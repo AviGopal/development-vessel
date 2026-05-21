@@ -6,7 +6,7 @@ export const ADD_RESOLVER_TO_VESSEL_TEMPLATE: ActivityTemplate = {
   description: "Read a source file, apply an edit to add a new resolver, then commit the result.",
   inputShapes: ["path", "oldString", "newString", "cwd", "message"],
   outputShapes: ["fileEditResult", "commandResult"],
-  tags: ["fs", "git", "vessel", "self-modify"],
+  tags: ["fs", "git", "vessel", "modify"],
   variables: [
     { name: "path", description: "File path to edit (resolver source file)" },
     { name: "oldString", description: "Exact string to replace" },

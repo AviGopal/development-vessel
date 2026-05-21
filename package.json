@@ -9,7 +9,8 @@
     "cli": "bun run src/cli.ts",
     "test": "bun test",
     "typecheck": "tsc --noEmit",
-    "lint": "bun run typecheck"
+    "check-shape-dispatch": "bun scripts/check-shape-dispatch.ts",
+    "lint": "bun run typecheck && bun run check-shape-dispatch"
   },
   "dependencies": {
     "@avigopal/ias-executor-ts": "file:../ias-executor-ts",

@@ -8,23 +8,15 @@ export const DISCOVERY_ENDPOINT = process.env["DISCOVERY_ENDPOINT"] ?? "https://
 
 export const WORKSPACE_ROOT = process.env["WORKSPACE_ROOT"] ?? process.cwd();
 
-/** All impulse shapes this vessel advertises to discovery. One entry per R2.* resolver. */
-export const DISCOVERY_SHAPES: string[] = [
-  "git_status",
-  "git_add",
-  "git_commit",
-  "git_diff",
-  "git_log",
-  "fs_read",
-  "fs_write",
-  "fs_edit",
-  "activity_fetch",
-  "activity_create_variant",
-  "vessel_register_passthrough",
-  "code_introspect",
-  "propagate_judgment",
-];
-
+/**
+ * Full configuration block. The `discovery.shapes` array is the single source
+ * of truth for the vessel's advertised shape contract — `scripts/check-shape-dispatch.ts`
+ * (via `bun run lint`) verifies every entry has a matching `case` in
+ * `src/routes/impulses.ts` and vice versa.
+ *
+ * Don't add a shape here without adding a case in the route. Don't add a case
+ * in the route without adding the shape here. The lint gate enforces it.
+ */
 export const config = {
   vesselId: VESSEL_ID,
   port: PORT,
@@ -34,10 +26,32 @@ export const config = {
   discoveryEndpoint: DISCOVERY_ENDPOINT,
   workspaceRoot: WORKSPACE_ROOT,
   discovery: {
-    shapes: DISCOVERY_SHAPES,
+    // Inline literal so packages/shape-dispatch-check/check.ts can find it.
+    // One entry per R2.* resolver in specs/development-vessel/spec.md.
+    shapes: [
+      "git_status",
+      "git_add",
+      "git_commit",
+      "git_diff",
+      "git_log",
+      "fs_read",
+      "fs_write",
+      "fs_edit",
+      "activity_fetch",
+      "activity_create_variant",
+      "vessel_register_passthrough",
+      "code_introspect",
+      "propagate_judgment",
+    ] as const,
     resolveEndpoint: "/v2/impulses/resolve",
     resolveRequestFormat: "pointer" as const,
     authScheme: "ApiKey" as const,
     resolveTimeoutMs: 10_000,
   },
 } as const;
+
+/**
+ * Back-compat alias used by tests that import the list directly. Derived
+ * from `config.discovery.shapes` so there's one source of truth.
+ */
+export const DISCOVERY_SHAPES: readonly string[] = config.discovery.shapes;

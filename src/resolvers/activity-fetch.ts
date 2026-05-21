@@ -12,7 +12,11 @@ export async function resolveActivityFetch(pointer: ActivityFetchPointer): Promi
     headers: { Authorization: `ApiKey ${METABOB_API_KEY}` },
   });
   if (!res.ok) {
-    throw new Error(`activity_fetch: ${res.status} from activity-api for ${pointer.templateId}`);
+    const text = await res.text().catch(() => "");
+    return {
+      shape: "structuredError",
+      body: { resolver: "activity_fetch", status: res.status, templateId: pointer.templateId, detail: text.slice(0, 200) },
+    };
   }
   const body = await res.json();
   return { shape: "activity_template", body };

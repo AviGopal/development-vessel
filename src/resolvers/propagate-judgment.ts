@@ -29,8 +29,11 @@ export async function resolvePropagateJudgment(pointer: PropagateJudgmentPointer
   });
   if (!res.ok) {
     const text = await res.text().catch(() => "");
-    throw new Error(`propagate_judgment: ${res.status}: ${text.slice(0, 200)}`);
+    return {
+      shape: "judgmentPropagated",
+      body: { impulse_relevance_call_succeeded: false, status: res.status, detail: text.slice(0, 200) },
+    };
   }
   const result = await res.json();
-  return { shape: "judgmentPropagated", body: { accepted: true, detail: result } };
+  return { shape: "judgmentPropagated", body: { impulse_relevance_call_succeeded: true, accepted: true, detail: result } };
 }

@@ -23,7 +23,11 @@ export async function resolveActivityCreateVariant(pointer: ActivityCreateVarian
   });
   if (!res.ok) {
     const text = await res.text().catch(() => "");
-    throw new Error(`activity_create_variant: ${res.status} from activity-api: ${text.slice(0, 200)}`);
+    const adminNote = res.status === 403 ? "admin scope required for this operation" : undefined;
+    return {
+      shape: "structuredError",
+      body: { resolver: "activity_create_variant", status: res.status, detail: text.slice(0, 200), adminNote },
+    };
   }
   const result = await res.json() as { id?: string; template_id?: string };
   const variantId = result.id ?? result.template_id ?? "";

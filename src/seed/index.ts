@@ -1,6 +1,20 @@
 import type { ActivityTemplate } from "@avigopal/ias-executor-ts";
+import { SHIP_CHANGE_TEMPLATE } from "./ship-change.js";
+import { BRANCH_HEALTH_TEMPLATE } from "./branch-health.js";
+import { RELEASE_CHANGE_TEMPLATE } from "./release-change.js";
+import { ADD_RESOLVER_TO_VESSEL_TEMPLATE } from "./add-resolver-to-vessel.js";
+import { PROPAGATE_JUDGMENT_TEMPLATE } from "./propagate-judgment.js";
 
-// §5 seeds are added here as they are implemented.
-// Each exported template is uploaded by `bun run src/cli.ts seed-templates`.
+export { SHIP_CHANGE_TEMPLATE } from "./ship-change.js";
+export { BRANCH_HEALTH_TEMPLATE } from "./branch-health.js";
+export { RELEASE_CHANGE_TEMPLATE } from "./release-change.js";
+export { ADD_RESOLVER_TO_VESSEL_TEMPLATE } from "./add-resolver-to-vessel.js";
+export { PROPAGATE_JUDGMENT_TEMPLATE } from "./propagate-judgment.js";
 
-export const SEED_TEMPLATES: ActivityTemplate[] = [];
+export const SEED_TEMPLATES: ActivityTemplate[] = [
+  SHIP_CHANGE_TEMPLATE,
+  BRANCH_HEALTH_TEMPLATE,
+  RELEASE_CHANGE_TEMPLATE,
+  ADD_RESOLVER_TO_VESSEL_TEMPLATE,
+  PROPAGATE_JUDGMENT_TEMPLATE,
+];

@@ -87,6 +87,19 @@ export const DRAFT_GAP_CLOSING_ACTIVITY_TEMPLATE: ActivityTemplate = {
       outputShapes: ["draftedTemplate"],
     },
     {
+      id: "extract_required_shapes",
+      description:
+        "Deterministically extract output_shapes_must_include from the scenario JSON " +
+        "so the registered template carries the correct outputShapes regardless of LLM output.",
+      resolver: "json_path_extract",
+      config: {
+        type: "json_path_extract",
+        json: "{{read_scenario_content}}",
+        path: "expected_emergence.activity_signature.output_shapes_must_include",
+      },
+      outputShapes: ["json_extracted_value"],
+    },
+    {
       id: "write_proposal",
       description: "Persist the drafted template as a proposal file with authored_by metadata.",
       resolver: "fs_write",
@@ -108,12 +121,13 @@ export const DRAFT_GAP_CLOSING_ACTIVITY_TEMPLATE: ActivityTemplate = {
     {
       id: "register_variant",
       description:
-        "Register the drafted template as a candidate variant in activity-api. " +
-        "Returns structuredError (non-fatal) if the LLM output is malformed.",
+        "Register the drafted template as a candidate variant in activity-api, " +
+        "forcing outputShapes to match the scenario's required shapes deterministically.",
       resolver: "activity_create_variant",
       config: {
         type: "activity_create_variant",
         template: "{{draft_via_llm_text}}",
+        output_shapes_override: "{{extract_required_shapes_valueJson}}",
       },
       outputShapes: ["activityTemplateVariant"],
     },

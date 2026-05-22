@@ -5,6 +5,9 @@ export interface ActivityCreateVariantPointer {
   type: "activity_create_variant";
   template: unknown;
   parentTemplateId?: string;
+  /** When set, forcibly overrides the `outputShapes` field on the generated template
+   *  regardless of what the LLM wrote. Accepts a JSON array or a JSON-string array. */
+  output_shapes_override?: unknown;
 }
 
 export async function resolveActivityCreateVariant(pointer: ActivityCreateVariantPointer): Promise<ResolverResult> {
@@ -46,6 +49,15 @@ export async function resolveActivityCreateVariant(pointer: ActivityCreateVarian
       });
     }
   }
+  // Forcibly override outputShapes when the caller provides a deterministic value.
+  if (pointer.output_shapes_override !== undefined && templateObj && typeof templateObj === "object") {
+    let shapes: unknown = pointer.output_shapes_override;
+    if (typeof shapes === "string") {
+      try { shapes = JSON.parse(shapes); } catch { shapes = [shapes]; }
+    }
+    (templateObj as Record<string, unknown>)["outputShapes"] = shapes;
+  }
+
   const body = pointer.parentTemplateId
     ? { ...templateObj as object, parent_template_id: pointer.parentTemplateId }
     : templateObj;

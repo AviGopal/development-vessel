@@ -7,7 +7,7 @@ export const RELEASE_AND_VALIDATE_TEMPLATE: ActivityTemplate = {
     "Commit changes, validate branch health, and refresh vessel registration. Cross-vessel composition demonstrating ship-change + branch-health + discovery refresh.",
   inputShapes: ["cwd"],
   outputShapes: ["releaseValidatedReport"],
-  tags: ["release", "validation", "git", "cross-vessel"],
+  tags: ["release", "validation", "git", "cross.vessel"],
   variables: [
     { name: "cwd", description: "Repository working directory" },
     { name: "message", description: "Commit message" },

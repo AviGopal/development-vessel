@@ -66,15 +66,21 @@ function interpolateVars(obj: unknown, vars: Record<string, string>): unknown {
   return obj;
 }
 
-async function runActivity(activityId: string, vars: Record<string, string>): Promise<void> {
-  const { resolveActivityFetch } = await import("./resolvers/activity-fetch.js");
-  const fetchResult = await resolveActivityFetch({ type: "activity_fetch", templateId: activityId });
-  if (fetchResult.shape !== "activity_template") {
-    console.error(JSON.stringify(fetchResult, null, 2));
-    process.exit(1);
+async function runActivity(activityId: string, vars: Record<string, string>, localTemplate?: unknown): Promise<void> {
+  let templateBody: unknown;
+  if (localTemplate !== undefined) {
+    templateBody = localTemplate;
+  } else {
+    const { resolveActivityFetch } = await import("./resolvers/activity-fetch.js");
+    const fetchResult = await resolveActivityFetch({ type: "activity_fetch", templateId: activityId });
+    if (fetchResult.shape !== "activity_template") {
+      console.error(JSON.stringify(fetchResult, null, 2));
+      process.exit(1);
+    }
+    templateBody = fetchResult.body;
   }
 
-  const template = fetchResult.body as { tasks?: Array<{ id: string; resolver: string; config?: Record<string, unknown> }> };
+  const template = templateBody as { tasks?: Array<{ id: string; resolver: string; config?: Record<string, unknown> }> };
   const tasks = template.tasks ?? [];
   const taskResults: Array<{ taskId: string; result: unknown }> = [];
 
@@ -143,9 +149,37 @@ async function main(): Promise<void> {
       await runActivity(activityId, vars);
       break;
     }
+    case "run-local-seed": {
+      // Run a seed template directly from the in-memory seed registry — bypasses activity-api
+      // fetch so the latest local template is always used (useful during bootstrap).
+      const seedId = args[1];
+      if (!seedId) {
+        console.error("Usage: run-local-seed <seed-id> [--var key=value ...]");
+        process.exit(1);
+      }
+      const { SEED_TEMPLATES } = await import("./seed/index.js");
+      const seedTemplate = SEED_TEMPLATES.find(
+        (t) => (t as { id?: string }).id === seedId || (t as { name?: string }).name === seedId,
+      );
+      if (!seedTemplate) {
+        console.error(`Seed template not found: ${seedId}`);
+        console.error(`Available: ${SEED_TEMPLATES.map((t) => (t as { id?: string }).id ?? (t as { name?: string }).name).join(", ")}`);
+        process.exit(1);
+      }
+      const localVars: Record<string, string> = { cwd: process.cwd() };
+      for (let i = 2; i < args.length - 1; i++) {
+        if (args[i] === "--var" && args[i + 1]) {
+          const [k, ...rest] = (args[i + 1]!).split("=");
+          if (k) localVars[k] = rest.join("=");
+          i++;
+        }
+      }
+      await runActivity(seedId, localVars, seedTemplate);
+      break;
+    }
     default: {
       console.error(`Unknown verb: ${verb ?? "(none)"}`);
-      console.error("Verbs: seed-templates | call-resolver <type> [--data '{...}'] | run-activity <id> [--var key=val ...]");
+      console.error("Verbs: seed-templates | call-resolver <type> [--data '{...}'] | run-activity <id> [--var key=val ...] | run-local-seed <seed-id> [--var key=val ...]");
       process.exit(1);
     }
   }

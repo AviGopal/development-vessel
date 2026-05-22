@@ -1,4 +1,7 @@
 import { DISCOVERY_ENDPOINT, METABOB_API_KEY } from "../config.js";
+
+// Optional override: set LLM_COMPLETION_ENDPOINT to bypass discovery (e.g. for local dev with port-forward).
+const LLM_COMPLETION_ENDPOINT_OVERRIDE = process.env["LLM_COMPLETION_ENDPOINT"] ?? "";
 import type { ResolverResult } from "./types.js";
 
 export interface LlmCompletionDispatchPointer {
@@ -6,6 +9,7 @@ export interface LlmCompletionDispatchPointer {
   prompt: string;
   system_prompt?: string;
   model?: string;
+  max_tokens?: number;
 }
 
 interface DiscoveryVessel {
@@ -50,7 +54,7 @@ async function findLlmCompletionEndpoint(): Promise<string | null> {
 export async function resolveLlmCompletionDispatch(
   pointer: LlmCompletionDispatchPointer,
 ): Promise<ResolverResult> {
-  const endpoint = await findLlmCompletionEndpoint();
+  const endpoint = LLM_COMPLETION_ENDPOINT_OVERRIDE || await findLlmCompletionEndpoint();
   if (!endpoint) {
     return {
       shape: "structuredError",
@@ -68,6 +72,7 @@ export async function resolveLlmCompletionDispatch(
     messages: [{ role: "user", content: pointer.prompt }],
     ...(pointer.system_prompt ? { systemPrompt: pointer.system_prompt } : {}),
     stream: false,
+    maxTokens: pointer.max_tokens ?? 4096,
   };
 
   let res: Response;

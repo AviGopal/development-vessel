@@ -9,9 +9,31 @@ export interface ActivityCreateVariantPointer {
 
 export async function resolveActivityCreateVariant(pointer: ActivityCreateVariantPointer): Promise<ResolverResult> {
   const url = `${METABOB_ENDPOINT}/v2/activities/templates`;
+  // Template may arrive as a JSON string (from LLM output via interpolation); parse if needed.
+  let templateObj: unknown = pointer.template;
+  if (typeof templateObj === "string") {
+    // Strip markdown code fences if present (LLM output often wraps JSON in ```json...```).
+    // Also handle case where only the JSON object is extracted (first { ... last }).
+    let stripped = templateObj.replace(/^```(?:json)?\n?/i, "").replace(/\n?```$/i, "").trim();
+    const jsonStart = stripped.indexOf("{");
+    const jsonEnd = stripped.lastIndexOf("}");
+    if (jsonStart > 0) stripped = stripped.slice(jsonStart, jsonEnd + 1);
+    try { templateObj = JSON.parse(stripped); } catch { /* leave as string; API will reject with clear error */ }
+  }
+  // Sanitize tags: replace hyphens with dots, drop non-alphanumeric/dot chars.
+  if (templateObj && typeof templateObj === "object" && "tags" in templateObj) {
+    const t = templateObj as Record<string, unknown>;
+    if (Array.isArray(t["tags"])) {
+      t["tags"] = (t["tags"] as unknown[]).map((tag) =>
+        typeof tag === "string"
+          ? tag.toLowerCase().replace(/-/g, ".").replace(/[^a-z0-9.]/g, "")
+          : tag
+      );
+    }
+  }
   const body = pointer.parentTemplateId
-    ? { ...pointer.template as object, parent_template_id: pointer.parentTemplateId }
-    : pointer.template;
+    ? { ...templateObj as object, parent_template_id: pointer.parentTemplateId }
+    : templateObj;
 
   const res = await fetch(url, {
     method: "POST",

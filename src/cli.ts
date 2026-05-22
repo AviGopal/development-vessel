@@ -83,6 +83,24 @@ async function runActivity(activityId: string, vars: Record<string, string>): Pr
     config["type"] = task.resolver;
     const result = await resolveDispatch(config as { type: string } & Record<string, unknown>);
     taskResults.push({ taskId: task.id, result });
+    // Propagate task result body as a variable for subsequent tasks.
+    const body = (result as { shape?: string; body?: unknown }).body;
+    if (body !== undefined) {
+      vars[task.id] = typeof body === "string" ? body : JSON.stringify(body);
+      if (body && typeof body === "object") {
+        for (const [k, v] of Object.entries(body as Record<string, unknown>)) {
+          if (typeof v === "string") {
+            vars[`${task.id}_${k}`] = v;
+            // Canonical aliases for backward compat with older templates.
+            if (task.id === "read_scenario" && k === "content") vars["scenario_json"] = v;
+            // llm_completion_result: expose stripped text as draft_via_llm_result.
+            if (task.id === "draft_via_llm" && k === "text") {
+              vars["draft_via_llm_result"] = v.replace(/^```(?:json)?\n?/i, "").replace(/\n?```$/i, "").trim();
+            }
+          }
+        }
+      }
+    }
   }
 
   console.log(JSON.stringify({ activityId, taskResults }, null, 2));

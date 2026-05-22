@@ -8,6 +8,9 @@ export interface ActivityCreateVariantPointer {
   /** When set, forcibly overrides the `outputShapes` field on the generated template
    *  regardless of what the LLM wrote. Accepts a JSON array or a JSON-string array. */
   output_shapes_override?: unknown;
+  /** When true, removes the `id` field from the template before posting so activity-api
+   *  always assigns a fresh UUID. Prevents silent no-ops when the id already exists. */
+  strip_id?: boolean;
 }
 
 export async function resolveActivityCreateVariant(pointer: ActivityCreateVariantPointer): Promise<ResolverResult> {
@@ -49,6 +52,11 @@ export async function resolveActivityCreateVariant(pointer: ActivityCreateVarian
       });
     }
   }
+  // Remove `id` so activity-api always creates a fresh UUID — prevents silent no-ops on duplicate ids.
+  if (pointer.strip_id && templateObj && typeof templateObj === "object") {
+    delete (templateObj as Record<string, unknown>)["id"];
+  }
+
   // Forcibly override outputShapes when the caller provides a deterministic value.
   if (pointer.output_shapes_override !== undefined && templateObj && typeof templateObj === "object") {
     let shapes: unknown = pointer.output_shapes_override;

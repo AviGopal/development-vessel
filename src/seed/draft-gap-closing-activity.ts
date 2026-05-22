@@ -128,6 +128,7 @@ export const DRAFT_GAP_CLOSING_ACTIVITY_TEMPLATE: ActivityTemplate = {
         type: "activity_create_variant",
         template: "{{draft_via_llm_text}}",
         output_shapes_override: "{{extract_required_shapes_valueJson}}",
+        strip_id: true,
       },
       outputShapes: ["activityTemplateVariant"],
     },

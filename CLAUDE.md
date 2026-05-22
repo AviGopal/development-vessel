@@ -39,6 +39,11 @@ Every other activity template:
   purpose is to be uploaded; they are not consumed at runtime).
 - Is fetched by id via `activity_fetch` at execution time.
 
+**Creating new vessels:** Use the `scaffold-new-vessel` activity
+(canonical bootstrap template) to generate vessel scaffolds. This
+template lives in activity-api after `seed-templates` uploads it —
+never inline vessel scaffolding logic in source code.
+
 If you find yourself adding a new TS constant that the vessel will
 read at runtime and call `executor.execute(template, …)` on, **stop
 and reconsider**. Either:

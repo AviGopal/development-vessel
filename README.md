@@ -84,6 +84,14 @@ backoff on failure.
 2. Operator runs `bun run cli seed-templates` against the canary
    activity-api ONCE. This uploads each bootstrap template as a
    variant under the caller's org/account. Idempotent on re-run.
+   Bootstraps 7 templates:
+   - `ship-change` — commit staged changes
+   - `branch-health` — probe working-tree state  
+   - `release-change` — commit then validate
+   - `add-resolver-to-vessel` — add resolver to vessel source
+   - `propagate-judgment` — fold validation into Thompson posterior
+   - `scaffold-new-vessel` — create new vessel from scratch (capability C)
+   - `release-and-validate` — cross-vessel composition (capability D)
 3. Subsequent ticks fetch templates by id from activity-api via
    `activity_fetch` and execute them through `run-activity`.
 

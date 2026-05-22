@@ -2,19 +2,25 @@ import type { ResolverResult } from "./types.js";
 
 export interface JsonPathExtractPointer {
   type: "json_path_extract";
-  json: string;
+  json: string | unknown; // string (JSON text) or pre-parsed object (from interpolateVars exact-match substitution)
   path: string; // dot-notation path, e.g. "expected_emergence.activity_signature.output_shapes_must_include"
 }
 
 export async function resolveJsonPathExtract(pointer: JsonPathExtractPointer): Promise<ResolverResult> {
+  // interpolateVars JSON-parses exact {{var}} substitutions, so pointer.json may arrive
+  // as a pre-parsed object rather than a JSON string. Accept both forms.
   let obj: unknown;
-  try {
-    obj = JSON.parse(pointer.json);
-  } catch {
-    return {
-      shape: "structuredError",
-      body: { resolver: "json_path_extract", detail: "input is not valid JSON" },
-    };
+  if (typeof pointer.json === "string") {
+    try {
+      obj = JSON.parse(pointer.json);
+    } catch {
+      return {
+        shape: "structuredError",
+        body: { resolver: "json_path_extract", detail: "input is not valid JSON" },
+      };
+    }
+  } else {
+    obj = pointer.json;
   }
 
   const parts = pointer.path.split(".");

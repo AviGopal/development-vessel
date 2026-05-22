@@ -31,6 +31,21 @@ export async function resolveActivityCreateVariant(pointer: ActivityCreateVarian
       );
     }
   }
+  // Normalize task fields: LLMs often use "name" instead of "description", "params" instead of "config".
+  if (templateObj && typeof templateObj === "object" && "tasks" in templateObj) {
+    const t = templateObj as Record<string, unknown>;
+    if (Array.isArray(t["tasks"])) {
+      t["tasks"] = (t["tasks"] as unknown[]).map((task) => {
+        if (!task || typeof task !== "object") return task;
+        const tt = { ...(task as Record<string, unknown>) };
+        if (!tt["description"] && tt["name"]) { tt["description"] = tt["name"]; delete tt["name"]; }
+        if (!tt["config"] && tt["params"]) { tt["config"] = tt["params"]; delete tt["params"]; }
+        if (!tt["outputShapes"] && tt["produces"]) { tt["outputShapes"] = typeof tt["produces"] === "string" ? [tt["produces"]] : tt["produces"]; delete tt["produces"]; }
+        if (!tt["inputShapes"] && tt["consumes"]) { tt["inputShapes"] = typeof tt["consumes"] === "string" ? [tt["consumes"]] : tt["consumes"]; delete tt["consumes"]; }
+        return tt;
+      });
+    }
+  }
   const body = pointer.parentTemplateId
     ? { ...templateObj as object, parent_template_id: pointer.parentTemplateId }
     : templateObj;

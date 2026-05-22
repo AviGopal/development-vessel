@@ -12,6 +12,7 @@ import { resolveActivityCreateVariant } from "../resolvers/activity-create-varia
 import { resolveVesselRegisterPassthrough } from "../resolvers/vessel-register-passthrough.js";
 import { resolveCodeIntrospect } from "../resolvers/code-introspect.js";
 import { resolvePropagateJudgment } from "../resolvers/propagate-judgment.js";
+import { resolveNoop } from "../resolvers/noop.js";
 import type { ResolverResult } from "../resolvers/types.js";
 
 type AnyPointer = { type: string } & Record<string, unknown>;
@@ -46,6 +47,8 @@ export async function resolveDispatch(pointer: AnyPointer): Promise<ResolverResu
       return resolveCodeIntrospect(p as Parameters<typeof resolveCodeIntrospect>[0]);
     case "propagate_judgment":
       return resolvePropagateJudgment(p as Parameters<typeof resolvePropagateJudgment>[0]);
+    case "noop":
+      return resolveNoop(p as Parameters<typeof resolveNoop>[0]);
     default:
       throw new Error(`unknown shape: ${pointer.type}`);
   }

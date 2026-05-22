@@ -42,6 +42,7 @@ export const config = {
       "vessel_register_passthrough",
       "code_introspect",
       "propagate_judgment",
+      "noop",
     ] as const,
     resolveEndpoint: "/v2/impulses/resolve",
     resolveRequestFormat: "pointer" as const,

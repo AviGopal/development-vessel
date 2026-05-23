@@ -15,6 +15,9 @@ let callCount = 0;
 
 function makeFetchProgressing() {
   callCount = 0;
+  // Timestamp guaranteed to be within all windows (30s ago); traces must have
+  // executed_at to pass the client-side time filter added in the resolver.
+  const recentTs = new Date(Date.now() - 30_000).toISOString();
   return (async (url: string) => {
     if (String(url).includes("/v2/activities/templates")) {
       return new Response(JSON.stringify({ templates: TEMPLATES }), { status: 200 });
@@ -25,13 +28,13 @@ function makeFetchProgressing() {
       // callCount=2 = 2h lookback: shapeA (template ran 1h-2h ago, cumulative)
       // callCount=3 = 3h lookback: shapeA+shapeB (additional template ran 2h-3h ago)
       // callCount=4 = 4h lookback (oldest): all three (additional template ran 3h-4h ago)
-      let traces: Array<{ output_shapes: string[] }> = [];
-      if (callCount === 2) traces = [{ output_shapes: ["shapeA"] }];
-      if (callCount === 3) traces = [{ output_shapes: ["shapeA"] }, { output_shapes: ["shapeB"] }];
+      let traces: Array<{ output_shapes: string[]; executed_at: string }> = [];
+      if (callCount === 2) traces = [{ output_shapes: ["shapeA"], executed_at: recentTs }];
+      if (callCount === 3) traces = [{ output_shapes: ["shapeA"], executed_at: recentTs }, { output_shapes: ["shapeB"], executed_at: recentTs }];
       if (callCount === 4) traces = [
-        { output_shapes: ["shapeA"] },
-        { output_shapes: ["shapeB"] },
-        { output_shapes: ["shapeC"] },
+        { output_shapes: ["shapeA"], executed_at: recentTs },
+        { output_shapes: ["shapeB"], executed_at: recentTs },
+        { output_shapes: ["shapeC"], executed_at: recentTs },
       ];
       return new Response(JSON.stringify({ traces }), { status: 200 });
     }
@@ -44,9 +47,9 @@ function makeFetchFlat() {
     if (String(url).includes("/v2/activities/templates")) {
       return new Response(JSON.stringify({ templates: TEMPLATES }), { status: 200 });
     }
-    // Same traces in every window — no progress
+    // Same traces in every window — no progress; executed_at required for client-side filter
     if (String(url).includes("/v2/activities/execution-traces")) {
-      return new Response(JSON.stringify({ traces: [{ output_shapes: ["shapeA"] }] }), { status: 200 });
+      return new Response(JSON.stringify({ traces: [{ output_shapes: ["shapeA"], executed_at: new Date(Date.now() - 30_000).toISOString() }] }), { status: 200 });
     }
     return new Response("not found", { status: 404 });
   }) as unknown as typeof fetch;

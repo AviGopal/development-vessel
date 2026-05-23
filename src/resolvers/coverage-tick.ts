@@ -19,6 +19,7 @@ interface TraceRow {
   activity_id?: string;
   variant_id?: string;
   output_shapes?: string[];
+  executed_at?: string;
   created_at?: string;
 }
 
@@ -37,12 +38,20 @@ async function computeCountsForWindow(
   // Fetch traces within the window
   const traces: TraceRow[] = [];
   const trRes = await fetch(
-    `${METABOB_ENDPOINT}/v2/activities/execution-traces?since=${encodeURIComponent(since)}&limit=200`,
+    `${METABOB_ENDPOINT}/v2/activities/execution-traces?start_date=${encodeURIComponent(since)}&limit=200`,
     { headers: auth },
   );
   if (trRes.ok) {
     const trData = await trRes.json() as { traces?: TraceRow[]; executions?: TraceRow[] };
-    traces.push(...(trData.traces ?? trData.executions ?? []));
+    const all = trData.traces ?? trData.executions ?? [];
+    // Client-side time filter: the server-side start_date filter may not work
+    // reliably when executed_at is stored as a datetime type in SurrealDB.
+    // ISO-8601 strings sort lexicographically correctly, so >= comparison works.
+    const filtered = all.filter(tr => {
+      const ts = tr.executed_at ?? tr.created_at;
+      return ts !== undefined && ts >= since;
+    });
+    traces.push(...filtered);
   }
 
   // Build a lookup from template id → output_shapes for the join below.

@@ -94,10 +94,15 @@ export async function resolveCoverageTick(
     cells_over_time.push(counts);
   }
 
-  // Compute monotonicity over the time series
+  // Compute monotonicity over the time series.
+  // "strictly" = every adjacent pair satisfies the strict inequality.
+  // For coverage_progress we use non-worsening (≤/≥) for the "decreasing"
+  // metrics because unknown=0 throughout is valid steady-state, not a failure.
   let reachable_learned_strictly_increasing = cells_over_time.length >= 2;
   let reachable_unlearned_strictly_decreasing = cells_over_time.length >= 2;
   let unknown_strictly_decreasing = cells_over_time.length >= 2;
+  let reachable_unlearned_non_increasing = true;
+  let unknown_non_increasing = true;
 
   for (let i = 1; i < cells_over_time.length; i++) {
     const prev = cells_over_time[i - 1]!;
@@ -105,6 +110,8 @@ export async function resolveCoverageTick(
     if (curr.reachable_learned <= prev.reachable_learned) reachable_learned_strictly_increasing = false;
     if (curr.reachable_unlearned >= prev.reachable_unlearned) reachable_unlearned_strictly_decreasing = false;
     if (curr.unknown >= prev.unknown) unknown_strictly_decreasing = false;
+    if (curr.reachable_unlearned > prev.reachable_unlearned) reachable_unlearned_non_increasing = false;
+    if (curr.unknown > prev.unknown) unknown_non_increasing = false;
   }
 
   // consecutive_progressing_cycles: how many consecutive windows at the end show progress
@@ -120,11 +127,12 @@ export async function resolveCoverageTick(
     else break;
   }
 
-  // coverage_progress: all three monotonic AND ≥3 consecutive cycles
+  // coverage_progress: learned is strictly improving, decreasing metrics are
+  // non-worsening (plateau at 0 is valid), and ≥3 consecutive progressing cycles.
   const coverage_progress =
     reachable_learned_strictly_increasing &&
-    reachable_unlearned_strictly_decreasing &&
-    unknown_strictly_decreasing &&
+    reachable_unlearned_non_increasing &&
+    unknown_non_increasing &&
     consecutive_progressing_cycles >= 3;
 
   return {

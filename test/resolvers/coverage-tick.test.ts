@@ -1,0 +1,109 @@
+import { describe, it, expect, beforeAll, afterAll } from "bun:test";
+import { resolveCoverageTick } from "../../src/resolvers/coverage-tick.js";
+
+const originalFetch = globalThis.fetch;
+
+// Three template shapes: shapeA, shapeB, shapeC
+const TEMPLATES = [
+  { id: "t:a", output_shapes: ["shapeA"] },
+  { id: "t:b", output_shapes: ["shapeB"] },
+  { id: "t:c", output_shapes: ["shapeC"] },
+];
+
+// callCount tracks which window is being queried so we can return different traces per window
+let callCount = 0;
+
+function makeFetchProgressing() {
+  callCount = 0;
+  return (async (url: string) => {
+    if (String(url).includes("/v2/activities/templates")) {
+      return new Response(JSON.stringify({ templates: TEMPLATES }), { status: 200 });
+    }
+    if (String(url).includes("/v2/activities/execution-traces")) {
+      callCount++;
+      // Window 1 (oldest): no learned shapes
+      // Window 2: shapeA learned
+      // Window 3: shapeA + shapeB learned
+      // Window 4 (most recent): all three learned
+      let traces: Array<{ output_shapes: string[] }> = [];
+      if (callCount === 2) traces = [{ output_shapes: ["shapeA"] }];
+      if (callCount === 3) traces = [{ output_shapes: ["shapeA"] }, { output_shapes: ["shapeB"] }];
+      if (callCount === 4) traces = [
+        { output_shapes: ["shapeA"] },
+        { output_shapes: ["shapeB"] },
+        { output_shapes: ["shapeC"] },
+      ];
+      return new Response(JSON.stringify({ traces }), { status: 200 });
+    }
+    return new Response("not found", { status: 404 });
+  }) as unknown as typeof fetch;
+}
+
+function makeFetchFlat() {
+  return (async (url: string) => {
+    if (String(url).includes("/v2/activities/templates")) {
+      return new Response(JSON.stringify({ templates: TEMPLATES }), { status: 200 });
+    }
+    // Same traces in every window — no progress
+    if (String(url).includes("/v2/activities/execution-traces")) {
+      return new Response(JSON.stringify({ traces: [{ output_shapes: ["shapeA"] }] }), { status: 200 });
+    }
+    return new Response("not found", { status: 404 });
+  }) as unknown as typeof fetch;
+}
+
+describe("coverage-tick resolver", () => {
+  beforeAll(() => {
+    process.env["METABOB_ENDPOINT"] = "https://activity.test";
+    process.env["METABOB_API_KEY"] = "test-key";
+  });
+
+  afterAll(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  it("returns coverageReport shape", async () => {
+    globalThis.fetch = makeFetchFlat();
+    const result = await resolveCoverageTick({ type: "coverage_tick", num_windows: 2 });
+    expect(result.shape).toBe("coverageReport");
+  });
+
+  it("coverage_progress=true when all three monotonic over 3+ windows", async () => {
+    globalThis.fetch = makeFetchProgressing();
+    const result = await resolveCoverageTick({ type: "coverage_tick", num_windows: 4 });
+    const body = result.body as { coverage_progress: boolean; consecutive_progressing_cycles: number };
+    // The series is 0/3/0, 1/2/0, 2/1/0, 3/0/0 for reachable_learned / reachable_unlearned / unknown
+    // All three monotonic across 4 windows → coverage_progress should be true
+    expect(body.coverage_progress).toBe(true);
+    expect(body.consecutive_progressing_cycles).toBeGreaterThanOrEqual(3);
+  });
+
+  it("coverage_progress=false when no progress across windows", async () => {
+    globalThis.fetch = makeFetchFlat();
+    const result = await resolveCoverageTick({ type: "coverage_tick", num_windows: 4 });
+    const body = result.body as { coverage_progress: boolean };
+    expect(body.coverage_progress).toBe(false);
+  });
+
+  it("cells_over_time has num_windows entries", async () => {
+    globalThis.fetch = makeFetchFlat();
+    const result = await resolveCoverageTick({ type: "coverage_tick", num_windows: 3 });
+    const body = result.body as { cells_over_time: unknown[] };
+    expect(body.cells_over_time).toHaveLength(3);
+  });
+
+  it("monotonic_progress fields are booleans", async () => {
+    globalThis.fetch = makeFetchFlat();
+    const result = await resolveCoverageTick({ type: "coverage_tick", num_windows: 2 });
+    const body = result.body as {
+      monotonic_progress: {
+        reachable_learned_strictly_increasing: unknown;
+        reachable_unlearned_strictly_decreasing: unknown;
+        unknown_strictly_decreasing: unknown;
+      }
+    };
+    expect(typeof body.monotonic_progress.reachable_learned_strictly_increasing).toBe("boolean");
+    expect(typeof body.monotonic_progress.reachable_unlearned_strictly_decreasing).toBe("boolean");
+    expect(typeof body.monotonic_progress.unknown_strictly_decreasing).toBe("boolean");
+  });
+});

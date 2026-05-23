@@ -171,7 +171,14 @@ that leads to IAL Phase 27 (lift):
    most recent emission AND an operator-written
    `validation/state/lift-status.json`. The substrate-measured halves
    (coverage + health) feed the operator's hand-over decision; the
-   decision itself is separate (IAL Phase 27).
+   decision itself is separate (IAL Phase 27). This describes the
+   S1 → S2 transition only (operator-authored, supervised →
+   substrate-authored, supervised). S2 → S3 (distributed-stable,
+   adversarial-resistant) is the substrate's own roadmap, not a
+   development-vessel concern: see IAL §27.S.5 for the post-lift
+   agenda the substrate authors via its own propose-spec pipeline,
+   and §27.S.6 for S3 readiness measured by active push-away rather
+   than by a gate.
 
 **Shape budget after topology-discovery-loop:**
 - Current: 19 shapes / 19 dispatch cases (after Phase 21)

@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import { impulsesRouter } from "./routes/impulses.js";
 import { config } from "./config.js";
 import { startDiscoveryRegistration, isRegistered } from "./discovery-registration.js";
+import { startRegistryChangeObserver } from "./observers/registry-change-observer.js";
 
 const app = new Hono();
 
@@ -26,5 +27,6 @@ console.log(`development-vessel listening on ${config.host}:${config.port}`);
 
 // Non-blocking; failure logs but does not crash
 startDiscoveryRegistration();
+startRegistryChangeObserver();
 
 export default server;

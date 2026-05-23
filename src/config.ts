@@ -53,6 +53,7 @@ export const config = {
       "unknown_shape_report",
       "coverage_tick",
       "substrate_health_tick",
+      "failure_mode_matrix_score",
     ] as const,
     resolveEndpoint: "/v2/impulses/resolve",
     resolveRequestFormat: "pointer" as const,

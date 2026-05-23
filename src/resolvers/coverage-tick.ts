@@ -51,7 +51,7 @@ async function computeCountsForWindow(
     if (tpl.output_shapes && tpl.output_shapes.length > 0) {
       // Strip SurrealDB record prefix if present (e.g. "activity:⟨foo⟩" → "foo")
       const rawId = tpl.id ?? "";
-      const cleanId = rawId.replace(/^activity:\⟨(.+)\⟩$/, "$1");
+      const cleanId = rawId.replace(/^activity:⟨(.+)⟩$/, "$1");
       templateShapes.set(cleanId, tpl.output_shapes);
       if (cleanId !== rawId) templateShapes.set(rawId, tpl.output_shapes);
     }

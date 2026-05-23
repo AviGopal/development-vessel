@@ -15,6 +15,8 @@ import { resolvePropagateJudgment } from "../resolvers/propagate-judgment.js";
 import { resolveLiftDemoNoop } from "../resolvers/lift-demo-noop.js";
 import { resolveLlmCompletionDispatch } from "../resolvers/llm-completion-dispatch.js";
 import { resolveJsonPathExtract } from "../resolvers/json-path-extract.js";
+import { resolveActivityRecommend } from "../resolvers/activity-recommend.js";
+import { resolveActivityDiscoverByShapes } from "../resolvers/activity-discover-by-shapes.js";
 import type { ResolverResult } from "../resolvers/types.js";
 
 type AnyPointer = { type: string } & Record<string, unknown>;
@@ -55,6 +57,10 @@ export async function resolveDispatch(pointer: AnyPointer): Promise<ResolverResu
       return resolveLlmCompletionDispatch(p as Parameters<typeof resolveLlmCompletionDispatch>[0]);
     case "json_path_extract":
       return resolveJsonPathExtract(p as Parameters<typeof resolveJsonPathExtract>[0]);
+    case "activity_recommend":
+      return resolveActivityRecommend(p as Parameters<typeof resolveActivityRecommend>[0]);
+    case "activity_discover_by_shapes":
+      return resolveActivityDiscoverByShapes(p as Parameters<typeof resolveActivityDiscoverByShapes>[0]);
     default:
       throw new Error(`unknown shape: ${pointer.type}`);
   }

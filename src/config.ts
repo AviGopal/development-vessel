@@ -45,6 +45,8 @@ export const config = {
       "propagate_judgment",
       "llm_completion_dispatch",
       "json_path_extract",
+      "activity_recommend",
+      "activity_discover_by_shapes",
     ] as const,
     resolveEndpoint: "/v2/impulses/resolve",
     resolveRequestFormat: "pointer" as const,

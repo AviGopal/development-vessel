@@ -103,7 +103,8 @@ export async function resolveActivityCreateVariant(pointer: ActivityCreateVarian
     method: "POST",
     headers: { Authorization: `ApiKey ${METABOB_API_KEY}`, "Content-Type": "application/json" },
     body: JSON.stringify({
-      activity_template_id: "development-vessel:activity_create_variant",
+      execution_id: `dev-vessel-acv-${Date.now()}`,
+      template_id: "development-vessel:activity_create_variant",
       vessel_id: "development-vessel",
       success: true,
       output_shapes: ["activityRegistryChange", "variant_created"],

@@ -96,25 +96,9 @@ export async function resolveActivityCreateVariant(pointer: ActivityCreateVarian
   const result = await res.json() as { id?: string; template_id?: string };
   const variantId = result.id ?? result.template_id ?? "";
 
-  // Notify the lifecycle observer that the registry changed. We POST a minimal synthetic
-  // AET so activity-api broadcasts lifecycle:execution:succeeded with output_shapes
-  // containing activityRegistryChange — which is what shouldRescore() guards on.
-  await fetch(`${METABOB_ENDPOINT}/v2/activities/execution-traces`, {
-    method: "POST",
-    headers: { Authorization: `ApiKey ${METABOB_API_KEY}`, "Content-Type": "application/json" },
-    body: JSON.stringify({
-      execution_id: `dev-vessel-acv-${Date.now()}`,
-      template_id: "development-vessel:activity_create_variant",
-      vessel_id: "development-vessel",
-      success: true,
-      output_shapes: ["activityRegistryChange", "variant_created"],
-      tasks: [],
-      metadata: { variantId, parentTemplateId: pointer.parentTemplateId ?? null },
-    }),
-  }).catch(() => {
-    // Non-fatal: if activity-api is unreachable, variant creation itself still succeeded.
-  });
-
+  // Return activityRegistryChange so that minibob includes it in the activity's
+  // output_shapes when emitting lifecycle:execution:succeeded. The development-vessel's
+  // registry-change observer watches for that shape and fires the topology chain.
   return {
     shape: "activityRegistryChange",
     body: { variantId, parentTemplateId: pointer.parentTemplateId, accepted: true },

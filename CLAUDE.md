@@ -155,21 +155,31 @@ that leads to IAL Phase 27 (lift):
    `activityRegistryChange` on completion to trigger the next phase.
 
 3. **`2026-05-23-topology-discovery-loop`** (gated on 1+2) — 6 new
-   activities in 2 layers:
+   activities in 2 layers, plus two aggregators:
    - **Measurement** (3): `learned-topology-snapshot`,
      `reachable-unlearned-report`, `unknown-shape-report`
    - **Probing** (3): `probe-reachable-unlearned`,
      `probe-untraversed-edge`, `escalate-unknown-shape`
-   Plus `convergence-tick` (aggregator). The observer fires the full
-   chain on every `activityRegistryChange`. When three consecutive
-   `convergenceReport` impulses have `lift_candidate=true` from natural
-   activity, lift is achieved (IAL Phase 27, foundation §33 Convergence).
+   - **Aggregators** (2): `coverage-tick` emitting `coverageReport`
+     (cell-count progress in the 4-cell table) and
+     `substrate-health-tick` emitting `substrateHealthReport`
+     (posterior confidence, graph stability, optimality).
+   The observer fires the full chain on every
+   `activityRegistryChange`. Lift = three consecutive `coverageReport`
+   impulses with `coverage_progress=true` from natural activity AND
+   `substrateHealthReport.health_verdict.overall_passing=true` on the
+   most recent emission AND an operator-written
+   `validation/state/lift-status.json`. The substrate-measured halves
+   (coverage + health) feed the operator's hand-over decision; the
+   decision itself is separate (IAL Phase 27).
 
 **Shape budget after topology-discovery-loop:**
 - Current: 19 shapes / 19 dispatch cases (after Phase 21)
 - After harness-lifecycle: 20 shapes (`failureModeMatrixScore` + `activityRegistryChange`)
-- After topology-discovery-loop: 22 shapes (+ 3 measurement shapes)
-- Convergence-tick shape: `convergenceReport` (emitted by `convergence-tick` resolver)
+- After topology-discovery-loop: 23 shapes / 23 dispatch cases
+  (+ 3 measurement shapes + `coverageReport` + `substrateHealthReport`)
+- Coverage-tick shape: `coverageReport` (emitted by `coverage-tick` resolver)
+- Substrate-health-tick shape: `substrateHealthReport` (emitted by `substrate-health-tick` resolver)
 
 When adding resolvers for the above specs, follow the three-place rule
 (resolver file + `config.ts` shape + `impulses.ts` case) and keep lint

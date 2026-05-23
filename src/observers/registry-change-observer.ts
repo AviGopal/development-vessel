@@ -181,7 +181,20 @@ export function startRegistryChangeObserver(
     ws.addEventListener("message", (ev) => {
       let event: LifecycleEvent;
       try {
-        event = JSON.parse(String(ev.data)) as LifecycleEvent;
+        const parsed = JSON.parse(String(ev.data)) as Record<string, unknown>;
+        // activity-api broadcasts "execution_completed"; normalize to the
+        // canonical lifecycle shape so shouldRescore can be event-format-agnostic.
+        if (parsed["type"] === "execution_completed") {
+          const d = (parsed["data"] ?? {}) as Record<string, unknown>;
+          event = {
+            type: "lifecycle:execution:succeeded",
+            activity_template_id: (d["activity_id"] as string | undefined) ?? (d["variant_id"] as string | undefined),
+            execution_id: d["execution_id"] as string | undefined,
+            output_shapes: d["output_shapes"] as string[] | undefined,
+          };
+        } else {
+          event = parsed as LifecycleEvent;
+        }
       } catch {
         return;
       }

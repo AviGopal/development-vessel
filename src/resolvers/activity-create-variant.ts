@@ -52,18 +52,25 @@ export async function resolveActivityCreateVariant(pointer: ActivityCreateVarian
       });
     }
   }
-  // Remove `id` so activity-api always creates a fresh UUID — prevents silent no-ops on duplicate ids.
+  // Append a timestamp to the id when strip_id is set — prevents silent no-ops when
+  // the declared id already exists in activity-api (POST is idempotent-ish on existing ids).
   if (pointer.strip_id && templateObj && typeof templateObj === "object") {
-    delete (templateObj as Record<string, unknown>)["id"];
+    const t = templateObj as Record<string, unknown>;
+    const baseId = typeof t["id"] === "string" ? t["id"] : "variant";
+    t["id"] = `${baseId}-${Date.now()}`;
   }
 
-  // Forcibly override outputShapes when the caller provides a deterministic value.
+  // Forcibly override output shapes when the caller provides a deterministic value.
+  // activity-api's CreateTemplateRequestSchema reads snake_case `output_shapes`, not
+  // camelCase `outputShapes` — Zod strips unknown keys so the camelCase form is ignored.
   if (pointer.output_shapes_override !== undefined && templateObj && typeof templateObj === "object") {
     let shapes: unknown = pointer.output_shapes_override;
     if (typeof shapes === "string") {
       try { shapes = JSON.parse(shapes); } catch { shapes = [shapes]; }
     }
-    (templateObj as Record<string, unknown>)["outputShapes"] = shapes;
+    const t = templateObj as Record<string, unknown>;
+    t["output_shapes"] = shapes;   // snake_case: read by Zod schema
+    t["outputShapes"] = shapes;    // camelCase: kept for any non-Zod readers
   }
 
   const body = pointer.parentTemplateId

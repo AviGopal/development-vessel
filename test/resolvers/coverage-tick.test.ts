@@ -21,10 +21,10 @@ function makeFetchProgressing() {
     }
     if (String(url).includes("/v2/activities/execution-traces")) {
       callCount++;
-      // Window 1 (oldest): no learned shapes
-      // Window 2: shapeA learned
-      // Window 3: shapeA + shapeB learned
-      // Window 4 (most recent): all three learned
+      // callCount=1 = 1h lookback (newest): no traces (nothing ran in last 1h)
+      // callCount=2 = 2h lookback: shapeA (template ran 1h-2h ago, cumulative)
+      // callCount=3 = 3h lookback: shapeA+shapeB (additional template ran 2h-3h ago)
+      // callCount=4 = 4h lookback (oldest): all three (additional template ran 3h-4h ago)
       let traces: Array<{ output_shapes: string[] }> = [];
       if (callCount === 2) traces = [{ output_shapes: ["shapeA"] }];
       if (callCount === 3) traces = [{ output_shapes: ["shapeA"] }, { output_shapes: ["shapeB"] }];
@@ -72,8 +72,8 @@ describe("coverage-tick resolver", () => {
     globalThis.fetch = makeFetchProgressing();
     const result = await resolveCoverageTick({ type: "coverage_tick", num_windows: 4 });
     const body = result.body as { coverage_progress: boolean; consecutive_progressing_cycles: number };
-    // The series is 0/3/0, 1/2/0, 2/1/0, 3/0/0 for reachable_learned / reachable_unlearned / unknown
-    // All three monotonic across 4 windows → coverage_progress should be true
+    // cells_over_time[0..3] = 1h,2h,3h,4h lookbacks → RL=0,1,2,3 (newest=0, oldest=3)
+    // Each consecutive pair (older > newer) shows progress → coverage_progress true
     expect(body.coverage_progress).toBe(true);
     expect(body.consecutive_progressing_cycles).toBeGreaterThanOrEqual(3);
   });

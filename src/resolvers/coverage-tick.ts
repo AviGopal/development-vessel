@@ -16,6 +16,8 @@ interface Template {
 }
 
 interface TraceRow {
+  activity_id?: string;
+  variant_id?: string;
   output_shapes?: string[];
   created_at?: string;
 }
@@ -43,14 +45,38 @@ async function computeCountsForWindow(
     traces.push(...(trData.traces ?? trData.executions ?? []));
   }
 
-  const advertisedShapes = new Set<string>();
+  // Build a lookup from template id → output_shapes for the join below.
+  const templateShapes = new Map<string, string[]>();
   for (const tpl of allTemplates) {
-    for (const s of (tpl.output_shapes ?? [])) advertisedShapes.add(s);
+    if (tpl.output_shapes && tpl.output_shapes.length > 0) {
+      // Strip SurrealDB record prefix if present (e.g. "activity:⟨foo⟩" → "foo")
+      const rawId = tpl.id ?? "";
+      const cleanId = rawId.replace(/^activity:\⟨(.+)\⟩$/, "$1");
+      templateShapes.set(cleanId, tpl.output_shapes);
+      if (cleanId !== rawId) templateShapes.set(rawId, tpl.output_shapes);
+    }
   }
 
+  const advertisedShapes = new Set<string>();
+  for (const shapes of templateShapes.values()) {
+    for (const s of shapes) advertisedShapes.add(s);
+  }
+
+  // Collect "learned" shapes: shapes from trace's own output_shapes field (when set),
+  // falling back to the template's advertised output_shapes for the executed activity_id.
+  // This handles executors (e.g. minibob) that do not populate output_shapes on the trace.
   const learnedShapes = new Set<string>();
   for (const tr of traces) {
-    for (const s of (tr.output_shapes ?? [])) learnedShapes.add(s);
+    if (tr.output_shapes && tr.output_shapes.length > 0) {
+      for (const s of tr.output_shapes) learnedShapes.add(s);
+    } else {
+      // Infer from template: a trace for activity X means X's output_shapes are learned.
+      const actId = tr.activity_id ?? tr.variant_id ?? "";
+      const inferredShapes = templateShapes.get(actId);
+      if (inferredShapes) {
+        for (const s of inferredShapes) learnedShapes.add(s);
+      }
+    }
   }
 
   const reachable_learned = [...advertisedShapes].filter(s => learnedShapes.has(s)).length;
@@ -84,12 +110,14 @@ export async function resolveCoverageTick(
     if (rows.length < pageSize) break;
   }
 
-  // Compute counts for each window (oldest to most recent)
-  // Window i looks back (numWindows - i) * windowSize seconds
+  // Build windows newest-first: cells_over_time[0] = 1h lookback, [n-1] = n*windowSize lookback.
+  // Cumulative "since" queries naturally satisfy cells_over_time[i].RL ≤ cells_over_time[i+1].RL
+  // (longer lookback = more traces = more shapes learned). The monotonicity checks below compare
+  // [i-1] vs [i] and expect [i].RL > [i-1].RL — correct with this ordering.
   const now = Date.now();
   const cells_over_time: CellCounts[] = [];
-  for (let i = numWindows - 1; i >= 0; i--) {
-    const since = new Date(now - (i + 1) * windowSize * 1000).toISOString();
+  for (let i = 1; i <= numWindows; i++) {
+    const since = new Date(now - i * windowSize * 1000).toISOString();
     const counts = await computeCountsForWindow(since, auth, allTemplates);
     cells_over_time.push(counts);
   }
@@ -114,11 +142,12 @@ export async function resolveCoverageTick(
     if (curr.unknown > prev.unknown) unknown_non_increasing = false;
   }
 
-  // consecutive_progressing_cycles: how many consecutive windows at the end show progress
+  // consecutive_progressing_cycles: how many consecutive pairs from the most recent end show progress.
+  // With newest-first ordering, pair (0,1) = most recent, pair (n-2,n-1) = oldest.
   let consecutive_progressing_cycles = 0;
-  for (let i = cells_over_time.length - 1; i >= 1; i--) {
-    const prev = cells_over_time[i - 1]!;
-    const curr = cells_over_time[i]!;
+  for (let i = 1; i < cells_over_time.length; i++) {
+    const prev = cells_over_time[i - 1]!; // newer (shorter lookback)
+    const curr = cells_over_time[i]!;      // older (longer lookback)
     const progressing =
       curr.reachable_learned > prev.reachable_learned ||
       curr.reachable_unlearned < prev.reachable_unlearned ||

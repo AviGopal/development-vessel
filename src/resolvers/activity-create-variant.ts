@@ -26,6 +26,17 @@ export async function resolveActivityCreateVariant(pointer: ActivityCreateVarian
     if (jsonStart > 0) stripped = stripped.slice(jsonStart, jsonEnd + 1);
     try { templateObj = JSON.parse(stripped); } catch { /* leave as string; API will reject with clear error */ }
   }
+  // Normalize camelCase → snake_case shape fields so activity-api's Zod schema reads them.
+  // TypeScript ActivityTemplate uses camelCase (outputShapes, inputShapes); the API reads snake_case.
+  if (templateObj && typeof templateObj === "object") {
+    const t = templateObj as Record<string, unknown>;
+    if (t["outputShapes"] !== undefined && t["output_shapes"] === undefined) {
+      t["output_shapes"] = t["outputShapes"];
+    }
+    if (t["inputShapes"] !== undefined && t["input_shapes"] === undefined) {
+      t["input_shapes"] = t["inputShapes"];
+    }
+  }
   // Sanitize tags: replace hyphens with dots, drop non-alphanumeric/dot chars.
   if (templateObj && typeof templateObj === "object" && "tags" in templateObj) {
     const t = templateObj as Record<string, unknown>;

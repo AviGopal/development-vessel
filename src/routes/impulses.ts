@@ -18,6 +18,11 @@ import { resolveJsonPathExtract } from "../resolvers/json-path-extract.js";
 import { resolveActivityRecommend } from "../resolvers/activity-recommend.js";
 import { resolveActivityDiscoverByShapes } from "../resolvers/activity-discover-by-shapes.js";
 import { resolveSystemdRestart } from "../resolvers/systemd-restart.js";
+import { resolveLearnedTopologySnapshot } from "../resolvers/learned-topology-snapshot.js";
+import { resolveReachableUnlearnedReport } from "../resolvers/reachable-unlearned-report.js";
+import { resolveUnknownShapeReport } from "../resolvers/unknown-shape-report.js";
+import { resolveCoverageTick } from "../resolvers/coverage-tick.js";
+import { resolveSubstrateHealthTick } from "../resolvers/substrate-health-tick.js";
 import type { ResolverResult } from "../resolvers/types.js";
 
 type AnyPointer = { type: string } & Record<string, unknown>;
@@ -64,6 +69,16 @@ export async function resolveDispatch(pointer: AnyPointer): Promise<ResolverResu
       return resolveActivityDiscoverByShapes(p as Parameters<typeof resolveActivityDiscoverByShapes>[0]);
     case "systemd_restart":
       return resolveSystemdRestart(p as Parameters<typeof resolveSystemdRestart>[0]);
+    case "learned_topology_snapshot":
+      return resolveLearnedTopologySnapshot(p as Parameters<typeof resolveLearnedTopologySnapshot>[0]);
+    case "reachable_unlearned_report":
+      return resolveReachableUnlearnedReport(p as Parameters<typeof resolveReachableUnlearnedReport>[0]);
+    case "unknown_shape_report":
+      return resolveUnknownShapeReport(p as Parameters<typeof resolveUnknownShapeReport>[0]);
+    case "coverage_tick":
+      return resolveCoverageTick(p as Parameters<typeof resolveCoverageTick>[0]);
+    case "substrate_health_tick":
+      return resolveSubstrateHealthTick(p as Parameters<typeof resolveSubstrateHealthTick>[0]);
     default:
       throw new Error(`unknown shape: ${pointer.type}`);
   }

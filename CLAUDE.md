@@ -137,6 +137,44 @@ bun test            # all suites green
 
 Both must pass. No exceptions.
 
+## Upcoming: topology-discovery loop (Phase 26+)
+
+This vessel is the implementation site for the three-phase spec chain
+that leads to IAL Phase 27 (lift):
+
+1. **`2026-05-23-single-container-substrate`** (Phase 26) — Dockerfile +
+   systemd units for the single-container substrate. All vessels including
+   this one run as units; inter-vessel calls are localhost. Gate: all units
+   healthy within 60s, harness smoke passes at `localhost:8080`.
+
+2. **`2026-05-23-harness-as-lifecycle-participant`** (gated on Phase 26) —
+   adds `failure_mode_matrix_score` resolver + `harness-run-matrix` seed
+   template + lifecycle observer (`lifecycle:execution:succeeded` of
+   `draft-gap-closing-activity` → `harness-run-matrix`). The observer
+   makes the harness a pull loop rather than a push script; it emits
+   `activityRegistryChange` on completion to trigger the next phase.
+
+3. **`2026-05-23-topology-discovery-loop`** (gated on 1+2) — 6 new
+   activities in 2 layers:
+   - **Measurement** (3): `learned-topology-snapshot`,
+     `reachable-unlearned-report`, `unknown-shape-report`
+   - **Probing** (3): `probe-reachable-unlearned`,
+     `probe-untraversed-edge`, `escalate-unknown-shape`
+   Plus `convergence-tick` (aggregator). The observer fires the full
+   chain on every `activityRegistryChange`. When three consecutive
+   `convergenceReport` impulses have `lift_candidate=true` from natural
+   activity, lift is achieved (IAL Phase 27, foundation §33 Convergence).
+
+**Shape budget after topology-discovery-loop:**
+- Current: 19 shapes / 19 dispatch cases (after Phase 21)
+- After harness-lifecycle: 20 shapes (`failureModeMatrixScore` + `activityRegistryChange`)
+- After topology-discovery-loop: 22 shapes (+ 3 measurement shapes)
+- Convergence-tick shape: `convergenceReport` (emitted by `convergence-tick` resolver)
+
+When adding resolvers for the above specs, follow the three-place rule
+(resolver file + `config.ts` shape + `impulses.ts` case) and keep lint
+green at every commit boundary.
+
 ## Related
 
 - [`README.md`](README.md) — operations
@@ -145,6 +183,10 @@ Both must pass. No exceptions.
   VERIFY pass + gap punch list
 - Super-repo spec:
   [`openspec/changes/2026-05-21-development-vessel/`](../../openspec/changes/2026-05-21-development-vessel/)
+- Substrate spec: [`openspec/changes/2026-05-23-single-container-substrate/`](../../openspec/changes/2026-05-23-single-container-substrate/)
+- Harness-lifecycle spec: [`openspec/changes/2026-05-23-harness-as-lifecycle-participant/`](../../openspec/changes/2026-05-23-harness-as-lifecycle-participant/)
+- Topology-discovery spec: [`openspec/changes/2026-05-23-topology-discovery-loop/`](../../openspec/changes/2026-05-23-topology-discovery-loop/)
+- Substrate developer guide: [`docs/SUBSTRATE.md`](../../docs/SUBSTRATE.md)
 - Memory anchor for the loop discipline:
   `feedback_autonomous_loop_alternates_dev_verify.md` in the auto-
   memory store; cites the four-stage cycle and the

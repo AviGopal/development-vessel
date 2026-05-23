@@ -17,6 +17,7 @@ import { resolveLlmCompletionDispatch } from "../resolvers/llm-completion-dispat
 import { resolveJsonPathExtract } from "../resolvers/json-path-extract.js";
 import { resolveActivityRecommend } from "../resolvers/activity-recommend.js";
 import { resolveActivityDiscoverByShapes } from "../resolvers/activity-discover-by-shapes.js";
+import { resolveSystemdRestart } from "../resolvers/systemd-restart.js";
 import type { ResolverResult } from "../resolvers/types.js";
 
 type AnyPointer = { type: string } & Record<string, unknown>;
@@ -61,6 +62,8 @@ export async function resolveDispatch(pointer: AnyPointer): Promise<ResolverResu
       return resolveActivityRecommend(p as Parameters<typeof resolveActivityRecommend>[0]);
     case "activity_discover_by_shapes":
       return resolveActivityDiscoverByShapes(p as Parameters<typeof resolveActivityDiscoverByShapes>[0]);
+    case "systemd_restart":
+      return resolveSystemdRestart(p as Parameters<typeof resolveSystemdRestart>[0]);
     default:
       throw new Error(`unknown shape: ${pointer.type}`);
   }

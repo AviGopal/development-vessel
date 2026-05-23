@@ -47,6 +47,7 @@ export const config = {
       "json_path_extract",
       "activity_recommend",
       "activity_discover_by_shapes",
+      "systemd_restart",
     ] as const,
     resolveEndpoint: "/v2/impulses/resolve",
     resolveRequestFormat: "pointer" as const,

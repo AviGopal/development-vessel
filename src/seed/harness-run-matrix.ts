@@ -37,7 +37,7 @@ export const HARNESS_RUN_MATRIX_TEMPLATE: ActivityTemplate = {
       description:
         "Invoke failure_mode_matrix_score resolver: reads all *.json in scenarios_dir, " +
         "calls discover-by-shapes per scenario, aggregates into failureModeReport.",
-      resolver: "failure_mode_matrix_score",
+      resolver: "development-vessel:failure_mode_matrix_score",
       config: {
         type: "failure_mode_matrix_score",
         scenarios_dir: "{{scenarios_dir}}",

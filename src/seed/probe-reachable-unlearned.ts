@@ -23,7 +23,7 @@ export const PROBE_REACHABLE_UNLEARNED_TEMPLATE: ActivityTemplate = {
       id: "read_report",
       description:
         "Load the reachableButUnlearnedReport from disk so we can select the top shape.",
-      resolver: "fs_read",
+      resolver: "development-vessel:fs_read",
       config: {
         type: "fs_read",
         path: "{{report_path}}",
@@ -33,7 +33,7 @@ export const PROBE_REACHABLE_UNLEARNED_TEMPLATE: ActivityTemplate = {
     {
       id: "extract_top_shape",
       description: "Extract the shape name of the highest-priority entry (entries[0].shape).",
-      resolver: "json_path_extract",
+      resolver: "development-vessel:json_path_extract",
       config: {
         type: "json_path_extract",
         json: "{{read_report_content}}",
@@ -46,7 +46,7 @@ export const PROBE_REACHABLE_UNLEARNED_TEMPLATE: ActivityTemplate = {
       description:
         "Ask activity_recommend for activities that produce the top unlearned shape. " +
         "The trace is tagged intent:topology_discovery so the observer can re-trigger measurement.",
-      resolver: "activity_recommend",
+      resolver: "development-vessel:activity_recommend",
       config: {
         type: "activity_recommend",
         goal: "produce shape {{extract_top_shape_valueJson}}",

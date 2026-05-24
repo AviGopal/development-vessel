@@ -89,6 +89,51 @@ export async function resolveDispatch(pointer: AnyPointer): Promise<ResolverResu
 
 export const impulsesRouter = new Hono();
 
+/**
+ * Vessel-proxy adapter endpoint.
+ *
+ * VesselResolverProxy in minibob calls POST /resolvers/execute with:
+ *   { resolver: string, impulseRefs: ImpulseRef[], config: Record<string,unknown> }
+ * and expects back:
+ *   { impulses: Impulse[] }
+ *
+ * This adapts the minibob vessel-proxy wire format to dev-vessel's own
+ * resolver dispatch logic and wraps the result as a single-item impulses array.
+ */
+impulsesRouter.post("/resolvers/execute", async (c) => {
+  let body: { resolver?: string; impulseRefs?: unknown[]; config?: Record<string, unknown> };
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: "invalid JSON body" }, 400);
+  }
+
+  const resolverName = body?.resolver;
+  if (!resolverName) {
+    return c.json({ error: "resolver field is required" }, 400);
+  }
+
+  try {
+    const pointer = { ...(body.config ?? {}), type: resolverName };
+    const result = await resolveDispatch(pointer as { type: string } & Record<string, unknown>);
+    const content = typeof result.body === "string" ? result.body : JSON.stringify(result.body);
+    const impulse = {
+      id: `dv-resolver-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
+      pointer: { type: "memo", content },
+      content,
+      loaded: true,
+      budget: Math.ceil(content.length / 4),
+      priority: "high" as const,
+      metadata: { shape: result.shape },
+      createdAt: Date.now(),
+    };
+    return c.json({ impulses: [impulse] });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return c.json({ error: message }, 500);
+  }
+});
+
 impulsesRouter.post("/v2/impulses/resolve", async (c) => {
   let body: { impulse?: { type?: string; pointer?: { type?: string } } };
   try {

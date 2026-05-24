@@ -15,8 +15,11 @@ interface Template {
 
 interface TraceRow {
   output_shapes?: string[];
+  output_impulse_shapes?: string[];
   input_shapes?: string[];
+  input_impulse_shapes?: string[];
   activity_template_id?: string;
+  activity_id?: string;
   created_at?: string;
 }
 
@@ -82,10 +85,12 @@ export async function resolveLearnedTopologySnapshot(
     producing_templates: producing,
   }));
 
-  // — 5. Trace counts per shape (learned = shape appears in a trace's output_shapes) —
+  // — 5. Trace counts per shape (learned = shape appears in a trace's output shapes) —
+  // output_impulse_shapes is the canonical field (activity-api); output_shapes is the legacy alias
   const trace_counts: Record<string, number> = {};
   for (const tr of traces) {
-    for (const s of (tr.output_shapes ?? [])) {
+    const shapes = tr.output_impulse_shapes ?? tr.output_shapes ?? [];
+    for (const s of shapes) {
       trace_counts[s] = (trace_counts[s] ?? 0) + 1;
     }
   }
@@ -110,7 +115,7 @@ export async function resolveLearnedTopologySnapshot(
 
   // Pair each producer–shape–consumer combination
   // v1: traversal_count = 1 if we see both templates in traces within the window, 0 otherwise
-  const tracedTemplateIds = new Set(traces.map(t => t.activity_template_id ?? "").filter(Boolean));
+  const tracedTemplateIds = new Set(traces.map(t => t.activity_template_id ?? t.activity_id ?? "").filter(Boolean));
 
   const edgeSet = new Set<string>(); // dedup
   for (const tpl of templates) {

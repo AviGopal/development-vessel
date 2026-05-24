@@ -54,10 +54,16 @@ export async function resolveFailureModeMatrixScore(
   const label = pointer.label ?? `auto-${Date.now()}`;
   const generatedAt = new Date().toISOString();
 
-  // Resolve scenarios_dir (support absolute or relative to WORKSPACE_ROOT)
-  const scenariosDir = pointer.scenarios_dir.startsWith("/")
-    ? pointer.scenarios_dir
-    : join(WORKSPACE_ROOT, pointer.scenarios_dir);
+  // Resolve scenarios_dir (support absolute or relative to WORKSPACE_ROOT).
+  // Default to "validation/failure-modes/scenarios" when omitted or when the
+  // template placeholder was not interpolated (literal "{{scenarios_dir}}").
+  const rawScenariosDir =
+    !pointer.scenarios_dir || pointer.scenarios_dir === "{{scenarios_dir}}"
+      ? "validation/failure-modes/scenarios"
+      : pointer.scenarios_dir;
+  const scenariosDir = rawScenariosDir.startsWith("/")
+    ? rawScenariosDir
+    : join(WORKSPACE_ROOT, rawScenariosDir);
 
   // Read all scenario JSON files
   let files: string[] = [];

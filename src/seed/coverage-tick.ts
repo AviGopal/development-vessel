@@ -28,7 +28,7 @@ export const COVERAGE_TICK_TEMPLATE: ActivityTemplate = {
       description:
         "Invoke coverage_tick resolver which fetches templates + execution-traces across " +
         "N time windows and computes monotonicity. Emits coverageReport with coverage_progress boolean.",
-      resolver: "coverage_tick",
+      resolver: "development-vessel:coverage_tick",
       config: {
         type: "coverage_tick",
         num_windows: 4,

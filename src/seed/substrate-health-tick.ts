@@ -24,7 +24,7 @@ export const SUBSTRATE_HEALTH_TICK_TEMPLATE: ActivityTemplate = {
       description:
         "Invoke substrate_health_tick resolver which checks posterior confidence, graph " +
         "stability, and optimality (if harness data is available). Emits substrateHealthReport.",
-      resolver: "substrate_health_tick",
+      resolver: "development-vessel:substrate_health_tick",
       config: {
         type: "substrate_health_tick",
         lookback_window_seconds: 3600,

@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import { impulsesRouter } from "./routes/impulses.js";
-import { config } from "./config.js";
+import { config, DISCOVERY_SHAPES } from "./config.js";
 import { startDiscoveryRegistration, isRegistered } from "./discovery-registration.js";
 import { startRegistryChangeObserver } from "./observers/registry-change-observer.js";
 
@@ -13,6 +13,10 @@ app.get("/health", (c) => {
     version: "0.1.0",
     discovery: { registered: isRegistered() },
   });
+});
+
+app.get("/shapes", (c) => {
+  return c.json({ shapes: DISCOVERY_SHAPES });
 });
 
 app.route("/", impulsesRouter);

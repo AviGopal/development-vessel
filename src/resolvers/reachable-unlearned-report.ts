@@ -98,6 +98,8 @@ export async function resolveReachableUnlearnedReport(
     };
   }).sort((a, b) => b.priority - a.priority);
 
+  const topEntry = entries[0];
+
   return {
     shape: "reachableButUnlearnedReport",
     body: {
@@ -105,6 +107,10 @@ export async function resolveReachableUnlearnedReport(
       snapshot_id: `snapshot-${Date.now()}`,
       entries,
       total: entries.length,
+      // Convenience fields so downstream tasks can access the top entry without
+      // array-index path traversal (json_path_extract doesn't support [N] syntax).
+      top_template_id: topEntry?.best_template_id ?? null,
+      top_shape: topEntry?.shape ?? null,
     },
   };
 }

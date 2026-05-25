@@ -4,53 +4,40 @@ export const PROBE_REACHABLE_UNLEARNED_TEMPLATE: ActivityTemplate = {
   id: "development-vessel:probe-reachable-unlearned",
   name: "probe-reachable-unlearned",
   description:
-    "Reads the most recent reachableButUnlearnedReport impulse, selects the highest-priority " +
+    "Reads the most recent reachableButUnlearnedReport, selects the highest-priority " +
     "unlearned shape, and dispatches an activity_recommend call with a synthetic goal of " +
-    "'produce shape <X>'. The recommended activity execution is the downstream step; this " +
-    "template does the selection and tagging. Tagged intent:topology_discovery.",
+    "'produce shape <X>'. The activityRecommendation output is consumed downstream by the " +
+    "lifecycle observer (recommend → slot-binding → execute via goal-host-vessel). " +
+    "Tagged intent:topology_discovery.",
   inputShapes: ["reachableButUnlearnedReport"],
   outputShapes: ["activityRecommendation"],
   tags: ["intent:topology_discovery", "phase:probe", "topology.discovery.loop"],
-  variables: [
-    {
-      name: "report_path",
-      description:
-        "Filesystem path to the reachableButUnlearnedReport JSON (fallback when impulse binding is unavailable).",
-    },
-  ],
+  variables: [],
   tasks: [
     {
-      id: "read_report",
+      id: "get_report",
       description:
-        "Load the reachableButUnlearnedReport from disk so we can select the top shape.",
-      resolver: "development-vessel:fs_read",
+        "Call the reachable_unlearned_report resolver directly to get the current list " +
+        "of shapes that have templates but no execution traces.",
+      resolver: "reachable_unlearned_report",
       config: {
-        type: "fs_read",
-        path: "{{report_path}}",
+        type: "reachable_unlearned_report",
+        lookback_window_seconds: 3600,
       },
       outputShapes: ["reachableButUnlearnedReport"],
-    },
-    {
-      id: "extract_top_shape",
-      description: "Extract the shape name of the highest-priority entry (entries[0].shape).",
-      resolver: "development-vessel:json_path_extract",
-      config: {
-        type: "json_path_extract",
-        json: "{{read_report_content}}",
-        path: "entries[0].shape",
-      },
-      outputShapes: ["json_extracted_value"],
     },
     {
       id: "recommend",
       description:
         "Ask activity_recommend for activities that produce the top unlearned shape. " +
-        "The trace is tagged intent:topology_discovery so the observer can re-trigger measurement.",
-      resolver: "development-vessel:activity_recommend",
+        "The trace is tagged intent:topology_discovery so the observer can re-trigger " +
+        "measurement. Execution of the recommended template is downstream via the " +
+        "standard lifecycle:substrate:idle → recommend → execute path.",
+      resolver: "activity_recommend",
       config: {
         type: "activity_recommend",
-        goal: "produce shape {{extract_top_shape_valueJson}}",
-        expected_output_shapes: ["{{extract_top_shape_valueJson}}"],
+        task_description: "produce shape {{get_report_top_shape}}",
+        expected_output_shapes: ["{{get_report_top_shape}}"],
         intent_tag: "topology_discovery",
       },
       outputShapes: ["activityRecommendation"],

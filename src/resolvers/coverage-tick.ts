@@ -37,8 +37,12 @@ async function computeCountsForWindow(
 ): Promise<CellCounts> {
   // Fetch traces within the window
   const traces: TraceRow[] = [];
+  // Limit=2000: the substrate generates ~300 validator-dispatch traces/hour.
+  // 200 only covers ~40 min of activity; 2000 covers ~6h, sufficient for a
+  // 4-window scan with 1h window_size. The server-side start_date filter is
+  // unreliable so we fetch a large slice and apply the client-side filter below.
   const trRes = await fetch(
-    `${METABOB_ENDPOINT}/v2/activities/execution-traces?start_date=${encodeURIComponent(since)}&limit=200`,
+    `${METABOB_ENDPOINT}/v2/activities/execution-traces?start_date=${encodeURIComponent(since)}&limit=2000`,
     { headers: auth },
   );
   if (trRes.ok) {

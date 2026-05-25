@@ -1,6 +1,6 @@
 import { METABOB_ENDPOINT, METABOB_API_KEY, WORKSPACE_ROOT } from "../config.js";
 import type { ResolverResult } from "./types.js";
-import { readdir, readFile } from "node:fs/promises";
+import { readdir, readFile, writeFile, rename, mkdir } from "node:fs/promises";
 import { join } from "node:path";
 
 export interface SubstrateHealthTickPointer {
@@ -37,6 +37,46 @@ interface HarnessReport {
   mean_optimality_ratio?: number;
   run_at?: string;
   generated_at?: string;
+}
+
+const SUBSTRATE_VESSELS = [
+  "activity-api",
+  "development-vessel",
+  "discovery-vessel",
+  "identity-vessel",
+  "goal-host-vessel",
+  "llm-resolver-vessel",
+  "local-tools-vessel",
+  "ribosome-vessel",
+  "boredom-vessel",
+  "concept-db",
+] as const;
+
+async function checkVesselLiveness(): Promise<{
+  statuses: Record<string, "active" | "inactive" | "unknown">;
+  down: string[];
+}> {
+  const statuses: Record<string, "active" | "inactive" | "unknown"> = {};
+  const down: string[] = [];
+  await Promise.all(
+    SUBSTRATE_VESSELS.map(async (vessel) => {
+      try {
+        const proc = Bun.spawn(["systemctl", "is-active", `${vessel}.service`], {
+          stdout: "pipe",
+          stderr: "pipe",
+        });
+        const out = (await new Response(proc.stdout).text()).trim();
+        await proc.exited;
+        const status = out === "active" ? "active" : "inactive";
+        statuses[vessel] = status;
+        if (status === "inactive") down.push(vessel);
+      } catch {
+        statuses[vessel] = "unknown";
+        down.push(vessel);
+      }
+    }),
+  );
+  return { statuses, down };
 }
 
 async function readMostRecentHarnessReport(workspace: string): Promise<HarnessReport | null> {
@@ -158,7 +198,10 @@ export async function resolveSubstrateHealthTick(
   };
 
   // — Optimality: read most recent harness report —
-  const harnessReport = await readMostRecentHarnessReport(WORKSPACE_ROOT);
+  const [harnessReport, vesselLiveness] = await Promise.all([
+    readMostRecentHarnessReport(WORKSPACE_ROOT),
+    checkVesselLiveness(),
+  ]);
   const optimality = {
     most_recent_harness_run_at: harnessReport?.run_at ?? harnessReport?.generated_at ?? null,
     mean_optimality_ratio: harnessReport?.mean_optimality_ratio ?? null,
@@ -172,25 +215,55 @@ export async function resolveSubstrateHealthTick(
     optimality.mean_optimality_ratio !== null
       ? optimality.mean_optimality_ratio <= optimalityRatioCeiling
       : null;
+  const vessels_passing = vesselLiveness.down.length === 0;
   const overall_passing =
     confidence_passing &&
     stability_passing &&
+    vessels_passing &&
     (optimality_passing === null ? true : optimality_passing);
+
+  const report = {
+    generated_at: new Date().toISOString(),
+    lookback_window_seconds: lookbackSecs,
+    posterior_confidence,
+    graph_stability,
+    optimality,
+    vessel_liveness: {
+      statuses: vesselLiveness.statuses,
+      down: vesselLiveness.down,
+      all_active: vessels_passing,
+    },
+    health_verdict: {
+      confidence_passing,
+      stability_passing,
+      optimality_passing,
+      vessels_passing,
+      overall_passing,
+    },
+  };
+
+  // Write a heartbeat file to the host-mounted workspace so external agents
+  // (validation, audit) can detect substrate liveness by stat'ing the file
+  // rather than polling HTTP — closes gap-008.
+  // Atomic write: write to .tmp then rename so readers never see a partial file.
+  try {
+    const heartbeatPath = join(WORKSPACE_ROOT, "substrate-heartbeat.json");
+    const tmpPath = heartbeatPath + ".tmp";
+    const heartbeat = JSON.stringify({
+      ts: report.generated_at,
+      overall_passing: report.health_verdict.overall_passing,
+      template_count: report.graph_stability.template_count_at_window_end,
+      vessels_down: report.vessel_liveness.down,
+    });
+    await mkdir(WORKSPACE_ROOT, { recursive: true });
+    await writeFile(tmpPath, heartbeat, "utf-8");
+    await rename(tmpPath, heartbeatPath);
+  } catch {
+    // Non-fatal — heartbeat failure must not crash the health tick itself.
+  }
 
   return {
     shape: "substrateHealthReport",
-    body: {
-      generated_at: new Date().toISOString(),
-      lookback_window_seconds: lookbackSecs,
-      posterior_confidence,
-      graph_stability,
-      optimality,
-      health_verdict: {
-        confidence_passing,
-        stability_passing,
-        optimality_passing,
-        overall_passing,
-      },
-    },
+    body: report,
   };
 }

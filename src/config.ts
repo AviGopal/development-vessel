@@ -2,9 +2,9 @@ export const VESSEL_ID = process.env["VESSEL_ID"] ?? `development-vessel-${proce
 export const PORT = parseInt(process.env["PORT"] ?? "8090", 10);
 export const HOST = process.env["HOST"] ?? "0.0.0.0";
 
-export const METABOB_ENDPOINT = process.env["METABOB_ENDPOINT"] ?? "https://activity.metabob.com";
+export const METABOB_ENDPOINT = process.env["METABOB_ENDPOINT"] ?? "http://127.0.0.1:8080";
 export const METABOB_API_KEY = process.env["METABOB_API_KEY"] ?? "";
-export const DISCOVERY_ENDPOINT = process.env["DISCOVERY_ENDPOINT"] ?? "https://discovery.metabob.com";
+export const DISCOVERY_ENDPOINT = process.env["DISCOVERY_ENDPOINT"] ?? "http://127.0.0.1:8100";
 
 export const WORKSPACE_ROOT = process.env["WORKSPACE_ROOT"] ?? process.cwd();
 
@@ -54,6 +54,7 @@ export const config = {
       "coverage_tick",
       "substrate_health_tick",
       "failure_mode_matrix_score",
+      "boredom_enqueue",
     ] as const,
     resolveEndpoint: "/v2/impulses/resolve",
     resolveRequestFormat: "pointer" as const,

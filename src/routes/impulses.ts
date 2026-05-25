@@ -24,6 +24,8 @@ import { resolveUnknownShapeReport } from "../resolvers/unknown-shape-report.js"
 import { resolveCoverageTick } from "../resolvers/coverage-tick.js";
 import { resolveSubstrateHealthTick } from "../resolvers/substrate-health-tick.js";
 import { resolveFailureModeMatrixScore } from "../resolvers/failure-mode-matrix-score.js";
+import { resolveBoredomEnqueue } from "../resolvers/boredom-enqueue.js";
+import { resolveMemoryNote, resolveMemoryNoteWrite } from "../resolvers/memory-note.js";
 import type { ResolverResult } from "../resolvers/types.js";
 
 type AnyPointer = { type: string } & Record<string, unknown>;
@@ -82,6 +84,12 @@ export async function resolveDispatch(pointer: AnyPointer): Promise<ResolverResu
       return resolveSubstrateHealthTick(p as Parameters<typeof resolveSubstrateHealthTick>[0]);
     case "failure_mode_matrix_score":
       return resolveFailureModeMatrixScore(p as Parameters<typeof resolveFailureModeMatrixScore>[0]);
+    case "boredom_enqueue":
+      return resolveBoredomEnqueue(p as Parameters<typeof resolveBoredomEnqueue>[0]);
+    case "memoryNote":
+      return resolveMemoryNote(p as Parameters<typeof resolveMemoryNote>[0]);
+    case "memoryNote_write":
+      return resolveMemoryNoteWrite(p as Parameters<typeof resolveMemoryNoteWrite>[0]);
     default:
       throw new Error(`unknown shape: ${pointer.type}`);
   }

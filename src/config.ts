@@ -55,6 +55,11 @@ export const config = {
       "substrate_health_tick",
       "failure_mode_matrix_score",
       "boredom_enqueue",
+      // Memory closure (IAL 27.3.j.1): substrate-resident note store.
+      // Read: filter by type/title/provenance. Write: upsert by id.
+      // Backed by WORKSPACE_ROOT/memory/notes.json (atomic writes).
+      "memoryNote",
+      "memoryNote_write",
     ] as const,
     resolveEndpoint: "/v2/impulses/resolve",
     resolveRequestFormat: "pointer" as const,

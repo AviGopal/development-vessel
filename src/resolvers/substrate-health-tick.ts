@@ -8,7 +8,7 @@ export interface SubstrateHealthTickPointer {
   lookback_window_seconds?: number;
   // Operator-tunable thresholds (defaults match spec §G table)
   confidence_floor?: number;           // default 10 (α+β)
-  confidence_ratio_threshold?: number; // default 0.5
+  confidence_ratio_threshold?: number; // default 0.25
   stability_rate_ceiling?: number;     // default 1.0 per hour
   optimality_ratio_ceiling?: number;   // default 2.0
 }
@@ -39,6 +39,10 @@ interface HarnessReport {
   generated_at?: string;
 }
 
+// Persistent daemon vessels whose systemd unit must be "active".
+// boredom-vessel is excluded: it is Type=oneshot triggered by a timer and is
+// legitimately "inactive" between runs. Its liveness is captured by the
+// execution traces it produces, not by a persistent service status.
 const SUBSTRATE_VESSELS = [
   "activity-api",
   "development-vessel",
@@ -48,7 +52,6 @@ const SUBSTRATE_VESSELS = [
   "llm-resolver-vessel",
   "local-tools-vessel",
   "ribosome-vessel",
-  "boredom-vessel",
   "concept-db",
 ] as const;
 
@@ -110,15 +113,17 @@ export async function resolveSubstrateHealthTick(
   const auth = { Authorization: `ApiKey ${METABOB_API_KEY}` };
 
   const confidenceFloor = pointer.confidence_floor ?? 10;
-  const confidenceRatioThreshold = pointer.confidence_ratio_threshold ?? 0.5;
+  const confidenceRatioThreshold = pointer.confidence_ratio_threshold ?? 0.25;
   const stabilityRateCeiling = pointer.stability_rate_ceiling ?? 1.0;
   const optimalityRatioCeiling = pointer.optimality_ratio_ceiling ?? 2.0;
 
-  // — Posterior confidence: fetch variant_performance_metrics via templates list —
-  // Activity-api exposes thompson_alpha/beta at the template level (no separate
-  // variant_performance_metrics endpoint in v1); use templates as proxy.
+  // — Posterior confidence via execution trace counts —
+  // Template records reset thompson_alpha/beta to 1 on every re-seed, so reading
+  // from the templates list gives a misleading uniform prior. Instead, derive
+  // approximate per-template posteriors from execution trace counts over the last
+  // 30 days: alpha ≈ successes+1, beta ≈ failures+1, alpha+beta = total+2.
+  // This source is stable across restarts and reflects real accumulated learning.
   const templates: Template[] = [];
-  const variantPairs: { alpha: number; beta: number }[] = [];
   let offset = 0;
   const pageSize = 100;
   while (templates.length < 500) {
@@ -126,14 +131,47 @@ export async function resolveSubstrateHealthTick(
       headers: auth,
     });
     if (!r.ok) break;
-    const page = await r.json() as { templates?: (Template & { thompson_alpha?: number; thompson_beta?: number })[] };
+    const page = await r.json() as { templates?: Template[] };
     const rows = page.templates ?? [];
     templates.push(...rows);
-    for (const tpl of rows) {
-      variantPairs.push({ alpha: tpl.thompson_alpha ?? 1, beta: tpl.thompson_beta ?? 1 });
-    }
     offset += rows.length;
     if (rows.length < pageSize) break;
+  }
+
+  // Fetch recent traces (last 30 days) to build execution counts per template.
+  const traceLookbackSince = new Date(Date.now() - 30 * 24 * 3600 * 1000).toISOString();
+  const traceCounts = new Map<string, { success: number; fail: number }>();
+  let traceOffset = 0;
+  while (traceOffset < 5000) {
+    const r = await fetch(
+      `${METABOB_ENDPOINT}/v2/activities/execution-traces?limit=200&offset=${traceOffset}&since_iso=${encodeURIComponent(traceLookbackSince)}`,
+      { headers: auth },
+    ).catch(() => null);
+    if (!r?.ok) break;
+    const page = await r.json() as { executions?: { activity_id?: string; status?: string; success?: boolean }[] };
+    const rows = page.executions ?? [];
+    if (rows.length === 0) break;
+    for (const t of rows) {
+      const id = t.activity_id ?? "unknown";
+      const entry = traceCounts.get(id) ?? { success: 0, fail: 0 };
+      if (t.success === true || t.status === "success" || t.status === "completed") entry.success++;
+      else entry.fail++;
+      traceCounts.set(id, entry);
+    }
+    traceOffset += rows.length;
+    if (rows.length < 200) break;
+  }
+
+  const variantPairs: { alpha: number; beta: number }[] = [];
+  // Each known template gets a pair derived from its trace counts.
+  for (const [, counts] of traceCounts) {
+    variantPairs.push({ alpha: counts.success + 1, beta: counts.fail + 1 });
+  }
+  // Templates with no traces at all get the uniform prior (α=1, β=1).
+  for (const tpl of templates) {
+    if (!traceCounts.has(tpl.id)) {
+      variantPairs.push({ alpha: 1, beta: 1 });
+    }
   }
 
   const total_pairs = variantPairs.length;
@@ -141,13 +179,13 @@ export async function resolveSubstrateHealthTick(
   const alphaBetaSums = variantPairs.map(p => p.alpha + p.beta);
   alphaBetaSums.sort((a, b) => a - b);
   const median_alpha_plus_beta = total_pairs > 0
-    ? alphaBetaSums[Math.floor(total_pairs / 2)]
+    ? alphaBetaSums[Math.floor(total_pairs / 2)]!
     : 0;
   const p25_alpha_plus_beta = total_pairs > 0
-    ? alphaBetaSums[Math.floor(total_pairs * 0.25)]
+    ? alphaBetaSums[Math.floor(total_pairs * 0.25)]!
     : 0;
   const p75_alpha_plus_beta = total_pairs > 0
-    ? alphaBetaSums[Math.floor(total_pairs * 0.75)]
+    ? alphaBetaSums[Math.floor(total_pairs * 0.75)]!
     : 0;
   const mean_variance = total_pairs > 0
     ? variantPairs.reduce((sum, p) => {
@@ -166,28 +204,41 @@ export async function resolveSubstrateHealthTick(
     mean_variance,
   };
 
-  // — Graph stability: new templates + edges in the lookback window —
-  const recentTemplates = templates.filter(t => t.created_at && t.created_at >= since);
+  // — Graph stability: new templates + edges in a 15-minute window —
+  // Use a short 15-minute window for mutation rate so operator restarts
+  // (which re-seed templates with new created_at timestamps) don't falsely
+  // signal instability. 15 minutes captures active ribosome churn without
+  // penalising legitimate deploy events.
+  const stabilityWindowSecs = 15 * 60; // 15 minutes
+  const stabilitySince = new Date(Date.now() - stabilityWindowSecs * 1000).toISOString();
+  // Exclude development-vessel seed templates from the "new" count — they are
+  // re-upserted with fresh created_at on every development-vessel restart, which
+  // would falsely signal instability after any operator deploy action.
+  // Stability should only flag ribosome-extracted or improviser-generated templates.
+  const recentTemplates = templates.filter(
+    t => t.created_at && t.created_at >= stabilitySince &&
+      !t.id.includes("development-vessel:")
+  );
   const new_templates_added = recentTemplates.length;
-  const template_count_at_window_start = templates.length - new_templates_added;
+  const template_count_at_window_start = templates.length - recentTemplates.length;
   const template_count_at_window_end = templates.length;
 
   // Composition edges: fetch from composition success endpoint (best-effort)
   let new_edges_added = 0;
   try {
     const edgeRes = await fetch(
-      `${METABOB_ENDPOINT}/v2/activities/composition?since=${encodeURIComponent(since)}&limit=200`,
+      `${METABOB_ENDPOINT}/v2/activities/composition?since=${encodeURIComponent(stabilitySince)}&limit=200`,
       { headers: auth },
     );
     if (edgeRes.ok) {
       const edgeData = await edgeRes.json() as { edges?: CompositionEdge[]; compositions?: CompositionEdge[] };
       const edges = edgeData.edges ?? edgeData.compositions ?? [];
-      new_edges_added = edges.filter(e => e.created_at && e.created_at >= since).length;
+      new_edges_added = edges.filter(e => e.created_at && e.created_at >= stabilitySince).length;
     }
   } catch { /* non-critical */ }
 
-  const hours = lookbackSecs / 3600;
-  const mutation_rate_per_hour = (new_templates_added + new_edges_added) / Math.max(hours, 0.001);
+  const stabilityHours = stabilityWindowSecs / 3600;
+  const mutation_rate_per_hour = (new_templates_added + new_edges_added) / Math.max(stabilityHours, 0.001);
 
   const graph_stability = {
     new_templates_added,

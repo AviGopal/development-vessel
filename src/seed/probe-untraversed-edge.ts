@@ -8,7 +8,7 @@ export const PROBE_UNTRAVERSED_EDGE_TEMPLATE: ActivityTemplate = {
     "edge (from_activity→via_shape→to_activity), and dispatches activity_recommend to " +
     "produce the intermediate shape. Tagged intent:topology_discovery, phase:probe.",
   inputShapes: ["learnedTopologySnapshot"],
-  outputShapes: ["activityRecommendation"],
+  outputShapes: ["activityRecommendation", "topologyGapReport"],
   tags: ["intent:topology_discovery", "phase:probe", "topology.discovery.loop"],
   variables: [
     {

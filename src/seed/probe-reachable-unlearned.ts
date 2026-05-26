@@ -10,7 +10,7 @@ export const PROBE_REACHABLE_UNLEARNED_TEMPLATE: ActivityTemplate = {
     "lifecycle observer (recommend → slot-binding → execute via goal-host-vessel). " +
     "Tagged intent:topology_discovery.",
   inputShapes: ["reachableButUnlearnedReport"],
-  outputShapes: ["activityRecommendation"],
+  outputShapes: ["activityRecommendation", "reachableUnlearnedReport"],
   tags: ["intent:topology_discovery", "phase:probe", "topology.discovery.loop"],
   variables: [],
   tasks: [

@@ -61,6 +61,11 @@ export const config = {
       // Backed by WORKSPACE_ROOT/memory/notes.json (atomic writes).
       "memoryNote",
       "memoryNote_write",
+      // Inv-031 (operator-authorized 71a28d5): substrate-resident gap-statement
+      // store. Distinct from memoryNote (problem statement vs candidate answer).
+      // Shape primitive only; gap-closing activity lives separately.
+      "substrateGap",
+      "substrateGap_write",
       // Skill closure (IAL 27.3.j.2): resolver primitives for codebase navigation
       // and outbound HTTP — enables substrate to perform skill-equivalent operations
       // without operator-authored templates.

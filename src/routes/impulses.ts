@@ -26,6 +26,7 @@ import { resolveSubstrateHealthTick } from "../resolvers/substrate-health-tick.j
 import { resolveFailureModeMatrixScore } from "../resolvers/failure-mode-matrix-score.js";
 import { resolveBoredomEnqueue } from "../resolvers/boredom-enqueue.js";
 import { resolveMemoryNote, resolveMemoryNoteWrite } from "../resolvers/memory-note.js";
+import { resolveSubstrateGap, resolveSubstrateGapWrite } from "../resolvers/substrate-gap.js";
 import { resolveFsList } from "../resolvers/fs-list.js";
 import { resolveHttpFetch } from "../resolvers/http-fetch.js";
 import { resolveResolverPatternReport } from "../resolvers/resolver-pattern-report.js";
@@ -93,6 +94,10 @@ export async function resolveDispatch(pointer: AnyPointer): Promise<ResolverResu
       return resolveMemoryNote(p as Parameters<typeof resolveMemoryNote>[0]);
     case "memoryNote_write":
       return resolveMemoryNoteWrite(p as Parameters<typeof resolveMemoryNoteWrite>[0]);
+    case "substrateGap":
+      return resolveSubstrateGap(p as Parameters<typeof resolveSubstrateGap>[0]);
+    case "substrateGap_write":
+      return resolveSubstrateGapWrite(p as Parameters<typeof resolveSubstrateGapWrite>[0]);
     case "fs_list":
       return resolveFsList(p as Parameters<typeof resolveFsList>[0]);
     case "http_fetch":

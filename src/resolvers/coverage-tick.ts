@@ -229,13 +229,20 @@ export async function resolveCoverageTick(
     .reduce((acc, c) => acc + c.new_shapes_introduced, 0);
   const coverage_progress = recent_new_shapes_total > 0;
 
-  // consecutive_progressing_cycles: how many consecutive newest-end windows
-  // each introduced at least one new shape.
-  let consecutive_progressing_cycles = 0;
+  // Count of consecutive newest-end non-overlapping rolling windows where at
+  // least one new shape was introduced. Counts windows, NOT boredom firing
+  // cycles — capped at num_windows. Audit F-128 (inv-053, inv-055): the
+  // legacy field name `consecutive_progressing_cycles` was misleading
+  // because "cycle" implied "boredom tick" rather than "rolling window."
+  // The new field name `consecutive_windows_with_new_shapes` makes the
+  // semantic explicit. The legacy field is preserved as an alias for
+  // backward compatibility (existing consumers like health-tick read it).
+  let consecutive_windows_with_new_shapes = 0;
   for (let i = 0; i < cells_over_time.length; i++) {
-    if (cells_over_time[i]!.new_shapes_introduced > 0) consecutive_progressing_cycles++;
+    if (cells_over_time[i]!.new_shapes_introduced > 0) consecutive_windows_with_new_shapes++;
     else break;
   }
+  const consecutive_progressing_cycles = consecutive_windows_with_new_shapes; // legacy alias
 
   // Legacy monotonic flags retained for downstream consumers. With non-overlapping
   // windows these no longer have the structural-true bias of the previous design.
@@ -261,7 +268,9 @@ export async function resolveCoverageTick(
         reachable_unlearned_strictly_decreasing,
         unknown_strictly_decreasing,
       },
-      consecutive_progressing_cycles,
+      consecutive_windows_with_new_shapes,
+      consecutive_progressing_cycles,  // legacy alias (audit F-128); same value, retained for backward compat
+      consecutive_windows_max: numWindows,  // upper bound — count caps here when every window contributes
       coverage_progress,
       // New substantive metrics — robust to trace-volume gaming:
       total_advertised_shapes: total_advertised,

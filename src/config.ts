@@ -5,6 +5,7 @@ export const HOST = process.env["HOST"] ?? "0.0.0.0";
 export const METABOB_ENDPOINT = process.env["METABOB_ENDPOINT"] ?? "http://127.0.0.1:8080";
 export const METABOB_API_KEY = process.env["METABOB_API_KEY"] ?? "";
 export const DISCOVERY_ENDPOINT = process.env["DISCOVERY_ENDPOINT"] ?? "http://127.0.0.1:8100";
+export const GOAL_HOST_VESSEL_ENDPOINT = process.env["GOAL_HOST_VESSEL_ENDPOINT"] ?? "http://127.0.0.1:8210";
 
 export const WORKSPACE_ROOT = process.env["WORKSPACE_ROOT"] ?? process.cwd();
 
@@ -65,6 +66,10 @@ export const config = {
       // without operator-authored templates.
       "fs_list",
       "http_fetch",
+      // Resolver-pattern aggregation (audit inv-028 B): trace-side
+      // (resolver_id, output_shape) → success-rate report. Lets ribosome
+      // bias future synthesis and makes the F-127 Thompson skew observable.
+      "resolver_pattern_report",
     ] as const,
     resolveEndpoint: "/v2/impulses/resolve",
     resolveRequestFormat: "pointer" as const,

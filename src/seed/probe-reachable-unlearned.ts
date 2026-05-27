@@ -4,29 +4,43 @@ export const PROBE_REACHABLE_UNLEARNED_TEMPLATE: ActivityTemplate = {
   id: "development-vessel:probe-reachable-unlearned",
   name: "probe-reachable-unlearned",
   description:
-    "Finds templates whose output shapes have never appeared in execution traces, " +
-    "picks the highest-priority unlearned shape's best producer, and dispatches " +
-    "that template via goal-host-vessel — closing the recommend→execute loop. " +
-    "Uses the reachable_unlearned_probe resolver which combines get-report and " +
-    "dispatch in a single call to avoid inter-task variable interpolation issues. " +
+    "Reads the most recent reachableButUnlearnedReport, selects the highest-priority " +
+    "unlearned shape, and dispatches an activity_recommend call with a synthetic goal of " +
+    "'produce shape <X>'. The activityRecommendation output is consumed downstream by the " +
+    "lifecycle observer (recommend → slot-binding → execute via goal-host-vessel). " +
     "Tagged intent:topology_discovery.",
   inputShapes: ["reachableButUnlearnedReport"],
-  outputShapes: ["reachableUnlearnedReport"],
+  outputShapes: ["activityRecommendation", "reachableUnlearnedReport"],
   tags: ["intent:topology_discovery", "phase:probe", "topology.discovery.loop"],
   variables: [],
   tasks: [
     {
-      id: "probe_and_dispatch",
+      id: "get_report",
       description:
-        "Fetch the reachable-but-unlearned report, pick the top unlearned shape's " +
-        "best producer template, and dispatch it to goal-host-vessel in one step. " +
-        "Returns reachableUnlearnedReport with dispatch_id and top_template_id.",
-      resolver: "reachable_unlearned_probe",
+        "Call the reachable_unlearned_report resolver directly to get the current list " +
+        "of shapes that have templates but no execution traces.",
+      resolver: "reachable_unlearned_report",
       config: {
-        type: "reachable_unlearned_probe",
+        type: "reachable_unlearned_report",
         lookback_window_seconds: 3600,
       },
-      outputShapes: ["reachableUnlearnedReport"],
+      outputShapes: ["reachableButUnlearnedReport"],
+    },
+    {
+      id: "recommend",
+      description:
+        "Ask activity_recommend for activities that produce the top unlearned shape. " +
+        "The trace is tagged intent:topology_discovery so the observer can re-trigger " +
+        "measurement. Execution of the recommended template is downstream via the " +
+        "standard lifecycle:substrate:idle → recommend → execute path.",
+      resolver: "activity_recommend",
+      config: {
+        type: "activity_recommend",
+        task_description: "produce shape {{get_report_top_shape}}",
+        expected_output_shapes: ["{{get_report_top_shape}}"],
+        intent_tag: "topology_discovery",
+      },
+      outputShapes: ["activityRecommendation"],
     },
   ],
 };

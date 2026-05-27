@@ -65,7 +65,6 @@ export const config = {
       // without operator-authored templates.
       "fs_list",
       "http_fetch",
-      "reachable_unlearned_probe",
     ] as const,
     resolveEndpoint: "/v2/impulses/resolve",
     resolveRequestFormat: "pointer" as const,

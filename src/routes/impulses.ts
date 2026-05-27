@@ -28,6 +28,7 @@ import { resolveBoredomEnqueue } from "../resolvers/boredom-enqueue.js";
 import { resolveMemoryNote, resolveMemoryNoteWrite } from "../resolvers/memory-note.js";
 import { resolveFsList } from "../resolvers/fs-list.js";
 import { resolveHttpFetch } from "../resolvers/http-fetch.js";
+import { resolveReachableUnlearnedProbe } from "../resolvers/reachable-unlearned-probe.js";
 import type { ResolverResult } from "../resolvers/types.js";
 
 type AnyPointer = { type: string } & Record<string, unknown>;
@@ -96,6 +97,8 @@ export async function resolveDispatch(pointer: AnyPointer): Promise<ResolverResu
       return resolveFsList(p as Parameters<typeof resolveFsList>[0]);
     case "http_fetch":
       return resolveHttpFetch(p as Parameters<typeof resolveHttpFetch>[0]);
+    case "reachable_unlearned_probe":
+      return resolveReachableUnlearnedProbe(p as Parameters<typeof resolveReachableUnlearnedProbe>[0]);
     default:
       throw new Error(`unknown shape: ${pointer.type}`);
   }

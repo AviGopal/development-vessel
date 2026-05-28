@@ -71,17 +71,22 @@ export async function resolveActivityCreateVariant(pointer: ActivityCreateVarian
     t["id"] = `${baseId}-${Date.now()}`;
   }
 
-  // Forcibly override output shapes when the caller provides a deterministic value.
+  // Forcibly override output shapes when the caller provides a valid array.
   // activity-api's CreateTemplateRequestSchema reads snake_case `output_shapes`, not
   // camelCase `outputShapes` — Zod strips unknown keys so the camelCase form is ignored.
+  // Skip the override if the value isn't a valid string-array (e.g. an error object from
+  // a failed upstream task) — in that case the LLM-generated outputShapes are used as-is.
   if (pointer.output_shapes_override !== undefined && templateObj && typeof templateObj === "object") {
     let shapes: unknown = pointer.output_shapes_override;
     if (typeof shapes === "string") {
-      try { shapes = JSON.parse(shapes); } catch { shapes = [shapes]; }
+      try { shapes = JSON.parse(shapes); } catch { shapes = undefined; }
     }
-    const t = templateObj as Record<string, unknown>;
-    t["output_shapes"] = shapes;   // snake_case: read by Zod schema
-    t["outputShapes"] = shapes;    // camelCase: kept for any non-Zod readers
+    // Only apply if it's a non-empty array of strings (not an error object)
+    if (Array.isArray(shapes) && shapes.length > 0 && shapes.every((s) => typeof s === "string")) {
+      const t = templateObj as Record<string, unknown>;
+      t["output_shapes"] = shapes;   // snake_case: read by Zod schema
+      t["outputShapes"] = shapes;    // camelCase: kept for any non-Zod readers
+    }
   }
 
   const body = pointer.parentTemplateId

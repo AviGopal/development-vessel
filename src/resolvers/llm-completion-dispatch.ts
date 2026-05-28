@@ -29,17 +29,28 @@ interface DiscoveryResolveResponse {
 
 async function findLlmCompletionEndpoint(): Promise<string | null> {
   try {
-    const res = await fetch(`${DISCOVERY_ENDPOINT}/resolve`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `ApiKey ${METABOB_API_KEY}`,
-      },
-      body: JSON.stringify({ pointer: { type: "vesselCapability", shape: "llm_completion" } }),
-    });
-    if (!res.ok) return null;
-    const data = await res.json() as DiscoveryResolveResponse;
-    const vessels = data.content?.vessels ?? [];
+    // llm-resolver-vessel advertises shape "llmCompletion" (camelCase per its
+    // index.ts config). Previously this resolver queried snake_case
+    // "llm_completion" and never found it — silent failure across every
+    // llm_completion_dispatch task in every activity. The 53 traces with 0/0
+    // tokens during goal[7]'s exec_x19p0558 confirm: zero LLM calls were
+    // happening. Try canonical camelCase first; keep snake_case as fallback
+    // for any future vessel that registers under the alternate spelling.
+    let vessels: DiscoveryVessel[] = [];
+    for (const shapeName of ["llmCompletion", "llm_completion"]) {
+      const res = await fetch(`${DISCOVERY_ENDPOINT}/resolve`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `ApiKey ${METABOB_API_KEY}`,
+        },
+        body: JSON.stringify({ pointer: { type: "vesselCapability", shape: shapeName } }),
+      });
+      if (!res.ok) continue;
+      const data = await res.json() as DiscoveryResolveResponse;
+      vessels = data.content?.vessels ?? [];
+      if (vessels.length > 0) break;
+    }
     if (vessels.length === 0) return null;
     // Skip stale localhost registrations; prefer cluster-internal endpoints.
     const reachable = vessels.filter((v) => !v.endpoint.includes("localhost"));

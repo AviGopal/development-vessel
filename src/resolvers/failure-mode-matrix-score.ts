@@ -1,6 +1,6 @@
 import { METABOB_ENDPOINT, METABOB_API_KEY, WORKSPACE_ROOT } from "../config.js";
 import type { ResolverResult } from "./types.js";
-import { readdir, readFile, writeFile, mkdir } from "node:fs/promises";
+import { readdir, readFile, writeFile, mkdir, symlink, unlink } from "node:fs/promises";
 import { join, dirname } from "node:path";
 
 export interface FailureModeMatrixScorePointer {
@@ -147,7 +147,11 @@ export async function resolveFailureModeMatrixScore(
     summary,
   };
 
-  // Optional disk write for progression-driver compatibility
+  // Optional disk write for progression-driver compatibility.
+  // Also atomically updates latest-failure-mode-report.json symlink so the
+  // boredom-vessel goal[7] always reads the freshest report without manual
+  // operator intervention. Eliminates the last hand-off point in the
+  // draft-gap-closing-activity → harness → next-cycle autonomous loop.
   if (pointer.out_path) {
     const outPath = pointer.out_path.startsWith("/")
       ? pointer.out_path
@@ -155,6 +159,11 @@ export async function resolveFailureModeMatrixScore(
     try {
       await mkdir(dirname(outPath), { recursive: true });
       await writeFile(outPath, JSON.stringify(body, null, 2));
+      // Update the canonical symlink used by boredom-vessel goal[7].
+      const symlinkPath = join(WORKSPACE_ROOT, "validation/results/latest-failure-mode-report.json");
+      await mkdir(dirname(symlinkPath), { recursive: true });
+      try { await unlink(symlinkPath); } catch { /* ok if not yet present */ }
+      await symlink(outPath, symlinkPath);
     } catch { /* non-critical */ }
   }
 

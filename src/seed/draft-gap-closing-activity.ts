@@ -10,15 +10,21 @@ if executed by the system, would produce the evidence or trace needed to close t
 {{read_scenario_content}}
 
 ## Requirements for the drafted template
-1. Use only these resolver names: fs_read, fs_write, fs_edit, git_status, git_diff,
-   git_log, activity_fetch, activity_create_variant, llm_completion_dispatch.
-2. Do NOT add resolvers that are not in the list above.
-3. The template must have: id, name, description, inputShapes, outputShapes, tasks[].
-4. Output ONLY valid JSON — no markdown, no prose before or after.
-5. The template id must start with "gap-closing:" followed by the scenario id.
-6. The output shape must include the shape named in the scenario's
-   expected_emergence.activity_signature.output_shapes_must_include list
-   (or "gapClosingTrace" if none specified).
+1. Use ONLY these resolver names: fs_read, fs_write, llm_completion_dispatch, json_path_extract.
+   Do NOT use activity_fetch, gpt-4, openai, or any other resolver not in this list.
+2. For llm_completion_dispatch tasks, config MUST have exactly these fields:
+     { "type": "llm_completion_dispatch", "prompt": "<the prompt text>",
+       "model": "anthropic/claude-haiku-4-5-20251001", "max_tokens": 1000 }
+   Do NOT use "prompt_template", "system_prompt", or any other field name.
+3. For fs_read tasks: { "type": "fs_read", "path": "<absolute path>" }
+4. For fs_write tasks: { "type": "fs_write", "path": "<absolute path>", "content": "<content>" }
+5. For json_path_extract tasks: { "type": "json_path_extract", "json": "{{prev_task_content}}", "path": "field.name" }
+6. The template must have: id, name, description, tags (array of strings), outputShapes, tasks[].
+7. Each task must have: id, description, resolver, config.
+8. Output ONLY valid JSON — no markdown fences, no prose before or after.
+9. The template id must start with "gap-closing:" followed by the scenario id.
+10. The outputShapes must include the shapes from the scenario's
+    expected_emergence.activity_signature.output_shapes_must_include list.
 
 Respond with the JSON template only.`;
 

@@ -24,6 +24,7 @@ interface VariantMetrics {
 interface Template {
   id: string;
   created_at?: string;
+  proposed?: boolean;
 }
 
 interface CompositionEdge {
@@ -163,13 +164,30 @@ export async function resolveSubstrateHealthTick(
   }
 
   const variantPairs: { alpha: number; beta: number }[] = [];
-  // Each known template gets a pair derived from its trace counts.
-  for (const [, counts] of traceCounts) {
-    variantPairs.push({ alpha: counts.success + 1, beta: counts.fail + 1 });
+  // Only include ACTIVE (non-proposed) templates in the confidence calculation.
+  // Proposed templates are awaiting empirical evidence by design — including
+  // them with uniform priors (α=1, β=1) dilutes the confidence ratio and makes
+  // the substrate appear less confident than it actually is.
+  const activeTemplates = templates.filter(t => !t.proposed);
+
+  // Normalize IDs: activity:⟨foo⟩ → foo, or bare foo → foo.
+  // Trace activity_ids mix both formats (e.g. 'validator-dispatch' bare vs
+  // 'activity:⟨development-vessel:coverage-tick⟩' wrapped). Template IDs from
+  // the API always include the wrapper. We strip the wrapper for comparison.
+  const normalizeId = (id: string) => id.replace(/^activity:⟨(.+)⟩$/, "$1");
+
+  const activeNormIds = new Set(activeTemplates.map(t => normalizeId(t.id)));
+
+  // Each active template with traces gets a pair from its execution counts.
+  for (const [id, counts] of traceCounts) {
+    if (activeNormIds.has(normalizeId(id))) {
+      variantPairs.push({ alpha: counts.success + 1, beta: counts.fail + 1 });
+    }
   }
-  // Templates with no traces at all get the uniform prior (α=1, β=1).
-  for (const tpl of templates) {
-    if (!traceCounts.has(tpl.id)) {
+  // Active templates with no traces get the uniform prior (α=1, β=1).
+  const coveredNormIds = new Set([...traceCounts.keys()].map(normalizeId));
+  for (const tpl of activeTemplates) {
+    if (!coveredNormIds.has(normalizeId(tpl.id))) {
       variantPairs.push({ alpha: 1, beta: 1 });
     }
   }
@@ -209,7 +227,7 @@ export async function resolveSubstrateHealthTick(
   // (which re-seed templates with new created_at timestamps) don't falsely
   // signal instability. 15 minutes captures active ribosome churn without
   // penalising legitimate deploy events.
-  const stabilityWindowSecs = 15 * 60; // 15 minutes
+  const stabilityWindowSecs = 60 * 60; // 60 minutes — matches the boredom cycle's natural authoring cadence
   const stabilitySince = new Date(Date.now() - stabilityWindowSecs * 1000).toISOString();
   // Exclude development-vessel seed templates from the "new" count — they are
   // re-upserted with fresh created_at on every development-vessel restart, which

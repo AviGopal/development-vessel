@@ -6,6 +6,7 @@ export const METABOB_ENDPOINT = process.env["METABOB_ENDPOINT"] ?? "http://127.0
 export const METABOB_API_KEY = process.env["METABOB_API_KEY"] ?? "";
 export const DISCOVERY_ENDPOINT = process.env["DISCOVERY_ENDPOINT"] ?? "http://127.0.0.1:8100";
 export const GOAL_HOST_VESSEL_ENDPOINT = process.env["GOAL_HOST_VESSEL_ENDPOINT"] ?? "http://127.0.0.1:8210";
+export const CONCEPT_DB_ENDPOINT = process.env["CONCEPT_DB_ENDPOINT"] ?? "http://127.0.0.1:8260";
 
 export const WORKSPACE_ROOT = process.env["WORKSPACE_ROOT"] ?? process.cwd();
 

@@ -3,6 +3,7 @@ import { impulsesRouter } from "./routes/impulses.js";
 import { config, DISCOVERY_SHAPES } from "./config.js";
 import { startDiscoveryRegistration, isRegistered } from "./discovery-registration.js";
 import { startRegistryChangeObserver } from "./observers/registry-change-observer.js";
+import { startConceptBridgeObserver } from "./observers/concept-bridge-observer.js";
 
 const app = new Hono();
 
@@ -32,5 +33,6 @@ console.log(`development-vessel listening on ${config.host}:${config.port}`);
 // Non-blocking; failure logs but does not crash
 startDiscoveryRegistration();
 startRegistryChangeObserver();
+startConceptBridgeObserver();
 
 export default server;

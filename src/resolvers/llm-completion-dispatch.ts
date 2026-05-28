@@ -56,7 +56,14 @@ async function findLlmCompletionEndpoint(): Promise<string | null> {
     const reachable = vessels.filter((v) => !v.endpoint.includes("localhost"));
     const pool = reachable.length > 0 ? reachable : vessels;
     const best = pool.sort((a, b) => (b.health_score ?? b.confidence ?? 0) - (a.health_score ?? a.confidence ?? 0))[0]!;
-    return `${best.endpoint}${best.resolve_endpoint}`;
+    // resolve_endpoint may be either a full URL (e.g. "http://localhost:8220/resolve")
+    // or a relative path (e.g. "/resolve"). Concatenating endpoint + full-URL gives
+    // "http://127.0.0.1:8220http://localhost:8220/resolve" → invalid. Detect.
+    const resolveEp = best.resolve_endpoint ?? "/resolve";
+    if (resolveEp.startsWith("http://") || resolveEp.startsWith("https://")) {
+      return resolveEp;
+    }
+    return `${best.endpoint.replace(/\/$/, "")}${resolveEp.startsWith("/") ? resolveEp : `/${resolveEp}`}`;
   } catch {
     return null;
   }
@@ -78,12 +85,15 @@ export async function resolveLlmCompletionDispatch(
   }
 
   const model = pointer.model ?? "anthropic/claude-haiku-4-5-20251001";
+  // llm-resolver-vessel's handler expects the impulse-style envelope OR flat
+  // body with type+prompt. Both forms work; using flat for clarity. The
+  // resolver's body schema: { type: "llm_completion", prompt, model, max_tokens, system }
   const requestBody = {
+    type: "llm_completion" as const,
+    prompt: pointer.prompt,
     model,
-    messages: [{ role: "user", content: pointer.prompt }],
-    ...(pointer.system_prompt ? { systemPrompt: pointer.system_prompt } : {}),
-    stream: false,
-    maxTokens: pointer.max_tokens ?? 4096,
+    max_tokens: pointer.max_tokens ?? 4096,
+    ...(pointer.system_prompt ? { system: pointer.system_prompt } : {}),
   };
 
   let res: Response;
@@ -114,20 +124,31 @@ export async function resolveLlmCompletionDispatch(
     };
   }
 
-  const result = await res.json() as { success: boolean; data?: string; error?: string };
-  if (!result.success) {
+  // llm-resolver-vessel returns { resolved: true, shape: "llmCompletion", content, usage }
+  const result = await res.json() as {
+    resolved?: boolean;
+    content?: string;
+    usage?: { input_tokens?: number; output_tokens?: number };
+    error?: string;
+    // Legacy / alternate field names from older vessels
+    success?: boolean;
+    data?: string;
+  };
+
+  if (result.error || result.resolved === false || result.success === false) {
     return {
       shape: "structuredError",
       body: {
         resolver: "llm_completion_dispatch",
-        detail: result.error ?? "LLM vessel returned success=false",
+        detail: result.error ?? "LLM vessel returned error or resolved=false",
         failure_mode: "verifier_negative",
       },
     };
   }
 
+  const text = result.content ?? result.data ?? "";
   return {
     shape: "llm_completion_result",
-    body: { text: result.data ?? "", model },
+    body: { text, model, usage: result.usage },
   };
 }

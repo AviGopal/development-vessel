@@ -89,6 +89,14 @@ export async function resolveActivityCreateVariant(pointer: ActivityCreateVarian
     }
   }
 
+  // Mark substrate-authored templates as proposed=true so auto-promote can
+  // see them and graduate them after sufficient empirical evidence accumulates.
+  // Without this flag, auto-promote's candidate scan returns 0 and the
+  // substrate never promotes its own authored templates.
+  if (templateObj && typeof templateObj === "object") {
+    (templateObj as Record<string, unknown>)["proposed"] = true;
+  }
+
   const body = pointer.parentTemplateId
     ? { ...templateObj as object, parent_template_id: pointer.parentTemplateId }
     : templateObj;

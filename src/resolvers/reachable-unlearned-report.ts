@@ -13,7 +13,9 @@ export interface ReachableUnlearnedReportPointer {
 interface Template {
   id: string;
   output_shapes?: string[];
+  input_shapes?: string[];
   thompson_alpha?: number;
+  proposed?: boolean;
 }
 
 interface TraceRow {
@@ -146,11 +148,38 @@ export async function resolveReachableUnlearnedReport(
     if (rows.length < 200) break;
   }
 
-  // Only consider ACTIVE (non-proposed) templates for coverage dispatch.
-  // Proposed templates are substrate-authored candidates that haven't been validated —
-  // they often use hallucinated resolvers and will consistently fail. Dispatching them
-  // doesn't improve coverage, it just records failures against unlearned shapes.
-  const activeTemplates = templates.filter(t => !t.proposed);
+  // Only consider ACTIVE templates for coverage dispatch:
+  // - Not proposed (proposed=true means awaiting validation)
+  // - Not a substrate-authored gap-closing template (id starts with "gap-closing:")
+  //   These templates may use hallucinated resolvers (activity_fetch, gpt-4) even when
+  //   proposed=false; they are TARGETS of the promotion pipeline, not sources for
+  //   coverage discovery. The proposed=false state just means they survived an auto-promote
+  //   cycle, not that they're actually executable in the current substrate.
+  const normId = (id: string) => id.replace(/^activity:⟨(.+)⟩$/, "$1");
+
+  // Build the set of ALL shapes ever advertised by templates (proxy for "could be available").
+  // If a shape has never been declared as an output by any template, no template can produce it,
+  // so a template requiring it as input can never succeed in this substrate.
+  const everAdvertisedShapes = new Set<string>();
+  for (const tpl of templates) {
+    for (const s of (tpl.output_shapes ?? [])) everAdvertisedShapes.add(s);
+  }
+
+  const activeTemplates = templates.filter(t => {
+    if (t.proposed) return false;
+    const cleanId = normId(t.id);
+    if (cleanId.startsWith("gap-closing:")) return false;
+    if (cleanId.startsWith("variant-")) return false; // anonymous test artifacts
+    // Input-availability gate: exclude templates that require shapes no active template
+    // can produce. These templates will always fail because their required context can
+    // never be satisfied in the current substrate (e.g. test_audit_report, test_suite).
+    const inputs = t.input_shapes ?? [];
+    if (inputs.length > 0) {
+      const unsatisfiable = inputs.filter(s => !everAdvertisedShapes.has(s));
+      if (unsatisfiable.length > 0) return false;
+    }
+    return true;
+  });
 
   // Build shape → templates map and best alpha per shape
   const shapeToTemplates = new Map<string, string[]>();
@@ -175,7 +204,7 @@ export async function resolveReachableUnlearnedReport(
   // So: total_executions < confidenceFloor - 2.
   const execsNeeded = Math.max(0, confidenceFloor - 2);
   const belowFloor = templates
-    .filter(tpl => !tpl.id.includes("gap-closing:")) // exclude substrate-authored proposed
+    .filter(tpl => !tpl.id.includes("gap-closing:") && !tpl.id.includes("variant-")) // exclude substrate-authored
     .map(tpl => {
       const norm = normalizeTemplateId(tpl.id);
       const count = allTimeExecCounts.get(norm) ?? allTimeExecCounts.get(tpl.id) ?? 0;

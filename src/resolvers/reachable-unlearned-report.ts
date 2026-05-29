@@ -146,10 +146,16 @@ export async function resolveReachableUnlearnedReport(
     if (rows.length < 200) break;
   }
 
+  // Only consider ACTIVE (non-proposed) templates for coverage dispatch.
+  // Proposed templates are substrate-authored candidates that haven't been validated —
+  // they often use hallucinated resolvers and will consistently fail. Dispatching them
+  // doesn't improve coverage, it just records failures against unlearned shapes.
+  const activeTemplates = templates.filter(t => !t.proposed);
+
   // Build shape → templates map and best alpha per shape
   const shapeToTemplates = new Map<string, string[]>();
   const shapeToAlpha = new Map<string, number>();
-  for (const tpl of templates) {
+  for (const tpl of activeTemplates) {
     for (const s of (tpl.output_shapes ?? [])) {
       if (!shapeToTemplates.has(s)) shapeToTemplates.set(s, []);
       shapeToTemplates.get(s)!.push(tpl.id);
@@ -200,9 +206,11 @@ export async function resolveReachableUnlearnedReport(
       const vpm = vpmMap.get(norm) ?? vpmMap.get(tplId);
       let score: number;
       if (vpm && vpm.executions > 0) {
-        const empiricalMean = (vpm.alpha - 1) / Math.max(1, (vpm.alpha + vpm.beta - 2));
-        // Secondary: prefer fewer total executions (less-tested has higher info gain)
-        score = empiricalMean + 0.01 / Math.max(1, vpm.executions);
+        // Pure Thompson success rate: α/(α+β). This favours templates that
+        // actually succeed. The secondary +executions*0.0001 breaks ties in
+        // favour of MORE executions (more evidence = more confidence) — the
+        // opposite of the earlier formulation which wrongly favoured fewer execs.
+        score = vpm.alpha / (vpm.alpha + vpm.beta) + vpm.executions * 0.0001;
       } else {
         score = 0.5; // uniform prior for never-tried templates
       }

@@ -4,6 +4,10 @@ import type { ResolverResult } from "./types.js";
 export interface ReachableUnlearnedReportPointer {
   type: "reachable_unlearned_report";
   lookback_window_seconds?: number;
+  /** Floor for "needs more executions" reporting. Templates with total
+   *  lifetime executions < confidence_floor are included in below_confidence_floor.
+   *  Matches substrate-health-tick's default (10). */
+  confidence_floor?: number;
 }
 
 interface Template {
@@ -29,6 +33,7 @@ export async function resolveReachableUnlearnedReport(
 ): Promise<ResolverResult> {
   const lookbackSecs = pointer.lookback_window_seconds ?? 3600;
   const since = new Date(Date.now() - lookbackSecs * 1000).toISOString();
+  const confidenceFloor = pointer.confidence_floor ?? 10;
   const auth = { Authorization: `ApiKey ${METABOB_API_KEY}` };
 
   // Fetch all templates (paginated, up to 500)
@@ -86,6 +91,32 @@ export async function resolveReachableUnlearnedReport(
     }
   }
 
+  // Count ALL-TIME executions per template. The 24h wide window covers recent
+  // activity; for confidence-floor purposes we need lifetime counts. Fetch a
+  // larger slice (30-day) and count per activity_id.
+  const allTimeSince = new Date(Date.now() - 30 * 24 * 3600 * 1000).toISOString();
+  const allTimeExecCounts = new Map<string, number>(); // normalizedId → count
+  let allTimeOffset = 0;
+  while (allTimeOffset < 5000) {
+    const r = await fetch(
+      `${METABOB_ENDPOINT}/v2/activities/execution-traces?limit=200&offset=${allTimeOffset}&since_iso=${encodeURIComponent(allTimeSince)}`,
+      { headers: auth },
+    ).catch(() => null);
+    if (!r?.ok) break;
+    const page = await r.json() as { executions?: TraceRow[] };
+    const rows = page.executions ?? [];
+    if (rows.length === 0) break;
+    for (const tr of rows) {
+      const id = tr.activity_id ?? tr.variant_id;
+      if (!id) continue;
+      const norm = normalizeTemplateId(id);
+      allTimeExecCounts.set(norm, (allTimeExecCounts.get(norm) ?? 0) + 1);
+      allTimeExecCounts.set(id, (allTimeExecCounts.get(id) ?? 0) + 1);
+    }
+    allTimeOffset += rows.length;
+    if (rows.length < 200) break;
+  }
+
   // Build shape → templates map and best alpha per shape
   const shapeToTemplates = new Map<string, string[]>();
   const shapeToAlpha = new Map<string, number>();
@@ -103,6 +134,20 @@ export async function resolveReachableUnlearnedReport(
   for (const tr of traces) {
     for (const s of (tr.output_shapes ?? [])) learnedShapes.add(s);
   }
+
+  // Below-confidence-floor templates: have been tried but not enough times.
+  // alpha + beta = total_executions + 2. Floor requires alpha + beta >= confidenceFloor.
+  // So: total_executions < confidenceFloor - 2.
+  const execsNeeded = Math.max(0, confidenceFloor - 2);
+  const belowFloor = templates
+    .filter(tpl => !tpl.id.includes("gap-closing:")) // exclude substrate-authored proposed
+    .map(tpl => {
+      const norm = normalizeTemplateId(tpl.id);
+      const count = allTimeExecCounts.get(norm) ?? allTimeExecCounts.get(tpl.id) ?? 0;
+      return { template_id: tpl.id, total_executions: count, runs_needed: Math.max(0, execsNeeded - count) };
+    })
+    .filter(e => e.total_executions > 0 && e.runs_needed > 0)
+    .sort((a, b) => a.runs_needed - b.runs_needed); // fewest needed first = cheapest fix
 
   // Reachable+Unlearned: advertised but no traces
   const advertisedShapes = Array.from(shapeToTemplates.keys());
@@ -166,6 +211,17 @@ export async function resolveReachableUnlearnedReport(
       top_template_last_executed_ms: topEntry?.best_template_last_executed_ms ?? 0,
       // Rotation evidence: producers exercised in last 24h (debug aid)
       producers_exercised_last_24h: lastExecByTemplate.size,
+      // Below-confidence-floor templates: have executions but fewer than the
+      // health-tick's confidence floor (confidenceFloor - 2 real executions needed).
+      // These are the templates the substrate should run more to pass confidence_passing.
+      // Sorted cheapest-to-fix first so callers can dispatch the top N.
+      below_confidence_floor: belowFloor,
+      below_confidence_floor_count: belowFloor.length,
+      confidence_floor: confidenceFloor,
+      executions_needed_for_floor: execsNeeded,
+      // Top pick: template that needs fewest additional runs to cross floor.
+      top_below_floor_template_id: belowFloor[0]?.template_id ?? null,
+      top_below_floor_runs_needed: belowFloor[0]?.runs_needed ?? 0,
     },
   };
 }

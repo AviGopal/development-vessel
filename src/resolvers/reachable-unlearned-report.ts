@@ -91,6 +91,35 @@ export async function resolveReachableUnlearnedReport(
     }
   }
 
+  // Fetch real posteriors from variant_performance_metrics (VPM).
+  // The template API's thompson_alpha is unreliable (stale proposed/Redis cache keeps
+  // all templates at α=1). VPM has the actual accumulated evidence.
+  // success_rate = (α-1)/(α+β-2) for templates with at least 1 real execution.
+  const vpmMap = new Map<string, { alpha: number; beta: number; executions: number }>();
+  try {
+    const vpmRes = await fetch(`${METABOB_ENDPOINT}/v2/activities/templates/auto-promote?dry_run=true`, {
+      method: "POST",
+      headers: { ...auth, "Content-Type": "application/json" },
+      body: JSON.stringify({ min_samples: 0, min_success_rate: 0, dry_run: true }),
+    });
+    if (vpmRes.ok) {
+      const vpmData = await vpmRes.json() as {
+        promoted?: Array<{ template_id?: string; thompson_alpha?: number; thompson_beta?: number; total_executions?: number }>;
+        skipped?: Array<{ template_id?: string; thompson_alpha?: number; thompson_beta?: number; total_executions?: number }>;
+      };
+      for (const entry of [...(vpmData.promoted ?? []), ...(vpmData.skipped ?? [])]) {
+        const id = entry.template_id;
+        if (id) {
+          vpmMap.set(id, {
+            alpha: entry.thompson_alpha ?? 1,
+            beta: entry.thompson_beta ?? 1,
+            executions: entry.total_executions ?? 0,
+          });
+        }
+      }
+    }
+  } catch { /* fallback to execution counts */ }
+
   // Count ALL-TIME executions per template. The 24h wide window covers recent
   // activity; for confidence-floor purposes we need lifetime counts. Fetch a
   // larger slice (30-day) and count per activity_id.
@@ -157,13 +186,28 @@ export async function resolveReachableUnlearnedReport(
 
   const entries = unlearnedShapes.map(shape => {
     const producing = shapeToTemplates.get(shape) ?? [];
-    // best_template_id: highest thompson_alpha among producers (unchanged)
+    // best_template_id: use real posteriors from variant_performance_metrics.
+    // Prefer templates with a positive success rate over brand-new or all-fail ones.
+    // This prevents the observer from repeatedly dispatching templates that consistently
+    // fail (like repair-failed-activity which needs specific inputs not provided here).
+    //
+    // Score = empirical mean (α-1)/(α+β-2) when executions > 0, else 0.5 (uniform prior).
+    // Ties broken by fewer total executions (less-tested templates get priority to build priors).
     let bestId = producing[0] ?? "";
-    let bestAlpha = 0;
+    let bestScore = -Infinity;
     for (const tplId of producing) {
-      const tpl = templates.find(t => t.id === tplId);
-      if (tpl && (tpl.thompson_alpha ?? 1) > bestAlpha) {
-        bestAlpha = tpl.thompson_alpha ?? 1;
+      const norm = normalizeTemplateId(tplId);
+      const vpm = vpmMap.get(norm) ?? vpmMap.get(tplId);
+      let score: number;
+      if (vpm && vpm.executions > 0) {
+        const empiricalMean = (vpm.alpha - 1) / Math.max(1, (vpm.alpha + vpm.beta - 2));
+        // Secondary: prefer fewer total executions (less-tested has higher info gain)
+        score = empiricalMean + 0.01 / Math.max(1, vpm.executions);
+      } else {
+        score = 0.5; // uniform prior for never-tried templates
+      }
+      if (score > bestScore) {
+        bestScore = score;
         bestId = tplId;
       }
     }

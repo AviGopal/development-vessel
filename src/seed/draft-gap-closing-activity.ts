@@ -6,6 +6,25 @@ Below is a failure-mode scenario that the system currently cannot handle autonom
 (emergence_class="gap"). Your task is to draft a candidate activity template (JSON) that,
 if executed by the system, would produce the evidence or trace needed to close this gap.
 
+## Substrate Memory — concepts already accumulated
+
+These are concepts the substrate has learned from prior runs. Each entry shows the
+shape, summary, success/load counts, and Bayesian relevance. Concepts with high
+times_loaded and high relevance describe shape signatures the substrate has seen
+repeatedly succeed. Treat them as priors: prefer drafting activities whose tasks
+produce shapes the substrate already recognises, and re-use resolver chains that
+mirror the high-relevance signatures below.
+
+{{prime_substrate_concepts_text}}
+
+## Substrate Memory — co-occurrence edges
+
+Edges between impulse-signature concepts that have appeared together in successful
+traces. Each edge's weight is the joint observation count. Use them to anticipate
+which downstream shapes are likely to be needed once a given shape is produced.
+
+{{prime_substrate_edges_text}}
+
 ## Failure-Mode Scenario
 {{read_scenario_content}}
 
@@ -33,8 +52,10 @@ export const DRAFT_GAP_CLOSING_ACTIVITY_TEMPLATE: ActivityTemplate = {
   name: "draft-gap-closing-activity",
   description:
     "Given a failure-mode report path and a scenario_id, reads the scenario JSON, " +
-    "drafts a candidate gap-closing activity template via llm_completion_dispatch, " +
-    "writes the proposal file, and registers it as a variant in activity-api. " +
+    "primes the LLM context with the substrate's accumulated concept memory (impulse-signature " +
+    "concepts ranked by Bayesian relevance, plus co-occurrence edges between them), drafts a " +
+    "candidate gap-closing activity template via llm_completion_dispatch, writes the proposal " +
+    "file, and registers it as a variant in activity-api. " +
     "Rate-limit: skips scenarios with ≥3 existing proposals in the last 7 days.",
   inputShapes: ["failureModeReport", "gapScenario"],
   outputShapes: ["activityTemplateProposal", "activityTemplateVariant"],
@@ -79,9 +100,46 @@ export const DRAFT_GAP_CLOSING_ACTIVITY_TEMPLATE: ActivityTemplate = {
       outputShapes: ["gapScenario"],
     },
     {
+      id: "prime_substrate_concepts",
+      description:
+        "Query concept-db for the substrate's accumulated impulse-signature concepts " +
+        "ranked by Bayesian relevance. The drafted template's LLM call uses these as priors. " +
+        "Failure is non-fatal — concept-db being empty or unreachable just means the LLM " +
+        "drafts without the substrate's memory as context.",
+      resolver: "http_fetch",
+      config: {
+        type: "http_fetch",
+        url: "http://127.0.0.1:8260/concepts/search?source_type=impulse_signature&min_relevance=0.3&limit=15",
+        method: "GET",
+        timeoutMs: 5000,
+      },
+      outputShapes: ["substrateConceptIndex"],
+    },
+    {
+      id: "prime_substrate_edges",
+      description:
+        "Query concept-db for the highest-weighted co-occurrence edges between " +
+        "impulse-signature concepts. Feeds the LLM evidence of which shape pairs " +
+        "have co-occurred in successful traces.",
+      resolver: "http_fetch",
+      config: {
+        type: "http_fetch",
+        url: "http://127.0.0.1:8260/mcp/tools/call",
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          tool: "concept_cooccurrence_edges",
+          arguments: { limit: 20 },
+        }),
+        timeoutMs: 5000,
+      },
+      outputShapes: ["substrateCooccurrenceEdges"],
+    },
+    {
       id: "draft_via_llm",
       description:
-        "Dispatch to a discovered llm_completion vessel to draft the candidate template JSON.",
+        "Dispatch to a discovered llm_completion vessel to draft the candidate template JSON. " +
+        "Receives the failure-mode scenario plus the substrate's accumulated concept memory.",
       resolver: "llm_completion_dispatch",
       config: {
         type: "llm_completion_dispatch",

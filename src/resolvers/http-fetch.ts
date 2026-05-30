@@ -33,11 +33,25 @@ export async function resolveHttpFetch(pointer: HttpFetchPointer): Promise<Resol
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
 
+  // Auto-attach this vessel's METABOB_API_KEY when the target is a
+  // substrate-local host AND the caller didn't already set Authorization.
+  // Substrate-internal vessels (concept-db, activity-api, identity-vessel, etc.)
+  // all gate writes on org_id from the resolved API key — without this, every
+  // intra-substrate http_fetch silently falls through to orgId='default' and
+  // sees no org-scoped data.
+  const headers: Record<string, string> = { ...(pointer.headers ?? {}) };
+  const apiKey = process.env["METABOB_API_KEY"];
+  const isSubstrateLocal = parsed.hostname === "127.0.0.1" || parsed.hostname === "localhost";
+  const hasAuth = Object.keys(headers).some((k) => k.toLowerCase() === "authorization");
+  if (apiKey && isSubstrateLocal && !hasAuth) {
+    headers["Authorization"] = `ApiKey ${apiKey}`;
+  }
+
   let response: Response;
   try {
     response = await fetch(pointer.url, {
       method,
-      headers: pointer.headers,
+      headers,
       body: pointer.body ?? undefined,
       signal: controller.signal,
     });

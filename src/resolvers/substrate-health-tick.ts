@@ -184,13 +184,14 @@ export async function resolveSubstrateHealthTick(
       variantPairs.push({ alpha: counts.success + 1, beta: counts.fail + 1 });
     }
   }
-  // Active templates with no traces get the uniform prior (α=1, β=1).
+  // Active templates with no traces are NOT included in the confidence pairs.
+  // Including them with uniform prior (α=1, β=1) causes the denominator to grow
+  // as the substrate authors new gap-closing templates, diluting the ratio below
+  // the 25% threshold even when the registry's active, tested templates are healthy.
+  // Confidence should reflect: "of the templates that have been tried, what fraction
+  // have enough evidence?" — not "of all templates including untested ones."
+  // Templates with no executions are excluded; they contribute nothing to evidence.
   const coveredNormIds = new Set([...traceCounts.keys()].map(normalizeId));
-  for (const tpl of activeTemplates) {
-    if (!coveredNormIds.has(normalizeId(tpl.id))) {
-      variantPairs.push({ alpha: 1, beta: 1 });
-    }
-  }
 
   const total_pairs = variantPairs.length;
   const pairs_above_floor = variantPairs.filter(p => (p.alpha + p.beta) >= confidenceFloor).length;

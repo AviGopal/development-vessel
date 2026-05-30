@@ -1,4 +1,4 @@
-import { METABOB_ENDPOINT, METABOB_API_KEY, WORKSPACE_ROOT } from "../config.js";
+import { METABOB_ENDPOINT, METABOB_API_KEY, WORKSPACE_ROOT, GOAL_HOST_VESSEL_ENDPOINT } from "../config.js";
 import { resolveDispatch } from "../routes/impulses.js";
 import { join } from "node:path";
 
@@ -113,6 +113,145 @@ export async function runTopologyChain(): Promise<void> {
   await fireAggregatorsIfDue();
 }
 
+// ── Recommendation → execution dispatch ──────────────────────────────────────
+//
+// Closes the recommend→execute loop for topology-discovery probes. The probe
+// templates (probe-reachable-unlearned, probe-untraversed-edge,
+// escalate-unknown-shape) emit an `activityRecommendation` impulse but
+// intentionally do NOT include a dispatch task — the engine does not
+// interpolate `{{}}` in non-llm task configs, and adding a combined resolver
+// would bypass the binding layer (see memoryNote
+// "Cross-task data flow uses slot-binding, not new resolvers or {{}}
+// interpolation").
+//
+// Mechanism: when activity-api broadcasts `execution_completed` for one of
+// these probe templates, the observer re-derives the top recommended template
+// from the resolver locally (cheap, deterministic, no LLM, no impulse-content
+// retrieval needed) and POSTs to goal-host-vessel `/run-goal` with
+// `targetTemplateId` + `parent_execution_id` so the dispatched execution
+// becomes a child of the probe.
+//
+// Dedupe: per-(parent_execution_id, target_template_id) for 60s to absorb
+// repeat broadcasts (activity-api emits `execution_completed` once but the
+// observer reconnects on socket flap and the events can replay).
+
+const DISPATCH_DEDUPE_MS = 60_000;
+const recentDispatches = new Map<string, number>();
+
+function shouldDispatch(parentExecutionId: string, targetTemplateId: string): boolean {
+  const key = `${parentExecutionId}::${targetTemplateId}`;
+  const last = recentDispatches.get(key);
+  const now = Date.now();
+  if (last !== undefined && now - last < DISPATCH_DEDUPE_MS) return false;
+  recentDispatches.set(key, now);
+  if (recentDispatches.size > 256) {
+    const oldest = [...recentDispatches.entries()].sort((a, b) => a[1] - b[1]);
+    for (const [k] of oldest.slice(0, 64)) recentDispatches.delete(k);
+  }
+  return true;
+}
+
+// Strip SurrealDB record-id brackets: "activity:⟨development-vessel:foo⟩" → "development-vessel:foo".
+// Both the WebSocket `activity_id` field and the report resolver's
+// `top_template_id` carry this wrapping; goal-host-vessel expects clean ids.
+function stripRecordIdWrapping(raw: string | undefined): string | undefined {
+  if (!raw) return undefined;
+  const m = raw.match(/^activity:⟨(.+)⟩$/);
+  return m ? m[1] : raw;
+}
+
+function looksLikeProbe(activityId: string): boolean {
+  return (
+    activityId.includes("probe-reachable-unlearned") ||
+    activityId.includes("probe-untraversed-edge") ||
+    activityId.includes("escalate-unknown-shape")
+  );
+}
+
+async function pickTopTemplateForProbe(activityId: string): Promise<string | null> {
+  // Each probe uses a different report resolver; re-derive locally rather
+  // than fetching the dead recommendation impulse from activity-api (impulse
+  // content is not persisted to the trace store).
+  try {
+    if (activityId.includes("probe-reachable-unlearned")) {
+      const res = await resolveDispatch({ type: "reachable_unlearned_report" });
+      const body = res.body as Record<string, unknown>;
+      const top = body["top_template_id"];
+      return typeof top === "string" && top.length > 0 ? top : null;
+    }
+    if (activityId.includes("probe-untraversed-edge")) {
+      const res = await resolveDispatch({ type: "learned_topology_snapshot" });
+      const body = res.body as Record<string, unknown>;
+      const edges = body["untraversed_edges"] as Array<Record<string, unknown>> | undefined;
+      const first = edges?.[0];
+      const tpl = first?.["producer_template_id"] ?? first?.["template_id"];
+      return typeof tpl === "string" && tpl.length > 0 ? tpl : null;
+    }
+    if (activityId.includes("escalate-unknown-shape")) {
+      const res = await resolveDispatch({ type: "unknown_shape_report" });
+      const body = res.body as Record<string, unknown>;
+      const top = body["top_template_id"] ?? body["best_template_id"];
+      return typeof top === "string" && top.length > 0 ? top : null;
+    }
+  } catch (err) {
+    console.error(`[recommend-dispatch] failed to derive top template for ${activityId}:`, err);
+  }
+  return null;
+}
+
+/**
+ * Visible for tests — clears dedupe state.
+ */
+export function _resetDispatchDedupe(): void {
+  recentDispatches.clear();
+}
+
+export async function dispatchRecommendationForProbe(
+  rawActivityId: string | undefined,
+  parentExecutionId: string | undefined,
+): Promise<{ dispatched: boolean; targetTemplateId?: string; dispatchId?: string; reason?: string }> {
+  const activityId = stripRecordIdWrapping(rawActivityId);
+  if (!activityId) return { dispatched: false, reason: "no activity_id" };
+  if (!looksLikeProbe(activityId)) return { dispatched: false, reason: "not a probe" };
+  if (!parentExecutionId) return { dispatched: false, reason: "no parent_execution_id" };
+
+  const rawTargetTemplateId = await pickTopTemplateForProbe(activityId);
+  const targetTemplateId = stripRecordIdWrapping(rawTargetTemplateId ?? undefined);
+  if (!targetTemplateId) return { dispatched: false, reason: "no top template" };
+
+  if (!shouldDispatch(parentExecutionId, targetTemplateId)) {
+    return { dispatched: false, targetTemplateId, reason: "deduped" };
+  }
+
+  try {
+    const res = await fetch(`${GOAL_HOST_VESSEL_ENDPOINT}/run-goal`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(METABOB_API_KEY ? { Authorization: `ApiKey ${METABOB_API_KEY}` } : {}),
+      },
+      body: JSON.stringify({
+        goal: `dispatch recommended template ${targetTemplateId} (from probe ${activityId})`,
+        targetTemplateId,
+        tags: ["intent:topology_discovery", "intent:probe_dispatch"],
+        parent_execution_id: parentExecutionId,
+      }),
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      return { dispatched: false, targetTemplateId, reason: `goal-host HTTP ${res.status}: ${text.slice(0, 120)}` };
+    }
+    const body = (await res.json()) as { dispatchId?: string };
+    console.log(
+      `[recommend-dispatch] ${activityId} → ${targetTemplateId} dispatchId=${body.dispatchId} parent=${parentExecutionId}`,
+    );
+    return { dispatched: true, targetTemplateId, dispatchId: body.dispatchId };
+  } catch (err) {
+    return { dispatched: false, targetTemplateId, reason: (err as Error).message };
+  }
+}
+
 // ── Harness-matrix predicate ─────────────────────────────────────────────────
 
 // Predicate: does this lifecycle event warrant re-scoring the failure-mode matrix?
@@ -199,6 +338,15 @@ export function startRegistryChangeObserver(
         return;
       }
       if (event.type !== "lifecycle:execution:succeeded") return;
+
+      // Recommend → execute dispatch (topology-discovery probes).
+      // Runs regardless of `shouldRescore` — this is a separate loop closure
+      // that targets probe templates, not the registry-change rescore path.
+      dispatchRecommendationForProbe(event.activity_template_id, event.execution_id).catch(
+        (err: unknown) =>
+          console.error("[recommend-dispatch] unexpected error:", err),
+      );
+
       if (!shouldRescore(event)) return;
 
       // Fire harness matrix re-score

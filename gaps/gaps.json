@@ -1,0 +1,22 @@
+[
+  {
+    "id": "gap-001",
+    "category": "conversation_only",
+    "source": "operator_narration",
+    "summary": "updated summary",
+    "detected_at": "2026-05-27T23:00:00Z",
+    "status": "closed",
+    "created_at": "2026-05-27T23:19:21.227Z",
+    "updated_at": "2026-05-27T23:20:35.817Z"
+  },
+  {
+    "id": "gap-missing-concept",
+    "category": "missing_concept",
+    "source": "substrate_detected",
+    "summary": "novel shape with no resolver",
+    "detected_at": "2026-05-27T23:00:00Z",
+    "status": "open",
+    "created_at": "2026-05-27T23:19:21.233Z",
+    "updated_at": "2026-05-27T23:20:35.818Z"
+  }
+]

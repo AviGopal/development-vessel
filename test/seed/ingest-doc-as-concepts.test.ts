@@ -25,13 +25,12 @@ describe("INGEST_DOC_AS_CONCEPTS_TEMPLATE", () => {
     expect(names).toContain("out_path");
   });
 
-  it("task graph splits BEFORE the LLM call: read → split → parse → iter → write", () => {
+  it("splits BEFORE the LLM call: read → split → extract → write", () => {
     const ids = INGEST_DOC_AS_CONCEPTS_TEMPLATE.tasks.map((t) => t.id);
     expect(ids).toEqual([
       "read_doc",
       "split_sections",
-      "parse_sections",
-      "iter_extract",
+      "extract_sections",
       "write_sections",
     ]);
   });
@@ -58,56 +57,29 @@ describe("INGEST_DOC_AS_CONCEPTS_TEMPLATE", () => {
     expect(config.type).toBe("markdown_split_sections");
     expect(config.content).toBe("{{read_doc_content}}");
     expect(config.doc_path).toBe("{{doc_path}}");
-    // Per-section payload cap: ≤3000 chars keeps the LLM call well under
-    // any token budget (the whole point of this rewrite).
+    // Per-section payload cap: ≤3000 chars × 60 sections worst-case ≈ 45K
+    // tokens, well under the 200K prompt cap.
     expect(config.maxSectionChars).toBeLessThanOrEqual(3000);
   });
 
-  it("parse_sections plucks the sections array via json_path_extract", () => {
+  it("extract_sections sees the BOUNDED section array, NOT the full doc", () => {
     const t = INGEST_DOC_AS_CONCEPTS_TEMPLATE.tasks.find(
-      (x) => x.id === "parse_sections",
+      (x) => x.id === "extract_sections",
     )!;
-    expect(t.resolver).toBe("json_path_extract");
-    const config = t.config as { path: string };
-    expect(config.path).toBe("sections");
-  });
-
-  it("iter_extract iterates per section and dispatches LLM ONCE PER SECTION (not over the whole doc)", () => {
-    const t = INGEST_DOC_AS_CONCEPTS_TEMPLATE.tasks.find(
-      (x) => x.id === "iter_extract",
-    )!;
-    expect(t.resolver).toBe("iteration");
-    const config = t.config as {
-      over: string;
-      elementVar: string;
-      stopOnError: boolean;
-      aggregateAs: string;
-      body: { resolver: string; config: { prompt: string; model: string; max_tokens: number } };
-    };
-    expect(config.over).toBe("{{parse_sections_valueJson}}");
-    expect(config.elementVar).toBe("candidate");
-    expect(config.stopOnError).toBe(false);
-    expect(config.aggregateAs).toBe("list");
-    expect(config.body.resolver).toBe("llm_completion_dispatch");
-    expect(config.body.config.model).toContain("haiku");
-    // The per-section prompt must reference the candidate fields, NOT the
+    expect(t.resolver).toBe("llm_completion_dispatch");
+    const config = t.config as { model: string; prompt: string; max_tokens: number };
+    expect(config.model).toContain("haiku");
+    // The prompt MUST consume the splitter's bounded output, NOT the
     // whole-doc placeholder that overflowed the prompt cap.
-    expect(config.body.config.prompt).toContain("{{candidate.heading}}");
-    expect(config.body.config.prompt).toContain("{{candidate.body_excerpt}}");
-    expect(config.body.config.prompt).toContain("{{candidate.heading_slug}}");
-    // Hard cap: per-section payloads stay tractable.
-    expect(config.body.config.max_tokens).toBeLessThanOrEqual(2000);
-    // The prompt MUST NOT pass the full doc.
-    expect(config.body.config.prompt).not.toContain("{{read_doc_content}}");
+    expect(config.prompt).toContain("{{split_sections_valueJson}}");
+    expect(config.prompt).not.toContain("{{read_doc_content}}");
   });
 
-  it("per-section prompt enforces content discipline: atomic ideas, summary/body caps, mandatory pointer, banned shapes", () => {
+  it("extract_sections prompt enforces content discipline: atomic ideas, summary/body caps, mandatory pointer, banned shapes", () => {
     const t = INGEST_DOC_AS_CONCEPTS_TEMPLATE.tasks.find(
-      (x) => x.id === "iter_extract",
+      (x) => x.id === "extract_sections",
     )!;
-    const prompt = (
-      t.config as { body: { config: { prompt: string } } }
-    ).body.config.prompt;
+    const prompt = (t.config as { prompt: string }).prompt;
     // Atomic granularity
     expect(prompt).toMatch(/ONE ATOMIC IDEA|atomic/i);
     // Summary cap
@@ -131,23 +103,23 @@ describe("INGEST_DOC_AS_CONCEPTS_TEMPLATE", () => {
       expect(prompt).toContain(banned);
     }
     // Good + bad examples present
-    expect(prompt).toMatch(/GOOD EXAMPLE/);
-    expect(prompt).toMatch(/BAD EXAMPLE/);
+    expect(prompt).toMatch(/GOOD ENTRY/);
+    expect(prompt).toMatch(/BAD ENTRY/);
     // Signature stamping preserved for idempotency.
     expect(prompt).toContain("signature");
     expect(prompt).toContain("ingest_source");
+    // Heading-slug reuse mandate for idempotency.
+    expect(prompt).toContain("heading_slug");
   });
 
-  it("write_sections writes the iter_extract aggregate to the out_path variable", () => {
+  it("write_sections writes the LLM output text to the out_path variable", () => {
     const t = INGEST_DOC_AS_CONCEPTS_TEMPLATE.tasks.find(
       (x) => x.id === "write_sections",
     )!;
     expect(t.resolver).toBe("fs_write");
     const config = t.config as { path: string; content: string };
     expect(config.path).toBe("{{out_path}}");
-    // Must consume the iteration's aggregate, NOT the legacy single-LLM
-    // text placeholder.
-    expect(config.content).toBe("{{iter_extract_valueJson}}");
+    expect(config.content).toBe("{{extract_sections_text}}");
   });
 
   it("all resolvers are in the autonomous palette (incl. the new markdown splitter)", () => {
@@ -157,19 +129,11 @@ describe("INGEST_DOC_AS_CONCEPTS_TEMPLATE", () => {
       "http_fetch",
       "llm_completion_dispatch",
       "json_path_extract",
-      "iteration",
       "markdown_split_sections",
     ]);
     for (const t of INGEST_DOC_AS_CONCEPTS_TEMPLATE.tasks) {
       expect(palette.has(t.resolver)).toBe(true);
     }
-    // The iteration body resolver also must be palette-safe.
-    const iter = INGEST_DOC_AS_CONCEPTS_TEMPLATE.tasks.find(
-      (x) => x.id === "iter_extract",
-    )!;
-    const innerResolver = (iter.config as { body: { resolver: string } }).body
-      .resolver;
-    expect(palette.has(innerResolver)).toBe(true);
   });
 
   it("carries the substrate.knowledge.accumulation tag family", () => {

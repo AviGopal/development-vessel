@@ -18,6 +18,11 @@ interface Template {
 interface TraceRow {
   activity_id?: string;
   variant_id?: string;
+  /** Activity-api stores actual produced shapes as output_impulse_shapes
+   *  (populated by ias-executor-ts trace-sink from real impulse metadata).
+   *  This is the ground-truth field post extras-bag Phase 2 fix. */
+  output_impulse_shapes?: string[];
+  /** Legacy fallback — older traces may have output_shapes; prefer output_impulse_shapes. */
   output_shapes?: string[];
   executed_at?: string;
   created_at?: string;
@@ -96,8 +101,16 @@ async function computeCountsForWindow(
     const actId = tr.activity_id ?? tr.variant_id ?? "";
     if (isMetaActivity(actId)) continue;
     substantiveTraces++;
-    if (tr.output_shapes && tr.output_shapes.length > 0) {
-      for (const s of tr.output_shapes) learnedShapes.add(s);
+    // Prefer output_impulse_shapes (actual shapes from impulse metadata,
+    // populated by ias-executor-ts trace-sink post extras-bag Phase 2 fix).
+    // Fall back to legacy output_shapes, then infer from template declarations.
+    const actualShapes = tr.output_impulse_shapes?.length
+      ? tr.output_impulse_shapes
+      : tr.output_shapes?.length
+        ? tr.output_shapes
+        : null;
+    if (actualShapes && actualShapes.length > 0) {
+      for (const s of actualShapes) learnedShapes.add(s);
     } else {
       const inferredShapes = templateShapes.get(actId);
       if (inferredShapes) {

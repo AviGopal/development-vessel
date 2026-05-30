@@ -76,6 +76,15 @@ export const config = {
       // (resolver_id, output_shape) → success-rate report. Lets ribosome
       // bias future synthesis and makes the F-127 Thompson skew observable.
       "resolver_pattern_report",
+      // Deterministic markdown splitter (iter-082, 2026-05-30): chunks docs
+      // on H2/H3 headings BEFORE the LLM call so ingest-doc-as-concepts can
+      // operate per-section without overflowing Anthropic's 200K prompt cap.
+      "markdown_split_sections",
+      // Deterministic stale-pointer detector + emitter (iter-082, 2026-05-30):
+      // scans concept-db, stats each concept's pointer.path, POSTs substrateGap
+      // for missing files. Replaces the prior LLM-heuristic detect-stale-pointer
+      // path that overflowed the prompt cap on large concept corpora.
+      "stale_pointer_emit",
     ] as const,
     resolveEndpoint: "/v2/impulses/resolve",
     resolveRequestFormat: "pointer" as const,

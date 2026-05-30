@@ -20,6 +20,7 @@ import { DRAIN_PENDING_SUBSTRATE_GAPS_TEMPLATE } from "./drain-pending-substrate
 import { DRAFT_SPEC_FROM_GAP_TEMPLATE } from "./draft-spec-from-gap.js";
 import { INGEST_DOC_AS_CONCEPTS_TEMPLATE } from "./ingest-doc-as-concepts.js";
 import { DETECT_STALE_POINTER_TEMPLATE } from "./detect-stale-pointer.js";
+import { INGEST_AUDIT_FINDINGS_TEMPLATE } from "./ingest-audit-findings.js";
 
 export { SHIP_CHANGE_TEMPLATE } from "./ship-change.js";
 export { BRANCH_HEALTH_TEMPLATE } from "./branch-health.js";
@@ -42,6 +43,7 @@ export { DRAIN_PENDING_SUBSTRATE_GAPS_TEMPLATE } from "./drain-pending-substrate
 export { DRAFT_SPEC_FROM_GAP_TEMPLATE } from "./draft-spec-from-gap.js";
 export { INGEST_DOC_AS_CONCEPTS_TEMPLATE } from "./ingest-doc-as-concepts.js";
 export { DETECT_STALE_POINTER_TEMPLATE } from "./detect-stale-pointer.js";
+export { INGEST_AUDIT_FINDINGS_TEMPLATE } from "./ingest-audit-findings.js";
 
 export const SEED_TEMPLATES: ActivityTemplate[] = [
   SHIP_CHANGE_TEMPLATE,
@@ -72,4 +74,6 @@ export const SEED_TEMPLATES: ActivityTemplate[] = [
   // doc-ingestion + concept management (2026-05-30)
   INGEST_DOC_AS_CONCEPTS_TEMPLATE,
   DETECT_STALE_POINTER_TEMPLATE,
+  // audit-ingestion bridge (iter-080, 2026-05-30): reads audit findings → substrateGap impulses
+  INGEST_AUDIT_FINDINGS_TEMPLATE,
 ];

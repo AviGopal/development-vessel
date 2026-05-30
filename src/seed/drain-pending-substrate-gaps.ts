@@ -84,11 +84,36 @@ export const DRAIN_PENDING_SUBSTRATE_GAPS_TEMPLATE: ActivityTemplate = {
       outputShapes: ["json_extracted_value"],
     },
     {
+      id: "write_scenario_file",
+      description:
+        "Write a minimal scenario JSON file for this gap so draft-gap-closing-activity " +
+        "can read it via fs_read. The file is written to the scenarios_dir with the gap id " +
+        "as filename. When no gap is open, extract_gap_id_text is empty and fs_write fails " +
+        "fast — a normal trace, not an error.",
+      resolver: "fs_write",
+      config: {
+        type: "fs_write",
+        path: "{{scenarios_dir}}/{{extract_gap_id_text}}.json",
+        content: JSON.stringify({
+          id: "{{extract_gap_id_text}}",
+          mode_class: "substrate_gap",
+          title: "Substrate-detected gap: {{extract_gap_summary_text}}",
+          description: "{{extract_gap_summary_text}}",
+          expected_emergence: {
+            activity_signature: {
+              output_shapes_must_include: ["gapAnalysisReport"],
+            },
+          },
+        }),
+      },
+      outputShapes: ["gapScenario"],
+    },
+    {
       id: "dispatch_drafter",
       description:
         "POST to goal-host-vessel /run-goal targeting draft-gap-closing-activity " +
-        "with the gap id as scenario_id. When no gap is open, extract_gap_id_text " +
-        "is empty and the drafter's fs_read fails fast — a normal trace, not an error.",
+        "with the gap id as scenario_id. Now that write_scenario_file created the " +
+        "scenario JSON, the drafter can read it successfully.",
       resolver: "http_fetch",
       config: {
         type: "http_fetch",

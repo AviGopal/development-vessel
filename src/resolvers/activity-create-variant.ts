@@ -89,6 +89,67 @@ export async function resolveActivityCreateVariant(pointer: ActivityCreateVarian
     }
   }
 
+  // Validate gap-closing templates: mechanically enforce the constraints that LLM
+  // prompt instructions alone cannot reliably enforce. Templates that fail validation
+  // are rejected here (structuredError) rather than registered and failing at execution.
+  // This makes LLM failures loud and early instead of silent-success + runtime-failure.
+  if (templateObj && typeof templateObj === "object") {
+    const t = templateObj as Record<string, unknown>;
+    const templateId = String(t["id"] ?? "");
+    if (templateId.startsWith("gap-closing:") || (pointer as Record<string,unknown>)["validate_gap_closing"]) {
+      const tasks = Array.isArray(t["tasks"]) ? (t["tasks"] as Record<string, unknown>[]) : [];
+      const ALLOWED_RESOLVERS = new Set(["fs_read","fs_write","llm_completion_dispatch","json_path_extract","http_fetch","noop"]);
+      const JMESPATH_CHARS = /[\[\]\*\?\(\)]/;
+      const WORKSPACE_PREFIX = "/workspace/";
+      const VALID_HTTP_HOSTS = ["127.0.0.1:8080","127.0.0.1:8090","127.0.0.1:8260","127.0.0.1:8270","127.0.0.1:8100","127.0.0.1:8210"];
+
+      for (const task of tasks) {
+        const resolver = String(task["resolver"] ?? "");
+        const cfg = (task["config"] ?? {}) as Record<string, unknown>;
+
+        if (!ALLOWED_RESOLVERS.has(resolver)) {
+          return { shape: "structuredError", body: {
+            resolver: "activity_create_variant", failure_mode: "validation_rejected",
+            detail: `Task '${task["id"]}' uses disallowed resolver '${resolver}'. Allowed: ${[...ALLOWED_RESOLVERS].join(",")}`,
+          }};
+        }
+
+        // json_path_extract: block JMESPath syntax
+        if (resolver === "json_path_extract") {
+          const path = String(cfg["path"] ?? "");
+          if (JMESPATH_CHARS.test(path)) {
+            return { shape: "structuredError", body: {
+              resolver: "activity_create_variant", failure_mode: "validation_rejected",
+              detail: `Task '${task["id"]}' json_path_extract uses JMESPath chars in path '${path}'. Use simple dot notation only.`,
+            }};
+          }
+        }
+
+        // fs_read: block non-workspace absolute paths
+        if (resolver === "fs_read") {
+          const path = String(cfg["path"] ?? "");
+          if (path.startsWith("/") && !path.startsWith(WORKSPACE_PREFIX)) {
+            return { shape: "structuredError", body: {
+              resolver: "activity_create_variant", failure_mode: "validation_rejected",
+              detail: `Task '${task["id"]}' fs_read path '${path}' is outside /workspace/. Only workspace paths are allowed.`,
+            }};
+          }
+        }
+
+        // http_fetch: block invented URLs — only allow known substrate endpoints
+        if (resolver === "http_fetch") {
+          const url = String(cfg["url"] ?? "");
+          if (url && !VALID_HTTP_HOSTS.some(h => url.includes(h))) {
+            return { shape: "structuredError", body: {
+              resolver: "activity_create_variant", failure_mode: "validation_rejected",
+              detail: `Task '${task["id"]}' http_fetch URL '${url.slice(0,80)}' uses unknown host. Valid hosts: ${VALID_HTTP_HOSTS.join(",")}`,
+            }};
+          }
+        }
+      }
+    }
+  }
+
   // Mark substrate-authored templates as proposed=true so auto-promote can
   // see them and graduate them after sufficient empirical evidence accumulates.
   // WITHOUT this flag, auto-promote's candidate scan returns 0 and the

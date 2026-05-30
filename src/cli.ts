@@ -16,27 +16,54 @@ async function seedTemplates(): Promise<void> {
   const { resolveActivityCreateVariant } = await import("./resolvers/activity-create-variant.js");
   console.log(`Uploading ${SEED_TEMPLATES.length} bootstrap templates...`);
   const results: Array<{ name: string; variantId: string }> = [];
+  const failures: Array<{ name: string; detail: string }> = [];
   for (const template of SEED_TEMPLATES) {
+    const label = (template as { name?: string }).name ?? template.id;
     try {
       // Seed templates are operator-authored starting points — always active (proposed=false).
       // Pass the template with proposed=false explicitly so ExecStartPost restarts don't
       // reset all seed templates to proposed=true via the substrate-authoring path.
+      // Also pass org_id explicitly: activity-api's POST /v2/activities/templates derives
+      // org_id from JWT/session auth context, but the development-vessel API key path does
+      // not populate session.org_id, so the SCHEMAFULL `org_id` field on the `activity`
+      // table fails with "Found NONE for field org_id". Setting it in the body is the
+      // documented workaround until auth-context derivation is fixed in activity-api.
       const seedTemplate = typeof template === "object" && template !== null
-        ? { ...(template as Record<string, unknown>), proposed: false }
+        ? { ...(template as Record<string, unknown>), proposed: false, org_id: "organizations:substrate" }
         : template;
       const result = await resolveActivityCreateVariant({
         type: "activity_create_variant",
         template: seedTemplate,
       });
-      const variantId = (result.body as { variantId: string }).variantId;
-      results.push({ name: (template as { name?: string }).name ?? template.id, variantId });
-      console.log(`  ✓ ${(template as { name?: string }).name ?? template.id} → ${variantId}`);
+      // Surface resolver-side failures rather than silently logging ✓ with undefined.
+      // The resolver returns shape="structuredError" on non-2xx from activity-api
+      // (auth failure, validation reject, schema error). Treat that as a failure.
+      if (result.shape === "structuredError") {
+        const detail = JSON.stringify(result.body);
+        failures.push({ name: label, detail });
+        console.error(`  ✗ ${label}: ${detail}`);
+        continue;
+      }
+      const variantId = (result.body as { variantId?: string }).variantId;
+      if (!variantId) {
+        const detail = `resolver returned shape=${result.shape} without variantId: ${JSON.stringify(result.body).slice(0, 200)}`;
+        failures.push({ name: label, detail });
+        console.error(`  ✗ ${label}: ${detail}`);
+        continue;
+      }
+      results.push({ name: label, variantId });
+      console.log(`  ✓ ${label} → ${variantId}`);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      console.error(`  ✗ ${(template as { name?: string }).name ?? template.id}: ${msg}`);
+      failures.push({ name: label, detail: msg });
+      console.error(`  ✗ ${label}: ${msg}`);
     }
   }
-  console.log(JSON.stringify({ seed_results: results }, null, 2));
+  console.log(JSON.stringify({ seed_results: results, seed_failures: failures }, null, 2));
+  if (failures.length > 0) {
+    console.error(`\n${failures.length} of ${SEED_TEMPLATES.length} seed templates failed to upload.`);
+    process.exit(1);
+  }
 }
 
 async function callResolver(pointerType: string, rawData: string): Promise<void> {

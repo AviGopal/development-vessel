@@ -157,26 +157,52 @@ export async function resolveReachableUnlearnedReport(
   //   cycle, not that they're actually executable in the current substrate.
   const normId = (id: string) => id.replace(/^activity:⟨(.+)⟩$/, "$1");
 
-  // Build the set of ALL shapes ever advertised by templates (proxy for "could be available").
-  // If a shape has never been declared as an output by any template, no template can produce it,
-  // so a template requiring it as input can never succeed in this substrate.
-  const everAdvertisedShapes = new Set<string>();
-  for (const tpl of templates) {
-    for (const s of (tpl.output_shapes ?? [])) everAdvertisedShapes.add(s);
+  // Build the set of shapes that have ACTUALLY BEEN PRODUCED in the 30-day trace window.
+  // "Advertised" is not enough — a shape might be declared as an output but its producer
+  // template has never successfully run in this substrate (e.g. test_audit_report is
+  // declared by audit-test templates that aren't part of the normal execution graph).
+  // Using historically-produced shapes as the gate ensures we only dispatch templates
+  // whose inputs have been seen in real execution traces.
+  const allTimeProducedShapes = new Set<string>();
+  for (const tr of traces) { // short-window traces
+    for (const s of (tr.output_shapes ?? [])) allTimeProducedShapes.add(s);
   }
+  // Also fetch wider 30-day produced shapes from the same paginated traces we already
+  // counted above — reuse allTimeExecCounts data source but track shapes too.
+  // We approximate: any shape in the wide-window exec traces' output_shapes is "produced".
+  // The wide fetch is the allTimeExecCounts loop above (rows have output_shapes).
+  // Re-iterate allTimeOffset data isn't available, so use a separate dedicated fetch.
+  try {
+    const shapeRes = await fetch(
+      `${METABOB_ENDPOINT}/v2/activities/execution-traces?limit=500&since_iso=${encodeURIComponent(allTimeSince)}`,
+      { headers: auth },
+    ).catch(() => null);
+    if (shapeRes?.ok) {
+      const shapeData = await shapeRes.json() as { executions?: TraceRow[] };
+      for (const tr of shapeData.executions ?? []) {
+        for (const s of (tr.output_shapes ?? [])) allTimeProducedShapes.add(s);
+      }
+    }
+  } catch { /* fallback: allTimeProducedShapes stays small */ }
+
+  // Unconditionally available shapes: shapes with no input requirements (always producible
+  // without context) are always satisfiable regardless of history.
+  const NO_INPUT_SHAPES_SENTINEL = new Set<string>(["*"]);
 
   const activeTemplates = templates.filter(t => {
     if (t.proposed) return false;
     const cleanId = normId(t.id);
     if (cleanId.startsWith("gap-closing:")) return false;
     if (cleanId.startsWith("variant-")) return false; // anonymous test artifacts
-    // Input-availability gate: exclude templates that require shapes no active template
-    // can produce. These templates will always fail because their required context can
-    // never be satisfied in the current substrate (e.g. test_audit_report, test_suite).
+    // Input-availability gate: a template is dispatchable only if ALL its required
+    // inputShapes have been produced at least once in the last 30 days. This prevents
+    // the observer from repeatedly dispatching templates like debug-failing-audit whose
+    // required context (test_audit_report, test_registration) has never materialized
+    // in this substrate's execution history.
     const inputs = t.input_shapes ?? [];
     if (inputs.length > 0) {
-      const unsatisfiable = inputs.filter(s => !everAdvertisedShapes.has(s));
-      if (unsatisfiable.length > 0) return false;
+      const unproduced = inputs.filter(s => !allTimeProducedShapes.has(s));
+      if (unproduced.length > 0) return false;
     }
     return true;
   });

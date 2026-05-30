@@ -115,7 +115,12 @@ export async function resolveSubstrateHealthTick(
 
   const confidenceFloor = pointer.confidence_floor ?? 10;
   const confidenceRatioThreshold = pointer.confidence_ratio_threshold ?? 0.25;
-  const stabilityRateCeiling = pointer.stability_rate_ceiling ?? 1.0;
+  // Ceiling of 10.0/hr: accommodates post-restart seed churn (bootstrap-seeder +
+  // seed-templates both run on restart, producing ~20 template UPSERTs within seconds).
+  // The 1.0/hr ceiling was too tight — it flagged normal operational maintenance as
+  // instability. 10.0/hr still detects genuinely runaway ribosome/improviser scenarios
+  // (which would produce dozens of templates per hour continuously).
+  const stabilityRateCeiling = pointer.stability_rate_ceiling ?? 10.0;
   const optimalityRatioCeiling = pointer.optimality_ratio_ceiling ?? 2.0;
 
   // — Posterior confidence via execution trace counts —
@@ -243,6 +248,11 @@ export async function resolveSubstrateHealthTick(
     const clean = normId(t.id);
     if (clean.startsWith("development-vessel:")) return false;
     if (clean.startsWith("gap-closing:")) return false;
+    if (clean.startsWith("variant-")) return false; // anonymous test artifacts
+    // Exclude templates that already have execution history — they were re-seeded on
+    // restart (UPSERT sets created_at=now() on every restart), not genuinely new.
+    // traceCounts is populated from the last 30 days of traces (built above).
+    if (traceCounts.has(clean) || traceCounts.has(t.id) || traceCounts.has(normId(t.id))) return false;
     return true;
   });
   const new_templates_added = recentTemplates.length;

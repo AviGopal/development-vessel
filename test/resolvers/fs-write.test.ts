@@ -35,4 +35,31 @@ describe("fs-write resolver", () => {
       resolveFsWrite({ type: "fs_write", path: "/etc/shadow-test.txt", content: "nope" }),
     ).rejects.toThrow("path outside workspace root");
   });
+
+  describe("WRITE_ALLOWLIST scoping", () => {
+    it("allows arbitrary in-workspace writes when env unset", async () => {
+      delete process.env["WRITE_ALLOWLIST"];
+      const path = join(testDir, "anywhere.txt");
+      const result = await resolveFsWrite({ type: "fs_write", path, content: "ok" });
+      expect(result.shape).toBe("fileWriteResult");
+    });
+
+    it("allows writes under an allowlisted prefix", async () => {
+      process.env["WRITE_ALLOWLIST"] = "openspec/changes/,validation/failure-modes/proposals/";
+      mkdirSync(join(testDir, "openspec/changes/2026-05-30-x"), { recursive: true });
+      const path = join(testDir, "openspec/changes/2026-05-30-x/proposal.md");
+      const result = await resolveFsWrite({ type: "fs_write", path, content: "# spec" });
+      expect(result.shape).toBe("fileWriteResult");
+      delete process.env["WRITE_ALLOWLIST"];
+    });
+
+    it("rejects writes outside an allowlisted prefix", async () => {
+      process.env["WRITE_ALLOWLIST"] = "openspec/changes/";
+      const path = join(testDir, "repos/some-vessel/src/index.ts");
+      await expect(
+        resolveFsWrite({ type: "fs_write", path, content: "evil", createDirs: true }),
+      ).rejects.toThrow("path outside write allowlist");
+      delete process.env["WRITE_ALLOWLIST"];
+    });
+  });
 });

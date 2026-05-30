@@ -29,8 +29,66 @@ which downstream shapes are likely to be needed once a given shape is produced.
 {{read_scenario_content}}
 
 ## Requirements for the drafted template
-1. Use ONLY these resolver names: fs_read, fs_write, llm_completion_dispatch, json_path_extract.
+1. Use ONLY these resolver names: fs_read, fs_write, llm_completion_dispatch, json_path_extract, http_fetch.
    Do NOT use activity_fetch, gpt-4, openai, or any other resolver not in this list.
+
+   For substrate-state writes (accumulating knowledge back into the system), use http_fetch
+   to dispatch to the appropriate vessel's /v2/impulses/resolve endpoint. The three SAFE
+   writes available to autonomous drafters are:
+
+   (a) concept_create_write — mint a concept (typed knowledge unit, Bayesian-rankable).
+       Endpoint: http://127.0.0.1:8260/v2/impulses/resolve
+       Pointer payload (POST body): {
+         "impulse": { "pointer": {
+           "type": "concept_create_write",
+           "conceptData": {
+             "shape": "<shape name, e.g. vessel_construction_pattern>",
+             "source_type": "extracted",
+             "summary": "<one-line gist>",
+             "content": "<concept body>",
+             "priority": 0.5,
+             "budget": 2000
+           }
+         } }
+       }
+       Use when a successful trace reveals a reusable pattern worth preserving.
+
+   (b) conceptLink_write — wire an edge between two existing concepts.
+       Endpoint: http://127.0.0.1:8260/v2/impulses/resolve
+       Pointer payload (POST body): {
+         "impulse": { "pointer": {
+           "type": "conceptLink_write",
+           "linkData": {
+             "from_concept_id": "<source concept id>",
+             "to_concept_id": "<target concept id>",
+             "edge_type": "related_to" | "derived_from" | "description_of" | "example_of"
+           }
+         } }
+       }
+       Use to wire a newly-minted concept into the existing graph so it is reachable
+       via concept_neighbors traversal.
+
+   (c) substrateGap_write — record a problem-statement gap the system discovered.
+       Endpoint: http://127.0.0.1:8270/v2/impulses/resolve
+       Pointer payload (POST body): {
+         "impulse": { "pointer": {
+           "type": "substrateGap_write",
+           "gap": {
+             "id": "<idempotency key>",
+             "category": "conversation_only" | "training_knowledge" | "missing_concept" | "missing_idiom" | "other",
+             "source": "substrate_detected",
+             "summary": "<gap statement>",
+             "detected_at": "<ISO timestamp>",
+             "status": "open"
+           }
+         } }
+       }
+       Use when execution detects a missing capability the system should track. Distinct
+       from a memoryNote (candidate answer); this is the problem statement.
+
+   These three writes are SAFE for autonomous use. Destructive writes
+   (activityTemplate_update, activityTemplate_deprecate, activityExecutionTrace_delete)
+   are NOT in the palette and must NOT be used.
 2. For llm_completion_dispatch tasks, config MUST have exactly these fields:
      { "type": "llm_completion_dispatch", "prompt": "<the prompt text>",
        "model": "anthropic/claude-haiku-4-5-20251001", "max_tokens": 1000 }

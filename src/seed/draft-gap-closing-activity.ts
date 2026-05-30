@@ -29,79 +29,72 @@ which downstream shapes are likely to be needed once a given shape is produced.
 {{read_scenario_content}}
 
 ## Requirements for the drafted template
+
+### RESOLVER RULES (violations cause runtime failures — follow exactly)
+
 1. Use ONLY these resolver names: fs_read, fs_write, llm_completion_dispatch, json_path_extract, http_fetch.
-   Do NOT use activity_fetch, gpt-4, openai, or any other resolver not in this list.
 
-   For substrate-state writes (accumulating knowledge back into the system), use http_fetch
-   to dispatch to the appropriate vessel's /v2/impulses/resolve endpoint. The three SAFE
-   writes available to autonomous drafters are:
+2. fs_read config: { "type": "fs_read", "path": "<ABSOLUTE path to a file that EXISTS>" }
+   ONLY read these paths — they are guaranteed to exist:
+   - /workspace/validation/failure-modes/scenarios/<scenario_id>.json  (the scenario file)
+   - /workspace/validation/results/latest-failure-mode-report.json     (harness results)
+   - /workspace/proposals/<any-file>.json                               (output dir)
+   DO NOT invent paths like /var/traces/ or /analytics/ — they do not exist.
+   DO NOT use fs_read to read directories — only read files with known full paths.
 
-   (a) concept_create_write — mint a concept (typed knowledge unit, Bayesian-rankable).
-       Endpoint: http://127.0.0.1:8260/v2/impulses/resolve
-       Pointer payload (POST body): {
-         "impulse": { "pointer": {
-           "type": "concept_create_write",
-           "conceptData": {
-             "shape": "<shape name, e.g. vessel_construction_pattern>",
-             "source_type": "extracted",
-             "summary": "<one-line gist>",
-             "content": "<concept body>",
-             "priority": 0.5,
-             "budget": 2000
-           }
-         } }
-       }
-       Use when a successful trace reveals a reusable pattern worth preserving.
+3. fs_write config: { "type": "fs_write", "path": "/workspace/proposals/<filename>.json", "content": "<content>" }
+   Only write to /workspace/proposals/ or /workspace/gaps/.
 
-   (b) conceptLink_write — wire an edge between two existing concepts.
-       Endpoint: http://127.0.0.1:8260/v2/impulses/resolve
-       Pointer payload (POST body): {
-         "impulse": { "pointer": {
-           "type": "conceptLink_write",
-           "linkData": {
-             "from_concept_id": "<source concept id>",
-             "to_concept_id": "<target concept id>",
-             "edge_type": "related_to" | "derived_from" | "description_of" | "example_of"
-           }
-         } }
-       }
-       Use to wire a newly-minted concept into the existing graph so it is reachable
-       via concept_neighbors traversal.
+4. llm_completion_dispatch config MUST use EXACTLY these fields:
+   { "type": "llm_completion_dispatch", "prompt": "<prompt text>",
+     "model": "anthropic/claude-haiku-4-5-20251001", "max_tokens": 1000 }
+   NO other fields. "prompt_template", "system_prompt", "system" are NOT valid.
 
-   (c) substrateGap_write — record a problem-statement gap the system discovered.
-       Endpoint: http://127.0.0.1:8270/v2/impulses/resolve
-       Pointer payload (POST body): {
-         "impulse": { "pointer": {
-           "type": "substrateGap_write",
-           "gap": {
-             "id": "<idempotency key>",
-             "category": "conversation_only" | "training_knowledge" | "missing_concept" | "missing_idiom" | "other",
-             "source": "substrate_detected",
-             "summary": "<gap statement>",
-             "detected_at": "<ISO timestamp>",
-             "status": "open"
-           }
-         } }
-       }
-       Use when execution detects a missing capability the system should track. Distinct
-       from a memoryNote (candidate answer); this is the problem statement.
+5. json_path_extract: DO NOT USE in your template. It is too fragile. Use llm_completion_dispatch to process any JSON data instead.
 
-   These three writes are SAFE for autonomous use. Destructive writes
-   (activityTemplate_update, activityTemplate_deprecate, activityExecutionTrace_delete)
-   are NOT in the palette and must NOT be used.
-2. For llm_completion_dispatch tasks, config MUST have exactly these fields:
-     { "type": "llm_completion_dispatch", "prompt": "<the prompt text>",
-       "model": "anthropic/claude-haiku-4-5-20251001", "max_tokens": 1000 }
-   Do NOT use "prompt_template", "system_prompt", or any other field name.
-3. For fs_read tasks: { "type": "fs_read", "path": "<absolute path>" }
-4. For fs_write tasks: { "type": "fs_write", "path": "<absolute path>", "content": "<content>" }
-5. For json_path_extract tasks: { "type": "json_path_extract", "json": "{{prev_task_content}}", "path": "field.name" }
-6. The template must have: id, name, description, tags (array of strings), outputShapes, tasks[].
-7. Each task must have: id, description, resolver, config.
-8. Output ONLY valid JSON — no markdown fences, no prose before or after.
-9. The template id must start with "gap-closing:" followed by the scenario id.
-10. The outputShapes must include the shapes from the scenario's
-    expected_emergence.activity_signature.output_shapes_must_include list.
+6. http_fetch config: { "type": "http_fetch", "url": "http://127.0.0.1:8080/...", "method": "GET" }
+   Use to query activity-api for execution trace data (DO NOT read traces from files):
+   - GET http://127.0.0.1:8080/v2/activities/execution-traces?limit=20
+   - POST http://127.0.0.1:8080/v2/activities/discover-by-shapes with body
+
+   For substrate writes, use http_fetch to POST to:
+   - concept_create_write: POST http://127.0.0.1:8260/v2/impulses/resolve
+     body: {"impulse":{"pointer":{"type":"concept_create_write","conceptData":{"shape":"<name>","source_type":"extracted","summary":"<text>","content":"<text>","priority":0.5,"budget":2000}}}}
+   - substrateGap_write: POST http://127.0.0.1:8270/v2/impulses/resolve
+     body: {"impulse":{"pointer":{"type":"substrateGap_write","gap":{"id":"<key>","category":"missing_concept","source":"substrate_detected","summary":"<text>","detected_at":"<ISO>","status":"open"}}}}
+
+### TEMPLATE STRUCTURE RULES
+
+7. The template must have: id, name, description, tags (array of strings), outputShapes, tasks[].
+8. Each task must have: id, description, resolver, config.
+9. Output ONLY valid JSON — no markdown fences, no prose before or after.
+10. Template id must start with "gap-closing:" followed by the scenario id.
+11. outputShapes must include the shapes from expected_emergence.activity_signature.output_shapes_must_include.
+
+### MANDATORY TEMPLATE STRUCTURE — use EXACTLY 4 tasks in this order
+
+Your template MUST have exactly these 4 tasks and no others:
+
+TASK 1 - read_scenario (fs_read):
+  config: { "type": "fs_read", "path": "/workspace/validation/failure-modes/scenarios/<scenario_id>.json" }
+  Replace <scenario_id> with the actual scenario_id from the failure-mode scenario above.
+
+TASK 2 - fetch_traces (http_fetch):
+  config: { "type": "http_fetch", "url": "http://127.0.0.1:8080/v2/activities/execution-traces?limit=20", "method": "GET" }
+  This is the ONLY valid URL for execution traces. Do NOT invent other URLs.
+
+TASK 3 - analyze (llm_completion_dispatch):
+  config: {
+    "type": "llm_completion_dispatch",
+    "prompt": "Scenario: {{read_scenario_content}}\n\nRecent traces: {{fetch_traces_content}}\n\nAnalyze the failure mode described in the scenario against the recent traces. Produce a JSON report addressing the gap: {\"<output_shape_name>\": \"<your analysis>\"}",
+    "model": "anthropic/claude-haiku-4-5-20251001",
+    "max_tokens": 1000
+  }
+  Replace <output_shape_name> with the first shape from expected_emergence.activity_signature.output_shapes_must_include.
+
+TASK 4 - write_report (fs_write):
+  config: { "type": "fs_write", "path": "/workspace/proposals/<scenario_id>-report.json", "content": "{{analyze_text}}" }
+  Replace <scenario_id> with the actual scenario id.
 
 Respond with the JSON template only.`;
 
@@ -160,14 +153,23 @@ export const DRAFT_GAP_CLOSING_ACTIVITY_TEMPLATE: ActivityTemplate = {
     {
       id: "prime_substrate_concepts",
       description:
-        "Query concept-db for the substrate's accumulated impulse-signature concepts " +
-        "ranked by Bayesian relevance. The drafted template's LLM call uses these as priors. " +
+        "Query concept-db for the substrate's accumulated concepts ranked by Bayesian " +
+        "relevance — both bridge-auto-minted impulse_signature concepts AND " +
+        "hand-minted operator/audit/skill concepts (memo for findings + " +
+        "vessel_construction_pattern + impulse_activity_pattern for constitutional knowledge). " +
+        "The drafted template's LLM call uses these as priors. " +
         "Failure is non-fatal — concept-db being empty or unreachable just means the LLM " +
-        "drafts without the substrate's memory as context.",
+        "drafts without the substrate's memory as context. " +
+        "F26 (2026-05-30): source_type filter expanded from impulse_signature-only to " +
+        "comma-separated multi-source-type, closing the gap where operator-minted concepts " +
+        "(source_type=memo) were structurally invisible to the substrate's autonomous loop.",
       resolver: "http_fetch",
       config: {
         type: "http_fetch",
-        url: "http://127.0.0.1:8260/concepts/search?source_type=impulse_signature&min_relevance=0.3&limit=15",
+        url:
+          "http://127.0.0.1:8260/concepts/search" +
+          "?source_type=impulse_signature,memo,vessel_construction_pattern,impulse_activity_pattern" +
+          "&min_relevance=0.3&limit=15",
         method: "GET",
         timeoutMs: 5000,
       },

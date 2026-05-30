@@ -16,6 +16,8 @@ import { SUBSTRATE_HEALTH_TICK_TEMPLATE } from "./substrate-health-tick.js";
 import { HARNESS_RUN_MATRIX_TEMPLATE } from "./harness-run-matrix.js";
 import { TRY_DIRECT_ANSWER_TEMPLATE } from "./try-direct-answer.js";
 import { CLOSE_HEALTH_GAP_TEMPLATE } from "./close-health-gap.js";
+import { DRAIN_PENDING_SUBSTRATE_GAPS_TEMPLATE } from "./drain-pending-substrate-gaps.js";
+import { DRAFT_SPEC_FROM_GAP_TEMPLATE } from "./draft-spec-from-gap.js";
 
 export { SHIP_CHANGE_TEMPLATE } from "./ship-change.js";
 export { BRANCH_HEALTH_TEMPLATE } from "./branch-health.js";
@@ -34,6 +36,8 @@ export { SUBSTRATE_HEALTH_TICK_TEMPLATE } from "./substrate-health-tick.js";
 export { HARNESS_RUN_MATRIX_TEMPLATE } from "./harness-run-matrix.js";
 export { TRY_DIRECT_ANSWER_TEMPLATE } from "./try-direct-answer.js";
 export { CLOSE_HEALTH_GAP_TEMPLATE } from "./close-health-gap.js";
+export { DRAIN_PENDING_SUBSTRATE_GAPS_TEMPLATE } from "./drain-pending-substrate-gaps.js";
+export { DRAFT_SPEC_FROM_GAP_TEMPLATE } from "./draft-spec-from-gap.js";
 
 export const SEED_TEMPLATES: ActivityTemplate[] = [
   SHIP_CHANGE_TEMPLATE,
@@ -57,4 +61,8 @@ export const SEED_TEMPLATES: ActivityTemplate[] = [
   TRY_DIRECT_ANSWER_TEMPLATE,
   // self-healing: closes diagnostic→action loop for confidence gap (2026-05-28)
   CLOSE_HEALTH_GAP_TEMPLATE,
+  // gap-drain: wires substrateGap impulses to draft-gap-closing-activity (2026-05-30)
+  DRAIN_PENDING_SUBSTRATE_GAPS_TEMPLATE,
+  // substrate-authored openspec changes (Unlock C, 2026-05-30)
+  DRAFT_SPEC_FROM_GAP_TEMPLATE,
 ];

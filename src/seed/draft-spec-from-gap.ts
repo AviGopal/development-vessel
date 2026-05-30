@@ -142,7 +142,7 @@ export const DRAFT_SPEC_FROM_GAP_TEMPLATE: ActivityTemplate = {
       resolver: "fs_read",
       config: {
         type: "fs_read",
-        path: "openspec/changes/2026-05-22-failure-mode-autonomous-loop/proposal.md",
+        path: "/workspace/openspec/changes/2026-05-22-failure-mode-autonomous-loop/proposal.md",
       },
       outputShapes: ["openspecProposalExemplar"],
     },
@@ -152,7 +152,7 @@ export const DRAFT_SPEC_FROM_GAP_TEMPLATE: ActivityTemplate = {
       resolver: "fs_read",
       config: {
         type: "fs_read",
-        path: "openspec/changes/2026-05-22-failure-mode-autonomous-loop/tasks.md",
+        path: "/workspace/openspec/changes/2026-05-22-failure-mode-autonomous-loop/tasks.md",
       },
       outputShapes: ["openspecTasksExemplar"],
     },
@@ -214,7 +214,7 @@ export const DRAFT_SPEC_FROM_GAP_TEMPLATE: ActivityTemplate = {
       resolver: "fs_write",
       config: {
         type: "fs_write",
-        path: "openspec/changes/{{date}}-substrate-authored-{{extract_slug_value}}/proposal.md",
+        path: "/workspace/openspec/changes/{{date}}-substrate-authored-{{extract_slug_value}}/proposal.md",
         content: "{{extract_proposal_md_value}}",
         createDirs: true,
       },
@@ -226,7 +226,7 @@ export const DRAFT_SPEC_FROM_GAP_TEMPLATE: ActivityTemplate = {
       resolver: "fs_write",
       config: {
         type: "fs_write",
-        path: "openspec/changes/{{date}}-substrate-authored-{{extract_slug_value}}/tasks.md",
+        path: "/workspace/openspec/changes/{{date}}-substrate-authored-{{extract_slug_value}}/tasks.md",
         content: "{{extract_tasks_md_value}}",
         createDirs: true,
       },

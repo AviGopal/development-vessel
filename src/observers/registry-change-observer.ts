@@ -321,8 +321,13 @@ export function startRegistryChangeObserver(
       let event: LifecycleEvent;
       try {
         const parsed = JSON.parse(String(ev.data)) as Record<string, unknown>;
-        // activity-api broadcasts "execution_completed"; normalize to the
-        // canonical lifecycle shape so shouldRescore can be event-format-agnostic.
+        // Normalize bus events to canonical lifecycle shape.
+        // Two sources carry execution-succeeded signal:
+        //   1. activity-api trace-writer emits "execution_completed" (legacy path)
+        //   2. BusForwardingEventSink emits "lifecycle.execution.succeeded" (bus path,
+        //      dot-notation per bus-forwarder colon→dot mapping). This is the path
+        //      that makes the bus "draw current" — without this arm, lifecycle.*
+        //      events from the bus were silently discarded (audit inv-077 finding).
         if (parsed["type"] === "execution_completed") {
           const d = (parsed["data"] ?? {}) as Record<string, unknown>;
           event = {
@@ -330,6 +335,15 @@ export function startRegistryChangeObserver(
             activity_template_id: (d["activity_id"] as string | undefined) ?? (d["variant_id"] as string | undefined),
             execution_id: d["execution_id"] as string | undefined,
             output_shapes: d["output_shapes"] as string[] | undefined,
+          };
+        } else if (parsed["type"] === "lifecycle.execution.succeeded") {
+          // Bus-emitted form from BusForwardingEventSink (dot-notation, inverted from colon).
+          const d = (parsed["data"] ?? {}) as Record<string, unknown>;
+          event = {
+            type: "lifecycle:execution:succeeded",
+            activity_template_id: (d["templateId"] as string | undefined) ?? (d["activity_template_id"] as string | undefined),
+            execution_id: (d["executionId"] as string | undefined) ?? (d["execution_id"] as string | undefined),
+            output_shapes: (d["outputShapes"] as string[] | undefined) ?? (d["output_shapes"] as string[] | undefined),
           };
         } else {
           event = parsed as LifecycleEvent;

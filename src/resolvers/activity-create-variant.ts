@@ -91,10 +91,19 @@ export async function resolveActivityCreateVariant(pointer: ActivityCreateVarian
 
   // Mark substrate-authored templates as proposed=true so auto-promote can
   // see them and graduate them after sufficient empirical evidence accumulates.
-  // Without this flag, auto-promote's candidate scan returns 0 and the
+  // WITHOUT this flag, auto-promote's candidate scan returns 0 and the
   // substrate never promotes its own authored templates.
+  //
+  // EXCEPTION: if the template already has proposed=false (operator-seeded
+  // templates pass through cli.ts → resolveActivityCreateVariant), respect
+  // that. Only apply proposed=true when proposed is absent or already true.
+  // This prevents seed-templates (ExecStartPost on every dev-vessel restart)
+  // from resetting all seed templates to proposed=true via this resolver.
   if (templateObj && typeof templateObj === "object") {
-    (templateObj as Record<string, unknown>)["proposed"] = true;
+    const t = templateObj as Record<string, unknown>;
+    if (t["proposed"] !== false) {
+      t["proposed"] = true;
+    }
   }
 
   const body = pointer.parentTemplateId

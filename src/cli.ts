@@ -18,9 +18,15 @@ async function seedTemplates(): Promise<void> {
   const results: Array<{ name: string; variantId: string }> = [];
   for (const template of SEED_TEMPLATES) {
     try {
+      // Seed templates are operator-authored starting points — always active (proposed=false).
+      // Pass the template with proposed=false explicitly so ExecStartPost restarts don't
+      // reset all seed templates to proposed=true via the substrate-authoring path.
+      const seedTemplate = typeof template === "object" && template !== null
+        ? { ...(template as Record<string, unknown>), proposed: false }
+        : template;
       const result = await resolveActivityCreateVariant({
         type: "activity_create_variant",
-        template,
+        template: seedTemplate,
       });
       const variantId = (result.body as { variantId: string }).variantId;
       results.push({ name: (template as { name?: string }).name ?? template.id, variantId });

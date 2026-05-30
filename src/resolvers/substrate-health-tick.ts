@@ -229,14 +229,21 @@ export async function resolveSubstrateHealthTick(
   // penalising legitimate deploy events.
   const stabilityWindowSecs = 60 * 60; // 60 minutes — matches the boredom cycle's natural authoring cadence
   const stabilitySince = new Date(Date.now() - stabilityWindowSecs * 1000).toISOString();
-  // Exclude development-vessel seed templates from the "new" count — they are
-  // re-upserted with fresh created_at on every development-vessel restart, which
-  // would falsely signal instability after any operator deploy action.
-  // Stability should only flag ribosome-extracted or improviser-generated templates.
-  const recentTemplates = templates.filter(
-    t => t.created_at && t.created_at >= stabilitySince &&
-      !t.id.includes("development-vessel:")
-  );
+  // Exclude from "new" count:
+  // 1. development-vessel: seed templates — re-upserted with fresh created_at on every
+  //    dev-vessel restart, which would falsely signal instability after any deploy.
+  // 2. gap-closing: substrate-authored variants — these are the OUTPUT of the autonomous
+  //    authoring loop (draft-gap-closing-activity). Adding 1-3 of these per hour is the
+  //    substrate working correctly, not instability. Stability should flag ribosome-extracted
+  //    or improviser-generated templates that appear unexpectedly.
+  const normId = (id: string) => id.replace(/^activity:⟨(.+)⟩$/, "$1");
+  const recentTemplates = templates.filter(t => {
+    if (!t.created_at || t.created_at < stabilitySince) return false;
+    const clean = normId(t.id);
+    if (clean.startsWith("development-vessel:")) return false;
+    if (clean.startsWith("gap-closing:")) return false;
+    return true;
+  });
   const new_templates_added = recentTemplates.length;
   const template_count_at_window_start = templates.length - recentTemplates.length;
   const template_count_at_window_end = templates.length;

@@ -378,10 +378,10 @@ export const DRAFT_GAP_CLOSING_ACTIVITY_TEMPLATE: ActivityTemplate = {
           pointer: {
             type: "concept_create_write",
             conceptData: {
-              shape: "{{extract_learning_shape_value}}",
+              shape: "{{extract_learning_shape_text}}",
               source_type: "extracted",
-              summary: "{{extract_learning_summary_value}}",
-              content: "{{extract_learning_content_value}}",
+              summary: "{{extract_learning_summary_text}}",
+              content: "{{extract_learning_content_text}}",
               priority: 0.5,
               budget: 2000,
               pointer: {

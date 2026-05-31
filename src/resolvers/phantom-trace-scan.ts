@@ -58,11 +58,35 @@ export interface PhantomTraceScanPointer {
   dry_run?: boolean;
   /** Cap on emitted gaps per invocation. Default 50. */
   maxEmits?: number;
+  /**
+   * Exclude meta-templates that legitimately have task_count=0
+   * (validator-dispatch, slot-binding, create-shape-provider-goal).
+   * Default true. These templates are framework-level routing wrappers,
+   * not user activities — their task_count=0 is expected behavior, not
+   * a phantom-success bug. Emitting gaps for them clogs the drain pipeline
+   * with 36+ false positives per scan window.
+   */
+  exclude_meta_templates?: boolean;
 }
 
 const DEFAULT_LIMIT = 200;
 const DEFAULT_MAX_EMITS = 50;
 const DEFAULT_DEV_VESSEL_URL = "http://127.0.0.1:8090/v2/impulses/resolve";
+
+/**
+ * Templates that legitimately have task_count=0 because they're framework-level
+ * routing wrappers — not phantom-success bugs. Includes the activity:⟨...⟩
+ * wrapping variants emitted by some recorders.
+ */
+const META_TEMPLATE_PATTERNS = [
+  "validator-dispatch",
+  "slot-binding",
+  "create-shape-provider-goal",
+];
+
+function isMetaTemplate(templateId: string): boolean {
+  return META_TEMPLATE_PATTERNS.some((p) => templateId.includes(p));
+}
 
 interface TraceRow {
   id?: unknown;
@@ -236,6 +260,13 @@ export async function resolvePhantomTraceScan(
     void taskCount;
 
     const templateId = extractTemplateId(t);
+    // Exclude meta-templates that legitimately have task_count=0.
+    // validator-dispatch, slot-binding, create-shape-provider-goal are
+    // framework wrappers — their task_count=0 is expected, not a bug.
+    if ((pointer.exclude_meta_templates ?? true) && isMetaTemplate(templateId)) {
+      falsePositiveCount += 1;
+      continue;
+    }
     const durationMs = typeof t.duration_ms === "number" ? t.duration_ms : null;
     phantoms.push({
       exec_id: execId,

@@ -66,7 +66,9 @@ function stripActivityWrap(id: string): string {
 export async function resolveTraceFailurePatternReport(
   pointer: TraceFailurePatternReportPointer,
 ): Promise<ResolverResult> {
-  const limit = pointer.limit ?? 200;
+  // Default 50 (was 200) to reduce activity-api / SurrealDB scan pressure.
+  // Caller can opt into larger windows explicitly when ad-hoc auditing.
+  const limit = pointer.limit ?? 50;
   const minOccurrences = pointer.min_occurrences ?? 3;
   const excludeMeta = pointer.exclude_meta ?? true;
 

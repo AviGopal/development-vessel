@@ -70,8 +70,35 @@ export interface PhantomTraceScanPointer {
   exclude_meta_templates?: boolean;
 }
 
-const DEFAULT_LIMIT = 200;
+// DEFAULT_LIMIT was 200, reduced to 25 (2026-05-31, iter-086).
+// Per-candidate confirmation does a single-trace GET (UNION across
+// activity_execution_traces + execution_trace_content). At limit=200 with
+// boredom firing every 5min, this generated 2400 single-trace queries/hr
+// against SurrealDB, pegging CPU at 1315% and consuming 15.8TB block I/O
+// in a 7hr window. limit=25 caps amplification to ~300 queries/hr while
+// still surfacing recent phantoms. Real fix is activity-api computing
+// task_count via UNION at LIST time so confirmation isn't needed.
+const DEFAULT_LIMIT = 25;
 const DEFAULT_MAX_EMITS = 50;
+
+// Confirmation cache — avoid re-fetching the same exec_id within the window.
+// Cleared on resolver-process restart; sufficient since scan invocations are
+// minutes apart and each scan window overlaps with the previous one.
+const confirmCache = new Map<string, number>();
+const CONFIRM_TTL_MS = 30 * 60 * 1000; // 30 min
+
+function cacheCheck(execId: string): boolean {
+  const ts = confirmCache.get(execId);
+  if (ts === undefined) return false;
+  if (Date.now() - ts > CONFIRM_TTL_MS) {
+    confirmCache.delete(execId);
+    return false;
+  }
+  return true;
+}
+function cacheSet(execId: string): void {
+  confirmCache.set(execId, Date.now());
+}
 const DEFAULT_DEV_VESSEL_URL = "http://127.0.0.1:8090/v2/impulses/resolve";
 
 // Meta-template exclusion lives in src/lib/meta-templates.ts; see import above.
@@ -201,6 +228,8 @@ export async function resolvePhantomTraceScan(
   let successCount = 0;
   let falsePositiveCount = 0;
   let confirmErrorCount = 0;
+  let metaSkipCount = 0;
+  let cacheHitCount = 0;
   for (const t of traces) {
     const { phantom, taskCount } = isPhantom(t);
     const status = typeof t.status === "string" ? t.status : "";
@@ -208,6 +237,28 @@ export async function resolvePhantomTraceScan(
     if (!phantom) continue;
     const execId = extractExecId(t);
     if (execId === null) continue;
+
+    // ── Pre-confirmation filters (iter-086, 2026-05-31) ────────────────────
+    // Skip the expensive single-trace UNION GET when we already know the
+    // candidate will be discarded. Meta-template + cache check catch ~75%
+    // of candidates in the steady-state scan.
+
+    // (a) Meta-template short-circuit: framework wrappers (validator-dispatch,
+    //     slot-binding, create-shape-provider-goal) legitimately have task_count=0
+    //     and are filtered out post-confirmation anyway. Filter HERE to save the
+    //     GET. Default true matches the post-confirmation behavior.
+    const earlyTemplateId = extractTemplateId(t);
+    if ((pointer.exclude_meta_templates ?? true) && isMetaTemplate(earlyTemplateId)) {
+      metaSkipCount += 1;
+      continue;
+    }
+    // (b) Cache: avoid re-confirming the same exec_id within the TTL window.
+    //     A trace observed phantom in the prior scan stays phantom — we don't
+    //     need to keep re-paying the UNION cost.
+    if (cacheCheck(execId)) {
+      cacheHitCount += 1;
+      continue;
+    }
 
     // Confirm against single-trace endpoint (which reads execution_trace_content).
     const baseUrl = pointer.tracesUrl
@@ -243,18 +294,17 @@ export async function resolvePhantomTraceScan(
     }
     if (confirmedTaskCount !== 0) {
       falsePositiveCount += 1;
+      // Cache the confirmed-healthy result — same exec_id won't be re-confirmed
+      // within the TTL window. This is the high-value cache entry: a healthy
+      // multi-task trace that LIST reports as task_count=0 (migration-118
+      // artifact) but single-trace UNION proves real.
+      cacheSet(execId);
       continue;
     }
     void taskCount;
 
-    const templateId = extractTemplateId(t);
-    // Exclude meta-templates that legitimately have task_count=0.
-    // validator-dispatch, slot-binding, create-shape-provider-goal are
-    // framework wrappers — their task_count=0 is expected, not a bug.
-    if ((pointer.exclude_meta_templates ?? true) && isMetaTemplate(templateId)) {
-      falsePositiveCount += 1;
-      continue;
-    }
+    // earlyTemplateId already extracted + meta-checked above; no need to repeat.
+    const templateId = earlyTemplateId;
     const durationMs = typeof t.duration_ms === "number" ? t.duration_ms : null;
     phantoms.push({
       exec_id: execId,
@@ -332,7 +382,10 @@ export async function resolvePhantomTraceScan(
       phantoms_detected: phantoms.length,
       phantoms_posted: phantoms.filter((p) => p.posted).length,
       list_candidates_rejected_after_confirm: falsePositiveCount,
+      list_candidates_skipped_meta: metaSkipCount,
+      list_candidates_skipped_cache: cacheHitCount,
       confirm_errors: confirmErrorCount,
+      confirm_cache_size: confirmCache.size,
       dry_run: dryRun,
       phantom_entries: phantoms,
       completed_at: new Date().toISOString(),

@@ -1,4 +1,5 @@
 import { METABOB_ENDPOINT, METABOB_API_KEY } from "../config.js";
+import { isMetaTemplate } from "../lib/meta-templates.js";
 import type { ResolverResult } from "./types.js";
 
 /**
@@ -73,20 +74,7 @@ const DEFAULT_LIMIT = 200;
 const DEFAULT_MAX_EMITS = 50;
 const DEFAULT_DEV_VESSEL_URL = "http://127.0.0.1:8090/v2/impulses/resolve";
 
-/**
- * Templates that legitimately have task_count=0 because they're framework-level
- * routing wrappers — not phantom-success bugs. Includes the activity:⟨...⟩
- * wrapping variants emitted by some recorders.
- */
-const META_TEMPLATE_PATTERNS = [
-  "validator-dispatch",
-  "slot-binding",
-  "create-shape-provider-goal",
-];
-
-function isMetaTemplate(templateId: string): boolean {
-  return META_TEMPLATE_PATTERNS.some((p) => templateId.includes(p));
-}
+// Meta-template exclusion lives in src/lib/meta-templates.ts; see import above.
 
 interface TraceRow {
   id?: unknown;

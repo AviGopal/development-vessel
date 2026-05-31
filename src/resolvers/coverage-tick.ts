@@ -1,4 +1,5 @@
 import { METABOB_ENDPOINT, METABOB_API_KEY } from "../config.js";
+import { META_TEMPLATE_IDS, normalizeTemplateId, isMetaTemplate } from "../lib/meta-templates.js";
 import type { ResolverResult } from "./types.js";
 
 export interface CoverageTickPointer {
@@ -45,21 +46,9 @@ interface CellCounts {
 // learning. Their executions dominate the trace corpus (~85% per investigation-048
 // F-118) but don't represent topology discovery. Excluded from learned-shape counts
 // to keep the coverage signal substantive rather than gameable by trace volume.
-const META_ACTIVITY_TEMPLATE_IDS = new Set<string>([
-  "validator-dispatch",
-  "slot-binding",
-  "create-shape-provider-goal",
-]);
-
-function normalizeTemplateId(rawId: string): string {
-  return rawId.replace(/^activity:⟨(.+)⟩$/, "$1");
-}
-
-function isMetaActivity(activityId: string | undefined): boolean {
-  if (!activityId) return false;
-  const cleanId = normalizeTemplateId(activityId);
-  return META_ACTIVITY_TEMPLATE_IDS.has(cleanId);
-}
+// Source of truth: src/lib/meta-templates.ts (also used by phantom_trace_scan and
+// trace_failure_pattern_report).
+const isMetaActivity = isMetaTemplate;
 
 async function computeCountsForWindow(
   since: string,
@@ -291,7 +280,7 @@ export async function resolveCoverageTick(
       total_unlearned_unique,
       coverage_fraction,
       recent_new_shapes_introduced: recent_new_shapes_total,
-      meta_activities_excluded: [...META_ACTIVITY_TEMPLATE_IDS],
+      meta_activities_excluded: [...META_TEMPLATE_IDS],
     },
   };
 }

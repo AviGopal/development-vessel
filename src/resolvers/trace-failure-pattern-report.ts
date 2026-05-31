@@ -1,4 +1,5 @@
 import { METABOB_ENDPOINT, METABOB_API_KEY } from "../config.js";
+import { isMetaTemplate } from "../lib/meta-templates.js";
 import type { ResolverResult } from "./types.js";
 
 export interface TraceFailurePatternReportPointer {
@@ -39,10 +40,10 @@ interface FailurePattern {
   failure_mode_types: string[];
 }
 
-const META_TEMPLATES = new Set([
-  "validator-dispatch",
-  "slot-binding",
-  "create-shape-provider-goal",
+// Failure-pattern reporting excludes the framework wrappers (via isMetaTemplate
+// from src/lib/meta-templates.ts) AND additionally excludes substrate diagnostic
+// templates that fail in ways the health loop should handle separately.
+const DIAGNOSTIC_TEMPLATE_IDS: ReadonlySet<string> = new Set([
   "development-vessel:substrate-health-tick",
   "development-vessel:coverage-tick",
 ]);
@@ -95,7 +96,7 @@ export async function resolveTraceFailurePatternReport(
     if (tr.status !== "failure") continue;
     totalFailures++;
     const templateId = stripActivityWrap(tr.activity_id ?? "?");
-    if (excludeMeta && META_TEMPLATES.has(templateId)) continue;
+    if (excludeMeta && (isMetaTemplate(templateId) || DIAGNOSTIC_TEMPLATE_IDS.has(templateId))) continue;
 
     const tasks = tr.tasks ?? [];
     const successCount = tasks.filter((t) => t.success === true).length;

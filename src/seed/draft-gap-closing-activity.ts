@@ -256,5 +256,23 @@ export const DRAFT_GAP_CLOSING_ACTIVITY_TEMPLATE: ActivityTemplate = {
       },
       outputShapes: ["activityTemplateVariant"],
     },
+    {
+      id: "verify_outputs",
+      description:
+        "Convergent validity check: cross-reference the produced shapes " +
+        "(activityTemplateProposal + activityTemplateVariant) against concept-db's " +
+        "learned co-occurrence priors. If concept-db expects shapes that are absent, " +
+        "records a divergence verdict in convergentValidityResult. Non-fatal " +
+        "(strict=false) while concept-db edges are still accumulating — the verdict " +
+        "is recorded for observability and Thompson learning without blocking registration.",
+      resolver: "convergent_validity_check",
+      config: {
+        type: "convergent_validity_check",
+        produced_shapes: ["activityTemplateProposal", "activityTemplateVariant"],
+        task_id: "register_variant",
+        strict: false,
+      },
+      outputShapes: ["convergentValidityResult"],
+    },
   ],
 };

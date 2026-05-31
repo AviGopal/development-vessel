@@ -20,6 +20,9 @@ import { DRAIN_PENDING_SUBSTRATE_GAPS_TEMPLATE } from "./drain-pending-substrate
 import { DRAFT_SPEC_FROM_GAP_TEMPLATE } from "./draft-spec-from-gap.js";
 import { INGEST_DOC_AS_CONCEPTS_TEMPLATE } from "./ingest-doc-as-concepts.js";
 import { DETECT_STALE_POINTER_TEMPLATE } from "./detect-stale-pointer.js";
+import { DETECT_PHANTOM_SUCCESS_TRACE_TEMPLATE } from "./detect-phantom-success-trace.js";
+import { DETECT_PRECONDITION_REJECTION_TEMPLATE } from "./detect-precondition-rejection.js";
+import { AUDIT_DISPATCH_TARGET_DRIFT_TEMPLATE } from "./audit-dispatch-target-drift.js";
 import { INGEST_AUDIT_FINDINGS_TEMPLATE } from "./ingest-audit-findings.js";
 
 export { SHIP_CHANGE_TEMPLATE } from "./ship-change.js";
@@ -43,6 +46,9 @@ export { DRAIN_PENDING_SUBSTRATE_GAPS_TEMPLATE } from "./drain-pending-substrate
 export { DRAFT_SPEC_FROM_GAP_TEMPLATE } from "./draft-spec-from-gap.js";
 export { INGEST_DOC_AS_CONCEPTS_TEMPLATE } from "./ingest-doc-as-concepts.js";
 export { DETECT_STALE_POINTER_TEMPLATE } from "./detect-stale-pointer.js";
+export { DETECT_PHANTOM_SUCCESS_TRACE_TEMPLATE } from "./detect-phantom-success-trace.js";
+export { DETECT_PRECONDITION_REJECTION_TEMPLATE } from "./detect-precondition-rejection.js";
+export { AUDIT_DISPATCH_TARGET_DRIFT_TEMPLATE } from "./audit-dispatch-target-drift.js";
 export { INGEST_AUDIT_FINDINGS_TEMPLATE } from "./ingest-audit-findings.js";
 
 export const SEED_TEMPLATES: ActivityTemplate[] = [
@@ -74,6 +80,19 @@ export const SEED_TEMPLATES: ActivityTemplate[] = [
   // doc-ingestion + concept management (2026-05-30)
   INGEST_DOC_AS_CONCEPTS_TEMPLATE,
   DETECT_STALE_POINTER_TEMPLATE,
+  // substrate self-detection (2026-05-30): author detection templates for
+  // observed bug classes — phantom-success traces (F25) are the first.
+  DETECT_PHANTOM_SUCCESS_TRACE_TEMPLATE,
+  // substrate self-detection (2026-05-30): pre-flight-rejected traces
+  // (status=failure + duration<500ms + task_count=0) — F25 signature.
+  // Complement to detect-phantom-success-trace (which catches status=success
+  // + task_count=0). Same constitutional principle (concept_9ldsmRgqSTd5).
+  DETECT_PRECONDITION_REJECTION_TEMPLATE,
+  // dispatch-target-drift detector (2026-05-30): detection-template-of-detection-
+  // templates — probes trace schema for any target-recording field; if absent
+  // (current state) emits a single instrumentation_gap substrateGap declaring
+  // the chained-prerequisite data shape; if present, emits per-drift gaps.
+  AUDIT_DISPATCH_TARGET_DRIFT_TEMPLATE,
   // audit-ingestion bridge (iter-080, 2026-05-30): reads audit findings → substrateGap impulses
   INGEST_AUDIT_FINDINGS_TEMPLATE,
 ];

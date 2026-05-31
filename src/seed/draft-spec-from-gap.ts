@@ -232,5 +232,102 @@ export const DRAFT_SPEC_FROM_GAP_TEMPLATE: ActivityTemplate = {
       },
       outputShapes: ["specProposal"],
     },
+    {
+      id: "draft_substrate_learning",
+      description:
+        "STRUCTURED LEARNING side-effect (G2 fix, 2026-05-30). Extract a substrate " +
+        "concept describing WHY this gap_class needed an openspec change. Future " +
+        "spec-from-gap runs read these concepts as priors instead of re-deriving " +
+        "the lineage from scratch.",
+      resolver: "llm_completion_dispatch",
+      config: {
+        type: "llm_completion_dispatch",
+        system_prompt:
+          "You are a precise JSON generator. Output only valid JSON with no surrounding text.",
+        prompt:
+          "You just authored an openspec change for gap_class '{{gap_class}}'. Now " +
+          "record what you LEARNED about why this gap_class persists, so future spec " +
+          "drafter runs inherit your reasoning.\n\n" +
+          "## Gap batch you saw\n{{read_gaps_content}}\n\n" +
+          "## Prior concepts you saw\n{{read_priors_content}}\n\n" +
+          "## Required output schema\n" +
+          '{ "shape": "<snake_case_shape, e.g. spec_gap_lineage or openspec_authoring_pattern>",\n' +
+          '  "summary": "<one-line gist <=120 chars>",\n' +
+          '  "content": "<2-4 sentences citing gap_class and any prior concept ids>" }\n\n' +
+          "If trivial, return\n" +
+          '{ "shape": "trivial_gap", "summary": "no substrate learning", "content": "trivial gap_class; no pattern worth recording" }.\n' +
+          "Output ONLY valid JSON.",
+        model: "anthropic/claude-haiku-4-5-20251001",
+        max_tokens: 500,
+      },
+      outputShapes: ["substrateLearningDraft"],
+    },
+    {
+      id: "extract_learning_shape",
+      description: "Extract shape from substrate learning JSON.",
+      resolver: "json_path_extract",
+      config: {
+        type: "json_path_extract",
+        json: "{{draft_substrate_learning_text}}",
+        path: "shape",
+      },
+      outputShapes: ["json_extracted_value"],
+    },
+    {
+      id: "extract_learning_summary",
+      description: "Extract summary from substrate learning JSON.",
+      resolver: "json_path_extract",
+      config: {
+        type: "json_path_extract",
+        json: "{{draft_substrate_learning_text}}",
+        path: "summary",
+      },
+      outputShapes: ["json_extracted_value"],
+    },
+    {
+      id: "extract_learning_content",
+      description: "Extract content from substrate learning JSON.",
+      resolver: "json_path_extract",
+      config: {
+        type: "json_path_extract",
+        json: "{{draft_substrate_learning_text}}",
+        path: "content",
+      },
+      outputShapes: ["json_extracted_value"],
+    },
+    {
+      id: "mint_substrate_learning_concept",
+      description:
+        "G2 fix (2026-05-30): POST concept_create_write to concept-db with the " +
+        "drafted substrate learning. Makes the autonomous palette grant of " +
+        "concept_create_write actually load-bearing.",
+      resolver: "http_fetch",
+      config: {
+        type: "http_fetch",
+        method: "POST",
+        url: "http://127.0.0.1:8260/v2/impulses/resolve",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          pointer: {
+            type: "concept_create_write",
+            conceptData: {
+              shape: "{{extract_learning_shape_value}}",
+              source_type: "extracted",
+              summary: "{{extract_learning_summary_value}}",
+              content: "{{extract_learning_content_value}}",
+              priority: 0.5,
+              budget: 2000,
+              pointer: {
+                type: "memo",
+                path: "/workspace/openspec/changes/{{date}}-substrate-authored-{{extract_slug_value}}/proposal.md",
+                section: "substrate_learning",
+              },
+            },
+          },
+        }),
+        timeoutMs: 5000,
+      },
+      outputShapes: ["substrateLearningConcept"],
+    },
   ],
 };

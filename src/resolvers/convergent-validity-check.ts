@@ -15,12 +15,24 @@ export interface ConvergentValidityCheckPointer {
    */
   min_edge_weight?: number;
   /**
-   * If true, a co-occurrence mismatch fails the check (throws).
-   * If false (default), a mismatch records a warning but passes.
-   * Use strict=true only after concept-db has accumulated enough edges
-   * to make co-occurrence expectations reliable (edge count > 10).
+   * Strict mode controls whether a co-occurrence mismatch throws (fails the
+   * task and records β+=1) or only warns.
+   *
+   * - false (default): mismatch → verdict=warn, task passes. Safe while
+   *   concept-db edges are too thin to be reliable.
+   * - true: mismatch → throws. Use when edge data is dense enough.
+   * - "auto": the resolver decides at execution time based on strong-edge
+   *   count vs auto_strict_threshold. This is the preferred production value
+   *   — the template stays static while behaviour sharpens automatically as
+   *   concept-db accumulates evidence.
    */
-  strict?: boolean;
+  strict?: boolean | "auto";
+  /**
+   * Minimum number of strong co-occurrence edges (weight ≥ min_edge_weight)
+   * in concept-db before "auto" strict mode activates.
+   * Default: 10. Only consulted when strict="auto".
+   */
+  auto_strict_threshold?: number;
 }
 
 interface ConceptEdge {
@@ -40,8 +52,10 @@ export async function resolveConvergentValidityCheck(
     execution_id,
     task_id,
     min_edge_weight = 2,
-    strict = false,
+    auto_strict_threshold = 10,
   } = pointer;
+  // strict is resolved after edges are fetched when mode is "auto"
+  const strictSetting = pointer.strict ?? false;
 
   if (!produced_shapes || produced_shapes.length === 0) {
     return {
@@ -108,13 +122,22 @@ export async function resolveConvergentValidityCheck(
     }
   }
 
-  // ── Evaluate co-occurrence divergence ────────────────────────────────────
-  // Filter edges where at least one side is a produced shape and the
-  // co-occurring partner is NOT in produced_shapes. High-weight edges
-  // represent strong learned expectations; their absence is a divergence.
+  // ── Resolve "auto" strict mode ───────────────────────────────────────────
+  // Count strong edges now that we have the data. "auto" activates strict mode
+  // once concept-db has accumulated enough evidence to be reliable.
   const strongEdges = cooccurrenceEdges.filter(
     (e) => e.weight >= min_edge_weight,
   );
+  let strict: boolean;
+  if (strictSetting === "auto") {
+    strict = conceptDbReachable && strongEdges.length >= auto_strict_threshold;
+  } else {
+    strict = strictSetting;
+  }
+
+  // ── Evaluate co-occurrence divergence ────────────────────────────────────
+  // For edges where one side is a produced shape and the partner is absent,
+  // record the divergence. High-weight edges are the strongest expectations.
   const producedSet = new Set(produced_shapes);
   const missingExpected: Array<{ expected: string; via: string; weight: number }> = [];
 
@@ -144,6 +167,10 @@ export async function resolveConvergentValidityCheck(
   let verdict: "pass" | "warn" | "fail";
   let reason: string;
 
+  const strictMode = strictSetting === "auto"
+    ? (strict ? `auto:activated (${strongEdges.length}>=${auto_strict_threshold} edges)` : `auto:deferred (${strongEdges.length}<${auto_strict_threshold} edges)`)
+    : String(strictSetting);
+
   if (!conceptDbReachable) {
     verdict = "pass";
     reason = "concept-db unreachable — skipping co-occurrence check; no independent signal available";
@@ -157,12 +184,13 @@ export async function resolveConvergentValidityCheck(
       .map((m) => `${m.expected} (via ${m.via}, weight=${m.weight})`)
       .join("; ");
     verdict = strict ? "fail" : "warn";
-    reason = `co-occurrence divergence: ${missingExpected.length} expected co-occurring shape(s) absent — ${topMissing}`;
+    reason = `co-occurrence divergence [strict=${strictMode}]: ${missingExpected.length} expected co-occurring shape(s) absent — ${topMissing}`;
   }
 
   const body = {
     verdict,
     reason,
+    strict_mode: strictMode,
     produced_shapes,
     novel_shapes: novelShapes,
     recognized_shapes: recognizedShapes,
@@ -170,6 +198,7 @@ export async function resolveConvergentValidityCheck(
     missing_expected_cooccurrences: missingExpected,
     concept_db_reachable: conceptDbReachable,
     strong_edges_checked: strongEdges.length,
+    auto_strict_threshold: strictSetting === "auto" ? auto_strict_threshold : undefined,
     execution_id,
     task_id,
     checked_at: new Date().toISOString(),

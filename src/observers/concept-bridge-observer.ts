@@ -126,19 +126,41 @@ export function startConceptBridgeObserver(): void {
       }
       if (event.type !== "task.completed") return;
       const data = event.data;
-      if (!data || data.source !== "vessel_daemon_resolve") return;
+      if (!data) {
+        console.warn("[concept-bridge] task.completed missing data");
+        return;
+      }
+      if (data.source !== "vessel_daemon_resolve") {
+        // Not a vessel-daemon resolve — silently skip but log at debug-cadence
+        // so we can confirm cross-flow events still arrive.
+        return;
+      }
 
       const resolutions = data.impulse_resolutions ?? [];
+      console.log(
+        `[concept-bridge] vessel_daemon_resolve received: ${resolutions.length} resolutions, shapes=[${resolutions.map((r) => r.shape ?? "?").join(",")}], exec=${data.execution_id}`,
+      );
+      let bridged = 0;
       for (const r of resolutions) {
         const shape = r.shape;
         if (!shape || !BRIDGEABLE_SHAPES.has(shape)) continue;
+        bridged++;
         // Fire and forget — never block the WS event loop.
-        recordConceptUsage(shape, r, data).catch((err: unknown) => {
-          console.error(
-            `[concept-bridge] usage record failed for ${shape}:`,
-            err instanceof Error ? err.message : err,
-          );
-        });
+        recordConceptUsage(shape, r, data)
+          .then(() => {
+            console.log(`[concept-bridge] minted/usage recorded shape=${shape} exec=${data.execution_id}`);
+          })
+          .catch((err: unknown) => {
+            console.error(
+              `[concept-bridge] usage record failed for ${shape}:`,
+              err instanceof Error ? err.message : err,
+            );
+          });
+      }
+      if (bridged === 0 && resolutions.length > 0) {
+        console.log(
+          `[concept-bridge] no bridgeable shapes in resolutions: [${resolutions.map((r) => r.shape).join(",")}]`,
+        );
       }
     });
 

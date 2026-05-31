@@ -214,8 +214,8 @@ export const DRAFT_SPEC_FROM_GAP_TEMPLATE: ActivityTemplate = {
       resolver: "fs_write",
       config: {
         type: "fs_write",
-        path: "/workspace/openspec/changes/{{date}}-substrate-authored-{{extract_slug_value}}/proposal.md",
-        content: "{{extract_proposal_md_value}}",
+        path: "/workspace/openspec/changes/{{date}}-substrate-authored-{{extract_slug_text}}/proposal.md",
+        content: "{{extract_proposal_md_text}}",
         createDirs: true,
       },
       outputShapes: ["specProposal"],
@@ -226,8 +226,8 @@ export const DRAFT_SPEC_FROM_GAP_TEMPLATE: ActivityTemplate = {
       resolver: "fs_write",
       config: {
         type: "fs_write",
-        path: "/workspace/openspec/changes/{{date}}-substrate-authored-{{extract_slug_value}}/tasks.md",
-        content: "{{extract_tasks_md_value}}",
+        path: "/workspace/openspec/changes/{{date}}-substrate-authored-{{extract_slug_text}}/tasks.md",
+        content: "{{extract_tasks_md_text}}",
         createDirs: true,
       },
       outputShapes: ["specProposal"],
@@ -311,15 +311,15 @@ export const DRAFT_SPEC_FROM_GAP_TEMPLATE: ActivityTemplate = {
           pointer: {
             type: "concept_create_write",
             conceptData: {
-              shape: "{{extract_learning_shape_value}}",
+              shape: "{{extract_learning_shape_text}}",
               source_type: "extracted",
-              summary: "{{extract_learning_summary_value}}",
-              content: "{{extract_learning_content_value}}",
+              summary: "{{extract_learning_summary_text}}",
+              content: "{{extract_learning_content_text}}",
               priority: 0.5,
               budget: 2000,
               pointer: {
                 type: "memo",
-                path: "/workspace/openspec/changes/{{date}}-substrate-authored-{{extract_slug_value}}/proposal.md",
+                path: "/workspace/openspec/changes/{{date}}-substrate-authored-{{extract_slug_text}}/proposal.md",
                 section: "substrate_learning",
               },
             },

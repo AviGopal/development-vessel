@@ -32,6 +32,7 @@ import { resolveHttpFetch } from "../resolvers/http-fetch.js";
 import { resolveResolverPatternReport } from "../resolvers/resolver-pattern-report.js";
 import { resolveMarkdownSplitSections } from "../resolvers/markdown-split-sections.js";
 import { resolveStalePointerEmit } from "../resolvers/stale-pointer-emit.js";
+import { resolveConvergentValidityCheck } from "../resolvers/convergent-validity-check.js";
 import type { ResolverResult } from "../resolvers/types.js";
 
 type AnyPointer = { type: string } & Record<string, unknown>;
@@ -110,6 +111,8 @@ export async function resolveDispatch(pointer: AnyPointer): Promise<ResolverResu
       return resolveMarkdownSplitSections(p as Parameters<typeof resolveMarkdownSplitSections>[0]);
     case "stale_pointer_emit":
       return resolveStalePointerEmit(p as Parameters<typeof resolveStalePointerEmit>[0]);
+    case "convergent_validity_check":
+      return resolveConvergentValidityCheck(p as Parameters<typeof resolveConvergentValidityCheck>[0]);
     default:
       throw new Error(`unknown shape: ${pointer.type}`);
   }

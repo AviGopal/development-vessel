@@ -85,6 +85,11 @@ export const config = {
       // for missing files. Replaces the prior LLM-heuristic detect-stale-pointer
       // path that overflowed the prompt cap on large concept corpora.
       "stale_pointer_emit",
+      // Convergent validity — independent co-occurrence signal from concept-db.
+      // Activities insert this as an explicit task after high-stakes resolvers
+      // to cross-check that produced shapes match concept-db's learned priors.
+      // Returns convergentValidityResult. Non-fatal by default (strict=false).
+      "convergent_validity_check",
     ] as const,
     resolveEndpoint: "/v2/impulses/resolve",
     resolveRequestFormat: "pointer" as const,

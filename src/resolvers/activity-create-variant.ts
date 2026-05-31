@@ -98,8 +98,10 @@ export async function resolveActivityCreateVariant(pointer: ActivityCreateVarian
     const templateId = String(t["id"] ?? "");
     if (templateId.startsWith("gap-closing:") || (pointer as unknown as Record<string,unknown>)["validate_gap_closing"]) {
       const tasks = Array.isArray(t["tasks"]) ? (t["tasks"] as Record<string, unknown>[]) : [];
-      const ALLOWED_RESOLVERS = new Set(["fs_read","fs_write","llm_completion_dispatch","json_path_extract","http_fetch","noop"]);
-      const JMESPATH_CHARS = /[\[\]\*\?\(\)]/;
+      // json_path_extract removed from ALLOWED — too fragile and the prompt explicitly bans it.
+      // LLM-drafted templates repeatedly use it for object navigation that breaks on schema variance;
+      // observed in fp-12-1780147252079 (15 tasks, fails at task 2 task-extract-output-impulses).
+      const ALLOWED_RESOLVERS = new Set(["fs_read","fs_write","llm_completion_dispatch","http_fetch","noop"]);
       const WORKSPACE_PREFIX = "/workspace/";
       const VALID_HTTP_HOSTS = ["127.0.0.1:8080","127.0.0.1:8090","127.0.0.1:8260","127.0.0.1:8270","127.0.0.1:8100","127.0.0.1:8210"];
 
@@ -110,19 +112,8 @@ export async function resolveActivityCreateVariant(pointer: ActivityCreateVarian
         if (!ALLOWED_RESOLVERS.has(resolver)) {
           return { shape: "structuredError", body: {
             resolver: "activity_create_variant", failure_mode: "validation_rejected",
-            detail: `Task '${task["id"]}' uses disallowed resolver '${resolver}'. Allowed: ${[...ALLOWED_RESOLVERS].join(",")}`,
+            detail: `Task '${task["id"]}' uses disallowed resolver '${resolver}'. Allowed: ${[...ALLOWED_RESOLVERS].join(",")}. Use llm_completion_dispatch to process JSON.`,
           }};
-        }
-
-        // json_path_extract: block JMESPath syntax
-        if (resolver === "json_path_extract") {
-          const path = String(cfg["path"] ?? "");
-          if (JMESPATH_CHARS.test(path)) {
-            return { shape: "structuredError", body: {
-              resolver: "activity_create_variant", failure_mode: "validation_rejected",
-              detail: `Task '${task["id"]}' json_path_extract uses JMESPath chars in path '${path}'. Use simple dot notation only.`,
-            }};
-          }
         }
 
         // fs_read: block non-workspace absolute paths

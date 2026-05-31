@@ -21,10 +21,15 @@ export interface LoadAttributionRecord {
   template_id?: string;
   /** Wall-clock duration of the goal from dispatch to terminal status, ms. */
   duration_ms: number;
-  /** Cumulative cpu.stat usage_usec at sample time. */
-  cpu_usec_before: number;
-  cpu_usec_after: number;
-  cpu_usec_delta: number;
+  /**
+   * Cumulative cpu.stat usage_usec at sample time. Nullable because sampleLoad
+   * may fail under stress (dev-vessel timeout); null markers preserve the
+   * substrate's ability to filter unreliable records rather than corrupting
+   * the signal with fabricated zero-deltas.
+   */
+  cpu_usec_before: number | null;
+  cpu_usec_after: number | null;
+  cpu_usec_delta: number | null;
   /** Cumulative memory.current bytes at sample time. */
   mem_bytes_before: number | null;
   mem_bytes_after: number | null;
@@ -33,6 +38,12 @@ export interface LoadAttributionRecord {
   load_1m_before: number | null;
   load_1m_after: number | null;
   load_1m_delta: number | null;
+  /**
+   * Sample quality marker. Aggregation should filter on this — only
+   * "both_present" records can compute valid deltas; others are kept for
+   * forensics but excluded from spike attribution.
+   */
+  sample_quality?: "both_present" | "before_missing" | "after_missing" | "both_missing";
   /** Goal-host returned status (completed | failed | etc). */
   goal_status?: string;
   /** ISO timestamp of the dispatch start. */

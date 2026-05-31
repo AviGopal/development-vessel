@@ -60,13 +60,23 @@ export async function resolveLoadAttributionReport(
 
   const raw = await resolveLoadAttribution({ type: "loadAttribution", limit });
   const body = raw.body as { records?: Array<Record<string, unknown>> };
-  const records = (body.records ?? []) as unknown as Array<{
+  const allRecords = (body.records ?? []) as unknown as Array<{
     dispatch_id: string;
     template_id?: string;
     duration_ms: number;
-    cpu_usec_delta: number;
+    cpu_usec_delta: number | null;
     load_1m_delta: number | null;
+    sample_quality?: string;
   }>;
+
+  // Filter: only "both_present" records have valid deltas. Older records
+  // without sample_quality fall back to the cpu_usec_delta-not-null check
+  // (backward compatible with pre-quality-marker records).
+  const records = allRecords.filter((r) => {
+    if (r.sample_quality !== undefined) return r.sample_quality === "both_present";
+    return r.cpu_usec_delta !== null && r.cpu_usec_delta !== undefined;
+  });
+  const skipped_unreliable = allRecords.length - records.length;
 
   // Group by template_id (skip records without one — typically free-text goals).
   const groups = new Map<string, typeof records>();
@@ -80,7 +90,11 @@ export async function resolveLoadAttributionReport(
   const aggregates: TemplateAggregate[] = [];
   for (const [template_id, group] of groups.entries()) {
     if (group.length < minInvocations) continue;
-    const cpuDeltas = group.map((r) => r.cpu_usec_delta);
+    // cpu_usec_delta is non-null in this branch — filter step above already
+    // ensured sample_quality === "both_present".
+    const cpuDeltas = group
+      .map((r) => r.cpu_usec_delta)
+      .filter((v): v is number => v !== null);
     const durations = group.map((r) => r.duration_ms);
     const loadDeltas = group
       .map((r) => r.load_1m_delta)
@@ -110,6 +124,7 @@ export async function resolveLoadAttributionReport(
     shape: "loadAttributionReport",
     body: {
       records_examined: records.length,
+      records_skipped_unreliable: skipped_unreliable,
       templates_aggregated: aggregates.length,
       spiking_template_count: spiking.length,
       cpu_delta_threshold: cpuThreshold,

@@ -35,6 +35,9 @@ import { resolveStalePointerEmit } from "../resolvers/stale-pointer-emit.js";
 import { resolvePhantomTraceScan } from "../resolvers/phantom-trace-scan.js";
 import { resolveConvergentValidityCheck } from "../resolvers/convergent-validity-check.js";
 import { resolveTraceFailurePatternReport } from "../resolvers/trace-failure-pattern-report.js";
+import { resolveSystemLoadReport } from "../resolvers/system-load-report.js";
+import { resolveLoadAttribution, resolveLoadAttributionWrite } from "../resolvers/load-attribution.js";
+import { resolveLoadAttributionReport } from "../resolvers/load-attribution-report.js";
 import { resolvePreconditionRejectionScan } from "../resolvers/precondition-rejection-scan.js";
 import { resolveDispatchTargetDriftScan } from "../resolvers/dispatch-target-drift-scan.js";
 import type { ResolverResult } from "../resolvers/types.js";
@@ -121,6 +124,14 @@ export async function resolveDispatch(pointer: AnyPointer): Promise<ResolverResu
       return resolveConvergentValidityCheck(p as Parameters<typeof resolveConvergentValidityCheck>[0]);
     case "trace_failure_pattern_report":
       return resolveTraceFailurePatternReport(p as Parameters<typeof resolveTraceFailurePatternReport>[0]);
+    case "system_load_report":
+      return resolveSystemLoadReport(p as Parameters<typeof resolveSystemLoadReport>[0]);
+    case "loadAttribution":
+      return resolveLoadAttribution(p as Parameters<typeof resolveLoadAttribution>[0]);
+    case "loadAttribution_write":
+      return resolveLoadAttributionWrite(p as Parameters<typeof resolveLoadAttributionWrite>[0]);
+    case "load_attribution_report":
+      return resolveLoadAttributionReport(p as Parameters<typeof resolveLoadAttributionReport>[0]);
     case "dispatch_target_drift_scan":
       return resolveDispatchTargetDriftScan(p as Parameters<typeof resolveDispatchTargetDriftScan>[0]);
     case "precondition_rejection_scan":

@@ -102,6 +102,25 @@ export const config = {
       // activities that mint substrateGap impulses — the substrate detects its
       // own systematic failures rather than waiting for the operator to read traces.
       "trace_failure_pattern_report",
+      // Substrate self-observation of resource state (iter-087, 2026-05-31):
+      // reads /proc/loadavg, /proc/meminfo, /sys/fs/cgroup/cpu.stat from inside
+      // the container. Without this, resource pathologies (the iter-086 1315%
+      // CPU spin) are invisible to the substrate — the detection family queries
+      // activity-api/SurrealDB which are the layer pegged by the pathology.
+      // Activities compose this with substrateGap_write to detect amplification
+      // cascades autonomously.
+      "system_load_report",
+      // Per-execution load attribution (iter-088, 2026-05-31): boredom-vessel
+      // samples system_load_report before/after each goal dispatch and writes
+      // one loadAttribution record per dispatch with cpu_usec_delta and
+      // mem_bytes_delta. load_attribution_report aggregates by template_id and
+      // surfaces spiking templates (≥50% of invocations exceeding cpu threshold)
+      // — same group-by-template pattern as trace_failure_pattern_report,
+      // applied to resource consumption. Implements
+      // concept_QCBqcPjQbdF_ (delta_observation_causal_attribution).
+      "loadAttribution",
+      "loadAttribution_write",
+      "load_attribution_report",
       // Substrate-self-detection (companion to phantom_trace_scan):
       // scans recent execution traces for the pre-flight rejection signature
       // (status=failure + duration<500ms + task_count=0 — the F25 pattern,

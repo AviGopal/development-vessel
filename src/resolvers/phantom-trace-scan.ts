@@ -12,6 +12,16 @@ import type { ResolverResult } from "./types.js";
  * because the trace-write path credits success without a real positive
  * signal.
  *
+ * IMPORTANT (2026-05-31): activity-api migration 118 moved `tasks` out of
+ * `activity_execution_traces` into the separate `execution_trace_content`
+ * table. The LIST endpoint computes task_count via array::len(tasks ?? [])
+ * on AET only — which now returns 0 for EVERY post-migration trace,
+ * including healthy multi-task executions. To avoid emitting false-positive
+ * gaps (≥493/500 traces look phantom in the list), this resolver now
+ * confirms each candidate by GET-ing /v2/activities/execution-traces/{id}
+ * (which unions execution_trace_content) and only emits when the
+ * authoritative task count is truly 0.
+ *
  * Why one resolver does the whole flow (mirrors stale_pointer_emit):
  *   - the prior 5-task design would itself be vulnerable to the F25 abort
  *     pattern (multi-task template + downstream LLM-shaped resolver dispatch
@@ -167,8 +177,18 @@ export async function resolvePhantomTraceScan(
   }
 
   // 2. Filter phantoms.
+  // Per-trace confirmation (post-migration-118): the LIST endpoint reports
+  // task_count via array::len(tasks ?? []) on activity_execution_traces,
+  // but `tasks` moved to execution_trace_content. A LIST hit with
+  // task_count==0 is a *candidate* only; we must GET the single-trace
+  // endpoint (which unions the content table) to authoritatively confirm.
+  // Never emit unconfirmed: if confirmation fails or is skipped, drop the
+  // candidate. False-positive cost (9367 prior bogus gaps) is much worse
+  // than missing a true phantom which next scan will pick up.
   const phantoms: PhantomEntry[] = [];
   let successCount = 0;
+  let falsePositiveCount = 0;
+  let confirmErrorCount = 0;
   for (const t of traces) {
     const { phantom, taskCount } = isPhantom(t);
     const status = typeof t.status === "string" ? t.status : "";
@@ -176,6 +196,45 @@ export async function resolvePhantomTraceScan(
     if (!phantom) continue;
     const execId = extractExecId(t);
     if (execId === null) continue;
+
+    // Confirm against single-trace endpoint (which reads execution_trace_content).
+    const baseUrl = pointer.tracesUrl
+      ? pointer.tracesUrl.replace(/\?.*$/, "")
+      : `${METABOB_ENDPOINT}/v2/activities/execution-traces`;
+    const singleUrl = `${baseUrl}/${execId}`;
+    let confirmedTaskCount: number | null = null;
+    try {
+      const sResp = await fetch(singleUrl, {
+        method: "GET",
+        headers: { ...authHeader },
+        signal: AbortSignal.timeout(10_000),
+      });
+      if (sResp.ok) {
+        const sJson = (await sResp.json()) as {
+          tasks?: unknown;
+          task_count?: unknown;
+        };
+        if (Array.isArray(sJson.tasks)) {
+          confirmedTaskCount = sJson.tasks.length;
+        } else if (typeof sJson.task_count === "number") {
+          confirmedTaskCount = sJson.task_count;
+        } else {
+          confirmedTaskCount = 0;
+        }
+      } else {
+        confirmErrorCount += 1;
+        continue;
+      }
+    } catch {
+      confirmErrorCount += 1;
+      continue;
+    }
+    if (confirmedTaskCount !== 0) {
+      falsePositiveCount += 1;
+      continue;
+    }
+    void taskCount;
+
     const templateId = extractTemplateId(t);
     const durationMs = typeof t.duration_ms === "number" ? t.duration_ms : null;
     phantoms.push({
@@ -183,7 +242,7 @@ export async function resolvePhantomTraceScan(
       template_id: templateId,
       duration_ms: durationMs,
       status,
-      task_count: taskCount,
+      task_count: confirmedTaskCount ?? 0,
       gap_id: `phantom-success-${execId}`,
       posted: false,
     });
@@ -253,6 +312,8 @@ export async function resolvePhantomTraceScan(
       success_traces: successCount,
       phantoms_detected: phantoms.length,
       phantoms_posted: phantoms.filter((p) => p.posted).length,
+      list_candidates_rejected_after_confirm: falsePositiveCount,
+      confirm_errors: confirmErrorCount,
       dry_run: dryRun,
       phantom_entries: phantoms,
       completed_at: new Date().toISOString(),

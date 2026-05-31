@@ -101,15 +101,37 @@ function extractSelected(t: TraceRow): string {
 }
 
 /**
+ * Read a candidate field from a row, transparently unwrapping the
+ * activity-api `metadata` envelope. Activity-api stores all non-canonical
+ * extras under `row.metadata` (a free-form bag declared in
+ * `ExecutionRecordSchema.metadata`); top-level recording would require a
+ * SCHEMAFULL column migration, which is out-of-scope. Looking inside
+ * `metadata` first, then top-level, lets the detector recognise either
+ * shape — schema-free instrumentation today, schema-pinned later if and
+ * when activity-api promotes the field. See ias-executor-ts
+ * `activity-api-trace-sink.ts` for the producer side.
+ */
+function readCandidate(row: TraceRow, field: string): string | null {
+  const meta = (row as { metadata?: unknown }).metadata;
+  if (meta && typeof meta === "object") {
+    const v = (meta as Record<string, unknown>)[field];
+    if (typeof v === "string" && v.length > 0) return v;
+  }
+  const top = row[field];
+  if (typeof top === "string" && top.length > 0) return top;
+  return null;
+}
+
+/**
  * Probe every row for any of the candidate target-recording fields. Return
  * the first field name that appears with a non-null string value on any
- * row, or null if none of them are present anywhere.
+ * row (either top-level or nested under `metadata`), or null if none of
+ * them are present anywhere.
  */
 function detectTargetField(rows: TraceRow[]): string | null {
   for (const field of TARGET_FIELD_CANDIDATES) {
     for (const row of rows) {
-      const v = row[field];
-      if (typeof v === "string" && v.length > 0) return field;
+      if (readCandidate(row, field) !== null) return field;
     }
   }
   return null;
@@ -257,16 +279,16 @@ export async function resolveDispatchTargetDriftScan(
   // 3b. Field present → scan for drifts.
   const drifts: DriftEntry[] = [];
   for (const t of traces) {
-    const requestedRaw = t[targetField];
-    if (typeof requestedRaw !== "string" || requestedRaw.length === 0) continue;
+    const requested = readCandidate(t, targetField);
+    if (requested === null) continue;
     const selected = extractSelected(t);
     if (selected === "unknown") continue;
-    if (requestedRaw === selected) continue;
+    if (requested === selected) continue;
     const execId = extractExecId(t);
     if (execId === null) continue;
     drifts.push({
       exec_id: execId,
-      requested: requestedRaw,
+      requested,
       selected,
       field_name: targetField,
       gap_id: `dispatch-target-drift-${execId}`,

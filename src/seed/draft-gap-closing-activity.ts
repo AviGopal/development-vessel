@@ -126,7 +126,14 @@ export const DRAFT_GAP_CLOSING_ACTIVITY_TEMPLATE: ActivityTemplate = {
     "candidate gap-closing activity template via llm_completion_dispatch, writes the proposal " +
     "file, and registers it as a variant in activity-api. " +
     "Rate-limit: skips scenarios with ≥3 existing proposals in the last 7 days.",
-  inputShapes: ["failureModeReport", "gapScenario"],
+  // No template-level inputShapes: tasks 1-2 use fs_read to load the report
+  // and scenario from disk paths supplied via variables. Declaring these as
+  // pool-seeded inputs triggered F25 precondition-rejection (concept_pFSLV6s5s3lQ)
+  // for the same reason as drain-pending-substrate-gaps — the autonomous
+  // dispatch path can't seed `failureModeReport` or `gapScenario` impulses,
+  // and the F25 filter at activity-api /recommend would skip the template.
+  // The fs_read-from-variable-paths pattern is the actual data flow.
+  inputShapes: [],
   outputShapes: ["activityTemplateProposal", "activityTemplateVariant"],
   tags: ["lift.autonomous.loop", "validation.failure.modes", "gap.closing"],
   variables: [

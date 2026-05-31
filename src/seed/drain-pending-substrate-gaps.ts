@@ -26,7 +26,15 @@ export const DRAIN_PENDING_SUBSTRATE_GAPS_TEMPLATE: ActivityTemplate = {
     "(persisted by substrateGap_write) into the drafter. No-ops cleanly when " +
     "no gaps are open — null scenario_id propagates and the drafter's fs_read " +
     "fails fast as a normal trace.",
-  inputShapes: ["substrateGap"],
+  // No template-level inputShapes: task 1 fetches the substrateGap impulse
+  // via the substrateGap resolver server-side. Declaring it here triggered
+  // F25 precondition-rejection (concept_pFSLV6s5s3lQ) because the autonomous
+  // dispatch path can't seed `substrateGap` impulses into the pool — recommend's
+  // filterBySatisfiableInputShapes would filter this template out, and the
+  // detector then flagged the resulting low-task-count traces as F25. The
+  // resolver-fetch pattern is the actual data flow; the declaration was
+  // misleading metadata, not an enforced contract.
+  inputShapes: [],
   outputShapes: ["healthGapDispatch"],
   tags: ["lift.autonomous.loop", "substrate.gap.drain", "gap.closing"],
   variables: [

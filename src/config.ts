@@ -85,11 +85,37 @@ export const config = {
       // for missing files. Replaces the prior LLM-heuristic detect-stale-pointer
       // path that overflowed the prompt cap on large concept corpora.
       "stale_pointer_emit",
+      // Deterministic phantom-success-trace detector + emitter (2026-05-30):
+      // scans recent execution traces for status=success AND task_count=0
+      // (the F25 phantom-success-trace signature), POSTs a substrateGap per
+      // finding. Companion to detect-stale-pointer; embodies the
+      // substrate_self_detection_principle (concept_9ldsmRgqSTd5).
+      "phantom_trace_scan",
       // Convergent validity — independent co-occurrence signal from concept-db.
       // Activities insert this as an explicit task after high-stakes resolvers
       // to cross-check that produced shapes match concept-db's learned priors.
       // Returns convergentValidityResult. Non-fatal by default (strict=false).
       "convergent_validity_check",
+      // Substrate-self-detection (companion to phantom_trace_scan):
+      // groups recent failed traces by (template, first_failed_task) and reports
+      // systematic patterns with occurrence ≥ threshold. Output feeds substrate
+      // activities that mint substrateGap impulses — the substrate detects its
+      // own systematic failures rather than waiting for the operator to read traces.
+      "trace_failure_pattern_report",
+      // Substrate-self-detection (companion to phantom_trace_scan):
+      // scans recent execution traces for the pre-flight rejection signature
+      // (status=failure + duration<500ms + task_count=0 — the F25 pattern,
+      // concept_qcctOLBT5-CL), groups by template_id, and emits one
+      // substrateGap impulse per affected template. Constitutional principle
+      // concept_9ldsmRgqSTd5 — substrate authors detection templates for
+      // observed bug classes rather than only patching instances.
+      "precondition_rejection_scan",
+      // Deterministic dispatch-target-drift detector + emitter (2026-05-30):
+      // probes traces for any target-recording field; if absent, emits a
+      // single instrumentation_gap substrateGap; if present, emits one
+      // substrateGap per drift. Detection-template-of-detection-templates;
+      // embodies the substrate_self_detection_principle (concept_9ldsmRgqSTd5).
+      "dispatch_target_drift_scan",
     ] as const,
     resolveEndpoint: "/v2/impulses/resolve",
     resolveRequestFormat: "pointer" as const,

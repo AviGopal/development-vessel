@@ -32,7 +32,11 @@ import { resolveHttpFetch } from "../resolvers/http-fetch.js";
 import { resolveResolverPatternReport } from "../resolvers/resolver-pattern-report.js";
 import { resolveMarkdownSplitSections } from "../resolvers/markdown-split-sections.js";
 import { resolveStalePointerEmit } from "../resolvers/stale-pointer-emit.js";
+import { resolvePhantomTraceScan } from "../resolvers/phantom-trace-scan.js";
 import { resolveConvergentValidityCheck } from "../resolvers/convergent-validity-check.js";
+import { resolveTraceFailurePatternReport } from "../resolvers/trace-failure-pattern-report.js";
+import { resolvePreconditionRejectionScan } from "../resolvers/precondition-rejection-scan.js";
+import { resolveDispatchTargetDriftScan } from "../resolvers/dispatch-target-drift-scan.js";
 import type { ResolverResult } from "../resolvers/types.js";
 
 type AnyPointer = { type: string } & Record<string, unknown>;
@@ -111,8 +115,16 @@ export async function resolveDispatch(pointer: AnyPointer): Promise<ResolverResu
       return resolveMarkdownSplitSections(p as Parameters<typeof resolveMarkdownSplitSections>[0]);
     case "stale_pointer_emit":
       return resolveStalePointerEmit(p as Parameters<typeof resolveStalePointerEmit>[0]);
+    case "phantom_trace_scan":
+      return resolvePhantomTraceScan(p as Parameters<typeof resolvePhantomTraceScan>[0]);
     case "convergent_validity_check":
       return resolveConvergentValidityCheck(p as Parameters<typeof resolveConvergentValidityCheck>[0]);
+    case "trace_failure_pattern_report":
+      return resolveTraceFailurePatternReport(p as Parameters<typeof resolveTraceFailurePatternReport>[0]);
+    case "dispatch_target_drift_scan":
+      return resolveDispatchTargetDriftScan(p as Parameters<typeof resolveDispatchTargetDriftScan>[0]);
+    case "precondition_rejection_scan":
+      return resolvePreconditionRejectionScan(p as Parameters<typeof resolvePreconditionRejectionScan>[0]);
     default:
       throw new Error(`unknown shape: ${pointer.type}`);
   }

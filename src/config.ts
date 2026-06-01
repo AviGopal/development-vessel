@@ -164,6 +164,11 @@ export const config = {
       "git_branch_create",
       "git_push",
       "gh_pr_create",
+      // Substrate self-merge of approved PRs. Refuses merge unless the PR has
+      // at least one APPROVED review from a non-substrate identity. The
+      // substrate authors + publishes + (after operator approval) merges;
+      // operator's role narrows to approve + audit.
+      "gh_pr_merge",
     ] as const,
     resolveEndpoint: "/v2/impulses/resolve",
     resolveRequestFormat: "pointer" as const,

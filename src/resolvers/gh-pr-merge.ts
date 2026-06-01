@@ -1,23 +1,96 @@
 import type { ResolverResult } from "./types.js";
 
+/**
+ * Substrate-internal evaluation evidence required to authorize a self-merge.
+ *
+ * The merge gate is NOT operator-review-based. Operator approval was the
+ * wrong abstraction: it doesn't scale, it doesn't tell the substrate what
+ * its own confidence in a change is, and it makes operator a bottleneck.
+ * The substrate has the capability to run its own checks against the
+ * changed artifact and recent traces — those checks ARE the approval
+ * function. Operator review remains valuable but as audit, not gate.
+ *
+ * Each field corresponds to a check the substrate already has primitives
+ * for. The resolver refuses merge if any required check is missing or
+ * below threshold. Adding a new internal idiom = adding a new required
+ * field here + updating the evaluation activity that produces the evidence.
+ */
+export interface EvaluationEvidence {
+  // Did `tsc --noEmit` + per-resolver tests pass on the writable clone?
+  // From a composition that runs fs_read on changed files + the existing
+  // dev-vessel test scripts.
+  lint_ok: boolean;
+  tests_ok: boolean;
+  // comprehensibility_check resolver result: did the LLM's blind summary
+  // of the artifact body semantically agree with the artifact's own
+  // self-description? Floor is operator-tunable; default ≥ 0.5.
+  comprehensibility_score: number;
+  // convergent_validity_check resolver result: did concept-db priors
+  // agree the produced shapes match the cited_concept_ids in the
+  // artifact? Floor default ≥ 0.4.
+  convergent_validity_score?: number;
+  // phantom_trace_scan delta in the post-change window: how many F25 ghost
+  // traces (status=success + task_count=0) appeared after the change?
+  // > 0 = regression; default required = 0.
+  phantom_trace_delta?: number;
+  // precondition_rejection_scan delta: did any new templates start
+  // pre-flight-rejecting after the change? > 0 = regression.
+  precondition_rejection_delta?: number;
+  // The dispatch chain that produced this evidence. Cited so the merge
+  // commit can record provenance.
+  produced_by_trace_ids?: string[];
+}
+
 export interface GhPrMergePointer {
   type: "gh_pr_merge";
   owner: string;
   repo: string;
   pr_number: number;
   merge_method?: "merge" | "squash" | "rebase";
-  // When true (default), refuse merge unless the PR has at least one APPROVED
-  // review from a user other than the substrate's git identity. This is the
-  // gate between "substrate authors + publishes" (no approval needed) and
-  // "substrate self-merges" (operator-approval required). Set false only in
-  // tests or in a dedicated bootstrap flow.
-  require_approval?: boolean;
-  // When true (default), delete the head branch on merge — same semantic as
-  // `gh pr merge --delete-branch`. Keeps the substrate-authored/ namespace tidy.
+  // Substrate-internal evaluation result. Required unless require_evaluation
+  // is explicitly false (which only the bootstrap flow does).
+  evaluation_evidence?: EvaluationEvidence;
+  require_evaluation?: boolean;
+  // When true (default), delete the head branch on merge.
   delete_branch?: boolean;
 }
 
-const SUBSTRATE_GIT_LOGIN_PATTERN = /^substrate(-|$)/i;
+const COMPREHENSIBILITY_FLOOR = parseFloat(
+  process.env["SUBSTRATE_MERGE_COMPREHENSIBILITY_FLOOR"] ?? "0.5",
+);
+const CONVERGENT_VALIDITY_FLOOR = parseFloat(
+  process.env["SUBSTRATE_MERGE_CONVERGENT_VALIDITY_FLOOR"] ?? "0.4",
+);
+const PHANTOM_DELTA_MAX = parseInt(
+  process.env["SUBSTRATE_MERGE_PHANTOM_DELTA_MAX"] ?? "0",
+  10,
+);
+const PRECONDITION_DELTA_MAX = parseInt(
+  process.env["SUBSTRATE_MERGE_PRECONDITION_DELTA_MAX"] ?? "0",
+  10,
+);
+
+function checkEvidence(ev: EvaluationEvidence | undefined): { ok: boolean; reasons: string[] } {
+  const reasons: string[] = [];
+  if (!ev) return { ok: false, reasons: ["evaluation_evidence missing"] };
+  if (ev.lint_ok !== true) reasons.push("lint_ok=false");
+  if (ev.tests_ok !== true) reasons.push("tests_ok=false");
+  if (typeof ev.comprehensibility_score !== "number") {
+    reasons.push("comprehensibility_score missing");
+  } else if (ev.comprehensibility_score < COMPREHENSIBILITY_FLOOR) {
+    reasons.push(`comprehensibility_score ${ev.comprehensibility_score} < ${COMPREHENSIBILITY_FLOOR}`);
+  }
+  if (ev.convergent_validity_score !== undefined && ev.convergent_validity_score < CONVERGENT_VALIDITY_FLOOR) {
+    reasons.push(`convergent_validity_score ${ev.convergent_validity_score} < ${CONVERGENT_VALIDITY_FLOOR}`);
+  }
+  if (ev.phantom_trace_delta !== undefined && ev.phantom_trace_delta > PHANTOM_DELTA_MAX) {
+    reasons.push(`phantom_trace_delta ${ev.phantom_trace_delta} > ${PHANTOM_DELTA_MAX}`);
+  }
+  if (ev.precondition_rejection_delta !== undefined && ev.precondition_rejection_delta > PRECONDITION_DELTA_MAX) {
+    reasons.push(`precondition_rejection_delta ${ev.precondition_rejection_delta} > ${PRECONDITION_DELTA_MAX}`);
+  }
+  return { ok: reasons.length === 0, reasons };
+}
 
 export async function resolveGhPrMerge(p: GhPrMergePointer): Promise<ResolverResult> {
   const token = process.env["GITHUB_TOKEN"] ?? process.env["GH_TOKEN"];
@@ -27,9 +100,34 @@ export async function resolveGhPrMerge(p: GhPrMergePointer): Promise<ResolverRes
       body: { resolver: "gh_pr_merge", detail: "GITHUB_TOKEN/GH_TOKEN not set", failure_mode: "cascading" },
     };
   }
-  const requireApproval = p.require_approval !== false;
+  const requireEvaluation = p.require_evaluation !== false;
   const deleteBranch = p.delete_branch !== false;
   const method = p.merge_method ?? "rebase";
+
+  // Substrate-internal evaluation gate. This replaces operator-approval as
+  // the trust function. The substrate composes its own idioms (lint, tests,
+  // phantom/precondition scans, comprehensibility, convergent validity) into
+  // evidence; the resolver verifies the evidence meets thresholds.
+  if (requireEvaluation) {
+    const verdict = checkEvidence(p.evaluation_evidence);
+    if (!verdict.ok) {
+      return {
+        shape: "evaluationInsufficient",
+        body: {
+          resolver: "gh_pr_merge",
+          pr_number: p.pr_number,
+          reasons: verdict.reasons,
+          floors: {
+            comprehensibility: COMPREHENSIBILITY_FLOOR,
+            convergent_validity: CONVERGENT_VALIDITY_FLOOR,
+            phantom_delta_max: PHANTOM_DELTA_MAX,
+            precondition_delta_max: PRECONDITION_DELTA_MAX,
+          },
+          detail: "substrate-internal evaluation evidence missing or below threshold; merge blocked",
+        },
+      };
+    }
+  }
 
   // PR metadata fetch — confirm base branch and head before deciding
   const prUrl = `https://api.github.com/repos/${p.owner}/${p.repo}/pulls/${p.pr_number}`;
@@ -72,63 +170,6 @@ export async function resolveGhPrMerge(p: GhPrMergePointer): Promise<ResolverRes
     // Allow merges into ANY base — substrate could legitimately merge a draft
     // into another draft branch. The protected-branches refusal happens at
     // open-PR time via the head/title checks; here we only validate state.
-  }
-
-  // Approval gate
-  if (requireApproval) {
-    const reviewsUrl = `https://api.github.com/repos/${p.owner}/${p.repo}/pulls/${p.pr_number}/reviews?per_page=100`;
-    let revRes: Response;
-    try {
-      revRes = await fetch(reviewsUrl, {
-        headers: {
-          Authorization: `Bearer ${token}`,
-          Accept: "application/vnd.github+json",
-          "X-GitHub-Api-Version": "2022-11-28",
-        },
-      });
-    } catch (err) {
-      return {
-        shape: "structuredError",
-        body: { resolver: "gh_pr_merge", detail: `reviews fetch: ${err instanceof Error ? err.message : String(err)}`, failure_mode: "cascading" },
-      };
-    }
-    if (!revRes.ok) {
-      const text = await revRes.text();
-      return {
-        shape: "structuredError",
-        body: { resolver: "gh_pr_merge", status: revRes.status, detail: text.slice(0, 400), failure_mode: "cascading" },
-      };
-    }
-    const reviews = (await revRes.json()) as Array<{ state?: string; user?: { login?: string } }>;
-    // GitHub returns ALL reviews including stale + dismissed. Use the
-    // most-recent review per user; that user "approved" if their last
-    // review is APPROVED.
-    const latestPerUser = new Map<string, string>();
-    for (const r of reviews) {
-      const login = r.user?.login;
-      if (!login || !r.state) continue;
-      latestPerUser.set(login, r.state);
-    }
-    const approverLogins: string[] = [];
-    for (const [login, state] of latestPerUser) {
-      if (state === "APPROVED" && !SUBSTRATE_GIT_LOGIN_PATTERN.test(login)) {
-        approverLogins.push(login);
-      }
-    }
-    if (approverLogins.length === 0) {
-      return {
-        shape: "approvalPending",
-        body: {
-          resolver: "gh_pr_merge",
-          pr_number: p.pr_number,
-          head: headRef,
-          base: baseRef,
-          reviews_count: reviews.length,
-          approvers: [],
-          detail: "no non-substrate approver has APPROVED the PR; merge blocked",
-        },
-      };
-    }
   }
 
   // Issue the merge

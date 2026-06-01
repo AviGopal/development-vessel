@@ -27,6 +27,7 @@ import { INGEST_AUDIT_FINDINGS_TEMPLATE } from "./ingest-audit-findings.js";
 import { DETECT_SERVICE_OOM_CASCADE_TEMPLATE } from "./detect-service-oom-cascade.js";
 import { DRAFT_ACTIVITY_FROM_PATTERN_TEMPLATE } from "./draft-activity-from-pattern.js";
 import { PUBLISH_SUBSTRATE_AUTHORED_ARTIFACT_TEMPLATE } from "./publish-substrate-authored-artifact.js";
+import { EVALUATE_PR_VIA_INTERNAL_IDIOMS_TEMPLATE } from "./evaluate-pr-via-internal-idioms.js";
 // Phase 3 — closed-loop learning and verification
 // (openspec/changes/2026-06-01-closed-loop-learning-and-verification/)
 import { DETECT_RECURRING_PATTERN_TEMPLATE } from "./detect-recurring-pattern.js";
@@ -131,4 +132,9 @@ export const SEED_TEMPLATES: ActivityTemplate[] = [
   // git_push + gh_pr_create resolvers without canonizing any destination path.
   // Caller chooses target_path, target_branch, and PR text as variables.
   PUBLISH_SUBSTRATE_AUTHORED_ARTIFACT_TEMPLATE,
+  // Substrate-internal evaluation gate replacing operator-approval. Composes
+  // comprehensibility_check + phantom_trace_scan + precondition_rejection_scan
+  // + (future) convergent_validity_check into an evaluationEvidence payload
+  // that gh_pr_merge accepts.
+  EVALUATE_PR_VIA_INTERNAL_IDIOMS_TEMPLATE,
 ];

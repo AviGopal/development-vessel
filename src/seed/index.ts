@@ -24,6 +24,7 @@ import { DETECT_PHANTOM_SUCCESS_TRACE_TEMPLATE } from "./detect-phantom-success-
 import { DETECT_PRECONDITION_REJECTION_TEMPLATE } from "./detect-precondition-rejection.js";
 import { AUDIT_DISPATCH_TARGET_DRIFT_TEMPLATE } from "./audit-dispatch-target-drift.js";
 import { INGEST_AUDIT_FINDINGS_TEMPLATE } from "./ingest-audit-findings.js";
+import { DETECT_SERVICE_OOM_CASCADE_TEMPLATE } from "./detect-service-oom-cascade.js";
 
 export { SHIP_CHANGE_TEMPLATE } from "./ship-change.js";
 export { BRANCH_HEALTH_TEMPLATE } from "./branch-health.js";
@@ -50,6 +51,7 @@ export { DETECT_PHANTOM_SUCCESS_TRACE_TEMPLATE } from "./detect-phantom-success-
 export { DETECT_PRECONDITION_REJECTION_TEMPLATE } from "./detect-precondition-rejection.js";
 export { AUDIT_DISPATCH_TARGET_DRIFT_TEMPLATE } from "./audit-dispatch-target-drift.js";
 export { INGEST_AUDIT_FINDINGS_TEMPLATE } from "./ingest-audit-findings.js";
+export { DETECT_SERVICE_OOM_CASCADE_TEMPLATE } from "./detect-service-oom-cascade.js";
 
 export const SEED_TEMPLATES: ActivityTemplate[] = [
   SHIP_CHANGE_TEMPLATE,
@@ -95,4 +97,11 @@ export const SEED_TEMPLATES: ActivityTemplate[] = [
   AUDIT_DISPATCH_TARGET_DRIFT_TEMPLATE,
   // audit-ingestion bridge (iter-080, 2026-05-30): reads audit findings → substrateGap impulses
   INGEST_AUDIT_FINDINGS_TEMPLATE,
+  // substrate self-detection (2026-05-31): service-level OOM cascade detector
+  // (concept_RYl73llSCGfc, concept_6RwK5H5F28hT, concept_s9ye5GKLw2L8,
+  // concept_T-CTTOEl97IM). The seven-iteration-unresolved bug class becomes
+  // a first-class substrate citizen; same constitutional principle
+  // (concept_9ldsmRgqSTd5) as detect-phantom-success-trace and
+  // detect-precondition-rejection.
+  DETECT_SERVICE_OOM_CASCADE_TEMPLATE,
 ];

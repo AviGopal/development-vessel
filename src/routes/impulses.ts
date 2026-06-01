@@ -40,6 +40,7 @@ import { resolveLoadAttribution, resolveLoadAttributionWrite } from "../resolver
 import { resolveLoadAttributionReport } from "../resolvers/load-attribution-report.js";
 import { resolvePreconditionRejectionScan } from "../resolvers/precondition-rejection-scan.js";
 import { resolveDispatchTargetDriftScan } from "../resolvers/dispatch-target-drift-scan.js";
+import { resolveServiceOomCascadeScan } from "../resolvers/service-oom-cascade-scan.js";
 import type { ResolverResult } from "../resolvers/types.js";
 
 type AnyPointer = { type: string } & Record<string, unknown>;
@@ -134,6 +135,8 @@ export async function resolveDispatch(pointer: AnyPointer): Promise<ResolverResu
       return resolveLoadAttributionReport(p as Parameters<typeof resolveLoadAttributionReport>[0]);
     case "dispatch_target_drift_scan":
       return resolveDispatchTargetDriftScan(p as Parameters<typeof resolveDispatchTargetDriftScan>[0]);
+    case "service_oom_cascade_scan":
+      return resolveServiceOomCascadeScan(p as Parameters<typeof resolveServiceOomCascadeScan>[0]);
     case "precondition_rejection_scan":
       return resolvePreconditionRejectionScan(p as Parameters<typeof resolvePreconditionRejectionScan>[0]);
     default:

@@ -129,6 +129,15 @@ export const config = {
       // concept_9ldsmRgqSTd5 — substrate authors detection templates for
       // observed bug classes rather than only patching instances.
       "precondition_rejection_scan",
+      // Deterministic service-level OOM cascade detector + emitter (2026-05-31):
+      // scans systemctl-show across substrate vessel units for the cascade
+      // signature (rapid restart loop, MemoryCurrent > 4GB absolute, or
+      // > 500MB delta since previous scan). One substrateGap_write per
+      // affected service. Detects the seven-iteration-unresolved bug class
+      // (concept_RYl73llSCGfc, concept_6RwK5H5F28hT, concept_s9ye5GKLw2L8,
+      // concept_T-CTTOEl97IM). Immunity-pattern compliant (empty inputShapes,
+      // empty variables, single server-side resolver).
+      "service_oom_cascade_scan",
       // Deterministic dispatch-target-drift detector + emitter (2026-05-30):
       // probes traces for any target-recording field; if absent, emits a
       // single instrumentation_gap substrateGap; if present, emits one

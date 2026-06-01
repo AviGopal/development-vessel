@@ -38,9 +38,9 @@ describe("gh_pr_merge resolver (substrate-internal evaluation gate)", () => {
     const r = await resolveGhPrMerge({
       type: "gh_pr_merge", owner: "octocat", repo: "hello", pr_number: 42,
     });
-    expect(r.shape).toBe("evaluationInsufficient");
+    expect(r.shape).toBe("structuredError");
     const body = r.body as { reasons: string[] };
-    expect(body.reasons).toContain("evaluation_evidence missing");
+    expect(body.reasons).toContain("evaluation_evidence missing or unparseable");
   });
 
   it("refuses when lint_ok=false", async () => {
@@ -49,7 +49,7 @@ describe("gh_pr_merge resolver (substrate-internal evaluation gate)", () => {
       type: "gh_pr_merge", owner: "octocat", repo: "hello", pr_number: 42,
       evaluation_evidence: { ...PASSING_EVIDENCE, lint_ok: false },
     });
-    expect(r.shape).toBe("evaluationInsufficient");
+    expect(r.shape).toBe("structuredError");
     const body = r.body as { reasons: string[] };
     expect(body.reasons.some((rea) => rea.includes("lint_ok=false"))).toBe(true);
   });
@@ -60,7 +60,7 @@ describe("gh_pr_merge resolver (substrate-internal evaluation gate)", () => {
       type: "gh_pr_merge", owner: "octocat", repo: "hello", pr_number: 42,
       evaluation_evidence: { ...PASSING_EVIDENCE, comprehensibility_score: 0.2 },
     });
-    expect(r.shape).toBe("evaluationInsufficient");
+    expect(r.shape).toBe("structuredError");
     const body = r.body as { reasons: string[] };
     expect(body.reasons.some((rea) => rea.includes("comprehensibility_score"))).toBe(true);
   });
@@ -71,7 +71,7 @@ describe("gh_pr_merge resolver (substrate-internal evaluation gate)", () => {
       type: "gh_pr_merge", owner: "octocat", repo: "hello", pr_number: 42,
       evaluation_evidence: { ...PASSING_EVIDENCE, phantom_trace_delta: 3 },
     });
-    expect(r.shape).toBe("evaluationInsufficient");
+    expect(r.shape).toBe("structuredError");
     const body = r.body as { reasons: string[] };
     expect(body.reasons.some((rea) => rea.includes("phantom_trace_delta"))).toBe(true);
   });

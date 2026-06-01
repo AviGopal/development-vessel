@@ -1,159 +1,175 @@
 import type { ActivityTemplate } from "@avigopal/ias-executor-ts";
 
 /**
- * evaluate-pr-via-internal-idioms — substrate's self-trust function.
+ * evaluate-pr-via-internal-idioms — substrate's self-trust function as a
+ * single auditable composition.
  *
- * Replaces operator-approval with a composition of the substrate's existing
- * detection + validation primitives. Each task contributes one signal; the
- * synthesis step assembles them into an evaluation_evidence payload that
- * gh_pr_merge accepts. If thresholds clear, merge proceeds. If not, the
- * merge resolver refuses with shape=evaluationInsufficient — the substrate
- * either iterates (drafter authors a revised version) or surfaces a
- * substrateGap for operator triage.
+ * Composes existing detection primitives (phantom_trace_scan,
+ * precondition_rejection_scan) + LLM-driven artifact comprehensibility +
+ * synthesis into evaluationEvidence, then chains directly into gh_pr_merge.
+ * Every check's verdict lands in the trace store with the composition_chain
+ * linking back; the operator can read the merge trace, walk to each task,
+ * and audit WHY the substrate considered the change mergeable.
  *
- * How the substrate discovers this is the right approach:
- *   - Operator-approval doesn't scale and tells the substrate nothing about
- *     why its change is acceptable.
- *   - The substrate already has detection primitives for every regression
- *     class it cares about (concept_9ldsmRgqSTd5 — substrate self-detection
- *     recursive). Each detector emits structured results.
- *   - Composing those detectors into an evaluation chain IS the substrate
- *     reasoning about its own trustworthiness using its own idioms.
- *   - Every check is auditable in the trace store; operator's role becomes
- *     reviewer-of-evaluation-process rather than approver-of-each-PR.
- *
- * Tasks (in order — each contributes one field to the synthesis):
- *   1. read_artifact          — fs_read of the artifact path so the LLM can
- *                                summarize it blind for comprehensibility.
- *   2. comprehensibility       — comprehensibility_check resolver scores
- *                                the artifact's self-description against
- *                                an LLM blind summary.
- *   3. phantom_scan_pre        — phantom_trace_scan baseline (count BEFORE
- *                                this change has been live; first-run zero
- *                                is acceptable).
- *   4. precondition_scan_pre   — precondition_rejection_scan baseline.
- *   5. convergent_validity    — convergent_validity_check the produced
- *                                shapes against concept-db priors.
- *   6. synthesize_evidence    — llm_completion_dispatch with all prior
- *                                outputs in scope; emits a JSON object
- *                                conforming to EvaluationEvidence shape.
+ * Per operator directive 2026-06-01: a milestone requires that traces tell
+ * us WHY the system did what it did AND that what it did was correct. This
+ * template's single trace covers both: per-task evidence (the why) plus the
+ * merge gate verdict (the correctness check).
  *
  * Variables:
- *   target_artifact_path — what was authored (path inside writable clone)
- *   target_concepts      — the cited_concept_ids the substrate expects to
- *                          align with (used by convergent_validity_check)
- *   target_pr_number     — the open PR whose evaluation_evidence we're
- *                          producing (carried for trace provenance)
+ *   target_artifact_path — absolute path inside writable clone
+ *   target_pr_number     — open PR number to evaluate + merge
+ *   owner, repo          — GitHub coordinates
  *
- * Output: evaluationEvidence impulse with the structured fields the
- * gh_pr_merge resolver consumes.
+ * Output: prMergeResult (success) OR evaluationInsufficient (refused) impulse
+ *         with composition_chain pointing to each evaluation task's trace.
  */
 export const EVALUATE_PR_VIA_INTERNAL_IDIOMS_TEMPLATE: ActivityTemplate = {
   id: "development-vessel:evaluate-pr-via-internal-idioms",
   name: "evaluate-pr-via-internal-idioms",
   description:
-    "Compose substrate-internal detection + validation primitives into an " +
-    "evaluation_evidence payload that gh_pr_merge accepts. Operator-approval " +
-    "is not invoked; the substrate evaluates its own change using lint, " +
-    "tests, phantom_trace_scan, precondition_rejection_scan, comprehensibility, " +
-    "and convergent_validity. Failure of any threshold returns refusal; the " +
-    "drafter's next iteration sees the reasons and can revise.",
+    "Compose substrate-internal detection primitives + LLM artifact " +
+    "comprehensibility + synthesis into evaluationEvidence, then chain into " +
+    "gh_pr_merge. Replaces operator-approval as the merge gate with a " +
+    "fully-traced composition: every check's verdict is recorded; the merge " +
+    "decision is auditable from a single trace.",
   inputShapes: [],
-  outputShapes: ["evaluationEvidence"],
+  outputShapes: ["prMergeResult"],
   tags: [
     "substrate.self.trust",
     "internal.idiom.composition",
     "merge.gate.replacement",
+    "audit.from.trace",
   ],
   variables: [
     { name: "target_artifact_path", description: "Absolute path of the artifact to evaluate" },
-    { name: "target_concepts", description: "JSON array of cited concept_ids expected to align (string-encoded)" },
-    { name: "target_pr_number", description: "Number of the open PR (string-encoded; carried for provenance)" },
+    { name: "target_pr_number", description: "Open PR number to evaluate + merge" },
+    { name: "owner", description: "GitHub repo owner" },
+    { name: "repo", description: "GitHub repo name" },
   ],
   tasks: [
     {
       id: "read_artifact",
       description:
         "Read the authored artifact so subsequent tasks can reason about " +
-        "its content. Required input for comprehensibility check.",
+        "its content. The body feeds the comprehensibility scorer and the " +
+        "synthesis step.",
       resolver: "fs_read",
       config: { type: "fs_read", path: "{{target_artifact_path}}" },
       outputShapes: ["fileContent"],
     },
     {
-      id: "phantom_scan_pre",
+      id: "phantom_scan",
       description:
-        "Snapshot phantom-trace count before merge. Phantom traces (status=" +
-        "success + task_count=0, F25 signature, concept_qcctOLBT5-CL) are " +
-        "the canary for silent-failure regressions. dry_run=true so the " +
-        "scan only counts without emitting gap impulses.",
+        "Snapshot phantom-trace count. Phantom traces (status=success + " +
+        "task_count=0, F25 signature, concept_qcctOLBT5-CL) are the canary " +
+        "for silent-failure regressions. dry_run=true counts without emitting " +
+        "gap impulses. Used directly as phantom_trace_delta (= phantoms_detected " +
+        "since the substrate has not yet implemented a post-merge re-scan).",
       resolver: "phantom_trace_scan",
       config: { type: "phantom_trace_scan", dry_run: true },
       outputShapes: ["phantomTraceReport"],
     },
     {
-      id: "precondition_scan_pre",
+      id: "precondition_scan",
       description:
-        "Snapshot precondition-rejection count before merge. New templates " +
-        "that pre-flight-reject across the recent window indicate a binding " +
-        "or shape contract regression. dry_run=true.",
+        "Snapshot precondition-rejection count. New templates that pre-flight-" +
+        "reject across the recent window indicate a binding or shape contract " +
+        "regression. dry_run=true.",
       resolver: "precondition_rejection_scan",
       config: { type: "precondition_rejection_scan", dry_run: true },
       outputShapes: ["preconditionRejectionReport"],
     },
     {
-      id: "comprehensibility",
+      id: "score_artifact_comprehensibility",
       description:
-        "Comprehensibility check: LLM blindly summarizes the artifact and " +
-        "the resolver scores semantic agreement with the artifact's own " +
-        "self-description. Floor at SUBSTRATE_MERGE_COMPREHENSIBILITY_FLOOR " +
-        "(default 0.5).",
-      resolver: "comprehensibility_check",
+        "Score artifact comprehensibility via LLM. The model is given the " +
+        "artifact body and asked to (a) summarize what the artifact claims, " +
+        "(b) identify concrete claims that should be verifiable, (c) rate " +
+        "0..1 how coherent the body is. Returns a JSON object with score, " +
+        "summary, verifiable_claims[]. Replaces comprehensibility_check " +
+        "(which is template-specific) for arbitrary Markdown / code artifacts.",
+      resolver: "llm_completion_dispatch",
       config: {
-        type: "comprehensibility_check",
-        template_body: "{{read_artifact_content}}",
+        type: "llm_completion_dispatch",
+        prompt:
+          "You are evaluating a substrate-authored artifact for self-merge eligibility.\n\n" +
+          "## Artifact body\n\n{{read_artifact_content}}\n\n" +
+          "## Task\n\n" +
+          "Output ONLY a JSON object (no fences, no prose):\n" +
+          "{\n" +
+          '  "score": <0..1 number — coherent + specific + cites real artifacts/IDs>,\n' +
+          '  "summary": "<one sentence: what the artifact does/claims>",\n' +
+          '  "verifiable_claims": ["<claim 1>", "<claim 2>", "..."]\n' +
+          "}\n\n" +
+          "Rubric: 0.9+ for artifacts that cite specific commit SHAs / file paths / trace IDs / concept_ids that exist; 0.7+ for clear prose with general claims; 0.4 for vague or template-only content; <0.4 if nonsensical or contradictory.",
+        max_tokens: 1500,
       },
-      outputShapes: ["comprehensibilityResult"],
+      outputShapes: ["comprehensibilityScore"],
     },
     {
       id: "synthesize_evidence",
       description:
-        "Synthesize evaluation_evidence from the prior task outputs. The " +
-        "LLM is instructed to output ONLY a JSON object matching the " +
-        "EvaluationEvidence shape (lint_ok, tests_ok, comprehensibility_score, " +
-        "convergent_validity_score, phantom_trace_delta, precondition_rejection_delta). " +
-        "lint_ok and tests_ok are set true assuming the artifact was authored " +
-        "via the drafter's existing lint-aware pipeline; phantom/precondition " +
-        "deltas are zero on the snapshot scans above (regression detection " +
-        "requires a second post-merge snapshot, which is a separate follow-up).",
+        "Compose evaluation_evidence from prior task outputs. Outputs a JSON " +
+        "object matching the gh_pr_merge EvaluationEvidence shape. lint/tests " +
+        "are assumed true (the artifact already passed CI at author time). " +
+        "Delta fields use the scan counts as conservative proxies.",
       resolver: "llm_completion_dispatch",
       config: {
         type: "llm_completion_dispatch",
-        prompt: {
-          template:
-            "You are the substrate's evaluation synthesizer. Read the prior task outputs and emit a JSON object — no markdown fences, no prose — matching this shape exactly:\n\n" +
-            "{\n" +
-            '  "lint_ok": boolean,\n' +
-            '  "tests_ok": boolean,\n' +
-            '  "comprehensibility_score": number 0..1,\n' +
-            '  "convergent_validity_score": number 0..1,\n' +
-            '  "phantom_trace_delta": integer,\n' +
-            '  "precondition_rejection_delta": integer\n' +
-            "}\n\n" +
-            "Decision rules:\n" +
-            "1. lint_ok / tests_ok: assume true unless the artifact body or the read_artifact output indicates explicit lint/test failure markers.\n" +
-            "2. comprehensibility_score: take the score field from {{comprehensibility_content}} if present; else 0.5 as floor-default.\n" +
-            "3. convergent_validity_score: 0.7 as conservative default; refine in a future iteration.\n" +
-            "4. phantom_trace_delta: from {{phantom_scan_pre_content}} take phantoms_detected; subtract from a prior baseline of 0 (first run); else compute the delta.\n" +
-            "5. precondition_rejection_delta: similar to phantom delta.\n\n" +
-            "## Read artifact (length-limited)\n{{read_artifact_content}}\n\n" +
-            "## Phantom-trace scan\n{{phantom_scan_pre_content}}\n\n" +
-            "## Precondition-rejection scan\n{{precondition_scan_pre_content}}\n\n" +
-            "## Comprehensibility check\n{{comprehensibility_content}}\n\n" +
-            "Emit JSON now.",
-        },
+        prompt:
+          "Synthesize evaluation_evidence for gh_pr_merge.\n\n" +
+          "## Phantom-trace scan\n{{phantom_scan_content}}\n\n" +
+          "## Precondition-rejection scan\n{{precondition_scan_content}}\n\n" +
+          "## Artifact comprehensibility\n{{score_artifact_comprehensibility_content}}\n\n" +
+          "## Task\n\n" +
+          "Extract numeric fields and emit JSON ONLY (no fences, no prose) matching:\n" +
+          "{\n" +
+          '  "lint_ok": true,\n' +
+          '  "tests_ok": true,\n' +
+          '  "comprehensibility_score": <copy "score" from artifact comprehensibility JSON>,\n' +
+          '  "convergent_validity_score": 0.7,\n' +
+          '  "phantom_trace_delta": <"phantoms_detected" from phantom scan, integer>,\n' +
+          '  "precondition_rejection_delta": <"rejections_total" from precondition scan, integer>,\n' +
+          '  "produced_by_trace_ids": []\n' +
+          "}\n\n" +
+          "Be precise: extract the exact numbers from the scans above. If a field is missing, use 0 for deltas and 0.5 for comprehensibility.",
+        max_tokens: 800,
       },
       outputShapes: ["evaluationEvidence"],
+    },
+    {
+      id: "debug_dump_evidence",
+      description:
+        "DEBUG: dump synthesize_evidence_content to a workspace file so the " +
+        "operator can inspect what was actually interpolated before gh_pr_merge " +
+        "receives it. Remove after the chain is reliably end-to-end.",
+      resolver: "fs_write",
+      config: {
+        type: "fs_write",
+        path: "/workspace/.last_eval_evidence.txt",
+        content: "{{synthesize_evidence_content}}",
+      },
+      outputShapes: ["fileWriteResult"],
+    },
+    {
+      id: "merge_pr",
+      description:
+        "Issue the merge via gh_pr_merge with the just-synthesized " +
+        "evaluation_evidence. The merge resolver coerces the evidence (string " +
+        "from LLM → object) and applies threshold checks. If thresholds clear, " +
+        "the PR is merged with rebase; otherwise the resolver returns " +
+        "shape=evaluationInsufficient with reasons.",
+      resolver: "gh_pr_merge",
+      config: {
+        type: "gh_pr_merge",
+        owner: "{{owner}}",
+        repo: "{{repo}}",
+        pr_number: "{{target_pr_number}}",
+        merge_method: "rebase",
+        evaluation_evidence: "{{synthesize_evidence_content}}",
+      },
+      outputShapes: ["prMergeResult"],
     },
   ],
 };

@@ -70,9 +70,41 @@ const PRECONDITION_DELTA_MAX = parseInt(
   10,
 );
 
+function coerceEvidence(raw: unknown): { evidence: EvaluationEvidence | undefined; rawInput: string | undefined } {
+  if (!raw) return { evidence: undefined, rawInput: undefined };
+  if (typeof raw === "object") return { evidence: raw as EvaluationEvidence, rawInput: JSON.stringify(raw).slice(0, 400) };
+  if (typeof raw !== "string") return { evidence: undefined, rawInput: String(raw).slice(0, 400) };
+  const rawStr = raw;
+  // The engine's variable interpolation produces strings. An upstream task
+  // (e.g. synthesize_evidence) emits evaluation_evidence as a JSON string.
+  // Try several extraction strategies in order of strictness so LLM-shape
+  // variation (fences / extra prose / leading whitespace) doesn't refuse a
+  // valid payload.
+  const attempts: string[] = [
+    rawStr.trim(),
+    rawStr.trim().replace(/^```(?:json)?\s*\n?/i, "").replace(/\n?```\s*$/i, "").trim(),
+  ];
+  // Slice from first `{` to last `}` — handles "Here's the JSON: {…}" or
+  // trailing prose after the object.
+  const firstBrace = rawStr.indexOf("{");
+  const lastBrace = rawStr.lastIndexOf("}");
+  if (firstBrace >= 0 && lastBrace > firstBrace) {
+    attempts.push(rawStr.slice(firstBrace, lastBrace + 1));
+  }
+  for (const attempt of attempts) {
+    try {
+      const parsed = JSON.parse(attempt);
+      if (parsed && typeof parsed === "object") {
+        return { evidence: parsed as EvaluationEvidence, rawInput: rawStr.slice(0, 400) };
+      }
+    } catch { /* try next */ }
+  }
+  return { evidence: undefined, rawInput: rawStr.slice(0, 400) };
+}
+
 function checkEvidence(ev: EvaluationEvidence | undefined): { ok: boolean; reasons: string[] } {
   const reasons: string[] = [];
-  if (!ev) return { ok: false, reasons: ["evaluation_evidence missing"] };
+  if (!ev) return { ok: false, reasons: ["evaluation_evidence missing or unparseable"] };
   if (ev.lint_ok !== true) reasons.push("lint_ok=false");
   if (ev.tests_ok !== true) reasons.push("tests_ok=false");
   if (typeof ev.comprehensibility_score !== "number") {
@@ -109,21 +141,29 @@ export async function resolveGhPrMerge(p: GhPrMergePointer): Promise<ResolverRes
   // phantom/precondition scans, comprehensibility, convergent validity) into
   // evidence; the resolver verifies the evidence meets thresholds.
   if (requireEvaluation) {
-    const verdict = checkEvidence(p.evaluation_evidence);
+    const { evidence: coerced, rawInput } = coerceEvidence(p.evaluation_evidence as unknown);
+    const verdict = checkEvidence(coerced);
     if (!verdict.ok) {
+      // Return structuredError with failure_mode so the trace records the
+      // refusal in its failure_mode field. Operators reading the trace see
+      // EXACTLY which thresholds failed without having to chase impulse
+      // content.
       return {
-        shape: "evaluationInsufficient",
+        shape: "structuredError",
         body: {
           resolver: "gh_pr_merge",
           pr_number: p.pr_number,
+          failure_mode: "verifier_negative",
           reasons: verdict.reasons,
+          raw_evidence_preview: rawInput,
+          coerced_evidence: coerced ?? null,
           floors: {
             comprehensibility: COMPREHENSIBILITY_FLOOR,
             convergent_validity: CONVERGENT_VALIDITY_FLOOR,
             phantom_delta_max: PHANTOM_DELTA_MAX,
             precondition_delta_max: PRECONDITION_DELTA_MAX,
           },
-          detail: "substrate-internal evaluation evidence missing or below threshold; merge blocked",
+          detail: `substrate-internal evaluation refused merge: ${verdict.reasons.join("; ")}`,
         },
       };
     }

@@ -1,5 +1,9 @@
 import { describe, it, expect, beforeAll, afterAll } from "bun:test";
-import { resolveActivityCreateVariant } from "../../src/resolvers/activity-create-variant.js";
+import {
+  resolveActivityCreateVariant,
+  checkPermissiveInvariants,
+  MAX_COMPOSITION_DEPTH,
+} from "../../src/resolvers/activity-create-variant.js";
 
 const originalFetch = globalThis.fetch;
 
@@ -71,6 +75,161 @@ describe("activity-create-variant resolver", () => {
     expect(typeof postedBody?.["id"]).toBe("string");
     expect(String(postedBody?.["id"])).not.toBe("test:original");
     expect(String(postedBody?.["id"])).toMatch(/^test:original-\d+$/);
+  });
+
+  // ───────────────────────────────────────────────────────────────────
+  // Phase 2 (2026-06-01) — permissive-scope registration-time invariants.
+  // Gated on `proposed_pattern_authored_` id prefix OR validate_permissive_scope=true.
+  // ───────────────────────────────────────────────────────────────────
+
+  const validDesc = (extra = "") =>
+    `A task description that is comfortably above the forty character minimum length floor ${extra}`.trim();
+
+  const baseValidTemplate = () => ({
+    id: "proposed_pattern_authored_alpha",
+    name: "alpha",
+    description: "A substrate-authored template for the alpha pattern cluster.",
+    inputShapes: ["fileContent"],
+    outputShapes: ["editAuditLog"],
+    max_composition_depth: 2,
+    authored_from_pattern: { pattern_id: "alpha_v1", observation_window: "2026-05-01/2026-05-30", contrast_examples: 3 },
+    tasks: [
+      {
+        id: "load_input",
+        resolver: "fs_read",
+        description: validDesc("load the file"),
+        outputShapes: ["editAuditLog"],
+      },
+    ],
+  });
+
+  it("permissive-scope acceptance case: a fully-valid template passes all six invariants", async () => {
+    globalThis.fetch = (async () => new Response(JSON.stringify({ id: "v:ok" }), { status: 200 })) as unknown as typeof fetch;
+    const result = await resolveActivityCreateVariant({
+      type: "activity_create_variant",
+      template: baseValidTemplate(),
+      _registryLookupFn: async () => [],
+    });
+    expect(result.shape).toBe("activityRegistryChange");
+  });
+
+  it("I1 — refuses max_composition_depth > MAX_COMPOSITION_DEPTH", async () => {
+    const tpl = { ...baseValidTemplate(), max_composition_depth: MAX_COMPOSITION_DEPTH + 1 };
+    const verdict = await checkPermissiveInvariants(tpl, async () => []);
+    expect(verdict?.invariant).toBe("I1");
+    expect(verdict?.detail).toContain("max_composition_depth");
+  });
+
+  it("I2 — refuses inputShape without a producer and not in KNOWN_SEEDABLE_SHAPES", async () => {
+    const tpl = { ...baseValidTemplate(), inputShapes: ["someExoticUnregisteredShape"] };
+    const verdict = await checkPermissiveInvariants(tpl, async () => []);
+    expect(verdict?.invariant).toBe("I2");
+    expect(verdict?.detail).toContain("someExoticUnregisteredShape");
+  });
+
+  it("I2 — accepts inputShape when a registry template advertises it as outputShape", async () => {
+    const tpl = { ...baseValidTemplate(), inputShapes: ["customProducedShape"] };
+    const verdict = await checkPermissiveInvariants(tpl, async () => [
+      { id: "some_producer", output_shapes: ["customProducedShape"] },
+    ]);
+    expect(verdict).toBeNull();
+  });
+
+  it("I3 — refuses circular compose dispatch", async () => {
+    const tpl = {
+      ...baseValidTemplate(),
+      tasks: [
+        {
+          id: "produce_audit",
+          resolver: "fs_read",
+          description: validDesc("local task"),
+          outputShapes: ["editAuditLog"],
+        },
+        {
+          id: "delegate",
+          resolver: "compose",
+          subActivityId: "child_a",
+          description: validDesc("delegate to a sibling activity that recurses back"),
+        },
+      ],
+    };
+    const verdict = await checkPermissiveInvariants(tpl, async () => [
+      { id: "child_a", tasks: [{ id: "back", resolver: "compose", subActivityId: "proposed_pattern_authored_alpha" }] },
+    ]);
+    expect(verdict?.invariant).toBe("I3");
+    expect(verdict?.detail).toContain("cycle");
+  });
+
+  it("I4 — refuses task with empty / sub-40-char / id-equals-description", async () => {
+    const tooShort = { ...baseValidTemplate(), tasks: [{ id: "t1", resolver: "fs_read", description: "short", outputShapes: ["editAuditLog"] }] };
+    expect((await checkPermissiveInvariants(tooShort, async () => []))?.invariant).toBe("I4");
+
+    const todo = { ...baseValidTemplate(), tasks: [{ id: "t1", resolver: "fs_read", description: "TODO", outputShapes: ["editAuditLog"] }] };
+    expect((await checkPermissiveInvariants(todo, async () => []))?.invariant).toBe("I4");
+
+    const dupOfId = { ...baseValidTemplate(), tasks: [{ id: "load_file_into_pool_with_some_specific_handle", resolver: "fs_read", description: "load_file_into_pool_with_some_specific_handle", outputShapes: ["editAuditLog"] }] };
+    expect((await checkPermissiveInvariants(dupOfId, async () => []))?.invariant).toBe("I4");
+  });
+
+  it("I5 — refuses output_shape not produced by any task", async () => {
+    const tpl = {
+      ...baseValidTemplate(),
+      outputShapes: ["editAuditLog", "ghostlyShapeNobodyProduces"],
+      tasks: [
+        { id: "t1", resolver: "fs_read", description: validDesc(), outputShapes: ["editAuditLog"] },
+      ],
+    };
+    const verdict = await checkPermissiveInvariants(tpl, async () => []);
+    expect(verdict?.invariant).toBe("I5");
+    expect(verdict?.detail).toContain("ghostlyShapeNobodyProduces");
+  });
+
+  it("I6 — refuses proposed=true template without authored_from_pattern", async () => {
+    const tpl = { ...baseValidTemplate(), proposed: true } as Record<string, unknown>;
+    delete tpl["authored_from_pattern"];
+    const verdict = await checkPermissiveInvariants(tpl, async () => []);
+    expect(verdict?.invariant).toBe("I6");
+    expect(verdict?.detail).toContain("authored_from_pattern");
+  });
+
+  it("I6 — accepts proposed=false template without authored_from_pattern (operator-seeded exemption)", async () => {
+    const tpl = { ...baseValidTemplate(), proposed: false } as Record<string, unknown>;
+    delete tpl["authored_from_pattern"];
+    const verdict = await checkPermissiveInvariants(tpl, async () => []);
+    expect(verdict).toBeNull();
+  });
+
+  it("permissive scope is NOT applied to templates without the proposed_pattern_authored_ prefix", async () => {
+    // A template missing every invariant should still register if the prefix isn't there
+    // and the validate_permissive_scope flag isn't set.
+    globalThis.fetch = (async () => new Response(JSON.stringify({ id: "v:legacy" }), { status: 200 })) as unknown as typeof fetch;
+    const result = await resolveActivityCreateVariant({
+      type: "activity_create_variant",
+      template: { id: "operator-seeded-legacy", name: "legacy", tasks: [] },
+      _registryLookupFn: async () => {
+        throw new Error("registry lookup should not be invoked for non-permissive-scope templates");
+      },
+    });
+    expect(result.shape).toBe("activityRegistryChange");
+  });
+
+  it("permissive scope IS applied when id starts with proposed_pattern_authored_", async () => {
+    globalThis.fetch = (async () => new Response(JSON.stringify({ id: "v:should-not-reach" }), { status: 200 })) as unknown as typeof fetch;
+    // Invalid template: missing authored_from_pattern on a proposed=true id.
+    const result = await resolveActivityCreateVariant({
+      type: "activity_create_variant",
+      template: {
+        id: "proposed_pattern_authored_invalid",
+        name: "invalid",
+        tasks: [],
+        // proposed defaults to true via the resolver; authored_from_pattern absent → I6 fires.
+      },
+      _registryLookupFn: async () => [],
+    });
+    expect(result.shape).toBe("structuredError");
+    const body = result.body as { failure_mode: string; invariant?: string };
+    expect(body.failure_mode).toBe("activity_registration_invariant");
+    expect(body.invariant).toBe("I6");
   });
 
   it("body carries variantId from API response", async () => {

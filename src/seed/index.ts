@@ -25,6 +25,7 @@ import { DETECT_PRECONDITION_REJECTION_TEMPLATE } from "./detect-precondition-re
 import { AUDIT_DISPATCH_TARGET_DRIFT_TEMPLATE } from "./audit-dispatch-target-drift.js";
 import { INGEST_AUDIT_FINDINGS_TEMPLATE } from "./ingest-audit-findings.js";
 import { DETECT_SERVICE_OOM_CASCADE_TEMPLATE } from "./detect-service-oom-cascade.js";
+import { DRAFT_ACTIVITY_FROM_PATTERN_TEMPLATE } from "./draft-activity-from-pattern.js";
 
 export { SHIP_CHANGE_TEMPLATE } from "./ship-change.js";
 export { BRANCH_HEALTH_TEMPLATE } from "./branch-health.js";
@@ -52,6 +53,7 @@ export { DETECT_PRECONDITION_REJECTION_TEMPLATE } from "./detect-precondition-re
 export { AUDIT_DISPATCH_TARGET_DRIFT_TEMPLATE } from "./audit-dispatch-target-drift.js";
 export { INGEST_AUDIT_FINDINGS_TEMPLATE } from "./ingest-audit-findings.js";
 export { DETECT_SERVICE_OOM_CASCADE_TEMPLATE } from "./detect-service-oom-cascade.js";
+export { DRAFT_ACTIVITY_FROM_PATTERN_TEMPLATE } from "./draft-activity-from-pattern.js";
 
 export const SEED_TEMPLATES: ActivityTemplate[] = [
   SHIP_CHANGE_TEMPLATE,
@@ -104,4 +106,10 @@ export const SEED_TEMPLATES: ActivityTemplate[] = [
   // (concept_9ldsmRgqSTd5) as detect-phantom-success-trace and
   // detect-precondition-rejection.
   DETECT_SERVICE_OOM_CASCADE_TEMPLATE,
+  // Phase 2 of obsidian meta-skill prototype (2026-06-01): the substrate's
+  // general drafter. Inputs a hand-built recurringPatternCluster, prunes the
+  // resolver + activity vocabularies, drafts an arbitrary-topology activity
+  // template, registers it through the 6 permissive-scope invariants, and
+  // gates promotion on convergent-validity + comprehensibility checks.
+  DRAFT_ACTIVITY_FROM_PATTERN_TEMPLATE,
 ];

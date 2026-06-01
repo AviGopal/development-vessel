@@ -144,6 +144,12 @@ export const config = {
       // substrateGap per drift. Detection-template-of-detection-templates;
       // embodies the substrate_self_detection_principle (concept_9ldsmRgqSTd5).
       "dispatch_target_drift_scan",
+      // Phase 2 of obsidian meta-skill prototype (2026-06-01):
+      // permissive-scope authoring gate. LLM is asked to read a template body
+      // without its self-description and explain what it does, why, and when
+      // useful; answers are compared semantically against the template's own
+      // description. Below floor → verifier_negative.comprehensibility_below_floor.
+      "comprehensibility_check",
     ] as const,
     resolveEndpoint: "/v2/impulses/resolve",
     resolveRequestFormat: "pointer" as const,

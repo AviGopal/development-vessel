@@ -41,6 +41,7 @@ import { resolveLoadAttributionReport } from "../resolvers/load-attribution-repo
 import { resolvePreconditionRejectionScan } from "../resolvers/precondition-rejection-scan.js";
 import { resolveDispatchTargetDriftScan } from "../resolvers/dispatch-target-drift-scan.js";
 import { resolveServiceOomCascadeScan } from "../resolvers/service-oom-cascade-scan.js";
+import { resolveComprehensibilityCheck } from "../resolvers/comprehensibility-check.js";
 import type { ResolverResult } from "../resolvers/types.js";
 
 type AnyPointer = { type: string } & Record<string, unknown>;
@@ -139,6 +140,8 @@ export async function resolveDispatch(pointer: AnyPointer): Promise<ResolverResu
       return resolveServiceOomCascadeScan(p as Parameters<typeof resolveServiceOomCascadeScan>[0]);
     case "precondition_rejection_scan":
       return resolvePreconditionRejectionScan(p as Parameters<typeof resolvePreconditionRejectionScan>[0]);
+    case "comprehensibility_check":
+      return resolveComprehensibilityCheck(p as Parameters<typeof resolveComprehensibilityCheck>[0]);
     default:
       throw new Error(`unknown shape: ${pointer.type}`);
   }

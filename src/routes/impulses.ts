@@ -42,6 +42,9 @@ import { resolvePreconditionRejectionScan } from "../resolvers/precondition-reje
 import { resolveDispatchTargetDriftScan } from "../resolvers/dispatch-target-drift-scan.js";
 import { resolveServiceOomCascadeScan } from "../resolvers/service-oom-cascade-scan.js";
 import { resolveComprehensibilityCheck } from "../resolvers/comprehensibility-check.js";
+import { resolveGitBranchCreate } from "../resolvers/git-branch-create.js";
+import { resolveGitPush } from "../resolvers/git-push.js";
+import { resolveGhPrCreate } from "../resolvers/gh-pr-create.js";
 import type { ResolverResult } from "../resolvers/types.js";
 
 type AnyPointer = { type: string } & Record<string, unknown>;
@@ -142,6 +145,12 @@ export async function resolveDispatch(pointer: AnyPointer): Promise<ResolverResu
       return resolvePreconditionRejectionScan(p as Parameters<typeof resolvePreconditionRejectionScan>[0]);
     case "comprehensibility_check":
       return resolveComprehensibilityCheck(p as Parameters<typeof resolveComprehensibilityCheck>[0]);
+    case "git_branch_create":
+      return resolveGitBranchCreate(p as Parameters<typeof resolveGitBranchCreate>[0]);
+    case "git_push":
+      return resolveGitPush(p as Parameters<typeof resolveGitPush>[0]);
+    case "gh_pr_create":
+      return resolveGhPrCreate(p as Parameters<typeof resolveGhPrCreate>[0]);
     default:
       throw new Error(`unknown shape: ${pointer.type}`);
   }

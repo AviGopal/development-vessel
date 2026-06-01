@@ -150,6 +150,20 @@ export const config = {
       // useful; answers are compared semantically against the template's own
       // description. Below floor → verifier_negative.comprehensibility_below_floor.
       "comprehensibility_check",
+      // Substrate-driven publication primitives (iter-substrate-as-git-author,
+      // 2026-06-01): substrate-side resolvers that let the substrate compose
+      // its own publication path to dev. git_branch_create refuses branch
+      // names outside SUBSTRATE_ALLOWED_BRANCH_PATTERNS env var (default
+      // ^(substrate-authored|substrate)/.+$). git_push refuses --force and
+      // refuses pushes to main/dev/master/trunk/release. gh_pr_create wraps
+      // the GitHub REST pulls endpoint, requires a Substrate-Authored-By
+      // trailer in the body, refuses auto-merge. Used together with existing
+      // git_add/git_commit/git_status by the publish-substrate-authored-
+      // artifact activity composition. No destination paths canonized — the
+      // composition carries target_path as a variable.
+      "git_branch_create",
+      "git_push",
+      "gh_pr_create",
     ] as const,
     resolveEndpoint: "/v2/impulses/resolve",
     resolveRequestFormat: "pointer" as const,

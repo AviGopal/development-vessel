@@ -26,6 +26,7 @@ import { AUDIT_DISPATCH_TARGET_DRIFT_TEMPLATE } from "./audit-dispatch-target-dr
 import { INGEST_AUDIT_FINDINGS_TEMPLATE } from "./ingest-audit-findings.js";
 import { DETECT_SERVICE_OOM_CASCADE_TEMPLATE } from "./detect-service-oom-cascade.js";
 import { DRAFT_ACTIVITY_FROM_PATTERN_TEMPLATE } from "./draft-activity-from-pattern.js";
+import { PUBLISH_SUBSTRATE_AUTHORED_ARTIFACT_TEMPLATE } from "./publish-substrate-authored-artifact.js";
 // Phase 3 — closed-loop learning and verification
 // (openspec/changes/2026-06-01-closed-loop-learning-and-verification/)
 import { DETECT_RECURRING_PATTERN_TEMPLATE } from "./detect-recurring-pattern.js";
@@ -125,4 +126,9 @@ export const SEED_TEMPLATES: ActivityTemplate[] = [
   DETECT_RECURRING_PATTERN_TEMPLATE,
   PREDICT_AND_VERIFY_TEMPLATE,
   REFINE_ON_DISAGREEMENT_TEMPLATE,
+  // substrate-as-git-author Phase 1 (2026-06-01): composition that lets the
+  // substrate publish authored artifacts via its own git_branch_create +
+  // git_push + gh_pr_create resolvers without canonizing any destination path.
+  // Caller chooses target_path, target_branch, and PR text as variables.
+  PUBLISH_SUBSTRATE_AUTHORED_ARTIFACT_TEMPLATE,
 ];

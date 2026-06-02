@@ -23,9 +23,9 @@ describe("vessel_demand_report", () => {
         new Response(
           JSON.stringify({
             templates: [
-              { id: "t1", inputShapes: ["needed_shape"] },
-              { id: "t2", inputShapes: ["needed_shape"] },
-              { id: "t3", inputShapes: ["needed_shape", "supplied"] },
+              { id: "t1", inputShapes: ["needed_shape_report"] },
+              { id: "t2", inputShapes: ["needed_shape_report"] },
+              { id: "t3", inputShapes: ["needed_shape_report", "supplied"] },
             ],
           }),
           { status: 200 },
@@ -46,7 +46,7 @@ describe("vessel_demand_report", () => {
     expect(r.shape).toBe("vesselDemandReport");
     const body = r.body as any;
     expect(body.demand_entry_count).toBe(1);
-    expect(body.top_priority.shape).toBe("needed_shape");
+    expect(body.top_priority.shape).toBe("needed_shape_report");
     expect(body.top_priority.template_count).toBe(3);
   });
 
@@ -68,9 +68,9 @@ describe("vessel_demand_report", () => {
         new Response(
           JSON.stringify({
             templates: [
-              { id: "t1", inputShapes: ["x"] },
-              { id: "t2", inputShapes: ["x"] },
-              { id: "t3", inputShapes: ["x"] },
+              { id: "t1", inputShapes: ["x_report"] },
+              { id: "t2", inputShapes: ["x_report"] },
+              { id: "t3", inputShapes: ["x_report"] },
             ],
           }),
           { status: 200 },
@@ -93,5 +93,35 @@ describe("vessel_demand_report", () => {
     const body = r.body as any;
     expect(body.demand_entry_count).toBe(1);
     expect(postCalls).toBe(0);
+  });
+
+  it("filters domain entities (goal, trace) out of demand", async () => {
+    globalThis.fetch = routedFetch({
+      "http://templates/": () =>
+        new Response(
+          JSON.stringify({
+            templates: [
+              { id: "t1", inputShapes: ["goal", "trace", "capability_scan"] },
+              { id: "t2", inputShapes: ["goal", "trace", "capability_scan"] },
+              { id: "t3", inputShapes: ["goal", "trace", "capability_scan"] },
+            ],
+          }),
+          { status: 200 },
+        ),
+      "http://discovery/": () => new Response(JSON.stringify({ shapes: [] }), { status: 200 }),
+      "http://dev-vessel/": () => new Response(JSON.stringify({ success: true }), { status: 200 }),
+    });
+    const r = await resolveVesselDemandReport({
+      type: "vessel_demand_report",
+      templatesUrl: "http://templates/",
+      discoveryShapesUrl: "http://discovery/",
+      devVesselImpulsesUrl: "http://dev-vessel/",
+      minTemplates: 3,
+      dry_run: true,
+    });
+    const body = r.body as any;
+    expect(body.demand_entry_count).toBe(1); // only capability_scan
+    expect(body.top_priority.shape).toBe("capability_scan");
+    expect(body.filtered_as_domain_entity_count).toBeGreaterThanOrEqual(2); // goal + trace
   });
 });

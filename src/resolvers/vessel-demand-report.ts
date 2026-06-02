@@ -74,6 +74,75 @@ function inputShapesOf(t: TemplateRow): string[] {
   return (candidate as unknown[]).filter((s): s is string => typeof s === "string");
 }
 
+/**
+ * looksLikeCapabilityShape — refined classifier for vessel-demand filtering.
+ *
+ * The unrefined demand-report surfaced 16 entries with top shapes `goal`,
+ * `trace`, `error`, `source_code`, `activity_template` — these are domain
+ * entities the substrate already models, not resolver capabilities a new
+ * vessel should produce. A vessel that "advertises shape `goal`" makes no
+ * sense; a vessel that "advertises shape `compositionCoverageReport`" does.
+ *
+ * Heuristic: a capability shape is one a RESOLVER produces. Patterns observed
+ * across the dev-vessel catalogue (precondition_rejection_scan, phantom_trace_scan,
+ * resolver_pattern_report, system_load_report, comprehensibility_check,
+ * convergent_validity_check, stale_pointer_emit, vesselDemand, traceFailurePatternReport, ...):
+ *   - snake_case ending in {_report, _scan, _check, _emit, _result, _summary,
+ *     _snapshot, _tick, _dispatch, _signature, _validity, _matrix}
+ *   - camelCase ending in {Report, Scan, Check, Result, Summary, Snapshot,
+ *     Signature, Validity, Verdict, Pattern, Outcome}
+ *   - Suffix "_write" (writer pointer)
+ * Domain entities filter to false: short common nouns (`goal`, `trace`,
+ * `error`, `tool`, `source_code`, `test_suite`, `activity_template`).
+ */
+const CAPABILITY_SUFFIX_PATTERNS: readonly RegExp[] = [
+  // snake_case capability suffixes
+  /_(report|scan|check|emit|result|summary|snapshot|tick|dispatch|signature|validity|matrix|write|fetch|extract|sections|propagate|judgment|introspect|noop|topology|attribution|reachable|advance|recommend|discover|delete|update|deprecate|by_shapes|by_signature)$/,
+  // camelCase capability suffixes
+  /(Report|Scan|Check|Result|Summary|Snapshot|Signature|Validity|Verdict|Pattern|Outcome|Reaction|Evaluation|Refused|Health|Trace|Relevance|Metrics|Demand|Audit|Status|Action|Sequence|Graph|Verdict|Stats|Profile|Tree|Map|Record)$/,
+  // Two-word camelCase compounds (capability shapes like activityTemplate, executionTrace)
+  // — must have at least two capitalized segments AND a "noun-like" combined length
+  /^[a-z][a-z0-9]+[A-Z][a-zA-Z0-9]{4,}$/,
+];
+
+const DOMAIN_ENTITY_DENYLIST = new Set<string>([
+  "goal",
+  "trace",
+  "error",
+  "tool",
+  "source_code",
+  "test_suite",
+  "activity_template",
+  "execution_trace",
+  "activity_metrics",
+  "impulse",
+  "task",
+  "vessel",
+  "config",
+  "metadata",
+  "context",
+  "input",
+  "output",
+  "request",
+  "response",
+  "user",
+  "message",
+  "string",
+  "number",
+  "object",
+]);
+
+function looksLikeCapabilityShape(shape: string): boolean {
+  if (DOMAIN_ENTITY_DENYLIST.has(shape)) return false;
+  // Very short shapes are almost always domain entities.
+  if (shape.length < 6) return false;
+  // Match any capability suffix pattern.
+  for (const pat of CAPABILITY_SUFFIX_PATTERNS) {
+    if (pat.test(shape)) return true;
+  }
+  return false;
+}
+
 export async function resolveVesselDemandReport(
   pointer: VesselDemandReportPointer,
 ): Promise<ResolverResult> {
@@ -155,12 +224,20 @@ export async function resolveVesselDemandReport(
     }
   }
 
-  // 4. Build demand entries — unmet & above threshold.
+  // 4. Build demand entries — unmet & above threshold AND capability-shaped.
+  // The capability filter excludes domain entities (goal, trace, error, …) that
+  // are not resolver outputs — they're operator-level concepts the substrate
+  // already models, not gaps a new vessel should fill.
   const today = new Date().toISOString().slice(0, 10);
   const entries: DemandEntry[] = [];
+  const entries_filtered_as_domain: { shape: string; template_count: number }[] = [];
   for (const [shape, templateIds] of demand.entries()) {
     if (templateIds.size < minTemplates) continue;
     if (advertised.has(shape)) continue;
+    if (!looksLikeCapabilityShape(shape)) {
+      entries_filtered_as_domain.push({ shape, template_count: templateIds.size });
+      continue;
+    }
     entries.push({
       shape,
       template_count: templateIds.size,
@@ -225,6 +302,8 @@ export async function resolveVesselDemandReport(
       demand_threshold_min_templates: minTemplates,
       demand_entry_count: entries.length,
       demand_entries: entries,
+      filtered_as_domain_entity_count: entries_filtered_as_domain.length,
+      filtered_as_domain_entity_samples: entries_filtered_as_domain.slice(0, 8),
       top_priority: entries[0] ?? null,
       dry_run: dryRun,
       completed_at: new Date().toISOString(),

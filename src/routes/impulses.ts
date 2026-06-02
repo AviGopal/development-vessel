@@ -50,6 +50,11 @@ import { resolveComputeStateSignature } from "../resolvers/compute-state-signatu
 import { resolveAuthoringChainHealthReport } from "../resolvers/authoring-chain-health-report.js";
 import { resolveUiWritePassthrough } from "../resolvers/ui-write-passthrough.js";
 import { resolveInteractorWrite, type InteractorWriteShape } from "../resolvers/interactor-passthrough.js";
+import {
+  resolveInterventionEvaluate,
+  resolveInterventionRefused,
+  resolveInterventionRefusedWrite,
+} from "../resolvers/intervention-evaluate.js";
 import type { ResolverResult } from "../resolvers/types.js";
 
 type AnyPointer = { type: string } & Record<string, unknown>;
@@ -171,6 +176,12 @@ export async function resolveDispatch(pointer: AnyPointer): Promise<ResolverResu
     case "interactorDismiss_write":
     case "interactorAttachment_write":
       return resolveInteractorWrite(p as { type: InteractorWriteShape } & Record<string, unknown>);
+    case "intervention_evaluate":
+      return resolveInterventionEvaluate(p as Parameters<typeof resolveInterventionEvaluate>[0]);
+    case "interventionRefused":
+      return resolveInterventionRefused(p as Parameters<typeof resolveInterventionRefused>[0]);
+    case "interventionRefused_write":
+      return resolveInterventionRefusedWrite(p as Parameters<typeof resolveInterventionRefusedWrite>[0]);
     default:
       throw new Error(`unknown shape: ${pointer.type}`);
   }

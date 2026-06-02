@@ -202,6 +202,17 @@ export const config = {
       "interactorAssertion_write",
       "interactorDismiss_write",
       "interactorAttachment_write",
+      // S3 push-away primitive (iter-s3-push-away, 2026-06-02): substrate
+      // evaluates a proposed operator/external intervention against its own
+      // priors (recent traces + concept-db) and returns ACCEPT / REFUSE /
+      // DEFER with cited substrate priors. REFUSE persists a refusal record
+      // (interventionRefused) so the substrate accumulates push-away history
+      // — the operator-measured S3 readiness signal per IAL §27.S.6.
+      // Deterministic only; semantic evaluation composes later with
+      // comprehensibility_check.
+      "intervention_evaluate",
+      "interventionRefused",
+      "interventionRefused_write",
     ] as const,
     resolveEndpoint: "/v2/impulses/resolve",
     resolveRequestFormat: "pointer" as const,

@@ -29,6 +29,7 @@ import { DRAFT_ACTIVITY_FROM_PATTERN_TEMPLATE } from "./draft-activity-from-patt
 import { PUBLISH_SUBSTRATE_AUTHORED_ARTIFACT_TEMPLATE } from "./publish-substrate-authored-artifact.js";
 import { EVALUATE_PR_VIA_INTERNAL_IDIOMS_TEMPLATE } from "./evaluate-pr-via-internal-idioms.js";
 import { OBSERVE_ORTHOGONAL_PATTERNS_TEMPLATE } from "./observe-orthogonal-patterns.js";
+import { ENACT_ORTHOGONAL_DECISIONS_TEMPLATE } from "./enact-orthogonal-decisions.js";
 // Phase 3 — closed-loop learning and verification
 // (openspec/changes/2026-06-01-closed-loop-learning-and-verification/)
 import { DETECT_RECURRING_PATTERN_TEMPLATE } from "./detect-recurring-pattern.js";
@@ -66,6 +67,7 @@ export { DETECT_RECURRING_PATTERN_TEMPLATE } from "./detect-recurring-pattern.js
 export { PREDICT_AND_VERIFY_TEMPLATE } from "./predict-and-verify.js";
 export { REFINE_ON_DISAGREEMENT_TEMPLATE } from "./refine-on-disagreement.js";
 export { OBSERVE_ORTHOGONAL_PATTERNS_TEMPLATE } from "./observe-orthogonal-patterns.js";
+export { ENACT_ORTHOGONAL_DECISIONS_TEMPLATE } from "./enact-orthogonal-decisions.js";
 
 export const SEED_TEMPLATES: ActivityTemplate[] = [
   SHIP_CHANGE_TEMPLATE,
@@ -144,4 +146,11 @@ export const SEED_TEMPLATES: ActivityTemplate[] = [
   // CREATE_DETECTOR / CREATE_CONSUMER decisions for the catalogue. Compose-
   // only — adds no resolver code.
   OBSERVE_ORTHOGONAL_PATTERNS_TEMPLATE,
+  // enact-orthogonal-decisions (2026-06-01): closes the meta-loop by reading
+  // the latest orthogonal observation, synthesizing a failure-mode-style
+  // scenario for the highest-priority CREATE_DETECTOR/CREATE_CONSUMER
+  // decision, and dispatching draft-gap-closing-activity. MODIFY decisions
+  // are surfaced as pendingModifyDecision context for future handling.
+  // Compose-only — adds no resolver code.
+  ENACT_ORTHOGONAL_DECISIONS_TEMPLATE,
 ];

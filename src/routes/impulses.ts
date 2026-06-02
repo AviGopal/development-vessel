@@ -47,6 +47,7 @@ import { resolveGitBranchCreate } from "../resolvers/git-branch-create.js";
 import { resolveGitPush } from "../resolvers/git-push.js";
 import { resolveGhPrCreate } from "../resolvers/gh-pr-create.js";
 import { resolveComputeStateSignature } from "../resolvers/compute-state-signature.js";
+import { resolveAuthoringChainHealthReport } from "../resolvers/authoring-chain-health-report.js";
 import { resolveUiWritePassthrough } from "../resolvers/ui-write-passthrough.js";
 import { resolveInteractorWrite, type InteractorWriteShape } from "../resolvers/interactor-passthrough.js";
 import type { ResolverResult } from "../resolvers/types.js";
@@ -159,6 +160,8 @@ export async function resolveDispatch(pointer: AnyPointer): Promise<ResolverResu
       return resolveGhPrMerge(p as Parameters<typeof resolveGhPrMerge>[0]);
     case "compute_state_signature":
       return resolveComputeStateSignature(p as Parameters<typeof resolveComputeStateSignature>[0]);
+    case "authoring_chain_health_report":
+      return resolveAuthoringChainHealthReport(p as Parameters<typeof resolveAuthoringChainHealthReport>[0]);
     case "uiPanel_write":
     case "uiQuestion_write":
       return resolveUiWritePassthrough(p as Parameters<typeof resolveUiWritePassthrough>[0]);

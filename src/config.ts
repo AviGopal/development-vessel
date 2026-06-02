@@ -177,6 +177,13 @@ export const config = {
       // tag — the substrate learns how environment affects template choice
       // and template success, not just which template succeeds in the abstract.
       "compute_state_signature",
+      // Substrate-self-detection of authoring-chain health (iter-substrate-face-v0.2,
+      // 2026-06-02). Classifies recent failures into preflight_rejection (#140),
+      // chain_truncation (fm-51), authoring_completed, other_failure, success.
+      // Verdict: HEALTHY / DEGRADED / BLOCKED. Lets the substrate detect when
+      // both authoring paths are simultaneously broken — the impasse observed
+      // when the projection-fix dispatch (9a6b1e0d) wedged.
+      "authoring_chain_health_report",
       // Stateful-UI vessel (substrate's face, 2026-06-02): advertised here so
       // discovery routes uiPanel_write / uiQuestion_write traffic correctly
       // for callers that resolve via dev-vessel. Implementation is a thin

@@ -28,6 +28,7 @@ import { DETECT_SERVICE_OOM_CASCADE_TEMPLATE } from "./detect-service-oom-cascad
 import { DRAFT_ACTIVITY_FROM_PATTERN_TEMPLATE } from "./draft-activity-from-pattern.js";
 import { PUBLISH_SUBSTRATE_AUTHORED_ARTIFACT_TEMPLATE } from "./publish-substrate-authored-artifact.js";
 import { EVALUATE_PR_VIA_INTERNAL_IDIOMS_TEMPLATE } from "./evaluate-pr-via-internal-idioms.js";
+import { OBSERVE_ORTHOGONAL_PATTERNS_TEMPLATE } from "./observe-orthogonal-patterns.js";
 // Phase 3 — closed-loop learning and verification
 // (openspec/changes/2026-06-01-closed-loop-learning-and-verification/)
 import { DETECT_RECURRING_PATTERN_TEMPLATE } from "./detect-recurring-pattern.js";
@@ -64,6 +65,7 @@ export { DRAFT_ACTIVITY_FROM_PATTERN_TEMPLATE } from "./draft-activity-from-patt
 export { DETECT_RECURRING_PATTERN_TEMPLATE } from "./detect-recurring-pattern.js";
 export { PREDICT_AND_VERIFY_TEMPLATE } from "./predict-and-verify.js";
 export { REFINE_ON_DISAGREEMENT_TEMPLATE } from "./refine-on-disagreement.js";
+export { OBSERVE_ORTHOGONAL_PATTERNS_TEMPLATE } from "./observe-orthogonal-patterns.js";
 
 export const SEED_TEMPLATES: ActivityTemplate[] = [
   SHIP_CHANGE_TEMPLATE,
@@ -137,4 +139,9 @@ export const SEED_TEMPLATES: ActivityTemplate[] = [
   // + (future) convergent_validity_check into an evaluationEvidence payload
   // that gh_pr_merge accepts.
   EVALUATE_PR_VIA_INTERNAL_IDIOMS_TEMPLATE,
+  // orthogonal-pattern observer (2026-06-01): composes resolver_pattern_report
+  // + trace_failure_pattern_report and LLM-synthesizes MODIFY /
+  // CREATE_DETECTOR / CREATE_CONSUMER decisions for the catalogue. Compose-
+  // only — adds no resolver code.
+  OBSERVE_ORTHOGONAL_PATTERNS_TEMPLATE,
 ];

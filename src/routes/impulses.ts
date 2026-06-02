@@ -55,6 +55,10 @@ import {
   resolveInterventionRefused,
   resolveInterventionRefusedWrite,
 } from "../resolvers/intervention-evaluate.js";
+import { resolveCompositionCoverageReport } from "../resolvers/composition-coverage-report.js";
+import { resolveVesselCompletenessReport } from "../resolvers/vessel-completeness-report.js";
+import { resolveTemplateInvocationHistoryReport } from "../resolvers/template-invocation-history-report.js";
+import { resolveVesselDemandReport } from "../resolvers/vessel-demand-report.js";
 import type { ResolverResult } from "../resolvers/types.js";
 
 type AnyPointer = { type: string } & Record<string, unknown>;
@@ -182,6 +186,14 @@ export async function resolveDispatch(pointer: AnyPointer): Promise<ResolverResu
       return resolveInterventionRefused(p as Parameters<typeof resolveInterventionRefused>[0]);
     case "interventionRefused_write":
       return resolveInterventionRefusedWrite(p as Parameters<typeof resolveInterventionRefusedWrite>[0]);
+    case "composition_coverage_report":
+      return resolveCompositionCoverageReport(p as Parameters<typeof resolveCompositionCoverageReport>[0]);
+    case "vessel_completeness_report":
+      return resolveVesselCompletenessReport(p as Parameters<typeof resolveVesselCompletenessReport>[0]);
+    case "template_invocation_history_report":
+      return resolveTemplateInvocationHistoryReport(p as Parameters<typeof resolveTemplateInvocationHistoryReport>[0]);
+    case "vessel_demand_report":
+      return resolveVesselDemandReport(p as Parameters<typeof resolveVesselDemandReport>[0]);
     default:
       throw new Error(`unknown shape: ${pointer.type}`);
   }

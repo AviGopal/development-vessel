@@ -213,6 +213,18 @@ export const config = {
       "intervention_evaluate",
       "interventionRefused",
       "interventionRefused_write",
+      // Lift-criterion meta-detectors (iter-lift-criterion, 2026-06-02): each
+      // surfaces a class of substrate gap that would have prompted the prior
+      // operator intervention. composition_coverage_report flags producer/
+      // consumer mismatches in the template catalogue; vessel_completeness_report
+      // flags vessel scaffolds missing canonical files; template_invocation_history_report
+      // flags registered-but-never-fired templates; vessel_demand_report flags
+      // shapes required by ≥N templates with zero advertising vessel — the
+      // trigger condition for substrate-authored vessel creation.
+      "composition_coverage_report",
+      "vessel_completeness_report",
+      "template_invocation_history_report",
+      "vessel_demand_report",
     ] as const,
     resolveEndpoint: "/v2/impulses/resolve",
     resolveRequestFormat: "pointer" as const,

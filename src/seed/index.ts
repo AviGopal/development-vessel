@@ -30,6 +30,8 @@ import { PUBLISH_SUBSTRATE_AUTHORED_ARTIFACT_TEMPLATE } from "./publish-substrat
 import { EVALUATE_PR_VIA_INTERNAL_IDIOMS_TEMPLATE } from "./evaluate-pr-via-internal-idioms.js";
 import { OBSERVE_ORTHOGONAL_PATTERNS_TEMPLATE } from "./observe-orthogonal-patterns.js";
 import { ENACT_ORTHOGONAL_DECISIONS_TEMPLATE } from "./enact-orthogonal-decisions.js";
+import { COMPLETE_VESSEL_SCAFFOLD_TEMPLATE } from "./complete-vessel-scaffold.js";
+import { SCAFFOLD_AND_PUBLISH_VESSEL_TEMPLATE } from "./scaffold-and-publish-vessel.js";
 // Phase 3 — closed-loop learning and verification
 // (openspec/changes/2026-06-01-closed-loop-learning-and-verification/)
 import { DETECT_RECURRING_PATTERN_TEMPLATE } from "./detect-recurring-pattern.js";
@@ -68,6 +70,8 @@ export { PREDICT_AND_VERIFY_TEMPLATE } from "./predict-and-verify.js";
 export { REFINE_ON_DISAGREEMENT_TEMPLATE } from "./refine-on-disagreement.js";
 export { OBSERVE_ORTHOGONAL_PATTERNS_TEMPLATE } from "./observe-orthogonal-patterns.js";
 export { ENACT_ORTHOGONAL_DECISIONS_TEMPLATE } from "./enact-orthogonal-decisions.js";
+export { COMPLETE_VESSEL_SCAFFOLD_TEMPLATE } from "./complete-vessel-scaffold.js";
+export { SCAFFOLD_AND_PUBLISH_VESSEL_TEMPLATE } from "./scaffold-and-publish-vessel.js";
 
 export const SEED_TEMPLATES: ActivityTemplate[] = [
   SHIP_CHANGE_TEMPLATE,
@@ -153,4 +157,13 @@ export const SEED_TEMPLATES: ActivityTemplate[] = [
   // are surfaced as pendingModifyDecision context for future handling.
   // Compose-only — adds no resolver code.
   ENACT_ORTHOGONAL_DECISIONS_TEMPLATE,
+  // Lift-iter (2026-06-02): complete-vessel-scaffold writes the full canonical
+  // vessel structure (extends scaffold-new-vessel from 4 files → 7 files,
+  // adding src/index.ts, src/discovery-registration.ts, and the systemd unit).
+  COMPLETE_VESSEL_SCAFFOLD_TEMPLATE,
+  // Lift-iter (2026-06-02): scaffold-and-publish-vessel composes the full
+  // vessel scaffold with the substrate-as-git-author publication chain —
+  // git_branch_create + git_add + git_commit + git_push + gh_pr_create.
+  // Mirrors publish-substrate-authored-artifact safety gates for vessel scope.
+  SCAFFOLD_AND_PUBLISH_VESSEL_TEMPLATE,
 ];

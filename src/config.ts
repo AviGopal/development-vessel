@@ -177,6 +177,13 @@ export const config = {
       // tag — the substrate learns how environment affects template choice
       // and template success, not just which template succeeds in the abstract.
       "compute_state_signature",
+      // Stateful-UI vessel (substrate's face, 2026-06-02): advertised here so
+      // discovery routes uiPanel_write / uiQuestion_write traffic correctly
+      // for callers that resolve via dev-vessel. Implementation is a thin
+      // passthrough to stateful-ui-vessel on port 8270 — the canonical store
+      // lives there. See repos/stateful-ui-vessel/.
+      "uiPanel_write",
+      "uiQuestion_write",
     ] as const,
     resolveEndpoint: "/v2/impulses/resolve",
     resolveRequestFormat: "pointer" as const,

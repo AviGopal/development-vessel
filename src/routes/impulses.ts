@@ -46,6 +46,7 @@ import { resolveGhPrMerge } from "../resolvers/gh-pr-merge.js";
 import { resolveGitBranchCreate } from "../resolvers/git-branch-create.js";
 import { resolveGitPush } from "../resolvers/git-push.js";
 import { resolveGhPrCreate } from "../resolvers/gh-pr-create.js";
+import { resolveComputeStateSignature } from "../resolvers/compute-state-signature.js";
 import type { ResolverResult } from "../resolvers/types.js";
 
 type AnyPointer = { type: string } & Record<string, unknown>;
@@ -154,6 +155,8 @@ export async function resolveDispatch(pointer: AnyPointer): Promise<ResolverResu
       return resolveGhPrCreate(p as Parameters<typeof resolveGhPrCreate>[0]);
     case "gh_pr_merge":
       return resolveGhPrMerge(p as Parameters<typeof resolveGhPrMerge>[0]);
+    case "compute_state_signature":
+      return resolveComputeStateSignature(p as Parameters<typeof resolveComputeStateSignature>[0]);
     default:
       throw new Error(`unknown shape: ${pointer.type}`);
   }

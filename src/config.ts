@@ -169,6 +169,14 @@ export const config = {
       // substrate authors + publishes + (after operator approval) merges;
       // operator's role narrows to approve + audit.
       "gh_pr_merge",
+      // First substrate state-space signature (iter-state-signature, 2026-06-01):
+      // returns stateSpaceSignature combining /proc/loadavg + /proc/meminfo +
+      // cgroup mem + recent-trace aggregates (success_rate, phantom_count,
+      // precondition_count, top failure_mode) + catalogue counters. Threaded
+      // through goal-host dispatches so every trace carries a state_signature
+      // tag — the substrate learns how environment affects template choice
+      // and template success, not just which template succeeds in the abstract.
+      "compute_state_signature",
     ] as const,
     resolveEndpoint: "/v2/impulses/resolve",
     resolveRequestFormat: "pointer" as const,

@@ -35,8 +35,10 @@ export interface ComputeStateSignaturePointer {
 }
 
 const DEFAULT_ACTIVITY_API = "http://127.0.0.1:8080";
+const DEFAULT_STATEFUL_UI = "http://127.0.0.1:8270";
 const DEFAULT_WINDOW_MINUTES = 30;
 const DEFAULT_HTTP_TIMEOUT_MS = 1500;
+const STATEFUL_UI_TIMEOUT_MS = 500;
 
 interface ProcLoadResult {
   load_avg_1m: number;
@@ -221,7 +223,8 @@ export async function resolveComputeStateSignature(
   ]);
 
   // HTTP fetches in parallel.
-  const [tracesResp, templatesResp] = await Promise.all([
+  const statefulUiEndpoint = process.env["STATEFUL_UI_VESSEL_ENDPOINT"] ?? DEFAULT_STATEFUL_UI;
+  const [tracesResp, templatesResp, uiInputsResp] = await Promise.all([
     fetchJsonWithTimeout(
       `${apiEndpoint}/v2/activities/execution-traces?limit=200`,
       apiKey,
@@ -232,7 +235,30 @@ export async function resolveComputeStateSignature(
       apiKey,
       httpTimeout,
     ),
+    fetchJsonWithTimeout(
+      `${statefulUiEndpoint}/api/signature-inputs`,
+      "", // stateful-ui endpoint is unauthenticated for this read
+      STATEFUL_UI_TIMEOUT_MS,
+    ),
   ]);
+
+  // UI signature inputs — fold operator-presence into the substrate's
+  // state-space signature. Default to zeros on failure (degraded reading
+  // still produces a stable hash for the "operator silent" state).
+  let uiEvents = 0;
+  let uiAsksAgeP95 = 0;
+  let uiAssertsPending = 0;
+  let uiPanelsOpen = 0;
+  if (uiInputsResp && typeof uiInputsResp === "object") {
+    const u = uiInputsResp as Record<string, unknown>;
+    if (typeof u.recent_interactor_events_count === "number") uiEvents = u.recent_interactor_events_count;
+    if (typeof u.unanswered_asks_age_ms_p95 === "number") uiAsksAgeP95 = u.unanswered_asks_age_ms_p95;
+    if (typeof u.operator_assertion_pending_count === "number") uiAssertsPending = u.operator_assertion_pending_count;
+    if (typeof u.panels_open_count === "number") uiPanelsOpen = u.panels_open_count;
+  }
+  // Bucket the p95 age to seconds; otherwise tiny clock drift would
+  // change the hash every call.
+  const uiAsksAgeSec = Math.round(uiAsksAgeP95 / 1000);
 
   // Aggregate traces.
   let recent: RecentTracesAgg = {
@@ -283,6 +309,12 @@ export async function resolveComputeStateSignature(
     prop: proposedCount,
     sa: substrateAuthoredCount,
     w: windowMinutes,
+    // UI / interactor presence — third-level recursion: operator presence is
+    // part of the substrate's environment.
+    uie: uiEvents,
+    uia: uiAsksAgeSec,
+    uip: uiAssertsPending,
+    uio: uiPanelsOpen,
   };
 
   const signature_hash = computeHash(hashPayload);
@@ -309,6 +341,12 @@ export async function resolveComputeStateSignature(
         total_templates: totalTemplates,
         proposed_count: proposedCount,
         substrate_authored_count: substrateAuthoredCount,
+      },
+      ui: {
+        recent_interactor_events_count: uiEvents,
+        unanswered_asks_age_ms_p95: uiAsksAgeP95,
+        operator_assertion_pending_count: uiAssertsPending,
+        panels_open_count: uiPanelsOpen,
       },
       signature_hash,
     },

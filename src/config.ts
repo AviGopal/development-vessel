@@ -184,6 +184,17 @@ export const config = {
       // lives there. See repos/stateful-ui-vessel/.
       "uiPanel_write",
       "uiQuestion_write",
+      // Stateful-UI vessel v0.2 (2026-06-02): interactor* impulses produced
+      // by the operator through the substrate's face. Dev-vessel passthrough
+      // appends to WORKSPACE_ROOT/interactor-log/<shape>.jsonl for substrate-
+      // side aggregation; durable in-memory pool lives in stateful-ui-vessel.
+      // Read shapes (uiFeedback / interactorEvent / interactorAssertion /
+      // interactorAttachment) are advertised by stateful-ui-vessel directly.
+      "uiFeedback_write",
+      "interactorEvent_write",
+      "interactorAssertion_write",
+      "interactorDismiss_write",
+      "interactorAttachment_write",
     ] as const,
     resolveEndpoint: "/v2/impulses/resolve",
     resolveRequestFormat: "pointer" as const,

@@ -48,6 +48,7 @@ import { resolveGitPush } from "../resolvers/git-push.js";
 import { resolveGhPrCreate } from "../resolvers/gh-pr-create.js";
 import { resolveComputeStateSignature } from "../resolvers/compute-state-signature.js";
 import { resolveUiWritePassthrough } from "../resolvers/ui-write-passthrough.js";
+import { resolveInteractorWrite, type InteractorWriteShape } from "../resolvers/interactor-passthrough.js";
 import type { ResolverResult } from "../resolvers/types.js";
 
 type AnyPointer = { type: string } & Record<string, unknown>;
@@ -161,6 +162,12 @@ export async function resolveDispatch(pointer: AnyPointer): Promise<ResolverResu
     case "uiPanel_write":
     case "uiQuestion_write":
       return resolveUiWritePassthrough(p as Parameters<typeof resolveUiWritePassthrough>[0]);
+    case "uiFeedback_write":
+    case "interactorEvent_write":
+    case "interactorAssertion_write":
+    case "interactorDismiss_write":
+    case "interactorAttachment_write":
+      return resolveInteractorWrite(p as { type: InteractorWriteShape } & Record<string, unknown>);
     default:
       throw new Error(`unknown shape: ${pointer.type}`);
   }

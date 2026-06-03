@@ -184,6 +184,18 @@ export const config = {
       // both authoring paths are simultaneously broken — the impasse observed
       // when the projection-fix dispatch (9a6b1e0d) wedged.
       "authoring_chain_health_report",
+      // Concept-db learning loop (2026-06-03): substrate-side wrappers around
+      // concept-db POST /concepts + GET /concepts/search filtered by source_type.
+      // The substrate calls concept_search_by_source before authoring a new
+      // vessel (read priors) and concept_write after a successful trace (write
+      // the new pattern back). source_type values include vessel_construction_pattern
+      // and impulse_activity_pattern — the two most relevant for substrate-
+      // authored learning. Empirical seeds: 4 vessel_construction_pattern
+      // concepts authored 2026-06-03 covering canonical vessel anatomy, the
+      // scaffold-and-publish-vessel composition, the three-place rule, and
+      // the immunity pattern for detectors.
+      "concept_write",
+      "concept_search_by_source",
       // Stateful-UI vessel (substrate's face, 2026-06-02): advertised here so
       // discovery routes uiPanel_write / uiQuestion_write traffic correctly
       // for callers that resolve via dev-vessel. Implementation is a thin

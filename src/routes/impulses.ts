@@ -67,6 +67,9 @@ import { resolveVesselDemandReport } from "../resolvers/vessel-demand-report.js"
 import { resolveVesselMitosisStart } from "../resolvers/vessel-mitosis-start.js";
 import { resolveVesselMitosisEvaluate } from "../resolvers/vessel-mitosis-evaluate.js";
 import { resolveVesselMitosisCutover } from "../resolvers/vessel-mitosis-cutover.js";
+import { resolveSurrealdbExport } from "../resolvers/surrealdb-export.js";
+import { resolveSurrealdbImport } from "../resolvers/surrealdb-import.js";
+import { resolveGhRepoCreate } from "../resolvers/gh-repo-create.js";
 import type { ResolverResult } from "../resolvers/types.js";
 
 type AnyPointer = { type: string } & Record<string, unknown>;
@@ -218,6 +221,12 @@ export async function resolveDispatch(pointer: AnyPointer): Promise<ResolverResu
       return resolveVesselMitosisEvaluate(p as Parameters<typeof resolveVesselMitosisEvaluate>[0]);
     case "vessel_mitosis_cutover":
       return resolveVesselMitosisCutover(p as Parameters<typeof resolveVesselMitosisCutover>[0]);
+    case "surrealdb_export":
+      return resolveSurrealdbExport(p as Parameters<typeof resolveSurrealdbExport>[0]);
+    case "surrealdb_import":
+      return resolveSurrealdbImport(p as Parameters<typeof resolveSurrealdbImport>[0]);
+    case "gh_repo_create":
+      return resolveGhRepoCreate(p as Parameters<typeof resolveGhRepoCreate>[0]);
     default:
       throw new Error(`unknown shape: ${pointer.type}`);
   }

@@ -34,6 +34,8 @@ import { ENACT_ORTHOGONAL_DECISIONS_TEMPLATE } from "./enact-orthogonal-decision
 import { COMPLETE_VESSEL_SCAFFOLD_TEMPLATE } from "./complete-vessel-scaffold.js";
 import { SCAFFOLD_AND_PUBLISH_VESSEL_TEMPLATE } from "./scaffold-and-publish-vessel.js";
 import { SCAFFOLD_MITOSIS_TRACK_TEMPLATE } from "./scaffold-mitosis-track.js";
+import { BACKEND_SNAPSHOT_TO_GIT_TEMPLATE } from "./backend-snapshot-to-git.js";
+import { VESSEL_REPO_PROMOTE_TEMPLATE } from "./vessel-repo-promote.js";
 // Phase 3 — closed-loop learning and verification
 // (openspec/changes/2026-06-01-closed-loop-learning-and-verification/)
 import { DETECT_RECURRING_PATTERN_TEMPLATE } from "./detect-recurring-pattern.js";
@@ -76,6 +78,8 @@ export { ENACT_ORTHOGONAL_DECISIONS_TEMPLATE } from "./enact-orthogonal-decision
 export { COMPLETE_VESSEL_SCAFFOLD_TEMPLATE } from "./complete-vessel-scaffold.js";
 export { SCAFFOLD_AND_PUBLISH_VESSEL_TEMPLATE } from "./scaffold-and-publish-vessel.js";
 export { SCAFFOLD_MITOSIS_TRACK_TEMPLATE } from "./scaffold-mitosis-track.js";
+export { BACKEND_SNAPSHOT_TO_GIT_TEMPLATE } from "./backend-snapshot-to-git.js";
+export { VESSEL_REPO_PROMOTE_TEMPLATE } from "./vessel-repo-promote.js";
 
 export const SEED_TEMPLATES: ActivityTemplate[] = [
   SHIP_CHANGE_TEMPLATE,
@@ -181,4 +185,14 @@ export const SEED_TEMPLATES: ActivityTemplate[] = [
   // need, drafts a parallel-track fix, and produces a vesselMitosisInitiated
   // artifact as a side effect of normal operation.
   SCAFFOLD_MITOSIS_TRACK_TEMPLATE,
+  // Durability (iter 2026-06-03): backend-snapshot-to-git dumps SurrealDB
+  // tables to /workspace/snapshots/<TS>/ (bind-mounted, survives container
+  // destruction) and commits a small manifest to git. Goal[14] dispatches
+  // this on the boredom timer. Closes Gap A.
+  BACKEND_SNAPSHOT_TO_GIT_TEMPLATE,
+  // New-vessel-repo capability (iter 2026-06-03): vessel-repo-promote creates
+  // a standalone GitHub repo for a substrate-authored vessel via
+  // gh_repo_create and commits a finding-style record. Closes Gap B; the
+  // submodule pointer conversion is deferred to a follow-up.
+  VESSEL_REPO_PROMOTE_TEMPLATE,
 ];

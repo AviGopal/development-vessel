@@ -274,6 +274,16 @@ export const config = {
       "vessel_mitosis_start",
       "vessel_mitosis_evaluate",
       "vessel_mitosis_cutover",
+      // Durability + new-repo primitives (iter 2026-06-03):
+      //   surrealdb_export — dump SurrealDB tables to JSONL under /workspace
+      //     so learning state survives container destruction (Gap A).
+      //   surrealdb_import — replay a snapshot dir; idempotent CREATEs
+      //     (duplicate ids count as rows_skipped).
+      //   gh_repo_create — create a separate GitHub repo for a new vessel
+      //     (Gap B). Refuses metabob-* prefix unless allow_canonical_prefix.
+      "surrealdb_export",
+      "surrealdb_import",
+      "gh_repo_create",
     ] as const,
     resolveEndpoint: "/v2/impulses/resolve",
     resolveRequestFormat: "pointer" as const,

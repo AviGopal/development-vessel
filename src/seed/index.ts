@@ -39,6 +39,7 @@ import { SCAFFOLD_MITOSIS_TRACK_TEMPLATE } from "./scaffold-mitosis-track.js";
 import { BACKEND_SNAPSHOT_TO_GIT_TEMPLATE } from "./backend-snapshot-to-git.js";
 import { VESSEL_REPO_PROMOTE_TEMPLATE } from "./vessel-repo-promote.js";
 import { MITOSIS_TICK_TEMPLATE } from "./mitosis-tick.js";
+import { CONCEPT_USAGE_BACKFILL_TEMPLATE } from "./concept-usage-backfill.js";
 // Phase 3 — closed-loop learning and verification
 // (openspec/changes/2026-06-01-closed-loop-learning-and-verification/)
 import { DETECT_RECURRING_PATTERN_TEMPLATE } from "./detect-recurring-pattern.js";
@@ -86,6 +87,7 @@ export { SCAFFOLD_MITOSIS_TRACK_TEMPLATE } from "./scaffold-mitosis-track.js";
 export { BACKEND_SNAPSHOT_TO_GIT_TEMPLATE } from "./backend-snapshot-to-git.js";
 export { VESSEL_REPO_PROMOTE_TEMPLATE } from "./vessel-repo-promote.js";
 export { MITOSIS_TICK_TEMPLATE } from "./mitosis-tick.js";
+export { CONCEPT_USAGE_BACKFILL_TEMPLATE } from "./concept-usage-backfill.js";
 
 export const SEED_TEMPLATES: ActivityTemplate[] = [
   SHIP_CHANGE_TEMPLATE,
@@ -219,4 +221,13 @@ export const SEED_TEMPLATES: ActivityTemplate[] = [
   // this iteration the lift loop (detect → modify → evaluate → cutover) has
   // no operator hand in the modify path.
   MITOSIS_TICK_TEMPLATE,
+  // Concept-db relevance writeback (iter 2026-06-03): unblocks the
+  // (ts+1)/(tl+2) Bayesian relevance signal that's currently one-sided
+  // (29/37 concepts have times_loaded > 0; only 6 have times_succeeded > 0
+  // from a manual backfill; ZERO autonomous traces invoke concept_usage_record).
+  // Boredom goal[16] dispatches this on cadence with a rotating query so
+  // different concepts get exercised. Single resolver chain + deterministic;
+  // no LLM, no pool iteration. The resolver concept_usage_record already
+  // exists (5/5 tests green); this is the missing dispatcher.
+  CONCEPT_USAGE_BACKFILL_TEMPLATE,
 ];

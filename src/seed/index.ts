@@ -27,6 +27,7 @@ import { AUDIT_DISPATCH_TARGET_DRIFT_TEMPLATE } from "./audit-dispatch-target-dr
 import { INGEST_AUDIT_FINDINGS_TEMPLATE } from "./ingest-audit-findings.js";
 import { DETECT_SERVICE_OOM_CASCADE_TEMPLATE } from "./detect-service-oom-cascade.js";
 import { DETECT_CONCEPT_DB_DRIFT_TEMPLATE } from "./detect-concept-db-drift.js";
+import { DETECT_OBSIDIAN_VESSEL_HEALTH_TEMPLATE } from "./detect-obsidian-vessel-health.js";
 import { DRAFT_ACTIVITY_FROM_PATTERN_TEMPLATE } from "./draft-activity-from-pattern.js";
 import { PUBLISH_SUBSTRATE_AUTHORED_ARTIFACT_TEMPLATE } from "./publish-substrate-authored-artifact.js";
 import { EVALUATE_PR_VIA_INTERNAL_IDIOMS_TEMPLATE } from "./evaluate-pr-via-internal-idioms.js";
@@ -72,6 +73,7 @@ export { AUDIT_DISPATCH_TARGET_DRIFT_TEMPLATE } from "./audit-dispatch-target-dr
 export { INGEST_AUDIT_FINDINGS_TEMPLATE } from "./ingest-audit-findings.js";
 export { DETECT_SERVICE_OOM_CASCADE_TEMPLATE } from "./detect-service-oom-cascade.js";
 export { DETECT_CONCEPT_DB_DRIFT_TEMPLATE } from "./detect-concept-db-drift.js";
+export { DETECT_OBSIDIAN_VESSEL_HEALTH_TEMPLATE } from "./detect-obsidian-vessel-health.js";
 export { DRAFT_ACTIVITY_FROM_PATTERN_TEMPLATE } from "./draft-activity-from-pattern.js";
 export { DETECT_RECURRING_PATTERN_TEMPLATE } from "./detect-recurring-pattern.js";
 export { PREDICT_AND_VERIFY_TEMPLATE } from "./predict-and-verify.js";
@@ -141,6 +143,12 @@ export const SEED_TEMPLATES: ActivityTemplate[] = [
   // in openspec/changes/2026-06-01-concept-db-supersession-and-chunker-hygiene/
   // and openspec/changes/2026-06-01-concept-db-upkeep-loop/.
   DETECT_CONCEPT_DB_DRIFT_TEMPLATE,
+  // obsidian-vessel connectivity detector (2026-06-03): detects CORS anti-patterns
+  // (raw fetch() calls that the Electron renderer blocks) and WebSocket URL doubling
+  // (/ws/ws construction). Reads concept-db priors + live plugin source via
+  // local-tools-vessel. Constitutional principle: every observed bug class becomes
+  // a detection template (concept_9ldsmRgqSTd5).
+  DETECT_OBSIDIAN_VESSEL_HEALTH_TEMPLATE,
   // Phase 2 of obsidian meta-skill prototype (2026-06-01): the substrate's
   // general drafter. Inputs a hand-built recurringPatternCluster, prunes the
   // resolver + activity vocabularies, drafts an arbitrary-topology activity

@@ -26,6 +26,7 @@ import { DETECT_PRECONDITION_REJECTION_TEMPLATE } from "./detect-precondition-re
 import { AUDIT_DISPATCH_TARGET_DRIFT_TEMPLATE } from "./audit-dispatch-target-drift.js";
 import { INGEST_AUDIT_FINDINGS_TEMPLATE } from "./ingest-audit-findings.js";
 import { DETECT_SERVICE_OOM_CASCADE_TEMPLATE } from "./detect-service-oom-cascade.js";
+import { DETECT_CONCEPT_DB_DRIFT_TEMPLATE } from "./detect-concept-db-drift.js";
 import { DRAFT_ACTIVITY_FROM_PATTERN_TEMPLATE } from "./draft-activity-from-pattern.js";
 import { PUBLISH_SUBSTRATE_AUTHORED_ARTIFACT_TEMPLATE } from "./publish-substrate-authored-artifact.js";
 import { EVALUATE_PR_VIA_INTERNAL_IDIOMS_TEMPLATE } from "./evaluate-pr-via-internal-idioms.js";
@@ -70,6 +71,7 @@ export { DETECT_PRECONDITION_REJECTION_TEMPLATE } from "./detect-precondition-re
 export { AUDIT_DISPATCH_TARGET_DRIFT_TEMPLATE } from "./audit-dispatch-target-drift.js";
 export { INGEST_AUDIT_FINDINGS_TEMPLATE } from "./ingest-audit-findings.js";
 export { DETECT_SERVICE_OOM_CASCADE_TEMPLATE } from "./detect-service-oom-cascade.js";
+export { DETECT_CONCEPT_DB_DRIFT_TEMPLATE } from "./detect-concept-db-drift.js";
 export { DRAFT_ACTIVITY_FROM_PATTERN_TEMPLATE } from "./draft-activity-from-pattern.js";
 export { DETECT_RECURRING_PATTERN_TEMPLATE } from "./detect-recurring-pattern.js";
 export { PREDICT_AND_VERIFY_TEMPLATE } from "./predict-and-verify.js";
@@ -134,6 +136,11 @@ export const SEED_TEMPLATES: ActivityTemplate[] = [
   // (concept_9ldsmRgqSTd5) as detect-phantom-success-trace and
   // detect-precondition-rejection.
   DETECT_SERVICE_OOM_CASCADE_TEMPLATE,
+  // concept-db upkeep detector (2026-06-03): detects duplicate clusters +
+  // cold-start concepts. Fills the detect-concept-db-upkeep-gaps gap cited
+  // in openspec/changes/2026-06-01-concept-db-supersession-and-chunker-hygiene/
+  // and openspec/changes/2026-06-01-concept-db-upkeep-loop/.
+  DETECT_CONCEPT_DB_DRIFT_TEMPLATE,
   // Phase 2 of obsidian meta-skill prototype (2026-06-01): the substrate's
   // general drafter. Inputs a hand-built recurringPatternCluster, prunes the
   // resolver + activity vocabularies, drafts an arbitrary-topology activity

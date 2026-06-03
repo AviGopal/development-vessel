@@ -13,6 +13,7 @@ import { PROBE_UNTRAVERSED_EDGE_TEMPLATE } from "./probe-untraversed-edge.js";
 import { ESCALATE_UNKNOWN_SHAPE_TEMPLATE } from "./escalate-unknown-shape.js";
 import { COVERAGE_TICK_TEMPLATE } from "./coverage-tick.js";
 import { SUBSTRATE_HEALTH_TICK_TEMPLATE } from "./substrate-health-tick.js";
+import { VESSEL_DEMAND_TICK_TEMPLATE } from "./vessel-demand-tick.js";
 import { HARNESS_RUN_MATRIX_TEMPLATE } from "./harness-run-matrix.js";
 import { TRY_DIRECT_ANSWER_TEMPLATE } from "./try-direct-answer.js";
 import { CLOSE_HEALTH_GAP_TEMPLATE } from "./close-health-gap.js";
@@ -52,6 +53,7 @@ export { PROBE_UNTRAVERSED_EDGE_TEMPLATE } from "./probe-untraversed-edge.js";
 export { ESCALATE_UNKNOWN_SHAPE_TEMPLATE } from "./escalate-unknown-shape.js";
 export { COVERAGE_TICK_TEMPLATE } from "./coverage-tick.js";
 export { SUBSTRATE_HEALTH_TICK_TEMPLATE } from "./substrate-health-tick.js";
+export { VESSEL_DEMAND_TICK_TEMPLATE } from "./vessel-demand-tick.js";
 export { HARNESS_RUN_MATRIX_TEMPLATE } from "./harness-run-matrix.js";
 export { TRY_DIRECT_ANSWER_TEMPLATE } from "./try-direct-answer.js";
 export { CLOSE_HEALTH_GAP_TEMPLATE } from "./close-health-gap.js";
@@ -166,4 +168,8 @@ export const SEED_TEMPLATES: ActivityTemplate[] = [
   // git_branch_create + git_add + git_commit + git_push + gh_pr_create.
   // Mirrors publish-substrate-authored-artifact safety gates for vessel scope.
   SCAFFOLD_AND_PUBLISH_VESSEL_TEMPLATE,
+  // Goal-alignment fix (2026-06-03): single-resolver wrapper for goal[12]
+  // so its open-ended text routes to a deterministic vessel_demand_report
+  // dispatch instead of LLM-reuse picking the closest semantic match.
+  VESSEL_DEMAND_TICK_TEMPLATE,
 ];

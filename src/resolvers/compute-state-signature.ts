@@ -32,6 +32,14 @@ export interface ComputeStateSignaturePointer {
   apiKey?: string;
   /** Override fetch timeout per HTTP call in ms. Default 1500. */
   httpTimeoutMs?: number;
+  /**
+   * Optional list of concept ids that were loaded as priors for the dispatch
+   * decision (e.g. via concept_select_for_prompt). Folded into the signature
+   * hash so the substrate can distinguish "this template fired with concept
+   * priors X loaded" from "fired blind" — concept-conditioned learning.
+   * Empty/missing → treated as zero loaded concepts. Optional for back-compat.
+   */
+  loaded_concept_ids?: string[];
 }
 
 const DEFAULT_ACTIVITY_API = "http://127.0.0.1:8080";
@@ -296,6 +304,14 @@ export async function resolveComputeStateSignature(
   const cgroupRounded = cgroupMemPct !== undefined ? Math.round(cgroupMemPct) : undefined;
   const successRateRounded = Math.round(recent.success_rate * 100) / 100;
 
+  // Concept priors — deduplicated, sorted for hash stability. Empty list when
+  // no priors are loaded (default) → contributes [] to the hash so empty-prior
+  // and absent-input states collapse to the same signature class.
+  const loadedConceptIds = Array.isArray(pointer.loaded_concept_ids)
+    ? Array.from(new Set(pointer.loaded_concept_ids.filter((s): s is string => typeof s === "string"))).sort()
+    : [];
+  const loadedConceptCount = loadedConceptIds.length;
+
   const hashPayload: Record<string, unknown> = {
     load: loadRounded,
     mem: memRounded,
@@ -315,6 +331,10 @@ export async function resolveComputeStateSignature(
     uia: uiAsksAgeSec,
     uip: uiAssertsPending,
     uio: uiPanelsOpen,
+    // Concept priors — both count and sorted-ids fold in. Including both
+    // means same-size-different-priors states get distinct signatures.
+    lcc: loadedConceptCount,
+    lci: loadedConceptIds,
   };
 
   const signature_hash = computeHash(hashPayload);
@@ -347,6 +367,11 @@ export async function resolveComputeStateSignature(
         unanswered_asks_age_ms_p95: uiAsksAgeP95,
         operator_assertion_pending_count: uiAssertsPending,
         panels_open_count: uiPanelsOpen,
+      },
+      concept_priors: {
+        loaded_concept_count: loadedConceptCount,
+        // Surface a sample for inspection. Full list is in the hash payload.
+        loaded_concept_ids_sample: loadedConceptIds.slice(0, 5),
       },
       signature_hash,
     },

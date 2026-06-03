@@ -1,76 +1,107 @@
 import type { ActivityTemplate } from "@avigopal/ias-executor-ts";
 
 /**
- * enact-orthogonal-decisions — closes the meta-loop between
- * `observe-orthogonal-patterns` (which writes a JSON array of MODIFY /
- * CREATE_DETECTOR / CREATE_CONSUMER decisions under
- * `/workspace/observations/orthogonal-<ts>.json`) and the drafter
- * (`draft-gap-closing-activity`).
+ * enact-orthogonal-decisions — closes the meta-loop between the substrate's
+ * observation surfaces and its self-authoring drafters.
  *
- * Without this activity the decisions sit unconsumed on disk. With it,
- * each boredom tick that lands on this template picks the highest-priority
- * CREATE_DETECTOR / CREATE_CONSUMER decision from the latest observation,
- * synthesizes a failure-mode-style scenario JSON (mirroring the
- * `auto-*.json` shape), writes it to the scenarios dir, and dispatches
- * `draft-gap-closing-activity` against the new scenario_id. MODIFY
- * decisions are explicitly NOT dispatched yet — a modify pathway doesn't
- * exist; instead the LLM is asked to mark them as pending so a future
- * modify-activity (or operator review) can pick them up.
+ * Two parallel observation sources feed the dispatch decision:
  *
- * Pattern: compose-only. No resolver changes. Five tasks:
+ *   1. orthogonal-decisions JSON array written by `observe-orthogonal-patterns`
+ *      under `/workspace/observations/orthogonal-<ts>.json`. Encodes
+ *      CREATE_DETECTOR / CREATE_CONSUMER / MODIFY decisions surfaced by the
+ *      pattern observer.
  *
- *   1. read_latest_observation     — fs_read the path passed via
- *                                    `observation_path`.
- *   2. extract_create_decisions    — llm_completion_dispatch filters the
- *                                    JSON array down to the highest-
- *                                    priority CREATE_DETECTOR or
- *                                    CREATE_CONSUMER entry and returns a
- *                                    single scenario-ready object (or a
- *                                    sentinel when none exist).
- *   3. synthesize_scenarios        — llm_completion_dispatch wraps the
- *                                    chosen decision in the
- *                                    auto-scenario JSON contract
- *                                    consumed by draft-gap-closing-
- *                                    activity (id, mode_class,
- *                                    expected_emergence, etc.).
- *   4. write_scenarios             — fs_write the synthesized scenario
- *                                    to /workspace/validation/failure-
- *                                    modes/scenarios/enacted-<ts>.json
- *                                    (single file per dispatch — the
- *                                    drafter only consumes one at a
- *                                    time; iterate via boredom cadence).
- *   5. dispatch_drafter            — http_fetch POST to goal-host
- *                                    /run-goal with
- *                                    targetTemplateId=draft-gap-closing-
- *                                    activity and the synthesized
- *                                    scenario_id in variables.
+ *   2. live `code_needs_report` (resolver call, no file read). Surfaces MODIFY
+ *      decisions sourced from failure-pattern aggregation in execution traces
+ *      (broken templates, chain-truncation patterns, etc.). This is the LIVE
+ *      arm — when the substrate's drafter itself breaks (e.g.
+ *      `draft-gap-closing-activity` chain truncation), it shows up here as a
+ *      top MODIFY decision.
  *
- * Variables (all defaults documented; caller supplies concrete paths):
- *   observation_path  — absolute path to the orthogonal-<ts>.json file
- *                       (default-doc: /workspace/observations/).
- *   scenarios_dir     — directory where the synthesized scenario lands
- *                       (default-doc: /workspace/validation/failure-
- *                       modes/scenarios/).
- *   report_path       — pass-through for the drafter dispatch (defaults
- *                       to the latest harness report).
- *   proposals_dir     — pass-through for the drafter dispatch.
- *   dispatch_ts       — short timestamp suffix used in the scenario id
- *                       so each dispatch produces a fresh file.
+ * The template synthesizes ONE dispatch decision from both inputs:
+ *
+ *   - If `code_needs_report.top_priority` is a MODIFY with priority_score ≥
+ *     `modify_priority_floor` (default 0.4) → dispatch
+ *     `development-vessel:scaffold-mitosis-track` with variables derived live
+ *     from the broken target id (vessel_name + target_file_path +
+ *     intent_summary). This is the autonomous self-modification path.
+ *
+ *   - Otherwise, if the orthogonal observation has a chosen CREATE_DETECTOR /
+ *     CREATE_CONSUMER decision → synthesize a failure-mode-style scenario JSON
+ *     and dispatch `development-vessel:draft-gap-closing-activity`. This is
+ *     the autonomous detector/consumer authoring path.
+ *
+ *   - Otherwise, dispatch a noop scenario so the chain still completes with a
+ *     normal trace (β+=1 in Thompson posteriors is fine — informative).
+ *
+ * Compose-only: no resolver changes. The synthesizer + dispatcher tasks
+ * encode the branch logic in their LLM/json_path_extract config; no
+ * conditional task graph required at the executor level.
  */
+
+const SYNTHESIZE_DISPATCH_PROMPT = `You are the substrate's autonomous-dispatch decider. You receive TWO observation sources and must output a single dispatch decision in strict JSON.
+
+## Source A: orthogonal observation (file-backed pattern decisions)
+
+{{read_latest_observation_content}}
+
+## Source B: live code_needs_report (trace-aggregation decisions)
+
+{{read_code_needs_value_json}}
+
+## Dispatch timestamp
+
+{{dispatch_ts}}
+
+## Decision rules (apply in order)
+
+1. **MODIFY priority**: if Source B has a top_priority entry with action="MODIFY" and priority_score >= {{modify_priority_floor}}, emit dispatch_kind="mitosis":
+   - target_template_id: "development-vessel:scaffold-mitosis-track"
+   - Derive vessel_name from the broken template id (e.g. id "activity:⟨development-vessel:draft-gap-closing-activity⟩" → vessel_name "development-vessel"; id "development-vessel:foo" → "development-vessel"; id "gap-closing:auto-…" → "development-vessel" by convention since gap-closing variants live there).
+   - Derive target_file_path: take the substring AFTER the first ":" (after stripping any "activity:⟨…⟩" wrapper); convert to "src/seed/<that>.ts" by convention. For an id like "development-vessel:draft-gap-closing-activity" the file is "src/seed/draft-gap-closing-activity.ts". For "gap-closing:auto-<slug>" the file is "src/seed/draft-gap-closing-activity.ts" (the drafter that authored it).
+   - intent_summary: combine the top_priority reason + cited_evidence to describe what should change. Keep under 400 chars. Quote the reason verbatim where possible.
+
+2. **CREATE_DETECTOR / CREATE_CONSUMER**: if Source A has CREATE_DETECTOR or CREATE_CONSUMER entries, pick the highest-evidence-count CREATE_DETECTOR (or fallback CREATE_CONSUMER). Emit dispatch_kind="drafter":
+   - target_template_id: "development-vessel:draft-gap-closing-activity"
+   - Synthesize a scenario JSON matching the auto-scenarios contract:
+     { id, mode_class, stage, outcome_class, title, description, goal_text, expected_input_shapes, expected_output_shapes, cited_concepts, expected_emergence: { activity_signature: { output_shapes_must_include } }, orthogonal_decision: { kind, target, rationale, evidence_trace_ids } }
+   - scenario_id MUST be "enacted-{{dispatch_ts}}-<short-slug>" derived from the target name (kebab-case, <=20 chars, ASCII lowercase letters/digits/hyphen).
+   - For CREATE_DETECTOR: output_shapes_must_include should be a sensible detector shape like ["detectionReport"]. For CREATE_CONSUMER: derive from the target name (e.g. target "concept_usage_record" → ["conceptUsageOutcome"]).
+
+3. **Noop**: otherwise emit dispatch_kind="noop":
+   - target_template_id: "development-vessel:draft-gap-closing-activity"
+   - scenario_id: "enacted-{{dispatch_ts}}-noop"
+   - scenario_json: a minimal noop body (id, mode_class="enacted_orthogonal", stage="noop", outcome_class="noop", title, description, goal_text="noop", empty arrays for the shape fields, expected_emergence.activity_signature.output_shapes_must_include=[])
+
+## Output contract — output ONLY this JSON, no fences, no prose
+
+{
+  "dispatch_kind": "mitosis" | "drafter" | "noop",
+  "target_template_id": "development-vessel:scaffold-mitosis-track" | "development-vessel:draft-gap-closing-activity",
+  "mitosis_vars": {
+    "vessel_name": "...",
+    "target_file_path": "...",
+    "intent_summary": "..."
+  },
+  "drafter_vars": {
+    "scenario_id": "enacted-{{dispatch_ts}}-<slug>",
+    "scenario_json": { ...synthesized scenario object, or null if dispatch_kind != "drafter" and != "noop"... }
+  },
+  "derivation_notes": "1-2 sentences explaining which source + entry drove the choice and what was derived from it. Quote priority_score / evidence counts."
+}
+
+When dispatch_kind="mitosis", set drafter_vars.scenario_json to null (it is unused). When dispatch_kind="drafter" or "noop", set mitosis_vars to zero-strings ("") — the field is unused in those branches.`;
+
 export const ENACT_ORTHOGONAL_DECISIONS_TEMPLATE: ActivityTemplate = {
   id: "development-vessel:enact-orthogonal-decisions",
   name: "enact-orthogonal-decisions",
   description:
-    "Reads the latest /workspace/observations/orthogonal-<ts>.json " +
-    "decision array, picks the highest-priority CREATE_DETECTOR or " +
-    "CREATE_CONSUMER decision, synthesizes a failure-mode-style scenario " +
-    "JSON, writes it to the scenarios dir, and dispatches " +
-    "draft-gap-closing-activity against the new scenario id. Closes the " +
-    "meta-loop between orthogonal observation and substrate authoring. " +
-    "MODIFY decisions are deferred — they are surfaced as " +
-    "pendingModifyDecision context inside the synthesizer prompt so a " +
-    "future modify-activity (or operator) can pick them up. Compose-only " +
-    "— adds no resolver code.",
+    "Reads two observation sources — (1) the latest orthogonal-decisions file, (2) live code_needs_report — and synthesizes a single dispatch decision. " +
+    "Routes MODIFY priorities from code_needs_report to scaffold-mitosis-track (substrate self-modification). " +
+    "Routes CREATE_DETECTOR / CREATE_CONSUMER orthogonal decisions to draft-gap-closing-activity (substrate self-authoring). " +
+    "Closes both meta-loops in one template. Compose-only — adds no resolver code. " +
+    "Variables (vessel_name, target_file_path, intent_summary, scenario_id) are DERIVED LIVE from observation data, " +
+    "not hardcoded by the caller.",
   inputShapes: [],
   outputShapes: ["healthGapDispatch"],
   tags: [
@@ -78,50 +109,49 @@ export const ENACT_ORTHOGONAL_DECISIONS_TEMPLATE: ActivityTemplate = {
     "orthogonal.learning",
     "observation.to.action",
     "substrate.self.authoring",
+    "substrate.self.modification",
   ],
   variables: [
     {
       name: "observation_path",
       description:
-        "Absolute path to the orthogonal-<timestamp>.json observation " +
-        "file produced by observe-orthogonal-patterns. Default convention: " +
-        "/workspace/observations/orthogonal-*.json — caller picks the most " +
-        "recent file and passes the concrete path here.",
+        "Absolute path to the orthogonal-<timestamp>.json observation file (Source A). " +
+        "Pass-through to the file reader; if absent or unreachable, the reader produces an empty " +
+        "fileContent which the LLM treats as 'no CREATE_* decisions'.",
     },
     {
       name: "scenarios_dir",
       description:
-        "Directory where the synthesized failure-mode-style scenario " +
-        "JSON is written. Default: " +
-        "/workspace/validation/failure-modes/scenarios/.",
+        "Directory where the synthesized scenario JSON is written (used only in the drafter branch).",
     },
     {
       name: "report_path",
       description:
-        "Path to the latest failure-mode harness report. Passed " +
-        "through to draft-gap-closing-activity unchanged.",
+        "Path to the latest failure-mode harness report. Pass-through to draft-gap-closing-activity.",
     },
     {
       name: "proposals_dir",
       description:
-        "Directory where the drafter writes proposal JSON. Pass-through " +
-        "to draft-gap-closing-activity.",
+        "Directory where the drafter writes proposal JSON. Pass-through.",
     },
     {
       name: "dispatch_ts",
       description:
-        "Short ISO-like timestamp suffix used in the synthesized " +
-        "scenario id and filename so each dispatch produces a fresh file " +
-        "(e.g. 20260602T030000Z).",
+        "Short ISO-like timestamp suffix used in the synthesized scenario id and filename.",
+    },
+    {
+      name: "modify_priority_floor",
+      description:
+        "Minimum priority_score (0..1) for a MODIFY decision from code_needs_report to trigger " +
+        "mitosis dispatch. Default 0.4 — below this the orthogonal CREATE_* branch is preferred.",
     },
   ],
   tasks: [
     {
       id: "read_latest_observation",
       description:
-        "Load the orthogonal-decisions JSON array written by " +
-        "observe-orthogonal-patterns. The path is supplied via " +
-        "observation_path so the dispatcher picks the freshest file.",
+        "Load the orthogonal-decisions JSON array written by observe-orthogonal-patterns. " +
+        "Source A of the dispatch decision.",
       resolver: "fs_read",
       config: {
         type: "fs_read",
@@ -130,150 +160,142 @@ export const ENACT_ORTHOGONAL_DECISIONS_TEMPLATE: ActivityTemplate = {
       outputShapes: ["fileContent"],
     },
     {
-      id: "extract_create_decisions",
+      id: "read_code_needs",
       description:
-        "LLM filter pass: scan the observation array and pick the single " +
-        "highest-priority decision with kind CREATE_DETECTOR or " +
-        "CREATE_CONSUMER. Output is a strict JSON object with the " +
-        "chosen decision plus a parallel list of any MODIFY decisions " +
-        "so the synthesizer can surface them as pendingModifyDecision " +
-        "context. Returns a sentinel { chosen: null } when no create-" +
-        "kind decisions exist so downstream tasks short-circuit cleanly.",
+        "Source B of the dispatch decision: synthesizes recent traces + templates + advertised " +
+        "shapes into MODIFY / CREATE_RESOLVER / etc. decisions. The substrate observes its own " +
+        "failure patterns here — broken-template MODIFY entries originate from preflight + " +
+        "chain-truncation aggregations. Deterministic resolver, no LLM.",
+      resolver: "code_needs_report",
+      config: {
+        type: "code_needs_report",
+        traceLimit: 100,
+        brokenTemplateThreshold: 3,
+        resolverDemandThreshold: 3,
+      },
+      outputShapes: ["codeNeedsReport"],
+    },
+    {
+      id: "synthesize_dispatch",
+      description:
+        "LLM combines both observation sources and emits a single dispatch decision. " +
+        "Branch logic (MODIFY → mitosis vs CREATE_* → drafter vs noop) lives in the prompt. " +
+        "Output is a strict JSON object whose fields downstream json_path_extract tasks read " +
+        "to construct the http_fetch body.",
       resolver: "llm_completion_dispatch",
       config: {
         type: "llm_completion_dispatch",
         system_prompt:
-          "You are a precise JSON generator. Output only valid JSON " +
-          "with no surrounding text.",
-        prompt:
-          "You receive a JSON array of catalogue-change decisions emitted " +
-          "by observe-orthogonal-patterns. Each element has fields: " +
-          "kind (MODIFY|CREATE_DETECTOR|CREATE_CONSUMER), target, " +
-          "rationale, evidence_trace_ids.\n\n" +
-          "## Observation array\n\n" +
-          "{{read_latest_observation_content}}\n\n" +
-          "## Task\n\n" +
-          "1. Filter to decisions where kind == 'CREATE_DETECTOR' or " +
-          "kind == 'CREATE_CONSUMER'.\n" +
-          "2. Rank them: CREATE_DETECTOR with the largest " +
-          "evidence_trace_ids count first; ties broken by length of " +
-          "rationale (shorter = more confident); then CREATE_CONSUMER " +
-          "with the same rule.\n" +
-          "3. Output ONLY a JSON object with this exact shape:\n" +
-          '{\n' +
-          '  "chosen": { "kind": "...", "target": "...", "rationale": "...", "evidence_trace_ids": [...] } | null,\n' +
-          '  "pending_modify": [ { "kind": "MODIFY", "target": "...", "rationale": "..." }, ... ]\n' +
-          '}\n\n' +
-          "If no CREATE_DETECTOR / CREATE_CONSUMER decisions exist, set " +
-          "chosen to null. pending_modify carries every MODIFY entry as-" +
-          "is so the synthesizer can include them as pendingModifyDecision " +
-          "context. Output ONLY the JSON object — no fences, no prose.",
+          "You are a precise JSON generator. Output only valid JSON with no surrounding text, no markdown fences, no prose.",
+        prompt: SYNTHESIZE_DISPATCH_PROMPT,
         model: "anthropic/claude-haiku-4-5-20251001",
-        max_tokens: 1500,
+        max_tokens: 2500,
       },
-      outputShapes: ["orthogonalDecisionSelection"],
+      outputShapes: ["enactedDispatchDecision"],
     },
     {
-      id: "synthesize_scenarios",
+      id: "extract_dispatch_kind",
       description:
-        "LLM wraps the chosen CREATE_DETECTOR / CREATE_CONSUMER decision " +
-        "in a failure-mode-style scenario JSON matching the contract " +
-        "consumed by draft-gap-closing-activity (id, mode_class, stage, " +
-        "outcome_class, title, description, goal_text, " +
-        "expected_input_shapes, expected_output_shapes, cited_concepts, " +
-        "expected_emergence.activity_signature.output_shapes_must_include). " +
-        "The synthesized scenario carries the original decision's " +
-        "rationale and evidence_trace_ids verbatim plus a " +
-        "pendingModifyDecision array for any MODIFY entries surfaced " +
-        "by the previous task — context the drafter can use.",
-      resolver: "llm_completion_dispatch",
-      config: {
-        type: "llm_completion_dispatch",
-        system_prompt:
-          "You are a precise JSON generator. Output only valid JSON " +
-          "with no surrounding text.",
-        prompt:
-          "You receive a chosen orthogonal decision plus a list of pending " +
-          "MODIFY decisions. Your job is to wrap the chosen decision in a " +
-          "failure-mode-style scenario JSON that draft-gap-closing-activity " +
-          "can consume.\n\n" +
-          "## Chosen + pending\n\n" +
-          "{{extract_create_decisions_content}}\n\n" +
-          "## Dispatch timestamp\n\n" +
-          "{{dispatch_ts}}\n\n" +
-          "## Output contract\n\n" +
-          "If the input has chosen == null, output exactly:\n" +
-          '{ "id": "enacted-{{dispatch_ts}}-noop", "mode_class": "enacted_orthogonal", "stage": "noop", "outcome_class": "noop", "title": "No CREATE_DETECTOR or CREATE_CONSUMER decisions in latest observation", "description": "Synthesizer short-circuited; no enactment needed this tick.", "goal_text": "noop", "expected_input_shapes": [], "expected_output_shapes": [], "cited_concepts": [], "expected_emergence": { "activity_signature": { "output_shapes_must_include": [] } }, "pendingModifyDecision": [] }\n\n' +
-          "Otherwise output:\n" +
-          '{\n' +
-          '  "id": "enacted-{{dispatch_ts}}-<short-slug>",\n' +
-          '  "mode_class": "enacted_orthogonal",\n' +
-          '  "stage": "synthesis",\n' +
-          '  "outcome_class": "gap",\n' +
-          '  "title": "Enacted orthogonal decision: <kind> for <target>",\n' +
-          '  "description": "<combines the chosen rationale with what the drafter should produce. Quote the original rationale verbatim and cite evidence_trace_ids.>",\n' +
-          '  "goal_text": "<CREATE_DETECTOR: \\"detect <signature>\\"; CREATE_CONSUMER: \\"consume <shape> downstream\\">",\n' +
-          '  "expected_input_shapes": [],\n' +
-          '  "expected_output_shapes": [],\n' +
-          '  "cited_concepts": [],\n' +
-          '  "expected_emergence": {\n' +
-          '    "activity_signature": {\n' +
-          '      "output_shapes_must_include": ["<CREATE_DETECTOR -> a sensible detector output shape like detectionReport; CREATE_CONSUMER -> a sensible consumer output shape based on the target name>"]\n' +
-          '    }\n' +
-          '  },\n' +
-          '  "orthogonal_decision": { "kind": "...", "target": "...", "rationale": "...", "evidence_trace_ids": [...] },\n' +
-          '  "pendingModifyDecision": [ ...the MODIFY entries verbatim... ]\n' +
-          '}\n\n' +
-          "Rules:\n" +
-          "- The id must start with 'enacted-{{dispatch_ts}}-' and end " +
-          "with a short kebab-case slug derived from the target (≤20 " +
-          "chars, ASCII lowercase letters/digits/hyphen).\n" +
-          "- Quote the original rationale verbatim inside description.\n" +
-          "- evidence_trace_ids in orthogonal_decision MUST be copied " +
-          "from the chosen decision verbatim.\n" +
-          "- Output ONLY the JSON object. No fences. No prose.",
-        model: "anthropic/claude-haiku-4-5-20251001",
-        max_tokens: 1500,
-      },
-      outputShapes: ["enactedOrthogonalScenario"],
-    },
-    {
-      id: "extract_scenario_id",
-      description:
-        "Pull the synthesized scenario's id field so the dispatcher can " +
-        "reference it. Deterministic — json_path_extract avoids LLM " +
-        "round-trip drift on the id field.",
+        "Pull dispatch_kind from the synthesized decision. Drives the http_fetch branch via the " +
+        "extracted_target_template_id and extracted_scenario_json fields.",
       resolver: "json_path_extract",
       config: {
         type: "json_path_extract",
-        json: "{{synthesize_scenarios_content}}",
-        path: "id",
+        json: "{{synthesize_dispatch_content}}",
+        path: "dispatch_kind",
       },
       outputShapes: ["json_extracted_value"],
     },
     {
-      id: "write_scenarios",
+      id: "extract_target_template_id",
       description:
-        "Persist the synthesized scenario to scenarios_dir as a single " +
-        "file. The drafter consumes one scenario per dispatch; the " +
-        "boredom cadence iterates through observations across ticks.",
+        "Pull target_template_id from the synthesized decision — same source used as the " +
+        "scaffold-mitosis-track / draft-gap-closing-activity selector in the http_fetch body.",
+      resolver: "json_path_extract",
+      config: {
+        type: "json_path_extract",
+        json: "{{synthesize_dispatch_content}}",
+        path: "target_template_id",
+      },
+      outputShapes: ["json_extracted_value"],
+    },
+    {
+      id: "extract_mitosis_vessel_name",
+      description:
+        "Pull mitosis_vars.vessel_name. Empty string when dispatch_kind != mitosis.",
+      resolver: "json_path_extract",
+      config: {
+        type: "json_path_extract",
+        json: "{{synthesize_dispatch_content}}",
+        path: "mitosis_vars.vessel_name",
+      },
+      outputShapes: ["json_extracted_value"],
+    },
+    {
+      id: "extract_mitosis_target_file_path",
+      description: "Pull mitosis_vars.target_file_path.",
+      resolver: "json_path_extract",
+      config: {
+        type: "json_path_extract",
+        json: "{{synthesize_dispatch_content}}",
+        path: "mitosis_vars.target_file_path",
+      },
+      outputShapes: ["json_extracted_value"],
+    },
+    {
+      id: "extract_mitosis_intent_summary",
+      description: "Pull mitosis_vars.intent_summary.",
+      resolver: "json_path_extract",
+      config: {
+        type: "json_path_extract",
+        json: "{{synthesize_dispatch_content}}",
+        path: "mitosis_vars.intent_summary",
+      },
+      outputShapes: ["json_extracted_value"],
+    },
+    {
+      id: "extract_drafter_scenario_id",
+      description: "Pull drafter_vars.scenario_id (used only when dispatch_kind != mitosis).",
+      resolver: "json_path_extract",
+      config: {
+        type: "json_path_extract",
+        json: "{{synthesize_dispatch_content}}",
+        path: "drafter_vars.scenario_id",
+      },
+      outputShapes: ["json_extracted_value"],
+    },
+    {
+      id: "extract_drafter_scenario_json",
+      description: "Pull drafter_vars.scenario_json as a string for file persistence.",
+      resolver: "json_path_extract",
+      config: {
+        type: "json_path_extract",
+        json: "{{synthesize_dispatch_content}}",
+        path: "drafter_vars.scenario_json",
+      },
+      outputShapes: ["json_extracted_value"],
+    },
+    {
+      id: "write_drafter_scenario",
+      description:
+        "Persist the synthesized scenario JSON for the drafter to pick up. When " +
+        "dispatch_kind=mitosis the JSON value is null/empty-string; the write still happens " +
+        "(harmless empty file) but the drafter isn't dispatched. Single file per tick.",
       resolver: "fs_write",
       config: {
         type: "fs_write",
         path: "{{scenarios_dir}}/enacted-{{dispatch_ts}}.json",
-        content: "{{synthesize_scenarios_content}}",
+        content: "{{extract_drafter_scenario_json_value_json}}",
       },
       outputShapes: ["fileWriteResult"],
     },
     {
-      id: "dispatch_drafter",
+      id: "dispatch_decision",
       description:
-        "POST to goal-host /run-goal with targetTemplateId=" +
-        "draft-gap-closing-activity and the synthesized scenario_id. " +
-        "The drafter's fs_read picks up the file just written by " +
-        "write_scenarios. When the synthesizer chose the noop sentinel, " +
-        "the drafter will fail fast on the noop scenario — a normal " +
-        "trace, not an error.",
+        "Single dispatch step. Routes to scaffold-mitosis-track or draft-gap-closing-activity " +
+        "based on the extracted target_template_id. Variables come from the LIVE-derived " +
+        "mitosis_vars or drafter_vars — no operator hardcoding. The unused branch's vars are " +
+        "passed verbatim but ignored by the receiving template (extra variables are inert).",
       resolver: "http_fetch",
       config: {
         type: "http_fetch",
@@ -282,11 +304,16 @@ export const ENACT_ORTHOGONAL_DECISIONS_TEMPLATE: ActivityTemplate = {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           goal:
-            "draft a gap-closing activity for enacted orthogonal " +
-            "decision {{extract_scenario_id_text}}",
-          targetTemplateId: "development-vessel:draft-gap-closing-activity",
+            "enact orthogonal decision: dispatch_kind={{extract_dispatch_kind_text}}, " +
+            "target={{extract_target_template_id_text}}",
+          targetTemplateId: "{{extract_target_template_id_text}}",
           variables: {
-            scenario_id: "{{extract_scenario_id_text}}",
+            // mitosis branch
+            vessel_name: "{{extract_mitosis_vessel_name_text}}",
+            target_file_path: "{{extract_mitosis_target_file_path_text}}",
+            intent_summary: "{{extract_mitosis_intent_summary_text}}",
+            // drafter branch
+            scenario_id: "{{extract_drafter_scenario_id_text}}",
             scenarios_dir: "{{scenarios_dir}}",
             report_path: "{{report_path}}",
             proposals_dir: "{{proposals_dir}}",

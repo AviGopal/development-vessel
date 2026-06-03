@@ -253,6 +253,19 @@ export const config = {
       "vessel_completeness_report",
       "template_invocation_history_report",
       "vessel_demand_report",
+      // Mitosis primitives (iter-vessel-mitosis, 2026-06-03): the substrate's
+      // self-modification keystone. vessel_mitosis_start copies a vessel tree
+      // to a parallel-track path with operator/substrate-supplied source
+      // changes and a port override; vessel_mitosis_evaluate segments recent
+      // traces by version_id and renders FAVORABLE/NEUTRAL/UNFAVORABLE/
+      // INSUFFICIENT_DATA; vessel_mitosis_cutover refuses unless verdict is
+      // FAVORABLE, then archives the base and promotes the mitosis track to
+      // the canonical path on the original port. Refuses on H4-load-bearing
+      // baseline vessels (discovery-vessel, identity-vessel) and on operator-
+      // anchor base_version_ids (v0, baseline, <vessel>-original).
+      "vessel_mitosis_start",
+      "vessel_mitosis_evaluate",
+      "vessel_mitosis_cutover",
     ] as const,
     resolveEndpoint: "/v2/impulses/resolve",
     resolveRequestFormat: "pointer" as const,

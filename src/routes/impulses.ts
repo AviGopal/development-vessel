@@ -63,6 +63,9 @@ import { resolveCompositionCoverageReport } from "../resolvers/composition-cover
 import { resolveVesselCompletenessReport } from "../resolvers/vessel-completeness-report.js";
 import { resolveTemplateInvocationHistoryReport } from "../resolvers/template-invocation-history-report.js";
 import { resolveVesselDemandReport } from "../resolvers/vessel-demand-report.js";
+import { resolveVesselMitosisStart } from "../resolvers/vessel-mitosis-start.js";
+import { resolveVesselMitosisEvaluate } from "../resolvers/vessel-mitosis-evaluate.js";
+import { resolveVesselMitosisCutover } from "../resolvers/vessel-mitosis-cutover.js";
 import type { ResolverResult } from "../resolvers/types.js";
 
 type AnyPointer = { type: string } & Record<string, unknown>;
@@ -206,6 +209,12 @@ export async function resolveDispatch(pointer: AnyPointer): Promise<ResolverResu
       return resolveTemplateInvocationHistoryReport(p as Parameters<typeof resolveTemplateInvocationHistoryReport>[0]);
     case "vessel_demand_report":
       return resolveVesselDemandReport(p as Parameters<typeof resolveVesselDemandReport>[0]);
+    case "vessel_mitosis_start":
+      return resolveVesselMitosisStart(p as Parameters<typeof resolveVesselMitosisStart>[0]);
+    case "vessel_mitosis_evaluate":
+      return resolveVesselMitosisEvaluate(p as Parameters<typeof resolveVesselMitosisEvaluate>[0]);
+    case "vessel_mitosis_cutover":
+      return resolveVesselMitosisCutover(p as Parameters<typeof resolveVesselMitosisCutover>[0]);
     default:
       throw new Error(`unknown shape: ${pointer.type}`);
   }

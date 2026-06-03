@@ -1,0 +1,182 @@
+import { describe, it, expect, beforeEach, afterEach } from "bun:test";
+import { resolveVesselMitosisCutover } from "../../src/resolvers/vessel-mitosis-cutover.js";
+import { mkdtemp, mkdir, writeFile, readFile, rm, stat } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+let tmpRoot: string;
+let workspaceRoot: string;
+let originalWS: string | undefined;
+let originalSkip: string | undefined;
+
+beforeEach(async () => {
+  tmpRoot = await mkdtemp(join(tmpdir(), "mitosis-cut-"));
+  workspaceRoot = tmpRoot;
+  originalWS = process.env["WORKSPACE_ROOT"];
+  originalSkip = process.env["MITOSIS_CUTOVER_SKIP_SYSTEMCTL"];
+  process.env["WORKSPACE_ROOT"] = workspaceRoot;
+  process.env["MITOSIS_CUTOVER_SKIP_SYSTEMCTL"] = "1";
+});
+
+afterEach(async () => {
+  if (originalWS === undefined) delete process.env["WORKSPACE_ROOT"];
+  else process.env["WORKSPACE_ROOT"] = originalWS;
+  if (originalSkip === undefined) delete process.env["MITOSIS_CUTOVER_SKIP_SYSTEMCTL"];
+  else process.env["MITOSIS_CUTOVER_SKIP_SYSTEMCTL"] = originalSkip;
+  await rm(tmpRoot, { recursive: true, force: true });
+});
+
+async function setupForCutover(): Promise<{
+  baseRoot: string;
+  mitosisRoot: string;
+  unitDir: string;
+}> {
+  const reposRoot = join(workspaceRoot, "git", "super-repo", "repos");
+  const baseRoot = join(reposRoot, "development-vessel");
+  const mitosisRoot = join(reposRoot, "development-vessel-mitosis-2026-06-03T00-00-00Z");
+  await mkdir(join(baseRoot, "src"), { recursive: true });
+  await mkdir(join(mitosisRoot, "src"), { recursive: true });
+  await writeFile(join(baseRoot, "src", "marker.txt"), "base-content");
+  await writeFile(join(mitosisRoot, "src", "marker.txt"), "mitosis-content");
+  const unitDir = join(workspaceRoot, "git", "super-repo", "scripts", "substrate", "units");
+  await mkdir(unitDir, { recursive: true });
+  await writeFile(
+    join(unitDir, "development-vessel-mitosis-2026-06-03T00-00-00Z.service"),
+    `[Unit]\nDescription=dev-vessel mitosis\n[Service]\nWorkingDirectory=/vessels/development-vessel-mitosis-2026-06-03T00-00-00Z\nExecStart=/root/.bun/bin/bun /vessels/development-vessel-mitosis-2026-06-03T00-00-00Z/src/index.ts\nEnvironment=PORT=8091\n[Install]\nWantedBy=multi-user.target\n`,
+  );
+  return { baseRoot, mitosisRoot, unitDir };
+}
+
+const FAVORABLE_EVIDENCE = {
+  verdict: "FAVORABLE",
+  base_success_rate: 0.2,
+  mitosis_success_rate: 1.0,
+  cited_trace_ids: ["exec_a", "exec_b"],
+};
+
+describe("vessel_mitosis_cutover", () => {
+  it("refuses cutover when verdict != FAVORABLE", async () => {
+    const r = await resolveVesselMitosisCutover({
+      type: "vessel_mitosis_cutover",
+      vessel_name: "development-vessel",
+      base_version_id: "v1",
+      mitosis_version_id: "mitosis-X",
+      mitosis_root: "/tmp/x",
+      evaluation_evidence: { ...FAVORABLE_EVIDENCE, verdict: "NEUTRAL" },
+    });
+    expect(r.shape).toBe("structuredError");
+    expect((r.body as { detail: string }).detail).toContain("FAVORABLE");
+  });
+
+  it("refuses cutover on protected vessel", async () => {
+    const r = await resolveVesselMitosisCutover({
+      type: "vessel_mitosis_cutover",
+      vessel_name: "discovery-vessel",
+      base_version_id: "v1",
+      mitosis_version_id: "mitosis-X",
+      mitosis_root: "/tmp/x",
+      evaluation_evidence: FAVORABLE_EVIDENCE,
+    });
+    expect(r.shape).toBe("structuredError");
+    expect((r.body as { detail: string }).detail).toContain("discovery-vessel");
+  });
+
+  it("refuses cutover from operator-anchor baseline (v0)", async () => {
+    const r = await resolveVesselMitosisCutover({
+      type: "vessel_mitosis_cutover",
+      vessel_name: "development-vessel",
+      base_version_id: "v0",
+      mitosis_version_id: "mitosis-X",
+      mitosis_root: "/tmp/x",
+      evaluation_evidence: FAVORABLE_EVIDENCE,
+    });
+    expect(r.shape).toBe("structuredError");
+    expect((r.body as { detail: string }).detail).toContain("operator-anchor");
+  });
+
+  it("refuses cutover from <vessel>-original baseline", async () => {
+    const r = await resolveVesselMitosisCutover({
+      type: "vessel_mitosis_cutover",
+      vessel_name: "development-vessel",
+      base_version_id: "development-vessel-original",
+      mitosis_version_id: "mitosis-X",
+      mitosis_root: "/tmp/x",
+      evaluation_evidence: FAVORABLE_EVIDENCE,
+    });
+    expect(r.shape).toBe("structuredError");
+    expect((r.body as { detail: string }).detail).toContain("operator-anchor");
+  });
+
+  it("dry_run returns plan without moving anything", async () => {
+    const { baseRoot, mitosisRoot } = await setupForCutover();
+    const r = await resolveVesselMitosisCutover({
+      type: "vessel_mitosis_cutover",
+      vessel_name: "development-vessel",
+      base_version_id: "v1",
+      mitosis_version_id: "mitosis-2026-06-03T00-00-00Z",
+      mitosis_root: mitosisRoot,
+      evaluation_evidence: FAVORABLE_EVIDENCE,
+      dry_run: true,
+    });
+    expect(r.shape).toBe("vesselMitosisCutoverPlan");
+    // Nothing moved.
+    const baseMarker = await readFile(join(baseRoot, "src/marker.txt"), "utf8");
+    expect(baseMarker).toBe("base-content");
+    const mitosisMarker = await readFile(join(mitosisRoot, "src/marker.txt"), "utf8");
+    expect(mitosisMarker).toBe("mitosis-content");
+  });
+
+  it("performs cutover: archive base, promote mitosis, rewrite unit", async () => {
+    const { baseRoot, mitosisRoot, unitDir } = await setupForCutover();
+    const r = await resolveVesselMitosisCutover({
+      type: "vessel_mitosis_cutover",
+      vessel_name: "development-vessel",
+      base_version_id: "v1",
+      mitosis_version_id: "mitosis-2026-06-03T00-00-00Z",
+      mitosis_root: mitosisRoot,
+      evaluation_evidence: FAVORABLE_EVIDENCE,
+    });
+    expect(r.shape).toBe("vesselMitosisCutoverResult");
+    const body = r.body as {
+      promoted_to: string;
+      archived_at: string;
+      operations: Array<{ op: string; status: string }>;
+    };
+    // Mitosis content is now at canonical baseRoot.
+    const promoted = await readFile(join(baseRoot, "src/marker.txt"), "utf8");
+    expect(promoted).toBe("mitosis-content");
+    // Original base is at archive.
+    const archived = await readFile(join(body.archived_at, "src/marker.txt"), "utf8");
+    expect(archived).toBe("base-content");
+    // Mitosis path no longer exists.
+    let mitosisStillThere = true;
+    try {
+      await stat(mitosisRoot);
+    } catch {
+      mitosisStillThere = false;
+    }
+    expect(mitosisStillThere).toBe(false);
+    // Canonical unit file rewritten to point at canonical path.
+    const canonicalUnit = await readFile(
+      join(unitDir, "development-vessel.service"),
+      "utf8",
+    );
+    expect(canonicalUnit).toContain("WorkingDirectory=/vessels/development-vessel");
+    expect(canonicalUnit).not.toContain("mitosis-2026-06-03T00-00-00Z");
+    // Cited evidence in body.
+    expect(JSON.stringify(r.body)).toContain("exec_a");
+  });
+
+  it("requires non-empty cited_trace_ids", async () => {
+    const r = await resolveVesselMitosisCutover({
+      type: "vessel_mitosis_cutover",
+      vessel_name: "development-vessel",
+      base_version_id: "v1",
+      mitosis_version_id: "mitosis-X",
+      mitosis_root: "/tmp/x",
+      evaluation_evidence: { ...FAVORABLE_EVIDENCE, cited_trace_ids: [] },
+    });
+    expect(r.shape).toBe("structuredError");
+    expect((r.body as { detail: string }).detail).toContain("cited_trace_ids");
+  });
+});

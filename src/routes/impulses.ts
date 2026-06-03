@@ -50,6 +50,7 @@ import { resolveComputeStateSignature } from "../resolvers/compute-state-signatu
 import { resolveAuthoringChainHealthReport } from "../resolvers/authoring-chain-health-report.js";
 import { resolveConceptWrite } from "../resolvers/concept-write.js";
 import { resolveConceptSearchBySource } from "../resolvers/concept-search-by-source.js";
+import { resolveConceptSelectForPrompt } from "../resolvers/concept-select-for-prompt.js";
 import { resolveUiWritePassthrough } from "../resolvers/ui-write-passthrough.js";
 import { resolveInteractorWrite, type InteractorWriteShape } from "../resolvers/interactor-passthrough.js";
 import {
@@ -177,6 +178,8 @@ export async function resolveDispatch(pointer: AnyPointer): Promise<ResolverResu
       return resolveConceptWrite(p as Parameters<typeof resolveConceptWrite>[0]);
     case "concept_search_by_source":
       return resolveConceptSearchBySource(p as Parameters<typeof resolveConceptSearchBySource>[0]);
+    case "concept_select_for_prompt":
+      return resolveConceptSelectForPrompt(p as Parameters<typeof resolveConceptSelectForPrompt>[0]);
     case "uiPanel_write":
     case "uiQuestion_write":
       return resolveUiWritePassthrough(p as Parameters<typeof resolveUiWritePassthrough>[0]);

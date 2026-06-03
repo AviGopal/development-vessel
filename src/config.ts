@@ -196,6 +196,13 @@ export const config = {
       // the immunity pattern for detectors.
       "concept_write",
       "concept_search_by_source",
+      // Multi-axis prior selection for LLM prompts (2026-06-03). Combines
+      // source-type affinity (hard filter), vector-similarity rank, usage
+      // success rate, priority, and token economy into combined_score.
+      // Greedy budget fill returns selected concepts {id, name, content,
+      // why_selected, combined_score} for llm_completion_dispatch to inject
+      // as priors. Replaces naive "top-N by similarity" prior dumping.
+      "concept_select_for_prompt",
       // Stateful-UI vessel (substrate's face, 2026-06-02): advertised here so
       // discovery routes uiPanel_write / uiQuestion_write traffic correctly
       // for callers that resolve via dev-vessel. Implementation is a thin

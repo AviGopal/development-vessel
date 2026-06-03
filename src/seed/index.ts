@@ -36,6 +36,7 @@ import { SCAFFOLD_AND_PUBLISH_VESSEL_TEMPLATE } from "./scaffold-and-publish-ves
 import { SCAFFOLD_MITOSIS_TRACK_TEMPLATE } from "./scaffold-mitosis-track.js";
 import { BACKEND_SNAPSHOT_TO_GIT_TEMPLATE } from "./backend-snapshot-to-git.js";
 import { VESSEL_REPO_PROMOTE_TEMPLATE } from "./vessel-repo-promote.js";
+import { MITOSIS_TICK_TEMPLATE } from "./mitosis-tick.js";
 // Phase 3 — closed-loop learning and verification
 // (openspec/changes/2026-06-01-closed-loop-learning-and-verification/)
 import { DETECT_RECURRING_PATTERN_TEMPLATE } from "./detect-recurring-pattern.js";
@@ -80,6 +81,7 @@ export { SCAFFOLD_AND_PUBLISH_VESSEL_TEMPLATE } from "./scaffold-and-publish-ves
 export { SCAFFOLD_MITOSIS_TRACK_TEMPLATE } from "./scaffold-mitosis-track.js";
 export { BACKEND_SNAPSHOT_TO_GIT_TEMPLATE } from "./backend-snapshot-to-git.js";
 export { VESSEL_REPO_PROMOTE_TEMPLATE } from "./vessel-repo-promote.js";
+export { MITOSIS_TICK_TEMPLATE } from "./mitosis-tick.js";
 
 export const SEED_TEMPLATES: ActivityTemplate[] = [
   SHIP_CHANGE_TEMPLATE,
@@ -195,4 +197,11 @@ export const SEED_TEMPLATES: ActivityTemplate[] = [
   // gh_repo_create and commits a finding-style record. Closes Gap B; the
   // submodule pointer conversion is deferred to a follow-up.
   VESSEL_REPO_PROMOTE_TEMPLATE,
+  // Autonomous mitosis evaluate+cutover (iter 2026-06-03): mitosis-tick reads
+  // /workspace/mitosis-pending.json, dispatches vessel_mitosis_evaluate, then
+  // unconditionally dispatches vessel_mitosis_cutover (which self-refuses
+  // unless verdict=FAVORABLE). Boredom goal[15] fires this on cadence. After
+  // this iteration the lift loop (detect → modify → evaluate → cutover) has
+  // no operator hand in the modify path.
+  MITOSIS_TICK_TEMPLATE,
 ];

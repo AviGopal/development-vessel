@@ -203,6 +203,15 @@ export const config = {
       // why_selected, combined_score} for llm_completion_dispatch to inject
       // as priors. Replaces naive "top-N by similarity" prior dumping.
       "concept_select_for_prompt",
+      // Trace→code-needed synthesis (2026-06-03). Reads traces + templates +
+      // discovery in parallel; classifies needs into missing_resolver /
+      // broken_template / missing_template / (future) missing_vessel /
+      // incomplete_vessel. Each entry has a structured action (CREATE / MODIFY
+      // / REFACTOR), cited evidence, and priority_score. This is the
+      // resolver that answers the operator's question 'how do we use traces
+      // to understand what code we need to make' — the substrate's
+      // observability surface becomes actionable decisions.
+      "code_needs_report",
       // Stateful-UI vessel (substrate's face, 2026-06-02): advertised here so
       // discovery routes uiPanel_write / uiQuestion_write traffic correctly
       // for callers that resolve via dev-vessel. Implementation is a thin

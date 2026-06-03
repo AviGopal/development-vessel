@@ -33,6 +33,7 @@ import { OBSERVE_ORTHOGONAL_PATTERNS_TEMPLATE } from "./observe-orthogonal-patte
 import { ENACT_ORTHOGONAL_DECISIONS_TEMPLATE } from "./enact-orthogonal-decisions.js";
 import { COMPLETE_VESSEL_SCAFFOLD_TEMPLATE } from "./complete-vessel-scaffold.js";
 import { SCAFFOLD_AND_PUBLISH_VESSEL_TEMPLATE } from "./scaffold-and-publish-vessel.js";
+import { SCAFFOLD_MITOSIS_TRACK_TEMPLATE } from "./scaffold-mitosis-track.js";
 // Phase 3 — closed-loop learning and verification
 // (openspec/changes/2026-06-01-closed-loop-learning-and-verification/)
 import { DETECT_RECURRING_PATTERN_TEMPLATE } from "./detect-recurring-pattern.js";
@@ -74,6 +75,7 @@ export { OBSERVE_ORTHOGONAL_PATTERNS_TEMPLATE } from "./observe-orthogonal-patte
 export { ENACT_ORTHOGONAL_DECISIONS_TEMPLATE } from "./enact-orthogonal-decisions.js";
 export { COMPLETE_VESSEL_SCAFFOLD_TEMPLATE } from "./complete-vessel-scaffold.js";
 export { SCAFFOLD_AND_PUBLISH_VESSEL_TEMPLATE } from "./scaffold-and-publish-vessel.js";
+export { SCAFFOLD_MITOSIS_TRACK_TEMPLATE } from "./scaffold-mitosis-track.js";
 
 export const SEED_TEMPLATES: ActivityTemplate[] = [
   SHIP_CHANGE_TEMPLATE,
@@ -172,4 +174,11 @@ export const SEED_TEMPLATES: ActivityTemplate[] = [
   // so its open-ended text routes to a deterministic vessel_demand_report
   // dispatch instead of LLM-reuse picking the closest semantic match.
   VESSEL_DEMAND_TICK_TEMPLATE,
+  // Autonomous self-modification loop (2026-06-03): scaffold-mitosis-track
+  // composes concept_select_for_prompt + fs_read + llm_completion_dispatch +
+  // vessel_mitosis_start. Boredom goal[13] dispatches this when
+  // code_needs_report surfaces a MODIFY decision. The substrate observes the
+  // need, drafts a parallel-track fix, and produces a vesselMitosisInitiated
+  // artifact as a side effect of normal operation.
+  SCAFFOLD_MITOSIS_TRACK_TEMPLATE,
 ];

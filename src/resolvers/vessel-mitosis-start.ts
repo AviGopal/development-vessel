@@ -13,6 +13,14 @@ import type { ResolverResult } from "./types.js";
  * detectors compare. Cutover happens only when the new track's evidence
  * dominates.
  *
+ * v0.2 (2026-06-03): When a base systemd unit is present (under
+ * scripts/substrate/units/<vessel>.service), parse it and PRESERVE all
+ * Environment=, Memory*, Restart*, After=, and Requires= directives from
+ * the base unit into the generated mitosis unit. This closes the parity
+ * gap the first goal-host mitosis exposed (mitosis ran uncapped + without
+ * LLM_VESSEL_ENDPOINT). Mitosis-specific overrides (PORT, VESSEL_ID,
+ * VESSEL_ENDPOINT, WorkingDirectory, ExecStart, Description) still win.
+ *
  * Safety:
  *   - Refuses mitosis on H4-load-bearing baselines: discovery-vessel,
  *     identity-vessel.
@@ -35,10 +43,31 @@ export interface VesselMitosisStartPointer {
   mitosis_port: number;
   source_root?: string;
   mitosis_root?: string;
+  base_unit_path?: string;
 }
 
 const PROTECTED_VESSELS = new Set(["discovery-vessel", "identity-vessel"]);
 const EXCLUDE_DIRS = new Set(["node_modules", "dist", ".git", "build", "coverage"]);
+
+// Directives whose values mitosis must override (not inherit). Everything
+// else found in the base unit's [Service] section is preserved verbatim.
+const MITOSIS_OVERRIDE_SERVICE_KEYS = new Set([
+  "WorkingDirectory",
+  "ExecStart",
+  // PORT, VESSEL_ID, VESSEL_ENDPOINT, MITOSIS_* are Environment= entries
+  // handled specially in mergeEnvironment.
+]);
+
+// Environment keys mitosis must own. Any base Environment=KEY=... that
+// matches one of these is dropped in favor of the mitosis value.
+const MITOSIS_OWNED_ENV_KEYS = new Set([
+  "PORT",
+  "VESSEL_ID",
+  "VESSEL_ENDPOINT",
+  "WORKSPACE_ROOT",
+  "MITOSIS_VERSION_ID",
+  "MITOSIS_BASE_VESSEL",
+]);
 
 function structuredError(detail: string, extra?: Record<string, unknown>): ResolverResult {
   return {
@@ -95,6 +124,174 @@ function pathsOverlap(a: string, b: string): boolean {
   const relBA = relative(rb, ra);
   return !relAB.startsWith("..") || !relBA.startsWith("..");
 }
+
+// ---- Systemd unit parsing + merge (v0.2) ----
+
+interface ParsedUnitLine {
+  raw: string;        // original line as-written (for comments/blanks)
+  key?: string;       // directive key if "Key=Value"
+  value?: string;     // directive value
+}
+
+interface ParsedUnit {
+  // Order-preserving line list per section, plus the section's header line.
+  // Sections appear in insertion order; lines preserved verbatim.
+  sectionsOrder: string[];
+  sections: Map<string, ParsedUnitLine[]>;
+}
+
+function parseUnitFile(content: string): ParsedUnit {
+  const sectionsOrder: string[] = [];
+  const sections = new Map<string, ParsedUnitLine[]>();
+  let current: string | null = null;
+  for (const rawLine of content.split(/\r?\n/)) {
+    const line = rawLine;
+    const trimmed = line.trim();
+    const sectionMatch = trimmed.match(/^\[([^\]]+)\]$/);
+    if (sectionMatch) {
+      const sec = sectionMatch[1] ?? "";
+      current = sec;
+      if (!sections.has(sec)) {
+        sectionsOrder.push(sec);
+        sections.set(sec, []);
+      }
+      continue;
+    }
+    if (!current) continue; // ignore preamble (shouldn't exist in systemd units)
+    if (trimmed === "" || trimmed.startsWith("#") || trimmed.startsWith(";")) {
+      sections.get(current)!.push({ raw: line });
+      continue;
+    }
+    const eqIdx = line.indexOf("=");
+    if (eqIdx < 0) {
+      sections.get(current)!.push({ raw: line });
+      continue;
+    }
+    const key = line.slice(0, eqIdx).trim();
+    const value = line.slice(eqIdx + 1);
+    sections.get(current)!.push({ raw: line, key, value });
+  }
+  return { sectionsOrder, sections };
+}
+
+function serializeUnit(unit: ParsedUnit): string {
+  const out: string[] = [];
+  for (const section of unit.sectionsOrder) {
+    out.push(`[${section}]`);
+    const lines = unit.sections.get(section) ?? [];
+    for (const l of lines) {
+      out.push(l.raw);
+    }
+    // Ensure blank separator between sections if not already trailing.
+    const last = out[out.length - 1];
+    if (last !== undefined && last.trim() !== "") out.push("");
+  }
+  // Trim trailing extra blank lines, leave one final newline.
+  while (
+    out.length > 1 &&
+    out[out.length - 1] === "" &&
+    out[out.length - 2] === ""
+  ) {
+    out.pop();
+  }
+  if (out[out.length - 1] !== "") out.push("");
+  return out.join("\n");
+}
+
+/**
+ * Merge a base unit with mitosis overrides:
+ *  - Preserve all base [Unit] directives (After=, Requires=, Description= base value).
+ *  - Override Description= in [Unit] by appending mitosis stamp + intent.
+ *  - Preserve all base [Service] directives EXCEPT:
+ *      - WorkingDirectory, ExecStart → replaced
+ *      - Environment=KEY=... where KEY ∈ MITOSIS_OWNED_ENV_KEYS → dropped
+ *  - Append mitosis-specific overrides at end of [Service].
+ *  - Preserve [Install] verbatim.
+ */
+function mergeUnitForMitosis(
+  base: ParsedUnit,
+  overrides: {
+    description: string;
+    workingDirectory: string;
+    execStart: string;
+    addedEnv: Array<{ key: string; value: string }>;
+  },
+): ParsedUnit {
+  // Deep-ish copy.
+  const merged: ParsedUnit = {
+    sectionsOrder: [...base.sectionsOrder],
+    sections: new Map(),
+  };
+  for (const [sec, lines] of base.sections) {
+    merged.sections.set(sec, lines.map((l) => ({ ...l })));
+  }
+
+  // Ensure required sections.
+  for (const sec of ["Unit", "Service", "Install"]) {
+    if (!merged.sections.has(sec)) {
+      merged.sectionsOrder.push(sec);
+      merged.sections.set(sec, []);
+    }
+  }
+
+  // [Unit] — override Description.
+  const unitLines = merged.sections.get("Unit")!;
+  let descSet = false;
+  for (const l of unitLines) {
+    if (l.key === "Description") {
+      l.raw = `Description=${overrides.description}`;
+      l.value = overrides.description;
+      descSet = true;
+      break;
+    }
+  }
+  if (!descSet) {
+    unitLines.unshift({ raw: `Description=${overrides.description}`, key: "Description", value: overrides.description });
+  }
+
+  // [Service] — drop overridden keys + owned Environment entries.
+  const serviceLines = merged.sections.get("Service")!;
+  const filteredService: ParsedUnitLine[] = [];
+  for (const l of serviceLines) {
+    if (l.key && MITOSIS_OVERRIDE_SERVICE_KEYS.has(l.key)) continue;
+    if (l.key === "Environment" && typeof l.value === "string") {
+      // Drop owned env keys.
+      const eq = l.value.indexOf("=");
+      const envKey = eq >= 0 ? l.value.slice(0, eq).trim() : l.value.trim();
+      if (MITOSIS_OWNED_ENV_KEYS.has(envKey)) continue;
+    }
+    filteredService.push(l);
+  }
+  // Append mitosis-owned directives.
+  const lastService = filteredService[filteredService.length - 1];
+  if (lastService !== undefined && lastService.raw.trim() !== "") {
+    filteredService.push({ raw: "" });
+  }
+  filteredService.push({ raw: "# --- mitosis overrides (v0.2 vessel_mitosis_start) ---" });
+  for (const env of overrides.addedEnv) {
+    const raw = `Environment=${env.key}=${env.value}`;
+    filteredService.push({ raw, key: "Environment", value: `${env.key}=${env.value}` });
+  }
+  filteredService.push({ raw: `WorkingDirectory=${overrides.workingDirectory}`, key: "WorkingDirectory", value: overrides.workingDirectory });
+  filteredService.push({ raw: `ExecStart=${overrides.execStart}`, key: "ExecStart", value: overrides.execStart });
+  merged.sections.set("Service", filteredService);
+
+  // Ensure [Install] has at least WantedBy=multi-user.target if empty.
+  const installLines = merged.sections.get("Install")!;
+  const hasWantedBy = installLines.some((l) => l.key === "WantedBy");
+  if (!hasWantedBy) {
+    installLines.push({ raw: "WantedBy=multi-user.target", key: "WantedBy", value: "multi-user.target" });
+  }
+
+  return merged;
+}
+
+// Exposed for tests.
+export const __test = {
+  parseUnitFile,
+  serializeUnit,
+  mergeUnitForMitosis,
+};
 
 export async function resolveVesselMitosisStart(
   pointer: VesselMitosisStartPointer,
@@ -198,7 +395,7 @@ export async function resolveVesselMitosisStart(
     }
   }
 
-  // 4. Generate systemd unit file.
+  // 4. Generate systemd unit file — v0.2 merge path.
   const version_id = `mitosis-${stamp}`;
   const unitName = `${vessel_name}-mitosis-${stamp}.service`;
   const unitDir = join(
@@ -211,31 +408,66 @@ export async function resolveVesselMitosisStart(
   );
   const unitPath = join(unitDir, unitName);
   const safeIntent = intent_summary.replace(/[\r\n]+/g, " ").slice(0, 200);
-  const unitBody = `[Unit]
-Description=${vessel_name} (mitosis ${stamp}) — ${safeIntent}
-After=activity-api.service
-Requires=activity-api.service
+  const description = `${vessel_name} (mitosis ${stamp}) — ${safeIntent}`;
+  const workDir = `/vessels/${vessel_name}-mitosis-${stamp}`;
+  const execStart = `/root/.bun/bin/bun ${workDir}/src/index.ts`;
+  const mitosisEnv = [
+    { key: "PORT", value: String(mitosis_port) },
+    { key: "WORKSPACE_ROOT", value: "/workspace" },
+    { key: "VESSEL_ID", value: `${vessel_name}-${version_id}` },
+    { key: "VESSEL_ENDPOINT", value: `http://127.0.0.1:${mitosis_port}` },
+    { key: "MITOSIS_VERSION_ID", value: version_id },
+    { key: "MITOSIS_BASE_VESSEL", value: vessel_name },
+  ];
 
-[Service]
-Type=simple
-EnvironmentFile=/etc/substrate/env
-Environment=PORT=${mitosis_port}
-Environment=HOST=0.0.0.0
-Environment=WORKSPACE_ROOT=/workspace
-Environment=VESSEL_ID=${vessel_name}-${version_id}
-Environment=VESSEL_ENDPOINT=http://127.0.0.1:${mitosis_port}
-Environment=MITOSIS_VERSION_ID=${version_id}
-Environment=MITOSIS_BASE_VESSEL=${vessel_name}
-WorkingDirectory=/vessels/${vessel_name}-mitosis-${stamp}
-ExecStart=/root/.bun/bin/bun /vessels/${vessel_name}-mitosis-${stamp}/src/index.ts
-Restart=on-failure
-RestartSec=5
-StandardOutput=journal
-StandardError=journal
+  // Locate the base unit. Caller may override; default is
+  // <unitDir>/<vessel_name>.service.
+  const baseUnitPath = pointer.base_unit_path
+    ? resolve(pointer.base_unit_path)
+    : join(unitDir, `${vessel_name}.service`);
 
-[Install]
-WantedBy=multi-user.target
-`;
+  let unitBody: string;
+  let baseUnitMerged = false;
+  let preservedDirectives: Record<string, number> = {};
+  if (await pathExists(baseUnitPath)) {
+    try {
+      const baseContent = await readFile(baseUnitPath, "utf8");
+      const parsed = parseUnitFile(baseContent);
+      const merged = mergeUnitForMitosis(parsed, {
+        description,
+        workingDirectory: workDir,
+        execStart,
+        addedEnv: mitosisEnv,
+      });
+      unitBody = serializeUnit(merged);
+      baseUnitMerged = true;
+      // Summarise preserved directives (for the result body).
+      const serviceLines = merged.sections.get("Service") ?? [];
+      const counts: Record<string, number> = {};
+      for (const l of serviceLines) {
+        if (l.key) counts[l.key] = (counts[l.key] ?? 0) + 1;
+      }
+      preservedDirectives = counts;
+    } catch (err) {
+      // Fall back to minimal unit. Log via result body; do not throw.
+      console.warn(
+        `[vessel_mitosis_start] base unit parse failed (${err instanceof Error ? err.message : err}); falling back to minimal unit`,
+      );
+      unitBody = buildMinimalUnit({
+        description,
+        workDir,
+        execStart,
+        mitosisEnv,
+      });
+    }
+  } else {
+    unitBody = buildMinimalUnit({
+      description,
+      workDir,
+      execStart,
+      mitosisEnv,
+    });
+  }
 
   let unitWritten = false;
   if (await pathExists(unitDir)) {
@@ -256,10 +488,45 @@ WantedBy=multi-user.target
       base_port,
       systemd_unit_path: unitWritten ? unitPath : null,
       systemd_unit_present: unitWritten,
+      base_unit_path: baseUnitPath,
+      base_unit_merged: baseUnitMerged,
+      preserved_service_directives: preservedDirectives,
       port_rewrite_applied: portRewriteApplied,
       copy_stats: copyStats,
       applied_changes: appliedChanges,
+      mitosis_resolver_version: "v0.2",
       initiated_at: new Date().toISOString(),
     },
   };
+}
+
+function buildMinimalUnit(args: {
+  description: string;
+  workDir: string;
+  execStart: string;
+  mitosisEnv: Array<{ key: string; value: string }>;
+}): string {
+  const envLines = args.mitosisEnv
+    .map((e) => `Environment=${e.key}=${e.value}`)
+    .join("\n");
+  return `[Unit]
+Description=${args.description}
+After=activity-api.service
+Requires=activity-api.service
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/substrate/env
+${envLines}
+Environment=HOST=0.0.0.0
+WorkingDirectory=${args.workDir}
+ExecStart=${args.execStart}
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+`;
 }

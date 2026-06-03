@@ -1,8 +1,10 @@
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
-import { resolveVesselMitosisStart } from "../../src/resolvers/vessel-mitosis-start.js";
+import { resolveVesselMitosisStart, __test } from "../../src/resolvers/vessel-mitosis-start.js";
 import { mkdtemp, mkdir, writeFile, readFile, rm, readdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+
+const { parseUnitFile, serializeUnit, mergeUnitForMitosis } = __test;
 
 let tmpRoot: string;
 let workspaceRoot: string;
@@ -178,6 +180,150 @@ describe("vessel_mitosis_start", () => {
     });
     expect(r.shape).toBe("structuredError");
     expect((r.body as { detail: string }).detail).toContain("escapes");
+  });
+
+  it("v0.2 — merges base unit, preserving Memory* + base Environment, applying mitosis overrides", async () => {
+    const baseRoot = await setupVesselTree("development-vessel", 8090);
+    // Write a base unit modelled on goal-host-vessel.service (the empirical
+    // motivator for v0.2: first mitosis ran uncapped + without LLM_VESSEL_ENDPOINT).
+    const unitDir = join(workspaceRoot, "git", "super-repo", "scripts", "substrate", "units");
+    const baseUnitPath = join(unitDir, "development-vessel.service");
+    await writeFile(
+      baseUnitPath,
+      `[Unit]
+Description=development-vessel
+After=activity-api.service llm-resolver-vessel.service
+Requires=activity-api.service
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/substrate/env
+Environment=PORT=8090
+Environment=HOST=127.0.0.1
+Environment=LLM_VESSEL_ENDPOINT=http://127.0.0.1:8220
+Environment=ACTIVITY_API_ENDPOINT=http://127.0.0.1:8080
+WorkingDirectory=/vessels/development-vessel
+ExecStart=/root/.bun/bin/bun /vessels/development-vessel/src/index.ts
+Restart=on-failure
+RestartSec=5
+MemoryHigh=2G
+MemoryMax=3G
+RestartSteps=3
+RestartMaxDelaySec=30
+
+[Install]
+WantedBy=multi-user.target
+`,
+    );
+
+    const r = await resolveVesselMitosisStart({
+      type: "vessel_mitosis_start",
+      vessel_name: "development-vessel",
+      intent_summary: "v0.2 unit-merge regression",
+      source_changes: [],
+      base_port: 8090,
+      mitosis_port: 8091,
+    });
+    expect(r.shape).toBe("vesselMitosisInitiated");
+    const body = r.body as {
+      systemd_unit_path: string;
+      base_unit_merged: boolean;
+      mitosis_resolver_version: string;
+      preserved_service_directives: Record<string, number>;
+    };
+
+    expect(body.base_unit_merged).toBe(true);
+    expect(body.mitosis_resolver_version).toBe("v0.2");
+
+    const unit = await readFile(body.systemd_unit_path, "utf8");
+    // Memory caps preserved (the key v0.2 fix).
+    expect(unit).toContain("MemoryHigh=2G");
+    expect(unit).toContain("MemoryMax=3G");
+    expect(unit).toContain("RestartSteps=3");
+    expect(unit).toContain("RestartMaxDelaySec=30");
+    // Base env preserved (LLM_VESSEL_ENDPOINT in particular).
+    expect(unit).toContain("LLM_VESSEL_ENDPOINT=http://127.0.0.1:8220");
+    expect(unit).toContain("ACTIVITY_API_ENDPOINT=http://127.0.0.1:8080");
+    // Mitosis-owned env applied.
+    expect(unit).toContain("Environment=PORT=8091");
+    expect(unit).toContain("MITOSIS_VERSION_ID=");
+    expect(unit).toContain("MITOSIS_BASE_VESSEL=development-vessel");
+    // Base PORT dropped.
+    expect(unit).not.toContain("Environment=PORT=8090");
+    // After= preserved.
+    expect(unit).toContain("After=activity-api.service llm-resolver-vessel.service");
+  });
+
+  it("v0.2 — falls back to minimal unit when base unit absent", async () => {
+    await setupVesselTree("development-vessel", 8090);
+    // No base unit file written → resolver should still succeed with minimal.
+    const r = await resolveVesselMitosisStart({
+      type: "vessel_mitosis_start",
+      vessel_name: "development-vessel",
+      intent_summary: "no base unit",
+      source_changes: [],
+      base_port: 8090,
+      mitosis_port: 8092,
+    });
+    expect(r.shape).toBe("vesselMitosisInitiated");
+    const body = r.body as { base_unit_merged: boolean; systemd_unit_path: string };
+    expect(body.base_unit_merged).toBe(false);
+    const unit = await readFile(body.systemd_unit_path, "utf8");
+    expect(unit).toContain("PORT=8092");
+    expect(unit).toContain("MITOSIS_VERSION_ID=");
+  });
+});
+
+describe("vessel_mitosis_start — systemd unit merge primitives (v0.2)", () => {
+  const BASE_UNIT = `[Unit]
+Description=goal-host-vessel
+After=activity-api.service
+Requires=activity-api.service
+
+[Service]
+Type=simple
+Environment=PORT=8210
+Environment=LLM_VESSEL_ENDPOINT=http://127.0.0.1:8220
+Environment=ACTIVITY_API_ENDPOINT=http://127.0.0.1:8080
+WorkingDirectory=/vessels/goal-host-vessel
+ExecStart=/root/.bun/bin/bun /vessels/goal-host-vessel/src/index.ts
+Restart=on-failure
+MemoryHigh=2G
+MemoryMax=3G
+
+[Install]
+WantedBy=multi-user.target
+`;
+
+  const OVERRIDES = {
+    description: "goal-host-vessel (mitosis) — streaming v2",
+    workingDirectory: "/vessels/goal-host-mitosis",
+    execStart: "/root/.bun/bin/bun /vessels/goal-host-mitosis/src/index.ts",
+    addedEnv: [
+      { key: "PORT", value: "8211" },
+      { key: "VESSEL_ID", value: "goal-host-vessel-mitosis-test" },
+      { key: "MITOSIS_VERSION_ID", value: "mitosis-test" },
+      { key: "MITOSIS_BASE_VESSEL", value: "goal-host-vessel" },
+    ],
+  };
+
+  it("parseUnitFile preserves section order", () => {
+    const parsed = parseUnitFile(BASE_UNIT);
+    expect(parsed.sectionsOrder).toEqual(["Unit", "Service", "Install"]);
+  });
+
+  it("merged unit contains both MemoryMax AND LLM_VESSEL_ENDPOINT AND new PORT", () => {
+    const parsed = parseUnitFile(BASE_UNIT);
+    const merged = mergeUnitForMitosis(parsed, OVERRIDES);
+    const out = serializeUnit(merged);
+    // The regression criterion from the goal: must contain BOTH base memory
+    // caps AND base LLM port AND mitosis-owned PORT.
+    expect(out).toContain("MemoryMax=3G");
+    expect(out).toContain("LLM_VESSEL_ENDPOINT=http://127.0.0.1:8220");
+    expect(out).toContain("Environment=PORT=8211");
+    expect(out).toContain("MITOSIS_VERSION_ID=mitosis-test");
+    // And does NOT contain the base PORT.
+    expect(out).not.toContain("Environment=PORT=8210");
   });
 });
 

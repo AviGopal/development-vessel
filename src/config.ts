@@ -212,6 +212,14 @@ export const config = {
       // to understand what code we need to make' — the substrate's
       // observability surface becomes actionable decisions.
       "code_needs_report",
+      // Concept-db outcome feedback wire (2026-06-03). POSTs to
+      // /concepts/:id/usage so the relevance formula (ts+1)/(tl+2) can
+      // actually learn from trace outcomes. Without this resolver, concepts
+      // accumulate times_loaded via reads but never times_succeeded — the
+      // relevance signal was inverted (more loads → lower relevance, the
+      // opposite of useful). Empirically verified the manual POST sets
+      // relevance correctly: ts=1 tf=0 tl=1 → 0.66; ts=1 tf=1 tl=2 → 0.5.
+      "concept_usage_record",
       // Stateful-UI vessel (substrate's face, 2026-06-02): advertised here so
       // discovery routes uiPanel_write / uiQuestion_write traffic correctly
       // for callers that resolve via dev-vessel. Implementation is a thin

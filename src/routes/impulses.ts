@@ -52,6 +52,7 @@ import { resolveConceptWrite } from "../resolvers/concept-write.js";
 import { resolveConceptSearchBySource } from "../resolvers/concept-search-by-source.js";
 import { resolveConceptSelectForPrompt } from "../resolvers/concept-select-for-prompt.js";
 import { resolveCodeNeedsReport } from "../resolvers/code-needs-report.js";
+import { resolveConceptUsageRecord } from "../resolvers/concept-usage-record.js";
 import { resolveUiWritePassthrough } from "../resolvers/ui-write-passthrough.js";
 import { resolveInteractorWrite, type InteractorWriteShape } from "../resolvers/interactor-passthrough.js";
 import {
@@ -186,6 +187,8 @@ export async function resolveDispatch(pointer: AnyPointer): Promise<ResolverResu
       return resolveConceptSelectForPrompt(p as Parameters<typeof resolveConceptSelectForPrompt>[0]);
     case "code_needs_report":
       return resolveCodeNeedsReport(p as Parameters<typeof resolveCodeNeedsReport>[0]);
+    case "concept_usage_record":
+      return resolveConceptUsageRecord(p as Parameters<typeof resolveConceptUsageRecord>[0]);
     case "uiPanel_write":
     case "uiQuestion_write":
       return resolveUiWritePassthrough(p as Parameters<typeof resolveUiWritePassthrough>[0]);

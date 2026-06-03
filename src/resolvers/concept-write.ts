@@ -38,7 +38,8 @@ export interface ConceptWritePointer {
     | "extracted"
     | "impulse_signature"
     | "vessel_construction_pattern"
-    | "impulse_activity_pattern";
+    | "impulse_activity_pattern"
+    | "architectural_pattern_principle";
   pointer_memo?: string;
   conceptDbUrl?: string;
 }

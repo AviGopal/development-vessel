@@ -284,6 +284,17 @@ export const config = {
       "surrealdb_export",
       "surrealdb_import",
       "gh_repo_create",
+      // Horizon detectors (Stage 1 of 2026-06-03-pre-lift-bootstrap-and-
+      // architecture-aware-loop). Four immunity-pattern detectors that
+      // consult architectural principle concepts (source_type =
+      // architectural_pattern_principle) and emit substrateGap impulses
+      // tagged by horizon. The substrate's detection layer becomes
+      // architecture-aware — adding a new principle concept extends ALL
+      // FOUR detectors' coverage without writing new resolver code.
+      "vessel_responsibility_audit",
+      "vessel_architecture_pattern_scan",
+      "activity_lifecycle_audit",
+      "resolver_distribution_audit",
     ] as const,
     resolveEndpoint: "/v2/impulses/resolve",
     resolveRequestFormat: "pointer" as const,

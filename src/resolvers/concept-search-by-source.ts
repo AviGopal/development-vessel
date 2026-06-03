@@ -29,7 +29,8 @@ export interface ConceptSearchBySourcePointer {
     | "extracted"
     | "impulse_signature"
     | "vessel_construction_pattern"
-    | "impulse_activity_pattern";
+    | "impulse_activity_pattern"
+    | "architectural_pattern_principle";
   /** Optional free-text query for vector similarity ranking. */
   query?: string;
   /** Cap on results returned. Default 10. */

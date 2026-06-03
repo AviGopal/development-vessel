@@ -40,6 +40,11 @@ import { BACKEND_SNAPSHOT_TO_GIT_TEMPLATE } from "./backend-snapshot-to-git.js";
 import { VESSEL_REPO_PROMOTE_TEMPLATE } from "./vessel-repo-promote.js";
 import { MITOSIS_TICK_TEMPLATE } from "./mitosis-tick.js";
 import { CONCEPT_USAGE_BACKFILL_TEMPLATE } from "./concept-usage-backfill.js";
+// Horizon-detector ticks (Stage 1 of 2026-06-03-pre-lift-bootstrap-and-architecture-aware-loop)
+import { VESSEL_RESPONSIBILITY_AUDIT_TICK_TEMPLATE } from "./vessel-responsibility-audit-tick.js";
+import { VESSEL_ARCHITECTURE_PATTERN_SCAN_TICK_TEMPLATE } from "./vessel-architecture-pattern-scan-tick.js";
+import { ACTIVITY_LIFECYCLE_AUDIT_TICK_TEMPLATE } from "./activity-lifecycle-audit-tick.js";
+import { RESOLVER_DISTRIBUTION_AUDIT_TICK_TEMPLATE } from "./resolver-distribution-audit-tick.js";
 // Phase 3 — closed-loop learning and verification
 // (openspec/changes/2026-06-01-closed-loop-learning-and-verification/)
 import { DETECT_RECURRING_PATTERN_TEMPLATE } from "./detect-recurring-pattern.js";
@@ -88,6 +93,10 @@ export { BACKEND_SNAPSHOT_TO_GIT_TEMPLATE } from "./backend-snapshot-to-git.js";
 export { VESSEL_REPO_PROMOTE_TEMPLATE } from "./vessel-repo-promote.js";
 export { MITOSIS_TICK_TEMPLATE } from "./mitosis-tick.js";
 export { CONCEPT_USAGE_BACKFILL_TEMPLATE } from "./concept-usage-backfill.js";
+export { VESSEL_RESPONSIBILITY_AUDIT_TICK_TEMPLATE } from "./vessel-responsibility-audit-tick.js";
+export { VESSEL_ARCHITECTURE_PATTERN_SCAN_TICK_TEMPLATE } from "./vessel-architecture-pattern-scan-tick.js";
+export { ACTIVITY_LIFECYCLE_AUDIT_TICK_TEMPLATE } from "./activity-lifecycle-audit-tick.js";
+export { RESOLVER_DISTRIBUTION_AUDIT_TICK_TEMPLATE } from "./resolver-distribution-audit-tick.js";
 
 export const SEED_TEMPLATES: ActivityTemplate[] = [
   SHIP_CHANGE_TEMPLATE,
@@ -230,4 +239,13 @@ export const SEED_TEMPLATES: ActivityTemplate[] = [
   // no LLM, no pool iteration. The resolver concept_usage_record already
   // exists (5/5 tests green); this is the missing dispatcher.
   CONCEPT_USAGE_BACKFILL_TEMPLATE,
+  // Horizon-detector ticks (Stage 1 of openspec change
+  // 2026-06-03-pre-lift-bootstrap-and-architecture-aware-loop): four
+  // single-task wrappers around the architecture-aware horizon detectors.
+  // Boredom goals [17..20] explicitly target these so the goal text routes
+  // deterministically to the resolver dispatch.
+  VESSEL_RESPONSIBILITY_AUDIT_TICK_TEMPLATE,
+  VESSEL_ARCHITECTURE_PATTERN_SCAN_TICK_TEMPLATE,
+  ACTIVITY_LIFECYCLE_AUDIT_TICK_TEMPLATE,
+  RESOLVER_DISTRIBUTION_AUDIT_TICK_TEMPLATE,
 ];

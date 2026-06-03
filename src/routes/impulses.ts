@@ -70,6 +70,10 @@ import { resolveVesselMitosisCutover } from "../resolvers/vessel-mitosis-cutover
 import { resolveSurrealdbExport } from "../resolvers/surrealdb-export.js";
 import { resolveSurrealdbImport } from "../resolvers/surrealdb-import.js";
 import { resolveGhRepoCreate } from "../resolvers/gh-repo-create.js";
+import { resolveVesselResponsibilityAudit } from "../resolvers/vessel-responsibility-audit.js";
+import { resolveVesselArchitecturePatternScan } from "../resolvers/vessel-architecture-pattern-scan.js";
+import { resolveActivityLifecycleAudit } from "../resolvers/activity-lifecycle-audit.js";
+import { resolveResolverDistributionAudit } from "../resolvers/resolver-distribution-audit.js";
 import type { ResolverResult } from "../resolvers/types.js";
 
 type AnyPointer = { type: string } & Record<string, unknown>;
@@ -227,6 +231,22 @@ export async function resolveDispatch(pointer: AnyPointer): Promise<ResolverResu
       return resolveSurrealdbImport(p as Parameters<typeof resolveSurrealdbImport>[0]);
     case "gh_repo_create":
       return resolveGhRepoCreate(p as Parameters<typeof resolveGhRepoCreate>[0]);
+    case "vessel_responsibility_audit":
+      return resolveVesselResponsibilityAudit(
+        p as Parameters<typeof resolveVesselResponsibilityAudit>[0],
+      );
+    case "vessel_architecture_pattern_scan":
+      return resolveVesselArchitecturePatternScan(
+        p as Parameters<typeof resolveVesselArchitecturePatternScan>[0],
+      );
+    case "activity_lifecycle_audit":
+      return resolveActivityLifecycleAudit(
+        p as Parameters<typeof resolveActivityLifecycleAudit>[0],
+      );
+    case "resolver_distribution_audit":
+      return resolveResolverDistributionAudit(
+        p as Parameters<typeof resolveResolverDistributionAudit>[0],
+      );
     default:
       throw new Error(`unknown shape: ${pointer.type}`);
   }

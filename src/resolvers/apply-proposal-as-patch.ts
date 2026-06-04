@@ -1,0 +1,210 @@
+/**
+ * apply_proposal_as_patch — Break 3 close (2026-06-04).
+ *
+ * Drafter writes analysis reports to /workspace/proposals/<id>-report.json
+ * but nothing converts proposal analysis into staged mitosis directories
+ * that the existing cutover machinery (vessel_mitosis_cutover + mitosis-tick)
+ * can apply. This resolver closes that final gap end-to-end:
+ *
+ *   1. List /workspace/proposals/*-report.json
+ *   2. Skip any whose scenario_id already has a staged mitosis dir
+ *      (/vessels/<vessel>-mitosis-<TS>/), pick newest unstaged by mtime
+ *   3. Strip markdown fences, parse the proposal, extract
+ *      required_code_modifications[0].file as the target path
+ *   4. Resolve target → /vessels/<vessel_name>/<sub_path>; compute base SHA
+ *   5. LLM call: live source + proposal analysis → patched full source
+ *   6. mkdir /vessels/<vessel_name>-mitosis-<TS>/<sub_path> and write
+ *   7. Write /workspace/mitosis-pending.json with staged_base_sha
+ *
+ * Output shape: mitosisStaged. On no-eligible-proposal returns the same
+ * shape with dispatched=null + reason. LLM/IO failures degrade with
+ * structuredError so callers can inspect the failure mode.
+ *
+ * Side effects are idempotent at the (proposal_id) granularity — re-running
+ * with the same newest proposal is a no-op once its mitosis dir exists.
+ */
+
+import { resolve, join, dirname } from "node:path";
+import { mkdir, readdir, stat, writeFile, readFile, access } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { DISCOVERY_ENDPOINT, METABOB_API_KEY } from "../config.js";
+import type { ResolverResult } from "./types.js";
+
+const LLM_OVERRIDE = process.env["LLM_COMPLETION_ENDPOINT"] ?? "";
+
+export interface ApplyProposalAsPatchPointer {
+  type: "apply_proposal_as_patch";
+  proposals_dir?: string;
+  vessels_root?: string;
+  pending_path?: string;
+  dry_run?: boolean;
+  model?: string;
+  max_tokens?: number;
+}
+
+function structuredError(detail: string, extra?: Record<string, unknown>): ResolverResult {
+  return { shape: "structuredError", body: { resolver: "apply_proposal_as_patch", detail, ...(extra ?? {}) } };
+}
+
+function stripFences(raw: string): string {
+  let s = raw.replace(/^```(?:json)?\n?/i, "").replace(/\n?```$/i, "").trim();
+  const a = s.indexOf("{");
+  const b = s.lastIndexOf("}");
+  if (a >= 0 && b > a) s = s.slice(a, b + 1);
+  return s;
+}
+
+async function exists(p: string): Promise<boolean> {
+  try { await access(p); return true; } catch { return false; }
+}
+
+function deriveVesselFromPath(filePath: string): { vessel: string; subPath: string } | null {
+  // Accept: repos/<vessel>/<rest>, /vessels/<vessel>/<rest>, <vessel>/src/... heuristic
+  const m1 = filePath.match(/^(?:\/)?repos\/([^/]+)\/(.+)$/);
+  if (m1) return { vessel: m1[1]!, subPath: m1[2]! };
+  const m2 = filePath.match(/^\/vessels\/([^/]+)\/(.+)$/);
+  if (m2) return { vessel: m2[1]!, subPath: m2[2]! };
+  return null;
+}
+
+async function findLlmEndpoint(): Promise<string | null> {
+  if (LLM_OVERRIDE) return LLM_OVERRIDE;
+  try {
+    for (const shape of ["llmCompletion", "llm_completion"]) {
+      const r = await fetch(`${DISCOVERY_ENDPOINT}/resolve`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `ApiKey ${METABOB_API_KEY}` },
+        body: JSON.stringify({ pointer: { type: "vesselCapability", shape } }),
+      });
+      if (!r.ok) continue;
+      const data = await r.json() as { content?: { vessels?: Array<{ endpoint: string; resolve_endpoint?: string; health_score?: number }> } };
+      const vs = data.content?.vessels ?? [];
+      if (vs.length === 0) continue;
+      const best = vs.sort((a, b) => (b.health_score ?? 0) - (a.health_score ?? 0))[0]!;
+      const ep = best.resolve_endpoint ?? "/resolve";
+      if (ep.startsWith("http")) return ep;
+      return `${best.endpoint.replace(/\/$/, "")}${ep.startsWith("/") ? ep : `/${ep}`}`;
+    }
+  } catch { /* fall through */ }
+  return null;
+}
+
+export async function resolveApplyProposalAsPatch(pointer: ApplyProposalAsPatchPointer): Promise<ResolverResult> {
+  const workspaceRoot = process.env["WORKSPACE_ROOT"] ?? "/workspace";
+  const proposalsDir = pointer.proposals_dir ?? join(workspaceRoot, "proposals");
+  const vesselsRoot = pointer.vessels_root ?? "/vessels";
+  const pendingPath = pointer.pending_path ?? join(workspaceRoot, "mitosis-pending.json");
+  const dryRun = pointer.dry_run === true;
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+
+  // 1. List proposals, sort newest first by mtime.
+  let entries: Array<{ name: string; path: string; mtime: number }> = [];
+  try {
+    const names = await readdir(proposalsDir);
+    for (const n of names) {
+      if (!n.endsWith("-report.json")) continue;
+      const p = join(proposalsDir, n);
+      try { const s = await stat(p); entries.push({ name: n, path: p, mtime: s.mtimeMs }); } catch { /* skip */ }
+    }
+  } catch (err) {
+    return structuredError(`cannot read proposals dir: ${(err as Error).message}`);
+  }
+  entries.sort((a, b) => b.mtime - a.mtime);
+
+  // 2. Find newest unstaged proposal — skip if any /vessels/<v>-mitosis-* dir exists for its scenario_id.
+  let mitosisDirs: string[] = [];
+  try { mitosisDirs = (await readdir(vesselsRoot)).filter((d) => /-mitosis-/.test(d)); } catch { /* tolerant */ }
+
+  // Walk entries in newest-first order; skip staged, malformed, or fieldless.
+  // Record skip reasons so the caller can audit drain progress.
+  const skipped: Array<{ proposal: string; reason: string }> = [];
+  let chosen: { name: string; path: string; scenarioId: string; content: string; targetFile: string } | null = null;
+  for (const e of entries) {
+    const scenarioId = e.name.replace(/-report\.json$/, "");
+    if (mitosisDirs.some((d) => d.includes(scenarioId.slice(0, 32)))) { skipped.push({ proposal: e.name, reason: "already_staged" }); continue; }
+    let content: string;
+    try { content = await readFile(e.path, "utf-8"); } catch { skipped.push({ proposal: e.name, reason: "read_failed" }); continue; }
+    let parsed: { required_code_modifications?: Array<{ file?: string }> };
+    try { parsed = JSON.parse(stripFences(content)); }
+    catch { skipped.push({ proposal: e.name, reason: "parse_failed" }); continue; }
+    const mods = parsed.required_code_modifications ?? [];
+    const targetFile = mods.find((m) => typeof m?.file === "string")?.file;
+    if (!targetFile) { skipped.push({ proposal: e.name, reason: "no_required_code_modifications" }); continue; }
+    chosen = { name: e.name, path: e.path, scenarioId, content, targetFile };
+    break;
+  }
+  if (!chosen) {
+    return { shape: "mitosisStaged", body: { dispatched: null, reason: "no eligible proposals", total_proposals: entries.length, skipped: skipped.slice(0, 20) } };
+  }
+  const targetFile = chosen.targetFile;
+  const derived = deriveVesselFromPath(targetFile);
+  if (!derived) return structuredError(`cannot derive vessel from path: ${targetFile}`, { proposal: chosen.name });
+  const { vessel, subPath } = derived;
+
+  // 4. Read live source (under /vessels/<vessel>/<subPath>); compute SHA.
+  const liveSrcPath = join(vesselsRoot, vessel, subPath);
+  if (!(await exists(liveSrcPath))) {
+    return structuredError(`live source missing: ${liveSrcPath}`, { proposal: chosen.name, target_file: targetFile });
+  }
+  const liveSrc = await readFile(liveSrcPath, "utf-8");
+  const baseSha = createHash("sha256").update(liveSrc).digest("hex").slice(0, 12);
+
+  if (dryRun) {
+    return { shape: "mitosisStaged", body: { dispatched: null, dry_run: true, would_stage: { proposal: chosen.name, target: targetFile, vessel, base_sha: baseSha } } };
+  }
+
+  // 5. LLM call to produce patched source.
+  const endpoint = await findLlmEndpoint();
+  if (!endpoint) return structuredError("no llm_completion vessel found in discovery");
+  const prompt =
+    `You are patching a source file based on a proposal analysis. Apply the changes described and output the COMPLETE patched file source, no fences, no prose. Preserve existing formatting/imports unless the proposal explicitly changes them.\n\n` +
+    `## Target file path\n${targetFile}\n\n## Proposal analysis (JSON)\n${chosen.content.slice(0, 8000)}\n\n## Live source (current contents)\n\`\`\`\n${liveSrc}\n\`\`\`\n\nOutput the full patched source for ${targetFile}. No commentary.`;
+  let patched: string;
+  try {
+    const res = await fetch(endpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ type: "llm_completion", prompt, model: pointer.model ?? "anthropic/claude-haiku-4-5-20251001", max_tokens: pointer.max_tokens ?? 8000 }),
+      signal: AbortSignal.timeout(120_000),
+    });
+    if (!res.ok) return structuredError(`llm fetch ${res.status}: ${(await res.text()).slice(0, 200)}`);
+    const j = await res.json() as { content?: string; data?: string; error?: string };
+    if (j.error) return structuredError(`llm error: ${j.error}`);
+    patched = (j.content ?? j.data ?? "").replace(/^```(?:[a-z]+)?\n?/i, "").replace(/\n?```$/i, "");
+    if (!patched.trim()) return structuredError("llm returned empty content");
+  } catch (err) {
+    return structuredError(`llm call failed: ${(err as Error).message}`);
+  }
+
+  // 6. Stage the mitosis dir and write the patched file.
+  const mitosisRoot = join(vesselsRoot, `${vessel}-mitosis-${stamp}`);
+  const stagedFile = join(mitosisRoot, subPath);
+  try {
+    await mkdir(dirname(stagedFile), { recursive: true });
+    await writeFile(stagedFile, patched);
+  } catch (err) {
+    return structuredError(`stage write failed: ${(err as Error).message}`, { staged_file: stagedFile });
+  }
+
+  // 7. Write mitosis-pending.json.
+  const versionId = `mitosis-${stamp}`;
+  const pendingBody = {
+    vessel_name: vessel,
+    base_version_id: "v1",
+    mitosis_version_id: versionId,
+    mitosis_root: mitosisRoot,
+    base_sha: baseSha,
+    staged_at: new Date().toISOString(),
+    authored_by: "apply_proposal_as_patch",
+    proposal: chosen.name,
+    target_file: targetFile,
+    staged_files: [subPath],
+  };
+  try { await writeFile(pendingPath, JSON.stringify(pendingBody, null, 2)); }
+  catch (err) { return structuredError(`pending write failed: ${(err as Error).message}`); }
+
+  return {
+    shape: "mitosisStaged",
+    body: { dispatched: chosen.name, vessel_name: vessel, mitosis_root: mitosisRoot, mitosis_version_id: versionId, base_sha: baseSha, staged_files: [subPath], pending_path: pendingPath, completed_at: new Date().toISOString() },
+  };
+}

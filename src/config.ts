@@ -306,6 +306,12 @@ export const config = {
       // unexecuted one, and POSTs a light-dispatch invocation so its Thompson
       // posterior gets seeded.
       "dispatch_latest_auto_draft",
+      // Apply-proposal close (Break 3, 2026-06-04). Reads newest unstaged
+      // /workspace/proposals/<id>-report.json, LLM-patches the target source,
+      // stages /vessels/<vessel>-mitosis-<TS>/, writes mitosis-pending.json
+      // with staged_base_sha. Closes the gap between drafter analysis and
+      // the existing cutover machinery (mitosis-tick + vessel_mitosis_cutover).
+      "apply_proposal_as_patch",
     ] as const,
     resolveEndpoint: "/v2/impulses/resolve",
     resolveRequestFormat: "pointer" as const,

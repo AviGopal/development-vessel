@@ -1,0 +1,99 @@
+import { describe, it, expect, beforeEach } from "bun:test";
+import { resolveApplyProposalAsPatch } from "../../src/resolvers/apply-proposal-as-patch.js";
+import { writeFileSync, mkdirSync, rmSync, existsSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+function freshDir(suffix: string): string {
+  const d = join(tmpdir(), `apply-proposal-test-${Date.now()}-${suffix}`);
+  mkdirSync(d, { recursive: true });
+  return d;
+}
+
+describe("apply_proposal_as_patch resolver", () => {
+  let proposalsDir: string;
+  let vesselsRoot: string;
+  let pendingPath: string;
+
+  beforeEach(() => {
+    const base = freshDir(Math.random().toString(36).slice(2, 8));
+    proposalsDir = join(base, "proposals");
+    vesselsRoot = join(base, "vessels");
+    pendingPath = join(base, "mitosis-pending.json");
+    mkdirSync(proposalsDir, { recursive: true });
+    mkdirSync(vesselsRoot, { recursive: true });
+    process.env["WORKSPACE_ROOT"] = base;
+  });
+
+  it("returns dispatched=null when no proposals exist", async () => {
+    const r = await resolveApplyProposalAsPatch({ type: "apply_proposal_as_patch", proposals_dir: proposalsDir, vessels_root: vesselsRoot, pending_path: pendingPath });
+    expect(r.shape).toBe("mitosisStaged");
+    expect((r.body as { dispatched: unknown }).dispatched).toBeNull();
+  });
+
+  it("dry-run identifies target proposal and computes base SHA without writing", async () => {
+    // Stage a vessel + live source.
+    const vesselDir = join(vesselsRoot, "demo-vessel", "src", "resolvers");
+    mkdirSync(vesselDir, { recursive: true });
+    writeFileSync(join(vesselDir, "scan.ts"), "export const VERSION = 'v1';\n");
+    // Stage a proposal report referencing that file.
+    const proposal = {
+      scenario_id: "auto-1780600000999-demo",
+      required_code_modifications: [{ file: "repos/demo-vessel/src/resolvers/scan.ts", function: "scan" }],
+    };
+    writeFileSync(join(proposalsDir, "auto-1780600000999-demo-report.json"), JSON.stringify(proposal));
+    const r = await resolveApplyProposalAsPatch({
+      type: "apply_proposal_as_patch",
+      proposals_dir: proposalsDir,
+      vessels_root: vesselsRoot,
+      pending_path: pendingPath,
+      dry_run: true,
+    });
+    expect(r.shape).toBe("mitosisStaged");
+    const body = r.body as { dry_run?: boolean; would_stage?: { vessel: string; base_sha: string; target: string } };
+    expect(body.dry_run).toBe(true);
+    expect(body.would_stage?.vessel).toBe("demo-vessel");
+    expect(body.would_stage?.base_sha).toMatch(/^[0-9a-f]{12}$/);
+    expect(body.would_stage?.target).toBe("repos/demo-vessel/src/resolvers/scan.ts");
+    expect(existsSync(pendingPath)).toBe(false);
+  });
+
+  it("skips fieldless / malformed proposals and reports them in skipped[]", async () => {
+    writeFileSync(join(proposalsDir, "auto-bad-report.json"), JSON.stringify({ scenario_id: "auto-bad", notes: "no mods" }));
+    writeFileSync(join(proposalsDir, "auto-truncated-report.json"), '{"scenario_id":"auto-truncated", "required_code_mod'); // intentional truncation
+    const r = await resolveApplyProposalAsPatch({ type: "apply_proposal_as_patch", proposals_dir: proposalsDir, vessels_root: vesselsRoot, pending_path: pendingPath, dry_run: true });
+    expect(r.shape).toBe("mitosisStaged");
+    const body = r.body as { dispatched: unknown; reason: string; skipped: Array<{ reason: string }> };
+    expect(body.dispatched).toBeNull();
+    expect(body.reason).toContain("no eligible");
+    expect(body.skipped.some((s) => s.reason === "no_required_code_modifications")).toBe(true);
+    expect(body.skipped.some((s) => s.reason === "parse_failed")).toBe(true);
+  });
+
+  it("skips proposals whose scenario already has a mitosis dir", async () => {
+    // Create vessel + proposal as before.
+    const vesselDir = join(vesselsRoot, "demo-vessel", "src");
+    mkdirSync(vesselDir, { recursive: true });
+    writeFileSync(join(vesselDir, "x.ts"), "x");
+    const scenarioId = "auto-skipme-report"; // will become "auto-skipme" after replace
+    const sid = scenarioId.replace(/-report$/, "");
+    const proposal = { scenario_id: sid, required_code_modifications: [{ file: "repos/demo-vessel/src/x.ts" }] };
+    writeFileSync(join(proposalsDir, `${sid}-report.json`), JSON.stringify(proposal));
+    // Pre-stage a matching mitosis dir.
+    mkdirSync(join(vesselsRoot, `demo-vessel-mitosis-${sid.slice(0, 32)}-2026`), { recursive: true });
+    const r = await resolveApplyProposalAsPatch({ type: "apply_proposal_as_patch", proposals_dir: proposalsDir, vessels_root: vesselsRoot, pending_path: pendingPath, dry_run: true });
+    expect(r.shape).toBe("mitosisStaged");
+    expect((r.body as { dispatched: unknown }).dispatched).toBeNull();
+  });
+
+  it("tolerates markdown fences around the proposal JSON", async () => {
+    const vesselDir = join(vesselsRoot, "demo-vessel", "src");
+    mkdirSync(vesselDir, { recursive: true });
+    writeFileSync(join(vesselDir, "x.ts"), "x");
+    const fenced = "```json\n" + JSON.stringify({ scenario_id: "auto-fenced", required_code_modifications: [{ file: "repos/demo-vessel/src/x.ts" }] }) + "\n```";
+    writeFileSync(join(proposalsDir, "auto-fenced-report.json"), fenced);
+    const r = await resolveApplyProposalAsPatch({ type: "apply_proposal_as_patch", proposals_dir: proposalsDir, vessels_root: vesselsRoot, pending_path: pendingPath, dry_run: true });
+    expect(r.shape).toBe("mitosisStaged");
+    expect((r.body as { dry_run: boolean }).dry_run).toBe(true);
+  });
+});

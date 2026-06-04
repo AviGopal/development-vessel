@@ -110,14 +110,22 @@ describe("vessel_mitosis_evaluate", () => {
     expect((r.body as { verdict: string }).verdict).toBe("NEUTRAL");
   });
 
-  it("returns structuredError on activity-api 500", async () => {
+  it("returns vesselMitosisEvaluation{INSUFFICIENT_DATA} on activity-api 500", async () => {
+    // Trace-fetch failure is the substrate's audited NO ("no runtime
+    // evidence available"), not a chain crash. Cutover should see the
+    // verdict and refuse cleanly instead of structuredError being
+    // silently dropped by the engine top-level catch.
+    // Mirrors pattern from 74542cc/875d539/f9573a3/befb371.
     globalThis.fetch = (async () => new Response("err", { status: 500 })) as unknown as typeof fetch;
     const r = await resolveVesselMitosisEvaluate({
       type: "vessel_mitosis_evaluate",
       base_version_id: "v1",
       mitosis_version_id: "mitosis-X",
     });
-    expect(r.shape).toBe("structuredError");
+    expect(r.shape).toBe("vesselMitosisEvaluation");
+    const body = r.body as { verdict: string; verdict_reason: string };
+    expect(body.verdict).toBe("INSUFFICIENT_DATA");
+    expect(body.verdict_reason).toMatch(/activity_api_traces_returned_500/);
   });
 
   it("requires base_version_id and mitosis_version_id", async () => {

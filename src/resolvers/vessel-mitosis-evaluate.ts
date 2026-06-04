@@ -475,11 +475,20 @@ export async function resolveVesselMitosisEvaluate(
       signal: AbortSignal.timeout(15_000),
     });
     if (!resp.ok) {
+      // Transient activity-api unavailability is the substrate's "no
+      // runtime evidence available right now" — the audited NO, not a
+      // chain failure. Emit vesselMitosisEvaluation{INSUFFICIENT_DATA}
+      // so cutover sees the verdict (and refuses cleanly) instead of
+      // structuredError being silently dropped by the engine top-level
+      // catch. Mirrors the pattern from 74542cc/875d539/f9573a3/befb371.
       return {
-        shape: "structuredError",
+        shape: "vesselMitosisEvaluation",
         body: {
-          resolver: "vessel_mitosis_evaluate",
-          detail: `activity-api traces returned ${resp.status}`,
+          base_version_id: baseId,
+          mitosis_version_id: mitosisId,
+          verdict: "INSUFFICIENT_DATA",
+          verdict_reason: `activity_api_traces_returned_${resp.status}`,
+          evaluated_at: new Date().toISOString(),
         },
       };
     }
@@ -491,11 +500,19 @@ export async function resolveVesselMitosisEvaluate(
         : [];
     traces = arr as TraceLike[];
   } catch (err) {
+    // Same audited-NO pattern as the 4xx/5xx branch above: trace-fetch
+    // failure is the substrate's "no runtime evidence available" signal,
+    // not a chain crash. Cutover will see the INSUFFICIENT_DATA verdict
+    // and either accept it via static-eval cited_check_names or
+    // soft-refuse cleanly.
     return {
-      shape: "structuredError",
+      shape: "vesselMitosisEvaluation",
       body: {
-        resolver: "vessel_mitosis_evaluate",
-        detail: `traces fetch failed: ${(err as Error).message}`,
+        base_version_id: baseId,
+        mitosis_version_id: mitosisId,
+        verdict: "INSUFFICIENT_DATA",
+        verdict_reason: `traces_fetch_failed: ${(err as Error).message.slice(0, 200)}`,
+        evaluated_at: new Date().toISOString(),
       },
     };
   }

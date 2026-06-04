@@ -99,6 +99,38 @@ describe("gap_to_scenario_bridge resolver", () => {
     expect(readdirSync(scenariosDir).length).toBe(2);
   });
 
+  it("prioritises architecture-class gaps over trace_quality / incidental", async () => {
+    // Mix: 4 trace_quality (low) + 1 missing_concept + 1 architectural_pattern
+    // + 1 resolver_distribution. With limit=3, only the three priority gaps
+    // should land scenarios, in the priority order declared by the resolver.
+    seed([
+      { id: "tq-1", category: "trace_quality", source: "substrate_detected", summary: "noise 1", status: "open", created_at: "2026-06-01T00:00:00Z" },
+      { id: "tq-2", category: "trace_quality", source: "substrate_detected", summary: "noise 2", status: "open", created_at: "2026-06-01T00:00:01Z" },
+      { id: "mc-old", category: "missing_concept", source: "substrate_detected", summary: "old missing concept", status: "open", created_at: "2026-06-01T00:00:00Z" },
+      { id: "tq-3", category: "trace_quality", source: "substrate_detected", summary: "noise 3", status: "open", created_at: "2026-06-01T00:00:02Z" },
+      { id: "arch-1", category: "architectural_pattern", source: "substrate_detected", summary: "arch gap", status: "open", created_at: "2026-06-02T00:00:00Z" },
+      { id: "tq-4", category: "trace_quality", source: "substrate_detected", summary: "noise 4", status: "open", created_at: "2026-06-01T00:00:03Z" },
+      { id: "rd-1", category: "resolver_distribution", source: "substrate_detected", summary: "rd gap", status: "open", created_at: "2026-06-02T00:00:00Z" },
+    ]);
+    const r = await resolveGapToScenarioBridge({ type: "gap_to_scenario_bridge", limit: 3 });
+    const body = r.body as {
+      scenarios_written: number;
+      scenarios: Array<{ gap_id: string }>;
+      priority_breakdown: Record<string, number>;
+    };
+    expect(body.scenarios_written).toBe(3);
+    // Order: architectural_pattern (idx 0) → resolver_distribution (idx 1) → missing_concept (idx 5)
+    expect(body.scenarios.map((s) => s.gap_id)).toEqual(["arch-1", "rd-1", "mc-old"]);
+    expect(body.priority_breakdown).toEqual({
+      architectural_pattern: 1,
+      resolver_distribution: 1,
+      missing_concept: 1,
+    });
+    // trace_quality gaps must NOT have been written
+    expect(existsSync(join(scenariosDir, "tq-1.json"))).toBe(false);
+    expect(existsSync(join(scenariosDir, "tq-4.json"))).toBe(false);
+  });
+
   it("returns empty result when gaps file is missing", async () => {
     rmSync(testRoot, { recursive: true, force: true });
     process.env["WORKSPACE_ROOT"] = testRoot;

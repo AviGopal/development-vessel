@@ -40,7 +40,26 @@ interface GapRow {
   source?: unknown;
   summary?: unknown;
   status?: unknown;
+  created_at?: unknown;
   classification_metadata?: Record<string, unknown> | null;
+}
+
+// Architecture-class gap categories drained before trace_quality / incidental.
+// Order within the list is also a tiebreaker (earlier = higher priority).
+const PRIORITY_CATEGORIES: string[] = [
+  "architectural_pattern",
+  "resolver_distribution",
+  "responsibility_misallocation",
+  "missing_capability",
+  "activity_lifecycle",
+  "missing_concept",
+  "detector_output_shape_mismatch",
+];
+
+function rankOf(g: GapRow): number {
+  const cat = typeof g.category === "string" ? g.category : "";
+  const idx = PRIORITY_CATEGORIES.indexOf(cat);
+  return idx === -1 ? PRIORITY_CATEGORIES.length : idx;
 }
 
 function sanitizeId(id: string): string {
@@ -81,10 +100,22 @@ export async function resolveGapToScenarioBridge(
 
   const ALLOWED_SOURCES = new Set(["operator_seed", "substrate_detected"]);
   const out: Array<{ gap_id: string; scenario_path: string }> = [];
+  const priorityBreakdown: Record<string, number> = {};
   let skippedExisting = 0;
   let examined = 0;
 
-  for (const g of gaps) {
+  // Sort by (priority rank ascending, then created_at ascending so older
+  // priority gaps drain first). Stable on equal keys.
+  const sorted = [...gaps].sort((a, b) => {
+    const pa = rankOf(a);
+    const pb = rankOf(b);
+    if (pa !== pb) return pa - pb;
+    const ta = typeof a.created_at === "string" ? a.created_at : "";
+    const tb = typeof b.created_at === "string" ? b.created_at : "";
+    return ta.localeCompare(tb);
+  });
+
+  for (const g of sorted) {
     if (out.length >= limit) break;
     const id = typeof g.id === "string" ? g.id : null;
     const status = typeof g.status === "string" ? g.status : "";
@@ -123,6 +154,7 @@ export async function resolveGapToScenarioBridge(
     const { rename } = await import("node:fs/promises");
     await rename(tmp, scenarioPath);
     out.push({ gap_id: id, scenario_path: scenarioPath });
+    priorityBreakdown[category] = (priorityBreakdown[category] ?? 0) + 1;
   }
 
   return {
@@ -133,6 +165,7 @@ export async function resolveGapToScenarioBridge(
       gaps_examined: examined,
       gaps_total: gaps.length,
       scenarios: out,
+      priority_breakdown: priorityBreakdown,
       completed_at: new Date().toISOString(),
     },
   };

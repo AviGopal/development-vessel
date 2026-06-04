@@ -152,14 +152,14 @@ export const DRAFT_ACTIVITY_FROM_PATTERN_TEMPLATE: ActivityTemplate = {
       id: "prime_concepts",
       description:
         "Pull concept-db's accumulated concepts ranked by relevance plus the pattern cluster's " +
-        "explicit citations. These become the cited_concept_ids candidates for the drafted template.",
+        "explicit citations. All source_types are eligible — Bayesian relevance gates inclusion, " +
+        "not an enumerated allow-list. These become the cited_concept_ids candidates for the " +
+        "drafted template. 2026-06-04: source_type whitelist removed; see openspec change " +
+        "2026-06-04-drop-drafter-source-type-filter for rationale.",
       resolver: "http_fetch",
       config: {
         type: "http_fetch",
-        url:
-          "http://127.0.0.1:8260/concepts/search" +
-          "?source_type=impulse_signature,memo,vessel_construction_pattern,impulse_activity_pattern" +
-          "&min_relevance=0.3&limit=15",
+        url: "http://127.0.0.1:8260/concepts/search?min_relevance=0.3&limit=15",
         method: "GET",
         timeoutMs: 5000,
       },

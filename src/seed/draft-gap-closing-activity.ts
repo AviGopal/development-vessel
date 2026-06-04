@@ -179,22 +179,21 @@ export const DRAFT_GAP_CLOSING_ACTIVITY_TEMPLATE: ActivityTemplate = {
       id: "prime_substrate_concepts",
       description:
         "Query concept-db for the substrate's accumulated concepts ranked by Bayesian " +
-        "relevance — both bridge-auto-minted impulse_signature concepts AND " +
-        "hand-minted operator/audit/skill concepts (memo for findings + " +
-        "vessel_construction_pattern + impulse_activity_pattern for constitutional knowledge). " +
-        "The drafted template's LLM call uses these as priors. " +
-        "Failure is non-fatal — concept-db being empty or unreachable just means the LLM " +
-        "drafts without the substrate's memory as context. " +
-        "F26 (2026-05-30): source_type filter expanded from impulse_signature-only to " +
-        "comma-separated multi-source-type, closing the gap where operator-minted concepts " +
-        "(source_type=memo) were structurally invisible to the substrate's autonomous loop.",
+        "relevance. All source_types are eligible — bridge-auto-minted impulse_signatures, " +
+        "memos, vessel_construction_patterns, impulse_activity_patterns, " +
+        "architectural_pattern_principles, extracted codebase patterns, and human_input " +
+        "operator corrections compete on the same relevance axis. The drafted template's " +
+        "LLM call uses the top-ranked concepts as priors. Failure is non-fatal — " +
+        "concept-db being empty or unreachable just means the LLM drafts without the " +
+        "substrate's memory as context. " +
+        "2026-06-04: source_type whitelist removed entirely. The prior whitelist was a " +
+        "special case that encoded which categories of knowledge the drafter would see; " +
+        "Bayesian relevance + the LLM's own filtering are sufficient and avoid pinning " +
+        "the substrate's vocabulary to an enumerated allow-list.",
       resolver: "http_fetch",
       config: {
         type: "http_fetch",
-        url:
-          "http://127.0.0.1:8260/concepts/search" +
-          "?source_type=impulse_signature,memo,vessel_construction_pattern,impulse_activity_pattern" +
-          "&min_relevance=0.3&limit=15",
+        url: "http://127.0.0.1:8260/concepts/search?min_relevance=0.3&limit=15",
         method: "GET",
         timeoutMs: 5000,
       },

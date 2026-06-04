@@ -56,7 +56,7 @@ Output ONLY a JSON array. No prose, no markdown fences. Each entry MUST
 be a JSON object ready to POST to concept-db's /concepts endpoint:
 
   {
-    "source_type": "extracted",
+    "source_type": "{{source_type}}",
     "shape": "<specific noun-phrase shape; see RULES below>",
     "summary": "<one-sentence gist, ≤80 chars>",
     "content": "<the section body, lightly cleaned, ≤200 words, single line>",
@@ -112,7 +112,7 @@ CONTENT DISCIPLINE — hard rules. Violations will be rejected downstream:
 
 GOOD ENTRY:
   {
-    "source_type": "extracted",
+    "source_type": "{{source_type}}",
     "shape": "thompson_sampling_alpha_beta_attribution",
     "summary": "Thompson posterior credits both variant and dispatched template on failure",
     "content": "When a variant fails, the directly-executed variant AND any dispatched-via-meta-trace template both receive beta updates, preventing failure-attribution drift relative to success attribution.",
@@ -130,7 +130,7 @@ GOOD ENTRY:
 
 BAD ENTRY (DO NOT EMIT — multi-idea, banned shape, verbose summary, leaked XML, missing pointer):
   {
-    "source_type": "extracted",
+    "source_type": "{{source_type}}",
     "shape": "overview",
     "summary": "An overview of Thompson and retry strategies for failed activities",
     "content": "<content>Thompson is used... and also we retry...</content>",
@@ -172,6 +172,15 @@ export const INGEST_DOC_AS_CONCEPTS_TEMPLATE: ActivityTemplate = {
       description:
         "Where to write the extracted JSON section array. Defaults to " +
         "/workspace/concept-ingest/sections-latest.json if unset.",
+    },
+    {
+      name: "source_type",
+      description:
+        "concept-db source_type to stamp on each minted concept. Defaults to " +
+        "'extracted' for generic ingest; pass 'architectural_pattern_principle' " +
+        "when ingesting IMPULSE_ACTIVITY_FOUNDATION.md or other principle docs " +
+        "so vesselResponsibilityAudit + concept-usage-backfill can find them.",
+      default: "extracted",
     },
   ],
   tasks: [

@@ -330,15 +330,31 @@ export async function resolveVesselMitosisCutover(
     ? resolve(pointer.mitosis_root)
     : null;
 
+  // Missing-path conditions are audited "no" decisions, not bugs — the
+  // substrate's correct response is to soft-refuse with a clean trace
+  // (vesselMitosisCutoverResult{applied:false}) so the refuse becomes a
+  // durable Thompson observation, NOT a structuredError (which the engine's
+  // top-level catch drops, leaving status=failure with no audit signal).
+  // Same pattern as 74542cc applied for non-FAVORABLE + this commit's
+  // siblings for empty cited evidence.
   if (!mitosisRoot) {
-    return structuredError("mitosis_root is required (cannot infer)");
+    return softRefuse(
+      "mitosis_root not supplied — cutover cannot identify the staged tree",
+      { verdict: evaluation_evidence.verdict, pointer_keys: Object.keys(pointer) },
+    );
   }
 
   if (!(await pathExists(baseRoot))) {
-    return structuredError(`base_root not found: ${baseRoot}`);
+    return softRefuse(
+      `base_root not found on disk: ${baseRoot}`,
+      { verdict: evaluation_evidence.verdict, base_root: baseRoot },
+    );
   }
   if (!(await pathExists(mitosisRoot))) {
-    return structuredError(`mitosis_root not found: ${mitosisRoot}`);
+    return softRefuse(
+      `mitosis_root not found on disk: ${mitosisRoot}`,
+      { verdict: evaluation_evidence.verdict, mitosis_root: mitosisRoot },
+    );
   }
 
   // ---- Mitosis freshness gate (Stage B.2 2026-06-03) ----

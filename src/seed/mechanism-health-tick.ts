@@ -105,6 +105,34 @@ export const MECHANISM_HEALTH_TICK_TEMPLATE: ActivityTemplate = {
         "same JSONPath contract would substitute.",
     },
     {
+      task_id: "dispatch_self_gate_placeholder",
+      rationale_class: "essential",
+      rationale_text:
+        "Self-gate row 6: filter-saturation on concept-db emissions where literal " +
+        "'{{...}}' placeholder strings survive into the content field — exactly the " +
+        "bug surfaced by concept_4eNd7BFuAJK0. Reuses detect-filter-saturation; no " +
+        "new shape/resolver. Operator-audit-becomes-tick (concept_Orn4yVaJYD24).",
+    },
+    {
+      task_id: "dispatch_self_gate_surrealdb_conflicts",
+      rationale_class: "replaceable",
+      rationale_text:
+        "Self-gate row 7: filter-saturation between concept_create_write successes " +
+        "and SurrealDB transaction-conflict log lines on concept-db.service. Any " +
+        "log-line positive/negative pair over the same window substitutes; this " +
+        "binding catches the conflict-rate degradation surfaced by concept_D9GHCGYCt9T1.",
+    },
+    {
+      task_id: "dispatch_self_gate_self_emission_rate",
+      rationale_class: "essential",
+      rationale_text:
+        "Self-gate row 8: feature-flag-zero-exercise binding where the 'flag' is " +
+        "container-presence (HOSTNAME, always set) and the observable is the count of " +
+        "mechanismHealthFinding concepts emitted in the last hour. Zero emissions " +
+        "across the hour means the detection layer itself is silent — the ultimate " +
+        "watchdog. Recursive-self-detection (concept_Orn4yVaJYD24).",
+    },
+    {
       task_id: "emit_rollup_report",
       rationale_class: "essential",
       rationale_text:
@@ -130,6 +158,10 @@ export const MECHANISM_HEALTH_TICK_TEMPLATE: ActivityTemplate = {
     "concept_YinkepAheImS",
     "concept_SDerP4GcuhGm",
     "concept_iae171XpW50_",
+    // Self-gate rows (6/7/8) — empirical-evidence + meta-principle anchors
+    "concept_4eNd7BFuAJK0",
+    "concept_D9GHCGYCt9T1",
+    "concept_Orn4yVaJYD24",
   ],
   tasks: [
     {
@@ -297,6 +329,104 @@ export const MECHANISM_HEALTH_TICK_TEMPLATE: ActivityTemplate = {
       outputShapes: ["mechanismHealthFinding"],
     },
     {
+      id: "dispatch_self_gate_placeholder",
+      description:
+        "Self-gate row 6: dispatch detect-filter-saturation against concept-db.service " +
+        "logs to surface literal '{{name_stdout}}' placeholder strings that survive " +
+        "into emitted concept content (the bug concept_4eNd7BFuAJK0 documents). " +
+        "Positive = 'Created concept' success log; negative = the literal " +
+        "placeholder pattern. Mechanism = concept_q2n0_XaSvphV (self-gate frame).",
+      resolver: "http_fetch",
+      config: {
+        type: "http_fetch",
+        method: "POST",
+        url: RUN_GOAL_URL,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          goal:
+            "mechanism-health-tick self-gate: detect placeholder-interpolation leakage in concept-db emissions",
+          targetTemplateId: "development-vessel:detect-filter-saturation",
+          variables: {
+            positive_event_pattern: "Created concept",
+            negative_event_pattern: "\\{\\{[a-zA-Z_]+_stdout\\}\\}",
+            log_unit_name: "concept-db.service",
+            time_window_minutes: "60",
+            saturation_threshold: "0.5",
+            min_volume: "1",
+            mechanism_concept_id: "concept_q2n0_XaSvphV",
+            source: "mechanism-health-tick-self-gate",
+          },
+        }),
+        timeoutMs: 60000,
+      },
+      outputShapes: ["mechanismHealthFinding"],
+    },
+    {
+      id: "dispatch_self_gate_surrealdb_conflicts",
+      description:
+        "Self-gate row 7: dispatch detect-filter-saturation against concept-db.service " +
+        "logs to surface SurrealDB transaction-conflict rate. Positive = successful " +
+        "concept_create_write or 'Created concept'; negative = 'failed transaction' / " +
+        "'read or write conflict'. Threshold 10% conflicts is concerning. " +
+        "Mechanism = concept_q2n0_XaSvphV.",
+      resolver: "http_fetch",
+      config: {
+        type: "http_fetch",
+        method: "POST",
+        url: RUN_GOAL_URL,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          goal:
+            "mechanism-health-tick self-gate: detect SurrealDB transaction-conflict saturation",
+          targetTemplateId: "development-vessel:detect-filter-saturation",
+          variables: {
+            positive_event_pattern: "concept_create_write|Created concept",
+            negative_event_pattern: "failed transaction|read or write conflict",
+            log_unit_name: "concept-db.service",
+            time_window_minutes: "60",
+            saturation_threshold: "0.1",
+            min_volume: "10",
+            mechanism_concept_id: "concept_q2n0_XaSvphV",
+            source: "mechanism-health-tick-self-gate",
+          },
+        }),
+        timeoutMs: 60000,
+      },
+      outputShapes: ["mechanismHealthFinding"],
+    },
+    {
+      id: "dispatch_self_gate_self_emission_rate",
+      description:
+        "Self-gate row 8: dispatch detect-feature-flag-zero-exercise where the 'flag' " +
+        "is HOSTNAME (always set inside the substrate container — no dedicated " +
+        "MECHANISM_HEALTH_TICK_ENABLED env exists, so we use container-presence as " +
+        "the always-true equivalent). Observable = mechanismHealthFinding emissions " +
+        "in the last hour. Zero in 1h means the detection layer itself is silent — " +
+        "the ultimate watchdog. Mechanism = concept_q2n0_XaSvphV.",
+      resolver: "http_fetch",
+      config: {
+        type: "http_fetch",
+        method: "POST",
+        url: RUN_GOAL_URL,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          goal:
+            "mechanism-health-tick self-gate: detect zero mechanismHealthFinding emission rate",
+          targetTemplateId: "development-vessel:detect-feature-flag-zero-exercise",
+          variables: {
+            flag_env_var: "HOSTNAME",
+            observable_sql:
+              "SELECT count() FROM concept WHERE shape = \"mechanismHealthFinding\" AND created_at > time::now() - 1h GROUP ALL",
+            expected_nonzero_threshold: "0",
+            mechanism_concept_id: "concept_q2n0_XaSvphV",
+            source: "mechanism-health-tick-self-gate",
+          },
+        }),
+        timeoutMs: 60000,
+      },
+      outputShapes: ["mechanismHealthFinding"],
+    },
+    {
       id: "emit_rollup_report",
       description:
         "Emit a single substrateHealthReport-shape memo via concept_create_write " +
@@ -328,11 +458,20 @@ export const MECHANISM_HEALTH_TICK_TEMPLATE: ActivityTemplate = {
                 "Cited detectors: concept_9L8PB5tQzc7l (skew), " +
                 "concept_7_yVEeVfMKQV (flag-zero), concept_-rQijiezhmMZ (saturation). " +
                 "Discipline: concept_7mzv7SQN_7JB. " +
+                "Self-gate empirical anchors: concept_4eNd7BFuAJK0 (placeholder " +
+                "leakage finding), concept_D9GHCGYCt9T1 (second-run evidence), " +
+                "concept_Orn4yVaJYD24 (operator-audit-becomes-tick meta-principle). " +
                 "M1 dispatch: {{dispatch_m1_feature_flag_content}}. " +
                 "M2 dispatch: {{dispatch_m2_filter_saturation_content}}. " +
                 "M3 dispatch: {{dispatch_m3_filter_saturation_content}}. " +
                 "M4 dispatch: {{dispatch_m4_classifier_skew_content}}. " +
-                "M6 dispatch: {{dispatch_m6_classifier_skew_content}}.",
+                "M6 dispatch: {{dispatch_m6_classifier_skew_content}}. " +
+                "Self-gate row 6 (placeholder leakage): " +
+                "{{dispatch_self_gate_placeholder_content}}. " +
+                "Self-gate row 7 (SurrealDB conflicts): " +
+                "{{dispatch_self_gate_surrealdb_conflicts_content}}. " +
+                "Self-gate row 8 (self-emission rate): " +
+                "{{dispatch_self_gate_self_emission_rate_content}}.",
               priority: 0.6,
               budget: 2000,
               pointer: {

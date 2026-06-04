@@ -152,4 +152,83 @@ describe("MECHANISM_HEALTH_TICK_TEMPLATE", () => {
       expect(t.description.length).toBeGreaterThanOrEqual(40);
     }
   });
+
+  it("has 9 tasks after adding the 3 substrate-self-gate rows", () => {
+    expect(MECHANISM_HEALTH_TICK_TEMPLATE.tasks.length).toBe(9);
+  });
+
+  it("includes the three new self-gate task ids", () => {
+    const ids = new Set(MECHANISM_HEALTH_TICK_TEMPLATE.tasks.map((t) => t.id));
+    expect(ids.has("dispatch_self_gate_placeholder")).toBe(true);
+    expect(ids.has("dispatch_self_gate_surrealdb_conflicts")).toBe(true);
+    expect(ids.has("dispatch_self_gate_self_emission_rate")).toBe(true);
+  });
+
+  it("row 6 (placeholder) targets detect-filter-saturation with placeholder regex", () => {
+    const t = MECHANISM_HEALTH_TICK_TEMPLATE.tasks.find(
+      (x) => x.id === "dispatch_self_gate_placeholder",
+    )!;
+    expect(t.resolver).toBe("http_fetch");
+    const body = JSON.stringify(t.config);
+    expect(body).toContain("development-vessel:detect-filter-saturation");
+    expect(body).toContain("concept-db.service");
+    expect(body).toContain("Created concept");
+    // The literal placeholder pattern (JSON-escaped backslashes)
+    expect(body).toContain("_stdout");
+    expect(body).toContain("mechanism-health-tick-self-gate");
+  });
+
+  it("row 7 (surrealdb conflicts) targets detect-filter-saturation with conflict regex", () => {
+    const t = MECHANISM_HEALTH_TICK_TEMPLATE.tasks.find(
+      (x) => x.id === "dispatch_self_gate_surrealdb_conflicts",
+    )!;
+    expect(t.resolver).toBe("http_fetch");
+    const body = JSON.stringify(t.config);
+    expect(body).toContain("development-vessel:detect-filter-saturation");
+    expect(body).toContain("concept-db.service");
+    expect(body).toContain("failed transaction");
+    expect(body).toContain("read or write conflict");
+    expect(body).toContain("mechanism-health-tick-self-gate");
+  });
+
+  it("row 8 (self-emission rate) targets detect-feature-flag-zero-exercise with mechanismHealthFinding SQL", () => {
+    const t = MECHANISM_HEALTH_TICK_TEMPLATE.tasks.find(
+      (x) => x.id === "dispatch_self_gate_self_emission_rate",
+    )!;
+    expect(t.resolver).toBe("http_fetch");
+    const body = JSON.stringify(t.config);
+    expect(body).toContain(
+      "development-vessel:detect-feature-flag-zero-exercise",
+    );
+    expect(body).toContain("mechanismHealthFinding");
+    expect(body).toContain("HOSTNAME");
+    expect(body).toContain("mechanism-health-tick-self-gate");
+  });
+
+  it("each new self-gate task has a composition_rationales entry", () => {
+    const t = MECHANISM_HEALTH_TICK_TEMPLATE as unknown as Record<
+      string,
+      unknown
+    >;
+    const rationaleIds = new Set(
+      (
+        t.composition_rationales as Array<{ task_id: string }>
+      ).map((r) => r.task_id),
+    );
+    for (const id of [
+      "dispatch_self_gate_placeholder",
+      "dispatch_self_gate_surrealdb_conflicts",
+      "dispatch_self_gate_self_emission_rate",
+    ]) {
+      expect(rationaleIds.has(id)).toBe(true);
+    }
+  });
+
+  it("cited_concept_ids includes the 3 self-gate empirical anchors (totals >= 14)", () => {
+    const ids = MECHANISM_HEALTH_TICK_TEMPLATE.cited_concept_ids as string[];
+    expect(ids.length).toBeGreaterThanOrEqual(14);
+    expect(ids).toContain("concept_4eNd7BFuAJK0");
+    expect(ids).toContain("concept_D9GHCGYCt9T1");
+    expect(ids).toContain("concept_Orn4yVaJYD24");
+  });
 });

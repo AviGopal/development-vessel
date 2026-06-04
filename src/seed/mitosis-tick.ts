@@ -175,14 +175,14 @@ export const MITOSIS_TICK_TEMPLATE: ActivityTemplate = {
       resolver: "vessel_mitosis_evaluate",
       config: {
         type: "vessel_mitosis_evaluate",
-        base_version_id: "{{extract_base_version_text}}",
-        mitosis_version_id: "{{extract_mitosis_version_text}}",
-        mitosis_root: "{{extract_mitosis_root_text}}",
+        base_version_id: "{{extract_base_version_value}}",
+        mitosis_version_id: "{{extract_mitosis_version_value}}",
+        mitosis_root: "{{extract_mitosis_root_value}}",
         // Overlay: staged file copied over canonical /vessels/<v>/ tree
         // so lint+tests run against a synthesized post-cutover vessel tree.
         // Required when the mitosis dir is sparse (only changed files).
-        static_check_base_root: "/vessels/{{extract_vessel_name_text}}",
-        staged_files: "{{extract_staged_files_content}}",
+        static_check_base_root: "/vessels/{{extract_vessel_name_value}}",
+        staged_files: "{{extract_staged_files_value}}",
         // Substrate-runtime defaults: use full bun path and run typecheck-only.
         // The shape-dispatch check + tests can require fixtures or packages not
         // available in /vessels/<v>/, so we narrow the static-eval surface to
@@ -206,14 +206,14 @@ export const MITOSIS_TICK_TEMPLATE: ActivityTemplate = {
       resolver: "vessel_mitosis_cutover",
       config: {
         type: "vessel_mitosis_cutover",
-        vessel_name: "{{extract_vessel_name_text}}",
-        base_version_id: "{{extract_base_version_text}}",
-        mitosis_version_id: "{{extract_mitosis_version_text}}",
-        mitosis_root: "{{extract_mitosis_root_text}}",
-        staged_base_sha: "{{extract_base_sha_text}}",
-        staged_files: "{{extract_staged_files_content}}",
-        proposal_id: "{{extract_proposal_id_text}}",
-        evaluation_evidence: "{{evaluate_pair_content}}",
+        vessel_name: "{{extract_vessel_name_value}}",
+        base_version_id: "{{extract_base_version_value}}",
+        mitosis_version_id: "{{extract_mitosis_version_value}}",
+        mitosis_root: "{{extract_mitosis_root_value}}",
+        staged_base_sha: "{{extract_base_sha_value}}",
+        staged_files: "{{extract_staged_files_value}}",
+        proposal_id: "{{extract_proposal_id_value}}",
+        evaluation_evidence: "{{evaluate_pair}}",
         dry_run: false,
       },
       outputShapes: [

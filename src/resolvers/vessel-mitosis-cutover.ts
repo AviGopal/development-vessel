@@ -180,6 +180,31 @@ function structuredError(detail: string, extra?: Record<string, unknown>): Resol
   };
 }
 
+/**
+ * Soft-refuse: returned when the audited NO is a normal outcome of the
+ * evaluate→cutover chain (verdict ≠ FAVORABLE, insufficient cited traces,
+ * stale base SHA, etc). Emits `vesselMitosisCutoverResult` with applied:false
+ * so light-dispatch / activity-api treat the trace as success — the refuse
+ * itself IS the substrate's audited NO, not a chain failure. Distinct from
+ * `structuredError`, which is reserved for genuine misconfiguration
+ * (missing required field, vessel-not-found, etc).
+ */
+function softRefuse(
+  refusal_reason: string,
+  extra?: Record<string, unknown>,
+): ResolverResult {
+  return {
+    shape: "vesselMitosisCutoverResult",
+    body: {
+      resolver: "vessel_mitosis_cutover",
+      applied: false,
+      refused: true,
+      refusal_reason,
+      ...(extra ?? {}),
+    },
+  };
+}
+
 async function pathExists(p: string): Promise<boolean> {
   try {
     await stat(p);
@@ -235,19 +260,28 @@ export async function resolveVesselMitosisCutover(
     );
   }
   if (!evaluation_evidence || typeof evaluation_evidence !== "object") {
+    // Missing evaluation_evidence is a misconfiguration (template forgot to
+    // pass {{evaluate_pair}}); keep this as a hard error so the bug is loud.
     return structuredError("evaluation_evidence is required");
   }
   if (evaluation_evidence.verdict !== "FAVORABLE") {
-    return structuredError(
-      `refusing cutover: verdict must be FAVORABLE (got ${evaluation_evidence.verdict})`,
-      { evaluation_evidence },
+    // Audited NO — normal outcome when verdict is INSUFFICIENT_DATA / NEUTRAL /
+    // UNFAVORABLE. Soft-refuse so mitosis-tick doesn't show as failure on every
+    // tick when there's nothing to cut over.
+    return softRefuse(
+      `verdict not FAVORABLE (got ${evaluation_evidence.verdict})`,
+      { verdict: evaluation_evidence.verdict, evaluation_evidence },
     );
   }
   if (
     !Array.isArray(evaluation_evidence.cited_trace_ids) ||
     evaluation_evidence.cited_trace_ids.length === 0
   ) {
-    return structuredError("evaluation_evidence.cited_trace_ids must be non-empty");
+    return softRefuse(
+      "no cited traces in evaluation_evidence — substrate has no runtime " +
+        "evidence yet for the mitosis pair",
+      { verdict: evaluation_evidence.verdict },
+    );
   }
 
   const workspaceRoot = process.env["WORKSPACE_ROOT"] ?? process.cwd();

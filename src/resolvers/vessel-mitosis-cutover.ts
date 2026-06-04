@@ -238,8 +238,35 @@ export async function resolveVesselMitosisCutover(
     vessel_name,
     base_version_id,
     mitosis_version_id,
-    evaluation_evidence,
   } = pointer;
+
+  // Defensive parse: when dispatched via goal-host, the engine's accumulated-
+  // variable interpolation JSON.stringifies non-scalar values (its
+  // interpolateProxyValue lacks the exact-match whole-object substitution
+  // light-dispatch added in 0596e7bd). So `{{evaluate_pair_content}}` arrives
+  // here as a JSON string, not an object, and the typeof-object check below
+  // would throw structuredError → silent task drop in the engine top-level
+  // catch (engine.ts ~line 578) → trace lands as status=failure with the
+  // conditional_cutover task missing from .tasks entirely. Restore object
+  // form here so both dispatcher paths converge on the same downstream
+  // shape contract.
+  //
+  // Fix anchors:
+  //   concept_K-NGhlSQ3grT — mitosis cutover chain post-fix state 2026_06_04
+  //   concept_jhOVI4a8DfMD — substrate durable gap closure verified 2026_06_04
+  //   concept_Orn4yVaJYD24 — operator audit becomes tick template
+  let evaluation_evidence: VesselMitosisCutoverPointer["evaluation_evidence"] =
+    pointer.evaluation_evidence;
+  if (typeof (evaluation_evidence as unknown) === "string") {
+    const raw = (evaluation_evidence as unknown as string).trim();
+    if (raw.startsWith("{") || raw.startsWith("[")) {
+      try {
+        evaluation_evidence = JSON.parse(raw) as typeof evaluation_evidence;
+      } catch {
+        // leave as string — the typeof guard below will reject it
+      }
+    }
+  }
 
   if (!vessel_name || PROTECTED_VESSELS.has(vessel_name)) {
     return structuredError(

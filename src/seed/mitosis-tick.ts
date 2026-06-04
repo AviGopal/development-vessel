@@ -40,6 +40,26 @@ import type { ActivityTemplate } from "@avigopal/ias-executor-ts";
  *
  * Immunity-pattern compliant — fs_read + json_path_extract + two server-side
  * resolvers. No LLM.
+ *
+ * Dispatcher-portable interpolation (2026-06-04 follow-up to 74542cc):
+ * All cross-task references use the `{{<taskId>_content}}` form. Both
+ * dispatchers honour this:
+ *   - goal-host (ias-executor-ts engine.ts ~line 421): populates
+ *     `accumulatedVariables[\`${taskId}_content\`]` from the first output
+ *     impulse's content. For json_extracted_value the goal-host proxy
+ *     unwraps body.value → string before the engine sees it, so _content is
+ *     the raw scalar. For vesselMitosisEvaluation the proxy passes the body
+ *     object through, so _content is the full verdict structure.
+ *   - light-dispatch (light-dispatch-vessel/src/index.ts resolvePath alias
+ *     block): when r.body has no `content` field, falls back to body.value
+ *     (preferred when present) or the whole body object — mirroring goal-
+ *     host's unwrap-then-alias chain.
+ * The earlier `{{<taskId>_value}}` and bare `{{evaluate_pair}}` forms worked
+ * only on light-dispatch (which reads r.body.value directly and supports
+ * exact-match whole-object substitution). Goal-host has no `_value` alias
+ * and no bare-taskId alias, so boredom-dispatched mitosis-tick traces
+ * silently failed at conditional_cutover with verdict="{{evaluate_pair}}".
+ * See concept_K-NGhlSQ3grT (mitosis cutover chain post-fix state).
  */
 
 export const MITOSIS_TICK_TEMPLATE: ActivityTemplate = {
@@ -175,14 +195,14 @@ export const MITOSIS_TICK_TEMPLATE: ActivityTemplate = {
       resolver: "vessel_mitosis_evaluate",
       config: {
         type: "vessel_mitosis_evaluate",
-        base_version_id: "{{extract_base_version_value}}",
-        mitosis_version_id: "{{extract_mitosis_version_value}}",
-        mitosis_root: "{{extract_mitosis_root_value}}",
+        base_version_id: "{{extract_base_version_content}}",
+        mitosis_version_id: "{{extract_mitosis_version_content}}",
+        mitosis_root: "{{extract_mitosis_root_content}}",
         // Overlay: staged file copied over canonical /vessels/<v>/ tree
         // so lint+tests run against a synthesized post-cutover vessel tree.
         // Required when the mitosis dir is sparse (only changed files).
-        static_check_base_root: "/vessels/{{extract_vessel_name_value}}",
-        staged_files: "{{extract_staged_files_value}}",
+        static_check_base_root: "/vessels/{{extract_vessel_name_content}}",
+        staged_files: "{{extract_staged_files_content}}",
         // Substrate-runtime defaults: use full bun path and run typecheck-only.
         // The shape-dispatch check + tests can require fixtures or packages not
         // available in /vessels/<v>/, so we narrow the static-eval surface to
@@ -206,14 +226,14 @@ export const MITOSIS_TICK_TEMPLATE: ActivityTemplate = {
       resolver: "vessel_mitosis_cutover",
       config: {
         type: "vessel_mitosis_cutover",
-        vessel_name: "{{extract_vessel_name_value}}",
-        base_version_id: "{{extract_base_version_value}}",
-        mitosis_version_id: "{{extract_mitosis_version_value}}",
-        mitosis_root: "{{extract_mitosis_root_value}}",
-        staged_base_sha: "{{extract_base_sha_value}}",
-        staged_files: "{{extract_staged_files_value}}",
-        proposal_id: "{{extract_proposal_id_value}}",
-        evaluation_evidence: "{{evaluate_pair}}",
+        vessel_name: "{{extract_vessel_name_content}}",
+        base_version_id: "{{extract_base_version_content}}",
+        mitosis_version_id: "{{extract_mitosis_version_content}}",
+        mitosis_root: "{{extract_mitosis_root_content}}",
+        staged_base_sha: "{{extract_base_sha_content}}",
+        staged_files: "{{extract_staged_files_content}}",
+        proposal_id: "{{extract_proposal_id_content}}",
+        evaluation_evidence: "{{evaluate_pair_content}}",
         dry_run: false,
       },
       outputShapes: [

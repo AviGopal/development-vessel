@@ -88,6 +88,10 @@ export interface VesselMitosisCutoverPointer {
   pending_pointer_path?: string;
   /** Test hook: override impulse log path (default: /workspace/mitosis-applied.jsonl). */
   applied_log_path?: string;
+  /** Test hook: override host-sync intent file path. */
+  host_sync_intent_path?: string;
+  /** Test hook: override host-sync results file path. */
+  host_sync_results_path?: string;
 }
 
 interface GitOpResult {
@@ -587,6 +591,24 @@ async function runGitAwareCutover(args: GitCutoverArgs): Promise<ResolverResult>
 
   const operations: Array<{ op: string; status: string; detail?: string }> = [];
 
+  // ---- Host-sync intent emission (2026-06-04, Stage B.3) ----
+  // When the cutover runs inside the container, `/workspace/repos` is a
+  // read-only bind mount of the host super-repo and direct git writes
+  // would fail. Setting MITOSIS_HOST_SYNC_MODE=1 redirects the
+  // commit + push to a host-side poller via an intent file.
+  if (process.env["MITOSIS_HOST_SYNC_MODE"] === "1") {
+    return await emitHostSyncIntent({
+      pointer,
+      vessel_name,
+      base_version_id,
+      mitosis_version_id,
+      mitosisRoot,
+      stagedFiles,
+      evaluationEvidence,
+      stagedBaseSha,
+    });
+  }
+
   // 1. Resilience: walk mitosis tree, enforce allowed file set.
   const allFiles = await walkRelativeFiles(mitosisRoot);
   const allowed = new Set(stagedFiles.map((f) => f.replace(/^\.\//, "")));
@@ -874,6 +896,102 @@ async function runGitAwareCutover(args: GitCutoverArgs): Promise<ResolverResult>
 
 // suppress unused-import warning when `relative` not used directly elsewhere
 void relative;
+
+interface HostSyncIntentArgs {
+  pointer: VesselMitosisCutoverPointer;
+  vessel_name: string;
+  base_version_id: string;
+  mitosis_version_id: string;
+  mitosisRoot: string;
+  stagedFiles: string[];
+  evaluationEvidence: VesselMitosisCutoverPointer["evaluation_evidence"];
+  stagedBaseSha: string | undefined;
+}
+
+async function emitHostSyncIntent(args: HostSyncIntentArgs): Promise<ResolverResult> {
+  const workspaceRoot = process.env["WORKSPACE_ROOT"] ?? "/workspace";
+  const intentPath =
+    args.pointer.host_sync_intent_path ??
+    join(workspaceRoot, "mitosis-applied-host-sync.jsonl");
+  const resultsPath =
+    args.pointer.host_sync_results_path ??
+    join(workspaceRoot, "mitosis-applied-host-sync-results.jsonl");
+  const intentId = crypto.randomUUID();
+  const emittedAt = new Date().toISOString();
+  const intent = {
+    intent_id: intentId,
+    vessel_name: args.vessel_name,
+    base_version_id: args.base_version_id,
+    mitosis_version_id: args.mitosis_version_id,
+    mitosis_root: args.mitosisRoot,
+    base_sha: args.stagedBaseSha ?? null,
+    proposal_id: args.pointer.proposal_id ?? "unknown-proposal",
+    gap_id: args.pointer.gap_id ?? "unknown-gap",
+    staged_files: args.stagedFiles,
+    emitted_at: emittedAt,
+    status: "pending",
+  };
+  try {
+    await mkdir(dirname(intentPath), { recursive: true });
+    await appendFile(intentPath, JSON.stringify(intent) + "\n");
+  } catch (err) {
+    return structuredError(`host-sync intent emit failed: ${(err as Error).message}`, {
+      kind: "host_sync_emit_failed",
+      intent_path: intentPath,
+    });
+  }
+
+  // Best-effort: check results file for a completed match (poller may have run).
+  let gitSha: string | null = null;
+  let resultStatus: string | null = null;
+  try {
+    if (await pathExists(resultsPath)) {
+      const raw = await readFile(resultsPath, "utf8");
+      const lines = raw.split("\n").filter((l) => l.trim().length > 0);
+      for (const line of lines) {
+        try {
+          const parsed = JSON.parse(line) as {
+            intent_id?: string;
+            git_sha?: string;
+            push_status?: string;
+          };
+          if (parsed.intent_id === intentId) {
+            gitSha = parsed.git_sha ?? null;
+            resultStatus = parsed.push_status ?? null;
+            break;
+          }
+        } catch {
+          /* skip */
+        }
+      }
+    }
+  } catch {
+    /* non-fatal */
+  }
+
+  const body = {
+    vessel_name: args.vessel_name,
+    mitosis_version_id: args.mitosis_version_id,
+    base_version_id: args.base_version_id,
+    base_sha: args.stagedBaseSha ?? null,
+    new_git_sha: gitSha,
+    push_status: resultStatus ?? "host_sync_pending",
+    host_sync_intent_id: intentId,
+    host_sync_intent_path: intentPath,
+    staged_files_applied: args.stagedFiles,
+    gap_id: args.pointer.gap_id ?? "unknown-gap",
+    proposal_id: args.pointer.proposal_id ?? "unknown-proposal",
+    emitted_at: emittedAt,
+    mode: "host_sync",
+    cited_evidence: {
+      verdict: args.evaluationEvidence.verdict,
+      base_success_rate: args.evaluationEvidence.base_success_rate,
+      mitosis_success_rate: args.evaluationEvidence.mitosis_success_rate,
+      cited_trace_ids: args.evaluationEvidence.cited_trace_ids.slice(0, 10),
+    },
+  };
+  return { shape: "cutoverApplied", body };
+}
 
 /**
  * Read-side resolver for the `cutoverApplied` shape. Returns recent entries

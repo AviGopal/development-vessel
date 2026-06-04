@@ -402,4 +402,96 @@ describe("vessel_mitosis_cutover", () => {
     );
     expect(hostContent).toBe("// original\n");
   });
+
+  it("host-sync mode: emits intent file instead of direct git writes", async () => {
+    const { baseRoot, mitosisRoot, hostRepoRoot, baseSha } =
+      await setupForGitCutover();
+    const intentPath = join(workspaceRoot, "host-sync-intent.jsonl");
+    const resultsPath = join(workspaceRoot, "host-sync-results.jsonl");
+    const originalMode = process.env["MITOSIS_HOST_SYNC_MODE"];
+    process.env["MITOSIS_HOST_SYNC_MODE"] = "1";
+    try {
+      const r = await resolveVesselMitosisCutover({
+        type: "vessel_mitosis_cutover",
+        vessel_name: "development-vessel",
+        base_version_id: "v1",
+        mitosis_version_id: "mitosis-host-sync-2026-06-04",
+        mitosis_root: mitosisRoot,
+        base_root: baseRoot,
+        host_repo_root: hostRepoRoot,
+        staged_base_sha: baseSha,
+        staged_files: ["src/resolvers/target.ts"],
+        proposal_id: "proposal-host-sync-test",
+        gap_id: "gap-host-sync-test",
+        evaluation_evidence: FAVORABLE_EVIDENCE,
+        host_sync_intent_path: intentPath,
+        host_sync_results_path: resultsPath,
+      });
+      expect(r.shape).toBe("cutoverApplied");
+      const body = r.body as Record<string, unknown>;
+      expect(body["mode"]).toBe("host_sync");
+      expect(body["push_status"]).toBe("host_sync_pending");
+      expect(typeof body["host_sync_intent_id"]).toBe("string");
+      // Host repo MUST be unchanged.
+      const hostContent = await readFile(
+        join(hostRepoRoot, "src", "resolvers", "target.ts"),
+        "utf8",
+      );
+      expect(hostContent).toBe("// original\n");
+      // Intent file populated.
+      const raw = await readFile(intentPath, "utf8");
+      const line = JSON.parse(raw.split("\n")[0]!) as Record<string, unknown>;
+      expect(line["status"]).toBe("pending");
+      expect(line["intent_id"]).toBe(body["host_sync_intent_id"]);
+      expect(line["staged_files"]).toEqual(["src/resolvers/target.ts"]);
+      expect(line["base_sha"]).toBe(baseSha);
+      expect(line["mitosis_root"]).toBe(mitosisRoot);
+    } finally {
+      if (originalMode === undefined)
+        delete process.env["MITOSIS_HOST_SYNC_MODE"];
+      else process.env["MITOSIS_HOST_SYNC_MODE"] = originalMode;
+    }
+  });
+
+  it("host-sync mode: surfaces git_sha when poller result is present", async () => {
+    const { baseRoot, mitosisRoot, hostRepoRoot, baseSha } =
+      await setupForGitCutover();
+    const intentPath = join(workspaceRoot, "hs-intent-2.jsonl");
+    const resultsPath = join(workspaceRoot, "hs-results-2.jsonl");
+    // Pre-seed a result that won't match this intent.
+    await writeFile(
+      resultsPath,
+      JSON.stringify({
+        intent_id: "00000000-aaaa-bbbb-cccc-000000000000",
+        git_sha: "deadbeefcafebabe",
+        push_status: "pushed",
+      }) + "\n",
+    );
+    const originalMode = process.env["MITOSIS_HOST_SYNC_MODE"];
+    process.env["MITOSIS_HOST_SYNC_MODE"] = "1";
+    try {
+      const r = await resolveVesselMitosisCutover({
+        type: "vessel_mitosis_cutover",
+        vessel_name: "development-vessel",
+        base_version_id: "v1",
+        mitosis_version_id: "m-x",
+        mitosis_root: mitosisRoot,
+        base_root: baseRoot,
+        host_repo_root: hostRepoRoot,
+        staged_base_sha: baseSha,
+        staged_files: ["src/resolvers/target.ts"],
+        evaluation_evidence: FAVORABLE_EVIDENCE,
+        host_sync_intent_path: intentPath,
+        host_sync_results_path: resultsPath,
+      });
+      const body = r.body as Record<string, unknown>;
+      // No matching intent_id yet → still pending.
+      expect(body["push_status"]).toBe("host_sync_pending");
+      expect(body["new_git_sha"]).toBeNull();
+    } finally {
+      if (originalMode === undefined)
+        delete process.env["MITOSIS_HOST_SYNC_MODE"];
+      else process.env["MITOSIS_HOST_SYNC_MODE"] = originalMode;
+    }
+  });
 });

@@ -152,4 +152,61 @@ describe("compute_state_signature", () => {
     expect(body.recent_traces.precondition_count).toBe(1);
     expect(body.recent_traces.top_failure_mode_type).toBe("budget_exhausted");
   });
+
+  // ── Signature coarsening (2026-06-04) ──────────────────────────────────
+  // Test that operationally-similar loadouts collapse to the same signature
+  // and operationally-distinct loadouts produce different signatures.
+
+  it("collapses similar loadouts to the same signature (bucketing)", async () => {
+    const ts = new Date().toISOString();
+    const tracesA = Array.from({ length: 25 }, () => ({
+      status: "success", task_count: 2, duration_ms: 100, executed_at: ts,
+    }));
+    const tracesB = Array.from({ length: 35 }, () => ({
+      status: "success", task_count: 2, duration_ms: 100, executed_at: ts,
+    }));
+    // Templates differ by a few (within the 100-bucket).
+    const tmplA = Array.from({ length: 410 }, (_, i) => ({ id: `core:t${i}`, proposed: false }));
+    const tmplB = Array.from({ length: 425 }, (_, i) => ({ id: `core:t${i}`, proposed: false }));
+
+    globalThis.fetch = makeFetch(tracesA, tmplA);
+    const r1 = await resolveComputeStateSignature({
+      type: "compute_state_signature",
+      activityApiEndpoint: "http://test",
+      apiKey: "k",
+      loaded_concept_ids: ["c1", "c2", "c3"],
+    });
+    globalThis.fetch = makeFetch(tracesB, tmplB);
+    const r2 = await resolveComputeStateSignature({
+      type: "compute_state_signature",
+      activityApiEndpoint: "http://test",
+      apiKey: "k",
+      // Different concept ids but same bucket-of-5 count.
+      loaded_concept_ids: ["c9", "c8", "c7"],
+    });
+    expect((r1.body as any).signature_hash).toBe((r2.body as any).signature_hash);
+  });
+
+  it("changes signature when operational class changes (e.g. idle → busy)", async () => {
+    const ts = new Date().toISOString();
+    const idle: Array<Record<string, unknown>> = [];
+    const busy = Array.from({ length: 250 }, () => ({
+      status: "success", task_count: 3, duration_ms: 200, executed_at: ts,
+    }));
+    const tmpl = [{ id: "core:x", proposed: false }];
+
+    globalThis.fetch = makeFetch(idle, tmpl);
+    const rIdle = await resolveComputeStateSignature({
+      type: "compute_state_signature",
+      activityApiEndpoint: "http://test",
+      apiKey: "k",
+    });
+    globalThis.fetch = makeFetch(busy, tmpl);
+    const rBusy = await resolveComputeStateSignature({
+      type: "compute_state_signature",
+      activityApiEndpoint: "http://test",
+      apiKey: "k",
+    });
+    expect((rIdle.body as any).signature_hash).not.toBe((rBusy.body as any).signature_hash);
+  });
 });

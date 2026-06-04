@@ -205,6 +205,21 @@ async function fetchJsonWithTimeout(
   }
 }
 
+/**
+ * Bucket a non-negative integer onto a coarse log-spaced scale:
+ *   0 → 0, 1-9 → 1, 10-49 → 2, 50-199 → 3, 200-499 → 4, 500+ → 5
+ * Used to collapse trace-count-like inputs so the signature is stable
+ * across the operational classes (idle, light, busy, saturated).
+ */
+function bucketLog(n: number): number {
+  if (!Number.isFinite(n) || n <= 0) return 0;
+  if (n < 10) return 1;
+  if (n < 50) return 2;
+  if (n < 200) return 3;
+  if (n < 500) return 4;
+  return 5;
+}
+
 function computeHash(payload: Record<string, unknown>): string {
   const json = JSON.stringify(payload);
   const h = createHash("sha1").update(json).digest("hex");
@@ -304,6 +319,22 @@ export async function resolveComputeStateSignature(
   const cgroupRounded = cgroupMemPct !== undefined ? Math.round(cgroupMemPct) : undefined;
   const successRateRounded = Math.round(recent.success_rate * 100) / 100;
 
+  // BUCKETING (signature coarsening, 2026-06-04) — observation at
+  // `validation/findings/self-improvement-loop-2026-06-04` showed signature
+  // changed nearly every tick, so (signature, goal_idx) cells never reached
+  // ≥3 samples and Thompson degraded to round_robin every cycle. Coarsen
+  // each high-entropy input to an operational class so similar substrate
+  // loadouts collapse to the same signature.
+  const bucketTotal = bucketLog(recent.total);          // {0, 1-9, 10-49, 50-199, 200-499, 500+}
+  const bucketTmpl = Math.floor(totalTemplates / 100);  // every 100 templates
+  const bucketProp = Math.floor(proposedCount / 10);    // every 10 proposed
+  const bucketSa = Math.floor(substrateAuthoredCount / 10);
+  const bucketUie = Math.floor(uiEvents / 5);
+  const bucketLoad = Math.round(loadRes.load_avg_1m * 2) / 2;   // 0.5 increments
+  const bucketMem = Math.floor(memRes.mem_used_pct / 10) * 10;  // 10% increments
+  const bucketSr = Math.round(recent.success_rate * 4) / 4;     // 0.25 increments
+  const bucketCgroup = cgroupMemPct !== undefined ? Math.floor(cgroupMemPct / 10) * 10 : undefined;
+
   // Concept priors — deduplicated, sorted for hash stability. Empty list when
   // no priors are loaded (default) → contributes [] to the hash so empty-prior
   // and absent-input states collapse to the same signature class.
@@ -312,30 +343,38 @@ export async function resolveComputeStateSignature(
     : [];
   const loadedConceptCount = loadedConceptIds.length;
 
+  // Hash payload uses BUCKETED values throughout (see "BUCKETING" comment
+  // above). The signature represents the substrate's operational state class,
+  // not its exact moment. We drop the raw concept-id list (`lci`) from the
+  // hash — it was the highest-entropy contributor; the bucketed count `lcc`
+  // is enough class-discrimination for state-conditioned learning. Phantom
+  // and precondition counts are also bucketed so trace-by-trace fluctuation
+  // doesn't shift signature classes.
   const hashPayload: Record<string, unknown> = {
-    load: loadRounded,
-    mem: memRounded,
-    ...(cgroupRounded !== undefined ? { cmem: cgroupRounded } : {}),
-    total: recent.total,
-    sr: successRateRounded,
-    ph: recent.phantom_count,
-    pr: recent.precondition_count,
+    load: bucketLoad,
+    mem: bucketMem,
+    ...(bucketCgroup !== undefined ? { cmem: bucketCgroup } : {}),
+    total: bucketTotal,
+    sr: bucketSr,
+    ph: bucketLog(recent.phantom_count),
+    pr: bucketLog(recent.precondition_count),
     ...(recent.top_failure_mode_type ? { fm: recent.top_failure_mode_type } : {}),
-    tmpl: totalTemplates,
-    prop: proposedCount,
-    sa: substrateAuthoredCount,
+    tmpl: bucketTmpl,
+    prop: bucketProp,
+    sa: bucketSa,
     w: windowMinutes,
-    // UI / interactor presence — third-level recursion: operator presence is
-    // part of the substrate's environment.
-    uie: uiEvents,
-    uia: uiAsksAgeSec,
-    uip: uiAssertsPending,
-    uio: uiPanelsOpen,
-    // Concept priors — both count and sorted-ids fold in. Including both
-    // means same-size-different-priors states get distinct signatures.
-    lcc: loadedConceptCount,
-    lci: loadedConceptIds,
+    // UI / interactor presence — bucketed; operator-active vs operator-quiet
+    // is the class distinction we want, not per-event count.
+    uie: bucketUie,
+    uia: bucketLog(uiAsksAgeSec),
+    uip: bucketLog(uiAssertsPending),
+    uio: bucketLog(uiPanelsOpen),
+    // Concept-prior count bucketed; ids deliberately excluded from hash.
+    lcc: Math.floor(loadedConceptCount / 5),
   };
+  // Suppress unused-vars warnings while preserving the original rounded
+  // values in the response body below.
+  void loadRounded; void memRounded; void cgroupRounded; void successRateRounded;
 
   const signature_hash = computeHash(hashPayload);
 

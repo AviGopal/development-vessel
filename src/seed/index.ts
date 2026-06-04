@@ -45,6 +45,11 @@ import { VESSEL_RESPONSIBILITY_AUDIT_TICK_TEMPLATE } from "./vessel-responsibili
 import { VESSEL_ARCHITECTURE_PATTERN_SCAN_TICK_TEMPLATE } from "./vessel-architecture-pattern-scan-tick.js";
 import { ACTIVITY_LIFECYCLE_AUDIT_TICK_TEMPLATE } from "./activity-lifecycle-audit-tick.js";
 import { RESOLVER_DISTRIBUTION_AUDIT_TICK_TEMPLATE } from "./resolver-distribution-audit-tick.js";
+// Gap-drain bridges (2026-06-04): close Break 1 (gap → drafter input boundary)
+// and Break 2 (drafter → executor wiring) so the substrate's autonomous
+// self-repair backlog can drain into applied vessel fixes.
+import { GAP_TO_SCENARIO_BRIDGE_TICK_TEMPLATE } from "./gap-to-scenario-bridge-tick.js";
+import { DISPATCH_LATEST_AUTO_DRAFT_TEMPLATE } from "./dispatch-latest-auto-draft.js";
 // Phase 3 — closed-loop learning and verification
 // (openspec/changes/2026-06-01-closed-loop-learning-and-verification/)
 import { DETECT_RECURRING_PATTERN_TEMPLATE } from "./detect-recurring-pattern.js";
@@ -97,6 +102,8 @@ export { VESSEL_RESPONSIBILITY_AUDIT_TICK_TEMPLATE } from "./vessel-responsibili
 export { VESSEL_ARCHITECTURE_PATTERN_SCAN_TICK_TEMPLATE } from "./vessel-architecture-pattern-scan-tick.js";
 export { ACTIVITY_LIFECYCLE_AUDIT_TICK_TEMPLATE } from "./activity-lifecycle-audit-tick.js";
 export { RESOLVER_DISTRIBUTION_AUDIT_TICK_TEMPLATE } from "./resolver-distribution-audit-tick.js";
+export { GAP_TO_SCENARIO_BRIDGE_TICK_TEMPLATE } from "./gap-to-scenario-bridge-tick.js";
+export { DISPATCH_LATEST_AUTO_DRAFT_TEMPLATE } from "./dispatch-latest-auto-draft.js";
 
 export const SEED_TEMPLATES: ActivityTemplate[] = [
   SHIP_CHANGE_TEMPLATE,
@@ -248,4 +255,9 @@ export const SEED_TEMPLATES: ActivityTemplate[] = [
   VESSEL_ARCHITECTURE_PATTERN_SCAN_TICK_TEMPLATE,
   ACTIVITY_LIFECYCLE_AUDIT_TICK_TEMPLATE,
   RESOLVER_DISTRIBUTION_AUDIT_TICK_TEMPLATE,
+  // Gap-drain bridges (2026-06-04): wire detector-emitted + operator-seeded
+  // substrateGap impulses into the drafter, and seed Thompson posteriors for
+  // newly-authored gap-closing:auto-* templates so they actually execute.
+  GAP_TO_SCENARIO_BRIDGE_TICK_TEMPLATE,
+  DISPATCH_LATEST_AUTO_DRAFT_TEMPLATE,
 ];

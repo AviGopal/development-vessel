@@ -295,6 +295,17 @@ export const config = {
       "vessel_architecture_pattern_scan",
       "activity_lifecycle_audit",
       "resolver_distribution_audit",
+      // Gap → drafter input-boundary bridge (Break 1, 2026-06-04).
+      // Reads substrateGap rows from WORKSPACE_ROOT/gaps/gaps.json and writes
+      // scenario JSON files into WORKSPACE_ROOT/validation/failure-modes/scenarios/
+      // so the file-polling draft-gap-closing-activity absorbs operator-seeded +
+      // substrate-detected gaps without changing the drafter's input contract.
+      "gap_to_scenario_bridge",
+      // Drafter → executor wiring (Break 2, 2026-06-04). Reads recent
+      // gap-closing:auto-* templates from activity-api, finds the newest
+      // unexecuted one, and POSTs a light-dispatch invocation so its Thompson
+      // posterior gets seeded.
+      "dispatch_latest_auto_draft",
     ] as const,
     resolveEndpoint: "/v2/impulses/resolve",
     resolveRequestFormat: "pointer" as const,

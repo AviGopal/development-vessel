@@ -51,6 +51,13 @@ import { RESOLVER_DISTRIBUTION_AUDIT_TICK_TEMPLATE } from "./resolver-distributi
 import { GAP_TO_SCENARIO_BRIDGE_TICK_TEMPLATE } from "./gap-to-scenario-bridge-tick.js";
 import { DISPATCH_LATEST_AUTO_DRAFT_TEMPLATE } from "./dispatch-latest-auto-draft.js";
 import { APPLY_PROPOSAL_AS_PATCH_TEMPLATE } from "./apply-proposal-as-patch.js";
+// mechanism-health-tick detection loop (2026-06-04). Three generic detectors +
+// one aggregator that compose the 3 detection-template-pattern primitives
+// against the M1-M6 observable surface (concept_q2n0_XaSvphV).
+import { DETECT_CLASSIFIER_DISTRIBUTION_SKEW_TEMPLATE } from "./detect-classifier-distribution-skew.js";
+import { DETECT_FEATURE_FLAG_ZERO_EXERCISE_TEMPLATE } from "./detect-feature-flag-zero-exercise.js";
+import { DETECT_FILTER_SATURATION_TEMPLATE } from "./detect-filter-saturation.js";
+import { MECHANISM_HEALTH_TICK_TEMPLATE } from "./mechanism-health-tick.js";
 // Phase 3 — closed-loop learning and verification
 // (openspec/changes/2026-06-01-closed-loop-learning-and-verification/)
 import { DETECT_RECURRING_PATTERN_TEMPLATE } from "./detect-recurring-pattern.js";
@@ -106,6 +113,10 @@ export { RESOLVER_DISTRIBUTION_AUDIT_TICK_TEMPLATE } from "./resolver-distributi
 export { GAP_TO_SCENARIO_BRIDGE_TICK_TEMPLATE } from "./gap-to-scenario-bridge-tick.js";
 export { DISPATCH_LATEST_AUTO_DRAFT_TEMPLATE } from "./dispatch-latest-auto-draft.js";
 export { APPLY_PROPOSAL_AS_PATCH_TEMPLATE } from "./apply-proposal-as-patch.js";
+export { DETECT_CLASSIFIER_DISTRIBUTION_SKEW_TEMPLATE } from "./detect-classifier-distribution-skew.js";
+export { DETECT_FEATURE_FLAG_ZERO_EXERCISE_TEMPLATE } from "./detect-feature-flag-zero-exercise.js";
+export { DETECT_FILTER_SATURATION_TEMPLATE } from "./detect-filter-saturation.js";
+export { MECHANISM_HEALTH_TICK_TEMPLATE } from "./mechanism-health-tick.js";
 
 export const SEED_TEMPLATES: ActivityTemplate[] = [
   SHIP_CHANGE_TEMPLATE,
@@ -268,4 +279,14 @@ export const SEED_TEMPLATES: ActivityTemplate[] = [
   // real-source patching — the missing link between "describe remediation"
   // and "enact remediation".
   APPLY_PROPOSAL_AS_PATCH_TEMPLATE,
+  // mechanism-health-tick detection loop (2026-06-04). Three generic detectors
+  // (substrate anchors concept_9L8PB5tQzc7l / concept_7_yVEeVfMKQV /
+  // concept_-rQijiezhmMZ) and the aggregator (concept_q2n0_XaSvphV) that
+  // composes them against the M1/M2/M3/M4/M6 observable surface. Boredom-
+  // vessel dispatches mechanism-health-tick on cadence so detection runs
+  // autonomously without operator probes.
+  DETECT_CLASSIFIER_DISTRIBUTION_SKEW_TEMPLATE,
+  DETECT_FEATURE_FLAG_ZERO_EXERCISE_TEMPLATE,
+  DETECT_FILTER_SATURATION_TEMPLATE,
+  MECHANISM_HEALTH_TICK_TEMPLATE,
 ];

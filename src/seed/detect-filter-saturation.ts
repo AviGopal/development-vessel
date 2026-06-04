@@ -88,14 +88,19 @@ export const DETECT_FILTER_SATURATION_TEMPLATE: ActivityTemplate = {
       description:
         "journalctl -u <unit> --since=<window>m | grep -cE <positive_event_pattern>. " +
         "Bounded to the configured window; outputs the count on stdout. The unit runs " +
-        "inside substrate-live so journalctl reads the substrate's own journal.",
+        "inside substrate-live so journalctl reads the substrate's own journal. " +
+        "Goal-host's bash resolver requires command as string[] ([\"bash\",\"-c\",<script>] " +
+        "form per forge-vessel-for-shape.json) — passing a bare string throws at task start.",
       resolver: "bash",
       config: {
         type: "bash",
-        command:
+        command: [
+          "bash",
+          "-c",
           "journalctl --no-pager -u {{log_unit_name}} " +
-          "--since '{{time_window_minutes}} minutes ago' | " +
-          "grep -cE -- '{{positive_event_pattern}}' || true",
+            "--since '{{time_window_minutes}} minutes ago' | " +
+            "grep -cE -- '{{positive_event_pattern}}' || true",
+        ],
       },
       outputShapes: ["shellResult"],
     },
@@ -103,14 +108,18 @@ export const DETECT_FILTER_SATURATION_TEMPLATE: ActivityTemplate = {
       id: "count_negative_events",
       description:
         "Same as count_positive_events but for the negative event pattern. " +
-        "Together the two counts give the saturation ratio.",
+        "Together the two counts give the saturation ratio. " +
+        "Same [\"bash\",\"-c\",<script>] form as count_positive_events.",
       resolver: "bash",
       config: {
         type: "bash",
-        command:
+        command: [
+          "bash",
+          "-c",
           "journalctl --no-pager -u {{log_unit_name}} " +
-          "--since '{{time_window_minutes}} minutes ago' | " +
-          "grep -cE -- '{{negative_event_pattern}}' || true",
+            "--since '{{time_window_minutes}} minutes ago' | " +
+            "grep -cE -- '{{negative_event_pattern}}' || true",
+        ],
       },
       outputShapes: ["shellResult"],
     },
@@ -120,21 +129,24 @@ export const DETECT_FILTER_SATURATION_TEMPLATE: ActivityTemplate = {
         "Compute ratio = neg / (pos + neg), then saturated = (ratio > threshold AND " +
         "total >= min_volume). Outputs JSON { positive, negative, total, ratio, " +
         "threshold, min_volume, saturated } the downstream emission step embeds in " +
-        "the finding body. python3 stdlib — no extra deps.",
+        "the finding body. python3 stdlib — no extra deps. Same [\"bash\",\"-c\",<script>] form.",
       resolver: "bash",
       config: {
         type: "bash",
-        command:
+        command: [
+          "bash",
+          "-c",
           "python3 -c \"import json,sys; " +
-          "try:\\n p=int((sys.argv[1] or '0').strip())\\nexcept Exception:\\n p=0\\n" +
-          "try:\\n n=int((sys.argv[2] or '0').strip())\\nexcept Exception:\\n n=0\\n" +
-          "thr=float(sys.argv[3] or '0.95'); " +
-          "mv=int(sys.argv[4] or '10'); " +
-          "t=p+n; r=(n/t) if t else 0.0; " +
-          "print(json.dumps({'positive':p,'negative':n,'total':t,'ratio':r," +
-          "'threshold':thr,'min_volume':mv,'saturated': r>thr and t>=mv}))\" " +
-          "'{{count_positive_events_stdout}}' '{{count_negative_events_stdout}}' " +
-          "'{{saturation_threshold}}' '{{min_volume}}'",
+            "try:\\n p=int((sys.argv[1] or '0').strip())\\nexcept Exception:\\n p=0\\n" +
+            "try:\\n n=int((sys.argv[2] or '0').strip())\\nexcept Exception:\\n n=0\\n" +
+            "thr=float(sys.argv[3] or '0.95'); " +
+            "mv=int(sys.argv[4] or '10'); " +
+            "t=p+n; r=(n/t) if t else 0.0; " +
+            "print(json.dumps({'positive':p,'negative':n,'total':t,'ratio':r," +
+            "'threshold':thr,'min_volume':mv,'saturated': r>thr and t>=mv}))\" " +
+            "'{{count_positive_events_stdout}}' '{{count_negative_events_stdout}}' " +
+            "'{{saturation_threshold}}' '{{min_volume}}'",
+        ],
       },
       outputShapes: ["shellResult"],
     },

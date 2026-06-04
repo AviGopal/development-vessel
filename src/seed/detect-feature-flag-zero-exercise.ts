@@ -75,11 +75,13 @@ export const DETECT_FEATURE_FLAG_ZERO_EXERCISE_TEMPLATE: ActivityTemplate = {
       description:
         "Read the feature flag from the substrate process environment via printenv. " +
         "All units run inside substrate-live so the env is the canonical source. " +
-        "Outputs a single line: the flag's raw string value (empty if unset).",
+        "Outputs a single line: the flag's raw string value (empty if unset). " +
+        "Goal-host's bash resolver requires command as string[] ([\"bash\",\"-c\",<script>] form, " +
+        "mirroring forge-vessel-for-shape.json — passing a bare string throws at task start).",
       resolver: "bash",
       config: {
         type: "bash",
-        command: "printenv {{flag_env_var}} || true",
+        command: ["bash", "-c", "printenv {{flag_env_var}} || true"],
       },
       outputShapes: ["shellResult"],
     },
@@ -90,16 +92,20 @@ export const DETECT_FEATURE_FLAG_ZERO_EXERCISE_TEMPLATE: ActivityTemplate = {
         "(http://localhost:8000/sql). Credentials are pulled from the substrate " +
         "env (SURREALDB_USER / SURREALDB_PASS); namespace/database headers are " +
         "the standard activity-system / learning_loop pair. Outputs the raw JSON " +
-        "array SurrealDB returns; downstream tasks extract the count.",
+        "array SurrealDB returns; downstream tasks extract the count. " +
+        "Same [\"bash\",\"-c\",<script>] form as read_flag.",
       resolver: "bash",
       config: {
         type: "bash",
-        command:
+        command: [
+          "bash",
+          "-c",
           "curl -sS -X POST http://localhost:8000/sql " +
-          "-H 'surreal-ns: activity-system' -H 'surreal-db: learning_loop' " +
-          "-H 'Accept: application/json' -H 'Content-Type: text/plain' " +
-          "-u \"$SURREALDB_USER:$SURREALDB_PASS\" " +
-          "--data-raw {{observable_sql}}",
+            "-H 'surreal-ns: activity-system' -H 'surreal-db: learning_loop' " +
+            "-H 'Accept: application/json' -H 'Content-Type: text/plain' " +
+            "-u \"$SURREALDB_USER:$SURREALDB_PASS\" " +
+            "--data-raw '{{observable_sql}}'",
+        ],
       },
       outputShapes: ["shellResult"],
     },
@@ -124,18 +130,22 @@ export const DETECT_FEATURE_FLAG_ZERO_EXERCISE_TEMPLATE: ActivityTemplate = {
         "Compute wiring_gap = (flag truthy AND count <= expected_nonzero_threshold). " +
         "Truthy values mirror posix-shell semantics: 'true', '1', 'yes', 'on' " +
         "(case-insensitive). Emits the verdict + cited_evidence as JSON for the " +
-        "downstream concept_create_write step. python3 stdlib — no extra deps.",
+        "downstream concept_create_write step. python3 stdlib — no extra deps. " +
+        "Same [\"bash\",\"-c\",<script>] form as read_flag.",
       resolver: "bash",
       config: {
         type: "bash",
-        command:
+        command: [
+          "bash",
+          "-c",
           "python3 -c \"import json,sys; " +
-          "flag=(sys.argv[1] or '').strip().lower() in ('1','true','yes','on'); " +
-          "try:\\n c=int(sys.argv[2] or '0')\\nexcept Exception:\\n c=0\\n" +
-          "thr=int(sys.argv[3] or '0'); " +
-          "print(json.dumps({'flag': flag, 'count': c, 'threshold': thr, " +
-          "'wiring_gap': flag and c<=thr}))\" " +
-          "'{{read_flag_stdout}}' '{{extract_count_valueJson}}' '{{expected_nonzero_threshold}}'",
+            "flag=(sys.argv[1] or '').strip().lower() in ('1','true','yes','on'); " +
+            "try:\\n c=int(sys.argv[2] or '0')\\nexcept Exception:\\n c=0\\n" +
+            "thr=int(sys.argv[3] or '0'); " +
+            "print(json.dumps({'flag': flag, 'count': c, 'threshold': thr, " +
+            "'wiring_gap': flag and c<=thr}))\" " +
+            "'{{read_flag_stdout}}' '{{extract_count_valueJson}}' '{{expected_nonzero_threshold}}'",
+        ],
       },
       outputShapes: ["shellResult"],
     },

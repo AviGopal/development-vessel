@@ -103,4 +103,17 @@ describe("DETECT_FILTER_SATURATION_TEMPLATE", () => {
       expect(cfg.type).toBe(t.resolver);
     }
   });
+
+  it("every bash task passes command as string[] ([\"bash\",\"-c\",<script>] form required by goal-host's bash resolver)", () => {
+    for (const t of DETECT_FILTER_SATURATION_TEMPLATE.tasks) {
+      if (t.resolver !== "bash") continue;
+      const cmd = (t.config as { command?: unknown }).command;
+      expect(Array.isArray(cmd)).toBe(true);
+      const arr = cmd as unknown[];
+      expect(arr.length).toBeGreaterThanOrEqual(3);
+      expect(arr[0]).toBe("bash");
+      expect(arr[1]).toBe("-c");
+      expect(typeof arr[2]).toBe("string");
+    }
+  });
 });

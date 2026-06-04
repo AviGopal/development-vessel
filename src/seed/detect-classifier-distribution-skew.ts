@@ -108,19 +108,25 @@ export const DETECT_CLASSIFIER_DISTRIBUTION_SKEW_TEMPLATE: ActivityTemplate = {
       description:
         "Compute the per-class histogram and the dominant-class fraction using " +
         "python3 stdlib (collections.Counter). Emits JSON { total, counts, " +
-        "max_class, max_count, max_fraction } onto stdout for the next stages.",
+        "max_class, max_count, max_fraction } onto stdout for the next stages. " +
+        "Goal-host's bash resolver requires command as string[] — the [\"bash\",\"-c\",<script>] " +
+        "form mirrors forge-vessel-for-shape.json (the canonical working idiom in " +
+        "ias-executor-ts shared templates).",
       resolver: "bash",
       config: {
         type: "bash",
-        command:
+        command: [
+          "bash",
+          "-c",
           "python3 -c \"import json,sys,collections; " +
-          "v=json.loads(sys.argv[1] or '[]'); " +
-          "v=[str(x) for x in (v if isinstance(v,list) else [v])]; " +
-          "c=collections.Counter(v); " +
-          "t=sum(c.values()) or 1; " +
-          "mc,mn=(c.most_common(1)[0] if c else ('',0)); " +
-          "print(json.dumps({'total':t,'counts':dict(c),'max_class':mc,'max_count':mn," +
-          "'max_fraction':mn/t}))\" '{{extract_class_array_valueJson}}'",
+            "v=json.loads(sys.argv[1] or '[]'); " +
+            "v=[str(x) for x in (v if isinstance(v,list) else [v])]; " +
+            "c=collections.Counter(v); " +
+            "t=sum(c.values()) or 1; " +
+            "mc,mn=(c.most_common(1)[0] if c else ('',0)); " +
+            "print(json.dumps({'total':t,'counts':dict(c),'max_class':mc,'max_count':mn," +
+            "'max_fraction':mn/t}))\" '{{extract_class_array_valueJson}}'",
+        ],
       },
       outputShapes: ["shellResult"],
     },
@@ -129,17 +135,21 @@ export const DETECT_CLASSIFIER_DISTRIBUTION_SKEW_TEMPLATE: ActivityTemplate = {
       description:
         "Compute skew_breach = (max_fraction > threshold_fraction) as a boolean string " +
         "the downstream conditional emission step keys on. Stays in python3 stdlib so the " +
-        "tick has no extra dependencies.",
+        "tick has no extra dependencies. Same [\"bash\",\"-c\",<script>] form as " +
+        "compute_histogram — goal-host's bash resolver rejects string commands.",
       resolver: "bash",
       config: {
         type: "bash",
-        command:
+        command: [
+          "bash",
+          "-c",
           "python3 -c \"import json,sys; " +
-          "h=json.loads(sys.argv[1] or '{}'); " +
-          "thr=float(sys.argv[2] or '0.8'); " +
-          "frac=float(h.get('max_fraction',0)); " +
-          "print(json.dumps({'skew_breach': frac>thr, 'max_fraction':frac, 'max_class':h.get('max_class',''), 'counts':h.get('counts',{}), 'total':h.get('total',0), 'threshold':thr}))\" " +
-          "'{{compute_histogram_stdout}}' '{{threshold_fraction}}'",
+            "h=json.loads(sys.argv[1] or '{}'); " +
+            "thr=float(sys.argv[2] or '0.8'); " +
+            "frac=float(h.get('max_fraction',0)); " +
+            "print(json.dumps({'skew_breach': frac>thr, 'max_fraction':frac, 'max_class':h.get('max_class',''), 'counts':h.get('counts',{}), 'total':h.get('total',0), 'threshold':thr}))\" " +
+            "'{{compute_histogram_stdout}}' '{{threshold_fraction}}'",
+        ],
       },
       outputShapes: ["shellResult"],
     },

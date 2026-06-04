@@ -428,12 +428,20 @@ export async function resolveVesselMitosisCutover(
         `[vessel_mitosis_cutover] substrateGap_write failed during freshness refusal: ${(err as Error).message}`,
       );
     }
-    return {
-      shape: "structuredError",
-      body: {
-        resolver: "vessel_mitosis_cutover",
-        detail: `refusing cutover: mitosis_freshness_violation (${reason})`,
+    // Audited NO (same pattern as non-FAVORABLE verdict / missing-path / empty
+    // evidence soft-refuses above): emit vesselMitosisCutoverResult{applied:false,
+    // refused:true} so light-dispatch / activity-api treat the trace as a
+    // success-with-refusal rather than a chain failure. structuredError gets
+    // dropped by the engine's top-level catch (engine.ts ~578) which leaves
+    // the conditional_cutover task entirely absent from the trace — silent
+    // failure mode. The freshness violation IS the substrate's audited NO.
+    // The substrateGap_write above carries the cited evidence; this return
+    // carries the verdict-acknowledged structure downstream observers expect.
+    return softRefuse(
+      `mitosis_freshness_violation (${reason})`,
+      {
         kind: "mitosis_freshness_violation",
+        detail: `refusing cutover: mitosis_freshness_violation (${reason})`,
         vessel_name,
         mitosis_version_id,
         staged_base_sha: stagedBaseSha ?? null,
@@ -441,8 +449,9 @@ export async function resolveVesselMitosisCutover(
         freshness_check_path: freshnessCheckPath,
         cite_principle: "resilient_against_unintended_changes",
         gap_id: gapId,
+        verdict: evaluation_evidence.verdict,
       },
-    };
+    );
   }
 
   // ---- Git-aware cutover path (2026-06-04) ----

@@ -193,10 +193,20 @@ describe("vessel_mitosis_cutover", () => {
       // staged_base_sha intentionally omitted
       evaluation_evidence: FAVORABLE_EVIDENCE,
     });
-    expect(r.shape).toBe("structuredError");
-    const body = r.body as { detail: string; kind?: string; gap_id?: string };
-    expect(body.detail).toContain("mitosis_freshness_violation");
-    expect(body.detail).toContain("missing_base_sha");
+    // 2026-06-04: freshness gate now soft-refuses (was structuredError).
+    // structuredError gets dropped by the engine's top-level catch leaving the
+    // task absent from the trace; soft-refuse keeps the audited NO visible.
+    expect(r.shape).toBe("vesselMitosisCutoverResult");
+    const body = r.body as {
+      refused: boolean;
+      refusal_reason: string;
+      detail?: string;
+      kind?: string;
+      gap_id?: string;
+    };
+    expect(body.refused).toBe(true);
+    expect(body.refusal_reason).toContain("mitosis_freshness_violation");
+    expect(body.refusal_reason).toContain("missing_base_sha");
     expect(body.kind).toBe("mitosis_freshness_violation");
     // Gap landed in WORKSPACE_ROOT/gaps/gaps.json.
     const gapsPath = join(workspaceRoot, "gaps", "gaps.json");
@@ -221,10 +231,12 @@ describe("vessel_mitosis_cutover", () => {
       staged_base_sha: "deadbeef0000", // wrong
       evaluation_evidence: FAVORABLE_EVIDENCE,
     });
-    expect(r.shape).toBe("structuredError");
-    const body = r.body as { detail: string; kind?: string };
-    expect(body.detail).toContain("mitosis_freshness_violation");
-    expect(body.detail).toContain("base_sha_mismatch");
+    // 2026-06-04: freshness gate now soft-refuses (was structuredError).
+    expect(r.shape).toBe("vesselMitosisCutoverResult");
+    const body = r.body as { refused: boolean; refusal_reason: string; kind?: string };
+    expect(body.refused).toBe(true);
+    expect(body.refusal_reason).toContain("mitosis_freshness_violation");
+    expect(body.refusal_reason).toContain("base_sha_mismatch");
   });
 
   it("soft-refuses when neither cited_trace_ids nor cited_check_names are provided", async () => {

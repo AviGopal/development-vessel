@@ -1,5 +1,15 @@
-import { resolve, join, dirname } from "path";
-import { rename, mkdir, stat, unlink, readFile, writeFile } from "node:fs/promises";
+import { resolve, join, dirname, relative, isAbsolute } from "path";
+import {
+  rename,
+  mkdir,
+  stat,
+  unlink,
+  readFile,
+  writeFile,
+  copyFile,
+  readdir,
+  appendFile,
+} from "node:fs/promises";
 import { createHash } from "node:crypto";
 import type { ResolverResult } from "./types.js";
 import { resolveSubstrateGapWrite } from "./substrate-gap.js";
@@ -54,6 +64,102 @@ export interface VesselMitosisCutoverPointer {
   /** Allow operator to override the freshness-check file (defaults to <baseRoot>/src/index.ts). */
   freshness_check_path?: string;
   dry_run?: boolean;
+  /**
+   * Git-aware cutover (2026-06-04): when supplied, the cutover applies
+   * staged files from `mitosis_root` (relative to `mitosis_root`) to
+   * `host_repo_root`, runs `git add` + `git commit` + `git push origin dev`,
+   * then mirrors the staged files into `base_root` (the live `/vessels/<v>/`
+   * runtime path) and restarts the vessel unit. Emits a `cutoverApplied`
+   * impulse on success.
+   */
+  staged_files?: string[];
+  host_repo_root?: string;
+  proposal_id?: string;
+  gap_id?: string;
+  /** Override the systemctl restart target (default: `<vessel>.service`). */
+  restart_unit_name?: string;
+  /** Test hook: override the git binary path. */
+  git_cmd?: string;
+  /** Test hook: skip the actual `git push` step. */
+  skip_push?: boolean;
+  /** Test hook: skip the systemctl restart step. */
+  skip_restart?: boolean;
+  /** Test hook: override the pending-pointer cleanup path. */
+  pending_pointer_path?: string;
+  /** Test hook: override impulse log path (default: /workspace/mitosis-applied.jsonl). */
+  applied_log_path?: string;
+}
+
+interface GitOpResult {
+  op: string;
+  exit_code: number;
+  stdout: string;
+  stderr: string;
+}
+
+async function runGit(
+  gitCmd: string,
+  args: string[],
+  cwd: string,
+): Promise<GitOpResult> {
+  try {
+    const proc = Bun.spawn([gitCmd, ...args], {
+      cwd,
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [stdout, stderr] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+    ]);
+    const exit = await proc.exited;
+    return { op: `git ${args.join(" ")}`, exit_code: exit, stdout, stderr };
+  } catch (err) {
+    return {
+      op: `git ${args.join(" ")}`,
+      exit_code: -1,
+      stdout: "",
+      stderr: (err as Error).message,
+    };
+  }
+}
+
+async function walkRelativeFiles(root: string, prefix = ""): Promise<string[]> {
+  const out: string[] = [];
+  let entries: Array<{ name: string; isDirectory(): boolean; isFile(): boolean }>;
+  try {
+    entries = (await readdir(join(root, prefix), { withFileTypes: true })) as unknown as Array<{
+      name: string;
+      isDirectory(): boolean;
+      isFile(): boolean;
+    }>;
+  } catch {
+    return out;
+  }
+  for (const e of entries) {
+    const name = e.name;
+    const rel = prefix ? join(prefix, name) : name;
+    if (e.isDirectory()) {
+      const sub = await walkRelativeFiles(root, rel);
+      out.push(...sub);
+    } else if (e.isFile()) {
+      out.push(rel);
+    }
+  }
+  return out;
+}
+
+async function copyTree(
+  srcRoot: string,
+  dstRoot: string,
+  files: string[],
+): Promise<void> {
+  for (const f of files) {
+    const src = join(srcRoot, f);
+    const dst = join(dstRoot, f);
+    await mkdir(dirname(dst), { recursive: true });
+    await copyFile(src, dst);
+  }
 }
 
 const PROTECTED_BASES = new Set(["v0", "baseline"]);
@@ -248,6 +354,28 @@ export async function resolveVesselMitosisCutover(
     };
   }
 
+  // ---- Git-aware cutover path (2026-06-04) ----
+  // When staged_files is supplied, we apply only those files (scope-creep
+  // gate) into a host-side git repo, commit, push, then mirror into the
+  // /vessels/<v>/ runtime path and restart the systemd unit. Emits a
+  // cutoverApplied impulse with new_git_sha + push_status.
+  if (pointer.staged_files && pointer.staged_files.length > 0) {
+    return await runGitAwareCutover({
+      pointer,
+      vessel_name,
+      base_version_id,
+      mitosis_version_id,
+      mitosisRoot,
+      baseRoot,
+      stagedFiles: pointer.staged_files,
+      hostRepoRoot:
+        pointer.host_repo_root ??
+        join(workspaceRoot, "repos", vessel_name),
+      evaluationEvidence: evaluation_evidence,
+      stagedBaseSha,
+    });
+  }
+
   const baseUnitName = pointer.base_unit_name ?? `${vessel_name}.service`;
   const mitosisUnitName =
     pointer.mitosis_unit_name ?? `${vessel_name}-${mitosis_version_id}.service`;
@@ -426,6 +554,373 @@ export async function resolveVesselMitosisCutover(
         cited_trace_ids: evaluation_evidence.cited_trace_ids.slice(0, 10),
       },
       completed_at: new Date().toISOString(),
+    },
+  };
+}
+
+interface GitCutoverArgs {
+  pointer: VesselMitosisCutoverPointer;
+  vessel_name: string;
+  base_version_id: string;
+  mitosis_version_id: string;
+  mitosisRoot: string;
+  baseRoot: string;
+  stagedFiles: string[];
+  hostRepoRoot: string;
+  evaluationEvidence: VesselMitosisCutoverPointer["evaluation_evidence"];
+  stagedBaseSha: string | undefined;
+}
+
+async function runGitAwareCutover(args: GitCutoverArgs): Promise<ResolverResult> {
+  const {
+    pointer,
+    vessel_name,
+    base_version_id,
+    mitosis_version_id,
+    mitosisRoot,
+    baseRoot,
+    stagedFiles,
+    hostRepoRoot,
+    evaluationEvidence,
+    stagedBaseSha,
+  } = args;
+
+  const operations: Array<{ op: string; status: string; detail?: string }> = [];
+
+  // 1. Resilience: walk mitosis tree, enforce allowed file set.
+  const allFiles = await walkRelativeFiles(mitosisRoot);
+  const allowed = new Set(stagedFiles.map((f) => f.replace(/^\.\//, "")));
+  const outOfScope = allFiles.filter((f) => !allowed.has(f));
+  if (outOfScope.length > 0) {
+    return structuredError(
+      `scope_creep_detected: mitosis dir contains files outside staged_files: ${outOfScope.slice(0, 5).join(", ")}`,
+      {
+        kind: "scope_creep_detected",
+        out_of_scope_files: outOfScope,
+        staged_files: stagedFiles,
+        mitosis_root: mitosisRoot,
+      },
+    );
+  }
+
+  // 2. Validate hostRepoRoot is a git repo.
+  if (!(await pathExists(join(hostRepoRoot, ".git")))) {
+    return structuredError(
+      `host_repo_root is not a git repo: ${hostRepoRoot}`,
+      { host_repo_root: hostRepoRoot, kind: "host_repo_not_git" },
+    );
+  }
+  for (const f of stagedFiles) {
+    if (isAbsolute(f) || f.includes("..")) {
+      return structuredError(
+        `unsafe staged file path: ${f}`,
+        { kind: "unsafe_path", staged_file: f },
+      );
+    }
+  }
+
+  if (pointer.dry_run) {
+    return {
+      shape: "vesselMitosisCutoverPlan",
+      body: {
+        vessel_name,
+        base_version_id,
+        mitosis_version_id,
+        mode: "git_aware",
+        host_repo_root: hostRepoRoot,
+        staged_files: stagedFiles,
+        plan: [
+          "copy mitosis_root/<staged_files> → host_repo_root/<staged_files>",
+          "git add <staged_files>",
+          "git status -- <staged_files> (scope-creep check)",
+          "git commit -m substrate-authored: ...",
+          pointer.skip_push ? "(push skipped)" : "git push origin dev",
+          "copy mitosis_root/<staged_files> → /vessels/<vessel>/<staged_files>",
+          pointer.skip_restart ? "(restart skipped)" : "systemctl restart <vessel>.service",
+          "emit cutoverApplied impulse",
+        ],
+        verdict_acknowledged: evaluationEvidence.verdict,
+      },
+    };
+  }
+
+  // 3. Copy staged files into host repo.
+  try {
+    await copyTree(mitosisRoot, hostRepoRoot, stagedFiles);
+    operations.push({
+      op: "copy mitosis → host_repo",
+      status: "ok",
+      detail: `${stagedFiles.length} file(s)`,
+    });
+  } catch (err) {
+    return structuredError(
+      `host repo copy failed: ${(err as Error).message}`,
+      { operations },
+    );
+  }
+
+  const gitCmd = pointer.git_cmd ?? "git";
+
+  // 4. git diff --name-only — verify ONLY staged_files are modified.
+  const diffNames = await runGit(
+    gitCmd,
+    ["diff", "--name-only", "HEAD", "--"],
+    hostRepoRoot,
+  );
+  operations.push({
+    op: diffNames.op,
+    status: diffNames.exit_code === 0 ? "ok" : "warn",
+    detail: diffNames.stderr.slice(0, 200),
+  });
+  // Also check unstaged untracked-but-tracked changes via plain `git diff --name-only`.
+  const diffWorkTree = await runGit(
+    gitCmd,
+    ["diff", "--name-only"],
+    hostRepoRoot,
+  );
+  const changedRaw = (diffWorkTree.stdout + "\n" + diffNames.stdout)
+    .split("\n")
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+  const changed = Array.from(new Set(changedRaw));
+  const unexpected = changed.filter((f) => !allowed.has(f));
+  if (unexpected.length > 0) {
+    return structuredError(
+      `git_diff_scope_violation: workspace shows changes outside staged_files: ${unexpected.slice(0, 5).join(", ")}`,
+      {
+        kind: "git_diff_scope_violation",
+        unexpected_changes: unexpected,
+        staged_files: stagedFiles,
+        operations,
+      },
+    );
+  }
+
+  // 5. git add.
+  const add = await runGit(gitCmd, ["add", ...stagedFiles], hostRepoRoot);
+  operations.push({
+    op: add.op,
+    status: add.exit_code === 0 ? "ok" : "fail",
+    detail: add.stderr.slice(0, 200),
+  });
+  if (add.exit_code !== 0) {
+    return structuredError(`git add failed: ${add.stderr.slice(0, 200)}`, {
+      operations,
+    });
+  }
+
+  // 6. git commit.
+  const proposalId = pointer.proposal_id ?? "unknown-proposal";
+  const gapId = pointer.gap_id ?? "unknown-gap";
+  const msg =
+    `substrate-authored: apply ${proposalId} via mitosis cutover\n\n` +
+    `Applied autonomously by apply_proposal_as_patch + vessel_mitosis_cutover.\n` +
+    `Gap: ${gapId}\n` +
+    `Proposal: ${proposalId}\n` +
+    `Mitosis: ${mitosis_version_id}\n` +
+    `Base SHA at staging: ${stagedBaseSha ?? "<unknown>"}\n`;
+  const commit = await runGit(gitCmd, ["commit", "-m", msg], hostRepoRoot);
+  operations.push({
+    op: commit.op,
+    status: commit.exit_code === 0 ? "ok" : "fail",
+    detail:
+      commit.exit_code === 0
+        ? commit.stdout.slice(0, 200)
+        : commit.stderr.slice(0, 400),
+  });
+  if (commit.exit_code !== 0) {
+    return structuredError(
+      `git commit failed: ${commit.stderr.slice(0, 200)}`,
+      { operations },
+    );
+  }
+
+  // 7. Capture new SHA.
+  const rev = await runGit(gitCmd, ["rev-parse", "HEAD"], hostRepoRoot);
+  const newSha = rev.stdout.trim();
+  operations.push({
+    op: rev.op,
+    status: rev.exit_code === 0 ? "ok" : "warn",
+    detail: newSha.slice(0, 12),
+  });
+
+  // 8. git push origin dev (best-effort; commit stays local on failure).
+  let pushStatus: "pushed" | "local_only" | "skipped" = "skipped";
+  let pushDetail = "";
+  if (!pointer.skip_push) {
+    const push = await runGit(
+      gitCmd,
+      ["push", "origin", "dev"],
+      hostRepoRoot,
+    );
+    pushDetail = (push.stderr + push.stdout).slice(0, 400);
+    if (push.exit_code === 0) {
+      pushStatus = "pushed";
+      operations.push({ op: push.op, status: "ok", detail: pushDetail });
+    } else {
+      pushStatus = "local_only";
+      operations.push({
+        op: push.op,
+        status: "warn",
+        detail: `push failed (commit local): ${pushDetail}`,
+      });
+    }
+  }
+
+  // 9. Mirror staged files into /vessels/<v>/ runtime path.
+  let vesselRestarted = false;
+  if (await pathExists(baseRoot)) {
+    try {
+      await copyTree(mitosisRoot, baseRoot, stagedFiles);
+      operations.push({
+        op: "copy mitosis → live vessel",
+        status: "ok",
+        detail: baseRoot,
+      });
+    } catch (err) {
+      operations.push({
+        op: "copy mitosis → live vessel",
+        status: "warn",
+        detail: (err as Error).message,
+      });
+    }
+  } else {
+    operations.push({
+      op: "copy mitosis → live vessel",
+      status: "warn",
+      detail: `baseRoot missing: ${baseRoot}`,
+    });
+  }
+
+  // 10. Restart vessel unit (best-effort).
+  if (!pointer.skip_restart) {
+    const unit = pointer.restart_unit_name ?? `${vessel_name}.service`;
+    const restart = await runSystemctl(["restart", unit]);
+    vesselRestarted = restart.exitCode === 0;
+    operations.push({
+      op: `systemctl restart ${unit}`,
+      status: vesselRestarted ? "ok" : "warn",
+      detail: vesselRestarted ? undefined : restart.stderr.slice(0, 200),
+    });
+  }
+
+  // 11. Emit cutoverApplied impulse to local log (three-place rule for new shape).
+  const appliedAt = new Date().toISOString();
+  const appliedBody = {
+    vessel_name,
+    mitosis_version_id,
+    base_version_id,
+    base_sha: stagedBaseSha ?? null,
+    new_git_sha: newSha,
+    push_status: pushStatus,
+    push_detail: pushDetail.slice(0, 200),
+    staged_files_applied: stagedFiles,
+    gap_id: gapId,
+    proposal_id: proposalId,
+    host_repo_root: hostRepoRoot,
+    vessel_restarted: vesselRestarted,
+    applied_at: appliedAt,
+  };
+  const workspaceRoot = process.env["WORKSPACE_ROOT"] ?? process.cwd();
+  const logPath =
+    pointer.applied_log_path ??
+    join(workspaceRoot, "mitosis-applied.jsonl");
+  try {
+    await mkdir(dirname(logPath), { recursive: true });
+    await appendFile(
+      logPath,
+      JSON.stringify({ shape: "cutoverApplied", body: appliedBody }) + "\n",
+    );
+    operations.push({ op: "emit cutoverApplied", status: "ok", detail: logPath });
+  } catch (err) {
+    operations.push({
+      op: "emit cutoverApplied",
+      status: "warn",
+      detail: (err as Error).message,
+    });
+  }
+
+  // 12. Cleanup pending pointer ONLY after successful impulse emit.
+  const pendingPath =
+    pointer.pending_pointer_path ?? join(workspaceRoot, "mitosis-pending.json");
+  try {
+    if (await pathExists(pendingPath)) {
+      await unlink(pendingPath);
+      operations.push({ op: "remove mitosis-pending.json", status: "ok" });
+    }
+  } catch (err) {
+    operations.push({
+      op: "remove mitosis-pending.json",
+      status: "warn",
+      detail: (err as Error).message,
+    });
+  }
+
+  return {
+    shape: "cutoverApplied",
+    body: {
+      ...appliedBody,
+      mode: "git_aware",
+      operations,
+      cited_evidence: {
+        verdict: evaluationEvidence.verdict,
+        base_success_rate: evaluationEvidence.base_success_rate,
+        mitosis_success_rate: evaluationEvidence.mitosis_success_rate,
+        cited_trace_ids: evaluationEvidence.cited_trace_ids.slice(0, 10),
+      },
+    },
+  };
+}
+
+// suppress unused-import warning when `relative` not used directly elsewhere
+void relative;
+
+/**
+ * Read-side resolver for the `cutoverApplied` shape. Returns recent entries
+ * from the cutover impulse log so the substrate (and operator) can read back
+ * its own git-aware commit history.
+ */
+export interface CutoverAppliedPointer {
+  type: "cutoverApplied";
+  limit?: number;
+  applied_log_path?: string;
+  vessel_name?: string;
+}
+
+export async function resolveCutoverApplied(
+  pointer: CutoverAppliedPointer,
+): Promise<ResolverResult> {
+  const workspaceRoot = process.env["WORKSPACE_ROOT"] ?? process.cwd();
+  const logPath =
+    pointer.applied_log_path ?? join(workspaceRoot, "mitosis-applied.jsonl");
+  const limit = Math.max(1, Math.min(pointer.limit ?? 20, 200));
+  if (!(await pathExists(logPath))) {
+    return {
+      shape: "cutoverApplied",
+      body: { entries: [], total: 0, log_path: logPath },
+    };
+  }
+  const raw = await readFile(logPath, "utf8");
+  const lines = raw.split("\n").filter((l) => l.trim().length > 0);
+  const entries: Array<Record<string, unknown>> = [];
+  for (const line of lines) {
+    try {
+      const parsed = JSON.parse(line) as { body?: Record<string, unknown> };
+      if (parsed.body) entries.push(parsed.body);
+    } catch {
+      /* skip malformed */
+    }
+  }
+  const filtered = pointer.vessel_name
+    ? entries.filter((e) => e["vessel_name"] === pointer.vessel_name)
+    : entries;
+  const recent = filtered.slice(-limit).reverse();
+  return {
+    shape: "cutoverApplied",
+    body: {
+      entries: recent,
+      total: filtered.length,
+      log_path: logPath,
     },
   };
 }

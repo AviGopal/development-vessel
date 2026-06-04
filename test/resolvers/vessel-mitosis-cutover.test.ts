@@ -236,4 +236,170 @@ describe("vessel_mitosis_cutover", () => {
     expect(r.shape).toBe("structuredError");
     expect((r.body as { detail: string }).detail).toContain("cited_trace_ids");
   });
+
+  // ---- Git-aware cutover (2026-06-04) ----
+
+  async function setupForGitCutover(): Promise<{
+    baseRoot: string;
+    mitosisRoot: string;
+    hostRepoRoot: string;
+    baseSha: string;
+    appliedLog: string;
+  }> {
+    // Independent setup — no extraneous files in mitosis dir, so the
+    // scope-creep gate stays quiet for the happy path.
+    const reposRoot = join(workspaceRoot, "git", "super-repo", "repos");
+    const baseRoot = join(reposRoot, "development-vessel");
+    const mitosisRoot = join(
+      reposRoot,
+      "development-vessel-mitosis-git-2026-06-04",
+    );
+    await mkdir(join(baseRoot, "src", "resolvers"), { recursive: true });
+    await mkdir(join(mitosisRoot, "src", "resolvers"), { recursive: true });
+    // Freshness gate hashes <baseRoot>/src/index.ts. Provide one + compute SHA.
+    const baseIndexContent = `// base index for git cutover test\n`;
+    await writeFile(join(baseRoot, "src", "index.ts"), baseIndexContent);
+    const { createHash } = await import("node:crypto");
+    const baseSha = createHash("sha256")
+      .update(baseIndexContent)
+      .digest("hex")
+      .slice(0, 12);
+    // Live vessel runtime path has the OLD content; it'll get mirrored.
+    await writeFile(
+      join(baseRoot, "src", "resolvers", "target.ts"),
+      "// original (live)\n",
+    );
+    // Mitosis dir contains ONLY the staged file with new content.
+    await writeFile(
+      join(mitosisRoot, "src", "resolvers", "target.ts"),
+      "// patched by substrate\n",
+    );
+    // Host git repo with the same original baseline.
+    const hostRepoRoot = join(workspaceRoot, "host-repo");
+    await mkdir(join(hostRepoRoot, "src", "resolvers"), { recursive: true });
+    await writeFile(
+      join(hostRepoRoot, "src", "resolvers", "target.ts"),
+      "// original\n",
+    );
+    const { spawnSync } = await import("node:child_process");
+    spawnSync("git", ["init", "-b", "dev"], { cwd: hostRepoRoot });
+    spawnSync("git", ["config", "user.email", "test@example.com"], {
+      cwd: hostRepoRoot,
+    });
+    spawnSync("git", ["config", "user.name", "Test"], { cwd: hostRepoRoot });
+    spawnSync("git", ["add", "."], { cwd: hostRepoRoot });
+    spawnSync("git", ["commit", "-m", "baseline"], { cwd: hostRepoRoot });
+    const appliedLog = join(workspaceRoot, "mitosis-applied.jsonl");
+    return { baseRoot, mitosisRoot, hostRepoRoot, baseSha, appliedLog };
+  }
+
+  it("git-aware cutover: applies staged files, commits, mirrors to /vessels, emits cutoverApplied", async () => {
+    const { baseRoot, mitosisRoot, hostRepoRoot, baseSha, appliedLog } =
+      await setupForGitCutover();
+    const r = await resolveVesselMitosisCutover({
+      type: "vessel_mitosis_cutover",
+      vessel_name: "development-vessel",
+      base_version_id: "v1",
+      mitosis_version_id: "mitosis-2026-06-03T00-00-00Z",
+      mitosis_root: mitosisRoot,
+      base_root: baseRoot,
+      host_repo_root: hostRepoRoot,
+      staged_base_sha: baseSha,
+      staged_files: ["src/resolvers/target.ts"],
+      proposal_id: "proposal-test-1",
+      gap_id: "gap-test-1",
+      evaluation_evidence: FAVORABLE_EVIDENCE,
+      skip_push: true,
+      skip_restart: true,
+      applied_log_path: appliedLog,
+    });
+    expect(r.shape).toBe("cutoverApplied");
+    const body = r.body as {
+      new_git_sha: string;
+      push_status: string;
+      staged_files_applied: string[];
+      mode: string;
+      vessel_restarted: boolean;
+    };
+    expect(body.mode).toBe("git_aware");
+    expect(body.new_git_sha.length).toBeGreaterThanOrEqual(40);
+    expect(body.push_status).toBe("skipped");
+    expect(body.staged_files_applied).toEqual(["src/resolvers/target.ts"]);
+    expect(body.vessel_restarted).toBe(false); // skip_restart=true
+    // Host repo got the new content.
+    const hostContent = await readFile(
+      join(hostRepoRoot, "src", "resolvers", "target.ts"),
+      "utf8",
+    );
+    expect(hostContent).toBe("// patched by substrate\n");
+    // Live vessel got mirrored content.
+    const liveContent = await readFile(
+      join(baseRoot, "src", "resolvers", "target.ts"),
+      "utf8",
+    );
+    expect(liveContent).toBe("// patched by substrate\n");
+    // Applied log has a cutoverApplied entry.
+    const logRaw = await readFile(appliedLog, "utf8");
+    expect(logRaw).toContain("cutoverApplied");
+    expect(logRaw).toContain("proposal-test-1");
+  });
+
+  it("git-aware cutover: scope_creep_detected when mitosis dir has extra files", async () => {
+    const { baseRoot, mitosisRoot, hostRepoRoot, baseSha, appliedLog } =
+      await setupForGitCutover();
+    // Plant an extra file not in staged_files.
+    await writeFile(
+      join(mitosisRoot, "src", "resolvers", "extra.ts"),
+      "// unexpected\n",
+    );
+    const r = await resolveVesselMitosisCutover({
+      type: "vessel_mitosis_cutover",
+      vessel_name: "development-vessel",
+      base_version_id: "v1",
+      mitosis_version_id: "mitosis-2026-06-03T00-00-00Z",
+      mitosis_root: mitosisRoot,
+      base_root: baseRoot,
+      host_repo_root: hostRepoRoot,
+      staged_base_sha: baseSha,
+      staged_files: ["src/resolvers/target.ts"],
+      proposal_id: "proposal-test-2",
+      gap_id: "gap-test-2",
+      evaluation_evidence: FAVORABLE_EVIDENCE,
+      skip_push: true,
+      skip_restart: true,
+      applied_log_path: appliedLog,
+    });
+    expect(r.shape).toBe("structuredError");
+    expect((r.body as { detail: string }).detail).toContain("scope_creep_detected");
+    expect((r.body as { kind: string }).kind).toBe("scope_creep_detected");
+  });
+
+  it("git-aware cutover: dry_run returns plan without modifying files", async () => {
+    const { baseRoot, mitosisRoot, hostRepoRoot, baseSha, appliedLog } =
+      await setupForGitCutover();
+    const r = await resolveVesselMitosisCutover({
+      type: "vessel_mitosis_cutover",
+      vessel_name: "development-vessel",
+      base_version_id: "v1",
+      mitosis_version_id: "mitosis-2026-06-03T00-00-00Z",
+      mitosis_root: mitosisRoot,
+      base_root: baseRoot,
+      host_repo_root: hostRepoRoot,
+      staged_base_sha: baseSha,
+      staged_files: ["src/resolvers/target.ts"],
+      evaluation_evidence: FAVORABLE_EVIDENCE,
+      skip_push: true,
+      skip_restart: true,
+      applied_log_path: appliedLog,
+      dry_run: true,
+    });
+    expect(r.shape).toBe("vesselMitosisCutoverPlan");
+    expect((r.body as { mode: string }).mode).toBe("git_aware");
+    // Host file untouched.
+    const hostContent = await readFile(
+      join(hostRepoRoot, "src", "resolvers", "target.ts"),
+      "utf8",
+    );
+    expect(hostContent).toBe("// original\n");
+  });
 });

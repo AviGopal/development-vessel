@@ -66,7 +66,10 @@ import { resolveTemplateInvocationHistoryReport } from "../resolvers/template-in
 import { resolveVesselDemandReport } from "../resolvers/vessel-demand-report.js";
 import { resolveVesselMitosisStart } from "../resolvers/vessel-mitosis-start.js";
 import { resolveVesselMitosisEvaluate } from "../resolvers/vessel-mitosis-evaluate.js";
-import { resolveVesselMitosisCutover } from "../resolvers/vessel-mitosis-cutover.js";
+import {
+  resolveVesselMitosisCutover,
+  resolveCutoverApplied,
+} from "../resolvers/vessel-mitosis-cutover.js";
 import { resolveSurrealdbExport } from "../resolvers/surrealdb-export.js";
 import { resolveSurrealdbImport } from "../resolvers/surrealdb-import.js";
 import { resolveGhRepoCreate } from "../resolvers/gh-repo-create.js";
@@ -228,6 +231,8 @@ export async function resolveDispatch(pointer: AnyPointer): Promise<ResolverResu
       return resolveVesselMitosisEvaluate(p as Parameters<typeof resolveVesselMitosisEvaluate>[0]);
     case "vessel_mitosis_cutover":
       return resolveVesselMitosisCutover(p as Parameters<typeof resolveVesselMitosisCutover>[0]);
+    case "cutoverApplied":
+      return resolveCutoverApplied(p as Parameters<typeof resolveCutoverApplied>[0]);
     case "surrealdb_export":
       return resolveSurrealdbExport(p as Parameters<typeof resolveSurrealdbExport>[0]);
     case "surrealdb_import":

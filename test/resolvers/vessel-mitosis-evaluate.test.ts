@@ -125,4 +125,43 @@ describe("vessel_mitosis_evaluate", () => {
     });
     expect(r.shape).toBe("structuredError");
   });
+
+  // ---- Static evaluation path (2026-06-04) ----
+
+  it("static eval: returns INSUFFICIENT_DATA fall-through when mitosis_root missing → trace path", async () => {
+    globalThis.fetch = makeFetch([]);
+    const r = await resolveVesselMitosisEvaluate({
+      type: "vessel_mitosis_evaluate",
+      base_version_id: "v1",
+      mitosis_version_id: "mitosis-X",
+      mitosis_root: "/nonexistent/path/that/should/not/exist",
+    });
+    const body = r.body as { verdict: string };
+    // mitosis_root absent → static eval falls through to trace path → INSUFFICIENT_DATA
+    expect(body.verdict).toBe("INSUFFICIENT_DATA");
+  });
+
+  it("static eval: returns FAVORABLE when static_check_runner=skip via trace-only path", async () => {
+    // With static_check_runner='skip', static eval is bypassed even when mitosis_root supplied.
+    const traces = [
+      vTrace("e_b1", "v1", "success"),
+      vTrace("e_b2", "v1", "success"),
+      vTrace("e_b3", "v1", "success"),
+      vTrace("e_m1", "mitosis-X", "success"),
+      vTrace("e_m2", "mitosis-X", "success"),
+      vTrace("e_m3", "mitosis-X", "success"),
+    ];
+    globalThis.fetch = makeFetch(traces);
+    const r = await resolveVesselMitosisEvaluate({
+      type: "vessel_mitosis_evaluate",
+      base_version_id: "v1",
+      mitosis_version_id: "mitosis-X",
+      mitosis_root: "/some/path",
+      static_check_runner: "skip",
+    });
+    const body = r.body as { verdict: string; static_evaluation: unknown };
+    expect(body.verdict).toBe("NEUTRAL");
+    // static_evaluation field present (null when skipped)
+    expect(body.static_evaluation).toBeNull();
+  });
 });

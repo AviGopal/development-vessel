@@ -1,9 +1,27 @@
+import { join, dirname } from "path";
+import {
+  stat,
+  mkdir,
+  copyFile,
+  readdir,
+  symlink,
+  unlink,
+} from "node:fs/promises";
+import { tmpdir } from "node:os";
 import type { ResolverResult } from "./types.js";
 
 /**
  * vessel_mitosis_evaluate — fetches recent traces from activity-api, segments
  * them by version_id (read from trace metadata), computes per-version
- * success_rate + failure_mode class set, and renders a verdict:
+ * success_rate + failure_mode class set, and renders a verdict.
+ *
+ * STATIC EVALUATION (2026-06-04): when pointer.mitosis_root is supplied, the
+ * resolver runs the idiomatic substrate disciplines — `bun run lint` +
+ * `bun test` — inside the mitosis directory BEFORE consulting traces. This
+ * lets the autonomous self-repair loop reach FAVORABLE on freshly-staged
+ * mitoses (which have no runtime traces against them yet) when the code
+ * change is well-formed. Failing checks → UNFAVORABLE with cited output.
+ * Passing checks → FAVORABLE (trace check becomes additive, not gating).
  *
  *   FAVORABLE       — mitosis success_rate ≥ base + threshold AND no new
  *                     failure_mode classes introduced.
@@ -29,6 +47,286 @@ export interface VesselMitosisEvaluatePointer {
   since?: string;
   min_traces_per_version?: number;
   success_rate_advantage_threshold?: number;
+  /**
+   * When supplied, the resolver runs `bun run lint` + `bun test` inside this
+   * directory before consulting traces. If both pass → FAVORABLE. If either
+   * fails → UNFAVORABLE with cited output. If the directory or scripts are
+   * missing → falls through to trace path.
+   */
+  mitosis_root?: string;
+  /**
+   * When supplied along with mitosis_root + staged_files, the resolver
+   * overlays staged files from mitosis_root onto a temp clone of
+   * static_check_base_root (the canonical vessel tree with package.json +
+   * node_modules) and runs lint + tests there. This is how the substrate
+   * evaluates a sparse mitosis dir (which only contains the changed files)
+   * — we synthesize the full vessel-tree-as-if-cutover-had-happened and
+   * test it in isolation, then throw the temp away.
+   */
+  static_check_base_root?: string;
+  staged_files?: string[];
+  /** Override the static-check command runner (test hook). */
+  static_check_runner?: "bun" | "skip";
+  /** Override `bun` binary path. */
+  bun_cmd?: string;
+  /**
+   * Script name(s) to invoke as `bun run <name>`. Defaults to ["lint"]
+   * (typecheck + shape-dispatch). When the synthesized overlay lacks
+   * supporting files for some scripts (e.g. test fixtures), provide a
+   * narrower set. The `bun test` step is always attempted after these.
+   */
+  static_check_scripts?: string[];
+  /** Skip `bun test` (default false). */
+  skip_tests?: boolean;
+}
+
+interface StaticCheckResult {
+  name: string;
+  exit_code: number;
+  duration_ms: number;
+  output_tail: string;
+}
+
+interface StaticEvalResult {
+  attempted: boolean;
+  ok: boolean;
+  reason: string;
+  checks: StaticCheckResult[];
+  duration_ms: number;
+}
+
+const STATIC_CHECK_TIMEOUT_MS = 60_000;
+const OUTPUT_TAIL_BYTES = 4096;
+
+function tail(s: string, n: number): string {
+  if (s.length <= n) return s;
+  return "...(truncated)..." + s.slice(s.length - n);
+}
+
+async function pathExists(p: string): Promise<boolean> {
+  try {
+    await stat(p);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function runCheck(
+  bunCmd: string,
+  args: string[],
+  cwd: string,
+  name: string,
+): Promise<StaticCheckResult> {
+  const start = Date.now();
+  let exit = -1;
+  let out = "";
+  try {
+    const proc = Bun.spawn([bunCmd, ...args], {
+      cwd,
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const timer = setTimeout(() => {
+      try {
+        proc.kill();
+      } catch {
+        /* noop */
+      }
+    }, STATIC_CHECK_TIMEOUT_MS);
+    const [stdoutText, stderrText] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+    ]);
+    exit = await proc.exited;
+    clearTimeout(timer);
+    out = `--- stdout ---\n${stdoutText}\n--- stderr ---\n${stderrText}`;
+  } catch (err) {
+    out = `spawn_error: ${(err as Error).message}`;
+  }
+  return {
+    name,
+    exit_code: exit,
+    duration_ms: Date.now() - start,
+    output_tail: tail(out, OUTPUT_TAIL_BYTES),
+  };
+}
+
+/**
+ * Build a synthetic vessel tree under tmpdir() that mirrors `baseRoot` via
+ * symlinks for unchanged entries and copies `stagedFiles` from `mitosisRoot`
+ * over the top. Returns the temp root. Caller is responsible for cleanup —
+ * since these are mostly symlinks, the cleanup is cheap.
+ */
+async function buildOverlay(
+  baseRoot: string,
+  mitosisRoot: string,
+  stagedFiles: string[],
+): Promise<string> {
+  const overlay = join(
+    tmpdir(),
+    `mitosis-overlay-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+  );
+  await mkdir(overlay, { recursive: true });
+  // Symlink every top-level entry of baseRoot into overlay.
+  const tops = (await readdir(baseRoot, { withFileTypes: true })) as unknown as Array<{
+    name: string;
+    isDirectory(): boolean;
+  }>;
+  for (const e of tops) {
+    const name = e.name;
+    if (name === ".git") continue;
+    try {
+      await symlink(join(baseRoot, name), join(overlay, name));
+    } catch {
+      /* ignore EEXIST */
+    }
+  }
+  // Apply each staged file: remove symlinked path along its prefix,
+  // materialize real dirs, copy the file.
+  for (const rel of stagedFiles) {
+    const parts = rel.split("/");
+    let cursor = overlay;
+    for (let i = 0; i < parts.length - 1; i++) {
+      const segment = parts[i];
+      if (!segment) continue;
+      const path = join(cursor, segment);
+      let s;
+      try {
+        s = await stat(path);
+      } catch {
+        s = null;
+      }
+      if (!s || !s.isDirectory()) {
+        try {
+          await unlink(path);
+        } catch {
+          /* not a symlink/file */
+        }
+        await mkdir(path, { recursive: true });
+        // Re-link existing entries from the real base subdir.
+        const realSub = join(baseRoot, parts.slice(0, i + 1).join("/"));
+        try {
+          const subEntries = (await readdir(realSub, { withFileTypes: true })) as unknown as Array<{
+            name: string;
+          }>;
+          for (const sub of subEntries) {
+            try {
+              await symlink(join(realSub, sub.name), join(path, sub.name));
+            } catch {
+              /* ignore */
+            }
+          }
+        } catch {
+          /* realSub missing — staged file introducing a new dir */
+        }
+      }
+      cursor = path;
+    }
+    const target = join(overlay, rel);
+    try {
+      await unlink(target);
+    } catch {
+      /* not present */
+    }
+    const src = join(mitosisRoot, rel);
+    if (await pathExists(src)) {
+      await mkdir(dirname(target), { recursive: true });
+      await copyFile(src, target);
+    }
+  }
+  return overlay;
+}
+
+async function staticEvaluate(
+  mitosisRoot: string,
+  bunCmd: string,
+  baseRootForOverlay?: string,
+  stagedFiles?: string[],
+  scripts: string[] = ["lint"],
+  skipTests = false,
+): Promise<StaticEvalResult> {
+  const start = Date.now();
+  if (!(await pathExists(mitosisRoot))) {
+    return {
+      attempted: false,
+      ok: false,
+      reason: "static_eval_unavailable: mitosis_root missing",
+      checks: [],
+      duration_ms: Date.now() - start,
+    };
+  }
+  // Decide which directory to run checks in.
+  let runRoot = mitosisRoot;
+  const mitosisHasPkg = await pathExists(join(mitosisRoot, "package.json"));
+  if (!mitosisHasPkg) {
+    // Need an overlay against a base that DOES have package.json.
+    if (
+      !baseRootForOverlay ||
+      !stagedFiles ||
+      stagedFiles.length === 0 ||
+      !(await pathExists(join(baseRootForOverlay, "package.json")))
+    ) {
+      return {
+        attempted: false,
+        ok: false,
+        reason:
+          "static_eval_unavailable: mitosis_root lacks package.json and no static_check_base_root+staged_files supplied",
+        checks: [],
+        duration_ms: Date.now() - start,
+      };
+    }
+    try {
+      runRoot = await buildOverlay(baseRootForOverlay, mitosisRoot, stagedFiles);
+    } catch (err) {
+      return {
+        attempted: false,
+        ok: false,
+        reason: `static_eval_unavailable: overlay build failed: ${(err as Error).message}`,
+        checks: [],
+        duration_ms: Date.now() - start,
+      };
+    }
+  }
+  const completed: StaticCheckResult[] = [];
+  for (const scriptName of scripts) {
+    const r = await runCheck(
+      bunCmd,
+      ["run", scriptName],
+      runRoot,
+      `bun run ${scriptName}`,
+    );
+    completed.push(r);
+    if (r.exit_code !== 0) {
+      return {
+        attempted: true,
+        ok: false,
+        reason: `${scriptName}_failed: exit=${r.exit_code}`,
+        checks: completed,
+        duration_ms: Date.now() - start,
+      };
+    }
+  }
+  if (!skipTests) {
+    const test = await runCheck(bunCmd, ["test"], runRoot, "bun test");
+    completed.push(test);
+    if (test.exit_code !== 0) {
+      return {
+        attempted: true,
+        ok: false,
+        reason: `tests_failed: exit=${test.exit_code}`,
+        checks: completed,
+        duration_ms: Date.now() - start,
+      };
+    }
+  }
+  return {
+    attempted: true,
+    ok: true,
+    reason: "static_checks_pass",
+    checks: completed,
+    duration_ms: Date.now() - start,
+  };
 }
 
 const DEFAULT_TRACES_URL = "http://127.0.0.1:8080/v2/activities/execution-traces";
@@ -116,6 +414,55 @@ export async function resolveVesselMitosisEvaluate(
   const threshold = pointer.success_rate_advantage_threshold ?? DEFAULT_THRESHOLD;
   const fetchLimit = pointer.fetchLimit ?? DEFAULT_FETCH_LIMIT;
   const url = (pointer.tracesUrl ?? DEFAULT_TRACES_URL) + `?limit=${fetchLimit}`;
+
+  // ---- Static evaluation gate (2026-06-04) ----
+  // Idiomatic substrate discipline: run lint + tests inside the mitosis dir
+  // before consulting traces. Lets freshly-staged mitoses reach FAVORABLE
+  // without waiting for runtime traces. Sufficient by itself for FAVORABLE
+  // when checks pass.
+  let staticResult: StaticEvalResult | null = null;
+  if (pointer.mitosis_root && pointer.static_check_runner !== "skip") {
+    const bunCmd = pointer.bun_cmd ?? "bun";
+    staticResult = await staticEvaluate(
+      pointer.mitosis_root,
+      bunCmd,
+      pointer.static_check_base_root,
+      pointer.staged_files,
+      pointer.static_check_scripts,
+      pointer.skip_tests ?? false,
+    );
+    if (staticResult.attempted && !staticResult.ok) {
+      const firstFail = staticResult.checks.find((c) => c.exit_code !== 0);
+      return {
+        shape: "vesselMitosisEvaluation",
+        body: {
+          base_version_id: baseId,
+          mitosis_version_id: mitosisId,
+          verdict: "UNFAVORABLE",
+          verdict_reason: staticResult.reason,
+          static_evaluation: staticResult,
+          cited_check_name: firstFail?.name ?? "unknown",
+          cited_check_output_tail: firstFail?.output_tail ?? "",
+          evaluated_at: new Date().toISOString(),
+        },
+      };
+    }
+    if (staticResult.attempted && staticResult.ok) {
+      return {
+        shape: "vesselMitosisEvaluation",
+        body: {
+          base_version_id: baseId,
+          mitosis_version_id: mitosisId,
+          verdict: "FAVORABLE",
+          verdict_reason: "static_checks_pass",
+          static_evaluation: staticResult,
+          cited_check_names: staticResult.checks.map((c) => c.name),
+          evaluated_at: new Date().toISOString(),
+        },
+      };
+    }
+    // staticResult.attempted === false → fall through to trace path.
+  }
 
   const apiKey = process.env["METABOB_API_KEY"];
   const headers: Record<string, string> = apiKey ? { Authorization: `ApiKey ${apiKey}` } : {};
@@ -227,6 +574,7 @@ export async function resolveVesselMitosisEvaluate(
       cited_trace_ids,
       scanned: traces.length,
       window_since: since ?? "(no since filter)",
+      static_evaluation: staticResult,
       evaluated_at: new Date().toISOString(),
     },
   };

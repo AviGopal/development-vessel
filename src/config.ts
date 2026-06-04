@@ -274,6 +274,12 @@ export const config = {
       "vessel_mitosis_start",
       "vessel_mitosis_evaluate",
       "vessel_mitosis_cutover",
+      // Git-aware cutover outcome (iter 2026-06-04). Emitted by
+      // vessel_mitosis_cutover when staged_files is supplied and the
+      // commit-and-push path completes. Carries new_git_sha + push_status +
+      // restart outcome so the substrate's autonomous self-repair loop
+      // produces visible, audit-able git history.
+      "cutoverApplied",
       // Durability + new-repo primitives (iter 2026-06-03):
       //   surrealdb_export — dump SurrealDB tables to JSONL under /workspace
       //     so learning state survives container destruction (Gap A).

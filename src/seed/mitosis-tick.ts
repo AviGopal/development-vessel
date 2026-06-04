@@ -53,7 +53,12 @@ export const MITOSIS_TICK_TEMPLATE: ActivityTemplate = {
     "accept traces are the audited YES. Closes the lift loop: detect → modify → " +
     "evaluate → cutover, no operator hand in the modify path.",
   inputShapes: [],
-  outputShapes: ["vesselMitosisEvaluation", "vesselMitosisCutoverResult", "structuredError"],
+  outputShapes: [
+    "vesselMitosisEvaluation",
+    "vesselMitosisCutoverResult",
+    "cutoverApplied",
+    "structuredError",
+  ],
   tags: [
     "intent:self_evaluation",
     "phase:judge",
@@ -135,18 +140,57 @@ export const MITOSIS_TICK_TEMPLATE: ActivityTemplate = {
       outputShapes: ["json_extracted_value"],
     },
     {
+      id: "extract_staged_files",
+      description:
+        "Extract pending.staged_files — the allowlist of relative paths the cutover " +
+        "is permitted to copy into the host repo + live vessel. Defaults to empty when " +
+        "absent, which makes the cutover take the legacy directory-rename path.",
+      resolver: "json_path_extract",
+      config: {
+        type: "json_path_extract",
+        json: "{{read_pending_content}}",
+        path: "staged_files",
+      },
+      outputShapes: ["json_extracted_value"],
+    },
+    {
+      id: "extract_proposal_id",
+      description: "Extract pending.proposal — the apply-proposal-as-patch source id.",
+      resolver: "json_path_extract",
+      config: {
+        type: "json_path_extract",
+        json: "{{read_pending_content}}",
+        path: "proposal",
+      },
+      outputShapes: ["json_extracted_value"],
+    },
+    {
       id: "evaluate_pair",
       description:
-        "Dispatch vessel_mitosis_evaluate against the live traces stream. Returns " +
-        "vesselMitosisEvaluation with verdict ∈ {FAVORABLE,NEUTRAL,UNFAVORABLE,INSUFFICIENT_DATA}. " +
-        "Threshold defaults to 0.1; min_traces_per_version set to 1 to allow early evaluation " +
-        "on freshly-spawned mitoses (will return INSUFFICIENT_DATA on either side with 0 traces, " +
-        "FAVORABLE on memory-axis improvements once even one mitosis trace is recorded).",
+        "Dispatch vessel_mitosis_evaluate. Static-evaluation path (2026-06-04) runs " +
+        "`bun run lint` + `bun test` inside mitosis_root BEFORE consulting traces — lint+tests " +
+        "pass → FAVORABLE without waiting for runtime traces; lint or tests fail → UNFAVORABLE " +
+        "with cited output. min_traces_per_version=1 preserves the fallback trace path when " +
+        "static eval is unavailable.",
       resolver: "vessel_mitosis_evaluate",
       config: {
         type: "vessel_mitosis_evaluate",
         base_version_id: "{{extract_base_version_text}}",
         mitosis_version_id: "{{extract_mitosis_version_text}}",
+        mitosis_root: "{{extract_mitosis_root_text}}",
+        // Overlay: staged file copied over canonical /vessels/<v>/ tree
+        // so lint+tests run against a synthesized post-cutover vessel tree.
+        // Required when the mitosis dir is sparse (only changed files).
+        static_check_base_root: "/vessels/{{extract_vessel_name_text}}",
+        staged_files: "{{extract_staged_files_content}}",
+        // Substrate-runtime defaults: use full bun path and run typecheck-only.
+        // The shape-dispatch check + tests can require fixtures or packages not
+        // available in /vessels/<v>/, so we narrow the static-eval surface to
+        // `tsc --noEmit` — sufficient to catch syntax/type bugs in substrate-
+        // authored patches without depending on full vessel-tree fidelity.
+        bun_cmd: "/root/.bun/bin/bun",
+        static_check_scripts: ["typecheck"],
+        skip_tests: true,
         min_traces_per_version: 1,
       },
       outputShapes: ["vesselMitosisEvaluation"],
@@ -167,10 +211,16 @@ export const MITOSIS_TICK_TEMPLATE: ActivityTemplate = {
         mitosis_version_id: "{{extract_mitosis_version_text}}",
         mitosis_root: "{{extract_mitosis_root_text}}",
         staged_base_sha: "{{extract_base_sha_text}}",
+        staged_files: "{{extract_staged_files_content}}",
+        proposal_id: "{{extract_proposal_id_text}}",
         evaluation_evidence: "{{evaluate_pair_content}}",
         dry_run: false,
       },
-      outputShapes: ["vesselMitosisCutoverResult", "structuredError"],
+      outputShapes: [
+        "vesselMitosisCutoverResult",
+        "cutoverApplied",
+        "structuredError",
+      ],
     },
   ],
 };

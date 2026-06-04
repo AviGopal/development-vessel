@@ -30,6 +30,7 @@ async function setupForCutover(): Promise<{
   baseRoot: string;
   mitosisRoot: string;
   unitDir: string;
+  baseSha: string;
 }> {
   const reposRoot = join(workspaceRoot, "git", "super-repo", "repos");
   const baseRoot = join(reposRoot, "development-vessel");
@@ -38,13 +39,20 @@ async function setupForCutover(): Promise<{
   await mkdir(join(mitosisRoot, "src"), { recursive: true });
   await writeFile(join(baseRoot, "src", "marker.txt"), "base-content");
   await writeFile(join(mitosisRoot, "src", "marker.txt"), "mitosis-content");
+  // Stage B.2: write a base index.ts so the cutover freshness gate has
+  // something to hash. We also compute its SHA so tests can pass a matching
+  // staged_base_sha by default.
+  const baseIndexContent = `// base index for cutover test\nexport const v = "base";\n`;
+  await writeFile(join(baseRoot, "src", "index.ts"), baseIndexContent);
+  const { createHash } = await import("node:crypto");
+  const baseSha = createHash("sha256").update(baseIndexContent).digest("hex").slice(0, 12);
   const unitDir = join(workspaceRoot, "git", "super-repo", "scripts", "substrate", "units");
   await mkdir(unitDir, { recursive: true });
   await writeFile(
     join(unitDir, "development-vessel-mitosis-2026-06-03T00-00-00Z.service"),
     `[Unit]\nDescription=dev-vessel mitosis\n[Service]\nWorkingDirectory=/vessels/development-vessel-mitosis-2026-06-03T00-00-00Z\nExecStart=/root/.bun/bin/bun /vessels/development-vessel-mitosis-2026-06-03T00-00-00Z/src/index.ts\nEnvironment=PORT=8091\n[Install]\nWantedBy=multi-user.target\n`,
   );
-  return { baseRoot, mitosisRoot, unitDir };
+  return { baseRoot, mitosisRoot, unitDir, baseSha };
 }
 
 const FAVORABLE_EVIDENCE = {
@@ -108,13 +116,14 @@ describe("vessel_mitosis_cutover", () => {
   });
 
   it("dry_run returns plan without moving anything", async () => {
-    const { baseRoot, mitosisRoot } = await setupForCutover();
+    const { baseRoot, mitosisRoot, baseSha } = await setupForCutover();
     const r = await resolveVesselMitosisCutover({
       type: "vessel_mitosis_cutover",
       vessel_name: "development-vessel",
       base_version_id: "v1",
       mitosis_version_id: "mitosis-2026-06-03T00-00-00Z",
       mitosis_root: mitosisRoot,
+      staged_base_sha: baseSha,
       evaluation_evidence: FAVORABLE_EVIDENCE,
       dry_run: true,
     });
@@ -127,13 +136,14 @@ describe("vessel_mitosis_cutover", () => {
   });
 
   it("performs cutover: archive base, promote mitosis, rewrite unit", async () => {
-    const { baseRoot, mitosisRoot, unitDir } = await setupForCutover();
+    const { baseRoot, mitosisRoot, unitDir, baseSha } = await setupForCutover();
     const r = await resolveVesselMitosisCutover({
       type: "vessel_mitosis_cutover",
       vessel_name: "development-vessel",
       base_version_id: "v1",
       mitosis_version_id: "mitosis-2026-06-03T00-00-00Z",
       mitosis_root: mitosisRoot,
+      staged_base_sha: baseSha,
       evaluation_evidence: FAVORABLE_EVIDENCE,
     });
     expect(r.shape).toBe("vesselMitosisCutoverResult");
@@ -165,6 +175,53 @@ describe("vessel_mitosis_cutover", () => {
     expect(canonicalUnit).not.toContain("mitosis-2026-06-03T00-00-00Z");
     // Cited evidence in body.
     expect(JSON.stringify(r.body)).toContain("exec_a");
+  });
+
+  // ---- Stage B.2: mitosis freshness gate ----
+
+  it("freshness gate: refuses cutover when staged_base_sha is missing", async () => {
+    const { mitosisRoot } = await setupForCutover();
+    const r = await resolveVesselMitosisCutover({
+      type: "vessel_mitosis_cutover",
+      vessel_name: "development-vessel",
+      base_version_id: "v1",
+      mitosis_version_id: "mitosis-2026-06-03T00-00-00Z",
+      mitosis_root: mitosisRoot,
+      // staged_base_sha intentionally omitted
+      evaluation_evidence: FAVORABLE_EVIDENCE,
+    });
+    expect(r.shape).toBe("structuredError");
+    const body = r.body as { detail: string; kind?: string; gap_id?: string };
+    expect(body.detail).toContain("mitosis_freshness_violation");
+    expect(body.detail).toContain("missing_base_sha");
+    expect(body.kind).toBe("mitosis_freshness_violation");
+    // Gap landed in WORKSPACE_ROOT/gaps/gaps.json.
+    const gapsPath = join(workspaceRoot, "gaps", "gaps.json");
+    const gaps = JSON.parse(await readFile(gapsPath, "utf8")) as Array<Record<string, unknown>>;
+    expect(gaps.length).toBeGreaterThan(0);
+    const cite = gaps.find(
+      (g) =>
+        ((g["classification_metadata"] ?? {}) as Record<string, unknown>)["cite_principle"] ===
+        "resilient_against_unintended_changes",
+    );
+    expect(cite).toBeDefined();
+  });
+
+  it("freshness gate: refuses cutover when staged_base_sha mismatches live", async () => {
+    const { mitosisRoot } = await setupForCutover();
+    const r = await resolveVesselMitosisCutover({
+      type: "vessel_mitosis_cutover",
+      vessel_name: "development-vessel",
+      base_version_id: "v1",
+      mitosis_version_id: "mitosis-2026-06-03T00-00-00Z",
+      mitosis_root: mitosisRoot,
+      staged_base_sha: "deadbeef0000", // wrong
+      evaluation_evidence: FAVORABLE_EVIDENCE,
+    });
+    expect(r.shape).toBe("structuredError");
+    const body = r.body as { detail: string; kind?: string };
+    expect(body.detail).toContain("mitosis_freshness_violation");
+    expect(body.detail).toContain("base_sha_mismatch");
   });
 
   it("requires non-empty cited_trace_ids", async () => {

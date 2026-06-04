@@ -1,5 +1,6 @@
 import { resolve, relative, dirname, join } from "path";
 import { mkdir, readdir, copyFile, readFile, writeFile, stat } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import type { ResolverResult } from "./types.js";
 
 /**
@@ -359,7 +360,23 @@ export async function resolveVesselMitosisStart(
     return structuredError(`mitosis_root already exists: ${mitosisRoot}`);
   }
 
-  // 1. Copy tree.
+  // 1. Capture base_sha BEFORE copy so the freshness gate (vessel_mitosis_cutover)
+  // can refuse cutover if the live source drifts before promotion. Stage B.2
+  // (2026-06-03). SHA-256(12) of base_root/src/index.ts. Best-effort; if the
+  // file is absent the field is null and the freshness gate will refuse on
+  // missing_base_sha at cutover time, which is the safe default.
+  let baseSha: string | null = null;
+  try {
+    const baseIndex = join(sourceRoot, "src", "index.ts");
+    if (await pathExists(baseIndex)) {
+      const buf = await readFile(baseIndex);
+      baseSha = createHash("sha256").update(buf).digest("hex").slice(0, 12);
+    }
+  } catch {
+    baseSha = null;
+  }
+
+  // 2. Copy tree.
   const copyStats = await copyTree(sourceRoot, mitosisRoot);
 
   // 2. Apply source_changes.
@@ -494,7 +511,9 @@ export async function resolveVesselMitosisStart(
       port_rewrite_applied: portRewriteApplied,
       copy_stats: copyStats,
       applied_changes: appliedChanges,
-      mitosis_resolver_version: "v0.2",
+      base_sha: baseSha,
+      freshness_check_path: join(sourceRoot, "src", "index.ts"),
+      mitosis_resolver_version: "v0.3",
       initiated_at: new Date().toISOString(),
     },
   };

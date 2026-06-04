@@ -57,9 +57,27 @@ const SYNTHESIZE_DISPATCH_PROMPT = `You are the substrate's autonomous-dispatch 
 
 1. **MODIFY priority**: if Source B has a top_priority entry with action="MODIFY" and priority_score >= {{modify_priority_floor}}, emit dispatch_kind="mitosis":
    - target_template_id: "development-vessel:scaffold-mitosis-track"
-   - Derive vessel_name from the broken template id (e.g. id "activity:⟨development-vessel:draft-gap-closing-activity⟩" → vessel_name "development-vessel"; id "development-vessel:foo" → "development-vessel"; id "gap-closing:auto-…" → "development-vessel" by convention since gap-closing variants live there).
-   - Derive target_file_path: take the substring AFTER the first ":" (after stripping any "activity:⟨…⟩" wrapper); convert to "src/seed/<that>.ts" by convention. For an id like "development-vessel:draft-gap-closing-activity" the file is "src/seed/draft-gap-closing-activity.ts". For "gap-closing:auto-<slug>" the file is "src/seed/draft-gap-closing-activity.ts" (the drafter that authored it).
-   - intent_summary: combine the top_priority reason + cited_evidence to describe what should change. Keep under 400 chars. Quote the reason verbatim where possible.
+   - Derive vessel_name via the FIRST matching path below (Stage B.1 2026-06-03 — multi-path resolution closes the architectural ceiling that hid ias-executor-ts and other non-template-owning vessels from the autonomous repair loop):
+
+     **Path 1 — template-owner (current):** if the broken target is a template id, derive the owner. Examples: "activity:⟨development-vessel:draft-gap-closing-activity⟩" → "development-vessel"; "development-vessel:foo" → "development-vessel"; "gap-closing:auto-…" → "development-vessel" by convention.
+
+     **Path 2 — path-mention:** if the top_priority cited_evidence (or the broken target id itself) contains a file path matching one of:
+       - "/vessels/<name>/..."
+       - "repos/<name>/..."
+       - "packages/<name>/..." (e.g. "packages/vessel-discovery-client/...")
+       - "node_modules/@<scope>/<name>/..." (e.g. "node_modules/@avigopal/ias-executor-ts/...")
+     extract <name> as vessel_name. This recognises libraries that own no templates but live in writable substrate paths (the keystone example: ias-executor-ts).
+
+     **Path 3 — principle-cite:** if cited_evidence mentions a known architectural principle name (snake_case like "per_dispatch_full_state_capture_is_o_n_memory") AND that principle's concept-db record has an "implementing_vessel" or "linked_artifact" field naming a vessel/library, use that name. If you do not have visibility into concept-db linkage, skip this path.
+
+     **Path 4 — fallback:** emit vessel_name="unresolved" AND set "requires_vessel_resolution":true at the top level of the output JSON so the operator can manually retag. Do NOT silently drop or default to "development-vessel" when paths 1-3 produced no answer.
+
+   - Derive target_file_path:
+     - When vessel_name came from Path 1: take the substring AFTER the first ":" (after stripping any "activity:⟨…⟩" wrapper); convert to "src/seed/<that>.ts" by convention. For an id like "development-vessel:draft-gap-closing-activity" the file is "src/seed/draft-gap-closing-activity.ts". For "gap-closing:auto-<slug>" the file is "src/seed/draft-gap-closing-activity.ts" (the drafter that authored it).
+     - When vessel_name came from Path 2 (path-mention): the cited path IS the target_file_path (relative to the vessel root). For "node_modules/@avigopal/ias-executor-ts/src/hosts.ts" → "src/hosts.ts" with vessel_name="ias-executor-ts".
+     - When vessel_name came from Path 3 (principle-cite): use the principle's implementing-file hint if present; otherwise set target_file_path="src/index.ts" as a default site.
+     - When vessel_name="unresolved" (Path 4): target_file_path="" — the dispatch will downstream-refuse, which is the correct behaviour.
+   - intent_summary: combine the top_priority reason + cited_evidence to describe what should change. Keep under 400 chars. Quote the reason verbatim where possible. When vessel_name resolved via Path 2/3/4, prepend the resolution path id in square brackets, e.g. "[path:path-mention from cited_evidence] …".
 
 2. **CREATE_DETECTOR / CREATE_CONSUMER**: if Source A has CREATE_DETECTOR or CREATE_CONSUMER entries, pick the highest-evidence-count CREATE_DETECTOR (or fallback CREATE_CONSUMER). Emit dispatch_kind="drafter":
    - target_template_id: "development-vessel:draft-gap-closing-activity"
@@ -78,6 +96,8 @@ const SYNTHESIZE_DISPATCH_PROMPT = `You are the substrate's autonomous-dispatch 
 {
   "dispatch_kind": "mitosis" | "drafter" | "noop",
   "target_template_id": "development-vessel:scaffold-mitosis-track" | "development-vessel:draft-gap-closing-activity",
+  "requires_vessel_resolution": false,
+  "vessel_resolution_path": "template-owner" | "path-mention" | "principle-cite" | "unresolved",
   "mitosis_vars": {
     "vessel_name": "...",
     "target_file_path": "...",

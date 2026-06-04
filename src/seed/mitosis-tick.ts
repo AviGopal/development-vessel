@@ -22,8 +22,16 @@ import type { ActivityTemplate } from "@avigopal/ias-executor-ts";
  *     "vessel_name": "goal-host-vessel",
  *     "base_version_id": "v1",
  *     "mitosis_version_id": "2026-06-03T07-12-14-972Z",
- *     "mitosis_root": "/vessels/goal-host-vessel-mitosis-2026-06-03T07-12-14-972Z"
+ *     "mitosis_root": "/vessels/goal-host-vessel-mitosis-2026-06-03T07-12-14-972Z",
+ *     "base_sha": "<12-hex SHA-256 of base src/index.ts at staging time>"
  *   }
+ *
+ * The base_sha field (Stage B.2 2026-06-03) enables the cutover resolver's
+ * freshness gate: if absent OR doesn't match the current live source's hash,
+ * cutover refuses and emits a substrateGap citing
+ * `resilient_against_unintended_changes`. vessel_mitosis_start v0.3+ now
+ * captures this automatically; pre-v0.3 pending entries lack it and are
+ * (correctly) refused as stale.
  *
  * Wiring: boredom-vessel goal[15] dispatches this template on cadence.
  * Refuses with structured reason are normal: INSUFFICIENT_DATA early in
@@ -112,6 +120,21 @@ export const MITOSIS_TICK_TEMPLATE: ActivityTemplate = {
       outputShapes: ["json_extracted_value"],
     },
     {
+      id: "extract_base_sha",
+      description:
+        "Extract pending.base_sha — SHA-256(12) hex of the live base source at staging time. " +
+        "Threaded into vessel_mitosis_cutover's freshness gate (Stage B.2 2026-06-03). " +
+        "When absent the cutover refuses with mitosis_freshness_violation, which is the safe " +
+        "default — a stale draft cannot silently regress newer operator-side fixes.",
+      resolver: "json_path_extract",
+      config: {
+        type: "json_path_extract",
+        json: "{{read_pending_content}}",
+        path: "base_sha",
+      },
+      outputShapes: ["json_extracted_value"],
+    },
+    {
       id: "evaluate_pair",
       description:
         "Dispatch vessel_mitosis_evaluate against the live traces stream. Returns " +
@@ -143,6 +166,7 @@ export const MITOSIS_TICK_TEMPLATE: ActivityTemplate = {
         base_version_id: "{{extract_base_version_text}}",
         mitosis_version_id: "{{extract_mitosis_version_text}}",
         mitosis_root: "{{extract_mitosis_root_text}}",
+        staged_base_sha: "{{extract_base_sha_text}}",
         evaluation_evidence: "{{evaluate_pair_content}}",
         dry_run: false,
       },

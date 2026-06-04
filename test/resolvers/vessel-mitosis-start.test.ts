@@ -233,7 +233,7 @@ WantedBy=multi-user.target
     };
 
     expect(body.base_unit_merged).toBe(true);
-    expect(body.mitosis_resolver_version).toBe("v0.2");
+    expect(body.mitosis_resolver_version).toBe("v0.3");
 
     const unit = await readFile(body.systemd_unit_path, "utf8");
     // Memory caps preserved (the key v0.2 fix).

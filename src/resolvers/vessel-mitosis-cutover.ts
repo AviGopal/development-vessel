@@ -1,6 +1,8 @@
 import { resolve, join, dirname } from "path";
 import { rename, mkdir, stat, unlink, readFile, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import type { ResolverResult } from "./types.js";
+import { resolveSubstrateGapWrite } from "./substrate-gap.js";
 
 /**
  * vessel_mitosis_cutover — promotes a mitosis track to the canonical position
@@ -38,6 +40,19 @@ export interface VesselMitosisCutoverPointer {
     mitosis_success_rate: number;
     cited_trace_ids: string[];
   };
+  /**
+   * Freshness gate (Stage B.2 2026-06-03): SHA-256(12) hex of the live
+   * `<base_root>/src/index.ts` at the time this mitosis was staged. The
+   * cutover resolver re-hashes the current live source and refuses if it
+   * differs — preventing a stale draft from silently regressing newer
+   * operator-side fixes. When omitted, the cutover refuses with a
+   * substrateGap citing `mitosis_freshness_violation` (category=other,
+   * reason=missing_base_sha). The gap cites the architectural principle
+   * `resilient_against_unintended_changes`.
+   */
+  staged_base_sha?: string;
+  /** Allow operator to override the freshness-check file (defaults to <baseRoot>/src/index.ts). */
+  freshness_check_path?: string;
   dry_run?: boolean;
 }
 
@@ -143,6 +158,94 @@ export async function resolveVesselMitosisCutover(
   }
   if (!(await pathExists(mitosisRoot))) {
     return structuredError(`mitosis_root not found: ${mitosisRoot}`);
+  }
+
+  // ---- Mitosis freshness gate (Stage B.2 2026-06-03) ----
+  // Refuse cutover if the live source has drifted since the mitosis was
+  // staged. Emits a substrateGap citing
+  // `resilient_against_unintended_changes` and returns structuredError.
+  // The gap is the substrate's idiomatic expression of the refusal —
+  // cite-evidence + 3-way base check + emit-trace rather than silent
+  // cutover or git-style merge tooling.
+  const freshnessCheckPath = pointer.freshness_check_path
+    ? resolve(pointer.freshness_check_path)
+    : join(baseRoot, "src", "index.ts");
+  let currentLiveSha: string | null = null;
+  try {
+    if (await pathExists(freshnessCheckPath)) {
+      const liveContent = await readFile(freshnessCheckPath);
+      currentLiveSha = createHash("sha256").update(liveContent).digest("hex").slice(0, 12);
+    }
+  } catch (err) {
+    currentLiveSha = `<unreadable: ${(err as Error).message.slice(0, 60)}>`;
+  }
+  const stagedBaseSha = pointer.staged_base_sha;
+  const freshnessOK =
+    !!stagedBaseSha &&
+    !!currentLiveSha &&
+    !currentLiveSha.startsWith("<") &&
+    stagedBaseSha === currentLiveSha;
+  if (!freshnessOK) {
+    const reason = !stagedBaseSha
+      ? "missing_base_sha"
+      : !currentLiveSha
+        ? "live_source_unreadable"
+        : "base_sha_mismatch";
+    const gapId = `mitosis_freshness_violation:${vessel_name}:${mitosis_version_id}`;
+    const summary =
+      `Mitosis ${mitosis_version_id} for ${vessel_name} refused cutover: ${reason}. ` +
+      `staged_base_sha=${stagedBaseSha ?? "<missing>"}, current_live_sha=${currentLiveSha ?? "<absent>"}. ` +
+      `Live source has changed since this mitosis was drafted (or was never recorded); ` +
+      `re-derive against current. Cites principle: resilient_against_unintended_changes.`;
+    try {
+      await resolveSubstrateGapWrite({
+        type: "substrateGap_write",
+        gap: {
+          id: gapId,
+          category: "other",
+          source: "substrate_detected",
+          summary,
+          detected_at: new Date().toISOString(),
+          status: "open",
+          classification_metadata: {
+            kind: "mitosis_freshness_violation",
+            vessel_name,
+            mitosis_version_id,
+            base_version_id,
+            staged_base_sha: stagedBaseSha ?? null,
+            current_live_sha: currentLiveSha,
+            freshness_check_path: freshnessCheckPath,
+            reason,
+            cite_principle: "resilient_against_unintended_changes",
+            suggested_remediation:
+              "Drop stale mitosis or re-stage from current base. " +
+              "If this is the first observation of the principle, the operator may seed " +
+              "the gap-closing pipeline; otherwise the next scaffold-mitosis-track will " +
+              "produce a fresh draft.",
+          },
+        },
+      });
+    } catch (err) {
+      // Best-effort: a gap-write failure must not mask the refusal itself.
+      console.warn(
+        `[vessel_mitosis_cutover] substrateGap_write failed during freshness refusal: ${(err as Error).message}`,
+      );
+    }
+    return {
+      shape: "structuredError",
+      body: {
+        resolver: "vessel_mitosis_cutover",
+        detail: `refusing cutover: mitosis_freshness_violation (${reason})`,
+        kind: "mitosis_freshness_violation",
+        vessel_name,
+        mitosis_version_id,
+        staged_base_sha: stagedBaseSha ?? null,
+        current_live_sha: currentLiveSha,
+        freshness_check_path: freshnessCheckPath,
+        cite_principle: "resilient_against_unintended_changes",
+        gap_id: gapId,
+      },
+    };
   }
 
   const baseUnitName = pointer.base_unit_name ?? `${vessel_name}.service`;

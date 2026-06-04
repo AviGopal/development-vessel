@@ -49,6 +49,12 @@ export interface VesselMitosisCutoverPointer {
     base_success_rate: number;
     mitosis_success_rate: number;
     cited_trace_ids: string[];
+    /**
+     * Names of static checks (lint, tests) that passed on the
+     * static-evaluation FAVORABLE path. Accepted as cited evidence in lieu
+     * of runtime traces when present (2026-06-04 cutover policy fix).
+     */
+    cited_check_names?: string[];
   };
   /**
    * Freshness gate (Stage B.2 2026-06-03): SHA-256(12) hex of the live
@@ -300,13 +306,17 @@ export async function resolveVesselMitosisCutover(
       { verdict: evaluation_evidence.verdict, evaluation_evidence },
     );
   }
-  if (
-    !Array.isArray(evaluation_evidence.cited_trace_ids) ||
-    evaluation_evidence.cited_trace_ids.length === 0
-  ) {
+  const traceCount = Array.isArray(evaluation_evidence.cited_trace_ids)
+    ? evaluation_evidence.cited_trace_ids.length
+    : 0;
+  const checkCount = Array.isArray(evaluation_evidence.cited_check_names)
+    ? evaluation_evidence.cited_check_names.length
+    : 0;
+  if (traceCount === 0 && checkCount === 0) {
     return softRefuse(
-      "no cited traces in evaluation_evidence — substrate has no runtime " +
-        "evidence yet for the mitosis pair",
+      "no cited evidence in evaluation_evidence — neither runtime traces " +
+        "(cited_trace_ids) nor static checks (cited_check_names) were " +
+        "provided for the mitosis pair",
       { verdict: evaluation_evidence.verdict },
     );
   }
@@ -616,7 +626,8 @@ export async function resolveVesselMitosisCutover(
         verdict: evaluation_evidence.verdict,
         base_success_rate: evaluation_evidence.base_success_rate,
         mitosis_success_rate: evaluation_evidence.mitosis_success_rate,
-        cited_trace_ids: evaluation_evidence.cited_trace_ids.slice(0, 10),
+        cited_trace_ids: (evaluation_evidence.cited_trace_ids ?? []).slice(0, 10),
+        cited_check_names: (evaluation_evidence.cited_check_names ?? []).slice(0, 10),
       },
       completed_at: new Date().toISOString(),
     },
@@ -949,7 +960,8 @@ async function runGitAwareCutover(args: GitCutoverArgs): Promise<ResolverResult>
         verdict: evaluationEvidence.verdict,
         base_success_rate: evaluationEvidence.base_success_rate,
         mitosis_success_rate: evaluationEvidence.mitosis_success_rate,
-        cited_trace_ids: evaluationEvidence.cited_trace_ids.slice(0, 10),
+        cited_trace_ids: (evaluationEvidence.cited_trace_ids ?? []).slice(0, 10),
+        cited_check_names: (evaluationEvidence.cited_check_names ?? []).slice(0, 10),
       },
     },
   };
@@ -1048,7 +1060,8 @@ async function emitHostSyncIntent(args: HostSyncIntentArgs): Promise<ResolverRes
       verdict: args.evaluationEvidence.verdict,
       base_success_rate: args.evaluationEvidence.base_success_rate,
       mitosis_success_rate: args.evaluationEvidence.mitosis_success_rate,
-      cited_trace_ids: args.evaluationEvidence.cited_trace_ids.slice(0, 10),
+      cited_trace_ids: (args.evaluationEvidence.cited_trace_ids ?? []).slice(0, 10),
+      cited_check_names: (args.evaluationEvidence.cited_check_names ?? []).slice(0, 10),
     },
   };
   return { shape: "cutoverApplied", body };

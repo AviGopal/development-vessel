@@ -1,5 +1,8 @@
 import { describe, it, expect, afterEach } from "bun:test";
 import { resolveVesselMitosisEvaluate } from "../../src/resolvers/vessel-mitosis-evaluate.js";
+import { mkdtemp, mkdir, writeFile, rm, chmod } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 const originalFetch = globalThis.fetch;
 afterEach(() => {
@@ -139,6 +142,45 @@ describe("vessel_mitosis_evaluate", () => {
     const body = r.body as { verdict: string };
     // mitosis_root absent → static eval falls through to trace path → INSUFFICIENT_DATA
     expect(body.verdict).toBe("INSUFFICIENT_DATA");
+  });
+
+  it("static eval: FAVORABLE response populates cited_check_names with passing-check names", async () => {
+    // Construct a tiny mitosis dir with a fake `bun` shim that exits 0 for
+    // every invocation. The static-eval path should reach the FAVORABLE
+    // branch and populate cited_check_names from the per-check names.
+    const tmpRoot = await mkdtemp(join(tmpdir(), "mitosis-eval-"));
+    try {
+      const mitosisRoot = join(tmpRoot, "mitosis");
+      await mkdir(mitosisRoot, { recursive: true });
+      await writeFile(
+        join(mitosisRoot, "package.json"),
+        JSON.stringify({ name: "fake", scripts: { lint: "true" } }),
+      );
+      const bunShim = join(tmpRoot, "bun-shim.sh");
+      await writeFile(bunShim, "#!/bin/sh\nexit 0\n");
+      await chmod(bunShim, 0o755);
+
+      const r = await resolveVesselMitosisEvaluate({
+        type: "vessel_mitosis_evaluate",
+        base_version_id: "v1",
+        mitosis_version_id: "mitosis-X",
+        mitosis_root: mitosisRoot,
+        bun_cmd: bunShim,
+      });
+      const body = r.body as {
+        verdict: string;
+        cited_check_names?: string[];
+        verdict_reason?: string;
+      };
+      expect(body.verdict).toBe("FAVORABLE");
+      expect(body.verdict_reason).toBe("static_checks_pass");
+      expect(Array.isArray(body.cited_check_names)).toBe(true);
+      expect((body.cited_check_names ?? []).length).toBeGreaterThan(0);
+      // Both lint and tests run by default → at least 2 named checks.
+      expect((body.cited_check_names ?? []).some((n) => n.includes("lint"))).toBe(true);
+    } finally {
+      await rm(tmpRoot, { recursive: true, force: true });
+    }
   });
 
   it("static eval: returns FAVORABLE when static_check_runner=skip via trace-only path", async () => {

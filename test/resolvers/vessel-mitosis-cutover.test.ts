@@ -72,8 +72,11 @@ describe("vessel_mitosis_cutover", () => {
       mitosis_root: "/tmp/x",
       evaluation_evidence: { ...FAVORABLE_EVIDENCE, verdict: "NEUTRAL" },
     });
-    expect(r.shape).toBe("structuredError");
-    expect((r.body as { detail: string }).detail).toContain("FAVORABLE");
+    // softRefuse path → vesselMitosisCutoverResult with refused:true.
+    expect(r.shape).toBe("vesselMitosisCutoverResult");
+    const body = r.body as { refused: boolean; refusal_reason: string };
+    expect(body.refused).toBe(true);
+    expect(body.refusal_reason).toContain("FAVORABLE");
   });
 
   it("refuses cutover on protected vessel", async () => {
@@ -224,7 +227,7 @@ describe("vessel_mitosis_cutover", () => {
     expect(body.detail).toContain("base_sha_mismatch");
   });
 
-  it("requires non-empty cited_trace_ids", async () => {
+  it("soft-refuses when neither cited_trace_ids nor cited_check_names are provided", async () => {
     const r = await resolveVesselMitosisCutover({
       type: "vessel_mitosis_cutover",
       vessel_name: "development-vessel",
@@ -233,8 +236,40 @@ describe("vessel_mitosis_cutover", () => {
       mitosis_root: "/tmp/x",
       evaluation_evidence: { ...FAVORABLE_EVIDENCE, cited_trace_ids: [] },
     });
-    expect(r.shape).toBe("structuredError");
-    expect((r.body as { detail: string }).detail).toContain("cited_trace_ids");
+    expect(r.shape).toBe("vesselMitosisCutoverResult");
+    const body = r.body as { refused: boolean; refusal_reason: string };
+    expect(body.refused).toBe(true);
+    expect(body.refusal_reason).toContain("no cited evidence");
+    expect(body.refusal_reason).toContain("cited_check_names");
+  });
+
+  it("proceeds past evidence gate when cited_check_names is non-empty (static-eval path)", async () => {
+    // Provide cited_check_names (no traces) — the evidence gate should NOT
+    // soft-refuse. The cutover may still fail downstream (missing
+    // staged_base_sha, etc.), but the FAVORABLE+static-checks evidence is
+    // sufficient to pass the policy gate at line 303.
+    const r = await resolveVesselMitosisCutover({
+      type: "vessel_mitosis_cutover",
+      vessel_name: "development-vessel",
+      base_version_id: "v1",
+      mitosis_version_id: "mitosis-X",
+      mitosis_root: "/tmp/x",
+      evaluation_evidence: {
+        ...FAVORABLE_EVIDENCE,
+        cited_trace_ids: [],
+        cited_check_names: ["bun-run-lint", "bun-test"],
+      },
+    });
+    // We DON'T expect this specific call to produce cutoverApplied — the
+    // tmp paths and missing staged_base_sha will still fail downstream
+    // checks. The assertion is that we did NOT soft-refuse with the
+    // "no cited evidence" reason.
+    if (r.shape === "vesselMitosisCutoverResult") {
+      const body = r.body as { refused?: boolean; refusal_reason?: string };
+      if (body.refused) {
+        expect(body.refusal_reason ?? "").not.toContain("no cited evidence");
+      }
+    }
   });
 
   // ---- Git-aware cutover (2026-06-04) ----

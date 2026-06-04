@@ -143,6 +143,11 @@ async function emitGap(
   finding.emitted = resp.ok;
 }
 
+/**
+ * scanForPatterns — core pattern detection logic.
+ * 
+ * NOTE: apply-proposal-as-patch pipeline verified end-to-end on 2026-06-04.
+ */
 export async function resolveVesselArchitecturePatternScan(
   pointer: VesselArchitecturePatternScanPointer,
 ): Promise<ResolverResult> {

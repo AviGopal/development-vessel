@@ -240,7 +240,13 @@ export async function resolveApplyProposalAsPatch(pointer: ApplyProposalAsPatchP
     break;
   }
   if (!chosen) {
-    return { shape: "mitosisStaged", body: { dispatched: null, reason: "no eligible proposals", total_proposals: entries.length, skipped: skipped.slice(0, 20) } };
+    // No work done = not a success. Boredom Thompson posteriors must record
+    // this as a no-op outcome so momentum decays and other goals (drafter,
+    // mitosis-tick) get score, instead of looping on apply-proposal because
+    // it always returns success regardless of whether it actually staged
+    // anything. structuredError makes the dispatcher record failure_count++
+    // without polluting α with empty wins.
+    return structuredError("no eligible proposals", { total_proposals: entries.length, skipped: skipped.slice(0, 20) });
   }
   const targetFile = chosen.targetFile;
   const derived = deriveVesselFromPath(targetFile);

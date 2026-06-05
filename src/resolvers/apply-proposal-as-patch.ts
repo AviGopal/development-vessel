@@ -22,6 +22,10 @@
  *
  * Side effects are idempotent at the (proposal_id) granularity — re-running
  * with the same newest proposal is a no-op once its mitosis dir exists.
+ *
+ * Observability: the resolver returns a `skipped` array in its result when no eligible proposal
+ * is found, listing each candidate's reason (already_applied_sentinel, already_staged, parse_failed,
+ * no_required_code_modifications, read_failed) so operators can audit drain progress.
  */
 
 import { resolve, join, dirname } from "node:path";

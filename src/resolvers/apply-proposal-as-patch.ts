@@ -177,14 +177,15 @@ export async function resolveApplyProposalAsPatch(pointer: ApplyProposalAsPatchP
   }
 
   // 6. Stage the mitosis dir and write the patched file.
-  // Encode the proposal scenario_id into the dir name so the dedup check at
-  // line 124 (`mitosisDirs.some((d) => d.includes(scenarioId.slice(0, 32)))`)
-  // can actually identify which proposals already have a staged mitosis.
-  // Without the scenario_id in the dir name the dedup always returns false
-  // and apply keeps picking the same newest proposal in a tight loop,
-  // producing identical patches → cutover commits the first one then every
-  // subsequent commit fails with "nothing to commit" (no diff vs HEAD).
-  const mitosisRoot = join(vesselsRoot, `${vessel}-mitosis-${chosen.scenarioId.slice(0, 32)}-${stamp}`);
+  // Note: the dedup at line 124 was originally designed for a future where
+  // many proposals have required_code_modifications. Today the corpus has
+  // 1/52 such proposals; encoding scenario_id into the dir name (an earlier
+  // attempt this session) deadlocked the chain by skipping the only valid
+  // proposal after one staging. We rely on the mirror step in
+  // host-sync-poller to keep container source aligned with HEAD post-commit;
+  // each subsequent apply reads the post-commit content and the LLM emits a
+  // genuinely different patch (or git rejects "nothing to commit" cleanly).
+  const mitosisRoot = join(vesselsRoot, `${vessel}-mitosis-${stamp}`);
   const stagedFile = join(mitosisRoot, subPath);
   try {
     await mkdir(dirname(stagedFile), { recursive: true });

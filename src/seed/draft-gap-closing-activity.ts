@@ -1,3 +1,8 @@
+// NOTE: TASK 3 (analyze) requires that the LLM emit a JSON object whose required_code_modifications[]
+// entries each have a `file` field starting with `repos/` — apply-proposal-as-patch derives the target
+// vessel from that prefix via deriveVesselFromPath(). Proposals lacking this field are skipped with
+// reason="no_required_code_modifications".
+
 import type { ActivityTemplate } from "@avigopal/ias-executor-ts";
 
 const PROMPT_TEMPLATE = `You are helping build a self-improving activity system.

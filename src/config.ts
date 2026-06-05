@@ -330,6 +330,13 @@ export const config = {
       // loser_samples >= MIN_SAMPLES (10) AND winner_mean - loser_mean
       // >= MIN_DELTA (0.15). Parallel in shape to vessel_mitosis_cutover.
       "variant_promote",
+      // Substrate-detected novel-failure-mode discovery (2026-06-04).
+      // Computes per-trace nearest-principle cosine similarity via
+      // concept-db's dense search and flags clusters whose max similarity
+      // falls below threshold as orthogonal to current principle coverage.
+      // Closes meta-recursion: substrate detects what it wasn't taught to
+      // detect; drafter authors the missing principle on the next loop.
+      "vector_space_orthogonality_audit",
     ] as const,
     resolveEndpoint: "/v2/impulses/resolve",
     resolveRequestFormat: "pointer" as const,

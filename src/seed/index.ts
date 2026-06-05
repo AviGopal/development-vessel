@@ -78,6 +78,9 @@ import { GOAL_EXECUTION_WITH_RETRY_TEMPLATE } from "./goal-execution-with-retry.
 // source) but for template source — same variant-first repair discipline.
 import { TEMPLATE_MITOSIS_TICK_TEMPLATE } from "./template-mitosis-tick.js";
 import { TEMPLATE_PROMOTE_TICK_TEMPLATE } from "./template-promote-tick.js";
+// Vector-space orthogonality audit (2026-06-04): substrate-detected novel
+// failure modes via embedding orthogonality vs architectural principles.
+import { VECTOR_SPACE_ORTHOGONALITY_AUDIT_TICK_TEMPLATE } from "./vector-space-orthogonality-audit-tick.js";
 
 export { SHIP_CHANGE_TEMPLATE } from "./ship-change.js";
 export { BRANCH_HEALTH_TEMPLATE } from "./branch-health.js";
@@ -119,6 +122,7 @@ export { RECOVER_FROM_GOAL_FAILURE_TEMPLATE } from "./recover-from-goal-failure.
 export { GOAL_EXECUTION_WITH_RETRY_TEMPLATE } from "./goal-execution-with-retry.js";
 export { TEMPLATE_MITOSIS_TICK_TEMPLATE } from "./template-mitosis-tick.js";
 export { TEMPLATE_PROMOTE_TICK_TEMPLATE } from "./template-promote-tick.js";
+export { VECTOR_SPACE_ORTHOGONALITY_AUDIT_TICK_TEMPLATE } from "./vector-space-orthogonality-audit-tick.js";
 export { OBSERVE_ORTHOGONAL_PATTERNS_TEMPLATE } from "./observe-orthogonal-patterns.js";
 export { ENACT_ORTHOGONAL_DECISIONS_TEMPLATE } from "./enact-orthogonal-decisions.js";
 export { COMPLETE_VESSEL_SCAFFOLD_TEMPLATE } from "./complete-vessel-scaffold.js";
@@ -346,4 +350,12 @@ export const SEED_TEMPLATES: ActivityTemplate[] = [
   // now manages its own template lifecycle end-to-end (mint via
   // template-mitosis-tick, promote+retire via template-promote-tick).
   TEMPLATE_PROMOTE_TICK_TEMPLATE,
+  // Substrate-detected novel-failure-mode discovery (2026-06-04). Closes the
+  // meta-recursion gap: substrate scans failure traces for embeddings that are
+  // orthogonal (max cosine similarity < threshold) to every existing
+  // architectural_pattern_principle, clusters them, and emits substrateGap
+  // impulses (category=novel_failure_mode_detected) that feed the drafter on
+  // the next gap-drain cycle. Goal slot wired in boredom-vessel; cheap-tier
+  // (no LLM, HTTP-only).
+  VECTOR_SPACE_ORTHOGONALITY_AUDIT_TICK_TEMPLATE,
 ];

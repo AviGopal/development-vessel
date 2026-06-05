@@ -54,6 +54,47 @@ function stripFences(raw: string): string {
   return s;
 }
 
+/**
+ * Tolerant proposal parse (2026-06-04). LLM drafters commonly emit one or more
+ * JSON objects followed by markdown commentary, or in some cases two JSON
+ * objects concatenated (main proposal + addendum learning object). The legacy
+ * `JSON.parse(stripFences(content))` path threw on multi-object output because
+ * `lastBrace` picked the wrong closer. Walk the string brace-depth + string
+ * state aware, slice the FIRST complete top-level JSON object, parse just that.
+ *
+ * On failure (truncated body, no opening brace, etc) return null so the
+ * resolver falls back to its existing skip-with-reason behaviour.
+ */
+function parseFirstJsonObject(raw: string): unknown | null {
+  // Strip leading markdown fences but DO NOT collapse to first/lastBrace —
+  // we need the raw substring so brace tracking works on the real body.
+  const s = raw.replace(/^```(?:json)?\n?/i, "").trimStart();
+  const start = s.indexOf("{");
+  if (start < 0) return null;
+  let depth = 0;
+  let inStr = false;
+  let escape = false;
+  for (let i = start; i < s.length; i++) {
+    const ch = s[i]!;
+    if (escape) { escape = false; continue; }
+    if (inStr) {
+      if (ch === "\\") { escape = true; continue; }
+      if (ch === '"') inStr = false;
+      continue;
+    }
+    if (ch === '"') { inStr = true; continue; }
+    if (ch === "{") depth++;
+    else if (ch === "}") {
+      depth--;
+      if (depth === 0) {
+        const candidate = s.slice(start, i + 1);
+        try { return JSON.parse(candidate); } catch { return null; }
+      }
+    }
+  }
+  return null; // truncated — never balanced
+}
+
 async function exists(p: string): Promise<boolean> {
   try { await access(p); return true; } catch { return false; }
 }
@@ -140,9 +181,18 @@ export async function resolveApplyProposalAsPatch(pointer: ApplyProposalAsPatchP
     if (mitosisDirs.some((d) => d.includes(scenarioId.slice(0, 32)))) { skipped.push({ proposal: e.name, reason: "already_staged" }); continue; }
     let content: string;
     try { content = await readFile(e.path, "utf-8"); } catch { skipped.push({ proposal: e.name, reason: "read_failed" }); continue; }
-    let parsed: { required_code_modifications?: Array<{ file?: string }> };
-    try { parsed = JSON.parse(stripFences(content)); }
-    catch { skipped.push({ proposal: e.name, reason: "parse_failed" }); continue; }
+    // Tolerant parse — brace-aware walker handles LLM tails (multi-object,
+    // post-JSON markdown narrative). Legacy stripFences path remains as a
+    // fallback for proposals whose body is a single clean JSON object that
+    // the new walker rejects due to a stray opening brace in commentary.
+    let parsed: { required_code_modifications?: Array<{ file?: string }> } | null = null;
+    const tolerant = parseFirstJsonObject(content);
+    if (tolerant && typeof tolerant === "object") {
+      parsed = tolerant as { required_code_modifications?: Array<{ file?: string }> };
+    } else {
+      try { parsed = JSON.parse(stripFences(content)); } catch { parsed = null; }
+    }
+    if (!parsed) { skipped.push({ proposal: e.name, reason: "parse_failed" }); continue; }
     const mods = parsed.required_code_modifications ?? [];
     const targetFile = mods.find((m) => typeof m?.file === "string")?.file;
     if (!targetFile) { skipped.push({ proposal: e.name, reason: "no_required_code_modifications" }); continue; }

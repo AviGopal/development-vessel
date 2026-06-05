@@ -86,6 +86,27 @@ describe("apply_proposal_as_patch resolver", () => {
     expect((r.body as { dispatched: unknown }).dispatched).toBeNull();
   });
 
+  it("tolerates multi-object LLM output (proposal + addendum/narrative)", async () => {
+    // LLM commonly emits the proposal JSON, then markdown narrative, then a
+    // second JSON object (addendum / learning notes). The brace-aware walker
+    // must extract just the first balanced object.
+    const vesselDir = join(vesselsRoot, "demo-vessel", "src");
+    mkdirSync(vesselDir, { recursive: true });
+    writeFileSync(join(vesselDir, "y.ts"), "y");
+    const main = JSON.stringify({
+      scenario_id: "auto-multi",
+      required_code_modifications: [{ file: "repos/demo-vessel/src/y.ts", change: "x" }],
+    });
+    const tail = '\n```\n\n**Key Finding:** narrative here\n\n{"learning_note": "addendum"}\n';
+    writeFileSync(join(proposalsDir, "auto-multi-report.json"), main + tail);
+    const r = await resolveApplyProposalAsPatch({ type: "apply_proposal_as_patch", proposals_dir: proposalsDir, vessels_root: vesselsRoot, pending_path: pendingPath, dry_run: true });
+    expect(r.shape).toBe("mitosisStaged");
+    const body = r.body as { dry_run?: boolean; would_stage?: { vessel: string; target: string } };
+    expect(body.dry_run).toBe(true);
+    expect(body.would_stage?.vessel).toBe("demo-vessel");
+    expect(body.would_stage?.target).toBe("repos/demo-vessel/src/y.ts");
+  });
+
   it("tolerates markdown fences around the proposal JSON", async () => {
     const vesselDir = join(vesselsRoot, "demo-vessel", "src");
     mkdirSync(vesselDir, { recursive: true });

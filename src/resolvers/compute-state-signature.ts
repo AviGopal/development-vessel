@@ -350,28 +350,44 @@ export async function resolveComputeStateSignature(
   // is enough class-discrimination for state-conditioned learning. Phantom
   // and precondition counts are also bucketed so trace-by-trace fluctuation
   // doesn't shift signature classes.
+  // SIGNATURE COARSENING v2 (2026-06-04 Part B). Observation: even after v1
+  // bucketing each cycle still produced a fresh hex signature, so per-cell
+  // Thompson never accumulated ≥3 samples and goal-level state-conditioned
+  // selection degraded to round_robin on every dispatch. v2 drops fields
+  // that represent rate/count drift rather than operational state class:
+  //   - `total` (trace-count bucket): churned even within stable load class
+  //   - `top_failure_mode_type` (free string): differs per most-recent failure
+  //   - `tmpl`, `sa`, `prop`: monotone-increasing as substrate authors
+  //     templates; would shift signature class permanently after each batch
+  //   - `ph` / `pr`: phantom / precondition counters; noisy
+  //   - per-call UI ages: bucketed to operator-present (any signal) vs absent
+  // Retain only inputs that map to genuine operational classes:
+  //   - load tier (idle / light / busy)
+  //   - memory pressure tier
+  //   - success-rate tier (healing / oscillating / stalled)
+  //   - operator-presence binary (uie buckets to {0, ≥1})
+  //   - concept-prior bucket (no priors / few / many)
+  // Goal: across a stable substrate window, ≤5 distinct signatures.
+  const opPresenceTier =
+    bucketUie > 0 || uiAssertsPending > 0 || uiPanelsOpen > 0 ? 1 : 0;
   const hashPayload: Record<string, unknown> = {
     load: bucketLoad,
     mem: bucketMem,
     ...(bucketCgroup !== undefined ? { cmem: bucketCgroup } : {}),
-    total: bucketTotal,
     sr: bucketSr,
-    ph: bucketLog(recent.phantom_count),
-    pr: bucketLog(recent.precondition_count),
-    ...(recent.top_failure_mode_type ? { fm: recent.top_failure_mode_type } : {}),
-    tmpl: bucketTmpl,
-    prop: bucketProp,
-    sa: bucketSa,
-    w: windowMinutes,
-    // UI / interactor presence — bucketed; operator-active vs operator-quiet
-    // is the class distinction we want, not per-event count.
-    uie: bucketUie,
-    uia: bucketLog(uiAsksAgeSec),
-    uip: bucketLog(uiAssertsPending),
-    uio: bucketLog(uiPanelsOpen),
-    // Concept-prior count bucketed; ids deliberately excluded from hash.
+    // operator presence — collapsed to binary class
+    op: opPresenceTier,
+    // concept-prior bucket (no priors / few / many)
     lcc: Math.floor(loadedConceptCount / 5),
   };
+  // Reference unused buckets so lint stays clean — they're retained in the
+  // observability body even though they no longer affect the hash.
+  void bucketTotal;
+  void bucketTmpl;
+  void bucketProp;
+  void bucketSa;
+  void bucketUie;
+  void uiAsksAgeSec;
   // Suppress unused-vars warnings while preserving the original rounded
   // values in the response body below.
   void loadRounded; void memRounded; void cgroupRounded; void successRateRounded;

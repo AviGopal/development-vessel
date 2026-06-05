@@ -337,6 +337,18 @@ export const config = {
       // Closes meta-recursion: substrate detects what it wasn't taught to
       // detect; drafter authors the missing principle on the next loop.
       "vector_space_orthogonality_audit",
+      // Substrate-detected trace-recording correctness (2026-06-05).
+      // Walks recent traces and flags clusters where the tail output_impulse_shape
+      // contradicts the recorded status (e.g. tail=structuredError + status=success).
+      // Closes the meta-recursion that operator log-scraping closed manually for
+      // the apply-proposal-as-patch echo chamber (commit a0f9f593) — substrate
+      // now detects the same pattern via an activity and emits substrateGap.
+      "trace_outcome_validity_audit",
+      // Cross-check claimed Thompson α/β cells against empirical trace counts;
+      // emits substrateGap when posterior means drift > threshold. Catches stale
+      // posteriors that won't show up in trace_outcome_validity_audit because the
+      // per-trace outcome is correct but cumulative posterior diverged.
+      "posterior_consistency_audit",
     ] as const,
     resolveEndpoint: "/v2/impulses/resolve",
     resolveRequestFormat: "pointer" as const,

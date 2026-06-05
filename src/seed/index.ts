@@ -81,6 +81,11 @@ import { TEMPLATE_PROMOTE_TICK_TEMPLATE } from "./template-promote-tick.js";
 // Vector-space orthogonality audit (2026-06-04): substrate-detected novel
 // failure modes via embedding orthogonality vs architectural principles.
 import { VECTOR_SPACE_ORTHOGONALITY_AUDIT_TICK_TEMPLATE } from "./vector-space-orthogonality-audit-tick.js";
+// Trace-recording correctness audits (2026-06-05): substrate inspects its
+// own learning records for status/outcome inconsistencies + Thompson posterior
+// drift; emits substrateGap so the drafter authors the fix.
+import { TRACE_OUTCOME_VALIDITY_AUDIT_TICK_TEMPLATE } from "./trace-outcome-validity-audit-tick.js";
+import { POSTERIOR_CONSISTENCY_AUDIT_TICK_TEMPLATE } from "./posterior-consistency-audit-tick.js";
 
 export { SHIP_CHANGE_TEMPLATE } from "./ship-change.js";
 export { BRANCH_HEALTH_TEMPLATE } from "./branch-health.js";
@@ -123,6 +128,8 @@ export { GOAL_EXECUTION_WITH_RETRY_TEMPLATE } from "./goal-execution-with-retry.
 export { TEMPLATE_MITOSIS_TICK_TEMPLATE } from "./template-mitosis-tick.js";
 export { TEMPLATE_PROMOTE_TICK_TEMPLATE } from "./template-promote-tick.js";
 export { VECTOR_SPACE_ORTHOGONALITY_AUDIT_TICK_TEMPLATE } from "./vector-space-orthogonality-audit-tick.js";
+export { TRACE_OUTCOME_VALIDITY_AUDIT_TICK_TEMPLATE } from "./trace-outcome-validity-audit-tick.js";
+export { POSTERIOR_CONSISTENCY_AUDIT_TICK_TEMPLATE } from "./posterior-consistency-audit-tick.js";
 export { OBSERVE_ORTHOGONAL_PATTERNS_TEMPLATE } from "./observe-orthogonal-patterns.js";
 export { ENACT_ORTHOGONAL_DECISIONS_TEMPLATE } from "./enact-orthogonal-decisions.js";
 export { COMPLETE_VESSEL_SCAFFOLD_TEMPLATE } from "./complete-vessel-scaffold.js";
@@ -358,4 +365,13 @@ export const SEED_TEMPLATES: ActivityTemplate[] = [
   // the next gap-drain cycle. Goal slot wired in boredom-vessel; cheap-tier
   // (no LLM, HTTP-only).
   VECTOR_SPACE_ORTHOGONALITY_AUDIT_TICK_TEMPLATE,
+  // Substrate trace-recording correctness audits (2026-06-05). Closes a
+  // recursion gap surfaced by the apply-proposal-as-patch echo chamber
+  // (commit a0f9f593): substrate should detect status/outcome mismatches in
+  // its own learning records via activities, not via operator log-scraping.
+  // trace-outcome-validity inspects per-trace tail shape vs status; posterior-
+  // consistency cross-checks claimed α/β against empirical trace counts. Both
+  // cheap-tier (HTTP-only, no LLM).
+  TRACE_OUTCOME_VALIDITY_AUDIT_TICK_TEMPLATE,
+  POSTERIOR_CONSISTENCY_AUDIT_TICK_TEMPLATE,
 ];

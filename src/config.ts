@@ -349,6 +349,15 @@ export const config = {
       // posteriors that won't show up in trace_outcome_validity_audit because the
       // per-trace outcome is correct but cumulative posterior diverged.
       "posterior_consistency_audit",
+      // Meta-cognition bootstrap (2026-06-05): scans recent failure traces for
+      // "unknown shape" / "no resolver for type" / endpoint-404 signatures and
+      // aggregates them into capability gaps. Each gap names the missing
+      // capability, the closest existing resolver, and a proposed resolver_name
+      // + output_shape. Emits substrateGap (category=missing_capability) so the
+      // resolver_author seed template can consume the gap and author a new
+      // resolver. This is the substrate extending its own capability surface
+      // by observation of its own needs.
+      "capability_gap_audit",
     ] as const,
     resolveEndpoint: "/v2/impulses/resolve",
     resolveRequestFormat: "pointer" as const,

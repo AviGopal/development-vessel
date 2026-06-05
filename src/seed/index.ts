@@ -86,6 +86,12 @@ import { VECTOR_SPACE_ORTHOGONALITY_AUDIT_TICK_TEMPLATE } from "./vector-space-o
 // drift; emits substrateGap so the drafter authors the fix.
 import { TRACE_OUTCOME_VALIDITY_AUDIT_TICK_TEMPLATE } from "./trace-outcome-validity-audit-tick.js";
 import { POSTERIOR_CONSISTENCY_AUDIT_TICK_TEMPLATE } from "./posterior-consistency-audit-tick.js";
+// Meta-cognition bootstrap (2026-06-05): substrate detects its own missing
+// capabilities and authors new resolvers to fill them. capability-gap-audit-tick
+// is the detection half; resolver-author is the authoring half. After this
+// lands the substrate's capability surface grows by its own action.
+import { CAPABILITY_GAP_AUDIT_TICK_TEMPLATE } from "./capability-gap-audit-tick.js";
+import { RESOLVER_AUTHOR_TEMPLATE } from "./resolver-author.js";
 
 export { SHIP_CHANGE_TEMPLATE } from "./ship-change.js";
 export { BRANCH_HEALTH_TEMPLATE } from "./branch-health.js";
@@ -130,6 +136,8 @@ export { TEMPLATE_PROMOTE_TICK_TEMPLATE } from "./template-promote-tick.js";
 export { VECTOR_SPACE_ORTHOGONALITY_AUDIT_TICK_TEMPLATE } from "./vector-space-orthogonality-audit-tick.js";
 export { TRACE_OUTCOME_VALIDITY_AUDIT_TICK_TEMPLATE } from "./trace-outcome-validity-audit-tick.js";
 export { POSTERIOR_CONSISTENCY_AUDIT_TICK_TEMPLATE } from "./posterior-consistency-audit-tick.js";
+export { CAPABILITY_GAP_AUDIT_TICK_TEMPLATE } from "./capability-gap-audit-tick.js";
+export { RESOLVER_AUTHOR_TEMPLATE } from "./resolver-author.js";
 export { OBSERVE_ORTHOGONAL_PATTERNS_TEMPLATE } from "./observe-orthogonal-patterns.js";
 export { ENACT_ORTHOGONAL_DECISIONS_TEMPLATE } from "./enact-orthogonal-decisions.js";
 export { COMPLETE_VESSEL_SCAFFOLD_TEMPLATE } from "./complete-vessel-scaffold.js";
@@ -374,4 +382,13 @@ export const SEED_TEMPLATES: ActivityTemplate[] = [
   // cheap-tier (HTTP-only, no LLM).
   TRACE_OUTCOME_VALIDITY_AUDIT_TICK_TEMPLATE,
   POSTERIOR_CONSISTENCY_AUDIT_TICK_TEMPLATE,
+  // Meta-cognition bootstrap (2026-06-05). capability-gap-audit-tick scans
+  // failure traces for missing-capability signatures and emits substrateGap.
+  // resolver-author consumes those gaps and produces a 4-file new-resolver
+  // patch (resolver + test + config-patched + impulses-patched) via the
+  // apply_proposal_as_patch multifile branch. Boredom goal[29] dispatches the
+  // audit tick; the authoring template is dispatchable on demand or via a
+  // future drain-pending-capability-gaps activity.
+  CAPABILITY_GAP_AUDIT_TICK_TEMPLATE,
+  RESOLVER_AUTHOR_TEMPLATE,
 ];

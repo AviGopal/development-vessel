@@ -165,4 +165,42 @@ describe("apply_proposal_as_patch resolver", () => {
     expect(r.shape).toBe("mitosisStaged");
     expect((r.body as { dry_run: boolean }).dry_run).toBe(true);
   });
+
+  it("stages multi-file proposal via new_files[] without invoking LLM", async () => {
+    // Multi-file proposal: 4 files (new resolver + test + 2 patches expressed as
+    // full-content). All same-vessel.
+    const proposal = {
+      scenario_id: "auto-newresolver-1780700000000",
+      new_files: [
+        { path: "repos/demo-vessel/src/resolvers/git-status-with-dirty-files.ts", content: "export const NEW = 'resolver';\n" },
+        { path: "repos/demo-vessel/test/resolvers/git-status-with-dirty-files.test.ts", content: "// test\n" },
+        { path: "repos/demo-vessel/src/config-patched.ts", content: "// config\n" },
+        { path: "repos/demo-vessel/src/impulses-patched.ts", content: "// impulses\n" },
+      ],
+    };
+    writeFileSync(join(proposalsDir, "auto-newresolver-1780700000000-report.json"), JSON.stringify(proposal));
+    const r = await resolveApplyProposalAsPatch({ type: "apply_proposal_as_patch", proposals_dir: proposalsDir, vessels_root: vesselsRoot, pending_path: pendingPath });
+    expect(r.shape).toBe("mitosisStaged");
+    const body = r.body as { dispatched: string; multifile: boolean; staged_files: string[]; vessel_name: string };
+    expect(body.dispatched).toContain("auto-newresolver");
+    expect(body.multifile).toBe(true);
+    expect(body.staged_files.length).toBe(4);
+    expect(body.vessel_name).toBe("demo-vessel");
+    // Verify the staged files exist on disk.
+    expect(existsSync(pendingPath)).toBe(true);
+  });
+
+  it("rejects multi-file proposal that spans more than one vessel", async () => {
+    const proposal = {
+      scenario_id: "auto-multivessel-bad",
+      new_files: [
+        { path: "repos/vessel-a/src/x.ts", content: "x" },
+        { path: "repos/vessel-b/src/y.ts", content: "y" },
+      ],
+    };
+    writeFileSync(join(proposalsDir, "auto-multivessel-bad-report.json"), JSON.stringify(proposal));
+    const r = await resolveApplyProposalAsPatch({ type: "apply_proposal_as_patch", proposals_dir: proposalsDir, vessels_root: vesselsRoot, pending_path: pendingPath });
+    expect(r.shape).toBe("structuredError");
+    expect((r.body as { detail: string }).detail).toContain("single vessel");
+  });
 });

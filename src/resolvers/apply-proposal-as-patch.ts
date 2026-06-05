@@ -233,10 +233,15 @@ export async function resolveApplyProposalAsPatch(pointer: ApplyProposalAsPatchP
       try { parsed = JSON.parse(stripFences(content)); } catch { parsed = null; }
     }
     if (!parsed) { skipped.push({ proposal: e.name, reason: "parse_failed" }); continue; }
-    const mods = parsed.required_code_modifications ?? [];
+    // Multi-file proposal (2026-06-05): proposals carrying `new_files[]` skip
+    // the required_code_modifications check; the multi-file branch below picks
+    // them up and writes each file's full content into the staged mitosis dir.
+    const pFull = parsed as { required_code_modifications?: Array<{ file?: string }>; new_files?: Array<{ path?: string; content?: string }> };
+    const hasNewFiles = Array.isArray(pFull.new_files) && pFull.new_files.some((f) => typeof f?.path === "string" && typeof f?.content === "string");
+    const mods = pFull.required_code_modifications ?? [];
     const targetFile = mods.find((m) => typeof m?.file === "string")?.file;
-    if (!targetFile) { skipped.push({ proposal: e.name, reason: "no_required_code_modifications" }); continue; }
-    chosen = { name: e.name, path: e.path, scenarioId, content, targetFile };
+    if (!targetFile && !hasNewFiles) { skipped.push({ proposal: e.name, reason: "no_required_code_modifications" }); continue; }
+    chosen = { name: e.name, path: e.path, scenarioId, content, targetFile: targetFile ?? "" };
     break;
   }
   if (!chosen) {
@@ -248,6 +253,98 @@ export async function resolveApplyProposalAsPatch(pointer: ApplyProposalAsPatchP
     // without polluting α with empty wins.
     return structuredError("no eligible proposals", { total_proposals: entries.length, skipped: skipped.slice(0, 20) });
   }
+  // Multi-file proposals path (2026-06-05): if proposal carries `new_files[]`
+  // (each {path, content} starting with `repos/<vessel>/`), write all of them
+  // into the staged mitosis dir without LLM-patching. Same-vessel constraint:
+  // all new_files must share a vessel root. This is how the resolver-author
+  // chain ships new-resolver scaffolds; vessel-mitosis-cutover already accepts
+  // N staged_files via host-sync intent. The search/replace path below remains
+  // the canonical single-file flow.
+  let parsedFull: { new_files?: Array<{ path?: string; content?: string }>; required_code_modifications?: Array<{ file?: string }> } | null = null;
+  const tolerantFull = parseFirstJsonObject(chosen.content);
+  if (tolerantFull && typeof tolerantFull === "object") parsedFull = tolerantFull as typeof parsedFull;
+  const newFiles = (parsedFull?.new_files ?? []).filter(
+    (f): f is { path: string; content: string } =>
+      f != null && typeof f.path === "string" && typeof f.content === "string",
+  );
+  if (newFiles.length > 0) {
+    // Verify all share a vessel root and none escape the staging tree.
+    const vesselRoots = new Set<string>();
+    const fileEntries: Array<{ vessel: string; subPath: string; content: string; absSource: string }> = [];
+    for (const nf of newFiles) {
+      if (nf.path.includes("..") || nf.path.startsWith("/")) {
+        return structuredError(`new_files[] path escape: ${nf.path}`, { proposal: chosen.name });
+      }
+      const d = deriveVesselFromPath(nf.path);
+      if (!d) return structuredError(`new_files[] path cannot derive vessel: ${nf.path}`, { proposal: chosen.name });
+      vesselRoots.add(d.vessel);
+      fileEntries.push({ vessel: d.vessel, subPath: d.subPath, content: nf.content, absSource: nf.path });
+    }
+    if (vesselRoots.size !== 1) {
+      return structuredError(`new_files[] must target a single vessel; got: ${[...vesselRoots].join(",")}`, { proposal: chosen.name });
+    }
+    const vesselOnly = [...vesselRoots][0]!;
+    if (dryRun) {
+      return {
+        shape: "mitosisStaged",
+        body: {
+          dispatched: null,
+          dry_run: true,
+          would_stage: {
+            proposal: chosen.name,
+            vessel: vesselOnly,
+            file_count: fileEntries.length,
+            files: fileEntries.map((e) => e.absSource),
+          },
+          multifile: true,
+        },
+      };
+    }
+    const mitosisRoot = join(vesselsRoot, `${vesselOnly}-mitosis-${stamp}`);
+    const stagedFiles: string[] = [];
+    for (const e of fileEntries) {
+      const stagedFile = join(mitosisRoot, e.subPath);
+      try {
+        await mkdir(dirname(stagedFile), { recursive: true });
+        await writeFile(stagedFile, e.content);
+        stagedFiles.push(e.subPath);
+      } catch (err) {
+        return structuredError(`stage write failed: ${(err as Error).message}`, { staged_file: stagedFile });
+      }
+    }
+    const versionId = `mitosis-${stamp}`;
+    const pendingBody = {
+      vessel_name: vesselOnly,
+      base_version_id: "v1",
+      mitosis_version_id: versionId,
+      mitosis_root: mitosisRoot,
+      staged_at: new Date().toISOString(),
+      authored_by: "apply_proposal_as_patch:multifile",
+      proposal: chosen.name,
+      staged_files: stagedFiles,
+      multifile: true,
+    };
+    try { await writeFile(pendingPath, JSON.stringify(pendingBody, null, 2)); }
+    catch (err) { return structuredError(`pending write failed: ${(err as Error).message}`); }
+    try {
+      await writeFile(`${proposalsDir}/.applied/${chosen.name}`,
+        JSON.stringify({ staged_at: pendingBody.staged_at, mitosis_version_id: versionId, multifile: true, file_count: stagedFiles.length }, null, 2));
+    } catch { /* tolerant */ }
+    return {
+      shape: "mitosisStaged",
+      body: {
+        dispatched: chosen.name,
+        vessel_name: vesselOnly,
+        mitosis_root: mitosisRoot,
+        mitosis_version_id: versionId,
+        staged_files: stagedFiles,
+        pending_path: pendingPath,
+        multifile: true,
+        completed_at: new Date().toISOString(),
+      },
+    };
+  }
+
   const targetFile = chosen.targetFile;
   const derived = deriveVesselFromPath(targetFile);
   if (!derived) return structuredError(`cannot derive vessel from path: ${targetFile}`, { proposal: chosen.name });

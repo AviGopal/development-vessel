@@ -85,6 +85,7 @@ import { resolveVariantPromote } from "../resolvers/variant-promote.js";
 import { resolveVectorSpaceOrthogonalityAudit } from "../resolvers/vector-space-orthogonality-audit.js";
 import { resolveTraceOutcomeValidityAudit } from "../resolvers/trace-outcome-validity-audit.js";
 import { resolvePosteriorConsistencyAudit } from "../resolvers/posterior-consistency-audit.js";
+import { resolveCapabilityGapAudit } from "../resolvers/capability-gap-audit.js";
 import type { ResolverResult } from "../resolvers/types.js";
 
 type AnyPointer = { type: string } & Record<string, unknown>;
@@ -291,6 +292,10 @@ export async function resolveDispatch(pointer: AnyPointer): Promise<ResolverResu
     case "posterior_consistency_audit":
       return resolvePosteriorConsistencyAudit(
         p as Parameters<typeof resolvePosteriorConsistencyAudit>[0],
+      );
+    case "capability_gap_audit":
+      return resolveCapabilityGapAudit(
+        p as Parameters<typeof resolveCapabilityGapAudit>[0],
       );
     default:
       throw new Error(`unknown shape: ${pointer.type}`);

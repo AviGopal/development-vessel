@@ -92,6 +92,12 @@ import { resolveAppliedProposalSentinelObserver } from "../resolvers/applied-pro
 import { resolveMitosisPendingObserver } from "../resolvers/mitosis-pending-observer.js";
 import { resolveDispatchDroppedObserver } from "../resolvers/dispatch-dropped-observer.js";
 import { resolveLlmApiHealthObserver } from "../resolvers/llm-api-health-observer.js";
+import { resolveHostContainerSourceDriftObserver } from "../resolvers/host-container-source-drift-observer.js";
+import { resolveDiskSpaceObserver } from "../resolvers/disk-space-observer.js";
+import { resolveConceptDbHealthObserver } from "../resolvers/concept-db-health-observer.js";
+import { resolveDiscoveryVesselRegistryObserver } from "../resolvers/discovery-vessel-registry-observer.js";
+import { resolveSubstrateHeartbeatObserver } from "../resolvers/substrate-heartbeat-observer.js";
+import { resolveLlmQuotaObserver } from "../resolvers/llm-quota-observer.js";
 import type { ResolverResult } from "../resolvers/types.js";
 
 type AnyPointer = { type: string } & Record<string, unknown>;
@@ -326,6 +332,30 @@ export async function resolveDispatch(pointer: AnyPointer): Promise<ResolverResu
     case "llm_api_health_observer":
       return resolveLlmApiHealthObserver(
         p as Parameters<typeof resolveLlmApiHealthObserver>[0],
+      );
+    case "host_container_source_drift_observer":
+      return resolveHostContainerSourceDriftObserver(
+        p as Parameters<typeof resolveHostContainerSourceDriftObserver>[0],
+      );
+    case "disk_space_observer":
+      return resolveDiskSpaceObserver(
+        p as Parameters<typeof resolveDiskSpaceObserver>[0],
+      );
+    case "concept_db_health_observer":
+      return resolveConceptDbHealthObserver(
+        p as Parameters<typeof resolveConceptDbHealthObserver>[0],
+      );
+    case "discovery_vessel_registry_observer":
+      return resolveDiscoveryVesselRegistryObserver(
+        p as Parameters<typeof resolveDiscoveryVesselRegistryObserver>[0],
+      );
+    case "substrate_heartbeat_observer":
+      return resolveSubstrateHeartbeatObserver(
+        p as Parameters<typeof resolveSubstrateHeartbeatObserver>[0],
+      );
+    case "llm_quota_observer":
+      return resolveLlmQuotaObserver(
+        p as Parameters<typeof resolveLlmQuotaObserver>[0],
       );
     default:
       throw new Error(`unknown shape: ${pointer.type}`);

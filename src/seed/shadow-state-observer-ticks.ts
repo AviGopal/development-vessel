@@ -166,6 +166,200 @@ export const DISPATCH_DROPPED_OBSERVER_TICK_TEMPLATE: ActivityTemplate = {
   ],
 };
 
+// ─── Round 2 (2026-06-05) ─────────────────────────────────────────────────
+// Six additional shadow-state observers closing the remaining round-1
+// impulse-coverage gaps. host-container-source-drift is the headline: makes
+// the dominant host-sync rejection cause (rejected_base_sha) substrate-
+// observable. The rest cover disk, concept-db, discovery-registry staleness,
+// substrate-heartbeat liveness, and LLM-quota signals from recent traces.
+
+export const HOST_CONTAINER_SOURCE_DRIFT_OBSERVER_TICK_TEMPLATE: ActivityTemplate = {
+  id: "development-vessel:host-container-source-drift-observer-tick",
+  name: "host-container-source-drift-observer-tick",
+  description:
+    "Deterministic single-resolver wrapper around host_container_source_drift_observer. " +
+    "Walks each substrate vessel's src/ tree in both container (/vessels/) and host " +
+    "(repos/) and emits hostContainerSourceDriftState with per-vessel drift counts. " +
+    "Makes the dominant host-sync rejection cause (rejected_base_sha) observable.",
+  inputShapes: [],
+  outputShapes: ["hostContainerSourceDriftState"],
+  tags: [
+    "intent:shadow_state_observation",
+    "horizon:meta",
+    "phase:detect",
+    "boredom_target_template",
+    "lift.autonomous.loop",
+    "light_dispatch_eligible",
+    "impulse_complete_base",
+  ],
+  variables: [],
+  tasks: [
+    {
+      id: "observe_host_container_source_drift",
+      description: "Invoke host_container_source_drift_observer.",
+      resolver: "host_container_source_drift_observer",
+      config: { type: "host_container_source_drift_observer" },
+      outputShapes: ["hostContainerSourceDriftState"],
+    },
+  ],
+};
+
+export const DISK_SPACE_OBSERVER_TICK_TEMPLATE: ActivityTemplate = {
+  id: "development-vessel:disk-space-observer-tick",
+  name: "disk-space-observer-tick",
+  description:
+    "Deterministic single-resolver wrapper around disk_space_observer. " +
+    "Runs df -k on /workspace, /vessels, / and emits diskSpaceState with per-mount " +
+    "used_pct and a green/yellow/red pressure level. Surfaces disk-pressure that " +
+    "would otherwise appear only as ENOSPC noise in downstream failure traces.",
+  inputShapes: [],
+  outputShapes: ["diskSpaceState"],
+  tags: [
+    "intent:shadow_state_observation",
+    "horizon:meta",
+    "phase:detect",
+    "boredom_target_template",
+    "lift.autonomous.loop",
+    "light_dispatch_eligible",
+    "impulse_complete_base",
+  ],
+  variables: [],
+  tasks: [
+    {
+      id: "observe_disk_space",
+      description: "Invoke disk_space_observer.",
+      resolver: "disk_space_observer",
+      config: { type: "disk_space_observer" },
+      outputShapes: ["diskSpaceState"],
+    },
+  ],
+};
+
+export const CONCEPT_DB_HEALTH_OBSERVER_TICK_TEMPLATE: ActivityTemplate = {
+  id: "development-vessel:concept-db-health-observer-tick",
+  name: "concept-db-health-observer-tick",
+  description:
+    "Deterministic single-resolver wrapper around concept_db_health_observer. " +
+    "Probes concept-db /health (control plane) and /concepts/search?q=&limit=1 " +
+    "(data plane) and emits conceptDbHealth with reachability + roundtrip per plane. " +
+    "Distinguishes control-plane outage from data-plane wedge.",
+  inputShapes: [],
+  outputShapes: ["conceptDbHealth"],
+  tags: [
+    "intent:shadow_state_observation",
+    "horizon:meta",
+    "phase:detect",
+    "boredom_target_template",
+    "lift.autonomous.loop",
+    "light_dispatch_eligible",
+    "impulse_complete_base",
+  ],
+  variables: [],
+  tasks: [
+    {
+      id: "observe_concept_db_health",
+      description: "Invoke concept_db_health_observer.",
+      resolver: "concept_db_health_observer",
+      config: { type: "concept_db_health_observer" },
+      outputShapes: ["conceptDbHealth"],
+    },
+  ],
+};
+
+export const DISCOVERY_VESSEL_REGISTRY_OBSERVER_TICK_TEMPLATE: ActivityTemplate = {
+  id: "development-vessel:discovery-vessel-registry-observer-tick",
+  name: "discovery-vessel-registry-observer-tick",
+  description:
+    "Deterministic single-resolver wrapper around discovery_vessel_registry_observer. " +
+    "Queries discovery-vessel for the vesselRegistry impulse and emits " +
+    "discoveryRegistryState with per-vessel last-heartbeat age and a stale-count " +
+    "threshold. Detects silently-degraded vessels still listed as registered.",
+  inputShapes: [],
+  outputShapes: ["discoveryRegistryState"],
+  tags: [
+    "intent:shadow_state_observation",
+    "horizon:meta",
+    "phase:detect",
+    "boredom_target_template",
+    "lift.autonomous.loop",
+    "light_dispatch_eligible",
+    "impulse_complete_base",
+  ],
+  variables: [],
+  tasks: [
+    {
+      id: "observe_discovery_vessel_registry",
+      description: "Invoke discovery_vessel_registry_observer.",
+      resolver: "discovery_vessel_registry_observer",
+      config: { type: "discovery_vessel_registry_observer" },
+      outputShapes: ["discoveryRegistryState"],
+    },
+  ],
+};
+
+export const SUBSTRATE_HEARTBEAT_OBSERVER_TICK_TEMPLATE: ActivityTemplate = {
+  id: "development-vessel:substrate-heartbeat-observer-tick",
+  name: "substrate-heartbeat-observer-tick",
+  description:
+    "Deterministic single-resolver wrapper around substrate_heartbeat_observer. " +
+    "Reads /workspace/substrate-heartbeat.json mtime + contents and emits " +
+    "substrateHeartbeatState with age_seconds + stale flag. Coarse liveness " +
+    "signal: when the heartbeat goes stale, boredom is not running.",
+  inputShapes: [],
+  outputShapes: ["substrateHeartbeatState"],
+  tags: [
+    "intent:shadow_state_observation",
+    "horizon:meta",
+    "phase:detect",
+    "boredom_target_template",
+    "lift.autonomous.loop",
+    "light_dispatch_eligible",
+    "impulse_complete_base",
+  ],
+  variables: [],
+  tasks: [
+    {
+      id: "observe_substrate_heartbeat",
+      description: "Invoke substrate_heartbeat_observer.",
+      resolver: "substrate_heartbeat_observer",
+      config: { type: "substrate_heartbeat_observer" },
+      outputShapes: ["substrateHeartbeatState"],
+    },
+  ],
+};
+
+export const LLM_QUOTA_OBSERVER_TICK_TEMPLATE: ActivityTemplate = {
+  id: "development-vessel:llm-quota-observer-tick",
+  name: "llm-quota-observer-tick",
+  description:
+    "Deterministic single-resolver wrapper around llm_quota_observer. " +
+    "Scans recent execution traces for llm_completion tasks with 429 / rate-limit " +
+    "/ overloaded_error signatures and emits llmQuotaState with recent-window " +
+    "counts + estimated remaining quota percentage. Lets the substrate throttle " +
+    "expensive goals before they hit a wall.",
+  inputShapes: [],
+  outputShapes: ["llmQuotaState"],
+  tags: [
+    "intent:shadow_state_observation",
+    "horizon:meta",
+    "phase:detect",
+    "boredom_target_template",
+    "lift.autonomous.loop",
+    "light_dispatch_eligible",
+    "impulse_complete_base",
+  ],
+  variables: [],
+  tasks: [
+    {
+      id: "observe_llm_quota",
+      description: "Invoke llm_quota_observer.",
+      resolver: "llm_quota_observer",
+      config: { type: "llm_quota_observer" },
+      outputShapes: ["llmQuotaState"],
+    },
+  ],
+};
+
 export const LLM_API_HEALTH_OBSERVER_TICK_TEMPLATE: ActivityTemplate = {
   id: "development-vessel:llm-api-health-observer-tick",
   name: "llm-api-health-observer-tick",

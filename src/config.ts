@@ -373,6 +373,19 @@ export const config = {
       "mitosis_pending_observer",
       "dispatch_dropped_observer",
       "llm_api_health_observer",
+      // Round 2 (2026-06-05): six more shadow-state observers closing the
+      // remaining round-1 gaps. host_container_source_drift is the headline —
+      // it makes the dominant host-sync rejection cause (43% of intents,
+      // `rejected_base_sha`) substrate-observable for the first time. The
+      // rest cover disk pressure, concept-db reachability + data plane,
+      // discovery registry staleness, substrate heartbeat liveness, and
+      // LLM-provider quota signals derived from recent trace error patterns.
+      "host_container_source_drift_observer",
+      "disk_space_observer",
+      "concept_db_health_observer",
+      "discovery_vessel_registry_observer",
+      "substrate_heartbeat_observer",
+      "llm_quota_observer",
     ] as const,
     resolveEndpoint: "/v2/impulses/resolve",
     resolveRequestFormat: "pointer" as const,

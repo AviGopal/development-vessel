@@ -277,6 +277,18 @@ export async function resolveActivityCreateVariant(pointer: ActivityCreateVarian
       t["input_shapes"] = t["inputShapes"];
     }
   }
+  // Default tags + category for substrate-authored variants when LLM omits them.
+  // Activity-API requires AT LEAST ONE of tags (non-empty) or category, else 400.
+  // Substrate-authored variants frequently miss tags; injecting a sentinel tag
+  // keeps the variant-first repair loop unblocked without weakening the gate.
+  if (templateObj && typeof templateObj === "object") {
+    const t = templateObj as Record<string, unknown>;
+    const hasTags = Array.isArray(t["tags"]) && (t["tags"] as unknown[]).length > 0;
+    const hasCategory = typeof t["category"] === "string" && (t["category"] as string).length > 0;
+    if (!hasTags && !hasCategory) {
+      t["tags"] = ["substrate.variant.authored"];
+    }
+  }
   // Sanitize tags: replace hyphens with dots, drop non-alphanumeric/dot chars.
   if (templateObj && typeof templateObj === "object" && "tags" in templateObj) {
     const t = templateObj as Record<string, unknown>;

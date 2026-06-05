@@ -115,16 +115,22 @@ export const TEMPLATE_MITOSIS_TICK_TEMPLATE: ActivityTemplate = {
           "Parent template (currently underperforming per Thompson posterior):\n" +
           "{{fetch_source_content}}\n\n" +
           "This template's success rate is below 0.3 across 10+ executions. Author an IMPROVED " +
-          "variant template JSON. Constraints:\n" +
+          "variant template JSON. HARD requirements (activity-api rejects otherwise):\n" +
+          "- Top-level fields: id, name, description, input_shapes, output_shapes, tasks, tags.\n" +
+          "- tags MUST be a non-empty array of dot-separated strings (e.g. " +
+          "[\"substrate.variant\", \"variant.authored.template-mitosis\"]). Without tags or " +
+          "category, registration fails with 400.\n" +
+          "- description MUST be >= 40 chars.\n" +
           "- Preserve input_shapes and output_shapes exactly.\n" +
-          "- Preserve the template name; suffix the id with -v<timestamp> for uniqueness.\n" +
+          "- Preserve the template name; the id will be auto-suffixed with a timestamp.\n" +
           "- Address probable failure modes: missing input guards, brittle interpolation, " +
           "redundant LLM calls, untimed http_fetch, unbounded retries.\n" +
           "- Prefer deterministic resolvers (fs_read, http_fetch, json_path_extract) over LLM " +
           "where the transformation is mechanical.\n" +
           "- Every task description must be >=40 chars and non-trivial.\n" +
-          "- Each declared output_shape must be produced by at least one task.\n" +
-          "Output ONLY the new template JSON (no narration, no code fences).",
+          "- Each declared output_shape must be produced by at least one task " +
+          "(task.outputShapes must include it).\n" +
+          "Output ONLY the new template JSON object (no narration, no code fences, no commentary).",
         model: "anthropic/claude-haiku-4-5-20251001",
         max_tokens: 4000,
       },
@@ -140,7 +146,7 @@ export const TEMPLATE_MITOSIS_TICK_TEMPLATE: ActivityTemplate = {
       resolver: "activity_create_variant",
       config: {
         type: "activity_create_variant",
-        template: "{{author_variant_content}}",
+        template: "{{author_variant_text}}",
         parentTemplateId: "{{pick_weak_content}}",
         strip_id: true,
       },

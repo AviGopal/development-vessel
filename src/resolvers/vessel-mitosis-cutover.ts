@@ -1,3 +1,7 @@
+// vessel-mitosis-cutover: applies a staged mitosis dir over the live vessel root via atomic rename.
+// Refuses with a freshness-gate failure when the staged base_sha no longer matches the current
+// live source, preventing accidental overwrites of concurrent edits.
+
 import { resolve, join, dirname, relative, isAbsolute } from "path";
 import {
   rename,

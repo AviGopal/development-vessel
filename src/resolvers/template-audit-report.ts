@@ -25,6 +25,10 @@ export interface TemplateAuditReportPointer {
   minSamples?: number;
   /** Cap on weak entries emitted. Default 20. */
   emitCap?: number;
+  /** Minimum posterior-mean delta between winner and loser to count as dominant. Default 0.15. */
+  promoteMinDelta?: number;
+  /** Minimum samples on the winner to count as dominant. Default 10. */
+  promoteMinSamples?: number;
 }
 
 interface TemplateRow {
@@ -54,6 +58,8 @@ export async function resolveTemplateAuditReport(
   const weakThreshold = pointer.weakThreshold ?? 0.3;
   const minSamples = pointer.minSamples ?? 10;
   const emitCap = pointer.emitCap ?? 20;
+  const promoteMinDelta = pointer.promoteMinDelta ?? 0.15;
+  const promoteMinSamples = pointer.promoteMinSamples ?? 10;
 
   const url = `${METABOB_ENDPOINT}/v2/activities/templates?limit=${limit}`;
   const res = await fetch(url, {
@@ -89,6 +95,50 @@ export async function resolveTemplateAuditReport(
   candidates.sort((a, b) => a.posterior_mean - b.posterior_mean);
   const weak = candidates.filter((c) => c.posterior_mean < weakThreshold).slice(0, emitCap);
 
+  // Family grouping for strongest_families: strip trailing "-<digits>"
+  // (variant suffix from activity_create_variant: gap-closing:auto-XYZ-1780352106759).
+  const familyOf = (id: string): string => id.replace(/-\d{10,}$/, "");
+  const byFamily = new Map<string, Entry[]>();
+  for (const c of candidates) {
+    const fam = familyOf(c.template_id);
+    const arr = byFamily.get(fam) ?? [];
+    arr.push(c);
+    byFamily.set(fam, arr);
+  }
+  const strongest_families: Array<Record<string, unknown>> = [];
+  for (const [family_id, variants] of byFamily) {
+    if (variants.length < 2) continue;
+    const sorted = [...variants].sort((a, b) => b.posterior_mean - a.posterior_mean);
+    const winner = sorted[0]!;
+    const losers = sorted.slice(1);
+    if (winner.samples < promoteMinSamples) continue;
+    const topLoser = losers[0]!;
+    const delta = winner.posterior_mean - topLoser.posterior_mean;
+    if (delta < promoteMinDelta) continue;
+    strongest_families.push({
+      family_id,
+      winner_id: winner.template_id,
+      loser_id: topLoser.template_id,
+      winner_variant_id: winner.template_id,
+      loser_variant_ids: losers.map((l) => l.template_id),
+      evidence: {
+        winner_alpha: winner.alpha,
+        winner_beta: winner.beta,
+        winner_samples: winner.samples,
+        loser_alpha: topLoser.alpha,
+        loser_beta: topLoser.beta,
+        loser_samples: topLoser.samples,
+        reason: `winner ${winner.template_id} (mean=${winner.posterior_mean}) dominates loser ${topLoser.template_id} (mean=${topLoser.posterior_mean}) by ${Math.round(delta * 1000) / 1000} over ${winner.samples} winner samples`,
+        confidence_threshold: promoteMinDelta,
+      },
+    });
+  }
+  strongest_families.sort((a, b) => {
+    const av = (a.evidence as { winner_samples: number }).winner_samples;
+    const bv = (b.evidence as { winner_samples: number }).winner_samples;
+    return bv - av;
+  });
+
   return {
     shape: "templateAuditReport",
     body: {
@@ -97,6 +147,9 @@ export async function resolveTemplateAuditReport(
       weak_threshold: weakThreshold,
       min_samples: minSamples,
       weak_templates: weak,
+      strongest_families,
+      promote_min_delta: promoteMinDelta,
+      promote_min_samples: promoteMinSamples,
       generated_at: new Date().toISOString(),
     },
   };

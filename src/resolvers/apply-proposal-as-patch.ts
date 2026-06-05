@@ -30,7 +30,9 @@ import { createHash } from "node:crypto";
 import { DISCOVERY_ENDPOINT, METABOB_API_KEY } from "../config.js";
 import type { ResolverResult } from "./types.js";
 
-const LLM_OVERRIDE = process.env["LLM_COMPLETION_ENDPOINT"] ?? "";
+// Read at call time, not load time — tests stand up a Bun server per case and
+// set LLM_COMPLETION_ENDPOINT just before invoking the resolver.
+function llmOverride(): string { return process.env["LLM_COMPLETION_ENDPOINT"] ?? ""; }
 
 export interface ApplyProposalAsPatchPointer {
   type: "apply_proposal_as_patch";
@@ -95,6 +97,39 @@ function parseFirstJsonObject(raw: string): unknown | null {
   return null; // truncated — never balanced
 }
 
+/**
+ * Brace/bracket-aware walker that extracts the FIRST balanced top-level JSON
+ * array from an LLM tail. Mirrors `parseFirstJsonObject` but tracks `[`/`]`.
+ * Tolerates leading markdown fences and stray prose before the array.
+ */
+function parseFirstJsonArray(raw: string): unknown | null {
+  const s = raw.replace(/^```(?:json)?\n?/i, "").trimStart();
+  const start = s.indexOf("[");
+  if (start < 0) return null;
+  let depth = 0;
+  let inStr = false;
+  let escape = false;
+  for (let i = start; i < s.length; i++) {
+    const ch = s[i]!;
+    if (escape) { escape = false; continue; }
+    if (inStr) {
+      if (ch === "\\") { escape = true; continue; }
+      if (ch === '"') inStr = false;
+      continue;
+    }
+    if (ch === '"') { inStr = true; continue; }
+    if (ch === "[") depth++;
+    else if (ch === "]") {
+      depth--;
+      if (depth === 0) {
+        const candidate = s.slice(start, i + 1);
+        try { return JSON.parse(candidate); } catch { return null; }
+      }
+    }
+  }
+  return null;
+}
+
 async function exists(p: string): Promise<boolean> {
   try { await access(p); return true; } catch { return false; }
 }
@@ -109,7 +144,8 @@ function deriveVesselFromPath(filePath: string): { vessel: string; subPath: stri
 }
 
 async function findLlmEndpoint(): Promise<string | null> {
-  if (LLM_OVERRIDE) return LLM_OVERRIDE;
+  const override = llmOverride();
+  if (override) return override;
   try {
     for (const shape of ["llmCompletion", "llm_completion"]) {
       const r = await fetch(`${DISCOVERY_ENDPOINT}/resolve`, {
@@ -219,27 +255,83 @@ export async function resolveApplyProposalAsPatch(pointer: ApplyProposalAsPatchP
     return { shape: "mitosisStaged", body: { dispatched: null, dry_run: true, would_stage: { proposal: chosen.name, target: targetFile, vessel, base_sha: baseSha } } };
   }
 
-  // 5. LLM call to produce patched source.
+  // 5. LLM call — search/replace patch format.
+  //
+  // Background (2026-06-04): the previous "produce the full patched source"
+  // prompt produced byte-identical output to the input on both haiku-4-5 and
+  // sonnet-4-5 for real vessel files. The model defaulted to copying the
+  // input rather than applying the proposal. Switch to a structured
+  // search/replace format the LLM can produce reliably; we then apply the
+  // ops deterministically and reject ambiguous matches.
   const endpoint = await findLlmEndpoint();
   if (!endpoint) return structuredError("no llm_completion vessel found in discovery");
   const prompt =
-    `You are patching a source file based on a proposal analysis. Apply the changes described and output the COMPLETE patched file source, no fences, no prose. Preserve existing formatting/imports unless the proposal explicitly changes them.\n\n` +
-    `## Target file path\n${targetFile}\n\n## Proposal analysis (JSON)\n${chosen.content.slice(0, 8000)}\n\n## Live source (current contents)\n\`\`\`\n${liveSrc}\n\`\`\`\n\nOutput the full patched source for ${targetFile}. No commentary.`;
-  let patched: string;
+    `You are producing a PATCH for a source file based on a proposal. Output ONLY a JSON array of search/replace operations. No prose, no markdown fences, no commentary.\n\n` +
+    `## Output format\n\n` +
+    `\`\`\`\n[\n  {\n    "search": "<exact substring from the original file, INCLUDING surrounding context for unambiguous match — 1 to 3 lines above + below the change>",\n    "replace": "<the modified substring — same context lines preserved, with the change applied inside>"\n  }\n]\n\`\`\`\n\n` +
+    `## Rules (CRITICAL)\n` +
+    `1. Each \`search\` MUST be an EXACT substring of the original file (preserve whitespace, newlines, indentation precisely).\n` +
+    `2. Each \`search\` MUST appear EXACTLY ONCE in the original file. Include 1-3 lines of context above and below the change so the match is unique.\n` +
+    `3. For APPEND-ONLY operations (add content at end of file): \`search\` = the last 1-3 lines of the file exactly; \`replace\` = those same lines + your new content appended.\n` +
+    `4. For INSERTS at a specific location: \`search\` = a unique nearby anchor (1-3 lines); \`replace\` = that anchor + your new content placed before or after as the proposal specifies.\n` +
+    `5. Do NOT echo unchanged regions of the file. Only emit ops that actually change content.\n` +
+    `6. If your output produces a file IDENTICAL to the input, you have FAILED. Re-read the proposal description and identify what concrete substring change it requests.\n` +
+    `7. Output ONLY the JSON array. Nothing before, nothing after.\n\n` +
+    `## Target file path\n${targetFile}\n\n` +
+    `## Proposal (JSON)\n${chosen.content.slice(0, 8000)}\n\n` +
+    `## Live source (current contents)\n\`\`\`\n${liveSrc}\n\`\`\`\n\n` +
+    `Output the JSON array of search/replace ops now.`;
+  let ops: Array<{ search: string; replace: string }>;
+  let rawLlm = "";
   try {
     const res = await fetch(endpoint, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ type: "llm_completion", prompt, model: pointer.model ?? "anthropic/claude-haiku-4-5-20251001", max_tokens: pointer.max_tokens ?? 8000 }),
+      body: JSON.stringify({ type: "llm_completion", prompt, model: pointer.model ?? "anthropic/claude-sonnet-4-5-20250929", max_tokens: pointer.max_tokens ?? 8000 }),
       signal: AbortSignal.timeout(120_000),
     });
     if (!res.ok) return structuredError(`llm fetch ${res.status}: ${(await res.text()).slice(0, 200)}`);
     const j = await res.json() as { content?: string; data?: string; error?: string };
     if (j.error) return structuredError(`llm error: ${j.error}`);
-    patched = (j.content ?? j.data ?? "").replace(/^```(?:[a-z]+)?\n?/i, "").replace(/\n?```$/i, "");
-    if (!patched.trim()) return structuredError("llm returned empty content");
+    rawLlm = (j.content ?? j.data ?? "").trim();
+    if (!rawLlm) return structuredError("llm returned empty content");
+    const parsed = parseFirstJsonArray(rawLlm);
+    if (!parsed || !Array.isArray(parsed)) {
+      return structuredError("llm output not a JSON array", { raw_preview: rawLlm.slice(0, 200) });
+    }
+    ops = parsed.filter((o): o is { search: string; replace: string } =>
+      o && typeof o === "object" && typeof (o as { search?: unknown }).search === "string" && typeof (o as { replace?: unknown }).replace === "string");
+    if (ops.length === 0) return structuredError("llm returned no usable ops", { raw_preview: rawLlm.slice(0, 200) });
   } catch (err) {
     return structuredError(`llm call failed: ${(err as Error).message}`);
+  }
+
+  // Apply ops deterministically. Each search must match exactly once.
+  let patched = liveSrc;
+  const opLog: Array<{ idx: number; matches: number; applied: boolean }> = [];
+  for (let i = 0; i < ops.length; i++) {
+    const { search, replace } = ops[i]!;
+    if (search === replace) { opLog.push({ idx: i, matches: 0, applied: false }); continue; }
+    // Count occurrences (non-overlapping).
+    let count = 0;
+    let pos = 0;
+    while (pos < patched.length) {
+      const idx = patched.indexOf(search, pos);
+      if (idx < 0) break;
+      count++;
+      pos = idx + Math.max(1, search.length);
+    }
+    if (count !== 1) {
+      opLog.push({ idx: i, matches: count, applied: false });
+      return structuredError(`op ${i} search matched ${count}x, need exactly 1`, { op_log: opLog, raw_preview: rawLlm.slice(0, 300) });
+    }
+    patched = patched.replace(search, replace);
+    opLog.push({ idx: i, matches: 1, applied: true });
+  }
+  const beforeMd5 = createHash("md5").update(liveSrc).digest("hex");
+  const afterMd5 = createHash("md5").update(patched).digest("hex");
+  if (beforeMd5 === afterMd5) {
+    return structuredError("patched output identical to input — llm produced no-op ops", { op_log: opLog, raw_preview: rawLlm.slice(0, 300) });
   }
 
   // 6. Stage the mitosis dir and write the patched file.

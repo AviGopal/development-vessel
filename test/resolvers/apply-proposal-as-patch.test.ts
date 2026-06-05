@@ -107,6 +107,54 @@ describe("apply_proposal_as_patch resolver", () => {
     expect(body.would_stage?.target).toBe("repos/demo-vessel/src/y.ts");
   });
 
+  it("applies search/replace ops from the LLM and writes the patched mitosis file", async () => {
+    // Stage vessel + live source where the LLM's search will match exactly once.
+    const vesselDir = join(vesselsRoot, "demo-vessel", "src");
+    mkdirSync(vesselDir, { recursive: true });
+    const liveSrc = "export const VERSION = 'v1';\nexport const NAME = 'demo';\n";
+    writeFileSync(join(vesselDir, "z.ts"), liveSrc);
+    const proposal = { scenario_id: "auto-srops", required_code_modifications: [{ file: "repos/demo-vessel/src/z.ts", description: "append doc note" }] };
+    writeFileSync(join(proposalsDir, "auto-srops-report.json"), JSON.stringify(proposal));
+
+    // Mock the LLM endpoint by setting LLM_COMPLETION_ENDPOINT and standing up
+    // a one-shot Bun server that returns a search/replace op array.
+    const ops = [{ search: "export const NAME = 'demo';\n", replace: "export const NAME = 'demo';\n// Substrate doc note (2026-06-04): appended\n" }];
+    const server = Bun.serve({
+      port: 0,
+      fetch: async () => new Response(JSON.stringify({ content: JSON.stringify(ops) }), { headers: { "Content-Type": "application/json" } }),
+    });
+    process.env["LLM_COMPLETION_ENDPOINT"] = `http://127.0.0.1:${server.port}/resolve`;
+    try {
+      const r = await resolveApplyProposalAsPatch({ type: "apply_proposal_as_patch", proposals_dir: proposalsDir, vessels_root: vesselsRoot, pending_path: pendingPath });
+      expect(r.shape).toBe("mitosisStaged");
+      const body = r.body as { dispatched?: string; mitosis_root?: string };
+      expect(body.dispatched).toBe("auto-srops-report.json");
+      // Verify staged file contains the appended line and differs from input.
+      const stagedFile = join(body.mitosis_root!, "src/z.ts");
+      const staged = await Bun.file(stagedFile).text();
+      expect(staged).toContain("Substrate doc note (2026-06-04): appended");
+      expect(staged).not.toBe(liveSrc);
+    } finally {
+      server.stop();
+      delete process.env["LLM_COMPLETION_ENDPOINT"];
+    }
+  });
+
+  it("rejects when LLM ops produce a no-op output", async () => {
+    const vesselDir = join(vesselsRoot, "demo-vessel", "src");
+    mkdirSync(vesselDir, { recursive: true });
+    writeFileSync(join(vesselDir, "n.ts"), "const X = 1;\n");
+    writeFileSync(join(proposalsDir, "auto-noop-report.json"), JSON.stringify({ scenario_id: "auto-noop", required_code_modifications: [{ file: "repos/demo-vessel/src/n.ts" }] }));
+    const ops = [{ search: "const X = 1;\n", replace: "const X = 1;\n" }]; // search === replace
+    const server = Bun.serve({ port: 0, fetch: async () => new Response(JSON.stringify({ content: JSON.stringify(ops) })) });
+    process.env["LLM_COMPLETION_ENDPOINT"] = `http://127.0.0.1:${server.port}/resolve`;
+    try {
+      const r = await resolveApplyProposalAsPatch({ type: "apply_proposal_as_patch", proposals_dir: proposalsDir, vessels_root: vesselsRoot, pending_path: pendingPath });
+      expect(r.shape).toBe("structuredError");
+      expect((r.body as { detail: string }).detail).toContain("identical to input");
+    } finally { server.stop(); delete process.env["LLM_COMPLETION_ENDPOINT"]; }
+  });
+
   it("tolerates markdown fences around the proposal JSON", async () => {
     const vesselDir = join(vesselsRoot, "demo-vessel", "src");
     mkdirSync(vesselDir, { recursive: true });

@@ -227,6 +227,7 @@ export const MITOSIS_TICK_TEMPLATE: ActivityTemplate = {
       config: {
         type: "vessel_mitosis_cutover",
         vessel_name: "{{extract_vessel_name_content}}",
+        base_root: "/vessels/{{extract_vessel_name_content}}",
         base_version_id: "{{extract_base_version_content}}",
         mitosis_version_id: "{{extract_mitosis_version_content}}",
         mitosis_root: "{{extract_mitosis_root_content}}",

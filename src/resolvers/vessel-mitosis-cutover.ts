@@ -364,9 +364,21 @@ export async function resolveVesselMitosisCutover(
   // The gap is the substrate's idiomatic expression of the refusal —
   // cite-evidence + 3-way base check + emit-trace rather than silent
   // cutover or git-style merge tooling.
+  // Default freshness sentinel to the first staged file. apply-proposal-as-patch
+  // computes staged_base_sha by hashing the file it patches, not src/index.ts —
+  // so comparing against src/index.ts produces base_sha_mismatch on every
+  // mitosis whose target isn't src/index.ts. Hashing the same file apply
+  // hashed makes the freshness invariant ("the file we're about to overwrite
+  // hasn't drifted since staging") actually testable.
+  const stagedSentinel =
+    Array.isArray(pointer.staged_files) && pointer.staged_files.length > 0
+      ? pointer.staged_files[0]
+      : null;
   const freshnessCheckPath = pointer.freshness_check_path
     ? resolve(pointer.freshness_check_path)
-    : join(baseRoot, "src", "index.ts");
+    : stagedSentinel
+      ? join(baseRoot, stagedSentinel)
+      : join(baseRoot, "src", "index.ts");
   let currentLiveSha: string | null = null;
   try {
     if (await pathExists(freshnessCheckPath)) {

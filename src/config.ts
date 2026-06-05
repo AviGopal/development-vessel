@@ -358,6 +358,21 @@ export const config = {
       // resolver. This is the substrate extending its own capability surface
       // by observation of its own needs.
       "capability_gap_audit",
+      // Shadow-state observers (Part A, 2026-06-05). Promote out-of-band
+      // substrate state (systemd units, JSONL queues, sentinel dirs, staging
+      // pointer, BoundedBusSink drop log, LLM-resolver reachability) into
+      // shape-typed impulses so the orthogonality / validation audits can
+      // observe the same surface the operator does. Every state the
+      // correction loop must act on must be impulse-shaped — without these,
+      // failure traces carry symptoms but not root causes. Each observer is
+      // safe-degrading: empty file / missing dir / unreachable endpoint
+      // returns a well-formed impulse marking absence rather than throwing.
+      "systemd_unit_health_observer",
+      "mitosis_intent_queue_observer",
+      "applied_proposal_sentinel_observer",
+      "mitosis_pending_observer",
+      "dispatch_dropped_observer",
+      "llm_api_health_observer",
     ] as const,
     resolveEndpoint: "/v2/impulses/resolve",
     resolveRequestFormat: "pointer" as const,

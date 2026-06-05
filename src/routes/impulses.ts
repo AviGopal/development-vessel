@@ -86,6 +86,12 @@ import { resolveVectorSpaceOrthogonalityAudit } from "../resolvers/vector-space-
 import { resolveTraceOutcomeValidityAudit } from "../resolvers/trace-outcome-validity-audit.js";
 import { resolvePosteriorConsistencyAudit } from "../resolvers/posterior-consistency-audit.js";
 import { resolveCapabilityGapAudit } from "../resolvers/capability-gap-audit.js";
+import { resolveSystemdUnitHealthObserver } from "../resolvers/systemd-unit-health-observer.js";
+import { resolveMitosisIntentQueueObserver } from "../resolvers/mitosis-intent-queue-observer.js";
+import { resolveAppliedProposalSentinelObserver } from "../resolvers/applied-proposal-sentinel-observer.js";
+import { resolveMitosisPendingObserver } from "../resolvers/mitosis-pending-observer.js";
+import { resolveDispatchDroppedObserver } from "../resolvers/dispatch-dropped-observer.js";
+import { resolveLlmApiHealthObserver } from "../resolvers/llm-api-health-observer.js";
 import type { ResolverResult } from "../resolvers/types.js";
 
 type AnyPointer = { type: string } & Record<string, unknown>;
@@ -296,6 +302,30 @@ export async function resolveDispatch(pointer: AnyPointer): Promise<ResolverResu
     case "capability_gap_audit":
       return resolveCapabilityGapAudit(
         p as Parameters<typeof resolveCapabilityGapAudit>[0],
+      );
+    case "systemd_unit_health_observer":
+      return resolveSystemdUnitHealthObserver(
+        p as Parameters<typeof resolveSystemdUnitHealthObserver>[0],
+      );
+    case "mitosis_intent_queue_observer":
+      return resolveMitosisIntentQueueObserver(
+        p as Parameters<typeof resolveMitosisIntentQueueObserver>[0],
+      );
+    case "applied_proposal_sentinel_observer":
+      return resolveAppliedProposalSentinelObserver(
+        p as Parameters<typeof resolveAppliedProposalSentinelObserver>[0],
+      );
+    case "mitosis_pending_observer":
+      return resolveMitosisPendingObserver(
+        p as Parameters<typeof resolveMitosisPendingObserver>[0],
+      );
+    case "dispatch_dropped_observer":
+      return resolveDispatchDroppedObserver(
+        p as Parameters<typeof resolveDispatchDroppedObserver>[0],
+      );
+    case "llm_api_health_observer":
+      return resolveLlmApiHealthObserver(
+        p as Parameters<typeof resolveLlmApiHealthObserver>[0],
       );
     default:
       throw new Error(`unknown shape: ${pointer.type}`);

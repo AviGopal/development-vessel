@@ -92,6 +92,16 @@ import { POSTERIOR_CONSISTENCY_AUDIT_TICK_TEMPLATE } from "./posterior-consisten
 // lands the substrate's capability surface grows by its own action.
 import { CAPABILITY_GAP_AUDIT_TICK_TEMPLATE } from "./capability-gap-audit-tick.js";
 import { RESOLVER_AUTHOR_TEMPLATE } from "./resolver-author.js";
+// Shadow-state observer ticks (2026-06-05): promote out-of-band substrate
+// state into impulse form so detectors can observe it.
+import {
+  SYSTEMD_UNIT_HEALTH_OBSERVER_TICK_TEMPLATE,
+  MITOSIS_INTENT_QUEUE_OBSERVER_TICK_TEMPLATE,
+  APPLIED_PROPOSAL_SENTINEL_OBSERVER_TICK_TEMPLATE,
+  MITOSIS_PENDING_OBSERVER_TICK_TEMPLATE,
+  DISPATCH_DROPPED_OBSERVER_TICK_TEMPLATE,
+  LLM_API_HEALTH_OBSERVER_TICK_TEMPLATE,
+} from "./shadow-state-observer-ticks.js";
 
 export { SHIP_CHANGE_TEMPLATE } from "./ship-change.js";
 export { BRANCH_HEALTH_TEMPLATE } from "./branch-health.js";
@@ -138,6 +148,14 @@ export { TRACE_OUTCOME_VALIDITY_AUDIT_TICK_TEMPLATE } from "./trace-outcome-vali
 export { POSTERIOR_CONSISTENCY_AUDIT_TICK_TEMPLATE } from "./posterior-consistency-audit-tick.js";
 export { CAPABILITY_GAP_AUDIT_TICK_TEMPLATE } from "./capability-gap-audit-tick.js";
 export { RESOLVER_AUTHOR_TEMPLATE } from "./resolver-author.js";
+export {
+  SYSTEMD_UNIT_HEALTH_OBSERVER_TICK_TEMPLATE,
+  MITOSIS_INTENT_QUEUE_OBSERVER_TICK_TEMPLATE,
+  APPLIED_PROPOSAL_SENTINEL_OBSERVER_TICK_TEMPLATE,
+  MITOSIS_PENDING_OBSERVER_TICK_TEMPLATE,
+  DISPATCH_DROPPED_OBSERVER_TICK_TEMPLATE,
+  LLM_API_HEALTH_OBSERVER_TICK_TEMPLATE,
+} from "./shadow-state-observer-ticks.js";
 export { OBSERVE_ORTHOGONAL_PATTERNS_TEMPLATE } from "./observe-orthogonal-patterns.js";
 export { ENACT_ORTHOGONAL_DECISIONS_TEMPLATE } from "./enact-orthogonal-decisions.js";
 export { COMPLETE_VESSEL_SCAFFOLD_TEMPLATE } from "./complete-vessel-scaffold.js";
@@ -391,4 +409,15 @@ export const SEED_TEMPLATES: ActivityTemplate[] = [
   // future drain-pending-capability-gaps activity.
   CAPABILITY_GAP_AUDIT_TICK_TEMPLATE,
   RESOLVER_AUTHOR_TEMPLATE,
+  // Shadow-state observer ticks (Part B, 2026-06-05). Each promotes one
+  // out-of-band substrate state into a shape-typed impulse so the
+  // orthogonality / validation audits can observe it. All immunity-pattern
+  // single-resolver wrappers (empty inputShapes + variables = precondition
+  // always satisfied), light-dispatch eligible, cheap tier.
+  SYSTEMD_UNIT_HEALTH_OBSERVER_TICK_TEMPLATE,
+  MITOSIS_INTENT_QUEUE_OBSERVER_TICK_TEMPLATE,
+  APPLIED_PROPOSAL_SENTINEL_OBSERVER_TICK_TEMPLATE,
+  MITOSIS_PENDING_OBSERVER_TICK_TEMPLATE,
+  DISPATCH_DROPPED_OBSERVER_TICK_TEMPLATE,
+  LLM_API_HEALTH_OBSERVER_TICK_TEMPLATE,
 ];

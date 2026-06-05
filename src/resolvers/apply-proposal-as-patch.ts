@@ -115,12 +115,28 @@ export async function resolveApplyProposalAsPatch(pointer: ApplyProposalAsPatchP
   let mitosisDirs: string[] = [];
   try { mitosisDirs = (await readdir(vesselsRoot)).filter((d) => /-mitosis-/.test(d)); } catch { /* tolerant */ }
 
+  // Per-proposal sentinel directory tracks proposals already converted into
+  // a mitosis stage, regardless of whether the cutover ultimately succeeded
+  // or got rejected by host-sync (commit_failed, scope_creep, etc.). The
+  // original `already_staged` check against mitosis-dir-name was structurally
+  // broken — mitosis dirs are named by timestamp and never contain the
+  // scenario_id, so the dedup never fired. Same proposal got picked every
+  // cycle, LLM produced same patch, host-sync rejected for nothing-to-commit,
+  // substrate never explored new proposals.
+  const sentinelDir = `${proposalsDir}/.applied`;
+  let appliedSet: Set<string> = new Set();
+  try {
+    await mkdir(sentinelDir, { recursive: true });
+    appliedSet = new Set(await readdir(sentinelDir));
+  } catch { /* tolerant — fall back to in-cycle skip-via-mitosis-dir */ }
+
   // Walk entries in newest-first order; skip staged, malformed, or fieldless.
   // Record skip reasons so the caller can audit drain progress.
   const skipped: Array<{ proposal: string; reason: string }> = [];
   let chosen: { name: string; path: string; scenarioId: string; content: string; targetFile: string } | null = null;
   for (const e of entries) {
     const scenarioId = e.name.replace(/-report\.json$/, "");
+    if (appliedSet.has(e.name)) { skipped.push({ proposal: e.name, reason: "already_applied_sentinel" }); continue; }
     if (mitosisDirs.some((d) => d.includes(scenarioId.slice(0, 32)))) { skipped.push({ proposal: e.name, reason: "already_staged" }); continue; }
     let content: string;
     try { content = await readFile(e.path, "utf-8"); } catch { skipped.push({ proposal: e.name, reason: "read_failed" }); continue; }
@@ -210,6 +226,15 @@ export async function resolveApplyProposalAsPatch(pointer: ApplyProposalAsPatchP
   };
   try { await writeFile(pendingPath, JSON.stringify(pendingBody, null, 2)); }
   catch (err) { return structuredError(`pending write failed: ${(err as Error).message}`); }
+
+  // Mark this proposal as applied so the next cycle picks a different one,
+  // even if the downstream host-sync rejects (commit_failed / scope_creep).
+  // Best-effort; if the sentinel write fails we still return success because
+  // the in-cycle mitosis-dir check will catch it on the very next call.
+  try {
+    await writeFile(`${proposalsDir}/.applied/${chosen.name}`,
+      JSON.stringify({ staged_at: pendingBody.staged_at, mitosis_version_id: versionId, base_sha: baseSha }, null, 2));
+  } catch { /* tolerant */ }
 
   return {
     shape: "mitosisStaged",

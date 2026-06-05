@@ -13,6 +13,10 @@ import type { ActivityTemplate } from "@avigopal/ias-executor-ts";
  * "dispatch the newest unexecuted auto-draft" and Thompson sampling skips
  * templates with no posterior.
  *
+ * Selection criteria: among gap-closing:auto-* templates with zero recent executions, the newest
+ * by created_at is chosen. Ties are broken by lexicographic template id so the choice is deterministic
+ * across replays.
+ *
  * Immunity-pattern compliant — empty inputShapes, empty variables, single
  * deterministic server-side resolver. No LLM, no pool iteration.
  */

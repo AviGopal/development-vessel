@@ -95,9 +95,20 @@ export async function resolveTemplateAuditReport(
   candidates.sort((a, b) => a.posterior_mean - b.posterior_mean);
   const weak = candidates.filter((c) => c.posterior_mean < weakThreshold).slice(0, emitCap);
 
-  // Family grouping for strongest_families: strip trailing "-<digits>"
-  // (variant suffix from activity_create_variant: gap-closing:auto-XYZ-1780352106759).
-  const familyOf = (id: string): string => id.replace(/-\d{10,}$/, "");
+  // Family grouping for strongest_families: peel off variant suffixes layered
+  // by activity_create_variant + template-mitosis. Observed forms:
+  //   gap-closing:auto-<ts>-<rand>-<ts2>                 (initial create_variant)
+  //   gap-closing:auto-<ts>-<rand>-variant-<ts2>         (manual variant)
+  //   gap-closing:auto-<ts>-<rand>-variant-mitosis-<ts2> (mitosis-tick)
+  //   gap-closing:auto-<ts>-<rand>-variant-mitosis-improved-<ts2>
+  // Family root is gap-closing:auto-<ts>-<rand>.
+  const familyOf = (id: string): string => {
+    let f = id;
+    // Strip nested -variant[-<word>]*-<digits> suffix groups, then any leftover trailing -<digits>.
+    f = f.replace(/(-variant(?:-[a-z]+)*-\d{8,})+$/i, "");
+    f = f.replace(/-\d{10,}$/, "");
+    return f;
+  };
   const byFamily = new Map<string, Entry[]>();
   for (const c of candidates) {
     const fam = familyOf(c.template_id);

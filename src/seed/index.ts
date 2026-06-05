@@ -65,6 +65,12 @@ import { DETECT_RECURRING_PATTERN_TEMPLATE } from "./detect-recurring-pattern.js
 import { PREDICT_AND_VERIFY_TEMPLATE } from "./predict-and-verify.js";
 import { REFINE_ON_DISAGREEMENT_TEMPLATE } from "./refine-on-disagreement.js";
 import { VALIDATE_OBSIDIAN_VESSEL_INTERACTION_TEMPLATE } from "./validate-obsidian-vessel-interaction.js";
+// Goal recovery activities (2026-06-04): replace autoDraft with explicit,
+// measurable, Thompson-sampled activities for shape pre-check, failure recovery,
+// and orchestrated retry. Composable standalone or together.
+import { GOAL_SHAPE_PRE_CHECK_TEMPLATE } from "./goal-shape-pre-check.js";
+import { RECOVER_FROM_GOAL_FAILURE_TEMPLATE } from "./recover-from-goal-failure.js";
+import { GOAL_EXECUTION_WITH_RETRY_TEMPLATE } from "./goal-execution-with-retry.js";
 
 export { SHIP_CHANGE_TEMPLATE } from "./ship-change.js";
 export { BRANCH_HEALTH_TEMPLATE } from "./branch-health.js";
@@ -101,6 +107,9 @@ export { DETECT_RECURRING_PATTERN_TEMPLATE } from "./detect-recurring-pattern.js
 export { PREDICT_AND_VERIFY_TEMPLATE } from "./predict-and-verify.js";
 export { REFINE_ON_DISAGREEMENT_TEMPLATE } from "./refine-on-disagreement.js";
 export { VALIDATE_OBSIDIAN_VESSEL_INTERACTION_TEMPLATE } from "./validate-obsidian-vessel-interaction.js";
+export { GOAL_SHAPE_PRE_CHECK_TEMPLATE } from "./goal-shape-pre-check.js";
+export { RECOVER_FROM_GOAL_FAILURE_TEMPLATE } from "./recover-from-goal-failure.js";
+export { GOAL_EXECUTION_WITH_RETRY_TEMPLATE } from "./goal-execution-with-retry.js";
 export { OBSERVE_ORTHOGONAL_PATTERNS_TEMPLATE } from "./observe-orthogonal-patterns.js";
 export { ENACT_ORTHOGONAL_DECISIONS_TEMPLATE } from "./enact-orthogonal-decisions.js";
 export { COMPLETE_VESSEL_SCAFFOLD_TEMPLATE } from "./complete-vessel-scaffold.js";
@@ -300,4 +309,19 @@ export const SEED_TEMPLATES: ActivityTemplate[] = [
   // identifying live endpoints, missing endpoints (404), concept-graph coverage
   // metrics, missing capabilities, and prioritised recommendations.
   VALIDATE_OBSIDIAN_VESSEL_INTERACTION_TEMPLATE,
+  // Goal recovery activities (2026-06-04): idiomatic composable replacements for
+  // goal-host's autoDraft path. All three are standalone-composable AND wire
+  // together as a pre-check → execute → recover chain.
+  //   goal-shape-pre-check: deterministic gate — verifies template output_shapes
+  //     intersect with expected_output_shapes before any execution cost is incurred.
+  //     Verdict 'fail' propagates verifier_negative via forbiddenPattern guard.
+  //   recover-from-goal-failure: given a failed trace ID, extracts failure_mode
+  //     context and dispatches the appropriate recovery (sub-goal, re-dispatch,
+  //     create_variant, or give_up) to goal-host-vessel.
+  //   goal-execution-with-retry: full orchestrator — recommend → execute → evaluate
+  //     → recover → compile. Thompson Sampling drives template selection; exclude
+  //     list accumulates failed templates; autoDraft never fires.
+  GOAL_SHAPE_PRE_CHECK_TEMPLATE,
+  RECOVER_FROM_GOAL_FAILURE_TEMPLATE,
+  GOAL_EXECUTION_WITH_RETRY_TEMPLATE,
 ];

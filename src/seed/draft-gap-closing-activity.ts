@@ -104,9 +104,9 @@ TASK 2 - fetch_traces (http_fetch):
 TASK 3 - analyze (llm_completion_dispatch):
   config: {
     "type": "llm_completion_dispatch",
-    "prompt": "Scenario: {{read_scenario_content}}\n\nRecent traces: {{fetch_traces_content}}\n\nAnalyze the failure mode described in the scenario against the recent traces. Produce a JSON report addressing the gap: {\"<output_shape_name>\": \"<your analysis>\"}",
+    "prompt": "Scenario: {{read_scenario_content}}\n\nRecent traces: {{fetch_traces_content}}\n\nAnalyze the failure mode described in the scenario against the recent traces, then produce a JSON proposal report with this EXACT schema (no other top-level keys):\n{\n  \"<output_shape_name>\": \"<one-line analysis summary>\",\n  \"required_code_modifications\": [\n    {\n      \"file\": \"<relative-path-from-repo-root, e.g. repos/<vessel>/src/<file>.ts>\",\n      \"description\": \"<what changes and why>\"\n    }\n  ]\n}\nThe required_code_modifications array MUST be present and non-empty for the downstream apply_proposal_as_patch resolver to convert this proposal into a staged source patch. List the ONE specific file most likely to need editing to close this gap; do NOT list multiple files unless the gap genuinely spans them. Each file path MUST be relative to the repo root, starting with 'repos/'.",
     "model": "anthropic/claude-haiku-4-5-20251001",
-    "max_tokens": 1000
+    "max_tokens": 1500
   }
   Replace <output_shape_name> with the first shape from expected_emergence.activity_signature.output_shapes_must_include.
 

@@ -191,6 +191,94 @@ function structuredError(detail: string, extra?: Record<string, unknown>): Resol
 }
 
 /**
+ * Soft-refuse with optional host-sync intent fallback (Part A, 2026-06-04).
+ *
+ * When the cutover refuses for a class of reason where the cutover-side
+ * verification is structurally weaker than the host-side poller (e.g.
+ * INSUFFICIENT_DATA verdict because the container's activity-api view is
+ * sparse; live_source_unreadable / base_sha_mismatch because the container's
+ * bind mount lags the host tree), AND a non-empty mitosis dir with a real
+ * diff vs the host exists, AND `MITOSIS_HOST_SYNC_MODE=1`, we still emit
+ * the host-sync intent. The host-sync poller runs its own freshness check
+ * against the real host source — moving the safety verdict from cutover-side
+ * (wrong baseRoot) to host-sync-side (real host paths).
+ *
+ * UNFAVORABLE is never emitted: a static-eval FAIL means the patch broke
+ * lint/tests and the substrate must not push it regardless of where the
+ * freshness check lives. `missing_base_sha` is never emitted either — without
+ * a recorded baseline the host-side poller has nothing to verify against.
+ */
+async function maybeEmitIntentForRefuse(args: {
+  pointer: VesselMitosisCutoverPointer;
+  vessel_name: string;
+  base_version_id: string;
+  mitosis_version_id: string;
+  evaluation_evidence: VesselMitosisCutoverPointer["evaluation_evidence"];
+  staged_base_sha?: string;
+  refuse_class: "insufficient_data_verdict" | "live_source_unreadable" | "base_sha_mismatch";
+}): Promise<ResolverResult | null> {
+  if (process.env["MITOSIS_HOST_SYNC_MODE"] !== "1") return null;
+  const { pointer } = args;
+  // Require an explicit mitosis_root + staged_files: host-sync intent is
+  // pointer-driven; without these the poller cannot identify what to apply.
+  if (!pointer.mitosis_root) return null;
+  if (!Array.isArray(pointer.staged_files) || pointer.staged_files.length === 0) {
+    return null;
+  }
+  const mitosisRoot = resolve(pointer.mitosis_root);
+  if (!(await pathExists(mitosisRoot))) return null;
+  // Verify at least one staged file is present in the mitosis dir AND differs
+  // from its baseRoot counterpart (or has no counterpart). A mitosis with no
+  // real diff is a no-op; don't churn the poller queue with no-op intents.
+  const workspaceRoot = process.env["WORKSPACE_ROOT"] ?? process.cwd();
+  const reposRoot = join(workspaceRoot, "git", "super-repo", "repos");
+  const baseRoot = pointer.base_root
+    ? resolve(pointer.base_root)
+    : join(reposRoot, args.vessel_name);
+  let hasRealDiff = false;
+  for (const rel of pointer.staged_files) {
+    if (isAbsolute(rel) || rel.includes("..")) continue;
+    const mPath = join(mitosisRoot, rel);
+    if (!(await pathExists(mPath))) continue;
+    try {
+      const mContent = await readFile(mPath);
+      const bPath = join(baseRoot, rel);
+      if (!(await pathExists(bPath))) {
+        hasRealDiff = true;
+        break;
+      }
+      const bContent = await readFile(bPath);
+      if (!mContent.equals(bContent)) {
+        hasRealDiff = true;
+        break;
+      }
+    } catch {
+      // unreadable on this side; let the host-sync poller decide
+      hasRealDiff = true;
+      break;
+    }
+  }
+  if (!hasRealDiff) return null;
+  const intent = await emitHostSyncIntent({
+    pointer,
+    vessel_name: args.vessel_name,
+    base_version_id: args.base_version_id,
+    mitosis_version_id: args.mitosis_version_id,
+    mitosisRoot,
+    stagedFiles: pointer.staged_files,
+    evaluationEvidence: args.evaluation_evidence,
+    stagedBaseSha: args.staged_base_sha,
+  });
+  // Annotate the body so observers can distinguish "FAVORABLE → emit" from
+  // "soft-refuse → host-sync defers verification".
+  if (intent.shape === "cutoverApplied" && intent.body && typeof intent.body === "object") {
+    (intent.body as Record<string, unknown>)["emitted_via_refuse_fallback"] = true;
+    (intent.body as Record<string, unknown>)["refuse_class"] = args.refuse_class;
+  }
+  return intent;
+}
+
+/**
  * Soft-refuse: returned when the audited NO is a normal outcome of the
  * evaluate→cutover chain (verdict ≠ FAVORABLE, insufficient cited traces,
  * stale base SHA, etc). Emits `vesselMitosisCutoverResult` with applied:false
@@ -305,6 +393,25 @@ export async function resolveVesselMitosisCutover(
     // Audited NO — normal outcome when verdict is INSUFFICIENT_DATA / NEUTRAL /
     // UNFAVORABLE. Soft-refuse so mitosis-tick doesn't show as failure on every
     // tick when there's nothing to cut over.
+    //
+    // Part A (2026-06-04): for INSUFFICIENT_DATA / NEUTRAL — verdicts where the
+    // cutover-side evaluation is structurally weaker than the host-side poller
+    // can verify — still emit a host-sync intent if we have a real diff. The
+    // poller re-verifies against the host source. UNFAVORABLE is a static-eval
+    // FAIL and must never emit.
+    const v = evaluation_evidence.verdict;
+    if (v === "INSUFFICIENT_DATA" || v === "NEUTRAL" || v == null) {
+      const intent = await maybeEmitIntentForRefuse({
+        pointer,
+        vessel_name,
+        base_version_id,
+        mitosis_version_id,
+        evaluation_evidence,
+        staged_base_sha: pointer.staged_base_sha,
+        refuse_class: "insufficient_data_verdict",
+      });
+      if (intent) return intent;
+    }
     return softRefuse(
       `verdict not FAVORABLE (got ${evaluation_evidence.verdict})`,
       { verdict: evaluation_evidence.verdict, evaluation_evidence },
@@ -453,6 +560,25 @@ export async function resolveVesselMitosisCutover(
     // failure mode. The freshness violation IS the substrate's audited NO.
     // The substrateGap_write above carries the cited evidence; this return
     // carries the verdict-acknowledged structure downstream observers expect.
+    //
+    // Part A (2026-06-04): for `live_source_unreadable` / `base_sha_mismatch`
+    // — failures the host-side poller is structurally better placed to verify
+    // (real host paths vs container bind mount) — still emit a host-sync
+    // intent if we have a real diff. The poller re-runs the freshness check
+    // against the host source. `missing_base_sha` is not emitted: without a
+    // recorded baseline the poller has nothing to verify against.
+    if (reason === "live_source_unreadable" || reason === "base_sha_mismatch") {
+      const intent = await maybeEmitIntentForRefuse({
+        pointer,
+        vessel_name,
+        base_version_id,
+        mitosis_version_id,
+        evaluation_evidence,
+        staged_base_sha: stagedBaseSha,
+        refuse_class: reason,
+      });
+      if (intent) return intent;
+    }
     return softRefuse(
       `mitosis_freshness_violation (${reason})`,
       {

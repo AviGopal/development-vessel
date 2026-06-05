@@ -131,7 +131,7 @@ export const CONCEPT_USAGE_BACKFILL_TEMPLATE: ActivityTemplate = {
       resolver: "concept_usage_record",
       config: {
         type: "concept_usage_record",
-        concept_id: "{{extract_concept_id_text}}",
+        concept_id: "{{extract_concept_id_value}}",
         trace_id: "{{trace_id}}",
         outcome: "success",
       },

@@ -62,9 +62,13 @@ export async function resolveJsonPathExtract(pointer: JsonPathExtractPointer): P
     if (current === null || current === undefined) {
       return missingResult(pointer.path, `null/undefined encountered at segment: ${part}`);
     }
-    if (typeof current !== "object" || Array.isArray(current)) {
+    if (typeof current !== "object") {
       return missingResult(pointer.path, `path not found at segment: ${part}`);
     }
+    // Arrays + objects both accept string-keyed access in JS. Numeric segments
+    // (e.g. "0", "1") on arrays index by position; named segments on objects
+    // index by key. Previously this branch rejected arrays outright, breaking
+    // documented paths like "selected.0.id" in concept-usage-backfill.
     current = (current as Record<string, unknown>)[part];
     if (current === undefined) {
       return missingResult(pointer.path, `no key '${part}' at this level`);

@@ -54,18 +54,57 @@ and reconsider**. Either:
 Just because we can render activities as JSON doesn't mean we
 should bake them into source.
 
-## Variant-first repair (RBAC consequence)
+## Variant-first repair (evidence-gated lifecycle, 2026-06-04)
 
-`METABOB_API_KEY` is write-scope, not admin-scope. The vessel
-**CAN** create variants of existing templates (write-scope). The
-vessel **CANNOT** mutate an existing template in place
-(admin-scope; operator-gated).
+> **Policy change.** `activityTemplate_update` and `_deprecate` are
+> no longer admin-scope-only. Activity-API now accepts those
+> impulses from write-scope callers when the request body carries
+> auditable evidence (Thompson posteriors for `_deprecate`,
+> reason string for `_update`). Admin scope still works as the
+> override path. See `repos/metabob-activity-api/src/routes/impulses.ts`
+> `validateEvidenceGate` for the gate logic and default thresholds
+> (`MIN_SAMPLES=10`, `MIN_DELTA=0.15` posterior-mean difference).
 
-When a template needs a fix, create a variant. Never call
-`activityTemplate_update` or `_deprecate` from this vessel — they
-will 403. Thompson sampling promotes the better variant. See
-`docs/CASES_AND_FLOWS.md` §"RBAC scope of operations" for the full
-table.
+**Variant-first is still preferred.** Mint a new variant before
+calling `_deprecate` on the parent. The order matters:
+
+1. Detect a weak family (low Thompson posterior + ≥10 samples).
+2. Mint an improved variant via `activity_create_variant`.
+3. Let Thompson Sampling allocate traffic to the variant.
+4. When the variant's posterior dominates the parent's by ≥0.15
+   over ≥10 loser samples, call `variant_promote` (which issues
+   `_update` to mark the winner canonical AND `_deprecate` on the
+   losers, both with the Thompson evidence body).
+5. The substrate is now in charge of its own template lifecycle.
+   Operator role narrows to anchor maintenance + adversarial probing
+   (per IAL §27.S.5).
+
+**Why the gate, not raw RBAC.** The vessel-mitosis cutover already
+uses evidence-based gating (FAVORABLE typecheck verdict). Template
+lifecycle uses the same shape — the substrate's own Thompson
+posteriors over real workload are the natural safety mechanism for
+promote/deprecate. Operator-only gates are appropriate for
+provisioning, billing, secret rotation, and other operations whose
+correctness cannot be re-derived from substrate state.
+
+**Three-place rule applies.** The `variant_promote` resolver is in
+`src/resolvers/variant-promote.ts`, registered in `src/config.ts`,
+dispatched in `src/routes/impulses.ts`. Per-resolver test lives in
+`test/resolvers/variant-promote.test.ts`.
+
+See `repos/metabob-activity-api/src/routes/impulses.ts` for the
+canonical evidence-gate implementation. The gate fields are:
+
+```ts
+evidence: {
+  reason: string,                  // required (audit trail)
+  winner_alpha?, winner_beta?,     // required for _deprecate
+  loser_alpha?, loser_beta?,       // required for _deprecate
+  loser_samples?,                  // default α+β-2, must be ≥ 10
+  confidence_threshold?,           // default 0.15
+  source_trace_ids?: string[],     // optional provenance
+}
+```
 
 ## Shape-dispatch agreement is enforced
 

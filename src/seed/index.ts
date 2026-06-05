@@ -77,6 +77,7 @@ import { GOAL_EXECUTION_WITH_RETRY_TEMPLATE } from "./goal-execution-with-retry.
 // the implicit promotion. Parallel to mitosis-tick (which targets vessel
 // source) but for template source — same variant-first repair discipline.
 import { TEMPLATE_MITOSIS_TICK_TEMPLATE } from "./template-mitosis-tick.js";
+import { TEMPLATE_PROMOTE_TICK_TEMPLATE } from "./template-promote-tick.js";
 
 export { SHIP_CHANGE_TEMPLATE } from "./ship-change.js";
 export { BRANCH_HEALTH_TEMPLATE } from "./branch-health.js";
@@ -117,6 +118,7 @@ export { GOAL_SHAPE_PRE_CHECK_TEMPLATE } from "./goal-shape-pre-check.js";
 export { RECOVER_FROM_GOAL_FAILURE_TEMPLATE } from "./recover-from-goal-failure.js";
 export { GOAL_EXECUTION_WITH_RETRY_TEMPLATE } from "./goal-execution-with-retry.js";
 export { TEMPLATE_MITOSIS_TICK_TEMPLATE } from "./template-mitosis-tick.js";
+export { TEMPLATE_PROMOTE_TICK_TEMPLATE } from "./template-promote-tick.js";
 export { OBSERVE_ORTHOGONAL_PATTERNS_TEMPLATE } from "./observe-orthogonal-patterns.js";
 export { ENACT_ORTHOGONAL_DECISIONS_TEMPLATE } from "./enact-orthogonal-decisions.js";
 export { COMPLETE_VESSEL_SCAFFOLD_TEMPLATE } from "./complete-vessel-scaffold.js";
@@ -336,4 +338,12 @@ export const SEED_TEMPLATES: ActivityTemplate[] = [
   // improved variant via the write-scope activity_create_variant resolver.
   // No admin-scope mutation — Thompson Sampling does the promotion.
   TEMPLATE_MITOSIS_TICK_TEMPLATE,
+  // Substrate-managed template-lifecycle back-half (2026-06-04). Composes
+  // templateAuditReport.strongest_families → variant_promote, issuing
+  // activityTemplate_update + activityTemplate_deprecate with Thompson
+  // evidence. activity-api's evidence gate admits the write-scope calls
+  // when loser_samples >= 10 AND posterior delta >= 0.15. The substrate
+  // now manages its own template lifecycle end-to-end (mint via
+  // template-mitosis-tick, promote+retire via template-promote-tick).
+  TEMPLATE_PROMOTE_TICK_TEMPLATE,
 ];

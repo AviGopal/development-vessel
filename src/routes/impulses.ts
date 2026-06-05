@@ -81,6 +81,7 @@ import { resolveGapToScenarioBridge } from "../resolvers/gap-to-scenario-bridge.
 import { resolveDispatchLatestAutoDraft } from "../resolvers/dispatch-latest-auto-draft.js";
 import { resolveApplyProposalAsPatch } from "../resolvers/apply-proposal-as-patch.js";
 import { resolveTemplateAuditReport } from "../resolvers/template-audit-report.js";
+import { resolveVariantPromote } from "../resolvers/variant-promote.js";
 import type { ResolverResult } from "../resolvers/types.js";
 
 type AnyPointer = { type: string } & Record<string, unknown>;
@@ -271,6 +272,10 @@ export async function resolveDispatch(pointer: AnyPointer): Promise<ResolverResu
     case "template_audit_report":
       return resolveTemplateAuditReport(
         p as Parameters<typeof resolveTemplateAuditReport>[0],
+      );
+    case "variant_promote":
+      return resolveVariantPromote(
+        p as Parameters<typeof resolveVariantPromote>[0],
       );
     default:
       throw new Error(`unknown shape: ${pointer.type}`);

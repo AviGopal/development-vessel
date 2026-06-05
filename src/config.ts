@@ -323,6 +323,13 @@ export const config = {
       // weak_templates[0].template_id feeds template-mitosis-tick (variant
       // authoring, write-scope; never admin-scope template mutation).
       "template_audit_report",
+      // Substrate-callable template lifecycle (2026-06-04). Issues
+      // activityTemplate_update + activityTemplate_deprecate against
+      // activity-api with Thompson evidence; the activity-api evidence
+      // gate (validateEvidenceGate) admits the write-scope calls when
+      // loser_samples >= MIN_SAMPLES (10) AND winner_mean - loser_mean
+      // >= MIN_DELTA (0.15). Parallel in shape to vessel_mitosis_cutover.
+      "variant_promote",
     ] as const,
     resolveEndpoint: "/v2/impulses/resolve",
     resolveRequestFormat: "pointer" as const,

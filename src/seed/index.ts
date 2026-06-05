@@ -71,6 +71,12 @@ import { VALIDATE_OBSIDIAN_VESSEL_INTERACTION_TEMPLATE } from "./validate-obsidi
 import { GOAL_SHAPE_PRE_CHECK_TEMPLATE } from "./goal-shape-pre-check.js";
 import { RECOVER_FROM_GOAL_FAILURE_TEMPLATE } from "./recover-from-goal-failure.js";
 import { GOAL_EXECUTION_WITH_RETRY_TEMPLATE } from "./goal-execution-with-retry.js";
+// Template-mitosis variant-authoring loop (2026-06-04): detects weak template
+// families via Thompson posterior mean < threshold, drafts improved variants
+// through activity_create_variant. Write-scope only; Thompson sampling does
+// the implicit promotion. Parallel to mitosis-tick (which targets vessel
+// source) but for template source — same variant-first repair discipline.
+import { TEMPLATE_MITOSIS_TICK_TEMPLATE } from "./template-mitosis-tick.js";
 
 export { SHIP_CHANGE_TEMPLATE } from "./ship-change.js";
 export { BRANCH_HEALTH_TEMPLATE } from "./branch-health.js";
@@ -110,6 +116,7 @@ export { VALIDATE_OBSIDIAN_VESSEL_INTERACTION_TEMPLATE } from "./validate-obsidi
 export { GOAL_SHAPE_PRE_CHECK_TEMPLATE } from "./goal-shape-pre-check.js";
 export { RECOVER_FROM_GOAL_FAILURE_TEMPLATE } from "./recover-from-goal-failure.js";
 export { GOAL_EXECUTION_WITH_RETRY_TEMPLATE } from "./goal-execution-with-retry.js";
+export { TEMPLATE_MITOSIS_TICK_TEMPLATE } from "./template-mitosis-tick.js";
 export { OBSERVE_ORTHOGONAL_PATTERNS_TEMPLATE } from "./observe-orthogonal-patterns.js";
 export { ENACT_ORTHOGONAL_DECISIONS_TEMPLATE } from "./enact-orthogonal-decisions.js";
 export { COMPLETE_VESSEL_SCAFFOLD_TEMPLATE } from "./complete-vessel-scaffold.js";
@@ -324,4 +331,9 @@ export const SEED_TEMPLATES: ActivityTemplate[] = [
   GOAL_SHAPE_PRE_CHECK_TEMPLATE,
   RECOVER_FROM_GOAL_FAILURE_TEMPLATE,
   GOAL_EXECUTION_WITH_RETRY_TEMPLATE,
+  // Template-mitosis variant-authoring loop (2026-06-04). Boredom goal[25]
+  // dispatches this; the chain detects the weakest family and authors an
+  // improved variant via the write-scope activity_create_variant resolver.
+  // No admin-scope mutation — Thompson Sampling does the promotion.
+  TEMPLATE_MITOSIS_TICK_TEMPLATE,
 ];

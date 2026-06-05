@@ -318,6 +318,11 @@ export const config = {
       // with staged_base_sha. Closes the gap between drafter analysis and
       // the existing cutover machinery (mitosis-tick + vessel_mitosis_cutover).
       "apply_proposal_as_patch",
+      // Template-mitosis weak-template scanner (2026-06-04). Ranks templates
+      // by Thompson posterior mean α/(α+β); emits templateAuditReport whose
+      // weak_templates[0].template_id feeds template-mitosis-tick (variant
+      // authoring, write-scope; never admin-scope template mutation).
+      "template_audit_report",
     ] as const,
     resolveEndpoint: "/v2/impulses/resolve",
     resolveRequestFormat: "pointer" as const,

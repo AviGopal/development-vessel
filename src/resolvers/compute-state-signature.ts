@@ -330,10 +330,22 @@ export async function resolveComputeStateSignature(
   const bucketProp = Math.floor(proposedCount / 10);    // every 10 proposed
   const bucketSa = Math.floor(substrateAuthoredCount / 10);
   const bucketUie = Math.floor(uiEvents / 5);
-  const bucketLoad = Math.round(loadRes.load_avg_1m * 2) / 2;   // 0.5 increments
-  const bucketMem = Math.floor(memRes.mem_used_pct / 10) * 10;  // 10% increments
-  const bucketSr = Math.round(recent.success_rate * 4) / 4;     // 0.25 increments
-  const bucketCgroup = cgroupMemPct !== undefined ? Math.floor(cgroupMemPct / 10) * 10 : undefined;
+  // Load tier — collapse 1m loadavg to a 4-class operational class.
+  //   0 = idle (<1.0), 1 = light (1-3), 2 = busy (3-8), 3 = saturated (>=8)
+  // Substrate sees load_avg_1m fluctuate wildly under work (5-15 range), so
+  // raw 0.5-increments still produced a fresh hash every call. Class collapse
+  // makes signature stable across moment-to-moment load drift while still
+  // distinguishing operational regimes.
+  const bucketLoad =
+    loadRes.load_avg_1m < 1 ? 0 :
+    loadRes.load_avg_1m < 3 ? 1 :
+    loadRes.load_avg_1m < 8 ? 2 : 3;
+  // Mem tier — same idea. 25% buckets collapse minor heap fluctuation.
+  const bucketMem = Math.floor(memRes.mem_used_pct / 25) * 25;
+  // Success-rate tier — 0.25 buckets capture healing/oscillating/stalled regimes.
+  const bucketSr = Math.round(recent.success_rate * 4) / 4;
+  // cgroup mem tier — same 25% buckets.
+  const bucketCgroup = cgroupMemPct !== undefined ? Math.floor(cgroupMemPct / 25) * 25 : undefined;
 
   // Concept priors — deduplicated, sorted for hash stability. Empty list when
   // no priors are loaded (default) → contributes [] to the hash so empty-prior

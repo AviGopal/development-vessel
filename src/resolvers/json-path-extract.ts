@@ -1,3 +1,6 @@
+// json-path-extract: dot-notation traversal over JSON values. Null/undefined intermediate hops
+// return a tolerant missing_result with `value: ""` and `missing: true` rather than throwing.
+
 import type { ResolverResult } from "./types.js";
 
 export interface JsonPathExtractPointer {

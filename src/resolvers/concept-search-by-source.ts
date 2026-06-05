@@ -1,3 +1,6 @@
+// concept-search-by-source: queries concept-db (port 8260) for prior concepts attached to a source type.
+// Callers should expect graceful degradation (empty result) when concept-db is unreachable.
+
 import type { ResolverResult } from "./types.js";
 
 /**

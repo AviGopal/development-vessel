@@ -64,6 +64,7 @@ import { MECHANISM_HEALTH_TICK_TEMPLATE } from "./mechanism-health-tick.js";
 import { DETECT_RECURRING_PATTERN_TEMPLATE } from "./detect-recurring-pattern.js";
 import { PREDICT_AND_VERIFY_TEMPLATE } from "./predict-and-verify.js";
 import { REFINE_ON_DISAGREEMENT_TEMPLATE } from "./refine-on-disagreement.js";
+import { VALIDATE_OBSIDIAN_VESSEL_INTERACTION_TEMPLATE } from "./validate-obsidian-vessel-interaction.js";
 
 export { SHIP_CHANGE_TEMPLATE } from "./ship-change.js";
 export { BRANCH_HEALTH_TEMPLATE } from "./branch-health.js";
@@ -99,6 +100,7 @@ export { DRAFT_ACTIVITY_FROM_PATTERN_TEMPLATE } from "./draft-activity-from-patt
 export { DETECT_RECURRING_PATTERN_TEMPLATE } from "./detect-recurring-pattern.js";
 export { PREDICT_AND_VERIFY_TEMPLATE } from "./predict-and-verify.js";
 export { REFINE_ON_DISAGREEMENT_TEMPLATE } from "./refine-on-disagreement.js";
+export { VALIDATE_OBSIDIAN_VESSEL_INTERACTION_TEMPLATE } from "./validate-obsidian-vessel-interaction.js";
 export { OBSERVE_ORTHOGONAL_PATTERNS_TEMPLATE } from "./observe-orthogonal-patterns.js";
 export { ENACT_ORTHOGONAL_DECISIONS_TEMPLATE } from "./enact-orthogonal-decisions.js";
 export { COMPLETE_VESSEL_SCAFFOLD_TEMPLATE } from "./complete-vessel-scaffold.js";
@@ -292,4 +294,10 @@ export const SEED_TEMPLATES: ActivityTemplate[] = [
   DETECT_FEATURE_FLAG_ZERO_EXERCISE_TEMPLATE,
   DETECT_FILTER_SATURATION_TEMPLATE,
   MECHANISM_HEALTH_TICK_TEMPLATE,
+  // obsidian-vessel interaction self-test (2026-06-04): drives the plugin over
+  // HTTP (health + observations/status + actions/sync + observations/concept-status)
+  // with 5s timeouts and synthesizes a structured obsidianVesselInteractionReport
+  // identifying live endpoints, missing endpoints (404), concept-graph coverage
+  // metrics, missing capabilities, and prioritised recommendations.
+  VALIDATE_OBSIDIAN_VESSEL_INTERACTION_TEMPLATE,
 ];

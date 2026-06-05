@@ -60,6 +60,10 @@ import type { ActivityTemplate } from "@avigopal/ias-executor-ts";
  * and no bare-taskId alias, so boredom-dispatched mitosis-tick traces
  * silently failed at conditional_cutover with verdict="{{evaluate_pair}}".
  * See concept_K-NGhlSQ3grT (mitosis cutover chain post-fix state).
+ *
+ * Soft-refuse semantics: vessel_mitosis_cutover may refuse with a non-error reason (e.g. freshness
+ * gate, missing mitosis-pending.json). The tick treats refusals as expected outcomes — the chain
+ * status stays success and the next tick retries when state has changed.
  */
 
 export const MITOSIS_TICK_TEMPLATE: ActivityTemplate = {

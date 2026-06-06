@@ -366,14 +366,25 @@ export async function resolveVesselMitosisCutover(
     }
   }
 
-  if (!vessel_name || PROTECTED_VESSELS.has(vessel_name)) {
+  // V9 (2026-06-05): field validation precedes protected-vessel guard.
+  // Previously a pointer with no `vessel_name` produced the misleading error
+  // `refusing cutover on protected vessel: undefined`. Required-field validation
+  // should fire first so the operator/substrate gets a typed
+  // missing-field error before the safety guard runs.
+  if (!vessel_name) {
+    return structuredError("missing required field: vessel_name");
+  }
+  if (!base_version_id) {
+    return structuredError("missing required field: base_version_id");
+  }
+  if (!mitosis_version_id) {
+    return structuredError("missing required field: mitosis_version_id");
+  }
+  if (PROTECTED_VESSELS.has(vessel_name)) {
     return structuredError(
       `refusing cutover on protected vessel: ${vessel_name}`,
       { protected_vessels: Array.from(PROTECTED_VESSELS) },
     );
-  }
-  if (!base_version_id || !mitosis_version_id) {
-    return structuredError("base_version_id and mitosis_version_id are required");
   }
   if (
     PROTECTED_BASES.has(base_version_id) ||

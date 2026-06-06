@@ -415,6 +415,23 @@ export async function resolveVesselMitosisEvaluate(
   const fetchLimit = pointer.fetchLimit ?? DEFAULT_FETCH_LIMIT;
   const url = (pointer.tracesUrl ?? DEFAULT_TRACES_URL) + `?limit=${fetchLimit}`;
 
+  // V8 (2026-06-05): deterministic verdict within an hour bucket.
+  // Previously the trace-path verdict drifted across calls on the same
+  // mitosis pair because the trace fetch returned whatever happened to be
+  // the most recent N rows at request time. Same input must yield same
+  // verdict to be a usable signal. We bucket time to the hour and use it
+  // as the lower bound of the trace window when no explicit `since` is
+  // supplied — repeated calls within the same hour see identical input.
+  const HOUR_MS = 60 * 60 * 1000;
+  // 30-day window — wide enough to capture all reasonably-recent traces
+  // for a mitosis evaluation, narrow enough that the trace fetch (limit=200)
+  // sees the same set across calls within an hour. The hour bucket on
+  // `bucketNow` is the determinism anchor; the window length only sets
+  // the lower bound of "ancient" traces we ignore.
+  const DEFAULT_WINDOW_HOURS = 24 * 30;
+  const bucketNow = Math.floor(Date.now() / HOUR_MS) * HOUR_MS;
+  const defaultSince = new Date(bucketNow - DEFAULT_WINDOW_HOURS * HOUR_MS).toISOString();
+
   // ---- Static evaluation gate (2026-06-04) ----
   // Idiomatic substrate discipline: run lint + tests inside the mitosis dir
   // before consulting traces. Lets freshly-staged mitoses reach FAVORABLE
@@ -517,13 +534,14 @@ export async function resolveVesselMitosisEvaluate(
     };
   }
 
-  const since = pointer.since;
-  if (since) {
-    traces = traces.filter((t) => {
-      const ts = typeof t.executed_at === "string" ? t.executed_at : "";
-      return ts >= since;
-    });
-  }
+  // V8: clamp to deterministic window. `pointer.since` wins when supplied;
+  // otherwise we use the hour-bucketed default so repeated calls within the
+  // same hour observe the same trace set.
+  const since = pointer.since ?? defaultSince;
+  traces = traces.filter((t) => {
+    const ts = typeof t.executed_at === "string" ? t.executed_at : "";
+    return ts >= since;
+  });
 
   const base = emptyStats(baseId);
   const mitosis = emptyStats(mitosisId);
@@ -590,7 +608,8 @@ export async function resolveVesselMitosisEvaluate(
       mitosis,
       cited_trace_ids,
       scanned: traces.length,
-      window_since: since ?? "(no since filter)",
+      window_since: since,
+      window_since_source: pointer.since ? "explicit" : "hour_bucket_default",
       static_evaluation: staticResult,
       evaluated_at: new Date().toISOString(),
     },

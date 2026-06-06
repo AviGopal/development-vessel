@@ -92,6 +92,24 @@ describe("vessel_mitosis_cutover", () => {
     expect((r.body as { detail: string }).detail).toContain("discovery-vessel");
   });
 
+  // V9 (2026-06-05): field validation must precede the protected-vessel
+  // guard so a pointer missing vessel_name produces a typed
+  // missing-required-field error instead of the misleading
+  // `refusing cutover on protected vessel: undefined`.
+  it("V9: missing vessel_name returns missing-field error not protected-vessel error", async () => {
+    const r = await resolveVesselMitosisCutover({
+      type: "vessel_mitosis_cutover",
+      base_version_id: "v1",
+      mitosis_version_id: "mitosis-X",
+      mitosis_root: "/tmp/x",
+      evaluation_evidence: FAVORABLE_EVIDENCE,
+    } as unknown as Parameters<typeof resolveVesselMitosisCutover>[0]);
+    expect(r.shape).toBe("structuredError");
+    const detail = (r.body as { detail: string }).detail;
+    expect(detail).toContain("missing required field: vessel_name");
+    expect(detail).not.toContain("protected vessel");
+  });
+
   it("refuses cutover from operator-anchor baseline (v0)", async () => {
     const r = await resolveVesselMitosisCutover({
       type: "vessel_mitosis_cutover",

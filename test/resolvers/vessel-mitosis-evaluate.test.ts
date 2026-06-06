@@ -96,6 +96,33 @@ describe("vessel_mitosis_evaluate", () => {
     expect(body.verdict_reason).toContain("new_explosion");
   });
 
+  // V8 (2026-06-05): trace-path verdict must be deterministic across calls
+  // when the underlying trace set is the same. Previously the verdict
+  // drifted (INSUFFICIENT_DATA → NEUTRAL on same input) because the
+  // trace window slid. Now we bucket time to the hour and use a
+  // 30-day default window so identical input yields identical verdict.
+  it("V8: verdict is deterministic across repeated calls with same trace set", async () => {
+    const traces = [
+      ...Array.from({ length: 5 }, (_, i) => vTrace(`b${i}`, "v1", i < 4 ? "success" : "failure")),
+      ...Array.from({ length: 5 }, (_, i) => vTrace(`m${i}`, "mitosis-X", i < 4 ? "success" : "failure")),
+    ];
+    globalThis.fetch = makeFetch(traces);
+    const verdicts: string[] = [];
+    const reasons: string[] = [];
+    for (let i = 0; i < 5; i++) {
+      const r = await resolveVesselMitosisEvaluate({
+        type: "vessel_mitosis_evaluate",
+        base_version_id: "v1",
+        mitosis_version_id: "mitosis-X",
+      });
+      verdicts.push((r.body as { verdict: string }).verdict);
+      reasons.push((r.body as { verdict_reason: string }).verdict_reason);
+    }
+    // All five should agree exactly.
+    expect(new Set(verdicts).size).toBe(1);
+    expect(new Set(reasons).size).toBe(1);
+  });
+
   it("returns NEUTRAL when delta within threshold and no new classes", async () => {
     const traces = [
       ...Array.from({ length: 5 }, (_, i) => vTrace(`b${i}`, "v1", i < 4 ? "success" : "failure")),

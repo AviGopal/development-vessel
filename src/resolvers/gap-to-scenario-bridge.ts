@@ -160,6 +160,12 @@ export async function resolveGapToScenarioBridge(
   return {
     shape: "bridgeResult",
     body: {
+      // V7 (2026-06-05): explicit idempotency counts. Existing fields kept
+      // for back-compat; `created` / `already_present` are the canonical
+      // labels surfaced to observers + the probe harness so successive
+      // dispatches with the same gap set show created=0.
+      created: out.length,
+      already_present: skippedExisting,
       scenarios_written: out.length,
       gaps_skipped_existing: skippedExisting,
       gaps_examined: examined,

@@ -275,7 +275,13 @@ export async function resolveApplyProposalAsPatch(pointer: ApplyProposalAsPatchP
     }
     const hasNewFiles = Array.isArray(pFull.new_files) && pFull.new_files.some((f) => typeof f?.path === "string" && typeof f?.content === "string");
     const mods = pFull.required_code_modifications ?? [];
-    const targetFile = mods.find((m) => typeof m?.file === "string")?.file;
+    // V13 fix (2026-06-06): drafter prompts variants emit the target under
+    // `required_modifications.primary_target.file` (singular, nested) instead
+    // of the canonical `required_code_modifications[].file`. Accept both —
+    // 193 proposals on disk all use the nested form, so without this fallback
+    // the chain reports 100% no_op despite the drafter doing real work.
+    const nestedTarget = (pFull as { required_modifications?: { primary_target?: { file?: string } } }).required_modifications?.primary_target?.file;
+    const targetFile = mods.find((m) => typeof m?.file === "string")?.file ?? (typeof nestedTarget === "string" ? nestedTarget : undefined);
     if (!targetFile && !hasNewFiles) { skipped.push({ proposal: e.name, reason: "no_required_code_modifications" }); continue; }
     chosen = { name: e.name, path: e.path, scenarioId, content, targetFile: targetFile ?? "" };
     break;

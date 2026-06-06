@@ -281,8 +281,38 @@ export async function resolveApplyProposalAsPatch(pointer: ApplyProposalAsPatchP
     // 193 proposals on disk all use the nested form, so without this fallback
     // the chain reports 100% no_op despite the drafter doing real work.
     const nestedTarget = (pFull as { required_modifications?: { primary_target?: { file?: string } } }).required_modifications?.primary_target?.file;
-    const targetFile = mods.find((m) => typeof m?.file === "string")?.file ?? (typeof nestedTarget === "string" ? nestedTarget : undefined);
-    if (!targetFile && !hasNewFiles) { skipped.push({ proposal: e.name, reason: "no_required_code_modifications" }); continue; }
+    // V14 fix (2026-06-06): the drafter writes proposals shaped as
+    // `{autoDraftedOutput_<id>: {required_code_modifications: [...], ...}}` —
+    // the LLM tail wraps its output under that key. Scan one level deep for
+    // required_code_modifications / required_modifications / new_files when
+    // the top level lacks them. This unwraps the natural-cycle drafter output
+    // so apply→cutover→commit can run from autonomous traces, not just
+    // operator-seeded canonical proposals.
+    let wrappedTarget: string | undefined;
+    let wrappedNewFiles: Array<{ path?: string; content?: string }> | undefined;
+    if (!mods.length && !nestedTarget && !hasNewFiles) {
+      for (const k of Object.keys(pFull)) {
+        if (!k.startsWith("autoDraftedOutput_")) continue;
+        const inner = (pFull as Record<string, unknown>)[k];
+        if (!inner || typeof inner !== "object") continue;
+        const innerObj = inner as { required_code_modifications?: Array<{ file?: string }>; required_modifications?: { primary_target?: { file?: string } }; new_files?: Array<{ path?: string; content?: string }> };
+        if (Array.isArray(innerObj.required_code_modifications)) {
+          const t = innerObj.required_code_modifications.find((m) => typeof m?.file === "string")?.file;
+          if (typeof t === "string") { wrappedTarget = t; break; }
+        }
+        const nt = innerObj.required_modifications?.primary_target?.file;
+        if (typeof nt === "string") { wrappedTarget = nt; break; }
+        if (Array.isArray(innerObj.new_files) && innerObj.new_files.some((f) => typeof f?.path === "string" && typeof f?.content === "string")) {
+          wrappedNewFiles = innerObj.new_files;
+          break;
+        }
+      }
+    }
+    const targetFile = mods.find((m) => typeof m?.file === "string")?.file
+      ?? (typeof nestedTarget === "string" ? nestedTarget : undefined)
+      ?? wrappedTarget;
+    const effectiveHasNewFiles = hasNewFiles || (Array.isArray(wrappedNewFiles) && wrappedNewFiles.length > 0);
+    if (!targetFile && !effectiveHasNewFiles) { skipped.push({ proposal: e.name, reason: "no_required_code_modifications" }); continue; }
     chosen = { name: e.name, path: e.path, scenarioId, content, targetFile: targetFile ?? "" };
     break;
   }

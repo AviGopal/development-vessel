@@ -3,6 +3,10 @@
 // vessel from that prefix via deriveVesselFromPath(). Proposals lacking this field are skipped with
 // reason="no_required_code_modifications".
 
+// Schema reminder for future audits: drafter MUST emit required_code_modifications[] not gap_analysis/recommendation. Canonical schema example:
+// { kind: 'patch_proposal', required_code_modifications: [{ file: 'repos/...', change_type: '...', search: '...', replace: '...' }] }
+//
+
 import type { ActivityTemplate } from "@avigopal/ias-executor-ts";
 
 const PROMPT_TEMPLATE = `You are helping build a self-improving activity system.

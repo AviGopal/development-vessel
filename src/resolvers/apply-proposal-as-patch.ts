@@ -236,7 +236,43 @@ export async function resolveApplyProposalAsPatch(pointer: ApplyProposalAsPatchP
     // Multi-file proposal (2026-06-05): proposals carrying `new_files[]` skip
     // the required_code_modifications check; the multi-file branch below picks
     // them up and writes each file's full content into the staged mitosis dir.
-    const pFull = parsed as { required_code_modifications?: Array<{ file?: string }>; new_files?: Array<{ path?: string; content?: string }> };
+    const pFull = parsed as { kind?: string; required_code_modifications?: Array<{ file?: string }>; new_files?: Array<{ path?: string; content?: string }>; vessel_shape_coverage?: unknown; trace_family_distribution?: unknown; [k: string]: unknown };
+    // V4 fix (2026-06-06): kind discriminator. The /workspace/proposals/ dir
+    // mixes patch_proposals (with required_code_modifications[] or new_files[])
+    // and legacy vessel_shape_coverage analytic reports (under a wrapper key
+    // like `autoDraftedOutput_*` whose value contains vessel_shape_coverage +
+    // trace_family_distribution). Pre-filter the analytic reports so the
+    // probe sees a cleaner skipped-reason stream and S4 isn't dominated by
+    // legacy artifacts.
+    //   - Explicit kind: respect it.
+    //   - Implicit: any nested vessel_shape_coverage or trace_family_distribution
+    //     key (root or one level deep under an `autoDraftedOutput_*` wrapper)
+    //     marks the report as an analytic non-patch.
+    const explicitKind = typeof pFull.kind === "string" ? pFull.kind : null;
+    let isAnalyticReport = false;
+    if (explicitKind && explicitKind !== "patch_proposal") {
+      isAnalyticReport = true;
+    } else if (!explicitKind) {
+      const hasCoverageKey = (obj: unknown): boolean =>
+        obj != null && typeof obj === "object" && (
+          "vessel_shape_coverage" in (obj as Record<string, unknown>) ||
+          "trace_family_distribution" in (obj as Record<string, unknown>)
+        );
+      if (hasCoverageKey(pFull)) {
+        isAnalyticReport = true;
+      } else {
+        for (const k of Object.keys(pFull)) {
+          if (k.startsWith("autoDraftedOutput_") && hasCoverageKey(pFull[k])) {
+            isAnalyticReport = true;
+            break;
+          }
+        }
+      }
+    }
+    if (isAnalyticReport) {
+      skipped.push({ proposal: e.name, reason: "analytic_report_not_patch_proposal" });
+      continue;
+    }
     const hasNewFiles = Array.isArray(pFull.new_files) && pFull.new_files.some((f) => typeof f?.path === "string" && typeof f?.content === "string");
     const mods = pFull.required_code_modifications ?? [];
     const targetFile = mods.find((m) => typeof m?.file === "string")?.file;
@@ -260,10 +296,11 @@ export async function resolveApplyProposalAsPatch(pointer: ApplyProposalAsPatchP
   // chain ships new-resolver scaffolds; vessel-mitosis-cutover already accepts
   // N staged_files via host-sync intent. The search/replace path below remains
   // the canonical single-file flow.
-  let parsedFull: { new_files?: Array<{ path?: string; content?: string }>; required_code_modifications?: Array<{ file?: string }> } | null = null;
+  type ParsedFull = { new_files?: Array<{ path?: string; content?: string }>; required_code_modifications?: Array<{ file?: string }> };
+  let parsedFull: ParsedFull | null = null;
   const tolerantFull = parseFirstJsonObject(chosen.content);
-  if (tolerantFull && typeof tolerantFull === "object") parsedFull = tolerantFull as typeof parsedFull;
-  const newFiles = (parsedFull?.new_files ?? []).filter(
+  if (tolerantFull && typeof tolerantFull === "object") parsedFull = tolerantFull as ParsedFull;
+  const newFiles = ((parsedFull?.new_files ?? []) as Array<{ path?: string; content?: string }>).filter(
     (f): f is { path: string; content: string } =>
       f != null && typeof f.path === "string" && typeof f.content === "string",
   );

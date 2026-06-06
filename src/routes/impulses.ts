@@ -426,6 +426,26 @@ impulsesRouter.post("/v2/impulses/resolve", async (c) => {
 
   try {
     const result = await resolveDispatch({ ...(pointer as Record<string, unknown>), type: pointerType });
+    // Wire-level boundary lie fix (V1, 2026-06-06): a resolver that returns
+    // shape:"structuredError" is signalling a substantive failure (missing
+    // required field, vessel-not-found, etc). The HTTP envelope must reflect
+    // that — otherwise callers (boredom, light-dispatch, the probe harness)
+    // that trust `success:true` record Thompson wins for what is actually a
+    // failure. Phase 2 probe observed this exact pattern on
+    // vessel_mitosis_cutover: success=true + shape=structuredError + zero
+    // intents emitted. Soft-refuse paths (e.g. vesselMitosisCutoverResult
+    // with applied:false) remain success:true — they are audited NOs, not
+    // boundary lies.
+    if (result.shape === "structuredError") {
+      const detail =
+        (result.body as Record<string, unknown> | undefined)?.["detail"];
+      return c.json({
+        success: false,
+        shape: result.shape,
+        body: result.body,
+        error: typeof detail === "string" ? detail : "structuredError",
+      });
+    }
     return c.json({ success: true, shape: result.shape, body: result.body });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);

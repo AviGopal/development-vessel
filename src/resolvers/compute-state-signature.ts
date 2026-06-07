@@ -313,6 +313,44 @@ export async function resolveComputeStateSignature(
     }
   }
 
+  // ACTIVITY-CLASS AXIS (signature widening, 2026-06-07).
+  // Observation: with only 5 hash fields (load/mem/sr/op/lcc) the substrate
+  // collapsed to 2 distinct signatures over 4h, meaning the pool exists in
+  // bimodal operation (drafter-heavy vs observer-heavy) without distinguishing
+  // which one. Add a coarse axis describing the DOMINANT recent activity class
+  // so Thompson can learn separate posteriors per operational mode without
+  // breaking the coarsening discipline (still discrete; still few classes).
+  //
+  // Five operational classes mapped from template id substrings:
+  //   1=drafter, 2=mitosis, 3=apply, 4=observer, 5=audit, 0=mixed/idle
+  // Derived from the top-K most-executed templates in the recent_traces window.
+  let dominantActivityClass = 0;
+  if (tracesResp && typeof tracesResp === "object") {
+    const obj = tracesResp as Record<string, unknown>;
+    const traces = (obj.executions ?? obj.traces ?? []) as Array<Record<string, unknown>>;
+    if (Array.isArray(traces) && traces.length > 0) {
+      const counts: Record<number, number> = { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 };
+      const now = Date.now();
+      const cutoff = now - windowMs;
+      for (const t of traces) {
+        const ts = typeof t.executed_at === "string" ? Date.parse(t.executed_at) : 0;
+        if (ts !== 0 && ts < cutoff) continue;
+        const tid = typeof t.template_id === "string" ? t.template_id : "";
+        if (tid.includes("draft") || tid.includes("dispatch-latest-auto-draft")) counts[1]! += 1;
+        else if (tid.includes("mitosis")) counts[2]! += 1;
+        else if (tid.includes("apply-proposal") || tid.includes("apply_proposal")) counts[3]! += 1;
+        else if (tid.includes("observer-tick") || tid.includes("dropped")) counts[4]! += 1;
+        else if (tid.includes("audit-tick") || tid.includes("health-tick")) counts[5]! += 1;
+      }
+      let topClass = 0;
+      let topCount = 0;
+      for (const k of [1, 2, 3, 4, 5]) {
+        if ((counts[k] ?? 0) > topCount) { topClass = k; topCount = counts[k] ?? 0; }
+      }
+      dominantActivityClass = topClass;
+    }
+  }
+
   // Round numeric fields for hash determinism.
   const loadRounded = Math.round(loadRes.load_avg_1m * 10) / 10;
   const memRounded = Math.round(memRes.mem_used_pct);
@@ -391,6 +429,8 @@ export async function resolveComputeStateSignature(
     op: opPresenceTier,
     // concept-prior bucket (no priors / few / many)
     lcc: Math.floor(loadedConceptCount / 5),
+    // activity-class axis (V16 widening 2026-06-07) — discrete 0-5
+    act: dominantActivityClass,
   };
   // Reference unused buckets so lint stays clean — they're retained in the
   // observability body even though they no longer affect the hash.
@@ -440,6 +480,7 @@ export async function resolveComputeStateSignature(
         // Surface a sample for inspection. Full list is in the hash payload.
         loaded_concept_ids_sample: loadedConceptIds.slice(0, 5),
       },
+      dominant_activity_class: dominantActivityClass,
       signature_hash,
     },
   };

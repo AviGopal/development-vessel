@@ -59,6 +59,7 @@ import { DETECT_CLASSIFIER_DISTRIBUTION_SKEW_TEMPLATE } from "./detect-classifie
 import { DETECT_FEATURE_FLAG_ZERO_EXERCISE_TEMPLATE } from "./detect-feature-flag-zero-exercise.js";
 import { DETECT_FILTER_SATURATION_TEMPLATE } from "./detect-filter-saturation.js";
 import { MECHANISM_HEALTH_TICK_TEMPLATE } from "./mechanism-health-tick.js";
+import { DRAFTER_TRIGGER_TICK_TEMPLATE } from "./drafter-trigger-tick.js";
 // Phase 3 — closed-loop learning and verification
 // (openspec/changes/2026-06-01-closed-loop-learning-and-verification/)
 import { DETECT_RECURRING_PATTERN_TEMPLATE } from "./detect-recurring-pattern.js";
@@ -188,6 +189,7 @@ export { DETECT_CLASSIFIER_DISTRIBUTION_SKEW_TEMPLATE } from "./detect-classifie
 export { DETECT_FEATURE_FLAG_ZERO_EXERCISE_TEMPLATE } from "./detect-feature-flag-zero-exercise.js";
 export { DETECT_FILTER_SATURATION_TEMPLATE } from "./detect-filter-saturation.js";
 export { MECHANISM_HEALTH_TICK_TEMPLATE } from "./mechanism-health-tick.js";
+export { DRAFTER_TRIGGER_TICK_TEMPLATE } from "./drafter-trigger-tick.js";
 
 export const SEED_TEMPLATES: ActivityTemplate[] = [
   SHIP_CHANGE_TEMPLATE,
@@ -207,6 +209,12 @@ export const SEED_TEMPLATES: ActivityTemplate[] = [
   SUBSTRATE_HEALTH_TICK_TEMPLATE,
   // harness-as-lifecycle-participant (§2)
   HARNESS_RUN_MATRIX_TEMPLATE,
+  // drafter-trigger-tick (V18, 2026-06-07) — bridges boredom rotation to the
+  // drafter's variable-supply requirement. Lists scenarios dir, picks the
+  // first one, dispatches draft-gap-closing-activity via light-dispatch with
+  // scenario_id + paths filled in. Without this template the producer chain
+  // dead-ends at goal[8] precondition-rejection.
+  DRAFTER_TRIGGER_TICK_TEMPLATE,
   // minimum activity loop — try → trace → learn (operator directive 2026-05-28)
   TRY_DIRECT_ANSWER_TEMPLATE,
   // self-healing: closes diagnostic→action loop for confidence gap (2026-05-28)

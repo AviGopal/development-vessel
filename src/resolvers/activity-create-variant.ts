@@ -258,13 +258,40 @@ export async function resolveActivityCreateVariant(pointer: ActivityCreateVarian
   // Template may arrive as a JSON string (from LLM output via interpolation); parse if needed.
   let templateObj: unknown = pointer.template;
   if (typeof templateObj === "string") {
-    // Strip markdown code fences if present (LLM output often wraps JSON in ```json...```).
-    // Also handle case where only the JSON object is extracted (first { ... last }).
-    let stripped = templateObj.replace(/^```(?:json)?\n?/i, "").replace(/\n?```$/i, "").trim();
-    const jsonStart = stripped.indexOf("{");
-    const jsonEnd = stripped.lastIndexOf("}");
-    if (jsonStart > 0) stripped = stripped.slice(jsonStart, jsonEnd + 1);
-    try { templateObj = JSON.parse(stripped); } catch { /* leave as string; API will reject with clear error */ }
+    // V20 (2026-06-07): use a brace-depth-aware walker to extract the FIRST
+    // balanced JSON object — the same primitive apply-proposal-as-patch uses
+    // (commit d6ec0aa). The previous lastIndexOf approach failed when the LLM
+    // emitted multi-block JSON or trailing commentary, leaving an unbalanced
+    // slice that JSON.parse rejected → activity-api validator received the
+    // raw string and 400'd with "Expected object, received string". The
+    // walker handles markdown fences, leading prose, and multi-object tails.
+    const raw = templateObj.replace(/^```(?:json)?\n?/i, "").trimStart();
+    const startIdx = raw.indexOf("{");
+    if (startIdx >= 0) {
+      let depth = 0;
+      let inStr = false;
+      let escape = false;
+      let endIdx = -1;
+      for (let i = startIdx; i < raw.length; i++) {
+        const ch = raw[i]!;
+        if (escape) { escape = false; continue; }
+        if (inStr) {
+          if (ch === "\\") { escape = true; continue; }
+          if (ch === '"') inStr = false;
+          continue;
+        }
+        if (ch === '"') { inStr = true; continue; }
+        if (ch === "{") depth++;
+        else if (ch === "}") {
+          depth--;
+          if (depth === 0) { endIdx = i; break; }
+        }
+      }
+      if (endIdx > startIdx) {
+        const candidate = raw.slice(startIdx, endIdx + 1);
+        try { templateObj = JSON.parse(candidate); } catch { /* leave as string; API will 400 with clear error */ }
+      }
+    }
   }
   // Normalize camelCase → snake_case shape fields so activity-api's Zod schema reads them.
   // TypeScript ActivityTemplate uses camelCase (outputShapes, inputShapes); the API reads snake_case.

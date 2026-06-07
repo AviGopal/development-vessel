@@ -4,6 +4,12 @@ export interface JsonPathExtractPointer {
   type: "json_path_extract";
   json: string | unknown; // string (JSON text) or pre-parsed object (from interpolateVars exact-match substitution)
   path: string; // dot-notation path, e.g. "expected_emergence.activity_signature.output_shapes_must_include"
+  /**
+   * Optional suffix to strip from the extracted value when it's a string.
+   * Useful for derived ids like "auto-foo.json" → "auto-foo" without
+   * needing a separate string resolver. (V18 producer-chain support, 2026-06-07).
+   */
+  strip_suffix?: string;
 }
 
 /**
@@ -77,6 +83,13 @@ export async function resolveJsonPathExtract(pointer: JsonPathExtractPointer): P
 
   if (current === null) {
     return missingResult(pointer.path, "path resolved to null");
+  }
+
+  // Optional suffix strip (V18 2026-06-07): applies when value is a string
+  // and ends with the supplied suffix. Lets callers derive a bare scenario id
+  // from "scenario.json" without a separate string-transform resolver.
+  if (typeof current === "string" && typeof pointer.strip_suffix === "string" && pointer.strip_suffix.length > 0 && current.endsWith(pointer.strip_suffix)) {
+    current = current.slice(0, current.length - pointer.strip_suffix.length);
   }
 
   return {

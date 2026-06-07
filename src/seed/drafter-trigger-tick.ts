@@ -84,13 +84,14 @@ export const DRAFTER_TRIGGER_TICK_TEMPLATE: ActivityTemplate = {
       id: "extract_scenario_id",
       description:
         "Strip .json extension from the filename to get the scenario_id. " +
-        "harness-check-scenario uses the same {scenarios_dir}/{scenario_id}.json " +
-        "construction so the id alone is enough.",
+        "draft-gap-closing-activity's read_scenario task constructs " +
+        "{scenarios_dir}/{scenario_id}.json so we must NOT pass .json here.",
       resolver: "json_path_extract",
       config: {
         type: "json_path_extract",
         json: "{\"name\":\"{{extract_scenario_name_value}}\"}",
         path: "name",
+        strip_suffix: ".json",
       },
       outputShapes: ["json_extracted_value"],
     },

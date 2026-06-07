@@ -144,7 +144,20 @@ export const DRAFT_GAP_CLOSING_ACTIVITY_TEMPLATE: ActivityTemplate = {
   // The fs_read-from-variable-paths pattern is the actual data flow.
   inputShapes: [],
   outputShapes: ["activityTemplateProposal", "activityTemplateVariant"],
-  tags: ["lift.autonomous.loop", "validation.failure.modes", "gap.closing"],
+  // boredom_target_template tag (V17, 2026-06-07) — entry into boredom's
+  // dispatch rotation. Without this tag the drafter only fires when explicitly
+  // triggered by an operator via light-dispatch, breaking the autonomy loop:
+  // no drafter → no new gap-closing:auto-* variants registered → goal[22]
+  // (dispatch-latest-auto-draft) re-runs only the pre-V15 variants → no
+  // canonical patch_proposal output → apply-proposal-as-patch starves.
+  // Adding the tag puts the drafter into Thompson rotation so it fires on
+  // its own cadence, closing the autonomy bootstrap.
+  tags: [
+    "lift.autonomous.loop",
+    "validation.failure.modes",
+    "gap.closing",
+    "boredom_target_template",
+  ],
   variables: [
     {
       name: "report_path",

@@ -76,7 +76,12 @@ export const MITOSIS_TICK_TEMPLATE: ActivityTemplate = {
     "the verdict is FAVORABLE. Refuse traces ARE the substrate's audited NO; " +
     "accept traces are the audited YES. Closes the lift loop: detect → modify → " +
     "evaluate → cutover, no operator hand in the modify path.",
-  inputShapes: [],
+  // V24d pipeline-pull (2026-06-08): declare mitosisStaged as input shape.
+  // apply-proposal-as-patch emits mitosisStaged when it succeeds. When V24d's
+  // selector sees a fresh mitosisStaged in recent traces, mitosis-tick's
+  // score lifts 2x so it cuts over immediately instead of waiting for random
+  // exploration to roll its way around.
+  inputShapes: ["mitosisStaged"],
   outputShapes: [
     "vesselMitosisEvaluation",
     "vesselMitosisCutoverResult",

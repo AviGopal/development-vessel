@@ -28,7 +28,13 @@ export const DISPATCH_LATEST_AUTO_DRAFT_TEMPLATE: ActivityTemplate = {
     "Finds the newest unexecuted gap-closing:auto-* template and posts a " +
     "light-dispatch invocation to seed its Thompson posterior. Idempotent — " +
     "skips templates already exercised by recent traces.",
-  inputShapes: [],
+  // V24d pipeline-pull (2026-06-08): declare activityTemplateVariant as the
+  // input shape. This template runs the LATEST unexecuted gap-closing variant,
+  // so its natural producer is draft-gap-closing-activity (which outputs
+  // activityTemplateVariant). When V24d's selector sees a fresh
+  // activityTemplateVariant impulse in recent traces, it lifts this template's
+  // score 2x — chain self-pulls instead of relying on uniform exploration.
+  inputShapes: ["activityTemplateVariant"],
   outputShapes: ["autoDraftDispatchResult"],
   tags: [
     "intent:auto_draft_seed",

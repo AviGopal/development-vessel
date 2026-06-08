@@ -27,7 +27,12 @@ export const APPLY_PROPOSAL_AS_PATCH_TEMPLATE: ActivityTemplate = {
     "the live target source identified by required_code_modifications[].file, " +
     "stages /vessels/<vessel>-mitosis-<TS>/<sub_path>, and writes " +
     "/workspace/mitosis-pending.json with staged_base_sha for the cutover gate.",
-  inputShapes: [],
+  // V24d pipeline-pull (2026-06-08): declare autoDraftDispatchResult as input.
+  // dispatch-latest-auto-draft emits autoDraftDispatchResult when it executes a
+  // gap-closing variant — that's when fresh proposal files land on disk for
+  // apply-proposal-as-patch to consume. Selector lifts this template 2x when
+  // dispatch-latest-auto-draft has recently run.
+  inputShapes: ["autoDraftDispatchResult"],
   outputShapes: ["mitosisStaged", "structuredError"],
   tags: [
     "intent:apply_proposal",

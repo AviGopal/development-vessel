@@ -34,7 +34,12 @@ export const DISPATCH_LATEST_AUTO_DRAFT_TEMPLATE: ActivityTemplate = {
   // activityTemplateVariant). When V24d's selector sees a fresh
   // activityTemplateVariant impulse in recent traces, it lifts this template's
   // score 2x — chain self-pulls instead of relying on uniform exploration.
-  inputShapes: ["activityTemplateVariant"],
+  // V24e (2026-06-08): use the shape that actually appears in execution-traces
+  // output_shapes when drafter runs (activityRegistryChange), not the template-
+  // level declared output (activityTemplateVariant). The selector reads
+  // recent-trace output_shapes, so input declarations must match what gets
+  // recorded there, not what templates nominally produce.
+  inputShapes: ["activityRegistryChange"],
   outputShapes: ["autoDraftDispatchResult"],
   tags: [
     "intent:auto_draft_seed",

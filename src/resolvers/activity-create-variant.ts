@@ -103,6 +103,12 @@ export const KNOWN_SEEDABLE_SHAPES: ReadonlySet<string> = new Set([
  *  parent_execution_id read-walk cap (16) at engine.ts. */
 export const MAX_COMPOSITION_DEPTH = 16;
 
+/** Canonical substrate LLM model. Foreign model ids the drafter LLM emits in
+ *  llm_completion_dispatch task configs (gpt-4, gpt-4-turbo, …) are rewritten to
+ *  this at registration so authored chains are executable against the
+ *  Anthropic-backed llm-resolver-vessel. */
+const CANONICAL_LLM_MODEL = "anthropic/claude-haiku-4-5-20251001";
+
 /** Description discipline (I4): minimum length and forbidden values. */
 const MIN_DESCRIPTION_LENGTH = 40;
 const FORBIDDEN_DESCRIPTIONS = new Set(["", "todo", "tbd", "fixme", "xxx"]);
@@ -500,6 +506,21 @@ export async function resolveActivityCreateVariant(pointer: ActivityCreateVarian
         const tt = { ...(task as Record<string, unknown>) };
         if (!tt["description"] && tt["name"]) { tt["description"] = tt["name"]; delete tt["name"]; }
         if (!tt["config"] && tt["params"]) { tt["config"] = tt["params"]; delete tt["params"]; }
+        // Deterministically pin foreign LLM model ids to the canonical substrate
+        // model. The drafter LLM (haiku) routinely emits non-substrate ids like
+        // "gpt-4" / "gpt-4-turbo" in llm_completion_dispatch tasks despite prompt
+        // instructions; the substrate's llm-resolver-vessel is Anthropic-backed,
+        // so a foreign id makes the authored chain unexecutable. This mirrors the
+        // gap drafter's enforceCanonicalAnalyzePrompt: enforce in code what the LLM
+        // cannot be trusted to get right. Anything not already an anthropic/* id is
+        // rewritten to the canonical default.
+        if (String(tt["resolver"]) === "llm_completion_dispatch" && tt["config"] && typeof tt["config"] === "object") {
+          const cfg = tt["config"] as Record<string, unknown>;
+          const model = typeof cfg["model"] === "string" ? cfg["model"] : "";
+          if (!model.startsWith("anthropic/")) {
+            cfg["model"] = CANONICAL_LLM_MODEL;
+          }
+        }
         if (!tt["outputShapes"] && tt["produces"]) { tt["outputShapes"] = typeof tt["produces"] === "string" ? [tt["produces"]] : tt["produces"]; delete tt["produces"]; }
         if (!tt["inputShapes"] && tt["consumes"]) { tt["inputShapes"] = typeof tt["consumes"] === "string" ? [tt["consumes"]] : tt["consumes"]; delete tt["consumes"]; }
         return tt;

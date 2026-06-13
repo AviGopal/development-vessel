@@ -40,8 +40,10 @@ export interface ComprehensibilityCheckPointer {
   type: "comprehensibility_check";
   /** Either `template_id` (fetched from activity-api) or `template_json` must be present. */
   template_id?: string;
-  /** Inline template object — same shape as ActivityTemplate. */
-  template_json?: Record<string, unknown>;
+  /** Inline template — an ActivityTemplate object, or the raw JSON string the
+   *  drafter produces (the engine interpolates `{{draft_via_llm_text}}` to a
+   *  string; it is parsed on entry). */
+  template_json?: Record<string, unknown> | string;
   /** Evaluator model. Defaults to anthropic/claude-haiku-4-5-20251001. */
   model?: string;
   /** Comprehensibility floor; below this the template is refused promotion. */
@@ -204,6 +206,25 @@ async function defaultLlmDispatch(prompt: string, model: string): Promise<string
   return result.content ?? result.data ?? "";
 }
 
+/** Parse a raw (possibly markdown-fenced) LLM template string into an object.
+ *  Returns null when no JSON object can be recovered. Mirrors the tolerant
+ *  extraction activity_create_variant applies to the same `{{draft_via_llm_text}}`. */
+function coerceTemplateString(text: string): Record<string, unknown> | null {
+  const stripped = text
+    .replace(/^```(?:json)?\n?/i, "")
+    .replace(/\n?```\s*$/i, "")
+    .trim();
+  const start = stripped.indexOf("{");
+  const end = stripped.lastIndexOf("}");
+  if (start === -1 || end === -1 || end <= start) return null;
+  try {
+    const parsed = JSON.parse(stripped.slice(start, end + 1));
+    return parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>) : null;
+  } catch {
+    return null;
+  }
+}
+
 function tryParseJson(text: string): { what?: string; why?: string; when_useful?: string } {
   // LLMs occasionally wrap in markdown fences or add prose. Strip and extract
   // the outermost JSON object.
@@ -226,6 +247,18 @@ export async function resolveComprehensibilityCheck(
 ): Promise<ResolverResult> {
   let template = pointer.template_json ?? null;
   let templateIdForReport: string | null = pointer.template_id ?? null;
+
+  // The drafter wires this resolver as `template_json: "{{draft_via_llm_text}}"`,
+  // and the engine interpolates that to the raw LLM STRING — not a parsed object.
+  // Without this coercion `template["description"]`/`["name"]` index into a string,
+  // selfDesc comes back empty, and every authored chain scores 0.000 against the
+  // 0.6 floor regardless of how comprehensible it actually is (the blind-LLM
+  // answers were coherent; only the self-description side was empty). Parse a
+  // string template the same tolerant way activity_create_variant does so the
+  // gate scores real chains instead of unconditionally refusing them.
+  if (typeof template === "string") {
+    template = coerceTemplateString(template);
+  }
 
   if (!template && pointer.template_id) {
     template = await fetchTemplate(pointer.template_id);

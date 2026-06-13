@@ -89,11 +89,47 @@ You will be given:
 
 ${PROMPT_AUTHORING_DISCIPLINE}
 
-== PATTERN CLUSTER ==
+== PATTERN CLUSTER (author a REAL resolver chain that performs this topology) ==
+{{load_cluster_content}}
+
+This cluster is the actual recurrent topology observed in traces. Your job is
+NOT to describe or analyse it — it is to COMPOSE a reusable activity whose tasks
+are real resolver calls that PERFORM the work the cluster recurs over. Each task
+must name a concrete resolver (fs_read, fs_write, http_fetch, llm_completion_dispatch,
+json_path_extract, compose, or any resolver listed in the pruned vocabulary below)
+and declare the outputShapes it produces, so that executing the registered template
+actually yields the cluster's output shapes. Do NOT author a read→analyse→write
+meta-activity that merely emits a description; author the chain that does the thing.
+
+== CONCEPT PRIORS (from concept-db; cite the relevant ones) ==
 {{prime_concepts_text}}
 
 == PRUNED RESOLVER + ACTIVITY VOCABULARIES ==
 {{prune_vocabulary_text}}
+
+== REQUIRED RESOLVER CONFIG CONTRACTS (an authored chain only closes the gap if it EXECUTES — use these exact field names) ==
+
+Each task is { "id", "description" (>=40 chars), "resolver", "config", "outputShapes": [...] }.
+Use ONLY these resolvers and these exact config shapes:
+
+- fs_read:   { "type": "fs_read", "path": "<ABSOLUTE path under /workspace>" }
+- fs_write:  { "type": "fs_write", "path": "/workspace/<dir>/<file>", "content": "<string>" }
+- http_fetch GET:  { "type": "http_fetch", "url": "http://127.0.0.1:<port>/...", "method": "GET" }
+- http_fetch POST: { "type": "http_fetch", "url": "http://127.0.0.1:<port>/...", "method": "POST", "headers": { "Content-Type": "application/json" }, "body": "<JSON string>" }
+  The field is "url" (NOT "uri"). "body" is a JSON STRING, not an object. There is no "body_template".
+- llm_completion_dispatch: { "type": "llm_completion_dispatch", "prompt": "<text, may reference {{<prior_task_id>_text}}>", "model": "anthropic/claude-haiku-4-5-20251001", "max_tokens": 1000 }
+  model MUST be a substrate model id (anthropic/claude-haiku-4-5-20251001). Never "gpt-4-turbo" or other non-substrate ids. No "temperature" field.
+- json_path_extract: { "type": "json_path_extract", "json": "{{<prior_task_id>_text}}", "path": "<dotted.path>" }
+
+Cross-task data flows through {{<prior_task_id>_text}} interpolation (the raw text output of an earlier task). There is no {{shape.field}} addressing — to use a field from a prior JSON output, either json_path_extract it into its own task first, or pass the whole {{<task>_text}} into the next prompt.
+
+Substrate write endpoints (use http_fetch POST with a JSON-string body of EXACTLY this shape):
+- concept_create_write → http://127.0.0.1:8260/v2/impulses/resolve
+  body (stringified): {"pointer":{"type":"concept_create_write","conceptData":{"shape":"<snake_case>","source_type":"extracted","summary":"<text>","content":"<text>","priority":0.5,"budget":2000}}}
+- substrateGap_write → http://127.0.0.1:8270/v2/impulses/resolve
+- activity-api reads (traces, templates, distribution) → http://127.0.0.1:8080/...
+
+The LAST task MUST produce the cluster's output shape so executing the template yields it.
 
 Output ONLY a single JSON object matching the ActivityTemplate shape. No
 markdown fences, no surrounding prose. The id MUST begin with
@@ -115,24 +151,58 @@ export const DRAFT_ACTIVITY_FROM_PATTERN_TEMPLATE: ActivityTemplate = {
     "activity_create_variant, then by convergent_validity_check and comprehensibility_check. " +
     "Companion to draft-gap-closing-activity (the scenario-driven analytical drafter); " +
     "they coexist orthogonally.",
-  inputShapes: ["recurringPatternCluster"],
+  // No template-level inputShapes: the cluster is loaded by the load_cluster
+  // fs_read task from the path the feeder (detect-recurring-pattern) wrote.
+  // Declaring recurringPatternCluster as a pool-seeded input triggered the same
+  // F25 precondition-rejection the gap drafter hit — recurringPatternCluster is
+  // not in KNOWN_SEEDABLE_SHAPES, so the autonomous /recommend filter skipped
+  // this template entirely. The fs_read-from-variable-path is the real dataflow,
+  // and it lets boredom Thompson rotation select the drafter (not just the
+  // feeder's direct targetTemplateId dispatch).
+  inputShapes: [],
   outputShapes: ["authoredActivityCandidate", "activityTemplateVariant"],
   tags: [
     "substrate.authored.drafter",
     "obsidian.meta.skill.phase2",
     "permissive.scope.authoring",
+    // boredom_target_template: without it the real-chain author only fires when
+    // detect-recurring-pattern's dispatch_drafter targets it. Adding the tag puts
+    // it in Thompson rotation so it self-drives once clusters exist — the dual of
+    // the gap drafter's own boredom_target_template tag.
+    "boredom_target_template",
   ],
   variables: [
+    // Aligned with the variables detect-recurring-pattern's dispatch_drafter
+    // actually sends (pattern_id + patterns_dir). The prior pattern_cluster_id /
+    // workspace_root names never matched the feeder, so the drafter was dispatched
+    // but could not locate its cluster — a silent mis-wire that left this author
+    // with zero live output.
     {
-      name: "pattern_cluster_id",
-      description: "Id of the recurringPatternCluster to author against",
+      name: "pattern_id",
+      description: "Id of the recurringPatternCluster to author against (matches the cluster file stem written by detect-recurring-pattern)",
     },
     {
-      name: "workspace_root",
-      description: "Workspace root for write paths",
+      name: "patterns_dir",
+      description: "Directory holding the cluster JSON files. Default /workspace/patterns.",
+      default: "/workspace/patterns",
     },
   ],
   tasks: [
+    {
+      id: "load_cluster",
+      description:
+        "Read the recurringPatternCluster JSON the feeder (detect-recurring-pattern) " +
+        "persisted at {{patterns_dir}}/{{pattern_id}}.json. This is the concrete " +
+        "topology — signature, member traces, contrast examples — the template is " +
+        "authored FROM. Without this load the drafter would author blind against " +
+        "generic concept-db results (the silent bug that left this author dead).",
+      resolver: "fs_read",
+      config: {
+        type: "fs_read",
+        path: "{{patterns_dir}}/{{pattern_id}}.json",
+      },
+      outputShapes: ["recurringPatternCluster"],
+    },
     {
       id: "prime_vocabulary",
       description:
@@ -179,7 +249,9 @@ export const DRAFT_ACTIVITY_FROM_PATTERN_TEMPLATE: ActivityTemplate = {
           "and activities (string array). Include only entries that materially help draft an activity " +
           "for the given pattern cluster.",
         prompt:
-          "Pattern cluster: {{prime_concepts_text}}\n\nFull vocabulary: {{prime_vocabulary_text}}\n\n" +
+          "Pattern cluster (the recurrent topology to author for): {{load_cluster_content}}\n\n" +
+          "Concept priors (for context only): {{prime_concepts_text}}\n\n" +
+          "Full vocabulary: {{prime_vocabulary_text}}\n\n" +
           "Return the pruned subset as JSON.",
         model: "anthropic/claude-haiku-4-5-20251001",
         max_tokens: 1500,
@@ -265,6 +337,17 @@ export const DRAFT_ACTIVITY_FROM_PATTERN_TEMPLATE: ActivityTemplate = {
         type: "comprehensibility_check",
         template_json: "{{draft_via_llm_text}}",
         model: "anthropic/claude-haiku-4-5-20251001",
+        // floor is calibrated to the CURRENT similarity metric (Jaccard token
+        // overlap), not to a semantic-cosine scale. A blind-LLM paraphrase vs a
+        // keyword-y self-description tops out around 0.3 by token overlap even for
+        // a perfectly clear template, so the resolver's 0.6 default rejected 100%
+        // of real authored chains (the v3 live drive scored 0.164 on a coherent
+        // chain). 0.12 sits in the discriminating gap: coherent reconstructions
+        // land ~0.15–0.30, while a template the blind LLM cannot explain scores
+        // ~0. UPGRADE PATH: when an embedding endpoint is exposed (the substrate
+        // already ships all-MiniLM-L6-v2 in activity-api), switch the resolver's
+        // similarity to cosine and raise this floor back toward 0.6.
+        floor: 0.12,
       },
       outputShapes: ["comprehensibilityScore"],
     },

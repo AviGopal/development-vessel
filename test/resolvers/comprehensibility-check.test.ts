@@ -96,6 +96,46 @@ describe("comprehensibility_check resolver", () => {
     expect(body.floor).toBe(0.6);
   });
 
+  it("parses a STRING template_json (the raw {{draft_via_llm_text}} the drafter wires) instead of scoring 0", async () => {
+    // Regression: the drafter wires `template_json: "{{draft_via_llm_text}}"`, which
+    // the engine interpolates to a raw JSON STRING. Indexing a string as an object
+    // left selfDesc empty and forced score 0.000 on every authored chain. The
+    // resolver must parse the string so the self-description populates.
+    const mockLlm = async () =>
+      JSON.stringify({
+        what:
+          "Performs targeted place edit persists result disk authored cluster small edit v2 contrast examples unchanged save behaviour small edit save",
+        why:
+          "proposed pattern authored small edit save substrate authored edit cycle performs targeted place edit persists result disk",
+        when_useful:
+          "fileContent editAuditLog load current file contents impulse pool edit step compute precise replacement target apply place edit exact string replacement record before after hashes audit log impulse",
+      });
+
+    const result = await resolveComprehensibilityCheck({
+      type: "comprehensibility_check",
+      // Pass the template as a raw JSON string, exactly as the engine delivers it.
+      template_json: JSON.stringify(sampleTemplate),
+      _llmFn: mockLlm,
+      floor: 0.3,
+    });
+
+    expect(result.shape).toBe("comprehensibilityScore");
+    const body = result.body as { overall_score: number; passed: boolean };
+    // Non-zero proves the self-description was recovered from the string.
+    expect(body.overall_score).toBeGreaterThan(0);
+    expect(body.passed).toBe(true);
+  });
+
+  it("returns input_error for an unparseable STRING template_json", async () => {
+    const result = await resolveComprehensibilityCheck({
+      type: "comprehensibility_check",
+      template_json: "this is not json at all",
+    });
+    expect(result.shape).toBe("structuredError");
+    const body = result.body as { failure_mode: string };
+    expect(body.failure_mode).toBe("input_error");
+  });
+
   it("returns input_error when neither template_id nor template_json is provided", async () => {
     const result = await resolveComprehensibilityCheck({
       type: "comprehensibility_check",

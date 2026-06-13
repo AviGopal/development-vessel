@@ -7,6 +7,7 @@ import { join } from "path";
 const testRoot = join(tmpdir(), `dev-vessel-bridge-${Date.now()}`);
 const gapsPath = join(testRoot, "gaps", "gaps.json");
 const scenariosDir = join(testRoot, "validation", "failure-modes", "scenarios");
+const vesselScenariosDir = join(testRoot, "validation", "failure-modes", "vessel-scenarios");
 
 function seed(gaps: unknown[]): void {
   rmSync(testRoot, { recursive: true, force: true });
@@ -129,6 +130,73 @@ describe("gap_to_scenario_bridge resolver", () => {
     // trace_quality gaps must NOT have been written
     expect(existsSync(join(scenariosDir, "tq-1.json"))).toBe(false);
     expect(existsSync(join(scenariosDir, "tq-4.json"))).toBe(false);
+  });
+
+  it("routes missing_capability gaps to the vessel-authoring queue, not the drafter", async () => {
+    seed([
+      {
+        id: "vessel-demand-conceptGraph-2026-06-13",
+        category: "missing_capability",
+        source: "substrate_detected",
+        summary: "Shape 'conceptGraph' required by 4 templates but no vessel advertises it.",
+        status: "open",
+        classification_metadata: {
+          gap_subtype: "vessel_demand",
+          shape: "conceptGraph",
+          template_count: 4,
+          sample_template_ids: ["t-1", "t-2"],
+        },
+      },
+      // a normal recombination gap alongside it
+      { id: "drift-1", category: "detector_drift", source: "operator_seed", summary: "drift", status: "open" },
+    ]);
+    const r = await resolveGapToScenarioBridge({ type: "gap_to_scenario_bridge" });
+    const body = r.body as {
+      created: number;
+      scenarios_written: number;
+      vessel_authoring_scenarios_written: number;
+      vessel_scenarios: Array<{ gap_id: string }>;
+    };
+    expect(body.created).toBe(2);
+    // recombination count excludes the capability gap
+    expect(body.scenarios_written).toBe(1);
+    expect(body.vessel_authoring_scenarios_written).toBe(1);
+
+    const capId = "vessel-demand-conceptGraph-2026-06-13";
+    // capability gap is NOT in the drafter's folder
+    expect(existsSync(join(scenariosDir, `${capId}.json`))).toBe(false);
+    // it IS in the vessel-authoring queue, tagged with the routing target
+    const capPath = join(vesselScenariosDir, `${capId}.json`);
+    expect(existsSync(capPath)).toBe(true);
+    const cap = JSON.parse(readFileSync(capPath, "utf-8"));
+    expect(cap.routing_class).toBe("vessel_authoring");
+    expect(cap.target_template_id).toBe("development-vessel:scaffold-and-publish-vessel");
+    expect(cap.capability_shape).toBe("conceptGraph");
+    expect(cap.demanding_template_count).toBe(4);
+    expect(cap.sample_template_ids).toEqual(["t-1", "t-2"]);
+
+    // recombination gap still carries its routing target
+    const drift = JSON.parse(readFileSync(join(scenariosDir, "drift-1.json"), "utf-8"));
+    expect(drift.routing_class).toBe("recombination");
+    expect(drift.target_template_id).toBe("development-vessel:draft-gap-closing-activity");
+  });
+
+  it("is idempotent for vessel-authoring gaps too", async () => {
+    const gap = {
+      id: "vessel-demand-foo",
+      category: "missing_capability",
+      source: "substrate_detected",
+      summary: "Shape 'foo' demanded, no supply.",
+      status: "open",
+      classification_metadata: { gap_subtype: "vessel_demand", shape: "foo", template_count: 3 },
+    };
+    seed([gap]);
+    const first = await resolveGapToScenarioBridge({ type: "gap_to_scenario_bridge" });
+    expect((first.body as { vessel_authoring_scenarios_written: number }).vessel_authoring_scenarios_written).toBe(1);
+    const second = await resolveGapToScenarioBridge({ type: "gap_to_scenario_bridge" });
+    const body = second.body as { vessel_authoring_scenarios_written: number; gaps_skipped_existing: number };
+    expect(body.vessel_authoring_scenarios_written).toBe(0);
+    expect(body.gaps_skipped_existing).toBe(1);
   });
 
   it("returns empty result when gaps file is missing", async () => {

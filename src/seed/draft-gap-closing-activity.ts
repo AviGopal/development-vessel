@@ -279,8 +279,33 @@ export const DRAFT_GAP_CLOSING_ACTIVITY_TEMPLATE: ActivityTemplate = {
       outputShapes: ["json_extracted_value"],
     },
     {
+      id: "write_proposal_draft",
+      description:
+        "Mirror the raw drafted-template text to a .draft.txt sibling for human " +
+        "audit. Kept OUT of the JSON envelope on purpose: the raw LLM output " +
+        "carries markdown fences, newlines, and unescaped quotes that cannot be " +
+        "embedded inside a JSON string without a JSON-escaping interpolation form " +
+        "(the engine has none — {{x_valueJson}} is a misnomer identical to " +
+        "{{x_text}}). The canonical, parsed template is persisted to activity-api " +
+        "by register_variant; this .txt is the verbatim copy.",
+      resolver: "fs_write",
+      config: {
+        type: "fs_write",
+        path: "{{proposals_dir}}/proposal-{{scenario_id}}.draft.txt",
+        content: "{{draft_via_llm_text}}",
+      },
+      outputShapes: ["fileWriteResult"],
+    },
+    {
       id: "write_proposal",
-      description: "Persist the drafted template as a proposal file with authored_by metadata.",
+      description:
+        "Persist a strictly-VALID-JSON provenance envelope for the drafted " +
+        "proposal. Only {{scenario_id}} (a filesystem-safe slug) is interpolated, " +
+        "so the emitted file always parses. The prior revision embedded " +
+        "{{draft_via_llm_text}} inside a JSON string slot, which made 100% of " +
+        "proposal-*.json files unparseable — a ghost-success where fs_write " +
+        "reported success while writing invalid JSON. The verbatim template lives " +
+        "in the .draft.txt sibling; the canonical one is registered in activity-api.",
       resolver: "fs_write",
       config: {
         type: "fs_write",
@@ -290,9 +315,8 @@ export const DRAFT_GAP_CLOSING_ACTIVITY_TEMPLATE: ActivityTemplate = {
             scenario_id: "{{scenario_id}}",
             authored_by: "make_activity_autonomous",
             registration_status: "draft",
-            created_at: new Date(0).toISOString(),
           },
-          template: "{{draft_via_llm_text}}",
+          template_artifact: "proposal-{{scenario_id}}.draft.txt",
         }),
       },
       outputShapes: ["activityTemplateProposal"],

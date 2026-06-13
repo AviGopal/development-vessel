@@ -99,6 +99,7 @@ import { resolveDiskSpaceObserver } from "../resolvers/disk-space-observer.js";
 import { resolveWorkspaceHygieneObserver } from "../resolvers/workspace-hygiene-observer.js";
 import { resolvePruneStaleMitosis } from "../resolvers/prune-stale-mitosis.js";
 import { resolveLearningSignalHealthObserver } from "../resolvers/learning-signal-health-observer.js";
+import { resolveCreditPrimedConcepts } from "../resolvers/credit-primed-concepts.js";
 import { resolveConceptDbHealthObserver } from "../resolvers/concept-db-health-observer.js";
 import { resolveDiscoveryVesselRegistryObserver } from "../resolvers/discovery-vessel-registry-observer.js";
 import { resolveSubstrateHeartbeatObserver } from "../resolvers/substrate-heartbeat-observer.js";
@@ -363,6 +364,10 @@ export async function resolveDispatch(pointer: AnyPointer): Promise<ResolverResu
     case "learning_signal_health_observer":
       return resolveLearningSignalHealthObserver(
         p as Parameters<typeof resolveLearningSignalHealthObserver>[0],
+      );
+    case "credit_primed_concepts":
+      return resolveCreditPrimedConcepts(
+        p as Parameters<typeof resolveCreditPrimedConcepts>[0],
       );
     case "concept_db_health_observer":
       return resolveConceptDbHealthObserver(

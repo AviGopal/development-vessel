@@ -433,5 +433,23 @@ export const DRAFT_GAP_CLOSING_ACTIVITY_TEMPLATE: ActivityTemplate = {
       },
       outputShapes: ["substrateLearningConcept"],
     },
+    {
+      id: "credit_primed_concepts",
+      description:
+        "FIX for the one-sided relevance signal (2026-06-13): the drafter primed " +
+        "the top concepts (recording LOADS only); reaching this terminal task means " +
+        "the draft+register chain succeeded, so credit those same primed concepts " +
+        "with outcome=success via concept-db's own usage endpoint. Makes concept " +
+        "relevance two-sided so it stops decaying with use. First-hand outcome " +
+        "reporting, read+written from concept-db — not re-derived.",
+      resolver: "credit_primed_concepts",
+      config: {
+        type: "credit_primed_concepts",
+        minRelevance: 0.3,
+        limit: 15,
+        outcome: "success",
+      },
+      outputShapes: ["conceptCreditResult"],
+    },
   ],
 };

@@ -392,6 +392,7 @@ export const config = {
       // LLM-provider quota signals derived from recent trace error patterns.
       "host_container_source_drift_observer",
       "disk_space_observer",
+      "workspace_hygiene_observer",
       "concept_db_health_observer",
       "discovery_vessel_registry_observer",
       "substrate_heartbeat_observer",

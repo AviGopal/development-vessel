@@ -235,6 +235,39 @@ export const DISK_SPACE_OBSERVER_TICK_TEMPLATE: ActivityTemplate = {
   ],
 };
 
+export const WORKSPACE_HYGIENE_OBSERVER_TICK_TEMPLATE: ActivityTemplate = {
+  id: "development-vessel:workspace-hygiene-observer-tick",
+  name: "workspace-hygiene-observer-tick",
+  description:
+    "Deterministic single-resolver wrapper around workspace_hygiene_observer. " +
+    "Counts /vessels/*-mitosis-* staging dirs (excluding the active pending one) " +
+    "and emits workspaceHygieneState with abandoned_count, oldest_age_days, and an " +
+    "over_threshold flag. Makes directory-count pollution that silently swamps the " +
+    "responsibility-audit scan cap substrate-observable (disk-space-observer can't " +
+    "see it — the dirs are mostly symlinks, so the harm is count, not bytes).",
+  inputShapes: [],
+  outputShapes: ["workspaceHygieneState"],
+  tags: [
+    "intent:shadow_state_observation",
+    "horizon:meta",
+    "phase:detect",
+    "boredom_target_template",
+    "lift.autonomous.loop",
+    "light_dispatch_eligible",
+    "impulse_complete_base",
+  ],
+  variables: [],
+  tasks: [
+    {
+      id: "observe_workspace_hygiene",
+      description: "Invoke workspace_hygiene_observer.",
+      resolver: "workspace_hygiene_observer",
+      config: { type: "workspace_hygiene_observer" },
+      outputShapes: ["workspaceHygieneState"],
+    },
+  ],
+};
+
 export const CONCEPT_DB_HEALTH_OBSERVER_TICK_TEMPLATE: ActivityTemplate = {
   id: "development-vessel:concept-db-health-observer-tick",
   name: "concept-db-health-observer-tick",

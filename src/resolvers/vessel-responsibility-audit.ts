@@ -135,7 +135,18 @@ function principleName(p: PrincipleConcept): string {
   return principleMetadata(p).principle_name ?? p.name ?? p.id;
 }
 
-async function listVesselDirs(workspaceRoot: string, cap: number): Promise<string[]> {
+interface VesselScanResult {
+  /** Vessel dirs to scan (capped). */
+  vessels: string[];
+  /** Total real vessel dirs found (after excluding mitosis stages), pre-cap. */
+  total: number;
+  /** True when total > cap, i.e. the scan did NOT cover every real vessel. */
+  cap_hit: boolean;
+  /** Count of `*-mitosis-*` staging dirs excluded from the scan. */
+  mitosis_excluded: number;
+}
+
+async function listVesselDirs(workspaceRoot: string, cap: number): Promise<VesselScanResult> {
   // Two possible roots: /vessels (substrate container) or <workspaceRoot>/repos.
   // The container path takes priority when it exists.
   const candidates = ["/vessels", join(workspaceRoot, "repos")];
@@ -144,19 +155,27 @@ async function listVesselDirs(workspaceRoot: string, cap: number): Promise<strin
       const st = await stat(root);
       if (!st.isDirectory()) continue;
       const entries = await readdir(root, { withFileTypes: true });
-      const vessels: string[] = [];
-      for (const e of entries) {
-        if (!e.isDirectory()) continue;
-        if (e.name.startsWith(".")) continue;
-        vessels.push(join(root, e.name));
-        if (vessels.length >= cap) break;
-      }
-      if (vessels.length > 0) return vessels;
+      // Exclude abandoned mitosis staging dirs (`<vessel>-mitosis-<ISO>`): they
+      // are not real vessels, and at scale (245/263 observed 2026-06-13) they
+      // swamp the cap and silently starve the scan of every real vessel. Sort
+      // so coverage is deterministic, not readdir-order-dependent.
+      const realDirs = entries
+        .filter((e) => e.isDirectory() && !e.name.startsWith("."))
+        .map((e) => e.name);
+      const mitosisExcluded = realDirs.filter((n) => /-mitosis-/.test(n)).length;
+      const vesselNames = realDirs.filter((n) => !/-mitosis-/.test(n)).sort();
+      if (vesselNames.length === 0) continue;
+      return {
+        vessels: vesselNames.slice(0, cap).map((n) => join(root, n)),
+        total: vesselNames.length,
+        cap_hit: vesselNames.length > cap,
+        mitosis_excluded: mitosisExcluded,
+      };
     } catch {
       // try next candidate
     }
   }
-  return [];
+  return { vessels: [], total: 0, cap_hit: false, mitosis_excluded: 0 };
 }
 
 async function listSourceFiles(vesselDir: string, cap: number): Promise<string[]> {
@@ -266,10 +285,10 @@ export async function resolveVesselResponsibilityAudit(
   );
 
   // 2. List vessels.
-  const allVesselDirs = await listVesselDirs(workspaceRoot, vesselScanCap);
+  const scan = await listVesselDirs(workspaceRoot, vesselScanCap);
   const filtered = pointer.vessel_name
-    ? allVesselDirs.filter((d) => vesselNameOf(d) === pointer.vessel_name)
-    : allVesselDirs;
+    ? scan.vessels.filter((d) => vesselNameOf(d) === pointer.vessel_name)
+    : scan.vessels;
 
   // 3. For each vessel × principle × check_hint, scan files for forbidden regex.
   const violations: Violation[] = [];
@@ -338,6 +357,12 @@ export async function resolveVesselResponsibilityAudit(
     shape: "vesselResponsibilityAudit",
     body: {
       vessels_scanned: filtered.length,
+      // Coverage stats — make silent scan-truncation trace-inspectable.
+      vessels_total: scan.total,
+      vessel_scan_cap: vesselScanCap,
+      cap_hit: scan.cap_hit,
+      coverage_pct: scan.total > 0 ? Math.round((filtered.length / scan.total) * 100) : 100,
+      mitosis_dirs_excluded: scan.mitosis_excluded,
       principles_fetched_total: principles.length,
       principles_consulted: structuralPrinciples.length,
       principles_with_check_hints: structuralPrinciples.length,

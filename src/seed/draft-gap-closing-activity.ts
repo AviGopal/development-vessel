@@ -87,7 +87,7 @@ which downstream shapes are likely to be needed once a given shape is produced.
 8. Each task must have: id, description, resolver, config.
 9. Output ONLY valid JSON — no markdown fences, no prose before or after.
 10. Template id must start with "gap-closing:" followed by the scenario id.
-11. outputShapes must include the shapes from expected_emergence.activity_signature.output_shapes_must_include.
+11. outputShapes MUST be exactly ["patch_proposal"]. Your template's analyze task emits a patch_proposal — that is its honest output. Do NOT declare the scenario's expected_emergence output shape; the gap is closed downstream by apply-proposal-as-patch converting your patch_proposal into a source patch, not by this template claiming to render the gap shape directly.
 
 ### STRUCTURED LEARNING (mandatory side-effect — knowledge dies otherwise)
 
@@ -126,7 +126,7 @@ TASK 3 - analyze (llm_completion_dispatch):
     "model": "anthropic/claude-haiku-4-5-20251001",
     "max_tokens": 1500
   }
-  The proposal's "summary" key is a FIXED literal — do NOT rename it to the scenario's output shape. The registered variant's outputShapes are set deterministically downstream via output_shapes_override; the proposal JSON does not carry them.
+  The proposal's "summary" key is a FIXED literal — do NOT rename it to the scenario's output shape. The registered variant's outputShapes are set deterministically downstream to ["patch_proposal"] via output_shapes_override (its honest output); the proposal JSON does not carry them.
 
 TASK 4 - write_report (fs_write):
   config: { "type": "fs_write", "path": "/workspace/proposals/<scenario_id>-report.json", "content": "{{analyze_text}}" }
@@ -325,12 +325,19 @@ export const DRAFT_GAP_CLOSING_ACTIVITY_TEMPLATE: ActivityTemplate = {
       id: "register_variant",
       description:
         "Register the drafted template as a candidate variant in activity-api, " +
-        "forcing outputShapes to match the scenario's required shapes deterministically.",
+        "declaring its HONEST output shape: patch_proposal. V25 forces this variant's " +
+        "analyze task to emit patch_proposal, so the variant IS a patch-proposing " +
+        "activity — not a renderer of the gap's expected shape. Stamping the gap shape " +
+        "here (the old {{extract_required_shapes}} override) made declared≠produced, so " +
+        "the reachability gate rejected the variant and β-penalized this whole draft even " +
+        "though its real product (the proposal file) succeeded (SUBSTRATE_AS_MDP §5 / " +
+        "showcase-autonomous-authoring fix 4). The gap shape is closed by the downstream " +
+        "apply-proposal-as-patch → source-patch chain, not by this variant's label.",
       resolver: "activity_create_variant",
       config: {
         type: "activity_create_variant",
         template: "{{draft_via_llm_text}}",
-        output_shapes_override: "{{extract_required_shapes_valueJson}}",
+        output_shapes_override: "[\"patch_proposal\"]",
         strip_id: true,
       },
       outputShapes: ["activityTemplateVariant"],

@@ -123,6 +123,10 @@ Use ONLY these resolvers and these exact config shapes:
 
 Cross-task data flows through {{<prior_task_id>_text}} interpolation (the raw text output of an earlier task). There is no {{shape.field}} addressing — to use a field from a prior JSON output, either json_path_extract it into its own task first, or pass the whole {{<task>_text}} into the next prompt.
 
+CRITICAL — embedding a prior task's output inside a JSON "body" string: raw text contains quotes and newlines that BREAK the JSON body when placed inside quotes. Do NOT write "content": "{{classify_text}}". Instead use the {{<task>_json}} form, which expands to an already-quoted, escaped JSON string literal — place it WITHOUT surrounding quotes:
+  "body": "{\\"pointer\\":{\\"type\\":\\"concept_create_write\\",\\"conceptData\\":{\\"shape\\":\\"<snake>\\",\\"source_type\\":\\"extracted\\",\\"summary\\":\\"<short literal>\\",\\"content\\":{{classify_orphaned_shapes_json}},\\"priority\\":0.5,\\"budget\\":2000}}}"
+Note "content":{{..._json}} has NO quotes around the token (the _json form supplies them). Keep "summary" a short literal you write yourself (no interpolation) so the body stays valid even if an upstream task returned nothing.
+
 Substrate write endpoints (use http_fetch POST with a JSON-string body of EXACTLY this shape):
 - concept_create_write → http://127.0.0.1:8260/v2/impulses/resolve
   body (stringified): {"pointer":{"type":"concept_create_write","conceptData":{"shape":"<snake_case>","source_type":"extracted","summary":"<text>","content":"<text>","priority":0.5,"budget":2000}}}
@@ -165,11 +169,16 @@ export const DRAFT_ACTIVITY_FROM_PATTERN_TEMPLATE: ActivityTemplate = {
     "substrate.authored.drafter",
     "obsidian.meta.skill.phase2",
     "permissive.scope.authoring",
-    // boredom_target_template: without it the real-chain author only fires when
-    // detect-recurring-pattern's dispatch_drafter targets it. Adding the tag puts
-    // it in Thompson rotation so it self-drives once clusters exist — the dual of
-    // the gap drafter's own boredom_target_template tag.
-    "boredom_target_template",
+    // NOT tagged boredom_target_template (deliberately). This author needs a
+    // recurringPatternCluster file on disk (load_cluster). Blind Thompson
+    // selection with no cluster present would fail at load_cluster and pollute
+    // the autonomous loop with β-penalised failures. The correct autonomy path is
+    // the feeder: detect-recurring-pattern produces a cluster AND dispatches this
+    // author via its dispatch_drafter task (passing pattern_id + patterns_dir).
+    // Full self-driving requires (a) detect-recurring-pattern in boredom rotation
+    // with a live, non-obsidian cluster source, and (b) the engine {{taskId_json}}
+    // body-interpolation wire-through (ias-executor 0febd4d) so authored chains
+    // mint cleanly. Until both land, this author is feeder-/operator-dispatched.
   ],
   variables: [
     // Aligned with the variables detect-recurring-pattern's dispatch_drafter

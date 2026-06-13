@@ -1,0 +1,343 @@
+/**
+ * patch_with_tools — ReAct-style LLM patcher (V36, 2026-06-10).
+ *
+ * Replaces the monolithic apply-proposal-as-patch LLM block. The LLM no longer
+ * free-styles search/replace JSON against a hallucinated copy of the source.
+ * Instead it iterates over a fixed tool catalog (local-tools-vessel resolvers),
+ * inspecting the live file with each tool call and composing a verifiable
+ * mutation sequence.
+ *
+ * Tools available:
+ *   - code_search(path, pattern, flags?)
+ *   - code_find_function(path, name)
+ *   - code_find_import(path, module)
+ *   - code_insert_after_line(path, after_line, text)
+ *   - code_replace_lines(path, start_line, end_line, text)
+ *   - code_add_import(path, module, specifier)
+ *   - code_verify_typecheck(cwd, script?)
+ *
+ * Each call is dispatched to local-tools-vessel via discovery. The full
+ * plan + per-step results is recorded so Thompson learning can generalise.
+ *
+ * Returns mitosisStaged when the LLM declares done AND the live file changed
+ * AND optional verification passes. Returns structuredError on iteration cap
+ * or LLM failure (with the plan-so-far for post-mortem).
+ */
+
+import { createHash } from "node:crypto";
+import { mkdir, writeFile, readFile, copyFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
+import { METABOB_ENDPOINT, METABOB_API_KEY } from "../config.js";
+import type { ResolverResult } from "./types.js";
+
+const DISCOVERY_ENDPOINT = process.env.DISCOVERY_ENDPOINT ?? "http://127.0.0.1:8100";
+// V38 (2026-06-12): 8 was too tight — non-trivial single-file patches spend
+// turns on search→edit→re-search-to-verify and hit the cap before declaring
+// done (observed: code_replace_lines applied on turns 4-5, capped at 8 mid-verify).
+// 16 gives headroom for inspect+edit+verify without unbounding cost.
+const MAX_ITERATIONS = 16;
+const PER_CALL_TIMEOUT_MS = 60_000;
+
+export interface PatchWithToolsPointer {
+  type: "patch_with_tools";
+  proposal_text: string; // sanitized proposal description (no code blocks)
+  target_file: string; // repos/<vessel>/<subpath>
+  vessels_root?: string;
+  workspace_root?: string;
+  model?: string;
+  max_iterations?: number;
+}
+
+type ToolCall = { tool: string; args: Record<string, unknown> };
+type ToolResult = { tool: string; args: Record<string, unknown>; result: unknown; ok: boolean };
+
+function structuredError(detail: string, body: Record<string, unknown> = {}): ResolverResult {
+  // V38 (2026-06-12): log every failure. Previously patch_with_tools failed
+  // SILENTLY — the apply trace recorded error=null/failure_mode=null and only a
+  // .applied sentinel's outcome_shape=structuredError survived, making the
+  // cutover leg undebuggable. Surface the detail so the failure mode is
+  // trace-inspectable, not opaque.
+  console.error(`[patch-with-tools] FAIL: ${detail}`);
+  return { shape: "structuredError", body: { resolver: "patch_with_tools", detail, ...body } };
+}
+
+async function llmCall(endpoint: string, prompt: string, model: string): Promise<string> {
+  const res = await fetch(endpoint, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `ApiKey ${METABOB_API_KEY}` },
+    body: JSON.stringify({ type: "llm_completion", prompt, model, max_tokens: 4000 }),
+    signal: AbortSignal.timeout(PER_CALL_TIMEOUT_MS),
+  });
+  if (!res.ok) throw new Error(`llm fetch ${res.status}`);
+  const j = (await res.json()) as { content?: string; data?: string; error?: string };
+  if (j.error) throw new Error(`llm error: ${j.error}`);
+  return (j.content ?? j.data ?? "").trim();
+}
+
+async function findLlmEndpoint(): Promise<string | null> {
+  try {
+    for (const shape of ["llmCompletion", "llm_completion"]) {
+      const r = await fetch(`${DISCOVERY_ENDPOINT}/resolve`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `ApiKey ${METABOB_API_KEY}` },
+        body: JSON.stringify({ pointer: { type: "vesselCapability", shape } }),
+      });
+      if (!r.ok) continue;
+      const data = (await r.json()) as { content?: { vessels?: Array<{ endpoint: string; resolve_endpoint?: string; health_score?: number }> } };
+      const vs = data.content?.vessels ?? [];
+      if (vs.length === 0) continue;
+      const best = vs.sort((a, b) => (b.health_score ?? 0) - (a.health_score ?? 0))[0]!;
+      const ep = best.resolve_endpoint ?? "/resolve";
+      if (ep.startsWith("http")) return ep;
+      return `${best.endpoint.replace(/\/$/, "")}${ep.startsWith("/") ? ep : `/${ep}`}`;
+    }
+  } catch { /* fall through */ }
+  return null;
+}
+
+async function findLocalToolsEndpoint(): Promise<string | null> {
+  try {
+    // local-tools-vessel advertises shellResult; use that to discover the vessel endpoint
+    const r = await fetch(`${DISCOVERY_ENDPOINT}/resolve`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `ApiKey ${METABOB_API_KEY}` },
+      body: JSON.stringify({ pointer: { type: "vesselCapability", shape: "shellResult" } }),
+    });
+    if (!r.ok) return null;
+    const data = (await r.json()) as { content?: { vessels?: Array<{ endpoint: string; resolve_endpoint?: string; health_score?: number }> } };
+    const vs = data.content?.vessels ?? [];
+    if (vs.length === 0) return null;
+    const best = vs.sort((a, b) => (b.health_score ?? 0) - (a.health_score ?? 0))[0]!;
+    const ep = best.resolve_endpoint ?? "/resolve";
+    if (ep.startsWith("http")) return ep;
+    return `${best.endpoint.replace(/\/$/, "")}${ep.startsWith("/") ? ep : `/${ep}`}`;
+  } catch { return null; }
+}
+
+async function callTool(localToolsEndpoint: string, tool: string, args: Record<string, unknown>): Promise<{ ok: boolean; body: unknown }> {
+  try {
+    const res = await fetch(localToolsEndpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `ApiKey ${METABOB_API_KEY}` },
+      body: JSON.stringify({ impulse: { pointer: { type: tool, ...args } } }),
+      signal: AbortSignal.timeout(PER_CALL_TIMEOUT_MS),
+    });
+    if (!res.ok) return { ok: false, body: { error: `HTTP ${res.status}` } };
+    const body = await res.json();
+    const bodyObj = body as Record<string, unknown>;
+    const errored = typeof bodyObj?.error === "string" || (bodyObj as { shape?: string })?.shape === "structuredError" || bodyObj?.success === false;
+    return { ok: !errored, body };
+  } catch (err) { return { ok: false, body: { error: (err as Error).message } }; }
+}
+
+const TOOL_CATALOG_HELP = `Available tools (call exactly one per turn):
+
+1. code_search { path, pattern, flags?, limit? }
+   - Regex search over the file. Returns matches with line numbers.
+   - Use first to locate the region you want to edit.
+
+2. code_find_function { path, name }
+   - Locates a function/method definition by name. Returns start_line, end_line, signature.
+
+3. code_find_import { path, module }
+   - Locates an existing import for the given module. Returns line + specifiers if found.
+
+4. code_insert_after_line { path, after_line, text }
+   - Inserts \`text\` as a new line after line \`after_line\` (1-indexed, 0 = top).
+
+5. code_replace_lines { path, start_line, end_line, text }
+   - Replaces lines [start_line..end_line] (inclusive, 1-indexed) with \`text\`.
+
+6. code_add_import { path, module, specifier }
+   - Idempotent. Adds an import; merges into existing brace-form imports.
+
+7. code_verify_typecheck { cwd, script? }
+   - Runs \`bun run <script>\` (default "typecheck") and returns error count.
+   - Use to verify your changes before declaring done.
+
+BE DECISIVE — your turn budget is small. The normal path is: locate (1-2 calls) →
+edit (code_replace_lines / code_insert_after_line) → ONE verification search →
+emit done. After an edit tool returns OK, do NOT keep searching: at most ONE
+confirming search, then emit done. Repeated searching wastes turns and the patch
+is REJECTED if you hit the cap without declaring done. If an edit returns OK and
+makes the described change, the patch is complete — declare done immediately.
+
+When the file is in the desired state, emit { "action": "done", "summary": "<one-line>" }.
+If you cannot complete the patch, emit { "action": "fail", "reason": "<why>" }.
+
+Emit ONLY a JSON object per turn — either { "action": "call_tool", "tool": "<name>", "args": {...} } or { "action": "done", ... } or { "action": "fail", ... }.
+NO prose, no markdown fences.`;
+
+function parseFirstJsonObject(raw: string): Record<string, unknown> | null {
+  const cleaned = raw.replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/i, "").trim();
+  const start = cleaned.indexOf("{");
+  if (start < 0) return null;
+  let depth = 0; let inStr = false; let escape = false;
+  for (let i = start; i < cleaned.length; i++) {
+    const ch = cleaned[i]!;
+    if (escape) { escape = false; continue; }
+    if (inStr) { if (ch === "\\") escape = true; else if (ch === "\"") inStr = false; continue; }
+    if (ch === "\"") { inStr = true; continue; }
+    if (ch === "{") depth++;
+    else if (ch === "}") { depth--; if (depth === 0) { try { return JSON.parse(cleaned.slice(start, i + 1)); } catch { return null; } } }
+  }
+  return null;
+}
+
+function deriveVesselFromPath(filePath: string): { vessel: string; subPath: string } | null {
+  const m1 = filePath.match(/^(?:\/)?repos\/([^/]+)\/(.+)$/);
+  if (m1) return { vessel: m1[1]!, subPath: m1[2]! };
+  const m2 = filePath.match(/^\/vessels\/([^/]+)\/(.+)$/);
+  if (m2) return { vessel: m2[1]!, subPath: m2[2]! };
+  return null;
+}
+
+export async function resolvePatchWithTools(pointer: PatchWithToolsPointer): Promise<ResolverResult> {
+  const workspaceRoot = pointer.workspace_root ?? process.env.WORKSPACE_ROOT ?? "/workspace";
+  const vesselsRoot = pointer.vessels_root ?? "/vessels";
+  const maxIters = pointer.max_iterations ?? MAX_ITERATIONS;
+  const model = pointer.model ?? "anthropic/claude-opus-4-7";
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+
+  const derived = deriveVesselFromPath(pointer.target_file);
+  if (!derived) return structuredError(`cannot derive vessel from path: ${pointer.target_file}`);
+  const { vessel, subPath } = derived;
+  const liveSrcPath = join(vesselsRoot, vessel, subPath);
+
+  const beforeSrc = await readFile(liveSrcPath, "utf-8").catch(() => null);
+  if (beforeSrc === null) return structuredError(`live source missing: ${liveSrcPath}`);
+  const beforeSha = createHash("sha256").update(beforeSrc).digest("hex").slice(0, 12);
+
+  const llmEndpoint = await findLlmEndpoint();
+  if (!llmEndpoint) return structuredError("no llm_completion vessel found in discovery");
+  const toolsEndpoint = await findLocalToolsEndpoint();
+  if (!toolsEndpoint) return structuredError("no local-tools vessel found in discovery");
+  console.error(`[patch-with-tools] start vessel=${vessel} file=${subPath} model=${model} llm=${llmEndpoint} tools=${toolsEndpoint}`);
+
+  // The LLM must operate on the LIVE container path so its searches match what cutover
+  // will actually stage. Stage into the mitosis tree at the end by copy.
+  const containerPath = liveSrcPath; // already /vessels/<v>/<subPath>
+
+  const history: Array<{ turn: number; thought_or_action: string; tool_result?: ToolResult }> = [];
+  let finalReason: string | null = null;
+  let finished = false;
+
+  for (let turn = 1; turn <= maxIters && !finished; turn++) {
+    const historyBlock = history.length === 0
+      ? "(no tool calls yet)"
+      : history.map((h, i) => `Turn ${h.turn}: ${h.thought_or_action}${h.tool_result ? `\n  → ${h.tool_result.ok ? "OK" : "ERR"}: ${JSON.stringify(h.tool_result.result).slice(0, 800)}` : ""}`).join("\n\n");
+
+    const prompt =
+      `You are patching a source file via fine-grained code tools. The proposal describes what to change; you use the tools to inspect the file and apply the change.\n\n` +
+      `## Target file (container path)\n${containerPath}\n\n` +
+      `## Proposal (intent — code samples may be illustrative, NOT the actual file contents)\n${pointer.proposal_text}\n\n` +
+      `## Tool catalog\n${TOOL_CATALOG_HELP}\n\n` +
+      `## Tool call history\n${historyBlock}\n\n` +
+      `## Turn ${turn} of ${maxIters}\n` +
+      `Emit your next action as a JSON object only.`;
+
+    let raw: string;
+    try {
+      raw = await llmCall(llmEndpoint, prompt, model);
+    } catch (err) {
+      return structuredError(`llm failed turn ${turn}: ${(err as Error).message}`, { history, before_sha: beforeSha });
+    }
+    const action = parseFirstJsonObject(raw);
+    console.error(`[patch-with-tools] turn ${turn}: action=${action?.action ?? "UNPARSEABLE"}${action?.tool ? ` tool=${action.tool}` : ""}`);
+    if (!action || typeof action.action !== "string") {
+      history.push({ turn, thought_or_action: `(unparseable LLM output: ${raw.slice(0, 200)})` });
+      continue;
+    }
+    if (action.action === "done") {
+      finalReason = String(action.summary ?? "done");
+      finished = true;
+      break;
+    }
+    if (action.action === "fail") {
+      return structuredError(`llm declared fail: ${String(action.reason ?? "no reason")}`, { history, before_sha: beforeSha });
+    }
+    if (action.action !== "call_tool") {
+      history.push({ turn, thought_or_action: `(unknown action: ${String(action.action)})` });
+      continue;
+    }
+    const tool = String(action.tool ?? "");
+    const args = (action.args ?? {}) as Record<string, unknown>;
+    console.error(`[patch-with-tools] turn ${turn} args=${JSON.stringify(args).slice(0, 240)}`);
+    if (!tool) { history.push({ turn, thought_or_action: "(missing tool name)" }); continue; }
+    // Force path arg to container path when not specified — protects against drafted absolute paths.
+    if (typeof args.path === "string" && args.path.startsWith("repos/")) {
+      args.path = args.path.replace(/^repos\/[^/]+\//, `${vesselsRoot}/${vessel}/`);
+    }
+    const result = await callTool(toolsEndpoint, tool, args);
+    console.error(`[patch-with-tools] turn ${turn} ${tool} -> ${result.ok ? "OK" : "ERR"}: ${JSON.stringify(result.body).slice(0, 160)}`);
+    history.push({ turn, thought_or_action: `call ${tool}(${JSON.stringify(args).slice(0, 200)})`, tool_result: { tool, args, result: result.body, ok: result.ok } });
+  }
+
+  if (!finished) {
+    // V38: the code tools edit liveSrcPath IN PLACE during the loop; only the
+    // success path below restored it after staging a copy. Failure paths left
+    // the running vessel's source half-patched. Restore so a failed/capped patch
+    // never corrupts live source.
+    try { await writeFile(liveSrcPath, beforeSrc); } catch { /* best-effort */ }
+    return structuredError(`patch_with_tools: iteration cap (${maxIters}) reached without done`, { history, before_sha: beforeSha });
+  }
+
+  // Verify the live file actually changed.
+  const afterSrc = await readFile(liveSrcPath, "utf-8");
+  const afterSha = createHash("sha256").update(afterSrc).digest("hex").slice(0, 12);
+  if (afterSha === beforeSha) {
+    return structuredError("llm declared done but file unchanged", { history, before_sha: beforeSha, after_sha: afterSha });
+  }
+
+  // Stage the modified file into a mitosis dir for the cutover machinery.
+  const mitosisRoot = join(vesselsRoot, `${vessel}-mitosis-${stamp}`);
+  const stagedFile = join(mitosisRoot, subPath);
+  try {
+    await mkdir(dirname(stagedFile), { recursive: true });
+    await copyFile(liveSrcPath, stagedFile);
+  } catch (err) {
+    return structuredError(`stage write failed: ${(err as Error).message}`);
+  }
+
+  // Restore the live container file to its pre-patch state. The cutover will
+  // apply the staged version via host-sync intent; we must not also mutate
+  // the container behind the freshness gate.
+  try { await writeFile(liveSrcPath, beforeSrc); } catch { /* best-effort */ }
+
+  const versionId = `mitosis-${stamp}`;
+  const pendingPath = join(workspaceRoot, "mitosis-pending.json");
+  const pendingBody = {
+    vessel_name: vessel,
+    base_version_id: "v1",
+    mitosis_version_id: versionId,
+    mitosis_root: mitosisRoot,
+    base_sha: beforeSha,
+    staged_at: new Date().toISOString(),
+    authored_by: "patch_with_tools",
+    target_file: pointer.target_file,
+    staged_files: [subPath],
+    plan_turns: history.length,
+    final_summary: finalReason,
+  };
+  try {
+    await writeFile(pendingPath, JSON.stringify(pendingBody, null, 2));
+  } catch (err) {
+    return structuredError(`pending write failed: ${(err as Error).message}`);
+  }
+
+  return {
+    shape: "mitosisStaged",
+    body: {
+      dispatched: true,
+      vessel_name: vessel,
+      mitosis_root: mitosisRoot,
+      mitosis_version_id: versionId,
+      base_sha: beforeSha,
+      staged_files: [subPath],
+      pending_path: pendingPath,
+      plan_turns: history.length,
+      final_summary: finalReason,
+      completed_at: new Date().toISOString(),
+    },
+  };
+}

@@ -71,6 +71,7 @@ export const config = {
       // and outbound HTTP — enables substrate to perform skill-equivalent operations
       // without operator-authored templates.
       "fs_list",
+      "fs_grep",
       "http_fetch",
       // Resolver-pattern aggregation (audit inv-028 B): trace-side
       // (resolver_id, output_shape) → success-rate report. Lets ribosome
@@ -318,6 +319,15 @@ export const config = {
       // with staged_base_sha. Closes the gap between drafter analysis and
       // the existing cutover machinery (mitosis-tick + vessel_mitosis_cutover).
       "apply_proposal_as_patch",
+      // Tools-as-resolvers patcher (V36, 2026-06-10). Replaces the monolithic
+      // free-form LLM search/replace in apply_proposal_as_patch with a ReAct
+      // loop: the LLM picks among code-tool resolvers from local-tools-vessel
+      // (code_search, code_find_function, code_find_import, code_insert_after_line,
+      // code_replace_lines, code_add_import, code_verify_typecheck), each call
+      // is dispatched + recorded, and the LLM iterates with the result history
+      // until it declares done or the iteration budget is exhausted. Learning
+      // generalises which tool-sequences close which gap shapes.
+      "patch_with_tools",
       // Template-mitosis weak-template scanner (2026-06-04). Ranks templates
       // by Thompson posterior mean α/(α+β); emits templateAuditReport whose
       // weak_templates[0].template_id feeds template-mitosis-tick (variant

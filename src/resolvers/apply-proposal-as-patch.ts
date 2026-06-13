@@ -138,6 +138,59 @@ async function exists(p: string): Promise<boolean> {
   try { await access(p); return true; } catch { return false; }
 }
 
+/**
+ * V35 (2026-06-09) — sanitize proposal content before feeding to the patcher LLM.
+ * The drafter (LLM-A) routinely embeds hypothetical code fragments in the
+ * proposal description illustrating the proposed change. The patcher (LLM-B)
+ * then treats those hypothetical fragments as canonical search text — even
+ * with opus + 3-turn feedback (V34), the search strings consistently
+ * match the proposal's hypothetical code rather than the actual live source.
+ *
+ * Strip:
+ *   - fenced code blocks (```lang ... ```)
+ *   - inline code (`...`)
+ *   - quoted multi-line strings that look like source (heuristic: 3+ consecutive
+ *     newline-separated lines starting with whitespace)
+ *
+ * Keep:
+ *   - kind, summary, file, plain-text description
+ *
+ * The patcher receives intent only; the live source is the sole ground truth.
+ */
+function sanitizeProposalForPatcher(raw: string): string {
+  let parsed: unknown;
+  try {
+    const m = raw.indexOf("{");
+    const j = m >= 0 ? raw.slice(m) : raw;
+    parsed = JSON.parse(j.replace(/```(?:json)?\s*/g, "").replace(/```\s*$/g, ""));
+  } catch {
+    return stripCodeFromText(raw).slice(0, 4000);
+  }
+  if (!parsed || typeof parsed !== "object") return stripCodeFromText(raw).slice(0, 4000);
+  const p = parsed as Record<string, unknown>;
+  const lines: string[] = [];
+  if (typeof p["kind"] === "string") lines.push(`kind: ${p["kind"]}`);
+  if (typeof p["summary"] === "string") lines.push(`summary: ${stripCodeFromText(p["summary"]).slice(0, 600)}`);
+  const mods = Array.isArray(p["required_code_modifications"]) ? p["required_code_modifications"] as Array<Record<string, unknown>> : [];
+  for (let i = 0; i < mods.length; i++) {
+    const m = mods[i]!;
+    if (typeof m["file"] === "string") lines.push(`required_code_modifications[${i}].file: ${m["file"]}`);
+    if (typeof m["description"] === "string") {
+      lines.push(`required_code_modifications[${i}].description: ${stripCodeFromText(m["description"]).slice(0, 1200)}`);
+    }
+  }
+  return lines.join("\n");
+}
+
+function stripCodeFromText(s: string): string {
+  return s
+    .replace(/```[\s\S]*?```/g, "[code-block-stripped]")
+    .replace(/`[^`\n]+`/g, "[inline-code-stripped]")
+    .replace(/((?:\n[ \t]+\S.*){3,})/g, "\n[multi-line-indented-block-stripped]")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 function deriveVesselFromPath(filePath: string): { vessel: string; subPath: string } | null {
   // Accept: repos/<vessel>/<rest>, /vessels/<vessel>/<rest>, <vessel>/src/... heuristic
   const m1 = filePath.match(/^(?:\/)?repos\/([^/]+)\/(.+)$/);
@@ -313,6 +366,52 @@ export async function resolveApplyProposalAsPatch(pointer: ApplyProposalAsPatchP
       ?? wrappedTarget;
     const effectiveHasNewFiles = hasNewFiles || (Array.isArray(wrappedNewFiles) && wrappedNewFiles.length > 0);
     if (!targetFile && !effectiveHasNewFiles) { skipped.push({ proposal: e.name, reason: "no_required_code_modifications" }); continue; }
+    // V29 (2026-06-09): in-loop file-existence validation. Reject proposals that
+    // cite non-existent source paths so the next-newest unstaged proposal gets
+    // a chance. Without this gate, a hallucinated-path proposal blocks the
+    // queue forever — the resolver picks it, fails at the live-source-missing
+    // check (line 428), returns structuredError, and on the next apply cycle
+    // picks the SAME proposal again. Archive bad proposals into .rejected/
+    // (parallel to .applied/) so future cycles skip them via mtime walk.
+    const filesToVerify: string[] = [];
+    if (targetFile) filesToVerify.push(targetFile);
+    if (Array.isArray(wrappedNewFiles)) {
+      for (const nf of wrappedNewFiles) if (typeof nf.path === "string") filesToVerify.push(nf.path);
+    }
+    if (hasNewFiles) {
+      for (const nf of pFull.new_files!) if (typeof nf.path === "string") filesToVerify.push(nf.path);
+    }
+    let allFilesExist = true;
+    const missingFiles: string[] = [];
+    for (const f of filesToVerify) {
+      const d = deriveVesselFromPath(f);
+      if (!d) {
+        allFilesExist = false;
+        missingFiles.push(`${f} (cannot derive vessel)`);
+        break;
+      }
+      const livePath = join(vesselsRoot, d.vessel, d.subPath);
+      if (!(await exists(livePath))) {
+        allFilesExist = false;
+        missingFiles.push(f);
+      }
+    }
+    if (!allFilesExist) {
+      // Archive to .rejected/ so next cycle's mtime walk treats it as already-handled.
+      const rejectedDir = `${proposalsDir}/.rejected`;
+      try { await mkdir(rejectedDir, { recursive: true }); } catch { /* tolerant */ }
+      try {
+        await writeFile(`${rejectedDir}/${e.name}`,
+          JSON.stringify({ rejected_at: new Date().toISOString(), reason: "file_path_hallucination", missing: missingFiles, original_content_preview: content.slice(0, 500) }, null, 2));
+        // Move the original out of the active dir so the mtime-sort doesn't keep re-selecting it.
+        // We can't unlink/rename across the resolver boundary safely, so write a sentinel into
+        // .applied/ — apply-loop reads .applied/ and skips matching entries (see appliedSet).
+        await writeFile(`${proposalsDir}/.applied/${e.name}`,
+          JSON.stringify({ rejected_at: new Date().toISOString(), reason: "file_path_hallucination", missing: missingFiles }, null, 2));
+      } catch { /* tolerant */ }
+      skipped.push({ proposal: e.name, reason: `file_path_hallucination: ${missingFiles.join(", ").slice(0, 120)}` });
+      continue;
+    }
     chosen = { name: e.name, path: e.path, scenarioId, content, targetFile: targetFile ?? "" };
     break;
   }
@@ -435,131 +534,28 @@ export async function resolveApplyProposalAsPatch(pointer: ApplyProposalAsPatchP
     return { shape: "mitosisStaged", body: { dispatched: null, dry_run: true, would_stage: { proposal: chosen.name, target: targetFile, vessel, base_sha: baseSha } } };
   }
 
-  // 5. LLM call — search/replace patch format.
-  //
-  // Background (2026-06-04): the previous "produce the full patched source"
-  // prompt produced byte-identical output to the input on both haiku-4-5 and
-  // sonnet-4-5 for real vessel files. The model defaulted to copying the
-  // input rather than applying the proposal. Switch to a structured
-  // search/replace format the LLM can produce reliably; we then apply the
-  // ops deterministically and reject ambiguous matches.
-  const endpoint = await findLlmEndpoint();
-  if (!endpoint) return structuredError("no llm_completion vessel found in discovery");
-  const prompt =
-    `You are producing a PATCH for a source file based on a proposal. Output ONLY a JSON array of search/replace operations. No prose, no markdown fences, no commentary.\n\n` +
-    `## Output format\n\n` +
-    `\`\`\`\n[\n  {\n    "search": "<exact substring from the original file, INCLUDING surrounding context for unambiguous match — 1 to 3 lines above + below the change>",\n    "replace": "<the modified substring — same context lines preserved, with the change applied inside>"\n  }\n]\n\`\`\`\n\n` +
-    `## Rules (CRITICAL)\n` +
-    `1. Each \`search\` MUST be an EXACT substring of the original file (preserve whitespace, newlines, indentation precisely).\n` +
-    `2. Each \`search\` MUST appear EXACTLY ONCE in the original file. Include 1-3 lines of context above and below the change so the match is unique.\n` +
-    `3. For APPEND-ONLY operations (add content at end of file): \`search\` = the last 1-3 lines of the file exactly; \`replace\` = those same lines + your new content appended.\n` +
-    `4. For INSERTS at a specific location: \`search\` = a unique nearby anchor (1-3 lines); \`replace\` = that anchor + your new content placed before or after as the proposal specifies.\n` +
-    `5. Do NOT echo unchanged regions of the file. Only emit ops that actually change content.\n` +
-    `6. If your output produces a file IDENTICAL to the input, you have FAILED. Re-read the proposal description and identify what concrete substring change it requests.\n` +
-    `7. Output ONLY the JSON array. Nothing before, nothing after.\n\n` +
-    `## Target file path\n${targetFile}\n\n` +
-    `## Proposal (JSON)\n${chosen.content.slice(0, 8000)}\n\n` +
-    `## Live source (current contents)\n\`\`\`\n${liveSrc}\n\`\`\`\n\n` +
-    `Output the JSON array of search/replace ops now.`;
-  let ops: Array<{ search: string; replace: string }>;
-  let rawLlm = "";
-  try {
-    const res = await fetch(endpoint, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ type: "llm_completion", prompt, model: pointer.model ?? "anthropic/claude-sonnet-4-5-20250929", max_tokens: pointer.max_tokens ?? 8000 }),
-      signal: AbortSignal.timeout(120_000),
-    });
-    if (!res.ok) return structuredError(`llm fetch ${res.status}: ${(await res.text()).slice(0, 200)}`);
-    const j = await res.json() as { content?: string; data?: string; error?: string };
-    if (j.error) return structuredError(`llm error: ${j.error}`);
-    rawLlm = (j.content ?? j.data ?? "").trim();
-    if (!rawLlm) return structuredError("llm returned empty content");
-    const parsed = parseFirstJsonArray(rawLlm);
-    if (!parsed || !Array.isArray(parsed)) {
-      return structuredError("llm output not a JSON array", { raw_preview: rawLlm.slice(0, 200) });
-    }
-    ops = parsed.filter((o): o is { search: string; replace: string } =>
-      o && typeof o === "object" && typeof (o as { search?: unknown }).search === "string" && typeof (o as { replace?: unknown }).replace === "string");
-    if (ops.length === 0) return structuredError("llm returned no usable ops", { raw_preview: rawLlm.slice(0, 200) });
-  } catch (err) {
-    return structuredError(`llm call failed: ${(err as Error).message}`);
-  }
-
-  // Apply ops deterministically. Each search must match exactly once.
-  let patched = liveSrc;
-  const opLog: Array<{ idx: number; matches: number; applied: boolean }> = [];
-  for (let i = 0; i < ops.length; i++) {
-    const { search, replace } = ops[i]!;
-    if (search === replace) { opLog.push({ idx: i, matches: 0, applied: false }); continue; }
-    // Count occurrences (non-overlapping).
-    let count = 0;
-    let pos = 0;
-    while (pos < patched.length) {
-      const idx = patched.indexOf(search, pos);
-      if (idx < 0) break;
-      count++;
-      pos = idx + Math.max(1, search.length);
-    }
-    if (count !== 1) {
-      opLog.push({ idx: i, matches: count, applied: false });
-      return structuredError(`op ${i} search matched ${count}x, need exactly 1`, { op_log: opLog, raw_preview: rawLlm.slice(0, 300) });
-    }
-    patched = patched.replace(search, replace);
-    opLog.push({ idx: i, matches: 1, applied: true });
-  }
-  const beforeMd5 = createHash("md5").update(liveSrc).digest("hex");
-  const afterMd5 = createHash("md5").update(patched).digest("hex");
-  if (beforeMd5 === afterMd5) {
-    return structuredError("patched output identical to input — llm produced no-op ops", { op_log: opLog, raw_preview: rawLlm.slice(0, 300) });
-  }
-
-  // 6. Stage the mitosis dir and write the patched file.
-  // Note: the dedup at line 124 was originally designed for a future where
-  // many proposals have required_code_modifications. Today the corpus has
-  // 1/52 such proposals; encoding scenario_id into the dir name (an earlier
-  // attempt this session) deadlocked the chain by skipping the only valid
-  // proposal after one staging. We rely on the mirror step in
-  // host-sync-poller to keep container source aligned with HEAD post-commit;
-  // each subsequent apply reads the post-commit content and the LLM emits a
-  // genuinely different patch (or git rejects "nothing to commit" cleanly).
-  const mitosisRoot = join(vesselsRoot, `${vessel}-mitosis-${stamp}`);
-  const stagedFile = join(mitosisRoot, subPath);
-  try {
-    await mkdir(dirname(stagedFile), { recursive: true });
-    await writeFile(stagedFile, patched);
-  } catch (err) {
-    return structuredError(`stage write failed: ${(err as Error).message}`, { staged_file: stagedFile });
-  }
-
-  // 7. Write mitosis-pending.json.
-  const versionId = `mitosis-${stamp}`;
-  const pendingBody = {
-    vessel_name: vessel,
-    base_version_id: "v1",
-    mitosis_version_id: versionId,
-    mitosis_root: mitosisRoot,
-    base_sha: baseSha,
-    staged_at: new Date().toISOString(),
-    authored_by: "apply_proposal_as_patch",
-    proposal: chosen.name,
+  // V36 (2026-06-10) — delegate the actual patching to patch_with_tools,
+  // a ReAct-style loop over fine-grained code-tool resolvers in
+  // local-tools-vessel. The free-styled search/replace monolith that lived
+  // here (V25→V35) consistently hallucinated search strings even with opus +
+  // 3-turn feedback (V34) and proposal sanitization (V35), because the LLM
+  // had no way to inspect the file before writing ops. The tool-using loop
+  // is structured by construction — every change is a verifiable primitive
+  // (code_find_function, code_insert_after_line, code_replace_lines, etc.).
+  const { resolvePatchWithTools } = await import("./patch-with-tools.js");
+  const result = await resolvePatchWithTools({
+    type: "patch_with_tools",
+    proposal_text: sanitizeProposalForPatcher(chosen.content),
     target_file: targetFile,
-    staged_files: [subPath],
-  };
-  try { await writeFile(pendingPath, JSON.stringify(pendingBody, null, 2)); }
-  catch (err) { return structuredError(`pending write failed: ${(err as Error).message}`); }
-
-  // Mark this proposal as applied so the next cycle picks a different one,
-  // even if the downstream host-sync rejects (commit_failed / scope_creep).
-  // Best-effort; if the sentinel write fails we still return success because
-  // the in-cycle mitosis-dir check will catch it on the very next call.
+    vessels_root: vesselsRoot,
+    workspace_root: workspaceRoot,
+  });
+  // Mark this proposal applied regardless of outcome so the next cycle
+  // picks a different one; downstream cutover/host-sync decide whether the
+  // staged patch lands.
   try {
     await writeFile(`${proposalsDir}/.applied/${chosen.name}`,
-      JSON.stringify({ staged_at: pendingBody.staged_at, mitosis_version_id: versionId, base_sha: baseSha }, null, 2));
+      JSON.stringify({ delegated_to: "patch_with_tools", outcome_shape: result.shape, applied_at: new Date().toISOString() }, null, 2));
   } catch { /* tolerant */ }
-
-  return {
-    shape: "mitosisStaged",
-    body: { dispatched: chosen.name, vessel_name: vessel, mitosis_root: mitosisRoot, mitosis_version_id: versionId, base_sha: baseSha, staged_files: [subPath], pending_path: pendingPath, completed_at: new Date().toISOString() },
-  };
+  return result;
 }

@@ -28,6 +28,7 @@ import { resolveBoredomEnqueue } from "../resolvers/boredom-enqueue.js";
 import { resolveMemoryNote, resolveMemoryNoteWrite } from "../resolvers/memory-note.js";
 import { resolveSubstrateGap, resolveSubstrateGapWrite } from "../resolvers/substrate-gap.js";
 import { resolveFsList } from "../resolvers/fs-list.js";
+import { resolveFsGrep } from "../resolvers/fs-grep.js";
 import { resolveHttpFetch } from "../resolvers/http-fetch.js";
 import { resolveResolverPatternReport } from "../resolvers/resolver-pattern-report.js";
 import { resolveMarkdownSplitSections } from "../resolvers/markdown-split-sections.js";
@@ -80,6 +81,7 @@ import { resolveResolverDistributionAudit } from "../resolvers/resolver-distribu
 import { resolveGapToScenarioBridge } from "../resolvers/gap-to-scenario-bridge.js";
 import { resolveDispatchLatestAutoDraft } from "../resolvers/dispatch-latest-auto-draft.js";
 import { resolveApplyProposalAsPatch } from "../resolvers/apply-proposal-as-patch.js";
+import { resolvePatchWithTools } from "../resolvers/patch-with-tools.js";
 import { resolveTemplateAuditReport } from "../resolvers/template-audit-report.js";
 import { resolveVariantPromote } from "../resolvers/variant-promote.js";
 import { resolveVectorSpaceOrthogonalityAudit } from "../resolvers/vector-space-orthogonality-audit.js";
@@ -168,6 +170,8 @@ export async function resolveDispatch(pointer: AnyPointer): Promise<ResolverResu
       return resolveSubstrateGapWrite(p as Parameters<typeof resolveSubstrateGapWrite>[0]);
     case "fs_list":
       return resolveFsList(p as Parameters<typeof resolveFsList>[0]);
+    case "fs_grep":
+      return resolveFsGrep(p as Parameters<typeof resolveFsGrep>[0]);
     case "http_fetch":
       return resolveHttpFetch(p as Parameters<typeof resolveHttpFetch>[0]);
     case "resolver_pattern_report":
@@ -284,6 +288,10 @@ export async function resolveDispatch(pointer: AnyPointer): Promise<ResolverResu
     case "apply_proposal_as_patch":
       return resolveApplyProposalAsPatch(
         p as Parameters<typeof resolveApplyProposalAsPatch>[0],
+      );
+    case "patch_with_tools":
+      return resolvePatchWithTools(
+        p as Parameters<typeof resolvePatchWithTools>[0],
       );
     case "template_audit_report":
       return resolveTemplateAuditReport(

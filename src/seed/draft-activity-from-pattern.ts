@@ -120,6 +120,7 @@ Use ONLY these resolvers and these exact config shapes:
 - llm_completion_dispatch: { "type": "llm_completion_dispatch", "prompt": "<text, may reference {{<prior_task_id>_text}}>", "model": "anthropic/claude-haiku-4-5-20251001", "max_tokens": 1000 }
   model MUST be a substrate model id (anthropic/claude-haiku-4-5-20251001). Never "gpt-4-turbo" or other non-substrate ids. No "temperature" field.
 - json_path_extract: { "type": "json_path_extract", "json": "{{<prior_task_id>_text}}", "path": "<dotted.path>" }
+  CRITICAL: path is SIMPLE DOT-NOTATION ONLY — keys and numeric indices, e.g. "data.items.0.id". It does NOT support "[*]" wildcards, filters, or jq-style "{a:b}" projections. Those silently extract NOTHING, starving the next task (the LLM then replies "please share the data"). When you need to reason over or reshape an array/list from a prior HTTP fetch, DO NOT json_path_extract a projection — pass the whole {{<fetch_task_id>_text}} straight into the classifying llm_completion_dispatch prompt and let the LLM read the JSON. Reserve json_path_extract for pulling a single scalar/object at a fixed dotted path.
 
 Cross-task data flows through {{<prior_task_id>_text}} interpolation (the raw text output of an earlier task). There is no {{shape.field}} addressing — to use a field from a prior JSON output, either json_path_extract it into its own task first, or pass the whole {{<task>_text}} into the next prompt.
 

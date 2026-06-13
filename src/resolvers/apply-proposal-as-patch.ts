@@ -554,6 +554,9 @@ export async function resolveApplyProposalAsPatch(pointer: ApplyProposalAsPatchP
   // picks a different one; downstream cutover/host-sync decide whether the
   // staged patch lands.
   try {
+  if (result.shape === "structuredError") {
+    console.error(`[apply_proposal_as_patch] patch_with_tools failed for ${chosen.name}: ${(result.body as Record<string, unknown>).detail}`);
+  }
     await writeFile(`${proposalsDir}/.applied/${chosen.name}`,
       JSON.stringify({ delegated_to: "patch_with_tools", outcome_shape: result.shape, applied_at: new Date().toISOString() }, null, 2));
   } catch { /* tolerant */ }

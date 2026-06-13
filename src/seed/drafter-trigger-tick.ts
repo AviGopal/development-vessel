@@ -63,6 +63,11 @@ export const DRAFTER_TRIGGER_TICK_TEMPLATE: ActivityTemplate = {
         path: "/workspace/validation/failure-modes/scenarios",
         glob: "*.json",
         max_depth: 0,
+        // V26 (2026-06-09): shuffle so entries[0].name rotates across scenarios
+        // instead of always returning the alphabetic-first id. Without this,
+        // drafter's 3-per-7-day rate-limit blocks new variants and V25
+        // canonical-prompt override never exercises.
+        shuffle: true,
       },
       outputShapes: ["directoryListing"],
     },

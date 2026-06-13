@@ -291,6 +291,11 @@ function softRefuse(
   refusal_reason: string,
   extra?: Record<string, unknown>,
 ): ResolverResult {
+  // V38 (2026-06-12): log the audited-NO reason. soft-refuse returns
+  // applied:false as a "success" shape, so without this the cutover-apply
+  // boundary is as silent as patch_with_tools was — mitosis-tick shows
+  // "completed" while nothing landed and no reason surfaces in the trace.
+  console.error(`[mitosis-cutover] REFUSE: ${refusal_reason}${extra ? ` ${JSON.stringify(extra).slice(0, 200)}` : ""}`);
   return {
     shape: "vesselMitosisCutoverResult",
     body: {
@@ -366,6 +371,20 @@ export async function resolveVesselMitosisCutover(
     }
   }
 
+  // V38 (2026-06-12): same defensive parse for staged_files. The engine
+  // JSON.stringifies the array, so {{extract_staged_files_content}} arrives as
+  // the literal string '["src/...ts"]'. Every Array.isArray(pointer.staged_files)
+  // check below (host-sync intent gate ~line 225, apply path ~502) would then
+  // fail silently, so the cutover could neither apply nor emit a host-sync
+  // intent — the staged patch sat forever. Same root cause fixed in
+  // vessel-mitosis-evaluate (the evaluate fell through to the trace path).
+  if (typeof (pointer.staged_files as unknown) === "string") {
+    try {
+      const p = JSON.parse(pointer.staged_files as unknown as string);
+      if (Array.isArray(p)) (pointer as { staged_files?: string[] }).staged_files = p as string[];
+    } catch { /* leave as-is — downstream array checks will treat it as absent */ }
+  }
+
   // V9 (2026-06-05): field validation precedes protected-vessel guard.
   // Previously a pointer with no `vessel_name` produced the misleading error
   // `refusing cutover on protected vessel: undefined`. Required-field validation
@@ -400,6 +419,7 @@ export async function resolveVesselMitosisCutover(
     // pass {{evaluate_pair}}); keep this as a hard error so the bug is loud.
     return structuredError("evaluation_evidence is required");
   }
+  console.error(`[mitosis-cutover] verdict=${evaluation_evidence.verdict} cited_checks=${JSON.stringify(evaluation_evidence.cited_check_names ?? null)} cited_traces=${Array.isArray(evaluation_evidence.cited_trace_ids) ? evaluation_evidence.cited_trace_ids.length : 0} base_sha=${pointer.staged_base_sha} host_sync=${process.env["MITOSIS_HOST_SYNC_MODE"] ?? "unset"} host_repo_root=${pointer.host_repo_root ?? process.env["MITOSIS_HOST_REPO_ROOT"] ?? "unset"}`);
   if (evaluation_evidence.verdict !== "FAVORABLE") {
     // Audited NO — normal outcome when verdict is INSUFFICIENT_DATA / NEUTRAL /
     // UNFAVORABLE. Soft-refuse so mitosis-tick doesn't show as failure on every

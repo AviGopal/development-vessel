@@ -65,10 +65,18 @@ export async function resolveDispatchLatestAutoDraft(
       { headers: authHeaders(), signal: AbortSignal.timeout(10_000) },
     );
     if (r.ok) {
-      const j = (await r.json()) as { templates?: Array<{ id?: unknown }> };
+      const j = (await r.json()) as { templates?: Array<{ id?: unknown; deprecated?: boolean }> };
       for (const t of j.templates ?? []) {
         const id = unwrapId(t.id);
-        if (id && id.startsWith("gap-closing:auto-")) templates.push({ id });
+        // V30 (2026-06-09): (a) accept ANY gap-closing: prefix, not just auto- —
+        // V25 substrate-authored variants from the V26 scenario-rotation chain
+        // have prefixes like gap-closing:activity-lifecycle-unload-* /
+        // gap-closing:responsibility-* and were being filtered out, leaving
+        // dispatch firing only the deprecated pre-V25 auto- variants. (b) Skip
+        // deprecated templates so the operator-driven Thompson-evidenced
+        // deprecation actually takes effect at dispatch time, not just on
+        // recommend.
+        if (id && id.startsWith("gap-closing:") && !t.deprecated) templates.push({ id });
       }
     }
   } catch (err) {

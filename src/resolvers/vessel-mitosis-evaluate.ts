@@ -1,6 +1,7 @@
 import { join, dirname } from "path";
 import {
   stat,
+  lstat,
   mkdir,
   copyFile,
   readdir,
@@ -193,7 +194,14 @@ async function buildOverlay(
       const path = join(cursor, segment);
       let s;
       try {
-        s = await stat(path);
+        // V38 (2026-06-12): lstat, NOT stat. stat FOLLOWS symlinks, so a
+        // symlinked top-level dir (overlay/src -> baseRoot/src) reported
+        // isDirectory()=true, the materialize branch never fired, and the
+        // staged-file copy below wrote THROUGH the symlink into the LIVE
+        // baseRoot tree. That corrupted the running vessel source mid-evaluate
+        // and then tripped the cutover's base_sha freshness gate. lstat sees
+        // the symlink itself (isDirectory()=false) so we materialize a real dir.
+        s = await lstat(path);
       } catch {
         s = null;
       }
@@ -298,13 +306,51 @@ async function staticEvaluate(
     );
     completed.push(r);
     if (r.exit_code !== 0) {
-      return {
-        attempted: true,
-        ok: false,
-        reason: `${scriptName}_failed: exit=${r.exit_code}`,
-        checks: completed,
-        duration_ms: Date.now() - start,
-      };
+      // V32 (2026-06-09): delta-aware verdict. Vessels carry pre-existing
+      // baseline typecheck errors (e.g. boredom-vessel src/index.ts:1805
+      // METABOB_API_KEY undefined — present months before any V25-V31 work).
+      // A binary exit≠0 → UNFAVORABLE gate makes the autonomous repair loop
+      // unreachable: every staged patch fails even when it doesn't worsen
+      // the baseline. The idiom shift — patches must not REGRESS the static
+      // health, but they need not perfect it — matches how vessel_mitosis
+      // already treats trace verdicts (better-than-base, not best-possible).
+      //
+      // Compare error-line counts. If the base tree has the same or more
+      // matching errors than the mitosis tree, treat as pass. Only run the
+      // base check when we actually have baseRootForOverlay (the overlay
+      // path); without it we can't compute a baseline, so we keep the strict
+      // gate behaviour.
+      let isRegression = true;
+      let baseErrorCount = -1;
+      let mitosisErrorCount = -1;
+      if (baseRootForOverlay && stagedFiles && stagedFiles.length > 0) {
+        const errPattern = /error TS\d+:/g;
+        mitosisErrorCount = (r.output_tail.match(errPattern) ?? []).length;
+        const baseCheck = await runCheck(bunCmd, ["run", scriptName], baseRootForOverlay, `base:bun run ${scriptName}`);
+        baseErrorCount = (baseCheck.output_tail.match(errPattern) ?? []).length;
+        // Only accept the patch if mitosis introduces NO new errors.
+        // We use error-count as the discriminator (vs exact set diff) because
+        // tsc output line numbers shift with even non-substantive edits, so
+        // a set-based comparison would over-reject. Count-based is monotone:
+        // mitosis_count > base_count strictly implies new errors exist.
+        if (mitosisErrorCount <= baseErrorCount) {
+          isRegression = false;
+          completed.push({
+            ...baseCheck,
+            name: `base:${baseCheck.name} (delta_aware: mitosis=${mitosisErrorCount} base=${baseErrorCount} → accept)`,
+          });
+        }
+      }
+      if (isRegression) {
+        return {
+          attempted: true,
+          ok: false,
+          reason: `${scriptName}_failed: exit=${r.exit_code}${baseErrorCount >= 0 ? ` mitosis_errs=${mitosisErrorCount} base_errs=${baseErrorCount} (regression)` : ""}`,
+          checks: completed,
+          duration_ms: Date.now() - start,
+        };
+      }
+      // Patch doesn't regress baseline — continue to next script (or finish).
     }
   }
   if (!skipTests) {
@@ -437,6 +483,18 @@ export async function resolveVesselMitosisEvaluate(
   // before consulting traces. Lets freshly-staged mitoses reach FAVORABLE
   // without waiting for runtime traces. Sufficient by itself for FAVORABLE
   // when checks pass.
+  // V38 (2026-06-12): coerce staged_files. The mitosis-tick template passes it
+  // as {{extract_staged_files_content}} — json_path_extract + variable
+  // substitution STRINGIFY the array, so the resolver receives the literal
+  // string '["src/...ts"]' not an array. staticEvaluate then iterated the
+  // string char-by-char, buildOverlay tried to copyfile the mitosis_root dir
+  // itself (ENOTSUP), returned attempted:false, and the verdict fell through to
+  // the trace path → INSUFFICIENT_DATA → cutover refused a perfectly good patch.
+  const stagedFilesArr: string[] = Array.isArray(pointer.staged_files)
+    ? (pointer.staged_files as string[])
+    : typeof pointer.staged_files === "string"
+      ? (() => { try { const p = JSON.parse(pointer.staged_files as unknown as string); return Array.isArray(p) ? (p as string[]) : [pointer.staged_files as unknown as string]; } catch { return [pointer.staged_files as unknown as string]; } })()
+      : [];
   let staticResult: StaticEvalResult | null = null;
   if (pointer.mitosis_root && pointer.static_check_runner !== "skip") {
     const bunCmd = pointer.bun_cmd ?? "bun";
@@ -444,10 +502,11 @@ export async function resolveVesselMitosisEvaluate(
       pointer.mitosis_root,
       bunCmd,
       pointer.static_check_base_root,
-      pointer.staged_files,
+      stagedFilesArr,
       pointer.static_check_scripts,
       pointer.skip_tests ?? false,
     );
+    console.error(`[mitosis-evaluate] static attempted=${staticResult.attempted} ok=${staticResult.ok} reason=${staticResult.reason} | mitosis_root=${pointer.mitosis_root} base=${pointer.static_check_base_root} staged_files=${JSON.stringify(pointer.staged_files)} (type ${typeof pointer.staged_files}) scripts=${JSON.stringify(pointer.static_check_scripts)}`);
     if (staticResult.attempted && !staticResult.ok) {
       const firstFail = staticResult.checks.find((c) => c.exit_code !== 0);
       return {

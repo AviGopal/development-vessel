@@ -9,6 +9,15 @@ export interface FsListPointer {
   maxDepth?: number;
   includeHidden?: boolean;
   glob?: string;
+  /**
+   * V26 (2026-06-09) — when true, shuffles the returned entries array.
+   * Used by drafter-trigger-tick to rotate through scenarios: the trigger's
+   * downstream `entries.0.name` extraction becomes a random pick instead of
+   * always selecting the first alphabetical entry. Without shuffle, the
+   * trigger hits the drafter's 3-per-7-day rate-limit on a single scenario
+   * id and starves new variant production.
+   */
+  shuffle?: boolean;
 }
 
 function assertInWorkspace(path: string, workspaceRoot: string): void {
@@ -75,6 +84,17 @@ export async function resolveFsList(pointer: FsListPointer): Promise<ResolverRes
 
   const entries: Entry[] = [];
   await walk(absPath, workspaceRoot, 0, maxDepth, pointer.includeHidden ?? false, pointer.glob, entries);
+
+  // V26 (2026-06-09): Fisher–Yates shuffle when requested. Lets drafter-trigger-tick
+  // rotate scenarios via the existing entries[0] extraction path without a new resolver.
+  if (pointer.shuffle && entries.length > 1) {
+    for (let i = entries.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      const tmp = entries[i]!;
+      entries[i] = entries[j]!;
+      entries[j] = tmp;
+    }
+  }
 
   return {
     shape: "directoryListing",

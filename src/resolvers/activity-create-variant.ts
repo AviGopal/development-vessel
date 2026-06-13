@@ -1,5 +1,69 @@
+import { readdir } from "node:fs/promises";
 import { METABOB_ENDPOINT, METABOB_API_KEY } from "../config.js";
 import type { ResolverResult } from "./types.js";
+
+/**
+ * V31 (2026-06-09) — File-inventory cache for the V25 canonical analyze prompt.
+ *
+ * The LLM running TASK 3 of substrate-authored variants was hallucinating
+ * file paths at ~80% rate (5 rejections in V29 archives within 30min of V29
+ * activation). Without the actual vessel-source inventory in the prompt, the
+ * LLM invents plausible-but-nonexistent names like
+ * `activity-lifecycle.ts` (real: `activity-lifecycle-audit.ts`) or
+ * `dispatch/target-template-resolver.ts` (real: no dispatch/ directory).
+ *
+ * V31 walks the canonical /vessels/<v>/src trees once per 5 min, builds a
+ * flat repos/<v>/src/... path list, and bakes that list into the canonical
+ * prompt at registration time. The LLM is then constrained to pick a real
+ * path from the inventory instead of inventing one.
+ *
+ * Mitosis vessel clones (/vessels/<v>-mitosis-<TS>/) are explicitly excluded
+ * — they're staging artefacts, not edit targets. node_modules and dist are
+ * also excluded.
+ */
+const CANONICAL_VESSELS = [
+  "development-vessel",
+  "goal-host-vessel",
+  "llm-resolver-vessel",
+  "ribosome-vessel",
+  "analysis-vessel",
+  "local-tools-vessel",
+  "light-dispatch-vessel",
+  "stateful-ui-vessel",
+  "discovery-vessel",
+  "identity-vessel",
+  "boredom-vessel",
+  "ias-executor-ts",
+  "concept-db",
+];
+const INVENTORY_TTL_MS = 5 * 60 * 1000;
+let cachedInventory: string | null = null;
+let cachedInventoryAt = 0;
+
+async function walkTsFiles(dir: string, into: string[]): Promise<void> {
+  let entries;
+  try { entries = await readdir(dir, { withFileTypes: true }); } catch { return; }
+  for (const e of entries) {
+    if (e.name === "node_modules" || e.name === "dist" || e.name === ".git") continue;
+    const p = `${dir}/${e.name}`;
+    if (e.isDirectory()) await walkTsFiles(p, into);
+    else if (e.name.endsWith(".ts") && !e.name.endsWith(".test.ts") && !e.name.endsWith(".d.ts")) {
+      into.push(p.replace(/^\/vessels\//, "repos/"));
+    }
+  }
+}
+
+async function getFileInventory(): Promise<string> {
+  const now = isFinite(cachedInventoryAt) ? Date.now() : 0;
+  if (cachedInventory && now - cachedInventoryAt < INVENTORY_TTL_MS) return cachedInventory;
+  const paths: string[] = [];
+  for (const v of CANONICAL_VESSELS) {
+    await walkTsFiles(`/vessels/${v}/src`, paths);
+  }
+  cachedInventory = paths.sort().join("\n");
+  cachedInventoryAt = Date.now();
+  return cachedInventory;
+}
 
 /**
  * Operator-curated set of input shapes that are allowed to have no producer
@@ -42,6 +106,71 @@ export const MAX_COMPOSITION_DEPTH = 16;
 /** Description discipline (I4): minimum length and forbidden values. */
 const MIN_DESCRIPTION_LENGTH = 40;
 const FORBIDDEN_DESCRIPTIONS = new Set(["", "todo", "tbd", "fixme", "xxx"]);
+
+/**
+ * V25 (2026-06-09) — Canonical analyze prompt for gap-closing variants.
+ * LLM-A (drafter) re-summarises TASK 3's prompt freely, producing variants
+ * whose LLM-B (executor) emits gap_analysis/recommendation/autoDraftedOutput_*
+ * wrapper schemas that apply_proposal_as_patch cannot consume. This constant
+ * is injected at registration time, overwriting whatever LLM-A wrote, so
+ * every gap-closing: variant has a TASK 3 prompt that enforces the
+ * { kind: "patch_proposal", required_code_modifications: [{ file, description }] }
+ * schema directly. Interpolation tokens {{read_scenario_content}} and
+ * {{fetch_traces_content}} are honoured by both goal-host and light-dispatch.
+ */
+const CANONICAL_ANALYZE_PROMPT =
+  "Scenario: {{read_scenario_content}}\n\n" +
+  "Recent traces: {{fetch_traces_content}}\n\n" +
+  "Analyze the failure mode described in the scenario against the recent traces, " +
+  "then produce a JSON proposal report with this EXACT schema (no other top-level keys, no wrapper objects):\n" +
+  "{\n" +
+  '  "kind": "patch_proposal",\n' +
+  '  "summary": "<one-line analysis summary>",\n' +
+  '  "required_code_modifications": [\n' +
+  "    {\n" +
+  '      "file": "repos/<vessel>/src/<file>.ts",\n' +
+  '      "description": "<what changes and why>"\n' +
+  "    }\n" +
+  "  ]\n" +
+  "}\n\n" +
+  "CRITICAL CONSTRAINTS:\n" +
+  '- TOP-LEVEL "kind" MUST be exactly the string "patch_proposal". apply_proposal_as_patch uses it as the discriminator.\n' +
+  '- "required_code_modifications" MUST be a non-empty array. Each entry MUST have a "file" string starting with "repos/" followed by a real vessel name (e.g. repos/development-vessel/src/resolvers/foo.ts).\n' +
+  '- DO NOT wrap the response in any object like {"autoDraftedOutput_<id>": {...}} or {"<shape>": {...}}. The three keys above are the ONLY top-level keys allowed.\n' +
+  "- DO NOT emit gap_analysis, recommendation, evidence_from_traces, implementation_sketch, or next_action. They will be rejected.\n" +
+  "- Available vessels: development-vessel, goal-host-vessel, llm-resolver-vessel, ribosome-vessel, analysis-vessel, local-tools-vessel, light-dispatch-vessel, stateful-ui-vessel, discovery-vessel, identity-vessel, boredom-vessel, ias-executor-ts, concept-db. If unsure, default to development-vessel.\n" +
+  "- List exactly ONE file unless the gap genuinely spans multiple.\n\n" +
+  "Output ONLY the JSON object. No prose, no markdown fences.";
+
+/**
+ * V25 — Enforce canonical analyze prompt on every gap-closing: variant.
+ * V31 (2026-06-09) — async + injects fresh vessel-source inventory so the LLM
+ * picks a real file path rather than hallucinating one.
+ */
+async function enforceCanonicalAnalyzePrompt(template: Record<string, unknown>): Promise<void> {
+  const tasks = Array.isArray(template["tasks"]) ? (template["tasks"] as Record<string, unknown>[]) : [];
+  let inventory: string | null = null;
+  for (const task of tasks) {
+    if (String(task["resolver"]) !== "llm_completion_dispatch") continue;
+    const cfg = (task["config"] ?? {}) as Record<string, unknown>;
+    const prompt = String(cfg["prompt"] ?? "");
+    const looksLikeAnalyze =
+      prompt.includes("{{read_scenario_content}}")
+      || prompt.includes("{{fetch_traces_content}}")
+      || prompt.toLowerCase().includes("scenario")
+      && prompt.toLowerCase().includes("trace");
+    if (!looksLikeAnalyze) continue;
+    if (inventory === null) inventory = await getFileInventory();
+    const promptWithInventory =
+      CANONICAL_ANALYZE_PROMPT +
+      "\n\nAVAILABLE FILES (you MUST pick one of these EXACT paths for `file` — do NOT invent a path that is not in this list):\n" +
+      inventory;
+    cfg["prompt"] = promptWithInventory;
+    cfg["max_tokens"] = 1500;
+    task["config"] = cfg;
+    task["outputShapes"] = ["patch_proposal"];
+  }
+}
 
 export interface ActivityCreateVariantPointer {
   type: "activity_create_variant";
@@ -415,6 +544,13 @@ export async function resolveActivityCreateVariant(pointer: ActivityCreateVarian
     const t = templateObj as Record<string, unknown>;
     const templateId = String(t["id"] ?? "");
     if (templateId.startsWith("gap-closing:") || (pointer as unknown as Record<string,unknown>)["validate_gap_closing"]) {
+      // V25 (2026-06-09): enforce canonical analyze prompt on the analyze task BEFORE
+      // resolver-allow-list validation. The LLM-A drafter regenerates TASK 3's prompt
+      // freely (regardless of how tight the PROMPT_TEMPLATE schema-enforcement is),
+      // producing variants whose LLM-B emits gap_analysis/recommendation/wrapper
+      // schemas. This override forces TASK 3 back to the canonical patch_proposal
+      // prompt so apply_proposal_as_patch can consume the output.
+      await enforceCanonicalAnalyzePrompt(t);
       const tasks = Array.isArray(t["tasks"]) ? (t["tasks"] as Record<string, unknown>[]) : [];
       // json_path_extract removed from ALLOWED — too fragile and the prompt explicitly bans it.
       // LLM-drafted templates repeatedly use it for object navigation that breaks on schema variance;

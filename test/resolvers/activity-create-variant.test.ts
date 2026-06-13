@@ -245,4 +245,100 @@ describe("activity-create-variant resolver", () => {
     expect(body.variantId).toBe("v:my-id");
     expect(body.parentTemplateId).toBe("test:parent");
   });
+
+  // ───────────────────────────────────────────────────────────────────
+  // Output-shape reachability (2026-06-13) — output_shapes_override must
+  // not stamp an aspirational shape no task produces, and the general gate
+  // rejects substrate-authored variants whose declared outputs are unreachable.
+  // Regression: gap-closing drafter cloned itself (tasks emit patch_proposal)
+  // while output_shapes_override force-labeled it substrateTopologyShowcase.
+  // ───────────────────────────────────────────────────────────────────
+
+  const renderTask = (shape: string) => ({
+    id: "render",
+    resolver: "fs_write",
+    description: "Render and write the substrate topology surface into the vault directory.",
+    outputShapes: [shape],
+  });
+
+  it("rejects an output_shapes_override that names a shape no task produces", async () => {
+    // fetch should never be reached — registration is refused pre-POST.
+    let posted = false;
+    globalThis.fetch = (async () => { posted = true; return new Response(JSON.stringify({ id: "v:x" }), { status: 200 }); }) as unknown as typeof fetch;
+
+    const result = await resolveActivityCreateVariant({
+      type: "activity_create_variant",
+      // tasks emit patch_proposal; the override aspirationally claims the gap shape.
+      template: { id: "test:showcase", name: "showcase", tasks: [renderTask("patch_proposal")] },
+      output_shapes_override: ["substrateTopologyShowcase"],
+    });
+
+    expect(result.shape).toBe("structuredError");
+    const body = result.body as { failure_mode: string; detail: string };
+    expect(body.failure_mode).toBe("output_shape_unreachable");
+    expect(body.detail).toContain("substrateTopologyShowcase");
+    expect(posted).toBe(false);
+  });
+
+  it("applies an output_shapes_override when every override shape is task-produced", async () => {
+    let postedBody: Record<string, unknown> | null = null;
+    globalThis.fetch = (async (_url: string, opts?: RequestInit) => {
+      postedBody = JSON.parse(String(opts?.body ?? "{}")) as Record<string, unknown>;
+      return new Response(JSON.stringify({ id: "v:showcase" }), { status: 200 });
+    }) as unknown as typeof fetch;
+
+    const result = await resolveActivityCreateVariant({
+      type: "activity_create_variant",
+      template: { id: "test:showcase", name: "showcase", tasks: [renderTask("substrateTopologyShowcase")] },
+      output_shapes_override: ["substrateTopologyShowcase"],
+    });
+
+    expect(result.shape).toBe("activityRegistryChange");
+    expect(postedBody?.["output_shapes"] as unknown as string[]).toEqual(["substrateTopologyShowcase"]);
+  });
+
+  it("general gate rejects a substrate-authored variant with an unreachable declared output shape", async () => {
+    let posted = false;
+    globalThis.fetch = (async () => { posted = true; return new Response(JSON.stringify({ id: "v:x" }), { status: 200 }); }) as unknown as typeof fetch;
+
+    const result = await resolveActivityCreateVariant({
+      type: "activity_create_variant",
+      // empty override array is not applied, but its presence marks the variant
+      // substrate-authored so the general gate inspects the declared output_shapes.
+      template: {
+        id: "test:ghost",
+        name: "ghost",
+        output_shapes: ["ghostShape"],
+        tasks: [renderTask("realShape")],
+      },
+      output_shapes_override: [],
+    });
+
+    expect(result.shape).toBe("structuredError");
+    const body = result.body as { failure_mode: string; detail: string };
+    expect(body.failure_mode).toBe("output_shape_unreachable");
+    expect(body.detail).toContain("ghostShape");
+    expect(posted).toBe(false);
+  });
+
+  it("does NOT gate operator-seeded templates (proposed=false) with externally-produced shapes", async () => {
+    let posted = false;
+    globalThis.fetch = (async () => { posted = true; return new Response(JSON.stringify({ id: "v:seed" }), { status: 200 }); }) as unknown as typeof fetch;
+
+    const result = await resolveActivityCreateVariant({
+      type: "activity_create_variant",
+      // operator seed: a declared output shape produced by a composed child, not a
+      // local task. proposed=false + non-gap-closing id + no override => exempt.
+      template: {
+        id: "test:operator-seed",
+        name: "seed",
+        proposed: false,
+        output_shapes: ["composedChildShape"],
+        tasks: [renderTask("localShape")],
+      },
+    });
+
+    expect(result.shape).toBe("activityRegistryChange");
+    expect(posted).toBe(true);
+  });
 });

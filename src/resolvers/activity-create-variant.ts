@@ -196,6 +196,41 @@ export interface RegisteredTemplate {
 }
 
 /**
+ * Collect the set of shapes produced by at least one task in the template.
+ * A task is treated as producing its declared `outputShapes` (the camelCase
+ * convention in this codebase) or `output_shapes`. Shared by the
+ * output_shapes_override reachability check and the general reachability gate
+ * so both judge "produced" identically — and identically to invariant I5.
+ */
+export function collectTaskProducedShapes(template: Record<string, unknown>): Set<string> {
+  const tasks = Array.isArray(template["tasks"]) ? (template["tasks"] as Record<string, unknown>[]) : [];
+  const produced = new Set<string>();
+  for (const task of tasks) {
+    const os = Array.isArray(task["outputShapes"])
+      ? (task["outputShapes"] as string[])
+      : Array.isArray(task["output_shapes"]) ? (task["output_shapes"] as string[]) : [];
+    for (const s of os) produced.add(s);
+  }
+  return produced;
+}
+
+/**
+ * Reachability check: returns the declared template output shapes that are
+ * NOT produced by any task. An empty array means every declared output is
+ * task-reachable. Used to reject registrations whose declared output_shapes
+ * are aspirational labels — e.g. an output_shapes_override that stamps a
+ * scenario's expected shape while the tasks only emit `patch_proposal`.
+ */
+export function unreachableOutputShapes(template: Record<string, unknown>): string[] {
+  const declared = Array.isArray(template["output_shapes"])
+    ? (template["output_shapes"] as string[])
+    : Array.isArray(template["outputShapes"]) ? (template["outputShapes"] as string[]) : [];
+  if (declared.length === 0) return [];
+  const produced = collectTaskProducedShapes(template);
+  return declared.filter((s) => !produced.has(s));
+}
+
+/**
  * Permissive-scope registration-time invariants (Phase 2, 2026-06-01).
  * Returns null if the template passes; a structuredError body on the first
  * violation. Order matches the spec (I1..I6).
@@ -479,23 +514,11 @@ export async function resolveActivityCreateVariant(pointer: ActivityCreateVarian
     t["id"] = `${baseId}-${Date.now()}`;
   }
 
-  // Forcibly override output shapes when the caller provides a valid array.
-  // activity-api's CreateTemplateRequestSchema reads snake_case `output_shapes`, not
-  // camelCase `outputShapes` — Zod strips unknown keys so the camelCase form is ignored.
-  // Skip the override if the value isn't a valid string-array (e.g. an error object from
-  // a failed upstream task) — in that case the LLM-generated outputShapes are used as-is.
-  if (pointer.output_shapes_override !== undefined && templateObj && typeof templateObj === "object") {
-    let shapes: unknown = pointer.output_shapes_override;
-    if (typeof shapes === "string") {
-      try { shapes = JSON.parse(shapes); } catch { shapes = undefined; }
-    }
-    // Only apply if it's a non-empty array of strings (not an error object)
-    if (Array.isArray(shapes) && shapes.length > 0 && shapes.every((s) => typeof s === "string")) {
-      const t = templateObj as Record<string, unknown>;
-      t["output_shapes"] = shapes;   // snake_case: read by Zod schema
-      t["outputShapes"] = shapes;    // camelCase: kept for any non-Zod readers
-    }
-  }
+  // NOTE: output_shapes_override is applied LATER (just before the POST), after
+  // enforceCanonicalAnalyzePrompt has finalized each task's true outputShapes.
+  // Stamping here — before the canonical analyze task is forced to emit
+  // `patch_proposal` — let an override declare a shape no task produces (the
+  // "aspirational label" mislabel). The relocated block is reachability-checked.
 
   // Phase 2 (2026-06-01) — permissive-scope registration-time invariants.
   // Scoped to substrate-authored templates with the `proposed_pattern_authored_`
@@ -609,6 +632,81 @@ export async function resolveActivityCreateVariant(pointer: ActivityCreateVarian
     const t = templateObj as Record<string, unknown>;
     if (t["proposed"] !== false) {
       t["proposed"] = true;
+    }
+  }
+
+  // ── output_shapes_override (relocated, reachability-checked) ──────────────
+  // Forcibly override output shapes when the caller provides a valid array.
+  // activity-api's CreateTemplateRequestSchema reads snake_case `output_shapes`
+  // (Zod strips unknown keys, so camelCase alone is ignored). Runs HERE — after
+  // enforceCanonicalAnalyzePrompt has set the canonical analyze task's true
+  // output to `patch_proposal` — so the reachability check below sees final task
+  // shapes. An override that names a shape no task produces is REJECTED rather
+  // than silently stamped: this is the fix for the mislabel where a gap-closing
+  // variant claimed to produce the scenario's expected shape while its tasks
+  // only emit patch_proposal.
+  if (pointer.output_shapes_override !== undefined && templateObj && typeof templateObj === "object") {
+    let shapes: unknown = pointer.output_shapes_override;
+    if (typeof shapes === "string") {
+      try { shapes = JSON.parse(shapes); } catch { shapes = undefined; }
+    }
+    // Only apply if it's a non-empty array of strings (not an error object from a
+    // failed upstream task) — otherwise the LLM-generated outputShapes stand.
+    if (Array.isArray(shapes) && shapes.length > 0 && shapes.every((s) => typeof s === "string")) {
+      const t = templateObj as Record<string, unknown>;
+      const produced = collectTaskProducedShapes(t);
+      const unreachable = (shapes as string[]).filter((s) => !produced.has(s));
+      if (unreachable.length > 0) {
+        return {
+          shape: "structuredError",
+          body: {
+            resolver: "activity_create_variant",
+            failure_mode: "output_shape_unreachable",
+            detail:
+              `output_shapes_override [${(shapes as string[]).join(", ")}] includes shape(s) ` +
+              `not produced by any task: [${unreachable.join(", ")}]. A variant must declare ` +
+              `only output shapes its tasks actually emit (produced: [${[...produced].join(", ") || "none"}]). ` +
+              `If this activity proposes a code change, declare 'patch_proposal'; if it renders a ` +
+              `surface, add a task whose outputShapes include the declared shape.`,
+          },
+        };
+      }
+      t["output_shapes"] = shapes;   // snake_case: read by Zod schema
+      t["outputShapes"] = shapes;    // camelCase: kept for any non-Zod readers
+    }
+  }
+
+  // ── Shape-reachability gate (general) ─────────────────────────────────────
+  // Reject any substrate-authored variant whose declared output_shapes are not
+  // all produced by some task — covers LLM-declared mislabels even when no
+  // override is supplied. This generalizes permissive invariant I5 (which is
+  // scoped to proposed_pattern_authored_* ids) to the gap-closing: path and any
+  // proposed variant, closing the exemption that let mislabeled gap-closing
+  // variants register. Operator seeds (proposed === false) are exempt — they may
+  // legitimately declare shapes produced by a composed child template.
+  if (templateObj && typeof templateObj === "object") {
+    const t = templateObj as Record<string, unknown>;
+    const tid = String(t["id"] ?? "");
+    const isSubstrateAuthored =
+      t["proposed"] !== false
+      && (tid.startsWith("gap-closing:")
+        || tid.startsWith("proposed_pattern_authored_")
+        || pointer.output_shapes_override !== undefined
+        || (pointer as unknown as Record<string, unknown>)["validate_gap_closing"] === true);
+    if (isSubstrateAuthored) {
+      const unreachable = unreachableOutputShapes(t);
+      if (unreachable.length > 0) {
+        return {
+          shape: "structuredError",
+          body: {
+            resolver: "activity_create_variant",
+            failure_mode: "output_shape_unreachable",
+            detail:
+              `declared output_shape(s) [${unreachable.join(", ")}] not produced by any task. ` +
+              `Every declared output_shape must appear in at least one task's outputShapes list.`,
+          },
+        };
+      }
     }
   }
 

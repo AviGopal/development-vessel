@@ -60,6 +60,11 @@ import { DETECT_FEATURE_FLAG_ZERO_EXERCISE_TEMPLATE } from "./detect-feature-fla
 import { DETECT_FILTER_SATURATION_TEMPLATE } from "./detect-filter-saturation.js";
 import { MECHANISM_HEALTH_TICK_TEMPLATE } from "./mechanism-health-tick.js";
 import { DRAFTER_TRIGGER_TICK_TEMPLATE } from "./drafter-trigger-tick.js";
+// Loop-C dispatch closer (2026-06-13): deterministic consumer of the
+// vessel-authoring scenario queue gap-to-scenario-bridge already writes.
+// Dual of drafter-trigger-tick — picks a vessel-authoring scenario, designs the
+// vessel via one constrained LLM task, dispatches scaffold-and-publish-vessel.
+import { VESSEL_SCAFFOLD_TRIGGER_TICK_TEMPLATE } from "./vessel-scaffold-trigger-tick.js";
 // Phase 3 — closed-loop learning and verification
 // (openspec/changes/2026-06-01-closed-loop-learning-and-verification/)
 import { DETECT_RECURRING_PATTERN_TEMPLATE } from "./detect-recurring-pattern.js";
@@ -106,6 +111,7 @@ import {
   DISK_SPACE_OBSERVER_TICK_TEMPLATE,
   WORKSPACE_HYGIENE_OBSERVER_TICK_TEMPLATE,
   PRUNE_STALE_MITOSIS_TICK_TEMPLATE,
+  LEARNING_SIGNAL_HEALTH_OBSERVER_TICK_TEMPLATE,
   CONCEPT_DB_HEALTH_OBSERVER_TICK_TEMPLATE,
   DISCOVERY_VESSEL_REGISTRY_OBSERVER_TICK_TEMPLATE,
   SUBSTRATE_HEARTBEAT_OBSERVER_TICK_TEMPLATE,
@@ -168,6 +174,7 @@ export {
   DISK_SPACE_OBSERVER_TICK_TEMPLATE,
   WORKSPACE_HYGIENE_OBSERVER_TICK_TEMPLATE,
   PRUNE_STALE_MITOSIS_TICK_TEMPLATE,
+  LEARNING_SIGNAL_HEALTH_OBSERVER_TICK_TEMPLATE,
   CONCEPT_DB_HEALTH_OBSERVER_TICK_TEMPLATE,
   DISCOVERY_VESSEL_REGISTRY_OBSERVER_TICK_TEMPLATE,
   SUBSTRATE_HEARTBEAT_OBSERVER_TICK_TEMPLATE,
@@ -194,6 +201,7 @@ export { DETECT_FEATURE_FLAG_ZERO_EXERCISE_TEMPLATE } from "./detect-feature-fla
 export { DETECT_FILTER_SATURATION_TEMPLATE } from "./detect-filter-saturation.js";
 export { MECHANISM_HEALTH_TICK_TEMPLATE } from "./mechanism-health-tick.js";
 export { DRAFTER_TRIGGER_TICK_TEMPLATE } from "./drafter-trigger-tick.js";
+export { VESSEL_SCAFFOLD_TRIGGER_TICK_TEMPLATE } from "./vessel-scaffold-trigger-tick.js";
 
 export const SEED_TEMPLATES: ActivityTemplate[] = [
   SHIP_CHANGE_TEMPLATE,
@@ -219,6 +227,16 @@ export const SEED_TEMPLATES: ActivityTemplate[] = [
   // scenario_id + paths filled in. Without this template the producer chain
   // dead-ends at goal[8] precondition-rejection.
   DRAFTER_TRIGGER_TICK_TEMPLATE,
+  // Loop-C dispatch closer (2026-06-13): the deterministic consumer of the
+  // vessel-authoring scenario queue. gap-to-scenario-bridge routes
+  // missing_capability gaps to validation/failure-modes/vessel-scenarios/ with
+  // target=scaffold-and-publish-vessel, but nothing consumed that queue. This
+  // tick (dual of drafter-trigger-tick) lists it, designs a vessel from the
+  // demanded capability_shape via one constrained LLM task, and dispatches
+  // scaffold-and-publish-vessel — which terminates in a PR (the safety gate).
+  // Compose-only; closes the last wired-but-truncated self-stability loop
+  // (SUBSTRATE_AS_MDP §8.6). No boredom goal added — operator-tunable cadence.
+  VESSEL_SCAFFOLD_TRIGGER_TICK_TEMPLATE,
   // minimum activity loop — try → trace → learn (operator directive 2026-05-28)
   TRY_DIRECT_ANSWER_TEMPLATE,
   // self-healing: closes diagnostic→action loop for confidence gap (2026-05-28)
@@ -452,6 +470,7 @@ export const SEED_TEMPLATES: ActivityTemplate[] = [
   DISK_SPACE_OBSERVER_TICK_TEMPLATE,
   WORKSPACE_HYGIENE_OBSERVER_TICK_TEMPLATE,
   PRUNE_STALE_MITOSIS_TICK_TEMPLATE,
+  LEARNING_SIGNAL_HEALTH_OBSERVER_TICK_TEMPLATE,
   CONCEPT_DB_HEALTH_OBSERVER_TICK_TEMPLATE,
   DISCOVERY_VESSEL_REGISTRY_OBSERVER_TICK_TEMPLATE,
   SUBSTRATE_HEARTBEAT_OBSERVER_TICK_TEMPLATE,

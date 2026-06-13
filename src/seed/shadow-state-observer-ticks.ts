@@ -300,6 +300,39 @@ export const PRUNE_STALE_MITOSIS_TICK_TEMPLATE: ActivityTemplate = {
   ],
 };
 
+export const LEARNING_SIGNAL_HEALTH_OBSERVER_TICK_TEMPLATE: ActivityTemplate = {
+  id: "development-vessel:learning-signal-health-observer-tick",
+  name: "learning-signal-health-observer-tick",
+  description:
+    "Deterministic single-resolver wrapper around learning_signal_health_observer. " +
+    "Reads concept-db's own metrics (success_credit_ratio = loaded-with-success / " +
+    "loaded; avgRelevance vs the 0.5 prior) and emits learningSignalHealth + a " +
+    "substrateGap when the relevance signal goes one-sided (loads recorded but " +
+    "success rarely credited, so relevance decays with use). Catches a silent " +
+    "learning-loop degradation that status counters mask. Cold-start-guarded.",
+  inputShapes: [],
+  outputShapes: ["learningSignalHealth"],
+  tags: [
+    "intent:shadow_state_observation",
+    "horizon:meta",
+    "phase:detect",
+    "boredom_target_template",
+    "lift.autonomous.loop",
+    "light_dispatch_eligible",
+    "impulse_complete_base",
+  ],
+  variables: [],
+  tasks: [
+    {
+      id: "observe_learning_signal_health",
+      description: "Invoke learning_signal_health_observer.",
+      resolver: "learning_signal_health_observer",
+      config: { type: "learning_signal_health_observer" },
+      outputShapes: ["learningSignalHealth"],
+    },
+  ],
+};
+
 export const CONCEPT_DB_HEALTH_OBSERVER_TICK_TEMPLATE: ActivityTemplate = {
   id: "development-vessel:concept-db-health-observer-tick",
   name: "concept-db-health-observer-tick",

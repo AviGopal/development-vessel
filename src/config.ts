@@ -394,6 +394,7 @@ export const config = {
       "disk_space_observer",
       "workspace_hygiene_observer",
       "prune_stale_mitosis",
+      "learning_signal_health_observer",
       "concept_db_health_observer",
       "discovery_vessel_registry_observer",
       "substrate_heartbeat_observer",

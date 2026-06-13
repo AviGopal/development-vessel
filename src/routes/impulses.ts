@@ -98,6 +98,7 @@ import { resolveHostContainerSourceDriftObserver } from "../resolvers/host-conta
 import { resolveDiskSpaceObserver } from "../resolvers/disk-space-observer.js";
 import { resolveWorkspaceHygieneObserver } from "../resolvers/workspace-hygiene-observer.js";
 import { resolvePruneStaleMitosis } from "../resolvers/prune-stale-mitosis.js";
+import { resolveLearningSignalHealthObserver } from "../resolvers/learning-signal-health-observer.js";
 import { resolveConceptDbHealthObserver } from "../resolvers/concept-db-health-observer.js";
 import { resolveDiscoveryVesselRegistryObserver } from "../resolvers/discovery-vessel-registry-observer.js";
 import { resolveSubstrateHeartbeatObserver } from "../resolvers/substrate-heartbeat-observer.js";
@@ -358,6 +359,10 @@ export async function resolveDispatch(pointer: AnyPointer): Promise<ResolverResu
     case "prune_stale_mitosis":
       return resolvePruneStaleMitosis(
         p as Parameters<typeof resolvePruneStaleMitosis>[0],
+      );
+    case "learning_signal_health_observer":
+      return resolveLearningSignalHealthObserver(
+        p as Parameters<typeof resolveLearningSignalHealthObserver>[0],
       );
     case "concept_db_health_observer":
       return resolveConceptDbHealthObserver(

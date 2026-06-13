@@ -28,6 +28,59 @@ export interface WorkspaceHygieneObserverPointer {
   mitosisPendingPath?: string;
   /** abandoned mitosis dirs above this → over_threshold=true. Default 25. */
   countThreshold?: number;
+  /** dev-vessel resolve URL for emitting the substrateGap. */
+  devVesselUrl?: string;
+}
+
+const DEFAULT_DEV_VESSEL_URL = "http://127.0.0.1:8090/v2/impulses/resolve";
+
+/**
+ * Best-effort substrateGap emission. Stable id so repeated ticks upsert one gap
+ * rather than spamming. This is the link that turns telemetry into action: the
+ * gap feeds the gap->scenario->drafter pipeline and names prune_stale_mitosis
+ * as the recommended resolver.
+ */
+async function emitPollutionGap(
+  devVesselUrl: string,
+  abandoned: number,
+  oldestAgeDays: number,
+): Promise<"emitted" | "error"> {
+  const apiKey = process.env["METABOB_API_KEY"] ?? "";
+  try {
+    const res = await fetch(devVesselUrl, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(apiKey ? { Authorization: `ApiKey ${apiKey}` } : {}),
+      },
+      body: JSON.stringify({
+        impulse: {
+          pointer: {
+            type: "substrateGap_write",
+            gap: {
+              id: "workspace-pollution-mitosis-dirs",
+              category: "workspace_pollution",
+              source: "substrate_detected",
+              summary: `${abandoned} abandoned mitosis staging dirs in /vessels (oldest ${oldestAgeDays}d) — swamps the responsibility-audit scan cap and blinds the self-audit`,
+              detected_at: new Date().toISOString(),
+              status: "open",
+              classification_metadata: {
+                detector: "workspace_hygiene_observer",
+                abandoned_count: abandoned,
+                oldest_age_days: oldestAgeDays,
+                recommended_resolver: "prune_stale_mitosis",
+                root_cause: "mitosis lifecycle lacks teardown on UNFAVORABLE/abandonment",
+              },
+            },
+          },
+        },
+      }),
+      signal: AbortSignal.timeout(5000),
+    });
+    return res.ok ? "emitted" : "error";
+  } catch {
+    return "error";
+  }
 }
 
 export async function resolveWorkspaceHygieneObserver(
@@ -84,6 +137,15 @@ export async function resolveWorkspaceHygieneObserver(
   const abandoned = total - pinnedCount;
   const overThreshold = abandoned > countThreshold;
 
+  let gapEmission: "emitted" | "error" | "not_needed" = "not_needed";
+  if (overThreshold) {
+    gapEmission = await emitPollutionGap(
+      pointer.devVesselUrl ?? DEFAULT_DEV_VESSEL_URL,
+      abandoned,
+      oldestAgeDays,
+    );
+  }
+
   return {
     shape: "workspaceHygieneState",
     body: {
@@ -94,6 +156,7 @@ export async function resolveWorkspaceHygieneObserver(
       oldest_age_days: oldestAgeDays,
       count_threshold: countThreshold,
       over_threshold: overThreshold,
+      gap_emission: gapEmission,
       recommended_action: overThreshold
         ? `prune ${abandoned} abandoned mitosis dirs (keep ${pinnedCount} pinned + recent); fix root cause: add teardown to vessel_mitosis lifecycle on UNFAVORABLE/abandonment`
         : "none",

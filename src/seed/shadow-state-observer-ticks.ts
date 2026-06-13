@@ -268,6 +268,38 @@ export const WORKSPACE_HYGIENE_OBSERVER_TICK_TEMPLATE: ActivityTemplate = {
   ],
 };
 
+export const PRUNE_STALE_MITOSIS_TICK_TEMPLATE: ActivityTemplate = {
+  id: "development-vessel:prune-stale-mitosis-tick",
+  name: "prune-stale-mitosis-tick",
+  description:
+    "Deterministic single-resolver wrapper around prune_stale_mitosis. Deletes " +
+    "abandoned /vessels/*-mitosis-* staging dirs older than 1 day (excluding the " +
+    "active mitosis-pending entry) and emits mitosisPruneResult. The RESOLUTION " +
+    "half of the workspace-hygiene loop: clears the directory-count pollution that " +
+    "blinds the responsibility-audit. Guarded (pattern + pinned + age gates).",
+  inputShapes: [],
+  outputShapes: ["mitosisPruneResult"],
+  tags: [
+    "intent:workspace_hygiene",
+    "horizon:meta",
+    "phase:resolve",
+    "boredom_target_template",
+    "lift.autonomous.loop",
+    "light_dispatch_eligible",
+    "impulse_complete_base",
+  ],
+  variables: [],
+  tasks: [
+    {
+      id: "prune_stale_mitosis",
+      description: "Invoke prune_stale_mitosis (real prune, age-gated).",
+      resolver: "prune_stale_mitosis",
+      config: { type: "prune_stale_mitosis", minAgeDays: 1 },
+      outputShapes: ["mitosisPruneResult"],
+    },
+  ],
+};
+
 export const CONCEPT_DB_HEALTH_OBSERVER_TICK_TEMPLATE: ActivityTemplate = {
   id: "development-vessel:concept-db-health-observer-tick",
   name: "concept-db-health-observer-tick",

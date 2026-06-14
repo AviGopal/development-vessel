@@ -62,13 +62,15 @@ function mockFetch(
       );
     }
     if (u.includes("/execution-traces")) {
-      const m = u.match(/activity_(?:template_)?id=([^&]+)/);
-      const id = m ? decodeURIComponent(m[1]!) : "";
-      const ok = id.startsWith("prod-of-");
-      return new Response(
-        JSON.stringify({ executions: ok ? [{ status: "success", output_impulse_shapes: ["concept_create_write"] }] : [] }),
-        { status: 200 },
-      );
+      // No server-side id filter; return success traces tagged with activity_id
+      // for every productive consumer so the audit's client-side match works.
+      const executions = [...consumers].map((shape) => ({
+        status: "success",
+        success: true,
+        activity_id: prodId(shape),
+        output_impulse_shapes: ["concept_create_write"],
+      }));
+      return new Response(JSON.stringify({ executions }), { status: 200 });
     }
     if (u.includes("/impulse-relevance")) {
       return new Response(JSON.stringify({ ok: true }), { status: 200 });

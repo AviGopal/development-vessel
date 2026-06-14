@@ -41,13 +41,15 @@ function mockApi(opts: {
       return new Response(JSON.stringify(tpl), { status: 200 });
     }
     if (u.includes("/execution-traces")) {
-      const m = u.match(/activity_(?:template_)?id=([^&]+)/);
-      const id = m ? decodeURIComponent(m[1]!) : "";
-      const ok = tracesOk.has(id);
-      return new Response(
-        JSON.stringify({ executions: ok ? [{ status: "success", output_impulse_shapes: ["concept_create_write"] }] : [] }),
-        { status: 200 },
-      );
+      // Endpoint does NOT filter by id param — return a mixed recent window and
+      // let the resolver filter client-side by activity_id (the honesty fix).
+      const executions = [
+        // an UNRELATED success trace with a genuine output — must be ignored
+        { status: "success", success: true, activity_id: "some-other-template", output_impulse_shapes: ["concept_create_write"] },
+        // real traces for the productive ids
+        ...[...tracesOk].map((id) => ({ status: "success", success: true, activity_id: id, output_impulse_shapes: ["concept_create_write"] })),
+      ];
+      return new Response(JSON.stringify({ executions }), { status: 200 });
     }
     return new Response("{}", { status: 404 });
   }) as unknown as typeof fetch;

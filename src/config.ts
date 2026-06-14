@@ -426,6 +426,12 @@ export const config = {
       // self-deception that flips a shape to "covered" without expanding the
       // frontier. Gates the arrival-scan "integrated" verdict.
       "consumer_productivity_audit",
+      // vessel_gap_to_cluster (2026-06-14): the PRODUCER adapter. Reshapes a
+      // vessel-arrival gap into a recurringPatternCluster targeting
+      // concept_create_write so the real-chain author (draft-activity-from-pattern)
+      // composes a genuine fetch→classify→persist consumer instead of a
+      // scaffold-clone. Optionally dispatches the author.
+      "vessel_gap_to_cluster",
       // obsidian_command_gate (2026-06-13): use the learned action-effect priors
       // (obsidian_action_effect concepts) to gate which Obsidian commands the
       // substrate will dispatch — allow learned-reversible, deny unobserved/

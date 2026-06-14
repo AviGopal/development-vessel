@@ -108,6 +108,7 @@ import { resolveConceptDbHealthObserver } from "../resolvers/concept-db-health-o
 import { resolveDiscoveryVesselRegistryObserver } from "../resolvers/discovery-vessel-registry-observer.js";
 import { resolveVesselArrivalScan } from "../resolvers/vessel-arrival-scan.js";
 import { resolveConsumerProductivityAudit } from "../resolvers/consumer-productivity-audit.js";
+import { resolveVesselGapToCluster } from "../resolvers/vessel-gap-to-cluster.js";
 import { resolveCreditVesselShapes } from "../resolvers/credit-vessel-shapes.js";
 import { resolveObsidianCommandGate } from "../resolvers/obsidian-command-gate.js";
 import { resolveObsidianExecuteGated } from "../resolvers/obsidian-execute-gated.js";
@@ -413,6 +414,10 @@ export async function resolveDispatch(pointer: AnyPointer): Promise<ResolverResu
     case "consumer_productivity_audit":
       return resolveConsumerProductivityAudit(
         p as Parameters<typeof resolveConsumerProductivityAudit>[0],
+      );
+    case "vessel_gap_to_cluster":
+      return resolveVesselGapToCluster(
+        p as Parameters<typeof resolveVesselGapToCluster>[0],
       );
     case "obsidian_command_gate":
       return resolveObsidianCommandGate(

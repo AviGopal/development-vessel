@@ -221,32 +221,62 @@ async function fetchTemplate(
   }
 }
 
-/** A success trace for `id` whose output shapes include a genuine (non-meta) shape. */
+/** Normalise an id for comparison: unwrap `activity:⟨…⟩` and strip a leading
+ * `activity:` so a trace's activity_id matches the candidate id regardless of
+ * which wrapped form either side carries. */
+function normId(id: string): string {
+  return unwrapId(id).replace(/^activity:/, "");
+}
+
+/**
+ * A success trace that genuinely belongs to `id` AND emitted one of the
+ * candidate's expected genuine output shapes.
+ *
+ * CRITICAL HONESTY FIX (2026-06-14): the activity-api execution-traces endpoint
+ * does NOT filter by the `activity_template_id` / `activity_id` query param — it
+ * returns recent traces regardless. Trusting the param made this check match an
+ * unrelated trace and falsely report a never-run consumer as `productive` (the
+ * exact self-deception this resolver exists to catch). We now filter
+ * CLIENT-SIDE: a trace counts only if its own activity_id/variant_id matches the
+ * candidate AND its output shapes include a genuine output the candidate declares.
+ */
 async function hasProductiveTrace(
   metabob: string,
   apiKey: string,
   id: string,
+  genuineOutputs: string[],
   timeoutMs: number,
 ): Promise<boolean> {
-  for (const param of [`activity_template_id=${encodeURIComponent(id)}`, `activity_id=${encodeURIComponent(id)}`]) {
-    try {
-      const res = await fetch(
-        `${metabob.replace(/\/+$/, "")}/v2/activities/execution-traces?${param}&limit=10`,
-        { headers: { Authorization: `ApiKey ${apiKey}` }, signal: AbortSignal.timeout(timeoutMs) },
-      );
-      if (!res.ok) continue;
-      const json = (await res.json()) as {
-        executions?: Array<{ status?: string; success?: boolean; output_impulse_shapes?: string[] }>;
-      };
-      const rows = json.executions ?? [];
-      for (const r of rows) {
-        const ok = r.success === true || r.status === "success";
-        const genuine = (r.output_impulse_shapes ?? []).some((s) => !isMeta(s));
-        if (ok && genuine) return true;
-      }
-    } catch {
-      /* try next param form */
+  if (genuineOutputs.length === 0) return false;
+  const target = normId(id);
+  const wanted = new Set(genuineOutputs);
+  try {
+    const res = await fetch(
+      `${metabob.replace(/\/+$/, "")}/v2/activities/execution-traces?limit=100`,
+      { headers: { Authorization: `ApiKey ${apiKey}` }, signal: AbortSignal.timeout(timeoutMs) },
+    );
+    if (!res.ok) return false;
+    const json = (await res.json()) as {
+      executions?: Array<{
+        status?: string;
+        success?: boolean;
+        output_impulse_shapes?: string[];
+        activity_id?: string;
+        variant_id?: string;
+        activity_template_id?: string;
+      }>;
+    };
+    for (const r of json.executions ?? []) {
+      const belongsToThis = [r.activity_id, r.variant_id, r.activity_template_id]
+        .filter(Boolean)
+        .some((tid) => normId(tid!) === target);
+      if (!belongsToThis) continue;
+      const ok = r.success === true || r.status === "success";
+      const emittedWanted = (r.output_impulse_shapes ?? []).some((s) => wanted.has(s));
+      if (ok && emittedWanted) return true;
     }
+  } catch {
+    return false;
   }
   return false;
 }
@@ -288,7 +318,10 @@ async function classifyCandidate(
   // Productive evidence requires a real downstream impulse: a state-write, or a
   // non-meta domain output the consumer is proven (by trace) to emit.
   const hasGenuineOutput = stateWriteOuts.length > 0 || genuine.length > 0;
-  const hasTrace = await hasProductiveTrace(metabob, apiKey, id, timeoutMs);
+  // Trace must emit one of THIS candidate's genuine outputs — not just any
+  // non-meta shape from an unrelated trace.
+  const genuineOutputSet = [...new Set([...stateWriteOuts, ...genuine])];
+  const hasTrace = scaffold ? false : await hasProductiveTrace(metabob, apiKey, id, genuineOutputSet, timeoutMs);
 
   let verdict: Verdict;
   let reason: string;

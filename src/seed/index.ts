@@ -9,6 +9,7 @@ import { RELEASE_AND_VALIDATE_TEMPLATE } from "./release-and-validate.js";
 import { DRAFT_GAP_CLOSING_ACTIVITY_TEMPLATE } from "./draft-gap-closing-activity.js";
 import { HARNESS_CHECK_SCENARIO_TEMPLATE } from "./harness-check-scenario.js";
 import { DETECTOR_COVERAGE_AUDIT_TICK_TEMPLATE } from "./detector-coverage-audit-tick.js";
+import { COST_EXPECTATION_AUDIT_TICK_TEMPLATE } from "./cost-expectation-audit-tick.js";
 import { DRAFT_DETECTOR_ACTIVITY_TEMPLATE } from "./draft-detector-activity.js";
 import { PROBE_REACHABLE_UNLEARNED_TEMPLATE } from "./probe-reachable-unlearned.js";
 import { PROBE_UNTRAVERSED_EDGE_TEMPLATE } from "./probe-untraversed-edge.js";
@@ -223,6 +224,7 @@ export { DRAFTER_TRIGGER_TICK_TEMPLATE } from "./drafter-trigger-tick.js";
 export { VESSEL_SCAFFOLD_TRIGGER_TICK_TEMPLATE } from "./vessel-scaffold-trigger-tick.js";
 export { CHARACTERIZE_ARRIVED_VESSEL_TEMPLATE } from "./characterize-arrived-vessel.js";
 export { DETECTOR_COVERAGE_AUDIT_TICK_TEMPLATE } from "./detector-coverage-audit-tick.js";
+export { COST_EXPECTATION_AUDIT_TICK_TEMPLATE } from "./cost-expectation-audit-tick.js";
 export { DRAFT_DETECTOR_ACTIVITY_TEMPLATE } from "./draft-detector-activity.js";
 
 export const SEED_TEMPLATES: ActivityTemplate[] = [
@@ -230,6 +232,7 @@ export const SEED_TEMPLATES: ActivityTemplate[] = [
   // the substrate authors its own detectors for uncovered problem classes via
   // the same detect→draft→register→promote loop it uses for every activity.
   DETECTOR_COVERAGE_AUDIT_TICK_TEMPLATE,
+  COST_EXPECTATION_AUDIT_TICK_TEMPLATE,
   DRAFT_DETECTOR_ACTIVITY_TEMPLATE,
   SHIP_CHANGE_TEMPLATE,
   BRANCH_HEALTH_TEMPLATE,

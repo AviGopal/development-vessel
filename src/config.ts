@@ -461,6 +461,7 @@ export const config = {
       "detector_coverage_scan",
       "signature_cluster_scan",
       "build_signature_detector",
+      "cost_expectation_scan",
     ] as const,
     resolveEndpoint: "/v2/impulses/resolve",
     resolveRequestFormat: "pointer" as const,

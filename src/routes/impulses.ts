@@ -36,6 +36,7 @@ import { resolveStalePointerEmit } from "../resolvers/stale-pointer-emit.js";
 import { resolvePhantomTraceScan } from "../resolvers/phantom-trace-scan.js";
 import { resolveTemplateInputLintScan } from "../resolvers/template-input-lint-scan.js";
 import { resolveGateSaturationScan } from "../resolvers/gate-saturation-scan.js";
+import { resolveCostExpectationScan } from "../resolvers/cost-expectation-scan.js";
 import { resolveVesselWriteErrorScan } from "../resolvers/vessel-write-error-scan.js";
 import { resolveChainFetchFailureScan } from "../resolvers/chain-fetch-failure-scan.js";
 import { resolveConvergentValidityCheck } from "../resolvers/convergent-validity-check.js";
@@ -205,6 +206,8 @@ export async function resolveDispatch(pointer: AnyPointer): Promise<ResolverResu
       return resolveTemplateInputLintScan(p as Parameters<typeof resolveTemplateInputLintScan>[0]);
     case "gate_saturation_scan":
       return resolveGateSaturationScan(p as Parameters<typeof resolveGateSaturationScan>[0]);
+    case "cost_expectation_scan":
+      return resolveCostExpectationScan(p as Parameters<typeof resolveCostExpectationScan>[0]);
     case "vessel_write_error_scan":
       return resolveVesselWriteErrorScan(p as Parameters<typeof resolveVesselWriteErrorScan>[0]);
     case "chain_fetch_failure_scan":

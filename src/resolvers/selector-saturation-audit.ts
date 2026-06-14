@@ -47,6 +47,14 @@ interface SelectorSnapshot {
   saturated_fraction?: number;
   distinct_means?: number;
   saturation_verdict?: string;
+  // Novel-yield (learning-rate) observables, boredom V29 (2026-06-14). Distinct
+  // from saturation: a redundant-pinned detector produces findings every run but
+  // nothing NEW (novel_fraction≈0). After novelty-graded reward its mean already
+  // decayed, so saturation is blind to it — this is the signal that catches it.
+  mean_novel_fraction?: number | null;
+  redundant_pinned_count?: number;
+  redundant_pinned_templates?: string[];
+  novelty_verdict?: string;
 }
 
 /**
@@ -151,19 +159,98 @@ export async function resolveSelectorSaturationAudit(
     gapEmission = await emitSaturationGap(pointer.devVesselUrl ?? DEFAULT_DEV_VESSEL_URL, snap);
   }
 
+  // Novelty-degeneracy (learning-rate) check — the recursion's recursion. After
+  // novelty-graded reward, redundant-pinned detectors no longer saturate (mean
+  // decayed), so they are invisible to the saturation check above. They are
+  // still a learning-rate leak: cycles spent re-finding known problems. The
+  // boredom snapshot now reports them directly.
+  const noveltyDegenerate = snap.novelty_verdict === "redundant_pinned"
+    && (snap.redundant_pinned_count ?? 0) > 0;
+  let noveltyGapEmission: "emitted" | "error" | "not_needed" = "not_needed";
+  if (noveltyDegenerate) {
+    noveltyGapEmission = await emitNoveltyGap(pointer.devVesselUrl ?? DEFAULT_DEV_VESSEL_URL, snap);
+  }
+
+  // Findings array so light-dispatch grades this tick by what it actually
+  // surfaced (and so its OWN re-emission is novelty-graded like any detector).
+  const findings = [
+    ...(degenerate ? [{ type: "reward_saturation", saturated_fraction: saturatedFraction }] : []),
+    ...(noveltyDegenerate ? (snap.redundant_pinned_templates ?? []).map((id) => ({ type: "redundant_pinned", template_id: id })) : []),
+  ];
+
   return {
     shape: "selectorRewardHealth",
     body: {
-      verdict: degenerate ? "saturated" : "healthy",
+      verdict: degenerate ? "saturated" : noveltyDegenerate ? "redundant_pinned" : "healthy",
       sampled_templates: sampled,
       saturated_fraction: saturatedFraction,
       variance_of_means: variance,
       mean_of_means: snap.mean_of_means,
       distinct_means: snap.distinct_means,
+      mean_novel_fraction: snap.mean_novel_fraction ?? null,
+      redundant_pinned_count: snap.redundant_pinned_count ?? 0,
       snapshot_verdict: snap.saturation_verdict,
+      snapshot_novelty_verdict: snap.novelty_verdict,
       gap_emission: gapEmission,
+      novelty_gap_emission: noveltyGapEmission,
+      findings,
       snapshot_generated_at: snap.generated_at,
       generated_at: new Date().toISOString(),
     },
   };
+}
+
+/**
+ * Emit a substrateGap for novelty-degeneracy: detectors that produce findings
+ * every run but nothing new. The fix is detector-specific (usually: the detector
+ * mints volatile/timestamped finding ids so the same finding looks new — make
+ * the id stable — or the underlying problem genuinely recurs and needs a fix,
+ * not just re-detection). Stable gap id → upsert, no spam.
+ */
+async function emitNoveltyGap(devVesselUrl: string, snap: SelectorSnapshot): Promise<"emitted" | "error"> {
+  const apiKey = process.env["METABOB_API_KEY"] ?? "";
+  try {
+    const res = await fetch(devVesselUrl, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(apiKey ? { Authorization: `ApiKey ${apiKey}` } : {}),
+      },
+      body: JSON.stringify({
+        impulse: {
+          pointer: {
+            type: "substrateGap_write",
+            gap: {
+              id: "selector-novelty-degeneracy",
+              category: "learning_signal_degeneracy",
+              source: "substrate_detected",
+              summary:
+                `${snap.redundant_pinned_count} detector(s) are redundant-pinned ` +
+                `(mean_novel_fraction=${snap.mean_novel_fraction}) — they produce findings every ` +
+                `run but nothing NEW, so pool cycles are spent re-detecting known problems. ` +
+                `Affected: ${(snap.redundant_pinned_templates ?? []).join(", ")}.`,
+              detected_at: new Date().toISOString(),
+              status: "open",
+              classification_metadata: {
+                detector: "selector_saturation_audit",
+                check: "novelty_degeneracy",
+                mean_novel_fraction: snap.mean_novel_fraction,
+                redundant_pinned_count: snap.redundant_pinned_count,
+                redundant_pinned_templates: snap.redundant_pinned_templates,
+                recommended_fix:
+                  "for each redundant-pinned detector, make its finding ids stable (strip " +
+                  "volatile/timestamp tokens) so re-emission is recognized; or fix the recurring " +
+                  "underlying problem so the finding stops being produced",
+                root_cause: "detector re-emits the same finding every run (no novelty)",
+              },
+            },
+          },
+        },
+      }),
+      signal: AbortSignal.timeout(5000),
+    });
+    return res.ok ? "emitted" : "error";
+  } catch {
+    return "error";
+  }
 }

@@ -134,17 +134,30 @@ function buildCluster(args: {
     n_concept_citations_available: conceptIds.length,
     available_concept_ids: conceptIds,
     expected_inputs: [shape],
-    // The genuine state-write that makes the authored consumer PRODUCTIVE.
-    expected_outputs: ["concept_create_write"],
+    // The genuine state-write that makes the authored consumer PRODUCTIVE. Use
+    // the TYPED concept_write resolver (emits conceptCreateResult) — NOT a raw
+    // http_fetch POST, which (a) needs hand-built JSON that the LLM gets wrong
+    // (400 Invalid JSON body) and (b) records its output as `httpResponse`, so
+    // a 400 ghost-succeeds and no concept is actually minted.
+    expected_outputs: ["conceptCreateResult"],
     topology_hint:
-      `1. http_fetch the ${shape} impulse from ${vesselId} at ${ep} ` +
-      `(POST /v2/impulses/resolve with body {"impulse":{"pointer":{"type":"${shape}"}}}). ` +
+      `1. http_fetch the ${shape} data from ${vesselId} at ${ep}. ` +
+      `Use the vessel's documented READ path that returns ACTUAL content (not a lazy pointer stub): ` +
+      `for activity-api read shapes that is a GET to its REST route ` +
+      `(e.g. executionTraceList → GET ${ep}/v2/activities/execution-traces?limit=20; ` +
+      `activityMetrics/thompson_posterior → the matching /v2/activities GET); ` +
+      `for a vessel resolver shape it is POST ${ep}/v2/impulses/resolve with body ` +
+      `{"impulse":{"pointer":{"type":"${shape}"}}}. Pick whichever returns real rows. ` +
       `2. llm_completion_dispatch: classify/summarise the fetched content into a short concept summary. ` +
-      `3. http_fetch POST to concept-db at ${conceptDb}/v2/impulses/resolve with a concept_create_write ` +
-      `pointer carrying the extracted summary (use the {{<task>_json}} form for the content field). ` +
-      `The LAST task MUST emit concept_create_write so executing the template advances substrate state. ` +
-      `Do NOT author a read_scenario → analyse → write-a-Proposal scaffold; emit no *Proposal output.`,
-    deny_list: ["fs_read of a scenario file", "activityTemplateProposal", "patch_proposal"],
+      `3. Persist with the TYPED concept_write resolver (NOT raw http_fetch): config ` +
+      `{"type":"concept_write","name":"<short title>","content":"{{<classify_task>_text}}",` +
+      `"source_type":"extracted"}. This resolver builds the concept-db body itself, emits ` +
+      `conceptCreateResult on real success, and emits structuredError (a FAILURE, not a ghost ` +
+      `success) if the write is rejected — so the trace cannot lie about minting a concept. ` +
+      `The LAST task MUST be this concept_write and emit conceptCreateResult. ` +
+      `Do NOT author a read_scenario → analyse → write-a-Proposal scaffold; emit no *Proposal output. ` +
+      `Do NOT POST concept_create_write via raw http_fetch — use concept_write.`,
+    deny_list: ["fs_read of a scenario file", "activityTemplateProposal", "patch_proposal", "raw http_fetch to concept-db"],
     bridge_source: "vessel_gap_to_cluster",
     target_shape: shape,
   };
@@ -229,7 +242,7 @@ export async function resolveVesselGapToCluster(
       owner_found: owner !== null,
       pattern_id: patternId,
       cluster_path: clusterPath || null,
-      expected_outputs: ["concept_create_write"],
+      expected_outputs: ["conceptCreateResult"],
       cited_concepts: conceptIds.length,
       ...(writeError ? { write_error: writeError } : {}),
       ...(dispatched ? { dispatched_to_author: dispatched.ok, dispatch_detail: dispatched.detail } : {}),

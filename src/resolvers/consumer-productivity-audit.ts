@@ -66,9 +66,20 @@ function isProposal(shape: string): boolean {
   return PROPOSAL_OUTPUT_SET.has(shape) || PROPOSAL_OUTPUT_RE.test(shape);
 }
 
-/** A genuine state-advancing write impulse (concept_create_write, *_write, …). */
+/**
+ * A genuine state-advancing output: a *_write impulse, OR a typed write-result
+ * shape that a write resolver emits ONLY on a confirmed mutation (e.g.
+ * concept_write → conceptCreateResult; the resolver emits structuredError, not
+ * this, on failure — so the shape's presence in a trace is honest evidence).
+ */
+const STATE_WRITE_RESULT_SET = new Set<string>([
+  "conceptCreateResult",
+  "conceptCreateWrite",
+  "cutoverApplied",
+  "loadAttribution",
+]);
 function isStateWrite(shape: string): boolean {
-  return /_write$/i.test(shape);
+  return /_write$/i.test(shape) || STATE_WRITE_RESULT_SET.has(shape);
 }
 
 export interface ConsumerProductivityAuditPointer {

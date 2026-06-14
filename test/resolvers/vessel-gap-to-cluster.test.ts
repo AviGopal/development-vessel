@@ -49,7 +49,7 @@ describe("vessel_gap_to_cluster", () => {
     expect(body.pattern_id).toBe("vessel-bridge-obsidian-event_observed");
     expect(body.vessel_id).toBe("obsidian-vessel-devbob");
     expect(body.owner_found).toBe(true);
-    expect(body.expected_outputs).toEqual(["concept_create_write"]);
+    expect(body.expected_outputs).toEqual(["conceptCreateResult"]);
     const cluster = JSON.parse(await fs.readFile(body.cluster_path, "utf8")) as {
       expected_inputs: string[];
       expected_outputs: string[];
@@ -57,9 +57,10 @@ describe("vessel_gap_to_cluster", () => {
       deny_list: string[];
     };
     expect(cluster.expected_inputs).toEqual(["obsidian:event_observed"]);
-    expect(cluster.expected_outputs).toEqual(["concept_create_write"]);
-    // topology must steer toward a genuine chain, not a scaffold
-    expect(cluster.topology_hint).toContain("concept_create_write");
+    expect(cluster.expected_outputs).toEqual(["conceptCreateResult"]);
+    // topology must steer toward a genuine chain using the TYPED write resolver
+    expect(cluster.topology_hint).toContain("concept_write");
+    expect(cluster.topology_hint).toContain("conceptCreateResult");
     expect(cluster.topology_hint).toContain("http://host.docker.internal:27183");
     expect(cluster.deny_list).toContain("activityTemplateProposal");
   });

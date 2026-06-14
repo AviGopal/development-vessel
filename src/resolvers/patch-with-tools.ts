@@ -46,6 +46,8 @@ export interface PatchWithToolsPointer {
   workspace_root?: string;
   model?: string;
   max_iterations?: number;
+  /** Bounded outer-retry attempts (default 3); resets to original between tries. */
+  max_attempts?: number;
 }
 
 type ToolCall = { tool: string; args: Record<string, unknown> };
@@ -147,6 +149,15 @@ const TOOL_CATALOG_HELP = `Available tools (call exactly one per turn):
 
 5. code_replace_lines { path, start_line, end_line, text }
    - Replaces lines [start_line..end_line] (inclusive, 1-indexed) with \`text\`.
+   - DANGER: you must supply the FULL replacement text for that whole range. If
+     you haven't read the exact current content, you WILL destroy it. Prefer fs_edit.
+
+5b. fs_edit { path, old_string, new_string }  ← PREFERRED for surgical edits
+   - Replaces the FIRST exact occurrence of old_string with new_string. Fails
+     safely ("old_string not found") WITHOUT writing if old_string isn't present,
+     so it can never destroy code you haven't read. Copy old_string VERBATIM from
+     a code_search result (include enough surrounding context to be unique) and
+     make new_string the minimal change. This is the safest way to edit.
 
 6. code_add_import { path, module, specifier }
    - Idempotent. Adds an import; merges into existing brace-form imports.
@@ -155,9 +166,11 @@ const TOOL_CATALOG_HELP = `Available tools (call exactly one per turn):
    - Runs \`bun run <script>\` (default "typecheck") and returns error count.
    - Use to verify your changes before declaring done.
 
-BE DECISIVE — your turn budget is small. The normal path is: locate (1-2 calls) →
-edit (code_replace_lines / code_insert_after_line) → ONE verification search →
-emit done. After an edit tool returns OK, do NOT keep searching: at most ONE
+BE DECISIVE — your turn budget is small. The normal path is: code_search to READ
+the exact current lines → fs_edit { old_string=<verbatim copy of those lines>,
+new_string=<minimal change> } → emit done. NEVER call code_replace_lines on a
+range whose content you have not just read verbatim — that destroys it. After an
+edit tool returns OK, do NOT keep searching: at most ONE
 confirming search, then emit done. Repeated searching wastes turns and the patch
 is REJECTED if you hit the cap without declaring done. If an edit returns OK and
 makes the described change, the patch is complete — declare done immediately.
@@ -221,9 +234,27 @@ export async function resolvePatchWithTools(pointer: PatchWithToolsPointer): Pro
   const history: Array<{ turn: number; thought_or_action: string; tool_result?: ToolResult }> = [];
   // Counts identical failing (tool,args) calls so a stuck ReAct loop aborts early.
   const failedCallCounts = new Map<string, number>();
+  // Counts identical verify-on-done typecheck failures so we don't burn cycles
+  // re-producing the same broken patch.
+  const verifyFailCounts = new Map<string, number>();
   let finalReason: string | null = null;
   let finished = false;
+  // Outer retry (2026-06-14): a single ReAct attempt can strand itself (e.g. it
+  // damages the function before reading it, then correctly refuses to
+  // hallucinate the recovery). Reset to the ORIGINAL source and re-attempt,
+  // injecting the prior failure so the next attempt produces a BETTER patch.
+  // Abort as soon as two attempts fail similarly — re-failing identically wastes
+  // cycles without improving coverage.
+  const maxAttempts = pointer.max_attempts ?? 3;
+  const attemptFailures: string[] = [];
 
+  for (let attempt = 1; attempt <= maxAttempts && !finished; attempt++) {
+    if (attempt > 1) {
+      try { await writeFile(liveSrcPath, beforeSrc); } catch { /* best-effort */ }
+      history.length = 0;
+      failedCallCounts.clear();
+      verifyFailCounts.clear();
+    }
   for (let turn = 1; turn <= maxIters && !finished; turn++) {
     const historyBlock = history.length === 0
       ? "(no tool calls yet)"
@@ -233,17 +264,37 @@ export async function resolvePatchWithTools(pointer: PatchWithToolsPointer): Pro
     // directive to FIX the args (not repeat them). The plain history line was too
     // easy for the LLM to ignore, causing identical-call retry loops.
     const last = history[history.length - 1];
-    const correction = last?.tool_result && !last.tool_result.ok
-      ? `## ⚠ YOUR LAST CALL FAILED — DO NOT REPEAT IT\n` +
-        `Tool: ${last.tool_result.tool}\nArgs you sent: ${JSON.stringify(last.tool_result.args).slice(0, 300)}\n` +
-        `Error: ${JSON.stringify(last.tool_result.result).slice(0, 300)}\n` +
-        `Re-read the tool catalog and emit a DIFFERENT, corrected call that supplies EVERY required argument ` +
-        `(an error naming required fields means one was missing — code_replace_lines needs all of {path, start_line, end_line, text}). ` +
-        `Repeating the same args will fail again and abort the patch.\n\n`
+    let correction = "";
+    if (last?.tool_result && !last.tool_result.ok) {
+      if (last.tool_result.tool === "code_typecheck") {
+        // verify-on-done failure: the patch compiled-but-broke the target file.
+        correction =
+          `## ⚠ YOUR PATCH FAILED TYPECHECK — IT IS NOT DONE\n` +
+          `Errors in the target file:\n${JSON.stringify(last.tool_result.result).slice(0, 500)}\n` +
+          `These are caused by YOUR edit. Inspect the actual current file (code_search / code_find_function) ` +
+          `and apply a MINIMAL corrected edit that fixes ONLY these errors — do NOT rewrite working code or ` +
+          `invent identifiers/URLs/imports. A named export must be imported as { name }, not as a default. ` +
+          `Do NOT declare done again until the change is correct; re-emitting the same broken patch aborts.\n\n`;
+      } else {
+        correction =
+          `## ⚠ YOUR LAST CALL FAILED — DO NOT REPEAT IT\n` +
+          `Tool: ${last.tool_result.tool}\nArgs you sent: ${JSON.stringify(last.tool_result.args).slice(0, 300)}\n` +
+          `Error: ${JSON.stringify(last.tool_result.result).slice(0, 300)}\n` +
+          `Re-read the tool catalog and emit a DIFFERENT, corrected call that supplies EVERY required argument ` +
+          `(an error naming required fields means one was missing — code_replace_lines needs all of {path, start_line, end_line, text}). ` +
+          `Repeating the same args will fail again and abort the patch.\n\n`;
+      }
+    }
+
+    const priorBlock = attemptFailures.length
+      ? `## ⚠ PRIOR ATTEMPTS FAILED — do something DIFFERENT this time\n${attemptFailures.join("\n")}\n` +
+        `The file has been reset to its original state. READ the exact lines first; do not repeat the above mistake.\n\n`
       : "";
 
     const prompt =
       `You are patching a source file via fine-grained code tools. The proposal describes what to change; you use the tools to inspect the file and apply the change.\n\n` +
+      priorBlock +
+      `MINIMAL-EDIT RULE: make the SMALLEST edit that satisfies the proposal. First READ the exact current lines you will change (code_search / code_find_function), then change ONLY those. Preserve every surrounding URL, header, identifier, type, and import style EXACTLY as they appear — never retype code from memory or invent values. A named export is imported as { name } (not a default import). After your edit, the file is typecheck-verified; if it fails, you must fix it before declaring done.\n\n` +
       `## Target file (container path)\n${containerPath}\n\n` +
       `## Proposal (intent — code samples may be illustrative, NOT the actual file contents)\n${pointer.proposal_text}\n\n` +
       `## Tool catalog\n${TOOL_CATALOG_HELP}\n\n` +
@@ -265,12 +316,43 @@ export async function resolvePatchWithTools(pointer: PatchWithToolsPointer): Pro
       continue;
     }
     if (action.action === "done") {
-      finalReason = String(action.summary ?? "done");
-      finished = true;
-      break;
+      // VERIFY-ON-DONE (2026-06-14): never accept the patch on the LLM's word.
+      // Typecheck the live (in-progress) edit and, if the TARGET FILE now has
+      // errors, feed them straight back so the patcher FIXES its own mistake
+      // instead of returning a broken patch that only fails later at the cutover
+      // gate. The loud-correction block (above) surfaces these on the next turn.
+      // Crucially: abort if the SAME typecheck failure recurs — re-producing an
+      // identical broken patch wastes cycles without improving coverage.
+      const vesselDir = `${vesselsRoot}/${vessel}`;
+      const tc = await callTool(toolsEndpoint, "code_typecheck", { cwd: vesselDir });
+      const tcBody = tc.body as { error_lines?: string[] } | undefined;
+      const targetBase = containerPath.split("/").pop() ?? containerPath;
+      const targetErrors = (tcBody?.error_lines ?? []).filter((l) => l.includes(targetBase));
+      if (targetErrors.length === 0) {
+        finalReason = String(action.summary ?? "done");
+        finished = true;
+        break;
+      }
+      const sig = targetErrors.slice(0, 5).join("|");
+      const vn = (verifyFailCounts.get(sig) ?? 0) + 1;
+      verifyFailCounts.set(sig, vn);
+      if (vn >= 2) {
+        try { await writeFile(liveSrcPath, beforeSrc); } catch { /* best-effort */ }
+        return structuredError(
+          `patch_with_tools: aborted — the patch keeps failing typecheck with the SAME ${targetErrors.length} error(s) in ${targetBase} (${vn}×). Not burning cycles re-producing a broken patch. Errors: ${targetErrors.slice(0, 3).join(" ; ")}`,
+          { history, before_sha: beforeSha, verify_errors: targetErrors },
+        );
+      }
+      history.push({
+        turn,
+        thought_or_action: `(verify-on-done) typecheck FAILED on ${targetBase}: patch is NOT complete — fix these errors`,
+        tool_result: { tool: "code_typecheck", args: { cwd: vesselDir }, result: { error_lines: targetErrors }, ok: false },
+      });
+      continue;
     }
     if (action.action === "fail") {
-      return structuredError(`llm declared fail: ${String(action.reason ?? "no reason")}`, { history, before_sha: beforeSha });
+      attemptFailures.push(`attempt ${attempt}: llm declared fail: ${String(action.reason ?? "no reason").slice(0, 200)}`);
+      break; // reset + try a fresh attempt
     }
     if (action.action !== "call_tool") {
       history.push({ turn, thought_or_action: `(unknown action: ${String(action.action)})` });
@@ -308,13 +390,29 @@ export async function resolvePatchWithTools(pointer: PatchWithToolsPointer): Pro
     }
   }
 
+    // Turn loop ended without finishing this attempt → record + maybe retry.
+    if (!finished) {
+      if (!attemptFailures.some((f) => f.startsWith(`attempt ${attempt}:`))) {
+        attemptFailures.push(`attempt ${attempt}: iteration cap (${maxIters}) reached without done`);
+      }
+      // No-accumulation guard: if the two most recent attempts failed similarly,
+      // stop — re-running won't improve coverage.
+      if (attemptFailures.length >= 2) {
+        const a = attemptFailures[attemptFailures.length - 1]!.replace(/^attempt \d+: /, "").slice(0, 50);
+        const b = attemptFailures[attemptFailures.length - 2]!.replace(/^attempt \d+: /, "").slice(0, 50);
+        if (a === b) break;
+      }
+    }
+  }
+
   if (!finished) {
-    // V38: the code tools edit liveSrcPath IN PLACE during the loop; only the
-    // success path below restored it after staging a copy. Failure paths left
-    // the running vessel's source half-patched. Restore so a failed/capped patch
-    // never corrupts live source.
+    // V38: the code tools edit liveSrcPath IN PLACE during the loop; restore the
+    // original so a failed/capped patch never corrupts live source.
     try { await writeFile(liveSrcPath, beforeSrc); } catch { /* best-effort */ }
-    return structuredError(`patch_with_tools: iteration cap (${maxIters}) reached without done`, { history, before_sha: beforeSha });
+    return structuredError(
+      `patch_with_tools: ${attemptFailures.length} attempt(s) exhausted without a verified patch`,
+      { history, before_sha: beforeSha, attempt_failures: attemptFailures },
+    );
   }
 
   // Verify the live file actually changed.

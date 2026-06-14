@@ -75,6 +75,23 @@ describe("gap_to_scenario_bridge resolver", () => {
     expect(body.gaps_skipped_existing).toBe(1);
   });
 
+  it("dedups by gap CLASS — collapses timestamped duplicates to one scenario", async () => {
+    // Same gap class re-emitted with three different timestamps (+ an exec-id
+    // variant) must yield exactly ONE scenario, not four.
+    seed([
+      { id: "arch-pattern-catalogue-bloat-1781426564164", category: "architectural_pattern", source: "substrate_detected", summary: "bloat 1", status: "open" },
+      { id: "arch-pattern-catalogue-bloat-1781426999999", category: "architectural_pattern", source: "substrate_detected", summary: "bloat 2", status: "open" },
+      { id: "arch-pattern-catalogue-bloat-exec_h14758l3-1781427000000", category: "architectural_pattern", source: "substrate_detected", summary: "bloat 3", status: "open" },
+      // a genuinely DISTINCT class must still be written
+      { id: "dispatch-target-drift-1781427111111", category: "architectural_pattern", source: "substrate_detected", summary: "distinct", status: "open" },
+    ]);
+    const r = await resolveGapToScenarioBridge({ type: "gap_to_scenario_bridge" });
+    const body = r.body as { created: number; skipped_class_duplicate: number };
+    expect(body.created).toBe(2); // one catalogue-bloat + one dispatch-target-drift
+    expect(body.skipped_class_duplicate).toBe(2); // the two extra bloat dupes
+    expect(readdirSync(scenariosDir).filter((f) => f.startsWith("arch-pattern-catalogue-bloat")).length).toBe(1);
+  });
+
   it("filters by status and source", async () => {
     seed([
       { id: "open-ok", category: "x", source: "operator_seed", summary: "y", status: "open" },

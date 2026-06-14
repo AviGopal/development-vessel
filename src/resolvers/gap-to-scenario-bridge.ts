@@ -82,8 +82,37 @@ function sanitizeId(id: string): string {
   return id.replace(/:/g, "-").replace(/[^a-zA-Z0-9._-]/g, "_");
 }
 
+/**
+ * Collapse a sanitized gap-id to its CLASS by cutting at the first timestamp or
+ * exec-id marker. e.g. `arch-pattern-catalogue-bloat-1781426564164` and
+ * `dispatch-target-drift-exec_h14758l3-1781007064750` both reduce to their bare
+ * class name. Detectors re-emit the same gap CLASS with a fresh timestamp every
+ * window; without class-level dedup the bridge materialised thousands of
+ * near-duplicate scenarios (7860 files over ~50 classes observed 2026-06-14),
+ * which dilutes the drafter's random pick so a genuinely NEW gap class waits
+ * O(file_count) ticks to be authored. Class dedup keeps one scenario per class
+ * so new classes surface immediately. Falls back to the full id if stripping
+ * would over-collapse (id is all timestamp).
+ */
+function classKey(sanitizedId: string): string {
+  const cut = sanitizedId.replace(/([-_]exec_|[-_][0-9]{10,}).*$/i, "");
+  return cut.length >= 4 ? cut : sanitizedId;
+}
+
 async function exists(path: string): Promise<boolean> {
   try { await access(path); return true; } catch { return false; }
+}
+
+/** Existing scenario CLASSES already on disk in `dir` (for class-level dedup). */
+async function existingClasses(dir: string): Promise<Set<string>> {
+  const set = new Set<string>();
+  try {
+    const { readdir } = await import("node:fs/promises");
+    for (const f of await readdir(dir)) {
+      if (f.endsWith(".json")) set.add(classKey(f.slice(0, -5)));
+    }
+  } catch { /* dir absent yet */ }
+  return set;
 }
 
 export async function resolveGapToScenarioBridge(
@@ -116,6 +145,11 @@ export async function resolveGapToScenarioBridge(
 
   await mkdir(scenariosDir, { recursive: true });
   await mkdir(vesselScenariosDir, { recursive: true });
+
+  // Class-level dedup state: one scenario per gap CLASS (not per timestamped id).
+  const seenClasses = await existingClasses(scenariosDir);
+  const seenVesselClasses = await existingClasses(vesselScenariosDir);
+  let skippedClassDup = 0;
 
   const ALLOWED_SOURCES = new Set(["operator_seed", "substrate_detected"]);
   const out: Array<{ gap_id: string; scenario_path: string }> = [];
@@ -154,6 +188,13 @@ export async function resolveGapToScenarioBridge(
     const targetDir = isVesselAuthoring ? vesselScenariosDir : scenariosDir;
     const scenarioPath = join(targetDir, `${safeId}.json`);
     if (await exists(scenarioPath)) { skippedExisting += 1; continue; }
+
+    // Class-level dedup: if a scenario of this gap CLASS already exists, the
+    // drafter is already covering it — re-materialising a fresh-timestamped
+    // duplicate only dilutes the drafter's pick. Skip it.
+    const ck = classKey(safeId);
+    const classSet = isVesselAuthoring ? seenVesselClasses : seenClasses;
+    if (classSet.has(ck)) { skippedClassDup += 1; continue; }
 
     // Capability gaps ("no vessel advertises shape X") need a NEW resolver,
     // not a recombination of existing ones — route them to the vessel-authoring
@@ -207,6 +248,7 @@ export async function resolveGapToScenarioBridge(
     const tmp = `${scenarioPath}.tmp`;
     await writeFile(tmp, JSON.stringify(scenario, null, 2), "utf-8");
     await rename(tmp, scenarioPath);
+    classSet.add(ck);
     (isVesselAuthoring ? vesselOut : out).push({ gap_id: id, scenario_path: scenarioPath });
     priorityBreakdown[category] = (priorityBreakdown[category] ?? 0) + 1;
   }
@@ -222,6 +264,9 @@ export async function resolveGapToScenarioBridge(
       // that only emitted vessel-authoring scenarios still reports created>0.
       created: out.length + vesselOut.length,
       already_present: skippedExisting,
+      // Class-duplicate gaps skipped: same gap CLASS already has a scenario
+      // (detectors re-emit the class with a fresh timestamp every window).
+      skipped_class_duplicate: skippedClassDup,
       // Back-compat: scenarios_written / scenarios remain recombination-only,
       // since existing observers + tests key on the drafter's scenario folder.
       scenarios_written: out.length,

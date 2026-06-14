@@ -133,6 +133,78 @@ describe("vessel_arrival_scan", () => {
     expect(body.scenarios_written).toBe(0);
   });
 
+  it("re-drives a pending arrival until integrated: integration-gap is the trigger, not arrival novelty", async () => {
+    const snapshotPath = path.join(tmp, "snap.json");
+    const scenariosDir = path.join(tmp, "scen");
+    // baseline: only infra vessel `a` exists (b has NOT arrived yet)
+    mockFetch([{ vesselId: "a" }]);
+    await resolveVesselArrivalScan({ type: "vessel_arrival_scan", apiKey: "k", snapshotPath, scenariosDir, creditOnCharacterize: false });
+    // run 2: b arrives uncovered → fresh arrival, enters pending, scenario written
+    mockFetch([{ vesselId: "a" }, { vesselId: "b", shapes: ["x:orphan"] }], { producers: new Set(["x:orphan"]) });
+    const r2 = await resolveVesselArrivalScan({ type: "vessel_arrival_scan", apiKey: "k", snapshotPath, scenariosDir, creditOnCharacterize: false });
+    const b2 = r2.body as { new_vessel_count: number; pending_count: number; scenarios_written: number };
+    expect(b2.new_vessel_count).toBe(1);
+    expect(b2.pending_count).toBe(1);
+    expect(b2.scenarios_written).toBe(1);
+    expect(await fs.exists(path.join(scenariosDir, "vessel-arrival-b.json"))).toBe(true);
+    // run 3: b is now KNOWN (not a fresh arrival) but still uncovered → re-driven via pending
+    mockFetch([{ vesselId: "a" }, { vesselId: "b", shapes: ["x:orphan"] }], { producers: new Set(["x:orphan"]) });
+    const r3 = await resolveVesselArrivalScan({ type: "vessel_arrival_scan", apiKey: "k", snapshotPath, scenariosDir, creditOnCharacterize: false });
+    const b3 = r3.body as {
+      new_vessel_count: number;
+      reintegration_target_count: number;
+      reintegration_targets: Array<{ vessel_id: string; uncovered_shapes: string[] }>;
+      scenarios_written: number;
+    };
+    expect(b3.new_vessel_count).toBe(0); // no longer a fresh arrival
+    expect(b3.reintegration_target_count).toBe(1); // but the gap re-enters the queue
+    expect(b3.reintegration_targets[0]!.vessel_id).toBe("b");
+    expect(b3.reintegration_targets[0]!.uncovered_shapes).toEqual(["x:orphan"]);
+    expect(b3.scenarios_written).toBe(1);
+  });
+
+  it("does NOT re-drive the baseline infra fleet (no flood)", async () => {
+    const snapshotPath = path.join(tmp, "snap.json");
+    const scenariosDir = path.join(tmp, "scen");
+    // baseline fleet has uncovered terminal-effect shapes (no consumer BY DESIGN)
+    mockFetch([
+      { vesselId: "activity-api", shapes: ["x:write"] },
+      { vesselId: "dev-vessel", shapes: ["y:write"] },
+    ]);
+    await resolveVesselArrivalScan({ type: "vessel_arrival_scan", apiKey: "k", snapshotPath, scenariosDir, creditOnCharacterize: false });
+    // second run: same fleet, still no consumers — must NOT be classified or queued
+    mockFetch([
+      { vesselId: "activity-api", shapes: ["x:write"] },
+      { vesselId: "dev-vessel", shapes: ["y:write"] },
+    ]);
+    const r = await resolveVesselArrivalScan({ type: "vessel_arrival_scan", apiKey: "k", snapshotPath, scenariosDir, creditOnCharacterize: false });
+    const body = r.body as { classified_vessels: number; reintegration_target_count: number; pending_count: number; scenarios_written: number };
+    expect(body.classified_vessels).toBe(0);
+    expect(body.reintegration_target_count).toBe(0);
+    expect(body.pending_count).toBe(0);
+    expect(body.scenarios_written).toBe(0);
+  });
+
+  it("clears a stale scenario and drops from pending once the vessel becomes integrated", async () => {
+    const snapshotPath = path.join(tmp, "snap.json");
+    const scenariosDir = path.join(tmp, "scen");
+    mockFetch([{ vesselId: "a" }]);
+    await resolveVesselArrivalScan({ type: "vessel_arrival_scan", apiKey: "k", snapshotPath, scenariosDir, creditOnCharacterize: false });
+    // b arrives uncovered → scenario written, pending
+    mockFetch([{ vesselId: "a" }, { vesselId: "b", shapes: ["x:orphan"] }], { producers: new Set(["x:orphan"]) });
+    await resolveVesselArrivalScan({ type: "vessel_arrival_scan", apiKey: "k", snapshotPath, scenariosDir, creditOnCharacterize: false });
+    expect(await fs.exists(path.join(scenariosDir, "vessel-arrival-b.json"))).toBe(true);
+    // a consumer now exists → b integrates, scenario cleared, leaves pending
+    mockFetch([{ vesselId: "a" }, { vesselId: "b", shapes: ["x:orphan"] }], { producers: new Set(["x:orphan"]), consumers: new Set(["x:orphan"]) });
+    const r = await resolveVesselArrivalScan({ type: "vessel_arrival_scan", apiKey: "k", snapshotPath, scenariosDir, creditOnCharacterize: false });
+    const body = r.body as { reintegration_target_count: number; scenarios_written: number; scenarios_cleared: number; pending_count: number };
+    expect(body.reintegration_target_count).toBe(0);
+    expect(body.scenarios_written).toBe(0);
+    expect(body.scenarios_cleared).toBe(1);
+    expect(body.pending_count).toBe(0);
+    expect(await fs.exists(path.join(scenariosDir, "vessel-arrival-b.json"))).toBe(false);
+  });
+
   it("missing api key degrades cleanly", async () => {
     const r = await resolveVesselArrivalScan({ type: "vessel_arrival_scan", apiKey: "", snapshotPath: path.join(tmp, "s.json") });
     expect((r.body as { error: string }).error).toBe("missing_api_key");

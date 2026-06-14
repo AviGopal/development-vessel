@@ -19,21 +19,28 @@ import { resolveCreditVesselShapes } from "./credit-vessel-shapes.js";
  *   2. Diff against a persisted snapshot of known vessel ids.
  *        FIRST RUN (no snapshot) = BASELINE: record everything, emit ZERO
  *        arrivals. This is the anti-flood guard — otherwise every pre-existing
- *        vessel would be reported as "arrived" and flood the drafter.
- *   3. For each genuinely-new vessel, classify each advertised shape's coverage
- *      via activity-api discover-by-shapes (forward=producers, backward=
- *      consumers): covered / producer_only / consumer_only / orphaned.
+ *        vessel would be reported as "arrived" and flood the drafter. The
+ *        baseline fleet (the substrate's own infra: activity-api, dev-vessel,
+ *        local-tools, …) is recorded as known but NEVER becomes an integration
+ *        target — its write/terminal shapes have no consumer BY DESIGN.
+ *   3. Classify the WORK SET = fresh arrivals (in registry, not in `known`) ∪
+ *      still-pending arrivals (in registry ∩ persisted `pending`). Per shape,
+ *      discover-by-shapes (forward=producers, backward=consumers):
+ *      covered / producer_only / consumer_only / orphaned.
  *        Routing invariant: an arrived vessel ALWAYS brought a resolver for its
  *        shapes (it advertises them), so an uncovered shape is a TEMPLATE gap,
  *        never a resolver gap → route to the drafter, not scaffold-vessel.
- *   4. For vessels with any uncovered shape, write a deterministic gap scenario
- *      into the scenarios dir the drafter already polls (drafter-trigger-tick).
- *      Only filesystem-safe slugs are interpolated, so the file always parses
- *      (avoids the LLM-text-in-JSON ghost-success draft-gap-closing just fixed).
- *      Scenario id is deterministic per vessel → re-runs UPSERT, never flood.
- *   5. Credit the new vessel's shapes via the reward edge (credit_vessel_shapes)
- *      so their cold-start relevance leaves zero.
- *   6. Persist the union snapshot.
+ *   4. INTEGRATION-GAP, NOT ARRIVAL-NOVELTY, is the trigger. A genuine arrival
+ *      that still has an unconsumed shape stays in `pending` and re-emits its
+ *      deterministic (UPSERT) gap scenario every run until a consumer is
+ *      authored — that is what turns "detected once" into "driven until
+ *      integrated". Once integrated it leaves `pending` and its stale scenario
+ *      is cleared. The baseline infra fleet is out of scope, so this never
+ *      floods the drafter with terminal-effect shapes.
+ *   5. Credit a genuine arrival's shapes via the reward edge (credit_vessel_shapes)
+ *      once, so their cold-start relevance leaves zero. Pending re-drives are
+ *      NOT re-credited (that would inflate relevance every tick).
+ *   6. Persist the union `known` + the live `pending` set.
  *
  * The verdict is trace-inspectable: per-shape coverage counts are in the body,
  * never an opaque "all good" (the self-audit-blindness failure mode).
@@ -77,6 +84,8 @@ interface ShapeClassification {
 interface VesselClassification {
   vessel_id: string;
   vessel_name: string | null;
+  /** True if this vessel was absent from the snapshot (a genuine arrival). */
+  arrival: boolean;
   shape_count: number;
   shapes: ShapeClassification[];
   uncovered_shapes: string[];
@@ -89,21 +98,38 @@ function slug(s: string): string {
   return s.replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 80);
 }
 
-async function readSnapshot(snapshotPath: string): Promise<Set<string> | null> {
+interface Snapshot {
+  known: Set<string>;
+  /** Post-baseline arrivals still awaiting integration (re-drive targets). */
+  pending: Set<string>;
+}
+
+async function readSnapshot(snapshotPath: string): Promise<Snapshot | null> {
   try {
     const raw = await fs.readFile(snapshotPath, "utf8");
-    const parsed = JSON.parse(raw) as { known?: string[] };
-    return new Set(Array.isArray(parsed.known) ? parsed.known : []);
+    const parsed = JSON.parse(raw) as { known?: string[]; pending?: string[] };
+    return {
+      known: new Set(Array.isArray(parsed.known) ? parsed.known : []),
+      pending: new Set(Array.isArray(parsed.pending) ? parsed.pending : []),
+    };
   } catch {
     return null; // missing/unreadable → baseline run
   }
 }
 
-async function writeSnapshot(snapshotPath: string, known: Set<string>): Promise<void> {
+async function writeSnapshot(
+  snapshotPath: string,
+  known: Set<string>,
+  pending: Set<string>,
+): Promise<void> {
   await fs.mkdir(path.dirname(snapshotPath), { recursive: true });
   await fs.writeFile(
     snapshotPath,
-    JSON.stringify({ known: [...known].sort(), updated_at: new Date().toISOString() }, null, 2),
+    JSON.stringify(
+      { known: [...known].sort(), pending: [...pending].sort(), updated_at: new Date().toISOString() },
+      null,
+      2,
+    ),
     "utf8",
   );
 }
@@ -221,11 +247,13 @@ export async function resolveVesselArrivalScan(
   }
 
   const currentIds = new Set(registry.map((v) => v.vesselId).filter(Boolean));
-  const known = await readSnapshot(snapshotPath);
+  const snapshot = await readSnapshot(snapshotPath);
 
-  // BASELINE: first run records the world without reporting arrivals.
-  if (known === null) {
-    await writeSnapshot(snapshotPath, currentIds);
+  // BASELINE: first run records the world without reporting arrivals. The whole
+  // existing fleet enters `known` and an empty `pending` — so the substrate's
+  // own infra is never an integration target.
+  if (snapshot === null) {
+    await writeSnapshot(snapshotPath, currentIds, new Set());
     return {
       shape: "vesselArrivalReport",
       body: {
@@ -239,10 +267,18 @@ export async function resolveVesselArrivalScan(
     };
   }
 
-  const newVessels = registry.filter((v) => v.vesselId && !known.has(v.vesselId));
+  const { known, pending } = snapshot;
+
+  // WORK SET = fresh arrivals (in registry, not known) ∪ still-pending arrivals
+  // (in registry ∩ pending). The baseline infra fleet is in neither, so it is
+  // never re-driven — only genuine arrivals that still have an unconsumed shape.
+  const arrivalIds = new Set(registry.filter((v) => v.vesselId && !known.has(v.vesselId)).map((v) => v.vesselId));
+  const toClassify = registry.filter(
+    (v) => v.vesselId && (arrivalIds.has(v.vesselId) || pending.has(v.vesselId)),
+  );
 
   const classifications: VesselClassification[] = [];
-  for (const v of newVessels) {
+  for (const v of toClassify) {
     const shapes = Array.isArray(v.shapes) ? v.shapes : [];
     const shapeClasses: ShapeClassification[] = [];
     for (const shape of shapes) {
@@ -267,6 +303,7 @@ export async function resolveVesselArrivalScan(
     classifications.push({
       vessel_id: v.vesselId,
       vessel_name: v.vesselName ?? null,
+      arrival: arrivalIds.has(v.vesselId),
       shape_count: shapes.length,
       shapes: shapeClasses,
       uncovered_shapes: uncovered,
@@ -276,31 +313,43 @@ export async function resolveVesselArrivalScan(
     });
   }
 
-  // Emit deterministic gap scenarios for vessels needing integration.
+  // Emit deterministic gap scenarios for vessels needing integration, and clear
+  // stale scenarios for vessels that have since been integrated. Deterministic
+  // scenario ids make the write an UPSERT (re-emit without flooding) and make
+  // the clear a targeted unlink — the queue tracks the live integration state.
   let scenariosWritten = 0;
+  let scenariosCleared = 0;
   const scenarioErrors: string[] = [];
   if (emitScenarios) {
+    await fs.mkdir(scenariosDir, { recursive: true }).catch(() => {});
     for (const v of classifications) {
-      if (v.verdict !== "needs_integration" || !v.scenario_id) continue;
-      try {
-        await fs.mkdir(scenariosDir, { recursive: true });
-        await fs.writeFile(
-          path.join(scenariosDir, `${v.scenario_id}.json`),
-          JSON.stringify(buildScenario(v), null, 2),
-          "utf8",
-        );
-        scenariosWritten += 1;
-      } catch (err) {
-        scenarioErrors.push(`${v.vessel_id}:${err instanceof Error ? err.message.slice(0, 60) : "err"}`);
+      const scenarioId = `vessel-arrival-${slug(v.vessel_id)}`;
+      const scenarioFile = path.join(scenariosDir, `${scenarioId}.json`);
+      if (v.verdict === "needs_integration") {
+        try {
+          await fs.writeFile(scenarioFile, JSON.stringify(buildScenario(v), null, 2), "utf8");
+          scenariosWritten += 1;
+        } catch (err) {
+          scenarioErrors.push(`${v.vessel_id}:${err instanceof Error ? err.message.slice(0, 60) : "err"}`);
+        }
+      } else {
+        // integrated → remove any stale gap scenario so the drafter stops working it.
+        try {
+          await fs.unlink(scenarioFile);
+          scenariosCleared += 1;
+        } catch {
+          /* no stale scenario to clear — expected for already-integrated vessels */
+        }
       }
     }
   }
 
-  // Reward edge: credit the characterized vessels' shapes (down-weighted).
+  // Reward edge: credit only genuine arrivals' shapes (down-weighted). Known
+  // vessels are NOT re-credited every rescan — that would inflate relevance.
   let creditedVessels = 0;
   if (creditOnCharacterize) {
     for (const v of classifications) {
-      if (v.shape_count === 0) continue;
+      if (v.shape_count === 0 || !v.arrival) continue;
       const credit = await resolveCreditVesselShapes({
         type: "credit_vessel_shapes",
         metabobEndpoint: metabob,
@@ -318,19 +367,44 @@ export async function resolveVesselArrivalScan(
     }
   }
 
-  // Persist the union so these vessels are not re-reported next run.
+  // Recompute `pending`: a classified vessel that still needs integration stays
+  // (or enters) pending; one that is now integrated leaves. Vessels no longer in
+  // the registry drop out of pending (a departed vessel isn't an open gap). The
+  // baseline infra fleet was never classified, so it never enters pending.
+  const nextPending = new Set<string>();
+  for (const id of pending) if (currentIds.has(id)) nextPending.add(id); // carry forward live ones
+  for (const c of classifications) {
+    if (c.verdict === "needs_integration") nextPending.add(c.vessel_id);
+    else nextPending.delete(c.vessel_id);
+  }
+
+  // Persist the union `known` (anti-re-arrival) + the live `pending` set.
   for (const id of currentIds) known.add(id);
-  await writeSnapshot(snapshotPath, known);
+  await writeSnapshot(snapshotPath, known, nextPending);
+
+  const arrivals = classifications.filter((c) => c.arrival);
+  const reintegrationTargets = classifications.filter(
+    (c) => !c.arrival && c.verdict === "needs_integration",
+  );
 
   return {
     shape: "vesselArrivalReport",
     body: {
       baseline: false,
-      known_before: known.size - newVessels.length,
+      known_before: known.size,
       current_vessels: currentIds.size,
-      new_vessel_count: newVessels.length,
-      new_vessels: classifications,
+      pending_count: nextPending.size,
+      classified_vessels: classifications.length,
+      new_vessel_count: arrivals.length,
+      new_vessels: arrivals,
+      reintegration_target_count: reintegrationTargets.length,
+      reintegration_targets: reintegrationTargets.map((v) => ({
+        vessel_id: v.vessel_id,
+        uncovered_shapes: v.uncovered_shapes,
+        scenario_id: v.scenario_id,
+      })),
       scenarios_written: scenariosWritten,
+      scenarios_cleared: scenariosCleared,
       ...(scenarioErrors.length ? { scenario_errors: scenarioErrors } : {}),
       credited_vessels: creditedVessels,
       generated_at: generatedAt,

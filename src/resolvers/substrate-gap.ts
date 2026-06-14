@@ -83,6 +83,25 @@ export interface SubstrateGapWritePointer {
 
 const GAPS_PATH = () => join(workspaceRoot(), "gaps", "gaps.json");
 
+/**
+ * Gap CLASS key: the gap id with volatile tokens stripped (epoch ms/sec, ISO
+ * datetimes, bare dates). Detectors mint per-run ids like
+ * `responsibility-${vessel}-${principle}-${Date.now()}`, so the SAME logical gap
+ * accumulated as hundreds of distinct open rows (observed 2026-06-14: 140
+ * responsibility_misallocation, 78 trace_outcome_inconsistency, …), diluting the
+ * drafter's random pick ~80× — the gap-store analogue of the scenario-bloat
+ * dilution. Deduping on this class key (instead of the raw id) collapses
+ * re-emissions onto one open row. Same root cause as finding-novelty grading:
+ * volatile ids defeat dedup.
+ */
+export function gapClassKey(id: string): string {
+  return id
+    .replace(/\d{4}-\d{2}-\d{2}T[\d:.\-Z]+/g, "T")
+    .replace(/\d{4}-\d{2}-\d{2}/g, "D")
+    .replace(/\d{13}/g, "M")
+    .replace(/\d{10}/g, "S");
+}
+
 async function loadGaps(): Promise<SubstrateGap[]> {
   try {
     const raw = await readFile(GAPS_PATH(), "utf-8");
@@ -151,19 +170,32 @@ export async function resolveSubstrateGapWrite(
   };
 
   const gaps = await loadGaps();
-  const existingIdx = gaps.findIndex((g) => g.id === gap.id);
+  // Dedup by gap CLASS (volatile-stripped id), not raw id, so timestamped
+  // re-emissions of the same logical gap upsert onto one row instead of
+  // accumulating. Exact-id match wins first (preserves explicit-id callers);
+  // otherwise fall back to class match against a non-closed row.
+  const classKey = gapClassKey(gap.id);
+  let existingIdx = gaps.findIndex((g) => g.id === gap.id);
+  if (existingIdx < 0) {
+    existingIdx = gaps.findIndex((g) => g.status !== "closed" && gapClassKey(g.id) === classKey);
+  }
 
+  let action: "created" | "updated";
   if (existingIdx >= 0) {
-    gap.created_at = gaps[existingIdx]!.created_at;
+    const existing = gaps[existingIdx]!;
+    gap.id = existing.id;
+    gap.created_at = existing.created_at;
     gaps[existingIdx] = gap;
+    action = "updated";
   } else {
     gaps.push(gap);
+    action = "created";
   }
 
   await saveGaps(gaps);
 
   return {
     shape: "substrateGapWriteResult",
-    body: { id: gap.id, action: existingIdx >= 0 ? "updated" : "created" },
+    body: { id: gap.id, action, gap_class: classKey },
   };
 }

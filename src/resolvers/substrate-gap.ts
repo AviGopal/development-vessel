@@ -94,7 +94,13 @@ async function loadGaps(): Promise<SubstrateGap[]> {
 
 async function saveGaps(gaps: SubstrateGap[]): Promise<void> {
   const dir = join(workspaceRoot(), "gaps");
-  await mkdir(dir, { recursive: true });
+  // recursive:true should be idempotent, but bun throws EEXIST on an
+  // already-existing dir under concurrent gap writes — which 500s the gap
+  // recording path and severs the substrate's detect→record→fix loop. Ignore
+  // EEXIST; a genuine write failure still surfaces at writeFile below.
+  await mkdir(dir, { recursive: true }).catch((err: NodeJS.ErrnoException) => {
+    if (err?.code !== "EEXIST") throw err;
+  });
   const tmp = GAPS_PATH() + ".tmp";
   await writeFile(tmp, JSON.stringify(gaps, null, 2), "utf-8");
   await rename(tmp, GAPS_PATH());

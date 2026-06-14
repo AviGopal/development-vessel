@@ -47,6 +47,34 @@ describe("trace_outcome_validity_audit", () => {
     expect(gap.classification_metadata.inconsistency_examples.length).toBe(3);
   });
 
+  it("detects the UNDER-claim: meta-activity audited-NO recorded as FAILURE (goal-host attributed)", async () => {
+    const now = new Date().toISOString();
+    const executions = [
+      ...Array.from({ length: 4 }, (_, i) => ({
+        id: `sb${i}`, activity_id: "slot-binding", status: "failure",
+        output_impulse_shapes: ["pool_precheck_result", "select_or_produce_result"], executed_at: now,
+      })),
+      ...Array.from({ length: 3 }, (_, i) => ({
+        id: `sp${i}`, activity_id: "create-shape-provider-goal", status: "failure",
+        output_impulse_shapes: ["activity_recommendations"], executed_at: now,
+      })),
+    ];
+    const emitCalls: any[] = [];
+    mockRouter([
+      (url) => url.includes("/v2/activities/execution-traces") ? new Response(JSON.stringify({ executions }), { status: 200 }) : null,
+      (url, init) => url.endsWith("/v2/impulses/resolve")
+        ? (emitCalls.push(JSON.parse(init?.body as string)), new Response(JSON.stringify({ ok: true }), { status: 200 })) : null,
+    ]);
+    const r = await resolveTraceOutcomeValidityAudit({ type: "trace_outcome_validity_audit", min_inconsistencies: 3 });
+    const body = r.body as any;
+    const sigs = body.cluster_summaries.map((c: any) => c.signature).sort();
+    expect(sigs).toEqual(["shapeProviderGoal_no_op_recorded_as_failure", "slotBinding_no_op_recorded_as_failure"]);
+    expect(body.gaps_emitted).toBe(2);
+    const gap = emitCalls.find((c) => c.impulse.pointer.gap.classification_metadata.signature === "slotBinding_no_op_recorded_as_failure").impulse.pointer.gap;
+    expect(gap.classification_metadata.vessel_name).toBe("goal-host-vessel");
+    expect(gap.classification_metadata.cited_evidence[0]).toContain("goal-host-vessel");
+  });
+
   it("does not emit when below min_inconsistencies", async () => {
     const now = new Date().toISOString();
     const executions = [

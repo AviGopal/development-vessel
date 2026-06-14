@@ -37,6 +37,12 @@ const RULES: ReadonlyArray<{
   derived: "no_op" | "failure";
   reason: string;
   fix: string;
+  // Where the mis-recording lives (default boredom-vessel recordOutcome). The
+  // under-claim rules below attribute to goal-host, which records the meta-
+  // activity sub-traces.
+  target_vessel?: string;
+  target_file?: string;
+  cited_evidence?: string[];
 }> = [
   {
     signature: "structuredError_recorded_as_success",
@@ -62,6 +68,36 @@ const RULES: ReadonlyArray<{
     reason: "tail shape=variantPromoteResult + status=success — common case admitted_count:0 (gate rejected all candidates) still recorded as Thompson win.",
     fix: "Emit shape=variantPromoteNoOp when admitted_count===0.",
   },
+  // ── UNDER-CLAIM direction (2026-06-14): a meta-activity that ran CORRECTLY and
+  // produced an audited-NO verdict is recorded as success:false — β-penalising
+  // it for doing its job and inflating the substrate's failure rate. This is the
+  // dominant Thompson-corrupting pollution (measured: ~40 of ~150 failures), and
+  // the autonomy blocker behind "0/6 posteriors above floor": substantive
+  // activities can't refine when their correct NOs count as failures.
+  {
+    signature: "slotBinding_no_op_recorded_as_failure",
+    tail_shape: "select_or_produce_result",
+    status_match: new Set(["failure"]),
+    derived: "no_op",
+    reason:
+      "tail shape=select_or_produce_result + status=failure — slot-binding ran correctly and produced a binding verdict. 'Could not bind a required slot' is an AUDITED NO, not an execution failure; recording success:false β-penalises slot-binding for doing its job. The parent goal's inability to proceed is the PARENT's outcome, not slot-binding's failure.",
+    fix: "goal-host recordOutcome should record a slot-binding sub-trace that emits select_or_produce_result as a completed activity (success) carrying its binding verdict in the body; propagate no-binding to the parent goal's outcome only.",
+    target_vessel: "goal-host-vessel",
+    target_file: "src/index.ts",
+    cited_evidence: ["repos/goal-host-vessel/src/index.ts"],
+  },
+  {
+    signature: "shapeProviderGoal_no_op_recorded_as_failure",
+    tail_shape: "activity_recommendations",
+    status_match: new Set(["failure"]),
+    derived: "no_op",
+    reason:
+      "tail shape=activity_recommendations + status=failure — create-shape-provider-goal ran correctly and produced recommendations. 'No provider found for the required shape' is an AUDITED NO; recording success:false β-penalises the activity for correctly reporting no producer and corrupts the failure metric.",
+    fix: "goal-host recordOutcome should record a create-shape-provider-goal sub-trace emitting activity_recommendations as success (the no-provider verdict is the body), not an execution failure.",
+    target_vessel: "goal-host-vessel",
+    target_file: "src/index.ts",
+    cited_evidence: ["repos/goal-host-vessel/src/index.ts"],
+  },
 ];
 
 async function fetchTraces(endpoint: string, apiKey: string, limit: number): Promise<ExecutionTrace[]> {
@@ -75,7 +111,7 @@ async function fetchTraces(endpoint: string, apiKey: string, limit: number): Pro
   } catch { return []; }
 }
 
-async function emitGap(emitUrl: string, apiKey: string, signature: string, hits: Array<{ trace: ExecutionTrace; status: string }>, derived: string, reason: string, fix: string): Promise<{ ok: boolean; status: number | "error" }> {
+async function emitGap(emitUrl: string, apiKey: string, signature: string, hits: Array<{ trace: ExecutionTrace; status: string }>, derived: string, reason: string, fix: string, attribution: { vessel: string; file: string; evidence: string[] }): Promise<{ ok: boolean; status: number | "error" }> {
   const body = {
     impulse: {
       pointer: {
@@ -84,15 +120,15 @@ async function emitGap(emitUrl: string, apiKey: string, signature: string, hits:
           id: `trace-outcome-inconsistency-${signature}-${Date.now()}`,
           category: "trace_outcome_inconsistency",
           source: "substrate_detected",
-          summary: `Trace recording mismatch: ${hits.length} traces with ${signature}. Recorded as ${hits[0]!.status} but substantive outcome was ${derived}. boredom-vessel's recordOutcome doesn't inspect body shape, inflating Thompson posteriors and trapping selection in echo chambers.`,
+          summary: `Trace recording mismatch: ${hits.length} traces with ${signature}. Recorded as ${hits[0]!.status} but substantive outcome was ${derived}. ${attribution.vessel}'s recordOutcome doesn't inspect body shape, ${derived === "no_op" && hits[0]!.status === "failure" ? "β-penalising correct audited-NO verdicts as failures and corrupting the failure metric" : "inflating Thompson posteriors and trapping selection in echo chambers"}.`,
           detected_at: new Date().toISOString(),
           status: "open",
           classification_metadata: {
             detector: "trace_outcome_validity_audit",
             cite_principle: "outcomes_must_reflect_substantive_work",
-            cited_evidence: ["repos/boredom-vessel/src/index.ts:1922-1931"],
-            vessel_name: "boredom-vessel",
-            target_file_path: "src/index.ts",
+            cited_evidence: attribution.evidence,
+            vessel_name: attribution.vessel,
+            target_file_path: attribution.file,
             signature,
             suggested_remediation: fix,
             discrepancy_reason: reason,
@@ -153,7 +189,12 @@ export async function resolveTraceOutcomeValidityAudit(pointer: TraceOutcomeVali
     const rule = RULES.find((r) => r.signature === signature)!;
     cluster_summaries.push({ signature, count: hits.length, proposed_fix: rule.fix });
     if (emit && hits.length >= minInconsistencies) {
-      const r = await emitGap(emitUrl, apiKey, signature, hits, rule.derived, rule.reason, rule.fix);
+      const attribution = {
+        vessel: rule.target_vessel ?? "boredom-vessel",
+        file: rule.target_file ?? "src/index.ts",
+        evidence: rule.cited_evidence ?? ["repos/boredom-vessel/src/index.ts:1922-1931"],
+      };
+      const r = await emitGap(emitUrl, apiKey, signature, hits, rule.derived, rule.reason, rule.fix, attribution);
       emissions.push({ signature, status: r.status });
       if (r.ok) gaps_emitted += 1;
     }

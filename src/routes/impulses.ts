@@ -102,6 +102,8 @@ import { resolveLearningSignalHealthObserver } from "../resolvers/learning-signa
 import { resolveCreditPrimedConcepts } from "../resolvers/credit-primed-concepts.js";
 import { resolveConceptDbHealthObserver } from "../resolvers/concept-db-health-observer.js";
 import { resolveDiscoveryVesselRegistryObserver } from "../resolvers/discovery-vessel-registry-observer.js";
+import { resolveVesselArrivalScan } from "../resolvers/vessel-arrival-scan.js";
+import { resolveCreditVesselShapes } from "../resolvers/credit-vessel-shapes.js";
 import { resolveSubstrateHeartbeatObserver } from "../resolvers/substrate-heartbeat-observer.js";
 import { resolveLlmQuotaObserver } from "../resolvers/llm-quota-observer.js";
 import type { ResolverResult } from "../resolvers/types.js";
@@ -384,6 +386,14 @@ export async function resolveDispatch(pointer: AnyPointer): Promise<ResolverResu
     case "llm_quota_observer":
       return resolveLlmQuotaObserver(
         p as Parameters<typeof resolveLlmQuotaObserver>[0],
+      );
+    case "vessel_arrival_scan":
+      return resolveVesselArrivalScan(
+        p as Parameters<typeof resolveVesselArrivalScan>[0],
+      );
+    case "credit_vessel_shapes":
+      return resolveCreditVesselShapes(
+        p as Parameters<typeof resolveCreditVesselShapes>[0],
       );
     default:
       throw new Error(`unknown shape: ${pointer.type}`);

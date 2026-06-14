@@ -400,6 +400,13 @@ export const config = {
       "discovery_vessel_registry_observer",
       "substrate_heartbeat_observer",
       "llm_quota_observer",
+      // vessel-arrival horizon classifier + reward edge (2026-06-13,
+      // SUBSTRATE_AS_MDP §8.4/§8.6): detect a newly-arrived vessel, classify
+      // each advertised shape's coverage, route uncovered shapes into the
+      // drafter, and credit the vessel's shapes so their cold-start relevance
+      // leaves zero.
+      "vessel_arrival_scan",
+      "credit_vessel_shapes",
     ] as const,
     resolveEndpoint: "/v2/impulses/resolve",
     resolveRequestFormat: "pointer" as const,

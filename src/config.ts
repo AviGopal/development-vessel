@@ -408,6 +408,12 @@ export const config = {
       "workspace_hygiene_observer",
       "prune_stale_mitosis",
       "learning_signal_health_observer",
+      // selector-reward saturation detector (2026-06-14, SUBSTRATE_AS_MDP §9.3
+      // limit-8): watches boredom's own UCB reward distribution for degeneracy
+      // (the recursive case — detects the class of bug that pinned 86% of
+      // templates at mean=1.0). Reads the selector-state snapshot, emits a
+      // substrateGap when saturated.
+      "selector_saturation_audit",
       "credit_primed_concepts",
       "concept_db_health_observer",
       "discovery_vessel_registry_observer",

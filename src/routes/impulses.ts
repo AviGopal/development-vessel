@@ -103,6 +103,7 @@ import { resolveDiskSpaceObserver } from "../resolvers/disk-space-observer.js";
 import { resolveWorkspaceHygieneObserver } from "../resolvers/workspace-hygiene-observer.js";
 import { resolvePruneStaleMitosis } from "../resolvers/prune-stale-mitosis.js";
 import { resolveLearningSignalHealthObserver } from "../resolvers/learning-signal-health-observer.js";
+import { resolveSelectorSaturationAudit } from "../resolvers/selector-saturation-audit.js";
 import { resolveCreditPrimedConcepts } from "../resolvers/credit-primed-concepts.js";
 import { resolveConceptDbHealthObserver } from "../resolvers/concept-db-health-observer.js";
 import { resolveDiscoveryVesselRegistryObserver } from "../resolvers/discovery-vessel-registry-observer.js";
@@ -375,6 +376,10 @@ export async function resolveDispatch(pointer: AnyPointer): Promise<ResolverResu
     case "workspace_hygiene_observer":
       return resolveWorkspaceHygieneObserver(
         p as Parameters<typeof resolveWorkspaceHygieneObserver>[0],
+      );
+    case "selector_saturation_audit":
+      return resolveSelectorSaturationAudit(
+        p as Parameters<typeof resolveSelectorSaturationAudit>[0],
       );
     case "prune_stale_mitosis":
       return resolvePruneStaleMitosis(

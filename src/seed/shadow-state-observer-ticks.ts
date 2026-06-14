@@ -333,6 +333,41 @@ export const LEARNING_SIGNAL_HEALTH_OBSERVER_TICK_TEMPLATE: ActivityTemplate = {
   ],
 };
 
+export const SELECTOR_SATURATION_AUDIT_TICK_TEMPLATE: ActivityTemplate = {
+  id: "development-vessel:selector-saturation-audit-tick",
+  name: "selector-saturation-audit-tick",
+  description:
+    "Deterministic single-resolver wrapper around selector_saturation_audit. " +
+    "Reads boredom's selector-state snapshot (/workspace/state/boredom-selector-state.json: " +
+    "per-template reward means + saturated_fraction + variance_of_means) and emits " +
+    "selectorRewardHealth + a substrateGap when the UCB reward distribution is saturated " +
+    "(most templates pinned high, variance ~0, so the selector cannot discriminate productive " +
+    "from idle detectors and the learning rate is capped). The recursive detector " +
+    "(SUBSTRATE_AS_MDP §9.3 limit-8): the substrate watching for degeneracy in its OWN " +
+    "improvement loop. Cold-start-guarded.",
+  inputShapes: [],
+  outputShapes: ["selectorRewardHealth"],
+  tags: [
+    "intent:shadow_state_observation",
+    "horizon:meta",
+    "phase:detect",
+    "boredom_target_template",
+    "lift.autonomous.loop",
+    "light_dispatch_eligible",
+    "impulse_complete_base",
+  ],
+  variables: [],
+  tasks: [
+    {
+      id: "audit_selector_saturation",
+      description: "Invoke selector_saturation_audit.",
+      resolver: "selector_saturation_audit",
+      config: { type: "selector_saturation_audit" },
+      outputShapes: ["selectorRewardHealth"],
+    },
+  ],
+};
+
 export const CONCEPT_DB_HEALTH_OBSERVER_TICK_TEMPLATE: ActivityTemplate = {
   id: "development-vessel:concept-db-health-observer-tick",
   name: "concept-db-health-observer-tick",

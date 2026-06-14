@@ -1,5 +1,6 @@
 import { METABOB_ENDPOINT, METABOB_API_KEY, DISCOVERY_ENDPOINT } from "../config.js";
 import type { ResolverResult } from "./types.js";
+import { fetchWithRetry } from "./http-retry.js";
 
 export interface LearnedTopologySnapshotPointer {
   type: "learned_topology_snapshot";
@@ -36,10 +37,10 @@ export async function resolveLearnedTopologySnapshot(
   const pageSize = 100;
   let keepFetching = true;
   while (keepFetching) {
-    const r = await fetch(`${METABOB_ENDPOINT}/v2/activities/templates?limit=${pageSize}&offset=${offset}`, {
+    const r = await fetchWithRetry(`${METABOB_ENDPOINT}/v2/activities/templates?limit=${pageSize}&offset=${offset}`, {
       headers: auth,
     });
-    if (!r.ok) break;
+    if (!r || !r.ok) break;
     const page = await r.json() as { templates?: Template[]; total?: number };
     const rows = page.templates ?? [];
     templates.push(...rows);
@@ -49,11 +50,11 @@ export async function resolveLearnedTopologySnapshot(
 
   // — 2. Fetch recent traces (up to 200) for learned-shape counts —
   const traces: TraceRow[] = [];
-  const trRes = await fetch(
+  const trRes = await fetchWithRetry(
     `${METABOB_ENDPOINT}/v2/activities/execution-traces?since=${encodeURIComponent(since)}&limit=200`,
     { headers: auth },
   );
-  if (trRes.ok) {
+  if (trRes && trRes.ok) {
     const trData = await trRes.json() as { traces?: TraceRow[]; executions?: TraceRow[] };
     traces.push(...(trData.traces ?? trData.executions ?? []));
   }

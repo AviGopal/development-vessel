@@ -2,6 +2,7 @@ import { METABOB_ENDPOINT, METABOB_API_KEY, WORKSPACE_ROOT } from "../config.js"
 import type { ResolverResult } from "./types.js";
 import { readdir, readFile, writeFile, rename, mkdir } from "node:fs/promises";
 import { join } from "node:path";
+import { fetchWithRetry } from "./http-retry.js";
 
 export interface SubstrateHealthTickPointer {
   type: "substrate_health_tick";
@@ -133,10 +134,10 @@ export async function resolveSubstrateHealthTick(
   let offset = 0;
   const pageSize = 100;
   while (templates.length < 500) {
-    const r = await fetch(`${METABOB_ENDPOINT}/v2/activities/templates?limit=${pageSize}&offset=${offset}`, {
+    const r = await fetchWithRetry(`${METABOB_ENDPOINT}/v2/activities/templates?limit=${pageSize}&offset=${offset}`, {
       headers: auth,
     });
-    if (!r.ok) break;
+    if (!r || !r.ok) break;
     const page = await r.json() as { templates?: Template[] };
     const rows = page.templates ?? [];
     templates.push(...rows);
@@ -149,10 +150,10 @@ export async function resolveSubstrateHealthTick(
   const traceCounts = new Map<string, { success: number; fail: number }>();
   let traceOffset = 0;
   while (traceOffset < 5000) {
-    const r = await fetch(
+    const r = await fetchWithRetry(
       `${METABOB_ENDPOINT}/v2/activities/execution-traces?limit=200&offset=${traceOffset}&since_iso=${encodeURIComponent(traceLookbackSince)}`,
       { headers: auth },
-    ).catch(() => null);
+    );
     if (!r?.ok) break;
     const page = await r.json() as { executions?: { activity_id?: string; status?: string; success?: boolean }[] };
     const rows = page.executions ?? [];

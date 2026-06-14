@@ -1,6 +1,7 @@
 import { METABOB_ENDPOINT, METABOB_API_KEY } from "../config.js";
 import { META_TEMPLATE_IDS, normalizeTemplateId, isMetaTemplate } from "../lib/meta-templates.js";
 import type { ResolverResult } from "./types.js";
+import { fetchWithRetry } from "./http-retry.js";
 
 export interface CoverageTickPointer {
   type: "coverage_tick";
@@ -63,11 +64,11 @@ async function computeCountsForWindow(
   // then apply a client-side [since, until) filter. The server-side start_date
   // filter is unreliable for SurrealDB datetime types so we rely on the
   // client-side ISO-string comparison.
-  const trRes = await fetch(
+  const trRes = await fetchWithRetry(
     `${METABOB_ENDPOINT}/v2/activities/execution-traces?start_date=${encodeURIComponent(since)}&limit=2000`,
     { headers: auth },
   );
-  if (trRes.ok) {
+  if (trRes && trRes.ok) {
     const trData = await trRes.json() as { traces?: TraceRow[]; executions?: TraceRow[] };
     const all = trData.traces ?? trData.executions ?? [];
     const filtered = all.filter(tr => {
@@ -139,10 +140,10 @@ export async function resolveCoverageTick(
   let offset = 0;
   const pageSize = 100;
   while (allTemplates.length < 500) {
-    const r = await fetch(`${METABOB_ENDPOINT}/v2/activities/templates?limit=${pageSize}&offset=${offset}`, {
+    const r = await fetchWithRetry(`${METABOB_ENDPOINT}/v2/activities/templates?limit=${pageSize}&offset=${offset}`, {
       headers: auth,
     });
-    if (!r.ok) break;
+    if (!r || !r.ok) break;
     const page = await r.json() as { templates?: Template[] };
     const rows = page.templates ?? [];
     allTemplates.push(...rows);

@@ -99,6 +99,9 @@ export const config = {
       // Meta-detector (2026-06-13): gate/filter resolvers saturated at one verdict
       // (e.g. comprehensibility_check at 0% pass) via resolver_pattern_report.
       "gate_saturation_scan",
+      // Meta-detector (2026-06-13): vessels logging repeated persistence (write)
+      // errors in their journal (e.g. concept-db NULL-vs-NONE INSERT failures).
+      "vessel_write_error_scan",
       // Convergent validity — independent co-occurrence signal from concept-db.
       // Activities insert this as an explicit task after high-stakes resolvers
       // to cross-check that produced shapes match concept-db's learned priors.

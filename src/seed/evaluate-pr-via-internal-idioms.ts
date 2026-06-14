@@ -128,12 +128,12 @@ export const EVALUATE_PR_VIA_INTERNAL_IDIOMS_TEMPLATE: ActivityTemplate = {
           '  "lint_ok": true,\n' +
           '  "tests_ok": true,\n' +
           '  "comprehensibility_score": <copy "score" from artifact comprehensibility JSON>,\n' +
-          '  "convergent_validity_score": 0.7,\n' +
           '  "phantom_trace_delta": <"phantoms_detected" from phantom scan, integer>,\n' +
           '  "precondition_rejection_delta": <"rejections_total" from precondition scan, integer>,\n' +
           '  "produced_by_trace_ids": []\n' +
           "}\n\n" +
-          "Be precise: extract the exact numbers from the scans above. If a field is missing, use 0 for deltas and 0.5 for comprehensibility.",
+          "Be precise: extract the exact numbers from the scans above. If a field is missing, use 0 for deltas and 0.5 for comprehensibility.\n" +
+          "Do NOT emit convergent_validity_score — the merge gate COMPUTES it deterministically from the deltas + provenance above and ignores any value you supply.",
         max_tokens: 800,
       },
       outputShapes: ["evaluationEvidence"],

@@ -25,9 +25,11 @@ export interface EvaluationEvidence {
   // of the artifact body semantically agree with the artifact's own
   // self-description? Floor is operator-tunable; default ≥ 0.5.
   comprehensibility_score: number;
-  // convergent_validity_check resolver result: did concept-db priors
-  // agree the produced shapes match the cited_concept_ids in the
-  // artifact? Floor default ≥ 0.4.
+  // DEPRECATED as an input. The gate now COMPUTES convergent validity from the
+  // objective deltas + provenance below (see deriveConvergentValidity) and
+  // ignores any value supplied here — a self-reported validity score is the
+  // self-deception this gate exists to catch. Kept on the interface only so
+  // legacy callers that still emit it don't fail to typecheck.
   convergent_validity_score?: number;
   // phantom_trace_scan delta in the post-change window: how many F25 ghost
   // traces (status=success + task_count=0) appeared after the change?
@@ -102,6 +104,51 @@ function coerceEvidence(raw: unknown): { evidence: EvaluationEvidence | undefine
   return { evidence: undefined, rawInput: rawStr.slice(0, 400) };
 }
 
+/**
+ * Compute convergent validity DETERMINISTICALLY from objective evidence the
+ * gate already holds — and IGNORE any caller-supplied `convergent_validity_score`.
+ *
+ * A self-reported validity number is exactly the self-deception this gate exists
+ * to catch: the prior synthesize_evidence step hardcoded `0.7`, which always
+ * cleared CONVERGENT_VALIDITY_FLOOR (0.4) regardless of whether the change
+ * actually converged on real, valid work. The foundation rule is "resolvers
+ * compute, LLMs reason about metadata" — a validity SCORE is a measurement, not
+ * a reasoning task, so it belongs here in deterministic TS.
+ *
+ * Signals (all objective; none asserted by the artifact's author):
+ *   - phantom_trace_delta:        new claimed-success-but-empty traces introduced
+ *   - precondition_rejection_delta: new fast-fail non-executions introduced
+ *   - produced_by_trace_ids:      provenance the change can be corroborated against
+ *
+ * Fail-closed: with no provenance the work cannot be independently corroborated,
+ * so the score is capped (not free). Each regression drives it down — defence in
+ * depth alongside the per-delta gates below.
+ */
+export function deriveConvergentValidity(
+  ev: EvaluationEvidence,
+): { score: number; basis: string[] } {
+  const basis: string[] = [];
+  let score = 1.0;
+  const phantom = Math.max(0, ev.phantom_trace_delta ?? 0);
+  const precond = Math.max(0, ev.precondition_rejection_delta ?? 0);
+  if (phantom > 0) {
+    score -= 0.5 * phantom;
+    basis.push(`-${(0.5 * phantom).toFixed(2)} phantom_trace_delta=${phantom}`);
+  }
+  if (precond > 0) {
+    score -= 0.34 * precond;
+    basis.push(`-${(0.34 * precond).toFixed(2)} precondition_rejection_delta=${precond}`);
+  }
+  const provenance = ev.produced_by_trace_ids?.length ?? 0;
+  if (provenance === 0) {
+    score = Math.min(score, 0.5);
+    basis.push("cap 0.50: no produced_by_trace_ids provenance to corroborate work");
+  } else {
+    basis.push(`provenance=${provenance} produced_by_trace_ids`);
+  }
+  return { score: Math.max(0, Math.min(1, score)), basis };
+}
+
 function checkEvidence(ev: EvaluationEvidence | undefined): { ok: boolean; reasons: string[] } {
   const reasons: string[] = [];
   if (!ev) return { ok: false, reasons: ["evaluation_evidence missing or unparseable"] };
@@ -112,8 +159,13 @@ function checkEvidence(ev: EvaluationEvidence | undefined): { ok: boolean; reaso
   } else if (ev.comprehensibility_score < COMPREHENSIBILITY_FLOOR) {
     reasons.push(`comprehensibility_score ${ev.comprehensibility_score} < ${COMPREHENSIBILITY_FLOOR}`);
   }
-  if (ev.convergent_validity_score !== undefined && ev.convergent_validity_score < CONVERGENT_VALIDITY_FLOOR) {
-    reasons.push(`convergent_validity_score ${ev.convergent_validity_score} < ${CONVERGENT_VALIDITY_FLOOR}`);
+  // Convergent validity is COMPUTED here from objective signals — any value the
+  // caller supplied in ev.convergent_validity_score is deliberately ignored.
+  const cv = deriveConvergentValidity(ev);
+  if (cv.score < CONVERGENT_VALIDITY_FLOOR) {
+    reasons.push(
+      `convergent_validity_score ${cv.score.toFixed(2)} (derived: ${cv.basis.join("; ")}) < ${CONVERGENT_VALIDITY_FLOOR}`,
+    );
   }
   if (ev.phantom_trace_delta !== undefined && ev.phantom_trace_delta > PHANTOM_DELTA_MAX) {
     reasons.push(`phantom_trace_delta ${ev.phantom_trace_delta} > ${PHANTOM_DELTA_MAX}`);

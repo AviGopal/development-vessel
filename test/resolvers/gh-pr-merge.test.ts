@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
-import { resolveGhPrMerge } from "../../src/resolvers/gh-pr-merge.js";
+import { resolveGhPrMerge, deriveConvergentValidity } from "../../src/resolvers/gh-pr-merge.js";
 
 const savedGh = process.env["GH_TOKEN"];
 const savedGithub = process.env["GITHUB_TOKEN"];
@@ -20,6 +20,34 @@ beforeEach(() => {
 afterEach(() => {
   if (savedGh === undefined) delete process.env["GH_TOKEN"]; else process.env["GH_TOKEN"] = savedGh;
   if (savedGithub === undefined) delete process.env["GITHUB_TOKEN"]; else process.env["GITHUB_TOKEN"] = savedGithub;
+});
+
+describe("deriveConvergentValidity (computed, not self-reported)", () => {
+  it("ignores any caller-supplied convergent_validity_score", () => {
+    // A fabricated value must not influence the score at all — it is derived
+    // only from objective deltas + provenance. Clean evidence → 0.5 (the
+    // no-provenance cap), regardless of the fabricated 0.99.
+    const fabricated = { ...PASSING_EVIDENCE, convergent_validity_score: 0.99 };
+    expect(deriveConvergentValidity(fabricated).score).toBe(0.5);
+  });
+
+  it("caps at 0.5 when there is no provenance (fail-closed, still clears 0.4 floor)", () => {
+    const { score, basis } = deriveConvergentValidity(PASSING_EVIDENCE);
+    expect(score).toBe(0.5);
+    expect(basis.join(" ")).toContain("no produced_by_trace_ids");
+  });
+
+  it("rewards corroborated work above the no-provenance cap", () => {
+    const corroborated = { ...PASSING_EVIDENCE, produced_by_trace_ids: ["exec_a", "exec_b"] };
+    expect(deriveConvergentValidity(corroborated).score).toBe(1.0);
+  });
+
+  it("drives the score below the floor on a multi-instance regression", () => {
+    // 2 precondition rejections: 1.0 - 0.68 = 0.32, under the 0.4 floor.
+    expect(deriveConvergentValidity({ ...PASSING_EVIDENCE, precondition_rejection_delta: 2 }).score).toBeLessThan(0.4);
+    // 2 phantom traces: 1.0 - 1.0 = 0.0.
+    expect(deriveConvergentValidity({ ...PASSING_EVIDENCE, phantom_trace_delta: 2 }).score).toBe(0);
+  });
 });
 
 describe("gh_pr_merge resolver (substrate-internal evaluation gate)", () => {

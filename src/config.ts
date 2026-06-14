@@ -96,6 +96,9 @@ export const config = {
       // task consumes — the silent mis-wire that left draft-activity-from-pattern
       // dead. Deterministic registry lint -> substrateGap_write per offender.
       "template_input_lint_scan",
+      // Meta-detector (2026-06-13): gate/filter resolvers saturated at one verdict
+      // (e.g. comprehensibility_check at 0% pass) via resolver_pattern_report.
+      "gate_saturation_scan",
       // Convergent validity — independent co-occurrence signal from concept-db.
       // Activities insert this as an explicit task after high-stakes resolvers
       // to cross-check that produced shapes match concept-db's learned priors.

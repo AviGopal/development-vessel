@@ -132,7 +132,10 @@ Substrate write endpoints (use http_fetch POST with a JSON-string body of EXACTL
 - concept_create_write → http://127.0.0.1:8260/v2/impulses/resolve
   body (stringified): {"pointer":{"type":"concept_create_write","conceptData":{"shape":"<snake_case>","source_type":"extracted","summary":"<text>","content":"<text>","priority":0.5,"budget":2000}}}
 - substrateGap_write → http://127.0.0.1:8270/v2/impulses/resolve
-- activity-api reads (traces, templates, distribution) → http://127.0.0.1:8080/...
+- activity-api reads — use these EXACT paths (other paths 404/401; GETs to these serve substrate-public data with no auth header needed):
+    templates / advertised output shapes: GET http://127.0.0.1:8080/v2/activities/templates?limit=200
+    recent execution traces / invocations:  GET http://127.0.0.1:8080/v2/activities/execution-traces?limit=50
+  Do NOT invent shorter forms like /v2/templates or /v2/traces/recent — they do not exist.
 
 The LAST task MUST produce the cluster's output shape so executing the template yields it.
 

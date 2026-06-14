@@ -92,6 +92,10 @@ export const config = {
       // finding. Companion to detect-stale-pointer; embodies the
       // substrate_self_detection_principle (concept_9ldsmRgqSTd5).
       "phantom_trace_scan",
+      // Meta-detector (2026-06-13): templates declaring inputShapes/variables no
+      // task consumes — the silent mis-wire that left draft-activity-from-pattern
+      // dead. Deterministic registry lint -> substrateGap_write per offender.
+      "template_input_lint_scan",
       // Convergent validity — independent co-occurrence signal from concept-db.
       // Activities insert this as an explicit task after high-stakes resolvers
       // to cross-check that produced shapes match concept-db's learned priors.

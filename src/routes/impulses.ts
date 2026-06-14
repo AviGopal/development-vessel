@@ -34,6 +34,7 @@ import { resolveResolverPatternReport } from "../resolvers/resolver-pattern-repo
 import { resolveMarkdownSplitSections } from "../resolvers/markdown-split-sections.js";
 import { resolveStalePointerEmit } from "../resolvers/stale-pointer-emit.js";
 import { resolvePhantomTraceScan } from "../resolvers/phantom-trace-scan.js";
+import { resolveTemplateInputLintScan } from "../resolvers/template-input-lint-scan.js";
 import { resolveConvergentValidityCheck } from "../resolvers/convergent-validity-check.js";
 import { resolveTraceFailurePatternReport } from "../resolvers/trace-failure-pattern-report.js";
 import { resolveSystemLoadReport } from "../resolvers/system-load-report.js";
@@ -190,6 +191,8 @@ export async function resolveDispatch(pointer: AnyPointer): Promise<ResolverResu
       return resolveStalePointerEmit(p as Parameters<typeof resolveStalePointerEmit>[0]);
     case "phantom_trace_scan":
       return resolvePhantomTraceScan(p as Parameters<typeof resolvePhantomTraceScan>[0]);
+    case "template_input_lint_scan":
+      return resolveTemplateInputLintScan(p as Parameters<typeof resolveTemplateInputLintScan>[0]);
     case "convergent_validity_check":
       return resolveConvergentValidityCheck(p as Parameters<typeof resolveConvergentValidityCheck>[0]);
     case "trace_failure_pattern_report":

@@ -21,6 +21,7 @@ import { DRAIN_PENDING_SUBSTRATE_GAPS_TEMPLATE } from "./drain-pending-substrate
 import { DRAFT_SPEC_FROM_GAP_TEMPLATE } from "./draft-spec-from-gap.js";
 import { INGEST_DOC_AS_CONCEPTS_TEMPLATE } from "./ingest-doc-as-concepts.js";
 import { DETECT_STALE_POINTER_TEMPLATE } from "./detect-stale-pointer.js";
+import { DETECT_TEMPLATE_INPUT_LINT_TEMPLATE } from "./detect-template-input-lint.js";
 import { DETECT_PHANTOM_SUCCESS_TRACE_TEMPLATE } from "./detect-phantom-success-trace.js";
 import { DETECT_CUTOVER_STUCK_LOOP_TEMPLATE } from "./detect-cutover-stuck-loop.js";
 import { DETECT_PRECONDITION_REJECTION_TEMPLATE } from "./detect-precondition-rejection.js";
@@ -145,6 +146,7 @@ export { DRAIN_PENDING_SUBSTRATE_GAPS_TEMPLATE } from "./drain-pending-substrate
 export { DRAFT_SPEC_FROM_GAP_TEMPLATE } from "./draft-spec-from-gap.js";
 export { INGEST_DOC_AS_CONCEPTS_TEMPLATE } from "./ingest-doc-as-concepts.js";
 export { DETECT_STALE_POINTER_TEMPLATE } from "./detect-stale-pointer.js";
+export { DETECT_TEMPLATE_INPUT_LINT_TEMPLATE } from "./detect-template-input-lint.js";
 export { DETECT_PHANTOM_SUCCESS_TRACE_TEMPLATE } from "./detect-phantom-success-trace.js";
 export { DETECT_CUTOVER_STUCK_LOOP_TEMPLATE } from "./detect-cutover-stuck-loop.js";
 export { DETECT_PRECONDITION_REJECTION_TEMPLATE } from "./detect-precondition-rejection.js";
@@ -261,6 +263,7 @@ export const SEED_TEMPLATES: ActivityTemplate[] = [
   // doc-ingestion + concept management (2026-05-30)
   INGEST_DOC_AS_CONCEPTS_TEMPLATE,
   DETECT_STALE_POINTER_TEMPLATE,
+  DETECT_TEMPLATE_INPUT_LINT_TEMPLATE,
   // substrate self-detection (2026-05-30): author detection templates for
   // observed bug classes — phantom-success traces (F25) are the first.
   DETECT_PHANTOM_SUCCESS_TRACE_TEMPLATE,

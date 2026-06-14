@@ -77,6 +77,7 @@ import { CHARACTERIZE_ARRIVED_VESSEL_TEMPLATE } from "./characterize-arrived-ves
 // Phase 3 — closed-loop learning and verification
 // (openspec/changes/2026-06-01-closed-loop-learning-and-verification/)
 import { DETECT_RECURRING_PATTERN_TEMPLATE } from "./detect-recurring-pattern.js";
+import { DETECT_RECURRING_TRACE_PATTERN_TEMPLATE } from "./detect-recurring-trace-pattern.js";
 import { PREDICT_AND_VERIFY_TEMPLATE } from "./predict-and-verify.js";
 import { REFINE_ON_DISAGREEMENT_TEMPLATE } from "./refine-on-disagreement.js";
 import { VALIDATE_OBSIDIAN_VESSEL_INTERACTION_TEMPLATE } from "./validate-obsidian-vessel-interaction.js";
@@ -163,6 +164,7 @@ export { DETECT_CONCEPT_DB_DRIFT_TEMPLATE } from "./detect-concept-db-drift.js";
 export { DETECT_OBSIDIAN_VESSEL_HEALTH_TEMPLATE } from "./detect-obsidian-vessel-health.js";
 export { DRAFT_ACTIVITY_FROM_PATTERN_TEMPLATE } from "./draft-activity-from-pattern.js";
 export { DETECT_RECURRING_PATTERN_TEMPLATE } from "./detect-recurring-pattern.js";
+export { DETECT_RECURRING_TRACE_PATTERN_TEMPLATE } from "./detect-recurring-trace-pattern.js";
 export { PREDICT_AND_VERIFY_TEMPLATE } from "./predict-and-verify.js";
 export { REFINE_ON_DISAGREEMENT_TEMPLATE } from "./refine-on-disagreement.js";
 export { VALIDATE_OBSIDIAN_VESSEL_INTERACTION_TEMPLATE } from "./validate-obsidian-vessel-interaction.js";
@@ -316,6 +318,7 @@ export const SEED_TEMPLATES: ActivityTemplate[] = [
   // Phase 3 — closed-loop learning and verification (2026-06-01)
   // openspec/changes/2026-06-01-closed-loop-learning-and-verification/
   DETECT_RECURRING_PATTERN_TEMPLATE,
+  DETECT_RECURRING_TRACE_PATTERN_TEMPLATE,
   PREDICT_AND_VERIFY_TEMPLATE,
   REFINE_ON_DISAGREEMENT_TEMPLATE,
   // substrate-as-git-author Phase 1 (2026-06-01): composition that lets the

@@ -432,6 +432,12 @@ export const config = {
       // composes a genuine fetch→classify→persist consumer instead of a
       // scaffold-clone. Optionally dispatches the author.
       "vessel_gap_to_cluster",
+      // trace_recurring_pattern_scan (2026-06-14): the NON-OBSIDIAN feeder for
+      // the real-chain author. Mines the substrate's own execution traces for a
+      // recurrent output-shape topology and emits a recurringPatternCluster for
+      // draft-activity-from-pattern — so the author runs in the core loop without
+      // depending on the (disconnectable) obsidian episode source.
+      "trace_recurring_pattern_scan",
       // obsidian_command_gate (2026-06-13): use the learned action-effect priors
       // (obsidian_action_effect concepts) to gate which Obsidian commands the
       // substrate will dispatch — allow learned-reversible, deny unobserved/

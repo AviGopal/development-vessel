@@ -109,6 +109,7 @@ import { resolveDiscoveryVesselRegistryObserver } from "../resolvers/discovery-v
 import { resolveVesselArrivalScan } from "../resolvers/vessel-arrival-scan.js";
 import { resolveConsumerProductivityAudit } from "../resolvers/consumer-productivity-audit.js";
 import { resolveVesselGapToCluster } from "../resolvers/vessel-gap-to-cluster.js";
+import { resolveTraceRecurringPatternScan } from "../resolvers/trace-recurring-pattern-scan.js";
 import { resolveCreditVesselShapes } from "../resolvers/credit-vessel-shapes.js";
 import { resolveObsidianCommandGate } from "../resolvers/obsidian-command-gate.js";
 import { resolveObsidianExecuteGated } from "../resolvers/obsidian-execute-gated.js";
@@ -418,6 +419,10 @@ export async function resolveDispatch(pointer: AnyPointer): Promise<ResolverResu
     case "vessel_gap_to_cluster":
       return resolveVesselGapToCluster(
         p as Parameters<typeof resolveVesselGapToCluster>[0],
+      );
+    case "trace_recurring_pattern_scan":
+      return resolveTraceRecurringPatternScan(
+        p as Parameters<typeof resolveTraceRecurringPatternScan>[0],
       );
     case "obsidian_command_gate":
       return resolveObsidianCommandGate(

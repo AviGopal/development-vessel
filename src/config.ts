@@ -102,6 +102,9 @@ export const config = {
       // Meta-detector (2026-06-13): vessels logging repeated persistence (write)
       // errors in their journal (e.g. concept-db NULL-vs-NONE INSERT failures).
       "vessel_write_error_scan",
+      // Meta-detector (2026-06-13): authored chains whose http_fetch tasks failed
+      // (non-2xx) — surfaced via the failure-marker content of the concepts they mint.
+      "chain_fetch_failure_scan",
       // Convergent validity — independent co-occurrence signal from concept-db.
       // Activities insert this as an explicit task after high-stakes resolvers
       // to cross-check that produced shapes match concept-db's learned priors.

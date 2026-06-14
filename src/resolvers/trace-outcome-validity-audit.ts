@@ -1,4 +1,5 @@
 import type { ResolverResult } from "./types.js";
+import { fetchWithRetry } from "./http-retry.js";
 
 /**
  * trace_outcome_validity_audit — substrate inspects its OWN trace records for
@@ -104,7 +105,8 @@ async function fetchTraces(endpoint: string, apiKey: string, limit: number): Pro
   const headers: Record<string, string> = {};
   if (apiKey) headers["Authorization"] = `ApiKey ${apiKey}`;
   try {
-    const resp = await fetch(`${endpoint}/v2/activities/execution-traces?limit=${limit}`, { headers, signal: AbortSignal.timeout(20_000) });
+    const resp = await fetchWithRetry(`${endpoint}/v2/activities/execution-traces?limit=${limit}`, { headers, signal: AbortSignal.timeout(20_000) });
+    if (!resp) return [];
     if (!resp.ok) return [];
     const json = (await resp.json()) as { executions?: ExecutionTrace[] };
     return json.executions ?? [];

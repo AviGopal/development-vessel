@@ -42,6 +42,10 @@ export const VALIDATE_OBSIDIAN_VESSEL_INTERACTION_TEMPLATE: ActivityTemplate = {
     "synthesizer which reports the vessel as unreachable.",
   inputShapes: [],
   outputShapes: ["obsidianVesselInteractionReport"],
+  // Deliberately NOT tagged boredom_target_template: obsidian is an external
+  // app that may be disconnected, so operating it belongs OUTSIDE the core
+  // self-optimization loop (driven as an external test, not the boredom
+  // rotation). See scripts/substrate/obsidian-learning-probe.sh.
   tags: ["obsidian-vessel", "validation", "self-test", "interaction"],
   variables: [],
   tasks: [

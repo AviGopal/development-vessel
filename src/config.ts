@@ -407,6 +407,15 @@ export const config = {
       // leaves zero.
       "vessel_arrival_scan",
       "credit_vessel_shapes",
+      // obsidian_command_gate (2026-06-13): use the learned action-effect priors
+      // (obsidian_action_effect concepts) to gate which Obsidian commands the
+      // substrate will dispatch — allow learned-reversible, deny unobserved/
+      // irreversible. The manipulability gate.
+      "obsidian_command_gate",
+      // obsidian_execute_gated (2026-06-13): the gated execute path — dispatch a
+      // single Obsidian command only after obsidian_command_gate clears it.
+      // Closes the manipulability loop: observe → learn → gate → ACT.
+      "obsidian_execute_gated",
     ] as const,
     resolveEndpoint: "/v2/impulses/resolve",
     resolveRequestFormat: "pointer" as const,

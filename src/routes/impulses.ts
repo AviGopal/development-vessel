@@ -104,6 +104,8 @@ import { resolveConceptDbHealthObserver } from "../resolvers/concept-db-health-o
 import { resolveDiscoveryVesselRegistryObserver } from "../resolvers/discovery-vessel-registry-observer.js";
 import { resolveVesselArrivalScan } from "../resolvers/vessel-arrival-scan.js";
 import { resolveCreditVesselShapes } from "../resolvers/credit-vessel-shapes.js";
+import { resolveObsidianCommandGate } from "../resolvers/obsidian-command-gate.js";
+import { resolveObsidianExecuteGated } from "../resolvers/obsidian-execute-gated.js";
 import { resolveSubstrateHeartbeatObserver } from "../resolvers/substrate-heartbeat-observer.js";
 import { resolveLlmQuotaObserver } from "../resolvers/llm-quota-observer.js";
 import type { ResolverResult } from "../resolvers/types.js";
@@ -394,6 +396,14 @@ export async function resolveDispatch(pointer: AnyPointer): Promise<ResolverResu
     case "credit_vessel_shapes":
       return resolveCreditVesselShapes(
         p as Parameters<typeof resolveCreditVesselShapes>[0],
+      );
+    case "obsidian_command_gate":
+      return resolveObsidianCommandGate(
+        p as Parameters<typeof resolveObsidianCommandGate>[0],
+      );
+    case "obsidian_execute_gated":
+      return resolveObsidianExecuteGated(
+        p as Parameters<typeof resolveObsidianExecuteGated>[0],
       );
     default:
       throw new Error(`unknown shape: ${pointer.type}`);

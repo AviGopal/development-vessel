@@ -110,19 +110,37 @@ export async function resolveTemplateInputLintScan(
 
     const tasks = Array.isArray(t.tasks) ? (t.tasks as TaskLike[]) : [];
     const consumedShapes = new Set<string>();
+    const consumedConfigKeys = new Set<string>();
     let allRefs = "";
     for (const task of tasks) {
       for (const s of [...asStringArray(task.inputShapes), ...asStringArray(task.input_shapes)]) consumedShapes.add(s);
+      // goal-host builds the resolver pointer as {type, ...variables, ...config},
+      // so a variable is also consumed when a task config carries a key of the
+      // same name (the spread-into-pointer-field path) — not only via {{name}}.
+      if (task.config && typeof task.config === "object") {
+        for (const k of Object.keys(task.config as Record<string, unknown>)) consumedConfigKeys.add(k);
+      }
       allRefs += taskReferenceBlob(task);
     }
 
-    // An inputShape is unused if no task declares it as a task inputShape AND it
-    // never appears as a {{shape}} reference in any task's config/prompt.
+    // An inputShape is flagged when no task declares it as a task inputShape AND
+    // it never appears as a {{shape}} reference. NOTE: this is a HEURISTIC, not a
+    // proof — an input can still be consumed via context.inputImpulses / slot-
+    // binding (pool-seeding), which is invisible to a static scan. We deliberately
+    // do NOT exclude KNOWN_SEEDABLE_SHAPES here: the cluster-load bug's input
+    // (recurringPatternCluster) IS seedable yet was still never bound by the
+    // autonomous path, so excluding seedable shapes would mask the exact class.
+    // The gap is marked confidence=heuristic so a consumer verifies before acting;
+    // the runtime-sound version (input declared but never bound across recent
+    // executions) is the follow-up.
     const unusedInputs = declaredInputs.filter(
       (s) => !consumedShapes.has(s) && !allRefs.includes(`{{${s}`),
     );
-    // A variable is unused if neither {{name}} nor {{name_<suffix>}} appears.
-    const unusedVars = declaredVars.filter((name) => !allRefs.includes(`{{${name}`));
+    // A variable is unused if {{name}} never appears AND no task config carries a
+    // key of that name (the goal-host variable-spread consumption path).
+    const unusedVars = declaredVars.filter(
+      (name) => !allRefs.includes(`{{${name}`) && !consumedConfigKeys.has(name),
+    );
 
     if (unusedInputs.length === 0 && unusedVars.length === 0) continue;
     findings.push({
@@ -154,6 +172,8 @@ export async function resolveTemplateInputLintScan(
               status: "open",
               classification_metadata: {
                 gap_subtype: "template_declares_unused_input",
+                confidence: "heuristic",
+                detection: "static_scan",
                 template_id: f.template_id,
                 unused_input_shapes: f.unused_input_shapes,
                 unused_variables: f.unused_variables,

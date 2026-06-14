@@ -2,6 +2,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import type { ResolverResult } from "./types.js";
 import { resolveCreditVesselShapes } from "./credit-vessel-shapes.js";
+import { resolveConsumerProductivityAudit } from "./consumer-productivity-audit.js";
 
 /**
  * vessel_arrival_scan (2026-06-13) — the VESSEL-ARRIVAL HORIZON CLASSIFIER.
@@ -79,6 +80,13 @@ interface ShapeClassification {
   has_producer: boolean;
   has_consumer: boolean;
   coverage: ShapeCoverage;
+  /**
+   * Productivity of the consumer side: `productively_consumed` is the only
+   * value that counts as integrated. `falsely_covered` means a template
+   * DECLARES this shape as input but none genuinely consume it — the
+   * self-deception we refuse to treat as coverage.
+   */
+  consumer_productivity?: "productively_consumed" | "falsely_covered" | "uncovered";
 }
 
 interface VesselClassification {
@@ -280,12 +288,30 @@ export async function resolveVesselArrivalScan(
   const classifications: VesselClassification[] = [];
   for (const v of toClassify) {
     const shapes = Array.isArray(v.shapes) ? v.shapes : [];
+    // Consumer side is judged by PRODUCTIVITY, not declaration. The audit
+    // distinguishes a genuine consumer from a scaffold-clone/phantom that
+    // merely declares the shape — so a shape only reads "covered" if something
+    // truly turns it into a downstream impulse. (Producer side stays a plain
+    // discover match — producing a shape is not the gap we close here.)
+    const productivity = shapes.length
+      ? ((await resolveConsumerProductivityAudit({
+          type: "consumer_productivity_audit",
+          shapes,
+          metabobEndpoint: metabob,
+          apiKey,
+          timeoutMs,
+        }).then((r) => r.body)) as {
+          shapes?: Array<{ shape: string; verdict: ShapeClassification["consumer_productivity"] }>;
+        })
+      : { shapes: [] };
+    const verdictByShape = new Map(
+      (productivity.shapes ?? []).map((s) => [s.shape, s.verdict] as const),
+    );
     const shapeClasses: ShapeClassification[] = [];
     for (const shape of shapes) {
-      const [hasProducer, hasConsumer] = await Promise.all([
-        shapeHasMatch(metabob, apiKey, shape, "forward", timeoutMs),
-        shapeHasMatch(metabob, apiKey, shape, "backward", timeoutMs),
-      ]);
+      const consumerProductivity = verdictByShape.get(shape) ?? "uncovered";
+      const hasConsumer = consumerProductivity === "productively_consumed";
+      const hasProducer = await shapeHasMatch(metabob, apiKey, shape, "forward", timeoutMs);
       const coverage: ShapeCoverage =
         hasProducer && hasConsumer
           ? "covered"
@@ -294,10 +320,17 @@ export async function resolveVesselArrivalScan(
             : hasConsumer
               ? "consumer_only"
               : "orphaned";
-      shapeClasses.push({ shape, has_producer: hasProducer, has_consumer: hasConsumer, coverage });
+      shapeClasses.push({
+        shape,
+        has_producer: hasProducer,
+        has_consumer: hasConsumer,
+        coverage,
+        consumer_productivity: consumerProductivity,
+      });
     }
-    // A shape the substrate can act on needs a CONSUMER (turns observation into
-    // a downstream impulse). Shapes with no consumer are the integration gap.
+    // A shape the substrate can act on needs a PRODUCTIVE CONSUMER (genuinely
+    // turns observation into a downstream impulse). A shape that is merely
+    // DECLARED as some template's input (falsely_covered) is still the gap.
     const uncovered = shapeClasses.filter((s) => !s.has_consumer).map((s) => s.shape);
     const verdict = uncovered.length > 0 ? "needs_integration" : "integrated";
     classifications.push({

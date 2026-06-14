@@ -15,13 +15,20 @@ afterEach(async () => {
   await fs.rm(tmp, { recursive: true, force: true });
 });
 
-/** Fake discovery + discover-by-shapes. `consumers` lists shapes that HAVE a consumer. */
+/**
+ * Fake discovery + discover-by-shapes + (for the consumer_productivity_audit
+ * the arrival scan now delegates to) template + trace fetches. `consumers`
+ * lists shapes that have a PRODUCTIVE consumer: each such shape resolves to a
+ * `prod-of-<shape>` template that declares the shape, references it, emits
+ * concept_create_write, and has a success trace.
+ */
 function mockFetch(
   vessels: Array<{ vesselId: string; vesselName?: string; shapes?: string[] }>,
   opts: { consumers?: Set<string>; producers?: Set<string> } = {},
 ) {
   const consumers = opts.consumers ?? new Set<string>();
   const producers = opts.producers ?? new Set<string>();
+  const prodId = (shape: string) => `prod-of-${shape}`;
   globalThis.fetch = (async (url: string, init?: { body?: string }) => {
     const u = String(url);
     const body = JSON.parse(init?.body ?? "{}");
@@ -30,9 +37,36 @@ function mockFetch(
     }
     if (u.includes("/discover-by-shapes")) {
       const shape = body.required_shapes?.[0];
-      const set = body.mode === "backward" ? consumers : producers;
+      if (body.mode === "backward") {
+        // audit's candidate discovery: a productive consumer iff shape ∈ consumers
+        const ids = consumers.has(shape) ? [{ id: prodId(shape) }] : [];
+        return new Response(JSON.stringify({ activities: ids }), { status: 200 });
+      }
+      // forward (producer) check stays a plain match
       return new Response(
-        JSON.stringify({ matched: set.has(shape), emergence_class: set.has(shape) ? "reuse" : "gap" }),
+        JSON.stringify({ matched: producers.has(shape), emergence_class: producers.has(shape) ? "reuse" : "gap" }),
+        { status: 200 },
+      );
+    }
+    if (u.includes("/v2/activities/templates/")) {
+      const id = decodeURIComponent(u.split("/v2/activities/templates/")[1]!.split("?")[0]!);
+      const shape = id.startsWith("prod-of-") ? id.slice("prod-of-".length) : "";
+      return new Response(
+        JSON.stringify({
+          id,
+          input_shapes: [shape],
+          output_shapes: ["concept_create_write"],
+          tasks: [{ id: "consume", resolver: "http_fetch", input_shapes: [shape], config: { body: shape }, output_shapes: ["concept_create_write"] }],
+        }),
+        { status: 200 },
+      );
+    }
+    if (u.includes("/execution-traces")) {
+      const m = u.match(/activity_(?:template_)?id=([^&]+)/);
+      const id = m ? decodeURIComponent(m[1]!) : "";
+      const ok = id.startsWith("prod-of-");
+      return new Response(
+        JSON.stringify({ executions: ok ? [{ status: "success", output_impulse_shapes: ["concept_create_write"] }] : [] }),
         { status: 200 },
       );
     }

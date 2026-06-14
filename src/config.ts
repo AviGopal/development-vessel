@@ -420,6 +420,12 @@ export const config = {
       // leaves zero.
       "vessel_arrival_scan",
       "credit_vessel_shapes",
+      // consumer_productivity_audit (2026-06-14): distinguish PRODUCTIVE consumers
+      // (genuinely consume a shape into a downstream impulse, trace-proven) from
+      // scaffold-clones/phantoms that merely DECLARE it as input — the
+      // self-deception that flips a shape to "covered" without expanding the
+      // frontier. Gates the arrival-scan "integrated" verdict.
+      "consumer_productivity_audit",
       // obsidian_command_gate (2026-06-13): use the learned action-effect priors
       // (obsidian_action_effect concepts) to gate which Obsidian commands the
       // substrate will dispatch — allow learned-reversible, deny unobserved/

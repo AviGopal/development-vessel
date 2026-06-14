@@ -86,10 +86,18 @@ function snake(s: string): string {
   return s.replace(/([a-z0-9])([A-Z])/g, "$1_$2").replace(/[^a-zA-Z0-9]+/g, "_").toLowerCase().replace(/^_+|_+$/g, "");
 }
 
-/** Pull every trace id cited by an existing substrateGap, so we can tell which
- *  problem clusters already have a detector watching them. */
-async function fetchCitedTraceIds(emitUrl: string, apiKey: string): Promise<Set<string>> {
-  const cited = new Set<string>();
+interface CoverageStats {
+  cited: Set<string>;
+  detector_coverage_gaps_open: number;
+  detector_coverage_gaps_closed: number;
+}
+
+/** Pull every trace id cited by an existing substrateGap (so we can tell which
+ *  clusters already have a detector watching them) AND the detection-coverage
+ *  metric (§9.4): how many detector_coverage_gaps are open vs closed — the
+ *  autonomous-closure signal for the detector-authoring recursion. */
+async function fetchCoverageStats(emitUrl: string, apiKey: string): Promise<CoverageStats> {
+  const stats: CoverageStats = { cited: new Set(), detector_coverage_gaps_open: 0, detector_coverage_gaps_closed: 0 };
   const headers: Record<string, string> = { "Content-Type": "application/json" };
   if (apiKey) headers["Authorization"] = `ApiKey ${apiKey}`;
   try {
@@ -99,17 +107,37 @@ async function fetchCitedTraceIds(emitUrl: string, apiKey: string): Promise<Set<
       body: JSON.stringify({ impulse: { pointer: { type: "substrateGap", limit: 500 } } }),
       signal: AbortSignal.timeout(10_000),
     });
-    if (!r.ok) return cited;
-    const j = await r.json() as { body?: { gaps?: Array<{ classification_metadata?: Record<string, unknown> }> } };
+    if (!r.ok) return stats;
+    const j = await r.json() as { body?: { gaps?: Array<{ category?: string; status?: string; classification_metadata?: Record<string, unknown> }> } };
     for (const g of j.body?.gaps ?? []) {
       const m = g.classification_metadata ?? {};
       for (const key of ["failure_examples", "exemplar_trace_ids", "trace_ids", "examples"]) {
         const v = m[key];
-        if (Array.isArray(v)) for (const id of v) if (typeof id === "string") cited.add(id);
+        if (Array.isArray(v)) for (const id of v) if (typeof id === "string") stats.cited.add(id);
+      }
+      if (g.category === "detector_coverage_gap") {
+        if (g.status === "closed") stats.detector_coverage_gaps_closed += 1;
+        else if (g.status === "open") stats.detector_coverage_gaps_open += 1;
       }
     }
   } catch { /* tolerant */ }
-  return cited;
+  return stats;
+}
+
+/** Count substrate-authored detectors (templates tagged substrate.authored).
+ *  The growth signal of the recursion. */
+async function fetchAuthoredDetectorCount(endpoint: string, apiKey: string): Promise<number> {
+  const headers: Record<string, string> = {};
+  if (apiKey) headers["Authorization"] = `ApiKey ${apiKey}`;
+  // Query the boredom pool (authored detectors carry boredom_target_template)
+  // and filter by the substrate.authored tag client-side — FTS tokenizes the
+  // dotted tag so a direct q on it misses.
+  try {
+    const r = await fetch(`${endpoint}/v2/activities/templates?q=boredomtargettemplate&limit=400`, { headers, signal: AbortSignal.timeout(10_000) });
+    if (!r.ok) return 0;
+    const j = await r.json() as { templates?: Array<{ tags?: string[] }> };
+    return (j.templates ?? []).filter((t) => (t.tags ?? []).some((tag) => tag === "substrate.authored" || tag === "substrateauthored")).length;
+  } catch { return 0; }
 }
 
 async function emitGap(emitUrl: string, apiKey: string, c: ProblemCluster, minRecurrence: number): Promise<boolean> {
@@ -176,7 +204,9 @@ export async function resolveDetectorCoverageScan(pointer: DetectorCoverageScanP
     if (r.ok) { const j = await r.json() as { executions?: ExecutionTrace[] }; traces = j.executions ?? []; }
   } catch { /* tolerant */ }
 
-  const cited = await fetchCitedTraceIds(emitUrl, apiKey);
+  const coverageStats = await fetchCoverageStats(emitUrl, apiKey);
+  const cited = coverageStats.cited;
+  const authoredDetectorCount = await fetchAuthoredDetectorCount(endpoint, apiKey);
 
   const cutoff = Date.now() - windowHours * 3600 * 1000;
   const failures = traces.filter((tr) => {
@@ -217,8 +247,20 @@ export async function resolveDetectorCoverageScan(pointer: DetectorCoverageScanP
       traces_examined: traces.length,
       failures_examined: failures.length,
       clusters_found: clusters.length,
+      covered_clusters: clusters.length - uncovered.length,
       uncovered_clusters: uncovered.length,
       gaps_emitted,
+      // §9.4 detection-coverage observable — measurable growth + stability of
+      // the detector-authoring recursion.
+      detection_coverage: {
+        authored_detector_count: authoredDetectorCount,
+        detector_coverage_gaps_open: coverageStats.detector_coverage_gaps_open,
+        detector_coverage_gaps_closed: coverageStats.detector_coverage_gaps_closed,
+        autonomous_closure_ratio: (() => {
+          const tot = coverageStats.detector_coverage_gaps_open + coverageStats.detector_coverage_gaps_closed;
+          return tot > 0 ? coverageStats.detector_coverage_gaps_closed / tot : null;
+        })(),
+      },
       information_yield: uncovered.length > 0 ? "productive" : "idle",
       uncovered: uncovered.slice(0, 10).map((c) => ({ gap_class: c.gap_class, count: c.count, cited: c.cited_count, failure_type: c.failure_type, activity_prefix: c.activity_prefix })),
       completed_at: new Date().toISOString(),

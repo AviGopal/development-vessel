@@ -219,6 +219,8 @@ export async function resolvePatchWithTools(pointer: PatchWithToolsPointer): Pro
   const containerPath = liveSrcPath; // already /vessels/<v>/<subPath>
 
   const history: Array<{ turn: number; thought_or_action: string; tool_result?: ToolResult }> = [];
+  // Counts identical failing (tool,args) calls so a stuck ReAct loop aborts early.
+  const failedCallCounts = new Map<string, number>();
   let finalReason: string | null = null;
   let finished = false;
 
@@ -227,11 +229,25 @@ export async function resolvePatchWithTools(pointer: PatchWithToolsPointer): Pro
       ? "(no tool calls yet)"
       : history.map((h, i) => `Turn ${h.turn}: ${h.thought_or_action}${h.tool_result ? `\n  → ${h.tool_result.ok ? "OK" : "ERR"}: ${JSON.stringify(h.tool_result.result).slice(0, 800)}` : ""}`).join("\n\n");
 
+    // When the previous turn's tool call failed, surface the error LOUDLY with a
+    // directive to FIX the args (not repeat them). The plain history line was too
+    // easy for the LLM to ignore, causing identical-call retry loops.
+    const last = history[history.length - 1];
+    const correction = last?.tool_result && !last.tool_result.ok
+      ? `## ⚠ YOUR LAST CALL FAILED — DO NOT REPEAT IT\n` +
+        `Tool: ${last.tool_result.tool}\nArgs you sent: ${JSON.stringify(last.tool_result.args).slice(0, 300)}\n` +
+        `Error: ${JSON.stringify(last.tool_result.result).slice(0, 300)}\n` +
+        `Re-read the tool catalog and emit a DIFFERENT, corrected call that supplies EVERY required argument ` +
+        `(an error naming required fields means one was missing — code_replace_lines needs all of {path, start_line, end_line, text}). ` +
+        `Repeating the same args will fail again and abort the patch.\n\n`
+      : "";
+
     const prompt =
       `You are patching a source file via fine-grained code tools. The proposal describes what to change; you use the tools to inspect the file and apply the change.\n\n` +
       `## Target file (container path)\n${containerPath}\n\n` +
       `## Proposal (intent — code samples may be illustrative, NOT the actual file contents)\n${pointer.proposal_text}\n\n` +
       `## Tool catalog\n${TOOL_CATALOG_HELP}\n\n` +
+      correction +
       `## Tool call history\n${historyBlock}\n\n` +
       `## Turn ${turn} of ${maxIters}\n` +
       `Emit your next action as a JSON object only.`;
@@ -271,6 +287,25 @@ export async function resolvePatchWithTools(pointer: PatchWithToolsPointer): Pro
     const result = await callTool(toolsEndpoint, tool, args);
     console.error(`[patch-with-tools] turn ${turn} ${tool} -> ${result.ok ? "OK" : "ERR"}: ${JSON.stringify(result.body).slice(0, 160)}`);
     history.push({ turn, thought_or_action: `call ${tool}(${JSON.stringify(args).slice(0, 200)})`, tool_result: { tool, args, result: result.body, ok: result.ok } });
+
+    // Loop-break on a stuck patcher (2026-06-14): the ReAct LLM can emit the
+    // SAME malformed tool call (e.g. code_replace_lines missing `text`), get the
+    // same error, and retry it identically until the iteration cap — burning the
+    // whole budget without learning (observed: 11 identical code_replace_lines on
+    // one line). Abort early when one (tool,args) signature fails >= 3 times so
+    // the failure is reported promptly instead of masquerading as "cap reached".
+    if (!result.ok) {
+      const sig = `${tool}:${JSON.stringify(args)}`;
+      const n = (failedCallCounts.get(sig) ?? 0) + 1;
+      failedCallCounts.set(sig, n);
+      if (n >= 3) {
+        try { await writeFile(liveSrcPath, beforeSrc); } catch { /* best-effort */ }
+        return structuredError(
+          `patch_with_tools: aborted — ${tool} failed ${n}× with the SAME args (likely a malformed call, e.g. a missing required field). Last error: ${JSON.stringify(result.body).slice(0, 200)}`,
+          { history, before_sha: beforeSha, stuck_signature: sig },
+        );
+      }
+    }
   }
 
   if (!finished) {

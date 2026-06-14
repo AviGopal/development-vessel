@@ -111,6 +111,9 @@ import { resolveVesselArrivalScan } from "../resolvers/vessel-arrival-scan.js";
 import { resolveConsumerProductivityAudit } from "../resolvers/consumer-productivity-audit.js";
 import { resolveVesselGapToCluster } from "../resolvers/vessel-gap-to-cluster.js";
 import { resolveTraceRecurringPatternScan } from "../resolvers/trace-recurring-pattern-scan.js";
+import { resolveDetectorCoverageScan } from "../resolvers/detector-coverage-scan.js";
+import { resolveSignatureClusterScan } from "../resolvers/signature-cluster-scan.js";
+import { resolveBuildSignatureDetector } from "../resolvers/build-signature-detector.js";
 import { resolveCreditVesselShapes } from "../resolvers/credit-vessel-shapes.js";
 import { resolveObsidianCommandGate } from "../resolvers/obsidian-command-gate.js";
 import { resolveObsidianExecuteGated } from "../resolvers/obsidian-execute-gated.js";
@@ -437,6 +440,12 @@ export async function resolveDispatch(pointer: AnyPointer): Promise<ResolverResu
       return resolveObsidianExecuteGated(
         p as Parameters<typeof resolveObsidianExecuteGated>[0],
       );
+    case "detector_coverage_scan":
+      return resolveDetectorCoverageScan(p as Parameters<typeof resolveDetectorCoverageScan>[0]);
+    case "signature_cluster_scan":
+      return resolveSignatureClusterScan(p as Parameters<typeof resolveSignatureClusterScan>[0]);
+    case "build_signature_detector":
+      return resolveBuildSignatureDetector(p as Parameters<typeof resolveBuildSignatureDetector>[0]);
     default:
       throw new Error(`unknown shape: ${pointer.type}`);
   }

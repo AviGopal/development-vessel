@@ -453,6 +453,14 @@ export const config = {
       // single Obsidian command only after obsidian_command_gate clears it.
       // Closes the manipulability loop: observe → learn → gate → ACT.
       "obsidian_execute_gated",
+      // detector-authoring recursion (2026-06-14, SUBSTRATE_AS_MDP §9.3 limit-8):
+      // detector_coverage_scan finds recurring problem classes no detector covers;
+      // build_signature_detector authors a detect-<class> activity binding the
+      // generic signature_cluster_scan body to the observed signature. The
+      // substrate extends its OWN detection surface via the same drafter loop.
+      "detector_coverage_scan",
+      "signature_cluster_scan",
+      "build_signature_detector",
     ] as const,
     resolveEndpoint: "/v2/impulses/resolve",
     resolveRequestFormat: "pointer" as const,

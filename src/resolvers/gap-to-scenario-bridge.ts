@@ -70,6 +70,11 @@ const PRIORITY_CATEGORIES: string[] = [
   "activity_lifecycle",
   "missing_concept",
   "detector_output_shape_mismatch",
+  // cost_constraint (2026-06-14): without this, cost-detector gaps get rank -1
+  // (unlisted) and starve at the back of the bridge queue — the substrate detects a
+  // cost miscalibration/inefficiency but never acts on it. Listed so it enters the
+  // gap→drafter→patch_proposal→apply-proposal-as-patch→cutover code-fix pipeline.
+  "cost_constraint",
 ];
 
 function rankOf(g: GapRow): number {
@@ -181,6 +186,9 @@ export async function resolveGapToScenarioBridge(
 
     const summary = typeof g.summary === "string" ? g.summary : "";
     const meta = (g.classification_metadata ?? {}) as Record<string, unknown>;
+    // Carry the detector's remediation_hint into the drafter's goal so a code-fix
+    // gap doesn't make the drafter rediscover blind what the detector already knew.
+    const remediationHint = typeof meta["remediation_hint"] === "string" ? meta["remediation_hint"] : "";
     const category = typeof g.category === "string" ? g.category : "auto";
     const isVesselAuthoring = VESSEL_AUTHORING_CATEGORIES.has(category);
 
@@ -234,7 +242,7 @@ export async function resolveGapToScenarioBridge(
           outcome_class: "gap",
           title: summary.slice(0, 120) || `Gap ${safeId}`,
           description: summary,
-          goal_text: summary,
+          goal_text: remediationHint ? `${summary}\n\nRemediation hint: ${remediationHint}` : summary,
           expected_input_shapes: [] as string[],
           expected_output_shapes: [] as string[],
           cite_principle: typeof meta["cite_principle"] === "string" ? meta["cite_principle"] : null,

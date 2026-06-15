@@ -137,9 +137,15 @@ export async function resolveCostExpectationScan(
         mean_cost_residual_tokens: residualTok,
         pool_median_cost_ms: poolMedian,
         pool_median_cost_tokens: poolMedianTok,
+        // Point the code-fix pipeline at the cost posterior that mispredicts.
+        // cited_evidence → scenario.target_file_paths → patch-with-tools target.
+        cited_evidence: ["repos/boredom-vessel/src/index.ts"],
         remediation_hint:
-          "Inspect per-template expected cost vs actuals for high-variance arms; consider a " +
-          "variance-aware cost posterior (track spread, not just mean) or splitting a bimodal arm.",
+          "In repos/boredom-vessel/src/index.ts, the per-template cost posterior (recordCostByTemplate / " +
+          "expectedCostMs) tracks only the mean, so a bimodal-cost template (fast hit vs slow timeout) " +
+          "mispredicts. Make the cost posterior variance-aware: track the spread (e.g. keep recent samples " +
+          "and use a robust/percentile estimate, or store mean+variance) so expectedCost reflects bimodality, " +
+          "and have combinedCostAdj use it. Keep the [0.5,2.0] clamp and cold-start ∞ behavior intact.",
       },
       posted: false,
     });

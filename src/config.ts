@@ -453,6 +453,11 @@ export const config = {
       // single Obsidian command only after obsidian_command_gate clears it.
       // Closes the manipulability loop: observe → learn → gate → ACT.
       "obsidian_execute_gated",
+      // obsidian_learn_commands (2026-06-15): the autonomous LEARN step — batch-
+      // probe the grant-covered command subset (default navigate, safe on any
+      // vault, no host config) and persist each effect-model to concept-db.
+      // Replaces the operator-run obsidian-learning-probe.sh persistence.
+      "obsidian_learn_commands",
       // detector-authoring recursion (2026-06-14, SUBSTRATE_AS_MDP §9.3 limit-8):
       // detector_coverage_scan finds recurring problem classes no detector covers;
       // build_signature_detector authors a detect-<class> activity binding the

@@ -118,6 +118,7 @@ import { resolveBuildSignatureDetector } from "../resolvers/build-signature-dete
 import { resolveCreditVesselShapes } from "../resolvers/credit-vessel-shapes.js";
 import { resolveObsidianCommandGate } from "../resolvers/obsidian-command-gate.js";
 import { resolveObsidianExecuteGated } from "../resolvers/obsidian-execute-gated.js";
+import { resolveObsidianLearnCommands } from "../resolvers/obsidian-learn-commands.js";
 import { resolveSubstrateHeartbeatObserver } from "../resolvers/substrate-heartbeat-observer.js";
 import { resolveLlmQuotaObserver } from "../resolvers/llm-quota-observer.js";
 import type { ResolverResult } from "../resolvers/types.js";
@@ -442,6 +443,10 @@ export async function resolveDispatch(pointer: AnyPointer): Promise<ResolverResu
     case "obsidian_execute_gated":
       return resolveObsidianExecuteGated(
         p as Parameters<typeof resolveObsidianExecuteGated>[0],
+      );
+    case "obsidian_learn_commands":
+      return resolveObsidianLearnCommands(
+        p as Parameters<typeof resolveObsidianLearnCommands>[0],
       );
     case "detector_coverage_scan":
       return resolveDetectorCoverageScan(p as Parameters<typeof resolveDetectorCoverageScan>[0]);

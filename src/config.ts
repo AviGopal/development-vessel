@@ -458,6 +458,21 @@ export const config = {
       // vault, no host config) and persist each effect-model to concept-db.
       // Replaces the operator-run obsidian-learning-probe.sh persistence.
       "obsidian_learn_commands",
+      // goal_host_behavior_scan (2026-06-15): the obsidian observe-and-learn
+      // mechanism transposed to the goal vessel — model how the goal executor
+      // operates (per goal-direction: modal template, tier, effect class,
+      // success, deviations) and persist expectation priors. No gating.
+      "goal_host_behavior_scan",
+      // obsidian_behavior_scan (2026-06-15): the FORWARD MODEL of the operator —
+      // reads obsidian:event_observed and builds P(next-action | current-action)
+      // with modal expectation + deviation; persists obsidian_behavior priors and
+      // emits substrateGap on unpredictable transitions. Reads only, side-loop.
+      "obsidian_behavior_scan",
+      // obsidian_reflect (2026-06-15): the RESPOND half of the interaction loop —
+      // reads learned obsidian_behavior + command-surface priors and renders a
+      // "Workflow" page onto the substrate vault-render board so the operator sees
+      // what the substrate learned. Non-intrusive (board, not operator notes).
+      "obsidian_reflect",
       // detector-authoring recursion (2026-06-14, SUBSTRATE_AS_MDP §9.3 limit-8):
       // detector_coverage_scan finds recurring problem classes no detector covers;
       // build_signature_detector authors a detect-<class> activity binding the

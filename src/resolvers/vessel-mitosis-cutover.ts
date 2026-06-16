@@ -465,9 +465,23 @@ export async function resolveVesselMitosisCutover(
 
   const workspaceRoot = process.env["WORKSPACE_ROOT"] ?? process.cwd();
   const reposRoot = join(workspaceRoot, "git", "super-repo", "repos");
+  // Direct-push mode (MITOSIS_DIRECT_PUSH=1): the cutover commits+pushes to a
+  // writable in-container clone (MITOSIS_PUSH_CLONE_DIR/<vessel>) and mirrors
+  // into the LIVE runtime, instead of emitting a host-sync intent. In that mode
+  // baseRoot — the mirror target AND the freshness-check root — must be the live
+  // runtime (/vessels/<v> via MITOSIS_RUNTIME_DIR) so (a) the freshness gate
+  // compares against the same file apply-proposal-as-patch hashed (killing the
+  // base_sha path-mismatch livelock), and (b) the mirror+restart makes the
+  // committed change live. host_repo_root (the commit/push clone) is resolved at
+  // the runGitAwareCutover call below.
+  const directPush = process.env["MITOSIS_DIRECT_PUSH"] === "1";
+  const runtimeDir = process.env["MITOSIS_RUNTIME_DIR"];
+  const cloneDir = process.env["MITOSIS_PUSH_CLONE_DIR"];
   const baseRoot = pointer.base_root
     ? resolve(pointer.base_root)
-    : join(reposRoot, vessel_name);
+    : directPush && runtimeDir
+      ? join(runtimeDir, vessel_name)
+      : join(reposRoot, vessel_name);
   const mitosisRoot = pointer.mitosis_root
     ? resolve(pointer.mitosis_root)
     : null;
@@ -643,7 +657,9 @@ export async function resolveVesselMitosisCutover(
       stagedFiles: pointer.staged_files,
       hostRepoRoot:
         pointer.host_repo_root ??
-        join(workspaceRoot, "repos", vessel_name),
+        (directPush && cloneDir
+          ? join(cloneDir, vessel_name)
+          : join(workspaceRoot, "repos", vessel_name)),
       evaluationEvidence: evaluation_evidence,
       stagedBaseSha,
     });

@@ -36,14 +36,15 @@ export const DRAFTER_TRIGGER_TICK_TEMPLATE: ActivityTemplate = {
   id: "development-vessel:drafter-trigger-tick",
   name: "drafter-trigger-tick",
   description:
-    "Picks the oldest scenario from /workspace/validation/failure-modes/scenarios " +
+    "Value-ranks open/materialized/undrafted scenarios (category priority -> " +
+    "severity -> recency) and dispatches draft-gap-closing-activity on the top " +
     "and dispatches draft-gap-closing-activity via light-dispatch with " +
     "scenario_id + paths filled in. Closes the producer-chain gap that " +
     "prevents the drafter from running autonomously via boredom rotation. " +
     "Idempotent: the drafter has its own rate-limit (skip if ≥3 proposals " +
     "in last 7 days for the picked scenario).",
   inputShapes: [],
-  outputShapes: ["autoDraftDispatchResult"],
+  outputShapes: ["priorityScenarioPick"],
   tags: [
     "lift.autonomous.loop",
     "validation.failure.modes",
@@ -54,83 +55,37 @@ export const DRAFTER_TRIGGER_TICK_TEMPLATE: ActivityTemplate = {
   variables: [],
   tasks: [
     {
-      id: "list_scenarios",
+      id: "pick_and_dispatch",
       description:
-        "Enumerate scenario JSON files in the validation/failure-modes/scenarios dir.",
-      resolver: "fs_list",
-      config: {
-        type: "fs_list",
-        path: "/workspace/validation/failure-modes/scenarios",
-        glob: "*.json",
-        max_depth: 0,
-        // V26 (2026-06-09): shuffle so entries[0].name rotates across scenarios
-        // instead of always returning the alphabetic-first id. Without this,
-        // drafter's 3-per-7-day rate-limit blocks new variants and V25
-        // canonical-prompt override never exercises.
-        shuffle: true,
-      },
-      outputShapes: ["directoryListing"],
-    },
-    {
-      id: "extract_scenario_name",
-      description:
-        "Extract entries[0].name — the first scenario file. Deterministic pick. " +
-        "Drafter's internal rate-limit skips already-drafted scenarios so this " +
-        "is idempotent even if the same name comes up repeatedly.",
-      resolver: "json_path_extract",
-      config: {
-        type: "json_path_extract",
-        json: "{{list_scenarios_content}}",
-        path: "entries.0.name",
-      },
-      outputShapes: ["json_extracted_value"],
-    },
-    {
-      id: "extract_scenario_id",
-      description:
-        "Strip .json extension from the filename to get the scenario_id. " +
-        "draft-gap-closing-activity's read_scenario task constructs " +
-        "{scenarios_dir}/{scenario_id}.json so we must NOT pass .json here.",
-      resolver: "json_path_extract",
-      config: {
-        type: "json_path_extract",
-        json: "{\"name\":\"{{extract_scenario_name_value}}\"}",
-        path: "name",
-        strip_suffix: ".json",
-      },
-      outputShapes: ["json_extracted_value"],
-    },
-    {
-      id: "dispatch_drafter",
-      description:
-        "POST to light-dispatch with template_id=draft-gap-closing-activity " +
-        "and the chosen scenario_id + paths. Light-dispatch runs the drafter " +
-        "synchronously, returns dispatchId + executionId. The drafter's tasks " +
-        "register a new variant via activity_create_variant — that variant " +
-        "carries the V15-tightened TASK 3 prompt so its output is canonical " +
-        "kind:patch_proposal shape.",
+        "Value-rank open/materialized/undrafted scenarios (category priority -> " +
+        "severity -> recency) and dispatch draft-gap-closing-activity on the top " +
+        "pick in ONE atomic resolver call. Replaces the prior fs_list-shuffle " +
+        "random pick (defect b): a coin-flip over hundreds of scenarios left " +
+        "high-priority self-detected gaps undrafted for hours. " +
+        "pick_priority_scenario supplies scenario_id + paths to the drafter " +
+        "itself, so there is no fragile cross-task interpolation to drop vars " +
+        "(the empty-vars no_op failure mode).",
       resolver: "http_fetch",
       config: {
         type: "http_fetch",
-        url: "http://127.0.0.1:8280/dispatch",
+        url: "http://127.0.0.1:8090/v2/impulses/resolve",
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           "Authorization": "ApiKey ${METABOB_API_KEY}",
         },
         body: JSON.stringify({
-          template_id: "development-vessel:draft-gap-closing-activity",
-          variables: {
-            report_path:
-              "/workspace/validation/failure-modes/scenarios/{{extract_scenario_name_value}}",
-            scenario_id: "{{extract_scenario_id_value}}",
-            proposals_dir: "/workspace/proposals",
+          impulse: {
+            type: "pick_priority_scenario",
+            dispatch_drafter: true,
             scenarios_dir: "/workspace/validation/failure-modes/scenarios",
+            light_dispatch_url: "http://127.0.0.1:8280/dispatch",
+            drafter_template_id: "development-vessel:draft-gap-closing-activity",
           },
         }),
-        timeoutMs: 60000,
+        timeoutMs: 130000,
       },
-      outputShapes: ["autoDraftDispatchResult"],
+      outputShapes: ["priorityScenarioPick"],
     },
   ],
 };

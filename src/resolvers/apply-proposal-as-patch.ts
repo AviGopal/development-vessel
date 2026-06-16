@@ -46,6 +46,19 @@ export interface ApplyProposalAsPatchPointer {
   dry_run?: boolean;
   model?: string;
   max_tokens?: number;
+  /**
+   * (d) Targeted selection. When set, apply this exact proposal
+   * (`<id>` or `<id>-report.json`) instead of mtime-ranking the dir. Lets the
+   * detector->gap->bridge chain drive a specific authored fix to completion
+   * rather than hoping the mtime walk reaches it before newer churn buries it.
+   */
+  proposal_id?: string;
+  /**
+   * (d) Untargeted ordering when `proposal_id` is absent. Default `oldest`
+   * (FIFO) so no proposal starves behind a stream of newer ones — the failure
+   * mode of the prior newest-first (LIFO) default. `newest` restores LIFO.
+   */
+  prefer?: "oldest" | "newest";
 }
 
 function structuredError(detail: string, extra?: Record<string, unknown>): ResolverResult {
@@ -231,7 +244,32 @@ export async function resolveApplyProposalAsPatch(pointer: ApplyProposalAsPatchP
   const dryRun = pointer.dry_run === true;
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
 
-  // 1. List proposals, sort newest first by mtime.
+  // (e) Singleton-pending guard: do NOT clobber an in-flight staged mitosis.
+  // Overwriting mitosis-pending.json while a prior staging awaits cutover
+  // orphans that staged tree (the abandoned -mitosis- dirs seen in the field).
+  // Serialize instead: refuse while a FRESH pending exists; a stale one (older
+  // than MITOSIS_PENDING_STALE_MS, default 30m) is treated as abandoned —
+  // prune-stale-mitosis reaps it — and we proceed.
+  if (!dryRun) {
+    try {
+      const curRaw = await readFile(pendingPath, "utf-8");
+      const cur = JSON.parse(curRaw) as { staged_at?: string; mitosis_version_id?: string };
+      const ageMs = cur.staged_at ? Date.now() - Date.parse(cur.staged_at) : Number.POSITIVE_INFINITY;
+      const staleMs = Number(process.env["MITOSIS_PENDING_STALE_MS"] ?? 1800000);
+      if (Number.isFinite(ageMs) && ageMs < staleMs) {
+        return structuredError("pending mitosis in flight — refusing to clobber", {
+          pending_path: pendingPath,
+          pending_mitosis_version_id: cur.mitosis_version_id ?? null,
+          pending_age_ms: Math.round(ageMs),
+          stale_after_ms: staleMs,
+        });
+      }
+    } catch {
+      /* no pending file (or unreadable/parse-fail) -> safe to proceed */
+    }
+  }
+
+  // 1. List proposals.
   let entries: Array<{ name: string; path: string; mtime: number }> = [];
   try {
     const names = await readdir(proposalsDir);
@@ -243,9 +281,29 @@ export async function resolveApplyProposalAsPatch(pointer: ApplyProposalAsPatchP
   } catch (err) {
     return structuredError(`cannot read proposals dir: ${(err as Error).message}`);
   }
-  entries.sort((a, b) => b.mtime - a.mtime);
+  // (d) Default FIFO (oldest-first) so no proposal starves behind newer churn;
+  // `prefer:"newest"` restores the prior LIFO behaviour.
+  const prefer = pointer.prefer ?? "oldest";
+  entries.sort((a, b) => (prefer === "newest" ? b.mtime - a.mtime : a.mtime - b.mtime));
 
-  // 2. Find newest unstaged proposal — skip if any /vessels/<v>-mitosis-* dir exists for its scenario_id.
+  // (d) Targeted selection: when proposal_id is given, restrict to that exact
+  // proposal so the detector->gap->bridge chain can drive a specific authored
+  // fix to completion regardless of how much newer churn exists.
+  if (pointer.proposal_id) {
+    const want = pointer.proposal_id.endsWith("-report.json")
+      ? pointer.proposal_id
+      : `${pointer.proposal_id}-report.json`;
+    entries = entries.filter(
+      (e) => e.name === want || e.name.replace(/-report\.json$/, "") === pointer.proposal_id,
+    );
+    if (entries.length === 0) {
+      return structuredError(`targeted proposal not found: ${pointer.proposal_id}`, {
+        proposal_id: pointer.proposal_id,
+      });
+    }
+  }
+
+  // 2. Find next unstaged proposal — skip if any /vessels/<v>-mitosis-* dir exists for its scenario_id.
   let mitosisDirs: string[] = [];
   try { mitosisDirs = (await readdir(vesselsRoot)).filter((d) => /-mitosis-/.test(d)); } catch { /* tolerant */ }
 

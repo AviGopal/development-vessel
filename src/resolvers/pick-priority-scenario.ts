@@ -1,0 +1,223 @@
+import type { ResolverResult } from "./types.js";
+import { readFile, readdir } from "node:fs/promises";
+import { join } from "node:path";
+import { PRIORITY_CATEGORIES, sanitizeId } from "./gap-to-scenario-bridge.js";
+
+/**
+ * pick_priority_scenario (2026-06-15) — VALUE-DIRECTED scenario selection.
+ *
+ * Replaces the drafter-trigger-tick's random `fs_list → shuffle → [0]` pick.
+ * That random pick was the live rate-limiter on self-development: a real,
+ * high-priority, self-detected goal-vessel deficiency sat undrafted for hours
+ * because the picker shuffled ~hundreds of scenarios and never landed on it.
+ *
+ * This resolver chooses the highest-VALUE undrafted scenario instead of a
+ * coin-flip. Value = (category priority rank, then severity, then recency):
+ *   - category priority: the bridge's PRIORITY_CATEGORIES order (architectural,
+ *     missing_capability, goal_host_*, … ahead of incidental). Single source of
+ *     truth, imported from the bridge.
+ *   - severity: harm magnitude from the gap's metadata (failing volume,
+ *     deviation, cyclic fraction) — a 0%-success-over-40-runs gap outranks a
+ *     marginal one of the same category.
+ *   - recency: fresher gaps drain first on ties.
+ * Already-drafted scenarios (a proposed gap-closing template already covers the
+ * class) are excluded so the picker rotates forward instead of re-drafting.
+ *
+ * Read-only over disk + one activity-api fetch; deterministic.
+ */
+
+const ACTIVITY_API = process.env["ACTIVITY_API_ENDPOINT"] ?? "http://127.0.0.1:8080";
+const API_KEY = process.env["METABOB_API_KEY"] ?? process.env["DEV_VESSEL_API_KEY"];
+
+export interface PickPriorityScenarioPointer {
+  type: "pick_priority_scenario";
+  scenarios_dir?: string;
+  gaps_path?: string;
+  exclude_drafted?: boolean; // default true
+  apiKey?: string;
+  /** When true, ALSO dispatch the drafter on the picked scenario (one-shot —
+   *  avoids fragile cross-task interpolation in the trigger-tick activity). */
+  dispatch_drafter?: boolean;
+  light_dispatch_url?: string;
+  drafter_template_id?: string;
+}
+
+const DEFAULT_LIGHT_DISPATCH = "http://127.0.0.1:8280/dispatch";
+const DEFAULT_DRAFTER = "development-vessel:draft-gap-closing-activity";
+
+async function dispatchDrafter(
+  pickedId: string,
+  scenariosDir: string,
+  url: string,
+  drafterId: string,
+  apiKey: string,
+): Promise<unknown> {
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `ApiKey ${apiKey}` },
+      body: JSON.stringify({
+        template_id: drafterId,
+        variables: {
+          report_path: `${scenariosDir}/${pickedId}.json`,
+          scenario_id: pickedId,
+          proposals_dir: "/workspace/proposals",
+          scenarios_dir: scenariosDir,
+        },
+      }),
+      signal: AbortSignal.timeout(120_000),
+    });
+    const j = (await res.json()) as { status?: string; dispatchId?: string; executionId?: string; error?: string };
+    return { status: j.status ?? (res.ok ? "ok" : `http_${res.status}`), dispatchId: j.dispatchId ?? j.executionId ?? null, error: j.error ?? null };
+  } catch (err) {
+    return { status: "error", error: err instanceof Error ? err.message.slice(0, 160) : String(err) };
+  }
+}
+
+interface Gap {
+  id?: string;
+  status?: string;
+  source?: string;
+  category?: string;
+  created_at?: string;
+  detected_at?: string;
+  classification_metadata?: Record<string, unknown> | null;
+}
+
+const num = (v: unknown): number => (typeof v === "number" && Number.isFinite(v) ? v : Number(v) || 0);
+
+function categoryRank(category: string): number {
+  const i = PRIORITY_CATEGORIES.indexOf(category);
+  return i === -1 ? PRIORITY_CATEGORIES.length : i;
+}
+
+// Harm magnitude from whatever the detector recorded. Higher = more valuable to
+// fix. Generic over detector families (failing direction, deviation, cyclic).
+function severity(gap: Gap): number {
+  const m = gap.classification_metadata ?? {};
+  const samples = num(m["samples"] ?? m["total_dispatches"] ?? m["total_executions"] ?? 0);
+  const success = num(m["success_rate"] ?? 1);
+  const deviation = num(m["deviation_fraction"] ?? 0);
+  const cyclic = num(m["cyclic_fraction"] ?? 0);
+  const harm = Math.max(1 - success, deviation, cyclic, 0.1);
+  // Volume-weighted harm; +1 so a high-harm low-sample gap still scores.
+  return (samples + 1) * harm;
+}
+
+const normalize = (s: string): string => s.toLowerCase().replace(/[^a-z0-9]/g, "");
+
+export async function resolvePickPriorityScenario(
+  p: PickPriorityScenarioPointer,
+): Promise<ResolverResult> {
+  const scenariosDir = p.scenarios_dir ?? "/workspace/validation/failure-modes/scenarios";
+  const gapsPath = p.gaps_path ?? "/workspace/gaps/gaps.json";
+  const excludeDrafted = p.exclude_drafted !== false;
+  const apiKey = p.apiKey ?? API_KEY;
+
+  // 1. Materialized scenario files on disk (the drafter can only draft these).
+  let files: string[] = [];
+  try {
+    files = (await readdir(scenariosDir)).filter((f) => f.endsWith(".json"));
+  } catch {
+    return { shape: "priorityScenarioPick", body: { scenario_id: "", scenario_filename: "", reason: "scenarios_dir_unreadable" } };
+  }
+  const fileSet = new Set(files.map((f) => f.slice(0, -5)));
+
+  // 2. Open gaps (the value/priority source).
+  let gaps: Gap[] = [];
+  try {
+    const parsed = JSON.parse(await readFile(gapsPath, "utf-8"));
+    if (Array.isArray(parsed)) gaps = parsed as Gap[];
+  } catch { /* tolerant — fall back to flat file ranking below */ }
+
+  // 3. Already-drafted classes (a proposed gap-closing template covers them).
+  let draftedClasses: string[] = [];
+  if (excludeDrafted && apiKey) {
+    try {
+      const res = await fetch(`${ACTIVITY_API.replace(/\/+$/, "")}/v2/activities/templates/proposed-for-exercise?limit=100`, {
+        headers: { Authorization: `ApiKey ${apiKey}` }, signal: AbortSignal.timeout(8_000),
+      });
+      if (res.ok) {
+        const body = (await res.json()) as { templates?: Array<{ gap_class?: string }> };
+        draftedClasses = (body.templates ?? []).map((t) => normalize(t.gap_class ?? "")).filter(Boolean);
+      }
+    } catch { /* tolerant — dedup best-effort */ }
+  }
+  const isDrafted = (scenarioId: string): boolean => {
+    const key = normalize(scenarioId);
+    return key.length > 0 && draftedClasses.some((c) => c.includes(key));
+  };
+
+  // 4. Score every gap that has a materialized, open, undrafted scenario.
+  type Cand = { scenario_id: string; category: string; rank: number; severity: number; recency: string };
+  const candidates: Cand[] = [];
+  const ALLOWED = new Set(["operator_seed", "substrate_detected"]);
+  for (const g of gaps) {
+    if (typeof g.id !== "string") continue;
+    if (g.status && g.status !== "open") continue;
+    if (g.source && !ALLOWED.has(g.source)) continue;
+    const scenarioId = sanitizeId(g.id);
+    if (!fileSet.has(scenarioId)) continue; // no materialized scenario
+    if (excludeDrafted && isDrafted(scenarioId)) continue;
+    candidates.push({
+      scenario_id: scenarioId,
+      category: g.category ?? "auto",
+      rank: categoryRank(g.category ?? "auto"),
+      severity: severity(g),
+      recency: g.detected_at ?? g.created_at ?? "",
+    });
+  }
+
+  // Fallback: if gaps.json gave nothing (e.g. scenario on disk with no live gap
+  // row), rank the raw files by recency-name so we still pick deterministically
+  // rather than failing — but value-ranked candidates always win.
+  if (candidates.length === 0) {
+    const undrafted = [...fileSet].filter((id) => !(excludeDrafted && isDrafted(id)));
+    undrafted.sort();
+    const pick = undrafted[0] ?? "";
+    return {
+      shape: "priorityScenarioPick",
+      body: {
+        scenario_id: pick,
+        scenario_filename: pick ? `${pick}.json` : "",
+        reason: pick ? "no_gap_metadata_fallback_alpha" : "no_undrafted_scenarios",
+        considered: fileSet.size,
+        value_ranked: 0,
+      },
+    };
+  }
+
+  // Rank: category priority asc, severity desc, recency desc.
+  candidates.sort((a, b) => {
+    if (a.rank !== b.rank) return a.rank - b.rank;
+    if (b.severity !== a.severity) return b.severity - a.severity;
+    return b.recency.localeCompare(a.recency);
+  });
+  const top = candidates[0]!;
+
+  let dispatch_result: unknown = null;
+  if (p.dispatch_drafter && apiKey) {
+    dispatch_result = await dispatchDrafter(
+      top.scenario_id, scenariosDir,
+      p.light_dispatch_url ?? DEFAULT_LIGHT_DISPATCH,
+      p.drafter_template_id ?? DEFAULT_DRAFTER, apiKey,
+    );
+  }
+
+  return {
+    shape: "priorityScenarioPick",
+    body: {
+      scenario_id: top.scenario_id,
+      scenario_filename: `${top.scenario_id}.json`,
+      category: top.category,
+      priority_rank: top.rank,
+      severity: Math.round(top.severity * 100) / 100,
+      reason: "value_ranked",
+      considered: fileSet.size,
+      value_ranked: candidates.length,
+      runner_up: candidates[1]?.scenario_id ?? null,
+      dispatched: p.dispatch_drafter === true,
+      dispatch_result,
+    },
+  };
+}

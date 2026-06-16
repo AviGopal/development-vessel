@@ -288,6 +288,10 @@ export const config = {
       "vessel_mitosis_start",
       "vessel_mitosis_evaluate",
       "vessel_mitosis_cutover",
+      // (b) value-directed scenario selection for the drafter trigger —
+      // replaces the random fs_list shuffle pick so high-priority gaps
+      // drain first instead of starving behind a coin-flip.
+      "pick_priority_scenario",
       // Git-aware cutover outcome (iter 2026-06-04). Emitted by
       // vessel_mitosis_cutover when staged_files is supplied and the
       // commit-and-push path completes. Carries new_git_sha + push_status +

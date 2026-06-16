@@ -62,7 +62,7 @@ interface GapRow {
 
 // Architecture-class gap categories drained before trace_quality / incidental.
 // Order within the list is also a tiebreaker (earlier = higher priority).
-const PRIORITY_CATEGORIES: string[] = [
+export const PRIORITY_CATEGORIES: string[] = [
   "architectural_pattern",
   "resolver_distribution",
   "responsibility_misallocation",
@@ -83,7 +83,7 @@ function rankOf(g: GapRow): number {
   return idx === -1 ? PRIORITY_CATEGORIES.length : idx;
 }
 
-function sanitizeId(id: string): string {
+export function sanitizeId(id: string): string {
   return id.replace(/:/g, "-").replace(/[^a-zA-Z0-9._-]/g, "_");
 }
 

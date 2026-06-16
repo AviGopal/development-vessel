@@ -1052,26 +1052,65 @@ async function runGitAwareCutover(args: GitCutoverArgs): Promise<ResolverResult>
     detail: newSha.slice(0, 12),
   });
 
-  // 8. git push origin dev (best-effort; commit stays local on failure).
+  // 8. git push origin dev — ROBUST TO UPSTREAM DRIFT (2026-06-16).
+  // origin/dev is a shared branch: the operator, concurrent sessions, AND other
+  // substrate cutovers all push to it. A bare `git push` fails non-fast-forward
+  // the moment anyone else has pushed since this clone last synced, and the old
+  // code just degraded to local_only — so self-alteration silently stopped
+  // landing whenever the branch moved (observed: a 4-commit fork). Instead, on a
+  // non-fast-forward, fetch + rebase our single staged-files commit onto the new
+  // origin/dev and retry. Our commit only touches one vessel's staged_files, so
+  // a rebase over unrelated upstream edits applies cleanly; a genuine same-file
+  // conflict aborts the rebase and degrades to local_only (the commit stays in
+  // the clone for the next cutover to re-derive against the moved base).
   let pushStatus: "pushed" | "local_only" | "skipped" = "skipped";
   let pushDetail = "";
+  let pushRebases = 0;
   if (!pointer.skip_push) {
-    const push = await runGit(
-      gitCmd,
-      ["push", "origin", "dev"],
-      hostRepoRoot,
-    );
-    pushDetail = (push.stderr + push.stdout).slice(0, 400);
-    if (push.exit_code === 0) {
-      pushStatus = "pushed";
-      operations.push({ op: push.op, status: "ok", detail: pushDetail });
-    } else {
-      pushStatus = "local_only";
+    const MAX_PUSH_ATTEMPTS = 3;
+    for (let attempt = 1; attempt <= MAX_PUSH_ATTEMPTS; attempt++) {
+      const push = await runGit(gitCmd, ["push", "origin", "dev"], hostRepoRoot);
+      pushDetail = (push.stderr + push.stdout).slice(0, 400);
+      if (push.exit_code === 0) {
+        pushStatus = "pushed";
+        operations.push({
+          op: push.op,
+          status: "ok",
+          detail: `${pushDetail}${pushRebases > 0 ? ` (after ${pushRebases} rebase onto moved origin/dev)` : ""}`,
+        });
+        break;
+      }
+      const nonFastForward = /non-fast-forward|fetch first|\[rejected\]|tip of your current branch is behind/i.test(pushDetail);
+      if (!nonFastForward || attempt === MAX_PUSH_ATTEMPTS) {
+        pushStatus = "local_only";
+        operations.push({
+          op: push.op,
+          status: "warn",
+          detail: `push failed (commit local): ${pushDetail}`,
+        });
+        break;
+      }
+      // Upstream moved — integrate and retry.
+      const fetched = await runGit(gitCmd, ["fetch", "origin", "dev"], hostRepoRoot);
       operations.push({
-        op: push.op,
-        status: "warn",
-        detail: `push failed (commit local): ${pushDetail}`,
+        op: fetched.op,
+        status: fetched.exit_code === 0 ? "ok" : "warn",
+        detail: fetched.stderr.slice(0, 160),
       });
+      const rebased = await runGit(gitCmd, ["rebase", "origin/dev"], hostRepoRoot);
+      if (rebased.exit_code !== 0) {
+        await runGit(gitCmd, ["rebase", "--abort"], hostRepoRoot);
+        pushStatus = "local_only";
+        operations.push({
+          op: rebased.op,
+          status: "warn",
+          detail: `rebase onto moved origin/dev conflicted; aborted (commit local, re-derive next cutover): ${(rebased.stderr + rebased.stdout).slice(0, 200)}`,
+        });
+        break;
+      }
+      pushRebases++;
+      operations.push({ op: `git rebase origin/dev (attempt ${attempt})`, status: "ok" });
+      // loop and re-push the rebased commit
     }
   }
 

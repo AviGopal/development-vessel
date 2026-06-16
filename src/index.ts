@@ -66,3 +66,5 @@ setInterval(() => {
 }, GC_INTERVAL_MS).unref();
 
 export default server;
+
+// [substrate direct-push smoke 20260616T045429] self-development-through-repos validated

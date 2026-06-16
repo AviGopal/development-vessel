@@ -541,7 +541,8 @@ export async function resolveVesselMitosisEvaluate(
   }
 
   const apiKey = process.env["METABOB_API_KEY"];
-  const headers: Record<string, string> = apiKey ? { Authorization: `ApiKey ${apiKey}` } : {};
+  const bearerToken = process.env["ACTIVITY_API_TOKEN"] ?? process.env["VESSEL_JWT"];
+  const headers: Record<string, string> = apiKey ? { Authorization: `ApiKey ${apiKey}` } : bearerToken ? { Authorization: `Bearer ${bearerToken}` } : {};
 
   let traces: TraceLike[] = [];
   try {

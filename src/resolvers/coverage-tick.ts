@@ -213,11 +213,17 @@ export async function resolveCoverageTick(
   // templates only). This is the total topology coverage observed over the
   // full lookback period.
   const total_learned_unique = cumulativeSeen.size;
-  const total_unlearned_unique = [...advertisedShapes].filter(s => !cumulativeSeen.has(s)).length;
   const total_advertised = advertisedShapes.size;
+  // Coverage numerator must be the ADVERTISED shapes actually learned. The rest
+  // of cumulativeSeen are "unknown" shapes outside the advertised set; counting
+  // them pushed coverage_fraction > 1.0 (observed 1.65) — a meaningless
+  // self-image that feeds the lift gate. Keep them as a separate breadth metric.
+  const advertised_learned_unique = [...advertisedShapes].filter(s => cumulativeSeen.has(s)).length;
+  const total_unlearned_unique = total_advertised - advertised_learned_unique;
+  const unknown_shapes_learned = total_learned_unique - advertised_learned_unique;
   const coverage_fraction = total_advertised > 0
-    ? Math.round((total_learned_unique / total_advertised) * 1000) / 1000
-    : 0;
+    ? Math.round((advertised_learned_unique / total_advertised) * 1000) / 1000
+    : 0; // in [0,1]: fraction of ADVERTISED shapes learned
 
   // coverage_progress: the substrate must be DISCOVERING new shapes in recent
   // windows, not just executing meta-activity churn.
@@ -278,6 +284,8 @@ export async function resolveCoverageTick(
       // New substantive metrics — robust to trace-volume gaming:
       total_advertised_shapes: total_advertised,
       total_learned_unique,
+      advertised_learned_unique,
+      unknown_shapes_learned,
       total_unlearned_unique,
       coverage_fraction,
       recent_new_shapes_introduced: recent_new_shapes_total,

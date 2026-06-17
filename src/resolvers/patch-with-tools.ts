@@ -35,7 +35,7 @@ const DISCOVERY_ENDPOINT = process.env.DISCOVERY_ENDPOINT ?? "http://127.0.0.1:8
 // turns on search→edit→re-search-to-verify and hit the cap before declaring
 // done (observed: code_replace_lines applied on turns 4-5, capped at 8 mid-verify).
 // 16 gives headroom for inspect+edit+verify without unbounding cost.
-const MAX_ITERATIONS = 16;
+const MAX_ITERATIONS = 30; // 2026-06-17: 16 capped mid-search (no_op); 30 is the memory-confirmed converging budget
 const PER_CALL_TIMEOUT_MS = 60_000;
 
 export interface PatchWithToolsPointer {
@@ -291,6 +291,27 @@ export async function resolvePatchWithTools(pointer: PatchWithToolsPointer): Pro
         `The file has been reset to its original state. READ the exact lines first; do not repeat the above mistake.\n\n`
       : "";
 
+    // Anti-search-loop (2026-06-17): the dominant autonomous failure is burning the
+    // turn budget on consecutive code_search / code_find_function calls without ever
+    // emitting an edit (observed live: turns 6-10 all code_search -> cap -> no_op ->
+    // nothing staged -> no cutover). After 3 consecutive read-only turns, escalate to
+    // a hard "edit now or fail" so the loop converges instead of grazing the file.
+    let searchStreak = 0;
+    for (let i = history.length - 1; i >= 0; i--) {
+      const tname = history[i]?.tool_result?.tool;
+      if (tname === "code_search" || tname === "code_find_function") searchStreak++;
+      else break;
+    }
+    const searchNudge = searchStreak >= 3
+      ? `## ⚠ STOP SEARCHING — YOU HAVE READ ENOUGH (${searchStreak} consecutive searches)\n` +
+        `You already have the file content from those searches. Do NOT call code_search or ` +
+        `code_find_function again. THIS TURN emit an EDIT: fs_edit { path, ` +
+        `old_string=<verbatim lines you just read>, new_string=<minimal change> } (or ` +
+        `code_replace_lines with exact line numbers). If you cannot construct the edit from ` +
+        `what you have already read, emit { "action": "fail", "reason": "<why>" }. Another ` +
+        `search wastes the budget and the patch is REJECTED at the cap.\n\n`
+      : "";
+
     const prompt =
       `You are patching a source file via fine-grained code tools. The proposal describes what to change; you use the tools to inspect the file and apply the change.\n\n` +
       priorBlock +
@@ -299,6 +320,7 @@ export async function resolvePatchWithTools(pointer: PatchWithToolsPointer): Pro
       `## Proposal (intent — code samples may be illustrative, NOT the actual file contents)\n${pointer.proposal_text}\n\n` +
       `## Tool catalog\n${TOOL_CATALOG_HELP}\n\n` +
       correction +
+      searchNudge +
       `## Tool call history\n${historyBlock}\n\n` +
       `## Turn ${turn} of ${maxIters}\n` +
       `Emit your next action as a JSON object only.`;

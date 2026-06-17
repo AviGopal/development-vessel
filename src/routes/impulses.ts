@@ -86,6 +86,7 @@ import { resolveResolverDistributionAudit } from "../resolvers/resolver-distribu
 import { resolveGapToScenarioBridge } from "../resolvers/gap-to-scenario-bridge.js";
 import { resolvePickPriorityScenario } from "../resolvers/pick-priority-scenario.js";
 import { resolveSelfAlterationFunnelScan } from "../resolvers/self-alteration-funnel-scan.js";
+import { resolveGapLifecycleScan } from "../resolvers/gap-lifecycle-scan.js";
 import { resolveDispatchLatestAutoDraft } from "../resolvers/dispatch-latest-auto-draft.js";
 import { resolveApplyProposalAsPatch } from "../resolvers/apply-proposal-as-patch.js";
 import { resolvePatchWithTools } from "../resolvers/patch-with-tools.js";
@@ -324,6 +325,10 @@ export async function resolveDispatch(pointer: AnyPointer): Promise<ResolverResu
     case "self_alteration_funnel_scan":
       return resolveSelfAlterationFunnelScan(
         p as Parameters<typeof resolveSelfAlterationFunnelScan>[0],
+      );
+    case "gap_lifecycle_scan":
+      return resolveGapLifecycleScan(
+        p as Parameters<typeof resolveGapLifecycleScan>[0],
       );
     case "dispatch_latest_auto_draft":
       return resolveDispatchLatestAutoDraft(

@@ -295,6 +295,8 @@ export const config = {
       // (funnel) emergent self-alteration pipeline health: detects 0-cutover
       // throughput despite N proposals and localizes the stuck stage.
       "self_alteration_funnel_scan",
+      // (lever-4) gap-lifecycle: stale/churned gap detection + auto-close.
+      "gap_lifecycle_scan",
       // Git-aware cutover outcome (iter 2026-06-04). Emitted by
       // vessel_mitosis_cutover when staged_files is supplied and the
       // commit-and-push path completes. Carries new_git_sha + push_status +

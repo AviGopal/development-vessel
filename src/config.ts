@@ -299,6 +299,8 @@ export const config = {
       "gap_lifecycle_scan",
       // (lever-3) forward/backward model opportunities — grows the predict->validate surface.
       "model_opportunity_scan",
+      // (nth-order) detector-over-detectors: detector-set coverage health.
+      "detector_meta_scan",
       // Git-aware cutover outcome (iter 2026-06-04). Emitted by
       // vessel_mitosis_cutover when staged_files is supplied and the
       // commit-and-push path completes. Carries new_git_sha + push_status +

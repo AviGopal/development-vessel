@@ -140,11 +140,17 @@ export async function resolveSubstrateHealthTick(
   // the endpoint-reported `total` is fetched or a page is empty; a short page
   // is NOT a stop signal.
   let templatesTotal = Infinity;
+  let fetchInterrupted = false;
   for (let guard = 0; templates.length < templatesTotal && guard < 100; guard++) {
+    // Self-measurement must survive its OWN load. The topology chain fires this
+    // resolver concurrently with the boredom loop; activity-api intermittently
+    // drops connections under that contention. Use generous retries so a transient
+    // blip on one page does NOT truncate the registry view — a truncated view
+    // silently corrupts confidence + stability and flaps the lift verdict.
     const r = await fetchWithRetry(`${METABOB_ENDPOINT}/v2/activities/templates?limit=${pageSize}&offset=${offset}`, {
       headers: auth,
-    });
-    if (!r || !r.ok) break;
+    }, { attempts: 6, baseDelayMs: 250 });
+    if (!r || !r.ok) { fetchInterrupted = true; break; }
     const page = await r.json() as { templates?: Template[]; total?: number };
     if (typeof page.total === "number") templatesTotal = page.total;
     const rows = page.templates ?? [];
@@ -152,6 +158,12 @@ export async function resolveSubstrateHealthTick(
     templates.push(...rows);
     offset += rows.length;
   }
+  // The corpus is COMPLETE only if the endpoint reported a total and we fetched
+  // all of it without an interrupted page. An incomplete corpus means confidence
+  // and stability were computed over a sliver — those dimensions are UNMEASURED,
+  // not failing. Emitting a confident pass/fail over a truncated registry is the
+  // self-misunderstanding defect this guard prevents.
+  const corpus_complete = !fetchInterrupted && templatesTotal !== Infinity && templates.length >= templatesTotal;
 
   // Fetch recent traces (last 30 days) to build execution counts per template.
   const traceLookbackSince = new Date(Date.now() - 30 * 24 * 3600 * 1000).toISOString();
@@ -304,25 +316,36 @@ export async function resolveSubstrateHealthTick(
   };
 
   // — Health verdict —
-  const confidence_passing =
-    total_pairs === 0 ? false : pairs_above_floor / total_pairs >= confidenceRatioThreshold;
-  const stability_passing = mutation_rate_per_hour <= stabilityRateCeiling;
+  // When the registry corpus could not be fully read, confidence + stability are
+  // UNMEASURED (null), never a confident pass/fail. A null dimension makes
+  // overall_passing null ("couldn't measure this tick"), which resets the lift
+  // streak honestly instead of falsely signalling a regression.
+  const confidence_passing = !corpus_complete
+    ? null
+    : (total_pairs === 0 ? false : pairs_above_floor / total_pairs >= confidenceRatioThreshold);
+  const stability_passing = !corpus_complete
+    ? null
+    : mutation_rate_per_hour <= stabilityRateCeiling;
   const optimality_passing =
     optimality.mean_optimality_ratio !== null
       ? optimality.mean_optimality_ratio <= optimalityRatioCeiling
       : null;
   const vessels_passing = vesselLiveness.down.length === 0;
-  const overall_passing =
-    confidence_passing &&
-    stability_passing &&
-    vessels_passing &&
-    (optimality_passing === null ? true : optimality_passing);
+  const measurable = confidence_passing !== null && stability_passing !== null;
+  const overall_passing = !measurable
+    ? null
+    : (confidence_passing &&
+       stability_passing &&
+       vessels_passing &&
+       (optimality_passing === null ? true : optimality_passing));
   // Honesty: optimality is structurally never measured (the harness writes no
   // ratio), so it silently dropped out of overall_passing as null->true.
   // Surface that it is UNMEASURED rather than letting it read as a passing
   // dimension — the lift gate keys on overall_passing.
   const optimality_measured = optimality.mean_optimality_ratio !== null;
-  const unmeasured_dimensions: string[] = optimality_measured ? [] : ["optimality"];
+  const unmeasured_dimensions: string[] = [];
+  if (!optimality_measured) unmeasured_dimensions.push("optimality");
+  if (!corpus_complete) unmeasured_dimensions.push("posterior_confidence", "graph_stability");
 
   const report = {
     generated_at: new Date().toISOString(),
@@ -335,6 +358,11 @@ export async function resolveSubstrateHealthTick(
       down: vesselLiveness.down,
       all_active: vessels_passing,
     },
+    registry_fetch: {
+      corpus_complete,
+      templates_fetched: template_count_at_window_end,
+      templates_total: templatesTotal === Infinity ? null : templatesTotal,
+    },
     health_verdict: {
       confidence_passing,
       stability_passing,
@@ -342,6 +370,7 @@ export async function resolveSubstrateHealthTick(
       optimality_measured,
       vessels_passing,
       overall_passing,
+      corpus_complete,
       unmeasured_dimensions,
     },
   };
@@ -357,6 +386,8 @@ export async function resolveSubstrateHealthTick(
       ts: report.generated_at,
       overall_passing: report.health_verdict.overall_passing,
       template_count: report.graph_stability.template_count_at_window_end,
+      template_total: report.registry_fetch.templates_total,
+      corpus_complete: report.registry_fetch.corpus_complete,
       vessels_down: report.vessel_liveness.down,
     });
     await mkdir(WORKSPACE_ROOT, { recursive: true });

@@ -292,6 +292,9 @@ export const config = {
       // replaces the random fs_list shuffle pick so high-priority gaps
       // drain first instead of starving behind a coin-flip.
       "pick_priority_scenario",
+      // (funnel) emergent self-alteration pipeline health: detects 0-cutover
+      // throughput despite N proposals and localizes the stuck stage.
+      "self_alteration_funnel_scan",
       // Git-aware cutover outcome (iter 2026-06-04). Emitted by
       // vessel_mitosis_cutover when staged_files is supplied and the
       // commit-and-push path completes. Carries new_git_sha + push_status +

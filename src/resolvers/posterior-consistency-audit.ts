@@ -90,14 +90,33 @@ export async function resolvePosteriorConsistencyAudit(pointer: PosteriorConsist
   const emit = pointer.emit_gap !== false;
   const apiKey = process.env["METABOB_API_KEY"] ?? "";
 
-  const [tplJson, trJson] = await Promise.all([
-    fetchJson<{ templates?: TemplateMetric[]; data?: TemplateMetric[]; total?: number }>(`${endpoint}/v2/activities/templates?limit=${pointer.template_limit ?? 2000}`, apiKey),
-    fetchJson<{ executions?: Array<{ activity_id?: string; status?: string }> }>(`${endpoint}/v2/activities/execution-traces?limit=${pointer.trace_limit ?? 500}`, apiKey),
-  ]);
-  const templates = tplJson?.templates ?? tplJson?.data ?? [];
-  // Report audit coverage so a partial/truncated read can't be mistaken for a
-  // comprehensive "no drift" verdict over the whole registry.
-  const templateTotal = typeof tplJson?.total === "number" ? tplJson.total : null;
+  // Paginate the FULL template registry. The endpoint caps page size at ~100,
+  // so a single large `limit` silently returns only the first page — this audit
+  // is the substrate's forward-model-vs-reality calibration check (stored
+  // Thompson posterior vs empirical trace counts), so it must examine EVERY
+  // template's posterior, not just the first 100. Loop on offset until `total`
+  // is reached or a page comes back empty.
+  const pageSize = 100;
+  const templates: TemplateMetric[] = [];
+  let templateTotal: number | null = null;
+  let offset = 0;
+  for (let guard = 0; guard < 200; guard++) {
+    const page = await fetchJson<{ templates?: TemplateMetric[]; data?: TemplateMetric[]; total?: number }>(
+      `${endpoint}/v2/activities/templates?limit=${pageSize}&offset=${offset}`,
+      apiKey,
+    );
+    if (!page) break;
+    if (typeof page.total === "number") templateTotal = page.total;
+    const rows = page.templates ?? page.data ?? [];
+    if (rows.length === 0) break;
+    templates.push(...rows);
+    offset += rows.length;
+    if (templateTotal !== null && templates.length >= templateTotal) break;
+  }
+  const trJson = await fetchJson<{ executions?: Array<{ activity_id?: string; status?: string }> }>(
+    `${endpoint}/v2/activities/execution-traces?limit=${pointer.trace_limit ?? 500}`,
+    apiKey,
+  );
   const traces = trJson?.executions ?? [];
 
   const empirical = new Map<string, { alpha: number; beta: number }>();

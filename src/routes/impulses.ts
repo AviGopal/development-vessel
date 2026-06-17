@@ -1,4 +1,5 @@
 import { Hono } from "hono";
+import { auditDetectorOutputSanity } from "../lib/detector-output-sanity.js";
 import { resolveGitStatus } from "../resolvers/git-status.js";
 import { resolveGitAdd } from "../resolvers/git-add.js";
 import { resolveGitCommit } from "../resolvers/git-commit.js";
@@ -135,6 +136,16 @@ type AnyPointer = { type: string } & Record<string, unknown>;
 
 /** Shared dispatch logic — used by both the HTTP route and the CLI. */
 export async function resolveDispatch(pointer: AnyPointer): Promise<ResolverResult> {
+  const result = await dispatchInner(pointer);
+  // Nth-order self-check: validate every detector output against generic value
+  // invariants the moment it is produced (fraction out of [0,1], passing flag
+  // over an unmeasured dimension, non-finite number), emitting a meta-gap on
+  // violation. Fire-and-forget; never blocks or throws into the dispatch path.
+  void auditDetectorOutputSanity(result).catch(() => {});
+  return result;
+}
+
+async function dispatchInner(pointer: AnyPointer): Promise<ResolverResult> {
   const p = pointer as unknown;
   switch (pointer.type) {
     case "lift_demo_noop":

@@ -358,7 +358,6 @@ export async function resolveApplyProposalAsPatch(pointer: ApplyProposalAsPatchP
   let chosen: { name: string; path: string; scenarioId: string; content: string; targetFile: string } | null = null;
   for (const e of entries) {
     const scenarioId = e.name.replace(/-report\.json$/, "");
-    if (appliedSet.has(e.name)) { skipped.push({ proposal: e.name, reason: "already_applied_sentinel" }); continue; }
     if (mitosisDirs.some((d) => d.includes(scenarioId.slice(0, 32)))) { skipped.push({ proposal: e.name, reason: "already_staged" }); continue; }
     // (funnel) skip the stale backlog so the ancient dead-proposal pile
     // (freshness/precondition/analytic reports) doesn't starve fresh actionable
@@ -366,6 +365,23 @@ export async function resolveApplyProposalAsPatch(pointer: ApplyProposalAsPatchP
     if (!pointer.proposal_id && e.mtime < staleBefore) { skipped.push({ proposal: e.name, reason: "stale_beyond_window" }); continue; }
     let content: string;
     try { content = await readFile(e.path, "utf-8"); } catch { skipped.push({ proposal: e.name, reason: "read_failed" }); continue; }
+    // Content-aware applied-sentinel (2026-06-17). The sentinel was keyed by
+    // FILENAME and written on stage-ATTEMPT (not on land); the drafter reuses a
+    // scenario's filename on every re-draft, so a recurring gap whose prior
+    // attempt never landed was blocked FOREVER — the dominant cause of flat
+    // landing throughput. Skip only if this EXACT content was already attempted
+    // (content_sha match); a re-draft with NEW content is a fresh attempt and
+    // falls through. Legacy sentinels (no content_sha) are treated as applied
+    // to avoid re-flooding the historical backlog — a recurring gap is unblocked
+    // by clearing its legacy sentinel once, after which content_sha governs.
+    const contentSha = createHash("sha256").update(content).digest("hex").slice(0, 16);
+    if (appliedSet.has(e.name)) {
+      let priorSha: string | null = null;
+      try { priorSha = (JSON.parse(await readFile(`${sentinelDir}/${e.name}`, "utf-8")) as { content_sha?: string }).content_sha ?? null; } catch { priorSha = null; }
+      if (priorSha === null || priorSha === contentSha) { skipped.push({ proposal: e.name, reason: "already_applied_sentinel" }); continue; }
+      // else: previously-attempted scenario, but the drafter produced NEW content
+      // (a fresh fix attempt) — do NOT skip.
+    }
     // Tolerant parse — brace-aware walker handles LLM tails (multi-object,
     // post-JSON markdown narrative). Legacy stripFences path remains as a
     // fallback for proposals whose body is a single clean JSON object that
@@ -499,7 +515,7 @@ export async function resolveApplyProposalAsPatch(pointer: ApplyProposalAsPatchP
         // We can't unlink/rename across the resolver boundary safely, so write a sentinel into
         // .applied/ — apply-loop reads .applied/ and skips matching entries (see appliedSet).
         await writeFile(`${proposalsDir}/.applied/${e.name}`,
-          JSON.stringify({ rejected_at: new Date().toISOString(), reason: "file_path_hallucination", missing: missingFiles }, null, 2));
+          JSON.stringify({ rejected_at: new Date().toISOString(), reason: "file_path_hallucination", missing: missingFiles, content_sha: contentSha }, null, 2));
       } catch { /* tolerant */ }
       skipped.push({ proposal: e.name, reason: `file_path_hallucination: ${missingFiles.join(", ").slice(0, 120)}` });
       continue;
@@ -592,7 +608,7 @@ export async function resolveApplyProposalAsPatch(pointer: ApplyProposalAsPatchP
     catch (err) { return structuredError(`pending write failed: ${(err as Error).message}`); }
     try {
       await writeFile(`${proposalsDir}/.applied/${chosen.name}`,
-        JSON.stringify({ staged_at: pendingBody.staged_at, mitosis_version_id: versionId, multifile: true, file_count: stagedFiles.length }, null, 2));
+        JSON.stringify({ staged_at: pendingBody.staged_at, mitosis_version_id: versionId, multifile: true, file_count: stagedFiles.length, content_sha: createHash("sha256").update(chosen.content).digest("hex").slice(0, 16) }, null, 2));
     } catch { /* tolerant */ }
     triggerMitosisTick(); // self-propel: evaluate→cutover without boredom latency
     return {
@@ -653,7 +669,7 @@ export async function resolveApplyProposalAsPatch(pointer: ApplyProposalAsPatchP
     console.error(`[apply_proposal_as_patch] patch_with_tools failed for ${chosen.name}: ${(result.body as Record<string, unknown>).detail}`);
   }
     await writeFile(`${proposalsDir}/.applied/${chosen.name}`,
-      JSON.stringify({ delegated_to: "patch_with_tools", outcome_shape: result.shape, applied_at: new Date().toISOString() }, null, 2));
+      JSON.stringify({ delegated_to: "patch_with_tools", outcome_shape: result.shape, applied_at: new Date().toISOString(), content_sha: createHash("sha256").update(chosen.content).digest("hex").slice(0, 16) }, null, 2));
   } catch { /* tolerant */ }
   return result;
 }

@@ -297,6 +297,8 @@ export const config = {
       "self_alteration_funnel_scan",
       // (lever-4) gap-lifecycle: stale/churned gap detection + auto-close.
       "gap_lifecycle_scan",
+      // (lever-3) forward/backward model opportunities — grows the predict->validate surface.
+      "model_opportunity_scan",
       // Git-aware cutover outcome (iter 2026-06-04). Emitted by
       // vessel_mitosis_cutover when staged_files is supplied and the
       // commit-and-push path completes. Carries new_git_sha + push_status +

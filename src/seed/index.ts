@@ -12,6 +12,7 @@ import { DETECTOR_COVERAGE_AUDIT_TICK_TEMPLATE } from "./detector-coverage-audit
 import { COST_EXPECTATION_AUDIT_TICK_TEMPLATE } from "./cost-expectation-audit-tick.js";
 import { SELF_ALTERATION_FUNNEL_TICK_TEMPLATE } from "./self-alteration-funnel-tick.js";
 import { GAP_LIFECYCLE_TICK_TEMPLATE } from "./gap-lifecycle-tick.js";
+import { MODEL_OPPORTUNITY_TICK_TEMPLATE } from "./model-opportunity-tick.js";
 import { DRAFT_DETECTOR_ACTIVITY_TEMPLATE } from "./draft-detector-activity.js";
 import { PROBE_REACHABLE_UNLEARNED_TEMPLATE } from "./probe-reachable-unlearned.js";
 import { PROBE_UNTRAVERSED_EDGE_TEMPLATE } from "./probe-untraversed-edge.js";
@@ -229,6 +230,7 @@ export { DETECTOR_COVERAGE_AUDIT_TICK_TEMPLATE } from "./detector-coverage-audit
 export { COST_EXPECTATION_AUDIT_TICK_TEMPLATE } from "./cost-expectation-audit-tick.js";
 export { SELF_ALTERATION_FUNNEL_TICK_TEMPLATE } from "./self-alteration-funnel-tick.js";
 export { GAP_LIFECYCLE_TICK_TEMPLATE } from "./gap-lifecycle-tick.js";
+export { MODEL_OPPORTUNITY_TICK_TEMPLATE } from "./model-opportunity-tick.js";
 export { DRAFT_DETECTOR_ACTIVITY_TEMPLATE } from "./draft-detector-activity.js";
 
 export const SEED_TEMPLATES: ActivityTemplate[] = [
@@ -239,6 +241,7 @@ export const SEED_TEMPLATES: ActivityTemplate[] = [
   COST_EXPECTATION_AUDIT_TICK_TEMPLATE,
   SELF_ALTERATION_FUNNEL_TICK_TEMPLATE,
   GAP_LIFECYCLE_TICK_TEMPLATE,
+  MODEL_OPPORTUNITY_TICK_TEMPLATE,
   DRAFT_DETECTOR_ACTIVITY_TEMPLATE,
   SHIP_CHANGE_TEMPLATE,
   BRANCH_HEALTH_TEMPLATE,

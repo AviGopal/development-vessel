@@ -54,11 +54,14 @@ export interface ApplyProposalAsPatchPointer {
    */
   proposal_id?: string;
   /**
-   * (d) Untargeted ordering when `proposal_id` is absent. Default `oldest`
-   * (FIFO) so no proposal starves behind a stream of newer ones — the failure
-   * mode of the prior newest-first (LIFO) default. `newest` restores LIFO.
+   * Untargeted ordering when `proposal_id` is absent. Default `newest` — fresh
+   * drafter output is the actionable stuff; `oldest` is FIFO. Anti-starvation is
+   * handled by `proposal_id` targeting + the staleness window, not by ordering.
    */
   prefer?: "oldest" | "newest";
+  /** Untargeted apply skips proposals older than this. Default 72h. A
+   *  proposal_id-targeted apply bypasses it. */
+  max_age_hours?: number;
 }
 
 function structuredError(detail: string, extra?: Record<string, unknown>): ResolverResult {
@@ -281,10 +284,15 @@ export async function resolveApplyProposalAsPatch(pointer: ApplyProposalAsPatchP
   } catch (err) {
     return structuredError(`cannot read proposals dir: ${(err as Error).message}`);
   }
-  // (d) Default FIFO (oldest-first) so no proposal starves behind newer churn;
-  // `prefer:"newest"` restores the prior LIFO behaviour.
-  const prefer = pointer.prefer ?? "oldest";
-  entries.sort((a, b) => (prefer === "newest" ? b.mtime - a.mtime : a.mtime - b.mtime));
+  // (funnel) Default NEWEST-first: the funnel detector showed apply was stuck
+  // because FIFO chewed a ~968-deep mostly-stale backlog before reaching fresh
+  // drafter output. Fresh proposals are the actionable ones — try them first.
+  // Anti-starvation is handled by `proposal_id` targeting, not FIFO ordering.
+  const prefer = pointer.prefer ?? "newest";
+  entries.sort((a, b) => (prefer === "oldest" ? a.mtime - b.mtime : b.mtime - a.mtime));
+  // (funnel) staleness window for untargeted selection.
+  const maxAgeMs = (pointer.max_age_hours ?? 72) * 3_600_000;
+  const staleBefore = Date.now() - maxAgeMs;
 
   // (d) Targeted selection: when proposal_id is given, restrict to that exact
   // proposal so the detector->gap->bridge chain can drive a specific authored
@@ -330,6 +338,10 @@ export async function resolveApplyProposalAsPatch(pointer: ApplyProposalAsPatchP
     const scenarioId = e.name.replace(/-report\.json$/, "");
     if (appliedSet.has(e.name)) { skipped.push({ proposal: e.name, reason: "already_applied_sentinel" }); continue; }
     if (mitosisDirs.some((d) => d.includes(scenarioId.slice(0, 32)))) { skipped.push({ proposal: e.name, reason: "already_staged" }); continue; }
+    // (funnel) skip the stale backlog so the ancient dead-proposal pile
+    // (freshness/precondition/analytic reports) doesn't starve fresh actionable
+    // drafter output. A proposal_id-targeted apply bypasses this.
+    if (!pointer.proposal_id && e.mtime < staleBefore) { skipped.push({ proposal: e.name, reason: "stale_beyond_window" }); continue; }
     let content: string;
     try { content = await readFile(e.path, "utf-8"); } catch { skipped.push({ proposal: e.name, reason: "read_failed" }); continue; }
     // Tolerant parse — brace-aware walker handles LLM tails (multi-object,

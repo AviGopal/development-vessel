@@ -68,6 +68,28 @@ function structuredError(detail: string, extra?: Record<string, unknown>): Resol
   return { shape: "structuredError", body: { resolver: "apply_proposal_as_patch", detail, ...(extra ?? {}) } };
 }
 
+/**
+ * Self-propel the chain: a freshly staged mitosis-pending must not wait for the
+ * boredom pool to re-select mitosis-tick — its UCB is low (it no_ops whenever no
+ * pending exists), so a staged change can sit un-evaluated for ~an hour (observed
+ * nudge-free: apply staged autonomously, then the pending idled 37min). Fire
+ * mitosis-tick (evaluate→cutover) immediately, fire-and-forget, so apply→stage→
+ * cutover is one continuous autonomous flow. Best-effort: if dispatch fails,
+ * boredom still selects mitosis-tick eventually.
+ */
+function triggerMitosisTick(): void {
+  try {
+    const url = process.env["LIGHT_DISPATCH_URL"] ?? "http://127.0.0.1:8280/dispatch";
+    const apiKey = process.env["METABOB_API_KEY"];
+    void fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...(apiKey ? { Authorization: `ApiKey ${apiKey}` } : {}) },
+      body: JSON.stringify({ template_id: "development-vessel:mitosis-tick", variables: {} }),
+      signal: AbortSignal.timeout(180_000),
+    }).catch(() => { /* best-effort */ });
+  } catch { /* best-effort */ }
+}
+
 function stripFences(raw: string): string {
   let s = raw.replace(/^```(?:json)?\n?/i, "").replace(/\n?```$/i, "").trim();
   const a = s.indexOf("{");
@@ -572,6 +594,7 @@ export async function resolveApplyProposalAsPatch(pointer: ApplyProposalAsPatchP
       await writeFile(`${proposalsDir}/.applied/${chosen.name}`,
         JSON.stringify({ staged_at: pendingBody.staged_at, mitosis_version_id: versionId, multifile: true, file_count: stagedFiles.length }, null, 2));
     } catch { /* tolerant */ }
+    triggerMitosisTick(); // self-propel: evaluate→cutover without boredom latency
     return {
       shape: "mitosisStaged",
       body: {
@@ -620,6 +643,8 @@ export async function resolveApplyProposalAsPatch(pointer: ApplyProposalAsPatchP
     vessels_root: vesselsRoot,
     workspace_root: workspaceRoot,
   });
+  // Self-propel evaluate→cutover the moment patch_with_tools stages a mitosis.
+  if (result.shape === "mitosisStaged") triggerMitosisTick();
   // Mark this proposal applied regardless of outcome so the next cycle
   // picks a different one; downstream cutover/host-sync decide whether the
   // staged patch lands.

@@ -63,6 +63,11 @@ interface GapRow {
 // Architecture-class gap categories drained before trace_quality / incidental.
 // Order within the list is also a tiebreaker (earlier = higher priority).
 export const PRIORITY_CATEGORIES: string[] = [
+  // typecheck_error first: a broken build is the highest-value, most concrete,
+  // most reliably-patchable fix (single-file, tsc-verifiable) — it is the fuel
+  // that lets the self-alteration funnel land continuously (see
+  // typecheck-scenario-gen.ts). Rank it above all abstract/meta gap classes.
+  "typecheck_error",
   "architectural_pattern",
   "resolver_distribution",
   "responsibility_misallocation",

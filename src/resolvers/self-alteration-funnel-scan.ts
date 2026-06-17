@@ -155,7 +155,7 @@ export async function resolveSelfAlterationFunnelScan(
   }
 
   // FINDING 2 — stale-backlog poisoning (independent of throughput).
-  if (backlog.length >= backlogThreshold && staleFrac >= staleFracThreshold) {
+  if (backlog.length >= backlogThreshold && (staleFrac >= staleFracThreshold || staleBacklog >= 200)) {
     findings.push({
       gap_id: "self-alteration-stale-proposal-backlog",
       subtype: "stale_proposal_backlog",
@@ -217,6 +217,9 @@ export async function resolveSelfAlterationFunnelScan(
     body: {
       window_hours: windowHours,
       funnel: { authored, staged, landed, pushed },
+      // Honesty: `landed` is read from mitosis-applied.jsonl and may include
+      // operator/manual cutovers — it is NOT purely autonomous throughput.
+      landed_caveat: "landed may include operator/manual cutovers; not purely autonomous",
       conversion: {
         authored_to_staged: authored > 0 ? Number((staged / authored).toFixed(3)) : null,
         staged_to_landed: staged > 0 ? Number((landed / staged).toFixed(3)) : null,

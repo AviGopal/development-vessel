@@ -248,6 +248,9 @@ export async function resolveDetectorCoverageScan(pointer: DetectorCoverageScanP
       failures_examined: failures.length,
       clusters_found: clusters.length,
       covered_clusters: clusters.length - uncovered.length,
+      // Honesty: clusters below the recurrence floor are NOT watched by any
+      // detector; they were silently folded into "covered". Report separately.
+      below_recurrence_clusters: clusters.filter((c) => c.count < minRecurrence).length,
       uncovered_clusters: uncovered.length,
       gaps_emitted,
       // §9.4 detection-coverage observable — measurable growth + stability of

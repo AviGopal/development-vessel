@@ -133,16 +133,24 @@ export async function resolveSubstrateHealthTick(
   const templates: Template[] = [];
   let offset = 0;
   const pageSize = 100;
-  while (templates.length < 500) {
+  // Fetch the FULL catalogue. Prior bug: the `< 500` cap plus `break` on the
+  // first short page truncated this — the corpus is ~1500 and the templates
+  // endpoint intermittently returns a short first page under load, so the
+  // detector emitted (lift-gate) verdicts over a sliver of reality. Loop until
+  // the endpoint-reported `total` is fetched or a page is empty; a short page
+  // is NOT a stop signal.
+  let templatesTotal = Infinity;
+  for (let guard = 0; templates.length < templatesTotal && guard < 100; guard++) {
     const r = await fetchWithRetry(`${METABOB_ENDPOINT}/v2/activities/templates?limit=${pageSize}&offset=${offset}`, {
       headers: auth,
     });
     if (!r || !r.ok) break;
-    const page = await r.json() as { templates?: Template[] };
+    const page = await r.json() as { templates?: Template[]; total?: number };
+    if (typeof page.total === "number") templatesTotal = page.total;
     const rows = page.templates ?? [];
+    if (rows.length === 0) break;
     templates.push(...rows);
     offset += rows.length;
-    if (rows.length < pageSize) break;
   }
 
   // Fetch recent traces (last 30 days) to build execution counts per template.
@@ -309,6 +317,12 @@ export async function resolveSubstrateHealthTick(
     stability_passing &&
     vessels_passing &&
     (optimality_passing === null ? true : optimality_passing);
+  // Honesty: optimality is structurally never measured (the harness writes no
+  // ratio), so it silently dropped out of overall_passing as null->true.
+  // Surface that it is UNMEASURED rather than letting it read as a passing
+  // dimension — the lift gate keys on overall_passing.
+  const optimality_measured = optimality.mean_optimality_ratio !== null;
+  const unmeasured_dimensions: string[] = optimality_measured ? [] : ["optimality"];
 
   const report = {
     generated_at: new Date().toISOString(),
@@ -325,8 +339,10 @@ export async function resolveSubstrateHealthTick(
       confidence_passing,
       stability_passing,
       optimality_passing,
+      optimality_measured,
       vessels_passing,
       overall_passing,
+      unmeasured_dimensions,
     },
   };
 

@@ -86,7 +86,7 @@ export async function resolveCompositionCoverageReport(
 ): Promise<ResolverResult> {
   const templatesUrlBase = pointer.templatesUrl ?? DEFAULT_TEMPLATES_URL;
   const pageSize = pointer.pageSize ?? 100;
-  const templateFetchCap = pointer.templateFetchCap ?? 1000;
+  const templateFetchCap = pointer.templateFetchCap ?? 5000;
   const reportLimit = pointer.reportLimit ?? 25;
 
   const apiKey = process.env["METABOB_API_KEY"];
@@ -97,17 +97,23 @@ export async function resolveCompositionCoverageReport(
   const templates: TemplateRow[] = [];
   let offset = 0;
   try {
-    while (templates.length < templateFetchCap) {
+    // Loop until the endpoint-reported `total` is fetched (not `< cap`) and do
+    // NOT break on a short page — the templates endpoint intermittently
+    // truncates a page under load, which previously shrank the basis to a
+    // sliver. templateFetchCap remains only as a hard backstop.
+    let templatesTotal = Infinity;
+    for (let guard = 0; templates.length < templatesTotal && templates.length < templateFetchCap && guard < 100; guard++) {
       const url = `${templatesUrlBase}?limit=${pageSize}&offset=${offset}`;
       const resp = await fetch(url, {
         headers: { ...auth },
         signal: AbortSignal.timeout(15_000),
       });
       if (!resp.ok) break;
-      const json = (await resp.json()) as { templates?: unknown };
+      const json = (await resp.json()) as { templates?: unknown; total?: number };
+      if (typeof json.total === "number") templatesTotal = json.total;
       const rows = Array.isArray(json.templates) ? (json.templates as TemplateRow[]) : [];
+      if (rows.length === 0) break;
       templates.push(...rows);
-      if (rows.length < pageSize) break;
       offset += rows.length;
     }
   } catch (err) {

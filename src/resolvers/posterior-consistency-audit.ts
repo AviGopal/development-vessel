@@ -91,10 +91,13 @@ export async function resolvePosteriorConsistencyAudit(pointer: PosteriorConsist
   const apiKey = process.env["METABOB_API_KEY"] ?? "";
 
   const [tplJson, trJson] = await Promise.all([
-    fetchJson<{ templates?: TemplateMetric[]; data?: TemplateMetric[] }>(`${endpoint}/v2/activities/templates?limit=${pointer.template_limit ?? 200}`, apiKey),
+    fetchJson<{ templates?: TemplateMetric[]; data?: TemplateMetric[]; total?: number }>(`${endpoint}/v2/activities/templates?limit=${pointer.template_limit ?? 2000}`, apiKey),
     fetchJson<{ executions?: Array<{ activity_id?: string; status?: string }> }>(`${endpoint}/v2/activities/execution-traces?limit=${pointer.trace_limit ?? 500}`, apiKey),
   ]);
   const templates = tplJson?.templates ?? tplJson?.data ?? [];
+  // Report audit coverage so a partial/truncated read can't be mistaken for a
+  // comprehensive "no drift" verdict over the whole registry.
+  const templateTotal = typeof tplJson?.total === "number" ? tplJson.total : null;
   const traces = trJson?.executions ?? [];
 
   const empirical = new Map<string, { alpha: number; beta: number }>();
@@ -137,6 +140,8 @@ export async function resolvePosteriorConsistencyAudit(pointer: PosteriorConsist
     shape: "posteriorConsistencyResult",
     body: {
       templates_examined: templates.length,
+      template_total: templateTotal,
+      audit_coverage_fraction: templateTotal && templateTotal > 0 ? Number((templates.length / templateTotal).toFixed(3)) : null,
       traces_examined: traces.length,
       drift_threshold,
       min_samples,

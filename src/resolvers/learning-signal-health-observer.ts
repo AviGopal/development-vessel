@@ -64,17 +64,17 @@ export async function resolveLearningSignalHealthObserver(
   const total = concepts.length;
   const loaded = concepts.filter((c) => (c.times_loaded ?? 0) > 0);
   const loadedWithSuccess = loaded.filter((c) => (c.times_succeeded ?? 0) > 0);
-  const successCreditRatio = loaded.length > 0 ? loadedWithSuccess.length / loaded.length : 1;
+  const successCreditRatio = loaded.length > 0 ? loadedWithSuccess.length / loaded.length : null; // null = unknown (no loaded data); do NOT report a false 1.0
   const relSum = concepts.reduce((s, c) => s + (c.relevance ?? 0.5), 0);
   const avgRelevance = total > 0 ? relSum / total : 0.5;
 
   const enoughVolume = loaded.length >= minLoadedVolume;
-  const oneSided = enoughVolume && (successCreditRatio < ratioThreshold || avgRelevance < 0.5);
+  const oneSided = enoughVolume && ((successCreditRatio !== null && successCreditRatio < ratioThreshold) || avgRelevance < 0.5);
 
   let gapEmission: "emitted" | "error" | "not_needed" = "not_needed";
   if (oneSided) {
     gapEmission = await emitGap(devVesselUrl, apiKey, {
-      successCreditRatio,
+      successCreditRatio: successCreditRatio ?? 0,
       avgRelevance,
       loaded: loaded.length,
       loadedWithSuccess: loadedWithSuccess.length,
@@ -87,7 +87,7 @@ export async function resolveLearningSignalHealthObserver(
       total_concepts: total,
       loaded_concepts: loaded.length,
       loaded_with_success: loadedWithSuccess.length,
-      success_credit_ratio: Math.round(successCreditRatio * 10000) / 10000,
+      success_credit_ratio: successCreditRatio === null ? null : Math.round(successCreditRatio * 10000) / 10000,
       avg_relevance: Math.round(avgRelevance * 10000) / 10000,
       prior: 0.5,
       ratio_threshold: ratioThreshold,

@@ -18,6 +18,7 @@
 import type { ResolverResult } from "./types.js";
 import { METABOB_API_KEY } from "../config.js";
 
+const MAX_GOAL_LEN = 8192;
 const GOAL_HOST_ENDPOINT = process.env["GOAL_HOST_VESSEL_ENDPOINT"] ?? "http://127.0.0.1:8210";
 
 export interface DispatchGoalPointer {
@@ -35,6 +36,7 @@ export interface DispatchGoalPointer {
 export async function resolveDispatchGoal(pointer: DispatchGoalPointer): Promise<ResolverResult> {
   const goal = (pointer.goal ?? "").trim();
   if (!goal) return { shape: "structuredError", body: { resolver: "dispatch_goal", detail: "goal is required" } };
+  if (goal.length > MAX_GOAL_LEN) return { shape: "structuredError", body: { resolver: "dispatch_goal", detail: `goal too long (${goal.length} > ${MAX_GOAL_LEN})` } };
 
   const body: Record<string, unknown> = { goal };
   if (pointer.variables) body["variables"] = pointer.variables;

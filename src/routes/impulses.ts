@@ -54,6 +54,7 @@ import { resolveGitBranchCreate } from "../resolvers/git-branch-create.js";
 import { resolveGitPush } from "../resolvers/git-push.js";
 import { resolveGhPrCreate } from "../resolvers/gh-pr-create.js";
 import { resolveComputeStateSignature } from "../resolvers/compute-state-signature.js";
+import { resolveDispatchGoal } from "../resolvers/dispatch-goal.js";
 import { resolveAuthoringChainHealthReport } from "../resolvers/authoring-chain-health-report.js";
 import { resolveConceptWrite } from "../resolvers/concept-write.js";
 import { resolveConceptSearchBySource } from "../resolvers/concept-search-by-source.js";
@@ -262,6 +263,8 @@ async function dispatchInner(pointer: AnyPointer): Promise<ResolverResult> {
       return resolveGhPrMerge(p as Parameters<typeof resolveGhPrMerge>[0]);
     case "compute_state_signature":
       return resolveComputeStateSignature(p as Parameters<typeof resolveComputeStateSignature>[0]);
+    case "dispatch_goal":
+      return resolveDispatchGoal(p as Parameters<typeof resolveDispatchGoal>[0]);
     case "authoring_chain_health_report":
       return resolveAuthoringChainHealthReport(p as Parameters<typeof resolveAuthoringChainHealthReport>[0]);
     case "concept_write":

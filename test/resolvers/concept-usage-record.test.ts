@@ -103,3 +103,55 @@ describe("concept_usage_record", () => {
     expect(postedUrl).toContain("concept%3Aconcept_with%3Acolons");
   });
 });
+
+// 2026-06-18: defensive placeholder hygiene. Some executor paths (notably
+// light-dispatch) dispatch this resolver without binding the template variables,
+// leaking `{{concept_id}}` / `{{trace_id}}` literals that pollute concept-db
+// usage attribution and defeat per-trace dedup.
+describe("concept_usage_record placeholder hygiene", () => {
+  const origFetch = globalThis.fetch;
+  afterEach(() => { globalThis.fetch = origFetch; });
+
+  it("skips the write when concept_id is an unsubstituted placeholder", async () => {
+    let called = false;
+    globalThis.fetch = (async () => { called = true; return new Response("{}"); }) as unknown as typeof fetch;
+    const r = await resolveConceptUsageRecord({
+      type: "concept_usage_record",
+      concept_id: "{{extract_concept_id_value}}",
+      trace_id: "autonomous_backfill_2026-06-18T00:00:00.000Z",
+      outcome: "success",
+    });
+    expect(r.shape).toBe("structuredError");
+    expect((r.body as any).detail).toContain("concept_id");
+    expect(called).toBe(false);
+  });
+
+  it("synthesizes a unique trace_id when the placeholder leaks, and still records", async () => {
+    let sentBody: any = {};
+    globalThis.fetch = (async (_url: any, init: any) => {
+      sentBody = JSON.parse(init.body as string);
+      return new Response(JSON.stringify({ id: "usage:1", recorded_at: "2026-06-18T00:00:00Z" }));
+    }) as unknown as typeof fetch;
+    const r = await resolveConceptUsageRecord({
+      type: "concept_usage_record",
+      concept_id: "concept_real_id",
+      trace_id: "{{trace_id}}",
+      outcome: "success",
+    });
+    expect(r.shape).toBe("conceptUsageRecorded");
+    expect(String(sentBody.trace_id)).not.toBe("{{trace_id}}");
+    expect(String(sentBody.trace_id)).toContain("autonomous_backfill_");
+  });
+
+  it("passes a real trace_id through unchanged", async () => {
+    let sentBody: any = {};
+    globalThis.fetch = (async (_url: any, init: any) => {
+      sentBody = JSON.parse(init.body as string);
+      return new Response(JSON.stringify({ id: "usage:2" }));
+    }) as unknown as typeof fetch;
+    await resolveConceptUsageRecord({
+      type: "concept_usage_record", concept_id: "concept_x", trace_id: "real-trace-99", outcome: "success",
+    });
+    expect(sentBody.trace_id).toBe("real-trace-99");
+  });
+});

@@ -572,7 +572,7 @@ export async function resolveApplyProposalAsPatch(pointer: ApplyProposalAsPatchP
     // it always returns success regardless of whether it actually staged
     // anything. structuredError makes the dispatcher record failure_count++
     // without polluting α with empty wins.
-    return structuredError("no eligible proposals", { total_proposals: entries.length, skipped: skipped.slice(0, 20) });
+    return structuredError("no eligible proposals", { total_proposals: entries.length, skipped: skipped.slice(0, 50) });
   }
   // Multi-file proposals path (2026-06-05): if proposal carries `new_files[]`
   // (each {path, content} starting with `repos/<vessel>/`), write all of them

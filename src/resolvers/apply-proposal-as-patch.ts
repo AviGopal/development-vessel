@@ -261,6 +261,36 @@ async function findLlmEndpoint(): Promise<string | null> {
   return null;
 }
 
+// Surgical pre-gate (2026-06-18). patch_with_tools is a SURGICAL editor: it
+// applies one minimal, anchored edit to ONE file via fs_edit / code_replace_lines.
+// Feature-sized proposals ("add a forward-model subsystem", "introduce a
+// prediction pipeline") have no minimal edit, so the patcher correctly declares
+// `fail` — but only AFTER burning up to max_attempts(3) x max_iterations(30) opus
+// turns. In the 12h before this gate, patch_with_tools started 86x and failed
+// 100x / succeeded 0x, uniformly on feature-sized proposals — a pure budget bleed
+// that produced zero cutovers. This gate cheaply (regex, no LLM) skips proposals
+// that read as new infrastructure with no concrete code anchor, so the expensive
+// patcher only runs on proposals it can actually land. Feature-sized gaps stay
+// OPEN and VISIBLE (skipped[] reason=non_surgical_proposal) instead of being
+// silently burned — they await a feature-authoring capability the substrate does
+// not yet have (the real S1->S2 boundary). Conservative by design: a proposal is
+// skipped ONLY when it BOTH reads as a feature AND carries no concrete anchor.
+const FEATURE_SCOPE_RE = /\b(subsystem|framework|infrastructure|pipeline|architecture|new\s+(model|system|module|engine|capability|abstraction)|forward[-\s]?model|predictor|forecast(ing)?|introduce\s+a\b|build\s+a\b|implement\s+a\s+(new\s+)?(model|system|framework|engine|pipeline))\b/i;
+const CONCRETE_ANCHOR_RE = /(`[^`]+`|===|!==|=>|\breturn\s+[\w'"{[]|\breplace\s+.{1,40}\bwith\b|\brename\b|\bimport\s*\{|\bif\s*\(\s*\w|\bset\s+\w+\s*=|\bchange\s+.{1,50}\s+to\s+[\w'"]|\badd\s+(a\s+|an\s+)?(field|parameter|argument|guard|null[-\s]?check|early\s+return|case|branch)\b)/i;
+function assessProposalSurgical(descriptionText: string): { surgical: boolean; reason: string } {
+  const text = (descriptionText ?? "").trim();
+  if (!text) return { surgical: true, reason: "surgical" }; // no description to judge -> don't over-block
+  const feature = FEATURE_SCOPE_RE.test(text);
+  const anchor = CONCRETE_ANCHOR_RE.test(text);
+  if (feature && !anchor) {
+    return {
+      surgical: false,
+      reason: `non_surgical_proposal: feature-scoped intent, no concrete code anchor — "${text.slice(0, 90).replace(/\s+/g, " ")}"`,
+    };
+  }
+  return { surgical: true, reason: "surgical" };
+}
+
 export async function resolveApplyProposalAsPatch(pointer: ApplyProposalAsPatchPointer): Promise<ResolverResult> {
   const workspaceRoot = process.env["WORKSPACE_ROOT"] ?? "/workspace";
   const proposalsDir = pointer.proposals_dir ?? join(workspaceRoot, "proposals");
@@ -519,6 +549,18 @@ export async function resolveApplyProposalAsPatch(pointer: ApplyProposalAsPatchP
       } catch { /* tolerant */ }
       skipped.push({ proposal: e.name, reason: `file_path_hallucination: ${missingFiles.join(", ").slice(0, 120)}` });
       continue;
+    }
+    // Surgical pre-gate (2026-06-18): only the single-file patch_with_tools path
+    // is gated (new_files[] proposals write full content directly, no patcher).
+    // Skips feature-sized proposals cheaply so the expensive patcher only runs on
+    // proposals it can land; feature gaps stay visible in skipped[].
+    if (targetFile && !effectiveHasNewFiles) {
+      const descText = mods
+        .map((m) => { const d = (m as { description?: string }).description; return typeof d === "string" ? d : ""; })
+        .filter(Boolean)
+        .join(" \n ") || content;
+      const surg = assessProposalSurgical(descText);
+      if (!surg.surgical) { skipped.push({ proposal: e.name, reason: surg.reason }); continue; }
     }
     chosen = { name: e.name, path: e.path, scenarioId, content, targetFile: targetFile ?? "" };
     break;

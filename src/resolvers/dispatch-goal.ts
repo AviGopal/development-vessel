@@ -40,6 +40,13 @@ import { METABOB_API_KEY } from "../config.js";
  *      `{ resolver: "dispatch_goal", detail: "goal too long (<len> > <max>)" }`
  *      so callers (and auto-draft closure documentation) can detect the
  *      substrate-fit gap and react without the request ever being dispatched.
+ *      This aligns with goal-host recommendation scoring semantics where a
+ *      top_score of 0 signals the substrate cannot fit this goal — the length
+ *      guard is the local, pre-network analogue of that signal. It also acts
+ *      as early validation that catches specification drift (overly long or
+ *      under-specified goals) before expensive downstream operations execute,
+ *      since an unboundedly long goal usually indicates poor specification
+ *      rather than legitimate intent.
  */
 const MAX_GOAL_LEN = 8192;
 const GOAL_HOST_ENDPOINT = process.env["GOAL_HOST_VESSEL_ENDPOINT"] ?? "http://127.0.0.1:8210";

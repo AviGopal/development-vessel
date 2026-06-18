@@ -117,7 +117,9 @@ interface PerTemplateStats {
 
 async function fetchJson<T>(url: string, apiKey: string, timeoutMs: number): Promise<T | null> {
   const headers: Record<string, string> = {};
-  if (apiKey) headers["Authorization"] = `ApiKey ${apiKey}`;
+  const jwt = process.env["CONCEPT_DB_JWT"] ?? process.env["METABOB_JWT"] ?? "";
+  if (jwt) headers["Authorization"] = `Bearer ${jwt}`;
+  else if (apiKey) headers["Authorization"] = `ApiKey ${apiKey}`;
   try {
     const resp = await fetch(url, { headers, signal: AbortSignal.timeout(timeoutMs) });
     if (!resp.ok) return null;

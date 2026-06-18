@@ -279,12 +279,31 @@ async function findLlmEndpoint(): Promise<string | null> {
 // skipped ONLY when it BOTH reads as a feature AND carries no concrete anchor.
 const SURGICAL_MAX_DESC_LEN = 300;
 const FEATURE_SCOPE_RE = /\b(subsystem|framework|infrastructure|pipeline|architecture|new\s+(model|system|module|engine|capability|abstraction)|forward[-\s]?model|predictor|forecast(ing)?|introduce\s+a\b|build\s+a\b|implement\s+a\s+(new\s+)?(model|system|framework|engine|pipeline))\b/i;
-const CONCRETE_ANCHOR_RE = /(`[^`]+`|===|!==|=>|\breturn\s+[\w'"{[]|\breplace\s+.{1,40}\bwith\b|\brename\b|\bimport\s*\{|\bif\s*\(\s*\w|\bset\s+\w+\s*=|\bchange\s+.{1,50}\s+to\s+[\w'"]|\badd\s+(a\s+|an\s+)?(field|parameter|argument|guard|null[-\s]?check|early\s+return|case|branch)\b)/i;
-function assessProposalSurgical(descriptionText: string): { surgical: boolean; reason: string } {
+// Anchor signals that a proposal names a CONCRETE, minimal edit the surgical
+// patcher can land. Conservative on purpose — every alternative is a marker of
+// edit-locality, NOT of mere topic mention. The 2026-06-18 widening (export /
+// comment-or-jsdoc / named-file / ALL_CAPS_UNDERSCORE constant) was added because
+// genuinely-surgical proposals ("Add explicit export of WebSocketMessage type
+// from the websocket/broadcaster module", "Add a JSDoc comment above the
+// MAX_GOAL_LEN constant") were over-refused as `non_surgical_proposal`, starving
+// the funnel (apply_proposal_as_patch skipped 50/50, flat `landed`). The new
+// alternatives are chosen to NOT match feature prose, which references symbols
+// only in lowercase snake/kebab form ("gap_landability backward model",
+// "patch_proposal") and never names a concrete .ts file, an `export`, or an
+// ALL_CAPS_WITH_UNDERSCORE constant.
+const CONCRETE_ANCHOR_RE = /(`[^`]+`|===|!==|=>|\breturn\s+[\w'"{[]|\breplace\s+.{1,40}\bwith\b|\brename\b|\bimport\s*\{|\bexport\b|\bif\s*\(\s*\w|\bset\s+\w+\s*=|\bchange\s+.{1,50}\s+to\s+[\w'"]|\badd\s+(a\s+|an\s+)?(field|parameter|argument|guard|null[-\s]?check|early\s+return|case|branch|export|import|comment|jsdoc|doc[-\s]?comment|annotation|type\s+annotation|return\s+type|log(ging)?\s+statement|assertion)\b|\b[\w./-]+\.(ts|tsx|js|jsx|json|sql|sh|md|py)\b)/i;
+// Named ALL_CAPS_WITH_UNDERSCORE constant (e.g. MAX_GOAL_LEN). Kept as a SEPARATE
+// case-SENSITIVE regex: folding it into CONCRETE_ANCHOR_RE (which carries /i) made
+// `[A-Z]` match lowercase, so feature prose with snake_case symbols
+// ("gap_landability", "patch_proposal", "fs_list") falsely read as anchored. The
+// underscore + true-uppercase requirement keeps this specific to named constants
+// and excludes bare acronyms (HTTP, API, JSON) which have no underscore.
+const CONSTANT_ANCHOR_RE = /\b[A-Z][A-Z0-9]*_[A-Z0-9_]+\b/;
+export function assessProposalSurgical(descriptionText: string): { surgical: boolean; reason: string } {
   const text = (descriptionText ?? "").trim();
   if (!text) return { surgical: true, reason: "surgical" }; // no description to judge -> don't over-block
   const feature = FEATURE_SCOPE_RE.test(text);
-  const anchor = CONCRETE_ANCHOR_RE.test(text);
+  const anchor = CONCRETE_ANCHOR_RE.test(text) || CONSTANT_ANCHOR_RE.test(text);
   // Length is the robust signal: feature descriptions are verbose multi-clause
   // prose ("integrate P(...) prediction model, extract features, store pairs,
   // wire residuals back..."), surgical edits are short and concrete. Vocabulary

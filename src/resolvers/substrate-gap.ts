@@ -147,7 +147,7 @@ export async function resolveSubstrateGap(
   }
 
   results = results
-    .sort((a, b) => b.updated_at.localeCompare(a.updated_at))
+    .sort((a, b) => (b.updated_at || b.created_at || b.detected_at || "").localeCompare(a.updated_at || a.created_at || a.detected_at || ""))
     .slice(0, limit);
 
   return {

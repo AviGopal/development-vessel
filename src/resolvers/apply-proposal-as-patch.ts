@@ -62,6 +62,8 @@ export interface ApplyProposalAsPatchPointer {
   /** Untargeted apply skips proposals older than this. Default 72h. A
    *  proposal_id-targeted apply bypasses it. */
   max_age_hours?: number;
+  /** Re-attempt a content-matched sentinel older than this many hours (default 24). */
+  retry_after_hours?: number;
 }
 
 function structuredError(detail: string, extra?: Record<string, unknown>): ResolverResult {
@@ -414,10 +416,28 @@ export async function resolveApplyProposalAsPatch(pointer: ApplyProposalAsPatchP
     const contentSha = createHash("sha256").update(content).digest("hex").slice(0, 16);
     if (appliedSet.has(e.name)) {
       let priorSha: string | null = null;
-      try { priorSha = (JSON.parse(await readFile(`${sentinelDir}/${e.name}`, "utf-8")) as { content_sha?: string }).content_sha ?? null; } catch { priorSha = null; }
-      if (priorSha === null || priorSha === contentSha) { skipped.push({ proposal: e.name, reason: "already_applied_sentinel" }); continue; }
-      // else: previously-attempted scenario, but the drafter produced NEW content
-      // (a fresh fix attempt) — do NOT skip.
+      let priorTs: number | null = null;
+      try {
+        const sj = JSON.parse(await readFile(`${sentinelDir}/${e.name}`, "utf-8")) as { content_sha?: string; applied_at?: string; staged_at?: string };
+        priorSha = sj.content_sha ?? null;
+        const tsStr = sj.applied_at ?? sj.staged_at ?? null;
+        priorTs = tsStr ? Date.parse(tsStr) : null;
+      } catch { priorSha = null; priorTs = null; }
+      // Retry TTL (2026-06-18): a content_sha match normally means "already attempted,
+      // skip". But a PERSISTENT real issue (e.g. a typecheck error whose first patch
+      // attempt failed) is re-drafted with IDENTICAL content forever, so it was
+      // sentinel-blocked PERMANENTLY — the substrate could never land a fix for any
+      // error whose first attempt failed, even after the patcher itself improved (e.g.
+      // the no-op-done recovery). Expire the sentinel after retry_after_hours so
+      // persistent work becomes re-attemptable. Feature-sized re-attempts are cheaply
+      // re-skipped by the surgical pre-gate; already-fixed ones abort fast via the
+      // no-op-done guard. This is what keeps the autonomous loop SUPPLIED with landable
+      // work instead of starving once every fresh proposal has been tried once.
+      const retryAfterMs = (pointer.retry_after_hours ?? 24) * 3_600_000;
+      const sentinelExpired = priorTs !== null && (Date.now() - priorTs) > retryAfterMs;
+      if ((priorSha === null || priorSha === contentSha) && !sentinelExpired) { skipped.push({ proposal: e.name, reason: "already_applied_sentinel" }); continue; }
+      // else: drafter produced NEW content (fresh attempt) OR the sentinel expired
+      // (retry persistent work that may now be landable) — do NOT skip.
     }
     // Tolerant parse — brace-aware walker handles LLM tails (multi-object,
     // post-JSON markdown narrative). Legacy stripFences path remains as a

@@ -116,6 +116,7 @@ export const config = {
       // activities that mint substrateGap impulses — the substrate detects its
       // own systematic failures rather than waiting for the operator to read traces.
       "trace_failure_pattern_report",
+      "prior_failed_attempts",
       // Substrate self-observation of resource state (iter-087, 2026-05-31):
       // reads /proc/loadavg, /proc/meminfo, /sys/fs/cgroup/cpu.stat from inside
       // the container. Without this, resource pathologies (the iter-086 1315%

@@ -42,6 +42,7 @@ import { resolveVesselWriteErrorScan } from "../resolvers/vessel-write-error-sca
 import { resolveChainFetchFailureScan } from "../resolvers/chain-fetch-failure-scan.js";
 import { resolveConvergentValidityCheck } from "../resolvers/convergent-validity-check.js";
 import { resolveTraceFailurePatternReport } from "../resolvers/trace-failure-pattern-report.js";
+import { resolvePriorFailedAttempts } from "../resolvers/prior-failed-attempts.js";
 import { resolveSystemLoadReport } from "../resolvers/system-load-report.js";
 import { resolveLoadAttribution, resolveLoadAttributionWrite } from "../resolvers/load-attribution.js";
 import { resolveLoadAttributionReport } from "../resolvers/load-attribution-report.js";
@@ -237,6 +238,8 @@ async function dispatchInner(pointer: AnyPointer): Promise<ResolverResult> {
       return resolveConvergentValidityCheck(p as Parameters<typeof resolveConvergentValidityCheck>[0]);
     case "trace_failure_pattern_report":
       return resolveTraceFailurePatternReport(p as Parameters<typeof resolveTraceFailurePatternReport>[0]);
+    case "prior_failed_attempts":
+      return resolvePriorFailedAttempts(p as Parameters<typeof resolvePriorFailedAttempts>[0]);
     case "system_load_report":
       return resolveSystemLoadReport(p as Parameters<typeof resolveSystemLoadReport>[0]);
     case "loadAttribution":

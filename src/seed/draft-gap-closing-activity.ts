@@ -46,6 +46,16 @@ which downstream shapes are likely to be needed once a given shape is produced.
 ## Failure-Mode Scenario
 {{read_scenario_content}}
 
+## Prior Failed Attempts (LEARN from these — do NOT repeat)
+
+The system has attempted to close this gap before. The JSON report below lists prior
+proposals that were drafted but did NOT land (e.g. they targeted a non-existent file,
+or a symbol that is imported-not-declared so the patcher made no edit). Read its
+'summary_text' field. If a prior approach targeted the wrong or non-existent file,
+choose a DIFFERENT, REAL target file this time — do not re-emit a known-failing approach.
+
+{{fetch_prior_failures_text}}
+
 ## Requirements for the drafted template
 
 ### RESOLVER RULES (violations cause runtime failures — follow exactly)
@@ -249,6 +259,31 @@ export const DRAFT_GAP_CLOSING_ACTIVITY_TEMPLATE: ActivityTemplate = {
         timeoutMs: 5000,
       },
       outputShapes: ["substrateCooccurrenceEdges"],
+    },
+    {
+      id: "fetch_prior_failures",
+      description:
+        "Learn from FAILED prior proposals (2026-06-18): query dev-vessel prior_failed_attempts " +
+        "for this scenario so the draft below avoids repeating approaches that did not land — " +
+        "wrong/non-existent target file, imported-not-declared symbol, etc. Non-fatal.",
+      resolver: "http_fetch",
+      config: {
+        type: "http_fetch",
+        method: "POST",
+        url: "http://127.0.0.1:8090/v2/impulses/resolve",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          impulse: {
+            pointer: {
+              type: "prior_failed_attempts",
+              scenario_id: "{{scenario_id}}",
+              proposals_dir: "{{proposals_dir}}",
+            },
+          },
+        }),
+        timeoutMs: 5000,
+      },
+      outputShapes: ["priorFailedAttempts"],
     },
     {
       id: "draft_via_llm",

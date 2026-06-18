@@ -277,6 +277,7 @@ async function findLlmEndpoint(): Promise<string | null> {
 // silently burned — they await a feature-authoring capability the substrate does
 // not yet have (the real S1->S2 boundary). Conservative by design: a proposal is
 // skipped ONLY when it BOTH reads as a feature AND carries no concrete anchor.
+const SURGICAL_MAX_DESC_LEN = 300;
 const FEATURE_SCOPE_RE = /\b(subsystem|framework|infrastructure|pipeline|architecture|new\s+(model|system|module|engine|capability|abstraction)|forward[-\s]?model|predictor|forecast(ing)?|introduce\s+a\b|build\s+a\b|implement\s+a\s+(new\s+)?(model|system|framework|engine|pipeline))\b/i;
 const CONCRETE_ANCHOR_RE = /(`[^`]+`|===|!==|=>|\breturn\s+[\w'"{[]|\breplace\s+.{1,40}\bwith\b|\brename\b|\bimport\s*\{|\bif\s*\(\s*\w|\bset\s+\w+\s*=|\bchange\s+.{1,50}\s+to\s+[\w'"]|\badd\s+(a\s+|an\s+)?(field|parameter|argument|guard|null[-\s]?check|early\s+return|case|branch)\b)/i;
 function assessProposalSurgical(descriptionText: string): { surgical: boolean; reason: string } {
@@ -290,7 +291,7 @@ function assessProposalSurgical(descriptionText: string): { surgical: boolean; r
   // alone is whack-a-mole — drafters reword "forward model" -> "prediction model"
   // to evade a keyword list. A long description with NO concrete code anchor is
   // almost certainly a feature, regardless of wording.
-  const verbose = text.length > 300;
+  const verbose = text.length > SURGICAL_MAX_DESC_LEN;
   if ((feature || verbose) && !anchor) {
     return {
       surgical: false,

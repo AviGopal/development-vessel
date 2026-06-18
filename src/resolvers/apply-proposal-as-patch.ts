@@ -282,10 +282,17 @@ function assessProposalSurgical(descriptionText: string): { surgical: boolean; r
   if (!text) return { surgical: true, reason: "surgical" }; // no description to judge -> don't over-block
   const feature = FEATURE_SCOPE_RE.test(text);
   const anchor = CONCRETE_ANCHOR_RE.test(text);
-  if (feature && !anchor) {
+  // Length is the robust signal: feature descriptions are verbose multi-clause
+  // prose ("integrate P(...) prediction model, extract features, store pairs,
+  // wire residuals back..."), surgical edits are short and concrete. Vocabulary
+  // alone is whack-a-mole — drafters reword "forward model" -> "prediction model"
+  // to evade a keyword list. A long description with NO concrete code anchor is
+  // almost certainly a feature, regardless of wording.
+  const verbose = text.length > 300;
+  if ((feature || verbose) && !anchor) {
     return {
       surgical: false,
-      reason: `non_surgical_proposal: feature-scoped intent, no concrete code anchor — "${text.slice(0, 90).replace(/\s+/g, " ")}"`,
+      reason: `non_surgical_proposal: ${feature ? "feature-scoped" : "verbose"} intent, no concrete code anchor — "${text.slice(0, 90).replace(/\s+/g, " ")}"`,
     };
   }
   return { surgical: true, reason: "surgical" };

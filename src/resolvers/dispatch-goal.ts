@@ -18,9 +18,29 @@
 import type { ResolverResult } from "./types.js";
 import { METABOB_API_KEY } from "../config.js";
 
-// MAX_GOAL_LEN bounds the accepted goal payload size to prevent overflow into
-// downstream goal-host APIs, keep goal-parsing predictable and fast, and act as
-// a safety boundary against accidental or hostile oversized inputs.
+/**
+ * MAX_GOAL_LEN — upper bound on the accepted goal payload size for dispatch.
+ *
+ * Rationale:
+ *  (1) Goal text flows into downstream LLM-backed goal-host APIs whose prompt
+ *      windows and tokenizer budgets are finite; capping the raw character
+ *      length prevents token-overflow failures and preserves prompt coherence
+ *      (very long goals dilute instruction salience and degrade routing).
+ *      It also enforces substrate limits in template/composition layers that
+ *      assume a bounded goal field.
+ *  (2) The threshold is 8192 characters. At a conservative ~4 chars/token this
+ *      maps to ~2k tokens — well within typical context budgets while still
+ *      large enough to admit rich multi-paragraph goals. It is a safety
+ *      boundary against accidental or hostile oversized inputs, not a target.
+ *  (3) Enforcement happens at the top of `resolveDispatchGoal`, immediately
+ *      after trimming and the empty-goal check, BEFORE any network call to
+ *      the goal-host endpoint. This makes the guard cheap and fail-fast.
+ *  (4) When a goal exceeds the limit, the resolver short-circuits and returns
+ *      a `structuredError` of shape
+ *      `{ resolver: "dispatch_goal", detail: "goal too long (<len> > <max>)" }`
+ *      so callers (and auto-draft closure documentation) can detect the
+ *      substrate-fit gap and react without the request ever being dispatched.
+ */
 const MAX_GOAL_LEN = 8192;
 const GOAL_HOST_ENDPOINT = process.env["GOAL_HOST_VESSEL_ENDPOINT"] ?? "http://127.0.0.1:8210";
 

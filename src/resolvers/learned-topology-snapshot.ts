@@ -105,13 +105,27 @@ export async function resolveLearnedTopologySnapshot(
     traversal_count: number;
   }> = [];
 
-  // Build a quick lookup: input_shape → templates that consume it
+  // Build a quick lookup: input_shape → templates that consume it.
   const inputShapeToTemplates = new Map<string, string[]>();
+  const addConsumer = (shape: string, id: string) => {
+    if (!inputShapeToTemplates.has(shape)) inputShapeToTemplates.set(shape, []);
+    const arr = inputShapeToTemplates.get(shape)!;
+    if (!arr.includes(id)) arr.push(id);
+  };
   for (const tpl of templates) {
-    for (const s of (tpl.input_shapes ?? [])) {
-      if (!inputShapeToTemplates.has(s)) inputShapeToTemplates.set(s, []);
-      inputShapeToTemplates.get(s)!.push(tpl.id);
-    }
+    for (const s of (tpl.input_shapes ?? [])) addConsumer(s, tpl.id);
+  }
+  // OBSERVED consumption (2026-06-18): the foundation makes input_shapes OPTIONAL
+  // ("activities accept any input by default"), so almost no template declares them
+  // — leaving the potential composition graph EMPTY (0 edges) and the topology
+  // undefined. Derive each activity's consumed shapes from real traces
+  // (input_impulse_shapes) so composition_edges reflect the ACTUAL observed topology,
+  // and untraversed_edges become a real exploration frontier for topology-based
+  // selection (probe-untraversed-edge). Deterministic, no LLM.
+  for (const tr of traces) {
+    const tid = tr.activity_template_id ?? tr.activity_id;
+    if (!tid) continue;
+    for (const s of (tr.input_impulse_shapes ?? tr.input_shapes ?? [])) addConsumer(s, tid);
   }
 
   // Pair each producer–shape–consumer combination

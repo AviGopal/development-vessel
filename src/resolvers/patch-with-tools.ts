@@ -256,9 +256,19 @@ export async function resolvePatchWithTools(pointer: PatchWithToolsPointer): Pro
       verifyFailCounts.clear();
     }
   for (let turn = 1; turn <= maxIters && !finished; turn++) {
+    const lastHistIdx = history.length - 1;
     const historyBlock = history.length === 0
       ? "(no tool calls yet)"
-      : history.map((h, i) => `Turn ${h.turn}: ${h.thought_or_action}${h.tool_result ? `\n  → ${h.tool_result.ok ? "OK" : "ERR"}: ${JSON.stringify(h.tool_result.result).slice(0, 800)}` : ""}`).join("\n\n");
+      // Show the MOST RECENT tool result in full (cap 6000) so the patcher can
+      // actually SEE the lines it just searched on a large file; older results are
+      // truncated to keep context bounded. The prior flat 800-char cap starved the
+      // patcher of the content it found -> it re-searched and exhausted the turn
+      // budget on big files (goal-host index.ts = 2108 lines) without ever
+      // constructing an edit. (2026-06-18)
+      : history.map((h, i) => {
+          const cap = i === lastHistIdx ? 6000 : 500;
+          return `Turn ${h.turn}: ${h.thought_or_action}${h.tool_result ? `\n  → ${h.tool_result.ok ? "OK" : "ERR"}: ${JSON.stringify(h.tool_result.result).slice(0, cap)}` : ""}`;
+        }).join("\n\n");
 
     // When the previous turn's tool call failed, surface the error LOUDLY with a
     // directive to FIX the args (not repeat them). The plain history line was too

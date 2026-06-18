@@ -101,6 +101,10 @@ export async function resolvePriorFailedAttempts(
       attempts.map((a, i) => {
         const why = a.reason === "file_path_hallucination"
           ? `targeted NON-EXISTENT file(s) ${a.missing.join(", ")} — pick a file that actually exists`
+          : a.reason === "patch_noop"
+          ? "the patcher made NO edit (the proposed change was not actually present in the target file, the target file was wrong, or the change needs no edit) — re-examine the file/symbol and propose a concrete change that is genuinely present and needed"
+          : a.reason === "patch_typecheck_fail"
+          ? "the patch broke typecheck on the target — the proposed edit was wrong; propose a change that compiles"
           : `rejected as ${a.reason}`;
         return `${i + 1}. ${why}.` + (a.prior_summary ? ` Prior (failed) approach: "${a.prior_summary}".` : "");
       }).join("\n") +

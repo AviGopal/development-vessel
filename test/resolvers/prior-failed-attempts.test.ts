@@ -63,3 +63,27 @@ describe("prior_failed_attempts", () => {
     expect((r.body as any).count).toBe(1); // malformed skipped, valid kept
   });
 });
+
+describe("prior_failed_attempts — patch no-op signal", () => {
+  it("phrases a patch_noop rejection so the drafter knows the patcher made no edit", async () => {
+    const { mkdirSync, writeFileSync, rmSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const dir = join(tmpdir(), `pfa-noop-${Date.now()}`);
+    mkdirSync(join(dir, ".rejected"), { recursive: true });
+    writeFileSync(join(dir, ".rejected", "auto-noop-report.json"), JSON.stringify({
+      rejected_at: "2026-06-18T22:00:00Z",
+      reason: "patch_noop",
+      target_file: "repos/activity-api/src/learners/goal-template-mismatch.ts",
+      detail: "patch_with_tools: aborted — LLM declared done 2x without making any edit",
+      original_content_preview: '"summary": "export WebSocketMessage from broadcaster"',
+    }));
+    const { resolvePriorFailedAttempts } = await import("../../src/resolvers/prior-failed-attempts.js");
+    const r = await resolvePriorFailedAttempts({ type: "prior_failed_attempts", proposals_dir: dir });
+    const b = r.body as any;
+    expect(b.count).toBe(1);
+    expect(b.attempts[0].reason).toBe("patch_noop");
+    expect(b.summary_text).toContain("made NO edit");
+    try { rmSync(dir, { recursive: true, force: true }); } catch { /* */ }
+  });
+});

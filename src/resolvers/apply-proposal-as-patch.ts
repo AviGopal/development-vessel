@@ -755,7 +755,25 @@ export async function resolveApplyProposalAsPatch(pointer: ApplyProposalAsPatchP
   // staged patch lands.
   try {
   if (result.shape === "structuredError") {
-    console.error(`[apply_proposal_as_patch] patch_with_tools failed for ${chosen.name}: ${(result.body as Record<string, unknown>).detail}`);
+    const patchDetail = String((result.body as Record<string, unknown>).detail ?? "");
+    console.error(`[apply_proposal_as_patch] patch_with_tools failed for ${chosen.name}: ${patchDetail}`);
+    // Record the patch no-op/failure in .rejected/ so the drafter's
+    // prior_failed_attempts resolver surfaces it and the drafter stops
+    // re-proposing un-landable fixes. patch_with_tools no-op ("LLM declared
+    // done without editing") + verify-fail are the dominant landing-killers;
+    // only file_path_hallucination was captured here before, so the drafter
+    // was blind to them. (2026-06-18)
+    const patchReason = /without making any edit|no-?op|needs no change/i.test(patchDetail)
+      ? "patch_noop"
+      : /failing typecheck|verify/i.test(patchDetail)
+      ? "patch_typecheck_fail"
+      : "patch_failed";
+    const patchRejectedDir = `${proposalsDir}/.rejected`;
+    try { await mkdir(patchRejectedDir, { recursive: true }); } catch { /* tolerant */ }
+    try {
+      await writeFile(`${patchRejectedDir}/${chosen.name}`,
+        JSON.stringify({ rejected_at: new Date().toISOString(), reason: patchReason, target_file: targetFile, detail: patchDetail.slice(0, 300), original_content_preview: chosen.content.slice(0, 500) }, null, 2));
+    } catch { /* tolerant */ }
   }
     await writeFile(`${proposalsDir}/.applied/${chosen.name}`,
       JSON.stringify({ delegated_to: "patch_with_tools", outcome_shape: result.shape, applied_at: new Date().toISOString(), content_sha: createHash("sha256").update(chosen.content).digest("hex").slice(0, 16) }, null, 2));

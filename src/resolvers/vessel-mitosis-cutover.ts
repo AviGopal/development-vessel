@@ -550,6 +550,7 @@ export async function resolveVesselMitosisCutover(
     !!currentLiveSha &&
     !currentLiveSha.startsWith("<") &&
     stagedBaseSha === currentLiveSha;
+  console.error(`[mitosis-cutover] freshness vessel=${vessel_name} mitosis=${mitosis_version_id} staged_base_sha=${stagedBaseSha ?? "<missing>"} current_live_sha=${currentLiveSha ?? "<absent>"} freshnessOK=${freshnessOK} freshness_check_path=${freshnessCheckPath}`);
   if (!freshnessOK) {
     const reason = !stagedBaseSha
       ? "missing_base_sha"

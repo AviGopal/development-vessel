@@ -567,7 +567,7 @@ export async function resolveApplyProposalAsPatch(pointer: ApplyProposalAsPatchP
         .filter(Boolean)
         .join(" \n ") || content;
       const surg = assessProposalSurgical(descText);
-      if (!surg.surgical) { skipped.push({ proposal: e.name, reason: surg.reason }); continue; }
+      if (!surg.surgical) { console.error(`[apply-proposal-as-patch] skip non_surgical_proposal: ${e.name} reason=${surg.reason}`); skipped.push({ proposal: e.name, reason: surg.reason }); continue; }
     }
     chosen = { name: e.name, path: e.path, scenarioId, content, targetFile: targetFile ?? "" };
     break;

@@ -338,6 +338,29 @@ export async function resolvePatchWithTools(pointer: PatchWithToolsPointer): Pro
       continue;
     }
     if (action.action === "done") {
+      // No-op-done recovery (2026-06-18): the ReAct LLM commonly declares done
+      // WITHOUT ever calling an edit tool (observed live on a surgical typecheck
+      // fix: action=done at turn 2/5, file byte-unchanged -> post-loop reject with
+      // no chance to recover). Catch it IN-LOOP: if the live file is identical to
+      // the original, the patch is empty -> feed a hard correction and continue so
+      // the LLM actually applies the edit, instead of wasting the whole attempt.
+      const curSrcForNoop = await readFile(liveSrcPath, "utf-8").catch(() => beforeSrc);
+      if (createHash("sha256").update(curSrcForNoop).digest("hex").slice(0, 12) === beforeSha) {
+        const nn = (verifyFailCounts.get("__noop_done__") ?? 0) + 1;
+        verifyFailCounts.set("__noop_done__", nn);
+        if (nn >= 2) {
+          return structuredError(
+            `patch_with_tools: aborted — LLM declared done ${nn}x without making any edit (file unchanged). The proposal likely needs no change to this file, or the LLM will not act.`,
+            { history, before_sha: beforeSha },
+          );
+        }
+        history.push({
+          turn,
+          thought_or_action: `(no-op done) you declared done but the file is UNCHANGED — you made NO edit. You MUST call an edit tool (fs_edit or code_replace_lines) to apply the change BEFORE declaring done.`,
+          tool_result: { tool: "noop_done_guard", args: {}, result: { error: "file unchanged; no edit was made — call an edit tool" }, ok: false },
+        });
+        continue;
+      }
       // VERIFY-ON-DONE (2026-06-14): never accept the patch on the LLM's word.
       // Typecheck the live (in-progress) edit and, if the TARGET FILE now has
       // errors, feed them straight back so the patcher FIXES its own mistake

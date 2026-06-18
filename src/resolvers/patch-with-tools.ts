@@ -147,10 +147,19 @@ const TOOL_CATALOG_HELP = `Available tools (call exactly one per turn):
 4. code_insert_after_line { path, after_line, text }
    - Inserts \`text\` as a new line after line \`after_line\` (1-indexed, 0 = top).
 
+4b. code_read_lines { path, start_line, end_line }  <- READ EXACT lines before a range replace
+   - Returns the VERBATIM current content of lines [start_line..end_line] (1-indexed),
+     plus a line-numbered view. Use this to get the EXACT text before code_replace_lines
+     so your replacement preserves everything you are not changing. Reliable multi-line
+     edit flow: code_read_lines(start,end) -> code_replace_lines(start,end, <that exact
+     text with your minimal change applied>).
+
 5. code_replace_lines { path, start_line, end_line, text }
    - Replaces lines [start_line..end_line] (inclusive, 1-indexed) with \`text\`.
-   - DANGER: you must supply the FULL replacement text for that whole range. If
-     you haven't read the exact current content, you WILL destroy it. Prefer fs_edit.
+   - DANGER: you must supply the FULL replacement text for that whole range. ALWAYS
+     code_read_lines that exact range first and edit the returned text - never retype it
+     from memory or a truncated search, or you WILL destroy code. For a single-line or
+     single-token change, fs_edit is simpler.
 
 5b. fs_edit { path, old_string, new_string }  ← PREFERRED for surgical edits
    - Replaces the FIRST exact occurrence of old_string with new_string. Fails

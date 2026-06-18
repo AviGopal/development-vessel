@@ -18,6 +18,9 @@
 import type { ResolverResult } from "./types.js";
 import { METABOB_API_KEY } from "../config.js";
 
+// MAX_GOAL_LEN bounds the accepted goal payload size to prevent overflow into
+// downstream goal-host APIs, keep goal-parsing predictable and fast, and act as
+// a safety boundary against accidental or hostile oversized inputs.
 const MAX_GOAL_LEN = 8192;
 const GOAL_HOST_ENDPOINT = process.env["GOAL_HOST_VESSEL_ENDPOINT"] ?? "http://127.0.0.1:8210";
 

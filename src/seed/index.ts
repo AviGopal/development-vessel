@@ -34,6 +34,7 @@ import { DETECT_GATE_SATURATION_TEMPLATE } from "./detect-gate-saturation.js";
 import { DETECT_VESSEL_WRITE_ERROR_TEMPLATE } from "./detect-vessel-write-error.js";
 import { DETECT_CHAIN_FETCH_FAILURE_TEMPLATE } from "./detect-chain-fetch-failure.js";
 import { DETECT_PHANTOM_SUCCESS_TRACE_TEMPLATE } from "./detect-phantom-success-trace.js";
+import { DEAD_END_DECISION_SCAN_TICK_TEMPLATE } from "./dead-end-decision-scan-tick.js";
 import { DETECT_CUTOVER_STUCK_LOOP_TEMPLATE } from "./detect-cutover-stuck-loop.js";
 import { DETECT_PRECONDITION_REJECTION_TEMPLATE } from "./detect-precondition-rejection.js";
 import { AUDIT_DISPATCH_TARGET_DRIFT_TEMPLATE } from "./audit-dispatch-target-drift.js";
@@ -308,6 +309,11 @@ export const SEED_TEMPLATES: ActivityTemplate[] = [
   // substrate self-detection (2026-05-30): author detection templates for
   // observed bug classes — phantom-success traces (F25) are the first.
   DETECT_PHANTOM_SUCCESS_TRACE_TEMPLATE,
+  // substrate self-detection (2026-06-18): decision-without-action — a decision/
+  // selection task produces an impulse no downstream task consumes (the
+  // slot-binding select_or_produce dead-end the operator found by hand,
+  // generalized). Low cadence; routes to the drafter (recombination-fixable).
+  DEAD_END_DECISION_SCAN_TICK_TEMPLATE,
   DETECT_CUTOVER_STUCK_LOOP_TEMPLATE,
   // substrate self-detection (2026-05-30): pre-flight-rejected traces
   // (status=failure + duration<500ms + task_count=0) — F25 signature.

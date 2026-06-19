@@ -80,6 +80,13 @@ export const PRIORITY_CATEGORIES: string[] = [
   // cost miscalibration/inefficiency but never acts on it. Listed so it enters the
   // gap→drafter→patch_proposal→apply-proposal-as-patch→cutover code-fix pipeline.
   "cost_constraint",
+  // decision_without_action (2026-06-18, dead_end_decision_scan): a decision/
+  // selection task produces an impulse no downstream task consumes. Listed so
+  // it enters the gap→drafter pipeline instead of starving at rank -1. NOT in
+  // VESSEL_AUTHORING_CATEGORIES: it's recombination-fixable (add a downstream
+  // task consuming the existing impulse), so it routes to the drafter
+  // (draft-gap-closing-activity), not vessel authoring.
+  "decision_without_action",
 ];
 
 function rankOf(g: GapRow): number {

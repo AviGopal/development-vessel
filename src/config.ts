@@ -92,6 +92,15 @@ export const config = {
       // finding. Companion to detect-stale-pointer; embodies the
       // substrate_self_detection_principle (concept_9ldsmRgqSTd5).
       "phantom_trace_scan",
+      // Deterministic decision-without-action detector (2026-06-18): intra-
+      // trajectory scan of execution_trace_content.tasks[] for an actionable
+      // decision/selection task (e.g. slot-binding's select_or_produce) that
+      // PRODUCES a decision impulse NO downstream task consumes — the decision
+      // is computed then discarded. Emits a decision_without_action substrateGap
+      // per systematic (activity_id, task_id) class. Recombination-fixable
+      // (add a downstream consumer), so it routes to the drafter, not vessel-
+      // authoring. Same constitutional principle (concept_9ldsmRgqSTd5).
+      "dead_end_decision_scan",
       // Meta-detector (2026-06-13): templates declaring inputShapes/variables no
       // task consumes — the silent mis-wire that left draft-activity-from-pattern
       // dead. Deterministic registry lint -> substrateGap_write per offender.

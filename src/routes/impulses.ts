@@ -35,6 +35,7 @@ import { resolveResolverPatternReport } from "../resolvers/resolver-pattern-repo
 import { resolveMarkdownSplitSections } from "../resolvers/markdown-split-sections.js";
 import { resolveStalePointerEmit } from "../resolvers/stale-pointer-emit.js";
 import { resolvePhantomTraceScan } from "../resolvers/phantom-trace-scan.js";
+import { resolveDeadEndDecisionScan } from "../resolvers/dead-end-decision-scan.js";
 import { resolveTemplateInputLintScan } from "../resolvers/template-input-lint-scan.js";
 import { resolveGateSaturationScan } from "../resolvers/gate-saturation-scan.js";
 import { resolveCostExpectationScan } from "../resolvers/cost-expectation-scan.js";
@@ -228,6 +229,8 @@ async function dispatchInner(pointer: AnyPointer): Promise<ResolverResult> {
       return resolveStalePointerEmit(p as Parameters<typeof resolveStalePointerEmit>[0]);
     case "phantom_trace_scan":
       return resolvePhantomTraceScan(p as Parameters<typeof resolvePhantomTraceScan>[0]);
+    case "dead_end_decision_scan":
+      return resolveDeadEndDecisionScan(p as Parameters<typeof resolveDeadEndDecisionScan>[0]);
     case "template_input_lint_scan":
       return resolveTemplateInputLintScan(p as Parameters<typeof resolveTemplateInputLintScan>[0]);
     case "gate_saturation_scan":

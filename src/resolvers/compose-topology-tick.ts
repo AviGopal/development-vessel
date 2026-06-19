@@ -101,11 +101,38 @@ export async function resolveComposeTopologyTick(
     if (dispatched.length && !/probe/.test(a.id)) { compositeIds.add(a.id); composedTargets.add(dispatched.sort().join("|")); }
   }
 
+  // CONNECTIVITY-JUSTIFIED selection (operator 2026-06-19: "add cells below the gap only
+  // if the expected/demonstrated connectivity increase justifies the growth"). Fetch the
+  // current composition-graph degree of each node. Expected Δλ₂ heuristic:
+  //   - CROSS-LINK (both endpoints already composed, low-degree) raises λ₂ — builds a mesh
+  //     among the composed core → expected POSITIVE. Best.
+  //   - BOOTSTRAP (a not-yet-composed leaf, degree 0) adds it to the composed set; a single
+  //     such add is pendant-ish (slightly λ₂-negative) but is the necessary seed that later
+  //     cross-links raise. Allowed, but demoted.
+  //   - HUB endpoint (degree > HUB_DEG): composing it again makes a bigger star → expected
+  //     NEGATIVE → excluded outright (never make a hub hubbier).
+  const HUB_DEG = 8;
+  const deg = new Map<string, number>();
+  try {
+    const [edgeRows] = await sql(`SELECT parent_activity_id, child_activity_id FROM activity_composition_graph LIMIT 3000;`);
+    for (const e of edgeRows || []) {
+      const a = e.parent_activity_id, b = e.child_activity_id;
+      if (!a || !b || a === b) continue;
+      deg.set(a, (deg.get(a) ?? 0) + 1); deg.set(b, (deg.get(b) ?? 0) + 1);
+    }
+  } catch { /* graph read failed — fall back to leaf/strict ranking only */ }
+  const d = (id: string) => deg.get(id) ?? 0;
+  const isGraphHub = (id: string) => d(id) > HUB_DEG;
+  const crossLink = (p: Pair) => d(p.producer) >= 1 && d(p.consumer) >= 1 && !isGraphHub(p.producer) && !isGraphHub(p.consumer);
   const uncomposed = (p: Pair) => !composedTargets.has([p.producer, p.consumer].sort().join("|"));
+  const noHub = (p: Pair) => !isGraphHub(p.producer) && !isGraphHub(p.consumer); // never grow a hub
   const leafPair = (p: Pair) => isMeta(p.producer) === false && isMeta(p.consumer) === false;
-  const rank = (p: Pair) => (leafPair(p) ? 0 : 2) + (p.strict ? 0 : 1);
+  // rank: expected-λ₂-positive cross-links first, then leaf×leaf, then strict shape.
+  const rank = (p: Pair) => (crossLink(p) ? 0 : 4) + (leafPair(p) ? 0 : 2) + (p.strict ? 0 : 1);
   const underCap = compositeIds.size < MAX;
-  const fresh = underCap ? pairs.filter(uncomposed).sort((a, b) => rank(a) - rank(b))[0] : undefined;
+  const candidates = underCap ? pairs.filter((p) => uncomposed(p) && noHub(p)).sort((a, b) => rank(a) - rank(b)) : [];
+  const fresh = candidates[0];
+  const expected_lambda2 = fresh ? (crossLink(fresh) ? "positive (cross-link)" : "bootstrap (seed)") : null;
 
   async function dispatch(targetTemplateId: string, goal: string): Promise<any> {
     try {
@@ -158,6 +185,7 @@ export async function resolveComposeTopologyTick(
   const report = {
     generated_at: new Date().toISOString(),
     action, composite, execution_id: result?.executionId ?? null, outcome: result?.status ?? null,
+    expected_lambda2, graph_nodes: deg.size,
     chainable_pairs_available: pairs.length, existing_composites: compositeIds.size, under_cap: underCap,
     star_ratio, headroom, unlock_at: 0.35,
   };

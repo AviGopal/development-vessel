@@ -55,6 +55,7 @@ export const config = {
       "unknown_shape_report",
       "coverage_tick",
       "substrate_health_tick",
+      "compose_topology_tick",
       "failure_mode_matrix_score",
       "boredom_enqueue",
       // Memory closure (IAL 27.3.j.1): substrate-resident note store.

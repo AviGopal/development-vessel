@@ -20,6 +20,7 @@ import { PROBE_UNTRAVERSED_EDGE_TEMPLATE } from "./probe-untraversed-edge.js";
 import { ESCALATE_UNKNOWN_SHAPE_TEMPLATE } from "./escalate-unknown-shape.js";
 import { COVERAGE_TICK_TEMPLATE } from "./coverage-tick.js";
 import { SUBSTRATE_HEALTH_TICK_TEMPLATE } from "./substrate-health-tick.js";
+import { COMPOSE_TOPOLOGY_TICK_TEMPLATE } from "./compose-topology-tick.js";
 import { VESSEL_DEMAND_TICK_TEMPLATE } from "./vessel-demand-tick.js";
 import { GENERATIVE_FRONTIER_GAP_TICK_TEMPLATE } from "./generative-frontier-gap-tick.js";
 import { HARNESS_RUN_MATRIX_TEMPLATE } from "./harness-run-matrix.js";
@@ -154,6 +155,7 @@ export { PROBE_UNTRAVERSED_EDGE_TEMPLATE } from "./probe-untraversed-edge.js";
 export { ESCALATE_UNKNOWN_SHAPE_TEMPLATE } from "./escalate-unknown-shape.js";
 export { COVERAGE_TICK_TEMPLATE } from "./coverage-tick.js";
 export { SUBSTRATE_HEALTH_TICK_TEMPLATE } from "./substrate-health-tick.js";
+export { COMPOSE_TOPOLOGY_TICK_TEMPLATE } from "./compose-topology-tick.js";
 export { VESSEL_DEMAND_TICK_TEMPLATE } from "./vessel-demand-tick.js";
 export { GENERATIVE_FRONTIER_GAP_TICK_TEMPLATE } from "./generative-frontier-gap-tick.js";
 export { HARNESS_RUN_MATRIX_TEMPLATE } from "./harness-run-matrix.js";
@@ -267,6 +269,7 @@ export const SEED_TEMPLATES: ActivityTemplate[] = [
   ESCALATE_UNKNOWN_SHAPE_TEMPLATE,
   COVERAGE_TICK_TEMPLATE,
   SUBSTRATE_HEALTH_TICK_TEMPLATE,
+  COMPOSE_TOPOLOGY_TICK_TEMPLATE,
   // harness-as-lifecycle-participant (§2)
   HARNESS_RUN_MATRIX_TEMPLATE,
   // drafter-trigger-tick (V18, 2026-06-07) — bridges boredom rotation to the

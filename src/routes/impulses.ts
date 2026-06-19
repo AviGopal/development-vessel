@@ -24,6 +24,7 @@ import { resolveReachableUnlearnedReport } from "../resolvers/reachable-unlearne
 import { resolveUnknownShapeReport } from "../resolvers/unknown-shape-report.js";
 import { resolveCoverageTick } from "../resolvers/coverage-tick.js";
 import { resolveSubstrateHealthTick } from "../resolvers/substrate-health-tick.js";
+import { resolveComposeTopologyTick } from "../resolvers/compose-topology-tick.js";
 import { resolveFailureModeMatrixScore } from "../resolvers/failure-mode-matrix-score.js";
 import { resolveBoredomEnqueue } from "../resolvers/boredom-enqueue.js";
 import { resolveMemoryNote, resolveMemoryNoteWrite } from "../resolvers/memory-note.js";
@@ -204,6 +205,8 @@ async function dispatchInner(pointer: AnyPointer): Promise<ResolverResult> {
       return resolveCoverageTick(p as Parameters<typeof resolveCoverageTick>[0]);
     case "substrate_health_tick":
       return resolveSubstrateHealthTick(p as Parameters<typeof resolveSubstrateHealthTick>[0]);
+    case "compose_topology_tick":
+      return resolveComposeTopologyTick(p as Parameters<typeof resolveComposeTopologyTick>[0]);
     case "failure_mode_matrix_score":
       return resolveFailureModeMatrixScore(p as Parameters<typeof resolveFailureModeMatrixScore>[0]);
     case "boredom_enqueue":

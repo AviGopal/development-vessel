@@ -100,9 +100,9 @@ export const OBSERVE_ORTHOGONAL_PATTERNS_TEMPLATE: ActivityTemplate = {
           "aggregations of the recent 24h trace window. Your job: emit a JSON " +
           "array of catalogue-change decisions, classified by KIND.\n\n" +
           "## resolverPatternReport (per resolver+output_shape success rate)\n\n" +
-          "{{read_resolver_patterns_resolverPatternReport}}\n\n" +
+          "{{read_resolver_patterns}}\n\n" +
           "## failurePatternReport (failure clusters by template + first failed task)\n\n" +
-          "{{read_failure_patterns_failurePatternReport}}\n\n" +
+          "{{read_failure_patterns}}\n\n" +
           "## Existing detection templates (do NOT propose CREATE_DETECTOR for these)\n\n" +
           "- detect-phantom-success-trace (status=success, task_count=0)\n" +
           "- detect-precondition-rejection (status=failure, task_count=0, duration<500ms)\n" +

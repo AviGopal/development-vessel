@@ -280,11 +280,16 @@ export async function resolveSubstrateHealthTick(
   const template_count_at_window_start = templates.length - recentTemplates.length;
   const template_count_at_window_end = templates.length;
 
-  // Composition edges: fetch from composition success endpoint (best-effort)
+  // Composition edges: OBSERVABILITY ONLY (feeds edge_growth_rate_per_hour, NOT the
+  // gated stability rate). The prior URL /v2/activities/composition?since= returned
+  // 404 — the real edge endpoint is /v2/activities/composition/graph — so this count
+  // was silently 0 for the whole gate's history (harmless, since edges don't gate
+  // stability). Fixed to the working endpoint + client-side created_at filter so the
+  // reported edge-growth metric reflects reality (2026-06-19).
   let new_edges_added = 0;
   try {
     const edgeRes = await fetch(
-      `${METABOB_ENDPOINT}/v2/activities/composition?since=${encodeURIComponent(stabilitySince)}&limit=200`,
+      `${METABOB_ENDPOINT}/v2/activities/composition/graph?limit=500`,
       { headers: auth },
     );
     if (edgeRes.ok) {

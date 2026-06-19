@@ -324,16 +324,28 @@ async function staticEvaluate(
       let baseErrorCount = -1;
       let mitosisErrorCount = -1;
       if (baseRootForOverlay && stagedFiles && stagedFiles.length > 0) {
-        const errPattern = /error TS\d+:/g;
-        mitosisErrorCount = (r.output_tail.match(errPattern) ?? []).length;
+        // Count BOTH tsc errors AND shape-dispatch violations. check-shape-dispatch
+        // (the three-place-rule lint) exits 1 with NO `error TS` line, so a tsc-only
+        // count delta-excuses a HALF-WIRED new resolver — an advertised shape with no
+        // dispatch case (or vice-versa) — letting it slip FAVORABLE into a cutover.
+        // This is the Seam-③ soundness fix (2026-06-19): closing the gate hole that
+        // made net-new-resolver authoring unsafe. See SUBSTRATE_AS_DEC §4.4.
+        const countErrors = (out: string) =>
+          (out.match(/error TS\d+:/g) ?? []).length +
+          (out.match(/UNHANDLED ADVERTISED SHAPES|ORPHAN DISPATCH HANDLERS|violation\(s\) found/g) ?? []).length;
+        mitosisErrorCount = countErrors(r.output_tail);
         const baseCheck = await runCheck(bunCmd, ["run", scriptName], baseRootForOverlay, `base:bun run ${scriptName}`);
-        baseErrorCount = (baseCheck.output_tail.match(errPattern) ?? []).length;
-        // Only accept the patch if mitosis introduces NO new errors.
-        // We use error-count as the discriminator (vs exact set diff) because
-        // tsc output line numbers shift with even non-substantive edits, so
-        // a set-based comparison would over-reject. Count-based is monotone:
-        // mitosis_count > base_count strictly implies new errors exist.
-        if (mitosisErrorCount <= baseErrorCount) {
+        baseErrorCount = countErrors(baseCheck.output_tail);
+        // Primary guard, robust to checker-prose drift: a script the BASE passes
+        // (exit 0) but the mitosis tree FAILS (exit≠0) is by definition a NEW
+        // regression — never delta-excuse it regardless of parsed counts. This is
+        // what closes the shape-dispatch-only hole even if the markers above drift.
+        const cleanBaseDirtyMitosis = baseCheck.exit_code === 0 && r.exit_code !== 0;
+        // Accept only if NOT a clean-base/dirty-mitosis regression AND mitosis
+        // introduces no new counted errors. Count is monotone for tsc (line numbers
+        // shift, but mitosis_count > base_count ⇒ new errors); the exit-code guard
+        // covers checkers whose failures the count regex can't see.
+        if (!cleanBaseDirtyMitosis && mitosisErrorCount <= baseErrorCount) {
           isRegression = false;
           completed.push({
             ...baseCheck,

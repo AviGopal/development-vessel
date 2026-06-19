@@ -508,6 +508,14 @@ export const config = {
       "signature_cluster_scan",
       "build_signature_detector",
       "cost_expectation_scan",
+      // Seam ③ (net-new resolver authoring, 2026-06-19): emits an apply-able
+      // resolverAuthorProposal that scaffolds a NET-NEW resolver across the
+      // three-place rule — new resolver file + test (new_files[]) plus spliced
+      // config.ts + impulses.ts (overwrite_files[]). Does NOT write live source;
+      // the existing apply_proposal_as_patch → cutover machinery stages it and
+      // the FAVORABLE gate (tsc + check-shape-dispatch + bun test) verifies the
+      // four-file tree before promotion.
+      "author_new_resolver",
     ] as const,
     resolveEndpoint: "/v2/impulses/resolve",
     resolveRequestFormat: "pointer" as const,

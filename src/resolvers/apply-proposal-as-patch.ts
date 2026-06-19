@@ -179,6 +179,37 @@ async function exists(p: string): Promise<boolean> {
 }
 
 /**
+ * (Seam ③ / Change 5, 2026-06-19) Net-new resolver rate-limit. Authoring a
+ * brand-new resolver expands the vessel's capability surface and touches the
+ * three-place wiring (config + impulses + resolver file); a runaway author loop
+ * could flood the staging tree. Count `.applied/` sentinels marked
+ * `new_resolver:true` whose timestamp falls in the last hour; the caller skips
+ * staging when the count is at/over MAX_NEW_RESOLVERS_PER_HOUR. Best-effort:
+ * an unreadable sentinel dir returns 0 (fail-open — never block on IO error).
+ */
+async function countRecentNewResolverApplications(sentinelDir: string): Promise<number> {
+  const oneHourAgo = Date.now() - 3_600_000;
+  let count = 0;
+  let names: string[];
+  try { names = await readdir(sentinelDir); } catch { return 0; }
+  for (const n of names) {
+    try {
+      const sj = JSON.parse(await readFile(`${sentinelDir}/${n}`, "utf-8")) as { new_resolver?: boolean; applied_at?: string; staged_at?: string };
+      if (sj.new_resolver !== true) continue;
+      const tsStr = sj.applied_at ?? sj.staged_at ?? null;
+      const ts = tsStr ? Date.parse(tsStr) : NaN;
+      if (Number.isFinite(ts) && ts >= oneHourAgo) count++;
+    } catch { /* tolerant */ }
+  }
+  return count;
+}
+
+/** True when any staged subPath authors a NET-NEW resolver source file. */
+function stagesNewResolver(subPaths: string[]): boolean {
+  return subPaths.some((p) => /(^|\/)src\/resolvers\/[^/]+\.ts$/.test(p));
+}
+
+/**
  * V35 (2026-06-09) — sanitize proposal content before feeding to the patcher LLM.
  * The drafter (LLM-A) routinely embeds hypothetical code fragments in the
  * proposal description illustrating the proposed change. The patcher (LLM-B)
@@ -414,7 +445,7 @@ export async function resolveApplyProposalAsPatch(pointer: ApplyProposalAsPatchP
   // Walk entries in newest-first order; skip staged, malformed, or fieldless.
   // Record skip reasons so the caller can audit drain progress.
   const skipped: Array<{ proposal: string; reason: string }> = [];
-  let chosen: { name: string; path: string; scenarioId: string; content: string; targetFile: string } | null = null;
+  let chosen: { name: string; path: string; scenarioId: string; content: string; targetFile: string; isNewFile?: boolean } | null = null;
   for (const e of entries) {
     const scenarioId = e.name.replace(/-report\.json$/, "");
     if (mitosisDirs.some((d) => d.includes(scenarioId.slice(0, 32)))) { skipped.push({ proposal: e.name, reason: "already_staged" }); continue; }
@@ -474,7 +505,7 @@ export async function resolveApplyProposalAsPatch(pointer: ApplyProposalAsPatchP
     // Multi-file proposal (2026-06-05): proposals carrying `new_files[]` skip
     // the required_code_modifications check; the multi-file branch below picks
     // them up and writes each file's full content into the staged mitosis dir.
-    const pFull = parsed as { kind?: string; required_code_modifications?: Array<{ file?: string }>; new_files?: Array<{ path?: string; content?: string }>; vessel_shape_coverage?: unknown; trace_family_distribution?: unknown; [k: string]: unknown };
+    const pFull = parsed as { kind?: string; required_code_modifications?: Array<{ file?: string }>; new_files?: Array<{ path?: string; content?: string }>; overwrite_files?: Array<{ path?: string; content?: string }>; vessel_shape_coverage?: unknown; trace_family_distribution?: unknown; [k: string]: unknown };
     // V4 fix (2026-06-06): kind discriminator. The /workspace/proposals/ dir
     // mixes patch_proposals (with required_code_modifications[] or new_files[])
     // and legacy vessel_shape_coverage analytic reports (under a wrapper key
@@ -558,43 +589,68 @@ export async function resolveApplyProposalAsPatch(pointer: ApplyProposalAsPatchP
     // check (line 428), returns structuredError, and on the next apply cycle
     // picks the SAME proposal again. Archive bad proposals into .rejected/
     // (parallel to .applied/) so future cycles skip them via mtime walk.
-    const filesToVerify: string[] = [];
-    if (targetFile) filesToVerify.push(targetFile);
+    // (Seam ③ / Change 2, 2026-06-19) Split file-existence verification by
+    // intent. Cited EDIT targets (required_code_modifications[].file) MUST
+    // exist — an absent one is still a path hallucination. Declared NEW files
+    // (new_files[].path) MUST NOT exist — absence is now EXPECTED/accepted
+    // (the prior single-list gate rejected every genuinely-new file as a
+    // hallucination, the dead-gate). A "new" file that ALREADY exists is a
+    // distinct error (new_file_collision). Both still require derive-vessel +
+    // path-escape protection.
+    const filesMustExist: string[] = [];
+    if (targetFile) filesMustExist.push(targetFile);
+    const filesMustBeNew: string[] = [];
     if (Array.isArray(wrappedNewFiles)) {
-      for (const nf of wrappedNewFiles) if (typeof nf.path === "string") filesToVerify.push(nf.path);
+      for (const nf of wrappedNewFiles) if (typeof nf.path === "string") filesMustBeNew.push(nf.path);
     }
     if (hasNewFiles) {
-      for (const nf of pFull.new_files!) if (typeof nf.path === "string") filesToVerify.push(nf.path);
+      for (const nf of pFull.new_files!) if (typeof nf.path === "string") filesMustBeNew.push(nf.path);
     }
-    let allFilesExist = true;
-    const missingFiles: string[] = [];
-    for (const f of filesToVerify) {
+    // (Seam ③ / Change 3) overwrite_files[] — paths the proposal declares as
+    // MODIFICATION targets to be staged with full spliced content (e.g. the
+    // author-new-resolver chain's spliced config.ts + impulses.ts). They MUST
+    // EXIST (they are overwrites, not new files) and are therefore EXEMPT from
+    // the new_file_collision check. Bounded strictly to these declared paths.
+    const overwriteFilesRaw = Array.isArray(pFull.overwrite_files)
+      ? pFull.overwrite_files.filter((f): f is { path: string; content: string } => f != null && typeof f.path === "string" && typeof f.content === "string")
+      : [];
+    const filesToOverwriteInStaging = overwriteFilesRaw.map((f) => f.path);
+    let gateFail = false;
+    let gateReason: "file_path_hallucination" | "new_file_collision" = "file_path_hallucination";
+    const offendingFiles: string[] = [];
+    for (const f of [...filesMustExist, ...filesToOverwriteInStaging]) {
+      if (f.includes("..") || f.startsWith("/")) { gateFail = true; gateReason = "file_path_hallucination"; offendingFiles.push(`${f} (path escape)`); break; }
       const d = deriveVesselFromPath(f);
-      if (!d) {
-        allFilesExist = false;
-        missingFiles.push(`${f} (cannot derive vessel)`);
-        break;
-      }
+      if (!d) { gateFail = true; offendingFiles.push(`${f} (cannot derive vessel)`); break; }
       const livePath = join(vesselsRoot, d.vessel, d.subPath);
-      if (!(await exists(livePath))) {
-        allFilesExist = false;
-        missingFiles.push(f);
+      if (!(await exists(livePath))) { gateFail = true; offendingFiles.push(f); }
+    }
+    if (!gateFail) {
+      const overwriteSet = new Set(filesToOverwriteInStaging);
+      for (const f of filesMustBeNew) {
+        if (overwriteSet.has(f)) continue; // declared as overwrite — handled above, exempt
+        if (f.includes("..") || f.startsWith("/")) { gateFail = true; gateReason = "file_path_hallucination"; offendingFiles.push(`${f} (path escape)`); break; }
+        const d = deriveVesselFromPath(f);
+        if (!d) { gateFail = true; gateReason = "file_path_hallucination"; offendingFiles.push(`${f} (cannot derive vessel)`); break; }
+        const livePath = join(vesselsRoot, d.vessel, d.subPath);
+        if (await exists(livePath)) { gateFail = true; gateReason = "new_file_collision"; offendingFiles.push(f); }
+        // ABSENT is expected for a NEW file — accept.
       }
     }
-    if (!allFilesExist) {
+    if (gateFail) {
       // Archive to .rejected/ so next cycle's mtime walk treats it as already-handled.
       const rejectedDir = `${proposalsDir}/.rejected`;
       try { await mkdir(rejectedDir, { recursive: true }); } catch { /* tolerant */ }
       try {
         await writeFile(`${rejectedDir}/${e.name}`,
-          JSON.stringify({ rejected_at: new Date().toISOString(), reason: "file_path_hallucination", missing: missingFiles, original_content_preview: content.slice(0, 500) }, null, 2));
+          JSON.stringify({ rejected_at: new Date().toISOString(), reason: gateReason, offending: offendingFiles, original_content_preview: content.slice(0, 500) }, null, 2));
         // Move the original out of the active dir so the mtime-sort doesn't keep re-selecting it.
         // We can't unlink/rename across the resolver boundary safely, so write a sentinel into
         // .applied/ — apply-loop reads .applied/ and skips matching entries (see appliedSet).
         await writeFile(`${proposalsDir}/.applied/${e.name}`,
-          JSON.stringify({ rejected_at: new Date().toISOString(), reason: "file_path_hallucination", missing: missingFiles, content_sha: contentSha }, null, 2));
+          JSON.stringify({ rejected_at: new Date().toISOString(), reason: gateReason, offending: offendingFiles, content_sha: contentSha }, null, 2));
       } catch { /* tolerant */ }
-      skipped.push({ proposal: e.name, reason: `file_path_hallucination: ${missingFiles.join(", ").slice(0, 120)}` });
+      skipped.push({ proposal: e.name, reason: `${gateReason}: ${offendingFiles.join(", ").slice(0, 120)}` });
       continue;
     }
     // Surgical pre-gate (2026-06-18): only the single-file patch_with_tools path
@@ -609,7 +665,19 @@ export async function resolveApplyProposalAsPatch(pointer: ApplyProposalAsPatchP
       const surg = assessProposalSurgical(descText);
       if (!surg.surgical) { console.error(`[apply-proposal-as-patch] skip non_surgical_proposal: ${e.name} reason=${surg.reason}`); skipped.push({ proposal: e.name, reason: surg.reason }); continue; }
     }
-    chosen = { name: e.name, path: e.path, scenarioId, content, targetFile: targetFile ?? "" };
+    // (Seam ③) Description-only NET-NEW file: proposal cites exactly one new
+    // file (a new_files[] path with NO full content, so the multi-file
+    // full-content path below does not pick it up) and NO edit target. Route it
+    // through the single-file patcher with is_new_file:true so the patcher
+    // AUTHORS the file via fs_write. (A new_files[] entry WITH content is handled
+    // by the multi-file direct-write path; effectiveHasNewFiles guards that.)
+    let effectiveTarget = targetFile ?? "";
+    let chosenIsNew = false;
+    if (!targetFile && !effectiveHasNewFiles && filesMustBeNew.length === 1) {
+      effectiveTarget = filesMustBeNew[0]!;
+      chosenIsNew = true;
+    }
+    chosen = { name: e.name, path: e.path, scenarioId, content, targetFile: effectiveTarget, isNewFile: chosenIsNew };
     break;
   }
   if (!chosen) {
@@ -628,7 +696,7 @@ export async function resolveApplyProposalAsPatch(pointer: ApplyProposalAsPatchP
   // chain ships new-resolver scaffolds; vessel-mitosis-cutover already accepts
   // N staged_files via host-sync intent. The search/replace path below remains
   // the canonical single-file flow.
-  type ParsedFull = { new_files?: Array<{ path?: string; content?: string }>; required_code_modifications?: Array<{ file?: string }> };
+  type ParsedFull = { new_files?: Array<{ path?: string; content?: string }>; overwrite_files?: Array<{ path?: string; content?: string }>; required_code_modifications?: Array<{ file?: string }> };
   let parsedFull: ParsedFull | null = null;
   const tolerantFull = parseFirstJsonObject(chosen.content);
   if (tolerantFull && typeof tolerantFull === "object") parsedFull = tolerantFull as ParsedFull;
@@ -636,16 +704,24 @@ export async function resolveApplyProposalAsPatch(pointer: ApplyProposalAsPatchP
     (f): f is { path: string; content: string } =>
       f != null && typeof f.path === "string" && typeof f.content === "string",
   );
-  if (newFiles.length > 0) {
+  // (Seam ③ / Change 3) Spliced MODIFICATION targets — existing files (config.ts,
+  // impulses.ts) staged with full content. They co-stage with new_files in the
+  // same mitosis tree; the gate above already verified they EXIST (exempt from
+  // new_file_collision). Tagged so the staging loop and rate-limit see them.
+  const overwriteFiles = ((parsedFull?.overwrite_files ?? []) as Array<{ path?: string; content?: string }>).filter(
+    (f): f is { path: string; content: string } =>
+      f != null && typeof f.path === "string" && typeof f.content === "string",
+  );
+  if (newFiles.length + overwriteFiles.length > 0) {
     // Verify all share a vessel root and none escape the staging tree.
     const vesselRoots = new Set<string>();
     const fileEntries: Array<{ vessel: string; subPath: string; content: string; absSource: string }> = [];
-    for (const nf of newFiles) {
+    for (const nf of [...newFiles, ...overwriteFiles]) {
       if (nf.path.includes("..") || nf.path.startsWith("/")) {
-        return structuredError(`new_files[] path escape: ${nf.path}`, { proposal: chosen.name });
+        return structuredError(`multi-file path escape: ${nf.path}`, { proposal: chosen.name });
       }
       const d = deriveVesselFromPath(nf.path);
-      if (!d) return structuredError(`new_files[] path cannot derive vessel: ${nf.path}`, { proposal: chosen.name });
+      if (!d) return structuredError(`multi-file path cannot derive vessel: ${nf.path}`, { proposal: chosen.name });
       vesselRoots.add(d.vessel);
       fileEntries.push({ vessel: d.vessel, subPath: d.subPath, content: nf.content, absSource: nf.path });
     }
@@ -653,6 +729,21 @@ export async function resolveApplyProposalAsPatch(pointer: ApplyProposalAsPatchP
       return structuredError(`new_files[] must target a single vessel; got: ${[...vesselRoots].join(",")}`, { proposal: chosen.name });
     }
     const vesselOnly = [...vesselRoots][0]!;
+    // (Seam ③ / Change 5) Net-new resolver rate-limit. A multi-file proposal that
+    // authors a new src/resolvers/*.ts file is bounded per hour so a runaway
+    // author loop cannot flood the staging tree with capability-surface growth.
+    const multifileSubPaths = fileEntries.map((e) => e.subPath);
+    if (stagesNewResolver(multifileSubPaths)) {
+      const maxPerHour = Number(process.env["MAX_NEW_RESOLVERS_PER_HOUR"] ?? 2);
+      const recent = await countRecentNewResolverApplications(sentinelDir);
+      if (recent >= maxPerHour) {
+        return structuredError("new_resolver_rate_limited", {
+          proposal: chosen.name,
+          recent_new_resolver_applications: recent,
+          max_per_hour: maxPerHour,
+        });
+      }
+    }
     if (dryRun) {
       return {
         shape: "mitosisStaged",
@@ -697,7 +788,7 @@ export async function resolveApplyProposalAsPatch(pointer: ApplyProposalAsPatchP
     catch (err) { return structuredError(`pending write failed: ${(err as Error).message}`); }
     try {
       await writeFile(`${proposalsDir}/.applied/${chosen.name}`,
-        JSON.stringify({ staged_at: pendingBody.staged_at, mitosis_version_id: versionId, multifile: true, file_count: stagedFiles.length, content_sha: createHash("sha256").update(chosen.content).digest("hex").slice(0, 16) }, null, 2));
+        JSON.stringify({ staged_at: pendingBody.staged_at, mitosis_version_id: versionId, multifile: true, file_count: stagedFiles.length, new_resolver: stagesNewResolver(multifileSubPaths), content_sha: createHash("sha256").update(chosen.content).digest("hex").slice(0, 16) }, null, 2));
     } catch { /* tolerant */ }
     triggerMitosisTick(); // self-propel: evaluate→cutover without boredom latency
     return {
@@ -721,15 +812,32 @@ export async function resolveApplyProposalAsPatch(pointer: ApplyProposalAsPatchP
   const { vessel, subPath } = derived;
 
   // 4. Read live source (under /vessels/<vessel>/<subPath>); compute SHA.
+  // (Seam ③) For a NET-NEW file the live source is EXPECTED absent — tolerate it
+  // and thread is_new_file through to the patcher (which authors via fs_write).
   const liveSrcPath = join(vesselsRoot, vessel, subPath);
-  if (!(await exists(liveSrcPath))) {
+  const isNewFileTarget = chosen.isNewFile === true;
+  if (!isNewFileTarget && !(await exists(liveSrcPath))) {
     return structuredError(`live source missing: ${liveSrcPath}`, { proposal: chosen.name, target_file: targetFile });
   }
-  const liveSrc = await readFile(liveSrcPath, "utf-8");
+  const liveSrc = isNewFileTarget ? "" : await readFile(liveSrcPath, "utf-8");
   const baseSha = createHash("sha256").update(liveSrc).digest("hex").slice(0, 12);
 
+  // (Seam ③ / Change 5) Net-new resolver rate-limit on the patcher-authored path.
+  if (isNewFileTarget && stagesNewResolver([subPath])) {
+    const maxPerHour = Number(process.env["MAX_NEW_RESOLVERS_PER_HOUR"] ?? 2);
+    const recent = await countRecentNewResolverApplications(`${proposalsDir}/.applied`);
+    if (recent >= maxPerHour) {
+      return structuredError("new_resolver_rate_limited", {
+        proposal: chosen.name,
+        target_file: targetFile,
+        recent_new_resolver_applications: recent,
+        max_per_hour: maxPerHour,
+      });
+    }
+  }
+
   if (dryRun) {
-    return { shape: "mitosisStaged", body: { dispatched: null, dry_run: true, would_stage: { proposal: chosen.name, target: targetFile, vessel, base_sha: baseSha } } };
+    return { shape: "mitosisStaged", body: { dispatched: null, dry_run: true, would_stage: { proposal: chosen.name, target: targetFile, vessel, base_sha: baseSha, is_new_file: isNewFileTarget } } };
   }
 
   // V36 (2026-06-10) — delegate the actual patching to patch_with_tools,
@@ -745,6 +853,7 @@ export async function resolveApplyProposalAsPatch(pointer: ApplyProposalAsPatchP
     type: "patch_with_tools",
     proposal_text: sanitizeProposalForPatcher(chosen.content),
     target_file: targetFile,
+    is_new_file: isNewFileTarget,
     vessels_root: vesselsRoot,
     workspace_root: workspaceRoot,
   });
@@ -776,7 +885,7 @@ export async function resolveApplyProposalAsPatch(pointer: ApplyProposalAsPatchP
     } catch { /* tolerant */ }
   }
     await writeFile(`${proposalsDir}/.applied/${chosen.name}`,
-      JSON.stringify({ delegated_to: "patch_with_tools", outcome_shape: result.shape, applied_at: new Date().toISOString(), content_sha: createHash("sha256").update(chosen.content).digest("hex").slice(0, 16) }, null, 2));
+      JSON.stringify({ delegated_to: "patch_with_tools", outcome_shape: result.shape, applied_at: new Date().toISOString(), new_resolver: isNewFileTarget && stagesNewResolver([subPath]) && result.shape === "mitosisStaged", content_sha: createHash("sha256").update(chosen.content).digest("hex").slice(0, 16) }, null, 2));
   } catch { /* tolerant */ }
   return result;
 }

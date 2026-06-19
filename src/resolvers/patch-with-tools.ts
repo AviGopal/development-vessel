@@ -25,7 +25,7 @@
  */
 
 import { createHash } from "node:crypto";
-import { mkdir, writeFile, readFile, copyFile } from "node:fs/promises";
+import { mkdir, writeFile, readFile, copyFile, unlink } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { METABOB_ENDPOINT, METABOB_API_KEY } from "../config.js";
 import type { ResolverResult } from "./types.js";
@@ -48,6 +48,15 @@ export interface PatchWithToolsPointer {
   max_iterations?: number;
   /** Bounded outer-retry attempts (default 3); resets to original between tries. */
   max_attempts?: number;
+  /**
+   * Seam ③ (net-new resolver authoring, 2026-06-19). When set, the target is a
+   * NET-NEW file that must NOT already exist: the patcher authors its full
+   * contents with a single fs_write rather than READ→fs_edit. The "live source
+   * missing" guard is tolerated (absence is expected); a pre-existing target is
+   * rejected. Per-attempt reset / fail-restore UNLINKS the file (writing "" back
+   * leaves a stub that poisons the next attempt's existence check).
+   */
+  is_new_file?: boolean;
 }
 
 type ToolCall = { tool: string; args: Record<string, unknown> };
@@ -168,6 +177,12 @@ const TOOL_CATALOG_HELP = `Available tools (call exactly one per turn):
      a code_search result (include enough surrounding context to be unique) and
      make new_string the minimal change. This is the safest way to edit.
 
+5c. fs_write { path, content }  ← ONLY for authoring a NET-NEW file
+   - Writes the FULL contents of \`path\`, creating parent dirs. Use EXACTLY ONCE
+     when the proposal declares a NEW file that does not yet exist. NEVER call it
+     on an existing file (use fs_edit / code_replace_lines for those) — it
+     overwrites the whole file.
+
 6. code_add_import { path, module, specifier }
    - Idempotent. Adds an import; merges into existing brace-form imports.
 
@@ -225,10 +240,33 @@ export async function resolvePatchWithTools(pointer: PatchWithToolsPointer): Pro
   if (!derived) return structuredError(`cannot derive vessel from path: ${pointer.target_file}`);
   const { vessel, subPath } = derived;
   const liveSrcPath = join(vesselsRoot, vessel, subPath);
+  const isNewFile = pointer.is_new_file === true;
 
   const beforeSrc = await readFile(liveSrcPath, "utf-8").catch(() => null);
-  if (beforeSrc === null) return structuredError(`live source missing: ${liveSrcPath}`);
-  const beforeSha = createHash("sha256").update(beforeSrc).digest("hex").slice(0, 12);
+  if (!isNewFile && beforeSrc === null) return structuredError(`live source missing: ${liveSrcPath}`);
+  // Seam ③: authoring a NET-NEW file — refuse if it ALREADY exists (the patcher
+  // would clobber, not author). Absence is the expected state here.
+  if (isNewFile && beforeSrc !== null) {
+    return structuredError(`new-file target already exists: ${liveSrcPath} (use fs_edit, not is_new_file)`);
+  }
+  // baseContent is "" for a net-new file; the SHA/reset/restore logic downstream
+  // uses it as the canonical "before" state.
+  const baseContent = beforeSrc ?? "";
+  const beforeSha = createHash("sha256").update(baseContent).digest("hex").slice(0, 12);
+
+  // resetTarget — restore the live path to its pre-attempt state. For a net-new
+  // file that means UNLINK (writing "" back leaves a stub that poisons the next
+  // attempt's existence check + makes the no-op guard pass on an empty file);
+  // for an existing file, write the original content back.
+  const resetTarget = async (): Promise<void> => {
+    try {
+      if (isNewFile) {
+        await unlink(liveSrcPath).catch(() => { /* not yet created */ });
+      } else {
+        await writeFile(liveSrcPath, baseContent);
+      }
+    } catch { /* best-effort */ }
+  };
 
   const llmEndpoint = await findLlmEndpoint();
   if (!llmEndpoint) return structuredError("no llm_completion vessel found in discovery");
@@ -259,7 +297,7 @@ export async function resolvePatchWithTools(pointer: PatchWithToolsPointer): Pro
 
   for (let attempt = 1; attempt <= maxAttempts && !finished; attempt++) {
     if (attempt > 1) {
-      try { await writeFile(liveSrcPath, beforeSrc); } catch { /* best-effort */ }
+      await resetTarget();
       history.length = 0;
       failedCallCounts.clear();
       verifyFailCounts.clear();
@@ -331,10 +369,18 @@ export async function resolvePatchWithTools(pointer: PatchWithToolsPointer): Pro
         `search wastes the budget and the patch is REJECTED at the cap.\n\n`
       : "";
 
+    // Seam ③ decision rule: a net-new file is AUTHORED with one fs_write (full
+    // content) then done — there is nothing to READ first. An existing file is
+    // edited READ→fs_edit. Surface the right path so the patcher does not waste
+    // turns code_search-ing a file that does not exist yet.
+    const decisionRule = isNewFile
+      ? `## ⚠ NET-NEW FILE — AUTHOR IT, DO NOT SEARCH\nThe target file does NOT exist yet; the proposal declares it as a new file. Do NOT call code_search / code_find_function (there is nothing to read). Your FIRST action MUST be fs_write { path: "${containerPath}", content: <the FULL file contents> }, then emit done. Write complete, well-formed TypeScript that typechecks; the file is typecheck-verified before done.\n\n`
+      : `MINIMAL-EDIT RULE: make the SMALLEST edit that satisfies the proposal. First READ the exact current lines you will change (code_search / code_find_function), then change ONLY those. Preserve every surrounding URL, header, identifier, type, and import style EXACTLY as they appear — never retype code from memory or invent values. A named export is imported as { name } (not a default import). After your edit, the file is typecheck-verified; if it fails, you must fix it before declaring done.\n\n`;
+
     const prompt =
       `You are patching a source file via fine-grained code tools. The proposal describes what to change; you use the tools to inspect the file and apply the change.\n\n` +
       priorBlock +
-      `MINIMAL-EDIT RULE: make the SMALLEST edit that satisfies the proposal. First READ the exact current lines you will change (code_search / code_find_function), then change ONLY those. Preserve every surrounding URL, header, identifier, type, and import style EXACTLY as they appear — never retype code from memory or invent values. A named export is imported as { name } (not a default import). After your edit, the file is typecheck-verified; if it fails, you must fix it before declaring done.\n\n` +
+      decisionRule +
       `## Target file (container path)\n${containerPath}\n\n` +
       `## Proposal (intent — code samples may be illustrative, NOT the actual file contents)\n${pointer.proposal_text}\n\n` +
       `## Tool catalog\n${TOOL_CATALOG_HELP}\n\n` +
@@ -363,7 +409,7 @@ export async function resolvePatchWithTools(pointer: PatchWithToolsPointer): Pro
       // no chance to recover). Catch it IN-LOOP: if the live file is identical to
       // the original, the patch is empty -> feed a hard correction and continue so
       // the LLM actually applies the edit, instead of wasting the whole attempt.
-      const curSrcForNoop = await readFile(liveSrcPath, "utf-8").catch(() => beforeSrc);
+      const curSrcForNoop = await readFile(liveSrcPath, "utf-8").catch(() => baseContent);
       if (createHash("sha256").update(curSrcForNoop).digest("hex").slice(0, 12) === beforeSha) {
         const nn = (verifyFailCounts.get("__noop_done__") ?? 0) + 1;
         verifyFailCounts.set("__noop_done__", nn);
@@ -375,7 +421,7 @@ export async function resolvePatchWithTools(pointer: PatchWithToolsPointer): Pro
         }
         history.push({
           turn,
-          thought_or_action: `(no-op done) you declared done but the file is UNCHANGED — you made NO edit. You MUST call an edit tool (fs_edit or code_replace_lines) to apply the change BEFORE declaring done.`,
+          thought_or_action: `(no-op done) you declared done but the file is UNCHANGED — you made NO edit. You MUST call an edit tool (${isNewFile ? "fs_write to author the new file" : "fs_edit or code_replace_lines"}) to apply the change BEFORE declaring done.`,
           tool_result: { tool: "noop_done_guard", args: {}, result: { error: "file unchanged; no edit was made — call an edit tool" }, ok: false },
         });
         continue;
@@ -401,7 +447,7 @@ export async function resolvePatchWithTools(pointer: PatchWithToolsPointer): Pro
       const vn = (verifyFailCounts.get(sig) ?? 0) + 1;
       verifyFailCounts.set(sig, vn);
       if (vn >= 2) {
-        try { await writeFile(liveSrcPath, beforeSrc); } catch { /* best-effort */ }
+        await resetTarget();
         return structuredError(
           `patch_with_tools: aborted — the patch keeps failing typecheck with the SAME ${targetErrors.length} error(s) in ${targetBase} (${vn}×). Not burning cycles re-producing a broken patch. Errors: ${targetErrors.slice(0, 3).join(" ; ")}`,
           { history, before_sha: beforeSha, verify_errors: targetErrors },
@@ -445,7 +491,7 @@ export async function resolvePatchWithTools(pointer: PatchWithToolsPointer): Pro
       const n = (failedCallCounts.get(sig) ?? 0) + 1;
       failedCallCounts.set(sig, n);
       if (n >= 3) {
-        try { await writeFile(liveSrcPath, beforeSrc); } catch { /* best-effort */ }
+        await resetTarget();
         return structuredError(
           `patch_with_tools: aborted — ${tool} failed ${n}× with the SAME args (likely a malformed call, e.g. a missing required field). Last error: ${JSON.stringify(result.body).slice(0, 200)}`,
           { history, before_sha: beforeSha, stuck_signature: sig },
@@ -472,7 +518,7 @@ export async function resolvePatchWithTools(pointer: PatchWithToolsPointer): Pro
   if (!finished) {
     // V38: the code tools edit liveSrcPath IN PLACE during the loop; restore the
     // original so a failed/capped patch never corrupts live source.
-    try { await writeFile(liveSrcPath, beforeSrc); } catch { /* best-effort */ }
+    await resetTarget();
     return structuredError(
       `patch_with_tools: ${attemptFailures.length} attempt(s) exhausted without a verified patch`,
       { history, before_sha: beforeSha, attempt_failures: attemptFailures },
@@ -498,8 +544,10 @@ export async function resolvePatchWithTools(pointer: PatchWithToolsPointer): Pro
 
   // Restore the live container file to its pre-patch state. The cutover will
   // apply the staged version via host-sync intent; we must not also mutate
-  // the container behind the freshness gate.
-  try { await writeFile(liveSrcPath, beforeSrc); } catch { /* best-effort */ }
+  // the container behind the freshness gate. For a net-new file this UNLINKS
+  // the just-authored file (resetTarget) — the staged copy is the source of
+  // truth and cutover applies it; leaving the live stub would poison re-runs.
+  await resetTarget();
 
   const versionId = `mitosis-${stamp}`;
   const pendingPath = join(workspaceRoot, "mitosis-pending.json");

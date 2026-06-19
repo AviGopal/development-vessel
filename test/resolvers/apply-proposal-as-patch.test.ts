@@ -25,10 +25,12 @@ describe("apply_proposal_as_patch resolver", () => {
     process.env["WORKSPACE_ROOT"] = base;
   });
 
-  it("returns dispatched=null when no proposals exist", async () => {
+  it("returns structuredError(no eligible) when no proposals exist", async () => {
+    // Contract (2026-06-06): no-work is a no-op outcome surfaced as structuredError
+    // so boredom Thompson posteriors don't record an empty win.
     const r = await resolveApplyProposalAsPatch({ type: "apply_proposal_as_patch", proposals_dir: proposalsDir, vessels_root: vesselsRoot, pending_path: pendingPath });
-    expect(r.shape).toBe("mitosisStaged");
-    expect((r.body as { dispatched: unknown }).dispatched).toBeNull();
+    expect(r.shape).toBe("structuredError");
+    expect((r.body as { detail: string }).detail).toContain("no eligible");
   });
 
   it("dry-run identifies target proposal and computes base SHA without writing", async () => {
@@ -62,10 +64,9 @@ describe("apply_proposal_as_patch resolver", () => {
     writeFileSync(join(proposalsDir, "auto-bad-report.json"), JSON.stringify({ scenario_id: "auto-bad", notes: "no mods" }));
     writeFileSync(join(proposalsDir, "auto-truncated-report.json"), '{"scenario_id":"auto-truncated", "required_code_mod'); // intentional truncation
     const r = await resolveApplyProposalAsPatch({ type: "apply_proposal_as_patch", proposals_dir: proposalsDir, vessels_root: vesselsRoot, pending_path: pendingPath, dry_run: true });
-    expect(r.shape).toBe("mitosisStaged");
-    const body = r.body as { dispatched: unknown; reason: string; skipped: Array<{ reason: string }> };
-    expect(body.dispatched).toBeNull();
-    expect(body.reason).toContain("no eligible");
+    expect(r.shape).toBe("structuredError");
+    const body = r.body as { detail: string; skipped: Array<{ reason: string }> };
+    expect(body.detail).toContain("no eligible");
     expect(body.skipped.some((s) => s.reason === "no_required_code_modifications")).toBe(true);
     expect(body.skipped.some((s) => s.reason === "parse_failed")).toBe(true);
   });
@@ -82,8 +83,8 @@ describe("apply_proposal_as_patch resolver", () => {
     // Pre-stage a matching mitosis dir.
     mkdirSync(join(vesselsRoot, `demo-vessel-mitosis-${sid.slice(0, 32)}-2026`), { recursive: true });
     const r = await resolveApplyProposalAsPatch({ type: "apply_proposal_as_patch", proposals_dir: proposalsDir, vessels_root: vesselsRoot, pending_path: pendingPath, dry_run: true });
-    expect(r.shape).toBe("mitosisStaged");
-    expect((r.body as { dispatched: unknown }).dispatched).toBeNull();
+    expect(r.shape).toBe("structuredError");
+    expect((r.body as { detail: string }).detail).toContain("no eligible");
   });
 
   it("tolerates multi-object LLM output (proposal + addendum/narrative)", async () => {
@@ -107,52 +108,57 @@ describe("apply_proposal_as_patch resolver", () => {
     expect(body.would_stage?.target).toBe("repos/demo-vessel/src/y.ts");
   });
 
-  it("applies search/replace ops from the LLM and writes the patched mitosis file", async () => {
-    // Stage vessel + live source where the LLM's search will match exactly once.
+  it("(Seam ③) chooses an EXISTING edit target (required_code_modifications) via dry-run", async () => {
+    // An edit target that exists on disk is selected and routed to the patcher
+    // (verified here in dry-run so we don't mock the whole patcher surface).
     const vesselDir = join(vesselsRoot, "demo-vessel", "src");
     mkdirSync(vesselDir, { recursive: true });
-    const liveSrc = "export const VERSION = 'v1';\nexport const NAME = 'demo';\n";
-    writeFileSync(join(vesselDir, "z.ts"), liveSrc);
-    const proposal = { scenario_id: "auto-srops", required_code_modifications: [{ file: "repos/demo-vessel/src/z.ts", description: "append doc note" }] };
-    writeFileSync(join(proposalsDir, "auto-srops-report.json"), JSON.stringify(proposal));
-
-    // Mock the LLM endpoint by setting LLM_COMPLETION_ENDPOINT and standing up
-    // a one-shot Bun server that returns a search/replace op array.
-    const ops = [{ search: "export const NAME = 'demo';\n", replace: "export const NAME = 'demo';\n// Substrate doc note (2026-06-04): appended\n" }];
-    const server = Bun.serve({
-      port: 0,
-      fetch: async () => new Response(JSON.stringify({ content: JSON.stringify(ops) }), { headers: { "Content-Type": "application/json" } }),
-    });
-    process.env["LLM_COMPLETION_ENDPOINT"] = `http://127.0.0.1:${server.port}/resolve`;
-    try {
-      const r = await resolveApplyProposalAsPatch({ type: "apply_proposal_as_patch", proposals_dir: proposalsDir, vessels_root: vesselsRoot, pending_path: pendingPath });
-      expect(r.shape).toBe("mitosisStaged");
-      const body = r.body as { dispatched?: string; mitosis_root?: string };
-      expect(body.dispatched).toBe("auto-srops-report.json");
-      // Verify staged file contains the appended line and differs from input.
-      const stagedFile = join(body.mitosis_root!, "src/z.ts");
-      const staged = await Bun.file(stagedFile).text();
-      expect(staged).toContain("Substrate doc note (2026-06-04): appended");
-      expect(staged).not.toBe(liveSrc);
-    } finally {
-      server.stop();
-      delete process.env["LLM_COMPLETION_ENDPOINT"];
-    }
+    writeFileSync(join(vesselDir, "z.ts"), "export const VERSION = 'v1';\n");
+    const proposal = { scenario_id: "auto-edit", required_code_modifications: [{ file: "repos/demo-vessel/src/z.ts", description: "add an `export const FLAG = true;` line" }] };
+    writeFileSync(join(proposalsDir, "auto-edit-report.json"), JSON.stringify(proposal));
+    const r = await resolveApplyProposalAsPatch({ type: "apply_proposal_as_patch", proposals_dir: proposalsDir, vessels_root: vesselsRoot, pending_path: pendingPath, dry_run: true });
+    expect(r.shape).toBe("mitosisStaged");
+    const body = r.body as { dry_run?: boolean; would_stage?: { target: string; is_new_file?: boolean } };
+    expect(body.dry_run).toBe(true);
+    expect(body.would_stage?.target).toBe("repos/demo-vessel/src/z.ts");
+    expect(body.would_stage?.is_new_file).toBe(false);
   });
 
-  it("rejects when LLM ops produce a no-op output", async () => {
-    const vesselDir = join(vesselsRoot, "demo-vessel", "src");
+  it("(Seam ③ / Change 2) ABSENT new_file is now ACCEPTED (dead-gate fixed)", async () => {
+    // A genuinely-new file (declared with full content) whose path does NOT
+    // exist on disk must NO LONGER be rejected as file_path_hallucination.
+    const proposal = {
+      scenario_id: "auto-newfile-ok",
+      new_files: [
+        { path: "repos/demo-vessel/src/resolvers/freshly-authored.ts", content: "export const NEW = 1;\n" },
+      ],
+    };
+    writeFileSync(join(proposalsDir, "auto-newfile-ok-report.json"), JSON.stringify(proposal));
+    const r = await resolveApplyProposalAsPatch({ type: "apply_proposal_as_patch", proposals_dir: proposalsDir, vessels_root: vesselsRoot, pending_path: pendingPath });
+    expect(r.shape).toBe("mitosisStaged");
+    const body = r.body as { dispatched: string; multifile: boolean; staged_files: string[] };
+    expect(body.dispatched).toContain("auto-newfile-ok");
+    expect(body.multifile).toBe(true);
+    expect(body.staged_files).toContain("src/resolvers/freshly-authored.ts");
+  });
+
+  it("(Seam ③ / Change 2) a new_file that ALREADY exists → new_file_collision", async () => {
+    const vesselDir = join(vesselsRoot, "demo-vessel", "src", "resolvers");
     mkdirSync(vesselDir, { recursive: true });
-    writeFileSync(join(vesselDir, "n.ts"), "const X = 1;\n");
-    writeFileSync(join(proposalsDir, "auto-noop-report.json"), JSON.stringify({ scenario_id: "auto-noop", required_code_modifications: [{ file: "repos/demo-vessel/src/n.ts" }] }));
-    const ops = [{ search: "const X = 1;\n", replace: "const X = 1;\n" }]; // search === replace
-    const server = Bun.serve({ port: 0, fetch: async () => new Response(JSON.stringify({ content: JSON.stringify(ops) })) });
-    process.env["LLM_COMPLETION_ENDPOINT"] = `http://127.0.0.1:${server.port}/resolve`;
-    try {
-      const r = await resolveApplyProposalAsPatch({ type: "apply_proposal_as_patch", proposals_dir: proposalsDir, vessels_root: vesselsRoot, pending_path: pendingPath });
-      expect(r.shape).toBe("structuredError");
-      expect((r.body as { detail: string }).detail).toContain("identical to input");
-    } finally { server.stop(); delete process.env["LLM_COMPLETION_ENDPOINT"]; }
+    writeFileSync(join(vesselDir, "collides.ts"), "export const ALREADY = 1;\n");
+    const proposal = {
+      scenario_id: "auto-collision",
+      new_files: [
+        { path: "repos/demo-vessel/src/resolvers/collides.ts", content: "export const NEW = 2;\n" },
+      ],
+    };
+    writeFileSync(join(proposalsDir, "auto-collision-report.json"), JSON.stringify(proposal));
+    const r = await resolveApplyProposalAsPatch({ type: "apply_proposal_as_patch", proposals_dir: proposalsDir, vessels_root: vesselsRoot, pending_path: pendingPath });
+    // The colliding proposal is skipped (rejected) → no eligible proposal remains.
+    expect(r.shape).toBe("structuredError");
+    const body = r.body as { detail: string; skipped?: Array<{ reason: string }> };
+    expect(body.detail).toContain("no eligible");
+    expect((body.skipped ?? []).some((s) => s.reason.startsWith("new_file_collision"))).toBe(true);
   });
 
   it("tolerates markdown fences around the proposal JSON", async () => {

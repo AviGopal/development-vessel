@@ -134,6 +134,7 @@ import { resolveObsidianBehaviorScan } from "../resolvers/obsidian-behavior-scan
 import { resolveObsidianReflect } from "../resolvers/obsidian-reflect.js";
 import { resolveSubstrateHeartbeatObserver } from "../resolvers/substrate-heartbeat-observer.js";
 import { resolveLlmQuotaObserver } from "../resolvers/llm-quota-observer.js";
+import { resolveAuthorNewResolver } from "../resolvers/author-new-resolver.js";
 import type { ResolverResult } from "../resolvers/types.js";
 
 type AnyPointer = { type: string } & Record<string, unknown>;
@@ -519,6 +520,8 @@ async function dispatchInner(pointer: AnyPointer): Promise<ResolverResult> {
       return resolveSignatureClusterScan(p as Parameters<typeof resolveSignatureClusterScan>[0]);
     case "build_signature_detector":
       return resolveBuildSignatureDetector(p as Parameters<typeof resolveBuildSignatureDetector>[0]);
+    case "author_new_resolver":
+      return resolveAuthorNewResolver(p as Parameters<typeof resolveAuthorNewResolver>[0]);
     default:
       throw new Error(`unknown shape: ${pointer.type}`);
   }

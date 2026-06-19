@@ -75,6 +75,44 @@ export async function resolveGapLifecycleScan(p: GapLifecycleScanPointer): Promi
   const open = gaps.filter((g) => g.status === "open" && typeof g.id === "string");
   const stale = (g: Gap) => { const t = Date.parse(g.updated_at ?? g.created_at ?? ""); return Number.isFinite(t) && t < staleBefore; };
 
+  // Backward predictive model: learn landability from closed/churned outcomes.
+  // Features: remediation_present (summary mentions fix/patch), single_file (one path token),
+  // category. Label: landed (status==="closed" and not in failedSentinels) vs not-landed.
+  const features = (g: Gap): { remediation: number; singleFile: number; category: string } => {
+    const s = (g.summary ?? "").toLowerCase();
+    const remediation = /\b(fix|patch|remediat|apply|replace|add|remove)\b/.test(s) ? 1 : 0;
+    const paths = (g.summary ?? "").match(/[\w./-]+\.[a-zA-Z]{1,5}\b/g) ?? [];
+    const singleFile = paths.length === 1 ? 1 : 0;
+    return { remediation, singleFile, category: g.category ?? "?" };
+  };
+  const trainSet = gaps.filter((g) => g.status === "closed" || (typeof g.id === "string" && failedSentinels.has(sanitizeId(g.id))));
+  const catLandRate: Record<string, { land: number; total: number }> = {};
+  let remLand = 0, remTotal = 0, sfLand = 0, sfTotal = 0, baseLand = 0, baseTotal = 0;
+  for (const g of trainSet) {
+    const landed = g.status === "closed" && !(typeof g.id === "string" && failedSentinels.has(sanitizeId(g.id)));
+    const f = features(g);
+    baseTotal++; if (landed) baseLand++;
+    if (f.remediation) { remTotal++; if (landed) remLand++; }
+    if (f.singleFile) { sfTotal++; if (landed) sfLand++; }
+    const c = catLandRate[f.category] ?? { land: 0, total: 0 };
+    c.total++; if (landed) c.land++;
+    catLandRate[f.category] = c;
+  }
+  const baseRate = baseTotal > 0 ? baseLand / baseTotal : 0.5;
+  const landability = (g: Gap): number => {
+    const f = features(g);
+    const remScore = remTotal > 0 ? remLand / remTotal : baseRate;
+    const sfScore = sfTotal > 0 ? sfLand / sfTotal : baseRate;
+    const cat = catLandRate[f.category];
+    const catScore = cat && cat.total > 0 ? cat.land / cat.total : baseRate;
+    const weighted = (f.remediation ? remScore : (1 - remScore)) * 0.4
+      + (f.singleFile ? sfScore : (1 - sfScore)) * 0.2
+      + catScore * 0.4;
+    return Math.max(0, Math.min(1, weighted));
+  };
+  const LANDABILITY_THRESHOLD = 0.2;
+  const unlandable = open.filter((g) => landability(g) < LANDABILITY_THRESHOLD);
+
   const churned = open.filter((g) => failedSentinels.has(sanitizeId(g.id!)) && stale(g));
   const staleOpen = open.filter((g) => stale(g));
 

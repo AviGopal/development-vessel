@@ -80,6 +80,11 @@ If it is empty, fall back to choosing the most likely file yourself.
 
 TARGET_FILE: {{extract_target_file_text}}
 
+TARGET_FILE CURRENT CONTENTS (verbatim — the file you must edit):
+{{read_target_file_text}}
+
+MANDATORY for a concrete-defect gap: in required_code_modifications[0] include an "anchor" field whose value is a short UNIQUE substring copied character-for-character from the contents above (the exact existing line/condition/symbol you will edit). Do NOT paraphrase it — the downstream patcher fs_edits this anchor literally; prose with no quotable anchor is skipped.
+
 ### RESOLVER RULES (violations cause runtime failures — follow exactly)
 
 1. Use ONLY these resolver names: fs_read, fs_write, llm_completion_dispatch, json_path_extract, http_fetch.
@@ -253,6 +258,22 @@ export const DRAFT_GAP_CLOSING_ACTIVITY_TEMPLATE: ActivityTemplate = {
         fallback_path: "target_file_paths.0",
       },
       outputShapes: ["json_extracted_value"],
+    },
+    {
+      id: "read_target_file",
+      description:
+        "Read the verbatim current contents of the scenario's target_file so the drafter " +
+        "can quote an EXACT anchor substring into required_code_modifications[0]. Without " +
+        "the file in the prompt the LLM paraphrases lines that don't exist and the " +
+        "downstream patcher's fs_edit no-ops (patch_failed/patch_noop). Failure is " +
+        "non-fatal — if target_file is empty or unreadable the drafter falls back to " +
+        "prose-only mode.",
+      resolver: "fs_read",
+      config: {
+        type: "fs_read",
+        path: "{{extract_target_file_text}}",
+      },
+      outputShapes: ["fileContent"],
     },
     {
       id: "prime_substrate_concepts",

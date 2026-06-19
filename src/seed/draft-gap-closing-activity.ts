@@ -250,6 +250,7 @@ export const DRAFT_GAP_CLOSING_ACTIVITY_TEMPLATE: ActivityTemplate = {
         type: "json_path_extract",
         json: "{{read_scenario_content}}",
         path: "target_file",
+        fallback_path: "target_file_paths.0",
       },
       outputShapes: ["json_extracted_value"],
     },

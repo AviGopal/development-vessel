@@ -149,9 +149,26 @@ export async function resolvePickPriorityScenario(
   };
 
   // 4. Score every gap that has a materialized, open, undrafted scenario.
-  type Cand = { scenario_id: string; category: string; rank: number; severity: number; recency: string };
+  type Cand = { scenario_id: string; category: string; rank: number; severity: number; recency: string; actionability: number };
   const candidates: Cand[] = [];
   const ALLOWED = new Set(["operator_seed", "substrate_detected"]);
+  // Forward model: P(patch_proposal non-empty | target_file_paths, mode_class, category).
+  // Predict drafter actionability before dispatch so we avoid burning cycles on
+  // scenarios that will almost certainly yield analytic-only/no-op proposals.
+  // Residual: callers comparing actual patch emptiness to this score widen gap
+  // detectability per predict→validate→residual.
+  const predictActionability = (g: { category?: string; mode_class?: string; target_file_paths?: unknown }): number => {
+    let score = 0.5;
+    const tfp = g.target_file_paths;
+    if (Array.isArray(tfp) && tfp.length > 0) score += 0.3; else score -= 0.2;
+    const mc = String(g.mode_class ?? "").toLowerCase();
+    if (mc && /analytic|observ|report|audit/.test(mc)) score -= 0.3;
+    if (mc && /code|fix|patch|impl/.test(mc)) score += 0.2;
+    const cat = String(g.category ?? "").toLowerCase();
+    if (/architectural|implementation|bug|fix/.test(cat)) score += 0.1;
+    return Math.max(0, Math.min(1, score));
+  };
+  const ACTIONABILITY_THRESHOLD = 0.25;
   for (const g of gaps) {
     if (typeof g.id !== "string") continue;
     if (g.status && g.status !== "open") continue;
@@ -159,12 +176,15 @@ export async function resolvePickPriorityScenario(
     const scenarioId = sanitizeId(g.id);
     if (!fileSet.has(scenarioId)) continue; // no materialized scenario
     if (excludeDrafted && isDrafted(scenarioId)) continue;
+    const actionability = predictActionability(g as { category?: string; mode_class?: string; target_file_paths?: unknown });
+    if (actionability < ACTIONABILITY_THRESHOLD) continue; // filter low-confidence no-ops
     candidates.push({
       scenario_id: scenarioId,
       category: g.category ?? "auto",
       rank: categoryRank(g.category ?? "auto"),
       severity: severity(g),
       recency: g.detected_at ?? g.created_at ?? "",
+      actionability,
     });
   }
 

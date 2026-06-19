@@ -48,10 +48,22 @@ import { METABOB_API_KEY } from "../config.js";
  *      since an unboundedly long goal usually indicates poor specification
  *      rather than legitimate intent.
  */
-// MAX_GOAL_LEN guard: enforces the 8192-character ceiling documented above —
-// prevents token-window overflow in downstream LLM goal-host calls, keeps goals
-// human-manageable, and bounds context consumption against prompt-injection or
-// runaway-payload abuse.
+/*
+ * MAX_GOAL_LEN guard: enforces the 8192-character ceiling documented above.
+ *
+ * Rationale:
+ *  - Token-window safety: prevents overflow in downstream LLM goal-host calls,
+ *    where oversized prompts would be truncated or rejected by the model.
+ *  - Goal coherence: keeps goals human-manageable; an unboundedly long goal
+ *    usually signals poor specification rather than legitimate intent.
+ *  - Resolver performance: bounds context consumption and request latency,
+ *    and provides a hard backstop against prompt-injection or runaway-payload
+ *    abuse arriving through the dispatch surface.
+ *
+ * Architectural note: this constant is the single source of truth for the
+ * dispatch-side limit; goal-host-vessel applies its own independent ceiling,
+ * so changes here must be coordinated with that boundary.
+ */
 const MAX_GOAL_LEN = 8192;
 const GOAL_HOST_ENDPOINT = process.env["GOAL_HOST_VESSEL_ENDPOINT"] ?? "http://127.0.0.1:8210";
 

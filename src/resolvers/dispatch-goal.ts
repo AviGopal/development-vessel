@@ -48,6 +48,10 @@ import { METABOB_API_KEY } from "../config.js";
  *      since an unboundedly long goal usually indicates poor specification
  *      rather than legitimate intent.
  */
+// MAX_GOAL_LEN guard: enforces the 8192-character ceiling documented above —
+// prevents token-window overflow in downstream LLM goal-host calls, keeps goals
+// human-manageable, and bounds context consumption against prompt-injection or
+// runaway-payload abuse.
 const MAX_GOAL_LEN = 8192;
 const GOAL_HOST_ENDPOINT = process.env["GOAL_HOST_VESSEL_ENDPOINT"] ?? "http://127.0.0.1:8210";
 

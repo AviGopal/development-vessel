@@ -22,6 +22,16 @@ import type { ResolverResult } from "./types.js";
  * also excluded.
  */
 const CANONICAL_VESSELS = [
+  // 2026-06-18: activity-api (142 files), cpg-inference-ts, metric-collector-vessel,
+  // and obsidian-vessel were MISSING — all are self-editable per the drafter prompt,
+  // so variants targeting them could not see their real files and hallucinated paths
+  // (the dominant file_path_hallucination cause; e.g. a TS2459 fix that belonged in
+  // activity-api was mis-targeted to development-vessel). Adding them lets the variant
+  // LLM pick a real path, so proposals targeting these vessels can actually land.
+  "activity-api",
+  "cpg-inference-ts",
+  "metric-collector-vessel",
+  "obsidian-vessel",
   "development-vessel",
   "goal-host-vessel",
   "llm-resolver-vessel",

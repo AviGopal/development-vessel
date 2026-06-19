@@ -85,6 +85,11 @@ describe("DRAFT_GAP_CLOSING_ACTIVITY_TEMPLATE", () => {
       "git_status", "git_diff", "git_log", "git_add", "git_commit",
       "activity_fetch", "activity_create_variant",
       "llm_completion_dispatch", "json_path_extract",
+      // http_fetch drives the substrate-priming tasks (prime_substrate_concepts/edges,
+      // fetch_prior_failures, fetch_prior_successes) — they POST to dev-vessel /resolve.
+      "http_fetch",
+      // registered dev-vessel resolver shapes used by the drafter's learning tasks
+      "convergent_validity_check", "credit_primed_concepts",
     ]);
     for (const task of DRAFT_GAP_CLOSING_ACTIVITY_TEMPLATE.tasks) {
       expect(knownResolvers.has(task.resolver)).toBe(true);

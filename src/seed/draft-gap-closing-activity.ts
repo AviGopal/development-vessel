@@ -56,6 +56,18 @@ choose a DIFFERENT, REAL target file this time — do not re-emit a known-failin
 
 {{fetch_prior_failures_text}}
 
+## Prior Successful Attempts (REUSE these winning shapes)
+
+The system has also LANDED proposals before. The JSON report below lists prior
+approaches that actually staged/landed — on this exact gap or on a SIMILAR trace
+(another vessel/activity with a shared error class). Read its 'summary_text' field.
+If a similar approach already LANDED, prefer the SAME shape here on the analogous
+target — name the real existing file and the same kind of minimal anchored edit. If a
+fix for THIS exact gap already landed, verify the current state before re-drafting
+(it may already be resolved).
+
+{{fetch_prior_successes_text}}
+
 ## Requirements for the drafted template
 
 ## Authoritative Target File (concrete-defect gaps)
@@ -309,6 +321,32 @@ export const DRAFT_GAP_CLOSING_ACTIVITY_TEMPLATE: ActivityTemplate = {
         timeoutMs: 5000,
       },
       outputShapes: ["priorFailedAttempts"],
+    },
+    {
+      id: "fetch_prior_successes",
+      description:
+        "Learn from LANDED prior proposals (2026-06-18): query dev-vessel prior_successful_attempts "
+        + "for this scenario so the draft below REUSES winning shapes that already staged/landed — "
+        + "on this exact gap or on a similar trace (shared error class, other vessel). Symmetric to "
+        + "fetch_prior_failures. Non-fatal.",
+      resolver: "http_fetch",
+      config: {
+        type: "http_fetch",
+        method: "POST",
+        url: "http://127.0.0.1:8090/v2/impulses/resolve",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          impulse: {
+            pointer: {
+              type: "prior_successful_attempts",
+              scenario_id: "{{scenario_id}}",
+              proposals_dir: "{{proposals_dir}}",
+            },
+          },
+        }),
+        timeoutMs: 5000,
+      },
+      outputShapes: ["priorSuccessfulAttempts"],
     },
     {
       id: "draft_via_llm",

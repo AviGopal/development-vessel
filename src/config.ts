@@ -101,6 +101,13 @@ export const config = {
       // (add a downstream consumer), so it routes to the drafter, not vessel-
       // authoring. Same constitutional principle (concept_9ldsmRgqSTd5).
       "dead_end_decision_scan",
+      // Detector-fleet self-inventory (2026-06-19): joins gap provenance
+      // (classification_metadata.detector) × gap outcomes (landed/churned/open)
+      // × scheduling (selector snapshot picks) into a per-detector yield row,
+      // deriving PRODUCTIVE/LOW_YIELD/DORMANT/UNKNOWN. The curative half of
+      // fleet management — names retirement candidates (optionally emits a
+      // detector_retirement_candidate gap routing to deprecate). Deterministic.
+      "detector_yield_registry",
       // Meta-detector (2026-06-13): templates declaring inputShapes/variables no
       // task consumes — the silent mis-wire that left draft-activity-from-pattern
       // dead. Deterministic registry lint -> substrateGap_write per offender.

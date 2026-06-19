@@ -35,6 +35,7 @@ import { DETECT_VESSEL_WRITE_ERROR_TEMPLATE } from "./detect-vessel-write-error.
 import { DETECT_CHAIN_FETCH_FAILURE_TEMPLATE } from "./detect-chain-fetch-failure.js";
 import { DETECT_PHANTOM_SUCCESS_TRACE_TEMPLATE } from "./detect-phantom-success-trace.js";
 import { DEAD_END_DECISION_SCAN_TICK_TEMPLATE } from "./dead-end-decision-scan-tick.js";
+import { DETECTOR_YIELD_REGISTRY_TICK_TEMPLATE } from "./detector-yield-registry-tick.js";
 import { DETECT_CUTOVER_STUCK_LOOP_TEMPLATE } from "./detect-cutover-stuck-loop.js";
 import { DETECT_PRECONDITION_REJECTION_TEMPLATE } from "./detect-precondition-rejection.js";
 import { AUDIT_DISPATCH_TARGET_DRIFT_TEMPLATE } from "./audit-dispatch-target-drift.js";
@@ -314,6 +315,10 @@ export const SEED_TEMPLATES: ActivityTemplate[] = [
   // slot-binding select_or_produce dead-end the operator found by hand,
   // generalized). Low cadence; routes to the drafter (recombination-fixable).
   DEAD_END_DECISION_SCAN_TICK_TEMPLATE,
+  // detector-fleet self-inventory (2026-06-19): joins gap provenance × outcomes ×
+  // scheduling into per-detector yield rows (PRODUCTIVE/LOW_YIELD/DORMANT/UNKNOWN)
+  // — the curative half of fleet management. Descriptive by default. Low cadence.
+  DETECTOR_YIELD_REGISTRY_TICK_TEMPLATE,
   DETECT_CUTOVER_STUCK_LOOP_TEMPLATE,
   // substrate self-detection (2026-05-30): pre-flight-rejected traces
   // (status=failure + duration<500ms + task_count=0) — F25 signature.

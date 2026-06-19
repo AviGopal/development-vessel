@@ -147,20 +147,42 @@ async function fetchTraces(tracesUrl: string): Promise<TraceRow[]> {
 // trailer or substrate-authored: prefix line. Best-effort; if the path doesn't
 // exist locally we cannot tell — caller should treat as operator-modifiable.
 async function isSubstrateAuthoredFile(targetPath: string): Promise<boolean> {
-  try {
-    const root = process.env["WORKSPACE_ROOT"] ?? DEFAULT_WORKSPACE_ROOT;
-    const fullPath = targetPath.startsWith("/")
-      ? targetPath
-      : join(root, targetPath);
-    const fd = await readFile(fullPath, "utf-8");
-    const head = fd.slice(0, 2048);
-    return (
-      head.includes("Substrate-Authored-By:") ||
-      head.includes("substrate-authored:")
-    );
-  } catch {
-    return false;
+  // (1) Explicit in-file provenance trailer. Try several roots — the target_path
+  // is repo-relative ("repos/<vessel>/...") but the live copy lives under the
+  // runtime root (/vessels/<vessel>/...) or a push clone, not WORKSPACE_ROOT.
+  const sub = targetPath.replace(/^\/?(repos|vessels)\//, "");
+  const m = sub.match(/^([^/]+)\/(.+)$/);
+  const vessel = m?.[1];
+  const subPath = m?.[2];
+  const roots = [
+    process.env["MITOSIS_RUNTIME_DIR"] ?? "/vessels",
+    process.env["WORKSPACE_ROOT"] ?? DEFAULT_WORKSPACE_ROOT,
+  ];
+  for (const root of roots) {
+    if (!vessel || !subPath) break;
+    try {
+      const head = (await readFile(join(root, vessel, subPath), "utf-8")).slice(0, 2048);
+      if (head.includes("Substrate-Authored-By:") || head.includes("substrate-authored:")) return true;
+    } catch { /* try next root */ }
   }
+  // (2) Git authorship: the file's most recent commit in the per-vessel push
+  // clone was authored by the substrate. Robust where the in-file trailer is
+  // absent — substrate-authored mitosis commits carry author "substrate-*" /
+  // "Substrate Autonomous" but rarely embed a trailer in the source itself.
+  if (vessel && subPath) {
+    const clone = join("/workspace/git/vessels", vessel);
+    try {
+      const proc = Bun.spawnSync(
+        ["git", "-C", clone, "log", "-1", "--format=%an <%ae>", "--", subPath],
+        { stdout: "pipe", stderr: "pipe", timeout: 8000 },
+      );
+      if (proc.exitCode === 0) {
+        const author = new TextDecoder().decode(proc.stdout).trim().toLowerCase();
+        if (author && /substrate/.test(author)) return true;
+      }
+    } catch { /* git unavailable -> not detectable this way */ }
+  }
+  return false;
 }
 
 interface RefusalRecord {

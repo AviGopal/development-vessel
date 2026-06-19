@@ -552,6 +552,42 @@ export async function resolveVesselMitosisCutover(
     stagedBaseSha === currentLiveSha;
   console.error(`[mitosis-cutover] freshness vessel=${vessel_name} mitosis=${mitosis_version_id} staged_base_sha=${stagedBaseSha ?? "<missing>"} current_live_sha=${currentLiveSha ?? "<absent>"} freshnessOK=${freshnessOK} freshness_check_path=${freshnessCheckPath}`);
   if (!freshnessOK) {
+    // Already-applied no-op: if the live source already matches the STAGED
+    // MITOSIS content (not the pre-staging base_sha), this change has already
+    // landed — a re-proposed duplicate, or a post-success retry whose pending
+    // pointer was never cleared. Refusing here on base_sha_mismatch and leaving
+    // mitosis-pending.json in place LIVELOCKS the funnel: apply-proposal-as-patch
+    // then refuses every new proposal with "pending mitosis in flight". Detect
+    // this case and clear the pending pointer as a no-op success instead of
+    // churning freshness gaps forever. (Genuine drift — live != staged content —
+    // still falls through to the refusal below.)
+    if (currentLiveSha && !currentLiveSha.startsWith("<") && stagedSentinel) {
+      try {
+        const stagedMitosisContent = await readFile(join(mitosisRoot, stagedSentinel));
+        const stagedMitosisSha = createHash("sha256").update(stagedMitosisContent).digest("hex").slice(0, 12);
+        if (stagedMitosisSha === currentLiveSha) {
+          const pendingPath = pointer.pending_pointer_path ?? join(workspaceRoot, "mitosis-pending.json");
+          let pendingCleared = false;
+          try {
+            if (await pathExists(pendingPath)) { await unlink(pendingPath); pendingCleared = true; }
+          } catch { /* best-effort */ }
+          console.error(`[mitosis-cutover] already-applied no-op: live matches staged mitosis content (${currentLiveSha}) for ${mitosis_version_id}; cleared pending=${pendingCleared} — not refusing, change already landed`);
+          return {
+            shape: "cutoverApplied",
+            body: {
+              applied: false,
+              noop: true,
+              reason: "already_applied",
+              vessel_name,
+              mitosis_version_id,
+              base_version_id,
+              current_live_sha: currentLiveSha,
+              pending_cleared: pendingCleared,
+            },
+          };
+        }
+      } catch { /* unreadable staged file -> fall through to normal refusal */ }
+    }
     const reason = !stagedBaseSha
       ? "missing_base_sha"
       : !currentLiveSha

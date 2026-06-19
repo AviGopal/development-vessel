@@ -58,6 +58,16 @@ choose a DIFFERENT, REAL target file this time — do not re-emit a known-failin
 
 ## Requirements for the drafted template
 
+## Authoritative Target File (concrete-defect gaps)
+
+If the value below is non-empty, the scenario already names the EXACT file that must
+be edited (e.g. a typecheck/compile error carries its own file:line). In that case your
+required_code_modifications[0].file MUST equal this value VERBATIM — do NOT pick a
+different vessel or file, do NOT re-derive it. Describe the minimal change to THAT file.
+If it is empty, fall back to choosing the most likely file yourself.
+
+TARGET_FILE: {{extract_target_file_text}}
+
 ### RESOLVER RULES (violations cause runtime failures — follow exactly)
 
 1. Use ONLY these resolver names: fs_read, fs_write, llm_completion_dispatch, json_path_extract, http_fetch.
@@ -215,6 +225,21 @@ export const DRAFT_GAP_CLOSING_ACTIVITY_TEMPLATE: ActivityTemplate = {
         path: "{{scenarios_dir}}/{{scenario_id}}.json",
       },
       outputShapes: ["gapScenario"],
+    },
+    {
+      id: "extract_target_file",
+      description:
+        "Deterministically extract the scenario target_file (concrete-defect gaps such " +
+        "as typecheck errors carry the exact repos/<vessel>/... path). Pinning it bypasses " +
+        "the LLM re-guessing the vessel/file — the dominant cause of file_path_hallucination " +
+        "rejections that starve the funnel. Empty for gaps without a known location.",
+      resolver: "json_path_extract",
+      config: {
+        type: "json_path_extract",
+        json: "{{read_scenario_content}}",
+        path: "target_file",
+      },
+      outputShapes: ["json_extracted_value"],
     },
     {
       id: "prime_substrate_concepts",

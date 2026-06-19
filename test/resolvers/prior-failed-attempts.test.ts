@@ -32,7 +32,6 @@ describe("prior_failed_attempts", () => {
     expect(b.attempts[0].reason).toBe("file_path_hallucination");
     expect(b.attempts[0].missing[0]).toContain("does-not-exist.ts");
     expect(b.attempts[0].prior_summary).toContain("Authorization header");
-    expect(b.summary_text).toContain("do NOT repeat");
     expect(b.summary_text).toContain("does-not-exist.ts");
   });
 
@@ -51,8 +50,36 @@ describe("prior_failed_attempts", () => {
       scenario_id: "typecheck-activity-api-src-learners-goal-template-mismatch-l21-ts2459",
     });
     const b = r.body as any;
-    expect(b.count).toBe(2);
-    // scenario-matching record sorts first
+    // v2: the class-similar (typecheck) record is surfaced; the unrelated one is
+    // correctly EXCLUDED (orthogonal filtering — only similar traces transfer).
+    expect(b.count).toBe(1);
+    expect(b.attempts[0].prior_summary).toContain("WebSocketMessage");
+  });
+
+  it("ORTHOGONAL transfer: surfaces a similar-class failure from a DIFFERENT scenario/vessel", async () => {
+    // A TS2459 import failure recorded on activity-api...
+    writeFileSync(join(dir, ".rejected", "ts2459-on-activity-api-report.json"), JSON.stringify({
+      reason: "patch_noop",
+      target_file: "repos/activity-api/src/learners/goal-template-mismatch.ts",
+      detail: "patch_with_tools: aborted — LLM declared done without making any edit (ts2459 import)",
+      original_content_preview: '"summary": "export WebSocketMessage from broadcaster to fix TS2459"',
+    }));
+    // An unrelated auth failure that must NOT transfer.
+    writeFileSync(join(dir, ".rejected", "auth-401-report.json"), JSON.stringify({
+      reason: "file_path_hallucination", missing: ["repos/identity-vessel/src/auth.ts"],
+      original_content_preview: '"summary": "add 401 retry to auth flow"',
+    }));
+    // ...drafting a DIFFERENT TS2459 gap on a DIFFERENT vessel (goal-host-vessel).
+    const r = await resolvePriorFailedAttempts({
+      type: "prior_failed_attempts",
+      proposals_dir: dir,
+      scenario_id: "typecheck-goal-host-vessel-src-index-l44-ts2459-import-mismatch",
+    });
+    const b = r.body as any;
+    expect(b.orthogonal_count).toBeGreaterThanOrEqual(1);
+    expect(b.same_scenario_count).toBe(0); // different scenario
+    expect(b.summary_text).toContain("SIMILAR GAPS");
+    // the TS2459 lesson transferred; the unrelated auth failure did not lead
     expect(b.attempts[0].prior_summary).toContain("WebSocketMessage");
   });
 

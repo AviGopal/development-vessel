@@ -4,6 +4,7 @@ export interface JsonPathExtractPointer {
   type: "json_path_extract";
   json: string | unknown; // string (JSON text) or pre-parsed object (from interpolateVars exact-match substitution)
   path: string; // dot-notation path, e.g. "expected_emergence.activity_signature.output_shapes_must_include"
+  fallback_path?: string;
   /**
    * Optional suffix to strip from the extracted value when it's a string.
    * Useful for derived ids like "auto-foo.json" → "auto-foo" without
@@ -62,27 +63,41 @@ export async function resolveJsonPathExtract(pointer: JsonPathExtractPointer): P
     obj = pointer.json;
   }
 
-  const parts = pointer.path.split(".");
-  let current: unknown = obj;
-  for (const part of parts) {
-    if (current === null || current === undefined) {
-      return missingResult(pointer.path, `null/undefined encountered at segment: ${part}`);
+  function walk(path: string): { ok: true; value: unknown } | { ok: false; reason: string } {
+    const parts = path.split(".");
+    let current: unknown = obj;
+    for (const part of parts) {
+      if (current === null || current === undefined) {
+        return { ok: false, reason: `null/undefined encountered at segment: ${part}` };
+      }
+      if (typeof current !== "object") {
+        return { ok: false, reason: `path not found at segment: ${part}` };
+      }
+      current = (current as Record<string, unknown>)[part];
+      if (current === undefined) {
+        return { ok: false, reason: `no key '${part}' at this level` };
+      }
     }
-    if (typeof current !== "object") {
-      return missingResult(pointer.path, `path not found at segment: ${part}`);
-    }
-    // Arrays + objects both accept string-keyed access in JS. Numeric segments
-    // (e.g. "0", "1") on arrays index by position; named segments on objects
-    // index by key. Previously this branch rejected arrays outright, breaking
-    // documented paths like "selected.0.id" in concept-usage-backfill.
-    current = (current as Record<string, unknown>)[part];
-    if (current === undefined) {
-      return missingResult(pointer.path, `no key '${part}' at this level`);
-    }
+    return { ok: true, value: current };
   }
 
+  let resolvedPath = pointer.path;
+  let walked = walk(pointer.path);
+  const primaryEmpty = walked.ok && (walked.value === "" || walked.value === null || walked.value === undefined);
+  if ((!walked.ok || primaryEmpty) && typeof pointer.fallback_path === "string" && pointer.fallback_path.length > 0) {
+    const fallback = walk(pointer.fallback_path);
+    if (fallback.ok) {
+      walked = fallback;
+      resolvedPath = pointer.fallback_path;
+    }
+  }
+  if (!walked.ok) {
+    return missingResult(pointer.path, walked.reason);
+  }
+  let current: unknown = walked.value;
+
   if (current === null) {
-    return missingResult(pointer.path, "path resolved to null");
+    return missingResult(resolvedPath, "path resolved to null");
   }
 
   // Optional suffix strip (V18 2026-06-07): applies when value is a string

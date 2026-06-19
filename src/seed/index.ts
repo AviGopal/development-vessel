@@ -21,6 +21,7 @@ import { ESCALATE_UNKNOWN_SHAPE_TEMPLATE } from "./escalate-unknown-shape.js";
 import { COVERAGE_TICK_TEMPLATE } from "./coverage-tick.js";
 import { SUBSTRATE_HEALTH_TICK_TEMPLATE } from "./substrate-health-tick.js";
 import { VESSEL_DEMAND_TICK_TEMPLATE } from "./vessel-demand-tick.js";
+import { GENERATIVE_FRONTIER_GAP_TICK_TEMPLATE } from "./generative-frontier-gap-tick.js";
 import { HARNESS_RUN_MATRIX_TEMPLATE } from "./harness-run-matrix.js";
 import { TRY_DIRECT_ANSWER_TEMPLATE } from "./try-direct-answer.js";
 import { CLOSE_HEALTH_GAP_TEMPLATE } from "./close-health-gap.js";
@@ -152,6 +153,7 @@ export { ESCALATE_UNKNOWN_SHAPE_TEMPLATE } from "./escalate-unknown-shape.js";
 export { COVERAGE_TICK_TEMPLATE } from "./coverage-tick.js";
 export { SUBSTRATE_HEALTH_TICK_TEMPLATE } from "./substrate-health-tick.js";
 export { VESSEL_DEMAND_TICK_TEMPLATE } from "./vessel-demand-tick.js";
+export { GENERATIVE_FRONTIER_GAP_TICK_TEMPLATE } from "./generative-frontier-gap-tick.js";
 export { HARNESS_RUN_MATRIX_TEMPLATE } from "./harness-run-matrix.js";
 export { TRY_DIRECT_ANSWER_TEMPLATE } from "./try-direct-answer.js";
 export { CLOSE_HEALTH_GAP_TEMPLATE } from "./close-health-gap.js";
@@ -384,6 +386,10 @@ export const SEED_TEMPLATES: ActivityTemplate[] = [
   // so its open-ended text routes to a deterministic vessel_demand_report
   // dispatch instead of LLM-reuse picking the closest semantic match.
   VESSEL_DEMAND_TICK_TEMPLATE,
+  // Seam ① (2026-06-19): closure-driven generative gap source. boredom goal[46]
+  // dispatches this to propose a consumer for the top produced-but-uncomposed
+  // shape — headroom-gated (fail-closed), rate-limited, stable-id deduped.
+  GENERATIVE_FRONTIER_GAP_TICK_TEMPLATE,
   // Autonomous self-modification loop (2026-06-03): scaffold-mitosis-track
   // composes concept_select_for_prompt + fs_read + llm_completion_dispatch +
   // vessel_mitosis_start. Boredom goal[13] dispatches this when

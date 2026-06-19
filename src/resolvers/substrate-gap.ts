@@ -27,6 +27,9 @@
  * Sources:
  *   - operator_narration     → manually filed via validation/gaps/*.yaml
  *   - substrate_detected     → lifecycle:gap:classified emitter (iter-023)
+ *   - substrate_generative   → Seam ① closure-driven generative frontier
+ *                              (generative_frontier_gap_tick) — the only source
+ *                              that ORIGINATES intent rather than reacting.
  */
 
 import { WORKSPACE_ROOT as DEFAULT_WORKSPACE_ROOT } from "../config.js";
@@ -49,7 +52,12 @@ export type SubstrateGapCategory =
   | "missing_idiom"
   | "other";
 
-export type SubstrateGapSource = "operator_narration" | "substrate_detected";
+export type SubstrateGapSource =
+  | "operator_narration"
+  | "substrate_detected"
+  // Seam ① (2026-06-19): closure-driven generative frontier — the only source
+  // that ORIGINATES intent (generative_frontier_gap_tick), not reacts.
+  | "substrate_generative";
 
 export interface SubstrateGap {
   id: string; // idempotency key — typically gap_id from validation/gaps/<id>.yaml

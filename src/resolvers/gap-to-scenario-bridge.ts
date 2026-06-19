@@ -161,7 +161,11 @@ export async function resolveGapToScenarioBridge(
   const seenVesselClasses = await existingClasses(vesselScenariosDir);
   let skippedClassDup = 0;
 
-  const ALLOWED_SOURCES = new Set(["operator_seed", "substrate_detected"]);
+  // substrate_generative (Seam ①, 2026-06-19): closure-driven generative gaps
+  // must be routable or the bridge silently ignores them — they'd be emitted but
+  // never reach the drafter/vessel-authoring path. category=missing_capability
+  // routes them to the vessel-authoring queue (VESSEL_AUTHORING_CATEGORIES).
+  const ALLOWED_SOURCES = new Set(["operator_seed", "substrate_detected", "substrate_generative"]);
   const out: Array<{ gap_id: string; scenario_path: string }> = [];
   const vesselOut: Array<{ gap_id: string; scenario_path: string }> = [];
   const priorityBreakdown: Record<string, number> = {};

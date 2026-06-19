@@ -282,6 +282,14 @@ export const config = {
       "vessel_completeness_report",
       "template_invocation_history_report",
       "vessel_demand_report",
+      // Seam ① (closure-driven GENERATIVE gap source, 2026-06-19): the only gap
+      // source that ORIGINATES intent rather than reacting. Proposes a consumer
+      // for the highest-traffic produced-but-uncomposed shape (closure frontier,
+      // not greenfield) and emits a substrateGap with source=substrate_generative
+      // — HARD-GATED on spectral-gap headroom (λ₁·(1-star_ratio) ≥ threshold,
+      // fail-CLOSED) so it cannot mint capability into a degenerate star. Rate-
+      // limited + stable-id deduped → structurally incapable of flooding.
+      "generative_frontier_gap_tick",
       // Mitosis primitives (iter-vessel-mitosis, 2026-06-03): the substrate's
       // self-modification keystone. vessel_mitosis_start copies a vessel tree
       // to a parallel-track path with operator/substrate-supplied source

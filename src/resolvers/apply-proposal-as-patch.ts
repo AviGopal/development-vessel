@@ -472,11 +472,11 @@ export async function resolveApplyProposalAsPatch(pointer: ApplyProposalAsPatchP
       let priorTs: number | null = null;
       let priorOutcome: string | null = null;
       try {
-        const sj = JSON.parse(await readFile(`${sentinelDir}/${e.name}`, "utf-8")) as { content_sha?: string; applied_at?: string; staged_at?: string; outcome?: string };
+        const sj = JSON.parse(await readFile(`${sentinelDir}/${e.name}`, "utf-8")) as { content_sha?: string; applied_at?: string; staged_at?: string; outcome_shape?: string };
         priorSha = sj.content_sha ?? null;
         const tsStr = sj.applied_at ?? sj.staged_at ?? null;
         priorTs = tsStr ? Date.parse(tsStr) : null;
-        priorOutcome = sj.outcome ?? null;
+        priorOutcome = sj.outcome_shape ?? null;
       } catch { priorSha = null; priorTs = null; priorOutcome = null; }
       // Retry TTL (2026-06-18): a content_sha match normally means "already attempted,
       // skip". But a PERSISTENT real issue (e.g. a typecheck error whose first patch

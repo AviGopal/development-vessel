@@ -523,3 +523,40 @@ export const LLM_API_HEALTH_OBSERVER_TICK_TEMPLATE: ActivityTemplate = {
     },
   ],
 };
+
+// push_health_observer tick (2026-06-19): promotes substrate self-PUSH health
+// into impulse form + emits a substrateGap on SUSTAINED push failure. An
+// authored commit that never reaches origin/dev is a silent learning loss; this
+// tick makes that condition observable + actionable on cadence (distinguishing
+// operator-territory invalid-PAT from a wedged host-sync poller from genuine
+// push failures, and from benign upstream gate rejections).
+export const PUSH_HEALTH_OBSERVER_TICK_TEMPLATE: ActivityTemplate = {
+  id: "development-vessel:push-health-observer-tick",
+  name: "push-health-observer-tick",
+  description:
+    "Deterministic single-resolver wrapper around push_health_observer. " +
+    "Scans host-sync push results/intents + cutover local_only outcomes and " +
+    "probes the in-container PAT; emits pushHealth and a substrateGap when " +
+    "substrate self-push is SUSTAINED-failing.",
+  inputShapes: [],
+  outputShapes: ["pushHealth"],
+  tags: [
+    "intent:shadow_state_observation",
+    "horizon:meta",
+    "phase:detect",
+    "boredom_target_template",
+    "lift.autonomous.loop",
+    "light_dispatch_eligible",
+    "impulse_complete_base",
+  ],
+  variables: [],
+  tasks: [
+    {
+      id: "observe_push_health",
+      description: "Invoke push_health_observer.",
+      resolver: "push_health_observer",
+      config: { type: "push_health_observer" },
+      outputShapes: ["pushHealth"],
+    },
+  ],
+};

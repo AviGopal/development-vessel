@@ -1064,9 +1064,26 @@ async function runGitAwareCutover(args: GitCutoverArgs): Promise<ResolverResult>
   // a rebase over unrelated upstream edits applies cleanly; a genuine same-file
   // conflict aborts the rebase and degrades to local_only (the commit stays in
   // the clone for the next cutover to re-derive against the moved base).
-  let pushStatus: "pushed" | "local_only" | "skipped" = "skipped";
+  // Durability (2026-06-19): the in-container push uses an HTTPS PAT credential
+  // helper (setup-git-push.sh). When that PAT is invalid/missing the push fails
+  // EVERY time with "Invalid username or token. Password authentication is not
+  // supported." — and the old code degraded to local_only, stranding the commit
+  // in the in-container clone where it never reaches origin. The DURABLE push
+  // path is the host-sync poller (host SSH key, always valid). So on a push
+  // failure that is NOT a transient non-fast-forward (i.e. an auth/transport
+  // failure the retry loop cannot fix), fall through to a host-sync intent so the
+  // host poller lands the change via SSH. push_status then reflects reality
+  // ("host_sync_pending") instead of a misleading local_only. The container's
+  // direct push stays as a fast path for when the PAT IS valid; host-sync is the
+  // graceful-degradation safety net independent of the operator-managed PAT.
+  let pushStatus:
+    | "pushed"
+    | "local_only"
+    | "host_sync_pending"
+    | "skipped" = "skipped";
   let pushDetail = "";
   let pushRebases = 0;
+  let pushAuthFailed = false;
   if (!pointer.skip_push) {
     const MAX_PUSH_ATTEMPTS = 3;
     for (let attempt = 1; attempt <= MAX_PUSH_ATTEMPTS; attempt++) {
@@ -1082,12 +1099,17 @@ async function runGitAwareCutover(args: GitCutoverArgs): Promise<ResolverResult>
         break;
       }
       const nonFastForward = /non-fast-forward|fetch first|\[rejected\]|tip of your current branch is behind/i.test(pushDetail);
+      // Auth/transport failures (bad/missing in-container PAT) are NOT fixable by
+      // rebase-retry. Flag them so the post-loop fallback emits a host-sync intent
+      // — the host poller (SSH) is the durable path that does not depend on the PAT.
+      const authFailed = /authentication failed|invalid username or token|password authentication is not supported|could not read username|terminal prompts disabled|403|401/i.test(pushDetail);
       if (!nonFastForward || attempt === MAX_PUSH_ATTEMPTS) {
         pushStatus = "local_only";
+        pushAuthFailed = authFailed;
         operations.push({
           op: push.op,
           status: "warn",
-          detail: `push failed (commit local): ${pushDetail}`,
+          detail: `push failed (commit local${authFailed ? ", auth/transport — will defer to host-sync" : ""}): ${pushDetail}`,
         });
         break;
       }
@@ -1112,6 +1134,45 @@ async function runGitAwareCutover(args: GitCutoverArgs): Promise<ResolverResult>
       pushRebases++;
       operations.push({ op: `git rebase origin/dev (attempt ${attempt})`, status: "ok" });
       // loop and re-push the rebased commit
+    }
+  }
+
+  // 8b. Durable-push fallback (2026-06-19): if the in-container push could not
+  // land (local_only) — most commonly because the in-container HTTPS PAT is
+  // invalid/missing — emit a host-sync intent so the host-side poller (SSH key,
+  // operator-independent of the PAT) commits+pushes the same staged files from
+  // the host clone. This makes substrate-authored commits land on origin/dev
+  // durably regardless of PAT state. We only fall back on local_only (never on
+  // "pushed"/"skipped"), and we tag the resulting status host_sync_pending so the
+  // cutoverApplied trace reflects "handed to host poller" rather than a
+  // misleading dead-end local_only. Best-effort: a failed intent emit leaves
+  // pushStatus=local_only (the commit still exists in the clone for re-derive).
+  if (pushStatus === "local_only") {
+    try {
+      await emitHostSyncIntent({
+        pointer,
+        vessel_name,
+        base_version_id,
+        mitosis_version_id,
+        mitosisRoot,
+        stagedFiles,
+        evaluationEvidence,
+        stagedBaseSha,
+      });
+      pushStatus = "host_sync_pending";
+      operations.push({
+        op: "emit host-sync intent (durable push fallback)",
+        status: "ok",
+        detail: pushAuthFailed
+          ? "in-container PAT auth failed; host poller will push via SSH"
+          : "in-container push failed; host poller will push via SSH",
+      });
+    } catch (err) {
+      operations.push({
+        op: "emit host-sync intent (durable push fallback)",
+        status: "warn",
+        detail: `host-sync fallback emit failed: ${(err as Error).message.slice(0, 160)}`,
+      });
     }
   }
 

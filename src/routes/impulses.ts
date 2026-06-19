@@ -103,6 +103,7 @@ import { resolveTraceOutcomeValidityAudit } from "../resolvers/trace-outcome-val
 import { resolvePosteriorConsistencyAudit } from "../resolvers/posterior-consistency-audit.js";
 import { resolveCapabilityGapAudit } from "../resolvers/capability-gap-audit.js";
 import { resolveSystemdUnitHealthObserver } from "../resolvers/systemd-unit-health-observer.js";
+import { resolvePushHealthObserver } from "../resolvers/push-health-observer.js";
 import { resolveMitosisIntentQueueObserver } from "../resolvers/mitosis-intent-queue-observer.js";
 import { resolveAppliedProposalSentinelObserver } from "../resolvers/applied-proposal-sentinel-observer.js";
 import { resolveMitosisPendingObserver } from "../resolvers/mitosis-pending-observer.js";
@@ -399,6 +400,10 @@ async function dispatchInner(pointer: AnyPointer): Promise<ResolverResult> {
     case "systemd_unit_health_observer":
       return resolveSystemdUnitHealthObserver(
         p as Parameters<typeof resolveSystemdUnitHealthObserver>[0],
+      );
+    case "push_health_observer":
+      return resolvePushHealthObserver(
+        p as Parameters<typeof resolvePushHealthObserver>[0],
       );
     case "mitosis_intent_queue_observer":
       return resolveMitosisIntentQueueObserver(

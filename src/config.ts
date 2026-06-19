@@ -416,6 +416,12 @@ export const config = {
       "mitosis_pending_observer",
       "dispatch_dropped_observer",
       "llm_api_health_observer",
+      // push_health_observer (2026-06-19): surfaces substrate self-PUSH failure.
+      // An authored commit that never reaches origin/dev is a silent learning
+      // loss; this observer scans host-sync results/intents + cutover local_only
+      // outcomes + probes the in-container PAT, and emits a substrateGap (with
+      // operator_territory classification) when push is SUSTAINED-failing.
+      "push_health_observer",
       // Round 2 (2026-06-05): six more shadow-state observers closing the
       // remaining round-1 gaps. host_container_source_drift is the headline —
       // it makes the dominant host-sync rejection cause (43% of intents,

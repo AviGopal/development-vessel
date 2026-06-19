@@ -64,6 +64,9 @@ import { METABOB_API_KEY } from "../config.js";
  * dispatch-side limit; goal-host-vessel applies its own independent ceiling,
  * so changes here must be coordinated with that boundary.
  */
+// MAX_GOAL_LEN guard: caps dispatch goal payloads to prevent token overflow in
+// downstream LLM prompts, preserve goal clarity and parsimony, and align with
+// typical resolver input constraints across the substrate architecture.
 const MAX_GOAL_LEN = 8192;
 const GOAL_HOST_ENDPOINT = process.env["GOAL_HOST_VESSEL_ENDPOINT"] ?? "http://127.0.0.1:8210";
 

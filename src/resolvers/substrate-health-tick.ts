@@ -295,14 +295,26 @@ export async function resolveSubstrateHealthTick(
   } catch { /* non-critical */ }
 
   const stabilityHours = stabilityWindowSecs / 3600;
-  const mutation_rate_per_hour = (new_templates_added + new_edges_added) / Math.max(stabilityHours, 0.001);
+  // Stability gates on TEMPLATE-authoring burst ONLY, not edge formation (2026-06-19).
+  // WHY: this dimension exists to catch runaway ribosome/improviser TEMPLATE churn
+  // (see the "dozens of templates per hour" rationale above). Composition edges are
+  // the OPPOSITE — they are the desirable convergence the DEC master inequality wants
+  // MORE of (λ₁ credit-mixing, escaping the star topology), and their growth health is
+  // already governed by the separate spectral-gap governor (λ₁ ≳ ρ_grow). Lumping edges
+  // into the instability rate made the lift gate chronically FLAP: a healthy 4 templates
+  // + 30 edges/hr read as 34/hr ≫ 10 ceiling, failing stability for doing exactly what
+  // autonomy requires. new_edges_added stays REPORTED below for observability; it just
+  // no longer counts as instability.
+  const mutation_rate_per_hour = new_templates_added / Math.max(stabilityHours, 0.001);
+  const edge_growth_rate_per_hour = new_edges_added / Math.max(stabilityHours, 0.001);
 
   const graph_stability = {
     new_templates_added,
     new_edges_added,
     template_count_at_window_start,
     template_count_at_window_end,
-    mutation_rate_per_hour,
+    mutation_rate_per_hour,          // templates/hr — the value gated by stabilityRateCeiling
+    edge_growth_rate_per_hour,       // edges/hr — observational only (governed by spectral-gap governor)
   };
 
   // — Optimality: read most recent harness report —

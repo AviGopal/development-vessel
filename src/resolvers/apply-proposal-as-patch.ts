@@ -855,7 +855,7 @@ export async function resolveApplyProposalAsPatch(pointer: ApplyProposalAsPatchP
   // is structured by construction — every change is a verifiable primitive
   // (code_find_function, code_insert_after_line, code_replace_lines, etc.).
   const { resolvePatchWithTools } = await import("./patch-with-tools.js");
-  const result = await resolvePatchWithTools({
+  let result = await resolvePatchWithTools({
     type: "patch_with_tools",
     proposal_text: sanitizeProposalForPatcher(chosen.content),
     target_file: targetFile,

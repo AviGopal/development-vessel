@@ -144,18 +144,30 @@ export async function resolveGenerativeFrontierGapTick(
   });
 
   // — 1. HEADROOM GATE (primary throttle, fail-CLOSED) —
+  // Gate on the GENUINE capability subgraph (lifecycle hooks excluded), NOT the full graph.
+  // The full-graph headroom is PERVERSE: every execution nests validator-dispatch/slot-binding,
+  // so the hub grows with activity → headroom FALLS as the substrate composes more, and this
+  // gate would never unlock (it would punish the very growth that should open it). genuine
+  // headroom is the honest signal — it is 0 while the capability graph is FRAGMENTED
+  // (components>1), so the gate stays closed until composition BRIDGES the components, then
+  // unlocks once the connected capability graph has real headroom. (2026-06-19) Falls back to
+  // the top-level (full) fields for spectral entries predating the genuine{} block.
   const spectral = await readSpectral(pointer.spectral_metrics_path);
+  const gspec: any =
+    spectral && (spectral as any).genuine && typeof (spectral as any).genuine.fiedler_lambda2 === "number"
+      ? (spectral as any).genuine
+      : spectral;
   if (
-    !spectral ||
-    typeof spectral.fiedler_lambda2 !== "number" ||
-    typeof spectral.star_ratio !== "number"
+    !gspec ||
+    typeof gspec.fiedler_lambda2 !== "number" ||
+    typeof gspec.star_ratio !== "number"
   ) {
     return fail("spectral_signal_unavailable");
   }
-  const lambda2 = spectral.fiedler_lambda2;
-  const starRatio = spectral.star_ratio;
-  const components = typeof spectral.components === "number" ? spectral.components : NaN;
-  const nodes = typeof spectral.nodes === "number" ? spectral.nodes : 0;
+  const lambda2 = gspec.fiedler_lambda2;
+  const starRatio = gspec.star_ratio;
+  const components = typeof gspec.components === "number" ? gspec.components : NaN;
+  const nodes = typeof gspec.nodes === "number" ? gspec.nodes : 0;
   const headroom = lambda2 * (1 - starRatio);
 
   const spectralFields = {

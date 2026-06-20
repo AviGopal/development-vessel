@@ -113,26 +113,48 @@ export async function resolveComposeTopologyTick(
   //     NEGATIVE → excluded outright (never make a hub hubbier).
   const HUB_DEG = 8;
   const deg = new Map<string, number>();
+  // GENUINE subgraph adjacency (lifecycle hooks excluded) — the real capability topology.
+  const gAdj = new Map<string, Set<string>>();
   try {
     const [edgeRows] = await sql(`SELECT parent_activity_id, child_activity_id FROM activity_composition_graph LIMIT 3000;`);
     for (const e of edgeRows || []) {
       const a = e.parent_activity_id, b = e.child_activity_id;
       if (!a || !b || a === b) continue;
       deg.set(a, (deg.get(a) ?? 0) + 1); deg.set(b, (deg.get(b) ?? 0) + 1);
+      if (!isHub(a) && !isHub(b)) {
+        if (!gAdj.has(a)) gAdj.set(a, new Set()); if (!gAdj.has(b)) gAdj.set(b, new Set());
+        gAdj.get(a)!.add(b); gAdj.get(b)!.add(a);
+      }
     }
   } catch { /* graph read failed — fall back to leaf/strict ranking only */ }
+  // Genuine connected components (BFS) → component id per node. Bridging two DIFFERENT
+  // components is the highest-value λ₂ move: it merges them, taking λ₂ from 0 (disconnected)
+  // to positive. (Check-in 2026-06-19: the genuine graph is 2 components → λ₂=0 → headroom 0.)
+  const compOf = new Map<string, number>();
+  let ncomp = 0;
+  for (const node of gAdj.keys()) {
+    if (compOf.has(node)) continue;
+    ncomp++; const stack = [node]; compOf.set(node, ncomp);
+    while (stack.length) { const u = stack.pop()!; for (const v of gAdj.get(u) ?? []) if (!compOf.has(v)) { compOf.set(v, ncomp); stack.push(v); } }
+  }
   const d = (id: string) => deg.get(id) ?? 0;
+  const inGenuine = (id: string) => gAdj.has(id);
   const isGraphHub = (id: string) => d(id) > HUB_DEG;
+  // BRIDGE: both endpoints already in the genuine graph, in DIFFERENT components → merges
+  // them. The single highest-value connectivity move while the graph is fragmented.
+  const bridge = (p: Pair) => inGenuine(p.producer) && inGenuine(p.consumer) && compOf.get(p.producer) !== compOf.get(p.consumer);
   const crossLink = (p: Pair) => d(p.producer) >= 1 && d(p.consumer) >= 1 && !isGraphHub(p.producer) && !isGraphHub(p.consumer);
   const uncomposed = (p: Pair) => !composedTargets.has([p.producer, p.consumer].sort().join("|"));
   const noHub = (p: Pair) => !isGraphHub(p.producer) && !isGraphHub(p.consumer); // never grow a hub
   const leafPair = (p: Pair) => isMeta(p.producer) === false && isMeta(p.consumer) === false;
-  // rank: expected-λ₂-positive cross-links first, then leaf×leaf, then strict shape.
-  const rank = (p: Pair) => (crossLink(p) ? 0 : 4) + (leafPair(p) ? 0 : 2) + (p.strict ? 0 : 1);
+  // rank: BRIDGE (merge components) first, then cross-link (mesh), then leaf×leaf, then strict.
+  const rank = (p: Pair) => (bridge(p) ? 0 : 8) + (crossLink(p) ? 0 : 4) + (leafPair(p) ? 0 : 2) + (p.strict ? 0 : 1);
   const underCap = compositeIds.size < MAX;
   const candidates = underCap ? pairs.filter((p) => uncomposed(p) && noHub(p)).sort((a, b) => rank(a) - rank(b)) : [];
   const fresh = candidates[0];
-  const expected_lambda2 = fresh ? (crossLink(fresh) ? "positive (cross-link)" : "bootstrap (seed)") : null;
+  const expected_lambda2 = fresh
+    ? (bridge(fresh) ? "JUMP (bridge components)" : crossLink(fresh) ? "positive (cross-link)" : "bootstrap (seed)")
+    : null;
 
   async function dispatch(targetTemplateId: string, goal: string): Promise<any> {
     try {
@@ -185,7 +207,7 @@ export async function resolveComposeTopologyTick(
   const report = {
     generated_at: new Date().toISOString(),
     action, composite, execution_id: result?.executionId ?? null, outcome: result?.status ?? null,
-    expected_lambda2, graph_nodes: deg.size,
+    expected_lambda2, graph_nodes: deg.size, genuine_components: ncomp,
     chainable_pairs_available: pairs.length, existing_composites: compositeIds.size, under_cap: underCap,
     star_ratio, headroom, unlock_at: 0.35,
   };

@@ -420,7 +420,28 @@ export async function resolveVesselMitosisCutover(
     return structuredError("evaluation_evidence is required");
   }
   console.error(`[mitosis-cutover] verdict=${evaluation_evidence.verdict} cited_checks=${JSON.stringify(evaluation_evidence.cited_check_names ?? null)} cited_traces=${Array.isArray(evaluation_evidence.cited_trace_ids) ? evaluation_evidence.cited_trace_ids.length : 0} base_sha=${pointer.staged_base_sha} host_sync=${process.env["MITOSIS_HOST_SYNC_MODE"] ?? "unset"} host_repo_root=${pointer.host_repo_root ?? process.env["MITOSIS_HOST_REPO_ROOT"] ?? "unset"}`);
+  // Freshness gate: surface staleness/push-readiness rejections explicitly so
+  // mitoses don't get stuck silently in EVALUATE_OR_CUTOVER. The staged_base_sha
+  // freshness is re-checked against the live source below (assertFreshness), but
+  // we log the inputs up front so an unfavorable verdict / stale base / not-ready
+  // push surface a clear reason in the tick log.
+  {
+    const stagedAgeMs = typeof (pointer as any).staged_at_ms === "number"
+      ? Date.now() - (pointer as any).staged_at_ms
+      : null;
+    const freshnessMaxAgeMs = Number(process.env["MITOSIS_STAGED_MAX_AGE_MS"] ?? "") || null;
+    const stale = stagedAgeMs != null && freshnessMaxAgeMs != null && stagedAgeMs > freshnessMaxAgeMs;
+    console.error(`[mitosis-cutover] gate verdict=${evaluation_evidence.verdict} staged_age_ms=${stagedAgeMs ?? "unknown"} max_age_ms=${freshnessMaxAgeMs ?? "unset"} stale=${stale} push_ready=${process.env["MITOSIS_DIRECT_PUSH"] === "1" ? "direct" : (process.env["MITOSIS_HOST_SYNC_MODE"] ?? "unset")}`);
+    if (stale) {
+      console.error(`[mitosis-cutover] REJECT reason=stale_mitosis staged_age_ms=${stagedAgeMs} max_age_ms=${freshnessMaxAgeMs}`);
+      return softRefuse(
+        `staged mitosis is stale (age ${stagedAgeMs}ms exceeds MITOSIS_STAGED_MAX_AGE_MS=${freshnessMaxAgeMs}ms)`,
+        { staged_age_ms: stagedAgeMs, max_age_ms: freshnessMaxAgeMs, refuse_class: "stale_mitosis" },
+      );
+    }
+  }
   if (evaluation_evidence.verdict !== "FAVORABLE") {
+    console.error(`[mitosis-cutover] REJECT reason=unfavorable_verdict verdict=${evaluation_evidence.verdict}`);
     // Audited NO — normal outcome when verdict is INSUFFICIENT_DATA / NEUTRAL /
     // UNFAVORABLE. Soft-refuse so mitosis-tick doesn't show as failure on every
     // tick when there's nothing to cut over.

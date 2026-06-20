@@ -855,7 +855,7 @@ export async function resolveApplyProposalAsPatch(pointer: ApplyProposalAsPatchP
   // is structured by construction — every change is a verifiable primitive
   // (code_find_function, code_insert_after_line, code_replace_lines, etc.).
   const { resolvePatchWithTools } = await import("./patch-with-tools.js");
-  let result = await resolvePatchWithTools({
+  let result: Awaited<ReturnType<typeof resolvePatchWithTools>> = await resolvePatchWithTools({
     type: "patch_with_tools",
     proposal_text: sanitizeProposalForPatcher(chosen.content),
     target_file: targetFile,
@@ -863,6 +863,33 @@ export async function resolveApplyProposalAsPatch(pointer: ApplyProposalAsPatchP
     vessels_root: vesselsRoot,
     workspace_root: workspaceRoot,
   });
+  // FAVORABLE-gate semantic no-op guard: when the RAW proposal (backticks intact)
+  // says replace `A` with `B`, the staged file MUST contain B verbatim. Otherwise
+  // the patcher wrote a typecheck-clean anchor deviation (e.g. told outcome_shape,
+  // wrote sj.outcome) that passes tests but is a no-op against intent.
+  if (result.shape === "mitosisStaged" && result.body && typeof (result.body as { mitosis_root?: unknown }).mitosis_root === "string") {
+    const raw = chosen.content;
+    const replaceRe = /replace\s+`([^`\n]+)`\s+with\s+`([^`\n]+)`/gi;
+    const required: string[] = [];
+    let m: RegExpExecArray | null;
+    while ((m = replaceRe.exec(raw)) !== null) {
+      if (m[2]) required.push(m[2]);
+    }
+    if (required.length > 0) {
+      try {
+        const stagedPath = join((result.body as { mitosis_root: string }).mitosis_root, subPath);
+        const stagedContent = await readFile(stagedPath, "utf-8");
+        const missing = required.filter((r) => !stagedContent.includes(r));
+        if (missing.length > 0) {
+          result = structuredError("verbatim_anchor_missing_post_stage", {
+            proposal: chosen.name,
+            target_file: targetFile,
+            missing_anchors: missing,
+          }) as typeof result;
+        }
+      } catch { /* if we cannot read the staged file, leave result as-is */ }
+    }
+  }
   // Self-propel evaluate→cutover the moment patch_with_tools stages a mitosis.
   if (result.shape === "mitosisStaged") triggerMitosisTick();
   // Mark this proposal applied regardless of outcome so the next cycle

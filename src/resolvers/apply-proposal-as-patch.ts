@@ -252,6 +252,9 @@ function sanitizeProposalForPatcher(raw: string): string {
     if (typeof m["anchor"] === "string" && m["anchor"].length > 0) {
       lines.push(`required_code_modifications[${i}].anchor: ${(m["anchor"] as string).slice(0, 4000)}`);
     }
+    if (typeof m["verbatim"] === "string" && (m["verbatim"] as string).length > 0) {
+      lines.push(`required_code_modifications[${i}].verbatim: ${(m["verbatim"] as string).slice(0, 4000)}`);
+    }
   }
   return lines.join("\n");
 }

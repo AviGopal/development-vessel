@@ -147,9 +147,18 @@ export async function resolveSubstrateHealthTick(
     // drops connections under that contention. Use generous retries so a transient
     // blip on one page does NOT truncate the registry view — a truncated view
     // silently corrupts confidence + stability and flaps the lift verdict.
-    const r = await fetchWithRetry(`${METABOB_ENDPOINT}/v2/activities/templates?limit=${pageSize}&offset=${offset}`, {
-      headers: auth,
-    }, { attempts: 6, baseDelayMs: 250 });
+    const pageUrl = `${METABOB_ENDPOINT}/v2/activities/templates?limit=${pageSize}&offset=${offset}`;
+    let r = await fetchWithRetry(pageUrl, { headers: auth }, { attempts: 6, baseDelayMs: 250 });
+    if (!r || !r.ok) {
+      // One page exhausting its retries used to abandon the WHOLE enumeration
+      // (fetchInterrupted=true; break) — a single unlucky page during a boredom
+      // burst marked the entire corpus incomplete and pinned the lift gate at
+      // overall_passing=null indefinitely. Give the struggling offset a real
+      // second chance in a calmer window (longer cooldown + more attempts)
+      // before giving up on the entire measurement.
+      await new Promise((res) => setTimeout(res, 3000));
+      r = await fetchWithRetry(pageUrl, { headers: auth }, { attempts: 10, baseDelayMs: 500 });
+    }
     if (!r || !r.ok) { fetchInterrupted = true; break; }
     const page = await r.json() as { templates?: Template[]; total?: number };
     if (typeof page.total === "number") templatesTotal = page.total;

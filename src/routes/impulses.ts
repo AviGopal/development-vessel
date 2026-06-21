@@ -50,6 +50,7 @@ import { resolvePriorSuccessfulAttempts } from "../resolvers/prior-successful-at
 import { resolveSystemLoadReport } from "../resolvers/system-load-report.js";
 import { resolveDbContentionObserver } from "../resolvers/db-contention-observer.js";
 import { resolveFeatureCompose } from "../resolvers/feature-compose.js";
+import { resolveGapToFeature } from "../resolvers/gap-to-feature.js";
 import { resolveLoadAttribution, resolveLoadAttributionWrite } from "../resolvers/load-attribution.js";
 import { resolveLoadAttributionReport } from "../resolvers/load-attribution-report.js";
 import { resolvePreconditionRejectionScan } from "../resolvers/precondition-rejection-scan.js";
@@ -263,6 +264,8 @@ async function dispatchInner(pointer: AnyPointer): Promise<ResolverResult> {
       return resolveDbContentionObserver(p as Parameters<typeof resolveDbContentionObserver>[0]);
     case "feature_compose":
       return resolveFeatureCompose(p as Parameters<typeof resolveFeatureCompose>[0]);
+    case "gap_to_feature":
+      return resolveGapToFeature(p as Parameters<typeof resolveGapToFeature>[0]);
     case "loadAttribution":
       return resolveLoadAttribution(p as Parameters<typeof resolveLoadAttribution>[0]);
     case "loadAttribution_write":

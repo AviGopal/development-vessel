@@ -251,6 +251,9 @@ function sanitizeProposalForPatcher(raw: string): string {
     if (typeof m["description"] === "string") {
       lines.push(`required_code_modifications[${i}].description: ${stripCodeFromText(m["description"]).slice(0, 1200)}`);
     }
+    if (typeof m["inline-code-stripped"] === "string" && (m["inline-code-stripped"] as string).length > 0) {
+      lines.push(`required_code_modifications[${i}].inline-code-stripped: ${(m["inline-code-stripped"] as string).slice(0, 4000)}`);
+    }
     if (typeof m["anchor"] === "string" && m["anchor"].length > 0) {
       lines.push(`required_code_modifications[${i}].anchor: ${(m["anchor"] as string).slice(0, 4000)}`);
     }

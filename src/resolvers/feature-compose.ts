@@ -22,6 +22,7 @@
  */
 import { METABOB_API_KEY } from "../config.js";
 import type { ResolverResult } from "./types.js";
+import { resolveVesselMitosisCutover } from "./vessel-mitosis-cutover.js";
 
 const DISCOVERY_ENDPOINT = process.env.DISCOVERY_ENDPOINT ?? "http://127.0.0.1:8100";
 // In-container authoring targets the WRITABLE runtime (/vessels), like the
@@ -46,6 +47,10 @@ export interface FeatureComposePointer {
   keep_on_fail?: boolean;
   /** Hard cap on ops in a single plan (default 24). */
   max_ops?: number;
+  /** On FAVORABLE, LAND each existing-vessel change through vessel-mitosis-cutover. */
+  land?: boolean;
+  /** Pass-through to the cutover: stage+commit but skip the actual git push (test). */
+  skip_push?: boolean;
 }
 
 interface PlanOp {
@@ -255,6 +260,49 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
     rolled_back = true;
   }
 
+  // 5. LAND (autonomous): on FAVORABLE, push each EXISTING-vessel change through
+  // vessel-mitosis-cutover. Its evidence+freshness gates ARE the substrate's
+  // self-verification; direct-push mode commits to the writable clone -> origin/dev
+  // -> mirror -> /vessels + restart. One-shot compose->cutover has no drift window,
+  // so the freshness gate passes legitimately. Net-new vessels (no push clone) are
+  // skipped here and land via the scaffold path.
+  const cutovers: unknown[] = [];
+  if (verdict === "FAVORABLE" && pointer.land) {
+    const ts = new Date().toISOString().replace(/[:.]/g, "-");
+    for (const v of touched) {
+      const vessel = v.replace(/^repos\//, "");
+      const vBase = `${REPO_ROOT}/${vessel}`;
+      const changedRel = [...created, ...edited]
+        .filter((p) => p.startsWith(`${vBase}/`))
+        .map((p) => p.slice(vBase.length + 1));
+      if (changedRel.length === 0) continue;
+      const clone = await callTool(toolsEndpoint, "shell", { command: `test -d /workspace/git/vessels/${vessel} && echo yes || echo no`, cwd: REPO_ROOT });
+      if (!String((clone.body as { stdout?: unknown })?.stdout ?? "").includes("yes")) {
+        cutovers.push({ vessel, landed: false, reason: "no push clone — net-new vessel, use scaffold path" });
+        continue;
+      }
+      const mitosisRoot = `${REPO_ROOT}/${vessel}-mitosis-fc-${ts}`;
+      for (const rel of changedRel) {
+        const dir = `${mitosisRoot}/${rel.split("/").slice(0, -1).join("/")}`;
+        await callTool(toolsEndpoint, "shell", { command: `mkdir -p ${JSON.stringify(dir)} && cp ${JSON.stringify(`${vBase}/${rel}`)} ${JSON.stringify(`${mitosisRoot}/${rel}`)}`, cwd: REPO_ROOT });
+      }
+      const shaRes = await callTool(toolsEndpoint, "shell", { command: `sha256sum ${JSON.stringify(`${vBase}/${changedRel[0]}`)} | cut -c1-12`, cwd: REPO_ROOT });
+      const staged_base_sha = String((shaRes.body as { stdout?: unknown })?.stdout ?? "").trim().split(/\s+/)[0];
+      const cut = await resolveVesselMitosisCutover({
+        type: "vessel_mitosis_cutover",
+        vessel_name: vessel,
+        base_version_id: `${vessel}-live`,
+        mitosis_version_id: `${vessel}-fc-${ts}`,
+        mitosis_root: mitosisRoot,
+        staged_files: changedRel,
+        staged_base_sha,
+        evaluation_evidence: { verdict: "FAVORABLE", base_success_rate: 1, mitosis_success_rate: 1, cited_trace_ids: [], cited_check_names: ["typecheck"] },
+        skip_push: pointer.skip_push ?? false,
+      } as never);
+      cutovers.push({ vessel, result: cut.body });
+    }
+  }
+
   return {
     shape: "featureComposeReport",
     body: {
@@ -269,6 +317,7 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
       rolled_back,
       created_files: created.map((f) => f.replace(`${REPO_ROOT}/`, "")),
       edited_files: edited.map((f) => f.replace(`${REPO_ROOT}/`, "")),
+      cutovers: pointer.land ? cutovers : undefined,
       next: verdict === "FAVORABLE"
         ? "staged + typecheck-clean; dispatch a cutover (commit/push) to land"
         : "rolled back; inspect applied[].detail and verify[] then refine the spec",

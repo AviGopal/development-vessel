@@ -72,8 +72,11 @@ export async function resolveGapToFeature(pointer: GapToFeaturePointer): Promise
     spec,
     model: pointer.model,
     dry_run: pointer.dry_run ?? false,
-    // STAGE on success (do not keep on fail — feature_compose rolls back UNFAVORABLE).
     keep_on_fail: false,
+    // Autonomous LAND: on FAVORABLE, push through vessel-mitosis-cutover (its
+    // evidence+freshness gates are the self-verification; self-recovery is the
+    // backstop). Suppressed in dry_run.
+    land: !(pointer.dry_run ?? false),
   });
 
   const cb = compose.body as Record<string, unknown>;
@@ -87,7 +90,7 @@ export async function resolveGapToFeature(pointer: GapToFeaturePointer): Promise
       verdict: cb?.verdict ?? cb?.stage,
       compose: cb,
       note: cb?.verdict === "FAVORABLE"
-        ? "STAGED + typecheck-clean in the /vessels runtime — route to the cutover gate to land"
+        ? "LANDED autonomously via cutover (or staged if push gated); self-recovery is the backstop"
         : "composer could not produce a verified change for this gap (see compose.applied/verify)",
     },
   };

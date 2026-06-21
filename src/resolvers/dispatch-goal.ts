@@ -81,6 +81,27 @@ import { METABOB_API_KEY } from "../config.js";
 //
 // DO NOT remove or raise without coordinating with goal-host-vessel's own ceiling —
 // this is a safety boundary, not a tunable performance knob.
+/**
+ * MAX_GOAL_LEN — hard ceiling on goal payload size (characters).
+ *
+ * Rationale:
+ *  - Token budget: goal text is forwarded to LLM-backed goal-host endpoints whose
+ *    context windows and per-request token budgets are finite; an unbounded payload
+ *    can exhaust the model's context window or blow past tokenizer limits, causing
+ *    truncation or outright dispatch failure.
+ *  - Prompt-injection surface: very large free-form payloads expand the attack
+ *    surface for prompt-injection and adversarial content smuggling; a tight
+ *    character cap keeps the input within an auditable, reviewable size.
+ *  - Resolver parsimony: dispatch goals are intended to be concise directives, not
+ *    document dumps — the cap nudges callers toward well-formed, parsimonious goals.
+ *
+ * Trade-offs / configuration:
+ *  - The 8192-character ceiling is intentionally conservative against typical model
+ *    context windows; legitimate goals exceeding it should be restructured (e.g.
+ *    moved into referenced artifacts) rather than uncapped here.
+ *  - This is a safety boundary, NOT a tunable performance knob. It MUST stay in
+ *    sync with goal-host-vessel's own input ceiling — change them together.
+ */
 const MAX_GOAL_LEN = 8192;
 const GOAL_HOST_ENDPOINT = process.env["GOAL_HOST_VESSEL_ENDPOINT"] ?? "http://127.0.0.1:8210";
 

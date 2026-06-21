@@ -67,6 +67,18 @@ import { METABOB_API_KEY } from "../config.js";
 // MAX_GOAL_LEN guard: caps dispatch goal payloads to prevent token overflow in
 // downstream LLM prompts, preserve goal clarity and parsimony, and align with
 // typical resolver input constraints across the substrate architecture.
+//
+// Rationale & trade-off:
+//   The 8192-character ceiling balances expressive flexibility against safety.
+//   Goals significantly longer than this risk (a) exceeding prompt/token budgets
+//   in the goal-host-vessel LLM call, (b) degrading reasoning quality as salient
+//   instructions get diluted across pages of text, and (c) triggering parsing
+//   failures in downstream resolvers that consume structured goal output.
+//   Typical goal formulations in this codebase are short imperative sentences
+//   or compact structured directives (see other resolvers in src/resolvers/),
+//   so this bound is generous relative to normal usage while still bounding
+//   worst-case payloads.
+//
 // DO NOT remove or raise without coordinating with goal-host-vessel's own ceiling —
 // this is a safety boundary, not a tunable performance knob.
 const MAX_GOAL_LEN = 8192;

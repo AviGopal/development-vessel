@@ -677,7 +677,7 @@ export async function resolveApplyProposalAsPatch(pointer: ApplyProposalAsPatchP
         .map((m) => { const d = (m as { description?: string }).description; return typeof d === "string" ? d : ""; })
         .filter(Boolean)
         .join(" \n ") || content;
-      const surg = assessProposalSurgical(descText);
+      let surg = assessProposalSurgical(descText);
       if (!surg.surgical) { console.error(`[apply-proposal-as-patch] skip non_surgical_proposal: ${e.name} reason=${surg.reason}`); skipped.push({ proposal: e.name, reason: surg.reason }); continue; }
     }
     // (Seam ③) Description-only NET-NEW file: proposal cites exactly one new

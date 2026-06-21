@@ -64,6 +64,8 @@ export interface ApplyProposalAsPatchPointer {
   max_age_hours?: number;
   /** Re-attempt a content-matched sentinel older than this many hours (default 24). */
   retry_after_hours?: number;
+  /** Re-attempt a FAILED (structuredError) sentinel sooner — default 2h. Failed attempts re-draft byte-identically, so a short TTL lets the improving patcher retry while the proposal is still in-window. */
+  failed_retry_after_hours?: number;
 }
 
 function structuredError(detail: string, extra?: Record<string, unknown>): ResolverResult {
@@ -474,12 +476,14 @@ export async function resolveApplyProposalAsPatch(pointer: ApplyProposalAsPatchP
     if (appliedSet.has(e.name)) {
       let priorSha: string | null = null;
       let priorTs: number | null = null;
+      let priorOutcome: string | null = null;
       try {
-        const sj = JSON.parse(await readFile(`${sentinelDir}/${e.name}`, "utf-8")) as { content_sha?: string; applied_at?: string; staged_at?: string };
+        const sj = JSON.parse(await readFile(`${sentinelDir}/${e.name}`, "utf-8")) as { content_sha?: string; applied_at?: string; staged_at?: string; outcome?: string };
         priorSha = sj.content_sha ?? null;
         const tsStr = sj.applied_at ?? sj.staged_at ?? null;
         priorTs = tsStr ? Date.parse(tsStr) : null;
-      } catch { priorSha = null; priorTs = null; }
+        priorOutcome = sj.outcome ?? null;
+      } catch { priorSha = null; priorTs = null; priorOutcome = null; }
       // Retry TTL (2026-06-18): a content_sha match normally means "already attempted,
       // skip". But a PERSISTENT real issue (e.g. a typecheck error whose first patch
       // attempt failed) is re-drafted with IDENTICAL content forever, so it was
@@ -490,7 +494,9 @@ export async function resolveApplyProposalAsPatch(pointer: ApplyProposalAsPatchP
       // re-skipped by the surgical pre-gate; already-fixed ones abort fast via the
       // no-op-done guard. This is what keeps the autonomous loop SUPPLIED with landable
       // work instead of starving once every fresh proposal has been tried once.
-      const retryAfterMs = (pointer.retry_after_hours ?? 24) * 3_600_000;
+      const retryAfterMs = (priorOutcome === "structuredError"
+        ? (pointer.failed_retry_after_hours ?? 2)
+        : (pointer.retry_after_hours ?? 24)) * 3_600_000;
       const sentinelExpired = priorTs !== null && (Date.now() - priorTs) > retryAfterMs;
       if ((priorSha === null || priorSha === contentSha) && !sentinelExpired) { skipped.push({ proposal: e.name, reason: "already_applied_sentinel" }); continue; }
       // else: drafter produced NEW content (fresh attempt) OR the sentinel expired

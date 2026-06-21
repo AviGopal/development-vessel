@@ -47,11 +47,20 @@ export async function resolveConceptUsageRecord(
   const isPlaceholder = (v: unknown): boolean =>
     typeof v === "string" && /\{\{.*\}\}/.test(v);
   if (isPlaceholder(pointer.concept_id) || !pointer.concept_id) {
+    // An empty/placeholder concept_id means the upstream extract selected nothing
+    // (e.g. a boredom dispatch with no real query) — the intended behaviour is to
+    // SKIP the usage write, which is a benign NO-OP, not a failure. Returning
+    // `structuredError` here made goal-host's proxy throw (index.ts) and fail the
+    // WHOLE composed activity, so concept transformers running via composition all
+    // failed whenever they selected nothing. Return the declared success shape with
+    // skipped:true so the chain completes gracefully and composition can self-assemble.
     return {
-      shape: "structuredError",
+      shape: "conceptUsageRecorded",
       body: {
         resolver: "concept_usage_record",
-        detail: `unresolved/empty concept_id ("${String(pointer.concept_id).slice(0, 40)}") — skipping usage write to avoid polluting concept-db`,
+        skipped: true,
+        recorded: false,
+        reason: `unresolved/empty concept_id ("${String(pointer.concept_id).slice(0, 40)}") — skipped usage write (no-op)`,
       },
     };
   }

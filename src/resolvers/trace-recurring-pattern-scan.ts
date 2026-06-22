@@ -144,10 +144,12 @@ function buildCluster(args: {
     pattern_id: patternId,
     summary:
       `The substrate has successfully produced the output-shape combination [${shapeList}] ` +
-      `${recurrence} times in the observation window (activities: ${producingActivities.join(", ")}), ` +
-      `but has no dedicated first-class template that produces it. Author the smallest REAL resolver ` +
-      `chain whose tasks PERFORM the work that yields these output shapes — a genuine producing ` +
-      `topology, not a meta-activity.`,
+      `${recurrence} times in the observation window via these EXISTING activities: ${producingActivities.join(", ")}. ` +
+      `Capture this recurrent topology as a reusable composite by COMPOSING those existing activities — ` +
+      `author a chain whose tasks set "resolver" to one of the existing activity ids listed above ` +
+      `(activities-as-resolvers), so executing it dispatches them and forms genuine composition edges. ` +
+      `Do NOT re-implement their work with leaf resolvers, and do NOT author a meta-activity. ` +
+      `Reuse the existing producers; only mint new leaf work for a shape that has no producer.`,
     observation_window: `${windowStart}/${windowEnd}`,
     n_observations: recurrence,
     n_contrast_examples: nContrast,
@@ -157,10 +159,15 @@ function buildCluster(args: {
     contrast_trace_ids: contrastTraceIds,
     producing_activities: producingActivities,
     topology_hint:
-      `Author tasks that actually emit [${shapeList}] via real resolver calls (http_fetch, ` +
-      `json_path_extract, fs_write, concept_create_write, etc.). The LAST task MUST emit one of the ` +
-      `cluster's output shapes so executing the template advances substrate state. Use the ` +
-      `{{<task>_json}} form when embedding a prior task's output into a JSON body. Do NOT author a ` +
+      `COMPOSE the existing producers via activities-as-resolvers. For each composing task, set the ` +
+      `task's "resolver" field to the EXACT activity id string of one of these existing activities: ` +
+      `[${producingActivities.join(", ")}] — e.g. {"id":"t1","resolver":"${producingActivities[0] ?? "<existing-activity-id>"}","outputShapes":[...]}. ` +
+      `The engine reads the "resolver" VALUE ITSELF as the activity to dispatch (getTemplate(task.resolver) ` +
+      `→ dispatchCompose), forming one genuine composition edge per task. Do NOT set resolver to the word ` +
+      `"activity" and do NOT put the activity id in config — the id MUST be the resolver value. Chain them ` +
+      `so the LAST task emits one of [${shapeList}]. ONLY fall back to a leaf resolver (http_fetch, ` +
+      `json_path_extract, fs_write, concept_create_write) for a needed shape that has NO existing producer. ` +
+      `Use the {{<task>_json}} form to thread a prior task's output into the next. Do NOT author a ` +
       `read_scenario → analyse → write-a-Proposal scaffold; emit no *Proposal output.`,
     deny_list: ["fs_read of a scenario file", "activityTemplateProposal", "patch_proposal", "read_scenario"],
     bridge_source: "trace_recurring_pattern_scan",

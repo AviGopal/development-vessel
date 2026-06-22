@@ -139,6 +139,10 @@ import { resolveObsidianLearnCommands } from "../resolvers/obsidian-learn-comman
 import { resolveGoalHostBehaviorScan } from "../resolvers/goal-host-behavior-scan.js";
 import { resolveObsidianBehaviorScan } from "../resolvers/obsidian-behavior-scan.js";
 import { resolveObsidianReflect } from "../resolvers/obsidian-reflect.js";
+import { resolveObsidianDeliverAssist } from "../resolvers/obsidian-deliver-assist.js";
+import { resolveObsidianAssistFeedbackScan } from "../resolvers/obsidian-assist-feedback-scan.js";
+import { resolveObsidianVerifyOutput } from "../resolvers/obsidian-verify-output.js";
+import { resolveObsidianRequestScan } from "../resolvers/obsidian-request-scan.js";
 import { resolveSubstrateHeartbeatObserver } from "../resolvers/substrate-heartbeat-observer.js";
 import { resolveLlmQuotaObserver } from "../resolvers/llm-quota-observer.js";
 import { resolveAuthorNewResolver } from "../resolvers/author-new-resolver.js";
@@ -260,10 +264,13 @@ async function dispatchInner(pointer: AnyPointer): Promise<ResolverResult> {
       return resolvePriorSuccessfulAttempts(p as Parameters<typeof resolvePriorSuccessfulAttempts>[0]);
     case "system_load_report":
       return resolveSystemLoadReport(p as Parameters<typeof resolveSystemLoadReport>[0]);
+    // @shape-dispatch:private
     case "db_contention_observer":
       return resolveDbContentionObserver(p as Parameters<typeof resolveDbContentionObserver>[0]);
+    // @shape-dispatch:private
     case "feature_compose":
       return resolveFeatureCompose(p as Parameters<typeof resolveFeatureCompose>[0]);
+    // @shape-dispatch:private
     case "gap_to_feature":
       return resolveGapToFeature(p as Parameters<typeof resolveGapToFeature>[0]);
     case "loadAttribution":
@@ -535,6 +542,14 @@ async function dispatchInner(pointer: AnyPointer): Promise<ResolverResult> {
       return resolveObsidianReflect(
         p as Parameters<typeof resolveObsidianReflect>[0],
       );
+    case "obsidian_deliver_assist":
+      return resolveObsidianDeliverAssist(p as Parameters<typeof resolveObsidianDeliverAssist>[0]);
+    case "obsidian_assist_feedback_scan":
+      return resolveObsidianAssistFeedbackScan(p as Parameters<typeof resolveObsidianAssistFeedbackScan>[0]);
+    case "obsidian_verify_output":
+      return resolveObsidianVerifyOutput(p as Parameters<typeof resolveObsidianVerifyOutput>[0]);
+    case "obsidian_request_scan":
+      return resolveObsidianRequestScan(p as Parameters<typeof resolveObsidianRequestScan>[0]);
     case "detector_coverage_scan":
       return resolveDetectorCoverageScan(p as Parameters<typeof resolveDetectorCoverageScan>[0]);
     case "signature_cluster_scan":

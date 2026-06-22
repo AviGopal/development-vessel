@@ -524,6 +524,15 @@ export const config = {
       // "Workflow" page onto the substrate vault-render board so the operator sees
       // what the substrate learned. Non-intrusive (board, not operator notes).
       "obsidian_reflect",
+      // obsidian feedback / RESPOND loop (2026-06-22): closes the operator↔vessel
+      // usefulness loop — deliver an assist, grade it by the operator's reaction,
+      // independently verify written output, and scan the inbox for explicit
+      // requests. Without these the substrate observes+models the operator but
+      // never measures whether its OWN assists/responses are useful.
+      "obsidian_deliver_assist",
+      "obsidian_assist_feedback_scan",
+      "obsidian_verify_output",
+      "obsidian_request_scan",
       // detector-authoring recursion (2026-06-14, SUBSTRATE_AS_MDP §9.3 limit-8):
       // detector_coverage_scan finds recurring problem classes no detector covers;
       // build_signature_detector authors a detect-<class> activity binding the

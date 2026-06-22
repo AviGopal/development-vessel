@@ -108,6 +108,24 @@ import { METABOB_API_KEY } from "../config.js";
 // recommendation scoring thresholds — goals exceeding this ceiling are
 // rejected at dispatch time rather than risking truncation or scoring
 // degradation downstream.
+//
+// Rationale for the 8192-character ceiling:
+//  - API constraints: goal-host-vessel enforces its own input limit on
+//    /run-goal; exceeding it yields a 4xx from the downstream service. We
+//    pre-validate here to fail fast with a structured error instead of
+//    surfacing an opaque HTTP failure from the remote vessel.
+//  - Token budget safety: 8192 characters comfortably fits within typical
+//    LLM context windows after prompt-template expansion, leaving headroom
+//    for system prompts, tool schemas, and response generation without
+//    risking mid-dispatch truncation.
+//  - Goal coherence threshold: dispatch goals are directives, not documents.
+//    Past ~8K characters, goals tend to encode multiple concerns that should
+//    be decomposed into separate dispatches or referenced artifacts.
+//
+// Failure mode when exceeded: resolveDispatchGoal returns a structuredError
+// of the form `goal too long (<actual> > <MAX_GOAL_LEN>)` BEFORE any network
+// call to goal-host-vessel — the dispatch is rejected synchronously and no
+// dispatchId is allocated.
 const MAX_GOAL_LEN = 8192;
 const GOAL_HOST_ENDPOINT = process.env["GOAL_HOST_VESSEL_ENDPOINT"] ?? "http://127.0.0.1:8210";
 

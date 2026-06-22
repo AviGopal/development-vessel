@@ -484,6 +484,31 @@ export async function resolveActivityCreateVariant(pointer: ActivityCreateVarian
       t["input_shapes"] = t["inputShapes"];
     }
   }
+  // Compose-task normalization (2026-06-22): activities-as-resolvers. The pattern
+  // drafter naturally emits a composing task as resolver:"activity" (or "compose")
+  // with the target activity id in config.activity_id / subActivityId — but the
+  // ias-executor engine reads task.resolver ITSELF as the activity to dispatch
+  // (getTemplate(task.resolver) → dispatchCompose). Rewrite that form so resolver
+  // holds the activity id, otherwise the composition fails to resolve "activity"
+  // and NO genuine composition edge forms. This is the wire that turns a drafted
+  // composition into real credit-carrying topology (producer→consumer edges).
+  if (templateObj && typeof templateObj === "object") {
+    const tasks = (templateObj as Record<string, unknown>)["tasks"];
+    if (Array.isArray(tasks)) {
+      for (const task of tasks as Record<string, unknown>[]) {
+        const res = String(task["resolver"] ?? "");
+        if (res === "activity" || res === "compose") {
+          const cfg = (task["config"] ?? {}) as Record<string, unknown>;
+          const id =
+            task["subActivityId"] ?? task["sub_activity_id"] ??
+            cfg["activity_id"] ?? cfg["activityId"] ?? cfg["sub_activity_id"] ?? cfg["template_id"];
+          if (typeof id === "string" && id.length > 0) {
+            task["resolver"] = id; // engine reads task.resolver as the activity id
+          }
+        }
+      }
+    }
+  }
   // Default tags + category for substrate-authored variants when LLM omits them.
   // Activity-API requires AT LEAST ONE of tags (non-empty) or category, else 400.
   // Substrate-authored variants frequently miss tags; injecting a sentinel tag

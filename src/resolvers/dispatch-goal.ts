@@ -102,6 +102,12 @@ import { METABOB_API_KEY } from "../config.js";
  *  - This is a safety boundary, NOT a tunable performance knob. It MUST stay in
  *    sync with goal-host-vessel's own input ceiling — change them together.
  */
+// MAX_GOAL_LEN guard: critical for maintaining goal comprehensibility and
+// avoiding token overflow in downstream goal-host evaluation. This length
+// constraint ensures compatibility with LLM token limits and goal-host
+// recommendation scoring thresholds — goals exceeding this ceiling are
+// rejected at dispatch time rather than risking truncation or scoring
+// degradation downstream.
 const MAX_GOAL_LEN = 8192;
 const GOAL_HOST_ENDPOINT = process.env["GOAL_HOST_VESSEL_ENDPOINT"] ?? "http://127.0.0.1:8210";
 

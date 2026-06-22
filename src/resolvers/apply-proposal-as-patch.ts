@@ -33,6 +33,7 @@ import { mkdir, readdir, stat, writeFile, readFile, access } from "node:fs/promi
 import { createHash } from "node:crypto";
 import { DISCOVERY_ENDPOINT, METABOB_API_KEY } from "../config.js";
 import type { ResolverResult } from "./types.js";
+import { resolveFeatureCompose } from "./feature-compose.js";
 
 // Read at call time, not load time — tests stand up a Bun server per case and
 // set LLM_COMPLETION_ENDPOINT just before invoking the resolver.
@@ -457,6 +458,10 @@ export async function resolveApplyProposalAsPatch(pointer: ApplyProposalAsPatchP
   // Record skip reasons so the caller can audit drain progress.
   const skipped: Array<{ proposal: string; reason: string }> = [];
   let chosen: { name: string; path: string; scenarioId: string; content: string; targetFile: string; isNewFile?: boolean } | null = null;
+  // Capture the first FEATURE-scoped (non-surgical) proposal we skip, so that when
+  // no surgical proposal is eligible we can route it through feature_compose
+  // instead of dropping it (2026-06-22 routing wire — see the !chosen block below).
+  let firstFeatureProposal: { name: string; spec: string } | null = null;
   for (const e of entries) {
     const scenarioId = e.name.replace(/-report\.json$/, "");
     if (mitosisDirs.some((d) => d.includes(scenarioId.slice(0, 32)))) { skipped.push({ proposal: e.name, reason: "already_staged" }); continue; }
@@ -678,7 +683,12 @@ export async function resolveApplyProposalAsPatch(pointer: ApplyProposalAsPatchP
         .filter(Boolean)
         .join(" \n ") || content;
       let surg = assessProposalSurgical(descText);
-      if (!surg.surgical) { console.error(`[apply-proposal-as-patch] skip non_surgical_proposal: ${e.name} reason=${surg.reason}`); skipped.push({ proposal: e.name, reason: surg.reason }); continue; }
+      if (!surg.surgical) {
+        // Feature-scoped: too big for the single-patch path. Capture the first one
+        // so the !chosen block can route it to feature_compose (decompose→atoms).
+        if (!firstFeatureProposal && descText.trim()) firstFeatureProposal = { name: e.name, spec: descText };
+        console.error(`[apply-proposal-as-patch] skip non_surgical_proposal: ${e.name} reason=${surg.reason}`); skipped.push({ proposal: e.name, reason: surg.reason }); continue;
+      }
     }
     // (Seam ③) Description-only NET-NEW file: proposal cites exactly one new
     // file (a new_files[] path with NO full content, so the multi-file
@@ -702,6 +712,43 @@ export async function resolveApplyProposalAsPatch(pointer: ApplyProposalAsPatchP
     // it always returns success regardless of whether it actually staged
     // anything. structuredError makes the dispatcher record failure_count++
     // without polluting α with empty wins.
+    // ROUTING WIRE (2026-06-22): no surgical proposal was eligible this drain.
+    // Rather than DROP the feature-scoped proposals (which the surgical pre-gate
+    // skips as non_surgical), route the first one THROUGH feature_compose — it
+    // decomposes the feature spec into surgical atoms, applies with edit-repair,
+    // typecheck-verifies (FAVORABLE→stage via the existing cutover gate /
+    // UNFAVORABLE→rollback). This closes the gap where feature-gaps never reached
+    // the composer. Bounded to one per drain so the LLM cost is paid only when
+    // there is no cheaper surgical work; landing safety stays with the cutover
+    // gate. Disable with ROUTE_FEATURE_PROPOSALS_TO_COMPOSE=0.
+    if (firstFeatureProposal && process.env["ROUTE_FEATURE_PROPOSALS_TO_COMPOSE"] !== "0") {
+      try {
+        const fc = await resolveFeatureCompose({
+          type: "feature_compose",
+          spec: firstFeatureProposal.spec,
+          dry_run: false,
+          keep_on_fail: false,
+          land: true,
+        } as Parameters<typeof resolveFeatureCompose>[0]);
+        const fb = (fc.body ?? {}) as Record<string, unknown>;
+        return {
+          shape: "featureRoutedReport",
+          body: {
+            resolver: "apply_proposal_as_patch",
+            routed_to: "feature_compose",
+            proposal: firstFeatureProposal.name,
+            verdict: fb["verdict"] ?? null,
+            ok: fb["ok"] ?? (fb["verdict"] === "FAVORABLE"),
+            touched_vessels: fb["touched_vessels"] ?? null,
+            note: "no surgical proposal eligible — routed first feature-scoped proposal through feature_compose (decompose→verify→stage)",
+            total_proposals: entries.length,
+            skipped: skipped.slice(0, 50),
+          },
+        };
+      } catch (err) {
+        return structuredError("feature_compose routing failed", { proposal: firstFeatureProposal.name, error: (err as Error).message, total_proposals: entries.length });
+      }
+    }
     return structuredError("no eligible proposals", { total_proposals: entries.length, skipped: skipped.slice(0, 50) });
   }
   // Multi-file proposals path (2026-06-05): if proposal carries `new_files[]`

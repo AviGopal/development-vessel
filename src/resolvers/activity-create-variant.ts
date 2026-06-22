@@ -741,6 +741,107 @@ export async function resolveActivityCreateVariant(pointer: ActivityCreateVarian
     }
   }
 
+  // ── Reuse-before-mint bias (ρ_grow↓, λ₁↑) ─────────────────────────────────
+  // Before minting a fresh Beta(1,1) cell, ask discover-by-shapes whether an
+  // existing activity already PRODUCES the declared output_shapes. If one does,
+  // this mint is a near-duplicate: it raises ρ_grow (a new uninformed cell) and
+  // splits selection traffic instead of concentrating it on — and forming a
+  // composition edge to — the existing producer (which is what raises λ₁). The
+  // master inequality λ₁(L) ≳ ρ_grow is helped on BOTH sides by reusing.
+  //
+  // EXEMPTION: variant-first repair (parentTemplateId set) legitimately mints a
+  // variant to IMPROVE a weak family — never blocked here.
+  // MODE gate — REUSE_BEFORE_MINT = off | shadow (default) | enforce:
+  //   shadow  → record the would-reuse decision, then mint as usual (observe
+  //             first; respects the over-refusal-stall lesson).
+  //   enforce → refuse the duplicate mint and return the existing producer so the
+  //             loop routes to it (a genuine composition edge) instead.
+  // Fail-open: any discover hiccup proceeds to mint (never block on the probe).
+  {
+    const reuseMode = (process.env["REUSE_BEFORE_MINT"] ?? "shadow").toLowerCase();
+    const declaredOut =
+      templateObj && typeof templateObj === "object"
+        ? (Array.isArray((templateObj as Record<string, unknown>)["output_shapes"])
+            ? ((templateObj as Record<string, unknown>)["output_shapes"] as string[])
+            : Array.isArray((templateObj as Record<string, unknown>)["outputShapes"])
+              ? ((templateObj as Record<string, unknown>)["outputShapes"] as string[])
+              : [])
+        : [];
+    const selfId =
+      templateObj && typeof templateObj === "object"
+        ? String((templateObj as Record<string, unknown>)["id"] ?? "")
+        : "";
+    if (reuseMode !== "off" && !pointer.parentTemplateId && declaredOut.length > 0) {
+      try {
+        // To find PRODUCERS of an output shape, discover-by-shapes wants the
+        // shapes in `required_shapes` with mode `candidates_with_scores` (which
+        // it treats as FORWARD: `output_shapes CONTAINSANY $required_shapes`).
+        // Passing `output_shapes` instead returns nothing — that field is only a
+        // secondary filter in backward mode (the latent bug in producer-selection.ts).
+        // The result list is under the `activities` key.
+        const dres = await fetch(`${METABOB_ENDPOINT}/v2/activities/discover-by-shapes`, {
+          method: "POST",
+          headers: { Authorization: `ApiKey ${METABOB_API_KEY}`, "Content-Type": "application/json" },
+          body: JSON.stringify({ mode: "candidates_with_scores", required_shapes: declaredOut }),
+          signal: AbortSignal.timeout(8000),
+        });
+        if (dres.ok) {
+          const dj = (await dres.json()) as {
+            activities?: Array<Record<string, unknown>>;
+            producers?: Array<Record<string, unknown>>;
+            candidates?: Array<Record<string, unknown>>;
+          };
+          const idOf = (c: Record<string, unknown>) =>
+            String(c["activity_id"] ?? c["template_id"] ?? c["id"] ?? "");
+          // Normalize for self-comparison: strip the `activity:⟨…⟩` record-id
+          // wrapper AND the strip_id `-<timestamp>` suffix, so an idempotent
+          // self-re-registration (proposed id == producer id, just wrapped) and
+          // the proposal's own timestamped twin are both recognized as SELF and
+          // excluded — only GENUINELY distinct producers count as near-dups.
+          const norm = (x: string) =>
+            x.replace(/^activity:⟨/, "").replace(/⟩$/, "").replace(/-\d{10,}$/, "");
+          const selfNorm = norm(selfId);
+          const producers = (dj.activities ?? dj.producers ?? dj.candidates ?? []).filter((c) => {
+            const id = idOf(c);
+            if (!id || c["deprecated"] === true) return false;
+            return selfNorm === "" || norm(id) !== selfNorm;
+          });
+          if (producers.length > 0) {
+            const candidateIds = producers.slice(0, 5).map(idOf);
+            // eslint-disable-next-line no-console
+            console.log(
+              `[reuse-before-mint] mode=${reuseMode} existing producer(s) for output_shapes=[${declaredOut.join(",")}] ` +
+                `→ ${candidateIds.join(", ")} (n=${producers.length}); proposed=${selfId}`,
+            );
+            if (reuseMode === "enforce") {
+              return {
+                shape: "structuredError",
+                body: {
+                  resolver: "activity_create_variant",
+                  failure_mode: "reuse_existing_producer",
+                  emergence_class: "reuse",
+                  reused: true,
+                  minted: false,
+                  existing_producer_id: candidateIds[0],
+                  candidate_producers: candidateIds,
+                  output_shapes: declaredOut,
+                  detail:
+                    `refused duplicate mint: ${producers.length} existing producer(s) of [${declaredOut.join(", ")}] ` +
+                    `already in the registry — route to ${candidateIds[0]} (composition edge) instead of minting a new Beta(1,1) cell.`,
+                },
+              };
+            }
+          }
+        }
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.warn(
+          `[reuse-before-mint] discover-by-shapes probe failed; proceeding to mint: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
+  }
+
   const body = pointer.parentTemplateId
     ? { ...templateObj as object, parent_template_id: pointer.parentTemplateId }
     : templateObj;

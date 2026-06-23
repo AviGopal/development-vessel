@@ -5,9 +5,9 @@ import {
   LANDABILITY_THRESHOLD,
 } from "./gap-landability-model";
 
-const FORTY_EIGHT_HOURS_MS = 48 * 60 * 60 * 1000;
 
-async function autoCloseStaleSubstrateGaps(
+
+async function _DELETED_autoCloseStaleSubstrateGaps(
   gaps: Array<{ id: string; createdAt: Date | string; status: string }>,
   checkProgress: (gapId: string) => Promise<boolean>,
   closeGap: (gapId: string) => Promise<void>
@@ -25,8 +25,79 @@ async function autoCloseStaleSubstrateGaps(
   }
   return closed;
 }
+import type { GapLifecycleScanResult } from '../types/gap-types';
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
+
+const STALE_THRESHOLD_MS = 48 * 60 * 60 * 1000; // 48 hours
+
+/**
+ * Categories that are known to produce un-actionable gaps and should be
+ * auto-closed when they have zero progress signals after the stale threshold.
+ */
+const PROBLEMATIC_STALE_CATEGORIES = new Set([
+  'auto_draft_fallback_recommend',
+  'auto_draft_triggered',
+  'novel_failure_mode_detected',
+]);
+
+/**
+ * Returns true when a gap should be auto-closed due to stale inactivity.
+ *
+ * Criteria (ALL must hold):
+ *   1. Gap has been open > 48 h without any update.
+ *   2. No draft updates recorded (draft_updated_at is absent or equals created_at).
+ *   3. No linked resolutions (linked_resolution_ids is empty / absent).
+ *   4. The gap category is either in the known-problematic set OR the gap is
+ *      older than 72 h (generic fallback for all categories).
+ */
+export function shouldAutoClose(gap: {
+  category?: string;
+  created_at?: string | number;
+  updated_at?: string | number;
+  draft_updated_at?: string | number;
+  linked_resolution_ids?: string[];
+}): boolean {
+  const now = Date.now();
+
+  const createdAt =
+    gap.created_at !== undefined ? new Date(gap.created_at).getTime() : null;
+  const updatedAt =
+    gap.updated_at !== undefined ? new Date(gap.updated_at).getTime() : null;
+
+  if (createdAt === null || isNaN(createdAt)) return false;
+
+  const lastTouched = updatedAt !== null && !isNaN(updatedAt) ? updatedAt : createdAt;
+  const ageMs = now - lastTouched;
+
+  if (ageMs <= STALE_THRESHOLD_MS) return false;
+
+  // Zero progress signals: no draft updates beyond creation
+  const draftUpdatedAt =
+    gap.draft_updated_at !== undefined
+      ? new Date(gap.draft_updated_at).getTime()
+      : null;
+  const hasDraftProgress =
+    draftUpdatedAt !== null &&
+    !isNaN(draftUpdatedAt) &&
+    draftUpdatedAt > createdAt;
+
+  if (hasDraftProgress) return false;
+
+  // No linked resolutions
+  const hasLinkedResolution =
+    Array.isArray(gap.linked_resolution_ids) &&
+    gap.linked_resolution_ids.length > 0;
+
+  if (hasLinkedResolution) return false;
+
+  // Auto-close if in known-problematic category OR age > 72 h
+  const isProblematicCategory =
+    gap.category !== undefined && PROBLEMATIC_STALE_CATEGORIES.has(gap.category);
+  const isVeryOld = ageMs > 72 * 60 * 60 * 1000;
+
+  return isProblematicCategory || isVeryOld;
+}
 
 // NOTE: un-landable stale gaps are now also caught proactively by
 // gap-landability-model.ts (predictive, backward model) before they go stale.
@@ -65,6 +136,30 @@ export interface GapLifecycleScanPointer {
 
 const DEFAULT_URL = "http://127.0.0.1:8090/v2/impulses/resolve";
 const sanitizeId = (id: string): string => id.replace(/:/g, "-").replace(/[^a-zA-Z0-9._-]/g, "_");
+
+const STALE_THRESHOLD_MS = 48 * 60 * 60 * 1000; // 48 hours
+
+// Categories that are known to produce un-actionable / never-closing gaps
+const AUTO_CLOSE_CATEGORIES = new Set([
+  'auto_draft_fallback_recommend',
+  'auto_draft_triggered',
+  'novel_failure_mode_detected',
+]);
+
+function isAutoCloseable(gap: {
+  category?: string;
+  updatedAt?: string | number | Date;
+  draftUpdates?: number;
+  linkedResolutions?: number;
+}): boolean {
+  const now = Date.now();
+  const updated = gap.updatedAt ? new Date(gap.updatedAt).getTime() : 0;
+  const ageMs = now - updated;
+  const isStale = ageMs > STALE_THRESHOLD_MS;
+  const noProgress =
+    (gap.draftUpdates ?? 0) === 0 && (gap.linkedResolutions ?? 0) === 0;
+  return isStale && noProgress && AUTO_CLOSE_CATEGORIES.has(gap.category ?? '');
+}
 
 interface Gap {
   id?: string; category?: string; status?: string;

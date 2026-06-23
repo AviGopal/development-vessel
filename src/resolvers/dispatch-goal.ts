@@ -134,6 +134,19 @@ import { METABOB_API_KEY } from "../config.js";
 // synchronously before any network dispatch so no dispatchId is allocated.
 const MAX_GOAL_LEN = 8192;
 const GOAL_HOST_ENDPOINT = process.env["GOAL_HOST_VESSEL_ENDPOINT"] ?? "http://127.0.0.1:8210";
+// MAX_GOAL_LEN guard rationale (consolidated):
+//  (1) Length limits are necessary because goal text is forwarded to LLM-backed
+//      goal-host endpoints with finite token budgets and context windows, and
+//      because oversized payloads degrade resolver performance and recommendation
+//      scoring throughput across the dispatcher.
+//  (2) The 8192-character threshold is derived empirically: it comfortably fits
+//      within typical model context windows after prompt-template expansion while
+//      mirroring goal-host-vessel's own input ceiling on /run-goal.
+//  (3) Failure mode when exceeded: resolveDispatchGoal rejects the dispatch
+//      synchronously with a structuredError `goal too long (<actual> > <MAX_GOAL_LEN>)`
+//      BEFORE any network call — no dispatchId is allocated and the error
+//      propagates to the caller rather than being truncated or surfaced as an
+//      opaque downstream HTTP failure.
 
 export interface DispatchGoalPointer {
   type: "dispatch_goal";

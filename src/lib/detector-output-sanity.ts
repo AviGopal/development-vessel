@@ -70,6 +70,129 @@ export function checkValueSanity(body: unknown, maxDepth = 6): SanityViolation[]
   return out;
 }
 
+/** Categories that are high-value stale and should be aggressively audited */
+const UNACTIONABLE_AUTO_DRAFT_SUBTYPES = new Set([
+  'auto_draft_fallback_recommend',
+  'auto_draft_triggered',
+]);
+
+export interface GapEmission {
+  gap_id?: string;
+  category?: string;
+  gap_subtype?: string;
+  context?: unknown;
+  [key: string]: unknown;
+}
+
+export interface GapAuditFinding {
+  audit_type: string;
+  reason: string;
+  gap_id?: string;
+  category?: string;
+  gap_subtype?: string;
+  rejected_at: string;
+}
+
+export interface ValidationResult {
+  valid: boolean;
+  findings: GapAuditFinding[];
+}
+
+/**
+ * Additional sanity gate: reject emissions that are structurally un-actionable.
+ * Returns a GapAuditFinding if the emission should be rejected, or null if it passes.
+ */
+export function auditGapEmissionActionability(
+  gap: GapEmission
+): GapAuditFinding | null {
+  // (1) auto_draft_fallback_recommend gaps without sufficient context
+  if (
+    UNACTIONABLE_AUTO_DRAFT_SUBTYPES.has(gap.gap_subtype ?? gap.category ?? '')
+  ) {
+    const hasContext =
+      gap.context != null &&
+      typeof gap.context === 'object' &&
+      Object.keys(gap.context).length > 0 &&
+      (gap.context as Record<string, unknown>)['resolver'] != null;
+    if (!hasContext) {
+      return {
+        audit_type: 'unactionable_emission_rejected',
+        reason: `gap_subtype '${gap.gap_subtype ?? gap.category}' lacks sufficient context for action (missing resolver or empty context)`,
+        gap_id: gap.gap_id,
+        category: gap.category,
+        gap_subtype: gap.gap_subtype,
+        rejected_at: new Date().toISOString(),
+      };
+    }
+  }
+
+  // (2) novel_failure_mode_detected gaps without reproducibility evidence
+  if (
+    (gap.gap_subtype ?? gap.category ?? '') === 'novel_failure_mode_detected'
+  ) {
+    const hasReproEvidence =
+      gap.context != null &&
+      typeof gap.context === 'object' &&
+      (
+        (gap.context as Record<string, unknown>)['reproducibility'] != null ||
+        (gap.context as Record<string, unknown>)['occurrences'] != null
+      );
+    if (!hasReproEvidence) {
+      return {
+        audit_type: 'unactionable_emission_rejected',
+        reason: `novel_failure_mode_detected gap lacks reproducibility evidence (missing 'reproducibility' or 'occurrences' in context)`,
+        gap_id: gap.gap_id,
+        category: gap.category,
+        gap_subtype: gap.gap_subtype,
+        rejected_at: new Date().toISOString(),
+      };
+    }
+  }
+
+  // (3) activity_lifecycle gaps missing state transitions
+  if ((gap.gap_subtype ?? gap.category ?? '') === 'activity_lifecycle') {
+    const hasStateTransition =
+      gap.context != null &&
+      typeof gap.context === 'object' &&
+      (
+        (gap.context as Record<string, unknown>)['from_state'] != null ||
+        (gap.context as Record<string, unknown>)['to_state'] != null ||
+        (gap.context as Record<string, unknown>)['state_transition'] != null
+      );
+    if (!hasStateTransition) {
+      return {
+        audit_type: 'unactionable_emission_rejected',
+        reason: `activity_lifecycle gap missing state transition (need from_state/to_state or state_transition in context)`,
+        gap_id: gap.gap_id,
+        category: gap.category,
+        gap_subtype: gap.gap_subtype,
+        rejected_at: new Date().toISOString(),
+      };
+    }
+  }
+
+  return null;
+}
+
+export function validateGapEmission(gap: GapEmission): ValidationResult {
+  // Run actionability audit and reject un-actionable gaps
+  const auditFinding = auditGapEmissionActionability(gap);
+  if (auditFinding != null) {
+    return {
+      valid: false,
+      findings: [
+        {
+          type: 'unactionable_emission',
+          message: auditFinding.reason,
+          audit_finding: auditFinding,
+        } as unknown as GapAuditFinding,
+      ],
+    };
+  }
+
+  return { valid: true, findings: [] };
+}
+
 export async function auditDetectorOutputSanity(result: { shape?: string; body?: unknown }): Promise<void> {
   const shape = String(result?.shape ?? "");
   if (!shape || SKIP_SHAPE_RE.test(shape)) return;

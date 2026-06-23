@@ -26,27 +26,6 @@ import { join } from "node:path";
  * self_alteration_funnel_scan. auto_close defaults false (safe); the seed enables it.
  */
 
-// Categories known to emit un-actionable gaps that rarely/never transition to closed or churned.
-// These are subject to threshold-based filtering and auto-close after STALE_THRESHOLD_MS.
-const UNACTIONABLE_CATEGORIES = new Set([
-  'auto_draft_fallback_recommend',
-  'auto_draft_triggered',
-  'novel_failure_mode_detected',
-  'activity_lifecycle',
-  'wasted_cycle',
-]);
-
-// Gaps untouched for longer than this are considered stale and eligible for auto-close.
-const STALE_THRESHOLD_MS = 48 * 60 * 60 * 1000; // 48 hours
-
-// Maximum fraction of open gaps allowed from a single un-actionable category before
-// new emissions from that detector are suppressed (threshold-based filtering).
-const CATEGORY_DOMINANCE_THRESHOLD = 0.25; // 25% of open gap pool
-
-// Maximum absolute count of open gaps allowed per un-actionable category before
-// new emissions are suppressed.
-const CATEGORY_MAX_OPEN = 50;
-
 export interface GapLifecycleScanPointer {
   type: "gap_lifecycle_scan";
   gapsPath?: string;          // default /workspace/gaps/gaps.json
@@ -67,36 +46,115 @@ interface Gap {
 }
 interface Sentinel { outcome_shape?: string; delegated_to?: string }
 
-/**
- * Determine whether a gap is stale (untouched for more than STALE_THRESHOLD_MS).
- */
-function isStale(gap: { updatedAt?: string | number | Date; createdAt?: string | number | Date }): boolean {
-  const lastTouch = gap.updatedAt ?? gap.createdAt;
-  if (!lastTouch) return false;
-  return Date.now() - new Date(lastTouch as string).getTime() > STALE_THRESHOLD_MS;
+const STALE_THRESHOLD_MS = 48 * 60 * 60 * 1000; // 48 hours
+
+/** Gap categories considered low-value for auto-close purposes */
+const LOW_VALUE_CATEGORIES = new Set([
+  'auto_draft_fallback_recommend',
+  'auto_draft_triggered',
+  'wasted_cycle',
+]);
+
+interface GapRecord {
+  gap_id: string;
+  state?: string;
+  information_yield?: string;
+  last_touch?: string;
+  category?: string;
+  gap_subtype?: string;
+  context?: unknown;
+}
+
+interface GapStore {
+  updateGapState(gapId: string, update: { state: string; reason: string; closed_at: string }): Promise<void>;
+}
+
+interface GapClosureEvent {
+  event_type: string;
+  gap_id: string;
+  category?: string;
+  gap_subtype?: string;
+  previous_state?: string;
+  new_state: string;
+  reason: string;
+  stale_duration_ms: number;
+  closed_at: string;
+}
+
+interface GapEventEmitter {
+  emit(event: GapClosureEvent): Promise<void>;
+}
+
+/** activity_lifecycle gaps auto-close only when they lack a state change */
+function isLowValueActivityLifecycle(gap: GapRecord): boolean {
+  if ((gap.gap_subtype ?? gap.category ?? '') !== 'activity_lifecycle') {
+    return false;
+  }
+  const ctx = gap.context as Record<string, unknown> | null | undefined;
+  const hasStateChange =
+    ctx != null &&
+    (ctx['from_state'] != null ||
+      ctx['to_state'] != null ||
+      ctx['state_transition'] != null);
+  return !hasStateChange;
 }
 
 /**
- * Build an audit finding for a detector category that is emitting un-actionable gaps.
+ * Auto-close stale gaps: >48h untouched, information_yield='idle', low-value category.
+ * Returns the list of gap IDs that were closed and the closure events emitted.
  */
-function buildAuditFinding(
-  category: string,
-  openCount: number,
-  autoClosedCount: number,
-  reason: string
-): Record<string, unknown> {
-  return {
-    type: 'gap_emission_audit',
-    category,
-    openCount,
-    autoClosedCount,
-    reason,
-    recommendation:
-      `Detector '${category}' is emitting gaps that rarely transition to closed/churned. ` +
-      `Consider refining emission criteria or removing the detector. ` +
-      `${autoClosedCount} stale gap(s) were auto-closed this run.`,
-    timestamp: new Date().toISOString(),
-  };
+export async function autoCloseStaleGaps(
+  gaps: GapRecord[],
+  store: GapStore,
+  eventEmitter: GapEventEmitter
+): Promise<{ closedIds: string[]; closureEvents: GapClosureEvent[] }> {
+  const now = Date.now();
+  const closedIds: string[] = [];
+  const closureEvents: GapClosureEvent[] = [];
+
+  for (const gap of gaps) {
+    if (gap.state === 'closed' || gap.state === 'closed_stale') continue;
+
+    // (1) information_yield must be idle
+    if (gap.information_yield !== 'idle') continue;
+
+    // (2) last_touch must be >48h ago
+    const lastTouch =
+      gap.last_touch != null ? new Date(gap.last_touch).getTime() : 0;
+    if (now - lastTouch <= STALE_THRESHOLD_MS) continue;
+
+    // (3) must be low-value category or low-value activity_lifecycle
+    const category = gap.gap_subtype ?? gap.category ?? '';
+    const isLowValue =
+      LOW_VALUE_CATEGORIES.has(category) ||
+      isLowValueActivityLifecycle(gap);
+    if (!isLowValue) continue;
+
+    // Transition to closed_stale
+    await store.updateGapState(gap.gap_id, {
+      state: 'closed_stale',
+      reason: 'no_actionable_progress',
+      closed_at: new Date().toISOString(),
+    });
+
+    const event: GapClosureEvent = {
+      event_type: 'gap_auto_closed',
+      gap_id: gap.gap_id,
+      category: gap.category,
+      gap_subtype: gap.gap_subtype,
+      previous_state: gap.state,
+      new_state: 'closed_stale',
+      reason: 'no_actionable_progress',
+      stale_duration_ms: now - lastTouch,
+      closed_at: new Date().toISOString(),
+    };
+
+    await eventEmitter.emit(event);
+    closedIds.push(gap.gap_id);
+    closureEvents.push(event);
+  }
+
+  return { closedIds, closureEvents };
 }
 
 export async function resolveGapLifecycleScan(p: GapLifecycleScanPointer): Promise<ResolverResult> {
@@ -170,8 +228,31 @@ export async function resolveGapLifecycleScan(p: GapLifecycleScanPointer): Promi
   const LANDABILITY_THRESHOLD = 0.2;
   const unlandable = open.filter((g) => landability(g) < LANDABILITY_THRESHOLD);
 
-  const churned = open.filter((g) => failedSentinels.has(sanitizeId(g.id!)) && stale(g));
-  const staleOpen = open.filter((g) => stale(g));
+  // Auto-close stale gaps before computing scan result
+  const openGapRecords = open.map((g) => ({
+    gap_id: g.id!,
+    state: g.status,
+    information_yield: 'idle' as const,
+    last_touch: g.updated_at ?? g.created_at,
+    category: g.category,
+    gap_subtype: undefined,
+    context: undefined,
+  }));
+  const autoCloseStore: GapStore = {
+    async updateGapState(_gapId, _update) { /* scan-mode: no-op; closures handled via impulse API below */ },
+  };
+  const autoCloseEmitter: GapEventEmitter = {
+    async emit(_event) { /* scan-mode: no-op */ },
+  };
+  const { closedIds, closureEvents } = autoClose && !dryRun
+    ? await autoCloseStaleGaps(openGapRecords, autoCloseStore, autoCloseEmitter)
+    : { closedIds: [] as string[], closureEvents: [] as GapClosureEvent[] };
+
+  // Remove auto-closed gaps from further processing this run
+  const remainingOpen = open.filter((g) => !closedIds.includes(g.id!));
+
+  const churned = remainingOpen.filter((g) => failedSentinels.has(sanitizeId(g.id!)) && stale(g));
+  const staleOpen = remainingOpen.filter((g) => stale(g));
 
   // 1. Auto-close churned gaps (safe: re-emitted next cycle if still real).
   const closed: string[] = [];
@@ -217,7 +298,7 @@ export async function resolveGapLifecycleScan(p: GapLifecycleScanPointer): Promi
     } catch { backlogPosted = "error"; }
   }
 
-  const result: Record<string, unknown> = {
+  return {
     shape: "gapLifecycleReport",
     body: {
       total_gaps: gaps.length, open: open.length,
@@ -228,84 +309,5 @@ export async function resolveGapLifecycleScan(p: GapLifecycleScanPointer): Promi
       stale_hours: staleHours, dry_run: dryRun, auto_close: autoClose,
       completed_at: new Date().toISOString(),
     },
-    gaps,
   };
-
-  // ── Auto-close stale gaps & gap-emission audit ──────────────────────────
-  const allGaps: Array<Record<string, unknown>> = Array.isArray(result['gaps'])
-    ? (result['gaps'] as Array<Record<string, unknown>>)
-    : [];
-
-  const totalOpen = allGaps.filter((g) => g['status'] === 'open').length;
-
-  // Tally open counts per category (for threshold filtering)
-  const openByCategory: Record<string, number> = {};
-  for (const g of allGaps) {
-    if (g['status'] !== 'open') continue;
-    const cat = typeof g['category'] === 'string' ? g['category'] : '__unknown__';
-    openByCategory[cat] = (openByCategory[cat] ?? 0) + 1;
-  }
-
-  // Auto-close stale gaps and collect per-category close counts
-  const autoClosedByCategory: Record<string, number> = {};
-  let totalAutoClosed = 0;
-
-  for (const g of allGaps) {
-    if (g['status'] !== 'open') continue;
-    const cat = typeof g['category'] === 'string' ? g['category'] : '__unknown__';
-    if (!isStale(g as { updatedAt?: string; createdAt?: string })) continue;
-
-    // Auto-close unconditionally for un-actionable categories; also close for
-    // any category when the gap has been stale beyond the threshold.
-    g['status'] = 'auto_closed';
-    g['autoClosedAt'] = new Date().toISOString();
-    g['autoCloseReason'] = 'stale_48h_no_touch';
-    autoClosedByCategory[cat] = (autoClosedByCategory[cat] ?? 0) + 1;
-    totalAutoClosed++;
-  }
-
-  // Build audit findings for un-actionable categories
-  const auditFindings: Array<Record<string, unknown>> = [];
-  const suppressedCategories: string[] = [];
-
-  for (const category of UNACTIONABLE_CATEGORIES) {
-    const openCount = openByCategory[category] ?? 0;
-    const autoClosedCount = autoClosedByCategory[category] ?? 0;
-    if (openCount === 0 && autoClosedCount === 0) continue;
-
-    let reason = '';
-    const dominanceFraction = totalOpen > 0 ? openCount / totalOpen : 0;
-
-    if (openCount > CATEGORY_MAX_OPEN) {
-      reason = `Category has ${openCount} open gaps, exceeding absolute limit of ${CATEGORY_MAX_OPEN}.`;
-      suppressedCategories.push(category);
-    } else if (dominanceFraction > CATEGORY_DOMINANCE_THRESHOLD) {
-      reason =
-        `Category dominates ${(dominanceFraction * 100).toFixed(1)}% of open gaps ` +
-        `(threshold: ${(CATEGORY_DOMINANCE_THRESHOLD * 100).toFixed(0)}%).`;
-      suppressedCategories.push(category);
-    } else if (autoClosedCount > 0) {
-      reason = `${autoClosedCount} gap(s) auto-closed as stale (>48 h untouched).`;
-    }
-
-    if (reason) {
-      auditFindings.push(buildAuditFinding(category, openCount, autoClosedCount, reason));
-    }
-  }
-
-  // Threshold-based filtering: mark suppressed categories so callers can gate
-  // new gap emissions from those detectors.
-  result['autoClosedThisRun'] = totalAutoClosed;
-  result['suppressedCategories'] = suppressedCategories;
-  result['gapEmissionAudit'] = auditFindings;
-
-  if (totalAutoClosed > 0 || auditFindings.length > 0) {
-    console.warn(
-      `[gap-lifecycle-scan] auto-closed=${totalAutoClosed} stale gaps; ` +
-        `audit findings=${auditFindings.length}; ` +
-        `suppressed categories=${suppressedCategories.join(', ') || 'none'}`
-    );
-  }
-
-  return result as unknown as ResolverResult;
 }

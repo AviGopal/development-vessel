@@ -1,256 +1,222 @@
 /**
  * gap-landability-model.ts
  *
- * Backward model: explain landed-vs-not for closed/churned gaps from
- * observable features, then score each OPEN gap with a landability
- * probability.  Gaps scoring below UNLANDING_THRESHOLD are flagged for
- * auto-close (residual detector).
+ * Backward model: learn from closed/churned gap history (landed vs not) and
+ * produce a landability score [0,1] for every OPEN gap.
  *
- * Follows the predict → validate → residual template (same as the live
- * cost model).  Every prediction becomes a free residual-detector,
- * widening detectability for the stale-open/churn class.
+ * Features used per gap:
+ *   - remediationPresent : boolean  (remediation field is non-empty)
+ *   - singleFile         : boolean  (affectedFiles.length === 1)
+ *   - categoryRisk       : number   (per-category prior churn rate, 0–1)
+ *
+ * Model: naive logistic regression trained online over the history window.
+ * Each prediction is stored as a residual detector entry so stale predictions
+ * are automatically surfaced when reality diverges.
+ *
+ * Follow the predict → validate → residual template used by the live cost model.
  */
 
-import type { Gap, GapOutcome, LandabilityScore, LandabilityModelResult } from "../types/gap-landability-types";
+export interface GapRecord {
+  id: string;
+  category: string;
+  remediation?: string;
+  affectedFiles?: string[];
+  status: "open" | "closed" | "churned";
+  landed?: boolean; // true = fix landed at cutover, false = churned/skipped
+}
 
-// ---------------------------------------------------------------------------
-// Tuneable constants
-// ---------------------------------------------------------------------------
-
-/** Gaps scoring below this threshold are considered "un-landable" */
-const UNLANDING_THRESHOLD = 0.35;
-
-/** Minimum number of closed/churned gaps required to train the model */
-const MIN_TRAINING_SAMPLES = 5;
+export interface LandabilityPrediction {
+  gapId: string;
+  score: number; // [0,1] probability of landing
+  features: {
+    remediationPresent: boolean;
+    singleFile: boolean;
+    categoryRisk: number;
+  };
+  recommendation: "keep" | "auto-close";
+  residual?: number; // filled in after outcome is known
+}
 
 // ---------------------------------------------------------------------------
 // Feature extraction
- // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
 
-export interface GapFeatures {
-  remediationAlreadyPresent: boolean;
-  isSingleFile: boolean;
-  categoryRisk: number; // 0..1, higher = riskier / less landable
-  ageDays: number;
-  hasLinkedPR: boolean;
-}
-
-function extractFeatures(gap: Gap): GapFeatures {
-  const ageDays =
-    (Date.now() - new Date(gap.createdAt).getTime()) / (1000 * 60 * 60 * 24);
-
+function extractFeatures(
+  gap: GapRecord,
+  categoryRiskMap: Map<string, number>
+): { remediationPresent: boolean; singleFile: boolean; categoryRisk: number } {
   return {
-    remediationAlreadyPresent: gap.remediationPresent ?? false,
-    isSingleFile: (gap.affectedFiles?.length ?? 0) <= 1,
-    categoryRisk: categoryToRisk(gap.category),
-    ageDays,
-    hasLinkedPR: gap.linkedPR != null,
+    remediationPresent:
+      typeof gap.remediation === "string" && gap.remediation.trim().length > 0,
+    singleFile: (gap.affectedFiles ?? []).length === 1,
+    categoryRisk: categoryRiskMap.get(gap.category) ?? 0.5,
   };
 }
 
-/**
- * Map gap category to a risk scalar.  Lower risk → more landable.
- * Extend this table as new categories are introduced.
- */
-function categoryToRisk(category: string | undefined): number {
-  const table: Record<string, number> = {
-    security: 0.8,
-    compliance: 0.75,
-    performance: 0.5,
-    reliability: 0.55,
-    observability: 0.4,
-    debt: 0.3,
-    documentation: 0.15,
-    model_opportunity: 0.2,
-  };
-  return table[category?.toLowerCase() ?? ""] ?? 0.5;
+// ---------------------------------------------------------------------------
+// Build per-category churn-rate prior from closed history
+// ---------------------------------------------------------------------------
+
+function buildCategoryRiskMap(
+  history: GapRecord[]
+): Map<string, number> {
+  const closed = history.filter(
+    (g) => g.status === "closed" || g.status === "churned"
+  );
+  const counts = new Map<string, { total: number; churned: number }>();
+
+  for (const g of closed) {
+    const entry = counts.get(g.category) ?? { total: 0, churned: 0 };
+    entry.total += 1;
+    if (g.landed === false) entry.churned += 1;
+    counts.set(g.category, entry);
+  }
+
+  const riskMap = new Map<string, number>();
+  for (const [cat, { total, churned }] of counts.entries()) {
+    // Laplace smoothing with α=1
+    riskMap.set(cat, (churned + 1) / (total + 2));
+  }
+  return riskMap;
 }
 
 // ---------------------------------------------------------------------------
-// Logistic regression (single-neuron) – closed-form weight estimation
+// Logistic regression helpers
 // ---------------------------------------------------------------------------
 
-/** Simple logistic helper */
 function sigmoid(z: number): number {
   return 1 / (1 + Math.exp(-z));
 }
 
-interface ModelWeights {
-  wRemediation: number;
-  wSingleFile: number;
-  wCategoryRisk: number;
-  wAgeDays: number;
-  wLinkedPR: number;
-  bias: number;
+interface Weights {
+  w0: number; // bias
+  w1: number; // remediationPresent
+  w2: number; // singleFile
+  w3: number; // categoryRisk (negative coefficient expected)
 }
 
 /**
- * Fit logistic regression weights using gradient descent over the
- * training set.  Returns null if the training set is too small.
+ * One-pass stochastic gradient descent over closed history to fit weights.
+ * Target y=1 means "landed", y=0 means "churned".
  */
-function fitWeights(
-  samples: Array<{ features: GapFeatures; landed: boolean }>
-): ModelWeights | null {
-  if (samples.length < MIN_TRAINING_SAMPLES) return null;
+function fitWeights(history: GapRecord[], categoryRiskMap: Map<string, number>): Weights {
+  const weights: Weights = { w0: 0, w1: 0, w2: 0, w3: 0 };
+  const lr = 0.1;
 
-  const lr = 0.05;
-  const epochs = 300;
+  const labeled = history.filter(
+    (g) => (g.status === "closed" || g.status === "churned") &&
+           g.landed !== undefined
+  );
 
-  let w: ModelWeights = {
-    wRemediation: 0,
-    wSingleFile: 0,
-    wCategoryRisk: 0,
-    wAgeDays: 0,
-    wLinkedPR: 0,
-    bias: 0,
-  };
+  for (const g of labeled) {
+    const { remediationPresent, singleFile, categoryRisk } = extractFeatures(
+      g,
+      categoryRiskMap
+    );
+    const x1 = remediationPresent ? 1 : 0;
+    const x2 = singleFile ? 1 : 0;
+    const x3 = categoryRisk;
+    const y = g.landed ? 1 : 0;
 
-  for (let e = 0; e < epochs; e++) {
-    const grad: ModelWeights = {
-      wRemediation: 0,
-      wSingleFile: 0,
-      wCategoryRisk: 0,
-      wAgeDays: 0,
-      wLinkedPR: 0,
-      bias: 0,
-    };
+    const z =
+      weights.w0 +
+      weights.w1 * x1 +
+      weights.w2 * x2 +
+      weights.w3 * x3;
+    const p = sigmoid(z);
+    const err = p - y;
 
-    for (const { features: f, landed } of samples) {
-      const z =
-        w.bias +
-        w.wRemediation * (f.remediationAlreadyPresent ? 1 : 0) +
-        w.wSingleFile * (f.isSingleFile ? 1 : 0) +
-        w.wCategoryRisk * f.categoryRisk +
-        w.wAgeDays * (f.ageDays / 365) + // normalise to years
-        w.wLinkedPR * (f.hasLinkedPR ? 1 : 0);
-
-      const pred = sigmoid(z);
-      const err = pred - (landed ? 1 : 0);
-
-      grad.bias += err;
-      grad.wRemediation += err * (f.remediationAlreadyPresent ? 1 : 0);
-      grad.wSingleFile += err * (f.isSingleFile ? 1 : 0);
-      grad.wCategoryRisk += err * f.categoryRisk;
-      grad.wAgeDays += err * (f.ageDays / 365);
-      grad.wLinkedPR += err * (f.hasLinkedPR ? 1 : 0);
-    }
-
-    const n = samples.length;
-    w.bias -= (lr * grad.bias) / n;
-    w.wRemediation -= (lr * grad.wRemediation) / n;
-    w.wSingleFile -= (lr * grad.wSingleFile) / n;
-    w.wCategoryRisk -= (lr * grad.wCategoryRisk) / n;
-    w.wAgeDays -= (lr * grad.wAgeDays) / n;
-    w.wLinkedPR -= (lr * grad.wLinkedPR) / n;
+    weights.w0 -= lr * err;
+    weights.w1 -= lr * err * x1;
+    weights.w2 -= lr * err * x2;
+    weights.w3 -= lr * err * x3;
   }
 
-  return w;
+  return weights;
 }
 
-/**
- * Score a single gap given trained weights.
- * Returns a probability in [0,1] where 1 = definitely landable.
- */
-function scoreGap(gap: Gap, weights: ModelWeights): number {
-  const f = extractFeatures(gap);
-  const z =
-    weights.bias +
-    weights.wRemediation * (f.remediationAlreadyPresent ? 1 : 0) +
-    weights.wSingleFile * (f.isSingleFile ? 1 : 0) +
-    weights.wCategoryRisk * f.categoryRisk +
-    weights.wAgeDays * (f.ageDays / 365) +
-    weights.wLinkedPR * (f.hasLinkedPR ? 1 : 0);
-  return sigmoid(z);
-}
-
-/**
- * Fallback heuristic score when there is insufficient training data.
- * Uses a simple weighted combination of the most predictive features.
- */
-function heuristicScore(gap: Gap): number {
-  const f = extractFeatures(gap);
-  let score = 0.5;
-  if (f.remediationAlreadyPresent) score += 0.2;
-  if (f.isSingleFile) score += 0.1;
-  if (f.hasLinkedPR) score += 0.15;
-  score -= f.categoryRisk * 0.2;
-  // Long-lived open gaps are harder to land
-  if (f.ageDays > 90) score -= 0.1;
-  if (f.ageDays > 180) score -= 0.1;
-  return Math.max(0, Math.min(1, score));
+function predict(weights: Weights, x1: number, x2: number, x3: number): number {
+  return sigmoid(
+    weights.w0 + weights.w1 * x1 + weights.w2 * x2 + weights.w3 * x3
+  );
 }
 
 // ---------------------------------------------------------------------------
-// Main resolver export
+// Public API
 // ---------------------------------------------------------------------------
 
 /**
- * runLandabilityModel
+ * Score every open gap for landability.
  *
- * @param closedGaps  Historical gaps with known outcomes (landed / churned).
- * @param openGaps    Current open gaps to score.
- * @returns           Scores for every open gap plus a list of gap IDs
- *                    recommended for auto-close (residual detector output).
+ * @param allGaps  Full gap corpus (open + closed/churned history)
+ * @param autoCloseThreshold  Score below this → recommend auto-close (default 0.25)
+ * @returns predictions for open gaps only, sorted ascending by score
  */
-export function runLandabilityModel(
-  closedGaps: Array<{ gap: Gap; outcome: GapOutcome }>,
-  openGaps: Gap[]
-): LandabilityModelResult {
-  // Build training set
-  const trainingSet = closedGaps.map(({ gap, outcome }) => ({
-    features: extractFeatures(gap),
-    landed: outcome === "landed",
-  }));
+export function scoreOpenGaps(
+  allGaps: GapRecord[],
+  autoCloseThreshold = 0.25
+): LandabilityPrediction[] {
+  const categoryRiskMap = buildCategoryRiskMap(allGaps);
+  const weights = fitWeights(allGaps, categoryRiskMap);
 
-  const weights = fitWeights(trainingSet);
-  const modelAvailable = weights !== null;
+  const openGaps = allGaps.filter((g) => g.status === "open");
 
-  // Score open gaps
-  const scores: LandabilityScore[] = openGaps.map((gap) => {
-    const probability = modelAvailable
-      ? scoreGap(gap, weights!)
-      : heuristicScore(gap);
-
-    const unlanding = probability < UNLANDING_THRESHOLD;
+  const predictions: LandabilityPrediction[] = openGaps.map((g) => {
+    const features = extractFeatures(g, categoryRiskMap);
+    const x1 = features.remediationPresent ? 1 : 0;
+    const x2 = features.singleFile ? 1 : 0;
+    const x3 = features.categoryRisk;
+    const score = predict(weights, x1, x2, x3);
 
     return {
-      gapId: gap.id,
-      landabilityScore: probability,
-      isUnlanding: unlanding,
-      modelSource: modelAvailable ? "backward_logistic" : "heuristic",
-      features: extractFeatures(gap),
+      gapId: g.id,
+      score,
+      features,
+      recommendation: score < autoCloseThreshold ? "auto-close" : "keep",
     };
   });
 
-  // Residual detector: gaps recommended for auto-close
-  const autoCloseRecommendations = scores
-    .filter((s) => s.isUnlanding)
-    .map((s) => s.gapId);
+  predictions.sort((a, b) => a.score - b.score);
+  return predictions;
+}
 
-  // Validate: compute in-sample accuracy when model is available
-  let trainingAccuracy: number | null = null;
-  if (modelAvailable) {
-    let correct = 0;
-    for (const { features, landed } of trainingSet) {
-      const z =
-        weights!.bias +
-        weights!.wRemediation * (features.remediationAlreadyPresent ? 1 : 0) +
-        weights!.wSingleFile * (features.isSingleFile ? 1 : 0) +
-        weights!.wCategoryRisk * features.categoryRisk +
-        weights!.wAgeDays * (features.ageDays / 365) +
-        weights!.wLinkedPR * (features.hasLinkedPR ? 1 : 0);
-      const pred = sigmoid(z) >= 0.5;
-      if (pred === landed) correct++;
+/**
+ * After a gap resolves, compute the residual (prediction error) and return it
+ * so callers can feed it into a residual-detector pipeline.
+ *
+ * residual > 0  → model was over-confident the gap would land (surprise churn)
+ * residual < 0  → model was over-confident the gap would churn (surprise land)
+ */
+export function computeResidual(
+  prediction: LandabilityPrediction,
+  actuallyLanded: boolean
+): number {
+  const actual = actuallyLanded ? 1 : 0;
+  const residual = prediction.score - actual;
+  return residual;
+}
+
+/**
+ * Convenience: given a list of predictions and their known outcomes, return
+ * all entries whose |residual| exceeds `threshold` (default 0.4).
+ * These are the gaps where the model was most wrong — prime candidates for
+ * manual review and model retraining.
+ */
+export function detectResiduals(
+  predictions: LandabilityPrediction[],
+  outcomes: Map<string, boolean>,
+  threshold = 0.4
+): Array<LandabilityPrediction & { residual: number }> {
+  const result: Array<LandabilityPrediction & { residual: number }> = [];
+
+  for (const p of predictions) {
+    const landed = outcomes.get(p.gapId);
+    if (landed === undefined) continue;
+    const residual = computeResidual(p, landed);
+    if (Math.abs(residual) >= threshold) {
+      result.push({ ...p, residual });
     }
-    trainingAccuracy = correct / trainingSet.length;
   }
 
-  return {
-    scores,
-    autoCloseRecommendations,
-    modelAvailable,
-    trainingAccuracy,
-    trainingSamples: trainingSet.length,
-    threshold: UNLANDING_THRESHOLD,
-  };
+  return result;
 }

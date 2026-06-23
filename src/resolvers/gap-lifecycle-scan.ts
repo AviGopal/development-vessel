@@ -2,9 +2,10 @@ import type { ResolverResult } from "./types.js";
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 
-// NOTE: For proactive un-landable gap suppression see gap-landability-model.ts
-// which provides a backward model (predict→validate→residual) that auto-closes
-// gaps before they become stale, reducing the reactive workload here.
+// NOTE: Reactive cleanup for stale-open/churn gaps is complemented by the
+// proactive gap-landability-model (see ./gap-landability-model.ts) which
+// predicts un-landable gaps BEFORE they go stale, reducing the work this
+// scanner needs to do reactively.
 
 /**
  * gap_lifecycle_scan — a SECOND-ORDER (lever-4 emergent) detector whose subject is

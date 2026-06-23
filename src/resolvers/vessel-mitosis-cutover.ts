@@ -1261,13 +1261,56 @@ async function runGitAwareCutover(args: GitCutoverArgs): Promise<ResolverResult>
   // 10. Restart vessel unit (best-effort).
   if (!pointer.skip_restart) {
     const unit = pointer.restart_unit_name ?? `${vessel_name}.service`;
-    const restart = await runSystemctl(["restart", unit]);
-    vesselRestarted = restart.exitCode === 0;
-    operations.push({
-      op: `systemctl restart ${unit}`,
-      status: vesselRestarted ? "ok" : "warn",
-      detail: vesselRestarted ? undefined : restart.stderr.slice(0, 200),
-    });
+    // SELF-CUTOVER guard (commit-vs-deploy gap fix, 2026-06-23): when this vessel
+    // (development-vessel, which hosts the cutover resolvers) cuts over ITSELF, an
+    // inline `systemctl restart development-vessel.service` kills THIS running
+    // resolver process mid-flight — before the mirror/emit reliably finish and
+    // before the HTTP response returns. That is exactly why dev-vessel self-
+    // cutovers committed to the clone but did NOT deploy to /vessels and NEVER
+    // emitted a cutoverApplied record (every OTHER vessel does, because restarting
+    // them doesn't kill the cutover process). Defer the restart to a transient
+    // systemd timer: it is PID1-owned and runs OUTSIDE this vessel's cgroup, so the
+    // restart can't kill the deferring process, and it fires only AFTER this
+    // resolver has finished mirroring (step 9, already done above) + emitting +
+    // returning. The change is already mirrored into baseRoot by step 9, so the
+    // deferred restart simply makes the already-deployed file live.
+    const selfVesselId = process.env["VESSEL_ID"] ?? "";
+    const isSelfCutover = selfVesselId.length > 0 && selfVesselId.startsWith(vessel_name);
+    if (isSelfCutover) {
+      const delaySec = process.env["MITOSIS_SELF_RESTART_DELAY_S"] ?? "5";
+      const tsUnit = `mitosis-self-restart-${mitosis_version_id}`.replace(/[^A-Za-z0-9_.-]/g, "-").slice(0, 90);
+      if (process.env["MITOSIS_CUTOVER_SKIP_SYSTEMCTL"] === "1") {
+        vesselRestarted = true;
+        operations.push({ op: `deferred self-restart ${unit}`, status: "ok", detail: "(skipped via env)" });
+      } else {
+        try {
+          const sysdRun = process.env["SYSTEMD_RUN_CMD"] ?? "systemd-run";
+          const proc = Bun.spawnSync(
+            [sysdRun, `--on-active=${delaySec}s`, `--unit=${tsUnit}`, "--collect", "systemctl", "restart", unit],
+            { stdout: "pipe", stderr: "pipe" },
+          );
+          const ok = (proc.exitCode ?? 1) === 0;
+          // "restarted" here means the restart is durably SCHEDULED (it fires in a
+          // few seconds, after this resolver returns), not that it already ran.
+          vesselRestarted = ok;
+          operations.push({
+            op: `deferred self-restart via systemd-run (--on-active=${delaySec}s) ${unit}`,
+            status: ok ? "ok" : "warn",
+            detail: ok ? `transient unit ${tsUnit} (PID1-owned, survives this process)` : (proc.stderr ? new TextDecoder().decode(proc.stderr).slice(0, 200) : "systemd-run failed"),
+          });
+        } catch (err) {
+          operations.push({ op: `deferred self-restart ${unit}`, status: "warn", detail: (err as Error).message.slice(0, 200) });
+        }
+      }
+    } else {
+      const restart = await runSystemctl(["restart", unit]);
+      vesselRestarted = restart.exitCode === 0;
+      operations.push({
+        op: `systemctl restart ${unit}`,
+        status: vesselRestarted ? "ok" : "warn",
+        detail: vesselRestarted ? undefined : restart.stderr.slice(0, 200),
+      });
+    }
   }
 
   // 11. Emit cutoverApplied impulse to local log (three-place rule for new shape).

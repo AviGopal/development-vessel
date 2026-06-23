@@ -7,10 +7,9 @@ import {
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 
-// NOTE: Reactive cleanup for stale-open/churn gaps is complemented by the
-// proactive gap-landability-model (see ./gap-landability-model.ts) which
-// predicts un-landable gaps BEFORE they go stale, reducing the work this
-// scanner needs to do reactively.
+// NOTE: un-landable stale gaps are now also caught proactively by
+// gap-landability-model.ts (predictive, backward model) before they go stale.
+// This scanner remains the reactive safety net for gaps that slip through.
 
 /**
  * gap_lifecycle_scan — a SECOND-ORDER (lever-4 emergent) detector whose subject is

@@ -4,6 +4,27 @@ import {
   type GapLandabilityFeatures,
   LANDABILITY_THRESHOLD,
 } from "./gap-landability-model";
+
+const FORTY_EIGHT_HOURS_MS = 48 * 60 * 60 * 1000;
+
+async function autoCloseStaleSubstrateGaps(
+  gaps: Array<{ id: string; createdAt: Date | string; status: string }>,
+  checkProgress: (gapId: string) => Promise<boolean>,
+  closeGap: (gapId: string) => Promise<void>
+): Promise<string[]> {
+  const now = Date.now();
+  const closed: string[] = [];
+  for (const gap of gaps) {
+    if (gap.status === "closed") continue;
+    const age = now - new Date(gap.createdAt).getTime();
+    if (age < FORTY_EIGHT_HOURS_MS) continue;
+    const hasProgress = await checkProgress(gap.id);
+    if (hasProgress) continue;
+    await closeGap(gap.id);
+    closed.push(gap.id);
+  }
+  return closed;
+}
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 

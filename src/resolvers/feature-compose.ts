@@ -235,14 +235,24 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
     }
   }
 
-  // 3. VERIFY: typecheck each touched vessel.
-  const verify: Array<{ vessel: string; errors: number | string; ok: boolean }> = [];
+  // 3. VERIFY: typecheck each touched vessel. FAIL-CLOSED on the AUTHORITATIVE
+  // signal — the tool's own exit_code (tsc exits non-zero on ANY error) and its
+  // ok flag. The old code trusted error_count (which was ALWAYS 0 because
+  // code_verify_typecheck scanned stderr while tsc writes to stdout) and checked
+  // the wrong key (`exitCode` vs the tool's `exit_code`), so verify ALWAYS passed
+  // → typecheck-broken edits were committed as FAVORABLE (e.g. a stale-gap wiring
+  // with 7 TS errors). Require: tool call ok AND tool ok===true AND exit_code===0
+  // AND no parsed TS errors. Anything ambiguous (missing exit_code, failed call)
+  // is treated as NOT ok so a bad/unverifiable edit cannot land.
+  const verify: Array<{ vessel: string; errors: number | string; exit_code: number | null; ok: boolean }> = [];
   if (!applyFailed) {
     for (const v of touched) {
       const r = await callTool(toolsEndpoint, "code_verify_typecheck", { cwd: `${REPO_ROOT}/${v.replace(/^repos\//, "")}` });
-      const errCount = (r.body?.error_count ?? r.body?.errors ?? (r.body?.exitCode === 0 ? 0 : "nonzero")) as number | string;
-      const ok = r.ok && (errCount === 0 || r.body?.exitCode === 0);
-      verify.push({ vessel: v, errors: errCount, ok });
+      const body = (r.body ?? {}) as { exit_code?: number; exitCode?: number; error_count?: number; errors?: number; ok?: boolean };
+      const exitCode = body.exit_code ?? body.exitCode;
+      const errCount = (body.error_count ?? body.errors ?? 0) as number;
+      const ok = r.ok === true && body.ok === true && exitCode === 0 && errCount === 0;
+      verify.push({ vessel: v, errors: errCount, exit_code: exitCode ?? null, ok });
     }
   }
 

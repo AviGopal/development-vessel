@@ -132,6 +132,13 @@ import { METABOB_API_KEY } from "../config.js";
 // of text, (c) maintain dispatcher throughput and recommendation-scoring
 // efficiency, and (d) conform to substrate context-window limits. Enforced
 // synchronously before any network dispatch so no dispatchId is allocated.
+/**
+ * MAX_GOAL_LEN — guard against excessively long goal texts.
+ *
+ * Rationale: caps goal payload size to prevent downstream processing failures,
+ * token budget overruns on the LLM-backed goal-host endpoint, and clarity
+ * degradation from prompt dilution. Enforced synchronously before dispatch.
+ */
 const MAX_GOAL_LEN = 8192;
 const GOAL_HOST_ENDPOINT = process.env["GOAL_HOST_VESSEL_ENDPOINT"] ?? "http://127.0.0.1:8210";
 // MAX_GOAL_LEN guard rationale (consolidated):

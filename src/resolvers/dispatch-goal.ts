@@ -101,6 +101,17 @@ import { METABOB_API_KEY } from "../config.js";
  *    moved into referenced artifacts) rather than uncapped here.
  *  - This is a safety boundary, NOT a tunable performance knob. It MUST stay in
  *    sync with goal-host-vessel's own input ceiling — change them together.
+ *
+ * Recommendation-scoring rationale:
+ *  - Empirically, goal payloads exceeding MAX_GOAL_LEN cause goal-host's
+ *    recommendation pipeline to return degraded scores (top_score collapses
+ *    toward 0, well below the 0.3 acceptance threshold used downstream).
+ *  - At that point the recommendation system is effectively ineffective: no
+ *    substrate catalogue entry clears the threshold, so dispatch can no
+ *    longer perform proper substrate catalogue matching for the goal.
+ *  - Guarding here keeps goals within the size range where goal-host's
+ *    scoring remains meaningful, preserving substrate-match quality rather
+ *    than silently returning empty/low-confidence recommendations.
  */
 // MAX_GOAL_LEN guard: critical for maintaining goal comprehensibility and
 // avoiding token overflow in downstream goal-host evaluation. This length
@@ -139,11 +150,14 @@ import { METABOB_API_KEY } from "../config.js";
  * token budget overruns on the LLM-backed goal-host endpoint, and clarity
  * degradation from prompt dilution. Enforced synchronously before dispatch.
  */
-// MAX_GOAL_LEN guard rationale: enforces an 8192-character limit on goal text
-// to prevent oversized prompts from overwhelming LLM context windows and to
-// maintain reasonable goal decomposition granularity. The guard rejects goals
-// exceeding this threshold with a clear error message, ensuring downstream
-// resolvers receive well-scoped, processable goal definitions.
+/**
+ * MAX_GOAL_LEN guard rationale: enforces an 8192-character limit on goal text
+ * to prevent oversized prompts from overwhelming LLM context windows (token
+ * budget overflow) and to maintain reasonable goal decomposition granularity.
+ * The guard rejects goals exceeding this threshold with a clear error message,
+ * ensuring downstream goal-host resolver processing receives well-scoped,
+ * processable goal definitions without truncation.
+ */
 const MAX_GOAL_LEN = 8192;
 const GOAL_HOST_ENDPOINT = process.env["GOAL_HOST_VESSEL_ENDPOINT"] ?? "http://127.0.0.1:8210";
 // MAX_GOAL_LEN guard rationale (consolidated):

@@ -35,6 +35,49 @@ import { DISCOVERY_ENDPOINT, METABOB_API_KEY } from "../config.js";
 import type { ResolverResult } from "./types.js";
 import { resolveFeatureCompose } from "./feature-compose.js";
 
+// ---------------------------------------------------------------------------
+// Staleness-sweep configuration
+// ---------------------------------------------------------------------------
+const STALE_MAX_AGE_DAYS = Number(process.env["STALE_PROPOSAL_MAX_AGE_DAYS"] ?? "7");
+const STALE_MAX_AGE_MS = STALE_MAX_AGE_DAYS * 24 * 60 * 60 * 1000;
+
+/** Tags that indicate a proposal is no longer actionable. */
+const STALE_TAGS = new Set([
+  "freshness_violation",
+  "precondition-rejection",
+  "arch-pattern-bloat",
+]);
+
+/**
+ * Returns true when a proposal should be swept as stale:
+ *   - It carries at least one staleness tag, AND
+ *   - Its creation timestamp is older than STALE_MAX_AGE_MS.
+ */
+function isStaleProposal(proposal: Record<string, unknown>): boolean {
+  const tags: unknown = proposal["tags"];
+  const tagArray: string[] = Array.isArray(tags)
+    ? (tags as string[])
+    : typeof tags === "string"
+    ? [tags]
+    : [];
+
+  const hasStaleTag = tagArray.some((t) => STALE_TAGS.has(t));
+  if (!hasStaleTag) return false;
+
+  const created: unknown =
+    proposal["created_at"] ?? proposal["createdAt"] ?? proposal["timestamp"];
+  if (!created) return false;
+
+  const createdMs =
+    typeof created === "number"
+      ? created
+      : Date.parse(String(created));
+
+  if (Number.isNaN(createdMs)) return false;
+
+  return Date.now() - createdMs > STALE_MAX_AGE_MS;
+}
+
 // Read at call time, not load time — tests stand up a Bun server per case and
 // set LLM_COMPLETION_ENDPOINT just before invoking the resolver.
 function llmOverride(): string { return process.env["LLM_COMPLETION_ENDPOINT"] ?? ""; }
@@ -363,6 +406,66 @@ export function assessProposalSurgical(descriptionText: string): { surgical: boo
   return { surgical: true, reason: "surgical" };
 }
 
+// ---------------------------------------------------------------------------
+// Staleness sweep helper — moves dead proposals out of the active backlog
+// before the FIFO apply loop runs, so rare selection slots go to fresh work.
+// ---------------------------------------------------------------------------
+async function sweepStaleProposals(
+  proposalsDir: string
+): Promise<void> {
+  let names: string[];
+  try { names = await readdir(proposalsDir); } catch { return; }
+
+  let swept = 0;
+  for (const name of names) {
+    if (!name.endsWith("-report.json")) continue;
+    const filePath = join(proposalsDir, name);
+
+    // Skip proposals already in a terminal state (path contains .rejected / .applied).
+    if (
+      filePath.includes(".rejected") ||
+      filePath.includes(".applied")
+    ) {
+      continue;
+    }
+
+    let proposal: Record<string, unknown>;
+    try {
+      const raw = await readFile(filePath, "utf-8");
+      proposal = JSON.parse(raw) as Record<string, unknown>;
+    } catch {
+      continue; // unparseable — leave for manual triage
+    }
+
+    if (!isStaleProposal(proposal)) continue;
+
+    // Mark the proposal as rejected due to staleness.
+    const updated: Record<string, unknown> = {
+      ...proposal,
+      state: "rejected",
+      rejection_reason: "staleness-sweep",
+      swept_at: new Date().toISOString(),
+      swept_by: "apply-proposal-as-patch/staleness-sweep",
+    };
+
+    try {
+      await writeFile(filePath, JSON.stringify(updated, null, 2));
+      swept++;
+    } catch {
+      // Non-fatal — log and continue so fresh proposals still get processed.
+      console.warn(
+        `[staleness-sweep] Failed to write rejected state to ${filePath}`
+      );
+    }
+  }
+
+  if (swept > 0) {
+    console.log(
+      `[staleness-sweep] Swept ${swept} stale proposal(s) older than ${STALE_MAX_AGE_DAYS} day(s) to rejected state.`
+    );
+  }
+}
+
 export async function resolveApplyProposalAsPatch(pointer: ApplyProposalAsPatchPointer): Promise<ResolverResult> {
   const workspaceRoot = process.env["WORKSPACE_ROOT"] ?? "/workspace";
   const proposalsDir = pointer.proposals_dir ?? join(workspaceRoot, "proposals");
@@ -395,6 +498,9 @@ export async function resolveApplyProposalAsPatch(pointer: ApplyProposalAsPatchP
       /* no pending file (or unreadable/parse-fail) -> safe to proceed */
     }
   }
+
+  // Sweep stale proposals before FIFO iteration so they don't consume selection slots.
+  await sweepStaleProposals(proposalsDir);
 
   // 1. List proposals.
   let entries: Array<{ name: string; path: string; mtime: number }> = [];

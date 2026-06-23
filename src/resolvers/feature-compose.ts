@@ -194,6 +194,12 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
   // 2. APPLY deterministically. Track created/edited for rollback.
   const created: string[] = [];
   const edited: string[] = [];
+  // Pre-edit content snapshot (abs -> original bytes), captured the FIRST time we
+  // touch a file, so an UNFAVORABLE verdict can RESTORE it. /vessels is NOT a git
+  // repo, so the old `git checkout` rollback silently no-op'd and left broken
+  // edits live in the runtime (defect #2). Snapshot+restore reverts only the
+  // files we edited, exactly, with no git dependency.
+  const preEditContent = new Map<string, string>();
   const applied: Array<{ path: string; kind: string; ok: boolean; repaired?: boolean; detail?: string }> = [];
   let applyFailed = false;
   for (const op of ops) {
@@ -207,6 +213,13 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
       applied.push({ path: op.path, kind: op.kind, ok: r.ok, detail: r.ok ? undefined : JSON.stringify(r.body).slice(0, 200) });
       if (r.ok) created.push(abs); else { applyFailed = true; break; }
     } else {
+      // Snapshot the original content BEFORE the first edit to this file, for a
+      // reliable (non-git) rollback on UNFAVORABLE.
+      if (!preEditContent.has(abs)) {
+        const snap = await callTool(toolsEndpoint, "fs_read", { path: abs });
+        const c = (snap.body as { content?: unknown })?.content;
+        if (snap.ok && typeof c === "string") preEditContent.set(abs, c);
+      }
       let r = await callTool(toolsEndpoint, "fs_edit", { path: abs, old_string: op.old_string ?? "", new_string: op.new_string ?? "" });
       let repaired = false;
       if (!r.ok) {
@@ -259,10 +272,17 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
   const verdict = !applyFailed && verify.every((v) => v.ok) && verify.length > 0 ? "FAVORABLE" : "UNFAVORABLE";
 
   // 4. ROLLBACK on UNFAVORABLE (restore edited, delete created) unless asked to keep.
+  // Restore each edited file from its pre-edit snapshot (NOT `git checkout` —
+  // /vessels is not a git repo, so the old git-checkout rollback silently failed
+  // and left typecheck-broken edits live, which then ran on the next vessel
+  // restart). fs_write the exact original bytes back; this is what makes the
+  // (now-correct) verify gate actually PROTECT the runtime.
   let rolled_back = false;
+  const restored: string[] = [];
   if (verdict === "UNFAVORABLE" && !pointer.keep_on_fail) {
-    for (const v of touched) {
-      await callTool(toolsEndpoint, "shell", { command: `git checkout -- . 2>/dev/null || true`, cwd: `${REPO_ROOT}/${v.replace(/^repos\//, "")}` });
+    for (const [abs, original] of preEditContent) {
+      const w = await callTool(toolsEndpoint, "fs_write", { path: abs, content: original });
+      if (w.ok) restored.push(abs);
     }
     for (const f of created) {
       await callTool(toolsEndpoint, "shell", { command: `rm -f ${JSON.stringify(f)}`, cwd: REPO_ROOT });
@@ -325,6 +345,7 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
       apply_failed: applyFailed,
       verify,
       rolled_back,
+      restored_files: restored.map((f) => f.replace(`${REPO_ROOT}/`, "")),
       created_files: created.map((f) => f.replace(`${REPO_ROOT}/`, "")),
       edited_files: edited.map((f) => f.replace(`${REPO_ROOT}/`, "")),
       cutovers: pointer.land ? cutovers : undefined,

@@ -139,6 +139,11 @@ import { METABOB_API_KEY } from "../config.js";
  * token budget overruns on the LLM-backed goal-host endpoint, and clarity
  * degradation from prompt dilution. Enforced synchronously before dispatch.
  */
+// MAX_GOAL_LEN guard rationale: enforces an 8192-character limit on goal text
+// to prevent oversized prompts from overwhelming LLM context windows and to
+// maintain reasonable goal decomposition granularity. The guard rejects goals
+// exceeding this threshold with a clear error message, ensuring downstream
+// resolvers receive well-scoped, processable goal definitions.
 const MAX_GOAL_LEN = 8192;
 const GOAL_HOST_ENDPOINT = process.env["GOAL_HOST_VESSEL_ENDPOINT"] ?? "http://127.0.0.1:8210";
 // MAX_GOAL_LEN guard rationale (consolidated):

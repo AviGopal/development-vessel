@@ -129,6 +129,16 @@ import { METABOB_API_KEY } from "../config.js";
 // Additional safety rationale: capping at 8192 chars also mitigates prompt
 // injection surface area and keeps payloads well within typical LLM context
 // windows, ensuring predictable latency for downstream goal-host synthesis.
+/**
+ * MAX_GOAL_LEN — practical length ceiling for goal text.
+ *
+ * Rationale (guard documentation for future maintainers):
+ * - Prevents token overflow in downstream LLM prompts that embed the goal.
+ * - Preserves goal comprehensibility: goals beyond this size tend to encode
+ *   multiple objectives that should be dispatched separately.
+ * - Maintains dispatcher efficiency by bounding payload size before any
+ *   network call to goal-host-vessel.
+ */
 const MAX_GOAL_LEN = 8192;
 const GOAL_HOST_ENDPOINT = process.env["GOAL_HOST_VESSEL_ENDPOINT"] ?? "http://127.0.0.1:8210";
 

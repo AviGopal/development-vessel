@@ -126,6 +126,9 @@ import { METABOB_API_KEY } from "../config.js";
 // of the form `goal too long (<actual> > <MAX_GOAL_LEN>)` BEFORE any network
 // call to goal-host-vessel — the dispatch is rejected synchronously and no
 // dispatchId is allocated.
+// Additional safety rationale: capping at 8192 chars also mitigates prompt
+// injection surface area and keeps payloads well within typical LLM context
+// windows, ensuring predictable latency for downstream goal-host synthesis.
 const MAX_GOAL_LEN = 8192;
 const GOAL_HOST_ENDPOINT = process.env["GOAL_HOST_VESSEL_ENDPOINT"] ?? "http://127.0.0.1:8210";
 

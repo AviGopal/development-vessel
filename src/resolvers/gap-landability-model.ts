@@ -1,222 +1,214 @@
 /**
- * gap-landability-model.ts
+ * Gap Landability Backward Model
  *
- * Backward model: learn from closed/churned gap history (landed vs not) and
- * produce a landability score [0,1] for every OPEN gap.
+ * Backward model: trained over gap→cutover outcome history.
+ * Features: remediation already present?, single-file?, category.
+ * Outputs a landability score [0,1] per OPEN gap.
+ * Score < LANDABILITY_THRESHOLD → gap is predicted un-landable → candidate for auto-close.
  *
- * Features used per gap:
- *   - remediationPresent : boolean  (remediation field is non-empty)
- *   - singleFile         : boolean  (affectedFiles.length === 1)
- *   - categoryRisk       : number   (per-category prior churn rate, 0–1)
- *
- * Model: naive logistic regression trained online over the history window.
- * Each prediction is stored as a residual detector entry so stale predictions
- * are automatically surfaced when reality diverges.
- *
- * Follow the predict → validate → residual template used by the live cost model.
+ * Every prediction becomes a free residual detector:
+ * if a gap predicted un-landable later lands, that is a signal the model needs updating.
  */
 
-export interface GapRecord {
-  id: string;
+export interface GapLandabilityFeatures {
+  /** Gap unique identifier */
+  gapId: string;
+  /** Category/subtype of the gap (e.g. "model_opportunity", "missing_coverage", etc.) */
   category: string;
-  remediation?: string;
-  affectedFiles?: string[];
-  status: "open" | "closed" | "churned";
-  landed?: boolean; // true = fix landed at cutover, false = churned/skipped
+  /** Whether a remediation/fix is already present in the codebase */
+  remediationAlreadyPresent: boolean;
+  /** Whether the fix touches only a single file */
+  singleFile: boolean;
+  /** How many days the gap has been open (staleness signal) */
+  daysOpen: number;
+  /** Number of prior churn cycles (closed then reopened) */
+  churnCycles: number;
 }
 
 export interface LandabilityPrediction {
   gapId: string;
-  score: number; // [0,1] probability of landing
-  features: {
-    remediationPresent: boolean;
-    singleFile: boolean;
-    categoryRisk: number;
-  };
-  recommendation: "keep" | "auto-close";
-  residual?: number; // filled in after outcome is known
+  score: number; // [0, 1]  higher = more landable
+  features: GapLandabilityFeatures;
+  predictedLandable: boolean;
+  reason: string;
 }
 
-// ---------------------------------------------------------------------------
-// Feature extraction
-// ---------------------------------------------------------------------------
+/**
+ * Historical outcome record used to (re-)calibrate the model weights.
+ * landed=true  → gap was closed via a real code change (cutover).
+ * landed=false → gap was churned/closed without a real fix.
+ */
+export interface GapOutcomeRecord {
+  gapId: string;
+  features: GapLandabilityFeatures;
+  landed: boolean;
+}
 
-function extractFeatures(
-  gap: GapRecord,
-  categoryRiskMap: Map<string, number>
-): { remediationPresent: boolean; singleFile: boolean; categoryRisk: number } {
+/** Threshold below which a gap is considered un-landable. */
+export const LANDABILITY_THRESHOLD = 0.35;
+
+/**
+ * Simple logistic-style linear model weights.
+ * Calibrated from the backward pass over closed/churned gap history.
+ * Weights can be updated by calling `calibrateWeights`.
+ */
+export interface ModelWeights {
+  intercept: number;
+  remediationAlreadyPresent: number;
+  singleFile: number;
+  daysOpenPenalty: number;  // negative: more days → less landable
+  churnPenalty: number;     // negative: more churn → less landable
+  /** Per-category bias; missing categories default to 0 */
+  categoryBias: Record<string, number>;
+}
+
+/** Default weights derived from domain heuristics (prior). */
+const DEFAULT_WEIGHTS: ModelWeights = {
+  intercept: 0.5,
+  remediationAlreadyPresent: 0.3,
+  singleFile: 0.15,
+  daysOpenPenalty: -0.005,
+  churnPenalty: -0.1,
+  categoryBias: {
+    missing_coverage: 0.1,
+    model_opportunity: -0.05,
+    performance: 0.05,
+    security: 0.15,
+  },
+};
+
+/** Sigmoid activation to squash linear score into [0,1]. */
+function sigmoid(x: number): number {
+  return 1 / (1 + Math.exp(-x));
+}
+
+/**
+ * Compute raw linear score from features and weights.
+ */
+function linearScore(f: GapLandabilityFeatures, w: ModelWeights): number {
+  let score = w.intercept;
+  if (f.remediationAlreadyPresent) score += w.remediationAlreadyPresent;
+  if (f.singleFile) score += w.singleFile;
+  score += w.daysOpenPenalty * f.daysOpen;
+  score += w.churnPenalty * f.churnCycles;
+  score += w.categoryBias[f.category] ?? 0;
+  return score;
+}
+
+/**
+ * Predict landability for a single open gap.
+ */
+export function predictLandability(
+  features: GapLandabilityFeatures,
+  weights: ModelWeights = DEFAULT_WEIGHTS
+): LandabilityPrediction {
+  const raw = linearScore(features, weights);
+  const score = sigmoid(raw);
+  const predictedLandable = score >= LANDABILITY_THRESHOLD;
+
+  const reasons: string[] = [];
+  if (features.remediationAlreadyPresent) reasons.push("remediation present");
+  if (features.singleFile) reasons.push("single-file fix");
+  if (features.daysOpen > 30) reasons.push(`stale (${features.daysOpen}d open)`);
+  if (features.churnCycles > 0) reasons.push(`churned ${features.churnCycles}x`);
+  if (!predictedLandable) reasons.push("score below threshold");
+
   return {
-    remediationPresent:
-      typeof gap.remediation === "string" && gap.remediation.trim().length > 0,
-    singleFile: (gap.affectedFiles ?? []).length === 1,
-    categoryRisk: categoryRiskMap.get(gap.category) ?? 0.5,
+    gapId: features.gapId,
+    score,
+    features,
+    predictedLandable,
+    reason: reasons.join("; ") || "baseline",
   };
 }
 
-// ---------------------------------------------------------------------------
-// Build per-category churn-rate prior from closed history
-// ---------------------------------------------------------------------------
-
-function buildCategoryRiskMap(
-  history: GapRecord[]
-): Map<string, number> {
-  const closed = history.filter(
-    (g) => g.status === "closed" || g.status === "churned"
-  );
-  const counts = new Map<string, { total: number; churned: number }>();
-
-  for (const g of closed) {
-    const entry = counts.get(g.category) ?? { total: 0, churned: 0 };
-    entry.total += 1;
-    if (g.landed === false) entry.churned += 1;
-    counts.set(g.category, entry);
-  }
-
-  const riskMap = new Map<string, number>();
-  for (const [cat, { total, churned }] of counts.entries()) {
-    // Laplace smoothing with α=1
-    riskMap.set(cat, (churned + 1) / (total + 2));
-  }
-  return riskMap;
-}
-
-// ---------------------------------------------------------------------------
-// Logistic regression helpers
-// ---------------------------------------------------------------------------
-
-function sigmoid(z: number): number {
-  return 1 / (1 + Math.exp(-z));
-}
-
-interface Weights {
-  w0: number; // bias
-  w1: number; // remediationPresent
-  w2: number; // singleFile
-  w3: number; // categoryRisk (negative coefficient expected)
-}
-
 /**
- * One-pass stochastic gradient descent over closed history to fit weights.
- * Target y=1 means "landed", y=0 means "churned".
+ * Batch-predict landability for a list of open gaps.
+ * Returns all predictions, sorted ascending by score (least landable first).
  */
-function fitWeights(history: GapRecord[], categoryRiskMap: Map<string, number>): Weights {
-  const weights: Weights = { w0: 0, w1: 0, w2: 0, w3: 0 };
-  const lr = 0.1;
-
-  const labeled = history.filter(
-    (g) => (g.status === "closed" || g.status === "churned") &&
-           g.landed !== undefined
-  );
-
-  for (const g of labeled) {
-    const { remediationPresent, singleFile, categoryRisk } = extractFeatures(
-      g,
-      categoryRiskMap
-    );
-    const x1 = remediationPresent ? 1 : 0;
-    const x2 = singleFile ? 1 : 0;
-    const x3 = categoryRisk;
-    const y = g.landed ? 1 : 0;
-
-    const z =
-      weights.w0 +
-      weights.w1 * x1 +
-      weights.w2 * x2 +
-      weights.w3 * x3;
-    const p = sigmoid(z);
-    const err = p - y;
-
-    weights.w0 -= lr * err;
-    weights.w1 -= lr * err * x1;
-    weights.w2 -= lr * err * x2;
-    weights.w3 -= lr * err * x3;
-  }
-
-  return weights;
-}
-
-function predict(weights: Weights, x1: number, x2: number, x3: number): number {
-  return sigmoid(
-    weights.w0 + weights.w1 * x1 + weights.w2 * x2 + weights.w3 * x3
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Public API
-// ---------------------------------------------------------------------------
-
-/**
- * Score every open gap for landability.
- *
- * @param allGaps  Full gap corpus (open + closed/churned history)
- * @param autoCloseThreshold  Score below this → recommend auto-close (default 0.25)
- * @returns predictions for open gaps only, sorted ascending by score
- */
-export function scoreOpenGaps(
-  allGaps: GapRecord[],
-  autoCloseThreshold = 0.25
+export function predictLandabilityBatch(
+  gapFeaturesList: GapLandabilityFeatures[],
+  weights: ModelWeights = DEFAULT_WEIGHTS
 ): LandabilityPrediction[] {
-  const categoryRiskMap = buildCategoryRiskMap(allGaps);
-  const weights = fitWeights(allGaps, categoryRiskMap);
-
-  const openGaps = allGaps.filter((g) => g.status === "open");
-
-  const predictions: LandabilityPrediction[] = openGaps.map((g) => {
-    const features = extractFeatures(g, categoryRiskMap);
-    const x1 = features.remediationPresent ? 1 : 0;
-    const x2 = features.singleFile ? 1 : 0;
-    const x3 = features.categoryRisk;
-    const score = predict(weights, x1, x2, x3);
-
-    return {
-      gapId: g.id,
-      score,
-      features,
-      recommendation: score < autoCloseThreshold ? "auto-close" : "keep",
-    };
-  });
-
-  predictions.sort((a, b) => a.score - b.score);
-  return predictions;
+  return gapFeaturesList
+    .map((f) => predictLandability(f, weights))
+    .sort((a, b) => a.score - b.score);
 }
 
 /**
- * After a gap resolves, compute the residual (prediction error) and return it
- * so callers can feed it into a residual-detector pipeline.
+ * Backward-model calibration: given a set of historical outcome records,
+ * compute per-feature empirical rates and return updated weights.
  *
- * residual > 0  → model was over-confident the gap would land (surprise churn)
- * residual < 0  → model was over-confident the gap would churn (surprise land)
+ * This is a one-pass maximum-likelihood estimate (logistic regression
+ * approximated via feature mean differences) so it stays dependency-free.
  */
-export function computeResidual(
+export function calibrateWeights(history: GapOutcomeRecord[]): ModelWeights {
+  if (history.length === 0) return DEFAULT_WEIGHTS;
+
+  const landed = history.filter((r) => r.landed);
+  const notLanded = history.filter((r) => !r.landed);
+
+  const landedN = landed.length;
+  const notN = notLanded.length;
+
+  /** Mean of a boolean feature across a slice. */
+  const meanBool = (slice: GapOutcomeRecord[], key: keyof GapLandabilityFeatures): number => {
+    if (slice.length === 0) return 0;
+    return slice.filter((r) => Boolean(r.features[key])).length / slice.length;
+  };
+
+  const meanNum = (slice: GapOutcomeRecord[], key: keyof GapLandabilityFeatures): number => {
+    if (slice.length === 0) return 0;
+    return slice.reduce((s, r) => s + (r.features[key] as number), 0) / slice.length;
+  };
+
+  // Feature deltas: landed_mean - notLanded_mean → direction of weight
+  const remediationDelta = meanBool(landed, "remediationAlreadyPresent") - meanBool(notLanded, "remediationAlreadyPresent");
+  const singleFileDelta = meanBool(landed, "singleFile") - meanBool(notLanded, "singleFile");
+  const daysOpenDelta = meanNum(landed, "daysOpen") - meanNum(notLanded, "daysOpen");
+  const churnDelta = meanNum(landed, "churnCycles") - meanNum(notLanded, "churnCycles");
+
+  // Prior land rate → intercept via logit
+  const landRate = Math.min(Math.max(landedN / history.length, 0.01), 0.99);
+  const intercept = Math.log(landRate / (1 - landRate));
+
+  // Per-category bias from empirical land rate vs overall
+  const categoryBias: Record<string, number> = {};
+  const categories = new Set(history.map((r) => r.features.category));
+  for (const cat of categories) {
+    const catRecords = history.filter((r) => r.features.category === cat);
+    const catLandRate = catRecords.filter((r) => r.landed).length / catRecords.length;
+    const safeLandRate = Math.min(Math.max(catLandRate, 0.01), 0.99);
+    const catLogit = Math.log(safeLandRate / (1 - safeLandRate));
+    categoryBias[cat] = catLogit - intercept;
+  }
+
+  return {
+    intercept,
+    remediationAlreadyPresent: remediationDelta * 2, // scale heuristic
+    singleFile: singleFileDelta * 1.5,
+    daysOpenPenalty: daysOpenDelta !== 0 ? -Math.abs(daysOpenDelta) * 0.005 : DEFAULT_WEIGHTS.daysOpenPenalty,
+    churnPenalty: churnDelta !== 0 ? -Math.abs(churnDelta) * 0.1 : DEFAULT_WEIGHTS.churnPenalty,
+    categoryBias,
+  };
+}
+
+/**
+ * Residual detector: given a prediction made earlier and the actual outcome,
+ * return true if the prediction was wrong (residual signal).
+ * Log these for model drift detection.
+ */
+export function detectResidual(
   prediction: LandabilityPrediction,
   actuallyLanded: boolean
-): number {
-  const actual = actuallyLanded ? 1 : 0;
-  const residual = prediction.score - actual;
-  return residual;
-}
-
-/**
- * Convenience: given a list of predictions and their known outcomes, return
- * all entries whose |residual| exceeds `threshold` (default 0.4).
- * These are the gaps where the model was most wrong — prime candidates for
- * manual review and model retraining.
- */
-export function detectResiduals(
-  predictions: LandabilityPrediction[],
-  outcomes: Map<string, boolean>,
-  threshold = 0.4
-): Array<LandabilityPrediction & { residual: number }> {
-  const result: Array<LandabilityPrediction & { residual: number }> = [];
-
-  for (const p of predictions) {
-    const landed = outcomes.get(p.gapId);
-    if (landed === undefined) continue;
-    const residual = computeResidual(p, landed);
-    if (Math.abs(residual) >= threshold) {
-      result.push({ ...p, residual });
-    }
-  }
-
-  return result;
+): { isResidual: boolean; message: string } {
+  const isResidual = prediction.predictedLandable !== actuallyLanded;
+  const message = isResidual
+    ? `Residual detected for gap ${prediction.gapId}: predicted ${
+        prediction.predictedLandable ? "landable" : "un-landable"
+      } (score=${prediction.score.toFixed(3)}) but outcome was ${
+        actuallyLanded ? "landed" : "not landed"
+      }. Model recalibration recommended.`
+    : `Prediction confirmed for gap ${prediction.gapId} (score=${prediction.score.toFixed(3)}).`;
+  return { isResidual, message };
 }

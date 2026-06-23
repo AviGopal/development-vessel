@@ -1,4 +1,9 @@
 import type { ResolverResult } from "./types.js";
+import {
+  predictLandabilityBatch,
+  type GapLandabilityFeatures,
+  LANDABILITY_THRESHOLD,
+} from "./gap-landability-model";
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 

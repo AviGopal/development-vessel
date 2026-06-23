@@ -65,7 +65,18 @@ async function sql(q: string): Promise<any[]> {
 export async function resolveComposeTopologyTick(
   pointer: ComposeTopologyTickPointer,
 ): Promise<ResolverResult> {
-  const MAX = pointer.max_composites ?? 40;
+  // Composite cap (2026-06-23): was 40 — a bloat-guard that throttled the very
+  // action the substrate needs. At 40 the resolver hit under_cap=false and only
+  // "reinforced_existing" (re-ran the same composites) while 3,906 connectivity-
+  // justified chainable pairs waited, so distinct_edges stayed pinned (the surface
+  // never spread). But a composite ADDS AN EDGE (raises λ₁), not just a cell — and
+  // these are cross-link/bridge selected (the rank fn prefers λ₂-raising pairs), so
+  // forming more RAISES the spectral gap the header wants to "retire once headroom
+  // positive." Raising the cap to 300 let one manual batch move distinct_edges
+  // 145→160 / genuine 95→103. The connectivity-justified selection keeps quality
+  // high; headroom-gating (stop when λ₂·(1−star_ratio) ≥ 0.35) is the cleaner cap
+  // and the right follow-up.
+  const MAX = pointer.max_composites ?? 300;
   const auth = { Authorization: `ApiKey ${METABOB_API_KEY}`, "Content-Type": "application/json" };
 
   // Real (non-hub) activities + their shapes.

@@ -144,6 +144,9 @@ export interface DispatchGoalPointer {
 export async function resolveDispatchGoal(pointer: DispatchGoalPointer): Promise<ResolverResult> {
   const goal = (pointer.goal ?? "").trim();
   if (!goal) return { shape: "structuredError", body: { resolver: "dispatch_goal", detail: "goal is required" } };
+  // MAX_GOAL_LEN guard: bounds goal text to protect downstream LLM resolution
+  // (tokenization overload, context-window exhaustion) and goal-host recommendation
+  // scoring efficiency. Rejected synchronously before any network dispatch.
   if (goal.length > MAX_GOAL_LEN) return { shape: "structuredError", body: { resolver: "dispatch_goal", detail: `goal too long (${goal.length} > ${MAX_GOAL_LEN})` } };
 
   const body: Record<string, unknown> = { goal };

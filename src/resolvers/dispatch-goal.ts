@@ -101,17 +101,6 @@ import { METABOB_API_KEY } from "../config.js";
  *    moved into referenced artifacts) rather than uncapped here.
  *  - This is a safety boundary, NOT a tunable performance knob. It MUST stay in
  *    sync with goal-host-vessel's own input ceiling — change them together.
- *
- * Recommendation-scoring rationale:
- *  - Empirically, goal payloads exceeding MAX_GOAL_LEN cause goal-host's
- *    recommendation pipeline to return degraded scores (top_score collapses
- *    toward 0, well below the 0.3 acceptance threshold used downstream).
- *  - At that point the recommendation system is effectively ineffective: no
- *    substrate catalogue entry clears the threshold, so dispatch can no
- *    longer perform proper substrate catalogue matching for the goal.
- *  - Guarding here keeps goals within the size range where goal-host's
- *    scoring remains meaningful, preserving substrate-match quality rather
- *    than silently returning empty/low-confidence recommendations.
  */
 // MAX_GOAL_LEN guard: critical for maintaining goal comprehensibility and
 // avoiding token overflow in downstream goal-host evaluation. This length
@@ -137,42 +126,8 @@ import { METABOB_API_KEY } from "../config.js";
 // of the form `goal too long (<actual> > <MAX_GOAL_LEN>)` BEFORE any network
 // call to goal-host-vessel — the dispatch is rejected synchronously and no
 // dispatchId is allocated.
-// MAX_GOAL_LEN guard rationale: caps goal payload at 8192 characters to (a) keep
-// the goal-host-vessel LLM call within prompt/token budgets, (b) preserve prompt
-// coherence by preventing salient instructions from being diluted across pages
-// of text, (c) maintain dispatcher throughput and recommendation-scoring
-// efficiency, and (d) conform to substrate context-window limits. Enforced
-// synchronously before any network dispatch so no dispatchId is allocated.
-/**
- * MAX_GOAL_LEN — guard against excessively long goal texts.
- *
- * Rationale: caps goal payload size to prevent downstream processing failures,
- * token budget overruns on the LLM-backed goal-host endpoint, and clarity
- * degradation from prompt dilution. Enforced synchronously before dispatch.
- */
-/**
- * MAX_GOAL_LEN guard rationale: enforces an 8192-character limit on goal text
- * to prevent oversized prompts from overwhelming LLM context windows (token
- * budget overflow) and to maintain reasonable goal decomposition granularity.
- * The guard rejects goals exceeding this threshold with a clear error message,
- * ensuring downstream goal-host resolver processing receives well-scoped,
- * processable goal definitions without truncation.
- */
 const MAX_GOAL_LEN = 8192;
 const GOAL_HOST_ENDPOINT = process.env["GOAL_HOST_VESSEL_ENDPOINT"] ?? "http://127.0.0.1:8210";
-// MAX_GOAL_LEN guard rationale (consolidated):
-//  (1) Length limits are necessary because goal text is forwarded to LLM-backed
-//      goal-host endpoints with finite token budgets and context windows, and
-//      because oversized payloads degrade resolver performance and recommendation
-//      scoring throughput across the dispatcher.
-//  (2) The 8192-character threshold is derived empirically: it comfortably fits
-//      within typical model context windows after prompt-template expansion while
-//      mirroring goal-host-vessel's own input ceiling on /run-goal.
-//  (3) Failure mode when exceeded: resolveDispatchGoal rejects the dispatch
-//      synchronously with a structuredError `goal too long (<actual> > <MAX_GOAL_LEN>)`
-//      BEFORE any network call — no dispatchId is allocated and the error
-//      propagates to the caller rather than being truncated or surfaced as an
-//      opaque downstream HTTP failure.
 
 export interface DispatchGoalPointer {
   type: "dispatch_goal";
@@ -189,9 +144,11 @@ export interface DispatchGoalPointer {
 export async function resolveDispatchGoal(pointer: DispatchGoalPointer): Promise<ResolverResult> {
   const goal = (pointer.goal ?? "").trim();
   if (!goal) return { shape: "structuredError", body: { resolver: "dispatch_goal", detail: "goal is required" } };
-  // MAX_GOAL_LEN guard: bounds goal text to protect downstream LLM resolution
-  // (tokenization overload, context-window exhaustion) and goal-host recommendation
-  // scoring efficiency. Rejected synchronously before any network dispatch.
+  // MAX_GOAL_LEN guard rationale: excessively long goal texts cause downstream
+  // processing failures in the goal-host recommendation engine (top_score < 0.3
+  // threshold indicates poor semantic fit). The limit enforces reasonable goal
+  // granularity for meaningful LLM analysis and prevents token budget
+  // exhaustion during prompt synthesis.
   if (goal.length > MAX_GOAL_LEN) return { shape: "structuredError", body: { resolver: "dispatch_goal", detail: `goal too long (${goal.length} > ${MAX_GOAL_LEN})` } };
 
   const body: Record<string, unknown> = { goal };

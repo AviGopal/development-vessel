@@ -170,7 +170,10 @@ export async function resolveDispatchGoal(pointer: DispatchGoalPointer): Promise
   // processing failures in the goal-host recommendation engine (top_score < 0.3
   // threshold indicates poor semantic fit). The limit enforces reasonable goal
   // granularity for meaningful LLM analysis and prevents token budget
-  // exhaustion during prompt synthesis.
+  // exhaustion during prompt synthesis. Threshold: MAX_GOAL_LEN = 8192 chars,
+  // chosen to fit within downstream LLM context windows, goal-host-vessel
+  // /run-goal input limits, and substrate goal parsing capacity. Treat as a
+  // safety boundary, not a performance knob.
   if (goal.length > MAX_GOAL_LEN) return { shape: "structuredError", body: { resolver: "dispatch_goal", detail: `goal too long (${goal.length} > ${MAX_GOAL_LEN})` } };
 
   const body: Record<string, unknown> = { goal };

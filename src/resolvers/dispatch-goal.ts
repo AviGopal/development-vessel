@@ -160,6 +160,12 @@ import { METABOB_API_KEY } from "../config.js";
  * goal text from causing token overflow in downstream LLM calls, performance
  * degradation in scoring/dispatch, and violations of upstream API limits.
  */
+// MAX_GOAL_LEN guard rationale: enforces a maximum goal text length so goals
+// remain tractable for the goal-host /recommend endpoint and maintain consistent
+// substrate synthesis scope. Without this guard, goal text bloat degrades
+// recommendation scoring (top_score < 0.3) and triggers false auto-synthesis of
+// scenarios. Goals exceeding this threshold are rejected before dispatch to
+// prevent substrate catalogue misfits and preserve gap-closing activity relevance.
 const MAX_GOAL_LEN = 8192;
 const GOAL_HOST_ENDPOINT = process.env["GOAL_HOST_VESSEL_ENDPOINT"] ?? "http://127.0.0.1:8210";
 

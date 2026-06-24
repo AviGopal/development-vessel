@@ -75,6 +75,11 @@ export const config = {
       "fs_list",
       "fs_grep",
       "http_fetch",
+      // Generative-root fix (2026-06-24): lift a file path out of goal prose
+      // into a `filePaths` impulse so file-consuming bridges minted by
+      // author_producer have a real entry. See openspec
+      // 2026-06-24-author-producer-validate-mint-parity.
+      "goal_file_extract",
       // Resolver-pattern aggregation (audit inv-028 B): trace-side
       // (resolver_id, output_shape) → success-rate report. Lets ribosome
       // bias future synthesis and makes the F-127 Thompson skew observable.

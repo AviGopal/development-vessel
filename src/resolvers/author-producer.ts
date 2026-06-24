@@ -309,6 +309,108 @@ function buildTestPointer(
   return out;
 }
 
+// ── Validate↔mint parity (2026-06-24) ───────────────────────────────────────
+// A file-consuming resolver (problem_detection, code_quality, source_code, …)
+// needs a filePaths/path field. The LLM binds it from a phantom input shape
+// (e.g. {{source_code}}) that is never in the pool, so the minted bridge can't
+// run even though validation passed (validation extracts the path from the goal
+// via buildTestPointer). Fix: when the validated config has a file-shaped
+// placeholder field, mint a 2-task bridge — task1 `goal_file_extract` lifts the
+// path from the goal, task2 binds the file field from task1's output slot. This
+// makes the minted execute-path match the validated path.
+const FILE_FIELD_RE = /^(filePaths?|paths?|path|filePath|file)$/i;
+const PLURAL_FILE_FIELD_RE = /^(filePaths|paths)$/i;
+const EXTRACT_SLOT = "goal_files";
+
+function hasPlaceholder(v: unknown): boolean {
+  if (typeof v === "string") return v.includes("{{");
+  if (Array.isArray(v)) return v.some(hasPlaceholder);
+  return false;
+}
+
+interface BridgeTasks {
+  tasks: Record<string, unknown>[];
+  templateInputShapes: string[];
+  bindsFrom: Record<string, unknown>;
+  twoTask: boolean;
+}
+
+/**
+ * Decide the bridge's task list from the validated spec. If any file-shaped
+ * field binds from a placeholder, return a 2-task bridge (extract-from-goal →
+ * produce); otherwise the original single-task bridge.
+ */
+export function buildBridgeTasks(shape: string, spec: AuthoredSpec): BridgeTasks {
+  const cfg = spec.task_config;
+  const fileFields = Object.keys(cfg).filter(
+    (k) => k !== "type" && FILE_FIELD_RE.test(k) && hasPlaceholder(cfg[k]),
+  );
+
+  if (fileFields.length === 0) {
+    return {
+      tasks: [
+        {
+          id: "produce",
+          description: `Invoke the ${shape} resolver to produce the ${shape} output shape, binding pointer fields from the declared input shapes.`,
+          resolver: shape,
+          config: cfg,
+          input_shapes: spec.input_shapes,
+          inputShapes: spec.input_shapes,
+          output_shapes: [shape],
+          outputShapes: [shape],
+        },
+      ],
+      templateInputShapes: spec.input_shapes,
+      bindsFrom: spec.binds_from,
+      twoTask: false,
+    };
+  }
+
+  const produceConfig: Record<string, unknown> = { ...cfg, type: shape };
+  const bindsFrom: Record<string, unknown> = { ...spec.binds_from };
+  for (const k of fileFields) {
+    // Array fields get a wrapped placeholder so the slot's bare-string content
+    // becomes a real ["/path"] array (goal-host interpolation JSON.stringify's
+    // non-strings — see goal-file-extract.ts header).
+    produceConfig[k] = PLURAL_FILE_FIELD_RE.test(k)
+      ? [`{{impulse:${EXTRACT_SLOT}}}`]
+      : `{{impulse:${EXTRACT_SLOT}}}`;
+    bindsFrom[k] = `task:extract(${EXTRACT_SLOT})`;
+  }
+
+  return {
+    tasks: [
+      {
+        id: "extract",
+        description:
+          "Lift the target file path out of the goal text so the producer has a real filePaths entry.",
+        resolver: "goal_file_extract",
+        config: { type: "goal_file_extract", goal: "{{goal}}" },
+        input_shapes: ["goal"],
+        inputShapes: ["goal"],
+        output_shapes: ["filePaths"],
+        outputShapes: ["filePaths"],
+        outputImpulses: [EXTRACT_SLOT],
+      },
+      {
+        id: "produce",
+        description: `Invoke the ${shape} resolver to produce ${shape}, binding the file field from the goal-extracted path.`,
+        resolver: shape,
+        dependencies: ["extract"],
+        config: produceConfig,
+        input_shapes: ["filePaths"],
+        inputShapes: ["filePaths"],
+        inputImpulses: [EXTRACT_SLOT],
+        output_shapes: [shape],
+        outputShapes: [shape],
+      },
+    ],
+    templateInputShapes: ["goal"],
+    bindsFrom,
+    twoTask: true,
+  };
+}
+
 interface ValidationOutcome {
   ok: boolean;
   /** Error text captured for refinement when ok=false. */
@@ -462,33 +564,28 @@ export async function resolveAuthorProducer(pointer: AuthorProducerPointer): Pro
     );
   }
 
-  // 3. Build the bridge activity template (validated task_config preserves the
-  //    LLM's {{...}} placeholders for fields that bind from input shapes).
+  // 3. Build the bridge activity template. For file-consuming shapes this is a
+  //    2-task bridge (extract-from-goal → produce) so the minted execute-path
+  //    matches the validated path (validate↔mint parity, 2026-06-24).
+  const bridge = buildBridgeTasks(shape, spec);
   const template = {
     id: `auto-bridge-${shape}`,
     name: `auto-bridge:${shape}`,
     description:
       `Auto-authored bridge activity that invokes the live ${shape} resolver` +
       (located.located_in ? ` (located in ${located.located_in})` : "") +
-      ` to produce the ${shape} shape. Authored by author_producer for recursive mint-as-you-go.`,
-    input_shapes: spec.input_shapes,
-    inputShapes: spec.input_shapes,
+      ` to produce the ${shape} shape.` +
+      (bridge.twoTask
+        ? ` Lifts the target file path from the goal first (goal_file_extract) so the producer has a real entry.`
+        : ``) +
+      ` Authored by author_producer for recursive mint-as-you-go.`,
+    input_shapes: bridge.templateInputShapes,
+    inputShapes: bridge.templateInputShapes,
     output_shapes: [shape],
     outputShapes: [shape],
     tags: ["auto_bridged", "improvise", "horizon:walk"],
     variables: [],
-    tasks: [
-      {
-        id: "produce",
-        description: `Invoke the ${shape} resolver to produce the ${shape} output shape, binding pointer fields from the declared input shapes.`,
-        resolver: shape,
-        config: spec.task_config,
-        input_shapes: spec.input_shapes,
-        inputShapes: spec.input_shapes,
-        output_shapes: [shape],
-        outputShapes: [shape],
-      },
-    ],
+    tasks: bridge.tasks,
     proposed: false,
     org_id: "organizations:substrate",
   };
@@ -512,9 +609,10 @@ export async function resolveAuthorProducer(pointer: AuthorProducerPointer): Pro
     body: {
       minted_activity_id: variantId,
       output_shape: shape,
-      input_shapes: spec.input_shapes,
+      input_shapes: bridge.templateInputShapes,
       task_config: spec.task_config,
-      binds_from: spec.binds_from,
+      binds_from: bridge.bindsFrom,
+      two_task_bridge: bridge.twoTask,
       validated: true,
       attempts,
       located_in: located.located_in,

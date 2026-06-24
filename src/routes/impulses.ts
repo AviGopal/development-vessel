@@ -33,6 +33,7 @@ import { resolveSubstrateGap, resolveSubstrateGapWrite } from "../resolvers/subs
 import { resolveFsList } from "../resolvers/fs-list.js";
 import { resolveFsGrep } from "../resolvers/fs-grep.js";
 import { resolveHttpFetch } from "../resolvers/http-fetch.js";
+import { resolveGoalFileExtract } from "../resolvers/goal-file-extract.js";
 import { resolveResolverPatternReport } from "../resolvers/resolver-pattern-report.js";
 import { resolveMarkdownSplitSections } from "../resolvers/markdown-split-sections.js";
 import { resolveStalePointerEmit } from "../resolvers/stale-pointer-emit.js";
@@ -237,6 +238,8 @@ async function dispatchInner(pointer: AnyPointer): Promise<ResolverResult> {
       return resolveFsGrep(p as Parameters<typeof resolveFsGrep>[0]);
     case "http_fetch":
       return resolveHttpFetch(p as Parameters<typeof resolveHttpFetch>[0]);
+    case "goal_file_extract":
+      return resolveGoalFileExtract(p as Parameters<typeof resolveGoalFileExtract>[0]);
     case "resolver_pattern_report":
       return resolveResolverPatternReport(p as Parameters<typeof resolveResolverPatternReport>[0]);
     case "markdown_split_sections":

@@ -125,7 +125,9 @@ describe("author_producer resolver", () => {
     expect(body.error).toContain("author_producer requires pointer.shape");
   });
 
-  it("builds and mints a bridge activity from the LLM authoring spec", async () => {
+  it("mints a 2-task bridge for a file-consuming shape (validate↔mint parity)", async () => {
+    // The canned authoring spec binds filePaths from a placeholder ({{source_code.path}})
+    // — the entry-starvation class. The mint must lift the path from the goal first.
     const result = await resolveAuthorProducer({
       type: "author_producer",
       shape: "problem_detection",
@@ -140,26 +142,55 @@ describe("author_producer resolver", () => {
       output_shape: string;
       input_shapes: string[];
       task_config: Record<string, unknown>;
+      two_task_bridge: boolean;
       validated: boolean;
       attempts: number;
     };
     expect(body.minted_activity_id).toBe("activity:auto-bridge-problem_detection");
     expect(body.output_shape).toBe("problem_detection");
-    expect(body.input_shapes).toEqual(["source_code"]);
+    // The genuine entry is the goal (not a phantom source_code input).
+    expect(body.input_shapes).toEqual(["goal"]);
+    expect(body.two_task_bridge).toBe(true);
     expect(body.validated).toBe(true);
     expect(body.attempts).toBe(1);
-    // task_config carries the LLM's pointer fields AND the enforced resolver type.
+    // The returned task_config is still the validated config (provenance).
     expect(body.task_config["type"]).toBe("problem_detection");
     expect(body.task_config["filePaths"]).toBe("{{source_code.path}}");
 
-    // The minted template must invoke shape X as its task resolver, declare the
-    // LLM's input shapes, and produce only X.
+    // The minted template is a 2-task bridge: extract-from-goal → produce.
     expect(postedTemplates.length).toBe(1);
     const tpl = postedTemplates[0]!;
-    const tasks = tpl["tasks"] as Array<Record<string, unknown>>;
-    expect(tasks[0]!["resolver"]).toBe("problem_detection");
+    expect(tpl["input_shapes"]).toEqual(["goal"]);
     expect(tpl["output_shapes"]).toEqual(["problem_detection"]);
-    expect(tpl["input_shapes"]).toEqual(["source_code"]);
+    const tasks = tpl["tasks"] as Array<Record<string, unknown>>;
+    expect(tasks.length).toBe(2);
+    expect(tasks[0]!["resolver"]).toBe("goal_file_extract");
+    expect(tasks[0]!["outputImpulses"]).toEqual(["goal_files"]);
+    expect(tasks[1]!["resolver"]).toBe("problem_detection");
+    expect(tasks[1]!["dependencies"]).toEqual(["extract"]);
+    expect(tasks[1]!["inputImpulses"]).toEqual(["goal_files"]);
+    // The file field now binds from the extract task's output slot, array-wrapped.
+    const produceConfig = tasks[1]!["config"] as Record<string, unknown>;
+    expect(produceConfig["filePaths"]).toEqual(["{{impulse:goal_files}}"]);
+  });
+
+  it("mints a single-task bridge for a no-input shape (regression)", async () => {
+    llmResp = {
+      ok: true,
+      status: 200,
+      data: {
+        resolved: true,
+        content: JSON.stringify({ input_shapes: [], task_config: { type: "git_status" }, binds_from: {} }),
+        usage: {},
+      },
+    };
+    validationResps = [{ ok: true, status: 200, data: { shape: "git_status", body: {} } }];
+    const result = await resolveAuthorProducer({ type: "author_producer", shape: "git_status" });
+    expect(result.shape).toBe("author_producer");
+    const body = result.body as { two_task_bridge: boolean };
+    expect(body.two_task_bridge).toBe(false);
+    const tpl = postedTemplates[0]!;
+    expect((tpl["tasks"] as unknown[]).length).toBe(1);
   });
 
   it("forces task_config.type to the target shape even if the LLM emits a wrong one", async () => {

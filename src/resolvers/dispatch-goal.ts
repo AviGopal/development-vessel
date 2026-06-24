@@ -142,6 +142,9 @@ import { METABOB_API_KEY } from "../config.js";
  *   before any network call to goal-host-vessel, preserving dispatcher
  *   efficiency and predictable resolver semantics.
  */
+// MAX_GOAL_LEN guard: see preceding JSDoc — 8192 chars caps payloads to fit
+// downstream LLM context windows, goal-host-vessel input limits, and substrate
+// goal parsing capacity. Treat as a safety boundary, not a performance knob.
 const MAX_GOAL_LEN = 8192;
 const GOAL_HOST_ENDPOINT = process.env["GOAL_HOST_VESSEL_ENDPOINT"] ?? "http://127.0.0.1:8210";
 

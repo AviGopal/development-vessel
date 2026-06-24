@@ -189,6 +189,30 @@ import { METABOB_API_KEY } from "../config.js";
 // MAX_GOAL_LEN guard rationale: enforces a maximum goal text length to prevent
 // token overflow in LLM prompts, ensure goal clarity, and maintain system
 // stability during goal synthesis and dispatch operations.
+/**
+ * MAX_GOAL_LEN — hard ceiling (characters) on accepted goal payloads.
+ *
+ * Why this guard exists:
+ *  (1) Oversized-payload protection: goal text is forwarded to LLM-backed
+ *      goal-host endpoints whose context windows and per-request token
+ *      budgets are finite. Capping raw character length prevents token
+ *      overflow and preserves prompt coherence after template expansion.
+ *  (2) Value & trade-off (8192 chars): chosen to comfortably fit typical
+ *      imperative goal formulations used across this codebase while staying
+ *      well within downstream tokenizer budgets. Larger values increase
+ *      LLM token cost and recommendation latency; smaller values would
+ *      reject legitimate structured directives. 8192 balances expressiveness
+ *      against token cost and dispatch reliability.
+ *  (3) Downstream impact on goal-host /recommend: the recommendation scorer
+ *      degrades on oversized inputs (lower top_score, noisier substrate
+ *      matches, spurious auto-synthesis of scenarios when top_score < 0.3).
+ *      Bounding payload size keeps scoring within its calibrated operating
+ *      range and preserves gap-closing activity relevance.
+ *  (4) Goal synthesis pipeline constraint: this ceiling MUST stay in sync
+ *      with goal-host-vessel's own input ceiling and the synthesis
+ *      pipeline's per-goal size assumptions; raise only by coordinated
+ *      change across vessels. Treat as a safety boundary, not a perf knob.
+ */
 const MAX_GOAL_LEN = 8192;
 const GOAL_HOST_ENDPOINT = process.env["GOAL_HOST_VESSEL_ENDPOINT"] ?? "http://127.0.0.1:8210";
 

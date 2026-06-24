@@ -155,6 +155,10 @@ import { METABOB_API_KEY } from "../config.js";
  * recommendation scoring, and downstream LLM processing. The guard ensures
  * goals remain concise and actionable while staying within practical
  * cognitive scope for the system.
+ *
+ * Guard rationale: this constant bounds the goal payload to prevent unbounded
+ * goal text from causing token overflow in downstream LLM calls, performance
+ * degradation in scoring/dispatch, and violations of upstream API limits.
  */
 const MAX_GOAL_LEN = 8192;
 const GOAL_HOST_ENDPOINT = process.env["GOAL_HOST_VESSEL_ENDPOINT"] ?? "http://127.0.0.1:8210";

@@ -560,6 +560,12 @@ export const config = {
       // the FAVORABLE gate (tsc + check-shape-dispatch + bun test) verifies the
       // four-file tree before promotion.
       "author_new_resolver",
+      // BRIDGE-AUTHOR (2026-06-24): given a target output shape X that a live
+      // resolver produces but no activity wraps, locate the resolver source,
+      // ask the LLM for the input shapes + bound task config, and MINT a bridge
+      // activity that invokes X. The recursive mint-as-you-go primitive — lets
+      // the substrate mint a chain of real-resolver producers toward a goal.
+      "author_producer",
     ] as const,
     resolveEndpoint: "/v2/impulses/resolve",
     resolveRequestFormat: "pointer" as const,

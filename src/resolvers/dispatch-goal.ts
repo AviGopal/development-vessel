@@ -166,6 +166,26 @@ import { METABOB_API_KEY } from "../config.js";
 // recommendation scoring (top_score < 0.3) and triggers false auto-synthesis of
 // scenarios. Goals exceeding this threshold are rejected before dispatch to
 // prevent substrate catalogue misfits and preserve gap-closing activity relevance.
+/**
+ * MAX_GOAL_LEN guard rationale (performance + reliability):
+ *
+ * This guard rejects goal payloads exceeding the ceiling BEFORE any downstream
+ * dispatch, protecting both performance and reliability of the goal pipeline:
+ *
+ *  - Token overflow protection: goal text is forwarded into LLM-backed
+ *    goal-host endpoints whose context windows are finite. An unbounded
+ *    payload risks exhausting the model's context after prompt-template
+ *    expansion, causing mid-dispatch truncation or outright failure.
+ *  - Reliable goal-host recommendations: the /recommend scoring path
+ *    degrades on oversized inputs (lower top_score, noisier substrate
+ *    matches). Bounding payload size keeps recommendation scoring within
+ *    its calibrated operating range and preserves gap-closing relevance.
+ *  - Fail-fast semantics: oversized goals are rejected synchronously with a
+ *    structured error rather than surfacing as opaque 4xx responses from
+ *    goal-host-vessel mid-flight — no dispatchId is allocated on rejection.
+ *  - Safety boundary, not a performance knob: this MUST stay in sync with
+ *    goal-host-vessel's own input ceiling; raise only by coordinated change.
+ */
 const MAX_GOAL_LEN = 8192;
 const GOAL_HOST_ENDPOINT = process.env["GOAL_HOST_VESSEL_ENDPOINT"] ?? "http://127.0.0.1:8210";
 

@@ -145,23 +145,16 @@ import { METABOB_API_KEY } from "../config.js";
 // MAX_GOAL_LEN guard: see preceding JSDoc — 8192 chars caps payloads to fit
 // downstream LLM context windows, goal-host-vessel input limits, and substrate
 // goal parsing capacity. Treat as a safety boundary, not a performance knob.
+// Guard rationale: MAX_GOAL_LEN prevents oversized goal payloads from
+// overwhelming downstream processors and goal-host resolver capacity,
+// ensuring reliable goal dispatch and scenario synthesis.
 /**
- * Guard rationale: MAX_GOAL_LEN prevents oversized goal payloads from
- * overwhelming downstream processors and goal-host resolver capacity,
- * ensuring reliable goal dispatch and scenario synthesis.
- *
- * Specifically, the 8192-character ceiling exists to:
- *  - Prevent unbounded goal text from exceeding LLM token/prompt-window limits
- *    in downstream goal-host-vessel synthesis.
- *  - Avoid resolver dispatch failures caused by oversized POST bodies to
- *    /run-goal and related goal-host endpoints.
- *  - Respect substrate capacity constraints and encourage parsimonious,
- *    well-formed goal directives rather than document dumps.
- *
- * Maintenance intent: if downstream token budgets or substrate capacity
- * change, update this constant in coordination with goal-host-vessel; do not
- * raise it casually, as it is a deliberate conservatism against typical model
- * context windows.
+ * MAX_GOAL_LEN guard rationale:
+ * The 512-character limit (see value below) prevents excessively long goal
+ * descriptions that could cause issues with prompt token budgets, resolver
+ * recommendation scoring, and downstream LLM processing. The guard ensures
+ * goals remain concise and actionable while staying within practical
+ * cognitive scope for the system.
  */
 const MAX_GOAL_LEN = 8192;
 const GOAL_HOST_ENDPOINT = process.env["GOAL_HOST_VESSEL_ENDPOINT"] ?? "http://127.0.0.1:8210";

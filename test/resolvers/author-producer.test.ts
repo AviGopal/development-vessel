@@ -17,6 +17,9 @@ interface ScriptedResponse {
 let discoveryResp: ScriptedResponse;
 let llmResp: ScriptedResponse;
 let mintResp: ScriptedResponse;
+// Validation-invocation responses, consumed in order (one per attempt).
+let validationResps: ScriptedResponse[];
+let validationCallCount = 0;
 const postedTemplates: Record<string, unknown>[] = [];
 
 function makeResponse(r: ScriptedResponse): Response {
@@ -32,13 +35,33 @@ function installFetch(): void {
   // @ts-expect-error — replace global fetch for tests
   globalThis.fetch = async (url: string, init?: RequestInit) => {
     const u = String(url);
+    const body = init?.body ? (JSON.parse(String(init.body)) as Record<string, unknown>) : {};
     if (u.includes("/resolve") && u.includes("8100")) {
-      // discovery-vessel lookup for llmCompletion
-      return makeResponse(discoveryResp);
+      // discovery-vessel /resolve serves TWO callers, distinguished by body:
+      //   - LLM discovery sends { pointer: { type: "vesselCapability", shape } }
+      //   - author_producer's validation discovery sends { shape }
+      if (body["pointer"]) return makeResponse(discoveryResp);
+      // validation discovery: point at the validation invocation endpoint.
+      return makeResponse({
+        ok: true,
+        status: 200,
+        data: {
+          content: {
+            found: true,
+            vessels: [{ endpoint: "http://validation-vessel:8250", resolve_endpoint: "/resolve", health_score: 1.0 }],
+          },
+        },
+      });
     }
     if (u.includes("llm-vessel")) {
       // LLM vessel completion call
       return makeResponse(llmResp);
+    }
+    if (u.includes("validation-vessel")) {
+      // resolver-X validation invocation; one scripted response per attempt.
+      const resp = validationResps[validationCallCount] ?? validationResps[validationResps.length - 1]!;
+      validationCallCount++;
+      return makeResponse(resp);
     }
     if (u.includes("/v2/activities/templates")) {
       // mint POST
@@ -86,9 +109,12 @@ describe("author_producer resolver", () => {
 
   beforeEach(() => {
     postedTemplates.length = 0;
+    validationCallCount = 0;
     discoveryResp = goodDiscovery;
     llmResp = { ok: true, status: 200, data: { resolved: true, content: cannedAuthoringJson, usage: {} } };
     mintResp = { ok: true, status: 200, data: { id: "activity:auto-bridge-problem_detection" } };
+    // Default: validation succeeds on the first attempt (resolver produces X).
+    validationResps = [{ ok: true, status: 200, data: { shape: "problem_detection", body: { problems: [] } } }];
     installFetch();
   });
 
@@ -114,10 +140,14 @@ describe("author_producer resolver", () => {
       output_shape: string;
       input_shapes: string[];
       task_config: Record<string, unknown>;
+      validated: boolean;
+      attempts: number;
     };
     expect(body.minted_activity_id).toBe("activity:auto-bridge-problem_detection");
     expect(body.output_shape).toBe("problem_detection");
     expect(body.input_shapes).toEqual(["source_code"]);
+    expect(body.validated).toBe(true);
+    expect(body.attempts).toBe(1);
     // task_config carries the LLM's pointer fields AND the enforced resolver type.
     expect(body.task_config["type"]).toBe("problem_detection");
     expect(body.task_config["filePaths"]).toBe("{{source_code.path}}");
@@ -142,26 +172,71 @@ describe("author_producer resolver", () => {
         usage: {},
       },
     };
+    // Validation must produce shape "concept" for this minting to proceed.
+    validationResps = [{ ok: true, status: 200, data: { shape: "concept", body: {} } }];
     const result = await resolveAuthorProducer({ type: "author_producer", shape: "concept" });
     expect(result.shape).toBe("author_producer");
     const body = result.body as { task_config: Record<string, unknown> };
     expect(body.task_config["type"]).toBe("concept");
   });
 
-  it("returns structuredError when the LLM call fails (discovery finds no vessel)", async () => {
-    discoveryResp = { ok: true, status: 200, data: { content: { vessels: [], found: false } } };
-    const result = await resolveAuthorProducer({ type: "author_producer", shape: "problem_detection" });
-    expect(result.shape).toBe("structuredError");
-    const body = result.body as { error: string };
-    expect(body.error).toContain("LLM authoring failed");
+  it("retries with refined config and mints only the validated config", async () => {
+    // Attempt 1 validation fails (resolver reports a missing field); attempt 2
+    // succeeds. The resolver must refine via the error and mint only the
+    // validated config, reporting attempts:2.
+    validationResps = [
+      { ok: true, status: 200, data: { error: "filePaths is required" } },
+      { ok: true, status: 200, data: { shape: "problem_detection", body: { problems: [] } } },
+    ];
+    const result = await resolveAuthorProducer({
+      type: "author_producer",
+      shape: "problem_detection",
+      goal: "detect code problems in a file",
+      available_shapes: ["source_code"],
+    });
+    expect(result.shape).toBe("author_producer");
+    const body = result.body as { validated: boolean; attempts: number };
+    expect(body.validated).toBe(true);
+    expect(body.attempts).toBe(2);
+    // Two validation invocations happened (one failed, one succeeded).
+    expect(validationCallCount).toBe(2);
+    // Exactly one mint — the validated config.
+    expect(postedTemplates.length).toBe(1);
   });
 
-  it("returns structuredError when the LLM returns unparseable JSON", async () => {
-    llmResp = { ok: true, status: 200, data: { resolved: true, content: "sorry, I cannot do that", usage: {} } };
-    const result = await resolveAuthorProducer({ type: "author_producer", shape: "problem_detection" });
+  it("returns structuredError (no mint) when all attempts fail validation", async () => {
+    // Every validation attempt reports an error → exhaustion, no mint.
+    validationResps = [{ ok: true, status: 200, data: { error: "filePaths is required" } }];
+    const result = await resolveAuthorProducer({
+      type: "author_producer",
+      shape: "problem_detection",
+      max_attempts: 2,
+    });
     expect(result.shape).toBe("structuredError");
-    const body = result.body as { error: string };
-    expect(body.error).toContain("parseable JSON");
+    const body = result.body as { error: string; attempts: number; last_error: string };
+    expect(body.error).toContain("could not author a genuinely-producing invocation");
+    expect(body.attempts).toBe(2);
+    expect(body.last_error).toContain("filePaths is required");
+    // Never minted a non-working config.
+    expect(postedTemplates.length).toBe(0);
+  });
+
+  it("returns structuredError when the LLM call fails on every attempt (discovery finds no vessel)", async () => {
+    discoveryResp = { ok: true, status: 200, data: { content: { vessels: [], found: false } } };
+    const result = await resolveAuthorProducer({ type: "author_producer", shape: "problem_detection", max_attempts: 2 });
+    expect(result.shape).toBe("structuredError");
+    const body = result.body as { error: string; last_error: string };
+    expect(body.error).toContain("could not author a genuinely-producing invocation");
+    expect(body.last_error).toContain("LLM authoring failed");
+    expect(postedTemplates.length).toBe(0);
+  });
+
+  it("returns structuredError when the LLM returns unparseable JSON on every attempt", async () => {
+    llmResp = { ok: true, status: 200, data: { resolved: true, content: "sorry, I cannot do that", usage: {} } };
+    const result = await resolveAuthorProducer({ type: "author_producer", shape: "problem_detection", max_attempts: 2 });
+    expect(result.shape).toBe("structuredError");
+    const body = result.body as { last_error: string };
+    expect(body.last_error).toContain("parseable JSON");
   });
 
   it("returns structuredError when minting is rejected by activity-api", async () => {

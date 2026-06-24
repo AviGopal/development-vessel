@@ -4,7 +4,13 @@
  * Shared types for the gap landability backward model.
  */
 
-import type { GapFeatures } from "../resolvers/gap-landability-model";
+import type { GapRecord } from "../resolvers/gap-landability-model";
+
+/** Feature subset of a gap fed to the backward landability model. */
+export type GapFeatures = Pick<
+  GapRecord,
+  "category" | "remediationAlreadyPresent" | "singleFile"
+>;
 
 /** Minimal Gap shape – extend with fields already present in the codebase */
 export interface Gap {

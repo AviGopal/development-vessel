@@ -9,8 +9,8 @@
  * is the recommended routing target.
  */
 
-import { thompsonScore } from "./thompson-score.ts";
-import { getRecord } from "./activity-shape-store.ts";
+import { thompsonScore } from "./thompson-score";
+import { getRecord } from "./activity-shape-store";
 
 export interface Candidate {
   activity: string;

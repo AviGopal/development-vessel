@@ -5,7 +5,7 @@
  * Provides get/update helpers used by the selector.
  */
 
-import type { ThompsonRecord } from "./thompson-score.ts";
+import type { ThompsonRecord } from "./thompson-score";
 
 export type ActivityShapeKey = string;
 

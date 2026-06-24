@@ -4,8 +4,8 @@
  */
 
 import { describe, it, expect } from "bun:test";
-import { recommend } from "./recommend.ts";
-import { recordOutcome } from "./activity-shape-store.ts";
+import { recommend } from "./recommend";
+import { recordOutcome } from "./activity-shape-store";
 
 describe("recommend", () => {
   it("returns a non-null thompsonScore for every candidate — unseen pair", () => {

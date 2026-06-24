@@ -14,6 +14,7 @@ import { resolveVesselRegisterPassthrough } from "../resolvers/vessel-register-p
 import { resolveCodeIntrospect } from "../resolvers/code-introspect.js";
 import { resolvePropagateJudgment } from "../resolvers/propagate-judgment.js";
 import { resolveLiftDemoNoop } from "../resolvers/lift-demo-noop.js";
+import { resolveEmitShape } from "../resolvers/emit-shape.js";
 import { resolveLlmCompletionDispatch } from "../resolvers/llm-completion-dispatch.js";
 import { resolveJsonPathExtract } from "../resolvers/json-path-extract.js";
 import { resolveActivityRecommend } from "../resolvers/activity-recommend.js";
@@ -167,6 +168,8 @@ async function dispatchInner(pointer: AnyPointer): Promise<ResolverResult> {
   switch (pointer.type) {
     case "lift_demo_noop":
       return resolveLiftDemoNoop();
+    case "emit_shape":
+      return resolveEmitShape(p as Parameters<typeof resolveEmitShape>[0]);
     case "git_status":
       return resolveGitStatus(p as Parameters<typeof resolveGitStatus>[0]);
     case "git_add":

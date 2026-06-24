@@ -66,6 +66,39 @@ interface Template {
  */
 const INTERNAL_SUFFIX_RE = /(_tick|_observer|_scan|_audit|_report|_registry|_matrix_score|_health_observer)$/;
 
+/**
+ * Output/result shapes (`…Result`) are PRODUCED by a resolver, not invoked as
+ * one — an activity never has `resolver: "codeReadResult"`. Excluded so we only
+ * flag genuine resolver-entry capabilities. (A resolver advertises both its
+ * trigger shape and its produced shapes in discovery; the produced ones are not
+ * orphaned capabilities — they are outputs.)
+ */
+const OUTPUT_SHAPE_RE = /Result$/;
+
+/**
+ * activity-api owns the trace store + learning loop; its write/mutation shapes
+ * are internal bookkeeping, not outward capability. Also the camelCase READ
+ * shapes that duplicate an invoked snake_case resolver (e.g. `git_status` is
+ * invoked and produces `gitStatus`; the latter is not an orphaned capability).
+ */
+const ACTIVITY_API_WRITE = new Set<string>([
+  "activityExecutionTrace_write", "activityExecutionTrace_delete", "activityFeedback_write",
+  "activityComposition_write", "activityTemplate_write", "activityTemplate_update",
+  "activityTemplate_deprecate", "activityVariant_write", "impulseRelevance_write",
+  "toolUsage_write", "toolArgumentPattern_write", "executionSequences_write",
+  "shapeScore_write", "shapeGapResolution_write", "similarState_write",
+  "goalSeeking_write", "execution_write", "compositionEdge_write",
+  "goal_verification_label_write",
+]);
+
+const OUTPUT_READ_DUPLICATE = new Set<string>([
+  // camelCase produced/read shapes whose snake_case resolver is invoked, or
+  // pure read shapes owned by activity-api / local-tools / concept-db.
+  "gitStatus", "gitDiff", "fileContent", "conceptGraph", "relatedConcepts",
+  "conceptUsageStats", "conceptSequence", "impulseCooccurrenceEdges",
+  "impulseSignatureConcept", "interactorObservation",
+]);
+
 const META_DENY = new Set<string>([
   // dev-vessel self-governance / orchestration meta
   "substrateGap", "substrateGap_write", "memoryNote", "memoryNote_write",
@@ -114,8 +147,11 @@ const META_DENY = new Set<string>([
 function isOutwardCapability(shape: string): boolean {
   if (META_DENY.has(shape)) return false;
   if (INTERNAL_SUFFIX_RE.test(shape)) return false;
-  // *_write that is a substrate-learning write (not an outward mutation) is denied
-  // explicitly above; remaining *_write are capability writes and are kept.
+  if (OUTPUT_SHAPE_RE.test(shape)) return false;          // produced output, not a resolver
+  if (ACTIVITY_API_WRITE.has(shape)) return false;        // trace-store / learning bookkeeping
+  if (OUTPUT_READ_DUPLICATE.has(shape)) return false;     // read/output dup of an invoked resolver
+  // Remaining *_write are genuine outward capability writes (concept-db, ui,
+  // stateful-ui, sensitivity) and are kept.
   return true;
 }
 

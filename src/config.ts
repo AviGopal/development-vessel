@@ -32,6 +32,7 @@ export const config = {
     // One entry per R2.* resolver in specs/development-vessel/spec.md.
     shapes: [
       "lift_demo_noop",
+      "emit_shape", // test-fixture: emit an impulse of a configurable shape (synthetic shape-chains)
       "git_status",
       "git_add",
       "git_commit",

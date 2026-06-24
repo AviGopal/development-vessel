@@ -483,6 +483,15 @@ export const config = {
       // self-deception that flips a shape to "covered" without expanding the
       // frontier. Gates the arrival-scan "integrated" verdict.
       "consumer_productivity_audit",
+      // orphaned_capability_scan (2026-06-23): the DEMAND-DRIVEN half of the
+      // capability find-stage. capability_gap_audit mines FAILURES (capability
+      // wanted+lacked); this mines SILENCE (capability advertised but invoked by
+      // zero activities). live_resolver_shapes − invoked_resolvers, filtered to
+      // the outward-capability surface, emitting one orphaned_capability
+      // substrateGap per orphan so the existing author/compose loop expresses
+      // the advertised surface. See openspec 2026-06-23-demand-driven-orphan-
+      // capability-detection.
+      "orphaned_capability_scan",
       // vessel_gap_to_cluster (2026-06-14): the PRODUCER adapter. Reshapes a
       // vessel-arrival gap into a recurringPatternCluster targeting
       // concept_create_write so the real-chain author (draft-activity-from-pattern)

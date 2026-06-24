@@ -118,6 +118,7 @@ import { POSTERIOR_CONSISTENCY_AUDIT_TICK_TEMPLATE } from "./posterior-consisten
 // is the detection half; resolver-author is the authoring half. After this
 // lands the substrate's capability surface grows by its own action.
 import { CAPABILITY_GAP_AUDIT_TICK_TEMPLATE } from "./capability-gap-audit-tick.js";
+import { ORPHANED_CAPABILITY_TICK_TEMPLATE } from "./orphaned-capability-tick.js";
 import { RESOLVER_AUTHOR_TEMPLATE } from "./resolver-author.js";
 // Shadow-state observer ticks (2026-06-05): promote out-of-band substrate
 // state into impulse form so detectors can observe it.
@@ -192,6 +193,7 @@ export { VECTOR_SPACE_ORTHOGONALITY_AUDIT_TICK_TEMPLATE } from "./vector-space-o
 export { TRACE_OUTCOME_VALIDITY_AUDIT_TICK_TEMPLATE } from "./trace-outcome-validity-audit-tick.js";
 export { POSTERIOR_CONSISTENCY_AUDIT_TICK_TEMPLATE } from "./posterior-consistency-audit-tick.js";
 export { CAPABILITY_GAP_AUDIT_TICK_TEMPLATE } from "./capability-gap-audit-tick.js";
+export { ORPHANED_CAPABILITY_TICK_TEMPLATE } from "./orphaned-capability-tick.js";
 export { RESOLVER_AUTHOR_TEMPLATE } from "./resolver-author.js";
 export {
   SYSTEMD_UNIT_HEALTH_OBSERVER_TICK_TEMPLATE,
@@ -526,6 +528,11 @@ export const SEED_TEMPLATES: ActivityTemplate[] = [
   // audit tick; the authoring template is dispatchable on demand or via a
   // future drain-pending-capability-gaps activity.
   CAPABILITY_GAP_AUDIT_TICK_TEMPLATE,
+  // Demand-driven complement (2026-06-23): orphaned-capability-tick mines
+  // SILENCE — resolvers advertised in discovery but invoked by zero activities
+  // — and emits orphaned_capability substrateGap. The existing drain/draft/
+  // compose loop authors a bridge activity that invokes the orphaned resolver.
+  ORPHANED_CAPABILITY_TICK_TEMPLATE,
   RESOLVER_AUTHOR_TEMPLATE,
   // Shadow-state observer ticks (Part B, 2026-06-05). Each promotes one
   // out-of-band substrate state into a shape-typed impulse so the

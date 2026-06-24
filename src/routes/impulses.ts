@@ -109,6 +109,7 @@ import { resolveVectorSpaceOrthogonalityAudit } from "../resolvers/vector-space-
 import { resolveTraceOutcomeValidityAudit } from "../resolvers/trace-outcome-validity-audit.js";
 import { resolvePosteriorConsistencyAudit } from "../resolvers/posterior-consistency-audit.js";
 import { resolveCapabilityGapAudit } from "../resolvers/capability-gap-audit.js";
+import { resolveOrphanedCapabilityScan } from "../resolvers/orphaned-capability-scan.js";
 import { resolveSystemdUnitHealthObserver } from "../resolvers/systemd-unit-health-observer.js";
 import { resolvePushHealthObserver } from "../resolvers/push-health-observer.js";
 import { resolveMitosisIntentQueueObserver } from "../resolvers/mitosis-intent-queue-observer.js";
@@ -425,6 +426,10 @@ async function dispatchInner(pointer: AnyPointer): Promise<ResolverResult> {
     case "capability_gap_audit":
       return resolveCapabilityGapAudit(
         p as Parameters<typeof resolveCapabilityGapAudit>[0],
+      );
+    case "orphaned_capability_scan":
+      return resolveOrphanedCapabilityScan(
+        p as Parameters<typeof resolveOrphanedCapabilityScan>[0],
       );
     case "systemd_unit_health_observer":
       return resolveSystemdUnitHealthObserver(

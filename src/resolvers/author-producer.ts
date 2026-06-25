@@ -179,7 +179,13 @@ function buildPrompt(
         "```\n" +
         prior.error.slice(0, 800) +
         "\n```\n" +
-        `Correct the config: fix field names and add any required fields the error indicates. ` +
+        `Correct the config. CRITICAL rules learned from the resolver's own feedback:\n` +
+        `- The error names the EXACT pointer fields the resolver reads. If it says "path must …", ` +
+        `the field is literally \`path\` — use that verbatim. Do NOT invent compound variants ` +
+        `(\`vault_path\`, \`notePath\`, \`note_content\`); the resolver does not read them, so they ` +
+        `arrive empty and it refuses.\n` +
+        `- Prefer the simplest canonical field names (path, content, text, body, query, title).\n` +
+        `- Satisfy every value constraint the error states (e.g. a required path prefix / extension).\n` +
         `Do not repeat the same mistake.\n`
       : "") +
     `\nRESOLVER SOURCE for shape "${p.shape}" (may be empty if not located):\n` +
@@ -241,7 +247,14 @@ async function findValidationEndpoint(shape: string): Promise<string | null> {
         "Content-Type": "application/json",
         Authorization: `ApiKey ${METABOB_API_KEY}`,
       },
-      body: JSON.stringify({ shape }),
+      // Discovery's /resolve expects an impulse pointer, not a bare {shape}. The
+      // bare form always errored → findValidationEndpoint always returned null →
+      // validation silently fell through to the hardcoded FALLBACK list (which
+      // happens to contain analysis-vessel, so file-reader shapes validated, but
+      // NOT obsidian / any vessel outside the list). Using the vesselCapability
+      // pointer lets validation reach ANY registered vessel by discovery — the
+      // prerequisite for closing orphans on surfaces like obsidian. (2026-06-25)
+      body: JSON.stringify({ pointer: { type: "vesselCapability", shape } }),
     });
     if (!res.ok) return null;
     const data = (await res.json()) as {
@@ -295,10 +308,15 @@ function buildTestPointer(
     if (key === "type") continue;
     if (typeof val === "string" && val.includes("{{")) {
       const isFileField = /^(filePaths?|paths?|path|filePath|file)$/i.test(key);
+      const isContentField = /^(content|body|text|note|noteBody|message|markdown|md|value)$/i.test(key);
       if (key.toLowerCase() === "filepaths" || key.toLowerCase() === "paths") {
         out[key] = [fileFromGoal ?? KNOWN_REAL_FILE];
       } else if (isFileField) {
         out[key] = fileFromGoal ?? KNOWN_REAL_FILE;
+      } else if (isContentField) {
+        // A real non-empty body so a content-writer's contract validates (it is
+        // synthesized at runtime by the content-synthesis bridge task).
+        out[key] = "author_producer validation probe content.";
       } else {
         // Generic placeholder: substitute a benign concrete value drawn from
         // the goal, else a token, so the resolver sees a non-template string.
@@ -320,13 +338,19 @@ function buildTestPointer(
 // makes the minted execute-path match the validated path.
 const FILE_FIELD_RE = /^(filePaths?|paths?|path|filePath|file)$/i;
 const PLURAL_FILE_FIELD_RE = /^(filePaths|paths)$/i;
-const EXTRACT_SLOT = "goal_files";
-
-function hasPlaceholder(v: unknown): boolean {
-  if (typeof v === "string") return v.includes("{{");
-  if (Array.isArray(v)) return v.some(hasPlaceholder);
-  return false;
-}
+// Content-shaped fields hold SYNTHESIZED free text (a note body, a message), not
+// a value liftable from the goal by extraction. They are provisioned by an
+// llm_completion_dispatch task that generates the field from the goal — the
+// "content-synthesis" provisioning strategy that lets author_producer close
+// content-WRITING orphans (obsidian:write_note, …), not just file-READING ones. (2026-06-25)
+const CONTENT_FIELD_RE = /^(content|body|text|note|noteBody|message|markdown|md|value)$/i;
+// Must equal the shape that goal_file_extract actually emits (`filePaths`, see the
+// extract task's output_shapes below and goal-file-extract.ts). It was "goal_files",
+// a slot the extract task never produces — so the produce task's
+// {{impulse:goal_files}} binding resolved to nothing and the file field arrived
+// empty ("filePath is required"), making every authored bridge a no-op. Aligning the
+// slot name to the emitted shape lets the extracted path flow to the producer. (2026-06-24)
+const EXTRACT_SLOT = "filePaths";
 
 interface BridgeTasks {
   tasks: Record<string, unknown>[];
@@ -340,13 +364,34 @@ interface BridgeTasks {
  * field binds from a placeholder, return a 2-task bridge (extract-from-goal →
  * produce); otherwise the original single-task bridge.
  */
-export function buildBridgeTasks(shape: string, spec: AuthoredSpec): BridgeTasks {
+export function buildBridgeTasks(
+  shape: string,
+  spec: AuthoredSpec,
+  senseBack?: { shape: string; pathField: string } | null,
+): BridgeTasks {
   const cfg = spec.task_config;
+  // Provisioning-strategy dispatch: classify each placeholder-bearing pointer
+  // field by how its value must be PRODUCED, then prepend one provisioning task
+  // per class and bind the producer's field to that task's output slot. This is
+  // authoring-time backward-chaining — the generalisation of the old single
+  // file-extract bridge.
+  //   - file/path field   → goal_file_extract  (lift a path from the goal)
+  //   - content/body field → llm_completion_dispatch (SYNTHESISE from the goal)
+  // Fields that are neither are left as the LLM authored them (bound from a
+  // declared input shape). (2026-06-25)
+  // Classify by field NAME, not by whether the LLM left a placeholder: a
+  // content-writer's path/content MUST be derived from the goal at runtime
+  // (extract / synthesise), so even when the LLM froze a concrete value from the
+  // authoring goal we OVERRIDE it with a provisioning slot — otherwise the bridge
+  // would write the same note for every goal. (2026-06-25)
   const fileFields = Object.keys(cfg).filter(
-    (k) => k !== "type" && FILE_FIELD_RE.test(k) && hasPlaceholder(cfg[k]),
+    (k) => k !== "type" && FILE_FIELD_RE.test(k),
+  );
+  const contentFields = Object.keys(cfg).filter(
+    (k) => k !== "type" && !FILE_FIELD_RE.test(k) && CONTENT_FIELD_RE.test(k),
   );
 
-  if (fileFields.length === 0) {
+  if (fileFields.length === 0 && contentFields.length === 0) {
     return {
       tasks: [
         {
@@ -368,47 +413,156 @@ export function buildBridgeTasks(shape: string, spec: AuthoredSpec): BridgeTasks
 
   const produceConfig: Record<string, unknown> = { ...cfg, type: shape };
   const bindsFrom: Record<string, unknown> = { ...spec.binds_from };
-  for (const k of fileFields) {
-    // Array fields get a wrapped placeholder so the slot's bare-string content
-    // becomes a real ["/path"] array (goal-host interpolation JSON.stringify's
-    // non-strings — see goal-file-extract.ts header).
-    produceConfig[k] = PLURAL_FILE_FIELD_RE.test(k)
-      ? [`{{impulse:${EXTRACT_SLOT}}}`]
-      : `{{impulse:${EXTRACT_SLOT}}}`;
-    bindsFrom[k] = `task:extract(${EXTRACT_SLOT})`;
+  const provisionTasks: Record<string, unknown>[] = [];
+  const dependencies: string[] = [];
+  // Slots (named outputImpulseKey handles) drive {{impulse:<slot>}} binding;
+  // shapes are the pool SHAPES the produce task requires. They DIFFER for the
+  // synthesis strategy (slot `synth_content` vs shape `llm_completion_result`),
+  // so track them separately — putting a slot name into input_shapes makes the
+  // engine require a non-existent shape and fail the produce task. (2026-06-25)
+  const produceInputSlots: string[] = [];
+  const produceInputShapes: string[] = [];
+
+  // Strategy A — file/path fields: one shared goal_file_extract task.
+  if (fileFields.length > 0) {
+    provisionTasks.push({
+      id: "extract",
+      description:
+        "Lift the target file path out of the goal text so the producer has a real filePaths entry.",
+      resolver: "goal_file_extract",
+      config: { type: "goal_file_extract", goal: "{{goal}}" },
+      input_shapes: ["goal"],
+      inputShapes: ["goal"],
+      output_shapes: ["filePaths"],
+      outputShapes: ["filePaths"],
+      outputImpulses: [EXTRACT_SLOT],
+    });
+    dependencies.push("extract");
+    produceInputSlots.push(EXTRACT_SLOT);
+    produceInputShapes.push("filePaths");
+    for (const k of fileFields) {
+      produceConfig[k] = PLURAL_FILE_FIELD_RE.test(k)
+        ? [`{{impulse:${EXTRACT_SLOT}}}`]
+        : `{{impulse:${EXTRACT_SLOT}}}`;
+      bindsFrom[k] = `task:extract(${EXTRACT_SLOT})`;
+    }
+  }
+
+  // Strategy B — content fields: one llm_completion_dispatch SYNTHESIS task per
+  // field, each producing its own slot. The prompt asks the LLM to emit exactly
+  // the field value the goal calls for, so the writer receives synthesised
+  // content rather than an unfillable placeholder.
+  for (const k of contentFields) {
+    const taskId = `synthesize_${k}`;
+    const slot = `synth_${k}`;
+    provisionTasks.push({
+      id: taskId,
+      description: `Synthesise the "${k}" value the goal asks ${shape} to write.`,
+      resolver: "llm_completion_dispatch",
+      config: {
+        type: "llm_completion_dispatch",
+        prompt:
+          `You are producing the "${k}" field for a "${shape}" action the substrate is performing. ` +
+          `Read the goal below and output ONLY the exact ${k} to use — no preamble, no explanation, ` +
+          `no markdown fences. If the goal implies a document/note, write its full body.\n\nGOAL:\n{{goal}}`,
+        max_tokens: 1500,
+      },
+      input_shapes: ["goal"],
+      inputShapes: ["goal"],
+      output_shapes: ["llm_completion_result"],
+      outputShapes: ["llm_completion_result"],
+      outputImpulses: [slot],
+    });
+    dependencies.push(taskId);
+    produceInputSlots.push(slot);
+    produceInputShapes.push("llm_completion_result");
+    produceConfig[k] = `{{impulse:${slot}}}`;
+    bindsFrom[k] = `task:${taskId}(${slot})`;
+  }
+
+  const produceTask: Record<string, unknown> = {
+    id: "produce",
+    description: `Invoke the ${shape} resolver to produce ${shape}, binding its fields from the provisioning tasks (path-extract and/or content-synthesis).`,
+    resolver: shape,
+    dependencies,
+    config: produceConfig,
+    input_shapes: produceInputShapes,
+    inputShapes: produceInputShapes,
+    inputImpulses: produceInputSlots,
+    output_shapes: [shape],
+    outputShapes: [shape],
+  };
+
+  const tasks: Record<string, unknown>[] = [...provisionTasks, produceTask];
+
+  // Sense-back (validation of the SENSED output): when the producer is a WRITER
+  // on a surface that also advertises a READER for the same resource, append a
+  // task that reads the just-written resource back through that observation
+  // resolver. This puts the surface's ACTUAL state into the pool as a shape, so
+  // the reach-gate validates the goal against what was genuinely sensed on the
+  // surface (the note read from the vault) rather than the writer's self-report
+  // or unrelated steps' noise. This is the actuate→sense→verify loop and is what
+  // lets the substrate extend topology toward implicit surfaces safely. (2026-06-25)
+  if (senseBack && (fileFields.length > 0)) {
+    tasks.push({
+      id: "sense_back",
+      description:
+        `Read ${senseBack.shape} back from the surface (the same path just written) so the pool carries the genuinely-sensed state — sensed-output validation of the ${shape} write.`,
+      resolver: senseBack.shape,
+      dependencies: ["produce"],
+      config: { type: senseBack.shape, [senseBack.pathField]: `{{impulse:${EXTRACT_SLOT}}}` },
+      input_shapes: ["filePaths"],
+      inputShapes: ["filePaths"],
+      inputImpulses: [EXTRACT_SLOT],
+      output_shapes: [senseBack.shape],
+      outputShapes: [senseBack.shape],
+      outputImpulses: ["sensed_state"],
+    });
   }
 
   return {
-    tasks: [
-      {
-        id: "extract",
-        description:
-          "Lift the target file path out of the goal text so the producer has a real filePaths entry.",
-        resolver: "goal_file_extract",
-        config: { type: "goal_file_extract", goal: "{{goal}}" },
-        input_shapes: ["goal"],
-        inputShapes: ["goal"],
-        output_shapes: ["filePaths"],
-        outputShapes: ["filePaths"],
-        outputImpulses: [EXTRACT_SLOT],
-      },
-      {
-        id: "produce",
-        description: `Invoke the ${shape} resolver to produce ${shape}, binding the file field from the goal-extracted path.`,
-        resolver: shape,
-        dependencies: ["extract"],
-        config: produceConfig,
-        input_shapes: ["filePaths"],
-        inputShapes: ["filePaths"],
-        inputImpulses: [EXTRACT_SLOT],
-        output_shapes: [shape],
-        outputShapes: [shape],
-      },
-    ],
+    tasks,
     templateInputShapes: ["goal"],
     bindsFrom,
     twoTask: true,
   };
+}
+
+/**
+ * For a WRITER shape on a namespaced surface (e.g. obsidian:write_note), find a
+ * paired READER the same vessel advertises (obsidian:note / open_note / …) so the
+ * write can be sensed back. Returns null when the shape isn't a surface writer or
+ * the vessel advertises no reader — sense-back is then simply skipped.
+ */
+async function findSenseBackReader(
+  writerShape: string,
+): Promise<{ shape: string; pathField: string } | null> {
+  const m = writerShape.match(/^([^:]+):(.+)$/);
+  if (!m || !m[1] || !m[2]) return null;
+  const ns = m[1];
+  const verbNoun = m[2];
+  const noun = verbNoun.replace(/^(write_|create_|save_|put_|set_|update_|append_)/i, "");
+  if (noun === verbNoun) return null; // not a recognisable write verb → not a surface writer
+  const candidates = [`${ns}:${noun}`, `${ns}:open_${noun}`, `${ns}:read_${noun}`, `${ns}:get_${noun}`];
+  try {
+    const res = await fetch(`${DISCOVERY_ENDPOINT}/resolve`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `ApiKey ${METABOB_API_KEY}` },
+      body: JSON.stringify({ pointer: { type: "vesselRegistry" } }),
+    });
+    if (!res.ok) return null;
+    const data = (await res.json()) as { content?: { vessels?: Array<{ shapes?: string[] }> } };
+    const vessels = data.content?.vessels ?? [];
+    const writerVessel = vessels.find((v) => (v.shapes ?? []).includes(writerShape));
+    if (!writerVessel) return null;
+    const advertised = new Set(writerVessel.shapes ?? []);
+    for (const c of candidates) {
+      if (c !== writerShape && advertised.has(c)) return { shape: c, pathField: "path" };
+    }
+  } catch {
+    return null;
+  }
+  return null;
 }
 
 interface ValidationOutcome {
@@ -423,6 +577,41 @@ interface ValidationOutcome {
  * structuredError / `.error`). On failure, captures the error text so the next
  * author attempt can refine the config.
  */
+/**
+ * Extract an explicit effect signal from a resolver response — the SENSED
+ * outcome of an action/write. Looks at the envelope top-level, a stringified or
+ * nested `content` body, and `metadata`. Returns `{ok:false,reason}` on a
+ * refusal/failed write, `{ok:true}` on a confirmed write, or `null` when no
+ * effect flag is present (a pure READER like code_quality — shape-match then
+ * suffices). Generic over `wrote`/`written`/`refused`/`success`/`ok` flags so it
+ * works for any write/surface vessel, not just obsidian.
+ */
+function extractEffectSignal(body: unknown): { ok: boolean; reason: string } | null {
+  const candidates: Record<string, unknown>[] = [];
+  const b = body as Record<string, unknown> | undefined;
+  if (b && typeof b === "object") {
+    candidates.push(b);
+    let c: unknown = b["content"];
+    if (typeof c === "string") {
+      try { c = JSON.parse(c); } catch { /* not JSON — ignore */ }
+    }
+    if (c && typeof c === "object") candidates.push(c as Record<string, unknown>);
+    const meta = b["metadata"];
+    if (meta && typeof meta === "object") candidates.push(meta as Record<string, unknown>);
+  }
+  for (const o of candidates) {
+    const refused = o["refused"] === true;
+    const negated =
+      o["wrote"] === false || o["written"] === false ||
+      o["success"] === false || o["ok"] === false;
+    if (refused || negated) {
+      return { ok: false, reason: String(o["reason"] ?? o["error"] ?? o["summary"] ?? "the action did not take effect") };
+    }
+    if (o["wrote"] === true || o["written"] === true) return { ok: true, reason: "" };
+  }
+  return null;
+}
+
 async function validateProducesShape(
   shape: string,
   testPointer: Record<string, unknown>,
@@ -463,9 +652,19 @@ async function validateProducesShape(
       continue;
     }
     const b = body as
-      | { shape?: string; error?: unknown; content?: { shape?: string; error?: unknown }; resolved?: boolean }
+      | {
+          shape?: string;
+          error?: unknown;
+          content?: { shape?: string; error?: unknown };
+          metadata?: { shape?: string };
+          resolved?: boolean;
+        }
       | undefined;
-    const respShape = b?.shape ?? b?.content?.shape;
+    // Vessels wrap the produced shape differently: analysis/dev-vessel put it at
+    // top-level `shape`, obsidian-vessel puts it at `metadata.shape` (its body is
+    // a stringified payload). Check all positions so a genuinely-producing surface
+    // vessel isn't misread as "did not carry shape". (2026-06-25)
+    const respShape = b?.shape ?? b?.content?.shape ?? b?.metadata?.shape;
     const respError = b?.error ?? b?.content?.error;
     if (!res.ok) {
       // Transport-style failure (5xx/503): this endpoint can't serve the shape,
@@ -483,6 +682,18 @@ async function validateProducesShape(
       };
     }
     if (respShape === shape) {
+      // Validation of the SENSED output (2026-06-25): a writer/surface resolver
+      // returns its produced shape EVEN WHEN IT REFUSED the action (e.g. obsidian
+      // write_note → {wrote:false, refused:true} but metadata.shape is still
+      // obsidian:write_note). Shape-presence alone is not "genuinely producing".
+      // Inspect the body for the sensed effect flag and FAIL with the surface's
+      // own reason when the effect did not occur — this turns the author→refine
+      // loop into a contract-discovery loop: the surface tells the LLM what it got
+      // wrong ("path must start with Substrate/"), and the next attempt corrects.
+      const effect = extractEffectSignal(body);
+      if (effect && effect.ok === false) {
+        return { ok: false, error: `resolver returned shape "${shape}" but the SENSED effect failed: ${effect.reason}` };
+      }
       return { ok: true, error: "" };
     }
     // 2xx, no error, but wrong/absent shape → did not genuinely produce X.
@@ -567,7 +778,10 @@ export async function resolveAuthorProducer(pointer: AuthorProducerPointer): Pro
   // 3. Build the bridge activity template. For file-consuming shapes this is a
   //    2-task bridge (extract-from-goal → produce) so the minted execute-path
   //    matches the validated path (validate↔mint parity, 2026-06-24).
-  const bridge = buildBridgeTasks(shape, spec);
+  // If the producer is a surface WRITER, discover a paired reader so the bridge
+  // can sense its write back into the pool (sensed-output validation).
+  const senseBack = await findSenseBackReader(shape);
+  const bridge = buildBridgeTasks(shape, spec, senseBack);
   const template = {
     id: `auto-bridge-${shape}`,
     name: `auto-bridge:${shape}`,

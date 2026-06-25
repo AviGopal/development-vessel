@@ -241,6 +241,15 @@ import { METABOB_API_KEY } from "../config.js";
  *     partial dispatch. It keeps the synthesis and dispatch chains stable and
  *     predictable by rejecting oversize input at the entry boundary.
  */
+/**
+ * MAX_GOAL_LEN guard rationale and constraint validation.
+ *
+ * Purpose: enforces a maximum goal text length to prevent token budget
+ * exhaustion and goal-host recommendation service overload. Shorter,
+ * well-defined goals yield higher recommendation scores and faster
+ * resolution cycles. The guard check below validates incoming goal text
+ * against this limit before dispatch.
+ */
 const MAX_GOAL_LEN = 8192;
 const GOAL_HOST_ENDPOINT = process.env["GOAL_HOST_VESSEL_ENDPOINT"] ?? "http://127.0.0.1:8210";
 

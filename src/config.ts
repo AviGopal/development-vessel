@@ -31,6 +31,7 @@ export const config = {
     // Inline literal so packages/shape-dispatch-check/check.ts can find it.
     // One entry per R2.* resolver in specs/development-vessel/spec.md.
     shapes: [
+      "contentAddressedVesselId",
       "lift_demo_noop",
       "emit_shape", // test-fixture: emit an impulse of a configurable shape (synthetic shape-chains)
       "git_status",

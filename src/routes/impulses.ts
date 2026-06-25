@@ -1,5 +1,6 @@
 import { Hono } from "hono";
 import { auditDetectorOutputSanity } from "../lib/detector-output-sanity.js";
+import { resolveContentAddressedVesselId } from "../resolvers/content-addressed-vessel-id.js";
 import { resolveGitStatus } from "../resolvers/git-status.js";
 import { resolveGitAdd } from "../resolvers/git-add.js";
 import { resolveGitCommit } from "../resolvers/git-commit.js";
@@ -172,6 +173,8 @@ async function dispatchInner(pointer: AnyPointer): Promise<ResolverResult> {
       return resolveLiftDemoNoop();
     case "emit_shape":
       return resolveEmitShape(p as Parameters<typeof resolveEmitShape>[0]);
+    case "contentAddressedVesselId":
+      return resolveContentAddressedVesselId(p as Parameters<typeof resolveContentAddressedVesselId>[0]);
     case "git_status":
       return resolveGitStatus(p as Parameters<typeof resolveGitStatus>[0]);
     case "git_add":

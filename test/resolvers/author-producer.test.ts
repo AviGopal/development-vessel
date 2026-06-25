@@ -37,10 +37,16 @@ function installFetch(): void {
     const u = String(url);
     const body = init?.body ? (JSON.parse(String(init.body)) as Record<string, unknown>) : {};
     if (u.includes("/resolve") && u.includes("8100")) {
-      // discovery-vessel /resolve serves TWO callers, distinguished by body:
-      //   - LLM discovery sends { pointer: { type: "vesselCapability", shape } }
-      //   - author_producer's validation discovery sends { shape }
-      if (body["pointer"]) return makeResponse(discoveryResp);
+      // discovery-vessel /resolve serves TWO callers, both now sending a
+      // { pointer: { type: "vesselCapability", shape } } body — distinguished by
+      // the requested SHAPE:
+      //   - LLM discovery asks for "llmCompletion" / "llm_completion"
+      //   - author_producer's validation discovery asks for the target shape (X)
+      const ptr = body["pointer"] as { shape?: string } | undefined;
+      const shape = ptr?.shape ?? "";
+      if (shape === "llmCompletion" || shape === "llm_completion") {
+        return makeResponse(discoveryResp);
+      }
       // validation discovery: point at the validation invocation endpoint.
       return makeResponse({
         ok: true,
@@ -113,8 +119,16 @@ describe("author_producer resolver", () => {
     discoveryResp = goodDiscovery;
     llmResp = { ok: true, status: 200, data: { resolved: true, content: cannedAuthoringJson, usage: {} } };
     mintResp = { ok: true, status: 200, data: { id: "activity:auto-bridge-problem_detection" } };
-    // Default: validation succeeds on the first attempt (resolver produces X).
-    validationResps = [{ ok: true, status: 200, data: { shape: "problem_detection", body: { problems: [] } } }];
+    // Default: validation succeeds on the first attempt (resolver produces X with
+    // SUBSTANCE — the resolver's substance-check rejects empty output on a known
+    // non-trivial input, so the fixture must carry a real problem).
+    validationResps = [
+      {
+        ok: true,
+        status: 200,
+        data: { shape: "problem_detection", problems: [{ file: "x.ts", line: 1, message: "too long" }], problems_found: 1 },
+      },
+    ];
     installFetch();
   });
 
@@ -165,13 +179,16 @@ describe("author_producer resolver", () => {
     const tasks = tpl["tasks"] as Array<Record<string, unknown>>;
     expect(tasks.length).toBe(2);
     expect(tasks[0]!["resolver"]).toBe("goal_file_extract");
-    expect(tasks[0]!["outputImpulses"]).toEqual(["goal_files"]);
+    // The extract task's named output SLOT (outputImpulseKey the engine stamps).
+    // It is decoupled from the output SHAPE ("filePaths"); the produce task binds
+    // it via the same slot name through inputImpulses + {{impulse:<slot>}}.
+    expect(tasks[0]!["outputImpulses"]).toEqual(["filePaths"]);
     expect(tasks[1]!["resolver"]).toBe("problem_detection");
     expect(tasks[1]!["dependencies"]).toEqual(["extract"]);
-    expect(tasks[1]!["inputImpulses"]).toEqual(["goal_files"]);
+    expect(tasks[1]!["inputImpulses"]).toEqual(["filePaths"]);
     // The file field now binds from the extract task's output slot, array-wrapped.
     const produceConfig = tasks[1]!["config"] as Record<string, unknown>;
-    expect(produceConfig["filePaths"]).toEqual(["{{impulse:goal_files}}"]);
+    expect(produceConfig["filePaths"]).toEqual(["{{impulse:filePaths}}"]);
   });
 
   it("mints a single-task bridge for a no-input shape (regression)", async () => {
@@ -184,7 +201,7 @@ describe("author_producer resolver", () => {
         usage: {},
       },
     };
-    validationResps = [{ ok: true, status: 200, data: { shape: "git_status", body: {} } }];
+    validationResps = [{ ok: true, status: 200, data: { shape: "git_status", body: { branch: "dev", dirty: false } } }];
     const result = await resolveAuthorProducer({ type: "author_producer", shape: "git_status" });
     expect(result.shape).toBe("author_producer");
     const body = result.body as { two_task_bridge: boolean };
@@ -203,8 +220,9 @@ describe("author_producer resolver", () => {
         usage: {},
       },
     };
-    // Validation must produce shape "concept" for this minting to proceed.
-    validationResps = [{ ok: true, status: 200, data: { shape: "concept", body: {} } }];
+    // Validation must produce shape "concept" for this minting to proceed (with
+    // substance — the resolver rejects empty output).
+    validationResps = [{ ok: true, status: 200, data: { shape: "concept", body: { id: "c1", name: "auth" } } }];
     const result = await resolveAuthorProducer({ type: "author_producer", shape: "concept" });
     expect(result.shape).toBe("author_producer");
     const body = result.body as { task_config: Record<string, unknown> };
@@ -217,7 +235,7 @@ describe("author_producer resolver", () => {
     // validated config, reporting attempts:2.
     validationResps = [
       { ok: true, status: 200, data: { error: "filePaths is required" } },
-      { ok: true, status: 200, data: { shape: "problem_detection", body: { problems: [] } } },
+      { ok: true, status: 200, data: { shape: "problem_detection", problems: [{ file: "x.ts", line: 1, message: "too long" }], problems_found: 1 } },
     ];
     const result = await resolveAuthorProducer({
       type: "author_producer",

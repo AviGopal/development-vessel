@@ -93,14 +93,42 @@ export function extractFilePaths(pointer: GoalFileExtractPointer): string[] {
   return out;
 }
 
+/**
+ * Resolve a path TOKEN lifted from goal prose to a path the producing resolver
+ * can actually open. Goal text names files in the developer's super-repo idiom
+ * (`repos/<vessel>/src/x.ts` or a bare `src/x.ts`), but the file-reading
+ * resolvers run inside the substrate container with their CWD set to their own
+ * unit dir (e.g. analysis-vessel's CWD is `/vessels/analysis-vessel`), where
+ * vessel source lives under the vessels root (`/vessels/<vessel>/…`). A relative
+ * token therefore ENOENTs at the producer → empty/error output → the reach-gate
+ * judges the goal HOLLOW even though the whole bridge ran. This was the residual
+ * validate↔mint gap: validation tolerated the read_error as "substance", so the
+ * minted bridge passed validation yet could never read the real file.
+ *
+ * Mapping (deterministic, no FS access — the producer's vessel may differ from
+ * ours so we cannot stat): an already-absolute path is returned unchanged; a
+ * leading `repos/` (super-repo idiom) is rewritten to the container vessels
+ * root; any other relative path is anchored under the vessels root. The root is
+ * `VESSELS_ROOT` (default `/vessels`) so non-default layouts / tests can steer
+ * it. (2026-06-25, spec: 2026-06-24-author-producer-validate-mint-parity)
+ */
+export function normalizeToContainerPath(token: string): string {
+  if (!token) return token;
+  const root = (process.env["VESSELS_ROOT"] ?? "/vessels").replace(/\/+$/, "");
+  if (token.startsWith("/")) return token; // already absolute
+  const stripped = token.replace(/^(\.\/)?repos\//, "");
+  return `${root}/${stripped}`;
+}
+
 export async function resolveGoalFileExtract(
   pointer: GoalFileExtractPointer,
 ): Promise<ResolverResult> {
   const paths = extractFilePaths(pointer);
-  const primary = paths[0] ?? "";
-  // body is the PRIMARY path as a bare string (see header). filePaths/count are
-  // attached for any structured consumer / observability, but the slot binding
-  // reads the bare-string body.
+  const rawPrimary = paths[0] ?? "";
+  // body is the PRIMARY path as a bare string (see header), NORMALIZED to a path
+  // the downstream file-reading resolver can open inside the container (relative
+  // goal-prose paths ENOENT otherwise → HOLLOW reach). Empty stays empty.
+  const primary = rawPrimary ? normalizeToContainerPath(rawPrimary) : "";
   return {
     shape: "filePaths",
     body: primary,

@@ -213,6 +213,10 @@ import { METABOB_API_KEY } from "../config.js";
  *      pipeline's per-goal size assumptions; raise only by coordinated
  *      change across vessels. Treat as a safety boundary, not a perf knob.
  */
+// MAX_GOAL_LEN guard rationale: this constant enforces a length limit on goal
+// text to prevent excessive token consumption, context overflow in LLM prompts,
+// and goal decomposition issues. The guard ensures goals remain tractable
+// within the system's goal-host recommendation and dispatch pipeline constraints.
 const MAX_GOAL_LEN = 8192;
 const GOAL_HOST_ENDPOINT = process.env["GOAL_HOST_VESSEL_ENDPOINT"] ?? "http://127.0.0.1:8210";
 

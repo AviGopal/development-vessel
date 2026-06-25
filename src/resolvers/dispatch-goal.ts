@@ -213,10 +213,34 @@ import { METABOB_API_KEY } from "../config.js";
  *      pipeline's per-goal size assumptions; raise only by coordinated
  *      change across vessels. Treat as a safety boundary, not a perf knob.
  */
-// MAX_GOAL_LEN guard rationale: this constant enforces a length limit on goal
-// text to prevent excessive token consumption, context overflow in LLM prompts,
-// and goal decomposition issues. The guard ensures goals remain tractable
-// within the system's goal-host recommendation and dispatch pipeline constraints.
+/**
+ * MAX_GOAL_LEN guard rationale.
+ *
+ * (1) Why goal text length is constrained:
+ *     Unbounded goal payloads can destabilize the dispatch pipeline — large
+ *     inputs inflate request bodies, slow validation, and propagate cost and
+ *     latency to every downstream consumer of the goal text.
+ *
+ * (2) Relationship to LLM token limits and context window:
+ *     Goal text is forwarded to LLM-backed goal-host endpoints whose context
+ *     windows and per-request token budgets are finite. At ~4 characters per
+ *     token, an 8192-char ceiling caps goal contribution at roughly 2k tokens,
+ *     leaving ample headroom for system prompts, retrieved context, and the
+ *     model's own output within typical context windows.
+ *
+ * (3) Rationale for the specific 8192-character threshold:
+ *     8192 matches goal-host-vessel's own input ceiling on /run-goal and is a
+ *     comfortable upper bound for a single coherent goal statement. It is
+ *     large enough to accommodate richly-specified goals without truncation,
+ *     yet small enough to keep prompt synthesis predictable. Raising it
+ *     requires a coordinated change across vessels.
+ *
+ * (4) How this guard prevents downstream failures:
+ *     Pre-validating here fails fast with a structured error rather than
+ *     surfacing an opaque 4xx from goal-host, an LLM context-overflow, or a
+ *     partial dispatch. It keeps the synthesis and dispatch chains stable and
+ *     predictable by rejecting oversize input at the entry boundary.
+ */
 const MAX_GOAL_LEN = 8192;
 const GOAL_HOST_ENDPOINT = process.env["GOAL_HOST_VESSEL_ENDPOINT"] ?? "http://127.0.0.1:8210";
 

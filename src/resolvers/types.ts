@@ -12,5 +12,7 @@ export interface CommandResult {
 export interface WebSocketMessage {
   type: string;
   payload?: unknown;
+  data?: unknown;
+  timestamp?: number;
 }
 

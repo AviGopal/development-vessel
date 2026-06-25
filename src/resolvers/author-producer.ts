@@ -307,9 +307,9 @@ function buildTestPointer(
   for (const [key, val] of Object.entries(out)) {
     if (key === "type") continue;
     if (typeof val === "string" && val.includes("{{")) {
-      const isFileField = /^(filePaths?|paths?|path|filePath|file)$/i.test(key);
-      const isContentField = /^(content|body|text|note|noteBody|message|markdown|md|value)$/i.test(key);
-      if (key.toLowerCase() === "filepaths" || key.toLowerCase() === "paths") {
+      const isFileField = FILE_FIELD_RE.test(key);
+      const isContentField = !isFileField && CONTENT_FIELD_RE.test(key);
+      if (PLURAL_FILE_FIELD_RE.test(key)) {
         out[key] = [fileFromGoal ?? KNOWN_REAL_FILE];
       } else if (isFileField) {
         out[key] = fileFromGoal ?? KNOWN_REAL_FILE;
@@ -336,8 +336,14 @@ function buildTestPointer(
 // placeholder field, mint a 2-task bridge — task1 `goal_file_extract` lifts the
 // path from the goal, task2 binds the file field from task1's output slot. This
 // makes the minted execute-path match the validated path.
-const FILE_FIELD_RE = /^(filePaths?|paths?|path|filePath|file)$/i;
-const PLURAL_FILE_FIELD_RE = /^(filePaths|paths)$/i;
+// Match file/path pointer fields across the naming conventions LLMs actually
+// emit — camelCase (filePath), snake_case (file_path), and common prefixes
+// (source_path, target_file). Without the snake/prefix variants a field like
+// `file_path` slipped through unprovisioned, leaving a `{{file_path}}` template
+// placeholder that nothing fills at runtime (the path never reaches the
+// resolver → empty output). (2026-06-25)
+const FILE_FIELD_RE = /^((source|target|input|output|note|vault)_?)?(file_?paths?|file_?path|filepath|filename|paths?|path|file)$/i;
+const PLURAL_FILE_FIELD_RE = /^((source|target|input|output)_?)?(file_?paths|paths)$/i;
 // Content-shaped fields hold SYNTHESIZED free text (a note body, a message), not
 // a value liftable from the goal by extraction. They are provisioned by an
 // llm_completion_dispatch task that generates the field from the goal — the
@@ -612,6 +618,47 @@ function extractEffectSignal(body: unknown): { ok: boolean; reason: string } | n
   return null;
 }
 
+/**
+ * Conservative "did it produce SUBSTANCE?" check. The validation test always
+ * uses a known NON-trivial input (a real source file with functions), so a
+ * producer that returns empty/zero output there has the wrong contract (usually
+ * wrong pointer field NAMES — e.g. `file_path` when the resolver reads
+ * `filePath`, so the path never arrives). Returns false only for clearly-empty
+ * output so the author→refine loop engages for READERS the way the sensed-effect
+ * loop already does for writers. Unwraps the common {success,content/body}
+ * envelope first. (2026-06-25)
+ */
+function isSubstantiveOutput(body: unknown): boolean {
+  let v: unknown = body;
+  const b = body as Record<string, unknown> | undefined;
+  if (b && typeof b === "object") {
+    if ("content" in b && b["content"] !== undefined && b["content"] !== null) v = b["content"];
+    else if ("body" in b && b["body"] !== undefined && b["body"] !== null) v = b["body"];
+  }
+  if (typeof v === "string") {
+    const t = v.trim();
+    if (t.startsWith("{") || t.startsWith("[")) { try { v = JSON.parse(t); } catch { return t.length > 0; } }
+    else return t.length > 0;
+  }
+  if (v == null) return false;
+  if (Array.isArray(v)) return v.length > 0;
+  if (typeof v === "object") {
+    const o = v as Record<string, unknown>;
+    // Explicit zero-count signals → nothing was produced.
+    for (const k of ["total", "count", "problems_found", "found", "files_analyzed"]) {
+      if (typeof o[k] === "number" && (o[k] as number) === 0) return false;
+    }
+    // If the payload's only real content is array fields and they're ALL empty,
+    // there's no substance (e.g. {annotations:[],total:0}).
+    const entries = Object.entries(o).filter(([k]) => !["shape", "type", "filePath", "path", "file"].includes(k));
+    const arrays = entries.filter(([, val]) => Array.isArray(val));
+    const nonArrayPayload = entries.filter(([, val]) => !Array.isArray(val) && val !== null && val !== "" && typeof val !== "undefined");
+    if (arrays.length > 0 && arrays.every(([, a]) => (a as unknown[]).length === 0) && nonArrayPayload.length === 0) return false;
+    return entries.length > 0;
+  }
+  return true;
+}
+
 async function validateProducesShape(
   shape: string,
   testPointer: Record<string, unknown>,
@@ -693,6 +740,17 @@ async function validateProducesShape(
       const effect = extractEffectSignal(body);
       if (effect && effect.ok === false) {
         return { ok: false, error: `resolver returned shape "${shape}" but the SENSED effect failed: ${effect.reason}` };
+      }
+      // Readers have no wrote/refused flag, so shape-presence alone passed even
+      // when the output was empty (wrong pointer field names → the input never
+      // arrived). Require SUBSTANCE against the known non-trivial test input so
+      // the refine loop converges on the real contract. Skip when the sensed
+      // effect already confirmed success (a write needn't carry a payload).
+      if (!(effect && effect.ok === true) && !isSubstantiveOutput(body)) {
+        return {
+          ok: false,
+          error: `resolver returned shape "${shape}" but the output was EMPTY/trivial on a known non-trivial input — the pointer field name(s) are likely wrong (the input never reached the resolver). Use the EXACT field names the resolver reads (check the resolver source / a prior error).`,
+        };
       }
       return { ok: true, error: "" };
     }

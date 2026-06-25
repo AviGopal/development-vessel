@@ -155,6 +155,8 @@ RULES:
 - create_file content must be COMPLETE and typecheck-clean on its own. Prefer ZERO external npm imports for net-new vessels (use Bun built-ins: Bun.serve, fetch, process.env) so no dependency install is needed. Include a tsconfig.json and package.json for any net-new vessel.
 - edit old_string must be copied VERBATIM and be UNIQUE in the target file; keep it minimal but unambiguous. Preserve everything you are not changing.
 - Do NOT invent file paths that must already exist without being sure; for edits, target real files named in the spec.
+- STRICT TYPESCRIPT (the vessels compile with strict mode incl. \`noUncheckedIndexedAccess\`): every array/object index access (\`arr[i]\`, \`map[k]\`, \`str[i]\`) is typed \`T | undefined\` — you MUST guard it (\`?? fallback\`) or non-null-assert it (\`arr[i]!\`) when you know it is in-range, or tsc fails TS2532/TS18048. Avoid \`any\`. Type every function parameter and return.
+- MATCH EXISTING CONTRACTS: when adding a resolver/handler to an existing vessel, make its return type match what the dispatch site expects — in these vessels a resolver returns \`{ shape: string, body: ... }\` (the \`ResolverResult\` shape), NOT a bespoke object; read the dispatch file's other cases and mirror their shape exactly.
 - No prose outside the JSON.`;
 }
 
@@ -220,8 +222,36 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
         const c = (snap.body as { content?: unknown })?.content;
         if (snap.ok && typeof c === "string") preEditContent.set(abs, c);
       }
-      let r = await callTool(toolsEndpoint, "fs_edit", { path: abs, old_string: op.old_string ?? "", new_string: op.new_string ?? "" });
-      let repaired = false;
+      // GROUND THE OLD_STRING PROACTIVELY (2026-06-25). Plan-once decomposition
+      // guesses old_string WITHOUT reading the file, so edits on existing files
+      // (especially large ones — e.g. registering a resolver in a big switch) fail
+      // "old_string not found" and the whole authoring rolls back. This was the
+      // binding constraint on the leaf→authoring loop (a goal-discovered capability
+      // gap could author a NEW file but never land the registration edit). We
+      // already snapshotted the live content above; if the planned old_string is
+      // absent verbatim, re-derive a matching SHORT anchor from the live content
+      // up front — rather than waiting for the post-failure repair, which fires too
+      // late and mis-parses multi-line strings. Only an old_string verified to
+      // appear verbatim in the live content is used.
+      const liveContent = preEditContent.get(abs) ?? "";
+      let effOld = op.old_string ?? "";
+      let groundedPre = false;
+      if (liveContent && (!effOld || !liveContent.includes(effOld))) {
+        try {
+          const g = parseJsonObject(await llmCall(
+            llmEndpoint,
+            `Current full content of ${op.path}:\n\n${liveContent}\n\nMake this change: ${op.rationale ?? ""}\nIntended new content/behaviour:\n${op.new_string ?? ""}\n\nReturn ONE JSON object {"old_string":"<a SHORT, verbatim, UNIQUE substring copied EXACTLY from the content above — prefer a single line; it MUST appear verbatim>","new_string":"<replacement for that exact substring, preserving everything not being changed>"}. No prose, no fences. Escape newlines as \\n.`,
+            model,
+          ));
+          if (g?.old_string && liveContent.includes(String(g.old_string))) {
+            effOld = String(g.old_string);
+            if (typeof g.new_string === "string") op.new_string = String(g.new_string);
+            groundedPre = true;
+          }
+        } catch { /* fall through to the planned old_string + post-failure repair */ }
+      }
+      let r = await callTool(toolsEndpoint, "fs_edit", { path: abs, old_string: effOld, new_string: op.new_string ?? "" });
+      let repaired = groundedPre && r.ok;
       if (!r.ok) {
         // Blind-edit repair: plan-once decomposition can guess an old_string that
         // does not match the LIVE file (it planned without reading it). Read the
@@ -257,16 +287,78 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
   // with 7 TS errors). Require: tool call ok AND tool ok===true AND exit_code===0
   // AND no parsed TS errors. Anything ambiguous (missing exit_code, failed call)
   // is treated as NOT ok so a bad/unverifiable edit cannot land.
-  const verify: Array<{ vessel: string; errors: number | string; exit_code: number | null; ok: boolean }> = [];
-  if (!applyFailed) {
-    for (const v of touched) {
-      const r = await callTool(toolsEndpoint, "code_verify_typecheck", { cwd: `${REPO_ROOT}/${v.replace(/^repos\//, "")}` });
-      const body = (r.body ?? {}) as { exit_code?: number; exitCode?: number; error_count?: number; errors?: number; ok?: boolean };
-      const exitCode = body.exit_code ?? body.exitCode;
-      const errCount = (body.error_count ?? body.errors ?? 0) as number;
-      const ok = r.ok === true && body.ok === true && exitCode === 0 && errCount === 0;
-      verify.push({ vessel: v, errors: errCount, exit_code: exitCode ?? null, ok });
+  // Verify with the vessel's OWN lint contract (strict tsc + e.g. shape-dispatch
+  // agreement), NOT just tsc. A missing dispatch-case registration is typecheck-
+  // clean but lint-broken; that incompleteness must block the cutover, else the
+  // system "authors" a shape it advertises but cannot route. Falls back to the
+  // typecheck tool when a vessel has no lint script.
+  // Verify = strict tsc PLUS the shared shape-dispatch agreement check (run
+  // DIRECTLY from packages/, because the per-vessel `bun run lint` wrapper script
+  // is not synced into the container). The dispatch check only constrains a vessel
+  // that has the config.shapes↔impulses.ts switch pattern; if the shared checker is
+  // absent or N/A it is treated as pass, so it never false-fails other vessels. The
+  // point: a missing dispatch-case registration is typecheck-clean but a real
+  // INCOMPLETE wiring — gating on it forces the system to author a ROUTABLE shape.
+  const SHARED_DISPATCH_CHECK = "/vessels/packages/shape-dispatch-check/check.ts";
+  const runVerify = async (v: string): Promise<{ vessel: string; errors: number | string; exit_code: number | null; ok: boolean; output: string }> => {
+    const vAbs = `${REPO_ROOT}/${v.replace(/^repos\//, "")}`;
+    const sh = await callTool(toolsEndpoint, "shell", {
+      command: `cd ${JSON.stringify(vAbs)} && (echo "== typecheck =="; bun run typecheck 2>&1; echo "TC_EXIT=$?"; echo "== shape-dispatch =="; if [ -f ${SHARED_DISPATCH_CHECK} ] && [ -f src/config.ts ] && [ -f src/routes/impulses.ts ]; then bun ${SHARED_DISPATCH_CHECK} ${JSON.stringify(vAbs)} 2>&1; echo "SD_EXIT=$?"; else echo "SD_EXIT=0"; fi)`,
+      cwd: REPO_ROOT,
+    });
+    const raw = String((sh.body as { stdout?: unknown })?.stdout ?? "");
+    const tc = raw.match(/TC_EXIT=(\d+)/); const sd = raw.match(/SD_EXIT=(\d+)/);
+    const tcExit = tc && tc[1] ? parseInt(tc[1], 10) : null;
+    const sdExit = sd && sd[1] ? parseInt(sd[1], 10) : 0;
+    const ok = tcExit === 0 && sdExit === 0;
+    return { vessel: v, errors: ok ? 0 : "verify", exit_code: tcExit, ok, output: raw.trim() };
+  };
+  let verify: Array<{ vessel: string; errors: number | string; exit_code: number | null; ok: boolean; output: string }> = [];
+  if (!applyFailed) { for (const v of touched) verify.push(await runVerify(v)); }
+
+  // TYPECHECK-REPAIR loop (2026-06-25). LLM-authored code routinely carries 1-2
+  // trivial strict-TS errors (TS2532 possibly-undefined, TS18048, etc.) that block
+  // an otherwise-correct authoring from landing — observed as the binding
+  // constraint on the leaf→authoring loop right after edit-grounding was fixed.
+  // Feed the REAL tsc errors + current file content back to the LLM, rewrite the
+  // offending file, re-verify; bounded. This is the verify-side analogue of the
+  // edit-grounding fix and is what makes the loop reliably LAND, not just apply.
+  // On failure to repair, verdict stays UNFAVORABLE and the existing rollback
+  // fires — so worst case is unchanged.
+  const MAX_REPAIR = 4;
+  for (let attempt = 0; attempt < MAX_REPAIR && !applyFailed && verify.length > 0 && !verify.every((v) => v.ok); attempt++) {
+    let anyFixed = false;
+    for (const fv of verify.filter((v) => !v.ok)) {
+      const errText = (fv.output || "").trim();
+      if (!errText) continue;
+      try {
+        // One SURGICAL fix per round per failing vessel. The LLM names the file and
+        // a verbatim old_string/new_string; we READ that file, confirm the anchor,
+        // and apply. This fixes strict-TS errors AND completes wiring (e.g. adds a
+        // missing dispatch case for an advertised shape) — multi-file lint failures
+        // converge over successive rounds. Full-file rewrites corrupt large files,
+        // so we never ask for them.
+        const fix = parseJsonObject(await llmCall(
+          llmEndpoint,
+          `A change to vessel ${fv.vessel} fails \`bun run lint\` (strict tsc + shape-dispatch agreement: every advertised shape in src/config.ts MUST have a matching case in src/routes/impulses.ts and vice-versa). Lint output:\n\n${errText.slice(0, 4000)}\n\nPick the SINGLE most-blocking error and emit ONE JSON object {"file":"repos/${fv.vessel.replace(/^repos\//, "")}/<subpath>","old_string":"<a SHORT verbatim UNIQUE substring of that file's CURRENT content>","new_string":"<corrected replacement>"} that fixes it, changing as little else as possible. For a missing dispatch case, copy the shape into the switch next to a sibling case. old_string MUST appear verbatim. No prose, no fences. Escape newlines as \\n.`,
+          model,
+        ));
+        const ef = typeof fix?.file === "string" ? String(fix.file) : "";
+        const efAbs = ef ? `${REPO_ROOT}/${ef.replace(/^repos\//, "")}` : "";
+        if (fix?.old_string && efAbs) {
+          const cur = await callTool(toolsEndpoint, "fs_read", { path: efAbs });
+          const curContent = (cur.body as { content?: unknown })?.content;
+          if (cur.ok && typeof curContent === "string" && curContent.includes(String(fix.old_string))) {
+            if (!preEditContent.has(efAbs) && !created.includes(efAbs)) preEditContent.set(efAbs, curContent);
+            const w = await callTool(toolsEndpoint, "fs_edit", { path: efAbs, old_string: String(fix.old_string), new_string: String(fix.new_string ?? "") });
+            if (w.ok) { anyFixed = true; if (!edited.includes(efAbs) && !created.includes(efAbs)) edited.push(efAbs); }
+          }
+        }
+      } catch { /* repair attempt failed; verify stays not-ok */ }
     }
+    if (!anyFixed) break;
+    verify = [];
+    for (const v of touched) verify.push(await runVerify(v));
   }
 
   const verdict = !applyFailed && verify.every((v) => v.ok) && verify.length > 0 ? "FAVORABLE" : "UNFAVORABLE";

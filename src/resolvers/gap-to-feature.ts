@@ -3,6 +3,7 @@ import { join } from "node:path";
 import type { ResolverResult } from "./types.js";
 import { resolveFeatureCompose } from "./feature-compose.js";
 import { resolveSubstrateGap } from "./substrate-gap.js";
+import { resolveAuthorProducer } from "./author-producer.js";
 
 // Mirror feature-compose's path model: repos/<vessel>/... maps to the writable
 // runtime ${RUNTIME_ROOT}/<vessel>/..., and the drafter writes proposal reports
@@ -127,6 +128,54 @@ export async function resolveGapToFeature(pointer: GapToFeaturePointer): Promise
   }
   if (!gap) {
     return { shape: "gapToFeatureReport", body: { ok: false, stage: "select", error: "no matching open gap", category: pointer.category ?? null } };
+  }
+
+  // 1b. ORPHANED-CAPABILITY gaps close via author_producer, NOT feature_compose
+  // (2026-06-25). The closure for "resolver X is live but invoked by 0 activities"
+  // is a RUNNABLE activity that invokes X — minted by the author_producer bridge
+  // path (lever 1: author→validate→mint a 2-task goal_file_extract→produce bridge
+  // for a file-consuming resolver). feature_compose authors vessel TypeScript and
+  // here free-drafts a create_file into a NON-EXISTENT vessel (e.g. repos/executive/)
+  // that phantom-lands and never invokes the resolver. Route to the primitive that
+  // actually produces a discoverable, Thompson-selectable producer.
+  if (String(gap.category ?? "") === "orphaned_capability") {
+    const meta = (gap.classification_metadata ?? gap.metadata ?? {}) as Record<string, unknown>;
+    const shape = String(meta.shape ?? "").trim();
+    if (!shape) {
+      return {
+        shape: "gapToFeatureReport",
+        body: { ok: false, stage: "route_orphan", gap_id: gap.id, gap_category: gap.category, error: "orphaned_capability gap missing classification_metadata.shape" },
+      };
+    }
+    // The summary already states "Author an activity that invokes resolver X"; pass
+    // it as goal context so author_producer's validate step can lift a real file
+    // path from a file-shaped pointer field (buildTestPointer reads the goal).
+    const goal = String(gap.summary ?? `author an activity that invokes resolver ${shape} and routes its output onward`);
+    const author = pointer.dry_run
+      ? null
+      : await resolveAuthorProducer({ type: "author_producer", shape, goal });
+    const ab = (author?.body ?? {}) as Record<string, unknown>;
+    const minted = author?.shape === "author_producer";
+    return {
+      shape: "gapToFeatureReport",
+      body: {
+        ok: pointer.dry_run ? true : minted,
+        gap_id: gap.id,
+        gap_category: gap.category,
+        gap_summary: gap.summary,
+        route: "author_producer",
+        orphan_shape: shape,
+        verdict: pointer.dry_run ? "plan" : (minted ? "MINTED" : "MINT_FAILED"),
+        minted_activity_id: minted ? ab.minted_activity_id : null,
+        two_task_bridge: minted ? ab.two_task_bridge : null,
+        author: ab,
+        note: pointer.dry_run
+          ? `plan: would mint a runnable bridge activity invoking resolver "${shape}" via author_producer`
+          : (minted
+            ? `MINTED runnable bridge "${ab.minted_activity_id}" invoking previously-orphaned resolver "${shape}" — capability now expressed and Thompson-selectable`
+            : `author_producer could not mint a validated invocation of "${shape}" (see author.last_error); the resolver may need an input the bridge can't yet provision`),
+      },
+    };
   }
 
   // 2. Build a spec and route THROUGH the composer. If the gap's drafter

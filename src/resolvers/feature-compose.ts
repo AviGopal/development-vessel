@@ -23,6 +23,7 @@
 import { METABOB_API_KEY } from "../config.js";
 import type { ResolverResult } from "./types.js";
 import { resolveVesselMitosisCutover } from "./vessel-mitosis-cutover.js";
+import { resolveSubstrateGap, resolveSubstrateGapWrite } from "./substrate-gap.js";
 
 const DISCOVERY_ENDPOINT = process.env.DISCOVERY_ENDPOINT ?? "http://127.0.0.1:8100";
 // In-container authoring targets the WRITABLE runtime (/vessels), like the
@@ -51,6 +52,15 @@ export interface FeatureComposePointer {
   land?: boolean;
   /** Pass-through to the cutover: stage+commit but skip the actual git push (test). */
   skip_push?: boolean;
+  /**
+   * Gap context for the SEMANTIC cutover-verification gate (2026-06-25). When the
+   * compose is driven by gap_to_feature, the gap is threaded through so the
+   * semantic gate can (a) judge whether the diff GENUINELY addresses the gap on a
+   * live path and (b) write `suspected_real_location` back onto the gap when the
+   * drafter mis-localized. Absent (e.g. a free-text spec) → no gap-relative judge,
+   * only the reachability hard-fail still applies.
+   */
+  gap?: { id?: string; summary?: string; classification_metadata?: Record<string, unknown>; category?: string };
 }
 
 interface PlanOp {
@@ -128,6 +138,158 @@ function parseJsonObject(raw: string): Json | null {
 function vesselDirOf(repoRelPath: string): string | null {
   const m = repoRelPath.match(/^repos\/([^/]+)\//);
   return m ? `repos/${m[1]}` : null;
+}
+
+// ───────────────────────────── SEMANTIC CUTOVER-VERIFICATION GATE ─────────────────────────────
+// (2026-06-25, lever 5) The orthogonal analogue of goal-host's reach-gate
+// (`verifyGoalReached`): typecheck-clean ≠ gap-fixed, exactly as status=completed ≠
+// goal-reached. After the typecheck/shape-dispatch verify PASSES and BEFORE the
+// FAVORABLE/stage decision, judge whether the applied diff GENUINELY addresses the
+// gap on a path that actually EXECUTES. A net-new `recordOutcome`/`isNoOpBody` with
+// zero callers compiles fine yet changes nothing — that hollow landing is what this
+// gate exists to reject. Two filters: (1) a deterministic, cheap reachability
+// hard-fail (no LLM) when EVERY changed symbol is dead code, (2) an LLM semantic
+// judge for the rest.
+
+export const SEMANTIC_CUTOVER_GATE = (process.env.SEMANTIC_CUTOVER_GATE ?? "1") !== "0";
+
+export interface ReachabilityFact {
+  symbol: string;
+  isNewFunction: boolean;     // function/const added by this diff (a `+` definition line)
+  callerCount: number;        // call-sites in the touched vessel's src/, excluding the definition
+  isEntrypoint: boolean;      // exported entrypoint / route handler / resolver dispatch case / lifecycle hook
+  reachable: boolean;         // callerCount > 0 OR isEntrypoint
+}
+
+export interface SemanticGateVerdict {
+  addresses: boolean;
+  reason: string;
+  on_live_path: boolean;
+  suspected_real_location?: string;
+  // provenance for logging/report
+  hard_fail?: boolean;        // true when rejected by reachability alone (no LLM call made)
+  llm_consulted: boolean;
+}
+
+/**
+ * Parse a unified diff for the names of functions/consts the patch DEFINES or EDITS.
+ * Cheap and grep-shaped (no full call-graph): we look at ADDED lines (`+`) for
+ * `function NAME(`, `const NAME =`, `let NAME =`, method shorthand `NAME(...) {`,
+ * and exported variants. A symbol seen on an added definition line is `isNewFunction`.
+ * Symbols referenced inside an edited hunk (not as a new definition) still count as
+ * "changed surface" so the judge sees them, but only added-definition symbols can be
+ * the dead-code hard-fail trigger.
+ */
+export function extractChangedSymbols(diff: string): Array<{ symbol: string; isNewFunction: boolean }> {
+  const out = new Map<string, boolean>(); // symbol -> isNewFunction (true wins)
+  const defPatterns: RegExp[] = [
+    /^\+\s*(?:export\s+)?(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*[(<]/,
+    /^\+\s*(?:export\s+)?(?:async\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*(?::[^=]+)?=\s*(?:async\s*)?(?:\([^)]*\)|[A-Za-z_$][\w$]*)?\s*=>/,
+    /^\+\s*(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s+)?function\b/,
+    /^\+\s*(?:public\s+|private\s+|protected\s+|static\s+|async\s+)*([A-Za-z_$][\w$]*)\s*\([^)]*\)\s*(?::[^={]+)?\{/, // class/object method shorthand
+  ];
+  for (const rawLine of diff.split("\n")) {
+    if (!rawLine.startsWith("+") || rawLine.startsWith("+++")) continue;
+    for (const re of defPatterns) {
+      const m = rawLine.match(re);
+      if (m && m[1] && !RESERVED.has(m[1])) { out.set(m[1], true); break; }
+    }
+  }
+  return [...out.entries()].map(([symbol, isNewFunction]) => ({ symbol, isNewFunction }));
+}
+
+const RESERVED = new Set(["if", "for", "while", "switch", "catch", "return", "function", "const", "let", "var", "async", "await", "new", "typeof"]);
+
+/**
+ * Decide the reachability hard-fail purely from the facts. HARD-FAIL (UNFAVORABLE,
+ * no LLM) iff there is ≥1 changed symbol AND every changed symbol is unreachable
+ * (callerCount===0 AND !isEntrypoint) — i.e. the patch only touches dead code. When
+ * we could not extract any symbol from the diff, we do NOT hard-fail (the change may
+ * be data/string/wiring the symbol extractor doesn't model); the LLM judge handles it.
+ */
+export function reachabilityHardFail(facts: ReachabilityFact[]): { hardFail: boolean; reason: string } {
+  if (facts.length === 0) return { hardFail: false, reason: "no changed symbols extracted from diff (not a hard-fail)" };
+  const reachable = facts.filter((f) => f.reachable);
+  if (reachable.length === 0) {
+    const names = facts.map((f) => f.symbol).join(", ");
+    return {
+      hardFail: true,
+      reason: `dead-code-only patch: every changed symbol (${names}) has zero callers and is not an entrypoint — the change cannot execute`,
+    };
+  }
+  return { hardFail: false, reason: `${reachable.length}/${facts.length} changed symbols reachable` };
+}
+
+function semanticJudgePrompt(
+  gapSummary: string,
+  gapMeta: Record<string, unknown> | undefined,
+  diff: string,
+  facts: ReachabilityFact[],
+  codeContext: string,
+): string {
+  const metaStr = gapMeta ? `\n\nGap detector evidence:\n${JSON.stringify(gapMeta, null, 2)}` : "";
+  return `You verify whether a self-authored CODE PATCH GENUINELY addresses a substrate gap, on a path that ACTUALLY EXECUTES. typecheck=clean does NOT mean the gap is fixed — many patches "compile" by adding dead code (a net-new function with zero callers) or by editing a path that never runs (hollow patch). This is the code analogue of hollow goal-completion.
+
+GAP: ${gapSummary}${metaStr}
+
+Reachability facts (deterministic, computed by grepping the touched vessel src/):
+${JSON.stringify(facts, null, 2)}
+
+Relevant existing code context (the symbol the gap names, and — if reachability found call-sites elsewhere — the live path):
+${codeContext || "(none extracted)"}
+
+Unified diff that was applied (and typechecked clean):
+${diff.slice(0, 8000)}
+
+Judge strictly. The patch ADDRESSES the gap only if it changes the behavior the gap describes AND that changed code is on a path that executes (called, routed, dispatched, or a lifecycle/entrypoint). If the patch edits a DIFFERENT symbol than the one the gap's real fix lives in (e.g. it adds \`recordOutcome\` when the live β-penalty path is \`penaliseHollowTemplate\`), report the right one in suspected_real_location.
+
+Respond with ONLY JSON: {"addresses": boolean, "reason": "<1 sentence>", "on_live_path": boolean, "suspected_real_location": "<symbol or file:symbol the real fix belongs in, or empty>"}`;
+}
+
+/**
+ * The semantic gate. Pure of I/O except for the injected `llm` call, so it is unit
+ * testable. Computes the reachability hard-fail first (no LLM); if it survives,
+ * consults the LLM judge. `llm` returns the raw model text; we JSON-extract it with
+ * the same `{...}` slice goal-host uses. Any LLM failure is treated as a NON-block
+ * (fail-open on the JUDGE only — the deterministic hard-fail already ran) so a flaky
+ * haiku call cannot wedge the loop; the deterministic dead-code filter is the floor.
+ */
+export async function verifyPatchAddressesGap(args: {
+  gapSummary: string;
+  gapMeta?: Record<string, unknown>;
+  diff: string;
+  reachability: ReachabilityFact[];
+  codeContext?: string;
+  llm: (prompt: string) => Promise<string>;
+}): Promise<SemanticGateVerdict> {
+  const { hardFail, reason } = reachabilityHardFail(args.reachability);
+  if (hardFail) {
+    return { addresses: false, reason, on_live_path: false, hard_fail: true, llm_consulted: false };
+  }
+  let raw = "";
+  try {
+    raw = await args.llm(semanticJudgePrompt(args.gapSummary, args.gapMeta, args.diff, args.reachability, args.codeContext ?? ""));
+  } catch (e) {
+    // Judge unreachable: do NOT block on the judge alone (the deterministic floor
+    // already passed). Treat as addresses=true-but-unverified so a flaky LLM cannot
+    // wedge landing; log surfaces it.
+    return { addresses: true, reason: `semantic judge unavailable (${(e as Error).message}); passed deterministic reachability floor`, on_live_path: true, llm_consulted: false };
+  }
+  const m = raw.match(/\{[\s\S]*\}/);
+  const parsed = m ? (parseJsonObject(m[0]) as Partial<SemanticGateVerdict> | null) : null;
+  if (!parsed || typeof parsed.addresses !== "boolean") {
+    return { addresses: true, reason: "semantic judge returned unparseable verdict; passed deterministic reachability floor", on_live_path: true, llm_consulted: true };
+  }
+  const sus = typeof parsed.suspected_real_location === "string" && parsed.suspected_real_location.trim()
+    ? parsed.suspected_real_location.trim()
+    : undefined;
+  return {
+    addresses: parsed.addresses,
+    reason: String(parsed.reason ?? ""),
+    on_live_path: parsed.on_live_path !== false,
+    ...(sus ? { suspected_real_location: sus } : {}),
+    llm_consulted: true,
+  };
 }
 
 function decomposePrompt(spec: string, maxOps: number): string {
@@ -361,7 +523,123 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
     for (const v of touched) verify.push(await runVerify(v));
   }
 
-  const verdict = !applyFailed && verify.every((v) => v.ok) && verify.length > 0 ? "FAVORABLE" : "UNFAVORABLE";
+  const typecheckPass = !applyFailed && verify.every((v) => v.ok) && verify.length > 0;
+  let verdict: "FAVORABLE" | "UNFAVORABLE" = typecheckPass ? "FAVORABLE" : "UNFAVORABLE";
+
+  // 3b. SEMANTIC GATE (2026-06-25, lever 5 — the reach-gate applied to code). Only
+  // a typecheck-clean patch reaches here. typecheck=clean ≠ gap-fixed: a net-new
+  // dead-code function (zero callers) or an edit to a non-executing path compiles
+  // fine yet changes nothing — the hollow landing this gate rejects. Reachability
+  // hard-fail (deterministic, no LLM) first; LLM judge second. addresses=false OR
+  // on_live_path=false → flip FAVORABLE→UNFAVORABLE (rolls back below, gap stays open
+  // + informed). Skip when the gate is flag-disabled or there were no edits to judge.
+  let semantic_gate: (SemanticGateVerdict & { skipped?: string }) | null = null;
+  if (verdict === "FAVORABLE" && SEMANTIC_CUTOVER_GATE) {
+    const editedTouched = touched && [...touched].length > 0;
+    if (!editedTouched) {
+      semantic_gate = { addresses: true, reason: "no touched vessel to judge", on_live_path: true, llm_consulted: false, skipped: "no_touched" };
+    } else {
+      // Build the unified diff from the pre-edit snapshots vs the live (post-edit)
+      // content of each edited file (created files are net-new — diff them against
+      // /dev/null). /vessels is not a git repo, so we reconstruct the diff with
+      // `diff -u` against a temp copy of the original bytes rather than `git diff`.
+      const diffParts: string[] = [];
+      for (const [abs, original] of preEditContent) {
+        const tmp = `/tmp/fc-orig-${Math.random().toString(36).slice(2)}`;
+        await callTool(toolsEndpoint, "fs_write", { path: tmp, content: original });
+        const d = await callTool(toolsEndpoint, "shell", { command: `diff -u ${JSON.stringify(tmp)} ${JSON.stringify(abs)} | sed '1,2s#.*#--- a/${abs.replace(/^.*\/repos\//, "").replace(/[#&]/g, "_")}#'; rm -f ${JSON.stringify(tmp)}`, cwd: REPO_ROOT });
+        const dt = String((d.body as { stdout?: unknown })?.stdout ?? "");
+        if (dt.trim()) diffParts.push(`### ${abs}\n${dt}`);
+      }
+      for (const abs of created) {
+        const cur = await callTool(toolsEndpoint, "fs_read", { path: abs });
+        const c = (cur.body as { content?: unknown })?.content;
+        if (typeof c === "string") diffParts.push(`### NEW FILE ${abs}\n` + c.split("\n").map((l) => `+${l}`).join("\n"));
+      }
+      const diff = diffParts.join("\n\n");
+
+      // Reachability facts: for each changed symbol, grep the touched vessels' src/
+      // for call-sites (excluding the definition) + classify as entrypoint.
+      const symbols = extractChangedSymbols(diff);
+      const facts: ReachabilityFact[] = [];
+      for (const { symbol, isNewFunction } of symbols) {
+        let callerCount = 0;
+        let isEntrypoint = false;
+        let codeHit = "";
+        for (const v of touched) {
+          const vAbs = `${REPO_ROOT}/${v.replace(/^repos\//, "")}/src`;
+          // Call-sites: `\bSYMBOL\s*(` across src/, minus the definition lines
+          // (function/const/let/var/method NAME). Count distinct hit lines.
+          const callQ = await callTool(toolsEndpoint, "shell", {
+            command: `grep -rEn "\\b${symbol}[[:space:]]*\\(" ${JSON.stringify(vAbs)} 2>/dev/null | grep -vE "(function|const|let|var)[[:space:]]+${symbol}\\b" | grep -vE "^[^:]+:[0-9]+:[[:space:]]*${symbol}[[:space:]]*\\([^)]*\\)[[:space:]]*(:[^={]+)?\\{" || true`,
+            cwd: REPO_ROOT,
+          });
+          const callOut = String((callQ.body as { stdout?: unknown })?.stdout ?? "").trim();
+          if (callOut) { callerCount += callOut.split("\n").filter(Boolean).length; codeHit ||= callOut.split("\n").slice(0, 4).join("\n"); }
+          // Entrypoint: exported, OR a route/dispatch/lifecycle reference to the symbol.
+          const entQ = await callTool(toolsEndpoint, "shell", {
+            command: `grep -rEn "(export[[:space:]]+(async[[:space:]]+)?(function|const|let)[[:space:]]+${symbol}\\b|case[[:space:]]+[\\"']${symbol}[\\"']|['\\"]${symbol}['\\"][[:space:]]*[:,)]|\\.(on|get|post|put|delete|use)\\([^)]*${symbol}|router\\.[a-z]+\\([^)]*${symbol})" ${JSON.stringify(vAbs)} 2>/dev/null || true`,
+            cwd: REPO_ROOT,
+          });
+          if (String((entQ.body as { stdout?: unknown })?.stdout ?? "").trim()) isEntrypoint = true;
+        }
+        facts.push({ symbol, isNewFunction, callerCount, isEntrypoint, reachable: callerCount > 0 || isEntrypoint });
+        void codeHit;
+      }
+
+      // Code context for the judge: include the function(s) the gap names + any live
+      // call-site we found (so the judge can spot mis-localization).
+      let codeContext = "";
+      const gapSummary = String(pointer.gap?.summary ?? pointer.spec.split("\n").find((l) => l.trim()) ?? "");
+      const gapNamed = (gapSummary.match(/\b[A-Za-z_$][\w$]{3,}\b/g) ?? []).filter((w) => /[A-Z_]/.test(w)).slice(0, 6);
+      for (const name of new Set([...gapNamed, ...facts.filter((f) => f.reachable).map((f) => f.symbol)])) {
+        for (const v of touched) {
+          const vAbs = `${REPO_ROOT}/${v.replace(/^repos\//, "")}/src`;
+          const g = await callTool(toolsEndpoint, "shell", { command: `grep -rEn "\\b${name}\\b" ${JSON.stringify(vAbs)} 2>/dev/null | head -8 || true`, cwd: REPO_ROOT });
+          const gt = String((g.body as { stdout?: unknown })?.stdout ?? "").trim();
+          if (gt) { codeContext += `\n# ${name} in ${v}:\n${gt}\n`; if (codeContext.length > 6000) break; }
+        }
+        if (codeContext.length > 6000) break;
+      }
+
+      const llmJudge = (prompt: string) => llmCall(llmEndpoint, prompt, model);
+      semantic_gate = await verifyPatchAddressesGap({
+        gapSummary,
+        gapMeta: pointer.gap?.classification_metadata,
+        diff,
+        reachability: facts,
+        codeContext,
+        llm: llmJudge,
+      });
+
+      console.log(`[development-vessel] semantic-gate ${JSON.stringify({
+        gap_id: pointer.gap?.id ?? null,
+        reachable_symbols: facts.filter((f) => f.reachable).map((f) => f.symbol),
+        unreachable_symbols: facts.filter((f) => !f.reachable).map((f) => f.symbol),
+        addresses: semantic_gate.addresses,
+        on_live_path: semantic_gate.on_live_path,
+        hard_fail: semantic_gate.hard_fail ?? false,
+        suspected_real_location: semantic_gate.suspected_real_location ?? null,
+        reason: semantic_gate.reason,
+      })}`);
+
+      if (!semantic_gate.addresses || semantic_gate.on_live_path === false) {
+        verdict = "UNFAVORABLE";
+        // Mis-localization feedback: when the judge named the real fix site, write it
+        // onto the gap so the next draft targets the right code. Best-effort.
+        if (pointer.gap?.id && semantic_gate.suspected_real_location) {
+          try {
+            const read = await resolveSubstrateGap({ type: "substrateGap", id: pointer.gap.id, limit: 1 } as never);
+            const g0 = ((read?.body as { gaps?: Record<string, unknown>[] })?.gaps ?? [])[0];
+            if (g0) {
+              const meta = { ...((g0.classification_metadata as Record<string, unknown>) ?? {}), suspected_real_location: semantic_gate.suspected_real_location, semantic_gate_reason: semantic_gate.reason };
+              await resolveSubstrateGapWrite({ type: "substrateGap_write", gap: { ...(g0 as Record<string, unknown>), classification_metadata: meta } } as never);
+            }
+          } catch { /* gap writeback best-effort; verdict already UNFAVORABLE */ }
+        }
+      }
+    }
+  }
 
   // 4. ROLLBACK on UNFAVORABLE (restore edited, delete created) unless asked to keep.
   // Restore each edited file from its pre-edit snapshot (NOT `git checkout` —
@@ -436,6 +714,7 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
       applied,
       apply_failed: applyFailed,
       verify,
+      semantic_gate,
       rolled_back,
       restored_files: restored.map((f) => f.replace(`${REPO_ROOT}/`, "")),
       created_files: created.map((f) => f.replace(`${REPO_ROOT}/`, "")),

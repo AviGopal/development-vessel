@@ -189,6 +189,15 @@ export async function resolveGapToFeature(pointer: GapToFeaturePointer): Promise
     model: pointer.model,
     dry_run: pointer.dry_run ?? false,
     keep_on_fail: false,
+    // Thread the gap through so the semantic cutover-verification gate (lever 5)
+    // can judge the patch AGAINST the gap on a live path and write
+    // suspected_real_location back onto the gap when the drafter mis-localized.
+    gap: {
+      id: String(gap.id ?? ""),
+      summary: String(gap.summary ?? gap.title ?? ""),
+      classification_metadata: (gap.classification_metadata ?? gap.metadata ?? undefined) as Record<string, unknown> | undefined,
+      category: String(gap.category ?? ""),
+    },
     // Autonomous LAND: on FAVORABLE, push through vessel-mitosis-cutover (its
     // evidence+freshness gates are the self-verification; self-recovery is the
     // backstop). Suppressed in dry_run.

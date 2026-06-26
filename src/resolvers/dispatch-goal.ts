@@ -285,6 +285,13 @@ export async function resolveDispatchGoal(pointer: DispatchGoalPointer): Promise
   // chosen to fit within downstream LLM context windows, goal-host-vessel
   // /run-goal input limits, and substrate goal parsing capacity. Treat as a
   // safety boundary, not a performance knob.
+  //
+  // Substrate-gap rationale: oversized goals can also cascade into serialization
+  // and database-constraint failures when persisted to the activity-system
+  // namespace (as evidenced by recent SurrealDB namespace access failures in
+  // execution-traces). Unbounded payloads risk connection pool exhaustion and
+  // namespace initialization failures downstream — enforcing this ceiling at
+  // the dispatch boundary keeps those substrate gaps from propagating.
   if (goal.length > MAX_GOAL_LEN) return { shape: "structuredError", body: { resolver: "dispatch_goal", detail: `goal too long (${goal.length} > ${MAX_GOAL_LEN})` } };
 
   const body: Record<string, unknown> = { goal };

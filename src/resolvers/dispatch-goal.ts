@@ -252,6 +252,20 @@ import { METABOB_API_KEY } from "../config.js";
  * recommendation scores and faster resolution cycles. The guard check below
  * validates incoming goal text against this limit before dispatch.
  */
+/**
+ * MAX_GOAL_LEN — guard constant capping accepted goal payload size at 8192 characters.
+ *
+ * Rationale: this guard exists to prevent oversized goal payloads from entering
+ * the dispatch pipeline, where they could (a) exhaust downstream context windows,
+ * (b) dilute the operative instruction across irrelevant text, and (c) provide a
+ * vector for prompt-injection or runaway-payload abuse.
+ *
+ * Threshold implications: 8192 characters is generous for the short imperative
+ * goals typical in this codebase, but legitimate goals exceeding it should be
+ * restructured (e.g. moved into referenced artifacts) rather than uncapped here.
+ * This is a safety boundary, NOT a performance knob — it must stay coordinated
+ * with goal-host-vessel's own independent input ceiling.
+ */
 const MAX_GOAL_LEN = 8192;
 const GOAL_HOST_ENDPOINT = process.env["GOAL_HOST_VESSEL_ENDPOINT"] ?? "http://127.0.0.1:8210";
 

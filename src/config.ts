@@ -465,6 +465,12 @@ export const config = {
       "disk_space_observer",
       "workspace_hygiene_observer",
       "prune_stale_mitosis",
+      // self-activation primitive (2026-06-26): write a substrate-authored new
+      // version of a timer script into the writable run-dir
+      // (/workspace/active-scripts) so it goes live on the next timer firing
+      // WITHOUT an operator container restart. Path-safe: basename-only, *.ts,
+      // must already exist in the run-dir, optional base_sha guard.
+      "activate_substrate_script",
       "learning_signal_health_observer",
       // selector-reward saturation detector (2026-06-14, SUBSTRATE_AS_MDP §9.3
       // limit-8): watches boredom's own UCB reward distribution for degeneracy

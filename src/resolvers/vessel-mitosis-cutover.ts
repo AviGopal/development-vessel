@@ -2,7 +2,7 @@
 // Refuses with a freshness-gate failure when the staged base_sha no longer matches the current
 // live source, preventing accidental overwrites of concurrent edits.
 
-import { resolve, join, dirname, relative, isAbsolute } from "path";
+import { resolve, join, dirname, relative, isAbsolute, basename } from "path";
 import {
   rename,
   mkdir,
@@ -17,6 +17,7 @@ import {
 import { createHash } from "node:crypto";
 import type { ResolverResult } from "./types.js";
 import { resolveSubstrateGapWrite } from "./substrate-gap.js";
+import { resolveActivateSubstrateScript } from "./activate-substrate-script.js";
 
 /**
  * vessel_mitosis_cutover — promotes a mitosis track to the canonical position
@@ -315,6 +316,80 @@ async function pathExists(p: string): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+/**
+ * SELF-ACTIVATION wiring (2026-06-26). Substrate timer scripts
+ * (scripts/substrate/*.ts) run from a writable run-dir
+ * (SUBSTRATE_RUN_DIR=/workspace/active-scripts) seeded fresh at boot; the unit
+ * ExecStarts reference ${SUBSTRATE_RUN_DIR}/<name>.ts. The read-only host bind
+ * is stale-after-mount, so a substrate-AUTHORED new version of a timer script
+ * mirrored/committed by the cutover does NOT take effect until a full container
+ * restart — the autonomy loop's authored output never goes live.
+ *
+ * Bridge: when a cutover/authoring step stages a scripts/substrate/*.ts file, we
+ * ALSO call the activate_substrate_script resolver in-process with the new
+ * content, overwriting the run-dir copy so the change is live on the NEXT timer
+ * firing — in addition to (never replacing) the git/host-sync durability path.
+ *
+ * Strictly scoped to scripts/substrate/*.ts staged files (never vessel source),
+ * and strictly non-fatal: any failure here is recorded as a warn op and never
+ * blocks the cutover. The activate resolver itself is replace-only + path-safe
+ * (basename, must already exist in the run-dir), so the blast radius is bounded
+ * to already-seeded timer scripts.
+ */
+async function maybeActivateSubstrateScripts(args: {
+  mitosisRoot: string;
+  stagedFiles: string[];
+}): Promise<Array<{ op: string; status: "ok" | "warn"; detail?: string }>> {
+  const ops: Array<{ op: string; status: "ok" | "warn"; detail?: string }> = [];
+  const runDir = process.env["SUBSTRATE_RUN_DIR"] || "/workspace/active-scripts";
+  // Match scripts/substrate/<name>.ts anywhere in the staged relative path.
+  const SUBSTRATE_SCRIPT_RE = /(?:^|\/)scripts\/substrate\/([A-Za-z0-9._-]+\.ts)$/;
+  for (const rel of args.stagedFiles) {
+    if (typeof rel !== "string") continue;
+    if (isAbsolute(rel) || rel.includes("..")) continue;
+    const m = rel.match(SUBSTRATE_SCRIPT_RE);
+    if (!m) continue;
+    const scriptName = basename(m[1]!);
+    const srcPath = join(args.mitosisRoot, rel);
+    let content: string;
+    try {
+      content = await readFile(srcPath, "utf-8");
+    } catch (err) {
+      ops.push({
+        op: `activate_substrate_script ${scriptName}`,
+        status: "warn",
+        detail: `read staged content failed: ${(err as Error).message.slice(0, 160)}`,
+      });
+      continue;
+    }
+    try {
+      const res = await resolveActivateSubstrateScript({
+        type: "activate_substrate_script",
+        script: scriptName,
+        content,
+        runDir,
+      });
+      const body = (res.body ?? {}) as Record<string, unknown>;
+      const activated = body["activated"] === true;
+      ops.push({
+        op: `activate_substrate_script ${scriptName}`,
+        status: activated ? "ok" : "warn",
+        detail: activated
+          ? `run-dir live (changed=${String(body["changed"])}, ${String(body["bytes"])}B)`
+          : `not activated: ${String(body["error"] ?? "unknown")}`.slice(0, 200),
+      });
+    } catch (err) {
+      // Non-fatal by contract: a failed activation never blocks the cutover.
+      ops.push({
+        op: `activate_substrate_script ${scriptName}`,
+        status: "warn",
+        detail: `activation threw (non-fatal): ${(err as Error).message.slice(0, 160)}`,
+      });
+    }
+  }
+  return ops;
 }
 
 async function runSystemctl(args: string[]): Promise<{ exitCode: number; stderr: string }> {
@@ -1258,6 +1333,22 @@ async function runGitAwareCutover(args: GitCutoverArgs): Promise<ResolverResult>
     });
   }
 
+  // 9b. SELF-ACTIVATION (2026-06-26): if any staged file is a substrate timer
+  // script (scripts/substrate/*.ts), make the new version live in the writable
+  // run-dir so it takes effect on the next timer firing WITHOUT a container
+  // restart. Scoped strictly to scripts/substrate/*.ts + non-fatal (warn ops
+  // only); the git/host-sync push above remains the durability path.
+  try {
+    const activateOps = await maybeActivateSubstrateScripts({ mitosisRoot, stagedFiles });
+    for (const op of activateOps) operations.push(op);
+  } catch (err) {
+    operations.push({
+      op: "activate_substrate_script (self-activation)",
+      status: "warn",
+      detail: `non-fatal: ${(err as Error).message.slice(0, 160)}`,
+    });
+  }
+
   // 10. Restart vessel unit (best-effort).
   if (!pointer.skip_restart) {
     const unit = pointer.restart_unit_name ?? `${vessel_name}.service`;
@@ -1427,6 +1518,21 @@ async function emitHostSyncIntent(args: HostSyncIntentArgs): Promise<ResolverRes
       kind: "host_sync_emit_failed",
       intent_path: intentPath,
     });
+  }
+
+  // SELF-ACTIVATION (2026-06-26): the host-sync path defers git durability to the
+  // host poller and does NOT mirror locally, so without this a substrate-authored
+  // scripts/substrate/*.ts change would not go live until the poller commits AND a
+  // container restart remounted the bind. Activate the run-dir copy now (non-fatal,
+  // scoped to scripts/substrate/*.ts) so the change takes effect on the next timer
+  // firing regardless of when the host poller lands the commit.
+  try {
+    await maybeActivateSubstrateScripts({
+      mitosisRoot: args.mitosisRoot,
+      stagedFiles: args.stagedFiles,
+    });
+  } catch {
+    /* non-fatal: activation never blocks the host-sync intent path */
   }
 
   // Best-effort: check results file for a completed match (poller may have run).

@@ -776,14 +776,28 @@ export async function resolveActivityCreateVariant(pointer: ActivityCreateVarian
   //
   // EXEMPTION: variant-first repair (parentTemplateId set) legitimately mints a
   // variant to IMPROVE a weak family — never blocked here.
-  // MODE gate — REUSE_BEFORE_MINT = off | shadow (default) | enforce:
-  //   shadow  → record the would-reuse decision, then mint as usual (observe
-  //             first; respects the over-refusal-stall lesson).
+  // MODE gate — REUSE_BEFORE_MINT = off | shadow | enforce (DEFAULT enforce):
+  //   off     → skip the probe entirely (always mint).
+  //   shadow  → record the would-reuse decision, then mint as usual (observe only).
   //   enforce → refuse the duplicate mint and return the existing producer so the
   //             loop routes to it (a genuine composition edge) instead.
-  // Fail-open: any discover hiccup proceeds to mint (never block on the probe).
+  // DEFAULT is `enforce` (2026-06-26): the foundational "Reuse Before Minting"
+  // principle is ENFORCED at the mint chokepoint, not merely observed. The enforce
+  // branch refuses ONLY when discover-by-shapes finds a CONFIDENT existing producer
+  // of the declared output_shapes (producers.length > 0 after self-exclusion) — i.e.
+  // a true near-duplicate. It is structurally incapable of starving legitimate
+  // authoring because:
+  //   (a) variant-first repair is exempt up front (pointer.parentTemplateId set →
+  //       the whole block is skipped — a weak-family repair always mints);
+  //   (b) a genuine GAP (no existing producer of the output shape) yields
+  //       producers.length === 0, so the refuse branch never fires and the mint
+  //       proceeds — minting stays the justified exception for true gaps;
+  //   (c) the discover-by-shapes probe FAILS OPEN — any transport/parse hiccup
+  //       proceeds to mint (never block capability creation on a flaky probe);
+  //   (d) `off`/`shadow` remain explicit overrides for an operator who wants to
+  //       observe or disable enforcement during an authoring burst.
   {
-    const reuseMode = (process.env["REUSE_BEFORE_MINT"] ?? "shadow").toLowerCase();
+    const reuseMode = (process.env["REUSE_BEFORE_MINT"] ?? "enforce").toLowerCase();
     const declaredOut =
       templateObj && typeof templateObj === "object"
         ? (Array.isArray((templateObj as Record<string, unknown>)["output_shapes"])

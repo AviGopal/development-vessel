@@ -258,6 +258,18 @@ import { METABOB_API_KEY } from "../config.js";
  * performance degradation. The 8192-character threshold is derived from
  * empirical token budgets and prompt template overhead — keep this constant
  * in sync with downstream prompt sizing if either changes.
+ *
+ * This limit exists to:
+ * - Bound dispatch payload size before any network call to goal-host-vessel,
+ *   preserving dispatcher efficiency and predictable resolver semantics.
+ * - Guarantee goals fit within downstream LLM context windows after prompt
+ *   template overhead, preventing truncation that would silently corrupt
+ *   goal decomposition.
+ * - Provide a hard backstop against prompt-injection or runaway-payload abuse
+ *   arriving through the dispatch surface.
+ *
+ * Note: goal-host-vessel applies its own independent ceiling; changes here
+ * must be coordinated with that boundary to avoid divergent rejection behavior.
  */
 const MAX_GOAL_LEN = 8192;
 const GOAL_HOST_ENDPOINT = process.env["GOAL_HOST_VESSEL_ENDPOINT"] ?? "http://127.0.0.1:8210";

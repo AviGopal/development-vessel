@@ -56,6 +56,10 @@ export type SubstrateGapCategory =
   // missing_capability (no resolver at all): here the capability exists but is
   // deficient, so the fix is an improvement, not a net-new resolver.
   | "systematic_failure"
+  // performance_inefficiency (2026-06-28): a hot internal endpoint/query that is
+  // SLOW or SATURATED — emitted by efficiency_scan(emit_gap). The author loop fixes
+  // it, so the substrate manages its own internal systems (load/latency) efficiently.
+  | "performance_inefficiency"
   | "other";
 
 export type SubstrateGapSource =

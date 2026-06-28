@@ -12,6 +12,10 @@ function buildRegistrationPayload() {
     version: "0.1.0",
     endpoint: `http://${config.host === "0.0.0.0" ? "localhost" : config.host}:${config.port}`,
     shapes: config.discovery.shapes,
+    // Resolver-DESCRIPTION advertisement (2026-06-28): pass per-shape
+    // descriptions so a decomposition planner can match this vessel's resolvers
+    // from their descriptions alone (no hand-written hint). Optional/backward-compat.
+    shape_descriptions: config.discovery.shapeDescriptions,
     resolve_endpoint: config.discovery.resolveEndpoint,
     resolve_request_format: config.discovery.resolveRequestFormat,
     auth_scheme: config.discovery.authScheme,

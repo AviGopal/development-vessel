@@ -602,6 +602,41 @@ export const config = {
     resolveRequestFormat: "pointer" as const,
     authScheme: "ApiKey" as const,
     resolveTimeoutMs: 10_000,
+    /**
+     * RESOLVER-DESCRIPTION ADVERTISEMENT (2026-06-28). One concise line per
+     * resolver: what it produces + when to use it. This is the per-resolver
+     * knowledge, written ONCE by the vessel that OWNS the resolver — NOT in the
+     * planner. Discovery merges this across vessels and exposes it at
+     * GET /registry/shape-descriptions; author_composed_capability composes from
+     * these descriptions so the loop self-composes ANY described resolver with
+     * no hand-written hint. Keys that aren't in `shapes` are ignored downstream.
+     *
+     * Seeded here: the data/report resolvers an operator goal would need for
+     * coverage/topology/failure-analysis reports. Add a line when you add a
+     * report/data resolver — that one line makes it planner-matchable.
+     */
+    shapeDescriptions: {
+      composition_coverage_report:
+        "Already-computed composition coverage gaps: input shapes consumed by some activity that NOTHING produces (with the consuming activities), orphan output shapes with no consumer, and unconnected pairs. Use for any orphan/coverage/'consumed-but-unproduced'/'no producer' goal.",
+      orphaned_capability_scan:
+        "Advertised OUTWARD capabilities (shapes) that have NO producer activity — the demand-driven orphan set. Use for 'which advertised capabilities/shapes are unbacked or orphaned' goals.",
+      reachable_unlearned_report:
+        "Shapes/activities REACHABLE from the current pool but with NO learned Thompson posterior yet (zero or near-zero samples) — the unlearned frontier. Use to report which reachable capabilities the substrate has not yet exercised/learned.",
+      learned_topology_snapshot:
+        "Snapshot of the learned capability topology: which shapes have producers, which composition edges have credit, and per-cell coverage of the measurement table. Use for 'current learned topology / what has the substrate learned' report goals.",
+      unknown_shape_report:
+        "Shapes referenced as inputs by templates that NO registered vessel advertises — the unknown/unreachable shape set. Use for 'which required shapes have no advertising vessel' goals.",
+      trace_failure_pattern_report:
+        "Recent FAILED traces grouped by (template, first-failed-task) with occurrence counts above a threshold — systematic failure patterns. Use for 'recurring/systematic failures' or 'which templates fail the same way' goals.",
+      resolver_pattern_report:
+        "Per-(resolver_id, output_shape) success-rate report mined from traces. Use to report which resolvers reliably produce which shapes, or to find weak resolver/shape pairs.",
+      load_attribution_report:
+        "Per-template CPU/memory consumption attributed from before/after load samples around each dispatch, surfacing templates that spike resources. Use for 'which templates are expensive / cause load spikes' goals.",
+      system_load_report:
+        "Current substrate resource state read from /proc and cgroup inside the container (loadavg, memory, cpu.stat). Use for 'current system load / is the substrate under resource pressure' goals.",
+      detector_yield_registry:
+        "Per-detector yield report joining gap provenance × gap outcomes (landed/churned/open) × scheduling, classifying each detector PRODUCTIVE/LOW_YIELD/DORMANT/UNKNOWN. Use for 'which detectors are productive vs candidates for retirement' goals.",
+    } as Record<string, string>,
   },
 } as const;
 

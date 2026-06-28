@@ -49,6 +49,7 @@ import { resolveChainFetchFailureScan } from "../resolvers/chain-fetch-failure-s
 import { resolveConvergentValidityCheck } from "../resolvers/convergent-validity-check.js";
 import { resolveTraceFailurePatternReport } from "../resolvers/trace-failure-pattern-report.js";
 import { resolveEfficiencyScan } from "../resolvers/efficiency-scan.js";
+import { resolvePerformanceReachGate } from "../resolvers/performance-reach-gate.js";
 import { resolvePriorFailedAttempts } from "../resolvers/prior-failed-attempts.js";
 import { resolvePriorSuccessfulAttempts } from "../resolvers/prior-successful-attempts.js";
 import { resolveSystemLoadReport } from "../resolvers/system-load-report.js";
@@ -275,6 +276,8 @@ async function dispatchInner(pointer: AnyPointer): Promise<ResolverResult> {
       return resolveTraceFailurePatternReport(p as Parameters<typeof resolveTraceFailurePatternReport>[0]);
     case "efficiency_scan":
       return resolveEfficiencyScan(p as Parameters<typeof resolveEfficiencyScan>[0]);
+    case "performance_reach_gate":
+      return resolvePerformanceReachGate(p as Parameters<typeof resolvePerformanceReachGate>[0]);
     case "prior_failed_attempts":
       return resolvePriorFailedAttempts(p as Parameters<typeof resolvePriorFailedAttempts>[0]);
     case "prior_successful_attempts":

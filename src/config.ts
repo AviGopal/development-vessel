@@ -578,6 +578,13 @@ export const config = {
       // activity that invokes X. The recursive mint-as-you-go primitive — lets
       // the substrate mint a chain of real-resolver producers toward a goal.
       "author_producer",
+      // DECOMPOSITION-AUTHOR (2026-06-27): the capability-BREADTH lever. When
+      // author_producer can't wrap a single resolver for a NOVEL operator shape
+      // (nothing produces it), this plans an LLM-decomposed CHAIN of EXISTING
+      // resolvers (query data → format report) and mints it as a composite — so
+      // the substrate authors a genuinely new multi-resolver capability on goal
+      // demand, not just single-resolver wraps.
+      "author_composed_capability",
     ] as const,
     resolveEndpoint: "/v2/impulses/resolve",
     resolveRequestFormat: "pointer" as const,

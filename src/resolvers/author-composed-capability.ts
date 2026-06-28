@@ -144,6 +144,82 @@ async function fetchCatalogue(): Promise<Set<string>> {
   }
 }
 
+/**
+ * Fetch the merged shape→description catalogue from discovery (the
+ * resolver-DESCRIPTION advertisement, 2026-06-28). This is THE generality
+ * lever: every vessel advertises a one-line description per shape it owns, so
+ * the planner can compose ANY described resolver WITHOUT a hand-written hint.
+ * Cached briefly like fetchCatalogue. Discovery failure → empty map (planner
+ * falls back to curated-only). (2026-06-28)
+ */
+let _descCache: { descriptions: Record<string, string>; at: number } | null = null;
+async function fetchShapeDescriptions(): Promise<Record<string, string>> {
+  const now = Date.now();
+  if (_descCache && now - _descCache.at < CATALOGUE_TTL_MS) return _descCache.descriptions;
+  try {
+    const r = await fetch(`${DISCOVERY_ENDPOINT.replace(/\/$/, "")}/registry/shape-descriptions`, {
+      method: "GET",
+      headers: { ...(METABOB_API_KEY ? { Authorization: `ApiKey ${METABOB_API_KEY}` } : {}) },
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!r.ok) return _descCache?.descriptions ?? {};
+    const j: any = await r.json();
+    const raw = j?.shape_descriptions;
+    const descriptions: Record<string, string> = {};
+    if (raw && typeof raw === "object") {
+      for (const [shape, desc] of Object.entries(raw)) {
+        if (typeof desc === "string" && desc.trim().length > 0) descriptions[shape] = desc.trim();
+      }
+    }
+    if (Object.keys(descriptions).length > 0) _descCache = { descriptions, at: now };
+    return descriptions;
+  } catch {
+    return _descCache?.descriptions ?? {};
+  }
+}
+
+/**
+ * A resolver-catalogue entry the planner shows the LLM: each is a shape id with
+ * a one-line "produces" description and a "how"/config hint. Built from the
+ * UNION of CURATED_RESOLVER_HINTS (richer `how`, OVERRIDE on conflict) and every
+ * advertised shape that carries a description. This is what eliminates the
+ * per-class hint treadmill: a purpose-built resolver becomes planner-matchable
+ * the moment its owning vessel advertises a description for it. (2026-06-28)
+ */
+interface CatalogueEntry { shape: string; produces_shape: string; produces: string; how: string }
+
+/**
+ * Build the planner's resolver catalogue from advertised descriptions + curated
+ * hints. Curated hints OVERRIDE descriptions on conflict (they carry richer
+ * config detail). Every other described shape becomes an entry whose `produces`
+ * is the advertised description and whose `how` points the LLM at the canonical
+ * `config { type:'<shape>' }` form. Excludes shapes already covered by a curated
+ * hint. Sorted: curated first, then described, for prompt stability.
+ */
+function buildResolverCatalogue(descriptions: Record<string, string>): CatalogueEntry[] {
+  const curatedShapes = new Set(CURATED_RESOLVER_HINTS.map((h) => h.shape));
+  const entries: CatalogueEntry[] = CURATED_RESOLVER_HINTS.map((h) => ({
+    shape: h.shape,
+    produces_shape: h.produces_shape,
+    produces: h.produces,
+    how: h.how,
+  }));
+  for (const [shape, desc] of Object.entries(descriptions)) {
+    if (curatedShapes.has(shape)) continue; // curated hint OVERRIDES
+    // Skip pure write/mutation + obviously-non-data resolvers that a report
+    // chain never composes as a data step. Heuristic, not a hard list — keep
+    // it conservative so we don't silently hide a genuinely useful resolver.
+    if (/_write$|_delete$|_deprecate$|^vessel_register|^systemd_/.test(shape)) continue;
+    entries.push({
+      shape,
+      produces_shape: shape,
+      produces: desc,
+      how: `config { "type":"${shape}" } — see the discovery advertisement for this shape. Add any pointer fields the description implies; bind upstream data with {{impulse:<slot>}} when this is a format step.`,
+    });
+  }
+  return entries;
+}
+
 /** Extract the first balanced JSON value (object or array) from a fenced/prose LLM reply. */
 function extractJson(text: string): unknown | null {
   const raw = text.replace(/^```(?:json)?\n?/i, "").trimStart();
@@ -180,8 +256,12 @@ interface PlannedTask {
   dependencies?: string[];
 }
 
-function buildPlanPrompt(p: AuthorComposedCapabilityPointer, deliverable: string): string {
-  const hints = CURATED_RESOLVER_HINTS.map(
+function buildPlanPrompt(
+  p: AuthorComposedCapabilityPointer,
+  deliverable: string,
+  catalogueEntries: CatalogueEntry[],
+): string {
+  const hints = catalogueEntries.map(
     (h) => `- resolver "${h.shape}" → output_shapes:["${h.produces_shape}"]\n    produces: ${h.produces}\n    use: ${h.how}`,
   ).join("\n");
   return (
@@ -429,7 +509,12 @@ export async function resolveAuthorComposedCapability(
     return structuredError("author_composed_capability requires pointer.goal");
   }
   const maxAttempts = Math.max(1, pointer.max_attempts ?? 2);
-  const catalogue = await fetchCatalogue();
+  // Fetch the id catalogue (for hallucination rejection) AND the merged
+  // shape→description catalogue (the generality lever). The planner now sees
+  // EVERY described resolver, not just the 6 curated ones. Discovery failure on
+  // descriptions → empty map → buildResolverCatalogue degrades to curated-only.
+  const [catalogue, descriptions] = await Promise.all([fetchCatalogue(), fetchShapeDescriptions()]);
+  const catalogueEntries = buildResolverCatalogue(descriptions);
   const deliverable = deliverableShape(goal, pointer.target_shapes);
 
   let plan: { tasks: PlannedTask[]; outputShapes: string[] } | null = null;
@@ -440,7 +525,7 @@ export async function resolveAuthorComposedCapability(
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     attempts = attempt;
     const prompt =
-      buildPlanPrompt(pointer, deliverable) +
+      buildPlanPrompt(pointer, deliverable, catalogueEntries) +
       (priorError ? `\n\nPREVIOUS PLAN WAS REJECTED: ${priorError}\nFix it — use only real resolver ids and keep the chain short.` : "");
     const llm = await resolveLlmCompletionDispatch({ type: "llm_completion_dispatch", prompt, max_tokens: 1800 });
     if (llm.shape !== "llm_completion_result") {

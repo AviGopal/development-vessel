@@ -113,6 +113,7 @@ import { resolveTraceOutcomeValidityAudit } from "../resolvers/trace-outcome-val
 import { resolvePosteriorConsistencyAudit } from "../resolvers/posterior-consistency-audit.js";
 import { resolveCapabilityGapAudit } from "../resolvers/capability-gap-audit.js";
 import { resolveOrphanedCapabilityScan } from "../resolvers/orphaned-capability-scan.js";
+import { resolveResidualShapeDiscovery } from "../resolvers/residual-shape-discovery.js";
 import { resolveSystemdUnitHealthObserver } from "../resolvers/systemd-unit-health-observer.js";
 import { resolvePushHealthObserver } from "../resolvers/push-health-observer.js";
 import { resolveMitosisIntentQueueObserver } from "../resolvers/mitosis-intent-queue-observer.js";
@@ -442,6 +443,10 @@ async function dispatchInner(pointer: AnyPointer): Promise<ResolverResult> {
     case "orphaned_capability_scan":
       return resolveOrphanedCapabilityScan(
         p as Parameters<typeof resolveOrphanedCapabilityScan>[0],
+      );
+    case "residual_shape_discovery":
+      return resolveResidualShapeDiscovery(
+        p as Parameters<typeof resolveResidualShapeDiscovery>[0],
       );
     case "systemd_unit_health_observer":
       return resolveSystemdUnitHealthObserver(

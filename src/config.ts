@@ -505,6 +505,18 @@ export const config = {
       // the advertised surface. See openspec 2026-06-23-demand-driven-orphan-
       // capability-detection.
       "orphaned_capability_scan",
+      // residual_shape_discovery (2026-06-27): the GENUINE bottom-up discovery
+      // side. The substrate is strong at DEMAND-derived shapes (goal asks →
+      // gap-compose names it) but weak at GENUINE discovery: shapes that MUST
+      // EXIST but are NOT YET NAMED, detected from persistent unexplained
+      // structure in the real trace stream. Heuristic first cut of the residual
+      // geometry: a recurring output-shape CLUSTER forced through a generic
+      // carrier (json_extracted_value/httpResponse/fileContent/…), with no
+      // single composite shape naming it, is an unnamed axis. PROPOSE-ONLY —
+      // emits residual_shape_proposal substrateGaps gated by persistence
+      // (K windows, M traces) + novelty + closure (producer required, consumer
+      // raises confidence). Never mints/registers; ratified later.
+      "residual_shape_discovery",
       // vessel_gap_to_cluster (2026-06-14): the PRODUCER adapter. Reshapes a
       // vessel-arrival gap into a recurringPatternCluster targeting
       // concept_create_write so the real-chain author (draft-activity-from-pattern)

@@ -78,7 +78,7 @@ async function llmCall(endpoint: string, prompt: string, model: string): Promise
   const res = await fetch(endpoint, {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: `ApiKey ${METABOB_API_KEY}` },
-    body: JSON.stringify({ type: "llm_completion", prompt, model, max_tokens: 8000 }),
+    body: JSON.stringify({ type: "llm_completion", prompt, model, max_tokens: 16000 }),
     signal: AbortSignal.timeout(PER_CALL_TIMEOUT_MS),
   });
   if (!res.ok) throw new Error(`llm fetch ${res.status}`);
@@ -292,13 +292,22 @@ export async function verifyPatchAddressesGap(args: {
   };
 }
 
-function decomposePrompt(spec: string, maxOps: number): string {
+function decomposePrompt(spec: string, maxOps: number, grounding: string): string {
   return `You are a senior engineer decomposing a feature specification into a CONCRETE, ORDERED plan of file operations. Output is executed deterministically — there is no follow-up turn, so the plan must be COMPLETE and CORRECT.
 
 Repo root contains vessels at repos/<vessel>/. Each vessel is a Bun + TypeScript project with its own tsconfig.json. Edits must compile (\`bun run typecheck\`).
 
 FEATURE SPEC:
 ${spec}
+${grounding ? `
+GROUND TRUTH — the ACTUAL files (and, where shown, their current contents) in the target vessel(s). Use this to bind to REALITY, not assumptions:
+- For every \`edit\` op, \`path\` MUST be one of these real paths (an \`edit\` to a path NOT listed fails at apply, ENOENT). Only \`create_file\` may introduce a NEW path.
+- Do NOT invent file names: if the spec says "the X endpoint" / "the Y handler / method", find the real file below that defines it and edit THAT one.
+- Read the CURRENT CONTENTS before adding anything: do NOT add a field/key/method that already exists (it causes a duplicate-property or redeclaration error), and match the existing types, response interfaces, and call signatures shown. If the response is a typed object/interface, update BOTH the object literal AND its type declaration.
+- Your \`old_string\` for an edit must be a verbatim substring of the content shown below.
+
+${grounding}
+` : ""}
 
 Emit ONE JSON object, no markdown fences, with this exact schema:
 {
@@ -319,7 +328,60 @@ RULES:
 - Do NOT invent file paths that must already exist without being sure; for edits, target real files named in the spec.
 - STRICT TYPESCRIPT (the vessels compile with strict mode incl. \`noUncheckedIndexedAccess\`): every array/object index access (\`arr[i]\`, \`map[k]\`, \`str[i]\`) is typed \`T | undefined\` — you MUST guard it (\`?? fallback\`) or non-null-assert it (\`arr[i]!\`) when you know it is in-range, or tsc fails TS2532/TS18048. Avoid \`any\`. Type every function parameter and return.
 - MATCH EXISTING CONTRACTS: when adding a resolver/handler to an existing vessel, make its return type match what the dispatch site expects — in these vessels a resolver returns \`{ shape: string, body: ... }\` (the \`ResolverResult\` shape), NOT a bespoke object; read the dispatch file's other cases and mirror their shape exactly.
-- No prose outside the JSON.`;
+- OUTPUT FORMAT IS STRICT: respond with ONLY the JSON object. Start your response with the character \`{\` and end with \`}\`. Do NOT write any reasoning, explanation, preamble, or markdown — not even before the JSON. Any prose wastes the output budget and can truncate the plan.`;
+}
+
+// SHAPE-GROUNDING (2026-06-28): resolve the target vessel's ACTUAL file tree
+// BEFORE planning so the plan binds edits to real paths instead of hallucinating
+// them (observed: the planner invented `registry-stats.ts`, which does not exist,
+// → ENOENT → UNFAVORABLE rollback). The file tree IS the code-structure shape;
+// resolving it pre-plan is the authoring analogue of the walk gating activities on
+// `input_shapes ⊆ pool` — a file path becomes RESOLVED DATA, not an LLM guess.
+// Best-effort: when the tree can't be read the planner falls back to ungrounded.
+// Grounding resolves the code-structure shape at TWO resolutions (the finer/coarser
+// dial): the COARSE level (the file tree) fixes hallucinated PATHS; the FINER level
+// (current file CONTENTS) fixes API-level mistakes — duplicating a field that already
+// exists (TS1117), calling a method that isn't there, mismatching a typed response.
+// Content is injected only while a total byte budget holds, so small vessels get full
+// content (finest grain) and large vessels degrade to tree-only (coarse) automatically.
+const GROUND_CONTENT_BUDGET = 26_000;
+async function groundVesselFiles(toolsEndpoint: string, verifyVessels: string[]): Promise<string> {
+  const blocks: string[] = [];
+  let contentBudget = GROUND_CONTENT_BUDGET;
+  for (const v of verifyVessels.slice(0, 6)) {
+    const vRel = v.replace(/^repos\//, "");
+    const vAbs = `${REPO_ROOT}/${vRel}`;
+    try {
+      const sh = await callTool(toolsEndpoint, "shell", {
+        command: `cd ${JSON.stringify(vAbs)} 2>/dev/null && find src -type f \\( -name '*.ts' -o -name '*.tsx' \\) 2>/dev/null | sort | head -400`,
+        cwd: REPO_ROOT,
+      });
+      const raw = String((sh.body as { stdout?: unknown })?.stdout ?? "").trim();
+      if (!raw) continue;
+      const files = raw.split("\n").filter(Boolean);
+      const tree = files.map((f) => `  repos/${vRel}/${f}`).join("\n");
+      // FINER grain: inject current contents while the byte budget holds. The
+      // apply step already fs_reads for edits; this lets the PLANNER see existing
+      // symbols/fields up front so it doesn't author a duplicate or a wrong call.
+      const contentParts: string[] = [];
+      for (const f of files) {
+        if (contentBudget <= 0) break;
+        try {
+          const rd = await callTool(toolsEndpoint, "fs_read", { path: `${vAbs}/${f}` });
+          const content = (rd.body as { content?: unknown })?.content;
+          if (rd.ok && typeof content === "string") {
+            const slice = content.slice(0, Math.min(content.length, contentBudget, 6000));
+            contentBudget -= slice.length;
+            const truncated = slice.length < content.length ? "\n… (truncated)" : "";
+            contentParts.push(`----- repos/${vRel}/${f} -----\n${slice}${truncated}`);
+          }
+        } catch { /* per-file content best-effort */ }
+      }
+      const contentSection = contentParts.length ? `\n\nCURRENT CONTENTS:\n${contentParts.join("\n\n")}` : "";
+      blocks.push(`repos/${vRel}/ FILES:\n${tree}${contentSection}`);
+    } catch { /* grounding is advisory; an unreadable tree falls back to ungrounded planning */ }
+  }
+  return blocks.join("\n\n");
 }
 
 export async function resolveFeatureCompose(pointer: FeatureComposePointer): Promise<ResolverResult> {
@@ -333,10 +395,16 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
     return { shape: "featureComposeReport", body: { ok: false, error: `endpoint discovery failed (llm=${!!llmEndpoint}, tools=${!!toolsEndpoint})` } };
   }
 
-  // 1. DECOMPOSE (single planning call).
+  // 1. DECOMPOSE (single planning call), GROUNDED in the target vessel's real
+  // file tree so edits bind to paths that actually exist (no hallucinated paths).
+  const verifyVessels = pointer.verify_vessels ?? [];
+  let grounding = "";
+  if (verifyVessels.length > 0) {
+    try { grounding = await groundVesselFiles(toolsEndpoint, verifyVessels); } catch { grounding = ""; }
+  }
   let planRaw: string;
   try {
-    planRaw = await llmCall(llmEndpoint, decomposePrompt(pointer.spec, maxOps), model);
+    planRaw = await llmCall(llmEndpoint, decomposePrompt(pointer.spec, maxOps, grounding), model);
   } catch (e) {
     return { shape: "featureComposeReport", body: { ok: false, stage: "decompose", error: (e as Error).message } };
   }

@@ -50,6 +50,12 @@ export type SubstrateGapCategory =
   | "training_knowledge"
   | "missing_concept"
   | "missing_idiom"
+  // systematic_failure (2026-06-28): an EXISTING capability that fails the same
+  // way repeatedly — emitted by trace_failure_pattern_report(emit_gap) so the
+  // gap_to_feature -> feature_compose loop authors an improvement. Distinct from
+  // missing_capability (no resolver at all): here the capability exists but is
+  // deficient, so the fix is an improvement, not a net-new resolver.
+  | "systematic_failure"
   | "other";
 
 export type SubstrateGapSource =

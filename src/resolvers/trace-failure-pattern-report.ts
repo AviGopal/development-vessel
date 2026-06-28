@@ -1,5 +1,6 @@
 import { METABOB_ENDPOINT, METABOB_API_KEY } from "../config.js";
 import { isMetaTemplate } from "../lib/meta-templates.js";
+import { resolveSubstrateGapWrite } from "./substrate-gap.js";
 import type { ResolverResult } from "./types.js";
 
 export interface TraceFailurePatternReportPointer {
@@ -14,6 +15,16 @@ export interface TraceFailurePatternReportPointer {
    * substrate-health-tick, coverage-tick). Default: true.
    */
   exclude_meta?: boolean;
+  /**
+   * If true (the meta-loop link, 2026-06-28): for every systematic pattern,
+   * emit an OPEN `substrateGap` (category "systematic_failure") so the existing
+   * gap_to_feature -> feature_compose author loop can propose an improvement.
+   * This is what turns "the system LEARNED a recurring failure" into "the system
+   * AUTHORS the fix" without an operator — the failure-side analogue of the
+   * reach-gate, lifted from one trace to a capability. Dedup is by a STABLE
+   * gap id (no timestamp) so re-emissions collapse onto one open row.
+   */
+  emit_gap?: boolean;
 }
 
 interface TraceTask {
@@ -135,6 +146,47 @@ export async function resolveTraceFailurePatternReport(
     .filter((p) => p.occurrence_count >= minOccurrences)
     .sort((a, b) => b.occurrence_count - a.occurrence_count);
 
+  // META-LOOP LINK (2026-06-28): turn each systematic failure-pattern into an
+  // OPEN improvement-gap that the existing gap_to_feature -> feature_compose loop
+  // drains and authors a fix for. This closes "the system LEARNS a recurring
+  // failure" -> "the system AUTHORS the improvement" with no operator. Stable
+  // (timestamp-free) gap id => re-emissions dedup onto one open row.
+  let gapsEmitted = 0;
+  if (pointer.emit_gap) {
+    for (const p of patterns) {
+      const modes = p.failure_mode_types.length ? p.failure_mode_types.join(",") : "unknown";
+      const gapId = `systematic-failure-${p.template_id}-${p.first_failed_task_id ?? "zero"}`
+        .replace(/[^a-zA-Z0-9_.-]/g, "_")
+        .slice(0, 120);
+      const summary = `Capability "${p.template_id}" fails systematically at task `
+        + `"${p.first_failed_task_id ?? "(no tasks)"}" (${p.successful_task_count}/${p.total_task_count} tasks ok, `
+        + `failure_mode: ${modes}) across ${p.occurrence_count} recent traces — author an improvement so it reaches.`;
+      try {
+        await resolveSubstrateGapWrite({
+          type: "substrateGap_write",
+          gap: {
+            id: gapId,
+            category: "systematic_failure",
+            source: "substrate_detected",
+            summary,
+            detected_at: new Date().toISOString(),
+            status: "open",
+            classification_metadata: {
+              failing_capability: p.template_id,
+              first_failed_task_id: p.first_failed_task_id,
+              failure_mode_types: p.failure_mode_types,
+              occurrence_count: p.occurrence_count,
+              example_trace_ids: p.example_trace_ids,
+              successful_task_count: p.successful_task_count,
+              total_task_count: p.total_task_count,
+            },
+          },
+        });
+        gapsEmitted++;
+      } catch { /* best-effort: a failed gap-write must not break the report */ }
+    }
+  }
+
   return {
     shape: "failurePatternReport",
     body: {
@@ -143,6 +195,7 @@ export async function resolveTraceFailurePatternReport(
       zero_task_failures: zeroTaskFailures,
       min_occurrences_threshold: minOccurrences,
       patterns_found: patterns.length,
+      gaps_emitted: gapsEmitted,
       patterns,
       generated_at: new Date().toISOString(),
     },

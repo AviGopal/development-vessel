@@ -292,13 +292,17 @@ export async function verifyPatchAddressesGap(args: {
   };
 }
 
-function decomposePrompt(spec: string, maxOps: number, grounding: string): string {
+function decomposePrompt(spec: string, maxOps: number, grounding: string, principles: string): string {
   return `You are a senior engineer decomposing a feature specification into a CONCRETE, ORDERED plan of file operations. Output is executed deterministically — there is no follow-up turn, so the plan must be COMPLETE and CORRECT.
 
 Repo root contains vessels at repos/<vessel>/. Each vessel is a Bun + TypeScript project with its own tsconfig.json. Edits must compile (\`bun run typecheck\`).
 
 FEATURE SPEC:
 ${spec}
+${principles ? `
+ARCHITECTURAL PRINCIPLES (the substrate's own, retrieved from its concept graph — your plan MUST respect these; e.g. reuse an existing producer before minting a new one, match existing contracts/return shapes, keep edits surgical):
+${principles}
+` : ""}
 ${grounding ? `
 GROUND TRUTH — the ACTUAL files (and, where shown, their current contents) in the target vessel(s). Use this to bind to REALITY, not assumptions:
 - For every \`edit\` op, \`path\` MUST be one of these real paths (an \`edit\` to a path NOT listed fails at apply, ENOENT). Only \`create_file\` may introduce a NEW path.
@@ -329,6 +333,30 @@ RULES:
 - STRICT TYPESCRIPT (the vessels compile with strict mode incl. \`noUncheckedIndexedAccess\`): every array/object index access (\`arr[i]\`, \`map[k]\`, \`str[i]\`) is typed \`T | undefined\` — you MUST guard it (\`?? fallback\`) or non-null-assert it (\`arr[i]!\`) when you know it is in-range, or tsc fails TS2532/TS18048. Avoid \`any\`. Type every function parameter and return.
 - MATCH EXISTING CONTRACTS: when adding a resolver/handler to an existing vessel, make its return type match what the dispatch site expects — in these vessels a resolver returns \`{ shape: string, body: ... }\` (the \`ResolverResult\` shape), NOT a bespoke object; read the dispatch file's other cases and mirror their shape exactly.
 - OUTPUT FORMAT IS STRICT: respond with ONLY the JSON object. Start your response with the character \`{\` and end with \`}\`. Do NOT write any reasoning, explanation, preamble, or markdown — not even before the JSON. Any prose wastes the output budget and can truncate the plan.`;
+}
+
+// CONSULTATION-ON-AUTHOR (2026-06-28): before planning, concept_search the substrate's
+// own architectural principles (the docs ingested into concept-db, + any web evidence)
+// and inject the top matches so the plan RESPECTS them — the active-consumption wire that
+// makes the docs/web a LEARNED source, not just a stored one. Read-only; advisory.
+const CONCEPT_DB_ENDPOINT = process.env["CONCEPT_DB_ENDPOINT"] ?? "http://127.0.0.1:8260";
+async function consultPrinciples(spec: string): Promise<string> {
+  try {
+    const params = new URLSearchParams({ query: spec.slice(0, 400), shape: "architecturePrinciple", limit: "4" });
+    const res = await fetch(`${CONCEPT_DB_ENDPOINT}/concepts/search?${params.toString()}`, {
+      headers: METABOB_API_KEY ? { Authorization: `ApiKey ${METABOB_API_KEY}` } : {},
+      signal: AbortSignal.timeout(8000),
+    });
+    if (!res.ok) return "";
+    const j = (await res.json()) as { concepts?: Array<{ summary?: string; content?: string }> };
+    const items = (j.concepts ?? []).slice(0, 4);
+    if (!items.length) return "";
+    return items
+      .map((c, i) => `${i + 1}. ${String(c.summary ?? "").trim()}\n   ${String(c.content ?? "").replace(/\s+/g, " ").slice(0, 400)}`)
+      .join("\n");
+  } catch {
+    return "";
+  }
 }
 
 // SHAPE-GROUNDING (2026-06-28): resolve the target vessel's ACTUAL file tree
@@ -402,9 +430,13 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
   if (verifyVessels.length > 0) {
     try { grounding = await groundVesselFiles(toolsEndpoint, verifyVessels); } catch { grounding = ""; }
   }
+  // CONSULT the substrate's own architectural principles (docs ingested as concepts)
+  // so the plan respects them — the active-consumption wire for the docs/web channel.
+  let principles = "";
+  try { principles = await consultPrinciples(pointer.spec); } catch { principles = ""; }
   let planRaw: string;
   try {
-    planRaw = await llmCall(llmEndpoint, decomposePrompt(pointer.spec, maxOps, grounding), model);
+    planRaw = await llmCall(llmEndpoint, decomposePrompt(pointer.spec, maxOps, grounding, principles), model);
   } catch (e) {
     return { shape: "featureComposeReport", body: { ok: false, stage: "decompose", error: (e as Error).message } };
   }

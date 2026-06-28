@@ -47,15 +47,21 @@ type Json = Record<string, unknown>;
 
 async function discover(shape: string): Promise<string | null> {
   try {
+    // NOTE: discovery's vesselCapability resolution is AUTH-scoped — the ApiKey header
+    // is required or it returns no vessels (the bug that made the live canary safe-bail).
     const res = await fetch(`${DISCOVERY_ENDPOINT}/resolve`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", Authorization: `ApiKey ${METABOB_API_KEY}` },
       body: JSON.stringify({ pointer: { type: "vesselCapability", shape } }),
       signal: AbortSignal.timeout(5000),
     });
-    const j = (await res.json()) as { content?: { vessels?: Array<{ resolve_endpoint?: string; endpoint?: string }> } };
-    const v = j.content?.vessels?.[0];
-    return v?.resolve_endpoint ?? v?.endpoint ?? null;
+    if (!res.ok) return null;
+    const j = (await res.json()) as { content?: { vessels?: Array<{ endpoint: string; resolve_endpoint?: string; health_score?: number }> } };
+    const vs = (j.content?.vessels ?? []).sort((a, b) => (b.health_score ?? 0) - (a.health_score ?? 0));
+    const best = vs[0];
+    if (!best) return null;
+    const ep = best.resolve_endpoint ?? "/resolve";
+    return ep.startsWith("http") ? ep : `${best.endpoint.replace(/\/$/, "")}${ep.startsWith("/") ? ep : `/${ep}`}`;
   } catch {
     return null;
   }

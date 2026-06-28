@@ -121,7 +121,7 @@ export async function resolveResolverPatternReport(
   // ── 2. Traces ─────────────────────────────────────────────────────────────
   const traces: TraceRow[] = [];
   const trRes = await fetch(
-    `${METABOB_ENDPOINT}/v2/activities/execution-traces?since=${encodeURIComponent(since)}&limit=2000`,
+    `${METABOB_ENDPOINT}/v2/activities/execution-traces?since=${encodeURIComponent(since)}&limit=500`,
     { headers: auth },
   );
   if (trRes.ok) {

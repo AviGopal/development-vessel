@@ -65,7 +65,7 @@ async function computeCountsForWindow(
   // filter is unreliable for SurrealDB datetime types so we rely on the
   // client-side ISO-string comparison.
   const trRes = await fetchWithRetry(
-    `${METABOB_ENDPOINT}/v2/activities/execution-traces?start_date=${encodeURIComponent(since)}&limit=2000`,
+    `${METABOB_ENDPOINT}/v2/activities/execution-traces?start_date=${encodeURIComponent(since)}&limit=500`,
     { headers: auth },
   );
   if (trRes && trRes.ok) {

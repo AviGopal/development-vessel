@@ -109,8 +109,42 @@ function specFromGap(gap: Record<string, unknown>, editTargets: Array<{ file: st
   ].join("\n");
 }
 
+// LANDABILITY-RANKED SELECTION (2026-06-28). gap_to_feature historically picked gaps[0]
+// (arbitrary order), so the autonomous loop kept selecting hard META/ARCHITECTURAL gaps
+// (stale-proposal-backlog, decision-without-action, performance-inefficiency) that
+// feature_compose cannot author a verifying surgical diff for -> UNFAVORABLE, 0 lands.
+// Rank open gaps by a landability prior — prefer a CONCRETE edit-site + surgically-
+// authorable categories, deprioritise meta/architectural — so the loop spends its
+// authoring budget on gaps it can actually LAND + push. This RAISES the autonomous land
+// rate (the residual after the autonomous-commit-on-dev demonstration).
+const HARD_CATEGORIES = new Set([
+  "architectural_pattern", "performance_inefficiency", "decision_without_action",
+  "responsibility_misallocation", "learning_signal_degeneracy", "resolver_distribution",
+]);
+const SURGICAL_CATEGORIES = new Set([
+  "missing_capability", "systematic_failure", "reference_integrity", "service_failure",
+  "forward_model_artifact",
+]);
+function landabilityScore(gap: Record<string, unknown>): number {
+  const meta = (gap.classification_metadata ?? gap.metadata ?? {}) as Record<string, unknown>;
+  let s = 0.5;
+  // A concrete change-site means feature_compose knows exactly where to edit (surgical).
+  if (meta.edit_site || meta.suspected_real_location || meta.change_site || meta.failing_capability) s += 0.3;
+  if (typeof meta.edit_site === "string" || meta.single_file === true) s += 0.1;
+  const cat = String(gap.category ?? "");
+  if (HARD_CATEGORIES.has(cat)) s -= 0.4;
+  if (SURGICAL_CATEGORIES.has(cat)) s += 0.15;
+  // ids that empirically cycle UNFAVORABLE (meta/diagnostic; no surgical diff exists).
+  if (/stale-proposal|demand-trace|forward[_-]chain|backlog|unknown/i.test(String(gap.id ?? ""))) s -= 0.3;
+  return Math.max(0, Math.min(1, s));
+}
+function pickMostLandable(gaps: Record<string, unknown>[]): Record<string, unknown> | null {
+  if (!gaps.length) return null;
+  return gaps.map((g) => ({ g, s: landabilityScore(g) })).sort((a, b) => b.s - a.s)[0]!.g;
+}
+
 export async function resolveGapToFeature(pointer: GapToFeaturePointer): Promise<ResolverResult> {
-  // 1. Select a gap.
+  // 1. Select a gap — landability-ranked when auto-picking (not arbitrary gaps[0]).
   let gap: Record<string, unknown> | null = null;
   try {
     const read = await resolveSubstrateGap({
@@ -122,7 +156,7 @@ export async function resolveGapToFeature(pointer: GapToFeaturePointer): Promise
     const gaps = ((read?.body as { gaps?: Record<string, unknown>[] })?.gaps) ?? [];
     gap = pointer.gap_id
       ? gaps.find((g) => g.id === pointer.gap_id) ?? null
-      : gaps[0] ?? null;
+      : pickMostLandable(gaps);
   } catch (e) {
     return { shape: "gapToFeatureReport", body: { ok: false, stage: "select", error: (e as Error).message } };
   }

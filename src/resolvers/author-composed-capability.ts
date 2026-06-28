@@ -70,16 +70,33 @@ function structuredError(detail: string, extra?: Record<string, unknown>): Resol
  */
 const CURATED_RESOLVER_HINTS: Array<{ shape: string; produces_shape: string; produces: string; how: string }> = [
   {
+    // THE PREFERRED DATA RESOLVER for report/ranking/sum goals. Computes the
+    // GROUP BY / COUNT / SUM server-side over the indexed trace table and returns
+    // a SMALL, already-aggregated result — fast (~1s) and load-robust. Use this
+    // for ANY goal about counts / rankings / totals grouped by template, status,
+    // or variant over a time window. It REPLACES the raw-trace scan for these.
+    shape: "traceAggregateReport",
+    produces_shape: "traceAggregateReport",
+    produces:
+      "ALREADY-AGGREGATED rows {key,value} computed in the database: failure/success/total counts or cost sums, grouped by activity template (activity_id), status, or variant, over a time window, sorted highest-first. The DIRECT answer to report/ranking/sum goals — no raw rows shipped to the LLM.",
+    how:
+      `config { "type":"traceAggregateReport", "group_by":"activity_id"|"status"|"variant_id", "metric":"failure_count"|"success_count"|"count"|"cost_sum", "window_hours":24, "limit":10, "order":"desc" }. ` +
+      `e.g. "5 templates with most failures in 24h" → group_by:"activity_id", metric:"failure_count", window_hours:24, limit:5. ` +
+      `"total cost by status this week" → group_by:"status", metric:"cost_sum", window_hours:168. ` +
+      `Returns { rows:[{key,value}], empty }. The format step renders rows directly.`,
+  },
+  {
     shape: "executionTraceWithSignatures",
     produces_shape: "executionTraceWithSignatures",
-    produces: "hydrated execution traces — per trace: activity_template_id, status (success|failure), failure_mode, per-task success flags. The PRIMARY working source for failure data: aggregate failures per activity_template_id from these.",
-    how: `config { "type":"executionTraceWithSignatures", "limit":500 } — then the format step counts failures per template.`,
+    produces:
+      "RAW hydrated execution traces (per-trace activity_id, status, per-task signatures). SLOW + LOAD-FRAGILE over the large trace table — use ONLY when the goal needs PER-TRACE detail that an aggregate cannot give (e.g. inspecting specific task signatures), NOT for counts/rankings/sums. For any aggregate/report goal, use traceAggregateReport instead.",
+    how: `config { "type":"executionTraceWithSignatures", "limit":200 } — capped hard; only for per-trace detail, never for aggregation.`,
   },
   {
     shape: "trace_recurring_pattern_scan",
     produces_shape: "recurringPatternCluster",
     produces: "clusters of recurring failure signatures across recent traces (which templates/tasks recur as failures)",
-    how: `config { "type":"trace_recurring_pattern_scan", "limit":200 } — fast, working aggregator of recurring failures.`,
+    how: `config { "type":"trace_recurring_pattern_scan", "limit":200 } — fast aggregator of recurring failure PATTERNS (use when the goal asks about recurring/clustered failures, not simple counts).`,
   },
   {
     shape: "llm_completion_dispatch",
@@ -162,7 +179,7 @@ function buildPlanPrompt(p: AuthorComposedCapabilityPointer, deliverable: string
     `1. Typically TWO tasks: (a) a DATA task that queries the real data the goal needs, (b) an llm_completion_dispatch task that FORMATS that data into the exact output the goal asks for.\n` +
     `2. The format task binds the data task's output by referencing {{impulse:<data_task_slot>}} inside its prompt, where <data_task_slot> is the data task's outputImpulses[0].\n` +
     `3. Use ONLY resolver ids from the list above. Do NOT invent resolver names. Do NOT use file/git/bash resolvers.\n` +
-    `4. Prefer the resolver whose output most directly contains the raw data the goal needs. For ANY goal about failed/failing executions or failure counts per template, use "executionTraceWithSignatures" as the data task (each trace has activity_template_id + status="failure"; the format step counts failures per template).\n` +
+    `4. PREFER THE AGGREGATE RESOLVER over a raw-trace scan whenever the goal asks for COUNTS, RANKINGS, TOTALS, or SUMS grouped by template/status/variant over a window (every "top N", "highest", "total", "how many", "per template/tier/status" report goal). Use "traceAggregateReport" as the data task — it computes the GROUP BY in the database (fast, ~1s) and returns already-aggregated {key,value} rows. Do NOT use "executionTraceWithSignatures" to fetch raw traces and count them in the LLM: that raw scan TIMES OUT over the large trace table and the report comes back empty. e.g. "5 templates with the highest failure counts in 24h" → traceAggregateReport group_by:"activity_id", metric:"failure_count", window_hours:24, limit:5. Only use executionTraceWithSignatures when the goal genuinely needs per-trace detail an aggregate cannot provide.\n` +
     `5. The final task's output is the goal's deliverable; its prompt must instruct the LLM to emit EXACTLY the requested format (e.g. "5 lines, each '<template_id>  <failure_count>', sorted descending"). Set the final task's "output_shapes" to ["${deliverable}"].\n\n` +
     `Return STRICT JSON: an ordered array of tasks, each:\n` +
     `{\n` +
@@ -193,6 +210,22 @@ function deliverableShape(goal: string, targetShapes?: string[]): string {
   if (fromTarget) return fromTarget;
   const slug = goal.replace(/[^a-zA-Z0-9]+/g, "_").replace(/(^_+|_+$)/g, "").toLowerCase().slice(0, 40) || "deliverable";
   return `composedDeliverable_${slug}`;
+}
+
+/**
+ * Heuristic: is this an AGGREGATE/report goal — one asking for counts, rankings,
+ * totals, or sums grouped over a window? Such goals must use the server-side
+ * aggregate resolver (traceAggregateReport), not a raw-trace scan. (2026-06-27)
+ */
+function isAggregateGoal(goal: string): boolean {
+  const g = goal.toLowerCase();
+  // Verbs / nouns of aggregation, ranking, and reporting over traces.
+  const aggSignals =
+    /\b(count|counts|number of|how many|total|totals|sum|sums|aggregate|average|avg|tally)\b/.test(g) ||
+    /\b(top \d+|highest|lowest|most|least|ranked|ranking|sorted|descending|ascending|leaderboard)\b/.test(g) ||
+    /\b(grouped by|per (template|tier|status|resolver|activity|variant)|by (template|tier|status|resolver|activity|variant))\b/.test(g);
+  const reportSignals = /\b(report|failure|failed|failing|cost|costs|execution|executions|success rate)\b/.test(g);
+  return aggSignals && reportSignals;
 }
 
 /** Heuristic: does a resolver response carry substantive (non-empty, non-error) data? */
@@ -410,6 +443,20 @@ export async function resolveAuthorComposedCapability(
     const coerced = coercePlan(parsed, catalogue, deliverable);
     if ("error" in coerced) {
       lastError = coerced.error;
+      priorError = lastError;
+      continue;
+    }
+    // AGGREGATE-GOAL GUARDRAIL (2026-06-27): if the goal asks for counts /
+    // rankings / totals / sums (an aggregate report) but the planned data step is
+    // the KNOWN-SLOW raw-trace scan (executionTraceWithSignatures), reject the
+    // plan so the planner refines onto the fast server-side aggregate
+    // (traceAggregateReport). This is the binding fix for the hollow report class:
+    // the raw scan times out over the large trace table, so a plan that uses it
+    // for an aggregate goal is un-runnable in practice even though it's
+    // structurally valid. traceAggregateReport answers these directly in ~1s.
+    if (isAggregateGoal(goal) && coerced.tasks.some((t) => t.resolver === "executionTraceWithSignatures")) {
+      lastError =
+        "this is an AGGREGATE/report goal (counts/ranking/totals over a window) but the data step uses the slow raw-trace scan executionTraceWithSignatures, which times out. Use \"traceAggregateReport\" as the data task instead (group_by + metric: failure_count/success_count/count/cost_sum + window_hours + limit) — it computes the aggregate in the database.";
       priorError = lastError;
       continue;
     }

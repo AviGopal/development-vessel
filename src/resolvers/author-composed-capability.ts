@@ -99,6 +99,22 @@ const CURATED_RESOLVER_HINTS: Array<{ shape: string; produces_shape: string; pro
     how: `config { "type":"trace_recurring_pattern_scan", "limit":200 } — fast aggregator of recurring failure PATTERNS (use when the goal asks about recurring/clustered failures, not simple counts).`,
   },
   {
+    // THE PREFERRED RESOLVER for orphan/coverage goals — "shapes consumed as input
+    // with no producer", "producer/consumer coverage gaps", "unconnected shapes".
+    // Computes the set-difference server-side and returns the answer directly.
+    shape: "composition_coverage_report",
+    produces_shape: "composition_coverage_report",
+    produces:
+      "ALREADY-COMPUTED coverage gaps: missing_input_shapes (shapes some activity CONSUMES as input but NOTHING produces, with the consuming activities), orphan_producers (output shapes with no consumer), unconnected_pairs. The DIRECT answer to any orphan/coverage/'consumed-but-unproduced'/'no producer' goal — do NOT scan raw traces or run a pattern detector for these.",
+    how: `config { "type":"composition_coverage_report" }. Returns { missing_input_shapes:[{shape,consumers}], orphan_producers, unconnected_pairs }. The format step renders it directly.`,
+  },
+  {
+    shape: "orphaned_capability_scan",
+    produces_shape: "orphaned_capability_scan",
+    produces: "advertised OUTWARD capabilities (shapes) that have NO producer activity — the demand-driven orphan set. Use for 'which advertised capabilities/shapes are unbacked/orphaned' goals.",
+    how: `config { "type":"orphaned_capability_scan" }. Returns the orphaned capability list. Pair with composition_coverage_report for input-consumption orphans.`,
+  },
+  {
     shape: "llm_completion_dispatch",
     produces_shape: "llm_completion_result",
     produces: "the formatted report text",

@@ -33,7 +33,12 @@ const DISCOVERY_ENDPOINT = process.env.DISCOVERY_ENDPOINT ?? "http://127.0.0.1:8
 // in the plan and mapped to ${RUNTIME_ROOT}/<vessel>/... here.
 const RUNTIME_ROOT = process.env.MITOSIS_RUNTIME_DIR ?? "/vessels";
 const REPO_ROOT = RUNTIME_ROOT;
-const PER_CALL_TIMEOUT_MS = 90_000;
+// 90s was fine for SURGICAL plans (small output) but timed out the DECOMPOSE call for
+// MULTI-COMPONENT / architectural changes — the plan there is large (a new migration's
+// full contents + several coordinated edits), so generation runs longer. Raise it so the
+// system can author more-than-surgical changes. Tool (shell/fs) calls finish in seconds,
+// so the larger cap is harmless to them.
+const PER_CALL_TIMEOUT_MS = 200_000;
 
 export interface FeatureComposePointer {
   type: "feature_compose";

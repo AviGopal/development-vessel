@@ -134,7 +134,10 @@ export async function resolveObsidianRequestScan(
     "# What I'm working on right now", "",
     "_You asked, I'm on it. Results land under `Substrate/` and I mark your [[Inbox]] item done._", "",
   ];
+  const seenText = new Set<string>();
   for (const d of dispatched) {
+    if (seenText.has(d.text)) continue;
+    seenText.add(d.text);
     const icon = d.dispatchId ? "🔄" : "⚠️";
     statusLines.push(`- ${icon} **${d.text}** — ${d.dispatchId ? `working (dispatch \`${d.dispatchId}\`)` : `could not start: ${d.status}`}`);
   }

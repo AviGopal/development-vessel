@@ -252,25 +252,6 @@ import { METABOB_API_KEY } from "../config.js";
  * recommendation scores and faster resolution cycles. The guard check below
  * validates incoming goal text against this limit before dispatch.
  */
-/**
- * MAX_GOAL_LEN guard rationale: protects against excessively long goal text
- * that could exceed LLM token limits, cause parsing failures, or introduce
- * performance degradation. The 8192-character threshold is derived from
- * empirical token budgets and prompt template overhead — keep this constant
- * in sync with downstream prompt sizing if either changes.
- *
- * This limit exists to:
- * - Bound dispatch payload size before any network call to goal-host-vessel,
- *   preserving dispatcher efficiency and predictable resolver semantics.
- * - Guarantee goals fit within downstream LLM context windows after prompt
- *   template overhead, preventing truncation that would silently corrupt
- *   goal decomposition.
- * - Provide a hard backstop against prompt-injection or runaway-payload abuse
- *   arriving through the dispatch surface.
- *
- * Note: goal-host-vessel applies its own independent ceiling; changes here
- * must be coordinated with that boundary to avoid divergent rejection behavior.
- */
 const MAX_GOAL_LEN = 8192;
 const GOAL_HOST_ENDPOINT = process.env["GOAL_HOST_VESSEL_ENDPOINT"] ?? "http://127.0.0.1:8210";
 
@@ -296,14 +277,9 @@ export async function resolveDispatchGoal(pointer: DispatchGoalPointer): Promise
   // exhaustion during prompt synthesis. Threshold: MAX_GOAL_LEN = 8192 chars,
   // chosen to fit within downstream LLM context windows, goal-host-vessel
   // /run-goal input limits, and substrate goal parsing capacity. Treat as a
-  // safety boundary, not a performance knob.
-  //
-  // Substrate-gap rationale: oversized goals can also cascade into serialization
-  // and database-constraint failures when persisted to the activity-system
-  // namespace (as evidenced by recent SurrealDB namespace access failures in
-  // execution-traces). Unbounded payloads risk connection pool exhaustion and
-  // namespace initialization failures downstream — enforcing this ceiling at
-  // the dispatch boundary keeps those substrate gaps from propagating.
+  // safety boundary, not a performance knob. When exceeded, the resolver
+  // short-circuits with a structuredError (no dispatch attempted) so callers
+  // can surface the constraint and retry with a more parsimonious goal.
   if (goal.length > MAX_GOAL_LEN) return { shape: "structuredError", body: { resolver: "dispatch_goal", detail: `goal too long (${goal.length} > ${MAX_GOAL_LEN})` } };
 
   const body: Record<string, unknown> = { goal };

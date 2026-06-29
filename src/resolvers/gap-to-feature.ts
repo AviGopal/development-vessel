@@ -516,6 +516,11 @@ function landabilityScore(gap: Record<string, unknown>): number {
   if (SURGICAL_CATEGORIES.has(cat)) s += 0.15;
   // ids that empirically cycle UNFAVORABLE (meta/diagnostic; no surgical diff exists).
   if (/stale-proposal|demand-trace|forward[_-]chain|backlog|unknown/i.test(String(gap.id ?? ""))) s -= 0.3;
+  // Deprioritise gaps that keep failing to land: each prior UNFAVORABLE attempt drops
+  // the score, so the loop stops re-picking a stuck high-rank gap and moves to landable
+  // work. Capped so a transient fail doesn't permanently bury a genuine gap.
+  const fa = Number((meta as Record<string, unknown>).failed_attempts ?? 0);
+  if (fa > 0) s -= Math.min(0.6, 0.2 * fa);
   return Math.max(0, Math.min(1, s));
 }
 function pickMostLandable(gaps: Record<string, unknown>[]): Record<string, unknown> | null {
@@ -590,6 +595,31 @@ async function closeLandedGap(gap: Record<string, unknown>, land: LandSignal): P
   } catch (e) {
     return { closed: false, error: (e as Error).message };
   }
+}
+
+// Increment a gap's failed_attempts counter when an authoring attempt does NOT land
+// (UNFAVORABLE / staged-not-pushed). Feeds landabilityScore so a stuck gap drops in
+// priority and the loop stops churning on it instead of reaching landable work. Best-effort.
+async function bumpFailedAttempts(gap: Record<string, unknown>): Promise<void> {
+  try {
+    const id = String(gap.id ?? "");
+    if (!id) return;
+    const meta0 = (gap.classification_metadata ?? gap.metadata ?? {}) as Record<string, unknown>;
+    const fa = Number(meta0.failed_attempts ?? 0) + 1;
+    const meta = { ...meta0, failed_attempts: fa, last_failed_at: new Date().toISOString() };
+    await resolveSubstrateGapWrite({
+      type: "substrateGap_write",
+      gap: {
+        id,
+        category: gap.category,
+        source: gap.source,
+        summary: gap.summary,
+        detected_at: gap.detected_at,
+        classification_metadata: meta,
+        status: "open",
+      },
+    } as never);
+  } catch { /* best-effort */ }
 }
 
 export async function resolveGapToFeature(pointer: GapToFeaturePointer): Promise<ResolverResult> {
@@ -750,6 +780,10 @@ export async function resolveGapToFeature(pointer: GapToFeaturePointer): Promise
     if (closure.closed) {
       closure.resolution = `landed via mitosis cutover${land.commit_sha ? ` ${land.commit_sha}` : ""}${land.vessel ? ` (${land.vessel})` : ""}`;
     }
+  } else if (!(pointer.dry_run ?? false)) {
+    // Did not land (UNFAVORABLE / staged-not-pushed): bump failed_attempts so the picker
+    // deprioritises this stuck gap next round and reaches landable work instead.
+    await bumpFailedAttempts(gap);
   }
 
   return {

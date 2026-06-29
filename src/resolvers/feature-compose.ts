@@ -293,6 +293,9 @@ export interface StubVerdict {
 // ADDED lines (the new code) so a pre-existing TODO elsewhere in an edited file never
 // trips this. Explicit "not implemented" / placeholder signals + structurally-empty
 // or return-only handler bodies.
+// CODE markers — matched against code with comments/strings STRIPPED (so a doc-comment
+// or log string mentioning a marker word never trips). A bare marker word is only a
+// stub signal when it survives as actual code.
 const STUB_TEXT_MARKERS: Array<{ re: RegExp; label: string }> = [
   { re: /\bTODO\b/i, label: "TODO" },
   { re: /\bFIXME\b/i, label: "FIXME" },
@@ -303,8 +306,67 @@ const STUB_TEXT_MARKERS: Array<{ re: RegExp; label: string }> = [
   { re: /\bstub(?:bed)?\b/i, label: "stub" },
   { re: /\bcoming soon\b/i, label: "coming soon" },
   { re: /\bnot\s+yet\b/i, label: "not yet" },
-  { re: /throw\s+new\s+Error\s*\(\s*["'`][^"'`]*\b(?:not\s+implemented|unimplemented|todo|stub|placeholder)\b/i, label: "throw not-implemented" },
 ];
+
+// STRUCTURAL throw marker — matched against the ORIGINAL (un-stripped) text. A
+// `throw new Error("...not implemented...")` is a genuine code stub even though the
+// marker word lives inside the string: the `throw new Error(` structure around it is
+// the real signal, so this one intentionally inspects the string body.
+const THROW_NOT_IMPLEMENTED_RE =
+  /throw\s+new\s+(?:Error|TypeError)\s*\(\s*["'`][^"'`]*\b(?:not\s+implemented|unimplemented|todo|stub|placeholder|not\s+yet)\b/i;
+
+/**
+ * Strip line comments, block comments, and string/template literals from a blob of
+ * code, replacing their contents with spaces (offsets/newlines preserved). A small
+ * hand-rolled scanner — good enough to keep marker words that live in comments/strings
+ * from tripping the text-marker gate, without pulling in a full TS parser. Conservative
+ * by construction: it only ever REMOVES text, so it can never manufacture a stub signal.
+ */
+export function stripCommentsAndStrings(src: string): string {
+  const out: string[] = [];
+  let i = 0;
+  const n = src.length;
+  const blank = (s: string) => s.replace(/[^\n]/g, " ");
+  while (i < n) {
+    const c = src[i] as string;
+    const next = src[i + 1];
+    // line comment
+    if (c === "/" && next === "/") {
+      let j = i + 2;
+      while (j < n && src[j] !== "\n") j++;
+      out.push(blank(src.slice(i, j)));
+      i = j;
+      continue;
+    }
+    // block comment
+    if (c === "/" && next === "*") {
+      let j = i + 2;
+      while (j < n && !(src[j] === "*" && src[j + 1] === "/")) j++;
+      j = Math.min(n, j + 2);
+      out.push(blank(src.slice(i, j)));
+      i = j;
+      continue;
+    }
+    // string / template literal
+    if (c === '"' || c === "'" || c === "`") {
+      const quote = c;
+      let j = i + 1;
+      while (j < n) {
+        if (src[j] === "\\") { j += 2; continue; } // escape
+        if (src[j] === quote) { j++; break; }
+        j++;
+      }
+      // keep the quote chars, blank the interior so structure (e.g. fn call args) survives
+      const body = src.slice(i, j);
+      out.push(body.length >= 2 ? quote + blank(body.slice(1, -1)) + (body.endsWith(quote) ? quote : "") : body);
+      i = j;
+      continue;
+    }
+    out.push(c);
+    i++;
+  }
+  return out.join("");
+}
 
 /**
  * Detect whether a CREATE-HEAVY diff's newly-introduced capability is a STUB rather
@@ -332,16 +394,35 @@ export function detectNewCapabilityStub(diff: string): StubVerdict {
   }
   const addedJoined = added.join("\n");
 
-  // 1) Explicit textual stub markers anywhere in the new code.
+  // 1) Explicit textual stub markers — but ONLY in actual CODE. The gate's own
+  //    contract (above) promises an exception for markers "inside an obvious
+  //    string/log"; this is that exception, finally implemented. We strip line
+  //    comments (`// …`), block comments (`/* … */`), and string/template literals
+  //    from the added code before matching, so a `// not yet wrapped` doc-comment or
+  //    a log/JSON string never trips, while a real `throw new Error("not implemented")`
+  //    still does (the throw-keyword marker matches the live structure, not the
+  //    string body alone). Conservative: stripping replaces literal/comment content
+  //    with spaces (preserving offsets) and never invents stub signal.
+  const codeOnly = stripCommentsAndStrings(addedJoined);
   for (const { re, label } of STUB_TEXT_MARKERS) {
-    const m = addedJoined.match(re);
+    const m = codeOnly.match(re);
     if (m) {
       return {
         isStub: true,
         marker: label,
-        reason: `new capability contains a stub marker ("${label}") — the new code is a placeholder, not a functional implementation`,
+        reason: `new capability contains a stub marker ("${label}") in code — the new code is a placeholder, not a functional implementation`,
       };
     }
+  }
+  // 1b) `throw new Error("...not implemented...")` — a genuine stub even though the
+  //     marker lives in the string; the throw structure is the real signal, so match
+  //     against the ORIGINAL (un-stripped) text.
+  if (THROW_NOT_IMPLEMENTED_RE.test(addedJoined)) {
+    return {
+      isStub: true,
+      marker: "throw not-implemented",
+      reason: `new capability throws a not-implemented error — a placeholder body, not a functional implementation`,
+    };
   }
 
   // 2) Structural: a newly-added function/handler whose ENTIRE body is return-only /

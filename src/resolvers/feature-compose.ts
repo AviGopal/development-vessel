@@ -256,6 +256,139 @@ export function enclosingSymbolsForHunks(diff: string, fileContents: Map<string,
   return out;
 }
 
+// FUNCTIONAL-COMPLETENESS / STUB DETECTION (2026-06-29, safety gate-strengthening).
+// Reachability proves a new symbol CAN execute (it has a caller / is an entrypoint);
+// it does NOT prove the new symbol DOES the work the gap intends. Now that the loop
+// can author a complete multi-vessel architectural MOVE (new endpoint + wiring +
+// call-site) that typechecks and is WIRED (on_live_path:true), a placeholder/stub
+// body slips through: the endpoint exists, is called, the LLM judged addresses:true
+// (it IS wired) — but the body is `// TODO` / `throw new Error("not implemented")` /
+// `return null`. Landing that to origin/dev pollutes the tree with a non-functional
+// new capability. This deterministic, cheap detector runs BEFORE the LLM judge and
+// HARD-FAILS create-heavy diffs whose newly-introduced handler/function bodies are
+// stubs. Scoped to create-heavy changes (a diff that adds a NEW FILE or a brand-new
+// function/handler body) so surgical edits to existing files are untouched.
+
+/** Is this diff "create-heavy" — does it introduce a new file or a new function body? */
+export function diffIsCreateHeavy(diff: string): boolean {
+  if (/^###\s+NEW FILE\s+/m.test(diff)) return true;
+  // a brand-new function/handler/route definition added on a `+` line
+  for (const raw of diff.split("\n")) {
+    if (!raw.startsWith("+") || raw.startsWith("+++")) continue;
+    const body = raw.slice(1);
+    if (/^\s*(?:export\s+)?(?:async\s+)?function\s+[A-Za-z_$][\w$]*\s*\(/.test(body)) return true;
+    if (/\.(get|post|put|delete|patch|use|on)\s*\(/.test(body)) return true; // route/handler registration
+  }
+  return false;
+}
+
+export interface StubVerdict {
+  isStub: boolean;
+  reason: string;
+  marker?: string;      // the stub signal that fired
+  symbol?: string;      // the new function/handler the stub lives in (best-effort)
+}
+
+// Stub MARKERS in the added (`+`) content of a create-heavy diff. We only consider
+// ADDED lines (the new code) so a pre-existing TODO elsewhere in an edited file never
+// trips this. Explicit "not implemented" / placeholder signals + structurally-empty
+// or return-only handler bodies.
+const STUB_TEXT_MARKERS: Array<{ re: RegExp; label: string }> = [
+  { re: /\bTODO\b/i, label: "TODO" },
+  { re: /\bFIXME\b/i, label: "FIXME" },
+  { re: /\bXXX\b/, label: "XXX" },
+  { re: /\bnot[\s_-]?implemented\b/i, label: "not implemented" },
+  { re: /\bunimplemented\b/i, label: "unimplemented" },
+  { re: /\bplaceholder\b/i, label: "placeholder" },
+  { re: /\bstub(?:bed)?\b/i, label: "stub" },
+  { re: /\bcoming soon\b/i, label: "coming soon" },
+  { re: /\bnot\s+yet\b/i, label: "not yet" },
+  { re: /throw\s+new\s+Error\s*\(\s*["'`][^"'`]*\b(?:not\s+implemented|unimplemented|todo|stub|placeholder)\b/i, label: "throw not-implemented" },
+];
+
+/**
+ * Detect whether a CREATE-HEAVY diff's newly-introduced capability is a STUB rather
+ * than a functional implementation. Returns isStub:false for non-create-heavy diffs
+ * (so it never affects surgical edits) and for create-heavy diffs whose new code has
+ * real substance. Deterministic and cheap — runs before the LLM judge.
+ *
+ * Signals (any → stub):
+ *  - an explicit stub-text marker (TODO/FIXME/not implemented/placeholder/...) on an
+ *    ADDED line, EXCEPT inside an obvious string/log that isn't the body's only act;
+ *  - a newly-added function/handler whose body is a single `return null|undefined|{}|[]`
+ *    or empty `{}` (a return-only / empty handler where real logic should live);
+ *  - a `throw new Error("...not implemented...")`-only body.
+ */
+export function detectNewCapabilityStub(diff: string): StubVerdict {
+  if (!diffIsCreateHeavy(diff)) {
+    return { isStub: false, reason: "not a create-heavy diff (surgical edit) — stub check N/A" };
+  }
+  // Collect ADDED code lines (drop the diff `+` and the NEW-FILE markers).
+  const added: string[] = [];
+  for (const raw of diff.split("\n")) {
+    if (/^###\s+(?:NEW FILE\s+)?/.test(raw)) continue;
+    if (raw.startsWith("+++")) continue;
+    if (raw.startsWith("+")) added.push(raw.slice(1));
+  }
+  const addedJoined = added.join("\n");
+
+  // 1) Explicit textual stub markers anywhere in the new code.
+  for (const { re, label } of STUB_TEXT_MARKERS) {
+    const m = addedJoined.match(re);
+    if (m) {
+      return {
+        isStub: true,
+        marker: label,
+        reason: `new capability contains a stub marker ("${label}") — the new code is a placeholder, not a functional implementation`,
+      };
+    }
+  }
+
+  // 2) Structural: a newly-added function/handler whose ENTIRE body is return-only /
+  //    empty. We scan added text for a function/arrow/handler open and check its body
+  //    is trivial. Cheap brace-walk over the added text only.
+  const trivialBody = (body: string): string | null => {
+    const t = body.trim();
+    if (t === "" ) return "empty body";
+    // strip a single trailing/leading set of nothing-statements
+    const stripped = t
+      .replace(/^[;\s]+/, "")
+      .replace(/[;\s]+$/, "");
+    if (stripped === "") return "empty body";
+    if (/^return\s*(?:null|undefined|\{\s*\}|\[\s*\]|""|''|``)?\s*;?$/.test(stripped)) return `return-only body (${stripped})`;
+    if (/^void\s+0\s*;?$/.test(stripped)) return "no-op body (void 0)";
+    return null;
+  };
+  // Find `function NAME(...) { BODY }`, `NAME(...) => { BODY }`, and route handlers
+  // `.post("/x", (req) => { BODY })` in the added text. Brace-match to extract BODY.
+  const openRe = /(?:function\s+([A-Za-z_$][\w$]*)\s*\([^)]*\)\s*(?::[^={]+)?|(?:async\s+)?\([^)]*\)\s*(?::[^=]+)?=>|\b([A-Za-z_$][\w$]*)\s*\([^)]*\)\s*(?::[^={]+)?)\s*\{/g;
+  let mm: RegExpExecArray | null;
+  while ((mm = openRe.exec(addedJoined)) !== null) {
+    const sym = mm[1] || mm[2] || "(anonymous)";
+    // brace-match from the `{` we just consumed
+    let depth = 1;
+    let i = openRe.lastIndex;
+    for (; i < addedJoined.length && depth > 0; i++) {
+      const c = addedJoined[i];
+      if (c === "{") depth++;
+      else if (c === "}") depth--;
+    }
+    if (depth !== 0) continue; // unbalanced (partial diff) — skip, do not false-fail
+    const body = addedJoined.slice(openRe.lastIndex, i - 1);
+    const triv = trivialBody(body);
+    if (triv) {
+      return {
+        isStub: true,
+        symbol: sym,
+        marker: triv,
+        reason: `new capability ${sym} has a ${triv} — a wired but non-functional placeholder, not a real implementation`,
+      };
+    }
+  }
+
+  return { isStub: false, reason: "create-heavy diff: new capability has substantive body (no stub signals)" };
+}
+
 /**
  * Decide the reachability hard-fail purely from the facts. HARD-FAIL (UNFAVORABLE,
  * no LLM) iff there is ≥1 changed symbol AND every changed symbol is unreachable
@@ -284,9 +417,13 @@ function semanticJudgePrompt(
   codeContext: string,
 ): string {
   const metaStr = gapMeta ? `\n\nGap detector evidence:\n${JSON.stringify(gapMeta, null, 2)}` : "";
-  return `You verify whether a self-authored CODE PATCH GENUINELY addresses a substrate gap, on a path that ACTUALLY EXECUTES. typecheck=clean does NOT mean the gap is fixed — many patches "compile" by adding dead code (a net-new function with zero callers) or by editing a path that never runs (hollow patch). This is the code analogue of hollow goal-completion.
+  const createHeavy = diffIsCreateHeavy(diff);
+  const completenessClause = createHeavy
+    ? `\n\nTHIS IS A CREATE-HEAVY CHANGE (it introduces a NEW file / endpoint / handler). For these, "addresses" is NOT satisfied merely because the new code exists and is wired (called/routed/exported). You MUST judge whether the NEW code FUNCTIONALLY IMPLEMENTS the gap's intent. For a responsibility MOVE (e.g. "move logic X out of vessel A into a new endpoint on vessel B"): does the new endpoint actually CONTAIN the moved logic (the real computation/transformation/persistence), or is it a placeholder that calls nothing, returns a stub/empty/null, re-dispatches without doing the work, or just echoes its input? addresses=true ONLY if the new capability is GENUINELY FUNCTIONAL — the moved/new logic is really present in the new code, not a shell. If the new handler/endpoint is wired but its body does not do the work the gap describes, set addresses=false and say "wired stub, not a functional implementation" in reason.`
+    : "";
+  return `You verify whether a self-authored CODE PATCH GENUINELY addresses a substrate gap, on a path that ACTUALLY EXECUTES. typecheck=clean does NOT mean the gap is fixed — many patches "compile" by adding dead code (a net-new function with zero callers), by editing a path that never runs (hollow patch), or by adding a wired-but-empty new endpoint/handler (a stub). This is the code analogue of hollow goal-completion.
 
-GAP: ${gapSummary}${metaStr}
+GAP: ${gapSummary}${metaStr}${completenessClause}
 
 Reachability facts (deterministic, computed by grepping the touched vessel src/):
 ${JSON.stringify(facts, null, 2)}
@@ -321,6 +458,22 @@ export async function verifyPatchAddressesGap(args: {
   const { hardFail, reason } = reachabilityHardFail(args.reachability);
   if (hardFail) {
     return { addresses: false, reason, on_live_path: false, hard_fail: true, llm_consulted: false };
+  }
+  // FUNCTIONAL-COMPLETENESS HARD-FAIL (2026-06-29). A create-heavy change can pass
+  // reachability (the new endpoint IS wired) yet be a STUB body — wired but does
+  // nothing. Reject deterministically BEFORE the LLM judge, scoped to create-heavy
+  // diffs so surgical edits are unaffected. on_live_path stays true (it IS reachable)
+  // but addresses=false: the capability exists on a live path but is not functional.
+  const stub = detectNewCapabilityStub(args.diff);
+  if (stub.isStub) {
+    return {
+      addresses: false,
+      reason: `new capability is a stub, not a functional implementation — ${stub.reason}`,
+      on_live_path: true,
+      hard_fail: true,
+      llm_consulted: false,
+      ...(stub.symbol ? { suspected_real_location: stub.symbol } : {}),
+    };
   }
   let raw = "";
   try {

@@ -206,6 +206,57 @@ export function extractChangedSymbols(diff: string): Array<{ symbol: string; isN
 const RESERVED = new Set(["if", "for", "while", "switch", "catch", "return", "function", "const", "let", "var", "async", "await", "new", "typeof"]);
 
 /**
+ * For a SYMBOL-LESS in-place edit (the patch changes statements inside an existing
+ * function but defines no new top-level symbol — e.g. inserting a dedup `Set` guard
+ * inside an already-dispatched loop), `extractChangedSymbols` returns []. The old
+ * reachability path then handed the LLM judge EMPTY facts, and the judge — lacking any
+ * call-path signal — defaulted `on_live_path:false`, sinking an otherwise-correct
+ * surgical fix to UNFAVORABLE. This recovers the ENCLOSING function for each changed
+ * hunk so the judge can see the edit lives inside a reachable function: we scan the
+ * full file content for the nearest preceding top-level declaration above each changed
+ * line. The enclosing symbol's reachability is then computed exactly like a changed
+ * symbol — so a genuinely dead enclosing function is still correctly unreachable (the
+ * dead-code floor is preserved); only live in-place edits gain the signal they were
+ * missing. Returns repo-relative-file → [enclosing symbol names].
+ */
+export function enclosingSymbolsForHunks(diff: string, fileContents: Map<string, string>): Map<string, string[]> {
+  // TOP-LEVEL declarations only (column 0, no leading indentation): a module-scope
+  // function/const is what "the enclosing function" means for reachability. Matching
+  // any indented `const NAME` would wrongly pick a loop-local (e.g. the very dedup
+  // `const seen` the patch added) as the enclosing symbol.
+  const declRe = /^(?:export\s+)?(?:async\s+)?(?:function|const|let|var)\s+([A-Za-z_$][\w$]*)\b/;
+  // Per-file: the changed-line texts (added `+` lines, definition stripped) so we can
+  // locate them in the current file and walk upward to the enclosing declaration.
+  const changedByFile = new Map<string, string[]>();
+  let curFile = "";
+  for (const rawLine of diff.split("\n")) {
+    const h = rawLine.match(/^###\s+(?:NEW FILE\s+)?(.+)$/);
+    if (h && h[1]) { curFile = h[1].trim(); continue; }
+    if (rawLine.startsWith("+") && !rawLine.startsWith("+++")) {
+      const body = rawLine.slice(1).trim();
+      if (body) { (changedByFile.get(curFile) ?? changedByFile.set(curFile, []).get(curFile)!).push(body); }
+    }
+  }
+  const out = new Map<string, string[]>();
+  for (const [absPath, changed] of changedByFile) {
+    const content = fileContents.get(absPath);
+    if (!content) continue;
+    const lines = content.split("\n");
+    const enclosing = new Set<string>();
+    for (const ch of changed) {
+      const idx = lines.findIndex((l) => l.includes(ch));
+      if (idx < 0) continue;
+      for (let i = idx; i >= 0; i--) {
+        const m = lines[i]!.match(declRe);
+        if (m && m[1] && !RESERVED.has(m[1])) { enclosing.add(m[1]); break; }
+      }
+    }
+    if (enclosing.size) out.set(absPath, [...enclosing]);
+  }
+  return out;
+}
+
+/**
  * Decide the reachability hard-fail purely from the facts. HARD-FAIL (UNFAVORABLE,
  * no LLM) iff there is ≥1 changed symbol AND every changed symbol is unreachable
  * (callerCount===0 AND !isEntrypoint) — i.e. the patch only touches dead code. When
@@ -297,13 +348,35 @@ export async function verifyPatchAddressesGap(args: {
   };
 }
 
-function decomposePrompt(spec: string, maxOps: number, grounding: string, principles: string): string {
+// PRIOR-ATTEMPT FEEDBACK (2026-06-28, drafter-completeness closure). The semantic
+// cutover gate (verifyPatchAddressesGap) REJECTS a partial drafter fix as UNFAVORABLE
+// and writes its findings (suspected_real_location + semantic_gate_reason) back onto
+// the gap's classification_metadata. Without feeding that back, the next draft re-runs
+// BLIND to what it missed and keeps producing the same partial fix. This extracts that
+// feedback into an explicit guidance block so the re-draft TARGETS the specific
+// path/lines the gate said were untouched. Additive: no feedback present → returns "".
+export function priorAttemptFeedbackBlock(meta?: Record<string, unknown> | null): string {
+  if (!meta) return "";
+  const reason = typeof meta.semantic_gate_reason === "string" ? meta.semantic_gate_reason.trim() : "";
+  const loc = typeof meta.suspected_real_location === "string" ? meta.suspected_real_location.trim() : "";
+  if (!reason && !loc) return "";
+  const lines = [
+    "",
+    "PRIOR ATTEMPT FEEDBACK — a previous draft for THIS gap was REJECTED by the semantic gate. Do NOT repeat it; your plan MUST address what it missed:",
+  ];
+  if (reason) lines.push(`- Rejection reason: ${reason}`);
+  if (loc) lines.push(`- The real change site is: ${loc}. Your fix MUST edit that specific path/lines (not just adjacent or related code).`);
+  lines.push("- A fix that again leaves the named path/lines untouched will be REJECTED again. Target the exact location the gate identified.");
+  return lines.join("\n");
+}
+
+function decomposePrompt(spec: string, maxOps: number, grounding: string, principles: string, priorFeedback = ""): string {
   return `You are a senior engineer decomposing a feature specification into a CONCRETE, ORDERED plan of file operations. Output is executed deterministically — there is no follow-up turn, so the plan must be COMPLETE and CORRECT.
 
 Repo root contains vessels at repos/<vessel>/. Each vessel is a Bun + TypeScript project with its own tsconfig.json. Edits must compile (\`bun run typecheck\`).
 
 FEATURE SPEC:
-${spec}
+${spec}${priorFeedback ? `\n${priorFeedback}\n` : ""}
 ${principles ? `
 ARCHITECTURAL PRINCIPLES (the substrate's own, retrieved from its concept graph — your plan MUST respect these; e.g. reuse an existing producer before minting a new one, match existing contracts/return shapes, keep edits surgical):
 ${principles}
@@ -378,7 +451,34 @@ async function consultPrinciples(spec: string): Promise<string> {
 // Content is injected only while a total byte budget holds, so small vessels get full
 // content (finest grain) and large vessels degrade to tree-only (coarse) automatically.
 const GROUND_CONTENT_BUDGET = 26_000;
-async function groundVesselFiles(toolsEndpoint: string, verifyVessels: string[]): Promise<string> {
+// Per-file content slice cap. For a SMALL file this captures the whole thing; for
+// a LARGE file (e.g. goal-host-vessel/src/index.ts at ~200 KB) it captures only a
+// window. The planner must produce a verbatim `old_string` for every `edit` op, so
+// for a deep change site (responsibility/refactor gaps cite a `matched_excerpt` far
+// past byte 0) the FIRST-N-bytes window is BLIND to the code it must edit → the
+// drafter emits prose ("the file is truncated") and 0 ops. focusHints lets the
+// window CENTER on the change site instead, making large-file non-surgical edits
+// groundable. See finding_2026_06_29_nonsurgical_grounding_window.
+const PER_FILE_SLICE = 6000;
+// CHANGE-SITE-CENTERED grounding window (2026-06-29). When a file exceeds the slice
+// cap, prefer a window CENTERED on the first focus hint that occurs in the file
+// (the gap's matched_excerpt / localized site) over the file's first PER_FILE_SLICE
+// bytes. Falls back to the head window when no hint matches — behaviour unchanged
+// for surgical/small-file cases. Returns the slice + a flag for the truncation note.
+function focusedSlice(content: string, cap: number, focusHints: string[]): { slice: string; centered: boolean; head: boolean } {
+  const window = Math.min(content.length, cap, PER_FILE_SLICE);
+  if (content.length <= window) return { slice: content, centered: false, head: false };
+  for (const hint of focusHints) {
+    const probe = hint.trim().slice(0, 80);
+    if (probe.length < 12) continue;
+    const at = content.indexOf(probe);
+    if (at < 0) continue;
+    const start = Math.max(0, at - Math.floor(window / 3));
+    return { slice: content.slice(start, start + window), centered: true, head: start === 0 };
+  }
+  return { slice: content.slice(0, window), centered: false, head: true };
+}
+async function groundVesselFiles(toolsEndpoint: string, verifyVessels: string[], focusHints: string[] = []): Promise<string> {
   const blocks: string[] = [];
   let contentBudget = GROUND_CONTENT_BUDGET;
   for (const v of verifyVessels.slice(0, 6)) {
@@ -403,10 +503,15 @@ async function groundVesselFiles(toolsEndpoint: string, verifyVessels: string[])
           const rd = await callTool(toolsEndpoint, "fs_read", { path: `${vAbs}/${f}` });
           const content = (rd.body as { content?: unknown })?.content;
           if (rd.ok && typeof content === "string") {
-            const slice = content.slice(0, Math.min(content.length, contentBudget, 6000));
+            const { slice, centered, head } = focusedSlice(content, contentBudget, focusHints);
             contentBudget -= slice.length;
-            const truncated = slice.length < content.length ? "\n… (truncated)" : "";
-            contentParts.push(`----- repos/${vRel}/${f} -----\n${slice}${truncated}`);
+            const truncated = slice.length < content.length
+              ? (centered
+                ? "\n… (windowed around the change site; head/tail omitted)"
+                : (head ? "\n… (truncated)" : "\n… (truncated)"))
+              : "";
+            const lead = centered && !head ? "… (head omitted)\n" : "";
+            contentParts.push(`----- repos/${vRel}/${f} -----\n${lead}${slice}${truncated}`);
           }
         } catch { /* per-file content best-effort */ }
       }
@@ -431,17 +536,31 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
   // 1. DECOMPOSE (single planning call), GROUNDED in the target vessel's real
   // file tree so edits bind to paths that actually exist (no hallucinated paths).
   const verifyVessels = pointer.verify_vessels ?? [];
+  // FOCUS HINTS: for a deep change site in a large file, the gap's matched_excerpt
+  // (and suspected_real_location) locate the code the planner must edit. Feed them
+  // so grounding windows CENTER on the site instead of the file head (which is blind
+  // to a byte-159k change site in a 200 KB file → 0-op decompose). Pure locators;
+  // empty for surgical/small-file cases → head-window behaviour preserved.
+  const gapMeta = (pointer.gap?.classification_metadata ?? {}) as Record<string, unknown>;
+  const focusHints = [gapMeta.matched_excerpt, gapMeta.suspected_real_location]
+    .filter((h): h is string => typeof h === "string" && h.trim().length >= 12)
+    .map((h) => h.trim());
   let grounding = "";
   if (verifyVessels.length > 0) {
-    try { grounding = await groundVesselFiles(toolsEndpoint, verifyVessels); } catch { grounding = ""; }
+    try { grounding = await groundVesselFiles(toolsEndpoint, verifyVessels, focusHints); } catch { grounding = ""; }
   }
   // CONSULT the substrate's own architectural principles (docs ingested as concepts)
   // so the plan respects them — the active-consumption wire for the docs/web channel.
   let principles = "";
   try { principles = await consultPrinciples(pointer.spec); } catch { principles = ""; }
+  // PRIOR-ATTEMPT FEEDBACK: if this gap was already rejected by the semantic gate, the
+  // gate wrote suspected_real_location + semantic_gate_reason onto its metadata. Inject
+  // that as explicit re-draft guidance so the drafter completes the partial fix instead
+  // of re-producing it blind. Additive — empty when no prior rejection exists.
+  const priorFeedback = priorAttemptFeedbackBlock(pointer.gap?.classification_metadata);
   let planRaw: string;
   try {
-    planRaw = await llmCall(llmEndpoint, decomposePrompt(pointer.spec, maxOps, grounding, principles), model);
+    planRaw = await llmCall(llmEndpoint, decomposePrompt(pointer.spec, maxOps, grounding, principles, priorFeedback), model);
   } catch (e) {
     return { shape: "featureComposeReport", body: { ok: false, stage: "decompose", error: (e as Error).message } };
   }
@@ -500,7 +619,21 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
       // up front — rather than waiting for the post-failure repair, which fires too
       // late and mis-parses multi-line strings. Only an old_string verified to
       // appear verbatim in the live content is used.
-      const liveContent = preEditContent.get(abs) ?? "";
+      // The snapshot above uses fs_read, which returns "" only when the planner
+      // chose a path that does NOT exist as readable content (mis-localization /
+      // stale proposed_fix). In that case the OLD gate (`if (liveContent && …)`)
+      // SKIPPED the proactive grounding entirely — the edit then failed
+      // `old_string not found` and the post-failure `cat` of the same bad path
+      // also came back empty, guaranteeing rollback even when localizeGap had
+      // derived a real file. Fall back to a direct shell `cat` so the grounding
+      // runs on EVERY edit (incl. feedback retries) whenever ANY readable content
+      // exists at the path, decoupled from a successful pre-snapshot.
+      let liveContent = preEditContent.get(abs) ?? "";
+      if (!liveContent) {
+        const cat0 = await callTool(toolsEndpoint, "shell", { command: `cat ${JSON.stringify(abs)}`, cwd: REPO_ROOT });
+        const c0 = String((cat0.body as { stdout?: unknown })?.stdout ?? "");
+        if (c0) { liveContent = c0; if (!preEditContent.has(abs)) preEditContent.set(abs, c0); }
+      }
       let effOld = op.old_string ?? "";
       let groundedPre = false;
       if (liveContent && (!effOld || !liveContent.includes(effOld))) {
@@ -592,12 +725,83 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
   // edit-grounding fix and is what makes the loop reliably LAND, not just apply.
   // On failure to repair, verdict stays UNFAVORABLE and the existing rollback
   // fires — so worst case is unchanged.
+  // CREATE-FILE-AWARE REPAIR (2026-06-29). The surgical one-old_string/new_string-
+  // per-round repair below converges on EDITS to large pre-existing files (you must
+  // not rewrite those — a full rewrite corrupts code you didn't author). But a file
+  // born THIS run via `create_file` is brand-new: there is no pre-existing code to
+  // corrupt, so it is SAFE to fully re-author. A new endpoint/vessel file the LLM
+  // emitted with several strict-TS errors cannot converge one-surgical-fix-at-a-time
+  // within MAX_REPAIR — the binding limit on authoring a COMPLETE new file. So:
+  // when a failing vessel's tsc errors point at a file we created this run, repair it
+  // by FULL-FILE RE-AUTHORING (feed current content + that file's errors → corrected
+  // complete content → overwrite via fs_write). Edited pre-existing files keep the
+  // surgical path UNCHANGED. Bounded by the same MAX_REPAIR; created-file rewrites get
+  // a couple of extra cheap rounds because a full rewrite typically converges fast.
+  //
+  // Match created files in the tsc output by their vessel-relative subpath OR basename:
+  // verify runs `cd <vesselDir> && bun run typecheck`, so tsc prints paths relative to
+  // the vessel (e.g. `src/routes/select-activity.ts(12,5): error ...`).
+  const createdRelOf = (abs: string): { rel: string; base: string } => {
+    const rel = abs.replace(`${REPO_ROOT}/`, "");
+    return { rel, base: rel.slice(rel.lastIndexOf("/") + 1) };
+  };
+  const errMentionsCreated = (errText: string, abs: string): boolean => {
+    const { rel, base } = createdRelOf(abs);
+    // tsc relative path is the part after the vessel dir; match the longest stable
+    // tail (src/...) or the basename, whichever the output carries.
+    const srcIdx = rel.indexOf("/src/");
+    const tail = srcIdx >= 0 ? rel.slice(srcIdx + 1) : rel; // "src/..."
+    return errText.includes(tail) || errText.includes(base) || errText.includes(rel);
+  };
+  const repairCreatedFile = async (abs: string, errText: string): Promise<boolean> => {
+    const { rel } = createdRelOf(abs);
+    const cur = await callTool(toolsEndpoint, "fs_read", { path: abs });
+    const curContent = (cur.body as { content?: unknown })?.content;
+    if (!cur.ok || typeof curContent !== "string" || !curContent) return false;
+    try {
+      const out = await llmCall(
+        llmEndpoint,
+        `This NET-NEW TypeScript file ${rel} fails strict typecheck. It is brand-new (no pre-existing code to preserve), so REWRITE IT COMPLETELY and correctly.\n\nCurrent full content:\n\n${curContent}\n\ntsc / lint errors (the file's relative path appears in each):\n${errText.slice(0, 4000)}\n\nReturn ONLY the corrected COMPLETE file content — the entire file, ready to write verbatim, typecheck-clean under strict mode (incl. noUncheckedIndexedAccess: guard every index access with ?? or !). No markdown fences, no prose, no commentary. Start with the first character of the file and end with its last.`,
+        model,
+      );
+      let body = out.trim();
+      // Strip accidental code fences if the model added them despite instructions.
+      if (body.startsWith("```")) body = body.replace(/^```[a-zA-Z]*\n?/, "").replace(/\n?```\s*$/, "").trim();
+      if (!body || body.length < 8) return false;
+      const w = await callTool(toolsEndpoint, "fs_write", { path: abs, content: body });
+      console.log(`[development-vessel] create-file-repair full-rewrite ${JSON.stringify({ file: rel, wrote: w.ok, bytes: body.length })}`);
+      return w.ok;
+    } catch { return false; }
+  };
+
+  // Created-file rewrites get up to MAX_REPAIR + 2 rounds (cheap, fast-converging);
+  // surgical edit repair stays at MAX_REPAIR.
   const MAX_REPAIR = 4;
-  for (let attempt = 0; attempt < MAX_REPAIR && !applyFailed && verify.length > 0 && !verify.every((v) => v.ok); attempt++) {
+  const MAX_REPAIR_CREATE = MAX_REPAIR + 2;
+  const repairCap = created.length > 0 ? MAX_REPAIR_CREATE : MAX_REPAIR;
+  for (let attempt = 0; attempt < repairCap && !applyFailed && verify.length > 0 && !verify.every((v) => v.ok); attempt++) {
     let anyFixed = false;
     for (const fv of verify.filter((v) => !v.ok)) {
       const errText = (fv.output || "").trim();
       if (!errText) continue;
+      // First, full-rewrite any CREATED (brand-new) files this vessel's errors mention.
+      // A new file carrying several errors cannot converge via single surgical fixes;
+      // a complete re-author can. Edited pre-existing files are NEVER rewritten here —
+      // they fall through to the surgical path below.
+      const vBaseAbs = `${REPO_ROOT}/${fv.vessel.replace(/^repos\//, "")}/`;
+      const createdInVessel = created.filter((c) => c.startsWith(vBaseAbs) && errMentionsCreated(errText, c));
+      if (createdInVessel.length > 0) {
+        let rewroteAny = false;
+        for (const cabs of createdInVessel) {
+          if (await repairCreatedFile(cabs, errText)) { anyFixed = true; rewroteAny = true; }
+        }
+        // A full rewrite changes this vessel's whole error landscape, so the surgical
+        // edit fix below would be derived from now-stale errText. Skip surgical for this
+        // vessel this round; the next round re-verifies and, if edited-file errors
+        // remain, repairs them surgically against fresh output. Worst case is just an
+        // extra round (bounded by repairCap).
+        if (rewroteAny) continue;
+      }
       try {
         // One SURGICAL fix per round per failing vessel. The LLM names the file and
         // a verbatim old_string/new_string; we READ that file, confirm the anchor,
@@ -690,6 +894,46 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
         }
         facts.push({ symbol, isNewFunction, callerCount, isEntrypoint, reachable: callerCount > 0 || isEntrypoint });
         void codeHit;
+      }
+
+      // SYMBOL-LESS IN-PLACE EDIT (2026-06-28): the patch defined no new top-level
+      // symbol (e.g. a dedup guard inserted inside an existing dispatched loop), so
+      // `facts` is empty and the judge would default on_live_path:false and sink a
+      // correct surgical fix. Recover the ENCLOSING function for each changed hunk and
+      // compute ITS reachability the same way, so the judge sees the edit is inside a
+      // live function. Preserves the dead-code floor: a dead enclosing function is
+      // still unreachable. Only runs when no symbol was extracted, so it never weakens
+      // the existing path.
+      if (facts.length === 0 && edited.length > 0) {
+        const curContents = new Map<string, string>();
+        for (const abs of edited) {
+          const rd = await callTool(toolsEndpoint, "shell", { command: `cat ${JSON.stringify(abs)}`, cwd: REPO_ROOT });
+          const c = String((rd.body as { stdout?: unknown })?.stdout ?? "");
+          if (c) curContents.set(abs, c);
+        }
+        const encl = enclosingSymbolsForHunks(diff, curContents);
+        const seenSym = new Set<string>();
+        for (const names of encl.values()) for (const symbol of names) {
+          if (seenSym.has(symbol)) continue;
+          seenSym.add(symbol);
+          let callerCount = 0;
+          let isEntrypoint = false;
+          for (const v of touched) {
+            const vAbs = `${REPO_ROOT}/${v.replace(/^repos\//, "")}/src`;
+            const callQ = await callTool(toolsEndpoint, "shell", {
+              command: `grep -rEn "\\b${symbol}[[:space:]]*\\(" ${JSON.stringify(vAbs)} 2>/dev/null | grep -vE "(function|const|let|var)[[:space:]]+${symbol}\\b" | grep -vE "^[^:]+:[0-9]+:[[:space:]]*${symbol}[[:space:]]*\\([^)]*\\)[[:space:]]*(:[^={]+)?\\{" || true`,
+              cwd: REPO_ROOT,
+            });
+            const callOut = String((callQ.body as { stdout?: unknown })?.stdout ?? "").trim();
+            if (callOut) callerCount += callOut.split("\n").filter(Boolean).length;
+            const entQ = await callTool(toolsEndpoint, "shell", {
+              command: `grep -rEn "(export[[:space:]]+(async[[:space:]]+)?(function|const|let)[[:space:]]+${symbol}\\b|case[[:space:]]+[\\"']${symbol}[\\"']|['\\"]${symbol}['\\"][[:space:]]*[:,)]|\\.(on|get|post|put|delete|use)\\([^)]*${symbol}|router\\.[a-z]+\\([^)]*${symbol})" ${JSON.stringify(vAbs)} 2>/dev/null || true`,
+              cwd: REPO_ROOT,
+            });
+            if (String((entQ.body as { stdout?: unknown })?.stdout ?? "").trim()) isEntrypoint = true;
+          }
+          facts.push({ symbol, isNewFunction: false, callerCount, isEntrypoint, reachable: callerCount > 0 || isEntrypoint });
+        }
       }
 
       // Code context for the judge: include the function(s) the gap names + any live

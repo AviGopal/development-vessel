@@ -89,7 +89,29 @@ export interface SubstrateGapReadPointer {
   source?: SubstrateGapSource;
   status?: SubstrateGap["status"];
   limit?: number;
+  /**
+   * Categories to EXCLUDE from the result set (e.g. decision-log noise like
+   * auto_draft_triggered). Applied BEFORE the limit slice so an actionable
+   * consumer (gap_to_feature) is not starved by a window full of log entries.
+   * Typed as string[] because some categories (the goal-host auto_draft_*
+   * decision log) are written with looser typing than SubstrateGapCategory.
+   */
+  exclude_categories?: string[];
 }
+
+/**
+ * Decision-log categories that are LOGS, not fixable work. Emitted by goal-host
+ * `emitAuthoringDecision` every time it auto-drafts a goal (source
+ * goal_host_auto_draft) — a per-dispatch record, not a gap a feature can close.
+ * They MUST stay in the store (useful authoring-decision log) but MUST be
+ * excluded from the actionable gap set the gap_to_feature picker considers,
+ * else they starve the limited window and outrank penalized real gaps.
+ */
+export const DECISION_LOG_GAP_CATEGORIES = [
+  "auto_draft_triggered",
+  "auto_draft_fallback_recommend",
+  "auto_draft_reused",
+] as const;
 
 export interface SubstrateGapWritePointer {
   type: "substrateGap_write";
@@ -162,6 +184,10 @@ export async function resolveSubstrateGap(
   }
   if (pointer.status) {
     results = results.filter((g) => g.status === pointer.status);
+  }
+  if (pointer.exclude_categories && pointer.exclude_categories.length) {
+    const excluded = new Set(pointer.exclude_categories);
+    results = results.filter((g) => !excluded.has(String(g.category)));
   }
 
   results = results

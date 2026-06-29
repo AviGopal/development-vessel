@@ -1010,6 +1010,17 @@ async function runGitAwareCutover(args: GitCutoverArgs): Promise<ResolverResult>
 
   const operations: Array<{ op: string; status: string; detail?: string }> = [];
 
+  // 0. Atomicity guard (2026-06-29): never commit with no staged files. An empty
+  // stagedFiles set means there is nothing to apply — committing here would
+  // either be an empty commit or (with a broad `add`) sweep the clone's
+  // pre-existing dirty state. Refuse cleanly.
+  if (!stagedFiles || stagedFiles.length === 0) {
+    return softRefuse(
+      "no staged files — cutover has nothing atomic to commit",
+      { kind: "no_staged_files", vessel_name },
+    );
+  }
+
   // ---- Host-sync intent emission (2026-06-04, Stage B.3) ----
   // When the cutover runs inside the container, `/workspace/repos` is a
   // read-only bind mount of the host super-repo and direct git writes
@@ -1085,7 +1096,71 @@ async function runGitAwareCutover(args: GitCutoverArgs): Promise<ResolverResult>
     };
   }
 
-  // 3. Copy staged files into host repo.
+  const gitCmd = pointer.git_cmd ?? "git";
+
+  // 2b. CLEAN-SLATE the push clone to origin/dev BEFORE applying staged files
+  // (ATOMICITY FIX, 2026-06-29). Root cause of non-atomic / sweepy autonomous
+  // commits: the push clone (hostRepoRoot, /workspace/git/vessels/<v>) carries
+  // PRE-EXISTING uncommitted/divergent state — untracked files, prior in-clone
+  // edits, or a clone whose tracked content has drifted from origin/dev (e.g. a
+  // mitosis tree whose src/index.ts lagged origin/dev caused commit af61dee to
+  // DELETE 655 legit lines while "only" touching one staged file). The
+  // freshness gate only compares mitosis↔runtime, so clone↔origin/dev drift is
+  // invisible. By hard-resetting the clone to the true remote tip first, the
+  // subsequent staged-file copy + scoped commit produces a diff that is EXACTLY
+  // the staged fix and nothing else.
+  //
+  // SAFETY: the clone is a disposable push-staging area ONLY — the live runtime
+  // is /vessels/<v> (baseRoot), mirrored independently in step 9, and the
+  // authored change lives in mitosisRoot. Resetting the clone to origin/dev
+  // loses nothing load-bearing (any committed-but-unpushed work here is either
+  // already on origin/dev or was an earlier sweep we WANT to drop). Set
+  // MITOSIS_SKIP_CLONE_RESET=1 to bypass (escape hatch).
+  if (process.env["MITOSIS_SKIP_CLONE_RESET"] !== "1") {
+    // Best-effort fetch to refresh the local origin/dev ref. In-container this
+    // OFTEN FAILS (the HTTPS PAT is invalid/missing — that is exactly why the
+    // durable push path is the host-sync poller over SSH). A failed fetch must
+    // NOT abort the cutover: we still reset to the LOCAL origin/dev ref, which
+    // is a clean tracked baseline far better than a dirty/divergent clone, and
+    // the host-sync poller (where fetch works) does the authoritative atomic
+    // commit against the true remote tip. So fetch is warn-only.
+    const cleanFetch = await runGit(gitCmd, ["fetch", "origin", "dev"], hostRepoRoot);
+    operations.push({
+      op: cleanFetch.op,
+      status: cleanFetch.exit_code === 0 ? "ok" : "warn",
+      detail: cleanFetch.exit_code === 0 ? "clean-slate fetch" : `fetch unavailable (host-sync is durable path): ${cleanFetch.stderr.slice(0, 160)}`,
+    });
+    // Hard-reset to the (local) origin/dev tracking ref. This is the load-bearing
+    // step: it discards ANY pre-existing dirty/divergent state in the disposable
+    // push clone so the staged-file copy below produces a diff that is exactly
+    // the staged fix. Reset to the local ref works even when fetch failed.
+    const reset = await runGit(gitCmd, ["reset", "--hard", "origin/dev"], hostRepoRoot);
+    operations.push({
+      op: reset.op,
+      status: reset.exit_code === 0 ? "ok" : "fail",
+      detail: reset.exit_code === 0 ? reset.stdout.slice(0, 120) : reset.stderr.slice(0, 200),
+    });
+    if (reset.exit_code !== 0) {
+      // No usable origin/dev ref at all — refuse rather than commit against a
+      // dirty clone (the very bug this step prevents). Soft-refuse → audit obs.
+      return softRefuse(
+        `clean-slate reset --hard origin/dev failed; refusing to commit against a dirty clone: ${reset.stderr.slice(0, 200)}`,
+        { kind: "clone_reset_failed", host_repo_root: hostRepoRoot, operations },
+      );
+    }
+    // Drop untracked + ignored cruft so the clone matches origin/dev exactly and
+    // no stray file can be swept by a later add. Best-effort (warn-only): the
+    // commit is scoped to stagedFiles anyway; this is belt-and-suspenders for
+    // the diff-scope check.
+    const clean = await runGit(gitCmd, ["clean", "-fd"], hostRepoRoot);
+    operations.push({
+      op: clean.op,
+      status: clean.exit_code === 0 ? "ok" : "warn",
+      detail: clean.exit_code === 0 ? "untracked dropped" : clean.stderr.slice(0, 160),
+    });
+  }
+
+  // 3. Copy staged files into the (now clean) host repo clone.
   try {
     await copyTree(mitosisRoot, hostRepoRoot, stagedFiles);
     operations.push({
@@ -1099,8 +1174,6 @@ async function runGitAwareCutover(args: GitCutoverArgs): Promise<ResolverResult>
       { operations },
     );
   }
-
-  const gitCmd = pointer.git_cmd ?? "git";
 
   // 4. git diff --name-only — verify ONLY staged_files are modified.
   const diffNames = await runGit(
@@ -1137,8 +1210,9 @@ async function runGitAwareCutover(args: GitCutoverArgs): Promise<ResolverResult>
     );
   }
 
-  // 5. git add.
-  const add = await runGit(gitCmd, ["add", ...stagedFiles], hostRepoRoot);
+  // 5. git add — SCOPED to stagedFiles via `--` pathspec separator so nothing
+  // outside the staged set is ever staged (atomicity, 2026-06-29).
+  const add = await runGit(gitCmd, ["add", "--", ...stagedFiles], hostRepoRoot);
   operations.push({
     op: add.op,
     status: add.exit_code === 0 ? "ok" : "fail",

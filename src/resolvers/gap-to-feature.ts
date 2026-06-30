@@ -600,13 +600,29 @@ async function closeLandedGap(gap: Record<string, unknown>, land: LandSignal): P
 // Increment a gap's failed_attempts counter when an authoring attempt does NOT land
 // (UNFAVORABLE / staged-not-pushed). Feeds landabilityScore so a stuck gap drops in
 // priority and the loop stops churning on it instead of reaching landable work. Best-effort.
-async function bumpFailedAttempts(gap: Record<string, unknown>): Promise<void> {
+// EXPECTATION-SETTING (closure primitive, 2026-06-29): commit an explicit prediction of
+// whether a gap will LAND, from its features (the landability prior IS the self-model's point
+// estimate). The prediction is measured against the actual outcome (surprise = prediction
+// error) so the substrate accrues a CALIBRATED self-model instead of acting blind. The
+// counterfactual baseline is the 0.5 no-signal prior; p above/below it is the discriminating
+// expectation.
+function predictLand(gap: Record<string, unknown>): { predicted: boolean; p: number } {
+  const p = landabilityScore(gap);
+  return { predicted: p >= 0.5, p };
+}
+
+async function bumpFailedAttempts(gap: Record<string, unknown>, opts: { surprise?: boolean; predictedP?: number } = {}): Promise<void> {
   try {
     const id = String(gap.id ?? "");
     if (!id) return;
     const meta0 = (gap.classification_metadata ?? gap.metadata ?? {}) as Record<string, unknown>;
-    const fa = Number(meta0.failed_attempts ?? 0) + 1;
-    const meta = { ...meta0, failed_attempts: fa, last_failed_at: new Date().toISOString() };
+    // A non-landing attempt the substrate PREDICTED would land is a high-information SURPRISE
+    // (over-optimistic self-model) → deprioritise harder (x2) and tally the calibration miss so
+    // the self-model is measurable. A correctly-predicted fail bumps normally.
+    const weight = opts.surprise ? 2 : 1;
+    const fa = Number(meta0.failed_attempts ?? 0) + weight;
+    const mis = Number(meta0.mispredicted_lands ?? 0) + (opts.surprise ? 1 : 0);
+    const meta = { ...meta0, failed_attempts: fa, last_failed_at: new Date().toISOString(), mispredicted_lands: mis, last_predicted_p: opts.predictedP ?? meta0.last_predicted_p };
     await resolveSubstrateGapWrite({
       type: "substrateGap_write",
       gap: {
@@ -781,9 +797,11 @@ export async function resolveGapToFeature(pointer: GapToFeaturePointer): Promise
       closure.resolution = `landed via mitosis cutover${land.commit_sha ? ` ${land.commit_sha}` : ""}${land.vessel ? ` (${land.vessel})` : ""}`;
     }
   } else if (!(pointer.dry_run ?? false)) {
-    // Did not land (UNFAVORABLE / staged-not-pushed): bump failed_attempts so the picker
-    // deprioritises this stuck gap next round and reaches landable work instead.
-    await bumpFailedAttempts(gap);
+    // Did not land. EXPECTATION-SETTING: measure the prediction-vs-outcome SURPRISE. A gap the
+    // self-model predicted would land but didn't is over-optimistic (high-information) → bump
+    // harder; a correctly-predicted fail bumps normally. Feeds the calibrated self-model.
+    const pred = predictLand(gap);
+    await bumpFailedAttempts(gap, { surprise: pred.predicted, predictedP: pred.p });
   }
 
   return {

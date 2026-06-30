@@ -525,7 +525,16 @@ function landabilityScore(gap: Record<string, unknown>): number {
 }
 function pickMostLandable(gaps: Record<string, unknown>[]): Record<string, unknown> | null {
   if (!gaps.length) return null;
-  return gaps.map((g) => ({ g, s: landabilityScore(g) })).sort((a, b) => b.s - a.s)[0]!.g;
+  // Learned category-level self-knowledge (expectation-setting step 3, 2026-06-29): strongly
+  // deprioritise gaps in a category the substrate has EMPIRICALLY learned it cannot land
+  // (>=8 attempts, 0 lands) — stop wasting cycles on a class it can't author, while leaving a
+  // re-test path (penalty, not hard exclusion) if nothing better exists.
+  const calib = readCalibration();
+  const hopeless = (g: Record<string, unknown>): boolean => {
+    const r = calib[String(g.category ?? "unknown")];
+    return !!r && r.attempts >= 8 && r.lands === 0;
+  };
+  return gaps.map((g) => ({ g, s: landabilityScore(g) - (hopeless(g) ? 0.5 : 0) })).sort((a, b) => b.s - a.s)[0]!.g;
 }
 
 // CLOSE-ON-LAND (2026-06-29). A landed gap previously stayed status:open, so the

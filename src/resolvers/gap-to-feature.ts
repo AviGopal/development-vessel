@@ -737,9 +737,34 @@ async function draftResolverImplBody(shape: string, goalText: string): Promise<s
       `- It MUST end by returning { shape: "${shape}", body: <the computed report object> }.\n` +
       `- On any error, return { shape: "${shape}", body: { error: String(e) } } — never throw.\n` +
       `- ONLY GLOBALS are available: fetch, process.env, AbortSignal, JSON, Math, Date is NOT available for deterministic runs — avoid Date.now()/new Date(); if you need a timestamp read it from data you fetch.\n` +
-      `- Read substrate data over HTTP from activity-api at (process.env.ACTIVITY_API_ENDPOINT ?? "http://127.0.0.1:8080") with header Authorization: \`ApiKey \${process.env.METABOB_API_KEY}\`. Use AbortSignal.timeout(20000). Tolerate non-OK responses gracefully.\n` +
-      `- Keep it self-contained and COMPILING under strict TypeScript (it will be typechecked). Prefer simple, robust aggregation over cleverness.\n\n` +
-      `Respond with ONLY the function-body statements.`;
+      `- Read substrate data IDIOMATICALLY. Header on every call: Authorization: \`ApiKey \${process.env.METABOB_API_KEY}\`, Content-Type application/json, AbortSignal.timeout(20000). Tolerate non-OK/timeout gracefully (never throw). Available reads (USE THESE EXACT PATHS — do NOT invent paths like /traces or /activities):\n` +
+      `    • activity-api = (process.env.ACTIVITY_API_ENDPOINT ?? "http://127.0.0.1:8080"):\n` +
+      `        GET  {activity-api}/v2/activities/templates?limit=100      → { templates: [{ id, metrics:{ thompson_alpha, thompson_beta, success_rate }, output_shapes, ... }] }\n` +
+      `        GET  {activity-api}/v2/activities/composition/graph?limit=200 → composition edges (producer→consumer shape flow)\n` +
+      `        POST {activity-api}/v2/impulses/resolve  body { impulse:{ pointer:{ type:<readShape>, ...filters } } } → { content/body } (read shapes: activityMetrics, executionTraceList, compositionSuccess — each needs shape-specific filter fields; prefer the GET endpoints above when they suffice)\n` +
+      `    • dev-vessel = (process.env.DEV_VESSEL_ENDPOINT ?? "http://127.0.0.1:8090"):\n` +
+      `        POST {dev-vessel}/v2/impulses/resolve body { impulse:{ pointer:{ type:"substrateGap", status:"open", limit:200 } } } → { body:{ gaps:[...] } } (for unsatisfied-shape / closure demand)\n` +
+      `- The producer MUST read REAL data from the correct endpoint above and aggregate it — a producer that returns hardcoded/empty data without fetching is a HOLLOW producer and will be rejected by the goal-reach gate.\n\n` +
+      `STRICT TYPESCRIPT — the file is typechecked with strict:true + noUncheckedIndexedAccess:true. Follow these rules EXACTLY or it will NOT compile:\n` +
+      `  • The wrapper signature is \`(pointer): Promise<ResolverResult>\` where pointer is typed \`{ type: string; [key: string]: unknown }\`. To read a pointer field, access it then coerce — NEVER cast the pointer to a shape. RIGHT: \`const limit = Number((pointer as Record<string, unknown>).limit ?? 100);\`  WRONG: \`pointer as { limit: number }\` (TS2352).\n` +
+      `  • Type ALL fetched JSON as \`any\`: \`const data = (await res.json()) as any;\`. Then narrow arrays defensively: \`const rows: any[] = Array.isArray(data?.templates) ? data.templates : [];\`.\n` +
+      `  • noUncheckedIndexedAccess: array/object index access is \`T | undefined\`. NEVER use \`!\` non-null assertions. Guard every access with \`?.\` and \`?? default\`, or iterate with \`for (const r of rows)\` where r is \`any\`.\n` +
+      `  • Do NOT import anything (only \`ResolverResult\` is imported by the wrapper). Use only globals.\n\n` +
+      `COMPILING SKELETON — adapt this exact structure (it compiles under the strict config); fill in the aggregation for THIS shape:\n` +
+      `  const endpoint = process.env.ACTIVITY_API_ENDPOINT ?? "http://127.0.0.1:8080";\n` +
+      `  const apiKey = process.env.METABOB_API_KEY ?? "";\n` +
+      `  const limit = Number((pointer as Record<string, unknown>).limit ?? 100);\n` +
+      `  try {\n` +
+      `    const res = await fetch(\`\${endpoint}/v2/activities/templates?limit=\${limit}\`, { headers: { Authorization: \`ApiKey \${apiKey}\`, "Content-Type": "application/json" }, signal: AbortSignal.timeout(20000) });\n` +
+      `    if (!res.ok) return { shape: ${JSON.stringify(shape)}, body: { error: \`http \${res.status}\` } };\n` +
+      `    const data = (await res.json()) as any;\n` +
+      `    const rows: any[] = Array.isArray(data?.templates) ? data.templates : [];\n` +
+      `    // ... aggregate rows per the spec into \`report\` ...\n` +
+      `    return { shape: ${JSON.stringify(shape)}, body: { count: rows.length, /* real aggregated fields */ } };\n` +
+      `  } catch (e) {\n` +
+      `    return { shape: ${JSON.stringify(shape)}, body: { error: String(e) } };\n` +
+      `  }\n\n` +
+      `Respond with ONLY the function-body statements (no signature, no imports, no fences).`;
     const res = await fetch(endpoint, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `ApiKey ${METABOB_API_KEY}` },

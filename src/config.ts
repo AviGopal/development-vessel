@@ -582,6 +582,8 @@ export const config = {
       "author_producer",
       // Seam ③ substrate-authored resolver (2026-06-30): producer for traceCompletenessReport (capability-gap autoclosure)
       "traceCompletenessReport",
+      // Seam ③ substrate-authored resolver (2026-06-30): coarsenable_chain
+      "coarsenableChain",
     ] as const,
     resolveEndpoint: "/v2/impulses/resolve",
     resolveRequestFormat: "pointer" as const,

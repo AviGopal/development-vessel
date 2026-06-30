@@ -251,6 +251,21 @@ import { METABOB_API_KEY } from "../config.js";
  * substrate's processing capacity. Shorter, well-defined goals yield higher
  * recommendation scores and faster resolution cycles. The guard check below
  * validates incoming goal text against this limit before dispatch.
+ *
+ * Design context (closes auto-synthesized documentation gap):
+ *  - Token budget: at ~4 chars/token, 8192 chars ≈ 2k tokens, leaving the
+ *    majority of any reasonable LLM context window free for system prompts,
+ *    retrieved context, and model output during goal synthesis.
+ *  - Goal-host API limit: 8192 mirrors goal-host-vessel's own /run-goal input
+ *    ceiling; this resolver pre-validates so callers fail fast here with a
+ *    structured error instead of receiving an opaque 4xx from goal-host.
+ *  - Resolver performance: bounding payload size keeps validation, hashing,
+ *    and dispatch latency predictable and prevents a single oversized goal
+ *    from inflating cost/latency for every downstream consumer.
+ *  - On exceed: the guard rejects the dispatch at the entry boundary with a
+ *    structured error rather than truncating, partially dispatching, or
+ *    propagating an LLM context-overflow downstream. Raising this ceiling
+ *    requires a coordinated change with goal-host-vessel.
  */
 const MAX_GOAL_LEN = 8192;
 const GOAL_HOST_ENDPOINT = process.env["GOAL_HOST_VESSEL_ENDPOINT"] ?? "http://127.0.0.1:8210";

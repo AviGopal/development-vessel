@@ -319,6 +319,37 @@ async function pathExists(p: string): Promise<boolean> {
 }
 
 /**
+ * Best-effort clear of the /workspace/mitosis-pending.json queue lock on a
+ * TERMINAL reject/refuse (2026-06-30, gap cutover-stale-pending-lock-on-reject).
+ *
+ * The no-op "already-applied" path (~line 668) and the success path (step 12)
+ * both unlink the pending pointer, but the terminal REJECT (stale_mitosis,
+ * unfavorable_verdict) and REFUSE (missing_base_sha / freshness violation)
+ * paths did NOT — so a failed staging left mitosis-pending.json in place and
+ * apply-proposal-as-patch then refused every new proposal with "pending mitosis
+ * in flight" until the ~30min lock TTL expired, livelocking the funnel.
+ *
+ * These are terminal decision points (evaluate has already decided NO), so
+ * clearing the queue lock is safe — nothing further will consume the pending
+ * pointer on this path. Mirrors the unlink at the already-applied no-op path.
+ */
+async function clearPendingOnReject(
+  pointer: VesselMitosisCutoverPointer,
+  workspaceRoot: string,
+): Promise<void> {
+  const pendingPath =
+    pointer.pending_pointer_path ?? join(workspaceRoot, "mitosis-pending.json");
+  try {
+    if (await pathExists(pendingPath)) {
+      await unlink(pendingPath);
+      console.error("[mitosis-cutover] cleared pending on reject");
+    }
+  } catch {
+    /* best-effort: a failed clear must not mask the refusal itself */
+  }
+}
+
+/**
  * SELF-ACTIVATION wiring (2026-06-26). Substrate timer scripts
  * (scripts/substrate/*.ts) run from a writable run-dir
  * (SUBSTRATE_RUN_DIR=/workspace/active-scripts) seeded fresh at boot; the unit
@@ -509,6 +540,7 @@ export async function resolveVesselMitosisCutover(
     console.error(`[mitosis-cutover] gate verdict=${evaluation_evidence.verdict} staged_age_ms=${stagedAgeMs ?? "unknown"} max_age_ms=${freshnessMaxAgeMs ?? "unset"} stale=${stale} push_ready=${process.env["MITOSIS_DIRECT_PUSH"] === "1" ? "direct" : (process.env["MITOSIS_HOST_SYNC_MODE"] ?? "unset")}`);
     if (stale) {
       console.error(`[mitosis-cutover] REJECT reason=stale_mitosis staged_age_ms=${stagedAgeMs} max_age_ms=${freshnessMaxAgeMs}`);
+      await clearPendingOnReject(pointer, process.env["WORKSPACE_ROOT"] ?? process.cwd());
       return softRefuse(
         `staged mitosis is stale (age ${stagedAgeMs}ms exceeds MITOSIS_STAGED_MAX_AGE_MS=${freshnessMaxAgeMs}ms)`,
         { staged_age_ms: stagedAgeMs, max_age_ms: freshnessMaxAgeMs, refuse_class: "stale_mitosis" },
@@ -539,6 +571,7 @@ export async function resolveVesselMitosisCutover(
       });
       if (intent) return intent;
     }
+    await clearPendingOnReject(pointer, process.env["WORKSPACE_ROOT"] ?? process.cwd());
     return softRefuse(
       `verdict not FAVORABLE (got ${evaluation_evidence.verdict})`,
       { verdict: evaluation_evidence.verdict, evaluation_evidence },
@@ -757,6 +790,7 @@ export async function resolveVesselMitosisCutover(
       });
       if (intent) return intent;
     }
+    await clearPendingOnReject(pointer, workspaceRoot);
     return softRefuse(
       `mitosis_freshness_violation (${reason})`,
       {

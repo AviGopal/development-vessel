@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { ResolverResult } from "./types.js";
 import { resolveFeatureCompose, priorAttemptFeedbackBlock } from "./feature-compose.js";
@@ -591,6 +591,7 @@ async function closeLandedGap(gap: Record<string, unknown>, land: LandSignal): P
         status: "closed",
       },
     } as never);
+    updateCalibration(String(gap.category ?? "unknown"), true);
     return { closed: true };
   } catch (e) {
     return { closed: false, error: (e as Error).message };
@@ -606,9 +607,34 @@ async function closeLandedGap(gap: Record<string, unknown>, land: LandSignal): P
 // error) so the substrate accrues a CALIBRATED self-model instead of acting blind. The
 // counterfactual baseline is the 0.5 no-signal prior; p above/below it is the discriminating
 // expectation.
-function predictLand(gap: Record<string, unknown>): { predicted: boolean; p: number } {
+// Learned per-category COUNTERFACTUAL baselines (expectation-setting step 2, 2026-06-29):
+// persist the empirical {attempts,lands} per gap category in the workspace volume so
+// predictLand's baseline is the real land-rate for "a gap like this", not a static 0.5 prior.
+// The gap-specific signal (landabilityScore p) is judged AGAINST that learned counterfactual.
+const CALIB_PATH = process.env.EXPECTATION_CALIB_PATH ?? "/workspace/expectation-calibration.json";
+type CalibRec = Record<string, { attempts: number; lands: number }>;
+function readCalibration(): CalibRec {
+  try { return existsSync(CALIB_PATH) ? (JSON.parse(readFileSync(CALIB_PATH, "utf8")) as CalibRec) : {}; }
+  catch { return {}; }
+}
+function updateCalibration(category: string, landed: boolean): void {
+  try {
+    const c = readCalibration();
+    const cat = category || "unknown";
+    const rec = c[cat] ?? { attempts: 0, lands: 0 };
+    rec.attempts += 1; if (landed) rec.lands += 1;
+    c[cat] = rec;
+    writeFileSync(CALIB_PATH, JSON.stringify(c));
+  } catch { /* best-effort */ }
+}
+function predictLand(gap: Record<string, unknown>): { predicted: boolean; p: number; baseline: number } {
   const p = landabilityScore(gap);
-  return { predicted: p >= 0.5, p };
+  // Counterfactual baseline = empirical land-rate for this gap's category (>=5 samples),
+  // else the 0.5 no-signal prior. Predict land only if the gap's signal beats its class.
+  const c = readCalibration();
+  const rec = c[String(gap.category ?? "unknown")];
+  const baseline = rec && rec.attempts >= 5 ? rec.lands / rec.attempts : 0.5;
+  return { predicted: p >= Math.max(0.4, baseline), p, baseline };
 }
 
 async function bumpFailedAttempts(gap: Record<string, unknown>, opts: { surprise?: boolean; predictedP?: number } = {}): Promise<void> {
@@ -619,6 +645,7 @@ async function bumpFailedAttempts(gap: Record<string, unknown>, opts: { surprise
     // A non-landing attempt the substrate PREDICTED would land is a high-information SURPRISE
     // (over-optimistic self-model) → deprioritise harder (x2) and tally the calibration miss so
     // the self-model is measurable. A correctly-predicted fail bumps normally.
+    updateCalibration(String(gap.category ?? "unknown"), false);
     const weight = opts.surprise ? 2 : 1;
     const fa = Number(meta0.failed_attempts ?? 0) + weight;
     const mis = Number(meta0.mispredicted_lands ?? 0) + (opts.surprise ? 1 : 0);

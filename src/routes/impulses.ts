@@ -164,6 +164,7 @@ import { resolveCoarsenableChain } from "../resolvers/coarsenable-chain.js";
 import { resolveLearningPolicy } from "../resolvers/learning-policy.js";
 import { resolveShapeClosureDemand } from "../resolvers/shape-closure-demand.js";
 import { resolveRepairPolicy } from "../resolvers/repair-policy.js";
+import { resolveSelectionEntropy } from "../resolvers/selection-entropy.js";
 import type { ResolverResult } from "../resolvers/types.js";
 
 type AnyPointer = { type: string } & Record<string, unknown>;
@@ -618,6 +619,8 @@ async function dispatchInner(pointer: AnyPointer): Promise<ResolverResult> {
       return resolveShapeClosureDemand(p as Parameters<typeof resolveShapeClosureDemand>[0]);
     case "repairPolicy":
       return resolveRepairPolicy(p as Parameters<typeof resolveRepairPolicy>[0]);
+    case "selectionEntropy":
+      return resolveSelectionEntropy(p as Parameters<typeof resolveSelectionEntropy>[0]);
     default:
       throw new Error(`unknown shape: ${pointer.type}`);
   }

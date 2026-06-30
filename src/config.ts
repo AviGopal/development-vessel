@@ -590,6 +590,10 @@ export const config = {
       "shapeClosureDemand",
       // Seam ③ substrate-authored resolver (2026-06-30): producer for repairPolicy (capability-gap autoclosure)
       "repairPolicy",
+      // Seam ③ substrate-authored resolver (2026-06-30): producer for selectionEntropy.
+      // Re-wired by operator: its commit's config/impulses splice was clobbered by a
+      // concurrent cutover's full-file overwrite (the resolver file landed; the wiring did not).
+      "selectionEntropy",
     ] as const,
     resolveEndpoint: "/v2/impulses/resolve",
     resolveRequestFormat: "pointer" as const,

@@ -851,17 +851,22 @@ export async function resolveGapToFeature(pointer: GapToFeaturePointer): Promise
   try {
     const read = await resolveSubstrateGap({
       type: "substrateGap",
+      // Targeted dispatch: pass the id straight to the read so a SPECIFIC gap is
+      // fetched directly. Without this, selection read a limit-25 window and did
+      // gaps.find(id) on it — a buried gap (store has 1000+) was never found and
+      // the resolver returned "no matching open gap" for a gap that plainly exists.
+      ...(pointer.gap_id ? { id: pointer.gap_id } : {}),
       ...(pointer.category ? { category: pointer.category } : {}),
       status: "open",
       // Exclude goal-host auto_draft_* decision-log noise BEFORE the limit slice
       // so the actionable window is never starved by per-dispatch log entries.
-      // (Log rows stay in the store; an explicit category query can still read them.)
-      exclude_categories: pointer.category ? [] : [...DECISION_LOG_GAP_CATEGORIES],
+      // (Log rows stay in the store; an explicit category/id query reads them.)
+      exclude_categories: (pointer.category || pointer.gap_id) ? [] : [...DECISION_LOG_GAP_CATEGORIES],
       limit: pointer.limit ?? 25,
     } as never);
     const gaps = ((read?.body as { gaps?: Record<string, unknown>[] })?.gaps) ?? [];
     gap = pointer.gap_id
-      ? gaps.find((g) => g.id === pointer.gap_id) ?? null
+      ? gaps.find((g) => g.id === pointer.gap_id) ?? gaps[0] ?? null
       : pickMostLandable(gaps);
   } catch (e) {
     return { shape: "gapToFeatureReport", body: { ok: false, stage: "select", error: (e as Error).message } };

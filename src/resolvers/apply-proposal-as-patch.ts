@@ -941,6 +941,31 @@ export async function resolveApplyProposalAsPatch(pointer: ApplyProposalAsPatchP
       }
     }
     const versionId = `mitosis-${stamp}`;
+    // FRESHNESS ANCHOR (2026-06-30). The cutover's freshness gate hashes the LIVE
+    // staged_files[0] and requires it to equal staged_base_sha ("did the file we're
+    // about to overwrite drift since staging?"). new_files sort first in
+    // fileEntries, but a NET-NEW file is absent live → currentLiveSha=null → the
+    // gate can never pass; and this multifile path previously omitted base_sha
+    // entirely, so the cutover refused with missing_base_sha BEFORE reaching the
+    // direct-push path (why goal-host's single-file stagings land but multifile/
+    // net-new-resolver stagings did not). Anchor freshness on an EXISTING overwrite
+    // file: hash its live content as base_sha and order it first so the cutover's
+    // staged_files[0] sentinel is that existing file. Mirrors patch-with-tools.ts
+    // (base_sha: beforeSha) and feature-compose.ts (sha256sum of the live file).
+    let baseSha = createHash("sha256").update("").digest("hex").slice(0, 12);
+    let orderedStagedFiles = stagedFiles;
+    const sentinelSubPath = overwriteFiles.length > 0
+      ? fileEntries[newFiles.length]?.subPath // first overwrite entry (existing file)
+      : stagedFiles[0];
+    if (sentinelSubPath) {
+      try {
+        const liveSentinel = join(vesselsRoot, vesselOnly, sentinelSubPath);
+        if (await exists(liveSentinel)) {
+          baseSha = createHash("sha256").update(await readFile(liveSentinel)).digest("hex").slice(0, 12);
+        }
+      } catch { /* keep sha256("") fallback */ }
+      orderedStagedFiles = [sentinelSubPath, ...stagedFiles.filter((f) => f !== sentinelSubPath)];
+    }
     const pendingBody = {
       vessel_name: vesselOnly,
       base_version_id: "v1",
@@ -949,7 +974,8 @@ export async function resolveApplyProposalAsPatch(pointer: ApplyProposalAsPatchP
       staged_at: new Date().toISOString(),
       authored_by: "apply_proposal_as_patch:multifile",
       proposal: chosen.name,
-      staged_files: stagedFiles,
+      staged_files: orderedStagedFiles,
+      base_sha: baseSha,
       multifile: true,
     };
     try { await writeFile(pendingPath, JSON.stringify(pendingBody, null, 2)); }

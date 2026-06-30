@@ -588,8 +588,8 @@ export const config = {
       "learningPolicy",
       // Seam ③ substrate-authored resolver (2026-06-30): shape_closure_demand
       "shapeClosureDemand",
-      // Seam ③ substrate-authored resolver (2026-06-30): selection_entropy
-      "selectionEntropy",
+      // Seam ③ substrate-authored resolver (2026-06-30): producer for repairPolicy (capability-gap autoclosure)
+      "repairPolicy",
     ] as const,
     resolveEndpoint: "/v2/impulses/resolve",
     resolveRequestFormat: "pointer" as const,

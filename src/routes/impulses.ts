@@ -125,6 +125,7 @@ import { resolveAppliedProposalSentinelObserver } from "../resolvers/applied-pro
 import { resolveMitosisPendingObserver } from "../resolvers/mitosis-pending-observer.js";
 import { resolveDispatchDroppedObserver } from "../resolvers/dispatch-dropped-observer.js";
 import { resolveLlmApiHealthObserver } from "../resolvers/llm-api-health-observer.js";
+import { resolveTransportHealthObserver } from "../resolvers/transport-health-observer.js";
 import { resolveHostContainerSourceDriftObserver } from "../resolvers/host-container-source-drift-observer.js";
 import { resolveDiskSpaceObserver } from "../resolvers/disk-space-observer.js";
 import { resolveWorkspaceHygieneObserver } from "../resolvers/workspace-hygiene-observer.js";
@@ -488,6 +489,8 @@ async function dispatchInner(pointer: AnyPointer): Promise<ResolverResult> {
       return resolveLlmApiHealthObserver(
         p as Parameters<typeof resolveLlmApiHealthObserver>[0],
       );
+    case "transport_health_observer":
+      return resolveTransportHealthObserver(p as Parameters<typeof resolveTransportHealthObserver>[0]);
     case "host_container_source_drift_observer":
       return resolveHostContainerSourceDriftObserver(
         p as Parameters<typeof resolveHostContainerSourceDriftObserver>[0],

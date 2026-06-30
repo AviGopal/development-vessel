@@ -31,6 +31,13 @@ export const config = {
     // Inline literal so packages/shape-dispatch-check/check.ts can find it.
     // One entry per R2.* resolver in specs/development-vessel/spec.md.
     shapes: [
+    "efficiency_scan",
+    "performance_reach_gate",
+    "perf_canary_resolve",
+    "web_resource",
+    "residual_shape_discovery",
+    "activate_substrate_script",
+    "author_composed_capability",
       "contentAddressedVesselId",
       "lift_demo_noop",
       "emit_shape", // test-fixture: emit an impulse of a configurable shape (synthetic shape-chains)
@@ -448,6 +455,7 @@ export const config = {
       "mitosis_pending_observer",
       "dispatch_dropped_observer",
       "llm_api_health_observer",
+  "transport_health_observer",
       // push_health_observer (2026-06-19): surfaces substrate self-PUSH failure.
       // An authored commit that never reaches origin/dev is a silent learning
       // loss; this observer scans host-sync results/intents + cutover local_only
@@ -465,12 +473,6 @@ export const config = {
       "disk_space_observer",
       "workspace_hygiene_observer",
       "prune_stale_mitosis",
-      // self-activation primitive (2026-06-26): write a substrate-authored new
-      // version of a timer script into the writable run-dir
-      // (/workspace/active-scripts) so it goes live on the next timer firing
-      // WITHOUT an operator container restart. Path-safe: basename-only, *.ts,
-      // must already exist in the run-dir, optional base_sha guard.
-      "activate_substrate_script",
       "learning_signal_health_observer",
       // selector-reward saturation detector (2026-06-14, SUBSTRATE_AS_MDP §9.3
       // limit-8): watches boredom's own UCB reward distribution for degeneracy
@@ -505,18 +507,6 @@ export const config = {
       // the advertised surface. See openspec 2026-06-23-demand-driven-orphan-
       // capability-detection.
       "orphaned_capability_scan",
-      // residual_shape_discovery (2026-06-27): the GENUINE bottom-up discovery
-      // side. The substrate is strong at DEMAND-derived shapes (goal asks →
-      // gap-compose names it) but weak at GENUINE discovery: shapes that MUST
-      // EXIST but are NOT YET NAMED, detected from persistent unexplained
-      // structure in the real trace stream. Heuristic first cut of the residual
-      // geometry: a recurring output-shape CLUSTER forced through a generic
-      // carrier (json_extracted_value/httpResponse/fileContent/…), with no
-      // single composite shape naming it, is an unnamed axis. PROPOSE-ONLY —
-      // emits residual_shape_proposal substrateGaps gated by persistence
-      // (K windows, M traces) + novelty + closure (producer required, consumer
-      // raises confidence). Never mints/registers; ratified later.
-      "residual_shape_discovery",
       // vessel_gap_to_cluster (2026-06-14): the PRODUCER adapter. Reshapes a
       // vessel-arrival gap into a recurringPatternCluster targeting
       // concept_create_write so the real-chain author (draft-activity-from-pattern)
@@ -590,53 +580,11 @@ export const config = {
       // activity that invokes X. The recursive mint-as-you-go primitive — lets
       // the substrate mint a chain of real-resolver producers toward a goal.
       "author_producer",
-      // DECOMPOSITION-AUTHOR (2026-06-27): the capability-BREADTH lever. When
-      // author_producer can't wrap a single resolver for a NOVEL operator shape
-      // (nothing produces it), this plans an LLM-decomposed CHAIN of EXISTING
-      // resolvers (query data → format report) and mints it as a composite — so
-      // the substrate authors a genuinely new multi-resolver capability on goal
-      // demand, not just single-resolver wraps.
-      "author_composed_capability",
     ] as const,
     resolveEndpoint: "/v2/impulses/resolve",
     resolveRequestFormat: "pointer" as const,
     authScheme: "ApiKey" as const,
     resolveTimeoutMs: 10_000,
-    /**
-     * RESOLVER-DESCRIPTION ADVERTISEMENT (2026-06-28). One concise line per
-     * resolver: what it produces + when to use it. This is the per-resolver
-     * knowledge, written ONCE by the vessel that OWNS the resolver — NOT in the
-     * planner. Discovery merges this across vessels and exposes it at
-     * GET /registry/shape-descriptions; author_composed_capability composes from
-     * these descriptions so the loop self-composes ANY described resolver with
-     * no hand-written hint. Keys that aren't in `shapes` are ignored downstream.
-     *
-     * Seeded here: the data/report resolvers an operator goal would need for
-     * coverage/topology/failure-analysis reports. Add a line when you add a
-     * report/data resolver — that one line makes it planner-matchable.
-     */
-    shapeDescriptions: {
-      composition_coverage_report:
-        "Already-computed composition coverage gaps: input shapes consumed by some activity that NOTHING produces (with the consuming activities), orphan output shapes with no consumer, and unconnected pairs. Use for any orphan/coverage/'consumed-but-unproduced'/'no producer' goal.",
-      orphaned_capability_scan:
-        "Advertised OUTWARD capabilities (shapes) that have NO producer activity — the demand-driven orphan set. Use for 'which advertised capabilities/shapes are unbacked or orphaned' goals.",
-      reachable_unlearned_report:
-        "Shapes/activities REACHABLE from the current pool but with NO learned Thompson posterior yet (zero or near-zero samples) — the unlearned frontier. Use to report which reachable capabilities the substrate has not yet exercised/learned.",
-      learned_topology_snapshot:
-        "Snapshot of the learned capability topology: which shapes have producers, which composition edges have credit, and per-cell coverage of the measurement table. Use for 'current learned topology / what has the substrate learned' report goals.",
-      unknown_shape_report:
-        "Shapes referenced as inputs by templates that NO registered vessel advertises — the unknown/unreachable shape set. Use for 'which required shapes have no advertising vessel' goals.",
-      trace_failure_pattern_report:
-        "Recent FAILED traces grouped by (template, first-failed-task) with occurrence counts above a threshold — systematic failure patterns. Use for 'recurring/systematic failures' or 'which templates fail the same way' goals.",
-      resolver_pattern_report:
-        "Per-(resolver_id, output_shape) success-rate report mined from traces. Use to report which resolvers reliably produce which shapes, or to find weak resolver/shape pairs.",
-      load_attribution_report:
-        "Per-template CPU/memory consumption attributed from before/after load samples around each dispatch, surfacing templates that spike resources. Use for 'which templates are expensive / cause load spikes' goals.",
-      system_load_report:
-        "Current substrate resource state read from /proc and cgroup inside the container (loadavg, memory, cpu.stat). Use for 'current system load / is the substrate under resource pressure' goals.",
-      detector_yield_registry:
-        "Per-detector yield report joining gap provenance × gap outcomes (landed/churned/open) × scheduling, classifying each detector PRODUCTIVE/LOW_YIELD/DORMANT/UNKNOWN. Use for 'which detectors are productive vs candidates for retirement' goals.",
-    } as Record<string, string>,
   },
 } as const;
 

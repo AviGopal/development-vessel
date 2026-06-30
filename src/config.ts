@@ -580,6 +580,8 @@ export const config = {
       // activity that invokes X. The recursive mint-as-you-go primitive — lets
       // the substrate mint a chain of real-resolver producers toward a goal.
       "author_producer",
+      // Seam ③ substrate-authored resolver (2026-06-30): producer for traceCompletenessReport (capability-gap autoclosure)
+      "traceCompletenessReport",
     ] as const,
     resolveEndpoint: "/v2/impulses/resolve",
     resolveRequestFormat: "pointer" as const,

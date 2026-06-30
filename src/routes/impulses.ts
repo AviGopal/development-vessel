@@ -159,6 +159,7 @@ import { resolveLlmQuotaObserver } from "../resolvers/llm-quota-observer.js";
 import { resolveAuthorNewResolver } from "../resolvers/author-new-resolver.js";
 import { resolveAuthorProducer } from "../resolvers/author-producer.js";
 import { resolveAuthorComposedCapability } from "../resolvers/author-composed-capability.js";
+import { resolveTraceCompletenessReport } from "../resolvers/trace-completeness-report.js";
 import type { ResolverResult } from "../resolvers/types.js";
 
 type AnyPointer = { type: string } & Record<string, unknown>;
@@ -603,6 +604,8 @@ async function dispatchInner(pointer: AnyPointer): Promise<ResolverResult> {
       return resolveAuthorProducer(p as Parameters<typeof resolveAuthorProducer>[0]);
     case "author_composed_capability":
       return resolveAuthorComposedCapability(p as Parameters<typeof resolveAuthorComposedCapability>[0]);
+    case "traceCompletenessReport":
+      return resolveTraceCompletenessReport(p as Parameters<typeof resolveTraceCompletenessReport>[0]);
     default:
       throw new Error(`unknown shape: ${pointer.type}`);
   }

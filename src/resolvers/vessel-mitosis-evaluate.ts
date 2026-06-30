@@ -86,6 +86,13 @@ interface StaticCheckResult {
   exit_code: number;
   duration_ms: number;
   output_tail: string;
+  /**
+   * True when the check was SIGTERM-killed by STATIC_CHECK_TIMEOUT_MS rather
+   * than completing on its own. A timed-out check produced NO trustworthy
+   * exit code / error output, so it must NOT be read as a typecheck failure
+   * (regression) — the caller treats it as inconclusive (defer-and-retry).
+   */
+  timed_out: boolean;
 }
 
 interface StaticEvalResult {
@@ -94,10 +101,29 @@ interface StaticEvalResult {
   reason: string;
   checks: StaticCheckResult[];
   duration_ms: number;
+  /**
+   * V40: set when a static check was SIGTERM-killed by the timeout (no
+   * completed verdict). This is INCONCLUSIVE, not a failure — the caller
+   * must NOT frame it as an UNFAVORABLE regression; it should defer and
+   * re-evaluate next tick (in a quieter window).
+   */
+  timed_out?: boolean;
 }
 
-const STATIC_CHECK_TIMEOUT_MS = 60_000;
+// V40 (2026-06-30): raised 60s → 120s. Overlay typechecks of large vessels
+// under autonomous-loop load (the substrate exercising itself concurrently)
+// legitimately exceed 60s — the SIGTERM-killed tsc then returned exit 143,
+// which the failure-reason assembly framed as a '(regression)' UNFAVORABLE
+// for a change that actually compiles. The timeout case is now detected and
+// surfaced as a DISTINCT, inconclusive result (see runCheck.timed_out and the
+// timeout branch in staticEvaluate) so the cutover defers-and-retries in a
+// quieter window instead of terminally rejecting a clean patch.
+const STATIC_CHECK_TIMEOUT_MS = 120_000;
 const OUTPUT_TAIL_BYTES = 4096;
+// POSIX 128 + SIGTERM(15). Bun.spawn's proc.kill() sends SIGTERM, so a
+// timeout-killed child exits 143. We also set an explicit timed_out flag so
+// we never confuse a genuine non-zero tsc exit with a kill.
+const SIGTERM_EXIT_CODE = 143;
 
 function tail(s: string, n: number): string {
   if (s.length <= n) return s;
@@ -122,6 +148,7 @@ async function runCheck(
   const start = Date.now();
   let exit = -1;
   let out = "";
+  let timedOut = false;
   try {
     const proc = Bun.spawn([bunCmd, ...args], {
       cwd,
@@ -129,6 +156,9 @@ async function runCheck(
       stderr: "pipe",
     });
     const timer = setTimeout(() => {
+      // V40: record that WE killed it. The resulting exit code (143 / -1) must
+      // not be interpreted as a tsc verdict — it's a kill, not a completion.
+      timedOut = true;
       try {
         proc.kill();
       } catch {
@@ -145,11 +175,18 @@ async function runCheck(
   } catch (err) {
     out = `spawn_error: ${(err as Error).message}`;
   }
+  // Belt-and-braces: if the timer didn't flip the flag but the process exited
+  // with the SIGTERM code AND produced no error output, treat it as a kill too.
+  // A genuine tsc failure exits non-zero WITH `error TS…` lines in its output.
+  if (!timedOut && exit === SIGTERM_EXIT_CODE && !/error TS\d+:/.test(out)) {
+    timedOut = true;
+  }
   return {
     name,
     exit_code: exit,
     duration_ms: Date.now() - start,
     output_tail: tail(out, OUTPUT_TAIL_BYTES),
+    timed_out: timedOut,
   };
 }
 
@@ -305,6 +342,21 @@ async function staticEvaluate(
       `bun run ${scriptName}`,
     );
     completed.push(r);
+    if (r.timed_out) {
+      // V40 (2026-06-30): the check was SIGTERM-killed by STATIC_CHECK_TIMEOUT_MS
+      // — it produced no completed verdict, so we cannot tell whether the code
+      // compiles. This is NOT a regression; framing it as one terminally rejects
+      // a change that may well be clean. Return a DISTINCT inconclusive result so
+      // the caller defers and re-evaluates next tick in a quieter window.
+      return {
+        attempted: true,
+        ok: false,
+        reason: `static_check_timeout: '${scriptName}' killed after ${STATIC_CHECK_TIMEOUT_MS}ms (exit=${r.exit_code}) — inconclusive, NOT a regression`,
+        checks: completed,
+        duration_ms: Date.now() - start,
+        timed_out: true,
+      };
+    }
     if (r.exit_code !== 0) {
       // V32 (2026-06-09): delta-aware verdict. Vessels carry pre-existing
       // baseline typecheck errors (e.g. boredom-vessel src/index.ts:1805
@@ -368,6 +420,17 @@ async function staticEvaluate(
   if (!skipTests) {
     const test = await runCheck(bunCmd, ["test"], runRoot, "bun test");
     completed.push(test);
+    if (test.timed_out) {
+      // V40: same inconclusive treatment as the script checks above.
+      return {
+        attempted: true,
+        ok: false,
+        reason: `static_check_timeout: 'bun test' killed after ${STATIC_CHECK_TIMEOUT_MS}ms (exit=${test.exit_code}) — inconclusive, NOT a regression`,
+        checks: completed,
+        duration_ms: Date.now() - start,
+        timed_out: true,
+      };
+    }
     if (test.exit_code !== 0) {
       return {
         attempted: true,
@@ -519,6 +582,32 @@ export async function resolveVesselMitosisEvaluate(
       pointer.skip_tests ?? false,
     );
     console.error(`[mitosis-evaluate] static attempted=${staticResult.attempted} ok=${staticResult.ok} reason=${staticResult.reason} | mitosis_root=${pointer.mitosis_root} base=${pointer.static_check_base_root} staged_files=${JSON.stringify(pointer.staged_files)} (type ${typeof pointer.staged_files}) scripts=${JSON.stringify(pointer.static_check_scripts)}`);
+    if (staticResult.attempted && staticResult.timed_out) {
+      // V40 (2026-06-30): the static check was SIGTERM-killed by the timeout —
+      // no completed verdict, so this is INCONCLUSIVE, not a regression. Emit
+      // INSUFFICIENT_DATA (NOT UNFAVORABLE) so the cutover treats it as
+      // defer-and-retry-next-tick (the existing INSUFFICIENT_DATA/NEUTRAL soft
+      // path) and re-evaluates in a quieter window — instead of terminally
+      // rejecting a change that may well compile. A genuine non-zero tsc exit
+      // WITH error output never reaches here (it is not flagged timed_out) and
+      // still produces UNFAVORABLE below.
+      const timedOutCheck = staticResult.checks.find((c) => c.timed_out);
+      console.error(`[mitosis-evaluate] static_check_timeout → INSUFFICIENT_DATA (defer) reason=${staticResult.reason}`);
+      return {
+        shape: "vesselMitosisEvaluation",
+        body: {
+          base_version_id: baseId,
+          mitosis_version_id: mitosisId,
+          verdict: "INSUFFICIENT_DATA",
+          verdict_reason: staticResult.reason,
+          static_check_timeout: true,
+          static_evaluation: staticResult,
+          cited_check_name: timedOutCheck?.name ?? "unknown",
+          cited_check_output_tail: timedOutCheck?.output_tail ?? "",
+          evaluated_at: new Date().toISOString(),
+        },
+      };
+    }
     if (staticResult.attempted && !staticResult.ok) {
       const firstFail = staticResult.checks.find((c) => c.exit_code !== 0);
       return {

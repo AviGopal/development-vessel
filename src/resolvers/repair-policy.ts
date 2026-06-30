@@ -1,5 +1,5 @@
 /**
- * repair_policy — producer for repairPolicy (capability-gap autoclosure).
+ * repair_policy — substrate-authored resolver (Seam ③).
  * Output shape: repairPolicy
  */
 
@@ -11,170 +11,128 @@ export interface RepairPolicyPointer {
 }
 
 export async function resolveRepairPolicy(pointer: RepairPolicyPointer): Promise<ResolverResult> {
-const activityEndpoint = process.env.ACTIVITY_API_ENDPOINT ?? "http://127.0.0.1:8080";
-const devEndpoint = process.env.DEV_VESSEL_ENDPOINT ?? "http://127.0.0.1:8090";
-const apiKey = process.env.METABOB_API_KEY ?? "";
-const headers = {
-  Authorization: `ApiKey ${apiKey}`,
-  "Content-Type": "application/json",
-};
+  // repairPolicy producer — measures whether the substrate's repair/retry behaviour
+  // is FAILURE-MODE-CONDITIONED. SPEC: read recent FAILED traces, bucket them by a
+  // (state-space signature, failure_mode.type) key, and compute a repair_blindness
+  // metric = number of signature buckets that absorb repeated failures while the
+  // selector keeps retrying the same approach (the signature ignores the distinct
+  // failure modes, so repair is blind to WHY it failed).
+  //
+  // IDIOMATIC DATA SOURCE (verified working): activity-api
+  //   POST /v2/impulses/resolve { pointer: { type: "executionTraceWithSignatures",
+  //   success_only:false, limit } } → { content: JSON.stringify({ traces:[{ activity_id,
+  //   status, duration_ms, parent_execution_id, composition_chain, ... }] }) }.
+  // executionTraceList reads the (empty) `execution` paradigm table and returns 0 rows,
+  // so it is NOT usable here. executionTraceWithSignatures returns the real failed
+  // traces. LIMITATION: that read does NOT expose `failure_mode.type` nor an explicit
+  // state-space signature, so we use activity_id as the signature bucket (the stable
+  // grouping key the data actually provides) and treat repeated failures of the same
+  // bucket as evidence of failure-mode-blind retrying; this is recorded in `limitation`.
+  const apiKey = process.env.METABOB_API_KEY ?? "";
+  const activityEndpoint = process.env.ACTIVITY_API_ENDPOINT ?? "http://127.0.0.1:8080";
+  const headers = {
+    Authorization: `ApiKey ${apiKey}`,
+    "Content-Type": "application/json",
+  };
+  const rawLimit = (pointer as Record<string, unknown>)["limit"];
+  const limit = typeof rawLimit === "number" ? rawLimit : 200;
 
-try {
-  // Fetch activity templates to assess reliability metrics
-  const templatesRes = await fetch(
-    `${activityEndpoint}/v2/activities/templates?limit=100`,
-    { headers, signal: AbortSignal.timeout(20000) }
-  );
-  if (!templatesRes.ok) {
-    return { shape: "repairPolicy", body: { error: `templates http ${templatesRes.status}` } };
-  }
-  const templatesData = (await templatesRes.json()) as any;
-  const templates: any[] = Array.isArray(templatesData?.templates) ? templatesData.templates : [];
-
-  // Fetch composition graph to understand shape flow dependencies
-  const graphRes = await fetch(
-    `${activityEndpoint}/v2/activities/composition/graph?limit=200`,
-    { headers, signal: AbortSignal.timeout(20000) }
-  );
-  const graphData = graphRes.ok ? ((await graphRes.json()) as any) : null;
-  const edges: any[] = Array.isArray(graphData?.edges) ? graphData.edges : [];
-
-  // Fetch substrate gaps from dev-vessel to understand unresolved demands
-  const gapsRes = await fetch(
-    `${devEndpoint}/v2/impulses/resolve`,
-    {
+  try {
+    const res = await fetch(`${activityEndpoint}/v2/impulses/resolve`, {
       method: "POST",
       headers,
       signal: AbortSignal.timeout(20000),
-      body: JSON.stringify({ impulse: { pointer: { type: "substrateGap", status: "open", limit: 200 } } }),
-    }
-  );
-  const gapsData = gapsRes.ok ? ((await gapsRes.json()) as any) : null;
-  const gaps: any[] = Array.isArray(gapsData?.body?.gaps) ? gapsData.body.gaps : [];
-
-  // Analyze templates for failure-prone activities (low success rate or skewed thompson params)
-  interface ActivityRisk {
-    id: string;
-    successRate: number;
-    thompsonAlpha: number;
-    thompsonBeta: number;
-    riskScore: number;
-    outputShapes: string[];
-    repairRecommendation: string;
-  }
-
-  const activityRisks: ActivityRisk[] = [];
-
-  for (const tmpl of templates) {
-    const id: string = typeof tmpl?.id === "string" ? tmpl.id : String(tmpl?.id ?? "unknown");
-    const metrics = tmpl?.metrics ?? {};
-    const successRate: number = typeof metrics?.success_rate === "number" ? metrics.success_rate : 0;
-    const alpha: number = typeof metrics?.thompson_alpha === "number" ? metrics.thompson_alpha : 1;
-    const beta: number = typeof metrics?.thompson_beta === "number" ? metrics.thompson_beta : 1;
-    const outputShapes: string[] = Array.isArray(tmpl?.output_shapes) ? tmpl.output_shapes : [];
-
-    // Thompson posterior mean = alpha / (alpha + beta); risk is inverse
-    const thompsonMean = (alpha + beta) > 0 ? alpha / (alpha + beta) : 0.5;
-    // Composite risk: weight success_rate 60%, thompson mean 40%
-    const compositeScore = (successRate * 0.6) + (thompsonMean * 0.4);
-    const riskScore = Math.round((1 - compositeScore) * 100);
-
-    let repairRecommendation = "monitor";
-    if (riskScore >= 70) {
-      repairRecommendation = "immediate-intervention";
-    } else if (riskScore >= 40) {
-      repairRecommendation = "schedule-review";
-    } else if (riskScore >= 20) {
-      repairRecommendation = "low-priority-watch";
-    }
-
-    activityRisks.push({
-      id,
-      successRate,
-      thompsonAlpha: alpha,
-      thompsonBeta: beta,
-      riskScore,
-      outputShapes,
-      repairRecommendation,
+      body: JSON.stringify({
+        pointer: { type: "executionTraceWithSignatures", success_only: false, limit },
+      }),
     });
-  }
-
-  // Sort by riskScore descending
-  activityRisks.sort((a, b) => b.riskScore - a.riskScore);
-
-  // Summarise gap categories
-  interface GapSummary {
-    shape: string;
-    count: number;
-  }
-  const gapMap: Record<string, number> = {};
-  for (const gap of gaps) {
-    const shape: string = typeof gap?.shape === "string" ? gap.shape : (typeof gap?.type === "string" ? gap.type : "unknown");
-    gapMap[shape] = (gapMap[shape] ?? 0) + 1;
-  }
-  const gapSummary: GapSummary[] = Object.entries(gapMap).map(([shape, count]) => ({ shape, count }));
-  gapSummary.sort((a, b) => b.count - a.count);
-
-  // Correlate gaps with high-risk activities via output shapes
-  const criticalShapes: string[] = gapSummary
-    .filter((g) => g.count >= 2)
-    .map((g) => g.shape);
-
-  const criticalActivities = activityRisks.filter((a) =>
-    a.outputShapes.some((s) => criticalShapes.includes(s))
-  );
-
-  // Compute edge-level repair surface: edges whose producer has high risk
-  const highRiskIds = new Set(
-    activityRisks.filter((a) => a.riskScore >= 40).map((a) => a.id)
-  );
-  const atRiskEdges: Array<{ producer: string; consumer: string; shape: string }> = [];
-  for (const edge of edges) {
-    const producer: string = typeof edge?.producer === "string" ? edge.producer : String(edge?.producer ?? "");
-    const consumer: string = typeof edge?.consumer === "string" ? edge.consumer : String(edge?.consumer ?? "");
-    const shape: string = typeof edge?.shape === "string" ? edge.shape : String(edge?.shape ?? "");
-    if (highRiskIds.has(producer)) {
-      atRiskEdges.push({ producer, consumer, shape });
+    if (!res.ok) {
+      return { shape: "repairPolicy", body: { repair_blindness: 0, blind_buckets: [], recommendation: "read_unavailable", limitation: `executionTraceWithSignatures http ${res.status}` } };
     }
+    const outer = (await res.json()) as { content?: string; body?: unknown };
+    let traces: Array<Record<string, unknown>> = [];
+    if (typeof outer.content === "string") {
+      try {
+        const parsed = JSON.parse(outer.content) as { traces?: Array<Record<string, unknown>> };
+        traces = Array.isArray(parsed?.traces) ? parsed.traces : [];
+      } catch {
+        traces = [];
+      }
+    }
+
+    // Keep only failures (success_only:false returns both; status==="failure").
+    const failed = traces.filter((t) => {
+      const s = t["status"];
+      return s === "failure" || s === false || s === "failed";
+    });
+
+    // Bucket failed traces by signature. The verified read does not surface
+    // failure_mode.type or a state-space signature hash, so the signature key is
+    // the activity_id; the "failure mode" axis is approximated from the duration
+    // band (fast-fail vs slow-fail) as a proxy for distinct failure shapes, which
+    // lets us still detect "≥2 distinct failure modes sharing one posterior".
+    interface Bucket {
+      signature: string;
+      count: number;
+      failure_modes: Record<string, number>;
+    }
+    const buckets: Record<string, Bucket> = {};
+    for (const t of failed) {
+      const sig = typeof t["activity_id"] === "string" ? (t["activity_id"] as string) : "unknown";
+      const dur = typeof t["duration_ms"] === "number" ? (t["duration_ms"] as number) : 0;
+      // Duration-band proxy for failure_mode.type (real failure_mode is not exposed).
+      const mode = dur < 500 ? "fast_fail" : dur < 5000 ? "mid_fail" : "slow_fail";
+      let b = buckets[sig];
+      if (!b) {
+        b = { signature: sig, count: 0, failure_modes: {} };
+        buckets[sig] = b;
+      }
+      b.count += 1;
+      b.failure_modes[mode] = (b.failure_modes[mode] ?? 0) + 1;
+    }
+
+    const totalFailures = failed.length;
+    const blindBuckets: Array<{ signature: string; failure_modes: string[]; repeat_rate: number }> = [];
+    for (const key of Object.keys(buckets)) {
+      const b = buckets[key];
+      if (!b) continue;
+      const distinctModes = Object.keys(b.failure_modes);
+      // repeat_rate = share of this signature's failures that are repeats (count>1
+      // means the substrate retried the same signature). High repeat_rate + ≥2
+      // distinct failure modes sharing one signature/posterior = repair blindness:
+      // the selector keeps retrying without conditioning on WHY it failed.
+      const repeatRate = b.count > 1 ? (b.count - 1) / b.count : 0;
+      const isBlind = distinctModes.length >= 2 && b.count >= 2 && repeatRate >= 0.5;
+      if (isBlind) {
+        blindBuckets.push({
+          signature: b.signature,
+          failure_modes: distinctModes,
+          repeat_rate: Math.round(repeatRate * 1000) / 1000,
+        });
+      }
+    }
+    blindBuckets.sort((a, b) => b.repeat_rate - a.repeat_rate);
+
+    const repairBlindness = blindBuckets.length;
+    const recommendation =
+      repairBlindness === 0
+        ? "no failure-mode-blind retry buckets detected in sampled failed traces; repair appears mode-agnostic-safe or sample too thin"
+        : `${repairBlindness} signature bucket(s) absorb ≥2 distinct failure modes under one posterior with high repeat rate — key the Thompson posterior on (signature, failure_mode) so repair stops retrying the same blind approach`;
+
+    return {
+      shape: "repairPolicy",
+      body: {
+        repair_blindness: repairBlindness,
+        blind_buckets: blindBuckets.slice(0, 50),
+        recommendation,
+        total_failed_traces_sampled: totalFailures,
+        distinct_signature_buckets: Object.keys(buckets).length,
+        limitation:
+          "Source executionTraceWithSignatures does not expose failure_mode.type or an explicit state-space signature; activity_id used as the signature bucket and a duration-band proxy used for failure_mode.type. Wire failure_mode into the trace read for a faithful (signature, failure_mode) grouping.",
+      },
+    };
+  } catch (e) {
+    return { shape: "repairPolicy", body: { repair_blindness: 0, blind_buckets: [], recommendation: "error", error: String(e) } };
   }
 
-  // Policy thresholds
-  const policyThresholds = {
-    immediateInterventionMinRisk: 70,
-    scheduleReviewMinRisk: 40,
-    lowPriorityWatchMinRisk: 20,
-    criticalGapMinCount: 2,
-  };
-
-  // Overall health score: average (100 - riskScore) across all templates, or 100 if none
-  const overallHealth =
-    activityRisks.length > 0
-      ? Math.round(
-          activityRisks.reduce((sum, a) => sum + (100 - a.riskScore), 0) /
-            activityRisks.length
-        )
-      : 100;
-
-  const report = {
-    overallHealthScore: overallHealth,
-    totalActivitiesEvaluated: templates.length,
-    totalGapsOpen: gaps.length,
-    policyThresholds,
-    activityRisks: activityRisks.slice(0, 50), // top 50 by risk
-    gapSummary,
-    criticalShapes,
-    criticalActivities: criticalActivities.slice(0, 20),
-    atRiskEdges: atRiskEdges.slice(0, 50),
-    repairPriorityCounts: {
-      immediateIntervention: activityRisks.filter((a) => a.repairRecommendation === "immediate-intervention").length,
-      scheduleReview: activityRisks.filter((a) => a.repairRecommendation === "schedule-review").length,
-      lowPriorityWatch: activityRisks.filter((a) => a.repairRecommendation === "low-priority-watch").length,
-      monitor: activityRisks.filter((a) => a.repairRecommendation === "monitor").length,
-    },
-  };
-
-  return { shape: "repairPolicy", body: report };
-} catch (e) {
-  return { shape: "repairPolicy", body: { error: String(e) } };
-}
 }

@@ -4,6 +4,8 @@ import type { ResolverResult } from "./types.js";
 import { resolveFeatureCompose, priorAttemptFeedbackBlock } from "./feature-compose.js";
 import { resolveSubstrateGap, resolveSubstrateGapWrite, DECISION_LOG_GAP_CATEGORIES } from "./substrate-gap.js";
 import { resolveAuthorProducer } from "./author-producer.js";
+import { resolveAuthorNewResolver } from "./author-new-resolver.js";
+import { resolveApplyProposalAsPatch } from "./apply-proposal-as-patch.js";
 import { DISCOVERY_ENDPOINT, METABOB_API_KEY } from "../config.js";
 
 // Mirror feature-compose's path model: repos/<vessel>/... maps to the writable
@@ -674,6 +676,175 @@ async function bumpFailedAttempts(gap: Record<string, unknown>, opts: { surprise
   } catch { /* best-effort */ }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// CAPABILITY-GAP → AUTHOR_NEW_RESOLVER bridge (net-new producer authoring, 2026-06-30)
+//
+// A capability gap filed by goal-host's shape-graph walk (fileCapabilityGap;
+// classification_metadata.kind === "capability_gap") names a missing OUTPUT SHAPE
+// with no producer AND no live resolver to bridge. The two existing routes BOTH
+// fail this case: the orphaned_capability route needs an EXISTING resolver, and
+// feature_compose free-drafts a phantom vessel for net-new producers (see the note
+// on the orphaned route). The substrate already HAS the right primitive —
+// author_new_resolver (Seam ③) authors a net-new resolver end-to-end (impl + test
+// new_files[], spliced config.ts/impulses.ts overwrite_files[]) as a patch_proposal
+// that apply_proposal_as_patch → mitosis cutover stages, gates (tsc +
+// check-shape-dispatch + bun test) and lands. This route CONNECTS the walk's native
+// recognition to that primitive, closing the whole class of missing-producer gaps
+// autonomously rather than per-shape operator authoring (the S1→S2 unlock).
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** camelCase / PascalCase shape → snake_case resolver name (the form
+ *  author_new_resolver requires: /^[a-z][a-z0-9_]*$/). */
+function shapeToResolverName(shape: string): string {
+  return shape
+    .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
+    .replace(/[^a-zA-Z0-9]+/g, "_")
+    .replace(/_+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .toLowerCase();
+}
+
+/**
+ * Draft the BODY (statements only) of the producer resolver via the llm_completion
+ * vessel — the goal/summary text describes what to compute. The body is wrapped by
+ * author_new_resolver as `async function resolveX(pointer): Promise<ResolverResult>
+ * { <body> }`, so it may reference `pointer` and must end returning
+ * `{ shape: "<shape>", body: {...} }`. Only GLOBALS are available (fetch, process,
+ * AbortSignal) — author_new_resolver adds no imports beyond `ResolverResult`. On
+ * LLM-down / empty, returns null → caller falls back to author_new_resolver's
+ * compiling stub (the gap still closes mechanically; the reach gate flags hollow
+ * output and the loop re-drafts).
+ */
+async function draftResolverImplBody(shape: string, goalText: string): Promise<string | null> {
+  try {
+    const dr = await fetch(`${DISCOVERY_ENDPOINT}/resolve`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `ApiKey ${METABOB_API_KEY}` },
+      body: JSON.stringify({ pointer: { type: "vesselCapability", shape: "llm_completion" } }),
+      signal: AbortSignal.timeout(6000),
+    });
+    if (!dr.ok) return null;
+    const dd = (await dr.json()) as { content?: { vessels?: Array<{ endpoint: string; resolve_endpoint?: string }> } };
+    const best = (dd.content?.vessels ?? [])[0];
+    if (!best) return null;
+    const ep0 = best.resolve_endpoint ?? "/resolve";
+    const endpoint = ep0.startsWith("http") ? ep0 : `${best.endpoint.replace(/\/$/, "")}${ep0.startsWith("/") ? ep0 : `/${ep0}`}`;
+    const prompt =
+      `Write the BODY (statements only — NO function signature, NO import lines, NO markdown fences) of an async TypeScript resolver that PRODUCES the impulse shape "${shape}".\n\n` +
+      `WHAT IT MUST COMPUTE:\n${goalText}\n\n` +
+      `CONTRACT:\n` +
+      `- The body is wrapped as: export async function resolve...(pointer): Promise<ResolverResult> { <YOUR BODY> }\n` +
+      `- It MUST end by returning { shape: "${shape}", body: <the computed report object> }.\n` +
+      `- On any error, return { shape: "${shape}", body: { error: String(e) } } — never throw.\n` +
+      `- ONLY GLOBALS are available: fetch, process.env, AbortSignal, JSON, Math, Date is NOT available for deterministic runs — avoid Date.now()/new Date(); if you need a timestamp read it from data you fetch.\n` +
+      `- Read substrate data over HTTP from activity-api at (process.env.ACTIVITY_API_ENDPOINT ?? "http://127.0.0.1:8080") with header Authorization: \`ApiKey \${process.env.METABOB_API_KEY}\`. Use AbortSignal.timeout(20000). Tolerate non-OK responses gracefully.\n` +
+      `- Keep it self-contained and COMPILING under strict TypeScript (it will be typechecked). Prefer simple, robust aggregation over cleverness.\n\n` +
+      `Respond with ONLY the function-body statements.`;
+    const res = await fetch(endpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `ApiKey ${METABOB_API_KEY}` },
+      body: JSON.stringify({ type: "llm_completion", prompt, model: "anthropic/claude-sonnet-4-6", max_tokens: 2200 }),
+      signal: AbortSignal.timeout(90_000),
+    });
+    if (!res.ok) return null;
+    const j = (await res.json()) as { content?: string; data?: string };
+    let body = String(j.content ?? j.data ?? "").trim();
+    if (!body) return null;
+    // Strip accidental code fences.
+    body = body.replace(/^```(?:ts|typescript)?\s*\n?/i, "").replace(/\n?```\s*$/i, "").trim();
+    // Only unwrap a leaked FULL function: strip the signature AND its matching
+    // closing brace together. Stripping a trailing `}` unconditionally corrupts a
+    // statements-only body (the common case) that legitimately ends in `}` (e.g.
+    // a closing try/catch or returned object literal) → brace imbalance → tsc fails.
+    const sig = body.match(/^export\s+async\s+function[^{]*\{\s*/i);
+    if (sig) {
+      body = body.slice(sig[0].length).replace(/\}\s*$/, "").trim();
+    }
+    return body.length > 0 ? body : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Route a capability gap (missing producer) to author_new_resolver, persist the
+ * resulting patch_proposal to the proposals dir, and apply it (targeted) so the
+ * apply → stage → mitosis-cutover flow lands a real producer. The target vessel
+ * defaults to development-vessel (the substrate's introspection meta-vessel — the
+ * natural home for these measurement/meta producers); a gap may override via
+ * classification_metadata.target_vessel.
+ */
+async function routeCapabilityGapToNewResolver(
+  gap: Record<string, unknown>,
+  missingShape: string,
+  meta: Record<string, unknown>,
+  pointer: GapToFeaturePointer,
+): Promise<ResolverResult> {
+  const vessel = (typeof meta.target_vessel === "string" && meta.target_vessel.trim()) || "development-vessel";
+  const resolverName = shapeToResolverName(missingShape);
+  if (!/^[a-z][a-z0-9_]*$/.test(resolverName)) {
+    return { shape: "gapToFeatureReport", body: { ok: false, route: "author_new_resolver", gap_id: gap.id, error: `cannot derive snake_case resolver name from shape "${missingShape}"` } };
+  }
+  const goalText = String(gap.summary ?? meta.goal ?? `produce the ${missingShape} shape`);
+
+  // Draft the producer body (best-effort; stub fallback inside author_new_resolver).
+  const implBody = pointer.dry_run ? null : await draftResolverImplBody(missingShape, goalText);
+
+  const authored = await resolveAuthorNewResolver({
+    type: "author_new_resolver",
+    vessel,
+    resolver_name: resolverName,
+    shape_name: missingShape,
+    ...(implBody ? { impl_body: implBody } : {}),
+    description: `producer for ${missingShape} (capability-gap autoclosure)`,
+    output_shape: missingShape,
+    input_shapes: Array.isArray(meta.input_shapes) ? (meta.input_shapes as string[]) : [],
+  });
+  if (authored.shape !== "resolverAuthorProposal") {
+    return { shape: "gapToFeatureReport", body: { ok: false, route: "author_new_resolver", gap_id: gap.id, error: "author_new_resolver did not return a proposal", author: authored.body } };
+  }
+  const ab = authored.body as { proposal?: unknown; file_paths?: string[]; shape?: string };
+  const proposalId = `capgap-${resolverName}`;
+
+  if (pointer.dry_run) {
+    return {
+      shape: "gapToFeatureReport",
+      body: {
+        ok: true, route: "author_new_resolver", verdict: "plan",
+        gap_id: gap.id, gap_category: gap.category, target_vessel: vessel,
+        resolver_name: resolverName, shape: missingShape,
+        edit_targets: ab.file_paths ?? [], drafted_impl: false,
+        note: `plan: would author resolver "${resolverName}" producing "${missingShape}" in ${vessel} and land via apply_proposal_as_patch → mitosis cutover`,
+      },
+    };
+  }
+
+  // Persist the proposal where apply_proposal_as_patch reads it, then apply it
+  // targeted so the apply → stage → cutover flow lands this exact producer.
+  try {
+    writeFileSync(join(PROPOSALS_DIR, `${proposalId}-report.json`), JSON.stringify(ab.proposal, null, 2));
+  } catch (e) {
+    return { shape: "gapToFeatureReport", body: { ok: false, route: "author_new_resolver", gap_id: gap.id, error: `could not persist proposal: ${(e as Error).message}` } };
+  }
+  const applied = await resolveApplyProposalAsPatch({ type: "apply_proposal_as_patch", proposal_id: proposalId } as never);
+  const appldBody = (applied?.body ?? {}) as Record<string, unknown>;
+  const staged = applied?.shape !== "structuredError" && appldBody.ok !== false;
+  return {
+    shape: "gapToFeatureReport",
+    body: {
+      ok: staged, route: "author_new_resolver",
+      gap_id: gap.id, gap_category: gap.category, target_vessel: vessel,
+      resolver_name: resolverName, shape: missingShape,
+      proposal_id: proposalId, drafted_impl: Boolean(implBody),
+      edit_targets: ab.file_paths ?? [],
+      apply: appldBody,
+      note: staged
+        ? `authored producer "${resolverName}" for "${missingShape}" and staged via apply_proposal_as_patch; mitosis-tick (evaluate→cutover) drives the land`
+        : `author_new_resolver produced a proposal but apply_proposal_as_patch did not stage it (see apply)`,
+    },
+  };
+}
+
 export async function resolveGapToFeature(pointer: GapToFeaturePointer): Promise<ResolverResult> {
   // 1. Select a gap — landability-ranked when auto-picking (not arbitrary gaps[0]).
   let gap: Record<string, unknown> | null = null;
@@ -745,6 +916,21 @@ export async function resolveGapToFeature(pointer: GapToFeaturePointer): Promise
             : `author_producer could not mint a validated invocation of "${shape}" (see author.last_error); the resolver may need an input the bridge can't yet provision`),
       },
     };
+  }
+
+  // 1c. CAPABILITY-GAP (missing producer, no existing resolver) → author_new_resolver.
+  // The walk files these (kind === "capability_gap", classification_metadata.
+  // missing_shape) when no producer exists for a target output shape. Route to the
+  // create-oriented primitive instead of feature_compose free-draft (see the bridge
+  // note above). This is the S1→S2 unlock for the whole missing-producer class.
+  {
+    const cgMeta = (gap.classification_metadata ?? gap.metadata ?? {}) as Record<string, unknown>;
+    if (String(cgMeta.kind ?? "") === "capability_gap") {
+      const missingShape = String(cgMeta.missing_shape ?? "").trim();
+      if (missingShape) {
+        return await routeCapabilityGapToNewResolver(gap, missingShape, cgMeta, pointer);
+      }
+    }
   }
 
   // 2. Build a spec and route THROUGH the composer. If the gap's drafter

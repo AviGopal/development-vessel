@@ -586,6 +586,8 @@ export const config = {
       "coarsenableChain",
       // Seam ③ substrate-authored resolver (2026-06-30): learning_policy
       "learningPolicy",
+      // Seam ③ substrate-authored resolver (2026-06-30): shape_closure_demand
+      "shapeClosureDemand",
     ] as const,
     resolveEndpoint: "/v2/impulses/resolve",
     resolveRequestFormat: "pointer" as const,

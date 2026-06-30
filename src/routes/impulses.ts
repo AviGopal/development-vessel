@@ -161,6 +161,7 @@ import { resolveAuthorProducer } from "../resolvers/author-producer.js";
 import { resolveAuthorComposedCapability } from "../resolvers/author-composed-capability.js";
 import { resolveTraceCompletenessReport } from "../resolvers/trace-completeness-report.js";
 import { resolveCoarsenableChain } from "../resolvers/coarsenable-chain.js";
+import { resolveLearningPolicy } from "../resolvers/learning-policy.js";
 import type { ResolverResult } from "../resolvers/types.js";
 
 type AnyPointer = { type: string } & Record<string, unknown>;
@@ -609,6 +610,8 @@ async function dispatchInner(pointer: AnyPointer): Promise<ResolverResult> {
       return resolveTraceCompletenessReport(p as Parameters<typeof resolveTraceCompletenessReport>[0]);
     case "coarsenableChain":
       return resolveCoarsenableChain(p as Parameters<typeof resolveCoarsenableChain>[0]);
+    case "learningPolicy":
+      return resolveLearningPolicy(p as Parameters<typeof resolveLearningPolicy>[0]);
     default:
       throw new Error(`unknown shape: ${pointer.type}`);
   }

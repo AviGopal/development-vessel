@@ -584,6 +584,8 @@ export const config = {
       "traceCompletenessReport",
       // Seam ③ substrate-authored resolver (2026-06-30): coarsenable_chain
       "coarsenableChain",
+      // Seam ③ substrate-authored resolver (2026-06-30): learning_policy
+      "learningPolicy",
     ] as const,
     resolveEndpoint: "/v2/impulses/resolve",
     resolveRequestFormat: "pointer" as const,

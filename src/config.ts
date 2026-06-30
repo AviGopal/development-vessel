@@ -585,6 +585,11 @@ export const config = {
     resolveRequestFormat: "pointer" as const,
     authScheme: "ApiKey" as const,
     resolveTimeoutMs: 10_000,
+    // Optional per-shape descriptions advertised on registration so a decomposition
+    // planner can match this vessel's resolvers from descriptions alone. Empty by
+    // default (descriptions are not hand-maintained); discovery-registration reads
+    // it as optional/backward-compat. Declared here so the read typechecks.
+    shapeDescriptions: {} as Record<string, string>,
   },
 } as const;
 

@@ -663,8 +663,10 @@ async function dispatchInner(pointer: AnyPointer): Promise<ResolverResult> {
       return resolveGoalSummary(p as Parameters<typeof resolveGoalSummary>[0]);
     case "activity_metrics":
       return resolveActivityMetrics(p as Parameters<typeof resolveActivityMetrics>[0]);
-    case "summary_of_clock_vessel_functionality":
-      return resolveSummaryOfClockVesselFunctionality(p as Parameters<typeof resolveSummaryOfClockVesselFunctionality>[0]);
+    case "summary_of_clock_vessel_functionality": {
+        const { resolveSummaryOfClockVesselFunctionality } = await import("../resolvers/summary-of-clock-vessel-functionality.js");
+        return resolveSummaryOfClockVesselFunctionality(pointer);
+      }
     case "assessment_summary":
       return resolveAssessmentSummary(p as Parameters<typeof resolveAssessmentSummary>[0]);
     default:

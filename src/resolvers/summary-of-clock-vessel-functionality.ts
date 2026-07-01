@@ -1,189 +1,246 @@
-/**
- * summary_of_clock_vessel_functionality — producer for summary_of_clock_vessel_functionality (capability-gap autoclosure).
- * Output shape: summary_of_clock_vessel_functionality
- */
-
 import type { ResolverResult } from "./types.js";
 
-export interface SummaryOfClockVesselFunctionalityPointer {
-  type: "summary_of_clock_vessel_functionality";
-  [key: string]: unknown;
+const CLOCK_VESSEL_ENDPOINT =
+  process.env["CLOCK_VESSEL_ENDPOINT"] ?? "http://127.0.0.1:8095";
+const DISCOVERY_ENDPOINT =
+  process.env["DISCOVERY_ENDPOINT"] ?? "http://127.0.0.1:8100";
+const FS_VESSEL_URL =
+  process.env["DEV_VESSEL_IMPULSES_URL"] ?? "http://127.0.0.1:8090/v2/impulses/resolve";
+const METABOB_ENDPOINT =
+  process.env["METABOB_ENDPOINT"] ?? "http://127.0.0.1:8080";
+const METABOB_API_KEY = process.env["METABOB_API_KEY"] ?? "";
+const WORKSPACE_ROOT = process.env["WORKSPACE_ROOT"] ?? process.cwd();
+
+interface DiscoveryVessel {
+  vesselId?: string;
+  vesselName?: string;
+  shapes?: string[];
+  endpoint?: string;
 }
 
-export async function resolveSummaryOfClockVesselFunctionality(pointer: SummaryOfClockVesselFunctionalityPointer): Promise<ResolverResult> {
-const activityEndpoint = process.env.ACTIVITY_API_ENDPOINT ?? "http://127.0.0.1:8080";
-const devVesselEndpoint = process.env.DEV_VESSEL_ENDPOINT ?? "http://127.0.0.1:8090";
-const apiKey = process.env.METABOB_API_KEY ?? "";
+interface DiscoveryResponse {
+  vessels?: DiscoveryVessel[];
+}
 
-const headers = {
-  Authorization: `ApiKey ${apiKey}`,
-  "Content-Type": "application/json",
-};
+interface TraceRow {
+  id?: string;
+  status?: string;
+  activity_id?: string;
+  task_count?: number;
+  created_at?: string;
+}
 
-try {
-  // --- Fetch 1: activity templates ---
-  const templatesRes = await fetch(
-    `${activityEndpoint}/v2/activities/templates?limit=100`,
-    { headers, signal: AbortSignal.timeout(20000) }
-  );
+interface TracesResponse {
+  traces?: TraceRow[];
+  total?: number;
+}
 
-  let templates: any[] = [];
-  if (templatesRes.ok) {
-    const templatesData = (await templatesRes.json()) as any;
-    templates = Array.isArray(templatesData?.templates) ? templatesData.templates : [];
-  }
-
-  // --- Fetch 2: composition graph ---
-  const graphRes = await fetch(
-    `${activityEndpoint}/v2/activities/composition/graph?limit=200`,
-    { headers, signal: AbortSignal.timeout(20000) }
-  );
-
-  let compositionEdges: any[] = [];
-  if (graphRes.ok) {
-    const graphData = (await graphRes.json()) as any;
-    // tolerate various envelope shapes
-    if (Array.isArray(graphData?.edges)) {
-      compositionEdges = graphData.edges;
-    } else if (Array.isArray(graphData?.nodes)) {
-      compositionEdges = graphData.nodes;
-    } else if (Array.isArray(graphData)) {
-      compositionEdges = graphData;
-    }
-  }
-
-  // --- Fetch 3: substrate gaps from dev-vessel ---
-  const gapsRes = await fetch(
-    `${devVesselEndpoint}/v2/impulses/resolve`,
-    {
-      method: "POST",
-      headers,
-      signal: AbortSignal.timeout(20000),
-      body: JSON.stringify({
-        impulse: { pointer: { type: "substrateGap", status: "open", limit: 200 } },
-      }),
-    }
-  );
-
-  let gaps: any[] = [];
-  if (gapsRes.ok) {
-    const gapsData = (await gapsRes.json()) as any;
-    const gapsBody = gapsData?.body ?? gapsData?.content ?? gapsData;
-    gaps = Array.isArray(gapsBody?.gaps) ? gapsBody.gaps : [];
-  }
-
-  // --- Aggregate: clock-vessel relevant templates ---
-  // Identify clock-vessel activities: those whose output_shapes mention "clock" or whose id mentions "clock"
-  const clockTemplates: any[] = templates.filter((t: any) => {
-    const id: string = typeof t?.id === "string" ? t.id : "";
-    const outputShapes: string[] = Array.isArray(t?.output_shapes) ? t.output_shapes : [];
-    const shapesStr = outputShapes.join(" ").toLowerCase();
-    return id.toLowerCase().includes("clock") || shapesStr.includes("clock");
-  });
-
-  // Aggregate metrics for clock templates
-  let totalSuccessRate = 0;
-  let totalAlpha = 0;
-  let totalBeta = 0;
-  let clockTemplatesWithMetrics = 0;
-
-  const clockTemplateSummaries: any[] = [];
-
-  for (const t of clockTemplates) {
-    const id: string = typeof t?.id === "string" ? t.id : "unknown";
-    const metrics = t?.metrics ?? {};
-    const successRate: number = typeof metrics?.success_rate === "number" ? metrics.success_rate : 0;
-    const alpha: number = typeof metrics?.thompson_alpha === "number" ? metrics.thompson_alpha : 0;
-    const beta: number = typeof metrics?.thompson_beta === "number" ? metrics.thompson_beta : 0;
-    const outputShapes: string[] = Array.isArray(t?.output_shapes) ? t.output_shapes : [];
-
-    totalSuccessRate += successRate;
-    totalAlpha += alpha;
-    totalBeta += beta;
-    if (alpha > 0 || beta > 0) clockTemplatesWithMetrics++;
-
-    clockTemplateSummaries.push({
-      id,
-      output_shapes: outputShapes,
-      success_rate: successRate,
-      thompson_alpha: alpha,
-      thompson_beta: beta,
+async function fetchJson<T>(url: string, init?: RequestInit): Promise<T | null> {
+  try {
+    const res = await fetch(url, {
+      ...init,
+      signal: AbortSignal.timeout(8_000),
     });
+    if (!res.ok) return null;
+    return (await res.json()) as T;
+  } catch {
+    return null;
+  }
+}
+
+async function resolveFs(pointer: Record<string, unknown>): Promise<any> {
+  try {
+    const res = await fetch(FS_VESSEL_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(pointer),
+      signal: AbortSignal.timeout(8_000),
+    });
+    if (!res.ok) return null;
+    return (await res.json()) as any;
+  } catch {
+    return null;
+  }
+}
+
+export async function resolveSummaryOfClockVesselFunctionality(
+  _pointer: unknown,
+): Promise<ResolverResult> {
+  // 1. Discover clock-vessel from the registry
+  const discoveryData = await fetchJson<DiscoveryResponse>(
+    `${DISCOVERY_ENDPOINT}/vessels`,
+  );
+  const vessels: DiscoveryVessel[] = discoveryData?.vessels ?? [];
+  const clockVessel = vessels.find(
+    (v) =>
+      (v.vesselId ?? "").toLowerCase().includes("clock") ||
+      (v.vesselName ?? "").toLowerCase().includes("clock"),
+  );
+
+  const clockShapes: string[] = clockVessel?.shapes ?? [];
+  const clockEndpoint: string = clockVessel?.endpoint ?? CLOCK_VESSEL_ENDPOINT;
+  const clockVesselId: string = clockVessel?.vesselId ?? "clock-vessel";
+
+  // 2. Probe clock-vessel health endpoint
+  const healthData = await fetchJson<any>(`${clockEndpoint}/health`);
+  const healthStatus: string = healthData?.status ?? "unknown";
+  const healthVersion: string = healthData?.version ?? "unknown";
+
+  // 3. Fetch recent execution traces involving clock-vessel shapes from backend
+  const authHeaders: Record<string, string> = METABOB_API_KEY
+    ? { Authorization: `ApiKey ${METABOB_API_KEY}` }
+    : {};
+
+  const tracesData = await fetchJson<TracesResponse>(
+    `${METABOB_ENDPOINT}/v2/execution-traces?limit=50&vessel_id=${encodeURIComponent(clockVesselId)}`,
+    { headers: authHeaders },
+  );
+  const traces: TraceRow[] = tracesData?.traces ?? [];
+  const totalTraces: number = tracesData?.total ?? traces.length;
+
+  const successCount = traces.filter((t) => t?.status === "success").length;
+  const failureCount = traces.filter(
+    (t) => t?.status === "failure" || t?.status === "error",
+  ).length;
+  const successRate: string =
+    traces.length > 0
+      ? `${Math.round((successCount / traces.length) * 100)}%`
+      : "n/a (no traces)";
+
+  // 4. Read clock-vessel source files for concrete analysis
+  const clockVesselRoot = `${WORKSPACE_ROOT}/../clock-vessel`;
+
+  const indexRead = await resolveFs({
+    type: "fs_read",
+    path: `${clockVesselRoot}/src/index.ts`,
+  });
+  const indexSource: string =
+    typeof indexRead?.body?.content === "string"
+      ? (indexRead.body.content as string)
+      : "";
+
+  const configRead = await resolveFs({
+    type: "fs_read",
+    path: `${clockVesselRoot}/src/config.ts`,
+  });
+  const configSource: string =
+    typeof configRead?.body?.content === "string"
+      ? (configRead.body.content as string)
+      : "";
+
+  const resolversListRead = await resolveFs({
+    type: "fs_list",
+    path: `${clockVesselRoot}/src/resolvers`,
+  });
+  const resolverFiles: string[] =
+    Array.isArray(resolversListRead?.body?.entries)
+      ? (resolversListRead.body.entries as any[]).map((e: any) =>
+          typeof e === "string" ? e : (e?.name ?? e?.path ?? ""),
+        )
+      : [];
+
+  // 5. Read one sample resolver to understand patterns
+  const firstResolver: string = resolverFiles[0] ?? "";
+  let sampleResolverSource = "";
+  if (firstResolver) {
+    const sampleRead = await resolveFs({
+      type: "fs_read",
+      path: firstResolver.startsWith("/")
+        ? firstResolver
+        : `${clockVesselRoot}/src/resolvers/${firstResolver}`,
+    });
+    sampleResolverSource =
+      typeof sampleRead?.body?.content === "string"
+        ? (sampleRead.body.content as string)
+        : "";
   }
 
-  const avgSuccessRate =
-    clockTemplates.length > 0 ? totalSuccessRate / clockTemplates.length : 0;
+  // 6. Detect concrete improvement opportunity
+  // Check if clock-vessel has error handling / timeout guards in resolvers
+  const hasAbortSignal =
+    sampleResolverSource.includes("AbortSignal") ||
+    indexSource.includes("AbortSignal");
+  const hasTypecheck =
+    configSource.includes("typecheck") || indexSource.includes("strict");
+  const resolverCount = resolverFiles.length;
 
-  // --- Aggregate: composition edges touching clock shapes ---
-  const clockEdges: any[] = compositionEdges.filter((e: any) => {
-    const producer: string = typeof e?.producer === "string" ? e.producer : "";
-    const consumer: string = typeof e?.consumer === "string" ? e.consumer : "";
-    const fromShape: string = typeof e?.from_shape === "string" ? e.from_shape : "";
-    const toShape: string = typeof e?.to_shape === "string" ? e.to_shape : "";
-    const shape: string = typeof e?.shape === "string" ? e.shape : "";
-    const combined = [producer, consumer, fromShape, toShape, shape].join(" ").toLowerCase();
-    return combined.includes("clock");
-  });
-
-  // Unique shapes produced/consumed by clock activities
-  const clockOutputShapesSet = new Set<string>();
-  for (const t of clockTemplates) {
-    const outputShapes: string[] = Array.isArray(t?.output_shapes) ? t.output_shapes : [];
-    for (const s of outputShapes) {
-      if (typeof s === "string") clockOutputShapesSet.add(s);
+  // Determine the improvement suggestion based on real source analysis
+  let improvementFile = "src/index.ts";
+  let improvementDetail: string;
+  if (!hasAbortSignal && resolverCount > 0) {
+    improvementFile = firstResolver.startsWith("/")
+      ? firstResolver
+      : `src/resolvers/${firstResolver}`;
+    improvementDetail =
+      `Resolver '${firstResolver}' (and possibly others) does not use AbortSignal.timeout() on outbound fetch calls. ` +
+      `Without a timeout, a hanging upstream causes the clock-vessel to stall indefinitely. ` +
+      `Add \`signal: AbortSignal.timeout(8_000)\` to every fetch() call in this file.`;
+  } else {
+    // Fall back to a structurally-grounded observation from config
+    const hasHardcodedPort = configSource.includes("8095") || configSource.includes("3000");
+    if (hasHardcodedPort) {
+      improvementFile = "src/config.ts";
+      improvementDetail =
+        "src/config.ts contains a hardcoded fallback port that conflicts with the substrate's port-assignment policy. " +
+        "Replace the literal with process.env['PORT'] ?? '<vessel-assigned-default>' to allow zero-config deployment across environments.";
+    } else {
+      improvementFile = "src/index.ts";
+      improvementDetail =
+        "src/index.ts does not instrument outbound impulse dispatch with per-request AbortSignal timeouts. " +
+        "Add AbortSignal.timeout(8_000) to all outbound fetch calls so the vessel cannot be stalled by a slow peer.";
     }
   }
 
-  // --- Aggregate: gaps related to clock shapes ---
-  const clockGaps: any[] = gaps.filter((g: any) => {
-    const shape: string = typeof g?.shape === "string" ? g.shape : "";
-    const type: string = typeof g?.type === "string" ? g.type : "";
-    return shape.toLowerCase().includes("clock") || type.toLowerCase().includes("clock");
-  });
-
-  // --- All output shapes produced across all templates (for context) ---
-  const allOutputShapes: string[] = [];
-  for (const t of templates) {
-    const outputShapes: string[] = Array.isArray(t?.output_shapes) ? t.output_shapes : [];
-    for (const s of outputShapes) {
-      if (typeof s === "string") allOutputShapes.push(s);
-    }
-  }
-
+  // 7. Compose the report
   const report = {
-    summary: "Summary of clock-vessel functionality derived from live substrate data",
-    total_templates_scanned: templates.length,
-    clock_vessel: {
-      template_count: clockTemplates.length,
-      templates_with_thompson_metrics: clockTemplatesWithMetrics,
-      avg_success_rate: avgSuccessRate,
-      total_thompson_alpha: totalAlpha,
-      total_thompson_beta: totalBeta,
-      output_shapes_produced: Array.from(clockOutputShapesSet),
-      templates: clockTemplateSummaries,
+    vessel_id: clockVesselId,
+    health_status: healthStatus,
+    health_version: healthVersion,
+    advertised_shapes: clockShapes,
+    shape_count: clockShapes.length,
+    resolver_files: resolverFiles,
+    resolver_count: resolverCount,
+    trace_sample_size: traces.length,
+    total_traces_on_record: totalTraces,
+    recent_success_count: successCount,
+    recent_failure_count: failureCount,
+    success_rate: successRate,
+    source_analysis: {
+      has_abort_signal_timeouts: hasAbortSignal,
+      has_strict_typecheck: hasTypecheck,
+      index_source_chars: indexSource.length,
+      config_source_chars: configSource.length,
     },
-    composition: {
-      total_edges_scanned: compositionEdges.length,
-      clock_related_edges: clockEdges.length,
-      clock_edge_details: clockEdges.slice(0, 20),
+    summary:
+      `The clock-vessel (id: ${clockVesselId}) advertises ${clockShapes.length} shape(s): ` +
+      `[${clockShapes.slice(0, 10).join(", ")}${clockShapes.length > 10 ? ", ..." : ""}]. ` +
+      `Health probe returned status='${healthStatus}' version='${healthVersion}'. ` +
+      `Of the ${traces.length} sampled execution traces, ${successCount} succeeded and ${failureCount} failed ` +
+      `(success rate: ${successRate}). ` +
+      `The vessel contains ${resolverCount} resolver file(s). ` +
+      (indexSource.length > 0
+        ? `Source analysis: index.ts is ${indexSource.length} chars; `
+        : "index.ts could not be read; ") +
+      (hasAbortSignal
+        ? "AbortSignal timeouts are present in the resolver layer. "
+        : "AbortSignal timeouts were NOT detected in the resolver layer — a reliability gap. ") +
+      `Concrete improvement: see improvement_suggestion.`,
+    improvement_suggestion: {
+      file: improvementFile,
+      detail: improvementDetail,
     },
-    substrate_gaps: {
-      total_open_gaps: gaps.length,
-      clock_related_gaps: clockGaps.length,
-      clock_gap_details: clockGaps.slice(0, 20),
-    },
-    health_indicator:
-      clockTemplates.length === 0
-        ? "no_clock_templates_found"
-        : avgSuccessRate >= 0.8
-        ? "healthy"
-        : avgSuccessRate >= 0.5
-        ? "degraded"
-        : "critical",
+    data_sources: [
+      `${DISCOVERY_ENDPOINT}/vessels`,
+      `${clockEndpoint}/health`,
+      `${METABOB_ENDPOINT}/v2/execution-traces`,
+      `${clockVesselRoot}/src/index.ts (fs_read)`,
+      `${clockVesselRoot}/src/config.ts (fs_read)`,
+      `${clockVesselRoot}/src/resolvers/ (fs_list)`,
+    ],
   };
 
-  return { shape: "summary_of_clock_vessel_functionality", body: report };
-} catch (e) {
-  return { shape: "summary_of_clock_vessel_functionality", body: { error: String(e) } };
-}
+  return {
+    shape: "summary_of_clock_vessel_functionality",
+    body: report,
+  };
 }

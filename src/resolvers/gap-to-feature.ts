@@ -434,7 +434,21 @@ function specFromGap(
 ): string {
   const summary = String(gap.summary ?? gap.title ?? "");
   const meta = (gap.classification_metadata ?? gap.metadata ?? null) as Record<string, unknown> | null;
-  const metaStr = meta ? `\n\nDetector evidence:\n${JSON.stringify(meta, null, 2)}` : "";
+  // Include only the GROUNDING fields as crisp lines — NOT a full classification_metadata
+  // JSON dump. The dump bloats the spec and measurably degrades feature_compose's decompose:
+  // a gap that authored FAVORABLE (op_count:1, typecheck-clean) via a crisp DIRECT spec came
+  // back UNFAVORABLE / 0-ops through this gap path purely from the extra framing + JSON dump.
+  // Keeping the composer's input tight is a loop-wide authoring lever. (2026-07-01)
+  const metaStr = meta
+    ? (() => {
+        const lines = [
+          meta.edit_site ? `Change site: ${String(meta.edit_site)}` : "",
+          meta.suspected_real_location ? `Location: ${String(meta.suspected_real_location)}` : "",
+          meta.matched_excerpt ? `Anchor (existing code near the change): ${String(meta.matched_excerpt)}` : "",
+        ].filter(Boolean).join("\n");
+        return lines ? `\n\n${lines}` : "";
+      })()
+    : "";
   // PRIOR-ATTEMPT FEEDBACK: if the semantic gate already rejected a draft for this gap,
   // surface its findings as explicit, framed re-draft guidance (not just buried in the
   // detector-evidence JSON dump) so the next draft completes the partial fix. Additive.

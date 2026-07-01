@@ -60,6 +60,11 @@ export type SubstrateGapCategory =
   // SLOW or SATURATED — emitted by efficiency_scan(emit_gap). The author loop fixes
   // it, so the substrate manages its own internal systems (load/latency) efficiently.
   | "performance_inefficiency"
+  // documentation_drift (2026-07-01): a doc CLAIM the substrate holds about itself that a
+  // landed code change FALSIFIED — emitted by docs-align-scan (closure detector). Routed to
+  // doc_drift_fix (a prose reach-gate), NOT feature_compose (whose typecheck gate is a no-op
+  // for a .md edit). A document is an expectation; drift is a closure failure.
+  | "documentation_drift"
   | "other";
 
 export type SubstrateGapSource =

@@ -6,6 +6,7 @@ import { resolveSubstrateGap, resolveSubstrateGapWrite, DECISION_LOG_GAP_CATEGOR
 import { resolveAuthorProducer } from "./author-producer.js";
 import { resolveAuthorNewResolver } from "./author-new-resolver.js";
 import { resolveApplyProposalAsPatch } from "./apply-proposal-as-patch.js";
+import { resolveDocDriftFix } from "./doc-drift-fix.js";
 import { DISCOVERY_ENDPOINT, METABOB_API_KEY } from "../config.js";
 
 // Mirror feature-compose's path model: repos/<vessel>/... maps to the writable
@@ -918,6 +919,19 @@ export async function resolveGapToFeature(pointer: GapToFeaturePointer): Promise
   }
   if (!gap) {
     return { shape: "gapToFeatureReport", body: { ok: false, stage: "select", error: "no matching open gap", category: pointer.category ?? null } };
+  }
+
+  // 1a. DOCUMENTATION-DRIFT gaps close via doc_drift_fix, NOT feature_compose (2026-07-01).
+  // A doc is prose: feature_compose grounds/verifies .ts only, so its typecheck→rollback gate
+  // is a no-op for a .md edit — routing prose through it would land an LLM draft with the gate
+  // disabled. doc_drift_fix drafts the minimal edit and gates it with a prose reach-gate (the
+  // doc analogue of verifyGoalReached). It is TRIAGE-only by default (DOC_FIX_AUTOLAND off).
+  if (String(gap.category ?? "") === "documentation_drift") {
+    const ddResult = await resolveDocDriftFix({ type: "doc_drift_fix", gap_id: String(gap.id ?? ""), dry_run: pointer.dry_run });
+    if (!pointer.dry_run && (ddResult?.body as { ok?: boolean } | undefined)?.ok === false) {
+      await bumpFailedAttempts(gap);
+    }
+    return ddResult;
   }
 
   // 1b. ORPHANED-CAPABILITY gaps close via author_producer, NOT feature_compose

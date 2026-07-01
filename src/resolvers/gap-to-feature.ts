@@ -926,6 +926,13 @@ export async function resolveGapToFeature(pointer: GapToFeaturePointer): Promise
       : await resolveAuthorProducer({ type: "author_producer", shape, goal });
     const ab = (author?.body ?? {}) as Record<string, unknown>;
     const minted = author?.shape === "author_producer";
+    // Deprioritise repeated MINT_FAILED. This early-return branch never reached
+    // bumpFailedAttempts (which fires only on the feature_compose path, ~L1056), so
+    // an orphaned-capability gap whose resolver can't be provisioned was re-selected
+    // every run FOREVER (observed: residual_shape_discovery MINT_FAILED hourly with
+    // failed_attempts unset), starving other gaps — the same liveness bug as the
+    // detector-re-emit wipe, on a different code path. Bump so the loop moves on. (2026-07-01)
+    if (!pointer.dry_run && !minted) await bumpFailedAttempts(gap);
     return {
       shape: "gapToFeatureReport",
       body: {
@@ -958,7 +965,14 @@ export async function resolveGapToFeature(pointer: GapToFeaturePointer): Promise
     if (String(cgMeta.kind ?? "") === "capability_gap") {
       const missingShape = String(cgMeta.missing_shape ?? "").trim();
       if (missingShape) {
-        return await routeCapabilityGapToNewResolver(gap, missingShape, cgMeta, pointer);
+        const cgResult = await routeCapabilityGapToNewResolver(gap, missingShape, cgMeta, pointer);
+        // Same liveness fix: this route's failure returns (ok:false) never bumped
+        // failed_attempts either, so a capability_gap the author can't satisfy would
+        // be re-selected forever. Bump on failure so the loop moves on. (2026-07-01)
+        if (!pointer.dry_run && (cgResult?.body as { ok?: boolean } | undefined)?.ok === false) {
+          await bumpFailedAttempts(gap);
+        }
+        return cgResult;
       }
     }
   }

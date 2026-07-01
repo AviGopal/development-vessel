@@ -175,6 +175,7 @@ import { resolveObsidianNoteWithProjectListContent } from "../resolvers/obsidian
 import { resolveSubstantiveFindings } from "../resolvers/substantive-findings.js";
 import { resolveGoalSummary } from "../resolvers/goal-summary.js";
 import { resolveActivityMetrics } from "../resolvers/activity-metrics.js";
+import { resolveSummaryOfClockVesselFunctionality } from "../resolvers/summary-of-clock-vessel-functionality.js";
 import type { ResolverResult } from "../resolvers/types.js";
 
 type AnyPointer = { type: string } & Record<string, unknown>;
@@ -654,6 +655,8 @@ async function dispatchInner(pointer: AnyPointer): Promise<ResolverResult> {
       return resolveGoalSummary(p as Parameters<typeof resolveGoalSummary>[0]);
     case "activity_metrics":
       return resolveActivityMetrics(p as Parameters<typeof resolveActivityMetrics>[0]);
+    case "summary_of_clock_vessel_functionality":
+      return resolveSummaryOfClockVesselFunctionality(p as Parameters<typeof resolveSummaryOfClockVesselFunctionality>[0]);
     default:
       throw new Error(`unknown shape: ${pointer.type}`);
   }

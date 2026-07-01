@@ -621,6 +621,8 @@ export const config = {
       "goal_summary",
       // Seam ③ substrate-authored resolver (2026-07-01): producer for activity_metrics (capability-gap autoclosure)
       "activity_metrics",
+      // Seam ③ substrate-authored resolver (2026-07-01): producer for summary_of_clock_vessel_functionality (capability-gap autoclosure)
+      "summary_of_clock_vessel_functionality",
     ] as const,
     resolveEndpoint: "/v2/impulses/resolve",
     resolveRequestFormat: "pointer" as const,

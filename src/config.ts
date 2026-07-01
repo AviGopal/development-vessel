@@ -609,6 +609,8 @@ export const config = {
       // selectionEntropy, traceCompleteness) and emits an EMERGENT work-mode
       // read-out + per_shape_boost for the develop/collect/reflect arbiter (C9).
       "learningMode",
+      // Seam ③ substrate-authored resolver (2026-07-01): producer for sourceCode (capability-gap autoclosure)
+      "sourceCode",
     ] as const,
     resolveEndpoint: "/v2/impulses/resolve",
     resolveRequestFormat: "pointer" as const,

@@ -597,6 +597,11 @@ export const config = {
       // Re-wired by operator: its commit's config/impulses splice was clobbered by a
       // concurrent cutover's full-file overwrite (the resolver file landed; the wiring did not).
       "selectionEntropy",
+      // P3 (2026-07-01): shape-driven mode-priority controller. Reads the shape
+      // lattice (shapeClosureDemand union open-gap shapes, available producers,
+      // selectionEntropy, traceCompleteness) and emits an EMERGENT work-mode
+      // read-out + per_shape_boost for the develop/collect/reflect arbiter (C9).
+      "learningMode",
     ] as const,
     resolveEndpoint: "/v2/impulses/resolve",
     resolveRequestFormat: "pointer" as const,

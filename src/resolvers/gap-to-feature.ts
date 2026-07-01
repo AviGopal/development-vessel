@@ -500,6 +500,16 @@ const HARD_CATEGORIES = new Set([
 const SURGICAL_CATEGORIES = new Set([
   "missing_capability", "systematic_failure", "reference_integrity", "service_failure",
   "forward_model_artifact",
+  // orphaned_capability lands via author_producer as a DIRECT activity mint (a
+  // Thompson-selectable bridge invoking a live-but-unused resolver) — no
+  // feature_compose + cutover needed. Its provisionable members mint immediately
+  // (e.g. auto-bridge-repairPolicy), so it is genuinely MORE landable than the
+  // hard feature classes; scoring it neutral (0.5) made the picker prefer
+  // systematic_failure gaps that mostly UNFAVORABLE at the LLM frontier, starving
+  // real capability expression. failed_attempts now culls the un-provisionable
+  // orphaned members (MINT_FAILED bump, 2026-07-01), so boosting the class is safe:
+  // the mintable ones land first, the rest deprioritise. (2026-07-01)
+  "orphaned_capability",
 ]);
 // Decision-log categories are LOGS, not work — hard-zero so even if one leaks
 // into the candidate window (belt-and-suspenders to the read-side exclusion) the

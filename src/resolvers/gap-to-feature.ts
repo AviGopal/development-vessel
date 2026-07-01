@@ -897,7 +897,17 @@ export async function resolveGapToFeature(pointer: GapToFeaturePointer): Promise
       // so the actionable window is never starved by per-dispatch log entries.
       // (Log rows stay in the store; an explicit category/id query reads them.)
       exclude_categories: (pointer.category || pointer.gap_id) ? [] : [...DECISION_LOG_GAP_CATEGORIES],
-      limit: pointer.limit ?? 25,
+      // Read the FULL real backlog, not a recency window. The read sorts by
+      // updated_at DESC then slices; a small limit (was 25) silently DROPPED aged
+      // gaps before pickMostLandable ever scored them — so a one-time operator- or
+      // human-filed gap (obsidian DEVELOP request, an architectural gap) that isn't
+      // continuously re-emitted by a detector AGED OUT of the window and was never
+      // worked, however landable. With the decision-log noise already excluded the
+      // real backlog is a few hundred gaps (all in memory via loadGaps), so scoring
+      // them all per run is cheap; landability then governs the WHOLE backlog and
+      // failed_attempts culls repeat-failers, so nothing high-value is starved by
+      // age. This makes the human/operator-request channel reliable. (2026-07-01)
+      limit: pointer.limit ?? 1000,
     } as never);
     const gaps = ((read?.body as { gaps?: Record<string, unknown>[] })?.gaps) ?? [];
     gap = pointer.gap_id

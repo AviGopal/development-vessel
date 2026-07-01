@@ -504,7 +504,7 @@ export function computeDataFlowFacts(
 
   // Parse the diff to associate added lines with their file.
   const declaredIn = new Map<string, string>();
-  const mapSetPattern = /const\s+(\w+)\s*=\s*new\s+(?:Map|Set)\(/;
+  const mapSetPattern = /const\s+(\w+)\s*=\s*new\s+(?:Map|Set)\s*(?:<[^(]*>)?\s*\(/;
   let currentFile = "";
   for (const rawLine of diff.split("\n")) {
     if (rawLine.startsWith("+++ ")) {

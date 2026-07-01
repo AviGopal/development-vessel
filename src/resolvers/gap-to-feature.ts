@@ -4,8 +4,6 @@ import type { ResolverResult } from "./types.js";
 import { resolveFeatureCompose, priorAttemptFeedbackBlock } from "./feature-compose.js";
 import { resolveSubstrateGap, resolveSubstrateGapWrite, DECISION_LOG_GAP_CATEGORIES } from "./substrate-gap.js";
 import { resolveAuthorProducer } from "./author-producer.js";
-import { resolveAuthorNewResolver } from "./author-new-resolver.js";
-import { resolveApplyProposalAsPatch } from "./apply-proposal-as-patch.js";
 import { resolveDocDriftFix } from "./doc-drift-fix.js";
 import { DISCOVERY_ENDPOINT, METABOB_API_KEY } from "../config.js";
 
@@ -730,16 +728,12 @@ function shapeToResolverName(shape: string): string {
 }
 
 /**
- * Draft the BODY (statements only) of the producer resolver via the llm_completion
- * vessel — the goal/summary text describes what to compute. The body is wrapped by
- * author_new_resolver as `async function resolveX(pointer): Promise<ResolverResult>
- * { <body> }`, so it may reference `pointer` and must end returning
- * `{ shape: "<shape>", body: {...} }`. Only GLOBALS are available (fetch, process,
- * AbortSignal) — author_new_resolver adds no imports beyond `ResolverResult`. On
- * LLM-down / empty, returns null → caller falls back to author_new_resolver's
- * compiling stub (the gap still closes mechanically; the reach gate flags hollow
- * output and the loop re-drafts).
+ * DEAD (2026-07-01): no longer called. The capability-gap route now goes through
+ * feature_compose (which drafts + verifies + repairs the whole resolver), retiring this
+ * single-shot, unverified body-drafter that had no typecheck backstop. Kept only to avoid
+ * a large template-literal delete mid-session; safe to remove wholesale in a follow-up.
  */
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 async function draftResolverImplBody(shape: string, goalText: string): Promise<string | null> {
   try {
     const dr = await fetch(`${DISCOVERY_ENDPOINT}/resolve`, {
@@ -817,12 +811,19 @@ async function draftResolverImplBody(shape: string, goalText: string): Promise<s
 }
 
 /**
- * Route a capability gap (missing producer) to author_new_resolver, persist the
- * resulting patch_proposal to the proposals dir, and apply it (targeted) so the
- * apply → stage → mitosis-cutover flow lands a real producer. The target vessel
- * defaults to development-vessel (the substrate's introspection meta-vessel — the
- * natural home for these measurement/meta producers); a gap may override via
- * classification_metadata.target_vessel.
+ * Route a WALK-DEMANDED capability gap (missing producer for a shape a real goal
+ * needed) to feature_compose, which authors a NEW resolver AND verifies+repairs it
+ * (its typecheck + shape-dispatch-check gates enforce the three-place wiring) before
+ * landing via cutover. Two operator constraints (2026-07-01) shape this:
+ *   • JUSTIFY THE SPEND — author only when the capability_gap carries a `goal` (real
+ *     walk demand). No goal ⇒ no demand ⇒ skip (reuse-before-mint; don't mint a
+ *     producer nothing consumes).
+ *   • FOLLOW THE PATTERN — reuse feature_compose's tested verify+repair loop rather
+ *     than the prior single-shot draftResolverImplBody→author_new_resolver path, which
+ *     had no verify backstop and stalled the whole route (0 lands / pending-mitosis
+ *     churn; see finding_2026_07_01_capability_gap_route_stalls).
+ * Target vessel defaults to development-vessel (the introspection meta-vessel); a gap
+ * may override via classification_metadata.target_vessel.
  */
 async function routeCapabilityGapToNewResolver(
   gap: Record<string, unknown>,
@@ -835,62 +836,83 @@ async function routeCapabilityGapToNewResolver(
   if (!/^[a-z][a-z0-9_]*$/.test(resolverName)) {
     return { shape: "gapToFeatureReport", body: { ok: false, route: "author_new_resolver", gap_id: gap.id, error: `cannot derive snake_case resolver name from shape "${missingShape}"` } };
   }
-  const goalText = String(gap.summary ?? meta.goal ?? `produce the ${missingShape} shape`);
+  const goalText = String(meta.goal ?? gap.summary ?? `produce the ${missingShape} shape`);
 
-  // Draft the producer body (best-effort; stub fallback inside author_new_resolver).
-  const implBody = pointer.dry_run ? null : await draftResolverImplBody(missingShape, goalText);
-
-  const authored = await resolveAuthorNewResolver({
-    type: "author_new_resolver",
-    vessel,
-    resolver_name: resolverName,
-    shape_name: missingShape,
-    ...(implBody ? { impl_body: implBody } : {}),
-    description: `producer for ${missingShape} (capability-gap autoclosure)`,
-    output_shape: missingShape,
-    input_shapes: Array.isArray(meta.input_shapes) ? (meta.input_shapes as string[]) : [],
-  });
-  if (authored.shape !== "resolverAuthorProposal") {
-    return { shape: "gapToFeatureReport", body: { ok: false, route: "author_new_resolver", gap_id: gap.id, error: "author_new_resolver did not return a proposal", author: authored.body } };
+  // JUSTIFY THE SPEND (operator 2026-07-01): author a NEW resolver ONLY for a
+  // WALK-DEMANDED capability gap — fileCapabilityGap sets `goal` precisely because a
+  // real goal needed the shape with no producer. No goal = no demand = don't spend the
+  // (expensive) author+verify+cutover time on a producer nothing consumes (reuse-before-
+  // mint; minting an unconsumed producer raises ρ_grow for zero λ₁ gain).
+  if (!String(meta.goal ?? "").trim()) {
+    return { shape: "gapToFeatureReport", body: {
+      ok: false, route: "capability_gap_skipped", gap_id: gap.id, shape: missingShape,
+      reason: "no walk demand (capability_gap carries no goal) — not worth authoring a resolver (reuse-before-mint)",
+    } };
   }
-  const ab = authored.body as { proposal?: unknown; file_paths?: string[]; shape?: string };
-  const proposalId = `capgap-${resolverName}`;
+
+  const kebab = resolverName.replace(/_/g, "-");
+  // FOLLOW THE PATTERN (operator 2026-07-01): route through feature_compose, whose
+  // verify+repair loop is the tested backstop (its typecheck + shape-dispatch-check
+  // gates enforce the three-place wiring). The prior single-shot draftResolverImplBody
+  // → author_new_resolver path had NO verify backstop, so it staged un-typechecked code
+  // that mitosis-cutover then rejected (0 lands / pending-mitosis churn — see
+  // finding_2026_07_01_capability_gap_route_stalls). Reuse the existing tested machinery
+  // instead of a one-off.
+  const spec = [
+    `MISSING PRODUCER for impulse shape "${missingShape}": a real goal needed it and no resolver produces it. AUTHOR A NEW RESOLVER in repos/${vessel} (this is a CREATE, not a surgical edit):`,
+    `1. Create src/resolvers/${kebab}.ts exporting an async resolver \`(pointer): Promise<ResolverResult>\` that reads REAL substrate data and returns { shape: "${missingShape}", body: <computed report> }. It MUST fetch + aggregate real data — a hollow stub is rejected by the goal-reach gate.`,
+    `2. WIRE IT THREE-PLACE in the SAME change (or the shape-dispatch-check fails the verify gate): add "${missingShape}" to the discovery.shapes array in src/config.ts; add \`case "${missingShape}":\` dispatching the new resolver before default: in src/routes/impulses.ts (with its import from "../resolvers/${kebab}.js"); add a per-resolver test test/resolvers/${kebab}.test.ts.`,
+    `3. STRICT TS (strict + noUncheckedIndexedAccess): import only ResolverResult; use only globals (fetch, process.env, AbortSignal, JSON, Math — Date.now() is unavailable); type fetched JSON as any; guard every index access with ?./?? ; never use non-null !.`,
+    `The goal that needs this shape (this is why the spend is justified): ${goalText}`,
+  ].join("\n");
+
+  const compose = await resolveFeatureCompose({
+    type: "feature_compose",
+    spec,
+    verify_vessels: [`repos/${vessel}`],
+    model: pointer.model,
+    dry_run: pointer.dry_run ?? false,
+    keep_on_fail: false,
+    gap: {
+      id: String(gap.id ?? ""),
+      summary: String(gap.summary ?? gap.title ?? ""),
+      classification_metadata: meta,
+      category: String(gap.category ?? ""),
+    },
+    land: !(pointer.dry_run ?? false),
+  });
+  const cb = (compose.body ?? {}) as Record<string, unknown>;
 
   if (pointer.dry_run) {
-    return {
-      shape: "gapToFeatureReport",
-      body: {
-        ok: true, route: "author_new_resolver", verdict: "plan",
-        gap_id: gap.id, gap_category: gap.category, target_vessel: vessel,
-        resolver_name: resolverName, shape: missingShape,
-        edit_targets: ab.file_paths ?? [], drafted_impl: false,
-        note: `plan: would author resolver "${resolverName}" producing "${missingShape}" in ${vessel} and land via apply_proposal_as_patch → mitosis cutover`,
-      },
-    };
+    return { shape: "gapToFeatureReport", body: {
+      ok: cb.ok !== false, route: "capability_gap_via_feature_compose", verdict: "plan",
+      gap_id: gap.id, gap_category: gap.category, target_vessel: vessel,
+      resolver_name: resolverName, shape: missingShape, compose: cb,
+      note: `plan: would author + VERIFY (feature_compose repair loop) a resolver producing "${missingShape}" in ${vessel} and land via cutover`,
+    } };
   }
 
-  // Persist the proposal where apply_proposal_as_patch reads it, then apply it
-  // targeted so the apply → stage → cutover flow lands this exact producer.
-  try {
-    writeFileSync(join(PROPOSALS_DIR, `${proposalId}-report.json`), JSON.stringify(ab.proposal, null, 2));
-  } catch (e) {
-    return { shape: "gapToFeatureReport", body: { ok: false, route: "author_new_resolver", gap_id: gap.id, error: `could not persist proposal: ${(e as Error).message}` } };
+  // CLOSE-ON-LAND: only when feature_compose GENUINELY landed on origin/dev; otherwise
+  // deprioritise so the picker advances (mirrors the main gap_to_feature flow).
+  const land = genuineLandSignal(cb, true);
+  let closed = false;
+  if (land.landed) {
+    const c = await closeLandedGap(gap, land);
+    closed = c.closed;
+  } else {
+    await bumpFailedAttempts(gap);
   }
-  const applied = await resolveApplyProposalAsPatch({ type: "apply_proposal_as_patch", proposal_id: proposalId } as never);
-  const appldBody = (applied?.body ?? {}) as Record<string, unknown>;
-  const staged = applied?.shape !== "structuredError" && appldBody.ok !== false;
   return {
     shape: "gapToFeatureReport",
     body: {
-      ok: staged, route: "author_new_resolver",
+      ok: land.landed, route: "capability_gap_via_feature_compose",
       gap_id: gap.id, gap_category: gap.category, target_vessel: vessel,
       resolver_name: resolverName, shape: missingShape,
-      proposal_id: proposalId, drafted_impl: Boolean(implBody),
-      edit_targets: ab.file_paths ?? [],
-      apply: appldBody,
-      note: staged
-        ? `authored producer "${resolverName}" for "${missingShape}" and staged via apply_proposal_as_patch; mitosis-tick (evaluate→cutover) drives the land`
-        : `author_new_resolver produced a proposal but apply_proposal_as_patch did not stage it (see apply)`,
+      verdict: cb.verdict ?? null, landed: land.landed, landed_commit: land.commit_sha ?? null,
+      gap_closed: closed,
+      note: land.landed
+        ? `authored + VERIFIED a new resolver producing "${missingShape}" (feature_compose verify+repair) and landed via cutover${land.commit_sha ? ` ${land.commit_sha}` : ""}`
+        : `feature_compose could not land a verified resolver for "${missingShape}" (verdict ${String(cb.verdict)}) — gap deprioritised, picker advances`,
     },
   };
 }

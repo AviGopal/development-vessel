@@ -24,6 +24,7 @@ import { resolveSystemdRestart } from "../resolvers/systemd-restart.js";
 import { resolveLearnedTopologySnapshot } from "../resolvers/learned-topology-snapshot.js";
 import { resolveReachableUnlearnedReport } from "../resolvers/reachable-unlearned-report.js";
 import { resolveUnknownShapeReport } from "../resolvers/unknown-shape-report.js";
+import { resolveCodeQualityWithSubstantiveAssessmentContent } from "../resolvers/code-quality-with-substantive-assessment-content.js";
 import { resolveCoverageTick } from "../resolvers/coverage-tick.js";
 import { resolveSubstrateHealthTick } from "../resolvers/substrate-health-tick.js";
 import { resolveComposeTopologyTick } from "../resolvers/compose-topology-tick.js";
@@ -669,6 +670,8 @@ async function dispatchInner(pointer: AnyPointer): Promise<ResolverResult> {
       }
     case "assessment_summary":
       return resolveAssessmentSummary(p as Parameters<typeof resolveAssessmentSummary>[0]);
+    case "code_quality with substantive assessment content":
+      return resolveCodeQualityWithSubstantiveAssessmentContent(pointer);
     default:
       throw new Error(`unknown shape: ${pointer.type}`);
   }

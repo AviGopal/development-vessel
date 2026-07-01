@@ -134,6 +134,8 @@ export const config = {
       // Meta-detector (2026-06-13): vessels logging repeated persistence (write)
       // errors in their journal (e.g. concept-db NULL-vs-NONE INSERT failures).
       "vessel_write_error_scan",
+      // Code quality assessment of clock-vessel source (reads real source files + LLM analysis)
+      "code_quality with substantive assessment content",
       "summary_of_clock_vessel_functionality",
       // Meta-detector (2026-06-13): authored chains whose http_fetch tasks failed
       // (non-2xx) — surfaced via the failure-marker content of the concepts they mint.

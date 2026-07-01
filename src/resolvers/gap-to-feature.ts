@@ -943,6 +943,28 @@ export async function resolveGapToFeature(pointer: GapToFeaturePointer): Promise
     // failed_attempts unset), starving other gaps — the same liveness bug as the
     // detector-re-emit wipe, on a different code path. Bump so the loop moves on. (2026-07-01)
     if (!pointer.dry_run && !minted) await bumpFailedAttempts(gap);
+    // CLOSE-ON-MINT (2026-07-01): a minted bridge IS the closure — the resolver is now
+    // invoked by a Thompson-selectable activity, so it is no longer orphaned. Without
+    // closing, the open-filtered picker re-selects the SAME top orphaned gap every run
+    // and re-mints it idempotently, never advancing to the other orphaned resolvers
+    // (observed: repairPolicy re-picked + re-MINTED though auto-bridge-repairPolicy
+    // already existed). Mirrors closeLandedGap on the feature_compose path (~L1071).
+    if (!pointer.dry_run && minted) {
+      try {
+        await resolveSubstrateGapWrite({
+          type: "substrateGap_write",
+          gap: {
+            id: String(gap.id ?? ""),
+            category: gap.category,
+            source: gap.source,
+            summary: gap.summary,
+            detected_at: gap.detected_at,
+            classification_metadata: (gap.classification_metadata ?? gap.metadata ?? {}) as Record<string, unknown>,
+            status: "closed",
+          },
+        } as never);
+      } catch { /* best-effort */ }
+    }
     return {
       shape: "gapToFeatureReport",
       body: {

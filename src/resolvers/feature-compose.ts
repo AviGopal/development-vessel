@@ -535,6 +535,17 @@ export async function verifyPatchAddressesGap(args: {
   reachability: ReachabilityFact[];
   codeContext?: string;
   llm: (prompt: string) => Promise<string>;
+  /**
+   * Run the LLM "does this diff address the gap?" judge. TRUE only when a real gap
+   * context was supplied. For a FREE-TEXT spec (no gap) there is nothing gap-relative
+   * to judge — the resolver's own doc-contract says: "Absent (e.g. a free-text spec) →
+   * no gap-relative judge, only the reachability hard-fail still applies." Comparing a
+   * free-text diff against a spec-derived (or, worse, stale/unrelated) gap summary made
+   * the judge return addresses=false and sink correct edits. When false, only the
+   * deterministic floors (reachability + stub) apply; a diff that clears them PASSES
+   * without an LLM gap-comparison. (Default true preserves the gap-driven path.)
+   */
+  runSemanticJudge?: boolean;
 }): Promise<SemanticGateVerdict> {
   const { hardFail, reason } = reachabilityHardFail(args.reachability);
   if (hardFail) {
@@ -555,6 +566,13 @@ export async function verifyPatchAddressesGap(args: {
       llm_consulted: false,
       ...(stub.symbol ? { suspected_real_location: stub.symbol } : {}),
     };
+  }
+  // NO-GAP (free-text spec) → the deterministic floors are the ONLY gate. There is no
+  // gap to judge the diff against, so we do NOT run the LLM gap-relative judge (which
+  // would otherwise compare the diff to a spec-derived or stale/unrelated gap and
+  // wrongly return addresses=false). Having cleared reachability + stub, PASS.
+  if (args.runSemanticJudge === false) {
+    return { addresses: true, reason: "no gap context (free-text spec) — passed deterministic reachability + stub floors; gap-relative judge not applicable", on_live_path: true, llm_consulted: false };
   }
   let raw = "";
   try {
@@ -1111,10 +1129,18 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
         let codeHit = "";
         for (const v of touched) {
           const vAbs = `${REPO_ROOT}/${v.replace(/^repos\//, "")}/src`;
-          // Call-sites: `\bSYMBOL\s*(` across src/, minus the definition lines
-          // (function/const/let/var/method NAME). Count distinct hit lines.
+          // REFERENCE-sites: any `\bSYMBOL\b` USE across src/, minus the definition
+          // lines (function/const/let/var/method NAME). A const/value symbol is
+          // "reachable" when it is REFERENCED on a live path, not only when it is
+          // CALLED — e.g. `FED_TRANSPORT_EGRESS` consumed inside a branch of
+          // `endpointForShape` (an indirectly-invoked closure on the resolve path)
+          // has ZERO `SYMBOL(` call-sites yet is very much live. The old grep only
+          // matched `SYMBOL(` (function-call form), so it flagged such consts as dead
+          // and hard-failed a correct edit. Widen to any reference. The dead-code
+          // floor is PRESERVED: a symbol defined and never referenced anywhere still
+          // yields 0 references (the definition line is excluded) → unreachable.
           const callQ = await callTool(toolsEndpoint, "shell", {
-            command: `grep -rEn "\\b${symbol}[[:space:]]*\\(" ${JSON.stringify(vAbs)} 2>/dev/null | grep -vE "(function|const|let|var)[[:space:]]+${symbol}\\b" | grep -vE "^[^:]+:[0-9]+:[[:space:]]*${symbol}[[:space:]]*\\([^)]*\\)[[:space:]]*(:[^={]+)?\\{" || true`,
+            command: `grep -rEn "\\b${symbol}\\b" ${JSON.stringify(vAbs)} 2>/dev/null | grep -vE "(function|const|let|var)[[:space:]]+${symbol}\\b" | grep -vE "^[^:]+:[0-9]+:[[:space:]]*${symbol}[[:space:]]*\\([^)]*\\)[[:space:]]*(:[^={]+)?\\{" || true`,
             cwd: REPO_ROOT,
           });
           const callOut = String((callQ.body as { stdout?: unknown })?.stdout ?? "").trim();
@@ -1154,8 +1180,11 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
           let isEntrypoint = false;
           for (const v of touched) {
             const vAbs = `${REPO_ROOT}/${v.replace(/^repos\//, "")}/src`;
+            // Any reference (not only `SYMBOL(` call form), minus definition lines —
+            // symmetrical with the primary reachability loop above so a symbol
+            // referenced-not-called counts as live and the dead-code floor holds.
             const callQ = await callTool(toolsEndpoint, "shell", {
-              command: `grep -rEn "\\b${symbol}[[:space:]]*\\(" ${JSON.stringify(vAbs)} 2>/dev/null | grep -vE "(function|const|let|var)[[:space:]]+${symbol}\\b" | grep -vE "^[^:]+:[0-9]+:[[:space:]]*${symbol}[[:space:]]*\\([^)]*\\)[[:space:]]*(:[^={]+)?\\{" || true`,
+              command: `grep -rEn "\\b${symbol}\\b" ${JSON.stringify(vAbs)} 2>/dev/null | grep -vE "(function|const|let|var)[[:space:]]+${symbol}\\b" | grep -vE "^[^:]+:[0-9]+:[[:space:]]*${symbol}[[:space:]]*\\([^)]*\\)[[:space:]]*(:[^={]+)?\\{" || true`,
               cwd: REPO_ROOT,
             });
             const callOut = String((callQ.body as { stdout?: unknown })?.stdout ?? "").trim();
@@ -1186,6 +1215,13 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
       }
 
       const llmJudge = (prompt: string) => llmCall(llmEndpoint, prompt, model);
+      // Only run the gap-relative LLM judge when a REAL gap context was threaded
+      // (gap_to_feature path). A free-text spec (no pointer.gap) has no gap to judge
+      // the diff against — the doc-contract on FeatureComposePointer.gap says absent →
+      // no gap-relative judge, only the reachability hard-fail applies. Without this,
+      // the judge compared the diff to a spec-derived / stale gap and sank correct
+      // edits with addresses=false. `gap.summary` present is the signal of a real gap.
+      const hasGapContext = !!(pointer.gap && (pointer.gap.id || pointer.gap.summary));
       semantic_gate = await verifyPatchAddressesGap({
         gapSummary,
         gapMeta: pointer.gap?.classification_metadata,
@@ -1193,6 +1229,7 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
         reachability: facts,
         codeContext,
         llm: llmJudge,
+        runSemanticJudge: hasGapContext,
       });
 
       console.log(`[development-vessel] semantic-gate ${JSON.stringify({

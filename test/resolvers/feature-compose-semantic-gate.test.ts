@@ -6,7 +6,9 @@ import {
   diffIsCreateHeavy,
   detectNewCapabilityStub,
   stripCommentsAndStrings,
+  computeDataFlowFacts,
   type ReachabilityFact,
+  type DataFlowFact,
 } from "../../src/resolvers/feature-compose.js";
 
 // Pins the SEMANTIC cutover-verification gate (2026-06-25, lever 5) — the reach-gate
@@ -345,5 +347,58 @@ describe("verifyPatchAddressesGap — wired-stub hard-fail (functional completen
     });
     expect(v.addresses).toBe(true);
     expect(v.llm_consulted).toBe(true);
+  });
+});
+
+// Data-flow facts (2026-07-01): the gate's third eye. Symbol reachability passed
+// three inert patches in one day (consumed-never-populated ×2, imported-never-called);
+// these pin the deterministic fact computation AND the end-to-end threading into the
+// judge prompt, so a dropped wiring edit can never again pass silently.
+describe("computeDataFlowFacts", () => {
+  it("flags a new Map consumed via .get/.has with zero .set/.add anywhere", () => {
+    const diff = [
+      "+++ b/src/routes/activities.ts",
+      "+    const repairScoresMap = new Map<string, number>();",
+    ].join("\n");
+    const contents = new Map<string, string>([
+      ["/vessels/x/src/routes/activities.ts",
+        "const repairScoresMap = new Map<string, number>();\nif (repairScoresMap.has(id)) v += repairScoresMap.get(id)!;"],
+    ]);
+    const facts = computeDataFlowFacts(diff, contents);
+    expect(facts.some((f: DataFlowFact) => f.kind === "consumed_never_populated" && f.symbol === "repairScoresMap")).toBe(true);
+  });
+
+  it("yields no fact when populate sites exist", () => {
+    const diff = [
+      "+++ b/src/routes/activities.ts",
+      "+    const repairScoresMap = new Map<string, number>();",
+    ].join("\n");
+    const contents = new Map<string, string>([
+      ["/vessels/x/src/routes/activities.ts",
+        "const repairScoresMap = new Map<string, number>();\nrepairScoresMap.set(k, v);\nif (repairScoresMap.has(id)) use(repairScoresMap.get(id));"],
+    ]);
+    expect(computeDataFlowFacts(diff, contents).filter((f: DataFlowFact) => f.symbol === "repairScoresMap")).toHaveLength(0);
+  });
+});
+
+describe("verifyPatchAddressesGap data-flow threading", () => {
+  it("injects the Data-flow facts section into the judge prompt when facts are supplied", async () => {
+    const facts: ReachabilityFact[] = [
+      { symbol: "wireThing", isNewFunction: true, callerCount: 1, isEntrypoint: false, reachable: true },
+    ];
+    const dataFlow: DataFlowFact[] = [
+      { symbol: "orphanMap", file: "src/x.ts", kind: "consumed_never_populated" },
+    ];
+    let seenPrompt = "";
+    await verifyPatchAddressesGap({
+      gapSummary: "wire the thing",
+      diff: "+++ b/src/x.ts\n+function wireThing() { return 1; }\n+export const y = wireThing();",
+      reachability: facts,
+      data_flow: dataFlow,
+      llm: async (prompt: string) => { seenPrompt = prompt; return JSON.stringify({ addresses: true, reason: "ok", on_live_path: true }); },
+    });
+    expect(seenPrompt).toContain("Data-flow facts (deterministic):");
+    expect(seenPrompt).toContain("orphanMap");
+    expect(seenPrompt).toContain("DROPPED EDIT");
   });
 });

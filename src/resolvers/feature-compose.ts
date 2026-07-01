@@ -490,6 +490,81 @@ export function reachabilityHardFail(facts: ReachabilityFact[]): { hardFail: boo
   return { hardFail: false, reason: `${reachable.length}/${facts.length} changed symbols reachable` };
 }
 
+export interface DataFlowFact {
+  symbol: string;
+  file: string;
+  kind: "consumed_never_populated" | "imported_never_called";
+}
+
+export function computeDataFlowFacts(
+  diff: string,
+  postPatchFileContents: Map<string, string>
+): DataFlowFact[] {
+  const facts: DataFlowFact[] = [];
+
+  // Parse the diff to associate added lines with their file.
+  const declaredIn = new Map<string, string>();
+  const mapSetPattern = /const\s+(\w+)\s*=\s*new\s+(?:Map|Set)\(/;
+  let currentFile = "";
+  for (const rawLine of diff.split("\n")) {
+    if (rawLine.startsWith("+++ ")) {
+      currentFile = rawLine.slice(4).replace(/^[ab]\//, "");
+      continue;
+    }
+    if (rawLine.startsWith("+") && !rawLine.startsWith("++")) {
+      const line = rawLine.slice(1);
+      const m = mapSetPattern.exec(line);
+      if (m && m[1]) {
+        declaredIn.set(m[1], currentFile);
+      }
+    }
+  }
+
+  for (const [sym, file] of declaredIn) {
+    let consumed = false;
+    let populated = false;
+    for (const content of postPatchFileContents.values()) {
+      if (content.includes(sym + ".get(") || content.includes(sym + ".has(")) consumed = true;
+      if (content.includes(sym + ".set(") || content.includes(sym + ".add(")) populated = true;
+    }
+    if (consumed && !populated) {
+      facts.push({ symbol: sym, file, kind: "consumed_never_populated" });
+    }
+  }
+
+  // Rule B: added import lines where identifier is never used outside import lines
+  const importPattern = /import\s*\{([^}]+)\}\s*from/;
+  let currentFileB = "";
+  for (const rawLine of diff.split("\n")) {
+    if (rawLine.startsWith("+++ ")) {
+      currentFileB = rawLine.slice(4).replace(/^[ab]\//, "");
+      continue;
+    }
+    if (rawLine.startsWith("+") && !rawLine.startsWith("++")) {
+      const line = rawLine.slice(1);
+      const m = importPattern.exec(line);
+      if (m && m[1]) {
+        const identifiers = m[1]
+          .split(",")
+          .map((s) => s.trim().split(/\s+as\s+/).pop()!.trim())
+          .filter((s) => s.length > 0);
+        const fileContent = postPatchFileContents.get(currentFileB) ?? "";
+        const nonImportLines = fileContent
+          .split("\n")
+          .filter((l) => !l.trimStart().startsWith("import "))
+          .join("\n");
+        for (const ident of identifiers) {
+          if (!nonImportLines.includes(ident)) {
+            facts.push({ symbol: ident, file: currentFileB, kind: "imported_never_called" });
+          }
+        }
+      }
+    }
+  }
+
+  return facts;
+}
+
 function semanticJudgePrompt(
   gapSummary: string,
   gapMeta: Record<string, unknown> | undefined,
@@ -533,6 +608,7 @@ export async function verifyPatchAddressesGap(args: {
   gapMeta?: Record<string, unknown>;
   diff: string;
   reachability: ReachabilityFact[];
+  data_flow?: DataFlowFact[];
   codeContext?: string;
   llm: (prompt: string) => Promise<string>;
   /**

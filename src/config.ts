@@ -31,6 +31,7 @@ export const config = {
     // Inline literal so packages/shape-dispatch-check/check.ts can find it.
     // One entry per R2.* resolver in specs/development-vessel/spec.md.
     shapes: [
+    "assessment_summary",
     "efficiency_scan",
     "performance_reach_gate",
     "perf_canary_resolve",

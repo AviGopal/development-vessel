@@ -295,7 +295,11 @@ async function dispatchInner(pointer: AnyPointer): Promise<ResolverResult> {
       return resolveConvergentValidityCheck(p as Parameters<typeof resolveConvergentValidityCheck>[0]);
     case "trace_failure_pattern_report":
       return resolveTraceFailurePatternReport(p as Parameters<typeof resolveTraceFailurePatternReport>[0]);
-    case "efficiency_scan":
+    case "assessment_summary": {
+        const { resolveAssessmentSummary } = await import("../resolvers/assessment-summary.js");
+        return resolveAssessmentSummary(pointer);
+      }
+      case "efficiency_scan":
       return resolveEfficiencyScan(p as Parameters<typeof resolveEfficiencyScan>[0]);
     case "performance_reach_gate":
       return resolvePerformanceReachGate(p as Parameters<typeof resolvePerformanceReachGate>[0]);

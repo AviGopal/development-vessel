@@ -611,6 +611,8 @@ export const config = {
       "learningMode",
       // Seam ③ substrate-authored resolver (2026-07-01): producer for sourceCode (capability-gap autoclosure)
       "sourceCode",
+      // Seam ③ substrate-authored resolver (2026-07-01): producer for populated_concept_graph_links (capability-gap autoclosure)
+      "populated_concept_graph_links",
     ] as const,
     resolveEndpoint: "/v2/impulses/resolve",
     resolveRequestFormat: "pointer" as const,

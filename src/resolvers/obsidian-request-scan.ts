@@ -175,7 +175,18 @@ export async function resolveObsidianRequestScan(
   }
 
   // 4a. ACK: write the status board the operator reads ("we are working on it").
-  const statusLines = [
+  const statusLines: string[] = [
+    `scan_ts: ${new Date().toISOString()}`,
+  ];
+  for (const req of dispatched) {
+    const what = (req as Record<string, unknown>)["goal"] ?? (req as Record<string, unknown>)["interpreted_as"] ?? (req as Record<string, unknown>)["type"] ?? "unknown";
+    const shapes: unknown = (req as Record<string, unknown>)["expected_output_shapes"];
+    const rationale: unknown = (req as Record<string, unknown>)["rationale"];
+    const shapesStr = Array.isArray(shapes) ? shapes.join(", ") : (typeof shapes === "string" ? shapes : "");
+    const rationaleStr = typeof rationale === "string" ? rationale : "";
+    statusLines.push(`  request: goal=${String(what)}${shapesStr ? ` expected_output_shapes=[${shapesStr}]` : ""}${rationaleStr ? ` rationale=${rationaleStr}` : ""}`);
+  }
+  const _statusLinesContinued = [
     "---", "substrate_board: now", `generated_at: ${generatedAt}`, "---", "",
     "# What I'm working on right now", "",
     "_You asked, I'm on it. Results land under `Substrate/` and I mark your [[Inbox]] item done._", "",

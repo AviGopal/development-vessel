@@ -615,6 +615,8 @@ export const config = {
       "populated_concept_graph_links",
       // Seam ③ substrate-authored resolver (2026-07-01): producer for obsidian:note with project list content (capability-gap autoclosure)
       "obsidian:note with project list content",
+      // Seam ③ substrate-authored resolver (2026-07-01): producer for substantive_findings (capability-gap autoclosure)
+      "substantive_findings",
     ] as const,
     resolveEndpoint: "/v2/impulses/resolve",
     resolveRequestFormat: "pointer" as const,

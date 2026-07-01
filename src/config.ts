@@ -375,6 +375,7 @@ export const config = {
       "vessel_architecture_pattern_scan",
       "activity_lifecycle_audit",
       "resolver_distribution_audit",
+      "sourceCodeAnalysis",
       // Gap → drafter input-boundary bridge (Break 1, 2026-06-04).
       // Reads substrateGap rows from WORKSPACE_ROOT/gaps/gaps.json and writes
       // scenario JSON files into WORKSPACE_ROOT/validation/failure-modes/scenarios/

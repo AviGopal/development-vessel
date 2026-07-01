@@ -207,6 +207,16 @@ async function fetchInvokedResolvers(
         const r1 = task.resolver_id ?? task.resolver ?? task.config?.type;
         if (r1) invoked.add(r1);
       }
+      // An `auto-bridge-<shape>` activity EXISTS precisely to invoke a previously-
+      // orphaned resolver. Count the shape as expressed from the bridge's existence,
+      // not only from a task whose resolver field the loop happens to recognise —
+      // author_producer's bridge may invoke the resolver in a form (compose/subActivity)
+      // this scan doesn't parse, so without this the shape stayed "orphaned" forever and
+      // the loop churned mint→close→re-flag on it (e.g. repairPolicy re-minted 5×/90m,
+      // starving every other gap incl. operator requests). (2026-07-01)
+      const tid = String((t as { id?: string }).id ?? "").replace(/^activity:⟨/, "").replace(/⟩$/, "");
+      const bm = tid.match(/^auto-bridge-(.+)$/);
+      if (bm && bm[1]) invoked.add(bm[1]);
     }
     offset += templates.length;
   }
@@ -265,6 +275,30 @@ async function emitOrphanGap(
   }
 }
 
+// Shapes whose `orphaned-capability-<shape>` gap is already CLOSED = a bridge was minted
+// (capability expressed). Read from our own gap store, because the invoked-set (built from
+// the legacy activity_template endpoint) CANNOT see auto-bridge-<shape> activities — they
+// land in the `activity` paradigm table. Without this the scan re-flagged already-bridged
+// shapes every cycle → the loop churned mint→close→re-flag (repairPolicy re-minted 5×/90m,
+// starving all other gaps). Best-effort; empty set on failure. (2026-07-01)
+async function fetchClosedOrphanShapes(emitUrl: string, apiKey: string): Promise<Set<string>> {
+  const out = new Set<string>();
+  try {
+    const r = await fetch(emitUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...(apiKey ? { Authorization: `ApiKey ${apiKey}` } : {}) },
+      body: JSON.stringify({ impulse: { pointer: { type: "substrateGap", status: "closed", category: "orphaned_capability", limit: 500 } } }),
+      signal: AbortSignal.timeout(10_000),
+    });
+    const j = (await r.json()) as { body?: { gaps?: Array<{ id?: string }> } };
+    for (const g of j.body?.gaps ?? []) {
+      const m = String(g.id ?? "").match(/^orphaned-capability-(.+)$/);
+      if (m && m[1]) out.add(m[1]);
+    }
+  } catch { /* best-effort */ }
+  return out;
+}
+
 export async function resolveOrphanedCapabilityScan(
   pointer: OrphanedCapabilityScanPointer,
 ): Promise<ResolverResult> {
@@ -288,7 +322,11 @@ export async function resolveOrphanedCapabilityScan(
   const invokedSet = invoked ?? new Set<string>();
 
   const orphanCandidates = liveShapes.filter((s) => !invokedSet.has(s));
-  const capabilityOrphans = orphanCandidates.filter(isOutwardCapability).sort();
+  // Drop shapes already expressed by a minted bridge (closed orphan gap) — see
+  // fetchClosedOrphanShapes: the invoked-set can't see paradigm-table auto-bridges,
+  // so this is what actually stops the mint→close→re-flag churn.
+  const bridged = await fetchClosedOrphanShapes(emitUrl, apiKey).catch(() => new Set<string>());
+  const capabilityOrphans = orphanCandidates.filter(isOutwardCapability).filter((s) => !bridged.has(s)).sort();
 
   let gapsEmitted = 0;
   const emitted: string[] = [];

@@ -125,6 +125,13 @@ export async function resolveObsidianRequestScan(
     return { shape: "obsidianRequestScan", body: { seeded_inbox: true, inbox_path: inboxPath, requests_found: 0, generated_at: generatedAt } };
   }
 
+  // OUTBOX (persistent status board): the operator asked for "a persistent outbox with
+  // the current status of everything you are working on and how you solved each item."
+  // Now.md is the in-flight board; Outbox.md is the durable record of RESOLVED work
+  // (recently closed gaps + freshly minted capabilities). Write it EVERY scan, regardless
+  // of whether there are new requests, so it always reflects current status. Best-effort.
+  const outboxWrote = await writeOutbox(obsidian, auth, timeoutMs).catch(() => false);
+
   // 2. Parse UNPROCESSED requests across ALL inbox files: unchecked tasks `- [ ] <text>`.
   const requests: ParsedRequest[] = [];
   for (const [path, lines] of fileLines) {
@@ -139,7 +146,7 @@ export async function resolveObsidianRequestScan(
   }
 
   if (requests.length === 0) {
-    return { shape: "obsidianRequestScan", body: { requests_found: 0, dispatched: 0, inbox_path: inboxPath, inbox_files: inboxFiles, generated_at: generatedAt } };
+    return { shape: "obsidianRequestScan", body: { requests_found: 0, dispatched: 0, outbox_written: outboxWrote, inbox_path: inboxPath, inbox_files: inboxFiles, generated_at: generatedAt } };
   }
 
   // 3. Dispatch each request (the run-goal path → author→serve loop) + collect acks.
@@ -211,6 +218,7 @@ export async function resolveObsidianRequestScan(
       dispatched: dispatched.filter((d) => d.dispatchId).length,
       requests: dispatched.map((d) => ({ text: d.text, dispatchId: d.dispatchId, status: d.status, file: d.file })),
       status_board_written: statusWrote,
+      outbox_written: outboxWrote,
       files_marked: filesMarked,
       inbox_path: inboxPath,
       inbox_files: inboxFiles,
@@ -234,4 +242,64 @@ async function writeNote(
   });
   const json = (await res.json()) as { content?: string; success?: boolean };
   try { return JSON.parse(json.content ?? "{}").wrote === true; } catch { return json.success === true; }
+}
+
+// Write the persistent OUTBOX — a durable, human-readable record of what the substrate
+// has RESOLVED and how, so the operator can see status without reading git/CLI. Sources
+// (best-effort, own localhost surfaces): recently CLOSED gaps (dev-vessel gap store =
+// "what I fixed" + resolution) and freshly MINTED capabilities (activity-api = "what I
+// expressed"). Failures are swallowed; the outbox is non-critical.
+async function writeOutbox(
+  obsidian: string,
+  auth: Record<string, string>,
+  timeoutMs: number,
+): Promise<boolean> {
+  const DEV = process.env["DEV_VESSEL_SELF_ENDPOINT"] ?? "http://127.0.0.1:8090";
+  const ACT = process.env["ACTIVITY_API_ENDPOINT"] ?? "http://127.0.0.1:8080";
+  const t = Math.min(timeoutMs, 10_000);
+  const now = new Date().toISOString();
+
+  // Recently closed gaps = resolved work.
+  let closed: Array<{ id?: string; category?: string; summary?: string }> = [];
+  try {
+    const r = await fetch(`${DEV}/v2/impulses/resolve`, {
+      method: "POST", headers: auth,
+      body: JSON.stringify({ impulse: { pointer: { type: "substrateGap", status: "closed", limit: 20 } } }),
+      signal: AbortSignal.timeout(t),
+    });
+    const j = (await r.json()) as { body?: { gaps?: Array<Record<string, unknown>> } };
+    // Filter housekeeping/cleanup closures (selftests, false-positive gap closes) — the
+    // operator wants GENUINE resolved work, not internal bookkeeping noise.
+    const NOISE = /selftest|false[- ]positive|^probe-|test-only|no[- ]op/i;
+    closed = (j.body?.gaps ?? [])
+      .filter((g) => !NOISE.test(String(g.summary ?? "")) && !NOISE.test(String(g.id ?? "")))
+      .slice(0, 12)
+      .map((g) => ({ id: String(g.id ?? ""), category: String(g.category ?? ""), summary: String(g.summary ?? "").slice(0, 140) }));
+  } catch { /* best-effort */ }
+
+  // Capabilities expressed = orphaned resolvers now invoked by a minted bridge. A closed
+  // orphaned_capability gap reliably means author_producer minted a runnable bridge for
+  // that shape, so derive it from the closed set (the templates endpoint caps at 100 rows
+  // and doesn't reliably surface the auto-bridges). ACT kept for future use.
+  void ACT;
+  const minted: string[] = (closed || [])
+    .filter((g) => (g.category ?? "") === "orphaned_capability")
+    .map((g) => String(g.id ?? "").replace(/^orphaned-capability-/, ""))
+    .filter(Boolean)
+    .slice(0, 10);
+
+  const lines = [
+    "---", "substrate_board: outbox", `generated_at: ${now}`, "---", "",
+    "# Outbox — what I've resolved", "",
+    "_Durable record of completed work. In-flight items are in [[Now]]; open requests you write go in [[Inbox]] or `Substrate/Inbox/`._", "",
+    "## Recently resolved", "",
+  ];
+  if (closed.length === 0) lines.push("_(nothing closed yet in the recent window)_", "");
+  for (const g of closed) lines.push(`- **${g.summary || g.id}** — resolved (${g.category})`);
+  lines.push("", "## Capabilities I expressed", "");
+  if (minted.length === 0) lines.push("_(none in the recent window)_", "");
+  for (const m of minted) lines.push(`- \`${m}\``);
+  lines.push("");
+
+  return writeNote(obsidian, auth, "Substrate/Outbox.md", lines.join("\n"), timeoutMs).catch(() => false);
 }

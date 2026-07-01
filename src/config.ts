@@ -617,6 +617,8 @@ export const config = {
       "obsidian:note with project list content",
       // Seam ③ substrate-authored resolver (2026-07-01): producer for substantive_findings (capability-gap autoclosure)
       "substantive_findings",
+      // Seam ③ substrate-authored resolver (2026-07-01): producer for goal_summary (capability-gap autoclosure)
+      "goal_summary",
     ] as const,
     resolveEndpoint: "/v2/impulses/resolve",
     resolveRequestFormat: "pointer" as const,

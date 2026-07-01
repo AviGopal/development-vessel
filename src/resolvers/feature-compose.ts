@@ -737,8 +737,15 @@ async function groundVesselFiles(toolsEndpoint: string, verifyVessels: string[],
     const vRel = v.replace(/^repos\//, "");
     const vAbs = `${REPO_ROOT}/${vRel}`;
     try {
+      // Ground on src/*.ts(x) AND the vessel's top-level build/config files
+      // (tsconfig.json, package.json, esbuild.config.mjs). Without these the composer
+      // could never SEE — and therefore never author — a config-level fix, so any gap
+      // whose fix lives in tsconfig/package.json (e.g. a moduleResolution fix to make a
+      // vessel typecheck-clean, the very thing the verify gate requires) was
+      // un-authorable: it produced 0 ops. Config files are small; adding them keeps the
+      // grounding universal so "nothing is loop-unauthorable" holds in practice. (2026-07-01)
       const sh = await callTool(toolsEndpoint, "shell", {
-        command: `cd ${JSON.stringify(vAbs)} 2>/dev/null && find src -type f \\( -name '*.ts' -o -name '*.tsx' \\) 2>/dev/null | sort | head -400`,
+        command: `cd ${JSON.stringify(vAbs)} 2>/dev/null && { find src -type f \\( -name '*.ts' -o -name '*.tsx' \\) 2>/dev/null; ls tsconfig.json package.json esbuild.config.mjs 2>/dev/null; } | sort -u | head -400`,
         cwd: REPO_ROOT,
       });
       const raw = String((sh.body as { stdout?: unknown })?.stdout ?? "").trim();

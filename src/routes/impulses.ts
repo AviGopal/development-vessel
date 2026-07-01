@@ -171,6 +171,7 @@ import { resolveSelectionEntropy } from "../resolvers/selection-entropy.js";
 import { resolveLearningMode } from "../resolvers/learning-mode.js";
 import { resolveSourceCode } from "../resolvers/source-code.js";
 import { resolvePopulatedConceptGraphLinks } from "../resolvers/populated-concept-graph-links.js";
+import { resolveObsidianNoteWithProjectListContent } from "../resolvers/obsidian-note-with-project-list-content.js";
 import type { ResolverResult } from "../resolvers/types.js";
 
 type AnyPointer = { type: string } & Record<string, unknown>;
@@ -642,6 +643,8 @@ async function dispatchInner(pointer: AnyPointer): Promise<ResolverResult> {
       return resolveSourceCode(p as Parameters<typeof resolveSourceCode>[0]);
     case "populated_concept_graph_links":
       return resolvePopulatedConceptGraphLinks(p as Parameters<typeof resolvePopulatedConceptGraphLinks>[0]);
+    case "obsidian:note with project list content":
+      return resolveObsidianNoteWithProjectListContent(p as Parameters<typeof resolveObsidianNoteWithProjectListContent>[0]);
     default:
       throw new Error(`unknown shape: ${pointer.type}`);
   }

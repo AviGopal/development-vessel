@@ -491,6 +491,13 @@ export const config = {
       // drafter, and credit the vessel's shapes so their cold-start relevance
       // leaves zero.
       "vessel_arrival_scan",
+      // implicit_vessel_scan (2026-07-01): the GENERIC implicit-vessel classifier
+      // — generalizes vessel_arrival_scan + obsidian_behavior_scan. Classifies an
+      // external actor the substrate MODELS but does NOT self-drive (today: the
+      // human via obsidian) as an "implicit vessel", building a forward model
+      // P(next|current) and emitting implicitVesselReport + a substrateGap when the
+      // forward model is weak (so the author loop can strengthen it). Reads only.
+      "implicit_vessel_scan",
       "credit_vessel_shapes",
       // consumer_productivity_audit (2026-06-14): distinguish PRODUCTIVE consumers
       // (genuinely consume a shape into a downstream impulse, trace-proven) from

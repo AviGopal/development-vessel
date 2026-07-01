@@ -137,6 +137,7 @@ import { resolveCreditPrimedConcepts } from "../resolvers/credit-primed-concepts
 import { resolveConceptDbHealthObserver } from "../resolvers/concept-db-health-observer.js";
 import { resolveDiscoveryVesselRegistryObserver } from "../resolvers/discovery-vessel-registry-observer.js";
 import { resolveVesselArrivalScan } from "../resolvers/vessel-arrival-scan.js";
+import { resolveImplicitVesselScan } from "../resolvers/implicit-vessel-scan.js";
 import { resolveConsumerProductivityAudit } from "../resolvers/consumer-productivity-audit.js";
 import { resolveVesselGapToCluster } from "../resolvers/vessel-gap-to-cluster.js";
 import { resolveTraceRecurringPatternScan } from "../resolvers/trace-recurring-pattern-scan.js";
@@ -550,6 +551,10 @@ async function dispatchInner(pointer: AnyPointer): Promise<ResolverResult> {
     case "vessel_arrival_scan":
       return resolveVesselArrivalScan(
         p as Parameters<typeof resolveVesselArrivalScan>[0],
+      );
+    case "implicit_vessel_scan":
+      return resolveImplicitVesselScan(
+        p as Parameters<typeof resolveImplicitVesselScan>[0],
       );
     case "credit_vessel_shapes":
       return resolveCreditVesselShapes(

@@ -586,6 +586,9 @@ export const config = {
       "coarsenableChain",
       // Seam ③ substrate-authored resolver (2026-06-30): learning_policy
       "learningPolicy",
+      // Seam 2a actuation (P2): reflect tick that writes learning_policy's
+      // recommended_hyperparameters back to activity-api /v2/tuning-params.
+      "learningPolicyWriteback",
       // Seam ③ substrate-authored resolver (2026-06-30): shape_closure_demand
       "shapeClosureDemand",
       // Seam ③ substrate-authored resolver (2026-06-30): producer for repairPolicy (capability-gap autoclosure)

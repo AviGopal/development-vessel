@@ -162,6 +162,7 @@ import { resolveAuthorComposedCapability } from "../resolvers/author-composed-ca
 import { resolveTraceCompletenessReport } from "../resolvers/trace-completeness-report.js";
 import { resolveCoarsenableChain } from "../resolvers/coarsenable-chain.js";
 import { resolveLearningPolicy } from "../resolvers/learning-policy.js";
+import { resolveLearningPolicyWriteback } from "../resolvers/learning-policy-writeback.js";
 import { resolveShapeClosureDemand } from "../resolvers/shape-closure-demand.js";
 import { resolveRepairPolicy } from "../resolvers/repair-policy.js";
 import { resolveSelectionEntropy } from "../resolvers/selection-entropy.js";
@@ -615,6 +616,8 @@ async function dispatchInner(pointer: AnyPointer): Promise<ResolverResult> {
       return resolveCoarsenableChain(p as Parameters<typeof resolveCoarsenableChain>[0]);
     case "learningPolicy":
       return resolveLearningPolicy(p as Parameters<typeof resolveLearningPolicy>[0]);
+    case "learningPolicyWriteback":
+      return resolveLearningPolicyWriteback(p as Parameters<typeof resolveLearningPolicyWriteback>[0]);
     case "shapeClosureDemand":
       return resolveShapeClosureDemand(p as Parameters<typeof resolveShapeClosureDemand>[0]);
     case "repairPolicy":

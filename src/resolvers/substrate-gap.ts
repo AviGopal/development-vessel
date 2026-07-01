@@ -229,6 +229,20 @@ export async function resolveSubstrateGapWrite(
     const existing = gaps[existingIdx]!;
     gap.id = existing.id;
     gap.created_at = existing.created_at;
+    // PRESERVE the loop's learned failure-tracking across re-emissions. A detector
+    // (e.g. surgical-gap-scan) re-emits the same logical gap every cycle with fresh
+    // classification_metadata that carries NO failed_attempts; a blind overwrite wiped
+    // the counter bumpFailedAttempts had accumulated, so a gap that repeatedly FAILS to
+    // land AND is repeatedly RE-DETECTED never deprioritised — it monopolised gap-compose
+    // and starved every other gap (0 lands). Carry these fields forward UNLESS the
+    // incoming write explicitly sets them (bumpFailedAttempts DOES — its incremented value
+    // must win to keep climbing).
+    const exMeta = (existing.classification_metadata ?? {}) as Record<string, unknown>;
+    const inMeta = (gap.classification_metadata ?? {}) as Record<string, unknown>;
+    for (const k of ["failed_attempts", "last_failed_at", "mispredicted_lands", "last_predicted_p"]) {
+      if (!(k in inMeta) && k in exMeta) inMeta[k] = exMeta[k];
+    }
+    gap.classification_metadata = inMeta;
     gaps[existingIdx] = gap;
     action = "updated";
   } else {

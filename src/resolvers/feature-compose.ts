@@ -570,6 +570,7 @@ function semanticJudgePrompt(
   gapMeta: Record<string, unknown> | undefined,
   diff: string,
   facts: ReachabilityFact[],
+  dataFlow: DataFlowFact[],
   codeContext: string,
 ): string {
   const metaStr = gapMeta ? `\n\nGap detector evidence:\n${JSON.stringify(gapMeta, null, 2)}` : "";
@@ -590,7 +591,7 @@ ${codeContext || "(none extracted)"}
 Unified diff that was applied (and typechecked clean):
 ${diff.slice(0, 8000)}
 
-Judge strictly. The patch ADDRESSES the gap only if it changes the behavior the gap describes AND that changed code is on a path that executes (called, routed, dispatched, or a lifecycle/entrypoint). If the patch edits a DIFFERENT symbol than the one the gap's real fix lives in (e.g. it adds \`recordOutcome\` when the live β-penalty path is \`penaliseHollowTemplate\`), report the right one in suspected_real_location.
+${dataFlow.length > 0 ? `\nData-flow facts (deterministic):\n${JSON.stringify(dataFlow, null, 2)}\n\nA consumed-but-never-populated collection or an imported-but-never-called symbol is presumptively a DROPPED EDIT: unless the diff itself shows the population/call site, return addresses:false and name the missing site in suspected_real_location.\n` : ''}Judge strictly. The patch ADDRESSES the gap only if it changes the behavior the gap describes AND that changed code is on a path that executes (called, routed, dispatched, or a lifecycle/entrypoint). If the patch edits a DIFFERENT symbol than the one the gap's real fix lives in (e.g. it adds \`recordOutcome\` when the live β-penalty path is \`penaliseHollowTemplate\`), report the right one in suspected_real_location.
 
 Respond with ONLY JSON: {"addresses": boolean, "reason": "<1 sentence>", "on_live_path": boolean, "suspected_real_location": "<symbol or file:symbol the real fix belongs in, or empty>"}`;
 }
@@ -609,6 +610,7 @@ export async function verifyPatchAddressesGap(args: {
   diff: string;
   reachability: ReachabilityFact[];
   data_flow?: DataFlowFact[];
+  // handled via `args.data_flow ?? []` at call sites
   codeContext?: string;
   llm: (prompt: string) => Promise<string>;
   /**
@@ -652,7 +654,7 @@ export async function verifyPatchAddressesGap(args: {
   }
   let raw = "";
   try {
-    raw = await args.llm(semanticJudgePrompt(args.gapSummary, args.gapMeta, args.diff, args.reachability, args.codeContext ?? ""));
+    raw = await args.llm(semanticJudgePrompt(args.gapSummary, args.gapMeta, args.diff, args.reachability, args.data_flow ?? [], args.codeContext ?? ""));
   } catch (e) {
     // Judge unreachable: do NOT block on the judge alone (the deterministic floor
     // already passed). Treat as addresses=true-but-unverified so a flaky LLM cannot
@@ -1305,11 +1307,19 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
       // the judge compared the diff to a spec-derived / stale gap and sank correct
       // edits with addresses=false. `gap.summary` present is the signal of a real gap.
       const hasGapContext = !!(pointer.gap && (pointer.gap.id || pointer.gap.summary));
+      const postPatchContents = new Map<string, string>();
+      for (const p of [...created, ...edited]) {
+        try {
+          postPatchContents.set(p, await Bun.file(p).text());
+        } catch { /* rolled back or missing - skip */ }
+      }
+      const dataFlowFacts = computeDataFlowFacts(diff, postPatchContents);
       semantic_gate = await verifyPatchAddressesGap({
         gapSummary,
         gapMeta: pointer.gap?.classification_metadata,
         diff,
         reachability: facts,
+        data_flow: dataFlowFacts,
         codeContext,
         llm: llmJudge,
         runSemanticJudge: hasGapContext,

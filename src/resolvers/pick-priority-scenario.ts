@@ -1,4 +1,5 @@
 import type { ResolverResult } from "./types.js";
+// Replaces the drafter-trigger-tick random scenario pick with a priority-weighted selection.
 import { readFile, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { PRIORITY_CATEGORIES, sanitizeId } from "./gap-to-scenario-bridge.js";

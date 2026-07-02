@@ -11,6 +11,7 @@ import { resolveFsWrite } from "../resolvers/fs-write.js";
 import { resolveFsEdit } from "../resolvers/fs-edit.js";
 import { resolveActivityFetch } from "../resolvers/activity-fetch.js";
 import { resolveActivityCreateVariant } from "../resolvers/activity-create-variant.js";
+import { resolveTemplateRepair } from "../resolvers/template-repair.js";
 import { resolveVesselRegisterPassthrough } from "../resolvers/vessel-register-passthrough.js";
 import { resolveCodeIntrospect } from "../resolvers/code-introspect.js";
 import { resolvePropagateJudgment } from "../resolvers/propagate-judgment.js";
@@ -463,6 +464,10 @@ async function dispatchInner(pointer: AnyPointer): Promise<ResolverResult> {
     case "variant_promote":
       return resolveVariantPromote(
         p as Parameters<typeof resolveVariantPromote>[0],
+      );
+    case "template_repair":
+      return resolveTemplateRepair(
+        p as Parameters<typeof resolveTemplateRepair>[0],
       );
     case "vector_space_orthogonality_audit":
       return resolveVectorSpaceOrthogonalityAudit(

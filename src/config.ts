@@ -418,6 +418,11 @@ export const config = {
       // loser_samples >= MIN_SAMPLES (10) AND winner_mean - loser_mean
       // >= MIN_DELTA (0.15). Parallel in shape to vessel_mitosis_cutover.
       "variant_promote",
+      // template_repair (2026-07-02): the ACTIVITY analogue of code repair.
+      // Grounds a repair spec from a flaky template's JSON + its recent FAILURE
+      // traces and mints a corrected variant candidate (variant-first repair).
+      // MINTS only — promotion stays the Thompson evidence gate (variant_promote).
+      "template_repair",
       // Substrate-detected novel-failure-mode discovery (2026-06-04).
       // Computes per-trace nearest-principle cosine similarity via
       // concept-db's dense search and flags clusters whose max similarity

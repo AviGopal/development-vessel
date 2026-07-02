@@ -402,3 +402,24 @@ describe("verifyPatchAddressesGap data-flow threading", () => {
     expect(seenPrompt).toContain("DROPPED EDIT");
   });
 });
+
+// Control-flow false-positive (2026-07-02): the stub detector's function regex also
+// matched `if (...) {`, so a legitimate guard branch `if (bespoke) { return null; }`
+// hard-failed two structurally-correct patches as "stub named `if`". Pins the exclusion.
+describe("detectNewCapabilityStub control-flow exclusion", () => {
+  it("does NOT flag a guard branch that returns null inside a real function", () => {
+    const diff = `### NEW FILE /vessels/goal-host-vessel/src/canon.ts
++export function canonicalizeShapeName(raw: string, known: string[]): string | null {
++  const normalize = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, "_");
++  const n = normalize(raw);
++  for (const k of known) if (normalize(k) === n) return k;
++  const tokens = n.split("_").filter(Boolean);
++  if (raw.includes(" ") || tokens.length > 4 || raw.length > 40) {
++    return null;
++  }
++  return raw;
++}`;
+    const r = detectNewCapabilityStub(diff);
+    expect(r.isStub).toBe(false);
+  });
+});

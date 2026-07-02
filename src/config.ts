@@ -39,6 +39,7 @@ export const config = {
     "residual_shape_discovery",
     "activate_substrate_script",
     "author_composed_capability",
+      "feature_compose",
       "contentAddressedVesselId",
       "lift_demo_noop",
       "emit_shape", // test-fixture: emit an impulse of a configurable shape (synthetic shape-chains)

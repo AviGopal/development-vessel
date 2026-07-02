@@ -425,7 +425,8 @@ export interface GapToFeaturePointer {
   limit?: number;
 }
 
-function specFromGap(
+// Auto-grounds the anchor from the live editTargets[0] file when classification_metadata.matched_excerpt is absent.
+export function specFromGap(
   gap: Record<string, unknown>,
   editTargets: Array<{ file: string; description: string }> = [],
   move?: { source: string | null; sourceFile: string | null; target: MoveTarget } | null,

@@ -446,6 +446,7 @@ export function detectNewCapabilityStub(diff: string): StubVerdict {
   let mm: RegExpExecArray | null;
   while ((mm = openRe.exec(addedJoined)) !== null) {
     const sym = mm[1] || mm[2] || "(anonymous)";
+    if (["if", "for", "while", "switch", "catch", "do", "else", "try", "return"].includes(sym)) continue; // control-flow, not a capability function
     // brace-match from the `{` we just consumed
     let depth = 1;
     let i = openRe.lastIndex;

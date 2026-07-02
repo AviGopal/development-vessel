@@ -214,6 +214,10 @@ export async function resolveTemplateRepair(pointer: TemplateRepairPointer): Pro
     `${baseDesc}\n\n[template_repair candidate] ${groundedSpec}`.slice(0, 4000);
   (baseTemplate as Record<string, unknown>)["repair_guidance"] = groundedSpec;
 
+  // activity-api LegacyCategorySchema rejects other values (invalid_enum_value 400, e.g. "lift"); create-variant defaults tags/category when absent.
+  if (typeof (baseTemplate as Record<string, unknown>)["category"] === "string" && !["feature","bugfix","refactor","tool","infrastructure","meta","system","security"].includes((baseTemplate as Record<string, unknown>)["category"] as string)) {
+    delete (baseTemplate as Record<string, unknown>)["category"];
+  }
   // TODO: probe under reach-gate — a follow-up would execute the minted variant
   // through the goal-reach gate before returning FAVORABLE.
   const minted = await resolveActivityCreateVariant({

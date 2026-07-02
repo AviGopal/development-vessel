@@ -1424,6 +1424,18 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
     }
   }
 
+  // Persist the compose report as a durable artifact (mirrors gap-to-feature's PROPOSALS_DIR reports). Never fails the compose.
+  try {
+    const { writeFileSync, mkdirSync } = await import("node:fs");
+    const { join } = await import("node:path");
+    const reportDir = process.env.PROPOSALS_DIR ?? "/workspace/proposals";
+    mkdirSync(reportDir, { recursive: true });
+    writeFileSync(
+      join(reportDir, `${pointer.gap?.id ?? "adhoc"}-compose-report.json`),
+      JSON.stringify({ ok: verdict === "FAVORABLE", verdict, summary: plan.summary, touched_vessels: [...touched], op_count: ops.length, applied, apply_failed: applyFailed, verify, semantic_gate, rolled_back, cutovers }, null, 2),
+    );
+  } catch { /* persistence failure must never fail the compose */ }
+
   return {
     shape: "featureComposeReport",
     body: {

@@ -439,10 +439,29 @@ function specFromGap(
   // Keeping the composer's input tight is a loop-wide authoring lever. (2026-07-01)
   const metaStr = meta
     ? (() => {
+        // Anchor line: prefer upstream-set excerpt; fall back to live file contents
+        // when editTargets names a real file under repos/<vessel>/src/.
+        let anchorLine = "";
+        if (meta.matched_excerpt) {
+          anchorLine = `Anchor (existing code near the change): \`\`\`\n${String(meta.matched_excerpt)}\n\`\`\``;
+        } else {
+          const firstTarget: string | undefined = editTargets[0]?.file;
+          if (firstTarget && /^\/repos\/[^/]+\/src\//.test(`/${firstTarget}`)) {
+            try {
+              const raw = readFileSync(join(RUNTIME_ROOT, firstTarget.replace(/^repos\//, "")), "utf8");
+              const lines = raw.split("\n");
+              const lineCount = lines.length;
+              const excerpt = lines.slice(0, 40).join("\n");
+              anchorLine = `File facts: path=${firstTarget}, total_lines=${lineCount}\nAnchor (verbatim top of file): \`\`\`\n${excerpt}\n\`\`\``;
+            } catch {
+              // file unreadable — leave anchorLine empty
+            }
+          }
+        }
         const lines = [
           meta.edit_site ? `Change site: ${String(meta.edit_site)}` : "",
           meta.suspected_real_location ? `Location: ${String(meta.suspected_real_location)}` : "",
-          meta.matched_excerpt ? `Anchor (existing code near the change): ${String(meta.matched_excerpt)}` : "",
+          anchorLine,
         ].filter(Boolean).join("\n");
         return lines ? `\n\n${lines}` : "";
       })()

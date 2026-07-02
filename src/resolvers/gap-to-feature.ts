@@ -452,8 +452,15 @@ export function specFromGap(
               const raw = readFileSync(join(RUNTIME_ROOT, firstTarget.replace(/^repos\//, "")), "utf8");
               const lines = raw.split("\n");
               const lineCount = lines.length;
-              const excerpt = lines.slice(0, 40).join("\n");
-              anchorLine = `File facts: path=${firstTarget}, total_lines=${lineCount}\nAnchor (verbatim top of file): \`\`\`\n${excerpt}\n\`\`\``;
+              // Near-edit-site grounding (#18): center the ~40-line excerpt window on the
+              // edit site when edit_site/suspected_real_location names a line; else top of file.
+              const siteStr = `${String(meta.edit_site ?? "")} ${String(meta.suspected_real_location ?? "")}`;
+              const lineMatch = siteStr.match(/(?::|line\s+|#L)(\d+)/i);
+              const startLine = lineMatch ? (parseInt(lineMatch[1] ?? "0", 10) || 0) : 0;
+              const from = Math.max(0, startLine - 15);
+              const excerpt = lines.slice(from, from + 40).join("\n");
+              const anchorLabel = startLine > 0 ? "Anchor (verbatim near edit site)" : "Anchor (verbatim top of file)";
+              anchorLine = `File facts: path=${firstTarget}, total_lines=${lineCount}, excerpt_start_line=${from + 1}\n${anchorLabel}: \`\`\`\n${excerpt}\n\`\`\``;
             } catch {
               // file unreadable — leave anchorLine empty
             }

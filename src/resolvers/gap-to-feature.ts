@@ -460,7 +460,8 @@ export function specFromGap(
               const from = Math.max(0, startLine - 15);
               const excerpt = lines.slice(from, from + 40).join("\n");
               const anchorLabel = startLine > 0 ? "Anchor (verbatim near edit site)" : "Anchor (verbatim top of file)";
-              anchorLine = `File facts: path=${firstTarget}, total_lines=${lineCount}, excerpt_start_line=${from + 1}\n${anchorLabel}: \`\`\`\n${excerpt}\n\`\`\``;
+              const vesselName = firstTarget.split('/')[1] ?? 'unknown';
+              anchorLine = `File facts: ${firstTarget} (vessel: ${vesselName}), total_lines=${lineCount}, excerpt_start_line=${from + 1}\n${anchorLabel}: \`\`\`\n${excerpt}\n\`\`\``;
             } catch {
               // file unreadable — leave anchorLine empty
             }

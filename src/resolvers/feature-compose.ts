@@ -225,6 +225,13 @@ export function enclosingSymbolsForHunks(diff: string, fileContents: Map<string,
   // any indented `const NAME` would wrongly pick a loop-local (e.g. the very dedup
   // `const seen` the patch added) as the enclosing symbol.
   const declRe = /^(?:export\s+)?(?:async\s+)?(?:function|const|let|var)\s+([A-Za-z_$][\w$]*)\b/;
+  // Class methods and interface members live INSIDE an indented body, so the
+  // column-0 walk above never matches for them and the judge got EMPTY facts
+  // (on_live_path defaulted false, sinking correct class-method edits — the
+  // sendHeartbeat calibration case, 2026-07-02). A class/interface/enum
+  // declaration IS the enclosing top-level symbol for such hunks: its name is
+  // importable/callable, so its reachability is computable like any other.
+  const containerRe = /^(?:export\s+)?(?:abstract\s+)?(?:class|interface|enum)\s+([A-Za-z_$][\w$]*)\b/;
   // Per-file: the changed-line texts (added `+` lines, definition stripped) so we can
   // locate them in the current file and walk upward to the enclosing declaration.
   const changedByFile = new Map<string, string[]>();
@@ -247,7 +254,7 @@ export function enclosingSymbolsForHunks(diff: string, fileContents: Map<string,
       const idx = lines.findIndex((l) => l.includes(ch));
       if (idx < 0) continue;
       for (let i = idx; i >= 0; i--) {
-        const m = lines[i]!.match(declRe);
+        const m = lines[i]!.match(declRe) ?? lines[i]!.match(containerRe);
         if (m && m[1] && !RESERVED.has(m[1])) { enclosing.add(m[1]); break; }
       }
     }

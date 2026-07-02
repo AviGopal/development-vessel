@@ -138,6 +138,40 @@ describe("template-repair resolver", () => {
     expect(String((createBody as Record<string, unknown>)["repair_guidance"])).toContain('"tasks"');
   });
 
+  it("sanitizes unresolved {{…}} placeholders and falls back to goal-text extraction", async () => {
+    globalThis.fetch = scriptFetch({});
+    const result = await resolveTemplateRepair({
+      type: "template_repair",
+      // both bindings arrived literal (walk dispatch carried no variables)
+      activity_id: "{{activity_id}}",
+      template_id: "{{failurePatternReport.patterns.0.template_id}}",
+      goal:
+        "Repair the flaky detect-stale-pointer activity — analyze its recent failures " +
+        "and mint a corrected variant.",
+      dry_run: true,
+    });
+    const body = result.body as Record<string, unknown>;
+    // goal text here carries no `vessel:name` token → falls through to error
+    expect(body["verdict"]).toBe("UNFAVORABLE");
+    expect(String(body["error"])).toContain("activity_id required");
+  });
+
+  it("extracts a vessel-qualified id from the goal text when bindings are unresolved", async () => {
+    globalThis.fetch = scriptFetch({});
+    const result = await resolveTemplateRepair({
+      type: "template_repair",
+      activity_id: "{{activity_id}}",
+      goal:
+        "Repair the flaky development-vessel:harness-run-matrix activity — analyze its " +
+        "recent failures and mint a corrected variant.",
+      dry_run: true,
+    });
+    const body = result.body as Record<string, unknown>;
+    expect(result.shape).toBe("templateRepairReport");
+    expect(body["verdict"]).toBe("FAVORABLE");
+    expect(String(body["summary"])).toContain("development-vessel:harness-run-matrix");
+  });
+
   it("returns UNFAVORABLE when the template cannot be fetched", async () => {
     globalThis.fetch = scriptFetch({ templateStatus: 404 });
     const result = await resolveTemplateRepair({

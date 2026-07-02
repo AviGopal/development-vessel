@@ -29,6 +29,37 @@ export interface TemplateRepairPointer {
   failure_window?: number;
   /** When true, ground + return the spec + failure summary but DO NOT mint. */
   dry_run?: boolean;
+  /**
+   * Goal text (walk data-flow: the goal-host proxy spreads walk variables —
+   * including `goal` — into the pointer). Used as an id-extraction fallback
+   * when activity_id/template_id are absent or arrive as unresolved `{{…}}`
+   * placeholders (seed template repair-activity-from-failures binds
+   * `{{activity_id}}` from goal variables, which stays literal when the goal
+   * dispatch carries no variables).
+   */
+  goal?: string;
+}
+
+/**
+ * Extract a template-id-shaped token (e.g. `development-vessel:harness-run-matrix`)
+ * from free goal text. Returns "" when none found. Skips the `activity:` record
+ * prefix so `activity:⟨x⟩` wrapped mentions resolve to the inner id.
+ */
+export function extractActivityIdFromGoal(goal: string): string {
+  const wrapped = goal.match(/activity:⟨([^⟩]+)⟩/);
+  if (wrapped?.[1]) return wrapped[1];
+  for (const m of goal.matchAll(/([A-Za-z0-9][A-Za-z0-9_.-]*):([A-Za-z0-9][A-Za-z0-9_.-]+)/g)) {
+    if (m[1] === "activity") continue; // record-id prefix, not a vessel prefix
+    return `${m[1]}:${m[2]}`;
+  }
+  return "";
+}
+
+/** Treat unresolved `{{…}}` placeholder strings as absent. */
+function sanitizeId(raw: unknown): string {
+  if (typeof raw !== "string") return "";
+  const s = raw.trim();
+  return s.includes("{{") ? "" : s;
 }
 
 interface FailureSummary {
@@ -144,7 +175,10 @@ async function fetchFailureTraces(bareId: string, window: number): Promise<Failu
 }
 
 export async function resolveTemplateRepair(pointer: TemplateRepairPointer): Promise<ResolverResult> {
-  const rawId = pointer.activity_id ?? pointer.template_id ?? "";
+  const rawId =
+    sanitizeId(pointer.activity_id) ||
+    sanitizeId(pointer.template_id) ||
+    (typeof pointer.goal === "string" ? extractActivityIdFromGoal(pointer.goal) : "");
   if (!rawId) {
     return {
       shape: "templateRepairReport",

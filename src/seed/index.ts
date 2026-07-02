@@ -25,6 +25,7 @@ import { COMPOSE_TOPOLOGY_TICK_TEMPLATE } from "./compose-topology-tick.js";
 import { VESSEL_DEMAND_TICK_TEMPLATE } from "./vessel-demand-tick.js";
 import { GENERATIVE_FRONTIER_GAP_TICK_TEMPLATE } from "./generative-frontier-gap-tick.js";
 import { HARNESS_RUN_MATRIX_TEMPLATE } from "./harness-run-matrix.js";
+import { REPAIR_ACTIVITY_FROM_FAILURES_TEMPLATE } from "./repair-activity-from-failures.js";
 import { TRY_DIRECT_ANSWER_TEMPLATE } from "./try-direct-answer.js";
 import { CLOSE_HEALTH_GAP_TEMPLATE } from "./close-health-gap.js";
 import { DRAIN_PENDING_SUBSTRATE_GAPS_TEMPLATE } from "./drain-pending-substrate-gaps.js";
@@ -162,6 +163,7 @@ export { COMPOSE_TOPOLOGY_TICK_TEMPLATE } from "./compose-topology-tick.js";
 export { VESSEL_DEMAND_TICK_TEMPLATE } from "./vessel-demand-tick.js";
 export { GENERATIVE_FRONTIER_GAP_TICK_TEMPLATE } from "./generative-frontier-gap-tick.js";
 export { HARNESS_RUN_MATRIX_TEMPLATE } from "./harness-run-matrix.js";
+export { REPAIR_ACTIVITY_FROM_FAILURES_TEMPLATE } from "./repair-activity-from-failures.js";
 export { TRY_DIRECT_ANSWER_TEMPLATE } from "./try-direct-answer.js";
 export { CLOSE_HEALTH_GAP_TEMPLATE } from "./close-health-gap.js";
 export { DRAIN_PENDING_SUBSTRATE_GAPS_TEMPLATE } from "./drain-pending-substrate-gaps.js";
@@ -277,6 +279,12 @@ export const SEED_TEMPLATES: ActivityTemplate[] = [
   COMPOSE_TOPOLOGY_TICK_TEMPLATE,
   // harness-as-lifecycle-participant (§2)
   HARNESS_RUN_MATRIX_TEMPLATE,
+  // template_repair as an ordinary shape-graph producer (2026-07-02): a goal
+  // inferring activityVariant_write backward-chains here; input
+  // trace_failure_pattern_report is produced by the existing trace-analysis
+  // chain, so the walk composes analysis → pattern report → repair → variant
+  // without the goal-host interception special-case.
+  REPAIR_ACTIVITY_FROM_FAILURES_TEMPLATE,
   // drafter-trigger-tick (V18, 2026-06-07) — bridges boredom rotation to the
   // drafter's variable-supply requirement. Lists scenarios dir, picks the
   // first one, dispatches draft-gap-closing-activity via light-dispatch with

@@ -1,4 +1,8 @@
-import { METABOB_ENDPOINT, METABOB_API_KEY } from '../config.js';
+const SURREALDB_URL = process.env['SURREALDB_URL'] ?? 'http://127.0.0.1:8000';
+const SURREALDB_USERNAME = process.env['SURREALDB_USERNAME'] ?? 'root';
+const SURREALDB_PASSWORD = process.env['SURREALDB_PASSWORD'] ?? process.env['SURREAL_PASS'] ?? 'root';
+const SURREALDB_NAMESPACE = process.env['SURREALDB_NAMESPACE'] ?? 'activity-system';
+const SURREALDB_DATABASE = process.env['SURREALDB_DATABASE'] ?? 'learning_loop';
 
 interface TraceRow {
   impulse_resolutions?: Array<{ resolver_id?: string; latency_ms?: unknown }>;
@@ -10,35 +14,61 @@ interface LatencySample {
   value: number;
 }
 
+interface SurrealResult<T> {
+  result?: T[];
+  status?: string;
+}
+
+async function fetchTraces(limit: number): Promise<Array<{ impulse_resolutions?: Array<{ resolver_id?: string; latency_ms?: number }>; tasks?: Array<{ resolver_id?: string; duration_ms?: number }> }>> {
+  const clampedLimit = Math.min(limit, 500);
+  const sql = `SELECT impulse_resolutions, tasks FROM activity_execution_traces ORDER BY created_at DESC LIMIT ${clampedLimit}`;
+  const credentials = Buffer.from(`${SURREALDB_USERNAME}:${SURREALDB_PASSWORD}`).toString('base64');
+  const resp = await fetch(`${SURREALDB_URL}/sql`, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Basic ${credentials}`,
+      'surreal-ns': SURREALDB_NAMESPACE,
+      'surreal-db': SURREALDB_DATABASE,
+      'Accept': 'application/json',
+      'Content-Type': 'text/plain',
+    },
+    body: sql,
+    signal: AbortSignal.timeout(30_000),
+  });
+  if (!resp.ok) {
+    const text = await resp.text();
+    throw new Error(`SurrealDB /sql ${resp.status}: ${text}`);
+  }
+  const json = await resp.json() as SurrealResult<{ impulse_resolutions?: Array<{ resolver_id?: string; latency_ms?: number }>; tasks?: Array<{ resolver_id?: string; duration_ms?: number }> }>[];
+  const first = json[0];
+  if (!first || first.status !== 'OK') {
+    throw new Error(`SurrealDB query failed: ${JSON.stringify(first)}`);
+  }
+  return first.result ?? [];
+}
+
 export async function resolveResolverLatencyCeilingScan(pointer: {
   type: string;
   limit?: number;
   ceiling_ms?: number;
   warn_fraction?: number;
 }): Promise<{ shape: string; body: unknown }> {
-  const limit = pointer.limit ?? 200;
+  const limit = typeof pointer.limit === 'number' ? Math.min(pointer.limit, 500) : 200;
   const ceiling_ms = pointer.ceiling_ms ?? 10000;
   const warn_fraction = pointer.warn_fraction ?? 0.8;
 
-  const url = `${METABOB_ENDPOINT}/v2/activities/execution-traces?limit=${limit}`;
-  const res = await fetch(url, {
-    headers: METABOB_API_KEY ? { Authorization: `ApiKey ${METABOB_API_KEY}` } : {},
-  });
-
-  if (!res.ok) {
-    const text = await res.text();
-    return {
-      shape: 'structuredError',
-      body: { error: `execution-traces fetch failed ${res.status}`, detail: text },
-    };
+  let traces: Array<{
+    impulse_resolutions?: Array<{ resolver_id?: string; latency_ms?: number }>;
+    tasks?: Array<{ resolver_id?: string; duration_ms?: number }>;
+  }> = [];
+  try {
+    traces = await fetchTraces(limit);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { shape: 'resolverLatencyCeilingReport', body: { ok: false, error: msg, resolver_stats: [], breaches: [] } };
   }
 
-  const data = (await res.json()) as { traces?: TraceRow[] } | TraceRow[];
-  const rows: TraceRow[] = Array.isArray(data)
-    ? data
-    : (Array.isArray((data as { traces?: TraceRow[] }).traces)
-        ? (data as { traces: TraceRow[] }).traces
-        : []);
+  const rows: TraceRow[] = traces;
 
   // Collect latency samples per resolver_id
   const sampleMap = new Map<string, number[]>();

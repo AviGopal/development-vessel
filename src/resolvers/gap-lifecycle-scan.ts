@@ -1,5 +1,5 @@
 import type { ResolverResult } from "./types.js";
-import { readFileSync, readdirSync } from "node:fs";
+import { readFileSync, readdirSync, appendFileSync } from "node:fs";
 import { join } from "node:path";
 
 // NOTE: For proactive un-landable gap suppression see gap-landability-model.ts
@@ -339,6 +339,26 @@ export async function resolveGapLifecycleScan(p: GapLifecycleScanPointer): Promi
     } catch { backlogPosted = "error"; }
   }
 
+  const historyPath = "/workspace/gaps/funnel-history.jsonl";
+  const runRecord = {
+    run_at: new Date().toISOString(),
+    total: gaps.length,
+    open_before: open.length,
+    open_after: open.length - lowValueClosed.length - expired.length - closed.length,
+    stale_open: staleOpen.length,
+    low_value_closed: lowValueClosed.length,
+    expired: expired.length,
+    churned_closed: closed.length,
+    closed_total: gaps.filter((g) => g.status === "closed").length,
+  };
+  let funnelHistory: unknown[] = [];
+  try {
+    if (!dryRun) appendFileSync(historyPath, JSON.stringify(runRecord) + "\n");
+    funnelHistory = readFileSync(historyPath, "utf-8").trim().split("\n").slice(-12).map((l) => JSON.parse(l));
+  } catch {
+    funnelHistory = [runRecord];
+  }
+
   return {
     shape: "gapLifecycleReport",
     body: {
@@ -348,6 +368,7 @@ export async function resolveGapLifecycleScan(p: GapLifecycleScanPointer): Promi
       low_value_closed: lowValueClosed.length,
       expired: expired.length,
       expire_hours: expireHours,
+      funnel_history: funnelHistory,
       consumption_queue: remainingOpen.filter((g) => !expired.includes(g.id!)).map((g) => ({ id: g.id, category: g.category, landability: landability(g) })).sort((a, b) => b.landability - a.landability).slice(0, 10),
       backlog_meta_gap_posted: backlogPosted,
       top_stale_categories: Object.fromEntries(topCats),

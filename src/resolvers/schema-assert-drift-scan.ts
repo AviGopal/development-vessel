@@ -13,8 +13,8 @@ const SURREALDB_PASSWORD =
   process.env["SURREALDB_PASSWORD"] ??
   process.env["SURREAL_PASS"] ??
   "root";
-const SURREALDB_NS = process.env["SURREALDB_NS"] ?? "substrate";
-const SURREALDB_DB = process.env["SURREALDB_DB"] ?? "substrate";
+const SURREALDB_NS = process.env["SURREALDB_NAMESPACE"] ?? "activity-system";
+const SURREALDB_DB = process.env["SURREALDB_DATABASE"] ?? "learning_loop";
 
 interface SurrealResponse {
   result?: unknown;

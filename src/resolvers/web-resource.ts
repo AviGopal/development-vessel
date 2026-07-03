@@ -23,6 +23,7 @@ const DEFAULT_ALLOW = (process.env["WEB_RESOURCE_ALLOWLIST"]?.split(",").map((s)
   "nodejs.org",
   "bun.sh",
   "surrealdb.com",
+  "api.open-meteo.com",
 ];
 
 export interface WebResourcePointer {

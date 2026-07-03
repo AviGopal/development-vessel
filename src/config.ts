@@ -100,6 +100,7 @@ export const config = {
       // (resolver_id, output_shape) → success-rate report. Lets ribosome
       // bias future synthesis and makes the F-127 Thompson skew observable.
       "resolver_pattern_report",
+      "resolver_latency_ceiling_scan",
       // Deterministic markdown splitter (iter-082, 2026-05-30): chunks docs
       // on H2/H3 headings BEFORE the LLM call so ingest-doc-as-concepts can
       // operate per-section without overflowing Anthropic's 200K prompt cap.

@@ -282,6 +282,10 @@ async function dispatchInner(pointer: AnyPointer): Promise<ResolverResult> {
       return resolveHttpFetch(p as Parameters<typeof resolveHttpFetch>[0]);
     case "goal_file_extract":
       return resolveGoalFileExtract(p as Parameters<typeof resolveGoalFileExtract>[0]);
+    case "resolver_latency_ceiling_scan": {
+      const { resolveResolverLatencyCeilingScan } = await import("../resolvers/resolver-latency-ceiling-scan.js");
+      return resolveResolverLatencyCeilingScan(pointer as { type: string; limit?: number; ceiling_ms?: number; warn_fraction?: number });
+    }
     case "resolver_pattern_report":
       return resolveResolverPatternReport(p as Parameters<typeof resolveResolverPatternReport>[0]);
     case "markdown_split_sections":

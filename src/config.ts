@@ -427,6 +427,17 @@ export const config = {
       // traces and mints a corrected variant candidate (variant-first repair).
       // MINTS only — promotion stays the Thompson evidence gate (variant_promote).
       "template_repair",
+      // reachability_gap_repair (2026-07-03, Part-1 step 2): closes an
+      // `unreachable_producer` substrateGap (goal-host's fileReachabilityGap).
+      // Classifies the producer's required inputs one level deep via
+      // discover-by-shapes: if >=1 has zero producers, the producer is gated
+      // on cold-infeasible data — repairs it by moving those inputs from
+      // input_shapes to optional_input_shapes via activityTemplate_update
+      // (the exact fix pattern that retired repair-activity-from-failures'
+      // unreachable trace_failure_pattern_report dependency). If every
+      // required input already has a producer, the gap is NOT a template
+      // defect (chain-reachable) and no mutation is made.
+      "reachability_gap_repair",
       // Substrate-detected novel-failure-mode discovery (2026-06-04).
       // Computes per-trace nearest-principle cosine similarity via
       // concept-db's dense search and flags clusters whose max similarity

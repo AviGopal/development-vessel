@@ -12,6 +12,7 @@ import { resolveFsEdit } from "../resolvers/fs-edit.js";
 import { resolveActivityFetch } from "../resolvers/activity-fetch.js";
 import { resolveActivityCreateVariant } from "../resolvers/activity-create-variant.js";
 import { resolveTemplateRepair } from "../resolvers/template-repair.js";
+import { resolveReachabilityGapRepair } from "../resolvers/reachability-gap-repair.js";
 import { resolveVesselRegisterPassthrough } from "../resolvers/vessel-register-passthrough.js";
 import { resolveCodeIntrospect } from "../resolvers/code-introspect.js";
 import { resolvePropagateJudgment } from "../resolvers/propagate-judgment.js";
@@ -472,6 +473,10 @@ async function dispatchInner(pointer: AnyPointer): Promise<ResolverResult> {
     case "template_repair":
       return resolveTemplateRepair(
         p as Parameters<typeof resolveTemplateRepair>[0],
+      );
+    case "reachability_gap_repair":
+      return resolveReachabilityGapRepair(
+        p as Parameters<typeof resolveReachabilityGapRepair>[0],
       );
     case "vector_space_orthogonality_audit":
       return resolveVectorSpaceOrthogonalityAudit(

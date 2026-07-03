@@ -567,7 +567,7 @@ export async function resolveApplyProposalAsPatch(pointer: ApplyProposalAsPatchP
   // Capture the first FEATURE-scoped (non-surgical) proposal we skip, so that when
   // no surgical proposal is eligible we can route it through feature_compose
   // instead of dropping it (2026-06-22 routing wire — see the !chosen block below).
-  let firstFeatureProposal: { name: string; spec: string } | null = null;
+  let firstFeatureProposal: { name: string; spec: string; contentSha: string } | null = null;
   for (const e of entries) {
     const scenarioId = e.name.replace(/-report\.json$/, "");
     if (mitosisDirs.some((d) => d.includes(scenarioId.slice(0, 32)))) { skipped.push({ proposal: e.name, reason: "already_staged" }); continue; }
@@ -792,7 +792,7 @@ export async function resolveApplyProposalAsPatch(pointer: ApplyProposalAsPatchP
       if (!surg.surgical) {
         // Feature-scoped: too big for the single-patch path. Capture the first one
         // so the !chosen block can route it to feature_compose (decompose→atoms).
-        if (!firstFeatureProposal && descText.trim()) firstFeatureProposal = { name: e.name, spec: descText };
+        if (!firstFeatureProposal && descText.trim()) firstFeatureProposal = { name: e.name, spec: descText, contentSha };
         console.error(`[apply-proposal-as-patch] skip non_surgical_proposal: ${e.name} reason=${surg.reason}`); skipped.push({ proposal: e.name, reason: surg.reason }); continue;
       }
     }
@@ -837,6 +837,7 @@ export async function resolveApplyProposalAsPatch(pointer: ApplyProposalAsPatchP
           land: true,
         } as Parameters<typeof resolveFeatureCompose>[0]);
         const fb = (fc.body ?? {}) as Record<string, unknown>;
+        try { await writeFile(join(sentinelDir, firstFeatureProposal.name), JSON.stringify({ content_sha: firstFeatureProposal.contentSha, applied_at: new Date().toISOString(), outcome_shape: fb["verdict"] === "FAVORABLE" ? "featureRouted" : "structuredError" })); } catch { /* tolerant */ }
         return {
           shape: "featureRoutedReport",
           body: {

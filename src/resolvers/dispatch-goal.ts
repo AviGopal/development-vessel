@@ -315,6 +315,15 @@ import { METABOB_API_KEY } from "../config.js";
  *   - Avoids ambiguous multi-goal interpretations and ensures goal clarity
  *     for recommendation engines by keeping goal text tightly scoped.
  */
+// MAX_GOAL_LEN: hard ceiling (in characters) on the dispatch goal payload.
+// Rationale:
+//   - Bounds token consumption for downstream LLM-backed goal-host calls whose
+//     context windows are finite; oversized goals risk truncation or overflow.
+//   - Preserves recommendation quality: diffuse, over-long goals dilute the
+//     embedding signal used by goal-host ranking (top_score confidence drops).
+//   - Keeps validation/hash/dispatch latency bounded and predictable.
+// This is a safety boundary, not a tunable perf knob — it must stay in sync
+// with goal-host-vessel's own input ceiling; change them together.
 const MAX_GOAL_LEN = 8192;
 const GOAL_HOST_ENDPOINT = process.env["GOAL_HOST_VESSEL_ENDPOINT"] ?? "http://127.0.0.1:8210";
 

@@ -1464,6 +1464,7 @@ async function runGitAwareCutover(args: GitCutoverArgs): Promise<ResolverResult>
       const dep = Bun.spawnSync([process.execPath, "run", "substrate:deploy"], { cwd: hostRepoRoot, env: { ...process.env, SUBSTRATE_BASE_ROOT: baseRoot, PATH: (process.env.PATH ?? "") + ":/usr/bin:/usr/local/bin:/root/.bun/bin" }, stdout: "pipe", stderr: "pipe" });
       const depOk = (dep.exitCode ?? 1) === 0;
       operations.push({ op: "substrate:deploy hook", status: depOk ? "ok" : "warn", detail: depOk ? undefined : new TextDecoder().decode(dep.stderr).slice(0, 160) });
+      try { const { appendFile } = await import("node:fs/promises"); await appendFile("/workspace/proposals/interface-deploys.jsonl", JSON.stringify({ at: new Date().toISOString(), vessel: vessel_name, ok: depOk }) + "\n"); } catch { operations.push({ op: "interface-deploy ledger", status: "warn" }); }
     }
   } catch (e) { operations.push({ op: "substrate:deploy hook", status: "warn", detail: String((e as Error).message ?? e).slice(0, 160) }); }
   // 10. Restart vessel unit (best-effort).

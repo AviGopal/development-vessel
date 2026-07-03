@@ -109,6 +109,15 @@ import { METABOB_API_KEY } from "../config.js";
 // rejected at dispatch time rather than risking truncation or scoring
 // degradation downstream.
 //
+// Additional rationale: the guard prevents excessively long goals from
+// overwhelming goal-host recommenders, ensures tractable reasoning within
+// bounded compute, and maintains predictable performance across the dispatch
+// pipeline. Empirically, oversized or malformed goal texts correlate with
+// low-confidence recommendations (top_score < 0.3) from goal-host — rejecting
+// them at dispatch time avoids propagating unreliable recommendations
+// downstream and keeps the recommender operating within its well-calibrated
+// input regime.
+//
 // Rationale for the 8192-character ceiling:
 //  - API constraints: goal-host-vessel enforces its own input limit on
 //    /run-goal; exceeding it yields a 4xx from the downstream service. We

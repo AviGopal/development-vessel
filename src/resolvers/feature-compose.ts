@@ -1433,6 +1433,11 @@ async function resolveFeatureComposeInner(pointer: FeatureComposePointer): Promi
         staged_files: changedRel,
         staged_base_sha,
         evaluation_evidence: { verdict: "FAVORABLE", base_success_rate: 1, mitosis_success_rate: 1, cited_trace_ids: [], cited_check_names: ["typecheck"] },
+        // Provenance: gap id when routed from a gap (goal-host edit-intent passes
+        // route-edit-<goal_hash>), and the durable compose-report artifact name as
+        // the proposal id — commits become trace-matchable instead of unknown-gap.
+        gap_id: pointer.gap?.id ?? "adhoc-spec",
+        proposal_id: `${pointer.gap?.id ?? "adhoc"}-compose-report`,
         skip_push: pointer.skip_push ?? false,
       } as never);
       cutovers.push({ vessel, result: cut.body });

@@ -37,7 +37,8 @@ export const REPAIR_ACTIVITY_FROM_FAILURES_TEMPLATE: ActivityTemplate = {
     "failure-pattern analysis (trace_failure_pattern_report) produced by the trace-analysis " +
     "chain and emits activityVariant_write + templateRepairReport. Only mints the candidate — " +
     "promotion stays with the Thompson evidence gate (variant_promote).",
-  inputShapes: ["trace_failure_pattern_report"],
+  inputShapes: [],
+  optionalInputShapes: ["trace_failure_pattern_report"],
   outputShapes: ["activityVariant_write", "templateRepairReport"],
   tags: ["repair", "activity-lifecycle", "meta"],
   variables: [

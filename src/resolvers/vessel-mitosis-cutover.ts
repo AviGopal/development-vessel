@@ -1461,10 +1461,11 @@ async function runGitAwareCutover(args: GitCutoverArgs): Promise<ResolverResult>
   try {
     const pkg = JSON.parse(await Bun.file(join(hostRepoRoot, "package.json")).text()) as { scripts?: Record<string, string> };
     if (pkg.scripts && pkg.scripts["substrate:deploy"]) {
-      const dep = Bun.spawnSync(["bun", "run", "substrate:deploy"], { cwd: hostRepoRoot, env: { ...process.env, SUBSTRATE_BASE_ROOT: baseRoot }, stdout: "pipe", stderr: "pipe" });
-      operations.push({ op: "substrate:deploy hook", status: (dep.exitCode ?? 1) === 0 ? "ok" : "warn" });
+      const dep = Bun.spawnSync([process.execPath, "run", "substrate:deploy"], { cwd: hostRepoRoot, env: { ...process.env, SUBSTRATE_BASE_ROOT: baseRoot, PATH: (process.env.PATH ?? "") + ":/usr/bin:/usr/local/bin:/root/.bun/bin" }, stdout: "pipe", stderr: "pipe" });
+      const depOk = (dep.exitCode ?? 1) === 0;
+      operations.push({ op: "substrate:deploy hook", status: depOk ? "ok" : "warn", detail: depOk ? undefined : new TextDecoder().decode(dep.stderr).slice(0, 160) });
     }
-  } catch { }
+  } catch (e) { operations.push({ op: "substrate:deploy hook", status: "warn", detail: String((e as Error).message ?? e).slice(0, 160) }); }
   // 10. Restart vessel unit (best-effort).
   if (!pointer.skip_restart) {
     let pkgUnit = "";

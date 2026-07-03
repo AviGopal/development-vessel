@@ -27,6 +27,8 @@ export interface CreditPrimedConceptsPointer {
   limit?: number;
   outcome?: "success" | "failure";
   traceId?: string;
+  /** Exact primed concept ids to credit; when non-empty, skips the search fetch. */
+  conceptIds?: string[];
 }
 
 interface ConceptLike { id?: string }
@@ -42,9 +44,11 @@ export async function resolveCreditPrimedConcepts(
   const apiKey = process.env["METABOB_API_KEY"] ?? "";
   const authHeaders: Record<string, string> = apiKey ? { Authorization: `ApiKey ${apiKey}` } : {};
 
-  // 1. Fetch the same primed set (top-N by relevance) concept-db surfaces.
-  let ids: string[] = [];
-  try {
+  // 1. Use explicitly-supplied primed ids when given; else fetch top-N by relevance.
+  let ids: string[] = Array.isArray(pointer.conceptIds)
+    ? pointer.conceptIds.filter((x): x is string => typeof x === "string" && x.length > 0)
+    : [];
+  if (ids.length === 0) try {
     const res = await fetch(
       `${base}/concepts/search?min_relevance=${minRelevance}&limit=${limit}`,
       { headers: authHeaders, signal: AbortSignal.timeout(10_000) },

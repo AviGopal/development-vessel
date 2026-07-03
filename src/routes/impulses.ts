@@ -344,6 +344,10 @@ async function dispatchInner(pointer: AnyPointer): Promise<ResolverResult> {
       return resolveLoadAttributionWrite(p as Parameters<typeof resolveLoadAttributionWrite>[0]);
     case "load_attribution_report":
       return resolveLoadAttributionReport(p as Parameters<typeof resolveLoadAttributionReport>[0]);
+    case "orphaned_org_write_scan": {
+      const { resolveOrphanedOrgWriteScan } = await import("../resolvers/orphaned-org-write-scan.js");
+      return resolveOrphanedOrgWriteScan(pointer);
+    }
     case "schema_assert_drift_scan": {
       const { resolveSchemaAssertDriftScan } = await import("../resolvers/schema-assert-drift-scan.js");
       return resolveSchemaAssertDriftScan(pointer);

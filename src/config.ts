@@ -203,6 +203,7 @@ export const config = {
       // embodies the substrate_self_detection_principle (concept_9ldsmRgqSTd5).
       "dispatch_target_drift_scan",
     "schema_assert_drift_scan",
+      "orphaned_org_write_scan",
       // Phase 2 of obsidian meta-skill prototype (2026-06-01):
       // permissive-scope authoring gate. LLM is asked to read a template body
       // without its self-description and explain what it does, why, and when

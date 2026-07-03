@@ -1,4 +1,5 @@
 import type { ActivityTemplate } from "@avigopal/ias-executor-ts";
+import { LEARNING_TRANSFER_GAP_TICK_TEMPLATE } from "./learning-transfer-gap-tick.js";
 import { SHIP_CHANGE_TEMPLATE } from "./ship-change.js";
 import { BRANCH_HEALTH_TEMPLATE } from "./branch-health.js";
 import { RELEASE_CHANGE_TEMPLATE } from "./release-change.js";
@@ -158,6 +159,7 @@ export { PROBE_REACHABLE_UNLEARNED_TEMPLATE } from "./probe-reachable-unlearned.
 export { PROBE_UNTRAVERSED_EDGE_TEMPLATE } from "./probe-untraversed-edge.js";
 export { ESCALATE_UNKNOWN_SHAPE_TEMPLATE } from "./escalate-unknown-shape.js";
 export { COVERAGE_TICK_TEMPLATE } from "./coverage-tick.js";
+export { LEARNING_TRANSFER_GAP_TICK_TEMPLATE } from "./learning-transfer-gap-tick.js";
 export { SUBSTRATE_HEALTH_TICK_TEMPLATE } from "./substrate-health-tick.js";
 export { COMPOSE_TOPOLOGY_TICK_TEMPLATE } from "./compose-topology-tick.js";
 export { VESSEL_DEMAND_TICK_TEMPLATE } from "./vessel-demand-tick.js";
@@ -275,6 +277,7 @@ export const SEED_TEMPLATES: ActivityTemplate[] = [
   PROBE_UNTRAVERSED_EDGE_TEMPLATE,
   ESCALATE_UNKNOWN_SHAPE_TEMPLATE,
   COVERAGE_TICK_TEMPLATE,
+  LEARNING_TRANSFER_GAP_TICK_TEMPLATE,
   SUBSTRATE_HEALTH_TICK_TEMPLATE,
   COMPOSE_TOPOLOGY_TICK_TEMPLATE,
   // harness-as-lifecycle-participant (§2)

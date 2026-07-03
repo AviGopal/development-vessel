@@ -125,9 +125,16 @@ export async function resolveLearningTransferReport(
         const pct = (coverage * 100).toFixed(1);
         const summary =
           `Successor-feature transfer coverage is low: ${sfCells}/${total} variant cells (${pct}%) carry a ` +
-          `ψ transfer vector (< floor ${(floor * 100).toFixed(0)}%). Most of the posterior space cannot borrow ` +
-          `value across goals — cross-activity learning is failing to flow. Author a fix that raises successor_features ` +
-          `coverage (compute/backfill ψ for uninformed and newly-composed cells) so the transfer machinery covers more cells.`;
+          `ψ transfer vector (< floor ${(floor * 100).toFixed(0)}%). This is NOT a writer/backfill problem — ` +
+          `updateSuccessorFeatures UPSERTs healthily on every trace store. The uncovered cells are STRUCTURALLY ` +
+          `INELIGIBLE: their traces carry no v1 state-signature (gate lib/successor-features.ts:172) and/or no ` +
+          `output_impulse_shapes (gate lib/successor-features.ts:181), so no ψ row is ever written for them. ` +
+          `Canonical case: validator-dispatch has ~650k executions yet zero ψ rows (signature=null, ` +
+          `output_impulse_shapes=null). The eligible (v1-signature × template) population is already ~fully covered, ` +
+          `so the constant writes only re-UPSERT existing cells. LEVER — do NOT author a ψ backfill (the cells are ` +
+          `ineligible, not un-computed); instead (a) attach v1 state-signatures to high-volume plumbing traces ` +
+          `(validator-dispatch, sig-less slot-binding, …), (b) make those cells emit output_impulse_shapes, or ` +
+          `(c) deliberately relax the two eligibility gates.`;
         try {
           await resolveSubstrateGapWrite({
             type: "substrateGap_write",
@@ -147,6 +154,13 @@ export async function resolveLearningTransferReport(
                 genuine_edge_density: density,
                 uninformed_fraction: fraction,
                 lambda1_inequality_ok: total > 0 ? density >= fraction : false,
+                diagnosis: "structural_ineligibility_not_writer",
+                eligibility_gates: [
+                  "lib/successor-features.ts:172 (no v1 state-signature)",
+                  "lib/successor-features.ts:181 (no output_impulse_shapes)",
+                ],
+                canonical_uncovered_cell: "validator-dispatch (~650k executions, signature=null, output_impulse_shapes=null, 0 psi rows)",
+                real_lever: "attach signatures + output-shapes to plumbing traces, or relax the two gates — NOT a psi backfill",
               },
             },
           });

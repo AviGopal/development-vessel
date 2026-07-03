@@ -5,6 +5,7 @@ import { startDiscoveryRegistration, isRegistered } from "./discovery-registrati
 import { startRegistryChangeObserver } from "./observers/registry-change-observer.js";
 import { startConceptBridgeObserver } from "./observers/concept-bridge-observer.js";
 import { startAutocompleteConceptWriter } from "./observers/autocomplete-concept-writer.js";
+import { startFailureCreditObserver } from "./observers/failure-credit-observer.js";
 
 const app = new Hono();
 
@@ -36,6 +37,7 @@ startDiscoveryRegistration();
 startRegistryChangeObserver();
 startConceptBridgeObserver();
 startAutocompleteConceptWriter();
+startFailureCreditObserver();
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Iteration 9 of the cross-vessel OOM hunt — periodic Bun.gc(true) workaround.

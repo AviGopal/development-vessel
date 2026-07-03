@@ -33,6 +33,7 @@ export const config = {
     shapes: [
     "assessment_summary",
     "interaction_expectation_verify",
+    "self_interference_scan",
     "efficiency_scan",
     "performance_reach_gate",
     "perf_canary_resolve",

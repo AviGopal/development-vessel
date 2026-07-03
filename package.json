@@ -1,12 +1,24 @@
 {
-  "name": "development-vessel",
-  "version": "0.1.0",
+  "name": "@metabob/development-vessel",
+  "version": "0.2.0",
+  "private": true,
   "type": "module",
   "scripts": {
+    "dev": "bun run --watch src/index.ts",
+    "start": "bun run src/index.ts",
+    "cli": "bun run src/cli.ts",
+    "test": "bun test",
     "typecheck": "tsc --noEmit",
-    "build": "tsc"
+    "check-shape-dispatch": "bun scripts/check-shape-dispatch.ts",
+    "lint": "bun run typecheck && bun run check-shape-dispatch"
+  },
+  "dependencies": {
+    "@avigopal/ias-executor-ts": "file:../ias-executor-ts",
+    "hono": "^4.0.0",
+    "zod": "^3.22.0"
   },
   "devDependencies": {
+    "@types/bun": "^1.0.0",
     "typescript": "^5.4.0"
   }
 }

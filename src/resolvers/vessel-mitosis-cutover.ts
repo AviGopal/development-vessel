@@ -1457,6 +1457,14 @@ async function runGitAwareCutover(args: GitCutoverArgs): Promise<ResolverResult>
     });
   }
 
+  // 9b. Vessel-owned deploy hook: run the clone's scripts["substrate:deploy"] with SUBSTRATE_BASE_ROOT so built-artifact vessels place their own runtime files.
+  try {
+    const pkg = JSON.parse(await Bun.file(join(hostRepoRoot, "package.json")).text()) as { scripts?: Record<string, string> };
+    if (pkg.scripts && pkg.scripts["substrate:deploy"]) {
+      const dep = Bun.spawnSync(["bun", "run", "substrate:deploy"], { cwd: hostRepoRoot, env: { ...process.env, SUBSTRATE_BASE_ROOT: baseRoot }, stdout: "pipe", stderr: "pipe" });
+      operations.push({ op: "substrate:deploy hook", status: (dep.exitCode ?? 1) === 0 ? "ok" : "warn" });
+    }
+  } catch { }
   // 10. Restart vessel unit (best-effort).
   if (!pointer.skip_restart) {
     const unit = pointer.restart_unit_name ?? `${vessel_name}.service`;

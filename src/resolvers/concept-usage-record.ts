@@ -64,10 +64,20 @@ export async function resolveConceptUsageRecord(
       },
     };
   }
-  const traceId =
-    isPlaceholder(pointer.trace_id) || !pointer.trace_id
-      ? `autonomous_backfill_${new Date().toISOString()}`
-      : pointer.trace_id;
+  if (isPlaceholder(pointer.trace_id) || !pointer.trace_id) {
+    // No real trace attribution — do NOT synthesize a usage row. Synthetic
+    // autonomous_backfill_* rows inflated concept relevance (usage credit must
+    // come only from a real execution trace that loaded the concept).
+    return {
+      shape: "conceptUsageRecorded",
+      body: {
+        skipped: true,
+        recorded: false,
+        reason: "unbound/placeholder trace_id — skipped usage write (no synthetic credit)",
+      },
+    };
+  }
+  const traceId = pointer.trace_id;
   const baseUrl = pointer.conceptDbUrl ?? DEFAULT_CONCEPT_DB_URL;
   // concept-db expects the concept_id URL-encoded into the path
   const url = `${baseUrl}/${encodeURIComponent(pointer.concept_id)}/usage`;

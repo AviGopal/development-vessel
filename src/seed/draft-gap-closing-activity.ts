@@ -599,6 +599,10 @@ export const DRAFT_GAP_CLOSING_ACTIVITY_TEMPLATE: ActivityTemplate = {
         minRelevance: 0.3,
         limit: 15,
         outcome: "success",
+        // Thread the ACTUAL primed set (2026-07-03): credit exactly the ids the
+        // prime step returned, instead of re-querying the (possibly shifted)
+        // ranking at terminal time.
+        primedJson: "{{prime_substrate_concepts_text}}",
       },
       outputShapes: ["conceptCreditResult"],
     },

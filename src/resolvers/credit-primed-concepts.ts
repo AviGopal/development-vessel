@@ -29,6 +29,10 @@ export interface CreditPrimedConceptsPointer {
   traceId?: string;
   /** Exact primed concept ids to credit; when non-empty, skips the search fetch. */
   conceptIds?: string[];
+  /** Raw prime-step output ({{prime_substrate_concepts_text}}): the /concepts/search
+   * response (JSON text or pre-parsed object). Ids derive from .concepts[].id so the
+   * credit targets exactly the primed set, not a fresh re-query. */
+  primedJson?: unknown;
 }
 
 interface ConceptLike { id?: string }
@@ -48,6 +52,20 @@ export async function resolveCreditPrimedConcepts(
   let ids: string[] = Array.isArray(pointer.conceptIds)
     ? pointer.conceptIds.filter((x): x is string => typeof x === "string" && x.length > 0)
     : [];
+  if (ids.length === 0 && pointer.primedJson !== undefined && pointer.primedJson !== null) {
+    // Derive the primed set from the prime step's own output (slot-bound raw
+    // /concepts/search response). interpolateVars may hand us a parsed object
+    // or raw JSON text; accept both. Unparseable or still-a-placeholder input
+    // falls through to the search re-query (legacy behaviour).
+    let parsed: unknown = pointer.primedJson;
+    if (typeof parsed === "string" && !parsed.startsWith("{{")) {
+      try { parsed = JSON.parse(parsed); } catch { parsed = undefined; }
+    }
+    const arr = (parsed as { concepts?: ConceptLike[] } | undefined)?.concepts;
+    if (Array.isArray(arr)) {
+      ids = arr.map((c) => c?.id).filter((x): x is string => typeof x === "string" && x.length > 0);
+    }
+  }
   if (ids.length === 0) try {
     const res = await fetch(
       `${base}/concepts/search?min_relevance=${minRelevance}&limit=${limit}`,

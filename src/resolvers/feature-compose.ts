@@ -871,7 +871,10 @@ const composeInFlight = new Set<string>();
 export async function resolveFeatureCompose(pointer: FeatureComposePointer): Promise<ResolverResult> {
   const guards = pointer.verify_vessels?.length ? pointer.verify_vessels : ["__global__"];
   const busy = guards.find((v) => composeInFlight.has(v));
-  if (busy) return { shape: "featureComposeReport", body: { ok: false, verdict: "BUSY", stage: "guard", error: "compose already in flight for " + busy + " - retry after it completes" } };
+  if (busy) {
+    try { const { appendFile } = await import("node:fs/promises"); await appendFile("/workspace/proposals/busy-refusals.jsonl", JSON.stringify({ at: new Date().toISOString(), vessel: busy }) + "\n"); } catch { }
+    return { shape: "featureComposeReport", body: { ok: false, verdict: "BUSY", stage: "guard", error: "compose already in flight for " + busy + " - retry after it completes" } };
+  }
   for (const v of guards) composeInFlight.add(v);
   try { return await resolveFeatureComposeInner(pointer); } finally { for (const v of guards) composeInFlight.delete(v); }
 }

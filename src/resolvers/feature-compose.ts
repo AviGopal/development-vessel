@@ -867,6 +867,57 @@ async function groundVesselFiles(toolsEndpoint: string, verifyVessels: string[],
   return blocks.join("\n\n");
 }
 
+// ── Compose failure lessons (never-the-same-mistake-twice, 2026-07-03) ──
+// Every non-FAVORABLE verdict appends a classified lesson to a durable JSONL;
+// composeLessonsBlock() re-injects the accumulated classes into the decompose
+// prompt so the drafter is warned against exactly the mistakes already made.
+const COMPOSE_LESSONS_PATH = "/workspace/proposals/compose-lessons.jsonl";
+const COMPOSE_LESSON_GUIDANCE: Record<string, string> = {
+  empty_diff_identity_edit: "every edit op MUST carry a non-empty old_string copied VERBATIM from the current file content and a new_string that DIFFERS from it — an op whose applied diff is empty is a hard reject",
+  anchor_not_found: "old_string anchors must be copied verbatim from the CURRENT file content shown in the grounding — never reconstructed from memory",
+  typecheck_dangling_reference: "when deleting or renaming a symbol, update EVERY reference to it in the same plan — search the grounding for the symbol name first",
+  syntax_break: "deletions must respect block structure — never delete across a function or brace boundary",
+  partial_spec_omission: "if the spec lists N numbered items, the plan must implement ALL N — partial implementations are rejected",
+  wrong_location: "anchor each edit to the EXACT symbol/site named in the spec, not a similarly-named one",
+  dead_insertion_unwired: "new code must be WIRED to a live path (registered, imported AND called) — declared-but-never-used insertions are rejected",
+  mis_localized_path: "only touch file paths that appear in the grounding file tree — never invent vessel or file names",
+  verify_failed: "the edited vessel must pass strict tsc after the change",
+  semantic_reject: "the diff must concretely address the spec on a live code path",
+};
+function classifyComposeFailure(appliedOps: Array<{ ok: boolean; detail?: string }>, verifyResults: Array<{ ok: boolean; output: string }>, semanticReason: string): string {
+  const ap = appliedOps.find((a) => !a.ok);
+  if (ap) return /ENOENT/.test(ap.detail ?? "") ? "mis_localized_path" : "anchor_not_found";
+  const bad = verifyResults.find((v) => !v.ok);
+  if (bad) {
+    if (/TS1128|TS1005|TS1109/.test(bad.output)) return "syntax_break";
+    if (/TS2304|TS2552|TS2554|TS2551/.test(bad.output)) return "typecheck_dangling_reference";
+    return "verify_failed";
+  }
+  if (/diff is empty|diff field is empty/i.test(semanticReason)) return "empty_diff_identity_edit";
+  if (/consumed_never_populated|imported-but-never-called|never actually|never inserts|never calls/i.test(semanticReason)) return "dead_insertion_unwired";
+  if (/omits|omitted|but never|only implements/i.test(semanticReason)) return "partial_spec_omission";
+  if (/not above|instead of|rather than|duplicates|whereas/i.test(semanticReason)) return "wrong_location";
+  return "semantic_reject";
+}
+async function appendComposeLesson(cls: string, reason: string, vessels: string): Promise<void> {
+  try {
+    const { appendFileSync, mkdirSync } = await import("node:fs");
+    mkdirSync("/workspace/proposals", { recursive: true });
+    appendFileSync(COMPOSE_LESSONS_PATH, JSON.stringify({ at: new Date().toISOString(), class: cls, reason: reason.slice(0, 200), vessels }) + "\n");
+  } catch { /* lesson persistence is advisory */ }
+}
+async function composeLessonsBlock(): Promise<string> {
+  try {
+    const { readFileSync } = await import("node:fs");
+    const lines = readFileSync(COMPOSE_LESSONS_PATH, "utf8").split("\n").filter((l) => l.trim().length > 0).slice(-60);
+    const counts = new Map<string, number>();
+    for (const l of lines) { try { const r = JSON.parse(l) as { class?: string }; if (r.class) counts.set(r.class, (counts.get(r.class) ?? 0) + 1); } catch { /* skip bad line */ } }
+    if (counts.size === 0) return "";
+    const rows = [...counts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 8)
+      .map(([cls, n]) => `- (${n}x) ${cls}: ${COMPOSE_LESSON_GUIDANCE[cls] ?? "avoid repeating this failure class"}`);
+    return `\n\nKNOWN FAILURE MODES from this substrate's own rejected composes — plans repeating these are rolled back:\n${rows.join("\n")}`;
+  } catch { return ""; }
+}
 const composeInFlight = new Set<string>();
 export async function resolveFeatureCompose(pointer: FeatureComposePointer): Promise<ResolverResult> {
   const guards = pointer.verify_vessels?.length ? pointer.verify_vessels : ["__global__"];
@@ -914,9 +965,10 @@ async function resolveFeatureComposeInner(pointer: FeatureComposePointer): Promi
   // that as explicit re-draft guidance so the drafter completes the partial fix instead
   // of re-producing it blind. Additive — empty when no prior rejection exists.
   const priorFeedback = priorAttemptFeedbackBlock(pointer.gap?.classification_metadata);
+  const composeLessons = await composeLessonsBlock();
   let planRaw: string;
   try {
-    planRaw = await llmCall(llmEndpoint, decomposePrompt(pointer.spec, maxOps, grounding, principles, priorFeedback), model);
+    planRaw = await llmCall(llmEndpoint, decomposePrompt(pointer.spec, maxOps, grounding, principles + composeLessons, priorFeedback), model);
   } catch (e) {
     return { shape: "featureComposeReport", body: { ok: false, stage: "decompose", error: (e as Error).message } };
   }
@@ -1444,6 +1496,10 @@ async function resolveFeatureComposeInner(pointer: FeatureComposePointer): Promi
     }
   }
 
+  if (verdict !== "FAVORABLE") {
+    const lessonClass = classifyComposeFailure(applied, verify, String(semantic_gate?.reason ?? ""));
+    await appendComposeLesson(lessonClass, String(semantic_gate?.reason ?? verify.find((v) => !v.ok)?.output ?? applied.find((a) => !a.ok)?.detail ?? verdict), [...touched].join(","));
+  }
   // Persist the compose report as a durable artifact (mirrors gap-to-feature's PROPOSALS_DIR reports). Never fails the compose.
   try {
     const { writeFileSync, mkdirSync } = await import("node:fs");

@@ -12,9 +12,11 @@ import type { ResolverResult } from "./types.js";
  * by the activity that loaded and used them. Not re-derivation: it reports the
  * success it observed (reaching the terminal) for the concepts it loaded.
  *
- * Reads the primed set from concept-db's OWN search (the same query the drafter
- * primes with) and writes via concept-db's own POST /concepts/:id/usage. The
- * load and the credit thus target the same top-N, making relevance two-sided.
+ * Credits the EXACT primed set: callers pass conceptIds (explicit ids) or
+ * primedJson (the prime step's raw /concepts/search response) and the resolver
+ * credits precisely those, with the caller's outcome (success or failure).
+ * The relevance-ranked search re-query survives only as a legacy fallback when
+ * neither field is supplied. Writes via concept-db's POST /concepts/:id/usage.
  */
 
 const DEFAULT_BASE = "http://127.0.0.1:8260";

@@ -1467,7 +1467,9 @@ async function runGitAwareCutover(args: GitCutoverArgs): Promise<ResolverResult>
   } catch { }
   // 10. Restart vessel unit (best-effort).
   if (!pointer.skip_restart) {
-    const unit = pointer.restart_unit_name ?? `${vessel_name}.service`;
+    let pkgUnit = "";
+    try { const pj = JSON.parse(await Bun.file(join(hostRepoRoot, "package.json")).text()) as { substrate?: { restart_unit?: string } }; if (pj.substrate && typeof pj.substrate.restart_unit === "string") pkgUnit = pj.substrate.restart_unit; } catch { }
+    const unit = pointer.restart_unit_name ?? (pkgUnit !== "" ? pkgUnit : vessel_name + ".service");
     // SELF-CUTOVER guard (commit-vs-deploy gap fix, 2026-06-23): when this vessel
     // (development-vessel, which hosts the cutover resolvers) cuts over ITSELF, an
     // inline `systemctl restart development-vessel.service` kills THIS running

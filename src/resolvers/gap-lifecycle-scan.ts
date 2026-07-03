@@ -248,16 +248,57 @@ export async function resolveGapLifecycleScan(p: GapLifecycleScanPointer): Promi
     ? await autoCloseStaleGaps(openGapRecords, autoCloseStore, autoCloseEmitter)
     : { closedIds: [] as string[], closureEvents: [] as GapClosureEvent[] };
 
+  const apiKey = process.env["METABOB_API_KEY"];
+  const authHeader: Record<string, string> = apiKey ? { Authorization: `ApiKey ${apiKey}` } : {};
+
+  const lowValueClosed: string[] = [];
+  if (autoClose && !dryRun) {
+    for (const id of closedIds.slice(0, maxClose)) {
+      const g = open.find((x) => x.id === id);
+      if (!g) continue;
+      try {
+        const resp = await fetch(emitUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', ...authHeader },
+          body: JSON.stringify({ impulse: { pointer: { type: 'substrateGap_write', gap: { id: g.id, category: g.category ?? 'other', source: 'substrate_detected', summary: `[auto-closed by gap_lifecycle_scan] ${(g.summary ?? '').slice(0, 160)} — stale low-value (not re-detected >${staleHours}h). Live detectors re-open if still real.`, status: 'closed', detected_at: new Date().toISOString(), classification_metadata: { closed_reason: 'stale_low_value', closed_by: 'gap_lifecycle_scan', previous_status: 'open', last_seen: g.updated_at ?? g.created_at } } } } }),
+          signal: AbortSignal.timeout(8_000)
+        });
+        if (resp.ok) lowValueClosed.push(g.id!);
+      } catch { }
+    }
+  }
+
   // Remove auto-closed gaps from further processing this run
   const remainingOpen = open.filter((g) => !closedIds.includes(g.id!));
 
   const churned = remainingOpen.filter((g) => failedSentinels.has(sanitizeId(g.id!)) && stale(g));
   const staleOpen = remainingOpen.filter((g) => stale(g));
 
+  const expireHours = (p as any).expireHours ?? 336;
+  const maxExpire = (p as any).maxExpire ?? 100;
+  const expireBefore = Date.now() - expireHours * 3_600_000;
+  const expiredCandidates = remainingOpen.filter((g) => {
+    const t = Date.parse(g.updated_at ?? g.created_at ?? '');
+    return Number.isFinite(t) && t < expireBefore && !lowValueClosed.includes(g.id!);
+  });
+  const expired: string[] = [];
+  if (autoClose && !dryRun) {
+    for (const g of expiredCandidates.slice(0, maxExpire)) {
+      try {
+        const resp = await fetch(emitUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', ...authHeader },
+          body: JSON.stringify({ impulse: { pointer: { type: 'substrateGap_write', gap: { id: g.id, category: g.category ?? 'other', source: 'substrate_detected', summary: `[expired by gap_lifecycle_scan] ${(g.summary ?? '').slice(0, 160)} — not re-detected within ${expireHours}h TTL; detector liveness (upsert-by-id) says this is likely no longer valid. Re-opens automatically if a detector re-emits it.`, status: 'closed', detected_at: new Date().toISOString(), classification_metadata: { closed_reason: 'expired_not_redetected', closed_by: 'gap_lifecycle_scan', previous_status: 'open', first_detected: g.created_at, last_seen: g.updated_at ?? g.created_at } } } } }),
+          signal: AbortSignal.timeout(8_000)
+        });
+        if (resp.ok) expired.push(g.id!);
+      } catch { }
+    }
+  }
+
   // 1. Auto-close churned gaps (safe: re-emitted next cycle if still real).
   const closed: string[] = [];
-  const apiKey = process.env["METABOB_API_KEY"];
-  const authHeader: Record<string, string> = apiKey ? { Authorization: `ApiKey ${apiKey}` } : {};
+
   if (autoClose && !dryRun) {
     for (const g of churned.slice(0, maxClose)) {
       try {
@@ -304,6 +345,10 @@ export async function resolveGapLifecycleScan(p: GapLifecycleScanPointer): Promi
       total_gaps: gaps.length, open: open.length,
       stale_open: staleOpen.length, churned: churned.length,
       auto_closed: closed.length, auto_closed_ids: closed.slice(0, 20),
+      low_value_closed: lowValueClosed.length,
+      expired: expired.length,
+      expire_hours: expireHours,
+      consumption_queue: remainingOpen.filter((g) => !expired.includes(g.id!)).map((g) => ({ id: g.id, category: g.category, landability: landability(g) })).sort((a, b) => b.landability - a.landability).slice(0, 10),
       backlog_meta_gap_posted: backlogPosted,
       top_stale_categories: Object.fromEntries(topCats),
       stale_hours: staleHours, dry_run: dryRun, auto_close: autoClose,

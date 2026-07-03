@@ -5,6 +5,7 @@ import { resolveFeatureCompose, priorAttemptFeedbackBlock } from "./feature-comp
 import { resolveSubstrateGap, resolveSubstrateGapWrite, DECISION_LOG_GAP_CATEGORIES } from "./substrate-gap.js";
 import { resolveAuthorProducer } from "./author-producer.js";
 import { resolveDocDriftFix } from "./doc-drift-fix.js";
+import { resolveReachabilityGapRepair } from "./reachability-gap-repair.js";
 import { DISCOVERY_ENDPOINT, METABOB_API_KEY } from "../config.js";
 
 // Mirror feature-compose's path model: repos/<vessel>/... maps to the writable
@@ -1006,6 +1007,31 @@ export async function resolveGapToFeature(pointer: GapToFeaturePointer): Promise
   // here free-drafts a create_file into a NON-EXISTENT vessel (e.g. repos/executive/)
   // that phantom-lands and never invokes the resolver. Route to the primitive that
   // actually produces a discoverable, Thompson-selectable producer.
+  if (String(gap.category ?? "") === "unreachable_producer") {
+    const repaired = await resolveReachabilityGapRepair({ type: "reachability_gap_repair", gap_id: String(gap.id ?? ""), dry_run: pointer.dry_run });
+    const rb = (repaired?.body ?? {}) as Record<string, unknown>;
+    if (!pointer.dry_run && rb["verdict"] !== "FAVORABLE") await bumpFailedAttempts(gap);
+    if (!pointer.dry_run && rb["verdict"] === "FAVORABLE") {
+      try {
+        await resolveSubstrateGapWrite({
+          type: "substrateGap_write",
+          gap: {
+            id: String(gap.id ?? ""),
+            category: gap.category,
+            source: gap.source,
+            summary: gap.summary,
+            detected_at: gap.detected_at,
+            classification_metadata: (gap.classification_metadata ?? gap.metadata ?? {}) as Record<string, unknown>,
+            status: "closed",
+          },
+        } as never);
+      } catch { /* best-effort */ }
+    }
+    return {
+      shape: "gapToFeatureReport",
+      body: { ok: rb["verdict"] === "FAVORABLE", stage: "route_reachability", gap_id: gap.id, gap_category: gap.category, route: "reachability_gap_repair", repair: rb },
+    };
+  }
   if (String(gap.category ?? "") === "orphaned_capability") {
     const meta = (gap.classification_metadata ?? gap.metadata ?? {}) as Record<string, unknown>;
     const shape = String(meta.shape ?? "").trim();

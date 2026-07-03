@@ -972,8 +972,15 @@ async function resolveFeatureComposeInner(pointer: FeatureComposePointer): Promi
   } catch (e) {
     return { shape: "featureComposeReport", body: { ok: false, stage: "decompose", error: (e as Error).message } };
   }
-  const plan = parseJsonObject(planRaw);
-  const ops = (plan?.ops as PlanOp[] | undefined) ?? [];
+  let plan = parseJsonObject(planRaw);
+  let ops = (plan?.ops as PlanOp[] | undefined) ?? [];
+  if (!plan || !Array.isArray(ops) || ops.length === 0) {
+    try {
+      planRaw = await llmCall(llmEndpoint, decomposePrompt(pointer.spec, maxOps, grounding, principles + composeLessons, priorFeedback) + "\n\nCRITICAL RETRY: your previous plan contained NO ops (analysis prose or truncation). Output ONLY the JSON object starting with { — zero words before it, no analysis, compressed ops only.", model);
+      plan = parseJsonObject(planRaw);
+      ops = (plan?.ops as PlanOp[] | undefined) ?? [];
+    } catch { /* fall through to honest no-ops below */ }
+  }
   if (!plan || !Array.isArray(ops) || ops.length === 0) {
     return { shape: "featureComposeReport", body: { ok: false, stage: "decompose", error: "plan had no ops", plan_raw: planRaw.slice(0, 1200) } };
   }

@@ -344,6 +344,10 @@ async function dispatchInner(pointer: AnyPointer): Promise<ResolverResult> {
       return resolveLoadAttributionWrite(p as Parameters<typeof resolveLoadAttributionWrite>[0]);
     case "load_attribution_report":
       return resolveLoadAttributionReport(p as Parameters<typeof resolveLoadAttributionReport>[0]);
+    case "schema_assert_drift_scan": {
+      const { resolveSchemaAssertDriftScan } = await import("../resolvers/schema-assert-drift-scan.js");
+      return resolveSchemaAssertDriftScan(pointer);
+    }
     case "dispatch_target_drift_scan":
       return resolveDispatchTargetDriftScan(p as Parameters<typeof resolveDispatchTargetDriftScan>[0]);
     case "service_oom_cascade_scan":

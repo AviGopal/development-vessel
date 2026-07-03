@@ -32,6 +32,7 @@ export const config = {
     // One entry per R2.* resolver in specs/development-vessel/spec.md.
     shapes: [
     "assessment_summary",
+    "interaction_expectation_verify",
     "efficiency_scan",
     "performance_reach_gate",
     "perf_canary_resolve",

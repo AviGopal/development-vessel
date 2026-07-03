@@ -276,6 +276,36 @@ import { METABOB_API_KEY } from "../config.js";
  *    propagating an LLM context-overflow downstream. Raising this ceiling
  *    requires a coordinated change with goal-host-vessel.
  */
+/**
+ * MAX_GOAL_LEN guard rationale:
+ *
+ * The 8192-character ceiling exists to prevent pathological goal text from
+ * destabilizing the dispatcher. Without this guard, oversized goal payloads
+ * could exceed downstream LLM token budgets, open the door to prompt-injection
+ * vectors hidden inside diffuse over-long specifications, or produce
+ * unintelligible synthesis scenarios where the dispatcher cannot reason about
+ * intent coherently.
+ *
+ * By enforcing this bound at the resolver boundary we preserve goal
+ * comprehensibility (goals remain focused enough for a human and the LLM to
+ * reason about) and dispatcher stability (bounded validation, hashing, and
+ * dispatch latency; predictable prompt-context usage shared with
+ * goal-host-vessel).
+ */
+/**
+ * MAX_GOAL_LEN — 8192-character ceiling on accepted goal text.
+ *
+ * Rationale: this guard prevents pathological goal payloads that would
+ * otherwise (a) exceed downstream LLM token budgets given finite context
+ * windows, (b) widen the surface area for prompt-injection attacks smuggled
+ * inside oversized free-form text, and (c) produce unintelligible synthesis
+ * scenarios where the goal is too diffuse to resolve into a coherent plan.
+ *
+ * Enforcing an explicit upper bound preserves goal comprehensibility for
+ * both human reviewers and the LLM planner, and keeps the dispatcher stable
+ * by bounding validation, hashing, and dispatch latency. Raising this
+ * ceiling requires a coordinated change with goal-host-vessel.
+ */
 // MAX_GOAL_LEN guard rationale:
 //   - Prevents token overflow in downstream LLM calls (finite context windows).
 //   - Ensures goal coherence by rejecting diffuse, over-long specifications.

@@ -1,0 +1,146 @@
+import type { ActivityTemplate } from '../types/activity-template.js';
+
+const scaffoldAndPublishVessel: ActivityTemplate = {
+  id: 'development-vessel:scaffold-and-publish-vessel',
+  tags: ['lift.autonomous.loop', 'vessel.addition'],
+  boredom_target_template: true,
+  description: 'Scaffold a new vessel from a validated failure-mode scenario and publish it via PR',
+  tasks: [
+    {
+      id: 'list-scenarios',
+      type: 'fs_list',
+      glob: '/workspace/validation/failure-modes/vessel-scenarios/*.json',
+      shuffle: true,
+      output_variable: 'scenario_file',
+    },
+    {
+      id: 'extract-vessel-name',
+      type: 'json_path_extract',
+      input_variable: 'scenario_file',
+      path: '$.vesselName',
+      output_variable: 'vesselName',
+    },
+    {
+      id: 'extract-port',
+      type: 'json_path_extract',
+      input_variable: 'scenario_file',
+      path: '$.port',
+      output_variable: 'port',
+    },
+    {
+      id: 'extract-advertised-shapes',
+      type: 'json_path_extract',
+      input_variable: 'scenario_file',
+      path: '$.advertised_shapes_literal',
+      output_variable: 'advertised_shapes_literal',
+    },
+    {
+      id: 'extract-description',
+      type: 'json_path_extract',
+      input_variable: 'scenario_file',
+      path: '$.description',
+      output_variable: 'description',
+    },
+    {
+      id: 'extract-cwd',
+      type: 'json_path_extract',
+      input_variable: 'scenario_file',
+      path: '$.cwd',
+      output_variable: 'cwd',
+    },
+    {
+      id: 'extract-dir-path',
+      type: 'json_path_extract',
+      input_variable: 'scenario_file',
+      path: '$.dirPath',
+      output_variable: 'dirPath',
+    },
+    {
+      id: 'extract-unit-file-path',
+      type: 'json_path_extract',
+      input_variable: 'scenario_file',
+      path: '$.unitFilePath',
+      output_variable: 'unitFilePath',
+    },
+    {
+      id: 'extract-owner',
+      type: 'json_path_extract',
+      input_variable: 'scenario_file',
+      path: '$.owner',
+      output_variable: 'owner',
+    },
+    {
+      id: 'extract-repo',
+      type: 'json_path_extract',
+      input_variable: 'scenario_file',
+      path: '$.repo',
+      output_variable: 'repo',
+    },
+    {
+      id: 'extract-base-branch',
+      type: 'json_path_extract',
+      input_variable: 'scenario_file',
+      path: '$.base_branch',
+      output_variable: 'base_branch',
+    },
+    {
+      id: 'extract-target-branch',
+      type: 'json_path_extract',
+      input_variable: 'scenario_file',
+      path: '$.target_branch',
+      output_variable: 'target_branch',
+    },
+    {
+      id: 'compose-commit-message',
+      type: 'llm_completion_dispatch',
+      prompt_template:
+        'Generate a concise git commit message for adding a new vessel named {{vesselName}} that {{description}}. Return only the commit message text.',
+      input_variables: ['vesselName', 'description'],
+      output_variable: 'commit_message',
+    },
+    {
+      id: 'compose-pr-title',
+      type: 'llm_completion_dispatch',
+      prompt_template:
+        'Generate a concise pull request title for adding a new vessel named {{vesselName}} that {{description}}. Return only the PR title text.',
+      input_variables: ['vesselName', 'description'],
+      output_variable: 'pr_title',
+    },
+    {
+      id: 'compose-pr-body',
+      type: 'llm_completion_dispatch',
+      prompt_template:
+        'Generate a pull request body for adding a new vessel named {{vesselName}} that {{description}}.\n\nInclude a trailer line at the end:\nSubstrate-Authored-By: autonomous-loop',
+      input_variables: ['vesselName', 'description'],
+      output_variable: 'pr_body',
+    },
+    {
+      id: 'dispatch-scaffold',
+      type: 'http_fetch',
+      method: 'POST',
+      url: '{{GOAL_HOST_URL}}/run-goal',
+      body: {
+        targetTemplateId: 'development-vessel:scaffold-and-publish-vessel',
+        variables: {
+          vesselName: '{{vesselName}}',
+          port: '{{port}}',
+          advertised_shapes_literal: '{{advertised_shapes_literal}}',
+          description: '{{description}}',
+          commit_message: '{{commit_message}}',
+          pr_title: '{{pr_title}}',
+          pr_body: '{{pr_body}}',
+          cwd: '{{cwd}}',
+          dirPath: '{{dirPath}}',
+          unitFilePath: '{{unitFilePath}}',
+          owner: '{{owner}}',
+          repo: '{{repo}}',
+          base_branch: '{{base_branch}}',
+          target_branch: '{{target_branch}}',
+        },
+      },
+      output_variable: 'dispatch_result',
+    },
+  ],
+};
+
+export default scaffoldAndPublishVessel;

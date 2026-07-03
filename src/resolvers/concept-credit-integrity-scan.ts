@@ -18,8 +18,12 @@ export async function resolveConceptCreditIntegrityScan(pointer: ConceptCreditIn
   const limit = typeof pointer.limit === "number" ? pointer.limit : 50;
   const offenders: Array<{ id: string; summary: string; loaded: number; succeeded: number }> = [];
   let scanned = 0;
+  // Org-scoped read: without ApiKey auth the search resolves under org 'default'
+  // and the org-scoped high-usage concepts are invisible (blind-window defect).
+  const apiKey = process.env["METABOB_API_KEY"] ?? "";
+  const authHeaders: Record<string, string> = apiKey ? { Authorization: `ApiKey ${apiKey}` } : {};
   try {
-    const res = await fetch(`${base}/concepts/search?limit=${limit}`, { signal: AbortSignal.timeout(10_000) });
+    const res = await fetch(`${base}/concepts/search?limit=${limit}`, { headers: authHeaders, signal: AbortSignal.timeout(10_000) });
     const json = (await res.json()) as { concepts?: ConceptRow[] };
     for (const c of json.concepts ?? []) {
       scanned += 1;

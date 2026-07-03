@@ -867,7 +867,15 @@ async function groundVesselFiles(toolsEndpoint: string, verifyVessels: string[],
   return blocks.join("\n\n");
 }
 
+const composeInFlight = new Set<string>();
 export async function resolveFeatureCompose(pointer: FeatureComposePointer): Promise<ResolverResult> {
+  const guards = pointer.verify_vessels?.length ? pointer.verify_vessels : ["__global__"];
+  const busy = guards.find((v) => composeInFlight.has(v));
+  if (busy) return { shape: "featureComposeReport", body: { ok: false, verdict: "BUSY", stage: "guard", error: "compose already in flight for " + busy + " - retry after it completes" } };
+  for (const v of guards) composeInFlight.add(v);
+  try { return await resolveFeatureComposeInner(pointer); } finally { for (const v of guards) composeInFlight.delete(v); }
+}
+async function resolveFeatureComposeInner(pointer: FeatureComposePointer): Promise<ResolverResult> {
   const model = pointer.model ?? "anthropic/claude-sonnet-4-6";
   const maxOps = pointer.max_ops ?? 24;
   const dryRun = pointer.dry_run ?? false;

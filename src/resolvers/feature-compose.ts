@@ -926,6 +926,10 @@ async function resolveFeatureComposeInner(pointer: FeatureComposePointer): Promi
 
   const touched = new Set<string>((plan.touched_vessels as string[] | undefined) ?? []);
   for (const op of ops) { const d = vesselDirOf(op.path); if (d) touched.add(d); }
+  if (verifyVessels.length > 0) {
+    const outOfScope = [...touched].find((v) => !verifyVessels.includes(v));
+    if (outOfScope) return { shape: "featureComposeReport", body: { ok: false, verdict: "REFUSED", stage: "scope", error: "plan touches " + outOfScope + " which is outside verify_vessels - declare it so it is typecheck-verified and concurrency-guarded" } };
+  }
 
   const planView = ops.map((o) => ({ kind: o.kind, path: o.path, rationale: o.rationale }));
   if (dryRun) {

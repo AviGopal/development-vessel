@@ -153,6 +153,7 @@ import { resolveObsidianExecuteGated } from "../resolvers/obsidian-execute-gated
 import { resolveObsidianLearnCommands } from "../resolvers/obsidian-learn-commands.js";
 import { resolveInteractionExpectationVerify } from "../resolvers/interaction-expectation-verify.js";
 import { resolveSelfInterferenceScan } from "../resolvers/self-interference-scan.js";
+import { resolveLearningTransferReport } from "../resolvers/learning-transfer-report.js";
 import { resolveInterfaceDeployReachCheck } from "../resolvers/interface-deploy-reach-check.js";
 import { resolveGoalHostBehaviorScan } from "../resolvers/goal-host-behavior-scan.js";
 import { resolveObsidianBehaviorScan } from "../resolvers/obsidian-behavior-scan.js";
@@ -610,6 +611,8 @@ async function dispatchInner(pointer: AnyPointer): Promise<ResolverResult> {
       return resolveInterfaceDeployReachCheck(p as Parameters<typeof resolveInterfaceDeployReachCheck>[0]);
     case "self_interference_scan":
       return resolveSelfInterferenceScan(p as Parameters<typeof resolveSelfInterferenceScan>[0]);
+    case "learning_transfer_report":
+      return resolveLearningTransferReport(p as Parameters<typeof resolveLearningTransferReport>[0]);
     case "interaction_expectation_verify":
       return resolveInteractionExpectationVerify(p as Parameters<typeof resolveInteractionExpectationVerify>[0]);
     case "obsidian_learn_commands":

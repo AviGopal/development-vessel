@@ -34,6 +34,7 @@ export const config = {
     "assessment_summary",
     "interaction_expectation_verify",
     "self_interference_scan",
+    "learning_transfer_report",
     "interface_deploy_reach_check",
     "efficiency_scan",
     "performance_reach_gate",

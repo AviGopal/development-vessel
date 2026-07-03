@@ -173,6 +173,36 @@ export async function resolveReachabilityGapRepair(
     };
   }
 
+  // Safety guard: bulk-clearing every required input on a many-input producer
+  // is a qualitatively different, riskier action than the primitive's proven
+  // case (ONE gating input made optional, e.g. repair-activity-from-failures'
+  // trace_failure_pattern_report). Observed live: a producer required 5 plain
+  // scalar params (path, oldString, newString, cwd, message) — none is a real
+  // data shape with a producer, so all 5 classify "infeasible", but declaring
+  // them all optional would leave the producer selectable with NOTHING bound,
+  // likely a mis-inferred-goal-target artifact rather than a genuine
+  // reachability defect. Cap at 2 infeasible inputs (or when they are not the
+  // producer's ENTIRE gating contract) so a wholesale clear is refused rather
+  // than silently applied.
+  const wouldClearEntireContract = infeasible.length === currentInputs.length && currentInputs.length > 2;
+  if (wouldClearEntireContract) {
+    return {
+      shape: "reachabilityGapRepairReport",
+      body: {
+        verdict: "NOT_APPLICABLE",
+        gap_id: gapId,
+        producer_id: producerId,
+        classification: "bulk_clear_refused",
+        infeasible_inputs: infeasible,
+        summary:
+          `'${producerId}' gates on ${infeasible.length} required inputs (${infeasible.join(", ")}), ` +
+          `none with a producer — but that is ALL of its declared inputs, so optionalizing them wholesale ` +
+          `would leave it selectable with nothing bound. Likely a mis-inferred goal-target or template-authoring ` +
+          `issue, not a single-input reachability defect this repair targets. No mutation made.`,
+      },
+    };
+  }
+
   const newInputShapes = currentInputs.filter((s) => !infeasible.includes(s));
   const newOptionalShapes = Array.from(new Set([...currentOptional, ...infeasible]));
 

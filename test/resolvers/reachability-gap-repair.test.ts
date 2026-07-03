@@ -126,6 +126,29 @@ describe("reachability-gap-repair resolver", () => {
     expect(updateCalls).toBe(0);
   });
 
+  it("refuses a bulk clear when ALL of a many-input producer's inputs are infeasible", async () => {
+    let updateCalls = 0;
+    const scalarTemplate = {
+      ...PRODUCER_TEMPLATE,
+      input_shapes: ["path", "oldString", "newString", "cwd", "message"],
+    };
+    globalThis.fetch = scriptFetch({
+      templateBody: scalarTemplate,
+      producerFor: () => false, // none of the 5 scalar params has a producer
+      onUpdate: () => { updateCalls += 1; },
+    });
+
+    const result = await resolveReachabilityGapRepair({
+      type: "reachability_gap_repair",
+      unreachable_producer_id: "add-resolver-to-vessel",
+      producer_required_inputs: ["path", "oldString", "newString", "cwd", "message"],
+    });
+    const body = result.body as Record<string, unknown>;
+    expect(body["verdict"]).toBe("NOT_APPLICABLE");
+    expect(body["classification"]).toBe("bulk_clear_refused");
+    expect(updateCalls).toBe(0);
+  });
+
   it("dry_run classifies + proposes without calling activityTemplate_update", async () => {
     let updateCalls = 0;
     globalThis.fetch = scriptFetch({

@@ -295,6 +295,11 @@ export async function resolveDispatchGoal(pointer: DispatchGoalPointer): Promise
   // safety boundary, not a performance knob. When exceeded, the resolver
   // short-circuits with a structuredError (no dispatch attempted) so callers
   // can surface the constraint and retry with a more parsimonious goal.
+  // Additional note: unbounded goal input degrades goal-host recommendation
+  // reliability by diluting embedding signal, which lowers top_score ranking
+  // confidence and inflates token budget consumption on every downstream LLM
+  // call. Enforcing MAX_GOAL_LEN here is therefore both a cost guard and a
+  // quality guard for the recommendation pipeline.
   if (goal.length > MAX_GOAL_LEN) return { shape: "structuredError", body: { resolver: "dispatch_goal", detail: `goal too long (${goal.length} > ${MAX_GOAL_LEN})` } };
 
   const body: Record<string, unknown> = { goal };

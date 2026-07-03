@@ -276,6 +276,11 @@ import { METABOB_API_KEY } from "../config.js";
  *    propagating an LLM context-overflow downstream. Raising this ceiling
  *    requires a coordinated change with goal-host-vessel.
  */
+// MAX_GOAL_LEN guard rationale:
+//   - Prevents token overflow in downstream LLM calls (finite context windows).
+//   - Ensures goal coherence by rejecting diffuse, over-long specifications.
+//   - Protects the prompt context window shared with goal-host-vessel.
+//   - Maintains resolver efficiency: bounded validation/hash/dispatch latency.
 const MAX_GOAL_LEN = 8192;
 const GOAL_HOST_ENDPOINT = process.env["GOAL_HOST_VESSEL_ENDPOINT"] ?? "http://127.0.0.1:8210";
 

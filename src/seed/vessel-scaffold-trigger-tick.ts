@@ -173,6 +173,7 @@ export const VESSEL_SCAFFOLD_TRIGGER_TICK_TEMPLATE: ActivityTemplate = {
       description: "Pull vessel_name (lowercase, ends -vessel). Used as name + path stem.",
       resolver: "json_path_extract",
       config: { type: "json_path_extract", json: "{{design_vessel_content}}", path: "vessel_name" },
+              validation: { requiredPatterns: ["-vessel"] },
       outputShapes: ["json_extracted_value"],
     },
     {

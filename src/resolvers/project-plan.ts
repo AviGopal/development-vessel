@@ -46,5 +46,14 @@ export async function resolveProjectPlan(pointer: ProjectPlanPointer): Promise<R
     const cls = /(format|css|style)/.test(lower) ? "obsidian_feature" : text.endsWith("?") ? "human_or_llm_question" : "substrate_authorable";
     return { text, checked: m[1] === "x", class: cls };
   });
-  return { shape: "projectPlanReport", body: { note_path: notePath, peer_routing, items, dry_run: true, plan_actions: [] } };
+  const plan_actions = items.filter((it) => !it.checked).map((it) => {
+    if (it.class === "human_or_llm_question") {
+      return { action: "solicit_human", item: it.text, delivery: "discussion_entry", note_path: notePath };
+    }
+    if (it.class === "obsidian_feature") {
+      return { action: "dispatch_goal", item: it.text, goal: `Implement in repos/obsidian-vessel: ${it.text}` };
+    }
+    return { action: "dispatch_goal", item: it.text, goal: `Author via the substrate loop: ${it.text}` };
+  });
+  return { shape: "projectPlanReport", body: { note_path: notePath, peer_routing, items, dry_run: true, plan_actions } };
 }

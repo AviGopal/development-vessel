@@ -57,7 +57,7 @@ async function listInboxViaPlugin(
     const json = (await res.json()) as { success?: boolean; content?: string };
     if (json.success && typeof json.content === "string") {
       const rows = JSON.parse(json.content) as Array<{ path?: string }>;
-      const md = rows.map((r) => r.path ?? "").filter((p) => p.endsWith(".md"));
+      const md = rows.map((r) => r.path ?? "").filter((p) => p.endsWith(".md") && p.startsWith("Substrate/Inbox/"));
       if (md.length > 0) return md;
     }
   } catch { /* plugin unreachable */ }
@@ -69,7 +69,7 @@ async function listInboxFiles(inboxPath: string, obsidianEndpoint?: string): Pro
   if (obsidianEndpoint) {
     const pluginPaths = await listInboxViaPlugin(obsidianEndpoint);
     if (pluginPaths !== null && pluginPaths.length > 0) {
-      return pluginPaths;
+      return [inboxPath, ...pluginPaths.filter((p) => p !== inboxPath)];
     }
   }
   // 2. Fall back to local fs readdir under VAULT_ROOT

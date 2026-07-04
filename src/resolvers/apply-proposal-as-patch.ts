@@ -856,7 +856,17 @@ export async function resolveApplyProposalAsPatch(pointer: ApplyProposalAsPatchP
         return structuredError("feature_compose routing failed", { proposal: firstFeatureProposal.name, error: (err as Error).message, total_proposals: entries.length });
       }
     }
-    return structuredError("no eligible proposals", { total_proposals: entries.length, skipped: skipped.slice(0, 50) });
+    return {
+      shape: "mitosisStaged",
+      body: {
+        resolver: "apply_proposal_as_patch",
+        dispatched: null,
+        skipped: true,
+        skip_reason: "no_eligible_proposals",
+        total_proposals: entries.length,
+        skipped_proposals: skipped.slice(0, 50),
+      },
+    };
   }
   // Multi-file proposals path (2026-06-05): if proposal carries `new_files[]`
   // (each {path, content} starting with `repos/<vessel>/`), write all of them

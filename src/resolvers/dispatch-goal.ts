@@ -86,7 +86,9 @@ import { METABOB_API_KEY } from "../config.js";
 // token budget exhaustion, LLM context window overflow, and malformed goal
 // parsing. The constraint protects downstream resolvers (goal-host recommendation,
 // activity dispatch chains) from exceeding reasonable bounds while maintaining
-// coherent goal semantics.
+// coherent goal semantics. Exceeding this bound triggers immediate rejection at
+// the resolver boundary (before any network dispatch), ensuring dispatch
+// reliability and predictable failure modes rather than partial/truncated calls.
 /**
  * MAX_GOAL_LEN — hard ceiling on goal payload size (characters).
  *

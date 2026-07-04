@@ -371,6 +371,13 @@ import { METABOB_API_KEY } from "../config.js";
  *     expansion, validation) assumes a bounded goal payload and degrades
  *     sharply beyond the ceiling.
  */
+// MAX_GOAL_LEN guard: 8192-character ceiling enforced at the resolver boundary
+// before dispatch. Rationale: (1) token budget — goal text is forwarded to
+// LLM-backed goal-host endpoints with finite context windows; (2) model input
+// window limits — bounds prompt assembly and template expansion downstream;
+// (3) goal complexity management — keeps dispatched goals parsimonious and
+// comprehensible. Impact: goals exceeding this length are rejected up-front
+// with a predictable validation failure rather than partial/truncated calls.
 const MAX_GOAL_LEN = 8192;
 const GOAL_HOST_ENDPOINT = process.env["GOAL_HOST_VESSEL_ENDPOINT"] ?? "http://127.0.0.1:8210";
 

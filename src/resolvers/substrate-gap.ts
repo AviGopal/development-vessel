@@ -141,6 +141,7 @@ const GAPS_PATH = () => join(workspaceRoot(), "gaps", "gaps.json");
  */
 export function gapClassKey(id: string): string {
   return id
+    .replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi, "U")
     .replace(/\d{4}-\d{2}-\d{2}T[\d:.\-Z]+/g, "T")
     .replace(/\d{4}-\d{2}-\d{2}/g, "D")
     .replace(/\d{13}/g, "M")
@@ -210,6 +211,26 @@ export async function resolveSubstrateGapWrite(
 ): Promise<ResolverResult> {
   const now = new Date().toISOString();
   const incoming = pointer.gap;
+
+  // Description gate: an OPEN gap must describe itself — empty summaries and
+  // uninterpolated {{placeholders}} are noise the drafter cannot act on.
+  // Closes/rejections of existing junk rows pass through untouched.
+  if ((incoming.status ?? "open") === "open") {
+    const summaryText = typeof incoming.summary === "string" ? incoming.summary.trim() : "";
+    const gateFields = `${incoming.id} ${incoming.category} ${incoming.summary}`;
+    if (summaryText.length === 0 || gateFields.includes("{{")) {
+      return {
+        shape: "structuredError",
+        body: {
+          resolver: "substrateGap_write",
+          failure_mode: "validation_rejected",
+          detail: summaryText.length === 0
+            ? `gap ${incoming.id}: empty summary — an open gap must describe itself so the drafter can act on it`
+            : `gap ${incoming.id}: uninterpolated {{placeholder}} in id/category/summary — bind slots before writing`,
+        },
+      };
+    }
+  }
 
   const gap: SubstrateGap = {
     ...incoming,

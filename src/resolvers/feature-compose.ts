@@ -927,7 +927,29 @@ async function appendComposeLesson(cls: string, reason: string, vessels: string)
     console.warn(`[compose-lessons] concept-db mirror failed: ${(err as Error).message}`);
   }
 }
-async function composeLessonsBlock(): Promise<string> {
+async function composeLessonsBlock(specText?: string): Promise<string> {
+  // FIRST: semantic recall from concept-db — relevance to the current spec, not
+  // JSONL recency. Fails open to the JSONL path when concept-db is down or empty.
+  if (specText && specText.trim().length > 0) {
+    try {
+      const headers: Record<string, string> = {};
+      const apiKey = process.env["METABOB_API_KEY"];
+      if (apiKey) headers["Authorization"] = `ApiKey ${apiKey}`;
+      const q = encodeURIComponent(specText.slice(0, 400));
+      const resp = await fetch(`http://127.0.0.1:8260/concepts/search?query=${q}&source_type=compose_lesson&limit=8`, { headers, signal: AbortSignal.timeout(8_000) });
+      if (resp.ok) {
+        const json = (await resp.json()) as { concepts?: Array<{ content?: string }> };
+        const found = (json.concepts ?? []).map((c) => c.content).filter((s): s is string => typeof s === "string" && s.length > 0);
+        if (found.length > 0) {
+          console.warn(`[compose-lessons] source=concept-db n=${found.length}`);
+          return `\n\nKNOWN FAILURE MODES from this substrate's own rejected composes — plans repeating these are rolled back:\n${found.map((r) => `- ${r}`).join("\n")}`;
+        }
+      }
+    } catch (err) {
+      console.warn(`[compose-lessons] concept-db recall failed: ${(err as Error).message}`);
+    }
+  }
+  console.warn("[compose-lessons] source=fallback=jsonl");
   try {
     const { readFileSync } = await import("node:fs");
     const lines = readFileSync(COMPOSE_LESSONS_PATH, "utf8").split("\n").filter((l) => l.trim().length > 0).slice(-60);
@@ -986,7 +1008,7 @@ async function resolveFeatureComposeInner(pointer: FeatureComposePointer): Promi
   // that as explicit re-draft guidance so the drafter completes the partial fix instead
   // of re-producing it blind. Additive — empty when no prior rejection exists.
   const priorFeedback = priorAttemptFeedbackBlock(pointer.gap?.classification_metadata);
-  const composeLessons = await composeLessonsBlock();
+  const composeLessons = await composeLessonsBlock(pointer.spec);
   let planRaw: string;
   try {
     planRaw = await llmCall(llmEndpoint, decomposePrompt(pointer.spec, maxOps, grounding, principles + composeLessons, priorFeedback), model);

@@ -348,6 +348,25 @@ import { METABOB_API_KEY } from "../config.js";
 //   4. Avoid substrate capacity exhaustion: unbounded goal payloads would
 //      allow a single caller to consume disproportionate memory, log volume,
 //      and downstream compute budget, degrading the whole substrate.
+/**
+ * MAX_GOAL_LEN guard rationale (see also: concept_9ldsmRgqSTd5).
+ *
+ * This ceiling exists to:
+ *  1. Prevent excessively long goal strings from causing resolver selection
+ *     and recommendation systems to fail or time out. Downstream selection
+ *     logic scans and scores candidate resolvers against the goal text; an
+ *     unbounded input produces unbounded work and unpredictable latency.
+ *  2. Align with goal-host recommendation API constraints: the top_score
+ *     threshold on /recommend requires a well-bounded context window so that
+ *     scoring remains stable and comparable across dispatches. Oversized
+ *     goals distort ranking and can push scores below the acceptance floor
+ *     even for otherwise-valid matches.
+ *  3. Keep synthetic gap scenarios tractable for auto-draft synthesis. When
+ *     no resolver matches, the substrate synthesises a draft resolver from
+ *     the goal; that synthesis pipeline (LLM prompt assembly, template
+ *     expansion, validation) assumes a bounded goal payload and degrades
+ *     sharply beyond the ceiling.
+ */
 const MAX_GOAL_LEN = 8192;
 const GOAL_HOST_ENDPOINT = process.env["GOAL_HOST_VESSEL_ENDPOINT"] ?? "http://127.0.0.1:8210";
 

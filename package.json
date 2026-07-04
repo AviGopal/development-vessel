@@ -11,7 +11,7 @@
     "typecheck": "tsc --noEmit",
     "check-shape-dispatch": "bun scripts/check-shape-dispatch.ts",
     "lint": "bun run typecheck && bun run check-shape-dispatch",
-    "substrate:deploy": "cp CLAUDE.md \"$SUBSTRATE_BASE_ROOT/development-vessel/CLAUDE.md\""
+    "substrate:deploy": "cp CLAUDE.md \"$SUBSTRATE_BASE_ROOT/CLAUDE.md\""
   },
   "dependencies": {
     "@avigopal/ias-executor-ts": "file:/vessels/ias-executor-ts",

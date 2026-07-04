@@ -1524,6 +1524,16 @@ async function runGitAwareCutover(args: GitCutoverArgs): Promise<ResolverResult>
         }
       }
     } else {
+      if (unit.startsWith("goal-host")) {
+        const deadline = Date.now() + Number(process.env["MITOSIS_DRAIN_WAIT_MS"] ?? "90000");
+        let inFlight = -1;
+        for (;;) {
+          try { const hj = await (await fetch("http://127.0.0.1:8210/health", { signal: AbortSignal.timeout(3000) })).json() as { in_flight?: number }; inFlight = typeof hj.in_flight === "number" ? hj.in_flight : -1; } catch { inFlight = -1; }
+          if (inFlight <= 0 || Date.now() >= deadline) break;
+          await new Promise((r) => setTimeout(r, 5000));
+        }
+        operations.push({ op: "drain-before-restart goal-host", status: inFlight <= 0 ? "ok" : "warn", detail: inFlight > 0 ? "bounded wait expired - proceeding with " + inFlight + " in-flight dispatch(es)" : "quiet or unknowable (fail-open)" });
+      }
       const restart = await runSystemctl(["restart", unit]);
       vesselRestarted = restart.exitCode === 0;
       operations.push({

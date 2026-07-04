@@ -23,6 +23,13 @@ function assertInWorkspace(path: string, workspaceRoot: string): void {
       if (trimmed) allowedRoots.push(trimmed);
     }
   }
+  const extraWorkspaceRoots = process.env["EXTRA_WORKSPACE_ROOTS"];
+  if (extraWorkspaceRoots) {
+    for (const entry of extraWorkspaceRoots.split(",")) {
+      const trimmed = entry.trim();
+      if (trimmed) allowedRoots.push(trimmed);
+    }
+  }
   for (const root of allowedRoots) {
     const rel = relative(root, abs);
     if (!rel.startsWith("..") && !isAbsolute(rel)) return;

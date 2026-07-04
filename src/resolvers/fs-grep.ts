@@ -1,6 +1,7 @@
 import { resolve, relative, join } from "path";
 import { readdir, readFile } from "node:fs/promises";
 import type { ResolverResult } from "./types.js";
+import { assertInAnyWorkspace } from "./workspace-roots.js";
 
 export interface FsGrepPointer {
   type: "fs_grep";
@@ -27,11 +28,7 @@ const TEXT_LIKE_EXT = new Set([
 ]);
 
 function assertInWorkspace(path: string, workspaceRoot: string): void {
-  const abs = resolve(path);
-  const rel = relative(workspaceRoot, abs);
-  if (rel.startsWith("..")) {
-    throw new Error(`path outside workspace root: ${path}`);
-  }
+  assertInAnyWorkspace(path, workspaceRoot);
 }
 
 function matchGlob(name: string, glob: string): boolean {

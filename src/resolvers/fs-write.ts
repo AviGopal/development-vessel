@@ -1,6 +1,7 @@
 import { resolve, relative, dirname } from "path";
 import { mkdir } from "fs/promises";
 import type { ResolverResult } from "./types.js";
+import { assertInAnyWorkspace } from "./workspace-roots.js";
 
 export interface FsWritePointer {
   type: "fs_write";
@@ -10,11 +11,7 @@ export interface FsWritePointer {
 }
 
 function assertInWorkspace(path: string, workspaceRoot: string): void {
-  const abs = resolve(path);
-  const rel = relative(workspaceRoot, abs);
-  if (rel.startsWith("..")) {
-    throw new Error(`path outside workspace root: ${path}`);
-  }
+  assertInAnyWorkspace(path, workspaceRoot);
 }
 
 /**

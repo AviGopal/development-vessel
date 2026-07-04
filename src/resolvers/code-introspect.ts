@@ -1,5 +1,6 @@
 import { resolve, relative } from "path";
 import type { ResolverResult } from "./types.js";
+import { assertInAnyWorkspace } from "./workspace-roots.js";
 
 export interface CodeIntrospectPointer {
   type: "code_introspect";
@@ -9,11 +10,7 @@ export interface CodeIntrospectPointer {
 }
 
 function assertInWorkspace(path: string, workspaceRoot: string): void {
-  const abs = resolve(path);
-  const rel = relative(workspaceRoot, abs);
-  if (rel.startsWith("..")) {
-    throw new Error(`path outside workspace root: ${path}`);
-  }
+  assertInAnyWorkspace(path, workspaceRoot);
 }
 
 export async function resolveCodeIntrospect(pointer: CodeIntrospectPointer): Promise<ResolverResult> {

@@ -27,6 +27,7 @@ app.route("/", impulsesRouter);
 const server = Bun.serve({
   port: config.port,
   hostname: config.host,
+  idleTimeout: 60,
   fetch: app.fetch,
 });
 

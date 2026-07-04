@@ -96,13 +96,12 @@ export function buildConceptWritePointer(event: NormalizedLifecycleEvent): {
   source_type: "impulse_activity_pattern";
 } {
   const tid = stripWrapping(event.activity_template_id) ?? "unknown";
-  const execId = event.execution_id ?? "unknown";
   return {
     type: "concept_write",
     name: `autocomplete:${tid}`,
     source_type: "impulse_activity_pattern",
     content:
-      `Substrate-authored success pattern: template "${tid}" completed successfully (execution ${execId}). ` +
+      `Substrate-authored success pattern: template "${tid}" completed successfully. ` +
       `This pattern was emitted by the autocomplete-concept-writer observer when a ` +
       `gap-closing-auto / apply-proposal / mitosis-cutover execution closed cleanly. ` +
       `Output shapes: ${(event.output_shapes ?? []).join(", ") || "(none reported)"}.`,

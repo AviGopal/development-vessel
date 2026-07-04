@@ -76,6 +76,8 @@ export async function resolveMitosisPendingObserver(
       pending: hasPending
         ? {
             vessel_name: parsed?.vessel_name ?? null,
+        base_version_id: parsed?.base_version_id ?? null,
+        mitosis_root: parsed?.mitosis_root ?? null,
             mitosis_version_id: parsed?.mitosis_version_id ?? null,
             base_sha: parsed?.base_sha ?? null,
             proposal: parsed?.proposal ?? null,

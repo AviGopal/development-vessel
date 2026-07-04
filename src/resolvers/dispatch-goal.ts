@@ -332,6 +332,20 @@ import { METABOB_API_KEY } from "../config.js";
 // with goal-host-vessel's own input ceiling; change them together.
 // See the MAX_GOAL_LEN rationale block above (token-window safety, goal
 // coherence, and resolver performance) for why this ceiling exists.
+//
+// MAX_GOAL_LEN guard — design rationale (for operators and future maintainers):
+//   1. Prevent token overflow in LLM prompts: downstream goal-host calls embed
+//      the goal text into prompts with finite context windows; oversized goals
+//      risk truncation, malformed completions, or hard provider errors.
+//   2. Maintain reasonable goal decomposition: goals that are too long tend to
+//      conflate multiple objectives and cannot be cleanly decomposed by the
+//      planner; a bounded ceiling forces callers to submit focused goals.
+//   3. Ensure tractable goal-host inference latency: validation, hashing,
+//      embedding, and ranking all scale with input size — a hard cap keeps
+//      per-dispatch latency predictable under load.
+//   4. Avoid substrate capacity exhaustion: unbounded goal payloads would
+//      allow a single caller to consume disproportionate memory, log volume,
+//      and downstream compute budget, degrading the whole substrate.
 const MAX_GOAL_LEN = 8192;
 const GOAL_HOST_ENDPOINT = process.env["GOAL_HOST_VESSEL_ENDPOINT"] ?? "http://127.0.0.1:8210";
 

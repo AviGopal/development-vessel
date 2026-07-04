@@ -660,6 +660,8 @@ export const config = {
       "project_plan",
       // Seam ③ substrate-authored resolver (2026-07-04): project_thread_scan
       "project_thread_scan",
+      // Seam ③ substrate-authored resolver (2026-07-04): solicitation_outcome_scan
+      "solicitation_outcome_scan",
     ] as const,
     resolveEndpoint: "/v2/impulses/resolve",
     resolveRequestFormat: "pointer" as const,

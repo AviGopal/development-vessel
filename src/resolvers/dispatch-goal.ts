@@ -324,6 +324,8 @@ import { METABOB_API_KEY } from "../config.js";
 //   - Keeps validation/hash/dispatch latency bounded and predictable.
 // This is a safety boundary, not a tunable perf knob — it must stay in sync
 // with goal-host-vessel's own input ceiling; change them together.
+// See the MAX_GOAL_LEN rationale block above (token-window safety, goal
+// coherence, and resolver performance) for why this ceiling exists.
 const MAX_GOAL_LEN = 8192;
 const GOAL_HOST_ENDPOINT = process.env["GOAL_HOST_VESSEL_ENDPOINT"] ?? "http://127.0.0.1:8210";
 

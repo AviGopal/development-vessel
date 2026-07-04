@@ -109,7 +109,15 @@ interface ParsedRequest {
 export async function resolveObsidianRequestScan(
   pointer: ObsidianRequestScanPointer,
 ): Promise<ResolverResult> {
-  const obsidian = (pointer.obsidianEndpoint ?? DEFAULT_OBSIDIAN_ENDPOINT).replace(/\/+$/, "");
+  let obsidian = (pointer.obsidianEndpoint ?? DEFAULT_OBSIDIAN_ENDPOINT).replace(/\/+$/, "");
+  // Endpoint may point at the wrong plugin instance (in-container peer vs host vault);
+  // probe candidates and use the first healthy one.
+  for (const cand of [...new Set([obsidian, "http://host.docker.internal:27182", "http://host.docker.internal:27183"])]) {
+    try {
+      const h = await fetch(`${cand}/health`, { signal: AbortSignal.timeout(2000) });
+      if (h.ok) { obsidian = cand; break; }
+    } catch { /* unreachable candidate — try next */ }
+  }
   const goalHost = (pointer.goalHostEndpoint ?? DEFAULT_GOAL_HOST).replace(/\/+$/, "");
   const inboxPath = pointer.inboxPath ?? "Substrate/Inbox.md";
   const statusPath = pointer.statusPath ?? "Substrate/Now.md";

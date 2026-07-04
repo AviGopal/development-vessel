@@ -522,6 +522,18 @@ export async function resolveVesselMitosisEvaluate(
 ): Promise<ResolverResult> {
   const baseId = pointer.base_version_id;
   const mitosisId = pointer.mitosis_version_id;
+  if (!baseId && !mitosisId) {
+    return {
+      shape: "vesselMitosisEvaluation",
+      body: {
+        base_version_id: "",
+        mitosis_version_id: "",
+        verdict: "INSUFFICIENT_DATA",
+        verdict_reason: "no_pending_mitosis",
+        evaluated_at: new Date().toISOString(),
+      },
+    };
+  }
   if (!baseId || !mitosisId) {
     return {
       shape: "structuredError",

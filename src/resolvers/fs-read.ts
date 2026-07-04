@@ -1,4 +1,4 @@
-import { resolve, relative } from "path";
+import { resolve, relative, isAbsolute } from "path";
 import type { ResolverResult } from "./types.js";
 
 export interface FsReadPointer {
@@ -12,10 +12,22 @@ const DEFAULT_BYTE_LIMIT = 1024 * 1024; // 1 MiB
 
 function assertInWorkspace(path: string, workspaceRoot: string): void {
   const abs = resolve(path);
-  const rel = relative(workspaceRoot, abs);
-  if (rel.startsWith("..")) {
-    throw new Error(`path outside workspace root: ${path}`);
+  const allowedRoots: string[] = [workspaceRoot];
+  const runtimeDir = process.env["MITOSIS_RUNTIME_DIR"];
+  if (runtimeDir) allowedRoots.push(runtimeDir);
+  allowedRoots.push("/vessels");
+  const extraRoots = process.env["FS_READ_EXTRA_ROOTS"];
+  if (extraRoots) {
+    for (const entry of extraRoots.split(",")) {
+      const trimmed = entry.trim();
+      if (trimmed) allowedRoots.push(trimmed);
+    }
   }
+  for (const root of allowedRoots) {
+    const rel = relative(root, abs);
+    if (!rel.startsWith("..") && !isAbsolute(rel)) return;
+  }
+  throw new Error(`path outside workspace root: ${path}`);
 }
 
 export async function resolveFsRead(pointer: FsReadPointer): Promise<ResolverResult> {

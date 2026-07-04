@@ -46,6 +46,7 @@ import { resolveDeadEndDecisionScan } from "../resolvers/dead-end-decision-scan.
 import { resolveDetectorYieldRegistry } from "../resolvers/detector-yield-registry.js";
 import { resolveTemplateInputLintScan } from "../resolvers/template-input-lint-scan.js";
 import { resolveGateSaturationScan } from "../resolvers/gate-saturation-scan.js";
+import { resolvePriorSeedEfficacyScan } from "../resolvers/prior-seed-efficacy-scan.js";
 import { resolveCostExpectationScan } from "../resolvers/cost-expectation-scan.js";
 import { resolveVesselWriteErrorScan } from "../resolvers/vessel-write-error-scan.js";
 import { resolveChainFetchFailureScan } from "../resolvers/chain-fetch-failure-scan.js";
@@ -306,6 +307,8 @@ async function dispatchInner(pointer: AnyPointer): Promise<ResolverResult> {
       return resolveTemplateInputLintScan(p as Parameters<typeof resolveTemplateInputLintScan>[0]);
     case "gate_saturation_scan":
       return resolveGateSaturationScan(p as Parameters<typeof resolveGateSaturationScan>[0]);
+    case "prior_seed_efficacy_scan":
+      return resolvePriorSeedEfficacyScan(p as Parameters<typeof resolvePriorSeedEfficacyScan>[0]);
     case "cost_expectation_scan":
       return resolveCostExpectationScan(p as Parameters<typeof resolveCostExpectationScan>[0]);
     case "vessel_write_error_scan":

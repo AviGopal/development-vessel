@@ -73,7 +73,23 @@ export async function resolveVariantPromote(
 ): Promise<ResolverResult> {
   const { family_id, winner_variant_id, loser_variant_ids, evidence, dry_run } = pointer;
 
-  if (!winner_variant_id || typeof winner_variant_id !== "string") {
+  if (typeof winner_variant_id === "string" && winner_variant_id.trim() === "") {
+    return {
+      shape: "variantPromoteResult",
+      body: {
+        family_id,
+        winner_variant_id: null,
+        loser_variant_ids: [],
+        evidence: null,
+        decisions: [],
+        admitted_count: 0,
+        rejected_count: 0,
+        skipped: true,
+        skip_reason: "no_promotable_candidate",
+      },
+    };
+  }
+  if (typeof winner_variant_id !== "string" || !winner_variant_id) {
     return {
       shape: "structuredError",
       body: {

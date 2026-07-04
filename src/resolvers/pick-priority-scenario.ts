@@ -152,7 +152,7 @@ export async function resolvePickPriorityScenario(
   // 4. Score every gap that has a materialized, open, undrafted scenario.
   type Cand = { scenario_id: string; category: string; rank: number; severity: number; recency: string; actionability: number };
   const candidates: Cand[] = [];
-  const ALLOWED = new Set(["operator_seed", "substrate_detected"]);
+  const ALLOWED = new Set(["operator_seed", "operator_narration", "substrate_detected", "substrate_generative"]);
   // Forward model: P(patch_proposal non-empty | target_file_paths, mode_class, category).
   // Predict drafter actionability before dispatch so we avoid burning cycles on
   // scenarios that will almost certainly yield analytic-only/no-op proposals.

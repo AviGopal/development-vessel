@@ -186,6 +186,7 @@ import { resolveGoalSummary } from "../resolvers/goal-summary.js";
 import { resolveActivityMetrics } from "../resolvers/activity-metrics.js";
 import { resolveSummaryOfClockVesselFunctionality } from "../resolvers/summary-of-clock-vessel-functionality.js";
 import { resolveAssessmentSummary } from "../resolvers/assessment-summary.js";
+import { resolveProjectPlan } from "../resolvers/project-plan.js";
 import type { ResolverResult } from "../resolvers/types.js";
 
 type AnyPointer = { type: string } & Record<string, unknown>;
@@ -713,6 +714,8 @@ async function dispatchInner(pointer: AnyPointer): Promise<ResolverResult> {
       return resolveAssessmentSummary(p as Parameters<typeof resolveAssessmentSummary>[0]);
     case "code_quality with substantive assessment content":
       return resolveCodeQualityWithSubstantiveAssessmentContent(pointer);
+    case "project_plan":
+      return resolveProjectPlan(p as Parameters<typeof resolveProjectPlan>[0]);
     default:
       throw new Error(`unknown shape: ${pointer.type}`);
   }

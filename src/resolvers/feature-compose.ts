@@ -905,6 +905,27 @@ async function appendComposeLesson(cls: string, reason: string, vessels: string)
     mkdirSync("/workspace/proposals", { recursive: true });
     appendFileSync(COMPOSE_LESSONS_PATH, JSON.stringify({ at: new Date().toISOString(), class: cls, reason: reason.slice(0, 200), vessels }) + "\n");
   } catch { /* lesson persistence is advisory */ }
+  // Mirror the CLASS-grain lesson to concept-db with STABLE content (no timestamps,
+  // execution ids, or per-failure reason strings) so exact-content dedup holds:
+  // one concept per failure class. Per-event detail stays in the JSONL above.
+  try {
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    const apiKey = process.env["METABOB_API_KEY"];
+    if (apiKey) headers["Authorization"] = `ApiKey ${apiKey}`;
+    void fetch("http://127.0.0.1:8260/concepts", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        source_type: "compose_lesson",
+        shape: "compose_lesson",
+        content: `compose failure class ${cls}: ${COMPOSE_LESSON_GUIDANCE[cls] ?? "avoid repeating this failure class"}`,
+        summary: `compose lesson: ${cls}`,
+      }),
+      signal: AbortSignal.timeout(10_000),
+    }).catch((err) => console.warn(`[compose-lessons] concept-db mirror failed: ${(err as Error).message}`));
+  } catch (err) {
+    console.warn(`[compose-lessons] concept-db mirror failed: ${(err as Error).message}`);
+  }
 }
 async function composeLessonsBlock(): Promise<string> {
   try {

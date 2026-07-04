@@ -37,24 +37,53 @@ const API_KEY = process.env["METABOB_API_KEY"] ?? process.env["DEV_VESSEL_API_KE
 // DIRECTORY (they explicitly asked us to "check Inbox/ and its subdirectories", not
 // just the single Substrate/Inbox.md file). Reads/writes still go through the obsidian
 // plugin by vault-relative path; fs is used only to list which notes exist.
-const VAULT_ROOT = process.env["OBSIDIAN_VAULT_ROOT"] ?? "/vaults/substrate-vault";
+const VAULT_ROOT = process.env["VAULT_ROOT"] ?? "/vaults/substrate-vault";
 
-// Enumerate inbox source notes: the main inbox file + every .md under the operator's
-// Substrate/Inbox/ directory (recursively). Returns vault-relative paths. Falls back
-// to just the main file if the directory is absent or fs is unreadable.
-async function listInboxFiles(inboxPath: string): Promise<string[]> {
-  const files = [inboxPath];
-  const dirRel = inboxPath.replace(/\.md$/i, ""); // Substrate/Inbox.md -> Substrate/Inbox
+/**
+ * Attempt to enumerate Substrate/Inbox/ notes via the obsidian plugin HTTP
+ * resolve surface. Returns vault-relative paths (e.g. "Substrate/Inbox/Foo.md")
+ * or null if the plugin is unreachable / returns no useful results.
+ */
+async function listInboxViaPlugin(
+  obsidianEndpoint: string,
+): Promise<string[] | null> {
   try {
-    const entries = await readdir(`${VAULT_ROOT}/${dirRel}`, { recursive: true, withFileTypes: true });
-    for (const e of entries) {
-      if (!e.isFile() || !e.name.toLowerCase().endsWith(".md")) continue;
-      const parent = ((e as { parentPath?: string; path?: string }).parentPath ?? (e as { path?: string }).path ?? `${VAULT_ROOT}/${dirRel}`);
-      const rel = `${parent}/${e.name}`.replace(`${VAULT_ROOT}/`, "").replace(/\/+/g, "/");
-      if (!files.includes(rel)) files.push(rel);
+    const auth: Record<string, string> = { "Content-Type": "application/json", ...(API_KEY ? { Authorization: `ApiKey ${API_KEY}` } : {}) };
+    const res = await fetch(`${obsidianEndpoint}/resolve`, {
+      method: "POST", headers: auth,
+      body: JSON.stringify({ type: "obsidian:list_notes", pointer: { type: "obsidian:list_notes", directory: "Substrate/Inbox" } }),
+      signal: AbortSignal.timeout(6000),
+    });
+    const json = (await res.json()) as { success?: boolean; files?: string[]; paths?: string[] };
+    if (json.success) {
+      const raw = json.files ?? json.paths ?? [];
+      const md = raw.filter((p) => p.endsWith(".md"));
+      if (md.length > 0) return md;
     }
-  } catch { /* directory absent / not fs-accessible → main file only */ }
-  return files;
+  } catch { /* plugin unreachable */ }
+  return null;
+}
+
+async function listInboxFiles(inboxPath: string, obsidianEndpoint?: string): Promise<string[]> {
+  // 1. Try plugin HTTP enumeration (works for host/remote vaults)
+  if (obsidianEndpoint) {
+    const pluginPaths = await listInboxViaPlugin(obsidianEndpoint);
+    if (pluginPaths !== null && pluginPaths.length > 0) {
+      return pluginPaths;
+    }
+  }
+  // 2. Fall back to local fs readdir under VAULT_ROOT
+  try {
+    const entries = await readdir(`${VAULT_ROOT}/Substrate/Inbox`);
+    const mdFiles = entries.filter((e) => e.endsWith(".md"));
+    if (mdFiles.length > 0) {
+      return mdFiles.map((e) => `Substrate/Inbox/${e}`);
+    }
+  } catch {
+    // fall through
+  }
+  // 3. Final fallback: single main inbox file
+  return [inboxPath];
 }
 
 export interface ObsidianRequestScanPointer {
@@ -95,7 +124,7 @@ export async function resolveObsidianRequestScan(
   // 1. Read the operator's inbox — the main note AND every .md under the Substrate/Inbox/
   // directory they asked us to watch. Each note's content is kept per-file so we can mark
   // processed tasks in the RIGHT file. A plain read; observer-skip does not apply.
-  const inboxFiles = await listInboxFiles(inboxPath);
+  const inboxFiles = await listInboxFiles(inboxPath, obsidian);
   const fileLines = new Map<string, string[]>();
   let readAny = false;
   for (const path of inboxFiles) {

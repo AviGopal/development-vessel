@@ -386,6 +386,7 @@ export const config = {
       // FOUR detectors' coverage without writing new resolver code.
       "vessel_responsibility_audit",
       "vessel_architecture_pattern_scan",
+      "env_gate_scan",
       "activity_lifecycle_audit",
       "resolver_distribution_audit",
       "sourceCodeAnalysis",

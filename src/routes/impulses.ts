@@ -103,6 +103,7 @@ import { resolveSurrealdbImport } from "../resolvers/surrealdb-import.js";
 import { resolveGhRepoCreate } from "../resolvers/gh-repo-create.js";
 import { resolveVesselResponsibilityAudit } from "../resolvers/vessel-responsibility-audit.js";
 import { resolveVesselArchitecturePatternScan } from "../resolvers/vessel-architecture-pattern-scan.js";
+import { resolveEnvGateScan } from "../resolvers/env-gate-scan.js";
 import { resolveActivityLifecycleAudit } from "../resolvers/activity-lifecycle-audit.js";
 import { resolveResolverDistributionAudit } from "../resolvers/resolver-distribution-audit.js";
 import { resolveGapToScenarioBridge } from "../resolvers/gap-to-scenario-bridge.js";
@@ -438,6 +439,8 @@ async function dispatchInner(pointer: AnyPointer): Promise<ResolverResult> {
       return resolveVesselArchitecturePatternScan(
         p as Parameters<typeof resolveVesselArchitecturePatternScan>[0],
       );
+    case "env_gate_scan":
+      return resolveEnvGateScan(p as Parameters<typeof resolveEnvGateScan>[0]);
     case "activity_lifecycle_audit":
       return resolveActivityLifecycleAudit(
         p as Parameters<typeof resolveActivityLifecycleAudit>[0],

@@ -52,7 +52,10 @@ export async function resolveProjectPlan(pointer: ProjectPlanPointer): Promise<R
       return { action: "solicit_human", item: it.text, delivery: "discussion_entry", note_path: notePath };
     }
     if (it.class === "obsidian_feature") {
-      return { action: "dispatch_goal", item: it.text, goal: `Implement in repos/obsidian-vessel: ${it.text}` };
+      const target = /(provenance|styling|css|format)/i.test(it.text)
+        ? "repos/obsidian-vessel/src/resolvers/write-note-resolver.ts"
+        : "repos/obsidian-vessel/src/main.ts";
+      return { action: "dispatch_goal", item: it.text, goal: `In ${target}, implement: ${it.text}` };
     }
     return { action: "dispatch_goal", item: it.text, goal: `Author via the substrate loop: ${it.text}` };
   });

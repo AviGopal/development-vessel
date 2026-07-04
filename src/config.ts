@@ -144,6 +144,10 @@ export const config = {
       // posterior_update_v1_conditional telemetry; files gap-prior-seed-inactive
       // or gap-prior-seed-not-helping.
       "prior_seed_efficacy_scan",
+      // Detector (2026-07-04): composition-graph flow health — genuine-graph
+      // component count, genuine edges per cell, bridges per reached chain.
+      // Files gap-composition-flow-components-split when components > 1.
+      "composition_flow_health_scan",
       // Meta-detector (2026-06-13): vessels logging repeated persistence (write)
       // errors in their journal (e.g. concept-db NULL-vs-NONE INSERT failures).
       "vessel_write_error_scan",

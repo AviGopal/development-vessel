@@ -556,7 +556,14 @@ export function computeDataFlowFacts(
           .split(",")
           .map((s) => s.trim().split(/\s+as\s+/).pop()!.trim())
           .filter((s) => s.length > 0);
-        const fileContent = postPatchFileContents.get(currentFileB) ?? "";
+        const repoRoot = process.env["REPO_ROOT"] ?? process.env["WORKSPACE_ROOT"] ?? "";
+        const normalizedKey = repoRoot && currentFileB.startsWith(repoRoot)
+          ? currentFileB.slice(repoRoot.length).replace(/^\//, "")
+          : currentFileB;
+        const fileContent = postPatchFileContents.get(normalizedKey)
+          ?? postPatchFileContents.get(currentFileB)
+          ?? (repoRoot ? postPatchFileContents.get(`${repoRoot}/${normalizedKey}`) : undefined)
+          ?? "";
         const nonImportLines = fileContent
           .split("\n")
           .filter((l) => !l.trimStart().startsWith("import "))

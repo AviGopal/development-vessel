@@ -49,7 +49,7 @@ function identityFields(vesselId: string): Record<string, unknown> {
   const key = loadOrCreateIdentityKey();
   if (!key) return {};
   const pem = key.export({ format: "pem", type: "pkcs8" }) as string;
-  const raw = createPublicKey({ key: pem, format: "pem" }).export({ format: "der", type: "spki" }).subarray(-32);
+  const raw = (createPublicKey(pem).export({ format: "der", type: "spki" }) as Buffer).subarray(-32);
   const pubkey = Buffer.from(raw).toString("base64");
   const identity_nonce = randomUUID();
   const identity_signed_at = Date.now();

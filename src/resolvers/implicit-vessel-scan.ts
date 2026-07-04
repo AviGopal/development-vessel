@@ -40,6 +40,7 @@ import type { ResolverResult } from "./types.js";
  * obsidian = graceful idle (external app), never a hard failure.
  */
 
+import { resolveObsidianEndpointViaDiscovery } from "./obsidian-request-scan.js";
 const DEFAULT_OBSIDIAN_ENDPOINT =
   process.env["OBSIDIAN_LEARN_ENDPOINT"] ??
   process.env["OBSIDIAN_PLUGIN_ENDPOINT"] ??
@@ -170,7 +171,7 @@ export async function resolveImplicitVesselScan(
   pointer: ImplicitVesselScanPointer,
 ): Promise<ResolverResult> {
   const vessel = pointer.vessel ?? "obsidian";
-  const endpoint = (pointer.obsidianEndpoint ?? DEFAULT_OBSIDIAN_ENDPOINT).replace(/\/+$/, "");
+  const endpoint = (pointer.obsidianEndpoint ?? (await resolveObsidianEndpointViaDiscovery()) ?? DEFAULT_OBSIDIAN_ENDPOINT).replace(/\/+$/, "");
   const emitUrl = pointer.emitGapUrl ?? DEFAULT_DEV_VESSEL_URL;
   const apiKey = pointer.apiKey ?? API_KEY;
   const minSamples = pointer.minSamples ?? 3;

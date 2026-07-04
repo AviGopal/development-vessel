@@ -45,7 +45,7 @@ type DiscoveryResolveResponse = {
   content?: { vessels?: Array<{ endpoint: string; resolve_endpoint?: string }> };
 };
 
-async function resolveObsidianEndpointViaDiscovery(): Promise<string | null> {
+export async function resolveObsidianEndpointViaDiscovery(): Promise<string | null> {
   // Returns the BASE endpoint (no trailing slash, no /resolve suffix).
   // Callers append "/resolve" themselves. Never return resolve_endpoint which
   // is a relative path "/resolve" — using it as a base causes double-resolve URLs.

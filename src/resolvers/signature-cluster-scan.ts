@@ -26,6 +26,7 @@ export interface SignatureMatch {
   /** Substring that must appear anywhere in activity_id (e.g. "{{" for an
    *  uninterpolated-placeholder leak). Complements activity_id_prefix. */
   activity_id_contains?: string | null;
+  error_message_contains?: string | null;
   output_shapes_include?: string[] | null;
 }
 
@@ -49,6 +50,7 @@ interface ExecutionTrace {
   failure_mode?: { type?: string; reason?: string } | null;
   output_impulse_shapes?: string[];
   executed_at?: string;
+  error_message?: string | null;
 }
 
 function matches(tr: ExecutionTrace, m: SignatureMatch): boolean {
@@ -59,8 +61,11 @@ function matches(tr: ExecutionTrace, m: SignatureMatch): boolean {
     if (!id.startsWith(m.activity_id_prefix)) return false;
   }
   if (m.activity_id_contains) {
-    const id = tr.activity_id ?? "";
-    if (!id.includes(m.activity_id_contains)) return false;
+    if (!tr.activity_id?.includes(m.activity_id_contains)) return false;
+  }
+  if (m.error_message_contains) {
+    const em = tr.error_message ?? "";
+    if (!em.includes(m.error_message_contains)) return false;
   }
   if (m.output_shapes_include && m.output_shapes_include.length > 0) {
     const have = new Set(tr.output_impulse_shapes ?? []);
@@ -83,7 +88,7 @@ export async function resolveSignatureClusterScan(pointer: SignatureClusterScanP
   if (apiKey) headers["Authorization"] = `ApiKey ${apiKey}`;
   let traces: ExecutionTrace[] = [];
   try {
-    const r = await fetch(`${endpoint}/v2/activities/execution-traces?limit=${traceLimit}`, { headers, signal: AbortSignal.timeout(20_000) });
+    const r = await fetch(`${endpoint}/v2/activities/execution-traces?limit=${traceLimit}`, { headers, signal: AbortSignal.timeout(55_000) });
     if (r.ok) { const j = await r.json() as { executions?: ExecutionTrace[] }; traces = j.executions ?? []; }
   } catch { /* tolerant */ }
 

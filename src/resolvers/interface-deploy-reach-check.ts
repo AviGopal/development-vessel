@@ -1,5 +1,6 @@
 // interface_deploy_reach_check v0 skeleton: scores interface deploys against post-deploy interaction (scan wired next).
 import type { ResolverResult } from "./types.js";
+import { resolveObsidianEndpointViaDiscovery } from "./obsidian-request-scan.js";
 
 export interface InterfaceDeployReachCheckPointer {
   type: "interface_deploy_reach_check";
@@ -13,7 +14,7 @@ export async function resolveInterfaceDeployReachCheck(pointer: InterfaceDeployR
   let lastEventAt = 0;
   let surfaceUp = false;
   try {
-    const endpoint = process.env["OBSIDIAN_LEARN_ENDPOINT"] ?? "http://127.0.0.1:27182";
+    const endpoint = (await resolveObsidianEndpointViaDiscovery()) ?? process.env["OBSIDIAN_LEARN_ENDPOINT"] ?? "http://127.0.0.1:27182";
     const res = await fetch(endpoint + "/resolve", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ impulse: { pointer: { type: "obsidian:presence_rhythm" } } }), signal: AbortSignal.timeout(10000) });
     const json = (await res.json()) as { content?: string };
     const parsed = json.content ? (JSON.parse(json.content) as { last_event_at?: string }) : {};

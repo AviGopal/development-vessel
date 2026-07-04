@@ -30,7 +30,7 @@
  * the scaffolded resolver connects to existing topology rather than dangling.
  */
 
-import { readFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { ResolverResult } from "./types.js";
 
@@ -219,9 +219,19 @@ export async function resolveAuthorNewResolver(pointer: AuthorNewResolverPointer
     ],
   };
 
+  let persisted_to: string | null = null;
+  if ((pointer as { persist?: boolean }).persist !== false) {
+    try {
+      const dir = join(process.env["WORKSPACE_ROOT"] ?? "/workspace", "proposals");
+      await mkdir(dir, { recursive: true });
+      persisted_to = join(dir, `${kebab}-authoring-report.json`);
+      await writeFile(persisted_to, JSON.stringify(proposal, null, 1));
+    } catch { persisted_to = null; }
+  }
   return {
     shape: "resolverAuthorProposal",
     body: {
+      persisted_to,
       vessel: pointer.vessel,
       resolver_name: pointer.resolver_name,
       shape,

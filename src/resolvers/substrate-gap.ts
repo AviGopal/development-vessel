@@ -247,6 +247,33 @@ export async function resolveSubstrateGapWrite(
   // otherwise fall back to class match against a non-closed row.
   const classKey = gapClassKey(gap.id);
   let existingIdx = gaps.findIndex((g) => g.id === gap.id);
+  // Consumption gate (loop-economy): do not raise the growth rate when the
+  // consumption side has no headroom (same inequality as the spectral-gap
+  // governor). A NEW detector-sourced OPEN filing whose gap CLASS already
+  // holds >= GAP_CLASS_OPEN_CAP open rows is refused honestly instead of
+  // accumulating rows or churning updated_at. Exact-id updates, closes,
+  // operator-filed gaps, and goal-host capability-gap escalations (kind
+  // capability_gap — the walk's topology-expansion path) always pass.
+  if (
+    existingIdx < 0 &&
+    gap.status === "open" &&
+    (gap.source === "substrate_detected" || gap.source === "substrate_generative") &&
+    (gap.classification_metadata as Record<string, unknown> | undefined)?.["kind"] !== "capability_gap"
+  ) {
+    const cap = Number(process.env["GAP_CLASS_OPEN_CAP"] ?? "3");
+    const openInClass = gaps.filter((g) => g.status === "open" && gapClassKey(g.id) === classKey).length;
+    if (openInClass >= cap) {
+      console.log(`[gap-consumption-gate] refused open write: class=${classKey} open=${openInClass} cap=${cap} id=${gap.id}`);
+      return {
+        shape: "structuredError",
+        body: {
+          resolver: "substrateGap_write",
+          failure_mode: "consumption_gated",
+          detail: `gap ${gap.id}: class "${classKey}" already has ${openInClass} open rows (cap ${cap}) — consumption-gated: class backlog un-drained`,
+        },
+      };
+    }
+  }
   if (existingIdx < 0) {
     existingIdx = gaps.findIndex((g) => g.status !== "closed" && gapClassKey(g.id) === classKey);
   }

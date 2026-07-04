@@ -10,10 +10,11 @@
     "test": "bun test",
     "typecheck": "tsc --noEmit",
     "check-shape-dispatch": "bun scripts/check-shape-dispatch.ts",
-    "lint": "bun run typecheck && bun run check-shape-dispatch"
+    "lint": "bun run typecheck && bun run check-shape-dispatch",
+    "substrate:deploy": "cp CLAUDE.md \"$SUBSTRATE_BASE_ROOT/development-vessel/CLAUDE.md\""
   },
   "dependencies": {
-    "@avigopal/ias-executor-ts": "file:../ias-executor-ts",
+    "@avigopal/ias-executor-ts": "file:/vessels/ias-executor-ts",
     "hono": "^4.0.0",
     "zod": "^3.22.0"
   },

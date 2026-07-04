@@ -4,7 +4,7 @@
  * Output shape: projectPlanReport
  */
 
-import { DISCOVERY_ENDPOINT, METABOB_API_KEY } from "../config.js";
+import { DISCOVERY_ENDPOINT, GOAL_HOST_VESSEL_ENDPOINT, METABOB_API_KEY } from "../config.js";
 import type { ResolverResult } from "./types.js";
 
 export interface ProjectPlanPointer {
@@ -17,6 +17,7 @@ export async function resolveProjectPlan(pointer: ProjectPlanPointer): Promise<R
   if (!notePath) return { shape: "projectPlanReport", body: { error: "note_path_required" } };
   const peer_routing: Array<{ vessel_id: string; has_note: boolean }> = [];
   let content = "";
+  let ownerUrl = "";
   try {
     const dres = await fetch(`${DISCOVERY_ENDPOINT}/resolve`, {
       method: "POST",
@@ -35,7 +36,7 @@ export async function resolveProjectPlan(pointer: ProjectPlanPointer): Promise<R
         const j = (await res.json()) as { success?: boolean; content?: string };
         const ok = j.success === true && typeof j.content === "string";
         peer_routing.push({ vessel_id: vid, has_note: ok });
-        if (ok && !content) content = j.content ?? "";
+        if (ok && !content) { content = j.content ?? ""; ownerUrl = url; }
       } catch { peer_routing.push({ vessel_id: vid, has_note: false }); }
     }
   } catch { /* discovery unreachable: report empty routing */ }
@@ -55,5 +56,26 @@ export async function resolveProjectPlan(pointer: ProjectPlanPointer): Promise<R
     }
     return { action: "dispatch_goal", item: it.text, goal: `Author via the substrate loop: ${it.text}` };
   });
-  return { shape: "projectPlanReport", body: { note_path: notePath, peer_routing, items, dry_run: true, plan_actions } };
+  const wet = pointer["dry_run"] === false;
+  const executed: Array<Record<string, unknown>> = [];
+  if (wet && ownerUrl && content) {
+    const asks = plan_actions.filter((a) => a.action === "solicit_human");
+    if (asks.length > 0) {
+      const stamp = new Date().toISOString().slice(0, 10);
+      const entries = asks.map((a) => `\n### Query: substrate solicitation (${stamp})\n---\n> [!question] From the substrate (project_plan)\n> ${a.item}\n> Reply below this callout — the system reads this thread.\n`).join("");
+      try {
+        const wres = await fetch(ownerUrl, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ type: "obsidian:write_note", pointer: { type: "obsidian:write_note", path: notePath, content: content + entries } }), signal: AbortSignal.timeout(8000) });
+        const wj = (await wres.json()) as { success?: boolean };
+        executed.push({ action: "solicit_human", ok: wj.success === true, count: asks.length });
+      } catch (err) { executed.push({ action: "solicit_human", ok: false, error: String(err).slice(0, 120) }); }
+    }
+    for (const a of plan_actions.filter((x) => x.action === "dispatch_goal")) {
+      try {
+        const gres = await fetch(`${GOAL_HOST_VESSEL_ENDPOINT}/run-goal`, { method: "POST", headers: { "Content-Type": "application/json", Authorization: `ApiKey ${METABOB_API_KEY}` }, body: JSON.stringify({ goal: a.goal, tags: ["dispatcher:project_plan", `note:${notePath}`], variables: {} }), signal: AbortSignal.timeout(15000) });
+        const gj = (await gres.json()) as { dispatchId?: string; executionId?: string; status?: string };
+        executed.push({ action: "dispatch_goal", ok: gres.ok, item: a.item, dispatchId: gj.dispatchId ?? gj.executionId, status: gj.status });
+      } catch (err) { executed.push({ action: "dispatch_goal", ok: false, item: a.item, error: String(err).slice(0, 120) }); }
+    }
+  }
+  return { shape: "projectPlanReport", body: { note_path: notePath, peer_routing, items, dry_run: !wet, plan_actions, executed } };
 }

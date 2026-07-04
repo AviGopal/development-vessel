@@ -86,6 +86,12 @@ export async function resolveCompositionFlowHealthScan(
   const reachedChains = Number(reachedRows[0]?.["n"] ?? 0);
   const cellRows = await flowSql(`SELECT count() AS n FROM variant_performance_metrics GROUP ALL`);
   const cells = Number(cellRows[0]?.["n"] ?? 0);
+  // Orphan fraction: child dispatches that fail to thread parent_execution_id
+  // leave chain-credit propagation nothing to walk. Sample the newest traces.
+  const recentParentRows = await flowSql(`SELECT parent_execution_id FROM activity_execution_traces ORDER BY stored_at DESC LIMIT 200`);
+  const recentN = recentParentRows.length;
+  const parentedN = recentParentRows.filter((r) => r["parent_execution_id"] != null && r["parent_execution_id"] !== "").length;
+  const orphanFraction = recentN > 0 ? (recentN - parentedN) / recentN : null;
   const verdict = components > 1 ? "flow_split" : components === 1 ? "flow_connected" : "no_genuine_edges";
   const gapId = components > 1 ? "gap-composition-flow-components-split" : null;
   let posted = false;
@@ -125,6 +131,9 @@ export async function resolveCompositionFlowHealthScan(
       bridge_nodes: bridgeNodes.size,
       reached_chains: reachedChains,
       bridges_per_reached_chain: reachedChains > 0 ? bridgeNodes.size / reachedChains : null,
+      recent_traces_sampled: recentN,
+      parented_recent_traces: parentedN,
+      orphan_fraction: orphanFraction,
       gap_id: gapId,
       gap_posted: posted,
       dry_run: dryRun,

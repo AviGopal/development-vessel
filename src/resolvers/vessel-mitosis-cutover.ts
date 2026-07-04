@@ -1268,6 +1268,12 @@ async function runGitAwareCutover(args: GitCutoverArgs): Promise<ResolverResult>
     });
   }
 
+  // 5b. Empty-diff guard: staged content byte-identical to HEAD after the clone
+  // reset means there is nothing to land — honest skip, not an empty commit.
+  const cachedDiff = await runGit(gitCmd, ["diff", "--cached", "--name-only"], hostRepoRoot);
+  if (cachedDiff.stdout.trim().length === 0) {
+    return softRefuse("no_diff: staged files are byte-identical to HEAD - nothing to cut over", { kind: "no_diff", skip_reason: "no_diff", vessel_name, staged_files: stagedFiles, operations });
+  }
   // 6. git commit.
   const proposalId = pointer.proposal_id ?? "unknown-proposal";
   const gapId = pointer.gap_id ?? "unknown-gap";

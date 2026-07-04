@@ -29,8 +29,71 @@ import { readdir } from "node:fs/promises";
  * restricted to Substrate/). Reads + Substrate/-only writes. Non-intrusive.
  */
 
+import { METABOB_ENDPOINT, METABOB_API_KEY, DISCOVERY_ENDPOINT } from "../config.js";
 const DEFAULT_OBSIDIAN_ENDPOINT =
-  process.env["OBSIDIAN_LEARN_ENDPOINT"] ?? process.env["OBSIDIAN_PLUGIN_ENDPOINT"] ?? "http://host.docker.internal:27183";
+  process.env["OBSIDIAN_ENDPOINT"] ??
+  process.env["OBSIDIAN_LEARN_ENDPOINT"] ??
+  process.env["OBSIDIAN_PLUGIN_ENDPOINT"] ??
+  "http://host.docker.internal:27183";
+
+// Module-level discovery cache
+let cachedObsidianEndpoint: string | null = null;
+let cacheExpiresAt = 0;
+const CACHE_TTL_MS = 60_000;
+
+type DiscoveryResolveResponse = {
+  content?: { vessels?: Array<{ endpoint: string; resolve_endpoint?: string }> };
+};
+
+async function resolveObsidianEndpointViaDiscovery(): Promise<string | null> {
+  const now = Date.now();
+  if (cachedObsidianEndpoint !== null && now < cacheExpiresAt) {
+    return cachedObsidianEndpoint;
+  }
+
+  try {
+    const res = await fetch(`${DISCOVERY_ENDPOINT}/resolve`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `ApiKey ${METABOB_API_KEY}`,
+      },
+      body: JSON.stringify({ pointer: { type: "vesselCapability", shape: "obsidian:note" } }),
+      signal: AbortSignal.timeout(5_000),
+    });
+
+    if (!res.ok) {
+      console.warn(`[obsidian-request-scan] discovery resolve HTTP ${res.status}, returning null`);
+      return null;
+    }
+
+    const json = (await res.json()) as DiscoveryResolveResponse;
+    const vessels = json.content?.vessels;
+
+    if (!vessels || vessels.length === 0) {
+      console.warn(`[obsidian-request-scan] discovery returned no vessels, returning null`);
+      return null;
+    }
+
+    // Use the first vessel's resolve_endpoint (or endpoint) directly; health probe happens at call site
+    const first = vessels[0]!;
+    const firstBase = first.endpoint.replace(/\/+$/, "");
+    const resolved = first.resolve_endpoint ? first.resolve_endpoint.replace(/\/+$/, "") : firstBase;
+
+    cachedObsidianEndpoint = resolved;
+    cacheExpiresAt = now + CACHE_TTL_MS;
+    return resolved;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.warn(`[obsidian-request-scan] discovery unreachable (${msg}), returning null`);
+    return null;
+  }
+}
+
+async function resolveObsidianEndpoint(): Promise<string> {
+  const discovered = await resolveObsidianEndpointViaDiscovery();
+  return discovered ?? DEFAULT_OBSIDIAN_ENDPOINT;
+}
 const DEFAULT_GOAL_HOST = process.env["GOAL_HOST_ENDPOINT"] ?? "http://127.0.0.1:8210";
 const API_KEY = process.env["METABOB_API_KEY"] ?? process.env["DEV_VESSEL_API_KEY"];
 // The vault is mounted in the container; used to ENUMERATE the operator's Inbox/
@@ -109,17 +172,7 @@ interface ParsedRequest {
 export async function resolveObsidianRequestScan(
   pointer: ObsidianRequestScanPointer,
 ): Promise<ResolverResult> {
-  let obsidian = (pointer.obsidianEndpoint ?? DEFAULT_OBSIDIAN_ENDPOINT).replace(/\/+$/, "");
-  // Endpoint may point at the wrong plugin instance (in-container peer vs host vault);
-  // probe candidates and use the first healthy one.
-  for (const cand of [...new Set([obsidian, "http://host.docker.internal:27182", "http://host.docker.internal:27183"])]) {
-    try {
-      const h = await fetch(`${cand}/health`, { signal: AbortSignal.timeout(2000) });
-      if (!h.ok) continue;
-      const notes = await listInboxViaPlugin(cand);
-      if (notes && notes.length > 0) { obsidian = cand; break; }
-    } catch { /* unreachable candidate — try next */ }
-  }
+  const obsidian = (pointer.obsidianEndpoint ?? await resolveObsidianEndpoint()).replace(/\/+$/, "");
   const goalHost = (pointer.goalHostEndpoint ?? DEFAULT_GOAL_HOST).replace(/\/+$/, "");
   const inboxPath = pointer.inboxPath ?? "Substrate/Inbox.md";
   const statusPath = pointer.statusPath ?? "Substrate/Now.md";

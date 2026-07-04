@@ -187,6 +187,7 @@ import { resolveActivityMetrics } from "../resolvers/activity-metrics.js";
 import { resolveSummaryOfClockVesselFunctionality } from "../resolvers/summary-of-clock-vessel-functionality.js";
 import { resolveAssessmentSummary } from "../resolvers/assessment-summary.js";
 import { resolveProjectPlan } from "../resolvers/project-plan.js";
+import { resolveProjectThreadScan } from "../resolvers/project-thread-scan.js";
 import type { ResolverResult } from "../resolvers/types.js";
 
 type AnyPointer = { type: string } & Record<string, unknown>;
@@ -716,6 +717,8 @@ async function dispatchInner(pointer: AnyPointer): Promise<ResolverResult> {
       return resolveCodeQualityWithSubstantiveAssessmentContent(pointer);
     case "project_plan":
       return resolveProjectPlan(p as Parameters<typeof resolveProjectPlan>[0]);
+    case "project_thread_scan":
+      return resolveProjectThreadScan(p as Parameters<typeof resolveProjectThreadScan>[0]);
     default:
       throw new Error(`unknown shape: ${pointer.type}`);
   }

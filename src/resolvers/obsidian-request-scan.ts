@@ -46,6 +46,13 @@ type DiscoveryResolveResponse = {
 };
 
 async function resolveObsidianEndpointViaDiscovery(): Promise<string | null> {
+  // Returns the BASE endpoint (no trailing slash, no /resolve suffix).
+  // Callers append "/resolve" themselves. Never return resolve_endpoint which
+  // is a relative path "/resolve" — using it as a base causes double-resolve URLs.
+  // Return cached value if still valid
+  if (cachedObsidianEndpoint !== null && Date.now() < cacheExpiresAt) {
+    return cachedObsidianEndpoint;
+  }
   const now = Date.now();
   if (cachedObsidianEndpoint !== null && now < cacheExpiresAt) {
     return cachedObsidianEndpoint;
@@ -69,20 +76,32 @@ async function resolveObsidianEndpointViaDiscovery(): Promise<string | null> {
 
     const json = (await res.json()) as DiscoveryResolveResponse;
     const vessels = json.content?.vessels;
-
     if (!vessels || vessels.length === 0) {
       console.warn(`[obsidian-request-scan] discovery returned no vessels, returning null`);
       return null;
     }
-
-    // Use the first vessel's resolve_endpoint (or endpoint) directly; health probe happens at call site
-    const first = vessels[0]!;
-    const firstBase = first.endpoint.replace(/\/+$/, "");
-    const resolved = first.resolve_endpoint ? first.resolve_endpoint.replace(/\/+$/, "") : firstBase;
-
-    cachedObsidianEndpoint = resolved;
-    cacheExpiresAt = now + CACHE_TTL_MS;
-    return resolved;
+    let firstBase: string | null = null;
+    for (const candidate of vessels) {
+      const base = String(candidate.endpoint ?? "").replace(/\/+$/, "");
+      if (!base) continue;
+      if (firstBase === null) firstBase = base;
+      try {
+        const res = await fetch(`${base}/health`, { signal: AbortSignal.timeout(2000) });
+        if (res.ok) {
+          cachedObsidianEndpoint = base;
+          cacheExpiresAt = now + CACHE_TTL_MS;
+          return base;
+        }
+      } catch {
+        // probe failed, try next candidate
+      }
+    }
+    if (firstBase !== null) {
+      cachedObsidianEndpoint = firstBase;
+      cacheExpiresAt = now + CACHE_TTL_MS;
+      return firstBase;
+    }
+    return null;
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.warn(`[obsidian-request-scan] discovery unreachable (${msg}), returning null`);

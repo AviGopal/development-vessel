@@ -411,6 +411,11 @@ export async function resolveDispatchGoal(pointer: DispatchGoalPointer): Promise
   // confidence and inflates token budget consumption on every downstream LLM
   // call. Enforcing MAX_GOAL_LEN here is therefore both a cost guard and a
   // quality guard for the recommendation pipeline.
+  // Performance rationale: the guard also bounds the cost of substring matching
+  // and recommendation scoring in the goal-host, which operate over the full
+  // goal text — capping input length keeps those operations O(MAX_GOAL_LEN)
+  // per candidate and preserves classification relevance by preventing a
+  // single oversized goal from dominating similarity signals.
   if (goal.length > MAX_GOAL_LEN) return { shape: "structuredError", body: { resolver: "dispatch_goal", detail: `goal too long (${goal.length} > ${MAX_GOAL_LEN})` } };
 
   const body: Record<string, unknown> = { goal };

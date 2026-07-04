@@ -275,6 +275,28 @@ export async function resolveGapToScenarioBridge(
     classSet.add(ck);
     (isVesselAuthoring ? vesselOut : out).push({ gap_id: id, scenario_path: scenarioPath });
     priorityBreakdown[category] = (priorityBreakdown[category] ?? 0) + 1;
+
+    // DECISION→DISPATCH (SUBSTRATE_AS_MDP §8.5–8.6): vessel_authoring scenarios
+    // are routed to vessel-scaffold-trigger-tick so the scaffold loop actually
+    // executes instead of the queue accumulating unread.
+    if (isVesselAuthoring) {
+      try {
+        await fetch("http://127.0.0.1:8210/run-goal", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            targetTemplateId: "development-vessel:vessel-scaffold-trigger-tick",
+            variables: {
+              scenario_id: safeId,
+              capability_shape:
+                typeof meta["shape"] === "string" ? meta["shape"] : null,
+            },
+          }),
+        });
+      } catch {
+        // Best-effort dispatch; downstream tick will re-scan the directory.
+      }
+    }
   }
 
   return {

@@ -41,6 +41,8 @@ export interface PickPriorityScenarioPointer {
   dispatch_drafter?: boolean;
   light_dispatch_url?: string;
   drafter_template_id?: string;
+  parent_execution_id?: string;
+  composition_chain?: string[];
 }
 
 const DEFAULT_LIGHT_DISPATCH = "http://127.0.0.1:8280/dispatch";
@@ -52,6 +54,8 @@ async function dispatchDrafter(
   url: string,
   drafterId: string,
   apiKey: string,
+  parentExecutionId?: string,
+  compositionChain?: string[],
 ): Promise<unknown> {
   try {
     const res = await fetch(url, {
@@ -59,6 +63,8 @@ async function dispatchDrafter(
       headers: { "Content-Type": "application/json", Authorization: `ApiKey ${apiKey}` },
       body: JSON.stringify({
         template_id: drafterId,
+        ...(parentExecutionId ? { parent_execution_id: parentExecutionId } : {}),
+        ...(compositionChain && compositionChain.length ? { composition_chain: compositionChain } : {}),
         variables: {
           report_path: `${scenariosDir}/${pickedId}.json`,
           scenario_id: pickedId,
@@ -222,6 +228,7 @@ export async function resolvePickPriorityScenario(
       top.scenario_id, scenariosDir,
       p.light_dispatch_url ?? DEFAULT_LIGHT_DISPATCH,
       p.drafter_template_id ?? DEFAULT_DRAFTER, apiKey,
+      p.parent_execution_id, p.composition_chain,
     );
   }
 

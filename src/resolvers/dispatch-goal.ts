@@ -378,6 +378,24 @@ import { METABOB_API_KEY } from "../config.js";
 // (3) goal complexity management — keeps dispatched goals parsimonious and
 // comprehensible. Impact: goals exceeding this length are rejected up-front
 // with a predictable validation failure rather than partial/truncated calls.
+//
+// MAX_GOAL_LEN guard rationale (detailed):
+//  - Purpose: validates goal text length at the resolver boundary to prevent
+//    oversized goal specifications from reaching downstream services.
+//  - Upper bound reasoning: 8192 characters is chosen to sit comfortably below
+//    the effective usable context of LLM-backed goal-host endpoints once system
+//    prompts, tool schemas, and response headroom are accounted for. This leaves
+//    room for prompt assembly and template expansion without risking mid-flight
+//    truncation.
+//  - Correctness implications: goals beyond this ceiling tend to encode multiple
+//    concerns and produce ambiguous goal decomposition; enforcing the limit keeps
+//    dispatched goals parsimonious, coherent, and unambiguously decomposable.
+//  - Performance implications: rejecting oversized payloads pre-dispatch avoids
+//    wasted network round-trips, token overflow failures, and partial/truncated
+//    downstream processing — trading a cheap up-front validation for predictable
+//    failure modes instead of costly late-stage errors.
+//  - Coordination note: this ceiling MUST stay in sync with goal-host-vessel's
+//    own input ceiling; treat it as a safety boundary, not a tunable perf knob.
 const MAX_GOAL_LEN = 8192;
 const GOAL_HOST_ENDPOINT = process.env["GOAL_HOST_VESSEL_ENDPOINT"] ?? "http://127.0.0.1:8210";
 

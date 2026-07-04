@@ -110,6 +110,10 @@ import { METABOB_API_KEY } from "../config.js";
  *  - This is a safety boundary, NOT a tunable performance knob. It MUST stay in
  *    sync with goal-host-vessel's own input ceiling — change them together.
  */
+// MAX_GOAL_LEN guard rationale: guards against excessively long goal text that
+// could degrade goal-host recommendation quality or cause token overflow in
+// downstream LLM processing. Ensures goal clarity and token budget compliance
+// in the goal dispatch workflow.
 // MAX_GOAL_LEN guard: critical for maintaining goal comprehensibility and
 // avoiding token overflow in downstream goal-host evaluation. This length
 // constraint ensures compatibility with LLM token limits and goal-host

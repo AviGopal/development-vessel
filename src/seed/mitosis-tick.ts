@@ -102,12 +102,11 @@ export const MITOSIS_TICK_TEMPLATE: ActivityTemplate = {
         "Read /workspace/mitosis-pending.json which carries the (base, mitosis) version pair " +
         "for the most recent scaffold-mitosis-track invocation. If the file is absent, the " +
         "chain fails fast — a normal trace, not an error.",
-      resolver: "fs_read",
+      resolver: "mitosis_pending_observer",
       config: {
-        type: "fs_read",
-        path: "/workspace/mitosis-pending.json",
+        type: "mitosis_pending_observer",
       },
-      outputShapes: ["fileContent"],
+      outputShapes: ["mitosisPendingState"],
     },
     {
       id: "extract_vessel_name",
@@ -116,7 +115,7 @@ export const MITOSIS_TICK_TEMPLATE: ActivityTemplate = {
       config: {
         type: "json_path_extract",
         json: "{{read_pending_content}}",
-        path: "vessel_name",
+        path: "pending.vessel_name",
       },
       outputShapes: ["json_extracted_value"],
     },
@@ -127,7 +126,7 @@ export const MITOSIS_TICK_TEMPLATE: ActivityTemplate = {
       config: {
         type: "json_path_extract",
         json: "{{read_pending_content}}",
-        path: "base_version_id",
+        path: "pending.base_version_id",
       },
       outputShapes: ["json_extracted_value"],
     },
@@ -138,7 +137,7 @@ export const MITOSIS_TICK_TEMPLATE: ActivityTemplate = {
       config: {
         type: "json_path_extract",
         json: "{{read_pending_content}}",
-        path: "mitosis_version_id",
+        path: "pending.mitosis_version_id",
       },
       outputShapes: ["json_extracted_value"],
     },
@@ -149,7 +148,7 @@ export const MITOSIS_TICK_TEMPLATE: ActivityTemplate = {
       config: {
         type: "json_path_extract",
         json: "{{read_pending_content}}",
-        path: "mitosis_root",
+        path: "pending.mitosis_root",
       },
       outputShapes: ["json_extracted_value"],
     },
@@ -164,7 +163,7 @@ export const MITOSIS_TICK_TEMPLATE: ActivityTemplate = {
       config: {
         type: "json_path_extract",
         json: "{{read_pending_content}}",
-        path: "base_sha",
+        path: "pending.base_sha",
       },
       outputShapes: ["json_extracted_value"],
     },
@@ -178,7 +177,7 @@ export const MITOSIS_TICK_TEMPLATE: ActivityTemplate = {
       config: {
         type: "json_path_extract",
         json: "{{read_pending_content}}",
-        path: "staged_files",
+        path: "pending.staged_files",
       },
       outputShapes: ["json_extracted_value"],
     },
@@ -189,7 +188,7 @@ export const MITOSIS_TICK_TEMPLATE: ActivityTemplate = {
       config: {
         type: "json_path_extract",
         json: "{{read_pending_content}}",
-        path: "proposal",
+        path: "pending.proposal",
       },
       outputShapes: ["json_extracted_value"],
     },

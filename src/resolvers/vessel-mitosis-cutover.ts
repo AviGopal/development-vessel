@@ -496,6 +496,16 @@ export async function resolveVesselMitosisCutover(
   // `refusing cutover on protected vessel: undefined`. Required-field validation
   // should fire first so the operator/substrate gets a typed
   // missing-field error before the safety guard runs.
+  if (!vessel_name && !base_version_id && !mitosis_version_id) {
+    return {
+      shape: "vesselMitosisCutoverResult",
+      body: {
+        skipped: true,
+        skip_reason: "no_pending_mitosis",
+        cutover_applied: false,
+      },
+    };
+  }
   if (!vessel_name) {
     return structuredError("missing required field: vessel_name");
   }

@@ -123,6 +123,11 @@ import { POSTERIOR_CONSISTENCY_AUDIT_TICK_TEMPLATE } from "./posterior-consisten
 import { CAPABILITY_GAP_AUDIT_TICK_TEMPLATE } from "./capability-gap-audit-tick.js";
 import { ORPHANED_CAPABILITY_TICK_TEMPLATE } from "./orphaned-capability-tick.js";
 import { RESOLVER_AUTHOR_TEMPLATE } from "./resolver-author.js";
+import { CYCLIC_FLOW_SCAN_TICK_TEMPLATE } from "./cyclic-flow-scan-tick.js";
+import { GROUP_INTERACTION_EPISODES_TEMPLATE } from "./group-interaction-episodes.js";
+import { OBSERVE_AND_AUTHOR_FROM_GAPS_TEMPLATE } from "./observe-and-author-from-gaps.js";
+import { OBSERVE_OBSIDIAN_EVENTS_TEMPLATE } from "./observe-obsidian-events.js";
+import { PROBE_OBSIDIAN_ACTION_EFFECTS_TEMPLATE } from "./probe-obsidian-action-effects.js";
 // Shadow-state observer ticks (2026-06-05): promote out-of-band substrate
 // state into impulse form so detectors can observe it.
 import {
@@ -575,4 +580,12 @@ export const SEED_TEMPLATES: ActivityTemplate[] = [
   LLM_QUOTA_OBSERVER_TICK_TEMPLATE,
   // push-health observer (2026-06-19): surfaces substrate self-push failure.
   PUSH_HEALTH_OBSERVER_TICK_TEMPLATE,
+  // seed-registry reconciliation (2026-07-03): these five existed on disk and
+  // live in the registry but were never wired into the seed array — a fresh
+  // boot silently lost them.
+  CYCLIC_FLOW_SCAN_TICK_TEMPLATE,
+  GROUP_INTERACTION_EPISODES_TEMPLATE,
+  OBSERVE_AND_AUTHOR_FROM_GAPS_TEMPLATE,
+  OBSERVE_OBSIDIAN_EVENTS_TEMPLATE,
+  PROBE_OBSIDIAN_ACTION_EFFECTS_TEMPLATE,
 ];

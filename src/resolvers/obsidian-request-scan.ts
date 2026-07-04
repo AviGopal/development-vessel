@@ -141,7 +141,7 @@ export async function resolveObsidianRequestScan(
     try {
       const res = await fetch(`${obsidian}/resolve`, {
         method: "POST", headers: auth,
-        body: JSON.stringify({ type: "obsidian:note", pointer: { type: "obsidian:note", path } }),
+        body: JSON.stringify({ type: "obsidian:note", pointer: { type: "obsidian:note", path, includeFrontmatter: true } }),
         signal: AbortSignal.timeout(Math.min(timeoutMs, 8000)),
       });
       const json = (await res.json()) as { success?: boolean; content?: string };

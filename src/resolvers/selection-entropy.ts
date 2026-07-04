@@ -97,17 +97,25 @@ export async function resolveSelectionEntropy(pointer: SelectionEntropyPointer):
 
     const collapsedBuckets = per_bucket.filter((b) => b.collapsed).map((b) => b.bucket);
     const collapsed = overall < floor || collapsedBuckets.length > 0;
+    // Never-converging check: maximal entropy with every sampled template stuck
+    // in the low-success band means nothing is winning — that is not healthy
+    // exploration, it is a posterior that never converges.
+    const lowBucket = per_bucket.find((b) => b.bucket === "success_0.00_0.33");
+    const neverConverging = !collapsed && lowBucket !== undefined && lowBucket.count === rows.length && rows.length >= 10;
     const recommendation = collapsed
       ? `Selection has crystallized (overall_entropy=${Math.round(overall * 1000) / 1000} < floor=${floor}` +
         (collapsedBuckets.length ? `; collapsed buckets: ${collapsedBuckets.join(", ")}` : "") +
         `). Increase exploration: widen Thompson priors, inject novel templates, or reduce reuse bias.`
-      : `Selection is healthy (overall_entropy=${Math.round(overall * 1000) / 1000} >= floor=${floor}); exploration spread is adequate.`;
+      : neverConverging
+        ? `Selection is NEVER-CONVERGING (overall_entropy=${Math.round(overall * 1000) / 1000}, but all ${rows.length} sampled templates sit in success_0.00_0.33). Entropy is high because nothing wins, not because exploration is healthy. Investigate reward flow: are successes being credited (alpha) at all for these templates?`
+        : `Selection is healthy (overall_entropy=${Math.round(overall * 1000) / 1000} >= floor=${floor}); exploration spread is adequate.`;
 
     return {
       shape: "selectionEntropy",
       body: {
         overall_entropy: Math.round(overall * 10000) / 10000,
         collapsed,
+        never_converging: neverConverging,
         template_count: rows.length,
         entropy_floor: floor,
         collapsed_buckets: collapsedBuckets,

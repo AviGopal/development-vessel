@@ -247,6 +247,7 @@ export async function resolveObsidianRequestScan(
   const requests: ParsedRequest[] = [];
   for (const [path, lines] of fileLines) {
     lines.forEach((raw, i) => {
+      if (raw.includes('⟶')) return;
       const m = raw.match(/^\s*[-*]\s+\[\s\]\s+(.+?)\s*$/);
       if (m) {
         const cap = m[1] ?? "";

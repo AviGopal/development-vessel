@@ -157,6 +157,7 @@ import { resolveObsidianExecuteGated } from "../resolvers/obsidian-execute-gated
 import { resolveObsidianLearnCommands } from "../resolvers/obsidian-learn-commands.js";
 import { resolveInteractionExpectationVerify } from "../resolvers/interaction-expectation-verify.js";
 import { resolveSelfInterferenceScan } from "../resolvers/self-interference-scan.js";
+import { resolveAdvertisedShapeCoverageScan } from "../resolvers/advertised-shape-coverage-scan.js";
 import { resolveConceptCreditIntegrityScan } from "../resolvers/concept-credit-integrity-scan.js";
 import { resolveLearningTransferReport } from "../resolvers/learning-transfer-report.js";
 import { resolveInterfaceDeployReachCheck } from "../resolvers/interface-deploy-reach-check.js";
@@ -645,6 +646,8 @@ async function dispatchInner(pointer: AnyPointer): Promise<ResolverResult> {
       return resolveInterfaceDeployReachCheck(p as Parameters<typeof resolveInterfaceDeployReachCheck>[0]);
     case "self_interference_scan":
       return resolveSelfInterferenceScan(p as Parameters<typeof resolveSelfInterferenceScan>[0]);
+    case "advertised_shape_coverage_scan":
+      return resolveAdvertisedShapeCoverageScan(p as Parameters<typeof resolveAdvertisedShapeCoverageScan>[0]);
     case "concept_credit_integrity_scan":
       return resolveConceptCreditIntegrityScan(p as Parameters<typeof resolveConceptCreditIntegrityScan>[0]);
     case "learning_transfer_report":

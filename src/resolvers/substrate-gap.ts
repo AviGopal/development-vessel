@@ -217,7 +217,8 @@ export async function resolveSubstrateGapWrite(
   // Closes/rejections of existing junk rows pass through untouched.
   if ((incoming.status ?? "open") === "open") {
     const summaryText = typeof incoming.summary === "string" ? incoming.summary.trim() : "";
-    const gateFields = `${incoming.id} ${incoming.category} ${incoming.summary}`;
+    // Placeholder check covers id/category only: a legitimate gap SUMMARY may quote {{placeholders}} when describing an interpolation bug.
+    const gateFields = `${incoming.id} ${incoming.category}`;
     if (summaryText.length === 0 || gateFields.includes("{{")) {
       return {
         shape: "structuredError",
@@ -226,7 +227,7 @@ export async function resolveSubstrateGapWrite(
           failure_mode: "validation_rejected",
           detail: summaryText.length === 0
             ? `gap ${incoming.id}: empty summary — an open gap must describe itself so the drafter can act on it`
-            : `gap ${incoming.id}: uninterpolated {{placeholder}} in id/category/summary — bind slots before writing`,
+            : `gap ${incoming.id}: uninterpolated {{placeholder}} in id/category — bind slots before writing`,
         },
       };
     }

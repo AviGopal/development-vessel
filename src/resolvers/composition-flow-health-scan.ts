@@ -82,7 +82,7 @@ export async function resolveCompositionFlowHealthScan(
   for (const k of parent.keys()) roots.add(find(k));
   const components = roots.size;
   const nodesInGenuineGraph = parent.size;
-  const reachedRows = await flowSql(`SELECT count() AS n FROM goal_execution_paths WHERE success = true GROUP ALL`);
+  const reachedRows = await flowSql(`SELECT count() AS n FROM goal_execution_paths WHERE successful_executions > 0 GROUP ALL`);
   const reachedChains = Number(reachedRows[0]?.["n"] ?? 0);
   const cellRows = await flowSql(`SELECT count() AS n FROM variant_performance_metrics GROUP ALL`);
   const cells = Number(cellRows[0]?.["n"] ?? 0);

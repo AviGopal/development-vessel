@@ -278,6 +278,17 @@ export async function resolveSubstrateGapWrite(
     existingIdx = gaps.findIndex((g) => g.status !== "closed" && gapClassKey(g.id) === classKey);
   }
 
+  // Close-if-open semantics: a close/reject write whose class has no existing row
+  // is an honest no-op, not a create — lifecycle closers (e.g. goal-host closing
+  // its auto_draft_decision rows on dispatch completion) would otherwise mint
+  // closed rows for classes that were never opened, bloating the store.
+  if (existingIdx < 0 && gap.status !== "open") {
+    return {
+      shape: "substrateGapWriteResult",
+      body: { id: gap.id, action: "skipped", skip_reason: "close_without_open_row", gap_class: classKey },
+    };
+  }
+
   let action: "created" | "updated";
   if (existingIdx >= 0) {
     const existing = gaps[existingIdx]!;

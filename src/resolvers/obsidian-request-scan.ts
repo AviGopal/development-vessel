@@ -51,13 +51,13 @@ async function listInboxViaPlugin(
     const auth: Record<string, string> = { "Content-Type": "application/json", ...(API_KEY ? { Authorization: `ApiKey ${API_KEY}` } : {}) };
     const res = await fetch(`${obsidianEndpoint}/resolve`, {
       method: "POST", headers: auth,
-      body: JSON.stringify({ type: "obsidian:list_notes", pointer: { type: "obsidian:list_notes", directory: "Substrate/Inbox" } }),
+      body: JSON.stringify({ type: "obsidian:search", pointer: { type: "obsidian:search", query: "-", folder: "Substrate/Inbox", limit: 50 } }),
       signal: AbortSignal.timeout(6000),
     });
-    const json = (await res.json()) as { success?: boolean; files?: string[]; paths?: string[] };
-    if (json.success) {
-      const raw = json.files ?? json.paths ?? [];
-      const md = raw.filter((p) => p.endsWith(".md"));
+    const json = (await res.json()) as { success?: boolean; content?: string };
+    if (json.success && typeof json.content === "string") {
+      const rows = JSON.parse(json.content) as Array<{ path?: string }>;
+      const md = rows.map((r) => r.path ?? "").filter((p) => p.endsWith(".md"));
       if (md.length > 0) return md;
     }
   } catch { /* plugin unreachable */ }
@@ -115,7 +115,9 @@ export async function resolveObsidianRequestScan(
   for (const cand of [...new Set([obsidian, "http://host.docker.internal:27182", "http://host.docker.internal:27183"])]) {
     try {
       const h = await fetch(`${cand}/health`, { signal: AbortSignal.timeout(2000) });
-      if (h.ok) { obsidian = cand; break; }
+      if (!h.ok) continue;
+      const notes = await listInboxViaPlugin(cand);
+      if (notes && notes.length > 0) { obsidian = cand; break; }
     } catch { /* unreachable candidate — try next */ }
   }
   const goalHost = (pointer.goalHostEndpoint ?? DEFAULT_GOAL_HOST).replace(/\/+$/, "");

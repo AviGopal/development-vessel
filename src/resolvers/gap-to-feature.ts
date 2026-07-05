@@ -1252,6 +1252,40 @@ export async function resolveGapToFeature(pointer: GapToFeaturePointer): Promise
   // plan on the real file tree+contents of those vessels and typechecks them. For a move
   // gap this is BOTH the source AND the destination vessel.
   const verifyVessels = [...new Set(editTargets.map((t) => t.file.match(/^repos\/[^/]+/)?.[0]).filter((v): v is string => !!v))];
+  const slices = await capacitySlices(gap);
+  if (slices.length >= 2) {
+    const sliceResults: Array<{ file: string; verdict: unknown }> = [];
+    let lastBody: Record<string, unknown> | null = null;
+    for (const s of slices) {
+      const sliceCompose = await resolveFeatureCompose({
+        type: "feature_compose",
+        spec: spec + "\n" + `CAPACITY SLICE: this dispatch must touch ONLY the file ${s.file}; other slices are handled in separate dispatches.` + (s.hint ? ` Context: ${s.hint}` : ""),
+        ...(verifyVessels.length ? { verify_vessels: verifyVessels } : {}),
+        model: pointer.model,
+        dry_run: pointer.dry_run ?? false,
+        keep_on_fail: false,
+        gap: {
+          id: String(gap.id ?? ""),
+          summary: String(gap.summary ?? gap.title ?? ""),
+          classification_metadata: (gap.classification_metadata ?? gap.metadata ?? undefined) as Record<string, unknown> | undefined,
+          category: String(gap.category ?? ""),
+        },
+        land: !(pointer.dry_run ?? false),
+        max_ops: 8,
+      } as never);
+      lastBody = sliceCompose.body as Record<string, unknown>;
+      sliceResults.push({ file: s.file, verdict: lastBody.verdict });
+      if (lastBody.verdict !== "FAVORABLE") break;
+    }
+    const allOk = sliceResults.length === slices.length && sliceResults.every((r) => r.verdict === "FAVORABLE");
+    if (allOk && lastBody) {
+      const sliceLand = genuineLandSignal(lastBody, !(pointer.dry_run ?? false));
+      if (sliceLand.landed) await closeLandedGap(gap, sliceLand);
+    }
+    if (!allOk && !pointer.dry_run) await bumpFailedAttempts(gap);
+    return { shape: "gapToFeatureReport", body: { ok: allOk, stage: "route_compose", route: "capacity_slice_sequence", gap_id: gap.id, gap_category: gap.category, slices: sliceResults } };
+  }
+
   const compose = await resolveFeatureCompose({
     type: "feature_compose",
     spec,

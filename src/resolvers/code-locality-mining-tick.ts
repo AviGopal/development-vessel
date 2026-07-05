@@ -156,6 +156,53 @@ export async function resolveCodeLocalityMiningTick(
     }
   }
 
+  // (g0) shadow-agreement measurement (capability-4 precondition): read the
+  // shadow-log counterfactual records and measure how well code_locality's
+  // predicted pointers agree with what exploratory composes actually edited.
+  // Measurement only — promotion out of shadow mode is a separate, gated step.
+  let shadow_records = 0;
+  let shadow_predicted_found = 0;
+  let file_hits = 0;
+  let file_predictions = 0;
+  let file_actuals = 0;
+  try {
+    const raw = readFileSync("/workspace/locality/shadow-log.jsonl", "utf8");
+    for (const line of raw.split("\n")) {
+      if (!line.trim()) continue;
+      let rec: unknown;
+      try { rec = JSON.parse(line); } catch { continue; }
+      if (typeof rec !== "object" || rec === null) continue;
+      shadow_records += 1;
+      const r = rec as Record<string, unknown>;
+      const predicted = r["predicted"];
+      const actual = r["actual"];
+      if (typeof predicted !== "object" || predicted === null || (predicted as Record<string, unknown>)["found"] !== true) continue;
+      shadow_predicted_found += 1;
+      const pointers = (predicted as Record<string, unknown>)["pointers"];
+      const predictedFiles = new Set<string>();
+      if (Array.isArray(pointers)) {
+        for (const p of pointers) {
+          if (typeof p === "object" && p !== null && typeof (p as Record<string, unknown>)["path"] === "string") predictedFiles.add((p as Record<string, unknown>)["path"] as string);
+        }
+      }
+      const actualFiles = new Set<string>();
+      if (Array.isArray(actual)) {
+        for (const a of actual) {
+          if (typeof a === "object" && a !== null && typeof (a as Record<string, unknown>)["path"] === "string") actualFiles.add((a as Record<string, unknown>)["path"] as string);
+        }
+      }
+      file_predictions += predictedFiles.size;
+      file_actuals += actualFiles.size;
+      for (const f of predictedFiles) if (actualFiles.has(f)) file_hits += 1;
+    }
+  } catch { /* no shadow log yet — agreement stays zero-sample */ }
+  const shadow_agreement = {
+    shadow_records,
+    shadow_predicted_found,
+    file_precision: file_predictions > 0 ? file_hits / file_predictions : null,
+    file_recall: file_actuals > 0 ? file_hits / file_actuals : null,
+  };
+
   // (g) build result
   const family_count = Object.keys(families).length;
   const families_summary = Object.entries(families).map(([fam, fe]) => ({
@@ -174,6 +221,7 @@ export async function resolveCodeLocalityMiningTick(
       index_path: indexPath,
       dry_run: pointer.dry_run === true,
       families_summary,
+      shadow_agreement,
       completed_at: new Date().toISOString(),
     },
   };

@@ -1637,6 +1637,23 @@ async function resolveFeatureComposeInner(pointer: FeatureComposePointer): Promi
     );
   } catch { /* persistence failure must never fail the compose */ }
 
+  // SHADOW-MODE counterfactual record (code_locality): log what the locality
+  // index WOULD have retrieved for this family alongside what this exploratory
+  // compose actually edited. Decision-time counterfactual only — never gates.
+  try {
+    const { resolveCodeLocality } = await import("./code-locality.js");
+    const famKey = pointer.gap?.id ?? "adhoc";
+    const m = /^route-edit-([0-9a-f]+)$/.exec(famKey);
+    const shadow = await resolveCodeLocality({ type: "code_locality", family: m ? `goal:${m[1]}` : `gap:${famKey}` });
+    const actual = applied.filter((a) => a.ok).map((a) => ({ path: a.path, kind: a.kind, span: a.span }));
+    const { appendFileSync, mkdirSync: mkShadowDir } = await import("node:fs");
+    mkShadowDir("/workspace/locality", { recursive: true });
+    appendFileSync(
+      "/workspace/locality/shadow-log.jsonl",
+      JSON.stringify({ ts: new Date().toISOString(), family: m ? `goal:${m[1]}` : `gap:${famKey}`, verdict, predicted: shadow.body, actual }) + "\n",
+    );
+  } catch { /* shadow logging must never fail the compose */ }
+
   for (const p of authoringMarkerPaths) { await clearAuthoringMarker(p); }
 
   return {

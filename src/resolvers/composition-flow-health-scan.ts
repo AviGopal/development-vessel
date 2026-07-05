@@ -88,7 +88,7 @@ export async function resolveCompositionFlowHealthScan(
   const cells = Number(cellRows[0]?.["n"] ?? 0);
   // Orphan fraction: child dispatches that fail to thread parent_execution_id
   // leave chain-credit propagation nothing to walk. Sample the newest traces.
-  const recentParentRows = await flowSql(`SELECT parent_execution_id FROM activity_execution_traces ORDER BY stored_at DESC LIMIT 200`);
+  const recentParentRows = await flowSql(`SELECT parent_execution_id, executed_at FROM activity_execution_traces ORDER BY executed_at DESC LIMIT 200`);
   const recentN = recentParentRows.length;
   const parentedN = recentParentRows.filter((r) => r["parent_execution_id"] != null && r["parent_execution_id"] !== "").length;
   const orphanFraction = recentN > 0 ? (recentN - parentedN) / recentN : null;

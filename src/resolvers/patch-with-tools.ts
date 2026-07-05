@@ -229,6 +229,36 @@ function deriveVesselFromPath(filePath: string): { vessel: string; subPath: stri
   return null;
 }
 
+// Durable authoring-in-flight marker (an impulse other planes can consume, not a process-private PID):
+// lifecycle actors like substrate-pull-sync consume it to defer vessel restarts while an authoring run is
+// live, and the killed-run detector flags markers whose pid is dead.
+export async function writeAuthoringMarker(workspaceRoot: string, vessel: string, targetFile: string): Promise<string | null> {
+  try {
+    const markerDir = join(workspaceRoot, 'authoring-inflight');
+    await mkdir(markerDir, { recursive: true });
+    const markerPath = join(markerDir, 'patch_with_tools-' + vessel + '.json');
+    await writeFile(markerPath, JSON.stringify({
+      resolver: 'patch_with_tools',
+      vessel,
+      target_file: targetFile,
+      pid: process.pid,
+      started_at: new Date().toISOString(),
+    }, null, 2));
+    return markerPath;
+  } catch {
+    return null;
+  }
+}
+
+export async function clearAuthoringMarker(markerPath: string | null): Promise<void> {
+  if (markerPath === null) return;
+  try {
+    await unlink(markerPath);
+  } catch {
+    // best-effort
+  }
+}
+
 export async function resolvePatchWithTools(pointer: PatchWithToolsPointer): Promise<ResolverResult> {
   const workspaceRoot = pointer.workspace_root ?? process.env.WORKSPACE_ROOT ?? "/workspace";
   const vesselsRoot = pointer.vessels_root ?? "/vessels";

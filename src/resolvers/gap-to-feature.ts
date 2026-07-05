@@ -713,6 +713,7 @@ async function bumpFailedAttempts(gap: Record<string, unknown>, opts: { surprise
     const fa = Number(meta0.failed_attempts ?? 0) + weight;
     const mis = Number(meta0.mispredicted_lands ?? 0) + (opts.surprise ? 1 : 0);
     const meta = { ...meta0, failed_attempts: fa, last_failed_at: new Date().toISOString(), mispredicted_lands: mis, last_predicted_p: opts.predictedP ?? meta0.last_predicted_p };
+    joinDecisionOutcome(meta, { landed: false });
     await resolveSubstrateGapWrite({
       type: "substrateGap_write",
       gap: {

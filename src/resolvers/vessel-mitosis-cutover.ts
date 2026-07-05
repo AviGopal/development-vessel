@@ -684,12 +684,19 @@ export async function resolveVesselMitosisCutover(
     currentLiveSha = `<unreadable: ${(err as Error).message.slice(0, 60)}>`;
   }
   const stagedBaseSha = pointer.staged_base_sha;
+  // A staged base sha equal to the empty-content sha combined with an ABSENT
+  // live file is exactly the net-new-file assertion the staging leg made
+  // (patch_with_tools is_new_file / feature_compose create) - absence is
+  // freshness, not unreadability.
+  const EMPTY_CONTENT_SHA = createHash("sha256").update("").digest("hex").slice(0, 12);
+  const netNewFreshnessOK = stagedBaseSha === EMPTY_CONTENT_SHA && currentLiveSha === null;
   const freshnessOK =
-    !!stagedBaseSha &&
+    netNewFreshnessOK ||
+    (!!stagedBaseSha &&
     !!currentLiveSha &&
     !currentLiveSha.startsWith("<") &&
-    stagedBaseSha === currentLiveSha;
-  console.error(`[mitosis-cutover] freshness vessel=${vessel_name} mitosis=${mitosis_version_id} staged_base_sha=${stagedBaseSha ?? "<missing>"} current_live_sha=${currentLiveSha ?? "<absent>"} freshnessOK=${freshnessOK} freshness_check_path=${freshnessCheckPath}`);
+    stagedBaseSha === currentLiveSha);
+  console.error(`[mitosis-cutover] freshness vessel=${vessel_name} mitosis=${mitosis_version_id} staged_base_sha=${stagedBaseSha ?? "<missing>"} current_live_sha=${currentLiveSha ?? "<absent>"} freshnessOK=${freshnessOK} net_new=${netNewFreshnessOK} freshness_check_path=${freshnessCheckPath}`);
   if (!freshnessOK) {
     // Already-applied no-op: if the live source already matches the STAGED
     // MITOSIS content (not the pre-staging base_sha), this change has already

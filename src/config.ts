@@ -67,6 +67,7 @@ export const config = {
       "activity_recommend",
       "activity_discover_by_shapes",
       "systemd_restart",
+      "pull_cutover",
       "learned_topology_snapshot",
       "reachable_unlearned_report",
       "unknown_shape_report",

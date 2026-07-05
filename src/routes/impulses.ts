@@ -23,6 +23,7 @@ import { resolveJsonPathExtract } from "../resolvers/json-path-extract.js";
 import { resolveActivityRecommend } from "../resolvers/activity-recommend.js";
 import { resolveActivityDiscoverByShapes } from "../resolvers/activity-discover-by-shapes.js";
 import { resolveSystemdRestart } from "../resolvers/systemd-restart.js";
+import { resolvePullCutover } from "../resolvers/pull-cutover.js";
 import { resolveLearnedTopologySnapshot } from "../resolvers/learned-topology-snapshot.js";
 import { resolveReachableUnlearnedReport } from "../resolvers/reachable-unlearned-report.js";
 import { resolveUnknownShapeReport } from "../resolvers/unknown-shape-report.js";
@@ -253,6 +254,8 @@ async function dispatchInner(pointer: AnyPointer): Promise<ResolverResult> {
       return resolveActivityDiscoverByShapes(p as Parameters<typeof resolveActivityDiscoverByShapes>[0]);
     case "systemd_restart":
       return resolveSystemdRestart(p as Parameters<typeof resolveSystemdRestart>[0]);
+    case "pull_cutover":
+      return resolvePullCutover(pointer as { type: "pull_cutover"; vessel_name: string; dry_run?: boolean });
     case "learned_topology_snapshot":
       return resolveLearnedTopologySnapshot(p as Parameters<typeof resolveLearnedTopologySnapshot>[0]);
     case "reachable_unlearned_report":

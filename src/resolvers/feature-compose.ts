@@ -704,13 +704,20 @@ export function priorAttemptFeedbackBlock(meta?: Record<string, unknown> | null)
   if (!meta) return "";
   const reason = typeof meta.semantic_gate_reason === "string" ? meta.semantic_gate_reason.trim() : "";
   const loc = typeof meta.suspected_real_location === "string" ? meta.suspected_real_location.trim() : "";
-  if (!reason && !loc) return "";
+  const lessons = (Array.isArray(meta.failure_lessons) ? meta.failure_lessons : []) as Array<Record<string, unknown>>;
+  if (!reason && !loc && lessons.length === 0) return "";
   const lines = [
     "",
     "PRIOR ATTEMPT FEEDBACK — a previous draft for THIS gap was REJECTED by the semantic gate. Do NOT repeat it; your plan MUST address what it missed:",
   ];
   if (reason) lines.push(`- Rejection reason: ${reason}`);
   if (loc) lines.push(`- The real change site is: ${loc}. Your fix MUST edit that specific path/lines (not just adjacent or related code).`);
+  if (lessons.length > 0) {
+    lines.push("PER-GAP FAILURE LESSONS — this exact mistake was already made on THIS gap; a plan repeating it will be rolled back:");
+    for (const entry of lessons.slice(-5)) {
+      lines.push(`- ${String(entry.class)}: ${String(entry.reason)}`);
+    }
+  }
   lines.push("- A fix that again leaves the named path/lines untouched will be REJECTED again. Target the exact location the gate identified.");
   return lines.join("\n");
 }

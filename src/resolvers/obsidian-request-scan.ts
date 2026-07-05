@@ -121,6 +121,26 @@ const API_KEY = process.env["METABOB_API_KEY"] ?? process.env["DEV_VESSEL_API_KE
 // plugin by vault-relative path; fs is used only to list which notes exist.
 const VAULT_ROOT = process.env["VAULT_ROOT"] ?? "/vaults/substrate-vault";
 
+// obsidian_live_edit_pulse consumer (plane-blindness triple, consumer leg).
+// The obsidian plugin writes /workspace/obsidian-live-edit-pulse.json while the
+// human is actively editing. Freshness-only rule (mirrors pull-sync): a FRESH
+// pulse defers intake on the note being edited; a dead pid short-circuits —
+// liveness must NOT extend deferral. Never throws.
+const LIVE_EDIT_PULSE_PATH = process.env["LIVE_EDIT_PULSE_PATH"] ?? "/workspace/obsidian-live-edit-pulse.json";
+const LIVE_EDIT_PULSE_TTL_MS = 120_000;
+export async function readFreshLiveEditPulse(): Promise<{ note_path: string | null; session_id?: string; last_activity_ts?: string } | null> {
+  try {
+    const { readFile } = await import("node:fs/promises");
+    const p = JSON.parse(await readFile(LIVE_EDIT_PULSE_PATH, "utf8")) as { note_path?: string | null; session_id?: string; last_activity_ts?: string; pid?: number };
+    const t = Date.parse(String(p.last_activity_ts ?? ""));
+    if (Number.isNaN(t) || Date.now() - t > LIVE_EDIT_PULSE_TTL_MS) return null;
+    if (typeof p.pid === "number" && p.pid > 0) {
+      try { process.kill(p.pid, 0); } catch { return null; }
+    }
+    return { note_path: p.note_path ?? null, session_id: p.session_id, last_activity_ts: p.last_activity_ts };
+  } catch { return null; }
+}
+
 /**
  * Attempt to enumerate Substrate/Inbox/ notes via the obsidian plugin HTTP
  * resolve surface. Returns vault-relative paths (e.g. "Substrate/Inbox/Foo.md")
@@ -245,7 +265,23 @@ export async function resolveObsidianRequestScan(
 
   // 2. Parse UNPROCESSED requests across ALL inbox files: unchecked tasks `- [ ] <text>`.
   const requests: ParsedRequest[] = [];
+  // Consumer leg of the plane-blindness triple: a FRESH obsidian_live_edit_pulse
+  // on a note defers intake of THAT note — the human is mid-edit and treating it
+  // as settled would dispatch half-written requests. Deferral is durable (JSONL
+  // + upserted gap impulse) so the detector/operator can see it.
+  const livePulse = await readFreshLiveEditPulse();
   for (const [path, lines] of fileLines) {
+    if (livePulse && livePulse.note_path === path) {
+      try {
+        const { appendFile } = await import("node:fs/promises");
+        await appendFile("/workspace/obsidian-intake-deferrals.jsonl", JSON.stringify({ at: generatedAt, note_path: path, session_id: livePulse.session_id, last_activity_ts: livePulse.last_activity_ts, actor: "obsidian_request_scan" }) + "\n");
+      } catch { }
+      try {
+        const { resolveSubstrateGapWrite } = await import("./substrate-gap.js");
+        await resolveSubstrateGapWrite({ type: "substrateGap_write", gap: { id: "obsidian-intake-deferred-" + path.replace(/[^a-zA-Z0-9_-]/g, "_"), category: "systematic_failure", source: "substrate_detected", summary: "obsidian intake deferred on " + path + ": fresh obsidian_live_edit_pulse (session " + String(livePulse.session_id ?? "?") + ") — human mid-edit, note not settled", detected_at: generatedAt, status: "open", classification_metadata: { incident_kind: "obsidian_intake_deferred", note_path: path, session_id: livePulse.session_id } } } as never);
+      } catch { }
+      continue;
+    }
     lines.forEach((raw, i) => {
       if (raw.includes('⟶')) return;
       const m = raw.match(/^\s*[-*]\s+\[\s\]\s+(.+?)\s*$/);

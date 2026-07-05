@@ -52,6 +52,7 @@ export async function resolvePullCutover(pointer: PullCutoverPointer): Promise<{
     const deployResult = await runCommand(["cp", "-a", src, dest]);
     deployed = deployResult.ok;
 
+    if (deployed && currentSha.length > 0) { await Bun.write(markerPath, currentSha); }
     // Step 3: restart the vessel service
     const restartResult = await runCommand(["systemctl", "restart", vessel_name]);
     restarted = restartResult.ok;

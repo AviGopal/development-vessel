@@ -907,6 +907,27 @@ function classifyComposeFailure(appliedOps: Array<{ ok: boolean; detail?: string
   return "semantic_reject";
 }
 async function appendComposeLesson(cls: string, reason: string, vessels: string, gap?: { id?: string; classification_metadata?: Record<string, unknown> }): Promise<void> {
+  if (gap && gap.id) {
+    try {
+      const meta = (gap.classification_metadata ?? {}) as Record<string, unknown>;
+      const lessons = (Array.isArray(meta.failure_lessons) ? meta.failure_lessons : []) as Array<Record<string, unknown>>;
+      lessons.push({ at: new Date().toISOString(), class: cls, reason: reason.slice(0, 200) });
+      while (lessons.length > 8) lessons.shift();
+      meta.failure_lessons = lessons;
+      await resolveSubstrateGapWrite({
+        type: "substrateGap_write",
+        gap: {
+          id: String(gap.id),
+          category: "missing_capability",
+          source: "substrate_detected",
+          summary: (typeof meta.summary === "string" && meta.summary) ? String(meta.summary) : "per-gap failure lessons updated",
+          detected_at: new Date().toISOString(),
+          status: "open",
+          classification_metadata: meta,
+        },
+      } as never);
+    } catch {}
+  }
   try {
     const { appendFileSync, mkdirSync } = await import("node:fs");
     mkdirSync("/workspace/proposals", { recursive: true });

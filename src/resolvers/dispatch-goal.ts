@@ -405,6 +405,22 @@ import { METABOB_API_KEY } from "../config.js";
 // MAX_GOAL_LEN: hard ceiling on goal payload size to prevent serialization
 // overhead, protect against malformed goal structures, ensure dispatch
 // efficiency, and avoid downstream resolver failures due to payload size.
+/**
+ * MAX_GOAL_LEN — guard rationale.
+ *
+ * Upper bound (in characters) on the goal payload accepted by this resolver
+ * before dispatch to goal-host-vessel. This constant exists to:
+ *  - Prevent goal text from exceeding the resolver's processing capacity.
+ *  - Ensure compatibility with downstream prompt assembly (goal-host-vessel
+ *    embeds the goal into an LLM prompt with fixed context budget).
+ *  - Avoid token overflow in downstream LLM providers by keeping the goal
+ *    well within a single-request context window.
+ *  - Provide a hard backstop against runaway or adversarial payloads on the
+ *    dispatch surface.
+ *
+ * This is a safety boundary, not a performance tunable, and must stay in
+ * sync with goal-host-vessel's own input ceiling — change them together.
+ */
 const MAX_GOAL_LEN = 8192;
 const GOAL_HOST_ENDPOINT = process.env["GOAL_HOST_VESSEL_ENDPOINT"] ?? "http://127.0.0.1:8210";
 

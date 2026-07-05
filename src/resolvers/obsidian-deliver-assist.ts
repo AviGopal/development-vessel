@@ -1,4 +1,5 @@
 import type { ResolverResult } from "./types.js";
+import { readFreshLiveEditPulse } from "./obsidian-request-scan.js";
 
 /**
  * obsidian_deliver_assist (2026-06-15) — the DELIVERY primitive for autonomous
@@ -56,6 +57,15 @@ export async function resolveObsidianDeliverAssist(
   if (!apiKey) return { shape: "obsidianAssistDelivered", body: { delivered: false, error: "missing_api_key" } };
   if (!assistPath.startsWith("Substrate/")) {
     return { shape: "obsidianAssistDelivered", body: { delivered: false, error: "assistPath must be under Substrate/", assistPath } };
+  }
+
+  // Consumer leg of the plane-blindness triple (assist-writeback actor): while a
+  // FRESH obsidian_live_edit_pulse exists the operator is mid-edit — writing an
+  // assist now lands in a plane they are not looking at (obsidian_assists_ignored).
+  // Defer delivery; the next tick re-evaluates once the pulse goes stale.
+  const livePulse = await readFreshLiveEditPulse();
+  if (livePulse) {
+    return { shape: "obsidianAssistDelivered", body: { delivered: false, deferred: true, reason: "obsidian_live_edit_pulse fresh — operator mid-edit", note_path: livePulse.note_path, session_id: livePulse.session_id, generated_at: generatedAt } };
   }
 
   // 1. Read the operator's current context (reads only).

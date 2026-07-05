@@ -15,9 +15,19 @@ export interface VesselRegisterPassthroughPointer {
 export async function resolveVesselRegisterPassthrough(
   pointer: VesselRegisterPassthroughPointer,
 ): Promise<ResolverResult> {
+  const registration = pointer?.registration;
+  if (!registration || typeof registration !== "object") {
+    return {
+      shape: "structuredError",
+      body: {
+        detail:
+          "vessel_register_passthrough requires pointer.registration with shapes and resolve_endpoint",
+      },
+    };
+  }
   const payload = {
-    vessel_id: pointer.registration.vessel_id ?? VESSEL_ID,
-    ...pointer.registration,
+    vessel_id: registration.vessel_id ?? VESSEL_ID,
+    ...registration,
   };
   const res = await fetch(`${DISCOVERY_ENDPOINT}/register`, {
     method: "POST",

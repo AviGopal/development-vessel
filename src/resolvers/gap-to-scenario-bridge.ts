@@ -281,7 +281,8 @@ export async function resolveGapToScenarioBridge(
     // executes instead of the queue accumulating unread.
     if (isVesselAuthoring) {
       try {
-        await fetch("http://127.0.0.1:8210/run-goal", {
+        const { GOAL_HOST_VESSEL_ENDPOINT } = await import("../config.js");
+        await fetch(`${GOAL_HOST_VESSEL_ENDPOINT}/run-goal`, {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({

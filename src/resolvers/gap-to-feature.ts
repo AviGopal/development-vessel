@@ -1019,6 +1019,7 @@ export async function resolveGapToFeature(pointer: GapToFeaturePointer): Promise
   if (!gap) {
     return { shape: "gapToFeatureReport", body: { ok: false, stage: "select", error: "no matching open gap", category: pointer.category ?? null } };
   }
+  await recordApproachDecision(gap);
 
   // 1a. DOCUMENTATION-DRIFT gaps close via doc_drift_fix, NOT feature_compose (2026-07-01).
   // A doc is prose: feature_compose grounds/verifies .ts only, so its typecheck→rollback gate

@@ -195,6 +195,7 @@ import { resolveProjectPlan } from "../resolvers/project-plan.js";
 import { resolveProjectThreadScan } from "../resolvers/project-thread-scan.js";
 import { resolveSolicitationOutcomeScan } from "../resolvers/solicitation-outcome-scan.js";
 import { resolveCodeLocalityMiningTick } from "../resolvers/code-locality-mining-tick.js";
+import { resolveCodeLocality } from "../resolvers/code-locality.js";
 import type { ResolverResult } from "../resolvers/types.js";
 
 type AnyPointer = { type: string } & Record<string, unknown>;
@@ -744,6 +745,8 @@ async function dispatchInner(pointer: AnyPointer): Promise<ResolverResult> {
       return resolveSolicitationOutcomeScan(p as Parameters<typeof resolveSolicitationOutcomeScan>[0]);
     case "code_locality_mining_tick":
       return resolveCodeLocalityMiningTick(p as Parameters<typeof resolveCodeLocalityMiningTick>[0]);
+    case "code_locality":
+      return resolveCodeLocality(p as Parameters<typeof resolveCodeLocality>[0]);
     default:
       throw new Error(`unknown shape: ${pointer.type}`);
   }

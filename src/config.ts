@@ -677,6 +677,8 @@ export const config = {
       "solicitation_outcome_scan",
       // Seam ③ substrate-authored resolver (2026-07-05): code_locality_mining_tick
       "code_locality_mining_tick",
+      // Seam ③ substrate-authored resolver (2026-07-05): code_locality
+      "code_locality",
     ] as const,
     resolveEndpoint: "/v2/impulses/resolve",
     resolveRequestFormat: "pointer" as const,

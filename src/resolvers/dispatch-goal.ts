@@ -402,6 +402,9 @@ import { METABOB_API_KEY } from "../config.js";
 // downstream recommendation system's context window well-conditioned. See the
 // extended notes above for the full derivation; changing this value requires
 // coordinated updates on goal-host-vessel.
+// MAX_GOAL_LEN: hard ceiling on goal payload size to prevent serialization
+// overhead, protect against malformed goal structures, ensure dispatch
+// efficiency, and avoid downstream resolver failures due to payload size.
 const MAX_GOAL_LEN = 8192;
 const GOAL_HOST_ENDPOINT = process.env["GOAL_HOST_VESSEL_ENDPOINT"] ?? "http://127.0.0.1:8210";
 

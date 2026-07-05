@@ -7,6 +7,7 @@ import { resolveAuthorProducer } from "./author-producer.js";
 import { resolveDocDriftFix } from "./doc-drift-fix.js";
 import { resolveReachabilityGapRepair } from "./reachability-gap-repair.js";
 import { DISCOVERY_ENDPOINT, METABOB_API_KEY } from "../config.js";
+import { readFile } from "node:fs/promises";
 
 // Mirror feature-compose's path model: repos/<vessel>/... maps to the writable
 // runtime ${RUNTIME_ROOT}/<vessel>/..., and the drafter writes proposal reports
@@ -762,6 +763,47 @@ export function joinDecisionOutcome(meta: Record<string, unknown>, outcome: Reco
     }
   }
 }
+
+export async function capacitySlices(gap: Record<string, unknown>): Promise<Array<{ file: string; hint: string }>> {
+  try {
+    const meta = (gap.classification_metadata as Record<string, unknown>) ?? {};
+    if (!(Number(meta.failed_attempts) >= 2)) return [];
+    const reportPath = `/workspace/proposals/${String(gap.id)}-compose-report.json`;
+    let report: Record<string, unknown>;
+    try {
+      const raw = await readFile(reportPath, "utf8");
+      report = JSON.parse(raw) as Record<string, unknown>;
+    } catch {
+      return [];
+    }
+    const semanticGate = report.semantic_gate as Record<string, unknown> | undefined;
+    const verifyArr = report.verify as Array<Record<string, unknown>> | undefined;
+    const firstVerifyOutput = verifyArr && verifyArr[0] ? String((verifyArr[0] as Record<string, unknown>).output ?? "") : "";
+    const opCount = Number(report.op_count);
+    const hasCapacityEvidence =
+      opCount >= 20 ||
+      (semanticGate !== undefined && semanticGate.addresses === false) ||
+      firstVerifyOutput.includes("TS1005");
+    if (!hasCapacityEvidence) return [];
+    const candidates = new Set<string>();
+    const suspected = String(meta.suspected_real_location ?? "");
+    for (const tok of suspected.split(/[,\s]+/)) {
+      if (tok.startsWith("repos/") && tok.endsWith(".ts")) candidates.add(tok);
+    }
+    const reason = semanticGate && typeof semanticGate.reason === "string" ? (semanticGate.reason as string) : "";
+    if (reason) {
+      const re = /repos\/[A-Za-z0-9_-]+\/src\/[A-Za-z0-9_./-]+[.]ts/g;
+      const matches = reason.match(re);
+      if (matches) for (const m of matches) candidates.add(m);
+    }
+    if (candidates.size < 2) return [];
+    const hint = reason ? reason.slice(0, 160) : "";
+    return Array.from(candidates).map((file) => ({ file, hint }));
+  } catch {
+    return [];
+  }
+}
+
 
 
 // ─────────────────────────────────────────────────────────────────────────────

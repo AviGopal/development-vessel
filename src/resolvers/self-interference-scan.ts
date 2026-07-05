@@ -1,4 +1,4 @@
-// self_interference_scan v0 skeleton: counts self-interference incidents from durable evidence (scan wired next).
+// self_interference_scan: detects self-interference stuck states from durable evidence — interrupted dispatches, compose BUSY refusals, same-error rollback streaks per vessel, re-landing storms, and abandoned approach decisions; files one substrateGap per distinct incident kind when emit_gap is set.
 import type { ResolverResult } from "./types.js";
 import { readdir } from "node:fs/promises";
 import { resolveSubstrateGapWrite } from "./substrate-gap.js";

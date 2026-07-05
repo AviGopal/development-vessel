@@ -49,7 +49,7 @@ export async function resolvePullCutover(pointer: PullCutoverPointer): Promise<{
     // Step 2: deploy — copy src from git clone into live vessel
     const src = `/workspace/git/vessels/${vessel_name}/src`;
     const dest = `/vessels/${vessel_name}/src`;
-    const deployResult = await runCommand(["cp", "-a", src, dest]);
+    const deployResult = await runCommand(["cp", "-aT", src, dest]);
     deployed = deployResult.ok;
 
     if (deployed && currentSha.length > 0) { await Bun.write(markerPath, currentSha); }

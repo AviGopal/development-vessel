@@ -728,6 +728,40 @@ async function bumpFailedAttempts(gap: Record<string, unknown>, opts: { surprise
   } catch { /* best-effort */ }
 }
 
+export async function recordApproachDecision(gap: Record<string, unknown>): Promise<void> {
+  try {
+    const pred = predictLand(gap);
+    const meta = (gap.classification_metadata ?? {}) as Record<string, unknown>;
+    const arr = Array.isArray(meta.approach_decisions) ? (meta.approach_decisions as unknown[]) : [];
+    arr.push({
+      at: new Date().toISOString(),
+      predicted_p: pred.p,
+      predicted_land: pred.predicted,
+      edit_site: meta.edit_site ? String(meta.edit_site) : "",
+      alternatives: ["full-scope-compose"],
+    });
+    while (arr.length > 5) arr.shift();
+    meta.approach_decisions = arr;
+    await resolveSubstrateGapWrite({
+      type: "substrateGap_write",
+      gap: { ...gap, classification_metadata: meta, status: String(gap.status ?? "open") },
+    } as never);
+  } catch { /* best-effort */ }
+}
+
+export function joinDecisionOutcome(meta: Record<string, unknown>, outcome: Record<string, unknown>): void {
+  const arr = meta.approach_decisions;
+  if (!Array.isArray(arr)) return;
+  for (let i = arr.length - 1; i >= 0; i--) {
+    const entry = arr[i];
+    if (entry && typeof entry === "object" && !("outcome" in (entry as Record<string, unknown>))) {
+      (entry as Record<string, unknown>).outcome = { ...outcome, joined_at: new Date().toISOString() };
+      return;
+    }
+  }
+}
+
+
 // ─────────────────────────────────────────────────────────────────────────────
 // CAPABILITY-GAP → AUTHOR_NEW_RESOLVER bridge (net-new producer authoring, 2026-06-30)
 //

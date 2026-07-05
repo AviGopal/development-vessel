@@ -6,6 +6,7 @@ export interface FsReadPointer {
   path: string;
   encoding?: BufferEncoding;
   byteLimit?: number;
+  allow_missing?: boolean;
 }
 
 const DEFAULT_BYTE_LIMIT = 1024 * 1024; // 1 MiB
@@ -39,12 +40,26 @@ function assertInWorkspace(path: string, workspaceRoot: string): void {
 
 export async function resolveFsRead(pointer: FsReadPointer): Promise<ResolverResult> {
   const workspaceRoot = process.env["WORKSPACE_ROOT"] ?? process.cwd();
+  if (pointer.allow_missing && !pointer.path) {
+    return {
+      shape: "fileContent",
+      body: { path: pointer.path, bytes: 0, content: "", truncated: false, missing: true },
+    };
+  }
   assertInWorkspace(pointer.path, workspaceRoot);
   const byteLimit = pointer.byteLimit ?? DEFAULT_BYTE_LIMIT;
 
   const file = Bun.file(pointer.path);
   const stat = await file.exists();
-  if (!stat) throw new Error(`file not found: ${pointer.path}`);
+  if (!stat) {
+    if (pointer.allow_missing) {
+      return {
+        shape: "fileContent",
+        body: { path: pointer.path, bytes: 0, content: "", truncated: false, missing: true },
+      };
+    }
+    throw new Error(`file not found: ${pointer.path}`);
+  }
 
   const bytes = await file.arrayBuffer();
   const truncated = bytes.byteLength > byteLimit;

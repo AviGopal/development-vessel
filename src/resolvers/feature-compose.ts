@@ -908,6 +908,14 @@ const COMPOSE_LESSON_GUIDANCE: Record<string, string> = {
   verify_failed: "the edited vessel must pass strict tsc after the change",
   semantic_reject: "the diff must concretely address the spec on a live code path",
 };
+function computeEditSpan(fileContent: string | null | undefined, anchor: string, replacement: string): { start_line: number; end_line: number } | undefined {
+  if (typeof fileContent !== "string" || !anchor || !fileContent.includes(anchor)) return undefined;
+  const idx = fileContent.indexOf(anchor);
+  const start_line = fileContent.slice(0, idx).split("\n").length;
+  const end_line = start_line + (replacement.match(/\n/g)?.length ?? 0);
+  return { start_line, end_line };
+}
+
 function classifyComposeFailure(appliedOps: Array<{ ok: boolean; detail?: string }>, verifyResults: Array<{ ok: boolean; output: string }>, semanticReason: string): string {
   const ap = appliedOps.find((a) => !a.ok);
   if (ap) return /ENOENT/.test(ap.detail ?? "") ? "mis_localized_path" : "anchor_not_found";
@@ -1117,7 +1125,7 @@ async function resolveFeatureComposeInner(pointer: FeatureComposePointer): Promi
   // edits live in the runtime (defect #2). Snapshot+restore reverts only the
   // files we edited, exactly, with no git dependency.
   const preEditContent = new Map<string, string>();
-  const applied: Array<{ path: string; kind: string; ok: boolean; repaired?: boolean; detail?: string }> = [];
+  const applied: Array<{ path: string; kind: string; ok: boolean; repaired?: boolean; detail?: string; span?: { start_line: number; end_line: number } }> = [];
   let applyFailed = false;
   for (const op of ops) {
     const abs = `${REPO_ROOT}/${op.path.replace(/^repos\//, "")}`;
@@ -1127,7 +1135,7 @@ async function resolveFeatureComposeInner(pointer: FeatureComposePointer): Promi
       const dir = abs.slice(0, abs.lastIndexOf("/"));
       await callTool(toolsEndpoint, "shell", { command: `mkdir -p ${JSON.stringify(dir)}`, cwd: REPO_ROOT });
       const r = await callTool(toolsEndpoint, "fs_write", { path: abs, content: op.content ?? "" });
-      applied.push({ path: op.path, kind: op.kind, ok: r.ok, detail: r.ok ? undefined : JSON.stringify(r.body).slice(0, 200) });
+      applied.push({ path: op.path, kind: op.kind, ok: r.ok, detail: r.ok ? undefined : JSON.stringify(r.body).slice(0, 200), span: r.ok ? { start_line: 1, end_line: (op.content ?? "").split("\n").length } : undefined });
       if (r.ok) created.push(abs); else { applyFailed = true; break; }
     } else {
       // Snapshot the original content BEFORE the first edit to this file, for a
@@ -1202,7 +1210,7 @@ async function resolveFeatureComposeInner(pointer: FeatureComposePointer): Promi
           } catch { /* repair failed; r stays not-ok */ }
         }
       }
-      applied.push({ path: op.path, kind: op.kind, ok: r.ok, repaired, detail: r.ok ? undefined : JSON.stringify(r.body).slice(0, 200) });
+      applied.push({ path: op.path, kind: op.kind, ok: r.ok, repaired, detail: r.ok ? undefined : JSON.stringify(r.body).slice(0, 200), span: r.ok ? computeEditSpan(liveContent || preEditContent.get(abs), effOld, op.new_string ?? "") : undefined });
       if (r.ok) { if (!edited.includes(abs)) edited.push(abs); } else { applyFailed = true; break; }
     }
   }

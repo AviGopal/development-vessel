@@ -130,6 +130,22 @@ export async function resolveSelfInterferenceScan(pointer: SelfInterferenceScanP
       } catch { }
     }
   } catch { }
+  let orphanedPulses = 0;
+  try {
+    const pulsePath = '/workspace/obsidian-live-edit-pulse.json';
+    const rawPulse = await readFile(pulsePath, 'utf8');
+    const p = JSON.parse(rawPulse) as { note_path?: string | null; session_id?: string; last_activity_ts?: string; pid?: number };
+    const pulsePid = typeof p.pid === 'number' ? p.pid : 0;
+    let editorDead = false;
+    if (pulsePid > 0) {
+      try { process.kill(pulsePid, 0); } catch { editorDead = true; }
+    }
+    if (editorDead) {
+      orphanedPulses += 1;
+      if (incidents.length < cap * 3) incidents.push({ kind: 'orphaned_live_edit_pulse', id: String(p.session_id ?? ''), detail: ('live-edit pulse for ' + String(p.note_path) + ' last_activity ' + String(p.last_activity_ts) + ' pid ' + pulsePid + ' dead; editor session gone mid-edit, anticipated operator follow-up never materialized').slice(0, 200) });
+      try { await unlink(pulsePath); } catch { }
+    }
+  } catch { }
   if (pointer.emit_gap) {
     const seen = new Set<string>();
     for (const inc of incidents) {
@@ -151,5 +167,5 @@ export async function resolveSelfInterferenceScan(pointer: SelfInterferenceScanP
       } catch { }
     }
   }
-  return { shape: "selfInterferenceReport", body: { interrupted_dispatches: interrupted, compose_busy_refusals: busyCount, rollback_streaks: rollbackStreaks, relanding_storms: relandingStorms, abandoned_decisions: abandonedDecisions, killed_authoring_runs: killedRuns, incidents, scanned: true, max_incidents: cap } };
+  return { shape: "selfInterferenceReport", body: { interrupted_dispatches: interrupted, compose_busy_refusals: busyCount, rollback_streaks: rollbackStreaks, relanding_storms: relandingStorms, abandoned_decisions: abandonedDecisions, killed_authoring_runs: killedRuns, orphaned_live_edit_pulses: orphanedPulses, incidents, scanned: true, max_incidents: cap } };
 }

@@ -283,6 +283,7 @@ export async function resolvePatchWithTools(pointer: PatchWithToolsPointer): Pro
   // uses it as the canonical "before" state.
   const baseContent = beforeSrc ?? "";
   const beforeSha = createHash("sha256").update(baseContent).digest("hex").slice(0, 12);
+  const authoringMarkerPath = await writeAuthoringMarker(workspaceRoot, vessel, pointer.target_file);
 
   // resetTarget — restore the live path to its pre-attempt state. For a net-new
   // file that means UNLINK (writing "" back leaves a stub that poisons the next
@@ -549,6 +550,7 @@ export async function resolvePatchWithTools(pointer: PatchWithToolsPointer): Pro
     // V38: the code tools edit liveSrcPath IN PLACE during the loop; restore the
     // original so a failed/capped patch never corrupts live source.
     await resetTarget();
+    await clearAuthoringMarker(authoringMarkerPath);
     return structuredError(
       `patch_with_tools: ${attemptFailures.length} attempt(s) exhausted without a verified patch`,
       { history, before_sha: beforeSha, attempt_failures: attemptFailures },
@@ -600,6 +602,7 @@ export async function resolvePatchWithTools(pointer: PatchWithToolsPointer): Pro
     return structuredError(`pending write failed: ${(err as Error).message}`);
   }
 
+  await clearAuthoringMarker(authoringMarkerPath);
   return {
     shape: "mitosisStaged",
     body: {

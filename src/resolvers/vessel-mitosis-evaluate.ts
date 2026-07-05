@@ -9,6 +9,7 @@ import {
   unlink,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
+// bun resolved via Bun.which at call-time (no external import needed)
 import type { ResolverResult } from "./types.js";
 
 /**
@@ -154,6 +155,7 @@ async function runCheck(
       cwd,
       stdout: "pipe",
       stderr: "pipe",
+      env: { ...process.env, PATH: `${process.env["PATH"] ?? "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"}:/root/.bun/bin` },
     });
     const timer = setTimeout(() => {
       // V40: record that WE killed it. The resulting exit code (143 / -1) must
@@ -397,7 +399,18 @@ async function staticEvaluate(
         // introduces no new counted errors. Count is monotone for tsc (line numbers
         // shift, but mitosis_count > base_count ⇒ new errors); the exit-code guard
         // covers checkers whose failures the count regex can't see.
-        if (!cleanBaseDirtyMitosis && mitosisErrorCount <= baseErrorCount) {
+        const hasSpawnError = (s: string) => s.includes("spawn_error") || s.includes("Executable not found");
+      if (hasSpawnError(r.output_tail) || hasSpawnError(baseCheck.output_tail)) {
+        return {
+          attempted: true,
+          ok: false,
+          reason: `static_check_inconclusive: spawn_error during '${scriptName}' — bun not found in spawn env; deferred for retry`,
+          checks: completed,
+          duration_ms: Date.now() - start,
+          timed_out: true,
+        };
+      }
+      if (!cleanBaseDirtyMitosis && mitosisErrorCount <= baseErrorCount) {
           isRegression = false;
           completed.push({
             ...baseCheck,
@@ -584,7 +597,7 @@ export async function resolveVesselMitosisEvaluate(
       : [];
   let staticResult: StaticEvalResult | null = null;
   if (pointer.mitosis_root && pointer.static_check_runner !== "skip") {
-    const bunCmd = pointer.bun_cmd ?? "bun";
+    const bunCmd = pointer.bun_cmd ?? Bun.which("bun") ?? "/root/.bun/bin/bun";
     staticResult = await staticEvaluate(
       pointer.mitosis_root,
       bunCmd,

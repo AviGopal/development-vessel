@@ -96,6 +96,16 @@ export async function resolveAdvertisedShapeCoverageScan(
     shape: "advertisedShapeCoverageReport",
     body: {
       skeleton: false,
+      feature_compose_locations_missing_local_toolbelt: (() => {
+          const LOCATION_STATEFUL = ["shellResult", "fs_read", "fs_write", "fs_edit", "patch_with_tools"];
+          const llmReachable = (advertised.get("llm_completion")?.size ?? 0) > 0;
+          const out: Array<{ vesselId: string; missing_local_stateful: string[]; llm_reachable: boolean }> = [];
+          for (const vesselId of Array.from(advertised.get("feature_compose") ?? [])) {
+            const missing_local_stateful = LOCATION_STATEFUL.filter((s) => !(advertised.get(s)?.has(vesselId)));
+            if (missing_local_stateful.length > 0 || !llmReachable) out.push({ vesselId, missing_local_stateful, llm_reachable: llmReachable });
+          }
+          return out;
+        })(),
       registry_reachable,
       advertised_shape_count: advertisedShapes.length,
       vessel_count,

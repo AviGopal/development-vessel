@@ -906,7 +906,7 @@ function classifyComposeFailure(appliedOps: Array<{ ok: boolean; detail?: string
   if (/not above|instead of|rather than|duplicates|whereas/i.test(semanticReason)) return "wrong_location";
   return "semantic_reject";
 }
-async function appendComposeLesson(cls: string, reason: string, vessels: string): Promise<void> {
+async function appendComposeLesson(cls: string, reason: string, vessels: string, gap?: { id?: string; classification_metadata?: Record<string, unknown> }): Promise<void> {
   try {
     const { appendFileSync, mkdirSync } = await import("node:fs");
     mkdirSync("/workspace/proposals", { recursive: true });
@@ -1557,7 +1557,7 @@ async function resolveFeatureComposeInner(pointer: FeatureComposePointer): Promi
 
   if (verdict !== "FAVORABLE") {
     const lessonClass = classifyComposeFailure(applied, verify, String(semantic_gate?.reason ?? ""));
-    await appendComposeLesson(lessonClass, String(semantic_gate?.reason ?? verify.find((v) => !v.ok)?.output ?? applied.find((a) => !a.ok)?.detail ?? verdict), [...touched].join(","));
+    await appendComposeLesson(lessonClass, String(semantic_gate?.reason ?? verify.find((v) => !v.ok)?.output ?? applied.find((a) => !a.ok)?.detail ?? verdict), [...touched].join(","), pointer.gap);
   }
   // Persist the compose report as a durable artifact (mirrors gap-to-feature's PROPOSALS_DIR reports). Never fails the compose.
   try {

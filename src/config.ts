@@ -674,6 +674,8 @@ export const config = {
       "project_thread_scan",
       // Seam ③ substrate-authored resolver (2026-07-04): solicitation_outcome_scan
       "solicitation_outcome_scan",
+      // Seam ③ substrate-authored resolver (2026-07-05): code_locality_mining_tick
+      "code_locality_mining_tick",
     ] as const,
     resolveEndpoint: "/v2/impulses/resolve",
     resolveRequestFormat: "pointer" as const,

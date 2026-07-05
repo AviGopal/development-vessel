@@ -1,6 +1,6 @@
 // self_interference_scan: detects self-interference stuck states from durable evidence — interrupted dispatches, compose BUSY refusals, same-error rollback streaks per vessel, re-landing storms, and abandoned approach decisions; files one substrateGap per distinct incident kind when emit_gap is set.
 import type { ResolverResult } from "./types.js";
-import { readdir } from "node:fs/promises";
+import { readdir, readFile, unlink } from "node:fs/promises";
 import { resolveSubstrateGapWrite } from "./substrate-gap.js";
 
 export interface SelfInterferenceScanPointer {
@@ -104,6 +104,32 @@ export async function resolveSelfInterferenceScan(pointer: SelfInterferenceScanP
       }
     }
   } catch { }
+  let killedRuns = 0;
+  try {
+    const markerDir = '/workspace/authoring-inflight';
+    let entries: string[] = [];
+    try { entries = await readdir(markerDir); } catch { }
+    for (const entry of entries) {
+      if (!entry.endsWith('.json')) continue;
+      try {
+        const raw = await readFile(`${markerDir}/${entry}`, 'utf8');
+        const m = JSON.parse(raw);
+        const pid = typeof m.pid === 'number' ? m.pid : 0;
+        const resolver = m.resolver;
+        const target_file = m.target_file;
+        const started_at = m.started_at;
+        let dead = false;
+        if (pid > 0) {
+          try { process.kill(pid, 0); } catch { dead = true; }
+        }
+        if (dead) {
+          killedRuns += 1;
+          if (incidents.length < cap * 3) incidents.push({ kind: 'killed_authoring_run', id: entry, detail: (resolver + ' on ' + target_file + ' started ' + started_at + ' pid ' + pid + ' dead; marker ' + markerDir + '/' + entry).slice(0, 200) });
+          try { await unlink(`${markerDir}/${entry}`); } catch { }
+        }
+      } catch { }
+    }
+  } catch { }
   if (pointer.emit_gap) {
     const seen = new Set<string>();
     for (const inc of incidents) {
@@ -125,5 +151,5 @@ export async function resolveSelfInterferenceScan(pointer: SelfInterferenceScanP
       } catch { }
     }
   }
-  return { shape: "selfInterferenceReport", body: { interrupted_dispatches: interrupted, compose_busy_refusals: busyCount, rollback_streaks: rollbackStreaks, relanding_storms: relandingStorms, abandoned_decisions: abandonedDecisions, incidents, scanned: true, max_incidents: cap } };
+  return { shape: "selfInterferenceReport", body: { interrupted_dispatches: interrupted, compose_busy_refusals: busyCount, rollback_streaks: rollbackStreaks, relanding_storms: relandingStorms, abandoned_decisions: abandonedDecisions, killed_authoring_runs: killedRuns, incidents, scanned: true, max_incidents: cap } };
 }

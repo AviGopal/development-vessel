@@ -480,7 +480,11 @@ async function dispatchInner(pointer: AnyPointer): Promise<ResolverResult> {
       return resolveModelOpportunityScan(
         p as Parameters<typeof resolveModelOpportunityScan>[0],
       );
-    case "detector_meta_scan":
+    case "code_locality_mining_tick": {
+        const { resolveCodeLocalityMiningTick } = await import("../resolvers/code-locality-mining-tick.js");
+        return resolveCodeLocalityMiningTick(pointer as import("../resolvers/code-locality-mining-tick.js").CodeLocalityMiningTickPointer);
+      }
+      case "detector_meta_scan":
       return resolveDetectorMetaScan(
         p as Parameters<typeof resolveDetectorMetaScan>[0],
       );

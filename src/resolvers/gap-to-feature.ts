@@ -642,6 +642,7 @@ async function closeLandedGap(gap: Record<string, unknown>, land: LandSignal): P
     if (!id) return { closed: false, error: "gap missing id" };
     const resolution = `landed via mitosis cutover${land.commit_sha ? ` ${land.commit_sha}` : ""}${land.vessel ? ` (${land.vessel})` : ""}`;
     const meta = { ...((gap.classification_metadata ?? gap.metadata ?? {}) as Record<string, unknown>), resolution, closed_at: new Date().toISOString() };
+    joinDecisionOutcome(meta, { landed: true, verdict: "FAVORABLE" });
     await resolveSubstrateGapWrite({
       type: "substrateGap_write",
       gap: {

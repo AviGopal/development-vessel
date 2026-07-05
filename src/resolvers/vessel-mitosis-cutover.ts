@@ -1541,7 +1541,7 @@ async function runGitAwareCutover(args: GitCutoverArgs): Promise<ResolverResult>
         const deadline = Date.now() + Number(process.env["MITOSIS_DRAIN_WAIT_MS"] ?? "90000");
         let inFlight = -1;
         for (;;) {
-          try { const hj = await (await fetch("http://127.0.0.1:8210/health", { signal: AbortSignal.timeout(3000) })).json() as { in_flight?: number }; inFlight = typeof hj.in_flight === "number" ? hj.in_flight : -1; } catch { inFlight = -1; }
+          try { const _ghEndpoint = (process.env["GOAL_HOST_VESSEL_ENDPOINT"] ?? "http://127.0.0.1:8210").replace(/\/+$/, ""); const hj = await (await fetch(`${_ghEndpoint}/health`, { signal: AbortSignal.timeout(3000) })).json() as { in_flight?: number }; inFlight = typeof hj.in_flight === "number" ? hj.in_flight : -1; } catch { inFlight = -1; }
           if (inFlight <= 0 || Date.now() >= deadline) break;
           await new Promise((r) => setTimeout(r, 5000));
         }

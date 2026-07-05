@@ -24,6 +24,7 @@ import { METABOB_API_KEY } from "../config.js";
 import type { ResolverResult } from "./types.js";
 import { resolveVesselMitosisCutover } from "./vessel-mitosis-cutover.js";
 import { resolveSubstrateGap, resolveSubstrateGapWrite } from "./substrate-gap.js";
+import { writeAuthoringMarker, clearAuthoringMarker } from "./patch-with-tools.js";
 
 const DISCOVERY_ENDPOINT = process.env.DISCOVERY_ENDPOINT ?? "http://127.0.0.1:8100";
 // In-container authoring targets the WRITABLE runtime (/vessels), like the
@@ -1093,6 +1094,11 @@ async function resolveFeatureComposeInner(pointer: FeatureComposePointer): Promi
     return { shape: "featureComposeReport", body: { ok: true, stage: "plan", summary: plan.summary, touched_vessels: [...touched], ops: planView, op_count: ops.length } };
   }
 
+  const authoringMarkerPaths: Array<string | null> = [];
+  for (const tv of touched) {
+    authoringMarkerPaths.push(await writeAuthoringMarker(process.env["WORKSPACE_ROOT"] ?? '/workspace', tv.replace(/^repos\//, ''), (ops[0] && ops[0].path) || '', 'feature_compose'));
+  }
+
   // 2. APPLY deterministically. Track created/edited for rollback.
   const created: string[] = [];
   const edited: string[] = [];
@@ -1613,6 +1619,8 @@ async function resolveFeatureComposeInner(pointer: FeatureComposePointer): Promi
       JSON.stringify({ ok: verdict === "FAVORABLE", verdict, summary: plan.summary, touched_vessels: [...touched], op_count: ops.length, applied, apply_failed: applyFailed, verify, semantic_gate, rolled_back, cutovers }, null, 2),
     );
   } catch { /* persistence failure must never fail the compose */ }
+
+  for (const p of authoringMarkerPaths) { await clearAuthoringMarker(p); }
 
   return {
     shape: "featureComposeReport",

@@ -124,6 +124,7 @@ import { CAPABILITY_GAP_AUDIT_TICK_TEMPLATE } from "./capability-gap-audit-tick.
 import { ORPHANED_CAPABILITY_TICK_TEMPLATE } from "./orphaned-capability-tick.js";
 import { RESOLVER_AUTHOR_TEMPLATE } from "./resolver-author.js";
 import { CYCLIC_FLOW_SCAN_TICK_TEMPLATE } from "./cyclic-flow-scan-tick.js";
+import { SELF_INTERFERENCE_SCAN_TICK_TEMPLATE } from "./self-interference-scan-tick.js";
 import { GROUP_INTERACTION_EPISODES_TEMPLATE } from "./group-interaction-episodes.js";
 import { OBSERVE_AND_AUTHOR_FROM_GAPS_TEMPLATE } from "./observe-and-author-from-gaps.js";
 import { OBSERVE_OBSIDIAN_EVENTS_TEMPLATE } from "./observe-obsidian-events.js";
@@ -584,6 +585,7 @@ export const SEED_TEMPLATES: ActivityTemplate[] = [
   // live in the registry but were never wired into the seed array — a fresh
   // boot silently lost them.
   CYCLIC_FLOW_SCAN_TICK_TEMPLATE,
+  SELF_INTERFERENCE_SCAN_TICK_TEMPLATE,
   GROUP_INTERACTION_EPISODES_TEMPLATE,
   OBSERVE_AND_AUTHOR_FROM_GAPS_TEMPLATE,
   OBSERVE_OBSIDIAN_EVENTS_TEMPLATE,

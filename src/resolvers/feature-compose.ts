@@ -544,6 +544,14 @@ export function computeDataFlowFacts(
   // Rule B: added import lines where identifier is never used outside import lines
   const importPattern = /import\s*\{([^}]+)\}\s*from/;
   let currentFileB = "";
+  // All added lines (excluding +++ headers and added import statements), joined - used as a fallback
+  // when the post-patch file content lookup misses (empty fileContent) so we don't false-flag identifiers
+  // whose use is visibly added in the same diff (call site, array/object-literal membership, export).
+  const addedNonImportText = diff
+    .split("\n")
+    .filter((l) => l.startsWith("+") && !l.startsWith("++") && !l.slice(1).trimStart().startsWith("import "))
+    .map((l) => l.slice(1))
+    .join("\n");
   for (const rawLine of diff.split("\n")) {
     if (rawLine.startsWith("+++ ")) {
       currentFileB = rawLine.slice(4).replace(/^[ab]\//, "");
@@ -570,7 +578,8 @@ export function computeDataFlowFacts(
           .filter((l) => !l.trimStart().startsWith("import "))
           .join("\n");
         for (const ident of identifiers) {
-          if (!nonImportLines.includes(ident)) {
+          // an added non-import line using the identifier (call site, array/object-literal membership, export) is a use
+          if (!nonImportLines.includes(ident) && !addedNonImportText.includes(ident)) {
             facts.push({ symbol: ident, file: currentFileB, kind: "imported_never_called" });
           }
         }

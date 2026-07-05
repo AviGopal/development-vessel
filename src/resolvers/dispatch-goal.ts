@@ -89,6 +89,9 @@ import { METABOB_API_KEY } from "../config.js";
 // coherent goal semantics. Exceeding this bound triggers immediate rejection at
 // the resolver boundary (before any network dispatch), ensuring dispatch
 // reliability and predictable failure modes rather than partial/truncated calls.
+// Additionally, the guard ensures safe goal serialization within substrate
+// limits and prevents malformed goals from entering the dispatch pipeline and
+// consuming excessive LLM context windows.
 /**
  * MAX_GOAL_LEN — hard ceiling on goal payload size (characters).
  *

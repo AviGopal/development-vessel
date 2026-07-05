@@ -36,6 +36,14 @@ export async function resolvePullCutover(pointer: PullCutoverPointer): Promise<{
 
   let deployed = false;
   let restarted = false;
+  const shaProc = Bun.spawn(["git", "-C", `/workspace/git/vessels/${vessel_name}`, "rev-parse", "HEAD"], { stdout: "pipe", stderr: "pipe" });
+  await shaProc.exited;
+  const currentSha = (await new Response(shaProc.stdout).text()).trim();
+  const markerPath = `/vessels/${vessel_name}/.pull-cutover-deployed-sha`;
+  const priorSha = (await Bun.file(markerPath).text().catch(() => "")).trim();
+  if (currentSha.length > 0 && currentSha === priorSha) {
+    return { shape: "pullCutoverReport", body: { vessel_name, pulled, deployed: false, restarted: false, dry_run } };
+  }
 
   if (!dry_run) {
     // Step 2: deploy — copy src from git clone into live vessel
@@ -49,6 +57,9 @@ export async function resolvePullCutover(pointer: PullCutoverPointer): Promise<{
     restarted = restartResult.ok;
   }
 
+  if (!dry_run && deployed && restarted && currentSha.length > 0) {
+    await Bun.write(markerPath, currentSha);
+  }
   return {
     shape: "pullCutoverReport",
     body: {

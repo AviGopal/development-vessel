@@ -911,6 +911,7 @@ async function appendComposeLesson(cls: string, reason: string, vessels: string,
     try {
       const meta = (gap.classification_metadata ?? {}) as Record<string, unknown>;
       const lessons = (Array.isArray(meta.failure_lessons) ? meta.failure_lessons : []) as Array<Record<string, unknown>>;
+      const reCommit = lessons.some((l) => l.class === cls);
       lessons.push({ at: new Date().toISOString(), class: cls, reason: reason.slice(0, 200) });
       while (lessons.length > 8) lessons.shift();
       meta.failure_lessons = lessons;
@@ -926,6 +927,20 @@ async function appendComposeLesson(cls: string, reason: string, vessels: string,
           classification_metadata: meta,
         },
       } as never);
+      if (reCommit) {
+        await resolveSubstrateGapWrite({
+          type: "substrateGap_write",
+          gap: {
+            id: "recommit-" + String(gap.id) + "-" + cls,
+            category: "systematic_failure",
+            source: "substrate_detected",
+            summary: "compose for gap " + String(gap.id) + " repeated already-recorded failure class " + cls + ": " + reason.slice(0, 150),
+            detected_at: new Date().toISOString(),
+            status: "open",
+            classification_metadata: { re_commit: true, source_gap_id: String(gap.id), failure_class: cls },
+          },
+        } as never);
+      }
     } catch {}
   }
   try {

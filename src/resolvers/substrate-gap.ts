@@ -207,10 +207,20 @@ export async function resolveSubstrateGap(
 }
 
 export async function resolveSubstrateGapWrite(
-  pointer: SubstrateGapWritePointer,
+  pointer: SubstrateGapWritePointer | Record<string, unknown>,
 ): Promise<ResolverResult> {
+  if ((pointer as Record<string, unknown>)["gap"] === undefined || (pointer as Record<string, unknown>)["gap"] === null) {
+    return {
+      shape: "structuredError",
+      body: {
+        error: "missing_required_field",
+        field: "gap",
+        message: "resolveSubstrateGapWrite requires a 'gap' field in the pointer; none was provided",
+      },
+    };
+  }
   const now = new Date().toISOString();
-  const incoming = pointer.gap;
+  const incoming = (pointer as SubstrateGapWritePointer).gap;
 
   // Description gate: an OPEN gap must describe itself — empty summaries and
   // uninterpolated {{placeholders}} are noise the drafter cannot act on.

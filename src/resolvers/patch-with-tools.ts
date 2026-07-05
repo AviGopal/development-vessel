@@ -232,13 +232,13 @@ function deriveVesselFromPath(filePath: string): { vessel: string; subPath: stri
 // Durable authoring-in-flight marker (an impulse other planes can consume, not a process-private PID):
 // lifecycle actors like substrate-pull-sync consume it to defer vessel restarts while an authoring run is
 // live, and the killed-run detector flags markers whose pid is dead.
-export async function writeAuthoringMarker(workspaceRoot: string, vessel: string, targetFile: string): Promise<string | null> {
+export async function writeAuthoringMarker(workspaceRoot: string, vessel: string, targetFile: string, resolverName: string = 'patch_with_tools'): Promise<string | null> {
   try {
     const markerDir = join(workspaceRoot, 'authoring-inflight');
     await mkdir(markerDir, { recursive: true });
-    const markerPath = join(markerDir, 'patch_with_tools-' + vessel + '.json');
+    const markerPath = join(markerDir, resolverName + '-' + vessel + '.json');
     await writeFile(markerPath, JSON.stringify({
-      resolver: 'patch_with_tools',
+      resolver: resolverName,
       vessel,
       target_file: targetFile,
       pid: process.pid,

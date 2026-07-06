@@ -41,6 +41,10 @@ export async function resolveVesselRegisterPassthrough(
     const text = await res.text().catch(() => "");
     throw new Error(`vessel_register_passthrough: ${res.status}: ${text.slice(0, 200)}`);
   }
-  const result = await res.json();
+  const result = await res.json() as Record<string, unknown>;
+  return {
+    shape: "vessel_register_passthrough",
+    body: result,
+  };
   return { shape: "vessel_registered", body: result };
 }

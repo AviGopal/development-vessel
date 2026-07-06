@@ -191,6 +191,7 @@ import { resolveSubstantiveFindings } from "../resolvers/substantive-findings.js
 import { resolveGoalSummary } from "../resolvers/goal-summary.js";
 import { resolveActivityMetrics } from "../resolvers/activity-metrics.js";
 import { resolveSummaryOfClockVesselFunctionality } from "../resolvers/summary-of-clock-vessel-functionality.js";
+import { resolveConfigFile } from "../resolvers/config-file.js";
 import { resolveAssessmentSummary } from "../resolvers/assessment-summary.js";
 import { resolveProjectPlan } from "../resolvers/project-plan.js";
 import { resolveProjectThreadScan } from "../resolvers/project-thread-scan.js";
@@ -329,6 +330,8 @@ async function dispatchInner(pointer: AnyPointer): Promise<ResolverResult> {
       return resolveConvergentValidityCheck(p as Parameters<typeof resolveConvergentValidityCheck>[0]);
     case "trace_failure_pattern_report":
       return resolveTraceFailurePatternReport(p as Parameters<typeof resolveTraceFailurePatternReport>[0]);
+    case "config_file":
+      return resolveConfigFile(pointer);
     case "assessment_summary": {
         const { resolveAssessmentSummary } = await import("../resolvers/assessment-summary.js");
         return resolveAssessmentSummary(pointer);

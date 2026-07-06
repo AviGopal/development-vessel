@@ -41,6 +41,7 @@ import { resolveFsGrep } from "../resolvers/fs-grep.js";
 import { resolveHttpFetch } from "../resolvers/http-fetch.js";
 import { resolveGoalFileExtract } from "../resolvers/goal-file-extract.js";
 import { resolveResolverPatternReport } from "../resolvers/resolver-pattern-report.js";
+import { resolveResolverTierCostSummary } from "../resolvers/resolver-tier-cost-summary.js";
 import { resolveMarkdownSplitSections } from "../resolvers/markdown-split-sections.js";
 import { resolveStalePointerEmit } from "../resolvers/stale-pointer-emit.js";
 import { resolvePhantomTraceScan } from "../resolvers/phantom-trace-scan.js";
@@ -301,7 +302,9 @@ async function dispatchInner(pointer: AnyPointer): Promise<ResolverResult> {
       const { resolveResolverLatencyCeilingScan } = await import("../resolvers/resolver-latency-ceiling-scan.js");
       return resolveResolverLatencyCeilingScan(pointer as { type: string; limit?: number; ceiling_ms?: number; warn_fraction?: number });
     }
-    case "resolver_pattern_report":
+    case "resolver_tier_cost_summary":
+        return resolveResolverTierCostSummary(pointer);
+      case "resolver_pattern_report":
       return resolveResolverPatternReport(p as Parameters<typeof resolveResolverPatternReport>[0]);
     case "markdown_split_sections":
       return resolveMarkdownSplitSections(p as Parameters<typeof resolveMarkdownSplitSections>[0]);

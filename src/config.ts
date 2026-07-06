@@ -31,6 +31,7 @@ export const config = {
     // Inline literal so packages/shape-dispatch-check/check.ts can find it.
     // One entry per R2.* resolver in specs/development-vessel/spec.md.
     shapes: [
+    "activity_template",
     "assessment_summary",
     "interaction_expectation_verify",
     "self_interference_scan",

@@ -162,9 +162,10 @@ export async function resolveVesselExerciseScan(
     });
     if (regResp.ok) {
       const regJson = (await regResp.json()) as {
+        content?: { vessels?: Array<{ vesselId?: string; lastSeen?: string; shapes?: string[] }> };
         vessels?: Array<{ vesselId?: string; lastSeen?: string; shapes?: string[] }>;
       };
-      vessels = (regJson.vessels ?? []).map((v) => ({
+      vessels = (regJson.content?.vessels ?? regJson.vessels ?? []).map((v) => ({
         vessel_id: v.vesselId,
         last_heartbeat: v.lastSeen,
         advertised_shapes: v.shapes,

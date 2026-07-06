@@ -728,6 +728,31 @@ async function bumpFailedAttempts(gap: Record<string, unknown>, opts: { surprise
         status: "open",
       },
     } as never);
+    // Emit narrowed child gap when the gap has now reached the chronic-failure
+    // threshold (>= 3 failed_attempts). The child carries a tighter description
+    // and resets failed_attempts to 0 so it re-enters the dispatch queue at
+    // normal priority rather than being culled by the landabilityScore filter.
+    const willExceedThreshold = fa >= 3;
+    if (willExceedThreshold) {
+      try {
+        const parentId: string = id;
+        const parentSummary = String(gap.summary ?? gap.title ?? "");
+        const childMeta = { ...meta, failed_attempts: 0, parent_gap_id: parentId, narrowed_at: new Date().toISOString() };
+        const childRecord: Record<string, unknown> = {
+          category: gap.category,
+          source: gap.source,
+          summary: `[narrowed from ${parentId}] ${parentSummary}`,
+          detected_at: gap.detected_at,
+          classification_metadata: childMeta,
+          status: "open",
+        };
+        await resolveSubstrateGapWrite({ type: "substrateGap_write", gap: childRecord as never });
+        console.log(`[bumpFailedAttempts] emitted narrowed child gap for chronically-stuck gap (failed_attempts>=3): ${parentId}`);
+      } catch (err) {
+        // Child gap emission is best-effort; never block the parent update.
+        console.warn(`[bumpFailedAttempts] child gap emit failed: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
   } catch { /* best-effort */ }
 }
 

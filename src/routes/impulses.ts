@@ -151,6 +151,7 @@ import { resolveConsumerProductivityAudit } from "../resolvers/consumer-producti
 import { resolveVesselGapToCluster } from "../resolvers/vessel-gap-to-cluster.js";
 import { resolveTraceRecurringPatternScan } from "../resolvers/trace-recurring-pattern-scan.js";
 import { resolveDetectorCoverageScan } from "../resolvers/detector-coverage-scan.js";
+import { resolveUiLegibilityScan } from "../resolvers/ui-legibility-scan.js";
 import { resolveSignatureClusterScan } from "../resolvers/signature-cluster-scan.js";
 import { resolveBuildSignatureDetector } from "../resolvers/build-signature-detector.js";
 import { resolveCreditVesselShapes } from "../resolvers/credit-vessel-shapes.js";
@@ -691,6 +692,8 @@ async function dispatchInner(pointer: AnyPointer): Promise<ResolverResult> {
       return resolveObsidianVerifyOutput(p as Parameters<typeof resolveObsidianVerifyOutput>[0]);
     case "obsidian_request_scan":
       return resolveObsidianRequestScan(p as Parameters<typeof resolveObsidianRequestScan>[0]);
+    case "ui_legibility_scan":
+      return resolveUiLegibilityScan(p as Parameters<typeof resolveUiLegibilityScan>[0]);
     case "detector_coverage_scan":
       return resolveDetectorCoverageScan(p as Parameters<typeof resolveDetectorCoverageScan>[0]);
     case "signature_cluster_scan":

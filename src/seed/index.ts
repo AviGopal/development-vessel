@@ -11,6 +11,7 @@ import { RELEASE_AND_VALIDATE_TEMPLATE } from "./release-and-validate.js";
 import { DRAFT_GAP_CLOSING_ACTIVITY_TEMPLATE } from "./draft-gap-closing-activity.js";
 import { HARNESS_CHECK_SCENARIO_TEMPLATE } from "./harness-check-scenario.js";
 import { DETECTOR_COVERAGE_AUDIT_TICK_TEMPLATE } from "./detector-coverage-audit-tick.js";
+import { UI_LEGIBILITY_AUDIT_TICK_TEMPLATE } from "./ui-legibility-audit-tick.js";
 import { COST_EXPECTATION_AUDIT_TICK_TEMPLATE } from "./cost-expectation-audit-tick.js";
 import { SELF_ALTERATION_FUNNEL_TICK_TEMPLATE } from "./self-alteration-funnel-tick.js";
 import { GAP_LIFECYCLE_TICK_TEMPLATE } from "./gap-lifecycle-tick.js";
@@ -251,6 +252,7 @@ export { DRAFTER_TRIGGER_TICK_TEMPLATE } from "./drafter-trigger-tick.js";
 export { VESSEL_SCAFFOLD_TRIGGER_TICK_TEMPLATE } from "./vessel-scaffold-trigger-tick.js";
 export { CHARACTERIZE_ARRIVED_VESSEL_TEMPLATE } from "./characterize-arrived-vessel.js";
 export { DETECTOR_COVERAGE_AUDIT_TICK_TEMPLATE } from "./detector-coverage-audit-tick.js";
+export { UI_LEGIBILITY_AUDIT_TICK_TEMPLATE } from "./ui-legibility-audit-tick.js";
 export { COST_EXPECTATION_AUDIT_TICK_TEMPLATE } from "./cost-expectation-audit-tick.js";
 export { SELF_ALTERATION_FUNNEL_TICK_TEMPLATE } from "./self-alteration-funnel-tick.js";
 export { GAP_LIFECYCLE_TICK_TEMPLATE } from "./gap-lifecycle-tick.js";
@@ -264,6 +266,7 @@ export const SEED_TEMPLATES: ActivityTemplate[] = [
   // the substrate authors its own detectors for uncovered problem classes via
   // the same detect→draft→register→promote loop it uses for every activity.
   DETECTOR_COVERAGE_AUDIT_TICK_TEMPLATE,
+  UI_LEGIBILITY_AUDIT_TICK_TEMPLATE,
   COST_EXPECTATION_AUDIT_TICK_TEMPLATE,
   SELF_ALTERATION_FUNNEL_TICK_TEMPLATE,
   GAP_LIFECYCLE_TICK_TEMPLATE,

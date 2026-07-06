@@ -613,6 +613,11 @@ export const config = {
       // build_signature_detector authors a detect-<class> activity binding the
       // generic signature_cluster_scan body to the observed signature. The
       // substrate extends its OWN detection surface via the same drafter loop.
+      // ui-legibility audit (2026-07-06, UI workstream phase 2): computable
+      // legibility rules over the obsidian panel's effective design tokens;
+      // violations file uiFeedback-keyed gaps into the same funnel as human
+      // right-click complaints.
+      "ui_legibility_scan",
       "detector_coverage_scan",
       "signature_cluster_scan",
       "build_signature_detector",

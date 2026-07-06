@@ -120,7 +120,7 @@ export async function resolveUiLegibilityScan(
   }
 
   // R2 color overrides in Substrate/theme-tokens.md must use theme vars, not raw hex
-  const noteResp = await resolveObsidian({ type: "note", path: "Substrate/theme-tokens.md" });
+  const noteResp = await resolveObsidian({ type: "obsidian:note", path: "Substrate/theme-tokens.md" });
   const noteText = typeof noteResp?.content === "string" ? noteResp.content : "";
   const overrideRe = /^\s*(--sub-[a-z0-9-]+)\s*:\s*(#[0-9a-fA-F]{3,8})\s*;?\s*$/gm;
   let om: RegExpExecArray | null;

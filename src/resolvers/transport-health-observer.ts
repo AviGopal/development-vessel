@@ -18,7 +18,8 @@ export async function resolveTransportHealthObserver(pointer: {
   let reason = "";
 
   try {
-    const res = await fetch("http://127.0.0.1:8401/health");
+    const transportEndpoint = process.env["TRANSPORT_VESSEL_ENDPOINT"] ?? "http://127.0.0.1:8401";
+    const res = await fetch(`${transportEndpoint}/health`);
     const data = (await res.json()) as TransportHealthResponse;
     const transport = data.transport;
 

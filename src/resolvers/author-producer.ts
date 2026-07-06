@@ -293,6 +293,7 @@ const FALLBACK_VALIDATION_ENDPOINTS = [
  * mapping back to {{...}} for genuine bind fields is preserved separately for
  * minting. Returns the concrete pointer used for the test invocation.
  */
+// Collect the live file paths a validation probe could write to (file-shaped fields), so resolveAuthorProducer can snapshot+restore them around the probe (gap-author-satisfier-stub-pollution).
 function extractProbeFilePaths(testPointer: Record<string, unknown>): string[] {
   const seen = new Set<string>();
   for (const [key, val] of Object.entries(testPointer)) {

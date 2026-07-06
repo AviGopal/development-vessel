@@ -31,6 +31,7 @@
  * a failed mint all degrade to a structuredError rather than throwing.
  */
 
+import { readFile, writeFile, unlink } from "node:fs/promises";
 import { resolveLlmCompletionDispatch } from "./llm-completion-dispatch.js";
 import { resolveActivityCreateVariant } from "./activity-create-variant.js";
 import { DISCOVERY_ENDPOINT, METABOB_API_KEY } from "../config.js";
@@ -292,6 +293,20 @@ const FALLBACK_VALIDATION_ENDPOINTS = [
  * mapping back to {{...}} for genuine bind fields is preserved separately for
  * minting. Returns the concrete pointer used for the test invocation.
  */
+function extractProbeFilePaths(testPointer: Record<string, unknown>): string[] {
+  const seen = new Set<string>();
+  for (const [key, val] of Object.entries(testPointer)) {
+    if (!FILE_FIELD_RE.test(key) && !PLURAL_FILE_FIELD_RE.test(key)) continue;
+    const candidates: unknown[] = Array.isArray(val) ? val : [val];
+    for (const c of candidates) {
+      if (typeof c !== "string" || c.length === 0) continue;
+      const abs = c.startsWith("/") ? c : `/vessels/${c}`;
+      seen.add(abs);
+    }
+  }
+  return Array.from(seen);
+}
+
 function buildTestPointer(
   config: Record<string, unknown>,
   shape: string,
@@ -815,7 +830,31 @@ export async function resolveAuthorProducer(pointer: AuthorProducerPointer): Pro
 
     // VALIDATE: invoke resolver X for real with a concrete test pointer.
     const testPointer = buildTestPointer(candidate.task_config, shape, pointer);
+    // Snapshot probe file paths before the validation probe so writes can be
+    // restored regardless of outcome (fixes gap-author-satisfier-stub-pollution).
+    const probeFilePaths = extractProbeFilePaths(testPointer as Record<string, unknown>);
+    const probeSnapshot = new Map<string, string | null>();
+    for (const fpath of probeFilePaths) {
+      probeSnapshot.set(fpath, await readFileSafe(fpath));
+    }
     const outcome = await validateProducesShape(shape, testPointer);
+    // Restore every snapshotted path regardless of outcome to undo probe writes.
+    for (const [fpath, original] of probeSnapshot.entries()) {
+      try {
+        if (original === null) {
+          // File did not exist before the probe; delete it if the probe created it.
+          await unlink(fpath).catch(() => undefined);
+        } else {
+          await writeFile(fpath, original, "utf8");
+        }
+      } catch (restoreErr) {
+        console.warn(
+          `[author-producer] probe restore failed for ${fpath}: ${
+            restoreErr instanceof Error ? restoreErr.message : String(restoreErr)
+          }`,
+        );
+      }
+    }
     if (outcome.ok) {
       spec = candidate;
       break;

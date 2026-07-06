@@ -149,11 +149,30 @@ export async function resolveVesselExerciseScan(
   const now = Date.now();
   const cutoff = now - window_ms;
 
-  const registryJson = await fetchJson<{ vessels?: VesselRegistryEntry[] }>(
-    discoveryEndpoint,
-    apiKey
-  );
-  const vessels = registryJson?.vessels ?? [];
+  let vessels: VesselRegistryEntry[] = [];
+  try {
+    const regResp = await fetch(`${discoveryEndpoint}/resolve`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(apiKey ? { Authorization: `ApiKey ${apiKey}` } : {}),
+      },
+      body: JSON.stringify({ pointer: { type: "vesselRegistry" } }),
+      signal: AbortSignal.timeout(20_000),
+    });
+    if (regResp.ok) {
+      const regJson = (await regResp.json()) as {
+        vessels?: Array<{ vesselId?: string; lastSeen?: string; shapes?: string[] }>;
+      };
+      vessels = (regJson.vessels ?? []).map((v) => ({
+        vessel_id: v.vesselId,
+        last_heartbeat: v.lastSeen,
+        advertised_shapes: v.shapes,
+      }));
+    }
+  } catch {
+    /* registry unreachable -> empty connected set */
+  }
 
   const connectedVessels = vessels.filter((v) => {
     if (!v.vessel_id || !v.last_heartbeat) return false;

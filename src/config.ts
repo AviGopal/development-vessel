@@ -668,6 +668,7 @@ export const config = {
       // Seam ③ substrate-authored resolver (2026-07-01): producer for summary_of_clock_vessel_functionality (capability-gap autoclosure)
       "summary_of_clock_vessel_functionality",
       // Seam ③ substrate-authored resolver (2026-07-01): producer for assessment_summary (capability-gap autoclosure)
+      "concept",
       "assessment_summary",
       // Seam ③ substrate-authored resolver (2026-07-04): Project-thread planner: reads a #project Obsidian note (via discovery, probing which vault peer actually holds the note path), parses its ## To do checkboxes into work items, classifies each item by resolver class (substrate_authorable | obsidian_feature | human_or_llm_question), and emits a projectPlanReport with peer_routing evidence. Dry-run by default; no vault writes.
       "project_plan",

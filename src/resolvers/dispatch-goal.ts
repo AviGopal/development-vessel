@@ -133,6 +133,12 @@ import { METABOB_API_KEY } from "../config.js";
 // downstream and keeps the recommender operating within its well-calibrated
 // input regime.
 //
+// MAX_GOAL_LEN guard (JSDoc rationale): this constant enforces a maximum goal
+// text length to prevent token overflow, performance degradation, and ensure
+// safe goal serialization within substrate limits. The guard prevents
+// malformed goals from entering the dispatch pipeline and consuming excessive
+// LLM context windows.
+//
 // Rationale for the 8192-character ceiling:
 //  - API constraints: goal-host-vessel enforces its own input limit on
 //    /run-goal; exceeding it yields a 4xx from the downstream service. We

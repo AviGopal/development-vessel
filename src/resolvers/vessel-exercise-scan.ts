@@ -12,6 +12,7 @@ export interface VesselExerciseScanPointer {
   trace_limit?: number;
   resolution_limit?: number;
   emit_gap?: boolean;
+  max_probes?: number;
   discoveryEndpoint?: string;
   activityEndpoint?: string;
   goalHostEndpoint?: string;
@@ -244,7 +245,13 @@ export async function resolveVesselExerciseScan(
   let probes_failed = 0;
   let gaps_emitted = 0;
 
-  for (const vessel_id of staleVessels) {
+  const max_probes = Math.min(Math.max(pointer.max_probes ?? 3, 0), 20);
+  const staleOldestFirst = [...staleVessels].sort((a, b) => {
+    const ageA = cells.find((c) => c.vessel_id === a)?.age_ms ?? Number.MAX_SAFE_INTEGER;
+    const ageB = cells.find((c) => c.vessel_id === b)?.age_ms ?? Number.MAX_SAFE_INTEGER;
+    return ageB - ageA;
+  });
+  for (const vessel_id of staleOldestFirst.slice(0, max_probes)) {
     const cell = cells.find((c) => c.vessel_id === vessel_id);
     if (!cell) continue;
 

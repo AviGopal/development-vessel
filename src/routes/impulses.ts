@@ -27,6 +27,7 @@ import { resolvePullCutover } from "../resolvers/pull-cutover.js";
 import { resolveLearnedTopologySnapshot } from "../resolvers/learned-topology-snapshot.js";
 import { resolveReachableUnlearnedReport } from "../resolvers/reachable-unlearned-report.js";
 import { resolveUnknownShapeReport } from "../resolvers/unknown-shape-report.js";
+import { resolveFailureCountReport } from "../resolvers/failure-count-report.js";
 import { resolveConceptFromTraces } from "../resolvers/concept.js";
 import { resolveCodeQualityWithSubstantiveAssessmentContent } from "../resolvers/code-quality-with-substantive-assessment-content.js";
 import { resolveCoverageTick } from "../resolvers/coverage-tick.js";
@@ -765,6 +766,8 @@ async function dispatchInner(pointer: AnyPointer): Promise<ResolverResult> {
       return resolveCodeLocality(p as Parameters<typeof resolveCodeLocality>[0]);
     case "concept":
       return resolveConceptFromTraces(pointer);
+    case "failure_count_report":
+      return resolveFailureCountReport(pointer);
     default:
       throw new Error(`unknown shape: ${pointer.type}`);
   }

@@ -31,6 +31,7 @@ export const config = {
     // Inline literal so packages/shape-dispatch-check/check.ts can find it.
     // One entry per R2.* resolver in specs/development-vessel/spec.md.
     shapes: [
+    'failure_count_report',
     'vessel_exercise_scan',
     "activity_template",
     "assessment_summary",

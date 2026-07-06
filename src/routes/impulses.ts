@@ -96,6 +96,7 @@ import { resolveCompositionCoverageReport } from "../resolvers/composition-cover
 import { resolveVesselCompletenessReport } from "../resolvers/vessel-completeness-report.js";
 import { resolveTemplateInvocationHistoryReport } from "../resolvers/template-invocation-history-report.js";
 import { resolveVesselDemandReport } from "../resolvers/vessel-demand-report.js";
+import { resolveVesselExerciseScan } from "../resolvers/vessel-exercise-scan.js";
 import { resolveGenerativeFrontierGapTick } from "../resolvers/generative-frontier-gap-tick.js";
 import { resolveVesselMitosisStart } from "../resolvers/vessel-mitosis-start.js";
 import { resolveVesselMitosisEvaluate } from "../resolvers/vessel-mitosis-evaluate.js";
@@ -438,6 +439,8 @@ async function dispatchInner(pointer: AnyPointer): Promise<ResolverResult> {
       return resolveTemplateInvocationHistoryReport(p as Parameters<typeof resolveTemplateInvocationHistoryReport>[0]);
     case "vessel_demand_report":
       return resolveVesselDemandReport(p as Parameters<typeof resolveVesselDemandReport>[0]);
+    case "vessel_exercise_scan":
+      return resolveVesselExerciseScan(p as Parameters<typeof resolveVesselExerciseScan>[0]);
     case "generative_frontier_gap_tick":
       return resolveGenerativeFrontierGapTick(p as Parameters<typeof resolveGenerativeFrontierGapTick>[0]);
     case "vessel_mitosis_start":

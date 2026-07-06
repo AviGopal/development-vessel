@@ -2,174 +2,198 @@ import type { ResolverResult } from "./types.js";
 
 const METABOB_ENDPOINT = process.env["METABOB_ENDPOINT"] ?? "http://127.0.0.1:8080";
 const METABOB_API_KEY = process.env["METABOB_API_KEY"] ?? "";
+const CONCEPT_DB_ENDPOINT = process.env["CONCEPT_DB_ENDPOINT"] ?? "http://127.0.0.1:8260";
 
 interface TraceTask {
+  task_id?: string;
   resolver_id?: string;
   output_shape?: string;
   status?: string;
 }
 
-interface ExecutionTrace {
+interface TraceRecord {
   id?: string;
+  activity_id?: string;
   status?: string;
   tasks?: TraceTask[];
-  activity_id?: string;
+  created_at?: string;
 }
 
-interface TracesResponse {
-  traces?: ExecutionTrace[];
-  items?: ExecutionTrace[];
-  data?: ExecutionTrace[];
+interface ConceptPointer {
+  type?: string;
+  id?: string;
 }
 
-function authHeaders(): Record<string, string> {
-  const h: Record<string, string> = { "Content-Type": "application/json" };
-  if (METABOB_API_KEY) h["Authorization"] = `ApiKey ${METABOB_API_KEY}`;
-  return h;
+function buildAuthHeaders(extra: Record<string, string> = {}): Record<string, string> {
+  const base: Record<string, string> = { ...extra };
+  if (METABOB_API_KEY) {
+    base["Authorization"] = `ApiKey ${METABOB_API_KEY}`;
+  }
+  return base;
 }
 
-async function fetchRecentSuccessfulTraces(): Promise<ExecutionTrace[]> {
-  const url = `${METABOB_ENDPOINT}/v2/execution-traces?status=success&limit=50`;
-  const res = await fetch(url, {
-    headers: authHeaders(),
-    signal: AbortSignal.timeout(15_000),
-  });
-  if (!res.ok) return [];
-  const body = (await res.json()) as any;
-  const raw: unknown[] =
-    (body as TracesResponse).traces ??
-    (body as TracesResponse).items ??
-    (body as TracesResponse).data ??
-    (Array.isArray(body) ? (body as unknown[]) : []);
-  return raw as ExecutionTrace[];
-}
+/**
+ * concept resolver: examines recent successful multi-task execution traces,
+ * identifies the recurring task pattern they share (common resolver step
+ * sequence and shape flow), and produces a concept summarizing that pattern.
+ */
+export async function resolveConcept(pointer: Record<string, unknown>): Promise<ResolverResult> {
+  const signal = AbortSignal.timeout(30_000);
 
-type PatternKey = string;
-
-interface PatternEntry {
-  count: number;
-  activityIds: string[];
-  resolverSteps: string[];
-  shapeFlow: string[];
-}
-
-function buildPatternKey(trace: ExecutionTrace): PatternKey {
-  const tasks = trace.tasks ?? [];
-  const resolvers = tasks
-    .map((t) => t.resolver_id ?? "unknown")
-    .filter((r) => r !== "unknown");
-  const shapes = tasks
-    .map((t) => t.output_shape ?? "")
-    .filter((s) => s.length > 0);
-  return JSON.stringify({ resolvers, shapes });
-}
-
-function findDominantPattern(
-  traces: ExecutionTrace[]
-): PatternEntry & { key: PatternKey } {
-  const multiTask = traces.filter(
-    (t) => t.status === "success" && Array.isArray(t.tasks) && (t.tasks?.length ?? 0) > 1
-  );
-
-  const map = new Map<PatternKey, PatternEntry>();
-
-  for (const trace of multiTask) {
-    const key = buildPatternKey(trace);
-    const existing = map.get(key);
-    const tasks = trace.tasks ?? [];
-    const resolverSteps = tasks
-      .map((t) => t.resolver_id ?? "unknown")
-      .filter((r) => r !== "unknown");
-    const shapeFlow = tasks
-      .map((t) => t.output_shape ?? "")
-      .filter((s) => s.length > 0);
-    const activityId = trace.activity_id ?? trace.id ?? "";
-    if (existing) {
-      existing.count += 1;
-      if (activityId) existing.activityIds.push(activityId);
-    } else {
-      map.set(key, {
-        count: 1,
-        activityIds: activityId ? [activityId] : [],
-        resolverSteps,
-        shapeFlow,
+  // 1. Fetch recent execution traces (successful, multi-task)
+  let traces: TraceRecord[] = [];
+  try {
+    const tracesResp = await fetch(
+      `${METABOB_ENDPOINT}/v2/execution-traces?status=success&limit=50`,
+      {
+        headers: buildAuthHeaders({ "Content-Type": "application/json" }),
+        signal,
+      }
+    );
+    if (tracesResp.ok) {
+      const body = (await tracesResp.json()) as unknown;
+      const raw: unknown[] = Array.isArray(body)
+        ? body
+        : Array.isArray((body as Record<string, unknown>)?.["traces"])
+        ? ((body as Record<string, unknown>)["traces"] as unknown[])
+        : Array.isArray((body as Record<string, unknown>)?.["results"])
+        ? ((body as Record<string, unknown>)["results"] as unknown[])
+        : [];
+      traces = raw.filter((t): t is TraceRecord => {
+        if (typeof t !== "object" || t === null) return false;
+        const rec = t as TraceRecord;
+        return Array.isArray(rec.tasks) && (rec.tasks?.length ?? 0) > 1;
       });
     }
+  } catch {
+    // fall through with empty traces
   }
 
-  let bestKey: PatternKey = "";
-  let bestEntry: PatternEntry = { count: 0, activityIds: [], resolverSteps: [], shapeFlow: [] };
+  // 2. Aggregate resolver-step sequences from traces
+  const sequenceCounts = new Map<string, number>();
+  const sequenceExamples = new Map<string, string[]>();
 
-  for (const [k, v] of map.entries()) {
-    if (v.count > bestEntry.count) {
-      bestKey = k;
-      bestEntry = v;
+  for (const trace of traces) {
+    const tasks = trace.tasks ?? [];
+    if (tasks.length < 2) continue;
+    const steps = tasks
+      .map((t) => `${t.resolver_id ?? "unknown"}->${t.output_shape ?? "?"}`)
+      .join(" | ");
+    const prev = sequenceCounts.get(steps) ?? 0;
+    sequenceCounts.set(steps, prev + 1);
+    const examples = sequenceExamples.get(steps) ?? [];
+    if (examples.length < 3) {
+      examples.push(trace.activity_id ?? trace.id ?? "unknown");
+    }
+    sequenceExamples.set(steps, examples);
+  }
+
+  // 3. Find the most recurring pattern
+  let topPattern = "";
+  let topCount = 0;
+  for (const [seq, count] of sequenceCounts) {
+    if (count > topCount) {
+      topCount = count;
+      topPattern = seq;
     }
   }
 
-  return { key: bestKey, ...bestEntry };
-}
+  // 4. Parse the top pattern into structured steps
+  const patternSteps = topPattern
+    ? topPattern.split(" | ").map((step) => {
+        const parts = step.split("->");
+        return {
+          resolver: parts[0] ?? "unknown",
+          output_shape: parts[1] ?? "unknown",
+        };
+      })
+    : [];
 
-function deriveConceptName(resolverSteps: string[], shapeFlow: string[]): string {
-  const firstStep = resolverSteps[0] ?? "generic";
-  const lastShape = shapeFlow[shapeFlow.length - 1] ?? "output";
-  const camel = firstStep
-    .split(/[_\-]/)
-    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
-    .join("");
-  return `${camel}To${lastShape
-    .split(/[_\-]/)
-    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
-    .join("")}Pattern`;
-}
-
-export async function resolveConceptFromTraces(
-  _pointer: Record<string, unknown>
-): Promise<ResolverResult> {
-  const traces = await fetchRecentSuccessfulTraces();
-
-  if (traces.length === 0) {
-    return {
-      shape: "concept",
-      body: {
-        name: "NoTracesAvailable",
-        description:
-          "No successful execution traces were found in the substrate. Cannot derive a recurring pattern concept.",
-        activities: [],
-        resolverSteps: [],
-        shapeFlow: [],
-        tracesSampled: 0,
-        patternCount: 0,
-      },
-    };
+  // 5. Attempt to look up existing concept in concept-db for deduplication
+  let existingConceptId: string | null = null;
+  try {
+    const searchResp = await fetch(
+      `${CONCEPT_DB_ENDPOINT}/concepts/search?q=recurring+resolver+pattern&limit=5`,
+      {
+        headers: buildAuthHeaders(),
+        signal: AbortSignal.timeout(10_000),
+      }
+    );
+    if (searchResp.ok) {
+      const body = (await searchResp.json()) as unknown;
+      const results: unknown[] = Array.isArray(body)
+        ? body
+        : Array.isArray((body as Record<string, unknown>)?.["results"])
+        ? ((body as Record<string, unknown>)["results"] as unknown[])
+        : [];
+      const found = results[0] ?? null;
+      if (typeof found === "object" && found !== null) {
+        const ptr = found as ConceptPointer;
+        existingConceptId = ptr.id ?? null;
+      }
+    }
+  } catch {
+    // concept-db unavailable — proceed without deduplication
   }
 
-  const dominant = findDominantPattern(traces);
-  const multiTaskSuccessful = traces.filter(
-    (t) => t.status === "success" && (t.tasks?.length ?? 0) > 1
-  ).length;
+  // 6. Build concept name and description from pattern
+  const resolverNames = patternSteps
+    .map((s) => s.resolver)
+    .filter((r) => r !== "unknown")
+    .slice(0, 4);
+  const shapeNames = patternSteps
+    .map((s) => s.output_shape)
+    .filter((s) => s !== "unknown")
+    .slice(0, 4);
 
-  const name = deriveConceptName(dominant.resolverSteps, dominant.shapeFlow);
+  const patternName =
+    resolverNames.length > 0
+      ? resolverNames.map((r) => r.replace(/-/g, "_")).join("__")
+      : "multi_step_resolver_flow";
+
+  const patternLabel =
+    resolverNames.length > 0
+      ? resolverNames.join(" → ")
+      : "(no dominant pattern found)";
 
   const description =
-    dominant.count === 0
-      ? `No recurring multi-task pattern detected across ${traces.length} sampled traces. All successful traces appear to be single-step.`
-      : `Recurring execution pattern observed in ${dominant.count} of ${multiTaskSuccessful} successful multi-task traces. ` +
-        `The pattern begins with resolver step(s) [${dominant.resolverSteps.slice(0, 3).join(", ")}] ` +
-        `and produces shape flow [${dominant.shapeFlow.join(" → ")}]. ` +
-        `This generalizes activities: ${dominant.activityIds.slice(0, 5).join(", ") || "(ids not available)"}. ` +
-        `It represents a reusable composition topology the substrate executes frequently for this class of goal.`;
+    topCount > 0
+      ? `Recurring execution pattern observed ${topCount}x across recent successful traces. ` +
+        `Resolver sequence: ${patternLabel}. ` +
+        `Shape flow: ${shapeNames.join(" → ") || "(none)"}. ` +
+        `Generalizes ${patternSteps.length} resolver steps into a reusable named pattern.`
+      : "No dominant recurring pattern found in recent successful traces. " +
+        "Insufficient trace data to generalize a concept.";
 
-  return {
-    shape: "concept",
-    body: {
-      name,
-      description,
-      activities: dominant.activityIds.slice(0, 10),
-      resolverSteps: dominant.resolverSteps,
-      shapeFlow: dominant.shapeFlow,
-      tracesSampled: traces.length,
-      patternCount: dominant.count,
-    },
+  const activities: string[] = [];
+  const exs = sequenceExamples.get(topPattern);
+  if (Array.isArray(exs)) {
+    for (const ex of exs) {
+      activities.push(ex);
+    }
+  }
+
+  const report = {
+    concept_name: patternName,
+    label: patternLabel,
+    description,
+    occurrence_count: topCount,
+    trace_count_analyzed: traces.length,
+    resolver_steps: patternSteps,
+    exemplar_activity_ids: activities,
+    existing_concept_id: existingConceptId,
+    all_pattern_frequencies: Object.fromEntries(
+      [...sequenceCounts.entries()]
+        .sort((a, b) => (b[1] ?? 0) - (a[1] ?? 0))
+        .slice(0, 10)
+        .map(([k, v]) => [k, v])
+    ),
+    pointer_type: (pointer["type"] as string | undefined) ?? "concept",
   };
+
+  return { shape: "concept", body: report };
+}
+
+export async function resolveConceptFromTraces(pointer: Record<string, unknown>): Promise<ResolverResult> {
+  return resolveConcept(pointer);
 }

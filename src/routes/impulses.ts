@@ -203,6 +203,7 @@ import { resolveProjectThreadScan } from "../resolvers/project-thread-scan.js";
 import { resolveSolicitationOutcomeScan } from "../resolvers/solicitation-outcome-scan.js";
 import { resolveCodeLocalityMiningTick } from "../resolvers/code-locality-mining-tick.js";
 import { resolveCodeLocality } from "../resolvers/code-locality.js";
+import { resolveDispatch as resolveDispatchHelper } from "./impulses.js";
 import type { ResolverResult } from "../resolvers/types.js";
 
 type AnyPointer = { type: string } & Record<string, unknown>;

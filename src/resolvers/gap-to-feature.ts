@@ -844,18 +844,20 @@ async function closeLandedGap(gap: Record<string, unknown>, land: LandSignal): P
     const pendingSetAt = new Date().toISOString();
     await resolveSubstrateGapWrite({
       type: "substrateGap_write",
-      id,
-      status: "open",
-      category: gap.category,
-      source: gap.source,
-      summary: gap.summary,
-      detected_at: gap.detected_at,
-      classification_metadata: {
-        ...(gap.classification_metadata ?? {}),
-        pending_outcome_verification: pendingOutcomeVerification,
-        pending_set_at: pendingSetAt,
+      gap: {
+        id,
+        status: "open",
+        category: gap.category,
+        source: gap.source,
+        summary: gap.summary,
+        detected_at: gap.detected_at,
+        classification_metadata: {
+          ...(gap.classification_metadata ?? {}),
+          pending_outcome_verification: pendingOutcomeVerification,
+          pending_set_at: pendingSetAt,
+        },
       },
-    });
+    } as never);
     return { closed: false, error: "self-cutover: closure deferred to next-tick pick-time outcome verification" };
   }
     const resolution = `landed via mitosis cutover${land.commit_sha ? ` ${land.commit_sha}` : ""}${land.vessel ? ` (${land.vessel})` : ""}`;

@@ -833,6 +833,31 @@ async function closeLandedGap(gap: Record<string, unknown>, land: LandSignal): P
     // verifyResult === 'unknown': fail-open, allow close (preserves existing behaviour)
     const id = String(gap.id ?? "");
     if (!id) return { closed: false, error: "gap missing id" };
+
+  // Self-cutover guard: when a landed change targets development-vessel itself,
+  // close-time outcome verification runs in the pre-cutover process and cannot
+  // observe the post-cutover state — producing hollow gap closures (observed on
+  // gap-obsidian-vessel-count at commit bbad5c4). Defer closure to next-tick
+  // pick-time outcome verification instead.
+  if (typeof land.vessel === "string" && land.vessel.includes("development-vessel")) {
+    const pendingOutcomeVerification = land.commit_sha ?? "unknown";
+    const pendingSetAt = new Date().toISOString();
+    await resolveSubstrateGapWrite({
+      type: "substrateGap_write",
+      id,
+      status: "open",
+      category: gap.category,
+      source: gap.source,
+      summary: gap.summary,
+      detected_at: gap.detected_at,
+      classification_metadata: {
+        ...(gap.classification_metadata ?? {}),
+        pending_outcome_verification: pendingOutcomeVerification,
+        pending_set_at: pendingSetAt,
+      },
+    });
+    return { closed: false, error: "self-cutover: closure deferred to next-tick pick-time outcome verification" };
+  }
     const resolution = `landed via mitosis cutover${land.commit_sha ? ` ${land.commit_sha}` : ""}${land.vessel ? ` (${land.vessel})` : ""}`;
     // Outcome verification: only close when the condition is observed gone.
     // If condition is still present, record failure and bail without closing.

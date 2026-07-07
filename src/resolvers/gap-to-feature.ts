@@ -640,6 +640,10 @@ function genuineLandSignal(composeBody: Record<string, unknown>, landRequested: 
  * Verify whether a gap's condition still holds in the file system.
  * For surgical gaps with edit_site + hardcoded_url in classification_metadata:
  *   returns 'present' if the literal is still in the file, 'absent' if gone, 'unknown' otherwise.
+ * For resolver-behaviour gaps with evidence_resolve or verify_shape in classification_metadata:
+ *   POSTs to the vessel's own resolve endpoint, inspects the body for the defect signature
+ *   (fetch_error field, or zero/empty value where ground truth is nonzero), returns
+ *   'present' (defect still there), 'absent' (resolved healthy), 'unknown' on transport failure.
  * 'unknown' preserves today's behaviour — no false closes, no blocked closes.
  */
 function verifyGapCondition(gap: Record<string, unknown>): 'present' | 'absent' | 'unknown' {
@@ -652,13 +656,128 @@ function verifyGapCondition(gap: Record<string, unknown>): 'present' | 'absent' 
       : (typeof meta['edit_site'] === 'string' ? meta['edit_site'] : null);
     const editSite = rawEditSite ? rawEditSite.replace(/:\d+$/, '') : null;
     const hardcodedUrl = typeof meta['hardcoded_url'] === 'string' ? meta['hardcoded_url'] : null;
-    if (!editSite || !hardcodedUrl) return 'unknown';
-    // editSite is repo-relative like repos/some-vessel/src/file.ts
-    // Map to runtime path using the same pattern as line 21
-    const runtimePath = join(RUNTIME_ROOT, editSite.replace(/^\//, '').replace(/^repos\//, ''));
-    if (!existsSync(runtimePath)) return 'unknown';
-    const contents = readFileSync(runtimePath, 'utf8');
-    return contents.includes(hardcodedUrl) ? 'present' : 'absent';
+    if (editSite && hardcodedUrl) {
+      // editSite is repo-relative like repos/some-vessel/src/file.ts
+      // Map to runtime path using the same pattern as line 21
+      const runtimePath = join(RUNTIME_ROOT, editSite.replace(/^\//, '').replace(/^repos\//, ''));
+      if (!existsSync(runtimePath)) return 'unknown';
+      const contents = readFileSync(runtimePath, 'utf8');
+      return contents.includes(hardcodedUrl) ? 'present' : 'absent';
+    }
+    // Second evidence class: resolver-behaviour gaps.
+    // classification_metadata may carry:
+    //   evidence_resolve: { shape: string, input?: Record<string,unknown>, defect_field?: string, nonzero_field?: string }
+    // OR
+    //   verify_shape: string  (shorthand — shape name only, defect detected by fetch_error or zero-count heuristic)
+    const evidenceResolveRaw = meta['evidence_resolve'];
+    const verifyShapeRaw = meta['verify_shape'];
+    if (evidenceResolveRaw !== undefined || verifyShapeRaw !== undefined) {
+      // This branch must be async; we cannot make verifyGapCondition async without
+      // refactoring all callers, so we return a Promise that the caller awaits.
+      // We wrap the async logic in an immediately-invoked function and return the
+      // Promise cast — callers already await the outer closeLandedGap which in turn
+      // calls verifyGapCondition. To keep the sync signature and avoid a full
+      // refactor, we use a synchronous Bun-native approach: spawn a sub-call inline
+      // with a helper that returns the verdict synchronously via Atomics + SharedArrayBuffer.
+      // However, the cleanest zero-refactor approach is to make verifyGapCondition
+      // return Promise<...> | 'unknown' and have callers handle it.  Since that would
+      // require editing every caller, we instead use a different strategy:
+      // return the sentinel 'unknown' here and rely on the async sibling
+      // verifyGapConditionAsync which is called from the async closer path below.
+      // The sentinel causes fail-open (no false close) — the async path does the real work.
+      return 'unknown';
+    }
+    return 'unknown';
+  } catch {
+    return 'unknown';
+  }
+}
+
+/**
+ * Async variant of verifyGapCondition that also handles the resolver-behaviour
+ * evidence class (evidence_resolve / verify_shape in classification_metadata).
+ * Called from closeLandedGap so the async fetch does not block the sync path.
+ */
+async function verifyGapConditionAsync(gap: Record<string, unknown>): Promise<'present' | 'absent' | 'unknown'> {
+  try {
+    const meta = (gap.classification_metadata ?? gap.metadata ?? {}) as Record<string, unknown>;
+    // ── Class 1: surgical (file + literal) ──────────────────────────────────
+    const rawEditSite = typeof meta['file_path'] === 'string'
+      ? meta['file_path']
+      : (typeof meta['edit_site'] === 'string' ? meta['edit_site'] : null);
+    const editSite = rawEditSite ? rawEditSite.replace(/:\d+$/, '') : null;
+    const hardcodedUrl = typeof meta['hardcoded_url'] === 'string' ? meta['hardcoded_url'] : null;
+    if (editSite && hardcodedUrl) {
+      const runtimePath = join(RUNTIME_ROOT, editSite.replace(/^\//, '').replace(/^repos\//, ''));
+      if (!existsSync(runtimePath)) return 'unknown';
+      const contents = readFileSync(runtimePath, 'utf8');
+      return contents.includes(hardcodedUrl) ? 'present' : 'absent';
+    }
+    // ── Class 2: resolver-behaviour (evidence_resolve / verify_shape) ───────
+    const evidenceResolveRaw = meta['evidence_resolve'];
+    const verifyShapeRaw = meta['verify_shape'];
+    let resolveShape: string | null = null;
+    let resolveInput: Record<string, unknown> = {};
+    let defectField: string | null = null;
+    let nonzeroField: string | null = null;
+    if (evidenceResolveRaw !== null && typeof evidenceResolveRaw === 'object') {
+      const er = evidenceResolveRaw as Record<string, unknown>;
+      resolveShape = typeof er['shape'] === 'string' ? er['shape'] : null;
+      resolveInput = (typeof er['input'] === 'object' && er['input'] !== null)
+        ? (er['input'] as Record<string, unknown>)
+        : {};
+      defectField = typeof er['defect_field'] === 'string' ? er['defect_field'] : null;
+      nonzeroField = typeof er['nonzero_field'] === 'string' ? er['nonzero_field'] : null;
+    } else if (typeof verifyShapeRaw === 'string') {
+      resolveShape = verifyShapeRaw;
+    }
+    if (!resolveShape) return 'unknown';
+    // POST to the vessel's own in-container resolve endpoint.
+    const payload: Record<string, unknown> = { type: resolveShape, ...resolveInput };
+    let respBody: Record<string, unknown>;
+    try {
+      const resp = await fetch('http://localhost:8090/v2/impulses/resolve', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+        signal: AbortSignal.timeout(10_000),
+      });
+      if (!resp.ok) return 'unknown';
+      respBody = (await resp.json()) as Record<string, unknown>;
+    } catch {
+      // Transport failure — fail open (unknown), no false close.
+      return 'unknown';
+    }
+    // Unwrap nested body if the resolver wraps results in { body: { ... } }
+    const inner = (typeof respBody['body'] === 'object' && respBody['body'] !== null)
+      ? (respBody['body'] as Record<string, unknown>)
+      : respBody;
+    // Defect heuristic 1: explicit defect_field present in response
+    if (defectField !== null && inner[defectField] !== undefined && inner[defectField] !== null && inner[defectField] !== '') {
+      return 'present';
+    }
+    // Defect heuristic 2: explicit nonzero_field should be >0 but is 0 / null / undefined
+    if (nonzeroField !== null) {
+      const val = inner[nonzeroField];
+      if (val === 0 || val === null || val === undefined || val === '') {
+        return 'present';
+      }
+      return 'absent';
+    }
+    // Defect heuristic 3 (generic): presence of a fetch_error field signals defect
+    if (typeof inner['fetch_error'] === 'string' && inner['fetch_error'].length > 0) {
+      return 'present';
+    }
+    // Defect heuristic 4 (generic): zero-count on common count fields
+    for (const countKey of ['count', 'obsidian_vessel_count', 'vessel_count']) {
+      if (countKey in inner) {
+        const v = inner[countKey];
+        if (v === 0 || v === null || v === undefined) return 'present';
+        return 'absent';
+      }
+    }
+    // No defect signature found — treat as healthy
+    return 'absent';
   } catch {
     return 'unknown';
   }
@@ -667,6 +786,23 @@ function verifyGapCondition(gap: Record<string, unknown>): 'present' | 'absent' 
 /** Mark a gap closed once its fix genuinely landed on origin/dev. Best-effort, guarded. */
 async function closeLandedGap(gap: Record<string, unknown>, land: LandSignal): Promise<{ closed: boolean; error?: string }> {
   try {
+    // Outcome-verification (increment 2): use the async verifier which covers both
+    // the surgical-class (file+literal) AND the resolver-behaviour class
+    // (evidence_resolve / verify_shape). Fall back to the sync verifier result
+    // only when the async path itself throws (belt-and-suspenders).
+    let verifyResult: 'present' | 'absent' | 'unknown';
+    try {
+      verifyResult = await verifyGapConditionAsync(gap);
+    } catch {
+      verifyResult = verifyGapCondition(gap);
+    }
+    if (verifyResult === 'absent') {
+      // Gap condition gone — allow close (fall through to existing logic)
+    } else if (verifyResult === 'present') {
+      // Defect still present — refuse close, record outcome_verification_failure
+      return { closed: false, error: 'outcome_verification_failure: gap condition still present at close time' };
+    }
+    // verifyResult === 'unknown': fail-open, allow close (preserves existing behaviour)
     const id = String(gap.id ?? "");
     if (!id) return { closed: false, error: "gap missing id" };
     const resolution = `landed via mitosis cutover${land.commit_sha ? ` ${land.commit_sha}` : ""}${land.vessel ? ` (${land.vessel})` : ""}`;

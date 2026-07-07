@@ -723,6 +723,34 @@ async function verifyGapConditionAsync(gap: Record<string, unknown>): Promise<'p
     if (evidenceResolveRaw !== null && typeof evidenceResolveRaw === 'object') {
       const er = evidenceResolveRaw as Record<string, unknown>;
       resolveShape = typeof er['shape'] === 'string' ? er['shape'] : null;
+      // ── Fallback A: sample-body-form evidence (no shape field) ──────────
+      // Gap-filing paths (defect reports, surgical-gap-scan) write evidence_resolve
+      // as a sample response body e.g. {obsidian_vessel_count:0, fetch_error:"..."}.
+      // When shape is absent, fall back to classification_metadata.verify_shape,
+      // then to a gap-id-derived shape. Also treat fetch_error/error keys as an
+      // implied defect_field so the verifier rejects hollow closes on error bodies.
+      if (resolveShape === null) {
+        if (typeof verifyShapeRaw === 'string' && verifyShapeRaw.length > 0) {
+          resolveShape = verifyShapeRaw;
+        } else if (typeof meta['verify_shape'] === 'string' && (meta['verify_shape'] as string).length > 0) {
+          resolveShape = meta['verify_shape'] as string;
+        } else {
+          // Derive shape from gap id: e.g. "gap-obsidian-vessel-count" -> "obsidian_vessel_count"
+          const gapId = typeof gap['id'] === 'string' ? gap['id'] : '';
+          if (gapId.length > 0) {
+            const derived = gapId.replace(/^gap-/, '').replace(/-/g, '_');
+            if (derived.length > 0) resolveShape = derived;
+          }
+        }
+        // Treat fetch_error or error keys in sample-body-form evidence as implied defect_field
+        if (defectField === null) {
+          if (typeof er['fetch_error'] === 'string') {
+            defectField = 'fetch_error';
+          } else if (typeof er['error'] === 'string') {
+            defectField = 'error';
+          }
+        }
+      }
       resolveInput = (typeof er['input'] === 'object' && er['input'] !== null)
         ? (er['input'] as Record<string, unknown>)
         : {};

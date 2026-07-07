@@ -1386,6 +1386,74 @@ export async function resolveGapToFeature(pointer: GapToFeaturePointer): Promise
     };
   }
 
+  // 1a-pre. ALREADY-RESOLVED CHECK for missing_capability gaps: query discovery for a
+  // live producer of the candidate shape named in the gap summary. If found, and (when
+  // edit_site is present) the file exists via statSync, close the gap without composing
+  // to prevent duplicate-identifier patches from re-applying already-landed patches.
+  if (String(gap.category ?? "") === "missing_capability") {
+    const mcMeta = (gap.classification_metadata ?? gap.metadata ?? {}) as Record<string, unknown>;
+    const mcEditSite = typeof mcMeta["edit_site"] === "string" ? mcMeta["edit_site"] as string : undefined;
+    const mcSummary = typeof gap.summary === "string" ? gap.summary as string : "";
+    const mcShapeMatch = mcSummary.match(/[a-z][a-z0-9_:-]{2,}/);
+    const mcCandidateShape = mcShapeMatch ? mcShapeMatch[0] : undefined;
+    let mcAlreadyResolved = false;
+    if (mcCandidateShape) {
+      try {
+        const mcDiscoveryEndpoint = process.env["DISCOVERY_ENDPOINT"] ?? "http://127.0.0.1:8100";
+        const mcProbeRes = await fetch(
+          `${mcDiscoveryEndpoint}/vessels?shape=${encodeURIComponent(mcCandidateShape)}`,
+          { signal: AbortSignal.timeout(3000) },
+        );
+        if (mcProbeRes.ok) {
+          const mcProbeBody = (await mcProbeRes.json()) as { vessels?: unknown[] };
+          if (Array.isArray(mcProbeBody.vessels) && mcProbeBody.vessels.length > 0) {
+            if (mcEditSite) {
+              try {
+                statSync(mcEditSite);
+                mcAlreadyResolved = true;
+              } catch {
+                // File absent — capability registered but file not present; let composer run
+              }
+            } else {
+              mcAlreadyResolved = true;
+            }
+          }
+        }
+      } catch {
+        // Discovery unreachable or timeout — proceed with normal compose
+      }
+    }
+    if (mcAlreadyResolved) {
+      const mcClosureNote = `already_resolved: live producer found for shape '${mcCandidateShape ?? mcSummary}'${
+        mcEditSite ? ` and edit_site '${mcEditSite}' exists in container tree` : ""
+      }; gap closed without recompose to prevent duplicate-identifier patches`;
+      try {
+        await resolveSubstrateGapWrite({
+          type: "substrateGap_write",
+          gap: {
+            id: String(gap.id ?? ""),
+            category: gap.category,
+            source: gap.source,
+            summary: gap.summary,
+            detected_at: gap.detected_at,
+            classification_metadata: { ...mcMeta, resolution: "already_resolved", closed_at: new Date().toISOString() },
+            status: "closed",
+          },
+        } as never);
+      } catch { /* best-effort */ }
+      return {
+        shape: "gapToFeatureReport",
+        body: {
+          ok: true,
+          gap_id: gap.id,
+          gap_category: gap.category,
+          verdict: "already_resolved",
+          note: mcClosureNote,
+        },
+      };
+    }
+  }
+
   // 1a. DOCUMENTATION-DRIFT gaps close via doc_drift_fix, NOT feature_compose (2026-07-01).
   // A doc is prose: feature_compose grounds/verifies .ts only, so its typecheck→rollback gate
   // is a no-op for a .md edit — routing prose through it would land an LLM draft with the gate

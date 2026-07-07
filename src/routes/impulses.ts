@@ -105,6 +105,7 @@ import {
   resolveVesselMitosisCutover,
   resolveCutoverApplied,
 } from "../resolvers/vessel-mitosis-cutover.js";
+import { resolveVesselHealthReport } from "../resolvers/vessel-health-report.js";
 import { resolveSurrealdbExport } from "../resolvers/surrealdb-export.js";
 import { resolveSurrealdbImport } from "../resolvers/surrealdb-import.js";
 import { resolveGhRepoCreate } from "../resolvers/gh-repo-create.js";
@@ -769,6 +770,8 @@ async function dispatchInner(pointer: AnyPointer): Promise<ResolverResult> {
       return resolveConceptFromTraces(pointer);
     case "failure_count_report":
       return resolveFailureCountReport(pointer);
+    case "vessel_health_report":
+      return resolveVesselHealthReport(pointer);
     default:
       throw new Error(`unknown shape: ${pointer.type}`);
   }

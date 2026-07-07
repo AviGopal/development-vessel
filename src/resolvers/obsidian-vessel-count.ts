@@ -38,13 +38,23 @@ export async function resolveObsidianVesselCount(
       fetchError = `discovery /vessels returned HTTP ${resp.status}`;
     } else {
       const raw: any = await resp.json();
-      // Discovery may return { vessels: [...] } or a bare array
+      // Discovery POST /resolve returns {content:{vessels:[...]}, metadata:{...}}
+      // Fall back to raw.vessels or bare array for older/alternate response shapes.
       if (Array.isArray(raw)) {
         allVessels = raw as DiscoveryVesselEntry[];
       } else if (raw !== null && typeof raw === "object") {
-        const vessels = (raw as Record<string, unknown>)["vessels"];
-        if (Array.isArray(vessels)) {
-          allVessels = vessels as DiscoveryVesselEntry[];
+        const content = (raw as Record<string, unknown>)["content"];
+        if (content !== null && content !== undefined && typeof content === "object") {
+          const contentVessels = (content as Record<string, unknown>)["vessels"];
+          if (Array.isArray(contentVessels)) {
+            allVessels = contentVessels as DiscoveryVesselEntry[];
+          }
+        }
+        if (allVessels.length === 0) {
+          const vessels = (raw as Record<string, unknown>)["vessels"];
+          if (Array.isArray(vessels)) {
+            allVessels = vessels as DiscoveryVesselEntry[];
+          }
         }
       }
     }

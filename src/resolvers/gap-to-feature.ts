@@ -885,7 +885,7 @@ async function closeLandedGap(gap: Record<string, unknown>, land: LandSignal): P
     }
     const closedMeta = { ...((gap.classification_metadata ?? gap.metadata ?? {}) as Record<string, unknown>), resolution, closed_at: new Date().toISOString() };
     const meta = closedMeta;
-    joinDecisionOutcome(meta, { landed: true, verdict: "FAVORABLE" });
+    joinDecisionOutcome(meta, { landed: true, verdict: "FAVORABLE", commit: land.commit_sha ?? null });
     await resolveSubstrateGapWrite({
       type: "substrateGap_write",
       gap: {

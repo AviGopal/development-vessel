@@ -636,13 +636,58 @@ function genuineLandSignal(composeBody: Record<string, unknown>, landRequested: 
   return none;
 }
 
+/**
+ * Verify whether a gap's condition still holds in the file system.
+ * For surgical gaps with edit_site + hardcoded_url in classification_metadata:
+ *   returns 'present' if the literal is still in the file, 'absent' if gone, 'unknown' otherwise.
+ * 'unknown' preserves today's behaviour — no false closes, no blocked closes.
+ */
+function verifyGapCondition(gap: Record<string, unknown>): 'present' | 'absent' | 'unknown' {
+  try {
+    const meta = (gap.classification_metadata ?? gap.metadata ?? {}) as Record<string, unknown>;
+    const editSite = typeof meta['edit_site'] === 'string' ? meta['edit_site'] : null;
+    const hardcodedUrl = typeof meta['hardcoded_url'] === 'string' ? meta['hardcoded_url'] : null;
+    if (!editSite || !hardcodedUrl) return 'unknown';
+    // editSite is repo-relative like repos/some-vessel/src/file.ts
+    // Map to runtime path using the same pattern as line 21
+    const runtimePath = join(RUNTIME_ROOT, editSite.replace(/^\//, '').replace(/^repos\//, ''));
+    if (!existsSync(runtimePath)) return 'unknown';
+    const contents = readFileSync(runtimePath, 'utf8');
+    return contents.includes(hardcodedUrl) ? 'present' : 'absent';
+  } catch {
+    return 'unknown';
+  }
+}
+
 /** Mark a gap closed once its fix genuinely landed on origin/dev. Best-effort, guarded. */
 async function closeLandedGap(gap: Record<string, unknown>, land: LandSignal): Promise<{ closed: boolean; error?: string }> {
   try {
     const id = String(gap.id ?? "");
     if (!id) return { closed: false, error: "gap missing id" };
     const resolution = `landed via mitosis cutover${land.commit_sha ? ` ${land.commit_sha}` : ""}${land.vessel ? ` (${land.vessel})` : ""}`;
-    const meta = { ...((gap.classification_metadata ?? gap.metadata ?? {}) as Record<string, unknown>), resolution, closed_at: new Date().toISOString() };
+    // Outcome verification: only close when the condition is observed gone.
+    // If condition is still present, record failure and bail without closing.
+    const conditionCheck = verifyGapCondition(gap);
+    if (conditionCheck === 'present') {
+      const failureMeta = { ...((gap.classification_metadata ?? gap.metadata ?? {}) as Record<string, unknown>), outcome_verification_failure: `condition still present at close time after land ${land.commit_sha ?? 'unknown'}`, outcome_checked_at: new Date().toISOString() };
+      try {
+        await resolveSubstrateGapWrite({
+          type: "substrateGap_write",
+          gap: {
+            id,
+            category: gap.category,
+            source: gap.source,
+            summary: gap.summary,
+            detected_at: gap.detected_at,
+            classification_metadata: failureMeta,
+            status: "open",
+          },
+        } as never);
+      } catch { /* best-effort */ }
+      return { closed: false, error: `outcome verification failed: hardcoded literal still present in edit_site after landing` };
+    }
+    const closedMeta = { ...((gap.classification_metadata ?? gap.metadata ?? {}) as Record<string, unknown>), resolution, closed_at: new Date().toISOString() };
+    const meta = closedMeta;
     joinDecisionOutcome(meta, { landed: true, verdict: "FAVORABLE" });
     await resolveSubstrateGapWrite({
       type: "substrateGap_write",
@@ -997,6 +1042,31 @@ async function routeCapabilityGapToNewResolver(
     `3. STRICT TS (strict + noUncheckedIndexedAccess): import only ResolverResult; use only globals (fetch, process.env, AbortSignal, JSON, Math — Date.now() is unavailable); type fetched JSON as any; guard every index access with ?./?? ; never use non-null !.`,
     `The goal that needs this shape (this is why the spend is justified): ${goalText}`,
   ].join("\n");
+
+  // Pick-time condition verification: if the gap condition no longer holds,
+  // close as already_resolved and skip composing.
+  const pickConditionCheck = verifyGapCondition(gap as Record<string, unknown>);
+  if (pickConditionCheck === 'absent') {
+    console.log(`[gap-to-feature] gap ${String(gap.id ?? '')} condition absent at pick time — closing as already_resolved`);
+    try {
+      const arMeta = { ...((gap.classification_metadata ?? gap.metadata ?? {}) as Record<string, unknown>), resolution: 'already_resolved', closed_at: new Date().toISOString() };
+      await resolveSubstrateGapWrite({
+        type: "substrateGap_write",
+        gap: {
+          id: String(gap.id ?? ''),
+          category: gap.category,
+          source: gap.source,
+          summary: gap.summary,
+          detected_at: gap.detected_at,
+          classification_metadata: arMeta,
+          status: "closed",
+        },
+      } as never);
+    } catch (writeErr) {
+      console.log(`[gap-to-feature] already_resolved write failed: ${(writeErr as Error).message}`);
+    }
+    return { shape: "gapToFeatureReport", body: { ok: true, gap_id: gap.id, gap_category: gap.category, verdict: "already_resolved", note: "gap condition absent at pick time — closed as already_resolved" } };
+  }
 
   const compose = await resolveFeatureCompose({
     type: "feature_compose",

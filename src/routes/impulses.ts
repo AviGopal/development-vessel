@@ -27,6 +27,7 @@ import { resolvePullCutover } from "../resolvers/pull-cutover.js";
 import { resolveLearnedTopologySnapshot } from "../resolvers/learned-topology-snapshot.js";
 import { resolveReachableUnlearnedReport } from "../resolvers/reachable-unlearned-report.js";
 import { resolveUnknownShapeReport } from "../resolvers/unknown-shape-report.js";
+import { resolveTemplateSuccessRanking24h } from "../resolvers/template-success-ranking-24h.js";
 import { resolveObsidianVesselCount } from "../resolvers/obsidian-vessel-count.js";
 import { resolveFailureCountReport } from "../resolvers/failure-count-report.js";
 import { resolveConceptFromTraces } from "../resolvers/concept.js";
@@ -779,6 +780,8 @@ async function dispatchInner(pointer: AnyPointer): Promise<ResolverResult> {
       const { resolveLightDispatchVesselStatus } = await import("../resolvers/light-dispatch-vessel-status.js");
       return resolveLightDispatchVesselStatus(pointer);
     }
+    case "template_success_ranking_24h":
+      return resolveTemplateSuccessRanking24h(pointer);
     default:
       throw new Error(`unknown shape: ${pointer.type}`);
   }

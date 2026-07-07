@@ -645,7 +645,12 @@ function genuineLandSignal(composeBody: Record<string, unknown>, landRequested: 
 function verifyGapCondition(gap: Record<string, unknown>): 'present' | 'absent' | 'unknown' {
   try {
     const meta = (gap.classification_metadata ?? gap.metadata ?? {}) as Record<string, unknown>;
-    const editSite = typeof meta['edit_site'] === 'string' ? meta['edit_site'] : null;
+    // Prefer clean file_path field (surgical-gap-scan writes this without line suffix);
+    // fall back to edit_site but strip trailing ':<digits>' line suffix if present.
+    const rawEditSite = typeof meta['file_path'] === 'string'
+      ? meta['file_path']
+      : (typeof meta['edit_site'] === 'string' ? meta['edit_site'] : null);
+    const editSite = rawEditSite ? rawEditSite.replace(/:\d+$/, '') : null;
     const hardcodedUrl = typeof meta['hardcoded_url'] === 'string' ? meta['hardcoded_url'] : null;
     if (!editSite || !hardcodedUrl) return 'unknown';
     // editSite is repo-relative like repos/some-vessel/src/file.ts
@@ -1167,12 +1172,16 @@ export async function resolveGapToFeature(pointer: GapToFeaturePointer): Promise
     const closedAt = new Date().toISOString();
     await resolveSubstrateGapWrite({
       type: "substrateGap_write",
-      id: gap.id as string,
-      status: "closed",
-      resolution: "already_resolved",
-      closed_at: closedAt,
-      note: "gap condition absent at pick time — closed as already_resolved",
-    });
+      gap: {
+        id: gap.id as string,
+        category: gap.category,
+        source: gap.source,
+        summary: gap.summary,
+        detected_at: gap.detected_at,
+        classification_metadata: { ...((gap.classification_metadata ?? gap.metadata ?? {}) as Record<string, unknown>), resolution: "already_resolved", closed_at: closedAt },
+        status: "closed",
+      },
+    } as never);
     return {
       shape: "gapToFeatureReport",
       body: {

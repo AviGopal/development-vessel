@@ -764,7 +764,8 @@ async function verifyGapConditionAsync(gap: Record<string, unknown>): Promise<'p
     const payload: Record<string, unknown> = { type: resolveShape, ...resolveInput };
     let respBody: Record<string, unknown>;
     try {
-      const resp = await fetch('http://localhost:8090/v2/impulses/resolve', {
+      const SELF_RESOLVE_ENDPOINT = process.env['SELF_RESOLVE_ENDPOINT'] ?? `http://localhost:${process.env['PORT'] ?? '8090'}/v2/impulses/resolve`;
+      const resp = await fetch(SELF_RESOLVE_ENDPOINT, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),

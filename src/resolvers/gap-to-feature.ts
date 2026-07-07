@@ -1160,6 +1160,31 @@ export async function resolveGapToFeature(pointer: GapToFeaturePointer): Promise
   }
   await recordApproachDecision(gap);
 
+  // Pick-time condition check: if the surgical gap's cited literal is already
+  // absent from the codebase, close it as already_resolved without composing.
+  const _pickCond = verifyGapCondition(gap);
+  if (_pickCond === 'absent') {
+    const closedAt = new Date().toISOString();
+    await resolveSubstrateGapWrite({
+      type: "substrateGap_write",
+      id: gap.id as string,
+      status: "closed",
+      resolution: "already_resolved",
+      closed_at: closedAt,
+      note: "gap condition absent at pick time — closed as already_resolved",
+    });
+    return {
+      shape: "gapToFeatureReport",
+      body: {
+        ok: true,
+        gap_id: gap.id as string,
+        gap_category: gap.category as string,
+        verdict: "already_resolved",
+        note: "gap condition absent at pick time — closed as already_resolved",
+      },
+    };
+  }
+
   // 1a. DOCUMENTATION-DRIFT gaps close via doc_drift_fix, NOT feature_compose (2026-07-01).
   // A doc is prose: feature_compose grounds/verifies .ts only, so its typecheck→rollback gate
   // is a no-op for a .md edit — routing prose through it would land an LLM draft with the gate

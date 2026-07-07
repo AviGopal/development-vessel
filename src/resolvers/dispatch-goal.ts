@@ -429,6 +429,9 @@ import { METABOB_API_KEY } from "../config.js";
  * This is a safety boundary, not a performance tunable, and must stay in
  * sync with goal-host-vessel's own input ceiling — change them together.
  */
+// MAX_GOAL_LEN guard: caps accepted goal payloads at 8192 characters to prevent
+// excessively long goal strings from causing performance degradation or resource
+// exhaustion in the goal dispatch and resolution pipelines.
 const MAX_GOAL_LEN = 8192;
 const GOAL_HOST_ENDPOINT = process.env["GOAL_HOST_VESSEL_ENDPOINT"] ?? "http://127.0.0.1:8210";
 

@@ -28,7 +28,7 @@ export async function resolveObsidianVesselCount(
   try {
     const resp = await fetch(`${discoveryEndpoint}/vessels`, {
       method: "GET",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", "Authorization": `ApiKey ${process.env["METABOB_API_KEY"] ?? ""}` },
       signal: AbortSignal.timeout(10_000),
     });
 

@@ -772,6 +772,10 @@ async function dispatchInner(pointer: AnyPointer): Promise<ResolverResult> {
       return resolveFailureCountReport(pointer);
     case "vessel_health_report":
       return resolveVesselHealthReport(pointer);
+    case "light-dispatch-vessel_status": {
+      const { resolveLightDispatchVesselStatus } = await import("../resolvers/light-dispatch-vessel-status.js");
+      return resolveLightDispatchVesselStatus(pointer);
+    }
     default:
       throw new Error(`unknown shape: ${pointer.type}`);
   }

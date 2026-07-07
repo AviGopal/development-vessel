@@ -27,6 +27,7 @@ import { resolvePullCutover } from "../resolvers/pull-cutover.js";
 import { resolveLearnedTopologySnapshot } from "../resolvers/learned-topology-snapshot.js";
 import { resolveReachableUnlearnedReport } from "../resolvers/reachable-unlearned-report.js";
 import { resolveUnknownShapeReport } from "../resolvers/unknown-shape-report.js";
+import { resolveObsidianVesselCount } from "../resolvers/obsidian-vessel-count.js";
 import { resolveFailureCountReport } from "../resolvers/failure-count-report.js";
 import { resolveConceptFromTraces } from "../resolvers/concept.js";
 import { resolveCodeQualityWithSubstantiveAssessmentContent } from "../resolvers/code-quality-with-substantive-assessment-content.js";
@@ -271,6 +272,8 @@ async function dispatchInner(pointer: AnyPointer): Promise<ResolverResult> {
       return resolveLearnedTopologySnapshot(p as Parameters<typeof resolveLearnedTopologySnapshot>[0]);
     case "reachable_unlearned_report":
       return resolveReachableUnlearnedReport(p as Parameters<typeof resolveReachableUnlearnedReport>[0]);
+    case "obsidian:vessel_count":
+      return resolveObsidianVesselCount(pointer);
     case "unknown_shape_report":
       return resolveUnknownShapeReport(p as Parameters<typeof resolveUnknownShapeReport>[0]);
     case "docs_align_scan": {

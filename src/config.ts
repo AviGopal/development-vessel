@@ -77,6 +77,7 @@ export const config = {
       "learned_topology_snapshot",
       "reachable_unlearned_report",
       "unknown_shape_report",
+      "obsidian:vessel_count",
       "coverage_tick",
       "docs_align_scan",
       "substrate_health_tick",

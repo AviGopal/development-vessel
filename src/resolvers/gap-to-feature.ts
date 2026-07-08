@@ -1387,6 +1387,31 @@ export async function resolveGapToFeature(pointer: GapToFeaturePointer): Promise
   }
   await recordApproachDecision(gap);
 
+  // RECOMMIT SOURCE-GAP LOCALIZATION (gap recommit-composer-mislocalized-edit-site):
+  // A re_commit gap's id (e.g. "recommit-route-edit-535ee072-verify_failed") is NOT a
+  // repo/vessel path; deriving the edit_site from it mis-localizes to a non-existent
+  // repos/<gap-id>/ (ENOENT, failure_class mis_localized_path). The real edit site lives
+  // on the SOURCE gap named in classification_metadata.source_gap_id. Fetch that source
+  // gap and inherit its edit_site (and file_path/change_site/suspected_real_location) so
+  // localizeGap below targets the actual file, not the recommit id. Best-effort.
+  {
+    const rcMeta = (gap.classification_metadata ?? {}) as Record<string, unknown>;
+    const sourceGapId = typeof rcMeta.source_gap_id === "string" ? rcMeta.source_gap_id : "";
+    const hasOwnSite = !!(rcMeta.edit_site || rcMeta.file_path || rcMeta.change_site || rcMeta.suspected_real_location);
+    if (sourceGapId && !hasOwnSite) {
+      try {
+        const srcRead = await resolveSubstrateGap({ type: "substrateGap", id: sourceGapId, limit: 1 } as never);
+        const srcGaps = ((srcRead?.body as { gaps?: Record<string, unknown>[] })?.gaps) ?? [];
+        const src = srcGaps.find((g) => g.id === sourceGapId) ?? srcGaps[0];
+        const srcMeta = (src?.classification_metadata ?? {}) as Record<string, unknown>;
+        for (const f of ["edit_site", "file_path", "change_site", "suspected_real_location"] as const) {
+          if (!rcMeta[f] && typeof srcMeta[f] === "string" && srcMeta[f]) rcMeta[f] = srcMeta[f];
+        }
+        gap.classification_metadata = rcMeta;
+      } catch { /* best-effort: fall through to normal localization */ }
+    }
+  }
+
   // Pick-time condition check: if the surgical gap's cited literal is already
   // absent from the codebase, close it as already_resolved without composing.
   const _pickCond = verifyGapCondition(gap);

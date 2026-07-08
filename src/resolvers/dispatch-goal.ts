@@ -429,9 +429,22 @@ import { METABOB_API_KEY } from "../config.js";
  * This is a safety boundary, not a performance tunable, and must stay in
  * sync with goal-host-vessel's own input ceiling — change them together.
  */
-// MAX_GOAL_LEN guard: caps accepted goal payloads at 8192 characters to prevent
-// excessively long goal strings from causing performance degradation or resource
-// exhaustion in the goal dispatch and resolution pipelines.
+/**
+ * MAX_GOAL_LEN guard: caps accepted goal payloads at 8192 characters to prevent
+ * excessively long goal strings from causing performance degradation or resource
+ * exhaustion in the goal dispatch and resolution pipelines.
+ *
+ * Rationale:
+ *  - 8192 chars comfortably fits within downstream LLM prompt token budgets
+ *    when the goal is embedded alongside system instructions and context.
+ *  - Protects goal-host-vessel /run-goal from adversarial or runaway payloads
+ *    on the dispatch surface.
+ *  - Chosen to match goal-host-vessel's own input ceiling; the two MUST be kept
+ *    in sync — change them together.
+ *  - This is a safety boundary, NOT a tunable performance knob. Legitimate
+ *    goals exceeding it should be restructured (e.g. moved into referenced
+ *    artifacts) rather than uncapped here.
+ */
 const MAX_GOAL_LEN = 8192;
 const GOAL_HOST_ENDPOINT = process.env["GOAL_HOST_VESSEL_ENDPOINT"] ?? "http://127.0.0.1:8210";
 

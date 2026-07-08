@@ -94,7 +94,7 @@ export const VESSEL_SCAFFOLD_TRIGGER_TICK_TEMPLATE: ActivityTemplate = {
     "deterministically consumed. Dual of drafter-trigger-tick. Idempotent: a scaffolded " +
     "vessel's PR is the dedup point; re-picking the same scenario re-opens the same branch " +
     "(git_branch_create refuses the duplicate). Compose-only — adds no resolver code.",
-  inputShapes: [],
+  inputShapes: ["directoryListing", "fileContent"],
   outputShapes: ["vesselScaffoldDispatchResult"],
   tags: [
     "lift.autonomous.loop",

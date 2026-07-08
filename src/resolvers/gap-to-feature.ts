@@ -576,6 +576,12 @@ function landabilityScore(gap: Record<string, unknown>): number {
   // work. Capped so a transient fail doesn't permanently bury a genuine gap.
   const fa = Number((meta as Record<string, unknown>).failed_attempts ?? 0);
   if (fa > 0) s -= Math.min(0.6, 0.2 * fa);
+  // Penalise gaps whose metadata points at the picker/composer itself — selecting
+  // them creates a self-referential loop that never lands. blockingWeight > 1
+  // means the gap targets core infrastructure; discount proportionally so the
+  // picker deprioritises them relative to ordinary capability gaps.
+  const bw = blockingWeight(gap);
+  if (bw > 1) s -= Math.min(0.3, 0.1 * (bw - 1));
   return Math.max(0, Math.min(1, s));
 }
 function blockingWeight(gap: Record<string, unknown>): number {

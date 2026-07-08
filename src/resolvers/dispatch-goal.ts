@@ -451,6 +451,9 @@ import { METABOB_API_KEY } from "../config.js";
  *  - This is a safety boundary, NOT a tunable performance knob. Legitimate
  *    goals exceeding it should be restructured (e.g. moved into referenced
  *    artifacts) rather than uncapped here.
+ *  - Also mitigates prompt-injection amplification: bounding goal length limits
+ *    the window an attacker has to smuggle adversarial instructions through the
+ *    dispatch → goal-host interaction.
  */
 const MAX_GOAL_LEN = 8192;
 const GOAL_HOST_ENDPOINT = process.env["GOAL_HOST_VESSEL_ENDPOINT"] ?? "http://127.0.0.1:8210";

@@ -575,7 +575,14 @@ function landabilityScore(gap: Record<string, unknown>): number {
   // the score, so the loop stops re-picking a stuck high-rank gap and moves to landable
   // work. Capped so a transient fail doesn't permanently bury a genuine gap.
   const fa = Number((meta as Record<string, unknown>).failed_attempts ?? 0);
-  if (fa > 0) s -= Math.min(0.6, 0.2 * fa);
+  // Gaps with a concrete edit_site are surgical — each failure is a bad LLM
+  // draft, not evidence the gap is unlandable. Cap the per-attempt penalty at
+  // 0.1 (vs 0.2) for surgical gaps so the picker keeps revisiting them after
+  // a transient UNFAVORABLE rather than burying them behind meta/diagnostic
+  // gaps that have no failed attempts only because they were never picked.
+  const hasConcreteSite = Boolean(meta.edit_site || meta.change_site || meta.single_file);
+  const faStep = hasConcreteSite ? 0.1 : 0.2;
+  if (fa > 0) s -= Math.min(0.5, faStep * fa);
   // Penalise gaps whose metadata points at the picker/composer itself — selecting
   // them creates a self-referential loop that never lands. blockingWeight > 1
   // means the gap targets core infrastructure; discount proportionally so the

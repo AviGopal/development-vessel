@@ -90,6 +90,13 @@ import { METABOB_API_KEY } from "../config.js";
  * bound triggers immediate rejection at the resolver boundary (before any
  * network dispatch), ensuring dispatch reliability and predictable failure
  * modes rather than partial/truncated calls.
+ *
+ * Design decision: the 8192-character ceiling was chosen to (a) stay well under
+ * typical LLM prompt/token budgets in goal-host-vessel, (b) keep goal-host
+ * recommendation scoring thresholds meaningful (very long goals dilute salient
+ * signal), and (c) respect substrate capacity constraints on serialized
+ * resolver inputs. Future maintainers: treat this as a coordinated safety
+ * boundary with goal-host-vessel, not a local tunable.
  */
 /**
  * MAX_GOAL_LEN — hard ceiling on goal payload size (characters).

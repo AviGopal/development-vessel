@@ -900,6 +900,35 @@ async function closeLandedGap(gap: Record<string, unknown>, land: LandSignal): P
       },
     } as never);
     updateCalibration(String(gap.category ?? "unknown"), true);
+    // CLOSURE-CREDIT: reward the filing detector for gap closure (not just filing).
+    // Best-effort — never throw; wrapped in its own try/catch.
+    try {
+      const detectorName: unknown = (gap as Record<string, unknown>).classification_metadata &&
+        typeof (gap as Record<string, unknown>).classification_metadata === "object"
+        ? ((gap as Record<string, unknown>).classification_metadata as Record<string, unknown>).detector
+        : undefined;
+      if (typeof detectorName === "string" && detectorName.length > 0) {
+        const ledgerPath: string = process.env.DETECTOR_CLOSURE_LEDGER_PATH ?? "/workspace/detector-closure-credit.json";
+        type LedgerEntry = { closures: number; last_closed_at: string };
+        type Ledger = Record<string, LedgerEntry>;
+        let ledger: Ledger = {};
+        if (existsSync(ledgerPath)) {
+          try {
+            ledger = JSON.parse(readFileSync(ledgerPath, "utf8")) as Ledger;
+          } catch {
+            ledger = {};
+          }
+        }
+        const existing: LedgerEntry | undefined = ledger[detectorName];
+        ledger[detectorName] = {
+          closures: (existing?.closures ?? 0) + 1,
+          last_closed_at: new Date().toISOString(),
+        };
+        writeFileSync(ledgerPath, JSON.stringify(ledger, null, 2), "utf8");
+      }
+    } catch {
+      // best-effort ledger write — never propagate
+    }
     return { closed: true };
   } catch (e) {
     return { closed: false, error: (e as Error).message };

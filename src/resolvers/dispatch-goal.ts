@@ -493,6 +493,10 @@ export async function resolveDispatchGoal(pointer: DispatchGoalPointer): Promise
   // goal text — capping input length keeps those operations O(MAX_GOAL_LEN)
   // per candidate and preserves classification relevance by preventing a
   // single oversized goal from dominating similarity signals.
+  // Threshold rationale: MAX_GOAL_LEN is set to 8192 characters — large enough
+  // to accommodate legitimate multi-paragraph goal descriptions while staying
+  // well within downstream LLM token budgets and the goal-host's own input
+  // capacity, giving a hard backstop against runaway or adversarial payloads.
   if (goal.length > MAX_GOAL_LEN) return { shape: "structuredError", body: { resolver: "dispatch_goal", detail: `goal too long (${goal.length} > ${MAX_GOAL_LEN})` } };
 
   const body: Record<string, unknown> = { goal };

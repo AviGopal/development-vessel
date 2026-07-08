@@ -133,8 +133,8 @@ export async function resolveCostExpectationScan(
       metadata: {
         gap_subtype: "cost_expectation_miscalibrated",
         dimensions: surprising,
-        mean_cost_residual_ms: residualMs,
-        mean_cost_residual_tokens: residualTok,
+        mean_cost_residual_ms: Number.isFinite(residualMs) ? residualMs : null,
+        mean_cost_residual_tokens: Number.isFinite(residualTok) ? residualTok : null,
         pool_median_cost_ms: poolMedian,
         pool_median_cost_tokens: poolMedianTok,
         // Point the code-fix pipeline at the cost posterior that mispredicts.
@@ -233,8 +233,9 @@ export async function resolveCostExpectationScan(
     body: {
       cost_model_verdict: verdictMs,
       cost_model_verdict_tokens: verdictTok,
-      mean_cost_residual: residualMs,
-      mean_cost_residual_tokens: residualTok,
+      mean_cost_residual: Number.isFinite(residualMs) ? residualMs : null,
+      mean_cost_residual_tokens: Number.isFinite(residualTok) ? residualTok : null,
+      cost_residual_samples: snap.cost_residual_samples,
       pool_median_cost_ms: poolMedian,
       pool_median_cost_tokens: poolMedianTok,
       templates_evaluated: templates.length,

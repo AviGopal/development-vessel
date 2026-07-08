@@ -578,6 +578,16 @@ function landabilityScore(gap: Record<string, unknown>): number {
   if (fa > 0) s -= Math.min(0.6, 0.2 * fa);
   return Math.max(0, Math.min(1, s));
 }
+function blockingWeight(gap: Record<string, unknown>): number {
+  const meta = (gap.classification_metadata ?? gap.metadata ?? {}) as Record<string, unknown>;
+  let w = 1.0;
+  const hay = [meta.edit_site, meta.failing_capability, meta.file_path, meta.root_cause]
+    .filter((x) => typeof x === "string").join(" ").toLowerCase();
+  if (/gap-to-feature|feature-compose|feature_compose|mitosis|cutover|drafter|fetchposteriorsforsignature|boredom-vessel/.test(hay)) w += 0.6;
+  if (String(gap.category ?? "") === "self_development_reliability") w += 0.3;
+  return Math.min(2.0, w);
+}
+
 function pickMostLandable(gaps: Record<string, unknown>[]): Record<string, unknown> | null {
   if (!gaps.length) return null;
   // Learned category-level self-knowledge (expectation-setting step 3, 2026-06-29): strongly
@@ -589,7 +599,7 @@ function pickMostLandable(gaps: Record<string, unknown>[]): Record<string, unkno
     const r = calib[String(g.category ?? "unknown")];
     return !!r && r.attempts >= 8 && r.lands === 0;
   };
-  return gaps.map((g) => ({ g, s: landabilityScore(g) - (hopeless(g) ? 0.5 : 0) })).sort((a, b) => b.s - a.s)[0]!.g;
+  return gaps.map((g) => ({ g, s: (landabilityScore(g) - (hopeless(g) ? 0.5 : 0)) * blockingWeight(g) })).sort((a, b) => b.s - a.s)[0]!.g;
 }
 
 // CLOSE-ON-LAND (2026-06-29). A landed gap previously stayed status:open, so the

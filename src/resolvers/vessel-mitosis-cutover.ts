@@ -1464,6 +1464,39 @@ async function runGitAwareCutover(args: GitCutoverArgs): Promise<ResolverResult>
     });
   }
 
+  // 9a. RUNTIME MANIFEST VERIFICATION (gap-cutover-container-tree-missing-new-files):
+  // The step-9 mirror above can leave the running /vessels tree missing a staged
+  // file (notably a NEWLY-CREATED file) if copyTree aborted partway on one file's
+  // error, or if the file landed on origin/dev but was not mirrored. A single
+  // missing file poisons EVERY later feature_compose verify on this vessel with a
+  // pre-existing TS2307 in a file the operator never touched (witnessed 2026-07-07,
+  // commit 8c8c41c). Verify each staged file is now present in baseRoot and re-copy
+  // any that are missing (from mitosisRoot) so the running container tree matches
+  // the landed commit. Best-effort per file; the aggregate verdict is recorded.
+  if (await pathExists(baseRoot)) {
+    const stillMissing: string[] = [];
+    for (const rel of stagedFiles) {
+      if (isAbsolute(rel) || rel.includes("..")) continue;
+      const dst = join(baseRoot, rel);
+      if (await pathExists(dst)) continue;
+      try {
+        await mkdir(dirname(dst), { recursive: true });
+        await copyFile(join(mitosisRoot, rel), dst);
+        operations.push({ op: "manifest re-copy missing staged file", status: "ok", detail: rel });
+      } catch (err) {
+        stillMissing.push(rel);
+        operations.push({ op: "manifest re-copy missing staged file", status: "warn", detail: `${rel}: ${(err as Error).message.slice(0, 120)}` });
+      }
+    }
+    operations.push({
+      op: "runtime manifest verify",
+      status: stillMissing.length === 0 ? "ok" : "fail",
+      detail: stillMissing.length === 0
+        ? `all ${stagedFiles.length} staged file(s) present in runtime tree`
+        : `MISSING in runtime after mirror: ${stillMissing.join(", ")}`,
+    });
+  }
+
   // 9b. SELF-ACTIVATION (2026-06-26): if any staged file is a substrate timer
   // script (scripts/substrate/*.ts), make the new version live in the writable
   // run-dir so it takes effect on the next timer firing WITHOUT a container

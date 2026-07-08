@@ -916,6 +916,19 @@ function computeEditSpan(fileContent: string | null | undefined, anchor: string,
   return { start_line, end_line };
 }
 
+// Baseline-delta typecheck (gap compose-verify-no-baseline-check): extract a set of
+// NORMALIZED tsc error identities from raw typecheck output. Line/column coordinates
+// are stripped so an error that merely SHIFTS line when the draft inserts code is not
+// counted as NEW. Lets verify blame the draft only for errors it INTRODUCES.
+function tscErrorSet(raw: string): Set<string> {
+  const out = new Set<string>();
+  for (const line of raw.split("\n")) {
+    if (!/error TS\d+/.test(line)) continue;
+    out.add(line.replace(/\(\d+,\d+\)/g, "").trim());
+  }
+  return out;
+}
+
 function classifyComposeFailure(appliedOps: Array<{ ok: boolean; detail?: string }>, verifyResults: Array<{ ok: boolean; output: string }>, semanticReason: string): string {
   const ap = appliedOps.find((a) => !a.ok);
   if (ap) return /ENOENT/.test(ap.detail ?? "") ? "mis_localized_path" : "anchor_not_found";
@@ -1116,6 +1129,17 @@ async function resolveFeatureComposeInner(pointer: FeatureComposePointer): Promi
     authoringMarkerPaths.push(await writeAuthoringMarker(process.env["WORKSPACE_ROOT"] ?? '/workspace', tv.replace(/^repos\//, ''), (ops[0] && ops[0].path) || '', 'feature_compose'));
   }
 
+  // BASELINE TYPECHECK (gap compose-verify-no-baseline-check): capture tsc errors
+  // present on the UNTOUCHED tree BEFORE applying the draft, per touched vessel, so
+  // the verify below blames the draft only for NEW errors (post minus baseline). A
+  // patch against a vessel that ALREADY fails tsc is thus not wrongly rolled back.
+  const baselineTsErrors = new Map<string, Set<string>>();
+  for (const v of touched) {
+    const vAbs = `${REPO_ROOT}/${v.replace(/^\/repos\//, "")}`;
+    const b = await callTool(toolsEndpoint, "shell", { command: `cd ${JSON.stringify(vAbs)} && bun run typecheck 2>&1`, cwd: REPO_ROOT });
+    baselineTsErrors.set(v, tscErrorSet(String((b.body as { stdout?: unknown })?.stdout ?? "")));
+  }
+
   // 2. APPLY deterministically. Track created/edited for rollback.
   const created: string[] = [];
   const edited: string[] = [];
@@ -1247,7 +1271,15 @@ async function resolveFeatureComposeInner(pointer: FeatureComposePointer): Promi
     const tc = raw.match(/TC_EXIT=(\d+)/); const sd = raw.match(/SD_EXIT=(\d+)/);
     const tcExit = tc && tc[1] ? parseInt(tc[1], 10) : null;
     const sdExit = sd && sd[1] ? parseInt(sd[1], 10) : 0;
-    const ok = tcExit === 0 && sdExit === 0;
+    // Baseline-delta: pass typecheck if clean, OR if the baseline already had tsc
+    // errors and the draft introduced NO NEW ones (post error set minus baseline is
+    // empty). Shape-dispatch (sdExit) still gates strictly. Only relax when baseline
+    // was itself broken, so a clean-baseline vessel keeps the strict tcExit===0 gate.
+    const curTs = tscErrorSet(raw);
+    const baseTs = baselineTsErrors.get(v) ?? new Set<string>();
+    const newTs = [...curTs].filter((e) => !baseTs.has(e));
+    const tcOk = tcExit === 0 || (baseTs.size > 0 && newTs.length === 0);
+    const ok = tcOk && sdExit === 0;
     return { vessel: v, errors: ok ? 0 : "verify", exit_code: tcExit, ok, output: raw.trim() };
   };
   let verify: Array<{ vessel: string; errors: number | string; exit_code: number | null; ok: boolean; output: string }> = [];

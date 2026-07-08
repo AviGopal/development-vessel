@@ -286,7 +286,7 @@ export async function resolveGapToScenarioBridge(
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({
-            targetTemplateId: "development-vessel:vessel-scaffold-trigger-tick",
+            targetTemplateId: "development-vessel:scaffold-and-publish-vessel",
             variables: {
               scenario_id: safeId,
               capability_shape:

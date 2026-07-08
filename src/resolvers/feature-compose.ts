@@ -962,7 +962,7 @@ async function appendComposeLesson(cls: string, reason: string, vessels: string,
             summary: "compose for gap " + String(gap.id) + " repeated already-recorded failure class " + cls + ": " + reason.slice(0, 150),
             detected_at: new Date().toISOString(),
             status: "open",
-            classification_metadata: { re_commit: true, source_gap_id: String(gap.id), failure_class: cls },
+            classification_metadata: { re_commit: true, source_gap_id: String(gap.id), failure_class: cls, edit_site: meta.edit_site, suspected_real_location: meta.suspected_real_location, file_path: meta.file_path },
           },
         } as never);
       }

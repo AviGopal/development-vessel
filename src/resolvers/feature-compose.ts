@@ -1135,7 +1135,7 @@ async function resolveFeatureComposeInner(pointer: FeatureComposePointer): Promi
   // patch against a vessel that ALREADY fails tsc is thus not wrongly rolled back.
   const baselineTsErrors = new Map<string, Set<string>>();
   for (const v of touched) {
-    const vAbs = `${REPO_ROOT}/${v.replace(/^\/repos\//, "")}`;
+    const vAbs = `${REPO_ROOT}/${v.replace(/^repos\//, "")}`;
     const b = await callTool(toolsEndpoint, "shell", { command: `cd ${JSON.stringify(vAbs)} && bun run typecheck 2>&1`, cwd: REPO_ROOT });
     baselineTsErrors.set(v, tscErrorSet(String((b.body as { stdout?: unknown })?.stdout ?? "")));
   }

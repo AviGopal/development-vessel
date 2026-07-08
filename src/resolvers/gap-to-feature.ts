@@ -582,7 +582,13 @@ function landabilityScore(gap: Record<string, unknown>): number {
   // gaps that have no failed attempts only because they were never picked.
   const hasConcreteSite = Boolean(meta.edit_site || meta.change_site || meta.single_file);
   const faStep = hasConcreteSite ? 0.1 : 0.2;
-  if (fa > 0) s -= Math.min(0.5, faStep * fa);
+  // Surgical gaps (concrete edit_site) have a tighter penalty cap (0.3 vs 0.5):
+  // per-gap failure lessons record the mistake so the LLM can avoid it, meaning
+  // repeated UNFAVORABLE attempts carry less signal about gap unlandability and
+  // more signal about draft quality. Burying them behind meta/diagnostic gaps
+  // that were never tried is worse than re-attempting with updated lessons.
+  const faCap = hasConcreteSite ? 0.3 : 0.5;
+  if (fa > 0) s -= Math.min(faCap, faStep * fa);
   // Penalise gaps whose metadata points at the picker/composer itself — selecting
   // them creates a self-referential loop that never lands. blockingWeight > 1
   // means the gap targets core infrastructure; discount proportionally so the

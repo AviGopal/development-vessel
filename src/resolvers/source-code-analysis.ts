@@ -177,7 +177,7 @@ export async function resolveSourceCodeAnalysis(
   const allPaths: string[] = [];
 
   for (const entry of topEntries) {
-    const entryPath = entry.startsWith("/") ? entry : `${absoluteTarget}/${entry}`;
+    const entryPath = entry.startsWith("/") ? entry : `${WORKSPACE_ROOT}/${entry}`;
     const basename = entry.split("/").pop() ?? entry;
     const kind = classifyFile(basename);
     if (kind !== "other" || basename.includes(".")) {
@@ -187,7 +187,7 @@ export async function resolveSourceCodeAnalysis(
     if (basename === "src" || basename.endsWith("/src")) {
       const subEntries = await listFiles(entryPath);
       for (const sub of subEntries) {
-        const subPath = sub.startsWith("/") ? sub : `${entryPath}/${sub}`;
+        const subPath = sub.startsWith("/") ? sub : `${WORKSPACE_ROOT}/${sub}`;
         allPaths.push(subPath);
       }
     }

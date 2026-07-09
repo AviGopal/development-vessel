@@ -256,11 +256,39 @@ export async function resolveGapLifecycleScan(p: GapLifecycleScanPointer): Promi
     for (const id of closedIds.slice(0, maxClose)) {
       const g = open.find((x) => x.id === id);
       if (!g) continue;
+      // Age-boundary re-verification: detector upsert-by-id refreshes updated_at,
+      // so updated_at > created_at + staleHours*h means the gap was re-detected
+      // within the current age window — do NOT close, count the verified boundary.
+      const createdAt = g.created_at ? new Date(g.created_at).getTime() : 0;
+      const updatedAt = g.updated_at ? new Date(g.updated_at).getTime() : 0;
+      const staleWindowMs = staleHours * 60 * 60 * 1000;
+      const reDetected = updatedAt > createdAt + staleWindowMs;
+      if (reDetected) {
+        const meta = (g as any).classification_metadata ?? {};
+        const prevBoundaries = Number(meta.verified_age_boundaries ?? 0);
+        try {
+          await fetch(emitUrl.replace(/\/v2\/impulses\/resolve$/, '') + `/v2/gaps/${g.id}`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json', ...authHeader },
+            body: JSON.stringify({
+              classification_metadata: {
+                ...meta,
+                verified_age_boundaries: prevBoundaries + 1,
+              },
+            }),
+            signal: AbortSignal.timeout(8_000),
+          });
+        } catch { }
+        continue;
+      }
+      const metaForClose = (g as any).classification_metadata ?? {};
+      const prevVerified = Number(metaForClose.verified_age_boundaries ?? 0);
+      const closeReason = prevVerified >= 1 ? 'condition_cleared' : 'stale_low_value';
       try {
         const resp = await fetch(emitUrl, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', ...authHeader },
-          body: JSON.stringify({ impulse: { pointer: { type: 'substrateGap_write', gap: { id: g.id, category: g.category ?? 'other', source: 'substrate_detected', summary: `[auto-closed by gap_lifecycle_scan] ${(g.summary ?? '').slice(0, 160)} — stale low-value (not re-detected >${staleHours}h). Live detectors re-open if still real.`, status: 'closed', detected_at: new Date().toISOString(), classification_metadata: { closed_reason: 'stale_low_value', closed_by: 'gap_lifecycle_scan', previous_status: 'open', last_seen: g.updated_at ?? g.created_at } } } } }),
+          body: JSON.stringify({ impulse: { pointer: { type: 'substrateGap_write', gap: { id: g.id, category: g.category ?? 'other', source: 'substrate_detected', summary: `[auto-closed by gap_lifecycle_scan] ${(g.summary ?? '').slice(0, 160)} — stale low-value (not re-detected >${staleHours}h). Live detectors re-open if still real.`, status: 'closed', detected_at: new Date().toISOString(), classification_metadata: { closed_reason: closeReason, closed_by: 'gap_lifecycle_scan', previous_status: 'open', last_seen: g.updated_at ?? g.created_at } } } } }),
           signal: AbortSignal.timeout(8_000)
         });
         if (resp.ok) lowValueClosed.push(g.id!);

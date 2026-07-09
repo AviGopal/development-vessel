@@ -1700,6 +1700,7 @@ async function resolveFeatureComposeInner(pointer: FeatureComposePointer): Promi
     body: {
       ok: verdict === "FAVORABLE",
       verdict,
+      failure_kind: verdict === "FAVORABLE" ? null : (classifyEnvironmentFailure(cutovers) ? "environment" : "fix"),
       summary: plan.summary,
       touched_vessels: [...touched],
       op_count: ops.length,

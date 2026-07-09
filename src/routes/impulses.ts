@@ -466,6 +466,10 @@ async function dispatchInner(pointer: AnyPointer): Promise<ResolverResult> {
       return resolveVesselDemandReport(p as Parameters<typeof resolveVesselDemandReport>[0]);
     case "vessel_exercise_scan":
       return resolveVesselExerciseScan(p as Parameters<typeof resolveVesselExerciseScan>[0]);
+    case "sensing_integrity_tick": {
+      const { resolveSensingIntegrityTick } = await import("../resolvers/sensing-integrity-tick.js");
+      return resolveSensingIntegrityTick(pointer);
+    }
     case "generative_frontier_gap_tick":
       return resolveGenerativeFrontierGapTick(p as Parameters<typeof resolveGenerativeFrontierGapTick>[0]);
     case "vessel_mitosis_start":

@@ -361,6 +361,7 @@ export const config = {
       // fail-CLOSED) so it cannot mint capability into a degenerate star. Rate-
       // limited + stable-id deduped → structurally incapable of flooding.
       "generative_frontier_gap_tick",
+      "sensing_integrity_tick",
       // Mitosis primitives (iter-vessel-mitosis, 2026-06-03): the substrate's
       // self-modification keystone. vessel_mitosis_start copies a vessel tree
       // to a parallel-track path with operator/substrate-supplied source

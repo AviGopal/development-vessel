@@ -335,6 +335,22 @@ export async function resolveSubstrateGapWrite(
   }
 
   await saveGaps(gaps);
+  if (action === "created" && (gap.status ?? "open") === "open") {
+    const g = globalThis as { __gapComposeLastTrigger?: number };
+    const nowMs = Date.now();
+    if (!g.__gapComposeLastTrigger || nowMs - g.__gapComposeLastTrigger > 60_000) {
+      g.__gapComposeLastTrigger = nowMs;
+      try {
+        Bun.spawn(["systemctl", "start", "gap-compose.service"], {
+          stdout: "ignore",
+          stderr: "ignore",
+        });
+        console.log("[substrate-gap] event-driven gap-compose pickup triggered by " + gap.id);
+      } catch (err) {
+        console.warn("[substrate-gap] gap-compose trigger failed (non-fatal): " + (err as Error).message);
+      }
+    }
+  }
   try {
     const { resolvePoolImpulseWrite } = await import("./pool-impulse.js");
     resolvePoolImpulseWrite({

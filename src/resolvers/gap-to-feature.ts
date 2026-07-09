@@ -6,6 +6,7 @@ import { resolveSubstrateGap, resolveSubstrateGapWrite, DECISION_LOG_GAP_CATEGOR
 import { resolveAuthorProducer } from "./author-producer.js";
 import { resolveDocDriftFix } from "./doc-drift-fix.js";
 import { resolveReachabilityGapRepair } from "./reachability-gap-repair.js";
+import { resolveDispatchGoal } from "./dispatch-goal.js";
 import { DISCOVERY_ENDPOINT, METABOB_API_KEY, GOAL_HOST_VESSEL_ENDPOINT } from "../config.js";
 import { readFile } from "node:fs/promises";
 
@@ -1450,6 +1451,31 @@ export async function resolveGapToFeature(pointer: GapToFeaturePointer): Promise
     return { shape: "gapToFeatureReport", body: { ok: false, stage: "select", error: "no matching open gap", category: pointer.category ?? null } };
   }
   await recordApproachDecision(gap);
+  // SURPRISE-ROUTED EXPLORE/EXPLOIT (2026-07-09): when-to-work-on-what is a measured
+  // policy, not a habit. Low-confidence picks are NOT composed on a guess — they route
+  // to investigation first. A high-confidence MISS (predicted land >= 0.7 but the last
+  // attempt did not land) means the self-model's mapping is wrong — investigate before
+  // recommitting. Calibrated confidence exploits (compose as usual). Targeted
+  // dispatches (pointer.gap_id) bypass routing: the caller explicitly chose this gap.
+  if (!pointer.gap_id) {
+    try {
+      const predR = predictLand(gap);
+      const mR = (gap.classification_metadata ?? {}) as Record<string, unknown>;
+      const decs = Array.isArray(mR.approach_decisions) ? mR.approach_decisions as Array<Record<string, unknown>> : [];
+      const last = decs.length ? decs[decs.length - 1] : undefined;
+      const lastOutcome = last ? last.outcome as Record<string, unknown> | undefined : undefined;
+      const highConfMiss = !!(last && Number(last.predicted_p ?? 0) >= 0.7 && lastOutcome && lastOutcome.landed === false);
+      const lowConf = predR.p < 0.35;
+      const alreadyInvestigated = mR.investigated_at !== undefined;
+      if ((lowConf || highConfMiss) && !alreadyInvestigated) {
+        const reason = highConfMiss ? "high_confidence_miss" : "low_confidence_pick";
+        await resolveDispatchGoal({ type: "dispatch_goal", goal: "investigate gap " + String(gap.id) + " before composing (" + reason + ", predicted_p=" + predR.p.toFixed(2) + "): " + String(gap.summary ?? "").slice(0, 240) } as never);
+        const invMeta = { ...mR, investigated_at: new Date().toISOString(), investigation_reason: reason, last_predicted_p: predR.p };
+        await resolveSubstrateGapWrite({ type: "substrateGap_write", gap: { ...gap, classification_metadata: invMeta, status: String(gap.status ?? "open") } } as never);
+        return { shape: "gapToFeatureReport", body: { ok: true, stage: "route", routed: "investigation", gap_id: gap.id, reason, predicted_p: predR.p } };
+      }
+    } catch { /* routing is best-effort; fall through to compose */ }
+  }
 
   // RECOMMIT SOURCE-GAP LOCALIZATION (gap recommit-composer-mislocalized-edit-site):
   // A re_commit gap's id (e.g. "recommit-route-edit-535ee072-verify_failed") is NOT a

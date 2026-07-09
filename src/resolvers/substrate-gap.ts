@@ -335,7 +335,6 @@ export async function resolveSubstrateGapWrite(
   }
 
   await saveGaps(gaps);
-      try { const { resolvePoolImpulseWrite } = await import("./pool-impulse.js"); resolvePoolImpulseWrite({ type: "poolImpulse_write", id: "gap:" + gap.id, shape: "substrateGap", body: { gap_id: gap.id, category: gap.category, route: gap.route, remedy: gap.remedy, summary: gap.summary }, source: "substrate-gap-mirror", status: gap.status === "open" ? "open" : "retired" }); } catch (err) { console.log("[substrate-gap-mirror] pool mirror failed (non-fatal):", err); }
   try {
     const { resolvePoolImpulseWrite } = await import("./pool-impulse.js");
     resolvePoolImpulseWrite({
@@ -367,6 +366,7 @@ export async function resolveSubstrateGapWrite(
   } catch (err) {
     console.log("[substrate-gap-event-publish] publish setup failed (non-fatal):", err);
   }
+
   return {
     shape: "substrateGapWriteResult",
     body: { id: gap.id, action, gap_class: classKey },

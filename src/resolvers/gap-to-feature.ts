@@ -625,7 +625,26 @@ function pickMostLandable(gaps: Record<string, unknown>[]): Record<string, unkno
     const r = calib[String(g.category ?? "unknown")];
     return !!r && r.attempts >= 8 && r.lands === 0;
   };
-  return gaps.map((g) => ({ g, s: (landabilityScore(g) - (hopeless(g) ? 0.5 : 0)) * blockingWeight(g) })).sort((a, b) => b.s - a.s)[0]!.g;
+  // IMPACT-RANKED SELECTION (2026-07-09): landability alone drains the easiest gaps
+  // first and lets a blocking gap starve behind them. Impact = how many OTHER open
+  // gaps cite this gap (by id or by its failing_capability) in their summaries or
+  // failure lessons — a cited blocker outranks its dependents, so a broken sensor
+  // (missing_capability others depend on) self-prioritizes because it blocks
+  // everything downstream. Computed from the gaps already in hand: no extra reads.
+  const impactOf = (g: Record<string, unknown>): number => {
+    const id = String(g.id ?? "").toLowerCase();
+    const gm = (g.classification_metadata ?? g.metadata ?? {}) as Record<string, unknown>;
+    const cap = String(gm.failing_capability ?? "").toLowerCase();
+    let cited = 0;
+    for (const other of gaps) {
+      if (other === g) continue;
+      const om = (other.classification_metadata ?? other.metadata ?? {}) as Record<string, unknown>;
+      const hay = (String(other.summary ?? "") + " " + JSON.stringify(om.per_gap_failure_lessons ?? om.failure_lessons ?? om.gap_lessons ?? "")).toLowerCase();
+      if ((id.length > 8 && hay.includes(id)) || (cap.length > 3 && hay.includes(cap))) cited++;
+    }
+    return 1 + Math.min(1.0, 0.25 * cited);
+  };
+  return gaps.map((g) => ({ g, s: (landabilityScore(g) - (hopeless(g) ? 0.5 : 0)) * blockingWeight(g) * impactOf(g) })).sort((a, b) => b.s - a.s)[0]!.g;
 }
 
 // CLOSE-ON-LAND (2026-06-29). A landed gap previously stayed status:open, so the

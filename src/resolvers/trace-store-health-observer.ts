@@ -90,7 +90,7 @@ export async function resolveTraceStoreHealthObserver(
             category: "trace_store_reconciliation",
             source: "substrate_detected",
               route: "dispatchable",
-              remedy: { vessel: "development-vessel", impulse_type: "trace_store_reconcile" },
+              remedy: { vessel: "goal-host-vessel", target_template_id: "development-vessel:trace-store-reconcile" },
             summary:
               `Trace store row_count=${rowCount} exceeds cap=${cap} ` +
               `(last_reconciled_at=${lastReconciledAt ?? "never"}). ` +

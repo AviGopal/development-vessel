@@ -634,6 +634,7 @@ export const config = {
       // right-click complaints.
       "ui_legibility_scan",
       "detector_coverage_scan",
+      "recurringPatternCluster",
       "signature_cluster_scan",
       "build_signature_detector",
       "cost_expectation_scan",

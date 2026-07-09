@@ -586,18 +586,16 @@ function landabilityScore(gap: Record<string, unknown>): number {
   // avoids it — a gap with lessons is MORE landable on re-pick, not less.
   // Halve the per-attempt penalty when lessons are present so the picker
   // keeps revisiting taught gaps instead of burying them behind fresh ones.
-  const hasLessons = Boolean((meta as Record<string, unknown>).per_gap_failure_lessons ||
+  // Per-gap failure lessons capture the exact mistake so the next LLM draft
+  // avoids it — a gap with lessons is MORE landable on re-pick, not less.
+  const hasLessons = Boolean(
     (meta as Record<string, unknown>).failure_lessons ||
-    (meta as Record<string, unknown>).gap_lessons);
-  if (hasLessons) s += 0.1;
-  const faStep = hasConcreteSite ? (hasLessons ? 0.05 : 0.1) : 0.2;
-  // Surgical gaps (concrete edit_site) have a tighter penalty cap (0.3 vs 0.5):
-  // per-gap failure lessons record the mistake so the LLM can avoid it, meaning
-  // repeated UNFAVORABLE attempts carry less signal about gap unlandability and
-  // more signal about draft quality. Burying them behind meta/diagnostic gaps
-  // that were never tried is worse than re-attempting with updated lessons.
-  const faCap = hasConcreteSite ? 0.3 : 0.5;
-  if (fa > 0) s -= Math.min(faCap, faStep * fa);
+    (meta as Record<string, unknown>).per_gap_failure_lessons
+  );
+  const penaltyPerAttempt = hasConcreteSite ? 0.1 : 0.2;
+  const lessonBonus = hasLessons ? 0.1 : 0;
+  s -= Math.min(fa * penaltyPerAttempt, 0.4);
+  s += lessonBonus;
   // Penalise gaps whose metadata points at the picker/composer itself — selecting
   // them creates a self-referential loop that never lands. blockingWeight > 1
   // means the gap targets core infrastructure; discount proportionally so the

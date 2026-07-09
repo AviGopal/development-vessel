@@ -715,6 +715,20 @@ function verifyGapCondition(gap: Record<string, unknown>): 'present' | 'absent' 
       const contents = readFileSync(runtimePath, 'utf8');
       return contents.includes(hardcodedUrl) ? 'present' : 'absent';
     }
+    // ── Class 3 (sync): landed commit — a substrate-authored commit referencing this gap id already exists ──
+    const gapIdForLandedSync = typeof gap['id'] === 'string' ? (gap['id'] as string) : '';
+    if (gapIdForLandedSync.length >= 8) {
+      try {
+        for (const cloneName of readdirSync('/workspace/git/vessels')) {
+          const cloneDir = join('/workspace/git/vessels', cloneName);
+          if (!existsSync(join(cloneDir, '.git'))) continue;
+          const gitLog = Bun.spawnSync(['git', '-C', cloneDir, 'log', '--grep', gapIdForLandedSync, '--fixed-strings', '-1', '--format=%H', '--since=14.days'], { stdout: 'pipe', stderr: 'pipe', timeout: 10_000 });
+          if (gitLog.exitCode === 0 && new TextDecoder().decode(gitLog.stdout).trim().length > 0) {
+            return 'absent';
+          }
+        }
+      } catch { /* fail open — never false-close */ }
+    }
     // Second evidence class: resolver-behaviour gaps.
     // classification_metadata may carry:
     //   evidence_resolve: { shape: string, input?: Record<string,unknown>, defect_field?: string, nonzero_field?: string }

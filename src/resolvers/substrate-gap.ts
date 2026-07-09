@@ -350,6 +350,23 @@ export async function resolveSubstrateGapWrite(
     console.log("[substrate-gap-mirror] pool mirror failed (non-fatal):", err);
   }
 
+  try {
+    const activityApiUrl = process.env["ACTIVITY_API_ENDPOINT"] ?? process.env["ACTIVITY_API_URL"] ?? "http://127.0.0.1:8080";
+    fetch(`${activityApiUrl}/v2/events/publish`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        type: "devvessel.gap.written",
+        source_vessel_id: "development-vessel",
+        data: { gap_id: gap.id, category: gap.category, route: gap.route, remedy: gap.remedy, status: gap.status },
+      }),
+      signal: AbortSignal.timeout(2000),
+    }).catch((err) => {
+      console.log("[substrate-gap-event-publish] publish failed (non-fatal):", err);
+    });
+  } catch (err) {
+    console.log("[substrate-gap-event-publish] publish setup failed (non-fatal):", err);
+  }
   return {
     shape: "substrateGapWriteResult",
     body: { id: gap.id, action, gap_class: classKey },

@@ -1806,6 +1806,17 @@ export async function resolveGapToFeature(pointer: GapToFeaturePointer): Promise
       editTargets = [{ file: localized.file, description: localized.description }];
     }
   }
+  if (editTargets.length === 0) {
+    const gapId = String(gap.id ?? "");
+    console.log("[gap-to-feature] no existing edit targets found for gap", gapId, "— composer will scaffold new file");
+    void fetch(`${GOAL_HOST_VESSEL_ENDPOINT}/v2/impulses/resolve`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...(METABOB_API_KEY ? { Authorization: `ApiKey ${METABOB_API_KEY}` } : {}) },
+      body: JSON.stringify({ type: "substrateGap", filter: { id: gapId } }),
+    }).catch((e: unknown) => {
+      console.warn("[gap-to-feature] escalation fetch failed:", e instanceof Error ? e.message : String(e));
+    });
+  }
 
   // DUAL-SIDE LOCALIZATION (2026-06-29): a responsibility-MOVE gap names a DESTINATION
   // vessel to move logic TO. localizeGap above pins only the SOURCE; without grounding the

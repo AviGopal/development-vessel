@@ -735,7 +735,7 @@ export function priorAttemptFeedbackBlock(meta?: Record<string, unknown> | null)
 function decomposePrompt(spec: string, maxOps: number, grounding: string, principles: string, priorFeedback = ""): string {
   return `You are a senior engineer decomposing a feature specification into a CONCRETE, ORDERED plan of file operations. Output is executed deterministically — there is no follow-up turn, so the plan must be COMPLETE and CORRECT.
 
-Repo root contains vessels at repos/<vessel>/. Each vessel is a Bun + TypeScript project with its own tsconfig.json. Edits must compile (\`bun run typecheck\`).
+Repo root contains vessels at repos/<vessel>/. Each vessel is a Bun + TypeScript project with its own tsconfig.json. Tests import from "bun:test" (never vitest or jest — they are not installed; a test importing them fails typecheck). New vessels need "typescript" and "@types/bun" in devDependencies. Edits must compile (\`bun run typecheck\`).
 
 FEATURE SPEC:
 ${spec}${priorFeedback ? `\n${priorFeedback}\n` : ""}

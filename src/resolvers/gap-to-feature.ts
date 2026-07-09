@@ -592,10 +592,10 @@ function landabilityScore(gap: Record<string, unknown>): number {
     (meta as Record<string, unknown>).failure_lessons ||
     (meta as Record<string, unknown>).per_gap_failure_lessons
   );
-  const penaltyPerAttempt = hasConcreteSite ? 0.1 : 0.2;
-  const lessonBonus = hasLessons ? 0.1 : 0;
-  s -= Math.min(fa * penaltyPerAttempt, 0.4);
-  s += lessonBonus;
+  const penaltyPerAttempt = hasConcreteSite ? 0.1 : (hasLessons ? 0.1 : 0.2);
+  const failurePenalty = Math.min(fa * penaltyPerAttempt, hasConcreteSite ? 0.2 : 0.4);
+  s -= failurePenalty;
+  if (hasLessons && fa > 0) s += 0.05;
   // Penalise gaps whose metadata points at the picker/composer itself — selecting
   // them creates a self-referential loop that never lands. blockingWeight > 1
   // means the gap targets core infrastructure; discount proportionally so the

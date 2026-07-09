@@ -118,6 +118,38 @@ export class GapDrainObserver {
     const status = data["status"];
     if (status !== undefined && status !== "open") return;
     if (route !== "dispatchable") return;
+    const remedyExt = remedy as { impulse_type?: string; goal?: string; target_template_id?: string } | undefined;
+    const extTemplateId = remedyExt && typeof remedyExt.target_template_id === "string" && remedyExt.target_template_id.length > 0 ? remedyExt.target_template_id : "";
+    const extGoal = remedyExt && typeof remedyExt.goal === "string" && remedyExt.goal.length > 0 ? remedyExt.goal : "";
+    const extHasImpulse = remedyExt && typeof remedyExt.impulse_type === "string" && remedyExt.impulse_type.length > 0;
+    if (!extHasImpulse && (extTemplateId !== "" || extGoal !== "")) {
+      const g2 = globalThis as unknown as { __drainInflight?: Set<string> };
+      g2.__drainInflight ??= new Set<string>();
+      if (g2.__drainInflight.has(category) || g2.__drainInflight.size >= 2) {
+        this.recordDrain({ action: "skipped_inflight", gap_id: gapId, category });
+        return;
+      }
+      g2.__drainInflight.add(category);
+      const t0 = Date.now();
+      try {
+        const goalHostUrl = process.env["GOAL_HOST_VESSEL_ENDPOINT"] ?? "http://127.0.0.1:8210";
+        const runGoalBody = extTemplateId !== ""
+          ? { target_template_id: extTemplateId, variables: { gap_id: gapId, triggered_by: "gap-drain" } }
+          : { goal: extGoal };
+        const ghResp = await fetch(goalHostUrl + "/run-goal", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(runGoalBody),
+          signal: AbortSignal.timeout(120000),
+        });
+        this.recordDrain({ action: "dispatched", gap_id: gapId, category, remedy: extTemplateId !== "" ? extTemplateId : extGoal, ok: ghResp.ok, http_status: ghResp.status, latency_ms: Date.now() - t0 });
+      } catch (err) {
+        this.recordDrain({ action: "dispatch_failed", gap_id: gapId, category, error: String(err), latency_ms: Date.now() - t0 });
+      } finally {
+        g2.__drainInflight.delete(category);
+      }
+      return;
+    }
     if (!remedy || typeof remedy.impulse_type !== "string" || remedy.impulse_type.length === 0) return;
     const g = globalThis as unknown as { __drainInflight?: Set<string> };
     g.__drainInflight ??= new Set<string>();

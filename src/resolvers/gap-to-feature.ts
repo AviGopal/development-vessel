@@ -1852,11 +1852,12 @@ export async function resolveGapToFeature(pointer: GapToFeaturePointer): Promise
   const slices = await capacitySlices(gap);
   if (slices.length >= 2) {
     const sliceResults: Array<{ file: string; verdict: unknown }> = [];
+    const priorSliceFlow: string[] = [];
     let lastBody: Record<string, unknown> | null = null;
     for (const s of slices) {
       const sliceCompose = await resolveFeatureCompose({
         type: "feature_compose",
-        spec: spec + "\n" + `CAPACITY SLICE: this dispatch must touch ONLY the file ${s.file}; other slices are handled in separate dispatches.` + (s.hint ? ` Context: ${s.hint}` : ""),
+        spec: spec + "\n" + `CAPACITY SLICE: this dispatch must touch ONLY the file ${s.file}; other slices are handled in separate dispatches.` + (s.hint ? ` Context: ${s.hint}` : "") + (priorSliceFlow.length ? "\nPRIOR SLICES ALREADY LANDED in this same gap (build on them, they are in the tree now, do not redo or contradict them): " + priorSliceFlow.join("; ") : ""),
         ...(verifyVessels.length ? { verify_vessels: verifyVessels } : {}),
         model: pointer.model,
         dry_run: pointer.dry_run ?? false,
@@ -1872,6 +1873,7 @@ export async function resolveGapToFeature(pointer: GapToFeaturePointer): Promise
       } as never);
       lastBody = sliceCompose.body as Record<string, unknown>;
       sliceResults.push({ file: s.file, verdict: lastBody.verdict });
+      if (lastBody.verdict === "FAVORABLE") { priorSliceFlow.push(s.file + " landed" + (typeof lastBody.commit_sha === "string" ? " (commit " + lastBody.commit_sha + ")" : "") + (typeof lastBody.summary === "string" ? ": " + String(lastBody.summary).slice(0, 120) : "")); }
       if (lastBody.verdict !== "FAVORABLE") break;
     }
     const allOk = sliceResults.length === slices.length && sliceResults.every((r) => r.verdict === "FAVORABLE");

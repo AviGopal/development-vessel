@@ -584,11 +584,13 @@ function landabilityScore(gap: Record<string, unknown>): number {
   const hasConcreteSite = Boolean(meta.edit_site || meta.change_site || meta.single_file);
   // Per-gap failure lessons capture the exact mistake so the next LLM draft
   // avoids it — a gap with lessons is MORE landable on re-pick, not less.
-  const hasLessonsFlag = Array.isArray((meta as Record<string, unknown>).failure_lessons)
-    ? ((meta as Record<string, unknown>).failure_lessons as unknown[]).length > 0
-    : Boolean((meta as Record<string, unknown>).failure_lessons);
-  const penalty = hasConcreteSite ? Math.min(fa * 0.1, 0.2) : Math.min(fa * 0.2, 0.4);
-  if (hasLessonsFlag) s += 0.05;
+  const rawLessons = (meta as Record<string, unknown>).failure_lessons;
+  const hasLessons = typeof rawLessons === "string"
+    ? (rawLessons as string).trim().length > 0
+    : Array.isArray(rawLessons) && (rawLessons as unknown[]).length > 0;
+  const penaltyPerAttempt = hasConcreteSite ? 0.1 : 0.2;
+  const penalty = Math.min(fa * penaltyPerAttempt, hasConcreteSite ? 0.2 : 0.4);
+  if (hasLessons) s += 0.05;
   s -= penalty;
   // Penalise gaps whose metadata points at the picker/composer itself — selecting
   // them creates a self-referential loop that never lands. blockingWeight > 1

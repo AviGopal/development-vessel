@@ -89,6 +89,8 @@ export async function resolveTraceStoreHealthObserver(
             id: `trace-store-reconcile-${hourBucket}`,
             category: "trace_store_reconciliation",
             source: "substrate_detected",
+              route: "dispatchable",
+              remedy: { vessel: "development-vessel", impulse_type: "trace_store_reconcile" },
             summary:
               `Trace store row_count=${rowCount} exceeds cap=${cap} ` +
               `(last_reconciled_at=${lastReconciledAt ?? "never"}). ` +

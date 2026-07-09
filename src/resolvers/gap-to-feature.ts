@@ -1902,8 +1902,12 @@ export async function resolveGapToFeature(pointer: GapToFeaturePointer): Promise
     // Did not land. EXPECTATION-SETTING: measure the prediction-vs-outcome SURPRISE. A gap the
     // self-model predicted would land but didn't is over-optimistic (high-information) → bump
     // harder; a correctly-predicted fail bumps normally. Feeds the calibrated self-model.
-    const pred = predictLand(gap);
-    await bumpFailedAttempts(gap, { surprise: pred.predicted, predictedP: pred.p });
+    if (String(cb.failure_kind ?? "") === "environment") {
+      console.log("[gap-to-feature] environment failure (" + String(cb.failure_kind) + ") — gap credit not bumped");
+    } else {
+      const pred = predictLand(gap);
+      await bumpFailedAttempts(gap, { surprise: pred.predicted, predictedP: pred.p });
+    }
   }
 
   return {

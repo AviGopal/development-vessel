@@ -43,6 +43,7 @@ const sanitizeId = (id: string): string => id.replace(/:/g, "-").replace(/[^a-zA
 interface Gap {
   id?: string; category?: string; status?: string;
   created_at?: string; updated_at?: string; summary?: string;
+  source?: string;
 }
 interface Sentinel { outcome_shape?: string; delegated_to?: string }
 
@@ -305,9 +306,11 @@ export async function resolveGapLifecycleScan(p: GapLifecycleScanPointer): Promi
   const expireHours = (p as any).expireHours ?? 336;
   const maxExpire = (p as any).maxExpire ?? 100;
   const expireBefore = Date.now() - expireHours * 3_600_000;
+  const detectorExpireHours = (p as any).detectorExpireHours ?? 120;
+  const detectorExpireBefore = Date.now() - detectorExpireHours * 3_600_000;
   const expiredCandidates = remainingOpen.filter((g) => {
     const t = Date.parse(g.updated_at ?? g.created_at ?? '');
-    return Number.isFinite(t) && t < expireBefore && !lowValueClosed.includes(g.id!);
+    return Number.isFinite(t) && t < (g.source === 'substrate_detected' ? detectorExpireBefore : expireBefore) && !lowValueClosed.includes(g.id!);
   });
   const expired: string[] = [];
   if (autoClose && !dryRun) {

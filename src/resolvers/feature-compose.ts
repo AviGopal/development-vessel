@@ -821,6 +821,28 @@ async function consultPrinciples(spec: string): Promise<string> {
   }
 }
 
+// REUSE-BEFORE-AUTHORING (2026-07-09): before drafting a new resolver/capability,
+// consult what already EXISTS — the discovery registry's advertised shape
+// vocabulary — and require the plan to cite which existing producer it reuses or
+// state why none fits. Minting a duplicate is a fresh Beta(1,1) cell that splits
+// selection traffic; reuse sharpens an existing posterior. Read-only; advisory.
+async function consultProducers(spec: string): Promise<string> {
+  try {
+    const res = await fetch(`${DISCOVERY_ENDPOINT}/shapes`, {
+      headers: METABOB_API_KEY ? { Authorization: `ApiKey ${METABOB_API_KEY}` } : {},
+      signal: AbortSignal.timeout(8000),
+    });
+    if (!res.ok) return "";
+    const j = (await res.json()) as { shapes?: string[] };
+    const shapes = Array.isArray(j.shapes) ? j.shapes : [];
+    if (!shapes.length) return "";
+    const words = Array.from(new Set(String(spec).toLowerCase().match(/[a-z_]{4,}/g) ?? [])).slice(0, 40);
+    const related = shapes.filter((s) => { const l = String(s).toLowerCase(); return words.some((w) => l.includes(w) || w.includes(l)); }).slice(0, 20);
+    const list = (related.length ? related : shapes.slice(0, 20)).join(", ");
+    return "\nEXISTING PRODUCERS (advertised shapes in the discovery registry). REUSE an existing producer before authoring a new one: if this plan adds a new resolver or capability, the plan summary MUST either name the existing shape it routes to or reuses, or state explicitly why none of these fit: " + list + "\n";
+  } catch { return ""; }
+}
+
 // SHAPE-GROUNDING (2026-06-28): resolve the target vessel's ACTUAL file tree
 // BEFORE planning so the plan binds edits to real paths instead of hallucinating
 // them (observed: the planner invented `registry-stats.ts`, which does not exist,
@@ -1108,6 +1130,7 @@ async function resolveFeatureComposeInner(pointer: FeatureComposePointer): Promi
   // so the plan respects them — the active-consumption wire for the docs/web channel.
   let principles = "";
   try { principles = await consultPrinciples(pointer.spec); } catch { principles = ""; }
+  try { principles += await consultProducers(pointer.spec); } catch { /* advisory */ }
   // PRIOR-ATTEMPT FEEDBACK: if this gap was already rejected by the semantic gate, the
   // gate wrote suspected_real_location + semantic_gate_reason onto its metadata. Inject
   // that as explicit re-draft guidance so the drafter completes the partial fix instead

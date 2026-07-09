@@ -110,8 +110,53 @@ export class GapDrainObserver {
     }
   }
 
-  private async handleGapWritten(_data: Record<string, unknown>): Promise<void> {
-    // Behavior wired in a follow-up change-set.
+  private async handleGapWritten(data: Record<string, unknown>): Promise<void> {
+    const gapId = typeof data["gap_id"] === "string" ? (data["gap_id"] as string) : "";
+    const category = typeof data["category"] === "string" ? (data["category"] as string) : "unknown";
+    const route = data["route"];
+    const remedy = data["remedy"] as { vessel?: string; impulse_type?: string; goal?: string } | undefined;
+    const status = data["status"];
+    if (status !== undefined && status !== "open") return;
+    if (route !== "dispatchable") return;
+    if (!remedy || typeof remedy.impulse_type !== "string" || remedy.impulse_type.length === 0) return;
+    const g = globalThis as unknown as { __drainInflight?: Set<string> };
+    g.__drainInflight ??= new Set<string>();
+    if (g.__drainInflight.has(category) || g.__drainInflight.size >= 2) {
+      this.recordDrain({ action: "skipped_inflight", gap_id: gapId, category });
+      return;
+    }
+    try {
+      for (const leaseName of ["trace_store", "change_window"]) {
+        const leaseResp = await fetch("http://127.0.0.1:8090/v2/impulses/resolve", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ impulse: { type: "maintenanceLease", name: leaseName } }),
+          signal: AbortSignal.timeout(5000),
+        });
+        const leaseBody = (await leaseResp.json()) as { body?: { held?: boolean } };
+        if (leaseBody?.body?.held === true) {
+          this.recordDrain({ action: "deferred_lease_held", gap_id: gapId, category, lease: leaseName });
+          return;
+        }
+      }
+    } catch (err) {
+      console.log("[gap-drain-observer] lease check failed (proceeding):", err);
+    }
+    g.__drainInflight.add(category);
+    const startedAt = Date.now();
+    try {
+      const resp = await fetch("http://127.0.0.1:8090/v2/impulses/resolve", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ impulse: { type: remedy.impulse_type, triggered_by: "gap-drain", gap_id: gapId } }),
+        signal: AbortSignal.timeout(120000),
+      });
+      this.recordDrain({ action: "dispatched", gap_id: gapId, category, impulse_type: remedy.impulse_type, ok: resp.ok, http_status: resp.status, latency_ms: Date.now() - startedAt });
+    } catch (err) {
+      this.recordDrain({ action: "dispatch_failed", gap_id: gapId, category, impulse_type: remedy.impulse_type, error: String(err), latency_ms: Date.now() - startedAt });
+    } finally {
+      g.__drainInflight.delete(category);
+    }
   }
 
   private async handleExecutionCompleted(): Promise<void> {

@@ -160,7 +160,33 @@ export class GapDrainObserver {
   }
 
   private async handleExecutionCompleted(): Promise<void> {
-    // Behavior wired in a follow-up change-set.
+    const g = globalThis as unknown as { __drainLastScan?: number; __drainInflight?: Set<string> };
+    const now = Date.now();
+    if (g.__drainLastScan !== undefined && now - g.__drainLastScan < 60000) return;
+    g.__drainLastScan = now;
+    g.__drainInflight ??= new Set<string>();
+    let impulses: Array<{ id?: string; shape?: string; body?: { gap_id?: string; category?: string; route?: string; remedy?: { impulse_type?: string } } }> = [];
+    try {
+      const { resolvePoolImpulse } = await import("../resolvers/pool-impulse.js");
+      const result = resolvePoolImpulse({ type: "poolImpulse", status: "open" });
+      impulses = (result.body?.impulses ?? []) as typeof impulses;
+    } catch (err) {
+      console.log("[gap-drain-observer] standing pool read failed (non-fatal):", err);
+      return;
+    }
+    for (const imp of impulses) {
+      const body = imp.body;
+      if (!body || body.route !== "dispatchable") continue;
+      const impulseType = body.remedy?.impulse_type;
+      if (typeof impulseType !== "string" || impulseType.length === 0) continue;
+      const category = body.category ?? "unknown";
+      const gapId = body.gap_id ?? imp.id ?? "";
+      if (g.__drainInflight.has(category) || g.__drainInflight.size >= 2) {
+        this.recordDrain({ action: "skipped_inflight", gap_id: gapId, category, source: "execution_completed_scan" });
+        continue;
+      }
+      await this.handleGapWritten({ gap_id: gapId, category, route: "dispatchable", remedy: body.remedy, status: "open" });
+    }
   }
 
   private recordDrain(entry: Record<string, unknown>): void {

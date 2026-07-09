@@ -132,7 +132,25 @@ export function predictLandability(
     .filter((g) => g.status === "open")
     .map((gap) => {
       const score = scoreGap(model, gap);
-      const autoClose = score < UNLANDABLE_THRESHOLD;
+      // Burial guard: a verified or directly-drainable gap must never be silently buried.
+      // If the gap is dispatchable or has verified age boundaries, park it instead of closing.
+      let autoClose = false;
+      if (score < UNLANDABLE_THRESHOLD) {
+        if (
+          (gap as any).route === 'dispatchable' ||
+          ((gap as any).classification_metadata &&
+            Number((gap as any).classification_metadata.verified_age_boundaries ?? 0) >= 1)
+        ) {
+          (gap as any).classification_metadata = {
+            ...((gap as any).classification_metadata ?? {}),
+            parked_reason: 'landability_low_but_verified',
+          };
+          // Leave status as 'open' (parked)
+        } else {
+          autoClose = true;
+          (gap as any).close_reason = 'gap_landability_low';
+        }
+      }
       const residualFlag = autoClose
         ? `gap_landability_low: gap ${gap.id} scored ${score.toFixed(3)} < threshold ${UNLANDABLE_THRESHOLD} — predicted un-landable, eligible for auto-close`
         : null;

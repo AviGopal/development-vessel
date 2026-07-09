@@ -353,7 +353,7 @@ export async function resolveSubstrateGapWrite(
     const activityApiUrl = process.env["ACTIVITY_API_ENDPOINT"] ?? process.env["ACTIVITY_API_URL"] ?? "http://127.0.0.1:8080";
     fetch(`${activityApiUrl}/v2/events/publish`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", "X-Internal-Api-Key": "development-vessel" },
       body: JSON.stringify({
         type: "devvessel.gap.written",
         source_vessel_id: "development-vessel",

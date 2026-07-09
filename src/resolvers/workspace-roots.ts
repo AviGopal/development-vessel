@@ -25,3 +25,13 @@ export function assertInAnyWorkspace(path: string, workspaceRoot: string): void 
   }
   throw new Error(`path outside workspace root: ${path}`);
 }
+
+export function assertInAnyWorkspaceForRead(path: string, workspaceRoot: string): void {
+  const abs = resolve(path);
+  const roots = [...allowedWorkspaceRoots(workspaceRoot), process.env["MITOSIS_RUNTIME_DIR"] ?? "/vessels"];
+  for (const root of roots) {
+    const rel = relative(root, abs);
+    if (!rel.startsWith("..") && !isAbsolute(rel)) return;
+  }
+  throw new Error(`path outside workspace root: ${path}`);
+}

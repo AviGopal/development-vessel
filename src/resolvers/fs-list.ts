@@ -1,7 +1,7 @@
 import { resolve, relative, join } from "path";
 import { readdir } from "node:fs/promises";
 import type { ResolverResult } from "./types.js";
-import { assertInAnyWorkspace } from "./workspace-roots.js";
+import { assertInAnyWorkspaceForRead } from "./workspace-roots.js";
 
 export interface FsListPointer {
   type: "fs_list";
@@ -22,7 +22,7 @@ export interface FsListPointer {
 }
 
 function assertInWorkspace(path: string, workspaceRoot: string): void {
-  assertInAnyWorkspace(path, workspaceRoot);
+  assertInAnyWorkspaceForRead(path, workspaceRoot);
 }
 
 function matchGlob(name: string, glob: string): boolean {

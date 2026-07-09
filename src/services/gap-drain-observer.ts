@@ -134,7 +134,7 @@ export class GapDrainObserver {
       try {
         const goalHostUrl = process.env["GOAL_HOST_VESSEL_ENDPOINT"] ?? "http://127.0.0.1:8210";
         const runGoalBody = extTemplateId !== ""
-          ? { target_template_id: extTemplateId, variables: { gap_id: gapId, triggered_by: "gap-drain" } }
+          ? { targetTemplateId: extTemplateId, variables: { gap_id: gapId, triggered_by: "gap-drain" } }
           : { goal: extGoal };
         const ghResp = await fetch(goalHostUrl + "/run-goal", {
           method: "POST",

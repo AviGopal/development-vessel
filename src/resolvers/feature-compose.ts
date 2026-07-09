@@ -1264,7 +1264,7 @@ async function resolveFeatureComposeInner(pointer: FeatureComposePointer): Promi
   const runVerify = async (v: string): Promise<{ vessel: string; errors: number | string; exit_code: number | null; ok: boolean; output: string }> => {
     const vAbs = `${REPO_ROOT}/${v.replace(/^repos\//, "")}`;
     const sh = await callTool(toolsEndpoint, "shell", {
-      command: `cd ${JSON.stringify(vAbs)} && (echo "== typecheck =="; bun run typecheck 2>&1; echo "TC_EXIT=$?"; echo "== shape-dispatch =="; if [ -f ${SHARED_DISPATCH_CHECK} ] && [ -f src/config.ts ] && [ -f src/routes/impulses.ts ]; then bun ${SHARED_DISPATCH_CHECK} ${JSON.stringify(vAbs)} 2>&1; echo "SD_EXIT=$?"; else echo "SD_EXIT=0"; fi)`,
+      command: `cd ${JSON.stringify(vAbs)} && ([ -d node_modules ] || bun install >/dev/null 2>&1; echo "== typecheck =="; bun run typecheck 2>&1; echo "TC_EXIT=$?"; echo "== shape-dispatch =="; if [ -f ${SHARED_DISPATCH_CHECK} ] && [ -f src/config.ts ] && [ -f src/routes/impulses.ts ]; then bun ${SHARED_DISPATCH_CHECK} ${JSON.stringify(vAbs)} 2>&1; echo "SD_EXIT=$?"; else echo "SD_EXIT=0"; fi)`,
       cwd: REPO_ROOT,
     });
     const raw = String((sh.body as { stdout?: unknown })?.stdout ?? "");

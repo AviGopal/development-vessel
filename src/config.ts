@@ -95,6 +95,12 @@ export const config = {
       // Shape primitive only; gap-closing activity lives separately.
       "substrateGap",
       "substrateGap_write",
+      // Standing-pool resolver (pool-impulse): persistent store of standing
+      // intent impulses at WORKSPACE_ROOT/pool/standing.json.
+      // Read: filter by id, shape, status (default 'open'), limit.
+      // Write: upsert-by-id with atomic tmp-write-then-rename persistence.
+      "poolImpulse",
+      "poolImpulse_write",
       // Skill closure (IAL 27.3.j.2): resolver primitives for codebase navigation
       // and outbound HTTP — enables substrate to perform skill-equivalent operations
       // without operator-authored templates.

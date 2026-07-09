@@ -39,6 +39,7 @@ import { resolveFailureModeMatrixScore } from "../resolvers/failure-mode-matrix-
 import { resolveBoredomEnqueue } from "../resolvers/boredom-enqueue.js";
 import { resolveMemoryNote, resolveMemoryNoteWrite } from "../resolvers/memory-note.js";
 import { resolveSubstrateGap, resolveSubstrateGapWrite } from "../resolvers/substrate-gap.js";
+import { resolvePoolImpulse, resolvePoolImpulseWrite } from "../resolvers/pool-impulse.js";
 import { resolveFsList } from "../resolvers/fs-list.js";
 import { resolveFsGrep } from "../resolvers/fs-grep.js";
 import { resolveHttpFetch } from "../resolvers/http-fetch.js";
@@ -301,6 +302,14 @@ async function dispatchInner(pointer: AnyPointer): Promise<ResolverResult> {
       return resolveSubstrateGap(p as Parameters<typeof resolveSubstrateGap>[0]);
     case "substrateGap_write":
       return resolveSubstrateGapWrite(p as Parameters<typeof resolveSubstrateGapWrite>[0]);
+    case "poolImpulse": {
+      const { resolvePoolImpulse } = await import("../resolvers/pool-impulse.js");
+      return resolvePoolImpulse(pointer as Parameters<typeof resolvePoolImpulse>[0]);
+    }
+    case "poolImpulse_write": {
+      const { resolvePoolImpulseWrite } = await import("../resolvers/pool-impulse.js");
+      return resolvePoolImpulseWrite(pointer as Parameters<typeof resolvePoolImpulseWrite>[0]);
+    }
     case "fs_list":
       return resolveFsList(p as Parameters<typeof resolveFsList>[0]);
     case "fs_grep":

@@ -6,6 +6,7 @@ import { startRegistryChangeObserver } from "./observers/registry-change-observe
 import { startConceptBridgeObserver } from "./observers/concept-bridge-observer.js";
 import { startAutocompleteConceptWriter } from "./observers/autocomplete-concept-writer.js";
 import { startFailureCreditObserver } from "./observers/failure-credit-observer.js";
+import { GapDrainObserver } from "./services/gap-drain-observer.js";
 
 const app = new Hono();
 
@@ -39,6 +40,14 @@ startRegistryChangeObserver();
 startConceptBridgeObserver();
 startAutocompleteConceptWriter();
 startFailureCreditObserver();
+if (process.env["GAP_DRAIN_OBSERVER"] !== "0") {
+  try {
+    const gapDrainObserver = new GapDrainObserver();
+    gapDrainObserver.start();
+  } catch (err) {
+    console.log("[gap-drain-observer] failed to start (non-fatal):", err);
+  }
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Iteration 9 of the cross-vessel OOM hunt — periodic Bun.gc(true) workaround.

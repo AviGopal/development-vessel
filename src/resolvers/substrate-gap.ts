@@ -89,6 +89,8 @@ export interface SubstrateGap {
   detected_at: string;
   status: "open" | "closed" | "rejected";
   closed_by_memory_note_id?: string; // populated by gap-closing activity
+  route?: "dispatchable" | "composable" | "human_required";
+  remedy?: { vessel: string; impulse_type?: string; goal?: string };
   classification_metadata?: Record<string, unknown>;
   created_at: string;
   updated_at: string;

@@ -1046,6 +1046,40 @@ interface GitCutoverArgs {
 }
 
 async function runGitAwareCutover(args: GitCutoverArgs): Promise<ResolverResult> {
+  // CHANGE-WINDOW LEASE (Seam 2A, 2026-07-09): the cutover is the substrate's
+  // only self-mutation chokepoint — commit + push + restart. Without a lease,
+  // concurrent cutovers and substrate-pull-sync race it (stale-runtime pushes
+  // clobbering fresh commits; restarts killing in-flight work). Acquire the
+  // maintenanceLease for the whole cutover; a held lease is an ENVIRONMENT
+  // condition (env_change_window_held), not a draft defect — refuse softly so
+  // the drain loop retries next tick without burning gap credit.
+  const { resolveMaintenanceLeaseWrite } = await import("./maintenance-lease.js");
+  const leaseHolder = `cutover:${args.vessel_name}`;
+  let leaseToken: string | undefined;
+  try {
+    const acq = await resolveMaintenanceLeaseWrite({ type: "maintenanceLease_write", op: "acquire", holder: leaseHolder, ttl_ms: 600_000 });
+    const acqBody = acq.body as { acquired?: boolean; token?: string; held_by?: string; expires_at?: string };
+    if (acqBody.acquired === false) {
+      return softRefuse(
+        `change window held by ${acqBody.held_by ?? "unknown"} until ${acqBody.expires_at ?? "?"} — deferring cutover to next tick`,
+        { kind: "env_change_window_held", vessel_name: args.vessel_name, held_by: acqBody.held_by },
+      );
+    }
+    leaseToken = acqBody.token;
+  } catch {
+    // Lease machinery unavailable — fail open (a dead lease file must not
+    // wedge all self-development), but proceed unleased.
+  }
+  try {
+    return await runGitAwareCutoverInner(args);
+  } finally {
+    if (leaseToken) {
+      try { await resolveMaintenanceLeaseWrite({ type: "maintenanceLease_write", op: "release", token: leaseToken }); } catch { }
+    }
+  }
+}
+
+async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverResult> {
   const {
     pointer,
     vessel_name,
@@ -1571,22 +1605,50 @@ async function runGitAwareCutover(args: GitCutoverArgs): Promise<ResolverResult>
       }
     } else {
       if (unit.startsWith("goal-host")) {
+        // Drain to <=1, not <=0: when this cutover was initiated FROM a goal-host
+        // dispatch (edit-intent compose), that parent dispatch is itself in flight
+        // for the entire cutover — waiting for 0 deadlocks by construction, the
+        // bounded wait always expired, and the inline restart killed the very
+        // dispatch that landed the change (interrupted → resumed → re-applied,
+        // the route-edit replay loop).
         const deadline = Date.now() + Number(process.env["MITOSIS_DRAIN_WAIT_MS"] ?? "90000");
         let inFlight = -1;
         for (;;) {
           try { const _ghEndpoint = (process.env["GOAL_HOST_VESSEL_ENDPOINT"] ?? "http://127.0.0.1:8210").replace(/\/+$/, ""); const hj = await (await fetch(`${_ghEndpoint}/health`, { signal: AbortSignal.timeout(3000) })).json() as { in_flight?: number }; inFlight = typeof hj.in_flight === "number" ? hj.in_flight : -1; } catch { inFlight = -1; }
-          if (inFlight <= 0 || Date.now() >= deadline) break;
+          if (inFlight <= 1 || Date.now() >= deadline) break;
           await new Promise((r) => setTimeout(r, 5000));
         }
-        operations.push({ op: "drain-before-restart goal-host", status: inFlight <= 0 ? "ok" : "warn", detail: inFlight > 0 ? "bounded wait expired - proceeding with " + inFlight + " in-flight dispatch(es)" : "quiet or unknowable (fail-open)" });
+        operations.push({ op: "drain-before-restart goal-host (target <=1)", status: inFlight <= 1 ? "ok" : "warn", detail: inFlight > 1 ? "bounded wait expired - proceeding with " + inFlight + " in-flight dispatch(es)" : "drained to initiator or quiet (fail-open)" });
+        // Deferred restart via PID1-owned transient timer (same mechanism as the
+        // dev-vessel self-cutover path): the mirror into /vessels is already done,
+        // so the delay only postpones when the new code goes live — long enough
+        // for the initiating dispatch to finish its reach gate and respond.
+        const ghDelay = process.env["MITOSIS_GOALHOST_RESTART_DELAY_S"] ?? "30";
+        const ghTsUnit = `mitosis-goalhost-restart-${mitosis_version_id}`.replace(/[^A-Za-z0-9_.-]/g, "-").slice(0, 90);
+        try {
+          const sysdRun = process.env["SYSTEMD_RUN_CMD"] ?? "systemd-run";
+          const proc = Bun.spawnSync(
+            [sysdRun, `--on-active=${ghDelay}s`, `--unit=${ghTsUnit}`, "--collect", "systemctl", "restart", unit],
+            { stdout: "pipe", stderr: "pipe" },
+          );
+          vesselRestarted = (proc.exitCode ?? 1) === 0;
+          operations.push({
+            op: `deferred restart via systemd-run (--on-active=${ghDelay}s) ${unit}`,
+            status: vesselRestarted ? "ok" : "warn",
+            detail: vesselRestarted ? `transient unit ${ghTsUnit} (fires after initiating dispatch completes)` : (proc.stderr ? new TextDecoder().decode(proc.stderr).slice(0, 200) : "systemd-run failed"),
+          });
+        } catch (err) {
+          operations.push({ op: `deferred restart ${unit}`, status: "warn", detail: (err as Error).message.slice(0, 200) });
+        }
+      } else {
+        const restart = await runSystemctl(["restart", unit]);
+        vesselRestarted = restart.exitCode === 0;
+        operations.push({
+          op: `systemctl restart ${unit}`,
+          status: vesselRestarted ? "ok" : "warn",
+          detail: vesselRestarted ? undefined : restart.stderr.slice(0, 200),
+        });
       }
-      const restart = await runSystemctl(["restart", unit]);
-      vesselRestarted = restart.exitCode === 0;
-      operations.push({
-        op: `systemctl restart ${unit}`,
-        status: vesselRestarted ? "ok" : "warn",
-        detail: vesselRestarted ? undefined : restart.stderr.slice(0, 200),
-      });
     }
   }
 

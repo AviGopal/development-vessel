@@ -151,6 +151,10 @@ export class GapDrainObserver {
       return;
     }
     if (!remedy || typeof remedy.impulse_type !== "string" || remedy.impulse_type.length === 0) return;
+    const gd = globalThis as any;
+    gd.__drainBackoff ??= new Map();
+    const boEntry = gd.__drainBackoff.get(gapId);
+    if (boEntry && Date.now() < boEntry.until) { return; }
     const g = globalThis as unknown as { __drainInflight?: Set<string> };
     g.__drainInflight ??= new Set<string>();
     if (g.__drainInflight.has(category) || g.__drainInflight.size >= 2) {

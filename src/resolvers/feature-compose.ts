@@ -1653,8 +1653,15 @@ async function resolveFeatureComposeInner(pointer: FeatureComposePointer): Promi
     }
   }
 
+  function classifyEnvironmentFailure(cuts: unknown[]): string | null {
+    const t = JSON.stringify(cuts ?? []);
+    if (/env_change_window_held|change window held/i.test(t)) return "env_change_window_held";
+    if (/restarted \(cutover\)|cutover race/i.test(t)) return "env_cutover_race";
+    return null;
+  }
   if (verdict !== "FAVORABLE") {
-    const lessonClass = classifyComposeFailure(applied, verify, String(semantic_gate?.reason ?? ""));
+    const envClass = classifyEnvironmentFailure(cutovers);
+    const lessonClass = envClass ?? classifyComposeFailure(applied, verify, String(semantic_gate?.reason ?? ""));
     await appendComposeLesson(lessonClass, String(semantic_gate?.reason ?? verify.find((v) => !v.ok)?.output ?? applied.find((a) => !a.ok)?.detail ?? verdict), [...touched].join(","), pointer.gap);
   }
   // Persist the compose report as a durable artifact (mirrors gap-to-feature's PROPOSALS_DIR reports). Never fails the compose.

@@ -589,6 +589,7 @@ function landabilityScore(gap: Record<string, unknown>): number {
   const hasLessons = Boolean((meta as Record<string, unknown>).per_gap_failure_lessons ||
     (meta as Record<string, unknown>).failure_lessons ||
     (meta as Record<string, unknown>).gap_lessons);
+  if (hasLessons) s += 0.1;
   const faStep = hasConcreteSite ? (hasLessons ? 0.05 : 0.1) : 0.2;
   // Surgical gaps (concrete edit_site) have a tighter penalty cap (0.3 vs 0.5):
   // per-gap failure lessons record the mistake so the LLM can avoid it, meaning

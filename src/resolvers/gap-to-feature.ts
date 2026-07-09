@@ -764,6 +764,20 @@ async function verifyGapConditionAsync(gap: Record<string, unknown>): Promise<'p
       const contents = readFileSync(runtimePath, 'utf8');
       return contents.includes(hardcodedUrl) ? 'present' : 'absent';
     }
+    // ── Class 3: landed commit — a substrate-authored commit referencing this gap id already exists ──
+    const gapIdForLanded = typeof gap['id'] === 'string' ? (gap['id'] as string) : '';
+    if (gapIdForLanded.length >= 8) {
+      try {
+        for (const cloneName of readdirSync('/workspace/git/vessels')) {
+          const cloneDir = join('/workspace/git/vessels', cloneName);
+          if (!existsSync(join(cloneDir, '.git'))) continue;
+          const gitLog = Bun.spawnSync(['git', '-C', cloneDir, 'log', '--grep', gapIdForLanded, '--fixed-strings', '-1', '--format=%H', '--since=14.days'], { stdout: 'pipe', stderr: 'pipe', timeout: 10_000 });
+          if (gitLog.exitCode === 0 && new TextDecoder().decode(gitLog.stdout).trim().length > 0) {
+            return 'absent';
+          }
+        }
+      } catch { /* fail open — never false-close */ }
+    }
     // ── Class 2: resolver-behaviour (evidence_resolve / verify_shape) ───────
     const evidenceResolveRaw = meta['evidence_resolve'];
     const verifyShapeRaw = meta['verify_shape'];

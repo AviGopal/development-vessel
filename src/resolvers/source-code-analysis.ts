@@ -146,7 +146,34 @@ export async function resolveSourceCodeAnalysis(
     : `${WORKSPACE_ROOT}/${targetPath}`;
 
   // Discover files recursively (up to 2 levels to avoid explosion)
-  const topEntries = await listFiles(absoluteTarget);
+  const vesselName = targetPath.replace(/^\/repos\//, "").replace(/^repos\//, "").split("/")[0] ?? targetPath;
+  const candidateRoots: string[] = targetPath.startsWith("/")
+    ? [targetPath]
+    : [absoluteTarget, `/vessels/${vesselName}`, `${WORKSPACE_ROOT}/repos/${vesselName}`];
+
+  let resolvedRoot: string = absoluteTarget;
+  let cachedEntries: string[] = [];
+  for (const candidate of candidateRoots) {
+    const entries = await listFiles(candidate);
+    if (entries.length > 0) {
+      resolvedRoot = candidate;
+      cachedEntries = entries;
+      break;
+    }
+  }
+
+  if (cachedEntries.length === 0) {
+    return {
+      shape: "sourceCodeAnalysis",
+      body: {
+        error: "root_not_found",
+        target_path: targetPath,
+        attempted_paths: candidateRoots,
+      },
+    };
+  }
+
+  const topEntries: string[] = cachedEntries;
   const allPaths: string[] = [];
 
   for (const entry of topEntries) {
@@ -168,10 +195,10 @@ export async function resolveSourceCodeAnalysis(
 
   // Also try standard sub-paths for known vessel layout
   const standardPaths = [
-    `${absoluteTarget}/src/index.ts`,
-    `${absoluteTarget}/package.json`,
-    `${absoluteTarget}/README.md`,
-    `${absoluteTarget}/tsconfig.json`,
+    `${resolvedRoot}/src`,
+    `${resolvedRoot}/lib`,
+    `${resolvedRoot}/index.ts`,
+    `${resolvedRoot}/index.js`,
   ];
   for (const sp of standardPaths) {
     if (!allPaths.includes(sp)) allPaths.push(sp);

@@ -1055,7 +1055,16 @@ async function bumpFailedAttempts(gap: Record<string, unknown>, opts: { surprise
           status: "open",
         };
         await resolveSubstrateGapWrite({ type: "substrateGap_write", gap: childRecord as never });
-        console.log(`[bumpFailedAttempts] emitted narrowed child gap for chronically-stuck gap (failed_attempts>=3): ${parentId}`);
+        const childId = String((childRecord as Record<string,unknown>).id ?? "");
+        console.log(`[gap-to-feature] emitted narrowed child gap for chronically-stuck gap ${parentId}: ${childId}`);
+        void fetch(GOAL_HOST_VESSEL_ENDPOINT + "/run-goal", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", ...(METABOB_API_KEY ? { Authorization: "ApiKey " + METABOB_API_KEY } : {}) },
+          body: JSON.stringify({
+            goal: "investigate and decompose gap " + parentId + ": " + parentSummary.slice(0, 400),
+            tags: ["escalated_from:" + parentId],
+          }),
+        }).catch(() => { });
       } catch (err) {
         // Child gap emission is best-effort; never block the parent update.
         console.warn(`[bumpFailedAttempts] child gap emit failed: ${err instanceof Error ? err.message : String(err)}`);

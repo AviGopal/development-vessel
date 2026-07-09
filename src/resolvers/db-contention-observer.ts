@@ -95,6 +95,7 @@ export async function resolveDbContentionObserver(
             id: `db-contention-${hourBucket}`,
             category: "db_contention",
             source: "substrate_detected",
+              route: "composable",
             summary:
               `SurrealDB write/read contention: ${anomalies.join(", ")} ` +
               `(p50=${p50}ms, slow_queries=${slow}, qps=${stats?.qps ?? "?"}). ` +

@@ -88,12 +88,13 @@ export const TRACE_STORE_RECONCILE_TEMPLATE: ActivityTemplate = {
         url: "http://127.0.0.1:8080/v2/impulses/resolve",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          impulse: {
+          pointer: {
             type: "db_admin",
             operation: "reconcile_trace_store",
             dry_run: false,
             lease_token: "{{extract_lease_token_text}}",
           },
+          budget: 1000,
         }),
         failOnNon2xx: true,
       },

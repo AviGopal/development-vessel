@@ -14,7 +14,7 @@ async function callImpulse(body: Record<string, unknown>): Promise<any> {
       "Content-Type": "application/json",
       ...(METABOB_API_KEY ? { Authorization: `ApiKey ${METABOB_API_KEY}` } : {}),
     },
-    body: JSON.stringify(body),
+    body: JSON.stringify({ impulse: body }),
     signal: AbortSignal.timeout(30_000),
   });
   if (!res.ok) {

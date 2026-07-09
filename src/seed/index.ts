@@ -19,6 +19,8 @@ import { MODEL_OPPORTUNITY_TICK_TEMPLATE } from "./model-opportunity-tick.js";
 import { DETECTOR_META_TICK_TEMPLATE } from "./detector-meta-tick.js";
 import { CODE_LOCALITY_MINING_TICK_TEMPLATE } from "./code-locality-mining-tick.js";
 import { DRAFT_DETECTOR_ACTIVITY_TEMPLATE } from "./draft-detector-activity.js";
+import { TRACE_STORE_HEALTH_OBSERVER_TICK_TEMPLATE } from "./trace-store-health-observer.js";
+import { TRACE_STORE_RECONCILE_TEMPLATE } from "./trace-store-reconcile.js";
 import { PROBE_REACHABLE_UNLEARNED_TEMPLATE } from "./probe-reachable-unlearned.js";
 import { PROBE_UNTRAVERSED_EDGE_TEMPLATE } from "./probe-untraversed-edge.js";
 import { ESCALATE_UNKNOWN_SHAPE_TEMPLATE } from "./escalate-unknown-shape.js";
@@ -260,6 +262,8 @@ export { MODEL_OPPORTUNITY_TICK_TEMPLATE } from "./model-opportunity-tick.js";
 export { DETECTOR_META_TICK_TEMPLATE } from "./detector-meta-tick.js";
 export { CODE_LOCALITY_MINING_TICK_TEMPLATE } from "./code-locality-mining-tick.js";
 export { DRAFT_DETECTOR_ACTIVITY_TEMPLATE } from "./draft-detector-activity.js";
+export { TRACE_STORE_HEALTH_OBSERVER_TICK_TEMPLATE } from "./trace-store-health-observer.js";
+export { TRACE_STORE_RECONCILE_TEMPLATE } from "./trace-store-reconcile.js";
 
 export const SEED_TEMPLATES: ActivityTemplate[] = [
   // detector-authoring recursion (2026-06-14, SUBSTRATE_AS_MDP §9.3 limit-8):
@@ -596,4 +600,9 @@ export const SEED_TEMPLATES: ActivityTemplate[] = [
   OBSERVE_AND_AUTHOR_FROM_GAPS_TEMPLATE,
   OBSERVE_OBSIDIAN_EVENTS_TEMPLATE,
   PROBE_OBSIDIAN_ACTION_EFFECTS_TEMPLATE,
+  // Self-managed DB reconciliation (2026-07-08): the trace-store health tick
+  // detects AET row_count > cap and emits a gap; the reconcile activity is the
+  // gap's closer, dispatched by gap_to_feature via goal-host.
+  TRACE_STORE_HEALTH_OBSERVER_TICK_TEMPLATE,
+  TRACE_STORE_RECONCILE_TEMPLATE,
 ];

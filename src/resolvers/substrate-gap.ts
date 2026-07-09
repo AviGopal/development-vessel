@@ -65,6 +65,13 @@ export type SubstrateGapCategory =
   // doc_drift_fix (a prose reach-gate), NOT feature_compose (whose typecheck gate is a no-op
   // for a .md edit). A document is an expectation; drift is a closure failure.
   | "documentation_drift"
+  // trace_store_reconciliation (2026-07-08): AET row_count exceeded its
+  // configured cap — emitted by trace_store_health_observer. Routed by
+  // gap_to_feature to the development-vessel:trace-store-reconcile seed
+  // activity via goal-host, NOT feature_compose (this is an operational
+  // maintenance swap, not a code change). See openspec
+  // 2026-07-08-substrate-self-managed-db-reconciliation/design.md.
+  | "trace_store_reconciliation"
   | "other";
 
 export type SubstrateGapSource =

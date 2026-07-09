@@ -6,7 +6,7 @@ import { resolveSubstrateGap, resolveSubstrateGapWrite, DECISION_LOG_GAP_CATEGOR
 import { resolveAuthorProducer } from "./author-producer.js";
 import { resolveDocDriftFix } from "./doc-drift-fix.js";
 import { resolveReachabilityGapRepair } from "./reachability-gap-repair.js";
-import { DISCOVERY_ENDPOINT, METABOB_API_KEY } from "../config.js";
+import { DISCOVERY_ENDPOINT, METABOB_API_KEY, GOAL_HOST_VESSEL_ENDPOINT } from "../config.js";
 import { readFile } from "node:fs/promises";
 
 // Mirror feature-compose's path model: repos/<vessel>/... maps to the writable
@@ -1540,6 +1540,103 @@ export async function resolveGapToFeature(pointer: GapToFeaturePointer): Promise
           gap_category: gap.category,
           verdict: "already_resolved",
           note: mcClosureNote,
+        },
+      };
+    }
+  }
+
+  // 1a0. TRACE-STORE-RECONCILIATION gaps dispatch the seeded
+  // development-vessel:trace-store-reconcile activity via goal-host, NOT
+  // feature_compose (2026-07-08, openspec
+  // 2026-07-08-substrate-self-managed-db-reconciliation). This is an
+  // operational DB-maintenance swap (acquire lease -> db_admin
+  // reconcile_trace_store -> verify -> release lease), not a code change —
+  // feature_compose's typecheck-verify gate has nothing to typecheck here.
+  // Dispatching by targetTemplateId (rather than freeform goal text) pins the
+  // exact activity so goal-host's shape-graph walk doesn't have to infer it,
+  // and the reach-gate still produces an honest `reached` verdict for the
+  // learning loop (canonical loop: run_goal -> goal_status -> goal_reasoning
+  // -> provide_feedback).
+  if (String(gap.category ?? "") === "trace_store_reconciliation") {
+    if (pointer.dry_run) {
+      return {
+        shape: "gapToFeatureReport",
+        body: {
+          ok: true,
+          stage: "route_trace_store_reconcile",
+          gap_id: gap.id,
+          gap_category: gap.category,
+          route: "trace-store-reconcile",
+          dry_run: true,
+          plan: "POST goal-host /run-goal targetTemplateId=development-vessel:trace-store-reconcile",
+        },
+      };
+    }
+    try {
+      const auth: Record<string, string> = METABOB_API_KEY ? { Authorization: `ApiKey ${METABOB_API_KEY}` } : {};
+      const res = await fetch(`${GOAL_HOST_VESSEL_ENDPOINT}/run-goal`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...auth },
+        body: JSON.stringify({
+          goal: "reconcile the trace store back under its configured cap",
+          targetTemplateId: "development-vessel:trace-store-reconcile",
+        }),
+        signal: AbortSignal.timeout(15_000),
+      });
+      const text = await res.text().catch(() => "");
+      const dispatched = res.ok;
+      if (dispatched) {
+        // Mark dispatched (classification_metadata only; status stays "open"
+        // — the trace-store-health-observer stops re-emitting once row_count
+        // drops back under cap, and gap-lifecycle-tick auto-closes stale
+        // non-reproducing gaps; this resolver does not assert the swap
+        // succeeded, only that it was handed off).
+        try {
+          await resolveSubstrateGapWrite({
+            type: "substrateGap_write",
+            gap: {
+              id: String(gap.id ?? ""),
+              category: gap.category,
+              source: gap.source,
+              summary: gap.summary,
+              detected_at: gap.detected_at,
+              classification_metadata: {
+                ...((gap.classification_metadata ?? gap.metadata ?? {}) as Record<string, unknown>),
+                dispatched_at: new Date().toISOString(),
+                dispatch_route: "trace-store-reconcile",
+              },
+              status: "open",
+            },
+          } as never);
+        } catch {
+          /* best-effort marker write */
+        }
+      } else {
+        await bumpFailedAttempts(gap);
+      }
+      return {
+        shape: "gapToFeatureReport",
+        body: {
+          ok: dispatched,
+          stage: "route_trace_store_reconcile",
+          gap_id: gap.id,
+          gap_category: gap.category,
+          route: "trace-store-reconcile",
+          dispatch_status: res.status,
+          dispatch_detail: text.slice(0, 300),
+        },
+      };
+    } catch (e) {
+      await bumpFailedAttempts(gap);
+      return {
+        shape: "gapToFeatureReport",
+        body: {
+          ok: false,
+          stage: "route_trace_store_reconcile",
+          gap_id: gap.id,
+          gap_category: gap.category,
+          route: "trace-store-reconcile",
+          error: e instanceof Error ? e.message : String(e),
         },
       };
     }

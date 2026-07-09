@@ -695,6 +695,16 @@ export const config = {
       "code_locality_mining_tick",
       // Seam ③ substrate-authored resolver (2026-07-05): code_locality
       "code_locality",
+      // Self-managed DB reconciliation (2026-07-08, openspec
+      // 2026-07-08-substrate-self-managed-db-reconciliation): file-backed
+      // advisory lock coordinating the trace-store swap with self-measurement
+      // reads (see http-retry.ts's pausable-citizen guard).
+      "maintenanceLease",
+      "maintenanceLease_write",
+      // Self-managed DB reconciliation: reads activity-api's GET /metrics/db
+      // traceStore counters (never a live AET scan) and emits a substrateGap
+      // when row_count exceeds cap.
+      "trace_store_health_observer",
     ] as const,
     resolveEndpoint: "/v2/impulses/resolve",
     resolveRequestFormat: "pointer" as const,

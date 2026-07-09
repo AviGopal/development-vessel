@@ -206,6 +206,8 @@ import { resolveProjectThreadScan } from "../resolvers/project-thread-scan.js";
 import { resolveSolicitationOutcomeScan } from "../resolvers/solicitation-outcome-scan.js";
 import { resolveCodeLocalityMiningTick } from "../resolvers/code-locality-mining-tick.js";
 import { resolveCodeLocality } from "../resolvers/code-locality.js";
+import { resolveMaintenanceLease, resolveMaintenanceLeaseWrite } from "../resolvers/maintenance-lease.js";
+import { resolveTraceStoreHealthObserver } from "../resolvers/trace-store-health-observer.js";
 import { resolveDispatch as resolveDispatchHelper } from "./impulses.js";
 import type { ResolverResult } from "../resolvers/types.js";
 
@@ -368,6 +370,12 @@ async function dispatchInner(pointer: AnyPointer): Promise<ResolverResult> {
     // @shape-dispatch:private
     case "db_contention_observer":
       return resolveDbContentionObserver(p as Parameters<typeof resolveDbContentionObserver>[0]);
+    case "maintenanceLease":
+      return resolveMaintenanceLease(p as Parameters<typeof resolveMaintenanceLease>[0]);
+    case "maintenanceLease_write":
+      return resolveMaintenanceLeaseWrite(p as Parameters<typeof resolveMaintenanceLeaseWrite>[0]);
+    case "trace_store_health_observer":
+      return resolveTraceStoreHealthObserver(p as Parameters<typeof resolveTraceStoreHealthObserver>[0]);
     // @shape-dispatch:private
     case "feature_compose":
       return resolveFeatureCompose(p as Parameters<typeof resolveFeatureCompose>[0]);

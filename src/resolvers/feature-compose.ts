@@ -732,6 +732,28 @@ export function priorAttemptFeedbackBlock(meta?: Record<string, unknown> | null)
   return lines.join("\n");
 }
 
+function refineSpecPrompt(spec: string, grounding: string, lessons: string): string {
+  return `You are a spec editor. Rewrite the following change spec into LANDING FORM.
+
+Rules:
+(a) Quote verbatim anchor lines exactly from the grounding excerpts.
+(b) Enumerate exact edit steps, one insert-or-replace per step, at most 2 steps.
+(c) Single-file single-concern scope.
+(d) Acceptance criteria at intent level only.
+(e) Output ONLY the rewritten spec text with zero analysis prose.
+
+SPEC:
+${spec}
+
+GROUNDING EXCERPTS:
+${grounding}
+
+LESSONS:
+${lessons}
+
+Rewrite the spec now:`;
+}
+
 function decomposePrompt(spec: string, maxOps: number, grounding: string, principles: string, priorFeedback = ""): string {
   return `You are a senior engineer decomposing a feature specification into a CONCRETE, ORDERED plan of file operations. Output is executed deterministically — there is no follow-up turn, so the plan must be COMPLETE and CORRECT.
 
@@ -1092,9 +1114,26 @@ async function resolveFeatureComposeInner(pointer: FeatureComposePointer): Promi
   // of re-producing it blind. Additive — empty when no prior rejection exists.
   const priorFeedback = priorAttemptFeedbackBlock(pointer.gap?.classification_metadata);
   const composeLessons = await composeLessonsBlock(pointer.spec);
+  let spec = pointer.spec;
+  if (!(/REPLACE|WITH:|INSERT AFTER|ANCHOR/i.test(spec)) || spec.length > 3500) {
+    try {
+      const refined = await llmCall(llmEndpoint, refineSpecPrompt(spec, grounding, composeLessons), model);
+      const trimmed = refined.trim();
+      if (trimmed.length >= 40) {
+        spec = trimmed;
+        console.log("[spec-refine] applied");
+      } else {
+        console.log("[spec-refine] skipped");
+      }
+    } catch {
+      console.log("[spec-refine] skipped");
+    }
+  } else {
+    console.log("[spec-refine] skipped");
+  }
   let planRaw: string;
   try {
-    planRaw = await llmCall(llmEndpoint, decomposePrompt(pointer.spec, maxOps, grounding, principles + composeLessons, priorFeedback), model);
+    planRaw = await llmCall(llmEndpoint, decomposePrompt(spec, maxOps, grounding, principles + composeLessons, priorFeedback), model);
   } catch (e) {
     return { shape: "featureComposeReport", body: { ok: false, stage: "decompose", error: (e as Error).message } };
   }
@@ -1102,7 +1141,7 @@ async function resolveFeatureComposeInner(pointer: FeatureComposePointer): Promi
   let ops = (plan?.ops as PlanOp[] | undefined) ?? [];
   if (!plan || !Array.isArray(ops) || ops.length === 0) {
     try {
-      planRaw = await llmCall(llmEndpoint, decomposePrompt(pointer.spec, maxOps, grounding, principles + composeLessons, priorFeedback) + "\n\nCRITICAL RETRY: your previous plan contained NO ops (analysis prose or truncation). Output ONLY the JSON object starting with { — zero words before it, no analysis, compressed ops only.", model);
+      planRaw = await llmCall(llmEndpoint, decomposePrompt(spec, maxOps, grounding, principles + composeLessons, priorFeedback) + "\n\nCRITICAL RETRY: your previous plan contained NO ops (analysis prose or truncation). Output ONLY the JSON object starting with { — zero words before it, no analysis, compressed ops only.", model);
       plan = parseJsonObject(planRaw);
       ops = (plan?.ops as PlanOp[] | undefined) ?? [];
     } catch { /* fall through to honest no-ops below */ }

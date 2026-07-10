@@ -40,17 +40,20 @@ export async function resolveTemplateSuccessRanking24h(
         : Array.isArray(body)
         ? (body as any[])
         : [];
-      // Filter to last 24h
-      traces = raw.filter((t: any) => {
-        const ts: unknown = t?.created_at ?? t?.started_at ?? t?.timestamp;
-        if (typeof ts === "number") return ts >= cutoffSec || ts >= cutoffMs;
-        if (typeof ts === "string") {
-          const parsed = new globalThis.Date(ts).getTime();
-          return !isNaN(parsed) && parsed >= cutoffMs;
+      const filtered = raw.filter((t: any) => {
+        const createdAt: unknown = t.created_at ?? t.createdAt ?? t.timestamp;
+        let withinWindow = false;
+        if (typeof createdAt === "number") withinWindow = createdAt >= cutoffSec;
+        else if (typeof createdAt === "string") {
+          const ms = new Date(createdAt).getTime();
+          withinWindow = !isNaN(ms) && ms >= cutoffMs;
         }
-        return true; // include if we can't parse timestamp
+        if (!withinWindow) return false;
+        // Only count successful traces toward the ranking.
+        const status: unknown = t.status ?? t.outcome;
+        return status === "success" || status === "completed" || status === "ok";
       });
-      traces = traces.filter((t: any) => t?.status === "success");
+      traces = filtered;
     }
   } catch {
     // If traces endpoint unavailable, fall through with empty

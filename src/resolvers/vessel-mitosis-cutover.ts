@@ -19,6 +19,7 @@ import { createHash } from "node:crypto";
 import type { ResolverResult } from "./types.js";
 import { resolveSubstrateGapWrite } from "./substrate-gap.js";
 import { resolveActivateSubstrateScript } from "./activate-substrate-script.js";
+import { resolveMaintenanceLeaseWrite } from "./maintenance-lease";
 
 /**
  * vessel_mitosis_cutover — promotes a mitosis track to the canonical position
@@ -832,22 +833,51 @@ export async function resolveVesselMitosisCutover(
   // /vessels/<v>/ runtime path and restart the systemd unit. Emits a
   // cutoverApplied impulse with new_git_sha + push_status.
   if (pointer.staged_files && pointer.staged_files.length > 0) {
-    return await runGitAwareCutover({
-      pointer,
-      vessel_name,
-      base_version_id,
-      mitosis_version_id,
-      mitosisRoot,
-      baseRoot,
-      stagedFiles: pointer.staged_files,
-      hostRepoRoot:
-        pointer.host_repo_root ??
-        (directPush && cloneDir
-          ? join(cloneDir, vessel_name)
-          : join(workspaceRoot, "repos", vessel_name)),
-      evaluationEvidence: evaluation_evidence,
-      stagedBaseSha,
+    // Acquire change-window maintenance lease before mutating /vessels
+    // (gap cutover-acquires-change-window-2026-07-09).
+    const acquireResult = await resolveMaintenanceLeaseWrite({
+      type: "maintenanceLease_write",
+      op: "acquire",
+      holder: `cutover:${String(pointer.vessel_name ?? "unknown")}`,
+      ttl_ms: 600000,
     });
+    const acquireBody = (acquireResult as { body?: { acquired?: boolean; held_by?: string; token?: string } }).body ?? {};
+    if (acquireBody.acquired === false) {
+      return {
+        shape: "cutoverDeferred",
+        body: {
+          deferred: true,
+          reason: "change_window lease held",
+          held_by: acquireBody.held_by,
+          retry_after_ms: 60000,
+        },
+      };
+    }
+    const token = acquireBody.token;
+    try {
+      return await runGitAwareCutover({
+        pointer,
+        vessel_name,
+        base_version_id,
+        mitosis_version_id,
+        mitosisRoot,
+        baseRoot,
+        stagedFiles: pointer.staged_files,
+        hostRepoRoot:
+          pointer.host_repo_root ??
+          (directPush && cloneDir
+            ? join(cloneDir, vessel_name)
+            : join(workspaceRoot, "repos", vessel_name)),
+        evaluationEvidence: evaluation_evidence,
+        stagedBaseSha,
+      });
+    } finally {
+      await resolveMaintenanceLeaseWrite({
+        type: "maintenanceLease_write",
+        op: "release",
+        token,
+      });
+    }
   }
 
   const baseUnitName = pointer.base_unit_name ?? `${vessel_name}.service`;

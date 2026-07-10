@@ -1657,7 +1657,7 @@ async function resolveFeatureComposeInner(pointer: FeatureComposePointer): Promi
   // (now-correct) verify gate actually PROTECT the runtime.
   let rolled_back = false;
   const restored: string[] = [];
-  if (verdict === "UNFAVORABLE" && !pointer.keep_on_fail) {
+  if ((verdict as string) === "UNFAVORABLE" && !pointer.keep_on_fail) {
     for (const [abs, original] of preEditContent) {
       const w = await callTool(toolsEndpoint, "fs_write", { path: abs, content: original });
       if (w.ok) restored.push(abs);

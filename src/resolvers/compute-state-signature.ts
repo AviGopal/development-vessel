@@ -440,7 +440,8 @@ export async function resolveComputeStateSignature(
     const rCtrl = new AbortController();
     const rTimer = setTimeout(() => rCtrl.abort(), 800);
     try {
-      const rResp = await fetch("http://127.0.0.1:8090/v2/impulses/resolve", {
+      const _selfEndpoint = process.env["SELF_ENDPOINT"] ?? `http://127.0.0.1:${process.env["PORT"] ?? "8090"}`;
+      const rResp = await fetch(`${_selfEndpoint}/v2/impulses/resolve`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({

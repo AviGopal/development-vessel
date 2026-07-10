@@ -1071,6 +1071,28 @@ async function appendComposeLesson(cls: string, reason: string, vessels: string,
     console.warn(`[compose-lessons] concept-db mirror failed: ${(err as Error).message}`);
   }
 }
+const COMPOSE_FILE_LESSONS_PATH = "/workspace/proposals/compose-file-lessons.jsonl";
+async function fileLessonsBlock(specText?: string): Promise<string> {
+  // PER-FILE TYPECHECK LESSONS: verbatim tsc diagnostics from prior failed
+  // attempts touching files named in this spec. File path is the stable key
+  // across reworded re-dispatches (goal_hash is not).
+  if (!specText) return "";
+  try {
+    const { existsSync, readFileSync } = await import("node:fs");
+    if (!existsSync(COMPOSE_FILE_LESSONS_PATH)) return "";
+    const lines = readFileSync(COMPOSE_FILE_LESSONS_PATH, "utf8").split("\n").filter((l) => l.trim().length > 0).slice(-80);
+    const relevant: Array<{ at: string; files: string[]; tsc: string }> = [];
+    for (const ln of lines) {
+      try {
+        const e = JSON.parse(ln) as { at?: string; files?: string[]; tsc?: string };
+        if (!Array.isArray(e.files) || !e.tsc) continue;
+        if (e.files.some((f) => specText.includes(String(f)) || specText.includes(String(f).split("/").pop() ?? String(f)))) relevant.push({ at: e.at ?? "", files: e.files.map(String), tsc: String(e.tsc) });
+      } catch { /* skip malformed line */ }
+    }
+    if (relevant.length === 0) return "";
+    return "\n\nPRIOR TYPECHECK FAILURES ON THESE FILES (verbatim diagnostics from earlier failed attempts on the same files — your op plan MUST avoid re-introducing these errors; declare each new variable exactly once, in the correct scope):\n" + relevant.slice(-3).map((r) => `- [${r.at}] files=${r.files.join(",")}\n${r.tsc.slice(0, 1500)}`).join("\n");
+  } catch { return ""; }
+}
 async function composeLessonsBlock(specText?: string): Promise<string> {
   // FIRST: semantic recall from concept-db — relevance to the current spec, not
   // JSONL recency. Fails open to the JSONL path when concept-db is down or empty.
@@ -1156,7 +1178,7 @@ async function resolveFeatureComposeInner(pointer: FeatureComposePointer): Promi
   // that as explicit re-draft guidance so the drafter completes the partial fix instead
   // of re-producing it blind. Additive — empty when no prior rejection exists.
   const priorFeedback = priorAttemptFeedbackBlock(pointer.gap?.classification_metadata);
-  const composeLessons = await composeLessonsBlock(pointer.spec);
+  const composeLessons = (await composeLessonsBlock(pointer.spec)) + (await fileLessonsBlock(pointer.spec));
   let spec = pointer.spec;
   if (!(/REPLACE|WITH:|INSERT AFTER|ANCHOR/i.test(spec)) || spec.length > 3500) {
     try {
@@ -1746,6 +1768,15 @@ async function resolveFeatureComposeInner(pointer: FeatureComposePointer): Promi
     const envClass = classifyEnvironmentFailure(cutovers);
     const lessonClass = envClass ?? classifyComposeFailure(applied, verify, String(semantic_gate?.reason ?? ""));
     await appendComposeLesson(lessonClass, String(semantic_gate?.reason ?? verify.find((v) => !v.ok)?.output ?? applied.find((a) => !a.ok)?.detail ?? verdict), [...touched].join(","), pointer.gap);
+    try {
+      const tscText = verify.find((v) => !v.ok)?.output ?? "";
+      const failedOpFiles = applied.filter((a) => !a.ok).map((a) => a.path);
+      const lessonFiles = (failedOpFiles.length > 0 ? failedOpFiles : applied.map((a) => a.path)).slice(0, 8);
+      if (tscText && lessonFiles.length > 0) {
+        const { appendFileSync: appendFileLesson } = await import("node:fs");
+        appendFileLesson(COMPOSE_FILE_LESSONS_PATH, JSON.stringify({ at: new Date().toISOString(), files: lessonFiles, class: lessonClass, tsc: tscText.slice(0, 2000) }) + "\n");
+      }
+    } catch { /* per-file lesson write is best-effort */ }
   }
   // Persist the compose report as a durable artifact (mirrors gap-to-feature's PROPOSALS_DIR reports). Never fails the compose.
   try {

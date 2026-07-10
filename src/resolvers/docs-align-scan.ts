@@ -182,18 +182,14 @@ export async function resolveDocsAlignScan(pointer: DocsAlignScanPointer): Promi
       }
     }
 
-    if (invariants.has("naming_alignment")) {
-      if (!vocabulary) {
-        if (!pushFinding({
-          doc_id: doc.id,
-          invariant: "naming_alignment",
-          evidence: "",
-          suggested_repair: "",
-          note: "vocabulary unavailable — canonical-naming-vocabulary memoryNote not resolvable",
-        })) break outer;
-      } else {
-        for (const entry of vocabulary.deprecated) {
-          const rx = new RegExp(entry.pattern, "g");
+    if (invariants.has("naming_alignment") && vocabulary) {
+      if (vocabulary) {
+        for (const entry of vocabulary.deprecated ?? []) {
+          const pat = entry.pattern ?? '';
+          const canon = entry.canonical ?? '';
+          const pathOnly = entry.path_only ?? false;
+          if (!pat) continue;
+          const rx = new RegExp(pat, "g");
           for (const line of lines) {
             rx.lastIndex = 0;
             let match: RegExpExecArray | null;
@@ -204,12 +200,12 @@ export async function resolveDocsAlignScan(pointer: DocsAlignScanPointer): Promi
                 return tokIdx >= 0 && idx >= tokIdx && idx < tokIdx + tok.length;
               });
               if (inRetained) continue;
-              if (entry.path_only && !(idx > 0 && /[\\/]/.test(line[idx - 1] ?? ''))) continue;
+              if (pathOnly && !(idx > 0 && /[\\/]/.test(line[idx - 1] ?? ''))) continue;
               if (!pushFinding({
                 doc_id: doc.id,
                 invariant: "naming_alignment",
                 evidence: line,
-                suggested_repair: `replace "${entry.pattern}" with "${entry.canonical}"`,
+                suggested_repair: `replace "${pat}" with "${canon}"`,
               })) break outer;
               break;
             }

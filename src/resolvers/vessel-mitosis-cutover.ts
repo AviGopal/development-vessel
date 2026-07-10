@@ -466,6 +466,17 @@ export async function resolveVesselMitosisCutover(
   //   concept_K-NGhlSQ3grT — mitosis cutover chain post-fix state 2026_06_04
   //   concept_jhOVI4a8DfMD — substrate durable gap closure verified 2026_06_04
   //   concept_Orn4yVaJYD24 — operator audit becomes tick template
+  // Coerce evaluation_evidence from JSON string → object when the engine's
+  // interpolateProxyValue emits a stringified value instead of the live object.
+  // Without this guard, typeof-object checks below throw structuredError and the
+  // conditional_cutover task silently drops from the trace (engine.ts ~line 578).
+  if (typeof pointer.evaluation_evidence === "string") {
+    try {
+      pointer = { ...pointer, evaluation_evidence: JSON.parse(pointer.evaluation_evidence) };
+    } catch {
+      // Leave as-is; downstream validation will surface the malformed value.
+    }
+  }
   let evaluation_evidence: VesselMitosisCutoverPointer["evaluation_evidence"] =
     pointer.evaluation_evidence;
   if (typeof (evaluation_evidence as unknown) === "string") {

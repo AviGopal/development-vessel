@@ -1573,8 +1573,12 @@ export async function resolveGapToFeature(pointer: GapToFeaturePointer): Promise
     const mcMeta = (gap.classification_metadata ?? gap.metadata ?? {}) as Record<string, unknown>;
     const mcEditSite = typeof mcMeta["edit_site"] === "string" ? mcMeta["edit_site"] as string : undefined;
     const mcSummary = typeof gap.summary === "string" ? gap.summary as string : "";
-    const mcShapeMatch = mcSummary.match(/[a-z][a-z0-9_:-]{2,}/);
-    const mcCandidateShape = mcShapeMatch ? mcShapeMatch[0] : undefined;
+    const _quotedMatch = mcSummary.match(/"([^"]+)"/);
+    const _metaShape = typeof (gap as Record<string, unknown>).classification_metadata === "object" && (gap as Record<string, unknown>).classification_metadata !== null
+      ? ((gap as Record<string, unknown>).classification_metadata as Record<string, unknown>).shape as string | undefined
+      : undefined;
+    const candidateShape: string = (_quotedMatch?.[1]) ?? (_metaShape ?? "") ?? (mcSummary.match(/[a-z][a-z0-9_:-]{2,}/)?.[0] ?? "");
+    const mcCandidateShape = candidateShape || undefined;
     let mcAlreadyResolved = false;
     if (mcCandidateShape) {
       try {

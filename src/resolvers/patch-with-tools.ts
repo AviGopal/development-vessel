@@ -550,6 +550,14 @@ export async function resolvePatchWithTools(pointer: PatchWithToolsPointer): Pro
     // V38: the code tools edit liveSrcPath IN PLACE during the loop; restore the
     // original so a failed/capped patch never corrupts live source.
     await resetTarget();
+    try {
+      const { execSync } = await import('node:child_process');
+      const targetDir = dirname(liveSrcPath);
+      execSync('git restore .', { cwd: targetDir, stdio: 'pipe' });
+    } catch (_restoreErr) {
+      // best-effort; log but do not mask the original error
+      console.warn('[patch-with-tools] git restore failed after exhausted attempts:', _restoreErr);
+    }
     await clearAuthoringMarker(authoringMarkerPath);
     return structuredError(
       `patch_with_tools: ${attemptFailures.length} attempt(s) exhausted without a verified patch`,

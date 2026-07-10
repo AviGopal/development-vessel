@@ -898,8 +898,41 @@ async function verifyGapConditionAsync(gap: Record<string, unknown>): Promise<'p
     // No defect signature found — treat as healthy
     return 'absent';
   } catch {
-    return 'unknown';
+    // fall through to landed-commit evidence class
   }
+  // ── Class 3: landed-commit evidence ─────────────────────────────────────
+  try {
+    const gapId = typeof gap.id === 'string' ? gap.id : '';
+    if (gapId.length >= 8) {
+      const vesselsRoot = '/workspace/git/vessels';
+      let entries: string[] = [];
+      try {
+        entries = readdirSync(vesselsRoot);
+      } catch {
+        entries = [];
+      }
+      for (const dir of entries) {
+        const repoPath = join(vesselsRoot, dir);
+        const gitPath = join(repoPath, '.git');
+        if (!existsSync(gitPath)) continue;
+        try {
+          const proc = Bun.spawnSync({
+            cmd: ['git', '-C', repoPath, 'log', '--grep', gapId, '--fixed-strings', '-1', '--format=%H', '--since=14.days'],
+            timeout: 10000,
+          });
+          const out = typeof proc.stdout === 'object' && proc.stdout !== null
+            ? new TextDecoder().decode(proc.stdout).trim()
+            : '';
+          if (out.length > 0) return 'absent';
+        } catch {
+          // per-repo failure — continue
+        }
+      }
+    }
+  } catch {
+    // fail open
+  }
+  return 'unknown';
 }
 
 /** Mark a gap closed once its fix genuinely landed on origin/dev. Best-effort, guarded. */

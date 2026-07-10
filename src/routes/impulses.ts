@@ -37,6 +37,7 @@ import { resolveSubstrateHealthTick } from "../resolvers/substrate-health-tick.j
 import { resolveComposeTopologyTick } from "../resolvers/compose-topology-tick.js";
 import { resolveFailureModeMatrixScore } from "../resolvers/failure-mode-matrix-score.js";
 import { resolveBoredomEnqueue } from "../resolvers/boredom-enqueue.js";
+import { resolveRhythmConductorTick } from "../resolvers/rhythm-conductor-tick.js";
 import { resolveMemoryNote, resolveMemoryNoteWrite } from "../resolvers/memory-note.js";
 import { resolveSubstrateGap, resolveSubstrateGapWrite } from "../resolvers/substrate-gap.js";
 import { resolvePoolImpulse, resolvePoolImpulseWrite } from "../resolvers/pool-impulse.js";
@@ -295,6 +296,8 @@ async function dispatchInner(pointer: AnyPointer): Promise<ResolverResult> {
       return resolveFailureModeMatrixScore(p as Parameters<typeof resolveFailureModeMatrixScore>[0]);
     case "boredom_enqueue":
       return resolveBoredomEnqueue(p as Parameters<typeof resolveBoredomEnqueue>[0]);
+    case "rhythm_conductor_tick":
+      return resolveRhythmConductorTick(p as Parameters<typeof resolveRhythmConductorTick>[0]);
     case "memoryNote":
       return resolveMemoryNote(p as Parameters<typeof resolveMemoryNote>[0]);
     case "memoryNote_write":

@@ -531,6 +531,15 @@ export async function resolveApplyProposalAsPatch(pointer: ApplyProposalAsPatchP
   // drafter output. Fresh proposals are the actionable ones — try them first.
   // Anti-starvation is handled by `proposal_id` targeting, not FIFO ordering.
   const prefer = pointer.prefer ?? "newest";
+  entries = entries.filter((p) => {
+    const raw = p as unknown as { status?: string; stale?: boolean };
+    const statusStale =
+      raw.status === 'stale' ||
+      raw.status === 'precondition_failed' ||
+      raw.status === 'analytic';
+    const boolStale = raw.stale === true;
+    return !statusStale && !boolStale;
+  });
   entries.sort((a, b) => (prefer === "oldest" ? a.mtime - b.mtime : b.mtime - a.mtime));
   // (funnel) staleness window for untargeted selection.
   const maxAgeMs = (pointer.max_age_hours ?? 72) * 3_600_000;

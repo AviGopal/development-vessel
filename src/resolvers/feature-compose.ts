@@ -727,6 +727,9 @@ export function priorAttemptFeedbackBlock(meta?: Record<string, unknown> | null)
     lines.push("PER-GAP FAILURE LESSONS — this exact mistake was already made on THIS gap; a plan repeating it will be rolled back:");
     for (const entry of lessons.slice(-5)) {
       lines.push(`- ${String(entry.class)}: ${String(entry.reason)}`);
+      if (typeof entry.raw_excerpt === "string" && entry.raw_excerpt.length > String(entry.reason).length) {
+        lines.push(`  raw verify output (verbatim, from the prior failed attempt): ${entry.raw_excerpt.slice(0, 1500)}`);
+      }
     }
   }
   lines.push("- A fix that again leaves the named path/lines untouched will be REJECTED again. Target the exact location the gate identified.");
@@ -1012,7 +1015,7 @@ async function appendComposeLesson(cls: string, reason: string, vessels: string,
       const meta = (gap.classification_metadata ?? {}) as Record<string, unknown>;
       const lessons = (Array.isArray(meta.failure_lessons) ? meta.failure_lessons : []) as Array<Record<string, unknown>>;
       const reCommit = lessons.some((l) => l.class === cls);
-      lessons.push({ at: new Date().toISOString(), class: cls, reason: reason.slice(0, 200) });
+      lessons.push({ at: new Date().toISOString(), class: cls, reason: reason.slice(0, 200), raw_excerpt: reason.slice(0, 1500) });
       while (lessons.length > 8) lessons.shift();
       meta.failure_lessons = lessons;
       await resolveSubstrateGapWrite({

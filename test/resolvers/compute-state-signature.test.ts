@@ -210,3 +210,93 @@ describe("compute_state_signature", () => {
     expect((rIdle.body as any).signature_hash).not.toBe((rBusy.body as any).signature_hash);
   });
 });
+
+describe("compute_state_signature — rhythm/cadence axis (rhythm-aware selection)", () => {
+  function makeFetchWithRhythms(
+    rhythms: Array<Record<string, unknown>>,
+  ): typeof fetch {
+    return (async (input: any, init?: any) => {
+      const url = typeof input === "string" ? input : String(input.url ?? input);
+      if (url.includes("/v2/activities/execution-traces")) {
+        return new Response(JSON.stringify({ executions: [] }), { status: 200 });
+      }
+      if (url.includes("/v2/activities/templates")) {
+        return new Response(JSON.stringify({ templates: [] }), { status: 200 });
+      }
+      // Rhythm registry read — POST /v2/impulses/resolve with a poolImpulse body.
+      if (url.includes("/v2/impulses/resolve")) {
+        const body = init?.body ? JSON.parse(String(init.body)) : {};
+        if (body?.impulse?.shape === "timeShapedRhythm") {
+          return new Response(
+            JSON.stringify({ body: { impulses: rhythms, count: rhythms.length } }),
+            { status: 200 },
+          );
+        }
+      }
+      return new Response("not found", { status: 404 });
+    }) as unknown as typeof fetch;
+  }
+
+  const mkRhythm = (id: string, axis: string, axis_code: number, staleness: number) => ({
+    id,
+    shape: "timeShapedRhythm",
+    body: { axis, axis_code, family: id, budget: 0.1, alpha: 4, beta: 1, staleness },
+  });
+
+  it("folds a dominant rhythm into the signature and swapping which rhythm is stalest flips it", async () => {
+    // reality more stale than freshness → reality (axis_code 1) dominates.
+    globalThis.fetch = makeFetchWithRhythms([
+      mkRhythm("reality", "reality", 1, 0.9),
+      mkRhythm("freshness", "freshness", 2, 0.3),
+    ]);
+    const a = await resolveComputeStateSignature({
+      type: "compute_state_signature",
+      activityApiEndpoint: "http://test",
+      apiKey: "k",
+    });
+    const ab = (a.body as any).rhythm;
+    const aReality = ab.rhythms.find((r: any) => r.id === "reality").due_score;
+    const aFresh = ab.rhythms.find((r: any) => r.id === "freshness").due_score;
+    // due_score ordering is load-independent (computed for all rhythms).
+    expect(aReality).toBeGreaterThan(aFresh);
+
+    // Swap staleness → freshness (axis_code 2) is now stalest.
+    globalThis.fetch = makeFetchWithRhythms([
+      mkRhythm("reality", "reality", 1, 0.3),
+      mkRhythm("freshness", "freshness", 2, 0.9),
+    ]);
+    const b = await resolveComputeStateSignature({
+      type: "compute_state_signature",
+      activityApiEndpoint: "http://test",
+      apiKey: "k",
+    });
+    const bb = (b.body as any).rhythm;
+    const bReality = bb.rhythms.find((r: any) => r.id === "reality").due_score;
+    const bFresh = bb.rhythms.find((r: any) => r.id === "freshness").due_score;
+    expect(bFresh).toBeGreaterThan(bReality);
+
+    // The signature reflects rhythm state: swapping the dominant rhythm changes
+    // the hash (rhythm management is part of what state-conditioned Thompson
+    // keys on). Holds whenever the rhythms are affordable under current load.
+    if (ab.dominant_rhythm_axis !== 0 || bb.dominant_rhythm_axis !== 0) {
+      expect(ab.dominant_rhythm_axis).not.toBe(bb.dominant_rhythm_axis);
+      expect((a.body as any).signature_hash).not.toBe((b.body as any).signature_hash);
+    }
+  });
+
+  it("degrades to a rhythm-blind signature when the registry is unreachable", async () => {
+    globalThis.fetch = (async (input: any) => {
+      const url = typeof input === "string" ? input : String(input.url ?? input);
+      if (url.includes("/v2/activities/")) return new Response(JSON.stringify({ executions: [], templates: [] }), { status: 200 });
+      return new Response("err", { status: 500 });
+    }) as unknown as typeof fetch;
+    const r = await resolveComputeStateSignature({
+      type: "compute_state_signature",
+      activityApiEndpoint: "http://test",
+      apiKey: "k",
+    });
+    const rb = (r.body as any).rhythm;
+    expect(rb.due_count).toBe(0);
+    expect(rb.dominant_rhythm_axis).toBe(0);
+  });
+});

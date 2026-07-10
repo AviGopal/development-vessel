@@ -420,6 +420,89 @@ export async function resolveComputeStateSignature(
   // Goal: across a stable substrate window, ≤5 distinct signatures.
   const opPresenceTier =
     bucketUie > 0 || uiAssertsPending > 0 || uiPanelsOpen > 0 ? 1 : 0;
+  // Rhythm/cadence axis fetch (dev-vessel's own pool store). Degrades to empty
+  // list on any failure so the signature stays defined.
+  type RhythmImpulse = {
+    id?: string;
+    shape?: string;
+    body?: {
+      axis?: string;
+      axis_code?: number;
+      family?: string;
+      budget?: number;
+      alpha?: number;
+      beta?: number;
+      staleness?: number;
+    };
+  };
+  let rhythmImpulses: RhythmImpulse[] = [];
+  try {
+    const rCtrl = new AbortController();
+    const rTimer = setTimeout(() => rCtrl.abort(), 800);
+    try {
+      const rResp = await fetch("http://127.0.0.1:8090/v2/impulses/resolve", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          impulse: {
+            type: "poolImpulse",
+            shape: "timeShapedRhythm",
+            limit: 50,
+          },
+        }),
+        signal: rCtrl.signal,
+      });
+      if (rResp.ok) {
+        const rJson = (await rResp.json()) as {
+          body?: { impulses?: RhythmImpulse[] };
+        } | null;
+        const arr = rJson?.body?.impulses;
+        if (Array.isArray(arr)) rhythmImpulses = arr;
+      }
+    } finally {
+      clearTimeout(rTimer);
+    }
+  } catch {
+    rhythmImpulses = [];
+  }
+  const rhythmScored = rhythmImpulses.map((r) => {
+    const b = r.body ?? {};
+    const alpha = typeof b.alpha === "number" ? b.alpha : 1;
+    const beta = typeof b.beta === "number" ? b.beta : 1;
+    const staleness = typeof b.staleness === "number" ? b.staleness : 0;
+    const budget = typeof b.budget === "number" ? b.budget : 1;
+    const denom = alpha + beta > 0 ? alpha + beta : 1;
+    const due_score = (alpha / denom) * staleness / Math.max(budget, 0.05);
+    const affordableBudget = budget <= 1 - bucketLoad / 3;
+    const presenceOk = b.axis === "presence" ? opPresenceTier === 1 : true;
+    const affordable = affordableBudget && presenceOk;
+    return {
+      id: typeof r.id === "string" ? r.id : "",
+      axis: typeof b.axis === "string" ? b.axis : "",
+      axis_code: typeof b.axis_code === "number" ? b.axis_code : 0,
+      family: typeof b.family === "string" ? b.family : "",
+      due_score,
+      affordable,
+    };
+  });
+  const affordableRhythms = rhythmScored.filter((r) => r.affordable);
+  const dueCount = affordableRhythms.filter((r) => r.due_score >= 1.0).length;
+  const cadenceDueTier = dueCount === 0 ? 0 : dueCount <= 2 ? 1 : 2;
+  let dominantRhythmAxis = 0;
+  let dominantRhythmFamily = "";
+  let bestScore = -Infinity;
+  for (const r of affordableRhythms) {
+    if (r.due_score > bestScore) {
+      bestScore = r.due_score;
+      dominantRhythmAxis = r.axis_code;
+      dominantRhythmFamily = r.family;
+    }
+  }
+  if (affordableRhythms.length === 0) {
+    dominantRhythmAxis = 0;
+    dominantRhythmFamily = "";
+  }
+
   const hashPayload: Record<string, unknown> = {
     load: bucketLoad,
     mem: bucketMem,
@@ -427,6 +510,8 @@ export async function resolveComputeStateSignature(
     sr: bucketSr,
     // operator presence — collapsed to binary class
     op: opPresenceTier,
+    cad: cadenceDueTier,
+    rhy: dominantRhythmAxis,
     // concept-prior bucket (no priors / few / many)
     lcc: Math.floor(loadedConceptCount / 5),
     // activity-class axis (V16 widening 2026-06-07) — discrete 0-5
@@ -479,6 +564,15 @@ export async function resolveComputeStateSignature(
         loaded_concept_count: loadedConceptCount,
         // Surface a sample for inspection. Full list is in the hash payload.
         loaded_concept_ids_sample: loadedConceptIds.slice(0, 5),
+      },
+      rhythm: {
+        due_count: dueCount,
+        cadence_due_tier: cadenceDueTier,
+        dominant_rhythm_axis: dominantRhythmAxis,
+        dominant_rhythm_family: dominantRhythmFamily,
+        rhythms: rhythmScored
+          .slice(0, 8)
+          .map((r) => ({ id: r.id, family: r.family, due_score: Math.round(r.due_score * 100) / 100 })),
       },
       dominant_activity_class: dominantActivityClass,
       signature_hash,

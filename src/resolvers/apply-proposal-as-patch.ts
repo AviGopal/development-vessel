@@ -29,7 +29,7 @@
  */
 
 import { resolve, join, dirname } from "node:path";
-import { mkdir, readdir, stat, writeFile, readFile, access } from "node:fs/promises";
+import { mkdir, readdir, stat, writeFile, readFile, access, rename } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { DISCOVERY_ENDPOINT, METABOB_API_KEY } from "../config.js";
 import type { ResolverResult } from "./types.js";
@@ -429,15 +429,27 @@ async function sweepStaleProposals(
       continue;
     }
 
+    let ageMs = 0;
+    try { ageMs = Date.now() - (await stat(filePath)).mtimeMs; } catch { /* age unknown — do not sweep */ }
+
     let proposal: Record<string, unknown>;
     try {
       const raw = await readFile(filePath, "utf-8");
       proposal = JSON.parse(raw) as Record<string, unknown>;
     } catch {
-      continue; // unparseable — leave for manual triage
+      // Unparseable (e.g. fence-wrapped JSON): once older than the staleness
+      // window, rename into the terminal .rejected state so it stops being
+      // rescanned; selection already ignores names not ending in -report.json.
+      if (ageMs > STALE_MAX_AGE_MS) {
+        try { await rename(filePath, `${filePath}.rejected`); swept++; } catch { /* non-fatal */ }
+      }
+      continue;
     }
 
-    if (!isStaleProposal(proposal)) continue;
+    // Tag+created_at predicate first; legacy proposals carry neither, so fall
+    // back to the staleness class in the filename plus file mtime.
+    const staleByName = /(freshness_violation|precondition|analytic)/i.test(name);
+    if (!isStaleProposal(proposal) && !(staleByName && ageMs > STALE_MAX_AGE_MS)) continue;
 
     // Mark the proposal as rejected due to staleness.
     const updated: Record<string, unknown> = {

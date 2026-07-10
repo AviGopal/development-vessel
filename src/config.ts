@@ -86,6 +86,7 @@ export const config = {
       "failure_mode_matrix_score",
       "boredom_enqueue",
       "rhythm_conductor_tick",
+      "rhythm_reality_sync",
       // Memory closure (IAL 27.3.j.1): substrate-resident note store.
       // Read: filter by type/title/provenance. Write: upsert by id.
       // Backed by WORKSPACE_ROOT/memory/notes.json (atomic writes).

@@ -25,7 +25,7 @@ export async function resolveTemplateSuccessRanking24h(
   let traces: any = [];
   try {
     const res = await fetch(
-      `${METABOB_ENDPOINT}/v2/activities/traces?limit=500&status=success`,
+      `${METABOB_ENDPOINT}/v2/activities/execution-traces?limit=500`,
       {
         headers,
         signal: AbortSignal.timeout(15_000),
@@ -33,7 +33,9 @@ export async function resolveTemplateSuccessRanking24h(
     );
     if (res.ok) {
       const body = (await res.json()) as any;
-      const raw: any[] = Array.isArray(body?.traces)
+      const raw: any[] = Array.isArray(body?.executions)
+        ? (body.executions as any[])
+        : Array.isArray(body?.traces)
         ? (body.traces as any[])
         : Array.isArray(body)
         ? (body as any[])

@@ -25,6 +25,7 @@ import type { ResolverResult } from "./types.js";
 import { resolveVesselMitosisCutover } from "./vessel-mitosis-cutover.js";
 import { resolveSubstrateGap, resolveSubstrateGapWrite } from "./substrate-gap.js";
 import { writeAuthoringMarker, clearAuthoringMarker } from "./patch-with-tools.js";
+import { existsSync as mountExistsSync } from "node:fs";
 
 const DISCOVERY_ENDPOINT = process.env.DISCOVERY_ENDPOINT ?? "http://127.0.0.1:8100";
 // In-container authoring targets the WRITABLE runtime (/vessels), like the
@@ -975,7 +976,24 @@ function tscErrorSet(raw: string): Set<string> {
 
 function classifyComposeFailure(appliedOps: Array<{ ok: boolean; detail?: string }>, verifyResults: Array<{ ok: boolean; output: string }>, semanticReason: string): string {
   const ap = appliedOps.find((a) => !a.ok);
-  if (ap) return /ENOENT/.test(ap.detail ?? "") ? "mis_localized_path" : "anchor_not_found";
+  if (ap) {
+    if (/ENOENT/.test(ap.detail ?? "")) {
+      // out_of_mount_target: when the ENOENT path's PARENT DIRECTORY is itself absent
+      // under the vessel runtime mount, the target is a git-tracked path outside the
+      // synced /vessels mount (e.g. obsidian-vessel/sidecar/**) — an environment /
+      // mount-scope fault, not a drafter hallucination. Surface it distinctly so the
+      // gap funnel routes it to a mount-sync fix instead of blaming the draft.
+      try {
+        const enoentPath = (ap.detail ?? "").match(/open '([^']+)'/)?.[1];
+        if (enoentPath) {
+          const parentDir = enoentPath.replace(/\/[^/]+$/, "");
+          if (!mountExistsSync(parentDir)) return "out_of_mount_target";
+        }
+      } catch { /* fall through to generic classification */ }
+      return "mis_localized_path";
+    }
+    return "anchor_not_found";
+  }
   const bad = verifyResults.find((v) => !v.ok);
   if (bad) {
     if (/TS1128|TS1005|TS1109/.test(bad.output)) return "syntax_break";

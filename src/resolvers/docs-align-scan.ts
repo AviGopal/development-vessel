@@ -11,7 +11,7 @@ export interface DocsAlignCorpusDocument {
 }
 
 export interface DocsAlignVocabulary {
-  deprecated: Array<{ pattern: string; canonical: string }>;
+  deprecated: Array<{ pattern: string; canonical: string; path_only?: boolean }>;
   retained: string[];
 }
 
@@ -65,10 +65,10 @@ async function fetchCanonicalVocabulary(): Promise<DocsAlignVocabulary | null> {
         : JSON.stringify(body ?? "");
     const deprecated: Array<{ pattern: string; canonical: string }> = [];
     if (/metabob-activity-api/.test(noteBody)) {
-      deprecated.push({ pattern: "metabob-activity-api", canonical: "activity-api" });
+      deprecated.push({ pattern: "metabob-activity-api", canonical: "activity-api", path_only: true } as { pattern: string; canonical: string; path_only?: boolean });
     }
     if (/metabob-analysis-api/.test(noteBody)) {
-      deprecated.push({ pattern: "metabob-analysis-api", canonical: "analysis-vessel" });
+      deprecated.push({ pattern: "metabob-analysis-api", canonical: "analysis-api", path_only: true } as { pattern: string; canonical: string; path_only?: boolean });
     }
     return { deprecated, retained: [] };
   } catch {
@@ -149,6 +149,7 @@ export async function resolveDocsAlignScan(pointer: DocsAlignScanPointer): Promi
     /\bas of 20\d\d-\d\d(-\d\d)?\b/i,
     /\(20\d\d-\d\d-\d\d\)/,
   ];
+  const datePattern = new RegExp(datedRegexes.map((r) => r.source).join("|"), "i");
   const substrateLive = "substrate-live";
 
   outer: for (const doc of documents) {
@@ -156,8 +157,19 @@ export async function resolveDocsAlignScan(pointer: DocsAlignScanPointer): Promi
     const lines = doc.body.split(/\r?\n/);
 
     if (invariants.has("timelessness")) {
+      let inChangelogSection = false;
       for (const line of lines) {
-        const hit = datedRegexes.some((rx) => rx.test(line)) || line.includes(substrateLive);
+        if (/^#{1,6}\s/.test(line)) {
+          if (/^#\s/.test(line)) {
+            inChangelogSection = false;
+          }
+          if (/recent stabilisation|changelog|version history/i.test(line)) {
+            inChangelogSection = true;
+          }
+        }
+        if (inChangelogSection) continue;
+        const isDeprecationMarker = /DEPRECATED\s*\(20\d\d/.test(line) || /\*\*DEPRECATED\b/.test(line);
+        const hit = (!isDeprecationMarker && (datePattern.test(line) || line.includes(substrateLive)));
         if (hit) {
           if (!pushFinding({
             doc_id: doc.id,
@@ -191,6 +203,7 @@ export async function resolveDocsAlignScan(pointer: DocsAlignScanPointer): Promi
                 return tokIdx >= 0 && idx >= tokIdx && idx < tokIdx + tok.length;
               });
               if (inRetained) continue;
+              if (entry.path_only && !(idx > 0 && /[\\/]/.test(line[idx - 1] ?? ''))) continue;
               if (!pushFinding({
                 doc_id: doc.id,
                 invariant: "naming_alignment",
@@ -216,6 +229,7 @@ export async function resolveDocsAlignScan(pointer: DocsAlignScanPointer): Promi
           if (!token) continue;
           if (!/^[a-z][a-zA-Z0-9_]*$/.test(token)) continue;
           if (advertised.has(token)) continue;
+          if (!/(?:shapes?\s+`[^`]+`|`[^`]+`\s+(?:\w+\s+)*shape)/.test(line)) continue;
           if (!pushFinding({
             doc_id: doc.id,
             invariant: "accuracy",

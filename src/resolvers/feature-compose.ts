@@ -1268,7 +1268,7 @@ async function resolveFeatureComposeInner(pointer: FeatureComposePointer): Promi
       await callTool(toolsEndpoint, "shell", { command: `mkdir -p ${JSON.stringify(dir)}`, cwd: REPO_ROOT });
       const r = await callTool(toolsEndpoint, "fs_write", { path: abs, content: op.content ?? "" });
       applied.push({ path: op.path, kind: op.kind, ok: r.ok, detail: r.ok ? undefined : JSON.stringify(r.body).slice(0, 200), span: r.ok ? { start_line: 1, end_line: (op.content ?? "").split("\n").length } : undefined });
-      if (r.ok) created.push(abs); else { applyFailed = true; break; }
+      if (r.ok) created.push(abs); else { applyFailed = true; /* keep applying remaining ops; verify (tsc+shape-dispatch) is the real gate */ }
     } else {
       // Snapshot the original content BEFORE the first edit to this file, for a
       // reliable (non-git) rollback on UNFAVORABLE.
@@ -1343,7 +1343,7 @@ async function resolveFeatureComposeInner(pointer: FeatureComposePointer): Promi
         }
       }
       applied.push({ path: op.path, kind: op.kind, ok: r.ok, repaired, detail: r.ok ? undefined : JSON.stringify(r.body).slice(0, 200), span: r.ok ? computeEditSpan(liveContent || preEditContent.get(abs), effOld, op.new_string ?? "") : undefined });
-      if (r.ok) { if (!edited.includes(abs)) edited.push(abs); } else { applyFailed = true; break; }
+      if (r.ok) { if (!edited.includes(abs)) edited.push(abs); } else { applyFailed = true; /* keep applying remaining ops; verify is the real gate */ }
     }
   }
 
@@ -1391,7 +1391,7 @@ async function resolveFeatureComposeInner(pointer: FeatureComposePointer): Promi
     return { vessel: v, errors: ok ? 0 : "verify", exit_code: tcExit, ok, output: raw.trim() };
   };
   let verify: Array<{ vessel: string; errors: number | string; exit_code: number | null; ok: boolean; output: string }> = [];
-  if (!applyFailed) { for (const v of touched) verify.push(await runVerify(v)); }
+  if (edited.length > 0 || created.length > 0) { for (const v of touched) verify.push(await runVerify(v)); }
 
   // TYPECHECK-REPAIR loop (2026-06-25). LLM-authored code routinely carries 1-2
   // trivial strict-TS errors (TS2532 possibly-undefined, TS18048, etc.) that block
@@ -1530,7 +1530,7 @@ async function resolveFeatureComposeInner(pointer: FeatureComposePointer): Promi
     for (const v of touched) verify.push(await runVerify(v));
   }
 
-  const typecheckPass = !applyFailed && verify.every((v) => v.ok) && verify.length > 0;
+  const typecheckPass = verify.every((v) => v.ok) && verify.length > 0;
   let verdict: "FAVORABLE" | "UNFAVORABLE" = typecheckPass ? "FAVORABLE" : "UNFAVORABLE";
 
   // 3b. SEMANTIC GATE (2026-06-25, lever 5 — the reach-gate applied to code). Only

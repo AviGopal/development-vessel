@@ -30,13 +30,22 @@ export interface DocsAlignFinding {
   note?: string;
 }
 
+function coerceObject<T>(input: unknown): T | undefined {
+  if (typeof input === 'string') {
+    if (input.includes('{{')) return undefined;
+    try { return JSON.parse(input) as T; } catch { return undefined; }
+  }
+  if (input !== null && typeof input === 'object') return input as T;
+  return undefined;
+}
+
 export interface DocsAlignScanPointer {
   type: "docs_align_scan";
   max_findings?: number;
   corpus?: { documents: DocsAlignCorpusDocument[] | string } | string;
   invariants?: string[];
-  live_truth?: DocsAlignLiveTruth;
-  vocabulary?: DocsAlignVocabulary;
+  live_truth?: DocsAlignLiveTruth | string;
+  vocabulary?: DocsAlignVocabulary | string;
 }
 
 async function fetchCanonicalVocabulary(): Promise<DocsAlignVocabulary | null> {
@@ -110,7 +119,18 @@ export async function resolveDocsAlignScan(pointer: DocsAlignScanPointer): Promi
     "setup_enablement",
   ]);
 
-  let vocabulary = pointer.vocabulary;
+  function coerceObject<T>(val: unknown): T | undefined {
+    if (val == null) return undefined;
+    if (typeof val === 'object' && !Array.isArray(val)) return val as T;
+    if (typeof val === 'string') {
+      try { const p = JSON.parse(val); if (p && typeof p === 'object' && !Array.isArray(p)) return p as T; } catch { /* ignore */ }
+    }
+    return undefined;
+  }
+  const liveTruth = coerceObject<DocsAlignLiveTruth>(pointer.live_truth);
+  const vocabPointer = coerceObject<DocsAlignVocabulary>(pointer.vocabulary);
+  const live_truth = liveTruth;
+  let vocabulary = vocabPointer;
   if (!vocabulary && invariants.has("naming_alignment")) {
     const fetched = await fetchCanonicalVocabulary();
     if (fetched) vocabulary = fetched;
@@ -184,7 +204,7 @@ export async function resolveDocsAlignScan(pointer: DocsAlignScanPointer): Promi
       }
     }
 
-    if (invariants.has("accuracy") && pointer.live_truth?.advertised_shapes) {
+    if (invariants.has("accuracy") && pointer.live_truth && typeof pointer.live_truth !== "string" && pointer.live_truth.advertised_shapes) {
       const advertised = new Set(pointer.live_truth.advertised_shapes);
       const shapeContext = /\b(shape|resolver)\b/i;
       for (const line of lines) {
@@ -206,7 +226,7 @@ export async function resolveDocsAlignScan(pointer: DocsAlignScanPointer): Promi
       }
     }
 
-    if (invariants.has("setup_enablement") && pointer.live_truth?.existing_paths) {
+    if (invariants.has("setup_enablement") && pointer.live_truth && typeof pointer.live_truth !== "string" && pointer.live_truth.existing_paths) {
       const existing = new Set(pointer.live_truth.existing_paths);
       const scriptRx = /(scripts\/[A-Za-z0-9_./-]+)/g;
       const makeRx = /make\s+-C\s+([A-Za-z0-9_./-]+)/g;

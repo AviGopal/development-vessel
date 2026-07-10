@@ -99,6 +99,80 @@ describe("docs_align_scan v1 (implemented behavior)", () => {
   });
 });
 
+describe("docs_align_scan v1 precision (constitutional-doc hardening)", () => {
+  it("naming_alignment path_only: flags the deprecated token in a path but not as a bare package name", async () => {
+    const res = await resolveDocsAlignScan({
+      type: "docs_align_scan",
+      invariants: ["naming_alignment"],
+      corpus: {
+        documents: [
+          {
+            id: "d.md",
+            body: [
+              "The package name is metabob-activity-api and that is correct.",
+              "See repos/metabob-activity-api/src/config.ts for the wiring.",
+            ].join("\n"),
+            durability: "durable",
+          },
+        ],
+      },
+      vocabulary: {
+        deprecated: [{ pattern: "metabob-activity-api", canonical: "activity-api", path_only: true }],
+        retained: [],
+      },
+    });
+    const findings = (res.body as { findings: Array<{ invariant: string; evidence: string }> }).findings;
+    expect(findings.length).toBe(1);
+    expect(findings[0]!.evidence).toContain("repos/metabob-activity-api/src/config.ts");
+  });
+
+  it("accuracy: only flags backtick tokens adjacent to the word 'shape', not field/function names near 'resolver'", async () => {
+    const res = await resolveDocsAlignScan({
+      type: "docs_align_scan",
+      invariants: ["accuracy"],
+      corpus: {
+        documents: [
+          {
+            id: "d.md",
+            body: [
+              "The resolver reads `failure_mode` and `parent_execution_id` from the trace.",
+              "The `bogus_shape_xyz` shape is served by no vessel.",
+            ].join("\n"),
+            durability: "durable",
+          },
+        ],
+      },
+      live_truth: { advertised_shapes: ["memoryNote"] },
+    });
+    const findings = (res.body as { findings: Array<{ invariant: string; evidence: string }> }).findings;
+    // field names near "resolver" are NOT flagged; only the token adjacent to "shape" is
+    expect(findings.every((f) => !f.evidence.includes("failure_mode"))).toBe(true);
+    expect(findings.some((f) => f.evidence.includes("bogus_shape_xyz"))).toBe(true);
+  });
+
+  it("timelessness: exempts explicit deprecation markers but flags embedded dated status", async () => {
+    const res = await resolveDocsAlignScan({
+      type: "docs_align_scan",
+      invariants: ["timelessness"],
+      corpus: {
+        documents: [
+          {
+            id: "d.md",
+            body: [
+              "> **DEPRECATED (2026-07-04): canary Kubernetes.** Retained reference-only.",
+              "As of 2026-06-24 this unit has been observed crash-looping.",
+            ].join("\n"),
+            durability: "durable",
+          },
+        ],
+      },
+    });
+    const findings = (res.body as { findings: Array<{ invariant: string; evidence: string }> }).findings;
+    expect(findings.some((f) => f.evidence.includes("DEPRECATED (2026-07-04)"))).toBe(false);
+    expect(findings.some((f) => f.evidence.includes("As of 2026-06-24"))).toBe(true);
+  });
+});
+
 describe("docs_align_scan v1 contract (remaining parked behaviors)", () => {
   it.todo(
     "each finding carries byte-anchored evidence (verbatim offending text) sufficient to seed a gap→repair pair without re-reading the corpus — evidence should include line offsets",

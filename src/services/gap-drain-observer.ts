@@ -7,7 +7,7 @@ const METABOB_API_KEY = process.env["METABOB_API_KEY"] ?? "";
 const RECONNECT_INITIAL_MS = 1000;
 const RECONNECT_MAX_MS = 30000;
 
-const DEV_VESSEL_ENDPOINT = process.env["DEV_VESSEL_ENDPOINT"] ?? "http://127.0.0.1:8090";
+const DEV_VESSEL_ENDPOINT = process.env["DEV_VESSEL_ENDPOINT"] ?? "http://127.0.0.1:8090"; // env-overridable dev-vessel base URL
 
 export class GapDrainObserver {
   private ws: WebSocket | null = null;

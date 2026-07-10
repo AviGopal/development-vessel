@@ -997,7 +997,7 @@ function classifyComposeFailure(appliedOps: Array<{ ok: boolean; detail?: string
   const bad = verifyResults.find((v) => !v.ok);
   if (bad) {
     if (/TS1128|TS1005|TS1109/.test(bad.output)) return "syntax_break";
-    if (/TS2304|TS2552|TS2554|TS2551/.test(bad.output)) return "typecheck_dangling_reference";
+    if (/TS2304|TS2552|TS2554|TS2551|TS2345|TS2322/.test(bad.output)) return "typecheck_dangling_reference";
     return "verify_failed";
   }
   if (/diff is empty|diff field is empty/i.test(semanticReason)) return "empty_diff_identity_edit";

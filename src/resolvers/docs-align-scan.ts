@@ -33,7 +33,7 @@ export interface DocsAlignFinding {
 export interface DocsAlignScanPointer {
   type: "docs_align_scan";
   max_findings?: number;
-  corpus?: { documents: DocsAlignCorpusDocument[] };
+  corpus?: { documents: DocsAlignCorpusDocument[] | string } | string;
   invariants?: string[];
   live_truth?: DocsAlignLiveTruth;
   vocabulary?: DocsAlignVocabulary;
@@ -67,9 +67,39 @@ async function fetchCanonicalVocabulary(): Promise<DocsAlignVocabulary | null> {
   }
 }
 
+function coerceCorpus(input: unknown): { documents: DocsAlignCorpusDocument[]; corpus_parse_failed?: true } {
+  if (input == null) return { documents: [] };
+  if (typeof input === 'object' && !Array.isArray(input)) {
+    const obj = input as { documents?: unknown };
+    if (typeof obj.documents === 'string') {
+      try {
+        const parsed = JSON.parse(obj.documents);
+        if (Array.isArray(parsed)) return { documents: parsed as DocsAlignCorpusDocument[] };
+        return { documents: [] };
+      } catch {
+        return { documents: [], corpus_parse_failed: true };
+      }
+    }
+    return { documents: Array.isArray(obj.documents) ? (obj.documents as DocsAlignCorpusDocument[]) : [] };
+  }
+  if (typeof input === 'string') {
+    try {
+      const parsed = JSON.parse(input);
+      if (Array.isArray(parsed)) return { documents: parsed as DocsAlignCorpusDocument[] };
+      if (parsed && typeof parsed === 'object' && Array.isArray((parsed as { documents?: unknown }).documents)) {
+        return { documents: (parsed as { documents: DocsAlignCorpusDocument[] }).documents };
+      }
+      return { documents: [] };
+    } catch {
+      return { documents: [], corpus_parse_failed: true };
+    }
+  }
+  return { documents: [] };
+}
+
 export async function resolveDocsAlignScan(pointer: DocsAlignScanPointer): Promise<ResolverResult> {
   const maxFindings = typeof pointer.max_findings === "number" ? pointer.max_findings : 20;
-  const documents = pointer.corpus?.documents ?? [];
+  const { documents, corpus_parse_failed: _corpusParseFlag } = coerceCorpus(pointer.corpus);
   const findings: DocsAlignFinding[] = [];
   let truncated = false;
 
@@ -203,6 +233,7 @@ export async function resolveDocsAlignScan(pointer: DocsAlignScanPointer): Promi
   return {
     shape: "docsAlignReport",
     body: {
+      ...(_corpusParseFlag ? { corpus_parse_failed: true } : {}),
       implemented: true,
       scanned_count: documents.filter((d) => d.durability !== "dated").length,
       findings,

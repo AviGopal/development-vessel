@@ -55,7 +55,7 @@ export async function resolveRhythmRealitySync(
       const data = (await res.json()) as { body?: { items?: Rhythm[] } | Rhythm[] };
       const items =
         Array.isArray(data) ? data :
-        Array.isArray((data as { body?: { items?: Rhythm[] } }).body) ? (data as unknown as { body: Rhythm[] }).body :
+        Array.isArray((data as { body?: { impulses?: Rhythm[] } }).body?.impulses) ? (data as { body: { impulses: Rhythm[] } }).body.impulses :
         Array.isArray((data as { body?: { items?: Rhythm[] } }).body?.items) ? (data as { body: { items: Rhythm[] } }).body.items :
         [];
       rhythms = items as Rhythm[];

@@ -7,6 +7,9 @@ import { resolveAuthorProducer } from "./author-producer.js";
 import { resolveDocDriftFix } from "./doc-drift-fix.js";
 import { resolveReachabilityGapRepair } from "./reachability-gap-repair.js";
 import { resolveDispatchGoal } from "./dispatch-goal.js";
+import { resolveUiWritePassthrough } from "./ui-write-passthrough.js";
+
+const solicitedHumanGaps = new Set<string>();
 import { DISCOVERY_ENDPOINT, METABOB_API_KEY, GOAL_HOST_VESSEL_ENDPOINT } from "../config.js";
 import { readFile } from "node:fs/promises";
 
@@ -620,7 +623,12 @@ function pickMostLandable(gaps: Record<string, unknown>[]): Record<string, unkno
   const actionableGaps: Record<string, unknown>[] = [];
   for (const g of gaps) {
     if (hopeless(g)) {
-      resolveDispatchGoal({
+      const gid = String((g as Record<string,unknown>).id ?? (g as Record<string,unknown>).gap_id ?? "");
+        if (gid && !solicitedHumanGaps.has(gid)) {
+          solicitedHumanGaps.add(gid);
+          resolveUiWritePassthrough({ type: "uiQuestion_write", id: "needs-human-" + gid, title: "Gap needs a human decision", body: "Gap " + gid + " (" + String((g as Record<string,unknown>).category ?? "?") + ") has failed auto-repair 8+ times with 0 lands. It likely needs a human response: redefine the goal, provide missing information, grant access, or drop it. Summary: " + String((g as Record<string,unknown>).summary ?? "").slice(0, 300), kind: "gap_needs_human", importance: "high" } as never).catch(() => {});
+        }
+        resolveDispatchGoal({
         type: "dispatch_goal",
         goalShape: "substrate_gap_decompose",
         payload: { gapId: (g as Record<string,unknown>).id ?? (g as Record<string,unknown>).gap_id, reason: "repeated_failure_escalation" },

@@ -183,7 +183,7 @@ export class GapDrainObserver {
     g.__drainInflight.add(category);
     const startedAt = Date.now();
     try {
-      const resp = await fetch(`${DEV_VESSEL_ENDPOINT}/v2/impulses/resolve`, {
+      const resp = await fetch(`${DEV_VESSEL_ENDPOINT}/v2/impulses/resolve`, { // env-overridable
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ impulse: { type: remedy.impulse_type, triggered_by: "gap-drain", gap_id: gapId } }),

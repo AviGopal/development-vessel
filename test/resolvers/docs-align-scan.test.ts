@@ -1,71 +1,123 @@
-import { describe, it, expect, beforeEach, afterEach, mock } from "bun:test";
-import { mkdtempSync, writeFileSync, mkdirSync } from "fs";
-import { join } from "path";
-import { tmpdir } from "os";
+// docs_align_scan contract.
+//
+// Two contract generations live here:
+// - The ORIGINAL parked it.todo contract (bottom) envisioned an fs-reading
+//   resolver (DOC_FIX_ROOT) that wrote substrateGaps itself with a dry_run
+//   flag. That design was superseded for generalization: an fs-bound scan
+//   cannot serve non-filesystem corpora (vault notes via obsidian:*), and
+//   resolver-side gap writes couple detection to emission.
+// - The CURRENT v1 contract: the resolver consumes an inline
+//   documentCorpusSlice (documents as data), producers bind upstream in
+//   activities (fs_read/fs_grep for repo docs, obsidian:note/obsidian:search
+//   for the vault), and gap emission belongs to a downstream
+//   findings-to-gaps activity (where the original dry_run gating now lives).
+//   The original todos' INTENT is preserved: seed-live drift is a
+//   setup_enablement/accuracy finding over a corpus document.
+//
+// Design constraints the v1 behavior honors:
+// - CORPUS-ABSTRACT INPUT: never filesystem paths.
+// - DATA-DRIVEN VOCABULARY: naming alignment reads memoryNote
+//   canonical-naming-vocabulary at scan time; no hardcoded branding lists.
+// - LIVE-TRUTH JOINS: accuracy/setup findings join against provided
+//   live-truth slices (advertised shapes, endpoints, unit names, paths) —
+//   supplied as inputs so the scan stays deterministic.
+import { describe, it, expect } from "bun:test";
+import { resolveDocsAlignScan } from "../../src/resolvers/docs-align-scan.js";
 
-describe("resolveDocsAlignScan", () => {
-  let tmpDir: string;
-  let originalEnv: string | undefined;
-
-  beforeEach(() => {
-    tmpDir = mkdtempSync(join(tmpdir(), "docs-align-scan-"));
-    originalEnv = process.env["DOC_FIX_ROOT"];
-    process.env["DOC_FIX_ROOT"] = tmpDir;
+describe("docs_align_scan v1 (implemented behavior)", () => {
+  it("scans an inline corpus for all four invariants with no fs access", async () => {
+    const res = await resolveDocsAlignScan({
+      type: "docs_align_scan",
+      corpus: {
+        documents: [
+          {
+            id: "durable.md",
+            body: [
+              "The trace store is repos/metabob-activity-api.",
+              "Status as of 2026-07-09: working.",
+              "Run scripts/nonexistent/foo.sh to start.",
+              "The `bogus_shape_xyz` shape is served by the resolver.",
+              "Use metabob-mcp to dispatch.",
+            ].join("\n"),
+            durability: "durable",
+          },
+          { id: "dated.md", body: "Changelog (2026-07-01): metabob-activity-api fix", durability: "dated" },
+        ],
+      },
+      live_truth: {
+        advertised_shapes: ["docs_align_scan", "memoryNote"],
+        existing_paths: ["scripts/substrate/up.sh"],
+      },
+      vocabulary: {
+        deprecated: [{ pattern: "metabob-activity-api", canonical: "activity-api" }],
+        retained: ["metabob-mcp"],
+      },
+    });
+    expect(res.shape).toBe("docsAlignReport");
+    const body = res.body as {
+      implemented: boolean;
+      scanned_count: number;
+      findings: Array<{ doc_id: string; invariant: string; evidence: string }>;
+      truncated: boolean;
+    };
+    expect(body.implemented).toBe(true);
+    expect(body.scanned_count).toBe(1); // dated doc excluded
+    const invariants = body.findings.map((f) => f.invariant).sort();
+    expect(invariants).toEqual(["accuracy", "naming_alignment", "setup_enablement", "timelessness"]);
+    // retained branding not flagged
+    expect(body.findings.some((f) => f.evidence.includes("metabob-mcp"))).toBe(false);
+    // dated doc produced no findings
+    expect(body.findings.every((f) => f.doc_id === "durable.md")).toBe(true);
   });
 
-  afterEach(() => {
-    if (originalEnv === undefined) {
-      delete process.env["DOC_FIX_ROOT"];
-    } else {
-      process.env["DOC_FIX_ROOT"] = originalEnv;
-    }
+  it("returns an empty-findings report for an empty corpus", async () => {
+    const res = await resolveDocsAlignScan({ type: "docs_align_scan" });
+    expect(res.shape).toBe("docsAlignReport");
+    const body = res.body as Record<string, unknown>;
+    expect(body["implemented"]).toBe(true);
+    expect(body["findings"]).toEqual([]);
   });
 
-  it.todo("detects drift when README has seed-live but not make -C scripts/substrate up", async () => {
-    writeFileSync(join(tmpDir, "README.md"), "Run seed-live to bootstrap the system.\n");
-
-    // Mock resolveSubstrateGapWrite
-    const gapMock = mock(() =>
-      Promise.resolve({ shape: "substrateGap", body: { gap_id: "test-gap" } }),
-    );
-
-    mock.module("../../src/resolvers/substrate-gap.js", () => ({
-      resolveSubstrateGapWrite: gapMock,
-    }));
-
-    const { resolveDocsAlignScan } = await import("../../src/resolvers/docs-align-scan.js");
-    const result = await resolveDocsAlignScan({ type: "docs_align_scan" });
-
-    expect(result.shape).toBe("docsAlignReport");
-    const body = result.body as Record<string, unknown>;
-    expect(body["drift_detected"]).toBe(true);
-    expect(body["gaps_written"]).toBe(1);
+  it("caps findings at max_findings and sets truncated", async () => {
+    const res = await resolveDocsAlignScan({
+      type: "docs_align_scan",
+      max_findings: 1,
+      corpus: {
+        documents: [
+          {
+            id: "d.md",
+            body: "as of 2026-01-01 x\nas of 2026-01-02 y\n",
+            durability: "durable",
+          },
+        ],
+      },
+      invariants: ["timelessness"],
+    });
+    const body = res.body as { findings: unknown[]; truncated: boolean };
+    expect(body.findings.length).toBe(1);
+    expect(body.truncated).toBe(true);
   });
+});
 
-  it.todo("reports no drift when README does not contain seed-live", async () => {
-    writeFileSync(
-      join(tmpDir, "README.md"),
-      "Run make -C scripts/substrate up to bootstrap.\n",
-    );
+describe("docs_align_scan v1 contract (remaining parked behaviors)", () => {
+  it.todo(
+    "each finding carries byte-anchored evidence (verbatim offending text) sufficient to seed a gap→repair pair without re-reading the corpus — evidence should include line offsets",
+  );
+  it.todo(
+    "joins endpoint and systemd-unit claims against live_truth.vessel_endpoints / unit_names and flags mismatches (only advertised_shapes and existing_paths join today)",
+  );
+  it.todo(
+    "instance-name detection reads the instance-name set from the vocabulary note rather than the literal 'substrate-live'",
+  );
+});
 
-    const { resolveDocsAlignScan } = await import("../../src/resolvers/docs-align-scan.js");
-    const result = await resolveDocsAlignScan({ type: "docs_align_scan" });
-
-    expect(result.shape).toBe("docsAlignReport");
-    const body = result.body as Record<string, unknown>;
-    expect(body["drift_detected"]).toBe(false);
-  });
-
-  it.todo("dry_run skips gap write when drift detected", async () => {
-    writeFileSync(join(tmpDir, "README.md"), "Run seed-live to bootstrap.\n");
-
-    const { resolveDocsAlignScan } = await import("../../src/resolvers/docs-align-scan.js");
-    const result = await resolveDocsAlignScan({ type: "docs_align_scan", dry_run: true });
-
-    expect(result.shape).toBe("docsAlignReport");
-    const body = result.body as Record<string, unknown>;
-    expect(body["drift_detected"]).toBe(true);
-    expect(body["gaps_written"]).toBe(0);
-    expect(body["dry_run"]).toBe(true);
-  });
+// Original parked contract (superseded design, intent preserved above and in
+// the downstream findings-to-gaps activity):
+describe("original fs-based contract — superseded, intent recast", () => {
+  it.todo(
+    "SUPERSEDED (was: detects drift when README has seed-live but not make -C scripts/substrate up) → now a setup_enablement/accuracy finding over a corpus document containing 'seed-live'",
+  );
+  it.todo(
+    "SUPERSEDED (was: resolver writes substrateGap with dry_run gating) → gap emission and dry_run gating live in the downstream docs-align-findings-to-gaps activity, keeping detection pure",
+  );
 });

@@ -1,22 +1,212 @@
-// docs_align_scan v0 stub: the dispatch case + shape registration landed without this
-// resolver file (TS2307 broke dev-vessel typecheck, blocking all self-edit composes).
-// Restored as an honest not-implemented skeleton so the shape is routable and verify
-// passes; scan behavior iteration belongs to the loop (skeleton-then-behavior).
+// docs_align_scan v1: scans a provided in-memory corpus (no filesystem access) for
+// four invariant violations — timelessness, naming_alignment, accuracy, setup_enablement.
 import type { ResolverResult } from "./types.js";
+
+export interface DocsAlignCorpusDocument {
+  id: string;
+  title?: string;
+  body: string;
+  source?: string;
+  durability?: "durable" | "dated";
+}
+
+export interface DocsAlignVocabulary {
+  deprecated: Array<{ pattern: string; canonical: string }>;
+  retained: string[];
+}
+
+export interface DocsAlignLiveTruth {
+  advertised_shapes?: string[];
+  vessel_endpoints?: Record<string, string>;
+  unit_names?: string[];
+  existing_paths?: string[];
+}
+
+export interface DocsAlignFinding {
+  doc_id: string;
+  invariant: string;
+  evidence: string;
+  suggested_repair: string;
+  note?: string;
+}
 
 export interface DocsAlignScanPointer {
   type: "docs_align_scan";
   max_findings?: number;
+  corpus?: { documents: DocsAlignCorpusDocument[] };
+  invariants?: string[];
+  live_truth?: DocsAlignLiveTruth;
+  vocabulary?: DocsAlignVocabulary;
+}
+
+async function fetchCanonicalVocabulary(): Promise<DocsAlignVocabulary | null> {
+  try {
+    const response = await fetch("http://127.0.0.1:8090/v2/impulses/resolve", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ impulse: { type: "memoryNote", id: "canonical-naming-vocabulary" } }),
+    });
+    if (!response.ok) return null;
+    const parsed: unknown = await response.json();
+    const body = (parsed as { body?: unknown })?.body;
+    const noteBody = typeof body === "string"
+      ? body
+      : typeof (body as { body?: unknown })?.body === "string"
+        ? String((body as { body?: unknown }).body)
+        : JSON.stringify(body ?? "");
+    const deprecated: Array<{ pattern: string; canonical: string }> = [];
+    if (/metabob-activity-api/.test(noteBody)) {
+      deprecated.push({ pattern: "metabob-activity-api", canonical: "activity-api" });
+    }
+    if (/metabob-analysis-api/.test(noteBody)) {
+      deprecated.push({ pattern: "metabob-analysis-api", canonical: "analysis-vessel" });
+    }
+    return { deprecated, retained: [] };
+  } catch {
+    return null;
+  }
 }
 
 export async function resolveDocsAlignScan(pointer: DocsAlignScanPointer): Promise<ResolverResult> {
+  const maxFindings = typeof pointer.max_findings === "number" ? pointer.max_findings : 20;
+  const documents = pointer.corpus?.documents ?? [];
+  const findings: DocsAlignFinding[] = [];
+  let truncated = false;
+
+  const invariants = new Set(pointer.invariants ?? [
+    "timelessness",
+    "naming_alignment",
+    "accuracy",
+    "setup_enablement",
+  ]);
+
+  let vocabulary = pointer.vocabulary;
+  if (!vocabulary && invariants.has("naming_alignment")) {
+    const fetched = await fetchCanonicalVocabulary();
+    if (fetched) vocabulary = fetched;
+  }
+
+  const pushFinding = (finding: DocsAlignFinding): boolean => {
+    if (findings.length >= maxFindings) {
+      truncated = true;
+      return false;
+    }
+    findings.push(finding);
+    return true;
+  };
+
+  const datedRegexes: RegExp[] = [
+    /\bas of 20\d\d-\d\d(-\d\d)?\b/i,
+    /\(20\d\d-\d\d-\d\d\)/,
+  ];
+  const substrateLive = "substrate-live";
+
+  outer: for (const doc of documents) {
+    if (doc.durability === "dated") continue;
+    const lines = doc.body.split(/\r?\n/);
+
+    if (invariants.has("timelessness")) {
+      for (const line of lines) {
+        const hit = datedRegexes.some((rx) => rx.test(line)) || line.includes(substrateLive);
+        if (hit) {
+          if (!pushFinding({
+            doc_id: doc.id,
+            invariant: "timelessness",
+            evidence: line,
+            suggested_repair: "remove dated status marker or move content to a dated note",
+          })) break outer;
+        }
+      }
+    }
+
+    if (invariants.has("naming_alignment")) {
+      if (!vocabulary) {
+        if (!pushFinding({
+          doc_id: doc.id,
+          invariant: "naming_alignment",
+          evidence: "",
+          suggested_repair: "",
+          note: "vocabulary unavailable — canonical-naming-vocabulary memoryNote not resolvable",
+        })) break outer;
+      } else {
+        for (const entry of vocabulary.deprecated) {
+          const rx = new RegExp(entry.pattern, "g");
+          for (const line of lines) {
+            rx.lastIndex = 0;
+            let match: RegExpExecArray | null;
+            while ((match = rx.exec(line)) !== null) {
+              const idx = match.index;
+              const inRetained = vocabulary.retained.some((tok) => {
+                const tokIdx = line.indexOf(tok);
+                return tokIdx >= 0 && idx >= tokIdx && idx < tokIdx + tok.length;
+              });
+              if (inRetained) continue;
+              if (!pushFinding({
+                doc_id: doc.id,
+                invariant: "naming_alignment",
+                evidence: line,
+                suggested_repair: `replace "${entry.pattern}" with "${entry.canonical}"`,
+              })) break outer;
+              break;
+            }
+          }
+        }
+      }
+    }
+
+    if (invariants.has("accuracy") && pointer.live_truth?.advertised_shapes) {
+      const advertised = new Set(pointer.live_truth.advertised_shapes);
+      const shapeContext = /\b(shape|resolver)\b/i;
+      for (const line of lines) {
+        if (!shapeContext.test(line)) continue;
+        const tickRx = /`([A-Za-z][A-Za-z0-9_]*)`/g;
+        let m: RegExpExecArray | null;
+        while ((m = tickRx.exec(line)) !== null) {
+          const token = m[1];
+          if (!token) continue;
+          if (!/^[a-z][a-zA-Z0-9_]*$/.test(token)) continue;
+          if (advertised.has(token)) continue;
+          if (!pushFinding({
+            doc_id: doc.id,
+            invariant: "accuracy",
+            evidence: line,
+            suggested_repair: `shape "${token}" is not advertised by any vessel; verify or remove`,
+          })) break outer;
+        }
+      }
+    }
+
+    if (invariants.has("setup_enablement") && pointer.live_truth?.existing_paths) {
+      const existing = new Set(pointer.live_truth.existing_paths);
+      const scriptRx = /(scripts\/[A-Za-z0-9_./-]+)/g;
+      const makeRx = /make\s+-C\s+([A-Za-z0-9_./-]+)/g;
+      for (const line of lines) {
+        for (const rx of [scriptRx, makeRx]) {
+          rx.lastIndex = 0;
+          let mm: RegExpExecArray | null;
+          while ((mm = rx.exec(line)) !== null) {
+            const path = mm[1];
+            if (!path) continue;
+            if (existing.has(path)) continue;
+            if (!pushFinding({
+              doc_id: doc.id,
+              invariant: "setup_enablement",
+              evidence: line,
+              suggested_repair: `path "${path}" not in live_truth.existing_paths; update doc or add path`,
+            })) break outer;
+          }
+        }
+      }
+    }
+  }
+
   return {
     shape: "docsAlignReport",
     body: {
-      implemented: false,
-      findings: [],
-      max_findings: typeof pointer.max_findings === "number" ? pointer.max_findings : 20,
-      note: "v0 stub restored 2026-07-03 — dispatch case existed without resolver file; scan behavior not yet authored",
+      implemented: true,
+      scanned_count: documents.filter((d) => d.durability !== "dated").length,
+      findings,
+      truncated,
     },
   };
 }

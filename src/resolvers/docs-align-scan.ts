@@ -27,6 +27,7 @@ export interface DocsAlignFinding {
   invariant: string;
   evidence: string;
   suggested_repair: string;
+  source?: string;
   note?: string;
 }
 
@@ -290,13 +291,14 @@ export async function resolveDocsAlignScan(pointer: DocsAlignScanPointer): Promi
     }
   }
 
+  const docSourceById = new Map(documents.map((d) => [d.id, d.source] as const));
   return {
     shape: "docsAlignReport",
     body: {
       ...(_corpusParseFlag ? { corpus_parse_failed: true } : {}),
       implemented: true,
       scanned_count: documents.filter((d) => d.durability !== "dated").length,
-      findings,
+      findings: findings.map((f) => ({ ...f, source: f.source ?? docSourceById.get(f.doc_id) })),
       truncated,
     },
   };

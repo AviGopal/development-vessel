@@ -51,7 +51,7 @@ describe("resolveDocsAlignScan", () => {
     const { resolveDocsAlignScan } = await import("../../src/resolvers/docs-align-scan.js");
     const result = await resolveDocsAlignScan({ type: "docs_align_scan" });
 
-    expect(result.shape).toBe("docsAlignScanReport");
+    expect(result.shape).toBe("docsAlignReport");
     const body = result.body as Record<string, unknown>;
     expect(body["drift_detected"]).toBe(false);
   });
@@ -62,7 +62,7 @@ describe("resolveDocsAlignScan", () => {
     const { resolveDocsAlignScan } = await import("../../src/resolvers/docs-align-scan.js");
     const result = await resolveDocsAlignScan({ type: "docs_align_scan", dry_run: true });
 
-    expect(result.shape).toBe("docsAlignScanReport");
+    expect(result.shape).toBe("docsAlignReport");
     const body = result.body as Record<string, unknown>;
     expect(body["drift_detected"]).toBe(true);
     expect(body["gaps_written"]).toBe(0);

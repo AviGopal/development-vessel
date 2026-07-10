@@ -531,29 +531,39 @@ export async function resolveComputeStateSignature(
 
   const signature_hash = computeHash(hashPayload);
 
+  const sig = {
+    window_minutes: windowMinutes,
+    sampled_at: new Date().toISOString(),
+    load: loadRounded,
+    memory: memRounded,
+    cgroup_memory: cgroupRounded !== undefined ? { limit_bytes: cgroupRounded, usage_bytes: cgroupRounded } : undefined,
+    recent_traces: {
+      total: recent.total,
+      success_rate: successRateRounded,
+      phantom_count: recent.phantom_count,
+      precondition_count: recent.precondition_count,
+      ...(recent.top_failure_mode_type ? { top_failure_mode_type: recent.top_failure_mode_type } : {}),
+      avg_duration_ms: recent.avg_duration_ms,
+    },
+    catalogue: {
+      total_templates: totalTemplates,
+      proposed_count: proposedCount,
+      substrate_authored_count: substrateAuthoredCount,
+    },
+  };
+
   return {
     shape: "stateSpaceSignature",
     body: {
-      computed_at: new Date().toISOString(),
-      window_minutes: windowMinutes,
+      computed_at: sig.sampled_at,
+      window_minutes: sig.window_minutes,
       load: {
-        load_avg_1m: loadRounded,
-        mem_used_pct: memRounded,
-        ...(cgroupRounded !== undefined ? { cgroup_mem_pct: cgroupRounded } : {}),
+        load_avg_1m: sig.load,
+        mem_used_pct: sig.memory,
+        ...(sig.cgroup_memory !== undefined ? { cgroup_mem_pct: sig.cgroup_memory.usage_bytes } : {}),
       },
-      recent_traces: {
-        total: recent.total,
-        success_rate: successRateRounded,
-        phantom_count: recent.phantom_count,
-        precondition_count: recent.precondition_count,
-        ...(recent.top_failure_mode_type ? { top_failure_mode_type: recent.top_failure_mode_type } : {}),
-        avg_duration_ms: recent.avg_duration_ms,
-      },
-      catalogue: {
-        total_templates: totalTemplates,
-        proposed_count: proposedCount,
-        substrate_authored_count: substrateAuthoredCount,
-      },
+      recent_traces: sig.recent_traces,
+      catalogue: sig.catalogue,
       ui: {
         recent_interactor_events_count: uiEvents,
         unanswered_asks_age_ms_p95: uiAsksAgeP95,
@@ -562,7 +572,6 @@ export async function resolveComputeStateSignature(
       },
       concept_priors: {
         loaded_concept_count: loadedConceptCount,
-        // Surface a sample for inspection. Full list is in the hash payload.
         loaded_concept_ids_sample: loadedConceptIds.slice(0, 5),
       },
       rhythm: {

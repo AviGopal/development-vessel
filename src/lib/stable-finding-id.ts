@@ -16,7 +16,7 @@ const VOLATILE_PATTERNS: RegExp[] = [
   // ISO-8601 timestamps (with or without ms / timezone)
   /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})?/g,
   // Unix epoch timestamps (10-digit seconds or 13-digit ms)
-  /(?<![\w-])\d{13}(?![\d])/g,
+  /(?<!\d)\d{13}(?!\d)/g,
   /(?<![\w-])\d{10}(?![\d])/g,
   // Version-4 UUIDs
   /[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}/gi,

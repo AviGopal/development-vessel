@@ -50,6 +50,7 @@ export async function resolveTemplateSuccessRanking24h(
         }
         return true; // include if we can't parse timestamp
       });
+      traces = traces.filter((t: any) => t?.status === "success");
     }
   } catch {
     // If traces endpoint unavailable, fall through with empty

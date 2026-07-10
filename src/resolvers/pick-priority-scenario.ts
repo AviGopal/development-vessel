@@ -156,7 +156,35 @@ export async function resolvePickPriorityScenario(
   };
 
   // 4. Score every gap that has a materialized, open, undrafted scenario.
-  type Cand = { scenario_id: string; category: string; rank: number; severity: number; recency: string; actionability: number };
+  const ACUTE_CATEGORIES = new Set([
+  "service_failure",
+  "operational_health",
+  "safety_breach",
+]);
+const STRUCTURAL_CATEGORIES = new Set([
+  "systematic_failure",
+  "architectural_pattern",
+  "unreachable_producer",
+  "residual_shape_proposal",
+]);
+
+type Cand = {
+  instability: number; scenario_id: string; category: string; rank: number; severity: number; recency: string; actionability: number };
+  let headroom = 1;
+  try {
+    const { readFileSync } = await import("node:fs");
+    const raw = readFileSync("/workspace/metrics/spectral-gap.jsonl", "utf8");
+    const lines = raw.split("\n").filter((l) => l.trim().length > 0);
+    if (lines.length > 0) {
+      const row = JSON.parse(lines[lines.length - 1]!) as Record<string, unknown>;
+      headroom =
+        (Number(row["fiedler_lambda2"]) || 0) *
+        (1 - (Number(row["star_ratio"]) || 0));
+    }
+  } catch {
+    headroom = 1;
+  }
+
   const candidates: Cand[] = [];
   const ALLOWED = new Set(["operator_seed", "operator_narration", "substrate_detected", "substrate_generative"]);
   // Forward model: P(patch_proposal non-empty | target_file_paths, mode_class, category).
@@ -185,13 +213,25 @@ export async function resolvePickPriorityScenario(
     if (excludeDrafted && isDrafted(scenarioId)) continue;
     const actionability = predictActionability(g as { category?: string; mode_class?: string; target_file_paths?: unknown });
     if (actionability < ACTIONABILITY_THRESHOLD) continue; // filter low-confidence no-ops
+    const cat: string = g.category ?? "auto";
+    const rank = categoryRank(cat);
+    const sev = severity(g);
+    const headroom = 1 - Math.min(sev / ((num((g.classification_metadata ?? {})["samples"] ?? (g.classification_metadata ?? {})["total_dispatches"] ?? 0)) + 1), 1);
+    const ACUTE_CATEGORIES = new Set(["missing_capability", "goal_host_missing", "goal_host_regression"]);
+    const STRUCTURAL_CATEGORIES = new Set(["architectural", "implementation"]);
+    const instability: number = ACUTE_CATEGORIES.has(cat)
+      ? 3
+      : headroom < 0.35 && STRUCTURAL_CATEGORIES.has(cat)
+        ? 2
+        : 0;
     candidates.push({
       scenario_id: scenarioId,
-      category: g.category ?? "auto",
-      rank: categoryRank(g.category ?? "auto"),
-      severity: severity(g),
+      category: cat,
+      rank,
+      severity: sev,
       recency: g.detected_at ?? g.created_at ?? "",
       actionability,
+      instability,
     });
   }
 
@@ -214,11 +254,12 @@ export async function resolvePickPriorityScenario(
     };
   }
 
-  // Rank: category priority asc, severity desc, recency desc.
+  // Rank: instability desc, category priority asc, severity desc, recency desc.
   candidates.sort((a, b) => {
+    if (a.instability !== b.instability) return b.instability - a.instability;
     if (a.rank !== b.rank) return a.rank - b.rank;
-    if (b.severity !== a.severity) return b.severity - a.severity;
-    return b.recency.localeCompare(a.recency);
+    if (a.severity !== b.severity) return b.severity - a.severity;
+    return b.scenario_id.localeCompare(a.scenario_id);
   });
   const top = candidates[0]!;
 
@@ -239,7 +280,8 @@ export async function resolvePickPriorityScenario(
       scenario_filename: `${top.scenario_id}.json`,
       category: top.category,
       priority_rank: top.rank,
-      severity: Math.round(top.severity * 100) / 100,
+      severity: top.severity,
+      instability: top.instability,
       reason: "value_ranked",
       considered: fileSet.size,
       value_ranked: candidates.length,

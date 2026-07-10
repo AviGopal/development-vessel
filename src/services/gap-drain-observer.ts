@@ -7,6 +7,8 @@ const METABOB_API_KEY = process.env["METABOB_API_KEY"] ?? "";
 const RECONNECT_INITIAL_MS = 1000;
 const RECONNECT_MAX_MS = 30000;
 
+const DEV_VESSEL_ENDPOINT = process.env["DEV_VESSEL_ENDPOINT"] ?? "http://127.0.0.1:8090";
+
 export class GapDrainObserver {
   private ws: WebSocket | null = null;
   private shouldRun = false;
@@ -163,7 +165,7 @@ export class GapDrainObserver {
     }
     try {
       for (const leaseName of ["trace_store", "change_window"]) {
-        const leaseResp = await fetch("http://127.0.0.1:8090/v2/impulses/resolve", {
+        const leaseResp = await fetch(`${DEV_VESSEL_ENDPOINT}/v2/impulses/resolve`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ impulse: { type: "maintenanceLease", name: leaseName } }),

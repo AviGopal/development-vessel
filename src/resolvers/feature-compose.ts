@@ -1486,9 +1486,30 @@ async function resolveFeatureComposeInner(pointer: FeatureComposePointer): Promi
         // missing dispatch case for an advertised shape) — multi-file lint failures
         // converge over successive rounds. Full-file rewrites corrupt large files,
         // so we never ask for them.
+        // Deterministic error-site grounding: parse the first file(line,col) from the
+        // tsc output, read that file, and hand the LLM the verbatim window around the
+        // error so old_string anchors are copied from REAL current bytes (anchor-miss
+        // was the dominant repair-loop death: one missed anchor => zero progress => break).
+        let errorSiteWindow = "";
+        try {
+          const m = errText.match(/^([^\s()]+\.ts)\((\d+),\d+\)/m);
+          if (m && m[1] && m[2]) {
+            const relPath = m[1];
+            const errLine = parseInt(m[2], 10);
+            const absPath = `${REPO_ROOT}/${fv.vessel.replace(/^repos\//, "")}/${relPath}`;
+            const g = await callTool(toolsEndpoint, "fs_read", { path: absPath });
+            const gc = (g.body as { content?: unknown })?.content;
+            if (g.ok && typeof gc === "string") {
+              const ls = gc.split("\n");
+              const lo = Math.max(0, errLine - 26);
+              const hi = Math.min(ls.length, errLine + 25);
+              errorSiteWindow = `\n\nCURRENT CONTENT of ${relPath} lines ${lo + 1}-${hi} (the first error is at line ${errLine}; copy old_string VERBATIM from these real bytes):\n${ls.slice(lo, hi).join("\n")}`;
+            }
+          }
+        } catch { /* grounding is best-effort */ }
         const fix = parseJsonObject(await llmCall(
           llmEndpoint,
-          `A change to vessel ${fv.vessel} fails \`bun run lint\` (strict tsc + shape-dispatch agreement: every advertised shape in src/config.ts MUST have a matching case in src/routes/impulses.ts and vice-versa). Lint output:\n\n${errText.slice(0, 4000)}\n\nPick the SINGLE most-blocking error and emit ONE JSON object {"file":"repos/${fv.vessel.replace(/^repos\//, "")}/<subpath>","old_string":"<a SHORT verbatim UNIQUE substring of that file's CURRENT content>","new_string":"<corrected replacement>"} that fixes it, changing as little else as possible. For a missing dispatch case, copy the shape into the switch next to a sibling case. old_string MUST appear verbatim. No prose, no fences. Escape newlines as \\n.`,
+          `A change to vessel ${fv.vessel} fails \`bun run lint\` (strict tsc + shape-dispatch agreement: every advertised shape in src/config.ts MUST have a matching case in src/routes/impulses.ts and vice-versa). Lint output:\n\n${errText.slice(0, 4000)}${errorSiteWindow}\n\nPick the SINGLE most-blocking error and emit ONE JSON object {"file":"repos/${fv.vessel.replace(/^repos\//, "")}/<subpath>","old_string":"<a SHORT verbatim UNIQUE substring of that file's CURRENT content>","new_string":"<corrected replacement>"} that fixes it, changing as little else as possible. For a missing dispatch case, copy the shape into the switch next to a sibling case. old_string MUST appear verbatim. No prose, no fences. Escape newlines as \\n.`,
           model,
         ));
         const ef = typeof fix?.file === "string" ? String(fix.file) : "";

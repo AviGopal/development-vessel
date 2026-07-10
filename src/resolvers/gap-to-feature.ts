@@ -621,6 +621,22 @@ function pickMostLandable(gaps: Record<string, unknown>[]): Record<string, unkno
     const r = calib[String(g.category ?? "unknown")];
     return !!r && r.attempts >= 8 && r.lands === 0;
   };
+  // Decompose hopeless gaps before scoring: escalate and exclude from selection.
+  const actionableGaps: Record<string, unknown>[] = [];
+  for (const g of gaps) {
+    if (hopeless(g)) {
+      resolveDispatchGoal({
+        type: "dispatch_goal",
+        goalShape: "substrate_gap_decompose",
+        payload: { gapId: (g as Record<string,unknown>).id ?? (g as Record<string,unknown>).gap_id, reason: "repeated_failure_escalation" },
+      } as never).catch(() => { /* fire-and-forget; non-fatal */ });
+      continue;
+    }
+    if (false) {
+    }
+    actionableGaps.push(g);
+  }
+  const scoredGaps = actionableGaps;
   // IMPACT-RANKED SELECTION (2026-07-09): landability alone drains the easiest gaps
   // first and lets a blocking gap starve behind them. Impact = how many OTHER open
   // gaps cite this gap (by id or by its failing_capability) in their summaries or
@@ -640,7 +656,7 @@ function pickMostLandable(gaps: Record<string, unknown>[]): Record<string, unkno
     }
     return 1 + Math.min(1.0, 0.25 * cited);
   };
-  return gaps.map((g) => ({ g, s: (landabilityScore(g) - (hopeless(g) ? 0.5 : 0)) * blockingWeight(g) * impactOf(g) })).sort((a, b) => b.s - a.s)[0]!.g;
+  return gaps.map((g) => ({ g, s: (landabilityScore(g) - (0)) * blockingWeight(g) * impactOf(g) })).sort((a, b) => b.s - a.s)[0]!.g;
 }
 
 // CLOSE-ON-LAND (2026-06-29). A landed gap previously stayed status:open, so the

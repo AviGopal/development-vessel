@@ -117,6 +117,7 @@ export async function resolveDocsAlignScan(pointer: DocsAlignScanPointer): Promi
     "naming_alignment",
     "accuracy",
     "setup_enablement",
+    "shape_existence",
   ]);
 
   function coerceObject<T>(val: unknown): T | undefined {
@@ -131,7 +132,7 @@ export async function resolveDocsAlignScan(pointer: DocsAlignScanPointer): Promi
   const vocabPointer = coerceObject<DocsAlignVocabulary>(pointer.vocabulary);
   const live_truth = liveTruth;
   let vocabulary = vocabPointer;
-  if (!vocabulary && invariants.has("naming_alignment")) {
+  if (!vocabulary && (invariants.has("naming_alignment") || invariants.has("shape_existence"))) {
     const fetched = await fetchCanonicalVocabulary();
     if (fetched) vocabulary = fetched;
   }
@@ -235,6 +236,35 @@ export async function resolveDocsAlignScan(pointer: DocsAlignScanPointer): Promi
             invariant: "accuracy",
             evidence: line,
             suggested_repair: `shape "${token}" is not advertised by any vessel; verify or remove`,
+          })) break outer;
+        }
+      }
+    }
+
+    if (invariants.has("shape_existence") && vocabulary) {
+      const vocab = vocabulary;
+      const vocabTokens = new Set<string>(vocab.retained);
+      for (const entry of vocab.deprecated) {
+        vocabTokens.add(entry.canonical);
+      }
+      const shapeMarkerRx = /shape|type:|output_shapes|input_shapes/;
+      const shapeTokenRx = /^[a-z][a-z0-9_]*(:[a-z0-9_]+)?$/;
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+        if (typeof line !== "string") continue;
+        if (!shapeMarkerRx.test(line)) continue;
+        const tickRx = /`([^`]+)`/g;
+        let sm: RegExpExecArray | null;
+        while ((sm = tickRx.exec(line)) !== null) {
+          const token = sm[1];
+          if (!token) continue;
+          if (!shapeTokenRx.test(token)) continue;
+          if (vocabTokens.has(token)) continue;
+          if (!pushFinding({
+            doc_id: doc.id,
+            invariant: "shape_existence",
+            evidence: `${doc.id}:${i + 1}: unknown shape token "${token}"`,
+            suggested_repair: `shape token "${token}" is not present in the canonical vocabulary; verify or remove`,
           })) break outer;
         }
       }

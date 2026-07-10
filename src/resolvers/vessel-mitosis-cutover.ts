@@ -3,6 +3,7 @@
 // live source, preventing accidental overwrites of concurrent edits.
 
 import { resolve, join, dirname, relative, isAbsolute, basename } from "path";
+import fs from "node:fs/promises";
 import {
   rename,
   mkdir,
@@ -1686,6 +1687,17 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
       status: "warn",
       detail: (err as Error).message,
     });
+  }
+
+  // Clear the pending slot so the next mitosis can be queued (before FAVORABLE success return).
+  const _preClearPendingPath = pointer.pending_pointer_path ?? join(workspaceRoot, "mitosis-pending.json");
+  try {
+    if (await pathExists(_preClearPendingPath)) {
+      await unlink(_preClearPendingPath);
+      operations.push({ op: "pre-return clear mitosis-pending.json", status: "ok" });
+    }
+  } catch {
+    // Non-fatal: file may already be absent
   }
 
   // 12. Cleanup pending pointer ONLY after successful impulse emit.

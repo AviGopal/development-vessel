@@ -216,9 +216,8 @@ type Cand = {
     const cat: string = g.category ?? "auto";
     const rank = categoryRank(cat);
     const sev = severity(g);
-    const headroom = 1 - Math.min(sev / ((num((g.classification_metadata ?? {})["samples"] ?? (g.classification_metadata ?? {})["total_dispatches"] ?? 0)) + 1), 1);
-    const ACUTE_CATEGORIES = new Set(["missing_capability", "goal_host_missing", "goal_host_regression"]);
-    const STRUCTURAL_CATEGORIES = new Set(["architectural", "implementation"]);
+    const ACUTE_CATEGORIES = new Set(["service_failure", "operational_health", "safety_breach", "systematic_failure", "goal_reaching", "self_development_reliability"]);
+    const STRUCTURAL_CATEGORIES = new Set(["missing_capability", "unreachable_producer", "orphaned_capability", "architectural_pattern", "residual_shape_proposal", "detector_coverage_gap"]);
     const instability: number = ACUTE_CATEGORIES.has(cat)
       ? 3
       : headroom < 0.35 && STRUCTURAL_CATEGORIES.has(cat)

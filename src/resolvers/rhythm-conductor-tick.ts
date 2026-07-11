@@ -69,7 +69,10 @@ const FAMILY_GOALS: Record<string, string> = {
     "check obsidian presence and deliver any pending assist",
   "concept-management":
     "run concept_naming_sync to reconcile concept-db concept naming and provenance with the current reality, and file any drift as gaps",
+  "project-intake": "produce a projectThreadScanReport for folder Substrate/Projects with execute true so open project To do items are dispatched as goals and dispatched items are marked in their notes",
 };
+
+const FAMILY_VARIABLES: Record<string, Record<string, unknown>> = { "project-intake": { execute: true, folder: "Substrate/Projects" } };
 
 async function fetchJson(url: string, init: RequestInit, timeoutMs: number): Promise<unknown> {
   const ctrl = new AbortController();
@@ -184,7 +187,7 @@ export async function resolveRhythmConductorTick(
         goal,
         priority: "medium",
         reason: `rhythm ${r.family} due (score ${r.due_score.toFixed(2)})`,
-        variables: { rhythm_id: r.id, due_score: r.due_score },
+        variables: { rhythm_id: r.id, due_score: r.due_score, ...(FAMILY_VARIABLES[r.family] ?? {}) },
         ...(pointer.queue_path ? { queue_path: pointer.queue_path } : {}),
       });
       const ok = (enq.body as { enqueued?: boolean } | undefined)?.enqueued === true;

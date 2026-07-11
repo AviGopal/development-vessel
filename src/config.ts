@@ -31,7 +31,6 @@ export const config = {
     // Inline literal so packages/shape-dispatch-check/check.ts can find it.
     // One entry per R2.* resolver in specs/development-vessel/spec.md.
     shapes: [
-    'concept_naming_sync',
     'template_success_ranking_24h',
     'light-dispatch-vessel_status',
     'vessel_health_report',

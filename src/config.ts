@@ -657,8 +657,6 @@ export const config = {
       // activity that invokes X. The recursive mint-as-you-go primitive — lets
       // the substrate mint a chain of real-resolver producers toward a goal.
       "author_producer",
-      // Seam ③ substrate-authored resolver (2026-06-30): producer for traceCompletenessReport (capability-gap autoclosure)
-      "traceCompletenessReport",
       // Seam ③ substrate-authored resolver (2026-06-30): coarsenable_chain
       "coarsenableChain",
       // Seam ③ substrate-authored resolver (2026-06-30): learning_policy
@@ -681,16 +679,7 @@ export const config = {
       "learningMode",
       // Seam ③ substrate-authored resolver (2026-07-01): producer for sourceCode (capability-gap autoclosure)
 
-      // Seam ③ substrate-authored resolver (2026-07-01): producer for populated_concept_graph_links (capability-gap autoclosure)
-      "populated_concept_graph_links",
-      // Seam ③ substrate-authored resolver (2026-07-01): producer for obsidian:note with project list content (capability-gap autoclosure)
-      "obsidian:note with project list content",
-      // Seam ③ substrate-authored resolver (2026-07-01): producer for substantive_findings (capability-gap autoclosure)
-      "substantive_findings",
-      // Seam ③ substrate-authored resolver (2026-07-01): producer for goal_summary (capability-gap autoclosure)
-      "goal_summary",
-      // Seam ③ substrate-authored resolver (2026-07-01): producer for activity_metrics (capability-gap autoclosure)
-      "activity_metrics",
+
       // Seam ③ substrate-authored resolver (2026-07-01): producer for summary_of_clock_vessel_functionality (capability-gap autoclosure)
       "summary_of_clock_vessel_functionality",
       // Seam ③ substrate-authored resolver (2026-07-01): producer for assessment_summary (capability-gap autoclosure)

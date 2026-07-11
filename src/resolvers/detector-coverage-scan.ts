@@ -78,7 +78,7 @@ function activityPrefix(activityId: string | undefined): string {
   const colon = activityId.indexOf(":");
   const vessel = colon >= 0 ? activityId.slice(0, colon) : "";
   let name = colon >= 0 ? activityId.slice(colon + 1) : activityId;
-  name = name.replace(/-\d{6,}.*$/, "").replace(/-v\d+$/, "");
+  name = name.replace(/_exec_[a-z0-9]+$/i, "").replace(/-\d{6,}.*$/, "").replace(/-v\d+$/, "");
   return vessel ? `${vessel}:${name}` : name;
 }
 

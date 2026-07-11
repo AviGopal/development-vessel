@@ -82,6 +82,11 @@ import { METABOB_API_KEY } from "../config.js";
 // DO NOT remove or raise without coordinating with goal-host-vessel's own ceiling —
 // this is a safety boundary, not a tunable performance knob.
 //
+// Note: this comment block documents the MAX_GOAL_LEN guard rationale — what it
+// constrains (goal payload character length), why it exists (token budget,
+// parsing complexity, downstream API limits), and its trade-offs (generous vs.
+// typical usage, coordinated with goal-host-vessel's own ceiling).
+//
 /**
  * MAX_GOAL_LEN guard rationale: enforces a maximum goal text length to prevent
  * token overflow, performance degradation, and ensure safe goal serialization

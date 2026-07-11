@@ -161,14 +161,11 @@ export async function resolveDocsAlignScan(pointer: DocsAlignScanPointer): Promi
     if (invariants.has("timelessness")) {
       let inChangelogSection = false;
       for (const line of lines) {
-        if (/^#{1,6}\s/.test(line)) {
-          if (/^#\s/.test(line)) {
-            inChangelogSection = false;
-          }
-          if (/recent stabilisation|changelog|version history/i.test(line)) {
-            inChangelogSection = true;
-          }
-        }
+        const isHeading = /^#{1,6}\s/.test(line);
+          const isBoldLead = /^\s*\*\*/.test(line);
+          const mentionsChangelog = /recent stabilisation|changelog|version history/i.test(line);
+          if (isHeading) { inChangelogSection = mentionsChangelog; }
+          else if (isBoldLead && mentionsChangelog) { inChangelogSection = true; }
         if (inChangelogSection) continue;
         const isDeprecationMarker = /DEPRECATED\s*\(20\d\d/.test(line) || /\*\*DEPRECATED\b/.test(line);
         const hit = (!isDeprecationMarker && (datePattern.test(line) || line.includes(substrateLive)));

@@ -31,6 +31,7 @@ export const config = {
     // Inline literal so packages/shape-dispatch-check/check.ts can find it.
     // One entry per R2.* resolver in specs/development-vessel/spec.md.
     shapes: [
+    'activity_metrics',
     'template_success_ranking_24h',
     'light-dispatch-vessel_status',
     'vessel_health_report',
@@ -116,6 +117,11 @@ export const config = {
       // author_producer have a real entry. See openspec
       // 2026-06-24-author-producer-validate-mint-parity.
       "goal_file_extract",
+      "traceCompletenessReport",
+      "populated_concept_graph_links",
+      "obsidian:note with project list content",
+      "substantive_findings",
+      "goal_summary",
       // Resolver-pattern aggregation (audit inv-028 B): trace-side
       // (resolver_id, output_shape) → success-rate report. Lets ribosome
       // bias future synthesis and makes the F-127 Thompson skew observable.

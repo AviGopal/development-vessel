@@ -40,6 +40,8 @@ import { METABOB_API_KEY } from "../config.js";
  *
  * Coordination: this is a coordinated safety boundary with goal-host-vessel,
  * which enforces its own independent ceiling. Do not change unilaterally.
+ *
+ * @constant
  */
 const MAX_GOAL_LEN = 8192;
 const GOAL_HOST_ENDPOINT = process.env["GOAL_HOST_VESSEL_ENDPOINT"] ?? "http://127.0.0.1:8210";

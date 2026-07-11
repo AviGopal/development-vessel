@@ -19,22 +19,24 @@ import type { ResolverResult } from "./types.js";
 import { METABOB_API_KEY } from "../config.js";
 
 /**
- * MAX_GOAL_LEN — upper bound on the accepted goal payload size for dispatch.
+ * MAX_GOAL_LEN — upper bound (in characters) on an accepted goal payload.
  *
- * Constrains: raw character length of the `goal` payload passed to this
- * resolver. Exists to (a) keep goal text within downstream LLM token budgets
- * in goal-host-vessel, (b) preserve goal coherence and routing signal (very
- * long goals dilute instruction salience), and (c) bound resolver work and
- * request latency against runaway or hostile payloads.
+ * Rationale (safety boundary): the raw `goal` string flows into downstream
+ * LLM prompts in goal-host-vessel. Capping its length (a) prevents token
+ * overflow in those prompts, (b) preserves goal coherence and instruction
+ * salience (very long goals dilute routing signal), and (c) bounds resolver
+ * work and request latency against runaway or hostile payloads.
  *
  * Threshold: 8192 characters. At a conservative ~4 chars/token this maps to
  * ~2k tokens — comfortably inside typical context budgets while still large
  * enough to admit rich multi-paragraph goals.
  *
- * Failure mode: when a goal exceeds this ceiling, `resolveDispatchGoal`
- * short-circuits at the top of the resolver (after trim/empty-check, BEFORE
- * any network dispatch) and returns a `structuredError` of shape
- * `{ resolver: "dispatch_goal", detail: "goal too long (<len> > <max>)" }`.
+ * Enforcement: checked at the top of `resolveDispatchGoal` (after trim /
+ * empty-check, BEFORE any network dispatch), so oversize goals never leave
+ * this process.
+ *
+ * Failure mode: exceeding the ceiling short-circuits with a `structuredError`
+ * of shape `{ resolver: "dispatch_goal", detail: "goal too long (<len> > <max>)" }`.
  *
  * Coordination: this is a coordinated safety boundary with goal-host-vessel,
  * which enforces its own independent ceiling. Do not change unilaterally.

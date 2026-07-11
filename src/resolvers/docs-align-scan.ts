@@ -269,6 +269,13 @@ export async function resolveDocsAlignScan(pointer: DocsAlignScanPointer): Promi
 
     if (invariants.has("setup_enablement") && pointer.live_truth && typeof pointer.live_truth !== "string" && pointer.live_truth.existing_paths) {
       const existing = new Set(pointer.live_truth.existing_paths);
+      const existingDirs = new Set<string>();
+      for (const fp of existing) {
+        const parts = fp.split("/");
+        for (let i = 1; i < parts.length; i++) {
+          existingDirs.add(parts.slice(0, i).join("/"));
+        }
+      }
       const scriptRx = /(scripts\/[A-Za-z0-9_./-]+)/g;
       const makeRx = /make\s+-C\s+([A-Za-z0-9_./-]+)/g;
       for (const line of lines) {
@@ -279,6 +286,8 @@ export async function resolveDocsAlignScan(pointer: DocsAlignScanPointer): Promi
             const path = mm[1];
             if (!path) continue;
             if (existing.has(path)) continue;
+            if (existingDirs.has(path)) continue;
+            if (Array.from(existing).some(f => f.startsWith(path + "/"))) continue;
             if (!pushFinding({
               doc_id: doc.id,
               invariant: "setup_enablement",

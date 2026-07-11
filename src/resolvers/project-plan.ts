@@ -60,6 +60,7 @@ export async function resolveProjectPlan(pointer: ProjectPlanPointer): Promise<R
     return { action: "dispatch_goal", item: it.text, goal: `Author via the substrate loop: ${it.text}` };
   });
   const wet = pointer["dry_run"] === false;
+  let noteContent = content;
   const executed: Array<Record<string, unknown>> = [];
   if (wet && ownerUrl && content) {
     const asks = plan_actions.filter((a) => a.action === "solicit_human");
@@ -67,9 +68,10 @@ export async function resolveProjectPlan(pointer: ProjectPlanPointer): Promise<R
       const stamp = new Date().toISOString().slice(0, 10);
       const entries = asks.map((a) => `\n### Query: substrate solicitation (${stamp})\n---\n> [!question] From the substrate (project_plan)\n> ${a.item}\n> Reply below this callout — the system reads this thread.\n`).join("");
       try {
-        const wres = await fetch(ownerUrl, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ type: "obsidian:write_note", pointer: { type: "obsidian:write_note", path: notePath, content: content + entries } }), signal: AbortSignal.timeout(8000) });
+        const wres = await fetch(ownerUrl, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ type: "obsidian:write_note", pointer: { type: "obsidian:write_note", path: notePath, content: noteContent + entries } }), signal: AbortSignal.timeout(8000) });
         const wj = (await wres.json()) as { success?: boolean };
         executed.push({ action: "solicit_human", ok: wj.success === true, count: asks.length });
+        noteContent = noteContent + entries;
       } catch (err) { executed.push({ action: "solicit_human", ok: false, error: String(err).slice(0, 120) }); }
     }
     for (const a of plan_actions.filter((x) => x.action === "dispatch_goal")) {
@@ -78,6 +80,20 @@ export async function resolveProjectPlan(pointer: ProjectPlanPointer): Promise<R
         const gj = (await gres.json()) as { dispatchId?: string; executionId?: string; status?: string };
         executed.push({ action: "dispatch_goal", ok: gres.ok, item: a.item, dispatchId: gj.dispatchId ?? gj.executionId, status: gj.status });
       } catch (err) { executed.push({ action: "dispatch_goal", ok: false, item: a.item, error: String(err).slice(0, 120) }); }
+    }
+    const before = noteContent;
+    for (const e of executed) {
+      if (e.ok === true && e.dispatchId && typeof e.item === "string") {
+        const marker = " ⇒ dispatched " + String(e.dispatchId).slice(0, 8) + " " + new Date().toISOString().slice(0, 10);
+        noteContent = noteContent.split("- [ ] " + e.item).join("- [ ] " + e.item + marker);
+      }
+    }
+    if (noteContent !== before) {
+      try {
+        const mres = await fetch(ownerUrl, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ type: "obsidian:write_note", pointer: { type: "obsidian:write_note", path: notePath, content: noteContent } }), signal: AbortSignal.timeout(8000) });
+        const mj = (await mres.json()) as { success?: boolean };
+        executed.push({ action: "mark_dispatched", ok: mj.success === true });
+      } catch (err) { executed.push({ action: "mark_dispatched", ok: false, error: String(err).slice(0, 120) }); }
     }
   }
   return { shape: "projectPlanReport", body: { note_path: notePath, peer_routing, items, dry_run: !wet, plan_actions, executed } };

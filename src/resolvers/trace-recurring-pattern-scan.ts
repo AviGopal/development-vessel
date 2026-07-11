@@ -217,17 +217,32 @@ export async function resolveTraceRecurringPatternScan(
     return { shape: "recurringPatternCluster", body: { has_pattern: false, error: "missing_api_key", generated_at: windowEnd } };
   }
 
-  let traces: TraceRow[];
+  const PAGE_SIZE = 100;
+  const traces: TraceRow[] = [];
+  let offset = 0;
+  const authHeaders = { Authorization: `ApiKey ${apiKey}` };
+  const windowStartMs = new Date(windowStart).getTime();
   try {
-    const res = await fetch(
-      `${metabob.replace(/\/+$/, "")}/v2/activities/execution-traces?since=${encodeURIComponent(windowStart)}&limit=${fetchLimit}`,
-      { headers: { Authorization: `ApiKey ${apiKey}` }, signal: AbortSignal.timeout(timeoutMs) },
-    );
-    if (!res.ok) {
-      return { shape: "recurringPatternCluster", body: { has_pattern: false, error: `traces fetch ${res.status}`, generated_at: windowEnd } };
+    while (traces.length < fetchLimit) {
+      const res = await fetch(
+        `${metabob.replace(/\/+$/, "")}/v2/activities/execution-traces?limit=${PAGE_SIZE}&offset=${offset}&order=desc`,
+        { headers: authHeaders, signal: AbortSignal.timeout(timeoutMs) },
+      );
+      if (!res.ok) {
+        return { shape: "recurringPatternCluster", body: { has_pattern: false, error: `traces fetch ${res.status}`, generated_at: windowEnd } };
+      }
+      const json = (await res.json()) as { traces?: TraceRow[]; executions?: TraceRow[] } | TraceRow[];
+      const page: TraceRow[] = Array.isArray(json) ? json : (json.traces ?? json.executions ?? []);
+      let exhausted = false;
+      for (const trace of page) {
+        if (traces.length >= fetchLimit) break;
+        const startedAt = (trace as TraceRow & { started_at?: string }).started_at;
+        if (startedAt && new Date(startedAt).getTime() < windowStartMs) { exhausted = true; break; }
+        traces.push(trace);
+      }
+      if (exhausted || page.length < PAGE_SIZE || traces.length >= fetchLimit) break;
+      offset += PAGE_SIZE;
     }
-    const json = (await res.json()) as { traces?: TraceRow[]; executions?: TraceRow[] } | TraceRow[];
-    traces = Array.isArray(json) ? json : (json.traces ?? json.executions ?? []);
   } catch (err) {
     return { shape: "recurringPatternCluster", body: { has_pattern: false, error: err instanceof Error ? err.message.slice(0, 120) : "fetch error", generated_at: windowEnd } };
   }

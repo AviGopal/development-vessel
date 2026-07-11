@@ -496,30 +496,9 @@ export interface DispatchGoalPointer {
 export async function resolveDispatchGoal(pointer: DispatchGoalPointer): Promise<ResolverResult> {
   const goal = (pointer.goal ?? "").trim();
   if (!goal) return { shape: "structuredError", body: { resolver: "dispatch_goal", detail: "goal is required" } };
-  // MAX_GOAL_LEN guard rationale: excessively long goal texts cause downstream
-  // processing failures in the goal-host recommendation engine (top_score < 0.3
-  // threshold indicates poor semantic fit). The limit enforces reasonable goal
-  // granularity for meaningful LLM analysis and prevents token budget
-  // exhaustion during prompt synthesis. Threshold: MAX_GOAL_LEN = 8192 chars,
-  // chosen to fit within downstream LLM context windows, goal-host-vessel
-  // /run-goal input limits, and substrate goal parsing capacity. Treat as a
-  // safety boundary, not a performance knob. When exceeded, the resolver
-  // short-circuits with a structuredError (no dispatch attempted) so callers
-  // can surface the constraint and retry with a more parsimonious goal.
-  // Additional note: unbounded goal input degrades goal-host recommendation
-  // reliability by diluting embedding signal, which lowers top_score ranking
-  // confidence and inflates token budget consumption on every downstream LLM
-  // call. Enforcing MAX_GOAL_LEN here is therefore both a cost guard and a
-  // quality guard for the recommendation pipeline.
-  // Performance rationale: the guard also bounds the cost of substring matching
-  // and recommendation scoring in the goal-host, which operate over the full
-  // goal text — capping input length keeps those operations O(MAX_GOAL_LEN)
-  // per candidate and preserves classification relevance by preventing a
-  // single oversized goal from dominating similarity signals.
-  // Threshold rationale: MAX_GOAL_LEN is set to 8192 characters — large enough
-  // to accommodate legitimate multi-paragraph goal descriptions while staying
-  // well within downstream LLM token budgets and the goal-host's own input
-  // capacity, giving a hard backstop against runaway or adversarial payloads.
+  // See the MAX_GOAL_LEN JSDoc above for the authoritative rationale (what it
+  // constrains, why it exists, the 8192-character threshold, failure mode, and
+  // its status as a coordinated safety boundary with goal-host-vessel).
   if (goal.length > MAX_GOAL_LEN) return { shape: "structuredError", body: { resolver: "dispatch_goal", detail: `goal too long (${goal.length} > ${MAX_GOAL_LEN})` } };
 
   const body: Record<string, unknown> = { goal };

@@ -110,7 +110,7 @@ export async function resolveRhythmConductorTick(
   let present = process.env["DEV_OPERATOR_PRESENT"] === "1";
   if (!present) {
     const disc = (await fetchJson(
-      process.env["DISCOVERY_ENDPOINT"] ?? "http://127.0.0.1:8100/resolve",
+      `${process.env["DISCOVERY_ENDPOINT"] ?? "http://127.0.0.1:8100"}/resolve`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `ApiKey ${process.env["METABOB_API_KEY"] ?? ""}` },

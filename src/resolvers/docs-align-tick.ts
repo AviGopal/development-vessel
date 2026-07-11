@@ -41,6 +41,72 @@ function walkMd(dir: string, cap: number): Array<{ id: string; source: string; b
   return results;
 }
 
+async function deriveNamingVocabulary(
+  documents: Array<{ id: string; source: string; body: string }>,
+): Promise<{ deprecated: Array<{ pattern: string; canonical: string; path_only?: boolean }>; retained: string[] }> {
+  try {
+    let projectName = "substrate";
+    try {
+      const proc = Bun.spawn(["git", "rev-parse", "--show-toplevel"], { cwd: DOC_ROOT, stdout: "pipe" });
+      const out = await new Response(proc.stdout).text();
+      const trimmed = out.trim();
+      if (trimmed.length > 0) {
+        const parts = trimmed.split("/");
+        const last = parts[parts.length - 1];
+        if (last && last.length > 0) projectName = last;
+      }
+    } catch {
+      // git absent
+    }
+
+    const tokenRe = /metabob-[a-z0-9]+(?:-[a-z0-9]+)*/gi;
+    const tokens = new Set<string>();
+
+    try {
+      const proc = Bun.spawn(["git", "log", "--oneline", "-n", "500"], { cwd: DOC_ROOT, stdout: "pipe" });
+      const out = await new Response(proc.stdout).text();
+      const matches = out.match(tokenRe);
+      if (matches) for (const m of matches) tokens.add(m.toLowerCase());
+    } catch {
+      // ignore
+    }
+
+    try {
+      const combined = documents.map((d) => d.body).join("\n");
+      const matches = combined.match(tokenRe);
+      if (matches) for (const m of matches) tokens.add(m.toLowerCase());
+    } catch {
+      // ignore
+    }
+
+    try {
+      const res = await fetch("http://127.0.0.1:8090/v2/impulses/resolve", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ impulse: { type: "memoryNote", limit: 100 } }),
+      });
+      const j = (await res.json()) as unknown;
+      const text = JSON.stringify(j);
+      const matches = text.match(tokenRe);
+      if (matches) for (const m of matches) tokens.add(m.toLowerCase());
+    } catch {
+      // ignore
+    }
+
+    const deprecated: Array<{ pattern: string; canonical: string; path_only?: boolean }> = [];
+    for (const token of tokens) {
+      const x = token.slice("metabob-".length);
+      const canonical = x === "devbob" ? projectName : x;
+      if (canonical === token) continue;
+      deprecated.push({ pattern: token, canonical, path_only: x !== "devbob" });
+    }
+    return { deprecated, retained: [] };
+  } catch {
+    return { deprecated: [], retained: [] };
+  }
+}
+
+
 function walkScripts(dir: string, cap: number): string[] {
   const results: string[] = [];
   try {
@@ -109,11 +175,13 @@ export async function resolveDocsAlignTick(
   }
 
   // 3. Run docs_align_scan
+  const vocabulary = await deriveNamingVocabulary(documents);
   const scan = await resolveDocsAlignScan({
     type: "docs_align_scan",
     corpus: { documents },
     live_truth: { existing_paths, unit_names },
     invariants: ["timelessness", "naming_alignment", "setup_enablement"],
+    vocabulary,
     max_findings: 100,
   });
 

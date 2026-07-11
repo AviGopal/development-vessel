@@ -44,7 +44,7 @@ export async function resolveProjectPlan(pointer: ProjectPlanPointer): Promise<R
   const items = [...todoSection.matchAll(/^- \[( |x)\] (.+)$/gm)].map((m) => {
     const text = (m[2] ?? "").trim();
     const lower = text.toLowerCase();
-    const cls = /(format|css|style)/.test(lower) ? "obsidian_feature" : text.endsWith("?") ? "human_or_llm_question" : "substrate_authorable";
+    const cls = text.endsWith("?") ? "human_or_llm_question" : /repos\/[\w.-]+\/src\//.test(text) ? "substrate_authorable" : /(css|style)\b/.test(lower) ? "obsidian_feature" : "substrate_authorable";
     return { text, checked: m[1] === "x", dispatched: text.includes("⇒ dispatched"), class: cls };
   });
   const plan_actions = items.filter((it) => !it.checked && !it.dispatched).map((it) => {
@@ -57,7 +57,7 @@ export async function resolveProjectPlan(pointer: ProjectPlanPointer): Promise<R
         : "repos/obsidian-vessel/src/main.ts";
       return { action: "dispatch_goal", item: it.text, goal: `In ${target}, implement: ${it.text}` };
     }
-    return { action: "dispatch_goal", item: it.text, goal: `Author via the substrate loop: ${it.text}` };
+    return { action: "dispatch_goal", item: it.text, goal: /repos\/[\w.-]+\/src\//.test(it.text) ? it.text : `Author via the substrate loop: ${it.text}` };
   });
   const wet = pointer["dry_run"] === false;
   let noteContent = content;

@@ -43,7 +43,9 @@ import { METABOB_API_KEY } from "../config.js";
  *
  * @constant
  */
-// Guard: cap goal payload length to prevent LLM prompt token overflow and preserve instruction salience (see rationale above).
+// Guard: MAX_GOAL_LEN enforces three concerns: (1) prevent LLM prompt token overflow,
+// (2) preserve instruction salience by bounding payload size, and
+// (3) maintain a coordinated safety boundary with goal-host-vessel (see rationale above).
 const MAX_GOAL_LEN = 8192;
 const GOAL_HOST_ENDPOINT = process.env["GOAL_HOST_VESSEL_ENDPOINT"] ?? "http://127.0.0.1:8210";
 

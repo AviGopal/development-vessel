@@ -680,7 +680,7 @@ export const config = {
       // read-out + per_shape_boost for the develop/collect/reflect arbiter (C9).
       "learningMode",
       // Seam ③ substrate-authored resolver (2026-07-01): producer for sourceCode (capability-gap autoclosure)
-      "sourceCode",
+
       // Seam ③ substrate-authored resolver (2026-07-01): producer for populated_concept_graph_links (capability-gap autoclosure)
       "populated_concept_graph_links",
       // Seam ③ substrate-authored resolver (2026-07-01): producer for obsidian:note with project list content (capability-gap autoclosure)

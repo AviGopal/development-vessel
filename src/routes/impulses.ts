@@ -197,7 +197,7 @@ import { resolveShapeClosureDemand } from "../resolvers/shape-closure-demand.js"
 import { resolveRepairPolicy } from "../resolvers/repair-policy.js";
 import { resolveSelectionEntropy } from "../resolvers/selection-entropy.js";
 import { resolveLearningMode } from "../resolvers/learning-mode.js";
-import { resolveSourceCode } from "../resolvers/source-code.js";
+
 import { resolveSourceCodeAnalysis } from "../resolvers/source-code-analysis.js";
 import { resolvePopulatedConceptGraphLinks } from "../resolvers/populated-concept-graph-links.js";
 import { resolveObsidianNoteWithProjectListContent } from "../resolvers/obsidian-note-with-project-list-content.js";
@@ -775,8 +775,7 @@ async function dispatchInner(pointer: AnyPointer): Promise<ResolverResult> {
       return resolveLearningMode(p as Parameters<typeof resolveLearningMode>[0]);
     case "sourceCodeAnalysis":
       return resolveSourceCodeAnalysis(pointer);
-    case "sourceCode":
-      return resolveSourceCode(p as Parameters<typeof resolveSourceCode>[0]);
+
     case "populated_concept_graph_links":
       return resolvePopulatedConceptGraphLinks(p as Parameters<typeof resolvePopulatedConceptGraphLinks>[0]);
     case "obsidian:note with project list content":

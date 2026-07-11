@@ -45,9 +45,9 @@ export async function resolveProjectPlan(pointer: ProjectPlanPointer): Promise<R
     const text = (m[2] ?? "").trim();
     const lower = text.toLowerCase();
     const cls = /(format|css|style)/.test(lower) ? "obsidian_feature" : text.endsWith("?") ? "human_or_llm_question" : "substrate_authorable";
-    return { text, checked: m[1] === "x", class: cls };
+    return { text, checked: m[1] === "x", dispatched: text.includes("⇒ dispatched"), class: cls };
   });
-  const plan_actions = items.filter((it) => !it.checked).map((it) => {
+  const plan_actions = items.filter((it) => !it.checked && !it.dispatched).map((it) => {
     if (it.class === "human_or_llm_question") {
       return { action: "solicit_human", item: it.text, delivery: "discussion_entry", note_path: notePath };
     }

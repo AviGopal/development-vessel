@@ -197,7 +197,7 @@ import { resolveShapeClosureDemand } from "../resolvers/shape-closure-demand.js"
 import { resolveRepairPolicy } from "../resolvers/repair-policy.js";
 import { resolveSelectionEntropy } from "../resolvers/selection-entropy.js";
 import { resolveLearningMode } from "../resolvers/learning-mode.js";
-
+import { resolveSourceCode } from "../resolvers/source-code.js";
 import { resolveSourceCodeAnalysis } from "../resolvers/source-code-analysis.js";
 import { resolvePopulatedConceptGraphLinks } from "../resolvers/populated-concept-graph-links.js";
 import { resolveObsidianNoteWithProjectListContent } from "../resolvers/obsidian-note-with-project-list-content.js";
@@ -215,6 +215,7 @@ import { resolveCodeLocalityMiningTick } from "../resolvers/code-locality-mining
 import { resolveCodeLocality } from "../resolvers/code-locality.js";
 import { resolveMaintenanceLease, resolveMaintenanceLeaseWrite } from "../resolvers/maintenance-lease.js";
 import { resolveTraceStoreHealthObserver } from "../resolvers/trace-store-health-observer.js";
+import { resolveUiScreenshot } from "../resolvers/ui-screenshot.js";
 import { resolveDispatch as resolveDispatchHelper } from "./impulses.js";
 import type { ResolverResult } from "../resolvers/types.js";
 
@@ -775,7 +776,8 @@ async function dispatchInner(pointer: AnyPointer): Promise<ResolverResult> {
       return resolveLearningMode(p as Parameters<typeof resolveLearningMode>[0]);
     case "sourceCodeAnalysis":
       return resolveSourceCodeAnalysis(pointer);
-
+    case "sourceCode":
+      return resolveSourceCode(p as Parameters<typeof resolveSourceCode>[0]);
     case "populated_concept_graph_links":
       return resolvePopulatedConceptGraphLinks(p as Parameters<typeof resolvePopulatedConceptGraphLinks>[0]);
     case "obsidian:note with project list content":
@@ -814,12 +816,10 @@ async function dispatchInner(pointer: AnyPointer): Promise<ResolverResult> {
       const { resolveLightDispatchVesselStatus } = await import("../resolvers/light-dispatch-vessel-status.js");
       return resolveLightDispatchVesselStatus(pointer);
     }
-    case "rubricEcho": {
-      const { resolveRubricEcho } = await import("../resolvers/rubric-echo.js");
-      return resolveRubricEcho(pointer as unknown as import("../resolvers/rubric-echo.js").RubricEchoPointer);
-    }
     case "template_success_ranking_24h":
       return resolveTemplateSuccessRanking24h(pointer);
+    case "obsidian:ui_screenshot":
+      return resolveUiScreenshot(p as Parameters<typeof resolveUiScreenshot>[0]);
     default:
       throw new Error(`unknown shape: ${pointer.type}`);
   }

@@ -31,8 +31,6 @@ export const config = {
     // Inline literal so packages/shape-dispatch-check/check.ts can find it.
     // One entry per R2.* resolver in specs/development-vessel/spec.md.
     shapes: [
-      'rubricEcho',
-    'activity_metrics',
     'template_success_ranking_24h',
     'light-dispatch-vessel_status',
     'vessel_health_report',
@@ -118,11 +116,6 @@ export const config = {
       // author_producer have a real entry. See openspec
       // 2026-06-24-author-producer-validate-mint-parity.
       "goal_file_extract",
-      "traceCompletenessReport",
-      "populated_concept_graph_links",
-      "obsidian:note with project list content",
-      "substantive_findings",
-      "goal_summary",
       // Resolver-pattern aggregation (audit inv-028 B): trace-side
       // (resolver_id, output_shape) → success-rate report. Lets ribosome
       // bias future synthesis and makes the F-127 Thompson skew observable.
@@ -664,6 +657,8 @@ export const config = {
       // activity that invokes X. The recursive mint-as-you-go primitive — lets
       // the substrate mint a chain of real-resolver producers toward a goal.
       "author_producer",
+      // Seam ③ substrate-authored resolver (2026-06-30): producer for traceCompletenessReport (capability-gap autoclosure)
+      "traceCompletenessReport",
       // Seam ③ substrate-authored resolver (2026-06-30): coarsenable_chain
       "coarsenableChain",
       // Seam ③ substrate-authored resolver (2026-06-30): learning_policy
@@ -685,8 +680,17 @@ export const config = {
       // read-out + per_shape_boost for the develop/collect/reflect arbiter (C9).
       "learningMode",
       // Seam ③ substrate-authored resolver (2026-07-01): producer for sourceCode (capability-gap autoclosure)
-
-
+      "sourceCode",
+      // Seam ③ substrate-authored resolver (2026-07-01): producer for populated_concept_graph_links (capability-gap autoclosure)
+      "populated_concept_graph_links",
+      // Seam ③ substrate-authored resolver (2026-07-01): producer for obsidian:note with project list content (capability-gap autoclosure)
+      "obsidian:note with project list content",
+      // Seam ③ substrate-authored resolver (2026-07-01): producer for substantive_findings (capability-gap autoclosure)
+      "substantive_findings",
+      // Seam ③ substrate-authored resolver (2026-07-01): producer for goal_summary (capability-gap autoclosure)
+      "goal_summary",
+      // Seam ③ substrate-authored resolver (2026-07-01): producer for activity_metrics (capability-gap autoclosure)
+      "activity_metrics",
       // Seam ③ substrate-authored resolver (2026-07-01): producer for summary_of_clock_vessel_functionality (capability-gap autoclosure)
       "summary_of_clock_vessel_functionality",
       // Seam ③ substrate-authored resolver (2026-07-01): producer for assessment_summary (capability-gap autoclosure)
@@ -713,6 +717,8 @@ export const config = {
       // traceStore counters (never a live AET scan) and emits a substrateGap
       // when row_count exceeds cap.
       "trace_store_health_observer",
+      // Seam ③ substrate-authored resolver (2026-07-11): Real screenshot capture resolver accessing Electron remote module to capture page and return base64 PNG with dimensions
+      "obsidian:ui_screenshot",
     ] as const,
     resolveEndpoint: "/v2/impulses/resolve",
     resolveRequestFormat: "pointer" as const,

@@ -10,6 +10,7 @@ export interface LlmCompletionDispatchPointer {
   system_prompt?: string;
   model?: string;
   max_tokens?: number;
+  tools?: unknown[];
 }
 
 interface DiscoveryVessel {
@@ -69,6 +70,13 @@ async function findLlmCompletionEndpoint(): Promise<string | null> {
   }
 }
 
+const DEFAULT_LLM_TOOLS = [
+  { name: "source_code", description: "Read the full source of a repo file yourself instead of asking for it. Use this whenever you need a file's contents.", input_schema: { type: "object", properties: { filePath: { type: "string", description: "repo-relative path, e.g. repos/concept-db/src/models/schemas.ts" } }, required: ["filePath"] } },
+  { name: "fs_read", description: "Read a file's contents by path.", input_schema: { type: "object", properties: { path: { type: "string" } }, required: ["path"] } },
+  { name: "code_search", description: "Grep a SINGLE file for a regex pattern.", input_schema: { type: "object", properties: { path: { type: "string" }, pattern: { type: "string", description: "regex" } }, required: ["path", "pattern"] } },
+  { name: "shell", description: "Run a shell command to inspect the repo or system (e.g. ls, grep, cat).", input_schema: { type: "object", properties: { command: { type: "string" }, cwd: { type: "string" } }, required: ["command"] } },
+];
+
 export async function resolveLlmCompletionDispatch(
   pointer: LlmCompletionDispatchPointer,
 ): Promise<ResolverResult> {
@@ -92,7 +100,8 @@ export async function resolveLlmCompletionDispatch(
     type: "llm_completion" as const,
     prompt: pointer.prompt,
     model,
-    max_tokens: pointer.max_tokens ?? 4096,
+    max_tokens: pointer.max_tokens ?? 8192,
+    tools: (Array.isArray(pointer.tools) && pointer.tools.length > 0) ? pointer.tools : DEFAULT_LLM_TOOLS,
     ...(pointer.system_prompt ? { system: pointer.system_prompt } : {}),
   };
 

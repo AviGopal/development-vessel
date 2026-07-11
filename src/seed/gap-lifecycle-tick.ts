@@ -23,7 +23,7 @@ export const GAP_LIFECYCLE_TICK_TEMPLATE: ActivityTemplate = {
       id: "scan_gap_lifecycle",
       description: "Run gap_lifecycle_scan with auto-close enabled.",
       resolver: "gap_lifecycle_scan",
-      config: { type: "gap_lifecycle_scan", staleHours: 48, autoClose: true, maxClose: 25, auditEmission: true, pruneChurned: true },
+      config: { type: "gap_lifecycle_scan", staleHours: 48, autoClose: true, maxClose: 25, auditEmission: true, pruneChurned: true, dispatchScenario: true },
       outputShapes: ["gapLifecycleReport"],
     },
   ],

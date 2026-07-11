@@ -158,6 +158,77 @@ export async function autoCloseStaleGaps(
   return { closedIds, closureEvents };
 }
 
+// NOTE: For proactive scenario-based reprobing see dispatchScenario below,
+// which resolves real scenarios from validation/failure-modes/scenarios/ and
+// executes them via the same dispatch pattern as harness-check-scenario.ts.
+
+import * as path from "path";
+
+interface ReprobeResult {
+  reproduced: boolean;
+  probe: string;
+}
+
+async function dispatchScenario(gap: {
+  detected_by?: string;
+  classification_metadata?: { scenario?: string };
+  [key: string]: unknown;
+}): Promise<ReprobeResult> {
+  const scenariosDir = path.resolve(
+    import.meta.dir,
+    "../../validation/failure-modes/scenarios"
+  );
+
+  // Resolve scenario name from gap metadata
+  const scenarioName: string | undefined =
+    gap.detected_by ??
+    gap.classification_metadata?.scenario;
+
+  if (!scenarioName) {
+    return { reproduced: false, probe: "no-scenario-resolved" };
+  }
+
+  const scenarioPath = path.join(scenariosDir, `${scenarioName}.json`);
+  const scenarioFile = Bun.file(scenarioPath);
+  const exists = await scenarioFile.exists();
+  if (!exists) {
+    return { reproduced: false, probe: `scenario-not-found:${scenarioName}` };
+  }
+
+  const scenario = await scenarioFile.json() as {
+    probe?: string;
+    steps?: Array<{ action: string; expect: string }>;
+    [key: string]: unknown;
+  };
+
+  const probe: string = scenario.probe ?? scenarioName;
+
+  // Execute scenario steps using the same dispatch pattern as harness-check-scenario
+  const steps = scenario.steps ?? [];
+  let reproduced = false;
+
+  for (const step of steps) {
+    const response = await fetch("http://localhost:3000/v2/impulses/resolve", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ shape: step.action, body: scenario }),
+    });
+
+    if (!response.ok) {
+      reproduced = true;
+      break;
+    }
+
+    const result = await response.json() as { status?: string; reproduced?: boolean };
+    if (result.reproduced === true || result.status === "failure") {
+      reproduced = true;
+      break;
+    }
+  }
+
+  return { reproduced, probe };
+}
+
 export async function resolveGapLifecycleScan(p: GapLifecycleScanPointer): Promise<ResolverResult> {
   const gapsPath = p.gapsPath ?? "/workspace/gaps/gaps.json";
   const proposalsDir = p.proposalsDir ?? "/workspace/proposals";
@@ -333,6 +404,14 @@ export async function resolveGapLifecycleScan(p: GapLifecycleScanPointer): Promi
   if (autoClose && !dryRun) {
     for (const g of churned.slice(0, maxClose)) {
       try {
+        const reprobe = await dispatchScenario(g as unknown as { [key: string]: unknown; detected_by?: string; classification_metadata?: { scenario?: string } });
+        if (reprobe.reproduced) {
+          (g as any).status = "open";
+          (g as any).failure_lesson = `Reprobe reproduced failure via ${reprobe.probe}; close blocked.`;
+          continue;
+        } else {
+          (g as any).reprobe_evidence = { probe: reprobe.probe, result: "not_reproduced", timestamp: new Date().toISOString() };
+        }
         const resp = await fetch(emitUrl, {
           method: "POST",
           headers: { "Content-Type": "application/json", ...authHeader },
@@ -340,7 +419,7 @@ export async function resolveGapLifecycleScan(p: GapLifecycleScanPointer): Promi
             id: g.id, category: g.category ?? "other", source: "substrate_detected",
             summary: `[auto-closed by gap_lifecycle_scan] ${(g.summary ?? "").slice(0, 160)} — drafted + apply FAILED (structuredError) + stale >${staleHours}h; likely already-resolved or not patch-tractable. Live detectors will re-open if still real.`,
             status: "closed", detected_at: new Date().toISOString(),
-            classification_metadata: { closed_reason: "churned_unlandable", closed_by: "gap_lifecycle_scan" },
+            classification_metadata: { closed_reason: "churned_unlandable", closed_by: "gap_lifecycle_scan", reprobe_evidence: (g as any).reprobe_evidence },
           } } } }),
           signal: AbortSignal.timeout(8_000),
         });

@@ -73,6 +73,7 @@ import { resolveDbContentionObserver } from "../resolvers/db-contention-observer
 import { resolveFeatureCompose } from "../resolvers/feature-compose.js";
 import { resolveGapToFeature } from "../resolvers/gap-to-feature.js";
 import { resolveDocDriftFix } from "../resolvers/doc-drift-fix.js";
+import { resolveDocsAlignBridge } from "../resolvers/docs-align-bridge.js";
 import { resolveLoadAttribution, resolveLoadAttributionWrite } from "../resolvers/load-attribution.js";
 import { resolveLoadAttributionReport } from "../resolvers/load-attribution-report.js";
 import { resolvePreconditionRejectionScan } from "../resolvers/precondition-rejection-scan.js";
@@ -400,6 +401,8 @@ async function dispatchInner(pointer: AnyPointer): Promise<ResolverResult> {
     // @shape-dispatch:private
     case "doc_drift_fix":
       return resolveDocDriftFix(p as Parameters<typeof resolveDocDriftFix>[0]);
+    case "docs_align_bridge":
+      return resolveDocsAlignBridge(p as Parameters<typeof resolveDocsAlignBridge>[0]);
     case "loadAttribution":
       return resolveLoadAttribution(p as Parameters<typeof resolveLoadAttribution>[0]);
     case "loadAttribution_write":

@@ -28,6 +28,7 @@ import { resolveLearnedTopologySnapshot } from "../resolvers/learned-topology-sn
 import { resolveReachableUnlearnedReport } from "../resolvers/reachable-unlearned-report.js";
 import { resolveUnknownShapeReport } from "../resolvers/unknown-shape-report.js";
 import { resolveTemplateSuccessRanking24h } from "../resolvers/template-success-ranking-24h.js";
+import { resolveConceptNamingSync } from "../resolvers/concept-naming-sync.js";
 import { resolveObsidianVesselCount } from "../resolvers/obsidian-vessel-count.js";
 import { resolveFailureCountReport } from "../resolvers/failure-count-report.js";
 import { resolveConceptFromTraces } from "../resolvers/concept.js";
@@ -804,6 +805,7 @@ async function dispatchInner(pointer: AnyPointer): Promise<ResolverResult> {
       return resolveCodeLocalityMiningTick(p as Parameters<typeof resolveCodeLocalityMiningTick>[0]);
     case "code_locality":
       return resolveCodeLocality(p as Parameters<typeof resolveCodeLocality>[0]);
+    case "concept_naming_sync": return resolveConceptNamingSync(p as Parameters<typeof resolveConceptNamingSync>[0]);
     case "concept":
       return resolveConceptFromTraces(pointer);
     case "failure_count_report":

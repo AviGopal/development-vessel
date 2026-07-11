@@ -473,6 +473,11 @@ import { METABOB_API_KEY } from "../config.js";
 //   computational bounds. The guard protects against goals that exceed context
 //   window limits and improves recommendation quality by rejecting overly
 //   complex/verbose goal statements.
+// MAX_GOAL_LEN guard rationale: enforces a maximum goal text length to prevent
+// token budget overflow in LLM prompts and to maintain goal coherence. Input
+// goal_text length is validated against this ceiling and oversized goals are
+// rejected before dispatch, which protects against prompt injection risks and
+// ensures reliable goal-to-activity mapping downstream.
 const MAX_GOAL_LEN = 8192;
 const GOAL_HOST_ENDPOINT = process.env["GOAL_HOST_VESSEL_ENDPOINT"] ?? "http://127.0.0.1:8210";
 

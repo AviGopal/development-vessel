@@ -1,3 +1,4 @@
+import { METABOB_ENDPOINT } from "../config.js";
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
 import { resolveDocsAlignScan } from "./docs-align-scan.js";
@@ -80,7 +81,7 @@ async function deriveNamingVocabulary(
     }
 
     try {
-      const res = await fetch("http://127.0.0.1:8090/v2/impulses/resolve", {
+      const res = await fetch(`${METABOB_ENDPOINT}/v2/impulses/resolve`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ impulse: { type: "memoryNote", limit: 100 } }),

@@ -13,7 +13,7 @@ export interface ProjectThreadScanPointer {
 }
 
 export async function resolveProjectThreadScan(pointer: ProjectThreadScanPointer): Promise<ResolverResult> {
-  const folder = String(pointer["folder"] ?? "Substrate/Inbox");
+  const folder = String(pointer["folder"] ?? "Substrate/Projects");
   const query = String(pointer["query"] ?? "project");
   const scanned_peers: Array<{ vessel_id: string; results: number }> = [];
   const paths = new Set<string>();
@@ -44,13 +44,16 @@ export async function resolveProjectThreadScan(pointer: ProjectThreadScanPointer
       } catch { scanned_peers.push({ vessel_id: vid, results: 0 }); }
     }
   } catch { /* discovery unreachable: report empty scan */ }
-  const notes: Array<{ note_path: string; items_found: number; open_items: number }> = [];
+  const execute = pointer["execute"] === true;
+  const notes: Array<{ note_path: string; items_found: number; open_items: number; executed?: unknown }> = [];
   for (const note_path of paths) {
     try {
-      const plan = await resolveProjectPlan({ type: "project_plan", note_path, dry_run: true });
+      const plan = await resolveProjectPlan({ type: "project_plan", note_path, dry_run: !execute });
       const body = plan.body as { items?: Array<{ checked?: boolean }> };
       const items = Array.isArray(body.items) ? body.items : [];
-      notes.push({ note_path, items_found: items.length, open_items: items.filter((i) => i.checked !== true).length });
+      notes.push(execute
+          ? { note_path, items_found: items.length, open_items: items.filter((i) => i.checked !== true).length, executed: (plan.body as { executed?: unknown }).executed }
+          : { note_path, items_found: items.length, open_items: items.filter((i) => i.checked !== true).length });
     } catch { notes.push({ note_path, items_found: 0, open_items: 0 }); }
   }
   return { shape: "projectThreadScanReport", body: { folder, query, scanned_peers, notes } };

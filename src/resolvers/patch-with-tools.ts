@@ -283,7 +283,8 @@ export async function resolvePatchWithTools(pointer: PatchWithToolsPointer): Pro
   const workspaceRoot = pointer.workspace_root ?? process.env.WORKSPACE_ROOT ?? "/workspace";
   const vesselsRoot = pointer.vessels_root ?? "/vessels";
   const maxIters = pointer.max_iterations ?? MAX_ITERATIONS;
-  const model = pointer.model ?? process.env.SELF_DEV_LLM_MODEL ?? "anthropic/claude-opus-4-7";
+  let model = pointer.model ?? process.env.SELF_DEV_LLM_MODEL ?? "anthropic/claude-opus-4-7";
+  const fallbackModels = ["zai-org/GLM-5.2-TEE", "moonshotai/Kimi-K2.6-TEE", "deepseek-ai/DeepSeek-V3.2-TEE"].filter((m) => m !== model);
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
 
   const derived = deriveVesselFromPath(pointer.target_file);
@@ -442,10 +443,20 @@ export async function resolvePatchWithTools(pointer: PatchWithToolsPointer): Pro
       `Emit your next action as a JSON object only.`;
 
     let raw: string;
-    try {
-      raw = await llmCall(llmEndpoint, prompt, model);
-    } catch (err) {
-      return structuredError(`llm failed turn ${turn}: ${(err as Error).message}`, { history, before_sha: beforeSha });
+    for (;;) {
+      try {
+        raw = await llmCall(llmEndpoint, prompt, model);
+        break;
+      } catch (err) {
+        const msg = (err as Error).message;
+        const creditDead = /credit balance|requires more credits/i.test(msg);
+        const next = creditDead ? fallbackModels.shift() : undefined;
+        if (!next) {
+          return structuredError(`llm failed turn ${turn}: ${msg}`, { history, before_sha: beforeSha });
+        }
+        console.error(`[patch-with-tools] model ${model} credit-dead; falling back to ${next}`);
+        model = next;
+      }
     }
     const action = parseFirstJsonObject(raw);
     console.error(`[patch-with-tools] turn ${turn}: action=${action?.action ?? "UNPARSEABLE"}${action?.tool ? ` tool=${action.tool}` : ""}`);

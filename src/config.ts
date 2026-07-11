@@ -82,6 +82,7 @@ export const config = {
       "coverage_tick",
       "docs_align_scan",
       "docs_align_bridge",
+      "docs_align_tick",
       "substrate_health_tick",
       "compose_topology_tick",
       "failure_mode_matrix_score",

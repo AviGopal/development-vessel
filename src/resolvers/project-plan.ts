@@ -63,7 +63,10 @@ export async function resolveProjectPlan(pointer: ProjectPlanPointer): Promise<R
   let noteContent = content;
   const executed: Array<Record<string, unknown>> = [];
   if (wet && ownerUrl && content) {
-    const asks = plan_actions.filter((a) => a.action === "solicit_human");
+    const askedRe = /> \[!question\] From the substrate \(project_plan\)\n> ([^\n]*)/g;
+    const already = new Set<string>();
+    for (const m of noteContent.matchAll(askedRe)) already.add((m[1] || "").trim());
+    const asks = plan_actions.filter((a) => a.action === "solicit_human" && !already.has(String(a.item ?? "").trim()));
     if (asks.length > 0) {
       const stamp = new Date().toISOString().slice(0, 10);
       const entries = asks.map((a) => `\n### Query: substrate solicitation (${stamp})\n---\n> [!question] From the substrate (project_plan)\n> ${a.item}\n> Reply below this callout — the system reads this thread.\n`).join("");

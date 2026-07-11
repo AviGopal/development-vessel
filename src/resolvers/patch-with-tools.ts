@@ -283,7 +283,7 @@ export async function resolvePatchWithTools(pointer: PatchWithToolsPointer): Pro
   const workspaceRoot = pointer.workspace_root ?? process.env.WORKSPACE_ROOT ?? "/workspace";
   const vesselsRoot = pointer.vessels_root ?? "/vessels";
   const maxIters = pointer.max_iterations ?? MAX_ITERATIONS;
-  const model = pointer.model ?? "anthropic/claude-opus-4-7";
+  const model = pointer.model ?? process.env.SELF_DEV_LLM_MODEL ?? "anthropic/claude-opus-4-7";
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
 
   const derived = deriveVesselFromPath(pointer.target_file);

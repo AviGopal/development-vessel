@@ -65,7 +65,8 @@ const FAMILY_GOALS: Record<string, string> = {
     "drain the highest-priority open substrate gap from the gap_lifecycle_scan consumption queue",
   "pattern-mining":
     "run trace_recurring_pattern_scan and promote any recurring cluster to a concept",
-  "human-interacting": "exercise the human-facing obsidian substrate surfaces so they stay legible and available: capture a ui_screenshot of the main obsidian interface, run the ui legibility sensors over it, verify the substrate-gap and goal-dispatch panels are present and navigable, and file any rendering defect, stale surface, or availability failure as a substrate gap",
+  "human-interacting":
+    "check obsidian presence and deliver any pending assist",
   "view-exercise": "exercise the obsidian goal-dispatch views so they stay legible and available to humans: capture a ui_screenshot of the goal-dispatch panel, run the ui legibility sensors over it, verify the newest goal note under Substrate/Dispatches carries a reached verdict callout and a Why block, and file any rendering defect, stale surface, or availability failure as a substrate gap",
   "concept-management":
     "run concept_naming_sync to reconcile concept-db concept naming and provenance with the current reality, and file any drift as gaps",

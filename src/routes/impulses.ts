@@ -814,6 +814,10 @@ async function dispatchInner(pointer: AnyPointer): Promise<ResolverResult> {
       const { resolveLightDispatchVesselStatus } = await import("../resolvers/light-dispatch-vessel-status.js");
       return resolveLightDispatchVesselStatus(pointer);
     }
+    case "rubricEcho": {
+      const { resolveRubricEcho } = await import("../resolvers/rubric-echo.js");
+      return resolveRubricEcho(pointer as unknown as import("../resolvers/rubric-echo.js").RubricEchoPointer);
+    }
     case "template_success_ranking_24h":
       return resolveTemplateSuccessRanking24h(pointer);
     default:

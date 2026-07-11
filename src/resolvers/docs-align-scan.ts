@@ -51,7 +51,8 @@ export interface DocsAlignScanPointer {
 
 async function fetchCanonicalVocabulary(): Promise<DocsAlignVocabulary | null> {
   try {
-    const response = await fetch("http://127.0.0.1:8090/v2/impulses/resolve", {
+    const SELF_ENDPOINT = process.env["SELF_ENDPOINT"] ?? "http://127.0.0.1:8090";
+    const response = await fetch(`${SELF_ENDPOINT}/v2/impulses/resolve`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ impulse: { type: "memoryNote", id: "canonical-naming-vocabulary" } }),

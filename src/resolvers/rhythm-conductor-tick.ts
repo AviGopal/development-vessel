@@ -54,6 +54,7 @@ interface RhythmImpulse {
   id?: string;
   shape?: string;
   body?: RhythmBody;
+  updated_at?: string;
 }
 
 const FAMILY_GOALS: Record<string, string> = {
@@ -126,7 +127,9 @@ export async function resolveRhythmConductorTick(
     const b = r.body ?? {};
     const alpha = typeof b.alpha === "number" ? b.alpha : 1;
     const beta = typeof b.beta === "number" ? b.beta : 1;
-    const staleness = typeof b.staleness === "number" ? b.staleness : 0;
+    const rawStaleness = typeof b.staleness === "number" ? b.staleness : 0;
+    const ageHours = typeof r.updated_at === "string" ? (Date.now() - new Date(r.updated_at).getTime()) / 3600000 : 0;
+    const staleness = b.family === "gap-closing" ? rawStaleness : Math.min(1, rawStaleness + Math.max(0, ageHours) / 24);
     const budget = typeof b.budget === "number" ? b.budget : 1;
     const denom = alpha + beta > 0 ? alpha + beta : 1;
     const due_score = (alpha / denom) * staleness / Math.max(budget, 0.05);

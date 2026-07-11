@@ -20,6 +20,7 @@ function walkMd(dir: string, cap: number): Array<{ id: string; source: string; b
       if (results.length >= cap) break;
       const full = join(dir, entry.name);
       if (entry.isDirectory()) {
+        if (entry.name === "archive") continue;
         const sub = walkMd(full, cap - results.length);
         results.push(...sub);
       } else if (entry.isFile() && entry.name.endsWith(".md")) {

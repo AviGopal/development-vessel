@@ -70,11 +70,83 @@ async function findLlmCompletionEndpoint(): Promise<string | null> {
   }
 }
 
-const DEFAULT_LLM_TOOLS = [
-  { name: "source_code", description: "Read the full source of a repo file yourself instead of asking for it. Use this whenever you need a file's contents.", input_schema: { type: "object", properties: { filePath: { type: "string", description: "repo-relative path, e.g. repos/concept-db/src/models/schemas.ts" } }, required: ["filePath"] } },
-  { name: "fs_read", description: "Read a file's contents by path.", input_schema: { type: "object", properties: { path: { type: "string" } }, required: ["path"] } },
-  { name: "code_search", description: "Grep a SINGLE file for a regex pattern.", input_schema: { type: "object", properties: { path: { type: "string" }, pattern: { type: "string", description: "regex" } }, required: ["path", "pattern"] } },
-  { name: "shell", description: "Run a shell command to inspect the repo or system (e.g. ls, grep, cat).", input_schema: { type: "object", properties: { command: { type: "string" }, cwd: { type: "string" } }, required: ["command"] } },
+interface LlmToolInputSchema {
+  type: string;
+  properties: Record<string, { type: string; description?: string }>;
+  required?: string[];
+}
+
+interface LlmTool {
+  name: string;
+  description: string;
+  input_schema: LlmToolInputSchema;
+}
+
+const DEFAULT_LLM_TOOLS: LlmTool[] = [
+  {
+    name: "source_code",
+    description: "Read a repo file's full source code. Use this tool directly to fetch file contents by repo-relative path (e.g. repos/concept-db/src/models/schemas.ts) — do not ask the user for the content.",
+    input_schema: {
+      type: "object",
+      properties: {
+        filePath: {
+          type: "string",
+          description: "Repo-relative path to the file, e.g. repos/concept-db/src/models/schemas.ts",
+        },
+      },
+      required: ["filePath"],
+    },
+  },
+  {
+    name: "fs_read",
+    description: "Read a file's contents by absolute or relative path. Use this tool directly to fetch file contents — do not ask the user for the content.",
+    input_schema: {
+      type: "object",
+      properties: {
+        path: {
+          type: "string",
+          description: "Path to the file to read",
+        },
+      },
+      required: ["path"],
+    },
+  },
+  {
+    name: "codeSearchResult",
+    description: "Grep a single file for a regex pattern. Use this tool directly to search file contents — do not ask the user to perform the search.",
+    input_schema: {
+      type: "object",
+      properties: {
+        path: {
+          type: "string",
+          description: "Path to the file to search",
+        },
+        pattern: {
+          type: "string",
+          description: "Regex pattern to search for in the file",
+        },
+      },
+      required: ["path", "pattern"],
+    },
+  },
+  {
+    name: "shellResult",
+    description: "Run a shell command to inspect the repo or system. Use this tool directly to execute commands — do not ask the user to run them.",
+    input_schema: {
+      type: "object",
+      properties: {
+        command: {
+          type: "string",
+          description: "Shell command to execute",
+        },
+        cwd: {
+          type: "string",
+          description: "Optional working directory for the command",
+        },
+      },
+      required: ["command"],
+    },
+  },
 ];
 
 export async function resolveLlmCompletionDispatch(

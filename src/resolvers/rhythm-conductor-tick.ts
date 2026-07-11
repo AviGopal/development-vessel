@@ -67,6 +67,8 @@ const FAMILY_GOALS: Record<string, string> = {
     "run trace_recurring_pattern_scan and promote any recurring cluster to a concept",
   "human-interacting":
     "check obsidian presence and deliver any pending assist",
+  "concept-management":
+    "run concept_naming_sync to reconcile concept-db concept naming and provenance with the current reality, and file any drift as gaps",
 };
 
 async function fetchJson(url: string, init: RequestInit, timeoutMs: number): Promise<unknown> {

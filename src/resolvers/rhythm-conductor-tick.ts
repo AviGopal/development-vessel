@@ -61,7 +61,7 @@ const FAMILY_GOALS: Record<string, string> = {
   "reality-modeling":
     "refresh the substrate reality model: run learned-topology-snapshot and substrate_health_tick",
   "data-management":
-    "run docs_align_scan over the repo docs corpus and file any drift as gaps",
+    "run docs_align_tick to assemble the repo docs corpus, scan it against live truth, and file documentation drift gaps",
   "gap-closing":
     "drain the highest-priority open substrate gap from the gap_lifecycle_scan consumption queue",
   "pattern-mining":

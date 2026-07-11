@@ -208,7 +208,8 @@ async function dispatchScenario(gap: {
   let reproduced = false;
 
   for (const step of steps) {
-    const response = await fetch("http://localhost:3000/v2/impulses/resolve", {
+    const resolveEndpoint = (process.env["METABOB_ENDPOINT"] ?? "http://127.0.0.1:8080") + "/v2/impulses/resolve";
+    const response = await fetch(resolveEndpoint, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ shape: step.action, body: scenario }),

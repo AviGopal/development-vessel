@@ -43,10 +43,25 @@ import { METABOB_API_KEY } from "../config.js";
  *
  * @constant
  */
-// Guard: MAX_GOAL_LEN enforces three concerns: (1) prevent LLM prompt token overflow,
-// (2) preserve instruction salience by bounding payload size, and
-// (3) maintain a coordinated safety boundary with goal-host-vessel (see rationale above).
-// See the JSDoc block above and the enforcement site in resolveDispatchGoal for details.
+/*
+ * Guard rationale for MAX_GOAL_LEN — three-part safety boundary:
+ *
+ *   (1) LLM token budget protection: caps the goal payload so it cannot
+ *       exhaust the downstream model's prompt token window, which would
+ *       cause truncation, request failure, or cost overruns.
+ *
+ *   (2) Instruction coherence & salience preservation: bounding payload
+ *       size keeps the operator's directive focused and prevents
+ *       dilution of the primary instruction by unbounded trailing text.
+ *
+ *   (3) DoS / latency protection: rejects abusive or accidental
+ *       oversized payloads early, before they consume network,
+ *       serialization, or downstream vessel resources.
+ *
+ * This comment is the canonical, discoverable rationale for the guard;
+ * see the JSDoc block above and the enforcement site in
+ * resolveDispatchGoal for the runtime check.
+ */
 const MAX_GOAL_LEN = 8192;
 const GOAL_HOST_ENDPOINT = process.env["GOAL_HOST_VESSEL_ENDPOINT"] ?? "http://127.0.0.1:8210";
 

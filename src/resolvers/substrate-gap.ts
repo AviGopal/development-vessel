@@ -309,8 +309,10 @@ export async function resolveSubstrateGapWrite(
   }
 
   let action: "created" | "updated";
+      let summaryChanged = false;
   if (existingIdx >= 0) {
     const existing = gaps[existingIdx]!;
+        summaryChanged = existing.summary !== gap.summary;
     gap.id = existing.id;
     gap.created_at = existing.created_at;
     // PRESERVE the loop's learned failure-tracking across re-emissions. A detector
@@ -335,7 +337,7 @@ export async function resolveSubstrateGapWrite(
   }
 
   await saveGaps(gaps);
-  if (action === "created" && (gap.status ?? "open") === "open") {
+  if ((action === "created" || (action === "updated" && summaryChanged)) && (gap.status ?? "open") === "open") {
     const g = globalThis as { __gapComposeLastTrigger?: number };
     const nowMs = Date.now();
     if (!g.__gapComposeLastTrigger || nowMs - g.__gapComposeLastTrigger > 60_000) {

@@ -1,5 +1,5 @@
 import type { ResolverResult } from "./types.js";
-import { DISCOVERY_ENDPOINT } from "../config.js";
+import { DISCOVERY_ENDPOINT, METABOB_API_KEY } from "../config.js";
 
 export interface DocsDecisionDeliverPointer {
   type: "docs_decision_deliver";
@@ -17,7 +17,7 @@ interface Panel {
 async function discoverOwnerUrls(_capability: string): Promise<string[]> {
   const res = await fetch(`${DISCOVERY_ENDPOINT}/resolve`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", Authorization: `ApiKey ${METABOB_API_KEY}` },
     body: JSON.stringify({ pointer: { type: "vesselCapability", shape: "obsidian:write_note" } }),
     signal: AbortSignal.timeout(8000),
   });

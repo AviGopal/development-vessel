@@ -67,7 +67,7 @@ const FAMILY_GOALS: Record<string, string> = {
   "pattern-mining":
     "run trace_recurring_pattern_scan and promote any recurring cluster to a concept",
   "human-interacting":
-    "check obsidian presence and deliver any pending assist",
+    "check obsidian presence, deliver any pending assist, run docs_decision_deliver to place pending docs decisions in the vaults, and run docs_decision_answer_scan to apply any human decisions from Substrate/Decisions",
   "view-exercise": "exercise the obsidian goal-dispatch views so they stay legible and available to humans: capture a ui_screenshot of the goal-dispatch panel, run the ui legibility sensors over it, verify the newest goal note under Substrate/Dispatches carries a reached verdict callout and a Why block, and file any rendering defect, stale surface, or availability failure as a substrate gap",
   "concept-management":
     "run concept_naming_sync to reconcile concept-db concept naming and provenance with the current reality, and file any drift as gaps",

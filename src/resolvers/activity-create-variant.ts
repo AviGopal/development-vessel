@@ -810,7 +810,22 @@ export async function resolveActivityCreateVariant(pointer: ActivityCreateVarian
       templateObj && typeof templateObj === "object"
         ? String((templateObj as Record<string, unknown>)["id"] ?? "")
         : "";
-    if (reuseMode !== "off" && !pointer.parentTemplateId && declaredOut.length > 0) {
+    // Detect whether the proposed template is a signature-parameterized detector:
+    // any task whose resolver type is "signature_cluster_scan" binds a distinct
+    // target_signature, making output_shapes an insufficient dedup key.
+    const templateTasks: Array<Record<string, unknown>> =
+      templateObj && typeof templateObj === "object" &&
+      Array.isArray((templateObj as Record<string, unknown>)["tasks"])
+        ? ((templateObj as Record<string, unknown>)["tasks"] as Array<Record<string, unknown>>)
+        : [];
+    const sigScanTask = templateTasks.find(
+      (t) => String(t["type"] ?? t["resolver"] ?? "") === "signature_cluster_scan",
+    );
+    const boundTargetSignature: string | null = sigScanTask
+      ? String(sigScanTask["target_signature"] ?? sigScanTask["targetSignature"] ?? "")
+      : null;
+    const isSignatureParameterized = boundTargetSignature !== null && boundTargetSignature !== "";
+    if (reuseMode !== "off" && !pointer.parentTemplateId && declaredOut.length > 0 && !isSignatureParameterized) {
       try {
         // To find PRODUCERS of an output shape, discover-by-shapes wants the
         // shapes in `required_shapes` with mode `candidates_with_scores` (which
@@ -832,7 +847,17 @@ export async function resolveActivityCreateVariant(pointer: ActivityCreateVarian
           };
           const idOf = (c: Record<string, unknown>) =>
             String(c["activity_id"] ?? c["template_id"] ?? c["id"] ?? "");
-          // Normalize for self-comparison: strip the `activity:⟨…⟩` record-id
+      // Signature-parameterized detector exemption: when the proposed template
+    // binds signature_cluster_scan with a distinct target_signature, the
+    // output_shapes-only dedup key is insufficient — each target_signature
+    // constitutes a justified variant-first mint. Log as shadow (never refuse).
+    if (isSignatureParameterized && reuseMode !== "off") {
+      console.log(
+        `[activity-create-variant] shadow: signature-parameterized detector exempted from REUSE_BEFORE_MINT ` +
+        `(target_signature=${boundTargetSignature}, output_shapes=${JSON.stringify(declaredOut)})`,
+      );
+    }
+        // Normalize for self-comparison: strip the `activity:⟨…⟩` record-id
           // wrapper AND the strip_id `-<timestamp>` suffix, so an idempotent
           // self-re-registration (proposed id == producer id, just wrapped) and
           // the proposal's own timestamped twin are both recognized as SELF and

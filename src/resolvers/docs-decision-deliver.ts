@@ -81,8 +81,19 @@ export async function resolveDocsDecisionDeliver(
   let unreachable = 0;
 
   for (const panel of selected) {
-    const path = `decisions/${panel.id}.md`;
-    const content = `# ${panel.title ?? panel.id}\n\n${(panel as Panel & { summary?: string }).summary ?? ""}\n`;
+    const path = `Substrate/Decisions/${panel.id}.md`;
+    const gapId = panel.id.replace(/^docs-decision-/, "");
+    const content = [
+      `---`,
+      `panel_id: ${panel.id}`,
+      `gap_id: ${gapId}`,
+      `status: awaiting-decision`,
+      `---`,
+      `# ${panel.title ?? panel.id}`,
+      panel.body ?? "",
+      `## Decision`,
+      `_Write your decision below; the substrate reads this section back and applies it._`,
+    ].join("\n");
     if (dry_run) {
       delivered++;
       continue;

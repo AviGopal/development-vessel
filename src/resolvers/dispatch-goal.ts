@@ -46,6 +46,7 @@ import { METABOB_API_KEY } from "../config.js";
 // Guard: MAX_GOAL_LEN enforces three concerns: (1) prevent LLM prompt token overflow,
 // (2) preserve instruction salience by bounding payload size, and
 // (3) maintain a coordinated safety boundary with goal-host-vessel (see rationale above).
+// See the JSDoc block above and the enforcement site in resolveDispatchGoal for details.
 const MAX_GOAL_LEN = 8192;
 const GOAL_HOST_ENDPOINT = process.env["GOAL_HOST_VESSEL_ENDPOINT"] ?? "http://127.0.0.1:8210";
 

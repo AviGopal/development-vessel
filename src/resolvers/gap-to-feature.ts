@@ -1781,11 +1781,9 @@ export async function resolveGapToFeature(pointer: GapToFeaturePointer): Promise
   // disabled. doc_drift_fix drafts the minimal edit and gates it with a prose reach-gate (the
   // doc analogue of verifyGoalReached). It is TRIAGE-only by default (DOC_FIX_AUTOLAND off).
   if (String(gap.category ?? "") === "documentation_drift") {
-    const ddResult = await resolveDocDriftFix({ type: "doc_drift_fix", gap_id: String(gap.id ?? ""), dry_run: pointer.dry_run });
-    if (!pointer.dry_run && (ddResult?.body as { ok?: boolean } | undefined)?.ok === false) {
-      await bumpFailedAttempts(gap);
-    }
-    return ddResult;
+    // doc_drift_fix records its own failure bookkeeping (doc_fix status + failed_attempts);
+    // re-upserting from the stale pre-run gap object here clobbered that write (lost update).
+    return resolveDocDriftFix({ type: "doc_drift_fix", gap_id: String(gap.id ?? ""), dry_run: pointer.dry_run });
   }
 
   // 1b. ORPHANED-CAPABILITY gaps close via author_producer, NOT feature_compose

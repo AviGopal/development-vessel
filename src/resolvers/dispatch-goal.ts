@@ -88,7 +88,7 @@ export async function resolveDispatchGoal(pointer: DispatchGoalPointer): Promise
    *       diluted by long, meandering input that degrades prompt adherence.
    *   (3) DoS / latency protection: a bounded input caps per-request CPU, memory,
    *       and downstream storage growth, limiting abuse surface and tail latency.
-   * See the rationale block above the MAX_GOAL_LEN constant definition.
+   * See the GUARD_RATIONALE block above the MAX_GOAL_LEN constant definition.
    */
   if (goal.length > MAX_GOAL_LEN) return { shape: "structuredError", body: { resolver: "dispatch_goal", detail: `goal too long (${goal.length} > ${MAX_GOAL_LEN})` } };
 

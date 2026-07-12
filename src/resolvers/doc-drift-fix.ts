@@ -33,8 +33,6 @@ import { resolveDocFixPolicy } from "./doc-fix-policy.js";
 
 const DOC_ROOT = process.env.DOC_FIX_ROOT ?? "/workspace/git/super-repo";
 const PROPOSALS_DIR = process.env.PROPOSALS_DIR ?? "/workspace/proposals";
-// Landing gate: the shaped docFixPolicy impulse, read at use time inside resolveDocDriftFix (observable, attributable, no restart to change).
-// DOC_FIX_AUTOLAND env is bootstrap fallback only.
 const LLM_MODEL = process.env.DOC_FIX_MODEL ?? "anthropic/claude-haiku-4-5";
 const DOC_BUDGET = 9000;
 
@@ -177,8 +175,11 @@ export async function resolveDocDriftFix(pointer: DocDriftFixPointer): Promise<R
     return report({ ok: false, stage: "select", error: (e as Error).message });
   }
   if (!gap) return report({ ok: false, stage: "select", error: "no open documentation_drift gap" });
-  const policyRes = await Promise.resolve(resolveDocFixPolicy({ type: "docFixPolicy" })).catch(() => null);
-  const AUTOLAND = (policyRes?.body as { autoland?: boolean } | undefined)?.autoland === true || process.env.DOC_FIX_AUTOLAND === "1";
+  const policyResult = await resolveDocFixPolicy({ type: "docFixPolicy" });
+  const AUTOLAND =
+    (policyResult.shape === "docFixPolicy" &&
+      (policyResult.body as { autoland?: boolean }).autoland === true) ||
+    process.env.DOC_FIX_AUTOLAND === "1";
 
   const meta = (gap.classification_metadata ?? gap.metadata ?? {}) as Record<string, unknown>;
   const docPath = String(meta.doc_path ?? meta.file_path ?? "");

@@ -17,7 +17,8 @@ import {
 } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import type { ResolverResult } from "./types.js";
-import { resolveSubstrateGapWrite } from "./substrate-gap.js";
+import { resolveSubstrateGap, resolveSubstrateGapWrite } from "./substrate-gap.js";
+import { runBehavioralVerification } from "./behavioral-verification.js";
 import { resolveActivateSubstrateScript } from "./activate-substrate-script.js";
 import { resolveMaintenanceLeaseWrite } from "./maintenance-lease";
 
@@ -1715,6 +1716,42 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
     vessel_restarted: vesselRestarted,
     applied_at: appliedAt,
   };
+  // Post-landing behavioral verification (gap cutover-gate-no-behavioral-verification):
+  // execute the driving gap's structured verification_spec; a failure rewrites the
+  // gap summary, which re-triggers gap-compose pickup.
+  if (gapId !== "unknown-gap") {
+    try {
+      const gapRead = await resolveSubstrateGap({ type: "substrateGap", id: gapId, limit: 1 } as never);
+      const gapRow = ((gapRead as { body?: { gaps?: Array<Record<string, unknown>> } }).body?.gaps ?? [])[0];
+      const meta = (gapRow?.["classification_metadata"] ?? {}) as Record<string, unknown>;
+      const spec = meta["verification_spec"];
+      if (gapRow && spec) {
+        const outcome = await runBehavioralVerification(spec);
+        if (outcome.ran) {
+          const priorSummary = String(gapRow["summary"] ?? "");
+          const nextSummary = outcome.passed
+            ? priorSummary
+            : `BEHAVIORAL VERIFICATION FAILED after ${String(newSha)}: ${priorSummary}`;
+          if (!outcome.passed) {
+            console.log(`[mitosis-cutover] behavioral-verification FAILED gap=${gapId} commit=${String(newSha)}`);
+          }
+          await resolveSubstrateGapWrite({
+            type: "substrateGap_write",
+            gap: {
+              ...gapRow,
+              summary: nextSummary,
+              classification_metadata: {
+                ...meta,
+                verification_outcome: { passed: outcome.passed, at: appliedAt, commit: newSha, observed: outcome.observed ?? null, error: outcome.error ?? null },
+              },
+            },
+          } as never);
+        }
+      }
+    } catch (err) {
+      console.warn("[mitosis-cutover] behavioral-verification errored (non-fatal):", err);
+    }
+  }
   const workspaceRoot = process.env["WORKSPACE_ROOT"] ?? process.cwd();
   const logPath =
     pointer.applied_log_path ??

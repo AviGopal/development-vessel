@@ -323,8 +323,8 @@ export async function resolveSubstrateGapWrite(
     // must win to keep climbing).
     const exMeta = (existing.classification_metadata ?? {}) as Record<string, unknown>;
     const inMeta = (gap.classification_metadata ?? {}) as Record<string, unknown>;
-    for (const k of ["failed_attempts", "last_failed_at", "mispredicted_lands", "last_predicted_p"]) {
-      if (!(k in inMeta) && k in exMeta) inMeta[k] = exMeta[k];
+    for (const k of Object.keys(exMeta)) {
+      if (!(k in inMeta)) inMeta[k] = exMeta[k];
     }
     gap.classification_metadata = inMeta;
     gaps[existingIdx] = gap;

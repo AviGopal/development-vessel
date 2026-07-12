@@ -194,6 +194,9 @@ type Cand = {
   // low-headroom structural gaps and analytic-only modes score below threshold.
   // Residual: callers comparing actual patch emptiness to this score widen gap
   // detectability per predict→validate→residual.
+  // Exported via scorePredictedActionability below so downstream residual
+  // validators (drafter outcome auditors) can recompute the same score and
+  // record mismatches between predicted actionability and actual patch emptiness.
   const predictActionability = (g: { category?: string; mode_class?: string; target_file_paths?: unknown }): number => {
     let score = 0.5;
     const tfp = g.target_file_paths;

@@ -24,6 +24,7 @@ interface ClassificationMetadata {
   doc_fix?: DocFix;
   awaiting_human?: boolean;
   solicited_at?: string;
+  doc_path?: string;
   [key: string]: unknown;
 }
 
@@ -53,7 +54,7 @@ function needsHumanDecision(gap: SubstrateGap): boolean {
   if (docFixStatus && DECISION_STATUSES.has(docFixStatus)) {
     return true;
   }
-  const claims = gap.drift_report?.claims ?? [];
+  const claims = (cm?.drift_report as DriftReport | undefined)?.claims ?? gap.drift_report?.claims ?? [];
   for (const claim of claims) {
     if (
       (claim.quote && METABOB_RE.test(claim.quote)) ||
@@ -66,8 +67,8 @@ function needsHumanDecision(gap: SubstrateGap): boolean {
 }
 
 function buildBody(gap: SubstrateGap): string {
-  const claims = gap.drift_report?.claims ?? [];
   const cm = gap.classification_metadata;
+  const claims = (cm?.drift_report as DriftReport | undefined)?.claims ?? gap.drift_report?.claims ?? [];
   const docFix = cm?.doc_fix;
 
   const claimLines = claims
@@ -85,7 +86,7 @@ function buildBody(gap: SubstrateGap): string {
     : "Auto-fix outcome: no doc_fix metadata recorded";
 
   return [
-    `Documentation alignment issue detected for: ${gap.doc_path ?? gap.source ?? gap.id}`,
+    `Documentation alignment issue detected for: ${(cm?.doc_path as string | undefined) ?? gap.doc_path ?? gap.source ?? gap.id}`,
     "",
     claimLines || "(no claims recorded)",
     "",
@@ -128,10 +129,11 @@ export async function resolveDocsDecisionSolicit(
         continue;
       }
 
-      const docPath: string = typeof gap.doc_path === "string" ? gap.doc_path : (gap.source ?? gap.id);
-      const claims = gap.drift_report?.claims ?? [];
+      const cmMeta = gap.classification_metadata;
+      const docPath: string = typeof cmMeta?.doc_path === "string" ? cmMeta.doc_path : typeof gap.doc_path === "string" ? gap.doc_path : (gap.source ?? gap.id);
+      const claims = (cmMeta?.drift_report as DriftReport | undefined)?.claims ?? gap.drift_report?.claims ?? [];
 
-      await resolveUiWritePassthrough({
+      if (!dry_run) await resolveUiWritePassthrough({
         type: "uiQuestion_write",
         id: `docs-decision-${gap.id}`,
         kind: "docs_alignment_decision",

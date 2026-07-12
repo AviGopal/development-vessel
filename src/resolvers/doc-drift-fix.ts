@@ -101,8 +101,8 @@ export function applyEdits(text: string, edits: Edit[]): { text: string; applied
   return { text: out, applied, missed };
 }
 
-async function draftEdits(docPath: string, docText: string, claims: DriftClaim[]): Promise<Edit[]> {
-  const claimList = claims.map((c, i) => `${i + 1}. FALSIFIED CLAIM: "${c.quote}"\n   contradicted by: ${c.contradicted_by ?? "(recent code change)"}\n   fix hint: ${c.correction_hint ?? "(correct to match current reality)"}`).join("\n");
+async function draftEdits(docPath: string, docText: string, claims: DriftClaim[], humanDecision?: string): Promise<Edit[]> {
+  const claimList = claims.map((c, i) => `${i + 1}. FALSIFIED CLAIM: "${c.quote}"\n   contradicted by: ${c.contradicted_by ?? "(recent code change)"}\n   fix hint: ${c.correction_hint ?? "(correct to match current reality)"}`).join("\n") + (humanDecision ? `\n\nOPERATOR DECISION (authoritative — follow it over the hints above): ${humanDecision}` : "");
   const prompt =
     `You correct a documentation file so it matches the current code. Below is the doc and a list ` +
     `of specific sentences a code change FALSIFIED. Produce the SMALLEST set of edits that removes/` +
@@ -175,7 +175,8 @@ export async function resolveDocDriftFix(pointer: DocDriftFixPointer): Promise<R
   }
 
   // 2. Draft the minimal edit.
-  const edits = pointer.dry_run ? [] : await draftEdits(docPath, docText, claims);
+  const humanDecision = typeof meta.human_decision === "string" ? meta.human_decision : undefined;
+  const edits = pointer.dry_run ? [] : await draftEdits(docPath, docText, claims, humanDecision);
   if (!pointer.dry_run && edits.length === 0) {
     await upsertGap(gap, { doc_fix: { status: "draft_failed", at: new Date().toISOString() }, failed_attempts: Number(meta.failed_attempts ?? 0) + 1 }, "open");
     return report({ ok: false, stage: "draft", gap_id: gap.id, error: "llm produced no usable edits" });

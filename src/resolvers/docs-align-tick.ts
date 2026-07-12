@@ -11,6 +11,7 @@ const DOC_ROOT = process.env.DOC_FIX_ROOT ?? "/workspace/git/super-repo";
 interface DocsAlignTickPointer {
   type: "docs_align_tick";
   dry_run?: boolean;
+  max_fixes?: number;
 }
 
 function walkMd(dir: string, cap: number): Array<{ id: string; source: string; body: string }> {
@@ -194,9 +195,10 @@ export async function resolveDocsAlignTick(
     : [];
 
   // 5. Run docs_align_bridge
+  const fixLimit = typeof pointer.max_fixes === "number" ? pointer.max_fixes : findingsArray.length;
   const bridge = await resolveDocsAlignBridge({
     type: "docs_align_bridge",
-    report: { findings: findingsArray },
+    report: { findings: findingsArray.slice(0, fixLimit) },
     dry_run: pointer.dry_run,
   });
 

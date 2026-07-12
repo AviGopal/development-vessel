@@ -23,6 +23,8 @@ import type { ResolverResult } from "./types.js";
  *   3. usage success rate: success_rate = times_succeeded /
  *      max(1, times_succeeded + times_failed). Concepts informing successful
  *      drafts get a bonus; concepts that consistently fail get demoted.
+ *      Newly created concepts with no usage history default to 0.5 (neutral)
+ *      so they are not unfairly penalized.
  *   4. priority (concept-db field, 0..1 default 0.5): operator/curation-
  *      assigned priority. Higher = preferred.
  *
@@ -42,8 +44,8 @@ export interface ConceptSelectForPromptPointer {
   type: "concept_select_for_prompt";
   /** Free-text query for vector similarity ranking. */
   query: string;
-  /** Hard filter — only concepts with these source_types are eligible. */
-  prior_source_types: string[];
+  /** Hard filter — only concepts with these source_types are eligible. Defaults to ["human_input", "vessel_construction_pattern", "impulse_activity_pattern"] if not provided. */
+  prior_source_types?: string[];
   /** Token budget cap. Default 8000. */
   budget_tokens?: number;
   /** Max candidates pulled per source_type before filtering. Default 20. */
@@ -54,6 +56,11 @@ export interface ConceptSelectForPromptPointer {
 const DEFAULT_CONCEPT_DB_URL = "http://127.0.0.1:8260/concepts/search";
 const DEFAULT_BUDGET_TOKENS = 8000;
 const DEFAULT_CANDIDATES_PER_SOURCE_TYPE = 20;
+const DEFAULT_SOURCE_TYPES = [
+  "human_input",
+  "vessel_construction_pattern",
+  "impulse_activity_pattern",
+];
 
 interface ConceptRow {
   id: string;
@@ -87,7 +94,13 @@ function safeRowToScored(
 ): ScoredConcept {
   const succeeded = typeof c.times_succeeded === "number" ? c.times_succeeded : 0;
   const failed = typeof c.times_failed === "number" ? c.times_failed : 0;
-  const successRate = succeeded / Math.max(1, succeeded + failed);
+  
+  // For newly created concepts with no usage history (cold prior),
+  // use neutral success_rate of 0.5 instead of 0 to avoid unfairly penalizing them.
+  // This ensures freshly minted operator-taught concepts can surface on their first selection.
+  const isColdStart = succeeded === 0 && failed === 0;
+  const successRate = isColdStart ? 0.5 : Math.max(succeeded / Math.max(1, succeeded + failed), 0.05);
+  
   const priority = typeof c.priority === "number" ? c.priority : 0.5;
   const tokenEstimate =
     typeof c.token_estimate === "number" && c.token_estimate > 0
@@ -147,16 +160,11 @@ export async function resolveConceptSelectForPrompt(
   const budgetTokens = pointer.budget_tokens ?? DEFAULT_BUDGET_TOKENS;
   const candidatesPerSourceType =
     pointer.candidates_per_source_type ?? DEFAULT_CANDIDATES_PER_SOURCE_TYPE;
-  const sourceTypes = pointer.prior_source_types ?? [];
-  if (sourceTypes.length === 0) {
-    return {
-      shape: "structuredError",
-      body: {
-        resolver: "concept_select_for_prompt",
-        detail: "prior_source_types must be non-empty",
-      },
-    };
-  }
+  
+  const sourceTypes: string[] =
+    pointer.prior_source_types && (pointer.prior_source_types as string[]).length > 0
+      ? (pointer.prior_source_types as string[])
+      : ["human_input", "vessel_construction_pattern", "impulse_activity_pattern"];
 
   const apiKey = process.env["METABOB_API_KEY"];
 

@@ -35,7 +35,7 @@ export const SCAFFOLD_NEW_VESSEL_TEMPLATE: ActivityTemplate = {
         type: "fs_write",
         path: "{{dirPath}}/package.json",
         content: `{
-  "name": "@metabob/{{vesselName}}",
+  "name": "@avigopal/{{vesselName}}",
   "type": "module",
   "version": "0.1.0",
   "description": "{{description}}",

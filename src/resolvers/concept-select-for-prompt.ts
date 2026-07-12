@@ -138,19 +138,24 @@ async function fetchForSourceType(
   const url = `${baseUrl}?q=${encodeURIComponent(query)}&limit=${limit * 3}`;
   const headers: Record<string, string> = {};
   if (apiKey) headers["Authorization"] = `ApiKey ${apiKey}`;
+  let raw: unknown;
   try {
-    const resp = await fetch(url, {
-      method: "GET",
-      headers,
-      signal: AbortSignal.timeout(15_000),
-    });
-    if (!resp.ok) return [];
-    const json = (await resp.json()) as { concepts?: unknown };
-    const all = Array.isArray(json.concepts) ? (json.concepts as ConceptRow[]) : [];
-    return all.filter((c) => c.source_type === sourceType).slice(0, limit);
-  } catch {
+    const res = await fetch(url, { signal: AbortSignal.timeout(8_000) });
+    if (!res.ok) {
+      return [];
+    }
+    raw = await res.json();
+  } catch (err) {
+    const msg = (err as Error).message ?? String(err);
+    const isEnoent = msg.includes("ENOENT") || msg.includes("ECONNREFUSED") || msg.includes("fetch failed");
+    if (isEnoent) {
+      return [];
+    }
     return [];
   }
+  const json = raw as { concepts?: unknown };
+  const all = Array.isArray(json.concepts) ? (json.concepts as ConceptRow[]) : [];
+  return all.filter((c) => c.source_type === sourceType).slice(0, limit);
 }
 
 export async function resolveConceptSelectForPrompt(

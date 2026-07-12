@@ -64,7 +64,9 @@ export interface DispatchGoalPointer {
 export async function resolveDispatchGoal(pointer: DispatchGoalPointer): Promise<ResolverResult> {
   const goal = (pointer.goal ?? "").trim();
   if (!goal) return { shape: "structuredError", body: { resolver: "dispatch_goal", detail: "goal is required" } };
-  // Enforce MAX_GOAL_LEN boundary — see rationale block above (prompt token overflow, DoS surface, downstream storage limits).
+  // Enforce MAX_GOAL_LEN boundary to prevent: (1) LLM token overflow (oversized goals blow past model context windows),
+  // (2) instruction coherence dilution (long inputs degrade downstream prompt adherence), and (3) DoS surface reduction
+  // (bounded input caps per-request CPU/memory and downstream storage growth). See rationale block above the constant.
   if (goal.length > MAX_GOAL_LEN) return { shape: "structuredError", body: { resolver: "dispatch_goal", detail: `goal too long (${goal.length} > ${MAX_GOAL_LEN})` } };
 
   const body: Record<string, unknown> = { goal };

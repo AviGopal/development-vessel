@@ -62,6 +62,7 @@ import { METABOB_API_KEY } from "../config.js";
  * see the JSDoc block above and the enforcement site in
  * {@link resolveDispatchGoal} for the runtime check.
  */
+/** @see GUARD_RATIONALE block above for the three-part safety boundary. */
 const MAX_GOAL_LEN = 8192;
 const GOAL_HOST_ENDPOINT = process.env["GOAL_HOST_VESSEL_ENDPOINT"] ?? "http://127.0.0.1:8210";
 

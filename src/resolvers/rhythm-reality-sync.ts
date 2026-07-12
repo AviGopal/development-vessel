@@ -85,7 +85,15 @@ export async function resolveRhythmRealitySync(
   for (const rhythm of rhythms) {
     if (rhythm.body.family === "gap-closing") {
       const old_staleness = rhythm.body.staleness;
-      const new_staleness = Math.min(1, openGapCount / 400);
+      const cadenceResult = await (async () => {
+        const { resolvePoolImpulse } = await import('./pool-impulse.js');
+        return resolvePoolImpulse({ type: 'poolImpulse', shape: 'gapClosingCadence', limit: 1, status: 'open' });
+      })();
+      const cadenceImpulses = (cadenceResult.body as { impulses?: Array<{ payload?: { target_backlog?: unknown } }> }).impulses;
+      const cadenceFirst = cadenceImpulses?.[0];
+      const cadenceTb = cadenceFirst?.payload?.target_backlog;
+      const targetBacklog = (typeof cadenceTb === 'number' && cadenceTb > 0) ? cadenceTb : 400;
+      const new_staleness = Math.min(1, openGapCount / targetBacklog);
       if (old_staleness !== new_staleness) {
         // (4) Write back via poolImpulse_write
         try {

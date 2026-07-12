@@ -89,6 +89,7 @@ export interface VesselMitosisCutoverPointer {
   host_repo_root?: string;
   proposal_id?: string;
   gap_id?: string;
+  adhoc?: boolean;
   /** Override the systemctl restart target (default: `<vessel>.service`). */
   restart_unit_name?: string;
   /** Test hook: override the git binary path. */
@@ -1358,8 +1359,11 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
     return softRefuse("no_diff: staged files are byte-identical to HEAD - nothing to cut over", { kind: "no_diff", skip_reason: "no_diff", vessel_name, staged_files: stagedFiles, operations });
   }
   // 6. git commit.
-  const proposalId = pointer.proposal_id ?? "unknown-proposal";
-  const gapId = pointer.gap_id ?? "unknown-gap";
+  const proposalId = pointer.proposal_id || "unknown-proposal";
+  const gapId = pointer.gap_id || "unknown-gap";
+  if ((gapId === "unknown-gap" || proposalId === "unknown-proposal") && pointer.adhoc !== true) {
+    return structuredError("cutover_refused_missing_provenance", { gap_id: gapId, proposal_id: proposalId, hint: "every landing must carry gap_id and proposal_id; pass adhoc: true only for consciously unattributed operator work" });
+  }
   const msg =
     `substrate-authored: apply ${proposalId} via mitosis cutover\n\n` +
     `Applied autonomously by apply_proposal_as_patch + vessel_mitosis_cutover.\n` +

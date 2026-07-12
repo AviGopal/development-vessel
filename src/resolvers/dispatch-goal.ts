@@ -19,50 +19,46 @@ import type { ResolverResult } from "./types.js";
 import { METABOB_API_KEY } from "../config.js";
 
 /**
- * MAX_GOAL_LEN — upper bound (in characters) on an accepted goal payload.
+ * MAX_GOAL_LEN — canonical safety boundary for accepted goal payload length.
  *
- * Rationale (safety boundary): the raw `goal` string flows into downstream
- * LLM prompts in goal-host-vessel. Capping its length (a) prevents token
- * overflow in those prompts, (b) preserves goal coherence and instruction
- * salience (very long goals dilute routing signal), and (c) bounds resolver
- * work and request latency against runaway or hostile payloads.
+ * GUARD_RATIONALE (three-part safety boundary — single source of truth):
  *
- * Threshold: 8192 characters. At a conservative ~4 chars/token this maps to
- * ~2k tokens — comfortably inside typical context budgets while still large
- * enough to admit rich multi-paragraph goals.
- *
- * Enforcement: checked at the top of `resolveDispatchGoal` (after trim /
- * empty-check, BEFORE any network dispatch), so oversize goals never leave
- * this process.
- *
- * Failure mode: exceeding the ceiling short-circuits with a `structuredError`
- * of shape `{ resolver: "dispatch_goal", detail: "goal too long (<len> > <max>)" }`.
- *
- * Coordination: this is a coordinated safety boundary with goal-host-vessel,
- * which enforces its own independent ceiling. Do not change unilaterally.
- *
- * @constant
- */
-/** GUARD_RATIONALE: MAX_GOAL_LEN — three-part safety boundary
- *
- * @remarks
- *   (1) LLM token budget protection: caps the goal payload so it cannot
- *       exhaust the downstream model's prompt token window, which would
+ *   (1) LLM token budget protection: the raw `goal` string flows into
+ *       downstream LLM prompts in goal-host-vessel. Capping its length
+ *       prevents token overflow in those prompts, which would otherwise
  *       cause truncation, request failure, or cost overruns.
  *
- *   (2) Instruction coherence & salience preservation: bounding payload
- *       size keeps the operator's directive focused and prevents
- *       dilution of the primary instruction by unbounded trailing text.
+ *   (2) Instruction coherence preservation: bounding payload size keeps
+ *       the operator's directive focused and prevents dilution of the
+ *       primary intent by unbounded trailing text (very long goals
+ *       dilute routing signal and instruction salience).
  *
- *   (3) DoS / latency protection: rejects abusive or accidental
+ *   (3) DoS / latency protection: rejects abusive, hostile, or accidental
  *       oversized payloads early, before they consume network,
  *       serialization, or downstream vessel resources.
  *
+ * Threshold: 8192 characters. At a conservative ~4 chars/token this maps
+ * to ~2k tokens — comfortably inside typical context budgets while still
+ * large enough to admit rich multi-paragraph goals.
+ *
+ * Enforcement site: checked at the top of `resolveDispatchGoal` (after
+ * trim / empty-check, BEFORE any network dispatch), so oversize goals
+ * never leave this process.
+ *
+ * Failure mode: exceeding the ceiling short-circuits with a
+ * `structuredError` of shape
+ * `{ resolver: "dispatch_goal", detail: "goal too long (<len> > <max>)" }`.
+ *
+ * Coordination: this is a coordinated safety boundary with
+ * goal-host-vessel, which enforces its own independent ceiling. Do not
+ * change unilaterally.
+ *
  * This block is the canonical, discoverable rationale for the guard;
- * see the JSDoc block above and the enforcement site in
- * {@link resolveDispatchGoal} for the runtime check.
+ * the runtime enforcement check in {@link resolveDispatchGoal} references
+ * it via @see.
+ *
+ * @constant
  */
-/** @see GUARD_RATIONALE block above for the three-part safety boundary. */
 const MAX_GOAL_LEN = 8192;
 const GOAL_HOST_ENDPOINT = process.env["GOAL_HOST_VESSEL_ENDPOINT"] ?? "http://127.0.0.1:8210";
 

@@ -85,6 +85,8 @@ export const config = {
       "docs_align_tick",
       "docs_decision_solicit",
       "docs_decision_deliver",
+      "docFixPolicy",
+      "docFixPolicy_write",
       "docs_decision_answer_scan",
       "substrate_health_tick",
       "compose_topology_tick",

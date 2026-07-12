@@ -78,6 +78,7 @@ import { resolveDocsAlignBridge } from "../resolvers/docs-align-bridge.js";
 import { resolveDocsAlignTick } from "../resolvers/docs-align-tick.js";
 import { resolveDocsDecisionSolicit } from "../resolvers/docs-decision-solicit.js";
 import { resolveDocsDecisionDeliver } from "../resolvers/docs-decision-deliver.js";
+import { resolveDocFixPolicy, resolveDocFixPolicyWrite } from "../resolvers/doc-fix-policy.js";
 import { resolveDocsDecisionAnswerScan } from "../resolvers/docs-decision-answer-scan.js";
 import { resolveLoadAttribution, resolveLoadAttributionWrite } from "../resolvers/load-attribution.js";
 import { resolveLoadAttributionReport } from "../resolvers/load-attribution-report.js";
@@ -410,6 +411,10 @@ async function dispatchInner(pointer: AnyPointer): Promise<ResolverResult> {
     case "docs_align_bridge":
       return resolveDocsAlignBridge(p as Parameters<typeof resolveDocsAlignBridge>[0]);
     case "docs_decision_solicit": return resolveDocsDecisionSolicit(pointer as Parameters<typeof resolveDocsDecisionSolicit>[0]);
+    case "docFixPolicy":
+      return resolveDocFixPolicy(pointer as unknown as { type: "docFixPolicy" });
+    case "docFixPolicy_write":
+      return resolveDocFixPolicyWrite(pointer as unknown as { type: "docFixPolicy_write"; autoland: boolean; set_by?: string; reason?: string });
     case "docs_decision_deliver": return await resolveDocsDecisionDeliver(pointer as Parameters<typeof resolveDocsDecisionDeliver>[0]);
     case "docs_decision_answer_scan": return await resolveDocsDecisionAnswerScan(pointer as any);
     case "docs_align_tick":

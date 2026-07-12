@@ -135,12 +135,12 @@ async function fetchForSourceType(
   limit: number,
   apiKey: string | undefined,
 ): Promise<ConceptRow[]> {
-  const url = `${baseUrl}?q=${encodeURIComponent(query)}&limit=${limit * 3}`;
+  const url = `${baseUrl}?q=${encodeURIComponent(query)}&limit=${limit * 3}&source_type=${encodeURIComponent(sourceType)}`;
   const headers: Record<string, string> = {};
   if (apiKey) headers["Authorization"] = `ApiKey ${apiKey}`;
   let raw: unknown;
   try {
-    const res = await fetch(url, { signal: AbortSignal.timeout(8_000) });
+    const res = await fetch(url, { method: 'GET', headers, signal: AbortSignal.timeout(15_000) });
     if (!res.ok) {
       return [];
     }

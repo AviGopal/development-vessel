@@ -1,5 +1,4 @@
 import { readFileSync, writeFileSync, renameSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const POLICY_PATH =
@@ -62,7 +61,7 @@ export function resolveDocFixPolicyWrite(
     reason: reason ?? "",
   };
   const json = JSON.stringify(data, null, 2);
-  const tmp = join(tmpdir(), `doc-fix-policy-${Date.now()}.json.tmp`);
+  const tmp = `${POLICY_PATH}.${Date.now()}.tmp`;
   writeFileSync(tmp, json, "utf8");
   renameSync(tmp, POLICY_PATH);
   return { shape: "docFixPolicyWriteResult", body: { ok: true, autoland } };

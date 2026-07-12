@@ -190,6 +190,8 @@ type Cand = {
   // Forward model: P(patch_proposal non-empty | target_file_paths, mode_class, category).
   // Predict drafter actionability before dispatch so we avoid burning cycles on
   // scenarios that will almost certainly yield analytic-only/no-op proposals.
+  // Incorporates spectral-gap headroom and structural/acute category health so
+  // low-headroom structural gaps and analytic-only modes score below threshold.
   // Residual: callers comparing actual patch emptiness to this score widen gap
   // detectability per predict→validate→residual.
   const predictActionability = (g: { category?: string; mode_class?: string; target_file_paths?: unknown }): number => {
@@ -201,9 +203,12 @@ type Cand = {
     if (mc && /code|fix|patch|impl/.test(mc)) score += 0.2;
     const cat = String(g.category ?? "").toLowerCase();
     if (/architectural|implementation|bug|fix/.test(cat)) score += 0.1;
+    if (ACUTE_CATEGORIES.has(cat)) score += 0.15;
+    if (STRUCTURAL_CATEGORIES.has(cat) && headroom < 0.35) score -= 0.15;
+    if (headroom < 0.35) score -= 0.1;
     return Math.max(0, Math.min(1, score));
   };
-  const ACTIONABILITY_THRESHOLD = 0.25;
+  const ACTIONABILITY_THRESHOLD = 0.35;
   for (const g of gaps) {
     if (typeof g.id !== "string") continue;
     if (g.status && g.status !== "open") continue;
@@ -216,8 +221,6 @@ type Cand = {
     const cat: string = g.category ?? "auto";
     const rank = categoryRank(cat);
     const sev = severity(g);
-    const ACUTE_CATEGORIES = new Set(["service_failure", "operational_health", "safety_breach", "systematic_failure", "goal_reaching", "self_development_reliability"]);
-    const STRUCTURAL_CATEGORIES = new Set(["missing_capability", "unreachable_producer", "orphaned_capability", "architectural_pattern", "residual_shape_proposal", "detector_coverage_gap"]);
     const instability: number = ACUTE_CATEGORIES.has(cat)
       ? 3
       : headroom < 0.35 && STRUCTURAL_CATEGORIES.has(cat)

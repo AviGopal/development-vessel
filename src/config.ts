@@ -84,6 +84,7 @@ export const config = {
       "docs_align_bridge",
       "docs_align_tick",
       "docs_decision_solicit",
+      "docs_decision_deliver",
       "substrate_health_tick",
       "compose_topology_tick",
       "failure_mode_matrix_score",

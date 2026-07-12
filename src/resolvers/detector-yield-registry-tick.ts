@@ -11,6 +11,7 @@
  */
 
 import { stableFindingId } from '../lib/stable-finding-id';
+import { resolveDetectorYieldRegistry } from './detector-yield-registry';
 
 export interface DetectorYieldEntry {
   template: string;
@@ -136,5 +137,10 @@ export default async function detectorYieldRegistryTick(
     },
   ];
 
-  return auditDetectorYield(entries);
+  const findings = auditDetectorYield(entries);
+  // gap ct1-arm-detector-retirement: the registry files detector-retirement-* substrateGaps for DORMANT/LOW_YIELD detectors so retirement routes through the normal gap-to-bridge-to-deprecate path.
+  try {
+    await resolveDetectorYieldRegistry({ type: "detector_yield_registry", emit_retirement_gaps: true });
+  } catch { /* best-effort: retirement emission must never break the novelty check */ }
+  return findings;
 }

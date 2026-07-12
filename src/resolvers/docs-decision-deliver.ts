@@ -135,7 +135,7 @@ export async function resolveDocsDecisionDeliver(
     }
     if (wrote >= 1) {
       delivered++;
-    } else if (responded >= 1 && wrote === 0 && vaultHadNote.length > 0 && vaultHadNote.every((v: boolean) => v)) {
+    } else if (vaultHadNote.some((v: boolean) => v)) {
       skipped_existing++;
     } else if (responded === 0) {
       unreachable++;

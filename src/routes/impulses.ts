@@ -399,6 +399,10 @@ async function dispatchInner(pointer: AnyPointer): Promise<ResolverResult> {
       return resolveMaintenanceLeaseWrite(p as Parameters<typeof resolveMaintenanceLeaseWrite>[0]);
     case "trace_store_health_observer":
       return resolveTraceStoreHealthObserver(p as Parameters<typeof resolveTraceStoreHealthObserver>[0]);
+    case "gap_compose": {
+      const { resolveFeatureCompose } = await import("../resolvers/feature-compose.js");
+      return resolveFeatureCompose({ ...pointer, type: "feature_compose", spec: (pointer as any).spec });
+    }
     // @shape-dispatch:private
     case "feature_compose":
       return resolveFeatureCompose(p as Parameters<typeof resolveFeatureCompose>[0]);

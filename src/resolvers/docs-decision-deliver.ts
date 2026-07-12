@@ -14,19 +14,22 @@ interface Panel {
   asks?: unknown;
 }
 
-async function discoverOwnerUrl(shape: string): Promise<string | null> {
-  try {
-    const res = await fetch(`${DISCOVERY_ENDPOINT}/lookup`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ shape }),
-    });
-    if (!res.ok) return null;
-    const data = (await res.json()) as { endpoint?: string; vesselCapability?: { endpoint?: string } };
-    return data.vesselCapability?.endpoint ?? data.endpoint ?? null;
-  } catch {
-    return null;
-  }
+async function discoverOwnerUrls(_capability: string): Promise<string[]> {
+  const res = await fetch(`${DISCOVERY_ENDPOINT}/resolve`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ pointer: { type: "vesselCapability", shape: "obsidian:write_note" } }),
+    signal: AbortSignal.timeout(8000),
+  });
+  if (!res.ok) return [];
+  const data = await res.json() as { content?: { vessels?: Array<{ endpoint: string; resolve_endpoint?: string }> }; vessels?: Array<{ endpoint: string; resolve_endpoint?: string }> };
+  const vessels: Array<{ endpoint: string; resolve_endpoint?: string }> = data.content?.vessels ?? data.vessels ?? [];
+  return vessels.map((v: { endpoint: string; resolve_endpoint?: string }) => {
+    const base = v.endpoint.replace(/\/$/, "");
+    const route: string = v.resolve_endpoint ?? "/resolve";
+    if (route.startsWith("http")) return route;
+    return base + (route.startsWith("/") ? route : "/" + route);
+  });
 }
 
 export async function resolveDocsDecisionDeliver(
@@ -71,72 +74,57 @@ export async function resolveDocsDecisionDeliver(
   const selected = panels.slice(0, limit);
   const panels_considered = selected.length;
 
-  const ownerUrl = await discoverOwnerUrl("obsidian:write_note");
+  const ownerUrls = await discoverOwnerUrls("obsidian:write_note");
 
   let delivered = 0;
   let skipped_existing = 0;
   let unreachable = 0;
 
   for (const panel of selected) {
-    try {
-      const path = `Substrate/Decisions/${panel.id}.md`;
-
-      if (ownerUrl) {
-        try {
-          const readRes = await fetch(`${ownerUrl}/impulse`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ type: "obsidian:note", path }),
-          });
-          if (readRes.ok) {
-            const readBody = (await readRes.json()) as { body?: { exists?: boolean; content?: string } };
-            const exists =
-              readBody.body?.exists === true ||
-              (typeof readBody.body?.content === "string" && readBody.body.content.length > 0);
-            if (exists) {
-              skipped_existing++;
-              continue;
-            }
-          }
-        } catch {
-          // read failure — treat as not-existing, attempt write
-        }
-      }
-
-      if (!dry_run) {
-        const gapId = panel.id.replace(/^docs-decision-/, "");
-        const title = panel.title ?? panel.id;
-        const body = panel.body ?? "";
-        const content = [
-          `---`,
-          `panel_id: ${panel.id}`,
-          `gap_id: ${gapId}`,
-          `status: awaiting-decision`,
-          `---`,
-          `# ${title}`,
-          body,
-          `## Decision`,
-          `_Write your decision below; the substrate reads this section back and applies it._`,
-        ].join("\n");
-
-        if (ownerUrl) {
-          const writeRes = await fetch(`${ownerUrl}/impulse`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ type: "obsidian:write_note", path, content }),
-          });
-          if (!writeRes.ok) {
-            unreachable++;
+    const path = `decisions/${panel.id}.md`;
+    const content = `# ${panel.title ?? panel.id}\n\n${(panel as Panel & { summary?: string }).summary ?? ""}\n`;
+    if (dry_run) {
+      delivered++;
+      continue;
+    }
+    let responded = 0;
+    let wrote = 0;
+    const vaultHadNote: boolean[] = [];
+    for (const url of ownerUrls) {
+      try {
+        const readRes = await fetch(url, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ type: "obsidian:note", pointer: { type: "obsidian:note", path } }),
+          signal: AbortSignal.timeout(8000),
+        });
+        if (readRes.ok) {
+          responded++;
+          const readData = await readRes.json() as { success?: boolean; content?: string };
+          if (readData.success === true && typeof readData.content === "string" && readData.content.length > 0) {
+            vaultHadNote.push(true);
             continue;
           }
-        } else {
-          unreachable++;
-          continue;
+          vaultHadNote.push(false);
+          const writeRes = await fetch(url, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ type: "obsidian:write_note", pointer: { type: "obsidian:write_note", path, content } }),
+            signal: AbortSignal.timeout(8000),
+          });
+          if (writeRes.ok) {
+            wrote++;
+          }
         }
+      } catch {
+        // per-url failure — continue to next vault
       }
-
+    }
+    if (wrote >= 1) {
       delivered++;
-    } catch {
+    } else if (responded >= 1 && wrote === 0 && vaultHadNote.length > 0 && vaultHadNote.every((v: boolean) => v)) {
+      skipped_existing++;
+    } else if (responded === 0) {
       unreachable++;
     }
   }

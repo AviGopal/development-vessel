@@ -111,7 +111,7 @@ async function draftEdits(docPath: string, docText: string, claims: DriftClaim[]
     `VERBATIM in the doc (copy it exactly, including whitespace) and new_string is the corrected text.\n\n` +
     `DOC: ${docPath}\n----- DOC TEXT -----\n${docText.slice(0, DOC_BUDGET)}\n----- FALSIFIED CLAIMS -----\n${claimList}\n\n` +
     `Respond with STRICT JSON only: {"edits":[{"old_string":"<verbatim>","new_string":"<corrected>"}]}`;
-  const raw = await llm(prompt, 1400);
+  const raw = await llm(prompt, 3000);
   if (!raw) return [];
   const parsed = parseJson<{ edits?: Edit[] }>(raw);
   return Array.isArray(parsed?.edits) ? parsed!.edits!.filter((e) => e && typeof e.old_string === "string" && typeof e.new_string === "string") : [];
@@ -121,18 +121,30 @@ export async function reachGate(docPath: string, revised: string, claims: DriftC
   const claimList = claims.map((c, i) => `${i + 1}. "${c.quote}"`).join("\n");
   const prompt =
     `You verify a documentation fix. Here is the REVISED doc and the list of claims that were ` +
-    `previously FALSE (asserted something the code no longer does). Decide: (a) does the revised doc ` +
-    `NO LONGER assert each false claim (resolved), and (b) did the edit introduce a REGRESSION — ` +
-    `falsify something that was previously TRUE or leave the doc self-contradictory?\n\n` +
-    `DOC: ${docPath}\n----- REVISED DOC -----\n${revised.slice(0, DOC_BUDGET)}\n----- CLAIMS THAT MUST BE RESOLVED -----\n${claimList}\n\n` +
-    `Respond with STRICT JSON only: {"reached": boolean, "unresolved": ["<claim still asserted>"], "regression": boolean, "reason": "<one sentence>"}`;
-  const raw = await llm(prompt, 500);
+    `previously FALSE (asserted something the code no longer does). For EACH numbered claim decide ` +
+    `still_asserted: does the revised doc STILL assert that claim (true) or is it gone/corrected (false)? ` +
+    `Also decide regression: did the edit falsify something previously TRUE or leave the doc self-contradictory?\n\n` +
+    `DOC: ${docPath}\n----- REVISED DOC -----\n${revised.slice(0, DOC_BUDGET)}\n----- CLAIMS -----\n${claimList}\n\n` +
+    `Respond with STRICT JSON only: {"claims": [{"n": 1, "still_asserted": boolean}], "regression": boolean, "reason": "<one sentence>"}`;
+  const raw = await llm(prompt, 600);
   if (!raw) return null;
-  const v = parseJson<ReachVerdict>(raw);
-  if (!v || typeof v.reached !== "boolean") return null;
-  v.unresolved = Array.isArray(v.unresolved) ? v.unresolved.map(String) : [];
-  v.regression = Boolean(v.regression);
-  return v;
+  const v = parseJson<{ claims?: Array<{ n?: number; still_asserted?: boolean }>; regression?: boolean; reason?: string }>(raw);
+  if (!v || !Array.isArray(v.claims)) return null;
+  // reached is COMPUTED from per-claim judgments — never trusted as a raw model
+  // boolean (models emitted reached:false alongside reasons saying every claim
+  // was resolved; per-claim booleans are far harder to garble).
+  const unresolved = v.claims
+    .filter((c) => c && c.still_asserted === true)
+    .map((c) => {
+      const idx = typeof c.n === "number" ? c.n - 1 : -1;
+      return claims[idx]?.quote ?? `claim ${String(c.n)}`;
+    });
+  return {
+    reached: unresolved.length === 0 && !v.regression,
+    unresolved,
+    regression: Boolean(v.regression),
+    reason: typeof v.reason === "string" ? v.reason : "",
+  };
 }
 
 /** Upsert the gap with merged metadata + status (best-effort). */

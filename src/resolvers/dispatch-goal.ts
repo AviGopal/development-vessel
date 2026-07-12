@@ -43,9 +43,9 @@ import { METABOB_API_KEY } from "../config.js";
  *
  * @constant
  */
-/*
- * Guard rationale for MAX_GOAL_LEN — three-part safety boundary:
+/** GUARD_RATIONALE: MAX_GOAL_LEN — three-part safety boundary
  *
+ * @remarks
  *   (1) LLM token budget protection: caps the goal payload so it cannot
  *       exhaust the downstream model's prompt token window, which would
  *       cause truncation, request failure, or cost overruns.
@@ -58,9 +58,9 @@ import { METABOB_API_KEY } from "../config.js";
  *       oversized payloads early, before they consume network,
  *       serialization, or downstream vessel resources.
  *
- * This comment is the canonical, discoverable rationale for the guard;
+ * This block is the canonical, discoverable rationale for the guard;
  * see the JSDoc block above and the enforcement site in
- * resolveDispatchGoal for the runtime check.
+ * {@link resolveDispatchGoal} for the runtime check.
  */
 const MAX_GOAL_LEN = 8192;
 const GOAL_HOST_ENDPOINT = process.env["GOAL_HOST_VESSEL_ENDPOINT"] ?? "http://127.0.0.1:8210";

@@ -109,23 +109,25 @@ export async function resolveDocsDecisionDeliver(
           body: JSON.stringify({ type: "obsidian:note", pointer: { type: "obsidian:note", path } }),
           signal: AbortSignal.timeout(8000),
         });
+        responded++;
+        let hasNote = false;
         if (readRes.ok) {
-          responded++;
           const readData = await readRes.json() as { success?: boolean; content?: string };
-          if (readData.success === true && typeof readData.content === "string" && readData.content.length > 0) {
-            vaultHadNote.push(true);
-            continue;
-          }
-          vaultHadNote.push(false);
-          const writeRes = await fetch(url, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ type: "obsidian:write_note", pointer: { type: "obsidian:write_note", path, content } }),
-            signal: AbortSignal.timeout(8000),
-          });
-          if (writeRes.ok) {
-            wrote++;
-          }
+          hasNote = readData.success === true && typeof readData.content === "string" && readData.content.length > 0;
+        }
+        if (hasNote) {
+          vaultHadNote.push(true);
+          continue;
+        }
+        vaultHadNote.push(false);
+        const writeRes = await fetch(url, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ type: "obsidian:write_note", pointer: { type: "obsidian:write_note", path, content } }),
+          signal: AbortSignal.timeout(8000),
+        });
+        if (writeRes.ok) {
+          wrote++;
         }
       } catch {
         // per-url failure — continue to next vault

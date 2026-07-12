@@ -14,7 +14,7 @@
     "substrate:deploy": "cp CLAUDE.md \"$SUBSTRATE_BASE_ROOT/CLAUDE.md\""
   },
   "dependencies": {
-    "@avigopal/ias-executor-ts": "file:/vessels/ias-executor-ts",
+    "@avigopal/ias-executor-ts": "file:../ias-executor-ts",
     "hono": "^4.0.0",
     "zod": "^3.22.0"
   },

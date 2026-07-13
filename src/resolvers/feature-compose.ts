@@ -1237,8 +1237,19 @@ async function resolveFeatureComposeInner(pointer: FeatureComposePointer): Promi
     const vesselName = tv.replace(/^\/repos\//, "");
     const runtimePath = `${RUNTIME_ROOT}/${vesselName}`;
     const clonePath = `${PUSH_CLONE_ROOT}/${vesselName}`;
-    if (mountExistsSync(runtimePath)) continue;
+    const isPartialMirror =
+      mountExistsSync(runtimePath) &&
+      !mountExistsSync(`${runtimePath}/.git`) &&
+      !mountExistsSync(`${runtimePath}/package.json`);
+    if (mountExistsSync(runtimePath) && !isPartialMirror) continue;
     if (!mountExistsSync(`${clonePath}/.git`)) continue; // net-new vessel: scaffold path handles it
+    if (isPartialMirror) {
+      // A previous cutover file-mirror left a partial tree (only landed files, no
+      // package.json/.git) - it blocks staging and lets edits bypass typecheck.
+      // Replace it with the full clone symlink.
+      await callTool(toolsEndpoint, "shell", { command: `rm -rf ${JSON.stringify(runtimePath)}`, cwd: PUSH_CLONE_ROOT });
+      console.log(`[feature-compose] replaced partial runtime mirror for ${vesselName}`);
+    }
     await callTool(toolsEndpoint, "shell", { command: `git -C ${JSON.stringify(clonePath)} fetch origin dev 2>&1; git -C ${JSON.stringify(clonePath)} reset --hard origin/dev 2>&1 && ln -sfn ${JSON.stringify(clonePath)} ${JSON.stringify(runtimePath)}`, cwd: PUSH_CLONE_ROOT });
     console.log(`[feature-compose] materialized non-resident vessel ${vesselName} -> ${clonePath}`);
   }

@@ -1815,6 +1815,24 @@ async function resolveFeatureComposeInner(pointer: FeatureComposePointer): Promi
 
       if (!semantic_gate.addresses || semantic_gate.on_live_path === false) {
         verdict = "UNFAVORABLE";
+        // Write semantic_gate_reason + suspected_real_location back onto the gap
+        // unconditionally (not only when suspected_real_location is present) so
+        // priorAttemptFeedbackBlock can inject the rejection reason into the next
+        // re-draft even when the gate did not name a specific mis-localization site.
+        if (pointer.gap?.id && semantic_gate.reason) {
+          try {
+            const read = await resolveSubstrateGap({ type: "substrateGap", id: pointer.gap.id, limit: 1 } as never);
+            const g0 = ((read?.body as { gaps?: Record<string, unknown>[] })?.gaps ?? [])[0];
+            if (g0) {
+              const meta = {
+                ...((g0.classification_metadata as Record<string, unknown>) ?? {}),
+                semantic_gate_reason: semantic_gate.reason,
+                ...(semantic_gate.suspected_real_location ? { suspected_real_location: semantic_gate.suspected_real_location } : {}),
+              };
+              await resolveSubstrateGapWrite({ type: "substrateGap_write", gap: { ...(g0 as Record<string, unknown>), classification_metadata: meta } } as never);
+            }
+          } catch { /* gap writeback best-effort; verdict already UNFAVORABLE */ }
+        }
         // Mis-localization feedback: when the judge named the real fix site, write it
         // onto the gap so the next draft targets the right code. Best-effort.
         if (pointer.gap?.id && semantic_gate.suspected_real_location) {

@@ -1837,7 +1837,7 @@ async function resolveFeatureComposeInner(pointer: FeatureComposePointer): Promi
     mkdirSync(reportDir, { recursive: true });
     writeFileSync(
       join(reportDir, `${pointer.gap?.id ?? "adhoc"}-compose-report.json`),
-      JSON.stringify({ ok: verdict === "FAVORABLE", verdict, summary: plan.summary, touched_vessels: [...touched], op_count: ops.length, applied, apply_failed: applyFailed, verify, semantic_gate, rolled_back, cutovers }, null, 2),
+      JSON.stringify({ ok: verdict === "FAVORABLE", verdict, spec: String(spec).slice(0, 8000), summary: plan.summary, touched_vessels: [...touched], op_count: ops.length, applied, apply_failed: applyFailed, verify, semantic_gate, rolled_back, cutovers }, null, 2),
     );
   } catch { /* persistence failure must never fail the compose */ }
 

@@ -1234,7 +1234,7 @@ async function resolveFeatureComposeInner(pointer: FeatureComposePointer): Promi
   // works unchanged. The clone is the same one the cutover commits+pushes from.
   const PUSH_CLONE_ROOT = process.env["MITOSIS_PUSH_CLONE_DIR"] ?? "/workspace/git/vessels";
   for (const tv of touched) {
-    const vesselName = tv.replace(/^\/repos\//, "");
+    const vesselName = tv.replace(/^repos\//, "");
     const runtimePath = `${RUNTIME_ROOT}/${vesselName}`;
     const clonePath = `${PUSH_CLONE_ROOT}/${vesselName}`;
     const isPartialMirror =

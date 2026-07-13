@@ -721,6 +721,7 @@ export function priorAttemptFeedbackBlock(meta?: Record<string, unknown> | null)
     "",
     "PRIOR ATTEMPT FEEDBACK — a previous draft for THIS gap was REJECTED by the semantic gate. Do NOT repeat it; your plan MUST address what it missed:",
   ];
+  if (typeof meta.verify_failure_reason === "string" && meta.verify_failure_reason.trim()) lines.push(`- Typecheck failure from prior attempt: ${meta.verify_failure_reason.trim()}`);
   if (reason) lines.push(`- Rejection reason: ${reason}`);
   if (loc) lines.push(`- The real change site is: ${loc}. Your fix MUST edit that specific path/lines (not just adjacent or related code).`);
   if (lessons.length > 0) {
@@ -1925,7 +1926,22 @@ async function resolveFeatureComposeInner(pointer: FeatureComposePointer): Promi
   }
   if (verdict !== "FAVORABLE") {
     const envClass = classifyEnvironmentFailure(cutovers);
+    const firstTscError = (() => {
+      const raw = verify.find((v) => !v.ok)?.output ?? "";
+      const m = raw.match(/(\S+\.ts\(\d+,\d+\): error TS\d+:[^\n]*)/);
+      return m ? m[1]! : raw.slice(0, 300);
+    })();
     const lessonClass = envClass ?? classifyComposeFailure(applied, verify, String(semantic_gate?.reason ?? ""));
+    if (pointer.gap?.id && firstTscError) {
+      try {
+        const read = await resolveSubstrateGap({ type: "substrateGap", id: pointer.gap.id, limit: 1 } as never);
+        const g0 = ((read?.body as { gaps?: Record<string, unknown>[] })?.gaps ?? [])[0];
+        if (g0) {
+          const meta = { ...((g0.classification_metadata as Record<string, unknown>) ?? {}), verify_failure_reason: firstTscError };
+          await resolveSubstrateGapWrite({ type: "substrateGap_write", gap: { ...(g0 as Record<string, unknown>), classification_metadata: meta } } as never);
+        }
+      } catch { /* gap writeback best-effort */ }
+    }
     await appendComposeLesson(lessonClass, String(semantic_gate?.reason ?? verify.find((v) => !v.ok)?.output ?? applied.find((a) => !a.ok)?.detail ?? verdict), [...touched].join(","), pointer.gap);
     try {
       const tscText = verify.find((v) => !v.ok)?.output ?? "";

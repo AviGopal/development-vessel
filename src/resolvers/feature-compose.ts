@@ -1297,7 +1297,16 @@ async function resolveFeatureComposeInner(pointer: FeatureComposePointer): Promi
       mountExistsSync(runtimePath) &&
       !mountExistsSync(`${runtimePath}/.git`) &&
       !mountExistsSync(`${runtimePath}/package.json`);
-    if (mountExistsSync(runtimePath) && !isPartialMirror) continue;
+    if (mountExistsSync(runtimePath) && !isPartialMirror) {
+          if (mountExistsSync(`${clonePath}/.git`)) {
+            await callTool(toolsEndpoint, "shell", {
+              command: `git -C ${JSON.stringify(clonePath)} fetch origin dev 2>&1; git -C ${JSON.stringify(clonePath)} reset --hard origin/dev 2>&1`,
+              cwd: PUSH_CLONE_ROOT,
+            });
+            console.log(`[feature-compose] refreshed mirror ${vesselName} to origin/dev`);
+          }
+          continue;
+        }
     if (!mountExistsSync(`${clonePath}/.git`)) continue; // net-new vessel: scaffold path handles it
     if (isPartialMirror) {
       // A previous cutover file-mirror left a partial tree (only landed files, no

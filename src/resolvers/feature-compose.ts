@@ -736,6 +736,60 @@ export function priorAttemptFeedbackBlock(meta?: Record<string, unknown> | null)
   return lines.join("\n");
 }
 
+async function fetchNamedShapeContracts(text: string): Promise<string> {
+  try {
+    const tokenRe = /(?:["'`]([a-zA-Z][a-zA-Z0-9_]*(?:_[a-zA-Z0-9]+|[A-Z][a-z0-9]+)*)["'`]|(?:shape|type|resolve)\s+([a-zA-Z][a-zA-Z0-9_]*(?:_[a-zA-Z0-9]+|[A-Z][a-z0-9]+)*))/g;
+    const seen = new Set<string>();
+    let m: RegExpExecArray | null;
+    while ((m = tokenRe.exec(text)) !== null) {
+      const tok = m[1] ?? m[2];
+      if (tok) seen.add(tok);
+      if (seen.size >= 8) break;
+    }
+    const candidates = Array.from(seen);
+    if (candidates.length === 0) return "";
+    const lines: string[] = [];
+    for (const shape of candidates) {
+      let res: Response;
+      try {
+        res = await fetch(`${DISCOVERY_ENDPOINT}/resolve`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `ApiKey ${METABOB_API_KEY}`,
+          },
+          body: JSON.stringify({ pointer: { type: "vesselCapability", shape } }),
+          signal: AbortSignal.timeout(4000),
+        });
+      } catch {
+        continue;
+      }
+      if (!res.ok) continue;
+      let rows: unknown;
+      try {
+        rows = await res.json();
+      } catch {
+        continue;
+      }
+      const arr = Array.isArray(rows) ? rows : [];
+      let count = 0;
+      for (const row of arr) {
+        if (count >= 3) break;
+        const r = row as Record<string, unknown>;
+        lines.push(
+          `CONTRACT ${shape}: ${r["vesselId"] ?? "?"} at ${r["endpoint"] ?? ""}${r["resolve_endpoint"] ?? ""} format=${r["resolve_request_format"] ?? "?"} auth=${r["auth_scheme"] ?? "?"} proto=${r["protocol"] ?? "http"}`,
+        );
+        count++;
+      }
+    }
+    const block = lines.join("\n");
+    return block.length > 2000 ? block.slice(0, 2000) : block;
+  } catch (e) {
+    console.warn("[fetchNamedShapeContracts] error:", (e as Error).message);
+    return "";
+  }
+}
+
 function refineSpecPrompt(spec: string, grounding: string, lessons: string): string {
   return `You are a spec editor. Rewrite the following change spec into LANDING FORM.
 
@@ -1185,7 +1239,9 @@ async function resolveFeatureComposeInner(pointer: FeatureComposePointer): Promi
   let spec = pointer.spec;
   if (!(/REPLACE|WITH:|INSERT AFTER|ANCHOR/i.test(spec)) || spec.length > 3500) {
     try {
-      const refined = await llmCall(llmEndpoint, refineSpecPrompt(spec, grounding, composeLessons), model);
+      const contractBlock = await fetchNamedShapeContracts(spec + " " + grounding);
+    if (contractBlock) grounding += "\n\nLIVE VESSEL CONTRACTS (authoritative — drafted HTTP calls MUST use one of these contracts or an existing in-file helper; NEVER invent a route or omit the Authorization header):\n" + contractBlock;
+    const refined = await llmCall(llmEndpoint, refineSpecPrompt(spec, grounding, composeLessons), model);
       const trimmed = refined.trim();
       if (trimmed.length >= 40) {
         spec = trimmed;

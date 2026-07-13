@@ -1928,17 +1928,18 @@ export async function resolveGapToFeature(pointer: GapToFeaturePointer): Promise
       editTargets = [{ file: localized.file, description: localized.description }];
     await resolveSubstrateGapWrite({
       type: "substrateGap_write",
-      id: gap.id,
-      category: gap.category,
-      source: gap.source,
-      summary: gap.summary,
-      detected_at: gap.detected_at,
-      status: gap.status,
-      classification_metadata: {
-        ...(typeof gap.classification_metadata === "object" && gap.classification_metadata !== null ? gap.classification_metadata as Record<string, unknown> : {}),
-        edit_site: localized.file,
-        localization_method: localized.method,
-        localized_at: new Date().toISOString(),
+      gap: {
+        id: gap.id,
+        category: gap.category,
+        source: gap.source,
+        summary: gap.summary,
+        detected_at: gap.detected_at,
+        status: gap.status,
+        classification_metadata: {
+          ...(gap.classification_metadata ?? {}),
+          localized: true,
+          localized_at: new Date().toISOString(),
+        },
       },
     });
     }
@@ -1948,16 +1949,18 @@ export async function resolveGapToFeature(pointer: GapToFeaturePointer): Promise
     console.log("[gap-to-feature] no existing edit targets found for gap", gapId, "— composer will scaffold new file");
     await resolveSubstrateGapWrite({
       type: "substrateGap_write",
-      id: gap.id,
-      category: gap.category,
-      source: gap.source,
-      summary: gap.summary,
-      detected_at: gap.detected_at,
-      status: gap.status,
-      classification_metadata: {
-        ...(typeof gap.classification_metadata === "object" && gap.classification_metadata !== null ? gap.classification_metadata as Record<string, unknown> : {}),
-        localization_failed: "no confident target from metadata, grep, or LLM rank",
-        localization_failed_at: new Date().toISOString(),
+      gap: {
+        id: gap.id,
+        category: gap.category,
+        source: gap.source,
+        summary: gap.summary,
+        detected_at: gap.detected_at,
+        status: gap.status,
+        classification_metadata: {
+          ...(gap.classification_metadata ?? {}),
+          localization_failed: true,
+          localization_failed_at: new Date().toISOString(),
+        },
       },
     });
     await resolveUiWritePassthrough({

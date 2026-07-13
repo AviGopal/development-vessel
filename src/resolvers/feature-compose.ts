@@ -1227,6 +1227,22 @@ async function resolveFeatureComposeInner(pointer: FeatureComposePointer): Promi
   }
 
   const planView = ops.map((o) => ({ kind: o.kind, path: o.path, rationale: o.rationale }));
+  // Materialize non-resident vessels (gap edit-intent-path-translation-post-unmooring):
+  // a vessel absent from RUNTIME_ROOT (host-resident, e.g. obsidian-vessel) is staged
+  // by symlinking its push clone - refreshed to origin/dev - into the runtime root, so
+  // every downstream path (baseline typecheck, ops apply, mitosis staging, cutover)
+  // works unchanged. The clone is the same one the cutover commits+pushes from.
+  const PUSH_CLONE_ROOT = process.env["MITOSIS_PUSH_CLONE_DIR"] ?? "/workspace/git/vessels";
+  for (const tv of touched) {
+    const vesselName = tv.replace(/^\/repos\//, "");
+    const runtimePath = `${RUNTIME_ROOT}/${vesselName}`;
+    const clonePath = `${PUSH_CLONE_ROOT}/${vesselName}`;
+    if (mountExistsSync(runtimePath)) continue;
+    if (!mountExistsSync(`${clonePath}/.git`)) continue; // net-new vessel: scaffold path handles it
+    await callTool(toolsEndpoint, "shell", { command: `git -C ${JSON.stringify(clonePath)} fetch origin dev 2>&1; git -C ${JSON.stringify(clonePath)} reset --hard origin/dev 2>&1 && ln -sfn ${JSON.stringify(clonePath)} ${JSON.stringify(runtimePath)}`, cwd: PUSH_CLONE_ROOT });
+    console.log(`[feature-compose] materialized non-resident vessel ${vesselName} -> ${clonePath}`);
+  }
+
   if (dryRun) {
     return { shape: "featureComposeReport", body: { ok: true, stage: "plan", summary: plan.summary, touched_vessels: [...touched], ops: planView, op_count: ops.length } };
   }

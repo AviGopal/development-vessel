@@ -736,6 +736,26 @@ export function priorAttemptFeedbackBlock(meta?: Record<string, unknown> | null)
   return lines.join("\n");
 }
 
+async function groundFileSymbols(toolsEndpoint: string, verifyVessels: string[]): Promise<string> {
+  const blocks: string[] = [];
+  for (const v of verifyVessels.slice(0, 6)) {
+    try {
+      const cmd = `rg -oNI --no-heading -g '*.ts' '^(export )?(async )?(function|const|let|interface|type) [A-Za-z0-9_]+' ${v}/src | sort -u | head -200`;
+      const res = await fetch(`${toolsEndpoint}/v2/impulses/resolve`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...(METABOB_API_KEY ? { Authorization: `ApiKey ${METABOB_API_KEY}` } : {}) },
+        body: JSON.stringify({ impulse: { pointer: { type: 'shellResult', command: cmd } } }),
+        signal: AbortSignal.timeout(8000),
+      });
+      if (!res.ok) continue;
+      const j = await res.json() as { body?: { stdout?: string }; content?: { stdout?: string } };
+      const out = (j.body?.stdout ?? j.content?.stdout ?? '').trim();
+      if (out) blocks.push(`SYMBOLS ${v}:\n${out.slice(0, 4000)}`);
+    } catch { /* advisory */ }
+  }
+  return blocks.join('\n\n');
+}
+
 async function fetchNamedShapeContracts(text: string): Promise<string> {
   try {
     const tokenRe = /(?:["'`]([a-zA-Z][a-zA-Z0-9_]*(?:_[a-zA-Z0-9]+|[A-Z][a-z0-9]+)*)["'`]|(?:shape|type|resolve)\s+([a-zA-Z][a-zA-Z0-9_]*(?:_[a-zA-Z0-9]+|[A-Z][a-z0-9]+)*))/g;
@@ -1241,6 +1261,10 @@ async function resolveFeatureComposeInner(pointer: FeatureComposePointer): Promi
     try {
       const contractBlock = await fetchNamedShapeContracts(spec + " " + grounding);
     if (contractBlock) grounding += "\n\nLIVE VESSEL CONTRACTS (authoritative — drafted HTTP calls MUST use one of these contracts or an existing in-file helper; NEVER invent a route or omit the Authorization header):\n" + contractBlock;
+    try {
+      const symbolBlock = await groundFileSymbols(toolsEndpoint, verifyVessels);
+      if (symbolBlock) grounding += '\n\nEXISTING SYMBOLS (authoritative — reference ONLY names that appear here or that this plan itself introduces; NEVER invent a function, const, type, or field name):\n' + symbolBlock;
+    } catch { /* advisory */ }
     const refined = await llmCall(llmEndpoint, refineSpecPrompt(spec, grounding, composeLessons), model);
       const trimmed = refined.trim();
       if (trimmed.length >= 40) {

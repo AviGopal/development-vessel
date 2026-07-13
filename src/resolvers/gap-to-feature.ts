@@ -1926,11 +1926,48 @@ export async function resolveGapToFeature(pointer: GapToFeaturePointer): Promise
     } catch { localized = null; }
     if (localized) {
       editTargets = [{ file: localized.file, description: localized.description }];
+    await resolveSubstrateGapWrite({
+      type: "substrateGap_write",
+      id: gap.id,
+      category: gap.category,
+      source: gap.source,
+      summary: gap.summary,
+      detected_at: gap.detected_at,
+      status: gap.status,
+      classification_metadata: {
+        ...(typeof gap.classification_metadata === "object" && gap.classification_metadata !== null ? gap.classification_metadata as Record<string, unknown> : {}),
+        edit_site: localized.file,
+        localization_method: localized.method,
+        localized_at: new Date().toISOString(),
+      },
+    });
     }
   }
   if (editTargets.length === 0) {
     const gapId = String(gap.id ?? "");
     console.log("[gap-to-feature] no existing edit targets found for gap", gapId, "— composer will scaffold new file");
+    await resolveSubstrateGapWrite({
+      type: "substrateGap_write",
+      id: gap.id,
+      category: gap.category,
+      source: gap.source,
+      summary: gap.summary,
+      detected_at: gap.detected_at,
+      status: gap.status,
+      classification_metadata: {
+        ...(typeof gap.classification_metadata === "object" && gap.classification_metadata !== null ? gap.classification_metadata as Record<string, unknown> : {}),
+        localization_failed: "no confident target from metadata, grep, or LLM rank",
+        localization_failed_at: new Date().toISOString(),
+      },
+    });
+    await resolveUiWritePassthrough({
+      type: "uiQuestion_write",
+      id: "needs-localization-" + gapId,
+      title: "Gap needs a change-site",
+      body: "Localization failed for gap " + gapId + ": name the concrete repos/<vessel>/src file this gap should change, or say it is out of code reach. Summary: " + String(gap.summary ?? "").slice(0, 300),
+      kind: "gap_needs_localization",
+      importance: "medium",
+    });
     void fetch(`${GOAL_HOST_VESSEL_ENDPOINT}/v2/impulses/resolve`, {
       method: "POST",
       headers: { "Content-Type": "application/json", ...(METABOB_API_KEY ? { Authorization: `ApiKey ${METABOB_API_KEY}` } : {}) },

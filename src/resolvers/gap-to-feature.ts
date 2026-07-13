@@ -736,7 +736,8 @@ function verifyGapCondition(gap: Record<string, unknown>): 'present' | 'absent' 
     }
     // ── Class 3 (sync): landed commit — a substrate-authored commit referencing this gap id already exists ──
     const gapIdForLandedSync = typeof gap['id'] === 'string' ? (gap['id'] as string) : '';
-    if (gapIdForLandedSync.length >= 8) {
+    const behavioralFail = String(gap['summary'] ?? '').includes('BEHAVIORAL VERIFICATION FAILED') || ((gap['classification_metadata'] ?? {}) as Record<string, unknown>)['regressed_by'] !== undefined;
+    if (gapIdForLandedSync.length >= 8 && !behavioralFail) {
       try {
         for (const cloneName of readdirSync('/workspace/git/vessels')) {
           const cloneDir = join('/workspace/git/vessels', cloneName);
@@ -799,7 +800,8 @@ async function verifyGapConditionAsync(gap: Record<string, unknown>): Promise<'p
     }
     // ── Class 3: landed commit — a substrate-authored commit referencing this gap id already exists ──
     const gapIdForLanded = typeof gap['id'] === 'string' ? (gap['id'] as string) : '';
-    if (gapIdForLanded.length >= 8) {
+    const behavioralFail = String(gap['summary'] ?? '').includes('BEHAVIORAL VERIFICATION FAILED') || ((gap['classification_metadata'] ?? {}) as Record<string, unknown>)['regressed_by'] !== undefined;
+    if (gapIdForLanded.length >= 8 && !behavioralFail) {
       try {
         for (const cloneName of readdirSync('/workspace/git/vessels')) {
           const cloneDir = join('/workspace/git/vessels', cloneName);

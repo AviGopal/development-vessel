@@ -1819,9 +1819,10 @@ async function resolveFeatureComposeInner(pointer: FeatureComposePointer): Promi
         // unconditionally (not only when suspected_real_location is present) so
         // priorAttemptFeedbackBlock can inject the rejection reason into the next
         // re-draft even when the gate did not name a specific mis-localization site.
-        if (pointer.gap?.id && semantic_gate.reason) {
+        const gapId = pointer.gap?.id ?? (pointer.spec.match(/^route-edit-([0-9a-f]+)/)?.[0]);
+        if (gapId && semantic_gate.reason) {
           try {
-            const read = await resolveSubstrateGap({ type: "substrateGap", id: pointer.gap.id, limit: 1 } as never);
+            const read = await resolveSubstrateGap({ type: "substrateGap", id: gapId, limit: 1 } as never);
             const g0 = ((read?.body as { gaps?: Record<string, unknown>[] })?.gaps ?? [])[0];
             if (g0) {
               const meta = {
@@ -1955,6 +1956,8 @@ async function resolveFeatureComposeInner(pointer: FeatureComposePointer): Promi
     const { resolveCodeLocality } = await import("./code-locality.js");
     const famKey = pointer.gap?.id ?? "adhoc";
     const m = /^route-edit-([0-9a-f]+)$/.exec(famKey);
+    const goalHash = m ? m[1] : undefined;
+    const gapId: string | undefined = pointer.gap?.id ?? (goalHash ? `route-edit-${goalHash}` : undefined);
     const shadow = await resolveCodeLocality({ type: "code_locality", family: m ? `goal:${m[1]}` : `gap:${famKey}` });
     const actual = applied.filter((a) => a.ok).map((a) => ({ path: a.path, kind: a.kind, span: a.span }));
     const { appendFileSync, mkdirSync: mkShadowDir } = await import("node:fs");

@@ -173,7 +173,14 @@ export async function resolveLlmCompletionDispatch(
     prompt: pointer.prompt,
     model,
     max_tokens: pointer.max_tokens ?? 8192,
-    tools: (Array.isArray(pointer.tools) && pointer.tools.length > 0) ? pointer.tools : DEFAULT_LLM_TOOLS,
+    // Tools cost real tokens (~500/request of schema) and force the
+    // multi-request tool-loop path. Absent field keeps the investigation
+    // defaults (walk satisfier fallbacks rely on them); an EXPLICIT empty
+    // array is a caller opting out — plain completions skip the schemas and
+    // take the cheaper single-shot path.
+    ...(Array.isArray(pointer.tools)
+      ? (pointer.tools.length > 0 ? { tools: pointer.tools } : {})
+      : { tools: DEFAULT_LLM_TOOLS }),
     ...(pointer.system_prompt ? { system: pointer.system_prompt } : {}),
   };
 
@@ -209,8 +216,15 @@ export async function resolveLlmCompletionDispatch(
   const result = await res.json() as {
     resolved?: boolean;
     content?: string;
-    usage?: { input_tokens?: number; output_tokens?: number };
+    usage?: { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number };
     error?: string;
+    // Resolved-model attribution: the llm-resolver reports which model
+    // actually served the completion (exhaustion fallback may differ from
+    // the requested model). Passing it through is what lets traces attribute
+    // cost and the learning loop grade wire models instead of the requested
+    // name (llm-model-selection observability seam).
+    model?: string;
+    fallback_from?: string;
     // Legacy / alternate field names from older vessels
     success?: boolean;
     data?: string;
@@ -230,6 +244,12 @@ export async function resolveLlmCompletionDispatch(
   const text = result.content ?? result.data ?? "";
   return {
     shape: "llm_completion_result",
-    body: { text, model, usage: result.usage },
+    body: {
+      text,
+      model: result.model ?? model,
+      requested_model: model,
+      ...(result.fallback_from ? { fallback_from: result.fallback_from } : {}),
+      usage: result.usage,
+    },
   };
 }

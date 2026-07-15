@@ -825,7 +825,37 @@ export async function resolveActivityCreateVariant(pointer: ActivityCreateVarian
       ? String(sigScanTask["target_signature"] ?? sigScanTask["targetSignature"] ?? "")
       : null;
     const isSignatureParameterized = boundTargetSignature !== null && boundTargetSignature !== "";
-    if (reuseMode !== "off" && !pointer.parentTemplateId && declaredOut.length > 0 && !isSignatureParameterized) {
+    // V32 (2026-06-27): producer reuse should only be enforced if there are
+    // capability-identifying declared output shapes, filtering out generic I/O
+    // and verification results (like "patch_proposal", "fs_write_result"). If
+    // a template only declares generic shapes, it's not a *new capability* to
+    // be de-duplicated.
+    const GENERIC_IO_SHAPES = new Set<string>([
+      "patch_proposal",
+      "fileContent",
+      "fs_read_result",
+      "fs_write_result",
+      "http_fetch_response",
+      "json_path_extract_result",
+      "llm_completion_output",
+      "noop_result",
+      // Verification results from analysis-vessel tasks
+      "gapAnalysis",
+      "testRunResult",
+      "pattern_metadata",
+    ]);
+    const capabilityIdentifyingDeclaredOut = declaredOut.filter(shapeName => !GENERIC_IO_SHAPES.has(shapeName));
+
+    if (
+      reuseMode !== "off" &&
+      !pointer.parentTemplateId &&
+      // Only require capability-identifying shapes when *not* a signature-parameterized detector.
+      // Signature-parameterized detectors are themselves distinct capabilities.
+      (isSignatureParameterized
+        ? declaredOut.length > 0
+        : capabilityIdentifyingDeclaredOut.length > 0) &&
+      !isSignatureParameterized
+    ) {
       try {
         // To find PRODUCERS of an output shape, discover-by-shapes wants the
         // shapes in `required_shapes` with mode `candidates_with_scores` (which

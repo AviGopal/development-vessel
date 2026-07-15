@@ -336,7 +336,7 @@ export async function resolveGapLifecycleScan(p: GapLifecycleScanPointer): Promi
       const updatedAt = g.updated_at ? new Date(g.updated_at).getTime() : 0;
       const staleWindowMs = staleHours * 60 * 60 * 1000;
       const reDetected = updatedAt > createdAt + staleWindowMs;
-      if (reDetected) {
+      if (reDetected && Number(((g as any).classification_metadata ?? {}).verified_age_boundaries ?? 0) < 1) {
         const meta = (g as any).classification_metadata ?? {};
         const prevBoundaries = Number(meta.verified_age_boundaries ?? 0);
         try {

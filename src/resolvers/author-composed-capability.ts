@@ -277,6 +277,8 @@ function buildPlanPrompt(
     `3. Use ONLY resolver ids from the list above. Do NOT invent resolver names. Do NOT use file/git/bash resolvers.\n` +
     `4. PREFER THE AGGREGATE RESOLVER over a raw-trace scan whenever the goal asks for COUNTS, RANKINGS, TOTALS, or SUMS grouped by template/status/variant over a window (every "top N", "highest", "total", "how many", "per template/tier/status" report goal). Use "traceAggregateReport" as the data task — it computes the GROUP BY in the database (fast, ~1s) and returns already-aggregated {key,value} rows. Do NOT use "executionTraceWithSignatures" to fetch raw traces and count them in the LLM: that raw scan TIMES OUT over the large trace table and the report comes back empty. e.g. "5 templates with the highest failure counts in 24h" → traceAggregateReport group_by:"activity_id", metric:"failure_count", window_hours:24, limit:5. Only use executionTraceWithSignatures when the goal genuinely needs per-trace detail an aggregate cannot provide.\n` +
     `5. The final task's output is the goal's deliverable; its prompt must instruct the LLM to emit EXACTLY the requested format (e.g. "5 lines, each '<template_id>  <failure_count>', sorted descending"). Set the final task's "output_shapes" to ["${deliverable}"].\n\n` +
+    `  - You MUST NOT invent new resolvers. Only use the resolvers explicitly listed and described above.\n` +
+    `  - The 'type' field MUST be one of the resolver IDs provided.\n\n` +
     `Return STRICT JSON: an ordered array of tasks, each:\n` +
     `{\n` +
     `  "id": "<short_id>",\n` +
@@ -287,7 +289,8 @@ function buildPlanPrompt(
     `  "outputImpulses": ["<slot_name>"],\n` +
     `  "dependencies": ["<id of a task whose output this consumes>"]\n` +
     `}\n` +
-    `Output ONLY the JSON array. No prose, no markdown fences.`
+    `For any RUNTIME INPUT the caller must supply at dispatch time (for example a file path to read or write), it MUST use a double-brace variable placeholder like {{file}} or {{targetModule}} in the task config value (a bare variable name, NOT the {{impulse:...}} upstream-binding form, and NOT a literal example path such as 'path/to/your/file.ts').
+Output ONLY the JSON array. No prose, no markdown fences.`
   );
 }
 
@@ -619,7 +622,14 @@ export async function resolveAuthorComposedCapability(
     output_shapes: plan.outputShapes,
     outputShapes: plan.outputShapes,
     tags: ["composed_capability", "improvise", "horizon:walk"],
-    variables: [],
+    variables: Array.from(new Set(plan.tasks.flatMap(t =>
+      Object.entries(t.config)
+        .filter(([_, v]) => typeof v === 'string')
+        .flatMap(([_, v]) => {
+          const matches = (v as string).matchAll(/{{(?!(?:impulse:))([^}]+)}}/g);
+          return Array.from(matches, m => m[1]!.trim());
+        })
+    ))).map(name => ({ name })), /* collect non-impulse variables */
     tasks: plan.tasks.map((t) => ({
       id: t.id,
       description: t.description,

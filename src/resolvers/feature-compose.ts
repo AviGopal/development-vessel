@@ -34,7 +34,7 @@ const DISCOVERY_ENDPOINT = process.env.DISCOVERY_ENDPOINT ?? "http://127.0.0.1:8
 // host-side poller bridges /vessels changes to git. Paths are repos/<vessel>/...
 // in the plan and mapped to ${RUNTIME_ROOT}/<vessel>/... here.
 const RUNTIME_ROOT = process.env.MITOSIS_RUNTIME_DIR ?? "/vessels";
-const REPO_ROOT = RUNTIME_ROOT;
+const REPO_ROOT = process.env.MITOSIS_REPO_ROOT ?? RUNTIME_ROOT;
 // 90s was fine for SURGICAL plans (small output) but timed out the DECOMPOSE call for
 // MULTI-COMPONENT / architectural changes — the plan there is large (a new migration's
 // full contents + several coordinated edits), so generation runs longer. Raise it so the

@@ -15,7 +15,9 @@ function assertInWorkspace(path: string, workspaceRoot: string): void {
 
 export async function resolveFsEdit(pointer: FsEditPointer): Promise<ResolverResult> {
   const workspaceRoot = process.env["WORKSPACE_ROOT"] ?? process.cwd();
-  assertInWorkspace(pointer.path, workspaceRoot);
+  pointer.oldString = pointer.oldString ?? (pointer as unknown as Record<string, string>)["old_string"];
+  pointer.newString = pointer.newString ?? (pointer as unknown as Record<string, string>)["new_string"];
+    assertInWorkspace(pointer.path, workspaceRoot);
 
   if (pointer.oldString === pointer.newString) {
     throw new Error("oldString and newString are identical — no edit needed");

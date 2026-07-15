@@ -1296,6 +1296,43 @@ async function resolveFeatureComposeInner(pointer: FeatureComposePointer): Promi
     } catch { /* fall through to honest no-ops below */ }
   }
   if (!plan || !Array.isArray(ops) || ops.length === 0) {
+    // Orphan-drain fix: when the intent is "author an activity" / composed-capability wrap,
+    // decompose correctly yields no file-edit ops — delegate to author_composed_capability.
+    const _gapCategory = pointer.gap?.category;
+    const _specText: string = typeof pointer.spec === "string" ? pointer.spec : "";
+    const _gapSummary: string =
+      typeof pointer.gap?.summary === "string"
+        ? pointer.gap.summary
+        : typeof (pointer.gap as Record<string, unknown> | undefined)?.["description"] === "string"
+        ? String((pointer.gap as Record<string, unknown>)["description"])
+        : "";
+    const _intentText = _gapSummary || _specText;
+    const _authorActivityRe = /author an activity|compose[s]? .*resolver|invoke[s]? (the )?resolver|wrap .*resolver as|composed capability/i;
+    const _isAuthorIntent =
+      _gapCategory === "orphaned_capability" || _authorActivityRe.test(_intentText);
+    if (_isAuthorIntent) {
+      const _delegateGoal =
+        _gapSummary ||
+        (_specText.split("\n").find((l) => l.trim().length > 0) ??
+        "author a composed capability activity");
+      try {
+        const _delegateRes = await fetch(`${DEV_VESSEL_ENDPOINT}/v2/impulses/resolve`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ impulse: { type: "author_composed_capability", goal: _delegateGoal } }),
+          signal: AbortSignal.timeout(120_000),
+        });
+        if (_delegateRes.ok) {
+          const _delegateBody = (await _delegateRes.json()) as unknown;
+          return {
+            shape: "featureComposeReport",
+            body: { ok: true, stage: "delegated_author_composed_capability", authored: _delegateBody },
+          };
+        }
+      } catch {
+        // delegation failed — fall through to existing error return
+      }
+    }
     return { shape: "featureComposeReport", body: { ok: false, stage: "decompose", error: "plan had no ops", plan_raw: planRaw.slice(0, 1200) } };
   }
   if (ops.length > maxOps) ops.length = maxOps;

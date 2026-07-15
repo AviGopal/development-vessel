@@ -347,7 +347,18 @@ function hasSubstance(body: unknown): boolean {
  * input is bound at execution time). (2026-06-27)
  */
 async function validateDataTask(task: PlannedTask): Promise<{ ok: boolean; reason: string }> {
-  if (task.resolver === "llm_completion_dispatch") return { ok: true, reason: "" };
+      if ([
+      "llm_completion_dispatch",
+      "source_code",
+      "sourceCode",
+      "fileContent",
+      "fileWriteResult",
+      "fs_edit",
+      "fileEditResult",
+      "codeTypecheckResult",
+    ].includes(task.resolver)) {
+      return { ok: true, reason: "" };
+    }
   // Discover the owning vessel's resolve endpoint, fall back to known vessels.
   const endpoints: string[] = [];
   try {

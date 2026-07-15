@@ -1915,6 +1915,7 @@ async function resolveFeatureComposeInner(pointer: FeatureComposePointer): Promi
         skip_push: pointer.skip_push ?? false,
       } as never);
       cutovers.push({ vessel, result: cut.body });
+        try { await callTool(toolsEndpoint, "shell", { command: `rm -rf ${JSON.stringify(mitosisRoot)}`, cwd: REPO_ROOT }); } catch { /* best-effort staging teardown */ }
     }
   }
 

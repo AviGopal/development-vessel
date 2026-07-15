@@ -1853,6 +1853,61 @@ async function resolveFeatureComposeInner(pointer: FeatureComposePointer): Promi
 
       if (!semantic_gate.addresses || semantic_gate.on_live_path === false) {
         verdict = "UNFAVORABLE";
+        // Per-gap failure lesson write-back on every UNFAVORABLE semantic-gate rejection.
+        // The pointer may carry no gap id in the route-edit compose flow, so we also
+        // query substrateGap by spec text and update whichever record matches, if any.
+        try {
+          const pointerAsUnknown = pointer as unknown as Record<string, unknown>;
+          const specText: string =
+            typeof pointerAsUnknown["spec"] === "string"
+              ? (pointerAsUnknown["spec"] as string)
+              : "";
+          if (specText) {
+            const existing = await resolveSubstrateGap({ type: "substrateGap", limit: 100 } as never);
+            const existingBody = existing.body as unknown as Record<string, unknown>;
+            const gaps: Array<Record<string, unknown>> =
+              Array.isArray(existingBody["gaps"])
+                ? (existingBody["gaps"] as Array<Record<string, unknown>>)
+                : [];
+            const matched = gaps.find(
+              (g) =>
+                typeof g["spec"] === "string" &&
+                (g["spec"] as string).trim() === specText.trim(),
+            );
+            if (matched && typeof matched["id"] === "string") {
+              const existingLessons: Array<Record<string, unknown>> = Array.isArray(matched["failure_lessons"])
+                ? (matched["failure_lessons"] as Array<Record<string, unknown>>)
+                : [];
+              const gateAsUnknown = semantic_gate as unknown as Record<string, unknown>;
+              const newLesson = {
+                at: new Date().toISOString(),
+                class: "semantic_reject",
+                reason: typeof gateAsUnknown["reason"] === "string"
+                  ? (gateAsUnknown["reason"] as string).slice(0, 200)
+                  : JSON.stringify(semantic_gate).slice(0, 200),
+                raw_excerpt: typeof gateAsUnknown["reason"] === "string"
+                  ? (gateAsUnknown["reason"] as string).slice(0, 1500)
+                  : JSON.stringify(semantic_gate).slice(0, 1500),
+              };
+              const updatedLessons = [...existingLessons, newLesson].slice(-8);
+              const existingMeta = (typeof matched["classification_metadata"] === "object" && matched["classification_metadata"] !== null
+                ? matched["classification_metadata"]
+                : {}) as Record<string, unknown>;
+              await resolveSubstrateGapWrite({
+                type: "substrateGap_write",
+                gap: {
+                  ...(matched as unknown as Record<string, unknown>),
+                  classification_metadata: {
+                    ...existingMeta,
+                    failure_lessons: updatedLessons,
+                    semantic_gate_reason: newLesson.reason,
+                    ...(semantic_gate.suspected_real_location ? { suspected_real_location: semantic_gate.suspected_real_location } : {}),
+                  },
+                },
+              } as never);
+            }
+          }
+        } catch { /* write-back failure is non-fatal */ }
         // Write semantic_gate_reason + suspected_real_location back onto the gap
         // unconditionally (not only when suspected_real_location is present) so
         // priorAttemptFeedbackBlock can inject the rejection reason into the next

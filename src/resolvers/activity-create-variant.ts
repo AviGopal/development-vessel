@@ -834,9 +834,11 @@ export async function resolveActivityCreateVariant(pointer: ActivityCreateVarian
       "patch_proposal",
       "fileContent",
       "fs_read_result",
-      "fs_write_result",
+      "fileWriteResult",
+      "fileEditResult",
+      "codeTypecheckResult",
       "http_fetch_response",
-      "json_path_extract_result",
+      "taskOutputExtraction",
       "llm_completion_output",
       "noop_result",
       // Verification results from analysis-vessel tasks

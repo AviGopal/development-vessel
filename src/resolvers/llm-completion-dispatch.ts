@@ -245,6 +245,9 @@ export async function resolveLlmCompletionDispatch(
 
   const rawText = (rawBody.content?.[0] as { text: string } | undefined)?.text;
   const toolCalls = (rawBody.content?.[0] as { tool_calls: any[] } | undefined)?.tool_calls;
+  if (!rawText && !toolCalls) {
+    throw new Error(`LLM completion did not return text or tool_calls: ${JSON.stringify(rawBody)}`);
+  }
   if (toolCalls && toolCalls.length > 0) {
     return { shape: "llmToolCalls" as const, body: { tool_calls: toolCalls } };
   }
@@ -260,7 +263,7 @@ export async function resolveLlmCompletionDispatch(
   return {
     shape: "llmTextCompletion" as const,
     body: {
-      text: rawText,
+      text: rawText!,
       model: result.model ?? model,
       requested_model: model,
       ...(result.fallback_from ? { fallback_from: result.fallback_from } : {  }),

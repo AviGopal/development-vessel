@@ -43,6 +43,7 @@ const REPO_ROOT = process.env.MITOSIS_REPO_ROOT ?? RUNTIME_ROOT;
 const PER_CALL_TIMEOUT_MS = 200_000;
 
 export interface FeatureComposePointer {
+  family_key?: string;
   type: "feature_compose";
   /** Free-text feature specification (what to build + concrete file/behaviour detail). */
   spec: string;
@@ -1912,7 +1913,7 @@ async function resolveFeatureComposeInner(pointer: FeatureComposePointer, caller
         // unconditionally (not only when suspected_real_location is present) so
         // priorAttemptFeedbackBlock can inject the rejection reason into the next
         // re-draft even when the gate did not name a specific mis-localization site.
-        const gapId = pointer.gap?.id ?? (pointer.spec.match(/^route-edit-([0-9a-f]+)/)?.[0]);
+        const gapId = pointer.gap?.id ?? (pointer.spec.match(/^route-edit-([0-9a-f]+)/)?.[0] ?? pointer.family_key);
         if (gapId && semantic_gate.reason) {
           try {
             const read = await resolveSubstrateGap({ type: "substrateGap", id: gapId, limit: 1 } as never);

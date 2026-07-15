@@ -241,14 +241,23 @@ export async function resolveLlmCompletionDispatch(
     };
   }
 
-  const text = result.content ?? result.data ?? "";
-
+  const rawText = result.content ?? result.data ?? "";
   let parsedFields: Record<string, unknown> = {};
+  let text = rawText;
   try {
-    const stripped = text.replace(/^```(?:json)?\n?/i, '').replace(/```\s*$/i, '').trim();
-    const p = JSON.parse(stripped);
-    if (p && typeof p === 'object' && !Array.isArray(p)) parsedFields = p as Record<string, unknown>;
-  } catch { /* not JSON: leave empty */ }
+    let candidate = rawText.trim();
+    const fenceMatch = candidate.match(/```(?:json)?\s*([\s\S]*?)```/i);
+    if (fenceMatch) candidate = fenceMatch[1].trim();
+    let p: unknown;
+    try {
+      p = JSON.parse(candidate);
+    } catch (e1) {
+      const a = candidate.indexOf("{");
+      const b = candidate.lastIndexOf("}");
+      if (a >= 0 && b > a) { candidate = candidate.slice(a, b + 1); p = JSON.parse(candidate); }
+    }
+    if (p && typeof p === "object" && !Array.isArray(p)) { parsedFields = p as Record<string, unknown>; text = candidate; }
+  } catch (e2) { /* not JSON: keep rawText, empty parsedFields */ }
 
   return {
     shape: "llm_completion_result",

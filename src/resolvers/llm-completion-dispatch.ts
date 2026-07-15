@@ -242,9 +242,18 @@ export async function resolveLlmCompletionDispatch(
   }
 
   const text = result.content ?? result.data ?? "";
+
+  let parsedFields: Record<string, unknown> = {};
+  try {
+    const stripped = text.replace(/^```(?:json)?\n?/i, '').replace(/```\s*$/i, '').trim();
+    const p = JSON.parse(stripped);
+    if (p && typeof p === 'object' && !Array.isArray(p)) parsedFields = p as Record<string, unknown>;
+  } catch { /* not JSON: leave empty */ }
+
   return {
     shape: "llm_completion_result",
     body: {
+      ...parsedFields,
       text,
       model: result.model ?? model,
       requested_model: model,

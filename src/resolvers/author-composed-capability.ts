@@ -622,14 +622,7 @@ export async function resolveAuthorComposedCapability(
     output_shapes: plan.outputShapes,
     outputShapes: plan.outputShapes,
     tags: ["composed_capability", "improvise", "horizon:walk"],
-    variables: Array.from(new Set(plan.tasks.flatMap(t =>
-      Object.entries(t.config)
-        .filter(([_, v]) => typeof v === 'string')
-        .flatMap(([_, v]) => {
-          const matches = (v as string).matchAll(/{{(?!(?:impulse:))([^}]+)}}/g);
-          return Array.from(matches, m => m[1]!.trim());
-        })
-    ))).map(name => ({ name })), /* collect non-impulse variables */
+    variables: [...new Set(plan.tasks.flatMap((t) => Object.values(t.config ?? {}).filter((v): v is string => typeof v === 'string').flatMap((v) => Array.from(v.matchAll(/{{\s*([^}:][^}]*?)\s*}}/g)).map((m) => m[1]!.trim())).filter((n) => !n.startsWith('impulse:'))))].map((name) => ({ name })), /* collect non-impulse variables */
     tasks: plan.tasks.map((t) => ({
       id: t.id,
       description: t.description,

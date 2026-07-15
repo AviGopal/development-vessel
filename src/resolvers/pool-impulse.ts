@@ -54,12 +54,15 @@ export function resolvePoolImpulse(pointer: {
     filtered = filtered.filter((imp) => imp.shape === pointer.shape);
   }
   const limit = pointer.limit;
-  if (limit !== undefined && limit > 0) {
-    filtered = filtered.slice(0, limit);
-  }
+  const sorted = filtered.slice().sort((a, b) => {
+    const ta = a.updated_at ?? a.injected_at ?? '';
+    const tb = b.updated_at ?? b.injected_at ?? '';
+    return tb < ta ? -1 : tb > ta ? 1 : 0;
+  });
+  const limited = limit !== undefined ? sorted.slice(0, limit) : sorted;
   return {
     shape: 'poolImpulse',
-    body: { impulses: filtered, count: filtered.length },
+    body: { impulses: limited, count: limited.length },
   };
 }
 

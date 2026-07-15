@@ -241,33 +241,31 @@ export async function resolveLlmCompletionDispatch(
     };
   }
 
-  const rawText = result.content ?? result.data ?? "";
-  let parsedFields: Record<string, unknown> = {};
-  let text = rawText;
-  try {
-    let candidate = rawText.trim();
-    const fenceMatch = candidate.match(/```(?:json)?\s*([\s\S]*?)```/i);
-    if (fenceMatch) candidate = fenceMatch[1].trim();
-    let p: unknown;
-    try {
-      p = JSON.parse(candidate);
-    } catch (e1) {
-      const a = candidate.indexOf("{");
-      const b = candidate.lastIndexOf("}");
-      if (a >= 0 && b > a) { candidate = candidate.slice(a, b + 1); p = JSON.parse(candidate); }
-    }
-    if (p && typeof p === "object" && !Array.isArray(p)) { parsedFields = p as Record<string, unknown>; text = candidate; }
-  } catch (e2) { /* not JSON: keep rawText, empty parsedFields */ }
+  const rawBody = result;
 
+  const rawText = (rawBody.content?.[0] as { text: string } | undefined)?.text;
+  const toolCalls = (rawBody.content?.[0] as { tool_calls: any[] } | undefined)?.tool_calls;
+  if (toolCalls && toolCalls.length > 0) {
+    return { shape: "llmToolCalls" as const, body: { tool_calls: toolCalls } };
+  }
+
+  if (typeof rawText !== "string") {
+    throw new Error(`LLM completion did not return text: ${JSON.stringify(rawBody)}`);
+  }
+  // If no tool_calls, return the raw text completion directly. This covers
+  // cases where the LLM responds with only text, or when force_tool_use was
+  // not active resulting in no tool_calls. Note: in this latter case, a good
+  // prompt will synthesize a tool call into the text field (e.g. "call
+  // make_hike_reservation(trail='Bright Angel')").
   return {
-    shape: "llm_completion_result",
+    shape: "llmTextCompletion" as const,
     body: {
-      ...parsedFields,
-      text,
+      text: rawText,
       model: result.model ?? model,
       requested_model: model,
-      ...(result.fallback_from ? { fallback_from: result.fallback_from } : {}),
+      ...(result.fallback_from ? { fallback_from: result.fallback_from } : {  }),
       usage: result.usage,
     },
   };
+
 }

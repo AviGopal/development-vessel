@@ -1217,9 +1217,9 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
     return { shape: "featureComposeReport", body: { ok: false, verdict: "BUSY", stage: "guard", error: "compose already in flight for " + busy + " - retry after it completes" } };
   }
   for (const v of guards) composeInFlight.add(v);
-  try { return await resolveFeatureComposeInner(pointer); } finally { for (const v of guards) composeInFlight.delete(v); }
+  try { return await resolveFeatureComposeInner(pointer, pointer.gap?.id); } finally { for (const v of guards) composeInFlight.delete(v); }
 }
-async function resolveFeatureComposeInner(pointer: FeatureComposePointer): Promise<ResolverResult> {
+async function resolveFeatureComposeInner(pointer: FeatureComposePointer, callerGapId?: string): Promise<ResolverResult> {
   const model = pointer.model ?? process.env.SELF_DEV_LLM_MODEL ?? "anthropic/claude-sonnet-4-6";
   const maxOps = pointer.max_ops ?? 24;
   const dryRun = pointer.dry_run ?? false;

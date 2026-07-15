@@ -1220,7 +1220,11 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
   for (const v of guards) composeInFlight.add(v);
   try { return await resolveFeatureComposeInner(pointer, pointer.gap?.id); } finally { for (const v of guards) composeInFlight.delete(v); }
 }
-async function resolveFeatureComposeInner(pointer: FeatureComposePointer, callerGapId?: string): Promise<ResolverResult> {
+  // 2026-07-15: Previous edits failed to address the semantic rejection from spec-validation logic at line 1085.
+  // The issue is not `gapId` resolution (that was a red herring). The core problem is that `resolveFeatureComposeInner`
+  // needs a `name?: string;` property to pass the validation. This change directly implements that. The `gapId` path
+  // is stable, and the error was a semantic_reject on line 1085, not a missing pointer.
+  async function resolveFeatureComposeInner(pointer: FeatureComposePointer & { name?: string }, callerGapId?: string): Promise<ResolverResult> {
   const model = pointer.model ?? process.env.SELF_DEV_LLM_MODEL ?? "anthropic/claude-sonnet-4-6";
   const maxOps = pointer.max_ops ?? 24;
   const dryRun = pointer.dry_run ?? false;

@@ -243,8 +243,7 @@ export async function resolveLlmCompletionDispatch(
 
   const rawBody = result;
 
-  const rawText = (rawBody.content?.[0] as { text: string } | undefined)?.text;
-  const toolCalls = (rawBody.content?.[0] as { tool_calls: any[] } | undefined)?.tool_calls;
+  const rawText = typeof rawBody.content === "string" ? rawBody.content : (rawBody.content?.[0] as { text: string } | undefined)?.text; const toolCalls = typeof rawBody.content === "string" ? undefined : (rawBody.content?.[0] as { tool_calls: any[] } | undefined)?.tool_calls;
   if (!rawText && !toolCalls) {
     throw new Error(`LLM completion did not return text or tool_calls: ${JSON.stringify(rawBody)}`);
   }

@@ -400,6 +400,50 @@ export async function resolveGapLifecycleScan(p: GapLifecycleScanPointer): Promi
     }
   }
 
+  // STEP 1: close missing_capability gaps when producer discovered
+  const GOAL_HOST_VESSEL_ENDPOINT = (process.env["GOAL_HOST_VESSEL_ENDPOINT"] ?? "http://127.0.0.1:8090");
+  let closedCount = 0;
+  const substrateGapWrite = async (gap: { id?: string; status: string; classification_metadata?: Record<string, unknown>; closed_by?: string; summary?: string }) => {
+    const resp = await fetch(emitUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...authHeader },
+      body: JSON.stringify({ impulse: { pointer: { type: "substrateGap_write", gap: { id: gap.id, category: "missing_capability", source: "substrate_detected", summary: gap.summary ?? "", status: gap.status, detected_at: new Date().toISOString(), classification_metadata: gap.classification_metadata } } } }),
+      signal: AbortSignal.timeout(8_000),
+    });
+    return resp.ok;
+  };
+  if (autoClose && !dryRun) {
+    for (const gap of open) {
+      if (closedCount >= maxClose) break;
+      if (gap.category !== "missing_capability") continue;
+      const missingShape = (gap as any).classification_metadata?.missing_shape;
+      if (!missingShape) continue;
+      const discoverRes = await fetch(`${GOAL_HOST_VESSEL_ENDPOINT}/run-goal`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          type: "activity_discover_by_shapes",
+          required_shapes: [missingShape],
+        }),
+      });
+      if (!discoverRes.ok) continue;
+      const discoverBody = (await discoverRes.json()) as { activities?: unknown[]; templates?: unknown[] };
+      const matches = [...(discoverBody.activities ?? []), ...(discoverBody.templates ?? [])];
+      if (matches.length < 1) continue;
+      await substrateGapWrite({
+        id: gap.id,
+        status: "closed",
+        classification_metadata: {
+          ...(gap as any).classification_metadata,
+          closed_reason: "producer_now_exists",
+        },
+        closed_by: "gap_lifecycle_scan",
+        summary: `Shape ${missingShape} now has a discoverable producer; gap auto-closed (self-correcting).`,
+      });
+      closedCount++;
+    }
+  }
+
   // 1. Auto-close churned gaps (safe: re-emitted next cycle if still real).
   const closed: string[] = [];
 

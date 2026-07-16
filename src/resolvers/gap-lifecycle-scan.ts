@@ -418,17 +418,15 @@ export async function resolveGapLifecycleScan(p: GapLifecycleScanPointer): Promi
       if (gap.category !== "missing_capability") continue;
       const missingShape = (gap as any).classification_metadata?.missing_shape;
       if (!missingShape) continue;
-      const discoverRes = await fetch(`${GOAL_HOST_VESSEL_ENDPOINT}/run-goal`, {
+      const discoverResp = await fetch(emitUrl, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          type: "activity_discover_by_shapes",
-          required_shapes: [missingShape],
-        }),
+        headers: { "Content-Type": "application/json", ...authHeader },
+        body: JSON.stringify({ impulse: { pointer: { type: "activity_discover_by_shapes", required_shapes: [missingShape] } } }),
+        signal: AbortSignal.timeout(8000),
       });
-      if (!discoverRes.ok) continue;
-      const discoverBody = (await discoverRes.json()) as { activities?: unknown[]; templates?: unknown[] };
-      const matches = [...(discoverBody.activities ?? []), ...(discoverBody.templates ?? [])];
+      const dj = await discoverResp.json();
+      const db = dj.body ?? dj;
+      const matches = [...(db.activities ?? []), ...(db.templates ?? [])];
       if (matches.length < 1) continue;
       await substrateGapWrite({
         id: gap.id,

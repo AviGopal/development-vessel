@@ -96,7 +96,7 @@ async function llmCall(endpoint: string, prompt: string, model: string): Promise
   const res = await fetch(endpoint, {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: `ApiKey ${METABOB_API_KEY}` },
-    body: JSON.stringify({ type: "llm_completion", prompt, model, max_tokens: 4000 }),
+    body: JSON.stringify({ type: "llm_completion", prompt, model, max_tokens: 4000, task_type: "patch_with_tools" }),
     signal: AbortSignal.timeout(PER_CALL_TIMEOUT_MS),
   });
   if (!res.ok) throw new Error(`llm fetch ${res.status}`);

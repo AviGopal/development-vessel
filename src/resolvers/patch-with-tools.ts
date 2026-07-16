@@ -283,7 +283,7 @@ export async function resolvePatchWithTools(pointer: PatchWithToolsPointer): Pro
   const workspaceRoot = pointer.workspace_root ?? process.env.WORKSPACE_ROOT ?? "/workspace";
   const vesselsRoot = pointer.vessels_root ?? "/vessels";
   const maxIters = pointer.max_iterations ?? MAX_ITERATIONS;
-  let model = pointer.model ?? process.env.SELF_DEV_LLM_MODEL ?? "anthropic/claude-opus-4-7";
+  const model = pointer.model ?? "auto";
   const fallbackModels = ["zai-org/GLM-5.2-TEE", "moonshotai/Kimi-K2.6-TEE", "deepseek-ai/DeepSeek-V3.2-TEE"].filter((m) => m !== model);
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
 
@@ -443,9 +443,11 @@ export async function resolvePatchWithTools(pointer: PatchWithToolsPointer): Pro
       `Emit your next action as a JSON object only.`;
 
     let raw: string;
+    let curLlmEndpoint = llmEndpoint;
+    let curModel = model;
     for (;;) {
       try {
-        raw = await llmCall(llmEndpoint, prompt, model);
+        raw = await llmCall(curLlmEndpoint, prompt, curModel);
         break;
       } catch (err) {
         const msg = (err as Error).message;
@@ -454,8 +456,10 @@ export async function resolvePatchWithTools(pointer: PatchWithToolsPointer): Pro
         if (!next) {
           return structuredError(`llm failed turn ${turn}: ${msg}`, { history, before_sha: beforeSha });
         }
-        console.error(`[patch-with-tools] model ${model} credit-dead; falling back to ${next}`);
-        model = next;
+        console.error(`[patch-with-tools] model ${curModel} credit-dead; falling back to ${next}`);
+        const fallbackEndpoints: string[] = fallbackModels.map(m => curLlmEndpoint);
+        curLlmEndpoint = fallbackEndpoints.shift() ?? curLlmEndpoint;
+        curModel = next;
       }
     }
     const action = parseFirstJsonObject(raw);

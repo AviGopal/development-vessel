@@ -382,7 +382,8 @@ async function validateDataTask(task: PlannedTask): Promise<{ ok: boolean; reaso
       }
     }
   } catch { /* discovery flaky → fall back */ }
-  for (const fb of ["http://127.0.0.1:8090/v2/impulses/resolve", "http://127.0.0.1:8080/v2/impulses/resolve"]) {
+  const fallbackEndpoints = ["http://127.0.0.1:8090/v2/impulses/resolve", "http://127.0.0.1:8080/v2/impulses/resolve", "http://127.0.0.1:8210/v2/impulses/resolve", "http://127.0.0.1:8100/v2/impulses/resolve", "http://127.0.0.1:8260/v2/impulses/resolve", "http://127.0.0.1:8270/v2/impulses/resolve"];
+  for (const fb of fallbackEndpoints) {
     if (!endpoints.includes(fb)) endpoints.push(fb);
   }
   // Build a concrete test pointer from the planned config, dropping {{...}} fields

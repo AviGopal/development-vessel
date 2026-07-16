@@ -543,7 +543,7 @@ export async function resolveAuthorComposedCapability(
       buildPlanPrompt(pointer, deliverable, catalogueEntries) +
       (priorError ? `\n\nPREVIOUS PLAN WAS REJECTED: ${priorError}\nFix it — use only real resolver ids and keep the chain short.` : "");
     const llm = await resolveLlmCompletionDispatch({ type: "llm_completion_dispatch", prompt, max_tokens: 1800 });
-    if (llm.shape !== "llm_completion_result") {
+    if (llm.shape !== "llm_completion_result" && llm.shape !== "llmTextCompletion") {
       const b = llm.body as { detail?: string } | undefined;
       lastError = `LLM planning failed: ${b?.detail ?? "no completion"}`;
       priorError = lastError;

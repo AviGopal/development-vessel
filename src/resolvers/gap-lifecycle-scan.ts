@@ -54,6 +54,7 @@ const LOW_VALUE_CATEGORIES = new Set([
   'auto_draft_fallback_recommend',
   'auto_draft_triggered',
   'wasted_cycle',
+  'ui_spacing_drift',
 ]);
 
 interface GapRecord {

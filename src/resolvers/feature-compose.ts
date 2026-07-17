@@ -1797,7 +1797,7 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
           });
           if (String((entQ.body as { stdout?: unknown })?.stdout ?? "").trim()) isEntrypoint = true;
         }
-        facts.push({ symbol, isNewFunction, callerCount, isEntrypoint, reachable: callerCount > 0 || isEntrypoint });
+        facts.push({ symbol, isNewFunction, callerCount, isEntrypoint, reachable: callerCount > 0 || (isEntrypoint && !isNewFunction) });
         void codeHit;
       }
 

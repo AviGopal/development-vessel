@@ -1785,7 +1785,7 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
           // floor is PRESERVED: a symbol defined and never referenced anywhere still
           // yields 0 references (the definition line is excluded) → unreachable.
           const callQ = await callTool(toolsEndpoint, "shell", {
-            command: `grep -rEn --exclude-dir=node_modules --exclude-dir=.git --exclude-dir=dist "\\b${symbol}\\b" ${JSON.stringify(vAbs)} 2>/dev/null | grep -vE "(function|const|let|var)[[:space:]]+${symbol}\\b" | grep -vE "^[^:]+:[0-9]+:[[:space:]]*${symbol}[[:space:]]*\\([^)]*\\)[[:space:]]*(:[^={]+)?\\{" || true`,
+            command: `grep -rEn --exclude-dir=node_modules --exclude-dir=.git --exclude-dir=dist "\\b${symbol}\\b" ${JSON.stringify(vAbs)} 2>/dev/null | grep -vE "(function|const|let|var)[[:space:]]+${symbol}\\b" | grep -vE "^[^:]+:[0-9]+:[[:space:]]*${symbol}[[:space:]]*\\([^)]*\\)[[:space:]]*(:[^={]+)?\\{" | grep -vE ":[0-9]+:[[:space:]]*(import|export)[[:space:]{]" || true`,
             cwd: REPO_ROOT,
           });
           const callOut = String((callQ.body as { stdout?: unknown })?.stdout ?? "").trim();

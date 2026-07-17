@@ -350,20 +350,38 @@ function normalizeText(text: string): string {
  * fingerprinted by name + normalized content of its declaration — a move that
  * captures a DIFFERENT same-named binding changes the content hash and fails.
  */
+const TYPE_MEMBER_KINDS = new Set<SyntaxKind>([
+  SyntaxKind.PropertySignature,
+  SyntaxKind.PropertyAssignment,
+  SyntaxKind.ShorthandPropertyAssignment,
+  SyntaxKind.MethodSignature,
+  SyntaxKind.MethodDeclaration,
+  SyntaxKind.PropertyDeclaration,
+  SyntaxKind.GetAccessor,
+  SyntaxKind.SetAccessor,
+  SyntaxKind.EnumMember,
+]);
+
 function bindingFingerprints(unit: Set<SourceFile>, decls: Map<string, NormalizedDecl[]>): Map<string, string[]> {
   const out = new Map<string, string[]>();
   for (const [key, list] of decls) {
     const prints: string[] = [];
     for (const { node } of list) {
       for (const id of node.getDescendantsOfKind(SyntaxKind.Identifier)) {
+        // JSDoc identifiers (@param names etc.) are comment trivia — the
+        // normalization strips comments, so fingerprints must too, or a doc
+        // comment moving (or not) with its declaration breaks equivalence.
+        if (id.getFirstAncestorByKind(SyntaxKind.JSDoc)) continue;
         const sym = id.getSymbol();
         if (!sym) continue;
         const resolved = sym.getAliasedSymbol() ?? sym;
-        const ds = resolved.getDeclarations();
-        if (ds.length === 0) {
-          prints.push(`unknown:${resolved.getName()}`);
-          continue;
-        }
+        // Only LEXICAL bindings can be captured/rebound by moving code between
+        // modules — type members (interface/object properties, methods, enum
+        // members) resolve through the TYPE, which typeParity + the declaration
+        // multiset already pin, and their resolution multiplicity differs
+        // benignly across worlds (observed on the first real-fossil dry-run).
+        const ds = resolved.getDeclarations().filter((d) => !TYPE_MEMBER_KINDS.has(d.getKind()));
+        if (ds.length === 0) continue;
         for (const d of ds) {
           const declSf = d.getSourceFile();
           if (unit.has(declSf)) {

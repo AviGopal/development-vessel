@@ -32,6 +32,7 @@ export const config = {
     // One entry per R2.* resolver in specs/development-vessel/spec.md.
     shapes: [
     'template_success_ranking_24h',
+    'fossilRankReport',
     'light-dispatch-vessel_status',
     'vessel_health_report',
     'concept',

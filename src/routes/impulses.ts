@@ -28,6 +28,7 @@ import { resolveLearnedTopologySnapshot } from "../resolvers/learned-topology-sn
 import { resolveReachableUnlearnedReport } from "../resolvers/reachable-unlearned-report.js";
 import { resolveUnknownShapeReport } from "../resolvers/unknown-shape-report.js";
 import { resolveTemplateSuccessRanking24h } from "../resolvers/template-success-ranking-24h.js";
+import { resolveFossilRankReport } from "../resolvers/fossil-rank-report.js";
 
 import { resolveObsidianVesselCount } from "../resolvers/obsidian-vessel-count.js";
 import { resolveFailureCountReport } from "../resolvers/failure-count-report.js";
@@ -832,7 +833,8 @@ async function dispatchInner(pointer: AnyPointer): Promise<ResolverResult> {
       return resolveLightDispatchVesselStatus(pointer);
     }
     case "template_success_ranking_24h":
-      return resolveTemplateSuccessRanking24h(pointer);
+    case "fossilRankReport":
+      return await resolveFossilRankReport(pointer as any);
     case "obsidian:ui_screenshot":
       return resolveUiScreenshot(p as Parameters<typeof resolveUiScreenshot>[0]);
     default:

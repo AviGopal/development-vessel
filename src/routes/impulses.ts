@@ -29,6 +29,7 @@ import { resolveReachableUnlearnedReport } from "../resolvers/reachable-unlearne
 import { resolveUnknownShapeReport } from "../resolvers/unknown-shape-report.js";
 import { resolveTemplateSuccessRanking24h } from "../resolvers/template-success-ranking-24h.js";
 import { resolveFossilRankReport } from "../resolvers/fossil-rank-report.js";
+// ensured import present for fossil_rank_report case
 
 import { resolveObsidianVesselCount } from "../resolvers/obsidian-vessel-count.js";
 import { resolveFailureCountReport } from "../resolvers/failure-count-report.js";
@@ -834,6 +835,8 @@ async function dispatchInner(pointer: AnyPointer): Promise<ResolverResult> {
     }
     case "template_success_ranking_24h":
     case "fossilRankReport":
+      return await resolveFossilRankReport(pointer as any);
+    case "fossil_rank_report":
       return await resolveFossilRankReport(pointer as any);
     case "obsidian:ui_screenshot":
       return resolveUiScreenshot(p as Parameters<typeof resolveUiScreenshot>[0]);

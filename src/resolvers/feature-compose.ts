@@ -2013,6 +2013,19 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
       for (const rel of changedRel) {
         const dir = `${mitosisRoot}/${rel.split("/").slice(0, -1).join("/")}`;
         await callTool(toolsEndpoint, "shell", { command: `mkdir -p ${JSON.stringify(dir)} && cp ${JSON.stringify(`${vBase}/${rel}`)} ${JSON.stringify(`${mitosisRoot}/${rel}`)}`, cwd: REPO_ROOT });
+        // LAND-TIME runtime sync (isolation follow-up): the cutover freshness
+        // gate compares staged_base_sha against the LIVE file at
+        // ${RUNTIME_ROOT}/<vessel>/<rel>. Pre-isolation, the compose's apply
+        // step wrote /vessels directly, so live==staged held implicitly; with
+        // per-compose worktrees nothing touches the runtime until NOW — sync
+        // the verified files here so freshness sees them (live_source_
+        // unreadable REFUSE observed on the first three isolated landings).
+        // Concurrent landings on the SAME file surface as an honest sha
+        // mismatch at the gate instead of silent last-writer-wins.
+        if (ws?.isolated(vessel)) {
+          const liveDir = `${RUNTIME_ROOT}/${vessel}/${rel.split("/").slice(0, -1).join("/")}`;
+          await callTool(toolsEndpoint, "shell", { command: `mkdir -p ${JSON.stringify(liveDir)} && cp ${JSON.stringify(`${vBase}/${rel}`)} ${JSON.stringify(`${RUNTIME_ROOT}/${vessel}/${rel}`)}`, cwd: REPO_ROOT });
+        }
       }
       const shaRes = await callTool(toolsEndpoint, "shell", { command: `sha256sum ${JSON.stringify(`${vBase}/${changedRel[0]}`)} | cut -c1-12`, cwd: REPO_ROOT });
       const staged_base_sha = String((shaRes.body as { stdout?: unknown })?.stdout ?? "").trim().split(/\s+/)[0];

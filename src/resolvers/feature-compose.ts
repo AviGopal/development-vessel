@@ -1686,6 +1686,25 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
               errorSiteWindow = `\n\nCURRENT CONTENT of ${relPath} lines ${lo + 1}-${hi} (the first error is at line ${errLine}; copy old_string VERBATIM from these real bytes):\n${ls.slice(lo, hi).join("\n")}`;
             }
           }
+          if (!errorSiteWindow && /SD_EXIT=[1-9]/.test(errText)) {
+            // Shape-dispatch-only failure: no file(line,col) in the checker output, so
+            // ground on the real bytes of the dispatch switch and the advertised shapes
+            // instead — old_string anchors must come from CURRENT file content.
+            const vRoot2 = vesselRoot(fv.vessel);
+            for (const rel2 of ["src/routes/impulses.ts", "src/config.ts"]) {
+              const g2 = await callTool(toolsEndpoint, "fs_read", { path: `${vRoot2}/${rel2}` });
+              const gc2 = (g2.body as { content?: unknown })?.content;
+              if (g2.ok && typeof gc2 === "string") {
+                const ls2 = gc2.split("\n");
+                const anchorIdx = rel2.endsWith("impulses.ts")
+                  ? ls2.findIndex((l) => /case\s+"/.test(l))
+                  : ls2.findIndex((l) => /shapes/i.test(l));
+                const lo2 = Math.max(0, (anchorIdx >= 0 ? anchorIdx : 0) - 5);
+                const hi2 = Math.min(ls2.length, lo2 + 60);
+                errorSiteWindow += `\n\nCURRENT CONTENT of ${rel2} lines ${lo2 + 1}-${hi2} (shape-dispatch agreement failed; copy old_string VERBATIM from these real bytes):\n${ls2.slice(lo2, hi2).join("\n")}`;
+              }
+            }
+          }
         } catch { /* grounding is best-effort */ }
         const fix = parseJsonObject(await llmCall(
           llmEndpoint,

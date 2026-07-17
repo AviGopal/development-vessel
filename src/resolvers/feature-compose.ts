@@ -21,6 +21,7 @@
  * — this resolver stages + reports, matching the mitosis-evaluate/cutover split.
  */
 import { METABOB_API_KEY } from "../config.js";
+import { acquireComposeWorkspace, type ComposeWorkspace } from "./compose-workspace";
 import type { ResolverResult } from "./types.js";
 import { resolveVesselMitosisCutover } from "./vessel-mitosis-cutover.js";
 import { resolveSubstrateGap, resolveSubstrateGapWrite } from "./substrate-gap.js";
@@ -1212,22 +1213,42 @@ const DEV_VESSEL_ENDPOINT = process.env["DEV_VESSEL_ENDPOINT"] ?? "http://127.0.
 
 export async function resolveFeatureCompose(pointer: FeatureComposePointer): Promise<ResolverResult> {
   const guards = pointer.verify_vessels?.length ? pointer.verify_vessels : ["__global__"];
-  const busy = guards.find((v) => composeInFlight.has(v));
+  // Per-compose isolation (gap edit-intent-compose-shared-workspace-no-isolation):
+  // each compose gets its own git worktree per vessel, so concurrent composes no
+  // longer stomp a shared tree — and no longer need to be REFUSED. The busy-set
+  // survives only as the fallback for vessels isolation could not cover (no push
+  // clone / net-new / git failure); landing races are handled downstream by the
+  // cutover's global lease + freshness gates, on evidence instead of up front.
+  const composeId = `fc-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  const ws = await acquireComposeWorkspace(pointer.verify_vessels ?? [], composeId);
+  const unisolated = guards.filter((v) => v === "__global__" || !ws.isolated(v));
+  const busy = unisolated.find((v) => composeInFlight.has(v));
   if (busy) {
+    await ws.release();
     try { const { appendFile } = await import("node:fs/promises"); await appendFile("/workspace/proposals/busy-refusals.jsonl", JSON.stringify({ at: new Date().toISOString(), vessel: busy }) + "\n"); } catch { }
     return { shape: "featureComposeReport", body: { ok: false, verdict: "BUSY", stage: "guard", error: "compose already in flight for " + busy + " - retry after it completes" } };
   }
-  for (const v of guards) composeInFlight.add(v);
-  try { return await resolveFeatureComposeInner(pointer, pointer.gap?.id); } finally { for (const v of guards) composeInFlight.delete(v); }
+  for (const v of unisolated) composeInFlight.add(v);
+  try { return await resolveFeatureComposeInner(pointer, pointer.gap?.id, ws); } finally { for (const v of unisolated) composeInFlight.delete(v); await ws.release(); }
 }
   // 2026-07-15: Previous edits failed to address the semantic rejection from spec-validation logic at line 1085.
   // The issue is not `gapId` resolution (that was a red herring). The core problem is that `resolveFeatureComposeInner`
   // needs a `name?: string;` property to pass the validation. This change directly implements that. The `gapId` path
   // is stable, and the error was a semantic_reject on line 1085, not a missing pointer.
-  async function resolveFeatureComposeInner(pointer: FeatureComposePointer & { name?: string }, callerGapId?: string): Promise<ResolverResult> {
+  async function resolveFeatureComposeInner(pointer: FeatureComposePointer & { name?: string }, callerGapId?: string, ws?: ComposeWorkspace): Promise<ResolverResult> {
   const model = pointer.model ?? "auto";
   const maxOps = pointer.max_ops ?? 24;
   const dryRun = pointer.dry_run ?? false;
+  // Per-compose isolation path helpers: every vessel-scoped path routes into
+  // this compose's worktree when isolated, else the shared runtime root
+  // (legacy behavior, still busy-set-serialized by the caller).
+  const vesselRoot = (v: string): string => ws?.rootFor(v) ?? `${REPO_ROOT}/${v.replace(/^repos\//, "")}`;
+  const opAbs = (p: string): string => {
+    const rel = p.replace(/^repos\//, "");
+    const vessel = rel.split("/")[0] ?? "";
+    const root = ws?.rootFor(vessel);
+    return root ? `${root}/${rel.slice(vessel.length + 1)}` : `${REPO_ROOT}/${rel}`;
+  };
 
   const llmEndpoint = await discover("llm_completion") ?? await discover("llmCompletion");
   const toolsEndpoint = await discover("shellResult");
@@ -1401,7 +1422,7 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
   // patch against a vessel that ALREADY fails tsc is thus not wrongly rolled back.
   const baselineTsErrors = new Map<string, Set<string>>();
   for (const v of touched) {
-    const vAbs = `${REPO_ROOT}/${v.replace(/^repos\//, "")}`;
+    const vAbs = vesselRoot(v);
     const b = await callTool(toolsEndpoint, "shell", { command: `cd ${JSON.stringify(vAbs)} && bun run typecheck 2>&1`, cwd: REPO_ROOT });
     baselineTsErrors.set(v, tscErrorSet(String((b.body as { stdout?: unknown })?.stdout ?? "")));
   }
@@ -1419,7 +1440,7 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
   const applied: Array<{ path: string; kind: string; ok: boolean; repaired?: boolean; detail?: string; span?: { start_line: number; end_line: number } }> = [];
   let applyFailed = false;
   for (const op of ops) {
-    const abs = `${REPO_ROOT}/${op.path.replace(/^repos\//, "")}`;
+    const abs = opAbs(op.path);
     if (op.kind === "create_file") {
       // local-tools fs_write does not create parent dirs — mkdir -p first so
       // net-new vessel files (in a not-yet-existing dir) land.
@@ -1529,7 +1550,7 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
   // INCOMPLETE wiring — gating on it forces the system to author a ROUTABLE shape.
   const SHARED_DISPATCH_CHECK = "/vessels/packages/shape-dispatch-check/check.ts";
   const runVerify = async (v: string): Promise<{ vessel: string; errors: number | string; exit_code: number | null; ok: boolean; output: string }> => {
-    const vAbs = `${REPO_ROOT}/${v.replace(/^repos\//, "")}`;
+    const vAbs = vesselRoot(v);
     const sh = await callTool(toolsEndpoint, "shell", {
       command: `cd ${JSON.stringify(vAbs)} && ([ -d node_modules ] || bun install >/dev/null 2>&1; echo "== typecheck =="; bun run typecheck 2>&1; echo "TC_EXIT=$?"; echo "== shape-dispatch =="; if [ -f ${SHARED_DISPATCH_CHECK} ] && [ -f src/config.ts ] && [ -f src/routes/impulses.ts ]; then bun ${SHARED_DISPATCH_CHECK} ${JSON.stringify(vAbs)} 2>&1; echo "SD_EXIT=$?"; else echo "SD_EXIT=0"; fi)`,
       cwd: REPO_ROOT,
@@ -1578,7 +1599,7 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
   // verify runs `cd <vesselDir> && bun run typecheck`, so tsc prints paths relative to
   // the vessel (e.g. `src/routes/select-activity.ts(12,5): error ...`).
   const createdRelOf = (abs: string): { rel: string; base: string } => {
-    const rel = abs.replace(`${REPO_ROOT}/`, "");
+    const rel = ws?.rel(abs) ?? abs.replace(`${REPO_ROOT}/`, "");
     return { rel, base: rel.slice(rel.lastIndexOf("/") + 1) };
   };
   const errMentionsCreated = (errText: string, abs: string): boolean => {
@@ -1624,7 +1645,7 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
       // A new file carrying several errors cannot converge via single surgical fixes;
       // a complete re-author can. Edited pre-existing files are NEVER rewritten here —
       // they fall through to the surgical path below.
-      const vBaseAbs = `${REPO_ROOT}/${fv.vessel.replace(/^repos\//, "")}/`;
+      const vBaseAbs = `${vesselRoot(fv.vessel)}/`;
       const createdInVessel = created.filter((c) => c.startsWith(vBaseAbs) && errMentionsCreated(errText, c));
       if (createdInVessel.length > 0) {
         let rewroteAny = false;
@@ -1655,7 +1676,7 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
           if (m && m[1] && m[2]) {
             const relPath = m[1];
             const errLine = parseInt(m[2], 10);
-            const absPath = `${REPO_ROOT}/${fv.vessel.replace(/^repos\//, "")}/${relPath}`;
+            const absPath = `${vesselRoot(fv.vessel)}/${relPath}`;
             const g = await callTool(toolsEndpoint, "fs_read", { path: absPath });
             const gc = (g.body as { content?: unknown })?.content;
             if (g.ok && typeof gc === "string") {
@@ -1672,7 +1693,7 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
           model,
         ));
         const ef = typeof fix?.file === "string" ? String(fix.file) : "";
-        const efAbs = ef ? `${REPO_ROOT}/${ef.replace(/^repos\//, "")}` : "";
+        const efAbs = ef ? opAbs(ef) : "";
         if (fix?.old_string && efAbs) {
           const cur = await callTool(toolsEndpoint, "fs_read", { path: efAbs });
           const curContent = (cur.body as { content?: unknown })?.content;
@@ -1733,7 +1754,7 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
         let isEntrypoint = false;
         let codeHit = "";
         for (const v of touched) {
-          const vAbs = `${REPO_ROOT}/${v.replace(/^repos\//, "")}`;
+          const vAbs = vesselRoot(v);
           // REFERENCE-sites: any `\bSYMBOL\b` USE across src/, minus the definition
           // lines (function/const/let/var/method NAME). A const/value symbol is
           // "reachable" when it is REFERENCED on a live path, not only when it is
@@ -1784,7 +1805,7 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
           let callerCount = 0;
           let isEntrypoint = false;
           for (const v of touched) {
-            const vAbs = `${REPO_ROOT}/${v.replace(/^repos\//, "")}/src`;
+            const vAbs = `${vesselRoot(v)}/src`;
             // Any reference (not only `SYMBOL(` call form), minus definition lines —
             // symmetrical with the primary reachability loop above so a symbol
             // referenced-not-called counts as live and the dead-code floor holds.
@@ -1811,7 +1832,7 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
       const gapNamed = (gapSummary.match(/\b[A-Za-z_$][\w$]{3,}\b/g) ?? []).filter((w) => /[A-Z_]/.test(w)).slice(0, 6);
       for (const name of new Set([...gapNamed, ...facts.filter((f) => f.reachable).map((f) => f.symbol)])) {
         for (const v of touched) {
-          const vAbs = `${REPO_ROOT}/${v.replace(/^repos\//, "")}/src`;
+          const vAbs = `${vesselRoot(v)}/src`;
           const g = await callTool(toolsEndpoint, "shell", { command: `grep -rEn "\\b${name}\\b" ${JSON.stringify(vAbs)} 2>/dev/null | head -8 || true`, cwd: REPO_ROOT });
           const gt = String((g.body as { stdout?: unknown })?.stdout ?? "").trim();
           if (gt) { codeContext += `\n# ${name} in ${v}:\n${gt}\n`; if (codeContext.length > 6000) break; }
@@ -1978,7 +1999,7 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
     const ts = new Date().toISOString().replace(/[:.]/g, "-");
     for (const v of touched) {
       const vessel = v.replace(/^repos\//, "");
-      const vBase = `${REPO_ROOT}/${vessel}`;
+      const vBase = vesselRoot(vessel);
       const changedRel = [...created, ...edited]
         .filter((p) => p.startsWith(`${vBase}/`))
         .map((p) => p.slice(vBase.length + 1));

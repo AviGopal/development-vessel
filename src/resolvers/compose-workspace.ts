@@ -56,9 +56,35 @@ async function git(cloneDir: string, args: string[]): Promise<void> {
   await run("git", ["-C", cloneDir, ...args], { timeout: 60_000 });
 }
 
+/**
+ * Janitor: a successful cutover RESTARTS the vessel, which kills sibling
+ * in-flight composes before their release() runs (env_cutover_race) — their
+ * worktrees leak. Sweep workspaces older than STALE_MS at acquire time;
+ * `git worktree prune` on each clone then drops the dangling registrations.
+ */
+const STALE_MS = 2 * 60 * 60 * 1000;
+async function sweepStaleWorkspaces(activeClones: Iterable<string>): Promise<void> {
+  try {
+    const { readdirSync, statSync } = await import("node:fs");
+    for (const entry of readdirSync(WS_ROOT)) {
+      const dir = `${WS_ROOT}/${entry}`;
+      try {
+        if (Date.now() - statSync(dir).mtimeMs < STALE_MS) continue;
+        await run("rm", ["-rf", dir], { timeout: 30_000 });
+      } catch { /* per-entry best-effort */ }
+    }
+    for (const clone of activeClones) {
+      try { await git(clone, ["worktree", "prune"]); } catch { /* best-effort */ }
+    }
+  } catch { /* WS_ROOT absent or unreadable — nothing to sweep */ }
+}
+
 export async function acquireComposeWorkspace(vessels: string[], id: string): Promise<ComposeWorkspace> {
   const roots = new Map<string, string>(); // vessel -> worktree abs
   const clones = new Map<string, string>(); // vessel -> clone abs (for release)
+
+  const candidateClones = vessels.map((v) => `${CLONE_ROOT}/${strip(v)}`).filter((c) => existsSync(`${c}/.git`));
+  await sweepStaleWorkspaces(candidateClones);
 
   for (const raw of vessels) {
     const vessel = strip(raw);

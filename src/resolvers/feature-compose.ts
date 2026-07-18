@@ -2243,12 +2243,15 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
 
   for (const p of authoringMarkerPaths) { await clearAuthoringMarker(p); }
 
+  const allCutoversRefused = pointer.land && verdict === "FAVORABLE" && cutovers.length > 0 &&
+    cutovers.every((c) => { const t = JSON.stringify(c); return /"refused"\s*:\s*true/.test(t) || /"landed"\s*:\s*false/.test(t); });
+  const effectiveVerdict = allCutoversRefused ? "UNFAVORABLE" : verdict;
   return {
     shape: "featureComposeReport",
     body: {
-      ok: verdict === "FAVORABLE",
-      verdict: verdict,
-      failure_kind: verdict === "FAVORABLE" ? null : (classifyEnvironmentFailure(cutovers) ? "environment" : "fix"),
+      ok: effectiveVerdict === "FAVORABLE",
+      verdict: effectiveVerdict,
+      failure_kind: effectiveVerdict === "FAVORABLE" ? null : (classifyEnvironmentFailure(cutovers) ? "environment" : "fix"),
       summary: plan.summary,
       touched_vessels: [...touched],
       op_count: ops.length,

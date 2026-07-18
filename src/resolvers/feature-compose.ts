@@ -1321,7 +1321,7 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
   // needs a `name?: string;` property to pass the validation. This change directly implements that. The `gapId` path
   // is stable, and the error was a semantic_reject on line 1085, not a missing pointer.
   async function resolveFeatureComposeInner(pointer: FeatureComposePointer & { name?: string }, callerGapId?: string, ws?: ComposeWorkspace): Promise<ResolverResult> {
-  const model = pointer.model ?? 'claude-3-opus-20240229';
+  const model = pointer.model ?? 'auto';
   const llm = (prompt: string) => llmCallWithFailover(llmEndpoints, prompt, model);
   const maxOps = pointer.max_ops ?? 24;
   const dryRun = pointer.dry_run ?? false;

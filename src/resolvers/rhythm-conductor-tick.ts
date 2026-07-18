@@ -58,6 +58,7 @@ interface RhythmImpulse {
 }
 
 const FAMILY_GOALS: Record<string, string> = {
+  "self-maintenance": "run the detect-vessel-code-drift scan across /workspace/repos, then for each vessel whose clone is strictly behind origin/dev and whose live /vessels tree matches its clone, fast-forward the clone with git pull --ff-only, mirror the updated src into /vessels/<vessel>/src, restart the vessel unit, and verify its /health endpoint answers healthy; for any vessel whose live tree and clone have diverged in both directions, do NOT sync it and instead file a substrateGap describing the two-way divergence",
   "reality-modeling":
     "refresh the substrate reality model: run learned-topology-snapshot and substrate_health_tick",
   "data-management":

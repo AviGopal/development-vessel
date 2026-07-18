@@ -403,7 +403,28 @@ async function dispatchInner(pointer: AnyPointer): Promise<ResolverResult> {
       return resolveTraceStoreHealthObserver(p as Parameters<typeof resolveTraceStoreHealthObserver>[0]);
     case "gap_compose": {
       const { resolveFeatureCompose } = await import("../resolvers/feature-compose.js");
-      return resolveFeatureCompose({ ...pointer, type: "feature_compose", spec: (pointer as any).spec });
+      // Walk-dispatched gap_compose rarely carries `spec`; feature-compose
+      // dereferences pointer.spec unconditionally, so a missing spec was an
+      // HTTP 500 on every call (the 2026-07-18 dispatch-storm grinder).
+      // Derive it from the gap fields the walk does bind, else fail shaped.
+      const pAny = pointer as unknown as {
+        spec?: unknown; goal?: unknown; description?: unknown;
+        gap?: { summary?: unknown; title?: unknown };
+      };
+      const spec = [pAny.spec, pAny.goal, pAny.description, pAny.gap?.summary, pAny.gap?.title].find(
+        (s): s is string => typeof s === "string" && s.trim().length > 0,
+      );
+      if (!spec) {
+        return {
+          shape: "structuredError",
+          body: {
+            resolver: "gap_compose",
+            failure_mode: "missing_input",
+            detail: "gap_compose requires spec (or goal/description/gap.summary/gap.title) — none present in pointer",
+          },
+        };
+      }
+      return resolveFeatureCompose({ ...pointer, type: "feature_compose", spec });
     }
     // @shape-dispatch:private
     case "feature_compose":

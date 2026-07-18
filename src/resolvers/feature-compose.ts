@@ -2178,6 +2178,9 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
     if (/restarted \(cutover\)|cutover race/i.test(t)) return "env_cutover_race";
     return null;
   }
+  if (pointer.land && cutovers.length > 0 && cutovers.every((c: unknown) => (c as Record<string, unknown>)?.refused === true)) {
+    verdict = "UNFAVORABLE";
+  }
   if (verdict !== "FAVORABLE") {
     const envClass = classifyEnvironmentFailure(cutovers);
     const firstTscError = (() => {
@@ -2244,7 +2247,7 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
     shape: "featureComposeReport",
     body: {
       ok: verdict === "FAVORABLE",
-      verdict,
+      verdict: verdict,
       failure_kind: verdict === "FAVORABLE" ? null : (classifyEnvironmentFailure(cutovers) ? "environment" : "fix"),
       summary: plan.summary,
       touched_vessels: [...touched],

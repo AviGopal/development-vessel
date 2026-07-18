@@ -85,6 +85,68 @@ type Json = Record<string, unknown>;
 
 async function llmCall(endpoint: string, prompt: string, model: string): Promise<string> {
   const res = await fetch(endpoint, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+    body: JSON.stringify({
+      type: 'llm_completion',
+      prompt,
+      model,
+      max_tokens: 16000,
+      task_type: 'feature_compose',
+    }),
+    signal: AbortSignal.timeout(120_000),
+  });
+
+  if (!res.ok) {
+    const errorBody = await res.text().catch(() => '');
+    throw new Error(`llmCall to ${endpoint} failed with status ${res.status}: ${errorBody.slice(0, 500)}`);
+  }
+
+  const j = await res.json();
+  if (j.error) {
+    throw new Error(`llmCall to ${endpoint} returned error in body: ${JSON.stringify(j.error)}`);
+  }
+
+  let content: string;
+  let resolved: boolean | undefined;
+
+  // Handle federated transport envelope
+  if (j.content && typeof j.content === 'object' && j.content !== null) {
+    const inner = j.content.body ?? j.content;
+    if (inner.error) {
+      throw new Error(`llmCall to ${endpoint} returned federated error: ${JSON.stringify(inner.error)}`);
+    }
+    content = String(inner.content ?? inner.data ?? '').trim();
+    resolved = inner.resolved;
+  } else {
+    // Handle flat llm-resolver form
+    content = String(j.content ?? j.data ?? '').trim();
+    resolved = j.resolved;
+  }
+
+  if (content === '' && resolved === false) {
+    throw new Error(`llmCall to ${endpoint} returned empty content with resolved:false`);
+  }
+
+  return content;
+}
+
+async function llmCallWithFailover(endpoints: string[], prompt: string, model: string): Promise<string> {
+  let lastError: Error | null = null;
+  for (const endpoint of endpoints) {
+    try {
+      const result = await llmCall(endpoint, prompt, model);
+      return result;
+    } catch (e) {
+      lastError = e instanceof Error ? e : new Error(String(e));
+    }
+  }
+  throw lastError ?? new Error('All LLM endpoints failed without returning a specific error.');
+}
+
+// llmCall() helper: call the llm_completion shape and unwrap the response
+async function llmCall_OLD(endpoint: string, prompt: string, model: string): Promise<string> {
+  const res = await fetch(endpoint, {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: `ApiKey ${METABOB_API_KEY}` },
     body: JSON.stringify({ type: "llm_completion", prompt, model, max_tokens: 16000, task_type: "feature_compose" }),
@@ -96,6 +158,29 @@ async function llmCall(endpoint: string, prompt: string, model: string): Promise
   return (j.content ?? j.data ?? "").trim();
 }
 
+async function discoverAll(shape: string): Promise<string[]> {
+  const res = await fetch(`${DISCOVERY_ENDPOINT}/v1/resolve-url?shape=${shape}`);
+  if (!res.ok) {
+    return [];
+  }
+  try {
+    const j = (await res.json()) as Array<{
+      endpoint: string;
+      health_score: number;
+      resolve_endpoint?: string;
+    }>;
+    if (!Array.isArray(j)) return [];
+
+    return j
+      .filter((v) => v.health_score > 0 && v.resolve_endpoint)
+      .sort((a, b) => b.health_score - a.health_score)
+      .map((v) => `${v.endpoint}${v.resolve_endpoint!}`);
+  } catch {
+    return [];
+  }
+}
+
+// discover() helper: find a healthy remote vessel that can resolve a shape
 async function discover(shape: string): Promise<string | null> {
   try {
     const r = await fetch(`${DISCOVERY_ENDPOINT}/resolve`, {
@@ -1236,7 +1321,8 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
   // needs a `name?: string;` property to pass the validation. This change directly implements that. The `gapId` path
   // is stable, and the error was a semantic_reject on line 1085, not a missing pointer.
   async function resolveFeatureComposeInner(pointer: FeatureComposePointer & { name?: string }, callerGapId?: string, ws?: ComposeWorkspace): Promise<ResolverResult> {
-  const model = pointer.model ?? "auto";
+  const model = pointer.model ?? 'claude-3-opus-20240229';
+  const llm = (prompt: string) => llmCallWithFailover(llmEndpoints, prompt, model);
   const maxOps = pointer.max_ops ?? 24;
   const dryRun = pointer.dry_run ?? false;
   // Per-compose isolation path helpers: every vessel-scoped path routes into
@@ -1250,11 +1336,28 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
     return root ? `${root}/${rel.slice(vessel.length + 1)}` : `${REPO_ROOT}/${rel}`;
   };
 
-  const llmEndpoint = await discover("llm_completion") ?? await discover("llmCompletion");
-  const toolsEndpoint = await discover("shellResult");
-  if (!llmEndpoint || !toolsEndpoint) {
-    return { shape: "featureComposeReport", body: { ok: false, error: `endpoint discovery failed (llm=${!!llmEndpoint}, tools=${!!toolsEndpoint})` } };
+  async function discoverAll(shape: string): Promise<string[]> {
+    try {
+      const r = await fetch(`${DISCOVERY_ENDPOINT}/resolve`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `ApiKey ${METABOB_API_KEY}` },
+        body: JSON.stringify({ pointer: { type: "vesselCapability", shape } }),
+      });
+      if (!r.ok) return [];
+      const data = (await r.json()) as { content?: { vessels?: Array<{ endpoint: string; resolve_endpoint?: string; health_score?: number }> } };
+      const vs = (data.content?.vessels ?? []).sort((a, b) => (b.health_score ?? 0) - (a.health_score ?? 0));
+      return vs.map(v => {
+        const ep = v.resolve_endpoint ?? "/resolve";
+        return ep.startsWith("http") ? ep : `${v.endpoint.replace(/\/$/, "")}${ep.startsWith("/") ? ep : `/${ep}`}`;
+      });
+    } catch { return []; }
   }
+  const llmEndpoints = [...new Set([...(await discoverAll("llm_completion")), ...(await discoverAll("llmCompletion"))])];
+  const toolsEndpoint = await discover("shellResult");
+  if (llmEndpoints.length === 0 || !toolsEndpoint) {
+    return { shape: "featureComposeReport", body: { ok: false, error: `endpoint discovery failed (llm=${llmEndpoints.length > 0}, tools=${!!toolsEndpoint})` } };
+  }
+  const llmEndpoint = llmEndpoints[0]!;
 
   // 1. DECOMPOSE (single planning call), GROUNDED in the target vessel's real
   // file tree so edits bind to paths that actually exist (no hallucinated paths).

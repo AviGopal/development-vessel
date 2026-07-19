@@ -98,6 +98,7 @@ import { resolveAuthoringChainHealthReport } from "../resolvers/authoring-chain-
 import { resolveConceptWrite } from "../resolvers/concept-write.js";
 import { resolveConceptSearchBySource } from "../resolvers/concept-search-by-source.js";
 import { resolveConceptSelectForPrompt } from "../resolvers/concept-select-for-prompt.js";
+import { resolveConceptTruthProbe } from "../resolvers/concept-truth-probe.js";
 import { resolveCodeNeedsReport } from "../resolvers/code-needs-report.js";
 import { resolveConceptUsageRecord } from "../resolvers/concept-usage-record.js";
 import { resolveUiWritePassthrough } from "../resolvers/ui-write-passthrough.js";
@@ -486,6 +487,8 @@ async function dispatchInner(pointer: AnyPointer): Promise<ResolverResult> {
       return resolveConceptWrite(p as Parameters<typeof resolveConceptWrite>[0]);
     case "concept_search_by_source":
       return resolveConceptSearchBySource(p as Parameters<typeof resolveConceptSearchBySource>[0]);
+    case "concept_truth_probe":
+      return resolveConceptTruthProbe(p as Parameters<typeof resolveConceptTruthProbe>[0]);
     case "concept_select_for_prompt":
       return resolveConceptSelectForPrompt(p as Parameters<typeof resolveConceptSelectForPrompt>[0]);
     case "code_needs_report":

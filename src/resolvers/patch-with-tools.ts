@@ -79,17 +79,23 @@ function structuredError(detail: string, body: Record<string, unknown> = {}): Re
 // so a correct, typecheck-clean staged patch could sit unlanded indefinitely
 // (the reach-on-rolled-back / staged-but-unlanded half of the cutover-reliability
 // defect). Best-effort: if dispatch fails, boredom selects mitosis-tick later.
-function triggerMitosisTick(): void {
+async function triggerMitosisTick(): Promise<void> {
+  // AWAIT the mitosis-tick dispatch (was fire-and-forget) so the stage->cutover
+  // apply completes synchronously before the compose returns — a clean, typecheck-
+  // verified staged patch must not be stranded on a best-effort fetch + an
+  // unreliable boredom fallback (the staged-but-unlanded half of the cutover
+  // reliability defect). mitosis-tick runs vessel_mitosis_evaluate + vessel_
+  // mitosis_cutover(dry_run:false), which commits+pushes to origin.
   try {
     const url = process.env["LIGHT_DISPATCH_URL"] ?? "http://127.0.0.1:8280/dispatch";
     const apiKey = process.env["METABOB_API_KEY"];
-    void fetch(url, {
+    await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json", ...(apiKey ? { Authorization: `ApiKey ${apiKey}` } : {}) },
       body: JSON.stringify({ template_id: "development-vessel:mitosis-tick", variables: {} }),
       signal: AbortSignal.timeout(180_000),
-    }).catch(() => { /* best-effort */ });
-  } catch { /* best-effort */ }
+    });
+  } catch { /* best-effort: boredom selects mitosis-tick later */ }
 }
 
 type LlmProducer = { url: string; target?: string };
@@ -711,7 +717,7 @@ export async function resolvePatchWithTools(pointer: PatchWithToolsPointer): Pro
   }
 
   await clearAuthoringMarker(authoringMarkerPath);
-  triggerMitosisTick(); // self-propel stage→cutover; do not strand a clean staged patch
+  await triggerMitosisTick(); // self-propel stage→cutover synchronously; do not strand a clean staged patch
   return {
     shape: "mitosisStaged",
     body: {

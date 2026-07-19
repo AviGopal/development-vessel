@@ -1520,9 +1520,20 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
     }
   }
 
-  // 9. Mirror staged files into /vessels/<v>/ runtime path.
+  // 9. Mirror staged files into /vessels/<v>/ runtime path — ONLY when the push
+  // actually landed on origin. Mirroring on a degraded push (local_only /
+  // host_sync_pending) drifts /vessels AHEAD of origin, poisoning the freshness
+  // sentinel (current_live_sha is hashed from /vessels) so every future FAVORABLE
+  // cutover short-circuits (no_diff / base_sha_mismatch) before commit+push — the
+  // self-sustaining P1(origin)!=P2(/vessels) livelock. Gate on pushStatus.
   let vesselRestarted = false;
-  if (await pathExists(baseRoot)) {
+  if (pushStatus !== "pushed") {
+    operations.push({
+      op: "copy mitosis → live vessel",
+      status: "skipped",
+      detail: `push not landed on origin (${pushStatus}); /vessels left at origin/dev to preserve the freshness base`,
+    });
+  } else if (await pathExists(baseRoot)) {
     try {
       await copyTree(mitosisRoot, baseRoot, stagedFiles);
       operations.push({

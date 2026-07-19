@@ -153,6 +153,7 @@ import {
   SUBSTRATE_HEARTBEAT_OBSERVER_TICK_TEMPLATE,
   LLM_QUOTA_OBSERVER_TICK_TEMPLATE,
   PUSH_HEALTH_OBSERVER_TICK_TEMPLATE,
+  CONCEPT_TRUTH_PROBE_TICK_TEMPLATE,
 } from "./shadow-state-observer-ticks.js";
 
 export { SHIP_CHANGE_TEMPLATE } from "./ship-change.js";
@@ -229,6 +230,7 @@ export {
   SUBSTRATE_HEARTBEAT_OBSERVER_TICK_TEMPLATE,
   LLM_QUOTA_OBSERVER_TICK_TEMPLATE,
   PUSH_HEALTH_OBSERVER_TICK_TEMPLATE,
+  CONCEPT_TRUTH_PROBE_TICK_TEMPLATE,
 } from "./shadow-state-observer-ticks.js";
 export { OBSERVE_ORTHOGONAL_PATTERNS_TEMPLATE } from "./observe-orthogonal-patterns.js";
 export { ENACT_ORTHOGONAL_DECISIONS_TEMPLATE } from "./enact-orthogonal-decisions.js";
@@ -591,6 +593,8 @@ export const SEED_TEMPLATES: ActivityTemplate[] = [
   LLM_QUOTA_OBSERVER_TICK_TEMPLATE,
   // push-health observer (2026-06-19): surfaces substrate self-push failure.
   PUSH_HEALTH_OBSERVER_TICK_TEMPLATE,
+  // concept-truth-probe checking trickle (2026-07-19): validates concept claims against reality.
+  CONCEPT_TRUTH_PROBE_TICK_TEMPLATE,
   // seed-registry reconciliation (2026-07-03): these five existed on disk and
   // live in the registry but were never wired into the seed array — a fresh
   // boot silently lost them.

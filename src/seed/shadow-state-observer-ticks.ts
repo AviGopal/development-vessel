@@ -560,3 +560,34 @@ export const PUSH_HEALTH_OBSERVER_TICK_TEMPLATE: ActivityTemplate = {
     },
   ],
 };
+
+export const CONCEPT_TRUTH_PROBE_TICK_TEMPLATE: ActivityTemplate = {
+  id: "development-vessel:concept-truth-probe-tick",
+  name: "concept-truth-probe-tick",
+  description:
+    "Deterministic single-resolver wrapper around concept_truth_probe. " +
+    "Samples concepts from concept-db, checks repo-path anchors in their content " +
+    "against the filesystem, and emits conceptTruthProbeReport with per-concept " +
+    "staleness and verified/refuted status — the truth-maintenance checking trickle.",
+  inputShapes: [],
+  outputShapes: ["conceptTruthProbeReport"],
+  tags: [
+    "intent:shadow_state_observation",
+    "horizon:meta",
+    "phase:detect",
+    "boredom_target_template",
+    "lift.autonomous.loop",
+    "light_dispatch_eligible",
+    "impulse_complete_base",
+  ],
+  variables: [],
+  tasks: [
+    {
+      id: "observe_concept_truth",
+      description: "Invoke concept_truth_probe.",
+      resolver: "concept_truth_probe",
+      config: { type: "concept_truth_probe" },
+      outputShapes: ["conceptTruthProbeReport"],
+    },
+  ],
+};

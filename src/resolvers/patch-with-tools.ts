@@ -512,9 +512,27 @@ export async function resolvePatchWithTools(pointer: PatchWithToolsPointer): Pro
     const action = parseFirstJsonObject(raw);
     console.error(`[patch-with-tools] turn ${turn}: action=${action?.action ?? "UNPARSEABLE"}${action?.tool ? ` tool=${action.tool}` : ""}`);
     if (!action || typeof action.action !== "string") {
-      history.push({ turn, thought_or_action: `(unparseable LLM output: ${raw.slice(0, 200)})` });
+      // UNPARSEABLE-RECOVERY (2026-07-19): the old no-op push carried NO tool_result,
+      // so the loud-correction block (gated on last.tool_result && !ok) never fired —
+      // the model got zero feedback, repeated the bad emission, and burned the whole
+      // turn budget dropping every remaining edit (the multi-hunk co-land killer).
+      // Push a FAILED tool_result so the correction fires next turn, and abort the
+      // attempt after 3 consecutive so a wedged model resets instead of looping.
+      const un = (verifyFailCounts.get("__unparseable__") ?? 0) + 1;
+      verifyFailCounts.set("__unparseable__", un);
+      if (un >= 3) {
+        attemptFailures.push(`attempt ${attempt}: ${un} consecutive unparseable LLM outputs — resetting attempt`);
+        break;
+      }
+      history.push({
+        turn,
+        thought_or_action: `(unparseable LLM output: ${raw.slice(0, 200)})`,
+        tool_result: { tool: "parse_guard", args: {}, result: { error: "Your previous output was NOT valid JSON and could not be parsed. Emit ONLY a single JSON object \u2014 no prose, no markdown fences, nothing before { or after }. Escape every newline inside a string value as \\n." }, ok: false },
+      });
       continue;
     }
+    // A valid action parsed: clear the consecutive-unparseable counter.
+    verifyFailCounts.set("__unparseable__", 0);
     if (action.action === "done") {
       // No-op-done recovery (2026-06-18): the ReAct LLM commonly declares done
       // WITHOUT ever calling an edit tool (observed live on a surgical typecheck

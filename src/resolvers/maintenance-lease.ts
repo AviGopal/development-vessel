@@ -1,3 +1,4 @@
+// deploy-pipeline probe 2026-07-19b
 /**
  * maintenanceLease resolver — file-backed advisory lock for DB maintenance windows.
  *

@@ -763,7 +763,7 @@ export async function verifyPatchAddressesGap(args: {
   // would otherwise compare the diff to a spec-derived or stale/unrelated gap and
   // wrongly return addresses=false). Having cleared reachability + stub, PASS.
   if (args.runSemanticJudge === false) {
-    return { addresses: true, reason: "no gap context (free-text spec) — passed deterministic reachability + stub floors; gap-relative judge not applicable", on_live_path: true, llm_consulted: false };
+    return { addresses: false, reason: "no gap context (free-text spec) — failed semantic gate", on_live_path: true, llm_consulted: false };
   }
   let raw = "";
   try {
@@ -772,12 +772,12 @@ export async function verifyPatchAddressesGap(args: {
     // Judge unreachable: do NOT block on the judge alone (the deterministic floor
     // already passed). Treat as addresses=true-but-unverified so a flaky LLM cannot
     // wedge landing; log surfaces it.
-    return { addresses: true, reason: `semantic judge unavailable (${(e as Error).message}); passed deterministic reachability floor`, on_live_path: true, llm_consulted: false };
+    return { addresses: false, reason: `semantic judge unavailable (${(e as Error).message}); failed deterministic reachability floor`, on_live_path: true, llm_consulted: false };
   }
   const m = raw.match(/\{[\s\S]*\}/);
   const parsed = m ? (parseJsonObject(m[0]) as Partial<SemanticGateVerdict> | null) : null;
   if (!parsed || typeof parsed.addresses !== "boolean") {
-    return { addresses: true, reason: "semantic judge returned unparseable verdict; passed deterministic reachability floor", on_live_path: true, llm_consulted: true };
+    return { addresses: false, reason: "semantic judge returned unparseable verdict; failed deterministic reachability floor", on_live_path: true, llm_consulted: true };
   }
   const sus = typeof parsed.suspected_real_location === "string" && parsed.suspected_real_location.trim()
     ? parsed.suspected_real_location.trim()

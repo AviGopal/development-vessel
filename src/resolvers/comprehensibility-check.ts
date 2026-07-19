@@ -24,7 +24,7 @@ import type { ResolverResult } from "./types.js";
  * hook for testing and future swap to ONNX cosine.
  */
 
-const DEFAULT_MODEL = "anthropic/claude-haiku-4-5-20251001";
+const DEFAULT_MODEL = "auto";
 const DEFAULT_FLOOR = 0.6;
 
 const COMPREHENSIBILITY_PROMPT_PREFIX =

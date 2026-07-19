@@ -164,7 +164,7 @@ export async function resolveLlmCompletionDispatch(
     };
   }
 
-  const model = pointer.model ?? "anthropic/claude-haiku-4-5-20251001";
+  const model = pointer.model ?? "auto";
   // llm-resolver-vessel's handler expects the impulse-style envelope OR flat
   // body with type+prompt. Both forms work; using flat for clarity. The
   // resolver's body schema: { type: "llm_completion", prompt, model, max_tokens, system }

@@ -231,7 +231,7 @@ async function rankWithLlm(summary: string, hits: Array<{ file: string; score: n
     const res = await fetch(endpoint, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `ApiKey ${METABOB_API_KEY}` },
-      body: JSON.stringify({ type: "llm_completion", prompt, model: "anthropic/claude-haiku-4-5", max_tokens: 16 }),
+      body: JSON.stringify({ type: "llm_completion", prompt, model: "auto", max_tokens: 16 }),
       signal: AbortSignal.timeout(LOCALIZE_LLM_TIMEOUT_MS),
     });
     if (!res.ok) return null;
@@ -1333,7 +1333,7 @@ async function draftResolverImplBody(shape: string, goalText: string): Promise<s
     const res = await fetch(endpoint, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `ApiKey ${METABOB_API_KEY}` },
-      body: JSON.stringify({ type: "llm_completion", prompt, model: "anthropic/claude-sonnet-4-6", max_tokens: 2200 }),
+      body: JSON.stringify({ type: "llm_completion", prompt, model: "auto", max_tokens: 2200 }),
       signal: AbortSignal.timeout(90_000),
     });
     if (!res.ok) return null;

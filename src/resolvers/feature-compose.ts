@@ -29,6 +29,11 @@ import { writeAuthoringMarker, clearAuthoringMarker } from "./patch-with-tools.j
 import { existsSync as mountExistsSync } from "node:fs";
 
 const DISCOVERY_ENDPOINT = process.env.DISCOVERY_ENDPOINT ?? "http://127.0.0.1:8100";
+// Federation-transport egress: dev-vessel has no libp2p deps, so a resolve to a
+// peer/overlay row is routed through the local egress (peer multiaddr as ?target=)
+// rather than by concatenating the row's raw hub-localhost endpoint (unreachable
+// from here). Mirrors goal-host-vessel FED_TRANSPORT_EGRESS / routeFor.
+const FED_TRANSPORT_EGRESS = process.env.FED_TRANSPORT_EGRESS ?? "http://127.0.0.1:8401";
 // In-container authoring targets the WRITABLE runtime (/vessels), like the
 // surgical patchers (patch_with_tools/apply_proposal_as_patch use vessels_root
 // "/vessels"). The host repo bind-mount is READ-ONLY from the container; a
@@ -1344,9 +1349,17 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
         body: JSON.stringify({ pointer: { type: "vesselCapability", shape } }),
       });
       if (!r.ok) return [];
-      const data = (await r.json()) as { content?: { vessels?: Array<{ endpoint: string; resolve_endpoint?: string; health_score?: number }> } };
+      const data = (await r.json()) as { content?: { vessels?: Array<{ endpoint: string; resolve_endpoint?: string; health_score?: number; protocol?: string; libp2p_multiaddr?: string[]; id?: string; vesselId?: string }> } };
       const vs = (data.content?.vessels ?? []).sort((a, b) => (b.health_score ?? 0) - (a.health_score ?? 0));
       return vs.map(v => {
+        // Peer/overlay row: route the resolve through the local federation-transport
+        // egress (dev-vessel has no libp2p deps), passing the peer multiaddr as ?target=.
+        // Never concatenate the row's raw endpoint for a libp2p row (that is a
+        // hub-localhost address, unreachable from here). Mirrors goal-host routeFor.
+        if ((v.protocol === "libp2p" || process.env.PREFER_LIBP2P_ROUTE === "1") && Array.isArray(v.libp2p_multiaddr) && v.libp2p_multiaddr[0]) {
+          const vid = v.id ?? v.vesselId;
+          return `${FED_TRANSPORT_EGRESS}/egress/resolve?target=${encodeURIComponent(v.libp2p_multiaddr[0])}${vid ? `&vessel=${encodeURIComponent(vid)}` : ""}`;
+        }
         const ep = v.resolve_endpoint ?? "/resolve";
         return ep.startsWith("http") ? ep : `${v.endpoint.replace(/\/$/, "")}${ep.startsWith("/") ? ep : `/${ep}`}`;
       });
@@ -1395,7 +1408,7 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
       const symbolBlock = await groundFileSymbols(toolsEndpoint, verifyVessels);
       if (symbolBlock) grounding += '\n\nEXISTING SYMBOLS (authoritative — reference ONLY names that appear here or that this plan itself introduces; NEVER invent a function, const, type, or field name):\n' + symbolBlock;
     } catch { /* advisory */ }
-    const refined = await llmCall(llmEndpoint, refineSpecPrompt(spec, grounding, composeLessons), model);
+    const refined = await llmCallWithFailover(llmEndpoints, refineSpecPrompt(spec, grounding, composeLessons), model);
       const trimmed = refined.trim();
       if (trimmed.length >= 40) {
         spec = trimmed;
@@ -1411,7 +1424,7 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
   }
   let planRaw: string;
   try {
-    planRaw = await llmCall(llmEndpoint, decomposePrompt(spec, maxOps, grounding, principles + composeLessons, priorFeedback), model);
+    planRaw = await llmCallWithFailover(llmEndpoints, decomposePrompt(spec, maxOps, grounding, principles + composeLessons, priorFeedback), model);
   } catch (e) {
     return { shape: "featureComposeReport", body: { ok: false, stage: "decompose", error: (e as Error).message } };
   }
@@ -1419,7 +1432,7 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
   let ops = (plan?.ops as PlanOp[] | undefined) ?? [];
   if (!plan || !Array.isArray(ops) || ops.length === 0) {
     try {
-      planRaw = await llmCall(llmEndpoint, decomposePrompt(spec, maxOps, grounding, principles + composeLessons, priorFeedback) + "\n\nCRITICAL RETRY: your previous plan contained NO ops (analysis prose or truncation). Output ONLY the JSON object starting with { — zero words before it, no analysis, compressed ops only.", model);
+      planRaw = await llmCallWithFailover(llmEndpoints, decomposePrompt(spec, maxOps, grounding, principles + composeLessons, priorFeedback) + "\n\nCRITICAL RETRY: your previous plan contained NO ops (analysis prose or truncation). Output ONLY the JSON object starting with { — zero words before it, no analysis, compressed ops only.", model);
       plan = parseJsonObject(planRaw);
       ops = (plan?.ops as PlanOp[] | undefined) ?? [];
     } catch { /* fall through to honest no-ops below */ }

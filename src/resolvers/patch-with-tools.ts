@@ -92,20 +92,40 @@ function triggerMitosisTick(): void {
   } catch { /* best-effort */ }
 }
 
-async function llmCall(endpoint: string, prompt: string, model: string): Promise<string> {
-  const res = await fetch(endpoint, {
+type LlmProducer = { url: string; target?: string };
+
+async function llmCall(producer: LlmProducer, prompt: string, model: string): Promise<string> {
+  const headers: Record<string, string> = { "Content-Type": "application/json", Authorization: `ApiKey ${METABOB_API_KEY}` };
+  // Federated producers are reached via the transport egress with the peer
+  // circuit multiaddr as target; the ingress proxies to the named arm over libp2p.
+  if (producer.target) headers["X-Libp2p-Target"] = producer.target;
+  const res = await fetch(producer.url, {
     method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `ApiKey ${METABOB_API_KEY}` },
+    headers,
     body: JSON.stringify({ type: "llm_completion", prompt, model, max_tokens: 4000, task_type: "patch_with_tools" }),
     signal: AbortSignal.timeout(PER_CALL_TIMEOUT_MS),
   });
   if (!res.ok) throw new Error(`llm fetch ${res.status}`);
-  const j = (await res.json()) as { content?: string; data?: string; error?: string };
-  if (j.error) throw new Error(`llm error: ${j.error}`);
-  return (j.content ?? j.data ?? "").trim();
+  const j = (await res.json()) as any;
+  // Local arm returns { content: "<text>" } | { error }. The federated egress
+  // nests the result: { content: { value | content | body:{content|error}, ... } }.
+  const c = j?.content;
+  if (typeof c === "string") {
+    if (j?.error) throw new Error(`llm error: ${j.error}`);
+    return c.trim();
+  }
+  if (j?.error) throw new Error(`llm error: ${typeof j.error === "string" ? j.error : JSON.stringify(j.error)}`);
+  if (c && typeof c === "object") {
+    const inner = c.value ?? c.content ?? c.body?.content ?? c.body?.value;
+    if (typeof inner === "string") return inner.trim();
+    const innerErr = c.body?.error ?? c.error;
+    if (innerErr) throw new Error(`llm error: ${typeof innerErr === "string" ? innerErr : JSON.stringify(innerErr)}`);
+  }
+  if (typeof j?.data === "string") return j.data.trim();
+  throw new Error(`llm unparseable response: ${JSON.stringify(j).slice(0, 120)}`);
 }
 
-async function findLlmEndpoints(): Promise<string[]> {
+async function findLlmEndpoints(): Promise<LlmProducer[]> {
   try {
     for (const shape of ["llmCompletion", "llm_completion"]) {
       const r = await fetch(`${DISCOVERY_ENDPOINT}/resolve`, {
@@ -114,16 +134,26 @@ async function findLlmEndpoints(): Promise<string[]> {
         body: JSON.stringify({ pointer: { type: "vesselCapability", shape } }),
       });
       if (!r.ok) continue;
-      const data = (await r.json()) as { content?: { vessels?: Array<{ endpoint: string; resolve_endpoint?: string; health_score?: number }> } };
+      const data = (await r.json()) as { content?: { vessels?: Array<{ vesselId?: string; endpoint: string; resolve_endpoint?: string; health_score?: number; libp2p_multiaddr?: string[] }> } };
       const vs = data.content?.vessels ?? [];
       if (vs.length === 0) continue;
-      // Return ALL producers (not just [0]) so the caller can fail over across
-      // them — including the federated hub row whose resolve_endpoint hops over
-      // libp2p to a funded arm on the peer substrate. Higher health_score first.
+      // Return ALL producers (not just [0]) so the caller can fail over across them.
+      // A FEDERATED row (carries a libp2p circuit multiaddr) is only reachable via
+      // the transport EGRESS path — its mirrored /v2/impulses/resolve resolves to the
+      // LOCAL shape-owner, not the peer. So route federated rows through
+      // /egress/resolve?vessel=<base> with the circuit multiaddr as X-Libp2p-Target;
+      // route local rows to their plain resolve endpoint. Higher health_score first.
       const sorted = vs.slice().sort((a, b) => (b.health_score ?? 0) - (a.health_score ?? 0));
-      return sorted.map((v) => {
+      return sorted.map((v): LlmProducer => {
+        const ma = Array.isArray(v.libp2p_multiaddr) ? v.libp2p_multiaddr[0] : undefined;
+        if (ma) {
+          const base = (v.vesselId ?? "").split("@")[0] ?? "";
+          const root = v.endpoint.replace(/\/$/, "");
+          return { url: `${root}/egress/resolve?vessel=${encodeURIComponent(base)}`, target: ma };
+        }
         const ep = v.resolve_endpoint ?? "/resolve";
-        return ep.startsWith("http") ? ep : `${v.endpoint.replace(/\/$/, "")}${ep.startsWith("/") ? ep : `/${ep}`}`;
+        const url = ep.startsWith("http") ? ep : `${v.endpoint.replace(/\/$/, "")}${ep.startsWith("/") ? ep : `/${ep}`}`;
+        return { url };
       });
     }
   } catch { /* fall through */ }
@@ -329,7 +359,7 @@ export async function resolvePatchWithTools(pointer: PatchWithToolsPointer): Pro
   const llmEndpoint = llmEndpoints[0]!;
   const toolsEndpoint = await findLocalToolsEndpoint();
   if (!toolsEndpoint) return structuredError("no local-tools vessel found in discovery");
-  console.error(`[patch-with-tools] start vessel=${vessel} file=${subPath} model=${model} llm=${llmEndpoint} tools=${toolsEndpoint}`);
+  console.error(`[patch-with-tools] start vessel=${vessel} file=${subPath} model=${model} llm=${llmEndpoint.url} tools=${toolsEndpoint}`);
 
   // The LLM must operate on the LIVE container path so its searches match what cutover
   // will actually stage. Stage into the mitosis tree at the end by copy.

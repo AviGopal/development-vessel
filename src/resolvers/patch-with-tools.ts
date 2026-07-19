@@ -105,7 +105,7 @@ async function llmCall(endpoint: string, prompt: string, model: string): Promise
   return (j.content ?? j.data ?? "").trim();
 }
 
-async function findLlmEndpoint(): Promise<string | null> {
+async function findLlmEndpoints(): Promise<string[]> {
   try {
     for (const shape of ["llmCompletion", "llm_completion"]) {
       const r = await fetch(`${DISCOVERY_ENDPOINT}/resolve`, {
@@ -117,13 +117,17 @@ async function findLlmEndpoint(): Promise<string | null> {
       const data = (await r.json()) as { content?: { vessels?: Array<{ endpoint: string; resolve_endpoint?: string; health_score?: number }> } };
       const vs = data.content?.vessels ?? [];
       if (vs.length === 0) continue;
-      const best = vs.sort((a, b) => (b.health_score ?? 0) - (a.health_score ?? 0))[0]!;
-      const ep = best.resolve_endpoint ?? "/resolve";
-      if (ep.startsWith("http")) return ep;
-      return `${best.endpoint.replace(/\/$/, "")}${ep.startsWith("/") ? ep : `/${ep}`}`;
+      // Return ALL producers (not just [0]) so the caller can fail over across
+      // them — including the federated hub row whose resolve_endpoint hops over
+      // libp2p to a funded arm on the peer substrate. Higher health_score first.
+      const sorted = vs.slice().sort((a, b) => (b.health_score ?? 0) - (a.health_score ?? 0));
+      return sorted.map((v) => {
+        const ep = v.resolve_endpoint ?? "/resolve";
+        return ep.startsWith("http") ? ep : `${v.endpoint.replace(/\/$/, "")}${ep.startsWith("/") ? ep : `/${ep}`}`;
+      });
     }
   } catch { /* fall through */ }
-  return null;
+  return [];
 }
 
 async function findLocalToolsEndpoint(): Promise<string | null> {
@@ -284,7 +288,7 @@ export async function resolvePatchWithTools(pointer: PatchWithToolsPointer): Pro
   const vesselsRoot = pointer.vessels_root ?? "/vessels";
   const maxIters = pointer.max_iterations ?? MAX_ITERATIONS;
   const model = pointer.model ?? "auto";
-  const fallbackModels = ["zai-org/GLM-5.2-TEE", "moonshotai/Kimi-K2.6-TEE", "deepseek-ai/DeepSeek-V3.2-TEE"].filter((m) => m !== model);
+  const fallbackModels = ["llama-3.3-70b-versatile", "mistral-small-latest", "zai-org/GLM-5.2-TEE", "moonshotai/Kimi-K2.6-TEE", "deepseek-ai/DeepSeek-V3.2-TEE"].filter((m) => m !== model);
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
 
   const derived = deriveVesselFromPath(pointer.target_file);
@@ -320,8 +324,9 @@ export async function resolvePatchWithTools(pointer: PatchWithToolsPointer): Pro
     } catch { /* best-effort */ }
   };
 
-  const llmEndpoint = await findLlmEndpoint();
-  if (!llmEndpoint) return structuredError("no llm_completion vessel found in discovery");
+  const llmEndpoints = await findLlmEndpoints();
+  if (llmEndpoints.length === 0) return structuredError("no llm_completion vessel found in discovery");
+  const llmEndpoint = llmEndpoints[0]!;
   const toolsEndpoint = await findLocalToolsEndpoint();
   if (!toolsEndpoint) return structuredError("no local-tools vessel found in discovery");
   console.error(`[patch-with-tools] start vessel=${vessel} file=${subPath} model=${model} llm=${llmEndpoint} tools=${toolsEndpoint}`);
@@ -354,6 +359,10 @@ export async function resolvePatchWithTools(pointer: PatchWithToolsPointer): Pro
       failedCallCounts.clear();
       verifyFailCounts.clear();
     }
+  // Producer/model failover state persisted ACROSS turns: once a working
+  // (endpoint, model) is found, keep it instead of re-cascading every turn.
+  let activeEndpoint = llmEndpoints[0]!;
+  let activeModel = model;
   for (let turn = 1; turn <= maxIters && !finished; turn++) {
     const lastHistIdx = history.length - 1;
     const historyBlock = history.length === 0
@@ -443,23 +452,31 @@ export async function resolvePatchWithTools(pointer: PatchWithToolsPointer): Pro
       `Emit your next action as a JSON object only.`;
 
     let raw: string;
-    let curLlmEndpoint = llmEndpoint;
-    let curModel = model;
     for (;;) {
       try {
-        raw = await llmCall(curLlmEndpoint, prompt, curModel);
+        raw = await llmCall(activeEndpoint, prompt, activeModel);
         break;
       } catch (err) {
         const msg = (err as Error).message;
-        const creditDead = /credit balance|requires more credits/i.test(msg);
-        const next = creditDead ? fallbackModels.shift() : undefined;
+        // Producer failover: on ANY provider failure (429, credit-dead, no-provider,
+        // 5xx), cascade to the next discovered llm_completion endpoint — including
+        // the federated hub row, whose resolve_endpoint hops over libp2p to a funded
+        // arm on the peer substrate. Only when every endpoint has failed for the
+        // current model do we fall through the model list and reset the endpoints.
+        const epIdx = llmEndpoints.indexOf(activeEndpoint);
+        const nextEp = epIdx >= 0 ? llmEndpoints[epIdx + 1] : undefined;
+        if (nextEp) {
+          console.error(`[patch-with-tools] llm endpoint failed (${msg.slice(0, 80)}); failing over to next producer`);
+          activeEndpoint = nextEp;
+          continue;
+        }
+        const next = fallbackModels.shift();
         if (!next) {
           return structuredError(`llm failed turn ${turn}: ${msg}`, { history, before_sha: beforeSha });
         }
-        console.error(`[patch-with-tools] model ${curModel} credit-dead; falling back to ${next}`);
-        const fallbackEndpoints: string[] = fallbackModels.map(m => curLlmEndpoint);
-        curLlmEndpoint = fallbackEndpoints.shift() ?? curLlmEndpoint;
-        curModel = next;
+        console.error(`[patch-with-tools] all endpoints exhausted for ${activeModel}; falling back to model ${next}`);
+        activeModel = next;
+        activeEndpoint = llmEndpoints[0]!;
       }
     }
     const action = parseFirstJsonObject(raw);

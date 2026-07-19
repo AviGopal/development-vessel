@@ -335,9 +335,7 @@ export async function resolveVesselMitosisStart(
     "repos",
     vessel_name,
   );
-  const sourceRoot = pointer.source_root
-    ? resolve(pointer.source_root)
-    : defaultSourceRoot;
+  const sourceRoot = pointer.source_root ? resolve(pointer.source_root) : defaultSourceRoot
 
   const stamp = isoCompact();
   const defaultMitosisRoot = `${sourceRoot}-mitosis-${stamp}`;

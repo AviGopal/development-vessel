@@ -135,7 +135,7 @@ async function fetchForSourceType(
   limit: number,
   apiKey: string | undefined,
 ): Promise<ConceptRow[]> {
-  const url = `${baseUrl}?q=${encodeURIComponent(query)}&limit=${limit * 3}&source_type=${encodeURIComponent(sourceType)}`;
+  const url = `${baseUrl}?query=${encodeURIComponent(query)}&limit=${limit * 3}&source_type=${encodeURIComponent(sourceType)}`;
   const headers: Record<string, string> = {};
   if (apiKey) headers["Authorization"] = `ApiKey ${apiKey}`;
   let raw: unknown;

@@ -613,9 +613,50 @@ export async function resolvePatchWithTools(pointer: PatchWithToolsPointer): Pro
     if (typeof args.path === "string" && args.path.startsWith("repos/")) {
       args.path = args.path.replace(/^repos\/[^/]+\//, `${vesselsRoot}/${vessel}/`);
     }
-    const result = await callTool(toolsEndpoint, tool, args);
-    console.error(`[patch-with-tools] turn ${turn} ${tool} -> ${result.ok ? "OK" : "ERR"}: ${JSON.stringify(result.body).slice(0, 160)}`);
+    // PREFIX-IDEMPOTENCE GUARD (2026-07-20): when old_string is a prefix of
+    // new_string, a re-applied fs_edit "succeeds" again and stacks duplicates
+    // until self-destruct. If the target already contains new_string, the edit
+    // is already applied — report a no-op success instead of re-applying.
+    let alreadyApplied = false;
+    if (tool === "fs_edit" && typeof args.new_string === "string" && args.new_string.length > 0) {
+      const guardNew = args.new_string;
+      const editPath = typeof args.path === "string" ? args.path : liveSrcPath;
+      const curForGuard = await readFile(editPath, "utf-8").catch(() => "");
+      alreadyApplied = curForGuard.includes(guardNew);
+    }
+    const result = alreadyApplied
+      ? { ok: true, body: { success: true, noop: true, note: "new_string already present — edit already applied; do NOT re-apply it" } as unknown }
+      : await callTool(toolsEndpoint, tool, args);
+    console.error(`[patch-with-tools] turn ${turn} ${tool} -> ${result.ok ? "OK" : "ERR"}${alreadyApplied ? " (idempotent no-op)" : ""}: ${JSON.stringify(result.body).slice(0, 160)}`);
     history.push({ turn, thought_or_action: `call ${tool}(${JSON.stringify(args).slice(0, 200)})`, tool_result: { tool, args, result: result.body, ok: result.ok } });
+
+    // VERIFIED-GREEN TERMINAL (2026-07-20, success-blindness fix): once an edit
+    // has landed (applied or already-applied) and the vessel typechecks clean,
+    // the patch IS done — terminate as success instead of waiting for the model
+    // to emit done (it commonly keeps re-applying until the abort guards fire).
+    const isEditTool = tool === "fs_edit" || tool === "code_replace_lines" || tool === "code_insert_after_line" || tool === "code_add_import" || tool === "fs_write";
+    if (result.ok && isEditTool) {
+      const curSrcAfterEdit = await readFile(liveSrcPath, "utf-8").catch(() => baseContent);
+      if (createHash("sha256").update(curSrcAfterEdit).digest("hex").slice(0, 12) !== beforeSha) {
+        const vesselDirVg = `${vesselsRoot}/${vessel}`;
+        const tcVg = await callTool(toolsEndpoint, "code_typecheck", { cwd: vesselDirVg });
+        const tcVgBody = tcVg.body as { error_lines?: string[] } | undefined;
+        const targetBaseVg = containerPath.split("/").pop() ?? containerPath;
+        const targetErrorsVg = (tcVgBody?.error_lines ?? []).filter((l) => l.includes(targetBaseVg));
+        if (targetErrorsVg.length === 0) {
+          finalReason = `verified-green: ${tool} applied and typecheck clean (auto-done at turn ${turn})`;
+          finished = true;
+          console.error(`[patch-with-tools] turn ${turn} verified-green terminal — auto-done`);
+          break;
+        }
+        history.push({
+          turn,
+          thought_or_action: `(verified-green check) edit applied but typecheck FAILED on ${targetBaseVg} — fix these errors before done`,
+          tool_result: { tool: "code_typecheck", args: { cwd: vesselDirVg }, result: { error_lines: targetErrorsVg }, ok: false },
+        });
+        continue;
+      }
+    }
 
     // Loop-break on a stuck patcher (2026-06-14): the ReAct LLM can emit the
     // SAME malformed tool call (e.g. code_replace_lines missing `text`), get the

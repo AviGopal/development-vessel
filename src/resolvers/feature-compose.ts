@@ -968,6 +968,36 @@ RULES:
 - OUTPUT FORMAT IS STRICT: respond with ONLY the JSON object. Start your response with the character \`{\` and end with \`}\`. Do NOT write any reasoning, explanation, preamble, or markdown — not even before the JSON. Any prose wastes the output budget and can truncate the plan.`;
 }
 
+// DETERMINISTIC VERBATIM-REPLACEMENT SYNTHESIS (2026-07-20, drafter-floor remedy).
+// A goal that itself carries an explicit verbatim old→new replacement — an anchor
+// instruction ("Find this exact anchor text: …" / old_string) plus a replacement
+// instruction ("Replace … with exactly: …" / new_string) around two fenced code
+// blocks — needs no LLM planner; plan-no-ops on exactly these goals was the
+// observed drafter floor. Synthesize the single edit op {file, old, new} straight
+// from the goal text; the normal apply/verify pipeline takes it from there.
+function synthesizeVerbatimEditOps(specText: string): PlanOp[] | null {
+  if (typeof specText !== "string" || specText.length === 0) return null;
+  const pathMatch = specText.match(/repos\/[\w.-]+\/[\w./-]+\.\w+/);
+  if (!pathMatch) return null;
+  const fences = [...specText.matchAll(/```[a-zA-Z]*\r?\n([\s\S]*?)```/g)].map((m) => m[1] ?? "");
+  if (fences.length !== 2) return null;
+  // Require BOTH explicit cues so ordinary prose with two code samples is never
+  // misread as a replacement instruction.
+  const hasAnchorCue = /(find|locate)\s+(this\s+)?exact\s+(anchor\s+)?text|exact\s+anchor|old[_\s]?string|anchor\s*:/i.test(specText);
+  const hasReplaceCue = /replace[\s\S]{0,300}?with(\s+(exactly|this))?\s*:|new[_\s]?string|replace\s+it\s+with/i.test(specText);
+  if (!hasAnchorCue || !hasReplaceCue) return null;
+  const oldStr = (fences[0] ?? "").replace(/\r?\n$/, "");
+  const newStr = (fences[1] ?? "").replace(/\r?\n$/, "");
+  if (oldStr.trim().length === 0 || oldStr === newStr) return null;
+  return [{
+    kind: "edit",
+    path: pathMatch[0],
+    old_string: oldStr,
+    new_string: newStr,
+    rationale: "deterministic synthesis: the goal carries a verbatim old→new replacement",
+  }];
+}
+
 // CONSULTATION-ON-AUTHOR (2026-06-28): before planning, concept_search the substrate's
 // own architectural principles (the docs ingested into concept-db, + any web evidence)
 // and inject the top matches so the plan RESPECTS them — the active-consumption wire that
@@ -1423,19 +1453,33 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
     console.log("[spec-refine] skipped");
   }
   let planRaw: string;
-  try {
-    planRaw = await llmCallWithFailover(llmEndpoints, decomposePrompt(spec, maxOps, grounding, principles + composeLessons, priorFeedback), model);
-  } catch (e) {
-    return { shape: "featureComposeReport", body: { ok: false, stage: "decompose", error: (e as Error).message } };
-  }
-  let plan = parseJsonObject(planRaw);
-  let ops = (plan?.ops as PlanOp[] | undefined) ?? [];
-  if (!plan || !Array.isArray(ops) || ops.length === 0) {
+  let plan: Json | null;
+  let ops: PlanOp[];
+  // Deterministic path first: a goal carrying an explicit verbatim old→new
+  // replacement is synthesized directly (drafter-floor remedy) — the LLM
+  // planner returned plan-no-ops on exactly these goals. Use pointer.spec (the
+  // raw goal), not the refined spec, so the verbatim blocks are untouched.
+  const verbatimOps = synthesizeVerbatimEditOps(pointer.spec);
+  if (verbatimOps) {
+    planRaw = "(deterministic verbatim-replacement synthesis; LLM planner bypassed)";
+    plan = { summary: "deterministic edit synthesized from the goal's verbatim old→new replacement", ops: verbatimOps };
+    ops = verbatimOps;
+    console.log("[decompose] deterministic verbatim-replacement synthesis applied");
+  } else {
     try {
-      planRaw = await llmCallWithFailover(llmEndpoints, decomposePrompt(spec, maxOps, grounding, principles + composeLessons, priorFeedback) + "\n\nCRITICAL RETRY: your previous plan contained NO ops (analysis prose or truncation). Output ONLY the JSON object starting with { — zero words before it, no analysis, compressed ops only.", model);
-      plan = parseJsonObject(planRaw);
-      ops = (plan?.ops as PlanOp[] | undefined) ?? [];
-    } catch { /* fall through to honest no-ops below */ }
+      planRaw = await llmCallWithFailover(llmEndpoints, decomposePrompt(spec, maxOps, grounding, principles + composeLessons, priorFeedback), model);
+    } catch (e) {
+      return { shape: "featureComposeReport", body: { ok: false, stage: "decompose", error: (e as Error).message } };
+    }
+    plan = parseJsonObject(planRaw);
+    ops = (plan?.ops as PlanOp[] | undefined) ?? [];
+    if (!plan || !Array.isArray(ops) || ops.length === 0) {
+      try {
+        planRaw = await llmCallWithFailover(llmEndpoints, decomposePrompt(spec, maxOps, grounding, principles + composeLessons, priorFeedback) + "\n\nCRITICAL RETRY: your previous plan contained NO ops (analysis prose or truncation). Output ONLY the JSON object starting with { — zero words before it, no analysis, compressed ops only.", model);
+        plan = parseJsonObject(planRaw);
+        ops = (plan?.ops as PlanOp[] | undefined) ?? [];
+      } catch { /* fall through to honest no-ops below */ }
+    }
   }
   if (!plan || !Array.isArray(ops) || ops.length === 0) {
     // Orphan-drain fix: when the intent is "author an activity" / composed-capability wrap,

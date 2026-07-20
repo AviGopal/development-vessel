@@ -28,7 +28,7 @@ interface DiscoveryResolveResponse {
   };
 }
 
-async function findLlmCompletionEndpoint(): Promise<string | null> {
+async function findLlmCompletionEndpoints(): Promise<string[]> {
   try {
     // llm-resolver-vessel advertises shape "llmCompletion" (camelCase per its
     // index.ts config). Previously this resolver queried snake_case
@@ -52,21 +52,32 @@ async function findLlmCompletionEndpoint(): Promise<string | null> {
       vessels = data.content?.vessels ?? [];
       if (vessels.length > 0) break;
     }
-    if (vessels.length === 0) return null;
+    if (vessels.length === 0) return [];
     // Skip stale localhost registrations; prefer cluster-internal endpoints.
     const reachable = vessels.filter((v) => !v.endpoint.includes("localhost"));
     const pool = reachable.length > 0 ? reachable : vessels;
-    const best = pool.sort((a, b) => (b.health_score ?? b.confidence ?? 0) - (a.health_score ?? a.confidence ?? 0))[0]!;
-    // resolve_endpoint may be either a full URL (e.g. "http://localhost:8220/resolve")
-    // or a relative path (e.g. "/resolve"). Concatenating endpoint + full-URL gives
-    // "http://127.0.0.1:8220http://localhost:8220/resolve" → invalid. Detect.
-    const resolveEp = best.resolve_endpoint ?? "/resolve";
-    if (resolveEp.startsWith("http://") || resolveEp.startsWith("https://")) {
-      return resolveEp;
+    // Order best-first by health/confidence; the caller tries each in turn and
+    // fails over to the next whenever an endpoint's arm is credit-dead or
+    // otherwise unavailable. A single credit-dead local arm must not sink the
+    // whole dispatch when a funded producer (e.g. an @<hub> arm egress-rewritten
+    // through the federation transport) is also advertised.
+    const ordered = [...pool].sort(
+      (a, b) => (b.health_score ?? b.confidence ?? 0) - (a.health_score ?? a.confidence ?? 0),
+    );
+    const endpoints: string[] = [];
+    for (const v of ordered) {
+      // resolve_endpoint may be either a full URL (e.g. "http://localhost:8220/resolve")
+      // or a relative path (e.g. "/resolve"). Concatenating endpoint + full-URL gives
+      // "http://127.0.0.1:8220http://localhost:8220/resolve" → invalid. Detect.
+      const resolveEp = v.resolve_endpoint ?? "/resolve";
+      const url = resolveEp.startsWith("http://") || resolveEp.startsWith("https://")
+        ? resolveEp
+        : `${v.endpoint.replace(/\/$/, "")}${resolveEp.startsWith("/") ? resolveEp : `/${resolveEp}`}`;
+      if (!endpoints.includes(url)) endpoints.push(url);
     }
-    return `${best.endpoint.replace(/\/$/, "")}${resolveEp.startsWith("/") ? resolveEp : `/${resolveEp}`}`;
+    return endpoints;
   } catch {
-    return null;
+    return [];
   }
 }
 
@@ -152,8 +163,10 @@ const DEFAULT_LLM_TOOLS: LlmTool[] = [
 export async function resolveLlmCompletionDispatch(
   pointer: LlmCompletionDispatchPointer,
 ): Promise<ResolverResult> {
-  const endpoint = LLM_COMPLETION_ENDPOINT_OVERRIDE || await findLlmCompletionEndpoint();
-  if (!endpoint) {
+  const endpoints = LLM_COMPLETION_ENDPOINT_OVERRIDE
+    ? [LLM_COMPLETION_ENDPOINT_OVERRIDE]
+    : await findLlmCompletionEndpoints();
+  if (endpoints.length === 0) {
     return {
       shape: "structuredError",
       body: {
@@ -184,36 +197,8 @@ export async function resolveLlmCompletionDispatch(
     ...(pointer.system_prompt ? { system: pointer.system_prompt } : {}),
   };
 
-  let res: Response;
-  try {
-    res = await fetch(endpoint, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(requestBody),
-    });
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    return {
-      shape: "structuredError",
-      body: { resolver: "llm_completion_dispatch", detail: msg, failure_mode: "cascading" },
-    };
-  }
-
-  if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    return {
-      shape: "structuredError",
-      body: {
-        resolver: "llm_completion_dispatch",
-        status: res.status,
-        detail: text.slice(0, 200),
-        failure_mode: "cascading",
-      },
-    };
-  }
-
   // llm-resolver-vessel returns { resolved: true, shape: "llmCompletion", content, usage }
-  const result = await res.json() as {
+  type LlmResolverResult = {
     resolved?: boolean;
     content?: string;
     usage?: { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number };
@@ -230,14 +215,52 @@ export async function resolveLlmCompletionDispatch(
     data?: string;
   };
 
-  if (result.error || result.resolved === false || result.success === false) {
+  // Try each advertised producer in turn; fail over to the next whenever an
+  // endpoint throws, returns non-ok, or reports resolved:false / an error
+  // (e.g. a credit-dead arm). Return the first successful completion; only
+  // surface a structuredError if every endpoint is unavailable.
+  let result: LlmResolverResult | null = null;
+  let lastFailure: { status?: number; detail: string; failure_mode: string } = {
+    detail: "No llm_completion endpoint produced a completion",
+    failure_mode: "cascading",
+  };
+  for (const endpoint of endpoints) {
+    let res: Response;
+    try {
+      res = await fetch(endpoint, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(requestBody),
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      lastFailure = { detail: msg, failure_mode: "cascading" };
+      continue;
+    }
+
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      lastFailure = { status: res.status, detail: text.slice(0, 200), failure_mode: "cascading" };
+      continue;
+    }
+
+    const candidate = await res.json().catch(() => null) as LlmResolverResult | null;
+    if (!candidate || candidate.error || candidate.resolved === false || candidate.success === false) {
+      lastFailure = {
+        detail: candidate?.error ?? "LLM vessel returned error or resolved=false",
+        failure_mode: "verifier_negative",
+      };
+      continue;
+    }
+
+    result = candidate;
+    break;
+  }
+
+  if (!result) {
     return {
       shape: "structuredError",
-      body: {
-        resolver: "llm_completion_dispatch",
-        detail: result.error ?? "LLM vessel returned error or resolved=false",
-        failure_mode: "verifier_negative",
-      },
+      body: { resolver: "llm_completion_dispatch", ...lastFailure },
     };
   }
 

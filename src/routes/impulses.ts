@@ -174,6 +174,7 @@ import { resolveDetectorCoverageScan } from "../resolvers/detector-coverage-scan
 import { resolveUiLegibilityScan } from "../resolvers/ui-legibility-scan.js";
 import { resolveSignatureClusterScan } from "../resolvers/signature-cluster-scan.js";
 import { resolveRecurringPatternCluster } from "../resolvers/recurring-pattern-cluster.js";
+import { resolveRecurringPatternConcept } from "../resolvers/recurring-pattern-concept.js";
 import { resolveBuildSignatureDetector } from "../resolvers/build-signature-detector.js";
 import { resolveCreditVesselShapes } from "../resolvers/credit-vessel-shapes.js";
 import { resolveObsidianCommandGate } from "../resolvers/obsidian-command-gate.js";
@@ -792,6 +793,8 @@ async function dispatchInner(pointer: AnyPointer): Promise<ResolverResult> {
     case "detector_coverage_scan":
       return resolveDetectorCoverageScan(p as Parameters<typeof resolveDetectorCoverageScan>[0]);
     case "recurringPatternCluster": return resolveRecurringPatternCluster(p as never);
+    case "recurringPatternConcept":
+      return await resolveRecurringPatternConcept(pointer as any);
     case "signature_cluster_scan":
       return resolveSignatureClusterScan(p as Parameters<typeof resolveSignatureClusterScan>[0]);
     case "build_signature_detector":

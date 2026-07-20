@@ -137,6 +137,7 @@ export const config = {
       // operate per-section without overflowing Anthropic's 200K prompt cap.
       "markdown_split_sections",
       "concept_truth_probe",
+      "recurringPatternConcept",
       // Deterministic stale-pointer detector + emitter (iter-082, 2026-05-30):
       // scans concept-db, stats each concept's pointer.path, POSTs substrateGap
       // for missing files. Replaces the prior LLM-heuristic detect-stale-pointer

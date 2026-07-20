@@ -121,7 +121,15 @@ async function llmCall(endpoint: string, prompt: string, model: string): Promise
     if (inner.error) {
       throw new Error(`llmCall to ${endpoint} returned federated error: ${JSON.stringify(inner.error)}`);
     }
-    content = String(inner.content ?? inner.data ?? '').trim();
+    // Hub egress envelopes carry the payload under `value` (content.value),
+    // not `content`/`data`. Without this unwrap every judge call through the
+    // hub returns "" and the semantic gate fail-closes on an unparseable
+    // verdict. patch-with-tools' llmCall already reads `value`; keep parity.
+    let picked = inner.content ?? inner.data ?? inner.value ?? '';
+    if (picked && typeof picked === 'object' && 'value' in picked) {
+      picked = picked.value ?? '';
+    }
+    content = String(picked).trim();
     resolved = inner.resolved;
   } else {
     // Handle flat llm-resolver form

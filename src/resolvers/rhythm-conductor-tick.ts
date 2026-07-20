@@ -183,12 +183,31 @@ export async function resolveRhythmConductorTick(
   const skipped: Array<{ family: string; reason: string }> = [];
   let picked = 0;
 
+  // Law 1: the family→goal mapping is behavioral — read rhythmFamilyGoal pool
+  // impulses at use time and merge them over the bootstrap FAMILY_GOALS const
+  // (pool wins), so new rhythm families mount by impulse-write, not code edit.
+  const poolGoalResp = (await fetchJson(
+    endpoint,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ impulse: { type: "poolImpulse", shape: "rhythmFamilyGoal", limit: 50 } }),
+    },
+    800,
+  )) as { body?: { impulses?: Array<{ body?: { family?: string; goal?: string } }> } } | null;
+  const poolGoals: Record<string, string> = {};
+  for (const imp of poolGoalResp?.body?.impulses ?? []) {
+    const fam = imp?.body?.family;
+    const g = imp?.body?.goal;
+    if (typeof fam === "string" && fam && typeof g === "string" && g) poolGoals[fam] = g;
+  }
+
   for (const r of candidates) {
     if (picked >= maxEnqueue) {
       skipped.push({ family: r.family, reason: "over_max_enqueue" });
       continue;
     }
-    const goal = FAMILY_GOALS[r.family];
+    const goal = poolGoals[r.family] ?? FAMILY_GOALS[r.family];
     if (!goal) {
       skipped.push({ family: r.family, reason: "no_goal_mapping" });
       continue;

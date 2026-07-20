@@ -776,8 +776,9 @@ export async function verifyPatchAddressesGap(args: {
   } catch (e) {
     // Judge unreachable: do NOT block on the judge alone (the deterministic floor
     // already passed). Treat as addresses=true-but-unverified so a flaky LLM cannot
-    // wedge landing; log surfaces it.
-    return { addresses: false, reason: `semantic judge unavailable (${(e as Error).message}); failed deterministic reachability floor`, on_live_path: true, llm_consulted: false };
+    // wedge landing; log surfaces it. (2026-07-20: code drifted to addresses:false,
+    // contradicting this contract — every judge outage sank otherwise-clean patches.)
+    return { addresses: true, reason: `semantic judge unavailable (${(e as Error).message}); deterministic floors passed — fail-open, unverified by judge`, on_live_path: true, llm_consulted: false };
   }
   const m = raw.match(/\{[\s\S]*\}/);
   const parsed = m ? (parseJsonObject(m[0]) as Partial<SemanticGateVerdict> | null) : null;
@@ -2019,7 +2020,10 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
         if (codeContext.length > 6000) break;
       }
 
-      const llmJudge = (prompt: string) => llmCall(llmEndpoint, prompt, model);
+      // 2026-07-20: route the judge through the SAME multi-endpoint failover as
+      // every other compose LLM call — the single-endpoint pin meant a credit-dead
+      // local arm (402) killed the judge with the funded hub lane one row away.
+      const llmJudge = (prompt: string) => llmCallWithFailover(llmEndpoints, prompt, model);
       // Only run the gap-relative LLM judge when a REAL gap context was threaded
       // (gap_to_feature path). A free-text spec (no pointer.gap) has no gap to judge
       // the diff against — the doc-contract on FeatureComposePointer.gap says absent →

@@ -53,6 +53,7 @@ import { resolveResolverPatternReport } from "../resolvers/resolver-pattern-repo
 import { resolveResolverTierCostSummary } from "../resolvers/resolver-tier-cost-summary.js";
 import { resolveMarkdownSplitSections } from "../resolvers/markdown-split-sections.js";
 import { resolveStalePointerEmit } from "../resolvers/stale-pointer-emit.js";
+import { default as resolveFailureModeSummary } from "../resolvers/failure-mode-summary.js";
 import { resolvePhantomTraceScan } from "../resolvers/phantom-trace-scan.js";
 import { resolveDeadEndDecisionScan } from "../resolvers/dead-end-decision-scan.js";
 import { resolveDetectorYieldRegistry } from "../resolvers/detector-yield-registry.js";
@@ -866,6 +867,8 @@ async function dispatchInner(pointer: AnyPointer): Promise<ResolverResult> {
       return await resolveFossilRankReport(pointer as any);
     case "obsidian:ui_screenshot":
       return resolveUiScreenshot(p as Parameters<typeof resolveUiScreenshot>[0]);
+    case "failure_mode_summary":
+      return resolveFailureModeSummary(pointer);
     default:
       throw new Error(`unknown shape: ${pointer.type}`);
   }

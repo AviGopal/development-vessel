@@ -39,6 +39,7 @@ export const config = {
     'vessel_health_report',
     'concept',
     'failure_count_report',
+    'failureCountReport',
     'vessel_exercise_scan',
     "activity_template",
     "assessment_summary",

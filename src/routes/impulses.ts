@@ -246,6 +246,8 @@ async function dispatchInner(pointer: AnyPointer): Promise<ResolverResult> {
       return resolveLiftDemoNoop();
     case "emit_shape":
       return resolveEmitShape(p as Parameters<typeof resolveEmitShape>[0]);
+    case "failureCountReport":
+      return resolveFailureCountReport(p as Parameters<typeof resolveFailureCountReport>[0]);
     case "contentAddressedVesselId":
       return resolveContentAddressedVesselId(p as Parameters<typeof resolveContentAddressedVesselId>[0]);
     case "git_status":

@@ -1,131 +1,72 @@
-import type { ResolverResult } from "./types.js";
+import type { ResolverResult } from "../resolvers/types.js";
 
-interface FailureCountEntry {
-  templateId: string;
-  failureCount: number;
-}
-
-interface FailureCountReportBody {
-  generatedAt: string;
-  windowHours: number;
-  topTemplates: FailureCountEntry[];
-}
-
-export async function resolveFailureCountReport(
-  _pointer: Record<string, unknown>,
-): Promise<ResolverResult> {
-  const endpoint =
-    process.env["METABOB_ENDPOINT"] ?? "http://127.0.0.1:8080";
-  const apiKey = process.env["METABOB_API_KEY"] ?? "";
-
-  const windowHours = 24;
-  const topN = 8;
-
-  // Fetch recent execution traces — we query a large page and aggregate client-side.
-  // The activity-api traces endpoint returns { traces: [...] }.
-  const url = `${endpoint}/v2/traces?limit=500&status=failure`;
-  const headers: Record<string, string> = {
-    "Content-Type": "application/json",
-  };
-  if (apiKey) {
-    headers["Authorization"] = `ApiKey ${apiKey}`;
-  }
-
-  const response = await fetch(url, {
-    method: "GET",
-    headers,
-    signal: AbortSignal.timeout(15_000),
-  });
-
-  const cutoffMs = (Math.floor(Date.now() / 1000) - windowHours * 3600) * 1000;
-
-  // Parse response; type as any so noUncheckedIndexedAccess is satisfied by guards.
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  let traces: any[] = [];
-  if (response.ok) {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const body = (await response.json()) as any;
-    const raw: unknown = body?.traces ?? body?.data ?? body?.results ?? body;
-    if (Array.isArray(raw)) {
-      traces = raw;
-    }
-  }
-
-  // Aggregate failure counts per template id within the time window.
-  const counts = new Map<string, number>();
-
-  for (const trace of traces) {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const t = trace as any;
-    // Accept both epoch-ms and ISO string timestamps.
-    const rawTs: unknown = t?.created_at ?? t?.createdAt ?? t?.started_at ?? t?.timestamp;
-    let tsMs = 0;
-    if (typeof rawTs === "number") {
-      tsMs = rawTs > 1e12 ? rawTs : rawTs * 1000;
-    } else if (typeof rawTs === "string") {
-      const parsed = new Date(rawTs).getTime();
-      tsMs = Number.isFinite(parsed) ? parsed : 0;
-    }
-    if (tsMs > 0 && tsMs < cutoffMs) {
-      continue;
-    }
-    const templateId: unknown =
-      t?.activity_template_id ??
-      t?.template_id ??
-      t?.templateId ??
-      t?.activity_id;
-    if (typeof templateId !== "string" || templateId.length === 0) {
-      continue;
-    }
-    counts.set(templateId, (counts.get(templateId) ?? 0) + 1);
-  }
-
-  // If the traces endpoint returned nothing useful, fall back to the
-  // activities/templates metrics endpoint which may expose failure counts directly.
-  if (counts.size === 0) {
-    const metricsUrl = `${endpoint}/v2/activities/templates?limit=200`;
-    const metricsResp = await fetch(metricsUrl, {
+export async function resolveFailureCountReport(pointer: { type: string } & Record<string, unknown>): Promise<ResolverResult> {
+  const endpoint = process.env.METABOB_ENDPOINT ?? "http://127.0.0.1:8080";
+  const apiKey = process.env.METABOB_API_KEY ?? "";
+  
+  const now = Date.now();
+  const twentyFourHoursAgo = now - 24 * 60 * 60 * 1000;
+  
+  const url = new URL("/v2/activities/traces", endpoint);
+  url.searchParams.set("since", String(twentyFourHoursAgo));
+  url.searchParams.set("limit", "1000");
+  
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (apiKey) headers.Authorization = `ApiKey ${apiKey}`;
+  
+  let response: Response;
+  try {
+    response = await fetch(url.toString(), {
       method: "GET",
       headers,
-      signal: AbortSignal.timeout(15_000),
+      signal: AbortSignal.timeout(10_000),
     });
-    if (metricsResp.ok) {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const metricsBody = (await metricsResp.json()) as any;
-      const templates: unknown =
-        metricsBody?.templates ?? metricsBody?.data ?? metricsBody?.results ?? metricsBody;
-      if (Array.isArray(templates)) {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        for (const tmpl of templates as any[]) {
-          const tid: unknown = tmpl?.id ?? tmpl?.template_id;
-          if (typeof tid !== "string" || tid.length === 0) continue;
-          const fc: unknown =
-            tmpl?.failure_count ??
-            tmpl?.failures ??
-            tmpl?.stats?.failure_count ??
-            tmpl?.metrics?.failure_count;
-          if (typeof fc === "number" && fc > 0) {
-            counts.set(tid, (counts.get(tid) ?? 0) + fc);
-          }
-        }
-      }
-    }
+  } catch (err) {
+    return {
+      shape: "structuredError",
+      body: { error: `Fetch failed: ${err instanceof Error ? err.message : String(err)}` },
+    };
   }
-
-  // Sort descending by count and take top N.
-  const sorted: FailureCountEntry[] = Array.from(counts.entries())
+  
+  if (!response.ok) {
+    return {
+      shape: "structuredError",
+      body: { error: `Failed to fetch traces: ${response.status} ${response.statusText}` },
+    };
+  }
+  
+  let data: any;
+  try {
+    data = await response.json();
+  } catch {
+    return {
+      shape: "structuredError",
+      body: { error: "Failed to parse traces response as JSON" },
+    };
+  }
+  
+  const traces = Array.isArray(data?.traces) ? data.traces : (Array.isArray(data) ? data : []);
+  
+  const failureCounts = new Map<string, number>();
+  
+  for (const trace of traces) {
+    const templateId = trace?.templateId ?? trace?.activity_template_id ?? trace?.activityTemplateId;
+    const outcome = trace?.outcome ?? trace?.status ?? trace?.result;
+    
+    if (!templateId) continue;
+    if (outcome !== "failure" && outcome !== "failed" && outcome !== "error") continue;
+    
+    const current = failureCounts.get(templateId) ?? 0;
+    failureCounts.set(templateId, current + 1);
+  }
+  
+  const templates = Array.from(failureCounts.entries())
     .map(([templateId, failureCount]) => ({ templateId, failureCount }))
-    .sort((a, b) => b.failureCount - a.failureCount)
-    .slice(0, topN);
-
-  const body: FailureCountReportBody = {
-    generatedAt: new Date(Math.floor(Date.now() / 1000) * 1000).toISOString(),
-    windowHours,
-    topTemplates: sorted,
-  };
-
+    .sort((a, b) => a.failureCount - b.failureCount)
+    .slice(0, 5);
+  
   return {
-    shape: "failure_count_report",
-    body,
+    shape: "failureCountReport",
+    body: { templates },
   };
 }

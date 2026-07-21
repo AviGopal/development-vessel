@@ -383,7 +383,11 @@ export async function resolveGapLifecycleScan(p: GapLifecycleScanPointer): Promi
   const detectorExpireBefore = Date.now() - detectorExpireHours * 3_600_000;
   const expiredCandidates = remainingOpen.filter((g) => {
     const t = Date.parse(g.updated_at ?? g.created_at ?? '');
-    return Number.isFinite(t) && t < (g.source === 'substrate_detected' ? detectorExpireBefore : expireBefore) && !lowValueClosed.includes(g.id!);
+    const isBaselineTypecheckBroken = g.id?.startsWith('baseline-typecheck-broken-') ?? false;
+    const isDetectorStale = Number.isFinite(t) && t < detectorExpireBefore;
+    const isExpireStale = Number.isFinite(t) && t < (g.source === 'substrate_detected' ? detectorExpireBefore : expireBefore);
+    const isBaselineTypecheckStale = isBaselineTypecheckBroken && Number.isFinite(t) && t < Date.now() - 6 * 60 * 60 * 1000;
+    return (isDetectorStale || isExpireStale || isBaselineTypecheckStale) && !lowValueClosed.includes(g.id!);
   });
   const expired: string[] = [];
   if (autoClose && !dryRun) {

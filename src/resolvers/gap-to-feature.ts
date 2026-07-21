@@ -210,6 +210,35 @@ function grepScoreFiles(srcAbs: string, vessel: string, terms: string[]): Array<
   return scored.sort((a, b) => b.score - a.score).slice(0, LOCALIZE_MAX_HITS);
 }
 
+/**
+ * Read a bounded source excerpt around the first matched terms (else the file head) so the
+ * ranking LLM picks the change-site by READING code, not guessing from a filename. Bounded
+ * (≤2 windows, ≤1200 chars) to stay within weak-model context budgets; "" on any error, so
+ * the caller degrades gracefully to filename-only ranking. This adds INFORMATION at the
+ * moment of use — it does not add localization heuristics.
+ */
+function siteExcerpt(repoRel: string, terms: string[]): string {
+  try {
+    const abs = join(RUNTIME_ROOT, repoRel.replace(/^repos\//, ""));
+    const lines = readFileSync(abs, "utf8").split("\n");
+    const marks: number[] = [];
+    for (const t of terms) {
+      const i = lines.findIndex((l) => l.includes(t));
+      if (i >= 0 && !marks.includes(i)) marks.push(i);
+      if (marks.length >= 2) break;
+    }
+    const anchors = marks.length ? marks : [0];
+    const windows = anchors.slice(0, 2).map((m) => {
+      const a = Math.max(0, m - 4);
+      const b = Math.min(lines.length, m + 10);
+      return lines.slice(a, b).map((l, k) => `${a + k + 1}: ${l}`).join("\n");
+    });
+    return windows.join("\n  …\n").slice(0, 1200);
+  } catch {
+    return "";
+  }
+}
+
 async function rankWithLlm(summary: string, hits: Array<{ file: string; score: number; matched: string[] }>): Promise<string | null> {
   if (hits.length < 2) return null;
   try {
@@ -226,12 +255,15 @@ async function rankWithLlm(summary: string, hits: Array<{ file: string; score: n
     if (!best) return null;
     const ep0 = best.resolve_endpoint ?? "/resolve";
     const endpoint = ep0.startsWith("http") ? ep0 : `${best.endpoint.replace(/\/$/, "")}${ep0.startsWith("/") ? ep0 : `/${ep0}`}`;
-    const list = hits.map((h, i) => `${i}. ${h.file} (term-matches: ${h.matched.join(", ")})`).join("\n");
-    const prompt = `A substrate gap needs the SINGLE existing source file most likely to be the change site.\n\nGAP: ${summary}\n\nCandidate files (already grep-matched on distinctive terms from the gap):\n${list}\n\nReturn ONLY the integer index of the single best file (the one whose responsibility the gap describes). If none is clearly the change site, return -1. Respond with JUST the number.`;
+    // Rank among the top candidates WITH source excerpts (bounded for weak-model budgets),
+    // so the pick is made by reading code rather than guessing from a filename.
+    const top = hits.slice(0, 5);
+    const list = top.map((h, i) => `[${i}] ${h.file} (matched: ${h.matched.join(", ")})\n${siteExcerpt(h.file, h.matched)}`).join("\n\n");
+    const prompt = `A substrate gap needs the SINGLE existing source file that is the change site. READ the code excerpts below and pick the file whose logic the gap describes.\n\nGAP: ${summary}\n\nCandidates:\n${list}\n\nReturn ONLY the integer index [0..${top.length - 1}] of the change-site file. If none fits, return -1. Respond with JUST the number.`;
     const res = await fetch(endpoint, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `ApiKey ${METABOB_API_KEY}` },
-      body: JSON.stringify({ type: "llm_completion", prompt, model: "auto", max_tokens: 16 }),
+      body: JSON.stringify({ type: "llm_completion", prompt, model: "auto", max_tokens: 24 }),
       signal: AbortSignal.timeout(LOCALIZE_LLM_TIMEOUT_MS),
     });
     if (!res.ok) return null;
@@ -240,8 +272,8 @@ async function rankWithLlm(summary: string, hits: Array<{ file: string; score: n
     const m = txt.match(/-?\d+/);
     if (!m) return null;
     const idx = parseInt(m[0], 10);
-    if (idx < 0 || idx >= hits.length) return null;
-    return hits[idx]!.file;
+    if (idx < 0 || idx >= top.length) return null;
+    return top[idx]!.file;
   } catch {
     return null;
   }

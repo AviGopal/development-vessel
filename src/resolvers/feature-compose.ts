@@ -1592,7 +1592,7 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
   const baselineTsErrors = new Map<string, Set<string>>();
   for (const v of touched) {
     const vAbs = vesselRoot(v);
-    const b = await callTool(toolsEndpoint, "shell", { command: `cd ${JSON.stringify(vAbs)} && bun run typecheck 2>&1`, cwd: REPO_ROOT });
+    const b = await callTool(toolsEndpoint, "shell", { command: `cd ${JSON.stringify(vAbs)} && ([ -d node_modules ] || bun install >/dev/null 2>&1; bun run typecheck 2>&1)`, cwd: REPO_ROOT });
     baselineTsErrors.set(v, tscErrorSet(String((b.body as { stdout?: unknown })?.stdout ?? "")));
   }
 

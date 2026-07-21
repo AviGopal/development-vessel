@@ -19,6 +19,16 @@ import { readFile } from "node:fs/promises";
 const RUNTIME_ROOT = process.env.MITOSIS_RUNTIME_DIR ?? "/vessels";
 const PROPOSALS_DIR = process.env.PROPOSALS_DIR ?? "/workspace/proposals";
 
+// COMPOSE-HORIZON DEDUP — the one selection primitive, applied at the compose horizon.
+// Ports boredom-vessel's gapGoalLastDispatchAt + GAP_GOAL_COOLDOWN_MS (src/index.ts:3451-3485)
+// and goal-host's /run-goal in-flight coalesce: a gap composed within the cooldown is
+// guaranteed-redundant work (VoI~0 for the duplicate — same gap id, only a jittering residual
+// float differs). Filter cooled gaps out of the AUTO-pick candidate set so the picker ADVANCES
+// to the next-best gap instead of re-composing the same top gap every ~60-90s tick. This is the
+// missing horizon that let cost-model-miscalibrated re-compose 17x/60min and starve self-authoring.
+const GAP_COMPOSE_COOLDOWN_MS = parseInt(process.env.GAP_COMPOSE_COOLDOWN_MS ?? "300000", 10);
+const gapComposeLastAttemptAt = new Map<string, number>();
+
 /** A repos/<vessel>/... path maps to an EXISTING file under the runtime root. */
 function repoPathExists(repoRelative: string): boolean {
   try {
@@ -1550,15 +1560,24 @@ export async function resolveGapToFeature(pointer: GapToFeaturePointer): Promise
       limit: pointer.limit ?? 1000,
     } as never);
     const gaps = ((read?.body as { gaps?: Record<string, unknown>[] })?.gaps) ?? [];
+    // Exclude gaps composed within the cooldown from AUTO-pick (per-candidate filter, exactly
+    // boredom's cooling-candidate skip) so the picker advances to the next-landable gap. Targeted
+    // picks (pointer.gap_id) BYPASS — the caller explicitly chose this gap (same carve-out as the
+    // goal-host coalesce skipping requeues, and boredom not throttling explicit requests).
+    const nowMs = Date.now();
+    const eligible = gaps.filter((g) => nowMs - (gapComposeLastAttemptAt.get(String(g.id ?? "")) ?? 0) >= GAP_COMPOSE_COOLDOWN_MS);
     gap = pointer.gap_id
       ? gaps.find((g) => g.id === pointer.gap_id) ?? gaps[0] ?? null
-      : pickMostLandable(gaps);
+      : pickMostLandable(eligible);
   } catch (e) {
     return { shape: "gapToFeatureReport", body: { ok: false, stage: "select", error: (e as Error).message } };
   }
   if (!gap) {
     return { shape: "gapToFeatureReport", body: { ok: false, stage: "select", error: "no matching open gap", category: pointer.category ?? null } };
   }
+  // Stamp the cooldown at pick-start (covers the whole compose wall time), auto-picks only —
+  // a targeted pointer.gap_id must be re-runnable on demand. Mirrors boredom's set-after-select.
+  if (!pointer.gap_id && gap.id) gapComposeLastAttemptAt.set(String(gap.id), Date.now());
   await recordApproachDecision(gap);
   // SURPRISE-ROUTED EXPLORE/EXPLOIT (2026-07-09): when-to-work-on-what is a measured
   // policy, not a habit. Low-confidence picks are NOT composed on a guess — they route

@@ -498,6 +498,16 @@ export async function resolveGapLifecycleScan(p: GapLifecycleScanPointer): Promi
   }
 
   const historyPath = "/workspace/gaps/funnel-history.jsonl";
+  // GAP-TRIPLE as a durable time-series (consistent-learning instrument): emit close_rate
+  // and detection->close latency per run so a rising close-rate / falling latency TREND is
+  // showable from funnel-history.jsonl (durability = closed_total decreases across the series).
+  // Latency uses created_at (detected_at is clobbered to close-time on the close path).
+  const _closedGaps = gaps.filter((g) => g.status === "closed");
+  const _latencies = _closedGaps
+    .map((g) => Date.parse(g.updated_at ?? "") - Date.parse(g.created_at ?? ""))
+    .filter((ms) => Number.isFinite(ms) && ms >= 0)
+    .sort((a, b) => a - b);
+  const _medianLatencyMs = _latencies.length ? _latencies[Math.floor(_latencies.length / 2)] : 0;
   const runRecord = {
     run_at: new Date().toISOString(),
     total: gaps.length,
@@ -507,7 +517,9 @@ export async function resolveGapLifecycleScan(p: GapLifecycleScanPointer): Promi
     low_value_closed: lowValueClosed.length,
     expired: expired.length,
     churned_closed: closed.length,
-    closed_total: gaps.filter((g) => g.status === "closed").length,
+    closed_total: _closedGaps.length,
+    close_rate: gaps.length ? _closedGaps.length / gaps.length : 0,
+    median_latency_ms: _medianLatencyMs,
   };
   let funnelHistory: unknown[] = [];
   try {

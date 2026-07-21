@@ -299,6 +299,39 @@ async function fetchClosedOrphanShapes(emitUrl: string, apiKey: string): Promise
   return out;
 }
 
+// Reachability pre-filter (unified selection at the goal horizon): an open
+// orphaned_capability gap whose shape has NO live producer has VoI 0 — no dispatch
+// of it can author a bridge — so retire it (open -> rejected) and every drain
+// (all of which filter status=="open") stops re-dispatching it for free. Reuses
+// the live-producer signal (liveSet from the discovery registry). Self-heals: when
+// the producer re-registers, the emit loop re-writes the gap open. Caller guards on
+// !degraded && liveSet.size>0 so a registry outage never rejects the corpus.
+async function rejectUnreachableOrphanGaps(emitUrl: string, apiKey: string, liveSet: Set<string>): Promise<string[]> {
+  const rejected: string[] = [];
+  try {
+    const r = await fetch(emitUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...(apiKey ? { Authorization: `ApiKey ${apiKey}` } : {}) },
+      body: JSON.stringify({ impulse: { pointer: { type: "substrateGap", status: "open", category: "orphaned_capability", limit: 500 } } }),
+      signal: AbortSignal.timeout(10_000),
+    });
+    const j = (await r.json()) as { body?: { gaps?: Array<{ id?: string; classification_metadata?: { shape?: string } }> } };
+    for (const g of j.body?.gaps ?? []) {
+      const id = String(g.id ?? "");
+      const shape = g.classification_metadata?.shape ?? id.replace(/^orphaned-capability-/, "");
+      if (!shape || liveSet.has(shape)) continue; // mintable — keep open
+      await fetch(emitUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...(apiKey ? { Authorization: `ApiKey ${apiKey}` } : {}) },
+        body: JSON.stringify({ impulse: { pointer: { type: "substrateGap_write", gap: { id, status: "rejected", classification_metadata: { shape, unreachable_reason: "no_live_producer" } } } } }),
+        signal: AbortSignal.timeout(10_000),
+      }).catch(() => {});
+      rejected.push(id);
+    }
+  } catch { /* best-effort */ }
+  return rejected;
+}
+
 export async function resolveOrphanedCapabilityScan(
   pointer: OrphanedCapabilityScanPointer,
 ): Promise<ResolverResult> {
@@ -341,6 +374,13 @@ export async function resolveOrphanedCapabilityScan(
     }
   }
 
+  // Retire VoI-0 orphan gaps whose shape has no live producer (see above).
+  const liveSet = new Set(liveShapes);
+  let rejectedUnreachable: string[] = [];
+  if (emit && !degraded && liveSet.size > 0) {
+    rejectedUnreachable = await rejectUnreachableOrphanGaps(emitUrl, apiKey, liveSet);
+  }
+
   return {
     shape: "orphanedCapabilityReport",
     body: {
@@ -351,6 +391,7 @@ export async function resolveOrphanedCapabilityScan(
       degraded,
       gaps_emitted: gapsEmitted,
       emitted_shapes: emitted,
+      rejected_unreachable: rejectedUnreachable,
       capability_orphans: capabilityOrphans.slice(0, 80),
       generated_at: new Date().toISOString(),
     },

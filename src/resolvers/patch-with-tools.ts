@@ -38,6 +38,16 @@ const DISCOVERY_ENDPOINT = process.env.DISCOVERY_ENDPOINT ?? "http://127.0.0.1:8
 const MAX_ITERATIONS = 30; // 2026-06-17: 16 capped mid-search (no_op); 30 is the memory-confirmed converging budget
 const PER_CALL_TIMEOUT_MS = 60_000;
 
+// Transient transport errors (the relay reservation self-heals at ~0.5 TTL, so a
+// 502 / NO_RESERVATION during that window is momentary, NOT provider exhaustion).
+// Retry the SAME endpoint a few times with backoff before cascading to another
+// producer/model — otherwise a self-healing blip needlessly abandons a funded arm.
+const MAX_TRANSIENT_RETRIES = 3;
+const TRANSIENT_BACKOFF_MS = 750;
+function isTransientTransportError(msg: string): boolean {
+  return /NO_RESERVATION|no reservation|fetch 50[234]|p2p-circuit|circuit|relay|dial(?:ed)? failed|ECONNRESET|ETIMEDOUT|socket hang up/i.test(msg);
+}
+
 export interface PatchWithToolsPointer {
   type: "patch_with_tools";
   proposal_text: string; // sanitized proposal description (no code blocks)
@@ -488,12 +498,24 @@ export async function resolvePatchWithTools(pointer: PatchWithToolsPointer): Pro
       `Emit your next action as a JSON object only.`;
 
     let raw: string;
+    const transientRetries = new Map<string, number>();
     for (;;) {
       try {
         raw = await llmCall(activeEndpoint, prompt, activeModel);
         break;
       } catch (err) {
         const msg = (err as Error).message;
+        // Transient transport blip (relay re-reservation window): retry the SAME
+        // endpoint a bounded number of times before treating it as a producer failure.
+        if (isTransientTransportError(msg)) {
+          const n = (transientRetries.get(activeEndpoint.url) ?? 0) + 1;
+          if (n <= MAX_TRANSIENT_RETRIES) {
+            transientRetries.set(activeEndpoint.url, n);
+            console.error(`[patch-with-tools] transient transport error (${msg.slice(0, 60)}); retry ${n}/${MAX_TRANSIENT_RETRIES} same endpoint after ${TRANSIENT_BACKOFF_MS * n}ms`);
+            await new Promise((r) => setTimeout(r, TRANSIENT_BACKOFF_MS * n));
+            continue;
+          }
+        }
         // Producer failover: on ANY provider failure (429, credit-dead, no-provider,
         // 5xx), cascade to the next discovered llm_completion endpoint — including
         // the federated hub row, whose resolve_endpoint hops over libp2p to a funded

@@ -730,6 +730,10 @@ export const config = {
       // traceStore counters (never a live AET scan) and emits a substrateGap
       // when row_count exceeds cap.
       "trace_store_health_observer",
+      // Law-6 class-detector (2026-07-22): reads the gap-drain drain log and
+      // flags a remedy that dispatches green but whose downstream execution
+      // aborts (no target-metric movement across N+ re-dispatches) as a livelock.
+      "remedy_effectiveness_observer",
       // Seam ③ substrate-authored resolver (2026-07-11): Real screenshot capture resolver accessing Electron remote module to capture page and return base64 PNG with dimensions
       "obsidian:ui_screenshot",
     ] as const,

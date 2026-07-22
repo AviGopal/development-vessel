@@ -20,6 +20,7 @@ import { DETECTOR_META_TICK_TEMPLATE } from "./detector-meta-tick.js";
 import { CODE_LOCALITY_MINING_TICK_TEMPLATE } from "./code-locality-mining-tick.js";
 import { DRAFT_DETECTOR_ACTIVITY_TEMPLATE } from "./draft-detector-activity.js";
 import { TRACE_STORE_HEALTH_OBSERVER_TICK_TEMPLATE } from "./trace-store-health-observer.js";
+import { REMEDY_EFFECTIVENESS_OBSERVER_TICK_TEMPLATE } from "./remedy-effectiveness-observer.js";
 import { TRACE_STORE_RECONCILE_TEMPLATE } from "./trace-store-reconcile.js";
 import { PROBE_REACHABLE_UNLEARNED_TEMPLATE } from "./probe-reachable-unlearned.js";
 import { PROBE_UNTRAVERSED_EDGE_TEMPLATE } from "./probe-untraversed-edge.js";
@@ -265,6 +266,7 @@ export { DETECTOR_META_TICK_TEMPLATE } from "./detector-meta-tick.js";
 export { CODE_LOCALITY_MINING_TICK_TEMPLATE } from "./code-locality-mining-tick.js";
 export { DRAFT_DETECTOR_ACTIVITY_TEMPLATE } from "./draft-detector-activity.js";
 export { TRACE_STORE_HEALTH_OBSERVER_TICK_TEMPLATE } from "./trace-store-health-observer.js";
+export { REMEDY_EFFECTIVENESS_OBSERVER_TICK_TEMPLATE } from "./remedy-effectiveness-observer.js";
 export { TRACE_STORE_RECONCILE_TEMPLATE } from "./trace-store-reconcile.js";
 
 export const SEED_TEMPLATES: ActivityTemplate[] = [
@@ -609,4 +611,8 @@ export const SEED_TEMPLATES: ActivityTemplate[] = [
   // gap's closer, dispatched by gap_to_feature via goal-host.
   TRACE_STORE_HEALTH_OBSERVER_TICK_TEMPLATE,
   TRACE_STORE_RECONCILE_TEMPLATE,
+  // Law-6 class-detector (2026-07-22): observes remedy effectiveness (drain-log
+  // re-dispatch + target-metric movement) and escalates green-but-aborting
+  // remedies as remedy_livelock gaps.
+  REMEDY_EFFECTIVENESS_OBSERVER_TICK_TEMPLATE,
 ];

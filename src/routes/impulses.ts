@@ -224,6 +224,7 @@ import { resolveCodeLocalityMiningTick } from "../resolvers/code-locality-mining
 import { resolveCodeLocality } from "../resolvers/code-locality.js";
 import { resolveMaintenanceLease, resolveMaintenanceLeaseWrite } from "../resolvers/maintenance-lease.js";
 import { resolveTraceStoreHealthObserver } from "../resolvers/trace-store-health-observer.js";
+import { resolveRemedyEffectivenessObserver } from "../resolvers/remedy-effectiveness-observer.js";
 import { resolveUiScreenshot } from "../resolvers/ui-screenshot.js";
 import { resolveDispatch as resolveDispatchHelper } from "./impulses.js";
 import type { ResolverResult } from "../resolvers/types.js";
@@ -406,6 +407,8 @@ async function dispatchInner(pointer: AnyPointer): Promise<ResolverResult> {
       return resolveMaintenanceLeaseWrite(p as Parameters<typeof resolveMaintenanceLeaseWrite>[0]);
     case "trace_store_health_observer":
       return resolveTraceStoreHealthObserver(p as Parameters<typeof resolveTraceStoreHealthObserver>[0]);
+    case "remedy_effectiveness_observer":
+      return resolveRemedyEffectivenessObserver(p as Parameters<typeof resolveRemedyEffectivenessObserver>[0]);
     case "gap_compose": {
       const { resolveFeatureCompose } = await import("../resolvers/feature-compose.js");
       // Walk-dispatched gap_compose rarely carries `spec`; feature-compose

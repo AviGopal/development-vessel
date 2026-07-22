@@ -70,20 +70,17 @@ export async function resolveTraceStoreHealthObserver(
 
   const rowCount = Number(traceStore.row_count ?? 0);
 
-// Fetch slow queries from activity-api
-let slowQueries: number | null = null;
-try {
-  const r = await fetch(`${apiBase}/metrics/db`, { signal: AbortSignal.timeout(8_000) });
-  if (r.ok) {
-    const metrics = (await r.json()) as Record<string, unknown>;
-    slowQueries = metrics["slow_queries"] as number | null;
-  }
-} catch (e) {
-  console.error(`Error fetching slow queries: ${e}`);
-}
+// Slow-query pressure sensor. Read the top-level slow_queries counter from the
+// /metrics/db payload already fetched above (no second, unauthenticated re-fetch).
+// Number-coerce and NaN-guard so a missing/null counter is treated as "no signal"
+// rather than a bogus gap. latency_ms.mean/p99 may be null when the sampling
+// window is empty; this path never reads them, so those nulls are inert.
+const slowRaw = stats["slow_queries"];
+const slowQueries: number | null =
+  typeof slowRaw === "number" && Number.isFinite(slowRaw) ? slowRaw : null;
 
 // Emit substrateGap if slow queries exceed threshold
-if (slowQueries !== null && slowQueries > 1000) {
+if (slowQueries !== null && slowQueries > 1000 && !dryRun) {
   const hourBucket = new Date().toISOString().slice(0, 13); // YYYY-MM-DDTHH
   const emitBody = {
     impulse: {
@@ -105,10 +102,12 @@ if (slowQueries !== null && slowQueries > 1000) {
       },
     },
   };
+  const dbApiKey = process.env["METABOB_API_KEY"];
+  const dbAuthHeader: Record<string, string> = dbApiKey ? { Authorization: `ApiKey ${dbApiKey}` } : {};
   try {
     const resp = await fetch(emitUrl, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...dbAuthHeader },
       body: JSON.stringify(emitBody),
       signal: AbortSignal.timeout(10_000),
     });

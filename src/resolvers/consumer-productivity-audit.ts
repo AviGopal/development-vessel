@@ -263,7 +263,7 @@ async function hasProductiveTrace(
   const wanted = new Set(genuineOutputs);
   try {
     const res = await fetch(
-      `${metabob.replace(/\/+$/, "")}/v2/activities/execution-traces?limit=100`,
+      `${metabob.replace(/\/+$/, "")}/v2/activities/execution-traces?limit=500`,
       { headers: { Authorization: `ApiKey ${apiKey}` }, signal: AbortSignal.timeout(timeoutMs) },
     );
     if (!res.ok) return false;

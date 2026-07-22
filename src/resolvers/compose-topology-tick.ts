@@ -85,7 +85,7 @@ export async function resolveComposeTopologyTick(
 
   // Reliably-succeeding (≥1 success / 24h).
   const since = new Date(Date.now() - 24 * 3600_000).toISOString();
-  const [succRows] = await sql(`SELECT activity_id, count() AS ok FROM activity_execution_traces WHERE executed_at >= type::datetime("${since}") AND success = true GROUP BY activity_id;`);
+  const [succRows] = await sql(`SELECT activity_id, count() AS ok FROM execution WHERE executed_at >= type::datetime("${since}") AND success = true GROUP BY activity_id;`);
   const succeeds = new Set<string>((succRows || []).filter((r: any) => (r.ok ?? 0) > 0).map((r: any) => r.activity_id));
   const reliable = real.filter((a: any) => succeeds.has(a.id));
 

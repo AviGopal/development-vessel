@@ -21,7 +21,7 @@ interface SurrealResult<T> {
 
 async function fetchTraces(limit: number): Promise<Array<{ impulse_resolutions?: Array<{ resolver_id?: string; latency_ms?: number }>; tasks?: Array<{ resolver_id?: string; duration_ms?: number }> }>> {
   const clampedLimit = Math.min(limit, 500);
-  const sql = `SELECT activity_id, duration_ms, impulse_resolutions, created_at FROM activity_execution_traces ORDER BY created_at DESC LIMIT ${clampedLimit}`;
+  const sql = `SELECT activity_id, duration_ms, impulse_resolutions, trace.tasks AS tasks, created_at FROM execution ORDER BY created_at DESC LIMIT ${clampedLimit}`;
   const credentials = Buffer.from(`${SURREALDB_USERNAME}:${SURREALDB_PASSWORD}`).toString('base64');
   const resp = await fetch(`${SURREALDB_URL}/sql`, {
     method: 'POST',

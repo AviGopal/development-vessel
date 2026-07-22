@@ -78,7 +78,7 @@ export async function resolveAdvertisedShapeCoverageScan(
   const recentlyProducedInTraces = new Set<string>();
   let trace_sample_size = 0;
   try {
-    const rows = await scanSql("SELECT output_impulse_shapes, executed_at FROM activity_execution_traces ORDER BY executed_at DESC LIMIT 2000;");
+    const rows = await scanSql("SELECT output_impulse_shapes, executed_at FROM execution ORDER BY executed_at DESC LIMIT 2000;");
     trace_sample_size = rows.length;
     for (const row of rows) {
       for (const s of stringArrayOf(row["output_impulse_shapes"])) recentlyProducedInTraces.add(s);

@@ -314,7 +314,7 @@ export async function resolveResidualShapeDiscovery(
   const rows = await surrealQuery(
     surrealUrl,
     `SELECT output_impulse_shapes, input_impulse_shapes, activity_id, executed_at ` +
-      `FROM activity_execution_traces ORDER BY executed_at DESC LIMIT ${Math.max(1, Math.floor(traceLimit))};`,
+      `FROM execution ORDER BY executed_at DESC LIMIT ${Math.max(1, Math.floor(traceLimit))};`,
   );
 
   if (rows === null) {

@@ -838,22 +838,41 @@ export function priorAttemptFeedbackBlock(meta?: Record<string, unknown> | null)
   return lines.join("\n");
 }
 
-async function groundFileSymbols(toolsEndpoint: string, verifyVessels: string[]): Promise<string> {
+async function groundFileSymbols(toolsEndpoint: string, verifyVessels: string[], targetFiles: string[] = []): Promise<string> {
   const blocks: string[] = [];
-  for (const v of verifyVessels.slice(0, 6)) {
+  const resolveSymbols = async (cmd: string, label: string): Promise<void> => {
     try {
-      const cmd = `rg -oNI --no-heading -g '*.ts' '^(export )?(async )?(function|const|let|interface|type) [A-Za-z0-9_]+' ${v}/src | sort -u | head -200`;
       const res = await fetch(`${toolsEndpoint}/v2/impulses/resolve`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...(METABOB_API_KEY ? { Authorization: `ApiKey ${METABOB_API_KEY}` } : {}) },
         body: JSON.stringify({ impulse: { pointer: { type: 'shellResult', command: cmd } } }),
         signal: AbortSignal.timeout(8000),
       });
-      if (!res.ok) continue;
+      if (!res.ok) return;
       const j = await res.json() as { body?: { stdout?: string }; content?: { stdout?: string } };
       const out = (j.body?.stdout ?? j.content?.stdout ?? '').trim();
-      if (out) blocks.push(`SYMBOLS ${v}:\n${out.slice(0, 4000)}`);
+      if (out) blocks.push(`SYMBOLS ${label}:\n${out.slice(0, 4000)}`);
     } catch { /* advisory */ }
+  };
+  // TARGET-SCOPED symbols (large-file mis-localization root): when the spec/edit_site
+  // names concrete target files, list the FULL top-level symbol set of EACH target
+  // file individually — never the whole-vessel alphabetical head-200, which truncates
+  // the edit-site's enclosing symbol out of the window and leaves an unrelated dead
+  // survivor (e.g. filterByInputSchema, first-alphabetically) as the nearest plausible
+  // pick. targetFiles carry the repos/ prefix ("repos/<vessel>/src/..."), the same
+  // REPO_ROOT-relative convention groundFileSymbols already greps for whole vessels,
+  // so each path is passed to rg verbatim (no -g glob needed for an explicit file).
+  if (targetFiles.length > 0) {
+    for (const f of targetFiles.slice(0, 4)) {
+      const cmd = `rg -oNI --no-heading '^(export )?(async )?(function|const|let|interface|type) [A-Za-z0-9_]+' ${JSON.stringify(f)} | sort -u | head -200`;
+      await resolveSymbols(cmd, f);
+    }
+    return blocks.join('\n\n');
+  }
+  // Fallback (no named target): whole-vessel symbol survey (-g '*.ts' filters the dir).
+  for (const v of verifyVessels.slice(0, 6)) {
+    const cmd = `rg -oNI --no-heading -g '*.ts' '^(export )?(async )?(function|const|let|interface|type) [A-Za-z0-9_]+' ${v}/src | sort -u | head -200`;
+    await resolveSymbols(cmd, v);
   }
   return blocks.join('\n\n');
 }
@@ -1500,8 +1519,8 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
       const contractBlock = await fetchNamedShapeContracts(spec + " " + grounding);
     if (contractBlock) grounding += "\n\nLIVE VESSEL CONTRACTS (authoritative — drafted HTTP calls MUST use one of these contracts or an existing in-file helper; NEVER invent a route or omit the Authorization header):\n" + contractBlock;
     try {
-      const symbolBlock = await groundFileSymbols(toolsEndpoint, verifyVessels);
-      if (symbolBlock) grounding += '\n\nEXISTING SYMBOLS (authoritative — reference ONLY names that appear here or that this plan itself introduces; NEVER invent a function, const, type, or field name):\n' + symbolBlock;
+      const symbolBlock = await groundFileSymbols(toolsEndpoint, verifyVessels, targetFiles);
+      if (symbolBlock) grounding += '\n\nEXISTING SYMBOLS (authoritative — these are the top-level declarations of the TARGET file(s). Do NOT INVENT a new function, const, type, or field name that is absent here. You MAY edit lines, fields, and expressions INSIDE an existing symbol, and inside an inline handler that has no top-level name (e.g. app.post("/x", async (req) => { ... })) — an in-body line/field edit at the change site is expected and does NOT require you to name a changed top-level symbol):\n' + symbolBlock;
     } catch { /* advisory */ }
     const refined = await llmCallWithFailover(llmEndpoints, refineSpecPrompt(spec, grounding, composeLessons), model);
       const trimmed = refined.trim();

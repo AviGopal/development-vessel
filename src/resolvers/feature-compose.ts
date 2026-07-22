@@ -1171,6 +1171,46 @@ function focusedSlice(content: string, cap: number, focusHints: string[]): { sli
   // 3. Head fallback (unlocalizable — no verbatim probe, no distinctive token).
   return { slice: content.slice(0, window), centered: false, head: true };
 }
+// DETERMINISTIC re-derivation window (minimal-window-swap, 2026-07-22). focusedSlice
+// step-1 only centers when a hint appears verbatim as a backtick fragment or an
+// 80-char prefix; a rationale that NAMES the edit site in prose ("the /executions GET
+// handler") without backticks falls through to the rarity-cluster step, which on a
+// large router mis-centers on a token-dense unrelated region — a 6000-char window
+// that fully EXCLUDES the true site -> the drafter re-derives against the wrong code
+// and the edit lands hollow (observed: db0cba46 centered on /templates for an
+// /executions goal). Here we pull HANDLER SIGNATURES (app.<verb>('<route>') — the one
+// construct that pins a single handler among many same-route log/comment lines) and
+// quoted intent literals out of the same hints, and center on the FIRST that is
+// UNIQUE in the live file. Override focusedSlice ONLY on a unique hit (high confidence
+// it is the true site); otherwise return null and defer to the existing heuristic — so
+// a landing that works today (goal #1: /feedback, no HTTP verb, route non-unique ->
+// null -> unchanged) is never wedged. In-process indexOf on liveContent (already read
+// from `abs`, worktree-correct under isolation) avoids code_search's RegExp-escape
+// hazard while reading the exact bytes fs_edit will target.
+function siteCenteredWindow(content: string, cap: number, hints: string[]): string | null {
+  const window = Math.min(content.length, cap, PER_FILE_SLICE);
+  if (content.length <= window) return content;
+  const text = hints.join("\n");
+  const routes = [...text.matchAll(/\/[A-Za-z0-9_][A-Za-z0-9_\-\/.]{2,}/g)].map((m) => m[0]!);
+  const verbs = [...new Set([...text.matchAll(/\b(GET|POST|PUT|PATCH|DELETE)\b/g)].map((m) => m[1]!.toLowerCase()))];
+  const probes: string[] = [];
+  // MOST distinctive: method+route handler signature -> one handler among many
+  // same-route logger/comment lines that make the bare path non-unique.
+  for (const v of verbs) for (const r of routes) { probes.push(`app.${v}('${r}'`); probes.push(`app.${v}("${r}"`); }
+  // next: quoted intent literals that ALREADY exist in the file (net-new ones miss).
+  for (const m of text.matchAll(/['"`]([^'"`\n]{8,80})['"`]/g)) probes.push(m[1]!);
+  // last: the bare route path.
+  for (const r of routes) probes.push(r);
+  probes.sort((a, b) => b.length - a.length);
+  for (const p of probes) {
+    const at = content.indexOf(p);
+    if (at >= 0 && content.indexOf(p, at + p.length) < 0) {
+      const start = Math.max(0, at - Math.floor(window / 3));
+      return content.slice(start, start + window);
+    }
+  }
+  return null;
+}
 async function groundVesselFiles(toolsEndpoint: string, verifyVessels: string[], focusHints: string[] = [], targetFiles: string[] = []): Promise<string> {
   const blocks: string[] = [];
   let contentBudget = GROUND_CONTENT_BUDGET;
@@ -1774,7 +1814,9 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
       const anchorUnusable = !effOld || n0 === 0 || n0 > 1;
       if (liveContent && anchorUnusable) {
         try {
-          const { slice: siteWindow } = focusedSlice(liveContent, GROUND_CONTENT_BUDGET, [...focusHints, op.new_string ?? "", op.rationale ?? ""]);
+          const siteHints = [...focusHints, op.new_string ?? "", op.rationale ?? ""];
+          const siteWindow = siteCenteredWindow(liveContent, GROUND_CONTENT_BUDGET, siteHints)
+            ?? focusedSlice(liveContent, GROUND_CONTENT_BUDGET, siteHints).slice;
           const g = parseJsonObject(await llmCall(
             llmEndpoint,
             `A window around the change site in ${op.path} (the file is larger; this is the relevant region):\n\n${siteWindow}\n\nMake this change: ${op.rationale ?? ""}\nIntended new content/behaviour:\n${op.new_string ?? ""}\n\nReturn ONE JSON object {"old_string":"<a verbatim substring copied EXACTLY from the window above that is UNIQUE in the file — include enough enclosing context (e.g. the containing declaration / CREATE-header line) that it cannot match any other occurrence>","new_string":"<replacement for that exact substring, preserving everything not being changed>"}. No prose, no fences. Escape newlines as \\n.`,

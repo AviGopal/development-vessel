@@ -522,8 +522,26 @@ export async function resolveGapLifecycleScan(p: GapLifecycleScanPointer): Promi
     median_latency_ms: _medianLatencyMs,
   };
   let funnelHistory: unknown[] = [];
+  if (!dryRun) {
+    try {
+      const hist = readFileSync(historyPath, "utf8");
+      const last = hist.trim().split("\n").filter(Boolean).pop();
+      if (last) {
+        const prev = JSON.parse(last) as { run_at?: string };
+        const prevRunAt = Date.parse(prev.run_at ?? "");
+        if (prevRunAt && Date.now() - prevRunAt < 300000) {
+          // Skip writing if last run was within 5 minutes
+        } else {
+          appendFileSync(historyPath, `${JSON.stringify(runRecord)}\n`);
+        }
+      } else {
+        appendFileSync(historyPath, `${JSON.stringify(runRecord)}\n`);
+      }
+    } catch {
+      appendFileSync(historyPath, `${JSON.stringify(runRecord)}\n`);
+    }
+  }
   try {
-    if (!dryRun) appendFileSync(historyPath, JSON.stringify(runRecord) + "\n");
     funnelHistory = readFileSync(historyPath, "utf-8").trim().split("\n").slice(-12).map((l) => JSON.parse(l));
   } catch {
     funnelHistory = [runRecord];

@@ -187,7 +187,7 @@ async function discoverConsumers(
     const res = await fetch(`${metabob.replace(/\/+$/, "")}/v2/activities/discover-by-shapes`, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `ApiKey ${apiKey}` },
-      body: JSON.stringify({ required_shapes: [shape], mode: "backward", limit: 25 }),
+      body: JSON.stringify({ required_shapes: [shape], mode: "backward", limit: 500 }),
       signal: AbortSignal.timeout(timeoutMs),
     });
     if (!res.ok) return [];

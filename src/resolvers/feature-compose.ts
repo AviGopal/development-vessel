@@ -276,6 +276,14 @@ export interface SemanticGateVerdict {
   // provenance for logging/report
   hard_fail?: boolean;        // true when rejected by reachability alone (no LLM call made)
   llm_consulted: boolean;
+  // TRUE only when a REAL (non-fail-open) semantic judgment produced this verdict.
+  // Code-set at the parse-success return, NEVER read from model JSON — an LLM cannot
+  // inject it. The grader (goal-host favorable-compose) requires verified:true before
+  // awarding deterministic:true, so a fail-open FAVORABLE can never earn strong credit.
+  verified?: boolean;
+  // Deterministic diff-substance (grep-derived, no LLM): changed symbols found reachable
+  // on a live path. Surfaced so the grader has a non-LLM reachability signal to require.
+  reachable_symbols?: string[];
 }
 
 /**
@@ -786,7 +794,7 @@ export async function verifyPatchAddressesGap(args: {
     // already passed). Treat as addresses=true-but-unverified so a flaky LLM cannot
     // wedge landing; log surfaces it. (2026-07-20: code drifted to addresses:false,
     // contradicting this contract — every judge outage sank otherwise-clean patches.)
-    return { addresses: true, reason: `semantic judge unavailable (${(e as Error).message}); deterministic floors passed — fail-open, unverified by judge`, on_live_path: true, llm_consulted: false };
+    return { addresses: true, reason: `semantic judge unavailable (${(e as Error).message}); deterministic floors passed — fail-open, unverified by judge`, on_live_path: true, llm_consulted: false, verified: false };
   }
   const m = raw.match(/\{[\s\S]*\}/);
   const parsed = m ? (parseJsonObject(m[0]) as Partial<SemanticGateVerdict> | null) : null;
@@ -802,6 +810,7 @@ export async function verifyPatchAddressesGap(args: {
     on_live_path: parsed.on_live_path !== false,
     ...(sus ? { suspected_real_location: sus } : {}),
     llm_consulted: true,
+    verified: true,
   };
 }
 
@@ -2162,6 +2171,18 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
         llm: llmJudge,
         runSemanticJudge: hasGapContext,
       });
+
+      // Surface the DETERMINISTIC (grep-derived, no-LLM) reachable changed symbols into
+      // the report's semantic_gate so the grader (goal-host favorable-compose) has a
+      // non-LLM substance signal it can require before awarding deterministic:true. facts
+      // are computed above (extractChangedSymbols + reachability grep), independent of the
+      // LLM verdict, so a fail-open landing gets an ACCURATE (possibly empty) list.
+      if (semantic_gate) {
+        semantic_gate = {
+          ...semantic_gate,
+          reachable_symbols: facts.filter((f) => f.reachable).map((f) => f.symbol).slice(0, 12),
+        };
+      }
 
       console.log(`[development-vessel] semantic-gate ${JSON.stringify({
         gap_id: pointer.gap?.id ?? null,

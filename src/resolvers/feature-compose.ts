@@ -1084,14 +1084,53 @@ const PER_FILE_SLICE = 6000;
 function focusedSlice(content: string, cap: number, focusHints: string[]): { slice: string; centered: boolean; head: boolean } {
   const window = Math.min(content.length, cap, PER_FILE_SLICE);
   if (content.length <= window) return { slice: content, centered: false, head: false };
-  for (const hint of focusHints) {
-    const probe = hint.trim().slice(0, 80);
-    if (probe.length < 12) continue;
-    const at = content.indexOf(probe);
-    if (at < 0) continue;
+  const centerOn = (at: number) => {
     const start = Math.max(0, at - Math.floor(window / 3));
     return { slice: content.slice(start, start + window), centered: true, head: start === 0 };
+  };
+  // 1. VERBATIM PROBES, most-distinctive first. A caller who quotes real code in
+  //    backticks (the CREATE query, the exact line to change) hands us the strongest
+  //    locator; split each fragment on ,{} so a wrapped multi-line block still yields a
+  //    matchable sub-phrase. The 80-char hint prefix (a REPLACE/ANCHOR block) is also a
+  //    probe. Longer probes first = more distinctive. indexOf hit → center on the site.
+  //    This is the fix for large-file mis-localization: a prose goal whose 80-char prefix
+  //    was un-matchable used to fall to the file HEAD and the drafter edited whatever
+  //    symbol lived there (dead code), never the deep change site.
+  const probes: string[] = [];
+  for (const hint of focusHints) {
+    for (const m of hint.matchAll(/`([^`\n]{6,200})`/g)) {
+      const frag = m[1]!.trim();
+      probes.push(frag);
+      for (const sub of frag.split(/[,{}]/).map((s) => s.trim())) if (sub.length >= 12) probes.push(sub);
+    }
   }
+  for (const hint of focusHints) { const p = hint.trim().slice(0, 80); if (p.length >= 12) probes.push(p); }
+  probes.sort((a, b) => b.length - a.length);
+  for (const probe of probes) {
+    const at = content.indexOf(probe);
+    if (at >= 0) return centerOn(at);
+  }
+  // 2. RARITY-WEIGHTED DENSEST-CLUSTER fallback (prose goals with no verbatim code):
+  //    center where the most DISTINCT hint tokens co-occur, weighting each by inverse
+  //    frequency so a rare table/type name (impulse_shape_activity_score) pins the site
+  //    over common words (query, route) that cluster in the head's imports/type-defs.
+  const toks = new Set<string>();
+  for (const hint of focusHints)
+    for (const m of hint.matchAll(/\b([A-Za-z_$][A-Za-z0-9_$]{5,})\b/g)) { const t = m[1]!; if (t.length >= 6) toks.add(t); }
+  const count = new Map<string, number>();
+  const occ: Array<{ at: number; t: string }> = [];
+  for (const t of toks) { let from = 0, c = 0; while (c < 80) { const at = content.indexOf(t, from); if (at < 0) break; occ.push({ at, t }); c++; from = at + t.length; } count.set(t, c); }
+  if (occ.length > 0) {
+    occ.sort((a, b) => a.at - b.at);
+    let best = -1, bestW = 0;
+    for (let i = 0; i < occ.length; i++) {
+      const hi = occ[i]!.at + window; const seen = new Set<string>(); let w = 0;
+      for (let j = i; j < occ.length && occ[j]!.at < hi; j++) { const t = occ[j]!.t; if (!seen.has(t)) { seen.add(t); w += 1 / Math.max(1, count.get(t) ?? 1); } }
+      if (w > bestW) { bestW = w; best = occ[i]!.at; }
+    }
+    if (best >= 0) { const start = Math.max(0, best - Math.floor(window / 6)); return { slice: content.slice(start, start + window), centered: true, head: start === 0 }; }
+  }
+  // 3. Head fallback (unlocalizable — no verbatim probe, no distinctive token).
   return { slice: content.slice(0, window), centered: false, head: true };
 }
 async function groundVesselFiles(toolsEndpoint: string, verifyVessels: string[], focusHints: string[] = []): Promise<string> {

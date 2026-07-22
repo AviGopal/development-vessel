@@ -1706,7 +1706,7 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
   const preEditContent = new Map<string, string>();
   const applied: Array<{ path: string; kind: string; ok: boolean; repaired?: boolean; detail?: string; span?: { start_line: number; end_line: number } }> = [];
   let applyFailed = false;
-  for (const op of ops) {
+  const applyOneOp = async (op: PlanOp): Promise<{ entry: (typeof applied)[number]; createdAbs?: string; editedAbs?: string; failed: boolean }> => {
     const abs = opAbs(op.path);
     if (op.kind === "create_file") {
       // local-tools fs_write does not create parent dirs — mkdir -p first so
@@ -1714,8 +1714,9 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
       const dir = abs.slice(0, abs.lastIndexOf("/"));
       await callTool(toolsEndpoint, "shell", { command: `mkdir -p ${JSON.stringify(dir)}`, cwd: REPO_ROOT });
       const r = await callTool(toolsEndpoint, "fs_write", { path: abs, content: op.content ?? "" });
-      applied.push({ path: op.path, kind: op.kind, ok: r.ok, detail: r.ok ? undefined : JSON.stringify(r.body).slice(0, 200), span: r.ok ? { start_line: 1, end_line: (op.content ?? "").split("\n").length } : undefined });
-      if (r.ok) created.push(abs); else { applyFailed = true; /* keep applying remaining ops; verify (tsc+shape-dispatch) is the real gate */ }
+      const entry = { path: op.path, kind: op.kind, ok: r.ok, detail: r.ok ? undefined : JSON.stringify(r.body).slice(0, 200), span: r.ok ? { start_line: 1, end_line: (op.content ?? "").split("\n").length } : undefined };
+      // keep applying remaining ops; verify (tsc+shape-dispatch) is the real gate
+      return { entry, createdAbs: r.ok ? abs : undefined, failed: !r.ok };
     } else {
       // Snapshot the original content BEFORE the first edit to this file, for a
       // reliable (non-git) rollback on UNFAVORABLE.
@@ -1806,8 +1807,42 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
           } catch { /* repair failed; r stays not-ok */ }
         }
       }
-      applied.push({ path: op.path, kind: op.kind, ok: r.ok, repaired, detail: r.ok ? undefined : JSON.stringify(r.body).slice(0, 200), span: r.ok ? computeEditSpan(liveContent || preEditContent.get(abs), effOld, op.new_string ?? "") : undefined });
-      if (r.ok) { if (!edited.includes(abs)) edited.push(abs); } else { applyFailed = true; /* keep applying remaining ops; verify is the real gate */ }
+      const entry = { path: op.path, kind: op.kind, ok: r.ok, repaired, detail: r.ok ? undefined : JSON.stringify(r.body).slice(0, 200), span: r.ok ? computeEditSpan(liveContent || preEditContent.get(abs), effOld, op.new_string ?? "") : undefined };
+      // keep applying remaining ops; verify is the real gate
+      return { entry, editedAbs: r.ok ? abs : undefined, failed: !r.ok };
+    }
+  };
+
+  // Draft independent ops CONCURRENTLY. Two ops that target DIFFERENT files share
+  // no mutable state (distinct fs paths, distinct preEditContent keys; typecheck
+  // runs only AFTER the whole batch), so the costly per-op work (LLM anchor-
+  // regrounding + blind-edit repair) overlaps and the draft phase collapses from
+  // sum(op latency) toward max(op latency). Ops on the SAME file MUST stay
+  // sequential and in order: a later fs_edit lands on the on-disk file already
+  // mutated by the earlier op, and both share the preEditContent[abs] rollback
+  // snapshot (captured once, on first touch). So group ops by absolute path, run
+  // the groups concurrently, keep each group's ops in original plan order, and
+  // reassemble results in original op index order so `applied` (and its downstream
+  // consumers) is byte-identical to the old serial ordering. Each op call is
+  // isolated: a throw becomes a failed `applied` entry rather than rejecting the
+  // whole batch (the old serial loop propagated throws and aborted everything).
+  {
+    const opGroups = new Map<string, number[]>();
+    ops.forEach((op, i) => { const k = opAbs(op.path); const g = opGroups.get(k); if (g) g.push(i); else opGroups.set(k, [i]); });
+    const opResults = new Array<Awaited<ReturnType<typeof applyOneOp>> | undefined>(ops.length);
+    await Promise.all([...opGroups.values()].map(async (indices) => {
+      for (const i of indices) {
+        const op = ops[i]!;
+        try { opResults[i] = await applyOneOp(op); }
+        catch (e) { opResults[i] = { entry: { path: op.path, kind: op.kind, ok: false, detail: String((e as Error)?.message ?? e).slice(0, 200) }, failed: true }; }
+      }
+    }));
+    for (const res of opResults) {
+      if (!res) continue;
+      applied.push(res.entry);
+      if (res.createdAbs) created.push(res.createdAbs);
+      if (res.editedAbs && !edited.includes(res.editedAbs)) edited.push(res.editedAbs);
+      if (res.failed) applyFailed = true;
     }
   }
 

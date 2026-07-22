@@ -342,6 +342,14 @@ export function enclosingSymbolsForHunks(diff: string, fileContents: Map<string,
   // declaration IS the enclosing top-level symbol for such hunks: its name is
   // importable/callable, so its reachability is computable like any other.
   const containerRe = /^(?:export\s+)?(?:abstract\s+)?(?:class|interface|enum)\s+([A-Za-z_$][\w$]*)\b/;
+  // A column-0 HTTP route registration (`app.post('/feedback', …)`, `router.get(…)`)
+  // IS the enclosing REACHABLE unit for any hunk in its handler body. Without this,
+  // the walk-up below skips the anonymous handler and mis-attributes the edit to the
+  // nearest preceding top-level helper (e.g. filterByInputSchema:172, zero callers) ->
+  // false dead-code hard-fail on a correctly-localized deep edit (activities.ts CREATE
+  // impulse_shape_activity_score inside app.post('/feedback')). The path tail becomes
+  // the symbol; the reachability entrypoint grep already recognizes `.post('/…tail…'`.
+  const routeRe = /^(?:[A-Za-z_$][\w$]*)\.(?:get|post|put|delete|patch|use|on)\s*\(\s*['"`]([^'"`]+)['"`]/;
   // Per-file: the changed-line texts (added `+` lines, definition stripped) so we can
   // locate them in the current file and walk upward to the enclosing declaration.
   const changedByFile = new Map<string, string[]>();
@@ -364,6 +372,8 @@ export function enclosingSymbolsForHunks(diff: string, fileContents: Map<string,
       const idx = lines.findIndex((l) => l.includes(ch));
       if (idx < 0) continue;
       for (let i = idx; i >= 0; i--) {
+        const rm = lines[i]!.match(routeRe);
+        if (rm && rm[1]) { const seg = rm[1].split("/").filter(Boolean).pop(); if (seg) { enclosing.add(seg); break; } }
         const m = lines[i]!.match(declRe) ?? lines[i]!.match(containerRe);
         if (m && m[1] && !RESERVED.has(m[1])) { enclosing.add(m[1]); break; }
       }

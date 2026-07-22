@@ -1565,6 +1565,20 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
       } catch { /* fall through to honest no-ops below */ }
     }
   }
+  // DIAGNOSTIC (localizer): the decompose plan is otherwise unlogged, so a mis-localized
+  // edit (e.g. onto a dead top-level function) is invisible. Log, per op, the target path
+  // and the old_string prefix, plus whether the GROUNDING the drafter saw even contained
+  // the mis-localized symbol vs the real target anchor — the load-bearing fact for the
+  // large-file mis-localization root.
+  try {
+    const g = typeof grounding === "string" ? grounding : "";
+    console.log(`[fc-plan] ${JSON.stringify({
+      grounding_len: g.length,
+      grounding_has_filterByInputSchema: g.includes("filterByInputSchema"),
+      grounding_has_target_create: g.includes("impulse_shape_activity_score"),
+      ops: (Array.isArray(ops) ? ops : []).map((o) => ({ kind: (o as PlanOp).kind, path: (o as PlanOp).path, old: ((o as PlanOp).old_string ?? "").slice(0, 90) })),
+    })}`);
+  } catch { /* advisory */ }
   if (!plan || !Array.isArray(ops) || ops.length === 0) {
     // Orphan-drain fix: when the intent is "author an activity" / composed-capability wrap,
     // decompose correctly yields no file-edit ops — delegate to author_composed_capability.

@@ -193,6 +193,17 @@ export const MITOSIS_TICK_TEMPLATE: ActivityTemplate = {
       outputShapes: ["json_extracted_value"],
     },
     {
+      id: "extract_gap_id",
+      description: "Extract pending.gap_id — provenance for the cutover's missing-provenance guard; a patch_with_tools staged edit must carry it to land.",
+      resolver: "json_path_extract",
+      config: {
+        type: "json_path_extract",
+        json: "{{read_pending_content}}",
+        path: "pending.gap_id",
+      },
+      outputShapes: ["json_extracted_value"],
+    },
+    {
       id: "evaluate_pair",
       description:
         "Dispatch vessel_mitosis_evaluate. Static-evaluation path (2026-06-04) runs " +
@@ -242,6 +253,7 @@ export const MITOSIS_TICK_TEMPLATE: ActivityTemplate = {
         staged_base_sha: "{{extract_base_sha_content}}",
         staged_files: "{{extract_staged_files_content}}",
         proposal_id: "{{extract_proposal_id_content}}",
+        gap_id: "{{extract_gap_id_content}}",
         evaluation_evidence: "{{evaluate_pair_content}}",
         dry_run: false,
       },

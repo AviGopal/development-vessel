@@ -1082,6 +1082,8 @@ export async function resolveApplyProposalAsPatch(pointer: ApplyProposalAsPatchP
     is_new_file: isNewFileTarget,
     vessels_root: vesselsRoot,
     workspace_root: workspaceRoot,
+    gap_id: chosen.name.replace(/-report\.json$/, ""),
+    proposal_id: pointer.proposal_id ?? chosen.name.replace(/-report\.json$/, ""),
   });
   // FAVORABLE-gate semantic no-op guard: when the RAW proposal (backticks intact)
   // says replace `A` with `B`, the staged file MUST contain B verbatim. Otherwise

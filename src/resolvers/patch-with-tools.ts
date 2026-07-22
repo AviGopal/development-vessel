@@ -67,6 +67,9 @@ export interface PatchWithToolsPointer {
    * leaves a stub that poisons the next attempt's existence check).
    */
   is_new_file?: boolean;
+  /** Provenance threaded to the cutover's missing-provenance guard. */
+  gap_id?: string;
+  proposal_id?: string;
 }
 
 type ToolCall = { tool: string; args: Record<string, unknown> };
@@ -398,6 +401,18 @@ export async function resolvePatchWithTools(pointer: PatchWithToolsPointer): Pro
   const maxAttempts = pointer.max_attempts ?? 3;
   const attemptFailures: string[] = [];
 
+  // BASELINE TYPECHECK (orphan-staged-edit fix): a large target file may carry pre-existing
+  // unrelated TS errors; grading the terminal by ABSOLUTE cleanliness makes a CORRECT edit
+  // un-finishable and the loop DISCARDS it. Snapshot the pre-edit target error set once so
+  // the terminal + salvage grade by NEW errors.
+  const targetBaseName = containerPath.split("/").pop() ?? containerPath;
+  let baselineTargetErrors = new Set<string>();
+  try {
+    const tcBase = await callTool(toolsEndpoint, "code_typecheck", { cwd: `${vesselsRoot}/${vessel}` });
+    const tcBaseBody = tcBase.body as { error_lines?: string[] } | undefined;
+    baselineTargetErrors = new Set((tcBaseBody?.error_lines ?? []).filter((l) => l.includes(targetBaseName)));
+  } catch { /* best-effort; empty set == prior absolute grading */ }
+
   for (let attempt = 1; attempt <= maxAttempts && !finished; attempt++) {
     if (attempt > 1) {
       await resetTarget();
@@ -665,7 +680,9 @@ export async function resolvePatchWithTools(pointer: PatchWithToolsPointer): Pro
         const tcVgBody = tcVg.body as { error_lines?: string[] } | undefined;
         const targetBaseVg = containerPath.split("/").pop() ?? containerPath;
         const targetErrorsVg = (tcVgBody?.error_lines ?? []).filter((l) => l.includes(targetBaseVg));
-        if (targetErrorsVg.length === 0) {
+        // Grade by NEW errors vs the pre-edit baseline, not absolute cleanliness.
+        const newTargetErrorsVg = targetErrorsVg.filter((l) => !baselineTargetErrors.has(l));
+        if (newTargetErrorsVg.length === 0) {
           finalReason = `verified-green: ${tool} applied and typecheck clean (auto-done at turn ${turn})`;
           finished = true;
           console.error(`[patch-with-tools] turn ${turn} verified-green terminal — auto-done`);
@@ -674,7 +691,7 @@ export async function resolvePatchWithTools(pointer: PatchWithToolsPointer): Pro
         history.push({
           turn,
           thought_or_action: `(verified-green check) edit applied but typecheck FAILED on ${targetBaseVg} — fix these errors before done`,
-          tool_result: { tool: "code_typecheck", args: { cwd: vesselDirVg }, result: { error_lines: targetErrorsVg }, ok: false },
+          tool_result: { tool: "code_typecheck", args: { cwd: vesselDirVg }, result: { error_lines: newTargetErrorsVg }, ok: false },
         });
         continue;
       }
@@ -716,16 +733,32 @@ export async function resolvePatchWithTools(pointer: PatchWithToolsPointer): Pro
   }
 
   if (!finished) {
-    // V38: the code tools edit liveSrcPath IN PLACE during the loop; restore the
-    // original so a failed/capped patch never corrupts live source.
+    // SALVAGE: the model may never emit `done` even after a CORRECT edit already landed
+    // (LLM-plane flakiness, or a pre-dirty file that never grades absolutely clean). Before
+    // discarding, if the live target now differs from baseline AND adds NO new target errors
+    // vs baseline, treat it as verified and fall through to the SAME staging block below.
+    const salvageSrc = await readFile(liveSrcPath, "utf-8").catch(() => baseContent);
+    if (createHash("sha256").update(salvageSrc).digest("hex").slice(0, 12) !== beforeSha) {
+      const tcSalvage = await callTool(toolsEndpoint, "code_typecheck", { cwd: `${vesselsRoot}/${vessel}` });
+      const tcSalvageBody = tcSalvage.body as { error_lines?: string[] } | undefined;
+      const newErrs = (tcSalvageBody?.error_lines ?? []).filter((l) => l.includes(targetBaseName) && !baselineTargetErrors.has(l));
+      if (newErrs.length === 0) {
+        finished = true;
+        finalReason = `salvaged: applied edit adds no new ${targetBaseName} errors vs baseline; staging despite no explicit done`;
+        console.error(`[patch-with-tools] salvage terminal — staging applied edit despite no explicit done`);
+      }
+    }
+  }
+
+  if (!finished) {
+    // RELIABLE REVERT: /vessels/<v> is NOT a git repo, so the old `git restore .` ALWAYS
+    // failed and leaked half-applied edits into live (poisoning later runs). resetTarget()
+    // is the deterministic revert (writeFile/unlink); assert it took, force a second pass.
     await resetTarget();
-    try {
-      const { execSync } = await import('node:child_process');
-      const targetDir = dirname(liveSrcPath);
-      execSync('git restore .', { cwd: targetDir, stdio: 'pipe' });
-    } catch (_restoreErr) {
-      // best-effort; log but do not mask the original error
-      console.warn('[patch-with-tools] git restore failed after exhausted attempts:', _restoreErr);
+    const revertSrc = await readFile(liveSrcPath, "utf-8").catch(() => (isNewFile ? "" : baseContent));
+    if (createHash("sha256").update(revertSrc).digest("hex").slice(0, 12) !== beforeSha) {
+      await resetTarget();
+      console.warn(`[patch-with-tools] live target still diverged after resetTarget — forced second revert (orphan-leak guard)`);
     }
     await clearAuthoringMarker(authoringMarkerPath);
     return structuredError(
@@ -768,6 +801,8 @@ export async function resolvePatchWithTools(pointer: PatchWithToolsPointer): Pro
     base_sha: beforeSha,
     staged_at: new Date().toISOString(),
     authored_by: "patch_with_tools",
+    gap_id: pointer.gap_id ?? `pwt-${vessel}-${subPath.split("/").pop() ?? subPath}`,
+    proposal: pointer.proposal_id ?? versionId,
     target_file: pointer.target_file,
     staged_files: [subPath],
     plan_turns: history.length,

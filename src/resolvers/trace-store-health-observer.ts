@@ -69,6 +69,58 @@ export async function resolveTraceStoreHealthObserver(
   }
 
   const rowCount = Number(traceStore.row_count ?? 0);
+
+// Fetch slow queries from activity-api
+let slowQueries: number | null = null;
+try {
+  const r = await fetch(`${apiBase}/metrics/db`, { signal: AbortSignal.timeout(8_000) });
+  if (r.ok) {
+    const metrics = (await r.json()) as Record<string, unknown>;
+    slowQueries = metrics["slow_queries"] as number | null;
+  }
+} catch (e) {
+  console.error(`Error fetching slow queries: ${e}`);
+}
+
+// Emit substrateGap if slow queries exceed threshold
+if (slowQueries !== null && slowQueries > 1000) {
+  const hourBucket = new Date().toISOString().slice(0, 13); // YYYY-MM-DDTHH
+  const emitBody = {
+    impulse: {
+      pointer: {
+        type: "substrateGap_write",
+        gap: {
+          id: `db_performance_slow_queries_${hourBucket}`,
+          category: "db_performance",
+          source: "substrate_detected",
+          route: "dispatchable",
+          remedy: { vessel: "goal-host-vessel", target_template_id: "development-vessel:db_performance_slow_queries" },
+          summary: `Slow queries exceeded threshold (${slowQueries})`,
+          detected_at: new Date().toISOString(),
+          status: "open",
+          classification_metadata: {
+            slow_queries: slowQueries,
+          },
+        },
+      },
+    },
+  };
+  try {
+    const resp = await fetch(emitUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(emitBody),
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (resp.ok) {
+      console.log(`Emitted substrateGap for slow queries`);
+    } else {
+      console.error(`Error emitting substrateGap: ${resp.status}`);
+    }
+  } catch (e) {
+    console.error(`Error emitting substrateGap: ${e}`);
+  }
+}
   const cap = Number(traceStore.cap ?? 0);
   const overCap = cap > 0 && rowCount > cap;
   const lastReconciledAt = (traceStore.last_reconciled_at as string | undefined) ?? null;

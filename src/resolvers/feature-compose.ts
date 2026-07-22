@@ -1133,7 +1133,7 @@ function focusedSlice(content: string, cap: number, focusHints: string[]): { sli
   // 3. Head fallback (unlocalizable — no verbatim probe, no distinctive token).
   return { slice: content.slice(0, window), centered: false, head: true };
 }
-async function groundVesselFiles(toolsEndpoint: string, verifyVessels: string[], focusHints: string[] = []): Promise<string> {
+async function groundVesselFiles(toolsEndpoint: string, verifyVessels: string[], focusHints: string[] = [], targetFiles: string[] = []): Promise<string> {
   const blocks: string[] = [];
   let contentBudget = GROUND_CONTENT_BUDGET;
   for (const v of verifyVessels.slice(0, 6)) {
@@ -1158,14 +1158,23 @@ async function groundVesselFiles(toolsEndpoint: string, verifyVessels: string[],
       // FINER grain: inject current contents while the byte budget holds. The
       // apply step already fs_reads for edits; this lets the PLANNER see existing
       // symbols/fields up front so it doesn't author a duplicate or a wrong call.
+      // TARGET-FIRST + reserved window: a spec-named / edit_site file MUST get a content
+      // window even when alphabetical noise would exhaust the shared budget first (the
+      // large-file mis-localization root — the target was file #62, budget gone by ~#5).
+      // Order targets to the FRONT and grant each a full PER_FILE_SLICE window; non-target
+      // files still honour the budget break.
+      const isTarget = (fp: string): boolean => targetFiles.includes(`repos/${vRel}/${fp}`);
+      const orderedFiles = [...files.filter(isTarget), ...files.filter((fp) => !isTarget(fp))];
       const contentParts: string[] = [];
-      for (const f of files) {
-        if (contentBudget <= 0) break;
+      for (const f of orderedFiles) {
+        const target = isTarget(f);
+        if (!target && contentBudget <= 0) break;
         try {
           const rd = await callTool(toolsEndpoint, "fs_read", { path: `${vAbs}/${f}` });
           const content = (rd.body as { content?: unknown })?.content;
           if (rd.ok && typeof content === "string") {
-            const { slice, centered, head } = focusedSlice(content, contentBudget, focusHints);
+            const effBudget = target ? Math.max(contentBudget, PER_FILE_SLICE) : contentBudget;
+            const { slice, centered, head } = focusedSlice(content, effBudget, focusHints);
             contentBudget -= slice.length;
             const truncated = slice.length < content.length
               ? (centered
@@ -1462,9 +1471,17 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
   const focusHints = [gapMeta.matched_excerpt, gapMeta.suspected_real_location, gapMeta.edit_site, ...pointer.spec.split("\n").map((l) => l.trim()).filter((l) => l.length >= 20)]
     .filter((h): h is string => typeof h === "string" && h.trim().length >= 12)
     .map((h) => h.trim());
+  // TARGET LOCATORS: the classifier's edit_site + any repos/… paths named in the spec.
+  // Capped at 4 so a verbose spec can't blow the reserved-window budget.
+  const editSiteRaw = typeof gapMeta.edit_site === "string" ? gapMeta.edit_site : "";
+  const targetFiles = Array.from(new Set(
+    [editSiteRaw, ...[...pointer.spec.matchAll(/repos\/[\w.-]+\/[\w./-]+\.\w+/g)].map((m) => m[0])]
+      .map((s) => s.replace(/:\d+.*$/, "").trim())
+      .filter((s) => /^repos\/[\w.-]+\/.+\.\w+$/.test(s)),
+  )).slice(0, 4);
   let grounding = "";
   if (verifyVessels.length > 0) {
-    try { grounding = await groundVesselFiles(toolsEndpoint, verifyVessels, focusHints); } catch { grounding = ""; }
+    try { grounding = await groundVesselFiles(toolsEndpoint, verifyVessels, focusHints, targetFiles); } catch { grounding = ""; }
   }
   // CONSULT the substrate's own architectural principles (docs ingested as concepts)
   // so the plan respects them — the active-consumption wire for the docs/web channel.
@@ -1693,23 +1710,40 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
       }
       let effOld = op.old_string ?? "";
       let groundedPre = false;
-      if (liveContent && (!effOld || !liveContent.includes(effOld))) {
+      // A non-unique anchor is as dangerous as a missing one: fs_edit lands on the FIRST
+      // occurrence, which in a large file is often dead-adjacent head code, not the named
+      // site (observed: `account_id: $account_id` matched ~line 1618 instead of the CREATE
+      // at ~4770 -> dead-code-only patch, hard-failed). Re-derive on missing OR non-unique,
+      // from a WINDOW around the change site, and accept ONLY a unique anchor; else fail closed.
+      const occurs = (hay: string, needle: string): number => (needle ? hay.split(needle).length - 1 : 0);
+      const n0 = liveContent ? occurs(liveContent, effOld) : 0;
+      const anchorNonUnique = !!effOld && n0 > 1;
+      const anchorUnusable = !effOld || n0 === 0 || n0 > 1;
+      if (liveContent && anchorUnusable) {
         try {
+          const { slice: siteWindow } = focusedSlice(liveContent, GROUND_CONTENT_BUDGET, [...focusHints, op.new_string ?? "", op.rationale ?? ""]);
           const g = parseJsonObject(await llmCall(
             llmEndpoint,
-            `Current full content of ${op.path}:\n\n${liveContent}\n\nMake this change: ${op.rationale ?? ""}\nIntended new content/behaviour:\n${op.new_string ?? ""}\n\nReturn ONE JSON object {"old_string":"<a SHORT, verbatim, UNIQUE substring copied EXACTLY from the content above — prefer a single line; it MUST appear verbatim>","new_string":"<replacement for that exact substring, preserving everything not being changed>"}. No prose, no fences. Escape newlines as \\n.`,
+            `A window around the change site in ${op.path} (the file is larger; this is the relevant region):\n\n${siteWindow}\n\nMake this change: ${op.rationale ?? ""}\nIntended new content/behaviour:\n${op.new_string ?? ""}\n\nReturn ONE JSON object {"old_string":"<a verbatim substring copied EXACTLY from the window above that is UNIQUE in the file — include enough enclosing context (e.g. the containing declaration / CREATE-header line) that it cannot match any other occurrence>","new_string":"<replacement for that exact substring, preserving everything not being changed>"}. No prose, no fences. Escape newlines as \\n.`,
             model,
           ));
-          if (g?.old_string && liveContent.includes(String(g.old_string))) {
-            effOld = String(g.old_string);
+          const cand = g?.old_string ? String(g.old_string) : "";
+          if (g && cand && occurs(liveContent, cand) === 1) {
+            effOld = cand;
             if (typeof g.new_string === "string") op.new_string = String(g.new_string);
             groundedPre = true;
           }
-        } catch { /* fall through to the planned old_string + post-failure repair */ }
+        } catch { /* fall through */ }
       }
-      let r = await callTool(toolsEndpoint, "fs_edit", { path: abs, old_string: effOld, new_string: op.new_string ?? "" });
+      // FAIL CLOSED on a non-unique anchor re-derivation could not disambiguate: never fs_edit
+      // onto the first of many occurrences. A purely MISSING anchor still falls to the existing
+      // post-failure repair (fs_edit errors cleanly on absence — no mislocalization risk).
+      const anchorRejected = anchorNonUnique && !groundedPre;
+      let r: { ok: boolean; body: Json } = anchorRejected
+        ? { ok: false, body: { error: "no_unique_anchor: refused fs_edit — planned anchor is non-unique and re-derivation found no unique substring (would mislocalize to first occurrence)" } as Json }
+        : await callTool(toolsEndpoint, "fs_edit", { path: abs, old_string: effOld, new_string: op.new_string ?? "" });
       let repaired = groundedPre && r.ok;
-      if (!r.ok) {
+      if (!r.ok && !anchorRejected) {
         // Blind-edit repair: plan-once decomposition can guess an old_string that
         // does not match the LIVE file (it planned without reading it). Read the
         // real content and re-derive a verbatim old_string for the intended

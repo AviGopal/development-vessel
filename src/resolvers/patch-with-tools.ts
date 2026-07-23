@@ -336,7 +336,7 @@ export async function resolvePatchWithTools(pointer: PatchWithToolsPointer): Pro
   const workspaceRoot = pointer.workspace_root ?? process.env.WORKSPACE_ROOT ?? "/workspace";
   const vesselsRoot = pointer.vessels_root ?? "/vessels";
   const maxIters = pointer.max_iterations ?? MAX_ITERATIONS;
-  const model = pointer.model ?? "deepseek-ai/DeepSeek-V3.2-TEE";
+  const model = pointer.model ?? "claude-sonnet-5"; // capable hub-served drafter model (see feature-compose rationale)
   const fallbackModels = ["llama-3.3-70b-versatile", "mistral-small-latest", "zai-org/GLM-5.2-TEE", "moonshotai/Kimi-K2.6-TEE", "deepseek-ai/DeepSeek-V3.2-TEE"].filter((m) => m !== model);
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
 

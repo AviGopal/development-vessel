@@ -266,7 +266,28 @@ export async function resolveLlmCompletionDispatch(
 
   const rawBody = result;
 
-  const rawText = typeof rawBody.content === "string" ? rawBody.content : (rawBody.content?.[0] as { text: string } | undefined)?.text; const toolCalls = typeof rawBody.content === "string" ? undefined : (rawBody.content?.[0] as { tool_calls: any[] } | undefined)?.tool_calls;
+  // `content` arrives in three shapes: a plain string (local direct resolve),
+  // an Anthropic-style block array (`content[0].text` — local Anthropic arm),
+  // or — on a federation SPOKE — the proxied envelope object
+  // `{shape:"llm_completion", value:<text>, ...}` returned when the hub's
+  // llm-resolver-vessel answers over libp2p. The last case previously fell
+  // through `content?.[0]` (undefined) and discarded a correctly-computed
+  // answer, starving every LLM-tier walk step (the ReAct floor). Unwrap all three.
+  const _c = rawBody.content as any;
+  const rawText = typeof _c === "string"
+    ? _c
+    : Array.isArray(_c)
+      ? (_c[0] as { text?: string } | undefined)?.text
+      : (_c && typeof _c === "object")
+        ? (_c.value ?? _c.text)
+        : undefined;
+  const toolCalls = typeof _c === "string"
+    ? undefined
+    : Array.isArray(_c)
+      ? (_c[0] as { tool_calls?: any[] } | undefined)?.tool_calls
+      : (_c && typeof _c === "object")
+        ? _c.tool_calls
+        : undefined;
   if (!rawText && !toolCalls) {
     throw new Error(`LLM completion did not return text or tool_calls: ${JSON.stringify(rawBody)}`);
   }

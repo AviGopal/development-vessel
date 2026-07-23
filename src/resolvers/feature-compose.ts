@@ -1491,7 +1491,22 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
   // needs a `name?: string;` property to pass the validation. This change directly implements that. The `gapId` path
   // is stable, and the error was a semantic_reject on line 1085, not a missing pointer.
   async function resolveFeatureComposeInner(pointer: FeatureComposePointer & { name?: string }, callerGapId?: string, ws?: ComposeWorkspace): Promise<ResolverResult> {
-  const model = pointer.model ?? "claude-sonnet-5"; // hub serves DeepSeek as a weak gpt-4-ish arm that mis-localizes; claude-sonnet-5 is hub-served (verified 200) and localizes reliably. Pragmatic capable default until shaped model-selection lands (law: tier preference should be learned, not hardcoded).
+  // Resolve model via policy endpoint; pointer.model remains highest-priority override, then policy default, then last-resort fallback.
+  const policyModel = pointer.model ??
+    (await (async () => {
+      try {
+        const r = await fetch(`${DISCOVERY_ENDPOINT}/resolve`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: `ApiKey ${METABOB_API_KEY}` },
+          body: JSON.stringify({ pointer: { type: "llmModelPolicy" } }),
+        });
+        if (!r.ok) return undefined;
+        const data = (await r.json()) as { content?: { model?: string } };
+        return data.content?.model;
+      } catch { return undefined; }
+    })()) ??
+    "claude-sonnet-5";
+  const model = policyModel;
   const llm = (prompt: string) => llmCallWithFailover(llmEndpoints, prompt, model);
   const maxOps = pointer.max_ops ?? 24;
   const dryRun = pointer.dry_run ?? false;

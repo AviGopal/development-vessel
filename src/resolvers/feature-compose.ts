@@ -1531,6 +1531,17 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
     } catch { return []; }
   }
   const llmEndpoints = [...new Set([...(await discoverAll("llm_completion")), ...(await discoverAll("llmCompletion"))])];
+  // Hub-egress fallback (law 11 data-locality + failover): when NO llm arm is
+  // discoverable locally — the local resolver de-advertises llm_completion on quota
+  // exhaustion, and a spoke does not mirror the hub's arms into its own discovery — a
+  // funded arm still lives on a peer substrate. Route to it through the federation
+  // egress by NAME; the egress picks a LIVE hub circuit from its connection table and
+  // _fedTargetVessel lands on the owning vessel on the far side. Costs nothing when a
+  // local arm exists (this branch is skipped); no hardcoded peer or endpoint.
+  if (llmEndpoints.length === 0) {
+    llmEndpoints.push(`${FED_TRANSPORT_EGRESS}/egress/resolve?vessel=llm-resolver-vessel`);
+    console.log("[feature-compose] no local llm arm discoverable — falling back to hub egress (?vessel=llm-resolver-vessel)");
+  }
   const toolsEndpoint = await discover("shellResult");
   if (llmEndpoints.length === 0 || !toolsEndpoint) {
     return { shape: "featureComposeReport", body: { ok: false, error: `endpoint discovery failed (llm=${llmEndpoints.length > 0}, tools=${!!toolsEndpoint})` } };

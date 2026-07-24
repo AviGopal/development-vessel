@@ -65,7 +65,9 @@ import { resolveCostExpectationScan } from "../resolvers/cost-expectation-scan.j
 import { resolveVesselWriteErrorScan } from "../resolvers/vessel-write-error-scan.js";
 import { resolveChainFetchFailureScan } from "../resolvers/chain-fetch-failure-scan.js";
 import { resolveConvergentValidityCheck } from "../resolvers/convergent-validity-check.js";
+
 import { resolveTraceFailurePatternReport } from "../resolvers/trace-failure-pattern-report.js";
+import { resolveError } from "../resolvers/error.js";
 import { resolveEfficiencyScan } from "../resolvers/efficiency-scan.js";
 import { resolvePerformanceReachGate } from "../resolvers/performance-reach-gate.js";
 import { resolvePerfCanaryResolve } from "../resolvers/perf-canary-resolve.js";
@@ -875,8 +877,10 @@ async function dispatchInner(pointer: AnyPointer): Promise<ResolverResult> {
       return resolveUiScreenshot(p as Parameters<typeof resolveUiScreenshot>[0]);
     case "failure_mode_summary":
       return resolveFailureModeSummary(pointer);
+    case "error":
+      return resolveError(pointer as Parameters<typeof resolveError>[0]);
     default:
-      throw new Error(`unknown shape: ${pointer.type}`);
+      throw new Error(`Unknown pointer type: ${pointer.type}`);
   }
 }
 

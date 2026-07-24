@@ -281,6 +281,7 @@ export const config = {
       // tag — the substrate learns how environment affects template choice
       // and template success, not just which template succeeds in the abstract.
       "compute_state_signature",
+      "error",
       // First-class goal dispatch (2026-06-18): any activity can spawn a (sub-)goal
       // via goal-host /run-goal, threading parent_execution_id/composition_chain so
       // the dispatched goal is a composition-child. Enables dynamic activity-graph

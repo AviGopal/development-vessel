@@ -1,5 +1,5 @@
 import { resolve, relative, join } from "path";
-import { readdir } from "node:fs/promises";
+import { readdir, stat } from "node:fs/promises";
 import type { ResolverResult } from "./types.js";
 import { assertInAnyWorkspaceForRead } from "./workspace-roots.js";
 
@@ -73,10 +73,23 @@ async function walk(
 }
 
 export async function resolveFsList(pointer: FsListPointer): Promise<ResolverResult> {
-  const workspaceRoot = process.env["WORKSPACE_ROOT"] ?? process.cwd();
+  const workspaceRoot = process.env["WORKSPACE_ROOT"] || process.cwd();
   assertInWorkspace(pointer.path, workspaceRoot);
 
-  const absPath = resolve(pointer.path);
+  // Location independence (law 11): resolve the path RELATIVE TO the workspace root, NOT
+  // process.cwd(). Otherwise the same listing (e.g. "docs") depends on where THIS vessel
+  // process happens to run — a location-dependence bug that made "count files in docs"
+  // resolve to a wrong path (../../../vessels/...) and silently return 0.
+  const absPath = resolve(workspaceRoot, pointer.path);
+
+  // Honest-reach (the vessel is the validator): a non-existent / non-directory target must
+  // FAIL, not silently return count 0 — a silent 0 lets the reach judge rubber-stamp a wrong
+  // answer ("0 files in docs" when docs plainly exists).
+  const st = await stat(absPath).catch(() => null);
+  if (!st || !st.isDirectory()) {
+    throw new Error(`fs_list: '${pointer.path}' is not an existing directory under the workspace (resolved ${absPath})`);
+  }
+
   const maxDepth = pointer.recursive ? (pointer.maxDepth ?? 10) : 0;
 
   const entries: Entry[] = [];

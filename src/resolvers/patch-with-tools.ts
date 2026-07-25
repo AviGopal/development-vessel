@@ -48,6 +48,24 @@ function isTransientTransportError(msg: string): boolean {
   return /NO_RESERVATION|no reservation|fetch 50[234]|p2p-circuit|circuit|relay|dial(?:ed)? failed|ECONNRESET|ETIMEDOUT|socket hang up/i.test(msg);
 }
 
+async function retryWithBackoff<T>(fn: () => Promise<T>, predicate: (e: unknown) => boolean): Promise<T> {
+  let attempt = 0;
+  let lastError: unknown;
+  while (attempt <= MAX_TRANSIENT_RETRIES) {
+    try {
+      return await fn();
+    } catch (e) {
+      lastError = e;
+      if (!predicate(e)) throw e;
+      attempt++;
+      if (attempt <= MAX_TRANSIENT_RETRIES) {
+        await new Promise((r) => setTimeout(r, TRANSIENT_BACKOFF_MS * attempt));
+      }
+    }
+  }
+  throw lastError;
+}
+
 export interface PatchWithToolsPointer {
   type: "patch_with_tools";
   proposal_text: string; // sanitized proposal description (no code blocks)
@@ -99,12 +117,21 @@ async function triggerMitosisTick(workspaceRoot: string, mitosisVersionId: strin
   try {
     const url = process.env["LIGHT_DISPATCH_URL"] ?? "http://127.0.0.1:8280/dispatch";
     const apiKey = process.env["METABOB_API_KEY"];
-    await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", ...(apiKey ? { Authorization: `ApiKey ${apiKey}` } : {}) },
-      body: JSON.stringify({ template_id: "development-vessel:mitosis-tick", variables: {} }),
-      signal: AbortSignal.timeout(180_000),
-    });
+    await retryWithBackoff(
+      async () =>
+        await fetch(url, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", ...(apiKey ? { Authorization: `ApiKey ${apiKey}` } : {}) },
+          body: JSON.stringify({ template_id: "development-vessel:mitosis-tick", variables: {} }),
+          signal: AbortSignal.timeout(180_000),
+        }),
+      (e) => {
+        if (e instanceof Error) {
+          return isTransientTransportError(e.message);
+        }
+        return false;
+      },
+    );
     // LANDED-SHA RECOVERY (credit == landing): the /dispatch response carries only counts +
     // output_shapes and the trace drops task bodies, so the pushed sha is read from the durable
     // cutoverApplied record the cutover appends to mitosis-applied.jsonl (same WORKSPACE_ROOT),

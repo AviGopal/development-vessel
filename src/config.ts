@@ -68,6 +68,7 @@ export const config = {
       "git_log",
       "fs_read",
       "fs_write",
+      "fileWriteResult",
       "fs_edit",
       "activity_fetch",
       "activity_create_variant",

@@ -270,6 +270,10 @@ async function dispatchInner(pointer: AnyPointer): Promise<ResolverResult> {
       return resolveFsRead(p as Parameters<typeof resolveFsRead>[0]);
     case "fs_write":
       return resolveFsWrite(p as Parameters<typeof resolveFsWrite>[0]);
+    case "fileWriteResult":
+      return await import("../resolvers/file-write-result.js").then(
+        (m) => m.fileWriteResult(pointer),
+      );
     case "fs_edit":
       return resolveFsEdit(p as Parameters<typeof resolveFsEdit>[0]);
     case "activity_fetch":

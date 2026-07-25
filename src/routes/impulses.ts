@@ -62,6 +62,7 @@ import { resolveGateSaturationScan } from "../resolvers/gate-saturation-scan.js"
 import { resolvePriorSeedEfficacyScan } from "../resolvers/prior-seed-efficacy-scan.js";
 import { resolveCompositionFlowHealthScan } from "../resolvers/composition-flow-health-scan.js";
 import { resolveCostExpectationScan } from "../resolvers/cost-expectation-scan.js";
+import { resolveHttpResponse } from "../resolvers/http-response.js";
 import { resolveVesselWriteErrorScan } from "../resolvers/vessel-write-error-scan.js";
 import { resolveChainFetchFailureScan } from "../resolvers/chain-fetch-failure-scan.js";
 import { resolveConvergentValidityCheck } from "../resolvers/convergent-validity-check.js";
@@ -370,6 +371,8 @@ async function dispatchInner(pointer: AnyPointer): Promise<ResolverResult> {
       return resolveCompositionFlowHealthScan(p as Parameters<typeof resolveCompositionFlowHealthScan>[0]);
     case "cost_expectation_scan":
       return resolveCostExpectationScan(p as Parameters<typeof resolveCostExpectationScan>[0]);
+    case "http_response":
+      return resolveHttpResponse(pointer);
     case "vessel_write_error_scan":
       return resolveVesselWriteErrorScan(p as Parameters<typeof resolveVesselWriteErrorScan>[0]);
     case "chain_fetch_failure_scan":

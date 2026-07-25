@@ -657,6 +657,7 @@ export const config = {
       "signature_cluster_scan",
       "build_signature_detector",
       "cost_expectation_scan",
+      "http_response",
       // Seam ③ (net-new resolver authoring, 2026-06-19): emits an apply-able
       // resolverAuthorProposal that scaffolds a NET-NEW resolver across the
       // three-place rule — new resolver file + test (new_files[]) plus spliced

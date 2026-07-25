@@ -230,6 +230,7 @@ import { resolveTraceStoreHealthObserver } from "../resolvers/trace-store-health
 import { resolveRemedyEffectivenessObserver } from "../resolvers/remedy-effectiveness-observer.js";
 import { resolveUiScreenshot } from "../resolvers/ui-screenshot.js";
 import { resolveDispatch as resolveDispatchHelper } from "./impulses.js";
+import { resolveFileList } from "../resolvers/file-list.js";
 import type { ResolverResult } from "../resolvers/types.js";
 
 type AnyPointer = { type: string } & Record<string, unknown>;
@@ -892,6 +893,8 @@ async function dispatchInner(pointer: AnyPointer): Promise<ResolverResult> {
       return resolveError(pointer as Parameters<typeof resolveError>[0]);
     case "execution_trace":
       return await import("../resolvers/execution-trace.js").then(m => m.executionTrace(pointer));
+    case "fileList":
+      return resolveFileList(pointer as { type: "fileList"; });
     default:
       throw new Error(`Unknown pointer type: ${pointer.type}`);
   }

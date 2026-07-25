@@ -145,6 +145,7 @@ export const config = {
       // path that overflowed the prompt cap on large concept corpora.
       "stale_pointer_emit",
       "failure_mode_summary",
+      "fileList",
       // Deterministic phantom-success-trace detector + emitter (2026-05-30):
       // scans recent execution traces for status=success AND task_count=0
       // (the F25 phantom-success-trace signature), POSTs a substrateGap per

@@ -748,6 +748,29 @@ Respond with ONLY JSON: {"addresses": boolean, "reason": "<1 sentence>", "on_liv
  * (fail-open on the JUDGE only — the deterministic hard-fail already ran) so a flaky
  * haiku call cannot wedge the loop; the deterministic dead-code filter is the floor.
  */
+// EFFECT-LESS HARD-FAIL detector (2026-07-25). A diff can pass reachability (the touched
+// handler IS live) yet change NOTHING observable. The substrate's "compose-report" mitosis
+// cutovers repeatedly landed a single unread `c.header("x-...-probe", "1")` as the WHOLE edit
+// — claiming to compose a report while doing nothing (5 confirmed via a self-authored-code
+// audit). Detect deterministically: if EVERY substantive added line is a response-header
+// emission (c.header / res.setHeader / reply.header / ctx.set), the patch is pure observability
+// with no query/body/branch change — effect-less regardless of the route being reachable.
+export function detectEffectlessHeaderOnlyDiff(diff: string): { isEffectless: boolean; headers: string[] } {
+  const added = diff.split("\n").filter((l) => l.startsWith("+") && !l.startsWith("+++"));
+  const substantive = added
+    .map((l) => l.slice(1).trim())
+    .filter((l) => l.length > 0 && !l.startsWith("//") && !l.startsWith("/*") && !l.startsWith("*") && l !== "{" && l !== "}");
+  if (substantive.length === 0) return { isEffectless: false, headers: [] };
+  const headerRe = /^(?:c\.header|res\.setHeader|reply\.header|ctx\.set)\s*\(\s*['"]([^'"]+)['"]/;
+  const headers: string[] = [];
+  for (const line of substantive) {
+    const m = line.match(headerRe);
+    if (!m) return { isEffectless: false, headers: [] }; // a non-header substantive line → real change
+    headers.push(m[1]!);
+  }
+  return { isEffectless: headers.length > 0, headers };
+}
+
 export async function verifyPatchAddressesGap(args: {
   gapSummary: string;
   gapMeta?: Record<string, unknown>;
@@ -795,6 +818,20 @@ export async function verifyPatchAddressesGap(args: {
   // wrongly return addresses=false). Having cleared reachability + stub, PASS.
   if (args.runSemanticJudge === false) {
     return { addresses: false, reason: "no gap context (free-text spec) — failed semantic gate", on_live_path: true, llm_consulted: false };
+  }
+  // Deterministic EFFECT-LESS floor (gap-driven path only — free-text already returned above).
+  // A gap that says "compose a report" is NOT closed by adding an unread response header; reject
+  // before spending an LLM judge call. Scoped to gap edits, so a legit "add a header" free-text
+  // goal is unaffected.
+  const effectless = detectEffectlessHeaderOnlyDiff(args.diff);
+  if (effectless.isEffectless) {
+    return {
+      addresses: false,
+      reason: `effect-less patch: the only substantive change is response-header emission (${effectless.headers.join(", ")}) — nothing observable (query/body/branch) is composed for the gap`,
+      on_live_path: true,
+      hard_fail: true,
+      llm_consulted: false,
+    };
   }
   let raw = "";
   try {

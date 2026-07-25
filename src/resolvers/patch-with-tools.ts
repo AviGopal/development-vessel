@@ -92,13 +92,10 @@ function structuredError(detail: string, body: Record<string, unknown> = {}): Re
 // so a correct, typecheck-clean staged patch could sit unlanded indefinitely
 // (the reach-on-rolled-back / staged-but-unlanded half of the cutover-reliability
 // defect). Best-effort: if dispatch fails, boredom selects mitosis-tick later.
-async function triggerMitosisTick(): Promise<void> {
-  // AWAIT the mitosis-tick dispatch (was fire-and-forget) so the stage->cutover
-  // apply completes synchronously before the compose returns — a clean, typecheck-
-  // verified staged patch must not be stranded on a best-effort fetch + an
-  // unreliable boredom fallback (the staged-but-unlanded half of the cutover
-  // reliability defect). mitosis-tick runs vessel_mitosis_evaluate + vessel_
-  // mitosis_cutover(dry_run:false), which commits+pushes to origin.
+type MitosisLanding = { landed: boolean; new_git_sha: string | null; push_status: string | null };
+
+async function triggerMitosisTick(workspaceRoot: string, mitosisVersionId: string): Promise<MitosisLanding> {
+  const none: MitosisLanding = { landed: false, new_git_sha: null, push_status: null };
   try {
     const url = process.env["LIGHT_DISPATCH_URL"] ?? "http://127.0.0.1:8280/dispatch";
     const apiKey = process.env["METABOB_API_KEY"];
@@ -108,7 +105,28 @@ async function triggerMitosisTick(): Promise<void> {
       body: JSON.stringify({ template_id: "development-vessel:mitosis-tick", variables: {} }),
       signal: AbortSignal.timeout(180_000),
     });
-  } catch { /* best-effort: boredom selects mitosis-tick later */ }
+    // LANDED-SHA RECOVERY (credit == landing): the /dispatch response carries only counts +
+    // output_shapes and the trace drops task bodies, so the pushed sha is read from the durable
+    // cutoverApplied record the cutover appends to mitosis-applied.jsonl (same WORKSPACE_ROOT),
+    // reverse-scanned for OUR mitosis_version_id with push_status==="pushed" (a real commit+push,
+    // never a reverted/local-only cutover, which write elsewhere). Absent => landed:false (honest).
+    try {
+      const logPath = join(workspaceRoot, "mitosis-applied.jsonl");
+      const lines = (await readFile(logPath, "utf8")).split("\n").filter((l) => l.trim());
+      for (let i = lines.length - 1; i >= 0; i--) {
+        let rec: { body?: { mitosis_version_id?: string; push_status?: string; new_git_sha?: string } };
+        try { rec = JSON.parse(lines[i] as string); } catch { continue; }
+        const b = rec.body ?? {};
+        if (b.mitosis_version_id === mitosisVersionId) {
+          if (b.push_status === "pushed" && typeof b.new_git_sha === "string" && b.new_git_sha.trim()) {
+            return { landed: true, new_git_sha: b.new_git_sha.trim(), push_status: "pushed" };
+          }
+          return { landed: false, new_git_sha: null, push_status: b.push_status ?? null };
+        }
+      }
+    } catch { /* no applied log yet => not landed */ }
+    return none;
+  } catch { return none; /* best-effort: boredom selects mitosis-tick later */ }
 }
 
 type LlmProducer = { url: string; target?: string };
@@ -815,11 +833,15 @@ export async function resolvePatchWithTools(pointer: PatchWithToolsPointer): Pro
   }
 
   await clearAuthoringMarker(authoringMarkerPath);
-  await triggerMitosisTick(); // self-propel stage→cutover synchronously; do not strand a clean staged patch
+  const _landing = await triggerMitosisTick(workspaceRoot, versionId); // self-propel stage→cutover synchronously; recover the pushed sha
   return {
     shape: "mitosisStaged",
     body: {
       dispatched: true,
+      landed: _landing.landed,
+      landed_sha: _landing.new_git_sha,
+      new_git_sha: _landing.new_git_sha,
+      push_status: _landing.push_status,
       vessel_name: vessel,
       mitosis_root: mitosisRoot,
       mitosis_version_id: versionId,

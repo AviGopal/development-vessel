@@ -893,8 +893,10 @@ async function dispatchInner(pointer: AnyPointer): Promise<ResolverResult> {
       return resolveError(pointer as Parameters<typeof resolveError>[0]);
     case "execution_trace":
       return await import("../resolvers/execution-trace.js").then(m => m.executionTrace(pointer));
-    case "fileList":
-      return resolveFileList(pointer as { type: "fileList"; });
+    case "fileList": {
+      const { resolveFileList } = await import("../resolvers/file-list.js");
+      return resolveFileList(pointer as Parameters<typeof resolveFileList>[0]);
+    }
     default:
       throw new Error(`Unknown pointer type: ${pointer.type}`);
   }

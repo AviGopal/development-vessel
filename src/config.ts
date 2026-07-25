@@ -159,6 +159,7 @@ export const config = {
       // (add a downstream consumer), so it routes to the drafter, not vessel-
       // authoring. Same constitutional principle (concept_9ldsmRgqSTd5).
       "dead_end_decision_scan",
+      "execution_trace",
       // Detector-fleet self-inventory (2026-06-19): joins gap provenance
       // (classification_metadata.detector) × gap outcomes (landed/churned/open)
       // × scheduling (selector snapshot picks) into a per-detector yield row,

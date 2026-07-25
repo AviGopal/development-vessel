@@ -1,17 +1,14 @@
-import type { ResolverResult } from "./types.js";
+import type { ResolverResult } from "../resolvers/types.js";
 
-export interface GitStatusPointer {
-  type: "git_status";
-  cwd?: string;
-}
-
-export async function resolveGitStatus(pointer: GitStatusPointer): Promise<ResolverResult> {
-  const cwd = pointer.cwd;
-  const proc = Bun.spawn(["git", "status", "--porcelain"], { cwd, stdout: "pipe", stderr: "pipe" });
-  const [stdout, stderr] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
-  ]);
-  const exitCode = await proc.exited;
-  return { shape: "commandResult", body: { exitCode, stdout, stderr } };
+export async function resolveGitStatus(pointer: Readonly<{ type: "gitStatus" }>): Promise<ResolverResult> {
+  const repoPath = process.env.GOAL_HOST_VESSEL_REPO ?? "/workspace/goal-host-vessel";
+  const result = await fetch(`file://${repoPath}/.git/HEAD`, { signal: AbortSignal.timeout(5000) });
+  if (!result.ok) {
+    return { shape: "gitStatus", body: { error: `failed to read HEAD: HTTP ${result.status}` } };
+  }
+  const headRef = await result.text();
+  const commitHash = headRef.trim().startsWith("ref: ")
+    ? await Bun.file(`${repoPath}/${headRef.trim().slice(5)}`).text()
+    : headRef.trim();
+  return { shape: "gitStatus", body: { commitHash } };
 }

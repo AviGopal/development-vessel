@@ -718,6 +718,8 @@ export const config = {
       "project_thread_scan",
       // Seam ③ substrate-authored resolver (2026-07-04): solicitation_outcome_scan
       "solicitation_outcome_scan",
+      // Seam ③ substrate-authored resolver (2026-07-05): human_input
+      "human_input",
       // Seam ③ substrate-authored resolver (2026-07-05): code_locality_mining_tick
       "code_locality_mining_tick",
       // Seam ③ substrate-authored resolver (2026-07-05): code_locality

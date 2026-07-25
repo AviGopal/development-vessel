@@ -302,6 +302,10 @@ async function dispatchInner(pointer: AnyPointer): Promise<ResolverResult> {
       return resolveObsidianVesselCount(pointer);
     case "unknown_shape_report":
       return resolveUnknownShapeReport(p as Parameters<typeof resolveUnknownShapeReport>[0]);
+    case "human_input": {
+      const { resolveHumanInput } = await import("../resolvers/human-input.js");
+      return resolveHumanInput(p as Parameters<typeof resolveHumanInput>[0]);
+    }
     case "docs_align_scan": {
       const { resolveDocsAlignScan } = await import("../resolvers/docs-align-scan.js");
       return resolveDocsAlignScan(pointer as import("../resolvers/docs-align-scan.js").DocsAlignScanPointer);

@@ -116,7 +116,7 @@ async function triggerMitosisTick(workspaceRoot: string, mitosisVersionId: strin
   const none: MitosisLanding = { landed: false, new_git_sha: null, push_status: null };
   try {
     const url = process.env["LIGHT_DISPATCH_URL"] ?? "http://127.0.0.1:8280/dispatch";
-    const apiKey = process.env["METABOB_API_KEY"];
+    const apiKey = process.env["METABOB_API_KEY"] ?? "";
     await retryWithBackoff(
       async () =>
         await fetch(url, {

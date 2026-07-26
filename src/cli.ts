@@ -16,7 +16,7 @@ async function seedTemplates(): Promise<void> {
   const { resolveActivityCreateVariant } = await import("./resolvers/activity-create-variant.js");
   const { METABOB_ENDPOINT, METABOB_API_KEY } = await import("./config.js");
 
-  // SEED-IF-EMPTY (2026-06-23): only populate the catalogue on a COLD start.
+  // SEED-IF-EMPTY: only populate the catalogue on a COLD start.
   // ExecStartPost re-ran this full 103-template seed on EVERY dev-vessel restart,
   // and the mitosis cutover loop restarts the vessel every ~5min — so each cutover
   // (a) flooded activity-api with 103 no-op UPSERTs + cache-busts, and worse (b)
@@ -25,62 +25,34 @@ async function seedTemplates(): Promise<void> {
   // learning loop (variant-first repair, ribosome extraction, Thompson promotion)
   // like any other — not be reset on restart. So if the catalogue already holds
   // templates, leave them be.
-  try {
-    const r = await fetch(`${METABOB_ENDPOINT}/v2/activities/templates?limit=1`, {
-      headers: METABOB_API_KEY ? { Authorization: `ApiKey ${METABOB_API_KEY}` } : {},
-      signal: AbortSignal.timeout(10_000),
-    });
-    if (r.ok) {
-      const body = (await r.json()) as { templates?: unknown[]; total?: number };
-      const count = body.total ?? (Array.isArray(body.templates) ? body.templates.length : 0);
-      if (count > 0) {
-        console.log(
-          `Catalogue already populated (>=${count}) — skipping seed. These activities now evolve via the learning loop (variant/ribosome/Thompson), not the static seed; re-seeding would clobber learned versions.`,
-        );
-        return;
+  const catalogueEmpty = await (async () => {
+    try {
+      const r = await fetch(`${METABOB_ENDPOINT}/v2/activities/templates?limit=1`, {
+        headers: METABOB_API_KEY ? { Authorization: `ApiKey ${METABOB_API_KEY}` } : {},
+        signal: AbortSignal.timeout(10_000),
+      });
+      if (r.ok) {
+        const body = (await r.json()) as { templates?: unknown[]; total?: number };
+        const count = body.total ?? (Array.isArray(body.templates) ? body.templates.length : 0);
+        if (count > 0) {
+          console.log(
+            `Catalogue already populated (>=${count}) — skipping seed. These activities now evolve via the learning loop (variant/ribosome/Thompson), not the static seed; re-seeding would clobber learned versions.`,
+          );
+          return false;
+        }
+        console.log("Catalogue empty — cold start, seeding bootstrap templates.");
+        return true;
       }
-      console.log("Catalogue empty — cold start, seeding bootstrap templates.");
-    } else {
       console.warn(`Catalogue check returned HTTP ${r.status}; proceeding to seed (cold-start safety).`);
+      return true;
+    } catch (e) {
+      // Check failed (activity-api not ready / transient) — fall through and seed:
+      // an empty catalogue is worse than a redundant seed on the rare failure path.
+      console.warn(`Catalogue-empty check failed (${(e as Error).message}); proceeding to seed.`);
+      return true;
     }
-  } catch (e) {
-    // Check failed (activity-api not ready / transient) — fall through and seed:
-    // an empty catalogue is worse than a redundant seed on the rare failure path.
-    console.warn(`Catalogue-empty check failed (${(e as Error).message}); proceeding to seed.`);
-  }
-
-  // SEED-IF-EMPTY (2026-06-23): only populate the catalogue on a COLD start.
-  // ExecStartPost re-ran this full 103-template seed on EVERY dev-vessel restart,
-  // and the mitosis cutover loop restarts the vessel every ~5min — so each cutover
-  // (a) flooded activity-api with 103 no-op UPSERTs + cache-busts, and worse (b)
-  // CLOBBERED the substrate's own learned/evolved versions of these templates back
-  // to the static operator seed. Once seeded, these activities must evolve via the
-  // learning loop (variant-first repair, ribosome extraction, Thompson promotion)
-  // like any other — not be reset on restart. So if the catalogue already holds
-  // templates, leave them be.
-  try {
-    const r = await fetch(`${METABOB_ENDPOINT}/v2/activities/templates?limit=1`, {
-      headers: METABOB_API_KEY ? { Authorization: `ApiKey ${METABOB_API_KEY}` } : {},
-      signal: AbortSignal.timeout(10_000),
-    });
-    if (r.ok) {
-      const body = (await r.json()) as { templates?: unknown[]; total?: number };
-      const count = body.total ?? (Array.isArray(body.templates) ? body.templates.length : 0);
-      if (count > 0) {
-        console.log(
-          `Catalogue already populated (>=${count}) — skipping seed. These activities now evolve via the learning loop (variant/ribosome/Thompson), not the static seed; re-seeding would clobber learned versions.`,
-        );
-        return;
-      }
-      console.log("Catalogue empty — cold start, seeding bootstrap templates.");
-    } else {
-      console.warn(`Catalogue check returned HTTP ${r.status}; proceeding to seed (cold-start safety).`);
-    }
-  } catch (e) {
-    // Check failed (activity-api not ready / transient) — fall through and seed:
-    // an empty catalogue is worse than a redundant seed on the rare failure path.
-    console.warn(`Catalogue-empty check failed (${(e as Error).message}); proceeding to seed.`);
-  }
+  })();
+  if (!catalogueEmpty) return;
 
   console.log(`Uploading ${SEED_TEMPLATES.length} bootstrap templates...`);
   const results: Array<{ name: string; variantId: string }> = [];

@@ -345,6 +345,15 @@ export function startRegistryChangeObserver(
             execution_id: (d["executionId"] as string | undefined) ?? (d["execution_id"] as string | undefined),
             output_shapes: (d["outputShapes"] as string[] | undefined) ?? (d["output_shapes"] as string[] | undefined),
           };
+        } else if (parsed["type"] === "lifecycle:execution:refined") {
+          // Bus-emitted refinement event from refine-on-disagreement resolver.
+          const d = (parsed["data"] ?? {}) as Record<string, unknown>;
+          event = {
+            type: "lifecycle:execution:succeeded",
+            activity_template_id: (d["templateId"] as string | undefined) ?? (d["activity_template_id"] as string | undefined),
+            execution_id: (d["executionId"] as string | undefined) ?? (d["execution_id"] as string | undefined),
+            output_shapes: (d["outputShapes"] as string[] | undefined) ?? (d["output_shapes"] as string[] | undefined),
+          };
         } else {
           event = parsed as LifecycleEvent;
         }

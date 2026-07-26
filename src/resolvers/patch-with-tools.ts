@@ -60,15 +60,12 @@ async function retryWithBackoff<T>(fn: () => Promise<T>, predicate: (e: unknown)
       return await fn();
     } catch (e) {
       lastError = e;
+      // Immediately surface semantic_reject failures; they are unrecoverable and would repeat on recommit
+      if (isSemanticReject(e)) throw e;
       // Retry on transient transport errors OR syntax_break failures only
       const shouldRetry = predicate(e) || isTransientTransportError(String(e)) || (typeof e === 'object' && e !== null && 'type' in e && (e as { type?: string }).type === 'syntax_break');
-      if (isSemanticReject(e)) {
-        // semantic_reject failures are NOT retried; they indicate an unrecoverable semantic mismatch
-        // that would repeat on recommit, so we surface the error immediately and do not retry
-        throw e;
-      }
       if (!shouldRetry) throw e;
-      attempt++;
+      attempt++
       if (attempt <= MAX_TRANSIENT_RETRIES) {
         await new Promise((r) => setTimeout(r, TRANSIENT_BACKOFF_MS * attempt));
       }

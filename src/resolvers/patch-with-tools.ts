@@ -48,6 +48,10 @@ function isTransientTransportError(msg: string): boolean {
   return /NO_RESERVATION|no reservation|fetch 50[234]|p2p-circuit|circuit|relay|dial(?:ed)? failed|ECONNRESET|ETIMEDOUT|socket hang up/i.test(msg);
 }
 
+function isSemanticReject(e: unknown): boolean {
+  return typeof e === 'object' && e !== null && 'type' in e && (e as { type?: string }).type === 'semantic_reject';
+}
+
 async function retryWithBackoff<T>(fn: () => Promise<T>, predicate: (e: unknown) => boolean): Promise<T> {
   let attempt = 0;
   let lastError: unknown;
@@ -57,7 +61,7 @@ async function retryWithBackoff<T>(fn: () => Promise<T>, predicate: (e: unknown)
     } catch (e) {
       lastError = e;
       // Retry on transient transport errors OR semantic_reject failures
-      const shouldRetry = predicate(e) || (typeof e === 'object' && e !== null && 'type' in e && (e.type === 'semantic_reject' || e.type === 'syntax_break'));
+      const shouldRetry = predicate(e) || isSemanticReject(e) || (typeof e === 'object' && e !== null && 'type' in e && (e as { type?: string }).type === 'syntax_break');
       if (!shouldRetry) throw e;
       attempt++;
       if (attempt <= MAX_TRANSIENT_RETRIES) {

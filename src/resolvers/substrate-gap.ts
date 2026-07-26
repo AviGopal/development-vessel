@@ -89,6 +89,18 @@ export interface SubstrateGap {
   detected_at: string;
   status: "open" | "closed" | "rejected";
   closed_by_memory_note_id?: string; // populated by gap-closing activity
+  // L7 gap-triple plumbing (all optional, backward-compatible):
+  // first_detected_at is the EARLIEST detection, never overwritten by a
+  // re-emission's detected_at — the anchor for durability/recurrence.
+  first_detected_at?: string;
+  // closed_at is stamped on the transition INTO "closed" — the anchor for
+  // detection->close latency. Cleared when a closed gap is reopened.
+  closed_at?: string;
+  // closed_by_trace records the trace that closed the gap, when one is in scope.
+  closed_by_trace?: string;
+  // reopen_count increments each time a previously-closed gap is re-detected as
+  // open (recurrence) — a durable fix keeps this at 0.
+  reopen_count?: number;
   route?: "dispatchable" | "composable" | "human_required";
   remedy?: { vessel: string; impulse_type?: string; goal?: string };
   classification_metadata?: Record<string, unknown>;
@@ -166,6 +178,22 @@ async function loadGaps(): Promise<SubstrateGap[]> {
   }
 }
 
+// In-process serialization of the gap store's read-modify-write. Concurrent
+// writers previously (a) shared a single gaps.json.tmp — one writer's rename
+// unlinked the tmp out from under another, surfacing as ENOENT — and (b)
+// interleaved load→modify→save, silently dropping gaps written between a
+// racer's load and its save. withGapLock chains the critical section so writes
+// apply strictly one at a time; the per-write UNIQUE tmp name below is
+// belt-and-suspenders so no two writers ever touch the same tmp path.
+let __gapWriteChain: Promise<unknown> = Promise.resolve();
+let __gapTmpCounter = 0;
+function withGapLock<T>(fn: () => Promise<T>): Promise<T> {
+  const run = __gapWriteChain.then(fn, fn);
+  // Keep the chain alive regardless of this write's outcome.
+  __gapWriteChain = run.then(() => undefined, () => undefined);
+  return run;
+}
+
 async function saveGaps(gaps: SubstrateGap[]): Promise<void> {
   const dir = join(workspaceRoot(), "gaps");
   // recursive:true should be idempotent, but bun throws EEXIST on an
@@ -175,7 +203,9 @@ async function saveGaps(gaps: SubstrateGap[]): Promise<void> {
   await mkdir(dir, { recursive: true }).catch((err: NodeJS.ErrnoException) => {
     if (err?.code !== "EEXIST") throw err;
   });
-  const tmp = GAPS_PATH() + ".tmp";
+  // UNIQUE per-write tmp (pid + monotonic counter): never shared, so a
+  // concurrent rename cannot unlink this writer's tmp (the observed ENOENT).
+  const tmp = GAPS_PATH() + `.${process.pid}.${__gapTmpCounter++}.tmp`;
   await writeFile(tmp, JSON.stringify(gaps, null, 2), "utf-8");
   await rename(tmp, GAPS_PATH());
 }
@@ -230,6 +260,15 @@ export async function resolveSubstrateGapWrite(
   }
   const now = new Date().toISOString();
   const incoming = (pointer as SubstrateGapWritePointer).gap;
+  // A trace id in scope for a close, when the caller provides one — either an
+  // explicit closed_by_trace field or a trace-ish key on classification_metadata.
+  // Optional: absent when no trace closed the gap. Backward-compatible.
+  const closedMeta = (incoming.classification_metadata ?? {}) as Record<string, unknown>;
+  const closedByTrace: string | undefined =
+    (typeof incoming.closed_by_trace === "string" ? incoming.closed_by_trace : undefined) ??
+    (typeof closedMeta["closed_by_trace"] === "string" ? (closedMeta["closed_by_trace"] as string) : undefined) ??
+    (typeof closedMeta["closing_trace_id"] === "string" ? (closedMeta["closing_trace_id"] as string) : undefined) ??
+    (typeof closedMeta["trace_id"] === "string" ? (closedMeta["trace_id"] as string) : undefined);
 
   // Description gate: an OPEN gap must describe itself — empty summaries and
   // uninterpolated {{placeholders}} are noise the drafter cannot act on.
@@ -259,6 +298,13 @@ export async function resolveSubstrateGapWrite(
     updated_at: now,
   };
 
+  // Serialize the ENTIRE read-modify-write: load, dedup/gate decisions, lineage
+  // stamping and save all run inside one critical section (see withGapLock), so
+  // concurrent writers can neither share a tmp nor drop each other's gaps.
+  const outcome = await withGapLock(async (): Promise<
+    | { early: ResolverResult }
+    | { action: "created" | "updated"; summaryChanged: boolean; classKey: string }
+  > => {
   const gaps = await loadGaps();
   // Dedup by gap CLASS (volatile-stripped id), not raw id, so timestamped
   // re-emissions of the same logical gap upsert onto one row instead of
@@ -284,11 +330,13 @@ export async function resolveSubstrateGapWrite(
     if (openInClass >= cap) {
       console.log(`[gap-consumption-gate] refused open write: class=${classKey} open=${openInClass} cap=${cap} id=${gap.id}`);
       return {
-        shape: "structuredError",
-        body: {
-          resolver: "substrateGap_write",
-          failure_mode: "consumption_gated",
-          detail: `gap ${gap.id}: class "${classKey}" already has ${openInClass} open rows (cap ${cap}) — consumption-gated: class backlog un-drained`,
+        early: {
+          shape: "structuredError",
+          body: {
+            resolver: "substrateGap_write",
+            failure_mode: "consumption_gated",
+            detail: `gap ${gap.id}: class "${classKey}" already has ${openInClass} open rows (cap ${cap}) — consumption-gated: class backlog un-drained`,
+          },
         },
       };
     }
@@ -303,8 +351,10 @@ export async function resolveSubstrateGapWrite(
   // closed rows for classes that were never opened, bloating the store.
   if (existingIdx < 0 && gap.status !== "open") {
     return {
-      shape: "substrateGapWriteResult",
-      body: { id: gap.id, action: "skipped", skip_reason: "close_without_open_row", gap_class: classKey },
+      early: {
+        shape: "substrateGapWriteResult",
+        body: { id: gap.id, action: "skipped", skip_reason: "close_without_open_row", gap_class: classKey },
+      },
     };
   }
 
@@ -329,14 +379,46 @@ export async function resolveSubstrateGapWrite(
       if (!(k in inMeta)) inMeta[k] = exMeta[k];
     }
     gap.classification_metadata = inMeta;
+
+    // L7 gap-triple lineage on the existing row (all backward-compatible):
+    // first_detected_at anchors durability — never overwritten by a
+    // re-emission's detected_at; seed from the oldest known detection.
+    gap.first_detected_at = existing.first_detected_at ?? existing.detected_at ?? gap.detected_at;
+    // Carry reopen_count forward; a recurrence (closed → re-detected open)
+    // increments it so durability (does the fix hold?) is measurable.
+    gap.reopen_count = existing.reopen_count ?? 0;
+    if (existing.status === "closed" && gap.status === "open") {
+      gap.reopen_count = (existing.reopen_count ?? 0) + 1;
+    }
+    // closed_at / closed_by_trace: stamp on the transition INTO closed (the
+    // detection->close latency anchor), preserve while it stays closed, clear
+    // once it is open again.
+    if (gap.status === "closed") {
+      gap.closed_at = existing.status === "closed" ? (existing.closed_at ?? now) : now;
+      const trace = closedByTrace ?? existing.closed_by_trace;
+      if (trace) gap.closed_by_trace = trace;
+    } else {
+      delete gap.closed_at;
+      delete gap.closed_by_trace;
+    }
+
     gaps[existingIdx] = gap;
     action = "updated";
   } else {
+    // Fresh row: this branch only runs for OPEN gaps (a close/reject without an
+    // open row short-circuits above), so seed first_detected_at from the
+    // detection time and leave close/reopen fields at their absent default.
+    gap.first_detected_at = gap.first_detected_at ?? gap.detected_at;
     gaps.push(gap);
     action = "created";
   }
 
   await saveGaps(gaps);
+  return { action, summaryChanged, classKey };
+  });
+
+  if ("early" in outcome) return outcome.early;
+  const { action, summaryChanged, classKey } = outcome;
   if ((action === "created" || (action === "updated" && summaryChanged)) && (gap.status ?? "open") === "open") {
     const g = globalThis as { __gapComposeLastTrigger?: number };
     const nowMs = Date.now();

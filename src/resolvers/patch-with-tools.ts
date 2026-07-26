@@ -56,7 +56,9 @@ async function retryWithBackoff<T>(fn: () => Promise<T>, predicate: (e: unknown)
       return await fn();
     } catch (e) {
       lastError = e;
-      if (!predicate(e)) throw e;
+      // Retry on transient transport errors OR semantic_reject failures
+      const shouldRetry = predicate(e) || (typeof e === 'object' && e !== null && 'type' in e && e.type === 'semantic_reject');
+      if (!shouldRetry) throw e;
       attempt++;
       if (attempt <= MAX_TRANSIENT_RETRIES) {
         await new Promise((r) => setTimeout(r, TRANSIENT_BACKOFF_MS * attempt));

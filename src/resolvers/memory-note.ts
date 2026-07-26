@@ -106,17 +106,125 @@ export async function resolveMemoryNote(
   };
 }
 
+/**
+ * Tolerant write-pointer input (2026-07-26). Accepts the canonical nested
+ * envelope ({ type, note: {...} }) sent by the operator-import scripts AND a
+ * flat pointer ({ type, title, content, ... }) synthesized by goal-host's
+ * generic pointer-arg binding (which advertises no resolver_schema for this
+ * shape and so emits flat field names). The former resolver dereferenced
+ * pointer.note.created_at unconditionally and 500'd on the flat payload
+ * ("undefined is not an object"), blocking composed shellResult->memoryNote_write
+ * emits (topology growth). Every field is now read defensively; never throws.
+ */
+export interface MemoryNoteWriteInput {
+  type: "memoryNote_write";
+  note?: unknown;
+  [key: string]: unknown;
+}
+
+const VALID_NOTE_TYPES: ReadonlyArray<MemoryNote["type"]> = [
+  "finding",
+  "feedback",
+  "reference",
+  "project",
+];
+
+function slugifyId(source: string): string {
+  return source
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 60);
+}
+
 export async function resolveMemoryNoteWrite(
-  pointer: MemoryNoteWritePointer,
+  pointer: MemoryNoteWriteInput,
 ): Promise<ResolverResult> {
   const now = new Date().toISOString();
-  const incoming = pointer.note;
+
+  // A nested `note` object is the canonical envelope; anything else (absent, a
+  // string from an LLM-emitted `note` key, a primitive) falls through to the
+  // flat pointer. Read the fields from whichever source applies.
+  const nested =
+    typeof pointer.note === "object" && pointer.note !== null
+      ? (pointer.note as Record<string, unknown>)
+      : null;
+  const src: Record<string, unknown> =
+    nested ?? (pointer as Record<string, unknown>);
+
+  const pickString = (...keys: string[]): string | undefined => {
+    for (const k of keys) {
+      const v = src[k];
+      if (typeof v === "string" && v.length > 0) return v;
+    }
+    return undefined;
+  };
+
+  // content -> body aliasing (goal-host flat payload uses `content`).
+  const title = pickString("title");
+  const body = pickString("body", "content");
+
+  // Reject cleanly — never throw — when there is nothing worth storing.
+  if (title === undefined && body === undefined) {
+    return {
+      shape: "memoryNoteWriteResult",
+      body: {
+        id: null,
+        action: "rejected",
+        reason:
+          "memoryNote_write requires at least a title or a body/content field",
+      },
+    };
+  }
+
+  // note_type -> type aliasing. In the flat pointer, `type` holds the shape
+  // discriminant ("memoryNote_write"), so only trust it as a category when it
+  // is a valid MemoryNote type (the nested-note case); otherwise fall back to
+  // `note_type`, then default to "reference".
+  const typeCandidate = pickString("type", "note_type");
+  const noteType: MemoryNote["type"] =
+    typeCandidate !== undefined &&
+    (VALID_NOTE_TYPES as string[]).includes(typeCandidate)
+      ? (typeCandidate as MemoryNote["type"])
+      : ((): MemoryNote["type"] => {
+          const nt = pickString("note_type");
+          return nt !== undefined && (VALID_NOTE_TYPES as string[]).includes(nt)
+            ? (nt as MemoryNote["type"])
+            : "reference";
+        })();
+
+  // Preserve an explicit id; otherwise derive a stable slug from the title
+  // (falling back to the body, then a timestamp so the id is never empty).
+  const explicitId = pickString("id");
+  const derivedSlug = slugifyId(title ?? body ?? "");
+  const id =
+    explicitId ??
+    (derivedSlug.length > 0 ? derivedSlug : `memory-note-${Date.now()}`);
 
   const note: MemoryNote = {
-    ...incoming,
-    created_at: incoming.created_at ?? now,
+    id,
+    type: noteType,
+    title: title ?? "",
+    body: body ?? "",
+    created_at: pickString("created_at") ?? now,
     updated_at: now,
   };
+
+  // Preserve optional canonical fields when supplied (the nested callers send
+  // some of these; the flat goal-host payload sends none).
+  const prov = src["provenance_trace_ids"];
+  if (Array.isArray(prov)) {
+    note.provenance_trace_ids = prov.filter(
+      (t): t is string => typeof t === "string",
+    );
+  }
+  const cw = src["confidence_weight"];
+  if (typeof cw === "number") note.confidence_weight = cw;
+  const lva = src["last_validated_at"];
+  if (typeof lva === "string") note.last_validated_at = lva;
+  const ps = src["pending_sync"];
+  if (typeof ps === "boolean") note.pending_sync = ps;
 
   const notes = await loadNotes();
   const existingIdx = notes.findIndex((n) => n.id === note.id);

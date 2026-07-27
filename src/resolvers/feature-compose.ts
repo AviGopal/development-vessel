@@ -1466,7 +1466,16 @@ async function appendComposeLesson(cls: string, reason: string, vessels: string,
           classification_metadata: meta,
         },
       } as never);
-      if (reCommit) {
+      // RECOMMIT DEPTH CAP (2026-07-27, self-alteration-throughput-zero amplifier). A failed
+      // compose files a `recommit-<gap.id>-<cls>` gap → gap-to-feature re-drafts → another
+      // compose-report; if it fails again it becomes `recommit-recommit-...` and so on. Measured
+      // in the live backlog: 81 recommit- / 28 recommit-recommit- / 15 triple / 7 quad / 2 quint —
+      // a self-amplifying churn that floods /workspace/proposals. Cap the recursion: a gap already
+      // carrying >=2 `recommit-` prefixes is a PERSISTENT failure — stop re-filing it (it should be
+      // dispositioned/skipped, not infinitely recommitted). The failure_lessons write above still
+      // records the class so the drafter keeps learning.
+      const _recommitDepth = (String(gap.id).match(/recommit-/g) ?? []).length;
+      if (reCommit && _recommitDepth < 2) {
         await resolveSubstrateGapWrite({
           type: "substrateGap_write",
           gap: {

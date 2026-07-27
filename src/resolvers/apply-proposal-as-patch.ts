@@ -528,6 +528,14 @@ async function attemptApplyOnce(pointer: ApplyProposalAsPatchPointer): Promise<R
     const names = await readdir(proposalsDir);
     for (const n of names) {
       if (!n.endsWith("-report.json")) continue;
+      // CHURN GUARD (2026-07-27, self-alteration-throughput-zero root). `*-compose-report.json`
+      // files are feature_compose RESULT artifacts (verdict/ok/apply_failed — written to
+      // /workspace/proposals so consumers like goal-host read the edit-intent outcome), NOT patch
+      // proposals. The apply scan was ingesting ALL of them as candidates: measured 1588
+      // compose-reports (2 actionable) vs 85 real proposals (83 actionable) — the churn buried the
+      // actionable work so newest-first never reached it. Skip them in the UNTARGETED scan; a
+      // targeted apply (proposal_id) can still address one explicitly.
+      if (!pointer.proposal_id && n.endsWith("-compose-report.json")) continue;
       const p = join(proposalsDir, n);
       try { const s = await stat(p); entries.push({ name: n, path: p, mtime: s.mtimeMs }); } catch { /* skip */ }
     }

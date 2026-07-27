@@ -716,12 +716,19 @@ function semanticJudgePrompt(
   facts: ReachabilityFact[],
   dataFlow: DataFlowFact[],
   codeContext: string,
+  archViolations: Array<{ law: string; detail: string; snippet: string }> = [],
 ): string {
   const metaStr = gapMeta ? `\n\nGap detector evidence:\n${JSON.stringify(gapMeta, null, 2)}` : "";
   const createHeavy = diffIsCreateHeavy(diff);
   const completenessClause = createHeavy
     ? `\n\nTHIS IS A CREATE-HEAVY CHANGE (it introduces a NEW file / endpoint / handler). For these, "addresses" is NOT satisfied merely because the new code exists and is wired (called/routed/exported). You MUST judge whether the NEW code FUNCTIONALLY IMPLEMENTS the gap's intent. For a responsibility MOVE (e.g. "move logic X out of vessel A into a new endpoint on vessel B"): does the new endpoint actually CONTAIN the moved logic (the real computation/transformation/persistence), or is it a placeholder that calls nothing, returns a stub/empty/null, re-dispatches without doing the work, or just echoes its input? addresses=true ONLY if the new capability is GENUINELY FUNCTIONAL — the moved/new logic is really present in the new code, not a shell. If the new handler/endpoint is wired but its body does not do the work the gap describes, set addresses=false and say "wired stub, not a functional implementation" in reason.`
     : "";
+  const archClause =
+    archViolations.length > 0
+      ? `\n\nARCHITECTURE-CONFORMANCE NOTES (deterministic scan of the ADDED lines against the substrate's OWN standing laws — the system must define its architecture BY ITS USE, so a patch that "fixes" the gap by VIOLATING a law is NOT a clean fix):\n${archViolations
+          .map((v) => `- [${v.law}] ${v.detail}\n    added: ${v.snippet}`)
+          .join("\n")}\n\nWeigh these. If the patch ADDRESSES the gap only BY the violating line (the behaviour is env-gated, or the LLM call is inlined where an llm-prompt resolver belongs), set addresses:false and name the CONFORMANT location (a shaped impulse read at use time, or the llm-prompt resolver dispatched from an activity) in suspected_real_location. If the violation is incidental and the gap is genuinely fixed the conformant way elsewhere in the diff, you MAY still pass but MUST name the violation in reason.`
+      : "";
   return `You verify whether a self-authored CODE PATCH GENUINELY addresses a substrate gap, on a path that ACTUALLY EXECUTES. typecheck=clean does NOT mean the gap is fixed — many patches "compile" by adding dead code (a net-new function with zero callers), by editing a path that never runs (hollow patch), or by adding a wired-but-empty new endpoint/handler (a stub). This is the code analogue of hollow goal-completion.
 
 GAP: ${gapSummary}${metaStr}${completenessClause}
@@ -735,7 +742,7 @@ ${codeContext || "(none extracted)"}
 Unified diff that was applied (and typechecked clean):
 ${diff.slice(0, 8000)}
 
-${dataFlow.length > 0 ? `\nData-flow facts (deterministic):\n${JSON.stringify(dataFlow, null, 2)}\n\nA consumed-but-never-populated collection or an imported-but-never-called symbol is presumptively a DROPPED EDIT: unless the diff itself shows the population/call site, return addresses:false and name the missing site in suspected_real_location.\n` : ''}Judge strictly. The patch ADDRESSES the gap only if it changes the behavior the gap describes AND that changed code is on a path that executes (called, routed, dispatched, or a lifecycle/entrypoint). If the patch edits a DIFFERENT symbol than the one the gap's real fix lives in (e.g. it adds \`recordOutcome\` when the live β-penalty path is \`penaliseHollowTemplate\`), report the right one in suspected_real_location.
+${dataFlow.length > 0 ? `\nData-flow facts (deterministic):\n${JSON.stringify(dataFlow, null, 2)}\n\nA consumed-but-never-populated collection or an imported-but-never-called symbol is presumptively a DROPPED EDIT: unless the diff itself shows the population/call site, return addresses:false and name the missing site in suspected_real_location.\n` : ''}${archClause}Judge strictly. The patch ADDRESSES the gap only if it changes the behavior the gap describes AND that changed code is on a path that executes (called, routed, dispatched, or a lifecycle/entrypoint). If the patch edits a DIFFERENT symbol than the one the gap's real fix lives in (e.g. it adds \`recordOutcome\` when the live β-penalty path is \`penaliseHollowTemplate\`), report the right one in suspected_real_location.
 
 Respond with ONLY JSON: {"addresses": boolean, "reason": "<1 sentence>", "on_live_path": boolean, "suspected_real_location": "<symbol or file:symbol the real fix belongs in, or empty>"}`;
 }
@@ -769,6 +776,65 @@ export function detectEffectlessHeaderOnlyDiff(diff: string): { isEffectless: bo
     headers.push(m[1]!);
   }
   return { isEffectless: headers.length > 0, headers };
+}
+
+// ARCHITECTURE-CONFORMANCE SCAN (2026-07-27). The substrate authors its own code, so a
+// self-authored patch must conform to the substrate's OWN standing laws — otherwise the
+// system erodes the very idiom it is meant to define BY ITS USE. This is the architecture
+// analogue of the reach gate: a patch can fix a gap AND typecheck yet do it by VIOLATING a
+// law — gating behaviour behind an env var read at a branch (L1: behaviour must be a shape
+// read at use time; env is bootstrap-only, invisible to traces and the walk, unlearnable),
+// or inlining an LLM provider call in vessel TS (dev-vessel layer-3: LLMs are invoked ONLY
+// through an llm-prompt-tier resolver dispatched from an activity, never inline). We do NOT
+// hard-block on a heuristic — that could wedge self-development — but surface deterministic,
+// law-backed NOTES to the semantic judge, which weighs whether the fix is conformant. Two
+// narrow, high-precision, code-only rules; bootstrap env reads (secrets/ports/identity/
+// endpoints) are explicitly allowed so a legitimate config read is never flagged.
+export function detectArchitectureViolation(
+  diff: string,
+): Array<{ law: string; detail: string; snippet: string }> {
+  const added = diff
+    .split("\n")
+    .filter((l) => l.startsWith("+") && !l.startsWith("+++"))
+    .map((l) => l.slice(1));
+  const violations: Array<{ law: string; detail: string; snippet: string }> = [];
+  const seen = new Set<string>();
+  const push = (law: string, detail: string, snippet: string): void => {
+    const snip = snippet.trim().slice(0, 160);
+    const key = law + "|" + snip.slice(0, 80);
+    if (seen.has(key)) return;
+    seen.add(key);
+    violations.push({ law, detail, snippet: snip });
+  };
+  const INLINE_LLM =
+    /\bnew\s+(?:Anthropic|OpenAI)\b|from\s+['"](?:@anthropic-ai\/sdk|openai)['"]|require\(\s*['"](?:@anthropic-ai\/sdk|openai)['"]\s*\)|anthropic\.messages\.create|openai\.chat\.completions|\/v1\/(?:messages|chat\/completions)\b/;
+  // Bootstrap-legitimate env names (secrets, ports, identity, endpoints, storage coords).
+  const BOOTSTRAP_ENV =
+    /(?:PORT|ENDPOINT|URL|HOST|HOSTNAME|ADDR|SECRET|TOKEN|API_?KEY|_KEY$|_DIR$|_PATH$|MODEL|ORG|_ID$|NODE_ENV|DSN|DATABASE|NAMESPACE|_NS$|_DB$|REGION|BUCKET)/;
+  // env read used at a BRANCH/decision point (not a top-level const assignment).
+  const ENV_GATE =
+    /(?:if\s*\(|while\s*\(|\?|&&|\|\||return\s+|===|!==|==|!=)[^;\n]*\bprocess\.env\.([A-Z0-9_]+)\b/;
+  for (const rawLine of added) {
+    const code = rawLine.trim();
+    if (!code || code.startsWith("//") || code.startsWith("*") || code.startsWith("/*")) continue;
+    if (INLINE_LLM.test(code)) {
+      push(
+        "dev-vessel layer-3 (LLMs only via the llm-prompt resolver, never inlined)",
+        "an LLM provider is instantiated / imported / called directly in vessel TS instead of dispatched through the llm-prompt-tier resolver from an activity — inline LLM calls are untraced and break the layering",
+        code,
+      );
+      continue;
+    }
+    const m = code.match(ENV_GATE);
+    if (m && !BOOTSTRAP_ENV.test(m[1]!)) {
+      push(
+        "L1 (behaviour must be a shape read at use time; env is bootstrap-only)",
+        `runtime behaviour is gated behind process.env.${m[1]!}, which is frozen at process start, invisible to traces and the walk, and unlearnable — steer this behaviour with a shaped impulse read at use time instead`,
+        code,
+      );
+    }
+  }
+  return violations;
 }
 
 export async function verifyPatchAddressesGap(args: {
@@ -835,7 +901,8 @@ export async function verifyPatchAddressesGap(args: {
   }
   let raw = "";
   try {
-    raw = await args.llm(semanticJudgePrompt(args.gapSummary, args.gapMeta, args.diff, args.reachability, args.data_flow ?? [], args.codeContext ?? ""));
+    const archViolations = detectArchitectureViolation(args.diff);
+    raw = await args.llm(semanticJudgePrompt(args.gapSummary, args.gapMeta, args.diff, args.reachability, args.data_flow ?? [], args.codeContext ?? "", archViolations));
   } catch (e) {
     // Judge unreachable: do NOT block on the judge alone (the deterministic floor
     // already passed). Treat as addresses=true-but-unverified so a flaky LLM cannot

@@ -1804,6 +1804,11 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
   const preEditContent = new Map<string, string>();
   const applied: Array<{ path: string; kind: string; ok: boolean; repaired?: boolean; detail?: string; span?: { start_line: number; end_line: number } }> = [];
   let applyFailed = false;
+  // 2026-07-26 apply-reliability (keystone): when a non-unique anchor is
+  // disambiguated to ONE of N identical sites, the n0-1 siblings are left
+  // unmodified. Record them so the semantic judge can demand completeness
+  // (addresses:false) and the existing re-draft path fixes the missed sites.
+  const droppedSiblingSites: Array<{ path: string; anchor: string; residual: number }> = [];
   const applyOneOp = async (op: PlanOp): Promise<{ entry: (typeof applied)[number]; createdAbs?: string; editedAbs?: string; failed: boolean }> => {
     const abs = opAbs(op.path);
     if (op.kind === "create_file") {
@@ -1886,6 +1891,9 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
         ? { ok: false, body: { error: "no_unique_anchor: refused fs_edit — planned anchor is non-unique and re-derivation found no unique substring (would mislocalize to first occurrence)" } as Json }
         : await callTool(toolsEndpoint, "fs_edit", { path: abs, old_string: effOld, new_string: op.new_string ?? "" });
       let repaired = groundedPre && r.ok;
+      if (anchorNonUnique && groundedPre && r.ok && n0 > 1) {
+        droppedSiblingSites.push({ path: op.path, anchor: (op.old_string ?? "").slice(0, 200), residual: n0 - 1 });
+      }
       if (!r.ok && !anchorRejected) {
         // Blind-edit repair: plan-once decomposition can guess an old_string that
         // does not match the LIVE file (it planned without reading it). Read the
@@ -2276,6 +2284,14 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
           if (gt) { codeContext += `\n# ${name} in ${v}:\n${gt}\n`; if (codeContext.length > 6000) break; }
         }
         if (codeContext.length > 6000) break;
+      }
+
+      // 2026-07-26 apply-reliability: if the apply disambiguated a non-unique
+      // anchor to ONE of several identical sites, tell the judge so it can return
+      // addresses:false when the gap intends ALL matching sites be changed (the
+      // existing prior-attempt-feedback path then re-drafts the missed sites).
+      if (droppedSiblingSites.length > 0) {
+        codeContext += `\n# INCOMPLETE-EDIT WARNING: the applied patch changed only ONE of several identical sites for ${droppedSiblingSites.length} anchor(s); ${droppedSiblingSites.map((d) => `${d.residual} unmodified sibling(s) of "${d.anchor.slice(0, 80)}" remain in ${d.path}`).join("; ")}. If the gap intends EVERY matching site to change, return addresses:false and name a remaining site; if a single-site edit is intended, ignore this.\n`;
       }
 
       // 2026-07-20: route the judge through the SAME multi-endpoint failover as

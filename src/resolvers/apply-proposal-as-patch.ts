@@ -1037,6 +1037,37 @@ export async function resolveApplyProposalAsPatch(pointer: ApplyProposalAsPatchP
   if (!derived) return structuredError(`cannot derive vessel from path: ${targetFile}`, { proposal: chosen.name });
   const { vessel, subPath } = derived;
 
+  // UNRELATED-CONFIG-TARGET GATE (2026-07-27). apply_proposal_as_patch dispatches the SURGICAL
+  // patcher (which self-lands via mitosis cutover) with NO check that the diff ADDRESSES the
+  // proposal — verifyPatchAddressesGap (feature-compose) is NOT on this path. EVIDENCE: a
+  // "route-edit ... compose-report" proposal landed a patch that ONLY bumped package.json
+  // "version" 1.20.9->1.20.10 (activity-api 2f4093c). Deterministically REJECT when the cited
+  // target is a package.json / lockfile / .yaml / .sh / scripts/ file AND the proposal never
+  // names that file nor mentions version/bump/dependency/script/manifest — a config edit the
+  // proposal does not actually describe. A legit "bump dep X" / "add build script" proposal
+  // names the file or a keyword and passes; a source (.ts/.tsx/.js) target never trips this.
+  {
+    const isNonSourceTarget =
+      /(^|\/)(package(-lock)?\.json|bun\.lockb?|yarn\.lock)$/.test(subPath) ||
+      /\.(lock|ya?ml)$/.test(subPath) ||
+      /(^|\/)scripts\//.test(subPath) ||
+      /\.sh$/.test(subPath);
+    if (isNonSourceTarget) {
+      const intentLc = String(chosen.content).toLowerCase();
+      const base = (subPath.split("/").pop() ?? subPath).toLowerCase();
+      const namesTarget = intentLc.includes(base) ||
+        /(version|bump|semver|\brelease\b|dependenc|devdependenc|package\.json|lock\s*file|lockfile|\bscript\b|manifest)/i.test(String(chosen.content));
+      if (!namesTarget) {
+        try { await writeFile(`${proposalsDir}/.applied/${chosen.name}`, JSON.stringify({ rejected_at: new Date().toISOString(), reason: "unrelated_config_target", target_file: targetFile }, null, 2)); } catch { /* tolerant */ }
+        return structuredError("unrelated_config_target", {
+          proposal: chosen.name,
+          target_file: targetFile,
+          detail: `cited target ${subPath} is a non-source config/lock/script the proposal never names (nor version/dependency/script/manifest) — refusing to land an edit unrelated to the proposal`,
+        });
+      }
+    }
+  }
+
   // 4. Read live source (under /vessels/<vessel>/<subPath>); compute SHA.
   // (Seam ③) For a NET-NEW file the live source is EXPECTED absent — tolerate it
   // and thread is_new_file through to the patcher (which authors via fs_write).

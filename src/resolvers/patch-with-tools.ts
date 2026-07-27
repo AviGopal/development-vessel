@@ -823,6 +823,43 @@ export async function resolvePatchWithTools(pointer: PatchWithToolsPointer): Pro
     return structuredError("llm declared done but file unchanged", { history, before_sha: beforeSha, after_sha: afterSha });
   }
 
+  // ORPHAN-INJECTION GATE (2026-07-27). The surgical patcher BYPASSES feature_compose's
+  // dead-code / reachability gates and self-lands via triggerMitosisTick below, so a
+  // hallucinated top-level declaration ships unchecked. EVIDENCE: a compose-report patch
+  // injected an orphan `async function countAsyncFunctions()` into goal-host index.ts (wrong
+  // path, dead on arrival) alongside a polluted regex. Reject when the patch ADDS a NEW,
+  // column-0, NON-exported `function NAME` (name absent from the pre-patch file) that is
+  // referenced NOWHERE else in the COMMENT/STRING/REGEX-stripped file. Scoped tightly to
+  // FUNCTION declarations (const/let/var are ordinary values and too FP-prone); a genuine new
+  // private helper has its call site (refs>=2); an exported helper starts with `export` and
+  // never matches `^(async )?function`; a name appearing only inside a string/regex literal
+  // (the observed regex pollution) is stripped, so the orphan's refs collapse to 1 and it is
+  // caught. Fail-safe: revert live (nothing staged, nothing lands) + structuredError.
+  if (!isNewFile) {
+    const nameDecl = /^(?:export\s+)?(?:async\s+)?function\s+([A-Za-z_$][\w$]*)/;
+    const beforeFns = new Set<string>();
+    for (const bl of baseContent.split("\n")) { const m = nameDecl.exec(bl); if (m) beforeFns.add(m[1]!); }
+    const codeOnly = afterSrc
+      .replace(/\/\*[\s\S]*?\*\//g, " ")
+      .replace(/\/\/[^\n]*/g, " ")
+      .replace(/'(?:[^'\\]|\\.)*'/g, "''")
+      .replace(/"(?:[^"\\]|\\.)*"/g, '""')
+      .replace(/`(?:[^`\\]|\\.)*`/g, "``")
+      .replace(/\/(?:\\.|\[(?:\\.|[^\]\\])*\]|[^\/\n\\])+\/[gimsuy]*/g, "/RE/");
+    for (const al of afterSrc.split("\n")) {
+      const m = /^(?:async\s+)?function\s+([A-Za-z_$][\w$]*)/.exec(al); // NON-exported, column 0
+      if (!m) continue;
+      const name = m[1]!;
+      if (beforeFns.has(name)) continue; // pre-existing function (modified body) — not a NEW injection
+      const esc = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const refs = (codeOnly.match(new RegExp(`\\b${esc}\\b`, "g")) ?? []).length;
+      if (refs <= 1) {
+        await resetTarget();
+        return structuredError("unrelated_diff_orphan_declaration", { target_file: pointer.target_file, orphan_symbol: name, before_sha: beforeSha, after_sha: afterSha });
+      }
+    }
+  }
+
   // Stage the modified file into a mitosis dir for the cutover machinery.
   const mitosisRoot = join(vesselsRoot, `${vessel}-mitosis-${stamp}`);
   const stagedFile = join(mitosisRoot, subPath);

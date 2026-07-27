@@ -110,6 +110,10 @@ export interface ApplyProposalAsPatchPointer {
   retry_after_hours?: number;
   /** Re-attempt a FAILED (structuredError) sentinel sooner — default 2h. Failed attempts re-draft byte-identically, so a short TTL lets the improving patcher retry while the proposal is still in-window. */
   failed_retry_after_hours?: number;
+  /** BOUNDED-RETRY: max proposals to ATTEMPT per untargeted invocation until one STAGES a
+   *  mitosis (default 4). Before, a single anchor_not_found / semantic_reject / config-target
+   *  reject ended the whole cycle with 0 throughput. proposal_id / dry_run force single-attempt. */
+  max_apply_attempts?: number;
 }
 
 function structuredError(detail: string, extra?: Record<string, unknown>): ResolverResult {
@@ -478,7 +482,11 @@ async function sweepStaleProposals(
   }
 }
 
-export async function resolveApplyProposalAsPatch(pointer: ApplyProposalAsPatchPointer): Promise<ResolverResult> {
+// Single attempt: select ONE eligible proposal (newest-first, skipping .applied sentinels and
+// stale/staged), dispatch patch_with_tools once, and DURABLY mark the chosen proposal in
+// .applied/ before returning — so a subsequent attempt deterministically skips it and picks the
+// NEXT eligible proposal. Wrapped by resolveApplyProposalAsPatch (bounded-retry) below.
+async function attemptApplyOnce(pointer: ApplyProposalAsPatchPointer): Promise<ResolverResult> {
   const workspaceRoot = process.env["WORKSPACE_ROOT"] ?? "/workspace";
   const proposalsDir = pointer.proposals_dir ?? join(workspaceRoot, "proposals");
   const vesselsRoot = pointer.vessels_root ?? "/vessels";
@@ -1174,4 +1182,44 @@ export async function resolveApplyProposalAsPatch(pointer: ApplyProposalAsPatchP
       JSON.stringify({ delegated_to: "patch_with_tools", outcome_shape: result.shape, applied_at: new Date().toISOString(), new_resolver: isNewFileTarget && stagesNewResolver([subPath]) && result.shape === "mitosisStaged", content_sha: createHash("sha256").update(chosen.content).digest("hex").slice(0, 16) }, null, 2));
   } catch { /* tolerant */ }
   return result;
+}
+
+// BOUNDED-RETRY (2026-07-27, closes self-alteration-throughput-zero-apply). The substrate's own
+// funnel showed apply landed 0 cutovers in 6h despite 16 proposals authored: attemptApplyOnce
+// picks ONE proposal and, on ANY per-proposal failure (anchor_not_found / patch_noop /
+// semantic_reject / config-target or orphan gate reject / malformed target), archives it to
+// .applied/ and RETURNS — never trying the next actionable proposal. Because each attempt DURABLY
+// marks its proposal in .applied/ BEFORE returning (and the selection loop at line ~611 skips
+// appliedSet members), re-invoking attemptApplyOnce deterministically advances to the NEXT
+// eligible proposal. Try up to K per invocation until one genuinely STAGES a mitosis, then stop.
+// STOP (no further attempt) on: a real stage (mitosisStaged), no_eligible_proposals (also
+// mitosisStaged, skipped:true), feature_compose routing (featureRoutedReport), any GLOBAL/fatal
+// error (structuredError not naming a proposal), a rate-limit / targeted-not-found / dir-read
+// error, or a repeated proposal (anti-spin). proposal_id-targeted and dry_run keep single-attempt
+// semantics — targeting must NEVER skip to a different proposal. K bounds per-cycle patch_with_tools
+// (LLM) cost; most non-actionable proposals are rejected cheaply before reaching the patcher.
+export async function resolveApplyProposalAsPatch(pointer: ApplyProposalAsPatchPointer): Promise<ResolverResult> {
+  const maxAttempts = (pointer.proposal_id || pointer.dry_run) ? 1 : Math.max(1, pointer.max_apply_attempts ?? 4);
+  let last: ResolverResult | null = null;
+  const tried = new Set<string>();
+  for (let i = 0; i < maxAttempts; i++) {
+    const res = await attemptApplyOnce(pointer);
+    last = res;
+    // Any non-error outcome is terminal: a real stage (success), no_eligible_proposals
+    // (mitosisStaged skipped:true), or a feature_compose routing report. Stop.
+    if (res.shape !== "structuredError") return res;
+    const body = (res.body ?? {}) as Record<string, unknown>;
+    // A GLOBAL/fatal error names no proposal (e.g. "cannot read proposals dir") — retrying a
+    // different proposal cannot help. Stop.
+    if (typeof body.proposal !== "string") return res;
+    const reason = `${String(body.detail ?? "")} ${String(body.reason ?? "")}`.toLowerCase();
+    // Errors where advancing to another proposal is wrong or futile this cycle. Stop.
+    if (/rate_limited|targeted proposal not found|cannot read proposals dir|feature_compose routing failed/.test(reason)) return res;
+    // Anti-spin: a proposal that failed WITHOUT being marked (rare malformed-target early
+    // returns) would be re-selected; stop the moment we see the same proposal twice.
+    if (tried.has(String(body.proposal))) return res;
+    tried.add(String(body.proposal));
+    // Retryable per-proposal failure: it was archived to .applied/ — loop to the NEXT proposal.
+  }
+  return last as ResolverResult;
 }

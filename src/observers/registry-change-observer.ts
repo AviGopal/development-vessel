@@ -252,6 +252,59 @@ export async function dispatchRecommendationForProbe(
   }
 }
 
+export async function dispatchRefineOnDisagreement(
+  rawActivityId: string | undefined,
+  executionId: string | undefined,
+  outputShapes: string[] | undefined,
+): Promise<{ dispatched: boolean; targetTemplateId?: string; dispatchId?: string; reason?: string }> {
+  if (!outputShapes?.includes("predictionDisagreement")) {
+    return { dispatched: false, reason: "no predictionDisagreement in output_shapes" };
+  }
+  if (!executionId) return { dispatched: false, reason: "no execution_id" };
+  if (!rawActivityId) return { dispatched: false, reason: "no activity_id" };
+
+  const activityId = stripRecordIdWrapping(rawActivityId);
+  if (!activityId) return { dispatched: false, reason: "no activity_id after unwrap" };
+
+  const targetTemplateId = "development-vessel:refine-on-disagreement";
+
+  if (!shouldDispatch(executionId, targetTemplateId)) {
+    return { dispatched: false, targetTemplateId, reason: "deduped" };
+  }
+
+  try {
+    const res = await fetch(`${GOAL_HOST_VESSEL_ENDPOINT}/run-goal`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(METABOB_API_KEY ? { Authorization: `ApiKey ${METABOB_API_KEY}` } : {}),
+      },
+      body: JSON.stringify({
+        goal: "refine after prediction_disagreement",
+        targetTemplateId,
+        tags: ["intent:closed_loop_learning", "intent:refine_on_disagreement"],
+        parent_execution_id: executionId,
+        variables: {
+          disagreement_execution_id: executionId,
+          failed_activity_id: activityId,
+        },
+      }),
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      return { dispatched: false, targetTemplateId, reason: `goal-host HTTP ${res.status}: ${text.slice(0, 120)}` };
+    }
+    const body = (await res.json()) as { dispatchId?: string };
+    console.log(
+      `[refine-disagreement-dispatch] ${activityId} → ${targetTemplateId} dispatchId=${body.dispatchId} parent=${executionId}`,
+    );
+    return { dispatched: true, targetTemplateId, dispatchId: body.dispatchId };
+  } catch (err) {
+    return { dispatched: false, targetTemplateId, reason: (err as Error).message };
+  }
+}
+
 // ── Harness-matrix predicate ─────────────────────────────────────────────────
 
 // Predicate: does this lifecycle event warrant re-scoring the failure-mode matrix?

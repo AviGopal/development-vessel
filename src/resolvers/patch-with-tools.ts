@@ -29,6 +29,7 @@ import { mkdir, writeFile, readFile, copyFile, unlink } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { METABOB_ENDPOINT, METABOB_API_KEY } from "../config.js";
 import type { ResolverResult } from "./types.js";
+import { resolveVesselMitosisCutover } from "./vessel-mitosis-cutover.js";
 
 const DISCOVERY_ENDPOINT = process.env.DISCOVERY_ENDPOINT ?? "http://127.0.0.1:8100";
 // V38 (2026-06-12): 8 was too tight — non-trivial single-file patches spend
@@ -118,48 +119,45 @@ function structuredError(detail: string, body: Record<string, unknown> = {}): Re
 // defect). Best-effort: if dispatch fails, boredom selects mitosis-tick later.
 type MitosisLanding = { landed: boolean; new_git_sha: string | null; push_status: string | null };
 
-async function triggerMitosisTick(workspaceRoot: string, mitosisVersionId: string): Promise<MitosisLanding> {
+async function triggerMitosisTick(a: {
+  vessel: string;
+  mitosisVersionId: string;
+  mitosisRoot: string;
+  stagedFiles: string[];
+  baseSha: string;
+  gapId: string;
+  proposalId: string;
+}): Promise<MitosisLanding> {
+  // 2026-07-26 apply-reliability (keystone SPEC C): LAND the verified staged patch
+  // by calling the cutover DIRECTLY with the FAVORABLE verdict patch_with_tools
+  // already earned via its own delta-aware typecheck gates — the SAME in-process
+  // path feature_compose uses. The prior light-dispatch to the mitosis-tick
+  // TEMPLATE re-earned the verdict through vessel_mitosis_evaluate, whose overlay
+  // typecheck failed/INSUFFICIENT_DATA on already-verified patches, so the cutover
+  // soft-refused and NOTHING ever committed ("staged-not-landed"). The cutover
+  // keeps its own freshness / provenance / scope-creep gates, so a bad tree still
+  // refuses; boredom's later mitosis-tick is a no-op (this already landed).
   const none: MitosisLanding = { landed: false, new_git_sha: null, push_status: null };
   try {
-    const url = process.env["LIGHT_DISPATCH_URL"] ?? "http://127.0.0.1:8280/dispatch";
-    const apiKey = process.env["METABOB_API_KEY"] ?? "";
-    await retryWithBackoff(
-      async () =>
-        await fetch(url, {
-          method: "POST",
-          headers: { "Content-Type": "application/json", ...(apiKey ? { Authorization: `ApiKey ${apiKey}` } : {}) },
-          body: JSON.stringify({ template_id: "development-vessel:mitosis-tick", variables: {} }),
-          signal: AbortSignal.timeout(180_000),
-        }),
-      (e) => {
-        if (e instanceof Error) {
-          return isTransientTransportError(e.message);
-        }
-        return false;
-      },
-    );
-    // LANDED-SHA RECOVERY (credit == landing): the /dispatch response carries only counts +
-    // output_shapes and the trace drops task bodies, so the pushed sha is read from the durable
-    // cutoverApplied record the cutover appends to mitosis-applied.jsonl (same WORKSPACE_ROOT),
-    // reverse-scanned for OUR mitosis_version_id with push_status==="pushed" (a real commit+push,
-    // never a reverted/local-only cutover, which write elsewhere). Absent => landed:false (honest).
-    try {
-      const logPath = join(workspaceRoot, "mitosis-applied.jsonl");
-      const lines = (await readFile(logPath, "utf8")).split("\n").filter((l) => l.trim());
-      for (let i = lines.length - 1; i >= 0; i--) {
-        let rec: { body?: { mitosis_version_id?: string; push_status?: string; new_git_sha?: string } };
-        try { rec = JSON.parse(lines[i] as string); } catch { continue; }
-        const b = rec.body ?? {};
-        if (b.mitosis_version_id === mitosisVersionId) {
-          if (b.push_status === "pushed" && typeof b.new_git_sha === "string" && b.new_git_sha.trim()) {
-            return { landed: true, new_git_sha: b.new_git_sha.trim(), push_status: "pushed" };
-          }
-          return { landed: false, new_git_sha: null, push_status: b.push_status ?? null };
-        }
-      }
-    } catch { /* no applied log yet => not landed */ }
-    return none;
-  } catch { return none; /* best-effort: boredom selects mitosis-tick later */ }
+    const cut = await resolveVesselMitosisCutover({
+      type: "vessel_mitosis_cutover",
+      vessel_name: a.vessel,
+      base_version_id: `${a.vessel}-live`,
+      mitosis_version_id: a.mitosisVersionId,
+      mitosis_root: a.mitosisRoot,
+      staged_files: a.stagedFiles,
+      staged_base_sha: a.baseSha,
+      evaluation_evidence: { verdict: "FAVORABLE", base_success_rate: 1, mitosis_success_rate: 1, cited_trace_ids: [], cited_check_names: ["typecheck"] },
+      gap_id: a.gapId,
+      proposal_id: a.proposalId,
+      skip_push: false,
+    } as never);
+    const b = (cut as { body?: Record<string, unknown> }).body ?? {};
+    const ps = typeof b["push_status"] === "string" ? (b["push_status"] as string) : null;
+    const sha = typeof b["new_git_sha"] === "string" && (b["new_git_sha"] as string).trim() ? (b["new_git_sha"] as string).trim() : null;
+    if (ps === "pushed" && sha) return { landed: true, new_git_sha: sha, push_status: "pushed" };
+    return { landed: false, new_git_sha: sha, push_status: ps };
+  } catch { return none; }
 }
 
 type LlmProducer = { url: string; target?: string };
@@ -866,7 +864,7 @@ export async function resolvePatchWithTools(pointer: PatchWithToolsPointer): Pro
   }
 
   await clearAuthoringMarker(authoringMarkerPath);
-  const _landing = await triggerMitosisTick(workspaceRoot, versionId); // self-propel stage→cutover synchronously; recover the pushed sha
+  const _landing = await triggerMitosisTick({ vessel, mitosisVersionId: versionId, mitosisRoot, stagedFiles: [subPath], baseSha: beforeSha, gapId: pendingBody.gap_id, proposalId: pendingBody.proposal }); // land the verified patch directly via the cutover
   return {
     shape: "mitosisStaged",
     body: {

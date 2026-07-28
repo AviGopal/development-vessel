@@ -2069,7 +2069,18 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
     const curTs = tscErrorSet(raw);
     const baseTs = baselineTsErrors.get(v) ?? new Set<string>();
     const newTs = [...curTs].filter((e) => !baseTs.has(e));
-    const tcOk = tcExit === 0 || (baseTs.size > 0 && newTs.length === 0);
+    // TIGHTEN the broken-baseline relaxation: never relax away a tsc error located in a
+    // file THIS compose actually touched. A permanently-broken vessel baseline (e.g. a
+    // missing module) makes baseTs huge, so `newTs.length===0` alone let edits LAND with a
+    // real error in the edited file (2/4 reverted autonomous landings were tcExit=2 in a
+    // touched file). Baseline errors in files we did NOT author may still be tolerated.
+    const touchedBases = new Set([...edited, ...created].map((p) => p.split("/").pop() ?? ""));
+    const touchedErr = [...curTs].some((e) => {
+      const f = (e.split(/[:(]/)[0] ?? "").trim();
+      const base = f.split("/").pop() ?? "";
+      return base.endsWith(".ts") && touchedBases.has(base);
+    });
+    const tcOk = tcExit === 0 || (baseTs.size > 0 && newTs.length === 0 && !touchedErr);
     const ok = tcOk && sdExit === 0;
     return { vessel: v, errors: ok ? 0 : "verify", exit_code: tcExit, ok, output: raw.trim() };
   };

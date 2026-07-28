@@ -2666,8 +2666,17 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
 
   for (const p of authoringMarkerPaths) { await clearAuthoringMarker(p); }
 
-  const allCutoversRefused = pointer.land && verdict === "FAVORABLE" && cutovers.length > 0 &&
-    cutovers.every((c) => { const t = JSON.stringify(c); return /"refused"\s*:\s*true/.test(t) || /"landed"\s*:\s*false/.test(t); });
+  // A cutover counts as landed ONLY if it actually pushed to origin/dev — the same
+  // condition goal-host's reach gate asserts (push_status==="pushed" && new_git_sha).
+  // The prior regex only caught explicit {"refused":true}/{"landed":false} markers, so a
+  // structuredError soft-refuse (protected vessel, missing-field, INSUFFICIENT_DATA) or a
+  // local_only/host_sync_pending success-shape body slipped through as a FALSE FAVORABLE —
+  // masking the non-landing and robbing goal-host of its walk/patch_with_tools recovery.
+  const anyCutoverPushed = cutovers.some((c) => {
+    const r = (((c as Record<string, unknown>)?.result) ?? {}) as Record<string, unknown>;
+    return r.push_status === "pushed" && typeof r.new_git_sha === "string" && String(r.new_git_sha).trim() !== "";
+  });
+  const allCutoversRefused = pointer.land && verdict === "FAVORABLE" && cutovers.length > 0 && !anyCutoverPushed;
   const effectiveVerdict = allCutoversRefused ? "UNFAVORABLE" : verdict;
   return {
     shape: "featureComposeReport",

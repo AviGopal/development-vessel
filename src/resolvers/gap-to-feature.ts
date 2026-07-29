@@ -2143,6 +2143,20 @@ export async function resolveGapToFeature(pointer: GapToFeaturePointer): Promise
       console.log("[gap-to-feature] environment failure (" + String(cb.failure_kind) + ") — gap credit not bumped");
     } else {
       const pred = predictLand(gap);
+      if (cb.apply_failed && !gap.classification_metadata.includes('pwt_escalated')) {
+        const { resolvePatchWithTools } = await import('./patch-with-tools.js');
+        const result = await resolvePatchWithTools({
+          proposal_text: spec + `PRIOR FEATURE-COMPOSE APPLY FAILURE ON THIS FILE (do not repeat it): op_count=${cb.op_count}, apply_failed, rolled_back=${cb.rolled_back}`,
+          target_file: gap.file_path,
+          max_attempts: 2,
+          threading: `vessels_root/workspace_root/${gap.id}/proposal_id`
+        });
+        if (result && result.mitosisStaged && result.pushedCutover) {
+          await closeLandedGap(gap);
+        } else {
+          gap.classification_metadata.push('pwt_escalated');
+        }
+      }
       await bumpFailedAttempts(gap, { surprise: pred.predicted, predictedP: pred.p });
     }
   }

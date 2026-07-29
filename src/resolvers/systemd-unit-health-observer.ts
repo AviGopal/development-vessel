@@ -141,6 +141,7 @@ async function emitServiceGap(
             detector: "systemd_unit_health_observer",
             cite_principle: "a_maintenance_unit_that_fails_every_run_is_a_silent_learning_loss",
             unit: info.unit,
+            health: info.health,
             result: info.result,
             exit_code: info.exec_main_status,
             last_log: info.error,

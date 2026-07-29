@@ -2143,21 +2143,40 @@ export async function resolveGapToFeature(pointer: GapToFeaturePointer): Promise
       console.log("[gap-to-feature] environment failure (" + String(cb.failure_kind) + ") — gap credit not bumped");
     } else {
       const pred = predictLand(gap);
-      if (cb.apply_failed && !gap.classification_metadata.includes('pwt_escalated')) {
-        const { resolvePatchWithTools } = await import('./patch-with-tools.js');
-        const result = await resolvePatchWithTools({
-          proposal_text: spec + `PRIOR FEATURE-COMPOSE APPLY FAILURE ON THIS FILE (do not repeat it): op_count=${cb.op_count}, apply_failed, rolled_back=${cb.rolled_back}`,
-          target_file: gap.file_path,
-          max_attempts: 2,
-          threading: `vessels_root/workspace_root/${gap.id}/proposal_id`
-        });
-        if (result && result.mitosisStaged && result.pushedCutover) {
-          await closeLandedGap(gap);
-        } else {
-          gap.classification_metadata.push('pwt_escalated');
+      // Bounded one-shot patch_with_tools escalation on an APPLY failure (anchor_not_found /
+      // localization miss — ~40% of autonomous compose failures). feature_compose already rolled
+      // back on applyFailed (nothing to double-land); pwt reads-then-edits the target agentically
+      // where blind-draft could not match old_string. One-shot PER GAP LINEAGE via pwt_escalated
+      // (no cross-tick loop); fires ONLY on apply_failed (never on semantic/verify rejects); any
+      // error or non-land falls through to bumpFailedAttempts unchanged. NB classification_metadata
+      // is an OBJECT — the coaxed draft (daf6d36) used .includes/.push on it (runtime crash) + a
+      // bogus threading string; corrected here to property access + the real resolver signature.
+      const _gm = ((gap as { classification_metadata?: Record<string, unknown> }).classification_metadata ??= {});
+      let _pwtLanded = false;
+      if (cb.apply_failed && !_gm.pwt_escalated) {
+        _gm.pwt_escalated = true; // one-shot BEFORE the attempt: a crash/retry can never re-escalate
+        try {
+          const { resolvePatchWithTools } = await import('./patch-with-tools.js');
+          const result = await resolvePatchWithTools({
+            type: "patch_with_tools",
+            proposal_text: spec + `\n\nPRIOR FEATURE-COMPOSE APPLY FAILURE ON THIS FILE (do not repeat it): op_count=${cb.op_count}, apply_failed, rolled_back=${cb.rolled_back}`,
+            target_file: gap.file_path,
+            gap_id: gap.id,
+            proposal_id: gap.id,
+          } as never);
+          const rb = (((result as unknown as Record<string, unknown>)?.body ?? result ?? {}) as Record<string, unknown>);
+          const _land = (rb.landing ?? {}) as Record<string, unknown>;
+          const _sha = (rb.new_git_sha ?? rb.commit_sha ?? _land.new_git_sha) as string | undefined;
+          const _pushed = rb.push_status === "pushed" || _land.push_status === "pushed" || _land.landed === true;
+          if (rb.mitosisStaged && _pushed && _sha) {
+            await closeLandedGap(gap, { landed: true, commit_sha: String(_sha), vessel: "development-vessel", push_status: "pushed" });
+            _pwtLanded = true;
+          }
+        } catch (e) {
+          console.warn("[gap-to-feature] pwt escalation error: " + (e as Error).message);
         }
       }
-      await bumpFailedAttempts(gap, { surprise: pred.predicted, predictedP: pred.p });
+      if (!_pwtLanded) await bumpFailedAttempts(gap, { surprise: pred.predicted, predictedP: pred.p });
     }
   }
 

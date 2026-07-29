@@ -200,11 +200,12 @@ type Cand = {
   const predictActionability = (g: { category?: string; mode_class?: string; target_file_paths?: unknown }): number => {
     let score = 0.5;
     const tfp = g.target_file_paths;
-    if (Array.isArray(tfp) && tfp.length > 0) score += 0.3; else score -= 0.2;
-    const mc = String(g.mode_class ?? "").toLowerCase();
-    if (mc && /analytic|observ|report|audit/.test(mc)) score -= 0.3;
-    if (mc && /code|fix|patch|impl/.test(mc)) score += 0.2;
-    const cat = String(g.category ?? "").toLowerCase();
+    if (tfp !== undefined && tfp !== null) score += 0.3; else score -= 0.2;
+    const mc = g.mode_class;
+    if (typeof mc === "string" && /analytic|observ|report|audit/.test(mc.toLowerCase())) score -= 0.3;
+    if (typeof mc === "string" && /code|fix|patch|impl/.test(mc.toLowerCase())) score += 0.2;
+    const cat = g.category;
+    if (typeof cat === "string" && /architectural|implementation|bug|fix/.test(cat.toLowerCase())) score += 0.1;
     if (/architectural|implementation|bug|fix/.test(cat)) score += 0.1;
     if (ACUTE_CATEGORIES.has(cat)) score += 0.15;
     if (STRUCTURAL_CATEGORIES.has(cat) && headroom < 0.35) score -= 0.15;

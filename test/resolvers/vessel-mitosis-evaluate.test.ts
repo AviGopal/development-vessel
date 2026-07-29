@@ -253,7 +253,12 @@ import { signatureSet } from "../../src/resolvers/vessel-mitosis-evaluate.js";
 function deltaAccepts(baseOut: string, mitOut: string, baseExit: number, mitExit: number): boolean {
   const cleanBaseDirtyMitosis = baseExit === 0 && mitExit !== 0;
   const newSignatures = [...signatureSet(mitOut)].filter((s) => !signatureSet(baseOut).has(s));
-  return !cleanBaseDirtyMitosis && newSignatures.length === 0;
+  // Mirrors the gate's SYNTAX-BAIL guard: TS1xxx = grammar/parse errors on which tsc stops
+  // early, truncating the error set; its generic signatures collide across files, so a subset
+  // comparison is unsound. When either tree shows a parse bail, fail closed.
+  const hasParseBail = (s: string) => /error TS1\d{3}:/.test(s);
+  const syntaxBail = hasParseBail(mitOut) || hasParseBail(baseOut);
+  return !cleanBaseDirtyMitosis && !syntaxBail && newSignatures.length === 0;
 }
 
 const SYNTAX_0f794d2 =
@@ -281,6 +286,15 @@ describe("mitosis delta gate: REJECTS new errors (pinned regressions)", () => {
   it("5697f70 out-of-scope-name type error on clean base", () => { expect(deltaAccepts("", TYPE_5697f70, 0, 1)).toBe(false); });
   it("5697f70 type error vs an unrelated dirty baseline", () => { expect(deltaAccepts(OTHER_BASELINE_ERR, TYPE_5697f70, 1, 1)).toBe(false); });
   it("half-wired new resolver (new [unhandled] shape) on dirty base (Seam-3)", () => { expect(deltaAccepts("  [unhandled] aShape", "  [unhandled] aShape\n  [unhandled] bShape", 1, 1)).toBe(false); });
+  // 2026-07-29 cascade: a syntax-broken landing made the base DIRTY-with-parse-error; tsc then
+  // bailed early on both trees, so a NEW syntax error in a DIFFERENT file normalized to a generic
+  // signature ALREADY in the (equally-truncated) base → new=0 → every subsequent broken patch
+  // landed as a "subset". The syntax-bail guard fails closed on any TS1xxx in either tree.
+  const SYNTAX_DIRTY_BASE = "src/resolvers/apply-proposal-as-patch.ts(441,41): error TS1005: ',' expected.";
+  const SYNTAX_NEW_OTHER_FILE = "src/resolvers/gap-to-feature.ts(999,9): error TS1005: ',' expected.";
+  it("parse-bail collision: NEW syntax error in another file, same signature as syntax-dirty base → REJECT", () => {
+    expect(deltaAccepts(SYNTAX_DIRTY_BASE, SYNTAX_NEW_OTHER_FILE, 2, 2)).toBe(false);
+  });
 });
 
 describe("mitosis delta gate: ACCEPTS legit deltas (delta-awareness preserved)", () => {

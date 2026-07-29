@@ -402,6 +402,7 @@ async function staticEvaluate(
       let baseErrorCount = -1;
       let mitosisErrorCount = -1;
       let newSignatures: string[] = [];
+      let syntaxBail = false;
       if (baseRootForOverlay && stagedFiles && stagedFiles.length > 0) {
         // Count BOTH tsc errors AND shape-dispatch violations. check-shape-dispatch
         // (the three-place-rule lint) exits 1 with NO `error TS` line, so a tsc-only
@@ -448,7 +449,16 @@ async function staticEvaluate(
           timed_out: true,
         };
       }
-      if (!cleanBaseDirtyMitosis && newSignatures.length === 0) {
+      // SYNTAX-BAIL GUARD: tsc reserves TS1xxx for grammar/parse errors, on which it stops
+      // parsing early — so the emitted error set is TRUNCATED and its signatures (generic
+      // messages like "TS1005: ',' expected.") collide across files. A subset comparison over
+      // a truncated set is unsound: a NEW syntax error can normalize to a signature already
+      // present in a syntax-dirty base and slip through as new=0. When either tree shows a
+      // parse bail, never delta-excuse — fail closed. (Closes the dirty-base cascade where one
+      // syntax-broken landing let every subsequent broken patch land as a "subset".)
+      const hasParseBail = (s: string) => /error TS1\d{3}:/.test(s);
+      syntaxBail = hasParseBail(r.output_tail) || hasParseBail(baseCheck.output_tail);
+      if (!cleanBaseDirtyMitosis && !syntaxBail && newSignatures.length === 0) {
           isRegression = false;
           completed.push({
             ...baseCheck,
@@ -460,7 +470,7 @@ async function staticEvaluate(
         return {
           attempted: true,
           ok: false,
-          reason: `${scriptName}_failed: exit=${r.exit_code}${baseErrorCount >= 0 ? ` new_errors(${newSignatures.length})=[${newSignatures.slice(0, 5).join(" | ")}${newSignatures.length > 5 ? ` +${newSignatures.length - 5}` : ""}] (regression)` : ""}`,
+          reason: `${scriptName}_failed: exit=${r.exit_code}${syntaxBail ? " parse_bail=true (tsc stopped early; truncated error set — subset unsound, failed closed)" : ""}${baseErrorCount >= 0 ? ` new_errors(${newSignatures.length})=[${newSignatures.slice(0, 5).join(" | ")}${newSignatures.length > 5 ? ` +${newSignatures.length - 5}` : ""}] (regression)` : ""}`,
           checks: completed,
           duration_ms: Date.now() - start,
         };

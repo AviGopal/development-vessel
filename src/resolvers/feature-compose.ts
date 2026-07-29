@@ -798,22 +798,6 @@ export function detectEffectlessHeaderOnlyDiff(diff: string): { isEffectless: bo
 export function detectArchitectureViolation(
   diff: string,
 ): Array<{ law: string; detail: string; snippet: string }> {
-  const addedLines = diff.split('+').filter(line => line !== '' && !line.startsWith('-'));
-  const externalUrls = addedLines.filter(line => line.match(/https?:\/\/[^\s]+/) && !line.match(/process\.env/));
-  const loopbackHosts = ['localhost', '127.0.0.1', '0.0.0.0', 'host.docker.internal'];
-  const sanctionedHosts = ['github.com', 'npmjs.org', 'registry.npmjs.org', 'httpbin.org'];
-  externalUrls.forEach(url => {
-    const host = (url.match(/https?:\/\/([^\s\/]+)/)?.[1]) ?? '';
-    if (!loopbackHosts.includes(host) && !sanctionedHosts.includes(host) && !addedLines.some(line => line.includes('-') && line.includes(host))) {
-      return [
-        {
-          law: 'Internal endpoints must be read from process.env.<X>_ENDPOINT with a loopback fallback',
-          detail: `Hardcoded external URL ${url} is not allowed`,
-          snippet: url,
-        },
-      ];
-    }
-  });
   const added = diff
     .split("\n")
     .filter((l) => l.startsWith("+") && !l.startsWith("+++"))
@@ -835,6 +819,19 @@ export function detectArchitectureViolation(
   // env read used at a BRANCH/decision point (not a top-level const assignment).
   const ENV_GATE =
     /(?:if\s*\(|while\s*\(|\?|&&|\|\||return\s+|===|!==|==|!=)[^;\n]*\bprocess\.env\.([A-Z0-9_]+)\b/;
+  // Check C (2026-07-29): a LITERAL external URL hardcoded in self-authored vessel code. Internal
+  // endpoints are uniformly `process.env.<X>_ENDPOINT ?? "http://127.0.0.1:<port>"`, so a bare
+  // external host with NO process.env on the line is either a confabulated endpoint (patch_with_tools
+  // invented https://concept-db.com — a data-egress risk that passed every STRUCTURAL gate) or an
+  // unsanctioned external integration. ADVISORY (fed to the semantic judge) — matches the env-gate
+  // rule's severity; per the L786 design we surface a law-backed NOTE, never hard-block a heuristic.
+  const EXTERNAL_URL = /https?:\/\/([a-zA-Z0-9._-]+(?::\d+)?)/;
+  const LOCAL_HOST = /^(?:localhost|127\.0\.0\.1|0\.0\.0\.0|host\.docker\.internal)$/;
+  const ALLOWED_HOST = /^(?:(?:[a-z0-9-]+\.)*github\.com|(?:[a-z0-9-]+\.)*npmjs\.(?:com|org)|registry\.npmjs\.org|httpbin\.org)$/;
+  const removedHosts = new Set(
+    diff.split("\n").filter((l) => l.startsWith("-") && !l.startsWith("---"))
+      .flatMap((l) => [...l.matchAll(/https?:\/\/([a-zA-Z0-9._-]+(?::\d+)?)/g)].map((mm) => mm[1]!.toLowerCase())),
+  );
   for (const rawLine of added) {
     const code = rawLine.trim();
     if (!code || code.startsWith("//") || code.startsWith("*") || code.startsWith("/*")) continue;
@@ -853,6 +850,20 @@ export function detectArchitectureViolation(
         `runtime behaviour is gated behind process.env.${m[1]!}, which is frozen at process start, invisible to traces and the walk, and unlearnable — steer this behaviour with a shaped impulse read at use time instead`,
         code,
       );
+    }
+    if (!code.includes("process.env")) {
+      const um = code.match(EXTERNAL_URL);
+      if (um) {
+        const hostport = um[1]!.toLowerCase();
+        const host = hostport.replace(/:\d+$/, "");
+        if (!LOCAL_HOST.test(host) && !ALLOWED_HOST.test(host) && !removedHosts.has(hostport)) {
+          push(
+            "L11/L1 (endpoints are config, not literals; external egress must be sanctioned)",
+            `a literal external URL (${um[1]!}) is hardcoded in self-authored vessel code with no process.env on the line — internal endpoints must be process.env.<X>_ENDPOINT ?? a loopback fallback, and a bare external host is an unsanctioned data-egress target invisible to config; route it through the configured endpoint, or add the host to the sanctioned allowlist if it is genuinely required`,
+            code,
+          );
+        }
+      }
     }
   }
   return violations;

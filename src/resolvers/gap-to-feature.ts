@@ -627,7 +627,19 @@ function landabilityScore(gap: Record<string, unknown>): number {
   // a transient UNFAVORABLE rather than burying them behind meta/diagnostic
   // gaps that have no failed attempts only because they were never picked.
   const hasConcreteSite = Boolean(meta.edit_site || meta.change_site || meta.single_file);
-  // Per-gap failure lessons capture the exact mistake so the next LLM draft
+  function vesselDirExists(vesselName: string): boolean {
+  try {
+    return existsSync(`repos/${vesselName}`) && lstatSync(`repos/${vesselName}`).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+function getValidTargetVessel(targetVessel: string): string {
+  return vesselDirExists(targetVessel) ? targetVessel : "development-vessel";
+}
+
+// Per-gap failure lessons capture the exact mistake so the next LLM draft
   // avoids it — a gap with lessons is MORE landable on re-pick, not less.
   const hasLessons = Boolean((meta as Record<string, unknown>).per_gap_failure_lessons);
   const penalty = Math.min(fa * (hasConcreteSite ? 0.1 : 0.2), 0.4) - (hasLessons ? 0.05 : 0);
@@ -1425,7 +1437,8 @@ async function routeCapabilityGapToNewResolver(
   meta: Record<string, unknown>,
   pointer: GapToFeaturePointer,
 ): Promise<ResolverResult> {
-  const vessel = (typeof meta.target_vessel === "string" && meta.target_vessel.trim()) || "development-vessel";
+  const targetVessel = typeof meta.target_vessel === "string" ? meta.target_vessel.trim() : "";
+  const vessel = getValidTargetVessel(targetVessel);
   const resolverName = shapeToResolverName(missingShape);
   if (!/^[a-z][a-z0-9_]*$/.test(resolverName)) {
     return { shape: "gapToFeatureReport", body: { ok: false, route: "author_new_resolver", gap_id: gap.id, error: `cannot derive snake_case resolver name from shape "${missingShape}"` } };

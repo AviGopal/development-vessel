@@ -2333,7 +2333,7 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
           if (callOut) { callerCount += callOut.split("\n").filter(Boolean).length; codeHit ||= callOut.split("\n").slice(0, 4).join("\n"); }
           // Entrypoint: exported, OR a route/dispatch/lifecycle reference to the symbol.
           const entQ = await callTool(toolsEndpoint, "shell", {
-            command: `grep -rEn "(export[[:space:]]+(async[[:space:]]+)?(function|const|let)[[:space:]]+${symbol}\\b|case[[:space:]]+[\\"']${symbol}[\\"']|['\\"]${symbol}['\\"][[:space:]]*[:,)]|\\.(on|get|post|put|delete|use)\\([^)]*${symbol}|router\\.[a-z]+\\([^)]*${symbol})" ${JSON.stringify(vAbs)} 2>/dev/null || true`,
+            command: `grep -rEn "(export[[:space:]]+(async[[:space:]]+)?(function|const|let)[[:space:]]+${symbol}\\b|export[[:space:]]+default[[:space:]]+(async[[:space:]]+)?(function[[:space:]]+)?${symbol}\\b|export[[:space:]]*\\{[^}]*${symbol}\\b|case[[:space:]]+[\\"']${symbol}[\\"']|['\\"]${symbol}['\\"][[:space:]]*[:,)]|\\.(on|get|post|put|delete|use)\\([^)]*${symbol}|router\\.[a-z]+\\([^)]*${symbol})" ${JSON.stringify(vAbs)} 2>/dev/null || true`,
             cwd: REPO_ROOT,
           });
           if (String((entQ.body as { stdout?: unknown })?.stdout ?? "").trim()) isEntrypoint = true;

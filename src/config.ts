@@ -139,6 +139,7 @@ export const config = {
       "markdown_split_sections",
       "concept_truth_probe",
       "recurringPatternConcept",
+      "shellResult",
       // Deterministic stale-pointer detector + emitter (iter-082, 2026-05-30):
       // scans concept-db, stats each concept's pointer.path, POSTs substrateGap
       // for missing files. Replaces the prior LLM-heuristic detect-stale-pointer

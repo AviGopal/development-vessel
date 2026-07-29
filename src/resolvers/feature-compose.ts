@@ -608,7 +608,12 @@ export function detectNewCapabilityStub(diff: string): StubVerdict {
 export function reachabilityHardFail(facts: ReachabilityFact[]): { hardFail: boolean; reason: string } {
   if (facts.length === 0) return { hardFail: false, reason: "no changed symbols extracted from diff (not a hard-fail)" };
   const reachable = facts.filter((f) => f.reachable);
-  if (reachable.length === 0) {
+  if (reachable.length === 0 || facts.some((f) => f.isNewFunction && f.callerCount === 0 && !f.isEntrypoint)) {
+    const newlyAddedFunctions = facts.filter((f) => f.isNewFunction && f.callerCount === 0 && !f.isEntrypoint);
+    if (newlyAddedFunctions.length > 0) {
+      return { hardFail: true, reason: `compose adds top-level function ${newlyAddedFunctions.map((f) => f.symbol).join(', ')} with zero readers, not exported and not wired — a write-only hollow addition; wire it, export it for a real consumer, or drop it` };
+    }
+
     const names = facts.map((f) => f.symbol).join(", ");
     return {
       hardFail: true,

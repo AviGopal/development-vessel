@@ -135,7 +135,7 @@ async function emitServiceGap(
           category: "service_failure",
           source: "substrate_detected",
           status: "open",
-          summary: `systemd unit ${info.unit}.service failed (Result=${info.result}, exit=${info.exec_main_status}). Last log: ${info.error.slice(0, 160)}`,
+          summary: `systemd unit ${info.unit}.service failed (Result=${info.result}, exit=${info.exec_main_status}). Last log: ${info.error.slice(0, 160)}. Possible causes: configuration issue, missing dependencies, or a bug in the script or application.`,
           detected_at: new Date().toISOString(),
           classification_metadata: {
             detector: "systemd_unit_health_observer",

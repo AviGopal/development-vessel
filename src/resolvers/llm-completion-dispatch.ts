@@ -2,6 +2,10 @@ import { DISCOVERY_ENDPOINT, METABOB_API_KEY } from "../config.js";
 
 // Optional override: set LLM_COMPLETION_ENDPOINT to bypass discovery (e.g. for local dev with port-forward).
 const LLM_COMPLETION_ENDPOINT_OVERRIDE = process.env["LLM_COMPLETION_ENDPOINT"] ?? "";
+// Federation-transport egress (dev-vessel has no libp2p deps; peer resolves route through
+// the local transport sidecar). Mirrors feature-compose / goal-host FED_TRANSPORT_EGRESS —
+// the by-name egress path proven to serve llm_completion from a funded hub arm.
+const FED_TRANSPORT_EGRESS = process.env["FED_TRANSPORT_EGRESS"] ?? "http://127.0.0.1:8401";
 import type { ResolverResult } from "./types.js";
 
 export interface LlmCompletionDispatchPointer {
@@ -166,6 +170,18 @@ export async function resolveLlmCompletionDispatch(
   const endpoints = LLM_COMPLETION_ENDPOINT_OVERRIDE
     ? [LLM_COMPLETION_ENDPOINT_OVERRIDE]
     : await findLlmCompletionEndpoints();
+  // Hub-egress fallback (law 11 data-locality + failover): when NO llm arm is discoverable
+  // locally — the local resolver de-advertises llm_completion on quota/credit exhaustion, and
+  // a spoke does not mirror the hub's arms into its own discovery — a funded arm still lives on
+  // a peer substrate. Route to it BY NAME through the federation egress; the egress picks a LIVE
+  // hub circuit and lands on the owning vessel over libp2p. Mirrors feature_compose's proven
+  // fallback; the per-endpoint failover loop below posts the same unwrapped body this endpoint
+  // accepts and the response-unwrap already handles the {content:{value}} envelope. Costs nothing
+  // when a local arm exists (branch skipped); no hardcoded peer/endpoint.
+  if (endpoints.length === 0) {
+    endpoints.push(`${FED_TRANSPORT_EGRESS}/egress/resolve?vessel=llm-resolver-vessel`);
+    console.error("[llm-completion-dispatch] no local llm arm discoverable — falling back to hub egress (?vessel=llm-resolver-vessel)");
+  }
   if (endpoints.length === 0) {
     return {
       shape: "structuredError",
@@ -279,7 +295,7 @@ export async function resolveLlmCompletionDispatch(
     : Array.isArray(_c)
       ? (_c[0] as { text?: string } | undefined)?.text
       : (_c && typeof _c === "object")
-        ? (_c.value ?? _c.text)
+        ? (_c.value ?? _c.text ?? _c.body?.value ?? _c.body?.content)
         : undefined;
   const toolCalls = typeof _c === "string"
     ? undefined

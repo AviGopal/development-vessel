@@ -32,6 +32,9 @@ import type { ResolverResult } from "./types.js";
 import { resolveVesselMitosisCutover } from "./vessel-mitosis-cutover.js";
 
 const DISCOVERY_ENDPOINT = process.env.DISCOVERY_ENDPOINT ?? "http://127.0.0.1:8100";
+// Federation-transport egress (dev-vessel has no libp2p deps). Mirrors feature-compose /
+// goal-host FED_TRANSPORT_EGRESS — the by-name egress path proven to serve llm_completion.
+const FED_TRANSPORT_EGRESS = process.env.FED_TRANSPORT_EGRESS ?? "http://127.0.0.1:8401";
 // V38 (2026-06-12): 8 was too tight — non-trivial single-file patches spend
 // turns on search→edit→re-search-to-verify and hit the cap before declaring
 // done (observed: code_replace_lines applied on turns 4-5, capped at 8 mid-verify).
@@ -423,6 +426,18 @@ export async function resolvePatchWithTools(pointer: PatchWithToolsPointer): Pro
   };
 
   const llmEndpoints = await findLlmEndpoints();
+  // Hub-egress fallback (law 11): when NO llm arm is discoverable locally (the local resolver
+  // de-advertises llm_completion on quota/credit exhaustion; a spoke doesn't mirror the hub's
+  // arms), a funded arm still lives on a peer. Route BY NAME through the federation egress — the
+  // egress picks a LIVE hub circuit and lands on the owning vessel over libp2p. No target header
+  // (by-name), matching feature_compose. The existing llmCall posts the unwrapped
+  // {type:"llm_completion",...} body this endpoint accepts, and its response-unwrap already
+  // handles the {content:{value}} envelope. The pushed producer is a first-class member of the
+  // per-turn cascade below. Costs nothing when a local arm exists (branch skipped).
+  if (llmEndpoints.length === 0) {
+    llmEndpoints.push({ url: `${FED_TRANSPORT_EGRESS}/egress/resolve?vessel=llm-resolver-vessel` });
+    console.error("[patch-with-tools] no local llm arm discoverable — falling back to hub egress (?vessel=llm-resolver-vessel)");
+  }
   if (llmEndpoints.length === 0) return structuredError("no llm_completion vessel found in discovery");
   const llmEndpoint = llmEndpoints[0]!;
   const toolsEndpoint = await findLocalToolsEndpoint();

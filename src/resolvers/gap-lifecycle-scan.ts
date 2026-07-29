@@ -508,6 +508,24 @@ export async function resolveGapLifecycleScan(p: GapLifecycleScanPointer): Promi
     .filter((ms) => Number.isFinite(ms) && ms >= 0)
     .sort((a, b) => a - b);
   const _medianLatencyMs = _latencies.length ? _latencies[Math.floor(_latencies.length / 2)] : 0;
+  const nowMs = Date.now();
+  const staleMs = staleHours * 3600 * 1000;
+  let open_with_failures = 0;
+  let open_persistent_fresh = 0;
+  let max_failure_lessons = 0;
+  const failure_count_dist: Record<number, number> = {};
+  for (const g of open) {
+    const meta = (g as any).classification_metadata;
+    const arr = Array.isArray(meta?.failure_lessons) ? meta.failure_lessons : [];
+    const len = arr.length;
+    if (len > 0) open_with_failures++;
+    if (len > max_failure_lessons) max_failure_lessons = len;
+    failure_count_dist[len] = (failure_count_dist[len] ?? 0) + 1;
+    if (len >= 3) {
+      const ts = Date.parse(g.updated_at ?? g.created_at ?? "");
+      if (Number.isFinite(ts) && nowMs - ts <= staleMs) open_persistent_fresh++;
+    }
+  }
   const runRecord = {
     run_at: new Date().toISOString(),
     total: gaps.length,
@@ -520,6 +538,10 @@ export async function resolveGapLifecycleScan(p: GapLifecycleScanPointer): Promi
     closed_total: _closedGaps.length,
     close_rate: gaps.length ? _closedGaps.length / gaps.length : 0,
     median_latency_ms: _medianLatencyMs,
+    open_with_failures,
+    open_persistent_fresh,
+    max_failure_lessons,
+    failure_count_dist,
   };
   let funnelHistory: unknown[] = [];
   if (!dryRun) {

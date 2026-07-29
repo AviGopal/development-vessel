@@ -1179,13 +1179,19 @@ async function bumpFailedAttempts(gap: Record<string, unknown>, opts: { surprise
     // threshold (>= 3 failed_attempts). The child carries a tighter description
     // and resets failed_attempts to 0 so it re-enters the dispatch queue at
     // normal priority rather than being culled by the landabilityScore filter.
-    const willExceedThreshold = fa >= 3;
+    // Only narrow a ROOT gap; an already-narrowed child (parent_gap_id set) must not spawn
+    // grandchildren, else chronic failure produces an unbounded -narrowed-narrowed chain.
+    const willExceedThreshold = fa >= 3 && !meta0.parent_gap_id;
     if (willExceedThreshold) {
       try {
         const parentId: string = id;
         const parentSummary = String(gap.summary ?? gap.title ?? "");
         const childMeta = { ...meta, failed_attempts: 0, parent_gap_id: parentId, narrowed_at: new Date().toISOString() };
         const childRecord: Record<string, unknown> = {
+          // Deterministic id so re-narrowing the SAME parent upserts one idempotent child
+          // (gapClassKey has no volatile token to strip here) instead of throwing on a
+          // missing id or spawning a new row every failure.
+          id: `${parentId}-narrowed`,
           category: gap.category,
           source: gap.source,
           summary: `[narrowed from ${parentId}] ${parentSummary}`,

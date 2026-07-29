@@ -567,6 +567,37 @@ export function detectNewCapabilityStub(diff: string): StubVerdict {
     if (/^void\s+0\s*;?$/.test(stripped)) return "no-op body (void 0)";
     return null;
   };
+  // A body that is a SINGLE `return <literal>;` where the literal references NONE of the
+  // function's parameters, makes no call, awaits nothing, and reads no env — a compile-time
+  // constant returned REGARDLESS of the input. This is the shellResultResolver miss:
+  // `return { shape:'shellResult', body:'computed report' }` is non-empty (so trivialBody
+  // misses it) yet computes nothing and ignores its `pointer`. FALSE-POSITIVE GUARDS: only
+  // fires when the fn declares >=1 meaningful (non `_`-prefixed) param — a noop/sentinel
+  // resolver signals "no input needed" by taking no params or `_`-prefixing them; and a
+  // `;` in the header means openRe swallowed a ternary/statement (not a real signature) — bail.
+  const constantReturnStub = (body: string, paramsStr: string, header: string): string | null => {
+    if (/;/.test(header)) return null; // openRe over-match (ternary+if swallowed) — not a function head
+    const paramNames = paramsStr
+      .split(",")
+      .map((p) => p.trim().match(/^\.{0,3}\s*([A-Za-z_$][\w$]*)/)?.[1])
+      .filter((n): n is string => Boolean(n));
+    const meaningful = paramNames.filter((n) => !n.startsWith("_"));
+    if (meaningful.length === 0) return null; // no input to honour -> not a placeholder
+    const t = body.trim().replace(/^[;\s]+/, "").replace(/[;\s]+$/, "");
+    const m = t.match(/^return\b([\s\S]*?);?$/); // single `return ...` statement only
+    if (!m) return null;
+    const expr = m[1]!.trim();
+    // Must BE a compile-time literal (object/array/string/number/bool/null), no runtime work.
+    if (!/^(?:\{[\s\S]*\}|\[[\s\S]*\]|"[^"]*"|'[^']*'|`[^`]*`|-?\d[\d_.eE]*|true|false|null)$/.test(expr)) return null;
+    if (expr.includes("(")) return null;                 // any call/constructor/arrow -> real work
+    if (/\bawait\b/.test(expr)) return null;             // awaits -> real work
+    if (/\bprocess\s*\.\s*env\b/.test(expr)) return null; // reads env -> not constant
+    for (const p of paramNames) {                        // interpolates/reads a param -> uses input
+      if (new RegExp(`\\b${p.replace(/\$/g, "\\$")}\\b`).test(expr)) return null;
+    }
+    const shown = expr.length > 60 ? expr.slice(0, 57) + "..." : expr;
+    return `constant-return body (return ${shown})`;
+  };
   // Find `function NAME(...) { BODY }`, `NAME(...) => { BODY }`, and route handlers
   // `.post("/x", (req) => { BODY })` in the added text. Brace-match to extract BODY.
   const openRe = /(?:function\s+([A-Za-z_$][\w$]*)\s*\([^)]*\)\s*(?::[^={]+)?|(?:async\s+)?\([^)]*\)\s*(?::[^=]+)?=>|\b([A-Za-z_$][\w$]*)\s*\([^)]*\)\s*(?::[^={]+)?)\s*\{/g;
@@ -584,7 +615,12 @@ export function detectNewCapabilityStub(diff: string): StubVerdict {
     }
     if (depth !== 0) continue; // unbalanced (partial diff) — skip, do not false-fail
     const body = addedJoined.slice(openRe.lastIndex, i - 1);
-    const triv = trivialBody(body);
+    // Header = match-start -> the consumed `{`; first paren group = the param list. Used to
+    // distinguish a genuine constant resolver (no input to honour) from a placeholder that
+    // IGNORES the pointer it was handed.
+    const header = addedJoined.slice(mm.index, openRe.lastIndex - 1);
+    const paramsStr = header.match(/\(([^)]*)\)/)?.[1] ?? "";
+    const triv = trivialBody(body) ?? constantReturnStub(body, paramsStr, header);
     if (triv) {
       return {
         isStub: true,

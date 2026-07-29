@@ -960,6 +960,40 @@ async function attemptApplyOnce(pointer: ApplyProposalAsPatchPointer): Promise<R
         });
       }
     }
+    // NEW-CAPABILITY-STUB GATE (multifile self-landing path). apply_proposal_as_patch
+    // self-cutovers via mitosis with NO semantic judge and NO stub check
+    // (verifyPatchAddressesGap is not on this path — see the note by the single-file
+    // patcher call below), which is how a net-new resolver STUB (shellResult, 9a019a0)
+    // shipped green. REUSE detectNewCapabilityStub on the AUTHORED net-new files: the
+    // "diff" of an added file is its whole content, each line `+`-prefixed under a
+    // `### NEW FILE` header (the form feature-compose builds → diffIsCreateHeavy true).
+    // Overwrite edits are excluded (whole-content `+`-prefixing would misread an edit).
+    if (newFiles.length > 0) {
+      const { detectNewCapabilityStub } = await import("./feature-compose.js");
+      const newFileDiff = newFiles
+        .map((nf) => `### NEW FILE ${nf.path}\n` + String(nf.content ?? "").split("\n").map((l) => `+${l}`).join("\n"))
+        .join("\n\n");
+      const stub = detectNewCapabilityStub(newFileDiff);
+      if (stub.isStub) {
+        try {
+          await writeFile(`${proposalsDir}/.applied/${chosen.name}`, JSON.stringify({
+            rejected_at: new Date().toISOString(),
+            reason: "new_capability_stub",
+            multifile: true,
+            marker: stub.marker ?? null,
+            symbol: stub.symbol ?? null,
+            stub_reason: stub.reason,
+          }, null, 2));
+        } catch { /* tolerant */ }
+        return structuredError("new_capability_stub", {
+          proposal: chosen.name,
+          vessel: vesselOnly,
+          marker: stub.marker,
+          symbol: stub.symbol,
+          detail: `refusing to stage/cutover a net-new capability that is a stub, not a functional implementation — ${stub.reason}`,
+        });
+      }
+    }
     if (dryRun) {
       return {
         shape: "mitosisStaged",
@@ -1158,6 +1192,41 @@ async function attemptApplyOnce(pointer: ApplyProposalAsPatchPointer): Promise<R
         }
       } catch { /* if we cannot read the staged file, leave result as-is */ }
     }
+  }
+  // NEW-CAPABILITY-STUB GATE (single-file net-new). The patcher authors a net-new file into
+  // the mitosis dir, then this path self-cutovers with no stub check. Read the STAGED file
+  // (like the verbatim-anchor guard above) and reject before cutover if the authored capability
+  // is a stub. Scoped to isNewFileTarget: a whole-file `+` diff only represents a NET-NEW file
+  // correctly; surgical edits to existing files are untouched.
+  if (isNewFileTarget && result.shape === "mitosisStaged" && result.body) {
+    try {
+      const stubMitosisRoot = (result.body as { mitosis_root?: string }).mitosis_root;
+      if (stubMitosisRoot) {
+        const { detectNewCapabilityStub } = await import("./feature-compose.js");
+        const stagedContent = await readFile(join(stubMitosisRoot, subPath), "utf-8");
+        const newFileDiff = `### NEW FILE ${subPath}\n` + stagedContent.split("\n").map((l) => `+${l}`).join("\n");
+        const stub = detectNewCapabilityStub(newFileDiff);
+        if (stub.isStub) {
+          try {
+            await writeFile(`${proposalsDir}/.applied/${chosen.name}`, JSON.stringify({
+              rejected_at: new Date().toISOString(),
+              reason: "new_capability_stub",
+              target_file: targetFile,
+              marker: stub.marker ?? null,
+              symbol: stub.symbol ?? null,
+              stub_reason: stub.reason,
+            }, null, 2));
+          } catch { /* tolerant */ }
+          result = structuredError("new_capability_stub", {
+            proposal: chosen.name,
+            target_file: targetFile,
+            marker: stub.marker,
+            symbol: stub.symbol,
+            detail: `refusing to cutover a net-new capability that is a stub, not a functional implementation — ${stub.reason}`,
+          }) as typeof result;
+        }
+      }
+    } catch { /* if we cannot read the staged file, leave result as-is (do not false-fail) */ }
   }
   // Self-propel evaluate→cutover the moment patch_with_tools stages a mitosis.
   if (result.shape === "mitosisStaged") triggerMitosisTick();

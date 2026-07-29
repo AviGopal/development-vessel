@@ -1609,28 +1609,6 @@ async function fileLessonsBlock(specText?: string): Promise<string> {
     return "\n\nPRIOR TYPECHECK FAILURES ON THESE FILES (verbatim diagnostics from earlier failed attempts on the same files — your op plan MUST avoid re-introducing these errors; declare each new variable exactly once, in the correct scope):\n" + relevant.slice(-3).map((r) => `- [${r.at}] files=${r.files.join(",")}\n${r.tsc.slice(0, 1500)}`).join("\n");
   } catch { return ""; }
 }
-const COMPOSE_FILE_LESSONS_PATH = "/workspace/proposals/compose-file-lessons.jsonl";
-async function fileLessonsBlock(specText?: string): Promise<string> {
-  // PER-FILE TYPECHECK LESSONS: verbatim tsc diagnostics from prior failed
-  // attempts touching files named in this spec. File path is the stable key
-  // across reworded re-dispatches (goal_hash is not).
-  if (!specText) return "";
-  try {
-    const { existsSync, readFileSync } = await import("node:fs");
-    if (!existsSync(COMPOSE_FILE_LESSONS_PATH)) return "";
-    const lines = readFileSync(COMPOSE_FILE_LESSONS_PATH, "utf8").split("\n").filter((l) => l.trim().length > 0).slice(-80);
-    const relevant: Array<{ at: string; files: string[]; tsc: string }> = [];
-    for (const ln of lines) {
-      try {
-        const e = JSON.parse(ln) as { at?: string; files?: string[]; tsc?: string };
-        if (!Array.isArray(e.files) || !e.tsc) continue;
-        if (e.files.some((f) => specText.includes(String(f)) || specText.includes(String(f).split("/").pop() ?? String(f)))) relevant.push({ at: e.at ?? "", files: e.files.map(String), tsc: String(e.tsc) });
-      } catch { /* skip malformed line */ }
-    }
-    if (relevant.length === 0) return "";
-    return "\n\nPRIOR TYPECHECK FAILURES ON THESE FILES (verbatim diagnostics from earlier failed attempts on the same files — your op plan MUST avoid re-introducing these errors; declare each new variable exactly once, in the correct scope):\n" + relevant.slice(-3).map((r) => `- [${r.at}] files=${r.files.join(",")}\n${r.tsc.slice(0, 1500)}`).join("\n");
-  } catch { return ""; }
-}
 async function composeLessonsBlock(specText?: string): Promise<string> {
   // FIRST: semantic recall from concept-db — relevance to the current spec, not
   // JSONL recency. Fails open to the JSONL path when concept-db is down or empty.
@@ -1900,6 +1878,8 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
     const outOfScope = [...touched].find((v) => !verifyVessels.includes(v));
     if (outOfScope) return { shape: "featureComposeReport", body: { ok: false, verdict: "REFUSED", stage: "scope", error: "plan touches " + outOfScope + " which is outside verify_vessels - declare it so it is typecheck-verified and concurrency-guarded" } };
   }
+  const missingVessel = [...touched].find((v) => !mountExistsSync(v));
+  if (missingVessel) return { shape: "featureComposeReport", body: { ok: false, verdict: "REFUSED", stage: "scope", error: "plan touches vessel " + missingVessel + " which does not exist" } };
 
   const planView = ops.map((o) => ({ kind: o.kind, path: o.path, rationale: o.rationale }));
   // Materialize non-resident vessels (gap edit-intent-path-translation-post-unmooring):

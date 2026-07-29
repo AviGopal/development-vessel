@@ -2246,6 +2246,28 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
   const typecheckPass = verify.every((v) => v.ok) && verify.length > 0;
   let verdict: "FAVORABLE" | "UNFAVORABLE" = typecheckPass ? "FAVORABLE" : "UNFAVORABLE";
 
+  // TARGET-TOUCHED FLOOR (2026-07-29, operator landing-quality audit). A FAVORABLE compose MUST
+  // have landed >=1 successfully-applied op on the INTENDED target file. Otherwise it greened
+  // without touching what was asked — the package.json-only / sibling-drift false-FAVORABLE that
+  // shipped 5 of 57 autonomous commits (c88bf0a/61c8e01/2f4093c: apply_proposal_as_patch's target
+  // hunk failed, mitosis committed its own version bump, favorable-compose greened on the landed
+  // SHA). Keyed on "intended target absent from the successfully-applied set", NOT on "package.json
+  // was the only change" — so a genuine package.json-target/dependency gap (package.json IS in
+  // targetFiles by its .json/repos shape) and a source fix that also bumps package.json both PASS;
+  // a goal with no repos/ target (targetFiles empty) is exempt. Flipping verdict here suppresses
+  // the mitosis cutover (gated on verdict==="FAVORABLE") AND un-greens goal-host's favorable-compose
+  // regex, so no empty commit lands. Single-site; no new params threaded.
+  {
+    const _changedRel = applied.filter((a) => a.ok).map((a) => a.path);
+    const _norm = (x: string) => x.replace(/:\d+.*$/, "").trim();
+    const _targetTouched = targetFiles.some((t) =>
+      _changedRel.some((c) => { const cn = _norm(c), tn = _norm(t); return cn === tn || cn.endsWith("/" + tn) || tn.endsWith("/" + cn); }));
+    if (verdict === "FAVORABLE" && targetFiles.length > 0 && !_targetTouched) {
+      verdict = "UNFAVORABLE";
+      console.log(`[feature-compose] target-touched floor: WITHHELD FAVORABLE \u2014 intended target(s) ${targetFiles.join(", ")} absent from applied set [${_changedRel.join(", ")}]`);
+    }
+  }
+
   // 3b. SEMANTIC GATE (2026-06-25, lever 5 — the reach-gate applied to code). Only
   // a typecheck-clean patch reaches here. typecheck=clean ≠ gap-fixed: a net-new
   // dead-code function (zero callers) or an edit to a non-executing path compiles

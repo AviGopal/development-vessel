@@ -476,6 +476,40 @@ export async function resolveGapLifecycleScan(p: GapLifecycleScanPointer): Promi
     }
   }
 
+  // Persistent compose failure auto-close
+  const persistentClosed: string[] = [];
+  if (autoClose && !dryRun) {
+    const excludedIds = new Set([...lowValueClosed, ...expired, ...closed]);
+    const persistentCandidates = remainingOpen.filter((g) => {
+      const lessons = ((g as any).classification_metadata?.failure_lessons ?? []) as unknown[];
+      return Array.isArray(lessons) && lessons.length >= 8 && !excludedIds.has(g.id!);
+    });
+    for (const g of persistentCandidates.slice(0, maxClose)) {
+      const failureCount = ((g as any).classification_metadata?.failure_lessons ?? []).length;
+      try {
+        const resp = await fetch(emitUrl, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", ...authHeader },
+          body: JSON.stringify({
+            impulse: {
+              pointer: { type: "substrateGap_write", gap: {
+                id: g.id,
+                category: g.category ?? "other",
+                source: "substrate_detected",
+                summary: `[auto-closed by gap_lifecycle_scan] ${(g.summary ?? "").slice(0, 160)} — persistent compose failure (${failureCount} failed attempts, failure_lessons saturated). Not patch‑tractable by re‑drafting. Live detectors will re-open if still real.`,
+                status: "closed",
+                detected_at: new Date().toISOString(),
+                classification_metadata: { closed_reason: "persistent_compose_failure", closed_by: "gap_lifecycle_scan", failure_count_at_close: failureCount },
+              } },
+            },
+          }),
+          signal: AbortSignal.timeout(8_000),
+        });
+        if (resp.ok) persistentClosed.push(g.id!);
+      } catch { /* best-effort */ }
+    }
+  }
+
   // 2. One aggregate backlog-health meta-gap (not one-per-gap).
   const byCat: Record<string, number> = {};
   for (const g of staleOpen) byCat[g.category ?? "?"] = (byCat[g.category ?? "?"] ?? 0) + 1;

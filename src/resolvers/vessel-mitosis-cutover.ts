@@ -914,32 +914,6 @@ export async function resolveVesselMitosisCutover(
         evaluationEvidence: evaluation_evidence,
         stagedBaseSha,
       });
-    } catch (err) {
-      // WEDGE GUARD (2026-07-29, gap-mitosis-cutover-freshok-never-finalizes-orphans-lock):
-      // a THROW from the git-aware cutover after the freshness gate passed (git/fs failure,
-      // unexpected error) would propagate to the resolver's top-level catch → structuredError,
-      // which engine.ts (~L578) DROPS silently — and, critically, leaves mitosis-pending.json
-      // in place. apply_proposal_as_patch then refuses every new proposal ("pending in flight")
-      // and pull-sync SKIPS every run ("mitosis cutover in flight") for the full 30-min
-      // MITOSIS_LOCK_TTL, freezing ALL deployment (autonomous landings AND operator pushes).
-      // Observed live: activity-api topocov (06:07) and dev-vessel stalelock (06:56) both
-      // logged freshnessOK=true then went silent, orphaning the lock. Reuse clearPendingOnReject
-      // to release the lock on this terminal path too, and return an AUDITED refusal so the
-      // failure is visible in the trace instead of swallowed. The finally still releases the lease.
-      await clearPendingOnReject(pointer, workspaceRoot);
-      console.error(`[mitosis-cutover] git-aware cutover THREW for ${vessel_name} ${mitosis_version_id}: ${(err as Error).message} — cleared pending lock, returning audited refusal (no wedge)`);
-      return {
-        shape: "vesselMitosisCutoverResult",
-        body: {
-          applied: false,
-          refused: true,
-          refuse_reason: "git_aware_cutover_threw",
-          error: (err as Error).message,
-          vessel_name,
-          base_version_id,
-          mitosis_version_id,
-        },
-      };
     } finally {
       await resolveMaintenanceLeaseWrite({
         type: "maintenanceLease_write",

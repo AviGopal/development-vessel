@@ -546,9 +546,9 @@ export function specFromGap(
   // (the planner deletes the source logic and calls a destination endpoint that doesn't
   // exist). This branch replaces that framing for move-type gaps only; surgical gaps fall
   // through to the unchanged instruction below (byte-identical).
-  if (move) {
-    const epName = move.target.endpoint ? ` named "${move.target.endpoint}"` : "";
-    const srcLabel = move.sourceFile ?? (move.source ? `repos/${move.source}/src/` : "the source vessel");
+  if (move && move.source && move.target && move.target.repoPath) {
+    const epName = move.target.endpoint ?? "";
+    const srcLabel = move.source;
     return [
       "This substrate gap is a RESPONSIBILITY MOVE between vessels — author BOTH halves of the move (this is NOT a single surgical edit):",
       `  HALF 1 (DESTINATION — ${move.target.repoPath}): CREATE the receiving capability${epName} in this vessel. Add it idiomatically — a resolver + its dispatch case + its discovery shape if the vessel exposes capabilities as impulse shapes, or a new HTTP route/handler if it exposes them as routes. Match how this vessel's existing capabilities are structured (read the grounded current contents to mirror its resolver/route pattern and return shape).`,

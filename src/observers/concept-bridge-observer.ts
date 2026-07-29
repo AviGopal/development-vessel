@@ -146,10 +146,39 @@ export function startConceptBridgeObserver(): void {
         if (!shape || !BRIDGEABLE_SHAPES.has(shape)) continue;
         bridged++;
         // Fire and forget — never block the WS event loop.
-        recordConceptUsage(shape, r, data)
-          .then(() => {
-            console.log(`[concept-bridge] minted/usage recorded shape=${shape} exec=${data.execution_id}`);
-          })
+        const retryFetch = async (url, options) => {
+  let attempts = 0;
+  while (attempts < 3) {
+    try {
+      const response = await fetch(url, options);
+      if (response.ok) {
+        return response;
+      } else if (response.status === 400 && (await response.text()).includes('conflict') || (await response.text()).includes('can be retried')) {
+        attempts++;
+        await new Promise(resolve => setTimeout(resolve, Math.floor(Math.random() * 100) + 50));
+      } else {
+        throw new Error(`Failed to fetch ${url}: ${await response.text()}`);
+      }
+    } catch (error) {
+      throw error;
+    }
+  }
+  throw new Error('All retries failed');
+};
+recordConceptUsage(shape, r, data)
+  .then(async () => {
+    const conceptDbResponse = await retryFetch('https://concept-db.com/concepts/upsert-by-signature', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ shape, signature: 'some-signature' }),
+    });
+    const usageResponse = await retryFetch('https://concept-db.com/usage', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ shape, executionId: data.execution_id }),
+    });
+    console.log(`[concept-bridge] minted/usage recorded shape=${shape} exec=${data.execution_id}`);
+  })
           .catch((err: unknown) => {
             console.error(
               `[concept-bridge] usage record failed for ${shape}:`,

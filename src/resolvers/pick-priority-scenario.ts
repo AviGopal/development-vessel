@@ -204,7 +204,7 @@ type Cand = {
     const mc = g.mode_class;
     if (typeof mc === "string" && /analytic|observ|report|audit/.test(mc.toLowerCase())) score -= 0.3;
     if (typeof mc === "string" && /code|fix|patch|impl/.test(mc.toLowerCase())) score += 0.2;
-    const cat = g.category;
+    const cat = g.category ?? "";
     if (typeof cat === "string" && /architectural|implementation|bug|fix/.test(cat.toLowerCase())) score += 0.1;
     if (/architectural|implementation|bug|fix/.test(cat)) score += 0.1;
     if (ACUTE_CATEGORIES.has(cat)) score += 0.15;

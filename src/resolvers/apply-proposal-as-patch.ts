@@ -1157,9 +1157,6 @@ async function attemptApplyOnce(pointer: ApplyProposalAsPatchPointer): Promise<R
   // (code_find_function, code_insert_after_line, code_replace_lines, etc.).
   const { resolvePatchWithTools } = await import("./patch-with-tools.js");
   let result: Awaited<ReturnType<typeof resolvePatchWithTools>> = await resolvePatchWithTools({
-    if (result.shape === "structuredError") {
-      console.error(`Proposal ${chosen.name} failed to apply: ${JSON.stringify((result.body as Record<string, unknown>).detail)}`);
-
     type: "patch_with_tools",
     proposal_text: sanitizeProposalForPatcher(chosen.content),
     target_file: targetFile,
@@ -1169,6 +1166,11 @@ async function attemptApplyOnce(pointer: ApplyProposalAsPatchPointer): Promise<R
     gap_id: chosen.name.replace(/-report\.json$/, ""),
     proposal_id: pointer.proposal_id ?? chosen.name.replace(/-report\.json$/, ""),
   });
+  // Observability (operator-demo-apply-observability): log apply failures. Re-anchored AFTER the
+  // call — the original landing mis-inserted this block inside the argument literal (syntax break).
+  if (result.shape === "structuredError") {
+    console.error(`Proposal ${chosen.name} failed to apply: ${JSON.stringify((result.body as Record<string, unknown>).detail)}`);
+  }
   // FAVORABLE-gate semantic no-op guard: when the RAW proposal (backticks intact)
   // says replace `A` with `B`, the staged file MUST contain B verbatim. Otherwise
   // the patcher wrote a typecheck-clean anchor deviation (e.g. told outcome_shape,

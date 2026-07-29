@@ -1878,8 +1878,18 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
     const outOfScope = [...touched].find((v) => !verifyVessels.includes(v));
     if (outOfScope) return { shape: "featureComposeReport", body: { ok: false, verdict: "REFUSED", stage: "scope", error: "plan touches " + outOfScope + " which is outside verify_vessels - declare it so it is typecheck-verified and concurrency-guarded" } };
   }
-  const missingVessel = [...touched].find((v) => !mountExistsSync(v));
-  if (missingVessel) return { shape: "featureComposeReport", body: { ok: false, verdict: "REFUSED", stage: "scope", error: "plan touches vessel " + missingVessel + " which does not exist" } };
+  // A touched vessel dir is `repos/<name>` (relative). Existence must be checked against the
+  // absolute roots the runtime actually uses — RUNTIME_ROOT (resident vessels) OR the push-clone
+  // root (host-resident vessels that the materialization block below symlinks into RUNTIME_ROOT).
+  // Checking the bare relative path against the process cwd (WorkingDirectory=/vessels/<self>)
+  // is always false and would refuse every plan — including this vessel's own repairs.
+  const CLONE_ROOT_FOR_SCOPE = process.env["MITOSIS_PUSH_CLONE_DIR"] ?? "/workspace/git/vessels";
+  const vesselResidentForScope = (v: string): boolean => {
+    const name = v.replace(/^repos\//, "");
+    return mountExistsSync(`${RUNTIME_ROOT}/${name}`) || mountExistsSync(`${CLONE_ROOT_FOR_SCOPE}/${name}`);
+  };
+  const missingVessel = [...touched].find((v) => !vesselResidentForScope(v));
+  if (missingVessel) return { shape: "featureComposeReport", body: { ok: false, verdict: "REFUSED", stage: "scope", error: "plan touches vessel " + missingVessel + " which does not exist in the runtime or push-clone roots" } };
 
   const planView = ops.map((o) => ({ kind: o.kind, path: o.path, rationale: o.rationale }));
   // Materialize non-resident vessels (gap edit-intent-path-translation-post-unmooring):

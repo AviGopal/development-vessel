@@ -435,10 +435,8 @@ async function sweepStaleProposals(
 
     let ageMs = 0;
     try { ageMs = Date.now() - (await stat(filePath)).mtimeMs; } catch { /* age unknown — do not sweep */ }
-    let ageMs = 0;
-    try { ageMs = Date.now() - (await stat(filePath)).mtimeMs; } catch { /* age unknown — do not sweep */ }
 
-    let proposal: Record<string, unknown);
+    let proposal: Record<string, unknown>;
     try {
       const raw = await readFile(filePath, "utf-8");
       proposal = JSON.parse(raw) as Record<string, unknown>;
@@ -446,16 +444,6 @@ async function sweepStaleProposals(
       // Unparseable (e.g. fence-wrapped JSON): once older than the staleness
       // window, rename into the terminal .rejected state so it stops being
       // rescanned; selection already ignores names not ending in -report.json.
-      if (ageMs > STALE_MAX_AGE_MS) {
-        try { await rename(filePath, `${filePath}.rejected`); swept++; } catch { /* non-fatal */ }
-      }
-      continue;
-    }
-
-    // Tag+created_at predicate first; legacy proposals carry neither, so fall
-    // back to the staleness class in the filename plus file mtime.
-    const staleByName = /(freshness_violation|precondition|analytic)/i.test(name);
-    if (!isStaleProposal(proposal) && !(staleByName && ageMs > STALE_MAX_AGE_MS)) continue;
       if (ageMs > STALE_MAX_AGE_MS) {
         try { await rename(filePath, `${filePath}.rejected`); swept++; } catch { /* non-fatal */ }
       }

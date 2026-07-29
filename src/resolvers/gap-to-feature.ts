@@ -1009,7 +1009,7 @@ async function closeLandedGap(gap: Record<string, unknown>, land: LandSignal): P
     // verifyResult === 'unknown': fail-open, allow close (preserves existing behaviour)
     const id = String(gap.id ?? "");
     if (!id) return { closed: false, error: "gap missing id" };
-  if (typeof land.vessel==="string" && land.vessel.includes("development-vessel")) { await resolveSubstrateGapWrite({type:"substrateGap_write",gap:{id,category:gap.category,source:gap.source,summary:gap.summary,detected_at:gap.detected_at,classification_metadata:{...((gap['classification_metadata'] as Record<string,unknown>)??{}),pending_outcome_verification:land.commit_sha,pending_set_at:new Date().toISOString()},status:"open"}} as never); return {closed:false,error:"self-cutover: closure deferred to next-tick verification"}; }
+  if (typeof land.vessel==="string" && land.vessel.includes("development-vessel")) { await resolveSubstrateGapWrite({type:"substrateGap_write",gap:{id: parentId + "-narrowed",category:gap.category,source:gap.source,summary:gap.summary,detected_at:gap.detected_at,classification_metadata:{...((gap['classification_metadata'] as Record<string,unknown>)??{}),pending_outcome_verification:land.commit_sha,pending_set_at:new Date().toISOString()},status:"open"}} as never); return {closed:false,error:"self-cutover: closure deferred to next-tick verification"}; }
 
   // Self-cutover guard: when a landed change targets development-vessel itself,
   // close-time outcome verification runs in the pre-cutover process and cannot

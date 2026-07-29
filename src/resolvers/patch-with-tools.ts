@@ -433,6 +433,34 @@ export async function resolvePatchWithTools(pointer: PatchWithToolsPointer): Pro
   // will actually stage. Stage into the mitosis tree at the end by copy.
   const containerPath = liveSrcPath; // already /vessels/<v>/<subPath>
 
+  // Anti-confabulation (law 8, information-at-use-time): inject the target file's REAL
+  // endpoint/base-URL constants so the drafter reuses them BY NAME instead of inventing a
+  // literal URL from memory (the 0b80f1be class: a duplicate fetch to a hardcoded
+  // https://concept-db.com while CONCEPT_DB_ENDPOINT sat imported in the file). The
+  // MINIMAL-EDIT RULE only guards PRESERVING surrounding lines on an edit, not a
+  // NEWLY-ADDED http call, and an advisory "go search first" instruction fights the
+  // anti-search-loop nudge below. Network-free: reads the file the patcher already edits.
+  let endpointFacts = "";
+  if (!isNewFile) {
+    try {
+      const _epSrc = await readFile(containerPath, "utf8");
+      const _epNames = new Set<string>();
+      const _epRe = /\b([A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*(?:_ENDPOINT|_URL|_BASE|_HOST|_ORIGIN))\b/g;
+      let _epM: RegExpExecArray | null;
+      while ((_epM = _epRe.exec(_epSrc)) !== null) {
+        const _epN = _epM[1];
+        if (_epN) _epNames.add(_epN);
+        if (_epNames.size >= 20) break;
+      }
+      if (_epNames.size > 0) {
+        endpointFacts =
+          `## LIVE ENDPOINTS ALREADY IN THIS FILE - reuse these BY NAME for any HTTP call; NEVER invent a literal URL string:\n` +
+          Array.from(_epNames).map((n) => `- ${n}`).join("\n") +
+          `\nIf your change adds or moves an HTTP call, use one of the above constants with the file's existing Authorization header pattern. Write a NEW url literal ONLY if none of the above fits AND the proposal supplies the endpoint value verbatim.\n\n`;
+      }
+    } catch { /* best-effort; absence just omits the block */ }
+  }
+
   const history: Array<{ turn: number; thought_or_action: string; tool_result?: ToolResult }> = [];
   // Counts identical failing (tool,args) calls so a stuck ReAct loop aborts early.
   const failedCallCounts = new Map<string, number>();
@@ -552,6 +580,7 @@ export async function resolvePatchWithTools(pointer: PatchWithToolsPointer): Pro
       `You are patching a source file via fine-grained code tools. The proposal describes what to change; you use the tools to inspect the file and apply the change.\n\n` +
       priorBlock +
       decisionRule +
+      endpointFacts +
       `## Target file (container path)\n${containerPath}\n\n` +
       `## Proposal (intent — code samples may be illustrative, NOT the actual file contents)\n${pointer.proposal_text}\n\n` +
       `## Tool catalog\n${TOOL_CATALOG_HELP}\n\n` +

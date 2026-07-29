@@ -285,6 +285,30 @@ async function buildOverlay(
   return overlay;
 }
 
+/**
+ * Normalize a static-check output blob into the SET of error SIGNATURES it reports.
+ * A signature drops the volatile `path(line,col): ` prefix (robust to line shifts) but
+ * keeps `TS<code>: <message>` (the message carries the distinguishing identifier), and
+ * folds shape-dispatch violations in per-shape. The mitosis delta gate accepts a staged
+ * change iff its signature set is a SUBSET of the base's — i.e. it introduces no NEW
+ * error the baseline lacked. Exported so the regression it guards (a syntax break or an
+ * out-of-scope-name type error that a raw line-COUNT waves through) is pinned by test.
+ */
+export function signatureSet(out: string): Set<string> {
+  const sigs = new Set<string>();
+  for (const raw of out.split("\n")) {
+    const line = raw.trimEnd();
+    const ts = line.match(/error TS\d+:.*/);
+    if (ts) { sigs.add(ts[0].replace(/\s+/g, " ").trim()); continue; }
+    const sd = line.match(/\[(?:unhandled|orphan)\]\s+\S+/);
+    if (sd) { sigs.add(sd[0].replace(/\s+/g, " ").trim()); continue; }
+    if (line.includes("UNHANDLED ADVERTISED SHAPES")) sigs.add("UNHANDLED ADVERTISED SHAPES");
+    else if (line.includes("ORPHAN DISPATCH HANDLERS")) sigs.add("ORPHAN DISPATCH HANDLERS");
+    else if (/violation\(s\) found/.test(line)) sigs.add("violation(s) found");
+  }
+  return sigs;
+}
+
 async function staticEvaluate(
   mitosisRoot: string,
   bunCmd: string,
@@ -377,6 +401,7 @@ async function staticEvaluate(
       let isRegression = true;
       let baseErrorCount = -1;
       let mitosisErrorCount = -1;
+      let newSignatures: string[] = [];
       if (baseRootForOverlay && stagedFiles && stagedFiles.length > 0) {
         // Count BOTH tsc errors AND shape-dispatch violations. check-shape-dispatch
         // (the three-place-rule lint) exits 1 with NO `error TS` line, so a tsc-only
@@ -384,12 +409,25 @@ async function staticEvaluate(
         // dispatch case (or vice-versa) — letting it slip FAVORABLE into a cutover.
         // This is the Seam-③ soundness fix (2026-06-19): closing the gate hole that
         // made net-new-resolver authoring unsafe. See SUBSTRATE_AS_DEC §4.4.
-        const countErrors = (out: string) =>
-          (out.match(/error TS\d+:/g) ?? []).length +
-          (out.match(/UNHANDLED ADVERTISED SHAPES|ORPHAN DISPATCH HANDLERS|violation\(s\) found/g) ?? []).length;
-        mitosisErrorCount = countErrors(r.output_tail);
+        // Delta-aware by SIGNATURE SUBSET, not line count. A raw error-line count is
+        // NOT monotone (contra the old "count is monotone" note): a NEW *syntax* error
+        // makes tsc bail EARLY and emit FEWER `error TS` lines than a dirty base
+        // (0f794d2: `Record<string, unknown)` + duplicate `let ageMs` → accepted-yet-
+        // unparseable, vessel DOWN), and a new TYPE error can enter at unchanged/lower
+        // count because tsc suppresses the cascades it feeds (5697f70: TS2552 'parentId').
+        // So compare the SET of normalized error SIGNATURES: strip the volatile
+        // `path(line,col): ` prefix (robust to line shifts) but KEEP `TS<code>: <message>`
+        // (the message carries the distinguishing id). Accept iff every mitosis signature
+        // already exists in base (mitosis ⊆ base). Shape-dispatch markers are folded in
+        // per-shape so a half-wired new resolver (advertised shape, no case) is a NEW
+        // signature even on a dirty base — preserving the Seam-③ soundness fix.
+        const mitosisSigs = signatureSet(r.output_tail);
         const baseCheck = await runCheck(bunCmd, ["run", scriptName], baseRootForOverlay, `base:bun run ${scriptName}`);
-        baseErrorCount = countErrors(baseCheck.output_tail);
+        const baseSigs = signatureSet(baseCheck.output_tail);
+        newSignatures = [...mitosisSigs].filter((sig) => !baseSigs.has(sig));
+        // Sizes kept for the human-readable note ONLY; the DECISION is the subset test.
+        mitosisErrorCount = mitosisSigs.size;
+        baseErrorCount = baseSigs.size;
         // Primary guard, robust to checker-prose drift: a script the BASE passes
         // (exit 0) but the mitosis tree FAILS (exit≠0) is by definition a NEW
         // regression — never delta-excuse it regardless of parsed counts. This is
@@ -410,11 +448,11 @@ async function staticEvaluate(
           timed_out: true,
         };
       }
-      if (!cleanBaseDirtyMitosis && mitosisErrorCount <= baseErrorCount) {
+      if (!cleanBaseDirtyMitosis && newSignatures.length === 0) {
           isRegression = false;
           completed.push({
             ...baseCheck,
-            name: `base:${baseCheck.name} (delta_aware: mitosis=${mitosisErrorCount} base=${baseErrorCount} → accept)`,
+            name: `base:${baseCheck.name} (delta_aware: mitosis_sigs=${mitosisErrorCount} base_sigs=${baseErrorCount} new=0 → accept)`,
           });
         }
       }
@@ -422,7 +460,7 @@ async function staticEvaluate(
         return {
           attempted: true,
           ok: false,
-          reason: `${scriptName}_failed: exit=${r.exit_code}${baseErrorCount >= 0 ? ` mitosis_errs=${mitosisErrorCount} base_errs=${baseErrorCount} (regression)` : ""}`,
+          reason: `${scriptName}_failed: exit=${r.exit_code}${baseErrorCount >= 0 ? ` new_errors(${newSignatures.length})=[${newSignatures.slice(0, 5).join(" | ")}${newSignatures.length > 5 ? ` +${newSignatures.length - 5}` : ""}] (regression)` : ""}`,
           checks: completed,
           duration_ms: Date.now() - start,
         };

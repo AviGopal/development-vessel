@@ -242,3 +242,49 @@ describe("vessel_mitosis_evaluate", () => {
     expect(body.static_evaluation).toBeNull();
   });
 });
+
+// ── Delta-typecheck gate soundness (2026-07-29) ──────────────────────────────
+// Gate accepts a staged change iff its error-SIGNATURE set is a SUBSET of the base's
+// (no NEW error the baseline lacked) and not a clean-base/dirty-mitosis transition.
+// Pins the two real regressions a raw error-LINE COUNT let land FAVORABLE (5697f70
+// TS2552, 0f794d2 syntax) so a future rewrite reopening the hole fails HERE, not live.
+import { signatureSet } from "../../src/resolvers/vessel-mitosis-evaluate.js";
+
+function deltaAccepts(baseOut: string, mitOut: string, baseExit: number, mitExit: number): boolean {
+  const cleanBaseDirtyMitosis = baseExit === 0 && mitExit !== 0;
+  const newSignatures = [...signatureSet(mitOut)].filter((s) => !signatureSet(baseOut).has(s));
+  return !cleanBaseDirtyMitosis && newSignatures.length === 0;
+}
+
+const SYNTAX_0f794d2 =
+  "src/resolvers/apply-proposal-as-patch.ts(441,41): error TS1005: '>' expected.\n" +
+  "src/resolvers/apply-proposal-as-patch.ts(495,1): error TS1128: Declaration or statement expected.";
+const TYPE_5697f70 =
+  "src/resolvers/gap-to-feature.ts(1012,153): error TS2552: Cannot find name 'parentId'. Did you mean 'parent'?";
+const OTHER_BASELINE_ERR = "src/x.ts(1,1): error TS2339: Property 'foo' does not exist on type 'Bar'.";
+
+describe("mitosis delta gate: signatureSet", () => {
+  it("strips path(line,col) prefix, keeps error TS<code>: message", () => {
+    expect([...signatureSet(TYPE_5697f70)]).toEqual(["error TS2552: Cannot find name 'parentId'. Did you mean 'parent'?"]);
+  });
+  it("line/col shift yields the SAME signature", () => {
+    expect(signatureSet(TYPE_5697f70.replace("(1012,153)", "(1050,9)"))).toEqual(signatureSet(TYPE_5697f70));
+  });
+  it("folds shape-dispatch violations per-shape, skips volatile 'at file:line'", () => {
+    expect([...signatureSet("  [unhandled] fooShape\n    at src/config.ts:12")]).toEqual(["[unhandled] fooShape"]);
+  });
+});
+
+describe("mitosis delta gate: REJECTS new errors (pinned regressions)", () => {
+  it("0f794d2 syntax break on clean base", () => { expect(deltaAccepts("", SYNTAX_0f794d2, 0, 2)).toBe(false); });
+  it("0f794d2 syntax break on DIRTY base (early-abort, fewer lines)", () => { expect(deltaAccepts(TYPE_5697f70, SYNTAX_0f794d2, 1, 2)).toBe(false); });
+  it("5697f70 out-of-scope-name type error on clean base", () => { expect(deltaAccepts("", TYPE_5697f70, 0, 1)).toBe(false); });
+  it("5697f70 type error vs an unrelated dirty baseline", () => { expect(deltaAccepts(OTHER_BASELINE_ERR, TYPE_5697f70, 1, 1)).toBe(false); });
+  it("half-wired new resolver (new [unhandled] shape) on dirty base (Seam-3)", () => { expect(deltaAccepts("  [unhandled] aShape", "  [unhandled] aShape\n  [unhandled] bShape", 1, 1)).toBe(false); });
+});
+
+describe("mitosis delta gate: ACCEPTS legit deltas (delta-awareness preserved)", () => {
+  it("unchanged dirty baseline (nothing new)", () => { expect(deltaAccepts(TYPE_5697f70, TYPE_5697f70, 1, 1)).toBe(true); });
+  it("patch that FIXES the base error", () => { expect(deltaAccepts(TYPE_5697f70, "", 1, 0)).toBe(true); });
+  it("same error, line shifted", () => { expect(deltaAccepts(TYPE_5697f70, TYPE_5697f70.replace("(1012,153)", "(1050,9)"), 1, 1)).toBe(true); });
+});

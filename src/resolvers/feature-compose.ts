@@ -803,7 +803,7 @@ export function detectArchitectureViolation(
   const loopbackHosts = ['localhost', '127.0.0.1', '0.0.0.0', 'host.docker.internal'];
   const sanctionedHosts = ['github.com', 'npmjs.org', 'registry.npmjs.org', 'httpbin.org'];
   externalUrls.forEach(url => {
-    const host = url.match(/https?:\/\/([^\s]+)/)[1];
+    const host = (url.match(/https?:\/\/([^\s\/]+)/)?.[1]) ?? '';
     if (!loopbackHosts.includes(host) && !sanctionedHosts.includes(host) && !addedLines.some(line => line.includes('-') && line.includes(host))) {
       return [
         {

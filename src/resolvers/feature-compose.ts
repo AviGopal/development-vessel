@@ -1886,7 +1886,8 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
   const CLONE_ROOT_FOR_SCOPE = process.env["MITOSIS_PUSH_CLONE_DIR"] ?? "/workspace/git/vessels";
   const vesselResidentForScope = (v: string): boolean => {
     const name = v.replace(/^repos\//, "");
-    return mountExistsSync(`${RUNTIME_ROOT}/${name}`) || mountExistsSync(`${CLONE_ROOT_FOR_SCOPE}/${name}`);
+    const { existsSync } = require("fs");
+    return existsSync(`${RUNTIME_ROOT}/${name}`) || existsSync(`${CLONE_ROOT_FOR_SCOPE}/${name}`);
   };
   const missingVessel = [...touched].find((v) => !vesselResidentForScope(v));
   if (missingVessel) return { shape: "featureComposeReport", body: { ok: false, verdict: "REFUSED", stage: "scope", error: "plan touches vessel " + missingVessel + " which does not exist in the runtime or push-clone roots" } };

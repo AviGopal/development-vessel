@@ -301,9 +301,6 @@ async function dispatchInner(pointer: AnyPointer): Promise<ResolverResult> {
       return resolvePullCutover(pointer as { type: "pull_cutover"; vessel_name: string; dry_run?: boolean });
     case "learned_topology_snapshot":
       return resolveLearnedTopologySnapshot(p as Parameters<typeof resolveLearnedTopologySnapshot>[0]);
-    case "shellResult":
-      const { shellResultResolver } = await import("../resolvers/shell-result.js");
-      return await shellResultResolver(pointer);
     case "reachable_unlearned_report":
       return resolveReachableUnlearnedReport(p as Parameters<typeof resolveReachableUnlearnedReport>[0]);
     case "obsidian:vessel_count":

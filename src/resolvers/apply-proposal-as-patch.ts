@@ -1157,6 +1157,9 @@ async function attemptApplyOnce(pointer: ApplyProposalAsPatchPointer): Promise<R
   // (code_find_function, code_insert_after_line, code_replace_lines, etc.).
   const { resolvePatchWithTools } = await import("./patch-with-tools.js");
   let result: Awaited<ReturnType<typeof resolvePatchWithTools>> = await resolvePatchWithTools({
+    if (result.shape === "structuredError") {
+      console.error(`Proposal ${chosen.name} failed to apply: ${JSON.stringify((result.body as Record<string, unknown>).detail)}`);
+
     type: "patch_with_tools",
     proposal_text: sanitizeProposalForPatcher(chosen.content),
     target_file: targetFile,

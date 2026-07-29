@@ -354,6 +354,36 @@ async function clearPendingOnReject(
 }
 
 /**
+ * Clear the queue lock ONLY when it belongs to THIS mitosis (exact
+ * mitosis_version_id match), so a concurrently-staged NEXT cutover's pending
+ * pointer is never clobbered. Called from the runGitAwareCutover finally so any
+ * freshnessOK-path terminal exit (host-sync handoff return, structuredError /
+ * softRefuse reject, or an uncaught throw) can no longer orphan
+ * mitosis-pending.json and freeze ALL pull-sync for the lock's TTL.
+ */
+async function clearPendingIfOwned(
+  pointer: VesselMitosisCutoverPointer,
+  workspaceRoot: string,
+  mitosisVersionId: string | undefined,
+): Promise<boolean> {
+  if (!mitosisVersionId) return false;
+  const pendingPath =
+    pointer.pending_pointer_path ?? join(workspaceRoot, "mitosis-pending.json");
+  try {
+    if (!(await pathExists(pendingPath))) return false;
+    const cur = JSON.parse(await readFile(pendingPath, "utf-8")) as { mitosis_version_id?: string };
+    if (cur.mitosis_version_id !== mitosisVersionId) return false;
+    await unlink(pendingPath);
+    console.error(`[mitosis-cutover] cleared owned pending lock (${mitosisVersionId}) on cutover exit`);
+    return true;
+  } catch {
+    /* best-effort: a failed clear must not mask the cutover result; a foreign or
+       unparseable lock is left for pull-sync's TTL backstop */
+    return false;
+  }
+}
+
+/**
  * SELF-ACTIVATION wiring (2026-06-26). Substrate timer scripts
  * (scripts/substrate/*.ts) run from a writable run-dir
  * (SUBSTRATE_RUN_DIR=/workspace/active-scripts) seeded fresh at boot; the unit
@@ -1120,6 +1150,14 @@ async function runGitAwareCutover(args: GitCutoverArgs): Promise<ResolverResult>
     if (leaseToken) {
       try { await resolveMaintenanceLeaseWrite({ type: "maintenanceLease_write", op: "release", token: leaseToken }); } catch { }
     }
+    // Exit-guaranteed queue-lock clear (root fix for the orphaned mitosis-pending
+    // wedge): the inner cutover has many terminal exits (host-sync handoff return,
+    // structuredError/softRefuse rejects, uncaught throw) that never reach the
+    // finalize clears, so an orphaned lock froze ALL pull-sync for its 30-min TTL.
+    // Ownership-scoped so a next-staged cutover lock is never clobbered. The
+    // retryable env_change_window_held deferral returns BEFORE this try, so its
+    // lock is correctly retained.
+    try { await clearPendingIfOwned(args.pointer, process.env["WORKSPACE_ROOT"] ?? process.cwd(), args.mitosis_version_id); } catch { }
   }
 }
 

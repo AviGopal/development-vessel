@@ -798,6 +798,22 @@ export function detectEffectlessHeaderOnlyDiff(diff: string): { isEffectless: bo
 export function detectArchitectureViolation(
   diff: string,
 ): Array<{ law: string; detail: string; snippet: string }> {
+  const addedLines = diff.split('+').filter(line => line !== '' && !line.startsWith('-'));
+  const externalUrls = addedLines.filter(line => line.match(/https?:\/\/[^\s]+/) && !line.match(/process\.env/));
+  const loopbackHosts = ['localhost', '127.0.0.1', '0.0.0.0', 'host.docker.internal'];
+  const sanctionedHosts = ['github.com', 'npmjs.org', 'registry.npmjs.org', 'httpbin.org'];
+  externalUrls.forEach(url => {
+    const host = url.match(/https?:\/\/([^\s]+)/)[1];
+    if (!loopbackHosts.includes(host) && !sanctionedHosts.includes(host) && !addedLines.some(line => line.includes('-') && line.includes(host))) {
+      return [
+        {
+          law: 'Internal endpoints must be read from process.env.<X>_ENDPOINT with a loopback fallback',
+          detail: `Hardcoded external URL ${url} is not allowed`,
+          snippet: url,
+        },
+      ];
+    }
+  });
   const added = diff
     .split("\n")
     .filter((l) => l.startsWith("+") && !l.startsWith("+++"))

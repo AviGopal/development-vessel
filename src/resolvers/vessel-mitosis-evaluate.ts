@@ -449,6 +449,28 @@ export async function staticEvaluate(
           timed_out: true,
         };
       }
+      // SCRIPT-MISSING FAIL-CLOSED (2026-07-30): a check that DID NOT ACTUALLY RUN is not
+      // evidence of health. `bun run <name>` for an absent script prints `Script not found
+      // "<name>"` and exits non-zero with ZERO `error TS` lines — so BOTH the overlay and the
+      // base normalize to the EMPTY signature set and the subset test (mitosis ⊆ base) passes
+      // TRIVIALLY, delta-excusing a tree that was NEVER TYPECHECKED. This is precisely how two
+      // broken goal-host commits slipped (TS2451 redeclare + TS2345 cross-file async): the
+      // landing gate ran `bun run lint`, but goal-host-vessel has no `lint` script (only
+      // `typecheck`). A missing check script is a HARD refuse (we could not verify) — never a
+      // delta-excuse, and NOT a deferrable timeout (the script is still absent next tick, so a
+      // defer would loop forever). patch_with_tools is separately fixed to pass the vessel's
+      // real check script; this backstop guarantees a delta-excuse only ever compares checks
+      // that GENUINELY EXECUTED.
+      const hasMissingScript = (s: string) => /Script not found/i.test(s);
+      if (hasMissingScript(r.output_tail) || hasMissingScript(baseCheck.output_tail)) {
+        return {
+          attempted: true,
+          ok: false,
+          reason: `static_check_script_missing: '${scriptName}' is not a script in this vessel (bun: "Script not found") — cannot typecheck; refusing to delta-excuse an UNVERIFIED tree`,
+          checks: completed,
+          duration_ms: Date.now() - start,
+        };
+      }
       // SYNTAX-BAIL GUARD: tsc reserves TS1xxx for grammar/parse errors, on which it stops
       // parsing early — so the emitted error set is TRUNCATED and its signatures (generic
       // messages like "TS1005: ',' expected.") collide across files. A subset comparison over
@@ -456,7 +478,17 @@ export async function staticEvaluate(
       // present in a syntax-dirty base and slip through as new=0. When either tree shows a
       // parse bail, never delta-excuse — fail closed. (Closes the dirty-base cascade where one
       // syntax-broken landing let every subsequent broken patch land as a "subset".)
-      const hasParseBail = (s: string) => /error TS1\d{3}:/.test(s);
+      // FAIL-CLOSED CLASSES (never delta-excuse):
+      //  • TS1xxx — grammar/parse bails; tsc stops early → TRUNCATED error set whose generic
+      //    signatures collide across files, so a subset comparison is unsound.
+      //  • TS2300 / TS2440 / TS2451 / TS2393 — duplicate-identifier, duplicate-import, redeclare
+      //    of a block-scoped variable, duplicate function implementation. The tree does NOT
+      //    compile and the class is cascade-prone: a NEW one can normalize to a signature already
+      //    present in a dirty base and slip through as new=0. A redeclare/duplicate is never a
+      //    legitimate "pre-existing baseline to build on" (contrast boredom-vessel's long-standing
+      //    TS2304 METABOB_API_KEY-undefined baseline, which is NOT fail-closed and stays
+      //    delta-excused). When either tree shows one of these, fail closed.
+      const hasParseBail = (s: string) => /error TS1\d{3}:/.test(s) || /error TS(?:2300|2440|2451|2393):/.test(s);
       syntaxBail = hasParseBail(r.output_tail) || hasParseBail(baseCheck.output_tail);
       if (!cleanBaseDirtyMitosis && !syntaxBail && newSignatures.length === 0) {
           isRegression = false;
@@ -470,7 +502,7 @@ export async function staticEvaluate(
         return {
           attempted: true,
           ok: false,
-          reason: `${scriptName}_failed: exit=${r.exit_code}${syntaxBail ? " parse_bail=true (tsc stopped early; truncated error set — subset unsound, failed closed)" : ""}${baseErrorCount >= 0 ? ` new_errors(${newSignatures.length})=[${newSignatures.slice(0, 5).join(" | ")}${newSignatures.length > 5 ? ` +${newSignatures.length - 5}` : ""}] (regression)` : ""}`,
+          reason: `${scriptName}_failed: exit=${r.exit_code}${syntaxBail ? " fail_closed=true (parse-bail TS1xxx or duplicate-symbol TS2300/2440/2451/2393 in either tree — subset unsound, failed closed)" : ""}${baseErrorCount >= 0 ? ` new_errors(${newSignatures.length})=[${newSignatures.slice(0, 5).join(" | ")}${newSignatures.length > 5 ? ` +${newSignatures.length - 5}` : ""}] (regression)` : ""}`,
           checks: completed,
           duration_ms: Date.now() - start,
         };

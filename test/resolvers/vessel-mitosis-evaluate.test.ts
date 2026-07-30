@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach } from "bun:test";
-import { resolveVesselMitosisEvaluate } from "../../src/resolvers/vessel-mitosis-evaluate.js";
+import { resolveVesselMitosisEvaluate, staticEvaluate } from "../../src/resolvers/vessel-mitosis-evaluate.js";
 import { mkdtemp, mkdir, writeFile, rm, chmod } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -253,10 +253,12 @@ import { signatureSet } from "../../src/resolvers/vessel-mitosis-evaluate.js";
 function deltaAccepts(baseOut: string, mitOut: string, baseExit: number, mitExit: number): boolean {
   const cleanBaseDirtyMitosis = baseExit === 0 && mitExit !== 0;
   const newSignatures = [...signatureSet(mitOut)].filter((s) => !signatureSet(baseOut).has(s));
-  // Mirrors the gate's SYNTAX-BAIL guard: TS1xxx = grammar/parse errors on which tsc stops
-  // early, truncating the error set; its generic signatures collide across files, so a subset
-  // comparison is unsound. When either tree shows a parse bail, fail closed.
-  const hasParseBail = (s: string) => /error TS1\d{3}:/.test(s);
+  // Mirrors the gate's FAIL-CLOSED guard. TS1xxx = grammar/parse bails (tsc stops early,
+  // truncating the error set; generic signatures collide across files → subset unsound).
+  // TS2300/2440/2451/2393 = duplicate-identifier / redeclare / duplicate-implementation:
+  // the tree does not compile and the class is cascade-prone (a NEW one can collide with a
+  // dirty-base signature → new=0). Neither is ever a legitimate baseline to build on.
+  const hasParseBail = (s: string) => /error TS1\d{3}:/.test(s) || /error TS(?:2300|2440|2451|2393):/.test(s);
   const syntaxBail = hasParseBail(mitOut) || hasParseBail(baseOut);
   return !cleanBaseDirtyMitosis && !syntaxBail && newSignatures.length === 0;
 }
@@ -301,4 +303,100 @@ describe("mitosis delta gate: ACCEPTS legit deltas (delta-awareness preserved)",
   it("unchanged dirty baseline (nothing new)", () => { expect(deltaAccepts(TYPE_5697f70, TYPE_5697f70, 1, 1)).toBe(true); });
   it("patch that FIXES the base error", () => { expect(deltaAccepts(TYPE_5697f70, "", 1, 0)).toBe(true); });
   it("same error, line shifted", () => { expect(deltaAccepts(TYPE_5697f70, TYPE_5697f70.replace("(1012,153)", "(1050,9)"), 1, 1)).toBe(true); });
+  // No-over-block: boredom-vessel's long-standing baseline (METABOB_API_KEY undefined = TS2304,
+  // NOT a fail-closed class) must STILL be delta-excused when the patch doesn't worsen it.
+  const BOREDOM_BASELINE = "src/index.ts(1805,15): error TS2304: Cannot find name 'METABOB_API_KEY'.";
+  it("boredom-vessel TS2304 baseline stays delta-excused (not a fail-closed class)", () => {
+    expect(deltaAccepts(BOREDOM_BASELINE, BOREDOM_BASELINE, 1, 1)).toBe(true);
+  });
+});
+
+// ── Redeclare / duplicate-symbol families are FAIL-CLOSED (2026-07-30) ───────────────
+// Pins the TS2451 class that let goal-host 7b3168e ("let walkTerminationReason ... remove
+// duplicate declaration" — the drafter INVERTED its own intent and ADDED a second decl) slip.
+// These classes mean the tree does not compile and are cascade-prone: on a base already dirty
+// with the SAME redeclare message, a NEW redeclare normalizes to a signature already present →
+// new=0 → the plain subset test would ACCEPT it. The fail-closed guard rejects regardless.
+const REDECLARE_WALK = "src/index.ts(3230,5): error TS2451: Cannot redeclare block-scoped variable 'walkTerminationReason'.";
+const DUP_IDENT = "src/x.ts(10,7): error TS2300: Duplicate identifier 'foo'.";
+describe("mitosis delta gate: REJECTS redeclare/duplicate families (fail-closed)", () => {
+  it("TS2451 redeclare on a CLEAN base (7b3168e class)", () => {
+    expect(deltaAccepts("", REDECLARE_WALK, 0, 2)).toBe(false);
+  });
+  it("TS2451 redeclare on a DIRTY base carrying the SAME redeclare signature (cascade) → REJECT", () => {
+    // Plain subset would say new=0 and ACCEPT; fail-closed on TS2451 rejects it.
+    expect(deltaAccepts(REDECLARE_WALK, REDECLARE_WALK, 2, 2)).toBe(false);
+  });
+  it("TS2300 duplicate identifier is fail-closed too", () => {
+    expect(deltaAccepts("", DUP_IDENT, 0, 1)).toBe(false);
+  });
+});
+
+// ── ROOT CAUSE: a check that never ran must NOT delta-excuse (2026-07-30) ─────────────
+// The dominant slip for BOTH broken goal-host commits: the landing gate ran `bun run lint`,
+// but goal-host-vessel has no `lint` script. bun prints `Script not found "lint"` and exits
+// non-zero with ZERO `error TS` lines, so overlay and base both normalize to the EMPTY
+// signature set, new=0, and the gate delta-excused a tree it NEVER TYPECHECKED. This drives
+// the REAL staticEvaluate (overlay path) with a bun shim to prove the fix end-to-end.
+import { mkdtemp as mkdtempX, mkdir as mkdirX, writeFile as writeFileX, rm as rmX, chmod as chmodX } from "node:fs/promises";
+import { tmpdir as tmpdirX } from "node:os";
+import { join as joinX } from "node:path";
+
+async function makeBunShim(dir: string): Promise<string> {
+  // Emulates bun: `run lint` → Script-not-found (exit 1); `run typecheck` → clean (exit 0);
+  // `test` → exit 0. This is exactly goal-host-vessel's script surface.
+  const shim = joinX(dir, "bun-shim.sh");
+  await writeFileX(
+    shim,
+    "#!/bin/sh\n" +
+      'if [ "$1" = "run" ]; then\n' +
+      '  if [ "$2" = "typecheck" ]; then exit 0; fi\n' +
+      '  echo "error: Script not found \\"$2\\"" 1>&2; exit 1\n' +
+      "fi\n" +
+      'if [ "$1" = "test" ]; then exit 0; fi\n' +
+      "exit 0\n",
+  );
+  await chmodX(shim, 0o755);
+  return shim;
+}
+
+describe("staticEvaluate: script-missing is fail-closed, not delta-excused", () => {
+  it("scripts=[lint] on a vessel with no lint script → REFUSE (was: silently accepted)", async () => {
+    const root = await mkdtempX(joinX(tmpdirX(), "mitosis-scriptmiss-"));
+    try {
+      const base = joinX(root, "base");
+      const mit = joinX(root, "mit");
+      await mkdirX(joinX(base, "src"), { recursive: true });
+      await mkdirX(joinX(mit, "src"), { recursive: true });
+      // base HAS package.json (only `typecheck`, like goal-host); mitosis is sparse (no pkg).
+      await writeFileX(joinX(base, "package.json"), JSON.stringify({ name: "gh", scripts: { typecheck: "tsc --noEmit" } }));
+      await writeFileX(joinX(base, "src", "foo.ts"), "export const a = 1;\n");
+      await writeFileX(joinX(mit, "src", "foo.ts"), "export const a = 2;\n");
+      const bunShim = await makeBunShim(root);
+      const ev = await staticEvaluate(mit, bunShim, base, ["src/foo.ts"], ["lint"], true);
+      expect(ev.ok).toBe(false);
+      expect(ev.timed_out ?? false).toBe(false); // hard refuse, not a deferrable timeout
+      expect(ev.reason).toMatch(/script_missing/);
+    } finally {
+      await rmX(root, { recursive: true, force: true });
+    }
+  });
+
+  it("scripts=[typecheck] (the vessel's REAL script) still passes → no over-block", async () => {
+    const root = await mkdtempX(joinX(tmpdirX(), "mitosis-scriptok-"));
+    try {
+      const base = joinX(root, "base");
+      const mit = joinX(root, "mit");
+      await mkdirX(joinX(base, "src"), { recursive: true });
+      await mkdirX(joinX(mit, "src"), { recursive: true });
+      await writeFileX(joinX(base, "package.json"), JSON.stringify({ name: "gh", scripts: { typecheck: "tsc --noEmit" } }));
+      await writeFileX(joinX(base, "src", "foo.ts"), "export const a = 1;\n");
+      await writeFileX(joinX(mit, "src", "foo.ts"), "export const a = 2;\n");
+      const bunShim = await makeBunShim(root);
+      const ev = await staticEvaluate(mit, bunShim, base, ["src/foo.ts"], ["typecheck"], true);
+      expect(ev.ok).toBe(true);
+    } finally {
+      await rmX(root, { recursive: true, force: true });
+    }
+  });
 });

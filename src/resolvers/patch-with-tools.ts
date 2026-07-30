@@ -123,6 +123,29 @@ function structuredError(detail: string, body: Record<string, unknown> = {}): Re
 // defect). Best-effort: if dispatch fails, boredom selects mitosis-tick later.
 type MitosisLanding = { landed: boolean; new_git_sha: string | null; push_status: string | null };
 
+/**
+ * Resolve the vessel's ACTUAL check script for the landing gate. The gate previously
+ * hard-defaulted staticEvaluate to `["lint"]`, but goal-host-vessel (and others) define
+ * only `typecheck` — so `bun run lint` printed `Script not found "lint"` and exited
+ * non-zero with NO `error TS` output. staticEvaluate then compared two EMPTY signature
+ * sets (overlay vs base), found new=0, and delta-excused a tree it had NEVER TYPECHECKED
+ * — the exact hole that let two broken commits (TS2451 redeclare, TS2345 cross-file async)
+ * self-land. Prefer `lint` (superset: tsc + shape-dispatch check) then `typecheck`, and
+ * return the FIRST that exists in the vessel's package.json. When neither exists, return
+ * the preferred name anyway so staticEvaluate's script-missing guard FAILS CLOSED (refuse)
+ * rather than silently skipping verification.
+ */
+async function resolveCheckScripts(vesselDir: string): Promise<string[]> {
+  try {
+    const pkgRaw = await readFile(join(vesselDir, "package.json"), "utf-8");
+    const scripts = (JSON.parse(pkgRaw) as { scripts?: Record<string, unknown> }).scripts ?? {};
+    for (const name of ["lint", "typecheck"]) {
+      if (typeof scripts[name] === "string" && scripts[name]) return [name];
+    }
+  } catch { /* unreadable package.json → fall through to fail-closed default */ }
+  return ["typecheck"];
+}
+
 async function triggerMitosisTick(a: {
   vessel: string;
   mitosisVersionId: string;
@@ -154,7 +177,10 @@ async function triggerMitosisTick(a: {
     const bunCmd = Bun.which("bun") ?? "/root/.bun/bin/bun";
     const vesselsRootForEval = dirname(a.mitosisRoot);
     const baseRootForEval = join(vesselsRootForEval, a.vessel);
-    const ev = await staticEvaluate(a.mitosisRoot, bunCmd, baseRootForEval, a.stagedFiles);
+    // Run the vessel's REAL check script (not the ["lint"] default, which is absent in
+    // goal-host-vessel and made the gate a silent no-op). Fails closed when neither exists.
+    const checkScripts = await resolveCheckScripts(baseRootForEval);
+    const ev = await staticEvaluate(a.mitosisRoot, bunCmd, baseRootForEval, a.stagedFiles, checkScripts);
     if (!ev.ok) {
       const status = ev.timed_out ? "evaluate_inconclusive" : `evaluate_refused:${ev.reason.slice(0, 120)}`;
       console.warn(`[patch-with-tools] cutover gated OUT for ${a.vessel}: ${status}`);

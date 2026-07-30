@@ -186,7 +186,8 @@ export async function resolveSystemdUnitHealthObserver(
   const failingStates = states.filter(
     (s) =>
       s.active_state === "failed" ||
-      (s.is_oneshot && (s.result === "exit-code" || s.result === "exited" || s.result === "failed" || s.result === "signal")) ||
+      (s.is_oneshot && s.result === "exit-code" && (typeof s.exec_main_status === "number" && s.exec_main_status !== 0)) ||
+      (s.is_oneshot && (s.result === "exited" || s.result === "failed" || s.result === "signal")) ||
       (s.is_oneshot && typeof s.exec_main_status === "number" && s.exec_main_status !== 0),
   );
   const failed_units = failingStates.map((s) => ({

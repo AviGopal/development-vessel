@@ -96,7 +96,7 @@ interface StaticCheckResult {
   timed_out: boolean;
 }
 
-interface StaticEvalResult {
+export interface StaticEvalResult {
   attempted: boolean;
   ok: boolean;
   reason: string;
@@ -309,7 +309,7 @@ export function signatureSet(out: string): Set<string> {
   return sigs;
 }
 
-async function staticEvaluate(
+export async function staticEvaluate(
   mitosisRoot: string,
   bunCmd: string,
   baseRootForOverlay?: string,

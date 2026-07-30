@@ -30,6 +30,7 @@ import { dirname, join } from "node:path";
 import { METABOB_ENDPOINT, METABOB_API_KEY } from "../config.js";
 import type { ResolverResult } from "./types.js";
 import { resolveVesselMitosisCutover } from "./vessel-mitosis-cutover.js";
+import { staticEvaluate } from "./vessel-mitosis-evaluate.js";
 
 const DISCOVERY_ENDPOINT = process.env.DISCOVERY_ENDPOINT ?? "http://127.0.0.1:8100";
 // Federation-transport egress (dev-vessel has no libp2p deps). Mirrors feature-compose /
@@ -142,6 +143,24 @@ async function triggerMitosisTick(a: {
   // refuses; boredom's later mitosis-tick is a no-op (this already landed).
   const none: MitosisLanding = { landed: false, new_git_sha: null, push_status: null };
   try {
+    // GATE UNIFICATION (2026-07-30): path 2 previously fabricated a FAVORABLE verdict and
+    // cut over on the strength of its own in-loop typecheck — which called a non-existent
+    // tool name (code_typecheck) and failed OPEN, so syntax-broken/destructive patches
+    // landed ungated (e.g. activity-api 9775bc8: a 12-line deletion, TS1128, reverted).
+    // Earn the verdict through the SAME hardened static gate feature_compose uses
+    // (staticEvaluate = delta-typecheck signature-subset + hasParseBail fail-closed on
+    // TS1xxx + clean-base guard). Refuse on regression; DEFER (not refuse) on an
+    // inconclusive timeout so the normal mitosis-tick re-evaluates in a quieter window.
+    const bunCmd = Bun.which("bun") ?? "/root/.bun/bin/bun";
+    const vesselsRootForEval = dirname(a.mitosisRoot);
+    const baseRootForEval = join(vesselsRootForEval, a.vessel);
+    const ev = await staticEvaluate(a.mitosisRoot, bunCmd, baseRootForEval, a.stagedFiles);
+    if (!ev.ok) {
+      const status = ev.timed_out ? "evaluate_inconclusive" : `evaluate_refused:${ev.reason.slice(0, 120)}`;
+      console.warn(`[patch-with-tools] cutover gated OUT for ${a.vessel}: ${status}`);
+      return { landed: false, new_git_sha: null, push_status: status };
+    }
+    const citedChecks = ev.checks.map((c) => c.name).filter((n): n is string => typeof n === "string" && n.length > 0);
     const cut = await resolveVesselMitosisCutover({
       type: "vessel_mitosis_cutover",
       vessel_name: a.vessel,
@@ -150,7 +169,7 @@ async function triggerMitosisTick(a: {
       mitosis_root: a.mitosisRoot,
       staged_files: a.stagedFiles,
       staged_base_sha: a.baseSha,
-      evaluation_evidence: { verdict: "FAVORABLE", base_success_rate: 1, mitosis_success_rate: 1, cited_trace_ids: [], cited_check_names: ["typecheck"] },
+      evaluation_evidence: { verdict: "FAVORABLE", base_success_rate: 1, mitosis_success_rate: 1, cited_trace_ids: [], cited_check_names: citedChecks.length ? citedChecks : ["static_evaluate"] },
       gap_id: a.gapId,
       proposal_id: a.proposalId,
       skip_push: false,
@@ -500,7 +519,7 @@ export async function resolvePatchWithTools(pointer: PatchWithToolsPointer): Pro
   const targetBaseName = containerPath.split("/").pop() ?? containerPath;
   let baselineTargetErrors = new Set<string>();
   try {
-    const tcBase = await callTool(toolsEndpoint, "code_typecheck", { cwd: `${vesselsRoot}/${vessel}` });
+    const tcBase = await callTool(toolsEndpoint, "code_verify_typecheck", { cwd: `${vesselsRoot}/${vessel}` });
     const tcBaseBody = tcBase.body as { error_lines?: string[] } | undefined;
     baselineTargetErrors = new Set((tcBaseBody?.error_lines ?? []).filter((l) => l.includes(targetBaseName)));
   } catch { /* best-effort; empty set == prior absolute grading */ }
@@ -701,7 +720,7 @@ export async function resolvePatchWithTools(pointer: PatchWithToolsPointer): Pro
       // Crucially: abort if the SAME typecheck failure recurs — re-producing an
       // identical broken patch wastes cycles without improving coverage.
       const vesselDir = `${vesselsRoot}/${vessel}`;
-      const tc = await callTool(toolsEndpoint, "code_typecheck", { cwd: vesselDir });
+      const tc = await callTool(toolsEndpoint, "code_verify_typecheck", { cwd: vesselDir });
       const tcBody = tc.body as { error_lines?: string[] } | undefined;
       const targetBase = containerPath.split("/").pop() ?? containerPath;
       const targetErrors = (tcBody?.error_lines ?? []).filter((l) => l.includes(targetBase));
@@ -769,7 +788,7 @@ export async function resolvePatchWithTools(pointer: PatchWithToolsPointer): Pro
       const curSrcAfterEdit = await readFile(liveSrcPath, "utf-8").catch(() => baseContent);
       if (createHash("sha256").update(curSrcAfterEdit).digest("hex").slice(0, 12) !== beforeSha) {
         const vesselDirVg = `${vesselsRoot}/${vessel}`;
-        const tcVg = await callTool(toolsEndpoint, "code_typecheck", { cwd: vesselDirVg });
+        const tcVg = await callTool(toolsEndpoint, "code_verify_typecheck", { cwd: vesselDirVg });
         const tcVgBody = tcVg.body as { error_lines?: string[] } | undefined;
         const targetBaseVg = containerPath.split("/").pop() ?? containerPath;
         const targetErrorsVg = (tcVgBody?.error_lines ?? []).filter((l) => l.includes(targetBaseVg));
@@ -832,7 +851,7 @@ export async function resolvePatchWithTools(pointer: PatchWithToolsPointer): Pro
     // vs baseline, treat it as verified and fall through to the SAME staging block below.
     const salvageSrc = await readFile(liveSrcPath, "utf-8").catch(() => baseContent);
     if (createHash("sha256").update(salvageSrc).digest("hex").slice(0, 12) !== beforeSha) {
-      const tcSalvage = await callTool(toolsEndpoint, "code_typecheck", { cwd: `${vesselsRoot}/${vessel}` });
+      const tcSalvage = await callTool(toolsEndpoint, "code_verify_typecheck", { cwd: `${vesselsRoot}/${vessel}` });
       const tcSalvageBody = tcSalvage.body as { error_lines?: string[] } | undefined;
       const newErrs = (tcSalvageBody?.error_lines ?? []).filter((l) => l.includes(targetBaseName) && !baselineTargetErrors.has(l));
       if (newErrs.length === 0) {

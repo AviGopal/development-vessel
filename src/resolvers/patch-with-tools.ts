@@ -773,7 +773,28 @@ export async function resolvePatchWithTools(pointer: PatchWithToolsPointer): Pro
       const curForGuard = await readFile(editPath, "utf-8").catch(() => "");
       alreadyApplied = curForGuard.includes(guardNew);
     }
-    const result = alreadyApplied
+    // CATASTROPHIC-TRUNCATION GUARD (2026-07-30): fs_write is for AUTHORING a
+    // NET-NEW file (full contents). When the drafter issues fs_write against an
+    // EXISTING non-trivial file, the LLM commonly emits a "full file" that
+    // contains only the few functions it was reasoning about — silently deleting
+    // thousands of lines of LIVE vessel source (observed 2026-07-30: goal-host
+    // index.ts 9386 → 213 lines, then a 29-turn loop re-reading its own stub,
+    // clobbering operator restores until development-vessel was restarted). An
+    // fs_write must NEVER shrink an existing file below half its size; force a
+    // surgical edit tool instead. Interim guard; overlay isolation is the
+    // structural fix (gap critical-patch-with-tools-edits-live-vessel-source).
+    let truncationBlocked = false;
+    if (tool === "fs_write" && typeof args.content === "string") {
+      const writePath = typeof args.path === "string" ? args.path : liveSrcPath;
+      const curForTrunc = await readFile(writePath, "utf-8").catch(() => "");
+      if (curForTrunc.length > 400 && args.content.length < curForTrunc.length * 0.5) {
+        truncationBlocked = true;
+        console.error(`[patch-with-tools] turn ${turn} fs_write BLOCKED: would shrink ${writePath} from ${curForTrunc.length} to ${args.content.length} chars (catastrophic truncation) — forcing surgical edit`);
+      }
+    }
+    const result = truncationBlocked
+      ? { ok: false, body: { success: false, error: "fs_write REFUSED: it would replace an existing file with a much smaller full-file rewrite, DELETING most of the live source. fs_write is ONLY for authoring a NET-NEW file. To change an existing file use fs_edit { path, old_string, new_string } or code_replace_lines for a SURGICAL edit that preserves everything you are not changing." } as unknown }
+      : alreadyApplied
       ? { ok: true, body: { success: true, noop: true, note: "new_string already present — edit already applied; do NOT re-apply it" } as unknown }
       : await callTool(toolsEndpoint, tool, args);
     console.error(`[patch-with-tools] turn ${turn} ${tool} -> ${result.ok ? "OK" : "ERR"}${alreadyApplied ? " (idempotent no-op)" : ""}: ${JSON.stringify(result.body).slice(0, 160)}`);

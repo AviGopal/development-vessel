@@ -1513,7 +1513,7 @@ function classifyComposeFailure(appliedOps: Array<{ ok: boolean; detail?: string
   if (/not above|instead of|rather than|duplicates|whereas/i.test(semanticReason)) return "wrong_location";
   return "semantic_reject";
 }
-async function appendComposeLesson(cls: string, reason: string, vessels: string, gap?: { id?: string; classification_metadata?: Record<string, unknown> }): Promise<void> {
+async function appendComposeLesson(cls: string, reason: string, vessels: string, gap?: { id?: string; summary?: unknown; category?: unknown; source?: unknown; detected_at?: unknown; classification_metadata?: Record<string, unknown> }): Promise<void> {
   if (gap && gap.id) {
     try {
       const meta = (gap.classification_metadata ?? {}) as Record<string, unknown>;
@@ -1522,14 +1522,25 @@ async function appendComposeLesson(cls: string, reason: string, vessels: string,
       lessons.push({ at: new Date().toISOString(), class: cls, reason: reason.slice(0, 200), raw_excerpt: reason.slice(0, 1500) });
       while (lessons.length > 8) lessons.shift();
       meta.failure_lessons = lessons;
+      // PRESERVE the gap's real identity on write-back. This write only ATTACHES failure
+      // lessons — it must NEVER rewrite the gap's category/summary. Historically it HARDCODED
+      // category:"missing_capability" + summary:"per-gap failure lessons updated" (a resolver
+      // status line), overwriting the real gap and LEAKING junk "per-gap failure lessons updated"
+      // gaps into the store. Carry the caller-supplied identity through instead. (2026-07-30)
+      const realCategory = (typeof gap.category === "string" && gap.category) ? gap.category : "missing_capability";
+      const realSummary = (typeof gap.summary === "string" && gap.summary.trim())
+        ? gap.summary
+        : (typeof meta.summary === "string" && (meta.summary as string).trim() ? String(meta.summary) : "");
+      const realSource = (typeof gap.source === "string" && gap.source) ? gap.source : "substrate_detected";
+      const realDetectedAt = (typeof gap.detected_at === "string" && gap.detected_at) ? gap.detected_at : new Date().toISOString();
       await resolveSubstrateGapWrite({
         type: "substrateGap_write",
         gap: {
           id: String(gap.id),
-          category: "missing_capability",
-          source: "substrate_detected",
-          summary: (typeof meta.summary === "string" && meta.summary) ? String(meta.summary) : "per-gap failure lessons updated",
-          detected_at: new Date().toISOString(),
+          category: realCategory,
+          source: realSource,
+          summary: realSummary || `compose failure lessons for gap ${String(gap.id)}`,
+          detected_at: realDetectedAt,
           status: "open",
           classification_metadata: meta,
         },

@@ -704,6 +704,196 @@ function pickMostLandable(gaps: Record<string, unknown>[]): Record<string, unkno
   return gaps.map((g) => ({ g, s: (landabilityScore(g) - (0)) * blockingWeight(g) * impactOf(g) })).sort((a, b) => b.s - a.s)[0]!.g;
 }
 
+// ─────────────────── ACTIONABILITY ADMISSION GATE (auto-pick only, 2026-07-30) ───────────────────
+// The autonomous loop's PROVEN-landable path is a gap that carries a CONCRETE edit target:
+// EITHER (a) a metadata-cited EXISTING repos/<vessel>/src file, OR (b) a proposal report naming
+// required_code_modifications[].file. The selection pool, however, gets FLOODED with candidates
+// that can never land — they hollow every dispatch and starve the proven path:
+//   • orphaned_capability / unreachable_producer gaps that demand a PRODUCER for a capability with
+//     none. author_producer returns "zero producers" / "empty activities list", so once one has
+//     failed to mint it is structurally un-provisionable — yet it keeps out-scoring real work and
+//     re-selecting each tick (failed_attempts alone caps the penalty at 0.4 — not enough).
+//   • PHANTOM typecheck gaps whose id/summary encode a TSxxxx at a vessel file that NO LONGER
+//     errors (e.g. "…_goal_host_vessel_src_index_l619_ts2322_variant" while `bun run typecheck`
+//     is EXIT=0 clean). The referenced defect is gone but the gap re-selects and re-drafts forever.
+// This gate ADMITS a gap to the auto-pick set only when it is actionable, and RETIRES a typecheck
+// gap whose error has already been fixed. Gaps are NOT deleted: an excluded orphan stays OPEN in the
+// store, reachable by a targeted pointer.gap_id dispatch — it is only kept out of AUTO selection.
+// CONSERVATIVE by design: the two structurally-unclosable classes above are the only HARD
+// exclusions. A gap with genuinely-unknown actionability (a feature_compose-routed gap with no
+// cited file/proposal) is LEFT ADMITTED — the downstream localizer (localizeGap) may still derive a
+// site, and hard-excluding it here would regress the working grep-localized band.
+
+const EXCLUDE_ORPHAN_AFTER_FAILS = 1; // an orphan/unreachable gap that already failed to mint = no producer
+const TYPECHECK_CACHE_TTL_MS = parseInt(process.env.GAP_TYPECHECK_CACHE_TTL_MS ?? "300000", 10);
+const TYPECHECK_MAX_RUNS_PER_PASS = parseInt(process.env.GAP_TYPECHECK_MAX_RUNS_PER_PASS ?? "3", 10);
+const typecheckCleanCache = new Map<string, { clean: boolean; at: number }>();
+
+/** (a) CHEAP: does the gap's metadata cite a concrete repos/<vessel>/src file that exists on disk? */
+export function citedExistingFile(gap: Record<string, unknown>): string | null {
+  const meta = (gap.classification_metadata ?? gap.metadata ?? {}) as Record<string, unknown>;
+  for (const f of ["edit_site", "file_path", "change_site", "suspected_real_location"]) {
+    const v = meta[f];
+    if (typeof v !== "string" || !v.trim()) continue;
+    let cand = v.trim().replace(/^\/vessels\//, "repos/").replace(/^\/+/, "");
+    if (!/^repos\//.test(cand) && /^[^/]+\/(src|tests?)\//.test(cand)) cand = `repos/${cand}`;
+    cand = cand.replace(/:[A-Za-z0-9_$]+$/, "").replace(/:\d+(?::\d+)?$/, "");
+    if (/^repos\/[^/]+\/.+\.(ts|tsx)$/.test(cand) && repoPathExists(cand)) return cand;
+  }
+  return null;
+}
+
+/** (b): the gap carries a proposal report naming required_code_modifications[].file that EXISTS. */
+export function hasProposalReport(gapId: string): boolean {
+  return existingEditTargets(gapId).length > 0;
+}
+
+/**
+ * Parse a typecheck-class gap: one whose id/summary encodes a TSxxxx error at a specific vessel
+ * source file (the phantom-churn shape). Returns { vessel, tsCode } when both a TS code and an
+ * EXISTING vessel dir are derivable, else null (→ not a typecheck-class gap; no tsc run).
+ */
+export function typecheckClassOf(gap: Record<string, unknown>): { vessel: string; tsCode: string } | null {
+  const id = String(gap.id ?? "");
+  const summary = String(gap.summary ?? gap.title ?? "");
+  const hay = `${id}\n${summary}`;
+  // TSxxxx as a token — underscore-delimited ("_ts2322_") or spaced ("TS2322"); NOT inside a word
+  // like "artifacts123". Underscore counts as a boundary here, so \b cannot be used.
+  const tsm = hay.match(/(?:^|[^a-z0-9])ts[_\s-]?(\d{4})(?![0-9])/i);
+  if (!tsm || !tsm[1]) return null;
+  const tsCode = `TS${tsm[1]}`;
+  let vessel: string | null = null;
+  // underscore form embedded in the id: "…_typecheck_goal_host_vessel_src_index_l619_ts2322_variant".
+  // Take the token run immediately BEFORE _src_ and walk suffixes so the LONGEST existing vessel dir
+  // wins ("goal-host-vessel"), never a spurious superset ("typecheck-goal-host-vessel").
+  const srcIdx = id.search(/_src[_/]/i);
+  if (srcIdx > 0) {
+    const parts = id.slice(0, srcIdx).split(/[_/]/).filter(Boolean);
+    for (let start = 0; start < parts.length; start++) {
+      const cand = parts.slice(start).join("-");
+      if (/-(vessel|api)$/.test(cand) && vesselDirExists(cand)) { vessel = cand; break; }
+    }
+  }
+  // repos/<vessel>/src path in id or summary
+  if (!vessel) {
+    const pm = hay.match(/repos\/([^/\s]+)\/src\//);
+    if (pm && pm[1] && vesselDirExists(pm[1])) vessel = pm[1];
+  }
+  if (!vessel) {
+    const iv = identifyVessel(gap, (gap.classification_metadata ?? gap.metadata ?? {}) as Record<string, unknown>);
+    if (iv) vessel = iv;
+  }
+  if (!vessel) return null;
+  return { vessel, tsCode };
+}
+
+export type TypecheckRunner = (vessel: string) => { ran: boolean; clean: boolean };
+/** Default runner: `bun run typecheck` in the vessel's runtime dir. Bounded by a wall timeout. */
+function defaultTypecheckRunner(vessel: string): { ran: boolean; clean: boolean } {
+  try {
+    const cwd = join(RUNTIME_ROOT, vessel);
+    if (!existsSync(join(cwd, "package.json"))) return { ran: false, clean: false };
+    const res = Bun.spawnSync(["bun", "run", "typecheck"], { cwd, stdout: "pipe", stderr: "pipe", timeout: 120_000 });
+    return { ran: true, clean: res.exitCode === 0 };
+  } catch {
+    return { ran: false, clean: false };
+  }
+}
+
+export interface AdmissionResult {
+  admitted: Record<string, unknown>[];
+  excluded: Array<{ id: string; reason: string }>;
+}
+
+/**
+ * Filter the AUTO-pick candidate set to actionable gaps. Excludes the two structurally-unclosable
+ * classes (no-producer orphans, phantom typecheck-clean gaps) and RETIRES the phantom typecheck
+ * gaps whose error is already fixed. See the block comment above for the full rationale. The
+ * typecheckRunner is injectable for tests; the default shells `bun run typecheck` per vessel,
+ * cached (TTL) and bounded (TYPECHECK_MAX_RUNS_PER_PASS) so tsc is never run per-gap.
+ */
+export async function admitActionableGaps(
+  gaps: Record<string, unknown>[],
+  opts?: { typecheckRunner?: TypecheckRunner },
+): Promise<AdmissionResult> {
+  const runner = opts?.typecheckRunner ?? defaultTypecheckRunner;
+  const admitted: Record<string, unknown>[] = [];
+  const excluded: Array<{ id: string; reason: string }> = [];
+  let tscRuns = 0;
+  const passCache = new Map<string, boolean | null>(); // vessel -> clean? (this pass; null = unknown)
+  const vesselTypecheckClean = (vessel: string): boolean | null => {
+    if (passCache.has(vessel)) return passCache.get(vessel) ?? null;
+    const now = Date.now();
+    const cached = typecheckCleanCache.get(vessel);
+    if (cached && now - cached.at < TYPECHECK_CACHE_TTL_MS) { passCache.set(vessel, cached.clean); return cached.clean; }
+    if (tscRuns >= TYPECHECK_MAX_RUNS_PER_PASS) { passCache.set(vessel, null); return null; } // budget spent → unknown
+    tscRuns++;
+    const r = runner(vessel);
+    if (!r.ran) { passCache.set(vessel, null); return null; }
+    typecheckCleanCache.set(vessel, { clean: r.clean, at: now });
+    passCache.set(vessel, r.clean);
+    return r.clean;
+  };
+
+  for (const g of gaps) {
+    const id = String(g.id ?? "");
+    const cat = String(g.category ?? "");
+    const meta = (g.classification_metadata ?? g.metadata ?? {}) as Record<string, unknown>;
+    const failedAttempts = Number(meta.failed_attempts ?? 0);
+
+    // (E2) PHANTOM TYPECHECK — retire when the referenced error is already gone.
+    const tc = typecheckClassOf(g);
+    if (tc) {
+      const clean = vesselTypecheckClean(tc.vessel);
+      if (clean === true) {
+        excluded.push({ id, reason: `typecheck_clean_phantom(${tc.vessel}:${tc.tsCode})` });
+        try {
+          await resolveSubstrateGapWrite({
+            type: "substrateGap_write",
+            gap: {
+              id, category: g.category, source: g.source, summary: g.summary, detected_at: g.detected_at,
+              classification_metadata: { ...meta, resolution: "already_resolved_typecheck_clean", closed_at: new Date().toISOString(), typecheck_verified_vessel: tc.vessel },
+              status: "closed",
+            },
+          } as never);
+        } catch { /* retire is best-effort; exclusion still holds */ }
+        continue;
+      }
+      // clean === false (error still present) or null (unknown / over budget) → fall through:
+      // a typecheck gap that still errors and cites a real file is genuinely actionable.
+    }
+
+    // (b) PROPOSAL-BACKED — the proven-landable path. ALWAYS admit (route unchanged).
+    if (hasProposalReport(id)) { admitted.push(g); continue; }
+    // (a) metadata cites a real EXISTING repos/<vessel>/src file.
+    if (citedExistingFile(g)) { admitted.push(g); continue; }
+
+    // (E1) ORPHAN / UNREACHABLE PRODUCER — no editable target; closes via author_producer /
+    // reachability_gap_repair, not feature_compose. Admit a FRESH one for its single mint attempt,
+    // but exclude once it has already failed to mint (structurally un-provisionable = "no producer")
+    // or lacks the `shape` its route needs.
+    const isOrphanClass = cat === "orphaned_capability" || cat === "unreachable_producer" || /orphaned[_-]capability/i.test(id);
+    if (isOrphanClass) {
+      const shape = String(meta.shape ?? "").trim();
+      if (failedAttempts >= EXCLUDE_ORPHAN_AFTER_FAILS) { excluded.push({ id, reason: `orphan_no_producer(failed=${failedAttempts})` }); continue; }
+      if (cat === "orphaned_capability" && !shape) { excluded.push({ id, reason: "orphan_missing_shape" }); continue; }
+      admitted.push(g); // one auto-shot for a provisionable-looking orphan
+      continue;
+    }
+
+    // UNKNOWN actionability (feature_compose-routed, no cited file/proposal) → keep existing
+    // behavior (do NOT hard-exclude; the localizer may still derive a site downstream).
+    admitted.push(g);
+  }
+
+  if (excluded.length) {
+    const byReason: Record<string, number> = {};
+    for (const e of excluded) { const k = e.reason.replace(/\(.*$/, ""); byReason[k] = (byReason[k] ?? 0) + 1; }
+    console.log(`[gap-to-feature] auto-pick admission: ${gaps.length} candidates → ${admitted.length} admitted, ${excluded.length} excluded ${JSON.stringify(byReason)}`);
+  }
+  return { admitted, excluded };
+}
+
 // CLOSE-ON-LAND (2026-06-29). A landed gap previously stayed status:open, so the
 // landability-ranked picker could re-select the SAME (now-fixed) gap each tick — its
 // staged fix re-applies as a no-op / fails to anchor (the change is already in source),
@@ -1575,9 +1765,19 @@ export async function resolveGapToFeature(pointer: GapToFeaturePointer): Promise
     // goal-host coalesce skipping requeues, and boredom not throttling explicit requests).
     const nowMs = Date.now();
     const eligible = gaps.filter((g) => nowMs - (gapComposeLastAttemptAt.get(String(g.id ?? "")) ?? 0) >= GAP_COMPOSE_COOLDOWN_MS);
-    gap = pointer.gap_id
-      ? gaps.find((g) => g.id === pointer.gap_id) ?? gaps[0] ?? null
-      : pickMostLandable(eligible);
+    if (pointer.gap_id) {
+      // Targeted dispatch BYPASSES the admission gate — the caller explicitly chose this gap
+      // (same carve-out as the cooldown filter and boredom not throttling explicit requests).
+      gap = gaps.find((g) => g.id === pointer.gap_id) ?? gaps[0] ?? null;
+    } else {
+      // ACTIONABILITY ADMISSION (auto-pick only): keep structurally-unclosable candidates
+      // (no-producer orphans; phantom typecheck gaps whose error is already fixed) OUT of the
+      // auto-pick set so they stop hollowing dispatches and starving the proven-landable path.
+      const { admitted } = await admitActionableGaps(eligible);
+      // Empty admitted (whole pool non-actionable — the common all-orphan case) → null,
+      // which flows to the graceful "no matching open gap" path, not pickMostLandable([])'s throw.
+      gap = admitted.length ? pickMostLandable(admitted) : null;
+    }
   } catch (e) {
     return { shape: "gapToFeatureReport", body: { ok: false, stage: "select", error: (e as Error).message } };
   }

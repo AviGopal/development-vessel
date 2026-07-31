@@ -1776,15 +1776,22 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
   const priorFeedback = priorAttemptFeedbackBlock(pointer.gap?.classification_metadata);
   const composeLessons = (await composeLessonsBlock(pointer.spec)) + (await fileLessonsBlock(pointer.spec));
   let spec = pointer.spec;
+  // Ground the spec against the REAL target file UNCONDITIONALLY (law 8 — information
+  // at use time). The specs most likely to carry SCHEMATIC anchors are exactly the ones
+  // matching REPLACE/WITH/INSERT AFTER/ANCHOR that used to SKIP this grounding, so the
+  // drafter obeyed the spec's invented symbol over the file. Always append the authoritative
+  // EXISTING SYMBOLS + LIVE VESSEL CONTRACTS; only the LLM spec-refine call stays gated.
+  try {
+    const contractBlock = await fetchNamedShapeContracts(spec + " " + grounding);
+    if (contractBlock) grounding += "\n\nLIVE VESSEL CONTRACTS (authoritative — drafted HTTP calls MUST use one of these contracts or an existing in-file helper; NEVER invent a route or omit the Authorization header):\n" + contractBlock;
+  } catch { /* advisory */ }
+  try {
+    const symbolBlock = await groundFileSymbols(toolsEndpoint, verifyVessels, targetFiles);
+    if (symbolBlock) grounding += '\n\nEXISTING SYMBOLS (authoritative — these are the top-level declarations of the TARGET file(s). Do NOT INVENT a new function, const, type, or field name that is absent here. You MAY edit lines, fields, and expressions INSIDE an existing symbol, and inside an inline handler that has no top-level name (e.g. app.post("/x", async (req) => { ... })) — an in-body line/field edit at the change site is expected and does NOT require you to name a changed top-level symbol):\n' + symbolBlock;
+  } catch { /* advisory */ }
   if (!(/REPLACE|WITH:|INSERT AFTER|ANCHOR/i.test(spec)) || spec.length > 3500) {
     try {
-      const contractBlock = await fetchNamedShapeContracts(spec + " " + grounding);
-    if (contractBlock) grounding += "\n\nLIVE VESSEL CONTRACTS (authoritative — drafted HTTP calls MUST use one of these contracts or an existing in-file helper; NEVER invent a route or omit the Authorization header):\n" + contractBlock;
-    try {
-      const symbolBlock = await groundFileSymbols(toolsEndpoint, verifyVessels, targetFiles);
-      if (symbolBlock) grounding += '\n\nEXISTING SYMBOLS (authoritative — these are the top-level declarations of the TARGET file(s). Do NOT INVENT a new function, const, type, or field name that is absent here. You MAY edit lines, fields, and expressions INSIDE an existing symbol, and inside an inline handler that has no top-level name (e.g. app.post("/x", async (req) => { ... })) — an in-body line/field edit at the change site is expected and does NOT require you to name a changed top-level symbol):\n' + symbolBlock;
-    } catch { /* advisory */ }
-    const refined = await llmCallWithFailover(llmEndpoints, refineSpecPrompt(spec, grounding, composeLessons), model);
+      const refined = await llmCallWithFailover(llmEndpoints, refineSpecPrompt(spec, grounding, composeLessons), model);
       const trimmed = refined.trim();
       if (trimmed.length >= 40) {
         spec = trimmed;

@@ -1765,6 +1765,10 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
     vessel_restarted: vesselRestarted,
     applied_at: appliedAt,
   };
+  // Threaded to the pending-land stamp below: a behavioral verification that RAN and
+  // FAILED must NOT earn landed_verified credit. Stays false when the check does not run
+  // (no verification_spec) or passes, preserving the existing stamp behaviour there.
+  let behavioralVerificationFailed = false;
   // Post-landing behavioral verification (gap cutover-gate-no-behavioral-verification):
   // execute the driving gap's structured verification_spec; a failure rewrites the
   // gap summary, which re-triggers gap-compose pickup.
@@ -1782,6 +1786,7 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
             ? priorSummary
             : `BEHAVIORAL VERIFICATION FAILED after ${String(newSha)}: ${priorSummary}`;
           if (!outcome.passed) {
+            behavioralVerificationFailed = true;
             console.log(`[mitosis-cutover] behavioral-verification FAILED gap=${gapId} commit=${String(newSha)}`);
           }
           await resolveSubstrateGapWrite({
@@ -1818,7 +1823,7 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
   // route-edit-<hash> proposal id has no gap row -> skip, never create a phantom
   // gap), only on a real origin push (pushStatus==="pushed" -> newSha is on
   // origin; host_sync_pending re-commits a different sha host-side), idempotent.
-  if (gapId !== "unknown-gap" && pushStatus === "pushed" && /^[0-9a-f]{7,40}$/i.test(newSha)) {
+  if (gapId !== "unknown-gap" && pushStatus === "pushed" && /^[0-9a-f]{7,40}$/i.test(newSha) && !behavioralVerificationFailed) {
     try {
       const stampRead = await resolveSubstrateGap({ type: "substrateGap", id: gapId, limit: 1 } as never);
       const stampRow = ((stampRead as { body?: { gaps?: Array<Record<string, unknown>> } }).body?.gaps ?? [])[0];

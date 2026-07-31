@@ -488,7 +488,7 @@ export async function resolvePatchWithTools(pointer: PatchWithToolsPointer): Pro
   const workspaceRoot = pointer.workspace_root ?? process.env.WORKSPACE_ROOT ?? "/workspace";
   const vesselsRoot = pointer.vessels_root ?? "/vessels";
   const maxIters = pointer.max_iterations ?? MAX_ITERATIONS;
-  const model = pointer.model ?? "auto"  /* law 1: "auto" makes the llm-resolver run selectArm (Thompson over the shaped llmModelPolicy, filtered to available models, graded) — model is a learned selection, not a frozen literal */; // capable hub-served drafter model (see feature-compose rationale)
+  const model = pointer.model ?? "claude-sonnet-5";
   // fallbackModels (the outer model-failover list) is DERIVED from the live policy arms
   // below, once llmEndpoints is resolved — see discoverFallbackModels. The frozen literal
   // it replaced (llama-3.3-70b-versatile / mistral-small-latest / GLM-5.2-TEE / Kimi-K2.6-TEE
@@ -590,7 +590,7 @@ export async function resolvePatchWithTools(pointer: PatchWithToolsPointer): Pro
   const llmEndpoint = llmEndpoints[0]!;
   const toolsEndpoint = await findLocalToolsEndpoint();
   if (!toolsEndpoint) return structuredError("no local-tools vessel found in discovery");
-  console.error(`[patch-with-tools] start vessel=${vessel} file=${subPath} model=${model} llm=${llmEndpoint.url} tools=${toolsEndpoint}`);
+  console.error(`[patch-with-tools] start vessel=${vessel} file=${subPath} model=${model} (auto→haiku hollow-lands hard edits; sonnet-5 is capable hub-served default) llm=${llmEndpoint.url} tools=${toolsEndpoint}`);
   // Outer model-failover list, derived NOW from the live policy arms (see
   // discoverFallbackModels). Reuses the resolved llmEndpoints (incl. hub-egress fallback)
   // so a spoke reads the hub's live arm pool rather than a frozen, credit-dead literal.

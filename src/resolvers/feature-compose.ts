@@ -1062,7 +1062,7 @@ async function groundFileSymbols(toolsEndpoint: string, verifyVessels: string[],
   }
   // Fallback (no named target): whole-vessel symbol survey (-g '*.ts' filters the dir).
   for (const v of verifyVessels.slice(0, 6)) {
-    const cmd = `rg -oNI --no-heading -g '*.ts' '^(export )?(async )?(function|const|let|interface|type) [A-Za-z0-9_]+' ${v}/src | sort -u | head -200`;
+    const cmd = `rg -oNI --no-heading -g '*.ts' '^(export )?(async )?(function|const|let|interface|type) [A-Za-z0-9_]+' ${v} | sort -u | head -200`;
     await resolveSymbols(cmd, v);
   }
   return blocks.join('\n\n');

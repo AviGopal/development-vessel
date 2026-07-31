@@ -635,6 +635,61 @@ export function detectNewCapabilityStub(diff: string): StubVerdict {
 }
 
 /**
+ * ZERO-BEHAVIOR-DELTA detector (2026-07-31). `detectNewCapabilityStub` above is
+ * create-heavy-scoped, so a SURGICAL no-op edit is out of its reach: a comment-only
+ * insert, or an empty-bodied control block added below an identical live guard (a
+ * SHADOWED no-op — e.g. `if (discoveredVia === "peer") { /* ... *\/ }` that executes
+ * nothing) passes every gate. This flags an added diff whose executable content is
+ * inert. Two conservative signals, both computed on the ADDED lines only, with
+ * comments/strings blanked via `stripCommentsAndStrings` so a doc-comment or log never
+ * masks real code:
+ *  (a) nothing survives the strip -> the insert is comment/whitespace-only;
+ *  (b) an empty-bodied control block (`if|else if|else|for|while (...) {}`) is present
+ *      AND the added code carries NO behaviour token anywhere (call, assignment,
+ *      return/throw/await/yield, break/continue, ++/--, new, import/export, `=>`).
+ * The empty-control-block precondition in (b) is what makes the behaviour-token test
+ * safe: an added object/enum/interface member (`retries: 3,`) or a `case` label carries
+ * no such token yet is never an empty control block, so it is never flagged. Biased
+ * toward NOT firing (any behaviour token anywhere clears it), so a genuine surgical
+ * edit that also happens to contain an empty guard is left to the LLM judge.
+ */
+export function detectZeroBehaviorDelta(diff: string): { isInert: boolean; reason: string } {
+  const added: string[] = [];
+  for (const raw of diff.split("\n")) {
+    if (/^###\s+(?:NEW FILE\s+)?/.test(raw)) continue;
+    if (raw.startsWith("+++")) continue;
+    if (raw.startsWith("+")) added.push(raw.slice(1));
+  }
+  if (added.length === 0) return { isInert: false, reason: "no added lines" };
+  const removed: string[] = [];
+  for (const raw of diff.split("\n")) {
+    if (raw.startsWith("---")) continue;
+    if (raw.startsWith("-")) removed.push(raw.slice(1));
+  }
+  const removedCode = stripCommentsAndStrings(removed.join("\n")).replace(/\s+/g, "");
+  const code = stripCommentsAndStrings(added.join("\n"));
+  if (code.replace(/\s+/g, "") === "") {
+    // A comment/whitespace-only ADD is only inert when nothing real was REMOVED —
+    // a deletion (e.g. drop a call, add "// handled upstream") IS the behaviour delta.
+    if (removedCode !== "") return { isInert: false, reason: "behaviour delta via deletion" };
+    return { isInert: true, reason: "added lines are comment/whitespace-only — zero behaviour delta" };
+  }
+  const hasEmptyControlBlock = /\b(?:if|else\s+if|else|for|while)\b[^{};]*\{\s*\}/.test(code);
+  if (hasEmptyControlBlock) {
+    const noCtrlHeaders = code.replace(/\b(?:if|for|while|switch|catch)\s*\([^)]*\)/g, " ");
+    const behaviourToken =
+      /\b(?:return|throw|await|yield|break|continue|delete|new|import|export)\b/.test(code) ||
+      /\+\+|--/.test(code) ||
+      /(?<![=!<>])=(?!=)/.test(code) ||
+      /[A-Za-z_$][\w$]*\s*\(/.test(noCtrlHeaders);
+    if (!behaviourToken) {
+      return { isInert: true, reason: "added code is an empty-bodied control block that performs no work (no-op / shadowed guard) — zero behaviour delta" };
+    }
+  }
+  return { isInert: false, reason: "added code performs work" };
+}
+
+/**
  * Decide the reachability hard-fail purely from the facts. HARD-FAIL (UNFAVORABLE,
  * no LLM) iff there is ≥1 changed symbol AND every changed symbol is unreachable
  * (callerCount===0 AND !isEntrypoint) — i.e. the patch only touches dead code. When
@@ -945,6 +1000,14 @@ export async function verifyPatchAddressesGap(args: {
       llm_consulted: false,
       ...(stub.symbol ? { suspected_real_location: stub.symbol } : {}),
     };
+  }
+  // ZERO-BEHAVIOR-DELTA HARD-FAIL (2026-07-31). detectNewCapabilityStub above is
+  // create-heavy-scoped, so a SURGICAL no-op — a comment-only insert or an empty-bodied
+  // shadowed control block — passed every gate. Reject it deterministically on ALL paths
+  // (create-heavy and surgical, gap-driven and free-text): inert added code closes no gap.
+  const inert = detectZeroBehaviorDelta(args.diff);
+  if (inert.isInert) {
+    return { addresses: false, reason: `zero behaviour delta — ${inert.reason}`, on_live_path: false, hard_fail: true, llm_consulted: false };
   }
   // NO-GAP (free-text spec) → the deterministic floors are the ONLY gate. There is no
   // gap to judge the diff against, so we do NOT run the LLM gap-relative judge (which

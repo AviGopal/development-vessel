@@ -392,6 +392,18 @@ export async function resolveGapLifecycleScan(p: GapLifecycleScanPointer): Promi
   const expired: string[] = [];
   if (autoClose && !dryRun) {
     for (const g of expiredCandidates.slice(0, maxExpire)) {
+      const reopens = (g as { reopen_count?: number }).reopen_count ?? 0;
+      if (reopens >= 3) {
+        try {
+          const resp = await fetch(emitUrl, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', ...authHeader },
+            body: JSON.stringify({ impulse: { pointer: { type: 'substrateGap_write', gap: { id: g.id, category: g.category ?? 'other', source: 'substrate_detected', summary: `[chronic re-emitter] ${(g.summary ?? '').slice(0, 160)} — reopen_count=${reopens} indicates durable fix has failed; marked needs_info instead of re-closing as expired.`, status: 'open', detected_at: new Date().toISOString(), classification_metadata: { disposition: 'needs_info', closed_by: 'gap_lifecycle_scan', reopen_count: reopens, note: 'chronic re-emitter (reopen_count>=3) — durable fix has failed; needs_info instead of re-closing as expired' } } } } }),
+            signal: AbortSignal.timeout(8_000)
+          });
+        } catch { }
+        continue;
+      }
       try {
         const resp = await fetch(emitUrl, {
           method: 'POST',

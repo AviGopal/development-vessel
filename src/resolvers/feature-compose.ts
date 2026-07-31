@@ -1184,6 +1184,9 @@ RULES:
 - Do NOT invent file paths that must already exist without being sure; for edits, target real files named in the spec.
 - STRICT TYPESCRIPT (the vessels compile with strict mode incl. \`noUncheckedIndexedAccess\`): every array/object index access (\`arr[i]\`, \`map[k]\`, \`str[i]\`) is typed \`T | undefined\` — you MUST guard it (\`?? fallback\`) or non-null-assert it (\`arr[i]!\`) when you know it is in-range, or tsc fails TS2532/TS18048. Avoid \`any\`. Type every function parameter and return.
 - MATCH EXISTING CONTRACTS: when adding a resolver/handler to an existing vessel, make its return type match what the dispatch site expects — in these vessels a resolver returns \`{ shape: string, body: ... }\` (the \`ResolverResult\` shape), NOT a bespoke object; read the dispatch file's other cases and mirror their shape exactly.
+- TARGET-FILE-SCOPE: edit ONLY the target file(s) named in the spec and shown under GROUND TRUTH / EXISTING SYMBOLS above. Do NOT edit any OTHER existing file to make the change fit; an edit whose path is not a named target file is off-target drift and the plan is REFUSED for it. If the change appears to need another existing file, it does not: re-read the target file and make it there. (A create_file for a genuinely net-new companion file - a new test, tsconfig, or module - is allowed.)
+- MULTI-SITE ENUMERATION: if the change must occur at N identical or near-identical sites in the target file, emit N SEPARATE edit ops, one per site, each with a DISTINCT old_string carrying enough surrounding context to be UNIQUE at that site. Do NOT emit a single edit on a non-unique anchor hoping it covers all N - apply replaces ONE occurrence, so the other N-1 sites are left unchanged (the 'landed 1 of N' failure). Enumerate every site.
+- FILE IS AUTHORITATIVE OVER SPEC: the GROUND TRUTH / EXISTING SYMBOLS above is the REAL current file and OUTWEIGHS the spec wherever they disagree. If the spec quotes an anchor, symbol, signature, or line that does NOT appear verbatim in the shown file contents, the spec is SCHEMATIC - bind old_string to the file's ACTUAL text, never to the spec's invented text. Never copy an anchor you cannot find verbatim in the shown file.
 - OUTPUT FORMAT IS STRICT: respond with ONLY the JSON object. Start your response with the character \`{\` and end with \`}\`. Do NOT write any reasoning, explanation, preamble, or markdown — not even before the JSON. Any prose wastes the output budget and can truncate the plan.`;
 }
 
@@ -1889,6 +1892,30 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
     return { shape: "featureComposeReport", body: { ok: false, stage: "decompose", error: "plan had no ops", plan_raw: planRaw.slice(0, 1200) } };
   }
   if (ops.length > maxOps) ops.length = maxOps;
+
+  // DETERMINISTIC FILE-SCOPE GATE (drafter binding-constraint remedy): when the spec
+  // names concrete target file(s) (targetFiles, derived from edit_site + repos/ paths in
+  // the spec), an `edit` op whose path is NOT one of them is off-target drift - the
+  // observed "plan wandered onto repos/landing-form" class. create_file is EXEMPT (a
+  // genuinely net-new companion file legitimately lives at a non-target path). SALVAGE
+  // over refuse: if the plan still retains >=1 on-target op (an on-target edit OR any
+  // create_file), DROP the off-target edits and proceed with the remainder; only REFUSE
+  // when the plan is PURELY off-target (every op is an off-target edit, so nothing would
+  // land on an intended file). Empty targetFiles (spec named no repos/ path) leaves the
+  // gate inert, matching the target-touched floor further below.
+  if (targetFiles.length > 0) {
+    const isOffTargetEdit = (op: PlanOp): boolean =>
+      op.kind === "edit" && !targetFiles.includes((op.path ?? "").replace(/:\d+.*$/, "").trim());
+    const offTargetEdits = ops.filter(isOffTargetEdit);
+    if (offTargetEdits.length > 0) {
+      if (offTargetEdits.length === ops.length) {
+        return { shape: "featureComposeReport", body: { ok: false, verdict: "REFUSED", stage: "scope", error: "plan is off-target: it edits " + offTargetEdits.map((o) => o.path).join(", ") + " but the spec's target file(s) are " + targetFiles.join(", ") + " - no edit lands on an intended target file" } };
+      }
+      const kept = ops.filter((op) => !isOffTargetEdit(op));
+      console.log(`[feature-compose] file-scope gate: DROPPED ${offTargetEdits.length} off-target edit op(s) [${offTargetEdits.map((o) => o.path).join(", ")}]; targets=[${targetFiles.join(", ")}]; kept ${kept.length} op(s)`);
+      ops = kept;
+    }
+  }
 
   const touched = new Set<string>((plan.touched_vessels as string[] | undefined) ?? []);
   for (const op of ops) { const d = vesselDirOf(op.path); if (d) touched.add(d); }

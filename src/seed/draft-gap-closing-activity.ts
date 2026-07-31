@@ -190,19 +190,21 @@ export const DRAFT_GAP_CLOSING_ACTIVITY_TEMPLATE: ActivityTemplate = {
   // The fs_read-from-variable-paths pattern is the actual data flow.
   inputShapes: [],
   outputShapes: ["activityTemplateProposal", "activityTemplateVariant"],
-  // boredom_target_template tag (V17, 2026-06-07) — entry into boredom's
-  // dispatch rotation. Without this tag the drafter only fires when explicitly
-  // triggered by an operator via light-dispatch, breaking the autonomy loop:
-  // no drafter → no new gap-closing:auto-* variants registered → goal[22]
-  // (dispatch-latest-auto-draft) re-runs only the pre-V15 variants → no
-  // canonical patch_proposal output → apply-proposal-as-patch starves.
-  // Adding the tag puts the drafter into Thompson rotation so it fires on
-  // its own cadence, closing the autonomy bootstrap.
+  // NOT a boredom_target_template (removed 2026-07-31). The V17 rationale
+  // (tag it so boredom fires it on its own cadence) was WRONG: this drafter
+  // REQUIRES report_path + scenario_id + dir variables, which boredom cannot
+  // seed — a direct boredom dispatch runs with empty vars, so task read_report
+  // does fs_read on the literal "{{report_path}}" and fails 100% (measured
+  // 4,546 failed/0 success over 7d; 1,432 failed since 07-30). The correct
+  // boredom entry point is development-vessel:drafter-trigger-tick (V18), which
+  // has ZERO vars and dispatches THIS drafter via pick_priority_scenario with
+  // the concrete variable values filled in (pick-priority-scenario.ts
+  // dispatchDrafter). So the drafter must ONLY be reached WITH vars, never as a
+  // bare boredom target.
   tags: [
     "lift.autonomous.loop",
     "validation.failure.modes",
     "gap.closing",
-    "boredom_target_template",
   ],
   variables: [
     {

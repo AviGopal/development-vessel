@@ -473,7 +473,64 @@ export interface GapToFeaturePointer {
   limit?: number;
 }
 
-// Auto-grounds the anchor from the live editTargets[0] file when classification_metadata.matched_excerpt is absent.
+/**
+ * Return a REAL line from the live target file that occurs EXACTLY ONCE — a
+ * deterministic MATCH ANCHOR the drafter can localize on. The drafter obeys the
+ * spec anchor over the actual file, so a SCHEMATIC (non-existent) gap-derived
+ * line mis-directs the edit and a NON-UNIQUE line fails closed. Selection order:
+ *   1. the most-distinctive line drawn FROM the excerpt hint that is unique in
+ *      the file — keeps the detector's intended context when the excerpt was
+ *      accurate, and REJECTS it when schematic (no excerpt line exists uniquely);
+ *   2. else the most-distinctive unique line in the edit-site window (±20 lines
+ *      when a line number is known, else the whole file).
+ * Returns the ORIGINAL file line (verbatim, with its indentation), or null when
+ * nothing clears the uniqueness bar. Only ever returns text that literally
+ * exists in the live file.
+ */
+export function groundedUniqueAnchor(
+  liveLines: string[],
+  excerptHint: string | null,
+  startLine: number,
+): string | null {
+  const norm = (s: string) => s.trim();
+  const MIN_LEN = 12;   // ignore short/boilerplate lines (braces, keywords)
+  const MAX_LEN = 240;  // avoid quoting a minified/huge line as the anchor
+  const counts = new Map<string, number>();
+  const original = new Map<string, string>(); // norm -> first original (indented) line
+  for (const l of liveLines) {
+    const t = norm(l);
+    if (t.length < MIN_LEN || t.length > MAX_LEN) continue;
+    counts.set(t, (counts.get(t) ?? 0) + 1);
+    if (!original.has(t)) original.set(t, l);
+  }
+  const uniqueOriginal = (t: string): string | null =>
+    counts.get(t) === 1 ? (original.get(t) ?? null) : null;
+  // (1) a unique line taken from the excerpt hint — most distinctive first.
+  if (excerptHint) {
+    const cand = excerptHint.split("\n").map(norm).filter((t) => t.length >= MIN_LEN);
+    cand.sort((a, b) => b.length - a.length);
+    for (const t of cand) {
+      const o = uniqueOriginal(t);
+      if (o) return o;
+    }
+  }
+  // (2) a unique line inside the edit-site window.
+  const from = startLine > 0 ? Math.max(0, startLine - 20) : 0;
+  const to = startLine > 0 ? Math.min(liveLines.length, startLine + 20) : liveLines.length;
+  const win = liveLines.slice(from, to).filter((l) => norm(l).length >= MIN_LEN);
+  win.sort((a, b) => norm(b).length - norm(a).length);
+  for (const l of win) {
+    const o = uniqueOriginal(norm(l));
+    if (o) return o;
+  }
+  return null;
+}
+
+// Grounds the spec anchor in the LIVE target file: hands the drafter real file
+// text (a verbatim window + a proven-UNIQUE match line) instead of a gap-derived
+// matched_excerpt that may be schematic or non-unique. matched_excerpt is used
+// only as a HINT to select the unique line, never emitted verbatim unless the
+// live target file cannot be read.
 export function specFromGap(
   gap: Record<string, unknown>,
   editTargets: Array<{ file: string; description: string }> = [],
@@ -490,30 +547,45 @@ export function specFromGap(
     ? (() => {
         // Anchor line: prefer upstream-set excerpt; fall back to live file contents
         // when editTargets names a real file under repos/<vessel>/src/.
+        // Ground the anchor against the LIVE target file. The drafter obeys the
+        // spec anchor over the real file, so a SCHEMATIC (non-existent) or
+        // NON-UNIQUE gap-derived excerpt mis-localizes the edit — the drafter's
+        // binding-constraint failure. Whenever the target is a readable
+        // repos/<vessel>/src file we hand the drafter ONLY real file text: a
+        // verbatim window for context PLUS a line proven to occur EXACTLY ONCE in
+        // the live file to anchor on. matched_excerpt is used only as a HINT to
+        // pick that unique line (excerpt-first, then edit-site window), never
+        // emitted verbatim unless the live file cannot be read.
         let anchorLine = "";
-        if (meta.matched_excerpt) {
-          anchorLine = `Anchor (existing code near the change): \`\`\`\n${String(meta.matched_excerpt)}\n\`\`\``;
-        } else {
-          const firstTarget: string | undefined = editTargets[0]?.file;
-          if (firstTarget && /^\/repos\/[^/]+\/src\//.test(`/${firstTarget}`)) {
-            try {
-              const raw = readFileSync(join(RUNTIME_ROOT, firstTarget.replace(/^repos\//, "")), "utf8");
-              const lines = raw.split("\n");
-              const lineCount = lines.length;
-              // Near-edit-site grounding (#18): center the ~40-line excerpt window on the
-              // edit site when edit_site/suspected_real_location names a line; else top of file.
-              const siteStr = `${String(meta.edit_site ?? "")} ${String(meta.suspected_real_location ?? "")}`;
-              const lineMatch = siteStr.match(/(?::|line\s+|#L)(\d+)/i);
-              const startLine = lineMatch ? (parseInt(lineMatch[1] ?? "0", 10) || 0) : 0;
-              const from = Math.max(0, startLine - 15);
-              const excerpt = lines.slice(from, from + 40).join("\n");
-              const anchorLabel = startLine > 0 ? "Anchor (verbatim near edit site)" : "Anchor (verbatim top of file)";
-              const vesselName = firstTarget.split('/')[1] ?? 'unknown';
-              anchorLine = `File facts: ${firstTarget} (vessel: ${vesselName}), total_lines=${lineCount}, excerpt_start_line=${from + 1}\n${anchorLabel}: \`\`\`\n${excerpt}\n\`\`\``;
-            } catch {
-              // file unreadable — leave anchorLine empty
-            }
+        const firstTarget: string | undefined = editTargets[0]?.file;
+        const excerptHint = meta.matched_excerpt != null ? String(meta.matched_excerpt) : "";
+        let liveLines: string[] | null = null;
+        if (firstTarget && /^\/repos\/[^/]+\/src\//.test(`/${firstTarget}`)) {
+          try {
+            liveLines = readFileSync(join(RUNTIME_ROOT, firstTarget.replace(/^repos\//, "")), "utf8").split("\n");
+          } catch {
+            liveLines = null; // file unreadable — fall back below
           }
+        }
+        if (liveLines && firstTarget) {
+          // Near-edit-site grounding (#18): center the ~40-line window on the edit
+          // site when edit_site/suspected_real_location names a line; else top of file.
+          const siteStr = `${String(meta.edit_site ?? "")} ${String(meta.suspected_real_location ?? "")}`;
+          const lineMatch = siteStr.match(/(?::|line\s+|#L)(\d+)/i);
+          const startLine = lineMatch ? (parseInt(lineMatch[1] ?? "0", 10) || 0) : 0;
+          const from = Math.max(0, startLine - 15);
+          const windowText = liveLines.slice(from, from + 40).join("\n");
+          const anchorLabel = startLine > 0 ? "Anchor (verbatim near edit site)" : "Anchor (verbatim top of file)";
+          const vesselName = firstTarget.split('/')[1] ?? 'unknown';
+          const unique = groundedUniqueAnchor(liveLines, excerptHint || null, startLine);
+          const uniqueNote = unique
+            ? `\nMATCH ANCHOR (this REAL line occurs EXACTLY ONCE in ${firstTarget} — locate your edit relative to it, verbatim): \`\`\`\n${unique}\n\`\`\``
+            : "";
+          anchorLine = `File facts: ${firstTarget} (vessel: ${vesselName}), total_lines=${liveLines.length}, excerpt_start_line=${from + 1}\n${anchorLabel}: \`\`\`\n${windowText}\n\`\`\`${uniqueNote}`;
+        } else if (excerptHint) {
+          // Target is not a readable repos/<vessel>/src file — cannot ground.
+          // Keep the upstream excerpt as-is (unchanged legacy behaviour).
+          anchorLine = `Anchor (existing code near the change): \`\`\`\n${excerptHint}\n\`\`\``;
         }
         const lines = [
           meta.edit_site ? `Change site: ${String(meta.edit_site)}` : "",

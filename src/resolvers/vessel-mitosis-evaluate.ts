@@ -122,7 +122,10 @@ export interface StaticEvalResult {
 // timeout branch in staticEvaluate) so the cutover defers-and-retries in a
 // quieter window instead of terminally rejecting a clean patch.
 const STATIC_CHECK_TIMEOUT_MS = 120_000;
-const OUTPUT_TAIL_BYTES = 4096;
+// Raised to 1 MiB (2026-06-30) to capture full typecheck/lint output so the
+// mitosis signature-subset gate and the spawn-error / missing-script / syntax-bail
+// guards normalize over the COMPLETE tsc output rather than only the last 4 KB.
+const OUTPUT_TAIL_BYTES = 1_048_576;
 // POSIX 128 + SIGTERM(15). Bun.spawn's proc.kill() sends SIGTERM, so a
 // timeout-killed child exits 143. We also set an explicit timed_out flag so
 // we never confuse a genuine non-zero tsc exit with a kill.

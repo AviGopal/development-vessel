@@ -180,6 +180,8 @@ export class GapDrainObserver {
     } catch (err) {
       console.log("[gap-drain-observer] lease check failed (proceeding):", err);
     }
+    const DRAIN_BACKOFF_INITIAL_MS = 60000;
+    const DRAIN_BACKOFF_MAX_MS = 3600000;
     g.__drainInflight.add(category);
     const startedAt = Date.now();
     try {
@@ -189,8 +191,20 @@ export class GapDrainObserver {
         body: JSON.stringify({ impulse: { type: remedy.impulse_type, triggered_by: "gap-drain", gap_id: gapId } }),
         signal: AbortSignal.timeout(120000),
       });
+      if (resp.ok) {
+        gd.__drainBackoff.delete(gapId);
+      } else {
+        const prev = gd.__drainBackoff.get(gapId);
+        const attempts = (prev?.attempts ?? 0) + 1;
+        const delay = Math.min(DRAIN_BACKOFF_INITIAL_MS * 2 ** (attempts - 1), DRAIN_BACKOFF_MAX_MS);
+        gd.__drainBackoff.set(gapId, { until: Date.now() + delay, attempts });
+      }
       this.recordDrain({ action: "dispatched", gap_id: gapId, category, impulse_type: remedy.impulse_type, ok: resp.ok, http_status: resp.status, latency_ms: Date.now() - startedAt });
     } catch (err) {
+      const prev = gd.__drainBackoff.get(gapId);
+      const attempts = (prev?.attempts ?? 0) + 1;
+      const delay = Math.min(DRAIN_BACKOFF_INITIAL_MS * 2 ** (attempts - 1), DRAIN_BACKOFF_MAX_MS);
+      gd.__drainBackoff.set(gapId, { until: Date.now() + delay, attempts });
       this.recordDrain({ action: "dispatch_failed", gap_id: gapId, category, impulse_type: remedy.impulse_type, error: String(err), latency_ms: Date.now() - startedAt });
     } finally {
       g.__drainInflight.delete(category);

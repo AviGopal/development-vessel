@@ -978,9 +978,9 @@ export async function verifyPatchAddressesGap(args: {
     // contradicting this contract — every judge outage sank otherwise-clean patches.)
     return { addresses: true, reason: `semantic judge unavailable (${(e as Error).message}); deterministic floors passed — fail-open, unverified by judge`, on_live_path: true, llm_consulted: false, verified: false };
   }
-  const m = raw.match(/\{[\s\S]*\}/);
+  const m = raw.match(/\{[\s\S]*\}/g);
   const parsed = m ? (parseJsonObject(m[0]) as Partial<SemanticGateVerdict> | null) : null;
-  if (!parsed || typeof parsed.addresses !== "boolean") {
+  if (!parsed || parsed === null || typeof parsed.addresses !== "boolean") {
     return { addresses: false, reason: "semantic judge returned unparseable verdict; failed deterministic reachability floor", on_live_path: true, llm_consulted: true };
   }
   const sus = typeof parsed.suspected_real_location === "string" && parsed.suspected_real_location.trim()

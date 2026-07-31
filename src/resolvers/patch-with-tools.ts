@@ -488,7 +488,7 @@ export async function resolvePatchWithTools(pointer: PatchWithToolsPointer): Pro
   const workspaceRoot = pointer.workspace_root ?? process.env.WORKSPACE_ROOT ?? "/workspace";
   const vesselsRoot = pointer.vessels_root ?? "/vessels";
   const maxIters = pointer.max_iterations ?? MAX_ITERATIONS;
-  const model = pointer.model ?? "claude-sonnet-5";
+  const model = pointer.model ?? "auto";
   // fallbackModels (the outer model-failover list) is DERIVED from the live policy arms
   // below, once llmEndpoints is resolved — see discoverFallbackModels. The frozen literal
   // it replaced (llama-3.3-70b-versatile / mistral-small-latest / GLM-5.2-TEE / Kimi-K2.6-TEE
@@ -582,10 +582,7 @@ export async function resolvePatchWithTools(pointer: PatchWithToolsPointer): Pro
   // {type:"llm_completion",...} body this endpoint accepts, and its response-unwrap already
   // handles the {content:{value}} envelope. The pushed producer is a first-class member of the
   // per-turn cascade below. Costs nothing when a local arm exists (branch skipped).
-  if (llmEndpoints.length === 0) {
-    llmEndpoints.push({ url: `${FED_TRANSPORT_EGRESS}/egress/resolve?vessel=llm-resolver-vessel` });
-    console.error("[patch-with-tools] no local llm arm discoverable — falling back to hub egress (?vessel=llm-resolver-vessel)");
-  }
+  llmEndpoints.push({ url: `${FED_TRANSPORT_EGRESS}/egress/resolve?vessel=llm-resolver-vessel` });
   if (llmEndpoints.length === 0) return structuredError("no llm_completion vessel found in discovery");
   const llmEndpoint = llmEndpoints[0]!;
   const toolsEndpoint = await findLocalToolsEndpoint();

@@ -1968,8 +1968,33 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
   // land on an intended file). Empty targetFiles (spec named no repos/ path) leaves the
   // gate inert, matching the target-touched floor further below.
   if (targetFiles.length > 0) {
+    // SIBLING-MIRROR FAN-OUT (structural-add remedy): "add X mirroring the other Y
+    // entries" legitimately touches every site the sibling is registered (its import +
+    // membership array + dispatch/cadence entry), which live in files the spec did not
+    // name. Collect the NEW top-level identifiers the on-target ops introduce; an
+    // off-target edit whose new_string WIRES one of them in (a cross-file registration of
+    // the just-created symbol) is NOT drift — admit it. Unrelated off-target edits (that
+    // reference no new symbol) are still dropped, and the verify_vessels gate below still
+    // refuses cross-vessel wandering.
+    const onTargetPath = (op: PlanOp): boolean =>
+      op.kind !== "edit" || targetFiles.includes((op.path ?? "").replace(/:\d+.*$/, "").trim());
+    const newSymbols = new Set<string>();
+    for (const op of ops) {
+      if (!onTargetPath(op)) continue;
+      const src = op.kind === "create_file" ? (op.content ?? "") : (op.new_string ?? "");
+      for (const m of src.matchAll(/export\s+(?:const|function|class|type|interface)\s+([A-Za-z_$][\w$]*)/g)) {
+        if (m[1] && m[1].length > 2) newSymbols.add(m[1]);
+      }
+    }
+    const wiresNewSymbol = (op: PlanOp): boolean => {
+      const ns = op.new_string ?? "";
+      for (const sym of newSymbols) if (ns.includes(sym)) return true;
+      return false;
+    };
     const isOffTargetEdit = (op: PlanOp): boolean =>
-      op.kind === "edit" && !targetFiles.includes((op.path ?? "").replace(/:\d+.*$/, "").trim());
+      op.kind === "edit"
+      && !targetFiles.includes((op.path ?? "").replace(/:\d+.*$/, "").trim())
+      && !wiresNewSymbol(op);
     const offTargetEdits = ops.filter(isOffTargetEdit);
     if (offTargetEdits.length > 0) {
       if (offTargetEdits.length === ops.length) {

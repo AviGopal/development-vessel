@@ -1801,6 +1801,49 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
       console.warn("[mitosis-cutover] behavioral-verification errored (non-fatal):", err);
     }
   }
+  // Land->close credit for the apply-proposal->cutover path (gap
+  // apply-proposal-as-patch-success-earns-no-gap-triple-credit). The ONLY gap
+  // closer was gap-to-feature's closeLandedGap, which never runs on the
+  // route-edit->feature_compose->apply_proposal_as_patch->cutover landing -- so a
+  // substrate-authored landing here scored zero on the gap triple. Reuse the
+  // EXISTING pending-land verification sweep (gap-to-feature
+  // sweepPendingLandVerifications) by stamping
+  // classification_metadata.pending_outcome_verification = <pushed sha> on the
+  // driving gap; that sweep closes it with closed_reason=landed_verified once the
+  // sha is observable as an ancestor of a clone HEAD AND the gap condition is no
+  // longer present (its verifyGapCondition is the hollow-land guard -- a stub land
+  // is stamped but NOT closed). Do NOT close here: post-cutover verification must
+  // run in a later tick against the synced clone, exactly like the self-cutover
+  // deferral. Guarded: stamp only a DURABLE, still-open gap (an ephemeral
+  // route-edit-<hash> proposal id has no gap row -> skip, never create a phantom
+  // gap), only on a real origin push (pushStatus==="pushed" -> newSha is on
+  // origin; host_sync_pending re-commits a different sha host-side), idempotent.
+  if (gapId !== "unknown-gap" && pushStatus === "pushed" && /^[0-9a-f]{7,40}$/i.test(newSha)) {
+    try {
+      const stampRead = await resolveSubstrateGap({ type: "substrateGap", id: gapId, limit: 1 } as never);
+      const stampRow = ((stampRead as { body?: { gaps?: Array<Record<string, unknown>> } }).body?.gaps ?? [])[0];
+      if (stampRow && String(stampRow["status"] ?? "") !== "closed") {
+        const stampMeta = (stampRow["classification_metadata"] ?? {}) as Record<string, unknown>;
+        if (stampMeta["pending_outcome_verification"] !== newSha) {
+          await resolveSubstrateGapWrite({
+            type: "substrateGap_write",
+            gap: {
+              ...stampRow,
+              status: "open",
+              classification_metadata: {
+                ...stampMeta,
+                pending_outcome_verification: newSha,
+                pending_set_at: appliedAt,
+              },
+            },
+          } as never);
+          console.log(`[mitosis-cutover] pending-land stamp gap=${gapId} sha=${newSha.slice(0, 12)} (sweep will close as landed_verified)`);
+        }
+      }
+    } catch (err) {
+      console.warn("[mitosis-cutover] pending-land stamp errored (non-fatal):", err);
+    }
+  }
   const workspaceRoot = process.env["WORKSPACE_ROOT"] ?? process.cwd();
   const logPath =
     pointer.applied_log_path ??

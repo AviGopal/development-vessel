@@ -2,13 +2,12 @@ import type { ResolverResult } from "./types.js";
 
 interface TransportHealth {
   activeReservations: number;
-  connections: Array<{ limited: boolean }>;
+  connections: Array<{ peer: string; addr: string; limited: boolean }>;
   streamResets: number;
   redialCount?: number;
   egressNoReservationCount?: number;
   lastRedialReason?: string;
-  reservationTTL?: number;
-  peers?: Array<{ id: string; circuits: number }>;
+  reservationTtlRemainingMs?: number;
 }
 
 interface TransportHealthResponse {
@@ -128,8 +127,8 @@ export async function resolveTransportHealthObserver(pointer: {
       redialCount: transportData.redialCount ?? 0,
       egressNoReservationCount: transportData.egressNoReservationCount ?? 0,
       lastRedialReason: transportData.lastRedialReason,
-      reservationTTL: transportData.reservationTTL,
-      peers: transportData.peers ?? [],
+      reservationTTL: transportData.reservationTtlRemainingMs,
+      peers: (transportData.connections ?? []).map((c) => ({ id: c.peer, circuit: c.addr.includes("p2p-circuit") })),
     },
   };
 }

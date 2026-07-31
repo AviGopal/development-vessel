@@ -117,7 +117,7 @@ export const MAX_COMPOSITION_DEPTH = 16;
  *  llm_completion_dispatch task configs (gpt-4, gpt-4-turbo, …) are rewritten to
  *  this at registration so authored chains are executable against the
  *  Anthropic-backed llm-resolver-vessel. */
-const CANONICAL_LLM_MODEL = "anthropic/claude-haiku-4-5-20251001";
+const CANONICAL_LLM_MODEL = "auto";
 
 /** Description discipline (I4): minimum length and forbidden values. */
 const MIN_DESCRIPTION_LENGTH = 40;

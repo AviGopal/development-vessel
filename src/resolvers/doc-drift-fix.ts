@@ -33,7 +33,7 @@ import { resolveDocFixPolicy } from "./doc-fix-policy.js";
 
 const DOC_ROOT = process.env.DOC_FIX_ROOT ?? "/workspace/git/super-repo";
 const PROPOSALS_DIR = process.env.PROPOSALS_DIR ?? "/workspace/proposals";
-const LLM_MODEL = process.env.DOC_FIX_MODEL ?? "anthropic/claude-haiku-4-5";
+const LLM_MODEL = process.env.DOC_FIX_MODEL ?? "auto";
 const DOC_BUDGET = 9000;
 
 export interface DocDriftFixPointer {

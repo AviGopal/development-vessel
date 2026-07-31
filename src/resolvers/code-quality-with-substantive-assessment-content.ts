@@ -132,7 +132,7 @@ Provide a structured assessment with an overall quality score (1-10) and per-cat
       type: "llm_completion_dispatch",
       prompt,
       max_tokens: 2000,
-      model: "claude-3-5-haiku-20241022",
+      model: "auto",
     });
     const llmBody: any = llmResult?.body ?? llmResult ?? {};
     assessment =

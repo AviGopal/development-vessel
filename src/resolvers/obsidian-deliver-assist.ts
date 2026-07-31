@@ -47,7 +47,7 @@ export async function resolveObsidianDeliverAssist(
   const llmEndpoint = pointer.llmEndpoint ?? DEFAULT_LLM_ENDPOINT;
   const assistPath = pointer.assistPath ?? "Substrate/Assists/active-note.md";
   const promptFocus = typeof pointer.promptFocus === "string" ? pointer.promptFocus.trim() : "";
-  const model = pointer.model ?? process.env["OBSIDIAN_ASSIST_MODEL"] ?? "claude-haiku-4-5-20251001";
+  const model = pointer.model ?? process.env["OBSIDIAN_ASSIST_MODEL"] ?? "auto";
   const apiKey = pointer.apiKey ?? API_KEY;
   const maxTokens = pointer.maxTokens ?? 500;
   const timeoutMs = pointer.timeoutMs ?? 30_000;

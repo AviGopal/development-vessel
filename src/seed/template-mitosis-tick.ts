@@ -131,7 +131,7 @@ export const TEMPLATE_MITOSIS_TICK_TEMPLATE: ActivityTemplate = {
           "- Each declared output_shape must be produced by at least one task " +
           "(task.outputShapes must include it).\n" +
           "Output ONLY the new template JSON object (no narration, no code fences, no commentary).",
-        model: "anthropic/claude-haiku-4-5-20251001",
+        model: "auto",
         max_tokens: 4000,
       },
       outputShapes: ["llm_completion_result"],

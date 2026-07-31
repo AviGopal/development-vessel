@@ -223,7 +223,7 @@ export const INGEST_DOC_AS_CONCEPTS_TEMPLATE: ActivityTemplate = {
       config: {
         type: "llm_completion_dispatch",
         prompt: EXTRACT_PROMPT,
-        model: "anthropic/claude-haiku-4-5-20251001",
+        model: "auto",
         max_tokens: 8000,
       },
       outputShapes: ["llm_completion_dispatch"],

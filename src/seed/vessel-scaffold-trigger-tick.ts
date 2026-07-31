@@ -163,7 +163,7 @@ export const VESSEL_SCAFFOLD_TRIGGER_TICK_TEMPLATE: ActivityTemplate = {
         system_prompt:
           "You are a precise JSON generator. Output only valid JSON with no surrounding text, no markdown fences, no prose.",
         prompt: DESIGN_VESSEL_PROMPT,
-        model: "anthropic/claude-haiku-4-5-20251001",
+        model: "auto",
         max_tokens: 1200,
       },
       outputShapes: ["vesselScaffoldDesign"],

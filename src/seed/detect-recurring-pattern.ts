@@ -131,7 +131,7 @@ export const DETECT_RECURRING_PATTERN_TEMPLATE: ActivityTemplate = {
           "Sort the array by count descending. If no signature reaches the " +
           "min_occurrences threshold ({{min_occurrences}}) OR if any candidate cluster " +
           "has zero contrast_examples, emit {\"clusters\":[]}.",
-        model: "anthropic/claude-haiku-4-5-20251001",
+        model: "auto",
         max_tokens: 1500,
       },
       outputShapes: ["recurringPatternClusterCandidates"],

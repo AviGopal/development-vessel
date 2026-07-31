@@ -129,7 +129,7 @@ export const GOAL_EXECUTION_WITH_RETRY_TEMPLATE: ActivityTemplate = {
           "If the recommendation is empty or has no templates, POST without targetTemplateId: " +
           "{\"goal\": \"{{goal}}\"}\n\n" +
           "Output ONLY the JSON response from the POST — no fences, no prose.",
-        model: "anthropic/claude-haiku-4-5-20251001",
+        model: "auto",
         max_tokens: 600,
       },
       outputShapes: ["goalExecutionAttempt"],
@@ -177,7 +177,7 @@ export const GOAL_EXECUTION_WITH_RETRY_TEMPLATE: ActivityTemplate = {
           '  "execution_id": "<executionId from result, or null>",\n' +
           '  "exclude_template_id": "<template id to exclude, or null>"\n' +
           "}",
-        model: "anthropic/claude-haiku-4-5-20251001",
+        model: "auto",
         max_tokens: 400,
       },
       outputShapes: ["executionEvaluation"],
@@ -212,7 +212,7 @@ export const GOAL_EXECUTION_WITH_RETRY_TEMPLATE: ActivityTemplate = {
           "}\n\n" +
           "Output ONLY the JSON response from the POST (or the skipped sentinel) — no fences, " +
           "no prose.",
-        model: "anthropic/claude-haiku-4-5-20251001",
+        model: "auto",
         max_tokens: 600,
       },
       outputShapes: ["recoveryAttempt"],
@@ -248,7 +248,7 @@ export const GOAL_EXECUTION_WITH_RETRY_TEMPLATE: ActivityTemplate = {
           '  "total_cost_usd": <number — sum of known costs, or 0 if unknown>,\n' +
           '  "learning_summary": "<one sentence: what this execution reveals about template quality or goal specificity>"\n' +
           "}",
-        model: "anthropic/claude-haiku-4-5-20251001",
+        model: "auto",
         max_tokens: 500,
       },
       outputShapes: ["goalExecutionResult"],

@@ -241,7 +241,7 @@ export const OBSERVE_AND_AUTHOR_FROM_GAPS_TEMPLATE: ActivityTemplate = {
           "Recent health traces JSON:\n{{read_recent_health_traces_content}}\n\n" +
           "Dedupe map (may be a fs_read error string if file absent — treat as empty):\n" +
           "{{read_dedupe_map_content}}",
-        model: "anthropic/claude-haiku-4-5-20251001",
+        model: "auto",
         max_tokens: 2000,
       },
       outputShapes: ["authoredScenarioCandidate"],

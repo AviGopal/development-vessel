@@ -270,7 +270,7 @@ export const DRAFT_ACTIVITY_FROM_PATTERN_TEMPLATE: ActivityTemplate = {
           "Concept priors (for context only): {{prime_concepts_text}}\n\n" +
           "Full vocabulary: {{prime_vocabulary_text}}\n\n" +
           "Return the pruned subset as JSON.",
-        model: "anthropic/claude-haiku-4-5-20251001",
+        model: "auto",
         max_tokens: 1500,
       },
       outputShapes: ["resolverVocabulary"],
@@ -290,7 +290,7 @@ export const DRAFT_ACTIVITY_FROM_PATTERN_TEMPLATE: ActivityTemplate = {
           "fences, no surrounding text. Honour all five comprehensibility-discipline rules or the " +
           "registration-time invariants will refuse your output.",
         prompt: DRAFT_PROMPT,
-        model: "anthropic/claude-haiku-4-5-20251001",
+        model: "auto",
         max_tokens: 4096,
       },
       outputShapes: ["draftedTemplate"],
@@ -353,7 +353,7 @@ export const DRAFT_ACTIVITY_FROM_PATTERN_TEMPLATE: ActivityTemplate = {
       config: {
         type: "comprehensibility_check",
         template_json: "{{draft_via_llm_text}}",
-        model: "anthropic/claude-haiku-4-5-20251001",
+        model: "auto",
         // floor is calibrated to the CURRENT similarity metric (Jaccard token
         // overlap), not to a semantic-cosine scale. A blind-LLM paraphrase vs a
         // keyword-y self-description tops out around 0.3 by token overlap even for

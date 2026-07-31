@@ -109,7 +109,7 @@ export const RECOVER_FROM_GOAL_FAILURE_TEMPLATE: ActivityTemplate = {
           '  "recommended_action": "retry_with_different_template|create_shape_provider|create_variant|reduce_scope|give_up",\n' +
           '  "exclude_template_ids": ["<id>", "..."]\n' +
           "}",
-        model: "anthropic/claude-haiku-4-5-20251001",
+        model: "auto",
         max_tokens: 600,
       },
       outputShapes: ["failureContext"],
@@ -153,7 +153,7 @@ export const RECOVER_FROM_GOAL_FAILURE_TEMPLATE: ActivityTemplate = {
           "\"expectedOutputShapes\": \"{{expected_output_shapes}}\"}}\n\n" +
           "Output ONLY the JSON object that was returned from the POST (or the " +
           "skipped object) — no fences, no prose.",
-        model: "anthropic/claude-haiku-4-5-20251001",
+        model: "auto",
         max_tokens: 800,
       },
       outputShapes: ["recoveryDispatch"],
@@ -182,7 +182,7 @@ export const RECOVER_FROM_GOAL_FAILURE_TEMPLATE: ActivityTemplate = {
           '  "exclude_template_ids": ["<id>", "..."],\n' +
           '  "learning": "<one-sentence note about what this failure reveals about the template or goal>"\n' +
           "}",
-        model: "anthropic/claude-haiku-4-5-20251001",
+        model: "auto",
         max_tokens: 400,
       },
       outputShapes: ["goalRecoveryAction"],

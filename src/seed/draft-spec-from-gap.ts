@@ -167,7 +167,7 @@ export const DRAFT_SPEC_FROM_GAP_TEMPLATE: ActivityTemplate = {
         system_prompt:
           "You are a precise JSON generator. Output only valid JSON with no surrounding text.",
         prompt: PROMPT_TEMPLATE,
-        model: "anthropic/claude-haiku-4-5-20251001",
+        model: "auto",
       },
       outputShapes: ["draftedSpecBundle"],
     },
@@ -257,7 +257,7 @@ export const DRAFT_SPEC_FROM_GAP_TEMPLATE: ActivityTemplate = {
           "If trivial, return\n" +
           '{ "shape": "trivial_gap", "summary": "no substrate learning", "content": "trivial gap_class; no pattern worth recording" }.\n' +
           "Output ONLY valid JSON.",
-        model: "anthropic/claude-haiku-4-5-20251001",
+        model: "auto",
         max_tokens: 500,
       },
       outputShapes: ["substrateLearningDraft"],

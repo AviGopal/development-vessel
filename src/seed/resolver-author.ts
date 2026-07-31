@@ -173,7 +173,7 @@ export const RESOLVER_AUTHOR_TEMPLATE: ActivityTemplate = {
           "- Patched config.ts and impulses.ts MUST be the FULL current file content with your additions inserted in place — do not abbreviate, do not write 'rest of file unchanged'.\n" +
           "- test file MUST use bun:test, mock fetch where needed, and contain at least 4 `it(...)` cases.\n" +
           "- Output ONLY the JSON object. No markdown fences. No commentary.",
-        model: "anthropic/claude-sonnet-4-5-20250929",
+        model: "auto",
         max_tokens: 16000,
       },
       outputShapes: ["resolverAuthorDraft"],

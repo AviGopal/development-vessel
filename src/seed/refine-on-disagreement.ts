@@ -169,7 +169,7 @@ export const REFINE_ON_DISAGREEMENT_TEMPLATE: ActivityTemplate = {
           "\"contrast_pair\":{\"passing_traces\":[<up to 3 most-recent success traces>]," +
           "\"failing_trace\":<failed trace summary>}}\n\n" +
           "Emit ONLY the JSON; no prose.",
-        model: "anthropic/claude-haiku-4-5-20251001",
+        model: "auto",
         max_tokens: 2000,
       },
       outputShapes: ["refinementContrastPair"],

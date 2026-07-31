@@ -123,7 +123,7 @@ export const PREDICT_AND_VERIFY_TEMPLATE: ActivityTemplate = {
           "Candidate template JSON: {{fetch_authored_candidate_content}}\n\n" +
           'Emit ONLY this JSON: {"types":["action"|"interpretation"|"prediction",...]} ' +
           "with no prose. If no applicable shape is present emit {\"types\":[]}.",
-        model: "anthropic/claude-haiku-4-5-20251001",
+        model: "auto",
         max_tokens: 400,
       },
       outputShapes: ["verifierClassification"],
@@ -176,7 +176,7 @@ export const PREDICT_AND_VERIFY_TEMPLATE: ActivityTemplate = {
           "\"pre_signature\":\"<sig>\",\"post_signature\":\"<sig>\"}}}\n" +
           "Otherwise emit {\"verifier\":\"action\",\"pass\":true}.\n\n" +
           "Emit ONLY the JSON described above; no prose.",
-        model: "anthropic/claude-haiku-4-5-20251001",
+        model: "auto",
         max_tokens: 500,
       },
       outputShapes: ["verifierResult"],
@@ -210,7 +210,7 @@ export const PREDICT_AND_VERIFY_TEMPLATE: ActivityTemplate = {
           "\"context\":{\"sub_type\":\"intent_inconsistency\",\"intent_label\":\"<l>\"," +
           "\"consistency_set\":[<set>],\"observed_continuation_signature\":\"<sig>\"}}}.\n\n" +
           "Emit ONLY the JSON described; no prose.",
-        model: "anthropic/claude-haiku-4-5-20251001",
+        model: "auto",
         max_tokens: 600,
       },
       outputShapes: ["verifierResult"],
@@ -244,7 +244,7 @@ export const PREDICT_AND_VERIFY_TEMPLATE: ActivityTemplate = {
           "\"context\":{\"sub_type\":\"trajectory_divergence\",\"predicted_signatures\":[<list>]," +
           "\"observed_signature\":\"<seq>\",\"horizon_events\":<N>,\"divergence_index\":<i>}}}.\n\n" +
           "Emit ONLY the JSON described; no prose.",
-        model: "anthropic/claude-haiku-4-5-20251001",
+        model: "auto",
         max_tokens: 700,
       },
       outputShapes: ["verifierResult"],

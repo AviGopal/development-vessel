@@ -208,7 +208,7 @@ export const ENACT_ORTHOGONAL_DECISIONS_TEMPLATE: ActivityTemplate = {
         system_prompt:
           "You are a precise JSON generator. Output only valid JSON with no surrounding text, no markdown fences, no prose.",
         prompt: SYNTHESIZE_DISPATCH_PROMPT,
-        model: "anthropic/claude-haiku-4-5-20251001",
+        model: "auto",
         max_tokens: 2500,
       },
       outputShapes: ["enactedDispatchDecision"],

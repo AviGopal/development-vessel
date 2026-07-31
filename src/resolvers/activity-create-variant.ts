@@ -552,7 +552,7 @@ export async function resolveActivityCreateVariant(pointer: ActivityCreateVarian
         if (String(tt["resolver"]) === "llm_completion_dispatch" && tt["config"] && typeof tt["config"] === "object") {
           const cfg = tt["config"] as Record<string, unknown>;
           const model = typeof cfg["model"] === "string" ? cfg["model"] : "";
-          if (!model.startsWith("anthropic/")) {
+          if (model !== "auto") {  // normalize EVERY authored model id (foreign AND anthropic/*) to the selection sentinel (law 1)
             cfg["model"] = CANONICAL_LLM_MODEL;
           }
         }

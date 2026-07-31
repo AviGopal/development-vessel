@@ -108,7 +108,7 @@ export const DETECT_CUTOVER_STUCK_LOOP_TEMPLATE: ActivityTemplate = {
       resolver: "llm_completion_dispatch",
       config: {
         type: "llm_completion_dispatch",
-        model: "anthropic/claude-haiku-4-5-20251001",
+        model: "auto",
         max_tokens: 800,
         prompt:
           "You are computing a deterministic detection verdict for the substrate's " +

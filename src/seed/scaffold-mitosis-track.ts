@@ -138,7 +138,7 @@ export const SCAFFOLD_MITOSIS_TRACK_TEMPLATE: ActivityTemplate = {
         system_prompt:
           "You are a precise source-code generator. Output only the raw source file content with no markdown fences and no commentary.",
         prompt: PROMPT_TEMPLATE,
-        model: "anthropic/claude-haiku-4-5-20251001",
+        model: "auto",
         max_tokens: 8000,
       },
       outputShapes: ["llmCompletionResult"],

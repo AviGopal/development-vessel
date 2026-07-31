@@ -46,7 +46,7 @@ export const INGEST_AUDIT_FINDINGS_TEMPLATE: ActivityTemplate = {
       resolver: "llm_completion_dispatch",
       config: {
         type: "llm_completion_dispatch",
-        model: "anthropic/claude-haiku-4-5-20251001",
+        model: "auto",
         max_tokens: 2000,
         prompt:
           "Parse the following audit findings document and extract all OPEN findings (not yet fully resolved).\n\n" +

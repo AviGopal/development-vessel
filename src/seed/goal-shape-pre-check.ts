@@ -98,7 +98,7 @@ export const GOAL_SHAPE_PRE_CHECK_TEMPLATE: ActivityTemplate = {
           '  "expected": ["<shape1>", "..."],\n' +
           '  "verdict": "pass" | "fail" | "no_constraint"\n' +
           "}",
-        model: "anthropic/claude-haiku-4-5-20251001",
+        model: "auto",
         max_tokens: 400,
       },
       outputShapes: ["shapeContractCheckResult"],
@@ -116,7 +116,7 @@ export const GOAL_SHAPE_PRE_CHECK_TEMPLATE: ActivityTemplate = {
         prompt:
           "Echo the following shape contract check result as-is. Output ONLY the JSON — " +
           "no prose, no fences:\n\n{{check_shape_intersection_content}}",
-        model: "anthropic/claude-haiku-4-5-20251001",
+        model: "auto",
         max_tokens: 400,
       },
       outputShapes: ["shapeContractCheckResult"],

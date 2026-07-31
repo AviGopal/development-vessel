@@ -1300,6 +1300,92 @@ async function closeLandedGap(gap: Record<string, unknown>, land: LandSignal): P
   }
 }
 
+// ── Pending-land verification sweep (land→close continuity) ──────────────────
+// Self-cutover lands defer closure: closeLandedGap stamps
+// classification_metadata.pending_outcome_verification = <landed SHA> and leaves the
+// gap open, expecting a "next-tick verification" that never existed — so gaps with
+// genuinely-landed commits stayed open and were picked and re-landed (observed on
+// gap-transport-health-observer-reads-lying-signals-2026-07-29 and the
+// service-failure-model-reality-audit duplicate re-lands). This sweep completes the
+// deferred path: at gap_to_feature tick start (an EXISTING rhythm — no new timer),
+// every open gap carrying a pending SHA is checked deterministically against the same
+// in-container clones this file already reads; when the SHA is an ancestor of a
+// clone's HEAD, the land is observable post-cutover and the gap flips to closed via
+// substrateGap_write (shape-flow preserved) with closed_reason=landed_verified.
+// Bounded like gap-lifecycle; best-effort; a still-'present' condition refuses close.
+const PENDING_VERIFY_SWEEP_LIMIT = 25;
+// Call-time (not module-load) so tests can point at a fixture clone tree; production
+// never sets the override and uses the same path as the other clone readers here.
+const vesselsCloneRoot = (): string => process.env["VESSELS_CLONE_ROOT"] ?? "/workspace/git/vessels";
+
+/** Deterministic land evidence: is `sha` an ancestor of HEAD in ANY vessel clone? */
+function shaIsAncestorOfAnyClone(sha: string): boolean {
+  if (!/^[0-9a-f]{7,40}$/i.test(sha)) return false;
+  let entries: string[] = [];
+  try { entries = readdirSync(vesselsCloneRoot()); } catch { return false; }
+  for (const cloneName of entries) {
+    const cloneDir = join(vesselsCloneRoot(), cloneName);
+    if (!existsSync(join(cloneDir, ".git"))) continue;
+    try {
+      const proc = Bun.spawnSync(["git", "-C", cloneDir, "merge-base", "--is-ancestor", sha, "HEAD"], { stdout: "pipe", stderr: "pipe", timeout: 10_000 });
+      if (proc.exitCode === 0) return true;
+    } catch { /* per-repo failure — continue */ }
+  }
+  return false;
+}
+
+export async function sweepPendingLandVerifications(): Promise<{ checked: number; closed: number }> {
+  const out = { checked: 0, closed: 0 };
+  try {
+    const read = await resolveSubstrateGap({
+      type: "substrateGap",
+      status: "open",
+      limit: 1000,
+      exclude_categories: [...DECISION_LOG_GAP_CATEGORIES],
+    } as never);
+    const gaps = ((read?.body as { gaps?: Record<string, unknown>[] })?.gaps) ?? [];
+    const pending = gaps
+      .filter((g) => {
+        const m = (g.classification_metadata ?? {}) as Record<string, unknown>;
+        return typeof m.pending_outcome_verification === "string" && (m.pending_outcome_verification as string).length >= 7;
+      })
+      .slice(0, PENDING_VERIFY_SWEEP_LIMIT);
+    for (const g of pending) {
+      out.checked += 1;
+      const meta = { ...((g.classification_metadata ?? {}) as Record<string, unknown>) };
+      const sha = String(meta.pending_outcome_verification);
+      // Not yet observable in a clone (pull-sync hasn't converged, or the land was
+      // reverted) — leave open; the sweep retries on every tick.
+      if (!shaIsAncestorOfAnyClone(sha)) continue;
+      // Post-cutover process: pick-time condition check CAN now observe the landed
+      // state. Refuse close only on a positive "still present"; unknown fails open,
+      // exactly like closeLandedGap.
+      if (verifyGapCondition(g) === "present") continue;
+      joinDecisionOutcome(meta, { landed: true, verdict: "FAVORABLE", commit: sha });
+      await resolveSubstrateGapWrite({
+        type: "substrateGap_write",
+        gap: {
+          id: String(g.id),
+          category: g.category,
+          source: g.source,
+          summary: g.summary,
+          detected_at: g.detected_at,
+          classification_metadata: {
+            ...meta,
+            closed_reason: "landed_verified",
+            resolution: `landed via mitosis cutover ${sha} (verified ancestor of clone HEAD)`,
+            closed_at: new Date().toISOString(),
+          },
+          status: "closed",
+        },
+      } as never);
+      updateCalibration(String(g.category ?? "unknown"), true);
+      out.closed += 1;
+    }
+  } catch { /* sweep is best-effort — never block the tick */ }
+  return out;
+}
+
 // Increment a gap's failed_attempts counter when an authoring attempt does NOT land
 // (UNFAVORABLE / staged-not-pushed). Feeds landabilityScore so a stuck gap drops in
 // priority and the loop stops churning on it instead of reaching landable work. Best-effort.
@@ -1730,6 +1816,9 @@ async function routeCapabilityGapToNewResolver(
 }
 
 export async function resolveGapToFeature(pointer: GapToFeaturePointer): Promise<ResolverResult> {
+  // 0. Land→close continuity: complete deferred self-cutover closures BEFORE selection,
+  // so an already-landed gap cannot be re-picked and re-landed. Cheap, bounded, best-effort.
+  try { await sweepPendingLandVerifications(); } catch { /* never block the tick */ }
   // 1. Select a gap — landability-ranked when auto-picking (not arbitrary gaps[0]).
   let gap: Record<string, unknown> | null = null;
   try {

@@ -844,9 +844,14 @@ export async function resolvePatchWithTools(pointer: PatchWithToolsPointer): Pro
     let alreadyApplied = false;
     if (tool === "fs_edit" && typeof args.new_string === "string" && args.new_string.length > 0) {
       const guardNew = args.new_string;
+      const guardOld = typeof args.old_string === "string" ? args.old_string : "";
       const editPath = typeof args.path === "string" ? args.path : liveSrcPath;
       const curForGuard = await readFile(editPath, "utf-8").catch(() => "");
-      alreadyApplied = curForGuard.includes(guardNew);
+      // Idempotence no-op ONLY when the edit already applied AND old_string survives
+      // inside new_string (the prefix/superset case fs_edit's own "old_string not
+      // found" fail-safe cannot catch). A FIRST edit whose new_string text merely
+      // coincides with existing bytes must NOT be skipped, or a real change is dropped.
+      alreadyApplied = guardNew.includes(guardOld) && curForGuard.includes(guardNew);
     }
     // CATASTROPHIC-TRUNCATION GUARD (2026-07-30): fs_write is for AUTHORING a
     // NET-NEW file (full contents). When the drafter issues fs_write against an

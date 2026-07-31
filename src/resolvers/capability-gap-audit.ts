@@ -143,6 +143,9 @@ async function emitGap(emitUrl: string, apiKey: string, gap: CapabilityGap): Pro
             proposed_resolver_name: gap.proposed_resolver_name,
             proposed_pointer_shape: gap.proposed_pointer_shape,
             output_shape: gap.output_shape,
+            // producer_now_exists close path (gap-lifecycle-scan) reads missing_shape;
+            // emit it so these gaps auto-close when a producer for the shape appears.
+            missing_shape: gap.output_shape,
             failure_examples: gap.failure_examples.slice(0, 5),
             evidence_snippets: gap.evidence_snippets.slice(0, 3),
             suggested_remediation: "Dispatch resolver_author seed template against this gap to draft a 4-file resolver patch following the three-place rule.",

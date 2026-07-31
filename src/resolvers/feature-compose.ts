@@ -1733,10 +1733,11 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
   // egress by NAME; the egress picks a LIVE hub circuit from its connection table and
   // _fedTargetVessel lands on the owning vessel on the far side. Costs nothing when a
   // local arm exists (this branch is skipped); no hardcoded peer or endpoint.
-  if (llmEndpoints.length === 0) {
-    llmEndpoints.push(`${FED_TRANSPORT_EGRESS}/egress/resolve?vessel=llm-resolver-vessel`);
-    console.log("[feature-compose] no local llm arm discoverable — falling back to hub egress (?vessel=llm-resolver-vessel)");
-  }
+  // ALWAYS append the hub egress as the TRAILING failover candidate — a local arm can
+  // be advertised yet credit-dead on the actual call, so llmCallWithFailover must be able
+  // to spill to a funded arm on a peer substrate. Local arms are tried first (they precede
+  // this in the array); no cost when a local arm answers.
+  llmEndpoints.push(`${FED_TRANSPORT_EGRESS}/egress/resolve?vessel=llm-resolver-vessel`);
   const toolsEndpoint = await discover("shellResult");
   if (llmEndpoints.length === 0 || !toolsEndpoint) {
     return { shape: "featureComposeReport", body: { ok: false, error: `endpoint discovery failed (llm=${llmEndpoints.length > 0}, tools=${!!toolsEndpoint})` } };

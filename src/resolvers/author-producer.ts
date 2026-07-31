@@ -812,7 +812,7 @@ export async function resolveAuthorProducer(pointer: AuthorProducerPointer): Pro
       prompt: buildPrompt(pointer, located.source, prior),
       max_tokens: 1500,
     });
-    if (llmResult.shape !== "llm_completion_result") {
+    if (llmResult.shape !== "llmTextCompletion" && llmResult.shape !== "llmToolCalls") {
       const b = llmResult.body as { detail?: string; failure_mode?: string } | undefined;
       lastError = `LLM authoring failed: ${b?.detail ?? "no completion"}`;
       continue;

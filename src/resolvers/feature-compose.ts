@@ -2005,6 +2005,10 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
   // edits live in the runtime (defect #2). Snapshot+restore reverts only the
   // files we edited, exactly, with no git dependency.
   const preEditContent = new Map<string, string>();
+  // Files this plan has ALREADY mutated on disk. A second edit op on the same file
+  // must validate its anchor against the file's CURRENT (post-prior-edit) bytes, not
+  // the stale first-touch snapshot in preEditContent (which stays for rollback only).
+  const editedInPlan = new Set<string>();
   const applied: Array<{ path: string; kind: string; ok: boolean; repaired?: boolean; detail?: string; span?: { start_line: number; end_line: number } }> = [];
   let applyFailed = false;
   // 2026-07-26 apply-reliability (keystone): when a non-unique anchor is
@@ -2052,7 +2056,14 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
       // runs on EVERY edit (incl. feedback retries) whenever ANY readable content
       // exists at the path, decoupled from a successful pre-snapshot.
       let liveContent = preEditContent.get(abs) ?? "";
-      if (!liveContent) {
+      // MULTI-SITE SEQUENCING: if a PRIOR op in this same plan already edited this
+      // file (same-file ops run sequentially in-group), the first-touch snapshot is
+      // now STALE. Re-read the CURRENT on-disk bytes as the basis for anchor
+      // uniqueness + proactive grounding, else a sibling edit that introduced a new
+      // occurrence would false-pass the non-unique guard (fs_edit then lands on the
+      // first of N), or one that rewrote the region would ground against text that no
+      // longer exists. preEditContent is left untouched (rollback keeps the original).
+      if (!liveContent || editedInPlan.has(abs)) {
         const cat0 = await callTool(toolsEndpoint, "shell", { command: `cat ${JSON.stringify(abs)}`, cwd: REPO_ROOT });
         const c0 = String((cat0.body as { stdout?: unknown })?.stdout ?? "");
         if (c0) { liveContent = c0; if (!preEditContent.has(abs)) preEditContent.set(abs, c0); }
@@ -2119,6 +2130,9 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
         }
       }
       const entry = { path: op.path, kind: op.kind, ok: r.ok, repaired, detail: r.ok ? undefined : JSON.stringify(r.body).slice(0, 200), span: r.ok ? computeEditSpan(liveContent || preEditContent.get(abs), effOld, op.new_string ?? "") : undefined };
+      // A successful edit mutated abs on disk; mark it so a later same-file op
+      // re-reads current bytes (above) instead of the stale first-touch snapshot.
+      if (r.ok) editedInPlan.add(abs);
       // keep applying remaining ops; verify is the real gate
       return { entry, editedAbs: r.ok ? abs : undefined, failed: !r.ok };
     }

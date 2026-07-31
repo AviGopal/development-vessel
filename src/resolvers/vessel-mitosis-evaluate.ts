@@ -1,4 +1,4 @@
-import { join, dirname } from "path";
+import { join, dirname, basename } from "path";
 import {
   stat,
   lstat,
@@ -7,6 +7,8 @@ import {
   readdir,
   symlink,
   unlink,
+  cp,
+  rm,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 // bun resolved via Bun.which at call-time (no external import needed)
@@ -309,6 +311,155 @@ export function signatureSet(out: string): Set<string> {
   return sigs;
 }
 
+// ── GOLDEN-DRIFT GATE (2026-07-30) ──────────────────────────────────────────
+// A vessel MAY ship a self-contained "golden" drift test that EXECUTES its
+// route-as-data selector cells over a real fixture and asserts each cell's shell
+// fragment and JS oracle AGREE (goal-host-vessel's test/reach-routes-golden.test.ts).
+// That test cannot run in the SRC-ONLY synced /vessels/<v> base (no test/ dir) nor
+// in the sparse mitosis dir, so the normal typecheck/lint gate never exercises it —
+// a drifted selector cell would land and serve hollow greens. This stage runs that
+// golden test against the IN-CONTAINER git clone (which HAS test/ + the route-as-data
+// src) with the STAGED src overlaid on top, so the cell BEING LANDED is what executes.
+//
+// CONDITIONAL: only vessels whose clone carries the golden test file engage it
+// (absent → SKIP, NOT fail-closed — most vessels have no such test). FAIL-CLOSED
+// (per the 530c1e9 lesson): once engaged, an inability to run (spawn error / missing
+// node_modules / module-load error / no parseable test summary) → REFUSE
+// (golden_drift_inconclusive), and a genuine test failure → REFUSE
+// (golden_drift_failed). A SIGTERM timeout is treated like every other static check
+// (V40): inconclusive-DEFER (timed_out), not a terminal regression, so a transient
+// under load re-evaluates next tick rather than permanently halting the whole fleet.
+const GOLDEN_TEST_REL = "test/reach-routes-golden.test.ts";
+const DEFAULT_CLONE_REPO_ROOT = "/workspace/git/super-repo/repos";
+
+/** Parse a `bun test` summary tail into pass/fail counts (null when absent). */
+function parseBunTestCounts(out: string): { pass: number | null; fail: number | null } {
+  const p = out.match(/(\d+)\s+pass\b/);
+  const f = out.match(/(\d+)\s+fail\b/);
+  return { pass: p ? Number(p[1]) : null, fail: f ? Number(f[1]) : null };
+}
+
+type GoldenGateOutcome =
+  | { kind: "skip" }
+  | { kind: "pass"; check: StaticCheckResult }
+  | { kind: "failed"; check: StaticCheckResult }
+  | { kind: "inconclusive"; check: StaticCheckResult | null; detail: string }
+  | { kind: "timeout"; check: StaticCheckResult };
+
+/**
+ * Run a vessel's golden drift test (if it ships one) against a temp overlay that
+ * combines: the clone's test/ + src/ (REAL files, so the test's relative
+ * `../src/index.ts` import resolves INTO the overlay), the STAGED src overlaid on
+ * top (so the cell being landed is what executes), and node_modules symlinked from
+ * the vessel's live base (the clone carries no node_modules). Torn down afterward.
+ */
+async function runGoldenDriftGate(args: {
+  cloneRepoRoot: string;
+  vesselName: string;
+  bunCmd: string;
+  mitosisRoot: string;
+  stagedFiles: string[];
+  nmSourceRoot: string | null;
+}): Promise<GoldenGateOutcome> {
+  const cloneDir = join(args.cloneRepoRoot, args.vesselName);
+  const goldenTestAbs = join(cloneDir, GOLDEN_TEST_REL);
+  if (!(await pathExists(goldenTestAbs))) return { kind: "skip" };
+
+  let overlay: string | null = null;
+  try {
+    overlay = join(
+      tmpdir(),
+      `golden-drift-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    );
+    await mkdir(overlay, { recursive: true });
+    // Real-copy every top-level clone entry (test/, src/, package.json, tsconfig,
+    // bun.lock …). The clone is src+test only (no node_modules), so this is cheap.
+    const tops = (await readdir(cloneDir, { withFileTypes: true })) as unknown as Array<{
+      name: string;
+    }>;
+    for (const e of tops) {
+      if (e.name === ".git" || e.name === "node_modules") continue;
+      await cp(join(cloneDir, e.name), join(overlay, e.name), { recursive: true });
+    }
+    // node_modules: the golden test imports the vessel entrypoint, which pulls in
+    // real deps (e.g. @anthropic-ai/sdk). The clone has none; symlink them from the
+    // live base. Without a resolvable node_modules the test cannot run → fail closed
+    // (inconclusive), never delta-excused.
+    if (!(await pathExists(join(overlay, "node_modules")))) {
+      const nmSrc =
+        args.nmSourceRoot && (await pathExists(join(args.nmSourceRoot, "node_modules")))
+          ? args.nmSourceRoot
+          : (await pathExists(join(cloneDir, "node_modules")))
+            ? cloneDir
+            : null;
+      if (!nmSrc) {
+        return {
+          kind: "inconclusive",
+          check: null,
+          detail: `no resolvable node_modules to build the golden overlay (checked ${args.nmSourceRoot ?? "<none>"} and ${cloneDir})`,
+        };
+      }
+      await symlink(join(nmSrc, "node_modules"), join(overlay, "node_modules"));
+    }
+    // Overlay the STAGED src files (the version being landed) on top of the clone
+    // src, so the golden test executes the cell being added — the whole point.
+    for (const rel of args.stagedFiles) {
+      const src = join(args.mitosisRoot, rel);
+      if (!(await pathExists(src))) continue;
+      const target = join(overlay, rel);
+      await mkdir(dirname(target), { recursive: true });
+      try {
+        await rm(target, { force: true });
+      } catch {
+        /* not present */
+      }
+      await copyFile(src, target);
+    }
+    // Execute the golden test IN the overlay (its self-contained fixtures spawn bash
+    // + mkdtemp; only the `../src/index.ts` import depends on cwd).
+    const check = await runCheck(
+      args.bunCmd,
+      ["test", GOLDEN_TEST_REL],
+      overlay,
+      "golden-drift: reach-routes-golden",
+    );
+    if (check.timed_out) return { kind: "timeout", check };
+    if (check.output_tail.includes("spawn_error")) {
+      return { kind: "inconclusive", check, detail: "spawn_error running the golden test" };
+    }
+    const { pass, fail } = parseBunTestCounts(check.output_tail);
+    // No parseable summary, or ZERO assertions ran → the harness never meaningfully
+    // executed (e.g. a module-load error). Cannot verify → refuse.
+    if (pass === null || pass === 0) {
+      return {
+        kind: "inconclusive",
+        check,
+        detail: `golden test did not execute any assertions (pass=${pass ?? "?"} fail=${fail ?? "?"} exit=${check.exit_code}) — likely a module-load/resolution error, not a clean run`,
+      };
+    }
+    // Assertions ran: any failure (or a non-zero exit) is a genuine drift / ownership
+    // break in the staged selector table.
+    if ((fail ?? 0) > 0 || check.exit_code !== 0) {
+      return { kind: "failed", check };
+    }
+    return { kind: "pass", check };
+  } catch (err) {
+    return {
+      kind: "inconclusive",
+      check: null,
+      detail: `golden overlay build/run threw: ${(err as Error).message}`,
+    };
+  } finally {
+    if (overlay) {
+      try {
+        await rm(overlay, { recursive: true, force: true });
+      } catch {
+        /* best-effort cleanup */
+      }
+    }
+  }
+}
+
 export async function staticEvaluate(
   mitosisRoot: string,
   bunCmd: string,
@@ -316,6 +467,7 @@ export async function staticEvaluate(
   stagedFiles?: string[],
   scripts: string[] = ["lint"],
   skipTests = false,
+  cloneRepoRoot: string = DEFAULT_CLONE_REPO_ROOT,
 ): Promise<StaticEvalResult> {
   const start = Date.now();
   if (!(await pathExists(mitosisRoot))) {
@@ -509,6 +661,59 @@ export async function staticEvaluate(
       }
       // Patch doesn't regress baseline — continue to next script (or finish).
     }
+  }
+  // ── GOLDEN-DRIFT GATE: run the vessel's executable selector-drift test (if it
+  // ships one) against the clone + STAGED src. Runs on BOTH the skip_tests and the
+  // normal paths — a shell-vs-oracle drift is a determinism defect, not a flaky
+  // test, and must gate every cutover. Conditional + fail-closed (see helper above).
+  {
+    const vesselName = baseRootForOverlay
+      ? basename(baseRootForOverlay)
+      : basename(mitosisRoot).replace(/-mitosis-.*$/, "");
+    const nmSourceRoot = baseRootForOverlay ?? mitosisRoot;
+    const golden = await runGoldenDriftGate({
+      cloneRepoRoot,
+      vesselName,
+      bunCmd,
+      mitosisRoot,
+      stagedFiles: stagedFiles ?? [],
+      nmSourceRoot,
+    });
+    if (golden.kind === "timeout") {
+      completed.push(golden.check);
+      return {
+        attempted: true,
+        ok: false,
+        reason: `static_check_timeout: golden-drift 'reach-routes-golden' killed after ${STATIC_CHECK_TIMEOUT_MS}ms (exit=${golden.check.exit_code}) — inconclusive, NOT a regression (defer-and-retry)`,
+        checks: completed,
+        duration_ms: Date.now() - start,
+        timed_out: true,
+      };
+    }
+    if (golden.kind === "inconclusive") {
+      if (golden.check) completed.push(golden.check);
+      return {
+        attempted: true,
+        ok: false,
+        reason: `evaluate_refused: golden_drift_inconclusive — ${golden.detail}; refusing to land an UNVERIFIED selector table (fail-closed per the 530c1e9 lesson)`,
+        checks: completed,
+        duration_ms: Date.now() - start,
+      };
+    }
+    if (golden.kind === "failed") {
+      completed.push(golden.check);
+      return {
+        attempted: true,
+        ok: false,
+        reason: `evaluate_refused: golden_drift_failed — the reach-routes golden fixture gate FAILED on the staged src (a SELECTORS shell-vs-oracle arithmetic drift or a route-ownership break); a drifted selector serves hollow greens`,
+        checks: completed,
+        duration_ms: Date.now() - start,
+      };
+    }
+    if (golden.kind === "pass") {
+      completed.push(golden.check);
+    }
+    // golden.kind === "skip" → vessel ships no golden test; proceed unchanged.
   }
   if (!skipTests) {
     const test = await runCheck(bunCmd, ["test"], runRoot, "bun test");

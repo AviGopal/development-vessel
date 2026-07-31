@@ -470,6 +470,50 @@ export async function resolvePatchWithTools(pointer: PatchWithToolsPointer): Pro
     } catch { /* best-effort */ }
   };
 
+  // DRIFT-PROOF SNAPSHOT/RESTORE (2026-07-30, gap
+  // critical-patch-with-tools-edits-live-vessel-source). resetTarget only ever
+  // restores the single declared target_file; a terminal that skipped it (the LLM
+  // plane exhausting mid-run at the `llm failed turn` return, an uncaught throw, or
+  // an edit the drafter aimed at a DIFFERENT path) stranded broken code in the LIVE
+  // /vessels source — not in git — waiting to crash the next restart (observed
+  // twice: goal-host index.ts left with a TS2451 walkTerminationReason redeclare).
+  // Capture the pre-EDIT content of EVERY path any edit tool touches (baseline-
+  // correct: the first touch of a path records its state BEFORE the first edit), and
+  // on ANY non-landing terminal outcome restore ALL of them, verified by hash. The
+  // target file is seeded up front so its baseline is correct even if it is the only
+  // file touched. Overlay isolation remains the structural fix; this is the
+  // deterministic backstop that makes a stranded corruption impossible.
+  const touchedSnapshots = new Map<string, string | null>();
+  touchedSnapshots.set(liveSrcPath, isNewFile ? null : baseContent);
+  const snapshotBeforeEdit = async (p: string): Promise<void> => {
+    if (touchedSnapshots.has(p)) return;
+    const cur = await readFile(p, "utf-8").catch(() => null);
+    touchedSnapshots.set(p, cur);
+  };
+  const restoreAllSnapshots = async (): Promise<void> => {
+    for (const [p, content] of touchedSnapshots) {
+      try {
+        if (content === null) {
+          // Path did not exist pre-op (net-new authoring): remove the stub so it
+          // cannot poison a re-run's existence check and cannot ship as live source.
+          await unlink(p).catch(() => { /* already absent */ });
+          continue;
+        }
+        await writeFile(p, content);
+        const back = await readFile(p, "utf-8").catch(() => null);
+        const want = createHash("sha256").update(content).digest("hex");
+        const got = back === null ? null : createHash("sha256").update(back).digest("hex");
+        if (got !== want) {
+          // Fail loud: a restore that did not take leaves drift on disk. This is the
+          // exact failure the whole guard exists to prevent, so it must be visible.
+          console.error(`[patch-with-tools] RESTORE FAILED — live ${p} still diverged after snapshot restore (drift on disk)`);
+        }
+      } catch (e) {
+        console.error(`[patch-with-tools] restore threw for ${p}: ${(e as Error).message}`);
+      }
+    }
+  };
+
   const llmEndpoints = await findLlmEndpoints();
   // Hub-egress fallback (law 11): when NO llm arm is discoverable locally (the local resolver
   // de-advertises llm_completion on quota/credit exhaustion; a spoke doesn't mirror the hub's
@@ -550,6 +594,11 @@ export async function resolvePatchWithTools(pointer: PatchWithToolsPointer): Pro
     baselineTargetErrors = new Set((tcBaseBody?.error_lines ?? []).filter((l) => l.includes(targetBaseName)));
   } catch { /* best-effort; empty set == prior absolute grading */ }
 
+  // DRIFT-PROOF: once true, the edit has been safely captured into the staged mitosis
+  // tree and the live file was intentionally reset (the cutover owns the live landing
+  // from here). Until then, ANY exit is non-landing and must restore the snapshots.
+  let stagedForLanding = false;
+  try {
   for (let attempt = 1; attempt <= maxAttempts && !finished; attempt++) {
     if (attempt > 1) {
       await resetTarget();
@@ -818,6 +867,14 @@ export async function resolvePatchWithTools(pointer: PatchWithToolsPointer): Pro
         console.error(`[patch-with-tools] turn ${turn} fs_write BLOCKED: would shrink ${writePath} from ${curForTrunc.length} to ${args.content.length} chars (catastrophic truncation) — forcing surgical edit`);
       }
     }
+    // DRIFT-PROOF: snapshot the pre-edit content of the exact path this edit tool is
+    // about to mutate, BEFORE it runs (baseline-correct; a no-op guard means nothing
+    // is written, so skip). Covers a drafter that aims an edit at a path other than
+    // the declared target_file — restoreAllSnapshots then reverts it too.
+    const isEditToolCall = tool === "fs_edit" || tool === "fs_write" || tool === "code_replace_lines" || tool === "code_insert_after_line" || tool === "code_add_import";
+    if (isEditToolCall && !truncationBlocked && !alreadyApplied) {
+      await snapshotBeforeEdit(typeof args.path === "string" ? args.path : liveSrcPath);
+    }
     const result = truncationBlocked
       ? { ok: false, body: { success: false, error: "fs_write REFUSED: it would replace an existing file with a much smaller full-file rewrite, DELETING most of the live source. fs_write is ONLY for authoring a NET-NEW file. To change an existing file use fs_edit { path, old_string, new_string } or code_replace_lines for a SURGICAL edit that preserves everything you are not changing." } as unknown }
       : alreadyApplied
@@ -986,6 +1043,10 @@ export async function resolvePatchWithTools(pointer: PatchWithToolsPointer): Pro
   // the just-authored file (resetTarget) — the staged copy is the source of
   // truth and cutover applies it; leaving the live stub would poison re-runs.
   await resetTarget();
+  // Edit is now captured in the staged tree and live is deliberately at base; the
+  // cutover owns the live landing. Suppress the finally snapshot-restore so it does
+  // not clobber the cutover's applied content on the success path.
+  stagedForLanding = true;
 
   const versionId = `mitosis-${stamp}`;
   const pendingPath = join(workspaceRoot, "mitosis-pending.json");
@@ -1031,4 +1092,12 @@ export async function resolvePatchWithTools(pointer: PatchWithToolsPointer): Pro
       completed_at: new Date().toISOString(),
     },
   };
+  } finally {
+    // DRIFT-PROOF backstop: on ANY non-landing terminal outcome — gate reject,
+    // drafter storm, exhausted attempts, an LLM-plane exhaustion `return`, or an
+    // uncaught throw — restore EVERY touched file to its pre-op snapshot so a broken
+    // edit can never strand in the LIVE /vessels source and crash the next restart.
+    // Suppressed only once the edit is safely staged and the cutover owns the landing.
+    if (!stagedForLanding) await restoreAllSnapshots();
+  }
 }

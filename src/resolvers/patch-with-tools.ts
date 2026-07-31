@@ -276,6 +276,49 @@ async function findLlmEndpoints(): Promise<LlmProducer[]> {
   return [];
 }
 
+// Derive the outer model-failover list from the LIVE policy arms instead of a frozen
+// literal. The prior frozen list went entirely credit-dead and omitted the live
+// qwen/qwen3-32b arm, so once "auto" exhausted every outer fallback pinned a dead model.
+// Resolve the llmModelPolicy shape off the SAME producers that serve llm_completion
+// (passed in from findLlmEndpoints, incl. the hub-egress fallback so a spoke reads the
+// hub's live pool) and return its arm model ids; fall back to a single live-verified
+// literal only when the policy is unreachable. Best-effort: any failure yields the literal.
+async function discoverFallbackModels(producers: LlmProducer[], exclude: string): Promise<string[]> {
+  for (const p of producers) {
+    try {
+      const headers: Record<string, string> = { "Content-Type": "application/json", Authorization: `ApiKey ${METABOB_API_KEY}` };
+      if (p.target) headers["X-Libp2p-Target"] = p.target;
+      // Short, dedicated timeout: this runs at startup on the happy path, so a hung policy
+      // endpoint must not stall the whole patch. The list is only consumed if "auto" exhausts.
+      const res = await fetch(p.url, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ type: "llmModelPolicy" }),
+        signal: AbortSignal.timeout(8_000),
+      });
+      if (!res.ok) continue;
+      const j = (await res.json()) as any;
+      // Direct vessel resolve returns { body: { arms:[{model}] } }; the federated egress
+      // nests it under { content: { value | content | body } }. Probe both envelopes.
+      const c = j?.content;
+      const policy = j?.body ?? (c && typeof c === "object" ? (c.body ?? c.value ?? c) : undefined) ?? j;
+      const arms = (policy as { arms?: unknown })?.arms;
+      if (Array.isArray(arms)) {
+        const models = (arms as unknown[])
+          .map((a) => {
+            const m = (a as { model?: unknown } | null)?.model;
+            return typeof m === "string" ? m : null;
+          })
+          .filter((m): m is string => !!m && m !== exclude);
+        const deduped = Array.from(new Set(models));
+        if (deduped.length > 0) return deduped;
+      }
+    } catch { /* try next producer */ }
+  }
+  // Minimal live-verified literal — only when the policy is unreachable.
+  return ["qwen/qwen3-32b"].filter((m) => m !== exclude);
+}
+
 async function findLocalToolsEndpoint(): Promise<string | null> {
   try {
     // local-tools-vessel advertises shellResult; use that to discover the vessel endpoint
@@ -323,8 +366,13 @@ const TOOL_CATALOG_HELP = `Available tools (call exactly one per turn):
 3. code_find_import { path, module }
    - Locates an existing import for the given module. Returns line + specifiers if found.
 
-4. code_insert_after_line { path, after_line, text }
-   - Inserts \`text\` as a new line after line \`after_line\` (1-indexed, 0 = top).
+4. code_insert_after_line { path, after_line, text }  ← AVOID unless adding a brand-new line
+   - Inserts \`text\` as a new line after line \`after_line\` (1-indexed, 0 = top). It can
+     only ADD a line — it can NEVER replace or delete one.
+   - WARN: \`after_line\` is a RAW line number. Any earlier edit this run (or a number read
+     from a stale search) SHIFTS the file, so the insert silently lands at the WRONG place.
+     Prefer fs_edit (matches by verbatim text, so it is immune to line-number drift). Use
+     code_insert_after_line ONLY to add a genuinely new line at a spot you re-read THIS turn.
 
 4b. code_read_lines { path, start_line, end_line }  <- READ EXACT lines before a range replace
    - Returns the VERBATIM current content of lines [start_line..end_line] (1-indexed),
@@ -340,12 +388,19 @@ const TOOL_CATALOG_HELP = `Available tools (call exactly one per turn):
      from memory or a truncated search, or you WILL destroy code. For a single-line or
      single-token change, fs_edit is simpler.
 
-5b. fs_edit { path, old_string, new_string }  ← PREFERRED for surgical edits
-   - Replaces the FIRST exact occurrence of old_string with new_string. Fails
-     safely ("old_string not found") WITHOUT writing if old_string isn't present,
-     so it can never destroy code you haven't read. Copy old_string VERBATIM from
-     a code_search result (include enough surrounding context to be unique) and
-     make new_string the minimal change. This is the safest way to edit.
+5b. fs_edit { path, old_string, new_string }  ← ★ USE THIS FIRST — replace a UNIQUE anchor
+   - The primary edit tool. Replaces old_string with new_string matched by CONTENT (a
+     verbatim anchor), so it is IMMUNE to the line-number drift that breaks
+     code_insert_after_line / code_replace_lines. Fails safely ("old_string not found")
+     WITHOUT writing if old_string isn't present, so it can never destroy code you haven't
+     read. Copy old_string VERBATIM from a code_search result and make new_string the
+     minimal change. This is the safest way to edit.
+   - WARN — FIRST OCCURRENCE ONLY: fs_edit changes ONLY the first match of old_string. If
+     the text you are changing appears more than once (a common token, a repeated call),
+     old_string MUST carry enough surrounding context to be UNIQUE to the exact site you
+     mean, or the edit hits the wrong one. To change N sites, emit N fs_edit calls, each
+     with its own uniquely-anchored old_string — a single call does NOT update every
+     occurrence.
 
 5c. fs_write { path, content }  ← ONLY for authoring a NET-NEW file
    - Writes the FULL contents of \`path\`, creating parent dirs. Use EXACTLY ONCE
@@ -434,7 +489,11 @@ export async function resolvePatchWithTools(pointer: PatchWithToolsPointer): Pro
   const vesselsRoot = pointer.vessels_root ?? "/vessels";
   const maxIters = pointer.max_iterations ?? MAX_ITERATIONS;
   const model = pointer.model ?? "auto"  /* law 1: "auto" makes the llm-resolver run selectArm (Thompson over the shaped llmModelPolicy, filtered to available models, graded) — model is a learned selection, not a frozen literal */; // capable hub-served drafter model (see feature-compose rationale)
-  const fallbackModels = ["llama-3.3-70b-versatile", "mistral-small-latest", "zai-org/GLM-5.2-TEE", "moonshotai/Kimi-K2.6-TEE", "deepseek-ai/DeepSeek-V3.2-TEE"].filter((m) => m !== model);
+  // fallbackModels (the outer model-failover list) is DERIVED from the live policy arms
+  // below, once llmEndpoints is resolved — see discoverFallbackModels. The frozen literal
+  // it replaced (llama-3.3-70b-versatile / mistral-small-latest / GLM-5.2-TEE / Kimi-K2.6-TEE
+  // / DeepSeek-V3.2-TEE) went ENTIRELY credit-dead and omitted the live qwen/qwen3-32b arm,
+  // so once "auto" exhausted every outer fallback pinned a dead model.
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
 
   const derived = deriveVesselFromPath(pointer.target_file);
@@ -532,6 +591,10 @@ export async function resolvePatchWithTools(pointer: PatchWithToolsPointer): Pro
   const toolsEndpoint = await findLocalToolsEndpoint();
   if (!toolsEndpoint) return structuredError("no local-tools vessel found in discovery");
   console.error(`[patch-with-tools] start vessel=${vessel} file=${subPath} model=${model} llm=${llmEndpoint.url} tools=${toolsEndpoint}`);
+  // Outer model-failover list, derived NOW from the live policy arms (see
+  // discoverFallbackModels). Reuses the resolved llmEndpoints (incl. hub-egress fallback)
+  // so a spoke reads the hub's live arm pool rather than a frozen, credit-dead literal.
+  const fallbackModels = await discoverFallbackModels(llmEndpoints, model);
 
   // The LLM must operate on the LIVE container path so its searches match what cutover
   // will actually stage. Stage into the mitosis tree at the end by copy.

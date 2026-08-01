@@ -1144,9 +1144,27 @@ async function runGitAwareCutover(args: GitCutoverArgs): Promise<ResolverResult>
     // Lease machinery unavailable — fail open (a dead lease file must not
     // wedge all self-development), but proceed unleased.
   }
+
+  let proposalLeaseToken: string | undefined;
+  if (args.pointer.proposal_id) {
+    const pLeaseHolder = `proposal:${args.pointer.proposal_id}`;
+    try {
+      const pAcq = await resolveMaintenanceLeaseWrite({ type: "maintenanceLease_write", op: "acquire", holder: pLeaseHolder, ttl_ms: 600_000 });
+      const pAcqBody = pAcq.body as { acquired?: boolean; token?: string; held_by?: string; expires_at?: string };
+      if (pAcqBody.acquired === false) {
+        if (leaseToken) try { await resolveMaintenanceLeaseWrite({ type: "maintenanceLease_write", op: "release", token: leaseToken }); } catch {}
+        return softRefuse(`proposal cutover lease held by ${pAcqBody.held_by ?? "unknown"} until ${pAcqBody.expires_at ?? "?"} — skipping redundant cutover`, { kind: "proposal_lease_held", proposal_id: args.pointer.proposal_id, held_by: pAcqBody.held_by });
+      }
+      proposalLeaseToken = pAcqBody.token;
+    } catch {}
+  }
+
   try {
     return await runGitAwareCutoverInner(args);
   } finally {
+    if (proposalLeaseToken) {
+      try { await resolveMaintenanceLeaseWrite({ type: "maintenanceLease_write", op: "release", token: proposalLeaseToken }); } catch { }
+    }
     if (leaseToken) {
       try { await resolveMaintenanceLeaseWrite({ type: "maintenanceLease_write", op: "release", token: leaseToken }); } catch { }
     }
@@ -1297,11 +1315,17 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
       status: cleanFetch.exit_code === 0 ? "ok" : "warn",
       detail: cleanFetch.exit_code === 0 ? "clean-slate fetch" : `fetch unavailable (host-sync is durable path): ${cleanFetch.stderr.slice(0, 160)}`,
     });
-    // Hard-reset to the (local) origin/dev tracking ref. This is the load-bearing
-    // step: it discards ANY pre-existing dirty/divergent state in the disposable
-    // push clone so the staged-file copy below produces a diff that is exactly
-    // the staged fix. Reset to the local ref works even when fetch failed.
-    const reset = await runGit(gitCmd, ["reset", "--hard", "origin/dev"], hostRepoRoot);
+    // Hard-reset to the authored base (stagedBaseSha) or origin/dev if unknown.
+    // By resetting to the base the vessel authored against, the committed tree
+    // reflects only the intended delta. The subsequent `git push origin dev`
+    // will detect if origin/dev has advanced and trigger a `git rebase origin/dev`,
+    // performing a proper 3-way merge rather than clobbering concurrent landings.
+    const resetTarget = args.stagedBaseSha ? args.stagedBaseSha : "origin/dev";
+    let reset = await runGit(gitCmd, ["reset", "--hard", resetTarget], hostRepoRoot);
+    if (reset.exit_code !== 0 && args.stagedBaseSha) {
+       // Fallback to origin/dev if the staged base sha is not found locally.
+       reset = await runGit(gitCmd, ["reset", "--hard", "origin/dev"], hostRepoRoot);
+    }
     operations.push({
       op: reset.op,
       status: reset.exit_code === 0 ? "ok" : "fail",

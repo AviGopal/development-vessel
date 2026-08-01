@@ -1,0 +1,93 @@
+[
+  {
+    "id": "gap:gap-001",
+    "shape": "substrateGap",
+    "body": {
+      "gap_id": "gap-001",
+      "category": "conversation_only",
+      "summary": "updated summary"
+    },
+    "source": "substrate-gap-mirror",
+    "status": "retired",
+    "injected_at": "2026-07-31T05:46:46.695Z",
+    "updated_at": "2026-07-31T05:50:05.133Z"
+  },
+  {
+    "id": "gap:gap-missing-concept",
+    "shape": "substrateGap",
+    "body": {
+      "gap_id": "gap-missing-concept",
+      "category": "missing_concept",
+      "summary": "novel shape with no resolver"
+    },
+    "source": "substrate-gap-mirror",
+    "status": "open",
+    "injected_at": "2026-07-31T05:46:46.700Z",
+    "updated_at": "2026-07-31T05:50:05.137Z"
+  },
+  {
+    "id": "gap:mitosis_freshness_violation:development-vessel:mitosis-2026-06-03T00-00-00Z",
+    "shape": "substrateGap",
+    "body": {
+      "gap_id": "mitosis_freshness_violation:development-vessel:mitosis-2026-06-03T00-00-00Z",
+      "category": "other",
+      "summary": "Mitosis mitosis-2026-06-03T00-00-00Z for development-vessel refused cutover: base_sha_mismatch. staged_base_sha=39ea308b48b1, current_live_sha=34ca0763f502. Live source has changed since this mitosis was drafted (or was never recorded); re-derive against current. Cites principle: resilient_against_unintended_changes."
+    },
+    "source": "substrate-gap-mirror",
+    "status": "open",
+    "injected_at": "2026-07-31T05:46:53.283Z",
+    "updated_at": "2026-07-31T05:50:12.875Z"
+  },
+  {
+    "id": "gap:mitosis_freshness_violation:development-vessel:mitosis-host-sync-2026-06-04",
+    "shape": "substrateGap",
+    "body": {
+      "gap_id": "mitosis_freshness_violation:development-vessel:mitosis-host-sync-2026-06-04",
+      "category": "other",
+      "summary": "Mitosis mitosis-host-sync-2026-06-04 for development-vessel refused cutover: base_sha_mismatch. staged_base_sha=39ea308b48b1, current_live_sha=34ca0763f502. Live source has changed since this mitosis was drafted (or was never recorded); re-derive against current. Cites principle: resilient_against_unintended_changes."
+    },
+    "source": "substrate-gap-mirror",
+    "status": "open",
+    "injected_at": "2026-07-31T05:46:53.363Z",
+    "updated_at": "2026-07-31T05:50:12.892Z"
+  },
+  {
+    "id": "gap:mitosis_freshness_violation:development-vessel:m-x",
+    "shape": "substrateGap",
+    "body": {
+      "gap_id": "mitosis_freshness_violation:development-vessel:m-x",
+      "category": "other",
+      "summary": "Mitosis m-x for development-vessel refused cutover: base_sha_mismatch. staged_base_sha=39ea308b48b1, current_live_sha=34ca0763f502. Live source has changed since this mitosis was drafted (or was never recorded); re-derive against current. Cites principle: resilient_against_unintended_changes."
+    },
+    "source": "substrate-gap-mirror",
+    "status": "open",
+    "injected_at": "2026-07-31T05:46:53.382Z",
+    "updated_at": "2026-07-31T05:50:12.918Z"
+  },
+  {
+    "id": "gap:mitosis_freshness_violation:development-vessel:mitosis-mismatch-2026-06-04",
+    "shape": "substrateGap",
+    "body": {
+      "gap_id": "mitosis_freshness_violation:development-vessel:mitosis-mismatch-2026-06-04",
+      "category": "other",
+      "summary": "Mitosis mitosis-mismatch-2026-06-04 for development-vessel refused cutover: base_sha_mismatch. staged_base_sha=deadbeefcafe, current_live_sha=34ca0763f502. Live source has changed since this mitosis was drafted (or was never recorded); re-derive against current. Cites principle: resilient_against_unintended_changes."
+    },
+    "source": "substrate-gap-mirror",
+    "status": "open",
+    "injected_at": "2026-07-31T05:46:53.436Z",
+    "updated_at": "2026-07-31T05:50:12.970Z"
+  },
+  {
+    "id": "gap:gap-pending-landed",
+    "shape": "substrateGap",
+    "body": {
+      "gap_id": "gap-pending-landed",
+      "category": "systematic_failure",
+      "summary": "pending gap whose land is now in the clone"
+    },
+    "source": "substrate-gap-mirror",
+    "status": "retired",
+    "injected_at": "2026-07-31T05:48:35.667Z",
+    "updated_at": "2026-07-31T05:50:13.430Z"
+  }
+]

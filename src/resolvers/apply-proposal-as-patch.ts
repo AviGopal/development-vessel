@@ -504,16 +504,34 @@ async function attemptApplyOnce(pointer: ApplyProposalAsPatchPointer): Promise<R
   if (!dryRun) {
     try {
       const curRaw = await readFile(pendingPath, "utf-8");
-      const cur = JSON.parse(curRaw) as { staged_at?: string; mitosis_version_id?: string };
+      const cur = JSON.parse(curRaw) as { staged_at?: string; mitosis_version_id?: string; mitosis_root?: string };
       const ageMs = cur.staged_at ? Date.now() - Date.parse(cur.staged_at) : Number.POSITIVE_INFINITY;
       const staleMs = Number(process.env["MITOSIS_PENDING_STALE_MS"] ?? 1800000);
       if (Number.isFinite(ageMs) && ageMs < staleMs) {
-        return structuredError("pending mitosis in flight — refusing to clobber", {
-          pending_path: pendingPath,
-          pending_mitosis_version_id: cur.mitosis_version_id ?? null,
-          pending_age_ms: Math.round(ageMs),
-          stale_after_ms: staleMs,
-        });
+        // Fresh pending: verify the staged_dir actually exists. If orphaned (dir gone),
+        // treat as abandoned and allow overwriting.
+        if (cur.mitosis_root) {
+          try {
+            await access(cur.mitosis_root);
+            // Directory exists and pending is fresh -> refuse to clobber
+            return structuredError("pending mitosis in flight — refusing to clobber", {
+              pending_path: pendingPath,
+              pending_mitosis_version_id: cur.mitosis_version_id ?? null,
+              pending_age_ms: Math.round(ageMs),
+              stale_after_ms: staleMs,
+            });
+          } catch {
+            // Directory doesn't exist -> orphaned pending record, safe to proceed
+          }
+        } else {
+          // No mitosis_root in pending JSON -> refuse as a precaution
+          return structuredError("pending mitosis in flight — refusing to clobber", {
+            pending_path: pendingPath,
+            pending_mitosis_version_id: cur.mitosis_version_id ?? null,
+            pending_age_ms: Math.round(ageMs),
+            stale_after_ms: staleMs,
+          });
+        }
       }
     } catch {
       /* no pending file (or unreadable/parse-fail) -> safe to proceed */

@@ -2174,9 +2174,10 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
           const siteWindow = siteCenteredWindow(liveContent, GROUND_CONTENT_BUDGET, siteHints)
             ?? focusedSlice(liveContent, GROUND_CONTENT_BUDGET, siteHints).slice;
           const g = parseJsonObject(await llmCall(
-            llmEndpoint,
+            DISCOVERY_ENDPOINT,
             `A window around the change site in ${op.path} (the file is larger; this is the relevant region):\n\n${siteWindow}\n\nMake this change: ${op.rationale ?? ""}\nIntended new content/behaviour:\n${op.new_string ?? ""}\n\nReturn ONE JSON object {"old_string":"<a verbatim substring copied EXACTLY from the window above that is UNIQUE in the file — include enough enclosing context (e.g. the containing declaration / CREATE-header line) that it cannot match any other occurrence>","new_string":"<replacement for that exact substring, preserving everything not being changed>"}. No prose, no fences. Escape newlines as \\n.`,
             model,
+            METABOB_API_KEY
           ));
           const cand = g?.old_string ? String(g.old_string) : "";
           if (g && cand && occurs(liveContent, cand) === 1) {
@@ -2364,8 +2365,9 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
         llmEndpoint,
         `This NET-NEW TypeScript file ${rel} fails strict typecheck. It is brand-new (no pre-existing code to preserve), so REWRITE IT COMPLETELY and correctly.\n\nCurrent full content:\n\n${curContent}\n\ntsc / lint errors (the file's relative path appears in each):\n${errText.slice(0, 4000)}\n\nReturn ONLY the corrected COMPLETE file content — the entire file, ready to write verbatim, typecheck-clean under strict mode (incl. noUncheckedIndexedAccess: guard every index access with ?? or !). No markdown fences, no prose, no commentary. Start with the first character of the file and end with its last.`,
         model,
+        { maximum_tokens: 2048, stop: ['\n\n---\n\n'], timeout: 200000, remove_start: 3 }
       );
-      let body = out.trim();
+      let body = out?.trim() ?? '';
       // Strip accidental code fences if the model added them despite instructions.
       if (body.startsWith("```")) body = body.replace(/^```[a-zA-Z]*\n?/, "").replace(/\n?```\s*$/, "").trim();
       if (!body || body.length < 8) return false;

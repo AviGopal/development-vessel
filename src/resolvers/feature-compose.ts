@@ -28,6 +28,7 @@ import { resolveSubstrateGap, resolveSubstrateGapWrite } from "./substrate-gap.j
 import { writeAuthoringMarker, clearAuthoringMarker } from "./patch-with-tools.js";
 import { existsSync as mountExistsSync } from "node:fs";
 
+
 const DISCOVERY_ENDPOINT = process.env.DISCOVERY_ENDPOINT ?? "http://127.0.0.1:8100";
 // Federation-transport egress: dev-vessel has no libp2p deps, so a resolve to a
 // peer/overlay row is routed through the local egress (peer multiaddr as ?target=)

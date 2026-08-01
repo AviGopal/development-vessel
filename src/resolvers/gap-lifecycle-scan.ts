@@ -235,7 +235,7 @@ export async function resolveGapLifecycleScan(p: GapLifecycleScanPointer): Promi
   const gapsPath = p.gapsPath ?? "/workspace/gaps/gaps.json";
   const proposalsDir = p.proposalsDir ?? "/workspace/proposals";
   const staleHours = p.staleHours ?? 48;
-  const autoClose = p.autoClose === true;
+  const autoClose = p.autoClose !== false;
   const maxClose = p.maxClose ?? 25;
   const dryRun = p.dry_run === true;
   const emitUrl = p.devVesselImpulsesUrl ?? DEFAULT_URL;

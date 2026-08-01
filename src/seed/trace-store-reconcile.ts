@@ -85,16 +85,13 @@ export const TRACE_STORE_RECONCILE_TEMPLATE: ActivityTemplate = {
       config: {
         type: "http_fetch",
         method: "POST",
-        url: "http://127.0.0.1:8080/v2/impulses/resolve",
-        headers: { "Content-Type": "application/json" },
+        url: "http://127.0.0.1:8080/v2/db/admin/reconcile-trace-store",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": "Bearer {{extract_lease_token_text}}",
+        },
         body: JSON.stringify({
-          pointer: {
-            type: "db_admin",
-            operation: "reconcile_trace_store",
-            dry_run: false,
-            lease_token: "{{extract_lease_token_text}}",
-          },
-          budget: 1000,
+          dry_run: false,
         }),
         failOnNon2xx: true,
       },

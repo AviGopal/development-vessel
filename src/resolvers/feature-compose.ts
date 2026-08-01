@@ -46,7 +46,7 @@ const REPO_ROOT = process.env.MITOSIS_REPO_ROOT ?? RUNTIME_ROOT;
 // full contents + several coordinated edits), so generation runs longer. Raise it so the
 // system can author more-than-surgical changes. Tool (shell/fs) calls finish in seconds,
 // so the larger cap is harmless to them.
-const PER_CALL_TIMEOUT_MS = 200_000;
+const PER_CALL_TIMEOUT_MS = 300_000;
 
 export interface FeatureComposePointer {
   family_key?: string;

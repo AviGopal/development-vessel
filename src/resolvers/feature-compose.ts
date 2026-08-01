@@ -2207,7 +2207,7 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
         if (live) {
           try {
             const fix = parseJsonObject(await llmCall(
-              llmEndpoint,
+              DISCOVERY_ENDPOINT,
               `Current full content of ${op.path}:\n\n${live}\n\nMake this change: ${op.rationale ?? ""}\nIntended replacement behaviour:\n${op.new_string ?? ""}\n\nEmit ONE JSON object {"old_string":"<verbatim UNIQUE substring copied from the content above>","new_string":"<replacement>"}. old_string MUST appear verbatim in the content above. No prose, no fences.`,
               model,
             ));

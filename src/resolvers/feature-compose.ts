@@ -2362,7 +2362,7 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
     try {
       const out = await llmCall(
         llmEndpoint,
-        `This NET-NEW TypeScript file ${rel} fails strict typecheck. It is brand-new (no pre-existing code to preserve), so REWRITE IT COMPLETELY and correctly.\n\nCurrent full content:\n\n${curContent}\n\ntsc / lint errors (the file's relative path appears in each):\n${errText.slice(0, 4000)}\n\nReturn ONLY the corrected COMPLETE file content — the entire file, ready to write verbatim, typecheck-clean under strict mode (incl. noUncheckedIndexedAccess: guard every index access with ?? or !). No markdown fences, no prose, no commentary. Start with the first character of the file and end with its last.`,
+        `Corrected file content`,
         model,
       );
       let body = out.trim();

@@ -1555,10 +1555,24 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
     });
   }
 
+  // LEAVE NO DIRTY INDEX (2026-08-02). Every failure path below returns AFTER the
+  // `git add` above, and used to return with those paths still staged. A staged
+  // path the commit hook rejects — e.g. a drafted path missing its `repos/` prefix,
+  // which the super-repo pre-commit hook refuses as a root-level addition — is
+  // therefore staged FOREVER. That is not cosmetic: `git merge --ff-only` calls
+  // require_clean_work_tree, so a dirty index permanently blocks pull-sync from
+  // converging the glue layer, silently (observed: 37 consecutive failed ticks over
+  // 11 hours, zero signal, repaired only by hand).
+  const unstage = async (why: string) => {
+    const r = await runGit(gitCmd, ["reset", "-q", "HEAD", "--", ...stagedFiles], hostRepoRoot);
+    operations.push({ op: r.op, status: r.exit_code === 0 ? "ok" : "warn", detail: `unstaged after ${why}` });
+  };
+
   // 5b. Empty-diff guard: staged content byte-identical to HEAD after the clone
   // reset means there is nothing to land — honest skip, not an empty commit.
   const cachedDiff = await runGit(gitCmd, ["diff", "--cached", "--name-only"], hostRepoRoot);
   if (cachedDiff.stdout.trim().length === 0) {
+    await unstage("no_diff");
     return softRefuse("no_diff: staged files are byte-identical to HEAD - nothing to cut over", { kind: "no_diff", skip_reason: "no_diff", vessel_name, staged_files: stagedFiles, operations });
   }
   // 6. git commit.
@@ -1584,6 +1598,7 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
         : commit.stderr.slice(0, 400),
   });
   if (commit.exit_code !== 0) {
+    await unstage("commit_failed");
     return structuredError(
       `git commit failed: ${commit.stderr.slice(0, 200)}`,
       { operations },

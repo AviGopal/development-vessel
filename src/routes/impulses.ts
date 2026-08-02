@@ -615,10 +615,18 @@ async function dispatchInner(pointer: AnyPointer): Promise<ResolverResult> {
       return resolveApplyProposalAsPatch(
         p as Parameters<typeof resolveApplyProposalAsPatch>[0],
       );
-    case "patch_with_tools":
+    case "patch_with_tools": {
+      // Untrusted entry point: an externally submitted impulse can otherwise choose
+      // its own run root and step around run-root containment entirely.
+      const vr = (p as { vessels_root?: unknown }).vessels_root;
+      const runtimeRoot = process.env["MITOSIS_RUNTIME_DIR"] ?? "/vessels";
+      if (typeof vr === "string" && !vr.startsWith(runtimeRoot) && !vr.startsWith("/workspace/git/compose")) {
+        return { shape: "error", body: { success: false, error: `vessels_root not permitted: ${vr}` } };
+      }
       return resolvePatchWithTools(
         p as Parameters<typeof resolvePatchWithTools>[0],
       );
+    }
     case "template_audit_report":
       return resolveTemplateAuditReport(
         p as Parameters<typeof resolveTemplateAuditReport>[0],

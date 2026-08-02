@@ -1123,7 +1123,7 @@ export async function resolvePatchWithTools(pointer: PatchWithToolsPointer): Pro
     base_sha: beforeSha,
     staged_at: new Date().toISOString(),
     authored_by: "patch_with_tools",
-    gap_id: pointer.gap_id ?? `pwt-${vessel}-${subPath.split("/").pop() ?? subPath}`,
+    gap_id: pointer.gap_id ?? `pwt-${vessel}-${subPath.split("/").pop() ?? subPath}-${createHash("sha256").update(`${pointer.target_file}\n${String(pointer.proposal_text ?? "").trim().replace(/\s+/g, " ")}`).digest("hex").slice(0, 8)}`,
     proposal: pointer.proposal_id ?? versionId,
     target_file: pointer.target_file,
     staged_files: [subPath],

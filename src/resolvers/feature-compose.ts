@@ -29,7 +29,7 @@ import { writeAuthoringMarker, clearAuthoringMarker } from "./patch-with-tools.j
 import { existsSync as mountExistsSync } from "node:fs";
 
 
-const llmEndpoint = process.env.LLM_ENDPOINT ?? "http://127.0.0.1:8100";
+const LLM_ENDPOINT = process.env.LLM_ENDPOINT ?? "http://127.0.0.1:8100";
 const DISCOVERY_ENDPOINT = process.env.DISCOVERY_ENDPOINT ?? "http://127.0.0.1:8100";
 // Federation-transport egress: dev-vessel has no libp2p deps, so a resolve to a
 // peer/overlay row is routed through the local egress (peer multiaddr as ?target=)
@@ -150,7 +150,7 @@ async function llmCallWithFailover(endpoints: string[], prompt: string, model: s
   let lastError: Error | null = null;
   for (const endpoint of endpoints) {
     try {
-      const result = await llmCall(llmEndpoint, prompt, model);
+      const result = await llmCall(LLM_ENDPOINT, prompt, model);
       return result;
     } catch (e) {
       lastError = e instanceof Error ? e : new Error(String(e));

@@ -1145,8 +1145,25 @@ async function runGitAwareCutover(args: GitCutoverArgs): Promise<ResolverResult>
     // wedge all self-development), but proceed unleased.
   }
 
+  // SELF-DEADLOCK GUARD. maintenanceLease is a SINGLE GLOBAL mutex — see
+  // maintenance-lease.ts: "a single JSON object { holder, token, acquired_at,
+  // expires_at }". It is NOT keyed per holder. So acquiring it a second time
+  // under a different holder name ALWAYS fails, and the failure reports
+  // held_by = our OWN change-window holder ("cutover:<vessel>"). Every cutover
+  // carrying a proposal_id therefore refused itself with proposal_lease_held
+  // immediately after passing its FAVORABLE gate, freshness check and typecheck
+  // — observed live: gate verdict=FAVORABLE at 05:14:05 followed by
+  // "REFUSE: proposal cutover lease held by cutover:goal-host-vessel until
+  // 05:24:05" in the same millisecond. Nothing could land.
+  //
+  // The change-window lease we already hold provides the mutual exclusion the
+  // proposal lease was reaching for; same-proposal redundancy is separately
+  // caught by the freshness check (staged_base_sha vs current_live_sha) below.
+  // So only take the proposal lease when the change-window acquire FAILED OPEN
+  // (lease machinery unavailable ⇒ leaseToken undefined) — there it is the only
+  // exclusion available and cannot contend with itself.
   let proposalLeaseToken: string | undefined;
-  if (args.pointer.proposal_id) {
+  if (args.pointer.proposal_id && !leaseToken) {
     const pLeaseHolder = `proposal:${args.pointer.proposal_id}`;
     try {
       const pAcq = await resolveMaintenanceLeaseWrite({ type: "maintenanceLease_write", op: "acquire", holder: pLeaseHolder, ttl_ms: 600_000 });

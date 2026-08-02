@@ -49,6 +49,7 @@ const REPO_ROOT = process.env.MITOSIS_REPO_ROOT ?? RUNTIME_ROOT;
 const PER_CALL_TIMEOUT_MS = 250_000;
 
 export interface FeatureComposePointer {
+  produceFeatureCompose?: boolean;
   family_key?: string;
   type: "feature_compose";
   /** Free-text feature specification (what to build + concrete file/behaviour detail). */
@@ -88,7 +89,7 @@ interface PlanOp {
 
 type Json = Record<string, unknown>;
 
-async function llmCall(endpoint: string, prompt: string, model: string): Promise<string> {
+async function llmCall(endpoint: string, prompt: string, model: string, produceFeatureCompose: boolean = false): Promise<string> {
   const res = await fetch(endpoint, {
     method: 'POST',
     // Every other call site in this file and the sibling drafter

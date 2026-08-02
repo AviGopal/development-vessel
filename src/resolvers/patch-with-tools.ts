@@ -26,7 +26,7 @@
 
 import { createHash } from "node:crypto";
 import { mkdir, writeFile, readFile, copyFile, unlink } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve, relative, isAbsolute } from "node:path";
 import { METABOB_ENDPOINT, METABOB_API_KEY } from "../config.js";
 import type { ResolverResult } from "./types.js";
 import { resolveVesselMitosisCutover } from "./vessel-mitosis-cutover.js";
@@ -897,6 +897,22 @@ export async function resolvePatchWithTools(pointer: PatchWithToolsPointer): Pro
     if (typeof args.path === "string" && args.path.startsWith("repos/")) {
       args.path = args.path.replace(/^repos\/[^/]+\//, `${vesselsRoot}/${vessel}/`);
     }
+    // RUN-ROOT CONTAINMENT: the drafter authors `args.path` freely, and the
+    // rewrite above only normalises a `repos/<vessel>/` prefix — an absolute path
+    // escapes the run root untouched, and nothing in the tool plane contains it.
+    // REFUSE rather than silently redirect: a rewrite would hide the fact that the
+    // model aimed outside its scope. Restricted to the edit tools; reads, greps and
+    // typechecks stay untouched so the observe half of the walk is unaffected.
+    let escapedRoot = false;
+    if (typeof args.path === "string" && (tool === "fs_edit" || tool === "fs_write" || tool === "code_replace_lines" || tool === "code_insert_after_line" || tool === "code_add_import")) {
+      const runRoot = `${vesselsRoot}/${vessel}`;
+      const absPath = resolve(args.path.startsWith("/") ? args.path : `${runRoot}/${args.path}`);
+      const relPath = relative(runRoot, absPath);
+      if (relPath.startsWith("..") || isAbsolute(relPath)) {
+        escapedRoot = true;
+        console.error(`[patch-with-tools] turn ${turn} ${tool} REFUSED: path ${args.path} resolves to ${absPath}, outside the run root ${runRoot}`);
+      }
+    }
     // PREFIX-IDEMPOTENCE GUARD (2026-07-20): when old_string is a prefix of
     // new_string, a re-applied fs_edit "succeeds" again and stacks duplicates
     // until self-destruct. If the target already contains new_string, the edit
@@ -940,7 +956,9 @@ export async function resolvePatchWithTools(pointer: PatchWithToolsPointer): Pro
     if (isEditToolCall && !truncationBlocked && !alreadyApplied) {
       await snapshotBeforeEdit(typeof args.path === "string" ? args.path : liveSrcPath);
     }
-    const result = truncationBlocked
+    const result = escapedRoot
+      ? { ok: false, body: { success: false, error: `path outside the run root ${vesselsRoot}/${vessel}; edit only files under the vessel you were given` } as unknown }
+      : truncationBlocked
       ? { ok: false, body: { success: false, error: "fs_write REFUSED: it would replace an existing file with a much smaller full-file rewrite, DELETING most of the live source. fs_write is ONLY for authoring a NET-NEW file. To change an existing file use fs_edit { path, old_string, new_string } or code_replace_lines for a SURGICAL edit that preserves everything you are not changing." } as unknown }
       : alreadyApplied
       ? { ok: true, body: { success: true, noop: true, note: "new_string already present — edit already applied; do NOT re-apply it" } as unknown }

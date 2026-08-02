@@ -29,7 +29,7 @@ import { writeAuthoringMarker, clearAuthoringMarker } from "./patch-with-tools.j
 import { existsSync as mountExistsSync } from "node:fs";
 
 
-const LLM_ENDPOINT = process.env.LLM_ENDPOINT ?? "http://127.0.0.1:8100";
+const LLM_ENDPOINT: string = process.env.LLM_ENDPOINT ?? 'http://127.0.0.1:8100';
 const DISCOVERY_ENDPOINT = process.env.DISCOVERY_ENDPOINT ?? "http://127.0.0.1:8100";
 // Federation-transport egress: dev-vessel has no libp2p deps, so a resolve to a
 // peer/overlay row is routed through the local egress (peer multiaddr as ?target=)

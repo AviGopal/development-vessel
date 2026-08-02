@@ -28,8 +28,6 @@ import { resolveSubstrateGap, resolveSubstrateGapWrite } from "./substrate-gap.j
 import { writeAuthoringMarker, clearAuthoringMarker } from "./patch-with-tools.js";
 import { existsSync as mountExistsSync } from "node:fs";
 
-
-const LLM_ENDPOINT: string = process.env.LLM_ENDPOINT ?? 'http://127.0.0.1:8100';
 const DISCOVERY_ENDPOINT = process.env.DISCOVERY_ENDPOINT ?? "http://127.0.0.1:8100";
 // Federation-transport egress: dev-vessel has no libp2p deps, so a resolve to a
 // peer/overlay row is routed through the local egress (peer multiaddr as ?target=)
@@ -48,7 +46,7 @@ const REPO_ROOT = process.env.MITOSIS_REPO_ROOT ?? RUNTIME_ROOT;
 // full contents + several coordinated edits), so generation runs longer. Raise it so the
 // system can author more-than-surgical changes. Tool (shell/fs) calls finish in seconds,
 // so the larger cap is harmless to them.
-const PER_CALL_TIMEOUT_MS = 900_000;
+const PER_CALL_TIMEOUT_MS = 200_000;
 
 export interface FeatureComposePointer {
   family_key?: string;
@@ -93,10 +91,10 @@ type Json = Record<string, unknown>;
 async function llmCall(endpoint: string, prompt: string, model: string): Promise<string> {
   const res = await fetch(endpoint, {
     method: 'POST',
-    // Every other call site in this file (:164, :201, :218, :1101) and the sibling
-    // drafter (patch-with-tools.ts:214) authenticate; this one did not, so every draft
-    // attempt died on 401 INVALID_API_KEY and feature_compose returned verdict=(none)
-    // — the drafter could not draft at all, and no self-authored commit could land.
+    // Every other call site in this file and the sibling drafter
+    // (patch-with-tools.ts:214) authenticate; this one did not, so every draft
+    // attempt died on 401 INVALID_API_KEY and feature_compose returned
+    // verdict=(none) — the drafter could not draft at all.
     headers: {
       'Content-Type': 'application/json',
       Accept: 'application/json',
@@ -158,7 +156,7 @@ async function llmCallWithFailover(endpoints: string[], prompt: string, model: s
   let lastError: Error | null = null;
   for (const endpoint of endpoints) {
     try {
-      const result = await llmCall(LLM_ENDPOINT, prompt, model);
+      const result = await llmCall(endpoint, prompt, model);
       return result;
     } catch (e) {
       lastError = e instanceof Error ? e : new Error(String(e));
@@ -2183,8 +2181,8 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
           const siteWindow = siteCenteredWindow(liveContent, GROUND_CONTENT_BUDGET, siteHints)
             ?? focusedSlice(liveContent, GROUND_CONTENT_BUDGET, siteHints).slice;
           const g = parseJsonObject(await llmCall(
-            LLM_ENDPOINT,
-            `A window around the change site in ${op.path} (the file is larger; this is the relevant region):\n\n${siteWindow}\n\nMake this change: ${op.rationale ?? ""}\nIntended new content/behaviour:\n${op.new_string ?? ""}\n\nReturn ONE JSON object {"old_string":"<a verbatim substring copied EXACTLY from the window above that is UNIQUE in the file — include enough enclosing context (e.g. the containing declaration / CREATE-header line) that it cannot match any other occurrence>","new_string":"<the actual replacement for that exact substring, preserving everything not being changed>"}. No prose, no fences. Escape newlines as \\n.`,
+            llmEndpoint,
+            `A window around the change site in ${op.path} (the file is larger; this is the relevant region):\n\n${siteWindow}\n\nMake this change: ${op.rationale ?? ""}\nIntended new content/behaviour:\n${op.new_string ?? ""}\n\nReturn ONE JSON object {"old_string":"<a verbatim substring copied EXACTLY from the window above that is UNIQUE in the file — include enough enclosing context (e.g. the containing declaration / CREATE-header line) that it cannot match any other occurrence>","new_string":"<replacement for that exact substring, preserving everything not being changed>"}. No prose, no fences. Escape newlines as \\n.`,
             model,
           ));
           const cand = g?.old_string ? String(g.old_string) : "";
@@ -2216,7 +2214,7 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
         if (live) {
           try {
             const fix = parseJsonObject(await llmCall(
-              DISCOVERY_ENDPOINT,
+              llmEndpoint,
               `Current full content of ${op.path}:\n\n${live}\n\nMake this change: ${op.rationale ?? ""}\nIntended replacement behaviour:\n${op.new_string ?? ""}\n\nEmit ONE JSON object {"old_string":"<verbatim UNIQUE substring copied from the content above>","new_string":"<replacement>"}. old_string MUST appear verbatim in the content above. No prose, no fences.`,
               model,
             ));
@@ -2370,8 +2368,8 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
     if (!cur.ok || typeof curContent !== "string" || !curContent) return false;
     try {
       const out = await llmCall(
-        LLM_ENDPOINT,
-        `Corrected file content`,
+        llmEndpoint,
+        `This NET-NEW TypeScript file ${rel} fails strict typecheck. It is brand-new (no pre-existing code to preserve), so REWRITE IT COMPLETELY and correctly.\n\nCurrent full content:\n\n${curContent}\n\ntsc / lint errors (the file's relative path appears in each):\n${errText.slice(0, 4000)}\n\nReturn ONLY the corrected COMPLETE file content — the entire file, ready to write verbatim, typecheck-clean under strict mode (incl. noUncheckedIndexedAccess: guard every index access with ?? or !). No markdown fences, no prose, no commentary. Start with the first character of the file and end with its last.`,
         model,
       );
       let body = out.trim();
@@ -2460,7 +2458,7 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
           }
         } catch { /* grounding is best-effort */ }
         const fix = parseJsonObject(await llmCall(
-          LLM_ENDPOINT,
+          llmEndpoint,
           `A change to vessel ${fv.vessel} fails \`bun run lint\` (strict tsc + shape-dispatch agreement: every advertised shape in src/config.ts MUST have a matching case in src/routes/impulses.ts and vice-versa). Lint output:\n\n${errText.slice(0, 4000)}${errorSiteWindow}\n\nPick the SINGLE most-blocking error and emit ONE JSON object {"file":"repos/${fv.vessel.replace(/^repos\//, "")}/<subpath>","old_string":"<a SHORT verbatim UNIQUE substring of that file's CURRENT content>","new_string":"<corrected replacement>"} that fixes it, changing as little else as possible. For a missing dispatch case, copy the shape into the switch next to a sibling case. old_string MUST appear verbatim. No prose, no fences. Escape newlines as \\n.`,
           model,
         ));

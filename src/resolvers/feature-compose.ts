@@ -93,7 +93,15 @@ type Json = Record<string, unknown>;
 async function llmCall(endpoint: string, prompt: string, model: string): Promise<string> {
   const res = await fetch(endpoint, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+    // Every other call site in this file (:164, :201, :218, :1101) and the sibling
+    // drafter (patch-with-tools.ts:214) authenticate; this one did not, so every draft
+    // attempt died on 401 INVALID_API_KEY and feature_compose returned verdict=(none)
+    // — the drafter could not draft at all, and no self-authored commit could land.
+    headers: {
+      'Content-Type': 'application/json',
+      Accept: 'application/json',
+      Authorization: `ApiKey ${METABOB_API_KEY}`,
+    },
     body: JSON.stringify({
       type: 'llm_completion',
       prompt,

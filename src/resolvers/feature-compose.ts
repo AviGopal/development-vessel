@@ -2120,6 +2120,24 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
       // net-new vessel files (in a not-yet-existing dir) land.
       const dir = abs.slice(0, abs.lastIndexOf("/"));
       await callTool(toolsEndpoint, "shell", { command: `mkdir -p ${JSON.stringify(dir)}`, cwd: REPO_ROOT });
+      // CREATE MUST NOT DESTROY. The plan contract is explicit — "Only create_file
+      // may introduce a NEW path" — but this branch issued an unconditional
+      // fs_write, and unlike the edit branch below it never snapshots
+      // preEditContent, so a create_file aimed at an EXISTING path overwrote the
+      // whole file with no rollback possible. Ops are applied against RUNTIME_ROOT
+      // (/vessels), so that truncates a RUNNING vessel: observed when a create_file
+      // carrying the placeholder body "Modified content to close substrate gap"
+      // reduced the live 2981-line feature-compose.ts to 39 bytes.
+      // An identical re-create is still allowed (idempotent retry within a run);
+      // only a DIFFERING overwrite of existing content is refused, and loudly.
+      const existing = await callTool(toolsEndpoint, "fs_read", { path: abs });
+      const existingContent = (existing.body as { content?: unknown })?.content;
+      if (existing.ok && typeof existingContent === "string" && existingContent.length > 0
+          && existingContent !== (op.content ?? "")) {
+        const detail = `create_file refused: ${op.path} already exists (${existingContent.length} bytes) and the op would overwrite it with ${(op.content ?? "").length} bytes. create_file may only introduce a NEW path; use an edit op to change an existing file.`;
+        console.error(`[feature-compose] ${detail}`);
+        return { entry: { path: op.path, kind: op.kind, ok: false, detail: detail.slice(0, 200) }, createdAbs: undefined, failed: true };
+      }
       const r = await callTool(toolsEndpoint, "fs_write", { path: abs, content: op.content ?? "" });
       const entry = { path: op.path, kind: op.kind, ok: r.ok, detail: r.ok ? undefined : JSON.stringify(r.body).slice(0, 200), span: r.ok ? { start_line: 1, end_line: (op.content ?? "").split("\n").length } : undefined };
       // keep applying remaining ops; verify (tsc+shape-dispatch) is the real gate

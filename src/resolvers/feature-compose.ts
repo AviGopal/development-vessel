@@ -1296,7 +1296,7 @@ function synthesizeVerbatimEditOps(specText: string): PlanOp[] | null {
 // own architectural principles (the docs ingested into concept-db, + any web evidence)
 // and inject the top matches so the plan RESPECTS them — the active-consumption wire that
 // makes the docs/web a LEARNED source, not just a stored one. Read-only; advisory.
-const CONCEPT_DB_ENDPOINT = process.env["CONCEPT_DB_ENDPOINT"] ?? "http://127.0.0.1:8260";
+const CONCEPT_DB_ENDPOINT = process.env["CONCEPT_DB_ENDPOINT"] ?? "http://127.0.0.1:8260"; // Renamed from DEV_VESSEL_ENDPOINT
 async function consultPrinciples(spec: string): Promise<string> {
   try {
     const params = new URLSearchParams({ query: spec.slice(0, 400), shape: "architecturePrinciple", limit: "4" });

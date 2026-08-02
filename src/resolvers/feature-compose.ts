@@ -1,4 +1,4 @@
-repos/development-vessel/src/resolvers/feature-compose.ts/**
+/**
  * feature_compose (2026-06-21) — the seed FEATURE composer.
  *
  * The substrate has two SURGICAL patchers (apply_proposal_as_patch,

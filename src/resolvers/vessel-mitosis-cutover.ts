@@ -919,6 +919,36 @@ export async function resolveVesselMitosisCutover(
           detail: `line 1 begins with an unrendered placeholder: ${stagedFirstLine.slice(0, 120)}`,
         });
       }
+      //  c) An `llmCall(` handed an endpoint constant that provably cannot answer
+      //     a completion. A degenerate self-modification loop rewrites this one
+      //     argument over and over, cycling between DISCOVERY_ENDPOINT (:8100,
+      //     the registry), CONCEPT_DB_ENDPOINT (:8260, the prose vessel) and
+      //     DEV_VESSEL_ENDPOINT (:8090, this vessel's OWN resolve route). Each
+      //     landing silently disables every compose anchor-repair and
+      //     lint-repair path, so the drafter loses the machinery that would fix
+      //     it. Neither existing gate can see this class: `bun run typecheck`
+      //     passes because any of them is a valid string, and the semantic gate
+      //     reasons about symbols and behaviour delta, not about what a resolved
+      //     endpoint SERVES. Two of the affected sites even carry a comment
+      //     forbidding the substitution, which the drafter left intact while
+      //     changing the line beneath it — in-file comments are not read at
+      //     decision time, so only a check can hold this invariant.
+      //     Corpus over all 862 .ts files under /vessels/*/src: 207 llmCall
+      //     sites pass `endpoint`/`llmEndpoint`/`LLM_ENDPOINT`/`producer`/
+      //     `activeEndpoint`; every one of the 266 hits on these three constants
+      //     is a corrupted draft (263 in stale mitosis staging roots, 3 the live
+      //     regression this gate is being added to stop). ZERO false positives.
+      //     The comment-skip in the pattern is required: one recurring site
+      //     places a comment between `llmCall(` and its argument.
+      for (const m of stagedContent.matchAll(
+        /llmCall\(\s*(?:\/\/[^\n]*\n\s*)*(CONCEPT_DB_ENDPOINT|DEV_VESSEL_ENDPOINT|DISCOVERY_ENDPOINT)\b/g,
+      )) {
+        corruptions.push({
+          file: rel,
+          kind: "llmcall_non_llm_endpoint",
+          detail: `llmCall() is passed ${m[1]}, which does not serve completions — this disables the compose recovery path`,
+        });
+      }
       try {
         const livePath = join(baseRoot, rel);
         if (await pathExists(livePath)) {

@@ -2201,7 +2201,7 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
           const siteWindow = siteCenteredWindow(liveContent, GROUND_CONTENT_BUDGET, siteHints)
             ?? focusedSlice(liveContent, GROUND_CONTENT_BUDGET, siteHints).slice;
           const g = parseJsonObject(await llmCall(
-            DEV_VESSEL_ENDPOINT,
+            llmEndpoint,
             `A window around the change site in ${op.path} (the file is larger; this is the relevant region):\n\n${siteWindow}\n\nMake this change: ${op.rationale ?? ""}\nIntended new content/behaviour:\n${op.new_string ?? ""}\n\nReturn ONE JSON object {"old_string":"<a verbatim substring copied EXACTLY from the window above that is UNIQUE in the file — include enough enclosing context (e.g. the containing declaration / CREATE-header line) that it cannot match any other occurrence>","new_string":"<the exact replacement>"}. No prose, no fences. Escape newlines as \\n.`,
             model,
           ));
@@ -2238,7 +2238,7 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
               // knowledge vessel and cannot answer a completion; the enclosing try
               // swallowed the failure, so every RECOVERABLE anchor miss became a terminal
               // `old_string not found`. Matches the sibling windowed-repair call above.
-              DEV_VESSEL_ENDPOINT,
+              llmEndpoint,
               `Current full content of ${op.path}:\n\n${live}\n\nMake this change: ${op.rationale ?? ""}\nIntended replacement behaviour:\n${op.new_string ?? ""}\n\nEmit ONE JSON object {"old_string":"<verbatim UNIQUE substring copied from the content above>","new_string":"<replacement>"}. old_string MUST appear verbatim in the content above. No prose, no fences.`,
               model,
             ));
@@ -2392,7 +2392,7 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
     if (!cur.ok || typeof curContent !== "string" || !curContent) return false;
     try {
       const out = await llmCall(
-        CONCEPT_DB_ENDPOINT,
+        llmEndpoint,
         `This NET-NEW TypeScript file ${rel} fails strict typecheck. It is brand-new (no pre-existing code to preserve), so REWRITE IT COMPLETELY and correctly.\n\nCurrent full content:\n\n${curContent}\n\ntsc / lint errors (the file's relative path appears in each):\n${errText.slice(0, 4000)}\n\nReturn ONLY the corrected COMPLETE file content — the entire file, ready to write verbatim, typecheck-clean under strict mode (incl. noUncheckedIndexedAccess: guard every index access with ?? or !). No markdown fences, no prose, no commentary. Start with the first character of the file and end with its last.`,
         model,
       );

@@ -513,6 +513,32 @@ export async function resolvePatchWithTools(pointer: PatchWithToolsPointer): Pro
   // uses it as the canonical "before" state.
   const baseContent = beforeSrc ?? "";
   const beforeSha = createHash("sha256").update(baseContent).digest("hex").slice(0, 12);
+  // POISONED-BASELINE DETECTOR (2026-08-02). baseContent is snapshotted from the LIVE
+  // file, and resetTarget()/touchedSnapshots restore to it — so if live source is
+  // already corrupt when a run starts, every run adopts the corruption as its
+  // "correct" state and faithfully restores it. The rollback machinery is correct and
+  // useless. Observed: live feature-compose.ts held `llmCall(\n  llmEndpoint,endpoint,
+  // prompt, model)` (an identifier not in scope) while the push clone and origin/dev
+  // were clean; nothing noticed, because the vessel kept serving its in-memory module.
+  //
+  // Detect only — deliberately NOT auto-restoring from the clone. A mitosis cutover
+  // copies staged files into /vessels BEFORE the clone pulls, so live is legitimately
+  // ahead of the clone inside that window, and "restore from clone" there would revert
+  // a just-landed change. That is the same shape as the freshness gate comparing the
+  // mirror instead of origin. pull-sync owns the repair (it heals live-vs-clone drift
+  // only when no authoring marker is in flight); this makes the condition visible at
+  // the moment it would poison a run.
+  if (!isNewFile) {
+    const clonePath = join(process.env["MITOSIS_PUSH_CLONE_DIR"] ?? "/workspace/git/vessels", vessel, subPath);
+    const cloneSrc = await readFile(clonePath, "utf-8").catch(() => null);
+    if (cloneSrc !== null && cloneSrc !== baseContent) {
+      console.error(
+        `[patch-with-tools] POISONED BASELINE: ${liveSrcPath} (${baseContent.length}B) differs from its clone ` +
+        `${clonePath} (${cloneSrc.length}B) BEFORE any edit — rollback would restore the live state, not the git state. ` +
+        `Either a prior run left un-reverted edits, or a cutover has landed and the clone has not pulled yet.`,
+      );
+    }
+  }
   const authoringMarkerPath = await writeAuthoringMarker(workspaceRoot, vessel, pointer.target_file);
 
   // resetTarget — restore the live path to its pre-attempt state. For a net-new

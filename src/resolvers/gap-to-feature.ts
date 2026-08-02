@@ -1542,7 +1542,7 @@ async function bumpFailedAttempts(gap: Record<string, unknown>, opts: { surprise
           id: `${parentId}-narrowed`,
           category: gap.category,
           source: gap.source,
-          summary: `[narrowed from ${parentId}] ${parentSummary}`,
+          summary: `[narrowed from ${parentId}] ${parentSummary.replace(/^\[narrowed from [\w:.!-]+\]\s*/g, "")}`,
           detected_at: gap.detected_at,
           classification_metadata: childMeta,
           status: "open",
@@ -1554,7 +1554,7 @@ async function bumpFailedAttempts(gap: Record<string, unknown>, opts: { surprise
           method: "POST",
           headers: { "Content-Type": "application/json", ...(METABOB_API_KEY ? { Authorization: "ApiKey " + METABOB_API_KEY } : {}) },
           body: JSON.stringify({
-            goal: "investigate and decompose gap " + parentId + ": " + parentSummary.slice(0, 400),
+            goal: "investigate and decompose gap " + parentId + ": " + parentSummary.replace(/^(?:Close substrate gap [\w:.!-]+:\s*)+/, "").replace(/^(?:investigate and decompose (?:gap|goal)[:\s]+(?:[\w:.!-]+[:\s]+)?)+/i, "").slice(0, 400),
             tags: ["escalated_from:" + parentId],
           }),
         }).catch(() => { });

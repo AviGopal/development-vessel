@@ -2458,7 +2458,7 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
           }
         } catch { /* grounding is best-effort */ }
         const fix = parseJsonObject(await llmCall(
-          llmEndpoint,
+          llmEndpoint, // edited
           `A change to vessel ${fv.vessel} fails \`bun run lint\` (strict tsc + shape-dispatch agreement: every advertised shape in src/config.ts MUST have a matching case in src/routes/impulses.ts and vice-versa). Lint output:\n\n${errText.slice(0, 4000)}${errorSiteWindow}\n\nPick the SINGLE most-blocking error and emit ONE JSON object {"file":"repos/${fv.vessel.replace(/^repos\//, "")}/<subpath>","old_string":"<a SHORT verbatim UNIQUE substring of that file's CURRENT content>","new_string":"<corrected replacement>"} that fixes it, changing as little else as possible. For a missing dispatch case, copy the shape into the switch next to a sibling case. old_string MUST appear verbatim. No prose, no fences. Escape newlines as \\n.`,
           model,
         ));

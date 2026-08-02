@@ -156,7 +156,7 @@ async function llmCallWithFailover(endpoints: string[], prompt: string, model: s
   let lastError: Error | null = null;
   for (const endpoint of endpoints) {
     try {
-      const result = await llmCall(endpoint, prompt, model);
+      const result = await llmCall(CONCEPT_DB_ENDPOINT, prompt, model);
       return result;
     } catch (e) {
       lastError = e instanceof Error ? e : new Error(String(e));

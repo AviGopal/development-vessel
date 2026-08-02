@@ -2533,6 +2533,9 @@ export async function resolveGapToFeature(pointer: GapToFeaturePointer): Promise
             target_file: gap.file_path,
             gap_id: gap.id,
             proposal_id: gap.id,
+            // Explicit, not the resolver's silent `?? "/vessels"` default: the value
+            // becomes visible in the trace, which is the point of threading it.
+            vessels_root: process.env["MITOSIS_RUNTIME_DIR"] ?? "/vessels",
           } as never);
           const rb = (((result as unknown as Record<string, unknown>)?.body ?? result ?? {}) as Record<string, unknown>);
           const _land = (rb.landing ?? {}) as Record<string, unknown>;

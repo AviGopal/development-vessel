@@ -2201,7 +2201,7 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
           const siteWindow = siteCenteredWindow(liveContent, GROUND_CONTENT_BUDGET, siteHints)
             ?? focusedSlice(liveContent, GROUND_CONTENT_BUDGET, siteHints).slice;
           const g = parseJsonObject(await llmCall(
-            llmEndpoint,
+            DEV_VESSEL_ENDPOINT,
             `A window around the change site in ${op.path} (the file is larger; this is the relevant region):\n\n${siteWindow}\n\nMake this change: ${op.rationale ?? ""}\nIntended new content/behaviour:\n${op.new_string ?? ""}\n\nReturn ONE JSON object {"old_string":"<a verbatim substring copied EXACTLY from the window above that is UNIQUE in the file — include enough enclosing context (e.g. the containing declaration / CREATE-header line) that it cannot match any other occurrence>","new_string":"<the exact replacement>"}. No prose, no fences. Escape newlines as \\n.`,
             model,
           ));

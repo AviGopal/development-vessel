@@ -1743,6 +1743,7 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
   // cutover's global lease + freshness gates, on evidence instead of up front.
   const composeId = `fc-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
   const ws = await acquireComposeWorkspace(pointer.verify_vessels ?? [], composeId);
+  console.error("[compose]", { composeId, isolated: pointer.verify_vessels?.filter(v => ws.isolated(v)), unisolated: pointer.verify_vessels?.filter(v => !ws.isolated(v)), verify_vessels: pointer.verify_vessels?.length });
   const unisolated = guards.filter((v) => v === "__global__" || !ws.isolated(v));
   const busy = unisolated.find((v) => composeInFlight.has(v));
   if (busy) {

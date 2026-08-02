@@ -2238,7 +2238,7 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
               // knowledge vessel and cannot answer a completion; the enclosing try
               // swallowed the failure, so every RECOVERABLE anchor miss became a terminal
               // `old_string not found`. Matches the sibling windowed-repair call above.
-              llmEndpoint,
+              DEV_VESSEL_ENDPOINT,
               `Current full content of ${op.path}:\n\n${live}\n\nMake this change: ${op.rationale ?? ""}\nIntended replacement behaviour:\n${op.new_string ?? ""}\n\nEmit ONE JSON object {"old_string":"<verbatim UNIQUE substring copied from the content above>","new_string":"<replacement>"}. old_string MUST appear verbatim in the content above. No prose, no fences.`,
               model,
             ));

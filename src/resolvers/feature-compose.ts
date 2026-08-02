@@ -89,7 +89,7 @@ interface PlanOp {
 
 type Json = Record<string, unknown>;
 
-async function llmCall(endpoint: string, prompt: string, model: string, produceFeatureCompose: boolean = false): Promise<string> {
+async function llmCall(endpoint: string, prompt: string, model: string, produceFeatureCompose: boolean = true): Promise<string> {
   const res = await fetch(endpoint, {
     method: 'POST',
     // Every other call site in this file and the sibling drafter

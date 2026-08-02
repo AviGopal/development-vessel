@@ -870,6 +870,129 @@ export async function resolveVesselMitosisCutover(
     );
   }
 
+  // ---- Drafter-corruption gate (2026-08-02) ----
+  // The drafter edits its own source, so a malformed draft can destroy the very
+  // mechanism that would repair it. Observed live: two cutovers minutes apart
+  // against the same gap wrote `{{source_code.content}}{{source_code.content}}/**`
+  // into byte 0 of feature-compose.ts. development-vessel then failed to parse
+  // its own drafter and crash-looped on both the hub and the spoke, and because
+  // the drafter IS the edit mechanism the substrate could not author its own
+  // fix — an operator had to hand-revert it. This gate exists so that class of
+  // draft cannot reach /vessels again.
+  //
+  // Two signatures, both cheap and both fail-closed:
+  //
+  //  a) LINE 1 begins with an unrendered {{...}} placeholder. The rule is
+  //     restricted to the first line, not "any line", because this vessel
+  //     legitimately BUILDS prompt templates: 21 lines across src/seed/*.ts sit
+  //     alone inside backtick literals as ordinary template data, and an
+  //     any-line rule flags every one of them. A scan of all 1114 .ts files in
+  //     the fleet finds ZERO whose first line matches — so line 1 separates the
+  //     corruption from the data with no false positives, while still catching
+  //     the signature that actually occurred.
+  //
+  //  b) A staged file that no longer opens the way the live file does. Real
+  //     edits essentially never prepend above a file's header, so a staged
+  //     first line that is non-empty and not a comment/import/shebang, where
+  //     the live first line was one, is a byte-0 injection.
+  //
+  // Emitted as an audited NO (substrateGap + softRefuse), matching the
+  // freshness gate's idiom directly above rather than introducing a new
+  // refusal mechanism.
+  if (Array.isArray(pointer.staged_files) && pointer.staged_files.length > 0) {
+    const HEADER_OPENING = /^\s*(\/\*|\/\/|import\b|export\b|#!|["'`]use )/;
+    const corruptions: Array<{ file: string; kind: string; detail: string }> = [];
+    for (const rel of pointer.staged_files) {
+      let stagedContent: string;
+      try {
+        stagedContent = await readFile(join(mitosisRoot, rel), "utf8");
+      } catch {
+        // An unreadable staged file is the freshness gate's concern, not this one.
+        continue;
+      }
+      const stagedLines = stagedContent.split("\n");
+      const stagedFirstLine = stagedLines[0] ?? "";
+      if (/^\s*\{\{\s*[\w$.[\]-]+\s*\}\}/.test(stagedFirstLine)) {
+        corruptions.push({
+          file: rel,
+          kind: "unrendered_template_placeholder",
+          detail: `line 1 begins with an unrendered placeholder: ${stagedFirstLine.slice(0, 120)}`,
+        });
+      }
+      try {
+        const livePath = join(baseRoot, rel);
+        if (await pathExists(livePath)) {
+          const liveFirst = (await readFile(livePath, "utf8")).split("\n", 1)[0] ?? "";
+          const stagedFirst = stagedFirstLine;
+          if (
+            HEADER_OPENING.test(liveFirst) &&
+            stagedFirst.trim() !== "" &&
+            !HEADER_OPENING.test(stagedFirst)
+          ) {
+            corruptions.push({
+              file: rel,
+              kind: "byte_zero_injection",
+              detail:
+                `staged first line does not open the file the way the live one does — ` +
+                `live: ${liveFirst.slice(0, 80)} | staged: ${stagedFirst.slice(0, 80)}`,
+            });
+          }
+        }
+      } catch {
+        // Best-effort: inability to read the live file must not mask signature (a).
+      }
+    }
+    if (corruptions.length > 0) {
+      const gapId = `mitosis_drafter_corruption:${vessel_name}:${mitosis_version_id}`;
+      const summary =
+        `Mitosis ${mitosis_version_id} for ${vessel_name} refused cutover: the staged draft carries ` +
+        `drafter-corruption signatures (${corruptions.map((c) => `${c.file}:${c.kind}`).join(", ")}). ` +
+        `Landing it risks writing unparseable source into /vessels; when the target is the drafter ` +
+        `itself the failure is self-sealing and cannot be repaired by the substrate.`;
+      console.error(`[mitosis-cutover] DRAFTER CORRUPTION REFUSED ${JSON.stringify(corruptions).slice(0, 500)}`);
+      try {
+        await resolveSubstrateGapWrite({
+          type: "substrateGap_write",
+          gap: {
+            id: gapId,
+            category: "other",
+            source: "substrate_detected",
+            summary,
+            detected_at: new Date().toISOString(),
+            status: "open",
+            classification_metadata: {
+              kind: "mitosis_drafter_corruption",
+              vessel_name,
+              mitosis_version_id,
+              base_version_id,
+              corruptions,
+              cite_principle: "resilient_against_unintended_changes",
+              suggested_remediation:
+                "Re-derive the draft against current source. If the same signature recurs for the " +
+                "same target file, the drafter's prompt-rendering path is emitting its template " +
+                "verbatim and that, not the individual draft, is the defect to close.",
+            },
+          },
+        });
+      } catch (err) {
+        // Best-effort: a gap-write failure must not mask the refusal itself.
+        console.warn(
+          `[vessel_mitosis_cutover] substrateGap_write failed during corruption refusal: ${(err as Error).message}`,
+        );
+      }
+      await clearPendingOnReject(pointer, workspaceRoot);
+      return softRefuse("mitosis_drafter_corruption", {
+        kind: "mitosis_drafter_corruption",
+        detail: `refusing cutover: ${corruptions.length} corruption signature(s) in staged draft`,
+        vessel_name,
+        mitosis_version_id,
+        corruptions,
+        cite_principle: "resilient_against_unintended_changes",
+        gap_id: gapId,
+      });
+    }
+  }
+
   // ---- Git-aware cutover path (2026-06-04) ----
   // When staged_files is supplied, we apply only those files (scope-creep
   // gate) into a host-side git repo, commit, push, then mirror into the

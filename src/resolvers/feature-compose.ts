@@ -2362,7 +2362,7 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
     if (!cur.ok || typeof curContent !== "string" || !curContent) return false;
     try {
       const out = await llmCall(
-        llmEndpoint,
+        LLM_ENDPOINT,
         `Corrected file content`,
         model,
       );

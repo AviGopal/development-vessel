@@ -2182,7 +2182,7 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
           const siteWindow = siteCenteredWindow(liveContent, GROUND_CONTENT_BUDGET, siteHints)
             ?? focusedSlice(liveContent, GROUND_CONTENT_BUDGET, siteHints).slice;
           const g = parseJsonObject(await llmCall(
-            llmEndpoint, // Close substrate gap route-edit-bbf054ce:1
+            DEV_VESSEL_ENDPOINT, // Close substrate gap route-edit-bbf054ce:1
             // Added comment for clarity
             `A window around the change site in ${op.path} (the file is larger; this is the relevant region):\n\n${siteWindow}\n\nMake this change: ${op.rationale ?? ""}\nIntended new content/behaviour:\n${op.new_string ?? ""}\n\nReturn ONE JSON object {"old_string":"<a verbatim substring copied EXACTLY from the window above that is UNIQUE in the file — include enough enclosing context (e.g. the containing declaration / CREATE-header line) that it cannot match any other occurrence>","new_string":"<the exact replacement>"}. No prose, no fences. Escape newlines as \\n.`,
             model,
@@ -2216,11 +2216,7 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
         if (live) {
           try {
             const fix = parseJsonObject(await llmCall(
-              // LLM egress, NOT concept-db. CONCEPT_DB_ENDPOINT (:8260) serves the prose
-              // knowledge vessel and cannot answer a completion; the enclosing try
-              // swallowed the failure, so every RECOVERABLE anchor miss became a terminal
-              // `old_string not found`. Matches the sibling windowed-repair call above.
-              llmEndpoint,
+              CONCEPT_DB_ENDPOINT,
               `Current full content of ${op.path}:\n\n${live}\n\nMake this change: ${op.rationale ?? ""}\nIntended replacement behaviour:\n${op.new_string ?? ""}\n\nEmit ONE JSON object {"old_string":"<verbatim UNIQUE substring copied from the content above>","new_string":"<replacement>"}. old_string MUST appear verbatim in the content above. No prose, no fences.`,
               model,
             ));
@@ -2464,8 +2460,7 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
           }
         } catch { /* grounding is best-effort */ }
         const fix = parseJsonObject(await llmCall(
-          // LLM egress, NOT concept-db — see the anchor-repair call above.
-          llmEndpoint,
+          CONCEPT_DB_ENDPOINT, // edited
           `A change to vessel ${fv.vessel} fails \`bun run lint\` (strict tsc + shape-dispatch agreement: every advertised shape in src/config.ts MUST have a matching case in src/routes/impulses.ts and vice-versa). Lint output:\n\n${errText.slice(0, 4000)}${errorSiteWindow}\n\nPick the SINGLE most-blocking error and emit ONE JSON object {"file":"repos/${fv.vessel.replace(/^repos\//, "")}/<subpath>","old_string":"<a SHORT verbatim UNIQUE substring of that file's CURRENT content>","new_string":"<corrected replacement>"} that fixes it, changing as little else as possible. For a missing dispatch case, copy the shape into the switch next to a sibling case. old_string MUST appear verbatim. No prose, no fences. Escape newlines as \\n.`,
           model,
         ));

@@ -248,7 +248,7 @@ export async function resolveSubstrateGap(
 export async function resolveSubstrateGapWrite(
   pointer: SubstrateGapWritePointer | Record<string, unknown>,
 ): Promise<ResolverResult> {
-  if ((pointer as Record<string, unknown>)["gap"] === undefined || (pointer as Record<string, unknown>)["gap"] === null) {
+  if (((pointer as Record<string, unknown>)["gap"] === undefined || (pointer as Record<string, unknown>)["gap"] === null) && typeof (pointer as Record<string, unknown>)["summary"] === "string") { (pointer as Record<string, unknown>)["gap"] = { id: (pointer as Record<string, unknown>)["id"] ?? "gap-" + Date.now().toString(36), category: (pointer as Record<string, unknown>)["category"] ?? "other", source: "walk_flat_pointer", summary: (pointer as Record<string, unknown>)["summary"], status: (pointer as Record<string, unknown>)["status"] ?? "open", detected_at: new Date().toISOString() }; } if ((pointer as Record<string, unknown>)["gap"] === undefined || (pointer as Record<string, unknown>)["gap"] === null) {
     return {
       shape: "structuredError",
       body: {

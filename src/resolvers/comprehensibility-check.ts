@@ -13,7 +13,7 @@ import type { ResolverResult } from "./types.js";
  * `verifier_negative.comprehensibility_below_floor` impulse is emitted.
  *
  * NOTE on similarity: the substrate ships `all-MiniLM-L6-v2` ONNX inside
- * `metabob-activity-api`, not inside development-vessel. Loading 22MB of ONNX
+ * `activity-api`, not inside development-vessel. Loading 22MB of ONNX
  * inside every dev-vessel restart is heavier than this check needs. We use a
  * deterministic token-overlap (Jaccard) score over normalised lowercase
  * alphanumeric tokens with English stop-words removed. The semantic-quality

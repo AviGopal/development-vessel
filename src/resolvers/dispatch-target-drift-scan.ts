@@ -222,7 +222,7 @@ export async function resolveDispatchTargetDriftScan(
               ` across ${scanned} recent rows and found none. Without this field, ` +
               "dispatch-target-drift (caller says X, Thompson/recommend selects Y) is " +
               "structurally invisible to the substrate. Fix path: extend AET schema + " +
-              "trace-write path in repos/metabob-activity-api so goal-host can persist " +
+              "trace-write path in repos/activity-api so goal-host can persist " +
               "the requested target alongside the selected variant_id.",
             detected_at: new Date().toISOString(),
             status: "open",
@@ -234,7 +234,7 @@ export async function resolveDispatchTargetDriftScan(
               probed_fields: [...TARGET_FIELD_CANDIDATES],
               rows_probed: scanned,
               affected_paths: [
-                "repos/metabob-activity-api/src/models/schemas.ts",
+                "repos/activity-api/src/models/schemas.ts",
                 "repos/goal-host-vessel/src/index.ts",
                 "repos/ias-executor-ts/src/hosts/goal-host.ts",
               ],

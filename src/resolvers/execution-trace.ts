@@ -10,7 +10,7 @@ const url = traceId
 const fetched = await fetch(url, {
     method: "GET",
     headers: { Authorization: `ApiKey ${METABOB_API_KEY}` },
-    signal: AbortSignal.timeout(10_000),
+    signal: AbortSignal.timeout(30_000),
   });
   if (!fetched.ok) {
     throw new Error(`execution-trace fetch failed: ${fetched.status}`);

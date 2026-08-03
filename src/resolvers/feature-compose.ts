@@ -1818,7 +1818,7 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
   if (llmEndpoints.length === 0 || !toolsEndpoint) {
     return { shape: "featureComposeReport", body: { ok: false, error: `endpoint discovery failed (llm=${llmEndpoints.length > 0}, tools=${!!toolsEndpoint})` } };
   }
-  const llmEndpointNew = llmEndpoints[1]!; const llmEndpoint = llmEndpoints[0]!;
+  const llmEndpoint = llmEndpoints[0]!; const llmEndpointNew = llmEndpoints[1] ?? llmEndpoint;
 
   // 1. DECOMPOSE (single planning call), GROUNDED in the target vessel's real
   // file tree so edits bind to paths that actually exist (no hallucinated paths).

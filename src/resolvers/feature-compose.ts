@@ -1664,8 +1664,8 @@ async function appendComposeLesson(cls: string, reason: string, vessels: string,
       body: JSON.stringify({
         source_type: "compose_lesson",
         shape: "compose_lesson",
-        content: `compose failure class ${cls}: ${COMPOSE_LESSON_GUIDANCE[cls] ?? "avoid repeating this failure class"}`,
-        summary: `compose lesson: ${cls}`,
+          content: `compose failure class ${cls}: ${COMPOSE_LESSON_GUIDANCE[cls] ?? "avoid repeating this failure class"}`,
+          summary: `compose lesson: ${cls}`,
       }),
       signal: AbortSignal.timeout(10_000),
     }).catch((err) => console.warn(`[compose-lessons] concept-db mirror failed: ${(err as Error).message}`));

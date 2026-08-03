@@ -1703,12 +1703,15 @@ async function composeLessonsBlock(specText?: string): Promise<string> {
       const headers: Record<string, string> = {};
       const apiKey = process.env["METABOB_API_KEY"];
       if (apiKey) headers["Authorization"] = `ApiKey ${apiKey}`;
-      const q = encodeURIComponent(specText.slice(0, 400));
-      const conceptDbEndpoint = process.env["CONCEPT_DB_ENDPOINT"] ?? "http://127.0.0.1:8260";
-      const resp = await fetch(`${conceptDbEndpoint}/concepts/search?query=${q}&source_type=compose_lesson&limit=8`, { headers, signal: AbortSignal.timeout(8_000) });
+      const resp = await fetch(`${DISCOVERY_ENDPOINT}/resolve`, {
+        method: "POST",
+        headers: { ...headers, "Content-Type": "application/json" },
+        body: JSON.stringify({ pointer: { type: "conceptSearch", query: specText.slice(0, 400), source_type: "compose_lesson", limit: 8 } }),
+        signal: AbortSignal.timeout(8_000),
+      });
       if (resp.ok) {
-        const json = (await resp.json()) as { concepts?: Array<{ content?: string }> };
-        const found = (json.concepts ?? []).map((c) => c.content).filter((s): s is string => typeof s === "string" && s.length > 0);
+        const json = (await resp.json()) as { content?: Array<{ content?: string }> };
+        const found = (json.content ?? []).map((c) => c.content).filter((s): s is string => typeof s === "string" && s.length > 0);
         if (found.length > 0) {
           console.warn(`[compose-lessons] source=concept-db n=${found.length}`);
           return `\n\nKNOWN FAILURE MODES from this substrate's own rejected composes — plans repeating these are rolled back:\n${found.map((r) => `- ${r}`).join("\n")}`;

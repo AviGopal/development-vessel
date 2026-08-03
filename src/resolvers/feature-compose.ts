@@ -1662,7 +1662,7 @@ async function appendComposeLesson(cls: string, reason: string, vessels: string,
       method: "POST",
       headers,
       body: JSON.stringify({
-        pointer: { type: "concept_create_write", conceptData: { source_type: "compose_lesson", shape: "compose_lesson" }},
+        pointer: { type: "concept_create_write", conceptData: { source_type: "compose_lesson", shape: "compose_lesson", content: `compose failure class ${cls}: ${COMPOSE_LESSON_GUIDANCE[cls] ?? "avoid repeating this failure class"}`, summary: `compose lesson: ${cls}` } },
         shape: "compose_lesson",
           content: `compose failure class ${cls}: ${COMPOSE_LESSON_GUIDANCE[cls] ?? "avoid repeating this failure class"}`,
           summary: `compose lesson: ${cls}`,

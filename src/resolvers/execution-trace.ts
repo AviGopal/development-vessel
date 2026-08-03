@@ -2,7 +2,10 @@ import type { ResolverResult } from "./types.js";
 import { METABOB_ENDPOINT } from "../config.js";
 
 export async function executionTrace(pointer: unknown): Promise<ResolverResult> {
-  const fetched = await fetch(`${METABOB_ENDPOINT}/execution-trace`, {
+  const discoveryUrl = await fetch(`${METABOB_ENDPOINT}/resolve/trace-store`, { method: "GET" });
+const discoveryResponse = await discoveryUrl.json();
+const traceStoreUrl = discoveryResponse.url;
+const fetched = await fetch(`${traceStoreUrl}/execution-trace`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(pointer),

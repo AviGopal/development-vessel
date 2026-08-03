@@ -1658,7 +1658,7 @@ async function appendComposeLesson(cls: string, reason: string, vessels: string,
     const apiKey = process.env["METABOB_API_KEY"];
     if (apiKey) headers["Authorization"] = `ApiKey ${apiKey}`;
     const conceptDbEndpoint = process.env["CONCEPT_DB_ENDPOINT"] ?? "http://127.0.0.1:8260";
-    void fetch(`${conceptDbEndpoint}/concepts`, {
+    void fetch(`${DISCOVERY_ENDPOINT}/resolve`, {
       method: "POST",
       headers,
       body: JSON.stringify({

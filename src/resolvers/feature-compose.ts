@@ -1706,7 +1706,7 @@ async function composeLessonsBlock(specText?: string): Promise<string> {
       const resp = await fetch(`${DISCOVERY_ENDPOINT}/resolve`, {
         method: "POST",
         headers: { ...headers, "Content-Type": "application/json" },
-        body: JSON.stringify({ pointer: { type: "conceptSearch", query: specText.slice(0, 400), source_type: "compose_lesson", limit: 8 } }),
+        body: JSON.stringify({ pointer: { type: "conceptSearch", source_type: "compose_lesson", limit: 8 } }),
         signal: AbortSignal.timeout(8_000),
       });
       if (resp.ok) {

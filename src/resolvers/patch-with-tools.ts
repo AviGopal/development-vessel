@@ -1150,7 +1150,7 @@ export async function resolvePatchWithTools(pointer: PatchWithToolsPointer): Pro
 {
   const { detectArchitectureViolation } = await import("./feature-compose.js");
   const pseudoDiff =
-    baseContent.split("\n").map((l) => `-${l}`).join("\n") + "\n" +
+    baseContent.split("\n").filter((l) => { const t = l.trim(); return t !== "" && !t.startsWith("//") && !t.startsWith("*") && !t.startsWith("/*"); }).map((l) => `-${l}`).join("\n") + "\n" +
     afterSrc.split("\n").map((l) => `+${l}`).join("\n");
   const egress = detectArchitectureViolation(pseudoDiff).filter((v) => v.law.includes("L11"));
   if (egress.length > 0) {

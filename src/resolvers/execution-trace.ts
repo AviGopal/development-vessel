@@ -1,14 +1,15 @@
 import type { ResolverResult } from "./types.js";
-import { METABOB_ENDPOINT } from "../config.js";
+import { METABOB_ENDPOINT, METABOB_API_KEY } from "../config.js";
 
 export async function executionTrace(pointer: unknown): Promise<ResolverResult> {
-  const discoveryUrl = await fetch(`${METABOB_ENDPOINT}/resolve/trace-store`, { method: "GET" });
-const discoveryResponse = await discoveryUrl.json();
-const traceStoreUrl = discoveryResponse.url;
-const fetched = await fetch(`${traceStoreUrl}/execution-trace`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(pointer),
+  const p = (pointer ?? {}) as { execution_id?: string; executionId?: string; limit?: number };
+const traceId = p.execution_id ?? p.executionId;
+const url = traceId
+    ? `${METABOB_ENDPOINT}/v2/activities/execution-traces/${traceId}`
+    : `${METABOB_ENDPOINT}/v2/activities/execution-traces?limit=${p.limit ?? 10}`;
+const fetched = await fetch(url, {
+    method: "GET",
+    headers: { Authorization: `ApiKey ${METABOB_API_KEY}` },
     signal: AbortSignal.timeout(10_000),
   });
   if (!fetched.ok) {

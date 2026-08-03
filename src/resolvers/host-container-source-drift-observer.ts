@@ -16,14 +16,17 @@ import type { ResolverResult } from "./types.js";
  * drift counts and a small sample of drifted files.
  */
 
-const HOST_REPO_ROOT =
-  process.env["HOST_REPO_ROOT"] ?? "/home/avi/documents/work/exp-repo/metabob-devbob";
+// No default. This is a HOST path, which the container cannot infer — the old
+// default pointed at a workspace that has since moved and carried a retired
+// name, so every vessel compared against a path that did not exist and reported
+// host_missing. An absent value is a configuration fact worth surfacing, not
+// something to guess at.
+const HOST_REPO_ROOT = process.env["HOST_REPO_ROOT"] ?? "";
 const CONTAINER_VESSELS_ROOT = process.env["CONTAINER_VESSELS_ROOT"] ?? "/vessels";
 
-// Vessel container-name → host-repo dir. Most match directly; activity-api
-// maps to repos/metabob-activity-api.
+// Vessel container-name → host-repo dir. All match directly.
 const DEFAULT_VESSEL_PAIRS: Array<{ container: string; host: string }> = [
-  { container: "activity-api", host: "metabob-activity-api" },
+  { container: "activity-api", host: "activity-api" },
   { container: "analysis-vessel", host: "analysis-vessel" },
   { container: "boredom-vessel", host: "boredom-vessel" },
   { container: "concept-db", host: "concept-db" },
@@ -97,6 +100,26 @@ export async function resolveHostContainerSourceDriftObserver(
   const pairs = pointer.vesselPairs ?? DEFAULT_VESSEL_PAIRS;
   const maxFiles = pointer.maxFilesPerVessel ?? 200;
   const sampleLimit = pointer.sampleLimit ?? 5;
+
+  if (!hostRoot) {
+    return {
+      shape: "hostContainerSourceDriftState",
+      body: {
+        host_repo_root: null,
+        container_vessels_root: containerRoot,
+        vessels_checked: 0,
+        total_scanned: 0,
+        total_drifted: 0,
+        drift_present: false,
+        unavailable_reason:
+          "HOST_REPO_ROOT is unset, so there is no host tree to compare against. " +
+          "Set it (or pass hostRepoRoot) to the super-repo checkout on the host.",
+        sample_drifted_files: [],
+        per_vessel: [],
+        generated_at: new Date().toISOString(),
+      },
+    };
+  }
 
   const perVessel: PerVessel[] = [];
   let totalScanned = 0;

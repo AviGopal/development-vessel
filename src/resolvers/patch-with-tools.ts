@@ -1136,7 +1136,37 @@ export async function resolvePatchWithTools(pointer: PatchWithToolsPointer): Pro
     }
   }
 
-  // Stage the modified file into a mitosis dir for the cutover machinery.
+  // EXTERNAL-URL EGRESS GATE (2026-08-03). Like the orphan gate above, the surgical
+// patcher self-lands via triggerMitosisTick and never runs feature_compose's
+// detectArchitectureViolation — which is why 7ea7d52 landed a literal
+// "https://new-llm-endpoint.com" into the drafter's own llmCall and passed every gate.
+// REUSE that existing check rather than inventing a new one; only its L11 external-URL
+// rule is hard-failed here (the other rules are advisory heuristics and would false-positive).
+// The pseudo-diff prefixes the whole pre-image with "-" and the whole post-image with "+",
+// which makes the check mean exactly "the host must already be present in the pre-image file".
+// Corpus-tested over 200 substrate-authored commits: flags exactly 2 (7ea7d52 and 0b80f1b,
+// both genuine fabricated-host egress), zero false positives — comment lines are skipped by
+// the check, so revert commits quoting a bad URL do not trip it.
+{
+  const { detectArchitectureViolation } = await import("./feature-compose.js");
+  const pseudoDiff =
+    baseContent.split("\n").map((l) => `-${l}`).join("\n") + "\n" +
+    afterSrc.split("\n").map((l) => `+${l}`).join("\n");
+  const egress = detectArchitectureViolation(pseudoDiff).filter((v) => v.law.includes("L11"));
+  if (egress.length > 0) {
+    await resetTarget();
+    return structuredError("unsanctioned_external_egress", {
+      target_file: pointer.target_file,
+      law: egress[0]!.law,
+      snippet: egress[0]!.snippet,
+      detail: egress[0]!.detail,
+      before_sha: beforeSha,
+      after_sha: afterSha,
+    });
+  }
+}
+
+// Stage the modified file into a mitosis dir for the cutover machinery.
   const mitosisRoot = join(vesselsRoot, `${vessel}-mitosis-${stamp}`);
   const stagedFile = join(mitosisRoot, subPath);
   try {

@@ -142,7 +142,7 @@ export const DRAFT_SPEC_FROM_GAP_TEMPLATE: ActivityTemplate = {
       resolver: "fs_read",
       config: {
         type: "fs_read",
-        path: "/workspace/openspec/changes/2026-05-22-failure-mode-autonomous-loop/proposal.md",
+        path: "/workspace/git/super-repo/openspec/changes/2026-05-22-failure-mode-autonomous-loop/proposal.md",
       },
       outputShapes: ["openspecProposalExemplar"],
     },
@@ -152,7 +152,7 @@ export const DRAFT_SPEC_FROM_GAP_TEMPLATE: ActivityTemplate = {
       resolver: "fs_read",
       config: {
         type: "fs_read",
-        path: "/workspace/openspec/changes/2026-05-22-failure-mode-autonomous-loop/tasks.md",
+        path: "/workspace/git/super-repo/openspec/changes/2026-05-22-failure-mode-autonomous-loop/tasks.md",
       },
       outputShapes: ["openspecTasksExemplar"],
     },

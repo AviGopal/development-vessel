@@ -104,6 +104,7 @@ export async function resolveUnknownShapeReport(
   }
 
   // Scan workspace files for shape references
+  const DOC_ROOT = process.env.DOC_FIX_ROOT ?? "/workspace/git/super-repo";
   const scanDirs = pointer.scan_dirs ?? ["openspec", "docs", "validation"];
   const textExts = new Set([".md", ".ts", ".json", ".yaml", ".yml"]);
 
@@ -111,7 +112,7 @@ export async function resolveUnknownShapeReport(
   const sources: Array<{ source_type: "goal_text" | "proposal_draft" | "scenario"; source_id: string; shape_references: string[] }> = [];
 
   for (const dir of scanDirs) {
-    const fullDir = join(WORKSPACE_ROOT, dir);
+    const fullDir = join(DOC_ROOT, dir);
     const files = await collectFiles(fullDir, textExts);
     for (const filePath of files) {
       let text = "";
@@ -123,7 +124,7 @@ export async function resolveUnknownShapeReport(
       const refs = extractShapeReferences(text, filePath);
       if (refs.length === 0) continue;
 
-      const relPath = filePath.replace(WORKSPACE_ROOT + "/", "");
+      const relPath = filePath.replace(DOC_ROOT + "/", "");
       let sourceType: "goal_text" | "proposal_draft" | "scenario" = "proposal_draft";
       if (relPath.includes("goal") || relPath.includes("task")) sourceType = "goal_text";
       if (relPath.includes("scenario") || relPath.includes("harness")) sourceType = "scenario";

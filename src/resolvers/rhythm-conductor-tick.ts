@@ -192,12 +192,23 @@ export async function resolveRhythmConductorTick(
       body: JSON.stringify({ impulse: { type: "poolImpulse", shape: "rhythmFamilyGoal", limit: 50 } }),
     },
     800,
-  )) as { body?: { impulses?: Array<{ body?: { family?: string; goal?: string } }> } } | null;
-  const poolGoals: Record<string, string> = {};
+  )) as { body?: { impulses?: Array<{ body?: { family?: string; goal?: string; member?: string } }> } } | null;
+  // A family may carry SEVERAL conditioned goals. Distinct jobs feed one family
+  // — gap-closing alone is fed by gap-compose, surgical-gap-scan,
+  // efficiency-failure-tick, operator-goal-generator and funnel-drain — and a
+  // one-goal-per-family map silently drops all but the last of them, which is
+  // what blocks retiring their timers. Accumulate rather than overwrite;
+  // `member` names a goal within its family so siblings dedup independently.
+  const poolGoals: Record<string, Array<{ goal: string; member?: string }>> = {};
   for (const imp of poolGoalResp?.body?.impulses ?? []) {
     const fam = imp?.body?.family;
     const g = imp?.body?.goal;
-    if (typeof fam === "string" && fam && typeof g === "string" && g) poolGoals[fam] = g;
+    const mem = imp?.body?.member;
+    if (typeof fam === "string" && fam && typeof g === "string" && g) {
+      const list = poolGoals[fam] ?? [];
+      list.push(typeof mem === "string" && mem ? { goal: g, member: mem } : { goal: g });
+      poolGoals[fam] = list;
+    }
   }
 
   for (const r of candidates) {
@@ -205,31 +216,60 @@ export async function resolveRhythmConductorTick(
       skipped.push({ family: r.family, reason: "over_max_enqueue" });
       continue;
     }
-    const goal = poolGoals[r.family] ?? FAMILY_GOALS[r.family];
-    if (!goal) {
+    const bootstrapGoal: string | undefined = FAMILY_GOALS[r.family];
+    const members: Array<{ goal: string; member?: string }> =
+      poolGoals[r.family] ?? (bootstrapGoal ? [{ goal: bootstrapGoal }] : []);
+    if (members.length === 0) {
       skipped.push({ family: r.family, reason: "no_goal_mapping" });
       continue;
     }
-    if (pendingReasons.some((reason) => reason.includes(r.family))) {
-      skipped.push({ family: r.family, reason: "already_pending" });
-      continue;
-    }
 
-    if (!pointer.dry_run) {
-      const enq = await resolveBoredomEnqueue({
-        type: "boredom_enqueue",
-        goal,
-        priority: "medium",
-        reason: `rhythm ${r.family} due (score ${r.due_score.toFixed(2)})`,
-        variables: { rhythm_id: r.id, due_score: r.due_score, ...(FAMILY_VARIABLES[r.family] ?? {}) },
-        ...(pointer.queue_path ? { queue_path: pointer.queue_path } : {}),
-      });
-      const ok = (enq.body as { enqueued?: boolean } | undefined)?.enqueued === true;
-      if (!ok) {
-        skipped.push({ family: r.family, reason: "enqueue_failed" });
+    let firedThisFamily = false;
+    for (const m of members) {
+      if (picked >= maxEnqueue) {
+        skipped.push({ family: r.family, reason: "over_max_enqueue" });
+        break;
+      }
+      // A single-member family keeps the historical reason text verbatim, so
+      // queue entries written before this change still dedup correctly.
+      const label = m.member ? `${r.family}:${m.member}` : r.family;
+      if (pendingReasons.some((reason) => reason.includes(`rhythm ${label} due`))) {
+        skipped.push({ family: label, reason: "already_pending" });
         continue;
       }
-      // 5. Decay the fired rhythm: accrue credit, reset staleness.
+
+      if (!pointer.dry_run) {
+        const enq = await resolveBoredomEnqueue({
+          type: "boredom_enqueue",
+          goal: m.goal,
+          priority: "medium",
+          reason: `rhythm ${label} due (score ${r.due_score.toFixed(2)})`,
+          variables: {
+            rhythm_id: r.id,
+            due_score: r.due_score,
+            ...(m.member ? { rhythm_member: m.member } : {}),
+            ...(FAMILY_VARIABLES[r.family] ?? {}),
+          },
+          ...(pointer.queue_path ? { queue_path: pointer.queue_path } : {}),
+        });
+        const ok = (enq.body as { enqueued?: boolean } | undefined)?.enqueued === true;
+        if (!ok) {
+          skipped.push({ family: label, reason: "enqueue_failed" });
+          continue;
+        }
+      }
+
+      firedThisFamily = true;
+      enqueued.push({ family: label, goal: m.goal, due_score: Math.round(r.due_score * 100) / 100 });
+      picked += 1;
+    }
+
+    // 5. Decay the fired rhythm ONCE per family per tick, not once per member.
+    // Decay models the family's staleness having been answered; decaying per
+    // member would make a family whose work is split across five goals decay
+    // five times as fast as an identical family expressed as one goal, which
+    // penalises the decomposition rather than the behaviour.
+    if (firedThisFamily && !pointer.dry_run) {
       await fetchJson(
         endpoint,
         {
@@ -248,9 +288,6 @@ export async function resolveRhythmConductorTick(
         800,
       );
     }
-
-    enqueued.push({ family: r.family, goal, due_score: Math.round(r.due_score * 100) / 100 });
-    picked += 1;
   }
 
   return {

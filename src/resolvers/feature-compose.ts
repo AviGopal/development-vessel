@@ -935,7 +935,7 @@ export function detectArchitectureViolation(
   for (const rawLine of added) {
     const code = rawLine.trim();
     if (!code || code.startsWith("//") || code.startsWith("*") || code.startsWith("/*")) continue;
-    if (INLINE_LLM.test(code) && !EXTERNAL_URL.test(code)) {
+    if (INLINE_LLM.test(code)) {
       push(
         "dev-vessel layer-3 (LLMs only via the llm-prompt resolver, never inlined)",
         "an LLM provider is instantiated / imported / called directly in vessel TS instead of dispatched through the llm-prompt-tier resolver from an activity — inline LLM calls are untraced and break the layering",

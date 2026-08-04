@@ -1737,6 +1737,7 @@ const composeInFlight = new Set<string>();
 const DEV_VESSEL_ENDPOINT = process.env["DEV_VESSEL_ENDPOINT"] ?? "http://127.0.0.1:8090";
 
 export async function resolveFeatureCompose(pointer: FeatureComposePointer): Promise<ResolverResult> {
+  if (typeof pointer.spec !== "string") pointer = { ...pointer, spec: String(pointer.spec ?? "") };
   const guards = pointer.verify_vessels?.length ? pointer.verify_vessels : ["__global__"];
   // Per-compose isolation (gap edit-intent-compose-shared-workspace-no-isolation):
   // each compose gets its own git worktree per vessel, so concurrent composes no

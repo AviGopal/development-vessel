@@ -1830,7 +1830,7 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
   // to a byte-159k change site in a 200 KB file → 0-op decompose). Pure locators;
   // empty for surgical/small-file cases → head-window behaviour preserved.
   const gapMeta = (pointer.gap?.classification_metadata ?? {}) as Record<string, unknown>;
-  const focusHints = [gapMeta.matched_excerpt, gapMeta.suspected_real_location, gapMeta.edit_site, ...pointer.spec.split("\n").map((l) => l.trim()).filter((l) => l.length >= 20)]
+  const focusHints = [gapMeta.matched_excerpt, gapMeta.suspected_real_location, gapMeta.edit_site, ...(pointer.spec ?? "").split("\n").map((l) => l.trim()).filter((l) => l.length >= 20)]
     .filter((h): h is string => typeof h === "string" && h.trim().length >= 12)
     .map((h) => h.trim());
   // TARGET LOCATORS: the classifier's edit_site + any repos/… paths named in the spec.

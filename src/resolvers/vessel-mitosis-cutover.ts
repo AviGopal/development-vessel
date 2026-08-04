@@ -952,7 +952,15 @@ export async function resolveVesselMitosisCutover(
       try {
         const livePath = join(baseRoot, rel);
         if (await pathExists(livePath)) {
-          const liveFirst = (await readFile(livePath, "utf8")).split("\n", 1)[0] ?? "";
+          const liveText = await readFile(livePath, "utf8");
+          const liveFirst = liveText.split("\n", 1)[0] ?? "";
+          if (liveText.length > 400 && stagedContent.length < liveText.length * 0.5) {
+            corruptions.push({
+              file: rel,
+              kind: "catastrophic_truncation",
+              detail: `staged file is ${stagedContent.length}B against a live ${liveText.length}B — a shrink past half is capability loss, not an edit`,
+            });
+          }
           const stagedFirst = stagedFirstLine;
           if (
             HEADER_OPENING.test(liveFirst) &&

@@ -2243,6 +2243,7 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
               llmEndpoint,
               `Current full content of ${op.path}:\n\n${live}\n\nMake this change: ${op.rationale ?? ""}\nIntended replacement behaviour:\n${op.new_string ?? ""}\n\nEmit ONE JSON object {"old_string":"<verbatim UNIQUE substring copied from the content above>","new_string":"<replacement>"}. old_string MUST appear verbatim in the content above. No prose, no fences.`,
               model,
+              true,
             ));
             if (fix?.old_string) {
               r = await callTool(toolsEndpoint, "fs_edit", { path: abs, old_string: String(fix.old_string), new_string: String(fix.new_string ?? op.new_string ?? "") });

@@ -1556,6 +1556,33 @@ function tscErrorSet(raw: string): Set<string> {
   return out;
 }
 
+// Baseline-delta TEST failures — the companion to tscErrorSet above.
+//
+// WHY this exists: the verify gate ran typecheck and NOTHING else, so a draft that
+// compiled could break the suite and land. Concrete instance: substrate-authored
+// 53e4267 added an early `return []` to goal-host's inferGoalTargetShapes — the
+// INVERSE of the behavior its own comment specified — turning the function into a
+// permanent no-op and breaking 5 tests. It typechecked, so it landed, and stayed red
+// for 10 days. typecheck-clean is not regression-free, and this vessel's own CLAUDE.md
+// already mandates `bun test` in CI ("Both must pass. No exceptions.") — the autonomous
+// apply path simply never enforced it.
+//
+// Extracts the set of FAILING test names from `bun test` output. Bun prints failures as
+// "(fail) <describe> > <it> [0.12ms]"; the timing suffix is stripped so the identity is
+// stable across runs. Baseline-delta (not absolute) for the same reason typecheck uses
+// it: vessels carry pre-existing reds (goal-host has 4 in repair-signature.test.ts from
+// an un-awaited Promise in the test itself), and gating absolutely would block EVERY
+// autonomous edit until someone fixes unrelated tests. Blame the draft only for
+// failures it INTRODUCES.
+function testFailureSet(raw: string): Set<string> {
+  const out = new Set<string>();
+  for (const line of raw.split("\n")) {
+    if (!/^\s*\(fail\)/.test(line)) continue;
+    out.add(line.replace(/\s*\[[\d.]+m?s\]\s*$/, "").trim());
+  }
+  return out;
+}
+
 function classifyComposeFailure(appliedOps: Array<{ ok: boolean; detail?: string }>, verifyResults: Array<{ ok: boolean; output: string }>, semanticReason: string): string {
   const ap = appliedOps.find((a) => !a.ok);
   if (ap) {
@@ -2091,10 +2118,17 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
   // the verify below blames the draft only for NEW errors (post minus baseline). A
   // patch against a vessel that ALREADY fails tsc is thus not wrongly rolled back.
   const baselineTsErrors = new Map<string, Set<string>>();
+  // Same baseline treatment for the SUITE (see testFailureSet): capture which tests are
+  // already red on the untouched tree, so verify blames the draft only for NEW failures.
+  const baselineTestFails = new Map<string, Set<string>>();
   for (const v of touched) {
     const vAbs = vesselRoot(v);
     const b = await callTool(toolsEndpoint, "shell", { command: `cd ${JSON.stringify(vAbs)} && ([ -d node_modules ] || bun install >/dev/null 2>&1; bun run typecheck 2>&1)`, cwd: REPO_ROOT });
     baselineTsErrors.set(v, tscErrorSet(String((b.body as { stdout?: unknown })?.stdout ?? "")));
+    // Bounded so a hanging/absent suite can never stall the compose path; a vessel with
+    // no tests just yields an empty baseline and an empty post-set, i.e. no gate.
+    const bt = await callTool(toolsEndpoint, "shell", { command: `cd ${JSON.stringify(vAbs)} && (timeout 240 bun test 2>&1 || true)`, cwd: REPO_ROOT });
+    baselineTestFails.set(v, testFailureSet(String((bt.body as { stdout?: unknown })?.stdout ?? "")));
   }
 
   for (const [v, errs] of baselineTsErrors) { if (errs.size === 0) continue; try { await fetch(`${DEV_VESSEL_ENDPOINT}/v2/impulses/resolve`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ impulse: { type: "substrateGap_write", gap: { id: "baseline-typecheck-broken-" + v.replace(/[^a-zA-Z0-9]+/g, "-"), category: "systematic_failure", source: "substrate_detected", summary: "feature_compose found the UNTOUCHED baseline of " + v + " failing typecheck BEFORE drafting (" + errs.size + " pre-existing tsc errors, e.g. " + Array.from(errs).slice(0, 3).join(" | ").slice(0, 400) + "). Environment fault (stale runtime copy or missing module), not a drafter fault: re-sync this vessel source from its repo baseline. Draft verdicts on this vessel use baseline-delta blame until the baseline is clean.", detected_at: new Date().toISOString(), status: "open" } } }) }); console.log("[feature-compose] baseline-broken environment gap filed for " + v); } catch { /* advisory */ } }
@@ -2320,7 +2354,7 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
   const runVerify = async (v: string): Promise<{ vessel: string; errors: number | string; exit_code: number | null; ok: boolean; output: string }> => {
     const vAbs = vesselRoot(v);
     const sh = await callTool(toolsEndpoint, "shell", {
-      command: `cd ${JSON.stringify(vAbs)} && ([ -d node_modules ] || bun install >/dev/null 2>&1; echo "== typecheck =="; bun run typecheck 2>&1; echo "TC_EXIT=$?"; echo "== shape-dispatch =="; if [ -f ${SHARED_DISPATCH_CHECK} ] && [ -f src/config.ts ] && [ -f src/routes/impulses.ts ]; then bun ${SHARED_DISPATCH_CHECK} ${JSON.stringify(vAbs)} 2>&1; echo "SD_EXIT=$?"; else echo "SD_EXIT=0"; fi)`,
+      command: `cd ${JSON.stringify(vAbs)} && ([ -d node_modules ] || bun install >/dev/null 2>&1; echo "== typecheck =="; bun run typecheck 2>&1; echo "TC_EXIT=$?"; echo "== shape-dispatch =="; if [ -f ${SHARED_DISPATCH_CHECK} ] && [ -f src/config.ts ] && [ -f src/routes/impulses.ts ]; then bun ${SHARED_DISPATCH_CHECK} ${JSON.stringify(vAbs)} 2>&1; echo "SD_EXIT=$?"; else echo "SD_EXIT=0"; fi; echo "== tests =="; timeout 240 bun test 2>&1 || true)`,
       cwd: REPO_ROOT,
     });
     const raw = String((sh.body as { stdout?: unknown })?.stdout ?? "");
@@ -2346,8 +2380,17 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
       return base.endsWith(".ts") && touchedBases.has(base);
     });
     const tcOk = tcExit === 0 || (baseTs.size > 0 && newTs.length === 0 && !touchedErr);
-    const ok = tcOk && sdExit === 0;
-    return { vessel: v, errors: ok ? 0 : "verify", exit_code: tcExit, ok, output: raw.trim() };
+    // TEST gate, baseline-delta (see testFailureSet): a draft that compiles can still
+    // break the suite — that is exactly how 53e4267 landed a no-op and left 5 tests red
+    // for 10 days. Block only on failures this draft INTRODUCED, so pre-existing reds in
+    // an unrelated test file don't wedge every autonomous edit.
+    const curTest = testFailureSet(raw);
+    const baseTest = baselineTestFails.get(v) ?? new Set<string>();
+    const newTest = [...curTest].filter((t) => !baseTest.has(t));
+    const testOk = newTest.length === 0;
+    const ok = tcOk && sdExit === 0 && testOk;
+    const detail = testOk ? "" : ` | NEW test failures introduced by this draft (${newTest.length}): ${newTest.slice(0, 5).join(" ; ").slice(0, 600)}`;
+    return { vessel: v, errors: ok ? 0 : "verify", exit_code: tcExit, ok, output: (raw + detail).trim() };
   };
   let verify: Array<{ vessel: string; errors: number | string; exit_code: number | null; ok: boolean; output: string }> = [];
   if (edited.length > 0 || created.length > 0) { for (const v of touched) verify.push(await runVerify(v)); }

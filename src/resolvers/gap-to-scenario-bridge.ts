@@ -292,13 +292,10 @@ export async function resolveGapToScenarioBridge(
       console.warn(
         `[gap-to-scenario] vessel-authoring dispatch SKIPPED for ${id}: gap carries no capability shape`,
       );
+      skippedClassDup += 1;
+      continue;
     }
     if (isVesselAuthoring && capabilityShape) {
-      if (!capabilityShape) {
-        skippedClassDup += 1; // Mark as skipped, same as class-level dedup
-        console.warn(`[gap-to-scenario] vessel-authoring dispatch SKIPPED for ${id}: gap carries no capability shape.`);
-        continue;
-      }
       try {
         const { GOAL_HOST_VESSEL_ENDPOINT } = await import("../config.js");
         await fetch(`${GOAL_HOST_VESSEL_ENDPOINT}/run-goal`, {

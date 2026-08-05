@@ -339,6 +339,10 @@ async function dispatchInner(pointer: AnyPointer): Promise<ResolverResult> {
       return resolveSubstrateGap(p as Parameters<typeof resolveSubstrateGap>[0]);
     case "substrateGap_write":
       return resolveSubstrateGapWrite(p as Parameters<typeof resolveSubstrateGapWrite>[0]);
+    case "resolver_schema": {
+      const { resolveResolverSchema } = await import("../resolvers/resolver-schema.js");
+      return resolveResolverSchema(p as Record<string, unknown>);
+    }
     case "poolImpulse": {
       const { resolvePoolImpulse } = await import("../resolvers/pool-impulse.js");
       return resolvePoolImpulse(pointer as Parameters<typeof resolvePoolImpulse>[0]);

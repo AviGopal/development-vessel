@@ -114,6 +114,7 @@ export const config = {
       // Shape primitive only; gap-closing activity lives separately.
       "substrateGap",
       "substrateGap_write",
+      "resolver_schema",
       // Standing-pool resolver (pool-impulse): persistent store of standing
       // intent impulses at WORKSPACE_ROOT/pool/standing.json.
       // Read: filter by id, shape, status (default 'open'), limit.

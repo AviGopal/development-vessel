@@ -245,16 +245,61 @@ export async function resolveSubstrateGap(
   };
 }
 
+/**
+ * Build a gap from a FLAT pointer, so this resolver works with whatever an activity threads in
+ * rather than only with one hand-written envelope.
+ *
+ * An activity carries its data as pointer fields; different producers name the prose differently
+ * (`summary`, `detail`, `description`, `text`, `message`, `title`). The previous normalization
+ * accepted `summary` only, so every other threading failed with `missing_required_field` — which
+ * is what four separate minted arms hit on 2026-08-05.
+ *
+ * Returns null when there is nothing gap-like to build from — an EMPTY pointer must still be
+ * refused. A write resolver inventing content it was never given is the failure this vessel
+ * exists to avoid; refusing an empty write is correct behavior, not the bug.
+ */
+function coerceFlatGapPointer(p: Record<string, unknown>): Record<string, unknown> | null {
+  if (p["gap"] !== undefined && p["gap"] !== null) return null;   // already enveloped
+  const str = (...keys: string[]): string | undefined => {
+    for (const k of keys) {
+      const v = p[k];
+      if (typeof v === "string" && v.trim().length > 0) return v.trim();
+    }
+    return undefined;
+  };
+  // Prose first: without a real description there is no gap worth writing.
+  const summary = str("summary", "detail", "description", "text", "message", "body", "title");
+  if (!summary) return null;
+  const id = str("id", "gap_id", "slug") ?? `gap-${Date.now().toString(36)}`;
+  return {
+    id,
+    category: str("category", "gap_category") ?? "other",
+    // Name the threading that produced this, so a row written from a flat pointer is
+    // distinguishable in the store from one an operator or a template enveloped properly.
+    source: str("source") ?? "walk_flat_pointer",
+    status: str("status") ?? "open",
+    detected_at: str("detected_at", "first_detected_at") ?? new Date().toISOString(),
+    summary,
+    ...(str("route") ? { route: str("route") } : {}),
+  };
+}
+
 export async function resolveSubstrateGapWrite(
   pointer: SubstrateGapWritePointer | Record<string, unknown>,
 ): Promise<ResolverResult> {
-  if (((pointer as Record<string, unknown>)["gap"] === undefined || (pointer as Record<string, unknown>)["gap"] === null) && typeof (pointer as Record<string, unknown>)["summary"] === "string") { (pointer as Record<string, unknown>)["gap"] = { id: (pointer as Record<string, unknown>)["id"] ?? "gap-" + Date.now().toString(36), category: (pointer as Record<string, unknown>)["category"] ?? "other", source: "walk_flat_pointer", summary: (pointer as Record<string, unknown>)["summary"], status: (pointer as Record<string, unknown>)["status"] ?? "open", detected_at: new Date().toISOString() }; } if ((pointer as Record<string, unknown>)["gap"] === undefined || (pointer as Record<string, unknown>)["gap"] === null) {
+  const flat = coerceFlatGapPointer(pointer as Record<string, unknown>);
+  if (flat) (pointer as Record<string, unknown>)["gap"] = flat;
+  if ((pointer as Record<string, unknown>)["gap"] === undefined || (pointer as Record<string, unknown>)["gap"] === null) {
     return {
       shape: "structuredError",
       body: {
         error: "missing_required_field",
         field: "gap",
-        message: "resolveSubstrateGapWrite requires a 'gap' field in the pointer; none was provided",
+        // Say the STRUCTURE, not just the field name. This message is fed back verbatim into
+        // goal-host's pointer-arg synthesis as the correction hint, so a message that only names
+        // the missing key sends the retry back to the same flat shape it just failed with.
+        message:
+          'resolveSubstrateGapWrite needs the gap fields. Preferred: {type:"substrateGap_write", gap:{id, category, source, status, detected_at, summary}}. A flat pointer carrying a summary/detail/description/title is also accepted. Resolve pointer:{type:"resolver_schema", shape:"substrateGap_write"} for the full contract.',
       },
     };
   }

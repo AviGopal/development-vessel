@@ -8,6 +8,8 @@
  *
  * This resolver scans gaps.json for status=="open" gaps with source in
  * (operator_seed, substrate_detected), and for each gap that does NOT yet
+if (gap.carry_no_capability_shape) { return; }
+if (gap.carry_no_capability_shape) { return; }
  * have a scenario file, writes one in the shape the drafter expects (mirrors
  * the existing auto-*.json scenarios already on disk).
  *
@@ -225,30 +227,34 @@ export async function resolveGapToScenarioBridge(
     // path. Carry the demanded shape + sample consumers so the downstream
     // dispatcher (scaffold-and-publish-vessel) has actionable inputs.
     const scenario = isVesselAuthoring && meta['shape']
-      ? {
-          id: safeId,
-          routing_class: "vessel_authoring",
-          target_template_id: VESSEL_AUTHORING_TARGET,
-          mode_class: category,
-          stage: "vessel_authoring",
-          outcome_class: "gap",
-          title: summary.slice(0, 120) || `Capability gap ${safeId}`,
-          description: summary,
-          goal_text: summary,
-          capability_shape:
-            typeof meta["shape"] === "string" ? meta["shape"] : null,
-          demanding_template_count:
-            typeof meta["template_count"] === "number" ? meta["template_count"] : null,
-          sample_template_ids: Array.isArray(meta["sample_template_ids"])
-            ? meta["sample_template_ids"]
-            : [],
-          gap_subtype: typeof meta["gap_subtype"] === "string" ? meta["gap_subtype"] : null,
-          cite_principle: typeof meta["cite_principle"] === "string" ? meta["cite_principle"] : null,
-          operator_seed: false,
-          bridge_source: "gap_to_scenario_bridge",
-          source_gap_id: id,
-          source_gap_source: source,
-        }
+      ? (() => {
+          if (typeof meta["shape"] !== "string") {
+            return null;
+          }
+          return {
+            id: safeId,
+            routing_class: "vessel_authoring",
+            target_template_id: VESSEL_AUTHORING_TARGET,
+            mode_class: category,
+            stage: "vessel_authoring",
+            outcome_class: "gap",
+            title: summary.slice(0, 120) || `Capability gap ${safeId}`,
+            description: summary,
+            goal_text: summary,
+            capability_shape: meta["shape"],
+            demanding_template_count:
+              typeof meta["template_count"] === "number" ? meta["template_count"] : null,
+            sample_template_ids: Array.isArray(meta["sample_template_ids"])
+              ? meta["sample_template_ids"]
+              : [],
+            gap_subtype: typeof meta["gap_subtype"] === "string" ? meta["gap_subtype"] : null,
+            cite_principle: typeof meta["cite_principle"] === "string" ? meta["cite_principle"] : null,
+            operator_seed: false,
+            bridge_source: "gap_to_scenario_bridge",
+            source_gap_id: id,
+            source_gap_source: source,
+          };
+        })()
       : {
           id: safeId,
           routing_class: "recombination",

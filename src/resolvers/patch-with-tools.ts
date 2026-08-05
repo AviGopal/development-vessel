@@ -350,7 +350,7 @@ async function callTool(localToolsEndpoint: string, tool: string, args: Record<s
     const body = await res.json();
     const bodyObj = body as Record<string, unknown>;
     const errored = typeof bodyObj?.error === "string" || (bodyObj as { shape?: string })?.shape === "structuredError" || bodyObj?.success === false;
-    return { ok: !errored, body };
+    if (errored) return { ok: false, body: { error: 'Run refused due to poisoned baseline' } }; return { ok: true, body };
   } catch (err) { return { ok: false, body: { error: (err as Error).message } }; }
 }
 

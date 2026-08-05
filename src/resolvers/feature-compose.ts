@@ -2069,7 +2069,21 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
     }
   }
 
-  const touched = new Set<string>((plan.touched_vessels as string[] | undefined) ?? []);
+  // NORMALIZE UNTRUSTED PLANNER OUTPUT. touched_vessels comes straight from the LLM
+  // plan and was trusted verbatim, while every ops-derived entry below is normalized
+  // through vesselDirOf(). When the planner named a FILE instead of a vessel dir the
+  // scope gate compared "repos/activity-api/src/routes/goal-paths.ts" against
+  // verify_vessels (["repos/activity-api"]), found no match, and REFUSED an edit that
+  // was entirely in scope — then escalated to patch_with_tools, which staged a mitosis
+  // and never landed. Measured 2026-08-05: this is why activity-api, the trace store
+  // the whole learning loop depends on, could not be self-modified at all. vesselDirOf
+  // returns null for a string that is already a bare vessel dir (it requires a trailing
+  // path segment), so the fallback preserves the previous behaviour exactly.
+  const touched = new Set<string>();
+  for (const t of (plan.touched_vessels as string[] | undefined) ?? []) {
+    const d = vesselDirOf(t);
+    touched.add(d ?? t);
+  }
   for (const op of ops) { const d = vesselDirOf(op.path); if (d) touched.add(d); }
   if (verifyVessels.length > 0) {
     const outOfScope = [...touched].find((v) => !verifyVessels.includes(v));

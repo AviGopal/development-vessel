@@ -226,7 +226,7 @@ export async function resolveGapToScenarioBridge(
     // not a recombination of existing ones — route them to the vessel-authoring
     // path. Carry the demanded shape + sample consumers so the downstream
     // dispatcher (scaffold-and-publish-vessel) has actionable inputs.
-    const scenario = isVesselAuthoring && meta['shape']
+    const scenario = isVesselAuthoring
       ? (() => {
           if (typeof meta["shape"] !== "string") {
             return null;

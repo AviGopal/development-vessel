@@ -1942,7 +1942,28 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
   // replacement is synthesized directly (drafter-floor remedy) — the LLM
   // planner returned plan-no-ops on exactly these goals. Use pointer.spec (the
   // raw goal), not the refined spec, so the verbatim blocks are untouched.
-  const verbatimOps = synthesizeVerbatimEditOps(pointer.spec);
+  // The caller appends a THIRD fenced block to every edit spec: goal-host's
+// verbatimExcerptBlock (goal-host-vessel/src/index.ts:6446-6452, appended at :6966 and
+// :7278) wraps real file text in its own fences so the drafter can copy anchors exactly.
+// But synthesizeVerbatimEditOps requires EXACTLY two fences, so that grounding step
+// silently disqualified every well-formed verbatim goal from the LLM-free path. Measured
+// 2026-08-05: "deterministic verbatim-replacement synthesis applied" appears ZERO times in
+// the entire journal, on every PID — the drafting floor had never once run, defeated by the
+// caller's own helpfulness rather than by drafter weakness or an LLM outage.
+//
+// The cost is not a missing optimisation. With the deterministic path dead, EVERY edit goes
+// through the LLM planner, which re-derives anchors from memory: an edit dispatched minutes
+// before this one was rejected because the planner emitted
+// `const created = await executeAsAuth<any>(jwtAuth, `CREATE goal_verification_labels CONTENT`
+// — lines collapsed that are separate in the real file — while the goal itself carried a
+// byte-exact anchor the synthesizer would have used verbatim.
+//
+// Cut at the LAST excerpt marker, not the first: the caller appends at the end, and a goal
+// whose own prose names the marker — such as this one — must not be truncated mid-goal.
+let vbCut = -1;
+for (const m of pointer.spec.matchAll(/\n[ \t]*VERBATIM EXCERPT of /g)) vbCut = m.index ?? vbCut;
+const verbatimSpecSource = vbCut > 0 ? pointer.spec.slice(0, vbCut) : pointer.spec;
+const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
   if (verbatimOps) {
     planRaw = "(deterministic verbatim-replacement synthesis; LLM planner bypassed)";
     plan = { summary: "deterministic edit synthesized from the goal's verbatim old→new replacement", ops: verbatimOps };

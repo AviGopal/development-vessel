@@ -112,8 +112,13 @@ export async function resolveTestSuite(pointer: Record<string, unknown>): Promis
       body: JSON.stringify({ impulse: { pointer: { type: "shell", command, cwd: RUNTIME_ROOT } } }),
       signal: AbortSignal.timeout(timeoutMs + 30_000),
     });
-    const body = (await res.json().catch(() => ({}))) as { body?: { stdout?: unknown } };
-    raw = String(body?.body?.stdout ?? "");
+    const j = (await res.json().catch(() => ({}))) as { stdout?: unknown; body?: { stdout?: unknown } };
+    // The shell producer returns stdout at the TOP level of the response — that is what
+    // feature_compose (the proven caller of this same tool) reads. Accept the nested form
+    // too so a producer that wraps its payload does not silently yield an empty string,
+    // which would surface as ran:false and read as "the suite is missing" rather than
+    // "I called it wrong". Observed exactly that on first live probe.
+    raw = String(j?.stdout ?? j?.body?.stdout ?? "");
   } catch (err) {
     return { shape: "structuredError", body: { resolver: "test_suite", vessel: rel, detail: `shell dispatch failed: ${(err as Error).message}` } };
   }

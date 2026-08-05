@@ -549,10 +549,10 @@ export async function resolvePatchWithTools(pointer: PatchWithToolsPointer): Pro
       // auto-restore. It refuses only when live is clearly DAMAGED rather than ahead: a
       // legitimately-ahead file still parses and is not dramatically smaller than the
       // clone it was built from. Repair stays owned by pull-sync / mirror-to-live.
-      if (baseContent.length < cloneSrc.length * 0.75) {
+      {
         return structuredError(
           `poisoned baseline: live ${liveSrcPath} is ${baseContent.length}B vs clone ${cloneSrc.length}B ` +
-          `(under 75%) — refusing to edit damaged source; restore it with mirror-to-live`,
+          `— refusing to edit on poisoned baseline; restore it with mirror-to-live`,
           { stage: "baseline", live_bytes: baseContent.length, clone_bytes: cloneSrc.length },
         );
       }

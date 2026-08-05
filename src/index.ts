@@ -34,6 +34,46 @@ const server = Bun.serve({
 
 console.log(`development-vessel listening on ${config.host}:${config.port}`);
 
+// GRACEFUL DRAIN. This vessel serves feature_compose and patch_with_tools, whose
+// runs take 5-8 minutes. With no SIGTERM handler at all, a restart (its own mitosis
+// cutover, or pull-sync converging it) killed the run outright and the caller saw
+// only "socket connection closed unexpectedly" — fully drafted, typecheck-clean
+// edits were lost that way repeatedly on 2026-08-05. The authoring-inflight markers
+// already mark exactly the window that must not be interrupted, so drain on them.
+// Bounded at 75s, deliberately UNDER the unit's 90s TimeoutStopSec, so this
+// deadline fires before systemd's SIGKILL and the process exits on its own terms —
+// a drain budget that exceeds its own stop timeout can never complete.
+let devDraining = false;
+async function developmentVesselDrain(sig: string): Promise<void> {
+  if (devDraining) return;
+  devDraining = true;
+  const deadline = Date.now() + Number(process.env["DEV_VESSEL_DRAIN_MS"] ?? 75000);
+  const markerDir = "/workspace/authoring-inflight";
+  const freshMs = Number(process.env["DEV_VESSEL_DRAIN_FRESH_MS"] ?? 600000);
+  try {
+    const { readdir, stat } = await import("node:fs/promises");
+    for (;;) {
+      let live = 0;
+      try {
+        for (const f of await readdir(markerDir)) {
+          if (!f.endsWith(".json")) continue;
+          try {
+            const st = await stat(`${markerDir}/${f}`);
+            if (Date.now() - st.mtimeMs < freshMs) live++;
+          } catch { /* vanished mid-scan — not in flight */ }
+        }
+      } catch { break; }
+      if (live === 0) { console.log(`[development-vessel] ${sig}: drained (0 authoring runs in flight)`); break; }
+      if (Date.now() >= deadline) { console.warn(`[development-vessel] ${sig}: drain deadline with ${live} authoring run(s) still in flight — they will be lost`); break; }
+      await new Promise((r) => setTimeout(r, 1000));
+    }
+  } catch (e) { console.warn(`[development-vessel] ${sig}: drain error (exiting anyway): ${(e as Error).message}`); }
+  try { server.stop(true); } catch { /* best-effort */ }
+  process.exit(0);
+}
+process.on("SIGTERM", () => { void developmentVesselDrain("SIGTERM"); });
+process.on("SIGINT", () => { void developmentVesselDrain("SIGINT"); });
+
 // Non-blocking; failure logs but does not crash
 startDiscoveryRegistration();
 startRegistryChangeObserver();

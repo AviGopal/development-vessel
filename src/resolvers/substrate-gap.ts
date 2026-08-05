@@ -336,11 +336,29 @@ export async function resolveSubstrateGapWrite(
     }
   }
 
+  // TIMESTAMP PLACEHOLDER SCRUB. The gate above rejects uninterpolated {{slots}} in id/category
+  // only — deliberately, since a legitimate summary may QUOTE a placeholder when describing an
+  // interpolation bug. But that left every other field unguarded, and a template slot reached the
+  // store verbatim: gap `ladder-rung-9-probe` persisted `created_at: "{{goal.created_at}}"`
+  // (observed 2026-08-05). A timestamp that is template syntax is not a lenient value, it is an
+  // unusable one — it silently breaks the gap-triple metrics, which sort and difference on these
+  // fields, and a string that never parses reads as "no data" rather than as a bug.
+  //
+  // Scrub rather than reject: the binding failed for one field, not for the gap, and dropping an
+  // otherwise-good gap would lose real signal. Falling back to the server clock is the same thing
+  // an absent field already does, so an unbound slot now behaves exactly like the field not being
+  // sent — which is the honest reading of "nothing was bound here".
+  const unbound = (v: unknown): boolean => typeof v === "string" && /\{\{[^}]*\}\}/.test(v);
+  const cleanTs = (v: unknown, fallback: string): string => (typeof v === "string" && v.length > 0 && !unbound(v) ? v : fallback);
+
   const gap: SubstrateGap = {
     ...incoming,
     status: incoming.status ?? "open",
-    created_at: incoming.created_at ?? now,
+    detected_at: cleanTs(incoming.detected_at, now),
+    created_at: cleanTs(incoming.created_at, now),
     updated_at: now,
+    ...(unbound(incoming.first_detected_at) ? { first_detected_at: undefined } : {}),
+    ...(unbound(incoming.closed_at) ? { closed_at: undefined } : {}),
   };
 
   // Serialize the ENTIRE read-modify-write: load, dedup/gate decisions, lineage

@@ -21,7 +21,7 @@ import { tmpdir } from "node:os";
 // is a test that changes the thing it is measuring.
 process.env["WORKSPACE_ROOT"] = mkdtempSync(`${tmpdir()}/dv-resolver-schema-`);
 const { CONTRACT_SHAPES, resolveResolverSchema } = await import("../../src/resolvers/resolver-schema.js");
-const { resolveSubstrateGapWrite } = await import("../../src/resolvers/substrate-gap.js");
+const { resolveSubstrateGap, resolveSubstrateGapWrite } = await import("../../src/resolvers/substrate-gap.js");
 
 const body = (r: unknown): Record<string, unknown> => (r as { body: Record<string, unknown> }).body;
 
@@ -109,5 +109,46 @@ describe("substrateGap_write accepts however an activity threads the data", () =
     // And the refusal must teach the caller the structure, since goal-host feeds this message
     // back verbatim as the retry correction.
     expect(String(body(res).message)).toContain("gap:{");
+  });
+});
+
+describe("uninterpolated template slots never reach the store as timestamps", () => {
+  // Observed 2026-08-05: gap `ladder-rung-9-probe` persisted created_at:"{{goal.created_at}}".
+  // The description gate checks id/category only — deliberately, since a real summary may QUOTE a
+  // placeholder when describing an interpolation bug — which left every other field unguarded.
+  // A timestamp that is template syntax silently breaks the gap-triple metrics, which sort and
+  // difference on these fields; a string that never parses reads as "no data", not as a bug.
+  it("replaces an unbound created_at/detected_at with a real timestamp", async () => {
+    const res = await resolveSubstrateGapWrite({
+      type: "substrateGap_write",
+      gap: {
+        id: "placeholder-scrub-probe",
+        category: "other",
+        source: "operator_audit",
+        status: "open",
+        detected_at: "{{goal.detected_at}}",
+        created_at: "{{goal.created_at}}",
+        summary: "Probe: unbound timestamp slots must not be persisted verbatim.",
+      },
+    } as never);
+    expect((res as { shape: string }).shape).not.toBe("structuredError");
+
+    const read = await resolveSubstrateGap({ type: "substrateGap", id: "placeholder-scrub-probe" } as never);
+    const gap = (body(read).gaps as Array<Record<string, unknown>>)[0]!;
+    for (const f of ["created_at", "detected_at"]) {
+      expect(String(gap[f])).not.toContain("{{");
+      // and it must be a timestamp something downstream can actually order by
+      expect(Number.isNaN(Date.parse(String(gap[f])))).toBe(false);
+    }
+  });
+
+  // The gate that DOES reject must keep rejecting — scrubbing timestamps must not become a
+  // licence to persist a gap with no identity.
+  it("still rejects an unbound id", async () => {
+    const res = await resolveSubstrateGapWrite({
+      type: "substrateGap_write",
+      gap: { id: "{{goal.id}}", category: "other", source: "operator_audit", status: "open", detected_at: new Date().toISOString(), summary: "Probe with an unbound id." },
+    } as never);
+    expect((res as { shape: string }).shape).toBe("structuredError");
   });
 });

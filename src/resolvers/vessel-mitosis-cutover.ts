@@ -1068,6 +1068,8 @@ for (let waited = 0; acquireBody.acquired === false && waited < leaseWaitMs; wai
   if (acquireBody.acquired !== false) console.log(`[mitosis-cutover] change_window lease acquired after waiting ${waited + 5000}ms`);
 }
     if (acquireBody.acquired === false) {
+      // Introduce a brief wait before returning cutoverDeferred
+      await new Promise(resolve => setTimeout(resolve, 10000));
       return {
         shape: "cutoverDeferred",
         body: {

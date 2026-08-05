@@ -276,10 +276,24 @@ export async function resolveGapToScenarioBridge(
     (isVesselAuthoring ? vesselOut : out).push({ gap_id: id, scenario_path: scenarioPath });
     priorityBreakdown[category] = (priorityBreakdown[category] ?? 0) + 1;
 
-    // DECISION→DISPATCH (SUBSTRATE_AS_MDP §8.5–8.6): vessel_authoring scenarios
-    // are routed to vessel-scaffold-trigger-tick so the scaffold loop actually
-    // executes instead of the queue accumulating unread.
-    if (isVesselAuthoring) {
+    const capabilityShape =
+      typeof meta["shape"] === "string" && meta["shape"].length > 0 ? meta["shape"] : null;
+    // UNBOUND-VARIABLE GUARD. Dispatching with a null capability_shape renders the
+    // goal as "scaffold + publish vessel  supplying  capability shape from a routed
+    // vessel-authoring gap" — the empty interpolations leave no vessel to author and
+    // no shape to supply, so the goal is unsatisfiable BY CONSTRUCTION. Measured
+    // 2026-08-05: 1,865 executions, 0 successes, thompson_beta 1866 on
+    // development-vessel:scaffold-and-publish-vessel, plus 153 more on a "repaired"
+    // variant — together 21% of ALL execution in the substrate, none of it able to
+    // reach. Thompson correctly drove the posterior to zero; the arm kept running
+    // because this dispatcher re-minted the goal regardless. Never mint work that
+    // cannot succeed: leave the gap open and let it dispatch once the shape binds.
+    if (isVesselAuthoring && !capabilityShape) {
+      console.warn(
+        `[gap-to-scenario] vessel-authoring dispatch SKIPPED for ${id}: gap carries no capability shape`,
+      );
+    }
+    if (isVesselAuthoring && capabilityShape) {
       try {
         const { GOAL_HOST_VESSEL_ENDPOINT } = await import("../config.js");
         await fetch(`${GOAL_HOST_VESSEL_ENDPOINT}/run-goal`, {
@@ -289,8 +303,7 @@ export async function resolveGapToScenarioBridge(
             targetTemplateId: "development-vessel:scaffold-and-publish-vessel",
             variables: {
               scenario_id: safeId,
-              capability_shape:
-                typeof meta["shape"] === "string" ? meta["shape"] : null,
+              capability_shape: capabilityShape,
             },
           }),
         });

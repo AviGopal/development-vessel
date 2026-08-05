@@ -33,7 +33,18 @@ import type { ResolverResult } from "./types.js";
 
 const DISCOVERY_ENDPOINT = process.env.DISCOVERY_VESSEL_ENDPOINT ?? "http://127.0.0.1:8100";
 const METABOB_API_KEY = process.env.METABOB_API_KEY ?? process.env.API_KEY ?? "";
-const RUNTIME_ROOT = process.env.MITOSIS_REPO_ROOT ?? "/workspace/git/super-repo";
+// WHICH TREE TO VERIFY — this choice decides whether the verdict means anything.
+// Three copies of a vessel's source coexist in the container and they DRIFT:
+//   /workspace/git/vessels/<v>            pull-sync's per-vessel clone — tracks origin/dev
+//   /workspace/git/super-repo/repos/<v>   a submodule of the super-repo — lags badly
+//   /vessels/<v>                          the deployed runtime mirror, no repos/ prefix
+// Measured while bringing this resolver up: the per-vessel clone was at a9742a9 (current)
+// while the super-repo submodule was still at 42547b2 from two days earlier. Verifying the
+// submodule reported 9 failures that no longer existed on the landed code — a confidently
+// wrong post-landing verdict, which would have filed a regression gap against a commit that
+// did not cause it. Prefer the per-vessel clone; fall back to the submodule only if absent.
+const VESSEL_CLONES_ROOT = process.env.MITOSIS_VESSEL_CLONES ?? "/workspace/git/vessels";
+const SUPER_REPO_ROOT = process.env.MITOSIS_REPO_ROOT ?? "/workspace/git/super-repo";
 const DEFAULT_TIMEOUT_MS = 240_000;
 
 async function discoverShellEndpoint(): Promise<string | null> {
@@ -76,12 +87,14 @@ export function parseBunSummary(raw: string): { total: number; pass: number; fai
   const pass = lastNum("pass");
   const fail = lastNum("fail");
   const skip = lastNum("skip");
-  const failingTests: string[] = [];
+  // Deduplicate: bun prints each failure twice (inline, then again in the summary block),
+  // which doubled the list and made 9 real failures look like 18.
+  const seen = new Set<string>();
   for (const line of raw.split("\n")) {
     if (!/^\s*\(fail\)/.test(line)) continue;
-    failingTests.push(line.replace(/\s*\[[\d.]+m?s\]\s*$/, "").trim());
+    seen.add(line.replace(/\s*\[[\d.]+m?s\]\s*$/, "").trim());
   }
-  return { total: pass + fail + skip, pass, fail, skip, failingTests };
+  return { total: pass + fail + skip, pass, fail, skip, failingTests: [...seen] };
 }
 
 export async function resolveTestSuite(pointer: Record<string, unknown>): Promise<ResolverResult> {
@@ -90,8 +103,10 @@ export async function resolveTestSuite(pointer: Record<string, unknown>): Promis
     return { shape: "structuredError", body: { resolver: "test_suite", detail: "vessel is required (e.g. 'repos/goal-host-vessel')" } };
   }
   // Accept both "repos/<v>" and a bare vessel name.
-  const rel = rawVessel.startsWith("repos/") ? rawVessel : `repos/${rawVessel}`;
-  const vesselAbs = `${RUNTIME_ROOT}/${rel}`;
+  const name = rawVessel.replace(/^repos\//, "");
+  const rel = `repos/${name}`;
+  const preferredRoot = `${VESSEL_CLONES_ROOT}/${name}`;
+  const fallbackRoot = `${SUPER_REPO_ROOT}/repos/${name}`;
   const timeoutMs = typeof pointer.timeout_ms === "number" && pointer.timeout_ms > 0 ? pointer.timeout_ms : DEFAULT_TIMEOUT_MS;
   const budgetSec = Math.ceil(timeoutMs / 1000);
 
@@ -102,14 +117,21 @@ export async function resolveTestSuite(pointer: Record<string, unknown>): Promis
 
   // `|| true` so a red suite returns its OUTPUT rather than an error: a failing suite is a
   // measurement, not a resolver fault. The timeout bounds a hanging suite.
-  const command = `cd ${JSON.stringify(vesselAbs)} && ([ -d node_modules ] || bun install >/dev/null 2>&1; timeout ${budgetSec} bun test 2>&1 || true)`;
+  // Resolve the root in the shell so the existence check happens where the trees live, and
+  // ECHO the chosen root + its HEAD into the output — a verdict about "the landed code" is
+  // only readable if the trace says which tree and which commit was actually measured.
+  const command =
+    `ROOT=${JSON.stringify(preferredRoot)}; [ -d "$ROOT" ] || ROOT=${JSON.stringify(fallbackRoot)}; ` +
+    `echo "VERIFIED_ROOT=$ROOT"; echo "VERIFIED_HEAD=$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)"; ` +
+    `cd "$ROOT" && ([ -d node_modules ] || timeout 120 bun install >/dev/null 2>&1; timeout ${budgetSec} bun test 2>&1 || true)`;
 
   let raw = "";
   try {
     const res = await fetch(shellEndpoint, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `ApiKey ${METABOB_API_KEY}` },
-      body: JSON.stringify({ impulse: { pointer: { type: "shell", command, cwd: RUNTIME_ROOT } } }),
+      // cwd is only the shell's starting directory; the command cd's to the resolved ROOT itself.
+      body: JSON.stringify({ impulse: { pointer: { type: "shell", command, cwd: SUPER_REPO_ROOT } } }),
       signal: AbortSignal.timeout(timeoutMs + 30_000),
     });
     const j = (await res.json().catch(() => ({}))) as { stdout?: unknown; body?: { stdout?: unknown } };
@@ -132,6 +154,10 @@ export async function resolveTestSuite(pointer: Record<string, unknown>): Promis
     shape: "test_suite",
     body: {
       vessel: rel,
+      // WHICH tree and commit were measured. Without these a suite result cannot be tied to
+      // the code it describes, and a stale-tree verdict is indistinguishable from a real one.
+      verified_root: raw.match(/^VERIFIED_ROOT=(.+)$/m)?.[1]?.trim() ?? null,
+      verified_head: raw.match(/^VERIFIED_HEAD=(.+)$/m)?.[1]?.trim() ?? null,
       landed_sha: typeof pointer.landed_sha === "string" ? pointer.landed_sha : null,
       gap_id: typeof pointer.gap_id === "string" ? pointer.gap_id : null,
       proposal_id: typeof pointer.proposal_id === "string" ? pointer.proposal_id : null,

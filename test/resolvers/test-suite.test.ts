@@ -48,6 +48,16 @@ describe("parseBunSummary", () => {
     expect(r.failingTests).toEqual(["(fail) repairSignatureOf > is deterministic"]);
   });
 
+  // bun prints each failure twice — inline, then again in the summary block. Without
+  // dedupe, 9 real failures were reported as 18, overstating a regression to whatever reads
+  // this shape.
+  it("deduplicates failures that bun prints twice", () => {
+    const dup = `(fail) a > one [0.1ms]\n(fail) b > two [0.2ms]\n 5 pass\n 2 fail\n(fail) a > one [0.1ms]\n(fail) b > two [0.2ms]\n`;
+    const r = parseBunSummary(dup);
+    expect(r.failingTests).toEqual(["(fail) a > one", "(fail) b > two"]);
+    expect(r.fail).toBe(2);
+  });
+
   it("returns zeros when the output carries no summary at all", () => {
     const r = parseBunSummary("bun: command not found");
     expect(r).toMatchObject({ total: 0, pass: 0, fail: 0, skip: 0 });

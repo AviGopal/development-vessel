@@ -350,7 +350,29 @@ async function callTool(localToolsEndpoint: string, tool: string, args: Record<s
     const body = await res.json();
     const bodyObj = body as Record<string, unknown>;
     const errored = typeof bodyObj?.error === "string" || (bodyObj as { shape?: string })?.shape === "structuredError" || bodyObj?.success === false;
-    if (errored) return { ok: false, body: { error: 'Run refused due to poisoned baseline' } }; return { ok: true, body };
+    if (errored) {
+      // PROPAGATE THE REAL CAUSE. This used to relabel EVERY tool failure — any error
+      // body, any structuredError, any success:false, from any of the tools this loop
+      // calls — as "Run refused due to poisoned baseline". That string names one
+      // specific condition (live source diverged from its clone before an edit), and
+      // it was being reported for causes that had nothing to do with it.
+      //
+      // Measured 2026-08-05: a code_search call failed here and the run was reported as
+      // a poisoned baseline. The live tree was intact — vessel-daemon.ts was 14,629
+      // bytes live and 14,629 in the clone, and a full scan of the vessel's src found
+      // no truncated file at all. The real error was discarded, so the failure was not
+      // just swallowed, it was actively misdirected: it points the reader at source
+      // corruption and at the guard that detects it, instead of at the tool that broke.
+      //
+      // Keep the tool name so the failure is attributable, and cap the detail so a
+      // large error body cannot flood the trace.
+      const detail =
+        typeof bodyObj?.error === "string" ? bodyObj.error
+        : typeof (bodyObj as { detail?: unknown })?.detail === "string" ? String((bodyObj as { detail: string }).detail)
+        : JSON.stringify(body ?? null).slice(0, 400);
+      return { ok: false, body: { error: `${tool} failed: ${detail}` } };
+    }
+    return { ok: true, body };
   } catch (err) { return { ok: false, body: { error: (err as Error).message } }; }
 }
 

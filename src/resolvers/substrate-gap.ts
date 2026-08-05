@@ -427,7 +427,13 @@ export async function resolveSubstrateGapWrite(
     const existing = gaps[existingIdx]!;
         summaryChanged = existing.summary !== gap.summary;
     gap.id = existing.id;
-    gap.created_at = existing.created_at;
+    // Preserve the original creation time — but run it through the SAME scrub as an incoming
+    // value. Restoring `existing.created_at` blind means a row poisoned before the scrub landed
+    // can never heal: every subsequent write faithfully re-preserves the literal
+    // "{{goal.created_at}}" it already holds. Observed on gap `ladder-rung-9-probe`, which
+    // survived a full rewrite still carrying the placeholder. A self-healing store is the point
+    // of scrubbing at the writer rather than at the reader.
+    gap.created_at = cleanTs(existing.created_at, gap.created_at ?? now);
     // PRESERVE the loop's learned failure-tracking across re-emissions. A detector
     // (e.g. surgical-gap-scan) re-emits the same logical gap every cycle with fresh
     // classification_metadata that carries NO failed_attempts; a blind overwrite wiped

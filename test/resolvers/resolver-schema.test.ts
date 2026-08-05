@@ -152,3 +152,26 @@ describe("uninterpolated template slots never reach the store as timestamps", ()
     expect((res as { shape: string }).shape).toBe("structuredError");
   });
 });
+
+describe("a poisoned row heals on the next write", () => {
+  // The update path preserves the ORIGINAL created_at, which is correct — but restoring it blind
+  // meant a row written before the scrub landed could never recover: every later write faithfully
+  // re-preserved the literal "{{goal.created_at}}" it already held. Observed on the real gap
+  // `ladder-rung-9-probe`, which survived a full rewrite still carrying the placeholder.
+  // Scrubbing at the writer is only worth doing if it also heals what is already stored.
+  it("scrubs a stored placeholder created_at instead of preserving it forever", async () => {
+    const base = {
+      id: "heal-probe", category: "other", source: "operator_audit", status: "open",
+      detected_at: new Date().toISOString(),
+    };
+    // First write poisons the row the way the pre-fix writer would have.
+    await resolveSubstrateGapWrite({ type: "substrateGap_write", gap: { ...base, created_at: "{{goal.created_at}}", summary: "First write, poisoned created_at." } } as never);
+    // Second write must HEAL it, not re-preserve it.
+    await resolveSubstrateGapWrite({ type: "substrateGap_write", gap: { ...base, summary: "Second write should heal the stored placeholder." } } as never);
+
+    const read = await resolveSubstrateGap({ type: "substrateGap", id: "heal-probe" } as never);
+    const gap = (body(read).gaps as Array<Record<string, unknown>>)[0]!;
+    expect(String(gap.created_at)).not.toContain("{{");
+    expect(Number.isNaN(Date.parse(String(gap.created_at)))).toBe(false);
+  });
+});

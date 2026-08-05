@@ -537,6 +537,25 @@ export async function resolvePatchWithTools(pointer: PatchWithToolsPointer): Pro
         `${clonePath} (${cloneSrc.length}B) BEFORE any edit — rollback would restore the live state, not the git state. ` +
         `Either a prior run left un-reverted edits, or a cutover has landed and the clone has not pulled yet.`,
       );
+      // REFUSE — do not merely report. Detecting and continuing is what turned this into
+      // an outage on 2026-08-05: live gap-to-scenario-bridge.ts was 11,489B against a
+      // 15,822B clone, no longer parsed, and development-vessel crash-looped for several
+      // minutes — while this very line had already named the condition exactly. Worse,
+      // resetTarget() writes baseContent back on rollback, so proceeding on a poisoned
+      // baseline CEMENTS the corruption this message warns about.
+      //
+      // The detect-only stance above is right about the cutover window — live is
+      // legitimately AHEAD of the clone until it pulls — so this deliberately does NOT
+      // auto-restore. It refuses only when live is clearly DAMAGED rather than ahead: a
+      // legitimately-ahead file still parses and is not dramatically smaller than the
+      // clone it was built from. Repair stays owned by pull-sync / mirror-to-live.
+      if (baseContent.length < cloneSrc.length * 0.75) {
+        return structuredError(
+          `poisoned baseline: live ${liveSrcPath} is ${baseContent.length}B vs clone ${cloneSrc.length}B ` +
+          `(under 75%) — refusing to edit damaged source; restore it with mirror-to-live`,
+          { stage: "baseline", live_bytes: baseContent.length, clone_bytes: cloneSrc.length },
+        );
+      }
     }
   }
   const authoringMarkerPath = await writeAuthoringMarker(workspaceRoot, vessel, pointer.target_file);

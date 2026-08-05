@@ -97,6 +97,10 @@ export const config = {
       "substrate_health_tick",
       "compose_topology_tick",
       "failure_mode_matrix_score",
+      // Post-landing verification of a landed change, run IN-CONTAINER and reported as a
+      // shape so change fitness is observable to the learning loop instead of living in an
+      // external CI webhook or a host-side log.
+      "test_suite",
       "boredom_enqueue",
       "rhythm_conductor_tick",
       "rhythm_reality_sync",

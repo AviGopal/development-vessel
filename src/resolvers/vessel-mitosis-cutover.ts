@@ -18,6 +18,7 @@ import {
 import { createHash } from "node:crypto";
 import type { ResolverResult } from "./types.js";
 import { resolveSubstrateGap, resolveSubstrateGapWrite } from "./substrate-gap.js";
+import { resolveTestSuite } from "./test-suite.js";
 import { runBehavioralVerification } from "./behavioral-verification.js";
 import { resolveActivateSubstrateScript } from "./activate-substrate-script.js";
 import { resolveMaintenanceLeaseWrite } from "./maintenance-lease";
@@ -2022,6 +2023,64 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
     } catch (err) {
       console.warn("[mitosis-cutover] behavioral-verification errored (non-fatal):", err);
     }
+  }
+
+  // Post-landing SUITE verification, in-band (gap change-fitness-lane-is-out-of-band-github-ci).
+  //
+  // The behavioral verification above only runs when the driving gap carries a
+  // verification_spec, and returns {ran:false} otherwise — which is the common case, so most
+  // landings were verified by nothing that the substrate could observe. The lanes that DID
+  // check a landed change both sat outside the system: GitHub Actions (runs in no vessel,
+  // untraced, outcome arrives as an env-gated webhook) and host-pull-sync.sh (host-side,
+  // detection-only, writes an operator log and emits no shape). External CI is an antipattern
+  // here unless it runs on a compliant container vessel.
+  //
+  // Run the landed vessel's own suite through the test_suite resolver — in-container, via the
+  // same shell primitive feature_compose already verifies with — and emit the outcome as a
+  // SHAPE keyed to the landed sha. That is what makes the fitness of a change computable from
+  // activity outcomes rather than inferable from an external badge. Best-effort throughout:
+  // this observes the landing, it does not gate it, and a reporting failure must never fail a
+  // cutover that already succeeded.
+  try {
+    const suite = await resolveTestSuite({
+      vessel: vessel_name,
+      landed_sha: newSha,
+      gap_id: gapId,
+      proposal_id: proposalId,
+    });
+    const sb = (suite as { body?: Record<string, unknown> }).body ?? {};
+    // Carry it on the emitted cutoverApplied shape (and the applied log) so a landing and
+    // its verification are ONE observable record. Two records that must be joined by hand
+    // is how the outcome of a change stayed unattributable in the first place.
+    (appliedBody as Record<string, unknown>).post_land_suite = {
+      ran: sb.ran ?? false,
+      pass: sb.pass ?? null,
+      fail: sb.fail ?? null,
+      skip: sb.skip ?? null,
+    };
+    console.log(
+      `[mitosis-cutover] post-land suite vessel=${vessel_name} commit=${String(newSha).slice(0, 10)} ran=${String(sb.ran)} pass=${String(sb.pass)} fail=${String(sb.fail)}`,
+    );
+    // A red suite after landing is a regression signal the system should act on, not a log
+    // line. Reuse the gap store (already advertised, already traced) rather than inventing a
+    // second alarm channel.
+    if (sb.ran === true && typeof sb.fail === "number" && sb.fail > 0) {
+      await resolveSubstrateGapWrite({
+        type: "substrateGap_write",
+        gap: {
+          id: `post-land-suite-red-${String(vessel_name).replace(/[^a-zA-Z0-9]+/g, "-")}`,
+          category: "systematic_failure",
+          source: "substrate_detected",
+          summary:
+            `Post-landing suite for ${vessel_name} reports ${String(sb.fail)} failing / ${String(sb.pass)} passing after ${String(newSha).slice(0, 10)} ` +
+            `(gap ${gapId}, proposal ${proposalId}). Failing: ${Array.isArray(sb.failingTests) ? (sb.failingTests as string[]).slice(0, 5).join(" ; ").slice(0, 400) : "n/a"}`,
+          detected_at: appliedAt,
+          status: "open",
+        },
+      } as never);
+    }
+  } catch (err) {
+    console.warn("[mitosis-cutover] post-land suite verification errored (non-fatal):", err);
   }
   // Land->close credit for the apply-proposal->cutover path (gap
   // apply-proposal-as-patch-success-earns-no-gap-triple-credit). The ONLY gap

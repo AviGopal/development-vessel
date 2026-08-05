@@ -39,6 +39,7 @@ import { resolveCoverageTick } from "../resolvers/coverage-tick.js";
 import { resolveSubstrateHealthTick } from "../resolvers/substrate-health-tick.js";
 import { resolveComposeTopologyTick } from "../resolvers/compose-topology-tick.js";
 import { resolveFailureModeMatrixScore } from "../resolvers/failure-mode-matrix-score.js";
+import { resolveTestSuite } from "../resolvers/test-suite.js";
 import { resolveBoredomEnqueue } from "../resolvers/boredom-enqueue.js";
 import { resolveRhythmConductorTick } from "../resolvers/rhythm-conductor-tick.js";
 import { resolveRhythmRealitySync } from "../resolvers/rhythm-reality-sync.js";
@@ -323,6 +324,8 @@ async function dispatchInner(pointer: AnyPointer): Promise<ResolverResult> {
       return resolveComposeTopologyTick(p as Parameters<typeof resolveComposeTopologyTick>[0]);
     case "failure_mode_matrix_score":
       return resolveFailureModeMatrixScore(p as Parameters<typeof resolveFailureModeMatrixScore>[0]);
+    case "test_suite":
+      return resolveTestSuite(p as Parameters<typeof resolveTestSuite>[0]);
     case "boredom_enqueue":
       return resolveBoredomEnqueue(p as Parameters<typeof resolveBoredomEnqueue>[0]);
     case "rhythm_conductor_tick":

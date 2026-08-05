@@ -1946,7 +1946,7 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
           const leaseFile = leasePath();
           const leaseMark = `"holder": "cutover:${vessel_name}"`;
           const proc = Bun.spawnSync(
-            [sysdRun, `--on-active=${delaySec}s`, `--unit=${tsUnit}`, "--collect", "/bin/sh", "-c", `if grep -qF '${leaseMark}' '${leaseFile}' 2>/dev/null; then rm -f '${leaseFile}'; fi; exec systemctl restart '${unit}'`],
+            [sysdRun, `--on-active=${delaySec}s`, `--unit=${tsUnit}`, "--collect", "/bin/sh", "-c", `rm -f '${leaseFile}' && exec systemctl restart '${unit}'`],
             { stdout: "pipe", stderr: "pipe" },
           );
           const ok = (proc.exitCode ?? 1) === 0;

@@ -47,7 +47,16 @@ let devDraining = false;
 async function developmentVesselDrain(sig: string): Promise<void> {
   if (devDraining) return;
   devDraining = true;
-  const deadline = Date.now() + Number(process.env["DEV_VESSEL_DRAIN_MS"] ?? 75000);
+  // Honour VESSEL_DRAIN_MS too: the live drop-in sets exactly that name, and it had
+// no reader anywhere in the fleet — a knob that is configured and consumed by
+// nothing. Prefer the vessel-specific name when present, fall back to the shared
+// one, and default to 240s rather than 75s. The 75s default was chosen against the
+// 90s DefaultTimeoutStopSec this unit used to inherit; its drop-in now allows 300s,
+// so the old default abandoned three quarters of the available budget and killed
+// composes that would have finished. The ordering invariant still holds and is the
+// whole point: drain budget (240s) < stop timeout (300s), so this deadline fires
+// before systemd's SIGKILL and the process exits on its own terms.
+const deadline = Date.now() + Number(process.env["DEV_VESSEL_DRAIN_MS"] ?? process.env["VESSEL_DRAIN_MS"] ?? 240000);
   const markerDir = "/workspace/authoring-inflight";
   const freshMs = Number(process.env["DEV_VESSEL_DRAIN_FRESH_MS"] ?? 600000);
   try {

@@ -1922,8 +1922,31 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
       } else {
         try {
           const sysdRun = process.env["SYSTEMD_RUN_CMD"] ?? "systemd-run";
+          // RELEASE-BEFORE-RESTART (2026-08-05). The change_window lease is released ONLY by
+          // the in-process `finally` in runGitAwareCutover. This timer RESTARTS the vessel —
+          // killing that very process — so on a SELF-cutover the release is unreachable BY
+          // CONSTRUCTION and the lease leaks for its full 600s TTL. Measured: acquired
+          // 08:22:55.815, unit Stopped 08:23:06, holder pid gone, lease file never rewritten.
+          // substrate-pull-sync and self-recovery-tick both defer their ENTIRE run on this
+          // lease, so each leak silently froze the deploy channel: the in-container super-repo
+          // clone sat 4 commits behind for over two hours while every tick logged "Finished".
+          // "The cleanup is in a finally" is not a proof of release when something can kill
+          // the process. Raising MITOSIS_SELF_RESTART_DELAY_S only moves the race.
+          //
+          // The transient unit is owned by PID1, so it always runs — let it free the lease
+          // itself. HOLDER-SCOPED, never unconditional: the acquire is wrapped in a fail-open
+          // catch, so this code can run holding NO lease, and an unconditional rm would then
+          // delete a FOREIGN holder's lease (db_admin's trace-store swap, or proposal:<id>)
+          // and release pull-sync into a live mid-swap — the exact corruption this mutex
+          // exists to prevent. leasePath() is IMPORTED rather than re-derived: its fallback is
+          // config.ts's WORKSPACE_ROOT, not process.cwd(), and duplicating that formula is how
+          // it would silently drift. writeLease uses JSON.stringify(lease, null, 2), so the
+          // fixed-string match below — with the space after the colon — is exact.
+          const { leasePath } = await import("./maintenance-lease.js");
+          const leaseFile = leasePath();
+          const leaseMark = `"holder": "cutover:${vessel_name}"`;
           const proc = Bun.spawnSync(
-            [sysdRun, `--on-active=${delaySec}s`, `--unit=${tsUnit}`, "--collect", "systemctl", "restart", unit],
+            [sysdRun, `--on-active=${delaySec}s`, `--unit=${tsUnit}`, "--collect", "/bin/sh", "-c", `if grep -qF '${leaseMark}' '${leaseFile}' 2>/dev/null; then rm -f '${leaseFile}'; fi; exec systemctl restart '${unit}'`],
             { stdout: "pipe", stderr: "pipe" },
           );
           const ok = (proc.exitCode ?? 1) === 0;

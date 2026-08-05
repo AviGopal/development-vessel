@@ -1046,7 +1046,27 @@ export async function resolveVesselMitosisCutover(
       holder: `cutover:${String(pointer.vessel_name ?? "unknown")}`,
       ttl_ms: 600000,
     });
-    const acquireBody = (acquireResult as { body?: { acquired?: boolean; held_by?: string; token?: string } }).body ?? {};
+    let acquireBody = (acquireResult as { body?: { acquired?: boolean; held_by?: string; token?: string } }).body ?? {};
+// BOUNDED WAIT before giving up. Deferring instantly discards work that has
+// already applied, typechecked, passed its suite and cleared the semantic gate
+// — and the `retry_after_ms` hint emitted below has ONE producer and ZERO
+// consumers, so nothing ever comes back for it. The common collision is another
+// cutover finishing within seconds, so wait for it rather than throwing the
+// result away. Bounded at 90s against a 600s lease TTL: long enough to absorb a
+// normal cutover, far short of the TTL so a genuinely long holder still yields a
+// prompt, honest deferral through the untouched branch below.
+const leaseWaitMs = Number(process.env["CUTOVER_LEASE_WAIT_MS"] ?? 90000);
+for (let waited = 0; acquireBody.acquired === false && waited < leaseWaitMs; waited += 5000) {
+  await new Promise((r) => setTimeout(r, 5000));
+  const retryAcquire = await resolveMaintenanceLeaseWrite({
+    type: "maintenanceLease_write",
+    op: "acquire",
+    holder: `cutover:${String(pointer.vessel_name ?? "unknown")}`,
+    ttl_ms: 600000,
+  });
+  acquireBody = (retryAcquire as { body?: { acquired?: boolean; held_by?: string; token?: string } }).body ?? {};
+  if (acquireBody.acquired !== false) console.log(`[mitosis-cutover] change_window lease acquired after waiting ${waited + 5000}ms`);
+}
     if (acquireBody.acquired === false) {
       return {
         shape: "cutoverDeferred",

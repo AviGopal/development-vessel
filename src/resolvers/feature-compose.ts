@@ -1583,6 +1583,28 @@ function testFailureSet(raw: string): Set<string> {
   return out;
 }
 
+/**
+ * How many tests PASSED, from bun's summary (" 155 pass"). Returns null when no summary
+ * line is present (suite absent, or the run died before summarizing).
+ *
+ * WHY a count and not just the failure set: a failure-set delta is blind in the direction
+ * that matters most. Deleting a test file, or a top-level throw in an imported module,
+ * makes tests DISAPPEAR rather than fail — the (fail) set SHRINKS, so
+ * `newTest = current \ baseline` is empty and the gate greens a draft that took passing
+ * tests to zero. Confirmed by controlled repro: a 2-file suite at 2 pass / 0 fail, then a
+ * module-load throw in one file, yields FEWER (fail) lines, not more. A gate that only
+ * watches failures cannot see coverage being deleted — which is the cheapest way for an
+ * autonomous draft to "fix" a failing test.
+ */
+function testPassCount(raw: string): number | null {
+  let last: number | null = null;
+  for (const line of raw.split("\n")) {
+    const m = line.match(/^\s*(\d+)\s+pass\b/);
+    if (m && m[1]) last = parseInt(m[1], 10);   // last summary wins (one per `bun test` run)
+  }
+  return last;
+}
+
 function classifyComposeFailure(appliedOps: Array<{ ok: boolean; detail?: string }>, verifyResults: Array<{ ok: boolean; output: string }>, semanticReason: string): string {
   const ap = appliedOps.find((a) => !a.ok);
   if (ap) {
@@ -2121,6 +2143,7 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
   // Same baseline treatment for the SUITE (see testFailureSet): capture which tests are
   // already red on the untouched tree, so verify blames the draft only for NEW failures.
   const baselineTestFails = new Map<string, Set<string>>();
+  const baselineTestPass = new Map<string, number>();
   for (const v of touched) {
     const vAbs = vesselRoot(v);
     const b = await callTool(toolsEndpoint, "shell", { command: `cd ${JSON.stringify(vAbs)} && ([ -d node_modules ] || bun install >/dev/null 2>&1; bun run typecheck 2>&1)`, cwd: REPO_ROOT });
@@ -2128,7 +2151,11 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
     // Bounded so a hanging/absent suite can never stall the compose path; a vessel with
     // no tests just yields an empty baseline and an empty post-set, i.e. no gate.
     const bt = await callTool(toolsEndpoint, "shell", { command: `cd ${JSON.stringify(vAbs)} && (timeout 240 bun test 2>&1 || true)`, cwd: REPO_ROOT });
-    baselineTestFails.set(v, testFailureSet(String((bt.body as { stdout?: unknown })?.stdout ?? "")));
+    const btRaw = String((bt.body as { stdout?: unknown })?.stdout ?? "");
+    baselineTestFails.set(v, testFailureSet(btRaw));
+    // Also record how many PASSED, so verify can catch tests that VANISH (see testPassCount).
+    const bp = testPassCount(btRaw);
+    if (bp !== null) baselineTestPass.set(v, bp);
   }
 
   for (const [v, errs] of baselineTsErrors) { if (errs.size === 0) continue; try { await fetch(`${DEV_VESSEL_ENDPOINT}/v2/impulses/resolve`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ impulse: { type: "substrateGap_write", gap: { id: "baseline-typecheck-broken-" + v.replace(/[^a-zA-Z0-9]+/g, "-"), category: "systematic_failure", source: "substrate_detected", summary: "feature_compose found the UNTOUCHED baseline of " + v + " failing typecheck BEFORE drafting (" + errs.size + " pre-existing tsc errors, e.g. " + Array.from(errs).slice(0, 3).join(" | ").slice(0, 400) + "). Environment fault (stale runtime copy or missing module), not a drafter fault: re-sync this vessel source from its repo baseline. Draft verdicts on this vessel use baseline-delta blame until the baseline is clean.", detected_at: new Date().toISOString(), status: "open" } } }) }); console.log("[feature-compose] baseline-broken environment gap filed for " + v); } catch { /* advisory */ } }
@@ -2387,9 +2414,20 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
     const curTest = testFailureSet(raw);
     const baseTest = baselineTestFails.get(v) ?? new Set<string>();
     const newTest = [...curTest].filter((t) => !baseTest.has(t));
-    const testOk = newTest.length === 0;
+    // Tests that VANISH are as bad as tests that fail, and the failure-set delta cannot see
+    // them: deleting a test file or breaking module load SHRINKS the (fail) set, so newTest is
+    // empty and the draft greens. Require the pass count not to regress. Enforced only when
+    // BOTH counts are known, so a vessel with no suite — or a run that died before printing a
+    // summary — never blocks on a missing number.
+    const basePass = baselineTestPass.get(v);
+    const curPass = testPassCount(raw);
+    const passRegressed = basePass !== undefined && curPass !== null && curPass < basePass;
+    const testOk = newTest.length === 0 && !passRegressed;
     const ok = tcOk && sdExit === 0 && testOk;
-    const detail = testOk ? "" : ` | NEW test failures introduced by this draft (${newTest.length}): ${newTest.slice(0, 5).join(" ; ").slice(0, 600)}`;
+    const detail = testOk ? "" : [
+      newTest.length > 0 ? ` | NEW test failures introduced by this draft (${newTest.length}): ${newTest.slice(0, 5).join(" ; ").slice(0, 600)}` : "",
+      passRegressed ? ` | PASSING TESTS DISAPPEARED: ${basePass} -> ${curPass} (a draft must not delete coverage or break module load to go green)` : "",
+    ].join("");
     return { vessel: v, errors: ok ? 0 : "verify", exit_code: tcExit, ok, output: (raw + detail).trim() };
   };
   let verify: Array<{ vessel: string; errors: number | string; exit_code: number | null; ok: boolean; output: string }> = [];

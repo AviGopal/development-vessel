@@ -1945,8 +1945,33 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
           const { leasePath } = await import("./maintenance-lease.js");
           const leaseFile = leasePath();
           const leaseMark = `"holder": "cutover:${vessel_name}"`;
+          // QUIESCE BEFORE RESTART (2026-08-05). Per-compose worktree isolation was added so
+          // concurrent composes no longer stomp each other -- but this self-restart fired
+          // unconditionally delaySec after the cutover, blind to whatever ELSE was in flight.
+          // Measured: the timer armed by a compose that began 23:13:06 fired at 23:16:11 and
+          // destroyed two UNRELATED composes mid-apply. The victim is never the compose that
+          // armed the timer; that one has already returned. development-vessel's own SIGTERM
+          // drain cannot save them either -- it reports "0 authoring runs in flight" because
+          // the marker is not written until the apply stage. The goal-host branch below
+          // already solves exactly this by draining before it schedules; this is the same
+          // guard for the self-cutover path -- REUSE, not a new mechanism. Bounded and
+          // fail-open: after the cap we restart anyway, so a stale marker can delay a deploy
+          // but can never block it forever.
+          //
+          // The lease removal is now HOLDER-SCOPED, which the comment above has always
+          // claimed and the code did NOT do: `leaseMark` was computed and never used, leaving
+          // an unconditional `rm -f` that could delete a FOREIGN holder's lease (db_admin's
+          // trace-store swap, or proposal:<id>) and release pull-sync into a live mid-swap --
+          // exactly the corruption that comment warns against.
+          const quiesceMaxS = Number(process.env["MITOSIS_SELF_RESTART_QUIESCE_MAX_S"] ?? "600");
+          const quiesceIters = Math.max(0, Math.floor(quiesceMaxS / 5));
+          const markerDir = `${process.env["WORKSPACE_ROOT"] ?? "/workspace"}/authoring-inflight`;
+          const restartScript =
+            `if grep -q '${leaseMark}' '${leaseFile}' 2>/dev/null; then rm -f '${leaseFile}'; fi; `
+            + `i=0; while [ "$i" -lt ${quiesceIters} ] && [ -n "$(ls -A '${markerDir}' 2>/dev/null)" ]; do sleep 5; i=$((i+1)); done; `
+            + `exec systemctl restart '${unit}'`;
           const proc = Bun.spawnSync(
-            [sysdRun, `--on-active=${delaySec}s`, `--unit=${tsUnit}`, "--collect", "/bin/sh", "-c", `rm -f '${leaseFile}' && exec systemctl restart '${unit}'`],
+            [sysdRun, `--on-active=${delaySec}s`, `--unit=${tsUnit}`, "--collect", "/bin/sh", "-c", restartScript],
             { stdout: "pipe", stderr: "pipe" },
           );
           const ok = (proc.exitCode ?? 1) === 0;

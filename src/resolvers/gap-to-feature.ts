@@ -760,20 +760,64 @@ function pickMostLandable(gaps: Record<string, unknown>[]): Record<string, unkno
   // failure lessons — a cited blocker outranks its dependents, so a broken sensor
   // (missing_capability others depend on) self-prioritizes because it blocks
   // everything downstream. Computed from the gaps already in hand: no extra reads.
+  // IMPACT MUST BE INDEPENDENT EVIDENCE (2026-08-06). `cited` counted ANY other open gap
+  // whose summary contains this gap's id. The goal-host routing path mints children whose
+  // summary IS the parent's goal text prefixed `Close substrate gap <parent-id>:`, so an
+  // 80-generation prefix chain made every member cite its own ancestors. Measured on the
+  // live store (651 admitted): 179 gaps sat at the x2.0 impact cap and ALL 179 were
+  // edit_intent_route citing each other, while 0 of the 334 non-route gaps ever reached it.
+  // A term meant to surface a BLOCKER was surfacing the one family that manufactures its
+  // own citations. A citer in the SAME category is not independent evidence; count only
+  // cross-category citations, which is exactly the "other kinds of work are blocked on
+  // this" signal the term was introduced for.
   const impactOf = (g: Record<string, unknown>): number => {
     const id = String(g.id ?? "").toLowerCase();
     const gm = (g.classification_metadata ?? g.metadata ?? {}) as Record<string, unknown>;
     const cap = String(gm.failing_capability ?? "").toLowerCase();
+    const myCat = String(g.category ?? "");
     let cited = 0;
     for (const other of gaps) {
-      if (other === g) continue;
+      if (other === g || String(other.category ?? "") === myCat) continue;
       const om = (other.classification_metadata ?? other.metadata ?? {}) as Record<string, unknown>;
       const hay = (String(other.summary ?? "") + " " + JSON.stringify(om.per_gap_failure_lessons ?? om.failure_lessons ?? om.gap_lessons ?? "")).toLowerCase();
       if ((id.length > 8 && hay.includes(id)) || (cap.length > 3 && hay.includes(cap))) cited++;
     }
     return 1 + Math.min(1.0, 0.25 * cited);
   };
-  return gaps.map((g) => ({ g, s: (landabilityScore(g) - (0)) * blockingWeight(g) * impactOf(g) })).sort((a, b) => b.s - a.s)[0]!.g;
+  // SIGN FIX + DEAD-FILTER FIX (2026-08-06). `* blockingWeight(g)` multiplied the score by
+  // up to 1.6 for gaps whose metadata points at the picker/composer itself — the exact
+  // OPPOSITE of the intent documented at the `bw > 1` branch of landabilityScore, which
+  // already applies the intended -0.06 penalty. Net effect was +40% for self-targeting
+  // gaps. And the map ran over `gaps`, so `scoredGaps` (hopeless-category rows escalated
+  // and meant to be excluded) was computed and then discarded — the escalated gap was
+  // selected anyway. When EVERY candidate is hopeless, return null so the caller emits its
+  // documented graceful "no matching open gap" instead of selecting a gap the calibration
+  // has already proven unlandable (and instead of ranked[0]! throwing on an empty array).
+  if (!scoredGaps.length) return null;
+  const selectionPool = scoredGaps;
+  const ranked = selectionPool
+    .map((g) => ({ g, s: landabilityScore(g) * impactOf(g) }))
+    .sort((a, b) => b.s - a.s);
+  const chosen = ranked[0]!;
+  const targetOf = (g: Record<string, unknown>): string =>
+    String(((g.classification_metadata ?? g.metadata ?? {}) as Record<string, unknown>).edit_site ?? "(no-target)");
+  // TRACED SELECTION DECISION (law 12: record the counterfactual AT decision time). Without
+  // this line a 90-way tie at one score over one target file is invisible at every
+  // observation point, which is why the sign error above survived beside its own comment.
+  console.log(`[gap-to-feature] pick ${JSON.stringify({
+    gap_id: String(chosen.g.id ?? ""),
+    category: String(chosen.g.category ?? ""),
+    target: targetOf(chosen.g),
+    score: Number(chosen.s.toFixed(4)),
+    landability: Number(landabilityScore(chosen.g).toFixed(4)),
+    impact: Number(impactOf(chosen.g).toFixed(4)),
+    pool: selectionPool.length,
+    hopeless_excluded: gaps.length - selectionPool.length,
+    tied_at_top: ranked.filter((r) => Math.abs(r.s - chosen.s) < 1e-9).length,
+    distinct_targets_top20: new Set(ranked.slice(0, 20).map((r) => targetOf(r.g))).size,
+    runner_up: ranked[1] ? { gap_id: String(ranked[1].g.id ?? ""), target: targetOf(ranked[1].g), score: Number(ranked[1].s.toFixed(4)) } : null,
+  })}`);
+  return chosen.g;
 }
 
 // ─────────────────── ACTIONABILITY ADMISSION GATE (auto-pick only, 2026-07-30) ───────────────────

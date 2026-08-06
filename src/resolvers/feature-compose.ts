@@ -1913,7 +1913,10 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
   // EXISTING SYMBOLS + LIVE VESSEL CONTRACTS; only the LLM spec-refine call stays gated.
   try {
     const contractBlock = await fetchNamedShapeContracts(spec + " " + grounding);
-    if (contractBlock) grounding += "\n\nLIVE VESSEL CONTRACTS (authoritative — drafted HTTP calls MUST use one of these contracts or an existing in-file helper; NEVER invent a route or omit the Authorization header):\n" + contractBlock;
+    const synthesizeVerbatimEditOps = (target: string, edits: Array<{old: string; new: string}>) => {
+  return edits.map(e => ({op: 'replace', path: target, old: e.old, new: e.new}));
+};
+if (contractBlock) grounding += "\n\nLIVE VESSEL CONTRACTS (authoritative — drafted HTTP calls MUST use one of these contracts or an existing in-file helper; NEVER invent a route or omit the Authorization header):\n" + contractBlock;
   } catch { /* advisory */ }
   try {
     const symbolBlock = await groundFileSymbols(toolsEndpoint, verifyVessels, targetFiles);

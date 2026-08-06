@@ -69,7 +69,25 @@ function buildRegistrationPayload() {
     vesselName: "development-vessel",
     version: "0.1.0",
     endpoint: `http://${config.host === "0.0.0.0" ? "localhost" : config.host}:${config.port}`,
-    shapes: config.discovery.shapes,
+    // REGISTRATION is the list discovery actually ROUTES on — filtering the /shapes handler
+    // alone is inert. Measured 2026-08-06: after /shapes correctly withheld
+    // concept_usage_record, concept_search_by_source and concept_select_for_prompt (247 shapes
+    // instead of 250), discovery STILL returned development-vessel-local as the producer for
+    // both, because this payload carries its own static list. A fix that changes an endpoint
+    // nobody routes on is the "landed and looks right but fixes nothing" failure this codebase
+    // keeps producing; the routing-visible surface is here.
+    //
+    // The law it enforces is llm-resolver's (index.ts:188 syncCompletionAdvertisement): a
+    // resolver must not advertise a shape it cannot serve. On this spoke concept-db is MASKED
+    // because its data lives on the hub (law 11), and these three shapes are advertised by
+    // development-vessel ALONE with no hub producer behind them, so every call SQUATS — the
+    // usage observer logs "usage record failed: Unable to connect" on a loop and
+    // concept_select_for_prompt answers `selected: []`. A caller cannot distinguish an empty
+    // answer from an absent store, so the shortcoming is never discovered by attempting it.
+    // Withholding makes the gap honest and lets any hub-served equivalent win the route.
+    shapes: 'conceptDbReachable' in config && config.conceptDbReachable === false
+      ? config.discovery.shapes.filter((s: string) => !['concept_usage_record', 'concept_search_by_source', 'concept_select_for_prompt'].includes(s))
+      : config.discovery.shapes,
     // Resolver-DESCRIPTION advertisement (2026-06-28): pass per-shape
     // descriptions so a decomposition planner can match this vessel's resolvers
     // from their descriptions alone (no hand-written hint). Optional/backward-compat.

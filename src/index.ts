@@ -19,8 +19,61 @@ app.get("/health", (c) => {
   });
 });
 
+// A RESOLVER MUST NOT ADVERTISE A SHAPE IT CANNOT SERVE. llm-resolver-vessel already encodes
+// this law in syncCompletionAdvertisement (index.ts:188): when every lane is cooling it DROPS
+// the completion shapes so discovery routes callers to a producer that still works — including
+// a remote hub arm — instead of into a dead local one. development-vessel was not doing the
+// same, and the consequence is measurable.
+//
+// Measured 2026-08-06 on this spoke, where concept-db is MASKED because its data lives on the
+// hub (law 11): concept_usage_record, concept_search_by_source and concept_select_for_prompt
+// are advertised by development-vessel ALONE — no hub producer to fall back to — and every one
+// POSTs to the pinned, dead CONCEPT_DB_ENDPOINT. They do not fail loudly; they SQUAT.
+// concept_select_for_prompt answers `candidates_considered:0, selected:[]` and the concept-usage
+// observer logs "usage record failed: Unable to connect" on a loop. A caller cannot tell an
+// empty answer from an absent store, so the shortcoming is never discovered by attempting it.
+//
+// Dropping them makes the failure HONEST: discovery reports no producer, the walk sees a real
+// capability gap it can act on, and any hub-served equivalent (concept_create_write,
+// conceptSearch) wins the route instead of being shadowed by a local squatter.
+//
+// Probe result is cached and FAIL-CLOSED-ON-UNKNOWN-ONLY: a probe that has never succeeded
+// withholds the shapes, but once concept-db is reachable the full list is restored on the next
+// refresh. Never the reverse — a transient blip must not permanently un-advertise a working
+// vessel, and the refresh is cache maintenance, not a behavioural rhythm.
+const CONCEPT_BACKED_SHAPES = new Set([
+  "concept_usage_record",
+  "concept_search_by_source",
+  "concept_select_for_prompt",
+]);
+const CONCEPT_PROBE_TTL_MS = 60_000;
+let conceptDbReachable: boolean | null = null;
+let conceptProbedAt = 0;
+async function probeConceptDb(): Promise<void> {
+  if (Date.now() - conceptProbedAt < CONCEPT_PROBE_TTL_MS) return;
+  conceptProbedAt = Date.now();
+  const base = process.env["CONCEPT_DB_ENDPOINT"] ?? "http://127.0.0.1:8260";
+  try {
+    const r = await fetch(`${base.replace(/\/$/, "")}/health`, { signal: AbortSignal.timeout(3_000) });
+    const next = r.ok;
+    if (next !== conceptDbReachable) {
+      console.log(`[shapes] concept-db reachable=${next} — ${next ? "advertising" : "withholding"} ${CONCEPT_BACKED_SHAPES.size} concept shape(s)`);
+    }
+    conceptDbReachable = next;
+  } catch {
+    if (conceptDbReachable !== false) {
+      console.log(`[shapes] concept-db unreachable at ${base} — withholding ${CONCEPT_BACKED_SHAPES.size} concept shape(s) so discovery routes to a producer that can serve them`);
+    }
+    conceptDbReachable = false;
+  }
+}
+
 app.get("/shapes", (c) => {
-  return c.json({ shapes: DISCOVERY_SHAPES });
+  void probeConceptDb();
+  const shapes = conceptDbReachable === false
+    ? DISCOVERY_SHAPES.filter((s: string) => !CONCEPT_BACKED_SHAPES.has(s))
+    : DISCOVERY_SHAPES;
+  return c.json({ shapes });
 });
 
 app.route("/", impulsesRouter);

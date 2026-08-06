@@ -96,6 +96,54 @@ export async function resolveConceptWrite(
       },
     };
   } catch (err) {
+    // FALL BACK TO THE ROUTE THAT ALREADY WORKS. DEFAULT_CONCEPT_DB_URL pins
+    // http://127.0.0.1:8260, and concept-db is MASKED on a spoke because it lives on the hub
+    // where its data lives (law 11) — so this POST fails for EVERY caller here, not just some.
+    // Measured 2026-08-06: resolving concept_write through discovery returned
+    // structuredError "concept-db POST failed: Unable to connect", and the concept-usage
+    // observer logged 49 "usage record failed" per hour. Concept usage credit — the mechanism
+    // that assigns utility to a resolver from how impulses actually thread through it — was
+    // writing nowhere.
+    //
+    // The repair is REUSE, not a new pin and not a new proxy hop. The `concept_create_write`
+    // shape is advertised by exactly one producer, `concept-db-local@syzygy-hub` over libp2p,
+    // with no local squatter to shadow it — and it demonstrably works: a live probe through
+    // ${DISCOVERY_ENDPOINT}/resolve created concept:⟨concept_FiS-lPLncAkQ⟩ on the hub. This is
+    // the same route feature-compose's compose-lesson mirror uses successfully today.
+    // Discovery is the fixed point; ask it rather than guessing a port.
+    try {
+      const discovery = process.env["DISCOVERY_ENDPOINT"] ?? process.env["DISCOVERY_VESSEL_ENDPOINT"] ?? "http://127.0.0.1:8100";
+      const fbRes = await fetch(`${discovery.replace(/\/$/, "")}/resolve`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          pointer: {
+            type: "concept_create_write",
+            conceptData: {
+              source_type: pointer.source_type,
+              shape: pointer.source_type,
+              content: pointer.content,
+              summary: pointer.pointer_memo ?? pointer.name,
+            },
+          },
+        }),
+        signal: AbortSignal.timeout(20_000),
+      });
+      if (fbRes.ok) {
+        const fbJson = (await fbRes.json()) as { success?: boolean; content?: unknown; body?: unknown };
+        if (fbJson?.success !== false) {
+          return {
+            shape: "conceptCreateResult",
+            body: {
+              concept_id: null,
+              routed_via: "discovery:concept_create_write",
+              raw: typeof fbJson.content === "string" ? fbJson.content.slice(0, 2000) : (fbJson.body ?? null),
+              completed_at: new Date().toISOString(),
+            },
+          };
+        }
+      }
+    } catch { /* fall through to the honest error below — never swallow into a false success */ }
     return {
       shape: "structuredError",
       body: {

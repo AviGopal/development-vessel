@@ -47,6 +47,7 @@ const REPO_ROOT = process.env.MITOSIS_REPO_ROOT ?? RUNTIME_ROOT;
 // system can author more-than-surgical changes. Tool (shell/fs) calls finish in seconds,
 // so the larger cap is harmless to them.
 const PER_CALL_TIMEOUT_MS = 250_000;
+export const FEATURE_COMPOSE_ENDPOINT = process.env.FEATURE_COMPOSE_ENDPOINT ?? "http://127.0.0.1:8100";
 
 export interface FeatureComposePointer {
   produceFeatureCompose?: boolean;

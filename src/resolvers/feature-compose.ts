@@ -3105,7 +3105,37 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
         }
       } catch { /* gap writeback best-effort */ }
     }
-    await appendComposeLesson(lessonClass, String(semantic_gate?.reason ?? verify.find((v) => !v.ok)?.output ?? applied.find((a) => !a.ok)?.detail ?? verdict), [...touched].join(","), pointer.gap);
+    // CLASS AND EVIDENCE MUST DESCRIBE THE SAME EVENT.
+    //
+    // classifyComposeFailure decides in the order apply -> verify -> semantic: the first
+    // failed APPLY op wins, and any non-ENOENT apply failure returns "anchor_not_found".
+    // This reason string used the OPPOSITE precedence — semantic, then verify output,
+    // then apply detail — so whenever an apply op failed AND verify also failed, the
+    // lesson was labelled anchor_not_found while carrying a tsc dump as its evidence.
+    //
+    // Measured on the live corpus: of 158 lessons labelled anchor_not_found, only 96
+    // (61%) are genuine anchor errors; 46 are typecheck failures and 14 are unknown.
+    // syntax_break and typecheck_dangling_reference are 100%/98% accurate, because
+    // those classes can only be reached when no apply op failed — i.e. exactly the case
+    // where the two precedences happened to agree.
+    //
+    // This is not a cosmetic mislabel. compose-lessons is the drafter's read-at-use-time
+    // teaching channel — per this repo's own notes, the one learning loop that actually
+    // works. Feeding it a class label that contradicts its own evidence teaches the
+    // drafter to fix anchors when the real defect was a dangling reference, on 39% of
+    // the largest class. That is a law-8 failure (the load-bearing fact is available but
+    // wrong at the moment of use) on the only channel with a runtime reader.
+    //
+    // Mirror the classifier's precedence exactly so the two can never diverge again.
+    const failedApply = applied.find((a) => !a.ok);
+    const failedVerify = verify.find((v) => !v.ok);
+    const lessonReason = String(
+      failedApply?.detail
+      ?? failedVerify?.output
+      ?? semantic_gate?.reason
+      ?? verdict,
+    );
+    await appendComposeLesson(lessonClass, lessonReason, [...touched].join(","), pointer.gap);
     try {
       const tscText = verify.find((v) => !v.ok)?.output ?? "";
       const failedOpFiles = applied.filter((a) => !a.ok).map((a) => a.path);

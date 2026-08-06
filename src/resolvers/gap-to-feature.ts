@@ -733,23 +733,41 @@ function pickMostLandable(gaps: Record<string, unknown>[]): Record<string, unkno
     const r = calib[String(g.category ?? "unknown")];
     return !!r && r.attempts >= 8 && r.lands === 0;
   };
-  // Decompose hopeless gaps before scoring: escalate and exclude from selection.
+  // Escalate hopeless gaps to a HUMAN and exclude them from selection.
+  // The escalation is the uiQuestion_write and nothing else. This branch used to ALSO call
+  // resolveDispatchGoal({ goalShape: "substrate_gap_decompose", payload: {...} }). That call
+  // could never dispatch: DispatchGoalPointer has no `goalShape` and no `payload` (see
+  // repos/development-vessel/src/resolvers/dispatch-goal.ts @ `export interface DispatchGoalPointer`),
+  // so resolveDispatchGoal read an empty `pointer.goal` and RETURNED a structuredError at
+  // `if (!goal) return { shape: "structuredError"` — a resolved promise, which the attached
+  // .catch() can never observe. The `as never` cast hid the type error and the error value was
+  // discarded, so the failure was invisible. It is not repaired, because repairing it needs a
+  // producer for `substrate_gap_decompose` and none exists: discovery advertises 332 shapes and
+  // zero match /decompos/ (measured 2026-08-06 against http://localhost:18100/registry/shapes).
+  // A dispatch to a shape nothing serves is confabulation with a dispatch id attached.
   const actionableGaps: Record<string, unknown>[] = [];
   for (const g of gaps) {
     if (hopeless(g)) {
       const gid = String((g as Record<string,unknown>).id ?? (g as Record<string,unknown>).gap_id ?? "");
-        if (gid && !solicitedHumanGaps.has(gid)) {
-          solicitedHumanGaps.add(gid);
-          resolveUiWritePassthrough({ type: "uiQuestion_write", id: "needs-human-" + gid, title: "Gap needs a human decision", body: "Gap " + gid + " (" + String((g as Record<string,unknown>).category ?? "?") + ") has failed auto-repair 8+ times with 0 lands. It likely needs a human response: redefine the goal, provide missing information, grant access, or drop it. Summary: " + String((g as Record<string,unknown>).summary ?? "").slice(0, 300), kind: "gap_needs_human", importance: "high" } as never).catch(() => {});
-        }
-        resolveDispatchGoal({
-        type: "dispatch_goal",
-        goalShape: "substrate_gap_decompose",
-        payload: { gapId: (g as Record<string,unknown>).id ?? (g as Record<string,unknown>).gap_id, reason: "repeated_failure_escalation" },
-      } as never).catch(() => { /* fire-and-forget; non-fatal */ });
+      if (gid && !solicitedHumanGaps.has(gid)) {
+        solicitedHumanGaps.add(gid);
+        resolveUiWritePassthrough({ type: "uiQuestion_write", id: "needs-human-" + gid, title: "Gap needs a human decision", body: "Gap " + gid + " (" + String((g as Record<string,unknown>).category ?? "?") + ") has failed auto-repair 8+ times with 0 lands. It likely needs a human response: redefine the goal, provide missing information, grant access, or drop it. Summary: " + String((g as Record<string,unknown>).summary ?? "").slice(0, 300), kind: "gap_needs_human", importance: "high" } as never)
+          .then((r) => {
+            // An escalation that silently failed is indistinguishable from one that was never
+            // attempted. Log ALL THREE outcomes so the absence of a line means "hopeless() never
+            // fired", not "the escalation was eaten". Baseline before this change: 0 lines in 7d.
+            const shape = (r as { shape?: unknown } | undefined)?.shape;
+            if (shape === "structuredError") {
+              console.warn(`[gap-escalation] uiQuestion_write REJECTED for hopeless gap ${gid}: ${JSON.stringify((r as { body?: unknown }).body).slice(0, 400)} — no human was asked`);
+            } else {
+              console.log(`[gap-escalation] uiQuestion_write accepted for hopeless gap ${gid} (shape=${String(shape)})`);
+            }
+          })
+          .catch((e: unknown) => {
+            console.warn(`[gap-escalation] uiQuestion_write THREW for hopeless gap ${gid}: ${String(e)} — no human was asked`);
+          });
+      }
       continue;
-    }
-    if (false) {
     }
     actionableGaps.push(g);
   }

@@ -91,6 +91,9 @@ interface PlanOp {
 type Json = Record<string, unknown>;
 
 async function llmCall(endpoint: string, prompt: string, model: string, produceFeatureCompose: boolean = true): Promise<string> {
+  if (produceFeatureCompose !== true) {
+    throw new Error('produceFeatureCompose must be true');
+  }
   const res = await fetch(endpoint, {
     method: 'POST',
     // Every other call site in this file and the sibling drafter

@@ -108,7 +108,7 @@ async function llmCall(endpoint: string, prompt: string, model: string, produceF
       max_tokens: 16000,
       task_type: 'feature_compose',
     }),
-    signal: AbortSignal.timeout(120_000),
+    signal: AbortSignal.timeout(250_000),
   });
 
   if (!res.ok) {
@@ -1913,7 +1913,7 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
   // EXISTING SYMBOLS + LIVE VESSEL CONTRACTS; only the LLM spec-refine call stays gated.
   try {
     const contractBlock = await fetchNamedShapeContracts(spec + " " + grounding);
-    if (contractBlock) grounding += "\n\nLIVE VESSEL CONTRACTS (authoritative — drafted HTTP calls MUST use one of these contracts or an existing in-file helper; NEVER invent a route or omit the Authorization header):\n" + contractBlock + "\n// Added a new contract for the substrate gap route-edit";
+    if (contractBlock) grounding += "\n\nLIVE VESSEL CONTRACTS (authoritative — drafted HTTP calls MUST use one of these contracts or an existing in-file helper; NEVER invent a route or omit the Authorization header):\n" + contractBlock;
   } catch { /* advisory */ }
   try {
     const symbolBlock = await groundFileSymbols(toolsEndpoint, verifyVessels, targetFiles);

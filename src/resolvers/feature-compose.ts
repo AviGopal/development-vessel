@@ -75,25 +75,8 @@ export interface FeatureComposePointer {
    * live path and (b) write `suspected_real_location` back onto the gap when the
    * drafter mis-localized. Absent (e.g. a free-text spec) → no gap-relative judge,
    * only the reachability hard-fail still applies.
-   * When `plan_outcome=semantic_reject` or `plan_outcome=anchor_not_found` from a
-   * gap-relative `feature_compose` call, the `suspected_real_location` on the gap
-   * is updated to the plan's `first_candidate_location` (or its best guess when
-   * `anchor_not_found`) so a subsequent `feature_compose` or drafter call can
-   * course-correct. This allows the system to converge on gap resolution even if
-   * initial localization attempts are imperfect, preventing self-interference on
-   * the same gap.
    */
-  gap?: {
-    id?: string;
-    summary?: string;
-    classification_metadata?: Record<string, unknown>;
-    category?: string;
-    suspected_real_location?: {
-      path: string;
-      start_line: number;
-      end_line: number;
-    };
-  };
+  gap?: { id?: string; summary?: string; classification_metadata?: Record<string, unknown>; category?: string };
 }
 
 interface PlanOp {

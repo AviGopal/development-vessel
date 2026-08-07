@@ -572,7 +572,31 @@ export function specFromGap(
           // site when edit_site/suspected_real_location names a line; else top of file.
           const siteStr = `${String(meta.edit_site ?? "")} ${String(meta.suspected_real_location ?? "")}`;
           const lineMatch = siteStr.match(/(?::|line\s+|#L)(\d+)/i);
-          const startLine = lineMatch ? (parseInt(lineMatch[1] ?? "0", 10) || 0) : 0;
+          let startLine = lineMatch ? (parseInt(lineMatch[1] ?? "0", 10) || 0) : 0;
+          // REGION -> LINE. A ui-feedback gap names the surface's file but not a line, so
+          // this window fell back to the TOP OF FILE and the drafter anchored on whatever
+          // happened to be there. Observed: a complaint about `sub-card sub-card--fleet`
+          // produced a plan anchored on `sub-step-shadowline`, an unrelated region, twice
+          // over with the identical old_string.
+          //
+          // The region IS the literal CSS class the renderer passes to createDiv, so it is
+          // greppable in the file we were just told to edit. Resolve it here — this code
+          // runs in development-vessel, which HAS the repo; the filing vessel (an Obsidian
+          // plugin) does not and cannot. Prefer the LAST occurrence: these views build a
+          // compact row first and the expanded detail later, and a complaint about content
+          // legibility is about the rendered detail.
+          if (startLine === 0) {
+            const region = String(meta.region ?? "").trim();
+            if (region) {
+              const idx = liveLines.map((l, i) => (l.includes(region) ? i : -1)).filter((i) => i >= 0);
+              if (idx.length > 0) {
+                startLine = (idx[idx.length - 1] ?? 0) + 1;
+                console.log(`[gap-to-feature] region->line: "${region}" found at ${idx.length} site(s) in ${firstTarget}; grounding on line ${startLine} (last occurrence)`);
+              } else {
+                console.warn(`[gap-to-feature] region->line: "${region}" NOT FOUND in ${firstTarget} — grounding falls back to top of file, drafter will likely anchor on the wrong code`);
+              }
+            }
+          }
           const from = Math.max(0, startLine - 15);
           const windowText = liveLines.slice(from, from + 40).join("\n");
           const anchorLabel = startLine > 0 ? "Anchor (verbatim near edit site)" : "Anchor (verbatim top of file)";

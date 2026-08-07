@@ -103,6 +103,7 @@ export const config = {
       "test_suite",
       "boredom_enqueue",
       "rhythm_conductor_tick",
+      "change_series_tick",
       "rhythm_reality_sync",
       // Memory closure (IAL 27.3.j.1): substrate-resident note store.
       // Read: filter by type/title/provenance. Write: upsert by id.

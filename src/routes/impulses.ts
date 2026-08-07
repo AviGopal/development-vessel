@@ -330,6 +330,10 @@ async function dispatchInner(pointer: AnyPointer): Promise<ResolverResult> {
       return resolveBoredomEnqueue(p as Parameters<typeof resolveBoredomEnqueue>[0]);
     case "rhythm_conductor_tick":
       return resolveRhythmConductorTick(p as Parameters<typeof resolveRhythmConductorTick>[0]);
+    case "change_series_tick": {
+      const { resolveChangeSeriesTick } = await import("../resolvers/change-series-tick.js");
+      return resolveChangeSeriesTick(p as Record<string, unknown>);
+    }
     case "rhythm_reality_sync": return resolveRhythmRealitySync(pointer as any);
     case "memoryNote":
       return resolveMemoryNote(p as Parameters<typeof resolveMemoryNote>[0]);

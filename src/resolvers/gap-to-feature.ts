@@ -1492,6 +1492,43 @@ function shaIsAncestorOfAnyClone(sha: string): boolean {
   return false;
 }
 
+/**
+ * Has this landed commit been REVERTED since it landed?
+ *
+ * shaIsAncestorOfAnyClone cannot tell: `git revert` adds a NEW commit that undoes the
+ * change and leaves the original in history, so the reverted sha stays an ancestor of
+ * HEAD forever. The sweep's own comment claimed the ancestor check covered "the land
+ * was reverted" — it never did.
+ *
+ * Measured 2026-08-07: ad706ce landed a wrong-region UI patch, was reverted in 1812ee7,
+ * and the sweep still closed the gap as `landed_verified` on a commit whose change no
+ * longer exists. A human's UI complaint was marked resolved with the code containing no
+ * trace of it — and a closed gap is never re-routed, so it could never be retried. That
+ * is worse than leaving it open: the store asserts a resolution that the tree denies.
+ *
+ * `git revert` writes "This reverts commit <full-sha>." into the message, so look for a
+ * descendant carrying it. Cheap, and it only has to catch the mechanised case; a manual
+ * undo that rewrites the change by hand is not detectable here and is not claimed to be.
+ */
+function shaWasRevertedInAnyClone(sha: string): boolean {
+  if (!/^[0-9a-f]{7,40}$/i.test(sha)) return false;
+  let entries: string[] = [];
+  try { entries = readdirSync(vesselsCloneRoot()); } catch { return false; }
+  for (const cloneName of entries) {
+    const cloneDir = join(vesselsCloneRoot(), cloneName);
+    if (!existsSync(join(cloneDir, ".git"))) continue;
+    try {
+      const full = Bun.spawnSync(["git", "-C", cloneDir, "rev-parse", sha], { stdout: "pipe", stderr: "pipe", timeout: 10_000 });
+      if (full.exitCode !== 0) continue;
+      const fullSha = new TextDecoder().decode(full.stdout).trim();
+      if (!fullSha) continue;
+      const proc = Bun.spawnSync(["git", "-C", cloneDir, "log", "--grep", `This reverts commit ${fullSha}`, "--format=%H", `${sha}..HEAD`], { stdout: "pipe", stderr: "pipe", timeout: 10_000 });
+      if (proc.exitCode === 0 && new TextDecoder().decode(proc.stdout).trim().length > 0) return true;
+    } catch { /* per-repo failure — continue */ }
+  }
+  return false;
+}
+
 export async function sweepPendingLandVerifications(): Promise<{ checked: number; closed: number }> {
   const out = { checked: 0, closed: 0 };
   try {
@@ -1515,6 +1552,12 @@ export async function sweepPendingLandVerifications(): Promise<{ checked: number
       // Not yet observable in a clone (pull-sync hasn't converged, or the land was
       // reverted) — leave open; the sweep retries on every tick.
       if (!shaIsAncestorOfAnyClone(sha)) continue;
+      // A REVERTED land is not a land. The ancestor check above passes forever once the
+      // commit exists, revert or not, so ask explicitly.
+      if (shaWasRevertedInAnyClone(sha)) {
+        console.warn(`[gap-sweep] gap ${String(g.id)} NOT closed: landed sha ${sha.slice(0, 12)} was REVERTED — the change is gone from HEAD, so the gap is unresolved and stays open for another attempt`);
+        continue;
+      }
       // Post-cutover process: pick-time condition check CAN now observe the landed
       // state. Refuse close only on a positive "still present"; unknown fails open,
       // exactly like closeLandedGap.

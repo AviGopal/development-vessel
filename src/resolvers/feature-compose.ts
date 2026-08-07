@@ -1052,7 +1052,7 @@ export function regionContainmentVerdict(
   touchedLines: string[],
   region: string,
   fileText: string,
-): { contained: boolean; reason: string; via: "literal" | "data_flow" | "none" } {
+): { contained: boolean; reason: string; via: "literal" | "data_flow" | "no_signal" | "none" } {
   // CODE lines only. A COMMENT that names the region is not a change to the region —
   // and the drafter writes the gap text into its own patch as a comment, so this is
   // not a hypothetical: 8a25744 landed a complete no-op past this check on the
@@ -1064,6 +1064,26 @@ export function regionContainmentVerdict(
     return t.startsWith("//") || t.startsWith("*") || t.startsWith("/*");
   };
   const codeLines = touchedLines.filter((l) => !isComment(l));
+  // ABSTAIN WHEN THE REGION IS NOT A LOCATOR (2026-08-07). This check assumes the
+  // region names something that exists in the code. Not every gap's region does: a
+  // ui-feedback row can carry a human-facing surface label ("the surface") rather
+  // than the CSS class a renderer emits, and that string occurs in no source file.
+  // The check then hard-fails EVERY possible patch and the gap becomes permanently
+  // unsatisfiable — observed exactly that on
+  // ui-feedback-the-surface-hard_to_understand once its region changed from
+  // "sub-fleet-elapsed" to "the surface".
+  //
+  // A predicate with no signal must abstain, not reject. If the region appears
+  // nowhere in the file, containment cannot discriminate between a right and a wrong
+  // location, so it defers to the semantic judge and says why — a rejection carrying
+  // no information is exactly what spends a gap's selection budget for nothing.
+  if (!fileText.includes(region)) {
+    return {
+      contained: true,
+      via: "no_signal",
+      reason: `region "${region}" does not occur in the target file, so it is a label rather than a code locator and containment has no signal here — deferring to the semantic judge`,
+    };
+  }
   if (codeLines.some((l) => l.includes(region))) {
     return { contained: true, reason: `a changed line contains the region "${region}"`, via: "literal" };
   }

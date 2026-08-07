@@ -654,3 +654,29 @@ describe("regionContainmentVerdict — a comment naming the region is not a chan
     expect(v.via).toBe("literal");
   });
 });
+
+describe("regionContainmentVerdict — abstains when the region is not a code locator", () => {
+  // ui-feedback rows can carry a human-facing surface label rather than the CSS class
+  // a renderer emits. "the surface" occurs in no source file, so the check has no
+  // signal — and hard-failing on it made the gap permanently unsatisfiable.
+  it("defers to the judge instead of rejecting everything", () => {
+    const v = regionContainmentVerdict(
+      ["    const elapsed = started ? fmtRel(finishedAt - started) : '';"],
+      "the surface",
+      FLEET_ROW_TEXT,
+    );
+    expect(v.contained).toBe(true);
+    expect(v.via).toBe("no_signal");
+    expect(v.reason).toContain("label rather than a code locator");
+  });
+
+  it("still discriminates normally when the region IS in the file", () => {
+    const v = regionContainmentVerdict(
+      ["    const unrelated = 1;"],
+      "sub-fleet-elapsed",
+      FLEET_ROW_TEXT,
+    );
+    expect(v.contained).toBe(false);
+    expect(v.via).toBe("none");
+  });
+});

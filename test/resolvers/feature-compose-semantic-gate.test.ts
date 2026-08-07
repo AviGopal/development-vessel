@@ -582,3 +582,34 @@ describe("regionContainmentVerdict / regionFromProposalText", () => {
     expect(regionFromProposalText("remove the dead import from foo.ts")).toBe("");
   });
 });
+
+describe("verifyPatchAddressesGap — region recovered from summary when metadata is absent", () => {
+  // The goal-host /run-goal edit-intent path builds its gap pointer from goal TEXT and
+  // never sets classification_metadata, which left this gate inert on the route that
+  // escalates. This is the exact op that slipped through on 2026-08-07 at 18:37.
+  it("hard-fails an off-region patch even with NO gapMeta at all", async () => {
+    let llmCalled = false;
+    const v = await verifyPatchAddressesGap({
+      gapSummary: 'UI feedback on the surface: the elapsed column keeps counting after a run has finished Edit repos/obsidian-vessel/src/views/goal-dispatch-view.ts in the region "sub-fleet-elapsed".',
+      diff: `--- a/x.ts\n+++ b/x.ts\n@@ -1 +1 @@\n-        const dispatchTotal = dispatchCountOf(members);\n+        const dispatchTotal = dispatchCountOf(members.filter(Boolean));`,
+      reachability: REACHABLE_VIEW,
+      fileText: FLEET_ROW_TEXT,
+      llm: async () => { llmCalled = true; return "{}"; },
+    });
+    expect(v.addresses).toBe(false);
+    expect(v.hard_fail).toBe(true);
+    expect(llmCalled).toBe(false);
+    expect(v.reason).toContain("dispatchTotal");
+  });
+
+  it("stays out of the way when the summary names no region", async () => {
+    const v = await verifyPatchAddressesGap({
+      gapSummary: "remove the dead import from foo.ts",
+      diff: `--- a/x.ts\n+++ b/x.ts\n@@ -1 +1 @@\n-import { join } from "node:path";\n+`,
+      reachability: REACHABLE_VIEW,
+      fileText: FLEET_ROW_TEXT,
+      llm: async () => JSON.stringify({ addresses: true, reason: "removes the dead import", on_live_path: true }),
+    });
+    expect(v.addresses).toBe(true);
+  });
+});

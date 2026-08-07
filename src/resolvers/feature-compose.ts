@@ -1127,7 +1127,16 @@ export async function verifyPatchAddressesGap(args: {
   // Safe to read the mirror for the use-site scan: this branch only runs when no
   // touched line contains the region, so region-bearing lines are identical pre- and
   // post-apply by construction.
-  const gapRegion = String((args.gapMeta ?? {})["region"] ?? "").trim();
+  // Take the region from metadata when the gap-to-feature pick path threaded it, and
+  // otherwise recover it from the summary text. NOT belt-and-braces: the goal-host
+  // /run-goal edit-intent path synthesizes its gap pointer from goal TEXT and never
+  // populates classification_metadata, so this gate was fully INERT on the busiest
+  // route into compose — the same route that escalates on failure. Verified by
+  // replaying the exact rejected op through regionContainmentVerdict: it returns
+  // contained:false, while production logged hard_fail:false, which can only mean the
+  // check never ran. The region was present the whole time, in the summary.
+  const gapRegion = String((args.gapMeta ?? {})["region"] ?? "").trim()
+    || regionFromProposalText(args.gapSummary ?? "");
   if (gapRegion) {
     const touchedLines = args.diff.split("\n").filter((l) => /^[+-]/.test(l) && !/^[+-][+-]/.test(l)).map((l) => l.slice(1));
     const contained = regionContainmentVerdict(touchedLines, gapRegion, args.fileText ?? "");

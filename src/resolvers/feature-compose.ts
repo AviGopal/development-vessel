@@ -40,6 +40,16 @@ const FED_TRANSPORT_EGRESS = process.env.FED_TRANSPORT_EGRESS ?? "http://127.0.0
 // host-side poller bridges /vessels changes to git. Paths are repos/<vessel>/...
 // in the plan and mapped to ${RUNTIME_ROOT}/<vessel>/... here.
 const RUNTIME_ROOT = process.env.MITOSIS_RUNTIME_DIR ?? "/vessels";
+/**
+ * The super-repo push clone.
+ *
+ * Vessels that are git submodules each get a clone under MITOSIS_PUSH_CLONE_DIR.
+ * Vessels committed as plain directories in the super-repo have no clone of their
+ * own — they live here, under `repos/<name>`, governed by this clone's .git.
+ * A git command run inside the symlinked runtime path walks up and finds it, so
+ * the cutover commits and pushes from the right place without special-casing.
+ */
+const SUPER_REPO_ROOT = process.env.MITOSIS_SUPER_REPO_DIR ?? "/workspace/git/super-repo";
 const REPO_ROOT = process.env.MITOSIS_REPO_ROOT ?? RUNTIME_ROOT;
 // 90s was fine for SURGICAL plans (small output) but timed out the DECOMPOSE call for
 // MULTI-COMPONENT / architectural changes — the plan there is large (a new migration's
@@ -2485,7 +2495,21 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
   const vesselResidentForScope = (v: string): boolean => {
     const name = v.replace(/^repos\//, "");
     const { existsSync } = require("fs");
-    return existsSync(`${RUNTIME_ROOT}/${name}`) || existsSync(`${CLONE_ROOT_FOR_SCOPE}/${name}`);
+    return (
+      existsSync(`${RUNTIME_ROOT}/${name}`) ||
+      existsSync(`${CLONE_ROOT_FOR_SCOPE}/${name}`) ||
+      // THE IN-TREE ROOT. Both roots above assume a vessel is a git SUBMODULE with
+      // a clone of its own, which every vessel in the push-clone root is. A vessel
+      // committed as a plain directory in the super-repo has no such clone and
+      // never will, so it failed both tests and was refused as a ghost — measured
+      // 2026-08-07 on human-surface-vessel, which meant the human surface was the
+      // one vessel the substrate could not author changes to, and it was invisible
+      // until a goal was dispatched because nothing declares the submodule
+      // requirement. Its source is right here, governed by the super-repo's own
+      // .git; the materialization block below symlinks it into RUNTIME_ROOT so
+      // every downstream path works unchanged.
+      existsSync(`${SUPER_REPO_ROOT}/repos/${name}`)
+    );
   };
   const missingVessel = [...touched].find((v) => !vesselResidentForScope(v));
   if (missingVessel) return { shape: "featureComposeReport", body: { ok: false, verdict: "REFUSED", stage: "scope", error: "plan touches vessel " + missingVessel + " which does not exist in the runtime or push-clone roots" } };
@@ -2501,6 +2525,39 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
     const vesselName = tv.replace(/^repos\//, "");
     const runtimePath = `${RUNTIME_ROOT}/${vesselName}`;
     const clonePath = `${PUSH_CLONE_ROOT}/${vesselName}`;
+    // IN-TREE VESSEL: no clone of its own, because it is a plain directory in the
+    // super-repo rather than a submodule. Symlink it from there so the baseline
+    // typecheck, the ops apply, and the cutover all run against real source.
+    //
+    // The refresh is deliberately CONDITIONAL where a submodule clone's is not.
+    // `reset --hard` on a per-vessel clone throws away that one vessel; on the
+    // super-repo it would throw away every in-tree vessel, scripts/, docs/ and any
+    // other compose in flight against them. So: always fetch, and only reset when
+    // the tree is clean. A dirty super-repo clone is used as-is and says so —
+    // stale-but-intact beats fresh-and-clobbered when the blast radius is the
+    // whole repository.
+    const inTreePath = `${SUPER_REPO_ROOT}/repos/${vesselName}`;
+    if (!mountExistsSync(`${clonePath}/.git`) && mountExistsSync(`${inTreePath}/package.json`)) {
+      const st = await callTool(toolsEndpoint, "shell", {
+        command: `git -C ${JSON.stringify(SUPER_REPO_ROOT)} fetch origin dev 2>&1 >/dev/null; git -C ${JSON.stringify(SUPER_REPO_ROOT)} status --porcelain`,
+        cwd: SUPER_REPO_ROOT,
+      });
+      const dirty = String((st.body as { stdout?: unknown })?.stdout ?? "").trim().length > 0;
+      if (dirty) {
+        console.log(`[feature-compose] super-repo clone is dirty; using ${vesselName} at its current commit`);
+      } else {
+        await callTool(toolsEndpoint, "shell", {
+          command: `git -C ${JSON.stringify(SUPER_REPO_ROOT)} reset --hard origin/dev 2>&1`,
+          cwd: SUPER_REPO_ROOT,
+        });
+      }
+      await callTool(toolsEndpoint, "shell", {
+        command: `ln -sfn ${JSON.stringify(inTreePath)} ${JSON.stringify(runtimePath)}`,
+        cwd: SUPER_REPO_ROOT,
+      });
+      console.log(`[feature-compose] materialized in-tree vessel ${vesselName} -> ${inTreePath}`);
+      continue;
+    }
     const isPartialMirror =
       mountExistsSync(runtimePath) &&
       !mountExistsSync(`${runtimePath}/.git`) &&

@@ -198,6 +198,20 @@ async function runCheck(
 }
 
 /**
+ * Failing-test names from a `bun test` run, for baseline-delta comparison. Mirrors
+ * feature-compose.ts's testFailureSet: a NEW failure is one this patch introduced, not
+ * one the vessel was already carrying.
+ */
+function testFailureNames(output: string): Set<string> {
+  const out = new Set<string>();
+  for (const line of output.split("\n")) {
+    const m = line.match(/^\(fail\)\s+(.*)$/);
+    if (m && m[1]) out.add(m[1].replace(/\s*\[[\d.]+m?s\]\s*$/, "").trim());
+  }
+  return out;
+}
+
+/**
  * Build a synthetic vessel tree under tmpdir() that mirrors `baseRoot` via
  * symlinks for unchanged entries and copies `stagedFiles` from `mitosisRoot`
  * over the top. Returns the temp root. Caller is responsible for cleanup —
@@ -733,13 +747,51 @@ export async function staticEvaluate(
       };
     }
     if (test.exit_code !== 0) {
-      return {
-        attempted: true,
-        ok: false,
-        reason: `tests_failed: exit=${test.exit_code}`,
-        checks: completed,
-        duration_ms: Date.now() - start,
-      };
+      // BASELINE-DELTA, NOT ABSOLUTE. `exit_code !== 0` refuses a landing whenever the
+      // vessel's suite is red for ANY reason, including reds that predate the patch.
+      // development-vessel sits at 76 pre-existing failures; goal-host at 4. Against an
+      // absolute gate every landing on those vessels is refused for reasons the patch did
+      // not cause — which is exactly why this check was disabled with skip_tests instead
+      // of fixed, and why 76 reds then accumulated behind a gate that never ran.
+      //
+      // feature_compose already solved this at feature-compose.ts (testFailureSet +
+      // `newTest = curTest \ baseTest`), explicitly so that "pre-existing reds in an
+      // unrelated test file don't wedge every autonomous edit". Same rule here: run the
+      // BASE tree, subtract its failures, and refuse only on failures this patch
+      // INTRODUCED.
+      //
+      // If the base run cannot be produced, fail CLOSED on the absolute result rather
+      // than guessing — an unknown baseline must not become a free pass.
+      const baseForDelta = mitosisHasPkg ? null : baseRootForOverlay;
+      let newFailures: string[] | null = null;
+      if (baseForDelta) {
+        const baseTest = await runCheck(bunCmd, ["test"], baseForDelta, "bun test (baseline)");
+        // Both tails must be COMPLETE. output_tail is capped at OUTPUT_TAIL_BYTES; a
+        // truncated run silently loses failure lines, which would fabricate "new"
+        // failures on one side or hide them on the other. If either side hit the cap the
+        // comparison is untrustworthy, so leave newFailures null and fail closed below.
+        const curTail = test.output_tail ?? "";
+        const baseTail = baseTest.output_tail ?? "";
+        const truncated = curTail.length >= OUTPUT_TAIL_BYTES || baseTail.length >= OUTPUT_TAIL_BYTES;
+        if (!baseTest.timed_out && !truncated) {
+          const cur = testFailureNames(curTail);
+          const base = testFailureNames(baseTail);
+          newFailures = [...cur].filter((t) => !base.has(t));
+        }
+      }
+      if (newFailures !== null && newFailures.length === 0) {
+        completed.push({ ...test, name: `bun test (${testFailureNames(test.output_tail ?? "").size} pre-existing red(s), 0 introduced)` });
+      } else {
+        return {
+          attempted: true,
+          ok: false,
+          reason: newFailures === null
+            ? `tests_failed: exit=${test.exit_code} (no baseline available — failing closed)`
+            : `tests_failed: ${newFailures.length} failure(s) INTRODUCED by this patch: ${newFailures.slice(0, 5).join(" ; ").slice(0, 400)}`,
+          checks: completed,
+          duration_ms: Date.now() - start,
+        };
+      }
     }
   }
   return {

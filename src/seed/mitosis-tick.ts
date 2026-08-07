@@ -217,19 +217,30 @@ export const MITOSIS_TICK_TEMPLATE: ActivityTemplate = {
         base_version_id: "{{extract_base_version_content}}",
         mitosis_version_id: "{{extract_mitosis_version_content}}",
         mitosis_root: "{{extract_mitosis_root_content}}",
-        // Overlay: staged file copied over canonical /vessels/<v>/ tree
-        // so lint+tests run against a synthesized post-cutover vessel tree.
-        // Required when the mitosis dir is sparse (only changed files).
-        static_check_base_root: "/vessels/{{extract_vessel_name_content}}",
+        // Overlay: staged file copied over a canonical vessel tree so lint+tests run
+        // against a synthesized post-cutover tree. Required when the mitosis dir is
+        // sparse (only changed files).
+        //
+        // BASE ROOT IS THE PUSH CLONE, NOT /vessels. The runtime mirror carries only
+        // what the image ships — src, scripts, package.json, node_modules — and has NO
+        // test/ directory at all (verified in-container). Against that root `bun test`
+        // finds zero test files and exits 1, so tests could never be enabled here: the
+        // gate would refuse every landing for a reason unrelated to test health. That is
+        // why skip_tests was set instead of the root being fixed, and with the test gate
+        // dark, 76 pre-existing failures accumulated in development-vessel unnoticed.
+        // The push clone has test/, package.json AND node_modules, so it can actually
+        // run them.
+        static_check_base_root: "/workspace/git/vessels/{{extract_vessel_name_content}}",
         staged_files: "{{extract_staged_files_content}}",
-        // Substrate-runtime defaults: use full bun path and run typecheck-only.
-        // The shape-dispatch check + tests can require fixtures or packages not
-        // available in /vessels/<v>/, so we narrow the static-eval surface to
-        // `tsc --noEmit` — sufficient to catch syntax/type bugs in substrate-
-        // authored patches without depending on full vessel-tree fidelity.
         bun_cmd: "/root/.bun/bin/bun",
         static_check_scripts: ["typecheck"],
-        skip_tests: true,
+        // TESTS ON, now that they can both run and be judged fairly. The resolver's test
+        // gate is baseline-DELTA: it runs the base tree, subtracts its failures, and
+        // refuses only on failures the patch INTRODUCED — the same rule feature_compose
+        // has always used so pre-existing reds in an unrelated file do not wedge every
+        // autonomous edit. An absolute exit-code gate would refuse every landing on any
+        // vessel with a red suite, which is the trap that got this disabled.
+        skip_tests: false,
         min_traces_per_version: 1,
       },
       outputShapes: ["vesselMitosisEvaluation"],

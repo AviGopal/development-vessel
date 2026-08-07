@@ -189,9 +189,15 @@ export async function resolveChangeSeriesTick(_pointer: Record<string, unknown>)
     const state = step.state ?? "pending";
     if (state === "landed" || state === "blocked") continue;
 
-    // A step still inside its lease is presumed in flight. Returning here is what
-    // makes two overlapping ticks safe: the second sees a held lease and does nothing.
-    if (state === "dispatching" && typeof step.lease_until === "number" && step.lease_until > now) {
+    // A step still inside its lease is presumed IN FLIGHT — for BOTH "dispatching" and
+    // "dispatched". Covering only "dispatching" was a real defect, observed live: the
+    // window between the pre-dispatch write and the post-dispatch write is milliseconds,
+    // so the guard essentially never fired, and a dispatched goal — which takes MINUTES
+    // to travel the drafter, semantic gate and cutover — was re-dispatched on the very
+    // next 30s beat. Measured: step a-ribosome reached attempt=2 within 33 seconds, and
+    // would have exhausted MAX_ATTEMPTS and blocked itself long before the first goal
+    // could land. The lease, not the state name, is what says "leave this alone".
+    if ((state === "dispatching" || state === "dispatched") && typeof step.lease_until === "number" && step.lease_until > now) {
       return { shape: "changeSeriesTickResult", body: { advanced: false, reason: "step in flight", plan_id: plan.plan_id, step: step.id } };
     }
 

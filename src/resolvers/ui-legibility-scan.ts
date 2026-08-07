@@ -92,9 +92,26 @@ export async function resolveUiLegibilityScan(
   const uiViewResp = await resolveObsidian({ type: "obsidian:ui_view" });
   const uiViewContent = typeof uiViewResp?.content === "string" ? uiViewResp.content : null;
   if (!uiViewContent) {
+    // AN UNOBSERVABLE TARGET IS A FAILED SCAN, NOT A CLEAN ONE.
+    //
+    // This previously returned `uiLegibilityReport{available:false}`, which the
+    // route wraps as `success:true`. A scheduled detector graded on that field
+    // would earn a Thompson win for every run in which it never looked, and its
+    // posterior would converge on "reliable" from a population of blind runs —
+    // the detector becoming a self-confirming oracle for itself.
+    //
+    // `structuredError` is the route's contract for exactly this (see the
+    // comment at its dispatch site): a boundary failure, distinct from a
+    // soft-refuse `applied:false`, which stays success:true because an audited
+    // NO is a real observation. "I could not observe" is not an observation.
     return {
-      shape: "uiLegibilityReport",
-      body: { available: false, reason: "obsidian-vessel unreachable or ui_view empty", completed_at: new Date().toISOString() },
+      shape: "structuredError",
+      body: {
+        detail: "ui_legibility_scan could not observe the surface: obsidian-vessel unreachable or ui_view empty",
+        available: false,
+        reason: "obsidian-vessel unreachable or ui_view empty",
+        completed_at: new Date().toISOString(),
+      },
     };
   }
   let uiView: Record<string, unknown> = {};
@@ -169,6 +186,92 @@ export async function resolveUiLegibilityScan(
     }
   }
 
+  // ── CLOSE what no longer reproduces ───────────────────────────────────────
+  //
+  // A detector that only OPENS gaps makes its own close-rate unmeasurable: the
+  // category accumulates forever and "did this get fixed?" has no answer in the
+  // store. Re-observation is the cheapest closure evidence there is — this scan
+  // just read the live surface, so it already knows which of its own findings
+  // still hold.
+  //
+  // This is deliberately NOT the composer's job. `gap_to_feature` refuses an
+  // ungrounded gap before drafting, which leaves no proposal sentinel, so
+  // `gap_lifecycle_scan` cannot classify it as churned either — it falls into
+  // stale_open and is reported forever. A detector closing its own findings is
+  // the only path that does not depend on a code-authoring attempt happening.
+  //
+  // SAFETY: closes ONLY findings it could itself have produced — category
+  // ui_legibility, source substrate_detected, and a rule this scan actually
+  // re-evaluates. A human's complaint shares this keyspace on purpose (one
+  // funnel); a detector must never close a human's report because its own three
+  // rules happen to pass, since the human saw something these rules cannot
+  // express.
+  let gapsClosed = 0;
+  const closedGapIds: string[] = [];
+  if (emitGap) {
+    const stillOpen = new Set(
+      violations.map(
+        (v) =>
+          `ui-feedback-${v.region.replace(/[^a-zA-Z0-9_-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 60)}-${v.kind}`,
+      ),
+    );
+    try {
+      const listResp = await fetch(devVesselImpulsesUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          impulse: {
+            pointer: { type: "substrateGap", category: "ui_legibility", status: "open", limit: 200 },
+          },
+        }),
+        signal: AbortSignal.timeout(10_000),
+      });
+      const listJson = (await listResp.json()) as {
+        body?: { gaps?: Array<Record<string, unknown>> };
+      };
+      for (const g of listJson?.body?.gaps ?? []) {
+        const id = typeof g["id"] === "string" ? (g["id"] as string) : "";
+        if (!id.startsWith("ui-feedback-")) continue;
+        if (g["source"] !== "substrate_detected") continue;
+        if (stillOpen.has(id)) continue;
+        const meta = (g["classification_metadata"] ?? {}) as Record<string, unknown>;
+        const rule = String(meta["rule"] ?? "");
+        if (!["px_floor", "hex_color_override", "chip_density"].includes(rule)) continue;
+        const closeResp = await fetch(devVesselImpulsesUrl, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            impulse: {
+              pointer: {
+                type: "substrateGap_write",
+                gap: {
+                  id,
+                  category: "ui_legibility",
+                  source: "substrate_detected",
+                  status: "closed",
+                  summary: `${String(g["summary"] ?? id)} — CLOSED: re-scan of the live surface no longer reproduces this violation`,
+                  classification_metadata: {
+                    ...meta,
+                    closed_by: "ui_legibility_scan",
+                    closed_reason: "violation_not_reproduced_on_rescan",
+                    closed_evidence_at: new Date().toISOString(),
+                  },
+                },
+              },
+            },
+          }),
+          signal: AbortSignal.timeout(10_000),
+        });
+        if (closeResp.ok) {
+          gapsClosed++;
+          closedGapIds.push(id);
+        }
+      }
+    } catch {
+      /* fail-soft: closing is additive and must never break the scan */
+    }
+  }
+
   return {
     shape: "uiLegibilityReport",
     body: {
@@ -177,7 +280,10 @@ export async function resolveUiLegibilityScan(
       rules_checked: 3,
       violations,
       gaps_emitted: gapsEmitted,
-      information_yield: violations.length > 0 ? "productive" : "idle",
+      gaps_closed: gapsClosed,
+      closed_gap_ids: closedGapIds,
+      information_yield:
+        violations.length > 0 || gapsClosed > 0 ? "productive" : "idle",
       completed_at: new Date().toISOString(),
     },
   };

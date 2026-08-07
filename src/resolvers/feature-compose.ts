@@ -818,6 +818,36 @@ function semanticJudgePrompt(
   const completenessClause = createHeavy
     ? `\n\nTHIS IS A CREATE-HEAVY CHANGE (it introduces a NEW file / endpoint / handler). For these, "addresses" is NOT satisfied merely because the new code exists and is wired (called/routed/exported). You MUST judge whether the NEW code FUNCTIONALLY IMPLEMENTS the gap's intent. For a responsibility MOVE (e.g. "move logic X out of vessel A into a new endpoint on vessel B"): does the new endpoint actually CONTAIN the moved logic (the real computation/transformation/persistence), or is it a placeholder that calls nothing, returns a stub/empty/null, re-dispatches without doing the work, or just echoes its input? addresses=true ONLY if the new capability is GENUINELY FUNCTIONAL — the moved/new logic is really present in the new code, not a shell. If the new handler/endpoint is wired but its body does not do the work the gap describes, set addresses=false and say "wired stub, not a functional implementation" in reason.`
     : "";
+  // A HUMAN COMPLAINT IS JUDGED BY THE COMPLAINANT, NOT BY "DID SOMETHING CHANGE".
+  //
+  // Twice today this judge approved a UI patch that plainly changed the named behaviour
+  // and plainly did not do what the person asked. The second is the clearer specimen:
+  // the complaint was "the elapsed column keeps counting after a run has finished", the
+  // patch was `text: running ? elapsed : '0s'`, and the judge returned addresses:true
+  // with the reason "changes the behavior of the elapsed column to display '0s' when
+  // the run has finished" — an accurate description of a change that DISCARDS the
+  // duration the human wanted preserved. Every settled row would have read 0s.
+  //
+  // The judge answered "does this change the behaviour the gap names?" — which is what
+  // it was asked. That is a different question from "would the person who wrote this
+  // consider it fixed", and only the second one matters for a complaint. Where the gap
+  // carries the human's own words, put those words in front of the judge and ask the
+  // second question explicitly.
+  //
+  // Named failure shapes rather than a vague instruction, because both real failures
+  // were of one kind: satisfying the letter of the complaint by REMOVING the thing
+  // complained about instead of correcting it.
+  const proseText = typeof gapMeta?.["prose"] === "string" ? String(gapMeta["prose"]).trim() : "";
+  const humanIntentClause = proseText
+    ? `
+
+THIS GAP CAME FROM A HUMAN, IN THEIR OWN WORDS:
+"${proseText}"
+
+Judge against THAT SENTENCE, not against whether the diff altered the named code. The question is whether the person who wrote it would consider it fixed. A change that touches the right place and still fails their intent is addresses:false — say so and put what they actually wanted in reason.
+
+Reject in particular the shape where the complaint is satisfied by DESTROYING what they complained about rather than correcting it: blanking, zeroing, hiding, emptying, or removing a value they wanted made correct or readable. "Stop showing it" is almost never what someone means by "this is wrong" — if they say a number keeps changing they want the RIGHT number held still, not a placeholder. Ask what the surface should read AFTER the fix, and if the diff does not produce that, reject it.`
+    : "";
   const archClause =
     archViolations.length > 0
       ? `\n\nARCHITECTURE-CONFORMANCE NOTES (deterministic scan of the ADDED lines against the substrate's OWN standing laws — the system must define its architecture BY ITS USE, so a patch that "fixes" the gap by VIOLATING a law is NOT a clean fix):\n${archViolations
@@ -826,7 +856,7 @@ function semanticJudgePrompt(
       : "";
   return `You verify whether a self-authored CODE PATCH GENUINELY addresses a substrate gap, on a path that ACTUALLY EXECUTES. typecheck=clean does NOT mean the gap is fixed — many patches "compile" by adding dead code (a net-new function with zero callers), by editing a path that never runs (hollow patch), or by adding a wired-but-empty new endpoint/handler (a stub). This is the code analogue of hollow goal-completion.
 
-GAP: ${gapSummary}${metaStr}${completenessClause}
+GAP: ${gapSummary}${metaStr}${humanIntentClause}${completenessClause}
 
 Reachability facts (deterministic, computed by grepping the touched vessel src/):
 ${JSON.stringify(facts, null, 2)}

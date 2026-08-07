@@ -2569,11 +2569,45 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
     // summary — never blocks on a missing number.
     const basePass = baselineTestPass.get(v);
     const curPass = testPassCount(raw);
-    const passRegressed = basePass !== undefined && curPass !== null && curPass < basePass;
-    const testOk = newTest.length === 0 && !passRegressed;
+    let passRegressed = basePass !== undefined && curPass !== null && curPass < basePass;
+    // FLAKE MUST BE CONFIRMED, NOT ASSUMED TO BE A REGRESSION.
+    //
+    // A "new" failure is any test failing now that was not failing at baseline — which
+    // is exactly what a NONDETERMINISTIC test looks like when it happens to flip. This
+    // suite is measured at +/-3 across identical runs: the unchanged tree gave
+    // 1288 pass / 116 fail, then 1285 / 119. So a correct draft is rejected roughly
+    // whenever the dice land badly, and the rejection is indistinguishable from a real
+    // regression in the report.
+    //
+    // Observed 2026-08-07: a dispatched deletion of a genuinely unused import was
+    // rejected here on three "new" failures, escalated, and the failed rollback then
+    // left the runtime diverged. A flaky gate did not merely waste a draft — it started
+    // the chain that corrupted the tree.
+    //
+    // Flake is BY DEFINITION non-reproducible, so re-run once and keep only the
+    // failures present in BOTH runs. This costs a second suite run only when a draft
+    // was about to be rejected, never on the happy path, and it cannot mask a real
+    // regression: a genuine break reproduces. Same for the pass count.
+    let confirmedNewTest = newTest;
+    if (newTest.length > 0 || passRegressed) {
+      const sh2 = await callTool(toolsEndpoint, "shell", {
+        command: `cd ${JSON.stringify(vAbs)} && (timeout 240 bun test 2>&1 || true)`,
+        cwd: REPO_ROOT,
+      });
+      const raw2 = String((sh2.body as { stdout?: unknown })?.stdout ?? "");
+      const cur2 = testFailureSet(raw2);
+      confirmedNewTest = newTest.filter((t) => cur2.has(t));
+      const curPass2 = testPassCount(raw2);
+      if (passRegressed && basePass !== undefined && curPass2 !== null && curPass2 >= basePass) passRegressed = false;
+      const shed = newTest.length - confirmedNewTest.length;
+      if (shed > 0 || (curPass2 !== null && curPass !== null && curPass2 !== curPass)) {
+        console.warn(`[feature-compose] FLAKE CONFIRMATION for ${v}: ${shed} of ${newTest.length} "new" failures did not reproduce on a second run (pass ${String(curPass)} -> ${String(curPass2)}). Only reproducible failures block this draft.`);
+      }
+    }
+    const testOk = confirmedNewTest.length === 0 && !passRegressed;
     const ok = tcOk && sdExit === 0 && testOk;
     const detail = testOk ? "" : [
-      newTest.length > 0 ? ` | NEW test failures introduced by this draft (${newTest.length}): ${newTest.slice(0, 5).join(" ; ").slice(0, 600)}` : "",
+      confirmedNewTest.length > 0 ? ` | NEW test failures introduced by this draft, REPRODUCED on a second run (${confirmedNewTest.length}): ${confirmedNewTest.slice(0, 5).join(" ; ").slice(0, 600)}` : "",
       passRegressed ? ` | PASSING TESTS DISAPPEARED: ${basePass} -> ${curPass} (a draft must not delete coverage or break module load to go green)` : "",
     ].join("");
     return { vessel: v, errors: ok ? 0 : "verify", exit_code: tcExit, ok, output: (raw + detail).trim() };

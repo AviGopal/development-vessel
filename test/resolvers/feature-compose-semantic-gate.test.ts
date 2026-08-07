@@ -423,3 +423,112 @@ describe("detectNewCapabilityStub control-flow exclusion", () => {
     expect(r.isStub).toBe(false);
   });
 });
+
+// ---------------------------------------------------------------------------
+// REGION-CONTAINMENT + ONE-HOP DATA-FLOW (2026-08-07)
+//
+// Corpus built from the three REAL patches this gate has judged on the
+// ui-feedback-*-hard_to_understand gaps, not invented cases. Each verdict below
+// is one the gate got wrong or right in production:
+//
+//   ad706ce  region "sub-card sub-card--fleet", edited sub-step-shadowline
+//            -> must stay REJECTED (right file, wrong region; landed and was
+//               reverted as 1812ee7 — the reason this gate exists)
+//   1743     region "sub-fleet-elapsed", edited the `elapsed` DEFINITION
+//            -> must be ACCEPTED (zero-hop containment rejected it twice; the
+//               define->use edge to line 1752 is the whole point of the widening)
+//   d90318f  region "sub-fleet-elapsed", edited the region line itself to '0s'
+//            -> must PASS CONTAINMENT and die at the semantic judge instead;
+//               containment is a location check, not a correctness check.
+// ---------------------------------------------------------------------------
+
+const FLEET_ROW_TEXT = [
+  "    const started = typeof d.startedAt === 'number' ? d.startedAt : 0;",
+  "    const elapsed = started ? fmtRel(Date.now() - started) : '';",
+  "    const row = parent.createDiv('sub-card sub-card--fleet');",
+  "    row.createSpan({ cls: 'sub-fleet-status ' + statusCls, text: dot });",
+  "    row.createSpan({ cls: 'sub-fleet-elapsed', text: elapsed });",
+].join("\n");
+
+const REACHABLE_VIEW: ReachabilityFact[] = [
+  { symbol: "GoalDispatchView", isNewFunction: false, callerCount: 2, isEntrypoint: true, reachable: true },
+];
+
+const SHADOWLINE_DIFF = `--- a/src/views/goal-dispatch-view.ts
++++ b/src/views/goal-dispatch-view.ts
+@@ -2762 +2762 @@
+-      node.createDiv({ cls: 'sub-step-shadowline', text: shadowSentence({ alpha: topRival.alpha }) });
++      node.createDiv({ cls: 'sub-step-shadowline', text: \`<b>\${shadowSentence({ alpha: topRival.alpha })}</b>\` });`;
+
+const ELAPSED_DEFINITION_DIFF = `--- a/src/views/goal-dispatch-view.ts
++++ b/src/views/goal-dispatch-view.ts
+@@ -1743 +1743 @@
+-    const elapsed = started ? fmtRel(Date.now() - started) : '';
++    const elapsed = started ? fmtRel((running ? Date.now() : finishedAt) - started) : '';`;
+
+const ZEROS_DIFF = `--- a/src/views/goal-dispatch-view.ts
++++ b/src/views/goal-dispatch-view.ts
+@@ -1752 +1752 @@
+-    row.createSpan({ cls: 'sub-fleet-elapsed', text: elapsed });
++    row.createSpan({ cls: 'sub-fleet-elapsed', text: running ? elapsed : '0s' });`;
+
+describe("verifyPatchAddressesGap — region containment with one-hop data flow", () => {
+  it("still rejects ad706ce: right file, wrong region, defines nothing the region consumes", async () => {
+    let llmCalled = false;
+    const v = await verifyPatchAddressesGap({
+      gapSummary: "the sub-card--fleet panel region is hard to understand",
+      gapMeta: { region: "sub-card sub-card--fleet" },
+      diff: SHADOWLINE_DIFF,
+      reachability: REACHABLE_VIEW,
+      fileText: FLEET_ROW_TEXT,
+      llm: async () => { llmCalled = true; return "{}"; },
+    });
+    expect(v.addresses).toBe(false);
+    expect(v.hard_fail).toBe(true);
+    expect(llmCalled).toBe(false);
+  });
+
+  it("accepts an edit to the DEFINITION of an identifier the region line renders", async () => {
+    const v = await verifyPatchAddressesGap({
+      gapSummary: "the elapsed column keeps counting after a run has finished",
+      gapMeta: { region: "sub-fleet-elapsed" },
+      diff: ELAPSED_DEFINITION_DIFF,
+      reachability: REACHABLE_VIEW,
+      fileText: FLEET_ROW_TEXT,
+      llm: async () => JSON.stringify({ addresses: true, reason: "holds the final duration", on_live_path: true }),
+    });
+    expect(v.addresses).toBe(true);
+    expect(v.llm_consulted).toBe(true);
+  });
+
+  it("lets d90318f through containment so the judge — not this gate — rejects '0s'", async () => {
+    const v = await verifyPatchAddressesGap({
+      gapSummary: "the elapsed column keeps counting after a run has finished",
+      gapMeta: { region: "sub-fleet-elapsed" },
+      diff: ZEROS_DIFF,
+      reachability: REACHABLE_VIEW,
+      fileText: FLEET_ROW_TEXT,
+      llm: async () => JSON.stringify({
+        addresses: false,
+        reason: "discards the duration instead of holding it",
+        on_live_path: true,
+      }),
+    });
+    expect(v.llm_consulted).toBe(true);
+    expect(v.addresses).toBe(false);
+  });
+
+  it("names the identifiers it considered when the data-flow branch finds no edge", async () => {
+    const v = await verifyPatchAddressesGap({
+      gapSummary: "the elapsed column keeps counting after a run has finished",
+      gapMeta: { region: "sub-fleet-elapsed" },
+      diff: `--- a/x.ts\n+++ b/x.ts\n@@ -1 +1 @@\n-    const dot = running ? 1 : 2;\n+    const dot = running ? 3 : 4;`,
+      reachability: REACHABLE_VIEW,
+      fileText: FLEET_ROW_TEXT,
+      llm: async () => "{}",
+    });
+    expect(v.addresses).toBe(false);
+    expect(v.hard_fail).toBe(true);
+    expect(v.reason).toContain("dot");
+  });
+});

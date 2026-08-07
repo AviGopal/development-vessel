@@ -997,6 +997,14 @@ export async function verifyPatchAddressesGap(args: {
   data_flow?: DataFlowFact[];
   // handled via `args.data_flow ?? []` at call sites
   codeContext?: string;
+  /**
+   * Post-apply text of the touched files, concatenated. Used ONLY by the
+   * region-containment gate's one-hop data-flow widening, to find lines bearing the
+   * gap's region literal and check whether the patch defines anything consumed there.
+   * Safe to read post-apply: that branch only runs when no touched line contains the
+   * region, so region-bearing lines are unchanged by the patch by construction.
+   */
+  fileText?: string;
   llm: (prompt: string) => Promise<string>;
   /**
    * Run the LLM "does this diff address the gap?" judge. TRUE only when a real gap
@@ -1039,18 +1047,56 @@ export async function verifyPatchAddressesGap(args: {
   // the judge, exactly as reachability and stub-detection already are.
   //
   // Scoped to gaps that actually name a region, so every other change is unaffected.
+  // ONE-HOP DATA-FLOW WIDENING (2026-08-07). Literal containment is the ZERO-hop
+  // case of the invariant this gate actually enforces: the patch must be causally
+  // connected to the named region. It is not the whole invariant, and demanding it
+  // rejected the one correct patch this gap ever produced.
+  //
+  //   1743   const elapsed = started ? fmtRel(Date.now() - started) : '';   <- correct fix
+  //   1752   row.createSpan({ cls: 'sub-fleet-elapsed', text: elapsed });   <- region literal
+  //
+  // The complaint ("the elapsed column keeps counting after a run finished") is about
+  // the VALUE, so the fix belongs at the definition; the region line only renders it.
+  // Zero-hop containment cannot see that edge and hard-failed a correct patch twice.
+  //
+  // The widening is exactly one hop, and deliberately NOT proximity or enclosing
+  // scope: `renderFleetRow` renders sub-fleet-status, sub-fleet-goal,
+  // sub-fleet-elapsed and sub-verdict, so any distance- or function-scoped rule
+  // readmits the ad706ce class (right file, wrong region) that this gate exists to
+  // stop. A define->use edge does not: the sub-step-shadowline patch defined nothing
+  // consumed on a sub-card--fleet line.
+  //
+  // Safe to read the mirror for the use-site scan: this branch only runs when no
+  // touched line contains the region, so region-bearing lines are identical pre- and
+  // post-apply by construction.
   const gapRegion = String((args.gapMeta ?? {})["region"] ?? "").trim();
   if (gapRegion) {
     const touchedLines = args.diff.split("\n").filter((l) => /^[+-]/.test(l) && !/^[+-][+-]/.test(l));
     const touchesRegion = touchedLines.some((l) => l.includes(gapRegion));
+    let flowsToRegion = false;
+    let considered: string[] = [];
     if (!touchesRegion) {
+      const declared = new Set<string>();
+      for (const line of touchedLines) {
+        const body = line.slice(1);
+        for (const m of body.matchAll(/(?:\b(?:const|let|var)\s+|^\s*)([A-Za-z_$][\w$]*)\s*=(?!=)/g)) {
+          const id = m[1];
+          if (id) declared.add(id);
+        }
+      }
+      considered = [...declared];
+      const regionLines = (args.fileText ?? "").split("\n").filter((l) => l.includes(gapRegion));
+      flowsToRegion = considered.some((id) =>
+        regionLines.some((l) => new RegExp(`\\b${id.replace(/[$]/g, "\\$")}\\b`).test(l)),
+      );
+    }
+    if (!touchesRegion && !flowsToRegion) {
       return {
         addresses: false,
-        reason: `patch does not touch the complained-about region "${gapRegion}" — no added or removed line contains it, so whatever this edits, it is not the region the gap names`,
+        reason: `patch does not touch the complained-about region "${gapRegion}" and nothing it defines is consumed there — no added or removed line contains the region, and none of the identifiers it assigns (${considered.length > 0 ? considered.join(", ") : "none"}) appear on a region-bearing line, so whatever this edits, it is not the region the gap names`,
         on_live_path: true,
         hard_fail: true,
         llm_consulted: false,
-        suspected_real_location: gapRegion,
       };
     }
   }
@@ -3023,6 +3069,7 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
         reachability: facts,
         data_flow: dataFlowFacts,
         codeContext,
+        fileText: [...postPatchContents.values()].join("\n"),
         llm: llmJudge,
         runSemanticJudge: hasGapContext,
       });

@@ -121,6 +121,23 @@ function reconcile(step: SeriesStep): { verdict: "landed" | "dispatchable" | "bl
   // caught that corruption on their own; the third is a coarse net for the general case.
   // None of them is a substitute for a typecheck — a step that passes here is "plausibly
   // landed", and the drafter's own verify stage remains the authority on correctness.
+  // DELETION IS A FIRST-CLASS STEP, expressed as an empty replacement.
+  // The anchor->replacement format could not express "remove this line", yet deletion is
+  // the core cruft operation — so the one thing this series exists to clean up was the
+  // one thing it could not say. An empty replacement means DELETE: the step is landed
+  // when the anchor is simply gone. The structural guards below still apply, so a
+  // deletion that also corrupts the file is caught by the envelope and balance checks
+  // rather than being waved through because the anchor happened to vanish.
+  if (step.replacement.length === 0) {
+    const envelopeD = /"requested_model"\s*:|"model"\s*:\s*"auto"/.test(text);
+    const balancedD = (text.split("{").length - text.split("}").length) === 0
+      && (text.split("(").length - text.split(")").length) === 0;
+    if (envelopeD) return { verdict: "blocked", detail: "drafter request envelope found in source — file is CORRUPTED, do not advance" };
+    if (occOld === 0 && !balancedD) return { verdict: "blocked", detail: "anchor removed but brace/paren imbalance — deletion broke the file" };
+    if (occOld === 0) return { verdict: "landed", detail: "anchor deleted, structure intact" };
+    if (occOld === 1) return { verdict: "dispatchable", detail: "anchor unique, pending deletion" };
+    return { verdict: "blocked", detail: `anchor occurs ${occOld} times — not a unique line to delete` };
+  }
   if (occOld === 0 && occNew >= 1) {
     // (1) The replacement must sit at a LINE BOUNDARY. Text embedded mid-line — inside a
     //     JSON string, a wider expression, a log message — is not an applied edit.
@@ -168,6 +185,22 @@ function validatePlan(plan: SeriesPlan): { ok: true; ordered: SeriesStep[] } | {
 }
 
 function renderGoal(step: SeriesStep): string {
+  if (step.replacement.length === 0) {
+    // A deletion goal names the file and quotes the exact line, same contract the
+    // drafter needs for an edit: ONE file, ONE self-sufficient contiguous region, a
+    // verbatim anchor. Removing dead code is a real behaviour delta, unlike a comment
+    // rewrite, which the semantic gate refuses as zero-delta on principle.
+    return [
+      `Edit ${step.file} to remove one line of dead code.`,
+      "",
+      "Delete this exact line, and nothing else:",
+      "```",
+      step.anchor,
+      "```",
+      "",
+      "The symbol it declares has no other reference anywhere in the repository.",
+    ].join("\n");
+  }
   return [
     `Edit ${step.file} to apply one atomic change.`,
     "",

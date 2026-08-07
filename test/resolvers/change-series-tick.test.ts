@@ -145,3 +145,33 @@ describe("change_series_tick corruption guards (regression: 2026-08-07 incident)
     expect(classify2(broken, "// OLD_COMMENT emits", "// NEW_COMMENT emits")).toBe("blocked");
   });
 });
+
+describe("change_series_tick deletion steps (empty replacement)", () => {
+  function classifyDel(text: string, anchor: string): string {
+    const occOld = anchor.length > 0 ? text.split(anchor).length - 1 : 0;
+    const envelope = /"requested_model"\s*:|"model"\s*:\s*"auto"/.test(text);
+    const balanced = (text.split("{").length - text.split("}").length) === 0
+      && (text.split("(").length - text.split(")").length) === 0;
+    if (envelope) return "blocked";
+    if (occOld === 0 && !balanced) return "blocked";
+    if (occOld === 0) return "landed";
+    if (occOld === 1) return "dispatchable";
+    return "blocked";
+  }
+
+  it("treats a still-present unique line as dispatchable", () => {
+    expect(classifyDel("a\nconst DEAD = 1;\nb\n", "const DEAD = 1;")).toBe("dispatchable");
+  });
+
+  it("treats a removed line as landed", () => {
+    expect(classifyDel("a\nb\n", "const DEAD = 1;")).toBe("landed");
+  });
+
+  it("blocks a deletion that left the file unbalanced", () => {
+    expect(classifyDel("function f() {\n", "const DEAD = 1;")).toBe("blocked");
+  });
+
+  it("blocks a non-unique line rather than deleting an arbitrary occurrence", () => {
+    expect(classifyDel("const DEAD = 1;\nx\nconst DEAD = 1;\n", "const DEAD = 1;")).toBe("blocked");
+  });
+});

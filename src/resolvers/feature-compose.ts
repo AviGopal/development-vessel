@@ -2090,7 +2090,22 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
   // to a byte-159k change site in a 200 KB file → 0-op decompose). Pure locators;
   // empty for surgical/small-file cases → head-window behaviour preserved.
   const gapMeta = (pointer.gap?.classification_metadata ?? {}) as Record<string, unknown>;
-  const focusHints = [gapMeta.matched_excerpt, gapMeta.suspected_real_location, gapMeta.edit_site, ...(pointer.spec ?? "").split("\n").map((l) => l.trim()).filter((l) => l.length >= 20)]
+  // THE REGION IS THE BEST FOCUS HINT THERE IS, AND IT WAS NEVER ONE (2026-08-07).
+  // focusedSlice centres the grounding window on a hint it can actually FIND in the
+  // file. Every hint available on the goal-host /run-goal path is a whole spec
+  // sentence ("... in the region \"sub-fleet-elapsed\".") which appears nowhere in the
+  // source, so centring failed and the drafter got the HEAD of a 3517-line file —
+  // containing none of the code it was asked to change. It then confabulated:
+  // `<td>${formatDuration(elapsed)}</td>` in a plugin that has no HTML tables, and
+  // `dispatchTotal` from the header it could actually see. That is information
+  // starvation presenting as a drafter fault (L8).
+  //
+  // The BARE region literal is the one string guaranteed to appear at the sites the
+  // complaint is about. Put it first, so it wins the centring probe.
+  const regionHint = String(gapMeta.region ?? "").trim()
+    || regionFromProposalText(String(pointer.spec ?? ""))
+    || regionFromProposalText(String(pointer.gap?.summary ?? ""));
+  const focusHints = [regionHint, gapMeta.matched_excerpt, gapMeta.suspected_real_location, gapMeta.edit_site, ...(pointer.spec ?? "").split("\n").map((l) => l.trim()).filter((l) => l.length >= 20)]
     .filter((h): h is string => typeof h === "string" && h.trim().length >= 12)
     .map((h) => h.trim());
   // TARGET LOCATORS: the classifier's edit_site + any repos/… paths named in the spec.
@@ -2260,8 +2275,11 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
     const g = typeof grounding === "string" ? grounding : "";
     console.log(`[fc-plan] ${JSON.stringify({
       grounding_len: g.length,
-      grounding_has_filterByInputSchema: g.includes("filterByInputSchema"),
-      grounding_has_target_create: g.includes("impulse_shape_activity_score"),
+      // Does the window the drafter saw actually CONTAIN the region it was asked to
+      // change? When this is false the plan is confabulation and no amount of judging
+      // it downstream helps — the fix is the window, not the drafter.
+      region: regionHint || null,
+      grounding_has_region: regionHint ? g.includes(regionHint) : null,
       ops: (Array.isArray(ops) ? ops : []).map((o) => ({ kind: (o as PlanOp).kind, path: (o as PlanOp).path, old: ((o as PlanOp).old_string ?? "").slice(0, 90) })),
     })}`);
   } catch { /* advisory */ }

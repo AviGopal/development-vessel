@@ -1219,7 +1219,26 @@ async function verifyGapConditionAsync(gap: Record<string, unknown>): Promise<'p
           const cloneDir = join('/workspace/git/vessels', cloneName);
           if (!existsSync(join(cloneDir, '.git'))) continue;
           const gitLog = Bun.spawnSync(['git', '-C', cloneDir, 'log', '--grep', gapIdForLanded, '--fixed-strings', '-1', '--format=%H', '--since=14.days'], { stdout: 'pipe', stderr: 'pipe', timeout: 10_000 });
-          if (gitLog.exitCode === 0 && new TextDecoder().decode(gitLog.stdout).trim().length > 0) {
+          const landedSha = gitLog.exitCode === 0 ? new TextDecoder().decode(gitLog.stdout).trim().split(/\s+/)[0] ?? '' : '';
+          if (landedSha) {
+            // A COMMIT MENTIONING THE GAP IS NOT A FIXED GAP.
+            //
+            // This grep matches any commit whose message contains the gap id — including
+            // a commit that was REVERTED, and including THE REVERT ITSELF, because a
+            // revert quotes the original subject verbatim. Third instance of this exact
+            // confusion today: the pending-land sweep had it (271228e), and this check
+            // had it too, five seconds after every pick.
+            //
+            // Observed: d90318f landed a wrong fix for
+            // ui-feedback-the-surface-hard_to_understand, b1d2417 reverted it, and BOTH
+            // messages carry the gap id. So the gap was closed as already_resolved on
+            // the strength of a change that no longer exists plus the commit that undid
+            // it — and a closed gap is never re-picked, so the complaint could never be
+            // retried no matter how many times it was reopened.
+            const subjRaw = Bun.spawnSync(['git', '-C', cloneDir, 'log', '-1', '--format=%s', landedSha], { stdout: 'pipe', stderr: 'pipe', timeout: 10_000 });
+            const subj = subjRaw.exitCode === 0 ? new TextDecoder().decode(subjRaw.stdout).trim() : '';
+            if (/^Revert[\s"']/i.test(subj)) continue;           // the match IS a revert
+            if (shaWasRevertedInAnyClone(landedSha)) continue;    // the match WAS reverted
             return 'absent';
           }
         }

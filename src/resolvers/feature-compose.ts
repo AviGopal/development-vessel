@@ -2082,7 +2082,7 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
   async function resolveFeatureComposeInner(pointer: FeatureComposePointer & { name?: string }, callerGapId?: string, ws?: ComposeWorkspace): Promise<ResolverResult> {
   const model = pointer.model ?? "auto"  /* law 1: "auto" makes the llm-resolver run selectArm (Thompson over the shaped llmModelPolicy, filtered to available models, graded) — model is a learned selection, not a frozen literal */; // hub serves DeepSeek as a weak gpt-4-ish arm that mis-localizes; claude-sonnet-5 is hub-served (verified 200) and localizes reliably. Pragmatic capable default until shaped model-selection lands (law: tier preference should be learned, not hardcoded).
   const llm = (prompt: string) => llmCall(FEATURE_COMPOSE_ENDPOINT, prompt, model);
-  const maxOps = pointer.max_ops ?? 24;
+  let maxOps = pointer.max_ops ?? 24;
   const dryRun = pointer.dry_run ?? false;
   // Per-compose isolation path helpers: every vessel-scoped path routes into
   // this compose's worktree when isolated, else the shared runtime root
@@ -2163,6 +2163,22 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
   const regionHint = String(gapMeta.region ?? "").trim()
     || regionFromProposalText(String(pointer.spec ?? ""))
     || regionFromProposalText(String(pointer.gap?.summary ?? ""));
+  // ONE SITE PER COMPOSE for a region-named gap (2026-08-07). A region literal
+  // typically occurs at SEVERAL render sites (this one: five), so the drafter plans an
+  // op for each — and same-file multi-op plans do not survive their own edits. Measured
+  // on this file: op_count=1 applied cleanly; op_count=2 and op_count=3 both rolled
+  // back on `old_string not found` / `no_unique_anchor`, because an earlier op moved
+  // the text a later op anchored on and short-anchor re-derivation could not recover a
+  // unique substring. The whole plan is then lost, including the ops that were right.
+  //
+  // A multi-site fix is a SERIES of atomic single-site changes, not one batch. Capping
+  // here makes each attempt land-or-fail on its own merits and lets the next pick take
+  // the next site, which is also what makes the change reviewable. An explicit
+  // pointer.max_ops still wins — this only tightens the DEFAULT.
+  if (regionHint && pointer.max_ops == null) {
+    maxOps = 1;
+    console.log(`[fc-scope] region-named gap ("${regionHint}") — capping this compose at ONE op; a multi-site region fix is a series of atomic changes, and same-file multi-op plans break their own anchors`);
+  }
   const focusHints = [regionHint, gapMeta.matched_excerpt, gapMeta.suspected_real_location, gapMeta.edit_site, ...(pointer.spec ?? "").split("\n").map((l) => l.trim()).filter((l) => l.length >= 20)]
     .filter((h): h is string => typeof h === "string" && h.trim().length >= 12)
     .map((h) => h.trim());

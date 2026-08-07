@@ -65,6 +65,22 @@ const FAMILY_GOALS: Record<string, string> = {
     "run docs_align_tick to assemble the repo docs corpus, scan it against live truth, and file documentation drift gaps",
   "gap-closing":
     "drain the highest-priority open substrate gap from the gap_lifecycle_scan consumption queue",
+  // ORGANIZING IS SEPARATE WORK FROM DOING, AND CHEAPER.
+  //
+  // gap-closing DRAINS the queue but nothing ORDERS it. The backlog reached 523 open
+  // gaps with 62 tied at the identical top score, so which one runs is effectively a
+  // coin flip and a cheap fast-failing arm out-competes real work. A human's UI
+  // complaint sat unselected behind repeated reservations of the same route-edit arm.
+  //
+  // Deliberately given a SMALLER budget than gap-closing (0.15 vs 0.40). In this
+  // scheduler budget is COST: due_score = credit * staleness / budget, and a family is
+  // affordable only while budget <= 1 - load/3. So a cheap family comes due often and
+  // stays affordable under load, while an expensive one waits for capacity. Organizing
+  // therefore runs frequently in the gaps between real work rather than competing with
+  // it — which is the point: triage that crowds out execution has just moved the
+  // problem.
+  "gap-organizing":
+    "organize the open substrate gap backlog so the next drain picks well: run gap_lifecycle_scan to close gaps that no longer reproduce, merge near-identical gaps onto a single id, and for any gap whose summary contains more than one distinct ask, split it into separate single-ask gaps so each one is a single-region edit the drafter can actually land",
   "pattern-mining":
     "run trace_recurring_pattern_scan and promote any recurring cluster to a concept",
   "human-interacting":

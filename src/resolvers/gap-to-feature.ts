@@ -1522,7 +1522,17 @@ function shaWasRevertedInAnyClone(sha: string): boolean {
       if (full.exitCode !== 0) continue;
       const fullSha = new TextDecoder().decode(full.stdout).trim();
       if (!fullSha) continue;
-      const proc = Bun.spawnSync(["git", "-C", cloneDir, "log", "--grep", `This reverts commit ${fullSha}`, "--format=%H", `${sha}..HEAD`], { stdout: "pipe", stderr: "pipe", timeout: 10_000 });
+      // Match BOTH forms. `git revert` writes the trailer "This reverts commit <full-sha>."
+      // but that message is routinely REWRITTEN — an operator amending the revert to
+      // explain WHY drops the trailer entirely. That is not hypothetical: the revert this
+      // detector was written for (1812ee7) says "This reverts ad706ce" in prose and
+      // carries no trailer, so a trailer-only grep misses the exact case that motivated
+      // it. I asserted I had verified against that pair and had not; the query returned
+      // empty. Accept "reverts <sha>" with a 7+ hex prefix as well, which survives an
+      // amended message, and search the SHORT sha too since prose uses it.
+      const shortSha = fullSha.slice(0, 12);
+      const pattern = `reverts (commit )?(${fullSha}|${shortSha}|${sha})`;
+      const proc = Bun.spawnSync(["git", "-C", cloneDir, "log", "-E", "--grep", pattern, "-i", "--format=%H", `${sha}..HEAD`], { stdout: "pipe", stderr: "pipe", timeout: 10_000 });
       if (proc.exitCode === 0 && new TextDecoder().decode(proc.stdout).trim().length > 0) return true;
     } catch { /* per-repo failure — continue */ }
   }

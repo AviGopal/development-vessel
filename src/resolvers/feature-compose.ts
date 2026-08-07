@@ -3051,15 +3051,42 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
   // (now-correct) verify gate actually PROTECT the runtime.
   let rolled_back = false;
   const restored: string[] = [];
+  const restoreFailed: string[] = [];
   if ((verdict as string) === "UNFAVORABLE" && !pointer.keep_on_fail) {
     for (const [abs, original] of preEditContent) {
       const w = await callTool(toolsEndpoint, "fs_write", { path: abs, content: original });
-      if (w.ok) restored.push(abs);
+      // VERIFY THE RESTORE, DO NOT ASSUME IT. `rolled_back = true` used to be set
+      // unconditionally at the end of this block while `restored` was collected and
+      // never read — so a failed fs_write produced a report saying rolled_back:true
+      // over a file that was still edited. That is worse than not rolling back at all:
+      // the live tree diverges from the clone and the log says it did not.
+      //
+      // Observed 2026-08-07: a deletion of an unused import was applied, verify failed
+      // on a FLAKY test, this block reported rolled_back, and /vessels was left 43 bytes
+      // short of the clone — exactly the deleted line. patch_with_tools then refused the
+      // next edit to that file with "poisoned baseline: live ... 72658B vs clone 72701B",
+      // which is how the divergence surfaced at all.
+      //
+      // Read the bytes back and compare. fs_write reporting ok is not evidence the file
+      // on disk matches; only reading it is.
+      let ok = w.ok === true;
+      if (ok) {
+        const back = await callTool(toolsEndpoint, "fs_read", { path: abs });
+        const got = (back.body as { content?: string } | undefined)?.content;
+        ok = back.ok === true && typeof got === "string" && got === original;
+      }
+      if (ok) restored.push(abs);
+      else {
+        restoreFailed.push(abs);
+        console.error(`[feature-compose] ROLLBACK FAILED for ${abs} — live file does NOT match its pre-edit snapshot. The runtime tree is DIVERGED and the next edit to this file will be refused as a poisoned baseline. This must not be reported as rolled_back.`);
+      }
     }
     for (const f of created) {
       await callTool(toolsEndpoint, "shell", { command: `rm -f ${JSON.stringify(f)}`, cwd: REPO_ROOT });
     }
-    rolled_back = true;
+    // Only claim a rollback that actually happened. A partial restore is a FAILED
+    // rollback, not a successful one — the caller needs to know the tree is dirty.
+    rolled_back = restoreFailed.length === 0;
   }
 
   // 5. LAND (autonomous): on FAVORABLE, push each EXISTING-vessel change through
@@ -3200,7 +3227,7 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
     mkdirSync(reportDir, { recursive: true });
     writeFileSync(
       join(reportDir, `${pointer.gap?.id ?? "adhoc"}-compose-report.json`),
-      JSON.stringify({ ok: verdict === "FAVORABLE", verdict, spec: String(spec).slice(0, 8000), summary: plan.summary, touched_vessels: [...touched], op_count: ops.length, applied, apply_failed: applyFailed, verify, semantic_gate, rolled_back, cutovers }, null, 2),
+      JSON.stringify({ ok: verdict === "FAVORABLE", verdict, spec: String(spec).slice(0, 8000), summary: plan.summary, touched_vessels: [...touched], op_count: ops.length, applied, apply_failed: applyFailed, verify, semantic_gate, rolled_back, restore_failed: restoreFailed, cutovers }, null, 2),
     );
   } catch { /* persistence failure must never fail the compose */ }
 
@@ -3251,6 +3278,7 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
       verify,
       semantic_gate,
       rolled_back,
+      restore_failed: restoreFailed,
       restored_files: restored.map((f) => f.replace(`${REPO_ROOT}/`, "")),
       created_files: created.map((f) => f.replace(`${REPO_ROOT}/`, "")),
       edited_files: edited.map((f) => f.replace(`${REPO_ROOT}/`, "")),

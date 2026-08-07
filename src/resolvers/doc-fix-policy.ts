@@ -1,5 +1,4 @@
 import { readFileSync, writeFileSync, renameSync } from "node:fs";
-import { join } from "node:path";
 
 const POLICY_PATH =
   process.env["DOC_FIX_POLICY_PATH"] ?? "/workspace/doc-fix-policy.json";

@@ -2047,7 +2047,7 @@ grounding += `\n\nCOMPOSED CHANGE:\n${composedChange}`;
   // planner returned plan-no-ops on exactly these goals. Use pointer.spec (the
   // raw goal), not the refined spec, so the verbatim blocks are untouched.
   // The caller appends a THIRD fenced block to every edit spec: goal-host's
-// verbatimExcerptBlock (goal-host-vessel/src/index.ts:6446-6452, appended at :6966 and
+// verbatimExcerptBlock in goal-host-vessel (grep: async function verbatimExcerptBlock,
 // :7278) wraps real file text in its own fences so the drafter can copy anchors exactly.
 // But synthesizeVerbatimEditOps requires EXACTLY two fences, so that grounding step
 // silently disqualified every well-formed verbatim goal from the LLM-free path. Measured

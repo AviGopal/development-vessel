@@ -3172,7 +3172,16 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
         mitosis_root: mitosisRoot,
         staged_files: changedRel,
         staged_base_sha,
-        evaluation_evidence: { verdict: "FAVORABLE", base_success_rate: 1, mitosis_success_rate: 1, cited_trace_ids: [], cited_check_names: ["typecheck"] },
+        // CITE WHAT WAS ACTUALLY CHECKED. This said ["typecheck"] alone, which
+        // UNDER-STATES the evidence: runVerify above runs typecheck AND the
+        // shape-dispatch agreement check AND the full suite, and this landing is gated
+        // on all three (`tcOk && sdExit === 0 && testOk`), with the test half
+        // baseline-delta and flake-confirmed by a second run. A trace that cites only
+        // typecheck makes the cutover look test-blind to anyone auditing it — I read it
+        // that way myself and wrongly concluded this path never ran tests. The cited
+        // names are the audit record of why a commit was allowed to land; they must
+        // name the checks that actually gated it.
+        evaluation_evidence: { verdict: "FAVORABLE", base_success_rate: 1, mitosis_success_rate: 1, cited_trace_ids: [], cited_check_names: ["typecheck", "shape-dispatch", "bun test (baseline-delta, flake-confirmed)"] },
         // Provenance: gap id when routed from a gap (goal-host edit-intent passes
         // route-edit-<goal_hash>), and the durable compose-report artifact name as
         // the proposal id — commits become trace-matchable instead of unknown-gap.

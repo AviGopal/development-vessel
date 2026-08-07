@@ -160,6 +160,25 @@ async function pathExists(p: string): Promise<boolean> {
   }
 }
 
+/**
+ * Baseline suite results, cached per base tree.
+ *
+ * The delta gate runs a baseline suite whenever the overlay suite is non-zero — which,
+ * for any vessel carrying pre-existing reds, is EVERY evaluation. development-vessel has
+ * 76, so every mitosis evaluation was running two full suites back to back.
+ *
+ * That is a real cost I introduced with the delta gate, and it showed: three concurrent
+ * `bun test` processes in the container, host load average 6.46, and the CHEAP checks
+ * starving — `typecheck` began timing out at its 120s budget, which it had never done
+ * before. A gate that makes the box too slow to run the other gates is not a safe gate.
+ *
+ * The base tree does not change between evaluations of the same staged batch, so the
+ * baseline is the same answer every time. Cache it briefly, keyed by the base root, and
+ * take the cost once per window instead of once per evaluation.
+ */
+const BASELINE_CACHE_TTL_MS = 10 * 60_000;
+const baselineSuiteCache = new Map<string, { at: number; result: StaticCheckResult }>();
+
 async function runCheck(
   bunCmd: string,
   args: string[],
@@ -781,7 +800,13 @@ export async function staticEvaluate(
       const baseForDelta = mitosisHasPkg ? null : baseRootForOverlay;
       let newFailures: string[] | null = null;
       if (baseForDelta) {
-        const baseTest = await runCheck(bunCmd, ["test"], baseForDelta, "bun test (baseline)", SUITE_CHECK_TIMEOUT_MS);
+        const cached = baselineSuiteCache.get(baseForDelta);
+        const baseTest = cached && Date.now() - cached.at < BASELINE_CACHE_TTL_MS
+          ? cached.result
+          : await runCheck(bunCmd, ["test"], baseForDelta, "bun test (baseline)", SUITE_CHECK_TIMEOUT_MS);
+        if (!cached || Date.now() - cached.at >= BASELINE_CACHE_TTL_MS) {
+          if (!baseTest.timed_out) baselineSuiteCache.set(baseForDelta, { at: Date.now(), result: baseTest });
+        }
         // Both tails must be COMPLETE. output_tail is capped at OUTPUT_TAIL_BYTES; a
         // truncated run silently loses failure lines, which would fabricate "new"
         // failures on one side or hide them on the other. If either side hit the cap the

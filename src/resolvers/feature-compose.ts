@@ -2185,9 +2185,23 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
   // here makes each attempt land-or-fail on its own merits and lets the next pick take
   // the next site, which is also what makes the change reviewable. An explicit
   // pointer.max_ops still wins — this only tightens the DEFAULT.
+  // A region-named gap gets a SMALL op budget, not a budget of one.
+  //
+  // Capping at 1 was a gate standing in for a real defect: same-file multi-op plans
+  // broke their own anchors, so I forbade the plans instead of fixing the anchors.
+  // That makes a COORDINATED change unrepresentable. Adding `endedAt` to
+  // DispatchRecord is two edits that must land together — declare the field, then set
+  // it — and at maxOps=1 the drafter emitted the assignment alone and failed verify
+  // with `TS2353: Object literal may only specify known properties`, identically, on
+  // every retry.
+  //
+  // Independent sites (five render calls) and coordinated sites (a type plus its
+  // writers) both look like "several ops on one file"; only the apply order tells them
+  // apart safely. Ops are now applied bottom-up (see the sort before apply), so an
+  // earlier edit cannot shift a later op's anchor, and a small budget is safe.
   if (regionHint && pointer.max_ops == null) {
-    maxOps = 1;
-    console.log(`[fc-scope] region-named gap ("${regionHint}") — capping this compose at ONE op; a multi-site region fix is a series of atomic changes, and same-file multi-op plans break their own anchors`);
+    maxOps = 4;
+    console.log(`[fc-scope] region-named gap ("${regionHint}") — op budget ${maxOps}; ops apply bottom-up so same-file edits cannot shift each other's anchors`);
   }
   const focusHints = [regionHint, gapMeta.matched_excerpt, gapMeta.suspected_real_location, gapMeta.edit_site, ...(pointer.spec ?? "").split("\n").map((l) => l.trim()).filter((l) => l.length >= 20)]
     .filter((h): h is string => typeof h === "string" && h.trim().length >= 12)
@@ -2408,6 +2422,49 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
     return { shape: "featureComposeReport", body: { ok: false, stage: "decompose", error: "plan had no ops", plan_raw: planRaw.slice(0, 1200) } };
   }
   if (ops.length > maxOps) ops.length = maxOps;
+
+  // APPLY SAME-FILE EDITS BOTTOM-UP (2026-08-07). Two ops on one file interfered:
+  // the first edit shifted the bytes the second anchored on, the second failed
+  // `old_string not found` / `no_unique_anchor`, and the WHOLE plan rolled back —
+  // including the ops that were correct. Measured on one file: op_count=1 applied
+  // cleanly, op_count=2 and op_count=3 both rolled back.
+  //
+  // Editing from the bottom of the file upward makes the interference structurally
+  // impossible rather than merely detected: every anchor still unedited lies ABOVE
+  // the edit just made, so its offset is unchanged. This is the ordering discipline
+  // any multi-site patcher needs, and it is why the op budget above does not have to
+  // be one.
+  //
+  // Ordering is by the anchor's position in the file as it stands BEFORE the plan is
+  // applied; ops whose anchor is not found keep their relative order and sort last, so
+  // creates and unmatched edits are unaffected.
+  {
+    const editOps = ops.filter((o) => o.kind === "edit" && typeof o.old_string === "string" && o.old_string.length > 0);
+    if (editOps.length > 1) {
+      const posCache = new Map<string, string>();
+      const posOf = async (o: PlanOp): Promise<number> => {
+        const abs = opAbs(o.path);
+        if (!abs) return -1;
+        if (!posCache.has(abs)) {
+          try { posCache.set(abs, await Bun.file(abs).text()); } catch { posCache.set(abs, ""); }
+        }
+        return (posCache.get(abs) ?? "").indexOf(o.old_string ?? "");
+      };
+      const keyed = await Promise.all(ops.map(async (o, i) => ({ o, i, pos: o.kind === "edit" ? await posOf(o) : -1 })));
+      keyed.sort((a, b) => {
+        // Unmatched / non-edit ops keep original relative order and stay last.
+        if (a.pos < 0 && b.pos < 0) return a.i - b.i;
+        if (a.pos < 0) return 1;
+        if (b.pos < 0) return -1;
+        return b.pos - a.pos; // deepest offset first
+      });
+      const reordered = keyed.map((k) => k.o);
+      if (reordered.some((o, i) => o !== ops[i])) {
+        console.log(`[fc-order] applying ${editOps.length} same-plan edit(s) bottom-up so earlier edits cannot shift later anchors`);
+        ops = reordered;
+      }
+    }
+  }
 
   // DETERMINISTIC FILE-SCOPE GATE (drafter binding-constraint remedy): when the spec
   // names concrete target file(s) (targetFiles, derived from edit_site + repos/ paths in

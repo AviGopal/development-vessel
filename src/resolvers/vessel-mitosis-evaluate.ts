@@ -122,6 +122,21 @@ export interface StaticEvalResult {
 // timeout branch in staticEvaluate) so the cutover defers-and-retries in a
 // quieter window instead of terminally rejecting a clean patch.
 const STATIC_CHECK_TIMEOUT_MS = 120_000;
+// A FULL SUITE IS NOT A SCRIPT CHECK, AND 120s CANNOT MEASURE ONE.
+//
+// STATIC_CHECK_TIMEOUT_MS was sized for `tsc --noEmit` and the shape-dispatch check,
+// which finish in seconds. `bun test` is a different order of work: development-vessel
+// runs 1429 tests across 203 files, ~33s on a warm host tree and considerably slower in
+// the overlay, which symlinks its top level and starts cold. Measured on the live gate:
+// killed after 120000ms (exit=143), every attempt, so the suite NEVER completed and the
+// delta could never be computed — the gate deferred forever and no autonomous landing
+// could pass it.
+//
+// The gate needs two suite runs (base + overlay) to judge a delta at all, so the budget
+// must cover the slower of them with room to spare. A too-short timeout here does not
+// fail safe: it converts a working gate into a permanent defer, which is how the test
+// gate came to be disabled with skip_tests the first time.
+const SUITE_CHECK_TIMEOUT_MS = 420_000;
 // Raised to 1 MiB (2026-06-30) to capture full typecheck/lint output so the
 // mitosis signature-subset gate and the spawn-error / missing-script / syntax-bail
 // guards normalize over the COMPLETE tsc output rather than only the last 4 KB.
@@ -150,6 +165,7 @@ async function runCheck(
   args: string[],
   cwd: string,
   name: string,
+  timeoutMs: number = STATIC_CHECK_TIMEOUT_MS,
 ): Promise<StaticCheckResult> {
   const start = Date.now();
   let exit = -1;
@@ -171,7 +187,7 @@ async function runCheck(
       } catch {
         /* noop */
       }
-    }, STATIC_CHECK_TIMEOUT_MS);
+    }, timeoutMs);
     const [stdoutText, stderrText] = await Promise.all([
       new Response(proc.stdout).text(),
       new Response(proc.stderr).text(),
@@ -733,14 +749,14 @@ export async function staticEvaluate(
     // golden.kind === "skip" → vessel ships no golden test; proceed unchanged.
   }
   if (!skipTests) {
-    const test = await runCheck(bunCmd, ["test"], runRoot, "bun test");
+    const test = await runCheck(bunCmd, ["test"], runRoot, "bun test", SUITE_CHECK_TIMEOUT_MS);
     completed.push(test);
     if (test.timed_out) {
       // V40: same inconclusive treatment as the script checks above.
       return {
         attempted: true,
         ok: false,
-        reason: `static_check_timeout: 'bun test' killed after ${STATIC_CHECK_TIMEOUT_MS}ms (exit=${test.exit_code}) — inconclusive, NOT a regression`,
+        reason: `static_check_timeout: 'bun test' killed after ${SUITE_CHECK_TIMEOUT_MS}ms (exit=${test.exit_code}) — inconclusive, NOT a regression`,
         checks: completed,
         duration_ms: Date.now() - start,
         timed_out: true,
@@ -765,7 +781,7 @@ export async function staticEvaluate(
       const baseForDelta = mitosisHasPkg ? null : baseRootForOverlay;
       let newFailures: string[] | null = null;
       if (baseForDelta) {
-        const baseTest = await runCheck(bunCmd, ["test"], baseForDelta, "bun test (baseline)");
+        const baseTest = await runCheck(bunCmd, ["test"], baseForDelta, "bun test (baseline)", SUITE_CHECK_TIMEOUT_MS);
         // Both tails must be COMPLETE. output_tail is capped at OUTPUT_TAIL_BYTES; a
         // truncated run silently loses failure lines, which would fabricate "new"
         // failures on one side or hide them on the other. If either side hit the cap the

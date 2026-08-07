@@ -1647,7 +1647,7 @@ const COMPOSE_LESSON_GUIDANCE: Record<string, string> = {
   dead_insertion_unwired: "new code must be WIRED to a live path (registered, imported AND called) — declared-but-never-used insertions are rejected",
   mis_localized_path: "only touch file paths that appear in the grounding file tree — never invent vessel or file names",
   verify_failed: "the edited vessel must pass strict tsc after the change",
-  semantic_reject: "the diff must concretely address the spec on a live code path",
+  semantic_reject: "the diff must concretely address the spec on a live code path — and for a complaint about something being WRONG or UNREADABLE, correct it rather than remove it. Blanking, zeroing, hiding or emptying the value someone complained about satisfies the words and fails the person: 'the elapsed column keeps counting after a run finished' wants the FINAL duration held still, not '0s'. Before writing the op, state what the surface should READ after the fix, and make the op produce that",
 };
 function computeEditSpan(fileContent: string | null | undefined, anchor: string, replacement: string): { start_line: number; end_line: number } | undefined {
   if (typeof fileContent !== "string" || !anchor || !fileContent.includes(anchor)) return undefined;

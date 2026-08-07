@@ -837,8 +837,29 @@ function pickMostLandable(gaps: Record<string, unknown>[]): Record<string, unkno
   // has already proven unlandable (and instead of ranked[0]! throwing on an empty array).
   if (!scoredGaps.length) return null;
   const selectionPool = scoredGaps;
+  // A HUMAN'S REPORT OUTRANKS A MACHINE-GENERATED ROUTING RECORD.
+  //
+  // Nothing in the score distinguished who filed a gap, so a person's complaint about
+  // the interface competed on equal terms with the substrate's own bookkeeping. Measured
+  // today: 54 gaps tied at the identical top score of 0.9, the great majority of them
+  // route-edit rows the routing path mints about itself. A reopened human complaint lost
+  // that draw repeatedly and simply never got picked.
+  //
+  // Human input is the scarce signal here. The substrate can mint route-edit gaps
+  // without limit and does; a person types a complaint once and it is the only evidence
+  // of what they actually experience. Law 13 puts humans on the resolver side of this
+  // system, not the preprocessor side — their reports are input to be acted on, and a
+  // tie-break that ignores provenance quietly discards them.
+  //
+  // A 1.5x multiplier, not an override: it breaks ties and outranks equal-scored machine
+  // rows, while a genuinely more landable or more blocking gap still wins on merit. This
+  // does not make human gaps unconditionally first, and it must not — a syntax break
+  // that wedges a vessel outranks a legibility complaint, and did so correctly today.
+  const HUMAN_REPORT_PRIORITY = 1.5;
+  const humanWeight = (g: Record<string, unknown>): number =>
+    String(g.source ?? "") === "human_reported" ? HUMAN_REPORT_PRIORITY : 1;
   const ranked = selectionPool
-    .map((g) => ({ g, s: landabilityScore(g) * impactOf(g) }))
+    .map((g) => ({ g, s: landabilityScore(g) * impactOf(g) * humanWeight(g) }))
     .sort((a, b) => b.s - a.s);
   const chosen = ranked[0]!;
   const targetOf = (g: Record<string, unknown>): string =>
@@ -852,6 +873,7 @@ function pickMostLandable(gaps: Record<string, unknown>[]): Record<string, unkno
     target: targetOf(chosen.g),
     score: Number(chosen.s.toFixed(4)),
     landability: Number(landabilityScore(chosen.g).toFixed(4)),
+    human_reported: String(chosen.g.source ?? "") === "human_reported",
     impact: Number(impactOf(chosen.g).toFixed(4)),
     pool: selectionPool.length,
     hopeless_excluded: gaps.length - selectionPool.length,

@@ -2529,25 +2529,31 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
     // super-repo rather than a submodule. Symlink it from there so the baseline
     // typecheck, the ops apply, and the cutover all run against real source.
     //
-    // The refresh is deliberately CONDITIONAL where a submodule clone's is not.
-    // `reset --hard` on a per-vessel clone throws away that one vessel; on the
-    // super-repo it would throw away every in-tree vessel, scripts/, docs/ and any
-    // other compose in flight against them. So: always fetch, and only reset when
-    // the tree is clean. A dirty super-repo clone is used as-is and says so —
-    // stale-but-intact beats fresh-and-clobbered when the blast radius is the
-    // whole repository.
+    // The refresh is SCOPED TO THIS VESSEL'S PATH, and both halves of that matter.
+    //
+    // Not `reset --hard`: on a per-vessel clone that discards one vessel, but on
+    // the super-repo it would discard every OTHER in-tree vessel, scripts/, docs/
+    // and any compose in flight against them. `checkout origin/dev -- <path>`
+    // touches only the subtree being composed.
+    //
+    // And the cleanliness test is scoped too. Gating on `status --porcelain` over
+    // the WHOLE repository never fires: the super-repo clone carries drifting
+    // submodule pointers and untracked operator files essentially always, so a
+    // whole-repo test reads dirty forever and the vessel silently stops being
+    // refreshed — a stale baseline that looks like a safety feature. What must be
+    // preserved is an edit to THIS vessel that someone else is mid-way through.
     const inTreePath = `${SUPER_REPO_ROOT}/repos/${vesselName}`;
     if (!mountExistsSync(`${clonePath}/.git`) && mountExistsSync(`${inTreePath}/package.json`)) {
       const st = await callTool(toolsEndpoint, "shell", {
-        command: `git -C ${JSON.stringify(SUPER_REPO_ROOT)} fetch origin dev 2>&1 >/dev/null; git -C ${JSON.stringify(SUPER_REPO_ROOT)} status --porcelain`,
+        command: `git -C ${JSON.stringify(SUPER_REPO_ROOT)} fetch origin dev 2>&1 >/dev/null; git -C ${JSON.stringify(SUPER_REPO_ROOT)} status --porcelain -- ${JSON.stringify(`repos/${vesselName}`)}`,
         cwd: SUPER_REPO_ROOT,
       });
       const dirty = String((st.body as { stdout?: unknown })?.stdout ?? "").trim().length > 0;
       if (dirty) {
-        console.log(`[feature-compose] super-repo clone is dirty; using ${vesselName} at its current commit`);
+        console.log(`[feature-compose] ${vesselName} has uncommitted changes in the super-repo clone; composing against them rather than discarding them`);
       } else {
         await callTool(toolsEndpoint, "shell", {
-          command: `git -C ${JSON.stringify(SUPER_REPO_ROOT)} reset --hard origin/dev 2>&1`,
+          command: `git -C ${JSON.stringify(SUPER_REPO_ROOT)} checkout origin/dev -- ${JSON.stringify(`repos/${vesselName}`)} 2>&1`,
           cwd: SUPER_REPO_ROOT,
         });
       }

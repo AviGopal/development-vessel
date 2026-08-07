@@ -1214,10 +1214,27 @@ async function verifyGapConditionAsync(gap: Record<string, unknown>): Promise<'p
     const gapIdForLanded = typeof gap['id'] === 'string' ? (gap['id'] as string) : '';
     const behavioralFail = String(gap['summary'] ?? '').includes('BEHAVIORAL VERIFICATION FAILED') || ((gap['classification_metadata'] ?? {}) as Record<string, unknown>)['regressed_by'] !== undefined;
     if (gapIdForLanded.length >= 8 && !behavioralFail) {
+      // EVIDENCE MUST COME FROM THE REPO THE GAP IS ABOUT.
+      //
+      // This scanned EVERY clone, so a commit in an unrelated vessel that merely
+      // MENTIONS the gap id counted as resolving it. The instance that exposed it is
+      // hard to improve on: commit 018fd05 in development-vessel — whose message
+      // explains that quoting a gap id is not evidence of a fix — became the false
+      // evidence closing the very gap it was written about. My documentation resolved
+      // the complaint it was documenting.
+      //
+      // A gap names its target through edit_site. Only that vessel's history can show
+      // the change landing; a commit anywhere else is discussion, not resolution.
+      const landedMeta = (gap['classification_metadata'] ?? gap['metadata'] ?? {}) as Record<string, unknown>;
+      const landedSiteRaw = typeof landedMeta['edit_site'] === 'string' ? String(landedMeta['edit_site']) : '';
+      const landedVessel = landedSiteRaw.match(/^repos\/([^/]+)\//)?.[1] ?? '';
       try {
         for (const cloneName of readdirSync('/workspace/git/vessels')) {
           const cloneDir = join('/workspace/git/vessels', cloneName);
           if (!existsSync(join(cloneDir, '.git'))) continue;
+          // Scoped when the gap names a target vessel; unscoped only when it names none,
+          // preserving the old behaviour for gaps that carry no edit_site at all.
+          if (landedVessel && cloneName !== landedVessel) continue;
           const gitLog = Bun.spawnSync(['git', '-C', cloneDir, 'log', '--grep', gapIdForLanded, '--fixed-strings', '-1', '--format=%H', '--since=14.days'], { stdout: 'pipe', stderr: 'pipe', timeout: 10_000 });
           const landedSha = gitLog.exitCode === 0 ? new TextDecoder().decode(gitLog.stdout).trim().split(/\s+/)[0] ?? '' : '';
           if (landedSha) {

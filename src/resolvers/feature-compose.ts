@@ -1935,7 +1935,8 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
 
   // 1. DECOMPOSE (single planning call), GROUNDED in the target vessel's real
   // file tree so edits bind to paths that actually exist (no hallucinated paths).
-  const verifyVessels = pointer.verify_vessels ?? [];
+  let verifyVessels = pointer.verify_vessels ?? [];
+  let verifyVesselsWereDerived = false;
   // FOCUS HINTS: for a deep change site in a large file, the gap's matched_excerpt
   // (and suspected_real_location) locate the code the planner must edit. Feed them
   // so grounding windows CENTER on the site instead of the file head (which is blind
@@ -1953,6 +1954,53 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
       .map((s) => s.replace(/:\d+.*$/, "").trim())
       .filter((s) => /^repos\/[\w.-]+\/.+\.\w+$/.test(s)),
   )).slice(0, 4);
+  // A PATH BINDING IS A PRECONDITION FOR PLANNING (measured 2026-08-06, 72h of this
+  // vessel's own journal). Ungrounded decomposes ran 7 / 21 / 94 per day (Aug 4/5/6)
+  // against 101 / 159 / 150 grounded, and with no real path in the prompt the planner
+  // copies the prompt's OWN scaffolding as file paths — "repos/<vessel>/<subpath>" (the
+  // decomposePrompt JSON schema placeholder) and "replacements/SPEC" (a refineSpecPrompt
+  // section heading). Useful yield of the ungrounded path: 0 of 114 over 72h. The scope
+  // gate below already refuses every one, but only AFTER paying for the planning call,
+  // and it returns without logging, so nothing is learned. Two repairs, both pure reuse.
+  //
+  // (a) DERIVE the binding the caller omitted. The walk-dispatched gap_compose case
+  //     forwards {...pointer} and derives a missing `spec` but not `verify_vessels`;
+  //     other call sites omit it too. targetFiles and vesselDirOf already exist above —
+  //     nothing is minted here.
+  if (verifyVessels.length === 0 && targetFiles.length > 0) {
+    const derived = Array.from(new Set(
+      targetFiles.map((f) => vesselDirOf(f)).filter((v): v is string => typeof v === "string" && v.length > 0),
+    ));
+    if (derived.length > 0) {
+      verifyVessels = derived;
+      verifyVesselsWereDerived = true;
+      console.log(`[fc-grounding] derived verify_vessels=[${derived.join(",")}] from targetFiles=[${targetFiles.join(",")}]`);
+    }
+  }
+  // (b) REFUSE only when there is NO path binding AT ALL. This predicate is STRUCTURAL
+  //     and does no I/O ON PURPOSE. Gating on the `grounding` STRING here would be wrong
+  //     twice over: groundFileSymbols (target-driven) and fetchNamedShapeContracts
+  //     (spec-token-driven) both run FURTHER DOWN and still ground plans that are empty
+  //     at this point — those plans are in the healthy `grounded` population today, so a
+  //     string gate would refuse known-good work and would move the very denominator this
+  //     change is monitored on. It would also turn a transient tools-endpoint timeout into
+  //     a hard refusal, since the groundVesselFiles call below is wrapped in
+  //     `catch { grounding = "" }`. Bind-or-refuse cannot be moved by a network failure.
+  //     Empirically this refuses nothing that works: all 114 ungrounded plans in the 72h
+  //     window had grounding_len in {0, 19} — the contracts block was empty for 100%.
+  //
+  //     NOTE, deliberately diverging from the reviewed spec: no appendComposeLesson call
+  //     here. This failure is the CALLER omitting a path binding, not the drafter
+  //     mis-localizing an edit. Filing it as `mis_localized_path` would teach the drafter
+  //     a lesson whose class contradicts its own evidence — the exact defect 8828642 just
+  //     repaired on the one channel with a runtime reader — and appendComposeLesson also
+  //     files recommit-* gaps, which on a ~94/day population is a new amplification input
+  //     into the very gap store this work is trying to drain.
+  if (verifyVessels.length === 0 && targetFiles.length === 0) {
+    const ungroundedDetail = "ungrounded decompose refused before the planning call: verify_vessels is empty and no repos/<vessel>/<file> target was derivable from the spec or the gap edit_site, so the prompt carries no real path and the planner emits its own schema placeholder";
+    console.log(`[fc-grounding] REFUSED ungrounded decompose; targetFiles=[] verify_vessels=[] gap=${pointer.gap?.id ?? "none"}`);
+    return { shape: "featureComposeReport", body: { ok: false, verdict: "REFUSED", stage: "scope", error: ungroundedDetail } };
+  }
   let grounding = "";
   if (verifyVessels.length > 0) {
     try { grounding = await groundVesselFiles(toolsEndpoint, verifyVessels, focusHints, targetFiles); } catch { grounding = ""; }
@@ -2176,7 +2224,15 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
     touched.add(d ?? t);
   }
   for (const op of ops) { const d = vesselDirOf(op.path); if (d) touched.add(d); }
-  if (verifyVessels.length > 0) {
+  // Scope-gate ONLY against CALLER-SUPPLIED verify_vessels. Derived scope comes from at
+  // most 4 targetFiles and exists to steer GROUNDING, not to assert authority over the
+  // plan. Arming this gate with it would refuse a legitimate two-vessel change whose spec
+  // happened to name files from only one vessel, and `touched` intentionally admits raw
+  // un-normalizable planner strings. That over-refusal is the documented 2026-08-05
+  // failure recorded above — it is why activity-api could not be self-modified at all.
+  // Keep the gate exactly as inert for this population as it is today; the missingVessel
+  // guard below still refuses ghosts.
+  if (verifyVessels.length > 0 && !verifyVesselsWereDerived) {
     const outOfScope = [...touched].find((v) => !verifyVessels.includes(v));
     if (outOfScope) return { shape: "featureComposeReport", body: { ok: false, verdict: "REFUSED", stage: "scope", error: "plan touches " + outOfScope + " which is outside verify_vessels - declare it so it is typecheck-verified and concurrency-guarded" } };
   }

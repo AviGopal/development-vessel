@@ -1587,7 +1587,7 @@ const PER_FILE_SLICE = 6000;
 // (the gap's matched_excerpt / localized site) over the file's first PER_FILE_SLICE
 // bytes. Falls back to the head window when no hint matches — behaviour unchanged
 // for surgical/small-file cases. Returns the slice + a flag for the truncation note.
-function focusedSlice(content: string, cap: number, focusHints: string[]): { slice: string; centered: boolean; head: boolean } {
+function focusedSlice(content: string, cap: number, focusHints: string[], primaryProbe = ""): { slice: string; centered: boolean; head: boolean } {
   const window = Math.min(content.length, cap, PER_FILE_SLICE);
   if (content.length <= window) return { slice: content, centered: false, head: false };
   const centerOn = (at: number) => {
@@ -1602,6 +1602,18 @@ function focusedSlice(content: string, cap: number, focusHints: string[]): { sli
   //    This is the fix for large-file mis-localization: a prose goal whose 80-char prefix
   //    was un-matchable used to fall to the file HEAD and the drafter edited whatever
   //    symbol lived there (dead code), never the deep change site.
+  // 0. PRIMARY PROBE — tried BEFORE the heuristic ordering below. The generic probe
+  //    list is sorted LONGEST-FIRST on the theory that longer means more distinctive,
+  //    which is right for quoted code but wrong for a region literal: a gap's region
+  //    (`sub-fleet-elapsed`, 17 chars) sinks below every 80-char spec sentence, and
+  //    whichever long probe happens to match first wins the window. With a ~6000-byte
+  //    slice of a 140KB file that is a 4% window in the wrong place, and the drafter
+  //    confabulates against code it cannot see. When the caller knows the single most
+  //    reliable locator, honour it first rather than letting length adjudicate.
+  if (primaryProbe) {
+    const at = content.indexOf(primaryProbe);
+    if (at >= 0) return centerOn(at);
+  }
   const probes: string[] = [];
   for (const hint of focusHints) {
     for (const m of hint.matchAll(/`([^`\n]{6,200})`/g)) {
@@ -1679,7 +1691,7 @@ function siteCenteredWindow(content: string, cap: number, hints: string[]): stri
   }
   return null;
 }
-async function groundVesselFiles(toolsEndpoint: string, verifyVessels: string[], focusHints: string[] = [], targetFiles: string[] = []): Promise<string> {
+async function groundVesselFiles(toolsEndpoint: string, verifyVessels: string[], focusHints: string[] = [], targetFiles: string[] = [], primaryProbe = ""): Promise<string> {
   const blocks: string[] = [];
   let contentBudget = GROUND_CONTENT_BUDGET;
   for (const v of verifyVessels.slice(0, 6)) {
@@ -1720,7 +1732,7 @@ async function groundVesselFiles(toolsEndpoint: string, verifyVessels: string[],
           const content = (rd.body as { content?: unknown })?.content;
           if (rd.ok && typeof content === "string") {
             const effBudget = target ? Math.max(contentBudget, PER_FILE_SLICE) : contentBudget;
-            const { slice, centered, head } = focusedSlice(content, effBudget, focusHints);
+            const { slice, centered, head } = focusedSlice(content, effBudget, focusHints, primaryProbe);
             contentBudget -= slice.length;
             const truncated = slice.length < content.length
               ? (centered
@@ -2176,7 +2188,7 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
   }
   let grounding = "";
   if (verifyVessels.length > 0) {
-    try { grounding = await groundVesselFiles(toolsEndpoint, verifyVessels, focusHints, targetFiles); } catch { grounding = ""; }
+    try { grounding = await groundVesselFiles(toolsEndpoint, verifyVessels, focusHints, targetFiles, regionHint); } catch { grounding = ""; }
   }
   // CONSULT the substrate's own architectural principles (docs ingested as concepts)
   // so the plan respects them — the active-consumption wire for the docs/web channel.

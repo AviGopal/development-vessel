@@ -781,13 +781,39 @@ export async function staticEvaluate(
       }
       if (newFailures !== null && newFailures.length === 0) {
         completed.push({ ...test, name: `bun test (${testFailureNames(test.output_tail ?? "").size} pre-existing red(s), 0 introduced)` });
+      } else if (newFailures === null) {
+        // AN UNPRODUCIBLE BASELINE IS INCONCLUSIVE, NOT A FAILURE.
+        //
+        // I shipped this as "failing closed" and it WEDGED autonomous landings on
+        // development-vessel within the hour. The baseline run is a second full suite,
+        // so the pair routinely exceeds STATIC_CHECK_TIMEOUT_MS (120s) — the journal
+        // shows `bun test killed after 120000ms (exit=143)` followed by
+        // `tests_failed: exit=1 (no baseline available — failing closed)`, and the
+        // cutover then failed on every retry. Its mitosis-pending marker never cleared,
+        // which in turn deferred pull-sync for 30 minutes until the TTL bailed it out.
+        // One over-strict gate stalled the whole convergence path.
+        //
+        // Fail-closed is right when a check RAN and disagreed. It is wrong when the
+        // check could not run at all: that is the same inconclusive state the
+        // surrounding code already treats as INSUFFICIENT_DATA and defers on, and
+        // treating "I could not measure" as "I measured a failure" is precisely the
+        // confusion this file's timeout branch above exists to avoid.
+        //
+        // So report it as a TIMEOUT-class inconclusive result. The caller defers and
+        // retries rather than recording a regression that was never observed.
+        return {
+          attempted: true,
+          ok: false,
+          reason: `static_check_timeout: baseline suite did not complete (overlay exit=${test.exit_code}); delta undecidable — INCONCLUSIVE, not a regression`,
+          checks: completed,
+          duration_ms: Date.now() - start,
+          timed_out: true,
+        };
       } else {
         return {
           attempted: true,
           ok: false,
-          reason: newFailures === null
-            ? `tests_failed: exit=${test.exit_code} (no baseline available — failing closed)`
-            : `tests_failed: ${newFailures.length} failure(s) INTRODUCED by this patch: ${newFailures.slice(0, 5).join(" ; ").slice(0, 400)}`,
+          reason: `tests_failed: ${newFailures.length} failure(s) INTRODUCED by this patch: ${newFailures.slice(0, 5).join(" ; ").slice(0, 400)}`,
           checks: completed,
           duration_ms: Date.now() - start,
         };

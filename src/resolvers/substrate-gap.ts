@@ -366,7 +366,7 @@ export async function resolveSubstrateGapWrite(
   // concurrent writers can neither share a tmp nor drop each other's gaps.
   const outcome = await withGapLock(async (): Promise<
     | { early: ResolverResult }
-    | { action: "created" | "updated"; summaryChanged: boolean; classKey: string }
+    | { action: "created" | "updated"; summaryChanged: boolean; reopened: boolean; classKey: string }
   > => {
   const gaps = await loadGaps();
   // Dedup by gap CLASS (volatile-stripped id), not raw id, so timestamped
@@ -423,9 +423,17 @@ export async function resolveSubstrateGapWrite(
 
   let action: "created" | "updated";
       let summaryChanged = false;
+      let reopened = false;
   if (existingIdx >= 0) {
     const existing = gaps[existingIdx]!;
         summaryChanged = existing.summary !== gap.summary;
+        // A closed->open transition is a REOPEN, and it is exactly when the gap wants
+        // re-picking. Without this the trigger below fires only on a new gap or a changed
+        // summary, so reopening one — after its landing was reverted, or after a human
+        // says it is still broken — leaves it sitting open with nothing scheduled to look
+        // at it. Observed today: gap-compose.timer is disabled and the picker is purely
+        // event-driven, so a reopened gap simply never got picked up again.
+        reopened = String(existing.status ?? "open") === "closed" && String(gap.status ?? "open") === "open";
     gap.id = existing.id;
     // Preserve the original creation time — but run it through the SAME scrub as an incoming
     // value. Restoring `existing.created_at` blind means a row poisoned before the scrub landed
@@ -483,12 +491,12 @@ export async function resolveSubstrateGapWrite(
   }
 
   await saveGaps(gaps);
-  return { action, summaryChanged, classKey };
+  return { action, summaryChanged, reopened, classKey };
   });
 
   if ("early" in outcome) return outcome.early;
-  const { action, summaryChanged, classKey } = outcome;
-  if ((action === "created" || (action === "updated" && summaryChanged)) && (gap.status ?? "open") === "open") {
+  const { action, summaryChanged, reopened, classKey } = outcome;
+  if ((action === "created" || (action === "updated" && (summaryChanged || reopened))) && (gap.status ?? "open") === "open") {
     const g = globalThis as { __gapComposeLastTrigger?: number };
     const nowMs = Date.now();
     if (!g.__gapComposeLastTrigger || nowMs - g.__gapComposeLastTrigger > 60_000) {
@@ -498,7 +506,7 @@ export async function resolveSubstrateGapWrite(
           stdout: "ignore",
           stderr: "ignore",
         });
-        console.log("[substrate-gap] event-driven gap-compose pickup triggered by " + gap.id);
+        console.log("[substrate-gap] event-driven gap-compose pickup triggered by " + gap.id + (reopened ? " (reopened)" : ""));
       } catch (err) {
         console.warn("[substrate-gap] gap-compose trigger failed (non-fatal): " + (err as Error).message);
       }

@@ -613,3 +613,44 @@ describe("verifyPatchAddressesGap — region recovered from summary when metadat
     expect(v.addresses).toBe(true);
   });
 });
+
+describe("regionContainmentVerdict — a comment naming the region is not a change to it", () => {
+  // Real touched lines from 8a25744, which landed a COMPLETE NO-OP through the judged
+  // path: it writes d.elapsed_ms (read nowhere in the file) off d.finished_at /
+  // d.started_at (the renderer uses d.startedAt). It satisfied literal containment
+  // solely because the drafter wrote the gap text into the patch as a comment.
+  const TOUCHED_8a25744 = [
+    "      for (const d of dispatches) {",
+    "        // sub-fleet-elapsed: [narrowed] UI feedback (hard_to_understand) on the",
+    "        // surface: the elapsed column keeps counting after a run has finished.",
+    "        if (d.finished_at && d.started_at) {",
+    "          d.elapsed_ms = new Date(d.finished_at as string).getTime() - new Date(d.started_at as string).getTime();",
+    "        }",
+    "      }",
+  ];
+
+  it("refuses 8a25744 once the comment no longer counts", () => {
+    const v = regionContainmentVerdict(TOUCHED_8a25744, "sub-fleet-elapsed", FLEET_ROW_TEXT);
+    expect(v.contained).toBe(false);
+    expect(v.via).toBe("none");
+  });
+
+  it("does not let a comment carry the one-hop edge either", () => {
+    const v = regionContainmentVerdict(
+      ["        // const elapsed = something about sub-fleet-elapsed", "        const unrelated = 1;"],
+      "sub-fleet-elapsed",
+      FLEET_ROW_TEXT,
+    );
+    expect(v.contained).toBe(false);
+  });
+
+  it("still accepts a real code change on the region line", () => {
+    const v = regionContainmentVerdict(
+      ["    row.createSpan({ cls: 'sub-fleet-elapsed', text: elapsed });", "        // sub-fleet-elapsed note"],
+      "sub-fleet-elapsed",
+      FLEET_ROW_TEXT,
+    );
+    expect(v.contained).toBe(true);
+    expect(v.via).toBe("literal");
+  });
+});

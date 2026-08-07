@@ -1025,7 +1025,18 @@ export function regionContainmentVerdict(
   region: string,
   fileText: string,
 ): { contained: boolean; reason: string; via: "literal" | "data_flow" | "none" } {
-  if (touchedLines.some((l) => l.includes(region))) {
+  // CODE lines only. A COMMENT that names the region is not a change to the region —
+  // and the drafter writes the gap text into its own patch as a comment, so this is
+  // not a hypothetical: 8a25744 landed a complete no-op past this check on the
+  // strength of `// sub-fleet-elapsed: [narrowed] UI feedback ...`. Strip that line and
+  // the patch declares nothing the region consumes, which is the honest verdict.
+  // Same failure shape as an envelope tripwire matching its own documentation.
+  const isComment = (l: string): boolean => {
+    const t = l.trim();
+    return t.startsWith("//") || t.startsWith("*") || t.startsWith("/*");
+  };
+  const codeLines = touchedLines.filter((l) => !isComment(l));
+  if (codeLines.some((l) => l.includes(region))) {
     return { contained: true, reason: `a changed line contains the region "${region}"`, via: "literal" };
   }
   // ONE HOP. The fix for a complaint about a VALUE lives at that value's definition,
@@ -1033,7 +1044,7 @@ export function regionContainmentVerdict(
   // a single render function typically emits several regions, so any distance-based
   // rule readmits the right-file/wrong-region class this check exists to stop.
   const declared = new Set<string>();
-  for (const body of touchedLines) {
+  for (const body of codeLines) {
     for (const m of body.matchAll(/(?:\b(?:const|let|var)\s+|^\s*)([A-Za-z_$][\w$]*)\s*=(?!=)/g)) {
       const id = m[1];
       if (id) declared.add(id);

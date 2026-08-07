@@ -117,6 +117,29 @@ function hasDrafterEnvelope(text: string): boolean {
   return false;
 }
 
+/**
+ * A coarse structural sanity check that does NOT false-positive on healthy TypeScript.
+ *
+ * The first version counted raw braces and parens and required exact balance. Real
+ * source never balances that way: braces and parens appear inside strings, template
+ * literals, regex literals and comments. Measured on a healthy, untouched
+ * apply-proposal-as-patch.ts: braces +4, parens +1. So the check blocked a correct
+ * deletion on a file that was perfectly fine — a guard that refuses valid work is
+ * only marginally better than one that admits corruption.
+ *
+ * So this is a WIDE smoke test, not a balance check: it only catches gross damage —
+ * a file truncated mid-body or spliced with a large foreign block, where the counts
+ * blow far past what string and regex literals explain. A healthy file sits in single
+ * digits; the threshold is 40. It will not notice a subtly broken edit, and it is not
+ * meant to: the drafter's own typecheck is the authority on correctness, and this only
+ * exists so an obviously shredded file cannot be marked landed.
+ */
+function structurallyPlausible(text: string): boolean {
+  const braces = text.split("{").length - text.split("}").length;
+  const parens = text.split("(").length - text.split(")").length;
+  return Math.abs(braces) <= 40 && Math.abs(parens) <= 40;
+}
+
 function reconcile(step: SeriesStep): { verdict: "landed" | "dispatchable" | "blocked"; detail: string } {
   const abs = absOf(step.file);
   if (!existsSync(abs)) return { verdict: "blocked", detail: `file not found: ${abs}` };
@@ -153,8 +176,7 @@ function reconcile(step: SeriesStep): { verdict: "landed" | "dispatchable" | "bl
   // rather than being waved through because the anchor happened to vanish.
   if (step.replacement.length === 0) {
     const envelopeD = hasDrafterEnvelope(text);
-    const balancedD = (text.split("{").length - text.split("}").length) === 0
-      && (text.split("(").length - text.split(")").length) === 0;
+    const balancedD = structurallyPlausible(text);
     if (envelopeD) return { verdict: "blocked", detail: "drafter request envelope found in source — file is CORRUPTED, do not advance" };
     if (occOld === 0 && !balancedD) return { verdict: "blocked", detail: "anchor removed but brace/paren imbalance — deletion broke the file" };
     if (occOld === 0) return { verdict: "landed", detail: "anchor deleted, structure intact" };
@@ -169,8 +191,7 @@ function reconcile(step: SeriesStep): { verdict: "landed" | "dispatchable" | "bl
     const envelope = hasDrafterEnvelope(text);
     // (3) Brace/paren balance. Crude, but a truncated or spliced file usually fails it,
     //     and a comment-only edit like the ones this series carries never changes it.
-    const balanced = (text.split("{").length - text.split("}").length) === 0
-      && (text.split("(").length - text.split(")").length) === 0;
+    const balanced = structurallyPlausible(text);
     if (envelope) return { verdict: "blocked", detail: "drafter request envelope found in source — file is CORRUPTED, do not advance" };
     if (!atLineStart) return { verdict: "blocked", detail: "replacement present only mid-line — not an applied edit" };
     if (!balanced) return { verdict: "blocked", detail: "brace/paren imbalance — file is structurally broken" };

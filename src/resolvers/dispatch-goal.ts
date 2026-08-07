@@ -110,14 +110,31 @@ export async function resolveDispatchGoal(pointer: DispatchGoalPointer): Promise
     if (pointer.await_completion && dispatchId) {
       const deadline = Date.now() + (pointer.timeout_ms ?? 120_000);
       let status = j.status ?? "running";
+      /*
+       * `reached` is the HONEST goal verdict; `status` is only the template exit
+       * status. Both hollow completion (status:"completed" + reached:false) and
+       * satisfier reach (status:"failed" + reached:true) are common, so a caller
+       * that grades on `status` grades the wrong thing. goal-host has carried the
+       * field on GET /executions/:id all along; this poll simply discarded it by
+       * narrowing the cast to { status }.
+       *
+       * null means UNKNOWN — the deadline expired, or the id was not found, or the
+       * poll never got an ok response. Callers MUST NOT read null as failure: the
+       * dispatched work may well have landed. Treat null as "inspect before acting".
+       * This distinction is load-bearing for any future caller that sequences
+       * dispatches: recording an unknown verdict as a failure is what would make a
+       * resume re-dispatch an edit that already landed, into an anchor that no
+       * longer matches.
+       */
+      let reached: boolean | null = null;
       while (Date.now() < deadline && (status === "running" || status === "pending" || !status)) {
         await new Promise((r) => setTimeout(r, 3_000));
         try {
           const pr = await fetch(`${GOAL_HOST_ENDPOINT}/executions/${dispatchId}`, { headers: { ...auth }, signal: AbortSignal.timeout(5_000) });
-          if (pr.ok) { const pj = (await pr.json()) as { status?: string }; status = pj.status ?? status; }
+          if (pr.ok) { const pj = (await pr.json()) as { status?: string; reached?: boolean | null }; status = pj.status ?? status; reached = pj.reached ?? null; }
         } catch { /* keep polling until deadline */ }
       }
-      return { shape: "goalDispatchResult", body: { dispatched: true, dispatch_id: dispatchId, status, goal, selected_template_id: j.selectedTemplateId ?? null, awaited: true } };
+      return { shape: "goalDispatchResult", body: { dispatched: true, dispatch_id: dispatchId, status, reached, goal, selected_template_id: j.selectedTemplateId ?? null, awaited: true } };
     }
     return { shape: "goalDispatchResult", body: { dispatched: true, dispatch_id: dispatchId, status: j.status ?? "accepted", goal, selected_template_id: j.selectedTemplateId ?? null, awaited: false } };
   } catch (e) {

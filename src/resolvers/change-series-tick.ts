@@ -94,6 +94,29 @@ function absOf(file: string): string {
  * Reconcile a step against the FILE, which is authoritative. Returns the only three
  * answers that are honest; "probably fine" is not among them.
  */
+/**
+ * A drafter request envelope written INTO source, as opposed to source that merely
+ * DOCUMENTS one. The first version of this tripwire tested the raw text for
+ * "requested_model", which matched the comments in goal-host and ias-executor that
+ * explain this very defect — so the guard blocked a healthy 11,293-line file on its
+ * own documentation, on the first tick, before dispatching anything.
+ *
+ * It failed SAFE, which is the right direction, but a detector that cannot tell a
+ * description of a bug from the bug makes every file that documents the bug
+ * permanently unworkable. Real corruption appears as a BARE JSON OBJECT occupying a
+ * line; documentation appears inside a comment. Test the line shape, not the substring.
+ */
+function hasDrafterEnvelope(text: string): boolean {
+  for (const raw of text.split("\n")) {
+    const line = raw.trim();
+    if (!line.startsWith("{")) continue;          // comments start with // or *
+    if (!/"requested_model"\s*:|"model"\s*:\s*"auto"/.test(line)) continue;
+    if (!/"text"\s*:/.test(line)) continue;        // the envelope always carries text
+    return true;
+  }
+  return false;
+}
+
 function reconcile(step: SeriesStep): { verdict: "landed" | "dispatchable" | "blocked"; detail: string } {
   const abs = absOf(step.file);
   if (!existsSync(abs)) return { verdict: "blocked", detail: `file not found: ${abs}` };
@@ -129,7 +152,7 @@ function reconcile(step: SeriesStep): { verdict: "landed" | "dispatchable" | "bl
   // deletion that also corrupts the file is caught by the envelope and balance checks
   // rather than being waved through because the anchor happened to vanish.
   if (step.replacement.length === 0) {
-    const envelopeD = /"requested_model"\s*:|"model"\s*:\s*"auto"/.test(text);
+    const envelopeD = hasDrafterEnvelope(text);
     const balancedD = (text.split("{").length - text.split("}").length) === 0
       && (text.split("(").length - text.split(")").length) === 0;
     if (envelopeD) return { verdict: "blocked", detail: "drafter request envelope found in source — file is CORRUPTED, do not advance" };
@@ -143,7 +166,7 @@ function reconcile(step: SeriesStep): { verdict: "landed" | "dispatchable" | "bl
     //     JSON string, a wider expression, a log message — is not an applied edit.
     const atLineStart = text.startsWith(step.replacement) || text.includes("\n" + step.replacement);
     // (2) Drafter-envelope tripwire: request scaffolding must never appear in source.
-    const envelope = /"requested_model"\s*:|"model"\s*:\s*"auto"/.test(text);
+    const envelope = hasDrafterEnvelope(text);
     // (3) Brace/paren balance. Crude, but a truncated or spliced file usually fails it,
     //     and a comment-only edit like the ones this series carries never changes it.
     const balanced = (text.split("{").length - text.split("}").length) === 0

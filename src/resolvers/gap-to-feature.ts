@@ -1149,13 +1149,37 @@ function verifyGapCondition(gap: Record<string, unknown>): 'present' | 'absent' 
     // ── Class 3 (sync): landed commit — a substrate-authored commit referencing this gap id already exists ──
     const gapIdForLandedSync = typeof gap['id'] === 'string' ? (gap['id'] as string) : '';
     const behavioralFail = String(gap['summary'] ?? '').includes('BEHAVIORAL VERIFICATION FAILED') || ((gap['classification_metadata'] ?? {}) as Record<string, unknown>)['regressed_by'] !== undefined;
+    // THIS IS THE SECOND COPY OF THE SAME CHECK IN THIS FUNCTION, and it runs FIRST.
+    //
+    // I fixed the copy ~100 lines below (018fd05, 81d8474) and never looked for another.
+    // This one kept the original behaviour — every clone, no revert awareness — so it
+    // returned 'absent' before the corrected copy was ever reached, and the gap kept
+    // closing as already_resolved five seconds after every pick while I verified fix
+    // after fix as "deployed and running". Duplicated logic means a fix applied to one
+    // site is not a fix.
+    //
+    // Same two corrections as the other copy: scope to the vessel the gap names, since
+    // only that repo's history can show the change landing (a commit elsewhere is
+    // discussion — my own fix commit in development-vessel was closing this very gap);
+    // and refuse a match that IS a revert or WAS reverted, since git is append-only and
+    // undoing a change adds a commit rather than removing one.
+    const landedSiteSync = typeof ((gap['classification_metadata'] ?? gap['metadata'] ?? {}) as Record<string, unknown>)['edit_site'] === 'string'
+      ? String(((gap['classification_metadata'] ?? gap['metadata'] ?? {}) as Record<string, unknown>)['edit_site'])
+      : '';
+    const landedVesselSync = landedSiteSync.match(/^repos\/([^/]+)\//)?.[1] ?? '';
     if (gapIdForLandedSync.length >= 8 && !behavioralFail) {
       try {
         for (const cloneName of readdirSync('/workspace/git/vessels')) {
           const cloneDir = join('/workspace/git/vessels', cloneName);
           if (!existsSync(join(cloneDir, '.git'))) continue;
+          if (landedVesselSync && cloneName !== landedVesselSync) continue;
           const gitLog = Bun.spawnSync(['git', '-C', cloneDir, 'log', '--grep', gapIdForLandedSync, '--fixed-strings', '-1', '--format=%H', '--since=14.days'], { stdout: 'pipe', stderr: 'pipe', timeout: 10_000 });
-          if (gitLog.exitCode === 0 && new TextDecoder().decode(gitLog.stdout).trim().length > 0) {
+          const shaSync = gitLog.exitCode === 0 ? new TextDecoder().decode(gitLog.stdout).trim().split(/\s+/)[0] ?? '' : '';
+          if (shaSync) {
+            const subjSync = Bun.spawnSync(['git', '-C', cloneDir, 'log', '-1', '--format=%s', shaSync], { stdout: 'pipe', stderr: 'pipe', timeout: 10_000 });
+            const sSync = subjSync.exitCode === 0 ? new TextDecoder().decode(subjSync.stdout).trim() : '';
+            if (/^Revert[\s"']/i.test(sSync)) continue;
+            if (shaWasRevertedInAnyClone(shaSync)) continue;
             return 'absent';
           }
         }

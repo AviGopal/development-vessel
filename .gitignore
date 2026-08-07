@@ -3,3 +3,8 @@ dist/
 .env
 *.local
 substrate-heartbeat.json
+
+# Runtime memory store — the memoryNote resolver rewrites this on every call, and a
+# unit test that touches it must not leave state in the tree (it made the suite
+# self-poisoning: baseline passed, post-draft failed, every compose went UNFAVORABLE).
+memory/

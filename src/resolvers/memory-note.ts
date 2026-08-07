@@ -52,7 +52,27 @@ export interface MemoryNoteWritePointer {
   };
 }
 
-const NOTES_PATH = () => join(WORKSPACE_ROOT, "memory", "notes.json");
+// READ WORKSPACE_ROOT AT USE TIME, NOT AT MODULE LOAD.
+//
+// config.ts evaluates `WORKSPACE_ROOT` once per bun process. Importing that frozen
+// const meant this resolver ignored any later WORKSPACE_ROOT — including the one the
+// test sets before dynamically importing it. That idiom only works if this file is the
+// FIRST to load config.ts; in a 202-file single-process `bun test` run it never is, so
+// the unit test wrote to the REAL memory store under cwd instead of its tmpdir.
+//
+// The consequence was not a cosmetic test failure. It made the suite SELF-POISONING and
+// deterministically so: run 1 creates the fixture note and asserts "created"; run 2 finds
+// the note it left behind and returns "updated". feature_compose runs its baseline in a
+// fresh git worktree of origin/dev where `memory/` does not exist (untracked), so the
+// BASELINE PASSES and the POST-DRAFT RUN FAILS — the one failure shape the baseline-delta
+// verify gate cannot subtract away. The flake re-confirmation could not save it either,
+// because the state is on disk, not random: it fails again. Every feature_compose on this
+// vessel since the test landed has gone UNFAVORABLE for this reason alone.
+//
+// It also violates law 1 directly: behaviour frozen into a module const at process start
+// is invisible to traces and unlearnable. A use-time read is what the law asks for.
+const notesRoot = (): string => process.env["WORKSPACE_ROOT"] ?? WORKSPACE_ROOT;
+const NOTES_PATH = () => join(notesRoot(), "memory", "notes.json");
 
 async function loadNotes(): Promise<MemoryNote[]> {
   try {
@@ -64,7 +84,7 @@ async function loadNotes(): Promise<MemoryNote[]> {
 }
 
 async function saveNotes(notes: MemoryNote[]): Promise<void> {
-  const dir = join(WORKSPACE_ROOT, "memory");
+  const dir = join(notesRoot(), "memory");
   await mkdir(dir, { recursive: true });
   const tmp = NOTES_PATH() + ".tmp";
   await writeFile(tmp, JSON.stringify(notes, null, 2), "utf-8");

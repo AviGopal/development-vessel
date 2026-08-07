@@ -2694,7 +2694,7 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
     if (!cur.ok || typeof curContent !== "string" || !curContent) return false;
     try {
       const out = await llmCall(
-        llmEndpoint,
+        FEATURE_COMPOSE_ENDPOINT,
         llmEndpointNew,
         model,
         false

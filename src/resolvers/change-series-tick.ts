@@ -105,7 +105,37 @@ function reconcile(step: SeriesStep): { verdict: "landed" | "dispatchable" | "bl
   }
   const occOld = step.anchor.length > 0 ? text.split(step.anchor).length - 1 : 0;
   const occNew = step.replacement.length > 0 ? text.split(step.replacement).length - 1 : 0;
-  if (occOld === 0 && occNew >= 1) return { verdict: "landed", detail: "anchor gone, replacement present" };
+
+  // "THE REPLACEMENT TEXT IS SOMEWHERE IN THE FILE" IS NOT EVIDENCE THE EDIT LANDED.
+  //
+  // Learned by causing it. On the first real plan this predicate returned LANDED for a
+  // file the drafter had CORRUPTED: it hoisted a comment line above the file's own
+  // docblock and wrote its own LLM request envelope into the source —
+  //   {"text":"<the replacement text>","model":"auto","requested_model":"auto"}
+  // — so the anchor was gone and the replacement WAS present, embedded inside a JSON
+  // string. Both halves of the old test passed on a file that no longer parsed. That is
+  // the self-confirming-oracle class this repo keeps rediscovering, rebuilt from scratch
+  // in the one place whose whole purpose was to be trustworthy without a verdict.
+  //
+  // Three structural guards, all cheap enough for a tick. The first two would each have
+  // caught that corruption on their own; the third is a coarse net for the general case.
+  // None of them is a substitute for a typecheck — a step that passes here is "plausibly
+  // landed", and the drafter's own verify stage remains the authority on correctness.
+  if (occOld === 0 && occNew >= 1) {
+    // (1) The replacement must sit at a LINE BOUNDARY. Text embedded mid-line — inside a
+    //     JSON string, a wider expression, a log message — is not an applied edit.
+    const atLineStart = text.startsWith(step.replacement) || text.includes("\n" + step.replacement);
+    // (2) Drafter-envelope tripwire: request scaffolding must never appear in source.
+    const envelope = /"requested_model"\s*:|"model"\s*:\s*"auto"/.test(text);
+    // (3) Brace/paren balance. Crude, but a truncated or spliced file usually fails it,
+    //     and a comment-only edit like the ones this series carries never changes it.
+    const balanced = (text.split("{").length - text.split("}").length) === 0
+      && (text.split("(").length - text.split(")").length) === 0;
+    if (envelope) return { verdict: "blocked", detail: "drafter request envelope found in source — file is CORRUPTED, do not advance" };
+    if (!atLineStart) return { verdict: "blocked", detail: "replacement present only mid-line — not an applied edit" };
+    if (!balanced) return { verdict: "blocked", detail: "brace/paren imbalance — file is structurally broken" };
+    return { verdict: "landed", detail: "anchor gone, replacement at line boundary, structure intact" };
+  }
   if (occOld === 1) return { verdict: "dispatchable", detail: "anchor unique" };
   if (occOld === 0) return { verdict: "blocked", detail: "anchor absent and replacement absent — the file moved under the plan" };
   return { verdict: "blocked", detail: `anchor occurs ${occOld} times — not a unique contiguous region` };

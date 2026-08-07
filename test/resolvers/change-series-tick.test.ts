@@ -98,3 +98,50 @@ describe("change_series_tick file resolution", () => {
     expect(abs.endsWith("demo/src/x.ts")).toBe(true);
   });
 });
+
+describe("change_series_tick corruption guards (regression: 2026-08-07 incident)", () => {
+  /** Mirrors the hardened predicate. */
+  function classify2(text: string, anchor: string, replacement: string): string {
+    const occOld = anchor.length > 0 ? text.split(anchor).length - 1 : 0;
+    const occNew = replacement.length > 0 ? text.split(replacement).length - 1 : 0;
+    if (occOld === 0 && occNew >= 1) {
+      const atLineStart = text.startsWith(replacement) || text.includes("\n" + replacement);
+      const envelope = /"requested_model"\s*:|"model"\s*:\s*"auto"/.test(text);
+      const balanced = (text.split("{").length - text.split("}").length) === 0
+        && (text.split("(").length - text.split(")").length) === 0;
+      if (envelope) return "blocked";
+      if (!atLineStart) return "blocked";
+      if (!balanced) return "blocked";
+      return "landed";
+    }
+    if (occOld === 1) return "dispatchable";
+    return "blocked";
+  }
+
+  it("BLOCKS the exact corruption that the old predicate called landed", () => {
+    // Verbatim shape of the real incident: the replacement text present, but only
+    // inside the drafter's own request envelope written into the source.
+    const corrupted = [
+      "// some hoisted comment",
+      " * docblock",
+      '{"text":"// NEW_COMMENT emits","model":"auto","requested_model":"auto"}',
+      "const x = 1;",
+    ].join("\n");
+    expect(classify2(corrupted, "// OLD_COMMENT emits", "// NEW_COMMENT emits")).toBe("blocked");
+  });
+
+  it("still accepts a genuinely applied edit", () => {
+    const applied = ["const a = 1;", "// NEW_COMMENT emits", "const b = 2;"].join("\n");
+    expect(classify2(applied, "// OLD_COMMENT emits", "// NEW_COMMENT emits")).toBe("landed");
+  });
+
+  it("blocks a replacement that appears only mid-line", () => {
+    const midline = 'const s = "prefix // NEW_COMMENT emits suffix";';
+    expect(classify2(midline, "// OLD_COMMENT emits", "// NEW_COMMENT emits")).toBe("blocked");
+  });
+
+  it("blocks a structurally broken file even when the text looks right", () => {
+    const broken = ["function f() {", "// NEW_COMMENT emits"].join("\n");
+    expect(classify2(broken, "// OLD_COMMENT emits", "// NEW_COMMENT emits")).toBe("blocked");
+  });
+});

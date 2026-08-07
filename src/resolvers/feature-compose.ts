@@ -170,20 +170,6 @@ async function llmCallWithFailover(endpoints: string[], prompt: string, model: s
   throw lastError ?? new Error('All LLM endpoints failed without returning a specific error.');
 }
 
-// llmCall() helper: call the llm_completion shape and unwrap the response
-async function llmCall_OLD(endpoint: string, prompt: string, model: string): Promise<string> {
-  const res = await fetch(endpoint, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `ApiKey ${METABOB_API_KEY}` },
-    body: JSON.stringify({ type: "llm_completion", prompt, model, max_tokens: 16000, task_type: "feature_compose" }),
-    signal: AbortSignal.timeout(PER_CALL_TIMEOUT_MS),
-  });
-  if (!res.ok) throw new Error(`llm fetch ${res.status}`);
-  const j = (await res.json()) as { content?: string; data?: string; error?: string };
-  if (j.error) throw new Error(`llm error: ${j.error}`);
-  return (j.content ?? j.data ?? "").trim();
-}
-
 async function discoverAll(shape: string): Promise<string[]> {
   const res = await fetch(`${DISCOVERY_ENDPOINT}/v1/resolve-url?shape=${shape}`);
   if (!res.ok) {

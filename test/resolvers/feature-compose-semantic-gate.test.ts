@@ -3,6 +3,8 @@ import {
   extractChangedSymbols,
   reachabilityHardFail,
   verifyPatchAddressesGap,
+  regionContainmentVerdict,
+  regionFromProposalText,
   diffIsCreateHeavy,
   detectNewCapabilityStub,
   stripCommentsAndStrings,
@@ -530,5 +532,53 @@ describe("verifyPatchAddressesGap — region containment with one-hop data flow"
     expect(v.addresses).toBe(false);
     expect(v.hard_fail).toBe(true);
     expect(v.reason).toContain("dot");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// SHARED PREDICATE — used by BOTH landing routes (feature_compose's semantic gate
+// and patch_with_tools' staging gate). The 046d754 case below is the one that
+// motivated exporting it: it landed through the route that had no check.
+// ---------------------------------------------------------------------------
+describe("regionContainmentVerdict / regionFromProposalText", () => {
+  it("would have refused 046d754 — a different render site that defines nothing the region shows", () => {
+    // Real before/after from 046d754, and the region-bearing line it did NOT touch.
+    const before = "        if (started) row.createSpan({ cls: 'sub-fleet-elapsed', text: fmtRel(Date.now() - started) });";
+    const after = "        if (started && Date.now() - started < 1000 * 60 * 60) row.createSpan({ cls: 'sub-fleet-elapsed', text: fmtRel(Date.now() - started) });";
+    // The patch touches a line that literally contains the region, so it is contained
+    // at zero hops — containment is a LOCATION check and correctly passes here. The
+    // shape that must stop it is the semantic judge, which this route never ran.
+    const v = regionContainmentVerdict([before, after], "sub-fleet-elapsed", FLEET_ROW_TEXT);
+    expect(v.contained).toBe(true);
+    expect(v.via).toBe("literal");
+  });
+
+  it("refuses a patch to an unrelated part of the right file", () => {
+    const v = regionContainmentVerdict(
+      ["    const dispatchCountOf = (ms) => ms.reduce((a, b) => a + b, 0);"],
+      "sub-fleet-elapsed",
+      FLEET_ROW_TEXT,
+    );
+    expect(v.contained).toBe(false);
+    expect(v.via).toBe("none");
+    expect(v.reason).toContain("dispatchCountOf");
+  });
+
+  it("accepts the definition site via one hop and says which identifier carried it", () => {
+    const v = regionContainmentVerdict(
+      ["    const elapsed = started ? fmtRel(finishedAt - started) : '';"],
+      "sub-fleet-elapsed",
+      FLEET_ROW_TEXT,
+    );
+    expect(v.contained).toBe(true);
+    expect(v.via).toBe("data_flow");
+    expect(v.reason).toContain("elapsed");
+  });
+
+  it("recovers the region from the canonical proposal phrasing, and returns '' otherwise", () => {
+    expect(regionFromProposalText(
+      'UI feedback on the surface: the elapsed column keeps counting. Edit repos/obsidian-vessel/src/views/goal-dispatch-view.ts in the region "sub-fleet-elapsed".',
+    )).toBe("sub-fleet-elapsed");
+    expect(regionFromProposalText("remove the dead import from foo.ts")).toBe("");
   });
 });

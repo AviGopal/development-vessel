@@ -989,6 +989,64 @@ export function detectArchitectureViolation(
   return violations;
 }
 
+/**
+ * Is a patch causally connected to the region a gap names?
+ *
+ * Exported because there are TWO landing routes and only one of them used to ask.
+ * feature_compose gates here; `patch_with_tools` stages a mitosis and self-lands
+ * with no semantic judge at all — which is how `046d754` put an unjudged patch on
+ * the human's UI surface (it hid the elapsed span after an hour instead of holding
+ * the final duration, and a finished run under an hour still counted up). One
+ * implementation, both callers, so the two cannot drift.
+ *
+ * `touchedLines` are BARE source lines (no +/- prefix) — added or removed.
+ * `fileText` is the post-apply text; safe, because the one-hop branch only runs
+ * when no touched line contains the region, so region-bearing lines are unchanged.
+ */
+export function regionContainmentVerdict(
+  touchedLines: string[],
+  region: string,
+  fileText: string,
+): { contained: boolean; reason: string; via: "literal" | "data_flow" | "none" } {
+  if (touchedLines.some((l) => l.includes(region))) {
+    return { contained: true, reason: `a changed line contains the region "${region}"`, via: "literal" };
+  }
+  // ONE HOP. The fix for a complaint about a VALUE lives at that value's definition,
+  // not on the line that renders it. Deliberately NOT proximity or enclosing scope:
+  // a single render function typically emits several regions, so any distance-based
+  // rule readmits the right-file/wrong-region class this check exists to stop.
+  const declared = new Set<string>();
+  for (const body of touchedLines) {
+    for (const m of body.matchAll(/(?:\b(?:const|let|var)\s+|^\s*)([A-Za-z_$][\w$]*)\s*=(?!=)/g)) {
+      const id = m[1];
+      if (id) declared.add(id);
+    }
+  }
+  const considered = [...declared];
+  const regionLines = fileText.split("\n").filter((l) => l.includes(region));
+  const hit = considered.find((id) =>
+    regionLines.some((l) => new RegExp(`\\b${id.replace(/[$]/g, "\\$")}\\b`).test(l)),
+  );
+  if (hit) {
+    return { contained: true, reason: `the patch defines "${hit}", which the region "${region}" renders`, via: "data_flow" };
+  }
+  return {
+    contained: false,
+    via: "none",
+    reason: `patch does not touch the complained-about region "${region}" and nothing it defines is consumed there — no added or removed line contains the region, and none of the identifiers it assigns (${considered.length > 0 ? considered.join(", ") : "none"}) appear on a region-bearing line, so whatever this edits, it is not the region the gap names`,
+  };
+}
+
+/**
+ * The canonical phrasing gap-to-feature puts in a gap summary:
+ * `Edit <file> in the region "<region>".` Machine-generated, so this is a contract,
+ * not prose parsing — but it returns "" on any miss and every caller treats "" as
+ * "no region known, do not gate".
+ */
+export function regionFromProposalText(text: string): string {
+  return (text.match(/\bin the region\s+"([^"]{2,120})"/i)?.[1] ?? "").trim();
+}
+
 export async function verifyPatchAddressesGap(args: {
   gapSummary: string;
   gapMeta?: Record<string, unknown>;
@@ -1071,29 +1129,12 @@ export async function verifyPatchAddressesGap(args: {
   // post-apply by construction.
   const gapRegion = String((args.gapMeta ?? {})["region"] ?? "").trim();
   if (gapRegion) {
-    const touchedLines = args.diff.split("\n").filter((l) => /^[+-]/.test(l) && !/^[+-][+-]/.test(l));
-    const touchesRegion = touchedLines.some((l) => l.includes(gapRegion));
-    let flowsToRegion = false;
-    let considered: string[] = [];
-    if (!touchesRegion) {
-      const declared = new Set<string>();
-      for (const line of touchedLines) {
-        const body = line.slice(1);
-        for (const m of body.matchAll(/(?:\b(?:const|let|var)\s+|^\s*)([A-Za-z_$][\w$]*)\s*=(?!=)/g)) {
-          const id = m[1];
-          if (id) declared.add(id);
-        }
-      }
-      considered = [...declared];
-      const regionLines = (args.fileText ?? "").split("\n").filter((l) => l.includes(gapRegion));
-      flowsToRegion = considered.some((id) =>
-        regionLines.some((l) => new RegExp(`\\b${id.replace(/[$]/g, "\\$")}\\b`).test(l)),
-      );
-    }
-    if (!touchesRegion && !flowsToRegion) {
+    const touchedLines = args.diff.split("\n").filter((l) => /^[+-]/.test(l) && !/^[+-][+-]/.test(l)).map((l) => l.slice(1));
+    const contained = regionContainmentVerdict(touchedLines, gapRegion, args.fileText ?? "");
+    if (!contained.contained) {
       return {
         addresses: false,
-        reason: `patch does not touch the complained-about region "${gapRegion}" and nothing it defines is consumed there — no added or removed line contains the region, and none of the identifiers it assigns (${considered.length > 0 ? considered.join(", ") : "none"}) appear on a region-bearing line, so whatever this edits, it is not the region the gap names`,
+        reason: contained.reason,
         on_live_path: true,
         hard_fail: true,
         llm_consulted: false,

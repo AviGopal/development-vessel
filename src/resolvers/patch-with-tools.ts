@@ -81,6 +81,13 @@ export interface PatchWithToolsPointer {
   type: "patch_with_tools";
   proposal_text: string; // sanitized proposal description (no code blocks)
   target_file: string; // repos/<vessel>/<subpath>
+  /**
+   * The region a gap names (a CSS class / marker the renderer emits). When present —
+   * threaded explicitly, or recovered from the proposal's canonical
+   * `in the region "<x>"` phrasing — the staged patch must be causally connected to
+   * it or staging is refused. Absent → no location gate, as for any non-region gap.
+   */
+  region?: string;
   vessels_root?: string;
   workspace_root?: string;
   model?: string;
@@ -1204,6 +1211,53 @@ export async function resolvePatchWithTools(pointer: PatchWithToolsPointer): Pro
       before_sha: beforeSha,
       after_sha: afterSha,
     });
+  }
+}
+
+// REGION-CONTAINMENT GATE (2026-08-07). Same reasoning as the egress gate above, and
+// the same reuse: this patcher self-lands via the mitosis cutover and never runs
+// feature_compose's semantic gate, so a patch that edits the wrong part of the right
+// file lands unjudged. EVIDENCE: 046d754 — a ui-feedback gap naming region
+// "sub-fleet-elapsed" ("the elapsed column keeps counting after a run has finished")
+// escalated here after a mechanical anchor failure and landed a patch on a DIFFERENT
+// render site that HID the span after an hour. It fixes nothing (a finished run under
+// an hour still counts up), it is the satisfy-by-destroying shape the compose judge
+// exists to reject, and it reached the human's UI surface. Reverted as 78c675d.
+//
+// The escalation itself was legitimate — the trigger was `no_unique_anchor`, a
+// mechanical failure, which is exactly what byte-anchored patching is for. What was
+// missing is that the end of that route has no location check at all.
+//
+// Gated ONLY when the proposal names a region, so every other patch is unaffected.
+{
+  const { regionContainmentVerdict, regionFromProposalText } = await import("./feature-compose.js");
+  const region = String(pointer.region ?? "").trim() || regionFromProposalText(String(pointer.proposal_text ?? ""));
+  if (region) {
+    // Touched lines = the multiset difference both ways. A line present in equal
+    // counts on both sides was not touched, whatever moved around it.
+    const count = (arr: string[]): Map<string, number> => {
+      const m = new Map<string, number>();
+      for (const l of arr) m.set(l, (m.get(l) ?? 0) + 1);
+      return m;
+    };
+    const beforeLines = baseContent.split("\n");
+    const afterLines = afterSrc.split("\n");
+    const bc = count(beforeLines);
+    const ac = count(afterLines);
+    const touched: string[] = [];
+    for (const [l, n] of ac) { const d = n - (bc.get(l) ?? 0); for (let i = 0; i < d; i++) touched.push(l); }
+    for (const [l, n] of bc) { const d = n - (ac.get(l) ?? 0); for (let i = 0; i < d; i++) touched.push(l); }
+    const verdict = regionContainmentVerdict(touched, region, afterSrc);
+    if (!verdict.contained) {
+      await resetTarget();
+      return structuredError("region_containment_failed", {
+        target_file: pointer.target_file,
+        region,
+        detail: verdict.reason,
+        before_sha: beforeSha,
+        after_sha: afterSha,
+      });
+    }
   }
 }
 

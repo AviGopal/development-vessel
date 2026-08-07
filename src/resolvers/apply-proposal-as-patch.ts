@@ -30,7 +30,7 @@
 
 import { resolve, join, dirname } from "node:path";
 import { mkdir, readdir, stat, writeFile, readFile, access, rename } from "node:fs/promises";
-import { randomBytes } from "node:crypto";
+
 import { createHash } from "node:crypto";
 import { DISCOVERY_ENDPOINT, METABOB_API_KEY } from "../config.js";
 import type { ResolverResult } from "./types.js";

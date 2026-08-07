@@ -157,14 +157,49 @@ async function llmCall(endpoint: string, prompt: string, model: string, produceF
   return content;
 }
 
+/**
+ * Try every endpoint, then RETRY the transient failures.
+ *
+ * Each endpoint used to get exactly one attempt. That is fine while a local arm is
+ * healthy, but the local resolver DE-ADVERTISES llm_completion the moment its
+ * provider quota is exhausted — and then the hub egress is the only lane left, so a
+ * single transient 502 killed an entire compose. Measured 2026-08-07: composes died
+ * on `502 {"error":"empty libp2p resolve"}` while the same hub lane, probed directly
+ * with the identical flat payload and max_tokens=16000, answered 200 in 1.5s. The
+ * lane was fine; the call had no second chance.
+ *
+ * Retry only what can plausibly succeed on a repeat: network errors and 5xx. A 4xx
+ * is a decision (bad auth, bad request, exhausted quota) and repeating it just burns
+ * the clock — quota exhaustion in particular must fall through to the next lane
+ * rather than spin on a dead one.
+ */
+const LLM_RETRY_ROUNDS = 3;
+function isRetryableLlmError(e: Error): boolean {
+  const m = e.message;
+  const status = m.match(/failed with status (\d{3})/)?.[1];
+  if (status) return Number(status) >= 500;
+  // No status parsed => transport-level (abort, socket, DNS) => retryable.
+  return true;
+}
 async function llmCallWithFailover(endpoints: string[], prompt: string, model: string): Promise<string> {
   let lastError: Error | null = null;
-  for (const endpoint of endpoints) {
-    try {
-      const result = await llmCall(endpoint, prompt, model);
-      return result;
-    } catch (e) {
-      lastError = e instanceof Error ? e : new Error(String(e));
+  for (let round = 0; round < LLM_RETRY_ROUNDS; round++) {
+    let anyRetryable = false;
+    for (const endpoint of endpoints) {
+      try {
+        return await llmCall(endpoint, prompt, model);
+      } catch (e) {
+        const err = e instanceof Error ? e : new Error(String(e));
+        lastError = err;
+        if (isRetryableLlmError(err)) anyRetryable = true;
+      }
+    }
+    // Every lane failed for a NON-transient reason — another round cannot help.
+    if (!anyRetryable) break;
+    if (round < LLM_RETRY_ROUNDS - 1) {
+      const backoffMs = 2000 * Math.pow(2, round);
+      console.log(`[llm-failover] all ${endpoints.length} endpoint(s) failed transiently (round ${round + 1}/${LLM_RETRY_ROUNDS}); retrying in ${backoffMs}ms — last: ${lastError?.message.slice(0, 160)}`);
+      await new Promise((r) => setTimeout(r, backoffMs));
     }
   }
   throw lastError ?? new Error('All LLM endpoints failed without returning a specific error.');

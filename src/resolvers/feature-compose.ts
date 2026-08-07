@@ -989,6 +989,41 @@ export async function verifyPatchAddressesGap(args: {
   // nothing. Reject deterministically BEFORE the LLM judge, scoped to create-heavy
   // diffs so surgical edits are unaffected. on_live_path stays true (it IS reachable)
   // but addresses=false: the capability exists on a live path but is not functional.
+  // REGION-CONTAINMENT HARD-FAIL (2026-08-07). A ui-feedback gap names the exact
+  // panel region it is about — `classification_metadata.region` is the literal CSS
+  // class the renderer passes to createDiv. If the diff does not touch that region,
+  // the patch cannot be addressing the complaint, whatever it says about itself.
+  //
+  // Learned by shipping it. A human complaint about `sub-card sub-card--fleet`
+  // produced a patch editing `sub-step-shadowline` — a different region in the same
+  // file — and the LLM judge returned addresses:true with the reasoning that it
+  // "directly addresses the request to boldface the content section of the
+  // sub-card--fleet panel region". That sentence NAMES THE CORRECT REGION WHILE
+  // APPROVING AN EDIT TO A DIFFERENT ONE. Every structural check passed because the
+  // FILE was right; location was judged by prose, and prose is what the drafter is
+  // best at. It landed (ad706ce) and had to be reverted (1812ee7).
+  //
+  // A judge asked "does this address the request?" will accept a plausible rationale,
+  // because the model that wrote the patch finds its own justification convincing.
+  // Containment is not a matter of opinion, so check it deterministically and BEFORE
+  // the judge, exactly as reachability and stub-detection already are.
+  //
+  // Scoped to gaps that actually name a region, so every other change is unaffected.
+  const gapRegion = String((args.gapMeta ?? {})["region"] ?? "").trim();
+  if (gapRegion) {
+    const touchedLines = args.diff.split("\n").filter((l) => /^[+-]/.test(l) && !/^[+-][+-]/.test(l));
+    const touchesRegion = touchedLines.some((l) => l.includes(gapRegion));
+    if (!touchesRegion) {
+      return {
+        addresses: false,
+        reason: `patch does not touch the complained-about region "${gapRegion}" — no added or removed line contains it, so whatever this edits, it is not the region the gap names`,
+        on_live_path: true,
+        hard_fail: true,
+        llm_consulted: false,
+        suspected_real_location: gapRegion,
+      };
+    }
+  }
   const stub = detectNewCapabilityStub(args.diff);
   if (stub.isStub) {
     return {

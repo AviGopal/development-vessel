@@ -229,6 +229,34 @@ export async function resolveMemoryNoteWrite(
   const notes = await loadNotes();
   const existingIdx = notes.findIndex((n) => n.id === note.id);
 
+  // A NOTE WITH NO CONTENT IS NOT A NOTE. The write path accepts "at least a title or a
+  // body", which lets a composed walk whose content binding produced nothing still write
+  // a titled shell and collect a success — the artifact exists, reads as delivered, and
+  // holds nothing. Observed live: dispatch 08841a58 asked for a summary note and created
+  // `llm-resolver-vessel-purpose` with body "".
+  //
+  // Refuse rather than accept-and-hope, so the caller's reach gate sees a failure instead
+  // of a green. Refusing is also why this is not "silently keep the old body": a write
+  // that carried nothing must be REPORTED, not quietly absorbed.
+  const incomingBody = (body ?? "").trim();
+  if (incomingBody.length === 0) {
+    const existingBody = existingIdx >= 0 ? (notes[existingIdx]!.body ?? "").trim() : "";
+    return {
+      shape: "memoryNoteWriteResult",
+      body: {
+        id: note.id,
+        action: "rejected",
+        reason:
+          existingBody.length > 0
+            ? // The destructive case. `notes[existingIdx] = note` replaced the row wholesale,
+              // so an empty-bodied re-write BLANKED an already-good note — a composed
+              // walk's second pass could destroy the artifact its first pass earned.
+              `refusing to overwrite the existing body of "${note.id}" (${existingBody.length} chars) with an empty one`
+            : `refusing to create "${note.id}" with an empty body — a titled shell is not a note`,
+      },
+    };
+  }
+
   if (existingIdx >= 0) {
     // Preserve original created_at on upsert
     note.created_at = notes[existingIdx]!.created_at;

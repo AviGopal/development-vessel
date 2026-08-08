@@ -196,7 +196,6 @@ export const config = {
       "vessel_write_error_scan",
       // Code quality assessment of clock-vessel source (reads real source files + LLM analysis)
       "code_quality with substantive assessment content",
-      "summary_of_clock_vessel_functionality",
       // Meta-detector (2026-06-13): authored chains whose http_fetch tasks failed
       // (non-2xx) — surfaced via the failure-marker content of the concepts they mint.
       "chain_fetch_failure_scan",
@@ -715,8 +714,6 @@ export const config = {
       "goal_summary",
       // Seam ③ substrate-authored resolver (2026-07-01): producer for activity_metrics (capability-gap autoclosure)
       "activity_metrics",
-      // Seam ③ substrate-authored resolver (2026-07-01): producer for summary_of_clock_vessel_functionality (capability-gap autoclosure)
-      "summary_of_clock_vessel_functionality",
       // Seam ③ substrate-authored resolver (2026-07-01): producer for assessment_summary (capability-gap autoclosure)
       "concept",
       "config_file",

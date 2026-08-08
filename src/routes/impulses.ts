@@ -217,7 +217,6 @@ import { resolveObsidianNoteWithProjectListContent } from "../resolvers/obsidian
 import { resolveSubstantiveFindings } from "../resolvers/substantive-findings.js";
 import { resolveGoalSummary } from "../resolvers/goal-summary.js";
 import { resolveActivityMetrics } from "../resolvers/activity-metrics.js";
-import { resolveSummaryOfClockVesselFunctionality } from "../resolvers/summary-of-clock-vessel-functionality.js";
 import { resolveConfigFile } from "../resolvers/config-file.js";
 import { resolveActivityTemplate } from "../resolvers/activity-template.js";
 import { resolveAssessmentSummary } from "../resolvers/assessment-summary.js";
@@ -871,10 +870,6 @@ async function dispatchInner(pointer: AnyPointer): Promise<ResolverResult> {
       return resolveGoalSummary(p as Parameters<typeof resolveGoalSummary>[0]);
     case "activity_metrics":
       return resolveActivityMetrics(p as Parameters<typeof resolveActivityMetrics>[0]);
-    case "summary_of_clock_vessel_functionality": {
-        const { resolveSummaryOfClockVesselFunctionality } = await import("../resolvers/summary-of-clock-vessel-functionality.js");
-        return resolveSummaryOfClockVesselFunctionality(pointer);
-      }
     case "assessment_summary":
       return resolveAssessmentSummary(p as Parameters<typeof resolveAssessmentSummary>[0]);
     case "code_quality with substantive assessment content":

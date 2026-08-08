@@ -69,7 +69,16 @@ scaffold-and-publish-vessel will write a 7-file canonical vessel (package.json, 
 - **pr_title**: short, e.g. "substrate-authored: scaffold <vessel_name> for <capability_shape>".
 - **pr_body**: 2-4 sentences. State the demanded shape, the demanding template count, and that this closes a §8.5 capability horizon the recombination drafter cannot close. The body MUST contain a literal line starting with "Substrate-Authored-By:" (scaffold-and-publish-vessel's gh_pr_create REFUSES PRs without it). End with "Substrate-Authored-By: vessel-scaffold-trigger-tick".
 
-## Output contract — output ONLY this JSON object, no prose, no markdown fences
+## Output contract — output ONLY this JSON object, no prose, no markdown
+{
+  "vessel_name": "<vessel_name>",
+  "port": "<port>",
+  "advertised_shapes_literal": "[\\"<capability_shape>\\"]",
+  "description": "<description>",
+  "commit_message": "feat(<vessel_name>): scaffold vessel supplying <capability_shape> (substrate-authored from <source_gap_id>)",
+  "pr_title": "substrate-authored: scaffold <vessel_name> for <capability_shape>",
+  "pr_body": "Demanded shape: <capability_shape>. This closes a §8.5 capability horizon the recombination drafter cannot close. Substrate-Authored-By: vessel-scaffold-trigger-tick"
+} fences
 
 {
   "vessel_name": "...",

@@ -8,3 +8,9 @@ substrate-heartbeat.json
 # unit test that touches it must not leave state in the tree (it made the suite
 # self-poisoning: baseline passed, post-draft failed, every compose went UNFAVORABLE).
 memory/
+
+# Claude Code agent worktrees. These are throwaway checkouts that live INSIDE
+# the repo; committing one records a gitlink with no .gitmodules entry, which
+# makes `git submodule update --recursive` fail for every consumer (it broke the
+# super-repo glue refresh, so the reach-oracle worktrees silently lagged).
+.claude/worktrees/

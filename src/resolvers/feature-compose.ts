@@ -2993,7 +2993,7 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
       const base = f.split("/").pop() ?? "";
       return base.endsWith(".ts") && touchedBases.has(base);
     });
-    const tcOk = tcExit === 0 || (baseTs.size > 0 && newTs.length === 0 && !touchedErr);
+    const tcOk = tcExit === 0;
     // TEST gate, baseline-delta (see testFailureSet): a draft that compiles can still
     // break the suite — that is exactly how 53e4267 landed a no-op and left 5 tests red
     // for 10 days. Block only on failures this draft INTRODUCED, so pre-existing reds in

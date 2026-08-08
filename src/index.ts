@@ -10,10 +10,13 @@ import { GapDrainObserver } from "./services/gap-drain-observer.js";
 
 const app = new Hono();
 
+import { VESSEL_ID } from "./config.js";
+
 app.get("/health", (c) => {
   return c.json({
     status: "ok",
     vessel: "development-vessel",
+    vesselId: VESSEL_ID,
     version: "0.1.0",
     discovery: { registered: isRegistered() },
   });

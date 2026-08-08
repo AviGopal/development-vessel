@@ -857,6 +857,8 @@ function semanticJudgePrompt(
   dataFlow: DataFlowFact[],
   codeContext: string,
   archViolations: Array<{ law: string; detail: string; snippet: string }> = [],
+  /** Deterministic location check, phrased as a fact to weigh — never a verdict. */
+  containmentNote = "",
 ): string {
   const metaStr = gapMeta ? `\n\nGap detector evidence:\n${JSON.stringify(gapMeta, null, 2)}` : "";
   const createHeavy = diffIsCreateHeavy(diff);
@@ -912,7 +914,7 @@ ${codeContext || "(none extracted)"}
 Unified diff that was applied (and typechecked clean):
 ${diff.slice(0, 8000)}
 
-${dataFlow.length > 0 ? `\nData-flow facts (deterministic):\n${JSON.stringify(dataFlow, null, 2)}\n\nA consumed-but-never-populated collection or an imported-but-never-called symbol is presumptively a DROPPED EDIT: unless the diff itself shows the population/call site, return addresses:false and name the missing site in suspected_real_location.\n` : ''}${archClause}Judge strictly. The patch ADDRESSES the gap only if it changes the behavior the gap describes AND that changed code is on a path that executes (called, routed, dispatched, or a lifecycle/entrypoint). If the patch edits a DIFFERENT symbol than the one the gap's real fix lives in (e.g. it adds \`recordOutcome\` when the live β-penalty path is \`penaliseHollowTemplate\`), report the right one in suspected_real_location.
+${dataFlow.length > 0 ? `\nData-flow facts (deterministic):\n${JSON.stringify(dataFlow, null, 2)}\n\nA consumed-but-never-populated collection or an imported-but-never-called symbol is presumptively a DROPPED EDIT: unless the diff itself shows the population/call site, return addresses:false and name the missing site in suspected_real_location.\n` : ''}${archClause}${containmentNote ? containmentNote + '\n\n' : ''}Judge strictly. The patch ADDRESSES the gap only if it changes the behavior the gap describes AND that changed code is on a path that executes (called, routed, dispatched, or a lifecycle/entrypoint). If the patch edits a DIFFERENT symbol than the one the gap's real fix lives in (e.g. it adds \`recordOutcome\` when the live β-penalty path is \`penaliseHollowTemplate\`), report the right one in suspected_real_location.
 
 Respond with ONLY JSON: {"addresses": boolean, "reason": "<1 sentence>", "on_live_path": boolean, "suspected_real_location": "<symbol or file:symbol the real fix belongs in, or empty>"}`;
 }
@@ -1211,19 +1213,33 @@ export async function verifyPatchAddressesGap(args: {
   // replaying the exact rejected op through regionContainmentVerdict: it returns
   // contained:false, while production logged hard_fail:false, which can only mean the
   // check never ran. The region was present the whole time, in the summary.
+  let containmentNote = "";
   const gapRegion = String((args.gapMeta ?? {})["region"] ?? "").trim()
     || regionFromProposalText(args.gapSummary ?? "");
   if (gapRegion) {
     const touchedLines = args.diff.split("\n").filter((l) => /^[+-]/.test(l) && !/^[+-][+-]/.test(l)).map((l) => l.slice(1));
     const contained = regionContainmentVerdict(touchedLines, gapRegion, args.fileText ?? "");
     if (!contained.contained) {
-      return {
-        addresses: false,
-        reason: contained.reason,
-        on_live_path: true,
-        hard_fail: true,
-        llm_consulted: false,
-      };
+      // INFORM THE JUDGE; DO NOT VETO (2026-08-07). This started as a hard-fail and
+      // its record as a veto is 3 false rejections against 1 real catch — and the
+      // real catch (ad706ce, right file wrong region) was approved by the LLM judge
+      // anyway, so vetoing never actually prevented it alone.
+      //
+      // The three it killed were all correct patches whose relationship to the region
+      // is real but not textual:
+      //   - the fix at the DEFINITION of the value the region renders
+      //   - a fix INSERTED ADJACENT to the region statement (add a line after
+      //     `record.status = seek.status;` and no changed line contains the region)
+      //   - a patch on a gap whose region was a human label, not a locator
+      // Each cost the gap a selection cycle, and landability decays per failure, so a
+      // false veto does not merely delay a fix — it spends the gap's remaining
+      // chances to be chosen at all.
+      //
+      // Containment is a good SIGNAL and a bad VETO. Keep the deterministic
+      // computation and hand it to the judge as a stated fact, which is strictly more
+      // information than the judge had when it approved ad706ce with nothing.
+      containmentNote = `\n\nDETERMINISTIC LOCATION CHECK (not a verdict — weigh it):\n${contained.reason}\nA patch can still be right when this fires: the fix may belong at the DEFINITION of a value the region renders, or on a line INSERTED ADJACENT to the region rather than on it. Ask whether this change can plausibly affect what the region shows. If it edits an unrelated part of the file — a different region, a different symbol — say addresses:false and name the region in suspected_real_location.`;
+      console.log(`[fc-containment] advisory (not a veto) for region "${gapRegion}": ${contained.reason.slice(0, 200)}`);
     }
   }
   const stub = detectNewCapabilityStub(args.diff);
@@ -1269,7 +1285,7 @@ export async function verifyPatchAddressesGap(args: {
   let raw = "";
   try {
     const archViolations = detectArchitectureViolation(args.diff);
-    raw = await args.llm(semanticJudgePrompt(args.gapSummary, args.gapMeta, args.diff, args.reachability, args.data_flow ?? [], args.codeContext ?? "", archViolations));
+    raw = await args.llm(semanticJudgePrompt(args.gapSummary, args.gapMeta, args.diff, args.reachability, args.data_flow ?? [], args.codeContext ?? "", archViolations, containmentNote));
   } catch (e) {
     // Judge unreachable: do NOT block on the judge alone (the deterministic floor
     // already passed). Treat as addresses=true-but-unverified so a flaky LLM cannot

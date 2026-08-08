@@ -485,9 +485,11 @@ describe("verifyPatchAddressesGap — region containment with one-hop data flow"
       fileText: FLEET_ROW_TEXT,
       llm: async () => { llmCalled = true; return "{}"; },
     });
-    expect(v.addresses).toBe(false);
-    expect(v.hard_fail).toBe(true);
-    expect(llmCalled).toBe(false);
+    // Containment is ADVISORY now: it informs the judge instead of vetoing, so the
+    // judge is consulted and its verdict decides. The 8a25744/ad706ce protection is
+    // the note handed to the judge, not a hard-fail.
+    expect(llmCalled).toBe(true);
+    expect(v.hard_fail ?? false).toBe(false);
   });
 
   it("accepts an edit to the DEFINITION of an identifier the region line renders", async () => {
@@ -520,18 +522,18 @@ describe("verifyPatchAddressesGap — region containment with one-hop data flow"
     expect(v.addresses).toBe(false);
   });
 
-  it("names the identifiers it considered when the data-flow branch finds no edge", async () => {
-    const v = await verifyPatchAddressesGap({
+  it("hands the judge the identifiers it considered, instead of vetoing", async () => {
+    let prompt = "";
+    await verifyPatchAddressesGap({
       gapSummary: "the elapsed column keeps counting after a run has finished",
       gapMeta: { region: "sub-fleet-elapsed" },
       diff: `--- a/x.ts\n+++ b/x.ts\n@@ -1 +1 @@\n-    const dot = running ? 1 : 2;\n+    const dot = running ? 3 : 4;`,
       reachability: REACHABLE_VIEW,
       fileText: FLEET_ROW_TEXT,
-      llm: async () => "{}",
+      llm: async (p) => { prompt = p; return JSON.stringify({ addresses: false, reason: "edits an unrelated span", on_live_path: true }); },
     });
-    expect(v.addresses).toBe(false);
-    expect(v.hard_fail).toBe(true);
-    expect(v.reason).toContain("dot");
+    expect(prompt).toContain("DETERMINISTIC LOCATION CHECK");
+    expect(prompt).toContain("dot");
   });
 });
 
@@ -587,19 +589,21 @@ describe("verifyPatchAddressesGap — region recovered from summary when metadat
   // The goal-host /run-goal edit-intent path builds its gap pointer from goal TEXT and
   // never sets classification_metadata, which left this gate inert on the route that
   // escalates. This is the exact op that slipped through on 2026-08-07 at 18:37.
-  it("hard-fails an off-region patch even with NO gapMeta at all", async () => {
+  it("recovers the region from the summary and tells the judge, with NO gapMeta at all", async () => {
     let llmCalled = false;
+    let prompt = "";
     const v = await verifyPatchAddressesGap({
       gapSummary: 'UI feedback on the surface: the elapsed column keeps counting after a run has finished Edit repos/obsidian-vessel/src/views/goal-dispatch-view.ts in the region "sub-fleet-elapsed".',
       diff: `--- a/x.ts\n+++ b/x.ts\n@@ -1 +1 @@\n-        const dispatchTotal = dispatchCountOf(members);\n+        const dispatchTotal = dispatchCountOf(members.filter(Boolean));`,
       reachability: REACHABLE_VIEW,
       fileText: FLEET_ROW_TEXT,
-      llm: async () => { llmCalled = true; return "{}"; },
+      llm: async (p) => { llmCalled = true; prompt = p; return JSON.stringify({ addresses: false, reason: "edits the header counter", on_live_path: true }); },
     });
+    expect(llmCalled).toBe(true);
     expect(v.addresses).toBe(false);
-    expect(v.hard_fail).toBe(true);
-    expect(llmCalled).toBe(false);
-    expect(v.reason).toContain("dispatchTotal");
+    // The region was recovered from the summary alone and reached the judge as a fact.
+    expect(prompt).toContain("DETERMINISTIC LOCATION CHECK");
+    expect(prompt).toContain("dispatchTotal");
   });
 
   it("stays out of the way when the summary names no region", async () => {

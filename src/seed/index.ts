@@ -128,6 +128,7 @@ import { POSTERIOR_CONSISTENCY_AUDIT_TICK_TEMPLATE } from "./posterior-consisten
 import { CAPABILITY_GAP_AUDIT_TICK_TEMPLATE } from "./capability-gap-audit-tick.js";
 import { ORPHANED_CAPABILITY_TICK_TEMPLATE } from "./orphaned-capability-tick.js";
 import { RESOLVER_AUTHOR_TEMPLATE } from "./resolver-author.js";
+import { INVOKE_DOCS_DECISION_SOLICIT_TEMPLATE } from "./invoke-docs-decision-solicit.js";
 import { CYCLIC_FLOW_SCAN_TICK_TEMPLATE } from "./cyclic-flow-scan-tick.js";
 import { SELF_INTERFERENCE_SCAN_TICK_TEMPLATE } from "./self-interference-scan-tick.js";
 import { GROUP_INTERACTION_EPISODES_TEMPLATE } from "./group-interaction-episodes.js";

@@ -106,7 +106,7 @@ export async function resolveRhythmConductorTick(
   const endpoint = pointer.registry_endpoint ?? `${DEV_SELF_ENDPOINT}/v2/impulses/resolve`;
   const maxEnqueue = pointer.max_enqueue ?? 2;
   const dueThreshold = pointer.due_threshold ?? 1.0;
-  let present = process.env["DEV_OPERATOR_PRESENT"] === "1";
+  let present = (process.env["DEV_OPERATOR_PRESENT"] ?? "0") === "1";
   if (!present) {
     const disc = (await fetchJson(
       `${process.env["DISCOVERY_ENDPOINT"] ?? "http://127.0.0.1:8100"}/resolve`,

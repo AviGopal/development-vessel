@@ -31,6 +31,7 @@ export const config = {
     // Inline literal so packages/shape-dispatch-check/check.ts can find it.
     // One entry per R2.* resolver in specs/development-vessel/spec.md.
     shapes: [
+    "test_suite",
     "learningMode",
     "fossil_rank_report",
     'template_success_ranking_24h',
@@ -465,6 +466,11 @@ export const config = {
       // until it declares done or the iteration budget is exhausted. Learning
       // generalises which tool-sequences close which gap shapes.
       "patch_with_tools",
+      // Bridge resolver for code_read_lines (local-tools-vessel deterministic code-line reader).
+      // Wired per the three-place rule (resolver + config shape + impulses case) to close
+      // orphaned-capability gap: code_read_lines was registered but invoked by 0 activities.
+      "code_read_lines",
+      "codeReadResult",
       // Template-mitosis weak-template scanner (2026-06-04). Ranks templates
       // by Thompson posterior mean α/(α+β); emits templateAuditReport whose
       // weak_templates[0].template_id feeds template-mitosis-tick (variant

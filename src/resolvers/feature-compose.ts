@@ -1749,7 +1749,7 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
   if (busy) {
     await ws.release();
     try { const { appendFile } = await import("node:fs/promises"); await appendFile("/workspace/proposals/busy-refusals.jsonl", JSON.stringify({ at: new Date().toISOString(), vessel: busy }) + "\n"); } catch { }
-    return { shape: "featureComposeReport", body: { ok: false, verdict: "BUSY", stage: "guard", error: "compose already in flight for " + busy + " - retry after it completes" } };
+    return { shape: "feature_compose", body: { ok: false, verdict: "BUSY", stage: "guard", error: "compose already in flight for " + busy + " - retry after it completes" } };
   }
   for (const v of unisolated) composeInFlight.add(v);
   try { return await resolveFeatureComposeInner(pointer, pointer.gap?.id, ws); } finally { for (const v of unisolated) composeInFlight.delete(v); await ws.release(); }
@@ -1813,7 +1813,7 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
   llmEndpoints.push(`${FED_TRANSPORT_EGRESS}/egress/resolve?vessel=llm-resolver-vessel`);
   const toolsEndpoint = await discover("shellResult");
   if (llmEndpoints.length === 0 || !toolsEndpoint) {
-    return { shape: "featureComposeReport", body: { ok: false, error: `endpoint discovery failed (llm=${llmEndpoints.length > 0}, tools=${!!toolsEndpoint})` } };
+    return { shape: "feature_compose", body: { ok: false, error: `endpoint discovery failed (llm=${llmEndpoints.length > 0}, tools=${!!toolsEndpoint})` } };
   }
   const llmEndpoint = llmEndpoints[0]!;
 
@@ -1899,7 +1899,7 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
     try {
       planRaw = await llmCallWithFailover(llmEndpoints, decomposePrompt(spec, maxOps, grounding, principles + composeLessons, priorFeedback), model);
     } catch (e) {
-      return { shape: "featureComposeReport", body: { ok: false, stage: "decompose", error: (e as Error).message } };
+      return { shape: "feature_compose", body: { ok: false, stage: "decompose", error: (e as Error).message } };
     }
     plan = parseJsonObject(planRaw);
     ops = (plan?.ops as PlanOp[] | undefined) ?? [];
@@ -1955,7 +1955,7 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
         if (_delegateRes.ok) {
           const _delegateBody = (await _delegateRes.json()) as unknown;
           return {
-            shape: "featureComposeReport",
+            shape: "feature_compose",
             body: { ok: true, stage: "delegated_author_composed_capability", authored: _delegateBody },
           };
         }
@@ -1963,7 +1963,7 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
         // delegation failed — fall through to existing error return
       }
     }
-    return { shape: "featureComposeReport", body: { ok: false, stage: "decompose", error: "plan had no ops", plan_raw: planRaw.slice(0, 1200) } };
+    return { shape: "feature_compose", body: { ok: false, stage: "decompose", error: "plan had no ops", plan_raw: planRaw.slice(0, 1200) } };
   }
   if (ops.length > maxOps) ops.length = maxOps;
 
@@ -2008,7 +2008,7 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
     const offTargetEdits = ops.filter(isOffTargetEdit);
     if (offTargetEdits.length > 0) {
       if (offTargetEdits.length === ops.length) {
-        return { shape: "featureComposeReport", body: { ok: false, verdict: "REFUSED", stage: "scope", error: "plan is off-target: it edits " + offTargetEdits.map((o) => o.path).join(", ") + " but the spec's target file(s) are " + targetFiles.join(", ") + " - no edit lands on an intended target file" } };
+        return { shape: "feature_compose", body: { ok: false, verdict: "REFUSED", stage: "scope", error: "plan is off-target: it edits " + offTargetEdits.map((o) => o.path).join(", ") + " but the spec's target file(s) are " + targetFiles.join(", ") + " - no edit lands on an intended target file" } };
       }
       const kept = ops.filter((op) => !isOffTargetEdit(op));
       console.log(`[feature-compose] file-scope gate: DROPPED ${offTargetEdits.length} off-target edit op(s) [${offTargetEdits.map((o) => o.path).join(", ")}]; targets=[${targetFiles.join(", ")}]; kept ${kept.length} op(s)`);
@@ -2020,7 +2020,7 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
   for (const op of ops) { const d = vesselDirOf(op.path); if (d) touched.add(d); }
   if (verifyVessels.length > 0) {
     const outOfScope = [...touched].find((v) => !verifyVessels.includes(v));
-    if (outOfScope) return { shape: "featureComposeReport", body: { ok: false, verdict: "REFUSED", stage: "scope", error: "plan touches " + outOfScope + " which is outside verify_vessels - declare it so it is typecheck-verified and concurrency-guarded" } };
+    if (outOfScope) return { shape: "feature_compose", body: { ok: false, verdict: "REFUSED", stage: "scope", error: "plan touches " + outOfScope + " which is outside verify_vessels - declare it so it is typecheck-verified and concurrency-guarded" } };
   }
   // A touched vessel dir is `repos/<name>` (relative). Existence must be checked against the
   // absolute roots the runtime actually uses — RUNTIME_ROOT (resident vessels) OR the push-clone
@@ -2034,7 +2034,7 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
     return existsSync(`${RUNTIME_ROOT}/${name}`) || existsSync(`${CLONE_ROOT_FOR_SCOPE}/${name}`);
   };
   const missingVessel = [...touched].find((v) => !vesselResidentForScope(v));
-  if (missingVessel) return { shape: "featureComposeReport", body: { ok: false, verdict: "REFUSED", stage: "scope", error: "plan touches vessel " + missingVessel + " which does not exist in the runtime or push-clone roots" } };
+  if (missingVessel) return { shape: "feature_compose", body: { ok: false, verdict: "REFUSED", stage: "scope", error: "plan touches vessel " + missingVessel + " which does not exist in the runtime or push-clone roots" } };
 
   const planView = ops.map((o) => ({ kind: o.kind, path: o.path, rationale: o.rationale }));
   // Materialize non-resident vessels (gap edit-intent-path-translation-post-unmooring):
@@ -2074,7 +2074,7 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
   }
 
   if (dryRun) {
-    return { shape: "featureComposeReport", body: { ok: true, stage: "plan", summary: plan.summary, touched_vessels: [...touched], ops: planView, op_count: ops.length } };
+    return { shape: "feature_compose", body: { ok: true, stage: "plan", summary: plan.summary, touched_vessels: [...touched], ops: planView, op_count: ops.length } };
   }
 
   const authoringMarkerPaths: Array<string | null> = [];
@@ -2974,7 +2974,7 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
   const allCutoversRefused = pointer.land && verdict === "FAVORABLE" && cutovers.length > 0 && !anyCutoverPushed;
   const effectiveVerdict = allCutoversRefused ? "UNFAVORABLE" : verdict;
   return {
-    shape: "featureComposeReport",
+    shape: "feature_compose",
     body: {
       ok: effectiveVerdict === "FAVORABLE",
       verdict: effectiveVerdict,

@@ -142,6 +142,7 @@ import { resolveDetectorMetaScan } from "../resolvers/detector-meta-scan.js";
 import { resolveDispatchLatestAutoDraft } from "../resolvers/dispatch-latest-auto-draft.js";
 import { resolveApplyProposalAsPatch } from "../resolvers/apply-proposal-as-patch.js";
 import { resolvePatchWithTools } from "../resolvers/patch-with-tools.js";
+import { resolveCodeReadLines } from "../resolvers/code-read-lines.js";
 import { resolveTemplateAuditReport } from "../resolvers/template-audit-report.js";
 import { resolveVariantPromote } from "../resolvers/variant-promote.js";
 import { resolveVectorSpaceOrthogonalityAudit } from "../resolvers/vector-space-orthogonality-audit.js";

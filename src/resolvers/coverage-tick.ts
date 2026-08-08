@@ -269,7 +269,41 @@ export async function resolveCoverageTick(
   const recent_new_shapes_total = cells_over_time
     .slice(0, recentHalf)
     .reduce((acc, c) => acc + c.new_shapes_introduced, 0);
-  const coverage_progress = recent_new_shapes_total > 0;
+  // SUPPORT-REGION GUARD — a rate is not evidence when its comparison region is empty.
+  //
+  // `new_shapes_introduced` counts shapes absent from every OLDER window, so if those
+  // windows hold no traces, EVERY shape in the newest window reads as new and
+  // coverage_progress is true by construction. That is exactly what happened here: the
+  // per-window query was bounded on one side only and clamped to 100 newest rows, so three
+  // of four windows reported trace_count=0 during hours when a 48-goal harness and the
+  // autonomous loop were both running, and the flag the lift criterion gates on
+  // (SUBSTRATE_AS_MDP §9.5) could not fail. Fixed upstream; this is the guard that makes the
+  // failure SELF-EVIDENT if it ever returns.
+  //
+  // Generalised, this is a TEMPORAL HORIZON in the sense of §8.4 — a region of its own state
+  // the substrate cannot reach. §8.4 names three horizon classes (orphaned-shape, bridge,
+  // tier-refinement), all in S x A, and the loop has detectors for each. It has none for the
+  // regions of its own HISTORY it cannot see, which is why this class kept recurring: the same
+  // shape appeared as an empty comparison window, a command-only cache read as pathway
+  // diversity, an AND-matched recall query, a non-existent namespace answering count:0, and
+  // lifetime aggregates read as current behaviour. Every one was a measurement whose support
+  // region excluded the answer.
+  //
+  // The rule this encodes: before trusting a rate, ask what its support region EXCLUDES and
+  // whether that is where the answer lives. Here the answer is cheap — a comparison window
+  // with no observations cannot supply counter-evidence, so progress computed against it is
+  // unfalsifiable and must be reported as such rather than as a green flag.
+  const comparison_windows = cells_over_time.slice(recentHalf);
+  const empty_comparison_windows = comparison_windows.filter((c) => c.trace_count === 0).length;
+  const support_region_degenerate = comparison_windows.length > 0 && empty_comparison_windows === comparison_windows.length;
+  const coverage_progress = recent_new_shapes_total > 0 && !support_region_degenerate;
+  if (support_region_degenerate) {
+    console.warn('[coverage-tick] SUPPORT REGION DEGENERATE — every comparison window is empty, so "new shape" is true by construction; reporting coverage_progress=false rather than an unfalsifiable pass', {
+      comparison_windows: comparison_windows.length,
+      empty_comparison_windows,
+      recent_new_shapes_total,
+    });
+  }
 
   // Count of consecutive newest-end non-overlapping rolling windows where at
   // least one new shape was introduced. Counts windows, NOT boredom firing
@@ -314,6 +348,9 @@ export async function resolveCoverageTick(
       consecutive_progressing_cycles,  // legacy alias (audit F-128); same value, retained for backward compat
       consecutive_windows_max: numWindows,  // upper bound — count caps here when every window contributes
       coverage_progress,
+      // Reported so a consumer can tell "no progress" from "could not have detected progress".
+      support_region_degenerate,
+      empty_comparison_windows,
       // New substantive metrics — robust to trace-volume gaming:
       total_advertised_shapes: total_advertised,
       total_learned_unique,

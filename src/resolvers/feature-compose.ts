@@ -2285,6 +2285,36 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
   if (verifyVessels.length > 0) {
     try { grounding = await groundVesselFiles(toolsEndpoint, verifyVessels, focusHints, targetFiles, regionHint); } catch { grounding = ""; }
   }
+  // REFUSE TO PLAN AGAINST A WINDOW THAT DOES NOT CONTAIN THE TARGET (2026-08-07).
+  // There is already a refusal for the case where NO path was derivable. There was
+  // none for the case where a path WAS derived and the grounding came back with
+  // nothing in it — and that case is not rare: composes run at grounding_len 19 (the
+  // budget header alone) and the drafter, asked to edit a file it cannot see, invents
+  // plausible anchors:
+  //
+  //   old: "// existing probe code"
+  //   old: "// code for resolveGoalHostEndpoint function"
+  //   old: "<td>${formatDuration(elapsed)}</td>"        (in a file with no HTML)
+  //
+  // Every one is faithful work on the only text available, correctly rejected several
+  // gates later, after the plan, the apply, the verify and the judge have all been
+  // paid for. The load-bearing fact — "you are about to plan blind" — is knowable
+  // HERE, for free, before any of that.
+  //
+  // The test is evidence-based rather than a length threshold: if a target file was
+  // named, its basename must appear in the window. A small window for a small file is
+  // fine; a window that never mentions the file is not.
+  if (targetFiles.length > 0) {
+    const missing = targetFiles.filter((t) => {
+      const base = t.split("/").pop() ?? t;
+      return base.length > 0 && !grounding.includes(base);
+    });
+    if (missing.length === targetFiles.length) {
+      const detail = `grounding window (${grounding.length} bytes) contains none of the target file(s) [${targetFiles.join(", ")}] — planning would be blind and the drafter would invent anchors; refusing before the LLM call`;
+      console.log(`[fc-grounding] REFUSED blind decompose; ${detail}`);
+      return { shape: "featureComposeReport", body: { ok: false, stage: "grounding", verdict: "REFUSED", error: detail } };
+    }
+  }
   // CONSULT the substrate's own architectural principles (docs ingested as concepts)
   // so the plan respects them — the active-consumption wire for the docs/web channel.
   let principles = "";

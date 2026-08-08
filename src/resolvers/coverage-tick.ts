@@ -60,24 +60,49 @@ async function computeCountsForWindow(
   advertisedShapes: Set<string>,
 ): Promise<{ counts: CellCounts; learnedSet: Set<string> }> {
   const traces: TraceRow[] = [];
-  // Fetch a generous slice (limit=2000 ≈ 6h of activity) anchored at `since`,
-  // then apply a client-side [since, until) filter. The server-side start_date
-  // filter is unreliable for SurrealDB datetime types so we rely on the
-  // client-side ISO-string comparison.
-  const trRes = await fetchWithRetry(
-    `${METABOB_ENDPOINT}/v2/activities/execution-traces?start_date=${encodeURIComponent(since)}&limit=500`,
-    { headers: auth },
-  );
-  if (trRes && trRes.ok) {
+  // BOUND THE WINDOW ON BOTH SIDES, AND PAGINATE.
+  //
+  // This asked for `start_date=<since>&limit=500` with no end_date, then filtered
+  // client-side to [since, until). Three things go wrong at once and they compound:
+  //   1. the server CLAMPS limit to 100 (the comment above claimed 500 ≈ 6h; it was
+  //      neither 500 nor 2000);
+  //   2. with no end_date the query is bounded on one side only;
+  //   3. rows come back newest-first, so the 100 returned are the newest 100 overall.
+  // For every window except the newest, the client-side filter then discards all 100.
+  //
+  // Measured against the live store: asking start_date=03:01 with limit=500 returned
+  // 100 rows, ALL from 05:55-06:02, and ZERO inside [03:00,04:00) — while the same
+  // request WITH end_date returns 300+ real traces in that hour. So the three older
+  // windows reported trace_count=0 during hours in which a 48-goal harness and the
+  // autonomous loop were both running.
+  //
+  // That is not merely an undercount. `new_shapes_introduced` counts shapes not seen
+  // in any OLDER window, and `coverage_progress` is true when the recent half of the
+  // windows introduced any. With the comparison windows structurally empty, every
+  // shape in the newest window reads as new and coverage_progress is TRUE BY
+  // CONSTRUCTION — and that flag is what the lift criterion (SUBSTRATE_AS_MDP §9.5)
+  // gates on. A proof criterion resting on an empty comparison proves nothing.
+  const PAGE = 100;                     // the server's real clamp, not the one we asked for
+  const MAX_PAGES = 40;                 // 4k traces per window; beyond that the window is degenerate
+  for (let page = 0; page < MAX_PAGES; page++) {
+    const trRes = await fetchWithRetry(
+      `${METABOB_ENDPOINT}/v2/activities/execution-traces`
+      + `?start_date=${encodeURIComponent(since)}&end_date=${encodeURIComponent(until)}`
+      + `&limit=${PAGE}&offset=${page * PAGE}`,
+      { headers: auth },
+    );
+    if (!trRes || !trRes.ok) break;
     const trData = await trRes.json() as { traces?: TraceRow[]; executions?: TraceRow[] };
     const all = trData.traces ?? trData.executions ?? [];
-    const filtered = all.filter(tr => {
+    // Keep the client-side [since, until) filter as a belt-and-braces check: it is now
+    // redundant with end_date, and if it ever starts discarding rows again that is the
+    // signal the server-side bounds have stopped working.
+    for (const tr of all) {
       const ts = tr.executed_at ?? tr.created_at;
-      if (ts === undefined) return false;
-      // [since, until) — half-open interval. Lexicographic compare on ISO-8601.
-      return ts >= since && ts < until;
-    });
-    traces.push(...filtered);
+      if (ts === undefined) continue;
+      if (ts >= since && ts < until) traces.push(tr);
+    }
+    if (all.length < PAGE) break;
   }
 
   // Collect learned shapes from THIS window's traces only — non-overlapping by design.

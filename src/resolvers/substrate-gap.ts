@@ -161,12 +161,40 @@ const GAPS_PATH = () => join(workspaceRoot(), "gaps", "gaps.json");
  * volatile ids defeat dedup.
  */
 export function gapClassKey(id: string): string {
-  return id
+  // Total by construction. This is called while scanning EVERY stored row, so a
+  // single row that does not carry a string id must not be able to throw here —
+  // see hasClassifiableId for what that cost the hub once.
+  return String(id ?? "")
     .replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi, "U")
     .replace(/\d{4}-\d{2}-\d{2}T[\d:.\-Z]+/g, "T")
     .replace(/\d{4}-\d{2}-\d{2}/g, "D")
     .replace(/\d{13}/g, "M")
     .replace(/\d{10}/g, "S");
+}
+
+/**
+ * Whether a STORED row can take part in class matching at all.
+ *
+ * A malformed row must degrade to "not a match", never take the store down with
+ * it. Observed live 2026-08-08 on the hub: gaps.json held exactly one row,
+ * hand-written with the wrong field names —
+ *
+ *     {"gap_id": "terminal-write-...", "gap_status": "closed"}
+ *
+ * — so `status` was `undefined`, which sails through a `status !== "closed"`
+ * guard, and `gapClassKey(undefined)` then threw. Every substrateGap_write on
+ * that hub 500'd for DAYS with `undefined is not an object (evaluating
+ * 'id.replace')`. Detectors kept firing and pull-sync kept logging
+ * "(substrateGap)" while nothing was ever filed — the store was not merely
+ * empty, it was unwritable, and the one condition that would have reported the
+ * outage was itself a gap write.
+ *
+ * The lesson is narrow and worth keeping: a dedup index built over
+ * operator-touchable storage must treat every stored row as untrusted input.
+ * One bad row is a row; one bad row that throws is an outage.
+ */
+function hasClassifiableId(g: SubstrateGap): boolean {
+  return typeof g.id === "string" && g.id.length > 0;
 }
 
 async function loadGaps(): Promise<SubstrateGap[]> {
@@ -315,6 +343,27 @@ export async function resolveSubstrateGapWrite(
     (typeof closedMeta["closing_trace_id"] === "string" ? (closedMeta["closing_trace_id"] as string) : undefined) ??
     (typeof closedMeta["trace_id"] === "string" ? (closedMeta["trace_id"] as string) : undefined);
 
+  // Identity gate. Everything downstream — exact-id match, class dedup, the
+  // consumption gate — keys off `id`, so a gap without one has no identity to
+  // dedup or close against and previously reached gapClassKey and 500'd. Say so
+  // as a validation rejection: this detail is fed back verbatim into goal-host's
+  // pointer-arg synthesis, and "missing id" is a correctable instruction while
+  // an opaque 500 sends the retry back with the same body.
+  if (typeof incoming.id !== "string" || incoming.id.trim().length === 0) {
+    return {
+      shape: "structuredError",
+      body: {
+        resolver: "substrateGap_write",
+        failure_mode: "validation_rejected",
+        error: "missing_required_field",
+        field: "gap.id",
+        detail:
+          'gap.id is required and must be a non-empty string — it is the dedup and close key. ' +
+          'Note the field is `id`, not `gap_id`: a row written with the wrong key has no identity here.',
+      },
+    };
+  }
+
   // Description gate: an OPEN gap must describe itself — empty summaries and
   // uninterpolated {{placeholders}} are noise the drafter cannot act on.
   // Closes/rejections of existing junk rows pass through untouched.
@@ -389,7 +438,7 @@ export async function resolveSubstrateGapWrite(
     (gap.classification_metadata as Record<string, unknown> | undefined)?.["kind"] !== "capability_gap"
   ) {
     const cap = Number(process.env["GAP_CLASS_OPEN_CAP"] ?? "3");
-    const openInClass = gaps.filter((g) => g.status === "open" && gapClassKey(g.id) === classKey).length;
+    const openInClass = gaps.filter((g) => hasClassifiableId(g) && g.status === "open" && gapClassKey(g.id) === classKey).length;
     if (openInClass >= cap) {
       console.log(`[gap-consumption-gate] refused open write: class=${classKey} open=${openInClass} cap=${cap} id=${gap.id}`);
       return {
@@ -405,7 +454,10 @@ export async function resolveSubstrateGapWrite(
     }
   }
   if (existingIdx < 0) {
-    existingIdx = gaps.findIndex((g) => g.status !== "closed" && gapClassKey(g.id) === classKey);
+    // hasClassifiableId FIRST: a row missing `status` passes `!== "closed"`, so
+    // without this guard the id check never runs. That exact ordering is what
+    // made one malformed row unwritable-store poison.
+    existingIdx = gaps.findIndex((g) => hasClassifiableId(g) && g.status !== "closed" && gapClassKey(g.id) === classKey);
   }
 
   // Close-if-open semantics: a close/reject write whose class has no existing row

@@ -24,7 +24,7 @@ export interface TraceStoreHealthObserverPointer {
   dry_run?: boolean;
 }
 
-const DEFAULT_API = "http://127.0.0.1:8080";
+const DEFAULT_API = "http://127.0.0.1:8080"; // Note: a spoke masks activity-api, so this default only resolves on a hub
 const DEFAULT_EMIT = "http://127.0.0.1:8090/v2/impulses/resolve";
 
 export async function resolveTraceStoreHealthObserver(

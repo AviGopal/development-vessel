@@ -1599,9 +1599,36 @@ function synthesizeVerbatimEditOps(specText: string): PlanOp[] | null {
 // and inject the top matches so the plan RESPECTS them — the active-consumption wire that
 // makes the docs/web a LEARNED source, not just a stored one. Read-only; advisory.
 const CONCEPT_DB_ENDPOINT = process.env["CONCEPT_DB_ENDPOINT"] ?? "http://127.0.0.1:8260"; // Renamed from DEV_VESSEL_ENDPOINT
+// A LIVE WIRE INTO AN EMPTY SOCKET (2026-08-09). This ran on every compose and
+// matched NOTHING: it filtered shape="architecturePrinciple", and `concept_search`
+// for that shape returns zero rows — no concept in the store has ever carried it.
+// The contract concepts that DO exist carry `impulse_activity_pattern` and
+// `vessel_construction_pattern`, and every one of them sat at loaded=0 since
+// 2026-07-30 as a result.
+//
+// That is not academic. `vessel_resolver_server` states verbatim: "Vessels expose
+// POST /resolve (the discovery resolver contract). Request body: { impulse: {
+// pointer: { type: '<shape>', ...fields } } }" — which is exactly the fact whose
+// absence let a maintenance activity POST to a REST route that does not exist,
+// through five stacked defects and 36 dispatches. The system had the load-bearing
+// fact written down and its own reader could not see it.
+//
+// MEASURED against the live concept-db before changing it:
+//   ?query=resolver+contract&shape=architecturePrinciple      -> 0 concepts
+//   ?query=resolver+contract&shape=impulse_activity_pattern   -> 0 concepts
+//   ?query=resolver+contract  (NO shape filter)               -> first hit is
+//     vessel_resolver_server, verbatim: "Vessels expose POST /resolve (the discovery
+//     resolver contract). Request body: { impulse: { pointer: { type: '<shape>',
+//     ...fields } } }"
+// The endpoint's `shape` parameter matches nothing at all — relevance ranking on the
+// query already surfaces the right concepts, and the filter only suppressed them. So
+// the filter is dropped rather than corrected: it was the failure, not the tuning.
+// (`source_type` is the parameter that does filter, if a future caller needs one.)
+// Read-only and advisory exactly as before — a bad result here degrades the prompt,
+// it does not fail the compose.
 async function consultPrinciples(spec: string): Promise<string> {
   try {
-    const params = new URLSearchParams({ query: spec.slice(0, 400), shape: "architecturePrinciple", limit: "4" });
+    const params = new URLSearchParams({ query: spec.slice(0, 400), limit: "4" });
     const res = await fetch(`${CONCEPT_DB_ENDPOINT}/concepts/search?${params.toString()}`, {
       headers: METABOB_API_KEY ? { Authorization: `ApiKey ${METABOB_API_KEY}` } : {},
       signal: AbortSignal.timeout(8000),

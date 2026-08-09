@@ -5,18 +5,18 @@ import {
 } from "../../src/resolvers/vessel-mitosis-evaluate";
 
 /**
- * REAL bun 1.3.14 output, captured verbatim from a failing run of
- * goal-host-vessel's goal-intent.test.ts on 2026-08-09 — the run whose two
- * failures the gate reported as "0 introduced".
+ * TTY-form bun output, captured from an interactive shell.
  *
- * It is a literal fixture on purpose. The parser previously matched
- * `^\(fail\)\s+(.*)$`, a shape bun no longer emits, so it extracted NOTHING from
- * every run for as long as this bun has been in the image. Both sides of the
- * delta parsed to the empty set, the gate always concluded "0 introduced", and a
- * commit that fails 2 of 7 tests landed FAVORABLE and pushed to origin/dev.
+ * CORRECTION (2026-08-09): this fixture was originally introduced with the claim
+ * that it proved the parser dead. It did not. Bun emits `(pass)`/`(fail)` when
+ * stdout is a PIPE — which is how the gate always spawns it — and the coloured
+ * tick/cross only on a TTY. So the ORIGINAL `(fail)` pattern was correct for the
+ * only context that matters, and the "inert parser" story was wrong; the real
+ * defect was symlinked test files importing unpatched source (see buildOverlay).
  *
- * Pinning the real bytes means the next bun upgrade breaks THIS TEST instead of
- * silently disarming the gate again.
+ * The fixture is KEPT because both spellings are now accepted and that property
+ * deserves a test: a run that somehow retains a TTY, or a future bun that changes
+ * its non-TTY format, must not silently yield an empty failure set.
  */
 const BUN_FAILING_OUTPUT = [
   "[0m[32m✓[0m [0misEditIntentGoal[2m >[0m[1m matches a concrete file plus a mutation verb[0m [0m[2m[0.71ms[0m[2m][0m",
@@ -38,7 +38,7 @@ const BUN_PASSING_OUTPUT = [
 const LEGACY_OUTPUT = ["(fail) suite > a legacy failure name [1.20ms]", " 1 fail"].join("\n");
 
 describe("testFailureNames", () => {
-  test("REGRESSION: extracts the two failures the gate reported as zero", () => {
+  test("parses the TTY cross form (not what the gate sees, but must not silently empty)", () => {
     const names = testFailureNames(BUN_FAILING_OUTPUT);
     expect(names.size).toBe(2);
     expect([...names]).toContain("isEditIntentGoal > does NOT match a mutation verb with no concrete file");

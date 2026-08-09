@@ -246,23 +246,23 @@ function stripAnsi(s: string): string {
 /**
  * Failure names from a bun test run.
  *
- * THIS PARSED NOTHING, ON EVERY RUN, FOR AS LONG AS THIS BUN HAS BEEN IN THE
- * IMAGE (2026-08-09). It matched `^\(fail\)\s+(.*)$`. Bun 1.3.14 does not emit
- * that; it emits an ANSI-prefixed cross:
+ * FORMAT NOTE, AND A CORRECTION TO AN EARLIER CLAIM IN THIS FILE'S HISTORY
+ * (2026-08-09). I once concluded this function "parsed nothing on every run"
+ * because bun printed an ANSI-prefixed cross rather than `(fail)`. That was
+ * WRONG, and the mistake is worth recording because it is easy to repeat: bun
+ * emits `(pass)`/`(fail)` when its stdout is a PIPE, and the coloured tick/cross
+ * when it is a TTY. The gate always spawns with piped stdout, so the original
+ * `(fail)` pattern was correct for the only context that matters. The cross I
+ * measured came from an interactive shell — I compared the gate against output
+ * it never sees, and shipped a "fix" on that premise.
  *
- *     [0m[31m✗[0m …isEditIntentGoal > requires a file EXTENSION…
+ * The real defect was elsewhere: symlinked test files executed from the base
+ * tree and imported unpatched source (see buildOverlay). Confirmed after that
+ * fix — a live gate run emits `(fail) isEditIntentGoal > ...` and the delta
+ * correctly reported 2 failures INTRODUCED.
  *
- * Measured on a real failing suite: lines matching `^\(fail\)` = 0 while the run
- * reported `2 fail`. The `^` anchor also faced an escape sequence, so it could
- * not have matched even if the token had survived.
- *
- * The gate built on it was therefore INERT, not lenient: both sides of the delta
- * parsed to the empty set, `newFailures` was always `[]`, and every mitosis
- * cited "0 pre-existing red(s), 0 introduced" whatever the suite did. That is how
- * a commit which fails 2 of 7 tests landed FAVORABLE and pushed to origin/dev.
- *
- * Both formats are accepted so this survives a bun downgrade as well as the
- * upgrade that broke it.
+ * Both spellings are accepted anyway: it costs one alternation, and it means a
+ * future bun that changes its non-TTY format cannot silently empty this set.
  */
 export function testFailureNames(output: string): Set<string> {
   const out = new Set<string>();

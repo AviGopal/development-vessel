@@ -1624,11 +1624,55 @@ const CONCEPT_DB_ENDPOINT = process.env["CONCEPT_DB_ENDPOINT"] ?? "http://127.0.
 // query already surfaces the right concepts, and the filter only suppressed them. So
 // the filter is dropped rather than corrected: it was the failure, not the tuning.
 // (`source_type` is the parameter that does filter, if a future caller needs one.)
+//
+// SECOND DEFECT IN THE SAME CALL: the search behaves as AND across terms, so a long
+// query matches nothing. Measured on the same endpoint:
+//   "resolver contract"                              -> 4 concepts
+//   "resolver"                                       -> 4 concepts
+//   "vessel resolver contract POST resolve discovery"-> 0 concepts
+//   a real 400-char spec                             -> 0 concepts
+// Passing `spec.slice(0, 400)` therefore returned nothing even with the filter fixed.
+// The spec is reduced to a few salient terms — longest words first, stopwords and
+// path punctuation stripped — and retried progressively narrower, so a miss on the
+// full set still gets a hit on the strongest term rather than silently giving up.
+//
 // Read-only and advisory exactly as before — a bad result here degrades the prompt,
 // it does not fail the compose.
+const PRINCIPLE_STOPWORDS = new Set([
+  "the", "and", "for", "with", "that", "this", "from", "into", "then", "when", "where",
+  "which", "what", "should", "must", "does", "not", "add", "fix", "make", "use", "using",
+  "repos", "src", "index", "file", "line", "code", "change", "update", "comment", "above",
+  "below", "note", "noting", "only", "also", "its", "his", "her", "their", "there",
+]);
+function principleTerms(spec: string): string[] {
+  const words = String(spec)
+    .toLowerCase()
+    .replace(/[^a-z0-9_\-\s]/g, " ")
+    .split(/[\s_\-]+/)
+    .filter((w) => w.length >= 4 && !PRINCIPLE_STOPWORDS.has(w));
+  const seen = new Set<string>();
+  const uniq: string[] = [];
+  for (const w of words.sort((a, b) => b.length - a.length)) {
+    if (seen.has(w)) continue;
+    seen.add(w);
+    uniq.push(w);
+  }
+  return uniq.slice(0, 3);
+}
 async function consultPrinciples(spec: string): Promise<string> {
+  const terms = principleTerms(spec);
+  // Progressively narrower: 3 terms, then 2, then 1. An AND-search that misses on the
+  // full set still lands on the strongest term.
+  for (let n = terms.length; n >= 1; n--) {
+    const hit = await consultPrinciplesQuery(terms.slice(0, n).join(" "));
+    if (hit) return hit;
+  }
+  return "";
+}
+async function consultPrinciplesQuery(query: string): Promise<string> {
   try {
-    const params = new URLSearchParams({ query: spec.slice(0, 400), limit: "4" });
+    if (!query.trim()) return "";
+    const params = new URLSearchParams({ query, limit: "4" });
     const res = await fetch(`${CONCEPT_DB_ENDPOINT}/concepts/search?${params.toString()}`, {
       headers: METABOB_API_KEY ? { Authorization: `ApiKey ${METABOB_API_KEY}` } : {},
       signal: AbortSignal.timeout(8000),

@@ -138,10 +138,24 @@ export const TRACE_STORE_RECONCILE_TEMPLATE: ActivityTemplate = {
         //     (routes/db-admin-reconcile.ts:217) and fail-closes 403 without it. So
         //     even against a correct URL on a correct host, the gate would refuse.
         //
-        // {{activity_api_endpoint}} is a DECLARED variable (see `variables`
-        // above) — an undeclared placeholder has no producer and would render
-        // empty, which is how the first draft of this fix was still broken.
-        url: "{{activity_api_endpoint}}/v2/impulses/resolve",
+        // A PLACEHOLDER NOTHING POPULATES IS WORSE THAN A LITERAL (2026-08-09).
+        // This was {{activity_api_endpoint}}, declared in `variables` below —
+        // and it rendered EMPTY in production, because the only dispatcher
+        // (gap-to-feature.ts:2355) posts just {goal, targetTemplateId} and
+        // passes no variables at all. The URL came out as "/v2/impulses/resolve"
+        // with no host, so the fetch died inside the process and NO REQUEST EVER
+        // REACHED activity-api — while the run still reported success:true with
+        // task_count:5. Fixing the hardcoded host with a mechanism nothing feeds
+        // turned a LOUD failure into a SILENT one, which is strictly worse.
+        //
+        // The fleet's convention for a same-host activity-api call is a literal
+        // (goal-shape-pre-check.ts:61, recover-from-goal-failure.ts:66). This
+        // activity only ever runs where the trace store is — the hub — so the
+        // literal is correct there. `activity_api_endpoint` remains declared
+        // below so a caller CAN override it; it is simply no longer load-bearing
+        // for the default path. Law 11 is satisfied by placement (this activity
+        // belongs where its data lives), not by an unpopulated indirection.
+        url: "http://127.0.0.1:8080/v2/impulses/resolve",
         // NO EXPLICIT `headers` — that is load-bearing, not an omission.
         // http_fetch auto-attaches METABOB_API_KEY for substrate-local hosts
         // (documented in ias-executor-ts/src/templates/lifecycle/ribosome-extract.json),

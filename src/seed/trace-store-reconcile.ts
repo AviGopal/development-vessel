@@ -142,9 +142,15 @@ export const TRACE_STORE_RECONCILE_TEMPLATE: ActivityTemplate = {
         // above) — an undeclared placeholder has no producer and would render
         // empty, which is how the first draft of this fix was still broken.
         url: "{{activity_api_endpoint}}/v2/impulses/resolve",
-        headers: {
-          "Content-Type": "application/json",
-        },
+        // NO EXPLICIT `headers` — that is load-bearing, not an omission.
+        // http_fetch auto-attaches METABOB_API_KEY for substrate-local hosts
+        // (documented in ias-executor-ts/src/templates/lifecycle/ribosome-extract.json),
+        // and supplying a headers object suppresses it: the impulse plane then
+        // answers 401 MISSING_AUTH. The original code only got past that check by
+        // accident, because its (wrongly-populated) Authorization: Bearer header
+        // happened to satisfy the presence test. Every sibling that POSTs to
+        // /v2/impulses/resolve sends no headers at all — see
+        // detect-cutover-stuck-loop.ts:150-155.
         body: JSON.stringify({
           impulse: {
             pointer: {

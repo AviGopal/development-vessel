@@ -14,3 +14,9 @@ memory/
 # makes `git submodule update --recursive` fail for every consumer (it broke the
 # super-repo glue refresh, so the reach-oracle worktrees silently lagged).
 .claude/worktrees/
+
+# Runtime state: the substrate rewrites this continuously (change-series pool).
+# The store the vessel actually reads is WORKSPACE_ROOT/pool/standing.json on the
+# named volume; this copy is never COPYed into the image. A file the substrate
+# rewrites is not a file git should carry.
+pool/

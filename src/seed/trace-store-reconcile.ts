@@ -105,6 +105,11 @@ export const TRACE_STORE_RECONCILE_TEMPLATE: ActivityTemplate = {
       // chased that mismatch as a corruption bug before noticing the acquire had
       // simply failed.
       //
+      // INERT — the engine never reads `task.validation` (no reference in
+      // ias-executor-ts/src/engine.ts), and pattern mode is out of scope even in the
+      // validation resolver (resolvers/validation.ts:15). This assertion has never
+      // fired. Kept as a statement of INTENT until task-level assertions exist; do not
+      // read it as a gate.
       // I tried to assert it with `validation: { forbiddenPatterns: [...] }` and that
       // guard does NOTHING: the engine never reads `task.validation` (grep of
       // ias-executor-ts/src/engine.ts finds no reference), and pattern mode is

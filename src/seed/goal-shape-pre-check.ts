@@ -123,6 +123,11 @@ export const GOAL_SHAPE_PRE_CHECK_TEMPLATE: ActivityTemplate = {
       // Fail this task — and propagate verifier_negative — if the verdict is 'fail'.
       // 'pass' and 'no_constraint' contain neither '"verdict":"fail"' nor '"verdict": "fail"'
       // so the pattern never fires for healthy checks.
+      // INERT — the engine never reads `task.validation` (no reference in
+      // ias-executor-ts/src/engine.ts), and pattern mode is out of scope even in the
+      // validation resolver (resolvers/validation.ts:15). This assertion has never
+      // fired. Kept as a statement of INTENT until task-level assertions exist; do not
+      // read it as a gate.
       validation: {
         forbiddenPatterns: ['"verdict":"fail"', '"verdict": "fail"'],
       },

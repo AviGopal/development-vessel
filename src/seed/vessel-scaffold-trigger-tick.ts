@@ -182,6 +182,8 @@ export const VESSEL_SCAFFOLD_TRIGGER_TICK_TEMPLATE: ActivityTemplate = {
       description: "Pull vessel_name (lowercase, ends -vessel). Used as name + path stem.",
       resolver: "json_path_extract",
       config: { type: "json_path_extract", json: "{{design_vessel_content}}", path: "vessel_name" },
+              // INERT — the engine never reads `task.validation` and pattern mode is
+              // out of scope in the validation resolver. Never fired. Intent only.
               validation: { requiredPatterns: ["-vessel"] },
       outputShapes: ["json_extracted_value"],
     },

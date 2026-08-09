@@ -93,6 +93,30 @@ export const TRACE_STORE_RECONCILE_TEMPLATE: ActivityTemplate = {
         ttl_ms: 300_000,
       },
       outputShapes: ["maintenanceLeaseWriteResult"],
+      // A REFUSED ACQUIRE IS INDISTINGUISHABLE FROM A SUCCESSFUL ONE HERE, AND THE
+      // TEMPLATE SCHEMA CANNOT EXPRESS THE ASSERTION (2026-08-09).
+      //
+      // When the lease is already held this returns
+      //   {"acquired":false,"held_by":"...","expires_at":"..."}
+      // with NO `token` field. The next task's json_path_extract yields empty, the
+      // reconcile POSTs an empty lease_token, and activity-api answers
+      // "reconcile_trace_store refused: maintenance lease token mismatch" — which
+      // reads like token CORRUPTION rather than "somebody else holds the lease". I
+      // chased that mismatch as a corruption bug before noticing the acquire had
+      // simply failed.
+      //
+      // I tried to assert it with `validation: { forbiddenPatterns: [...] }` and that
+      // guard does NOTHING: the engine never reads `task.validation` (grep of
+      // ias-executor-ts/src/engine.ts finds no reference), and pattern mode is
+      // explicitly out of scope even in the validation RESOLVER
+      // (resolvers/validation.ts:15 "OUT OF SCOPE for the minimum-viable port"), which
+      // implements two hardcoded rules only. The `forbiddenPatterns` on the verify task
+      // below is inert for the same reason — it has never gated anything.
+      //
+      // Left unasserted deliberately rather than shipping a guard that only looks like
+      // one. The honest fix is engine support for task-level assertions; filed as its
+      // own gap. Until then the failure is at least legible from this comment and from
+      // the 403 the reconcile task returns.
     },
     {
       id: "extract_lease_token",

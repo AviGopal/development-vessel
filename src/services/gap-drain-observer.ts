@@ -112,6 +112,45 @@ export class GapDrainObserver {
     }
   }
 
+  /**
+   * Event-driven drain for COMPOSABLE gaps: nudge gap_to_feature when one is written.
+   *
+   * Rate discipline, not a timer (law 5): nothing here paces work on a clock. The
+   * event is the trigger; these two guards only stop a burst of gap writes from
+   * launching concurrent composes, which is expensive and self-defeating since the
+   * picker would select the same highest-scoring gap each time.
+   */
+  private async nudgeComposableDrain(gapId: string, category: string): Promise<void> {
+    const g = globalThis as unknown as { __composeDrainInflight?: boolean; __composeDrainLastAt?: number };
+    const MIN_INTERVAL_MS = 90_000;
+    const now = Date.now();
+    if (g.__composeDrainInflight === true) {
+      this.recordDrain({ action: "compose_skipped_inflight", gap_id: gapId, category });
+      return;
+    }
+    if (typeof g.__composeDrainLastAt === "number" && now - g.__composeDrainLastAt < MIN_INTERVAL_MS) {
+      this.recordDrain({ action: "compose_skipped_cooldown", gap_id: gapId, category, since_last_ms: now - g.__composeDrainLastAt });
+      return;
+    }
+    g.__composeDrainInflight = true;
+    g.__composeDrainLastAt = now;
+    const t0 = now;
+    try {
+      const resp = await fetch(`${DEV_VESSEL_ENDPOINT}/v2/impulses/resolve`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ impulse: { type: "gap_to_feature", triggered_by: "gap-drain-observer", flow: "gap-compose" } }),
+        signal: AbortSignal.timeout(600_000),
+      });
+      this.recordDrain({ action: "compose_nudged", gap_id: gapId, category, ok: resp.ok, http_status: resp.status, latency_ms: Date.now() - t0 });
+    } catch (err) {
+      // A failed nudge is not a verdict about the gap; the next write re-arms it.
+      this.recordDrain({ action: "compose_nudge_failed", gap_id: gapId, category, error: String(err), latency_ms: Date.now() - t0 });
+    } finally {
+      g.__composeDrainInflight = false;
+    }
+  }
+
   private async handleGapWritten(data: Record<string, unknown>): Promise<void> {
     const gapId = typeof data["gap_id"] === "string" ? (data["gap_id"] as string) : "";
     const category = typeof data["category"] === "string" ? (data["category"] as string) : "unknown";
@@ -119,7 +158,29 @@ export class GapDrainObserver {
     const remedy = data["remedy"] as { vessel?: string; impulse_type?: string; goal?: string } | undefined;
     const status = data["status"];
     if (status !== undefined && status !== "open") return;
-    if (route !== "dispatchable") return;
+    if (route !== "dispatchable") {
+      // COMPOSABLE GAPS HAD NO EVENT PATH AT ALL.
+      //
+      // This observer returned here for anything not route:dispatchable, and the
+      // gap-compose watchdog — the only other lane, by its own drop-in comment
+      // ("Composable gaps rely solely on this watchdog") — is permanently
+      // suppressed: its stall marker is /workspace/proposals/compose-lessons.jsonl,
+      // which EVERY compose in the fleet appends to, so stalledForMs never reaches
+      // WATCHDOG_STALL_MIN and it returns "flow alive" forever. Measured: the marker
+      // was 4 seconds old on a fleet where gap_to_feature had not run in 24h.
+      //
+      // That is the same defect the 2026-07-29 drop-in comment describes fixing when
+      // drain-log.jsonl was the shared marker — pinning to a different SHARED file
+      // moved the problem down one level rather than removing it. So the composable
+      // backlog (154 of 157 open gaps) drained at exactly zero per day.
+      //
+      // Nudge the composer directly on the write event instead. Guarded so a burst of
+      // gap writes cannot storm it: one compose in flight at a time, plus a floor on
+      // the interval between nudges. Both are deliberately cheap and local — a stalled
+      // compose simply means the next event re-arms it.
+      await this.nudgeComposableDrain(gapId, category);
+      return;
+    }
     const remedyExt = remedy as { impulse_type?: string; goal?: string; target_template_id?: string } | undefined;
     const extTemplateId = remedyExt && typeof remedyExt.target_template_id === "string" && remedyExt.target_template_id.length > 0 ? remedyExt.target_template_id : "";
     const extGoal = remedyExt && typeof remedyExt.goal === "string" && remedyExt.goal.length > 0 ? remedyExt.goal : "";

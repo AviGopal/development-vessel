@@ -297,7 +297,7 @@ export async function resolveRhythmConductorTick(
               id: r.id,
               shape: "timeShapedRhythm",
               source: "rhythm-conductor-tick",
-              body: { ...r.body, alpha: r.alpha + 0.5, staleness: Math.max(0, r.staleness * 0.3) },
+              body: { due_score: r.due_score, alpha: r.alpha + 0.5, staleness: Math.max(0, r.staleness * 0.3) },
             },
           }),
         },

@@ -3570,6 +3570,9 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
   // so the freshness gate passes legitimately. Net-new vessels (no push clone) are
   // skipped here and land via the scaffold path.
   const cutovers: unknown[] = [];
+  // PRE-SYNC SNAPSHOT of every live file the land-time sync below overwrites, so a
+  // cutover that does not land can be undone. See the restore block after the loop.
+  const preLiveSync = new Map<string, string | null>(); // abs live path -> bytes, or null if absent
   if (verdict === "FAVORABLE" && pointer.land) {
     const ts = new Date().toISOString().replace(/[:.]/g, "-");
     for (const v of touched) {
@@ -3599,7 +3602,24 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
         // mismatch at the gate instead of silent last-writer-wins.
         if (ws?.isolated(vessel)) {
           const liveDir = `${RUNTIME_ROOT}/${vessel}/${rel.split("/").slice(0, -1).join("/")}`;
-          await callTool(toolsEndpoint, "shell", { command: `mkdir -p ${JSON.stringify(liveDir)} && cp ${JSON.stringify(`${vBase}/${rel}`)} ${JSON.stringify(`${RUNTIME_ROOT}/${vessel}/${rel}`)}`, cwd: REPO_ROOT });
+          const liveAbs = `${RUNTIME_ROOT}/${vessel}/${rel}`;
+          // SNAPSHOT BEFORE OVERWRITING. This cp is load-bearing (the freshness gate
+          // reads the live file), but it runs BEFORE the cutover — so when the cutover
+          // defers or refuses, the edit stays on /vessels describing no commit. The
+          // next edit to that file then dies at patch_with_tools' poisoned-baseline
+          // check, i.e. one failed compose disables the next one. Observed 2026-08-09
+          // across four dispatches: each left ~600B of residue and each was blamed on
+          // the following run. Nothing else in the fleet compares live to clone, so
+          // nothing repaired it — pull-sync only compares clone to origin.
+          if (!preLiveSync.has(liveAbs)) {
+            const cur = await callTool(toolsEndpoint, "shell", {
+              command: `test -f ${JSON.stringify(liveAbs)} && cat ${JSON.stringify(liveAbs)} || printf '\\0ABSENT\\0'`,
+              cwd: REPO_ROOT,
+            });
+            const raw = String((cur.body as { stdout?: unknown })?.stdout ?? "");
+            preLiveSync.set(liveAbs, raw === "\0ABSENT\0" ? null : raw);
+          }
+          await callTool(toolsEndpoint, "shell", { command: `mkdir -p ${JSON.stringify(liveDir)} && cp ${JSON.stringify(`${vBase}/${rel}`)} ${JSON.stringify(liveAbs)}`, cwd: REPO_ROOT });
         }
       }
       const shaRes = await callTool(toolsEndpoint, "shell", { command: `sha256sum ${JSON.stringify(`${vBase}/${changedRel[0]}`)} | cut -c1-12`, cwd: REPO_ROOT });
@@ -3634,13 +3654,71 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
     }
   }
 
+  // UNDO THE LAND-TIME SYNC WHEN NOTHING LANDED. A cutover that deferred (lease
+  // held), refused (freshness/corruption gate) or errored leaves the live tree
+  // carrying an edit that belongs to no commit — the poisoned baseline that
+  // disables the NEXT compose. Restore only files this run overwrote, and only
+  // when no cutover reported a real push, so a successful landing is untouched.
+  // Keyed on push_status/new_git_sha — the same evidence `anyCutoverPushed`
+  // below uses — deliberately NOT on a `refused` flag: nothing pushed into
+  // `cutovers` carries a top-level `refused` field (see the dead predicate note
+  // below), so a refused-based test here would silently never fire.
+  if (preLiveSync.size > 0) {
+    const landed = cutovers.some((c) => {
+      const r = (((c as Record<string, unknown>)?.result) ?? {}) as Record<string, unknown>;
+      return r["push_status"] === "pushed" && typeof r["new_git_sha"] === "string" && String(r["new_git_sha"]).trim() !== "";
+    });
+    if (!landed) {
+      let restored = 0;
+      let failed = 0;
+      for (const [abs, original] of preLiveSync) {
+        try {
+          if (original === null) {
+            await callTool(toolsEndpoint, "shell", { command: `rm -f ${JSON.stringify(abs)}`, cwd: REPO_ROOT });
+          } else {
+            const w = await callTool(toolsEndpoint, "fs_write", { path: abs, content: original });
+            // VERIFY THE RESTORE, DO NOT ASSUME IT — the step-4 rollback block
+            // above records what happens when this is skipped: a report claiming
+            // rolled_back over a file that was still edited.
+            if ((w.body as { ok?: boolean })?.ok === false) { failed++; continue; }
+          }
+          restored++;
+        } catch { failed++; }
+      }
+      console.log(`[feature-compose] live-sync rollback: no cutover pushed — restored ${restored}/${preLiveSync.size} live file(s)${failed ? `, ${failed} FAILED (live tree now diverges from its clone)` : ""}`);
+    }
+  }
+
   function classifyEnvironmentFailure(cuts: unknown[]): string | null {
     const t = JSON.stringify(cuts ?? []);
-    if (/env_change_window_held|change window held/i.test(t)) return "env_change_window_held";
+    // The deferral's own reason is "change_window lease held" (underscore, from
+    // vessel-mitosis-cutover's cutoverDeferred body). The old pattern looked for
+    // "change window held" with spaces and so never matched it — a lease deferral
+    // was classified as a `fix` failure and charged to the drafter, for an
+    // environment condition the drafter did not cause and cannot fix.
+    if (/env_change_window_held|change[_ ]window( lease)? held|"deferred"\s*:\s*true/i.test(t)) return "env_change_window_held";
     if (/restarted \(cutover\)|cutover race/i.test(t)) return "env_cutover_race";
     return null;
   }
-  if (pointer.land && cutovers.length > 0 && cutovers.every((c: unknown) => (c as Record<string, unknown>)?.refused === true)) {
+  // DEAD PREDICATE, FIXED (2026-08-09). This tested a top-level `refused` field
+  // that nothing ever sets: the two push sites above append
+  // `{vessel, result: cut.body}` and `{vessel, landed, reason}`, so `c.refused`
+  // was always undefined and this flip could never fire. It read as the thing
+  // that turned a refused cutover into UNFAVORABLE — I reported it as such —
+  // while the flip actually came from `allCutoversRefused` further below. The
+  // consequence of the dead branch was not cosmetic: with `verdict` left
+  // FAVORABLE, the whole `if (verdict !== "FAVORABLE")` block that follows was
+  // skipped, so no compose lesson and no gap write-back was produced for a
+  // failed landing. Test the same evidence the live check uses.
+  if (
+    pointer.land &&
+    cutovers.length > 0 &&
+    cutovers.every((c: unknown) => {
+      const r = (((c as Record<string, unknown>)?.result) ?? {}) as Record<string, unknown>;
+      const pushed = r["push_status"] === "pushed" && typeof r["new_git_sha"] === "string" && String(r["new_git_sha"]).trim() !== "";
+      return !pushed;
+    })
+  ) {
     verdict = "UNFAVORABLE";
   }
   if (verdict !== "FAVORABLE") {

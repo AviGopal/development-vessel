@@ -26,9 +26,31 @@ import type { ActivityTemplate } from "@avigopal/ias-executor-ts";
  * branch (grep of src/seed/*.ts / ActivityTemplate found no such field), so
  * if the reconcile or verify task fails mid-run, `release_lease` is simply
  * never reached and the lease is NOT explicitly released here. The lease's
- * own TTL (default 15 min, see maintenance-lease.ts) is the backstop —
- * acquire_lease's ttl_ms is set to bound the abandoned-lease window rather
- * than relying on an in-template failure branch.
+ * own TTL (see maintenance-lease.ts) is the backstop — acquire_lease's
+ * ttl_ms is set to bound the abandoned-lease window rather than relying on
+ * an in-template failure branch.
+ *
+ * THE TTL IS A DEADLINE FOR OTHER WORK, NOT JUST FOR THIS ONE (2026-08-09).
+ * `change_window` has NO name dimension — maintenance-lease.ts keys a single
+ * global mutex and silently discards the `name:` every caller passes — so the
+ * lease this template holds is the SAME lease vessel-mitosis-cutover must take
+ * before it may write to /vessels. That cutover waits CUTOVER_LEASE_WAIT_MS
+ * (default 90s) and then defers.
+ *
+ * So the abandoned-lease window is not a private cost: while it is held, no
+ * substrate-authored edit can land anywhere in the fleet. With a 15-minute TTL
+ * and a re-dispatch cadence near 10 minutes, a task that always failed produced
+ * a ~100%-duty-cycle exclusion lock — measured 2026-08-09, and it is why the
+ * fleet could not self-edit at all.
+ *
+ * ttl_ms is therefore sized to the work (a copy-forward swap, seconds to a few
+ * minutes) rather than left generous "just in case". The trade is deliberate:
+ * too short and a genuinely slow swap loses its lease mid-run and a second
+ * reconcile could start concurrently; too long and every failure blocks all
+ * self-editing for that duration. 5 minutes keeps ample headroom over an
+ * observed swap while bounding the blast radius of an abort to one third of
+ * what it was. The durable fix for the concurrency edge is a release on the
+ * failure path, which needs template-schema support that does not exist yet.
  */
 export const TRACE_STORE_RECONCILE_TEMPLATE: ActivityTemplate = {
   id: "development-vessel:trace-store-reconcile",
@@ -57,7 +79,9 @@ export const TRACE_STORE_RECONCILE_TEMPLATE: ActivityTemplate = {
         type: "maintenanceLease_write",
         op: "acquire",
         holder: "trace-store-reconcile",
-        ttl_ms: 900_000,
+        // 5 min, not 15 — see "THE TTL IS A DEADLINE FOR OTHER WORK" above.
+        // This lease is the global change_window every cutover must take.
+        ttl_ms: 300_000,
       },
       outputShapes: ["maintenanceLeaseWriteResult"],
     },
@@ -85,13 +109,42 @@ export const TRACE_STORE_RECONCILE_TEMPLATE: ActivityTemplate = {
       config: {
         type: "http_fetch",
         method: "POST",
-        url: "http://127.0.0.1:8080/v2/db/admin/reconcile-trace-store",
+        // THREE DEFECTS IN ONE CALL, ALL FATAL, NONE EVER OBSERVED (2026-08-09).
+        // This task had never succeeded on any host since it was written, and the
+        // failure was invisible because the run dies here — BEFORE release_lease —
+        // so the 15-minute lease is left parked and re-taken by the next re-dispatch.
+        // With change_window at a ~100% duty cycle, every vessel-mitosis-cutover
+        // lease acquire timed out, so NO self-authored edit could land at all.
+        //
+        //  1. The URL named a route that does not exist: `grep -rn
+        //     "reconcile-trace-store" repos/activity-api/src` returns NOTHING. The
+        //     db_admin ops are reached through the impulse plane
+        //     (routes/impulses.ts:5243 `case 'db_admin'`), never a REST path.
+        //  2. `127.0.0.1:8080` is unreachable wherever activity-api is not local.
+        //     activity-api is role `api` — hub-owned — so on every spoke this is a
+        //     connection refusal by construction. Endpoints belong to discovery,
+        //     not to a hardcoded loopback port (law 11).
+        //  3. The lease token was sent as an `Authorization: Bearer` header, but
+        //     resolveReconcileTraceStore reads `pointer.lease_token` from the BODY
+        //     (routes/db-admin-reconcile.ts:217) and fail-closes 403 without it. So
+        //     even against a correct URL on a correct host, the gate would refuse.
+        //
+        // {{activity_api_base}} is bound by the caller (goal-host resolves the
+        // `db_admin` shape through discovery); it falls back to the hub-local
+        // default only when discovery yields nothing.
+        url: "{{activity_api_base}}/v2/impulses/resolve",
         headers: {
           "Content-Type": "application/json",
-          "Authorization": "Bearer {{extract_lease_token_text}}",
         },
         body: JSON.stringify({
-          dry_run: false,
+          impulse: {
+            pointer: {
+              type: "db_admin",
+              operation: "reconcile_trace_store",
+              dry_run: false,
+              lease_token: "{{extract_lease_token_text}}",
+            },
+          },
         }),
         failOnNon2xx: true,
       },

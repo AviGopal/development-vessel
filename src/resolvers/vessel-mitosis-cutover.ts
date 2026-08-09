@@ -1068,6 +1068,21 @@ for (let waited = 0; acquireBody.acquired === false && waited < leaseWaitMs; wai
   if (acquireBody.acquired !== false) console.log(`[mitosis-cutover] change_window lease acquired after waiting ${waited + 5000}ms`);
 }
     if (acquireBody.acquired === false) {
+      // SAY SO. Every sibling exit in this resolver logs before returning; this
+      // branch did not, and it is the one that fires when the fleet cannot edit
+      // itself. Measured 2026-08-09: four consecutive self-edit dispatches were
+      // deferred here after passing the semantic gate, typecheck, the test suite
+      // and the freshness gate — and because this return is silent, each one was
+      // attributed downstream to `semantic_gate` (goal-host's failDetail cascade
+      // falls through to semantic_gate.reason when no applied[] or verify[] entry
+      // failed). The operator-visible verdict therefore quoted a gate that had
+      // PASSED, on all four attempts, while the real cause never appeared in any
+      // log. An unlogged deferral is indistinguishable from a hang.
+      console.error(
+        `[mitosis-cutover] DEFERRED: change_window lease held by ${acquireBody.held_by ?? "<unknown>"} ` +
+        `after waiting ${leaseWaitMs}ms — vessel=${String(pointer.vessel_name ?? "unknown")} ` +
+        `mitosis=${mitosis_version_id}; no edit will land this run`,
+      );
       // Introduce a brief wait before returning cutoverDeferred
       await new Promise(resolve => setTimeout(resolve, 10000));
       return {

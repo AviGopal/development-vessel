@@ -306,6 +306,76 @@ export async function resolveRhythmConductorTick(
     }
   }
 
+  // AN EMPTY OR UNMAPPABLE REGISTRY IS A STRUCTURAL BREAK, NOT IDLENESS (2026-08-09).
+  //
+  // Both failures read identically to a healthy-but-quiet fleet — the tick returns,
+  // enqueues nothing, and says nothing — so both ran undetected:
+  //   * registry EMPTY: the spoke had zero timeShapedRhythm impulses (a pool merge
+  //     destroyed them and nothing re-seeds), so considered:0 forever.
+  //   * registry UNMAPPABLE: 50 rhythms present and EVERY ONE skipped
+  //     "no_goal_mapping" — no rhythmFamilyGoal existed for any family, so the hub's
+  //     48 rhythms had never fired either.
+  // In both cases nothing periodic in the fleet had a cadence, and the only reason it
+  // was found was an operator running this resolver by hand.
+  //
+  // The evidence was already computed here and simply terminated in a report nothing
+  // reads. Emit a gap instead. Deliberately NOT emitted when the registry is populated
+  // and mappable but nothing is due or affordable — that IS ordinary idleness, and
+  // over-reporting it would train the operator to ignore the signal.
+  // Judge mappability from the REGISTRY, not from this tick's skip list. A rhythm only
+  // reaches the mapping loop if it is already due AND affordable, so on a quiet tick
+  // `skipped` is empty and a no_goal_mapping count would read 0 on a totally unmapped
+  // fleet — which is exactly what it did when I first wrote this check against
+  // `skipped`. Measured: 4 rhythms, every mapping retired, skipped:[] and considered:4.
+  // `poolGoals` and FAMILY_GOALS are both computed above independently of due-ness, so
+  // asking "could this family EVER map?" is answerable on every tick.
+  const mappable = rhythms.filter((r) => {
+    const fam = typeof r.body?.family === "string" ? r.body.family : "";
+    return !!fam && ((poolGoals[fam]?.length ?? 0) > 0 || !!FAMILY_GOALS[fam]);
+  }).length;
+  const structuralBreak =
+    rhythms.length === 0
+      ? "registry_empty"
+      : mappable === 0
+        ? "registry_unmappable"
+        : null;
+  if (structuralBreak && pointer.dry_run !== true) {
+    const summary =
+      structuralBreak === "registry_empty"
+        ? "Rhythm registry is EMPTY: rhythm_conductor_tick read zero timeShapedRhythm impulses, so nothing periodic in this substrate has a cadence. Re-seed the registry (pool impulses of shape timeShapedRhythm carrying axis/family/budget/alpha/beta/staleness)."
+        : `Rhythm registry is UNMAPPABLE: all ${rhythms.length} rhythm(s) were skipped with no_goal_mapping, so the conductor scores due-ness and has nothing to enqueue. Mount rhythmFamilyGoal pool impulses ({family, goal, member?}) for the affected families.`;
+    try {
+      await fetchJson(
+        endpoint,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            impulse: {
+              type: "substrateGap_write",
+              gap: {
+                id: `rhythm-cadence-${structuralBreak}`,
+                category: "other",
+                source: "substrate_detected",
+                summary,
+                detected_at: new Date().toISOString(),
+                status: "open",
+                route: "dispatchable",
+                classification_metadata: {
+                  kind: structuralBreak,
+                  considered: rhythms.length,
+                  mappable,
+                  enqueued: enqueued.length,
+                },
+              },
+            },
+          }),
+        },
+        800,
+      );
+    } catch { /* best-effort: a gap-write failure must not break the tick */ }
+  }
+
   return {
     shape: "rhythmConductorReport",
     body: {
@@ -314,6 +384,9 @@ export async function resolveRhythmConductorTick(
       bucket_load: bucketLoad,
       presence: present,
       considered: rhythms.length,
+      // Names the break in the report too, so an operator reading a single tick sees
+      // "registry_unmappable" rather than inferring it from an empty enqueued list.
+      structural_break: structuralBreak,
       dry_run: pointer.dry_run === true,
     },
   };

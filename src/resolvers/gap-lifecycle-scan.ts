@@ -1,6 +1,13 @@
 import type { ResolverResult } from "./types.js";
 import { readFileSync, readdirSync, appendFileSync } from "node:fs";
 import { join } from "node:path";
+import { WORKSPACE_ROOT as DEFAULT_WORKSPACE_ROOT } from "../config.js";
+
+// Read at call time, not module load, so tests can override WORKSPACE_ROOT —
+// same accessor shape substrate-gap.ts uses for the store this resolver reads.
+function workspaceRoot(): string {
+  return process.env["WORKSPACE_ROOT"] ?? DEFAULT_WORKSPACE_ROOT;
+}
 
 // NOTE: For proactive un-landable gap suppression see gap-landability-model.ts
 // which provides a backward model (predict→validate→residual) that auto-closes
@@ -232,7 +239,21 @@ async function dispatchScenario(gap: {
 }
 
 export async function resolveGapLifecycleScan(p: GapLifecycleScanPointer): Promise<ResolverResult> {
-  const gapsPath = p.gapsPath ?? "/workspace/gaps/gaps.json";
+  // THE GAP STORE MOVED BEHIND WORKSPACE_ROOT; THIS DEFAULT DID NOT FOLLOW IT.
+  //
+  // substrate-gap.ts writes the store at join(workspaceRoot(), "gaps", "gaps.json").
+  // This literal pointed at a copy frozen on 2026-08-08, so the whole gap-closing
+  // organ was reading a fossil: measured live, the same code returned
+  // total_gaps 2666 / open 462 / stale_open 274 against the literal path, and
+  // 200 / 154 / 0 against the workspace root — the latter matching an independent
+  // substrateGap resolve exactly. A gap filed today was invisible to closure,
+  // prioritisation and clustering alike.
+  //
+  // proposalsDir is deliberately NOT changed in the same way: /workspace/proposals
+  // is the LIVE directory (compose-lessons.jsonl is written there), and
+  // ${WORKSPACE_ROOT}/proposals does not exist. The two pieces of state moved
+  // independently, so correcting them together would break the one that works.
+  const gapsPath = p.gapsPath ?? join(workspaceRoot(), "gaps", "gaps.json");
   const proposalsDir = p.proposalsDir ?? "/workspace/proposals";
   const staleHours = p.staleHours ?? 48;
   const autoClose = p.autoClose !== false;

@@ -67,7 +67,16 @@ export const TRACE_STORE_RECONCILE_TEMPLATE: ActivityTemplate = {
     "lift.autonomous.loop",
     "db.maintenance.trace-store",
   ],
-  variables: [],
+  variables: [
+    // DECLARE IT OR IT RENDERS EMPTY. An undeclared {{placeholder}} has no
+    // producer and no default, so the URL would come out as "/v2/impulses/
+    // resolve" and fail exactly as the old hardcoded one did — differently
+    // broken, equally dead. `activity_api_endpoint` is the fleet's established
+    // name for this (detect-cutover-stuck-loop.ts:69 declares it the same way
+    // for the same /v2/impulses/resolve call); the default is only correct on a
+    // hub, which is where the trace store lives, and a spoke overrides it.
+    { name: "activity_api_endpoint", description: "Activity-api base URL. Default http://127.0.0.1:8080." },
+  ],
   tasks: [
     {
       id: "acquire_lease",
@@ -129,10 +138,10 @@ export const TRACE_STORE_RECONCILE_TEMPLATE: ActivityTemplate = {
         //     (routes/db-admin-reconcile.ts:217) and fail-closes 403 without it. So
         //     even against a correct URL on a correct host, the gate would refuse.
         //
-        // {{activity_api_base}} is bound by the caller (goal-host resolves the
-        // `db_admin` shape through discovery); it falls back to the hub-local
-        // default only when discovery yields nothing.
-        url: "{{activity_api_base}}/v2/impulses/resolve",
+        // {{activity_api_endpoint}} is a DECLARED variable (see `variables`
+        // above) — an undeclared placeholder has no producer and would render
+        // empty, which is how the first draft of this fix was still broken.
+        url: "{{activity_api_endpoint}}/v2/impulses/resolve",
         headers: {
           "Content-Type": "application/json",
         },

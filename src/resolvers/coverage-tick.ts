@@ -38,6 +38,13 @@ interface CellCounts {
   timestamp: string;
   reachable_learned: number;
   reachable_unlearned: number;
+  /**
+   * Advertised shapes that only a TEMPLATE DECLARATION vouches for — no trace in this
+   * window actually carried them. These used to be folded into reachable_learned, which
+   * made a claim indistinguishable from a demonstration. A non-zero value is a worklist:
+   * edges to go exercise, not coverage already earned.
+   */
+  reachable_declared_only: number;
   unknown: number;
   new_shapes_introduced: number;
   trace_count: number;
@@ -111,6 +118,10 @@ async function computeCountsForWindow(
   // discovery. Traces from meta activities still count for trace_count so the
   // dominance pattern remains visible.
   const learnedShapes = new Set<string>();
+  // Shapes only a TEMPLATE DECLARATION vouches for — no trace carried them. Tracked
+  // separately so a claim can never be counted as a demonstration; see the note at the
+  // inference branch below.
+  const inferredOnlyShapes = new Set<string>();
   let substantiveTraces = 0;
   for (const tr of traces) {
     const actId = tr.activity_id ?? tr.variant_id ?? "";
@@ -127,16 +138,34 @@ async function computeCountsForWindow(
     if (actualShapes && actualShapes.length > 0) {
       for (const s of actualShapes) learnedShapes.add(s);
     } else {
+      // DECLARED IS NOT DEMONSTRATED (2026-08-09).
+      //
+      // This used to add the TEMPLATE'S DECLARED output shapes to `learnedShapes`
+      // whenever a trace carried no actual ones — laundering an advertisement into
+      // evidence. A template that declares it produces X and has never once produced
+      // X then counted as X being learned, which is precisely the blind spot that let
+      // a maintenance edge sit "covered" through 36 dispatches and five stacked
+      // defects while its target metric never moved.
+      //
+      // Kept as a SEPARATE count rather than discarded: the gap between demonstrated
+      // and inferred is itself the useful signal — it is the set of shapes the fleet
+      // claims but has not shown. Reporting them apart makes the claim auditable;
+      // merging them made it unfalsifiable.
       const inferredShapes = templateShapes.get(actId);
       if (inferredShapes) {
-        for (const s of inferredShapes) learnedShapes.add(s);
+        for (const s of inferredShapes) inferredOnlyShapes.add(s);
       }
     }
   }
 
+  // A shape counts as learned only where a trace actually carried it.
   const reachable_learned = [...advertisedShapes].filter(s => learnedShapes.has(s)).length;
   const reachable_unlearned = [...advertisedShapes].filter(s => !learnedShapes.has(s)).length;
   const unknown = [...learnedShapes].filter(s => !advertisedShapes.has(s)).length;
+  // Advertised, and claimed by some template's declaration, but never demonstrated in
+  // a trace this window. A non-zero value here is a list of edges to go exercise.
+  const reachable_declared_only = [...advertisedShapes]
+    .filter(s => !learnedShapes.has(s) && inferredOnlyShapes.has(s)).length;
 
   return {
     counts: {
@@ -146,6 +175,7 @@ async function computeCountsForWindow(
       reachable_learned,
       reachable_unlearned,
       unknown,
+      reachable_declared_only,
       new_shapes_introduced: 0, // populated after all windows computed
       trace_count: substantiveTraces,
     },

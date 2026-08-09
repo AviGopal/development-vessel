@@ -361,7 +361,29 @@ async function buildOverlay(
           }>;
           for (const sub of subEntries) {
             try {
-              await symlink(join(realSub, sub.name), join(path, sub.name));
+              // TEST FILES MUST BE REAL COPIES, NOT SYMLINKS (2026-08-09).
+              //
+              // A symlinked test executes at its REAL path in baseRoot, so its
+              // relative imports resolve against baseRoot — `import "./goal-intent"`
+              // loads the UNPATCHED source, never the staged copy sitting beside it
+              // in the overlay. The suite then passes honestly about code that was
+              // never patched, and the delta reports "0 introduced".
+              //
+              // MEASURED, probe validated in both directions before trusting it:
+              // base tree 7 pass/0 fail; same suite against the staged (broken)
+              // goal-intent.ts 2 FAIL; the gate ran it from
+              // `../gv-base/src/goal-intent.test.ts` and returned FAVORABLE 7/0.
+              // That is how a commit disabling the isEditIntentGoal path guard
+              // landed FAVORABLE and pushed to origin/dev.
+              //
+              // Only test files are copied: they are few and small, and they are the
+              // only entries whose module resolution decides WHICH TREE gets tested.
+              // Everything else stays symlinked, so the cheap-overlay property holds.
+              if (/\.(test|spec)\.[cm]?[jt]sx?$/.test(sub.name)) {
+                await copyFile(join(realSub, sub.name), join(path, sub.name));
+              } else {
+                await symlink(join(realSub, sub.name), join(path, sub.name));
+              }
             } catch {
               /* ignore */
             }

@@ -67,7 +67,9 @@ export async function resolveSelfInterferenceScan(pointer: SelfInterferenceScanP
   } catch { }
   let gaps: Array<{ id?: string; summary?: string; classification_metadata?: { resolution_commits?: unknown[]; approach_decisions?: Array<{ outcome?: unknown; at?: string }> } }> = [];
   try {
-    gaps = JSON.parse(await Bun.file("/workspace/gaps/gaps.json").text()) as typeof gaps;
+    // WORKSPACE_ROOT-relative: the literal path is a copy frozen 2026-08-08.
+    const gapsStorePath = `${process.env["WORKSPACE_ROOT"] ?? "/workspace"}/gaps/gaps.json`;
+    gaps = JSON.parse(await Bun.file(gapsStorePath).text()) as typeof gaps;
     for (const g of gaps) {
       const commits = g.classification_metadata?.resolution_commits;
       const summary = typeof g.summary === "string" ? g.summary : "";

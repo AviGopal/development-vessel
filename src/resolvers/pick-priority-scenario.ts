@@ -117,7 +117,11 @@ export async function resolvePickPriorityScenario(
   p: PickPriorityScenarioPointer,
 ): Promise<ResolverResult> {
   const scenariosDir = p.scenarios_dir ?? "/workspace/validation/failure-modes/scenarios";
-  const gapsPath = p.gaps_path ?? "/workspace/gaps/gaps.json";
+  // Follow the store, which lives under WORKSPACE_ROOT (substrate-gap.ts writes it
+  // there). The literal default pointed at a copy frozen 2026-08-08, so priority
+  // was being picked over gaps that no longer exist.
+  const gapsPath = p.gaps_path
+    ?? `${process.env["WORKSPACE_ROOT"] ?? "/workspace"}/gaps/gaps.json`;
   const excludeDrafted = p.exclude_drafted !== false;
   const apiKey = p.apiKey ?? API_KEY;
 

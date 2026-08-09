@@ -237,13 +237,61 @@ async function runCheck(
  * feature-compose.ts's testFailureSet: a NEW failure is one this patch introduced, not
  * one the vessel was already carrying.
  */
-function testFailureNames(output: string): Set<string> {
+/** Drop SGR escapes so anchored matching sees the text bun printed, not its colours. */
+function stripAnsi(s: string): string {
+  // eslint-disable-next-line no-control-regex
+  return s.replace(/\[[0-9;]*m/g, "");
+}
+
+/**
+ * Failure names from a bun test run.
+ *
+ * THIS PARSED NOTHING, ON EVERY RUN, FOR AS LONG AS THIS BUN HAS BEEN IN THE
+ * IMAGE (2026-08-09). It matched `^\(fail\)\s+(.*)$`. Bun 1.3.14 does not emit
+ * that; it emits an ANSI-prefixed cross:
+ *
+ *     [0m[31m✗[0m …isEditIntentGoal > requires a file EXTENSION…
+ *
+ * Measured on a real failing suite: lines matching `^\(fail\)` = 0 while the run
+ * reported `2 fail`. The `^` anchor also faced an escape sequence, so it could
+ * not have matched even if the token had survived.
+ *
+ * The gate built on it was therefore INERT, not lenient: both sides of the delta
+ * parsed to the empty set, `newFailures` was always `[]`, and every mitosis
+ * cited "0 pre-existing red(s), 0 introduced" whatever the suite did. That is how
+ * a commit which fails 2 of 7 tests landed FAVORABLE and pushed to origin/dev.
+ *
+ * Both formats are accepted so this survives a bun downgrade as well as the
+ * upgrade that broke it.
+ */
+export function testFailureNames(output: string): Set<string> {
   const out = new Set<string>();
-  for (const line of output.split("\n")) {
-    const m = line.match(/^\(fail\)\s+(.*)$/);
+  for (const raw of stripAnsi(output).split("\n")) {
+    const line = raw.trim();
+    const m = line.match(/^(?:\(fail\)|✗|×)\s+(.*)$/);
     if (m && m[1]) out.add(m[1].replace(/\s*\[[\d.]+m?s\]\s*$/, "").trim());
   }
   return out;
+}
+
+/**
+ * Does the parsed failure set agree with bun's own summary line?
+ *
+ * THE REGEX WAS NOT THE BUG. The bug was that an empty parse was trusted as a
+ * measurement: a parser returning nothing is indistinguishable from a green
+ * suite, and nothing ever asserted the difference — which is why a dead pattern
+ * survived a bun upgrade and silently disarmed the gate.
+ *
+ * bun prints `N fail` in its summary. If it says failures happened and we parsed
+ * none, the parse is broken and the comparison must be treated as UNKNOWN rather
+ * than as zero. Returns true when the two agree (including the ordinary
+ * everything-passed case, where both are zero).
+ */
+export function testFailureParseIsConsistent(output: string, parsed: Set<string>): boolean {
+  const m = stripAnsi(output).match(/^\s*(\d+)\s+fail\b/m);
+  if (!m) return true; // no summary to check against — nothing to contradict
+  const reported = Number(m[1]);
+  return reported === 0 ? parsed.size === 0 : parsed.size > 0;
 }
 
 /**
@@ -817,7 +865,21 @@ export async function staticEvaluate(
         if (!baseTest.timed_out && !truncated) {
           const cur = testFailureNames(curTail);
           const base = testFailureNames(baseTail);
-          newFailures = [...cur].filter((t) => !base.has(t));
+          // A PARSE THAT CONTRADICTS BUN'S OWN SUMMARY IS NOT A MEASUREMENT.
+          // If either side reports `N fail` and we extracted none, the pattern has
+          // drifted from the runner's output again; leaving newFailures null routes
+          // to the inconclusive branch instead of silently reporting "0 introduced",
+          // which is exactly how the dead `(fail)` pattern disarmed this gate.
+          if (
+            testFailureParseIsConsistent(curTail, cur) &&
+            testFailureParseIsConsistent(baseTail, base)
+          ) {
+            newFailures = [...cur].filter((t) => !base.has(t));
+          } else {
+            console.error(
+              `[mitosis-evaluate] test failure parse DISAGREES with bun's summary (cur=${cur.size} base=${base.size}) — treating the delta as unknown rather than zero; the output format has probably changed`,
+            );
+          }
         }
       }
       if (newFailures !== null && newFailures.length === 0) {

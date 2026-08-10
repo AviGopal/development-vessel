@@ -1031,15 +1031,50 @@ async function attemptApplyOnce(pointer: ApplyProposalAsPatchPointer): Promise<R
     }
     const mitosisRoot = join(vesselsRoot, `${vesselOnly}-mitosis-${stamp}`);
     const stagedFiles: string[] = [];
+    // A WRITE THAT SUCCEEDS IS NOT AN EDIT (task #54, 2026-08-10).
+    //
+    // stagedFiles recorded a name whenever writeFile did not throw — it never
+    // asked whether the content DIFFERS from what is live. A proposal that
+    // reproduces the current file byte-for-byte therefore staged "successfully"
+    // and returned mitosisStaged, and the operator then went looking for an edit
+    // that does not exist on disk. That is the reported symptom exactly.
+    //
+    // The downstream cost is worse than the confusion: a no-op staging occupies
+    // the mitosis slot, drives evaluate→cutover, and lands a commit whose diff is
+    // empty — consuming a change window and a Thompson observation for nothing.
+    //
+    // Counting changed files (not written ones) also makes the returned
+    // file_count honest, which the cutover's freshness anchor reads.
+    let unchangedCount = 0;
     for (const e of fileEntries) {
       const stagedFile = join(mitosisRoot, e.subPath);
       try {
+        // Compare against the LIVE file, which is what a cutover would overwrite.
+        // Missing (net-new) counts as changed — that is the whole point of a new file.
+        const livePath = join(vesselsRoot, vesselOnly, e.subPath);
+        let liveContent: string | null = null;
+        try { liveContent = await readFile(livePath, "utf8"); } catch { liveContent = null; }
+        if (liveContent !== null && liveContent === e.content) {
+          unchangedCount++;
+          continue; // staged on disk for inspection, but NOT counted as an edit
+        }
         await mkdir(dirname(stagedFile), { recursive: true });
         await writeFile(stagedFile, e.content);
         stagedFiles.push(e.subPath);
       } catch (err) {
         return structuredError(`stage write failed: ${(err as Error).message}`, { staged_file: stagedFile });
       }
+    }
+    if (stagedFiles.length === 0) {
+      // Every file in the proposal already matches live. Refusing here is what
+      // stops an empty commit from consuming a change window, and it names the
+      // reason so the drafter's redundancy is visible rather than silent.
+      return structuredError("proposal is a no-op: every file already matches the live tree", {
+        proposal: chosen.name,
+        vessel: vesselOnly,
+        files_examined: fileEntries.length,
+        files_unchanged: unchangedCount,
+      });
     }
     const versionId = `mitosis-${stamp}`;
     // FRESHNESS ANCHOR (2026-06-30). The cutover's freshness gate hashes the LIVE

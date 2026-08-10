@@ -196,6 +196,56 @@ describe("apply_proposal_as_patch resolver", () => {
     expect(existsSync(pendingPath)).toBe(true);
   });
 
+  it("does not count an overwrite whose content already matches live", async () => {
+    // TASK #54, 2026-08-10. stagedFiles recorded a name whenever writeFile did not
+    // throw — it never asked whether the content DIFFERS from live, so a file
+    // reproducing the current bytes was reported as staged and the operator went
+    // looking for an edit that does not exist on disk.
+    //
+    // A PURE no-op proposal turns out to be unreachable: eligibility requires
+    // required_code_modifications[] or new_files[], and a new file is changed by
+    // definition. So the reachable form is a MIXED proposal — a genuine new file
+    // plus an overwrite that is already current — and the guard's job is to keep
+    // the redundant one out of staged_files, which feeds the cutover's
+    // freshness anchor and the reported file_count.
+    const IDENTICAL = "export const VERSION = 'already-live';\n";
+    const dir = join(vesselsRoot, "demo-vessel", "src", "resolvers");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "noop.ts"), IDENTICAL);
+    const proposal = {
+      scenario_id: "auto-noop-1780800000000",
+      new_files: [{ path: "repos/demo-vessel/src/resolvers/real.ts", content: "export const REAL = 1;\n" }],
+      overwrite_files: [{ path: "repos/demo-vessel/src/resolvers/noop.ts", content: IDENTICAL }],
+    };
+    writeFileSync(join(proposalsDir, "auto-noop-1780800000000-report.json"), JSON.stringify(proposal));
+    const r = await resolveApplyProposalAsPatch({ type: "apply_proposal_as_patch", proposals_dir: proposalsDir, vessels_root: vesselsRoot, pending_path: pendingPath });
+    expect(r.shape).toBe("mitosisStaged");
+    const body = r.body as { staged_files: string[] };
+    // The already-current overwrite must NOT be reported as staged.
+    expect(body.staged_files).toEqual(["src/resolvers/real.ts"]);
+  });
+
+  it("still stages when ONE file of several differs", async () => {
+    // The guard must count CHANGED files, not refuse any proposal containing an
+    // unchanged one — otherwise a real multi-file edit is rejected for carrying
+    // one already-current file.
+    const SAME = "// unchanged\n";
+    const dir = join(vesselsRoot, "demo-vessel", "src");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "same.ts"), SAME);
+    const proposal = {
+      scenario_id: "auto-mixed-1780800000001",
+      overwrite_files: [{ path: "repos/demo-vessel/src/same.ts", content: SAME }],
+      new_files: [{ path: "repos/demo-vessel/src/changed.ts", content: "// genuinely new\n" }],
+    };
+    writeFileSync(join(proposalsDir, "auto-mixed-1780800000001-report.json"), JSON.stringify(proposal));
+    const r = await resolveApplyProposalAsPatch({ type: "apply_proposal_as_patch", proposals_dir: proposalsDir, vessels_root: vesselsRoot, pending_path: pendingPath });
+    expect(r.shape).toBe("mitosisStaged");
+    const body = r.body as { staged_files: string[] };
+    // Only the changed file counts — file_count feeds the cutover's freshness anchor.
+    expect(body.staged_files).toEqual(["src/changed.ts"]);
+  });
+
   it("rejects multi-file proposal that spans more than one vessel", async () => {
     const proposal = {
       scenario_id: "auto-multivessel-bad",

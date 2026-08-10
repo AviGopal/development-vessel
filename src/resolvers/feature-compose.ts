@@ -2222,7 +2222,30 @@ async function fileLessonsBlock(specText?: string): Promise<string> {
     return "\n\nPRIOR TYPECHECK FAILURES ON THESE FILES (verbatim diagnostics from earlier failed attempts on the same files — your op plan MUST avoid re-introducing these errors; declare each new variable exactly once, in the correct scope):\n" + relevant.slice(-3).map((r) => `- [${r.at}] files=${r.files.join(",")}\n${r.tsc.slice(0, 1500)}`).join("\n");
   } catch { return ""; }
 }
-async function composeLessonsBlock(specText?: string): Promise<string> {
+/**
+ * The failure classes this gap has already been rejected for, most recent first.
+ *
+ * These are the right recall key, and they were sitting on the gap the whole time.
+ * The lesson corpus is keyed on exactly these names — a bare `anchor_not_found`
+ * returns "old_string anchors must be copied verbatim from the CURRENT file content
+ * shown in the grounding" immediately. The SPEC is not a usable key: it is
+ * code-shaped, so its distinctive terms are identifiers while the corpus is prose,
+ * and passing it returns nothing (measured twice, reverted twice — 89a7f31/90c585f
+ * and d274763/8236895).
+ */
+export function gapFailureClasses(meta: Record<string, unknown> | undefined): string[] {
+  const lessons = (meta?.["failure_lessons"] ?? []) as Array<{ class?: unknown; at?: unknown }>;
+  if (!Array.isArray(lessons)) return [];
+  const ordered = [...lessons].sort((a, b) => String(b?.at ?? "").localeCompare(String(a?.at ?? "")));
+  const out: string[] = [];
+  for (const l of ordered) {
+    const c = typeof l?.class === "string" ? l.class.trim() : "";
+    if (c && !out.includes(c)) out.push(c);
+  }
+  return out;
+}
+
+async function composeLessonsBlock(specText?: string, failureClasses: string[] = []): Promise<string> {
   // FIRST: semantic recall from concept-db — relevance to the current spec, not
   // JSONL recency. Fails open to the JSONL path when concept-db is down or empty.
   if (specText && specText.trim().length > 0) {
@@ -2233,14 +2256,25 @@ async function composeLessonsBlock(specText?: string): Promise<string> {
       const resp = await fetch(`${DISCOVERY_ENDPOINT}/resolve`, {
         method: "POST",
         headers: { ...headers, "Content-Type": "application/json" },
-        body: JSON.stringify({ pointer: { type: "conceptSearch", source_type: "compose_lesson", limit: 8 } }),
+        // QUERY BY FAILURE CLASS. The corpus is keyed on these names, so this returns the
+        // lesson for the mistake this gap actually made rather than a fixed eight. Sending
+        // no query at all returned the SAME eight rows for 132 consecutive composes under
+        // the heading "KNOWN FAILURE MODES" — a fixed list read as targeted advice.
+        //
+        // Send only the MOST RECENT class — the mistake about to be repeated. Joining
+        // several was measured and rejected: `@@` is AND, so a join matches none of them
+        // and concept-db's ladder then relaxes to the LONGEST name, not the most recent
+        // (a join of four returned typecheck_dangling_reference, 28 chars, over
+        // anchor_not_found). Length is not recency. When the gap has no recorded class
+        // the query is omitted entirely, preserving today's behaviour exactly.
+        body: JSON.stringify({ pointer: { type: "conceptSearch", source_type: "compose_lesson", ...(failureClasses[0] ? { query: failureClasses[0] } : {}), limit: 8 } }),
         signal: AbortSignal.timeout(8_000),
       });
       if (resp.ok) {
         const json = (await resp.json()) as { content?: Array<{ content?: string }> };
         const found = (json.content ?? []).map((c) => c.content).filter((s): s is string => typeof s === "string" && s.length > 0);
         if (found.length > 0) {
-          console.warn(`[compose-lessons] source=concept-db n=${found.length}`);
+          console.warn(`[compose-lessons] source=concept-db n=${found.length} class=${failureClasses[0] ?? "none"}`);
           return `\n\nKNOWN FAILURE MODES from this substrate's own rejected composes — plans repeating these are rolled back:\n${found.map((r) => `- ${r}`).join("\n")}`;
         }
       }
@@ -2516,7 +2550,7 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
   // that as explicit re-draft guidance so the drafter completes the partial fix instead
   // of re-producing it blind. Additive — empty when no prior rejection exists.
   const priorFeedback = priorAttemptFeedbackBlock(pointer.gap?.classification_metadata);
-  const composeLessons = (await composeLessonsBlock(pointer.spec)) + (await fileLessonsBlock(pointer.spec));
+  const composeLessons = (await composeLessonsBlock(pointer.spec, gapFailureClasses(pointer.gap?.classification_metadata as Record<string, unknown> | undefined))) + (await fileLessonsBlock(pointer.spec));
   let spec = pointer.spec;
   // Ground the spec against the REAL target file UNCONDITIONALLY (law 8 — information
   // at use time). The specs most likely to carry SCHEMATIC anchors are exactly the ones

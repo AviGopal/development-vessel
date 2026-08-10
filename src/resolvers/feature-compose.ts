@@ -26,6 +26,7 @@ import type { ResolverResult } from "./types.js";
 import { resolveVesselMitosisCutover } from "./vessel-mitosis-cutover.js";
 import { resolveSubstrateGap, resolveSubstrateGapWrite } from "./substrate-gap.js";
 import { writeAuthoringMarker, clearAuthoringMarker } from "./patch-with-tools.js";
+import { vacuousEditReason } from "../vacuous-edit.js";
 import { existsSync as mountExistsSync } from "node:fs";
 import { regionCandidatesFromText } from "./region-probe.js";
 
@@ -2675,6 +2676,73 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
         ops = reordered;
       }
     }
+  }
+
+  // DETERMINISTIC VACUOUS-EDIT GATE. A plan whose every edit adds only bindings
+  // that are never used cannot be the requested change, yet it typechecks clean
+  // (noUnusedLocals is not set fleet-wide), so the mitosis verdict comes back
+  // FAVORABLE and the stage is ACCEPTED — which ENDS the attempt. The escalation
+  // that exists for a failed compose (patch_with_tools) never gets a turn,
+  // because from the gate's point of view the compose succeeded.
+  //
+  // Observed on a correctly-routed repair goal: the entire diff was
+  // `const tenant = c.get('tenant');` — unreferenced, wrong key, and the write
+  // statement the goal was about untouched.
+  //
+  // TWO GUARDS AGAINST OVER-REFUSAL, because refusing real work is worse than
+  // accepting a no-op:
+  //   1. only when EVERY edit op is vacuous (mirrors the file-scope gate's
+  //      "purely off-target" rule — any op doing real work admits the plan);
+  //   2. only when the bound name appears NOWHERE in the target file's current
+  //      text. An op's new_string is a FRAGMENT, so a declaration that is used
+  //      later in the file would otherwise look unused. Adding a missing
+  //      definition for an already-referenced symbol is legitimate and must pass.
+  try {
+    const editOnly = ops.filter((o) => o.kind === "edit");
+    if (editOnly.length > 0) {
+      const reasons: string[] = [];
+      for (const op of editOnly) {
+        const r = vacuousEditReason(op.old_string ?? "", op.new_string ?? "");
+        if (!r) { reasons.length = 0; break; }        // any real op admits the plan
+        reasons.push(r);
+      }
+      if (reasons.length === editOnly.length) {
+        // Guard 2: consult the whole file before refusing.
+        let referencedSomewhere = false;
+        for (const op of editOnly) {
+          const names = (op.new_string ?? "").match(/(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=/g) ?? [];
+          const path = (op.path ?? "").replace(/:\d+.*$/, "").trim();
+          if (!path) continue;
+          let current = "";
+          try {
+            const { readFile } = await import("node:fs/promises");
+            const root = process.env["REPO_ROOT"] ?? process.env["WORKSPACE_ROOT"] ?? "/workspace/git/super-repo";
+            current = await readFile(`${root}/${path}`, "utf8");
+          } catch { current = ""; }
+          if (!current) { referencedSomewhere = true; break; }   // cannot verify → do not refuse
+          for (const decl of names) {
+            const nm = /(?:const|let|var)\s+([A-Za-z_$][\w$]*)/.exec(decl)?.[1];
+            if (!nm) continue;
+            const codeOnly = current
+              .replace(/'(?:[^'\\]|\\.)*'/g, "''")
+              .replace(/"(?:[^"\\]|\\.)*"/g, '""');
+            if (new RegExp(`\\b${nm}\\b`).test(codeOnly)) { referencedSomewhere = true; break; }
+          }
+          if (referencedSomewhere) break;
+        }
+        if (!referencedSomewhere) {
+          console.warn(`[fc-vacuous] REFUSING plan: ${reasons[0]}`);
+          return {
+            shape: "featureComposeReport",
+            body: { ok: false, verdict: "REFUSED", stage: "scope", error: `vacuous plan refused — ${reasons[0]}` },
+          };
+        }
+        console.log(`[fc-vacuous] plan looked vacuous but a bound name is referenced in the target file — admitting`);
+      }
+    }
+  } catch (err) {
+    // A gate must never break convergence: an error here admits the plan.
+    console.warn(`[fc-vacuous] gate error (non-fatal, admitting plan):`, err);
   }
 
   // DETERMINISTIC FILE-SCOPE GATE (drafter binding-constraint remedy): when the spec

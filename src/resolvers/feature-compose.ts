@@ -2295,9 +2295,60 @@ async function composeLessonsBlock(specText?: string, failureClasses: string[] =
   } catch { return ""; }
 }
 const composeInFlight = new Set<string>();
+/** In-flight compose count, for the capacity cap. See the cap comment below. */
+let composeConcurrency = 0;
 const DEV_VESSEL_ENDPOINT = process.env["DEV_VESSEL_ENDPOINT"] ?? "http://127.0.0.1:8090";
 
+/**
+ * GLOBAL CAPACITY CAP — a thin wrapper, so the 4k-line body is untouched.
+ *
+ * Distinct from the per-vessel busy-set inside, which is a CORRECTNESS guard
+ * (two composes must not stomp one tree). Per-compose worktree isolation made
+ * concurrent composes correct and the refusal was dropped as "no longer needed"
+ * — but correct is not the same as AFFORDABLE, and nothing replaced it with a
+ * resource bound.
+ *
+ * Measured on substrate-live: 27 concurrent typecheck/test processes at load
+ * 50.8 on 14 CPUs — 3.6x oversubscribed. Every compose spawns `bun install` +
+ * `tsc --noEmit` + `bun test`, each itself multi-core, so a handful saturates the
+ * box. The damage lands on everything else sharing the host, and on the composes
+ * themselves, which then time out queued behind each other.
+ *
+ * REFUSE, don't queue: a queue here is unbounded (every gap tick can add one),
+ * turning a capacity problem into a memory + latency problem. A refusal is
+ * visible, costs nothing, and does not lose the work — the gap stays open and is
+ * retried when there is room.
+ */
 export async function resolveFeatureCompose(pointer: FeatureComposePointer): Promise<ResolverResult> {
+  // NaN GUARD, not decoration: `Math.max(1, Number("typo"))` is NaN, and
+  // `inFlight >= NaN` is ALWAYS FALSE — so a mistyped env var would silently
+  // disable the cap while the code still looks like it has one. Any
+  // non-finite or sub-1 value falls back to the default rather than to
+  // "unlimited", because the failure mode of a wrong cap must be a slow fleet,
+  // never an oversubscribed host.
+  const rawCap = Number(process.env["COMPOSE_MAX_CONCURRENT"] ?? 2);
+  const cap = Number.isFinite(rawCap) && rawCap >= 1 ? Math.floor(rawCap) : 2;
+  if (composeConcurrency >= cap) {
+    console.warn(`[compose-cap] REFUSING: ${composeConcurrency} compose(s) in flight (cap ${cap}) — gap stays open, retried when there is capacity`);
+    return {
+      shape: "featureComposeReport",
+      body: {
+        ok: false,
+        verdict: "REFUSED",
+        stage: "capacity",
+        error: `compose capacity cap reached (${composeConcurrency}/${cap} in flight); refused rather than oversubscribing the host`,
+      },
+    };
+  }
+  composeConcurrency++;
+  try {
+    return await resolveFeatureComposeUncapped(pointer);
+  } finally {
+    composeConcurrency--;
+  }
+}
+
+async function resolveFeatureComposeUncapped(pointer: FeatureComposePointer): Promise<ResolverResult> {
   if (typeof pointer.spec !== "string") pointer = { ...pointer, spec: String(pointer.spec ?? "") };
   const guards = pointer.verify_vessels?.length ? pointer.verify_vessels : ["__global__"];
   // Per-compose isolation (gap edit-intent-compose-shared-workspace-no-isolation):
@@ -2306,6 +2357,29 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
   // survives only as the fallback for vessels isolation could not cover (no push
   // clone / net-new / git failure); landing races are handled downstream by the
   // cutover's global lease + freshness gates, on evidence instead of up front.
+  // GLOBAL CONCURRENCY CAP.
+  //
+  // The per-vessel `composeInFlight` guard below only covers UNISOLATED vessels. Once
+  // isolation was added, an isolated compose bypassed the only bound there was, and
+  // nothing replaced it — so concurrency became unlimited by construction.
+  //
+  // Measured 2026-08-10 on this host: 45 live compose worktrees at load average 25-30
+  // on a 14-vCPU VM. At that point concept-db returns nothing within 30s for ANY
+  // caller (verified with a paired probe — a keyed query and an unkeyed one both
+  // timed out identically), typechecks and tests inside each compose slow to a crawl,
+  // and work that would otherwise have succeeded fails on timeouts. The storm makes
+  // the fleet worse at the exact moment it is trying hardest.
+  //
+  // Checked BEFORE acquiring a workspace so a refused compose does not create and
+  // immediately discard a worktree, and returns the SAME `BUSY` verdict the
+  // per-vessel guard already returns — goal-host already waits and retries on BUSY,
+  // so no caller needs to change.
+  if (composesInFlight >= MAX_CONCURRENT_COMPOSES) {
+    console.error(`[compose] REFUSED — ${composesInFlight}/${MAX_CONCURRENT_COMPOSES} composes already in flight`);
+    return { shape: "featureComposeReport", body: { ok: false, verdict: "BUSY", stage: "guard", error: `concurrency cap reached (${composesInFlight}/${MAX_CONCURRENT_COMPOSES} composes in flight) - retry after one completes` } };
+  }
+  composesInFlight++;
+  try {
   const composeId = `fc-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
   const ws = await acquireComposeWorkspace(pointer.verify_vessels ?? [], composeId);
   console.error("[compose]", { composeId, isolated: pointer.verify_vessels?.filter(v => ws.isolated(v)), unisolated: pointer.verify_vessels?.filter(v => !ws.isolated(v)), verify_vessels: pointer.verify_vessels?.length });

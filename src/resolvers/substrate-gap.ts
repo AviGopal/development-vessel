@@ -571,8 +571,29 @@ export async function resolveSubstrateGapWrite(
       // So call the composer in-process, which needs no unit, no marker and no bus.
       // Guarded by the SAME globals the observer uses so the two entry points cannot
       // launch concurrent composes (the picker would select the same top gap twice).
-      const proc = Bun.spawn(["systemctl", "start", "gap-compose.service"], { stdout: "ignore", stderr: "ignore" });
-      void proc.exited.then((code) => {
+      // GUARD THE UNIT START TOO.
+      //
+      // The comment directly above claims these entry points are "guarded by the
+      // SAME globals ... so the two entry points cannot launch concurrent
+      // composes". They were not: this spawn sat ABOVE the `__composeDrainInflight`
+      // check, which therefore protected only the in-process nudge below it. The
+      // systemd unit fired on every tick regardless of how many composes were
+      // already running.
+      //
+      // With per-compose worktree isolation having removed the old refusal,
+      // nothing bounded the outcome: measured 27 concurrent typecheck/test
+      // processes at load 50.8 on 14 CPUs. The resolver now enforces a hard
+      // capacity cap as well; this is the cheap half — not launching a unit whose
+      // work will be refused saves the process and keeps the log honest.
+      const gdPre = globalThis as unknown as { __composeDrainInflight?: boolean };
+      const unitAlreadyBusy = gdPre.__composeDrainInflight === true;
+      if (unitAlreadyBusy) {
+        console.log(`[substrate-gap] gap-compose unit NOT started for ${gap.id} — a compose is already in flight`);
+      }
+      const proc = unitAlreadyBusy
+        ? null
+        : Bun.spawn(["systemctl", "start", "gap-compose.service"], { stdout: "ignore", stderr: "ignore" });
+      void proc?.exited.then((code) => {
         if (code === 0) console.log("[substrate-gap] gap-compose unit started for " + gap.id + (reopened ? " (reopened)" : ""));
         else console.warn(`[substrate-gap] gap-compose unit did NOT start for ${gap.id} (systemctl exit ${code}) — masked or missing; relying on the in-process nudge`);
       }).catch(() => { /* spawn-level failure is reported by the nudge path */ });

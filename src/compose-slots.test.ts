@@ -26,9 +26,11 @@ const fresh = async () => (await import(`./compose-slots.ts?t=${Math.random()}`)
 describe("compose slots — the cap holds across processes", () => {
   test("grants up to the cap and refuses beyond it", async () => {
     const acquire = await fresh();
-    const a = await acquire("a");
-    const b = await acquire("b");
-    const c = await acquire("c");
+    // Directed work may use the FULL cap; autonomous is held to cap-1 (see the
+    // reservation tests below), so use directed here to exercise the raw cap.
+    const a = await acquire("a", { directed: true });
+    const b = await acquire("b", { directed: true });
+    const c = await acquire("c", { directed: true });
     expect(a.granted).toBe(true);
     expect(b.granted).toBe(true);
     expect(c.granted).toBe(false); // the storm case
@@ -37,11 +39,11 @@ describe("compose slots — the cap holds across processes", () => {
 
   test("releasing frees capacity for the next compose", async () => {
     const acquire = await fresh();
-    const a = await acquire("a");
-    const b = await acquire("b");
-    expect((await acquire("c")).granted).toBe(false);
+    const a = await acquire("a", { directed: true });
+    const b = await acquire("b", { directed: true });
+    expect((await acquire("c", { directed: true })).granted).toBe(false);
     await a.release();
-    expect((await acquire("d")).granted).toBe(true);
+    expect((await acquire("d", { directed: true })).granted).toBe(true);
     await b.release();
   });
 
@@ -55,13 +57,13 @@ describe("compose slots — the cap holds across processes", () => {
 
   test("a STALE slot is reaped, so a crashed compose cannot wedge the fleet", async () => {
     const acquire = await fresh();
-    await acquire("a");
-    await acquire("b");
-    expect((await acquire("c")).granted).toBe(false);
+    await acquire("a", { directed: true });
+    await acquire("b", { directed: true });
+    expect((await acquire("c", { directed: true })).granted).toBe(false);
     // Age both slots past the staleness horizon, as a crashed holder would.
     const old = new Date(Date.now() - 60 * 60_000);
     for (const f of await readdir(dir)) await utimes(join(dir, f), old, old);
-    expect((await acquire("d")).granted).toBe(true);
+    expect((await acquire("d", { directed: true })).granted).toBe(true);
   });
 
   test("FAILS OPEN when the directory is unusable", async () => {
@@ -78,8 +80,37 @@ describe("compose slots — the cap holds across processes", () => {
   test("a garbage cap falls back to the default, never to unlimited", async () => {
     process.env["COMPOSE_MAX_CONCURRENT"] = "not-a-number";
     const acquire = await fresh();
-    await acquire("a");
-    await acquire("b");
-    expect((await acquire("c")).granted).toBe(false); // still capped at 2
+    await acquire("a", { directed: true });
+    await acquire("b", { directed: true });
+    expect((await acquire("c", { directed: true })).granted).toBe(false); // still 2
+  });
+});
+
+describe("compose slots — a directed goal cannot be starved by the boredom lane", () => {
+  test("autonomous work is held to cap-1, leaving a slot for directed", async () => {
+    // The measured failure this prevents: an operator dispatch that had routed
+    // correctly came back "compose capacity cap reached (2 in flight)" while both
+    // slots held self-generated gap work. A cap without a reservation converts
+    // "waits behind the stream" into "refused outright".
+    const acquire = await fresh();
+    expect((await acquire("auto-1")).granted).toBe(true);
+    expect((await acquire("auto-2")).granted).toBe(false); // cap-1 reached
+    expect((await acquire("directed-1", { directed: true })).granted).toBe(true);
+  });
+
+  test("directed work is still bounded — it cannot exceed the cap either", async () => {
+    // The reservation is a priority, not an exemption; the host bound holds.
+    const acquire = await fresh();
+    await acquire("directed-1", { directed: true });
+    await acquire("directed-2", { directed: true });
+    expect((await acquire("directed-3", { directed: true })).granted).toBe(false);
+  });
+
+  test("a cap of 1 still admits directed work rather than deadlocking", async () => {
+    // cap-1 would be 0 here; the floor keeps autonomous at 1 and directed at 1,
+    // so a single-slot host still runs SOMETHING instead of refusing everything.
+    process.env["COMPOSE_MAX_CONCURRENT"] = "1";
+    const acquire = await fresh();
+    expect((await acquire("only", { directed: true })).granted).toBe(true);
   });
 });

@@ -87,13 +87,30 @@ async function countLive(now: number): Promise<number> {
  * guardrail, not a correctness invariant — correctness is the per-vessel busy-set
  * and the cutover lease, both of which remain.
  */
-export async function acquireComposeSlot(composeId: string): Promise<ComposeSlot> {
+export async function acquireComposeSlot(
+  composeId: string,
+  opts: { directed?: boolean } = {},
+): Promise<ComposeSlot> {
   const cap = capFromEnv();
+  // RESERVE THE LAST SLOT FOR DIRECTED WORK.
+  //
+  // A capacity cap alone converts "a directed goal waits behind the boredom
+  // stream" into "a directed goal is REFUSED" — measured immediately after the
+  // cap landed: an operator dispatch that had routed correctly came back
+  // "compose capacity cap reached (2 in flight)" while both slots held
+  // self-generated gap work.
+  //
+  // Autonomous work may therefore fill at most cap-1 slots; a directed compose
+  // may use the full cap. Someone asked for the directed one, and the gap lane's
+  // work is not lost by waiting — its gap stays open and retries. At the default
+  // cap of 2 this is one slot each, which is the point: neither lane can starve
+  // the other.
+  const effectiveCap = opts.directed === true ? cap : Math.max(1, cap - 1);
   let path: string | null = null;
   try {
     await mkdir(SLOT_DIR, { recursive: true });
     const live = await countLive(Date.now());
-    if (live >= cap) {
+    if (live >= effectiveCap) {
       return { granted: false, observed: live, release: async () => {} };
     }
     path = `${SLOT_DIR}/${composeId}.slot`;

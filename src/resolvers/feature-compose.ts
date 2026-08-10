@@ -2344,9 +2344,12 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
   // The slot directory is visible to both — same pattern as the authoring
   // markers this vessel already reaps by mtime.
   const slotId = `${process.pid}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-  const slot = await acquireComposeSlot(slotId);
+  // `directed` is set by goal-host on the operator/edit-intent route. It is NOT
+  // inferable from `pointer.gap`, which that route also populates.
+  const isDirected = (pointer as { directed?: boolean }).directed === true;
+  const slot = await acquireComposeSlot(slotId, { directed: isDirected });
   if (!slot.granted) {
-    console.warn(`[compose-cap] REFUSING: ${slot.observed} compose(s) in flight — gap stays open, retried when there is capacity`);
+    console.warn(`[compose-cap] REFUSING ${isDirected ? "DIRECTED" : "autonomous"} compose: ${slot.observed} in flight — gap stays open, retried when there is capacity`);
     return {
       shape: "featureComposeReport",
       body: {

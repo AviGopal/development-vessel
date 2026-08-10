@@ -3230,7 +3230,7 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
       // INSTALL_EXIT marker is kept and still emitted, and the verdict still gates on a
       // PRESENT non-zero — so a fresh-tree install failure is caught, while the common
       // case emits nothing and is treated as not-observed.
-      command: `cd ${JSON.stringify(vAbs)} && (echo "== install =="; [ -d node_modules ] || { bun install >/dev/null 2>&1; echo "INSTALL_EXIT=$?"; }; echo "== typecheck =="; bun run typecheck 2>&1; echo "TC_EXIT=$?"; echo "== shape-dispatch =="; if [ -f ${SHARED_DISPATCH_CHECK} ] && [ -f src/config.ts ] && [ -f src/routes/impulses.ts ]; then bun ${SHARED_DISPATCH_CHECK} ${JSON.stringify(vAbs)} 2>&1; echo "SD_EXIT=$?"; else echo "SD_EXIT=0"; fi; echo "== tests =="; timeout 240 bun test 2>&1 || true)`,
+      command: `cd ${JSON.stringify(vAbs)} && (echo "== install =="; bun install >/dev/null 2>&1; echo "INSTALL_EXIT=$?"; echo "== typecheck =="; bun run typecheck 2>&1; echo "TC_EXIT=$?"; echo "== shape-dispatch =="; if [ -f ${SHARED_DISPATCH_CHECK} ] && [ -f src/config.ts ] && [ -f src/routes/impulses.ts ]; then bun ${SHARED_DISPATCH_CHECK} ${JSON.stringify(vAbs)} 2>&1; echo "SD_EXIT=$?"; else echo "SD_EXIT=0"; fi; echo "== tests =="; timeout 240 bun test 2>&1 || true)`,
       cwd: REPO_ROOT,
     });
     const raw = String((sh.body as { stdout?: unknown })?.stdout ?? "");
@@ -3411,7 +3411,7 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
 
   // Created-file rewrites get up to MAX_REPAIR + 2 rounds (cheap, fast-converging);
   // surgical edit repair stays at MAX_REPAIR.
-  const MAX_REPAIR = 4; // Concurrency cap: limit the number of concurrent composes.
+  const MAX_REPAIR = 4;
   const MAX_REPAIR_CREATE = MAX_REPAIR + 2;
   const repairCap = created.length > 0 ? MAX_REPAIR_CREATE : MAX_REPAIR;
   for (let attempt = 0; attempt < repairCap && !applyFailed && verify.length > 0 && !verify.every((v) => v.ok); attempt++) {

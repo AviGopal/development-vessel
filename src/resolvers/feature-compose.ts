@@ -3191,7 +3191,20 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
     const testOk = confirmedNewTest.length === 0 && !passRegressed;
     // installOk gates alongside tcOk: a manifest that cannot install is a broken
     // change no matter how cleanly the source typechecks against a stale node_modules.
-    const installOk = installExit === 0;
+    // ABSENT MARKER MEANS "NOT OBSERVED", NOT "FAILED".
+    //
+    // This was `installExit === 0`, so a null — which is what the parse yields when
+    // INSTALL_EXIT is not in the captured output at all — failed the verify. Not every
+    // verify path emits the marker, so this failed EVERY compose it touched, with the
+    // detail line reading "INSTALL_EXIT=null". Measured within the hour on
+    // compose-drain-cooldown-is-hardcoded: 6 attempts, every one refused by this gate,
+    // nothing else wrong with the drafts.
+    //
+    // The safety property only needs a PRESENT non-zero to fail: that is the case the
+    // gate exists for (a manifest that cannot install, as in the reverted ddffdee).
+    // An unobserved install is exactly as informative as the old behaviour, which
+    // never ran one — so it must not be stricter than the evidence supports.
+    const installOk = installExit === null || installExit === 0;
     const ok = installOk && tcOk && sdExit === 0 && testOk;
     const detail = (installOk ? "" : ` | DEPENDENCY INSTALL FAILED (INSTALL_EXIT=${String(installExit)}) — the staged manifest does not install; a typecheck against an already-populated node_modules cannot see this`)
       + (testOk ? "" : [

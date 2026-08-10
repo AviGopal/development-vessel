@@ -1932,6 +1932,20 @@ function computeEditSpan(fileContent: string | null | undefined, anchor: string,
 // NORMALIZED tsc error identities from raw typecheck output. Line/column coordinates
 // are stripped so an error that merely SHIFTS line when the draft inserts code is not
 // counted as NEW. Lets verify blame the draft only for errors it INTRODUCES.
+/**
+ * Did a rollback write actually put `original` back on disk?
+ *
+ * Extracted so it is TESTABLE (task #36, 2026-08-10). The rollback loop lived
+ * inline and trusted the write tool's own `ok` flag, which is a self-report: a
+ * truncated write returns ok:true. That is how "restored 1/1 live file(s)" was
+ * logged over a discovery-vessel/src/index.ts left at 2,449 bytes against 23,746
+ * in its clone. Read the bytes back and compare — the tool's opinion of its own
+ * success is not evidence about the file.
+ */
+export function rollbackRestoreIsVerified(original: string, readBack: unknown): boolean {
+  return typeof readBack === "string" && readBack === original;
+}
+
 function tscErrorSet(raw: string): Set<string> {
   const out = new Set<string>();
   for (const line of raw.split("\n")) {
@@ -3773,6 +3787,27 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
             // above records what happens when this is skipped: a report claiming
             // rolled_back over a file that was still edited.
             if ((w.body as { ok?: boolean })?.ok === false) { failed++; continue; }
+            // ...AND ok:true IS THE TOOL'S SELF-REPORT, NOT THE FILE'S STATE.
+            // Task #36, measured 2026-08-10: this loop logged "restored 1/1 live
+            // file(s)" over a discovery-vessel/src/index.ts left at 2,449 bytes
+            // against 23,746 in its clone — every import, the server and the auth
+            // middleware gone. The unit stayed healthy only because it had not
+            // restarted since; the next restart would have booted a fragment and
+            // taken the fleet's routing fixed point down, hours after the compose
+            // that caused it.
+            //
+            // A partial or truncated write can return ok:true, so the only honest
+            // check is reading the bytes back. Cheap (these are the few files this
+            // compose touched) and it converts a silent corruption into a loud,
+            // attributable failure at the moment it happens.
+            const back = await callTool(toolsEndpoint, "fs_read", { path: abs });
+            const backContent = (back.body as { content?: unknown })?.content;
+            if (!rollbackRestoreIsVerified(original, backContent)) {
+              const got = typeof backContent === "string" ? `${backContent.length} bytes` : "unreadable";
+              console.error(`[feature-compose] ROLLBACK VERIFY FAILED ${abs}: wrote ${original.length} bytes, read back ${got} — the live tree does NOT match its clone`);
+              failed++;
+              continue;
+            }
           }
           restored++;
         } catch { failed++; }

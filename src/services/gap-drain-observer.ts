@@ -57,6 +57,7 @@ export class GapDrainObserver {
     this.ws = ws;
 
     ws.addEventListener("open", () => {
+  console.log(`[gap-drain-observer] connected to ${this.buildWsUrl()}`);
       this.currentBackoffMs = RECONNECT_INITIAL_MS;
       try {
         ws.send(JSON.stringify({ type: "authenticate", token: METABOB_API_KEY }));
@@ -80,6 +81,7 @@ export class GapDrainObserver {
     });
 
     ws.addEventListener("close", () => {
+  console.log("[gap-drain-observer] socket closed — reconnecting");
       this.ws = null;
       this.scheduleReconnect();
     });

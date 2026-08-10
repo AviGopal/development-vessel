@@ -3411,7 +3411,7 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
 
   // Created-file rewrites get up to MAX_REPAIR + 2 rounds (cheap, fast-converging);
   // surgical edit repair stays at MAX_REPAIR.
-  const MAX_REPAIR = 4;
+  const MAX_REPAIR = 4; // Concurrency cap: limit the number of concurrent composes.
   const MAX_REPAIR_CREATE = MAX_REPAIR + 2;
   const repairCap = created.length > 0 ? MAX_REPAIR_CREATE : MAX_REPAIR;
   for (let attempt = 0; attempt < repairCap && !applyFailed && verify.length > 0 && !verify.every((v) => v.ok); attempt++) {

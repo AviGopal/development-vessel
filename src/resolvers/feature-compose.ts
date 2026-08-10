@@ -3230,7 +3230,20 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
       // INSTALL_EXIT marker is kept and still emitted, and the verdict still gates on a
       // PRESENT non-zero — so a fresh-tree install failure is caught, while the common
       // case emits nothing and is treated as not-observed.
-      command: `cd ${JSON.stringify(vAbs)} && (echo "== install =="; bun install >/dev/null 2>&1; echo "INSTALL_EXIT=$?"; echo "== typecheck =="; bun run typecheck 2>&1; echo "TC_EXIT=$?"; echo "== shape-dispatch =="; if [ -f ${SHARED_DISPATCH_CHECK} ] && [ -f src/config.ts ] && [ -f src/routes/impulses.ts ]; then bun ${SHARED_DISPATCH_CHECK} ${JSON.stringify(vAbs)} 2>&1; echo "SD_EXIT=$?"; else echo "SD_EXIT=0"; fi; echo "== tests =="; timeout 240 bun test 2>&1 || true)`,
+      // DO NOT INSTALL UNCONDITIONALLY HERE. This runs inside a compose WORKTREE whose
+      // node_modules is a SYMLINK to the shared clone's (compose-workspace.ts:100), so an
+      // install here writes THROUGH the symlink into the tree every other compose depends
+      // on. This vessel declares "@avigopal/ias-executor-ts": "file:../ias-executor-ts",
+      // and from ${WS_ROOT}/<composeId>/<vessel> that relative path does not resolve, so
+      // bun PRUNES the dependency from the shared node_modules. Every other compose then
+      // fails TS2307 in files its draft never touched, which reads as drafter
+      // hallucination and cost hours to diagnose (landed f38f1a3, reverted b90d6c4).
+      // Re-landed autonomously as 0797af4 and reverted again here.
+      //
+      // The gap this keeps trying to close is REAL — a manifest that cannot install must
+      // not reach origin/dev (ddffdee did exactly that). But the check belongs against the
+      // CLONE before staging, where node_modules is not shared. Do not solve it here.
+      command: `cd ${JSON.stringify(vAbs)} && (echo "== install =="; [ -d node_modules ] || { bun install >/dev/null 2>&1; echo "INSTALL_EXIT=$?"; }; echo "== typecheck =="; bun run typecheck 2>&1; echo "TC_EXIT=$?"; echo "== shape-dispatch =="; if [ -f ${SHARED_DISPATCH_CHECK} ] && [ -f src/config.ts ] && [ -f src/routes/impulses.ts ]; then bun ${SHARED_DISPATCH_CHECK} ${JSON.stringify(vAbs)} 2>&1; echo "SD_EXIT=$?"; else echo "SD_EXIT=0"; fi; echo "== tests =="; timeout 240 bun test 2>&1 || true)`,
       cwd: REPO_ROOT,
     });
     const raw = String((sh.body as { stdout?: unknown })?.stdout ?? "");

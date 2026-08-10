@@ -137,6 +137,7 @@ async function llmCall(endpoint: string, prompt: string, model: string, produceF
 
   let content: string;
   let resolved: boolean | undefined;
+  let stopReason: unknown;
 
   // Handle federated transport envelope
   if (j.content && typeof j.content === 'object' && j.content !== null) {
@@ -154,14 +155,30 @@ async function llmCall(endpoint: string, prompt: string, model: string, produceF
     }
     content = String(picked).trim();
     resolved = inner.resolved;
+    stopReason = inner.stop_reason;
   } else {
     // Handle flat llm-resolver form
     content = String(j.content ?? j.data ?? '').trim();
     resolved = j.resolved;
+    stopReason = j.stop_reason;
   }
 
   if (content === '' && resolved === false) {
     throw new Error(`llmCall to ${endpoint} returned empty content with resolved:false`);
+  }
+
+  // A TRUNCATED DRAFT IS NOT A DRAFT (task #12). The resolver has always
+  // reported how generation ended and nothing read it, so a patch severed at the
+  // token limit was credited like a complete one and spent a typecheck, a
+  // mitosis slot and a Thompson observation proving what the response already
+  // said. Thrown rather than returned so llmCallWithFailover treats it like any
+  // other failed attempt — a longer budget or a different arm may well succeed,
+  // and silently returning half a patch is the outcome this exists to prevent.
+  if (isTruncatedCompletion(stopReason)) {
+    throw new Error(
+      `llmCall to ${endpoint} was TRUNCATED at the token limit (stop_reason=${String(stopReason)}, ` +
+      `${content.length} chars) — a draft cut mid-generation is not usable`,
+    );
   }
 
   return content;
@@ -1932,6 +1949,32 @@ function computeEditSpan(fileContent: string | null | undefined, anchor: string,
 // NORMALIZED tsc error identities from raw typecheck output. Line/column coordinates
 // are stripped so an error that merely SHIFTS line when the draft inserts code is not
 // counted as NEW. Lets verify blame the draft only for errors it INTRODUCES.
+/**
+ * Was this completion cut off at the token limit?
+ *
+ * Task #12, 2026-08-10. llm-resolver-vessel returns `stop_reason` on BOTH
+ * provider paths and even normalises the openai spelling (`finish_reason:
+ * "length"`) to the anthropic one (`"max_tokens"`) — and EVERY consumer read it
+ * zero times. feature-compose, patch-with-tools, apply-proposal-as-patch,
+ * resolver-author, goal-host and local-tools all send `max_tokens` and none
+ * looked at how generation ended, so a draft severed mid-token was credited
+ * exactly like a complete one.
+ *
+ * For a DRAFTING call that is never acceptable: a patch truncated at the limit
+ * is syntactically broken by construction, and passing it downstream spends a
+ * typecheck, a mitosis slot and a Thompson observation to discover what the
+ * response already said.
+ *
+ * Both spellings are accepted because the normalisation lives in one provider
+ * branch of the resolver; relying on it would make this silently blind if a new
+ * provider lands its own wire format. Anything else — including undefined, which
+ * is what a resolver that does not report it returns — is treated as fine, so a
+ * provider without the field keeps working exactly as today.
+ */
+export function isTruncatedCompletion(stopReason: unknown): boolean {
+  return stopReason === 'max_tokens' || stopReason === 'length';
+}
+
 /**
  * Did a rollback write actually put `original` back on disk?
  *

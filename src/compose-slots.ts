@@ -54,7 +54,32 @@ function capFromEnv(): number {
   return Number.isFinite(raw) && raw >= 1 ? Math.floor(raw) : 2;
 }
 
-/** Count live slots, deleting any that are stale. Returns the live count. */
+/**
+ * Is the process that took this slot still running?
+ *
+ * Unreadable or malformed slot files return TRUE (assume alive): a slot we cannot
+ * parse must not be reaped out from under a live compose. Only a pid we can read
+ * AND find missing from /proc is treated as dead.
+ */
+async function holderAlive(path: string): Promise<boolean> {
+  try {
+    const { readFile } = await import("node:fs/promises");
+    const raw = JSON.parse(await readFile(path, "utf8")) as { pid?: unknown };
+    const pid = typeof raw.pid === "number" ? raw.pid : NaN;
+    if (!Number.isFinite(pid) || pid <= 0) return true;
+    try {
+      // Signal 0 tests existence without touching the process.
+      process.kill(pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  } catch {
+    return true;
+  }
+}
+
+/** Count live slots, deleting stale or ownerless ones. Returns the live count. */
 async function countLive(now: number): Promise<number> {
   let live = 0;
   const names = await readdir(SLOT_DIR);
@@ -66,6 +91,24 @@ async function countLive(now: number): Promise<number> {
       if (now - st.mtimeMs > SLOT_STALE_MS) {
         // Reap rather than leave it to an operator: a crashed compose must not
         // hold capacity forever.
+        await unlink(path).catch(() => {});
+        continue;
+      }
+      // DEAD HOLDER = FREE SLOT, RECLAIMED NOW rather than in SLOT_STALE_MS.
+      //
+      // `release()` runs in a `finally`, which does NOT run when the process is
+      // killed — so every restart of this vessel leaks a slot per in-flight
+      // compose. Measured: after one deploy, both slots were held by pid 1980861,
+      // already dead, and would have blocked all capacity for 20 minutes. The
+      // reservation for directed work is worthless if the slots are held by
+      // ghosts.
+      //
+      // The pid is recorded at acquire time for exactly this check. A dead pid is
+      // conclusive — that process cannot still be composing. PID REUSE could make
+      // a dead holder look alive, which is why the mtime backstop above stays:
+      // the two failure modes are opposite, so keeping both is strictly safer
+      // than either alone.
+      if (!(await holderAlive(path))) {
         await unlink(path).catch(() => {});
         continue;
       }

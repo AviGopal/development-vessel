@@ -114,3 +114,36 @@ describe("compose slots — a directed goal cannot be starved by the boredom lan
     expect((await acquire("only", { directed: true })).granted).toBe(true);
   });
 });
+
+describe("compose slots — a dead holder frees its slot immediately", () => {
+  test("a slot whose pid is gone is reclaimed, not held for 20 minutes", async () => {
+    // Measured: after one deploy, BOTH slots were held by pid 1980861 — already
+    // dead, killed by the restart. `release()` runs in a `finally`, which does
+    // not run when the process is killed, so every restart leaks a slot per
+    // in-flight compose. A reservation for directed work is worthless if the
+    // slots are held by ghosts.
+    const acquire = await fresh();
+    await writeFile(join(dir, "ghost.slot"), JSON.stringify({ pid: 999999, at: Date.now() }));
+    await writeFile(join(dir, "ghost2.slot"), JSON.stringify({ pid: 999998, at: Date.now() }));
+    const s = await acquire("real", { directed: true });
+    expect(s.granted).toBe(true);
+    // Both ghosts reaped, so only the real slot remains.
+    expect((await readdir(dir)).filter((f) => f.endsWith(".slot"))).toEqual(["real.slot"]);
+  });
+
+  test("a LIVE holder keeps its slot", async () => {
+    const acquire = await fresh();
+    await writeFile(join(dir, "mine.slot"), JSON.stringify({ pid: process.pid, at: Date.now() }));
+    await acquire("second", { directed: true });
+    expect((await acquire("third", { directed: true })).granted).toBe(false); // both counted
+  });
+
+  test("an unparseable slot is ASSUMED ALIVE rather than reaped", async () => {
+    // Reaping what we cannot read would steal a slot from a live compose. The
+    // mtime backstop still bounds it.
+    const acquire = await fresh();
+    await writeFile(join(dir, "corrupt.slot"), "not json at all");
+    await acquire("one", { directed: true });
+    expect((await acquire("two", { directed: true })).granted).toBe(false);
+  });
+});

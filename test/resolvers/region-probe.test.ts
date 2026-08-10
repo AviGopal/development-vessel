@@ -71,6 +71,18 @@ describe("regionCandidatesFromText", () => {
     expect(out.filter((x) => x === "TC_EXIT").length).toBe(1);
   });
 
+  it("drops keywords and generic words that arrive BACKTICKED — the live noise", () => {
+    // Specs carry pasted machine output; a plan op serialises as {"kind":"edit", …},
+    // so `edit` and `finally` reached the quoted tier and were promoted to top
+    // priority. Observed centring the window on both. Length cannot separate them:
+    // `TC_EXIT` (7) is a real locator and `finally` (7) is not.
+    const spec = 'ops: [{"kind":"edit","path":"x"}] and a `finally` block; anchor is `classifyComposeFailure` with `TC_EXIT`';
+    const out = regionCandidatesFromText(spec);
+    expect(out).toEqual(["classifyComposeFailure", "TC_EXIT"]);
+    expect(out).not.toContain("edit");
+    expect(out).not.toContain("finally");
+  });
+
   it("never throws on junk input", () => {
     for (const junk of [null, undefined, 42, {}, []] as unknown[]) {
       expect(regionCandidatesFromText(junk as string)).toEqual([]);

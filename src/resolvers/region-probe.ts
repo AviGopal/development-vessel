@@ -27,6 +27,23 @@
  * additive — it can only turn a miss into a hit.
  */
 
+/**
+ * Language keywords and generic operation words. These reach the candidate list via
+ * the QUOTED tier, not the scraped one — specs carry pasted machine output, and a plan
+ * op serialises as `{"kind":"edit", …}`, so `edit` and `finally` arrive backticked and
+ * were promoted to top-priority locators. Observed centring the window on both.
+ *
+ * Filtering by length would not work: `TC_EXIT` (7) is a real locator while
+ * `finally` (7) is not. The distinguishing property is that these are vocabulary,
+ * not names.
+ */
+const KEYWORDS = new Set([
+  "edit", "finally", "catch", "try", "return", "default", "export", "import",
+  "function", "const", "await", "async", "class", "throw", "switch", "case",
+  "true", "false", "null", "undefined", "error", "result", "value", "content",
+  "type", "kind", "path", "name", "index", "data", "body", "status",
+]);
+
 /** Words that look like identifiers but locate nothing useful. */
 const STOPWORDS = new Set([
   "because", "therefore", "whenever", "instead", "however", "although", "actually",
@@ -69,6 +86,7 @@ export function regionCandidatesFromText(text: string): string[] {
   // noise from a failure excerpt rather than the change site. Sort WITHIN tiers only.
   for (const m of text.matchAll(/[`"']([A-Za-z_$][\w$.\-]{3,80})[`"']/g)) {
     const tok = m[1]!;
+    if (KEYWORDS.has(tok.toLowerCase()) || STOPWORDS.has(tok.toLowerCase())) continue;
     if (!seen.has(tok)) { seen.add(tok); quoted.push(tok); }
   }
 

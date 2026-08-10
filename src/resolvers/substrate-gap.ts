@@ -617,7 +617,7 @@ export async function resolveSubstrateGapWrite(
 
   try {
     const activityApiUrl = process.env["ACTIVITY_API_ENDPOINT"] ?? process.env["ACTIVITY_API_URL"] ?? "http://127.0.0.1:8080";
-    fetch(`${activityApiUrl}/v2/events/publish`, {
+    const response = await fetch(`${activityApiUrl}/v2/events/publish`, {
       method: "POST",
       headers: { "Content-Type": "application/json", "X-Internal-Api-Key": "development-vessel" },
       body: JSON.stringify({
@@ -626,11 +626,14 @@ export async function resolveSubstrateGapWrite(
         data: { gap_id: gap.id, category: gap.category, route: gap.route, remedy: gap.remedy, status: gap.status },
       }),
       signal: AbortSignal.timeout(2000),
-    }).catch((err) => {
-      console.log("[substrate-gap-event-publish] publish failed (non-fatal):", err);
     });
+    if (!response.ok) {
+      console.warn(`[substrate-gap-event-publish] publish failed with status ${response.status} for gap ${gap.id}`);
+    } else {
+      console.log(`[substrate-gap-event-publish] published devvessel.gap.written for gap ${gap.id}`);
+    }
   } catch (err) {
-    console.log("[substrate-gap-event-publish] publish setup failed (non-fatal):", err);
+    console.log("[substrate-gap-event-publish] publish failed (non-fatal):", err);
   }
 
   return {

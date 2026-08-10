@@ -2223,7 +2223,6 @@ async function fileLessonsBlock(specText?: string): Promise<string> {
   } catch { return ""; }
 }
 async function composeLessonsBlock(specText?: string): Promise<string> {
-  const lessonsStartedAt = Date.now();
   // FIRST: semantic recall from concept-db — relevance to the current spec, not
   // JSONL recency. Fails open to the JSONL path when concept-db is down or empty.
   if (specText && specText.trim().length > 0) {
@@ -2234,26 +2233,14 @@ async function composeLessonsBlock(specText?: string): Promise<string> {
       const resp = await fetch(`${DISCOVERY_ENDPOINT}/resolve`, {
         method: "POST",
         headers: { ...headers, "Content-Type": "application/json" },
-        // SEND THE SPEC. This block promises "relevance to the current spec" and specText
-        // gates entry to the branch, but it was never sent — the query was "give me any 8
-        // rows", which is why 132 consecutive composes logged the SAME n=8 under the
-        // heading "KNOWN FAILURE MODES". A fixed list read as targeted advice is worse
-        // than none.
-        //
-        // A first attempt at this (89a7f31) had to be reverted: `@@` is AND over every
-        // term, so a long query matched nothing and every compose fell back silently.
-        // concept-db now relaxes the term-set progressively (7df39d2), verified live —
-        // the same prose that returned n=0 returns n=1. Timeout 15s because relaxation
-        // costs up to ~4 sequential rungs at ~1.5s each; both paths log elapsed ms so a
-        // slow index is distinguishable from this caller.
-        body: JSON.stringify({ pointer: { type: "conceptSearch", source_type: "compose_lesson", query: specText.slice(0, 2000), limit: 8 } }),
-        signal: AbortSignal.timeout(15_000),
+        body: JSON.stringify({ pointer: { type: "conceptSearch", source_type: "compose_lesson", limit: 8 } }),
+        signal: AbortSignal.timeout(8_000),
       });
       if (resp.ok) {
         const json = (await resp.json()) as { content?: Array<{ content?: string }> };
         const found = (json.content ?? []).map((c) => c.content).filter((s): s is string => typeof s === "string" && s.length > 0);
         if (found.length > 0) {
-          console.warn(`[compose-lessons] source=concept-db n=${found.length} query=yes ms=${Date.now() - lessonsStartedAt}`);
+          console.warn(`[compose-lessons] source=concept-db n=${found.length}`);
           return `\n\nKNOWN FAILURE MODES from this substrate's own rejected composes — plans repeating these are rolled back:\n${found.map((r) => `- ${r}`).join("\n")}`;
         }
       }
@@ -2261,7 +2248,7 @@ async function composeLessonsBlock(specText?: string): Promise<string> {
       console.warn(`[compose-lessons] concept-db recall failed: ${(err as Error).message}`);
     }
   }
-  console.warn(`[compose-lessons] source=fallback=jsonl ms=${Date.now() - lessonsStartedAt}`);
+  console.warn("[compose-lessons] source=fallback=jsonl");
   try {
     const { readFileSync } = await import("node:fs");
     const lines = readFileSync(COMPOSE_LESSONS_PATH, "utf8").split("\n").filter((l) => l.trim().length > 0).slice(-60);

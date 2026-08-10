@@ -107,6 +107,19 @@ app.route("/", impulsesRouter);
 // "the marker is not written until the apply stage") and guarded the timer path;
 // this closes it at the drain, which is where every caller of this vessel is
 // exposed to it.
+// COUNT ONLY THE REQUESTS WORTH WAITING FOR.
+//
+// A first version counted EVERY request. Measured immediately: this vessel's
+// steady state is 3-5 concurrent requests (health polls, registry reads, short
+// resolves), so "0 in flight" is unreachable and the drain simply burned its
+// whole 240s budget every time and then killed the compose anyway — a gate that
+// holds the door but never lets go is the same outage with a longer preamble.
+//
+// Only LONG-RUNNING work is worth blocking a restart for, and on this vessel that
+// is the drafting surface: feature_compose and patch_with_tools, whose runs take
+// 5-8 minutes and whose loss is the thing this drain exists to prevent. A health
+// poll interrupted mid-flight costs nothing and retries itself.
+const LONG_RUNNING = /(feature_compose|patch_with_tools|apply_proposal_as_patch|vessel_mitosis)/i;
 let inFlightRequests = 0;
 publishInFlight(() => inFlightRequests);
 const server = Bun.serve({
@@ -114,11 +127,30 @@ const server = Bun.serve({
   hostname: config.host,
   idleTimeout: 60,
   fetch: async (req, srv) => {
-    inFlightRequests++;
+    // Read the body ONCE to classify, then hand a fresh Request downstream:
+    // consuming the stream here would leave the handler with an empty body.
+    let counted = false;
+    let forwarded = req;
     try {
-      return await app.fetch(req, srv);
+      if (req.method === "POST") {
+        const raw = await req.clone().text();
+        if (LONG_RUNNING.test(raw)) {
+          counted = true;
+          inFlightRequests++;
+        }
+        forwarded = new Request(req.url, {
+          method: req.method,
+          headers: req.headers,
+          body: raw,
+        });
+      }
+    } catch {
+      forwarded = req; // unreadable body → forward untouched, never count
+    }
+    try {
+      return await app.fetch(forwarded, srv);
     } finally {
-      inFlightRequests--;
+      if (counted) inFlightRequests--;
     }
   },
 });

@@ -3096,7 +3096,27 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
   const runVerify = async (v: string): Promise<{ vessel: string; errors: number | string; exit_code: number | null; ok: boolean; output: string }> => {
     const vAbs = vesselRoot(v);
     const sh = await callTool(toolsEndpoint, "shell", {
-      command: `cd ${JSON.stringify(vAbs)} && (echo "== install =="; bun install >/dev/null 2>&1; echo "INSTALL_EXIT=$?"; echo "== typecheck =="; bun run typecheck 2>&1; echo "TC_EXIT=$?"; echo "== shape-dispatch =="; if [ -f ${SHARED_DISPATCH_CHECK} ] && [ -f src/config.ts ] && [ -f src/routes/impulses.ts ]; then bun ${SHARED_DISPATCH_CHECK} ${JSON.stringify(vAbs)} 2>&1; echo "SD_EXIT=$?"; else echo "SD_EXIT=0"; fi; echo "== tests =="; timeout 240 bun test 2>&1 || true)`,
+      // DO NOT RUN A BARE `bun install` HERE — IT CORRUPTS THE SHARED node_modules.
+      //
+      // f38f1a3 (mine) made this install unconditional so a staged package.json that
+      // cannot install would be caught. It does catch that — but compose-workspace.ts
+      // symlinks the worktree's node_modules at the CLONE's node_modules, so an install
+      // run from the worktree writes THROUGH that symlink into the shared tree. This
+      // vessel depends on "@avigopal/ias-executor-ts": "file:../ias-executor-ts", and
+      // from a worktree at ${WS_ROOT}/<composeId>/<vessel> that relative path does not
+      // exist — so bun resolves it as missing and PRUNES it from the shared
+      // node_modules. Every compose then broke every other compose:
+      //   src/seed/*.ts(1,39): error TS2307: Cannot find module '@avigopal/ias-executor-ts'
+      // observed on 6 consecutive attempts across two gaps, with the drafts themselves
+      // fine. Reinstalling in the clone fixed it for exactly one compose, until the
+      // next one pruned it again.
+      //
+      // Restored to the original guard: install ONLY when node_modules is absent (a
+      // genuinely fresh tree), which never writes through a populated symlink. The
+      // INSTALL_EXIT marker is kept and still emitted, and the verdict still gates on a
+      // PRESENT non-zero — so a fresh-tree install failure is caught, while the common
+      // case emits nothing and is treated as not-observed.
+      command: `cd ${JSON.stringify(vAbs)} && (echo "== install =="; [ -d node_modules ] || { bun install >/dev/null 2>&1; echo "INSTALL_EXIT=$?"; }; echo "== typecheck =="; bun run typecheck 2>&1; echo "TC_EXIT=$?"; echo "== shape-dispatch =="; if [ -f ${SHARED_DISPATCH_CHECK} ] && [ -f src/config.ts ] && [ -f src/routes/impulses.ts ]; then bun ${SHARED_DISPATCH_CHECK} ${JSON.stringify(vAbs)} 2>&1; echo "SD_EXIT=$?"; else echo "SD_EXIT=0"; fi; echo "== tests =="; timeout 240 bun test 2>&1 || true)`,
       cwd: REPO_ROOT,
     });
     const raw = String((sh.body as { stdout?: unknown })?.stdout ?? "");

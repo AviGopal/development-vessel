@@ -1758,6 +1758,14 @@ const PER_FILE_SLICE = 6000;
 // (the gap's matched_excerpt / localized site) over the file's first PER_FILE_SLICE
 // bytes. Falls back to the head window when no hint matches — behaviour unchanged
 // for surgical/small-file cases. Returns the slice + a flag for the truncation note.
+/**
+ * How often a mined probe may appear before it stops being a locator. Loose enough
+ * for a definition plus its call sites (a real symbol runs ~2-5), tight enough to
+ * refuse a token sprayed through the file. Uniqueness was measured and rejected:
+ * it would drop `classifyComposeFailure` (3×) and keep `noUncheckedIndexedAccess` (1×).
+ */
+const PROBE_MAX_OCCURRENCES = 8;
+
 function focusedSlice(content: string, cap: number, focusHints: string[], primaryProbe: string | string[] = ""): { slice: string; centered: boolean; head: boolean } {
   const window = Math.min(content.length, cap, PER_FILE_SLICE);
   if (content.length <= window) return { slice: content, centered: false, head: false };
@@ -1788,7 +1796,28 @@ function focusedSlice(content: string, cap: number, focusHints: string[], primar
   for (const probe of (Array.isArray(primaryProbe) ? primaryProbe : [primaryProbe])) {
     if (!probe) continue;
     const at = content.indexOf(probe);
-    if (at >= 0) return centerOn(at);
+    if (at < 0) continue;
+    // REJECT ONLY PATHOLOGICALLY COMMON TOKENS, and do NOT demand uniqueness.
+    //
+    // Observed live centring on `finally`, `write_note` and
+    // `process.env.FED_TRANSPORT_EGRESS` — tokens appearing all over a file, where
+    // the first occurrence is effectively random and worse than the focusHints
+    // heuristics below. So a frequency ceiling is needed.
+    //
+    // But uniqueness is the WRONG ceiling, and measuring said so before this
+    // shipped: in this very file `classifyComposeFailure` occurs 3× (its definition
+    // plus call sites) while `noUncheckedIndexedAccess` — lifted from a pasted error
+    // excerpt — occurs exactly 1×. Requiring uniqueness would have rejected the real
+    // anchor and accepted the noise, the precise inversion of what is wanted.
+    //
+    // Frequency separates "mentioned everywhere" from "a real symbol"; it does NOT
+    // separate signal from noise. PROVENANCE does that, and the candidate list is
+    // already tiered so a quoted anchor outranks anything scraped. Keep the ceiling
+    // loose enough to admit a definition plus its call sites.
+    let occurrences = 0;
+    for (let k = content.indexOf(probe); k !== -1 && occurrences <= PROBE_MAX_OCCURRENCES; k = content.indexOf(probe, k + 1)) occurrences++;
+    if (occurrences > PROBE_MAX_OCCURRENCES) continue;
+    return centerOn(at);
   }
   const probes: string[] = [];
   for (const hint of focusHints) {

@@ -79,10 +79,34 @@ describe("regionCandidatesFromText", () => {
   });
 });
 
-describe("the probe is inert unless it occurs in the file", () => {
-  // Mirrors focusedSlice's guard: indexOf(probe) < 0 falls through to the existing
-  // heuristics, so a wrong candidate can never move a window that was already right.
-  const centresOn = (content: string, probes: string[]) => probes.find((p) => content.indexOf(p) >= 0) ?? null;
+describe("the probe is inert unless it plausibly locates", () => {
+  // Mirrors focusedSlice's guard: present, and not sprayed through the file.
+  const MAX = 8;
+  const centresOn = (content: string, probes: string[]) =>
+    probes.find((p) => {
+      const at = content.indexOf(p);
+      if (at < 0) return false;
+      let n = 0;
+      for (let k = content.indexOf(p); k !== -1 && n <= MAX; k = content.indexOf(p, k + 1)) n++;
+      return n <= MAX;
+    }) ?? null;
+
+  it("REJECTS a token sprayed through the file — the live regression", () => {
+    const content = "try {} finally {}\n".repeat(40);
+    expect(centresOn(content, ["finally"])).toBeNull();
+  });
+
+  it("ACCEPTS a real symbol at its definition plus call sites", () => {
+    // The measurement that killed the uniqueness rule: classifyComposeFailure
+    // occurs 3x in the real file. Uniqueness would have rejected the true anchor.
+    const content = "function classifyComposeFailure() {}\n" + "classifyComposeFailure();\n".repeat(2);
+    expect(centresOn(content, ["classifyComposeFailure"])).toBe("classifyComposeFailure");
+  });
+
+  it("skips a sprayed candidate and takes the next viable one", () => {
+    const content = "finally\n".repeat(30) + "function classifyComposeFailure() {}\n";
+    expect(centresOn(content, ["finally", "classifyComposeFailure"])).toBe("classifyComposeFailure");
+  });
 
   it("a candidate absent from the file changes nothing", () => {
     expect(centresOn("function somethingElse() {}", ["classifyComposeFailure"])).toBeNull();

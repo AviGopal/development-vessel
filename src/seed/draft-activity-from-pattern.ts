@@ -203,6 +203,26 @@ export const DRAFT_ACTIVITY_FROM_PATTERN_TEMPLATE: ActivityTemplate = {
       description: "Directory holding the cluster JSON files. Default /workspace/patterns.",
       default: "/workspace/patterns",
     },
+    {
+      // A LOOPBACK ADDRESS IS NOT A LOCATION ON A FEDERATED DEPLOYMENT.
+      //
+      // prime_vocabulary fetched http://127.0.0.1:8080/v2/activities/templates
+      // literally. activity-api carries role "api", which is in the hub role group
+      // and NOT in spoke — so on every spoke that port is dead and this task failed
+      // with `http_fetch HTTP 500: fetch failed: Unable to connect`, killing the
+      // drafter at task 2 every time. Measured on a spoke whose hub was healthy and
+      // answering on :18080 throughout, which is what made it look like an outage.
+      //
+      // Consequence: the whole orphaned-capability family (45 open gaps, the largest
+      // in the backlog) could not drain, because closing one means authoring a
+      // consumer activity and the authoring step could not read its own vocabulary.
+      //
+      // Default stays loopback so a standalone `full` substrate is unchanged; callers
+      // on a spoke pass their configured ACTIVITY_API_ENDPOINT.
+      name: "activity_api_endpoint",
+      description: "Base URL of activity-api. Spokes must pass their hub endpoint; activity-api does not run locally there. Default http://127.0.0.1:8080.",
+      default: "http://127.0.0.1:8080",
+    },
   ],
   tasks: [
     {
@@ -229,7 +249,7 @@ export const DRAFT_ACTIVITY_FROM_PATTERN_TEMPLATE: ActivityTemplate = {
       resolver: "http_fetch",
       config: {
         type: "http_fetch",
-        url: "http://127.0.0.1:8080/v2/activities/templates?limit=200",
+        url: "{{activity_api_endpoint}}/v2/activities/templates?limit=200",
         method: "GET",
         timeoutMs: 5000,
       },

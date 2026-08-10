@@ -197,7 +197,15 @@ async function dispatchAuthor(
       body: JSON.stringify({
         goal: `author a vessel-shape bridge consumer from pattern ${patternId}`,
         targetTemplateId: DRAFTER_TEMPLATE_ID,
-        variables: { pattern_id: patternId, patterns_dir: patternsDir, source: "vessel_gap_to_cluster" },
+        // activity_api_endpoint: the drafter's prime_vocabulary task fetches
+        // activity-api. Its default is loopback, which is dead on a spoke (role "api"
+        // is hub-only), so pass the configured endpoint or the drafter dies at task 2.
+        variables: {
+          pattern_id: patternId,
+          patterns_dir: patternsDir,
+          activity_api_endpoint: process.env["ACTIVITY_API_ENDPOINT"] ?? process.env["ACTIVITY_API_URL"] ?? "http://127.0.0.1:8080",
+          source: "vessel_gap_to_cluster",
+        },
       }),
       signal: AbortSignal.timeout(timeoutMs),
     });

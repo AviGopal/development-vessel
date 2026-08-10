@@ -31,6 +31,7 @@ import { METABOB_ENDPOINT, METABOB_API_KEY } from "../config.js";
 import type { ResolverResult } from "./types.js";
 import { resolveVesselMitosisCutover } from "./vessel-mitosis-cutover.js";
 import { staticEvaluate } from "./vessel-mitosis-evaluate.js";
+import { noProgressStreak } from "./no-progress-streak.js";
 
 const DISCOVERY_ENDPOINT = process.env.DISCOVERY_ENDPOINT ?? "http://127.0.0.1:8100";
 // Federation-transport egress (dev-vessel has no libp2p deps). Mirrors feature-compose /
@@ -795,15 +796,18 @@ export async function resolvePatchWithTools(pointer: PatchWithToolsPointer): Pro
     // emitting an edit (observed live: turns 6-10 all code_search -> cap -> no_op ->
     // nothing staged -> no cutover). After 3 consecutive read-only turns, escalate to
     // a hard "edit now or fail" so the loop converges instead of grazing the file.
-    let searchStreak = 0;
-    for (let i = history.length - 1; i >= 0; i--) {
-      const tname = history[i]?.tool_result?.tool;
-      if (tname === "code_search" || tname === "code_find_function") searchStreak++;
-      else break;
-    }
+    // 2026-08-10: this scan used to match only code_search / code_find_function and
+    // `break` on anything else — including a turn with NO tool_result, which is what
+    // an unrecognised action verb produces. Since the model loops by emitting the
+    // tool name in the action slot, every turn of the loop had no tool_result, the
+    // first one ended the scan, and the guard could never fire (observed: 24
+    // consecutive code_read_lines, cap reached, nothing staged). Counted properly
+    // in noProgressStreak().
+    const searchStreak = noProgressStreak(history);
     const searchNudge = searchStreak >= 3
-      ? `## ⚠ STOP SEARCHING — YOU HAVE READ ENOUGH (${searchStreak} consecutive searches)\n` +
-        `You already have the file content from those searches. Do NOT call code_search or ` +
+      ? `## ⚠ STOP — ${searchStreak} CONSECUTIVE TURNS MADE NO EDIT\n` +
+        `Those turns either only READ the file or were rejected without running anything. ` +
+        `You already have the file content. Do NOT call code_search, code_read_lines or ` +
         `code_find_function again. THIS TURN emit an EDIT: fs_edit { path, ` +
         `old_string=<verbatim lines you just read>, new_string=<minimal change> } (or ` +
         `code_replace_lines with exact line numbers). If you cannot construct the edit from ` +
@@ -960,13 +964,43 @@ export async function resolvePatchWithTools(pointer: PatchWithToolsPointer): Pro
       break; // reset + try a fresh attempt
     }
     if (action.action !== "call_tool") {
-      history.push({ turn, thought_or_action: `(unknown action: ${String(action.action)})` });
+      // Record WHY it was rejected. Previously this pushed a bare note with no
+      // tool_result, so the model got no correction and reissued the identical
+      // malformed turn — the parse_guard branch above has always done this properly.
+      history.push({
+        turn,
+        thought_or_action: `(unknown action: ${String(action.action)})`,
+        tool_result: {
+          tool: "action_guard",
+          args: {},
+          result: {
+            error:
+              `"${String(action.action)}" is not an action. The action field must be exactly one of ` +
+              `"call_tool", "done", or "fail". To use a tool, put its NAME in the "tool" field: ` +
+              `{ "action": "call_tool", "tool": "${String(action.action)}", "args": { … } }. ` +
+              `This turn did nothing — do not repeat it.`,
+          },
+          ok: false,
+        },
+      });
       continue;
     }
     const tool = String(action.tool ?? "");
     const args = (action.args ?? {}) as Record<string, unknown>;
     console.error(`[patch-with-tools] turn ${turn} args=${JSON.stringify(args).slice(0, 240)}`);
-    if (!tool) { history.push({ turn, thought_or_action: "(missing tool name)" }); continue; }
+    if (!tool) {
+      history.push({
+        turn,
+        thought_or_action: "(missing tool name)",
+        tool_result: {
+          tool: "action_guard",
+          args: {},
+          result: { error: `You emitted "call_tool" with no "tool" field. Name the tool, e.g. { "action": "call_tool", "tool": "code_read_lines", "args": { … } }. This turn did nothing — do not repeat it.` },
+          ok: false,
+        },
+      });
+      continue;
+    }
     // Force path arg to container path when not specified — protects against drafted absolute paths.
     if (typeof args.path === "string" && args.path.startsWith("repos/")) {
       args.path = args.path.replace(/^repos\/[^/]+\//, `${vesselsRoot}/${vessel}/`);

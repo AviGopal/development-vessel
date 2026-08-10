@@ -82,3 +82,37 @@ describe("vacuousEditReason — references inside string literals do not count",
     expect(vacuousEditReason(before, after)).toBeNull();
   });
 });
+
+describe("vacuousEditReason — a TYPE-ONLY edit cannot be the requested change", () => {
+  test("the `as const` that actually landed in production is refused", () => {
+    // A repair goal about a missing tenant column produced, and LANDED via
+    // mitosis cutover, exactly this — in the CORRECT file. `as const` is erased
+    // by the compiler, so the emitted program is byte-identical.
+    const before = "      message: `Child path produces shapes [${v}]`,";
+    const after = "      message: `Child path produces shapes [${v}]` as const,";
+    expect(vacuousEditReason(before, after)).toContain("type-only");
+  });
+
+  test("`satisfies` is caught too", () => {
+    expect(vacuousEditReason("const a = { x: 1 };", "const a = { x: 1 } satisfies Foo;"))
+      .toContain("type-only");
+  });
+
+  test("a REAL change alongside a type assertion still passes", () => {
+    // The assertion must not launder a genuine edit into a refusal. Uses an
+    // ASSIGNMENT, not a declaration: a one-line `const a = ...` fragment would
+    // also trip the unused-binding arm, which is a fixture artifact of testing a
+    // fragment in isolation — at the call site, guard 2 consults the whole file.
+    const before = "record.org_id = null;";
+    const after = "record.org_id = auth.orgId as string;";
+    expect(vacuousEditReason(before, after)).toBeNull();
+  });
+
+  test("adding a type ANNOTATION that changes nothing else is still type-only", () => {
+    expect(vacuousEditReason("record.x = g();", "record.x = g() as string;")).toContain("type-only");
+  });
+
+  test("unrelated real edits are untouched", () => {
+    expect(vacuousEditReason("record.org_id = null;", "record.org_id = auth.orgId;")).toBeNull();
+  });
+});

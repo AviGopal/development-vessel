@@ -54,9 +54,50 @@ function isInert(line: string): boolean {
  * @param after  file text after the edit
  * @returns a reason when the edit is vacuous, or `null` when it may proceed
  */
+/**
+ * Strip TYPE-ONLY syntax that cannot affect runtime behaviour.
+ *
+ * Narrow on purpose: only `as <Type>` and `satisfies <Type>` are removed, both of
+ * which are erased by the compiler. This is not a TypeScript parser and must not
+ * pretend to be — anything it does not recognise stays, so an unrecognised change
+ * is treated as REAL.
+ */
+function stripTypeOnly(s: string): string {
+  return s
+    .replace(/\s+as\s+const\b/g, "")
+    .replace(/\s+as\s+[A-Za-z_$][\w$.<>[\]|\s]*/g, "")
+    .replace(/\s+satisfies\s+[A-Za-z_$][\w$.<>[\]|\s]*/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 export function vacuousEditReason(before: string, after: string): string | null {
   if (typeof before !== "string" || typeof after !== "string") return null;
   if (after === before) return null;
+
+  // A TYPE-ONLY EDIT CANNOT BE THE REQUESTED CHANGE.
+  //
+  // Observed in production: a repair goal about a missing tenant column produced,
+  // and LANDED via mitosis cutover, exactly this diff in the correct file —
+  //
+  //   - message: `Child path produces shapes [...]`
+  //   + message: `Child path produces shapes [...]` as const
+  //
+  // `as const` is erased by the compiler, so the emitted program is byte-identical.
+  // It typechecks (of course), the verdict came back FAVORABLE, and it shipped.
+  // The earlier arm of this function only inspects ADDED declarations, so a
+  // MODIFIED line carrying a no-op assertion sailed past it.
+  //
+  // Deliberately narrow: only `as X` / `satisfies X` are stripped. A change that
+  // alters anything else — including a type annotation that makes real code
+  // compile — is not matched here and proceeds normally.
+  if (stripTypeOnly(before) === stripTypeOnly(after)) {
+    return (
+      "type-only edit: the change is limited to type assertions (`as` / `satisfies`), " +
+      "which the compiler erases — the emitted program is identical, so this cannot be " +
+      "the requested change"
+    );
+  }
 
   const beforeLines = new Set(before.split("\n").map((l) => l.trim()));
   const added = after

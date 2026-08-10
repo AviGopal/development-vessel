@@ -27,6 +27,7 @@ import { resolveVesselMitosisCutover } from "./vessel-mitosis-cutover.js";
 import { resolveSubstrateGap, resolveSubstrateGapWrite } from "./substrate-gap.js";
 import { writeAuthoringMarker, clearAuthoringMarker } from "./patch-with-tools.js";
 import { existsSync as mountExistsSync } from "node:fs";
+import { regionCandidatesFromText } from "./region-probe.js";
 
 const DISCOVERY_ENDPOINT = process.env.DISCOVERY_ENDPOINT ?? "http://127.0.0.1:8100";
 // Federation-transport egress: dev-vessel has no libp2p deps, so a resolve to a
@@ -1756,7 +1757,7 @@ const PER_FILE_SLICE = 6000;
 // (the gap's matched_excerpt / localized site) over the file's first PER_FILE_SLICE
 // bytes. Falls back to the head window when no hint matches — behaviour unchanged
 // for surgical/small-file cases. Returns the slice + a flag for the truncation note.
-function focusedSlice(content: string, cap: number, focusHints: string[], primaryProbe = ""): { slice: string; centered: boolean; head: boolean } {
+function focusedSlice(content: string, cap: number, focusHints: string[], primaryProbe: string | string[] = ""): { slice: string; centered: boolean; head: boolean } {
   const window = Math.min(content.length, cap, PER_FILE_SLICE);
   if (content.length <= window) return { slice: content, centered: false, head: false };
   const centerOn = (at: number) => {
@@ -1779,8 +1780,13 @@ function focusedSlice(content: string, cap: number, focusHints: string[], primar
   //    slice of a 140KB file that is a 4% window in the wrong place, and the drafter
   //    confabulates against code it cannot see. When the caller knows the single most
   //    reliable locator, honour it first rather than letting length adjudicate.
-  if (primaryProbe) {
-    const at = content.indexOf(primaryProbe);
+  // Accept several probes, tried in order. The explicit region literal still wins;
+  // identifier candidates mined from the request follow. Each is inert unless it
+  // actually occurs in this file, so an extra candidate can only turn a miss into a
+  // hit — it can never move a window that would otherwise have been correct.
+  for (const probe of (Array.isArray(primaryProbe) ? primaryProbe : [primaryProbe])) {
+    if (!probe) continue;
+    const at = content.indexOf(probe);
     if (at >= 0) return centerOn(at);
   }
   const probes: string[] = [];
@@ -1860,7 +1866,7 @@ function siteCenteredWindow(content: string, cap: number, hints: string[]): stri
   }
   return null;
 }
-async function groundVesselFiles(toolsEndpoint: string, verifyVessels: string[], focusHints: string[] = [], targetFiles: string[] = [], primaryProbe = ""): Promise<string> {
+async function groundVesselFiles(toolsEndpoint: string, verifyVessels: string[], focusHints: string[] = [], targetFiles: string[] = [], primaryProbe: string | string[] = ""): Promise<string> {
   const blocks: string[] = [];
   let contentBudget = GROUND_CONTENT_BUDGET;
   for (const v of verifyVessels.slice(0, 6)) {
@@ -2427,7 +2433,18 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
   }
   let grounding = "";
   if (verifyVessels.length > 0) {
-    try { grounding = await groundVesselFiles(toolsEndpoint, verifyVessels, focusHints, targetFiles, regionHint); } catch { grounding = ""; }
+    // The explicit region literal first, then identifiers mined from the request. Both
+    // legacy sources of a region are inert in practice (0 of 402 gaps set
+    // metadata.region; nothing emits the `in the region "x"` phrase), so without these
+    // candidates every grounding is unwindowed and the drafter hunts anchors across
+    // ~51KB of whole files — which is what anchor_not_found, the largest failure class,
+    // actually is. Each candidate is inert unless it occurs in the file.
+    const regionProbes = [regionHint, ...regionCandidatesFromText(`${String(pointer.spec ?? "")}\n${String(pointer.gap?.summary ?? "")}`)].filter(Boolean);
+    try { grounding = await groundVesselFiles(toolsEndpoint, verifyVessels, focusHints, targetFiles, regionProbes); } catch { grounding = ""; }
+    if (!regionHint && regionProbes.length) {
+      const hit = regionProbes.find((p) => grounding.includes(p));
+      console.log(`[fc-scope] no region literal; mined ${regionProbes.length} identifier probe(s), grounding centred on ${hit ? `"${hit}"` : "none (fell through to heuristics)"}`);
+    }
   }
   // REFUSE TO PLAN AGAINST A WINDOW THAT DOES NOT CONTAIN THE TARGET (2026-08-07).
   // There is already a refusal for the case where NO path was derivable. There was

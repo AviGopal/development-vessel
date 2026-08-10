@@ -553,14 +553,51 @@ export async function resolveSubstrateGapWrite(
     const nowMs = Date.now();
     if (!g.__gapComposeLastTrigger || nowMs - g.__gapComposeLastTrigger > 60_000) {
       g.__gapComposeLastTrigger = nowMs;
-      try {
-        Bun.spawn(["systemctl", "start", "gap-compose.service"], {
-          stdout: "ignore",
-          stderr: "ignore",
-        });
+      // START THE UNIT *AND* NUDGE THE COMPOSER DIRECTLY.
+      //
+      // The spawn alone accomplished nothing for two reasons, both measured:
+      //   1. `systemctl start` on a MASKED unit fails, and this code discarded the
+      //      exit status — so "pickup triggered" printed on every gap filed while the
+      //      unit could not start at all. The log certified an outage as healthy.
+      //   2. Even unmasked, the unit runs watchdog-tick, which returns "flow alive"
+      //      unless its stall marker is >20min old. That marker is
+      //      /workspace/proposals/compose-lessons.jsonl, which EVERY compose in the
+      //      fleet appends to — so it is never stale and the drain never fires.
+      //
+      // The event path through GapDrainObserver does not save us either: it subscribes
+      // to activity-api's websocket, which on a spoke is the HUB's — unreachable when
+      // the hub is down, and silently so.
+      //
+      // So call the composer in-process, which needs no unit, no marker and no bus.
+      // Guarded by the SAME globals the observer uses so the two entry points cannot
+      // launch concurrent composes (the picker would select the same top gap twice).
+      const proc = Bun.spawn(["systemctl", "start", "gap-compose.service"], { stdout: "ignore", stderr: "ignore" });
+      void proc.exited.then((code) => {
+        if (code === 0) console.log("[substrate-gap] gap-compose unit started for " + gap.id + (reopened ? " (reopened)" : ""));
+        else console.warn(`[substrate-gap] gap-compose unit did NOT start for ${gap.id} (systemctl exit ${code}) — masked or missing; relying on the in-process nudge`);
+      }).catch(() => { /* spawn-level failure is reported by the nudge path */ });
+
+      const gd = globalThis as unknown as { __composeDrainInflight?: boolean; __composeDrainLastAt?: number };
+      const COMPOSE_MIN_INTERVAL_MS = 90_000;
+      if (gd.__composeDrainInflight === true) {
+        console.log(`[substrate-gap] compose nudge skipped for ${gap.id} — a compose is already in flight`);
+      } else if (typeof gd.__composeDrainLastAt === "number" && nowMs - gd.__composeDrainLastAt < COMPOSE_MIN_INTERVAL_MS) {
+        console.log(`[substrate-gap] compose nudge skipped for ${gap.id} — ${Math.round((nowMs - gd.__composeDrainLastAt) / 1000)}s since last, floor is ${COMPOSE_MIN_INTERVAL_MS / 1000}s`);
+      } else {
+        gd.__composeDrainInflight = true;
+        gd.__composeDrainLastAt = nowMs;
+        const selfUrl = process.env["DEV_VESSEL_ENDPOINT"] ?? "http://127.0.0.1:8090";
+        const t0 = Date.now();
+        void fetch(`${selfUrl}/v2/impulses/resolve`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ impulse: { type: "gap_to_feature", triggered_by: "substrate-gap-write", flow: "gap-compose" } }),
+          signal: AbortSignal.timeout(600_000),
+        })
+          .then((r) => console.log(`[substrate-gap] compose nudge for ${gap.id} finished http=${r.status} in ${Date.now() - t0}ms`))
+          .catch((err) => console.warn(`[substrate-gap] compose nudge for ${gap.id} failed (non-fatal): ${String(err)}`))
+          .finally(() => { gd.__composeDrainInflight = false; });
         console.log("[substrate-gap] event-driven gap-compose pickup triggered by " + gap.id + (reopened ? " (reopened)" : ""));
-      } catch (err) {
-        console.warn("[substrate-gap] gap-compose trigger failed (non-fatal): " + (err as Error).message);
       }
     }
   }

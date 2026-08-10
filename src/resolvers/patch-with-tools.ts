@@ -477,6 +477,11 @@ function parseFirstJsonObject(raw: string): Record<string, unknown> | null {
 }
 
 function deriveVesselFromPath(filePath: string): { vessel: string; subPath: string } | null {
+  // Fail closed on a missing target rather than throwing. A caller passing an absent
+  // field threw "undefined is not an object (evaluating 'filePath.match')" here, which
+  // aborted the whole escalation before it began; returning null lets the caller report
+  // "no target" honestly instead of surfacing as an unexplained crash.
+  if (typeof filePath !== "string" || !filePath) return null;
   const m1 = filePath.match(/^(?:\/)?repos\/([^/]+)\/(.+)$/);
   if (m1) return { vessel: m1[1]!, subPath: m1[2]! };
   const m2 = filePath.match(/^\/vessels\/([^/]+)\/(.+)$/);

@@ -112,6 +112,24 @@ function vesselDirExists(vessel: string): boolean {
  * embedded in the gap id ("responsibility-<vessel>-…", "<…>-<vessel>-…"). Returns a
  * vessel dir name that EXISTS under the runtime root, else null.
  */
+/**
+ * The file a gap says it is about, in the order the rest of this file already trusts:
+ * `edit_site` first, then the legacy aliases, then a top-level field.
+ *
+ * `gap.file_path` alone is not enough — measured 2026-08-10 over the live store, 0 of
+ * 360 gaps carried a top-level `file_path` while 104 carried
+ * `classification_metadata.edit_site`. Reading only the former handed `undefined`
+ * downstream and threw.
+ */
+export function gapEditSite(gap: Record<string, unknown>, meta: Record<string, unknown>): string | undefined {
+  for (const f of ["edit_site", "file_path", "change_site", "path"] as const) {
+    const v = meta?.[f];
+    if (typeof v === "string" && v.trim()) return v.trim();
+  }
+  const top = gap?.["file_path"];
+  return typeof top === "string" && top.trim() ? top.trim() : undefined;
+}
+
 function identifyVessel(gap: Record<string, unknown>, meta: Record<string, unknown>): string | null {
   // 1. explicit metadata.vessel
   const mv = typeof meta.vessel === "string" ? meta.vessel.trim() : "";
@@ -2751,7 +2769,14 @@ export async function resolveGapToFeature(pointer: GapToFeaturePointer): Promise
           const result = await resolvePatchWithTools({
             type: "patch_with_tools",
             proposal_text: spec + `\n\nPRIOR FEATURE-COMPOSE APPLY FAILURE ON THIS FILE (do not repeat it): op_count=${cb.op_count}, apply_failed, rolled_back=${cb.rolled_back}`,
-            target_file: gap.file_path,
+            // `gap.file_path` is ALWAYS undefined — measured 0 of 360 live gaps carry a
+            // top-level file_path, while 104 carry classification_metadata.edit_site. So
+            // this handed patch_with_tools `undefined`, deriveVesselFromPath threw
+            // "undefined is not an object (evaluating 'filePath.match')", and the
+            // escalation had never once run. Worse, pwt_escalated is set one-shot ABOVE
+            // this line, so every gap that reached here was permanently marked escalated
+            // by a crash. Same field order identifyVessel() already uses.
+            target_file: gapEditSite(gap, _gm),
             gap_id: gap.id,
             proposal_id: gap.id,
             // Explicit, not the resolver's silent `?? "/vessels"` default: the value

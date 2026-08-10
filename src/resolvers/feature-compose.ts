@@ -27,6 +27,7 @@ import { resolveVesselMitosisCutover } from "./vessel-mitosis-cutover.js";
 import { resolveSubstrateGap, resolveSubstrateGapWrite } from "./substrate-gap.js";
 import { writeAuthoringMarker, clearAuthoringMarker } from "./patch-with-tools.js";
 import { vacuousEditReason } from "../vacuous-edit.js";
+import { acquireComposeSlot } from "../compose-slots.js";
 import { existsSync as mountExistsSync } from "node:fs";
 import { regionCandidatesFromText } from "./region-probe.js";
 
@@ -2295,6 +2296,17 @@ async function composeLessonsBlock(specText?: string, failureClasses: string[] =
   } catch { return ""; }
 }
 const composeInFlight = new Set<string>();
+
+/**
+ * Ceiling on TOTAL composes running at once, isolated or not.
+ *
+ * A plain constant rather than an env var on purpose: a growth bound that can be
+ * widened invisibly at deploy time is not a bound, and law 1 keeps behaviour out of
+ * env. 4 is deliberately conservative — a compose is an LLM call plus a typecheck
+ * plus a test run, and the container is a 14-vCPU VM shared with every other vessel.
+ */
+const MAX_CONCURRENT_COMPOSES = 4;
+let composesInFlight = 0;
 /** In-flight compose count, for the capacity cap. See the cap comment below. */
 let composeConcurrency = 0;
 const DEV_VESSEL_ENDPOINT = process.env["DEV_VESSEL_ENDPOINT"] ?? "http://127.0.0.1:8090";
@@ -2326,25 +2338,29 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
   // non-finite or sub-1 value falls back to the default rather than to
   // "unlimited", because the failure mode of a wrong cap must be a slow fleet,
   // never an oversubscribed host.
-  const rawCap = Number(process.env["COMPOSE_MAX_CONCURRENT"] ?? 2);
-  const cap = Number.isFinite(rawCap) && rawCap >= 1 ? Math.floor(rawCap) : 2;
-  if (composeConcurrency >= cap) {
-    console.warn(`[compose-cap] REFUSING: ${composeConcurrency} compose(s) in flight (cap ${cap}) — gap stays open, retried when there is capacity`);
+  // CROSS-PROCESS. An in-process counter bounds only half the traffic: composes
+  // are launched both from this HTTP surface and from `gap-compose.service`,
+  // which is a separate `bun gap-compose-tick.ts` process with its own memory.
+  // The slot directory is visible to both — same pattern as the authoring
+  // markers this vessel already reaps by mtime.
+  const slotId = `${process.pid}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  const slot = await acquireComposeSlot(slotId);
+  if (!slot.granted) {
+    console.warn(`[compose-cap] REFUSING: ${slot.observed} compose(s) in flight — gap stays open, retried when there is capacity`);
     return {
       shape: "featureComposeReport",
       body: {
         ok: false,
         verdict: "REFUSED",
         stage: "capacity",
-        error: `compose capacity cap reached (${composeConcurrency}/${cap} in flight); refused rather than oversubscribing the host`,
+        error: `compose capacity cap reached (${slot.observed} in flight); refused rather than oversubscribing the host`,
       },
     };
   }
-  composeConcurrency++;
   try {
     return await resolveFeatureComposeUncapped(pointer);
   } finally {
-    composeConcurrency--;
+    await slot.release();
   }
 }
 
@@ -2392,6 +2408,7 @@ async function resolveFeatureComposeUncapped(pointer: FeatureComposePointer): Pr
   }
   for (const v of unisolated) composeInFlight.add(v);
   try { return await resolveFeatureComposeInner(pointer, pointer.gap?.id, ws); } finally { for (const v of unisolated) composeInFlight.delete(v); await ws.release(); }
+  } finally { composesInFlight--; }
 }
   // 2026-07-15: Previous edits failed to address the semantic rejection from spec-validation logic at line 1085.
   // The issue is not `gapId` resolution (that was a red herring). The core problem is that `resolveFeatureComposeInner`

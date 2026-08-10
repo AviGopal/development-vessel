@@ -3039,13 +3039,30 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
   const runVerify = async (v: string): Promise<{ vessel: string; errors: number | string; exit_code: number | null; ok: boolean; output: string }> => {
     const vAbs = vesselRoot(v);
     const sh = await callTool(toolsEndpoint, "shell", {
-      command: `cd ${JSON.stringify(vAbs)} && ([ -d node_modules ] || bun install >/dev/null 2>&1; echo "== typecheck =="; bun run typecheck 2>&1; echo "TC_EXIT=$?"; echo "== shape-dispatch =="; if [ -f ${SHARED_DISPATCH_CHECK} ] && [ -f src/config.ts ] && [ -f src/routes/impulses.ts ]; then bun ${SHARED_DISPATCH_CHECK} ${JSON.stringify(vAbs)} 2>&1; echo "SD_EXIT=$?"; else echo "SD_EXIT=0"; fi; echo "== tests =="; timeout 240 bun test 2>&1 || true)`,
+      command: `cd ${JSON.stringify(vAbs)} && (echo "== install =="; bun install >/dev/null 2>&1; echo "INSTALL_EXIT=$?"; echo "== typecheck =="; bun run typecheck 2>&1; echo "TC_EXIT=$?"; echo "== shape-dispatch =="; if [ -f ${SHARED_DISPATCH_CHECK} ] && [ -f src/config.ts ] && [ -f src/routes/impulses.ts ]; then bun ${SHARED_DISPATCH_CHECK} ${JSON.stringify(vAbs)} 2>&1; echo "SD_EXIT=$?"; else echo "SD_EXIT=0"; fi; echo "== tests =="; timeout 240 bun test 2>&1 || true)`,
       cwd: REPO_ROOT,
     });
     const raw = String((sh.body as { stdout?: unknown })?.stdout ?? "");
     const tc = raw.match(/TC_EXIT=(\d+)/); const sd = raw.match(/SD_EXIT=(\d+)/);
     const tcExit = tc && tc[1] ? parseInt(tc[1], 10) : null;
     const sdExit = sd && sd[1] ? parseInt(sd[1], 10) : 0;
+    // A VERIFY THAT NEVER INSTALLS CANNOT SEE A MANIFEST THAT NO LONGER INSTALLS.
+    //
+    // This ran `[ -d node_modules ] || bun install`, so the install was skipped
+    // whenever node_modules existed — i.e. always. A staged package.json change was
+    // therefore never exercised. Demonstrated: ddffdee reached origin/dev with
+    // closed_reason=landed_verified after rewriting
+    //   "@avigopal/ias-executor-ts": "file:../ias-executor-ts"  ->  "^0.1.0"
+    // which is E404 on the npm registry (the package is a private sibling submodule
+    // at repos/ias-executor-ts). tsc resolved the import through the stale symlink
+    // still on disk, so typecheck, the semantic gate and the cutover all said yes and
+    // the change broke `bun install` for every clean clone. Reverted as 956e464.
+    //
+    // Install unconditionally and gate on its exit exactly as tcExit is gated. Absent
+    // marker => null => treated as "not observed", matching the tcExit convention, so
+    // an older cached verify output cannot be read as a pass.
+    const ie = raw.match(/INSTALL_EXIT=(\d+)/);
+    const installExit = ie && ie[1] ? parseInt(ie[1], 10) : null;
     // Baseline-delta: pass typecheck if clean, OR if the baseline already had tsc
     // errors and the draft introduced NO NEW ones (post error set minus baseline is
     // empty). Shape-dispatch (sdExit) still gates strictly. Only relax when baseline
@@ -3115,11 +3132,15 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
       }
     }
     const testOk = confirmedNewTest.length === 0 && !passRegressed;
-    const ok = tcOk && sdExit === 0 && testOk;
-    const detail = testOk ? "" : [
+    // installOk gates alongside tcOk: a manifest that cannot install is a broken
+    // change no matter how cleanly the source typechecks against a stale node_modules.
+    const installOk = installExit === 0;
+    const ok = installOk && tcOk && sdExit === 0 && testOk;
+    const detail = (installOk ? "" : ` | DEPENDENCY INSTALL FAILED (INSTALL_EXIT=${String(installExit)}) — the staged manifest does not install; a typecheck against an already-populated node_modules cannot see this`)
+      + (testOk ? "" : [
       confirmedNewTest.length > 0 ? ` | NEW test failures introduced by this draft, REPRODUCED on a second run (${confirmedNewTest.length}): ${confirmedNewTest.slice(0, 5).join(" ; ").slice(0, 600)}` : "",
       passRegressed ? ` | PASSING TESTS DISAPPEARED: ${basePass} -> ${curPass} (a draft must not delete coverage or break module load to go green)` : "",
-    ].join("");
+    ].join(""));
     return { vessel: v, errors: ok ? 0 : "verify", exit_code: tcExit, ok, output: (raw + detail).trim() };
   };
   let verify: Array<{ vessel: string; errors: number | string; exit_code: number | null; ok: boolean; output: string }> = [];

@@ -44,9 +44,26 @@ describe("regionCandidatesFromText", () => {
     expect(out).toEqual([]);
   });
 
-  it("orders longest first, since a longer identifier is rarer", () => {
+  it("orders longest first WITHIN a tier", () => {
     const out = regionCandidatesFromText("classifyComposeFailure and TC_EXIT both appear");
     expect(out.indexOf("classifyComposeFailure")).toBeLessThan(out.indexOf("TC_EXIT"));
+  });
+
+  it("a quoted anchor OUTRANKS a longer scraped identifier — the live regression", () => {
+    // Real shape: the restatement's anchor clause beside a pasted failure excerpt.
+    // Length-sorting everything made `noUncheckedIndexedAccess` (24) beat the anchor,
+    // and the window centred on tsconfig options for many consecutive composes.
+    const spec = 'The relevant code is around `classifyFailure`.\n' +
+      'PRIOR FAILURE: error TS2345 under noUncheckedIndexedAccess in strictNullChecks mode';
+    const out = regionCandidatesFromText(spec);
+    expect(out[0]).toBe("classifyFailure");
+    expect(out.indexOf("classifyFailure")).toBeLessThan(out.indexOf("noUncheckedIndexedAccess"));
+  });
+
+  it("keeps a scraped identifier available, just ranked below the quoted one", () => {
+    const out = regionCandidatesFromText('around `shortName` plus someLongerIdentifierHere');
+    expect(out[0]).toBe("shortName");
+    expect(out).toContain("someLongerIdentifierHere");
   });
 
   it("dedupes repeats", () => {

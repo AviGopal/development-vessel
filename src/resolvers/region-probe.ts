@@ -51,12 +51,25 @@ const STOPWORDS = new Set([
 export function regionCandidatesFromText(text: string): string[] {
   if (typeof text !== "string" || !text) return [];
   const seen = new Set<string>();
+  const quoted: string[] = [];
   const out: string[] = [];
 
-  // Quoted or backticked spans first: an author who quotes is pointing.
+  // TIER 1 — QUOTED / BACKTICKED SPANS, and they must STAY ahead of everything.
+  //
+  // Goal restatement emits "The relevant code is around `<anchor>`", carrying the
+  // term that actually located the file. That anchor is the single best locator
+  // available and it arrives backticked.
+  //
+  // These were originally collected first and then length-sorted with everything
+  // else, which threw the priority away: a 24-char compiler flag lifted out of a
+  // pasted failure excerpt (`noUncheckedIndexedAccess`) outranked the real anchor,
+  // and the window centred on tsconfig options and unrelated env reads
+  // (`process.env.FED_TRANSPORT_EGRESS`) across many consecutive composes. Specs
+  // carry prior error output, so the longest identifier in the text is very often
+  // noise from a failure excerpt rather than the change site. Sort WITHIN tiers only.
   for (const m of text.matchAll(/[`"']([A-Za-z_$][\w$.\-]{3,80})[`"']/g)) {
     const tok = m[1]!;
-    if (!seen.has(tok)) { seen.add(tok); out.push(tok); }
+    if (!seen.has(tok)) { seen.add(tok); quoted.push(tok); }
   }
 
   const CODEISH = /\b([A-Za-z_$][A-Za-z0-9_$]*(?:[._-][A-Za-z0-9_$]+)+|[a-z$_][a-z0-9$_]*[A-Z][A-Za-z0-9_$]*|[A-Z][a-z0-9_$]+[A-Z][A-Za-z0-9_$]*|[A-Z]{2,}(?:_[A-Z0-9]+)+)\b/g;
@@ -69,9 +82,9 @@ export function regionCandidatesFromText(text: string): string[] {
     out.push(tok);
   }
 
-  // Longest first: a longer identifier is rarer, so it centres more precisely. (Unlike
-  // the generic probe list, where length ordering is wrong because an 80-char prose
-  // sentence outranks a short region literal — these are all identifiers, so length
-  // really does track specificity here.)
-  return out.sort((a, b) => b.length - a.length);
+  // Longest first WITHIN each tier: among identifiers of equal provenance a longer
+  // one is rarer, so it centres more precisely. Across tiers, provenance beats
+  // length — a term someone deliberately quoted outranks anything merely scraped.
+  const byLen = (a: string, b: string) => b.length - a.length;
+  return [...quoted.sort(byLen), ...out.sort(byLen)];
 }

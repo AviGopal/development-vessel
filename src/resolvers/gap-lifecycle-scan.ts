@@ -564,7 +564,7 @@ export async function resolveGapLifecycleScan(p: GapLifecycleScanPointer): Promi
     } catch { backlogPosted = "error"; }
   }
 
-  const historyPath = "/workspace/gaps/funnel-history.jsonl";
+  const historyPath = join(workspaceRoot(), "gaps", "funnel-history.jsonl");
   // GAP-TRIPLE as a durable time-series (consistent-learning instrument): emit close_rate
   // and detection->close latency per run so a rising close-rate / falling latency TREND is
   // showable from funnel-history.jsonl (durability = closed_total decreases across the series).

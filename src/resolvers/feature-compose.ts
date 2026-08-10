@@ -2354,9 +2354,21 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
       shape: "featureComposeReport",
       body: {
         ok: false,
-        verdict: "REFUSED",
+        // BUSY, not REFUSED. Capacity is TRANSIENT — the work is fine, the host is
+        // full — whereas REFUSED means "this should not be done" (the scope stage).
+        // The distinction is load-bearing, not cosmetic: goal-host backs off 45s and
+        // retries on BUSY and on nothing else (index.ts, `if (verdict === "BUSY")`),
+        // so a capacity refusal returned as REFUSED does not queue — the dispatch
+        // simply dies.
+        //
+        // Observed: with the gap lane holding both slots, a dispatched edit goal got
+        // `verdict=REFUSED (compose capacity cap reached (2 in flight))` and was
+        // abandoned. The lane runs continuously against 200+ open gaps, so under the
+        // new cap it starves every interactive dispatch. Returning BUSY makes them
+        // wait their turn instead, which is what the cap was for.
+        verdict: "BUSY",
         stage: "capacity",
-        error: `compose capacity cap reached (${slot.observed} in flight); refused rather than oversubscribing the host`,
+        error: `compose capacity cap reached (${slot.observed} in flight); retry after one completes`,
       },
     };
   }

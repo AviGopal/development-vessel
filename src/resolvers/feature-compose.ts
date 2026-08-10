@@ -2223,6 +2223,7 @@ async function fileLessonsBlock(specText?: string): Promise<string> {
   } catch { return ""; }
 }
 async function composeLessonsBlock(specText?: string): Promise<string> {
+  const lessonsStartedAt = Date.now();
   // FIRST: semantic recall from concept-db — relevance to the current spec, not
   // JSONL recency. Fails open to the JSONL path when concept-db is down or empty.
   if (specText && specText.trim().length > 0) {
@@ -2233,14 +2234,29 @@ async function composeLessonsBlock(specText?: string): Promise<string> {
       const resp = await fetch(`${DISCOVERY_ENDPOINT}/resolve`, {
         method: "POST",
         headers: { ...headers, "Content-Type": "application/json" },
-        body: JSON.stringify({ pointer: { type: "conceptSearch", source_type: "compose_lesson", limit: 8 } }),
-        signal: AbortSignal.timeout(8_000),
+        // PASS THE SPEC. This block's own comment promises "relevance to the current
+        // spec", and specText gates entry to the branch — but it was never sent, so the
+        // query was "give me any 8 compose_lesson rows". Measured 2026-08-10: 132
+        // consecutive composes logged `source=concept-db n=8`, the SAME eight lessons,
+        // for unrelated goals. The drafter was shown a fixed list under the heading
+        // "KNOWN FAILURE MODES", which is worse than no lessons: it reads as targeted.
+        //
+        // TIMEOUT RAISED WITH IT, deliberately. `query` turns this into a free-text
+        // search; concept-db's own client documents that as an embedding call that
+        // "routinely exceeds 10s on cold cache — hence 30s". At the previous 8s budget,
+        // adding the query would have timed out every time and silently demoted this to
+        // the JSONL fallback — a fix that reads as a regression. 20s keeps it inside the
+        // compose's own budget while giving a cold index room.
+        body: JSON.stringify({ pointer: { type: "conceptSearch", source_type: "compose_lesson", query: specText.slice(0, 2000), limit: 8 } }),
+        signal: AbortSignal.timeout(20_000),
       });
       if (resp.ok) {
         const json = (await resp.json()) as { content?: Array<{ content?: string }> };
         const found = (json.content ?? []).map((c) => c.content).filter((s): s is string => typeof s === "string" && s.length > 0);
         if (found.length > 0) {
-          console.warn(`[compose-lessons] source=concept-db n=${found.length}`);
+          // Log the elapsed time: a slow answer here is the concept index, not this
+          // caller, and the two are indistinguishable from `source=concept-db` alone.
+          console.warn(`[compose-lessons] source=concept-db n=${found.length} query=yes ms=${Date.now() - lessonsStartedAt}`);
           return `\n\nKNOWN FAILURE MODES from this substrate's own rejected composes — plans repeating these are rolled back:\n${found.map((r) => `- ${r}`).join("\n")}`;
         }
       }
@@ -2248,7 +2264,7 @@ async function composeLessonsBlock(specText?: string): Promise<string> {
       console.warn(`[compose-lessons] concept-db recall failed: ${(err as Error).message}`);
     }
   }
-  console.warn("[compose-lessons] source=fallback=jsonl");
+  console.warn(`[compose-lessons] source=fallback=jsonl ms=${Date.now() - lessonsStartedAt}`);
   try {
     const { readFileSync } = await import("node:fs");
     const lines = readFileSync(COMPOSE_LESSONS_PATH, "utf8").split("\n").filter((l) => l.trim().length > 0).slice(-60);

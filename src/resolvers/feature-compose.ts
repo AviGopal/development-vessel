@@ -3896,7 +3896,25 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
     const firstTscError = (() => {
       const raw = verify.find((v) => !v.ok)?.output ?? "";
       const m = raw.match(/(\S+\.ts\(\d+,\d+\): error TS\d+:[^\n]*)/);
-      return m ? m[1]! : raw.slice(0, 300);
+      if (m) return m[1]!;
+      // NO TSC ERROR MEANS THE FAILURE IS DOWNSTREAM — KEEP THE TAIL, NOT THE HEAD.
+      //
+      // The fallback was raw.slice(0, 300), which stores the BEGINNING of the verify
+      // output. The verify script prints its stages in order (install, typecheck,
+      // shape-dispatch, tests), so the first 300 characters are always the typecheck
+      // banner — and when the failure is in the TEST stage that banner reads
+      // "TC_EXIT=0", i.e. the stored evidence says the thing that PASSED.
+      //
+      // Observed 2026-08-10 on gap-drain-observer-connection-state-is-invisible: the
+      // record ended mid-word at "(pass) comment-only add (no", before ever reaching
+      // the failing test, while its lesson class said typecheck. Neither the operator
+      // nor the drafter re-attempting the gap could learn anything from it, and the
+      // drafter was being taught the wrong failure class.
+      //
+      // Failures are at the END of a staged log, so keep the tail. 900 chars covers a
+      // bun test failure block plus its summary line without bloating the gap record.
+      const tail = raw.slice(-900);
+      return raw.length > 900 ? `…(head truncated; tail follows)\n${tail}` : tail;
     })();
     const lessonClass = envClass ?? classifyComposeFailure(applied, verify, String(semantic_gate?.reason ?? ""));
     if (pointer.gap?.id && firstTscError) {

@@ -12,12 +12,21 @@ const app = new Hono();
 
 import { VESSEL_ID } from "./config.js";
 
+// Published so lifecycle actors can SEE the work before deciding to restart us.
+// substrate-pull-sync defers a vessel's restart while it reports in-flight work,
+// and it reads exactly this field — but only if the vessel actually emits it.
+// development-vessel did not, so the deferral built for that purpose could never
+// protect the vessel whose runs are the longest in the fleet.
+let readInFlight: () => number = () => 0;
+export function publishInFlight(fn: () => number): void { readInFlight = fn; }
+
 app.get("/health", (c) => {
   return c.json({
     status: "ok",
     vessel: "development-vessel",
     vesselId: VESSEL_ID,
     version: "0.1.0",
+    in_flight: readInFlight(),
     discovery: { registered: isRegistered() },
   });
 });
@@ -81,11 +90,37 @@ app.get("/shapes", (c) => {
 
 app.route("/", impulsesRouter);
 
+// IN-FLIGHT REQUEST COUNT — the half the authoring markers do not cover.
+//
+// The drain below waits on `/workspace/authoring-inflight` markers, and those are
+// not written until the APPLY stage. A compose spends most of its 5-8 minutes
+// before that point (grounding, the planning call, verification), so a restart
+// landing in that window drains "cleanly" — logging `0 authoring runs in flight`
+// — while an inbound request is very much alive. The caller sees exactly the
+// symptom this file's own comment describes: "socket connection closed
+// unexpectedly".
+//
+// Observed 2026-08-10: a correctly-routed edit dispatch reached feature_compose,
+// development-vessel restarted 2 minutes later reporting a clean drain, and the
+// dispatch died `interrupted:none` with nothing staged. A previous session
+// diagnosed this same gap from the cutover side (see vessel-mitosis-cutover.ts,
+// "the marker is not written until the apply stage") and guarded the timer path;
+// this closes it at the drain, which is where every caller of this vessel is
+// exposed to it.
+let inFlightRequests = 0;
+publishInFlight(() => inFlightRequests);
 const server = Bun.serve({
   port: config.port,
   hostname: config.host,
   idleTimeout: 60,
-  fetch: app.fetch,
+  fetch: async (req, srv) => {
+    inFlightRequests++;
+    try {
+      return await app.fetch(req, srv);
+    } finally {
+      inFlightRequests--;
+    }
+  },
 });
 
 console.log(`development-vessel listening on ${config.host}:${config.port}`);
@@ -128,7 +163,11 @@ const deadline = Date.now() + Number(process.env["DEV_VESSEL_DRAIN_MS"] ?? proce
           } catch { /* vanished mid-scan — not in flight */ }
         }
       } catch { break; }
-      if (live === 0) { console.log(`[development-vessel] ${sig}: drained (0 authoring runs in flight)`); break; }
+      // Both signals must be quiet: a marker-free vessel can still be mid-compose.
+      if (live === 0 && inFlightRequests === 0) { console.log(`[development-vessel] ${sig}: drained (0 authoring runs, 0 requests in flight)`); break; }
+      if (live === 0 && inFlightRequests > 0) {
+        console.log(`[development-vessel] ${sig}: no authoring markers but ${inFlightRequests} request(s) still in flight — continuing to drain`);
+      }
       if (Date.now() >= deadline) { console.warn(`[development-vessel] ${sig}: drain deadline with ${live} authoring run(s) still in flight — they will be lost`); break; }
       await new Promise((r) => setTimeout(r, 1000));
     }

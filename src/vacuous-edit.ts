@@ -1,9 +1,10 @@
 /**
  * Does an edit add code that CANNOT do anything?
  *
- * THE OBSERVED CASE. A correctly-routed repair goal — "the handler that writes
- * execution-path records sets no tenant marking, fix it" — was planned against
- * the right file and produced this entire diff:
+ * THE OBSERVED CASE. A correctly-routed repair goal about a missing tenant
+ * column on persisted path rows (goal text PARAPHRASED on purpose — see the note
+ * at the end of this block) was planned against the right file and produced this
+ * entire diff:
  *
  *   + const tenant = c.get('tenant');
  *
@@ -23,6 +24,13 @@
  * text, not a judgement about whether it solves the goal — a check that tried to
  * judge responsiveness would refuse correct work it did not understand. An added
  * line that calls anything, assigns anything, or is referenced later all pass.
+ *
+ * ── WHY THE GOAL TEXT ABOVE IS PARAPHRASED ───────────────────────────────────
+ * The workspace phrase search greps this tree, so a verbatim goal span written
+ * into source becomes a phantom UNIQUE match and restates that goal onto this
+ * file. It has now happened THREE times — twice in goal-host-vessel, and once
+ * here, in the file written to catch exactly this genre of mistake. Paraphrase
+ * illustrative goal text, always.
  */
 
 /** A declaration whose binding is introduced by the added text. */

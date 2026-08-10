@@ -124,7 +124,7 @@ export class GapDrainObserver {
    */
   private async nudgeComposableDrain(gapId: string, category: string): Promise<void> {
     const g = globalThis as unknown as { __composeDrainInflight?: boolean; __composeDrainLastAt?: number };
-    const MIN_INTERVAL_MS = Number(process.env["COMPOSE_DRAIN_MIN_INTERVAL_MS"] ?? 90_000);
+        const MIN_INTERVAL_MS = Number(process.env["COMPOSE_DRAIN_MIN_INTERVAL_MS"] ?? 90_000);
     const now = Date.now();
     if (g.__composeDrainInflight === true) {
       this.recordDrain({ action: "compose_skipped_inflight", gap_id: gapId, category });

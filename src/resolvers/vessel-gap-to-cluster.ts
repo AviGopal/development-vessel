@@ -28,7 +28,27 @@ import type { ResolverResult } from "./types.js";
  * the app live). The frontier will not read "integrated" until then — by design.
  */
 
-const DEFAULT_PATTERNS_DIR = "/workspace/patterns";
+// WRITE THE PATTERN WHERE THE READER IS ALLOWED TO LOOK.
+//
+// This wrote to the literal /workspace/patterns, but the drafter it dispatches
+// (development-vessel:draft-activity-from-pattern) opens that path with fs_read,
+// which enforces containment inside WORKSPACE_ROOT (/workspace/git/super-repo).
+// So every dispatch died on:
+//
+//   [engine] execution ... template activity:<development-vessel:draft-activity-from-pattern>
+//   failed after 1 task(s): dev-vessel fs_read HTTP 500: {"error":"path outside workspace"}
+//
+// which is why 45 orphaned-capability gaps — the single largest family in the
+// backlog — could not be drained: the clusterer succeeded, wrote its pattern, and
+// handed the drafter a path it was forbidden to read.
+//
+// Only NEW patterns need to move: the drafter reads the file this call just wrote,
+// never the directory, so the 104 files already under /workspace/patterns are not
+// stranded by this and need no migration.
+const DEFAULT_PATTERNS_DIR = path.join(
+  process.env["WORKSPACE_ROOT"] ?? "/workspace",
+  "patterns",
+);
 const DEFAULT_CONCEPT_DB = process.env["CONCEPT_DB_ENDPOINT"] ?? "http://127.0.0.1:8260";
 const DEFAULT_GOAL_HOST = process.env["GOAL_HOST_ENDPOINT"] ?? "http://127.0.0.1:8210";
 const DRAFTER_TEMPLATE_ID = "development-vessel:draft-activity-from-pattern";

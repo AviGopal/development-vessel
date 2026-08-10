@@ -1,4 +1,5 @@
 import { Hono } from "hono";
+import { isLongRunningBody } from "./long-running.js";
 import { impulsesRouter } from "./routes/impulses.js";
 import { config, DISCOVERY_SHAPES } from "./config.js";
 import { startDiscoveryRegistration, isRegistered } from "./discovery-registration.js";
@@ -119,7 +120,30 @@ app.route("/", impulsesRouter);
 // is the drafting surface: feature_compose and patch_with_tools, whose runs take
 // 5-8 minutes and whose loss is the thing this drain exists to prevent. A health
 // poll interrupted mid-flight costs nothing and retries itself.
-const LONG_RUNNING = /(feature_compose|patch_with_tools|apply_proposal_as_patch|vessel_mitosis)/i;
+//
+// CLASSIFY BY POINTER TYPE, NEVER BY BODY TEXT.
+//
+// The previous version tested this regex against the RAW REQUEST BODY, so any
+// request that merely MENTIONED one of these words counted as a long-running run.
+// Measured 2026-08-10 against an independent census — `ls /workspace/compose-slots`
+// (the authoritative count of live composes) said **1**, `/health` said **9**.
+// The autonomous lane was writing gap records titled
+// "feature-compose-has-no-concurrency-cap"; every such write registered as a
+// compose in flight.
+//
+// That inflation was load-bearing in three places built on top of it: the drain
+// waits for this to reach 0 (so it never could, and killed the compose at its
+// deadline — the exact failure the counter was added to prevent), substrate-pull-sync
+// defers restarts on it (so it deferred every tick until it hit its bound and
+// restarted anyway), and it is published on /health for anyone else to believe.
+//
+// A request IS a compose only if its impulse pointer SAYS so, so read the pointer.
+// Non-JSON and unparseable bodies are not counted: a compose pointer is always a
+// JSON envelope, so "cannot parse" is conclusive evidence this is not one.
+// Declared HERE rather than beside the drain below: the request handler is the
+// other reader, and a flag whose only declaration sits after its consumer is how
+// this one stayed unread in the first place.
+let devDraining = false;
 let inFlightRequests = 0;
 publishInFlight(() => inFlightRequests);
 const server = Bun.serve({
@@ -134,7 +158,36 @@ const server = Bun.serve({
     try {
       if (req.method === "POST") {
         const raw = await req.clone().text();
-        if (LONG_RUNNING.test(raw)) {
+        if (isLongRunningBody(raw)) {
+          // LAME-DUCK ADMISSION. Once the drain has begun this process is going to
+          // exit at a fixed deadline, so admitting a 5-8 minute compose now is
+          // admitting work we have already decided to kill.
+          //
+          // Observed 2026-08-10: SIGTERM at 23:20:29, a NEW compose admitted at
+          // 23:23:54, drain deadline at 23:24:30 — 36 seconds of life, one dead
+          // dispatch, and the slot burned for nothing. The `devDraining` flag that
+          // would have prevented it already existed; this handler simply never
+          // read it.
+          //
+          // 503 + Retry-After, not a silent drop: the caller's gap stays open and
+          // the work is retried against the process that replaces this one. That is
+          // strictly better than quiescing on a counter, because the gap lane
+          // retries every ~2 minutes and "wait until in-flight is 0" is unreachable
+          // under that arrival rate.
+          if (devDraining) {
+            console.log(
+              `[development-vessel] REFUSING long-running request during drain — it cannot finish before the deadline; caller should retry against the next process`,
+            );
+            return new Response(
+              JSON.stringify({
+                success: false,
+                error: "draining",
+                message:
+                  "development-vessel is draining for restart and cannot start long-running work; retry shortly",
+              }),
+              { status: 503, headers: { "Content-Type": "application/json", "Retry-After": "30" } },
+            );
+          }
           counted = true;
           inFlightRequests++;
         }
@@ -166,7 +219,6 @@ console.log(`development-vessel listening on ${config.host}:${config.port}`);
 // Bounded at 75s, deliberately UNDER the unit's 90s TimeoutStopSec, so this
 // deadline fires before systemd's SIGKILL and the process exits on its own terms —
 // a drain budget that exceeds its own stop timeout can never complete.
-let devDraining = false;
 async function developmentVesselDrain(sig: string): Promise<void> {
   if (devDraining) return;
   devDraining = true;
@@ -200,7 +252,24 @@ const deadline = Date.now() + Number(process.env["DEV_VESSEL_DRAIN_MS"] ?? proce
       if (live === 0 && inFlightRequests > 0) {
         console.log(`[development-vessel] ${sig}: no authoring markers but ${inFlightRequests} request(s) still in flight — continuing to drain`);
       }
-      if (Date.now() >= deadline) { console.warn(`[development-vessel] ${sig}: drain deadline with ${live} authoring run(s) still in flight — they will be lost`); break; }
+      // REPORT BOTH SIGNALS, because both can lose work.
+      //
+      // This line used to print only `live` (the marker count) while the loop's
+      // continue-condition above reads BOTH markers and requests. Observed output,
+      // one second apart on 2026-08-10:
+      //
+      //   23:24:29  no authoring markers but 2 request(s) still in flight — continuing to drain
+      //   23:24:30  drain deadline with 0 authoring run(s) still in flight — they will be lost
+      //
+      // Two requests died and the log recorded zero losses. When a loop gains a
+      // second signal, every branch that REPORTS on it has to gain it too, not just
+      // the branch that reads it.
+      if (Date.now() >= deadline) {
+        console.warn(
+          `[development-vessel] ${sig}: drain deadline — ${live} authoring run(s) and ${inFlightRequests} long-running request(s) still in flight; they will be lost`,
+        );
+        break;
+      }
       await new Promise((r) => setTimeout(r, 1000));
     }
   } catch (e) { console.warn(`[development-vessel] ${sig}: drain error (exiting anyway): ${(e as Error).message}`); }

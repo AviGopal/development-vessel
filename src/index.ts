@@ -270,6 +270,21 @@ const server = Bun.serve({
 
 console.log(`development-vessel listening on ${config.host}:${config.port}`);
 
+// WHY DID THIS PROCESS START? Nothing in systemd's journal records who requested a
+// restart, and every restart of THIS vessel discards in-flight composes for the
+// whole fleet once the drain deadline passes. An UNATTRIBUTED line here is the
+// signal being hunted: a source that restarts the compose host without declaring
+// itself. Purely observational and fully swallowed — a vessel must never fail to
+// boot because its telemetry file is unreadable.
+void (async () => {
+  try {
+    const { readFile } = await import("node:fs/promises");
+    const { breadcrumbPath, parseBreadcrumb, describeStart } = await import("./restart-attribution.js");
+    const raw = await readFile(breadcrumbPath("development-vessel"), "utf8").catch(() => "");
+    console.log(describeStart(raw ? parseBreadcrumb(raw) : null, Date.now()));
+  } catch { /* telemetry only */ }
+})();
+
 // GRACEFUL DRAIN. This vessel serves feature_compose and patch_with_tools, whose
 // runs take 5-8 minutes. With no SIGTERM handler at all, a restart (its own mitosis
 // cutover, or pull-sync converging it) killed the run outright and the caller saw

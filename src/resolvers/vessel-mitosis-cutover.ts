@@ -2118,6 +2118,7 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
           // Same env var pull-sync honours (QUIESCE_DIR), same default, so the two
           // convergers and the vessel cannot drift apart again by construction.
           const quiesceDir = process.env["QUIESCE_DIR"] ?? "/workspace/quiesce";
+          const breadcrumbDir = process.env["RESTART_BREADCRUMB_DIR"] ?? "/workspace/restart-requests";
           // Port this vessel serves /health on, for the in-flight poll above.
           const inflightPort = process.env["PORT"] ?? process.env["VESSEL_PORT"] ?? "8090";
           const restartScript =
@@ -2145,6 +2146,19 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
             // call site, missed the sibling" error this session has hit repeatedly.
             // A restart that destroys an in-flight run destroys the verdict that
             // would have attributed credit to the change, which is the loop itself.
+            // DECLARE YOURSELF BEFORE RESTARTING SOMETHING. systemd records only
+            // `Stopping <unit>`, never the requester, and at least three sources can
+            // restart this vessel. The breadcrumb is written INSIDE the restart
+            // script (not at scheduling time) so its timestamp and its in_flight
+            // reading describe the restart that actually happens, and it carries the
+            // in_flight count observed at that moment so a LOSSY restart is visible
+            // afterwards. Best-effort: every write is `2>/dev/null` and nothing here
+            // can block the restart.
+            + `mkdir -p '${breadcrumbDir}' 2>/dev/null; `
+            + `IFB=$(curl -s --max-time 5 'http://127.0.0.1:${inflightPort}/health' 2>/dev/null | grep -o '"in_flight"[[:space:]]*:[[:space:]]*[0-9][0-9]*' | grep -o '[0-9]*$' | head -1); `
+            + `printf '{"requester":"mitosis-cutover","reason":"cutover %s","in_flight":%s,"at":"%s"}' `
+            + `  "${mitosis_version_id}" "\${IFB:-null}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" `
+            + `  > '${breadcrumbDir}/${vessel_name}.json' 2>/dev/null; `
             + `mkdir -p '${quiesceDir}' 2>/dev/null; : > '${quiesceDir}/${vessel_name}' 2>/dev/null; `
             + `i=0; while [ "$i" -lt ${quiesceIters} ]; do `
             + `  IF=$(curl -s --max-time 5 'http://127.0.0.1:${inflightPort}/health' 2>/dev/null | grep -o '"in_flight"[[:space:]]*:[[:space:]]*[0-9][0-9]*' | grep -o '[0-9]*$' | head -1); `

@@ -489,7 +489,7 @@ async function sweepStaleProposals(
 // NEXT eligible proposal. Wrapped by resolveApplyProposalAsPatch (bounded-retry) below.
 async function attemptApplyOnce(pointer: ApplyProposalAsPatchPointer): Promise<ResolverResult> {
   const workspaceRoot = process.env["WORKSPACE_ROOT"] ?? "/workspace";
-  const proposalsDir = pointer.proposals_dir ?? join(workspaceRoot, "proposals");
+  const proposalsDir = pointer.proposals_dir ?? process.env["PROPOSALS_DIR"] ?? "/workspace/proposals";
   const vesselsRoot = pointer.vessels_root ?? "/vessels";
   const pendingPath = pointer.pending_path ?? join(workspaceRoot, "mitosis-pending.json");
   const dryRun = pointer.dry_run === true;

@@ -649,12 +649,13 @@ export async function resolveSubstrateGapWrite(
       signal: AbortSignal.timeout(2000),
     });
     if (!response.ok) {
-      console.warn(`[substrate-gap-event-publish] publish failed with status ${response.status} for gap ${gap.id}`);
+      const responseBody = await response.text();
+      console.error(`[substrate-gap-event-publish] publish failed with status ${response.status}: ${responseBody}`);
     } else {
-      console.log(`[substrate-gap-event-publish] published devvessel.gap.written for gap ${gap.id}`);
+      console.log(`[substrate-gap-event-publish] publish successful: ${response.status}`);
     }
   } catch (err) {
-    console.log("[substrate-gap-event-publish] publish failed (non-fatal):", err);
+    console.error(`[substrate-gap-event-publish] publish failed (non-fatal):`, err);
   }
 
   return {

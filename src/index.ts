@@ -140,6 +140,49 @@ app.route("/", impulsesRouter);
 // A request IS a compose only if its impulse pointer SAYS so, so read the pointer.
 // Non-JSON and unparseable bodies are not counted: a compose pointer is always a
 // JSON envelope, so "cannot parse" is conclusive evidence this is not one.
+/**
+ * QUIESCE — close admission WITHOUT killing anything.
+ *
+ * A convergence that restarts this vessel destroys whatever compose is in flight.
+ * substrate-pull-sync knows that and trades it away deliberately: "the restart
+ * drains for up to ${DRAINMS}ms, and work still running past that IS lost." The
+ * drain is bounded, so a long compose dies anyway.
+ *
+ * That trade is what makes the system unable to measure itself while it develops
+ * itself. The outcome of an in-flight change is the evidence that attributes
+ * credit to the decision that produced it; if convergence destroys the run, the
+ * dispatch ends `interrupted`, no verdict is recorded, and the learning loop
+ * cannot tell a good change from a bad one. Measured 2026-08-11: three
+ * consecutive operator trials died exactly this way, and each push of a fix
+ * triggered the convergence that killed the next measurement.
+ *
+ * The drain is bounded only because work keeps ARRIVING. Close admission first
+ * and in-flight decreases monotonically to zero on its own — so a quiesce-then-
+ * restart is bounded by the longest single compose, not unbounded, and loses
+ * nothing. That is the whole difference between a destructive convergence and a
+ * safe one, and it needs no new machinery: the lame-duck refusal already exists
+ * for SIGTERM, and this simply lets a converger open it early.
+ *
+ * A FILE, deliberately: pull-sync is a shell script and the marker must be
+ * settable without an authenticated call, readable across process restarts, and
+ * removable by a supervisor if the converger dies mid-run. Stale markers are
+ * bounded by mtime for exactly that case — a quiesce that outlives its owner must
+ * not wedge the vessel permanently.
+ */
+const QUIESCE_MARKER = process.env["QUIESCE_MARKER"] ?? "/workspace/quiesce/development-vessel";
+const QUIESCE_MAX_MS = Number(process.env["QUIESCE_MAX_MS"] ?? 20 * 60_000);
+function quiesced(): boolean {
+  try {
+    const { statSync } = require("node:fs") as typeof import("node:fs");
+    const st = statSync(QUIESCE_MARKER);
+    // Fail open on a stale marker: a converger that died must not close admission
+    // forever. Same reasoning as the compose-slot staleness backstop.
+    return Date.now() - st.mtimeMs < QUIESCE_MAX_MS;
+  } catch {
+    return false;
+  }
+}
+
 // Declared HERE rather than beside the drain below: the request handler is the
 // other reader, and a flag whose only declaration sits after its consumer is how
 // this one stayed unread in the first place.
@@ -174,7 +217,7 @@ const server = Bun.serve({
           // strictly better than quiescing on a counter, because the gap lane
           // retries every ~2 minutes and "wait until in-flight is 0" is unreachable
           // under that arrival rate.
-          if (devDraining) {
+          if (devDraining || quiesced()) {
             console.log(
               `[development-vessel] REFUSING long-running request during drain — it cannot finish before the deadline; caller should retry against the next process`,
             );

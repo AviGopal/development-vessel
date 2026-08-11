@@ -2028,7 +2028,20 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
           const quiesceMaxS = Number(process.env["MITOSIS_SELF_RESTART_QUIESCE_MAX_S"] ?? "600");
           const quiesceIters = Math.max(0, Math.floor(quiesceMaxS / 5));
           const markerDir = `${process.env["WORKSPACE_ROOT"] ?? "/workspace"}/authoring-inflight`;
-          const quiesceDir = `${process.env["WORKSPACE_ROOT"] ?? "/workspace"}/quiesce`;
+          // NOT derived from WORKSPACE_ROOT — the vessel and pull-sync both use
+          // /workspace/quiesce, and WORKSPACE_ROOT is /workspace/git/super-repo here.
+          //
+          // Measured 2026-08-11: this timer wrote
+          // `/workspace/git/super-repo/quiesce/development-vessel` while the vessel
+          // read `/workspace/quiesce/development-vessel`, so the marker closed
+          // nothing. New composes kept arriving, in_flight never reached 0, the
+          // wait burned its full 600s and restarted into live work anyway — which
+          // is precisely the loss this quiesce was added to prevent. The mechanism
+          // ran perfectly and communicated with nobody.
+          //
+          // Same env var pull-sync honours (QUIESCE_DIR), same default, so the two
+          // convergers and the vessel cannot drift apart again by construction.
+          const quiesceDir = process.env["QUIESCE_DIR"] ?? "/workspace/quiesce";
           // Port this vessel serves /health on, for the in-flight poll above.
           const inflightPort = process.env["PORT"] ?? process.env["VESSEL_PORT"] ?? "8090";
           const restartScript =

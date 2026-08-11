@@ -3320,12 +3320,27 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
 
   for (const [v, errs] of baselineTsErrors) { if (errs.size === 0) continue; try { await fetch(`${DEV_VESSEL_ENDPOINT}/v2/impulses/resolve`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ impulse: { type: "substrateGap_write", gap: { id: "baseline-typecheck-broken-" + v.replace(/[^a-zA-Z0-9]+/g, "-"), category: "systematic_failure", source: "substrate_detected", summary: "feature_compose found the UNTOUCHED baseline of " + v + " failing typecheck BEFORE drafting (" + errs.size + " pre-existing tsc errors, e.g. " + Array.from(errs).slice(0, 3).join(" | ").slice(0, 400) + "). Environment fault (stale runtime copy or missing module), not a drafter fault: re-sync this vessel source from its repo baseline. Draft verdicts on this vessel use baseline-delta blame until the baseline is clean.", detected_at: new Date().toISOString(), status: "open" } } }) }); console.log("[feature-compose] baseline-broken environment gap filed for " + v); } catch { /* advisory */ } }
 
-// Abort entire compose if baseline is broken to prevent corrupt edits
-for (const [v, errs] of baselineTsErrors) {
-  if (errs.size > 0) {
-    throw new Error(`Vessel ${v} has pre-existing type errors - aborting compose to prevent corruption`);
-  }
-}
+// NO ABORT ON A DIRTY BASELINE — that is what baseline-delta blame is FOR.
+//
+// A substrate-authored patch (2dbb4a6) added a throw here that aborted the whole
+// compose whenever any vessel carried a pre-existing tsc error. Removed, because
+// it contradicts the design immediately above and below it:
+//
+//   - line ~3321 already DETECTS this state, files a `baseline-typecheck-broken-*`
+//     gap for it, and deliberately continues;
+//   - the verify step subtracts `baselineTsErrors` from the post-edit set, so a
+//     drafter is blamed only for errors it INTRODUCED.
+//
+// The comment on the existing handler states the intent outright: "Draft verdicts
+// on this vessel use baseline-delta blame until the baseline is clean." Aborting
+// instead would halt ALL self-development on any vessel whose runtime copy is
+// momentarily stale — the exact environment fault that handler exists to tolerate
+// — and it would do so silently from the caller's side, as a thrown error rather
+// than a verdict.
+//
+// The gap it was authored against ("a corrupt draft crash-loops a vessel before
+// any gate sees it") is real, but a corrupt DRAFT is caught by the post-edit
+// delta; a dirty BASELINE is not the drafter's doing and must not block it.
 // 2. APPLY deterministically. Track created/edited for rollback.
   const created: string[] = [];
   const edited: string[] = [];

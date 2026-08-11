@@ -74,12 +74,39 @@ export function symbolsNeedingDeclaration(
     if (seen.has(raw)) continue;
     seen.add(raw);
     if (!looksLikeIdentifier(raw)) continue;
-    // Already visible to the drafter — nothing to add.
-    if (g.includes(raw)) continue;
+    // PRESENCE OF THE NAME IS NOT PRESENCE OF THE DECLARATION.
+    //
+    // This originally skipped any symbol whose name appeared anywhere in the
+    // window. Measured 2026-08-11, and it disabled the fix for the exact case it
+    // was written for: the window was index.ts, which contains
+    // `pickSatisfierProducer` three times — an import and two call sites — while
+    // its DECLARATION lives in satisfier-pick.ts. The symbol read as "already
+    // visible", nothing was resolved, and the drafter still had no signature and
+    // no parameter type. It then wrote a call that failed TS2345.
+    //
+    // A call site tells the drafter the name exists; only a declaration tells it
+    // what to pass. Skip only when the window actually shows the declaration.
+    if (declarationVisible(g, raw)) continue;
     out.push(raw);
     if (out.length >= limit) break;
   }
   return out;
+}
+
+/**
+ * Does the window already show this symbol's DECLARATION (not merely a mention)?
+ *
+ * Call sites and imports name a symbol without saying anything about its shape,
+ * so they must not suppress a lookup. Matches the declaration forms this codebase
+ * uses, anchored to a line start so an import cannot satisfy it.
+ */
+function declarationVisible(grounding: string, name: string): boolean {
+  if (!grounding || !name) return false;
+  const n = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(
+    `^[\\t ]*(?:export[\\t ]+)?(?:async[\\t ]+)?(?:function|const|let|var|class|interface|type)[\\t ]+${n}\\b`,
+    "m",
+  ).test(grounding);
 }
 
 /** One resolved declaration: where a symbol lives and how to call it. */

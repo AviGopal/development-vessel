@@ -126,3 +126,47 @@ describe("typeNamesIn — a signature without its types is half a fact", () => {
     expect(typeNamesIn(undefined as unknown as string)).toEqual([]);
   });
 });
+
+describe("symbolsNeedingDeclaration — a mention is not a declaration", () => {
+  // THE DEFECT, and it silently disabled this module for the case it was written
+  // for. The original skip was `if (grounding.includes(name)) continue` — "already
+  // visible to the drafter". Measured 2026-08-11: the window was index.ts, which
+  // contains `pickSatisfierProducer` three times (one import, two call sites),
+  // while the DECLARATION lives in satisfier-pick.ts. The symbol read as visible,
+  // nothing was resolved, and the drafter wrote a call that failed TS2345 for want
+  // of the parameter type.
+  //
+  // A call site says the name exists. Only a declaration says what to pass.
+  const SPEC = "These lookups should use the pickSatisfierProducer helper the vessel already has.";
+
+  test("an import plus call sites does NOT suppress the lookup", () => {
+    const window = [
+      'import { pickSatisfierProducer } from "./satisfier-pick.js";',
+      "  const v = pickSatisfierProducer(list);",
+      "  const earlyV = pickSatisfierProducer(other);",
+    ].join("\n");
+    expect(symbolsNeedingDeclaration(SPEC, window)).toContain("pickSatisfierProducer");
+  });
+
+  test("a real declaration DOES suppress it", () => {
+    const window = "export function pickSatisfierProducer(producers: SatisfierProducer[]) {";
+    expect(symbolsNeedingDeclaration(SPEC, window)).not.toContain("pickSatisfierProducer");
+  });
+
+  test("every declaration form is recognised", () => {
+    for (const decl of [
+      "function pickSatisfierProducer(",
+      "export const pickSatisfierProducer = (",
+      "  export async function pickSatisfierProducer(",
+      "interface pickSatisfierProducer {",
+    ]) {
+      expect(symbolsNeedingDeclaration(SPEC, decl)).not.toContain("pickSatisfierProducer");
+    }
+  });
+
+  test("a mention inside prose or a comment does not suppress it", () => {
+    expect(
+      symbolsNeedingDeclaration(SPEC, "// pickSatisfierProducer already encodes the rule"),
+    ).toContain("pickSatisfierProducer");
+  });
+});

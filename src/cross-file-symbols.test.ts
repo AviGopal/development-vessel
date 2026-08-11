@@ -327,3 +327,46 @@ describe("safeAnchorLines — the list behind the enumerated choice", () => {
     expect(safeAnchorLines("", "anything")).toEqual([]);
   });
 });
+
+describe("a unique anchor in the WRONG REGION is still the wrong anchor", () => {
+  // The residual failure after every other cause was fixed, seen across FOUR goals
+  // and two vessels: correct file, real whole-file-unique anchor, wrong region.
+  // `occurs === 1` says an anchor binds unambiguously; it says nothing about
+  // whether it binds where the change belongs. locateRegion already knows where
+  // that is — it is the same centre the offered anchors were drawn around — so the
+  // distance between them is a decidable, LLM-free test.
+  const SLACK = 160;
+  const file = [
+    ...Array.from({ length: 200 }, (_, i) => `const head${i} = ${i};`),
+    "app.get('/selection-events', async (c) => {",
+    ...Array.from({ length: 200 }, (_, i) => `const tail${i} = ${i};`),
+  ].join("\n");
+  const lines = file.split("\n");
+  const distOf = (anchor: string) => {
+    const center = locateRegion(lines, ["/selection-events"]);
+    const idx = file.slice(0, file.indexOf(anchor)).split("\n").length - 1;
+    return { center, dist: Math.abs(idx - center) };
+  };
+
+  test("the correct line sits at distance 0 and is accepted", () => {
+    const { dist } = distOf("app.get('/selection-events', async (c) => {");
+    expect(dist).toBe(0);
+    expect(dist > SLACK).toBe(false);
+  });
+
+  test("a unique anchor far away is rejected despite being unique", () => {
+    const anchor = "const head5 = 5;";
+    expect(anchorOccurrences(file, anchor)).toBe(1); // genuinely unique
+    expect(distOf(anchor).dist).toBeGreaterThan(SLACK); // and still wrong
+  });
+
+  test("a nearby anchor is NOT second-guessed — the slack is deliberate", () => {
+    const anchor = "const tail10 = 10;";
+    expect(distOf(anchor).dist).toBeLessThanOrEqual(SLACK);
+  });
+
+  test("no judgement is made when the region cannot be located", () => {
+    // center < 0 means we have no opinion, so the anchor must stand.
+    expect(locateRegion(lines, ["a-token-that-does-not-occur"])).toBe(-1);
+  });
+});

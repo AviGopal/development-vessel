@@ -30,8 +30,20 @@ import { vacuousEditReason, nonTerminatingEditReason } from "../vacuous-edit.js"
 import { acquireComposeSlot } from "../compose-slots.js";
 import { existsSync as mountExistsSync } from "node:fs";
 import { regionCandidatesFromText } from "./region-probe.js";
-import { symbolsNeedingDeclaration, renderSymbolDeclarations, typeNamesIn, renderSafeAnchors, safeAnchorLines, type SymbolDeclaration } from "../cross-file-symbols.js";
+import { symbolsNeedingDeclaration, renderSymbolDeclarations, typeNamesIn, renderSafeAnchors, safeAnchorLines, locateRegion, type SymbolDeclaration } from "../cross-file-symbols.js";
 import { refuseRederivedEdit } from "../edit-provenance.js";
+
+/**
+ * How far a planned anchor may sit from the located region before it is treated as
+ * mislocated rather than merely unique.
+ *
+ * The offered anchors are drawn from a +/-80 line band around that same region, so
+ * anything inside 80 is "in the region the anchors came from" by construction.
+ * Doubled to 160 so an anchor slightly outside the band — a legitimate enclosing
+ * declaration, say — is not second-guessed; the failures this catches were 140 to
+ * 1,200 lines away, not marginal.
+ */
+const ANCHOR_REGION_SLACK_LINES = Number(process.env["ANCHOR_REGION_SLACK_LINES"] ?? 160);
 
 const DISCOVERY_ENDPOINT = process.env.DISCOVERY_ENDPOINT ?? "http://127.0.0.1:8100";
 // Federation-transport egress: dev-vessel has no libp2p deps, so a resolve to a
@@ -3518,8 +3530,50 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
       // from a WINDOW around the change site, and accept ONLY a unique anchor; else fail closed.
       const occurs = (hay: string, needle: string): number => (needle ? hay.split(needle).length - 1 : 0);
       const n0 = liveContent ? occurs(liveContent, effOld) : 0;
+      // Same ordering the offered anchors were built from, so "the region" here and
+      // "the region the anchors came from" are by construction the same place.
+      const anchorLocatorsForOp = [
+        ...regionCandidatesFromText(`${String(pointer.spec ?? "")}\n${String(pointer.gap?.summary ?? "")}`),
+        ...focusHints.slice(1),
+        regionHint ?? "",
+      ].filter(Boolean);
       const anchorNonUnique = !!effOld && n0 > 1;
-      const anchorUnusable = !effOld || n0 === 0 || n0 > 1;
+      // A UNIQUE ANCHOR IN THE WRONG REGION IS STILL THE WRONG ANCHOR.
+      //
+      // `n0 === 1` only says the anchor binds unambiguously — it says nothing
+      // about whether it binds where the change belongs. Measured 2026-08-11
+      // across FOUR distinct goals and two vessels, this was the residual failure
+      // after every other cause was fixed: correct file, real whole-file-unique
+      // anchor, wrong region. A goal about the health response (line 30) anchored
+      // in the drain loop (line ~329); a goal about route ordering (line 1385)
+      // anchored on `interface ExecutionTrace {` (line 169) and on
+      // `WHERE variant_id = $variant_id`.
+      //
+      // We already know where the change belongs — locateRegion() computes it from
+      // the goal's own locators, and it is the same centre the offered anchors were
+      // drawn around. So treat "unique but far outside that band" as unusable,
+      // which routes the op into the re-derivation that now offers the anchors as
+      // an ENUMERATED CHOICE. That converts a silent wrong-region edit into a
+      // pick from the right region.
+      //
+      // FAILS OPEN in both directions: when the region cannot be located
+      // (`center < 0`) no distance judgement is made and the anchor stands, and a
+      // rejected anchor is not discarded — re-derivation still has the free-text
+      // path behind the indexed one.
+      let anchorFarFromRegion = false;
+      if (liveContent && effOld && n0 === 1) {
+        const liveLines = liveContent.split("\n");
+        const center = locateRegion(liveLines, anchorLocatorsForOp);
+        if (center >= 0) {
+          const idx = liveContent.slice(0, liveContent.indexOf(effOld)).split("\n").length - 1;
+          const dist = Math.abs(idx - center);
+          if (dist > ANCHOR_REGION_SLACK_LINES) {
+            anchorFarFromRegion = true;
+            console.warn(`[fc-anchor-region] planned anchor for ${op.path} is unique but ${dist} lines from the located region (line ${center + 1}) — re-deriving from the offered anchors instead`);
+          }
+        }
+      }
+      const anchorUnusable = !effOld || n0 === 0 || n0 > 1 || anchorFarFromRegion;
       if (liveContent && anchorUnusable) {
         try {
           const siteHints = [...focusHints, op.new_string ?? "", op.rationale ?? ""];

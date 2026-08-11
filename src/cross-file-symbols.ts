@@ -318,6 +318,45 @@ export function locateRegion(lines: readonly string[], region: string | readonly
 }
 
 /**
+ * The anchors themselves, nearest the region first.
+ *
+ * Extracted from `renderSafeAnchors` so a caller can offer them as an ENUMERATED
+ * CHOICE rather than as prose to copy. Measured 2026-08-11: with the correct
+ * anchor demonstrably present in its prompt — first in the list, the exact target
+ * line — the drafter still emitted a fabricated `old_string` (`router.get(...)`
+ * for a codebase that uses `app.get`, and `const out = {};`, both occurring ZERO
+ * times). Every information-availability cause upstream had been fixed and
+ * measured by then. A model that ignores a list will ignore a longer one, so the
+ * remaining lever is mechanical: let it pick an INDEX and take the string from
+ * here, so the anchor cannot be invented because the model never writes it.
+ *
+ * Same guarantees as the rendered block: whole-file uniqueness, sorted by distance
+ * from the located region, empty when the region cannot be located.
+ */
+export function safeAnchorLines(
+  fileText: string,
+  region: string | readonly string[],
+  maxAnchors = 12,
+  window = 80,
+): string[] {
+  if (!fileText) return [];
+  const lines = fileText.split("\n");
+  const center = locateRegion(lines, region);
+  if (center < 0) return [];
+  const lo = Math.max(0, center - window);
+  const hi = Math.min(lines.length, center + window);
+  const nearText = lines.slice(lo, hi).join("\n");
+  const uniqueInBand = new Set(uniqueAnchorLines(nearText, Number.MAX_SAFE_INTEGER));
+  return lines
+    .slice(lo, hi)
+    .map((l, i) => ({ text: l.trim(), dist: Math.abs(lo + i - center) }))
+    .filter((c) => uniqueInBand.has(c.text) && anchorOccurrences(fileText, c.text) === 1)
+    .sort((a, b) => a.dist - b.dist)
+    .slice(0, maxAnchors)
+    .map((c) => c.text);
+}
+
+/**
  * Render verified-unique anchors near the region as a compact block.
  *
  * Scoped to the region's vicinity rather than the whole file: a 13,000-line file
@@ -350,15 +389,7 @@ export function renderSafeAnchors(
   // Sort candidates by distance from the region and take the closest. Uniqueness is
   // still whole-file (`anchorOccurrences === 1`), so a nearer anchor is never a
   // less safe one.
-  const nearText = lines.slice(lo, hi).join("\n");
-  const uniqueInBand = new Set(uniqueAnchorLines(nearText, Number.MAX_SAFE_INTEGER));
-  const unique = lines
-    .slice(lo, hi)
-    .map((l, i) => ({ text: l.trim(), dist: Math.abs(lo + i - center) }))
-    .filter((c) => uniqueInBand.has(c.text) && anchorOccurrences(fileText, c.text) === 1)
-    .sort((a, b) => a.dist - b.dist)
-    .slice(0, maxAnchors)
-    .map((c) => c.text);
+  const unique = safeAnchorLines(fileText, region, maxAnchors, window);
   if (unique.length === 0) return "";
   return [
     "",

@@ -30,7 +30,7 @@ import { vacuousEditReason, nonTerminatingEditReason } from "../vacuous-edit.js"
 import { acquireComposeSlot } from "../compose-slots.js";
 import { existsSync as mountExistsSync } from "node:fs";
 import { regionCandidatesFromText } from "./region-probe.js";
-import { symbolsNeedingDeclaration, renderSymbolDeclarations, typeNamesIn, renderSafeAnchors, type SymbolDeclaration } from "../cross-file-symbols.js";
+import { symbolsNeedingDeclaration, renderSymbolDeclarations, typeNamesIn, renderSafeAnchors, safeAnchorLines, type SymbolDeclaration } from "../cross-file-symbols.js";
 import { refuseRederivedEdit } from "../edit-provenance.js";
 
 const DISCOVERY_ENDPOINT = process.env.DISCOVERY_ENDPOINT ?? "http://127.0.0.1:8100";
@@ -3539,16 +3539,40 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
           // liveContent is the bytes this edit must actually bind to and may
           // differ from what the drafting prompt saw if an earlier op in the same
           // plan already touched the file.
-          const rederiveAnchors = renderSafeAnchors(
-            liveContent,
-            [...regionCandidatesFromText(`${String(pointer.spec ?? "")}\n${String(pointer.gap?.summary ?? "")}`), ...focusHints.slice(1), regionHint ?? ""].filter(Boolean),
-            op.path,
-          );
+          const anchorLocatorList = [...regionCandidatesFromText(`${String(pointer.spec ?? "")}\n${String(pointer.gap?.summary ?? "")}`), ...focusHints.slice(1), regionHint ?? ""].filter(Boolean);
+          const rederiveChoices = safeAnchorLines(liveContent, anchorLocatorList);
+          // ENUMERATED CHOICE, NOT FREE TEXT.
+          //
+          // Offering the anchors as prose to copy was not enough. Measured
+          // 2026-08-11 with EVERY information-availability cause upstream fixed and
+          // measured — capacity, locator derivation (route paths), band centring
+          // (verified on the edit site), selection, and supply (the exact target
+          // line offered FIRST) — the model still emitted fabricated old_strings
+          // (`router.get(...)` for a codebase that uses `app.get`; `const out =
+          // {};`), each occurring ZERO times. A model that ignores a list will
+          // ignore a longer one, so stop asking it to reproduce a string at all:
+          // let it pick an INDEX and take the bytes from the verified list here.
+          // The anchor then CANNOT be invented, because the model never writes it.
+          //
+          // Fails open: an out-of-range or absent index falls through to the
+          // free-text path below, which is still gated by uniqueness and by
+          // refuseRederivedEdit.
+          const choiceBlock = rederiveChoices.length
+            ? `\n\n## CHOOSE AN ANCHOR BY INDEX (each occurs EXACTLY ONCE in the file)\n`
+              + rederiveChoices.map((a, i) => `  [${i}] ${a}`).join("\n")
+              + `\n\nPrefer answering with {"anchor_index": <n>, "new_string": "<replacement>"} — the anchor text is taken from the list above, so you do not need to reproduce it.`
+            : "";
+          const rederiveAnchors = renderSafeAnchors(liveContent, anchorLocatorList, op.path) + choiceBlock;
           const g = parseJsonObject(await llmCall(llmEndpoint, /* updated comment */
             `A window around the change site in ${op.path} (the file is larger; this is the relevant region):\n\n${siteWindow}${rederiveAnchors}\n\nMake this change: ${op.rationale ?? ""}\nIntended new content/behaviour:\n${op.new_string ?? ""}\n\nReturn ONE JSON object {"old_string":"<a verbatim substring copied EXACTLY from the window above that is UNIQUE in the file — PREFER one of the VERIFIED-UNIQUE ANCHORS listed above, copied character for character; they are already checked to occur exactly once. Include enough enclosing context that it cannot match any other occurrence>","new_string":"<the exact replacement>"}. No prose, no fences. Escape newlines as \\n.`,
             model,
           ));
-          const cand = g?.old_string ? String(g.old_string) : "";
+          // Index answer wins: its bytes come from OUR verified list, not the model.
+          const idxRaw = (g as Record<string, unknown> | null)?.["anchor_index"];
+          const idx = typeof idxRaw === "number" ? idxRaw : Number.isFinite(Number(idxRaw)) ? Number(idxRaw) : NaN;
+          const chosen = Number.isInteger(idx) && idx >= 0 && idx < rederiveChoices.length ? rederiveChoices[idx]! : "";
+          if (chosen) console.log(`[fc-anchor-choice] re-derivation picked anchor [${idx}] from the verified list for ${op.path}`);
+          const cand = chosen || (g?.old_string ? String(g.old_string) : "");
           // UNIQUENESS IS NOT LOCATION AND NOT PLAUSIBILITY.
           //
           // `occurs(...) === 1` used to be the ONLY test here, and every comment

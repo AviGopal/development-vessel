@@ -15,6 +15,7 @@ import {
   anchorOccurrences,
   renderSafeAnchors,
   locateRegion,
+  safeAnchorLines,
 } from "./cross-file-symbols";
 
 const SPEC = `Edit repos/llm-resolver-vessel/src/model-policy.ts so a provider-level failure
@@ -293,5 +294,36 @@ describe("uniqueAnchorLines / anchorOccurrences — uniqueness is a whole-file f
     expect(locateRegion(text.split("\n"), ["", "beta"])).toBe(1);
     expect(locateRegion(text.split("\n"), ["nope", "alpha"])).toBe(0);
     expect(locateRegion(text.split("\n"), ["", "  "])).toBe(-1);
+  });
+});
+
+describe("safeAnchorLines — the list behind the enumerated choice", () => {
+  // The whole point of exposing the list: the caller offers INDICES, takes the
+  // bytes from here, and the anchor can no longer be invented because the model
+  // never writes it. So the list must be exactly what the rendered block shows.
+  const long = Array.from({ length: 400 }, (_, i) => `const uniqueSymbolNumber${i} = ${i};`).join("\n");
+
+  test("it returns the same anchors the rendered block advertises", () => {
+    const list = safeAnchorLines(long, "uniqueSymbolNumber200");
+    const rendered = renderSafeAnchors(long, "uniqueSymbolNumber200", "p.ts");
+    expect(list.length).toBeGreaterThan(0);
+    for (const a of list) expect(rendered).toContain(a);
+  });
+
+  test("every offered anchor occurs EXACTLY once in the whole file", () => {
+    for (const a of safeAnchorLines(long, "uniqueSymbolNumber200")) {
+      expect(anchorOccurrences(long, a)).toBe(1);
+    }
+  });
+
+  test("nearest the region first — index 0 is the most useful choice", () => {
+    const list = safeAnchorLines(long, "uniqueSymbolNumber200");
+    expect(list[0]).toContain("uniqueSymbolNumber200");
+  });
+
+  test("an unlocatable region yields NO choices, so no index can be offered", () => {
+    expect(safeAnchorLines(long, "")).toEqual([]);
+    expect(safeAnchorLines(long, "a-token-that-does-not-occur")).toEqual([]);
+    expect(safeAnchorLines("", "anything")).toEqual([]);
   });
 });

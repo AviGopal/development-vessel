@@ -202,3 +202,60 @@ describe("nonTerminatingEditReason — must NOT refuse ordinary recursion", () =
     expect(nonTerminatingEditReason(undefined as unknown as string, "y")).toBeNull();
   });
 });
+
+describe("vacuousEditReason — a diagnostic-only edit is not a change", () => {
+  // bc0ba3f3, authored autonomously, graded reached:true, verdict FAVORABLE,
+  // LANDED on origin/dev and deployed. The entire diff removed one tap() call.
+  // The `if (verdict === "BUSY")` block and its return were untouched, so
+  // behaviour was identical — and it deleted an honest diagnostic, making the
+  // condition it reported harder to see.
+  //
+  // Every gate passed it: deleting a log line typechecks, keeps shape-dispatch
+  // agreement, breaks no test. The semantic judge recorded that the patch
+  // "removes the suppression of byte-anchored escalation" — a change not in the
+  // diff. The added-lines arm could not catch it because a pure deletion returns
+  // null on the principle that deleting CODE can be the right repair.
+  const BEFORE = [
+    '            if (verdict === "BUSY") {',
+    "              tap(`[goal-host-vessel] capacity-refused for ${editFile} — still BUSY`);",
+    "              return {",
+    "                result: null,",
+    "              };",
+    "            }",
+  ].join("\n");
+
+  test("fires on the landed hollow diff", () => {
+    const after = BEFORE.replace(/\n\s*tap\(.*\n/, "\n");
+    const r = vacuousEditReason(BEFORE, after);
+    expect(r).not.toBeNull();
+    expect(r).toContain("diagnostic-only");
+  });
+
+  test("adding only a log line is equally hollow", () => {
+    expect(
+      vacuousEditReason("function f() {\n  return 1;\n}", 'function f() {\n  console.log("here");\n  return 1;\n}'),
+    ).not.toBeNull();
+  });
+});
+
+describe("vacuousEditReason — diagnostic gate must not swallow real work", () => {
+  test("DELETING REAL CODE still passes — a deletion can be the right repair", () => {
+    // The load-bearing control. Narrowing to logging is what keeps the original
+    // pure-deletion principle intact.
+    expect(
+      vacuousEditReason("function f() {\n  doThing();\n  return 1;\n}", "function f() {\n  return 1;\n}"),
+    ).toBeNull();
+  });
+
+  test("a logic change beside a log line is real work", () => {
+    expect(
+      vacuousEditReason('if (x) {\n  console.log("a");\n  return 1;\n}', 'if (x && y) {\n  console.log("b");\n  return 2;\n}'),
+    ).toBeNull();
+  });
+
+  test("adding a real statement passes", () => {
+    expect(
+      vacuousEditReason("function f() {\n  return 1;\n}", "function f() {\n  const y = compute();\n  return y;\n}"),
+    ).toBeNull();
+  });
+});

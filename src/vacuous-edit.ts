@@ -101,6 +101,18 @@ function stripTypeOnly(s: string): string {
  * and passes. A gate that refused all self-calls would be far worse than the
  * defect it prevents, since recursion is ordinary and correct.
  */
+/**
+ * Is this line purely a diagnostic emission?
+ *
+ * console.*, and this fleet's `tap(...)` walk-log helper. Deliberately a small
+ * fixed list: anything unrecognised counts as REAL code, so an unfamiliar shape
+ * is never mistaken for a no-op.
+ */
+function isLoggingCall(line: string): boolean {
+  const s = line.trim().replace(/^[-+]\s*/, "");
+  return /^(?:await\s+)?(?:console\.(?:log|warn|error|info|debug)|tap|logger\.(?:log|warn|error|info|debug))\s*\(/.test(s);
+}
+
 export function nonTerminatingEditReason(before: string, after: string): string | null {
   if (typeof before !== "string" || typeof after !== "string") return null;
   if (after === before) return null;
@@ -249,8 +261,56 @@ export function vacuousEditReason(before: string, after: string): string | null 
     .filter((l) => !beforeLines.has(l.trim()))
     .filter((l) => !isInert(l));
 
+  // A DIAGNOSTIC-ONLY EDIT CANNOT BE THE REQUESTED CHANGE.
+  //
+  // Observed 2026-08-11 (bc0ba3f3 — authored autonomously, graded reached:true,
+  // verdict FAVORABLE, LANDED on origin/dev and deployed). The entire diff:
+  //
+  //   - tap(`[goal-host-vessel] ... capacity-refused for ${editFile} — compose
+  //          still BUSY after retry; NOT escalating ...`);
+  //
+  // One deleted logging call. The `if (verdict === "BUSY")` block and its return
+  // were untouched, so behaviour was identical — and the change REMOVED an honest
+  // diagnostic, making the fleet slightly harder to debug.
+  //
+  // Every gate passed it. Deleting a log line typechecks, keeps shape-dispatch
+  // agreement, and breaks no test. The semantic judge even recorded that the patch
+  // "removes the suppression of byte-anchored escalation" — describing a change
+  // that is not in the diff.
+  //
+  // The arm below cannot catch it: it inspects ADDED lines, and a pure deletion
+  // returns null on the honest principle that a deletion can be the right repair.
+  // That principle holds for deleting CODE. It does not hold when the only thing
+  // removed is a diagnostic, because a program that logs less behaves the same.
+  //
+  // Narrow deliberately: fires only when EVERY changed line — added or removed —
+  // is a logging call. A diff that also touches a condition, a return, an
+  // assignment or a call is real work and passes untouched. A goal genuinely
+  // asking to quieten a log will be refused here, which is the accepted cost: that
+  // ask is rare, the refusal is recoverable via escalation, and it landed twice
+  // tonight in the other direction.
+  const removed = after
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0 && !isInert(l));
+  const afterSet = new Set(removed);
+  const deleted = before
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0 && !isInert(l) && !afterSet.has(l));
+  const changed = [...added, ...deleted];
+  if (changed.length > 0 && changed.every(isLoggingCall)) {
+    return (
+      `diagnostic-only edit: every changed line is a logging call ` +
+      `(${changed.length} line(s), e.g. \`${(changed[0] ?? "").slice(0, 80)}\`). ` +
+      `A program that logs differently behaves identically, so this cannot be the ` +
+      `requested change — and removing a diagnostic makes the failure it reported ` +
+      `harder to see`
+    );
+  }
+
   // Nothing meaningful added (pure deletion or comment/whitespace churn): not
-  // this gate's business. A deletion can be exactly the right repair.
+  // this gate's business. A deletion of real CODE can be exactly the right repair.
   if (added.length === 0) return null;
 
   const declaredNames: string[] = [];

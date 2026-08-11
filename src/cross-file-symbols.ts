@@ -287,8 +287,14 @@ export function renderSafeAnchors(
 ): string {
   if (!fileText || !path) return "";
   const lines = fileText.split("\n");
-  let center = lines.findIndex((l) => l.includes(region));
-  if (center < 0) return ""; // If region not found, return no anchors.
+  // `"anything".includes("")` is TRUE, so an EMPTY region makes findIndex return
+  // 0 and silently bands the top of the file. The `region ?` guard is what keeps
+  // an absent region from being treated as "found at line 0" — and absent is the
+  // case that actually occurs (callers pass `regionHint ?? ""`, and compose logs
+  // report `region: null` / "no region literal"). Without the guard this returned
+  // an arbitrary band centred on line 0 instead of no anchors at all.
+  const center = region ? lines.findIndex((l) => l.includes(region)) : -1;
+  if (center < 0) return ""; // Region absent or not found: no anchors, not a guess.
   const lo = Math.max(0, center - window);
   const hi = Math.min(lines.length, center + window);
   const near = lines.slice(lo, hi).join("\n");

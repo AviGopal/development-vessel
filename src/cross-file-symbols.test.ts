@@ -215,4 +215,54 @@ describe("uniqueAnchorLines / anchorOccurrences — uniqueness is a whole-file f
     expect(renderSafeAnchors("", "r", "p.ts")).toBe("");
     expect(renderSafeAnchors("{\n}\n", "r", "p.ts")).toBe("");
   });
+
+  // AN UNLOCATABLE REGION MUST YIELD NO ANCHORS, NOT AN ARBITRARY BAND.
+  //
+  // These pin the two halves of one defect, because a patch that satisfies only
+  // one reads as addressing it. The band is centred on the first line CONTAINING
+  // `region`; if that cannot be found, any band is a guess about where the edit
+  // lives, and a confidently-offered wrong anchor is worse than none — measured
+  // 2026-08-11, a drafter handed anchors from lines 168-328 of a 4209-line file
+  // whose edit sites were all past 1148 invented an anchor occurring ZERO times,
+  // identically on two dispatches.
+  //
+  // The empty case is the one that actually occurs: callers pass
+  // `regionHint ?? ""`. `"anything".includes("")` is TRUE, so without an explicit
+  // guard findIndex returns 0 and bands the top of the file.
+  test("an empty region yields no anchors rather than banding line 0", () => {
+    const long = Array.from({ length: 400 }, (_, i) => `const uniqueSymbolNumber${i} = ${i};`).join("\n");
+    expect(renderSafeAnchors(long, "", "p.ts")).toBe("");
+  });
+
+  test("a region absent from the file yields no anchors rather than the midpoint", () => {
+    const long = Array.from({ length: 400 }, (_, i) => `const uniqueSymbolNumber${i} = ${i};`).join("\n");
+    expect(renderSafeAnchors(long, "a-token-that-does-not-occur-anywhere", "p.ts")).toBe("");
+  });
+
+  test("a locatable region bands near it, not across the whole file", () => {
+    const long = Array.from({ length: 400 }, (_, i) => `const uniqueSymbolNumber${i} = ${i};`).join("\n");
+    const out = renderSafeAnchors(long, "uniqueSymbolNumber200", "p.ts");
+    const offered = [...out.matchAll(/uniqueSymbolNumber(\d+) =/g)].map((m) => Number(m[1]));
+    expect(offered.length).toBeGreaterThan(0);
+    // Every offered anchor lies inside the +/-80 band around the located region.
+    for (const n of offered) expect(Math.abs(n - 200)).toBeLessThanOrEqual(80);
+  });
+
+  // ANCHORS COME FROM THE BAND'S TOP EDGE, NOT FROM NEAR THE REGION.
+  //
+  // `uniqueAnchorLines(near, …).slice(0, maxAnchors)` keeps the FIRST maxAnchors
+  // unique lines of the band, and the band starts at `center - window`. So with
+  // the defaults the drafter is handed lines [center-80, center-68] — up to 80
+  // lines ABOVE the line it must edit, and never the line itself. Centring the
+  // band correctly is necessary but NOT sufficient; this is why a "correctly
+  // located" region can still produce an unusable anchor set on a large file.
+  // Pinned as current behaviour so a future fix is a deliberate change, not an
+  // accident.
+  test("offered anchors currently skew to the top of the band, not the region", () => {
+    const long = Array.from({ length: 400 }, (_, i) => `const uniqueSymbolNumber${i} = ${i};`).join("\n");
+    const out = renderSafeAnchors(long, "uniqueSymbolNumber200", "p.ts");
+    const offered = [...out.matchAll(/uniqueSymbolNumber(\d+) =/g)].map((m) => Number(m[1]));
+    expect(Math.min(...offered)).toBe(120);
+    expect(offered).not.toContain(200);
+  });
 });

@@ -2788,8 +2788,19 @@ async function resolveFeatureComposeUncapped(pointer: FeatureComposePointer): Pr
           const rootA = process.env["REPO_ROOT"] ?? process.env["WORKSPACE_ROOT"] ?? "/workspace/git/super-repo";
           const text = await readFile(`${rootA}/${tf}`, "utf8").catch(() => "");
           if (text) {
+            // CENTRE THE BAND ON SOMETHING ACTUALLY IN THE FILE. renderSafeAnchors
+            // bands +/-80 lines around the first line CONTAINING its region arg, so
+            // passing regionHint alone centred it on the grounding term — which has
+            // no relationship to where the edit must happen. Measured 2026-08-11 on
+            // a 4209-line file whose edit sites were all past 1148: the mined term's
+            // first occurrence was line 248, inside a COMMENT, and the drafter was
+            // handed twelve unique, unusable anchors and invented one occurring ZERO
+            // times, identically on 2 of 2 dispatches. The `text.includes` test is
+            // the load-bearing part: edit_site is a `path:line` string that never
+            // appears in the source it points at, so taking focusHints[0] blindly
+            // would trade a wrong band for no band.
             const bestHint = focusHints.find((h) => text.includes(h)) ?? regionHint;
-const anchors = renderSafeAnchors(text, bestHint ?? "", tf);
+            const anchors = renderSafeAnchors(text, bestHint ?? "", tf);
             if (anchors) { symbolBlock += anchors; console.log(`[fc-anchors] supplied verified-unique anchors for ${tf}`); }
           }
         }

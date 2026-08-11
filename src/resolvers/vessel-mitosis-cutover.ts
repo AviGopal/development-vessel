@@ -742,6 +742,34 @@ export async function resolveVesselMitosisCutover(
     !!currentLiveSha &&
     !currentLiveSha.startsWith("<") &&
     stagedBaseSha === currentLiveSha);
+  // SAY HOW MUCH OF THE STAGED CHANGE WAS ACTUALLY FRESHNESS-CHECKED.
+  //
+  // The gate above verifies ONE file: the sentinel (staged_files[0], or
+  // src/index.ts). Only that file has a recorded base sha, so every OTHER staged
+  // file is applied with its freshness unverified — and silently.
+  //
+  // Measured 2026-08-11 (commit 2dbb4a6): a mitosis staged from base 7e175bce
+  // touched feature-compose.ts and vessel-mitosis-cutover.ts. Neither is
+  // src/index.ts, the sentinel matched, the gate passed, and the cutover reverted
+  // 14 lines of newer work in the second file with NO conflict raised. An
+  // autonomous commit undid an operator fix and nothing reported it.
+  //
+  // The substrate's own semantic judge independently described the same defect
+  // when asked about it: "The current code still only checks one sentinel file."
+  //
+  // Refusing multi-file mitoses outright would block legitimate work, and adding
+  // per-file base shas is a change to the STAGING writer, not this reader. What
+  // this can do honestly, now, is stop the unchecked portion being invisible: a
+  // gate that silently verifies 1 of N reads exactly like a gate that verified N.
+  const stagedCount = Array.isArray(pointer.staged_files) ? pointer.staged_files.length : 0;
+  if (stagedCount > 1) {
+    console.warn(
+      `[mitosis-cutover] FRESHNESS COVERAGE 1/${stagedCount} — only the sentinel (${stagedSentinel}) has a recorded base sha; ` +
+      `the other ${stagedCount - 1} staged file(s) are applied WITHOUT a drift check. A file changed since staging will be ` +
+      `silently reverted (observed 2026-08-11, commit 2dbb4a6). Treat a green freshness verdict on a multi-file mitosis as ` +
+      `covering one file only.`,
+    );
+  }
   console.error(`[mitosis-cutover] freshness vessel=${vessel_name} mitosis=${mitosis_version_id} staged_base_sha=${stagedBaseSha ?? "<missing>"} current_live_sha=${currentLiveSha ?? "<absent>"} freshnessOK=${freshnessOK} net_new=${netNewFreshnessOK} freshness_check_path=${freshnessCheckPath}`);
   if (!freshnessOK) {
     // Already-applied no-op: if the live source already matches the STAGED

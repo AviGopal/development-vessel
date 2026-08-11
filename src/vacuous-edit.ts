@@ -38,8 +38,6 @@ const DECL = /^\s*(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=/;
 
 /** Lines that carry no behaviour and should not count either way. */
 function isInert(line: string): boolean {
-  // vacuous edit
-  console.log('isInert called with:', line);
   const s = line.trim();
   return (
     s === "" ||

@@ -40,6 +40,12 @@ const SLOT_STALE_MS = Number(process.env["COMPOSE_SLOT_STALE_MS"] ?? 20 * 60_000
 
 export interface ComposeSlot {
   readonly granted: boolean;
+  /**
+   * Refused because a simultaneous claimant took the last index, rather than
+   * because the cap was already full when this call started. Advisory: it only
+   * changes how the refusal is DESCRIBED, never whether work proceeds.
+   */
+  readonly race?: boolean;
   /** In-flight count observed at decision time, for honest logging. */
   readonly observed: number;
   release(): Promise<void>;
@@ -215,7 +221,25 @@ export async function acquireComposeSlot(
       }
     }
     if (path === null) {
-      return { granted: false, observed: live, release: async () => {} };
+      // LOST THE RACE, not "cap reached" — say which.
+      //
+      // `live` was read BEFORE the claim loop. Under simultaneous arrival another
+      // claimant can take the last index in between, so a refusal here can report
+      // a count that is already stale. Observed 2026-08-11:
+      //
+      //   [compose-cap] REFUSING autonomous compose: 0 in flight
+      //
+      // which reads as a broken cap — zero in flight must surely be admissible —
+      // and I began diagnosing it as one. The slot directory showed slot-0 held by
+      // a live pid: the refusal was CORRECT and only its explanation was wrong.
+      //
+      // This is the arbitration the O_EXCL claim exists to perform, so it will
+      // happen by design whenever two composes arrive together. Reporting the
+      // pre-claim count as though it were the reason turns correct behaviour into
+      // an apparent defect — and a misleading log has cost more diagnostic time
+      // this session than any silent failure.
+      const nowLive = await countLive(Date.now()).catch(() => live);
+      return { granted: false, observed: nowLive, race: nowLive <= live, release: async () => {} };
     }
     return {
       granted: true,

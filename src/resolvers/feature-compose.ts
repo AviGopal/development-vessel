@@ -2371,7 +2371,17 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
   const isDirected = (pointer as { directed?: boolean }).directed === true;
   const slot = await acquireComposeSlot(slotId, { directed: isDirected });
   if (!slot.granted) {
-    console.warn(`[compose-cap] REFUSING ${isDirected ? "DIRECTED" : "autonomous"} compose: ${slot.observed} in flight — gap stays open, retried when there is capacity`);
+    // Say WHICH refusal this is. `observed` is read before the atomic claim, so a
+    // simultaneous claimant can take the last index in between — and reporting the
+    // pre-claim count then produces "REFUSING autonomous compose: 0 in flight",
+    // which reads as a broken cap. Observed 2026-08-11, and I started debugging it
+    // as one before the slot directory showed a live holder: the refusal was
+    // correct, only its explanation was wrong.
+    console.warn(
+      slot.race
+        ? `[compose-cap] REFUSING ${isDirected ? "DIRECTED" : "autonomous"} compose: lost the race for the last slot to a simultaneous claimant (${slot.observed} in flight now) — the cap held, gap stays open and retries`
+        : `[compose-cap] REFUSING ${isDirected ? "DIRECTED" : "autonomous"} compose: ${slot.observed} in flight — gap stays open, retried when there is capacity`,
+    );
     return {
       shape: "featureComposeReport",
       body: {

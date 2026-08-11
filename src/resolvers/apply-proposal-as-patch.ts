@@ -1102,6 +1102,18 @@ async function attemptApplyOnce(pointer: ApplyProposalAsPatchPointer): Promise<R
       } catch { /* keep sha256("") fallback */ }
       orderedStagedFiles = [sentinelSubPath, ...stagedFiles.filter((f) => f !== sentinelSubPath)];
     }
+    // Hash EVERY staged file's live (pre-edit) content, by the same rule the
+    // sentinel uses. A file that does not exist yet is net-new and gets no entry,
+    // so the reader cannot mistake "absent" for "drifted".
+    const stagedBaseShas: Record<string, string> = {};
+    for (const rel of orderedStagedFiles) {
+      try {
+        const livePath = join(vesselsRoot, vesselOnly, rel);
+        if (await exists(livePath)) {
+          stagedBaseShas[rel] = createHash("sha256").update(await readFile(livePath)).digest("hex").slice(0, 12);
+        }
+      } catch { /* unreadable -> no entry -> reader treats as unknown */ }
+    }
     const pendingBody = {
       vessel_name: vesselOnly,
       base_version_id: "v1",
@@ -1112,6 +1124,30 @@ async function attemptApplyOnce(pointer: ApplyProposalAsPatchPointer): Promise<R
       proposal: chosen.name,
       staged_files: orderedStagedFiles,
       base_sha: baseSha,
+      // PER-FILE BASE HASHES — one sha cannot speak for N files.
+      //
+      // `base_sha` is the hash of the SENTINEL only (staged_files[0]). The cutover
+      // freshness gate therefore verifies exactly one file, and every other file in
+      // the same staged change is written over with no drift check.
+      //
+      // Measured 2026-08-11 (commit 2dbb4a6): a mitosis staged from an older base
+      // touched two files, the sentinel was untouched so the gate passed, and the
+      // cutover silently reverted 14 lines of newer work in the second file with no
+      // conflict raised. An autonomous commit undid an operator fix and nothing
+      // reported it.
+      //
+      // A later autonomous attempt at this same defect (067b3f46) tried to fix it
+      // READER-side by comparing every staged file's hash against `base_sha` — but
+      // that value is the sentinel's hash, so every other file mismatches by
+      // construction and ALL multi-file cutovers would have been refused. The
+      // missing information is per-file, so it has to be recorded here, at staging,
+      // where each file's pre-edit content is still known.
+      //
+      // ADDITIVE and fail-open: a reader that ignores this field behaves exactly as
+      // before, and a reader that uses it must treat an absent entry as "unknown,
+      // do not refuse" — the same contract the existing `unknown` freshness state
+      // already has.
+      staged_base_shas: stagedBaseShas,
       multifile: true,
     };
     try { await writeFile(pendingPath, JSON.stringify(pendingBody, null, 2)); }

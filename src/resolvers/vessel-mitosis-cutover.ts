@@ -762,6 +762,46 @@ export async function resolveVesselMitosisCutover(
   // this can do honestly, now, is stop the unchecked portion being invisible: a
   // gate that silently verifies 1 of N reads exactly like a gate that verified N.
   const stagedCount = Array.isArray(pointer.staged_files) ? pointer.staged_files.length : 0;
+  // PER-FILE FRESHNESS, when the staging leg recorded it.
+  //
+  // `staged_base_sha` is the SENTINEL's hash, so it can only ever verify one file.
+  // apply_proposal_as_patch now also records `staged_base_shas` — a per-file map of
+  // pre-edit hashes — which is the information this check actually needs.
+  //
+  // The naive reader-side fix (attempted autonomously in 067b3f46) compared every
+  // staged file against the single `staged_base_sha`; because that is one file's
+  // hash, every other file mismatched by construction and ALL multi-file cutovers
+  // would have been refused. Compare each file to ITS OWN recorded base.
+  //
+  // FAIL-OPEN on absence, deliberately and in three places: no map (older staging
+  // leg), no entry for a file (net-new, or unreadable at staging), or an unreadable
+  // live file. Each yields "unknown", which is the state this gate already treats
+  // as non-blocking — a freshness check that refuses on missing evidence would
+  // wedge every mitosis staged before this field existed.
+  const perFileBases = (pointer as { staged_base_shas?: Record<string, string> }).staged_base_shas;
+  if (perFileBases && typeof perFileBases === "object" && Array.isArray(pointer.staged_files)) {
+    const drifted: string[] = [];
+    for (const rel of pointer.staged_files) {
+      const recorded = perFileBases[rel];
+      if (typeof recorded !== "string" || recorded.length === 0) continue; // unknown -> do not refuse
+      try {
+        const livePath = join(baseRoot, rel);
+        if (!(await pathExists(livePath))) continue; // absent live -> net-new, not drift
+        const liveNow = createHash("sha256").update(await readFile(livePath)).digest("hex").slice(0, 12);
+        if (liveNow !== recorded) drifted.push(`${rel} (staged base ${recorded}, live now ${liveNow})`);
+      } catch { /* unreadable -> unknown -> do not refuse */ }
+    }
+    if (drifted.length > 0) {
+      console.error(
+        `[mitosis-cutover] FRESHNESS DRIFT in ${drifted.length}/${pointer.staged_files.length} staged file(s) — ` +
+        `each changed since this mitosis was staged, so applying it would revert that newer work: ${drifted.join("; ")}`,
+      );
+      return softRefuse("staged files drifted since staging", {
+        verdict: evaluation_evidence.verdict,
+        drifted,
+      });
+    }
+  }
   if (stagedCount > 1) {
     console.warn(
       `[mitosis-cutover] FRESHNESS COVERAGE 1/${stagedCount} — only the sentinel (${stagedSentinel}) has a recorded base sha; ` +

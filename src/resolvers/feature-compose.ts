@@ -1898,6 +1898,27 @@ function siteCenteredWindow(content: string, cap: number, hints: string[]): stri
   }
   return null;
 }
+/**
+ * Reassemble a declaration that grep returned as several -A context lines.
+ *
+ * grep prefixes the match with `file:line:` and context with `file-line-`, so the
+ * text has to be recovered from both forms. Stops at the line that opens the body
+ * (`{`) or the arrow (`=>`), because everything after that is implementation, not
+ * signature — and the point of this block is to show the drafter the CONTRACT.
+ */
+function joinSignature(rawGrepOutput: string): string {
+  const parts: string[] = [];
+  for (const line of rawGrepOutput.split("\n")) {
+    const m = /^[^:]+[:-]\d+[:-](.*)$/.exec(line);
+    if (!m) continue;
+    const text = (m[1] ?? "").trim();
+    if (!text) continue;
+    parts.push(text);
+    if (text.includes("{") || text.includes("=>")) break;
+  }
+  return parts.join(" ").replace(/\s+/g, " ").trim();
+}
+
 async function groundVesselFiles(toolsEndpoint: string, verifyVessels: string[], focusHints: string[] = [], targetFiles: string[] = [], primaryProbe: string | string[] = ""): Promise<string> {
   const blocks: string[] = [];
   let contentBudget = GROUND_CONTENT_BUDGET;
@@ -2681,14 +2702,29 @@ async function resolveFeatureComposeUncapped(pointer: FeatureComposePointer): Pr
           if (decls.some((d) => d.symbol === sym)) continue;
           // Declarations only — a call site would teach the wrong signature.
           const pattern = `(export[[:space:]]+)?(const|function|async function|class|type|interface)[[:space:]]+${sym}\\b`;
+          // -A3: A SIGNATURE IS NOT ALWAYS ONE LINE.
+          //
+          // Measured 2026-08-11. The real declaration is formatted across three
+          // lines:
+          //
+          //   export function pickSatisfierProducer(
+          //     producers: SatisfierProducer[],
+          //   ): SatisfierProducer | undefined {
+          //
+          // A single-line grep captured only `export function pickSatisfierProducer(`
+          // — no parameter type, no return type. The drafter got a signature
+          // carrying no shape information, and the one-hop type resolution had
+          // nothing to extract, so it silently found no types to resolve. The
+          // symbol looked resolved (`resolved 1/3`) while conveying almost nothing.
           const sh = await callTool(toolsEndpoint, "shell", {
-            command: `cd ${JSON.stringify(`${REPO_ROOT}/${vRel}`)} 2>/dev/null && grep -rnE ${JSON.stringify(pattern)} src --include='*.ts' --include='*.tsx' 2>/dev/null | head -1`,
+            command: `cd ${JSON.stringify(`${REPO_ROOT}/${vRel}`)} 2>/dev/null && grep -rnE -A3 ${JSON.stringify(pattern)} src --include='*.ts' --include='*.tsx' --exclude='*.test.ts' 2>/dev/null | head -4`,
             cwd: REPO_ROOT,
           });
-          const hit = String((sh.body as { stdout?: unknown })?.stdout ?? "").trim();
-          const m = /^([^:]+):(\d+):(.*)$/.exec(hit);
+          const raw = String((sh.body as { stdout?: unknown })?.stdout ?? "").trim();
+          const first = raw.split("\n")[0] ?? "";
+          const m = /^([^:]+):(\d+):(.*)$/.exec(first);
           if (!m) continue;
-          decls.push({ symbol: sym, file: `repos/${vRel}/${m[1]}`, line: (m[3] ?? "").trim().slice(0, 300) });
+          decls.push({ symbol: sym, file: `repos/${vRel}/${m[1]}`, line: joinSignature(raw).slice(0, 300) });
         }
       }
       // ONE HOP OUT: the TYPES named in those declarations.

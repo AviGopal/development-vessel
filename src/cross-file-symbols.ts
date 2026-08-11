@@ -140,3 +140,44 @@ export function importSpecifier(fromFile: string, toFile: string): string {
   const prefix = up === 0 ? "./" : "../".repeat(up);
   return `${prefix}${[...down, toName].join("/")}`;
 }
+
+/**
+ * Type names mentioned in a declaration line, so they can be resolved one hop out.
+ *
+ * THE OBSERVED CASE (2026-08-11). Cross-file grounding gave the drafter the
+ * helper's declaration:
+ *
+ *   export function pickSatisfierProducer(producers: SatisfierProducer[]): SatisfierProducer | undefined
+ *
+ * It then wrote the call correctly and failed to compile:
+ *
+ *   TS2345: '{ endpoint?: string }[] | undefined' is not assignable to 'SatisfierProducer[]'
+ *
+ * The signature told it WHAT to call and nothing about the type in that signature,
+ * so it could not know the cast the existing call sites use. Handing over a
+ * function without its parameter types is the same information gap one level up —
+ * a name whose meaning lives in another file.
+ *
+ * Capitalised identifiers only, and built-ins excluded: a lowercase token in a
+ * signature is a parameter name, not a type, and resolving `string` teaches
+ * nothing. Depth ONE by construction — this is called on declaration lines, never
+ * on its own output, so a chain of types cannot fan out.
+ */
+const BUILTIN_TYPES = new Set([
+  "String", "Number", "Boolean", "Object", "Array", "Promise", "Record", "Partial",
+  "Readonly", "ReadonlyArray", "Map", "Set", "Date", "RegExp", "Error", "JSON",
+  "Function", "Symbol", "BigInt", "Uint8Array", "Buffer", "Request", "Response",
+]);
+
+export function typeNamesIn(declarationLine: string): string[] {
+  if (typeof declarationLine !== "string" || declarationLine.length === 0) return [];
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const m of declarationLine.matchAll(/\b([A-Z][A-Za-z0-9_]{2,})\b/g)) {
+    const t = m[1]!;
+    if (seen.has(t) || BUILTIN_TYPES.has(t)) continue;
+    seen.add(t);
+    out.push(t);
+  }
+  return out;
+}

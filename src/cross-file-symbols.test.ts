@@ -10,6 +10,7 @@ import {
   symbolsNeedingDeclaration,
   renderSymbolDeclarations,
   importSpecifier,
+  typeNamesIn,
 } from "./cross-file-symbols";
 
 const SPEC = `Edit repos/llm-resolver-vessel/src/model-policy.ts so a provider-level failure
@@ -93,5 +94,35 @@ describe("renderSymbolDeclarations — carries signature AND import path", () =>
       symbol: `sym${i}`, file: `repos/v/src/f${i}.ts`, line: "x".repeat(200),
     }));
     expect(renderSymbolDeclarations(many, "repos/v/src/t.ts", 500).length).toBeLessThanOrEqual(520);
+  });
+});
+
+describe("typeNamesIn — a signature without its types is half a fact", () => {
+  // Measured 2026-08-11: given the helper's declaration, the drafter wrote the
+  // call correctly and failed to compile —
+  //   TS2345: '{ endpoint?: string }[]' is not assignable to 'SatisfierProducer[]'
+  // because the signature named a type it had never been shown. Resolving the
+  // types mentioned in a resolved declaration closes that, one hop out.
+  test("extracts the type from the real declaration", () => {
+    expect(
+      typeNamesIn("export function pickSatisfierProducer(producers: SatisfierProducer[]): SatisfierProducer | undefined {"),
+    ).toEqual(["SatisfierProducer"]);
+  });
+
+  test("built-ins are not worth resolving", () => {
+    expect(typeNamesIn("function f(a: string, b: Promise<Record<string, number>>): Array<Date>")).toEqual([]);
+  });
+
+  test("lowercase tokens are parameter names, not types", () => {
+    expect(typeNamesIn("function f(producers, best, pool)")).toEqual([]);
+  });
+
+  test("multiple distinct types, deduped", () => {
+    expect(typeNamesIn("function g(a: Alpha, b: Beta, c: Alpha): Gamma")).toEqual(["Alpha", "Beta", "Gamma"]);
+  });
+
+  test("empty input is safe", () => {
+    expect(typeNamesIn("")).toEqual([]);
+    expect(typeNamesIn(undefined as unknown as string)).toEqual([]);
   });
 });

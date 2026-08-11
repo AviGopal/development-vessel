@@ -30,7 +30,7 @@ import { vacuousEditReason, nonTerminatingEditReason } from "../vacuous-edit.js"
 import { acquireComposeSlot } from "../compose-slots.js";
 import { existsSync as mountExistsSync } from "node:fs";
 import { regionCandidatesFromText } from "./region-probe.js";
-import { symbolsNeedingDeclaration, renderSymbolDeclarations, type SymbolDeclaration } from "../cross-file-symbols.js";
+import { symbolsNeedingDeclaration, renderSymbolDeclarations, typeNamesIn, type SymbolDeclaration } from "../cross-file-symbols.js";
 
 const DISCOVERY_ENDPOINT = process.env.DISCOVERY_ENDPOINT ?? "http://127.0.0.1:8100";
 // Federation-transport egress: dev-vessel has no libp2p deps, so a resolve to a
@@ -2691,6 +2691,44 @@ async function resolveFeatureComposeUncapped(pointer: FeatureComposePointer): Pr
           decls.push({ symbol: sym, file: `repos/${vRel}/${m[1]}`, line: (m[3] ?? "").trim().slice(0, 300) });
         }
       }
+      // ONE HOP OUT: the TYPES named in those declarations.
+      //
+      // A signature tells the drafter what to call and nothing about the types in
+      // it. Measured 2026-08-11: given `pickSatisfierProducer(producers:
+      // SatisfierProducer[])` it wrote the call correctly and failed to compile —
+      // `'{ endpoint?: string }[]' is not assignable to 'SatisfierProducer[]'` —
+      // because it could not know the cast the existing call sites use. Handing
+      // over a function without its parameter types is the same information gap
+      // one level up.
+      //
+      // Depth ONE, and bounded: types are collected only from declaration lines
+      // already resolved, never from their own results, so this cannot fan out.
+      try {
+        const wantTypes = new Set<string>();
+        for (const d of decls) for (const t of typeNamesIn(d.line)) {
+          if (!grounding.includes(`interface ${t}`) && !grounding.includes(`type ${t}`)) wantTypes.add(t);
+        }
+        for (const vessel of verifyVessels.slice(0, 2)) {
+          const vRel = vessel.replace(/^repos\//, "");
+          for (const t of Array.from(wantTypes).slice(0, 3)) {
+            if (decls.some((d) => d.symbol === t)) continue;
+            // ANCHORED, and tests excluded. The unanchored pattern matched a
+            // TEST FILE's `import { ..., type SatisfierProducer }` line instead of
+            // the real `export interface SatisfierProducer {` — teaching the
+            // drafter from an import rather than a definition. Caught by running
+            // the grep against the live tree, not by reading it.
+            const pattern = `^(export[[:space:]]+)?(interface|type|class)[[:space:]]+${t}\\b`;
+            const sh = await callTool(toolsEndpoint, "shell", {
+              command: `cd ${JSON.stringify(`${REPO_ROOT}/${vRel}`)} 2>/dev/null && grep -rnE ${JSON.stringify(pattern)} src --include='*.ts' --include='*.tsx' --exclude='*.test.ts' 2>/dev/null | head -1`,
+              cwd: REPO_ROOT,
+            });
+            const hit = String((sh.body as { stdout?: unknown })?.stdout ?? "").trim();
+            const m2 = /^([^:]+):(\d+):(.*)$/.exec(hit);
+            if (!m2) continue;
+            decls.push({ symbol: t, file: `repos/${vRel}/${m2[1]}`, line: (m2[3] ?? "").trim().slice(0, 300) });
+          }
+        }
+      } catch { /* advisory — a type we cannot resolve simply is not shown */ }
       symbolBlock = renderSymbolDeclarations(decls, targetFiles[0] ?? "");
       if (symbolBlock) {
         console.log(`[fc-symbols] resolved ${decls.length}/${needed.length} cross-file declaration(s): ${decls.map((d) => d.symbol).join(", ")}`);

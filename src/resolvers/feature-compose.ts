@@ -3589,8 +3589,28 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
           // So also ask the two questions uniqueness cannot: did the anchor come
           // from the window we showed the model, and does the replacement name
           // symbols this module actually has. Both FAIL OPEN.
+          // AN ANCHOR CHOSEN BY INDEX HAS BETTER PROVENANCE THAN THE WINDOW CHECK.
+          //
+          // The chosen string comes from safeAnchorLines(), which already verified
+          // it occurs EXACTLY ONCE in this very file. The window test asks a weaker
+          // question — "did the model copy this out of the excerpt we showed it" —
+          // and the anchor list is drawn from the +/-80 band around the located
+          // region, which need not overlap siteWindow at all. Measured 2026-08-11:
+          // the choice path picked anchor [4] correctly and this gate refused it
+          // with anchor_not_from_window. Two fixes of mine composing into a
+          // refusal of provably-good work — the same "fixed one call site, missed
+          // the sibling" shape this session hit repeatedly.
+          //
+          // So skip the provenance half for an indexed choice and keep the
+          // identifier-grounding half, which still judges the REPLACEMENT and is
+          // the check that caught the real corruption.
           const refusal = (g && cand)
-            ? refuseRederivedEdit({ candidateAnchor: cand, replacement: String(g.new_string ?? ""), window: siteWindow, moduleText: liveContent })
+            ? refuseRederivedEdit({
+                candidateAnchor: cand,
+                replacement: String(g.new_string ?? ""),
+                window: chosen ? cand : siteWindow,
+                moduleText: liveContent,
+              })
             : null;
           if (refusal) {
             console.warn(`[fc-anchor-provenance] REFUSED re-derived edit to ${op.path}: ${refusal.kind} — ${refusal.detail}`);

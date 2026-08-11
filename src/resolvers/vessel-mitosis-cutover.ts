@@ -763,12 +763,34 @@ export async function resolveVesselMitosisCutover(
   // gate that silently verifies 1 of N reads exactly like a gate that verified N.
   const stagedCount = Array.isArray(pointer.staged_files) ? pointer.staged_files.length : 0;
   if (stagedCount > 1) {
-    console.warn(
-      `[mitosis-cutover] FRESHNESS COVERAGE 1/${stagedCount} — only the sentinel (${stagedSentinel}) has a recorded base sha; ` +
-      `the other ${stagedCount - 1} staged file(s) are applied WITHOUT a drift check. A file changed since staging will be ` +
-      `silently reverted (observed 2026-08-11, commit 2dbb4a6). Treat a green freshness verdict on a multi-file mitosis as ` +
-      `covering one file only.`,
-    );
+    const mismatches: string[] = [];
+    const stagedFiles = pointer.staged_files as string[];
+    
+    for (const file of stagedFiles) {
+      const filePath = join(baseRoot, file);
+      let fileSha: string | null = null;
+      try {
+        if (await pathExists(filePath)) {
+          const content = await readFile(filePath);
+          fileSha = createHash("sha256").update(content).digest("hex").slice(0, 12);
+        }
+      } catch (err) {
+        fileSha = `<unreadable: ${(err as Error).message.slice(0, 60)}>`;
+      }
+      
+      if (fileSha !== pointer.staged_base_sha) {
+        mismatches.push(`${file}: expected ${pointer.staged_base_sha}, found ${fileSha}`);
+      }
+    }
+    
+    if (mismatches.length > 0) {
+      console.error(`[mitosis-cutover] FRESHNESS MISMATCH in ${mismatches.length} of ${stagedCount} files:`);
+      for (const msg of mismatches) console.error("  - " + msg);
+      return softRefuse(
+        "freshness mismatch in staged files",
+        { verdict: evaluation_evidence.verdict, mismatches },
+      );
+    }
   }
   console.error(`[mitosis-cutover] freshness vessel=${vessel_name} mitosis=${mitosis_version_id} staged_base_sha=${stagedBaseSha ?? "<missing>"} current_live_sha=${currentLiveSha ?? "<absent>"} freshnessOK=${freshnessOK} net_new=${netNewFreshnessOK} freshness_check_path=${freshnessCheckPath}`);
   if (!freshnessOK) {

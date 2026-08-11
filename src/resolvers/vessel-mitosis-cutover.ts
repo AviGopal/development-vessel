@@ -22,6 +22,7 @@ import { resolveTestSuite } from "./test-suite.js";
 import { runBehavioralVerification } from "./behavioral-verification.js";
 import { resolveActivateSubstrateScript } from "./activate-substrate-script.js";
 import { resolveMaintenanceLeaseWrite } from "./maintenance-lease";
+import { CUTOVER_QUIESCE_MAX_MS } from "../compose-slots.js";
 
 /**
  * vessel_mitosis_cutover — promotes a mitosis track to the canonical position
@@ -2093,7 +2094,14 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
           // an unconditional `rm -f` that could delete a FOREIGN holder's lease (db_admin's
           // trace-store swap, or proposal:<id>) and release pull-sync into a live mid-swap --
           // exactly the corruption that comment warns against.
-          const quiesceMaxS = Number(process.env["MITOSIS_SELF_RESTART_QUIESCE_MAX_S"] ?? "600");
+          // WAS a bare 600 (10 min) — BELOW the 15-minute ceiling a compose is
+          // allowed to run, so this guard gave up while legal work was still in
+          // flight and the 4-minute drain then discarded it. Measured 2026-08-11:
+          // six restarts of the compose host in 2h20m, 54 drain refusals, and
+          // ZERO isolated-vessel composes completing all evening while in-place
+          // ones landed 5 commits. The bound now derives from the compose ceiling
+          // itself (see compose-slots.ts), so the two cannot drift apart again.
+          const quiesceMaxS = Math.ceil(CUTOVER_QUIESCE_MAX_MS / 1000);
           const quiesceIters = Math.max(0, Math.floor(quiesceMaxS / 5));
           const markerDir = `${process.env["WORKSPACE_ROOT"] ?? "/workspace"}/authoring-inflight`;
           // NOT derived from WORKSPACE_ROOT — the vessel and pull-sync both use

@@ -38,6 +38,53 @@ const SLOT_DIR = process.env["COMPOSE_SLOT_DIR"] ?? "/workspace/compose-slots";
  */
 const SLOT_STALE_MS = Number(process.env["COMPOSE_SLOT_STALE_MS"] ?? 20 * 60_000);
 
+/**
+ * The longest a single compose may legally run, in ms.
+ *
+ * Stated in this module's own doc above ("the ceiling its caller allows is 15")
+ * and now exported, because three OTHER lifecycle timeouts are only correct
+ * RELATIVE to it and were each written independently against a remembered number.
+ * Measured 2026-08-11 they did not agree:
+ *
+ *   drain deadline        4 min   (index.ts DEV_VESSEL_DRAIN_MS)
+ *   compose ceiling      15 min   (this constant)
+ *   cutover quiesce      10 min   (vessel-mitosis-cutover MITOSIS_SELF_RESTART_QUIESCE_MAX_S)
+ *   slot staleness       20 min   (SLOT_STALE_MS above)
+ *
+ * The quiesce sat BELOW the ceiling it exists to protect, so a legal compose was
+ * killed by a cutover restart: quiesce waits 10 min, gives up, restarts, and the
+ * 4-minute drain then discards whatever is still running. Observed cadence on the
+ * compose host that day: six restarts in 2h20m (~13 min apart = 10 quiesce + 4
+ * drain, minus overlap), 54 `REFUSING long-running request during drain`, and two
+ * explicit `drain deadline — … they will be lost`. Composes that draft IN PLACE
+ * finished inside the window and landed 5 commits; ISOLATED composes (a fresh
+ * worktree plus a ~1,250-test suite) exceeded it and landed ZERO, silently.
+ *
+ * THE INVARIANT, pinned by test: drain < ceiling < quiesce < staleness. Each gap
+ * has a reason. Quiesce must exceed the ceiling or it interrupts legal work.
+ * Staleness must exceed quiesce or a slot is reaped out from under a compose that
+ * the restart was still politely waiting for.
+ */
+export const COMPOSE_CEILING_MS = Number(process.env["COMPOSE_CEILING_MS"] ?? 15 * 60_000);
+
+/**
+ * How long a cutover-triggered restart waits for in-flight composes to finish.
+ *
+ * Must be strictly greater than COMPOSE_CEILING_MS — a restart that gives up
+ * before the longest legal compose can finish is a restart that destroys legal
+ * work, and it destroys it in the way that is hardest to see: the compose simply
+ * stops, leaving a plan with no verdict, which reads downstream as a drafting
+ * failure rather than as work that never ran.
+ */
+export const CUTOVER_QUIESCE_MAX_MS = Number(
+  process.env["MITOSIS_SELF_RESTART_QUIESCE_MAX_S"]
+    ? Number(process.env["MITOSIS_SELF_RESTART_QUIESCE_MAX_S"]) * 1000
+    : COMPOSE_CEILING_MS + 60_000,
+);
+
+/** Exported for the invariant test; not part of the acquire/release contract. */
+export const SLOT_STALE_MS_FOR_TEST = SLOT_STALE_MS;
+
 export interface ComposeSlot {
   readonly granted: boolean;
   /**

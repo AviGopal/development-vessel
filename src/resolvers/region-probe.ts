@@ -84,9 +84,27 @@ export function regionCandidatesFromText(text: string): string[] {
   // (`process.env.FED_TRANSPORT_EGRESS`) across many consecutive composes. Specs
   // carry prior error output, so the longest identifier in the text is very often
   // noise from a failure excerpt rather than the change site. Sort WITHIN tiers only.
-  for (const m of text.matchAll(/[`"']([A-Za-z_$][\w$.\-]{3,80})[`"']/g)) {
+  // A ROUTE PATH IS A QUOTED LOCATOR TOO, AND IT WAS THE ONE BEING THROWN AWAY.
+  //
+  // The character class used to demand `[A-Za-z_$]` first, so a quoted route path
+  // — `'/selection-events'` — was rejected on its leading slash and never became a
+  // candidate. Measured 2026-08-11: a goal naming four such routes produced 62
+  // locator candidates, NONE of them the route paths, so the anchor band centred
+  // elsewhere and every drafted anchor was a real, whole-file-unique string in the
+  // wrong region (`interface ExecutionTrace {`, `WHERE variant_id = $variant_id`).
+  // The route path occurs EXACTLY ONCE in that file, at the line the edit needed —
+  // the single most precise locator available in the goal, discarded by a
+  // character class.
+  //
+  // Leading `/` and internal `/` are both allowed now: the former admits route
+  // paths, the latter admits quoted file paths (`src/routes/execution-traces.ts`),
+  // which are locators of the same kind and equally deliberate. The minimum length
+  // still applies, so `'/'` and `'/a'` cannot qualify.
+  for (const m of text.matchAll(/[`"']([A-Za-z_$/][\w$.\-/]{3,80})[`"']/g)) {
     const tok = m[1]!;
     if (KEYWORDS.has(tok.toLowerCase()) || STOPWORDS.has(tok.toLowerCase())) continue;
+    // A bare `/` or a path of only separators locates nothing.
+    if (!/[A-Za-z0-9_$]/.test(tok)) continue;
     if (!seen.has(tok)) { seen.add(tok); quoted.push(tok); }
   }
 

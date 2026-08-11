@@ -913,6 +913,53 @@ export async function resolveVesselMitosisCutover(
       }
       const stagedLines = stagedContent.split("\n");
       const stagedFirstLine = stagedLines[0] ?? "";
+      //  d) The staged file DOES NOT PARSE. (2026-08-11.) Signatures (a) and (b)
+      //     match a corruption's SHAPE; this one asks the only question that
+      //     actually decides whether the vessel will boot, and so it catches the
+      //     class independent of how the corruption happens to look.
+      //     Observed live: a compose prepended 20 lines of an entirely different,
+      //     hallucinated implementation onto activity-api's 1,237-line
+      //     routes/goal-paths.ts — an Express router in a Hono vessel, importing a
+      //     service that does not exist, with the GAP SUMMARY pasted at line 3 as
+      //     bare unquoted prose. activity-api crash-looped for 5 minutes
+      //     (NRestarts 107 -> 123, respawning every ~6s) and an operator had to
+      //     hand-restore it, because self-recovery.timer was simultaneously in a
+      //     dead state and could not fire.
+      //     NEITHER existing signature could see it, verified against the captured
+      //     artifact: (b) byte_zero_injection did not fire because the injected
+      //     text BEGINS WITH AN IMPORT, which HEADER_OPENING accepts as a
+      //     legitimate file opening; and catastrophic_truncation did not fire
+      //     because the file GREW (51,036B against a live 51,011B). A prepend that
+      //     opens with imports is exactly the blind spot between the two.
+      //     Bun's transpiler is in-process and synchronous — no subprocess, no
+      //     typecheck — so this costs a parse per staged file. It is a strictly
+      //     weaker check than `tsc`: it rejects only source that cannot be parsed
+      //     AT ALL, never a type error, so it cannot refuse a merely-imperfect
+      //     edit. Control over all 835 .ts/.tsx files under /vessels/*/src: ZERO
+      //     parse failures, while the captured corrupt file throws. No false
+      //     positives, and it fails OPEN on transpiler-unavailability so a broken
+      //     check can never block a good cutover.
+      if (/\.(ts|tsx)$/.test(rel)) {
+        let transpiler: { transformSync: (code: string) => unknown } | undefined;
+        try {
+          transpiler = new Bun.Transpiler({ loader: rel.endsWith(".tsx") ? "tsx" : "ts" });
+        } catch {
+          transpiler = undefined; // fail open — never block a cutover on our own tooling
+        }
+        if (transpiler) {
+          try {
+            transpiler.transformSync(stagedContent);
+          } catch (e) {
+            corruptions.push({
+              file: rel,
+              kind: "unparseable_typescript",
+              detail:
+                `staged file does not parse, so landing it would crash-loop the vessel: ` +
+                `${(String(e instanceof Error ? e.message : e).split("\n")[0] ?? "").slice(0, 160)}`,
+            });
+          }
+        }
+      }
       if (/^\s*\{\{\s*[\w$.[\]-]+\s*\}\}/.test(stagedFirstLine)) {
         corruptions.push({
           file: rel,

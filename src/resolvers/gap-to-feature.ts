@@ -1167,7 +1167,12 @@ function verifyGapCondition(gap: Record<string, unknown>): 'present' | 'absent' 
     // ── Class 3 (sync): landed commit — a substrate-authored commit referencing this gap id already exists ──
     const gapIdForLandedSync = typeof gap['id'] === 'string' ? (gap['id'] as string) : '';
     const behavioralFail = String(gap['summary'] ?? '').includes('BEHAVIORAL VERIFICATION FAILED') || ((gap['classification_metadata'] ?? {}) as Record<string, unknown>)['regressed_by'] !== undefined;
-    // THIS IS THE SECOND COPY OF THE SAME CHECK IN THIS FUNCTION, and it runs FIRST.
+    const conditionStatus = verifyGapCondition(gap);
+if (conditionStatus !== 'present') {
+  // If the condition is not present, do not compose
+  return conditionStatus;
+}
+// THIS IS THE SECOND COPY OF THE SAME CHECK IN THIS FUNCTION, and it runs FIRST.
     //
     // I fixed the copy ~100 lines below (018fd05, 81d8474) and never looked for another.
     // This one kept the original behaviour — every clone, no revert awareness — so it

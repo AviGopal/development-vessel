@@ -30,6 +30,7 @@ import { vacuousEditReason } from "../vacuous-edit.js";
 import { acquireComposeSlot } from "../compose-slots.js";
 import { existsSync as mountExistsSync } from "node:fs";
 import { regionCandidatesFromText } from "./region-probe.js";
+import { symbolsNeedingDeclaration, renderSymbolDeclarations, type SymbolDeclaration } from "../cross-file-symbols.js";
 
 const DISCOVERY_ENDPOINT = process.env.DISCOVERY_ENDPOINT ?? "http://127.0.0.1:8100";
 // Federation-transport egress: dev-vessel has no libp2p deps, so a resolve to a
@@ -2646,6 +2647,59 @@ async function resolveFeatureComposeUncapped(pointer: FeatureComposePointer): Pr
       return { shape: "featureComposeReport", body: { ok: false, stage: "grounding", verdict: "REFUSED", error: detail } };
     }
   }
+  // CROSS-FILE SYMBOL GROUNDING (2026-08-11).
+  //
+  // The window above is built from the TARGET files, so a symbol the request NAMES
+  // but which is declared elsewhere is structurally invisible to the planner.
+  //
+  // Observed: a goal said "this vessel already classifies that error class with
+  // isFailoverError". The drafter routed correctly, found the file, found the exact
+  // line, and wrote the right shape of change — then invented the two facts it was
+  // never shown. It called the predicate with NO ARGUMENT (it takes an error) and
+  // imported it from `../error-types` (it lives in index.ts). It searched first
+  // (`code_find_import` -> found:false) and the tools answered honestly; the loop
+  // worked, the information simply was not in reach. It ended by commenting out its
+  // own import.
+  //
+  // Law 8: the repair for a wrong output is rarely a bigger prompt — it is making
+  // the load-bearing fact available at the moment of use. A stronger model guesses
+  // more plausibly here, not more correctly.
+  //
+  // Placed AFTER the blind-window refusal on purpose: this block must never be able
+  // to satisfy "the window mentions the target file". It only ever ADDS declarations
+  // for symbols the request already names, and it fails open to "" — a lookup that
+  // errors leaves drafting exactly as it is today.
+  let symbolBlock = "";
+  try {
+    const needed = symbolsNeedingDeclaration(String(pointer.spec ?? ""), grounding);
+    if (needed.length > 0 && verifyVessels.length > 0) {
+      const decls: SymbolDeclaration[] = [];
+      for (const vessel of verifyVessels.slice(0, 2)) {
+        if (decls.length >= needed.length) break;
+        const vRel = vessel.replace(/^repos\//, "");
+        for (const sym of needed) {
+          if (decls.some((d) => d.symbol === sym)) continue;
+          // Declarations only — a call site would teach the wrong signature.
+          const pattern = `(export[[:space:]]+)?(const|function|async function|class|type|interface)[[:space:]]+${sym}\\b`;
+          const sh = await callTool(toolsEndpoint, "shell", {
+            command: `cd ${JSON.stringify(`${REPO_ROOT}/${vRel}`)} 2>/dev/null && grep -rnE ${JSON.stringify(pattern)} src --include='*.ts' --include='*.tsx' 2>/dev/null | head -1`,
+            cwd: REPO_ROOT,
+          });
+          const hit = String((sh.body as { stdout?: unknown })?.stdout ?? "").trim();
+          const m = /^([^:]+):(\d+):(.*)$/.exec(hit);
+          if (!m) continue;
+          decls.push({ symbol: sym, file: `repos/${vRel}/${m[1]}`, line: (m[3] ?? "").trim().slice(0, 300) });
+        }
+      }
+      symbolBlock = renderSymbolDeclarations(decls, targetFiles[0] ?? "");
+      if (symbolBlock) {
+        console.log(`[fc-symbols] resolved ${decls.length}/${needed.length} cross-file declaration(s): ${decls.map((d) => d.symbol).join(", ")}`);
+        grounding += symbolBlock;
+      } else if (needed.length > 0) {
+        console.log(`[fc-symbols] ${needed.length} spec symbol(s) absent from the window and NOT declared in the target vessel(s): ${needed.join(", ")} — drafter will have to infer them`);
+      }
+    }
+  } catch { symbolBlock = ""; }
   // CONSULT the substrate's own architectural principles (docs ingested as concepts)
   // so the plan respects them — the active-consumption wire for the docs/web channel.
   let principles = "";

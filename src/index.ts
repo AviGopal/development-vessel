@@ -28,6 +28,23 @@ app.get("/health", (c) => {
     vesselId: VESSEL_ID,
     version: "0.1.0",
     in_flight: readInFlight(),
+    // ADVERTISE THE DRAIN BUDGET, or the protection built on it cannot apply.
+    //
+    // substrate-pull-sync gates its safe-convergence path on this field: a vessel
+    // that publishes `drain_ms` is quiesced (admission closed) and waited out
+    // before restart; one that does not falls through to plain deferral and then
+    // the starvation break, which converges destructively.
+    //
+    // goal-host publishes it. development-vessel — which hosts feature_compose and
+    // patch_with_tools, the LONGEST runs in the fleet and the only ones whose loss
+    // destroys a measurement — did not. So the quiesce mechanism written to stop
+    // exactly that loss could never engage for the vessel it was written for.
+    // Measured 2026-08-11: `[QUIESCED (admission closed)]` never appeared; the log
+    // said "deferring convergence" instead, and composes kept dying on restart.
+    //
+    // Same number the drain itself uses, read from the same env, so the value the
+    // converger trusts is the value the drain will honour.
+    drain_ms: Number(process.env["DEV_VESSEL_DRAIN_MS"] ?? process.env["VESSEL_DRAIN_MS"] ?? 240000),
     discovery: { registered: isRegistered() },
   });
 });

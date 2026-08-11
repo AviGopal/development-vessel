@@ -14,6 +14,7 @@ import {
   uniqueAnchorLines,
   anchorOccurrences,
   renderSafeAnchors,
+  locateRegion,
 } from "./cross-file-symbols";
 
 const SPEC = `Edit repos/llm-resolver-vessel/src/model-policy.ts so a provider-level failure
@@ -248,21 +249,49 @@ describe("uniqueAnchorLines / anchorOccurrences — uniqueness is a whole-file f
     for (const n of offered) expect(Math.abs(n - 200)).toBeLessThanOrEqual(80);
   });
 
-  // ANCHORS COME FROM THE BAND'S TOP EDGE, NOT FROM NEAR THE REGION.
+  // ANCHORS MUST BE THE ONES NEAREST THE REGION, NOT THE BAND'S TOP EDGE.
   //
-  // `uniqueAnchorLines(near, …).slice(0, maxAnchors)` keeps the FIRST maxAnchors
-  // unique lines of the band, and the band starts at `center - window`. So with
-  // the defaults the drafter is handed lines [center-80, center-68] — up to 80
-  // lines ABOVE the line it must edit, and never the line itself. Centring the
-  // band correctly is necessary but NOT sufficient; this is why a "correctly
-  // located" region can still produce an unusable anchor set on a large file.
-  // Pinned as current behaviour so a future fix is a deliberate change, not an
-  // accident.
-  test("offered anchors currently skew to the top of the band, not the region", () => {
+  // The selection was `uniqueAnchorLines(near, …).slice(0, maxAnchors)`, which
+  // keeps the FIRST maxAnchors unique lines of a band starting at
+  // `center - window` — so the drafter got lines [center-80, center-68]: up to 80
+  // lines ABOVE the line it must edit, and never the line itself. Measured
+  // 2026-08-11 on a 4209-line file, the band centred at 248 and every anchor came
+  // from line 169 while the edit sites were 1148+. Centring the BAND is necessary
+  // but not sufficient; the SELECTION has to be centred too.
+  test("offered anchors are the ones nearest the region", () => {
     const long = Array.from({ length: 400 }, (_, i) => `const uniqueSymbolNumber${i} = ${i};`).join("\n");
     const out = renderSafeAnchors(long, "uniqueSymbolNumber200", "p.ts");
     const offered = [...out.matchAll(/uniqueSymbolNumber(\d+) =/g)].map((m) => Number(m[1]));
-    expect(Math.min(...offered)).toBe(120);
-    expect(offered).not.toContain(200);
+    expect(offered).toContain(200);
+    // 12 anchors centred on 200 cannot reach the old top-of-band start.
+    for (const n of offered) expect(Math.abs(n - 200)).toBeLessThanOrEqual(12);
+  });
+
+  // A MATCH INSIDE A COMMENT IS THE WEAKEST KIND OF MATCH.
+  //
+  // The observed failure: the grounding term first occurred in a doc comment 2,500
+  // lines from the code it named, and the band centred there. Prose quoting an
+  // identifier says it is discussed, not that the work is here — the same defect
+  // already filed for goal→file routing, recurring one stage later.
+  test("a code occurrence outranks an earlier comment occurrence", () => {
+    const text = [
+      "// targetToken is described here in prose",
+      ...Array.from({ length: 200 }, (_, i) => `const filler${i} = ${i};`),
+      "const targetToken = realImplementation();",
+      ...Array.from({ length: 200 }, (_, i) => `const tail${i} = ${i};`),
+    ].join("\n");
+    expect(locateRegion(text.split("\n"), "targetToken")).toBe(201);
+  });
+
+  test("a comment-only match is still used when there is no code occurrence", () => {
+    const text = ["// onlyInAComment appears here", "const x = 1;"].join("\n");
+    expect(locateRegion(text.split("\n"), "onlyInAComment")).toBe(0);
+  });
+
+  test("candidate locators are tried in order and empties never locate", () => {
+    const text = ["const alpha = 1;", "const beta = 2;"].join("\n");
+    expect(locateRegion(text.split("\n"), ["", "beta"])).toBe(1);
+    expect(locateRegion(text.split("\n"), ["nope", "alpha"])).toBe(0);
+    expect(locateRegion(text.split("\n"), ["", "  "])).toBe(-1);
   });
 });

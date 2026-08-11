@@ -272,6 +272,52 @@ export function anchorOccurrences(fileText: string, anchor: string): number {
 }
 
 /**
+ * Which line should the anchor band be centred on?
+ *
+ * Accepts several candidate locators and returns the best line index, or -1 when
+ * none can be located. Two rules, both measured:
+ *
+ * 1. AN EMPTY CANDIDATE LOCATES NOTHING. `"anything".includes("")` is TRUE, so a
+ *    bare findIndex on "" returns 0 and silently bands the top of the file. Absent
+ *    is the case that actually occurs — callers pass `regionHint ?? ""` and the
+ *    compose logs report `region: null`.
+ *
+ * 2. A MATCH INSIDE A COMMENT IS THE WEAKEST KIND OF MATCH. Measured 2026-08-11:
+ *    the grounding term `variant_performance_metrics` first occurs at line 248 of
+ *    execution-traces.ts, inside a doc comment, while the code it names is 2,500
+ *    lines away. Centring there produced twelve unique, unusable anchors. Prose
+ *    quoting an identifier says the identifier is discussed, not that the work is
+ *    here — the same defect already filed for goal→file routing, recurring one
+ *    stage later. So: prefer a candidate that occurs OUTSIDE comments, and accept
+ *    a comment-only match only when nothing better exists (it is still better than
+ *    no anchors at all).
+ *
+ * Candidates are tried in order, so callers should pass their strongest locator
+ * first.
+ */
+export function locateRegion(lines: readonly string[], region: string | readonly string[]): number {
+  const candidates = (typeof region === "string" ? [region] : region ?? [])
+    .filter((r): r is string => typeof r === "string" && r.trim().length > 0);
+  let commentOnly = -1;
+  for (const cand of candidates) {
+    let firstAny = -1;
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i] ?? "";
+      if (!line.includes(cand)) continue;
+      if (firstAny < 0) firstAny = i;
+      const t = line.trim();
+      // Not a full comment parse — a line whose CODE mentions the term is what we
+      // want, and `//`/`*`/`/*` openers catch the doc-comment case that was
+      // actually observed. A false "this is code" only costs us the fallback we
+      // would otherwise have taken.
+      if (!t.startsWith("//") && !t.startsWith("*") && !t.startsWith("/*")) return i;
+    }
+    if (firstAny >= 0 && commentOnly < 0) commentOnly = firstAny;
+  }
+  return commentOnly;
+}
+
+/**
  * Render verified-unique anchors near the region as a compact block.
  *
  * Scoped to the region's vicinity rather than the whole file: a 13,000-line file
@@ -280,27 +326,39 @@ export function anchorOccurrences(fileText: string, anchor: string): number {
  */
 export function renderSafeAnchors(
   fileText: string,
-  region: string,
+  region: string | readonly string[],
   path: string,
   maxAnchors = 12,
   window = 80,
 ): string {
   if (!fileText || !path) return "";
   const lines = fileText.split("\n");
-  // `"anything".includes("")` is TRUE, so an EMPTY region makes findIndex return
-  // 0 and silently bands the top of the file. The `region ?` guard is what keeps
-  // an absent region from being treated as "found at line 0" — and absent is the
-  // case that actually occurs (callers pass `regionHint ?? ""`, and compose logs
-  // report `region: null` / "no region literal"). Without the guard this returned
-  // an arbitrary band centred on line 0 instead of no anchors at all.
-  const center = region ? lines.findIndex((l) => l.includes(region)) : -1;
+  const center = locateRegion(lines, region);
   if (center < 0) return ""; // Region absent or not found: no anchors, not a guess.
   const lo = Math.max(0, center - window);
   const hi = Math.min(lines.length, center + window);
-  const near = lines.slice(lo, hi).join("\n");
-  const unique = uniqueAnchorLines(near, maxAnchors * 3)
-    .filter((l) => anchorOccurrences(fileText, l) === 1)
-    .slice(0, maxAnchors);
+  // ANCHORS NEAREST THE REGION, NOT THE TOP OF THE BAND.
+  //
+  // This used to be `uniqueAnchorLines(near, …).slice(0, maxAnchors)`, which keeps
+  // the FIRST maxAnchors unique lines of the band — and the band starts at
+  // `center - window`. So the drafter was handed lines [center-80, center-68]: up
+  // to 80 lines ABOVE the line it must edit, and never the line itself. Measured
+  // 2026-08-11 on a 4209-line file: the band centred at 248 and every anchor came
+  // from 169 onward, while the edit sites were 1148+. Centring the band correctly
+  // is necessary but NOT sufficient — the SELECTION has to be centred too.
+  //
+  // Sort candidates by distance from the region and take the closest. Uniqueness is
+  // still whole-file (`anchorOccurrences === 1`), so a nearer anchor is never a
+  // less safe one.
+  const nearText = lines.slice(lo, hi).join("\n");
+  const uniqueInBand = new Set(uniqueAnchorLines(nearText, Number.MAX_SAFE_INTEGER));
+  const unique = lines
+    .slice(lo, hi)
+    .map((l, i) => ({ text: l.trim(), dist: Math.abs(lo + i - center) }))
+    .filter((c) => uniqueInBand.has(c.text) && anchorOccurrences(fileText, c.text) === 1)
+    .sort((a, b) => a.dist - b.dist)
+    .slice(0, maxAnchors)
+    .map((c) => c.text);
   if (unique.length === 0) return "";
   return [
     "",

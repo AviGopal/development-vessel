@@ -2799,9 +2799,27 @@ async function resolveFeatureComposeUncapped(pointer: FeatureComposePointer): Pr
             // the load-bearing part: edit_site is a `path:line` string that never
             // appears in the source it points at, so taking focusHints[0] blindly
             // would trade a wrong band for no band.
-            const bestHint = focusHints.find((h) => text.includes(h)) ?? regionHint;
-            const anchors = renderSafeAnchors(text, bestHint ?? "", tf);
-            if (anchors) { symbolBlock += anchors; console.log(`[fc-anchors] supplied verified-unique anchors for ${tf}`); }
+            // regionHint goes LAST. It is focusHints[0] and the WEAKEST locator —
+            // a mined grounding term whose first occurrence is routinely a doc
+            // comment far from the code it names. The spec-derived hints and
+            // edit_site describe the requested edit; the grounding term only
+            // describes what the file talks about. renderSafeAnchors tries these in
+            // order and prefers a match outside comments, so ordering is the whole
+            // lever here.
+            // Strongest locator first. regionCandidatesFromText already tiers
+            // quoted/backticked spans above bare identifiers precisely because the
+            // restatement emits the term that located the file in backticks; reuse
+            // it rather than mint a second extractor. focusHints (minus regionHint)
+            // next, then regionHint LAST — it is focusHints[0] and the weakest
+            // locator, a mined grounding term whose first occurrence is routinely a
+            // doc comment far from the code it names.
+            const anchorLocators = [
+              ...regionCandidatesFromText(`${String(pointer.spec ?? "")}\n${String(pointer.gap?.summary ?? "")}`),
+              ...focusHints.slice(1),
+              regionHint ?? "",
+            ].filter(Boolean);
+            const anchors = renderSafeAnchors(text, anchorLocators, tf);
+            if (anchors) { symbolBlock += anchors; console.log(`[fc-anchors] supplied verified-unique anchors for ${tf} (${anchorLocators.length} locator candidate(s))`); }
           }
         }
       } catch { /* advisory */ }

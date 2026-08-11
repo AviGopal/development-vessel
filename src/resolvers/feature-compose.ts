@@ -31,6 +31,7 @@ import { acquireComposeSlot } from "../compose-slots.js";
 import { existsSync as mountExistsSync } from "node:fs";
 import { regionCandidatesFromText } from "./region-probe.js";
 import { symbolsNeedingDeclaration, renderSymbolDeclarations, typeNamesIn, renderSafeAnchors, type SymbolDeclaration } from "../cross-file-symbols.js";
+import { refuseRederivedEdit } from "../edit-provenance.js";
 
 const DISCOVERY_ENDPOINT = process.env.DISCOVERY_ENDPOINT ?? "http://127.0.0.1:8100";
 // Federation-transport egress: dev-vessel has no libp2p deps, so a resolve to a
@@ -3529,7 +3530,29 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
             model,
           ));
           const cand = g?.old_string ? String(g.old_string) : "";
-          if (g && cand && occurs(liveContent, cand) === 1) {
+          // UNIQUENESS IS NOT LOCATION AND NOT PLAUSIBILITY.
+          //
+          // `occurs(...) === 1` used to be the ONLY test here, and every comment
+          // line in a well-commented file passes it. Measured 2026-08-11 on this
+          // very vessel: re-derivation returned the doc-comment line
+          // ` * never "the fleet is wedged".` (genuinely unique) paired with
+          // `if (this.childProcess?.exitCode !== null) {` for a module that is not
+          // a class. It applied, it PARSED because it landed inside a block
+          // comment, and no gate fired — byte_zero_injection looks at line 1,
+          // catastrophic_truncation needs a shrink, unparseable_typescript cannot
+          // fire on valid TypeScript. An operator hand-diffing the live tree
+          // against its clone was the only thing that saw it.
+          //
+          // So also ask the two questions uniqueness cannot: did the anchor come
+          // from the window we showed the model, and does the replacement name
+          // symbols this module actually has. Both FAIL OPEN.
+          const refusal = (g && cand)
+            ? refuseRederivedEdit({ candidateAnchor: cand, replacement: String(g.new_string ?? ""), window: siteWindow, moduleText: liveContent })
+            : null;
+          if (refusal) {
+            console.warn(`[fc-anchor-provenance] REFUSED re-derived edit to ${op.path}: ${refusal.kind} — ${refusal.detail}`);
+          }
+          if (!refusal && g && cand && occurs(liveContent, cand) === 1) {
             effOld = cand;
             if (typeof g.new_string === "string") op.new_string = String(g.new_string);
             groundedPre = true;
@@ -3567,8 +3590,23 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
               true,
             ));
             if (fix?.old_string) {
-              r = await callTool(toolsEndpoint, "fs_edit", { path: abs, old_string: String(fix.old_string), new_string: String(fix.new_string ?? op.new_string ?? "") });
-              repaired = r.ok;
+              // Same two questions as the windowed re-derivation above, and this
+              // path needs them more: it applies the returned anchor with no
+              // uniqueness test at all. `live` is both the window the model was
+              // shown and the module being written, so it serves as both inputs.
+              // Fails open.
+              const fixRefusal = refuseRederivedEdit({
+                candidateAnchor: String(fix.old_string),
+                replacement: String(fix.new_string ?? op.new_string ?? ""),
+                window: live,
+                moduleText: live,
+              });
+              if (fixRefusal) {
+                console.warn(`[fc-anchor-provenance] REFUSED blind-edit repair to ${op.path}: ${fixRefusal.kind} — ${fixRefusal.detail}`);
+              } else {
+                r = await callTool(toolsEndpoint, "fs_edit", { path: abs, old_string: String(fix.old_string), new_string: String(fix.new_string ?? op.new_string ?? "") });
+                repaired = r.ok;
+              }
             }
           } catch { /* repair failed; r stays not-ok */ }
         }

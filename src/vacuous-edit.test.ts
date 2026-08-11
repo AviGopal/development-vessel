@@ -6,7 +6,7 @@
 // FAVORABLE, the stage was accepted, and the attempt ENDED. Refusing it lets the
 // existing escalation (patch_with_tools) take a turn.
 import { describe, test, expect } from "bun:test";
-import { vacuousEditReason } from "./vacuous-edit";
+import { vacuousEditReason, nonTerminatingEditReason } from "./vacuous-edit";
 
 const BEFORE = `async function createGoalPath(c) {
   const goalHash = hashGoal(validated.goal_text);
@@ -114,5 +114,91 @@ describe("vacuousEditReason — a TYPE-ONLY edit cannot be the requested change"
 
   test("unrelated real edits are untouched", () => {
     expect(vacuousEditReason("record.org_id = null;", "record.org_id = auth.orgId;")).toBeNull();
+  });
+});
+
+describe("nonTerminatingEditReason — the regression the SUBSTRATE landed and deployed", () => {
+  // 2026-08-11, commit d96e2ae, authored autonomously and cut over live:
+  //
+  //   - return best ?? pool[0];
+  //   + return pickSatisfierProducer(pool);
+  //
+  // It typechecked, the semantic judge approved it, the mitosis verdict was
+  // FAVORABLE, the dispatch was graded reached:true, and it shipped. The module
+  // had no test, so nothing ever EXECUTED the function — and a typecheck cannot
+  // tell "returns the best producer" from "calls itself forever". In tail position
+  // it loops rather than overflowing, so the vessel HANGS while reporting healthy.
+  const BEFORE = [
+    "export function pickSatisfierProducer(",
+    "  producers: SatisfierProducer[],",
+    "): SatisfierProducer | undefined {",
+    "  if (producers.length === 0) return undefined;",
+    "  const pool = producers.some(isPinned) ? producers.filter(isPinned) : producers;",
+    "  let best;",
+    "  let bestScore = -Infinity;",
+    "  for (const p of pool) { if (0 > bestScore) { best = p; } }",
+    "  return best ?? pool[0];",
+    "}",
+  ].join("\n");
+
+  test("fires on the exact landed diff", () => {
+    const after = BEFORE.replace("return best ?? pool[0];", "return pickSatisfierProducer(pool);");
+    const r = nonTerminatingEditReason(BEFORE, after);
+    expect(r).not.toBeNull();
+    expect(r).toContain("pickSatisfierProducer");
+  });
+
+  test("vacuousEditReason surfaces it too — the gate feature_compose actually calls", () => {
+    // A predicate nothing consults is this session's most repeated defect.
+    const after = BEFORE.replace("return best ?? pool[0];", "return pickSatisfierProducer(pool);");
+    expect(vacuousEditReason(BEFORE, after)).not.toBeNull();
+  });
+
+  test("a base case that can never be REACHED is still non-terminating", () => {
+    // Rule 1 (no base case) does not catch this: the real function opens with
+    // `if (producers.length === 0) return undefined`. The base case is genuine and
+    // unreachable for every non-empty input, which is every real input.
+    const b = "function q(a, b) {\n  return a;\n}";
+    const a = "function q(a, b) {\n  if (!a) return b;\n  return q(a, b);\n}";
+    expect(nonTerminatingEditReason(b, a)).not.toBeNull();
+  });
+
+  test("a function with NO base case at all", () => {
+    expect(nonTerminatingEditReason("function z(n) {\n  return n;\n}", "function z(n) {\n  return z(n);\n}")).not.toBeNull();
+  });
+});
+
+describe("nonTerminatingEditReason — must NOT refuse ordinary recursion", () => {
+  // A gate that refused all self-calls would be far worse than the defect it
+  // prevents. Recursion is ordinary and correct; only NON-PROGRESS is the defect.
+  test("recursion on a property makes progress", () => {
+    expect(
+      nonTerminatingEditReason("function walk(n) {\n  return n;\n}", "function walk(n) {\n  if (!n.next) return n;\n  return walk(n.next);\n}"),
+    ).toBeNull();
+  });
+
+  test("recursion with arithmetic makes progress", () => {
+    expect(
+      nonTerminatingEditReason("function f(n) {\n  return 1;\n}", "function f(n) {\n  if (n <= 0) return 1;\n  return f(n - 1);\n}"),
+    ).toBeNull();
+  });
+
+  test("a reassigned binding moves, so non-progress cannot be claimed", () => {
+    expect(
+      nonTerminatingEditReason("function g(xs) {\n  return xs;\n}", "function g(xs) {\n  if (!xs.length) return xs;\n  xs = xs.slice(1);\n  return g(xs);\n}"),
+    ).toBeNull();
+  });
+
+  test("calling a DIFFERENT function is not self-recursion", () => {
+    expect(nonTerminatingEditReason("function a(x) {\n  return x;\n}", "function a(x) {\n  return b(x);\n}")).toBeNull();
+  });
+
+  test("an unrelated edit is untouched", () => {
+    expect(nonTerminatingEditReason("function h() {\n  return 1;\n}", "function h() {\n  return 2;\n}")).toBeNull();
+  });
+
+  test("nullish / identical input is safe", () => {
+    expect(nonTerminatingEditReason("x", "x")).toBeNull();
+    expect(nonTerminatingEditReason(undefined as unknown as string, "y")).toBeNull();
   });
 });

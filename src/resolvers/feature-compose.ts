@@ -26,7 +26,7 @@ import type { ResolverResult } from "./types.js";
 import { resolveVesselMitosisCutover } from "./vessel-mitosis-cutover.js";
 import { resolveSubstrateGap, resolveSubstrateGapWrite } from "./substrate-gap.js";
 import { writeAuthoringMarker, clearAuthoringMarker } from "./patch-with-tools.js";
-import { vacuousEditReason } from "../vacuous-edit.js";
+import { vacuousEditReason, nonTerminatingEditReason } from "../vacuous-edit.js";
 import { acquireComposeSlot } from "../compose-slots.js";
 import { existsSync as mountExistsSync } from "node:fs";
 import { regionCandidatesFromText } from "./region-probe.js";
@@ -2920,6 +2920,42 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
   //      text. An op's new_string is a FRAGMENT, so a declaration that is used
   //      later in the file would otherwise look unused. Adding a missing
   //      definition for an already-referenced symbol is legitimate and must pass.
+  // NON-TERMINATION IS FATAL ON A SINGLE OP, and must be judged against the WHOLE
+  // FILE — not the op fragment.
+  //
+  // The vacuous gate below deliberately passes `op.old_string`/`op.new_string`,
+  // which are FRAGMENTS. A fragment carries no enclosing function, so a
+  // non-termination check handed one would find no declaration and silently
+  // return null — present in the code, wired to nothing, which is exactly how the
+  // regression it exists to catch got through in the first place.
+  //
+  // So this reads the target file and applies the op to it before judging, using
+  // the same readFile idiom guard 2 below already uses.
+  //
+  // Refuses on ANY single offending op, unlike the vacuous rule which requires
+  // EVERY op to be vacuous. That asymmetry is deliberate: a vacuous op beside real
+  // work is merely noise, whereas one op that makes a function loop forever hangs
+  // the vessel no matter how much genuine work ships alongside it. Observed
+  // 2026-08-11 (d96e2ae): it typechecked, passed the judge, was graded reached,
+  // deployed, and the vessel kept reporting healthy while every call spun.
+  try {
+    const { readFile } = await import("node:fs/promises");
+    const root = process.env["REPO_ROOT"] ?? process.env["WORKSPACE_ROOT"] ?? "/workspace/git/super-repo";
+    for (const op of ops.filter((o) => o.kind === "edit")) {
+      const path = (op.path ?? "").replace(/:\d+.*$/, "").trim();
+      const oldS = op.old_string ?? "";
+      const newS = op.new_string ?? "";
+      if (!path || !oldS) continue;
+      let current = "";
+      try { current = await readFile(`${root}/${path}`, "utf8"); } catch { current = ""; }
+      if (!current || !current.includes(oldS)) continue; // cannot simulate → do not refuse
+      const loops = nonTerminatingEditReason(current, current.replace(oldS, newS));
+      if (loops) {
+        console.log(`[fc-nonterminating] REFUSED plan: ${loops}`);
+        return { shape: "featureComposeReport", body: { ok: false, stage: "plan", verdict: "REFUSED", error: loops } };
+      }
+    }
+  } catch { /* fail open — a gate that cannot read the tree must not block work */ }
   try {
     const editOnly = ops.filter((o) => o.kind === "edit");
     if (editOnly.length > 0) {

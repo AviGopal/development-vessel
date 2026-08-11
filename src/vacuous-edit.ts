@@ -71,9 +71,153 @@ function stripTypeOnly(s: string): string {
     .trim();
 }
 
+/**
+ * Does the edit make a function call itself forever?
+ *
+ * THE OBSERVED CASE (2026-08-11, commit d96e2ae — authored autonomously and cut
+ * over to the live vessel):
+ *
+ *   - return best ?? pool[0];
+ *   + return pickSatisfierProducer(pool);
+ *
+ * where `pool` is the function's own parameter. Every invocation loops forever.
+ *
+ * NOTHING OBJECTED. It is perfectly type-correct, so `tsc` passed; the semantic
+ * judge approved it; the mitosis verdict was FAVORABLE; the dispatch was graded
+ * `reached:true`; it landed on origin/dev and deployed. The module had no test, so
+ * no gate ever EXECUTED the function — and a typecheck cannot tell "returns the
+ * best producer" from "calls itself forever".
+ *
+ * It does not even crash: the call is in tail position, so the engine turns it
+ * into a loop and the vessel HANGS while still reporting healthy.
+ *
+ * ── DELIBERATELY NARROW ──────────────────────────────────────────────────────
+ * Fires only when an ADDED line is `return <enclosing fn>(<args>)` with arguments
+ * that are exactly the function's own parameter names, in order. That is provably
+ * non-terminating: same function, same values, unconditionally.
+ *
+ * Genuine recursion is NOT touched — a recursive call that changes an argument
+ * (`walk(node.next)`, `f(n - 1)`) or is guarded by a base case reads differently
+ * and passes. A gate that refused all self-calls would be far worse than the
+ * defect it prevents, since recursion is ordinary and correct.
+ */
+export function nonTerminatingEditReason(before: string, after: string): string | null {
+  if (typeof before !== "string" || typeof after !== "string") return null;
+  if (after === before) return null;
+
+  const beforeLines = new Set(before.split("\n").map((l) => l.trim()));
+  const added = after
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0 && !beforeLines.has(l));
+  // Only functions this edit actually touched are examined.
+  const addedSelfCalls = added.filter((l) => /^return\s+[A-Za-z_$][\w$]*\s*\(/.test(l));
+  if (addedSelfCalls.length === 0) return null;
+
+  for (const fn of functionBodies(after)) {
+    // Did this edit add a returning self-call inside THIS function?
+    const touched = addedSelfCalls.some(
+      (l) => new RegExp(`^return\\s+${escapeRe(fn.name)}\\s*\\(`).test(l) && fn.body.includes(l),
+    );
+    if (!touched) continue;
+
+    const selfCall = new RegExp(`^return\\s+${escapeRe(fn.name)}\\s*\\(`);
+    const returns = (fn.body.match(/\breturn\b[^;\n]*/g) ?? []).map((r) => r.trim());
+
+    // RULE 1 — NO BASE CASE. Every return is a self-call, so nothing can exit.
+    if (returns.length > 0 && returns.every((r) => selfCall.test(r))) {
+      return (
+        `non-terminating edit: after this change every return in \`${fn.name}\` is a call to ` +
+        `\`${fn.name}\` itself (${returns.length} return statement(s), no base case), so no ` +
+        `invocation can exit. This typechecks, and in tail position it loops rather than ` +
+        `overflowing the stack — the process hangs while still reporting healthy`
+      );
+    }
+
+    // RULE 2 — NO PROGRESS. A base case can exist and still never be reached.
+    //
+    // This is the observed case and Rule 1 does NOT catch it: the real function
+    // opened with `if (producers.length === 0) return undefined;` — a genuine base
+    // case — and the added line was `return pickSatisfierProducer(pool)`, handing
+    // the next invocation a value it never narrows. The base case is unreachable
+    // for every non-empty input, which is every real input.
+    //
+    // Recursion only terminates if something CHANGES on the way down. So: a self
+    // call whose arguments are all PLAIN IDENTIFIERS that are never reassigned in
+    // the body cannot be making progress — the same values recurse forever.
+    //
+    // Ordinary recursion is untouched because it does not look like this. It
+    // passes a derived expression — `walk(node.next)`, `f(n - 1)`, `go(rest)` where
+    // `rest` is reassigned in a loop — and any property access, arithmetic, call,
+    // literal, or reassigned binding makes this rule abstain.
+    for (const line of addedSelfCalls) {
+      if (!selfCall.test(line) || !fn.body.includes(line)) continue;
+      const argsRaw = /\(([^)]*)\)\s*;?$/.exec(line)?.[1] ?? "";
+      const args = argsRaw.split(",").map((a) => a.trim()).filter(Boolean);
+      if (args.length === 0) continue; // zero-arg self call: Rule 1's territory
+      const allPlain = args.every((a) => /^[A-Za-z_$][\w$]*$/.test(a));
+      if (!allPlain) continue; // derived expression → real progress is plausible
+      const anyReassigned = args.some((a) =>
+        new RegExp(`\\b${escapeRe(a)}\\s*(?:=[^=]|\\+\\+|--|\\+=|-=)`).test(
+          fn.body.replace(new RegExp(`(?:const|let|var)\\s+${escapeRe(a)}\\s*=`, "g"), ""),
+        ),
+      );
+      if (anyReassigned) continue; // the value moves → cannot claim non-progress
+      return (
+        `non-terminating edit: the added line \`${line}\` returns a call to the enclosing ` +
+        `function \`${fn.name}\` passing ${args.map((a) => `\`${a}\``).join(", ")} — plain ` +
+        `binding(s) never reassigned in the body, so each invocation recurses on the same ` +
+        `value and no base case can ever be reached. This typechecks, and in tail position ` +
+        `it loops rather than overflowing the stack — the process hangs while still ` +
+        `reporting healthy`
+      );
+    }
+    continue;
+  }
+  return null;
+}
+
+function escapeRe(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * Function bodies in source order, by brace matching from each declaration.
+ *
+ * Not a parser and must not pretend to be: anything it cannot match is skipped,
+ * so an unrecognised shape is simply not checked rather than wrongly refused.
+ */
+function functionBodies(src: string): Array<{ name: string; body: string }> {
+  const out: Array<{ name: string; body: string }> = [];
+  const decl = /(?:export\s+)?(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\(/g;
+  for (const m of src.matchAll(decl)) {
+    const name = m[1]!;
+    const open = src.indexOf("{", m.index! + m[0].length);
+    if (open < 0) continue;
+    let depth = 0;
+    let i = open;
+    for (; i < src.length; i++) {
+      if (src[i] === "{") depth++;
+      else if (src[i] === "}") {
+        depth--;
+        if (depth === 0) break;
+      }
+    }
+    if (depth !== 0) continue;
+    out.push({ name, body: src.slice(open, i + 1) });
+  }
+  return out;
+}
+
 export function vacuousEditReason(before: string, after: string): string | null {
   if (typeof before !== "string" || typeof after !== "string") return null;
   if (after === before) return null;
+
+  // AN EDIT THAT CANNOT TERMINATE CANNOT BE THE REQUESTED CHANGE.
+  // Checked first: non-termination is the most destructive of these classes, and
+  // unlike the others it survived every existing gate and reached production.
+  const loops = nonTerminatingEditReason(before, after);
+  if (loops) return loops;
 
   // A TYPE-ONLY EDIT CANNOT BE THE REQUESTED CHANGE.
   //

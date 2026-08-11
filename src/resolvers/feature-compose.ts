@@ -3525,8 +3525,27 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
           const siteHints = [...focusHints, op.new_string ?? "", op.rationale ?? ""];
           const siteWindow = siteCenteredWindow(liveContent, GROUND_CONTENT_BUDGET, siteHints)
             ?? focusedSlice(liveContent, GROUND_CONTENT_BUDGET, siteHints).slice;
+          // GIVE THE RE-DERIVATION THE ANCHORS WE ALREADY COMPUTED (law 8).
+          //
+          // The verified-unique anchor block is assembled for the DRAFTING prompt
+          // and was never passed here — so the stage whose entire job is "produce
+          // an old_string that exists" was the one stage denied the list of
+          // strings that provably exist. Measured 2026-08-11 with every upstream
+          // cause excluded (capacity, locator derivation, band centring, anchor
+          // selection, anchor supply, gates): re-derivation returned
+          // `const out = {};`, which occurs ZERO times in the target.
+          //
+          // Recomputed against liveContent rather than threaded, because
+          // liveContent is the bytes this edit must actually bind to and may
+          // differ from what the drafting prompt saw if an earlier op in the same
+          // plan already touched the file.
+          const rederiveAnchors = renderSafeAnchors(
+            liveContent,
+            [...regionCandidatesFromText(`${String(pointer.spec ?? "")}\n${String(pointer.gap?.summary ?? "")}`), ...focusHints.slice(1), regionHint ?? ""].filter(Boolean),
+            op.path,
+          );
           const g = parseJsonObject(await llmCall(llmEndpoint, /* updated comment */
-            `A window around the change site in ${op.path} (the file is larger; this is the relevant region):\n\n${siteWindow}\n\nMake this change: ${op.rationale ?? ""}\nIntended new content/behaviour:\n${op.new_string ?? ""}\n\nReturn ONE JSON object {"old_string":"<a verbatim substring copied EXACTLY from the window above that is UNIQUE in the file — include enough enclosing context (e.g. the containing declaration / CREATE-header line) that it cannot match any other occurrence>","new_string":"<the exact replacement>"}. No prose, no fences. Escape newlines as \\n.`,
+            `A window around the change site in ${op.path} (the file is larger; this is the relevant region):\n\n${siteWindow}${rederiveAnchors}\n\nMake this change: ${op.rationale ?? ""}\nIntended new content/behaviour:\n${op.new_string ?? ""}\n\nReturn ONE JSON object {"old_string":"<a verbatim substring copied EXACTLY from the window above that is UNIQUE in the file — PREFER one of the VERIFIED-UNIQUE ANCHORS listed above, copied character for character; they are already checked to occur exactly once. Include enough enclosing context that it cannot match any other occurrence>","new_string":"<the exact replacement>"}. No prose, no fences. Escape newlines as \\n.`,
             model,
           ));
           const cand = g?.old_string ? String(g.old_string) : "";

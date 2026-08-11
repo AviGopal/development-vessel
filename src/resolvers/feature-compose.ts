@@ -30,7 +30,7 @@ import { vacuousEditReason, nonTerminatingEditReason } from "../vacuous-edit.js"
 import { acquireComposeSlot } from "../compose-slots.js";
 import { existsSync as mountExistsSync } from "node:fs";
 import { regionCandidatesFromText } from "./region-probe.js";
-import { symbolsNeedingDeclaration, renderSymbolDeclarations, typeNamesIn, type SymbolDeclaration } from "../cross-file-symbols.js";
+import { symbolsNeedingDeclaration, renderSymbolDeclarations, typeNamesIn, renderSafeAnchors, type SymbolDeclaration } from "../cross-file-symbols.js";
 
 const DISCOVERY_ENDPOINT = process.env.DISCOVERY_ENDPOINT ?? "http://127.0.0.1:8100";
 // Federation-transport egress: dev-vessel has no libp2p deps, so a resolve to a
@@ -2766,6 +2766,23 @@ async function resolveFeatureComposeUncapped(pointer: FeatureComposePointer): Pr
         }
       } catch { /* advisory — a type we cannot resolve simply is not shown */ }
       symbolBlock = renderSymbolDeclarations(decls, targetFiles[0] ?? "");
+      // VERIFIED-UNIQUE ANCHORS. The prompt already demands a unique old_string;
+      // the drafter cannot verify that from an excerpt, because uniqueness is a
+      // whole-file property. Compute it and hand it over (law 8) rather than
+      // instructing harder — measured 2026-08-11, a draft anchored on a line
+      // occurring THREE times and apply correctly refused it.
+      try {
+        const tf = targetFiles[0] ?? "";
+        if (tf) {
+          const { readFile } = await import("node:fs/promises");
+          const rootA = process.env["REPO_ROOT"] ?? process.env["WORKSPACE_ROOT"] ?? "/workspace/git/super-repo";
+          const text = await readFile(`${rootA}/${tf}`, "utf8").catch(() => "");
+          if (text) {
+            const anchors = renderSafeAnchors(text, regionHint ?? "", tf);
+            if (anchors) { symbolBlock += anchors; console.log(`[fc-anchors] supplied verified-unique anchors for ${tf}`); }
+          }
+        }
+      } catch { /* advisory */ }
       if (symbolBlock) {
         console.log(`[fc-symbols] resolved ${decls.length}/${needed.length} cross-file declaration(s): ${decls.map((d) => d.symbol).join(", ")}`);
         grounding += symbolBlock;

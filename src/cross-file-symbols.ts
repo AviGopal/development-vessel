@@ -208,3 +208,101 @@ export function typeNamesIn(declarationLine: string): string[] {
   }
   return out;
 }
+
+/**
+ * Lines that occur EXACTLY ONCE in a file — anchors an edit can safely bind to.
+ *
+ * THE OBSERVED CASE (2026-08-11). The compose prompt already says an `old_string`
+ * "must be copied VERBATIM and be UNIQUE in the target file. Keep it SHORT (the
+ * fewest lines, ideally one, that are still unique)". A drafter optimised for
+ * SHORT and lost UNIQUE: it anchored on `verdict = String(body.verdict ?? "");`,
+ * which occurs twice, and apply refused —
+ *
+ *   no_unique_anchor: planned anchor is non-unique and re-derivation found no
+ *   unique substring (would mislocalize to first occurrence)
+ *
+ * The refusal is correct; editing the wrong occurrence is worse. But the
+ * instruction asks the model to VERIFY a property of a file it is seeing in
+ * excerpt, which it cannot do reliably — uniqueness is a whole-file fact and the
+ * window is a fragment. That is law 8: the fix is not a firmer instruction, it is
+ * making the fact available at the moment of use.
+ *
+ * So compute it and hand it over. Deterministic, cheap, and it removes the need
+ * for the model to check anything.
+ *
+ * Trimmed lines are compared, because that is what an anchor match uses; blank
+ * lines, bare braces and comment-only lines are skipped since none of them is a
+ * useful anchor even when unique.
+ */
+export function uniqueAnchorLines(fileText: string, limit = 40): string[] {
+  if (typeof fileText !== "string" || fileText.length === 0) return [];
+  const counts = new Map<string, number>();
+  const order: string[] = [];
+  for (const raw of fileText.split("\n")) {
+    const t = raw.trim();
+    if (t.length < 12 || t.length > 160) continue;
+    if (t.startsWith("//") || t.startsWith("*") || t.startsWith("/*")) continue;
+    if (/^[{}()\[\];,]+$/.test(t)) continue;
+    if (!counts.has(t)) order.push(t);
+    counts.set(t, (counts.get(t) ?? 0) + 1);
+  }
+  const out: string[] = [];
+  for (const t of order) {
+    if (counts.get(t) === 1) out.push(t);
+    if (out.length >= limit) break;
+  }
+  return out;
+}
+
+/**
+ * Is this anchor safe to bind an edit to?
+ *
+ * Returns the occurrence count so a caller can say WHY it refused. Exact
+ * substring counting, matching how apply binds.
+ */
+export function anchorOccurrences(fileText: string, anchor: string): number {
+  if (!fileText || !anchor) return 0;
+  let n = 0;
+  let i = fileText.indexOf(anchor);
+  while (i !== -1) {
+    n++;
+    i = fileText.indexOf(anchor, i + Math.max(1, anchor.length));
+  }
+  return n;
+}
+
+/**
+ * Render verified-unique anchors near the region as a compact block.
+ *
+ * Scoped to the region's vicinity rather than the whole file: a 13,000-line file
+ * has thousands of unique lines and listing them would drown the window. The
+ * drafter needs a handful of anchors it can trust AT the place it is editing.
+ */
+export function renderSafeAnchors(
+  fileText: string,
+  region: string,
+  path: string,
+  maxAnchors = 12,
+  window = 80,
+): string {
+  if (!fileText || !path) return "";
+  const lines = fileText.split("\n");
+  let center = region ? lines.findIndex((l) => l.includes(region)) : -1;
+  if (center < 0) center = Math.floor(lines.length / 2);
+  const lo = Math.max(0, center - window);
+  const hi = Math.min(lines.length, center + window);
+  const near = lines.slice(lo, hi).join("\n");
+  const unique = uniqueAnchorLines(near, maxAnchors * 3)
+    .filter((l) => anchorOccurrences(fileText, l) === 1)
+    .slice(0, maxAnchors);
+  if (unique.length === 0) return "";
+  return [
+    "",
+    `## VERIFIED-UNIQUE ANCHORS in ${path} (near the region)`,
+    "Each line below occurs EXACTLY ONCE in the file — copying one verbatim as",
+    "`old_string` cannot mislocalize. Uniqueness is a whole-file property you",
+    "cannot check from an excerpt, so it has been checked for you. If the line you",
+    "need is not listed, include enough adjacent lines to make your anchor unique.",
+    ...unique.map((l) => `    ${l}`),
+  ].join("\n");
+}

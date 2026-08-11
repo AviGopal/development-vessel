@@ -11,6 +11,9 @@ import {
   renderSymbolDeclarations,
   importSpecifier,
   typeNamesIn,
+  uniqueAnchorLines,
+  anchorOccurrences,
+  renderSafeAnchors,
 } from "./cross-file-symbols";
 
 const SPEC = `Edit repos/llm-resolver-vessel/src/model-policy.ts so a provider-level failure
@@ -168,5 +171,48 @@ describe("symbolsNeedingDeclaration — a mention is not a declaration", () => {
     expect(
       symbolsNeedingDeclaration(SPEC, "// pickSatisfierProducer already encodes the rule"),
     ).toContain("pickSatisfierProducer");
+  });
+});
+
+describe("uniqueAnchorLines / anchorOccurrences — uniqueness is a whole-file fact", () => {
+  // The compose prompt already demands a UNIQUE old_string. A drafter cannot
+  // verify that from an excerpt — uniqueness is a property of the whole file and
+  // the window is a fragment. Measured 2026-08-11: a draft anchored on a line
+  // occurring THREE times and apply refused it (correctly). Law 8 — compute the
+  // fact and hand it over rather than instructing harder.
+  const FILE = [
+    "import { a } from './a';",
+    "const shared = compute(value);",
+    "function one() {",
+    "  const shared = compute(value);",
+    "  return distinctLineNumberOne(x);",
+    "}",
+    "function two() {",
+    "  return distinctLineNumberTwo(y);",
+    "}",
+  ].join("\n");
+
+  test("counts occurrences the way apply binds", () => {
+    expect(anchorOccurrences(FILE, "const shared = compute(value);")).toBe(2);
+    expect(anchorOccurrences(FILE, "return distinctLineNumberOne(x);")).toBe(1);
+    expect(anchorOccurrences(FILE, "nowhere")).toBe(0);
+  });
+
+  test("a duplicated line is never offered as an anchor", () => {
+    expect(uniqueAnchorLines(FILE)).not.toContain("const shared = compute(value);");
+  });
+
+  test("every offered anchor is genuinely unique", () => {
+    for (const a of uniqueAnchorLines(FILE)) expect(anchorOccurrences(FILE, a)).toBe(1);
+  });
+
+  test("noise is skipped — braces, comments, and trivially short lines", () => {
+    const out = uniqueAnchorLines("{\n}\n// a comment that is quite long indeed\nx;\n");
+    expect(out).toEqual([]);
+  });
+
+  test("the rendered block is empty when there is nothing safe to offer", () => {
+    expect(renderSafeAnchors("", "r", "p.ts")).toBe("");
+    expect(renderSafeAnchors("{\n}\n", "r", "p.ts")).toBe("");
   });
 });

@@ -287,8 +287,8 @@ export function renderSafeAnchors(
 ): string {
   if (!fileText || !path) return "";
   const lines = fileText.split("\n");
-  let center = region ? lines.findIndex((l) => l.includes(region)) : -1;
-  if (center < 0) center = Math.floor(lines.length / 2);
+  let center = lines.findIndex((l) => l.includes(region));
+  if (center < 0) return ""; // If region not found, return no anchors.
   const lo = Math.max(0, center - window);
   const hi = Math.min(lines.length, center + window);
   const near = lines.slice(lo, hi).join("\n");

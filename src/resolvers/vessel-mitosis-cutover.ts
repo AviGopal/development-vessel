@@ -2028,9 +2028,41 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
           const quiesceMaxS = Number(process.env["MITOSIS_SELF_RESTART_QUIESCE_MAX_S"] ?? "600");
           const quiesceIters = Math.max(0, Math.floor(quiesceMaxS / 5));
           const markerDir = `${process.env["WORKSPACE_ROOT"] ?? "/workspace"}/authoring-inflight`;
+          const quiesceDir = `${process.env["WORKSPACE_ROOT"] ?? "/workspace"}/quiesce`;
+          // Port this vessel serves /health on, for the in-flight poll above.
+          const inflightPort = process.env["PORT"] ?? process.env["VESSEL_PORT"] ?? "8090";
           const restartScript =
             `if grep -q '${leaseMark}' '${leaseFile}' 2>/dev/null; then rm -f '${leaseFile}'; fi; `
-            + `i=0; while [ "$i" -lt ${quiesceIters} ] && [ -n "$(ls -A '${markerDir}' 2>/dev/null)" ]; do sleep 5; i=$((i+1)); done; `
+            // CLOSE ADMISSION, THEN WAIT ON THE HONEST COUNTER.
+            //
+            // The marker-directory wait above is blind in exactly the way this
+            // block's own comment says the SIGTERM drain is: authoring markers are
+            // not written until the APPLY stage, so a compose spending its 5-8
+            // minutes in grounding/planning/verify looks idle and gets destroyed.
+            //
+            // Two changes, both reusing machinery that already exists:
+            //   1. WRITE THE QUIESCE MARKER first, so the vessel stops admitting
+            //      new long-running work (the same lame-duck refusal SIGTERM uses).
+            //      Without this the wait cannot terminate under load — new composes
+            //      keep arriving, which is why the bounded version kept expiring.
+            //   2. WAIT ON /health in_flight, which counts a compose from the
+            //      moment it is admitted, not from apply.
+            //
+            // Falls back to the marker directory when in_flight cannot be read, so
+            // a vessel that does not publish it behaves exactly as before.
+            //
+            // This is the SECOND converger to get this treatment; substrate-pull-sync
+            // was fixed first and this path was left behind — the same "fixed one
+            // call site, missed the sibling" error this session has hit repeatedly.
+            // A restart that destroys an in-flight run destroys the verdict that
+            // would have attributed credit to the change, which is the loop itself.
+            + `mkdir -p '${quiesceDir}' 2>/dev/null; : > '${quiesceDir}/${vessel_name}' 2>/dev/null; `
+            + `i=0; while [ "$i" -lt ${quiesceIters} ]; do `
+            + `  IF=$(curl -s --max-time 5 'http://127.0.0.1:${inflightPort}/health' 2>/dev/null | grep -o '"in_flight"[[:space:]]*:[[:space:]]*[0-9][0-9]*' | grep -o '[0-9]*$' | head -1); `
+            + `  if [ -n "$IF" ]; then [ "$IF" -eq 0 ] && break; `
+            + `  else [ -z "$(ls -A '${markerDir}' 2>/dev/null)" ] && break; fi; `
+            + `  sleep 5; i=$((i+1)); done; `
+            + `rm -f '${quiesceDir}/${vessel_name}' 2>/dev/null; `
             + `exec systemctl restart '${unit}'`;
           const proc = Bun.spawnSync(
             [sysdRun, `--on-active=${delaySec}s`, `--unit=${tsUnit}`, "--collect", "/bin/sh", "-c", restartScript],

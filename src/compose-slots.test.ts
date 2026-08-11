@@ -127,8 +127,13 @@ describe("compose slots — a dead holder frees its slot immediately", () => {
     await writeFile(join(dir, "ghost2.slot"), JSON.stringify({ pid: 999998, at: Date.now() }));
     const s = await acquire("real", { directed: true });
     expect(s.granted).toBe(true);
-    // Both ghosts reaped, so only the real slot remains.
-    expect((await readdir(dir)).filter((f) => f.endsWith(".slot"))).toEqual(["real.slot"]);
+    // Both ghosts reaped, so exactly one slot remains — the one just claimed.
+    // Slots are FIXED NUMBERED names (`slot-<i>.slot`) claimed with O_EXCL so that
+    // simultaneous arrivals cannot both win; the composeId no longer names the
+    // file. What this test pins is unchanged: dead holders are reclaimed now, not
+    // in STALE_MS, and the caller gets a slot.
+    const remaining = (await readdir(dir)).filter((f) => f.endsWith(".slot"));
+    expect(remaining).toEqual(["slot-0.slot"]);
   });
 
   test("a LIVE holder keeps its slot", async () => {
@@ -145,5 +150,37 @@ describe("compose slots — a dead holder frees its slot immediately", () => {
     await writeFile(join(dir, "corrupt.slot"), "not json at all");
     await acquire("one", { directed: true });
     expect((await acquire("two", { directed: true })).granted).toBe(false);
+  });
+});
+
+describe("compose slots — the reservation survives a RACE, not just a count", () => {
+  // THE DEFECT: acquisition was count-then-write with uniquely-named files, so two
+  // simultaneous arrivals both read the same count and both wrote a slot. I had
+  // documented that race as acceptable on the grounds that the overflow "costs
+  // load". It does not only cost load — the extra admission consumes the slot
+  // RESERVED for directed work. Measured 2026-08-11: two AUTONOMOUS composes ran
+  // against an autonomous cap of 1, holding both slots, and three consecutive
+  // operator dispatches were refused before reaching the drafter.
+  test("simultaneous autonomous claimants cannot exceed the autonomous cap", async () => {
+    const acquire = await fresh();
+    // cap=2 => autonomous effectiveCap = 1. Fire them together, not in sequence:
+    // sequential calls pass even under the old racy implementation.
+    const results = await Promise.all([
+      acquire("a", { directed: false }),
+      acquire("b", { directed: false }),
+      acquire("c", { directed: false }),
+    ]);
+    expect(results.filter((r) => r.granted).length).toBe(1);
+  });
+
+  test("a directed compose can still claim the reserved slot afterwards", async () => {
+    const acquire = await fresh();
+    const auto = await Promise.all([
+      acquire("a", { directed: false }),
+      acquire("b", { directed: false }),
+    ]);
+    expect(auto.filter((r) => r.granted).length).toBe(1);
+    // The whole point of the reservation: autonomous overflow must not eat this.
+    expect((await acquire("directed", { directed: true })).granted).toBe(true);
   });
 });

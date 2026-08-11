@@ -123,12 +123,21 @@ async function countLive(now: number): Promise<number> {
 /**
  * Try to take a compose slot.
  *
- * Not atomic across processes, and deliberately so: the alternative is a real
- * lock, whose failure mode is a wedged fleet when a holder dies. A count-then-
- * write race can admit one extra compose under simultaneous arrival, which costs
- * some load; a stuck lock costs all self-development. The cap is a resource
- * guardrail, not a correctness invariant — correctness is the per-vessel busy-set
- * and the cutover lease, both of which remain.
+ * Atomic across processes, without a lock. Each slot is a FIXED, NUMBERED file
+ * claimed with O_EXCL, so the filesystem arbitrates simultaneous arrivals and no
+ * two claimants can hold the same index. There is still no lock to get stuck: a
+ * holder that dies leaves a file, and `countLive` reclaims it by dead-pid or
+ * staleness before the scan — so the failure mode remains "a slot frees late",
+ * never "the fleet is wedged".
+ *
+ * This replaced a count-then-write version that was deliberately racy on the
+ * argument that the overflow merely cost load. That argument was wrong about
+ * which property the race breaks: the extra admission consumes the slot RESERVED
+ * for directed work, so autonomous overflow silently starved operator dispatches
+ * (measured 2026-08-11 — two autonomous composes against a cap of one, and three
+ * directed trials refused in a row). The cap is a resource guardrail; the
+ * RESERVATION is a fairness property, and a race that can defeat it is a defect
+ * in it rather than a rounding error on it.
  */
 export async function acquireComposeSlot(
   composeId: string,
@@ -152,12 +161,62 @@ export async function acquireComposeSlot(
   let path: string | null = null;
   try {
     await mkdir(SLOT_DIR, { recursive: true });
+    // Reap dead/stale holders, then refuse on the live count BEFORE trying to
+    // claim. Both checks are load-bearing and neither subsumes the other:
+    //
+    //   - the COUNT bounds every live slot, including legacy arbitrarily-named
+    //     `<composeId>.slot` files written by the previous version (which are on
+    //     disk at deploy time, and which the numbered claim below cannot see);
+    //   - the atomic CLAIM decides simultaneous arrivals, which the count alone
+    //     cannot, because two racers read the same count.
+    //
+    // Dropping the count in favour of the claim would over-admit across the
+    // version change; dropping the claim in favour of the count restores the race.
     const live = await countLive(Date.now());
     if (live >= effectiveCap) {
       return { granted: false, observed: live, release: async () => {} };
     }
-    path = `${SLOT_DIR}/${composeId}.slot`;
-    await writeFile(path, JSON.stringify({ pid: process.pid, at: Date.now() }));
+    // CLAIM A NUMBERED SLOT ATOMICALLY — count-then-write is not enough.
+    //
+    // The previous version counted live slots and then wrote a uniquely-named
+    // file. Two arrivals that interleave both read the same count and both write,
+    // so the cap admits one extra. I documented that race as acceptable because
+    // "the cost is load" — and that was wrong about WHICH property it breaks.
+    //
+    // Measured 2026-08-11: two AUTONOMOUS composes were in flight at once against
+    // an autonomous cap of 1 (`REFUSING autonomous compose: 2 in flight`), so they
+    // held BOTH slots, and every directed dispatch was refused
+    // (`REFUSING DIRECTED compose: 2 in flight`) — three operator trials in a row
+    // never reached the drafter. The overflow does not just cost load: it consumes
+    // the slot RESERVED for directed work, which voids the reservation the comment
+    // above promises. A race that can defeat a safety property is not a rounding
+    // error on that property.
+    //
+    // Slots are now FIXED, NUMBERED names claimed with O_EXCL (`wx`), so the
+    // filesystem decides the winner: two simultaneous claimants for slot 2 cannot
+    // both succeed. Autonomous work scans only [0, cap-2], leaving the top index
+    // claimable by directed work alone — the reservation is now structural rather
+    // than advisory.
+    //
+    // Still fails open (see the module comment): if every index is taken we refuse,
+    // but an unreadable/unwritable directory falls through to the catch below.
+    for (let i = 0; i < effectiveCap; i++) {
+      const candidate = `${SLOT_DIR}/slot-${i}.slot`;
+      try {
+        // `wx` = O_CREAT | O_EXCL — fails if the file already exists.
+        await writeFile(candidate, JSON.stringify({ pid: process.pid, at: Date.now(), composeId }), {
+          flag: "wx",
+        });
+        path = candidate;
+        break;
+      } catch {
+        // Taken by a live holder (countLive already removed dead/stale ones).
+        continue;
+      }
+    }
+    if (path === null) {
+      return { granted: false, observed: live, release: async () => {} };
+    }
     return {
       granted: true,
       observed: live,

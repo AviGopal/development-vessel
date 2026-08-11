@@ -2788,7 +2788,7 @@ async function resolveFeatureComposeUncapped(pointer: FeatureComposePointer): Pr
           const rootA = process.env["REPO_ROOT"] ?? process.env["WORKSPACE_ROOT"] ?? "/workspace/git/super-repo";
           const text = await readFile(`${rootA}/${tf}`, "utf8").catch(() => "");
           if (text) {
-            const bestHint = focusHints.find((hint) => text.includes(hint)) ?? regionHint;
+            const bestHint = focusHints.find((h) => text.includes(h)) ?? regionHint;
 const anchors = renderSafeAnchors(text, bestHint ?? "", tf);
             if (anchors) { symbolBlock += anchors; console.log(`[fc-anchors] supplied verified-unique anchors for ${tf}`); }
           }

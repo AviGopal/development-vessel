@@ -3320,6 +3320,53 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
 
   for (const [v, errs] of baselineTsErrors) { if (errs.size === 0) continue; try { await fetch(`${DEV_VESSEL_ENDPOINT}/v2/impulses/resolve`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ impulse: { type: "substrateGap_write", gap: { id: "baseline-typecheck-broken-" + v.replace(/[^a-zA-Z0-9]+/g, "-"), category: "systematic_failure", source: "substrate_detected", summary: "feature_compose found the UNTOUCHED baseline of " + v + " failing typecheck BEFORE drafting (" + errs.size + " pre-existing tsc errors, e.g. " + Array.from(errs).slice(0, 3).join(" | ").slice(0, 400) + "). Environment fault (stale runtime copy or missing module), not a drafter fault: re-sync this vessel source from its repo baseline. Draft verdicts on this vessel use baseline-delta blame until the baseline is clean.", detected_at: new Date().toISOString(), status: "open" } } }) }); console.log("[feature-compose] baseline-broken environment gap filed for " + v); } catch { /* advisory */ } }
 
+  // UNTESTED TARGET = TEXT-ONLY VERIFICATION. Say so before drafting.
+  //
+  // Every gate downstream of this point reasons about the DIFF: typecheck, the
+  // semantic judge, the vacuous / non-termination / diagnostic-only checks. The
+  // only gate that EXECUTES the changed code is the module's own test suite. When
+  // the target module has no test file, nothing in the pipeline ever runs it.
+  //
+  // Measured 2026-08-11: d96e2ae replaced a function's tail return with a call to
+  // itself and landed. It typechecked (it is type-correct), the judge approved it,
+  // the verdict was FAVORABLE, the dispatch was graded reached:true — and
+  // satisfier-pick.ts had NO test file, so nothing ever invoked the function. In
+  // tail position it loops rather than overflowing, so the vessel hung while
+  // reporting healthy.
+  //
+  // A WARNING, not a refusal. Blocking edits to untested modules is a policy call
+  // about halting self-development and belongs to an operator. The alternative —
+  // a gate that simply executes the exports — was built and abandoned: it cannot
+  // reach the defect with zero-arity calls (the base case throws first), and
+  // guessing arguments would invoke resolveVesselMitosisCutover /
+  // resolveApplyProposalAsPatch, which rename live vessel directories and restart
+  // units. That gate is more dangerous than the defect.
+  //
+  // What this can do is stop the weakness being invisible: a green verdict on an
+  // untested module means the diff was READ, never RUN.
+  try {
+    const { access } = await import("node:fs/promises");
+    const rootT = process.env["REPO_ROOT"] ?? process.env["WORKSPACE_ROOT"] ?? "/workspace/git/super-repo";
+    for (const tf of targetFiles) {
+      if (!/\.tsx?$/.test(tf) || /\.test\.tsx?$/.test(tf)) continue;
+      const candidates = [
+        tf.replace(/\.tsx?$/, ".test.ts"),
+        tf.replace(/^([^/]+\/[^/]+)\/src\//, "$1/test/").replace(/\.tsx?$/, ".test.ts"),
+      ];
+      let covered = false;
+      for (const c of candidates) {
+        try { await access(`${rootT}/${c}`); covered = true; break; } catch { /* try next */ }
+      }
+      if (!covered) {
+        console.warn(
+          `[fc-coverage] TARGET HAS NO TEST FILE: ${tf} — every gate below this point READS the diff; ` +
+          `only a test RUNS it. A FAVORABLE verdict here means the change was reviewed, never executed. ` +
+          `This is the exact condition under which d96e2ae (an unconditional self-call) landed and hung the vessel.`,
+        );
+      }
+    }
+  } catch { /* advisory only */ }
+
 // NO ABORT ON A DIRTY BASELINE — that is what baseline-delta blame is FOR.
 //
 // A substrate-authored patch (2dbb4a6) added a throw here that aborted the whole

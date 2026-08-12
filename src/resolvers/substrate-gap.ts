@@ -454,6 +454,8 @@ export async function resolveSubstrateGapWrite(
     }
   }
   if (existingIdx < 0) {
+  existingIdx = gaps.findIndex((g) => gapClassKey(g.id) === classKey);
+
     // hasClassifiableId FIRST: a row missing `status` passes `!== "closed"`, so
     // without this guard the id check never runs. That exact ordering is what
     // made one malformed row unwritable-store poison.

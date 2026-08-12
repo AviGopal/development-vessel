@@ -259,3 +259,53 @@ describe("vacuousEditReason — diagnostic gate must not swallow real work", () 
     ).toBeNull();
   });
 });
+
+describe("nonTerminatingEditReason — a self-call bound to a local is the same defect", () => {
+  // 75427eea landed exactly this shape into gap-to-feature.ts and hung the vessel;
+  // the detector missed it because it matched only `return f(...)`. Reverted as
+  // f836134. These pin the widened collection site.
+  const before = "function verifyGapCondition(gap) {\n  return 'present';\n}";
+
+  test("the two-statement form is caught, not just the returned one", () => {
+    const after =
+      "function verifyGapCondition(gap) {\n" +
+      "  const conditionStatus = verifyGapCondition(gap);\n" +
+      "  if (conditionStatus !== 'present') { return conditionStatus; }\n" +
+      "  return 'present';\n}";
+    const reason = nonTerminatingEditReason(before, after);
+    expect(reason).not.toBeNull();
+    expect(reason).toContain("verifyGapCondition");
+    // The symptom differs from the returned form and the explanation must say so:
+    // a bound call is not in tail position, so it grows the stack instead of looping.
+    expect(reason).toContain("grows the stack");
+  });
+
+  test("the returned form still reports tail-position looping", () => {
+    const after = "function verifyGapCondition(gap) {\n  return verifyGapCondition(gap);\n}";
+    expect(nonTerminatingEditReason(before, after)).toContain("tail position");
+  });
+
+  test("an awaited bound self-call is caught too", () => {
+    const b = "async function drain(queue) {\n  return 1;\n}";
+    const a = "async function drain(queue) {\n  const r = await drain(queue);\n  return r;\n}";
+    expect(nonTerminatingEditReason(b, a)).not.toBeNull();
+  });
+
+  // CONTROLS — widening a refusal filter is only safe if these keep passing.
+  test("CONTROL: binding a call to a DIFFERENT function is ordinary code", () => {
+    const a = "function f(x) {\n  const y = compute(x);\n  return y;\n}";
+    expect(nonTerminatingEditReason("function f(x) {\n  return 1;\n}", a)).toBeNull();
+  });
+
+  test("CONTROL: genuine recursion on a derived argument still passes", () => {
+    const b = "function walk(node) {\n  return null;\n}";
+    const a = "function walk(node) {\n  if (!node) return null;\n  const rest = walk(node.next);\n  return rest;\n}";
+    expect(nonTerminatingEditReason(b, a)).toBeNull();
+  });
+
+  test("CONTROL: a bound self-call whose argument is reassigned still passes", () => {
+    const b = "function f(n) {\n  return n;\n}";
+    const a = "function f(n) {\n  n = n - 1;\n  const r = f(n);\n  return r;\n}";
+    expect(nonTerminatingEditReason(b, a)).toBeNull();
+  });
+});

@@ -123,14 +123,39 @@ export function nonTerminatingEditReason(before: string, after: string): string 
     .map((l) => l.trim())
     .filter((l) => l.length > 0 && !beforeLines.has(l));
   // Only functions this edit actually touched are examined.
-  const addedSelfCalls = added.filter((l) => /^return\s+[A-Za-z_$][\w$]*\s*\(/.test(l));
+  //
+  // BINDING THE CALL TO A LOCAL FIRST IS THE SAME DEFECT AND THE SAME PROOF.
+  // The collection below used to match only `return f(...)`, so
+  //
+  //     const conditionStatus = verifyGapCondition(gap);
+  //     if (conditionStatus !== 'present') { return conditionStatus; }
+  //
+  // produced an EMPTY addedSelfCalls and this function returned null at the very
+  // next line — both rules below are keyed off this set, so widening it here is
+  // the whole fix. That two-statement form is not hypothetical: it is what
+  // 75427eea actually landed into gap-to-feature.ts (reverted as f836134), and a
+  // detector that catches `return f(x)` while missing `const y = f(x); return y`
+  // is checking a spelling, not a property.
+  //
+  // Rule 2's soundness argument carries over unchanged, because it is about the
+  // ARGUMENTS, not the syntax: if every argument is a plain binding never
+  // reassigned in the body, the recursive invocation meets every guard in exactly
+  // the same state, so any guard that would return early returns early in both —
+  // the call is unconditional with respect to its arguments either way.
+  //
+  // One real difference, reflected in the explanations below: a returned self-call
+  // sits in tail position and loops, while an assigned one grows the stack and
+  // eventually throws. Both are non-terminating; only the symptom differs.
+  const SELF_CALL_RETURN = /^return\s+([A-Za-z_$][\w$]*)\s*\(/;
+  const SELF_CALL_ASSIGN = /^(?:const|let|var)\s+[A-Za-z_$][\w$]*\s*=\s*(?:await\s+)?([A-Za-z_$][\w$]*)\s*\(/;
+  const calleeOf = (l: string): string | null =>
+    SELF_CALL_RETURN.exec(l)?.[1] ?? SELF_CALL_ASSIGN.exec(l)?.[1] ?? null;
+  const addedSelfCalls = added.filter((l) => calleeOf(l) !== null);
   if (addedSelfCalls.length === 0) return null;
 
   for (const fn of functionBodies(after)) {
-    // Did this edit add a returning self-call inside THIS function?
-    const touched = addedSelfCalls.some(
-      (l) => new RegExp(`^return\\s+${escapeRe(fn.name)}\\s*\\(`).test(l) && fn.body.includes(l),
-    );
+    // Did this edit add a self-call — returned or bound — inside THIS function?
+    const touched = addedSelfCalls.some((l) => calleeOf(l) === fn.name && fn.body.includes(l));
     if (!touched) continue;
 
     const selfCall = new RegExp(`^return\\s+${escapeRe(fn.name)}\\s*\\(`);
@@ -163,7 +188,8 @@ export function nonTerminatingEditReason(before: string, after: string): string 
     // `rest` is reassigned in a loop — and any property access, arithmetic, call,
     // literal, or reassigned binding makes this rule abstain.
     for (const line of addedSelfCalls) {
-      if (!selfCall.test(line) || !fn.body.includes(line)) continue;
+      if (calleeOf(line) !== fn.name || !fn.body.includes(line)) continue;
+      const returned = selfCall.test(line);
       const argsRaw = /\(([^)]*)\)\s*;?$/.exec(line)?.[1] ?? "";
       const args = argsRaw.split(",").map((a) => a.trim()).filter(Boolean);
       if (args.length === 0) continue; // zero-arg self call: Rule 1's territory
@@ -176,12 +202,15 @@ export function nonTerminatingEditReason(before: string, after: string): string 
       );
       if (anyReassigned) continue; // the value moves → cannot claim non-progress
       return (
-        `non-terminating edit: the added line \`${line}\` returns a call to the enclosing ` +
-        `function \`${fn.name}\` passing ${args.map((a) => `\`${a}\``).join(", ")} — plain ` +
+        `non-terminating edit: the added line \`${line}\` ${returned ? "returns" : "binds"} a call to ` +
+        `the enclosing function \`${fn.name}\` passing ${args.map((a) => `\`${a}\``).join(", ")} — plain ` +
         `binding(s) never reassigned in the body, so each invocation recurses on the same ` +
-        `value and no base case can ever be reached. This typechecks, and in tail position ` +
-        `it loops rather than overflowing the stack — the process hangs while still ` +
-        `reporting healthy`
+        `value and no base case can ever be reached. This typechecks, and ` +
+        (returned
+          ? `in tail position it loops rather than overflowing the stack — the process hangs ` +
+            `while still reporting healthy`
+          : `because the call is BOUND rather than returned it is not in tail position, so it ` +
+            `grows the stack until the process throws — a crash loop rather than a silent hang`)
       );
     }
     continue;

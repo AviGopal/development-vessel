@@ -3862,7 +3862,7 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
       // The gap this keeps trying to close is REAL — a manifest that cannot install must
       // not reach origin/dev (ddffdee did exactly that). But the check belongs against the
       // CLONE before staging, where node_modules is not shared. Do not solve it here.
-      command: `cd ${JSON.stringify(vAbs)} && (echo "== install =="; [ -d node_modules ] || { bun install >/dev/null 2>&1; echo "INSTALL_EXIT=$?"; }; echo "== typecheck =="; bun run typecheck 2>&1; echo "TC_EXIT=$?"; echo "== shape-dispatch =="; if [ -f ${SHARED_DISPATCH_CHECK} ] && [ -f src/config.ts ] && [ -f src/routes/impulses.ts ]; then bun ${SHARED_DISPATCH_CHECK} ${JSON.stringify(vAbs)} 2>&1; echo "SD_EXIT=$?"; else echo "SD_EXIT=0"; fi; echo "== tests =="; timeout 240 bun test 2>&1 || true)`,
+      command: `cd ${JSON.stringify(vAbs)} && (echo "== install =="; [ -d node_modules ] || { bun install >/dev/null 2>&1; echo "INSTALL_EXIT=$?"; }; echo "== resolve =="; bun install --dry-run >/tmp/fc-dryrun.$$ 2>&1; echo "DRYRUN_EXIT=$?"; tail -6 /tmp/fc-dryrun.$$; rm -f /tmp/fc-dryrun.$$; echo "== typecheck =="; bun run typecheck 2>&1; echo "TC_EXIT=$?"; echo "== shape-dispatch =="; if [ -f ${SHARED_DISPATCH_CHECK} ] && [ -f src/config.ts ] && [ -f src/routes/impulses.ts ]; then bun ${SHARED_DISPATCH_CHECK} ${JSON.stringify(vAbs)} 2>&1; echo "SD_EXIT=$?"; else echo "SD_EXIT=0"; fi; echo "== tests =="; timeout 240 bun test 2>&1 || true)`,
       cwd: REPO_ROOT,
     });
     const raw = String((sh.body as { stdout?: unknown })?.stdout ?? "");
@@ -3886,6 +3886,28 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
     // an older cached verify output cannot be read as a pass.
     const ie = raw.match(/INSTALL_EXIT=(\d+)/);
     const installExit = ie && ie[1] ? parseInt(ie[1], 10) : null;
+    // A MANIFEST THAT NO LONGER RESOLVES MUST NOT REACH origin/dev.
+    //
+    // The install above is conditional on a missing node_modules, and the compose
+    // worktree SYMLINKS node_modules from the clone, so it never fires and
+    // INSTALL_EXIT is always absent. A typecheck against an already-populated
+    // node_modules cannot see a manifest that stopped resolving — which is how
+    // `"@avigopal/ias-executor-ts": "file:../ias-executor-ts"` became `"0.1.0"`,
+    // landed twice, and broke every fresh install with a 404.
+    //
+    // `--dry-run` and NOT a real install, deliberately. The comment above records
+    // two reverted attempts (f38f1a3, 0797af4) that ran a MUTATING install here and
+    // pruned the shared node_modules, failing every other compose with TS2307 in
+    // files their drafts never touched. Measured in the container before adding
+    // this: bun.lock md5 and node_modules entry count are byte-identical across a
+    // dry-run, and it takes 16ms on an unchanged clone. It reads; it does not write.
+    //
+    // NO PIPE, so no PIPESTATUS: the verify command runs under `sh`, where
+    // `${PIPESTATUS[0]}` is a bash-ism that expands to "Bad substitution" and would
+    // have made this marker silently wrong. Redirect to a file, capture `$?`
+    // directly, then show the tail.
+    const dr = raw.match(/DRYRUN_EXIT=(\d+)/);
+    const dryRunExit = dr && dr[1] ? parseInt(dr[1], 10) : null;
     // Baseline-delta: pass typecheck if clean, OR if the baseline already had tsc
     // errors and the draft introduced NO NEW ones (post error set minus baseline is
     // empty). Shape-dispatch (sdExit) still gates strictly. Only relax when baseline
@@ -3971,8 +3993,14 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
     // An unobserved install is exactly as informative as the old behaviour, which
     // never ran one — so it must not be stricter than the evidence supports.
     const installOk = installExit === null || installExit === 0;
-    const ok = installOk && tcOk && sdExit === 0 && testOk;
+    // Absent marker passes, non-negotiably: an unobserved resolve is exactly as
+    // informative as the old behaviour, which never ran one. Only a PRESENT
+    // non-zero fails — treating an absent marker as failure is what refused six
+    // consecutive composes when the same mistake was made for INSTALL_EXIT.
+    const dryRunOk = dryRunExit === null || dryRunExit === 0;
+    const ok = installOk && dryRunOk && tcOk && sdExit === 0 && testOk;
     const detail = (installOk ? "" : ` | DEPENDENCY INSTALL FAILED (INSTALL_EXIT=${String(installExit)}) — the staged manifest does not install; a typecheck against an already-populated node_modules cannot see this`)
+      + (dryRunOk ? "" : ` | DEPENDENCY RESOLUTION FAILED (DRYRUN_EXIT=${String(dryRunExit)}) — the staged manifest names a dependency that does not resolve, so this change would break a fresh install even though it typechecks here: ${(raw.match(/== resolve ==\n([\s\S]*?)\n== typecheck ==/)?.[1] ?? "").slice(0, 400)}`)
       + (testOk ? "" : [
       confirmedNewTest.length > 0 ? ` | NEW test failures introduced by this draft, REPRODUCED on a second run (${confirmedNewTest.length}): ${confirmedNewTest.slice(0, 5).join(" ; ").slice(0, 600)}` : "",
       passRegressed ? ` | PASSING TESTS DISAPPEARED: ${basePass} -> ${curPass} (a draft must not delete coverage or break module load to go green)` : "",

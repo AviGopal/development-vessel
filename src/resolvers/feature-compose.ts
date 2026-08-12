@@ -117,10 +117,22 @@ interface PlanOp {
 
 type Json = Record<string, unknown>;
 
-async function llmCall(endpoint: string, prompt: string, model: string, produceFeatureCompose: boolean = true): Promise<string> {
-  if (produceFeatureCompose !== true) {
-    throw new Error('produceFeatureCompose must be true');
-  }
+// A FOURTH PARAMETER THAT ONLY THREW.
+//
+// This carried `produceFeatureCompose: boolean = true` plus
+// `if (produceFeatureCompose !== true) throw`. It appeared nowhere else — not in
+// the request body, not in a branch — so it gated nothing and its only effect was
+// to kill any caller that passed `false`. Exactly one did: `repairCreatedFile`.
+//
+// That call sits inside `try { ... } catch { return false; }`, so from 2026-08-06
+// (when substrate-authored 9972ecd added the guard) the created-file repair path
+// threw on every invocation, was swallowed without a log, and silently reported
+// "could not repair". Zero firings since, against 1,567 compose runs in the same
+// window; the 8 firings on record all predate the guard.
+//
+// Removed rather than satisfied at the call site: a parameter no code reads is
+// not a flag, and leaving it would keep a landmine for the next caller.
+async function llmCall(endpoint: string, prompt: string, model: string): Promise<string> {
   const res = await fetch(endpoint, {
     method: 'POST',
     // Every other call site in this file and the sibling drafter
@@ -3727,7 +3739,6 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
               llmEndpoint,
               `Current full content of ${op.path}:\n\n${live}\n\nMake this change: ${op.rationale ?? ""}\nIntended replacement behaviour:\n${op.new_string ?? ""}\n\nEmit ONE JSON object {"old_string":"<verbatim UNIQUE substring copied from the content above>","new_string":"<replacement>"}. old_string MUST appear verbatim in the content above. No prose, no fences.`,
               model,
-              true,
             ));
             if (fix?.old_string) {
               // Same two questions as the windowed re-derivation above, and this
@@ -4038,7 +4049,6 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
         `Emit the ENTIRE corrected file and nothing else — no prose, no code fences, no commentary. ` +
         `Preserve every export the rest of the vessel depends on. Change as little as the errors require.`,
         model,
-        false
       );
       let body = out.trim();
       // Strip accidental code fences if the model added them despite instructions.

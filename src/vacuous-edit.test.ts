@@ -6,7 +6,7 @@
 // FAVORABLE, the stage was accepted, and the attempt ENDED. Refusing it lets the
 // existing escalation (patch_with_tools) take a turn.
 import { describe, test, expect } from "bun:test";
-import { vacuousEditReason, nonTerminatingEditReason } from "./vacuous-edit";
+import { vacuousEditReason, nonTerminatingEditReason, deadStoreEditReason } from "./vacuous-edit";
 
 const BEFORE = `async function createGoalPath(c) {
   const goalHash = hashGoal(validated.goal_text);
@@ -307,5 +307,63 @@ describe("nonTerminatingEditReason — a self-call bound to a local is the same 
     const b = "function f(n) {\n  return n;\n}";
     const a = "function f(n) {\n  n = n - 1;\n  const r = f(n);\n  return r;\n}";
     expect(nonTerminatingEditReason(b, a)).toBeNull();
+  });
+});
+
+describe("deadStoreEditReason — an assignment the next statement erases", () => {
+  // 8eb660a landed exactly this into substrate-gap.ts, closed its gap, and had no
+  // behavioural effect. Reverted as 5a04b21.
+  const before =
+    "function f(gaps, classKey) {\n" +
+    "  let existingIdx = -1;\n" +
+    "  if (existingIdx < 0) {\n" +
+    "    existingIdx = gaps.findIndex((g) => ok(g) && key(g.id) === classKey);\n" +
+    "  }\n" +
+    "  return existingIdx;\n}";
+
+  test("the overwritten assignment is refused", () => {
+    const after = before.replace(
+      "    existingIdx = gaps.findIndex((g) => ok(g) && key(g.id) === classKey);",
+      "    existingIdx = gaps.findIndex((g) => key(g.id) === classKey);\n" +
+        "    existingIdx = gaps.findIndex((g) => ok(g) && key(g.id) === classKey);",
+    );
+    const reason = deadStoreEditReason(before, after);
+    expect(reason).not.toBeNull();
+    expect(reason).toContain("existingIdx");
+    expect(reason).toContain("dead store");
+  });
+
+  test("vacuousEditReason consumes it — a gate with no reader is not a gate", () => {
+    const after = before.replace(
+      "    existingIdx = gaps.findIndex((g) => ok(g) && key(g.id) === classKey);",
+      "    existingIdx = gaps.findIndex((g) => key(g.id) === classKey);\n" +
+        "    existingIdx = gaps.findIndex((g) => ok(g) && key(g.id) === classKey);",
+    );
+    expect(vacuousEditReason(before, after)).toContain("dead store");
+  });
+
+  // CONTROLS — a refusal gate is only safe if real work keeps passing.
+  test("CONTROL: accumulation passes — the second assignment READS the binding", () => {
+    const b = "function f() {\n  let x = 1;\n  return x;\n}";
+    const a = "function f() {\n  let x = 1;\n  x = 2;\n  x = x + 3;\n  return x;\n}";
+    expect(deadStoreEditReason(b, a)).toBeNull();
+  });
+
+  test("CONTROL: a real statement between the two assignments passes", () => {
+    const b = "function f() {\n  let x = 1;\n  return x;\n}";
+    const a = "function f() {\n  let x = 1;\n  x = 2;\n  send(x);\n  x = 3;\n  return x;\n}";
+    expect(deadStoreEditReason(b, a)).toBeNull();
+  });
+
+  test("CONTROL: two assignments to DIFFERENT bindings pass", () => {
+    const b = "function f() {\n  let x = 1;\n  let y = 1;\n  return x + y;\n}";
+    const a = "function f() {\n  let x = 1;\n  let y = 1;\n  x = 2;\n  y = 3;\n  return x + y;\n}";
+    expect(deadStoreEditReason(b, a)).toBeNull();
+  });
+
+  test("CONTROL: an unrelated added statement passes", () => {
+    const b = "function f() {\n  return 1;\n}";
+    const a = "function f() {\n  doThing();\n  return 1;\n}";
+    expect(deadStoreEditReason(b, a)).toBeNull();
   });
 });

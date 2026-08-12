@@ -250,6 +250,82 @@ function functionBodies(src: string): Array<{ name: string; body: string }> {
   return out;
 }
 
+/**
+ * Did this edit add an assignment that the very next statement erases?
+ *
+ * ── WHY THIS EXISTS ──────────────────────────────────────────────────────────
+ * Observed live 2026-08-12. Commit 8eb660a landed autonomously via mitosis
+ * cutover, closing its gap, having inserted into substrate-gap.ts:
+ *
+ *     if (existingIdx < 0) {
+ *   +   existingIdx = gaps.findIndex((g) => gapClassKey(g.id) === classKey);
+ *       // hasClassifiableId FIRST: ...
+ *       existingIdx = gaps.findIndex((g) => hasClassifiableId(g) && ...);
+ *     }
+ *
+ * The added assignment is overwritten by the next statement before anything can
+ * read it, so the change has NO behavioural effect — and it still closed the gap
+ * it was supposed to fix. A false close is the costly half: it removes the demand
+ * that would otherwise drive the real repair.
+ *
+ * Neither existing gate could see it. `tsc` cannot — a dead store is valid
+ * TypeScript. `vacuousEditReason`'s unused-binding rule cannot — that looks for a
+ * DECLARATION whose binding is never used, and this is an assignment to an
+ * ALREADY-DECLARED binding, so there is no new binding to be unused. The detector
+ * sat one syntactic case away from the defect, which is the same shape as
+ * `nonTerminatingEditReason` catching `return f(x)` while missing
+ * `const y = f(x); return y`.
+ *
+ * ── DELIBERATELY NARROW ──────────────────────────────────────────────────────
+ * Fires only when an ADDED line is `x = <expr>;` and the very NEXT statement —
+ * blank lines and comments skipped, nothing else — assigns `x` again. Adjacency
+ * is what makes the proof local: no intervening statement exists, so nothing can
+ * read the first value and no branch can skip the second write.
+ *
+ * A later reassignment separated by any real statement is NOT touched, because
+ * that statement may read the value or may be a guard that returns first.
+ * Legitimate accumulate-then-overwrite (`x = a; x = f(x);`) is not touched
+ * either: the second assignment READS x, which is checked for explicitly.
+ */
+export function deadStoreEditReason(before: string, after: string): string | null {
+  if (typeof before !== "string" || typeof after !== "string") return null;
+  if (after === before) return null;
+
+  const beforeLines = new Set(before.split("\n").map((l) => l.trim()));
+  const lines = after.split("\n").map((l) => l.trim());
+  // `let x = 1` / `const x = 1` are DECLARATIONS — a redeclaration is a syntax
+  // error, not a dead store, so only bare assignments qualify.
+  const ASSIGN = /^([A-Za-z_$][\w$]*)\s*=\s*([^=].*?);?$/;
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]!;
+    if (beforeLines.has(line)) continue; // untouched by this edit
+    const m = ASSIGN.exec(line);
+    if (!m) continue;
+    const name = m[1]!;
+    if (/^(?:const|let|var)\b/.test(line)) continue;
+
+    // The NEXT statement, skipping blanks and comments only.
+    let j = i + 1;
+    while (j < lines.length && (lines[j] === "" || lines[j]!.startsWith("//") || lines[j]!.startsWith("*") || lines[j]!.startsWith("/*"))) j++;
+    if (j >= lines.length) continue;
+    const next = ASSIGN.exec(lines[j]!);
+    if (!next || next[1] !== name) continue;
+    if (/^(?:const|let|var)\b/.test(lines[j]!)) continue;
+    // If the overwriting statement READS the binding, this is an accumulation,
+    // not a dead store.
+    if (new RegExp(`\\b${escapeRe(name)}\\b`).test(next[2] ?? "")) continue;
+
+    return (
+      `dead store: the added line \`${line}\` assigns \`${name}\`, and the very next statement ` +
+      `\`${lines[j]}\` assigns \`${name}\` again without reading it, so the added line has no ` +
+      `effect whatsoever. This typechecks and the file behaves identically, so it cannot be the ` +
+      `requested change — and accepting it would close the gap while leaving the defect in place`
+    );
+  }
+  return null;
+}
+
 export function vacuousEditReason(before: string, after: string): string | null {
   if (typeof before !== "string" || typeof after !== "string") return null;
   if (after === before) return null;
@@ -259,6 +335,10 @@ export function vacuousEditReason(before: string, after: string): string | null 
   // unlike the others it survived every existing gate and reached production.
   const loops = nonTerminatingEditReason(before, after);
   if (loops) return loops;
+
+  // AN EDIT THE NEXT STATEMENT ERASES CANNOT BE THE REQUESTED CHANGE.
+  const dead = deadStoreEditReason(before, after);
+  if (dead) return dead;
 
   // A TYPE-ONLY EDIT CANNOT BE THE REQUESTED CHANGE.
   //

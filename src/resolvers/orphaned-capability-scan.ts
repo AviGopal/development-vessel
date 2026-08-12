@@ -52,7 +52,7 @@ export interface OrphanedCapabilityScanPointer {
 interface TemplateTask {
   resolver?: string;
   resolver_id?: string;
-  config?: { type?: string };
+  config?: { type?: string; activity_task_field?: string };
 }
 interface Template {
   tasks?: TemplateTask[];

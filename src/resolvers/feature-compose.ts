@@ -26,7 +26,7 @@ import type { ResolverResult } from "./types.js";
 import { resolveVesselMitosisCutover } from "./vessel-mitosis-cutover.js";
 import { resolveSubstrateGap, resolveSubstrateGapWrite } from "./substrate-gap.js";
 import { writeAuthoringMarker, clearAuthoringMarker } from "./patch-with-tools.js";
-import { vacuousEditReason, nonTerminatingEditReason, deadStoreEditReason } from "../vacuous-edit.js";
+import { vacuousEditReason, nonTerminatingEditReason, deadStoreEditReason, truncatingRewriteReason } from "../vacuous-edit.js";
 import { acquireComposeSlot } from "../compose-slots.js";
 import { existsSync as mountExistsSync } from "node:fs";
 import { regionCandidatesFromText } from "./region-probe.js";
@@ -4014,9 +4014,29 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
     const curContent = (cur.body as { content?: unknown })?.content;
     if (!cur.ok || typeof curContent !== "string" || !curContent) return false;
     try {
+      // THE PROMPT ARGUMENT WAS AN ENDPOINT URL.
+      //
+      // `llmCall(endpoint, prompt, model, produceFeatureCompose)` — this call passed
+      // `llmEndpointNew` (a resolved producer URL) as the PROMPT, and neither the
+      // file content it had just read nor the `errText` it was handed reached the
+      // model at all. It typechecks because every one of those parameters is a
+      // `string`. The comment above this function has always described the intent
+      // correctly — "feed current content + that file's errors → corrected complete
+      // content" — and the code never did it.
+      //
+      // The model was therefore asked to continue a URL, and whatever came back was
+      // written over the file. Measured in production, 8 firings, including:
+      //   create-file-repair full-rewrite {"file":".../feature-compose.ts","wrote":true,"bytes":160}
+      // 160 bytes over the ~5,000-line compose resolver — this repair path truncated
+      // the very file it lives in. That is the `catastrophic_truncation` signature
+      // the mitosis cutover screens for, produced here from inside.
       const out = await llmCall(
-        FEATURE_COMPOSE_ENDPOINT,
         llmEndpointNew,
+        `The file ${rel} was created by this change and fails \`bun run typecheck\`. Re-author it COMPLETELY and correctly.\n\n` +
+        `TYPECHECK OUTPUT:\n${errText.slice(0, 4000)}\n\n` +
+        `CURRENT CONTENT of ${rel}:\n${curContent.slice(0, 24000)}\n\n` +
+        `Emit the ENTIRE corrected file and nothing else — no prose, no code fences, no commentary. ` +
+        `Preserve every export the rest of the vessel depends on. Change as little as the errors require.`,
         model,
         false
       );
@@ -4024,8 +4044,23 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
       // Strip accidental code fences if the model added them despite instructions.
       if (body.startsWith("```")) body = body.replace(/^```[a-zA-Z]*\n?/, "").replace(/\n?```\s*$/, "").trim();
       if (!body || body.length < 8) return false;
+      // A WHOLE-FILE REWRITE MAY NOT COLLAPSE THE FILE.
+      //
+      // The absolute floor above (8 bytes) is what let 160 bytes land on a 190KB
+      // file: it bounds the output, not the DAMAGE. The damage is relative, so the
+      // guard must be too. A genuine re-author of a failing new file stays within
+      // the same order of magnitude; an order-of-magnitude collapse is a truncated
+      // or hallucinated response, never a repair.
+      //
+      // Deliberately one-sided: growth is unbounded (adding the missing import,
+      // type or export legitimately grows a file), only SHRINKAGE is refused.
+      const truncating = truncatingRewriteReason(curContent, body, rel);
+      if (truncating) {
+        console.warn(`[development-vessel] create-file-repair REFUSED: ${truncating}`);
+        return false;
+      }
       const w = await callTool(toolsEndpoint, "fs_write", { path: abs, content: body });
-      console.log(`[development-vessel] create-file-repair full-rewrite ${JSON.stringify({ file: rel, wrote: w.ok, bytes: body.length })}`);
+      console.log(`[development-vessel] create-file-repair full-rewrite ${JSON.stringify({ file: rel, wrote: w.ok, was: curContent.length, bytes: body.length })}`);
       return w.ok;
     } catch { return false; }
   };

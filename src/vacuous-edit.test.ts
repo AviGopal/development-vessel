@@ -6,7 +6,7 @@
 // FAVORABLE, the stage was accepted, and the attempt ENDED. Refusing it lets the
 // existing escalation (patch_with_tools) take a turn.
 import { describe, test, expect } from "bun:test";
-import { vacuousEditReason, nonTerminatingEditReason, deadStoreEditReason } from "./vacuous-edit";
+import { vacuousEditReason, nonTerminatingEditReason, deadStoreEditReason, truncatingRewriteReason } from "./vacuous-edit";
 
 const BEFORE = `async function createGoalPath(c) {
   const goalHash = hashGoal(validated.goal_text);
@@ -450,5 +450,47 @@ describe("feature-compose wires the dead-store gate to the SIMULATED file", () =
   test("CONTROL: a string that is NOT in the file is not found", async () => {
     const src = await Bun.file(new URL("./resolvers/feature-compose.ts", import.meta.url)).text();
     expect(src).not.toContain("deadStoreEditReason(zzqqxx, zzqqxx)");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The guard that would have stopped the 160-byte write over feature-compose.ts.
+// ---------------------------------------------------------------------------
+describe("truncatingRewriteReason", () => {
+  test("REFUSES the production incident: 160 bytes over a ~190KB file", () => {
+    const before = "x".repeat(190_000);
+    const after = "y".repeat(160);
+    const r = truncatingRewriteReason(before, after, "feature-compose.ts");
+    expect(r).not.toBeNull();
+    expect(r).toContain("truncating rewrite");
+    expect(r).toContain("160 bytes");
+  });
+
+  test("the OLD absolute floor would have allowed it — this is why the guard is relative", () => {
+    // The rule this replaced was `body.length < 8`. 160 clears it comfortably.
+    expect(160 < 8).toBe(false);
+    expect(truncatingRewriteReason("x".repeat(190_000), "y".repeat(160))).not.toBeNull();
+  });
+
+  test("CONTROL: growth is never refused — a real repair adds an import or a type", () => {
+    const before = "import a from 'a';\nexport const x = 1;\n";
+    const after = "import a from 'a';\nimport b from 'b';\nexport const x: number = 1;\n";
+    expect(truncatingRewriteReason(before, after)).toBeNull();
+  });
+
+  test("CONTROL: a modest shrink is allowed — deleting dead code is a real repair", () => {
+    const before = "x".repeat(1000);
+    const after = "y".repeat(800);   // 80%, above the floor
+    expect(truncatingRewriteReason(before, after)).toBeNull();
+  });
+
+  test("CONTROL: an empty original cannot be truncated", () => {
+    expect(truncatingRewriteReason("", "anything")).toBeNull();
+  });
+
+  test("boundary: exactly half is allowed, a byte under is not", () => {
+    const before = "x".repeat(1000);
+    expect(truncatingRewriteReason(before, "y".repeat(500))).toBeNull();
+    expect(truncatingRewriteReason(before, "y".repeat(499))).not.toBeNull();
   });
 });

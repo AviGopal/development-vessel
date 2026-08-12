@@ -452,3 +452,44 @@ export function vacuousEditReason(before: string, after: string): string | null 
     `than accepting a no-op as FAVORABLE`
   );
 }
+
+/**
+ * A whole-file rewrite that collapses the file is truncation, not repair.
+ *
+ * Exported and separate from the edit rules above because it guards a different
+ * operation: `fs_write` of a COMPLETE file, where there is no anchor to check and
+ * no diff to inspect — only the before and after sizes.
+ *
+ * The rule this replaces was an absolute floor (`body.length < 8`). An absolute
+ * floor bounds the OUTPUT; the damage is RELATIVE, so the guard must be too.
+ * Measured in production before this existed:
+ *
+ *   create-file-repair full-rewrite {"file":"…/feature-compose.ts","wrote":true,"bytes":160}
+ *
+ * 160 bytes over a ~190KB file — far above the floor, and a total loss.
+ *
+ * ONE-SIDED ON PURPOSE. Growth is never refused: adding a missing import, type or
+ * export legitimately grows a file, and refusing that would block real repairs.
+ * Only collapse is refused, and only past half — a re-author that genuinely halves
+ * a file is rare enough to be worth a human look, while an order-of-magnitude drop
+ * is always a truncated or hallucinated response.
+ *
+ * Returns a reason string when the write must be refused, or null to allow it.
+ */
+export function truncatingRewriteReason(
+  before: string,
+  after: string,
+  file = "the file",
+  minRatio = 0.5,
+): string | null {
+  if (typeof before !== "string" || typeof after !== "string") return null;
+  // Nothing to protect: an empty or unreadable original cannot be truncated.
+  if (before.length === 0) return null;
+  if (after.length >= before.length * minRatio) return null;
+  return (
+    `truncating rewrite: the replacement for ${file} is ${after.length} bytes against ` +
+    `${before.length} before (${((after.length / before.length) * 100).toFixed(1)}% of the original, ` +
+    `below the ${(minRatio * 100).toFixed(0)}% floor) — a whole-file re-author that collapses the file ` +
+    `is a truncated or hallucinated response, not a repair, and writing it would destroy the file`
+  );
+}

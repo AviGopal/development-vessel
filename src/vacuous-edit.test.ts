@@ -367,3 +367,88 @@ describe("deadStoreEditReason — an assignment the next statement erases", () =
     expect(deadStoreEditReason(b, a)).toBeNull();
   });
 });
+
+// ---------------------------------------------------------------------------
+// THE INPUT FORM THE RUNTIME CALLER ACTUALLY PASSES.
+//
+// deadStoreEditReason was landed (671ce88) and validated by replaying the real
+// harmful commit 8eb660a as FULL FILE CONTENTS. Its only runtime caller passed
+// `vacuousEditReason(op.old_string, op.new_string)` — the raw edit-op strings.
+// For an anchored insertion the op's new_string stops at the inserted line, so
+// the statement that ERASES the store is not in `after` and the detector cannot
+// see it. `git show 8eb660a --stat` is `1 file changed, 2 insertions(+)`: a pure
+// insertion, i.e. exactly this form.
+//
+// These tests pin BOTH halves — that the op form is genuinely undetectable, and
+// that simulating against the file catches it — so the fix cannot be undone by
+// re-pointing the call site at the op strings again.
+// ---------------------------------------------------------------------------
+describe("deadStoreEditReason — op-string form vs simulated-file form (8eb660a)", () => {
+  const FILE_BEFORE = [
+    "function pick(gaps, classKey) {",
+    "  let existingIdx = -1;",
+    "  if (existingIdx < 0) {",
+    '    existingIdx = gaps.findIndex((g) => hasClassifiableId(g) && g.status !== "closed" && gapClassKey(g.id) === classKey);',
+    "  }",
+    "  return existingIdx;",
+    "}",
+  ].join("\n");
+
+  // The anchored insertion, as an edit op: anchor line + the added line.
+  const OLD_STRING = "  if (existingIdx < 0) {";
+  const NEW_STRING =
+    "  if (existingIdx < 0) {\n" +
+    "    existingIdx = gaps.findIndex((g) => gapClassKey(g.id) === classKey);";
+
+  test("the RAW OP STRINGS cannot show the dead store — this is why the gate was inert", () => {
+    // Not a bug in the detector: the overwriting statement is genuinely absent
+    // from `after`. Nothing readable at this granularity can decide it.
+    expect(deadStoreEditReason(OLD_STRING, NEW_STRING)).toBeNull();
+    expect(vacuousEditReason(OLD_STRING, NEW_STRING)).toBeNull();
+  });
+
+  test("SIMULATED AGAINST THE FILE, the same op is refused", () => {
+    const after = FILE_BEFORE.replace(OLD_STRING, NEW_STRING);
+    expect(after).not.toBe(FILE_BEFORE); // the anchor must actually match
+    const reason = deadStoreEditReason(FILE_BEFORE, after);
+    expect(reason).not.toBeNull();
+    expect(reason).toContain("dead store");
+    expect(reason).toContain("existingIdx");
+  });
+
+  test("CONTROL: a genuine anchored insertion, simulated the same way, still passes", () => {
+    // Same file, same simulation path, an added line that is NOT erased — this is
+    // what proves the gate refuses the defect rather than refusing insertions.
+    const newReal =
+      "  if (existingIdx < 0) {\n" +
+      "    logger.debug(`no row for ${classKey}`);";
+    const after = FILE_BEFORE.replace(OLD_STRING, newReal);
+    expect(after).not.toBe(FILE_BEFORE);
+    expect(deadStoreEditReason(FILE_BEFORE, after)).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// THE CALL SITE IS THE THING THAT WAS WRONG, SO THE CALL SITE IS WHAT IS PINNED.
+//
+// The tests above prove the DETECTOR behaves correctly in both input forms. They
+// would all still pass if feature-compose stopped simulating and went back to
+// handing it raw op strings — which is precisely the state that made 671ce88
+// inert for a day. A source-level assertion is crude, but the failure it guards
+// against is a silent reversion at a call site, and nothing else here can see it.
+// ---------------------------------------------------------------------------
+describe("feature-compose wires the dead-store gate to the SIMULATED file", () => {
+  test("the simulated call exists on the tree-reading path", async () => {
+    const src = await Bun.file(new URL("./resolvers/feature-compose.ts", import.meta.url)).text();
+    // POSITIVE CONTROL FIRST: the sibling call this one was modelled on must be
+    // findable by the same query. If the control misses, the assertion below is
+    // measuring the query, not the code.
+    expect(src).toContain("nonTerminatingEditReason(current, current.replace(oldS, newS))");
+    expect(src).toContain("deadStoreEditReason(current, current.replace(oldS, newS))");
+  });
+
+  test("CONTROL: a string that is NOT in the file is not found", async () => {
+    const src = await Bun.file(new URL("./resolvers/feature-compose.ts", import.meta.url)).text();
+    expect(src).not.toContain("deadStoreEditReason(zzqqxx, zzqqxx)");
+  });
+});

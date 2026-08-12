@@ -26,7 +26,7 @@ import type { ResolverResult } from "./types.js";
 import { resolveVesselMitosisCutover } from "./vessel-mitosis-cutover.js";
 import { resolveSubstrateGap, resolveSubstrateGapWrite } from "./substrate-gap.js";
 import { writeAuthoringMarker, clearAuthoringMarker } from "./patch-with-tools.js";
-import { vacuousEditReason, nonTerminatingEditReason } from "../vacuous-edit.js";
+import { vacuousEditReason, nonTerminatingEditReason, deadStoreEditReason } from "../vacuous-edit.js";
 import { acquireComposeSlot } from "../compose-slots.js";
 import { existsSync as mountExistsSync } from "node:fs";
 import { regionCandidatesFromText } from "./region-probe.js";
@@ -3097,6 +3097,29 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
       if (loops) {
         console.log(`[fc-nonterminating] REFUSED plan: ${loops}`);
         return { shape: "featureComposeReport", body: { ok: false, stage: "plan", verdict: "REFUSED", error: loops } };
+      }
+      // THE DEAD-STORE GATE MUST SIMULATE TOO, FOR THE SAME REASON THIS BLOCK EXISTS.
+      //
+      // `deadStoreEditReason` runs inside `vacuousEditReason`, whose only caller
+      // (below, ~line 3115) passes the raw `op.old_string` / `op.new_string`. The
+      // detector needs the statement that OVERWRITES the assignment to be present
+      // in `after` — and for an anchored insertion it is not, because the op's
+      // new_string stops at the inserted line.
+      //
+      // So the gate was inert against exactly the commit it was written for.
+      // Measured on 8eb660a (`1 file changed, 2 insertions(+)` — a pure insertion):
+      //   raw op strings              -> null    (lands)
+      //   simulated against the file  -> REFUSES
+      // It had been validated by replaying the real commit as FULL FILE CONTENTS,
+      // a form its runtime caller never produces. The correct call site was these
+      // twelve lines above it, already reading the tree and already simulating.
+      //
+      // Left in place below as well: on the op strings it is a cheap no-op, and on
+      // an op that DOES span the overwrite it still fires without a tree read.
+      const dead = deadStoreEditReason(current, current.replace(oldS, newS));
+      if (dead) {
+        console.log(`[fc-deadstore] REFUSED plan: ${dead}`);
+        return { shape: "featureComposeReport", body: { ok: false, stage: "plan", verdict: "REFUSED", error: dead } };
       }
     }
   } catch { /* fail open — a gate that cannot read the tree must not block work */ }

@@ -1650,7 +1650,11 @@ export function landedCommitVerdict(gapId: string, editSite: string): 'absent' |
 function escalateRelandToHuman(gapId: string, category: string, summary: string): void {
   if (!gapId || solicitedHumanGaps.has(gapId)) return;
   solicitedHumanGaps.add(gapId);
-  void resolveUiWritePassthrough({ type: "uiQuestion_write", id: "reland-needs-human-" + gapId, title: "Gap re-lands without closing — needs a human decision", body: "Gap " + gapId + " (" + category + ") has had multiple substrate-authored landings, none of which resolved its condition (the close-oracle abstains — out of coverage). The automated fix keeps landing an inert or wrong change. It likely needs a human: redefine the goal, supply the missing fact, grant access, or drop it. Summary: " + summary.slice(0, 300), kind: "gap_reland_needs_human", importance: "high" } as never)
+  // A re-land is the retrospective FALSE-CLOSE label for the landed-commit class: grade the oracle.
+  recordCloseVerdict("landed_commit", true);
+  const rel = closeOracleReliability("landed_commit");
+  const relNote = ` [close-oracle landed-commit reliability so far: ${(rel.reliability * 100).toFixed(0)}% (${rel.closes} closes, ${rel.false_closes} re-lands)]`;
+  void resolveUiWritePassthrough({ type: "uiQuestion_write", id: "reland-needs-human-" + gapId, title: "Gap re-lands without closing — needs a human decision", body: "Gap " + gapId + " (" + category + ") has had multiple substrate-authored landings, none of which resolved its condition (the close-oracle abstains — out of coverage). The automated fix keeps landing an inert or wrong change. It likely needs a human: redefine the goal, supply the missing fact, grant access, or drop it. Summary: " + summary.slice(0, 300) + relNote, kind: "gap_reland_needs_human", importance: "high" } as never)
     .then((r) => {
       const shape = (r as { shape?: unknown } | undefined)?.shape;
       if (shape === "structuredError") console.warn(`[gap-escalation] reland uiQuestion_write REJECTED for ${gapId} — no human was asked`);
@@ -1701,6 +1705,14 @@ export async function sweepPendingLandVerifications(): Promise<{ checked: number
         continue;
       }
       joinDecisionOutcome(meta, { landed: true, verdict: "FAVORABLE", commit: sha });
+      // Provisional SUCCESS label for the close-oracle (§12.6 1a): a landed_verified close is
+      // attributable to the landed-commit class when it was a SINGLE non-reverted landing (a
+      // re-land would have been refused above). A later re-detect+re-land flips it to a false-close.
+      {
+        const gidClose = String(g.id ?? "");
+        const editSiteClose = gapEditSite(g, (g.classification_metadata ?? g.metadata ?? {}) as Record<string, unknown>) ?? "";
+        if (landedCommitVerdict(gidClose, editSiteClose) === 'absent') recordCloseVerdict("landed_commit", false);
+      }
       await resolveSubstrateGapWrite({
         type: "substrateGap_write",
         gap: {
@@ -1753,6 +1765,41 @@ function updateCalibration(category: string, landed: boolean): void {
     c[cat] = rec;
     writeFileSync(CALIB_PATH, JSON.stringify(c));
   } catch { /* best-effort */ }
+}
+
+// ── Close-oracle posterior (§12.6 step 1(a), 2026-08-14) ────────────────────────────────
+// The close-oracle is graded like any other activity: its per-evidence-class reliability accrues
+// from ground truth, so its trust is EARNED, not assumed. A single-landing close via the
+// landed-commit class is a provisional SUCCESS; a later RE-LAND on that class is the retrospective
+// FALSE-CLOSE label (the prior close did not hold — reality re-detected the gap). Both labels are
+// recorded at the close/refuse decision points, so the posterior is calibrated against the
+// UN-AUTHORABLE REFERENT (re-detection) without instrumenting the re-open path. Per class the
+// posterior is Beta(closes_that_held + 1, false_closes + 1); closeOracleReliability reads its mean.
+// One label per gap (the callers dedup), so a single thrashing gap cannot dominate the posterior.
+// Call-time (not module-load) so tests can point at a fixture file; production never sets it.
+const closeOracleCalibPath = (): string => process.env["CLOSE_ORACLE_CALIB_PATH"] ?? "/workspace/close-oracle-calibration.json";
+type CloseOracleCalib = Record<string, { closes: number; false_closes: number }>;
+function readCloseOracleCalib(): CloseOracleCalib {
+  try { const p = closeOracleCalibPath(); return existsSync(p) ? (JSON.parse(readFileSync(p, "utf8")) as CloseOracleCalib) : {}; }
+  catch { return {}; }
+}
+function recordCloseVerdict(evidenceClass: string, falseClose: boolean): void {
+  try {
+    const c = readCloseOracleCalib();
+    const k = evidenceClass || "unknown";
+    const rec = c[k] ?? { closes: 0, false_closes: 0 };
+    if (falseClose) rec.false_closes += 1; else rec.closes += 1;
+    c[k] = rec;
+    writeFileSync(closeOracleCalibPath(), JSON.stringify(c));
+  } catch { /* best-effort */ }
+}
+/** Beta-mean reliability of the close-oracle at an evidence class: P(a close of this class holds). */
+export function closeOracleReliability(evidenceClass: string): { alpha: number; beta: number; reliability: number; closes: number; false_closes: number } {
+  const rec = readCloseOracleCalib()[evidenceClass || "unknown"] ?? { closes: 0, false_closes: 0 };
+  const held = Math.max(0, rec.closes - rec.false_closes); // closes that did NOT later re-land
+  const alpha = held + 1;                                  // Beta(1,1) prior
+  const beta = rec.false_closes + 1;
+  return { alpha, beta, reliability: alpha / (alpha + beta), closes: rec.closes, false_closes: rec.false_closes };
 }
 function predictLand(gap: Record<string, unknown>): { predicted: boolean; p: number; baseline: number } {
   const p = landabilityScore(gap);

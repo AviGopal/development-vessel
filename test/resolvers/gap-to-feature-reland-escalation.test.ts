@@ -33,6 +33,7 @@ beforeAll(() => {
   process.env.WORKSPACE_ROOT = ROOT;
   process.env.VESSELS_CLONE_ROOT = CLONES;
   process.env.EXPECTATION_CALIB_PATH = join(ROOT, "expectation-calibration.json");
+  process.env.CLOSE_ORACLE_CALIB_PATH = join(ROOT, "close-oracle-calibration.json");
   process.env.STATEFUL_UI_VESSEL_ENDPOINT = "http://ui.test.local:8270";
   // Capture uiQuestion_write POSTs to stateful-ui; everything else returns 200 {}.
   // Capture ALL POSTs and match on body: the stateful-ui endpoint is frozen into a module-level
@@ -90,5 +91,10 @@ describe("sweep abstain->escalate on a re-land gap", () => {
     const q = uiWrites.find((w) => w.body.includes("uiQuestion_write") && w.body.includes("gap-reland-sweep-0005"));
     expect(q).toBeTruthy();
     expect(q!.body).toContain("gap_reland_needs_human");
+    // the oracle GRADED itself: the re-land recorded a false-close for the landed-commit class
+    const mod = await import("../../src/resolvers/gap-to-feature.js");
+    const rel = mod.closeOracleReliability("landed_commit");
+    expect(rel.false_closes).toBeGreaterThanOrEqual(1);
+    expect(rel.reliability).toBeLessThan(1); // a false-close pulls reliability below the 1.0 prior mean
   });
 });

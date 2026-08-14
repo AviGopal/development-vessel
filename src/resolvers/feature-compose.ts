@@ -1575,6 +1575,11 @@ ${principles ? `
 ARCHITECTURAL PRINCIPLES (the substrate's own, retrieved from its concept graph — your plan MUST respect these; e.g. reuse an existing producer before minting a new one, match existing contracts/return shapes, keep edits surgical):
 ${principles}
 ` : ""}
+CLOSURE CRITERION — your plan is accepted only if it GENUINELY addresses the gap on a path that EXECUTES. typecheck-clean is NOT enough. A post-draft judge applies exactly these rules; DRAFT TO PASS THEM (this is the load-bearing fact you author against, §12.6 step 4):
+- SURFACE-SATISFYING is rejected: a rename, a comment, whitespace, or any change that leaves the gap's condition STILL TRUE does not close it. Ask "what makes the gap's condition FALSE?" and do THAT — not the smallest edit to the cited line. (A real case: a gap "WRITE_ALLOWLIST is env-gated" was "fixed" by renaming the local var WRITE_ALLOWLIST -> WRITE_ALLOWLIST_ENV, which left process.env["WRITE_ALLOWLIST"] and the gate intact — rejected as inert.)
+- DEAD CODE / STUB is rejected: a net-new function/handler with zero callers, an edit to a path that never runs, or a wired-but-empty endpoint. Wire the change into a live call path.
+- DESTROY-TO-SATISFY is rejected: blanking, zeroing, hiding, emptying, or removing the value the gap wanted made correct. The surface must READ CORRECTLY after the fix, not be removed.
+- CONFORMANT FIX (the substrate defines its architecture BY USE): if the gap is an ENV-GATED capability, the fix is a SHAPED IMPULSE read at use time — NOT a rename of the env var or an env tweak. If it is an INLINE LLM call, the fix is an llm-prompt-tier resolver dispatched from an activity. Addressing the gap only BY the violating line is rejected.
 ${grounding ? `
 GROUND TRUTH — the ACTUAL files (and, where shown, their current contents) in the target vessel(s). Use this to bind to REALITY, not assumptions:
 - For every \`edit\` op, \`path\` MUST be one of these real paths (an \`edit\` to a path NOT listed fails at apply, ENOENT). Only \`create_file\` may introduce a NEW path.

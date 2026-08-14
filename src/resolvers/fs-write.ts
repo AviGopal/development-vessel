@@ -24,7 +24,7 @@ function assertInWorkspace(path: string, workspaceRoot: string): void {
  * for the motivation.
  */
 function assertInAllowlist(path: string, workspaceRoot: string): void {
-  const raw = process.env["WRITE_ALLOWLIST"];
+  const WRITE_ALLOWLIST = process.env["WRITE_ALLOWLIST"]; const raw = WRITE_ALLOWLIST;
   if (!raw) return;
   const prefixes = raw
     .split(",")

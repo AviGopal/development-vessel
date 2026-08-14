@@ -1347,9 +1347,28 @@ export async function verifyPatchAddressesGap(args: {
   const sus = typeof parsed.suspected_real_location === "string" && parsed.suspected_real_location.trim()
     ? parsed.suspected_real_location.trim()
     : undefined;
+  let addresses = parsed.addresses;
+  let verdictReason = String(parsed.reason ?? "");
+  // §12.6 step 6 (diversity / adversarial-verify quorum): when the first judge PASSES, consult an
+  // INDEPENDENT refuter with a DIVERSE (adversarial) lens and flip to addresses:false ONLY on a
+  // HIGH-CONFIDENCE, SPECIFIC refutation. Calibrated to catch clear false-passes (inert rename,
+  // stub, dead code) without over-rejecting borderline fixes, and fail-open on any refuter
+  // error/parse-fail (a flaky second lens must never wedge landing — the first judge stands).
+  if (addresses === true) {
+    try {
+      const rraw = await args.llm(refutationPrompt(args.gapSummary, args.diff));
+      const rm = rraw.match(/\{[\s\S]*\}/g);
+      const rp = rm ? (parseJsonObject(rm[0]) as { refuted?: boolean; confidence?: number; reason?: string } | null) : null;
+      if (rp && rp.refuted === true && typeof rp.confidence === "number" && rp.confidence >= 0.8
+          && typeof rp.reason === "string" && rp.reason.trim().length >= 20) {
+        addresses = false;
+        verdictReason = `adversarial refuter (diverse lens, conf ${rp.confidence.toFixed(2)}): ${rp.reason.trim()} [first judge had passed: ${verdictReason}]`;
+      }
+    } catch { /* refuter unavailable — keep the first judge's verdict (fail-open) */ }
+  }
   return {
-    addresses: parsed.addresses,
-    reason: String(parsed.reason ?? ""),
+    addresses,
+    reason: verdictReason,
     on_live_path: parsed.on_live_path !== false,
     ...(sus ? { suspected_real_location: sus } : {}),
     llm_consulted: true,
@@ -1562,6 +1581,30 @@ LESSONS:
 ${lessons}
 
 Rewrite the spec now:`;
+}
+
+// Adversarial refutation — the DIVERSE second lens of the close-verdict quorum (§12.6 step 6).
+// A single judge shares the drafter's frame and misses inert/surface/stub passes; an independent
+// reviewer prompted to REFUTE catches what redundancy cannot. Returns a specific, high-confidence
+// refutation or nothing. Deliberately narrow: refute ONLY on a concrete, defensible flaw, never on
+// vibes, so the quorum catches clear false-passes without over-rejecting borderline fixes.
+function refutationPrompt(gapSummary: string, diff: string): string {
+  return `You are an ADVERSARIAL reviewer. A first reviewer judged that this patch ADDRESSES the gap. Your job is to REFUTE that — find CONCRETE evidence the patch does NOT genuinely close the gap on an executing path.
+
+Look specifically for:
+- SURFACE-ONLY change: a rename, comment, whitespace, or reordering that leaves the gap's condition STILL TRUE (e.g. renaming a variable while the env-gate / hardcode / defect it names is untouched).
+- DEAD CODE / STUB: a net-new function/handler with zero callers, an edit to a path that never runs, or a wired-but-empty endpoint.
+- DESTROY-TO-SATISFY: blanking, zeroing, hiding, or removing the value the gap wanted made correct.
+- VIOLATING-LINE-ONLY: the gap is "addressed" only by the offending line (env-gated behaviour kept as env, or an LLM call left inlined) rather than the conformant fix (a shaped impulse read at use time / an llm-prompt resolver).
+
+Cite the EXACT lines. Refute ONLY on a specific, defensible flaw — NEVER on vibes or style. If the patch genuinely closes the gap on a live path, do not refute.
+
+GAP: ${gapSummary}
+
+DIFF:
+${diff}
+
+Output ONLY this JSON object, nothing else: {"refuted": <boolean>, "confidence": <number 0..1>, "reason": "<the specific flaw, citing lines>"}`;
 }
 
 function decomposePrompt(spec: string, maxOps: number, grounding: string, principles: string, priorFeedback = ""): string {

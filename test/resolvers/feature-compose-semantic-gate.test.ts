@@ -397,7 +397,9 @@ describe("verifyPatchAddressesGap data-flow threading", () => {
       diff: "+++ b/src/x.ts\n+function wireThing() { return 1; }\n+export const y = wireThing();",
       reachability: facts,
       data_flow: dataFlow,
-      llm: async (prompt: string) => { seenPrompt = prompt; return JSON.stringify({ addresses: true, reason: "ok", on_live_path: true }); },
+      // capture the FIRST (judge) prompt only; the step-6 adversarial refuter makes a SECOND call
+      // on a pass, and we are asserting the JUDGE prompt carries the data-flow facts.
+      llm: async (prompt: string) => { if (!seenPrompt) seenPrompt = prompt; return JSON.stringify({ addresses: true, reason: "ok", on_live_path: true }); },
     });
     expect(seenPrompt).toContain("Data-flow facts (deterministic):");
     expect(seenPrompt).toContain("orphanMap");

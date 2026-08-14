@@ -1,9 +1,10 @@
 // Per-resolver test for landedCommitVerdict — the re-land-aware Class-3 landed-commit
 // evidence helper (§12.6, 2026-08-14). Encodes the bafd83d hole:
-//   • no commit references the gap            → null   (no landed evidence)
-//   • ONE non-reverted landing                → 'absent' (first landing, benefit of the doubt)
+//   • no commit references the gap            → null      (no landed evidence)
+//   • ONE non-reverted landing                → 'pending' (landed = PROVENANCE, not measurement;
+//       a commit is proof a change landed, not proof it did anything — the inert-diff hole)
 //   • TWO+ non-reverted landings (a RE-LAND)  → 'present' (referent persisted despite landing)
-//   • the only landing was reverted           → null   (no valid landing remains)
+//   • the only landing was reverted           → null      (no valid landing remains)
 // Real git against a tmp fixture clone tree (VESSELS_CLONE_ROOT), no network.
 
 import { describe, it, expect, beforeAll, afterAll } from "bun:test";
@@ -59,9 +60,12 @@ describe("landedCommitVerdict — re-land awareness (§12.6)", () => {
     const { landedCommitVerdict } = await import("../../src/resolvers/gap-to-feature.js");
     expect(landedCommitVerdict("gap-unmentioned-9999", EDIT)).toBe(null);
   });
-  it("returns 'absent' for a single non-reverted landing (first landing, benefit of the doubt)", async () => {
+  it("returns 'pending' for a single non-reverted landing (provenance, NOT measured resolution)", async () => {
     const { landedCommitVerdict } = await import("../../src/resolvers/gap-to-feature.js");
-    expect(landedCommitVerdict("gap-single-landing-0001", EDIT)).toBe("absent");
+    // A single landing is proof a change LANDED, not proof it RESOLVED the gap. Returning 'pending'
+    // (was 'absent') is what closes the inert-diff hole: the close-oracle abstains instead of
+    // closing green on the commit count — only a measurement predicate can yield 'absent'.
+    expect(landedCommitVerdict("gap-single-landing-0001", EDIT)).toBe("pending");
   });
   it("returns 'present' for a RE-LAND (>=2 non-reverted commits) — the bafd83d hole", async () => {
     const { landedCommitVerdict } = await import("../../src/resolvers/gap-to-feature.js");

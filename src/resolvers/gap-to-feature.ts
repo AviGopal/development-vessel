@@ -1146,9 +1146,13 @@ function genuineLandSignal(composeBody: Record<string, unknown>, landRequested: 
  *   'present' (defect still there), 'absent' (resolved healthy), 'unknown' on transport failure.
  * 'unknown' preserves today's behaviour — no false closes, no blocked closes.
  */
-function verifyGapCondition(gap: Record<string, unknown>): 'present' | 'absent' | 'unknown' {
+function verifyGapCondition(gap: Record<string, unknown>): 'present' | 'absent' | 'pending' | 'unknown' {
   try {
     const meta = (gap.classification_metadata ?? gap.metadata ?? {}) as Record<string, unknown>;
+    // MEASUREMENT BEFORE PROVENANCE (§12.6 step 1, 2026-08-14): if this gap declares a Class-2
+    // measurement predicate (evidence_resolve / verify_shape), the async sibling must run it —
+    // do NOT let the sync landed-commit provenance short-circuit a measurable gap. Defer to async.
+    const hasClass2Predicate = meta['evidence_resolve'] !== undefined || meta['verify_shape'] !== undefined;
     // Prefer clean file_path field (surgical-gap-scan writes this without line suffix);
     // fall back to edit_site but strip trailing ':<digits>' line suffix if present.
     const rawEditSite = typeof meta['file_path'] === 'string'
@@ -1184,9 +1188,10 @@ function verifyGapCondition(gap: Record<string, unknown>): 'present' | 'absent' 
     const landedSiteSync = typeof ((gap['classification_metadata'] ?? gap['metadata'] ?? {}) as Record<string, unknown>)['edit_site'] === 'string'
       ? String(((gap['classification_metadata'] ?? gap['metadata'] ?? {}) as Record<string, unknown>)['edit_site'])
       : '';
-    // Class 3 centralized (2026-08-14): a single non-reverted landing => 'absent', but a
-    // RE-LAND (>=2) => 'present' — the referent persisted despite landing. See landedCommitVerdict.
-    if (gapIdForLandedSync.length >= 8 && !behavioralFail) {
+    // Class 3 centralized (2026-08-14): a single non-reverted landing => 'pending' (landed,
+    // UNVERIFIED — provenance, not measurement), a RE-LAND (>=2) => 'present'. Only runs when the
+    // gap has no measurement predicate (else the async measurer owns the verdict).
+    if (gapIdForLandedSync.length >= 8 && !behavioralFail && !hasClass2Predicate) {
       const verdict = landedCommitVerdict(gapIdForLandedSync, landedSiteSync);
       if (verdict !== null) return verdict;
     }
@@ -1224,9 +1229,15 @@ function verifyGapCondition(gap: Record<string, unknown>): 'present' | 'absent' 
  * evidence class (evidence_resolve / verify_shape in classification_metadata).
  * Called from closeLandedGap so the async fetch does not block the sync path.
  */
-async function verifyGapConditionAsync(gap: Record<string, unknown>): Promise<'present' | 'absent' | 'unknown'> {
+async function verifyGapConditionAsync(gap: Record<string, unknown>): Promise<'present' | 'absent' | 'pending' | 'unknown'> {
   try {
     const meta = (gap.classification_metadata ?? gap.metadata ?? {}) as Record<string, unknown>;
+    // MEASUREMENT BEFORE PROVENANCE (§12.6 step 1, 2026-08-14): a Class-2 measurement predicate
+    // (evidence_resolve / verify_shape) must be RUN before the Class-3 landed-commit provenance is
+    // consulted. Previously Class 3 ran first and a gap with a real predicate closed on the commit
+    // count without its predicate ever executing. When a predicate exists, skip provenance here and
+    // let Class 2 below own the verdict (measured present/absent, or 'unknown'-abstain if unmeasurable).
+    const hasClass2Predicate = meta['evidence_resolve'] !== undefined || meta['verify_shape'] !== undefined;
     // ── Class 1: surgical (file + literal) ──────────────────────────────────
     const rawEditSite = typeof meta['file_path'] === 'string'
       ? meta['file_path']
@@ -1239,10 +1250,11 @@ async function verifyGapConditionAsync(gap: Record<string, unknown>): Promise<'p
       const contents = readFileSync(runtimePath, 'utf8');
       return contents.includes(hardcodedUrl) ? 'present' : 'absent';
     }
-    // ── Class 3: landed commit — a substrate-authored commit referencing this gap id already exists ──
+    // ── Class 3: landed commit — provenance (single landing => 'pending', NOT measurement) ──
+    // Only consulted when no Class-2 predicate exists (measurement-before-provenance, above).
     const gapIdForLanded = typeof gap['id'] === 'string' ? (gap['id'] as string) : '';
     const behavioralFail = String(gap['summary'] ?? '').includes('BEHAVIORAL VERIFICATION FAILED') || ((gap['classification_metadata'] ?? {}) as Record<string, unknown>)['regressed_by'] !== undefined;
-    if (gapIdForLanded.length >= 8 && !behavioralFail) {
+    if (gapIdForLanded.length >= 8 && !behavioralFail && !hasClass2Predicate) {
       // EVIDENCE MUST COME FROM THE REPO THE GAP IS ABOUT.
       //
       // This scanned EVERY clone, so a commit in an unrelated vessel that merely
@@ -1383,27 +1395,42 @@ async function closeLandedGap(gap: Record<string, unknown>, land: LandSignal): P
     // the surgical-class (file+literal) AND the resolver-behaviour class
     // (evidence_resolve / verify_shape). Fall back to the sync verifier result
     // only when the async path itself throws (belt-and-suspenders).
-    let verifyResult: 'present' | 'absent' | 'unknown';
+    let verifyResult: 'present' | 'absent' | 'pending' | 'unknown';
     try {
       verifyResult = await verifyGapConditionAsync(gap);
     } catch {
       verifyResult = verifyGapCondition(gap);
     }
-    if (verifyResult === 'absent') {
-      // Gap condition gone — allow close (fall through to existing logic)
-    } else if (verifyResult === 'present') {
+    const gidV = String(gap.id ?? "");
+    if (verifyResult === 'present') {
       // Defect still present — refuse close. If this 'present' is a RE-LAND (>=2 non-reverted
       // landings, none of which resolved it), the close-oracle is out of coverage: abstain ->
       // escalate to the human (§12.6 step 1) rather than leave it to re-compose inertly forever.
-      const gidPresent = String(gap.id ?? "");
       const editSitePresent = gapEditSite(gap, (gap.classification_metadata ?? gap.metadata ?? {}) as Record<string, unknown>) ?? "";
-      if (landedCommitVerdict(gidPresent, editSitePresent) === 'present') {
-        escalateRelandToHuman(gidPresent, String(gap.category ?? "?"), String(gap.summary ?? ""));
+      if (landedCommitVerdict(gidV, editSitePresent) === 'present') {
+        escalateRelandToHuman(gidV, String(gap.category ?? "?"), String(gap.summary ?? ""));
       }
       return { closed: false, error: 'outcome_verification_failure: gap condition still present at close time' };
     }
-    // verifyResult === 'unknown': fail-open, allow close (preserves existing behaviour)
-    const id = String(gap.id ?? "");
+    if (verifyResult === 'pending') {
+      // SINGLE landing, unverified — provenance, not measurement. This is the inert-diff (bafd83d)
+      // hole: a no-op diff typechecks, lands, and used to close green here. Abstain: hold PENDING
+      // (do not close, do not re-compose) and ask the human. No false-close label — pending is not
+      // yet a failure. If a measurement predicate later becomes available the sweep closes/refuses it.
+      await markPendingVerification(gap, land.commit_sha ?? undefined, "landed once; awaiting outcome verification (no measurement predicate)");
+      escalatePendingVerification(gidV, String(gap.category ?? "?"), String(gap.summary ?? ""), land.commit_sha ?? undefined);
+      return { closed: false, error: 'close-oracle abstains: single landing is provenance, not measured resolution — held pending verification' };
+    }
+    if (verifyResult === 'unknown' && !closeOracleEarnedTrust('landed_commit')) {
+      // Unmeasured, and the landed-commit class has NOT earned fail-open trust (Beta(1,1) or a
+      // poor track record never earns — trust is held closes, not assumed). Abstain: leave open for
+      // the next tick rather than close on no evidence. No escalation — 'unknown' here is transient/
+      // unmeasurable (e.g. clone not converged), distinct from 'pending' (which HAS a landing to verify).
+      await markPendingVerification(gap, land.commit_sha ?? undefined, "unmeasured at close; landed-commit class has not earned fail-open trust");
+      return { closed: false, error: 'close-oracle abstains: unmeasured close on a class without earned trust' };
+    }
+    // verifyResult === 'absent' (measured resolved) OR 'unknown' with EARNED trust: allow close.
+    const id = gidV;
     if (!id) return { closed: false, error: "gap missing id" };
   if (typeof land.vessel==="string" && land.vessel.includes("development-vessel")) { await resolveSubstrateGapWrite({type:"substrateGap_write",gap:{id,category:gap.category,source:gap.source,summary:gap.summary,detected_at:gap.detected_at,classification_metadata:{...((gap['classification_metadata'] as Record<string,unknown>)??{}),pending_outcome_verification:land.commit_sha,pending_set_at:new Date().toISOString()},status:"open"}} as never); return {closed:false,error:"self-cutover: closure deferred to next-tick verification"}; }
 
@@ -1435,9 +1462,10 @@ async function closeLandedGap(gap: Record<string, unknown>, land: LandSignal): P
   }
     const resolution = `landed via mitosis cutover${land.commit_sha ? ` ${land.commit_sha}` : ""}${land.vessel ? ` (${land.vessel})` : ""}`;
     // Outcome verification: only close when the condition is observed gone.
-    // If condition is still present, record failure and bail without closing.
+    // Refuse on 'present' (still broken) AND 'pending' (single landing, unmeasured — provenance,
+    // not resolution; the top-of-function gate already abstained on it, this is belt-and-suspenders).
     const conditionCheck = verifyGapCondition(gap);
-    if (conditionCheck === 'present') {
+    if (conditionCheck === 'present' || conditionCheck === 'pending') {
       const failureMeta = { ...((gap.classification_metadata ?? gap.metadata ?? {}) as Record<string, unknown>), outcome_verification_failure: `condition still present at close time after land ${land.commit_sha ?? 'unknown'}`, outcome_checked_at: new Date().toISOString() };
       try {
         await resolveSubstrateGapWrite({
@@ -1599,10 +1627,18 @@ function shaWasRevertedInAnyClone(sha: string): boolean {
  * (69d680b at 05:39, then bafd83d at 07:34: two non-reverted commits reference it).
  *
  * The re-detection is the referent's persistence signal. Count non-reverted commits:
- *   0  -> null    (no landed evidence — caller falls through, unchanged)
- *   1  -> 'absent' (first landing, benefit of the doubt — preserves prior behaviour, no flood)
+ *   0  -> null      (no landed evidence — caller falls through, unchanged)
+ *   1  -> 'pending' (first landing — PROVENANCE, NOT MEASUREMENT. A commit naming the gap is
+ *          proof a change LANDED, not proof it DID ANYTHING. This is exactly the inert-diff
+ *          (bafd83d) hole: a syntactically-valid no-op typechecks, lands, and — when this
+ *          returned 'absent' — closed the gap green while the condition it named still held.
+ *          'pending' means "landed, unverified": the close-oracle abstains (out of coverage
+ *          for provenance-only evidence), so the caller must NOT close and must NOT re-compose
+ *          (a second landing would read as a re-land and manufacture the false-close the oracle
+ *          is calibrated against). Only a MEASUREMENT predicate (Class 1 literal / Class 2
+ *          resolver-behaviour) can return 'absent' = positively-observed resolved.)
  *   >=2 -> 'present' (landed, re-detected, re-landed => prior landing did not resolve the
- *          condition => refuse close; both callers already refuse close on 'present')
+ *          condition => refuse close; callers refuse close on 'present')
  *
  * Scoped to the gap's target vessel (from editSite): a mention elsewhere is discussion, not
  * evidence — the same rule the three former inline copies carried. Uses vesselsCloneRoot() so
@@ -1610,7 +1646,7 @@ function shaWasRevertedInAnyClone(sha: string): boolean {
  * therefore untested. Replaces the duplicated Class-3 blocks the authors were burned by
  * ("a fix applied to one site is not a fix").
  */
-export function landedCommitVerdict(gapId: string, editSite: string): 'absent' | 'present' | null {
+export function landedCommitVerdict(gapId: string, editSite: string): 'pending' | 'present' | null {
   if (typeof gapId !== 'string' || gapId.length < 8) return null;
   const landedVessel = (typeof editSite === 'string' ? editSite : '').match(/^repos\/([^/]+)\//)?.[1] ?? '';
   let entries: string[] = [];
@@ -1635,7 +1671,22 @@ export function landedCommitVerdict(gapId: string, editSite: string): 'absent' |
   }
   if (nonReverted === 0) return null;
   if (nonReverted >= 2) return 'present';
-  return 'absent';
+  return 'pending';
+}
+
+// ── Close-oracle EARNED-TRUST gate (§12.6 step 1, 2026-08-14) ────────────────────────────────
+// The fail-open direction — closing a gap on an UNMEASURED verdict ('unknown') — is permitted ONLY
+// when the close-oracle has EARNED that trust for the evidence class: enough samples AND a
+// reliability floor. This is the inverse of satisfierProvenBad (satisfier-pick.ts) and reuses its
+// constants. CRITICAL: a fresh class at Beta(1,1) (zero evidence) must NOT earn fail-open — "trust
+// assumed" is exactly what the program forbids; trust is earned by holding closes. landed_commit at
+// {closes:0,false_closes:8} => 8 samples < floor and reliability 0.1 < 0.3 => never earns => abstains.
+const CLOSE_ORACLE_TRUST_FLOOR = 0.7;   // a class must hold >=70% of its closes to fail-open on unknown
+const CLOSE_ORACLE_MIN_SAMPLES = 10;    // and have >=10 graded closes; below this it has no earned trust
+export function closeOracleEarnedTrust(evidenceClass: string): boolean {
+  const r = closeOracleReliability(evidenceClass);
+  const samples = r.closes + r.false_closes;
+  return samples >= CLOSE_ORACLE_MIN_SAMPLES && r.reliability >= CLOSE_ORACLE_TRUST_FLOOR;
 }
 
 /**
@@ -1661,6 +1712,60 @@ function escalateRelandToHuman(gapId: string, category: string, summary: string)
       else console.log(`[gap-escalation] reland uiQuestion_write accepted for ${gapId} (shape=${String(shape)})`);
     })
     .catch((e: unknown) => console.warn(`[gap-escalation] reland uiQuestion_write THREW for ${gapId}: ${String(e)} — no human was asked`));
+}
+
+// Dedup for pending-verification escalations, separate from re-land dedup: a gap can escalate as
+// 'pending' (one landing, unverified) and LATER as 're-land' (>=2 landings) — distinct signals.
+const pendingVerificationEscalated = new Set<string>();
+
+/**
+ * Abstain on a SINGLE landing (§12.6 step 1, 2026-08-14). A single non-reverted commit naming the
+ * gap is PROVENANCE (a change landed), not MEASUREMENT (the condition resolved) — the inert-diff
+ * (bafd83d) hole. The close-oracle abstains: it neither closes (an inert diff would close green)
+ * nor labels a false-close (pending is not yet a failure — the landing may be genuine). It asks the
+ * human to confirm the landed change actually did the thing. Deduped; fire-and-forget. NOTE: unlike
+ * escalateRelandToHuman this records NO close-verdict — a pending gap has not failed, so labelling it
+ * would poison the posterior with a verdict reality has not yet delivered.
+ */
+function escalatePendingVerification(gapId: string, category: string, summary: string, sha?: string): void {
+  if (!gapId || pendingVerificationEscalated.has(gapId)) return;
+  pendingVerificationEscalated.add(gapId);
+  const shaNote = sha ? ` (landed ${String(sha).slice(0, 12)})` : "";
+  void resolveUiWritePassthrough({ type: "uiQuestion_write", id: "pending-verify-" + gapId, title: "Gap landed but is unverified — did the change actually fix it?", body: "Gap " + gapId + " (" + category + ") had a single substrate-authored landing" + shaNote + ", but the close-oracle has no way to MEASURE whether the change resolved the condition (no literal/resolver predicate — provenance only). Rather than close it green on the commit alone (the inert-diff hole), it is held PENDING. Please confirm: did the landed change actually fix this, or is it inert/wrong? Summary: " + summary.slice(0, 300), kind: "gap_pending_verification", importance: "medium" } as never)
+    .then((r) => {
+      const shape = (r as { shape?: unknown } | undefined)?.shape;
+      if (shape === "structuredError") console.warn(`[gap-escalation] pending-verify uiQuestion_write REJECTED for ${gapId} — no human was asked`);
+      else console.log(`[gap-escalation] pending-verify uiQuestion_write accepted for ${gapId} (shape=${String(shape)})`);
+    })
+    .catch((e: unknown) => console.warn(`[gap-escalation] pending-verify uiQuestion_write THREW for ${gapId}: ${String(e)} — no human was asked`));
+}
+
+/**
+ * Mark a gap PENDING-VERIFICATION: keep it open, stamp pending_outcome_verification (so the
+ * sweep re-checks it) and disposition:'pending_verification' (so the PICKER skips re-composing it —
+ * a second landing would read as a re-land and manufacture the false-close the oracle is calibrated
+ * against). Best-effort; never throws into the caller.
+ */
+async function markPendingVerification(gap: Record<string, unknown>, sha: string | undefined, note: string): Promise<void> {
+  try {
+    const id = String(gap.id ?? "");
+    if (!id) return;
+    const meta0 = (gap.classification_metadata ?? gap.metadata ?? {}) as Record<string, unknown>;
+    await resolveSubstrateGapWrite({
+      type: "substrateGap_write",
+      gap: {
+        id, category: gap.category, source: gap.source, summary: gap.summary, detected_at: gap.detected_at,
+        classification_metadata: {
+          ...meta0,
+          pending_outcome_verification: sha ?? meta0['pending_outcome_verification'] ?? "unknown",
+          pending_set_at: new Date().toISOString(),
+          disposition: "pending_verification",
+          pending_note: note,
+        },
+        status: "open",
+      },
+    } as never);
+  } catch { /* best-effort */ }
 }
 
 export async function sweepPendingLandVerifications(): Promise<{ checked: number; closed: number }> {
@@ -1692,27 +1797,40 @@ export async function sweepPendingLandVerifications(): Promise<{ checked: number
         console.warn(`[gap-sweep] gap ${String(g.id)} NOT closed: landed sha ${sha.slice(0, 12)} was REVERTED — the change is gone from HEAD, so the gap is unresolved and stays open for another attempt`);
         continue;
       }
-      // Post-cutover process: pick-time condition check CAN now observe the landed
-      // state. Refuse close only on a positive "still present"; unknown fails open,
-      // exactly like closeLandedGap. A RE-LAND 'present' (>=2 landings, none resolved it)
-      // is out of coverage for the close-oracle: abstain -> escalate to the human (§12.6 step 1).
-      if (verifyGapCondition(g) === "present") {
-        const gidPresent = String(g.id ?? "");
+      // Post-cutover: the async verifier CAN now observe the landed state. Close ONLY on a
+      // positively-MEASURED 'absent' (a Class-1 literal or Class-2 resolver-behaviour predicate
+      // observed the condition gone). Everything else abstains (§12.6 step 1):
+      //   'present'  -> defect still there; a RE-LAND (>=2) is out of coverage -> escalate.
+      //   'pending'  -> SINGLE landing, no measurement predicate: PROVENANCE, not resolution.
+      //                 This is the inert-diff (bafd83d) hole — a no-op diff landed and used to
+      //                 close green HERE. Hold pending, ask the human, do NOT close, do NOT
+      //                 re-compose (disposition set so the picker skips it -> no manufactured re-land).
+      //   'unknown'  -> unmeasured; close only if the landed-commit class has EARNED fail-open trust
+      //                 (it never does on provenance alone -> abstain, retry next tick).
+      const verdict = await verifyGapConditionAsync(g);
+      const gidSweep = String(g.id ?? "");
+      if (verdict === "present") {
         const editSitePresent = gapEditSite(g, (g.classification_metadata ?? g.metadata ?? {}) as Record<string, unknown>) ?? "";
-        if (landedCommitVerdict(gidPresent, editSitePresent) === 'present') {
-          escalateRelandToHuman(gidPresent, String(g.category ?? "?"), String(g.summary ?? ""));
+        if (landedCommitVerdict(gidSweep, editSitePresent) === 'present') {
+          escalateRelandToHuman(gidSweep, String(g.category ?? "?"), String(g.summary ?? ""));
         }
         continue;
       }
-      joinDecisionOutcome(meta, { landed: true, verdict: "FAVORABLE", commit: sha });
-      // Provisional SUCCESS label for the close-oracle (§12.6 1a): a landed_verified close is
-      // attributable to the landed-commit class when it was a SINGLE non-reverted landing (a
-      // re-land would have been refused above). A later re-detect+re-land flips it to a false-close.
-      {
-        const gidClose = String(g.id ?? "");
-        const editSiteClose = gapEditSite(g, (g.classification_metadata ?? g.metadata ?? {}) as Record<string, unknown>) ?? "";
-        if (landedCommitVerdict(gidClose, editSiteClose) === 'absent') recordCloseVerdict("landed_commit", false);
+      if (verdict === "pending") {
+        await markPendingVerification(g, sha, "pending sweep: single landing, no measurement predicate");
+        escalatePendingVerification(gidSweep, String(g.category ?? "?"), String(g.summary ?? ""), sha);
+        continue;
       }
+      if (verdict === "unknown" && !closeOracleEarnedTrust("landed_commit")) {
+        continue; // unmeasured and untrusted — leave open for the next tick
+      }
+      // verdict === 'absent' (MEASURED resolved) OR 'unknown' with earned trust -> close.
+      joinDecisionOutcome(meta, { landed: true, verdict: "FAVORABLE", commit: sha });
+      // SUCCESS label for the close-oracle (§12.6 1a): a MEASURED close builds the trustworthy
+      // "measured" class posterior. Provenance-only closes no longer happen here, so landed_commit
+      // never accrues a fake success from a commit count — it earns trust only via human confirmation
+      // (solicitation-outcome-scan) and loses it on re-lands. That asymmetry is deliberate.
+      recordCloseVerdict("measured", false);
       await resolveSubstrateGapWrite({
         type: "substrateGap_write",
         gap: {
@@ -2164,6 +2282,14 @@ async function routeCapabilityGapToNewResolver(
     }
     return { shape: "gapToFeatureReport", body: { ok: true, gap_id: gap.id, gap_category: gap.category, verdict: "already_resolved", note: "gap condition absent at pick time — closed as already_resolved" } };
   }
+  if (pickConditionCheck === 'pending') {
+    // A single non-reverted landing already exists for this gap (provenance), but the close-oracle
+    // cannot MEASURE that it resolved the condition. Do NOT re-compose: a second landing would read
+    // as a re-land and manufacture the false-close the oracle is calibrated against (§12.6 step 1).
+    // The pending-verify sweep + human escalation own this gap now; skip composing.
+    console.log(`[gap-to-feature] gap ${String(gap.id ?? '')} PENDING verification at pick time (landed once, unmeasured) — skipping re-compose to avoid a manufactured re-land`);
+    return { shape: "gapToFeatureReport", body: { ok: true, gap_id: gap.id, gap_category: gap.category, verdict: "pending_verification", note: "landed once but unmeasured — held pending verification; not re-composed" } };
+  }
 
   const compose = await resolveFeatureCompose({
     type: "feature_compose",
@@ -2355,6 +2481,15 @@ export async function resolveGapToFeature(pointer: GapToFeaturePointer): Promise
         verdict: "already_resolved",
         note: "gap condition absent at pick time — closed as already_resolved",
       },
+    };
+  }
+  if (_pickCond === 'pending') {
+    // Landed once but unmeasured — do NOT re-compose (a second landing manufactures a re-land the
+    // close-oracle would score as a false-close). The sweep + human escalation own it. (§12.6 step 1)
+    console.log(`[gap-to-feature] gap ${String(gap.id ?? '')} PENDING verification at pick time — skipping re-compose`);
+    return {
+      shape: "gapToFeatureReport",
+      body: { ok: true, gap_id: gap.id as string, gap_category: gap.category as string, verdict: "pending_verification", note: "landed once but unmeasured — held pending verification; not re-composed" },
     };
   }
 

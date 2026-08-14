@@ -1778,7 +1778,7 @@ function updateCalibration(category: string, landed: boolean): void {
 // One label per gap (the callers dedup), so a single thrashing gap cannot dominate the posterior.
 // Call-time (not module-load) so tests can point at a fixture file; production never sets it.
 const closeOracleCalibPath = (): string => process.env["CLOSE_ORACLE_CALIB_PATH"] ?? "/workspace/close-oracle-calibration.json";
-type CloseOracleCalib = Record<string, { closes: number; false_closes: number }>;
+type CloseOracleCalib = Record<string, { closes: number; false_closes: number; operator_engaged?: number }>;
 function readCloseOracleCalib(): CloseOracleCalib {
   try { const p = closeOracleCalibPath(); return existsSync(p) ? (JSON.parse(readFileSync(p, "utf8")) as CloseOracleCalib) : {}; }
   catch { return {}; }
@@ -1793,13 +1793,28 @@ function recordCloseVerdict(evidenceClass: string, falseClose: boolean): void {
     writeFileSync(closeOracleCalibPath(), JSON.stringify(c));
   } catch { /* best-effort */ }
 }
+// Operator-verdict-corpus calibration (§12.6 step 1b): when a HUMAN answers a re-land escalation
+// (read back via solicitation_outcome_scan over obsidian interaction episodes), that engagement is
+// an operator verdict corroborating the abstain — the oracle calibrating against the operator
+// corpus, not just against reality's re-detection. Tracked honestly as engagement (met/unmet), not
+// folded into the reliability posterior as a fake polar verdict, since met/unmet carries no polarity.
+export function recordOperatorEngagement(evidenceClass: string): void {
+  try {
+    const c = readCloseOracleCalib();
+    const k = evidenceClass || "unknown";
+    const rec = c[k] ?? { closes: 0, false_closes: 0 };
+    rec.operator_engaged = (rec.operator_engaged ?? 0) + 1;
+    c[k] = rec;
+    writeFileSync(closeOracleCalibPath(), JSON.stringify(c));
+  } catch { /* best-effort */ }
+}
 /** Beta-mean reliability of the close-oracle at an evidence class: P(a close of this class holds). */
-export function closeOracleReliability(evidenceClass: string): { alpha: number; beta: number; reliability: number; closes: number; false_closes: number } {
+export function closeOracleReliability(evidenceClass: string): { alpha: number; beta: number; reliability: number; closes: number; false_closes: number; operator_engaged: number } {
   const rec = readCloseOracleCalib()[evidenceClass || "unknown"] ?? { closes: 0, false_closes: 0 };
   const held = Math.max(0, rec.closes - rec.false_closes); // closes that did NOT later re-land
   const alpha = held + 1;                                  // Beta(1,1) prior
   const beta = rec.false_closes + 1;
-  return { alpha, beta, reliability: alpha / (alpha + beta), closes: rec.closes, false_closes: rec.false_closes };
+  return { alpha, beta, reliability: alpha / (alpha + beta), closes: rec.closes, false_closes: rec.false_closes, operator_engaged: rec.operator_engaged ?? 0 };
 }
 function predictLand(gap: Record<string, unknown>): { predicted: boolean; p: number; baseline: number } {
   const p = landabilityScore(gap);

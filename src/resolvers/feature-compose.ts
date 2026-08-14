@@ -2943,7 +2943,15 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
     try {
       planRaw = await llmCallWithFailover(llmEndpoints, decomposePrompt(spec, maxOps, grounding, principles + composeLessons, priorFeedback), model);
     } catch (e) {
-      return { shape: "featureComposeReport", body: { ok: false, stage: "decompose", error: (e as Error).message } };
+      // OBSERVABILITY (2026-08-13): this decompose-throw was SILENT — it returns
+      // ok:false and never reaches the [fc-plan] log below, so a draft that dies
+      // here (llmCallWithFailover exhausted its rounds / every endpoint failed)
+      // vanished from the journal right after "spec-refine applied", leaving no
+      // fc-plan, no verdict, and no error line. That invisibility is why composes
+      // "die after spec-refine" with no diagnosable cause. Log it loudly.
+      const _de = (e as Error).message;
+      console.log(`[fc-decompose-failed] draft LLM call threw — compose dies BEFORE fc-plan (llm_endpoints=${llmEndpoints.length}, model=${model}): ${_de.slice(0, 300)}`);
+      return { shape: "featureComposeReport", body: { ok: false, stage: "decompose", error: _de } };
     }
     plan = parseJsonObject(planRaw);
     ops = (plan?.ops as PlanOp[] | undefined) ?? [];

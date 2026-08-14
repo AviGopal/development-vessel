@@ -1184,24 +1184,11 @@ function verifyGapCondition(gap: Record<string, unknown>): 'present' | 'absent' 
     const landedSiteSync = typeof ((gap['classification_metadata'] ?? gap['metadata'] ?? {}) as Record<string, unknown>)['edit_site'] === 'string'
       ? String(((gap['classification_metadata'] ?? gap['metadata'] ?? {}) as Record<string, unknown>)['edit_site'])
       : '';
-    const landedVesselSync = landedSiteSync.match(/^repos\/([^/]+)\//)?.[1] ?? '';
+    // Class 3 centralized (2026-08-14): a single non-reverted landing => 'absent', but a
+    // RE-LAND (>=2) => 'present' — the referent persisted despite landing. See landedCommitVerdict.
     if (gapIdForLandedSync.length >= 8 && !behavioralFail) {
-      try {
-        for (const cloneName of readdirSync('/workspace/git/vessels')) {
-          const cloneDir = join('/workspace/git/vessels', cloneName);
-          if (!existsSync(join(cloneDir, '.git'))) continue;
-          if (landedVesselSync && cloneName !== landedVesselSync) continue;
-          const gitLog = Bun.spawnSync(['git', '-C', cloneDir, 'log', '--grep', gapIdForLandedSync, '--fixed-strings', '-1', '--format=%H', '--since=14.days'], { stdout: 'pipe', stderr: 'pipe', timeout: 10_000 });
-          const shaSync = gitLog.exitCode === 0 ? new TextDecoder().decode(gitLog.stdout).trim().split(/\s+/)[0] ?? '' : '';
-          if (shaSync) {
-            const subjSync = Bun.spawnSync(['git', '-C', cloneDir, 'log', '-1', '--format=%s', shaSync], { stdout: 'pipe', stderr: 'pipe', timeout: 10_000 });
-            const sSync = subjSync.exitCode === 0 ? new TextDecoder().decode(subjSync.stdout).trim() : '';
-            if (/^Revert[\s"']/i.test(sSync)) continue;
-            if (shaWasRevertedInAnyClone(shaSync)) continue;
-            return 'absent';
-          }
-        }
-      } catch { /* fail open — never false-close */ }
+      const verdict = landedCommitVerdict(gapIdForLandedSync, landedSiteSync);
+      if (verdict !== null) return verdict;
     }
     // Second evidence class: resolver-behaviour gaps.
     // classification_metadata may carry:
@@ -1269,39 +1256,12 @@ async function verifyGapConditionAsync(gap: Record<string, unknown>): Promise<'p
       // the change landing; a commit anywhere else is discussion, not resolution.
       const landedMeta = (gap['classification_metadata'] ?? gap['metadata'] ?? {}) as Record<string, unknown>;
       const landedSiteRaw = typeof landedMeta['edit_site'] === 'string' ? String(landedMeta['edit_site']) : '';
-      const landedVessel = landedSiteRaw.match(/^repos\/([^/]+)\//)?.[1] ?? '';
-      try {
-        for (const cloneName of readdirSync('/workspace/git/vessels')) {
-          const cloneDir = join('/workspace/git/vessels', cloneName);
-          if (!existsSync(join(cloneDir, '.git'))) continue;
-          // Scoped when the gap names a target vessel; unscoped only when it names none,
-          // preserving the old behaviour for gaps that carry no edit_site at all.
-          if (landedVessel && cloneName !== landedVessel) continue;
-          const gitLog = Bun.spawnSync(['git', '-C', cloneDir, 'log', '--grep', gapIdForLanded, '--fixed-strings', '-1', '--format=%H', '--since=14.days'], { stdout: 'pipe', stderr: 'pipe', timeout: 10_000 });
-          const landedSha = gitLog.exitCode === 0 ? new TextDecoder().decode(gitLog.stdout).trim().split(/\s+/)[0] ?? '' : '';
-          if (landedSha) {
-            // A COMMIT MENTIONING THE GAP IS NOT A FIXED GAP.
-            //
-            // This grep matches any commit whose message contains the gap id — including
-            // a commit that was REVERTED, and including THE REVERT ITSELF, because a
-            // revert quotes the original subject verbatim. Third instance of this exact
-            // confusion today: the pending-land sweep had it (271228e), and this check
-            // had it too, five seconds after every pick.
-            //
-            // Observed: d90318f landed a wrong fix for
-            // ui-feedback-the-surface-hard_to_understand, b1d2417 reverted it, and BOTH
-            // messages carry the gap id. So the gap was closed as already_resolved on
-            // the strength of a change that no longer exists plus the commit that undid
-            // it — and a closed gap is never re-picked, so the complaint could never be
-            // retried no matter how many times it was reopened.
-            const subjRaw = Bun.spawnSync(['git', '-C', cloneDir, 'log', '-1', '--format=%s', landedSha], { stdout: 'pipe', stderr: 'pipe', timeout: 10_000 });
-            const subj = subjRaw.exitCode === 0 ? new TextDecoder().decode(subjRaw.stdout).trim() : '';
-            if (/^Revert[\s"']/i.test(subj)) continue;           // the match IS a revert
-            if (shaWasRevertedInAnyClone(landedSha)) continue;    // the match WAS reverted
-            return 'absent';
-          }
-        }
-      } catch { /* fail open — never false-close */ }
+      // Class 3 centralized (2026-08-14): a single non-reverted landing => 'absent'; a RE-LAND
+      // (>=2 non-reverted commits) => 'present' — the referent persisted despite landing, so a
+      // commit naming the gap is not proof it is fixed. Revert-awareness + vessel scoping live in
+      // landedCommitVerdict (the prior inline copies' revert lessons are folded into it).
+      const verdict = landedCommitVerdict(gapIdForLanded, landedSiteRaw);
+      if (verdict !== null) return verdict;
     }
     // ── Class 2: resolver-behaviour (evidence_resolve / verify_shape) ───────
     const evidenceResolveRaw = meta['evidence_resolve'];
@@ -1400,35 +1360,16 @@ async function verifyGapConditionAsync(gap: Record<string, unknown>): Promise<'p
   } catch {
     // fall through to landed-commit evidence class
   }
-  // ── Class 3: landed-commit evidence ─────────────────────────────────────
+  // ── Class 3: landed-commit evidence (centralized 2026-08-14 — now revert- and re-land-aware) ──
+  // This copy was previously unscoped and NOT revert-aware; routing it through
+  // landedCommitVerdict strengthens it to match the other sites and closes the same hole.
   try {
     const gapId = typeof gap.id === 'string' ? gap.id : '';
-    if (gapId.length >= 8) {
-      const vesselsRoot = '/workspace/git/vessels';
-      let entries: string[] = [];
-      try {
-        entries = readdirSync(vesselsRoot);
-      } catch {
-        entries = [];
-      }
-      for (const dir of entries) {
-        const repoPath = join(vesselsRoot, dir);
-        const gitPath = join(repoPath, '.git');
-        if (!existsSync(gitPath)) continue;
-        try {
-          const proc = Bun.spawnSync({
-            cmd: ['git', '-C', repoPath, 'log', '--grep', gapId, '--fixed-strings', '-1', '--format=%H', '--since=14.days'],
-            timeout: 10000,
-          });
-          const out = typeof proc.stdout === 'object' && proc.stdout !== null
-            ? new TextDecoder().decode(proc.stdout).trim()
-            : '';
-          if (out.length > 0) return 'absent';
-        } catch {
-          // per-repo failure — continue
-        }
-      }
-    }
+    const editSite = typeof (gap.classification_metadata as Record<string, unknown> | undefined)?.['edit_site'] === 'string'
+      ? String((gap.classification_metadata as Record<string, unknown>)['edit_site'])
+      : '';
+    const verdict = landedCommitVerdict(gapId, editSite);
+    if (verdict !== null) return verdict;
   } catch {
     // fail open
   }
@@ -1637,6 +1578,57 @@ function shaWasRevertedInAnyClone(sha: string): boolean {
     } catch { /* per-repo failure — continue */ }
   }
   return false;
+}
+
+/**
+ * Landed-commit evidence for a gap, with RE-LAND awareness (§12.6, 2026-08-14).
+ *
+ * Class 3 previously returned 'absent' whenever ONE non-reverted substrate-authored commit
+ * referenced the gap id (`git log --grep <gapId> -1`). That certifies closure on a
+ * producer-authored string — the commit message names the gap — rather than on a measured
+ * condition. Demonstrated hole: gap-env-gated-write-allowlist "closed" on bafd83d, an inert
+ * rename (WRITE_ALLOWLIST -> WRITE_ALLOWLIST_ENV) that left process.env["WRITE_ALLOWLIST"]
+ * and thus the env-gate intact — and that gap had already been re-detected and re-landed once
+ * (69d680b at 05:39, then bafd83d at 07:34: two non-reverted commits reference it).
+ *
+ * The re-detection is the referent's persistence signal. Count non-reverted commits:
+ *   0  -> null    (no landed evidence — caller falls through, unchanged)
+ *   1  -> 'absent' (first landing, benefit of the doubt — preserves prior behaviour, no flood)
+ *   >=2 -> 'present' (landed, re-detected, re-landed => prior landing did not resolve the
+ *          condition => refuse close; both callers already refuse close on 'present')
+ *
+ * Scoped to the gap's target vessel (from editSite): a mention elsewhere is discussion, not
+ * evidence — the same rule the three former inline copies carried. Uses vesselsCloneRoot() so
+ * it is testable against a fixture clone tree; the inline copies hardcoded the path and were
+ * therefore untested. Replaces the duplicated Class-3 blocks the authors were burned by
+ * ("a fix applied to one site is not a fix").
+ */
+export function landedCommitVerdict(gapId: string, editSite: string): 'absent' | 'present' | null {
+  if (typeof gapId !== 'string' || gapId.length < 8) return null;
+  const landedVessel = (typeof editSite === 'string' ? editSite : '').match(/^repos\/([^/]+)\//)?.[1] ?? '';
+  let entries: string[] = [];
+  try { entries = readdirSync(vesselsCloneRoot()); } catch { return null; }
+  let nonReverted = 0;
+  for (const cloneName of entries) {
+    const cloneDir = join(vesselsCloneRoot(), cloneName);
+    if (!existsSync(join(cloneDir, '.git'))) continue;
+    if (landedVessel && cloneName !== landedVessel) continue;
+    try {
+      // ALL matching commits (no -1) so re-lands are countable, not just the most recent.
+      const gitLog = Bun.spawnSync(['git', '-C', cloneDir, 'log', '--grep', gapId, '--fixed-strings', '--format=%H', '--since=14.days'], { stdout: 'pipe', stderr: 'pipe', timeout: 10_000 });
+      const shas = gitLog.exitCode === 0 ? new TextDecoder().decode(gitLog.stdout).trim().split(/\s+/).filter(Boolean) : [];
+      for (const sha of shas) {
+        const subjRaw = Bun.spawnSync(['git', '-C', cloneDir, 'log', '-1', '--format=%s', sha], { stdout: 'pipe', stderr: 'pipe', timeout: 10_000 });
+        const subj = subjRaw.exitCode === 0 ? new TextDecoder().decode(subjRaw.stdout).trim() : '';
+        if (/^Revert[\s"']/i.test(subj)) continue;      // the match IS a revert
+        if (shaWasRevertedInAnyClone(sha)) continue;     // the match WAS reverted
+        nonReverted += 1;
+      }
+    } catch { /* per-repo failure — continue */ }
+  }
+  if (nonReverted === 0) return null;
+  if (nonReverted >= 2) return 'present';
+  return 'absent';
 }
 
 export async function sweepPendingLandVerifications(): Promise<{ checked: number; closed: number }> {

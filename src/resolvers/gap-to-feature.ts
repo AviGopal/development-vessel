@@ -1392,7 +1392,14 @@ async function closeLandedGap(gap: Record<string, unknown>, land: LandSignal): P
     if (verifyResult === 'absent') {
       // Gap condition gone — allow close (fall through to existing logic)
     } else if (verifyResult === 'present') {
-      // Defect still present — refuse close, record outcome_verification_failure
+      // Defect still present — refuse close. If this 'present' is a RE-LAND (>=2 non-reverted
+      // landings, none of which resolved it), the close-oracle is out of coverage: abstain ->
+      // escalate to the human (§12.6 step 1) rather than leave it to re-compose inertly forever.
+      const gidPresent = String(gap.id ?? "");
+      const editSitePresent = gapEditSite(gap, (gap.classification_metadata ?? gap.metadata ?? {}) as Record<string, unknown>) ?? "";
+      if (landedCommitVerdict(gidPresent, editSitePresent) === 'present') {
+        escalateRelandToHuman(gidPresent, String(gap.category ?? "?"), String(gap.summary ?? ""));
+      }
       return { closed: false, error: 'outcome_verification_failure: gap condition still present at close time' };
     }
     // verifyResult === 'unknown': fail-open, allow close (preserves existing behaviour)
@@ -1631,6 +1638,27 @@ export function landedCommitVerdict(gapId: string, editSite: string): 'absent' |
   return 'absent';
 }
 
+/**
+ * Abstain -> escalate (§12.6 step 1, 2026-08-14). The close-oracle refuses to close a gap on a
+ * RE-LAND (>=2 non-reverted landings, none of which resolved the condition) — it is OUT OF
+ * COVERAGE: repeated landing without closure means the automated fix is inert or wrong. Unlike
+ * the category-hopeless escalation (which keys on lands===0 and therefore never fires for a gap
+ * that DOES land), this fires per-gap at the close-refusal point and asks the human. The
+ * uiQuestion_write is the durable escalation record and, once answered, an operator-verdict
+ * corpus entry that calibrates the oracle. Deduped via solicitedHumanGaps; fire-and-forget.
+ */
+function escalateRelandToHuman(gapId: string, category: string, summary: string): void {
+  if (!gapId || solicitedHumanGaps.has(gapId)) return;
+  solicitedHumanGaps.add(gapId);
+  void resolveUiWritePassthrough({ type: "uiQuestion_write", id: "reland-needs-human-" + gapId, title: "Gap re-lands without closing — needs a human decision", body: "Gap " + gapId + " (" + category + ") has had multiple substrate-authored landings, none of which resolved its condition (the close-oracle abstains — out of coverage). The automated fix keeps landing an inert or wrong change. It likely needs a human: redefine the goal, supply the missing fact, grant access, or drop it. Summary: " + summary.slice(0, 300), kind: "gap_reland_needs_human", importance: "high" } as never)
+    .then((r) => {
+      const shape = (r as { shape?: unknown } | undefined)?.shape;
+      if (shape === "structuredError") console.warn(`[gap-escalation] reland uiQuestion_write REJECTED for ${gapId} — no human was asked`);
+      else console.log(`[gap-escalation] reland uiQuestion_write accepted for ${gapId} (shape=${String(shape)})`);
+    })
+    .catch((e: unknown) => console.warn(`[gap-escalation] reland uiQuestion_write THREW for ${gapId}: ${String(e)} — no human was asked`));
+}
+
 export async function sweepPendingLandVerifications(): Promise<{ checked: number; closed: number }> {
   const out = { checked: 0, closed: 0 };
   try {
@@ -1662,8 +1690,16 @@ export async function sweepPendingLandVerifications(): Promise<{ checked: number
       }
       // Post-cutover process: pick-time condition check CAN now observe the landed
       // state. Refuse close only on a positive "still present"; unknown fails open,
-      // exactly like closeLandedGap.
-      if (verifyGapCondition(g) === "present") continue;
+      // exactly like closeLandedGap. A RE-LAND 'present' (>=2 landings, none resolved it)
+      // is out of coverage for the close-oracle: abstain -> escalate to the human (§12.6 step 1).
+      if (verifyGapCondition(g) === "present") {
+        const gidPresent = String(g.id ?? "");
+        const editSitePresent = gapEditSite(g, (g.classification_metadata ?? g.metadata ?? {}) as Record<string, unknown>) ?? "";
+        if (landedCommitVerdict(gidPresent, editSitePresent) === 'present') {
+          escalateRelandToHuman(gidPresent, String(g.category ?? "?"), String(g.summary ?? ""));
+        }
+        continue;
+      }
       joinDecisionOutcome(meta, { landed: true, verdict: "FAVORABLE", commit: sha });
       await resolveSubstrateGapWrite({
         type: "substrateGap_write",

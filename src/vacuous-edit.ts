@@ -338,7 +338,7 @@ export function vacuousEditReason(before: string, after: string): string | null 
 
   // AN EDIT THE NEXT STATEMENT ERASES CANNOT BE THE REQUESTED CHANGE.
   const dead = deadStoreEditReason(before, after);
-  if (dead) return dead;
+  if (dead) return `dead store simulation: ${dead}`;
 
   // A TYPE-ONLY EDIT CANNOT BE THE REQUESTED CHANGE.
   //

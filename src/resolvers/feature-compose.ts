@@ -73,7 +73,7 @@ const REPO_ROOT = process.env.MITOSIS_REPO_ROOT ?? RUNTIME_ROOT;
 // full contents + several coordinated edits), so generation runs longer. Raise it so the
 // system can author more-than-surgical changes. Tool (shell/fs) calls finish in seconds,
 // so the larger cap is harmless to them.
-const PER_CALL_TIMEOUT_MS = 250_000;
+const PER_CALL_TIMEOUT_MS = 600_000;
 export const FEATURE_COMPOSE_ENDPOINT = process.env.FEATURE_COMPOSE_ENDPOINT ?? "http://127.0.0.1:8100";
 
 export interface FeatureComposePointer {
@@ -2485,6 +2485,7 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
 }
 
 async function resolveFeatureComposeUncapped(pointer: FeatureComposePointer): Promise<ResolverResult> {
+  // Tool (shell/fs) calls finish in seconds, but the verify shell call can exceed this cap; therefore the outer budget must be increased
   if (typeof pointer.spec !== "string") pointer = { ...pointer, spec: String(pointer.spec ?? "") };
   const guards = pointer.verify_vessels?.length ? pointer.verify_vessels : ["__global__"];
   // Per-compose isolation (gap edit-intent-compose-shared-workspace-no-isolation):

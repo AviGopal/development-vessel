@@ -288,6 +288,7 @@ function functionBodies(src: string): Array<{ name: string; body: string }> {
  * either: the second assignment READS x, which is checked for explicitly.
  */
 export function deadStoreEditReason(before: string, after: string): string | null {
+    if (typeof before !== "string" || typeof after !== "string") return null;
   if (typeof before !== "string" || typeof after !== "string") return null;
   if (after === before) return null;
 
@@ -307,7 +308,7 @@ export function deadStoreEditReason(before: string, after: string): string | nul
 
     // The NEXT statement, skipping blanks and comments only.
     let j = i + 1;
-    while (j < lines.length && (lines[j] === "" || lines[j]!.startsWith("//") || lines[j]!.startsWith("*") || lines[j]!.startsWith("/*"))) j++;
+    while (j < lines.length && isInert(lines[j]!)) j++;
     if (j >= lines.length) continue;
     const next = ASSIGN.exec(lines[j]!);
     if (!next || next[1] !== name) continue;

@@ -14,6 +14,24 @@
  */
 import type { ResolverResult } from "./types.js";
 
+// THE TRUST ALLOWLIST.
+//
+// `ssd.jpl.nasa.gov` added 2026-08-16, deliberately and narrowly. The substrate has repeatedly
+// derived that JPL Horizons is the right source for an ephemeris question and then been unable to
+// reach it, so the goal class failed for want of an origin rather than for want of reasoning. It
+// belongs in the same category as the entries already here: a read-only, unauthenticated, public
+// scientific data API, exactly like `api.open-meteo.com` and `wttr.in`. Nothing about the trust
+// model changes — content still returns tagged `trust:"external-evidence"` and must be verified
+// before it shapes durable state.
+//
+// The env var remains the override, but it is BOOTSTRAP-ONLY and that is a law-1 violation this
+// list still carries: an allowlist is behaviour, and behaviour frozen at process start is
+// behaviour the system cannot observe, grade, or learn. It is deliberately NOT converted to a
+// freely-writable shape here — this is a security boundary, and anything that can write it can
+// open an arbitrary egress path. The right fix is a shaped, operator-seeded policy with a
+// self-heal default (the pattern `bodyHonestyPolicy` now uses), which is a separate change with
+// its own review; widening the surface on the way past is how a trust gate quietly stops being
+// one. Filed rather than done.
 const DEFAULT_ALLOW = (process.env["WEB_RESOURCE_ALLOWLIST"]?.split(",").map((s) => s.trim()).filter(Boolean)) ?? [
   "developer.mozilla.org",
   "docs.python.org",
@@ -25,6 +43,7 @@ const DEFAULT_ALLOW = (process.env["WEB_RESOURCE_ALLOWLIST"]?.split(",").map((s)
   "surrealdb.com",
   "api.open-meteo.com",
   "wttr.in",
+  "ssd.jpl.nasa.gov",
 ];
 
 export interface WebResourcePointer {

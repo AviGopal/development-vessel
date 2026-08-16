@@ -11,9 +11,32 @@ interface Pointer {
 }
 
 export async function resolveVesselHealthReport(pointer: Pointer): Promise<ResolverResult> {
-  const vesselId = (typeof pointer.vessel_id === "string" && pointer.vessel_id.length > 0)
-    ? pointer.vessel_id
-    : "analysis-vessel-local";
+  // DO NOT INVENT A SUBJECT (2026-08-16).
+  //
+  // This defaulted to the literal "analysis-vessel-local" whenever the caller failed to bind
+  // vessel_id, and said nothing about having done so. That is a false-reach generator, and it was
+  // caught producing one: a goal naming discovery-vessel and development-vessel walked, produced a
+  // perfectly well-formed healthy report for analysis-vessel-local, persisted it as a memory note,
+  // and the reach judge — reading a valid report — asserted the note "successfully summarizes the
+  // health of both the discovery vessel and the development vessel". Neither appeared in it.
+  //
+  // The failure was never visible to any gate, because a defaulted subject is indistinguishable
+  // from a requested one once the report is built. An unbound argument must surface as an
+  // unresolved impulse so the walk can retry or fail honestly — the same discipline
+  // bodyHonestyPolicy follows by serving NOTHING rather than an empty policy. A wrong answer that
+  // looks right is worse than no answer, because only one of the two can be detected.
+  const vesselId = typeof pointer.vessel_id === "string" ? pointer.vessel_id.trim() : "";
+  if (!vesselId) {
+    return {
+      shape: "vessel_health_report",
+      body: {
+        error: "vessel_id is required — refusing to report on an assumed vessel",
+        detail:
+          "No vessel_id was bound on this pointer. This resolver previously defaulted to a hardcoded vessel, which produced valid-looking reports about a subject nobody asked for and passed the reach judge. Bind vessel_id (one report per vessel; dispatch once per vessel for a multi-vessel goal).",
+        resolved: false,
+      },
+    };
+  }
 
   const authHeaders: Record<string, string> = {
     "Content-Type": "application/json",

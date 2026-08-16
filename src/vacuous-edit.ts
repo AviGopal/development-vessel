@@ -304,6 +304,7 @@ export function deadStoreEditReason(before: string, after: string): string | nul
     if (!m) continue;
     const name = m[1]!;
     if (/^(?:const|let|var)\b/.test(line)) continue;
+    if (!name) continue;
 
     // The NEXT statement, skipping blanks and comments only.
     let j = i + 1;

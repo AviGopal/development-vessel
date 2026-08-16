@@ -1,11 +1,77 @@
 import { describe, it, expect } from "bun:test";
 import { resolveHttpResponse } from "../../src/resolvers/http-response.js";
 
+// WHAT THIS TEST USED TO ASSERT (2026-08-16):
+//
+//   it("fetches httpbin 404 page and returns title in http_response shape", async () => {
+//     const result = await resolveHttpResponse({ type: "http_response" });
+//     expect(typeof result.body).toBe("string");
+//   });
+//
+// It pinned a resolver that ignored the pointer entirely and fetched a hardcoded
+// https://httpbin.org/status/404, returning that page's <title>. The shape was advertised and
+// dispatched, so a walk needing an external fetch selected it and got httpbin's title back no
+// matter what it asked for — and the coverage said that was correct. It also made a live network
+// call from a unit test, so the suite depended on httpbin being up.
+//
+// A test that pins a hardcoded answer pins the lie with it. These tests assert the two properties
+// that matter instead: an unbound url is REFUSED rather than assumed, and the trust gate's verdict
+// reaches the caller instead of being flattened into a success.
+
 describe("resolveHttpResponse", () => {
-  it("fetches httpbin 404 page and returns title in http_response shape", async () => {
+  it("REFUSES an unbound url rather than fetching an assumed address", async () => {
     const result = await resolveHttpResponse({ type: "http_response" });
     expect(result.shape).toBe("http_response");
-    expect(typeof result.body).toBe("string");
-    expect(result.body.length).toBeGreaterThan(0);
+    const body = result.body as Record<string, unknown>;
+    expect(body["resolved"]).toBe(false);
+    expect(String(body["error"])).toContain("url is required");
+    // The predecessor's hardcoded probe must not survive anywhere in the refusal.
+    expect(JSON.stringify(body)).not.toContain("httpbin.org/status/404");
+  });
+
+  it("refuses empty and whitespace-only urls, not just a missing key", async () => {
+    for (const url of ["", "   ", "\t"]) {
+      const body = (await resolveHttpResponse({ type: "http_response", url })).body as Record<string, unknown>;
+      expect(body["resolved"]).toBe(false);
+    }
+  });
+
+  it("rejects a wrong pointer type without touching the network", async () => {
+    const body = (await resolveHttpResponse({ type: "not_http_response" })).body as Record<string, unknown>;
+    expect(body["ok"]).toBe(false);
+  });
+
+  // THE DELEGATION PROPERTY. http_response must inherit web_resource's trust gate rather than
+  // become a second, ungated egress path — an unknown origin is REFUSED, not fetched. No network
+  // call happens here: the gate rejects before any fetch is attempted.
+  it("passes the trust gate's refusal through instead of flattening it into a success", async () => {
+    const body = (await resolveHttpResponse({
+      type: "http_response",
+      url: "https://ssd.jpl.nasa.gov/api/horizons.api?format=text",
+    })).body as Record<string, unknown>;
+    expect(body["trust"]).toBe("rejected");
+    expect(String(body["reason"])).toContain("allowlist");
+    // The caller is told which domain was refused and what the allowlist is, so a walk can
+    // report the real obstacle rather than inventing a value.
+    expect(body["domain"]).toBe("ssd.jpl.nasa.gov");
+    expect(Array.isArray(body["allow_domains"])).toBe(true);
+  });
+
+  it("refuses non-https urls through the same gate", async () => {
+    const body = (await resolveHttpResponse({
+      type: "http_response",
+      url: "http://en.wikipedia.org/wiki/Io",
+    })).body as Record<string, unknown>;
+    expect(body["trust"]).toBe("rejected");
+  });
+
+  it("honours a caller-supplied allowlist override, so the gate is data not a constant", async () => {
+    const body = (await resolveHttpResponse({
+      type: "http_response",
+      url: "https://example.invalid/thing",
+      allow_domains: ["other.invalid"],
+    })).body as Record<string, unknown>;
+    expect(body["trust"]).toBe("rejected");
+    expect(body["allow_domains"]).toEqual(["other.invalid"]);
   });
 });

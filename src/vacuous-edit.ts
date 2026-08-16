@@ -289,8 +289,6 @@ function functionBodies(src: string): Array<{ name: string; body: string }> {
  */
 export function deadStoreEditReason(before: string, after: string): string | null {
   if (typeof before !== "string" || typeof after !== "string") return null;
-    if (typeof before !== "string" || typeof after !== "string") return null;
-  if (typeof before !== "string" || typeof after !== "string") return null;
   if (after === before) return null;
 
   const beforeLines = new Set(before.split("\n").map((l) => l.trim()));

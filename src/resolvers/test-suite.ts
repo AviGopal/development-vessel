@@ -107,6 +107,7 @@ export async function resolveTestSuite(pointer: Record<string, unknown>): Promis
   const rel = `repos/${name}`;
   const preferredRoot = `${VESSEL_CLONES_ROOT}/${name}`;
   const fallbackRoot = `${SUPER_REPO_ROOT}/repos/${name}`;
+  const landedSha = typeof pointer.landed_sha === "string" ? pointer.landed_sha.trim() : undefined;
   const timeoutMs = typeof pointer.timeout_ms === "number" && pointer.timeout_ms > 0 ? pointer.timeout_ms : DEFAULT_TIMEOUT_MS;
   const budgetSec = Math.ceil(timeoutMs / 1000);
 

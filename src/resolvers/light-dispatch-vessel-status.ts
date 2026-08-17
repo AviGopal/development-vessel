@@ -90,7 +90,7 @@ export async function resolveLightDispatchVesselStatus(
 
   // 3. Recent trace summary from metabob/activity-api
   const tracesResult = await safeFetch(
-    `${METABOB_ENDPOINT}/v2/traces?vessel_id=${encodeURIComponent(vesselId)}&limit=20&sort=created_at:desc`,
+    `${METABOB_ENDPOINT}/v2/activities/execution-traces?vessel_id=${encodeURIComponent(vesselId)}&limit=20&sort=created_at:desc`,
     {
       method: "GET",
       headers: METABOB_API_KEY ? { Authorization: `ApiKey ${METABOB_API_KEY}` } : {},
@@ -98,7 +98,11 @@ export async function resolveLightDispatchVesselStatus(
     8_000,
   );
   const tracesBody = (tracesResult.body ?? {}) as { traces?: TraceRow[]; total?: number };
-  const traces: TraceRow[] = Array.isArray(tracesBody.traces) ? tracesBody.traces : [];
+  // activity-api returns {executions,...}; reading only `traces` would leave this empty
+  // even after the URL was corrected — URL and response key are two dimensions and
+  // fixing one is inert.
+  const traces: TraceRow[] = Array.isArray((tracesBody as any).executions) ? (tracesBody as any).executions
+    : Array.isArray(tracesBody.traces) ? tracesBody.traces : [];
 
   const totalTraces = typeof tracesBody.total === "number" ? tracesBody.total : traces.length;
   let successCount = 0;

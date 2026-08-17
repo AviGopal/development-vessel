@@ -63,7 +63,7 @@ export async function resolveTemplateSuccessRanking24h(
   if (traces.length === 0) {
     try {
       const res2 = await fetch(
-        `${METABOB_ENDPOINT}/v2/executions?limit=500&status=success`,
+        `${METABOB_ENDPOINT}/v2/activities/execution-traces?limit=500&status=success`,
         {
           headers,
           signal: AbortSignal.timeout(15_000),

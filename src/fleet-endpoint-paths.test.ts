@@ -39,10 +39,31 @@ function walk(dir: string, out: string[] = []): string[] {
   return out;
 }
 
-/** Prefixes activity-api mounts, from its `app.route('<prefix>', …)` table. */
+/** Prefixes activity-api mounts, from its `app.route('<prefix>', …)` table.
+ *
+ *  THE ROOT MOUNT IS EXCLUDED, and this is the whole reason the first version of this test
+ *  was worthless. activity-api has `app.route('/', boredomRoutes)`. With `/` in the list, the
+ *  coverage check `path.startsWith(prefix + "/")` matched EVERY path — so the detector
+ *  reported clean while /v2/traces, /v2/goals and /v2/executions were all live and unmounted.
+ *  It passed vacuously for exactly the class it exists to catch.
+ *
+ *  A root-mounted router serves specific paths, not the whole namespace; treating it as
+ *  covering /v2/* is what erased the signal. The negative-control test below now proves the
+ *  matcher can still REJECT. */
 function mountedPrefixes(): string[] {
   const src = readFileSync(ACTIVITY_API_INDEX, "utf8");
-  return [...src.matchAll(/app\.route\(\s*['"]([^'"]+)['"]/g)].map((m) => m[1]!);
+  return [...src.matchAll(/app\.route\(\s*['"]([^'"]+)['"]/g)]
+    .map((m) => m[1]!)
+    .filter((p) => p !== "/" && p !== "");
+}
+
+/** True when some mounted prefix genuinely covers this path. */
+function isCovered(path: string, prefixes: string[]): boolean {
+  const p = path.replace(/\/$/, "");
+  return prefixes.some((pre) => {
+    const q = pre.replace(/\/$/, "");
+    return q.length > 0 && (p === q || p.startsWith(q + "/"));
+  });
 }
 
 /** `/v2/...` paths this vessel builds, from template literals and new URL(...) calls. */
@@ -77,15 +98,56 @@ describe("fleet endpoint paths — this vessel calls only routes activity-api mo
     expect(paths.length).toBeGreaterThan(5);
   });
 
-  it("THE REGRESSION: no call targets an unmounted path", () => {
+  /** Call sites targeting a path nothing in the fleet mounts, as of 2026-08-17.
+   *
+   *  Each is a live defect, not a style issue: the call 404s and the caller degrades. They are
+   *  FROZEN rather than fixed because choosing the replacement needs the receiving contract —
+   *  what serves gaps, notes, goals and impulse resolutions, and in what response shape. A
+   *  guessed endpoint is worse than a known-broken one: it would 404 identically while looking
+   *  deliberate.
+   *
+   *  Where a correct target WAS determinable it was fixed rather than listed: five sites moved
+   *  to /v2/activities/execution-traces, each also switched to read `executions` — the key that
+   *  endpoint actually returns. Fixing the URL alone would have left them silently empty, which
+   *  is the same write-key/read-key mismatch one layer out.
+   *
+   *  The list may SHRINK. It may not grow. */
+  const KNOWN_UNMOUNTED = new Set<string>([
+    "src/resolvers/gap-lifecycle-scan.ts -> /v2/gaps",
+    "src/resolvers/human-input.ts -> /v2/notes",
+    "src/resolvers/resolver-tier-cost-summary.ts -> /v2/resolutions",
+    "src/resolvers/vessel-health-report.ts -> /v2/goals",
+  ]);
+
+  it("THE REGRESSION: no NEW call targets an unmounted path", () => {
     const prefixes = mountedPrefixes();
-    const bad = calledPaths().filter(({ path }) => {
-      // A call is fine when SOME mounted prefix covers it. Sub-paths are the router's business.
-      return !prefixes.some((pre) => path === pre || path.startsWith(pre.replace(/\/$/, "") + "/"));
-    });
+    // A call is fine when SOME mounted prefix covers it. Sub-paths are the router's business.
+    const bad = calledPaths().filter(({ path }) => !isCovered(path, prefixes));
     // Before the fix this listed /v2/execution-traces (silent 404 → concepts from zero traces)
     // and /v2/activities/traces (loud 404 → the report could never run).
-    expect(bad.map((b) => `${b.file} -> ${b.path}`)).toEqual([]);
+    const labelled = [...new Set(bad.map((b) => `${b.file} -> ${b.path}`))];
+    expect(labelled.filter((l) => !KNOWN_UNMOUNTED.has(l))).toEqual([]);
+  });
+
+  it("NEGATIVE CONTROL: the matcher can still reject an unmounted path", () => {
+    // Without this, the previous bug is invisible: a coverage function that returns true for
+    // everything passes every assertion above. Before believing a clean result, prove a dirty
+    // one is detectable.
+    const prefixes = mountedPrefixes();
+    expect(isCovered("/v2/activities/execution-traces", prefixes)).toBe(true);
+    for (const dead of ["/v2/traces", "/v2/goals", "/v2/executions", "/v2/resolutions", "/v2/gaps"]) {
+      expect(isCovered(dead, prefixes)).toBe(false);
+    }
+  });
+
+  it("the frozen list does not go stale — every entry is still unmounted", () => {
+    // A baseline that silently becomes false is how a detector stops detecting. If someone
+    // mounts /v2/gaps, this fails and the entry must come out.
+    const prefixes = mountedPrefixes();
+    for (const entry of KNOWN_UNMOUNTED) {
+      const path = entry.split(" -> ")[1]!;
+      expect(isCovered(path, prefixes)).toBe(false);
+    }
   });
 
   it("the specific paths that were wrong are now right", () => {

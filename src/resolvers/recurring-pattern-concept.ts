@@ -8,13 +8,14 @@ export interface RecurringPatternPointer {
 async function fetchTraces(limit: number): Promise<any[]> {
   const endpoint = process.env["METABOB_ENDPOINT"] ?? "http://127.0.0.1:8080";
   const apiKey = process.env["METABOB_API_KEY"] ?? "";
-  const res = await fetch(`${endpoint}/v2/traces?outcome=success&limit=${limit}`, {
+  const res = await fetch(`${endpoint}/v2/activities/execution-traces?outcome=success&limit=${limit}`, {
     headers: apiKey ? { Authorization: `ApiKey ${apiKey}` } : {},
     signal: AbortSignal.timeout(10_000),
   });
   if (!res.ok) return [];
   const json = (await res.json()) as any;
-  const traces = json?.traces ?? json?.data ?? [];
+  // `executions` first: that is the key activity-api returns.
+  const traces = json?.executions ?? json?.traces ?? json?.data ?? [];
   if (!Array.isArray(traces)) return [];
   return traces;
 }

@@ -65,12 +65,17 @@ export async function resolveVesselHealthReport(pointer: Pointer): Promise<Resol
   let tracesError: string | null = null;
   try {
     const res = await fetch(
-      `${METABOB_ENDPOINT}/v2/traces?vessel_id=${encodeURIComponent(vesselId)}&limit=50`,
+      `${METABOB_ENDPOINT}/v2/activities/execution-traces?vessel_id=${encodeURIComponent(vesselId)}&limit=50`,
       { headers: authHeaders, signal: AbortSignal.timeout(8_000) },
     );
     if (res.ok) {
       const body = await res.json() as any;
-      recentTraces = Array.isArray(body?.traces) ? (body.traces as any[]) : [];
+      // `executions` is the key activity-api actually returns
+      // (ListExecutionTracesResponse: {executions,total,limit,offset}). Accepting only
+      // `traces` read undefined -> [] , so fixing the URL alone would have left this
+      // silently empty — the same write-key/read-key mismatch one layer out.
+      recentTraces = Array.isArray(body?.executions) ? (body.executions as any[])
+        : Array.isArray(body?.traces) ? (body.traces as any[]) : [];
     } else {
       tracesError = `traces HTTP ${res.status}`;
     }

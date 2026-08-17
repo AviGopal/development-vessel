@@ -32,7 +32,7 @@ export async function resolveResolverTierCostSummary(
   }
 
   // Fetch recent execution traces from the substrate
-  const tracesUrl = `${metabobEndpoint}/v2/traces?since=${encodeURIComponent(since)}&limit=1000`;
+  const tracesUrl = `${metabobEndpoint}/v2/activities/execution-traces?since=${encodeURIComponent(since)}&limit=1000`;
   let tracesResp: Response;
   try {
     tracesResp = await fetch(tracesUrl, {
@@ -64,8 +64,12 @@ export async function resolveResolverTierCostSummary(
   // Aggregate cost by resolver_tier from traces
   const tierMap: Record<string, { total_cost: number; count: number }> = {};
 
+  // activity-api returns {executions,...}; `traces` is accepted too for any producer that
+  // still sends it. Reading only `traces` made a successful fetch look like an empty store.
   const traces: any[] = Array.isArray(tracesData)
     ? tracesData
+    : Array.isArray(tracesData?.executions)
+    ? (tracesData.executions as any[])
     : Array.isArray(tracesData?.traces)
     ? (tracesData.traces as any[])
     : [];

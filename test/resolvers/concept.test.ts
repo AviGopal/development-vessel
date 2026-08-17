@@ -1,3 +1,13 @@
+/*
+ * NOTE (2026-08-17): these mocks used to match "/v2/execution-traces" — a path
+ * activity-api does NOT mount. The resolver called it, every live call 404'd, and
+ * `traces` stayed [] while the resolver reported success. The test passed throughout,
+ * because it mocked the same wrong path the code used.
+ *
+ * A mock that agrees with the caller verifies the caller against ITSELF. Reachability is
+ * only testable against the routes the service actually mounts — see
+ * src/fleet-endpoint-paths.test.ts, which reads activity-api's app.route() table.
+ */
 import { describe, it, expect, beforeEach, afterEach, mock } from "bun:test";
 import { resolveConcept } from "../../src/resolvers/concept.js";
 
@@ -43,7 +53,7 @@ describe("resolveConcept", () => {
     globalThis.fetch = async (input: RequestInfo | URL, _init?: RequestInit) => {
       const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : (input as Request).url;
       callCount++;
-      if (url.includes("/v2/execution-traces")) {
+      if (url.includes("/v2/activities/execution-traces")) {
         return new Response(JSON.stringify({ traces }), { status: 200, headers: { "Content-Type": "application/json" } });
       }
       if (url.includes("/concepts/search")) {
@@ -92,7 +102,7 @@ describe("resolveConcept", () => {
 
     globalThis.fetch = async (input: RequestInfo | URL, _init?: RequestInit) => {
       const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : (input as Request).url;
-      if (url.includes("/v2/execution-traces")) {
+      if (url.includes("/v2/activities/execution-traces")) {
         return new Response(JSON.stringify(traces), { status: 200, headers: { "Content-Type": "application/json" } });
       }
       return new Response(JSON.stringify([]), { status: 200, headers: { "Content-Type": "application/json" } });

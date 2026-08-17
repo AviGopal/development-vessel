@@ -44,12 +44,21 @@ export async function resolveConcept(pointer: Record<string, unknown>): Promise<
   let traces: TraceRecord[] = [];
   try {
     const tracesResp = await fetch(
-      `${METABOB_ENDPOINT}/v2/execution-traces?status=success&limit=50`,
+      `${METABOB_ENDPOINT}/v2/activities/execution-traces?status=success&limit=50`,
       {
         headers: buildAuthHeaders({ "Content-Type": "application/json" }),
         signal,
       }
     );
+    // A 404 HERE USED TO READ AS "NO TRACES". Until 2026-08-17 this called
+    // /v2/execution-traces, which activity-api does not mount (its router is at
+    // /v2/activities/execution-traces), so every call 404'd and `traces` stayed [] — and
+    // because the only guard was `if (resp.ok)`, the resolver went on to build concepts from
+    // ZERO traces and report success. A zero read through a broken query is indistinguishable
+    // from an empty store unless the failure is stated, so state it.
+    if (!tracesResp.ok) {
+      console.warn(`[concept] trace fetch failed: HTTP ${tracesResp.status} — concepts will be built WITHOUT trace evidence, not from an empty store`);
+    }
     if (tracesResp.ok) {
       const body = (await tracesResp.json()) as unknown;
       const raw: unknown[] = Array.isArray(body)

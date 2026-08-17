@@ -7,7 +7,7 @@ export async function resolveFailureCountReport(pointer: { type: string } & Reco
   const now = Date.now();
   const twentyFourHoursAgo = now - 24 * 60 * 60 * 1000;
   
-  const url = new URL("/v2/activities/traces", endpoint);
+  const url = new URL("/v2/activities/execution-traces", endpoint);
   url.searchParams.set("since", String(twentyFourHoursAgo));
   url.searchParams.set("limit", "1000");
   

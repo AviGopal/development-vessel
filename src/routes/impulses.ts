@@ -391,7 +391,7 @@ async function dispatchInner(pointer: AnyPointer): Promise<ResolverResult> {
     case "cost_expectation_scan":
       return resolveCostExpectationScan(p as Parameters<typeof resolveCostExpectationScan>[0]);
     case "http_response":
-      return resolveHttpResponse(pointer);
+      return resolveHttpResponse(pointer as Parameters<typeof resolveHttpResponse>[0]);
     case "vessel_write_error_scan":
       return resolveVesselWriteErrorScan(p as Parameters<typeof resolveVesselWriteErrorScan>[0]);
     case "chain_fetch_failure_scan":

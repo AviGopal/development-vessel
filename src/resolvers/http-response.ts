@@ -38,9 +38,9 @@ import { resolveWebResource } from './web-resource.js';
  * would have done, since none of them carried a trust gate.
  */
 export async function resolveHttpResponse(
-  pointer: { type: string; url?: string; max_bytes?: number; allow_domains?: string[] },
+  pointer: { type: "http_response"; url: string; max_bytes?: number; allow_domains?: string[] },
 ): Promise<ResolverResult> {
-  if (pointer.type !== 'http_response') {
+  if (pointer.type !== "http_response") {
     return { shape: 'http_response', body: { ok: false, error: 'Invalid pointer type' } };
   }
 

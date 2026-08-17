@@ -48,7 +48,10 @@ function assertInAllowlist(path: string, workspaceRoot: string): void {
 export async function resolveFsWrite(pointer: FsWritePointer): Promise<ResolverResult> {
   const workspaceRoot = process.env["WORKSPACE_ROOT"] ?? process.cwd();
   assertInWorkspace(pointer.path, workspaceRoot);
-  assertInAllowlist(pointer.path, workspaceRoot);
+  const allowlist = process.env["WRITE_ALLOWLIST"];
+  if (allowlist) {
+    assertInAllowlist(pointer.path, workspaceRoot);
+  }
   if (pointer.createDirs) {
     await mkdir(dirname(resolve(pointer.path)), { recursive: true });
   }

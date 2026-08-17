@@ -25,12 +25,18 @@ function assertInWorkspace(path: string, workspaceRoot: string): void {
  */
 function assertInAllowlist(path: string, workspaceRoot: string): void {
   const raw = process.env["WRITE_ALLOWLIST"];
-  if (!raw) return;
+  if (!raw) {
+    // When WRITE_ALLOWLIST is unset, allow any path within WORKSPACE_ROOT.
+    return;
+  }
   const prefixes = raw
     .split(",")
     .map((s) => s.trim())
     .filter((s) => s.length > 0);
-  if (prefixes.length === 0) return;
+  if (prefixes.length === 0) {
+    // Empty allowlist string is treated as unset behavior: allow any path.
+    return;
+  }
   const abs = resolve(path);
   const rel = relative(workspaceRoot, abs);
   const ok = prefixes.some((p) => rel === p || rel.startsWith(p.endsWith("/") ? p : `${p}/`) || rel.startsWith(p));

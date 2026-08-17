@@ -2331,7 +2331,33 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
     // A red suite after landing is a regression signal the system should act on, not a log
     // line. Reuse the gap store (already advertised, already traced) rather than inventing a
     // second alarm channel.
-    if (sb.ran === true && typeof sb.fail === "number" && sb.fail > 0) {
+    // PER-TEST ATTRIBUTION, NOT A COUNT.
+    //
+    // This gate used to fire on `fail > 0` and name the landed sha. Measured 2026-08-17:
+    // it filed post-land-suite-red-goal-host-vessel blaming 31f1d67 for four repairSignatureOf
+    // failures that PRE-DATE it — verified by stashing all local changes and re-running, still
+    // 4 fail — while 31f1d67 changed exactly one line in a different file. The gap is demand
+    // signal autonomous repair acts on, so a gate that manufactures gaps from a standing red
+    // suite spends the substrate's repair capacity on healthy code. It did so here while the
+    // landing it was judging WAS a real regression, which it did not notice.
+    //
+    // So compare NAMES against the last observed set for this vessel and report only what is
+    // newly failing. With no baseline yet, record one and file nothing — nothing can be
+    // attributed on the first observation, and guessing is what this replaces.
+    const _failNow: string[] = Array.isArray(sb.failingTests) ? (sb.failingTests as string[]).map(String) : [];
+    const _baseDir = "/workspace/post-land-baseline";
+    const _baseFile = `${_baseDir}/${String(vessel_name).replace(/[^a-zA-Z0-9]+/g, "-")}.json`;
+    let _prev: string[] | null = null;
+    try { _prev = JSON.parse(await readFile(_baseFile, "utf8")) as string[]; } catch { _prev = null; }
+    const _newlyFailing = _prev === null ? [] : _failNow.filter((t) => !_prev!.includes(t));
+    try {
+      await mkdir(_baseDir, { recursive: true });
+      await writeFile(_baseFile, JSON.stringify(_failNow));
+    } catch { /* baseline is best-effort; a missed write costs one noisy cycle, not correctness */ }
+    if (_prev === null && sb.ran === true) {
+      console.log(`[mitosis-cutover] post-land suite: no baseline for ${vessel_name} yet — recorded ${_failNow.length} failing test(s), filing nothing (nothing is attributable on first observation)`);
+    }
+    if (sb.ran === true && _newlyFailing.length > 0) {
       await resolveSubstrateGapWrite({
         type: "substrateGap_write",
         gap: {
@@ -2339,8 +2365,8 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
           category: "systematic_failure",
           source: "substrate_detected",
           summary:
-            `Post-landing suite for ${vessel_name} reports ${String(sb.fail)} failing / ${String(sb.pass)} passing after ${String(newSha).slice(0, 10)} ` +
-            `(gap ${gapId}, proposal ${proposalId}). Failing: ${Array.isArray(sb.failingTests) ? (sb.failingTests as string[]).slice(0, 5).join(" ; ").slice(0, 400) : "n/a"}`,
+            `Post-landing suite for ${vessel_name}: ${String(_newlyFailing.length)} test(s) NEWLY failing after ${String(newSha).slice(0, 10)} (suite total ${String(sb.fail)} failing / ${String(sb.pass)} passing; the rest were already failing before this commit). ` +
+            `(gap ${gapId}, proposal ${proposalId}). Newly failing: ${_newlyFailing.slice(0, 5).join(" ; ").slice(0, 400)}`,
           detected_at: appliedAt,
           status: "open",
         },

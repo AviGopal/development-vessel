@@ -167,7 +167,19 @@ async function emitGap(emitUrl: string, apiKey: string, c: ProblemCluster, minRe
               },
               min_recurrence: minRecurrence,
               emit_gap_class: c.gap_class,
-              emit_summary: `Observed {count}× occurrences of problem class ${c.gap_class}.`,
+              // A GAP SUMMARY MUST NAME THE DEFECT AND THE REPAIR, not a count.
+              //
+              // `Observed {count}× occurrences of problem class X` states neither, and the
+              // boredom goal-gate correctly dropped every gap carrying it — the 2026-08-13
+              // audit called this "the detector recursion works; its last mile is severed".
+              //
+              // The gate is NOT the thing to loosen: its ACTIONABLE_CATEGORIES set is
+              // deliberately narrow because widening it would re-open an autocatalytic
+              // re-mint loop that was closed at some cost ("cut the autocatalysis first,
+              // then widen"). The producer is what was wrong. A summary that says what broke
+              // and what must be repaired passes the prose gate because it IS actionable,
+              // not because it matches a word.
+              emit_summary: `Repair needed: {count}× executions failed with ${c.failure_type === "unclassified_failure" ? "an unclassified failure" : c.failure_type}${c.activity_prefix === "unknown" ? "" : ` on ${c.activity_prefix}`}, a recurring problem class (${c.gap_class}) that no detector covers. Diagnose the shared cause from the cited traces and repair the producing capability.`,
             },
             occurrence_count: c.count,
             failure_examples: c.trace_ids.slice(0, 8),

@@ -360,7 +360,7 @@ export async function resolveRhythmConductorTick(
                 summary,
                 detected_at: new Date().toISOString(),
                 status: "open",
-                route: "gap",
+                route: "dispatchable",
                 classification_metadata: {
                   kind: structuralBreak,
                   considered: rhythms.length,

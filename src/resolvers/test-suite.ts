@@ -1,4 +1,5 @@
 import type { ResolverResult } from "./types.js";
+import fs from "node:fs";
 
 /**
  * Resolver for the `test_suite` shape — runs a vessel's test suite INSIDE the container

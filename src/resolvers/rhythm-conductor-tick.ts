@@ -386,7 +386,7 @@ export async function resolveRhythmConductorTick(
       considered: rhythms.length,
       // Names the break in the report too, so an operator reading a single tick sees
       // "registry_unmappable" rather than inferring it from an empty enqueued list.
-      structural_break: structuralBreak,
+      structural_break: structuralBreak ?? null,
       dry_run: pointer.dry_run === true,
     },
   };

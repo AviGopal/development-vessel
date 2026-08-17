@@ -26,8 +26,8 @@ function assertInWorkspace(path: string, workspaceRoot: string): void {
 function assertInAllowlist(path: string, workspaceRoot: string): void {
   const raw = process.env["WRITE_ALLOWLIST"];
   if (!raw) {
-    // When WRITE_ALLOWLIST is unset, allow any path within WORKSPACE_ROOT.
-    return;
+    // When WRITE_ALLOWLIST is unset, deny any write to enforce explicit allowlisting.
+    throw new Error("WRITE_ALLOWLIST environment variable must be set to allow writes");
   }
   const prefixes = raw
     .split(",")

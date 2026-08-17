@@ -318,7 +318,8 @@ export async function resolveGapLifecycleScan(p: GapLifecycleScanPointer): Promi
     const weighted = (f.remediation ? remScore : (1 - remScore)) * 0.4
       + (f.singleFile ? sfScore : (1 - sfScore)) * 0.2
       + catScore * 0.4;
-    return Math.max(0, Math.min(1, weighted));
+    const landabilityScore = Math.max(0, Math.min(1, weighted));
+    return landabilityScore;
   };
   const LANDABILITY_THRESHOLD = 0.2;
   const unlandable = open.filter((g) => landability(g) < LANDABILITY_THRESHOLD);

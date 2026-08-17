@@ -453,7 +453,7 @@ async function sweepStaleProposals(
 
     // Tag+created_at predicate first; legacy proposals carry neither, so fall
     // back to the staleness class in the filename plus file mtime.
-    const staleByName = /(freshness_violation|precondition|analytic)/i.test(name);
+    const staleByName = /(freshness_violation|precondition-rejection|arch-pattern-bloat)/i.test(name);
     if (!isStaleProposal(proposal) && !(staleByName && ageMs > STALE_MAX_AGE_MS)) continue;
 
     // Mark the proposal as rejected due to staleness.

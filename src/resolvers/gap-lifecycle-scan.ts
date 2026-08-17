@@ -363,7 +363,18 @@ export async function resolveGapLifecycleScan(p: GapLifecycleScanPointer): Promi
         const meta = (g as any).classification_metadata ?? {};
         const prevBoundaries = Number(meta.verified_age_boundaries ?? 0);
         try {
-          await fetch(emitUrl.replace(/\/v2\/impulses\/resolve$/, '') + `/v2/gaps/${g.id}`, {
+          // VERIFIED DEAD ENDPOINT (2026-08-17). Nothing in the fleet serves /v2/gaps —
+          // probed live: PATCH /v2/gaps/<id> -> 404 while /health on the same vessel -> 200,
+          // so it is routing, not auth. This PATCH has therefore never landed, its result was
+          // never checked, and `verified_age_boundaries` has never incremented — which means
+          // the re-detected branch above re-fires indefinitely and closes are labelled
+          // `stale_low_value` rather than `condition_cleared`.
+          //
+          // NOT silently repointed at substrateGap_write (the working write in this file):
+          // that impulse carries a whole gap object, and a partial write could clobber
+          // fields on a live gap. Surfacing the failure is the change that cannot make
+          // things worse; choosing the replacement needs the gap-store contract in hand.
+          const _boundaryResp = await fetch(emitUrl.replace(/\/v2\/impulses\/resolve$/, '') + `/v2/gaps/${g.id}`, {
             method: 'PATCH',
             headers: { 'Content-Type': 'application/json', ...authHeader },
             body: JSON.stringify({
@@ -374,6 +385,9 @@ export async function resolveGapLifecycleScan(p: GapLifecycleScanPointer): Promi
             }),
             signal: AbortSignal.timeout(8_000),
           });
+          if (!_boundaryResp.ok) {
+            console.warn(`[gap_lifecycle_scan] verified_age_boundaries PATCH failed for gap ${g.id}: HTTP ${_boundaryResp.status} ${_boundaryResp.statusText} — the counter did NOT increment; this gap will be re-processed as unverified on every run`);
+          }
         } catch { }
         continue;
       }

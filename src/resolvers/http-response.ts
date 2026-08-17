@@ -45,7 +45,7 @@ export async function resolveHttpResponse(
   }
 
   // NO DEFAULT URL. The predecessor's hardcoded httpbin address is precisely what made this
-  // resolver lie: an unbound argument must surface as an unresolved impulse so the walk can bind
+  // resolver lie: an unbound argument must surface as an unresolved impulse so the walk can bind or fail honestly, never be silently filled in.
   // it or fail honestly, never be silently filled in.
   const url = typeof pointer.url === 'string' ? pointer.url.trim() : '';
   if (!url) {

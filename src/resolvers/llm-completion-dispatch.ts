@@ -305,6 +305,38 @@ export async function resolveLlmCompletionDispatch(
       }
       return null;
     };
+    // ROUTING INTEGRITY: THE ANSWER MUST COME FROM THE VESSEL WE ASKED FOR.
+    //
+    // Measured 2026-08-18: a request target-pinned to the HUB's circuit, naming
+    // `llm-resolver-google@syzygy-hub`, was answered by
+    // `llm-resolver-google@federation-transport-vessel@spoke-739b76f1` — a substrate on neither
+    // this host nor the hub, which had joined through the public relay and registered vessels
+    // whose names COLLIDE with the hub's own. By-name lookup then resolved to it, and the
+    // egress's live-circuit "repair" path substituted its circuit for the one we asked for.
+    //
+    // A wrong-but-plausible answer from an unrequested vessel is the dangerous case, not the
+    // error we happened to get: the same substitution would have silently served content from
+    // an unknown peer under the identity of a fleet vessel. Treat a substrate mismatch as a
+    // failure and cascade, so provenance is enforced rather than assumed.
+    const requestedSubstrate = (() => {
+      const e = /[?&]expect_substrate=([^&]+)/.exec(endpoint);
+      if (e?.[1]) return decodeURIComponent(e[1]);
+      const m = /[?&]vessel=([^&]+)/.exec(endpoint);
+      const v = m?.[1] ? decodeURIComponent(m[1]) : "";
+      return v.includes("@") ? v.split("@").pop() ?? "" : "";
+    })();
+    const producedBy = (() => {
+      const c = (candidate as unknown as Record<string, unknown> | null)?.["content"];
+      const p = c && typeof c === "object" ? (c as Record<string, unknown>)["produced_by"] : undefined;
+      return typeof p === "string" ? p : "";
+    })();
+    if (requestedSubstrate && producedBy && !producedBy.endsWith(`@${requestedSubstrate}`)) {
+      lastFailure = {
+        detail: `routing integrity: asked for @${requestedSubstrate}, answered by ${producedBy}`,
+        failure_mode: "verifier_negative",
+      };
+      continue;
+    }
     const nested = federatedError(candidate);
     if (!candidate || candidate.error || candidate.resolved === false || candidate.success === false || nested) {
       lastFailure = {

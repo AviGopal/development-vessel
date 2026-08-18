@@ -125,7 +125,13 @@ export async function federatedLlmEgressUrls(
     const base = String(v.vesselId ?? "").split("@")[0] ?? "";
     const ma = (v.libp2p_multiaddr ?? [])[0] ?? "";
     if (!base || !ma) return "";
-    return `${fedTransportEgress.replace(/\/$/, "")}/egress/resolve?target=${encodeURIComponent(ma)}&vessel=${encodeURIComponent(base)}`;
+    // `vessel` keeps the BASE name because that is what the owning substrate knows it as and
+    // what routing has always used. `expect_substrate` is additive metadata the caller verifies
+    // the ANSWER against — it changes no routing decision, so it cannot break resolution at a
+    // legitimate peer, and it gives the caller a way to notice when the answer came from
+    // somewhere other than the row it selected.
+    const sub = substrateOf(String(v.vesselId ?? ""));
+    return `${fedTransportEgress.replace(/\/$/, "")}/egress/resolve?target=${encodeURIComponent(ma)}&vessel=${encodeURIComponent(base)}&expect_substrate=${encodeURIComponent(sub)}`;
   };
 
   // Peers themselves are ordered by their BEST arm, so health still governs which peer is

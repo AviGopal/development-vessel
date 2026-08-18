@@ -90,3 +90,41 @@ describe('llm_completion_dispatch cascades past federated failures', () => {
     expect(federatedError(null)).toBeNull();
   });
 });
+
+describe('routing integrity — the answer must come from the vessel we asked for', () => {
+  const src = () => readFileSync(SRC, 'utf8');
+
+  it('the check exists and cascades on a substrate mismatch', () => {
+    const s = src();
+    expect(s).toContain('routing integrity');
+    const i = s.indexOf('const requestedSubstrate');
+    const block = s.slice(i, i + 1400);
+    expect(block).toContain('produced_by');
+    expect(block).toContain('continue;');
+  });
+
+  it('it reads expect_substrate, which is METADATA — routing is unchanged', () => {
+    // The vessel param must keep the BASE name: that is what the owning substrate knows it as.
+    // If verification changed the routing key, a legitimate peer that cannot resolve a suffixed
+    // name would be dropped, and a safety check would have caused an outage.
+    const s = src();
+    expect(s).toMatch(/expect_substrate=\(\[\^&\]\+\)/);
+    const helper = readFileSync(new URL('./federated-llm-egress.ts', import.meta.url).pathname, 'utf8');
+    expect(helper).toContain('vessel=${encodeURIComponent(base)}');
+    expect(helper).toContain('expect_substrate=');
+  });
+
+  it('THE OBSERVED HIJACK is what this rejects', () => {
+    // Re-implement the predicate and run the measured case through it.
+    const mismatch = (expected: string, producedBy: string) =>
+      Boolean(expected && producedBy && !producedBy.endsWith(`@${expected}`));
+    // Asked for the hub; answered by a substrate on neither this host nor the hub.
+    expect(mismatch('syzygy-hub', 'llm-resolver-google@federation-transport-vessel@spoke-739b76f1')).toBe(true);
+    // A genuine hub answer passes.
+    expect(mismatch('syzygy-hub', 'llm-resolver-google@federation-transport-vessel@syzygy-hub')).toBe(false);
+    // NEGATIVE CONTROL: with nothing expected, or no provenance reported, we must NOT reject —
+    // otherwise every local/unlabelled arm would be discarded and this check would be an outage.
+    expect(mismatch('', 'llm-resolver-google@anything')).toBe(false);
+    expect(mismatch('syzygy-hub', '')).toBe(false);
+  });
+});

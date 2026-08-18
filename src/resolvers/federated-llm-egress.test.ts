@@ -76,11 +76,10 @@ describe('federatedLlmEgressUrls', () => {
     }
   });
 
-  it('ONE CANDIDATE PER PEER — duplicates of one dead arm must not eat a bounded turn budget', async () => {
+  it('ROUND-ROBIN ACROSS PEERS — a stale peer costs one slot per round, not the whole budget', async () => {
     // Measured: four rows for @spoke-739b76f1, a PREVIOUS INCARNATION of this spoke whose
-    // registrations outlived its container, all resolving to the same dead resolver, ahead of
-    // the single live @syzygy-hub row. patch-with-tools gives up after 3 turns, so it exhausted
-    // them on duplicates and never reached the arm that works.
+    // registrations outlived its container, ahead of the hub's row. patch-with-tools gives up
+    // after 3 turns, so a front-loaded stale peer meant the hub was never tried.
     const urls = await withFetch(
       { content: { vessels: [
         { vesselId: 'a@stale-spoke', endpoint: EGRESS, libp2p_multiaddr: [MA] },
@@ -91,8 +90,27 @@ describe('federatedLlmEgressUrls', () => {
       ] } },
       () => federatedLlmEgressUrls('http://d', 'k', EGRESS),
     );
-    expect(urls).toHaveLength(2);
-    expect(urls.some((u) => u.includes('syzygy-hub') || u.includes('llm-resolver-google'))).toBe(true);
+    // Every arm is still reachable — nothing is discarded...
+    expect(urls).toHaveLength(5);
+    // ...but the hub is reached on the SECOND attempt, inside a three-turn budget.
+    expect(urls[1]).toContain('llm-resolver-google');
+  });
+
+  it('INTRA-PEER FALLBACK SURVIVES — one arm per peer was an over-correction', async () => {
+    // Measured minutes after v2 shipped: llm-resolver-google@syzygy-hub returned a transient
+    // 404 while llm-resolver-haiku and -opus on the SAME hub both answered "OK". Collapsing to
+    // one arm per peer let a single transient take the whole peer out of the call.
+    const urls = await withFetch(
+      { content: { vessels: [
+        { vesselId: 'llm-resolver-google@syzygy-hub', endpoint: EGRESS, libp2p_multiaddr: [MA], health_score: 9 },
+        { vesselId: 'llm-resolver-haiku@syzygy-hub', endpoint: EGRESS, libp2p_multiaddr: [MA], health_score: 5 },
+        { vesselId: 'llm-resolver-opus@syzygy-hub', endpoint: EGRESS, libp2p_multiaddr: [MA], health_score: 1 },
+      ] } },
+      () => federatedLlmEgressUrls('http://d', 'k', EGRESS),
+    );
+    expect(urls).toHaveLength(3);
+    expect(urls[0]).toContain('llm-resolver-google');  // healthiest first within the peer
+    expect(urls[2]).toContain('llm-resolver-opus');
   });
 
   it('a row with no substrate suffix is not routable and is dropped', async () => {

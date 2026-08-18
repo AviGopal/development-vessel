@@ -87,27 +87,61 @@ export async function federatedLlmEgressUrls(
   //      after 3) exhausts it on duplicates of one dead arm and never reaches the working one.
   //      Deduping by substrate makes the cascade's budget buy DISTINCT arms rather than
   //      repeated attempts at the same one.
+  // ★ CORRECTED TWICE, BOTH TIMES BY MEASUREMENT.
+  //
+  // v1 kept "rows carrying a circuit multiaddr" and asserted a local row has none. FALSE — all
+  // five rows on a live spoke carried one, four of them ours.
+  //
+  // v2 kept ONE ROW PER PEER, to stop four stale rows from eating a bounded turn budget. That
+  // over-corrected. The four stale rows were four DIFFERENT vessel names
+  // (llm-resolver-vessel / -opus / -google / -haiku) on a dead incarnation of THIS spoke, so
+  // per-vessel dedupe would not have collapsed them either — but per-PEER dedupe discarded the
+  // hub's genuine alternates. Measured minutes later: llm-resolver-google@syzygy-hub returned a
+  // transient 404 while llm-resolver-haiku and -opus on the SAME hub both answered "OK". One
+  // arm per peer meant that transient took the whole peer down for the call.
+  //
+  // ROUND-ROBIN ACROSS PEERS is what both facts ask for. Take the first arm of each peer, then
+  // the second of each, and so on. A dead or stale peer costs ONE slot per round instead of
+  // monopolising the front of the list, and every distinct arm stays reachable as fallback.
+  // With patch-with-tools' three turns and one stale peer, the hub is tried on turn two.
   const ownSubstrate = process.env["FED_SUBSTRATE_ID"] ?? "";
   const substrateOf = (vesselId: string): string => vesselId.split("@")[1] ?? "";
-  const seenSubstrate = new Set<string>();
-  return rows
-    .filter((v) => Array.isArray(v.libp2p_multiaddr) && typeof v.libp2p_multiaddr[0] === "string" && v.libp2p_multiaddr[0].length > 0)
-    .filter((v) => {
-      const sub = substrateOf(String(v.vesselId ?? ""));
-      if (!sub) return false;
-      if (ownSubstrate && sub === ownSubstrate) return false;
-      if (seenSubstrate.has(sub)) return false;
-      seenSubstrate.add(sub);
-      return true;
-    })
-    .sort((a, b) => (b.health_score ?? 0) - (a.health_score ?? 0))
-    .map((v) => {
-      // The base name is what the OWNING substrate knows the vessel as; the target decides WHICH
-      // substrate answers. Both are required — see the measurement in the header.
-      const base = String(v.vesselId ?? "").split("@")[0] ?? "";
-      const ma = v.libp2p_multiaddr![0]!;
-      if (!base) return "";
-      return `${fedTransportEgress.replace(/\/$/, "")}/egress/resolve?target=${encodeURIComponent(ma)}&vessel=${encodeURIComponent(base)}`;
-    })
-    .filter((u) => u.length > 0);
+
+  const byPeer = new Map<string, DiscoveredVessel[]>();
+  for (const v of rows) {
+    const ma = Array.isArray(v.libp2p_multiaddr) ? v.libp2p_multiaddr[0] : undefined;
+    if (typeof ma !== "string" || ma.length === 0) continue;
+    const sub = substrateOf(String(v.vesselId ?? ""));
+    // No suffix means the row names no substrate and cannot be targeted; our own id is the
+    // loop-back this module exists to prevent.
+    if (!sub || (ownSubstrate && sub === ownSubstrate)) continue;
+    const list = byPeer.get(sub) ?? [];
+    list.push(v);
+    byPeer.set(sub, list);
+  }
+  for (const list of byPeer.values()) list.sort((a, b) => (b.health_score ?? 0) - (a.health_score ?? 0));
+
+  const urlFor = (v: DiscoveredVessel): string => {
+    const base = String(v.vesselId ?? "").split("@")[0] ?? "";
+    const ma = (v.libp2p_multiaddr ?? [])[0] ?? "";
+    if (!base || !ma) return "";
+    return `${fedTransportEgress.replace(/\/$/, "")}/egress/resolve?target=${encodeURIComponent(ma)}&vessel=${encodeURIComponent(base)}`;
+  };
+
+  // Peers themselves are ordered by their BEST arm, so health still governs which peer is
+  // tried first; round-robin governs only that no peer monopolises the front of the list.
+  const peers = [...byPeer.values()].sort(
+    (a, b) => (b[0]?.health_score ?? 0) - (a[0]?.health_score ?? 0),
+  );
+  const depth = Math.max(0, ...peers.map((l) => l.length));
+  const out: string[] = [];
+  for (let round = 0; round < depth; round++) {
+    for (const list of peers) {
+      const v = list[round];
+      if (!v) continue;
+      const u = urlFor(v);
+      if (u && !out.includes(u)) out.push(u);
+    }
+  }
+  return out;
 }

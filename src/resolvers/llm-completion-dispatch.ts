@@ -179,24 +179,20 @@ export async function resolveLlmCompletionDispatch(
   // fallback; the per-endpoint failover loop below posts the same unwrapped body this endpoint
   // accepts and the response-unwrap already handles the {content:{value}} envelope. Costs nothing
   // when a local arm exists (branch skipped); no hardcoded peer/endpoint.
-  // FEDERATED ARMS ARE A FALLBACK, NOT A LAST RESORT ONLY WHEN DISCOVERY IS EMPTY.
+  // FEDERATED ARMS ARE A LAZY FALLBACK — RESOLVED ONLY AFTER LOCAL ONES FAIL.
   //
-  // This used to append hub arms only `if (endpoints.length === 0)`. The local resolver
+  // They used to be appended only `if (endpoints.length === 0)`. The local resolver
   // re-advertises llm_completion the moment a model cooldown lapses — deliberately, so a
   // returning key recovers without traffic it can never receive while de-advertised — and then
   // refuses the next call. In that window `endpoints` is non-empty, so the federated arms were
-  // never added, and the cascade had nothing to fall through to: every call ended on
-  // "no llm arm is currently servable" with three working arms on the hub, unlisted.
+  // never added and the cascade had nothing to fall through to: every call ended on "no llm arm
+  // is currently servable" while working arms sat on the hub, unlisted.
   //
-  // Appending unconditionally is safe because the loop is ordered and short-circuits: a healthy
-  // LOCAL arm still answers first and the federated entries are never dialled (data locality,
-  // law 11, is preserved by ORDER rather than by omission). They cost nothing when local works
-  // and are the whole recovery path when it does not.
-  const fed = await federatedLlmEgressUrls(DISCOVERY_ENDPOINT, METABOB_API_KEY, FED_TRANSPORT_EGRESS);
-  if (fed.length > 0) {
-    endpoints.push(...fed);
-    console.error(`[llm-completion-dispatch] ${endpoints.length - fed.length} local arm(s) + ${fed.length} target-pinned federated arm(s) in the cascade`);
-  }
+  // Appending them UP FRONT fixed that and broke two things the tests rightly pin: it spent a
+  // discovery round-trip on every call including the ones local answers, and it turned the
+  // terminal failure_mode of a purely-local failure from verifier_negative into cascading.
+  // Resolving them lazily — after the local loop has exhausted itself — keeps the local-only
+  // path byte-identical and pays for discovery only when there is nothing else left to try.
   if (endpoints.length === 0) {
     return {
       shape: "structuredError",
@@ -255,6 +251,24 @@ export async function resolveLlmCompletionDispatch(
     detail: "No llm_completion endpoint produced a completion",
     failure_mode: "cascading",
   };
+  // Hoisted to function scope: both the local loop and the lazy federated loop
+  // below need it, and a failure envelope looks the same wherever it comes from.
+  const federatedError = (c: unknown): string | null => {
+    if (!c || typeof c !== "object") return null;
+    const top = c as Record<string, unknown>;
+    const inner = top["content"];
+    if (!inner || typeof inner !== "object") return null;
+    const i = inner as Record<string, unknown>;
+    if (typeof i["error"] === "string") return i["error"];
+    const body = i["body"];
+    if (body && typeof body === "object") {
+      const b = body as Record<string, unknown>;
+      if (typeof b["error"] === "string") return b["error"];
+      if (b["resolved"] === false) return "federated arm returned resolved=false";
+    }
+    return null;
+  };
+
   for (const endpoint of endpoints) {
     let res: Response;
     try {
@@ -296,21 +310,6 @@ export async function resolveLlmCompletionDispatch(
     // "dispatch FAILED http=500" on all 8 iterations and four ordinary human goals — chemical
     // symbol for gold, violin strings, marathon distance, The Starry Night — failed while three
     // working arms sat on the hub one endpoint later in the list.
-    const federatedError = (c: unknown): string | null => {
-      if (!c || typeof c !== "object") return null;
-      const top = c as Record<string, unknown>;
-      const inner = top["content"];
-      if (!inner || typeof inner !== "object") return null;
-      const i = inner as Record<string, unknown>;
-      if (typeof i["error"] === "string") return i["error"];
-      const body = i["body"];
-      if (body && typeof body === "object") {
-        const b = body as Record<string, unknown>;
-        if (typeof b["error"] === "string") return b["error"];
-        if (b["resolved"] === false) return "federated arm returned resolved=false";
-      }
-      return null;
-    };
     // ROUTING INTEGRITY: THE ANSWER MUST COME FROM THE VESSEL WE ASKED FOR.
     //
     // Measured 2026-08-18: a request target-pinned to the HUB's circuit, naming
@@ -354,6 +353,45 @@ export async function resolveLlmCompletionDispatch(
 
     result = candidate;
     break;
+  }
+
+  // LAZY FEDERATED FALLBACK: every local arm has failed. Only now is a discovery round-trip
+  // worth paying for, and only now can trying a peer change the outcome.
+  if (!result) {
+    const fed = (await federatedLlmEgressUrls(DISCOVERY_ENDPOINT, METABOB_API_KEY, FED_TRANSPORT_EGRESS))
+      .filter((u) => !endpoints.includes(u));
+    if (fed.length > 0) {
+      console.error(`[llm-completion-dispatch] local arms exhausted — trying ${fed.length} target-pinned federated arm(s)`);
+      for (const endpoint of fed) {
+        let res: Response;
+        try {
+          res = await fetch(endpoint, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(requestBody),
+          });
+        } catch (err) {
+          lastFailure = { detail: err instanceof Error ? err.message : String(err), failure_mode: "cascading" };
+          continue;
+        }
+        if (!res.ok) {
+          const text = await res.text().catch(() => "");
+          lastFailure = { status: res.status, detail: text.slice(0, 200), failure_mode: "cascading" };
+          continue;
+        }
+        const candidate = await res.json().catch(() => null) as LlmResolverResult | null;
+        const nested = federatedError(candidate);
+        if (!candidate || candidate.error || candidate.resolved === false || candidate.success === false || nested) {
+          lastFailure = {
+            detail: candidate?.error ?? nested ?? "federated arm returned error",
+            failure_mode: "verifier_negative",
+          };
+          continue;
+        }
+        result = candidate;
+        break;
+      }
+    }
   }
 
   if (!result) {

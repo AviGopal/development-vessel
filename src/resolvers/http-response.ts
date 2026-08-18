@@ -37,8 +37,15 @@ import { resolveWebResource } from './web-resource.js';
  * discard that discipline — which is exactly what the drafted patches in `openspec/changes/`
  * would have done, since none of them carried a trust gate.
  */
+export type HttpResponsePointer = {
+  type: "http_response";
+  url: string;
+  max_bytes?: number;
+  allow_domains?: string[];
+};
+
 export async function resolveHttpResponse(
-  pointer: { type: "http_response"; url: string; max_bytes?: number; allow_domains?: string[] },
+  pointer: HttpResponsePointer,
 ): Promise<ResolverResult> {
   if (pointer.type !== "http_response") {
     return { shape: 'http_response', body: { ok: false, error: 'Invalid pointer type' } };

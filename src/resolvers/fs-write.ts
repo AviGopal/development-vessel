@@ -48,8 +48,7 @@ function assertInAllowlist(path: string, workspaceRoot: string): void {
 export async function resolveFsWrite(pointer: FsWritePointer): Promise<ResolverResult> {
   const workspaceRoot = process.env["WORKSPACE_ROOT"] ?? process.cwd();
   assertInWorkspace(pointer.path, workspaceRoot);
-  const allowlist = process.env["WRITE_ALLOWLIST"];
-  if (allowlist) {
+  if (process.env["WRITE_ALLOWLIST"] !== undefined) {
     assertInAllowlist(pointer.path, workspaceRoot);
   }
   if (pointer.createDirs) {

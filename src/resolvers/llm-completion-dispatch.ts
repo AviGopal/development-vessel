@@ -270,9 +270,45 @@ export async function resolveLlmCompletionDispatch(
     }
 
     const candidate = await res.json().catch(() => null) as LlmResolverResult | null;
-    if (!candidate || candidate.error || candidate.resolved === false || candidate.success === false) {
+    // A FEDERATED FAILURE NESTS ITS ERROR, AND THE TOP-LEVEL CHECK COULD NOT SEE IT.
+    //
+    // The guard below used to read only candidate.error / .resolved / .success. Every one of
+    // those is TOP-LEVEL, and a failure that crossed the federation transport carries its error
+    // one or two levels down. Both envelopes observed live on 2026-08-18:
+    //
+    //   {"content":{"error":"ingress proxy failed: ... NO_RESERVATION"}}
+    //   {"content":{"body":{"resolved":false,"error":"no llm arm is currently servable ..."}}}
+    //
+    // Neither sets a top-level error/resolved/success, so the guard PASSED, the loop treated a
+    // failed call as the winner and BROKE — never trying the remaining endpoints. The cascade
+    // existed and could not fire, which is worse than having no cascade: the code reads as
+    // fault-tolerant while stopping at the first broken arm.
+    //
+    // MEASURED COST. A third substrate (spoke-739b76f1, on neither this host nor the hub) had
+    // joined the federation advertising llm_completion arms it could not serve. Its rows sorted
+    // ahead of the hub's, so EVERY llm call stopped there: the ReAct floor logged
+    // "dispatch FAILED http=500" on all 8 iterations and four ordinary human goals — chemical
+    // symbol for gold, violin strings, marathon distance, The Starry Night — failed while three
+    // working arms sat on the hub one endpoint later in the list.
+    const federatedError = (c: unknown): string | null => {
+      if (!c || typeof c !== "object") return null;
+      const top = c as Record<string, unknown>;
+      const inner = top["content"];
+      if (!inner || typeof inner !== "object") return null;
+      const i = inner as Record<string, unknown>;
+      if (typeof i["error"] === "string") return i["error"];
+      const body = i["body"];
+      if (body && typeof body === "object") {
+        const b = body as Record<string, unknown>;
+        if (typeof b["error"] === "string") return b["error"];
+        if (b["resolved"] === false) return "federated arm returned resolved=false";
+      }
+      return null;
+    };
+    const nested = federatedError(candidate);
+    if (!candidate || candidate.error || candidate.resolved === false || candidate.success === false || nested) {
       lastFailure = {
-        detail: candidate?.error ?? "LLM vessel returned error or resolved=false",
+        detail: candidate?.error ?? nested ?? "LLM vessel returned error or resolved=false",
         failure_mode: "verifier_negative",
       };
       continue;

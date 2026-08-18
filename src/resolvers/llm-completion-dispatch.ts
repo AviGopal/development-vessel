@@ -179,17 +179,23 @@ export async function resolveLlmCompletionDispatch(
   // fallback; the per-endpoint failover loop below posts the same unwrapped body this endpoint
   // accepts and the response-unwrap already handles the {content:{value}} envelope. Costs nothing
   // when a local arm exists (branch skipped); no hardcoded peer/endpoint.
-  if (endpoints.length === 0) {
-  // TARGET-PINNED, NOT BY-NAME. Measured 2026-08-18: ?vessel=<name> alone resolves to the LOCAL
-  // substrate every time — even for a name that exists on both — so this "hub fallback" looped
-  // straight back to the credit-dead local arm it exists to escape. And the hardcoded literal
-  // "llm-resolver-vessel" names no vessel on the hub at all (it advertises llm-resolver-google /
-  // -haiku / -opus), so it could not have matched even if by-name crossed substrates. Two
-  // independent defects, each alone sufficient. Discovery now supplies both the circuit target
-  // and the owning substrate's own name for the arm.
-    const fed = await federatedLlmEgressUrls(DISCOVERY_ENDPOINT, METABOB_API_KEY, FED_TRANSPORT_EGRESS);
+  // FEDERATED ARMS ARE A FALLBACK, NOT A LAST RESORT ONLY WHEN DISCOVERY IS EMPTY.
+  //
+  // This used to append hub arms only `if (endpoints.length === 0)`. The local resolver
+  // re-advertises llm_completion the moment a model cooldown lapses — deliberately, so a
+  // returning key recovers without traffic it can never receive while de-advertised — and then
+  // refuses the next call. In that window `endpoints` is non-empty, so the federated arms were
+  // never added, and the cascade had nothing to fall through to: every call ended on
+  // "no llm arm is currently servable" with three working arms on the hub, unlisted.
+  //
+  // Appending unconditionally is safe because the loop is ordered and short-circuits: a healthy
+  // LOCAL arm still answers first and the federated entries are never dialled (data locality,
+  // law 11, is preserved by ORDER rather than by omission). They cost nothing when local works
+  // and are the whole recovery path when it does not.
+  const fed = await federatedLlmEgressUrls(DISCOVERY_ENDPOINT, METABOB_API_KEY, FED_TRANSPORT_EGRESS);
+  if (fed.length > 0) {
     endpoints.push(...fed);
-    console.error(`[llm-completion-dispatch] no local llm arm discoverable — falling back to ${fed.length} target-pinned federated arm(s)`);
+    console.error(`[llm-completion-dispatch] ${endpoints.length - fed.length} local arm(s) + ${fed.length} target-pinned federated arm(s) in the cascade`);
   }
   if (endpoints.length === 0) {
     return {

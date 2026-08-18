@@ -337,10 +337,40 @@ async function findLocalToolsEndpoint(): Promise<string | null> {
       body: JSON.stringify({ pointer: { type: "vesselCapability", shape: "shellResult" } }),
     });
     if (!r.ok) return null;
-    const data = (await r.json()) as { content?: { vessels?: Array<{ endpoint: string; resolve_endpoint?: string; health_score?: number }> } };
+    const data = (await r.json()) as { content?: { vessels?: Array<{ vesselId?: string; endpoint: string; resolve_endpoint?: string; health_score?: number; libp2p_multiaddr?: string[] }> } };
     const vs = data.content?.vessels ?? [];
     if (vs.length === 0) return null;
-    const best = vs.sort((a, b) => (b.health_score ?? 0) - (a.health_score ?? 0))[0]!;
+    // A LOCAL TOOL MUST BE LOCAL. This picked the highest-health shellResult producer with no
+    // locality filter, so a FEDERATED row could win — and did.
+    //
+    // MEASURED 2026-08-18. feature_compose's grounding reads came back
+    //   produced_by: local-tools-vessel@federation-transport-vessel@spoke-739b76f1
+    // a substrate on neither this workstation nor the hub, which had joined through the public
+    // relay. It does not have our repository, so every read returned nothing, grounding was 0
+    // bytes, and compose REFUSED "blind decompose" on a file that exists here and that this
+    // process had been reading all along. Teaching by goal simply stopped working.
+    //
+    // ★ THE OUTAGE IS THE MILD FAILURE. These calls are fs_read / code_search over OUR source
+    //   paths. A peer that answered with PLAUSIBLE content instead of nothing would have had
+    //   the drafter author patches against a stranger's files, and the diff would have looked
+    //   entirely reasonable. Reading local files over the federation is not a capability, it is
+    //   a confusion — "local" is the whole meaning of the vessel.
+    //
+    // So: keep only rows that are demonstrably OURS — no circuit multiaddr (a federated row
+    // always carries one) and a loopback endpoint — and refuse rather than fall back to a
+    // remote one. A refusal here is a clean, loud failure; a remote read is a silent wrong
+    // answer about our own source.
+    const isLocal = (v: { endpoint?: string; libp2p_multiaddr?: string[] }): boolean => {
+      if (Array.isArray(v.libp2p_multiaddr) && v.libp2p_multiaddr.length > 0) return false;
+      const ep = String(v.endpoint ?? "");
+      return ep.includes("127.0.0.1") || ep.includes("localhost");
+    };
+    const local = vs.filter(isLocal);
+    if (local.length === 0) {
+      console.error(`[patch-with-tools] no LOCAL shellResult producer in discovery (${vs.length} row(s), all federated/remote) — refusing rather than reading our source from another substrate`);
+      return null;
+    }
+    const best = local.sort((a, b) => (b.health_score ?? 0) - (a.health_score ?? 0))[0]!;
     const ep = best.resolve_endpoint ?? "/resolve";
     if (ep.startsWith("http")) return ep;
     return `${best.endpoint.replace(/\/$/, "")}${ep.startsWith("/") ? ep : `/${ep}`}`;

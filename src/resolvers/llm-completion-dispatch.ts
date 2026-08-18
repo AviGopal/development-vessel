@@ -1,4 +1,5 @@
 import { DISCOVERY_ENDPOINT, METABOB_API_KEY } from "../config.js";
+import { federatedLlmEgressUrls } from "./federated-llm-egress.js";
 
 // Optional override: set LLM_COMPLETION_ENDPOINT to bypass discovery (e.g. for local dev with port-forward).
 const LLM_COMPLETION_ENDPOINT_OVERRIDE = process.env["LLM_COMPLETION_ENDPOINT"] ?? "";
@@ -179,8 +180,16 @@ export async function resolveLlmCompletionDispatch(
   // accepts and the response-unwrap already handles the {content:{value}} envelope. Costs nothing
   // when a local arm exists (branch skipped); no hardcoded peer/endpoint.
   if (endpoints.length === 0) {
-    endpoints.push(`${FED_TRANSPORT_EGRESS}/egress/resolve?vessel=llm-resolver-vessel`);
-    console.error("[llm-completion-dispatch] no local llm arm discoverable — falling back to hub egress (?vessel=llm-resolver-vessel)");
+  // TARGET-PINNED, NOT BY-NAME. Measured 2026-08-18: ?vessel=<name> alone resolves to the LOCAL
+  // substrate every time — even for a name that exists on both — so this "hub fallback" looped
+  // straight back to the credit-dead local arm it exists to escape. And the hardcoded literal
+  // "llm-resolver-vessel" names no vessel on the hub at all (it advertises llm-resolver-google /
+  // -haiku / -opus), so it could not have matched even if by-name crossed substrates. Two
+  // independent defects, each alone sufficient. Discovery now supplies both the circuit target
+  // and the owning substrate's own name for the arm.
+    const fed = await federatedLlmEgressUrls(DISCOVERY_ENDPOINT, METABOB_API_KEY, FED_TRANSPORT_EGRESS);
+    endpoints.push(...fed);
+    console.error(`[llm-completion-dispatch] no local llm arm discoverable — falling back to ${fed.length} target-pinned federated arm(s)`);
   }
   if (endpoints.length === 0) {
     return {

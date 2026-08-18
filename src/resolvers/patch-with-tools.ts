@@ -25,6 +25,7 @@
  */
 
 import { createHash } from "node:crypto";
+import { federatedLlmEgressUrls } from "./federated-llm-egress.js";
 import { mkdir, writeFile, readFile, copyFile, unlink } from "node:fs/promises";
 import { dirname, join, resolve, relative, isAbsolute } from "node:path";
 import { METABOB_ENDPOINT, METABOB_API_KEY } from "../config.js";
@@ -662,7 +663,16 @@ export async function resolvePatchWithTools(pointer: PatchWithToolsPointer): Pro
   // {type:"llm_completion",...} body this endpoint accepts, and its response-unwrap already
   // handles the {content:{value}} envelope. The pushed producer is a first-class member of the
   // per-turn cascade below. Costs nothing when a local arm exists (branch skipped).
-  llmEndpoints.push({ url: `${FED_TRANSPORT_EGRESS}/egress/resolve?vessel=llm-resolver-vessel` });
+  // TARGET-PINNED, NOT BY-NAME. Measured 2026-08-18: ?vessel=<name> alone resolves to the LOCAL
+  // substrate every time — even for a name that exists on both — so this "hub fallback" looped
+  // straight back to the credit-dead local arm it exists to escape. And the hardcoded literal
+  // "llm-resolver-vessel" names no vessel on the hub at all (it advertises llm-resolver-google /
+  // -haiku / -opus), so it could not have matched even if by-name crossed substrates. Two
+  // independent defects, each alone sufficient. Discovery now supplies both the circuit target
+  // and the owning substrate's own name for the arm.
+  llmEndpoints.push(
+    ...(await federatedLlmEgressUrls(DISCOVERY_ENDPOINT, METABOB_API_KEY, FED_TRANSPORT_EGRESS)).map((url) => ({ url })),
+  );
   if (llmEndpoints.length === 0) return structuredError("no llm_completion vessel found in discovery");
   const llmEndpoint = llmEndpoints[0]!;
   const toolsEndpoint = await findLocalToolsEndpoint();

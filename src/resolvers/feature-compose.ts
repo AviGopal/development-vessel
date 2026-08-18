@@ -21,6 +21,7 @@
  * — this resolver stages + reports, matching the mitosis-evaluate/cutover split.
  */
 import { METABOB_API_KEY } from "../config.js";
+import { federatedLlmEgressUrls } from "./federated-llm-egress.js";
 import { acquireComposeWorkspace, type ComposeWorkspace } from "./compose-workspace";
 import type { ResolverResult } from "./types.js";
 import { resolveVesselMitosisCutover } from "./vessel-mitosis-cutover.js";
@@ -2587,7 +2588,14 @@ async function resolveFeatureComposeUncapped(pointer: FeatureComposePointer): Pr
   // be advertised yet credit-dead on the actual call, so llmCallWithFailover must be able
   // to spill to a funded arm on a peer substrate. Local arms are tried first (they precede
   // this in the array); no cost when a local arm answers.
-  llmEndpoints.push(`${FED_TRANSPORT_EGRESS}/egress/resolve?vessel=llm-resolver-vessel`);
+  // TARGET-PINNED, NOT BY-NAME. Measured 2026-08-18: ?vessel=<name> alone resolves to the LOCAL
+  // substrate every time — even for a name that exists on both — so this "hub fallback" looped
+  // straight back to the credit-dead local arm it exists to escape. And the hardcoded literal
+  // "llm-resolver-vessel" names no vessel on the hub at all (it advertises llm-resolver-google /
+  // -haiku / -opus), so it could not have matched even if by-name crossed substrates. Two
+  // independent defects, each alone sufficient. Discovery now supplies both the circuit target
+  // and the owning substrate's own name for the arm.
+  llmEndpoints.push(...(await federatedLlmEgressUrls(DISCOVERY_ENDPOINT, process.env["METABOB_API_KEY"] ?? "", FED_TRANSPORT_EGRESS)));
   const toolsEndpoint = await discover("shellResult");
   if (llmEndpoints.length === 0 || !toolsEndpoint) {
     return { shape: "featureComposeReport", body: { ok: false, error: `endpoint discovery failed (llm=${llmEndpoints.length > 0}, tools=${!!toolsEndpoint})` } };

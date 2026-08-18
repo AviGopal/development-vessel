@@ -27,8 +27,9 @@
  *   substrates, the hardcoded literal could not have matched a hub arm. Two independent defects,
  *   each alone sufficient — which is why fixing either one alone changes nothing.
  *
- * This helper asks discovery for llm_completion producers, keeps only rows that carry a circuit
- * multiaddr (a FEDERATED row — a local row has none), and builds target-pinned URLs from the
+ * This helper asks discovery for llm_completion producers, keeps one row per PEER substrate
+ * (never our own FED_SUBSTRATE_ID — and note that carrying a multiaddr does NOT mean remote:
+ * measured, this substrate's own rows carry one too), and builds target-pinned URLs from the
  * discovered vesselId. Nothing is hardcoded: no peer name, no endpoint, no substrate id. If the
  * hub renames or re-homes an arm, discovery carries the change.
  */
@@ -68,11 +69,37 @@ export async function federatedLlmEgressUrls(
     return [];
   }
 
-  const seen = new Set<string>();
+  // ★ CORRECTED 2026-08-18, SAME DAY, BY MEASUREMENT. The first version of this filter kept
+  // "rows carrying a circuit multiaddr" and asserted in this very file that "a local row has
+  // none". THAT IS FALSE. Measured against a live spoke registry, ALL FIVE llm_completion rows
+  // carried a multiaddr — four of them this substrate's own vessels. Presence of a multiaddr is
+  // not evidence of remoteness, so the filter admitted the dead local arms it existed to skip.
+  //
+  // The real discriminator is the substrate suffix of the vesselId (`<vessel>@<substrate>`).
+  // Two things follow, and both are needed:
+  //
+  //   1. NEVER our own FED_SUBSTRATE_ID. Routing to ourselves through the egress is the
+  //      loop-back this module exists to prevent.
+  //   2. ONE CANDIDATE PER PEER SUBSTRATE. The same registry held FOUR rows for
+  //      `@spoke-739b76f1` — a PREVIOUS INCARNATION of this spoke whose registrations outlived
+  //      its container — all resolving to the same dead local resolver, ahead of the single
+  //      live `@syzygy-hub` row. A caller with a bounded turn budget (patch-with-tools gives up
+  //      after 3) exhausts it on duplicates of one dead arm and never reaches the working one.
+  //      Deduping by substrate makes the cascade's budget buy DISTINCT arms rather than
+  //      repeated attempts at the same one.
+  const ownSubstrate = process.env["FED_SUBSTRATE_ID"] ?? "";
+  const substrateOf = (vesselId: string): string => vesselId.split("@")[1] ?? "";
+  const seenSubstrate = new Set<string>();
   return rows
-    // A federated row is exactly one that carries a circuit multiaddr; a local row has none.
-    // Routing a local row through the egress is what produced the loop-back in the first place.
     .filter((v) => Array.isArray(v.libp2p_multiaddr) && typeof v.libp2p_multiaddr[0] === "string" && v.libp2p_multiaddr[0].length > 0)
+    .filter((v) => {
+      const sub = substrateOf(String(v.vesselId ?? ""));
+      if (!sub) return false;
+      if (ownSubstrate && sub === ownSubstrate) return false;
+      if (seenSubstrate.has(sub)) return false;
+      seenSubstrate.add(sub);
+      return true;
+    })
     .sort((a, b) => (b.health_score ?? 0) - (a.health_score ?? 0))
     .map((v) => {
       // The base name is what the OWNING substrate knows the vessel as; the target decides WHICH
@@ -82,5 +109,5 @@ export async function federatedLlmEgressUrls(
       if (!base) return "";
       return `${fedTransportEgress.replace(/\/$/, "")}/egress/resolve?target=${encodeURIComponent(ma)}&vessel=${encodeURIComponent(base)}`;
     })
-    .filter((u) => u.length > 0 && !seen.has(u) && (seen.add(u), true));
+    .filter((u) => u.length > 0);
 }

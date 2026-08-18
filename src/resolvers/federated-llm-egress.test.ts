@@ -44,16 +44,63 @@ describe('federatedLlmEgressUrls', () => {
     expect(urls).toEqual([]);
   });
 
-  it('federated rows are ordered by health, best first', async () => {
+  it('rows on DISTINCT peers are ordered by health, best first', async () => {
     const urls = await withFetch(
       { content: { vessels: [
-        { vesselId: 'low@hub', endpoint: EGRESS, libp2p_multiaddr: [MA], health_score: 1 },
-        { vesselId: 'high@hub', endpoint: EGRESS, libp2p_multiaddr: [MA], health_score: 9 },
+        { vesselId: 'low@peer-a', endpoint: EGRESS, libp2p_multiaddr: [MA], health_score: 1 },
+        { vesselId: 'high@peer-b', endpoint: EGRESS, libp2p_multiaddr: [MA], health_score: 9 },
       ] } },
       () => federatedLlmEgressUrls('http://d', 'k', EGRESS),
     );
     expect(urls[0]).toContain('vessel=high');
     expect(urls[1]).toContain('vessel=low');
+  });
+
+  it('MEASURED REGRESSION: a multiaddr does NOT mean remote — our own rows are excluded', async () => {
+    // The first version of this filter kept every row with a multiaddr and asserted a local row
+    // had none. Against a live spoke registry ALL FIVE rows carried one, four of them ours.
+    const prev = process.env['FED_SUBSTRATE_ID'];
+    process.env['FED_SUBSTRATE_ID'] = 'spoke-cfda39e7';
+    try {
+      const urls = await withFetch(
+        { content: { vessels: [
+          { vesselId: 'llm-resolver-vessel@spoke-cfda39e7', endpoint: EGRESS, libp2p_multiaddr: [MA] },
+          { vesselId: 'llm-resolver-google@syzygy-hub', endpoint: EGRESS, libp2p_multiaddr: [MA] },
+        ] } },
+        () => federatedLlmEgressUrls('http://d', 'k', EGRESS),
+      );
+      expect(urls).toHaveLength(1);
+      expect(urls[0]).toContain('vessel=llm-resolver-google');
+    } finally {
+      if (prev === undefined) delete process.env['FED_SUBSTRATE_ID']; else process.env['FED_SUBSTRATE_ID'] = prev;
+    }
+  });
+
+  it('ONE CANDIDATE PER PEER — duplicates of one dead arm must not eat a bounded turn budget', async () => {
+    // Measured: four rows for @spoke-739b76f1, a PREVIOUS INCARNATION of this spoke whose
+    // registrations outlived its container, all resolving to the same dead resolver, ahead of
+    // the single live @syzygy-hub row. patch-with-tools gives up after 3 turns, so it exhausted
+    // them on duplicates and never reached the arm that works.
+    const urls = await withFetch(
+      { content: { vessels: [
+        { vesselId: 'a@stale-spoke', endpoint: EGRESS, libp2p_multiaddr: [MA] },
+        { vesselId: 'b@stale-spoke', endpoint: EGRESS, libp2p_multiaddr: [MA] },
+        { vesselId: 'c@stale-spoke', endpoint: EGRESS, libp2p_multiaddr: [MA] },
+        { vesselId: 'd@stale-spoke', endpoint: EGRESS, libp2p_multiaddr: [MA] },
+        { vesselId: 'llm-resolver-google@syzygy-hub', endpoint: EGRESS, libp2p_multiaddr: [MA] },
+      ] } },
+      () => federatedLlmEgressUrls('http://d', 'k', EGRESS),
+    );
+    expect(urls).toHaveLength(2);
+    expect(urls.some((u) => u.includes('syzygy-hub') || u.includes('llm-resolver-google'))).toBe(true);
+  });
+
+  it('a row with no substrate suffix is not routable and is dropped', async () => {
+    const urls = await withFetch(
+      { content: { vessels: [{ vesselId: 'bare-name', endpoint: EGRESS, libp2p_multiaddr: [MA] }] } },
+      () => federatedLlmEgressUrls('http://d', 'k', EGRESS),
+    );
+    expect(urls).toEqual([]);
   });
 
   it('asks discovery for the capability, not for a vessel by name', async () => {

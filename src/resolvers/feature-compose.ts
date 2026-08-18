@@ -1357,13 +1357,51 @@ export async function verifyPatchAddressesGap(args: {
   // error/parse-fail (a flaky second lens must never wedge landing — the first judge stands).
   if (addresses === true) {
     try {
-      const rraw = await args.llm(refutationPrompt(args.gapSummary, args.diff));
-      const rm = rraw.match(/\{[\s\S]*\}/g);
-      const rp = rm ? (parseJsonObject(rm[0]) as { refuted?: boolean; confidence?: number; reason?: string } | null) : null;
-      if (rp && rp.refuted === true && typeof rp.confidence === "number" && rp.confidence >= 0.8
-          && typeof rp.reason === "string" && rp.reason.trim().length >= 20) {
-        addresses = false;
-        verdictReason = `adversarial refuter (diverse lens, conf ${rp.confidence.toFixed(2)}): ${rp.reason.trim()} [first judge had passed: ${verdictReason}]`;
+      // A QUORUM OF ONE IS NOT A QUORUM.
+      //
+      // This block calls itself an "adversarial-verify quorum" and then let a SINGLE refuter
+      // overturn a passing judge. The only guard on "specific" was reason.length >= 20 —
+      // string length standing in for specificity, which it does not measure.
+      //
+      // MEASURED 2026-08-18, twice on the same file, in opposite directions. Given a vague
+      // spec the drafter edited the WRONG regex (the field-name list, not the counting-trigger
+      // alternation) and the refuter caught it — correctly, at conf 1.00, citing the exact
+      // confusion. Given a spec that named the target regex explicitly, the drafter produced
+      // the RIGHT one-line change and the refuter rejected it anyway at conf 0.90 with
+      // "only adds 'quantity of' to the regex in line 54, but it does not address the
+      // underlying logic of the regex match within the context of the gap" — 110 characters of
+      // generality that cleared a 20-character bar. A correct minimal patch was rolled back.
+      //
+      // A FALSE REJECTION IS WORSE THAN A FALSE PASS HERE: it discards a correct change, and it
+      // is the failure mode that makes the substrate unteachable by goal — the operator writes
+      // a precise instruction, the drafter follows it, and the gate throws the result away.
+      //
+      // So require what the comment always claimed: two INDEPENDENT refutations before
+      // overturning a judge that passed. Each is sampled separately, so a single adversarial
+      // lens having a bad draw can no longer sink a clean patch, while a genuine false-pass
+      // (inert rename, stub, dead code) still refutes consistently and is still caught. The
+      // second call is paid ONLY when the first judge passed AND the first refuter refuted,
+      // which is the rare branch.
+      const refute = async (): Promise<{ refuted: boolean; confidence: number; reason: string } | null> => {
+        const rraw = await args.llm(refutationPrompt(args.gapSummary, args.diff));
+        const rm = rraw.match(/\{[\s\S]*\}/g);
+        const rp = rm ? (parseJsonObject(rm[0]) as { refuted?: boolean; confidence?: number; reason?: string } | null) : null;
+        if (!rp || rp.refuted !== true || typeof rp.confidence !== "number" || rp.confidence < 0.8) return null;
+        if (typeof rp.reason !== "string" || rp.reason.trim().length < 20) return null;
+        return { refuted: true, confidence: rp.confidence, reason: rp.reason.trim() };
+      };
+      const first = await refute();
+      if (first) {
+        const second = await refute();
+        if (second) {
+          addresses = false;
+          verdictReason = `adversarial refuters agreed 2/2 (conf ${first.confidence.toFixed(2)}, ${second.confidence.toFixed(2)}): ${first.reason} [second lens: ${second.reason}] [first judge had passed: ${verdictReason}]`;
+        } else {
+          // One lens refuted and the other did not. That is a SPLIT, not a refutation, and the
+          // judge that examined the patch on its merits already passed it. Say so in the log so
+          // a split is visible rather than silently resolved.
+          console.error(`[feature-compose] refuter SPLIT 1/2 — keeping the first judge's PASS. Dissent: ${first.reason.slice(0, 200)}`);
+        }
       }
     } catch { /* refuter unavailable — keep the first judge's verdict (fail-open) */ }
   }

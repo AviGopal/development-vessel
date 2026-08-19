@@ -409,7 +409,21 @@ export function vacuousEditReason(before: string, after: string): string | null 
     .map((l) => l.trim())
     .filter((l) => l.length > 0 && !isInert(l) && !afterSet.has(l));
   const changed = [...added, ...deleted];
-  if (changed.length > 0 && changed.every(isLoggingCall)) {
+  // A DIAGNOSTIC THAT DISTINGUISHES MORE STATES IS REPAIR, NOT QUIETENING.
+  // The rule below rests on "a program that logs differently behaves identically".
+  // That is true of the emitted program and false of this system, whose reach-gate
+  // lessons, judge, and every after-the-fact analysis read the log — as the comment
+  // above already says. So an edit that ADDS a conditional branch to a log line is
+  // adding information, and refusing it protects the wrong thing. Measured case: a
+  // HOLLOW summary line reported "β-penalised last pick" for a beta the branch above
+  // it had WITHHELD, and that line produced two published, wrong conclusions about
+  // the system's learning dynamics before anyone consulted the sink. Its repair adds
+  // one ternary and was refused here. Counting branches separates the three cases:
+  // deleting a log line (0 added) and rewording one (no new branch) are still
+  // refused; only a strict increase in conditionals is allowed through.
+  const _logBranches = (ls: string[]) => ls.reduce((n, l) => n + (l.match(/\?/g) ?? []).length, 0);
+  const _distinguishesMore = _logBranches(added) > _logBranches(deleted);
+  if (changed.length > 0 && changed.every(isLoggingCall) && !_distinguishesMore) {
     return (
       `diagnostic-only edit: every changed line is a logging call ` +
       `(${changed.length} line(s), e.g. \`${(changed[0] ?? "").slice(0, 80)}\`). ` +

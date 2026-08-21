@@ -453,7 +453,10 @@ export async function resolveGapLifecycleScan(p: GapLifecycleScanPointer): Promi
   }
 
   // STEP 1: close missing_capability gaps when producer discovered
-  const GOAL_HOST_VESSEL_ENDPOINT = (process.env["GOAL_HOST_VESSEL_ENDPOINT"] ?? "http://127.0.0.1:8090");
+  // 8210 is goal-host. This defaulted to 8090 — the DEVELOPMENT-VESSEL port —
+  // so with the variable unset this resolver posted goal dispatches to itself.
+  // Twelve other sites in the fleet default the same name to 8210.
+  const GOAL_HOST_VESSEL_ENDPOINT = (process.env["GOAL_HOST_VESSEL_ENDPOINT"] ?? "http://127.0.0.1:8210");
   let closedCount = 0;
   const substrateGapWrite = async (gap: { id?: string; status: string; classification_metadata?: Record<string, unknown>; closed_by?: string; summary?: string }) => {
     const resp = await fetch(emitUrl, {

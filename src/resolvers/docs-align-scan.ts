@@ -169,7 +169,27 @@ export async function resolveDocsAlignScan(pointer: DocsAlignScanPointer): Promi
           else if (isBoldLead && mentionsChangelog) { inChangelogSection = true; }
         if (inChangelogSection) continue;
         const isDeprecationMarker = /DEPRECATED\s*\(20\d\d/.test(line) || /\*\*DEPRECATED\b/.test(line);
-        const hit = (!isDeprecationMarker && (datePattern.test(line) || line.includes(substrateLive)));
+        // `substrate-live` is the DEFAULT CONTAINER NAME, not an instance name.
+        // Law 9 bars dated status and instance names from operator docs — but a
+        // reader has to type this one, and every documented command contains it
+        // (`docker exec substrate-live ...`, `make up LIVE_NAME=...`). Matching
+        // the bare string flagged 36 of 40 findings on this repo's own docs:
+        // the checker was reporting the setup instructions for being usable.
+        //
+        // What law 9 actually forbids is naming a PARTICULAR deployment. Flag it
+        // in prose, where it may be describing one specific box, and not inside
+        // a command, where it is the documented default the reader must supply.
+        // `#` covers a shell COMMENT inside a code block — the annotation on a
+        // command is as much a part of the command as the command itself
+        // ("# docker stop -t 300 substrate-live   # equivalent"), and a trailing
+        // comment after a command counts too.
+        const isCommandLine = /^\s*(?:\$\s+)?(?:docker|make|until|curl|bun|sudo|systemctl|for)\b/.test(line)
+          || /^\s*#/.test(line)
+          || /\s#\s/.test(line)
+          || /^\s*(?:```|\||>)/.test(line)
+          || /`[^`]*substrate-live[^`]*`/.test(line);
+        const namesAnInstance = line.includes(substrateLive) && !isCommandLine;
+        const hit = (!isDeprecationMarker && (datePattern.test(line) || namesAnInstance));
         if (hit) {
           if (!pushFinding({
             doc_id: doc.id,
@@ -274,14 +294,29 @@ export async function resolveDocsAlignScan(pointer: DocsAlignScanPointer): Promi
           existingDirs.add(parts.slice(0, i).join("/"));
         }
       }
-      const scriptRx = /(scripts\/[A-Za-z0-9_./-]+)/g;
+      // Anchor at a path boundary, not at the bare word "scripts/".
+      // Unanchored, "validation/scripts/failure-mode-harness.ts" captured only
+      // "scripts/failure-mode-harness.ts" — a path that legitimately does not
+      // exist — and reported the doc as wrong for citing a file that is right
+      // there. Same for "docs/scripts/tests/config". A checker that fails on
+      // correct docs trains its readers to ignore it, which is worse than no
+      // checker: every one of the 4 setup_enablement findings on this repo's
+      // own docs was this bug.
+      const scriptRx = /(?:^|[\s`'"(])((?:[A-Za-z0-9_.-]+\/)*scripts\/[A-Za-z0-9_./-]+)/g;
       const makeRx = /make\s+-C\s+([A-Za-z0-9_./-]+)/g;
       for (const line of lines) {
         for (const rx of [scriptRx, makeRx]) {
           rx.lastIndex = 0;
           let mm: RegExpExecArray | null;
           while ((mm = rx.exec(line)) !== null) {
-            const path = mm[1];
+            // Trailing slash means "this directory", which is how prose cites a
+            // directory ("edit `scripts/substrate/units/`"). Kept verbatim it
+            // matches neither the file set nor the derived directory set, so a
+            // correct citation was reported missing.
+            // Also strip leading "../" and "./": a doc inside docs/ cites a
+            // sibling tree as "../scripts/substrate/llm-arms.json", which is
+            // correct markdown and never matches a repo-root-relative path set.
+            const path = (mm[1] ?? "").replace(/\/+$/, "").replace(/^(?:\.\.?\/)+/, "");
             if (!path) continue;
             if (existing.has(path)) continue;
             if (existingDirs.has(path)) continue;

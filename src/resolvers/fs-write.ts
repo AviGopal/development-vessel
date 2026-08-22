@@ -2,17 +2,13 @@ import { truncatingRewriteReason } from "../vacuous-edit.js";
 import { resolve, relative, dirname } from "path";
 import { mkdir } from "fs/promises";
 import type { ResolverResult } from "./types.js";
-import { assertInAnyWorkspace } from "./workspace-roots.js";
+import { resolveInAnyWorkspace } from "./workspace-roots.js";
 
 export interface FsWritePointer {
   type: "fs_write";
   path: string;
   content: string;
   createDirs?: boolean;
-}
-
-function assertInWorkspace(path: string, workspaceRoot: string): void {
-  assertInAnyWorkspace(path, workspaceRoot);
 }
 
 /**
@@ -23,7 +19,12 @@ function assertInWorkspace(path: string, workspaceRoot: string): void {
  * writable. See openspec/changes/2026-05-30-draft-spec-from-gap-template
  * for the motivation.
  */
-function assertInAllowlist(path: string, workspaceRoot: string): void {
+// Takes the ALREADY-RESOLVED absolute path. It used to take the raw pointer
+// path and call `resolve(path)` itself, which for a relative path resolved
+// against process.cwd() — so `rel` was computed from a location the caller
+// never named and the prefix comparison was meaningless. Same defect as the
+// workspace guard; see workspace-roots.ts.
+function assertInAllowlist(abs: string, workspaceRoot: string): void {
   const raw = process.env["WRITE_ALLOWLIST"];
   if (!raw) {
     // When WRITE_ALLOWLIST is unset, deny any write to enforce explicit allowlisting.
@@ -37,7 +38,6 @@ function assertInAllowlist(path: string, workspaceRoot: string): void {
     // Empty allowlist string is treated as unset behavior: allow any path.
     return;
   }
-  const abs = resolve(path);
   const rel = relative(workspaceRoot, abs);
   const ok = prefixes.some((p) => rel === p || rel.startsWith(p.endsWith("/") ? p : `${p}/`) || rel.startsWith(p));
   if (!ok) {
@@ -47,12 +47,13 @@ function assertInAllowlist(path: string, workspaceRoot: string): void {
 
 export async function resolveFsWrite(pointer: FsWritePointer): Promise<ResolverResult> {
   const workspaceRoot = process.env["WORKSPACE_ROOT"] ?? process.cwd();
-  assertInWorkspace(pointer.path, workspaceRoot);
+  // Validate AND resolve once; every path use below is the absolute form.
+  const absPath = resolveInAnyWorkspace(pointer.path, workspaceRoot);
   if (process.env["WRITE_ALLOWLIST"] !== undefined) {
-    assertInAllowlist(pointer.path, workspaceRoot);
+    assertInAllowlist(absPath, workspaceRoot);
   }
   if (pointer.createDirs) {
-    await mkdir(dirname(resolve(pointer.path)), { recursive: true });
+    await mkdir(dirname(absPath), { recursive: true });
   }
   // A TRUNCATION GUARD MUST LIVE WITH EVERY PRODUCER OF THE SHAPE, NOT ONE OF THEM.
   //
@@ -75,7 +76,7 @@ export async function resolveFsWrite(pointer: FsWritePointer): Promise<ResolverR
   // Advisory on a stat failure, deliberately: a guard that cannot read the
   // previous file must not block a legitimate write.
   try {
-    const existing = Bun.file(pointer.path);
+    const existing = Bun.file(absPath);
     if (await existing.exists()) {
       const prev = await existing.text();
       const reason = truncatingRewriteReason(prev, pointer.content, pointer.path);
@@ -93,7 +94,7 @@ export async function resolveFsWrite(pointer: FsWritePointer): Promise<ResolverR
       }
     }
   } catch { /* existence/read probe is advisory — never block a write on a stat failure */ }
-  await Bun.write(pointer.path, pointer.content);
+  await Bun.write(absPath, pointer.content);
   const bytesWritten = new TextEncoder().encode(pointer.content).byteLength;
   return { shape: "fileWriteResult", body: { path: pointer.path, bytesWritten } };
 }

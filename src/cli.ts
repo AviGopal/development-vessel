@@ -57,6 +57,9 @@ async function seedTemplates(): Promise<void> {
   console.log(`Uploading ${SEED_TEMPLATES.length} bootstrap templates...`);
   const results: Array<{ name: string; variantId: string }> = [];
   const failures: Array<{ name: string; detail: string }> = [];
+  // Refusals that mean the capability is already present. Counted, reported,
+  // and deliberately NOT treated as failures.
+  const alreadyServed: Array<{ name: string; detail: string }> = [];
   for (const template of SEED_TEMPLATES) {
     const label = (template as { name?: string }).name ?? template.id;
     try {
@@ -80,6 +83,27 @@ async function seedTemplates(): Promise<void> {
       // (auth failure, validation reject, schema error). Treat that as a failure.
       if (result.shape === "structuredError") {
         const detail = JSON.stringify(result.body);
+        // A LAW-3 REUSE REFUSAL IS NOT AN UPLOAD FAILURE. activity-api declines
+        // a template whose output shape already has a producer — "refused
+        // duplicate mint: N existing producer(s), route to <id> instead of
+        // minting a new Beta(1,1) cell". That is the learning loop working as
+        // intended, and the post-condition seeding cares about — a producer for
+        // this shape exists — is already satisfied.
+        //
+        // Measured on a clean first boot from the published image: 49 of 119
+        // templates reported failed, of which 40 were this refusal. Since any
+        // failure exits non-zero, development-vessel-seed ended `failed` and
+        // substrate-doctor reported FAILURES on a substrate behaving correctly,
+        // while the README told the reader those failures clear by themselves.
+        //
+        // Match on the refusal's own words rather than a status code: the same
+        // error channel carries genuine validation rejections, which must still
+        // fail.
+        if (/duplicate mint|existing producer|already[ _-]?exists/i.test(detail)) {
+          alreadyServed.push({ name: label, detail });
+          console.log(`  = ${label}: existing producer already serves this shape (reuse, not a failure)`);
+          continue;
+        }
         failures.push({ name: label, detail });
         console.error(`  ✗ ${label}: ${detail}`);
         continue;
@@ -99,11 +123,22 @@ async function seedTemplates(): Promise<void> {
       console.error(`  ✗ ${label}: ${msg}`);
     }
   }
-  console.log(JSON.stringify({ seed_results: results, seed_failures: failures }, null, 2));
+  console.log(JSON.stringify({ seed_results: results, seed_failures: failures, seed_already_served: alreadyServed }, null, 2));
   if (failures.length > 0) {
-    console.error(`\n${failures.length} of ${SEED_TEMPLATES.length} seed templates failed to upload.`);
+    console.error(
+      `\n${failures.length} of ${SEED_TEMPLATES.length} seed templates failed to upload` +
+        (alreadyServed.length > 0 ? ` (${alreadyServed.length} more were already served — not failures)` : "") +
+        ".",
+    );
     process.exit(1);
   }
+  // Reported separately rather than folded into either bucket: an operator needs
+  // to tell "nothing was there and I seeded it" from "it was already served".
+  console.log(
+    `\n${results.length + alreadyServed.length} of ${SEED_TEMPLATES.length} seed templates present` +
+      (alreadyServed.length > 0 ? ` (${results.length} seeded, ${alreadyServed.length} already served)` : "") +
+      ".",
+  );
 }
 
 async function callResolver(pointerType: string, rawData: string): Promise<void> {

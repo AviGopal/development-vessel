@@ -264,16 +264,34 @@ export async function resolveDocsAlignScan(pointer: DocsAlignScanPointer): Promi
       }
       const shapeMarkerRx = /shape|type:|output_shapes|input_shapes/;
       const shapeTokenRx = /^[a-z][a-z0-9_]*(:[a-z0-9_]+)?$/;
+      // shapeMarkerRx matches the bare word "shape" ANYWHERE on a line, so a
+      // sentence about how units map to roles that ends "…into deployable
+      // shapes:" trips it and every backticked token on that line is then tested
+      // as a shape. Two classes of correct documentation were reported as
+      // unknown shapes:
+      //   roles     — 14 findings on docs/SUBSTRATE.md (store, control, api,
+      //               compute, models, ui, transport, seed, infra, autonomy,
+      //               registry, desktop, and the group alias full)
+      //   host:port — 2 on README.md (localhost:18080, localhost:18260), which
+      //               satisfy shapeTokenRx because it permits a colon suffix
+      // A validator that fails on correct docs trains its readers to ignore it,
+      // which is worse than having no validator.
+      const roleContextRx = /\brole\b|\broles\b|ENABLED_ROLES|role-group/i;
+      const hostPortRx = /:\d+$/;
       for (let i = 0; i < lines.length; i++) {
         const line = lines[i];
         if (typeof line !== "string") continue;
         if (!shapeMarkerRx.test(line)) continue;
+        // A line that talks about roles is describing roles, not shapes.
+        if (roleContextRx.test(line)) continue;
         const tickRx = /`([^`]+)`/g;
         let sm: RegExpExecArray | null;
         while ((sm = tickRx.exec(line)) !== null) {
           const token = sm[1];
           if (!token) continue;
           if (!shapeTokenRx.test(token)) continue;
+          // `localhost:18080` is an endpoint, not a shape.
+          if (hostPortRx.test(token)) continue;
           if (vocabTokens.has(token)) continue;
           if (!pushFinding({
             doc_id: doc.id,

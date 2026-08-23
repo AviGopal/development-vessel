@@ -1836,6 +1836,59 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
       }
     }
   }
+  // 5d. PRE-CUTOVER TEST GATE (2026-08-23). The post-land suite (below, after promotion) already
+  // computes which tests are NEWLY failing vs the per-vessel baseline and files a gap — but it
+  // runs AFTER the commit exists, so a regression lands and is only then noticed. This runs the
+  // SAME suite against the SAME tree BEFORE the commit and refuses when a regression is confirmed.
+  // hostRepoRoot is /workspace/git/vessels/<name> — exactly the tree resolveTestSuite tests by
+  // name — and its working tree already holds the staged (about-to-commit) content, so this
+  // measures the code that would land.
+  //
+  // SAFETY, by construction (this is why it is safe to land without an end-to-end dry run):
+  //   • FAIL OPEN. Any inability to measure — suite did not run, shell producer absent, timeout,
+  //     exception — proceeds with the cutover. Infra trouble never blocks autonomy.
+  //   • Gate on the newly-failing NAME SET vs baseline, never a raw count — a suite standing red
+  //     in the 81–94 band does not blame a new commit (computeNewlyFailing, unit-tested).
+  //   • CONFIRM before refusing: a non-empty set is re-run once; only a set that fails BOTH times
+  //     refuses. A single flake does not block.
+  //   • REVERSIBLE worst case: a wrongful refusal defers ONE cutover (the gap stays open and is
+  //     re-composed later); it does not halt the system. There is no path here that permanently
+  //     stops autonomy.
+  //   • KILL SWITCH: CUTOVER_PRECHECK_SUITE=0 disables it entirely (law 1 — a shaped/env override).
+  // Closes cutover-suite-observes-but-does-not-gate. End-to-end gating is verified on the next
+  // real cutover; the decision primitive and the fail-open paths are unit-covered now.
+  if (process.env["CUTOVER_PRECHECK_SUITE"] !== "0") {
+    try {
+      const runSuite = async (): Promise<string[] | null> => {
+        const res = await resolveTestSuite({ vessel: vessel_name, gap_id: pointer.gap_id, proposal_id: pointer.proposal_id });
+        const sb = (res as { body?: Record<string, unknown> }).body ?? {};
+        if (sb.ran !== true) return null;   // could not measure → caller fails open
+        return Array.isArray(sb.failingTests) ? (sb.failingTests as unknown[]).map(String) : [];
+      };
+      const failNow = await runSuite();
+      if (failNow !== null) {                // null = unmeasurable → fall through and commit
+        const baseFile = `/workspace/post-land-baseline/${String(vessel_name).replace(/[^a-zA-Z0-9]+/g, "-")}.json`;
+        let baseline: string[] | null = null;
+        try { baseline = JSON.parse(await readFile(baseFile, "utf8")) as string[]; } catch { baseline = null; }
+        let newlyFailing = computeNewlyFailing(baseline, failNow);
+        if (newlyFailing.length > 0) {
+          // Confirm — a single flake must not block a cutover.
+          const failAgain = await runSuite();
+          newlyFailing = failAgain === null ? [] : computeNewlyFailing(baseline, failAgain);
+        }
+        if (newlyFailing.length > 0) {
+          await unstage("precutover_regression");
+          return softRefuse(
+            `precutover_regression: ${newlyFailing.length} test(s) fail on the staged tree that passed at the last landed baseline, confirmed on a re-run — e.g. "${newlyFailing[0]!.slice(0, 120)}". Refusing to promote a regression. Fix the staged change or, if these are known-flaky, they will clear once the baseline is refreshed by a green landing.`,
+            { kind: "precutover_regression", skip_reason: "precutover_regression", vessel_name, staged_files: stagedFiles, newly_failing: newlyFailing.slice(0, 8), operations },
+          );
+        }
+      }
+    } catch (err) {
+      // FAIL OPEN — a gate that cannot measure must not block a cutover that would otherwise land.
+      operations.push({ op: "precutover_suite", status: "warn", detail: `precheck skipped (fail-open): ${(err as Error).message.slice(0, 160)}` });
+    }
+  }
   // 6. git commit.
   const proposalId = pointer.proposal_id || "unknown-proposal";
   const gapId = pointer.gap_id || "unknown-gap";

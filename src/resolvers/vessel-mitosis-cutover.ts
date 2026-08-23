@@ -1767,6 +1767,51 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
     await unstage("no_diff");
     return softRefuse("no_diff: staged files are byte-identical to HEAD - nothing to cut over", { kind: "no_diff", skip_reason: "no_diff", vessel_name, staged_files: stagedFiles, operations });
   }
+  // 5c. Evidence-deletion guard (2026-08-23). No other gate reads what a diff REMOVES.
+  // Measured: 3e58e73 deleted a 20-line comment recording measured row counts and an explicit
+  // "do not simplify this back" warning from getCanonicalPosteriors, and every gate passed it
+  // because the removed reasoning is invisible to typecheck / shape-dispatch / the semantic gate.
+  // SCOPE, stated honestly: this refuses only the PURE case — the staged code is byte-identical
+  // on both sides (whitespace/comment churn only) AND a load-bearing comment was removed. That is
+  // exactly the inert-landing shape (e.g. dbb2917: two stray comments + a reindent). It does NOT
+  // catch an evidence deletion INTERLEAVED with a real code change (3e58e73 reflowed the query
+  // too); catching that safely needs proposal-level justification, not a pure-diff check, and is
+  // tracked separately. This narrow gate has near-zero false-positive risk: it can only fire when
+  // the functional code is unchanged. Closes no-gate-reads-what-a-diff-removes (pure case).
+  {
+    const full = await runGit(gitCmd, ["diff", "--cached", "-U0"], hostRepoRoot);
+    if (full.exit_code === 0) {
+      const isComment = (t: string) => t === "" || t.startsWith("//") || t.startsWith("*") || t.startsWith("/*") || t.startsWith("*/");
+      const loadBearing = (t: string) =>
+        /\d/.test(t) &&                               // carries a number (row counts, measurements)
+        (/\brow(s)?\b|\bcount|\bmeasured|matched|->|=>/i.test(t)) ||
+        /\bdo not\b|\bnever\b|\bmust\b|\bdanger|\bwarn|do NOT|don't\b/i.test(t);
+      const removedCode: string[] = [];
+      const addedCode: string[] = [];
+      const removedLoadBearingComments: string[] = [];
+      for (const raw of full.stdout.split("\n")) {
+        if (raw.startsWith("+++") || raw.startsWith("---")) continue;
+        if (raw.startsWith("-")) {
+          const t = raw.slice(1).trim();
+          if (isComment(t)) { if (loadBearing(t)) removedLoadBearingComments.push(t); }
+          else removedCode.push(t);
+        } else if (raw.startsWith("+")) {
+          const t = raw.slice(1).trim();
+          if (!isComment(t)) addedCode.push(t);
+        }
+      }
+      // "No functional change" = the non-comment code, trimmed, is the same multiset on both sides.
+      const norm = (xs: string[]) => xs.filter((x) => x !== "").sort().join("");
+      const noCodeChange = norm(removedCode) === norm(addedCode);
+      if (noCodeChange && removedLoadBearingComments.length > 0) {
+        await unstage("evidence_deletion");
+        return softRefuse(
+          `evidence_deletion: this cutover changes no functional code but removes ${removedLoadBearingComments.length} load-bearing comment line(s) — e.g. "${removedLoadBearingComments[0]!.slice(0, 120)}". A commit that only strips measured reasoning or an explicit warning is refused; if the deletion is intended, carry a justification in the proposal.`,
+          { kind: "evidence_deletion", skip_reason: "evidence_deletion", vessel_name, staged_files: stagedFiles, removed_comments: removedLoadBearingComments.slice(0, 5), operations },
+        );
+      }
+    }
+  }
   // 6. git commit.
   const proposalId = pointer.proposal_id || "unknown-proposal";
   const gapId = pointer.gap_id || "unknown-gap";

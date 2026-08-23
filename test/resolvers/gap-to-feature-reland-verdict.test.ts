@@ -45,6 +45,19 @@ beforeAll(() => {
   // a landing followed by its revert -> no valid landing remains
   const sha = commit(repo, "c.txt", "c1\n", "substrate-authored: apply gap-reverted-land-0003-compose-report via mitosis cutover");
   git(repo, "revert", "--no-edit", sha);
+  // a landing reverted with a CONVENTIONAL-COMMITS subject (`revert(scope): ...`) rather than
+  // git's default `Revert "..."`. Measured 2026-08-23 on route-edit-56849210: the subject test
+  // /^Revert[\s"']/i and the trailer grep `reverts (commit )?<sha>` BOTH missed such a revert, so
+  // the revert was counted as a SECOND landing and the gap it reverted flipped to 'present'
+  // (== already_resolved). A correct detector must treat this as reverted → back to a single
+  // remaining landing → 'pending', not 'present'.
+  const cvSha = commit(repo, "d.txt", "d1\n", "substrate-authored: apply gap-conventional-revert-0005-compose-report via mitosis cutover");
+  git(repo, "revert", "--no-edit", "--no-commit", cvSha);
+  // The revert message NAMES THE GAP ID (as a real operator revert does — the explanation
+  // references the gap it is reverting), so the gap-id grep in landedCommitVerdict matches this
+  // commit too. That is the whole trap: unless the subject/trailer test recognises it as a
+  // revert, it is counted as a SECOND landing for gap-conventional-revert-0005.
+  git(repo, "commit", "-q", "-m", `revert(some-scope): undo the inert landing for gap-conventional-revert-0005\n\nReverts substrate-authored commit ${cvSha}.`);
   // a DIFFERENT vessel mentioning a gap must not count when editSite scopes to development-vessel
   const other = join(CLONES, "obsidian-vessel");
   mkdirSync(other, { recursive: true });
@@ -78,5 +91,14 @@ describe("landedCommitVerdict — re-land awareness (§12.6)", () => {
   it("ignores a commit in a different vessel when editSite scopes to the target vessel", async () => {
     const { landedCommitVerdict } = await import("../../src/resolvers/gap-to-feature.js");
     expect(landedCommitVerdict("gap-scoped-elsewhere-0004", EDIT)).toBe(null);
+  });
+  it("treats a conventional-commits `revert(scope):` as a revert, not a second landing", async () => {
+    // Regression for the route-edit-56849210 hole (2026-08-23): one landing + one
+    // conventional-subject revert of it. The revert must be recognised so the landing count
+    // drops to zero-net → a single remaining landing is NOT created and the verdict is NOT
+    // 'present'. Against the pre-fix code both the subject test and the trailer grep miss it,
+    // the revert counts as a second landing, and this returns 'present' — a false close.
+    const { landedCommitVerdict } = await import("../../src/resolvers/gap-to-feature.js");
+    expect(landedCommitVerdict("gap-conventional-revert-0005", EDIT)).not.toBe("present");
   });
 });

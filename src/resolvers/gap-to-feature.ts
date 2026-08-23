@@ -1607,7 +1607,11 @@ function shaWasRevertedInAnyClone(sha: string): boolean {
       // empty. Accept "reverts <sha>" with a 7+ hex prefix as well, which survives an
       // amended message, and search the SHORT sha too since prose uses it.
       const shortSha = fullSha.slice(0, 12);
-      const pattern = `reverts (commit )?(${fullSha}|${shortSha}|${sha})`;
+      // Allow arbitrary words between "reverts" and the sha, not only an optional "commit ".
+      // An operator amending the revert message ("Reverts substrate-authored commit <sha>")
+      // inserts words the fixed `(commit )?` alternative cannot absorb, and the trailer-only
+      // form is defeated the same way. Measured 2026-08-23 on route-edit-56849210.
+      const pattern = `reverts (\\w+ ){0,4}(commit )?(${fullSha}|${shortSha}|${sha})`;
       const proc = Bun.spawnSync(["git", "-C", cloneDir, "log", "-E", "--grep", pattern, "-i", "--format=%H", `${sha}..HEAD`], { stdout: "pipe", stderr: "pipe", timeout: 10_000 });
       if (proc.exitCode === 0 && new TextDecoder().decode(proc.stdout).trim().length > 0) return true;
     } catch { /* per-repo failure — continue */ }
@@ -1663,7 +1667,13 @@ export function landedCommitVerdict(gapId: string, editSite: string): 'pending' 
       for (const sha of shas) {
         const subjRaw = Bun.spawnSync(['git', '-C', cloneDir, 'log', '-1', '--format=%s', sha], { stdout: 'pipe', stderr: 'pipe', timeout: 10_000 });
         const subj = subjRaw.exitCode === 0 ? new TextDecoder().decode(subjRaw.stdout).trim() : '';
-        if (/^Revert[\s"']/i.test(subj)) continue;      // the match IS a revert
+        // Accept git's default subject `Revert "<subject>"` AND the conventional-commits
+        // forms `revert(scope): ...` / `revert: ...`. The default-only test /^Revert[\s"']/i
+        // missed a `revert(scope):` subject whose body named the gap id, so that revert was
+        // counted as a SECOND landing and flipped the verdict to 'present' — closing the gap it
+        // was reverting as already_resolved. Measured 2026-08-23 on route-edit-56849210; pinned
+        // by gap-to-feature-reland-verdict.test.ts ("conventional-commits revert(scope):").
+        if (/^Revert[\s"']/i.test(subj) || /^revert(\([^)]*\))?:/i.test(subj)) continue;      // the match IS a revert
         if (shaWasRevertedInAnyClone(sha)) continue;     // the match WAS reverted
         nonReverted += 1;
       }

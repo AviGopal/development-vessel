@@ -44,6 +44,30 @@ import { CUTOVER_QUIESCE_MAX_MS } from "../compose-slots.js";
  * Immunity-pattern: deterministic, no LLM, single resolver.
  */
 
+/**
+ * The set-difference at the heart of post-land (and, once wired, pre-cutover) test
+ * attribution: which failing tests are NEW relative to the recorded baseline. Pure and
+ * exported so it can be unit-tested and reused by a pre-cutover gate without duplicating
+ * the rule. Semantics, pinned by test:
+ *   - prev === null (no baseline yet)  → [] (nothing attributable on first observation)
+ *   - otherwise                        → failures present now but not in the baseline,
+ *                                        de-duplicated, order-stable.
+ * Gating on this set (not on a raw pass/fail COUNT) is what survives a suite flaky in the
+ * 81–94 band: a test that already failed at baseline is not held against a new commit.
+ */
+export function computeNewlyFailing(prev: string[] | null, now: string[]): string[] {
+  if (prev === null) return [];
+  const baseline = new Set(prev.map(String));
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const t of now.map(String)) {
+    if (baseline.has(t) || seen.has(t)) continue;
+    seen.add(t);
+    out.push(t);
+  }
+  return out;
+}
+
 export interface VesselMitosisCutoverPointer {
   type: "vessel_mitosis_cutover";
   vessel_name: string;
@@ -2394,7 +2418,7 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
     const _baseFile = `${_baseDir}/${String(vessel_name).replace(/[^a-zA-Z0-9]+/g, "-")}.json`;
     let _prev: string[] | null = null;
     try { _prev = JSON.parse(await readFile(_baseFile, "utf8")) as string[]; } catch { _prev = null; }
-    const _newlyFailing = _prev === null ? [] : _failNow.filter((t) => !_prev!.includes(t));
+    const _newlyFailing = computeNewlyFailing(_prev, _failNow);
     try {
       await mkdir(_baseDir, { recursive: true });
       await writeFile(_baseFile, JSON.stringify(_failNow));

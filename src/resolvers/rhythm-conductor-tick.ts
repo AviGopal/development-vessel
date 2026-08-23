@@ -351,10 +351,8 @@ export async function resolveRhythmConductorTick(
             impulse: {
               type: "substrateGap_write",
               gap: {
-                // The drafter's one-line regex edit is flaky with greedy matchers and complex prompts.
-                // Ensure non-greedy matching to prevent over-matching and missing actual edits.
                 id: `rhythm-cadence-${structuralBreak}`,
-                                category: "other",
+                category: "other",
                 source: "substrate_detected",
                 summary,
                 detected_at: new Date().toISOString(),

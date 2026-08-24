@@ -357,6 +357,7 @@ export async function resolveRhythmConductorTick(
                 summary,
                 detected_at: new Date().toISOString(),
                 status: "open",
+                structural_break: structuralBreak,
                 route: "dispatchable",
                 classification_metadata: {
                   kind: structuralBreak,

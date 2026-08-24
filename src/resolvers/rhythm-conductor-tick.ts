@@ -93,6 +93,9 @@ export interface RhythmConductorTickPointer {
   queue_path?: string;
   /** Do everything except actually enqueue/decay. */
   dry_run?: boolean;
+  /** Test override for the load bucket (0-3); default reads /proc/loadavg. Makes the
+   *  affordability gate deterministic under test rather than load-sensitive. */
+  bucket_load?: number;
 }
 
 interface RhythmBody {
@@ -146,6 +149,22 @@ const FAMILY_GOALS: Record<string, string> = {
 
 const FAMILY_VARIABLES: Record<string, Record<string, unknown>> = { "project-intake": { execute: true, folder: "Substrate/Projects" } };
 
+/**
+ * Families whose work IS a dev-vessel resolver, dispatched DIRECTLY rather than as a
+ * natural-language goal.
+ *
+ * MEASURED 2026-08-24: the gap-organizing family goal ("…run gap_lifecycle_scan…") was
+ * enqueued and drained to goal-host, which WALKED it and went HOLLOW (reach=false, "no
+ * evidence of gap_lifecycle_scan, only a directory listing") — because gap_lifecycle_scan
+ * is a resolver, not a walkable activity, so the walk cannot invoke it. The disposition
+ * scan therefore never ran autonomously and the gap store bloated to 834 open (78% stale).
+ * For a resolver-backed maintenance family, resolve it directly against this vessel — the
+ * scan is self-correcting (live detectors re-open a wrongly-closed gap) and idempotent.
+ */
+const FAMILY_RESOLVERS: Record<string, Record<string, unknown>> = {
+  "gap-organizing": { type: "gap_lifecycle_scan", autoClose: true, dry_run: false, maxClose: 25 },
+};
+
 async function fetchJson(url: string, init: RequestInit, timeoutMs: number): Promise<unknown> {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
@@ -187,7 +206,7 @@ export async function resolveRhythmConductorTick(
     800,
   )) as { content?: { vessels?: unknown[] } } | null;
   const present = Array.isArray(disc?.content?.vessels) && (disc?.content?.vessels?.length ?? 0) > 0;
-  const bucketLoad = bucketLoadFromProc();
+  const bucketLoad = typeof pointer.bucket_load === "number" ? pointer.bucket_load : bucketLoadFromProc();
 
   // 1. Read the rhythm registry.
   const regResp = (await fetchJson(
@@ -293,6 +312,29 @@ export async function resolveRhythmConductorTick(
     }
 
     let firedThisFamily = false;
+    const directResolver = FAMILY_RESOLVERS[r.family];
+    if (directResolver) {
+      // Resolver-backed family: dispatch the resolver directly against this vessel
+      // instead of enqueuing an NL goal that goal-host cannot walk into an invocation.
+      if (!pointer.dry_run && picked < maxEnqueue) {
+        try {
+          await fetchJson(
+            endpoint,
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ impulse: { pointer: directResolver } }),
+            },
+            60_000,
+          );
+          firedThisFamily = true;
+          enqueued.push({ family: r.family, goal: `direct:${String(directResolver.type)}`, due_score: Math.round(r.due_score * 100) / 100 });
+          picked += 1;
+        } catch {
+          skipped.push({ family: r.family, reason: "direct_dispatch_failed" });
+        }
+      }
+    } else {
     for (const m of members) {
       if (picked >= maxEnqueue) {
         skipped.push({ family: r.family, reason: "over_max_enqueue" });
@@ -330,6 +372,7 @@ export async function resolveRhythmConductorTick(
       firedThisFamily = true;
       enqueued.push({ family: label, goal: m.goal, due_score: Math.round(r.due_score * 100) / 100 });
       picked += 1;
+    }
     }
 
     // 5. Decay the fired rhythm ONCE per family per tick, not once per member.

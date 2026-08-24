@@ -21,10 +21,65 @@
  */
 
 import type { ResolverResult } from "./types.js";
-import { resolveBoredomEnqueue } from "./boredom-enqueue.js";
-import { readFileSync } from "node:fs";
+import { resolveBoredomEnqueue, DEFAULT_QUEUE_PATH } from "./boredom-enqueue.js";
+import { readFileSync, writeFileSync, existsSync } from "node:fs";
 
 const DEV_SELF_ENDPOINT = process.env["DEV_VESSEL_SELF_ENDPOINT"] ?? "http://127.0.0.1:8090";
+const GOAL_HOST_ENDPOINT = process.env["GOAL_HOST_VESSEL_ENDPOINT"] ?? "http://127.0.0.1:8210";
+const API_KEY = process.env["METABOB_API_KEY"] ?? "";
+
+/**
+ * Drain pending boredom-queue tasks into actual dispatches.
+ *
+ * THE ORPHANED QUEUE (measured 2026-08-24): the conductor enqueues due family goals
+ * to boredom-queue.json (status:pending), but NOTHING drained it — only boredom-enqueue
+ * wrote it and this resolver read it for dedup. So every enqueued maintenance goal
+ * (gap-organizing disposition, self-maintenance, …) sat pending forever and no periodic
+ * maintenance ever ran, which is how the gap store reached 834 open (78% stale). This
+ * closes the loop: read pending tasks, dispatch each to goal-host /run-goal (async), and
+ * mark them dispatched so they are not re-run. Best-effort + bounded; never throws.
+ */
+async function drainBoredomQueue(queuePath: string, maxDispatch: number): Promise<number> {
+  try {
+    if (!existsSync(queuePath)) return 0;
+    const q = JSON.parse(readFileSync(queuePath, "utf-8")) as {
+      tasks?: Array<{ id?: string; goal?: string; templateId?: string; variables?: Record<string, unknown>; status?: string }>;
+      lastUpdated?: number;
+    };
+    const tasks = Array.isArray(q.tasks) ? q.tasks : [];
+    const pending = tasks.filter((t) => t.status === "pending" && (t.goal || t.templateId));
+    if (pending.length === 0) return 0;
+    let dispatched = 0;
+    for (const t of pending) {
+      if (dispatched >= maxDispatch) break;
+      try {
+        const res = await fetchJson(
+          `${GOAL_HOST_ENDPOINT}/run-goal`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json", ...(API_KEY ? { Authorization: `ApiKey ${API_KEY}` } : {}) },
+            body: JSON.stringify({
+              ...(t.goal ? { goal: t.goal } : { targetTemplateId: t.templateId }),
+              variables: t.variables ?? {},
+              operator: "rhythm-conductor-drain",
+              async: true,
+            }),
+          },
+          8000,
+        );
+        // Mark dispatched on any non-null response (goal-host accepted it). A failed
+        // dispatch leaves status:pending so the next tick retries.
+        if (res) { (t as { status?: string }).status = "dispatched"; dispatched += 1; }
+      } catch { /* leave pending; retry next tick */ }
+    }
+    if (dispatched > 0) {
+      writeFileSync(queuePath, JSON.stringify({ tasks, lastUpdated: Date.now() }, null, 2));
+    }
+    return dispatched;
+  } catch {
+    return 0;
+  }
+}
 
 export interface RhythmConductorTickPointer {
   type: "rhythm_conductor_tick";
@@ -294,7 +349,11 @@ export async function resolveRhythmConductorTick(
               id: r.id,
               shape: "timeShapedRhythm",
               source: "rhythm-conductor-tick",
-              body: { due_score: r.due_score, alpha: r.alpha + 0.5, staleness: Math.max(0, r.staleness * 0.3) },
+              // PRESERVE the identity fields (family/axis/budget/beta): a bare
+              // {due_score,alpha,staleness} write STRIPPED family on first fire, so a
+              // rhythm became unmappable ("no_goal_mapping") after firing exactly once —
+              // a self-erasing registry. Spread the existing body, then overlay the decay.
+              body: { ...r.body, due_score: r.due_score, alpha: r.alpha + 0.5, staleness: Math.max(0, r.staleness * 0.3) },
             },
           }),
         },
@@ -374,11 +433,19 @@ export async function resolveRhythmConductorTick(
     } catch { /* best-effort: a gap-write failure must not break the tick */ }
   }
 
+  // Close the loop: dispatch any pending queue tasks (this tick's enqueues plus any
+  // left pending by prior ticks). Without this the queue is write-only and no rhythm
+  // goal ever runs. Bounded per tick to avoid a dispatch flood; the rest drain next tick.
+  const drained = pointer.dry_run === true
+    ? 0
+    : await drainBoredomQueue(pointer.queue_path ?? DEFAULT_QUEUE_PATH, pointer.max_enqueue ?? 2);
+
   return {
     shape: "rhythmConductorReport",
     body: {
       enqueued,
       skipped,
+      drained,
       bucket_load: bucketLoad,
       presence: present,
       considered: rhythms.length,

@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { ResolverResult } from "./types.js";
 
-const DEFAULT_QUEUE_PATH = join(
+export const DEFAULT_QUEUE_PATH = join(
   process.env["HOME"] ?? "/root",
   ".minibob",
   "boredom-queue.json",

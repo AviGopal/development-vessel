@@ -496,6 +496,9 @@ export async function resolveRhythmConductorTick(
       // "registry_unmappable" rather than inferring it from an empty enqueued list.
       structural_break: structuralBreak,
       dry_run: pointer.dry_run === true,
+      gap_id: structuralBreak === 'registry_unmappable' || structuralBreak === 'registry_empty' 
+        ? `rhythm-cadence-${structuralBreak}` 
+        : undefined,
     },
   };
 }

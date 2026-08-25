@@ -3619,6 +3619,28 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
       // keep applying remaining ops; verify (tsc+shape-dispatch) is the real gate
       return { entry, createdAbs: r.ok ? abs : undefined, failed: !r.ok };
     } else {
+      // MISLABELED CREATE (2026-08-25): the drafter sometimes emits kind:"edit" for a
+      // file that does not exist yet — observed live when a "Create repos/.../x.ts" goal
+      // produced a single edit op on a net-new path, so fs_edit ENOENT'd, the whole
+      // compose rolled back UNFAVORABLE, and nothing was created (dispatch 8d98f763 /
+      // route-edit-15b1240a). feature_compose's create_file op works; the fault is only
+      // the op TYPE. For an ABSENT target, new_string carries the FULL intended content
+      // (there is no prior content to anchor a fragment against), so create it exactly as
+      // the create_file branch above does: mkdir -p + fs_write. Guarded on absence, so
+      // edits to EXISTING files fall through unchanged; the tsc/shape-dispatch verify gate
+      // still judges the created content, and createdAbs wires it into the same rollback.
+      {
+        const pre = await callTool(toolsEndpoint, "fs_read", { path: abs });
+        const preContent = (pre.body as { content?: unknown })?.content;
+        const absent = !(pre.ok && typeof preContent === "string" && preContent.length > 0);
+        if (absent && (op.new_string ?? "").length > 0) {
+          const dir = abs.slice(0, abs.lastIndexOf("/"));
+          await callTool(toolsEndpoint, "shell", { command: `mkdir -p ${JSON.stringify(dir)}`, cwd: REPO_ROOT });
+          const r = await callTool(toolsEndpoint, "fs_write", { path: abs, content: op.new_string ?? "" });
+          const entry = { path: op.path, kind: op.kind, ok: r.ok, detail: r.ok ? undefined : JSON.stringify(r.body).slice(0, 200), span: r.ok ? { start_line: 1, end_line: (op.new_string ?? "").split("\n").length } : undefined };
+          return { entry, createdAbs: r.ok ? abs : undefined, failed: !r.ok };
+        }
+      }
       // Snapshot the original content BEFORE the first edit to this file, for a
       // reliable (non-git) rollback on UNFAVORABLE.
       if (!preEditContent.has(abs)) {

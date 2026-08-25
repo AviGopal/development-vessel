@@ -2787,11 +2787,36 @@ async function resolveFeatureComposeUncapped(pointer: FeatureComposePointer): Pr
   // The test is evidence-based rather than a length threshold: if a target file was
   // named, its basename must appear in the window. A small window for a small file is
   // fine; a window that never mentions the file is not.
+  // NET-NEW CREATE EXEMPTION (2026-08-24). The basename test above is correct for an
+  // EDIT — a file you cannot see, you cannot anchor into — but it is structurally
+  // unsatisfiable for a CREATE: a net-new file's basename can never appear in a window
+  // built from `find src` of files that ALREADY exist, so every clean-state create
+  // REFUSED here, upstream of routing and apply. The only creates that reached were
+  // retries after a prior attempt had seeded the file into the checkout (measured live:
+  // a fresh basename identical in every other way to a landed one still refused). A
+  // create_file drafts the FULL file content — there are no anchors to invent — so the
+  // blind-planning risk simply does not apply to it. Refuse ONLY for a target that
+  // EXISTS on disk but is invisible in the window (the true blind-edit case this gate
+  // was built for). Existence is checked against the SAME tree the window was built from
+  // (${REPO_ROOT}/<vessel>/…, as in groundVesselFiles). FAIL-OPEN by design: if fs_read
+  // errors transiently, exists stays false → the target is treated as a create → the
+  // gate passes; a genuinely-blind edit then dies downstream at apply (anchor_not_found),
+  // which is the pre-2026-08-07 behaviour — wasteful, not dangerous. Do NOT "harden"
+  // this into a fail-closed: that re-blocks creation, the class of bug this fixes.
   if (targetFiles.length > 0) {
-    const missing = targetFiles.filter((t) => {
+    const missing: string[] = [];
+    for (const t of targetFiles) {
       const base = t.split("/").pop() ?? t;
-      return base.length > 0 && !grounding.includes(base);
-    });
+      if (base.length === 0) continue;
+      if (grounding.includes(base)) continue; // visible in the window → groundable, fine
+      let exists = false;
+      try {
+        const rd = await callTool(toolsEndpoint, "fs_read", { path: `${REPO_ROOT}/${t.replace(/^repos\//, "")}` });
+        const c = (rd.body as { content?: unknown })?.content;
+        exists = rd.ok && typeof c === "string" && c.length > 0;
+      } catch { /* unreadable → treat as a net-new create, not a blind edit */ }
+      if (exists) missing.push(t); // existing file, invisible in the window → blind-edit risk
+    }
     if (missing.length === targetFiles.length) {
       const detail = `grounding window (${grounding.length} bytes) contains none of the target file(s) [${targetFiles.join(", ")}] — planning would be blind and the drafter would invent anchors; refusing before the LLM call`;
       console.log(`[fc-grounding] REFUSED blind decompose; ${detail}`);

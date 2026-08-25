@@ -1646,7 +1646,7 @@ ${diff}
 Output ONLY this JSON object, nothing else: {"refuted": <boolean>, "confidence": <number 0..1>, "reason": "<the specific flaw, citing lines>"}`;
 }
 
-function decomposePrompt(spec: string, maxOps: number, grounding: string, principles: string, priorFeedback = ""): string {
+function decomposePrompt(spec: string, maxOps: number, grounding: string, principles: string, priorFeedback = "", netNewTargets: string[] = []): string {
   return `You are a senior engineer decomposing a feature specification into a CONCRETE, ORDERED plan of file operations. Output is executed deterministically — there is no follow-up turn, so the plan must be COMPLETE and CORRECT.
 
 Repo root contains vessels at repos/<vessel>/. Each vessel is a Bun + TypeScript project with its own tsconfig.json. Tests import ONLY from "bun:test" — any other test-framework import (vitest, jest, @jest/globals, mocha, chai) fails typecheck; when scaffolding a NEW vessel prefer creating NO test file over a test file with any non-bun:test import. New vessels need "typescript" and "@types/bun" in devDependencies. Edits must compile (\`bun run typecheck\`).
@@ -1671,7 +1671,11 @@ GROUND TRUTH — the ACTUAL files (and, where shown, their current contents) in 
 
 ${grounding}
 ` : ""}
-
+${netNewTargets.length ? `
+NET-NEW TARGET FILES — these spec-named target paths do NOT exist yet and will NOT appear under GROUND TRUTH above:
+${netNewTargets.map((t) => `  ${t}`).join("\n")}
+For EACH of these paths, emit exactly one \`create_file\` op whose \`content\` is the COMPLETE, typecheck-clean file. These paths ARE in scope: TARGET-FILE-SCOPE covers a create_file for a named net-new target (it is expected, not off-target drift), and for these paths the SPEC is AUTHORITATIVE — the file's ABSENCE is expected and is NOT evidence the spec invented the path (the "FILE IS AUTHORITATIVE OVER SPEC" rule applies only to the EXISTING files shown under GROUND TRUTH). NEVER emit an \`edit\` op for these paths — an edit to a non-existent path fails at apply.
+` : ""}
 Emit ONE JSON object, no markdown fences, with this exact schema:
 {
   "summary": "<one line>",
@@ -2823,6 +2827,23 @@ async function resolveFeatureComposeUncapped(pointer: FeatureComposePointer): Pr
       return { shape: "featureComposeReport", body: { ok: false, stage: "grounding", verdict: "REFUSED", error: detail } };
     }
   }
+  // NET-NEW TARGET FILES (2026-08-25). The decompose prompt is edit-framed: "FILE IS
+  // AUTHORITATIVE OVER SPEC" tells the drafter a spec path absent from the grounding is
+  // invented, and TARGET-FILE-SCOPE tells it to touch only files shown in GROUND TRUTH.
+  // A net-new create target satisfies NEITHER, so the drafter emits NO ops (measured live:
+  // a clean create returned plan-had-no-ops). Tell it explicitly which targets are creates.
+  // UNCONDITIONAL read per target — do NOT reuse the grounding.includes short-circuit above:
+  // a basename echoed in a comment/lesson would skip the read and silently drop a real create.
+  // ≤4 targets → ≤4 reads. An existing target can never enter this list (a create_file on an
+  // existing path is refused at apply), so the set is exactly the files that must be created.
+  const netNewTargets: string[] = [];
+  for (const t of targetFiles) {
+    try {
+      const rd = await callTool(toolsEndpoint, "fs_read", { path: `${REPO_ROOT}/${t.replace(/^repos\//, "")}` });
+      const c = (rd.body as { content?: unknown })?.content;
+      if (!(rd.ok && typeof c === "string" && c.length > 0)) netNewTargets.push(t);
+    } catch { netNewTargets.push(t); }
+  }
   // CROSS-FILE SYMBOL GROUNDING (2026-08-11).
   //
   // The window above is built from the TARGET files, so a symbol the request NAMES
@@ -3061,7 +3082,7 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
     console.log("[decompose] deterministic verbatim-replacement synthesis applied");
   } else {
     try {
-      planRaw = await llmCallWithFailover(llmEndpoints, decomposePrompt(spec, maxOps, grounding, principles + composeLessons, priorFeedback), model);
+      planRaw = await llmCallWithFailover(llmEndpoints, decomposePrompt(spec, maxOps, grounding, principles + composeLessons, priorFeedback, netNewTargets), model);
     } catch (e) {
       // OBSERVABILITY (2026-08-13): this decompose-throw was SILENT — it returns
       // ok:false and never reaches the [fc-plan] log below, so a draft that dies
@@ -3077,7 +3098,7 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
     ops = (plan?.ops as PlanOp[] | undefined) ?? [];
     if (!plan || !Array.isArray(ops) || ops.length === 0) {
       try {
-        planRaw = await llmCallWithFailover(llmEndpoints, decomposePrompt(spec, maxOps, grounding, principles + composeLessons, priorFeedback) + "\n\nCRITICAL RETRY: your previous plan contained NO ops (analysis prose or truncation). Output ONLY the JSON object starting with { — zero words before it, no analysis, compressed ops only.", model);
+        planRaw = await llmCallWithFailover(llmEndpoints, decomposePrompt(spec, maxOps, grounding, principles + composeLessons, priorFeedback, netNewTargets) + "\n\nCRITICAL RETRY: your previous plan contained NO ops (analysis prose or truncation). Output ONLY the JSON object starting with { — zero words before it, no analysis, compressed ops only.", model);
         plan = parseJsonObject(planRaw);
         ops = (plan?.ops as PlanOp[] | undefined) ?? [];
       } catch { /* fall through to honest no-ops below */ }

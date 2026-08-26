@@ -785,6 +785,21 @@ export function detectZeroBehaviorDelta(diff: string): { isInert: boolean; reaso
       return { isInert: true, reason: "added code is an empty-bodied control block that performs no work (no-op / shadowed guard) — zero behaviour delta" };
     }
   }
+  // Tautological self-test (the 8eff84d signature): a NEW *.test.ts that imports NO real
+  // vessel module via a relative path only exercises inline-defined logic — it lands green
+  // yet validates nothing real. A test carries behaviour tokens (expect(...)), so it clears
+  // the checks above; this is a distinct SEMANTIC inertness. Fires ONLY for a create of a
+  // *.test.ts; edits to existing tests and every non-test file are unaffected. A real test
+  // imports the module under test via a relative path (./x or ../src/x) that is not itself
+  // a test file; only bun:test / node builtins → tautological.
+  const newTest = diff.match(/^###\s+NEW FILE\s+(\S*\.test\.tsx?)\b/m);
+  if (newTest) {
+    const relImports = [...added.join("\n").matchAll(/\bfrom\s+["'](\.[^"']*)["']/g)].map((m) => m[1] ?? "");
+    const importsRealModule = relImports.some((p) => !/\.test(\.tsx?)?$/.test(p));
+    if (!importsRealModule) {
+      return { isInert: true, reason: "new *.test.ts imports no real vessel module (relative import) — tautological self-test that validates only inline-defined logic" };
+    }
+  }
   return { isInert: false, reason: "added code performs work" };
 }
 

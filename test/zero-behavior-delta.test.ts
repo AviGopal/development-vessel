@@ -14,6 +14,10 @@ const cases: Array<[string,string,boolean]> = [
   ["normal assignment edit", '@@\n+  const x = computeThing();', false],
   ["empty block BUT real behavior added too", '@@\n+  if (x) {}\n+  doThing();', false],
   ["real if with body", '@@\n+  if (ready) {\n+    start();\n+  }', false],
+  // Tautological self-test: a NEW *.test.ts importing no real module (only bun:test) — inert.
+  ["tautological new test (imports nothing real)", '### NEW FILE /v/src/foo.test.ts\n@@\n+import { test, expect } from "bun:test";\n+const classify = (r) => r.includes("x") ? "a" : "b";\n+test("t", () => { expect(classify("x")).toBe("a"); });', true],
+  // A NEW *.test.ts that imports the real module under test — genuine, NOT inert.
+  ["real new test (imports ./real-module)", '### NEW FILE /v/src/bar.test.ts\n@@\n+import { realFn } from "./real-module";\n+import { test, expect } from "bun:test";\n+test("t", () => { expect(realFn()).toBe(1); });', false],
 ];
 for (const [name,diff,exp] of cases) {
   test(name, () => {

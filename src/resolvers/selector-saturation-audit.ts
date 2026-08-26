@@ -153,7 +153,14 @@ export async function resolveSelectorSaturationAudit(
     };
   }
 
-  const degenerate = saturatedFraction >= satThreshold && variance <= varThreshold;
+  // Two ways the selector can be degenerate, each masking learning: (1) SATURATED
+  // — arms pinned high (saturated_fraction >= threshold with low variance); (2)
+  // UNDIFFERENTIATED — the sampled arms' posterior means are indistinguishable
+  // (variance at/below threshold and distinct_means <= 1), so Thompson selection is
+  // effectively uniform-random even when nothing is saturated. The original AND-only
+  // form missed (2) and reported "healthy" over undifferentiated posteriors.
+  const undifferentiated = variance <= varThreshold && (snap.distinct_means ?? 2) <= 1;
+  const degenerate = (saturatedFraction >= satThreshold && variance <= varThreshold) || undifferentiated;
   let gapEmission: "emitted" | "error" | "not_needed" = "not_needed";
   if (degenerate) {
     gapEmission = await emitSaturationGap(pointer.devVesselUrl ?? DEFAULT_DEV_VESSEL_URL, snap);
@@ -181,7 +188,7 @@ export async function resolveSelectorSaturationAudit(
   return {
     shape: "selectorRewardHealth",
     body: {
-      verdict: degenerate ? "saturated" : noveltyDegenerate ? "redundant_pinned" : "healthy",
+      verdict: degenerate ? (saturatedFraction >= satThreshold ? "saturated" : "undifferentiated") : noveltyDegenerate ? "redundant_pinned" : "healthy",
       sampled_templates: sampled,
       saturated_fraction: saturatedFraction,
       variance_of_means: variance,

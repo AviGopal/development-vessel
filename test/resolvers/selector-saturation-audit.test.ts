@@ -65,4 +65,26 @@ describe("selector_saturation_audit", () => {
     expect(posted!.type).toBe("substrateGap_write");
     await rm(path, { force: true });
   });
+
+  it("returns verdict=undifferentiated and emits a gap when means are indistinguishable but unsaturated", async () => {
+    // The exact live failure this fix addresses: distinct_means<=1 with near-zero
+    // variance and LOW saturation. The old AND-only check reported "healthy" and
+    // masked a selector that is effectively choosing uniformly at random.
+    let posted: { url: string; type?: string } | null = null;
+    globalThis.fetch = (async (url: string, init?: RequestInit) => {
+      const parsed = JSON.parse(String(init?.body ?? "{}"));
+      posted = { url: String(url), type: parsed?.impulse?.pointer?.type };
+      return { ok: true } as Response;
+    }) as typeof fetch;
+
+    const path = await snapshotFile({
+      sampled_templates: 14, saturated_fraction: 0, variance_of_means: 0, mean_of_means: 0.2, distinct_means: 1,
+    });
+    const result = await resolveSelectorSaturationAudit({ type: "selector_saturation_audit", snapshotPath: path });
+    const body = result.body as { verdict: string; gap_emission: string };
+    expect(body.verdict).toBe("undifferentiated");
+    expect(body.gap_emission).toBe("emitted");
+    expect(posted!.type).toBe("substrateGap_write");
+    await rm(path, { force: true });
+  });
 });

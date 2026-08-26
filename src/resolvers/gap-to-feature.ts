@@ -713,6 +713,10 @@ const SURGICAL_CATEGORIES = new Set([
   // orphaned members (MINT_FAILED bump, 2026-07-01), so boosting the class is safe:
   // the mintable ones land first, the rest deprioritise. (2026-07-01)
   "orphaned_capability",
+  // documentation_drift lands via doc_drift_fix as a DIRECT single-file prose edit
+  // with no feature_compose draft and no mitosis cutover — more landable than
+  // hard feature classes, not less. (2026-08-26)
+  "documentation_drift",
 ]);
 // Decision-log categories are LOGS, not work — hard-zero so even if one leaks
 // into the candidate window (belt-and-suspenders to the read-side exclusion) the
@@ -724,8 +728,8 @@ function landabilityScore(gap: Record<string, unknown>): number {
   const meta = (gap.classification_metadata ?? gap.metadata ?? {}) as Record<string, unknown>;
   let s = 0.5;
   // A concrete change-site means feature_compose knows exactly where to edit (surgical).
-  if (meta.edit_site || meta.suspected_real_location || meta.change_site || meta.failing_capability || meta.file_path) s += 0.3;
-  if (typeof meta.edit_site === "string" || meta.single_file === true) s += 0.1;
+  if (meta.edit_site || meta.suspected_real_location || meta.change_site || meta.failing_capability || meta.file_path || meta.doc_path) s += 0.3;
+  if (typeof meta.edit_site === "string" || meta.single_file === true || typeof meta.doc_path === "string") s += 0.1;
   const cat = String(gap.category ?? "");
   if (HARD_CATEGORIES.has(cat)) s -= 0.4;
   if (SURGICAL_CATEGORIES.has(cat)) s += 0.15;

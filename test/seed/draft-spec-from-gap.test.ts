@@ -68,7 +68,7 @@ describe("DRAFT_SPEC_FROM_GAP_TEMPLATE", () => {
     const config = JSON.stringify(task.config);
     expect(config).toContain("openspec/changes/");
     expect(config).toContain("{{date}}");
-    expect(config).toContain("substrate-authored-{{extract_slug_value}}");
+    expect(config).toContain("substrate-authored-{{extract_slug_text}}");
     expect(config).toContain("proposal.md");
   });
 
@@ -77,7 +77,7 @@ describe("DRAFT_SPEC_FROM_GAP_TEMPLATE", () => {
     expect(task.resolver).toBe("fs_write");
     const config = JSON.stringify(task.config);
     expect(config).toContain("tasks.md");
-    expect(config).toContain("substrate-authored-{{extract_slug_value}}");
+    expect(config).toContain("substrate-authored-{{extract_slug_text}}");
   });
 
   it("all resolvers are known dev-vessel shapes", () => {

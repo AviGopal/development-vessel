@@ -108,11 +108,19 @@ export interface FeatureComposePointer {
 }
 
 interface PlanOp {
-  kind: "create_file" | "edit";
+  kind: "create_file" | "edit" | "replace_lines";
   path: string;            // repo-relative, e.g. "repos/<vessel>/src/index.ts"
   content?: string;        // for create_file
   old_string?: string;     // for edit
-  new_string?: string;     // for edit
+  new_string?: string;     // for edit; and the replacement text for replace_lines
+  // replace_lines: a line-range replace for edits that CANNOT be uniquely content-anchored
+  // (N identical, ADJACENT blocks — each middle duplicate has identical surrounding context,
+  // so no old_string is unique). Drift-safe: expect_first_line / expect_last_line carry the
+  // verbatim text of the boundary lines and apply REFUSES on any mismatch.
+  start_line?: number;        // 1-indexed, inclusive
+  end_line?: number;          // 1-indexed, inclusive
+  expect_first_line?: string; // verbatim current text of start_line (drift guard)
+  expect_last_line?: string;  // verbatim current text of end_line (drift guard)
   rationale?: string;
 }
 
@@ -1684,7 +1692,9 @@ Emit ONE JSON object, no markdown fences, with this exact schema:
     // create a NET-NEW file (full contents):
     { "kind": "create_file", "path": "repos/<vessel>/<subpath>", "content": "<FULL file contents>", "rationale": "<why>" },
     // edit an EXISTING file (exact-substring replace; old_string MUST be a verbatim unique substring of the current file):
-    { "kind": "edit", "path": "repos/<vessel>/<subpath>", "old_string": "<verbatim current text>", "new_string": "<replacement>", "rationale": "<why>" }
+    { "kind": "edit", "path": "repos/<vessel>/<subpath>", "old_string": "<verbatim current text>", "new_string": "<replacement>", "rationale": "<why>" },
+    // replace a LINE RANGE — ONLY when a change spans N identical, ADJACENT blocks that cannot be uniquely content-anchored (their surrounding context is also identical). Target files in GROUND TRUTH are shown as: line-number, then a TAB, then the line text. start_line/end_line are those 1-indexed numbers (inclusive); expect_first_line/expect_last_line are the VERBATIM <line text> of those two boundary lines — the text AFTER the tab only, NOT the number or tab (apply DRIFT-REFUSES on any mismatch); new_string is the full replacement for the whole range (use "" to delete it):
+    { "kind": "replace_lines", "path": "repos/<vessel>/<subpath>", "start_line": 0, "end_line": 0, "expect_first_line": "<verbatim text of start_line>", "expect_last_line": "<verbatim text of end_line>", "new_string": "<replacement for the range, or empty to delete>", "rationale": "<why>" }
   ]
 }
 
@@ -1696,7 +1706,7 @@ RULES:
 - STRICT TYPESCRIPT (the vessels compile with strict mode incl. \`noUncheckedIndexedAccess\`): every array/object index access (\`arr[i]\`, \`map[k]\`, \`str[i]\`) is typed \`T | undefined\` — you MUST guard it (\`?? fallback\`) or non-null-assert it (\`arr[i]!\`) when you know it is in-range, or tsc fails TS2532/TS18048. Avoid \`any\`. Type every function parameter and return.
 - MATCH EXISTING CONTRACTS: when adding a resolver/handler to an existing vessel, make its return type match what the dispatch site expects — in these vessels a resolver returns \`{ shape: string, body: ... }\` (the \`ResolverResult\` shape), NOT a bespoke object; read the dispatch file's other cases and mirror their shape exactly.
 - TARGET-FILE-SCOPE: edit ONLY the target file(s) named in the spec and shown under GROUND TRUTH / EXISTING SYMBOLS above. Do NOT edit any OTHER existing file to make the change fit; an edit whose path is not a named target file is off-target drift and the plan is REFUSED for it. If the change appears to need another existing file, it does not: re-read the target file and make it there. (A create_file for a genuinely net-new companion file - a new test, tsconfig, or module - is allowed.)
-- MULTI-SITE ENUMERATION: if the change must occur at N identical or near-identical sites in the target file, emit N SEPARATE edit ops, one per site, each with a DISTINCT old_string carrying enough surrounding context to be UNIQUE at that site. Do NOT emit a single edit on a non-unique anchor hoping it covers all N - apply replaces ONE occurrence, so the other N-1 sites are left unchanged (the 'landed 1 of N' failure). Enumerate every site.
+- MULTI-SITE ENUMERATION: if the change must occur at N identical or near-identical sites in the target file, emit N SEPARATE edit ops, one per site, each with a DISTINCT old_string carrying enough surrounding context to be UNIQUE at that site. Do NOT emit a single edit on a non-unique anchor hoping it covers all N - apply replaces ONE occurrence, so the other N-1 sites are left unchanged (the 'landed 1 of N' failure). Enumerate every site. EXCEPTION - IDENTICAL ADJACENT blocks: when the N sites are byte-identical AND contiguous, even a context-extended old_string cannot be made unique for the middle ones, so you CANNOT anchor them with edit ops; emit ONE replace_lines op spanning the whole contiguous run (start_line..end_line from the numbered GROUND TRUTH, expect_first_line/expect_last_line = the verbatim boundary lines), whose new_string is the collapsed/edited result for that entire range (or "" to delete the run).
 - FILE IS AUTHORITATIVE OVER SPEC: the GROUND TRUTH / EXISTING SYMBOLS above is the REAL current file and OUTWEIGHS the spec wherever they disagree. If the spec quotes an anchor, symbol, signature, or line that does NOT appear verbatim in the shown file contents, the spec is SCHEMATIC - bind old_string to the file's ACTUAL text, never to the spec's invented text. Never copy an anchor you cannot find verbatim in the shown file.
 - OUTPUT FORMAT IS STRICT: respond with ONLY the JSON object. Start your response with the character \`{\` and end with \`}\`. Do NOT write any reasoning, explanation, preamble, or markdown — not even before the JSON. Any prose wastes the output budget and can truncate the plan.`;
 }
@@ -2084,7 +2094,18 @@ async function groundVesselFiles(toolsEndpoint: string, verifyVessels: string[],
                 : (head ? "\n… (truncated)" : "\n… (truncated)"))
               : "";
             const lead = centered && !head ? "… (head omitted)\n" : "";
-            contentParts.push(`----- repos/${vRel}/${f} -----\n${lead}${slice}${truncated}`);
+            // Number TARGET-file lines with ABSOLUTE line numbers (derived from the slice's
+            // offset in the full file) so the drafter can emit replace_lines ranges. Shown
+            // as `<lineNumber><TAB><line text>`. The apply step re-verifies the boundary
+            // line TEXT (expect_first_line/expect_last_line), so a slightly-off number is
+            // drift-refused, never mis-applied.
+            let shown = slice;
+            if (target) {
+              const at = content.indexOf(slice);
+              const startLine = at >= 0 ? content.slice(0, at).split("\n").length : 1;
+              shown = slice.split("\n").map((l, i) => `${startLine + i}\t${l}`).join("\n");
+            }
+            contentParts.push(`----- repos/${vRel}/${f} -----\n${lead}${shown}${truncated}`);
           }
         } catch { /* per-file content best-effort */ }
       }
@@ -3352,7 +3373,7 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
     // reference no new symbol) are still dropped, and the verify_vessels gate below still
     // refuses cross-vessel wandering.
     const onTargetPath = (op: PlanOp): boolean =>
-      op.kind !== "edit" || targetFiles.includes((op.path ?? "").replace(/:\d+.*$/, "").trim());
+      (op.kind !== "edit" && op.kind !== "replace_lines") || targetFiles.includes((op.path ?? "").replace(/:\d+.*$/, "").trim());
     const newSymbols = new Set<string>();
     for (const op of ops) {
       if (!onTargetPath(op)) continue;
@@ -3367,7 +3388,7 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
       return false;
     };
     const isOffTargetEdit = (op: PlanOp): boolean =>
-      op.kind === "edit"
+      (op.kind === "edit" || op.kind === "replace_lines")
       && !targetFiles.includes((op.path ?? "").replace(/:\d+.*$/, "").trim())
       && !wiresNewSymbol(op);
     const offTargetEdits = ops.filter(isOffTargetEdit);
@@ -3637,6 +3658,45 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
   const droppedSiblingSites: Array<{ path: string; anchor: string; residual: number }> = [];
   const applyOneOp = async (op: PlanOp): Promise<{ entry: (typeof applied)[number]; createdAbs?: string; editedAbs?: string; failed: boolean }> => {
     const abs = opAbs(op.path);
+    if (op.kind === "replace_lines") {
+      // Line-range replace for edits that CANNOT be uniquely content-anchored — N
+      // identical, ADJACENT blocks whose middle duplicates share identical surrounding
+      // context (the 'op_count=0' failure on a large file). DRIFT-SAFE: line numbers can
+      // drift between grounding and apply, so the op MUST carry the verbatim first/last
+      // line text and we REFUSE (loudly, no write) on any mismatch — a stale range must
+      // never silently delete the wrong code on the self-development core.
+      const start = op.start_line ?? 0;
+      const end = op.end_line ?? 0;
+      const rd = await callTool(toolsEndpoint, "fs_read", { path: abs });
+      const cur = (rd.body as { content?: unknown })?.content;
+      if (!rd.ok || typeof cur !== "string") {
+        return { entry: { path: op.path, kind: op.kind, ok: false, detail: `replace_lines refused: could not read ${op.path}`.slice(0, 200) }, failed: true };
+      }
+      const lines = cur.split("\n");
+      if (start < 1 || end < start || end > lines.length) {
+        return { entry: { path: op.path, kind: op.kind, ok: false, detail: `replace_lines refused: range ${start}-${end} invalid for ${lines.length}-line ${op.path}`.slice(0, 200) }, failed: true };
+      }
+      const gotFirst = lines[start - 1];
+      const gotLast = lines[end - 1];
+      if (typeof op.expect_first_line !== "string" || typeof op.expect_last_line !== "string"
+          || gotFirst !== op.expect_first_line || gotLast !== op.expect_last_line) {
+        const detail = `replace_lines DRIFT-REFUSED for ${op.path} ${start}-${end}: expected first/last [${JSON.stringify(op.expect_first_line)}/${JSON.stringify(op.expect_last_line)}] but file has [${JSON.stringify(gotFirst)}/${JSON.stringify(gotLast)}] — line numbers drifted; refusing to avoid deleting the wrong code`;
+        console.error(`[feature-compose] ${detail}`);
+        return { entry: { path: op.path, kind: op.kind, ok: false, detail: detail.slice(0, 200) }, failed: true };
+      }
+      const replacement = op.new_string ?? "";
+      const removed = lines.slice(start - 1, end).join("\n");
+      if (replacement === removed) {
+        return { entry: { path: op.path, kind: op.kind, ok: false, detail: `replace_lines refused: applied diff is empty (new content equals lines ${start}-${end})`.slice(0, 200) }, failed: true };
+      }
+      if (!preEditContent.has(abs)) preEditContent.set(abs, cur);
+      const replacementLines = replacement === "" ? [] : replacement.split("\n");
+      const next = [...lines.slice(0, start - 1), ...replacementLines, ...lines.slice(end)].join("\n");
+      const wr = await callTool(toolsEndpoint, "fs_write", { path: abs, content: next });
+      editedInPlan.add(abs);
+      const entry = { path: op.path, kind: op.kind, ok: wr.ok, detail: wr.ok ? undefined : JSON.stringify(wr.body).slice(0, 200), span: wr.ok ? { start_line: start, end_line: start + Math.max(0, replacementLines.length - 1) } : undefined };
+      return { entry, editedAbs: wr.ok ? abs : undefined, failed: !wr.ok };
+    }
     if (op.kind === "create_file") {
       // local-tools fs_write does not create parent dirs — mkdir -p first so
       // net-new vessel files (in a not-yet-existing dir) land.

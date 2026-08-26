@@ -733,6 +733,7 @@ function landabilityScore(gap: Record<string, unknown>): number {
   const cat = String(gap.category ?? "");
   if (HARD_CATEGORIES.has(cat)) s -= 0.4;
   if (SURGICAL_CATEGORIES.has(cat)) s += 0.15;
+  if (cat === "documentation_drift") s += 0.2;
   // ids that empirically cycle UNFAVORABLE (meta/diagnostic; no surgical diff exists).
   if (/stale-proposal|demand-trace|forward[_-]chain|backlog|unknown/i.test(String(gap.id ?? ""))) s -= 0.3;
   // Deprioritise gaps that keep failing to land: each prior UNFAVORABLE attempt drops

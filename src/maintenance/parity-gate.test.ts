@@ -84,6 +84,18 @@ function applyPureMove(project: Project): void {
   project.createSourceFile("/src/box.helpers.ts", HELPERS_PURE);
 }
 
+/**
+ * Each case builds an in-memory ts-morph Project and runs a full type-check, which
+ * costs seconds, not milliseconds — the suite as a whole takes roughly a minute.
+ * bun's default per-test timeout is 5000ms, so under load these cases lose a race
+ * they were never meant to be in: measured runs failed 4, 1, 3, 0, 0 and 2 cases,
+ * a different set each time, and EVERY failure was a timeout rather than a failed
+ * assertion. The pre-cutover gate then reports whichever cases lost as regressions
+ * INTRODUCED by the patch under test, blocking unrelated landings. The work is
+ * inherently slow; the timeout, not the suite, was wrong.
+ */
+const PARITY_GATE_TEST_TIMEOUT_MS = 60_000;
+
 describe("parity gate — the safety property", () => {
   test("a pure move PASSes all four checks", async () => {
     const v = await gateAfter(applyPureMove);
@@ -93,7 +105,7 @@ describe("parity gate — the safety property", () => {
     expect(v.testParity).toBeTrue();
     expect(v.astEquivalent).toBeTrue();
     expect(v.verdict).toBeTrue();
-  });
+  }, PARITY_GATE_TEST_TIMEOUT_MS);
 
   test("move + body edit of the moved fn FAILs astEquivalent", async () => {
     const v = await gateAfter((p) => {
@@ -106,7 +118,7 @@ describe("parity gate — the safety property", () => {
     expect(v.astEquivalent).toBeFalse();
     expect(v.verdict).toBeFalse();
     expect(v.failReason).toContain("astEquivalent");
-  });
+  }, PARITY_GATE_TEST_TIMEOUT_MS);
 
   test("move + rename of the moved fn FAILs", async () => {
     const v = await gateAfter((p) => {
@@ -117,7 +129,7 @@ describe("parity gate — the safety property", () => {
     });
     expect(v.astEquivalent).toBeFalse();
     expect(v.verdict).toBeFalse();
-  });
+  }, PARITY_GATE_TEST_TIMEOUT_MS);
 
   test("move that rebinds a free identifier FAILs the binding check", async () => {
     const v = await gateAfter((p) => {
@@ -133,7 +145,7 @@ describe("parity gate — the safety property", () => {
     expect(v.astEquivalent).toBeFalse();
     expect(v.verdict).toBeFalse();
     expect(v.failReason).toContain("binding");
-  });
+  }, PARITY_GATE_TEST_TIMEOUT_MS);
 
   test("export removed from the file FAILs surfaceParity", async () => {
     const v = await gateAfter((p) => {
@@ -145,7 +157,7 @@ describe("parity gate — the safety property", () => {
     expect(v.surfaceParity).toBeFalse();
     expect(v.verdict).toBeFalse();
     expect(v.failReason).toContain("surfaceParity");
-  });
+  }, PARITY_GATE_TEST_TIMEOUT_MS);
 
   test("export added FAILs surfaceParity", async () => {
     const v = await gateAfter((p) => {
@@ -156,7 +168,7 @@ describe("parity gate — the safety property", () => {
     });
     expect(v.surfaceParity).toBeFalse();
     expect(v.verdict).toBeFalse();
-  });
+  }, PARITY_GATE_TEST_TIMEOUT_MS);
 
   test("a NEW compiler diagnostic FAILs typeParity", async () => {
     const v = await gateAfter((p) => {
@@ -168,7 +180,7 @@ describe("parity gate — the safety property", () => {
     expect(v.typeParity).toBeFalse();
     expect(v.verdict).toBeFalse();
     expect(v.failReason).toContain("typeParity");
-  });
+  }, PARITY_GATE_TEST_TIMEOUT_MS);
 
   test("pre-existing diagnostics do NOT fail typeParity (subset-or-equal)", async () => {
     const project = makeProject();
@@ -179,7 +191,7 @@ describe("parity gate — the safety property", () => {
     const v = await verifyParity(project, baseline, "/src/box.helpers.ts");
     expect(v.typeParity).toBeTrue();
     expect(v.verdict).toBeTrue();
-  });
+  }, PARITY_GATE_TEST_TIMEOUT_MS);
 
   test("an edited test file FAILs testParity", async () => {
     const v = await gateAfter((p) => {
@@ -189,7 +201,7 @@ describe("parity gate — the safety property", () => {
     expect(v.testParity).toBeFalse();
     expect(v.verdict).toBeFalse();
     expect(v.failReason).toContain("testParity");
-  });
+  }, PARITY_GATE_TEST_TIMEOUT_MS);
 
   test("an added test file FAILs testParity", async () => {
     const v = await gateAfter((p) => {
@@ -198,7 +210,7 @@ describe("parity gate — the safety property", () => {
     });
     expect(v.testParity).toBeFalse();
     expect(v.verdict).toBeFalse();
-  });
+  }, PARITY_GATE_TEST_TIMEOUT_MS);
 
   test("a failing suite FAILs testParity even when files are byte-identical", async () => {
     const v = await gateAfter(applyPureMove, {
@@ -207,13 +219,13 @@ describe("parity gate — the safety property", () => {
     expect(v.testParity).toBeFalse();
     expect(v.verdict).toBeFalse();
     expect(v.failReason).toContain("suite failed");
-  });
+  }, PARITY_GATE_TEST_TIMEOUT_MS);
 
   test("missing target module FAILs (fail-safe: gate can only BLOCK)", async () => {
     const v = await gateAfter(applyPureMove, { target: "/src/does-not-exist.ts" });
     expect(v.astEquivalent).toBeFalse();
     expect(v.verdict).toBeFalse();
-  });
+  }, PARITY_GATE_TEST_TIMEOUT_MS);
 
   test("a declaration smuggled into the target FAILs", async () => {
     const v = await gateAfter((p) => {
@@ -226,5 +238,5 @@ describe("parity gate — the safety property", () => {
     // Fails surface (new export via shim would be caught there) or AST
     // (declaration appeared) — either way, blocked.
     expect(v.failReason).toBeDefined();
-  });
+  }, PARITY_GATE_TEST_TIMEOUT_MS);
 });

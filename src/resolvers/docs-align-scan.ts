@@ -245,7 +245,20 @@ export async function resolveDocsAlignScan(pointer: DocsAlignScanPointer): Promi
           if (!token) continue;
           if (!/^[a-z][a-zA-Z0-9_]*$/.test(token)) continue;
           if (advertised.has(token)) continue;
-          if (!/(?:shapes?\s+`[^`]+`|`[^`]+`\s+shapes?\b)/.test(line)) continue;
+          // DECLARATION CONTEXT ONLY. Proximity to the word "shape" is not evidence:
+          // prose that merely mentions a backticked identifier near "shape" produced
+          // false positives on field names (`columns`, `success`, `activity_variant_id`),
+          // function names (`verifyGoalReached`) and DELIBERATELY FICTIONAL example
+          // shapes (`cargoManifest` in "Example pass: Introduce `cargoManifest` shape").
+          // A validator that fails on correct docs trains its readers to ignore it —
+          // the same conclusion this file already records for shape_existence below.
+          if (/\bexamples?\b|\be\.g\.|\bfor instance\b|\bhypothetical\b|\bviolation:/i.test(line)) continue;
+          const decl = new RegExp(
+            "(?:\\btype\\s*[:=]\\s*[\"'`]" + token + "[\"'`])" +
+            "|(?:\\bshape\\s*[:=]\\s*[\"'`]" + token + "[\"'`])" +
+            "",
+          );
+          if (!decl.test(line)) continue;
           if (!pushFinding({
             doc_id: doc.id,
             invariant: "accuracy",

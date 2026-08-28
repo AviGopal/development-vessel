@@ -178,11 +178,27 @@ export async function resolveDocsAlignTick(
 
   // 3. Run docs_align_scan
   const vocabulary = await deriveNamingVocabulary(documents);
+  let advertised_shapes: string[] = [];
+  try {
+    const base = (process.env["DISCOVERY_ENDPOINT"] ?? "http://127.0.0.1:8100").replace(/\/+$/, "");
+    const res = await fetch(`${base}/registry/shapes`, { signal: AbortSignal.timeout(10_000) });
+    if (res.ok) {
+      const j = (await res.json()) as unknown;
+      const arr = Array.isArray(j)
+        ? j
+        : Array.isArray((j as { shapes?: unknown })?.shapes)
+          ? (j as { shapes: unknown[] }).shapes
+          : [];
+      advertised_shapes = arr.filter((s): s is string => typeof s === "string");
+    }
+  } catch {
+    advertised_shapes = [];
+  }
   const scan = await resolveDocsAlignScan({
     type: "docs_align_scan",
     corpus: { documents },
-    live_truth: { existing_paths, unit_names },
-    invariants: ["timelessness", "naming_alignment", "setup_enablement"],
+    live_truth: { existing_paths, unit_names, advertised_shapes },
+    invariants: ["timelessness", "naming_alignment", "setup_enablement", "accuracy"],
     vocabulary,
     max_findings: 100,
   });

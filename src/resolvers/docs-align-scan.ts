@@ -235,7 +235,7 @@ export async function resolveDocsAlignScan(pointer: DocsAlignScanPointer): Promi
 
     if (invariants.has("accuracy") && pointer.live_truth && typeof pointer.live_truth !== "string" && pointer.live_truth.advertised_shapes) {
       const advertised = new Set(pointer.live_truth.advertised_shapes);
-      const shapeContext = /\b(shape|resolver)\b/i;
+      const shapeContext = /\b(shapes?|resolvers?)\b/i;
       for (const line of lines) {
         if (!shapeContext.test(line)) continue;
         const tickRx = /`([A-Za-z][A-Za-z0-9_]*)`/g;

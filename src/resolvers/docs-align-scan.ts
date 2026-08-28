@@ -245,7 +245,7 @@ export async function resolveDocsAlignScan(pointer: DocsAlignScanPointer): Promi
           if (!token) continue;
           if (!/^[a-z][a-zA-Z0-9_]*$/.test(token)) continue;
           if (advertised.has(token)) continue;
-          if (!/(?:shapes?\s+`[^`]+`|`[^`]+`\s+(?:\w+\s+)*shape)/.test(line)) continue;
+          if (!/(?:shapes?\s+`[^`]+`|`[^`]+`\s+shapes?\b)/.test(line)) continue;
           if (!pushFinding({
             doc_id: doc.id,
             invariant: "accuracy",

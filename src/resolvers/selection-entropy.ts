@@ -68,6 +68,9 @@ export async function resolveSelectionEntropy(pointer: SelectionEntropyPointer):
       rows.push({ id, mean, success });
     }
 
+    const floor = Number(p.entropy_floor ?? 0.5) || 0.5;
+    const ceiling = Number(p.entropy_ceiling ?? 0.95) || 0.95;
+
     const overall = normEntropy(rows.map((r) => r.mean));
 
     // Bucket by success-rate band as a coarse context proxy.
@@ -102,13 +105,19 @@ export async function resolveSelectionEntropy(pointer: SelectionEntropyPointer):
     // exploration, it is a posterior that never converges.
     const lowBucket = per_bucket.find((b) => b.bucket === "success_0.00_0.33");
     const neverConverging = !collapsed && lowBucket !== undefined && lowBucket.count === rows.length && rows.length >= 10;
+    // Ceiling check: near-maximal entropy over a meaningful sample means selection
+    // is effectively uniform — Thompson is not discriminating between templates.
+    // A floor-only sensor reports exactly this state as healthy.
+    const undifferentiated = !collapsed && !neverConverging && rows.length >= 10 && overall >= ceiling;
     const recommendation = collapsed
       ? `Selection has crystallized (overall_entropy=${Math.round(overall * 1000) / 1000} < floor=${floor}` +
         (collapsedBuckets.length ? `; collapsed buckets: ${collapsedBuckets.join(", ")}` : "") +
         `). Increase exploration: widen Thompson priors, inject novel templates, or reduce reuse bias.`
       : neverConverging
         ? `Selection is NEVER-CONVERGING (overall_entropy=${Math.round(overall * 1000) / 1000}, but all ${rows.length} sampled templates sit in success_0.00_0.33). Entropy is high because nothing wins, not because exploration is healthy. Investigate reward flow: are successes being credited (alpha) at all for these templates?`
-        : `Selection is healthy (overall_entropy=${Math.round(overall * 1000) / 1000} >= floor=${floor}); exploration spread is adequate.`;
+        : undifferentiated
+          ? `Selection is UNDIFFERENTIATED (overall_entropy=${Math.round(overall * 1000) / 1000} >= ceiling=${ceiling} over ${rows.length} templates). Posteriors are near-uniform: Thompson is choosing at random rather than by learned merit. Investigate whether credit is reaching per-template posteriors at all.`
+          : `Selection is healthy (overall_entropy=${Math.round(overall * 1000) / 1000} >= floor=${floor}); exploration spread is adequate.`;
 
     return {
       shape: "selectionEntropy",
@@ -116,8 +125,10 @@ export async function resolveSelectionEntropy(pointer: SelectionEntropyPointer):
         overall_entropy: Math.round(overall * 10000) / 10000,
         collapsed,
         never_converging: neverConverging,
+        undifferentiated,
         template_count: rows.length,
         entropy_floor: floor,
+        entropy_ceiling: ceiling,
         collapsed_buckets: collapsedBuckets,
         per_bucket,
         recommendation,

@@ -55,6 +55,8 @@ import { CUTOVER_QUIESCE_MAX_MS } from "../compose-slots.js";
  * Gating on this set (not on a raw pass/fail COUNT) is what survives a suite flaky in the
  * 81–94 band: a test that already failed at baseline is not held against a new commit.
  */
+const BASELINE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+
 export function computeNewlyFailing(prev: string[] | null, now: string[]): string[] {
   if (prev === null) return [];
   const baseline = new Set(prev.map(String));
@@ -1869,7 +1871,16 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
       if (failNow !== null) {                // null = unmeasurable → fall through and commit
         const baseFile = `/workspace/post-land-baseline/${String(vessel_name).replace(/[^a-zA-Z0-9]+/g, "-")}.json`;
         let baseline: string[] | null = null;
-        try { baseline = JSON.parse(await readFile(baseFile, "utf8")) as string[]; } catch { baseline = null; }
+        try {
+          const bstat = await fs.stat(baseFile);
+          // A baseline older than BASELINE_MAX_AGE_MS predates whatever has since drifted in the
+          // tree, so treating it as authoritative blames every staged change for pre-existing
+          // failures — and the refusal prevents the green landing that would refresh it. An
+          // unusable baseline already fails open (computeNewlyFailing(null, …) === []); reuse it.
+          if (Date.now() - bstat.mtimeMs <= BASELINE_MAX_AGE_MS) {
+            baseline = JSON.parse(await readFile(baseFile, "utf8")) as string[];
+          }
+        } catch { baseline = null; }
         let newlyFailing = computeNewlyFailing(baseline, failNow);
         if (newlyFailing.length > 0) {
           // Confirm — a single flake must not block a cutover.

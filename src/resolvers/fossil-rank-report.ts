@@ -4,6 +4,9 @@ export interface FossilRankReportPointer {
   spliceCeiling?: number;
 }
 
+import { readdir, readFile } from "node:fs/promises";
+import { join, relative } from "node:path";
+
 export interface FossilRankReportResult {
   shape: 'fossilRankReport';
   body: { fossils: Array<{ file: string; weight: number }>; ceiling: number };

@@ -339,7 +339,10 @@ export async function resolveOrphanedCapabilityScan(
   const discoveryUrl = pointer.discoveryEndpoint ?? DISCOVERY_ENDPOINT;
   const emitUrl = pointer.devVesselImpulsesUrl ?? DEFAULT_DEV_VESSEL_URL;
   const apiKey = pointer.apiKey ?? process.env["METABOB_API_KEY"] ?? METABOB_API_KEY;
-  const emit = pointer.emit_gaps !== false;
+  const emit =
+    pointer.emit_gaps !== false &&
+    (pointer as { emit_gap?: boolean }).emit_gap !== false &&
+    (pointer as { dry_run?: boolean }).dry_run !== true;
   const templateLimit = pointer.template_limit ?? 2000;
   const maxEmit = pointer.max_emit ?? 40;
 

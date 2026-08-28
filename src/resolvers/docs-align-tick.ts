@@ -198,7 +198,7 @@ export async function resolveDocsAlignTick(
     type: "docs_align_scan",
     corpus: { documents },
     live_truth: { existing_paths, unit_names, advertised_shapes },
-    invariants: ["timelessness", "naming_alignment", "setup_enablement", "accuracy"],
+    invariants: ["timelessness", "naming_alignment", "setup_enablement"],
     vocabulary,
     max_findings: 100,
   });

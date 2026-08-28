@@ -104,13 +104,24 @@ const RULES: ReadonlyArray<{
 async function fetchTraces(endpoint: string, apiKey: string, limit: number): Promise<ExecutionTrace[]> {
   const headers: Record<string, string> = {};
   if (apiKey) headers["Authorization"] = `ApiKey ${apiKey}`;
+  // The list endpoint hard-clamps limit to 100, so a single request silently
+  // truncated every window the caller asked for — a 720h audit actually covered
+  // about 35 minutes at the observed 111-181 traces/hour. Page with offset until
+  // the requested count is reached or the store runs out.
+  const PAGE = 100;
+  const out: ExecutionTrace[] = [];
   try {
-    const resp = await fetchWithRetry(`${endpoint}/v2/activities/execution-traces?limit=${limit}`, { headers, signal: AbortSignal.timeout(20_000) });
-    if (!resp) return [];
-    if (!resp.ok) return [];
-    const json = (await resp.json()) as { executions?: ExecutionTrace[] };
-    return json.executions ?? [];
-  } catch { return []; }
+    for (let offset = 0; out.length < limit; offset += PAGE) {
+      const want = Math.min(PAGE, limit - out.length);
+      const resp = await fetchWithRetry(`${endpoint}/v2/activities/execution-traces?limit=${want}&offset=${offset}`, { headers, signal: AbortSignal.timeout(20_000) });
+      if (!resp || !resp.ok) break;
+      const json = (await resp.json()) as { executions?: ExecutionTrace[] };
+      const page = json.executions ?? [];
+      out.push(...page);
+      if (page.length < want) break;
+    }
+  } catch { /* fall through with whatever pages already succeeded */ }
+  return out;
 }
 
 async function emitGap(emitUrl: string, apiKey: string, signature: string, hits: Array<{ trace: ExecutionTrace; status: string }>, derived: string, reason: string, fix: string, attribution: { vessel: string; file: string; evidence: string[] }): Promise<{ ok: boolean; status: number | "error" }> {

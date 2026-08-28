@@ -724,6 +724,10 @@ export const config = {
       "project_thread_scan",
       // Seam ③ substrate-authored resolver (2026-07-04): solicitation_outcome_scan
       "solicitation_outcome_scan",
+      // The consumer solicitationOutcomeReport never had (2026-08-28): applies the human's
+      // disposition to the gap, restoring the bounded re-test path 143212a traded away for
+      // that answer. See openspec/changes/2026-08-28-escalation-disposition-executor/.
+      "escalation_disposition_apply",
       // Seam ③ substrate-authored resolver (2026-07-05): human_input
       "human_input",
       // Seam ③ substrate-authored resolver (2026-07-05): code_locality_mining_tick

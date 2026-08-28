@@ -808,7 +808,18 @@ function pickMostLandable(gaps: Record<string, unknown>[]): Record<string, unkno
   const calib = readCalibration();
   const hopeless = (g: Record<string, unknown>): boolean => {
     const r = calib[String(g.category ?? "unknown")];
-    return !!r && r.attempts >= 8 && r.lands === 0;
+    if (!r || r.attempts < 8 || r.lands !== 0) return false;
+    // HUMAN-AUTHORIZED EXEMPTION (2026-08-28). 143212a traded the automatic re-test path
+    // ("leaving a re-test path", d1bb37a) for a HUMAN DECISION, and predicated this
+    // exclusion on the row being "already escalated" — the human IS the designed escape.
+    // Until escalation_disposition_apply existed nothing applied the answer, so the trade
+    // was one-directional and the seal was permanent. A gap whose escalation a human has
+    // ANSWERED carries a bounded exemption; it is per-GAP and decrements, so the category
+    // stays sealed for every other member and the flood 143212a deliberately closed cannot
+    // reopen. Not a threshold change: without an answered escalation this is a no-op.
+    const gm = (g.classification_metadata ?? g.metadata ?? {}) as Record<string, unknown>;
+    if (Number(gm.human_exemption_attempts_remaining ?? 0) > 0) return false;
+    return true;
   };
   // Escalate hopeless gaps to a HUMAN and exclude them from selection.
   // The escalation is the uiQuestion_write and nothing else. This branch used to ALSO call
@@ -2034,7 +2045,19 @@ async function bumpFailedAttempts(gap: Record<string, unknown>, opts: { surprise
     const weight = opts.surprise ? 2 : 1;
     const fa = Number(meta0.failed_attempts ?? 0) + weight;
     const mis = Number(meta0.mispredicted_lands ?? 0) + (opts.surprise ? 1 : 0);
-    const meta = { ...meta0, failed_attempts: fa, last_failed_at: new Date().toISOString(), mispredicted_lands: mis, last_predicted_p: opts.predictedP ?? meta0.last_predicted_p };
+    // SPEND THE HUMAN-AUTHORIZED EXEMPTION (2026-08-28). The exemption granted by
+    // escalation_disposition_apply is BOUNDED, and this is the only place the bound can
+    // bind: a non-landing attempt consumes one. Without this decrement "bounded" would be
+    // a word in a comment — the gap would re-enter selection forever on one human answer
+    // and re-open the flood 143212a deliberately closed. At zero the seal applies again
+    // and the gap re-escalates, which is the correct end state: the human's answer was
+    // tried, it did not land, and the human should be asked again rather than the loop
+    // grinding on it.
+    const exRem = Number(meta0.human_exemption_attempts_remaining ?? 0);
+    const exemptionPatch = exRem > 0
+      ? { human_exemption_attempts_remaining: exRem - 1, human_exemption_spent_at: new Date().toISOString() }
+      : {};
+    const meta = { ...meta0, ...exemptionPatch, failed_attempts: fa, last_failed_at: new Date().toISOString(), mispredicted_lands: mis, last_predicted_p: opts.predictedP ?? meta0.last_predicted_p };
     joinDecisionOutcome(meta, { landed: false });
     await resolveSubstrateGapWrite({
       type: "substrateGap_write",

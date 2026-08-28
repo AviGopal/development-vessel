@@ -769,6 +769,36 @@ function blockingWeight(gap: Record<string, unknown>): number {
   return Math.min(2.0, w);
 }
 
+/** Bounded so the pick cannot spawn a git subprocess per pooled gap. See chooseFirstActionable. */
+export const PENDING_SCAN_MAX = 20;
+
+/**
+ * Walk a score-ranked candidate list and return the highest-ranked entry that is NOT pending.
+ *
+ * Split out of pickMostLandable so the skip can be tested with an injected predicate instead of
+ * a real git history. `isPending` is evaluated LAZILY and at most PENDING_SCAN_MAX times: the
+ * real predicate (verifyGapCondition -> landedCommitVerdict) spawns `git log` per clone, so
+ * evaluating a ~330-gap pool on every pick would cost hundreds of subprocesses.
+ *
+ * Fail-open: if every candidate inside the scan window is pending, the top entry is returned
+ * unchanged and the post-selection guard refuses it exactly as before. That preserves today's
+ * behaviour rather than returning null and starving the tick.
+ */
+export function chooseFirstActionable<T>(
+  ranked: Array<{ g: T; s: number }>,
+  isPending: (g: T) => boolean,
+  scanMax: number = PENDING_SCAN_MAX,
+): { chosen: { g: T; s: number }; skippedPending: number } {
+  let skippedPending = 0;
+  const limit = Math.min(ranked.length, scanMax);
+  for (let i = 0; i < limit; i++) {
+    const cand = ranked[i]!;
+    if (isPending(cand.g)) { skippedPending++; continue; }
+    return { chosen: cand, skippedPending };
+  }
+  return { chosen: ranked[0]!, skippedPending };
+}
+
 function pickMostLandable(gaps: Record<string, unknown>[]): Record<string, unknown> | null {
   if (!gaps.length) return null;
   // Learned category-level self-knowledge (expectation-setting step 3, 2026-06-29): strongly
@@ -884,7 +914,39 @@ function pickMostLandable(gaps: Record<string, unknown>[]): Record<string, unkno
   const ranked = selectionPool
     .map((g) => ({ g, s: landabilityScore(g) * impactOf(g) * humanWeight(g) }))
     .sort((a, b) => b.s - a.s);
-  const chosen = ranked[0]!;
+  // A GAP THAT CANNOT BE COMPOSED MUST NOT CONSUME THE PICK (2026-08-28).
+  //
+  // The eligibility test ran only AFTER selection: the branches at `pickConditionCheck ===
+  // 'pending'` (~2300) and `_pickCond === 'pending'` (~2501) correctly refuse to re-compose a
+  // gap that landed once but is unmeasured — a second landing would manufacture the re-land the
+  // close-oracle scores as a false close. But by then the pick was already spent, so the cycle
+  // ended in a no-op and the next tick re-selected the same gap.
+  //
+  // Self-sustaining, because a skipped pick does no work and therefore records no failed
+  // attempt: the score never decays, so the same gap wins again. Measured over 6h on
+  // recommit-route-edit-9077062c-typecheck_dangling_reference-narrowed: 50 picks, 0 composes,
+  // failed_attempts 0, landability 1.0, open since 2026-08-16 — roughly one wasted cycle every
+  // 7 minutes. Over the same window seven eligible operator-filed gaps were never picked once.
+  //
+  // Filter on the SAME predicate the post-selection branches use. Do NOT filter on the stored
+  // classification_metadata.disposition field: markPendingVerification writes it, but the
+  // livelocked gap does not carry it (verified — disposition was null on that record while it
+  // logged PENDING on every pick). 'pending' here is DERIVED at pick time by verifyGapCondition
+  // from landed-commit provenance, so a disposition-based filter would have excluded ten
+  // unrelated gaps and missed the one actually burning the slot.
+  //
+  // Walked lazily rather than applied pool-wide: verifyGapCondition -> landedCommitVerdict
+  // spawns `git log --grep` per clone plus `git log -1` per matching sha, so evaluating all
+  // ~330 pooled gaps every pick would be hundreds of subprocesses. Walking the ranked list
+  // costs one evaluation per pending gap actually encountered, normally one or two.
+  //
+  // Only 'pending' is skipped. 'absent' must still be selected — the post-selection branch
+  // closes those as already_resolved, which is real work, not a no-op.
+  // Extracted as a pure function with an injected predicate so the skip is unit-testable
+  // without a git checkout — the same reason computeNewlyFailing was extracted in the cutover
+  // resolver. A selection change that only a diff-reader has inspected is the inert-landing
+  // risk fc-coverage warns about: only a test actually runs it.
+  const { chosen, skippedPending } = chooseFirstActionable(ranked, (g) => verifyGapCondition(g) === 'pending');
   const targetOf = (g: Record<string, unknown>): string =>
     String(((g.classification_metadata ?? g.metadata ?? {}) as Record<string, unknown>).edit_site ?? "(no-target)");
   // TRACED SELECTION DECISION (law 12: record the counterfactual AT decision time). Without
@@ -900,6 +962,7 @@ function pickMostLandable(gaps: Record<string, unknown>[]): Record<string, unkno
     impact: Number(impactOf(chosen.g).toFixed(4)),
     pool: selectionPool.length,
     hopeless_excluded: gaps.length - selectionPool.length,
+    skipped_pending: skippedPending,
     tied_at_top: ranked.filter((r) => Math.abs(r.s - chosen.s) < 1e-9).length,
     distinct_targets_top20: new Set(ranked.slice(0, 20).map((r) => targetOf(r.g))).size,
     runner_up: ranked[1] ? { gap_id: String(ranked[1].g.id ?? ""), target: targetOf(ranked[1].g), score: Number(ranked[1].s.toFixed(4)) } : null,

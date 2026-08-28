@@ -8,26 +8,36 @@ describe("DRAFT_GAP_CLOSING_ACTIVITY_TEMPLATE", () => {
     expect(typeof DRAFT_GAP_CLOSING_ACTIVITY_TEMPLATE.description).toBe("string");
   });
 
-  it("declares correct input and output shapes", () => {
-    expect(DRAFT_GAP_CLOSING_ACTIVITY_TEMPLATE.inputShapes).toContain("failureModeReport");
-    expect(DRAFT_GAP_CLOSING_ACTIVITY_TEMPLATE.inputShapes).toContain("gapScenario");
+  it("declares NO template-level inputShapes, and the two output shapes", () => {
+    // inputShapes is deliberately empty: tasks 1-2 fs_read the report and scenario
+    // from variable-supplied paths. Declaring failureModeReport/gapScenario as
+    // pool-seeded inputs triggered F25 precondition-rejection at /recommend,
+    // because the autonomous dispatch path cannot seed those impulses. Asserting
+    // them here is what went stale — do not reintroduce them.
+    expect(DRAFT_GAP_CLOSING_ACTIVITY_TEMPLATE.inputShapes).toEqual([]);
     expect(DRAFT_GAP_CLOSING_ACTIVITY_TEMPLATE.outputShapes).toContain("activityTemplateProposal");
     expect(DRAFT_GAP_CLOSING_ACTIVITY_TEMPLATE.outputShapes).toContain("activityTemplateVariant");
   });
 
-  it("has exactly 6 tasks in the correct order", () => {
-    const tasks = DRAFT_GAP_CLOSING_ACTIVITY_TEMPLATE.tasks;
-    expect(tasks).toHaveLength(6);
-
-    const ids = tasks.map((t) => t.id);
-    expect(ids).toEqual([
+  it("keeps the load -> draft -> register spine in order", () => {
+    // Pinned as RELATIVE order, not an exact task count. The previous form asserted
+    // exactly 6 tasks and broke on every legitimate addition (the template now has
+    // 20), which is why it sat red and unread for months. The durable contract is
+    // that inputs are read before the draft, and the variant is registered after it.
+    const ids = DRAFT_GAP_CLOSING_ACTIVITY_TEMPLATE.tasks.map((t) => t.id);
+    for (const required of [
       "read_report",
       "read_scenario",
       "draft_via_llm",
-      "extract_required_shapes",
       "write_proposal",
       "register_variant",
-    ]);
+    ]) {
+      expect(ids).toContain(required);
+    }
+    expect(ids.indexOf("read_report")).toBeLessThan(ids.indexOf("draft_via_llm"));
+    expect(ids.indexOf("read_scenario")).toBeLessThan(ids.indexOf("draft_via_llm"));
+    expect(ids.indexOf("draft_via_llm")).toBeLessThan(ids.indexOf("write_proposal"));
+    expect(ids.indexOf("write_proposal")).toBeLessThan(ids.indexOf("register_variant"));
   });
 
   it("read_report uses fs_read resolver with report_path variable", () => {
@@ -72,11 +82,19 @@ describe("DRAFT_GAP_CLOSING_ACTIVITY_TEMPLATE", () => {
     expect(content).toContain("{{read_scenario_content}}");
   });
 
-  it("register_variant passes output_shapes_override from extract_required_shapes", () => {
+  it("register_variant declares the HONEST literal output shape, not the gap's shape", () => {
+    // INVERTED deliberately (V25/V37). This test used to require that
+    // output_shapes_override interpolate {{extract_required_shapes}}, i.e. stamp the
+    // gap's expected shape onto the variant. That made declared != produced: the
+    // variant's analyze task emits patch_proposal, so the reachability gate rejected
+    // it and beta-penalised the whole draft even though the proposal file succeeded.
+    // The override is now a literal ["patch_proposal"]. Asserting the old form would
+    // reintroduce a known, fixed defect — so assert its ABSENCE.
     const task = DRAFT_GAP_CLOSING_ACTIVITY_TEMPLATE.tasks.find((t) => t.id === "register_variant")!;
     const content = JSON.stringify(task.config);
     expect(content).toContain("output_shapes_override");
-    expect(content).toContain("extract_required_shapes");
+    expect(content).toContain("patch_proposal");
+    expect(content).not.toContain("{{extract_required_shapes}}");
   });
 
   it("all resolvers are known dev-vessel shapes or declared resolver names", () => {

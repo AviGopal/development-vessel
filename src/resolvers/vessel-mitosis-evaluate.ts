@@ -873,7 +873,7 @@ export async function staticEvaluate(
         const cached = baselineSuiteCache.get(baseForDelta);
         const baseTest = cached && Date.now() - cached.at < BASELINE_CACHE_TTL_MS
           ? cached.result
-          : await runCheck(bunCmd, ["test"], baseForDelta, "bun test (baseline)", SUITE_CHECK_TIMEOUT_MS);
+          : await runCheck(bunCmd, ["test"], await buildOverlay(baseForDelta, baseForDelta, stagedFiles ?? []), "bun test (baseline)", SUITE_CHECK_TIMEOUT_MS);
         if (!cached || Date.now() - cached.at >= BASELINE_CACHE_TTL_MS) {
           if (!baseTest.timed_out) baselineSuiteCache.set(baseForDelta, { at: Date.now(), result: baseTest });
         }

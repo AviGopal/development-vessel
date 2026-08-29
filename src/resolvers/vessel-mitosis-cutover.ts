@@ -58,7 +58,23 @@ import { CUTOVER_QUIESCE_MAX_MS } from "../compose-slots.js";
 const BASELINE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 
 export function computeNewlyFailing(prev: string[] | null, now: string[]): string[] {
-  if (prev === null) return [];
+  // AN EMPTY BASELINE IS UNMEASURED, NOT GREEN.
+  //
+  // `[]` asserts "nothing was failing at the last landed commit". On a vessel with a
+  // standing-red suite that is never true — it is what gets recorded when the baseline
+  // was never populated, or when a run reported ran:true with an unparseable failing
+  // list. Treating it as authoritative makes EVERY pre-existing failure "newly failing",
+  // so every cutover is refused as a regression, so no green landing ever happens, so the
+  // baseline is never refreshed. Self-sealing.
+  //
+  // Measured 2026-08-29: 70fdab4 removed `|| prev.length === 0` from this line — landed
+  // through the patch_with_tools escalation lane with no gate approval and no test pinning
+  // the behaviour it deleted. development-vessel's baseline was `[]` (2 bytes), and the
+  // next cutover refused with "precutover_regression: 25 test(s) fail on the staged tree
+  // that passed at the last landed baseline" — naming seed-templates and fleet-endpoint
+  // tests that a one-line boolean change cannot touch, and which fail identically on a
+  // pristine origin/dev checkout. Restored, with the test that was missing.
+  if (prev === null || prev.length === 0) return [];
   const baseline = new Set(prev.map(String));
   const seen = new Set<string>();
   const out: string[] = [];

@@ -11,6 +11,15 @@ describe("computeNewlyFailing", () => {
   it("returns [] on first observation (no baseline) — nothing is attributable yet", () => {
     expect(computeNewlyFailing(null, ["a", "b"])).toEqual([]);
   });
+  it("returns [] on an EMPTY baseline — unmeasured is not green", () => {
+    // `[]` is what gets recorded when the baseline was never populated, or when a suite
+    // run reported ran:true with an unparseable failing list. Treating it as "nothing was
+    // failing" makes every pre-existing failure look new, refuses every cutover as a
+    // regression, and so prevents the green landing that would refresh the baseline.
+    // Regression test for 70fdab4, which deleted this clause and deadlocked all landing
+    // on development-vessel until it was restored.
+    expect(computeNewlyFailing([], ["a", "b", "c"])).toEqual([]);
+  });
   it("reports only failures absent from the baseline", () => {
     expect(computeNewlyFailing(["a", "b"], ["a", "b", "c"])).toEqual(["c"]);
   });

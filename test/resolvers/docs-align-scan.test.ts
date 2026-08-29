@@ -126,7 +126,20 @@ describe("docs_align_scan v1 precision (constitutional-doc hardening)", () => {
     expect(findings[0]!.evidence).toContain("repos/metabob-activity-api/src/config.ts");
   });
 
-  it("accuracy: only flags backtick tokens adjacent to the word 'shape', not field/function names near 'resolver'", async () => {
+  it("accuracy: flags an unadvertised shape only in DECLARATION context, not by mere proximity to 'shape'", async () => {
+    // POLICY REVERSAL, deliberate — this case previously asserted that any backticked
+    // token adjacent to the word "shape" was flagged. That was narrowed on purpose
+    // (docs-align-scan.ts:249-262): proximity is not evidence, and the loose rule produced
+    // false positives on field names (`columns`, `success`, `activity_variant_id`),
+    // function names (`verifyGoalReached`) and deliberately FICTIONAL example shapes
+    // (`cargoManifest` in "Example pass: Introduce `cargoManifest` shape"). As the
+    // resolver puts it: a validator that fails on correct docs trains its readers to
+    // ignore it. Re-asserting the old rule would restore exactly those false positives.
+    //
+    // The detector now requires a BACKTICKED token in a declaration — shape: `x` / type: `x`
+    // (token extraction is backtick-only, docs-align-scan.ts:242) — so the test
+    // asserts BOTH directions, which is what makes it a discriminator rather than a
+    // one-sided pass: prose proximity must NOT flag, a real declaration MUST.
     const res = await resolveDocsAlignScan({
       type: "docs_align_scan",
       invariants: ["accuracy"],
@@ -137,6 +150,7 @@ describe("docs_align_scan v1 precision (constitutional-doc hardening)", () => {
             body: [
               "The resolver reads `failure_mode` and `parent_execution_id` from the trace.",
               "The `bogus_shape_xyz` shape is served by no vessel.",
+              "shape: `undeclared_shape_abc` is wired here.",
             ].join("\n"),
             durability: "durable",
           },
@@ -145,9 +159,12 @@ describe("docs_align_scan v1 precision (constitutional-doc hardening)", () => {
       live_truth: { advertised_shapes: ["memoryNote"] },
     });
     const findings = (res.body as { findings: Array<{ invariant: string; evidence: string }> }).findings;
-    // field names near "resolver" are NOT flagged; only the token adjacent to "shape" is
+    // field/function names near "resolver" are never flagged
     expect(findings.every((f) => !f.evidence.includes("failure_mode"))).toBe(true);
-    expect(findings.some((f) => f.evidence.includes("bogus_shape_xyz"))).toBe(true);
+    // prose proximity alone is NOT a finding — this is the narrowing being asserted
+    expect(findings.some((f) => f.evidence.includes("bogus_shape_xyz"))).toBe(false);
+    // ...but a declaration of an unadvertised shape IS, so the detector still discriminates
+    expect(findings.some((f) => f.evidence.includes("undeclared_shape_abc"))).toBe(true);
   });
 
   it("timelessness: exempts explicit deprecation markers but flags embedded dated status", async () => {

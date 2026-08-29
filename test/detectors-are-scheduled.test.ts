@@ -36,10 +36,24 @@ import { fileURLToPath } from "node:url";
 // failed with "missing detector units" while the units were present and correct. That is a
 // portability bug in this file, not a defect in the thing it audits, and a validator that fails
 // on correct code trains its readers to ignore it.
+// The root predicate must DISCRIMINATE, not merely match. `repos/` + `scripts/substrate/`
+// both exist under the container's `/workspace`, but that tree is a partial mirror: its
+// scripts/substrate holds only `units/` with a single service file and zero detector scripts.
+// The walk therefore "found" a super-repo that has none of what this test reads, and the
+// instrument guard below did its job — reporting 0 detector scripts rather than sweeping a
+// vacuous pass. Requiring vessels.inventory.json (present in the real super-repo next to its
+// 38 detector scripts, absent from the mirror) tells the two apart, so a deployment without
+// the super-repo skips honestly instead of failing against a decoy.
 function findSuperRepoRoot(): string | null {
   let dir = dirname(fileURLToPath(import.meta.url));
   for (let i = 0; i < 8; i += 1) {
-    if (existsSync(join(dir, "repos")) && existsSync(join(dir, "scripts", "substrate"))) return dir;
+    if (
+      existsSync(join(dir, "repos")) &&
+      existsSync(join(dir, "scripts", "substrate")) &&
+      existsSync(join(dir, "scripts", "substrate", "vessels.inventory.json"))
+    ) {
+      return dir;
+    }
     const parent = dirname(dir);
     if (parent === dir) break;
     dir = parent;
@@ -58,7 +72,9 @@ if (!HAS_SUPER_REPO) {
   console.error(
     "[detectors-are-scheduled] SKIPPED: no super-repo root found above " +
       dirname(fileURLToPath(import.meta.url)) +
-      " (needs a directory containing both repos/ and scripts/substrate). " +
+      " (needs a directory containing repos/, scripts/substrate/, and " +
+      "scripts/substrate/vessels.inventory.json — the last one distinguishes the real " +
+      "super-repo from a partial mirror that has the first two but no detector scripts). " +
       "Super-repo scheduling cannot be verified from a standalone vessel checkout.",
   );
 }

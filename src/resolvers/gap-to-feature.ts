@@ -920,8 +920,32 @@ function pickMostLandable(gaps: Record<string, unknown>[]): Record<string, unkno
   // does not make human gaps unconditionally first, and it must not — a syntax break
   // that wedges a vessel outranks a legibility complaint, and did so correctly today.
   const HUMAN_REPORT_PRIORITY = 1.5;
+  // A LIVE HUMAN EXEMPTION COUNTS AS HUMAN ENDORSEMENT (2026-08-29). The bounded exemption granted
+  // by escalation_disposition_apply bought immunity from the CATEGORY SEAL but nothing in
+  // selection, so a gap the operator had just answered took one attempt and then lost the queue.
+  // Measured: the lift-gate gap sat with 2 of its 3 exemption attempts UNSPENT and was picked ZERO
+  // times in 25 minutes, while three competitors carrying failed_attempts of 122, 82 and 64 were
+  // picked 8 times each — they were not winning on a reset penalty, they simply outranked it.
+  //
+  // An operator answering an escalation is the substrate's most expensive input: the one fact it
+  // cannot derive for itself. Spending it on a single attempt and then stranding the remainder
+  // wastes it, and leaves the seal's only designed escape opening onto a full room.
+  //
+  // A gap the operator has just ANSWERED is at least as human-endorsed as one the operator merely
+  // REPORTED, so it earns the same 1.5x — a tie-breaker, not an override. Everything the comment
+  // above says still holds: a genuinely more landable or more blocking gap still wins on merit.
+  //
+  // Self-limiting by construction: bumpFailedAttempts decrements the counter on every non-landing
+  // attempt, so the preference expires after the three granted attempts and the gap returns to
+  // ordinary ranking WITH ITS REAL HISTORY INTACT. Deliberately NOT done by zeroing
+  // failed_attempts — that is the narrowing defect (a verbatim child with failed_attempts:0
+  // outranking its own parent forever), which this store already carries a closed gap for.
+  const hasLiveHumanExemption = (g: Record<string, unknown>): boolean => {
+    const m = (g.classification_metadata ?? g.metadata ?? {}) as Record<string, unknown>;
+    return Number(m.human_exemption_attempts_remaining ?? 0) > 0;
+  };
   const humanWeight = (g: Record<string, unknown>): number =>
-    String(g.source ?? "") === "human_reported" ? HUMAN_REPORT_PRIORITY : 1;
+    String(g.source ?? "") === "human_reported" || hasLiveHumanExemption(g) ? HUMAN_REPORT_PRIORITY : 1;
   const ranked = selectionPool
     .map((g) => ({ g, s: landabilityScore(g) * impactOf(g) * humanWeight(g) }))
     .sort((a, b) => b.s - a.s);

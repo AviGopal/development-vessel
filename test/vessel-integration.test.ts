@@ -64,7 +64,11 @@ describe("vessel HTTP integration", () => {
     const res = await app.fetch(req);
     const body = await res.json() as { success: boolean; error: string };
     expect(body.success).toBe(false);
-    expect(body.error).toContain("unknown shape");
+    // Assert the error NAMES the offending type rather than matching prose. The message reads
+    // "Unknown pointer type: no_such_resolver"; the previous assertion matched the words
+    // "unknown shape", which the dispatcher does not say, so it tracked wording rather than
+    // behaviour and broke on a rephrase that changed nothing.
+    expect(body.error).toContain("no_such_resolver");
   });
 
   it("returns 400 for missing pointer type", async () => {
@@ -86,8 +90,13 @@ describe("vessel HTTP integration", () => {
       cwd: devVesselDir,
     });
     expect(result.success).toBe(true);
-    expect(result.shape).toBe("commandResult");
-    const b = result.body as { exitCode: number };
-    expect(typeof b.exitCode).toBe("number");
+    // git_status reads HEAD; it does not shell out, so there is no exitCode and no
+    // "commandResult" envelope — that shape exists nowhere in src/ and this assertion was never
+    // satisfiable. Assert the contract the resolver actually has, and use the opportunity to
+    // check at the HTTP layer that `cwd` is honoured end to end.
+    expect(result.shape).toBe("gitStatus");
+    const b = result.body as { commitHash: string; repoPath: string };
+    expect(b.commitHash).toMatch(/^[0-9a-f]{40}$/);
+    expect(b.repoPath).toBe(devVesselDir);
   });
 });

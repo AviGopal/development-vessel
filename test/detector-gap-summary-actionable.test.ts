@@ -1,4 +1,7 @@
 import { describe, it, expect } from "bun:test";
+import { existsSync } from "node:fs";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 
 /**
  * A DETECTED CLASS MUST REACH A FIX, AND THE SUMMARY IS THE LAST MILE.
@@ -20,7 +23,35 @@ import { describe, it, expect } from "bun:test";
  */
 
 const SRC = new URL("../src/resolvers/detector-coverage-scan.ts", import.meta.url);
-const GATE = new URL("../../boredom-vessel/src/goal-generation.ts", import.meta.url);
+// Locate the SIBLING vessel by walking up to the repos root, not by fixed depth.
+// `../../boredom-vessel/...` only resolves when this file sits at
+// `<repos>/development-vessel/test/`. From an isolated clone it pointed at
+// `/tmp/boredom-vessel/src/goal-generation.ts` and the case failed with ENOENT — a
+// portability bug in this file, not a change in the gate it audits. Third instance of this
+// fixed-depth class in this suite (see detectors-are-scheduled.test.ts).
+function findSiblingVessel(name: string): string | null {
+  let dir = dirname(fileURLToPath(import.meta.url));
+  for (let i = 0; i < 8; i += 1) {
+    const candidate = join(dir, name);
+    if (existsSync(candidate)) return candidate;
+    const parent = dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return null;
+}
+
+const GATE_PATH = findSiblingVessel(join("boredom-vessel", "src", "goal-generation.ts"));
+// Skip explicitly rather than fail: a standalone development-vessel checkout genuinely has no
+// sibling boredom-vessel to read. Never skip silently, and never skip when it IS found — a real
+// change to the gate must still fail this.
+const HAS_GATE = GATE_PATH !== null;
+if (!HAS_GATE) {
+  console.error(
+    "[detector-gap-summary-actionable] SKIPPED the gate assertion: no sibling boredom-vessel found above " +
+      dirname(fileURLToPath(import.meta.url)) + " — cannot audit the goal-gate from a standalone checkout.",
+  );
+}
 
 describe("detector gap summaries are actionable", () => {
   it("THE REGRESSION: the summary is no longer a bare occurrence count", async () => {
@@ -47,8 +78,8 @@ describe("detector gap summaries are actionable", () => {
     expect(/capability|repair/i.test(rendered)).toBe(true);
   });
 
-  it("the gate itself is unchanged — the fix is on the producer side", async () => {
-    const gate = await Bun.file(GATE).text();
+  it.skipIf(!HAS_GATE)("the gate itself is unchanged — the fix is on the producer side", async () => {
+    const gate = await Bun.file(GATE_PATH!).text();
     // If someone later widens ACTIONABLE_CATEGORIES to paper over a barren summary, this is
     // the reminder that the ordering constraint exists and why.
     expect(gate).toContain('ACTIONABLE_CATEGORIES = new Set(["ui_legibility"])');

@@ -61,7 +61,15 @@ describe("reachabilityHardFail", () => {
     ];
     const r = reachabilityHardFail(facts);
     expect(r.hardFail).toBe(true);
-    expect(r.reason).toContain("dead-code-only");
+    // Assert what the reason must CARRY, not the phrase it happens to use. It previously
+    // matched the literal token "dead-code-only"; the message has since become a far more
+    // actionable sentence ("...with zero readers, not exported and not wired — a write-only
+    // hollow addition; wire it, export it for a real consumer, or drop it"). Pinning prose
+    // makes an IMPROVED message look like a regression, and would discourage improving it.
+    // What a caller actually needs is the offending symbols named and the defect identified.
+    expect(r.reason).toContain("recordOutcome");
+    expect(r.reason).toContain("isNoOpBody");
+    expect(r.reason).toMatch(/zero readers|no callers|dead[- ]code|not wired/i);
   });
 
   it("does NOT hard-fail when at least one symbol is reachable", () => {

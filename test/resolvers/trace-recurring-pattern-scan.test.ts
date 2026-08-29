@@ -88,7 +88,13 @@ describe("trace_recurring_pattern_scan", () => {
     const written = JSON.parse(await fs.readFile(String(b.cluster_path), "utf8"));
     expect(written.expected_outputs).toEqual(["alpha", "beta"]);
     expect(written.deny_list).toContain("patch_proposal");
-    expect(written.topology_hint).toContain("real resolver calls");
+    // The hint's WORDING changed as it got more specific (it now names the exact mechanism:
+    // set task.resolver to an existing activity id, which the engine dispatches). Assert the
+    // substance it must convey — compose over existing producers, and do not emit a Proposal
+    // scaffold — rather than a phrase that made a better hint read as a failure.
+    expect(written.topology_hint).toMatch(/COMPOSE|composing|composition/i);
+    expect(written.topology_hint).toContain("real-composer");
+    expect(written.topology_hint).toMatch(/Proposal/);
 
     // dispatch targeted the real-chain author by pattern_id
     const dispatch = calls.find((c) => c.url.includes("/run-goal"));

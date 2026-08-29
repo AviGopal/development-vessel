@@ -87,7 +87,11 @@ describe("resolveLlmCompletionDispatch", () => {
     mockResponses.push({
       ok: true,
       status: 200,
-      data: { success: true, data: '{"id":"gap-closing:fp-11","tasks":[]}' },
+      // The LLM vessel answers with `content` (or `value` on a federation spoke), NOT the
+      // generic `{success, data}` vessel envelope — see goal-host-vessel/src/llm-router.ts,
+      // which reads `body.content ?? content ?? body.text ?? value`. Mocking {success,data}
+      // gave the resolver no text at all, so it threw "did not return text or tool_calls".
+      data: { content: '{"id":"gap-closing:fp-11","tasks":[]}' },
     });
 
     const result = await resolveLlmCompletionDispatch({
@@ -97,7 +101,12 @@ describe("resolveLlmCompletionDispatch", () => {
       model: "anthropic/claude-haiku-4-5-20251001",
     });
 
-    expect(result.shape).toBe("llm_completion_result");
+    // The resolver emits `llmTextCompletion` (llm-completion-dispatch.ts) since 22c6660, and
+    // its consumers were migrated with it: author-producer.ts:815 checks for llmTextCompletion,
+    // author-composed-capability accepts both. The old `llm_completion_result` survives only in
+    // template output_shapes DECLARATIONS, which is a separate inconsistency filed as a gap —
+    // not a reason to assert a shape the resolver no longer returns.
+    expect(result.shape).toBe("llmTextCompletion");
     const body = result.body as { text: string; model: string };
     expect(typeof body.text).toBe("string");
     expect(body.text.length).toBeGreaterThan(0);
@@ -156,7 +165,7 @@ describe("resolveLlmCompletionDispatch", () => {
     mockResponses.push({
       ok: true,
       status: 200,
-      data: { success: true, data: "response" },
+      data: { content: "response" },
     });
 
     await resolveLlmCompletionDispatch({

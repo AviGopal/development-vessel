@@ -14,10 +14,23 @@ import { DISCOVERY_ENDPOINT, METABOB_API_KEY, GOAL_HOST_VESSEL_ENDPOINT } from "
 import { readFile } from "node:fs/promises";
 
 // Mirror feature-compose's path model: repos/<vessel>/... maps to the writable
-// runtime ${RUNTIME_ROOT}/<vessel>/..., and the drafter writes proposal reports
+// runtime ${MITOSIS_RUNTIME_DIR}/<vessel>/..., and the drafter writes proposal reports
 // to <workspace>/proposals/<gapId>-report.json.
-const RUNTIME_ROOT = process.env.MITOSIS_RUNTIME_DIR ?? "/vessels";
-const PROPOSALS_DIR = process.env.PROPOSALS_DIR ?? "/workspace/proposals";
+// READ AT CALL TIME, not frozen at module load. These were `const … = process.env.X ?? …`,
+// which binds to whichever importer loaded this module FIRST. Under `bun test` the module
+// registry is shared across test files, so a sibling that redirected these to its own tmp
+// fixture won the binding and every later file silently inherited it — the admission test
+// saw a sibling's MITOSIS_RUNTIME_DIR (whose tree happens to contain goal-host-vessel/src/index.ts,
+// so the cited-file check passed) paired with a proposals dir that had none of its fixtures.
+// It passed alone and failed in the suite, which reads as flake rather than as the ordering
+// dependency it is. An empty string is treated as unset: exporting X="" is "no value", and
+// `??` does not fall back on "" (same defect class as 3409fac in config.ts).
+const envPath = (key: string, fallback: string): string => {
+  const raw = process.env[key];
+  return raw === undefined || raw.trim() === "" ? fallback : raw;
+};
+const runtimeRoot = (): string => envPath("MITOSIS_RUNTIME_DIR", "/vessels");
+const proposalsDir = (): string => envPath("PROPOSALS_DIR", "/workspace/proposals");
 
 // COMPOSE-HORIZON DEDUP — the one selection primitive, applied at the compose horizon.
 // Ports boredom-vessel's gapGoalLastDispatchAt + GAP_GOAL_COOLDOWN_MS (src/index.ts:3451-3485)
@@ -32,7 +45,7 @@ const gapComposeLastAttemptAt = new Map<string, number>();
 /** A repos/<vessel>/... path maps to an EXISTING file under the runtime root. */
 function repoPathExists(repoRelative: string): boolean {
   try {
-    return existsSync(join(RUNTIME_ROOT, repoRelative.replace(/^repos\//, "")));
+    return existsSync(join(runtimeRoot(), repoRelative.replace(/^repos\//, "")));
   } catch {
     return false;
   }
@@ -50,7 +63,7 @@ function repoPathExists(repoRelative: string): boolean {
  */
 function existingEditTargets(gapId: string): Array<{ file: string; description: string }> {
   try {
-    const path = join(PROPOSALS_DIR, `${gapId}-report.json`);
+    const path = join(proposalsDir(), `${gapId}-report.json`);
     if (!existsSync(path)) return [];
     let raw = readFileSync(path, "utf8").trim();
     // Tolerant parse: drafters wrap JSON in ```json fences (sometimes multiple
@@ -100,7 +113,7 @@ const LOCALIZE_LLM_TIMEOUT_MS = 12_000;
 /** Resolve the vessel directory under the runtime root, returning the repos/<vessel> rel path. */
 function vesselDirExists(vessel: string): boolean {
   try {
-    return statSync(join(RUNTIME_ROOT, vessel)).isDirectory();
+    return statSync(join(runtimeRoot(), vessel)).isDirectory();
   } catch {
     return false;
   }
@@ -149,8 +162,8 @@ function identifyVessel(gap: Record<string, unknown>, meta: Record<string, unkno
   const id = String(gap.id ?? "");
   let best: string | null = null;
   try {
-    const dirs = readdirSync(RUNTIME_ROOT).filter((d) => {
-      try { return statSync(join(RUNTIME_ROOT, d)).isDirectory(); } catch { return false; }
+    const dirs = readdirSync(runtimeRoot()).filter((d) => {
+      try { return statSync(join(runtimeRoot(), d)).isDirectory(); } catch { return false; }
     });
     for (const d of dirs) {
       if (!/-(vessel|api)$/.test(d) && !/^(activity-api|goal-host-vessel)$/.test(d)) continue;
@@ -247,7 +260,7 @@ function grepScoreFiles(srcAbs: string, vessel: string, terms: string[]): Array<
  */
 function siteExcerpt(repoRel: string, terms: string[]): string {
   try {
-    const abs = join(RUNTIME_ROOT, repoRel.replace(/^repos\//, ""));
+    const abs = join(runtimeRoot(), repoRel.replace(/^repos\//, ""));
     const lines = readFileSync(abs, "utf8").split("\n");
     const marks: number[] = [];
     for (const t of terms) {
@@ -342,7 +355,7 @@ export async function localizeGap(gap: Record<string, unknown>, opts?: { useLlm?
   // (a) identify the target vessel.
   const vessel = identifyVessel(gap, meta);
   if (!vessel) return null;
-  const srcAbs = join(RUNTIME_ROOT, vessel, "src");
+  const srcAbs = join(runtimeRoot(), vessel, "src");
   if (!existsSync(srcAbs)) return null;
 
   // (c) extract terms + grep the vessel src/ for the best-matching file.
@@ -395,9 +408,9 @@ export interface MoveTarget {
 /** All vessel-shaped dir names under the runtime root (cached per call site is fine — cheap). */
 function listVesselDirs(): string[] {
   try {
-    return readdirSync(RUNTIME_ROOT).filter((d) => {
+    return readdirSync(runtimeRoot()).filter((d) => {
       try {
-        if (!statSync(join(RUNTIME_ROOT, d)).isDirectory()) return false;
+        if (!statSync(join(runtimeRoot(), d)).isDirectory()) return false;
       } catch { return false; }
       return /-(vessel|api)$/.test(d) || /^(activity-api|goal-host-vessel)$/.test(d);
     });
@@ -580,7 +593,7 @@ export function specFromGap(
         let liveLines: string[] | null = null;
         if (firstTarget && /^\/repos\/[^/]+\/src\//.test(`/${firstTarget}`)) {
           try {
-            liveLines = readFileSync(join(RUNTIME_ROOT, firstTarget.replace(/^repos\//, "")), "utf8").split("\n");
+            liveLines = readFileSync(join(runtimeRoot(), firstTarget.replace(/^repos\//, "")), "utf8").split("\n");
           } catch {
             liveLines = null; // file unreadable — fall back below
           }
@@ -1092,7 +1105,7 @@ export type TypecheckRunner = (vessel: string) => { ran: boolean; clean: boolean
 /** Default runner: `bun run typecheck` in the vessel's runtime dir. Bounded by a wall timeout. */
 function defaultTypecheckRunner(vessel: string): { ran: boolean; clean: boolean } {
   try {
-    const cwd = join(RUNTIME_ROOT, vessel);
+    const cwd = join(runtimeRoot(), vessel);
     if (!existsSync(join(cwd, "package.json"))) return { ran: false, clean: false };
     const res = Bun.spawnSync(["bun", "run", "typecheck"], { cwd, stdout: "pipe", stderr: "pipe", timeout: 120_000 });
     return { ran: true, clean: res.exitCode === 0 };
@@ -1266,7 +1279,7 @@ function verifyGapCondition(gap: Record<string, unknown>): 'present' | 'absent' 
     if (editSite && hardcodedUrl) {
       // editSite is repo-relative like repos/some-vessel/src/file.ts
       // Map to runtime path using the same pattern as line 21
-      const runtimePath = join(RUNTIME_ROOT, editSite.replace(/^\//, '').replace(/^repos\//, ''));
+      const runtimePath = join(runtimeRoot(), editSite.replace(/^\//, '').replace(/^repos\//, ''));
       if (!existsSync(runtimePath)) return 'unknown';
       const contents = readFileSync(runtimePath, 'utf8');
       return contents.includes(hardcodedUrl) ? 'present' : 'absent';
@@ -1348,7 +1361,7 @@ async function verifyGapConditionAsync(gap: Record<string, unknown>): Promise<'p
     const editSite = rawEditSite ? rawEditSite.replace(/:\d+$/, '') : null;
     const hardcodedUrl = typeof meta['hardcoded_url'] === 'string' ? meta['hardcoded_url'] : null;
     if (editSite && hardcodedUrl) {
-      const runtimePath = join(RUNTIME_ROOT, editSite.replace(/^\//, '').replace(/^repos\//, ''));
+      const runtimePath = join(runtimeRoot(), editSite.replace(/^\//, '').replace(/^repos\//, ''));
       if (!existsSync(runtimePath)) return 'unknown';
       const contents = readFileSync(runtimePath, 'utf8');
       return contents.includes(hardcodedUrl) ? 'present' : 'absent';

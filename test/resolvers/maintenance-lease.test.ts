@@ -1,4 +1,4 @@
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect, afterAll } from "bun:test";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { rmSync } from "node:fs";
@@ -6,6 +6,7 @@ import {
   resolveMaintenanceLease,
   resolveMaintenanceLeaseWrite,
 } from "../../src/resolvers/maintenance-lease.js";
+import { __resetMaintenanceLeaseCacheForTests } from "../../src/resolvers/http-retry.js";
 
 // Sequential-state test file (model: substrate-gap.test.ts) — each `it` builds
 // on the file left by the previous one. NO per-test cleanup: the acquire ->
@@ -19,6 +20,26 @@ try {
   /* ignore */
 }
 process.env["MAINTENANCE_LEASE_PATH"] = leasePath;
+
+// afterALL (not afterEach) — the sequential lifecycle above must survive between
+// cases, but it must NOT survive this FILE. bun runs every suite in one process, and
+// fetchWithRetry SUPPRESSES trace-store reads while a maintenance lease is active
+// (http-retry.ts: TRACE_STORE_READ_PATTERNS + isMaintenanceLeaseActive, memoised for
+// 5s in a module-level leaseCheckCache). Leaving a live lease behind therefore makes
+// every later suite that reads /v2/activities/execution-traces silently receive
+// nothing — coverage_tick reported trace_count 0 and coverage_progress false, looking
+// like a broken detector when the read had simply been skipped by design.
+// Verified: `bun test maintenance-lease.test.ts coverage-tick.test.ts` failed 2 while
+// each file alone passed. Release the file AND clear the memoised check, since the
+// cache would otherwise answer "active" for up to 5s after the file is gone.
+afterAll(() => {
+  try {
+    rmSync(leasePath, { force: true });
+  } catch {
+    /* ignore */
+  }
+  __resetMaintenanceLeaseCacheForTests();
+});
 
 describe("maintenanceLease resolver", () => {
   it("status reports held:false when no lease file exists", async () => {

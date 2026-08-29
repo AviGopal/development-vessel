@@ -60,13 +60,37 @@ describe("json-path-extract resolver", () => {
     expect(body.missing).toBe(true);
   });
 
-  it("tolerates traversal through an array by returning empty value with missing flag", async () => {
+  it("traverses INTO an array via a numeric segment (documented dot-notation)", async () => {
+    // POLICY REVERSAL, deliberate — this case previously asserted that a numeric segment
+    // returned empty + missing, which is what the resolver did while line 65 rejected arrays
+    // outright (`typeof current !== "object" || Array.isArray(current)`). That rejection was
+    // removed on purpose in 2a21456: the documented syntax `selected.0.id` had never worked,
+    // and concept-usage-backfill — THE ONLY AUTONOMOUS WRITER of times_succeeded — had been
+    // broken since ship as a result. Re-asserting the old limitation would re-break autonomous
+    // concept-relevancy increments, so the case is inverted rather than deleted.
     const result = await resolveJsonPathExtract({
       type: "json_path_extract",
       json: scenarioJson,
       path: "expected_emergence.activity_signature.output_shapes_must_include.0",
     });
     expect(result.shape).toBe("json_extracted_value");
+    const body = result.body as { value: unknown; missing: boolean };
+    expect(body.value).toBe("semanticValidatorProposal");
+    // NOTE the asymmetry: `missing` is set to true only by missingResult(); the success path
+    // omits the field entirely, so a consumer testing `missing === false` reads undefined.
+    // Assert "not flagged missing" rather than pretending the field is present.
+    expect(body.missing).not.toBe(true);
+  });
+
+  it("still reports missing for an OUT-OF-RANGE array index", async () => {
+    // The discriminator: array traversal must succeed for a real index and still fail for a
+    // bogus one. Without this, the case above would pass equally well against a resolver that
+    // had stopped checking anything at all.
+    const result = await resolveJsonPathExtract({
+      type: "json_path_extract",
+      json: scenarioJson,
+      path: "expected_emergence.activity_signature.output_shapes_must_include.99",
+    });
     const body = result.body as { value: unknown; missing: boolean };
     expect(body.value).toBe("");
     expect(body.missing).toBe(true);

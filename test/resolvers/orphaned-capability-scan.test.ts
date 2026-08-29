@@ -61,9 +61,10 @@ describe("orphaned_capability_scan", () => {
     expect(body.capability_orphans).not.toContain("fs_read");
     expect(body.capability_orphans).not.toContain("concept_db_health_observer");
     expect(body.gaps_emitted).toBe(1);
-    expect(emits[0].impulse.pointer.type).toBe("substrateGap_write");
-    expect(emits[0].impulse.pointer.gap.category).toBe("orphaned_capability");
-    expect(emits[0].impulse.pointer.gap.id).toBe("orphaned-capability-problem_detection");
+    const _w = emits.filter((e: any) => e.impulse.pointer.type === "substrateGap_write");
+    expect(_w.length).toBe(1);
+    expect(_w[0].impulse.pointer.gap.category).toBe("orphaned_capability");
+    expect(_w[0].impulse.pointer.gap.id).toBe("orphaned-capability-problem_detection");
   });
 
   it("does not emit for an invoked resolver", async () => {

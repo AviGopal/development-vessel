@@ -48,17 +48,28 @@ afterEach(() => {
   global.fetch = originalFetch;
 });
 
+// Pin the discovery endpoint explicitly instead of inheriting it. The resolver reads
+// `process.env["DISCOVERY_ENDPOINT"] ?? "http://127.0.0.1:8100"`, and `??` falls back only
+// on null/undefined — NOT on "". This container exports DISCOVERY_ENDPOINT as an EMPTY
+// STRING, so the default never applied, the endpoint resolved to "", and the resolver
+// fetched a hostless "/resolve". That missed every registered mock URL, the harness
+// returned its default `{vessels: []}` at status 200, and the scan reported 0 connected
+// vessels — a lookup failure wearing the costume of a healthy empty fleet.
+const DISCOVERY = "http://127.0.0.1:8100";
+const ACTIVITY = "http://127.0.0.1:8080";
+const GOAL_HOST = "http://127.0.0.1:8210";
+
 describe("vessel_exercise_scan", () => {
   it("returns empty report when no vessels are connected", async () => {
-    fetchMock.setResponse("http://127.0.0.1:8100", { vessels: [] });
-    fetchMock.setResponse("http://127.0.0.1:8080/v2/activities/execution-traces?limit=500", {
+    fetchMock.setResponse(`${DISCOVERY}/resolve`, { vessels: [] });
+    fetchMock.setResponse(`${ACTIVITY}/v2/activities/execution-traces?limit=500`, {
       executions: [],
     });
-    fetchMock.setResponse("http://127.0.0.1:8080/v2/impulses/resolutions?limit=500", {
+    fetchMock.setResponse(`${ACTIVITY}/v2/impulses/resolutions?limit=500`, {
       resolutions: [],
     });
 
-    const result = await resolveVesselExerciseScan({ type: "vessel_exercise_scan" });
+    const result = await resolveVesselExerciseScan({ type: "vessel_exercise_scan", discoveryEndpoint: DISCOVERY, activityEndpoint: ACTIVITY, goalHostEndpoint: GOAL_HOST });
 
     expect(result.shape).toBe("vesselExerciseReport");
     expect(result.body).toMatchObject({
@@ -73,22 +84,30 @@ describe("vessel_exercise_scan", () => {
     const now = Date.now();
     const recentHeartbeat = new Date(now - 1000 * 60 * 5).toISOString();
 
-    fetchMock.setResponse("http://127.0.0.1:8100", {
+    fetchMock.setResponse(`${DISCOVERY}/resolve`, {
       vessels: [
-        { vessel_id: "vessel-a", last_heartbeat: recentHeartbeat },
-        { vessel_id: "vessel-b", last_heartbeat: recentHeartbeat },
+        // Registry payload uses the discovery-vessel wire names (vesselId/lastSeen);
+        // the resolver maps them to vessel_id/last_heartbeat internally. Mocking the
+        // internal names leaves both fields undefined, so every vessel is dropped by
+        // the `!v.vessel_id || !v.last_heartbeat` guard and the scan reports zero.
+        // See discovery-vessel/src/resolvers.ts:69,79.
+        { vesselId: "vessel-a", lastSeen: recentHeartbeat },
+        { vesselId: "vessel-b", lastSeen: recentHeartbeat },
       ],
     });
-    fetchMock.setResponse("http://127.0.0.1:8080/v2/activities/execution-traces?limit=500", {
+    fetchMock.setResponse(`${ACTIVITY}/v2/activities/execution-traces?limit=500`, {
       executions: [],
     });
-    fetchMock.setResponse("http://127.0.0.1:8080/v2/impulses/resolutions?limit=500", {
+    fetchMock.setResponse(`${ACTIVITY}/v2/impulses/resolutions?limit=500`, {
       resolutions: [],
     });
-    fetchMock.setResponse("http://127.0.0.1:8210/run-goal", { success: true });
+    fetchMock.setResponse(`${GOAL_HOST}/run-goal`, { success: true });
 
     const result = await resolveVesselExerciseScan({
       type: "vessel_exercise_scan",
+      discoveryEndpoint: DISCOVERY,
+      activityEndpoint: ACTIVITY,
+      goalHostEndpoint: GOAL_HOST,
       window_ms: 24 * 60 * 60 * 1000,
     });
 
@@ -105,10 +124,10 @@ describe("vessel_exercise_scan", () => {
     const recentHeartbeat = new Date(now - 1000 * 60 * 5).toISOString();
     const recentExercise = new Date(now - 1000 * 60 * 30).toISOString();
 
-    fetchMock.setResponse("http://127.0.0.1:8100", {
-      vessels: [{ vessel_id: "vessel-a", last_heartbeat: recentHeartbeat }],
+    fetchMock.setResponse(`${DISCOVERY}/resolve`, {
+      vessels: [{ vesselId: "vessel-a", lastSeen: recentHeartbeat }],
     });
-    fetchMock.setResponse("http://127.0.0.1:8080/v2/activities/execution-traces?limit=500", {
+    fetchMock.setResponse(`${ACTIVITY}/v2/activities/execution-traces?limit=500`, {
       executions: [
         {
           vessel_id: "vessel-a",
@@ -117,12 +136,15 @@ describe("vessel_exercise_scan", () => {
         },
       ],
     });
-    fetchMock.setResponse("http://127.0.0.1:8080/v2/impulses/resolutions?limit=500", {
+    fetchMock.setResponse(`${ACTIVITY}/v2/impulses/resolutions?limit=500`, {
       resolutions: [],
     });
 
     const result = await resolveVesselExerciseScan({
       type: "vessel_exercise_scan",
+      discoveryEndpoint: DISCOVERY,
+      activityEndpoint: ACTIVITY,
+      goalHostEndpoint: GOAL_HOST,
       window_ms: 24 * 60 * 60 * 1000,
     });
 
@@ -136,20 +158,23 @@ describe("vessel_exercise_scan", () => {
     const now = Date.now();
     const recentHeartbeat = new Date(now - 1000 * 60 * 5).toISOString();
 
-    fetchMock.setResponse("http://127.0.0.1:8100", {
-      vessels: [{ vessel_id: "vessel-stale", last_heartbeat: recentHeartbeat }],
+    fetchMock.setResponse(`${DISCOVERY}/resolve`, {
+      vessels: [{ vesselId: "vessel-stale", lastSeen: recentHeartbeat }],
     });
-    fetchMock.setResponse("http://127.0.0.1:8080/v2/activities/execution-traces?limit=500", {
+    fetchMock.setResponse(`${ACTIVITY}/v2/activities/execution-traces?limit=500`, {
       executions: [],
     });
-    fetchMock.setResponse("http://127.0.0.1:8080/v2/impulses/resolutions?limit=500", {
+    fetchMock.setResponse(`${ACTIVITY}/v2/impulses/resolutions?limit=500`, {
       resolutions: [],
     });
-    fetchMock.setResponse("http://127.0.0.1:8210/run-goal", new Error("probe failed"));
+    fetchMock.setResponse(`${GOAL_HOST}/run-goal`, new Error("probe failed"));
     fetchMock.setResponse("http://127.0.0.1:8090/v2/impulses/resolve", { success: true });
 
     const result = await resolveVesselExerciseScan({
       type: "vessel_exercise_scan",
+      discoveryEndpoint: DISCOVERY,
+      activityEndpoint: ACTIVITY,
+      goalHostEndpoint: GOAL_HOST,
       window_ms: 24 * 60 * 60 * 1000,
       emit_gap: true,
     });

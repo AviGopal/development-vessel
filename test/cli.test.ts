@@ -44,8 +44,14 @@ describe("CLI — call-resolver", () => {
       JSON.stringify({ cwd: process.cwd() }),
     ]);
     expect(result.exitCode).toBe(0);
-    const parsed = JSON.parse(result.stdout) as { shape: string; body: unknown };
-    expect(parsed.shape).toBe("commandResult");
+    const parsed = JSON.parse(result.stdout) as { shape: string; body: { commitHash?: string } };
+    // `call-resolver` PASSES THROUGH the resolver's own shape; it does not wrap results in an
+    // envelope. `commandResult` was asserted here but is produced nowhere in src/ and has no
+    // history in cli.ts — the expectation was never satisfiable. It went unnoticed because the
+    // case failed earlier, on exitCode: git_status hardcoded /workspace/goal-host-vessel and
+    // exited 1 with ENOENT, so this line was never reached.
+    expect(parsed.shape).toBe("gitStatus");
+    expect(typeof parsed.body.commitHash).toBe("string");
   });
 
   it("exits 1 when resolver type is missing", async () => {

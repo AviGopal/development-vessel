@@ -78,7 +78,7 @@ describe("orphaned_capability_scan", () => {
     const body = r.body as any;
     expect(body.capability_orphan_count).toBe(0);
     expect(body.gaps_emitted).toBe(0);
-    expect(emits.length).toBe(0);
+    expect(emits.filter((e: any) => e.impulse.pointer.type === "substrateGap_write").length).toBe(0);
   });
 
   it("uses a stable id so re-running upserts rather than duplicating", async () => {

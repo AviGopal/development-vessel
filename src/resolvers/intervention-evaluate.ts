@@ -160,10 +160,19 @@ async function isSubstrateAuthoredFile(targetPath: string): Promise<boolean> {
   ];
   for (const root of roots) {
     if (!vessel || !subPath) break;
-    try {
-      const head = (await readFile(join(root, vessel, subPath), "utf-8")).slice(0, 2048);
-      if (head.includes("Substrate-Authored-By:") || head.includes("substrate-authored:")) return true;
-    } catch { /* try next root */ }
+    // TWO LAYOUTS, and only one of them was tried. The runtime root holds vessels directly
+    // (/vessels/<vessel>/...), so stripping "repos/" is right there. WORKSPACE_ROOT does NOT:
+    // its real shape is <root>/repos/<vessel>/..., so the stripped form looked for
+    // /workspace/<vessel>/... and never found the file. The trailer check therefore returned
+    // false for every file under the workspace layout, and this gate — the S3 push-away
+    // primitive that REFUSEs operator edits of substrate-authored files under strict policy —
+    // silently degraded to ACCEPT there. Try both shapes per root.
+    for (const candidate of [join(root, vessel, subPath), join(root, "repos", vessel, subPath)]) {
+      try {
+        const head = (await readFile(candidate, "utf-8")).slice(0, 2048);
+        if (head.includes("Substrate-Authored-By:") || head.includes("substrate-authored:")) return true;
+      } catch { /* try next candidate */ }
+    }
   }
   // (2) Git authorship: the file's most recent commit in the per-vessel push
   // clone was authored by the substrate. Robust where the in-file trailer is

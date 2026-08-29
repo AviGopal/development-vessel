@@ -56,6 +56,7 @@ import { resolveMarkdownSplitSections } from "../resolvers/markdown-split-sectio
 import { resolveStalePointerEmit } from "../resolvers/stale-pointer-emit.js";
 import { default as resolveFailureModeSummary } from "../resolvers/failure-mode-summary.js";
 import { resolvePhantomTraceScan } from "../resolvers/phantom-trace-scan.js";
+import { resolveCyclicFlowScan } from "../resolvers/cyclic-flow-scan.js";
 import { resolveDeadEndDecisionScan } from "../resolvers/dead-end-decision-scan.js";
 import { resolveDetectorYieldRegistry } from "../resolvers/detector-yield-registry.js";
 import { resolveTemplateInputLintScan } from "../resolvers/template-input-lint-scan.js";
@@ -377,6 +378,8 @@ async function dispatchInner(pointer: AnyPointer): Promise<ResolverResult> {
       return resolveStalePointerEmit(p as Parameters<typeof resolveStalePointerEmit>[0]);
     case "phantom_trace_scan":
       return resolvePhantomTraceScan(p as Parameters<typeof resolvePhantomTraceScan>[0]);
+    case "cyclic_flow_scan":
+      return resolveCyclicFlowScan(p as Parameters<typeof resolveCyclicFlowScan>[0]);
     case "dead_end_decision_scan":
       return resolveDeadEndDecisionScan(p as Parameters<typeof resolveDeadEndDecisionScan>[0]);
     case "detector_yield_registry":

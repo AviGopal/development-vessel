@@ -190,6 +190,7 @@ export const config = {
       // finding. Companion to detect-stale-pointer; embodies the
       // substrate_self_detection_principle (concept_9ldsmRgqSTd5).
       "phantom_trace_scan",
+      "cyclic_flow_scan",
       // Deterministic decision-without-action detector (2026-06-18): intra-
       // trajectory scan of execution_trace_content.tasks[] for an actionable
       // decision/selection task (e.g. slot-binding's select_or_produce) that

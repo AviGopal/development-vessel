@@ -2,6 +2,17 @@ import { describe, it, expect, afterEach } from "bun:test";
 import { resolveOrphanedCapabilityScan } from "../../src/resolvers/orphaned-capability-scan.js";
 
 const originalFetch = globalThis.fetch;
+import { mkdirSync } from "node:fs";
+
+// HERMETIC WORKSPACE_ROOT. findCandidateConsumers — the second consumption surface added by
+// 5693903 — shells out to `grep -rl` over ${WORKSPACE_ROOT}/repos. With the real repo present,
+// every fixture shape has a "consumer" in some source file and is never classified an orphan,
+// so these fixtures stopped describing the case they were written for. Point it at an empty
+// tree so the fetch-mocked fixtures remain the only input to the classification.
+const EMPTY_WS = "/tmp/ocs-empty-ws";
+mkdirSync(`${EMPTY_WS}/repos`, { recursive: true });
+process.env.WORKSPACE_ROOT = EMPTY_WS;
+
 afterEach(() => { globalThis.fetch = originalFetch; });
 
 function mockRouter(handlers: Array<(url: string, init?: RequestInit) => Response | null>) {

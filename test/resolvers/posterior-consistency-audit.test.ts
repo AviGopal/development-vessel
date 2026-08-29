@@ -27,7 +27,19 @@ describe("posterior_consistency_audit", () => {
     ];
     const emitCalls: any[] = [];
     mockRouter([
-      (url) => url.includes("/v2/activities/templates") ? new Response(JSON.stringify({ templates }), { status: 200 }) : null,
+      // PAGINATE. The resolver loops `offset += rows.length` until a page comes back empty
+      // (or `total` is reached), guarded at 200 iterations. A mock that returns the SAME page
+      // for every offset never terminates that loop: it ran all 200 iterations and accumulated
+      // 200 copies of the single fixture template, so drifted_cells.length was 200 instead of 1.
+      // The resolver's pagination is correct; the mock has to emulate the end of the list.
+      (url) => {
+        if (!url.includes("/v2/activities/templates")) return null;
+        const off = Number(new URL(url, "http://x").searchParams.get("offset") ?? 0);
+        return new Response(
+          JSON.stringify({ templates: templates.slice(off), total: templates.length }),
+          { status: 200 },
+        );
+      },
       (url) => url.includes("/v2/activities/execution-traces") ? new Response(JSON.stringify({ executions }), { status: 200 }) : null,
       (url, init) => url.endsWith("/v2/impulses/resolve")
         ? (emitCalls.push(JSON.parse(init?.body as string)), new Response("{}", { status: 200 })) : null,
@@ -45,7 +57,19 @@ describe("posterior_consistency_audit", () => {
     const templates = [{ id: "actB", metrics: { thompson_alpha: 50, thompson_beta: 1 } }];
     const executions = [{ activity_id: "actB", status: "failure" }, { activity_id: "actB", status: "failure" }];
     mockRouter([
-      (url) => url.includes("/v2/activities/templates") ? new Response(JSON.stringify({ templates }), { status: 200 }) : null,
+      // PAGINATE. The resolver loops `offset += rows.length` until a page comes back empty
+      // (or `total` is reached), guarded at 200 iterations. A mock that returns the SAME page
+      // for every offset never terminates that loop: it ran all 200 iterations and accumulated
+      // 200 copies of the single fixture template, so drifted_cells.length was 200 instead of 1.
+      // The resolver's pagination is correct; the mock has to emulate the end of the list.
+      (url) => {
+        if (!url.includes("/v2/activities/templates")) return null;
+        const off = Number(new URL(url, "http://x").searchParams.get("offset") ?? 0);
+        return new Response(
+          JSON.stringify({ templates: templates.slice(off), total: templates.length }),
+          { status: 200 },
+        );
+      },
       (url) => url.includes("/v2/activities/execution-traces") ? new Response(JSON.stringify({ executions }), { status: 200 }) : null,
     ]);
     const r = await resolvePosteriorConsistencyAudit({ type: "posterior_consistency_audit", min_samples: 10 });
@@ -60,7 +84,19 @@ describe("posterior_consistency_audit", () => {
       ...Array.from({ length: 10 }, () => ({ activity_id: "actC", status: "failure" })),
     ];
     mockRouter([
-      (url) => url.includes("/v2/activities/templates") ? new Response(JSON.stringify({ templates }), { status: 200 }) : null,
+      // PAGINATE. The resolver loops `offset += rows.length` until a page comes back empty
+      // (or `total` is reached), guarded at 200 iterations. A mock that returns the SAME page
+      // for every offset never terminates that loop: it ran all 200 iterations and accumulated
+      // 200 copies of the single fixture template, so drifted_cells.length was 200 instead of 1.
+      // The resolver's pagination is correct; the mock has to emulate the end of the list.
+      (url) => {
+        if (!url.includes("/v2/activities/templates")) return null;
+        const off = Number(new URL(url, "http://x").searchParams.get("offset") ?? 0);
+        return new Response(
+          JSON.stringify({ templates: templates.slice(off), total: templates.length }),
+          { status: 200 },
+        );
+      },
       (url) => url.includes("/v2/activities/execution-traces") ? new Response(JSON.stringify({ executions }), { status: 200 }) : null,
     ]);
     const r = await resolvePosteriorConsistencyAudit({ type: "posterior_consistency_audit" });

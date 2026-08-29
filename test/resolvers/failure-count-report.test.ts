@@ -3,11 +3,25 @@ import { describe, it, expect, mock, beforeEach, afterEach } from "bun:test";
 describe("resolveFailureCountReport", () => {
   const originalFetch = globalThis.fetch;
 
-  afterEach(() => {
-    globalThis.fetch = originalFetch;
+  // The resolver builds `new URL("/v2/activities/execution-traces", endpoint)` from
+  // `process.env.METABOB_ENDPOINT ?? "http://127.0.0.1:8080"`. `??` falls back only on
+  // null/undefined — NOT on "" — and this container exports METABOB_ENDPOINT as an EMPTY
+  // STRING, so the default never applied and the URL constructor threw
+  // ERR_INVALID_URL ("/v2/activities/execution-traces" cannot be parsed as a URL) before
+  // any assertion ran. Pin it so the suite does not depend on ambient env, and restore it
+  // exactly — including the unset case — so this file never becomes a polluter itself.
+  const ORIGINAL_ENDPOINT = process.env.METABOB_ENDPOINT;
+  beforeEach(() => {
+    process.env.METABOB_ENDPOINT = "http://127.0.0.1:8080";
   });
 
-  it("returns shape failure_count_report with topTemplates array", async () => {
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    if (ORIGINAL_ENDPOINT === undefined) delete process.env.METABOB_ENDPOINT;
+    else process.env.METABOB_ENDPOINT = ORIGINAL_ENDPOINT;
+  });
+
+  it("returns shape failure_count_report with templates array", async () => {
     const nowMs = Math.floor(Date.now() / 1000) * 1000;
     const recentIso = new Date(nowMs - 3600 * 1000).toISOString(); // 1 hour ago
 
@@ -45,17 +59,23 @@ describe("resolveFailureCountReport", () => {
 
     const result = await resolveFailureCountReport({ type: "failure_count_report" });
 
-    expect(result.shape).toBe("failure_count_report");
+    // The resolver ALWAYS emits `failureCountReport` (failure-count-report.ts:69). The
+    // snake_case `failure_count_report` used in the pointer above is an accepted INPUT
+    // alias only (impulses.ts:935 alongside the camelCase case at :257) — an input alias
+    // is not an output shape, and the emitted shape is what downstream binds against.
+    expect(result.shape).toBe("failureCountReport");
     const body = result.body as {
-      topTemplates: Array<{ templateId: string; failureCount: number }>;
+      templates: Array<{ templateId: string; failureCount: number }>;
       windowHours: number;
       generatedAt: string;
     };
-    expect(Array.isArray(body.topTemplates)).toBe(true);
-    expect(body.topTemplates.length).toBeLessThanOrEqual(8);
+    // The resolver emits `body.templates` (failure-count-report.ts:70). Nothing anywhere
+    // consumes a `topTemplates` field on this shape — that name was stale.
+    expect(Array.isArray(body.templates)).toBe(true);
+    expect(body.templates.length).toBeLessThanOrEqual(8);
     expect(body.windowHours).toBe(24);
     // Top entry should be gamma (count=3)
-    const top = body.topTemplates[0];
+    const top = body.templates[0];
     if (top !== undefined) {
       expect(top.templateId).toBe("tmpl:gamma");
       expect(top.failureCount).toBe(3);
@@ -90,19 +110,23 @@ describe("resolveFailureCountReport", () => {
     );
 
     const result = await resolveFailureCountReport({ type: "failure_count_report" });
-    expect(result.shape).toBe("failure_count_report");
+    // The resolver ALWAYS emits `failureCountReport` (failure-count-report.ts:69). The
+    // snake_case `failure_count_report` used in the pointer above is an accepted INPUT
+    // alias only (impulses.ts:935 alongside the camelCase case at :257) — an input alias
+    // is not an output shape, and the emitted shape is what downstream binds against.
+    expect(result.shape).toBe("failureCountReport");
     const body = result.body as {
-      topTemplates: Array<{ templateId: string; failureCount: number }>;
+      templates: Array<{ templateId: string; failureCount: number }>;
     };
-    expect(body.topTemplates.length).toBeGreaterThanOrEqual(1);
-    const first = body.topTemplates[0];
+    expect(body.templates.length).toBeGreaterThanOrEqual(1);
+    const first = body.templates[0];
     if (first !== undefined) {
       expect(first.templateId).toBe("tmpl:x");
       expect(first.failureCount).toBe(10);
     }
   });
 
-  it("returns empty topTemplates when both endpoints return no usable data", async () => {
+  it("returns empty templates when both endpoints return no usable data", async () => {
     globalThis.fetch = mock(async () => {
       return new Response(JSON.stringify({}), {
         status: 200,
@@ -115,9 +139,13 @@ describe("resolveFailureCountReport", () => {
     );
 
     const result = await resolveFailureCountReport({ type: "failure_count_report" });
-    expect(result.shape).toBe("failure_count_report");
-    const body = result.body as { topTemplates: unknown[] };
-    expect(Array.isArray(body.topTemplates)).toBe(true);
-    expect(body.topTemplates.length).toBe(0);
+    // The resolver ALWAYS emits `failureCountReport` (failure-count-report.ts:69). The
+    // snake_case `failure_count_report` used in the pointer above is an accepted INPUT
+    // alias only (impulses.ts:935 alongside the camelCase case at :257) — an input alias
+    // is not an output shape, and the emitted shape is what downstream binds against.
+    expect(result.shape).toBe("failureCountReport");
+    const body = result.body as { templates: unknown[] };
+    expect(Array.isArray(body.templates)).toBe(true);
+    expect(body.templates.length).toBe(0);
   });
 });

@@ -72,7 +72,7 @@ export function parseDisposition(answer: string): DispositionVerb | null {
   const t = String(answer ?? "").toLowerCase();
   if (!t.trim()) return null;
   if (/\bredefine\b|\bre-define\b|\brescope\b|\breword\b/.test(t)) return "redefine";
-  if (/\bgrant\s+access\b|\baccess\s+granted\b|\bcredential/.test(t)) return "grant_access";
+  if (/\bgrant[\s_-]+access\b|\baccess\s+granted\b|\bcredential/.test(t)) return "grant_access";
   if (/\bprovide[sd]?[\s_-]+(missing[\s_-]+)?info(rmation)?\b|\bmissing\s+info(rmation)?\b|\bhere'?s\s+the\s+fact\b/.test(t)) {
     return "provide_information";
   }

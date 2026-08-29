@@ -60,3 +60,39 @@ describe("escalation_disposition_apply — the bound", () => {
     expect(Number.isFinite(HUMAN_EXEMPTION_ATTEMPTS)).toBe(true);
   });
 });
+
+describe("parseDisposition accepts the underscored verb names (2026-08-29)", () => {
+  // THE REGRESSION. The four verb names the system writes into every gap record are
+  // drop / redefine / provide_information / grant_access, so an operator answering an escalation
+  // naturally types one of them. The patterns required WHITESPACE between the words, so the
+  // underscored literals matched nothing and the answer was silently a no-op — measured live on
+  // the first real escalation answer this channel ever received. Since the escalation channel is
+  // the only designed escape from the hopeless() category seal, a verb that cannot be parsed is a
+  // seal that cannot be opened.
+  it("accepts the exact literals the system itself emits", () => {
+    expect(parseDisposition("PROVIDE_INFORMATION. here is the fact")).toBe("provide_information");
+    expect(parseDisposition("grant_access to the deploy key")).toBe("grant_access");
+  });
+
+  it("accepts hyphenated forms too", () => {
+    expect(parseDisposition("provide-information: the schema is v3")).toBe("provide_information");
+    expect(parseDisposition("grant-access please")).toBe("grant_access");
+  });
+
+  it("STILL accepts the spaced prose forms — this only widens", () => {
+    expect(parseDisposition("Providing missing information: the schema is v3")).toBe("provide_information");
+    expect(parseDisposition("Grant access to the deploy key.")).toBe("grant_access");
+  });
+
+  it("STILL returns null on an answer with no verb", () => {
+    // The no-op on an unrecognised answer is deliberate and must survive the widening: a guess
+    // would mutate a gap on a keyword the human never intended.
+    expect(parseDisposition("Interesting, I'll look at this next week.")).toBeNull();
+    expect(parseDisposition("")).toBeNull();
+  });
+
+  it("does not let the widening break verb precedence", () => {
+    // redefine is checked first on purpose; an answer that mentions both must still redefine.
+    expect(parseDisposition("Redefine it; drop the old wording.")).toBe("redefine");
+  });
+});

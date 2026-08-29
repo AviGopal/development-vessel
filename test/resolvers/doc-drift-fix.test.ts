@@ -49,27 +49,37 @@ describe("doc_drift_fix / parseJson", () => {
 });
 
 describe("doc_drift_fix / reachGate", () => {
+  // The model is asked for PER-CLAIM judgments — {"claims":[{"n":1,"still_asserted":bool}],
+  // "regression":bool,"reason":"..."} — and `reached` is COMPUTED from them by the resolver
+  // (doc-drift-fix.ts:133-146). It is deliberately NOT read from a raw model boolean: models
+  // emitted `reached:false` alongside reasons stating every claim was resolved, and per-claim
+  // booleans are far harder to garble. These fixtures previously returned the old raw-`reached`
+  // schema, which has no `claims` array, so reachGate bailed at
+  // `if (!v || !Array.isArray(v.claims)) return null` and every assertion read `undefined`.
+  // Mocking a raw `reached` again would re-introduce trust in the field that was garbling.
   const claimQuote = "It exposes no HTTP endpoints and cannot be reached.";
   const claims = [{ quote: claimQuote }];
 
   it("REJECTS a revision that still leaves a claim asserted (reached:false)", async () => {
-    globalThis.fetch = fakeLlm(JSON.stringify({ reached: false, unresolved: [claimQuote], regression: false, reason: "still asserted" }));
+    globalThis.fetch = fakeLlm(JSON.stringify({ claims: [{ n: 1, still_asserted: true }], regression: false, reason: "still asserted" }));
     const v = await reachGate("docs/thing.md", "It exposes no HTTP endpoints and cannot be reached. (unchanged)", claims);
     expect(v?.reached).toBe(false);
+    // reached is DERIVED: the still_asserted claim must surface by quote in unresolved[]
+    expect(v?.unresolved).toEqual([claimQuote]);
     // the resolver treats reached:false as UNFAVORABLE (do not land)
     const favorable = !!v && v.reached && !v.regression;
     expect(favorable).toBe(false);
   });
 
   it("REJECTS a revision that resolves the claim but introduces a regression", async () => {
-    globalThis.fetch = fakeLlm(JSON.stringify({ reached: true, unresolved: [], regression: true, reason: "falsified a previously-true line" }));
+    globalThis.fetch = fakeLlm(JSON.stringify({ claims: [{ n: 1, still_asserted: false }], regression: true, reason: "falsified a previously-true line" }));
     const v = await reachGate("docs/thing.md", "It exposes /health now (but broke another claim).", claims);
     const favorable = !!v && v.reached && !v.regression;
     expect(favorable).toBe(false);
   });
 
   it("ACCEPTS a revision that removes the claim with no regression (favorable)", async () => {
-    globalThis.fetch = fakeLlm(JSON.stringify({ reached: true, unresolved: [], regression: false, reason: "claim removed" }));
+    globalThis.fetch = fakeLlm(JSON.stringify({ claims: [{ n: 1, still_asserted: false }], regression: false, reason: "claim removed" }));
     const v = await reachGate("docs/thing.md", "The foo vessel exposes /health and /resolve over HTTP.", claims);
     expect(v?.reached).toBe(true);
     const favorable = !!v && v.reached && !v.regression;

@@ -136,7 +136,9 @@ export async function resolveLlmQuotaObserver(
     };
   }
 
-  let parsed: { traces?: ExecutionTrace[] } | ExecutionTrace[];
+  // The type declared only `traces`, which is why the wrong read key never surfaced as an
+  // error: the contract was mis-encoded at the type level, so the compiler agreed with it.
+  let parsed: { executions?: ExecutionTrace[]; traces?: ExecutionTrace[] } | ExecutionTrace[];
   try {
     parsed = (await resp.json()) as typeof parsed;
   } catch (err) {
@@ -158,8 +160,15 @@ export async function resolveLlmQuotaObserver(
       },
     };
   }
+  // `executions` is the key /v2/activities/execution-traces actually returns
+  // (ListExecutionTracesResponse: {executions,total,limit,offset}). Reading only `traces` gave
+  // undefined -> [], so this observer saw an EMPTY trace stream against the real API and
+  // reported no rate limiting and no LLM activity — the reassuring answer, always. Same defect
+  // and same fix as vessel-health-report, resolver-tier-cost-summary and failure-count-report.
   const traces: ExecutionTrace[] = Array.isArray(parsed)
     ? parsed
+    : Array.isArray(parsed.executions)
+    ? (parsed.executions as ExecutionTrace[])
     : Array.isArray(parsed.traces)
     ? parsed.traces
     : [];

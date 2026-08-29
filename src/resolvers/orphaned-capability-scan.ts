@@ -223,6 +223,46 @@ async function fetchInvokedResolvers(
   return firstPageEmpty ? null : invoked;
 }
 
+/**
+ * Files that already REFERENCE this shape — the candidate consumers a rewire would point at.
+ *
+ * REWIRE BEFORE MINT (law 3, 2026-08-29). Every orphan gap this scan emitted said "Author an
+ * activity that invokes resolver X" — 114 of 114 measured. That prescription satisfies the orphan
+ * METRIC by creating a consumer that exists only to consume, which is the documented
+ * poison_producer path (12 such gaps open, and the category itself sits at 346 attempts / 0 lands).
+ *
+ * The real shape of these defects is a producer/consumer SURFACE MISMATCH: an intended consumer
+ * already exists and reads a different key, tree, file or window. Three verified instances from one
+ * session, every one repaired by rewiring and none by minting — solicitation_outcome_scan read
+ * obsidian episodes keyed on solicitation_ids while answers landed in stateful-ui keyed on
+ * panel_id; mitosis cutover checked freshness against /vessels while committing into the push
+ * clone; reuse lineage was written to parent_* fields whose CC1 assertion rejected it.
+ *
+ * A rewire needs to know WHO already references the shape. The gap could not say, so it asked for
+ * the only repair it could describe. This supplies the missing half.
+ *
+ * Best-effort and bounded: grep is cheap, the result is advisory, and on any failure the gap simply
+ * carries no candidates and falls back to the author-a-consumer wording.
+ */
+function findCandidateConsumers(shape: string): string[] {
+  try {
+    const root = process.env["WORKSPACE_ROOT"] ?? "/workspace";
+    const out = Bun.spawnSync(
+      ["grep", "-rl", "--include=*.ts", "--exclude-dir=node_modules", shape, `${root}/repos`],
+      { stdout: "pipe", stderr: "pipe" },
+    );
+    return new TextDecoder()
+      .decode(out.stdout)
+      .split("\n")
+      .map((l) => l.trim())
+      .filter((l) => l.length > 0 && !l.includes(".test."))
+      .map((l) => l.replace(`${root}/`, ""))
+      .slice(0, 8);
+  } catch {
+    return [];
+  }
+}
+
 async function emitOrphanGap(
   emitUrl: string,
   apiKey: string,
@@ -230,6 +270,8 @@ async function emitOrphanGap(
   liveCount: number,
   invokedCount: number,
 ): Promise<boolean> {
+  const candidateConsumers = findCandidateConsumers(shape);
+  const hasCandidates = candidateConsumers.length > 0;
   const body = {
     impulse: {
       pointer: {
@@ -240,9 +282,17 @@ async function emitOrphanGap(
           source: "substrate_detected",
           summary:
             `Resolver "${shape}" is a live registered capability but is invoked by 0 of the activity corpus ` +
-            `(${invokedCount}/${liveCount} live resolvers are ever invoked). Author an activity that invokes ` +
-            `resolver "${shape}" (deterministic tier — NOT an LLM re-derivation) and routes its output onward, ` +
-            `so the substrate expresses the capability surface it advertises.`,
+            `(${invokedCount}/${liveCount} live resolvers are ever invoked). ` +
+            (hasCandidates
+              ? `REWIRE BEFORE MINT (law 3): these files already reference "${shape}" and are the likely ` +
+                `intended consumers — ${candidateConsumers.join(", ")}. Check whether one of them reads a ` +
+                `DIFFERENT surface than the producer writes (a different key, tree, file or window); that ` +
+                `mismatch, not an absent consumer, is the usual cause. Point the existing consumer at the ` +
+                `producer's actual surface. Only if none of them is meant to consume this shape should a new ` +
+                `activity be authored.`
+              : `No file outside tests references "${shape}", so no rewire target was found. Author an ` +
+                `activity that invokes it (deterministic tier — NOT an LLM re-derivation) and routes its ` +
+                `output onward, so the substrate expresses the capability surface it advertises.`),
           detected_at: new Date().toISOString(),
           status: "open",
           classification_metadata: {
@@ -251,10 +301,17 @@ async function emitOrphanGap(
             shape,
             live_resolver: true,
             invocation_count: 0,
-            suggested_remediation:
-              "Dispatch draft-gap-closing-activity / gap-compose against this gap to author a bridge " +
-              "activity whose task invokes this resolver directly. Prefer the deterministic resolver " +
-              "over an llm_completion_dispatch re-derivation of the same capability.",
+            candidate_consumers: candidateConsumers,
+            repair_direction: hasCandidates ? "rewire" : "mint",
+            suggested_remediation: hasCandidates
+              ? `Inspect the candidate consumers (${candidateConsumers.join(", ")}) for a surface mismatch ` +
+                `against the producer of "${shape}" — wrong key, wrong tree, wrong file, wrong window — and ` +
+                `repair the CONSUMER to read what the producer actually writes. Minting a new activity to ` +
+                `invoke this resolver satisfies the orphan count while adding a consumer nobody wanted ` +
+                `(law 3, and the poison_producer class).`
+              : "No existing consumer references this shape. Dispatch draft-gap-closing-activity / " +
+                "gap-compose to author a bridge activity whose task invokes this resolver directly. " +
+                "Prefer the deterministic resolver over an llm_completion_dispatch re-derivation.",
           },
         },
       },

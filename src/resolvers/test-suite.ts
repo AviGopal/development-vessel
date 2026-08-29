@@ -111,6 +111,26 @@ export async function resolveTestSuite(pointer: Record<string, unknown>): Promis
   const landedSha = typeof pointer.landed_sha === "string" ? pointer.landed_sha.trim() : undefined;
   const timeoutMs = typeof pointer.timeout_ms === "number" && pointer.timeout_ms > 0 ? pointer.timeout_ms : DEFAULT_TIMEOUT_MS;
   const budgetSec = Math.ceil(timeoutMs / 1000);
+  // PER-TEST TIMEOUT: bun defaults to 5000ms, which is a LOAD SENSOR, not a correctness one.
+  //
+  // Measured 2026-08-29 on this vessel's suite, five full runs at ONE commit with NO code
+  // change: 94, 95, 96, 97, 97 failures, wall time 52s -> 325s as the container's load
+  // average climbed to 12.75 (the substrate composes concurrently with its own gate). In one
+  // run 10 of the 97 failures were literally "timed out after 5000ms" — phantom failures
+  // that appear and disappear with ambient load.
+  //
+  // That is fatal for the caller this resolver exists to serve. precutover_regression stores
+  // a baseline of failing tests and refuses when a staged tree adds any, so a baseline taken
+  // on an idle container and compared against a staged run on a busy one MANUFACTURES
+  // regressions the change did not cause — the false-refusal class fixed in 6d1562c.
+  //
+  // With 20000ms the same suite reports 94 failures and ZERO timeouts at load 11.6 AND at
+  // load 24.4 — identical across a 20x load range, where the 5s default drifted by 3. This
+  // does not hide slow tests: `timeout ${budgetSec}` still bounds the whole run, so a
+  // genuinely hung test fails the suite rather than silently passing.
+  const perTestTimeoutMs = typeof pointer.per_test_timeout_ms === "number" && pointer.per_test_timeout_ms > 0
+    ? Math.floor(pointer.per_test_timeout_ms)
+    : 20000;
 
   const shellEndpoint = await discoverShellEndpoint();
   if (!shellEndpoint) {
@@ -143,7 +163,7 @@ export async function resolveTestSuite(pointer: Record<string, unknown>): Promis
   const command =
     `ROOT=${JSON.stringify(preferredRoot)}; [ -d "$ROOT" ] || ROOT=${JSON.stringify(fallbackRoot)}; ` +
     `echo "VERIFIED_ROOT=$ROOT"; echo "VERIFIED_HEAD=$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)"; ` +
-    `cd "$ROOT" && ([ -d node_modules ] || timeout 120 bun install >/dev/null 2>&1; timeout ${budgetSec} bun test${testFilter} 2>&1 || true)`;
+    `cd "$ROOT" && ([ -d node_modules ] || timeout 120 bun install >/dev/null 2>&1; timeout ${budgetSec} bun test --timeout ${perTestTimeoutMs}${testFilter} 2>&1 || true)`;
 
   let raw = "";
   try {

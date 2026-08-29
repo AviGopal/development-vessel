@@ -136,3 +136,61 @@ describe("test_suite — only_tests isolation filter", () => {
     expect(cmd).not.toContain(" -t ");
   });
 });
+
+// ---- Per-test timeout (2026-08-29) ----
+//
+// bun's 5000ms default is a LOAD SENSOR, not a correctness one. Measured across five runs of
+// this vessel's suite at ONE commit with no code change: 94/95/96/97/97 failures, 10 of them
+// literal "timed out after 5000ms", drifting with container load. precutover_regression
+// compares a staged run against a stored baseline, so that drift manufactures regressions.
+describe("test_suite — per-test timeout", () => {
+  const originalFetch = globalThis.fetch;
+
+  async function captureCommand(pointer: Record<string, unknown>): Promise<string> {
+    let captured = "";
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const body = typeof init?.body === "string" ? init.body : "";
+      if (body.includes("vesselCapability")) {
+        return new Response(
+          JSON.stringify({ content: { vessels: [{ endpoint: "http://shell.test", resolve_endpoint: "/resolve", health_score: 1 }] } }),
+          { status: 200 },
+        );
+      }
+      if (url.startsWith("http://shell.test")) {
+        captured = String(JSON.parse(body).impulse.pointer.command ?? "");
+        return new Response(JSON.stringify({ stdout: " 1 pass\n 0 fail\n" }), { status: 200 });
+      }
+      return new Response("{}", { status: 200 });
+    }) as typeof fetch;
+    try {
+      await resolveTestSuite({ type: "test_suite", vessel: "development-vessel", ...pointer });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+    return captured;
+  }
+
+  it("passes a per-test timeout well above bun's 5s default", async () => {
+    const cmd = await captureCommand({});
+    expect(cmd).toContain("--timeout 20000");
+  });
+
+  it("still bounds the WHOLE run, so a hung test cannot pass silently", async () => {
+    // The per-test timeout is raised, not removed. `timeout <budget>` wraps the run.
+    const cmd = await captureCommand({});
+    expect(cmd).toMatch(/timeout \d+ bun test/);
+  });
+
+  it("accepts an explicit override", async () => {
+    const cmd = await captureCommand({ per_test_timeout_ms: 45000 });
+    expect(cmd).toContain("--timeout 45000");
+  });
+
+  it("ignores a non-positive or non-numeric override rather than emitting a broken flag", async () => {
+    for (const bad of [0, -1, "20000", null]) {
+      const cmd = await captureCommand({ per_test_timeout_ms: bad });
+      expect(cmd).toContain("--timeout 20000");
+    }
+  });
+});

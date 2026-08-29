@@ -2033,6 +2033,36 @@ function predictLand(gap: Record<string, unknown>): { predicted: boolean; p: num
   return { predicted: p >= Math.max(0.4, baseline), p, baseline };
 }
 
+/**
+ * A compose that never RAN is not a compose that FAILED.
+ *
+ * feature-compose returns `verdict: "BUSY"` / `stage: "capacity"` when the slot cap is
+ * hit, and its own comment marks the distinction as load-bearing: "BUSY, not REFUSED.
+ * Capacity is TRANSIENT — the work is fine, the host is full — whereas REFUSED means
+ * this should not be done." goal-host honours it (backs off 45s and retries). This file
+ * did not: the word BUSY appeared nowhere in it, so a capacity refusal fell through as
+ * a plain `ok:false` into bumpFailedAttempts, which BOTH decays the gap's score and
+ * calls updateCalibration(category, false). Since hopeless() excludes a category at
+ * attempts >= 8 with lands === 0, a run of capacity refusals could seal an ENTIRE
+ * CATEGORY without a single compose ever having run — a non-attempt recorded as a
+ * failed attempt.
+ *
+ * Measured 2026-08-29: `reach_grounding_gap` went from absent (attempts 0) to
+ * attempts=5 / lands=0 in ~6h on refusals alone, three short of sealing, while five
+ * gaps sat at failed_attempts=2 with `approach_decisions[].outcome.joined_at` within
+ * 200-800ms of the pick — orders of magnitude too fast for a compose to have run.
+ *
+ * `environment` was already excluded at the main call site for exactly this reason;
+ * capacity is the same class, so both live here and every call site asks one question.
+ */
+export function isNonAttemptComposeResult(cb: Record<string, unknown> | null | undefined): boolean {
+  if (!cb) return false;
+  if (String(cb.failure_kind ?? "") === "environment") return true;
+  if (String(cb.verdict ?? "") === "BUSY") return true;
+  if (String(cb.stage ?? "") === "capacity") return true;
+  return false;
+}
+
 async function bumpFailedAttempts(gap: Record<string, unknown>, opts: { surprise?: boolean; predictedP?: number } = {}): Promise<void> {
   try {
     const id = String(gap.id ?? "");
@@ -2425,7 +2455,8 @@ async function routeCapabilityGapToNewResolver(
   if (land.landed) {
     const c = await closeLandedGap(gap, land);
     closed = c.closed;
-  } else {
+  } else if (!isNonAttemptComposeResult(cb)) {
+    // A capacity refusal here is a retry, not a failure — see isNonAttemptComposeResult.
     await bumpFailedAttempts(gap);
   }
   return {
@@ -3031,7 +3062,8 @@ export async function resolveGapToFeature(pointer: GapToFeaturePointer): Promise
       const sliceLand = genuineLandSignal(lastBody, !(pointer.dry_run ?? false));
       if (sliceLand.landed) await closeLandedGap(gap, sliceLand);
     }
-    if (!allOk && !pointer.dry_run) await bumpFailedAttempts(gap);
+    // A slice sequence cut short by a capacity refusal never got its attempt either.
+    if (!allOk && !pointer.dry_run && !isNonAttemptComposeResult(lastBody)) await bumpFailedAttempts(gap);
     return { shape: "gapToFeatureReport", body: { ok: allOk, stage: "route_compose", route: "capacity_slice_sequence", gap_id: gap.id, gap_category: gap.category, slices: sliceResults } };
   }
 
@@ -3074,8 +3106,8 @@ export async function resolveGapToFeature(pointer: GapToFeaturePointer): Promise
     // Did not land. EXPECTATION-SETTING: measure the prediction-vs-outcome SURPRISE. A gap the
     // self-model predicted would land but didn't is over-optimistic (high-information) → bump
     // harder; a correctly-predicted fail bumps normally. Feeds the calibrated self-model.
-    if (String(cb.failure_kind ?? "") === "environment") {
-      console.log("[gap-to-feature] environment failure (" + String(cb.failure_kind) + ") — gap credit not bumped");
+    if (isNonAttemptComposeResult(cb)) {
+      console.log("[gap-to-feature] non-attempt (failure_kind=" + String(cb.failure_kind ?? "-") + " verdict=" + String(cb.verdict ?? "-") + " stage=" + String(cb.stage ?? "-") + ") — gap credit not bumped, category calibration untouched");
     } else {
       const pred = predictLand(gap);
       // Bounded one-shot patch_with_tools escalation on an APPLY failure (anchor_not_found /

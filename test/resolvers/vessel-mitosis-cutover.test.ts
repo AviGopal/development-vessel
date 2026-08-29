@@ -321,19 +321,29 @@ describe("vessel_mitosis_cutover", () => {
     );
     await mkdir(join(baseRoot, "src", "resolvers"), { recursive: true });
     await mkdir(join(mitosisRoot, "src", "resolvers"), { recursive: true });
-    // Freshness gate hashes <baseRoot>/src/index.ts. Provide one + compute SHA.
+    // The freshness sentinel is staged_files[0] — NOT src/index.ts. The resolver
+    // defaults to the first staged file precisely because apply-proposal-as-patch hashes
+    // the file it patches, and comparing against src/index.ts "produces base_sha_mismatch
+    // on every mitosis whose target isn't src/index.ts" (vessel-mitosis-cutover.ts:735-740).
+    // This helper predates that change and kept hashing src/index.ts, so every git-aware
+    // test refused with base_sha_mismatch and had done since the sentinel default landed —
+    // 3 permanently-red tests over exactly the git-aware cutover path, in the suite the
+    // precutover_regression gate measures. The code was right; the expectation was stale.
     const baseIndexContent = `// base index for git cutover test\n`;
     await writeFile(join(baseRoot, "src", "index.ts"), baseIndexContent);
-    const { createHash } = await import("node:crypto");
-    const baseSha = createHash("sha256")
-      .update(baseIndexContent)
-      .digest("hex")
-      .slice(0, 12);
     // Live vessel runtime path has the OLD content; it'll get mirrored.
+    const liveTargetContent = "// original (live)\n";
     await writeFile(
       join(baseRoot, "src", "resolvers", "target.ts"),
-      "// original (live)\n",
+      liveTargetContent,
     );
+    const { createHash } = await import("node:crypto");
+    // Hash the SENTINEL the resolver will actually check, with the content it will
+    // actually read there.
+    const baseSha = createHash("sha256")
+      .update(liveTargetContent)
+      .digest("hex")
+      .slice(0, 12);
     // Mitosis dir contains ONLY the staged file with new content.
     await writeFile(
       join(mitosisRoot, "src", "resolvers", "target.ts"),
@@ -354,6 +364,15 @@ describe("vessel_mitosis_cutover", () => {
     spawnSync("git", ["config", "user.name", "Test"], { cwd: hostRepoRoot });
     spawnSync("git", ["add", "."], { cwd: hostRepoRoot });
     spawnSync("git", ["commit", "-m", "baseline"], { cwd: hostRepoRoot });
+    // The cutover does a clean-slate `git reset --hard origin/dev` before committing, so
+    // it refuses ("clone_reset_failed") against a repo with no origin. This fixture was
+    // written before that hardening existed and never grew a remote, which is the second
+    // reason the git-aware tests were permanently red. Give it a real bare origin so
+    // origin/dev resolves and the reset exercises the path it is meant to exercise.
+    const originRoot = join(workspaceRoot, "host-origin.git");
+    spawnSync("git", ["init", "--bare", "-b", "dev", originRoot]);
+    spawnSync("git", ["remote", "add", "origin", originRoot], { cwd: hostRepoRoot });
+    spawnSync("git", ["push", "-u", "origin", "dev"], { cwd: hostRepoRoot });
     const appliedLog = join(workspaceRoot, "mitosis-applied.jsonl");
     return { baseRoot, mitosisRoot, hostRepoRoot, baseSha, appliedLog };
   }
@@ -385,6 +404,7 @@ describe("vessel_mitosis_cutover", () => {
       staged_files_applied: string[];
       mode: string;
       vessel_restarted: boolean;
+      operations: Array<{ op: string; status: string }>;
     };
     expect(body.mode).toBe("git_aware");
     expect(body.new_git_sha.length).toBeGreaterThanOrEqual(40);
@@ -397,12 +417,20 @@ describe("vessel_mitosis_cutover", () => {
       "utf8",
     );
     expect(hostContent).toBe("// patched by substrate\n");
-    // Live vessel got mirrored content.
+    // Live vessel is DELIBERATELY NOT mirrored here, because push_status is "skipped".
+    // Step 9 gates the mirror on pushStatus === "pushed": mirroring on a degraded push
+    // drifts /vessels AHEAD of origin and poisons the freshness sentinel, since
+    // current_live_sha is hashed from /vessels — "the self-sustaining
+    // P1(origin)!=P2(/vessels) livelock" (vessel-mitosis-cutover.ts:2114-2119).
+    // This assertion used to demand the mirror unconditionally, from before that gate
+    // existed, and was the third stale expectation keeping this test red. Asserting the
+    // gate HOLDS is the useful test: it is what prevents the livelock.
     const liveContent = await readFile(
       join(baseRoot, "src", "resolvers", "target.ts"),
       "utf8",
     );
-    expect(liveContent).toBe("// patched by substrate\n");
+    expect(liveContent).toBe("// original (live)\n");
+    expect(body.operations.some((o) => o.op === "copy mitosis → live vessel" && o.status === "skipped")).toBe(true);
     // Applied log has a cutoverApplied entry.
     const logRaw = await readFile(appliedLog, "utf8");
     expect(logRaw).toContain("cutoverApplied");

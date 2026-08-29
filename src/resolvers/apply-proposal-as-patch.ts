@@ -912,17 +912,18 @@ async function attemptApplyOnce(pointer: ApplyProposalAsPatchPointer): Promise<R
         return structuredError("feature_compose routing failed", { proposal: firstFeatureProposal.name, error: (err as Error).message, total_proposals: entries.length });
       }
     }
-    return {
-      shape: "mitosisStaged",
-      body: {
-        resolver: "apply_proposal_as_patch",
-        dispatched: null,
-        skipped: true,
-        skip_reason: "no_eligible_proposals",
-        total_proposals: entries.length,
-        skipped_proposals: skipped.slice(0, 50),
-      },
-    };
+    // RESTORED (see the contract comment above): f365f3a — a substrate-authored cutover
+    // applying the UNRELATED gap route-edit-487b811e — replaced this structuredError with a
+    // `mitosisStaged{skipped:true}` success and gave no rationale for the contract change,
+    // leaving the comment above standing over code that contradicted it. That reinstated
+    // exactly the pathology 54fc5c8 measured and fixed: an empty drain scored as a win, so
+    // boredom's posterior at the dominant signature never decayed (goal[23] selected 54x in
+    // 20min; goal[8] drafter 0x). No-work must not pollute alpha.
+    return structuredError("no eligible proposals", {
+      skip_reason: "no_eligible_proposals",
+      total_proposals: entries.length,
+      skipped: skipped.slice(0, 50),
+    });
   }
   // Multi-file proposals path (2026-06-05): if proposal carries `new_files[]`
   // (each {path, content} starting with `repos/<vessel>/`), write all of them
@@ -1364,9 +1365,10 @@ async function attemptApplyOnce(pointer: ApplyProposalAsPatchPointer): Promise<R
 // marks its proposal in .applied/ BEFORE returning (and the selection loop at line ~611 skips
 // appliedSet members), re-invoking attemptApplyOnce deterministically advances to the NEXT
 // eligible proposal. Try up to K per invocation until one genuinely STAGES a mitosis, then stop.
-// STOP (no further attempt) on: a real stage (mitosisStaged), no_eligible_proposals (also
-// mitosisStaged, skipped:true), feature_compose routing (featureRoutedReport), any GLOBAL/fatal
-// error (structuredError not naming a proposal), a rate-limit / targeted-not-found / dir-read
+// STOP (no further attempt) on: a real stage (mitosisStaged), feature_compose routing
+// (featureRoutedReport), any GLOBAL/fatal error (structuredError not naming a proposal —
+// this is the branch no_eligible_proposals takes, since it names no proposal), a
+// rate-limit / targeted-not-found / dir-read
 // error, or a repeated proposal (anti-spin). proposal_id-targeted and dry_run keep single-attempt
 // semantics — targeting must NEVER skip to a different proposal. K bounds per-cycle patch_with_tools
 // (LLM) cost; most non-actionable proposals are rejected cheaply before reaching the patcher.
@@ -1377,8 +1379,9 @@ export async function resolveApplyProposalAsPatch(pointer: ApplyProposalAsPatchP
   for (let i = 0; i < maxAttempts; i++) {
     const res = await attemptApplyOnce(pointer);
     last = res;
-    // Any non-error outcome is terminal: a real stage (success), no_eligible_proposals
-    // (mitosisStaged skipped:true), or a feature_compose routing report. Stop.
+    // Any non-error outcome is terminal: a real stage (success) or a feature_compose routing
+    // report. Stop. (no_eligible_proposals is a structuredError naming no proposal, so it
+    // stops one branch below — retrying cannot find work that is not there.)
     if (res.shape !== "structuredError") return res;
     const body = (res.body ?? {}) as Record<string, unknown>;
     // A GLOBAL/fatal error names no proposal (e.g. "cannot read proposals dir") — retrying a

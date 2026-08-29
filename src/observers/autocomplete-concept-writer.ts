@@ -96,12 +96,19 @@ export function buildConceptWritePointer(event: NormalizedLifecycleEvent): {
   source_type: "impulse_activity_pattern";
 } {
   const tid = stripWrapping(event.activity_template_id) ?? "unknown";
+  // CITE THE EXECUTION. eb42e0b (substrate-authored, 2026-07-04) removed
+  // `(execution ${execId})` from this sentence, leaving the id computed but used only for the
+  // dedupe key. A concept minted FROM an execution then carried no way back to it — in a
+  // substrate whose citation oracle beta-penalises uncited work. Restored: provenance belongs in
+  // the concept itself, because that is what a later reader (or grader) actually sees.
+  const execId = event.execution_id ?? "unknown";
   return {
     type: "concept_write",
     name: `autocomplete:${tid}`,
     source_type: "impulse_activity_pattern",
     content:
-      `Substrate-authored success pattern: template "${tid}" completed successfully. ` +
+      `Substrate-authored success pattern: template "${tid}" completed successfully ` +
+      `(execution ${execId}). ` +
       `This pattern was emitted by the autocomplete-concept-writer observer when a ` +
       `gap-closing-auto / apply-proposal / mitosis-cutover execution closed cleanly. ` +
       `Output shapes: ${(event.output_shapes ?? []).join(", ") || "(none reported)"}.`,

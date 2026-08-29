@@ -105,7 +105,11 @@ describe("orphaned_capability_scan", () => {
     };
     const a = await run();
     const b = await run();
-    expect(a[0].impulse.pointer.gap.id).toBe(b[0].impulse.pointer.gap.id);
+    // `emits` captures EVERY POST to /v2/impulses/resolve, reads included, so a[0] is the
+    // resolver's first READ, not its first gap emission. Filter to the write before indexing.
+    const aw = a.filter((e: any) => e.impulse.pointer.type === "substrateGap_write");
+    const bw = b.filter((e: any) => e.impulse.pointer.type === "substrateGap_write");
+    expect(aw[0].impulse.pointer.gap.id).toBe(bw[0].impulse.pointer.gap.id);
   });
 
   it("classify-only mode (emit_gaps:false) reports orphans without emitting", async () => {
@@ -119,7 +123,9 @@ describe("orphaned_capability_scan", () => {
     const body = r.body as any;
     expect(body.capability_orphans).toContain("problem_detection");
     expect(body.gaps_emitted).toBe(0);
-    expect(emits.length).toBe(0);
+    // Same reason: with emit_gaps:false the resolver still READS, so a raw count is 1, not 0.
+    // Assert on gap WRITES, which is what "without emitting" actually means.
+    expect(emits.filter((e: any) => e.impulse.pointer.type === "substrateGap_write").length).toBe(0);
   });
 
   it("does not storm when discovery/templates come back empty (degraded guard)", async () => {

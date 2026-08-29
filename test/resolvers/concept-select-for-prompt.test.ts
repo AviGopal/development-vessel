@@ -83,13 +83,47 @@ describe("concept_select_for_prompt", () => {
     expect(types.has("memo")).toBe(false);
   });
 
-  it("returns structuredError when prior_source_types empty", async () => {
-    const r = await resolveConceptSelectForPrompt({
+  it("falls back to DEFAULT_SOURCE_TYPES when prior_source_types is empty or absent", async () => {
+    // POLICY REVERSAL, deliberate. `prior_source_types` used to be REQUIRED and an empty list
+    // was a structuredError. bff8313 made it optional with a documented default — the interface
+    // now reads "Defaults to [human_input, vessel_construction_pattern,
+    // impulse_activity_pattern] if not provided", and DEFAULT_SOURCE_TYPES was added alongside.
+    // The resolver treats empty and absent identically (see the `.length > 0 ? ... : DEFAULT`
+    // ternary), so demanding an error here would re-impose a requirement the API deliberately
+    // dropped. Assert the fallback instead — and assert it in BOTH forms, since "empty" and
+    // "absent" taking the same path is the actual contract.
+    // Mock the corpus: the fallback path actually QUERIES concept-db, whereas the old
+    // structuredError path returned before any network call. Without this the case hangs on a
+    // real request and times out at 20s — the assertion never runs.
+    globalThis.fetch = makeFetch([
+      {
+        id: "c_default",
+        source_type: "human_input",
+        name: "default-eligible",
+        content: "c",
+        token_estimate: 10,
+        times_succeeded: 1,
+        times_failed: 0,
+        priority: 0.5,
+      },
+    ]);
+    const fromEmpty = await resolveConceptSelectForPrompt({
       type: "concept_select_for_prompt",
       query: "x",
       prior_source_types: [],
     });
-    expect(r.shape).toBe("structuredError");
+    const fromAbsent = await resolveConceptSelectForPrompt({
+      type: "concept_select_for_prompt",
+      query: "x",
+    });
+    expect(fromEmpty.shape).toBe("conceptPromptPriors");
+    expect(fromAbsent.shape).toBe("conceptPromptPriors");
+    const a = fromEmpty.body as { prior_source_types?: string[] };
+    expect(a.prior_source_types).toEqual([
+      "human_input",
+      "vessel_construction_pattern",
+      "impulse_activity_pattern",
+    ]);
   });
 
   it("graceful empty result on network failure", async () => {

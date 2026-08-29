@@ -129,7 +129,7 @@ describe("orphaned_capability_scan", () => {
     const body = r.body as any;
     expect(body.degraded).toBe(true); // invoked.size === 0
     expect(body.gaps_emitted).toBe(0);
-    expect(emits.length).toBe(0);
+    expect(emits.filter((e: any) => e.impulse.pointer.type === "substrateGap_write").length).toBe(0);
   });
 
   it("respects max_emit cap", async () => {

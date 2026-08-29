@@ -42,9 +42,15 @@ export async function resolveVesselRegisterPassthrough(
     throw new Error(`vessel_register_passthrough: ${res.status}: ${text.slice(0, 200)}`);
   }
   const result = await res.json() as Record<string, unknown>;
+  // Emits `vessel_register_passthrough` — the shape this resolver ADVERTISES in
+  // src/config.ts discovery.shapes:107. It previously returned `vessel_registered`, which is
+  // registered nowhere and consumed by nothing; 16deb9c (substrate-authored, 2026-07-06)
+  // corrected that by prepending this return and leaving the old one below it as UNREACHABLE
+  // dead code. The correction was right — an emitted shape that is not the advertised one
+  // cannot be routed — but the dead return survived and made the file read as if it still
+  // returned `vessel_registered`. Removed.
   return {
     shape: "vessel_register_passthrough",
     body: result,
   };
-  return { shape: "vessel_registered", body: result };
 }

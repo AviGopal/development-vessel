@@ -29,7 +29,7 @@ describe("vessel-register-passthrough resolver", () => {
       },
     });
 
-    expect(result.shape).toBe("vessel_registered");
+    expect(result.shape).toBe("vessel_register_passthrough");
     const body = result.body as { registered: boolean };
     expect(body.registered).toBe(true);
     expect((captured as { shapes: string[] }).shapes).toContain("git_status");

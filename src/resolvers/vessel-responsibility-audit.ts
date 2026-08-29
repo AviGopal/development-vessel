@@ -146,10 +146,23 @@ interface VesselScanResult {
   mitosis_excluded: number;
 }
 
-async function listVesselDirs(workspaceRoot: string, cap: number): Promise<VesselScanResult> {
+async function listVesselDirs(
+  workspaceRoot: string,
+  cap: number,
+  rootWasExplicit: boolean,
+): Promise<VesselScanResult> {
   // Two possible roots: /vessels (substrate container) or <workspaceRoot>/repos.
-  // The container path takes priority when it exists.
-  const candidates = ["/vessels", join(workspaceRoot, "repos")];
+  // The container path takes priority ONLY when the caller did not name a root.
+  //
+  // It used to take priority unconditionally, which meant an explicitly supplied
+  // `workspaceRoot` was silently ignored wherever /vessels exists — i.e. always, inside the
+  // container. A caller asking to audit ONE tree was answered about the whole live fleet
+  // (observed: vessels_total 20, mitosis_dirs_excluded 49, zero violations, while the tree it
+  // asked about contained two obvious ones). "A field that accepts your data is not a field
+  // that means it" — same defect shape as git_status ignoring its cwd.
+  const candidates = rootWasExplicit
+    ? [join(workspaceRoot, "repos"), workspaceRoot]
+    : ["/vessels", join(workspaceRoot, "repos")];
   for (const root of candidates) {
     try {
       const st = await stat(root);
@@ -265,6 +278,9 @@ export async function resolveVesselResponsibilityAudit(
 ): Promise<ResolverResult> {
   const conceptDbUrl = pointer.conceptDbUrl ?? DEFAULT_CONCEPT_DB_URL;
   const emitUrl = pointer.devVesselImpulsesUrl ?? DEFAULT_DEV_VESSEL_URL;
+  // An explicit pointer.workspaceRoot is an instruction, not a hint — track that so the
+  // container default cannot override it.
+  const rootWasExplicit = typeof pointer.workspaceRoot === "string" && pointer.workspaceRoot.trim() !== "";
   const workspaceRoot = pointer.workspaceRoot ?? process.env["WORKSPACE_ROOT"] ?? "/workspace";
   const vesselScanCap = pointer.vesselScanCap ?? 20;
   const filesPerVessel = pointer.filesPerVessel ?? 60;
@@ -285,7 +301,7 @@ export async function resolveVesselResponsibilityAudit(
   );
 
   // 2. List vessels.
-  const scan = await listVesselDirs(workspaceRoot, vesselScanCap);
+  const scan = await listVesselDirs(workspaceRoot, vesselScanCap, rootWasExplicit);
   const filtered = pointer.vessel_name
     ? scan.vessels.filter((d) => vesselNameOf(d) === pointer.vessel_name)
     : scan.vessels;

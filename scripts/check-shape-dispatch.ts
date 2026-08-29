@@ -18,11 +18,37 @@ const vesselRoot = resolve(import.meta.dir, "..");
 // is its sibling). Try grandparent first, then parent — first existing path
 // wins. Without this, static-eval gates inside mitosis-overlay symlink
 // stacks can't pass and autonomous cutover never produces cited_check_names.
+// WALK UPWARD instead of guessing depths. The two fixed candidates below covered the host
+// super-repo (<super>/repos/<vessel>) and the container runtime (/vessels/<vessel>), but not a
+// checkout at /workspace/repos/<vessel> whose packages/ sits at /vessels/packages — there the
+// gate could not run at all, and `bun run lint` silently lost its shape-dispatch half.
+// author_new_resolver's Seam ③ test invokes this wrapper over a staged config+impulses splice
+// and asserts exit 0, so an unrunnable gate reads as a failed splice.
+function findCheckScript(start: string): string | null {
+  let dir = start;
+  for (let i = 0; i < 8; i += 1) {
+    const candidate = resolve(dir, "packages/shape-dispatch-check/check.ts");
+    if (existsSync(candidate)) return candidate;
+    const parent = resolve(dir, "..");
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return null;
+}
+
 const candidates = [
   resolve(vesselRoot, "../../packages/shape-dispatch-check/check.ts"),
   resolve(vesselRoot, "../packages/shape-dispatch-check/check.ts"),
 ];
-const checkScript = candidates.find((p) => existsSync(p)) ?? candidates[0];
+const checkScript =
+  candidates.find((p) => existsSync(p)) ?? findCheckScript(vesselRoot) ?? candidates[0];
+if (!existsSync(checkScript)) {
+  console.error(
+    `check-shape-dispatch: cannot locate packages/shape-dispatch-check/check.ts above ${vesselRoot} — ` +
+      "the shape/dispatch agreement gate did NOT run. Failing loudly rather than passing silently.",
+  );
+  process.exit(1);
+}
 
 const proc = Bun.spawnSync(["bun", checkScript, vesselRoot], {
   stdout: "inherit",

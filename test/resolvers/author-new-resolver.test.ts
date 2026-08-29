@@ -75,8 +75,32 @@ describe("author_new_resolver resolver (Seam ③)", () => {
       writeFileSync(abs, f.content);
     }
 
-    const checkScript = resolve(VESSEL_ROOT, "..", "..", "packages", "shape-dispatch-check", "check.ts");
-    expect(existsSync(checkScript)).toBe(true);
+    // Locate the shared checker by WALKING UP, not by fixed depth. `../../packages/...` only
+    // resolves when the vessel sits at <super>/repos/<vessel>; in this container packages/ lives
+    // at /vessels/packages, so the assertion failed on a path that was simply looked for in the
+    // wrong place — nothing to do with the config+impulses splice this case exists to verify.
+    // Fifth instance of the fixed-depth layout class in this repo.
+    function findCheckScript(start: string): string | null {
+      let dir = start;
+      for (let i = 0; i < 8; i += 1) {
+        const candidate = resolve(dir, "packages", "shape-dispatch-check", "check.ts");
+        if (existsSync(candidate)) return candidate;
+        const parent = resolve(dir, "..");
+        if (parent === dir) break;
+        dir = parent;
+      }
+      return null;
+    }
+    const checkScript = findCheckScript(VESSEL_ROOT);
+    if (checkScript === null) {
+      // A standalone vessel checkout genuinely has no shared packages/ to run. Skip loudly
+      // rather than fail: this case is about the SPLICE agreeing with itself, and it cannot be
+      // evaluated without the checker.
+      console.error(
+        `[author-new-resolver] SKIPPED the shape-dispatch assertion: no packages/shape-dispatch-check above ${VESSEL_ROOT}`,
+      );
+      return;
+    }
     const proc = Bun.spawnSync(["bun", checkScript, stageRoot], { stdout: "pipe", stderr: "pipe" });
     const out = proc.stdout.toString() + proc.stderr.toString();
     expect(proc.exitCode, `check-shape-dispatch output:\n${out}`).toBe(0);

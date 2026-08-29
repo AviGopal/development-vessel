@@ -122,10 +122,28 @@ export async function resolveTestSuite(pointer: Record<string, unknown>): Promis
   // Resolve the root in the shell so the existence check happens where the trees live, and
   // ECHO the chosen root + its HEAD into the output — a verdict about "the landed code" is
   // only readable if the trace says which tree and which commit was actually measured.
+  // ISOLATION RE-RUN (2026-08-29). `only_tests` narrows the run to named tests via bun's
+  // -t filter. It exists for one caller: the precutover regression gate, which re-runs the
+  // WHOLE suite to confirm a failure before refusing. A whole-suite re-run cannot
+  // discriminate a LOAD-CORRELATED flake, because the second run happens under the same
+  // load that produced the first — the confirmation reproduces the artefact and reads as a
+  // regression. A test that fails in the full suite but PASSES when run alone is an
+  // isolation/load artefact, not a regression the staged change caused. Re-running just
+  // the named failures is both cheaper and the only form of that check that discriminates.
+  //
+  // Names are matched as an escaped alternation, so a title containing regex metacharacters
+  // ("apply + gate = PASS") matches literally rather than silently matching nothing —
+  // which would look like "it passed in isolation" and wave a real regression through.
+  const onlyTests = Array.isArray(pointer.only_tests)
+    ? (pointer.only_tests as unknown[]).filter((t): t is string => typeof t === "string" && t.trim().length > 0)
+    : [];
+  const testFilter = onlyTests.length > 0
+    ? ` -t ${JSON.stringify(onlyTests.map((t) => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|"))}`
+    : "";
   const command =
     `ROOT=${JSON.stringify(preferredRoot)}; [ -d "$ROOT" ] || ROOT=${JSON.stringify(fallbackRoot)}; ` +
     `echo "VERIFIED_ROOT=$ROOT"; echo "VERIFIED_HEAD=$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)"; ` +
-    `cd "$ROOT" && ([ -d node_modules ] || timeout 120 bun install >/dev/null 2>&1; timeout ${budgetSec} bun test 2>&1 || true)`;
+    `cd "$ROOT" && ([ -d node_modules ] || timeout 120 bun install >/dev/null 2>&1; timeout ${budgetSec} bun test${testFilter} 2>&1 || true)`;
 
   let raw = "";
   try {

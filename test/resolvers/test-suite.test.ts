@@ -71,3 +71,68 @@ test("resolveTestSuite refuses without a vessel rather than reporting an empty s
   const result = await resolveTestSuite({ type: "test_suite" });
   expect(result).toHaveProperty("shape", "structuredError");
 });
+
+// ---- Isolation re-run filter (2026-08-29) ----
+//
+// `only_tests` exists for the precutover regression gate, which must confirm a failure
+// before refusing. Confirming by re-running the WHOLE suite cannot discriminate a
+// load-correlated flake — the second run carries the same load that produced the first.
+// These pin the two properties that make the narrowed re-run trustworthy.
+describe("test_suite — only_tests isolation filter", () => {
+  const originalFetch = globalThis.fetch;
+
+  async function captureCommand(pointer: Record<string, unknown>): Promise<string> {
+    let captured = "";
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const body = typeof init?.body === "string" ? init.body : "";
+      if (body.includes("vesselCapability")) {
+        return new Response(
+          JSON.stringify({ content: { vessels: [{ endpoint: "http://shell.test", resolve_endpoint: "/resolve", health_score: 1 }] } }),
+          { status: 200 },
+        );
+      }
+      if (url.startsWith("http://shell.test")) {
+        captured = String(JSON.parse(body).impulse.pointer.command ?? "");
+        return new Response(JSON.stringify({ stdout: " 1 pass\n 0 fail\n" }), { status: 200 });
+      }
+      return new Response("{}", { status: 200 });
+    }) as typeof fetch;
+    try {
+      await resolveTestSuite({ type: "test_suite", vessel: "development-vessel", ...pointer });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+    return captured;
+  }
+
+  it("runs the whole suite when no names are supplied", async () => {
+    const cmd = await captureCommand({});
+    expect(cmd).toContain("bun test");
+    expect(cmd).not.toContain(" -t ");
+  });
+
+  it("narrows to the named tests with -t", async () => {
+    const cmd = await captureCommand({ only_tests: ["alpha case", "beta case"] });
+    expect(cmd).toContain(" -t ");
+    expect(cmd).toContain("alpha case");
+    expect(cmd).toContain("beta case");
+  });
+
+  // THE LOAD-BEARING PROPERTY. bun's -t is a regex. The real failure that motivated this
+  // is titled "propose finds a closed cluster; apply + gate = PASS" — unescaped, the '+'
+  // makes the pattern match NOTHING, the isolated re-run reports zero failures, and the
+  // gate concludes "passed in isolation" and waves a genuine regression through. Silent,
+  // and in the safe-looking direction.
+  it("escapes regex metacharacters so a title with '+' matches literally", async () => {
+    const cmd = await captureCommand({ only_tests: ["apply + gate = PASS"] });
+    expect(cmd).toContain("apply \\\\+ gate");
+  });
+
+  it("ignores empty or non-string entries rather than emitting an empty pattern", async () => {
+    // An empty alternation branch matches everything, which would silently restore the
+    // whole-suite behaviour while claiming to be narrowed.
+    const cmd = await captureCommand({ only_tests: ["", "   ", 42, null] });
+    expect(cmd).not.toContain(" -t ");
+  });
+});

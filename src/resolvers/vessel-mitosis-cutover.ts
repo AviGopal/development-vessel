@@ -1910,12 +1910,15 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
   // real cutover; the decision primitive and the fail-open paths are unit-covered now.
   if (process.env["CUTOVER_PRECHECK_SUITE"] !== "0") {
     try {
-      const runSuite = async (): Promise<string[] | null> => {
-        const res = await resolveTestSuite({ vessel: vessel_name, gap_id: pointer.gap_id, proposal_id: pointer.proposal_id });
+      const runSuiteWith = async (extra: Record<string, unknown>): Promise<string[] | null> => {
+        const res = await resolveTestSuite({ vessel: vessel_name, gap_id: pointer.gap_id, proposal_id: pointer.proposal_id, ...extra });
         const sb = (res as { body?: Record<string, unknown> }).body ?? {};
         if (sb.ran !== true) return null;   // could not measure → caller fails open
         return Array.isArray(sb.failingTests) ? (sb.failingTests as unknown[]).map(String) : [];
       };
+      const runSuite = async (): Promise<string[] | null> => runSuiteWith({});
+      /** Re-run ONLY the named tests, so a load-correlated flake is not confirmed by its own load. */
+      const runSuiteOnly = async (names: string[]): Promise<string[] | null> => runSuiteWith({ only_tests: names });
       const failNow = await runSuite();
       if (failNow !== null) {                // null = unmeasurable → fall through and commit
         const baseFile = `/workspace/post-land-baseline/${String(vessel_name).replace(/[^a-zA-Z0-9]+/g, "-")}.json`;
@@ -1932,8 +1935,30 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
         } catch { baseline = null; }
         let newlyFailing = computeNewlyFailing(baseline, failNow);
         if (newlyFailing.length > 0) {
-          // Confirm — a single flake must not block a cutover.
-          const failAgain = await runSuite();
+          // CONFIRM IN ISOLATION, NOT BY RE-RUNNING THE WHOLE SUITE (2026-08-29).
+          //
+          // This used to re-run the entire suite. That cannot discriminate a
+          // LOAD-CORRELATED flake: the second run happens under the same load as the
+          // first, so the artefact reproduces and "confirmed on a re-run" reads as a
+          // regression. Measured 2026-08-28: the gate refused a change five times citing
+          // "seam extraction round-trip", a test that passes 3/0 on a clean tree AND 3/0
+          // with the change applied. The re-run confirmed the load, not the change.
+          //
+          // A test that fails in the full suite but PASSES when run alone is an isolation
+          // artefact. Re-run only the named failures; keep as regressions only those that
+          // still fail by themselves. Falls back to the old whole-suite confirmation when
+          // no test name could be extracted, so an unparseable line cannot wave a real
+          // regression through.
+          const isolatedNames = newlyFailing
+            .map((line) => {
+              const withoutPrefix = line.replace(/^\s*\(fail\)\s*/, "").trim();
+              const segments = withoutPrefix.split(" > ");
+              return (segments[segments.length - 1] ?? "").trim();
+            })
+            .filter((n) => n.length > 0);
+          const failAgain = isolatedNames.length === newlyFailing.length
+            ? await runSuiteOnly(isolatedNames)
+            : await runSuite();
           newlyFailing = failAgain === null ? [] : computeNewlyFailing(baseline, failAgain);
         }
         if (newlyFailing.length > 0) {

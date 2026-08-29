@@ -74,7 +74,7 @@ export function computeNewlyFailing(prev: string[] | null, now: string[]): strin
   // that passed at the last landed baseline" — naming seed-templates and fleet-endpoint
   // tests that a one-line boolean change cannot touch, and which fail identically on a
   // pristine origin/dev checkout. Restored, with the test that was missing.
-  if (prev === null || prev.length === 0) return [];
+  if (prev === null || prev.length === 0 || !Array.isArray(prev)) return [];
   const baseline = new Set(prev.map(String));
   const seen = new Set<string>();
   const out: string[] = [];

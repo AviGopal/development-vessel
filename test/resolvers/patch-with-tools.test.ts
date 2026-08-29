@@ -31,6 +31,23 @@ function makeFetch(opts: { vesselsRoot: string; llmActions: string[] }): typeof 
       }), { status: 200 });
     }
 
+    // MODEL POLICY — answered WITHOUT consuming a scripted action.
+    //
+    // discoverFallbackModels (patch-with-tools.ts:302, called from resolvePatchWithTools before
+    // the ReAct loop) POSTs { type: "llmModelPolicy" } to the same producer URL as a completion.
+    // This stub matched on the URL alone, so that pre-loop discovery ate llmActions[0]: turn 1
+    // then received the script's SECOND entry and every later turn got it too, since the index is
+    // clamped once the script is exhausted.
+    //
+    // That is why "absent target with is_new_file:true …" failed with
+    // "LLM declared done 2x without making any edit" while its scripted first action was a
+    // call_tool it never saw. Sibling cases in this file survived only because their second entry
+    // happens to be a usable action. Discriminating by body.type keeps every script aligned with
+    // the turns it was written for.
+    if (url.endsWith("/llm") && body?.type === "llmModelPolicy") {
+      return new Response(JSON.stringify({ body: { arms: [{ model: "qwen/qwen3-32b" }] } }), { status: 200 });
+    }
+
     // LLM endpoint — emit queued action objects.
     if (url.endsWith("/llm")) {
       const content = llmActions[Math.min(llmTurn, llmActions.length - 1)] ?? '{"action":"fail","reason":"out of script"}';

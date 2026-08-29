@@ -1,24 +1,41 @@
 import type { ResolverResult } from "./types.js";
+import { env } from "../config.js";
 
 export async function resolveError(
   pointer: Readonly<{ type: "error"; [key: string]: unknown }>,
 ): Promise<ResolverResult> {
-  const endpoint = process.env.SUBSTRATE_ENDPOINT ?? "http://localhost:3173";
-  const apiKey = process.env.SUBSTRATE_API_KEY;
-  const traceSince = Date.now() - 24 * 60 * 60 * 1000; // last 24h
+  // REPOINTED at the real trace store. This previously fetched
+  // `${SUBSTRATE_ENDPOINT ?? "http://localhost:3173"}/v1/traces` — an endpoint that exists
+  // nowhere: SUBSTRATE_ENDPOINT and port 3173 appear in no other file, 3173 is not a fleet port,
+  // and activity-api mounts no /v1/traces route. So this resolver could never succeed, while
+  // being advertised in discovery.shapes. activity-api serves /v2/activities/execution-traces,
+  // which is what every other trace consumer in this vessel reads.
+  const endpoint = env("METABOB_ENDPOINT", "http://127.0.0.1:8080");
+  const apiKey = process.env["METABOB_API_KEY"] ?? "";
+  const tracesUrl = `${endpoint}/v2/activities/execution-traces?limit=1000`;
 
-  const tracesUrl = `${endpoint}/v1/traces?since=${traceSince}&limit=10000`;
-  const tracesRes = await fetch(tracesUrl, {
-    headers: apiKey ? { Authorization: `ApiKey ${apiKey}` } : {},
-    signal: AbortSignal.timeout(30_000),
-  });
-  if (!tracesRes.ok) {
-    throw new Error(`failed to fetch traces: ${tracesRes.status}`);
+  // DEGRADE, do not throw. An unreachable or unhappy trace store is an expected operating
+  // condition; throwing escaped the resolver and left callers unable to distinguish "no
+  // failures recorded" from "this resolver exploded". Report the degradation in the body.
+  let tracesRes: Response;
+  try {
+    tracesRes = await fetch(tracesUrl, {
+      headers: apiKey ? { Authorization: `ApiKey ${apiKey}` } : {},
+      signal: AbortSignal.timeout(30_000),
+    });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return { shape: "error", body: { rows: [], degraded: true, reason: `trace store unreachable: ${msg}` } };
   }
-  const traces = (await tracesRes.json())?.traces as Array<{
-    execution_id?: string;
-    failure_mode?: { type?: string };
-  }> ?? [];
+  if (!tracesRes.ok) {
+    return { shape: "error", body: { rows: [], degraded: true, reason: `trace store HTTP ${tracesRes.status}` } };
+  }
+  const json = (await tracesRes.json().catch(() => null)) as {
+    executions?: Array<{ execution_id?: string; failure_mode?: { type?: string } }>;
+    traces?: Array<{ execution_id?: string; failure_mode?: { type?: string } }>;
+  } | null;
+  // `executions` is the key activity-api returns; `traces` kept as a tolerated alias.
+  const traces = json?.executions ?? json?.traces ?? [];
 
   const counts = new Map<string, number>();
   const examples = new Map<string, string>();

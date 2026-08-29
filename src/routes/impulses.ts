@@ -460,8 +460,51 @@ async function dispatchInner(pointer: AnyPointer): Promise<ResolverResult> {
       return resolveFeatureCompose({ ...pointer, type: "feature_compose", spec });
     }
     // @shape-dispatch:private
-    case "feature_compose":
-      return resolveFeatureCompose(p as Parameters<typeof resolveFeatureCompose>[0]);
+    case "feature_compose": {
+      // SAME GUARD AS gap_compose ABOVE (2026-08-29). This case passed the pointer straight
+      // through with no validation, so a BARE `{"type":"feature_compose"}` reached the resolver,
+      // claimed one of the 1-2 compose SLOTS, acquired a workspace, and was only stopped deep
+      // inside by the grounding gate — which then reported it as "REFUSED ungrounded decompose".
+      //
+      // Measured 2026-08-29 via the [compose] attribution logging (cbc6e64): the refused composes
+      // carried NOTHING — gap "none", directed false, land false, spec_len 0, verify_vessels
+      // undefined — and 28 of them produced 32 of the ungrounded refusals in a 3h window. They
+      // fire ~7s after each vessel restart. So the single largest terminal failure of the
+      // edit-intent lane was self-inflicted slot contention, and it was diagnosed as a GROUNDING
+      // problem because that is where the refusal surfaced. It is a missing-input problem.
+      //
+      // The cost is not just the wasted slot: with the cap at 1-2, a directed operator dispatch
+      // is refused outright while these run. Measured the same day, 182 of ~270 edit-intent
+      // non-reaches were RETRYABLE CAPACITY — the lane too full to attempt the work.
+      //
+      // Fail BEFORE the slot claim, with the same shaped error and the same derivation the
+      // sibling case already uses. Deliberately not a new predicate: the drift-guard lesson from
+      // earlier tonight is that inventing one costs more than copying a proven one.
+      const fcAny = pointer as unknown as {
+        spec?: unknown; goal?: unknown; description?: unknown;
+        gap?: { summary?: unknown; title?: unknown };
+      };
+      const fcSpec = [fcAny.spec, fcAny.goal, fcAny.description, fcAny.gap?.summary, fcAny.gap?.title].find(
+        (s): s is string => typeof s === "string" && s.trim().length > 0,
+      );
+      if (!fcSpec) {
+        console.warn(
+          `[feature_compose] REFUSED before slot claim: no spec/goal/description/gap.summary/gap.title in pointer. ` +
+          `Keys offered: ${JSON.stringify(Object.keys(pointer as object).filter((k) => k !== "type").slice(0, 12))}. ` +
+          `An empty pointer used to consume a compose slot and surface as an ungrounded-decompose refusal.`,
+        );
+        return {
+          shape: "structuredError",
+          body: {
+            resolver: "feature_compose",
+            failure_mode: "missing_input",
+            detail: "feature_compose requires spec (or goal/description/gap.summary/gap.title) — none present in pointer; refused before claiming a compose slot",
+            offered_keys: Object.keys(pointer as object).filter((k) => k !== "type").slice(0, 12),
+          },
+        };
+      }
+      return resolveFeatureCompose({ ...(p as Parameters<typeof resolveFeatureCompose>[0]), spec: fcSpec });
+    }
     // @shape-dispatch:private
     case "gap_to_feature":
       return resolveGapToFeature(p as Parameters<typeof resolveGapToFeature>[0]);

@@ -2263,6 +2263,29 @@ function tscErrorSet(raw: string): Set<string> {
 // already mandates `bun test` in CI ("Both must pass. No exceptions.") — the autonomous
 // apply path simply never enforced it.
 //
+// PER-TEST TIMEOUT — 7ed1bf8 FIXED test-suite.ts AND MISSED THIS PATH.
+//
+// bun's default per-test timeout is 5000ms, which measures ambient load, not correctness.
+// 7ed1bf8 raised it to 20000ms in src/resolvers/test-suite.ts with the measurement that a
+// suite reporting 94-97 failures at one commit with NO code change had 10 failures that
+// were literally "timed out after 5000ms" — phantom failures appearing and disappearing
+// with container load. But feature-compose runs `bun test` itself at three sites, and
+// those kept the default, so the path that actually GATES LANDINGS still had the load
+// sensor wired in.
+//
+// Measured here 2026-08-29, on a PRISTINE tree with nothing staged, looping one file:
+//   (fail) seam extraction round-trip > propose finds a closed cluster [5094.94ms]
+//          ^ this test timed out after 5000ms
+// while its sibling in the same file legitimately takes 3596ms. These tests genuinely run
+// at 3.5-5s, so under compose load they cross the line and read as NEW failures.
+//
+// That is the precutover_regression false-refusal: a correct 3-edit patch to an unrelated
+// test file was refused UNFAVORABLE citing exactly this test, after passing typecheck
+// (TC_EXIT=0), shape-dispatch (246/249), the semantic gate (addresses:true) and drift.
+//
+// This is verify-at-the-consuming-layer: the fix was applied to one runner and the
+// landing gate uses another.
+//
 // Extracts the set of FAILING test names from `bun test` output. Bun prints failures as
 // "(fail) <describe> > <it> [0.12ms]"; the timing suffix is stripped so the identity is
 // stable across runs. Baseline-delta (not absolute) for the same reason typecheck uses
@@ -3649,7 +3672,7 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
     baselineTsErrors.set(v, tscErrorSet(String((b.body as { stdout?: unknown })?.stdout ?? "")));
     // Bounded so a hanging/absent suite can never stall the compose path; a vessel with
     // no tests just yields an empty baseline and an empty post-set, i.e. no gate.
-    const bt = await callTool(toolsEndpoint, "shell", { command: `cd ${JSON.stringify(vAbs)} && (timeout 240 bun test 2>&1 || true)`, cwd: REPO_ROOT });
+    const bt = await callTool(toolsEndpoint, "shell", { command: `cd ${JSON.stringify(vAbs)} && (timeout 240 bun test --timeout 20000 2>&1 || true)`, cwd: REPO_ROOT });
     const btRaw = String((bt.body as { stdout?: unknown })?.stdout ?? "");
     baselineTestFails.set(v, testFailureSet(btRaw));
     // Also record how many PASSED, so verify can catch tests that VANISH (see testPassCount).
@@ -4184,7 +4207,7 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
       // The gap this keeps trying to close is REAL — a manifest that cannot install must
       // not reach origin/dev (ddffdee did exactly that). But the check belongs against the
       // CLONE before staging, where node_modules is not shared. Do not solve it here.
-      command: `cd ${JSON.stringify(vAbs)} && (echo "== install =="; [ -d node_modules ] || { bun install >/dev/null 2>&1; echo "INSTALL_EXIT=$?"; }; echo "== resolve =="; bun install --dry-run >/tmp/fc-dryrun.$$ 2>&1; echo "DRYRUN_EXIT=$?"; tail -6 /tmp/fc-dryrun.$$; rm -f /tmp/fc-dryrun.$$; echo "== typecheck =="; bun run typecheck 2>&1; echo "TC_EXIT=$?"; echo "== shape-dispatch =="; if [ -f ${SHARED_DISPATCH_CHECK} ] && [ -f src/config.ts ] && [ -f src/routes/impulses.ts ]; then bun ${SHARED_DISPATCH_CHECK} ${JSON.stringify(vAbs)} 2>&1; echo "SD_EXIT=$?"; else echo "SD_EXIT=0"; fi; echo "== tests =="; timeout 240 bun test 2>&1 || true)`,
+      command: `cd ${JSON.stringify(vAbs)} && (echo "== install =="; [ -d node_modules ] || { bun install >/dev/null 2>&1; echo "INSTALL_EXIT=$?"; }; echo "== resolve =="; bun install --dry-run >/tmp/fc-dryrun.$$ 2>&1; echo "DRYRUN_EXIT=$?"; tail -6 /tmp/fc-dryrun.$$; rm -f /tmp/fc-dryrun.$$; echo "== typecheck =="; bun run typecheck 2>&1; echo "TC_EXIT=$?"; echo "== shape-dispatch =="; if [ -f ${SHARED_DISPATCH_CHECK} ] && [ -f src/config.ts ] && [ -f src/routes/impulses.ts ]; then bun ${SHARED_DISPATCH_CHECK} ${JSON.stringify(vAbs)} 2>&1; echo "SD_EXIT=$?"; else echo "SD_EXIT=0"; fi; echo "== tests =="; timeout 240 bun test --timeout 20000 2>&1 || true)`,
       cwd: REPO_ROOT,
     });
     const raw = String((sh.body as { stdout?: unknown })?.stdout ?? "");
@@ -4285,7 +4308,7 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
     let confirmedNewTest = newTest;
     if (newTest.length > 0 || passRegressed) {
       const sh2 = await callTool(toolsEndpoint, "shell", {
-        command: `cd ${JSON.stringify(vAbs)} && (timeout 240 bun test 2>&1 || true)`,
+        command: `cd ${JSON.stringify(vAbs)} && (timeout 240 bun test --timeout 20000 2>&1 || true)`,
         cwd: REPO_ROOT,
       });
       const raw2 = String((sh2.body as { stdout?: unknown })?.stdout ?? "");

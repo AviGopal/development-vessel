@@ -9,6 +9,36 @@ let workspaceRoot: string;
 let originalWS: string | undefined;
 let originalSkip: string | undefined;
 
+// AMBIENT MITOSIS_* MUST NOT REACH THESE TESTS (2026-08-29).
+//
+// baseRoot is derived as `directPush && runtimeDir ? join(runtimeDir, vessel) : join(reposRoot,
+// vessel)`. When MITOSIS_DIRECT_PUSH / MITOSIS_RUNTIME_DIR are set in the ambient environment —
+// which they ARE on the running vessel (DIRECT_PUSH=1, RUNTIME_DIR=/vessels) — baseRoot resolves
+// to the REAL /vessels tree instead of the test's temp dir, and the assertions describe a
+// different filesystem than the one the test built.
+//
+// Measured 2026-08-29: running this suite with the vessel's own environment turned two passing
+// tests red ("dry_run returns plan without moving anything", "performs cutover: archive base,
+// promote mitosis, rewrite unit") purely from ambient env. A test whose verdict depends on the
+// shell it is launched from is not a measurement, and it is worse than useless inside a gate:
+// precutover_regression compares a staged run against a stored baseline, so an env difference
+// between the two runs reads as a regression the change did not cause.
+//
+// Cleared here rather than in each test so the whole file is deterministic under any launcher.
+// SCOPED TO MITOSIS_* DELIBERATELY. Clearing the endpoint vars here too (ACTIVITY_API_ENDPOINT,
+// DISCOVERY_ENDPOINT) was tried and REVERTED: process.env is process-wide in bun, so unsetting a
+// shared endpoint from one file's beforeEach changes resolution for every other test file in the
+// run. Measured 2026-08-29: it took the full suite from 94 failures in 52s to 95 in 325s — the
+// cleared defaults sent other suites to endpoints that hang. The narrow fix is the correct one.
+const MITOSIS_ENV_KEYS = [
+  "MITOSIS_DIRECT_PUSH",
+  "MITOSIS_RUNTIME_DIR",
+  "MITOSIS_PUSH_CLONE_DIR",
+  "MITOSIS_HOST_SYNC_MODE",
+  "MITOSIS_HOST_REPO_ROOT",
+] as const;
+const savedMitosisEnv: Record<string, string | undefined> = {};
+
 beforeEach(async () => {
   tmpRoot = await mkdtemp(join(tmpdir(), "mitosis-cut-"));
   workspaceRoot = tmpRoot;
@@ -16,6 +46,10 @@ beforeEach(async () => {
   originalSkip = process.env["MITOSIS_CUTOVER_SKIP_SYSTEMCTL"];
   process.env["WORKSPACE_ROOT"] = workspaceRoot;
   process.env["MITOSIS_CUTOVER_SKIP_SYSTEMCTL"] = "1";
+  for (const k of MITOSIS_ENV_KEYS) {
+    savedMitosisEnv[k] = process.env[k];
+    delete process.env[k];
+  }
 });
 
 afterEach(async () => {
@@ -23,6 +57,10 @@ afterEach(async () => {
   else process.env["WORKSPACE_ROOT"] = originalWS;
   if (originalSkip === undefined) delete process.env["MITOSIS_CUTOVER_SKIP_SYSTEMCTL"];
   else process.env["MITOSIS_CUTOVER_SKIP_SYSTEMCTL"] = originalSkip;
+  for (const k of MITOSIS_ENV_KEYS) {
+    if (savedMitosisEnv[k] === undefined) delete process.env[k];
+    else process.env[k] = savedMitosisEnv[k];
+  }
   await rm(tmpRoot, { recursive: true, force: true });
 });
 

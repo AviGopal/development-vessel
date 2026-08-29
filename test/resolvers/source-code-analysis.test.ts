@@ -17,33 +17,48 @@ const json = (body: unknown): Response =>
   new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
 
 /**
- * Serve a fake vessel tree. `tree` maps an absolute dir path to its entries; `files` maps an
- * absolute file path to its contents. Anything unlisted answers empty, which is what the real
- * fs_list does for a missing directory.
+ * Serve a fake vessel tree, keyed by path SUFFIX and basename rather than by absolute path.
+ *
+ * This must not depend on WORKSPACE_ROOT. The resolver freezes WORKSPACE_ROOT into a module
+ * const at import time, several sibling test files assign process.env.WORKSPACE_ROOT to their
+ * own tmp fixtures, and under `bun test` the module registry is shared — so the absolute root
+ * the resolver asks about is whatever the FIRST importer happened to set, not what this file
+ * reads at test time. Keying on absolute paths made these tests pass on the host and fail
+ * in-container with root_not_found. Suffix matching answers whatever root it is asked about.
+ *
+ * `dirs` maps a directory suffix to the entry BASENAMES it contains; `files` maps a file
+ * basename to its contents. Unlisted directories answer empty, which is what the real fs_list
+ * does for a missing directory — so the root_not_found path stays reachable.
  */
-const serveTree = (tree: Record<string, string[]>, files: Record<string, string>): void => {
+const serveTree = (dirs: Record<string, string[]>, files: Record<string, string>): void => {
   globalThis.fetch = (async (_url: unknown, init?: { body?: string }) => {
     const impulse = JSON.parse(String(init?.body ?? "{}")).impulse ?? {};
-    if (impulse.type === "fs_list") return json({ body: { entries: tree[impulse.path] ?? [] } });
-    if (impulse.type === "fs_read") return json({ body: { content: files[impulse.path] ?? "" } });
+    const p = String(impulse.path ?? "");
+    if (impulse.type === "fs_list") {
+      const key = Object.keys(dirs).find((k) => p.endsWith(k));
+      const names = key === undefined ? [] : dirs[key] ?? [];
+      return json({ body: { entries: names.map((n) => `${p}/${n}`) } });
+    }
+    if (impulse.type === "fs_read") {
+      const base = p.split("/").pop() ?? p;
+      return json({ body: { content: files[base] ?? "" } });
+    }
     return json({ body: {} });
   }) as unknown as typeof fetch;
 };
-
-const ROOT = `${process.env["WORKSPACE_ROOT"] ?? process.cwd()}/repos/demo-vessel`;
 
 describe("resolveSourceCodeAnalysis", () => {
   it("classifies and counts source, test and config files", async () => {
     serveTree(
       {
-        [ROOT]: [`${ROOT}/index.ts`, `${ROOT}/package.json`, `${ROOT}/src`],
-        [`${ROOT}/src`]: [`${ROOT}/src/scan.ts`, `${ROOT}/src/scan.test.ts`],
+        "/repos/demo-vessel": ["index.ts", "package.json", "src"],
+        "/repos/demo-vessel/src": ["scan.ts", "scan.test.ts"],
       },
       {
-        [`${ROOT}/index.ts`]: "export const main = 1;\n",
-        [`${ROOT}/package.json`]: '{"name":"demo-vessel"}\n',
-        [`${ROOT}/src/scan.ts`]: "import { x } from 'node:fs';\nexport function scan() { return 1; }\n",
-        [`${ROOT}/src/scan.test.ts`]: "import { describe } from 'bun:test';\nexport const t = 1;\n",
+        "index.ts": "export const main = 1;\n",
+        "package.json": '{"name":"demo-vessel"}\n',
+        "scan.ts": "import { x } from 'node:fs';\nexport function scan() { return 1; }\n",
+        "scan.test.ts": "import { describe } from 'bun:test';\nexport const t = 1;\n",
       },
     );
     const result = await resolveSourceCodeAnalysis({
@@ -64,8 +79,8 @@ describe("resolveSourceCodeAnalysis", () => {
 
   it("extracts exports and imports from source files", async () => {
     serveTree(
-      { [ROOT]: [`${ROOT}/src`], [`${ROOT}/src`]: [`${ROOT}/src/scan.ts`] },
-      { [`${ROOT}/src/scan.ts`]: "import { readFile } from 'node:fs/promises';\nexport function scan() {}\nexport const VERSION = '1';\n" },
+      { "/repos/demo-vessel": ["src"], "/repos/demo-vessel/src": ["scan.ts"] },
+      { "scan.ts": "import { readFile } from 'node:fs/promises';\nexport function scan() {}\nexport const VERSION = '1';\n" },
     );
     const body = (await resolveSourceCodeAnalysis({
       type: "sourceCodeAnalysis",

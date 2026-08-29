@@ -24,7 +24,14 @@ function vTrace(
     status,
     metadata: { version_id: version },
     failure_mode: failureModeType ? { type: failureModeType } : null,
-    executed_at: "2026-06-03T00:00:00Z",
+    // MUST be relative to now, not a literal date. The resolver clamps traces to a
+    // deterministic window of `now - 30 days` (DEFAULT_WINDOW_HOURS, filtered at
+    // `ts >= since`), so a hardcoded fixture date is a TIME BOMB: these tests passed
+    // until wall-clock crossed that date + 30d, then every trace aged out of the
+    // window, every version counted 0 traces, and four tests began asserting their
+    // verdict against INSUFFICIENT_DATA. Nothing about these cases is date-specific —
+    // they test relative recency, so the fixture must be recent by construction.
+    executed_at: new Date().toISOString(),
   };
 }
 

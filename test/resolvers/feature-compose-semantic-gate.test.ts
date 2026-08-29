@@ -2,6 +2,7 @@ import { describe, it, expect } from "bun:test";
 import {
   extractChangedSymbols,
   reachabilityHardFail,
+  changesAreTestOnly,
   verifyPatchAddressesGap,
   regionContainmentVerdict,
   regionFromProposalText,
@@ -684,5 +685,24 @@ describe("regionContainmentVerdict — abstains when the region is not a code lo
     );
     expect(v.contained).toBe(false);
     expect(v.via).toBe("none");
+  });
+});
+
+// A test file has no callers by construction — the reachability hard-fail cannot measure
+// it, so a correct test-only patch was always rejected as dead code. Scoped: the waiver
+// applies only when EVERY touched file is a test, and fails closed on an unparseable diff.
+// Regression test for reachability-gate-hard-fails-test-only-patches-and-misattributes-the-symbol.
+describe("changesAreTestOnly", () => {
+  it("waives only when every touched file is a test", () => {
+    expect(changesAreTestOnly("### /a/b/foo.test.ts\n+x")).toBe(true);
+    expect(changesAreTestOnly("### /a/b/foo.spec.tsx\n+x")).toBe(true);
+    expect(changesAreTestOnly("### NEW FILE /a/b/new.test.ts\n+x")).toBe(true);
+    expect(changesAreTestOnly("### /a/b/foo.test.ts\n+x\n\n### /a/b/impl.ts\n+y")).toBe(false);
+    expect(changesAreTestOnly("### /a/b/impl.ts\n+y")).toBe(false);
+  });
+  it("fails closed when no file header is parseable", () => {
+    // An unrecognised diff shape must keep the full reachability check, never waive it.
+    expect(changesAreTestOnly("")).toBe(false);
+    expect(changesAreTestOnly("--- a/foo.test.ts\n+++ b/foo.test.ts\n+x")).toBe(false);
   });
 });

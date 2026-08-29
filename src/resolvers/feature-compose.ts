@@ -810,6 +810,25 @@ export function detectZeroBehaviorDelta(diff: string): { isInert: boolean; reaso
  * we could not extract any symbol from the diff, we do NOT hard-fail (the change may
  * be data/string/wiring the symbol extractor doesn't model); the LLM judge handles it.
  */
+/**
+ * True iff the diff touches at least one file and EVERY file it touches is a test file.
+ * Used to waive the reachability hard-fail, which cannot measure a test file: nothing
+ * imports a test, so callerCount is 0 for everything in it by construction.
+ *
+ * Reads the `### <path>` headers the diff builder emits (and `### NEW FILE <path>`).
+ * Fails CLOSED: no parseable header means "not test-only", so an unrecognised diff shape
+ * keeps the full check rather than silently waiving it.
+ */
+export function changesAreTestOnly(diff: string): boolean {
+  const paths = String(diff ?? "")
+    .split("\n")
+    .filter((l) => l.startsWith("### "))
+    .map((l) => l.replace(/^###\s+(NEW FILE\s+)?/, "").trim())
+    .filter((p) => p.length > 0);
+  if (paths.length === 0) return false;
+  return paths.every((p) => /\.(test|spec)\.[cm]?[jt]sx?$/.test(p));
+}
+
 export function reachabilityHardFail(facts: ReachabilityFact[]): { hardFail: boolean; reason: string } {
   if (facts.length === 0) return { hardFail: false, reason: "no changed symbols extracted from diff (not a hard-fail)" };
   const reachable = facts.filter((f) => f.reachable);
@@ -1225,7 +1244,31 @@ export async function verifyPatchAddressesGap(args: {
   runSemanticJudge?: boolean;
 }): Promise<SemanticGateVerdict> {
   const { hardFail, reason } = reachabilityHardFail(args.reachability);
-  if (hardFail) {
+  // A TEST FILE HAS NO CALLERS BY CONSTRUCTION — callerCount IS NOT A SIGNAL THERE.
+  //
+  // reachabilityHardFail rejects a patch when every changed symbol has zero callers and
+  // is not an entrypoint. Test bodies are invoked by the RUNNER via describe/it; nothing
+  // imports them. So a correct test-only patch is always "dead code" by that measure, and
+  // the substrate cannot repair its own suite.
+  //
+  // The attributed symbol is usually wrong as well. Measured 2026-08-29 on
+  // orphaned-capability-scan.test.ts: the drafter edited exactly the specified assertion
+  // lines (compose report records ops at 64-65, 66, 78, 96-98, all inside the describe
+  // block) and the gate refused with "every changed symbol (TEMPLATES) has zero callers".
+  // TEMPLATES is a top-level const at line 42 that the patch never touched — the extractor
+  // credits a changed line to the nearest PRECEDING top-level declaration, which in a test
+  // file is some fixture const with no callers.
+  //
+  // Scale of the block: 3 of 783 substrate-authored commits over 60 days touched only test
+  // files (0.4%). Not impossible — a diff yielding no extracted symbol skips the hard-fail
+  // via the facts.length===0 branch — but far too unreliable to fix a red suite, and a red
+  // suite is what forces every cutover to diff newly-failing against a baseline.
+  //
+  // Scoped deliberately: the exemption applies ONLY when EVERY file in the diff is a test
+  // file. A patch touching src/ alongside a test still faces the full check, so production
+  // dead code cannot be smuggled in beside a test edit. Fails CLOSED — a diff with no
+  // parseable file headers is not treated as test-only.
+  if (hardFail && !changesAreTestOnly(args.diff)) {
     return { addresses: false, reason, on_live_path: false, hard_fail: true, llm_consulted: false };
   }
   // FUNCTIONAL-COMPLETENESS HARD-FAIL (2026-06-29). A create-heavy change can pass

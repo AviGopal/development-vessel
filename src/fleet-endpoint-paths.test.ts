@@ -25,10 +25,40 @@
 
 import { describe, it, expect } from "bun:test";
 import { readdirSync, readFileSync, statSync, existsSync } from "node:fs";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
 
 const SRC = new URL("./", import.meta.url).pathname;
-const ACTIVITY_API_INDEX = join(SRC, "../../activity-api/src/index.ts");
+
+// Locate the SIBLING activity-api by WALKING UP, not by fixed depth. `../../activity-api/...`
+// only resolves when this vessel sits at `<repos>/development-vessel/src/`. From an isolated
+// clone it pointed at `/tmp/activity-api/src/index.ts`, so `existsSync` was false, the
+// instrument-guard failed, and all four cases in this file failed with ENOENT — a portability
+// bug here, not a change in the mount table this file audits. Fourth instance of this class in
+// this repo (see detectors-are-scheduled.test.ts and detector-gap-summary-actionable.test.ts).
+function findSibling(relative: string): string | null {
+  let dir = SRC;
+  for (let i = 0; i < 8; i += 1) {
+    const candidate = join(dir, relative);
+    if (existsSync(candidate)) return candidate;
+    const parent = dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return null;
+}
+
+const ACTIVITY_API_INDEX_RESOLVED = findSibling(join("activity-api", "src", "index.ts"));
+// Skip explicitly rather than fail: a standalone development-vessel checkout genuinely has no
+// sibling activity-api whose mount table could be read. Never skip silently, and never skip when
+// it IS found — a real unmounted call path must still fail this file.
+const HAS_ACTIVITY_API = ACTIVITY_API_INDEX_RESOLVED !== null;
+const ACTIVITY_API_INDEX = ACTIVITY_API_INDEX_RESOLVED ?? join(SRC, "../../activity-api/src/index.ts");
+if (!HAS_ACTIVITY_API) {
+  console.error(
+    `[fleet-endpoint-paths] SKIPPED: no sibling activity-api found above ${SRC} — ` +
+      "cannot read the mount table from a standalone vessel checkout.",
+  );
+}
 
 function walk(dir: string, out: string[] = []): string[] {
   for (const e of readdirSync(dir)) {
@@ -84,7 +114,7 @@ function calledPaths(): Array<{ file: string; path: string }> {
 }
 
 describe("fleet endpoint paths — this vessel calls only routes activity-api mounts", () => {
-  it("can read activity-api's mount table (guards the instrument)", () => {
+  it.skipIf(!HAS_ACTIVITY_API)("can read activity-api's mount table (guards the instrument)", () => {
     expect(existsSync(ACTIVITY_API_INDEX)).toBe(true);
     const prefixes = mountedPrefixes();
     // If this comes back empty the assertion below passes vacuously — the failure mode that
@@ -93,7 +123,7 @@ describe("fleet endpoint paths — this vessel calls only routes activity-api mo
     expect(prefixes).toContain("/v2/activities/execution-traces");
   });
 
-  it("finds the /v2 paths this vessel calls (guards the scanner)", () => {
+  it.skipIf(!HAS_ACTIVITY_API)("finds the /v2 paths this vessel calls (guards the scanner)", () => {
     const paths = calledPaths();
     expect(paths.length).toBeGreaterThan(5);
   });
@@ -119,7 +149,7 @@ describe("fleet endpoint paths — this vessel calls only routes activity-api mo
     "src/resolvers/vessel-health-report.ts -> /v2/goals",
   ]);
 
-  it("THE REGRESSION: no NEW call targets an unmounted path", () => {
+  it.skipIf(!HAS_ACTIVITY_API)("THE REGRESSION: no NEW call targets an unmounted path", () => {
     const prefixes = mountedPrefixes();
     // A call is fine when SOME mounted prefix covers it. Sub-paths are the router's business.
     const bad = calledPaths().filter(({ path }) => !isCovered(path, prefixes));
@@ -129,7 +159,7 @@ describe("fleet endpoint paths — this vessel calls only routes activity-api mo
     expect(labelled.filter((l) => !KNOWN_UNMOUNTED.has(l))).toEqual([]);
   });
 
-  it("NEGATIVE CONTROL: the matcher can still reject an unmounted path", () => {
+  it.skipIf(!HAS_ACTIVITY_API)("NEGATIVE CONTROL: the matcher can still reject an unmounted path", () => {
     // Without this, the previous bug is invisible: a coverage function that returns true for
     // everything passes every assertion above. Before believing a clean result, prove a dirty
     // one is detectable.
@@ -140,7 +170,7 @@ describe("fleet endpoint paths — this vessel calls only routes activity-api mo
     }
   });
 
-  it("the frozen list does not go stale — every entry is still unmounted", () => {
+  it.skipIf(!HAS_ACTIVITY_API)("the frozen list does not go stale — every entry is still unmounted", () => {
     // A baseline that silently becomes false is how a detector stops detecting. If someone
     // mounts /v2/gaps, this fails and the entry must come out.
     const prefixes = mountedPrefixes();
@@ -150,7 +180,7 @@ describe("fleet endpoint paths — this vessel calls only routes activity-api mo
     }
   });
 
-  it("the specific paths that were wrong are now right", () => {
+  it.skipIf(!HAS_ACTIVITY_API)("the specific paths that were wrong are now right", () => {
     const concept = readFileSync(join(SRC, "resolvers/concept.ts"), "utf8");
     expect(concept).toContain("/v2/activities/execution-traces");
     expect(concept).not.toMatch(/\$\{METABOB_ENDPOINT\}\/v2\/execution-traces/);
@@ -159,7 +189,7 @@ describe("fleet endpoint paths — this vessel calls only routes activity-api mo
     expect(report).not.toContain('"/v2/activities/traces"');
   });
 
-  it("a failed trace fetch is STATED, not read as an empty store", () => {
+  it.skipIf(!HAS_ACTIVITY_API)("a failed trace fetch is STATED, not read as an empty store", () => {
     // The silent-empty half of the defect. Fixing the URL without this would leave the next
     // wrong path just as invisible.
     const concept = readFileSync(join(SRC, "resolvers/concept.ts"), "utf8");

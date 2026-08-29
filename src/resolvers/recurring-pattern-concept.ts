@@ -1,3 +1,4 @@
+import { env } from "../config.js";
 import type { ResolverResult } from "./types.js";
 
 export interface RecurringPatternPointer {
@@ -6,14 +7,23 @@ export interface RecurringPatternPointer {
 }
 
 async function fetchTraces(limit: number): Promise<any[]> {
-  const endpoint = process.env["METABOB_ENDPOINT"] ?? "http://127.0.0.1:8080";
+  const endpoint = env("METABOB_ENDPOINT", "http://127.0.0.1:8080");
   const apiKey = process.env["METABOB_API_KEY"] ?? "";
-  const res = await fetch(`${endpoint}/v2/activities/execution-traces?outcome=success&limit=${limit}`, {
-    headers: apiKey ? { Authorization: `ApiKey ${apiKey}` } : {},
-    signal: AbortSignal.timeout(10_000),
-  });
+  // A non-OK response already returned [] — but a CONNECTION failure threw straight out of the
+  // resolver, so an unreachable trace store produced an exception instead of the declared
+  // shape. The trace store being down is an expected operating condition, not a crash, and the
+  // caller cannot distinguish "no patterns" from "resolver exploded" if it never gets a shape.
+  let res: Response;
+  try {
+    res = await fetch(`${endpoint}/v2/activities/execution-traces?outcome=success&limit=${limit}`, {
+      headers: apiKey ? { Authorization: `ApiKey ${apiKey}` } : {},
+      signal: AbortSignal.timeout(10_000),
+    });
+  } catch {
+    return [];
+  }
   if (!res.ok) return [];
-  const json = (await res.json()) as any;
+  const json = (await res.json().catch(() => null)) as any;
   // `executions` first: that is the key activity-api returns.
   const traces = json?.executions ?? json?.traces ?? json?.data ?? [];
   if (!Array.isArray(traces)) return [];

@@ -11,8 +11,20 @@ export interface UiScreenshotPointer {
 }
 
 export async function resolveUiScreenshot(pointer: UiScreenshotPointer): Promise<ResolverResult> {
+  // GUARD `window` ITSELF, not just `window.require`. This resolver targets the Obsidian /
+  // Electron renderer, but it is registered and dispatched in a Node vessel where `window` does
+  // not exist — so the very next line threw ReferenceError before reaching the graceful
+  // REQUIRE_NOT_FOUND branch below. The degraded answer was already designed; it was just
+  // unreachable from the environment the resolver actually runs in.
+  const win = (globalThis as { window?: unknown }).window;
+  if (typeof win !== "object" || win === null) {
+    return {
+      shape: 'obsidian:ui_screenshot',
+      body: { error: 'no browser window in this runtime (server-side dispatch)', error_code: 'WINDOW_UNAVAILABLE' },
+    };
+  }
   // Access Electron's require exactly as the proven read-only probe does.
-  const req0 = (window as unknown as { require?: (m: string) => unknown }).require;
+  const req0 = (win as { require?: (m: string) => unknown }).require;
   if (!req0) {
     return { shape: 'obsidian:ui_screenshot', body: { error: 'require unavailable', error_code: 'REQUIRE_NOT_FOUND' } };
   }

@@ -10,6 +10,7 @@ export interface SubstrateHealthTickPointer {
   // Operator-tunable thresholds (defaults match spec §G table)
   confidence_floor?: number;           // default 10 (α+β)
   confidence_ratio_threshold?: number; // default 0.25
+  confidence_min_pairs?: number;       // default 8 — below this the ratio is UNMEASURED (null), not false
   stability_rate_ceiling?: number;     // default 1.0 per hour
   optimality_ratio_ceiling?: number;   // default 2.0
 }
@@ -116,6 +117,20 @@ export async function resolveSubstrateHealthTick(
 
   const confidenceFloor = pointer.confidence_floor ?? 10;
   const confidenceRatioThreshold = pointer.confidence_ratio_threshold ?? 0.25;
+  // MINIMUM SAMPLE (2026-08-29). The confidence ratio below is meaningless on a thin window, and
+  // without a floor it moves in the WRONG DIRECTION as the substrate goes quiet. Measured on the
+  // same unchanged system 4h apart, with no learning intervention between:
+  //   01:11Z  total_pairs 17, pairs_above_floor 2  -> 0.12  FAIL
+  //   05:00Z  total_pairs  4, pairs_above_floor 2  -> 0.50  PASS
+  // The numerator never moved. The gate flipped because the DENOMINATOR COLLAPSED — fewer distinct
+  // (state, activity) pairs exercised in the 1h window. The degenerate case is total_pairs 1 with
+  // that pair above floor: 1/1 = a confident PASS on a single observation.
+  //
+  // That is not a metric nit. development-vessel/CLAUDE.md defines the S1->S2 lift as three
+  // consecutive coverage_progress=true AND overall_passing=true, so an IDLE substrate manufactures
+  // lift: the system certifies itself ready to advance BY DOING LESS. SUBSTRATE_AS_MDP.md §12.6
+  // names exactly this class — a gameable reward converges on the wrong objective.
+  const confidenceMinPairs = pointer.confidence_min_pairs ?? 8;
   // Ceiling of 10.0/hr: accommodates post-restart seed churn (bootstrap-seeder +
   // seed-templates both run on restart, producing ~20 template UPSERTs within seconds).
   // The 1.0/hr ceiling was too tight — it flagged normal operational maintenance as
@@ -348,7 +363,14 @@ export async function resolveSubstrateHealthTick(
   // streak honestly instead of falsely signalling a regression.
   const confidence_passing = !corpus_complete
     ? null
-    : (total_pairs === 0 ? false : pairs_above_floor / total_pairs >= confidenceRatioThreshold);
+    // null, NOT false, on a thin sample. This file already treats null as "couldn't measure this
+    // tick" three lines above, and the comment there states the reason: a null dimension "makes
+    // overall_passing null … which resets the lift streak honestly instead of falsely signalling a
+    // regression". A thin sample is owed that same honesty — returning false would assert a
+    // MEASURED regression, which is the opposite of the truth, and would be as dishonest in the
+    // pessimistic direction as the current behaviour is in the optimistic one. Subsumes the old
+    // total_pairs === 0 guard, since 0 < confidenceMinPairs.
+    : (total_pairs < confidenceMinPairs ? null : pairs_above_floor / total_pairs >= confidenceRatioThreshold);
   const stability_passing = !corpus_complete
     ? null
     : mutation_rate_per_hour <= stabilityRateCeiling;

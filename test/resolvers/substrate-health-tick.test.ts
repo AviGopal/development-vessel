@@ -179,3 +179,64 @@ describe("substrate-health-tick resolver", () => {
     expect(body.health_verdict.overall_passing).toBeNull();
   });
 });
+
+// ---- Minimum-sample floor on the confidence term (2026-08-29) ----
+//
+// THE GATE PASSED WHEN THE SUBSTRATE WENT IDLE. Measured on the same unchanged system 4h apart,
+// with no learning intervention between:
+//   01:11Z  total_pairs 17, pairs_above_floor 2  -> 0.12  FAIL
+//   05:00Z  total_pairs  4, pairs_above_floor 2  -> 0.50  PASS
+// The numerator never moved; the denominator collapsed. Because CLAUDE.md defines the S1->S2 lift
+// as three consecutive coverage_progress=true AND overall_passing=true, an IDLE substrate
+// manufactured lift — the system certifying itself ready to advance by doing less.
+//
+// These pin the predicate directly. The resolver itself does network I/O, so the rule is mirrored
+// here in the same style as the hashWork/bucketSignature tests elsewhere in this repo: a change to
+// the predicate in substrate-health-tick.ts MUST change this file too.
+import { describe, it, expect } from "bun:test";
+
+function confidencePassing(
+  total_pairs: number,
+  pairs_above_floor: number,
+  corpus_complete = true,
+  confidenceMinPairs = 8,
+  confidenceRatioThreshold = 0.25,
+): boolean | null {
+  return !corpus_complete
+    ? null
+    : (total_pairs < confidenceMinPairs ? null : pairs_above_floor / total_pairs >= confidenceRatioThreshold);
+}
+
+describe("confidence term — minimum sample floor", () => {
+  it("THE REGRESSION: 2 of 4 pairs no longer passes", () => {
+    // The exact reading that flipped the gate to true on an idle hour.
+    expect(confidencePassing(4, 2)).toBeNull();
+  });
+
+  it("the same numerator cannot pass at ANY denominator below the floor", () => {
+    // The load-bearing property: it is not that 4 is unlucky, it is that a thin sample is
+    // unmeasured. 2/2 = 1.0 and 2/3 = 0.67 both clear the 0.25 ratio and must still be null.
+    for (const n of [1, 2, 3, 4, 5, 6, 7]) expect(confidencePassing(n, 2)).toBeNull();
+  });
+
+  it("UNMEASURED is null, never false", () => {
+    // false asserts a MEASURED regression — as dishonest in the pessimistic direction as the old
+    // behaviour was in the optimistic one. The file uses null for "couldn't measure this tick",
+    // and overall_passing keys on `confidence_passing !== null`, so null resets the lift streak
+    // honestly rather than signalling a regression that was never observed.
+    expect(confidencePassing(0, 0)).toBeNull();
+    expect(confidencePassing(0, 0)).not.toBe(false);
+  });
+
+  it("still discriminates once the sample is sufficient", () => {
+    // The floor must not swallow real verdicts: at or above it, the ratio decides as before.
+    expect(confidencePassing(8, 2)).toBe(true);    // 0.25 — exactly the threshold
+    expect(confidencePassing(8, 1)).toBe(false);   // 0.125 — a genuine, measured fail
+    expect(confidencePassing(17, 2)).toBe(false);  // the 01:11Z reading, still FAIL
+    expect(confidencePassing(20, 15)).toBe(true);
+  });
+
+  it("an unreadable corpus is still null regardless of sample size", () => {
+    expect(confidencePassing(50, 40, false)).toBeNull();
+  });
+});

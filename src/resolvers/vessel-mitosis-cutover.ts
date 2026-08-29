@@ -345,6 +345,46 @@ function softRefuse(
   // boundary is as silent as patch_with_tools was — mitosis-tick shows
   // "completed" while nothing landed and no reason surfaces in the trace.
   console.error(`[mitosis-cutover] REFUSE: ${refusal_reason}${extra ? ` ${JSON.stringify(extra).slice(0, 200)}` : ""}`);
+  // EMIT A TRACE FOR THE REFUSAL. The comment above already names the problem it was written for —
+  // "no reason surfaces in the trace" — but a console.error is not a trace: it is not queryable by
+  // shape, not joinable to a gap, and not gradeable. Measured 2026-08-29: 191 cutovers ran in 12
+  // hours and the trace store held ZERO vessel_mitosis_cutover rows out of 19,757.
+  //
+  // Every refusal path returns through here, so one emission covers all of them. That matters
+  // because the refusals ARE the interesting signal: a drift check refusing the cutover's own
+  // staged patch, an empty baseline reading pre-existing failures as regressions, a stale
+  // mitosis_root copying files already at HEAD. Each of those cost hours of journalctl archaeology
+  // to find precisely because this boundary was silent to the trace store.
+  //
+  // Fire-and-forget, swallowed, 5s cap: a trace-store hiccup must never turn a refusal into a throw.
+  try {
+    const ep = process.env["METABOB_ENDPOINT"] ?? "http://127.0.0.1:8080";
+    const key = process.env["METABOB_API_KEY"] ?? "";
+    void fetch(`${ep}/v2/activities/executions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `ApiKey ${key}` },
+      body: JSON.stringify({
+        activity_id: "vessel_mitosis_cutover",
+        success: false,
+        duration_ms: 0,
+        cost: 0,
+        tokens: { input: 0, output: 0, cache: 0 },
+        error_message: refusal_reason.slice(0, 400),
+        metadata: {
+          outcome: "refused",
+          refusal_reason: refusal_reason.slice(0, 400),
+          kind: String((extra ?? {})["kind"] ?? ""),
+          vessel_name: String((extra ?? {})["vessel_name"] ?? ""),
+          gap_id: String((extra ?? {})["gap_id"] ?? ""),
+          sentinel: String((extra ?? {})["sentinel"] ?? ""),
+          staged_base_sha: String((extra ?? {})["staged_base_sha"] ?? ""),
+          commit_tree_sha: String((extra ?? {})["commit_tree_sha"] ?? ""),
+          newly_failing: Array.isArray((extra ?? {})["newly_failing"]) ? (extra ?? {})["newly_failing"] : [],
+        },
+      }),
+      signal: AbortSignal.timeout(5000),
+    }).catch(() => { /* trace store unreachable — a refusal must still return cleanly */ });
+  } catch { /* emission must never change the refusal path */ }
   return {
     shape: "vesselMitosisCutoverResult",
     body: {
@@ -2711,6 +2751,40 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
       JSON.stringify({ shape: "cutoverApplied", body: appliedBody }) + "\n",
     );
     operations.push({ op: "emit cutoverApplied", status: "ok", detail: logPath });
+    // TRACE THE LANDING TOO, not just the refusals. mitosis-applied.jsonl is an append-only file:
+    // useful for forensics, invisible to the walk, Thompson and the ribosome. Pairing this with the
+    // refusal emission in softRefuse gives the cutover a complete outcome distribution, which is
+    // what a posterior over landing strategies needs — a store containing only failures would
+    // teach that nothing ever works.
+    try {
+      const ep = process.env["METABOB_ENDPOINT"] ?? "http://127.0.0.1:8080";
+      const key = process.env["METABOB_API_KEY"] ?? "";
+      const ab = appliedBody as Record<string, unknown>;
+      void fetch(`${ep}/v2/activities/executions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `ApiKey ${key}` },
+        body: JSON.stringify({
+          activity_id: "vessel_mitosis_cutover",
+          success: true,
+          duration_ms: 0,
+          cost: 0,
+          tokens: { input: 0, output: 0, cache: 0 },
+          metadata: {
+            outcome: "applied",
+            vessel_name: String(ab["vessel_name"] ?? ""),
+            gap_id: String(ab["gap_id"] ?? ""),
+            proposal_id: String(ab["proposal_id"] ?? ""),
+            new_git_sha: String(ab["new_git_sha"] ?? ""),
+            push_status: String(ab["push_status"] ?? ""),
+            staged_files: Array.isArray(ab["staged_files_applied"]) ? ab["staged_files_applied"] : [],
+            // gap_id "unknown-gap" or a route-edit-<hash> means the landing carries no durable gap
+            // linkage, which is why a landed fix can leave its gap open — worth being queryable.
+            linked_to_gap: !!ab["gap_id"] && String(ab["gap_id"]) !== "unknown-gap" && !String(ab["gap_id"]).startsWith("route-edit-"),
+          },
+        }),
+        signal: AbortSignal.timeout(5000),
+      }).catch(() => { /* trace store unreachable — the landing already happened */ });
+    } catch { /* emission must never affect a completed landing */ }
   } catch (err) {
     operations.push({
       op: "emit cutoverApplied",

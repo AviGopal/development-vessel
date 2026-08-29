@@ -415,18 +415,42 @@ export async function resolveOrphanedCapabilityScan(
   const invokedSet = invoked ?? new Set<string>();
 
   const orphanCandidates = liveShapes.filter((s) => !invokedSet.has(s));
+  // The count the report and gap summaries should use: invoked resolvers that are ALSO live.
+  const invokedLive = liveShapes.filter((s) => invokedSet.has(s)).length;
   // Drop shapes already expressed by a minted bridge (closed orphan gap) — see
   // fetchClosedOrphanShapes: the invoked-set can't see paradigm-table auto-bridges,
   // so this is what actually stops the mint→close→re-flag churn.
   const bridged = await fetchClosedOrphanShapes(emitUrl, apiKey).catch(() => new Set<string>());
-  const capabilityOrphans = orphanCandidates.filter(isOutwardCapability).filter((s) => !bridged.has(s)).sort();
+  // CONSUMPTION HAS TWO SURFACES, NOT ONE (2026-08-29). The invoked-set counts ACTIVITY-mediated
+  // invocation only, so a resolver consumed directly by ANOTHER RESOLVER was invisible and kept
+  // being reported as an orphan. Proven live: solicitation_outcome_scan consumes the uiQuestion
+  // read shape on every bare dispatch (it self-supplies ids from it and returned 85 outcomes), and
+  // orphaned-capability-uiQuestion was STILL emitted afterwards. The detector could not see a
+  // repair that had already happened — the same wrong-surface defect it exists to find, in itself.
+  //
+  // Reuses findCandidateConsumers rather than adding a second scanner (law 3). Bounded by
+  // construction: it runs only over shapes that already passed isOutwardCapability and the bridged
+  // filter — tens of shapes, not the full 389 — and each call is one grep.
+  //
+  // A false NEGATIVE here is cheap (a real orphan goes unreported for a cycle); a false POSITIVE is
+  // expensive, because it manufactures the worklist that fed 346 attempts at 0 lands. So the
+  // widening is deliberate: any non-test file referencing the shape is enough to say "someone reads
+  // this", and the rewire prescription then names those files.
+  const capabilityOrphans = orphanCandidates
+    .filter(isOutwardCapability)
+    .filter((s) => !bridged.has(s))
+    .filter((s) => findCandidateConsumers(s).length === 0)
+    .sort();
 
   let gapsEmitted = 0;
   const emitted: string[] = [];
   if (emit && !degraded) {
     for (const shape of capabilityOrphans) {
       if (gapsEmitted >= maxEmit) break;
-      const ok = await emitOrphanGap(emitUrl, apiKey, shape, liveShapes.length, invoked.size);
+      // Pass the RECONCILED count, not invoked.size — the gap summary renders it as
+      // "(N/M live resolvers are ever invoked)", and invoked.size is drawn from a different
+      // population, which is how that sentence came to print 394/389.
+      const ok = await emitOrphanGap(emitUrl, apiKey, shape, liveShapes.length, invokedLive);
       if (ok) {
         gapsEmitted += 1;
         emitted.push(shape);
@@ -445,7 +469,13 @@ export async function resolveOrphanedCapabilityScan(
     shape: "orphanedCapabilityReport",
     body: {
       live_shape_count: liveShapes.length,
-      invoked_resolver_count: invokedSet.size,
+      // RECONCILED (2026-08-29). invokedSet counts every resolver seen invoked ANYWHERE, which is
+      // not the population liveShapes is drawn from — so the report printed "394/389 live resolvers
+      // are ever invoked", a numerator exceeding its denominator, and neither the ratio nor the
+      // orphan count could be trusted as a worklist. Report the INTERSECTION, which is the quantity
+      // the sentence actually claims, and keep the raw total separately so nothing is hidden.
+      invoked_resolver_count: invokedLive,
+      invoked_anywhere_count: invokedSet.size,
       orphan_candidate_count: orphanCandidates.length,
       capability_orphan_count: capabilityOrphans.length,
       degraded,

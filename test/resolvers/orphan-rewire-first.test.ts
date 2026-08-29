@@ -51,3 +51,40 @@ describe("orphan gaps prescribe rewiring first", () => {
     expect(await src()).toContain("adding a consumer nobody wanted");
   });
 });
+
+describe("the detector's own surface (2026-08-29)", () => {
+  // THE DETECTOR HAD THE DEFECT IT DETECTS. It counted ACTIVITY-mediated invocation only, so a
+  // resolver consumed directly by another RESOLVER was invisible. Proven live:
+  // solicitation_outcome_scan consumes the uiQuestion read shape on every bare dispatch (85
+  // outcomes), and orphaned-capability-uiQuestion was STILL emitted afterwards — the detector could
+  // not see a repair that had already happened.
+  it("treats a shape with existing consumers as NOT an orphan", async () => {
+    const s = await src();
+    expect(s).toMatch(/\.filter\(\(s\) => findCandidateConsumers\(s\)\.length === 0\)/);
+  });
+
+  it("keeps the activity-corpus check — this widens, it does not replace", async () => {
+    const s = await src();
+    expect(s).toContain("orphanCandidates = liveShapes.filter((s) => !invokedSet.has(s))");
+    expect(s).toContain(".filter(isOutwardCapability)");
+  });
+
+  it("reports a numerator drawn from its denominator's population", async () => {
+    // The report printed "394/389 live resolvers are ever invoked" — a numerator exceeding its
+    // denominator, because invokedSet counts resolvers invoked ANYWHERE. Neither the ratio nor the
+    // orphan count could be trusted as a worklist while that held.
+    const s = await src();
+    expect(s).toContain("const invokedLive = liveShapes.filter((s) => invokedSet.has(s)).length");
+    expect(s).toContain("invoked_resolver_count: invokedLive");
+  });
+
+  it("still surfaces the raw total so nothing is hidden by the reconciliation", async () => {
+    expect(await src()).toContain("invoked_anywhere_count: invokedSet.size");
+  });
+
+  it("passes the reconciled count into the gap summary too", async () => {
+    // The summary renders "(N/M live resolvers are ever invoked)"; passing invoked.size there is
+    // how that sentence came to print 394/389.
+    expect(await src()).toContain("liveShapes.length, invokedLive)");
+  });
+});

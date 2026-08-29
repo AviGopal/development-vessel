@@ -63,7 +63,17 @@ describe("docs_align_scan v1 (implemented behavior)", () => {
     expect(body.implemented).toBe(true);
     expect(body.scanned_count).toBe(1); // dated doc excluded
     const invariants = body.findings.map((f) => f.invariant).sort();
-    expect(invariants).toEqual(["accuracy", "naming_alignment", "setup_enablement", "timelessness"]);
+    // The bogus-shape line is reported under shape_existence, not accuracy. This expectation
+    // predates the precision hardening that gated `accuracy` on DECLARATION context
+    // (`type: "x"` / `shape: "x"`) rather than mere proximity to the word "shape" — a gate
+    // added because proximity flagged field names, function names and deliberately fictional
+    // example shapes, and a validator that fails on correct docs trains readers to ignore it.
+    // The corpus line here ("The `bogus_shape_xyz` shape is served by…") is prose, not a
+    // declaration, so accuracy correctly declines it. Detection is NOT lost: shape_existence
+    // still flags the same token, which is why the count stays at four. Asserted below.
+    expect(invariants).toEqual(["naming_alignment", "setup_enablement", "shape_existence", "timelessness"]);
+    // the unadvertised shape is still caught — by the invariant that owns vocabulary checks
+    expect(body.findings.some((f) => f.invariant === "shape_existence" && f.evidence.includes("bogus_shape_xyz"))).toBe(true);
     // retained branding not flagged
     expect(body.findings.some((f) => f.evidence.includes("metabob-mcp"))).toBe(false);
     // dated doc produced no findings

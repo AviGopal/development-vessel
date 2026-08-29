@@ -837,7 +837,56 @@ export async function resolveVesselMitosisCutover(
       `covering one file only.`,
     );
   }
-  console.error(`[mitosis-cutover] freshness vessel=${vessel_name} mitosis=${mitosis_version_id} staged_base_sha=${stagedBaseSha ?? "<missing>"} current_live_sha=${currentLiveSha ?? "<absent>"} freshnessOK=${freshnessOK} net_new=${netNewFreshnessOK} freshness_check_path=${freshnessCheckPath}`);
+  // CHECK THE TREE THE COMMIT LANDS IN, NOT ONLY THE ONE IT RUNS FROM (2026-08-28).
+  //
+  // Under MITOSIS_DIRECT_PUSH the freshness gate above reads baseRoot =
+  // MITOSIS_RUNTIME_DIR (/vessels/<v>) — the DEPLOYED copy — while the commit is made in
+  // MITOSIS_PUSH_CLONE_DIR (/workspace/git/vessels/<v>), a DIFFERENT tree. The runtime dir
+  // lags the clone by a pull-sync cycle, so for the whole window between a commit landing
+  // in git and being deployed, the gate compares against content that is provably not what
+  // the commit will be applied to. It passes, and the cutover writes stale content over
+  // newer work.
+  //
+  // Measured 2026-08-28: commit 510b6df, staged from base 4e87aba4ab11, logged
+  // `current_live_sha=4e87aba4ab11 freshnessOK=true freshness_check_path=/vessels/...` at
+  // 23:00:29 — while the clone already carried 421052c. /vessels did not receive it until
+  // 23:20:43, twenty minutes later. The cutover reverted 44 lines of verified work and the
+  // gate reported green. This is the same class as the 2026-08-11 sighting (2dbb4a6); that
+  // fix added per-file bases but kept reading the runtime tree, so the hole survived.
+  //
+  // Fail-open on absence, matching the per-file check above: no clone dir, no sentinel, an
+  // absent file (net-new), or an unreadable one all yield "unknown" and do not refuse.
+  const pushCloneVesselRoot = cloneDir ? join(resolve(cloneDir), vessel_name) : null;
+  if (
+    pushCloneVesselRoot &&
+    resolve(pushCloneVesselRoot) !== resolve(baseRoot) &&
+    stagedSentinel &&
+    stagedBaseSha &&
+    !netNewFreshnessOK
+  ) {
+    try {
+      const clonePath = join(pushCloneVesselRoot, stagedSentinel);
+      if (await pathExists(clonePath)) {
+        const cloneSha = createHash("sha256").update(await readFile(clonePath)).digest("hex").slice(0, 12);
+        if (cloneSha !== stagedBaseSha) {
+          console.error(
+            `[mitosis-cutover] COMMIT-TREE DRIFT: ${stagedSentinel} in the push clone is ${cloneSha}, but this mitosis was ` +
+            `staged from ${stagedBaseSha}. The runtime tree still reads ${currentLiveSha ?? "<absent>"}, which is why the ` +
+            `freshness gate passed — it checks ${baseRoot} while the commit lands in ${pushCloneVesselRoot}. Applying this ` +
+            `would revert work that is already committed. Refusing.`,
+          );
+          return softRefuse("staged content drifted in the tree the commit lands in", {
+            verdict: evaluation_evidence.verdict,
+            staged_base_sha: stagedBaseSha,
+            commit_tree_sha: cloneSha,
+            runtime_tree_sha: currentLiveSha,
+            sentinel: stagedSentinel,
+          });
+        }
+      }
+    } catch { /* unreadable -> unknown -> do not refuse */ }
+  }
+  console.error(`[mitosis-cutover] freshness vessel=${vessel_name} mitosis=${mitosis_version_id} staged_base_sha=${stagedBaseSha ?? "<missing>"} current_live_sha=${currentLiveSha ?? "<absent>"} freshnessOK=${freshnessOK} net_new=${netNewFreshnessOK} freshness_check_path=${freshnessCheckPath} commit_tree=${pushCloneVesselRoot ?? "<same-as-base>"}`);
   if (!freshnessOK) {
     // Already-applied no-op: if the live source already matches the STAGED
     // MITOSIS content (not the pre-staging base_sha), this change has already

@@ -705,3 +705,87 @@ describe("vessel_mitosis_cutover", () => {
     }
   });
 });
+
+// ---- Commit-tree freshness (2026-08-28) ----
+//
+// Regression test for the hole that let 510b6df revert a verified commit. Under
+// MITOSIS_DIRECT_PUSH the freshness gate reads MITOSIS_RUNTIME_DIR (the DEPLOYED copy)
+// while the commit is made in MITOSIS_PUSH_CLONE_DIR (the git clone). The runtime tree
+// lags the clone by a pull-sync cycle, so the gate can read the pre-commit content, pass,
+// and let the cutover write stale content over newer work.
+//
+// The discriminating pair matters: a clone that AGREES with the staged base must still
+// cut over. A test that only asserted the refusal would also pass if the check refused
+// everything.
+describe("vessel_mitosis_cutover — commit-tree freshness", () => {
+  let originalClone: string | undefined;
+  beforeEach(() => { originalClone = process.env["MITOSIS_PUSH_CLONE_DIR"]; });
+  afterEach(() => {
+    if (originalClone === undefined) delete process.env["MITOSIS_PUSH_CLONE_DIR"];
+    else process.env["MITOSIS_PUSH_CLONE_DIR"] = originalClone;
+  });
+
+  async function withCloneTree(content: string): Promise<string> {
+    const cloneDir = join(tmpRoot, "git", "vessels");
+    await mkdir(join(cloneDir, "development-vessel", "src"), { recursive: true });
+    await writeFile(join(cloneDir, "development-vessel", "src", "index.ts"), content);
+    process.env["MITOSIS_PUSH_CLONE_DIR"] = cloneDir;
+    return cloneDir;
+  }
+
+  it("refuses when the commit tree has moved even though the runtime tree still matches", async () => {
+    const { mitosisRoot, baseSha } = await setupForCutover();
+    // The exact 510b6df shape: runtime still at the staged base (so the original gate
+    // passes), clone already carrying newer work.
+    await withCloneTree(`// base index for cutover test\nexport const v = "base";\nexport const newerWork = true;\n`);
+    const r = await resolveVesselMitosisCutover({
+      type: "vessel_mitosis_cutover",
+      vessel_name: "development-vessel",
+      base_version_id: "v1",
+      mitosis_version_id: "mitosis-2026-06-03T00-00-00Z",
+      mitosis_root: mitosisRoot,
+      staged_base_sha: baseSha,
+      staged_files: ["src/index.ts"],
+      evaluation_evidence: FAVORABLE_EVIDENCE,
+    });
+    const body = r.body as { refused?: boolean; refusal_reason?: string };
+    expect(body.refused).toBe(true);
+    expect(String(body.refusal_reason)).toContain("drifted in the tree the commit lands in");
+  });
+
+  it("still cuts over when the commit tree agrees with the staged base", async () => {
+    const { mitosisRoot, baseSha } = await setupForCutover();
+    await withCloneTree(`// base index for cutover test\nexport const v = "base";\n`);
+    const r = await resolveVesselMitosisCutover({
+      type: "vessel_mitosis_cutover",
+      vessel_name: "development-vessel",
+      base_version_id: "v1",
+      mitosis_version_id: "mitosis-2026-06-03T00-00-00Z",
+      mitosis_root: mitosisRoot,
+      staged_base_sha: baseSha,
+      staged_files: ["src/index.ts"],
+      evaluation_evidence: FAVORABLE_EVIDENCE,
+    });
+    const body = r.body as { refused?: boolean; refusal_reason?: string };
+    expect(String(body.refusal_reason ?? "")).not.toContain("drifted in the tree the commit lands in");
+  });
+
+  it("fails open when the commit tree has no copy of the sentinel", async () => {
+    const { mitosisRoot, baseSha } = await setupForCutover();
+    const cloneDir = join(tmpRoot, "git", "vessels-empty");
+    await mkdir(join(cloneDir, "development-vessel", "src"), { recursive: true });
+    process.env["MITOSIS_PUSH_CLONE_DIR"] = cloneDir;
+    const r = await resolveVesselMitosisCutover({
+      type: "vessel_mitosis_cutover",
+      vessel_name: "development-vessel",
+      base_version_id: "v1",
+      mitosis_version_id: "mitosis-2026-06-03T00-00-00Z",
+      mitosis_root: mitosisRoot,
+      staged_base_sha: baseSha,
+      staged_files: ["src/index.ts"],
+      evaluation_evidence: FAVORABLE_EVIDENCE,
+    });
+    const body = r.body as { refusal_reason?: string };
+    expect(String(body.refusal_reason ?? "")).not.toContain("drifted in the tree the commit lands in");
+  });
+});

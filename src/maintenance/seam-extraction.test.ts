@@ -39,6 +39,22 @@ function makeProject(): Project {
   return project;
 }
 
+/**
+ * Same reason as PARITY_GATE_TEST_TIMEOUT_MS in parity-gate.test.ts, and these are the same
+ * work: the two async cases below call verifyParity, which builds a ts-morph Project and runs a
+ * full type-check — measured at 8-9s here, against bun's 5000ms default. They failed as TIMEOUTS,
+ * never on an assertion, and the set that lost the race varied run to run.
+ *
+ * That is not cosmetic: the pre-cutover gate reads a red test as a regression INTRODUCED by the
+ * patch under test, so these timeouts block unrelated landings. parity-gate was given this
+ * treatment when the problem was diagnosed there; its sibling was missed. The work is inherently
+ * slow — the timeout was wrong, not the suite.
+ *
+ * The synchronous case needs no extension and does not get one, so a genuine hang there still
+ * fails fast.
+ */
+const SEAM_EXTRACTION_TEST_TIMEOUT_MS = 60_000;
+
 describe("seam extraction round-trip", () => {
   test("propose finds a closed cluster; apply + gate = PASS", async () => {
     const project = makeProject();
@@ -53,7 +69,7 @@ describe("seam extraction round-trip", () => {
     const v = await verifyParity(project, baseline, seam!.targetModule);
     expect(v.failReason).toBeUndefined();
     expect(v.verdict).toBeTrue();
-  });
+  }, SEAM_EXTRACTION_TEST_TIMEOUT_MS);
 
   test("apply refuses a non-sibling target (relative-import safety)", () => {
     const project = makeProject();
@@ -79,5 +95,5 @@ describe("seam extraction round-trip", () => {
     const v = await verifyParity(project, baseline, "/src/routes/bag.handler-b.ts");
     expect(v.failReason).toBeUndefined();
     expect(v.verdict).toBeTrue();
-  });
+  }, SEAM_EXTRACTION_TEST_TIMEOUT_MS);
 });

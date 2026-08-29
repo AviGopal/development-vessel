@@ -1,7 +1,8 @@
+import { env } from "../config.js";
 import type { ResolverResult } from "../resolvers/types.js";
 
 export async function resolveFailureCountReport(pointer: { type: string } & Record<string, unknown>): Promise<ResolverResult> {
-  const endpoint = process.env.METABOB_ENDPOINT ?? "http://127.0.0.1:8080";
+  const endpoint = env("METABOB_ENDPOINT", "http://127.0.0.1:8080");
   const apiKey = process.env.METABOB_API_KEY ?? "";
   
   const now = Date.now();

@@ -1,3 +1,4 @@
+import { env } from "../config.js";
 interface ConceptRecord {
   readonly id?: unknown;
   readonly title?: unknown;
@@ -33,7 +34,7 @@ interface LearningModeResult {
 }
 
 export async function resolveLearningMode(_pointer: Record<string, unknown>): Promise<LearningModeResult> {
-  const endpoint = process.env.CONCEPT_DB_ENDPOINT ?? "http://127.0.0.1:8260";
+  const endpoint = env("CONCEPT_DB_ENDPOINT", "http://127.0.0.1:8260");
   let res: Response;
   try {
     res = await fetch(`${endpoint}/concepts?limit=1000`, {

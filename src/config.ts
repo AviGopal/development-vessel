@@ -1,14 +1,46 @@
-export const VESSEL_ID = process.env["VESSEL_ID"] ?? `development-vessel-${process.env["HOSTNAME"] ?? "local"}`;
-export const PORT = parseInt(process.env["PORT"] ?? "8090", 10);
-export const HOST = process.env["HOST"] ?? "0.0.0.0";
+/**
+ * `??` falls back only on null/undefined — NOT on the empty string. An env var exported as
+ * `FOO=` (a bare assignment in an env file, or an unset variable expanded into a systemd
+ * EnvironmentFile) therefore DEFEATS the literal default and yields "".
+ *
+ * For a URL that is silent and severe: the endpoint becomes "", every `${endpoint}/path`
+ * becomes a HOSTLESS relative URL, and the fetch does not fail distinctively — it produces an
+ * empty or refused result that reads as a legitimately empty answer. Measured in this container,
+ * which exports DISCOVERY_ENDPOINT and METABOB_ENDPOINT as empty strings: vessel_exercise_scan
+ * reported `connected_vessels: 0` (a dead registry lookup wearing the costume of a healthy empty
+ * fleet), author_producer failed every case with "No vessel advertising llm_completion found in
+ * discovery", and activity_template / failure_count_report threw ERR_INVALID_URL before a single
+ * assertion ran.
+ *
+ * `env()` treats empty/whitespace as absent, which is what an empty env var means for a URL.
+ */
+export const env = (key: string, fallback: string): string => {
+  const raw = process.env[key];
+  return raw === undefined || raw.trim() === "" ? fallback : raw;
+};
 
-export const METABOB_ENDPOINT = process.env["METABOB_ENDPOINT"] ?? "http://127.0.0.1:8080";
+/**
+ * Same hazard, different shape: `parseInt("")` is NaN, not the default. An empty PORT would
+ * bind NaN rather than 8090, so validate the parse rather than trusting the ?? to have caught it.
+ */
+const envInt = (key: string, fallback: number): number => {
+  const parsed = parseInt(env(key, String(fallback)), 10);
+  return Number.isFinite(parsed) ? parsed : fallback;
+};
+
+export const VESSEL_ID = env("VESSEL_ID", `development-vessel-${env("HOSTNAME", "local")}`);
+export const PORT = envInt("PORT", 8090);
+export const HOST = env("HOST", "0.0.0.0");
+
+export const METABOB_ENDPOINT = env("METABOB_ENDPOINT", "http://127.0.0.1:8080");
+// API keys are NOT endpoints: an empty key is a legitimate "no credential", and coercing it to a
+// default would be wrong. Left as `??` deliberately.
 export const METABOB_API_KEY = process.env["METABOB_API_KEY"] ?? "";
-export const DISCOVERY_ENDPOINT = process.env["DISCOVERY_ENDPOINT"] ?? "http://127.0.0.1:8100";
-export const GOAL_HOST_VESSEL_ENDPOINT = process.env["GOAL_HOST_VESSEL_ENDPOINT"] ?? "http://127.0.0.1:8210";
-export const CONCEPT_DB_ENDPOINT = process.env["CONCEPT_DB_ENDPOINT"] ?? "http://127.0.0.1:8260";
+export const DISCOVERY_ENDPOINT = env("DISCOVERY_ENDPOINT", "http://127.0.0.1:8100");
+export const GOAL_HOST_VESSEL_ENDPOINT = env("GOAL_HOST_VESSEL_ENDPOINT", "http://127.0.0.1:8210");
+export const CONCEPT_DB_ENDPOINT = env("CONCEPT_DB_ENDPOINT", "http://127.0.0.1:8260");
 
-export const WORKSPACE_ROOT = process.env["WORKSPACE_ROOT"] ?? process.cwd();
+export const WORKSPACE_ROOT = env("WORKSPACE_ROOT", process.cwd());
 
 /**
  * Full configuration block. The `discovery.shapes` array is the single source

@@ -1,6 +1,7 @@
+import { env } from "../config.js";
 import type { ResolverResult } from "./types.js";
 
-const DEFAULT_DISCOVERY_ENDPOINT = process.env["DISCOVERY_ENDPOINT"] ?? "http://127.0.0.1:8100";
+const DEFAULT_DISCOVERY_ENDPOINT = env("DISCOVERY_ENDPOINT", "http://127.0.0.1:8100");
 const DEFAULT_ACTIVITY_ENDPOINT = process.env["METABOB_ENDPOINT"] ?? "http://127.0.0.1:8080";
 const DEFAULT_GOAL_HOST_ENDPOINT = process.env["GOAL_HOST_VESSEL_ENDPOINT"] ?? "http://127.0.0.1:8210";
 const DEFAULT_DEV_VESSEL_URL = "http://127.0.0.1:8090/v2/impulses/resolve";

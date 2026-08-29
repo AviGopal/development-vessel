@@ -1,6 +1,7 @@
+import { env } from "../config.js";
 import type { ResolverResult } from "./types.js";
 
-const METABOB_ENDPOINT = process.env["METABOB_ENDPOINT"] ?? "http://127.0.0.1:8080";
+const METABOB_ENDPOINT = env("METABOB_ENDPOINT", "http://127.0.0.1:8080");
 const METABOB_API_KEY = process.env["METABOB_API_KEY"] ?? "";
 
 interface ActivityTemplatePointer {

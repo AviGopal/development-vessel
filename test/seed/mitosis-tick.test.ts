@@ -15,7 +15,11 @@ describe("MITOSIS_TICK_TEMPLATE", () => {
     expect(extract).toBeDefined();
     expect(extract?.resolver).toBe("json_path_extract");
     const cfg = extract?.config as { path: string; type: string };
-    expect(cfg.path).toBe("staged_files");
+    // The path moved under `pending.` in 1f454d1, which replaced a raw fs_read of
+    // /workspace/mitosis-pending.json with the mitosis_pending_observer resolver emitting
+    // `mitosisPendingState`. The extraction paths changed because the SOURCE SHAPE changed —
+    // a coherent swap of a file read for a shaped producer, not a rename.
+    expect(cfg.path).toBe("pending.staged_files");
   });
 
   it("conditional_cutover task threads staged_files into vessel_mitosis_cutover pointer", () => {

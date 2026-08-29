@@ -13,10 +13,16 @@ describe("DRAFT_SPEC_FROM_GAP_TEMPLATE", () => {
     expect(DRAFT_SPEC_FROM_GAP_TEMPLATE.outputShapes).toContain("specProposal");
   });
 
-  it("has exactly 10 tasks in the correct order", () => {
+  it("keeps the 10 spec-drafting tasks, in order, as its opening sequence", () => {
     const tasks = DRAFT_SPEC_FROM_GAP_TEMPLATE.tasks;
-    expect(tasks).toHaveLength(10);
-    expect(tasks.map((t) => t.id)).toEqual([
+    // Was `toHaveLength(10)` plus an exact id list. The template has since been EXTENDED with
+    // five appended tasks (draft_substrate_learning -> mint_substrate_learning_concept) that
+    // mint a learning concept after the spec is written; the original ten are untouched and
+    // still first. Pinning the total made a purely additive extension read as a break, which
+    // taxes exactly the kind of change this template is supposed to accumulate.
+    // Assert the CORE SEQUENCE as a prefix — that is the contract — and allow growth after it.
+    expect(tasks.length).toBeGreaterThanOrEqual(10);
+    expect(tasks.slice(0, 10).map((t) => t.id)).toEqual([
       "read_gaps",
       "read_priors",
       "read_exemplar_proposal",

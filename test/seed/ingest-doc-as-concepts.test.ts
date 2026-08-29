@@ -68,7 +68,13 @@ describe("INGEST_DOC_AS_CONCEPTS_TEMPLATE", () => {
     )!;
     expect(t.resolver).toBe("llm_completion_dispatch");
     const config = t.config as { model: string; prompt: string; max_tokens: number };
-    expect(config.model).toContain("haiku");
+    // Was toContain("haiku"). e2d6158 defaulted runtime drafter/gate calls to the
+    // policy-governed "auto"; pinning a model here re-imposes the pinning that change removed
+    // and breaks again on the next policy update. Assert the template NAMES a model, which is
+    // the durable contract — which one policy selects is not this test's business.
+    // Sibling of the same fix in comprehensibility-check.test.ts (4f5313e).
+    expect(typeof config.model).toBe("string");
+    expect(String(config.model).length).toBeGreaterThan(0);
     // The prompt MUST consume the splitter's bounded output, NOT the
     // whole-doc placeholder that overflowed the prompt cap.
     expect(config.prompt).toContain("{{split_sections_valueJson}}");

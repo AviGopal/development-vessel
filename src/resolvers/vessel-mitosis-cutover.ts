@@ -893,13 +893,41 @@ export async function resolveVesselMitosisCutover(
           cloneIsOurOwnStagedContent =
             createHash("sha256").update(stagedContentForClone).digest("hex").slice(0, 12) === cloneSha;
         } catch { /* unreadable staged file -> not already-applied -> fall through to the check */ }
-        if (cloneIsOurOwnStagedContent && cloneSha !== stagedBaseSha) {
+        // A CLONE THAT MATCHES ITS OWN HEAD HAS NOTHING TO LOSE.
+        //
+        // The refusal exists to stop a cutover reverting work already COMMITTED in the tree
+        // the commit lands in. That danger only exists when the clone's worktree differs
+        // from its own HEAD — i.e. it carries content no commit has yet captured. When the
+        // clone is clean at HEAD, applying staged content is an ordinary forward change and
+        // can revert nothing, whatever staged_base_sha happens to say.
+        //
+        // This is the OTHER direction of the same defect, measured 2026-08-29T06:24:30Z:
+        //   staged_base_sha=c32e4baea648 (patched)  commit_tree_sha=215e11068c33 (clean)
+        //   runtime_tree_sha=c32e4baea648 (patched)
+        // The staging leg had recorded its base from the RUNTIME tree, which a previous
+        // attempt had transiently patched, while the push clone sat clean at HEAD. Comparing
+        // a runtime-derived base against the clone refused a change that would have reverted
+        // nothing. Baseing freshness on the runtime tree is the root defect the message below
+        // already names; until staging records a clone-derived base, this makes the reader
+        // safe against it.
+        let cloneIsCleanAtHead = false;
+        try {
+          const headShow = Bun.spawnSync(
+            [process.env["GIT_CMD"] ?? "git", "-C", pushCloneVesselRoot, "show", `HEAD:${stagedSentinel}`],
+            { stdout: "pipe", stderr: "pipe" },
+          );
+          if ((headShow.exitCode ?? 1) === 0 && headShow.stdout) {
+            cloneIsCleanAtHead =
+              createHash("sha256").update(headShow.stdout).digest("hex").slice(0, 12) === cloneSha;
+          }
+        } catch { /* git unavailable -> cannot prove clean -> fall through to the check */ }
+        if ((cloneIsOurOwnStagedContent || cloneIsCleanAtHead) && cloneSha !== stagedBaseSha) {
           console.error(
-            `[mitosis-cutover] already-applied in commit tree: ${stagedSentinel} in the push clone (${cloneSha}) ` +
-            `matches THIS mitosis's staged content, not its pre-patch base ${stagedBaseSha}. Not drift — proceeding.`,
+            `[mitosis-cutover] not drift: ${stagedSentinel} in the push clone (${cloneSha}) vs staged base ` +
+            `${stagedBaseSha} — ${cloneIsOurOwnStagedContent ? "clone already holds THIS mitosis's staged content" : "clone is clean at its own HEAD, so nothing uncommitted can be reverted"}. Proceeding.`,
           );
         }
-        if (cloneSha !== stagedBaseSha && !cloneIsOurOwnStagedContent) {
+        if (cloneSha !== stagedBaseSha && !cloneIsOurOwnStagedContent && !cloneIsCleanAtHead) {
           console.error(
             `[mitosis-cutover] COMMIT-TREE DRIFT: ${stagedSentinel} in the push clone is ${cloneSha}, but this mitosis was ` +
             `staged from ${stagedBaseSha}. The runtime tree still reads ${currentLiveSha ?? "<absent>"}, which is why the ` +

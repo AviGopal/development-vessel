@@ -4893,7 +4893,20 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
       const changedRel = [...created, ...edited]
         .filter((p) => p.startsWith(`${vBase}/`))
         .map((p) => p.slice(vBase.length + 1));
-      if (changedRel.length === 0) continue;
+      // STAGING PROVENANCE. A test-only compose passed every gate, applied its edits, and
+      // then committed nothing: the cutover copied a mitosis dir that did not contain the
+      // patch, so `git diff --name-only HEAD` was empty and `git commit` failed. No mitosis
+      // dir has ever held a file under test/ (0 across every staging dir on this host), and
+      // 3 of 783 substrate commits in 60 days were test-only. Path derivation is NOT the
+      // cause — opAbs and vesselRoot key ws.rootFor on the same unprefixed vessel name — so
+      // the remaining suspect is worktree lifecycle: vBase resolving elsewhere, or the
+      // worktree being reclaimed, between apply and staging. This line makes the comparison
+      // observable instead of inferred. Log-only; it changes no behaviour.
+      console.log(`[fc-stage] vessel=${vessel} vBase=${vBase} isolated=${String(ws?.isolated(vessel) ?? false)} edited=${JSON.stringify(edited)} created=${JSON.stringify(created)} changedRel=${JSON.stringify(changedRel)}`);
+      if (changedRel.length === 0) {
+        console.warn(`[fc-stage] SKIPPED staging for ${vessel}: no edited/created path is under vBase — nothing will be copied into the mitosis dir, so the cutover will find an empty diff and the commit will fail`);
+        continue;
+      }
       const clone = await callTool(toolsEndpoint, "shell", { command: `test -d /workspace/git/vessels/${vessel} && echo yes || echo no`, cwd: REPO_ROOT });
       if (!String((clone.body as { stdout?: unknown })?.stdout ?? "").includes("yes")) {
         cutovers.push({ vessel, landed: false, reason: "no push clone — net-new vessel, use scaffold path" });

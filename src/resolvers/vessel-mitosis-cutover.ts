@@ -58,7 +58,7 @@ import { CUTOVER_QUIESCE_MAX_MS } from "../compose-slots.js";
 const BASELINE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 
 export function computeNewlyFailing(prev: string[] | null, now: string[]): string[] {
-  if (prev === null || prev.length === 0) return [];
+  if (prev === null) return [];
   const baseline = new Set(prev.map(String));
   const seen = new Set<string>();
   const out: string[] = [];

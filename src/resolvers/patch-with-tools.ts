@@ -28,16 +28,16 @@ import { createHash } from "node:crypto";
 import { federatedLlmEgressUrls } from "./federated-llm-egress.js";
 import { mkdir, writeFile, readFile, copyFile, unlink } from "node:fs/promises";
 import { dirname, join, resolve, relative, isAbsolute } from "node:path";
-import { METABOB_ENDPOINT, METABOB_API_KEY } from "../config.js";
+import { METABOB_ENDPOINT, METABOB_API_KEY, env } from "../config.js";
 import type { ResolverResult } from "./types.js";
 import { resolveVesselMitosisCutover } from "./vessel-mitosis-cutover.js";
 import { staticEvaluate } from "./vessel-mitosis-evaluate.js";
 import { noProgressStreak } from "./no-progress-streak.js";
 
-const DISCOVERY_ENDPOINT = process.env.DISCOVERY_ENDPOINT ?? "http://127.0.0.1:8100";
+const DISCOVERY_ENDPOINT = env("DISCOVERY_ENDPOINT", "http://127.0.0.1:8100");
 // Federation-transport egress (dev-vessel has no libp2p deps). Mirrors feature-compose /
 // goal-host FED_TRANSPORT_EGRESS — the by-name egress path proven to serve llm_completion.
-const FED_TRANSPORT_EGRESS = process.env.FED_TRANSPORT_EGRESS ?? "http://127.0.0.1:8401";
+const FED_TRANSPORT_EGRESS = env("FED_TRANSPORT_EGRESS", "http://127.0.0.1:8401");
 // V38 (2026-06-12): 8 was too tight — non-trivial single-file patches spend
 // turns on search→edit→re-search-to-verify and hit the cap before declaring
 // done (observed: code_replace_lines applied on turns 4-5, capped at 8 mid-verify).

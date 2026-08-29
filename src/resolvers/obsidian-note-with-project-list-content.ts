@@ -22,6 +22,14 @@ const headers = {
 };
 
 try {
+  // Each source below is individually "tolerated" so one outage cannot break the report. That
+  // is right, but tolerating silently was not: with all three down the body was zero templates,
+  // zero edges, zero gaps and NO marker — a total outage rendered identical to a healthy but
+  // empty substrate, and the reader had no way to tell. Record WHICH source degraded, matching
+  // the convention already used by error.ts (degraded/reason) and vessel-health-report
+  // (fetch_error).
+  const sourceErrors: Record<string, string> = {};
+
   // ── 1. Fetch activity templates ──────────────────────────────────────────
   let templates: any[] = [];
   try {
@@ -33,8 +41,9 @@ try {
       const tData = (await tRes.json()) as any;
       templates = Array.isArray(tData?.templates) ? tData.templates : [];
     }
-  } catch (_) {
-    // tolerate — continue with empty
+  } catch (e) {
+    // tolerate — continue with empty, but SAY SO
+    sourceErrors["templates"] = e instanceof Error ? e.message : String(e);
   }
 
   // ── 2. Fetch composition graph ───────────────────────────────────────────
@@ -52,8 +61,9 @@ try {
         ? gData.graph
         : [];
     }
-  } catch (_) {
-    // tolerate
+  } catch (e) {
+    // tolerate — continue with empty, but SAY SO
+    sourceErrors["compositionGraph"] = e instanceof Error ? e.message : String(e);
   }
 
   // ── 3. Fetch substrate gaps from dev-vessel ──────────────────────────────
@@ -73,8 +83,9 @@ try {
       const gapData = (await gapRes.json()) as any;
       gaps = Array.isArray(gapData?.body?.gaps) ? gapData.body.gaps : [];
     }
-  } catch (_) {
-    // tolerate
+  } catch (e) {
+    // tolerate — continue with empty, but SAY SO
+    sourceErrors["substrateGaps"] = e instanceof Error ? e.message : String(e);
   }
 
   // ── 4. Aggregate templates into project-list entries ────────────────────
@@ -166,6 +177,10 @@ try {
     projects,
     compositionEdges: edgeSummary,
     openGapShapes: gapShapes,
+    // Absent when every source answered; present and named when any did not.
+    ...(Object.keys(sourceErrors).length > 0
+      ? { degraded: true, source_errors: sourceErrors }
+      : {}),
   };
 
   return {

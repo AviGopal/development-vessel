@@ -4859,6 +4859,10 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
   // restart). fs_write the exact original bytes back; this is what makes the
   // (now-correct) verify gate actually PROTECT the runtime.
   let rolled_back = false;
+  // Wall-clock reference for the execution trace emitted further down. Declared in the same scope
+  // as rolled_back so it is reachable at the emission site; the compose's own start is in an
+  // enclosing function that has already closed by then.
+  const traceClockStart = Date.now();
   const restored: string[] = [];
   const restoreFailed: string[] = [];
   if ((verdict as string) === "UNFAVORABLE" && !pointer.keep_on_fail) {
@@ -5178,6 +5182,71 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
       JSON.stringify({ ok: verdict === "FAVORABLE", verdict, spec: String(spec).slice(0, 8000), summary: plan.summary, touched_vessels: [...touched], op_count: ops.length, applied, apply_failed: applyFailed, verify, semantic_gate, rolled_back, restore_failed: restoreFailed, cutovers }, null, 2),
     );
   } catch { /* persistence failure must never fail the compose */ }
+
+  // EMIT A TRACE. THE LOOP THAT DEVELOPS THE SUBSTRATE WAS THE ONE LOOP IT COULD NOT OBSERVE.
+  //
+  // Measured 2026-08-29: 119 composes, 191 cutovers and 579 gap picks ran in 12 hours while the
+  // trace store held 5 feature_compose rows and ZERO for vessel_mitosis_cutover,
+  // apply_proposal_as_patch, gap_to_feature and patch_with_tools — out of 19,757 rows total. The
+  // foundation's third sentence is "every execution is traced, and the traces are the learning
+  // substrate"; the substrate's most consequential behaviour was exempt from it.
+  //
+  // What that cost, all in one session: six mechanism defects that each took hours of journalctl
+  // archaeology (a drift check refusing the cutover's own staged patch, an empty baseline reading
+  // 68 pre-existing failures as regressions and deadlocking ALL landing, a reachability gate
+  // rejecting every test-only patch as dead code, a 5000ms per-test timeout acting as a load
+  // sensor); three operator diagnoses that were WRONG because causality had to be inferred from
+  // co-occurring log lines; and two misattributions of authorship — work credited to the substrate
+  // that was actually the escalation lane, and a "regression" blamed on the substrate that was a
+  // concurrent session's correct fix. None of that is visible without a trace.
+  //
+  // Law 4 says an activity's proper origin is EXTRACTION from a reached execution, not an operator
+  // hand-authoring a template. Extraction needs a traced execution to extract FROM, and there were
+  // none — so the ribosome could never mint a compose activity, Thompson had no arm to grade, and
+  // nothing in this domain could be composed or chained. This emission is the precondition that
+  // breaks that circularity; the templates should follow from the ribosome, not from a hand mint.
+  //
+  // Fire-and-forget and fully swallowed: a trace-store hiccup must never fail or slow a compose,
+  // which is exactly why this is `void` with a catch and a short timeout.
+  try {
+    const traceEndpoint = process.env["METABOB_ENDPOINT"] ?? "http://127.0.0.1:8080";
+    const traceKey = process.env["METABOB_API_KEY"] ?? "";
+    const landedVessels = (cutovers as Array<Record<string, unknown>>)
+      .filter((c) => (c?.result as Record<string, unknown> | undefined)?.applied === true)
+      .map((c) => String(c.vessel ?? ""));
+    void fetch(`${traceEndpoint}/v2/activities/executions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `ApiKey ${traceKey}` },
+      body: JSON.stringify({
+        activity_id: "feature_compose",
+        success: verdict === "FAVORABLE",
+        duration_ms: Date.now() - traceClockStart,
+        cost: 0,
+        tokens: { input: 0, output: 0, cache: 0 },
+        error_message: verdict === "FAVORABLE" ? undefined : String(semantic_gate?.reason ?? "").slice(0, 400),
+        metadata: {
+          gap_id: pointer.gap?.id ?? "adhoc",
+          // Gated route vs the patch_with_tools escalation lane — the distinction that took a
+          // manual bisect over commit trailers and gap-id prefixes to establish by hand.
+          route: String(pointer.gap?.id ?? "").startsWith("pwt-") ? "escalation" : "gated",
+          touched_vessels: [...touched],
+          op_count: ops.length,
+          ops_applied: applied.filter((a) => a.ok).length,
+          apply_failed: applyFailed,
+          semantic_addresses: semantic_gate?.addresses ?? null,
+          semantic_reason: String(semantic_gate?.reason ?? "").slice(0, 400),
+          hard_fail: semantic_gate?.hard_fail ?? null,
+          verify_ok: (verify as Array<Record<string, unknown>>).map((v) => v?.ok ?? null),
+          rolled_back,
+          landed_vessels: landedVessels,
+          cutover_refusals: (cutovers as Array<Record<string, unknown>>)
+            .map((c) => String((c?.result as Record<string, unknown> | undefined)?.kind ?? ""))
+            .filter((k) => k.length > 0),
+        },
+      }),
+      signal: AbortSignal.timeout(5000),
+    }).catch(() => { /* trace-store unreachable — never fail the compose */ });
+  } catch { /* emission must never fail the compose */ }
 
   // SHADOW-MODE counterfactual record (code_locality): log what the locality
   // index WOULD have retrieved for this family alongside what this exploratory

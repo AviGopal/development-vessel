@@ -2598,7 +2598,40 @@ async function resolveFeatureComposeUncapped(pointer: FeatureComposePointer): Pr
   try {
   const composeId = `fc-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
   const ws = await acquireComposeWorkspace(pointer.verify_vessels ?? [], composeId);
-  console.error("[compose]", { composeId, isolated: pointer.verify_vessels?.filter(v => ws.isolated(v)), unisolated: pointer.verify_vessels?.filter(v => !ws.isolated(v)), verify_vessels: pointer.verify_vessels?.length });
+  // CALLER ATTRIBUTION (2026-08-29). This line recorded only composeId and vessel isolation, so
+  // a compose that arrived with an empty pointer was UNATTRIBUTABLE. Measured over 24h:
+  // "[fc-grounding] REFUSED ungrounded decompose" fired 298 times — the single largest terminal
+  // failure of the edit-intent lane, ahead of semantic-gate (48) and precutover (44) combined —
+  // and 279 of those carried gap=none. Tracing the caller from source ruled out every candidate:
+  // goal-host's two dispatch sites (index.ts:11470, 12012) always set `gap`, falling back to
+  // route-edit-<hash>; all three gap-to-feature callers set it; apply-proposal-as-patch does not
+  // but ran only 8 times. So the dominant failure mode of the most expensive path in the system
+  // could not be attributed to a caller by any existing instrument.
+  //
+  // That is a law-8 defect in its own right: the fact needed to fix this is not available at the
+  // moment of use. Recording the discriminating fields makes the next reading a MEASUREMENT
+  // rather than another inference — and makes a wrong guess falsifiable, which one already was.
+  //
+  // The spec is recorded as LENGTH + first 80 chars only, deliberately. Specs carry arbitrary
+  // caller-supplied content and this line goes to the journal; a full dump is an exfiltration
+  // surface, and the prefix is enough to identify a caller family.
+  const specForLog = typeof pointer.spec === "string" ? pointer.spec : "";
+  console.error("[compose]", {
+    composeId,
+    gap: pointer.gap?.id ?? "none",
+    gap_category: pointer.gap?.category ?? "none",
+    // Same local cast as the slot guard (see `isDirected` above): goal-host sets `directed`
+    // on the operator/edit-intent route but FeatureComposePointer does not declare it, and
+    // widening the shared type is a separate change.
+    directed: (pointer as { directed?: boolean }).directed === true,
+    land: pointer.land ?? false,
+    dry_run: pointer.dry_run ?? false,
+    spec_len: specForLog.length,
+    spec_head: specForLog.slice(0, 80).replace(/\s+/g, " "),
+    isolated: pointer.verify_vessels?.filter(v => ws.isolated(v)),
+    unisolated: pointer.verify_vessels?.filter(v => !ws.isolated(v)),
+    verify_vessels: pointer.verify_vessels?.length,
+  });
   const unisolated = guards.filter((v) => v === "__global__" || !ws.isolated(v));
   const busy = unisolated.find((v) => composeInFlight.has(v));
   if (busy) {

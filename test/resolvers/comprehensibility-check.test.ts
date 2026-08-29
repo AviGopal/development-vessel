@@ -66,7 +66,12 @@ describe("comprehensibility_check resolver", () => {
     expect(body.passed).toBe(true);
     expect(body.overall_score).toBeGreaterThanOrEqual(0.3);
     expect(body.per_field.what).toBeGreaterThan(0.3);
-    expect(body.evaluator_model_id).toContain("haiku");
+    // Was `toContain("haiku")`. e2d6158 defaulted runtime drafter/gate calls to the
+    // policy-governed "auto" on purpose; asserting a pinned model here would re-impose the
+    // very pinning that change removed, and would break again on the next policy update.
+    // Assert the resolver REPORTS which evaluator it used — that is the durable contract.
+    expect(typeof body.evaluator_model_id).toBe("string");
+    expect(body.evaluator_model_id.length).toBeGreaterThan(0);
     expect(body.raw_answers.what.length).toBeGreaterThan(0);
   });
 

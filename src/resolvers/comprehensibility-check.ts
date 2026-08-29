@@ -44,7 +44,10 @@ export interface ComprehensibilityCheckPointer {
    *  drafter produces (the engine interpolates `{{draft_via_llm_text}}` to a
    *  string; it is parsed on entry). */
   template_json?: Record<string, unknown> | string;
-  /** Evaluator model. Defaults to anthropic/claude-haiku-4-5-20251001. */
+  /** Evaluator model. Defaults to DEFAULT_MODEL ("auto"), which is policy-governed —
+   *  e2d6158 moved runtime drafter/gate calls off a pinned model on purpose, so naming a
+   *  specific one here (this comment said haiku long after the code stopped using it)
+   *  invites callers and tests to re-pin it and defeat the policy. */
   model?: string;
   /** Comprehensibility floor; below this the template is refused promotion. */
   floor?: number;

@@ -8,7 +8,7 @@ export async function resolveGitStatus(pointer: Readonly<{ type: "gitStatus" }>)
   }
   const headRef = await result.text();
   const commitHash = headRef.trim().startsWith("ref: ")
-    ? await Bun.file(`${repoPath}/${headRef.trim().slice(5)}`).text()
+    ? await Bun.file(`${repoPath}/.git/${headRef.trim().slice(5)}`).text()
     : headRef.trim();
   return { shape: "gitStatus", body: { commitHash } };
 }

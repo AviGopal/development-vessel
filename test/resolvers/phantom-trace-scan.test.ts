@@ -44,16 +44,26 @@ function makeFetch(
   }) as unknown as typeof fetch;
 }
 
+// Fixtures must NOT use a META-TEMPLATE id. `validator-dispatch` (along with
+// `slot-binding` and `create-shape-provider-goal`) is in META_TEMPLATE_IDS
+// (src/lib/meta-templates.ts) — framework wrappers that legitimately have
+// task_count=0 and are deliberately excluded from phantom detection, both as an
+// early short-circuit (phantom-trace-scan.ts:251) and post-confirmation. These
+// fixtures had picked `validator-dispatch` as a filler activity_id before that
+// exclusion existed, so every candidate was correctly skipped
+// (`list_candidates_skipped_meta: 2`) and phantoms_detected was 0 — the resolver
+// was right and the fixtures were self-defeating. A non-meta id restores what
+// these cases actually test: confirmation of a phantom via the single-trace GET.
 describe("phantom_trace_scan", () => {
   it("confirms candidates via single-trace GET; rejects list false-positives", async () => {
     const listTraces = [
       // List reports task_count=0 (post-migration-118 artefact) but the
       // content table holds 5 tasks → must NOT emit.
-      { execution_id: "exec_real_a", status: "success", task_count: 0, activity_id: "validator-dispatch", duration_ms: 5000 },
+      { execution_id: "exec_real_a", status: "success", task_count: 0, activity_id: "some-real-template", duration_ms: 5000 },
       // True phantom: zero tasks in content too → must emit.
-      { execution_id: "exec_phantom_b", status: "success", task_count: 0, activity_id: "validator-dispatch", duration_ms: 9 },
+      { execution_id: "exec_phantom_b", status: "success", task_count: 0, activity_id: "some-real-template", duration_ms: 9 },
       // Non-success — ignored.
-      { execution_id: "exec_failed_c", status: "failure", task_count: 0, activity_id: "validator-dispatch", duration_ms: 12 },
+      { execution_id: "exec_failed_c", status: "failure", task_count: 0, activity_id: "some-real-template", duration_ms: 12 },
     ];
     const calls: FetchCalls = { list: 0, singleGets: [], emits: [] };
     globalThis.fetch = makeFetch(
@@ -81,7 +91,7 @@ describe("phantom_trace_scan", () => {
 
   it("dry_run skips emits", async () => {
     const listTraces = [
-      { execution_id: "exec_p", status: "success", task_count: 0, activity_id: "validator-dispatch", duration_ms: 5 },
+      { execution_id: "exec_p", status: "success", task_count: 0, activity_id: "some-real-template", duration_ms: 5 },
     ];
     const calls: FetchCalls = { list: 0, singleGets: [], emits: [] };
     globalThis.fetch = makeFetch(listTraces, { exec_p: 0 }, calls);

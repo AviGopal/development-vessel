@@ -397,6 +397,59 @@ function softRefuse(
   };
 }
 
+/**
+ * Emit an execution trace for a LANDING, mirroring the refusal emission in softRefuse.
+ *
+ * ONE HELPER, CALLED FROM EVERY LANDING RETURN — deliberately. This resolver has several
+ * `shape: "cutoverApplied"` returns (git_aware, host_sync, an already-applied no-op, plus two
+ * log-listing returns that are not landings at all). I instrumented a single site twice and both
+ * were wrong: first the mitosis-applied.jsonl append, whose last write on this host is 2026-08-08,
+ * then the git_aware return, which a real landing did not take. Both looked correct in review.
+ *
+ * softRefuse works precisely because every refusal path funnels through one function — 16 refusal
+ * traces landed on the first attempt. This is that pattern applied to the success half, so a future
+ * return site cannot silently go untraced.
+ *
+ * Fire-and-forget with a 5s cap and a swallowing catch: the landing has already happened by the
+ * time this runs, and a trace-store hiccup must never affect it.
+ */
+function emitLandingTrace(appliedBody: Record<string, unknown>, mode: string): void {
+  try {
+    const ep = process.env["METABOB_ENDPOINT"] ?? "http://127.0.0.1:8080";
+    const key = process.env["METABOB_API_KEY"] ?? "";
+    const gapId = String(appliedBody["gap_id"] ?? "");
+    void fetch(`${ep}/v2/activities/executions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `ApiKey ${key}` },
+      body: JSON.stringify({
+        activity_id: "vessel_mitosis_cutover",
+        success: true,
+        duration_ms: 0,
+        cost: 0,
+        tokens: { input: 0, output: 0, cache: 0 },
+        metadata: {
+          outcome: "applied",
+          mode,
+          vessel_name: String(appliedBody["vessel_name"] ?? ""),
+          gap_id: gapId,
+          proposal_id: String(appliedBody["proposal_id"] ?? ""),
+          new_git_sha: String(appliedBody["new_git_sha"] ?? ""),
+          push_status: String(appliedBody["push_status"] ?? ""),
+          staged_files: Array.isArray(appliedBody["staged_files_applied"]) ? appliedBody["staged_files_applied"] : [],
+          // The patch_with_tools escalation lane credits a synthetic pwt-* gap; the gated route does
+          // not. Establishing which lane a commit came from took a manual bisect over commit
+          // trailers twice tonight, and the first answer was wrong both times. It should be a column.
+          route: gapId.startsWith("pwt-") ? "escalation" : "gated",
+          // False when the landing carries no durable gap linkage — precisely the condition under
+          // which a landed fix leaves its gap open.
+          linked_to_gap: gapId.length > 0 && gapId !== "unknown-gap" && !gapId.startsWith("route-edit-"),
+        },
+      }),
+      signal: AbortSignal.timeout(5000),
+    }).catch(() => { /* trace store unreachable — the landing already happened */ });
+  } catch { /* emission must never affect a completed landing */ }
+}
+
 async function pathExists(p: string): Promise<boolean> {
   try {
     await stat(p);
@@ -2786,48 +2839,7 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
     });
   }
 
-  // TRACE THE LANDING TOO, not just the refusals. Pairing this with the softRefuse emission gives
-  // the cutover a complete outcome distribution — a store containing only failures would teach a
-  // posterior that nothing ever works.
-  //
-  // Placed at the TERMINAL RETURN, not at the mitosis-applied.jsonl append. I first put it there
-  // and it never fired: that log's last entry on this host is 2026-08-08, three weeks stale, so the
-  // append site is on a path this deployment does not take while cutovers land daily. Verified by
-  // watching a FAVORABLE cutover produce zero traces. Instrument the return, not a side-effect that
-  // happens to sit near it.
-  try {
-    const ep = process.env["METABOB_ENDPOINT"] ?? "http://127.0.0.1:8080";
-    const key = process.env["METABOB_API_KEY"] ?? "";
-    const ab = appliedBody as Record<string, unknown>;
-    const landedGapId = String(ab["gap_id"] ?? "");
-    void fetch(`${ep}/v2/activities/executions`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `ApiKey ${key}` },
-      body: JSON.stringify({
-        activity_id: "vessel_mitosis_cutover",
-        success: true,
-        duration_ms: 0,
-        cost: 0,
-        tokens: { input: 0, output: 0, cache: 0 },
-        metadata: {
-          outcome: "applied",
-          vessel_name: String(ab["vessel_name"] ?? ""),
-          gap_id: landedGapId,
-          proposal_id: String(ab["proposal_id"] ?? ""),
-          new_git_sha: String(ab["new_git_sha"] ?? ""),
-          push_status: String(ab["push_status"] ?? ""),
-          staged_files: Array.isArray(ab["staged_files_applied"]) ? ab["staged_files_applied"] : [],
-          // The patch_with_tools escalation lane credits a synthetic pwt-* gap; the gated route does
-          // not. Distinguishing them took a manual bisect over commit trailers twice tonight.
-          route: landedGapId.startsWith("pwt-") ? "escalation" : "gated",
-          // False when the landing carries no durable gap linkage — exactly the condition under
-          // which a landed fix leaves its gap open.
-          linked_to_gap: landedGapId.length > 0 && landedGapId !== "unknown-gap" && !landedGapId.startsWith("route-edit-"),
-        },
-      }),
-      signal: AbortSignal.timeout(5000),
-    }).catch(() => { /* trace store unreachable — the landing already happened */ });
-  } catch { /* emission must never affect a completed landing */ }
+  emitLandingTrace(appliedBody as Record<string, unknown>, "git_aware");
   return {
     shape: "cutoverApplied",
     body: {
@@ -2957,6 +2969,7 @@ async function emitHostSyncIntent(args: HostSyncIntentArgs): Promise<ResolverRes
       cited_check_names: (args.evaluationEvidence.cited_check_names ?? []).slice(0, 10),
     },
   };
+  emitLandingTrace(body as unknown as Record<string, unknown>, "host_sync");
   return { shape: "cutoverApplied", body };
 }
 

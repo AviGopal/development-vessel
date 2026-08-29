@@ -120,6 +120,7 @@ export async function resolveDocsAlignScan(pointer: DocsAlignScanPointer): Promi
     "accuracy",
     "setup_enablement",
     "shape_existence",
+    "behavioral_claim",
   ]);
 
   function coerceObject<T>(val: unknown): T | undefined {

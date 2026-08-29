@@ -868,7 +868,38 @@ export async function resolveVesselMitosisCutover(
       const clonePath = join(pushCloneVesselRoot, stagedSentinel);
       if (await pathExists(clonePath)) {
         const cloneSha = createHash("sha256").update(await readFile(clonePath)).digest("hex").slice(0, 12);
-        if (cloneSha !== stagedBaseSha) {
+        // ALREADY-APPLIED IS NOT DRIFT.
+        //
+        // The staging leg writes THIS mitosis's own patch into the push clone, so by the
+        // time this check runs the clone legitimately holds the PATCHED content while
+        // staged_base_sha records the PRE-patch hash. Comparing those two and refusing makes
+        // the cutover reject its own work: the rollback restores the clean file, the next
+        // attempt stages and patches again, and the pair livelocks with zero commits.
+        //
+        // Measured 2026-08-29 on src/resolvers/gap-to-feature.ts. The clean file hashed
+        // 215e11068c33 and the one-line patched file hashed c32e4baea648, and BOTH orderings
+        // were reported as drift across seven refusals — "push clone is c32e…, staged from
+        // 215e…" and later the exact inverse — with HEAD unmoved for 2.5 hours and no other
+        // actor involved. The two shas were one file in its two states.
+        //
+        // Reuses the already-applied idiom below (live vs staged mitosis content) rather than
+        // inventing a second way to locate staged files. The genuine refusal is preserved: a
+        // clone matching NEITHER the staged base nor the staged content still refuses.
+        // Committing content identical to what is already in the worktree cannot revert
+        // anything, which is what makes this exemption safe.
+        let cloneIsOurOwnStagedContent = false;
+        try {
+          const stagedContentForClone = await readFile(join(mitosisRoot, stagedSentinel));
+          cloneIsOurOwnStagedContent =
+            createHash("sha256").update(stagedContentForClone).digest("hex").slice(0, 12) === cloneSha;
+        } catch { /* unreadable staged file -> not already-applied -> fall through to the check */ }
+        if (cloneIsOurOwnStagedContent && cloneSha !== stagedBaseSha) {
+          console.error(
+            `[mitosis-cutover] already-applied in commit tree: ${stagedSentinel} in the push clone (${cloneSha}) ` +
+            `matches THIS mitosis's staged content, not its pre-patch base ${stagedBaseSha}. Not drift — proceeding.`,
+          );
+        }
+        if (cloneSha !== stagedBaseSha && !cloneIsOurOwnStagedContent) {
           console.error(
             `[mitosis-cutover] COMMIT-TREE DRIFT: ${stagedSentinel} in the push clone is ${cloneSha}, but this mitosis was ` +
             `staged from ${stagedBaseSha}. The runtime tree still reads ${currentLiveSha ?? "<absent>"}, which is why the ` +

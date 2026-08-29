@@ -446,7 +446,39 @@ function emitLandingTrace(appliedBody: Record<string, unknown>, mode: string): v
         },
       }),
       signal: AbortSignal.timeout(5000),
-    }).catch(() => { /* trace store unreachable — the landing already happened */ });
+    })
+      // GRADE THE TRACE, OR THE RIBOSOME WILL NOT READ IT.
+      //
+      // Emitting the execution is only half the loop. The ribosome subscribes to
+      // execution_completed, then RE-READS the trace looking for a `reached:*` tag, and
+      // extracts only on `reached && allSucceeded`. Measured 2026-08-29 on this very
+      // emission:
+      //   reach re-read exec_1788014880529… verdict=ungraded (no-tags) attempts=5
+      //     — extraction SKIPPED (not honestly reached)
+      // Five re-reads with backoff, then a correct refusal: an ungraded execution is not
+      // evidence of anything, and the ribosome is right not to mint a template from it.
+      //
+      // ExecutionRecordSchema has no `tags` field, so the verdict cannot ride along with the
+      // POST. It goes to the dedicated grader, POST /v2/activities/execution-traces/reach
+      // with { execution_id, reached, completion_shapes } — the same endpoint goal-host uses.
+      //
+      // reached:true is HONEST here and only here. This helper runs after the commit exists
+      // and the push has been attempted; the change is in the tree. A compose that merely
+      // reached FAVORABLE has not landed and must stay ungraded — grading it true would
+      // feed the ribosome exactly the hollow executions law 4 warns about.
+      .then(async (res) => {
+        if (!res || !res.ok) return;
+        const j = await res.json().catch(() => null) as { execution_id?: string } | null;
+        const execId = j?.execution_id;
+        if (!execId) return;
+        await fetch(`${ep}/v2/activities/execution-traces/reach`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: `ApiKey ${key}` },
+          body: JSON.stringify({ execution_id: execId, reached: true, completion_shapes: ["cutoverApplied"] }),
+          signal: AbortSignal.timeout(5000),
+        }).catch(() => { /* ungraded is the safe failure — the ribosome simply skips it */ });
+      })
+      .catch(() => { /* trace store unreachable — the landing already happened */ });
   } catch { /* emission must never affect a completed landing */ }
 }
 

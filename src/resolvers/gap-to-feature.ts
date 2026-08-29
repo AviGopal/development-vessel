@@ -2087,6 +2087,46 @@ export function isNonAttemptComposeResult(cb: Record<string, unknown> | null | u
   return false;
 }
 
+/**
+ * The same principle, applied to SELECTION rather than to credit.
+ *
+ * `isNonAttemptComposeResult` above already keeps a compose that never ran out of
+ * `failed_attempts` and out of the category calibration. The compose COOLDOWN was never
+ * given the same treatment, and that asymmetry is the bug: the stamp is written at
+ * PICK-START (`gapComposeLastAttemptAt.set` below, before feature_compose is called, so it
+ * "covers the whole compose wall time"), and nothing clears it when the compose comes back
+ * BUSY. So a capacity refusal — work the host declined to start — cost the gap a full
+ * GAP_COMPOSE_COOLDOWN_MS of exclusion from the auto-pick candidate set.
+ *
+ * Measured 2026-08-29: the autonomous lane holds exactly one slot
+ * (`compose-slots.ts` `effectiveCap = max(1, cap - 1)`, one reserved for directed work) and
+ * composes run for minutes, so most autonomous picks return BUSY. One gap was picked at
+ * 19:26:31.9 / 19:31:46.5 / 19:36:52.6 / 19:41:56.7 / 19:47:01.5 — deltas of 5:14.6, 5:06.1,
+ * 5:04.1, 5:04.8, i.e. cooldown-limited to the second rather than tick-limited — and every
+ * one of those picks logged `verdict=BUSY stage=capacity`. Zero composes ran. Meanwhile the
+ * picker walked the ranked backlog cooling one gap after another that had never been tried,
+ * so the highest-priority gap was repeatedly selected, repeatedly refused for capacity, and
+ * repeatedly penalised in selection for a refusal it did not cause.
+ *
+ * Takes the map as a parameter so the behaviour is unit-testable without a live pool — the
+ * same reason `chooseFirstActionable` was extracted with an injected predicate. Returns
+ * whether a stamp was actually removed, so a caller (or a test) can assert the effect rather
+ * than infer it.
+ *
+ * DELIBERATELY NOT DONE HERE: nothing touches `failed_attempts` or `updateCalibration`. That
+ * accounting is already correct for a non-attempt and must stay untouched — this only
+ * restores eligibility.
+ */
+export function clearCooldownIfNonAttempt(
+  stamps: Map<string, number>,
+  gapId: string,
+  cb: Record<string, unknown> | null | undefined,
+): boolean {
+  if (!isNonAttemptComposeResult(cb)) return false;
+  if (!gapId) return false;
+  return stamps.delete(gapId);
+}
+
 async function bumpFailedAttempts(gap: Record<string, unknown>, opts: { surprise?: boolean; predictedP?: number } = {}): Promise<void> {
   try {
     const id = String(gap.id ?? "");
@@ -2483,6 +2523,9 @@ async function routeCapabilityGapToNewResolver(
     // A capacity refusal here is a retry, not a failure — see isNonAttemptComposeResult.
     await bumpFailedAttempts(gap);
   }
+  // ...and a retry must be RETRYABLE: release the cooldown the pick stamped, or the "retry"
+  // is a five-minute exclusion for a compose that never ran.
+  clearCooldownIfNonAttempt(gapComposeLastAttemptAt, String(gap.id ?? ""), cb);
   return {
     shape: "gapToFeatureReport",
     body: {
@@ -3088,6 +3131,8 @@ export async function resolveGapToFeature(pointer: GapToFeaturePointer): Promise
     }
     // A slice sequence cut short by a capacity refusal never got its attempt either.
     if (!allOk && !pointer.dry_run && !isNonAttemptComposeResult(lastBody)) await bumpFailedAttempts(gap);
+    // ...so it must not serve the cooldown either. Same reasoning as the credit exemption above.
+    clearCooldownIfNonAttempt(gapComposeLastAttemptAt, String(gap.id ?? ""), lastBody);
     return { shape: "gapToFeatureReport", body: { ok: allOk, stage: "route_compose", route: "capacity_slice_sequence", gap_id: gap.id, gap_category: gap.category, slices: sliceResults } };
   }
 
@@ -3131,7 +3176,11 @@ export async function resolveGapToFeature(pointer: GapToFeaturePointer): Promise
     // self-model predicted would land but didn't is over-optimistic (high-information) → bump
     // harder; a correctly-predicted fail bumps normally. Feeds the calibrated self-model.
     if (isNonAttemptComposeResult(cb)) {
-      console.log("[gap-to-feature] non-attempt (failure_kind=" + String(cb.failure_kind ?? "-") + " verdict=" + String(cb.verdict ?? "-") + " stage=" + String(cb.stage ?? "-") + ") — gap credit not bumped, category calibration untouched");
+      // Credit was already exempt here; SELECTION was not. Release the pick-start cooldown
+      // stamp so the gap is immediately re-pickable instead of sitting out five minutes for
+      // a compose the host never started.
+      const cooled = clearCooldownIfNonAttempt(gapComposeLastAttemptAt, String(gap.id ?? ""), cb);
+      console.log("[gap-to-feature] non-attempt (failure_kind=" + String(cb.failure_kind ?? "-") + " verdict=" + String(cb.verdict ?? "-") + " stage=" + String(cb.stage ?? "-") + ") — gap credit not bumped, category calibration untouched, cooldown " + (cooled ? "released" : "not held"));
     } else {
       const pred = predictLand(gap);
       // Bounded one-shot patch_with_tools escalation on an APPLY failure (anchor_not_found /

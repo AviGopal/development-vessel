@@ -1,4 +1,4 @@
-import { describe, it, expect, mock, beforeEach } from "bun:test";
+import { describe, it, expect, mock, beforeEach, afterAll} from "bun:test";
 
 // Mock fetch before importing the resolver so the module picks up the mock.
 const fetchCalls: { url: string; body: unknown }[] = [];
@@ -15,8 +15,18 @@ const mockFetch = mock(async (url: string, init?: RequestInit) => {
   } as Response;
 });
 
+// This install is at MODULE SCOPE (it must be, so the resolver below imports against
+// the mock), which means nothing scoped to a test hook ever takes it back down. Without
+// the afterAll restore, this file leaks its mock into every suite bun runs afterwards:
+// a leaked mock answers instantly with a canned 200, so any later test that needs a REAL
+// network failure — "degrades to reachable=false on unreachable endpoint", "timeout to
+// non-routable host" — silently succeeds and asserts red. Reproduced:
+// `bun test llm-completion-dispatch.test.ts discovery-vessel-registry-observer.test.ts`
+// fails 2, while the victim alone passes 3/0.
+const ORIGINAL_FETCH = globalThis.fetch;
 // @ts-expect-error — replace global fetch for tests
 globalThis.fetch = mockFetch;
+afterAll(() => { globalThis.fetch = ORIGINAL_FETCH; });
 
 // Import AFTER installing the mock.
 const { resolveLlmCompletionDispatch } = await import(

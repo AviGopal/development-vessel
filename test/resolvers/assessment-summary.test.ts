@@ -1,4 +1,4 @@
-import { describe, it, expect, mock, beforeEach } from "bun:test";
+import { describe, it, expect, mock, beforeEach, afterAll} from "bun:test";
 
 // Mock fetch globally before importing the resolver
 const mockFetch = mock(async (url: string, opts?: RequestInit): Promise<Response> => {
@@ -63,7 +63,15 @@ const mockFetch = mock(async (url: string, opts?: RequestInit): Promise<Response
   });
 });
 
+// Module-scope install (required so the resolver imports against the mock) with no hook
+// to take it back down — so without this afterAll it leaks into every suite bun runs
+// afterwards. A leaked mock answers instantly with a canned 200, which turns any later
+// test that needs a REAL network failure into a false pass and a red assertion.
+// Reproduced: `bun test assessment-summary.test.ts discovery-vessel-registry-observer.test.ts`
+// fails 2, while the victim alone passes 3/0.
+const ORIGINAL_FETCH = globalThis.fetch;
 globalThis.fetch = mockFetch as unknown as typeof fetch;
+afterAll(() => { globalThis.fetch = ORIGINAL_FETCH; });
 
 import { resolveAssessmentSummary } from "../../src/resolvers/assessment-summary.js";
 

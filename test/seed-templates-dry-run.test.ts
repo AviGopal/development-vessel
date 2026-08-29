@@ -43,7 +43,12 @@ describe("seed-templates dry-run", () => {
       for (const task of template.tasks) {
         const config = task.config as Record<string, unknown> | undefined;
         if (config && "type" in config) {
-          expect(config["type"]).toBe(task.resolver);
+          // `resolver` may be namespaced (`development-vessel:coverage_tick`) because it is a
+          // ROUTING key, while `config.type` is the bare impulse SHAPE (`coverage_tick`). That
+          // split is deliberate and is what the seeds actually write, so compare against the
+          // same shapeOf() normalisation this file already applies on the line above — not the
+          // raw resolver, which made six templates look mismatched when they were correct.
+          expect(config["type"]).toBe(shapeOf(task.resolver));
         }
       }
     });

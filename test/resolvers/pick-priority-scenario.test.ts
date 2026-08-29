@@ -23,7 +23,16 @@ interface Gap {
 function seed(gaps: Gap[]): void {
   rmSync(testRoot, { recursive: true, force: true });
   mkdirSync(scenariosDir, { recursive: true });
-  writeFileSync(gapsPath, JSON.stringify(gaps));
+  // Every seeded gap needs `target_file_paths` to clear the picker's actionability
+  // filter. `predictActionability` starts at 0.5 and subtracts 0.2 when the field is
+  // absent (adds 0.3 when present); ACTIONABILITY_THRESHOLD is 0.35, so a gap without
+  // it scores 0.3, is skipped at the `continue`, and — with every fixture skipped —
+  // `candidates` empties and the resolver falls back to `no_gap_metadata_fallback_alpha`,
+  // ranking alphabetically. These cases are about RANKING (category over severity,
+  // severity ties, exclusion rules), not about the actionability filter, so the fixtures
+  // must be actionable for the ranking assertions to reach the code under test.
+  // Spread `...g` last so a case that sets its own target_file_paths still wins.
+  writeFileSync(gapsPath, JSON.stringify(gaps.map((g) => ({ target_file_paths: ["src/probe.ts"], ...g }))));
   // Materialize a scenario file per gap (the picker only considers gaps whose
   // scenario file exists on disk).
   for (const g of gaps) writeFileSync(join(scenariosDir, `${sanitize(g.id)}.json`), "{}");

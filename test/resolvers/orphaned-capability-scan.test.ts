@@ -44,7 +44,7 @@ const TEMPLATES = [
 ];
 
 describe("orphaned_capability_scan", () => {
-  it("emits an orphaned_capability gap for a live, never-invoked outward capability", async () => {
+  it("emits an orphaned_capability gap for a live, never-invoked outward capability", async () => { const readCount = 0;
     const emits: any[] = [];
     wireSubstrate({
       liveShapes: ["problem_detection", "fs_read", "json_path_extract", "concept_db_health_observer"],

@@ -121,16 +121,29 @@ describe("concept_usage_record placeholder hygiene", () => {
       trace_id: "autonomous_backfill_2026-06-18T00:00:00.000Z",
       outcome: "success",
     });
-    expect(r.shape).toBe("structuredError");
-    expect((r.body as any).detail).toContain("concept_id");
+    // Skipping is a benign NO-OP, and it must be reported as the DECLARED SUCCESS shape
+    // rather than structuredError. Returning structuredError here made goal-host's proxy
+    // throw and failed the WHOLE composed activity, so every concept transformer running
+    // via composition failed whenever it selected nothing (see the resolver's comment).
+    // The write still must not happen — that is what `called` guards.
+    expect(r.shape).toBe("conceptUsageRecorded");
+    expect((r.body as any).skipped).toBe(true);
+    expect((r.body as any).recorded).toBe(false);
+    expect((r.body as any).reason).toContain("concept_id");
     expect(called).toBe(false);
   });
 
-  it("synthesizes a unique trace_id when the placeholder leaks, and still records", async () => {
-    let sentBody: any = {};
-    globalThis.fetch = (async (_url: any, init: any) => {
-      sentBody = JSON.parse(init.body as string);
-      return new Response(JSON.stringify({ id: "usage:1", recorded_at: "2026-06-18T00:00:00Z" }));
+  it("does NOT synthesize a trace_id when the placeholder leaks — no synthetic credit", async () => {
+    // POLICY REVERSAL, deliberate: this case used to assert that an unbound trace_id was
+    // replaced with a synthesized `autonomous_backfill_*` id and the usage row written
+    // anyway. That inflated concept relevance, because usage credit must come only from a
+    // REAL execution trace that actually loaded the concept — a synthesized row is credit
+    // for something that never happened. The resolver now refuses the write outright.
+    // Re-asserting the old behaviour would re-introduce the inflation it was removed for.
+    let called = false;
+    globalThis.fetch = (async () => {
+      called = true;
+      return new Response(JSON.stringify({ id: "usage:1" }));
     }) as unknown as typeof fetch;
     const r = await resolveConceptUsageRecord({
       type: "concept_usage_record",
@@ -139,8 +152,11 @@ describe("concept_usage_record placeholder hygiene", () => {
       outcome: "success",
     });
     expect(r.shape).toBe("conceptUsageRecorded");
-    expect(String(sentBody.trace_id)).not.toBe("{{trace_id}}");
-    expect(String(sentBody.trace_id)).toContain("autonomous_backfill_");
+    expect((r.body as any).skipped).toBe(true);
+    expect((r.body as any).recorded).toBe(false);
+    expect((r.body as any).reason).toContain("trace_id");
+    // The load-bearing assertion: no row reached concept-db at all.
+    expect(called).toBe(false);
   });
 
   it("passes a real trace_id through unchanged", async () => {

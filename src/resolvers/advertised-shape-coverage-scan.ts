@@ -1,5 +1,6 @@
 // advertised_shape_coverage_scan: cross-checks discovery-registry advertised shapes against catalogue consumers, composition edges, and trace resolutions.
 import type { ResolverResult } from "./types.js";
+import { env } from "../config.js";
 
 export interface AdvertisedShapeCoverageScanPointer {
   type: "advertised_shape_coverage_scan";
@@ -40,7 +41,7 @@ export async function resolveAdvertisedShapeCoverageScan(
   const advertised = new Map<string, Set<string>>();
   let vessel_count = 0;
   try {
-    const endpoint = process.env["DISCOVERY_VESSEL_ENDPOINT"] ?? "http://127.0.0.1:8100";
+    const endpoint = env("DISCOVERY_VESSEL_ENDPOINT", "http://127.0.0.1:8100");
     const apiKey = process.env["METABOB_API_KEY"] ?? process.env["DEV_VESSEL_API_KEY"];
     const res = await fetch(`${endpoint.replace(/\/+$/, "")}/resolve`, {
       method: "POST",

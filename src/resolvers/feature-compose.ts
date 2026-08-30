@@ -4209,6 +4209,12 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
       // CLONE before staging, where node_modules is not shared. Do not solve it here.
       command: `cd ${JSON.stringify(vAbs)} && (echo "== install =="; [ -d node_modules ] || { bun install >/dev/null 2>&1; echo "INSTALL_EXIT=$?"; }; echo "== resolve =="; bun install --dry-run >/tmp/fc-dryrun.$$ 2>&1; echo "DRYRUN_EXIT=$?"; tail -6 /tmp/fc-dryrun.$$; rm -f /tmp/fc-dryrun.$$; echo "== typecheck =="; timeout 300 bun run typecheck 2>&1; echo "TC_EXIT=$?"; echo "== shape-dispatch =="; if [ -f ${SHARED_DISPATCH_CHECK} ] && [ -f src/config.ts ] && [ -f src/routes/impulses.ts ]; then bun ${SHARED_DISPATCH_CHECK} ${JSON.stringify(vAbs)} 2>&1; echo "SD_EXIT=$?"; else echo "SD_EXIT=0"; fi; echo "== tests =="; timeout 240 bun test --timeout 20000 2>&1 || true)`,
       cwd: REPO_ROOT,
+      // The shell resolver kills the process GROUP at its request timeout, which defaulted to
+      // 30s. This pipeline budgets 240s for the test step alone, so the kill landed mid-typecheck
+      // every time: TC_EXIT was never echoed, tcExit was null, and every code-class compose was
+      // graded UNFAVORABLE for a reason that had nothing to do with the draft. Ask for the time
+      // this pipeline actually needs (the resolver clamps to its own maximum).
+      timeout_sec: 720,
     });
     const raw = String((sh.body as { stdout?: unknown })?.stdout ?? "");
     const tc = raw.match(/TC_EXIT=(\d+)/); const sd = raw.match(/SD_EXIT=(\d+)/);

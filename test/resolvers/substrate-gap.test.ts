@@ -1,7 +1,7 @@
 import { describe, it, expect } from "bun:test";
 import { tmpdir } from "os";
 import { join } from "path";
-import { rmSync } from "fs";
+import { rmSync, existsSync } from "fs";
 
 // IMPORTANT: set WORKSPACE_ROOT BEFORE importing the resolver — config.ts
 // snapshots the env var at module-load. Top-level statements run before any
@@ -95,5 +95,45 @@ describe("substrateGap resolver", () => {
     const closed = await resolveSubstrateGap({ type: "substrateGap", status: "closed" });
     expect((open.body as { total: number }).total).toBe(1);
     expect((closed.body as { total: number }).total).toBe(1);
+  });
+
+  // Pins defensive hardening added 2026-08-30: workspaceRoot() now captures
+  // WORKSPACE_ROOT once at module load instead of re-reading it on every call,
+  // so a runtime mutation of that env var from elsewhere in the process can no
+  // longer redirect gap reads/writes mid-lifetime. This is a precaution, not a
+  // fix for an observed incident — the investigation that prompted it turned
+  // out to be a misdiagnosis (an operator probe checked a stale fossil path,
+  // not the live store, which had been persisting correctly all along; see
+  // the comment above workspaceRoot()). This test simulates the hypothetical
+  // the hardening guards against: mutate the env var AFTER the module has
+  // already loaded, then verify a write still lands in the module-load-time
+  // workspace, not the mutated one.
+  it("is immune to process.env.WORKSPACE_ROOT changing after module load", async () => {
+    const decoyRoot = join(tmpdir(), `decoy-workspace-${Date.now()}`);
+    const original = process.env["WORKSPACE_ROOT"];
+    process.env["WORKSPACE_ROOT"] = decoyRoot;
+    try {
+      const write = await resolveSubstrateGapWrite({
+        type: "substrateGap_write",
+        gap: {
+          id: "post-mutation-probe",
+          category: "conversation_only",
+          source: "operator_narration",
+          summary: "must land in the original workspace, not the decoy",
+          detected_at: "2026-08-30T00:00:00Z",
+          status: "open",
+        },
+      });
+      expect((write.body as { action: string }).action).toBe("created");
+
+      const read = await resolveSubstrateGap({ type: "substrateGap", id: "post-mutation-probe" });
+      expect((read.body as { total: number }).total).toBe(1);
+
+      // The decoy path must never have been created — proves the write went
+      // to the original module-load-time workspace, not the mutated one.
+      expect(existsSync(join(decoyRoot, "gaps", "gaps.json"))).toBe(false);
+    } finally {
+      process.env["WORKSPACE_ROOT"] = original;
+    }
   });
 });

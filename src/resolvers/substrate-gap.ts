@@ -37,12 +37,27 @@ import type { ResolverResult } from "./types.js";
 import { readFile, writeFile, rename, mkdir } from "node:fs/promises";
 import { join } from "node:path";
 
-// Read at call time, not module load, so tests can override WORKSPACE_ROOT
-// after this module is imported (config.ts snapshots at load — that's fine
-// for production where the env is set before bun starts, but tests need
-// late-binding).
+// Captured ONCE at module load (matches config.ts's own WORKSPACE_ROOT export),
+// not re-read at call time. Read-at-call-time was deliberate so tests could set
+// process.env.WORKSPACE_ROOT after importing this module — but it also means
+// ANY later runtime mutation of that env var, from anywhere in the process,
+// would permanently redirect every subsequent read/write for the rest of the
+// process lifetime. No such mutation has been observed in production: this
+// vessel's WORKSPACE_ROOT is set once, at process start, by
+// /etc/substrate/env (to /workspace/git/super-repo, per that file's law-11
+// rationale) and never changes afterward. This is defensive hardening against
+// a hypothetical future runtime mutation, not a fix for an incident — the
+// 2026-08-30 investigation that prompted this change turned out to be a
+// misdiagnosis: an operator probe was checking /workspace/gaps/gaps.json,
+// a stale fossil left over from before WORKSPACE_ROOT pointed at the
+// super-repo clone, while the live store at
+// /workspace/git/super-repo/gaps/gaps.json was persisting writes correctly
+// the whole time. Existing tests already set the env var BEFORE importing
+// this module (see substrate-gap.test.ts), so capturing at load time changes
+// nothing for them.
+const WORKSPACE_ROOT_AT_LOAD = process.env["WORKSPACE_ROOT"] ?? DEFAULT_WORKSPACE_ROOT;
 function workspaceRoot(): string {
-  return process.env["WORKSPACE_ROOT"] ?? DEFAULT_WORKSPACE_ROOT;
+  return WORKSPACE_ROOT_AT_LOAD;
 }
 
 export type SubstrateGapCategory =

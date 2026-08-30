@@ -39,7 +39,7 @@ function assertInAllowlist(abs: string, workspaceRoot: string): void {
     return;
   }
   const rel = relative(workspaceRoot, abs);
-  const ok = prefixes.some((p) => rel === p || rel.startsWith(p.endsWith("/") ? p : `${p}/`) || rel.startsWith(p));
+  const ok = prefixes.some((p) => rel === p || rel.startsWith(p.endsWith("/") ? p : `${p}/`));
   if (!ok) {
     throw new Error(`path outside write allowlist: ${rel} (allowed prefixes: ${prefixes.join(", ")})`);
   }

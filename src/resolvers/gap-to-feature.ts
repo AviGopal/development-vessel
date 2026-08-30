@@ -2140,6 +2140,22 @@ export function clearCooldownIfNonAttempt(
   return stamps.delete(gapId);
 }
 
+// Decide whether a chronically-failing gap should be narrowed into a fresh child.
+//
+// Only narrow a ROOT gap; an already-narrowed child (parent_gap_id set) must not spawn
+// grandchildren, else chronic failure produces an unbounded -narrowed-narrowed chain.
+// A recommit- gap (feature-compose.ts's own retry-cap mechanism) records its lineage as
+// re_commit/source_gap_id, never parent_gap_id, so without this check it looks like a
+// root to THIS guard and gets narrowed too — then, if the narrowed result fails compose
+// again, feature-compose wraps it in another recommit- layer (which again omits
+// parent_gap_id), making it eligible for narrowing all over again. Each narrowing resets
+// failed_attempts to 0 (and with it landability back to 1.0), so the two caps alternate
+// forever instead of either ever holding — confirmed via the recommit-*-syntax_break-
+// -narrowed chain measured on 2026-08-07 (id: route-edit-2206dec0:1's lineage).
+export function shouldNarrowForChronicFailure(failedAttempts: number, meta: Record<string, unknown>): boolean {
+  return failedAttempts >= 3 && !meta.parent_gap_id && !meta.re_commit && !meta.source_gap_id;
+}
+
 async function bumpFailedAttempts(gap: Record<string, unknown>, opts: { surprise?: boolean; predictedP?: number } = {}): Promise<void> {
   try {
     const id = String(gap.id ?? "");
@@ -2182,17 +2198,7 @@ async function bumpFailedAttempts(gap: Record<string, unknown>, opts: { surprise
     // threshold (>= 3 failed_attempts). The child carries a tighter description
     // and resets failed_attempts to 0 so it re-enters the dispatch queue at
     // normal priority rather than being culled by the landabilityScore filter.
-    // Only narrow a ROOT gap; an already-narrowed child (parent_gap_id set) must not spawn
-    // grandchildren, else chronic failure produces an unbounded -narrowed-narrowed chain.
-    // A recommit- gap (feature-compose.ts's own retry-cap mechanism) records its lineage as
-    // re_commit/source_gap_id, never parent_gap_id, so without this check it looks like a
-    // root to THIS guard and gets narrowed too — then, if the narrowed result fails compose
-    // again, feature-compose wraps it in another recommit- layer (which again omits
-    // parent_gap_id), making it eligible for narrowing all over again. Each narrowing resets
-    // failed_attempts to 0 (and with it landability back to 1.0), so the two caps alternate
-    // forever instead of either ever holding — confirmed via the recommit-*-syntax_break-
-    // -narrowed chain measured on 2026-08-07 (id: route-edit-2206dec0:1's lineage).
-    const willExceedThreshold = fa >= 3 && !meta0.parent_gap_id && !meta0.re_commit && !meta0.source_gap_id;
+    const willExceedThreshold = shouldNarrowForChronicFailure(fa, meta0);
     if (willExceedThreshold) {
       try {
         const parentId: string = id;

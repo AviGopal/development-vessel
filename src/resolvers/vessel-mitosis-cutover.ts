@@ -3,6 +3,7 @@
 // live source, preventing accidental overwrites of concurrent edits.
 
 import { resolve, join, dirname, relative, isAbsolute, basename } from "path";
+import { env } from "../config.js";
 import fs from "node:fs/promises";
 import {
   rename,
@@ -413,12 +414,31 @@ function softRefuse(
  * Fire-and-forget with a 5s cap and a swallowing catch: the landing has already happened by the
  * time this runs, and a trace-store hiccup must never affect it.
  */
-function emitLandingTrace(appliedBody: Record<string, unknown>, mode: string): void {
+/**
+ * AWAITED, not fire-and-forget. This was `void fetch(...)` inside a synchronous function, so the
+ * resolver returned its cutoverApplied body immediately and the request was abandoned when the
+ * handler finished — the landing trace never arrived.
+ *
+ * MEASURED 2026-08-29: a real landing (commit b857661, gap route-edit-d71ecda6) went through the
+ * git_aware path, and the store held ZERO vessel_mitosis_cutover executions across the most recent
+ * 400. Both landing return sites DO call this emitter — I checked all seven cutoverApplied returns
+ * and the other five are already-applied no-ops and log listings, not landings — so coverage was
+ * never the problem. The emission was simply dropped in flight.
+ *
+ * That is the prerequisite for feeding a landing verdict anywhere: the reach grader below, and any
+ * future consumer joining landings to their originating walk on metadata.gap_id, can only read a
+ * trace that actually lands.
+ *
+ * The existing guarantee is preserved exactly: every failure path still swallows, so emission can
+ * never affect a completed landing. Awaiting only bounds the return by the 5s timeout already
+ * declared on the request.
+ */
+async function emitLandingTrace(appliedBody: Record<string, unknown>, mode: string): Promise<void> {
   try {
-    const ep = process.env["METABOB_ENDPOINT"] ?? "http://127.0.0.1:8080";
+    const ep = env("METABOB_ENDPOINT", "http://127.0.0.1:8080");
     const key = process.env["METABOB_API_KEY"] ?? "";
     const gapId = String(appliedBody["gap_id"] ?? "");
-    void fetch(`${ep}/v2/activities/executions`, {
+    await fetch(`${ep}/v2/activities/executions`, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `ApiKey ${key}` },
       body: JSON.stringify({
@@ -2871,7 +2891,7 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
     });
   }
 
-  emitLandingTrace(appliedBody as Record<string, unknown>, "git_aware");
+  await emitLandingTrace(appliedBody as Record<string, unknown>, "git_aware");
   return {
     shape: "cutoverApplied",
     body: {
@@ -3001,7 +3021,7 @@ async function emitHostSyncIntent(args: HostSyncIntentArgs): Promise<ResolverRes
       cited_check_names: (args.evaluationEvidence.cited_check_names ?? []).slice(0, 10),
     },
   };
-  emitLandingTrace(body as unknown as Record<string, unknown>, "host_sync");
+  await emitLandingTrace(body as unknown as Record<string, unknown>, "host_sync");
   return { shape: "cutoverApplied", body };
 }
 

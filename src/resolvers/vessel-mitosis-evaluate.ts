@@ -11,6 +11,7 @@ import {
   rm,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
+import { groupLeaderArgv, killProcessGroup } from "../process-group";
 // bun resolved via Bun.which at call-time (no external import needed)
 import type { ResolverResult } from "./types.js";
 
@@ -191,7 +192,8 @@ async function runCheck(
   let out = "";
   let timedOut = false;
   try {
-    const proc = Bun.spawn([bunCmd, ...args], {
+    // Spawned as its own process-group leader so a timeout can take the WHOLE tree.
+    const proc = Bun.spawn(groupLeaderArgv(bunCmd, args), {
       cwd,
       stdout: "pipe",
       stderr: "pipe",
@@ -201,11 +203,15 @@ async function runCheck(
       // V40: record that WE killed it. The resulting exit code (143 / -1) must
       // not be interpreted as a tsc verdict — it's a kill, not a completion.
       timedOut = true;
-      try {
-        proc.kill();
-      } catch {
-        /* noop */
-      }
+      // KILL THE GROUP, NOT THE CHILD. `proc.kill()` signals exactly one pid, so killing `bun`
+      // left every worker `bun test` had forked running — reparented to init, no parent, no
+      // timer, forever. Measured on substrate-live 2026-08-30: loadavg 57.5 holding above 45
+      // with 29-47 orphaned `bun test` processes continuously replenished (this runs at ~292
+      // mitosis-ticks/hour with a 420s suite timeout), which is what made vessel /health take
+      // 9.5s and walks die on "fetch failed: The operation was aborted". Same defect, same fix
+      // as `groupBounded` in repos/local-tools-vessel/src/index.ts. Falls back to the old
+      // single-pid kill so a timeout always terminates something.
+      killProcessGroup(proc.pid, () => proc.kill());
     }, timeoutMs);
     const [stdoutText, stderrText] = await Promise.all([
       new Response(proc.stdout).text(),

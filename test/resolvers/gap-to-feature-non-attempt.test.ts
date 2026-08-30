@@ -75,8 +75,10 @@ describe("isNonAttemptComposeResult", () => {
 // REQUEUE, NOT RELEASE (2026-08-30). The first fix DELETED the stamp. That over-corrected:
 // this map is the ONLY rotation pressure in the auto-picker, and with one autonomous slot
 // BUSY is the MAJORITY outcome (45 of ~80 composes, 56%, over a measured 4h window), so
-// releasing on the majority path disabled rotation entirely — the top-ranked gap took 73 of
-// 83 picks (88%) in 40 minutes while 62 never-attempted substrate-detected findings queued.
+// releasing on the majority path removes rotation pressure. CORRECTED 2026-08-30: an earlier
+// note here claimed 88% (73 of 83 picks); that double-counted each line's runner_up.gap_id.
+// Counting primary picks only, 04:00-07:00 went 13 -> 9 distinct gaps/hour with the top share
+// rising 16% -> 35%. A real narrowing, not a monopoly — judge the fix against those numbers.
 // Both extremes starve the backlog: the full cooldown cools gaps that were never tried, and
 // no cooldown lets one gap monopolise every tick. A non-attempt now costs a SHORT requeue.
 describe("requeueAfterNonAttempt", () => {

@@ -2134,10 +2134,24 @@ export function isNonAttemptComposeResult(cb: Record<string, unknown> | null | u
  * gap instantly re-eligible. That over-corrected: this map is not only a penalty, it is the
  * ONLY rotation pressure in the picker (`eligible` filters on it at the auto-pick site), and
  * the autonomous lane holds exactly one slot, so BUSY is the majority outcome — 45 of ~80
- * composes (56%) in a measured 4h window. Releasing on the majority path therefore disabled
- * rotation: the top-ranked gap was refused, immediately re-admitted, and re-picked, taking
- * 73 of 83 picks (88%) in a 40-minute window while 62 never-attempted substrate-detected
- * findings queued behind it.
+ * composes (56%) in a 4h window measured by the compose-lane-capacity gap. Releasing on the
+ * majority path therefore removes rotation pressure: the top-ranked gap is refused,
+ * immediately re-admitted, and re-picked.
+ *
+ * MEASURED CONCENTRATION, corrected 2026-08-30. An earlier version of this note claimed 88%
+ * (73 of 83 picks). That was WRONG — it counted each pick line's `runner_up.gap_id` as a
+ * second pick, roughly doubling the top-gap tally. Counting only the primary gap_id, the
+ * real trend over 2026-08-30 04:00-07:00 is a steady narrowing rather than a monopoly:
+ *
+ *     hour    picks   distinct gaps   top-gap share
+ *     04:00     114        13              16%
+ *     05:00     115        14              13%
+ *     06:00     114        12              21%
+ *     07:00      89         9              35%
+ *
+ * Distinct gaps per hour falling 13 -> 9 while the top share rises 16% -> 35% is the signal
+ * this change targets. It is a real degradation and worth fixing; it is NOT the 88% monopoly
+ * first reported, and the fix should be judged against these numbers.
  *
  * Both extremes starve the backlog, in opposite directions:
  *   - full cooldown on BUSY  → cools gaps that were never tried (the bug this function fixed)

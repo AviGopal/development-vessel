@@ -1,5 +1,5 @@
 import type { ResolverResult } from "./types.js";
-import { DISCOVERY_ENDPOINT, METABOB_API_KEY } from "../config.js";
+import { DISCOVERY_ENDPOINT, METABOB_API_KEY, env } from "../config.js";
 import { resolveSubstrateGap, resolveSubstrateGapWrite } from "./substrate-gap.js";
 
 export async function resolveDocsDecisionAnswerScan(pointer: {
@@ -148,7 +148,7 @@ export async function resolveDocsDecisionAnswerScan(pointer: {
           // (5b) POST feedback to UI
           try {
             const uiEndpoint =
-              process.env["STATEFUL_UI_VESSEL_ENDPOINT"] ?? "http://127.0.0.1:8270";
+              env("STATEFUL_UI_VESSEL_ENDPOINT", "http://127.0.0.1:8270")
             await fetch(`${uiEndpoint}/api/feedback`, {
               method: "POST",
               headers: { "Content-Type": "application/json" },

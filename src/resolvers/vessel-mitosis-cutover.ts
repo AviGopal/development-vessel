@@ -414,6 +414,11 @@ function softRefuse(
  * Fire-and-forget with a 5s cap and a swallowing catch: the landing has already happened by the
  * time this runs, and a trace-store hiccup must never affect it.
  */
+/** Bounded so awaiting the emission cannot stall a completed landing. The store is local
+ *  (127.0.0.1:8080) and answers in milliseconds; when it is unreachable this fails fast
+ *  instead of holding the cutover's return open for the full 5s the request used to allow. */
+const EMIT_TIMEOUT_MS = 1500;
+
 /**
  * AWAITED, not fire-and-forget. This was `void fetch(...)` inside a synchronous function, so the
  * resolver returned its cutoverApplied body immediately and the request was abandoned when the
@@ -465,7 +470,7 @@ async function emitLandingTrace(appliedBody: Record<string, unknown>, mode: stri
           linked_to_gap: gapId.length > 0 && gapId !== "unknown-gap" && !gapId.startsWith("route-edit-"),
         },
       }),
-      signal: AbortSignal.timeout(5000),
+      signal: AbortSignal.timeout(EMIT_TIMEOUT_MS),
     })
       // GRADE THE TRACE, OR THE RIBOSOME WILL NOT READ IT.
       //
@@ -495,7 +500,7 @@ async function emitLandingTrace(appliedBody: Record<string, unknown>, mode: stri
           method: "POST",
           headers: { "Content-Type": "application/json", Authorization: `ApiKey ${key}` },
           body: JSON.stringify({ execution_id: execId, reached: true, completion_shapes: ["cutoverApplied"] }),
-          signal: AbortSignal.timeout(5000),
+          signal: AbortSignal.timeout(EMIT_TIMEOUT_MS),
         }).catch(() => { /* ungraded is the safe failure — the ribosome simply skips it */ });
       })
       .catch(() => { /* trace store unreachable — the landing already happened */ });

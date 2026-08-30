@@ -13,6 +13,11 @@ try {
   /* ignore */
 }
 process.env["WORKSPACE_ROOT"] = testWorkspace;
+// Without this, every open-gap write below shells out to the REAL `systemctl start
+// gap-compose.service` against whatever systemd this test process can reach — see
+// the comment above the skipComposeTrigger check in substrate-gap.ts. Must be set
+// before import, same as WORKSPACE_ROOT above.
+process.env["SUBSTRATE_GAP_SKIP_COMPOSE_TRIGGER"] = "1";
 
 const { resolveSubstrateGap, resolveSubstrateGapWrite } = await import(
   "../../src/resolvers/substrate-gap.js"
@@ -134,6 +139,80 @@ describe("substrateGap resolver", () => {
       expect(existsSync(join(decoyRoot, "gaps", "gaps.json"))).toBe(false);
     } finally {
       process.env["WORKSPACE_ROOT"] = original;
+    }
+  });
+
+  // Pins the fix for a real production side effect (2026-08-30): writing an open
+  // gap through this resolver unconditionally shells out to `systemctl start
+  // gap-compose.service` and self-fetches a compose nudge — neither gated behind
+  // a test seam. This file itself creates several open gaps per run, so every
+  // `bun test` pass that includes this file — including the one compose's own
+  // verify pipeline runs on every candidate fix — could start another
+  // gap-compose.service tick against the live system. SUBSTRATE_GAP_SKIP_COMPOSE_TRIGGER
+  // (set at the top of this file, before import) suppresses that; this test proves
+  // the suppression actually reaches Bun.spawn, and that flipping it off restores
+  // the original trigger behavior (the guard doesn't silently disable production).
+  it("does not spawn systemctl when SUBSTRATE_GAP_SKIP_COMPOSE_TRIGGER=1, but does when unset", async () => {
+    const realSpawn = Bun.spawn;
+    const realFetch = globalThis.fetch;
+    const spawnCalls: unknown[][] = [];
+    const fakeExited = Promise.resolve(0);
+    (Bun as unknown as { spawn: typeof Bun.spawn }).spawn = ((...args: unknown[]) => {
+      spawnCalls.push(args);
+      return { exited: fakeExited } as unknown as ReturnType<typeof Bun.spawn>;
+    }) as typeof Bun.spawn;
+    // The "guard off" branch below also reaches the second production side effect
+    // in this same code block — a self-fetch nudge to THIS vessel's own live HTTP
+    // surface (http://127.0.0.1:8090 by default). Left real, this test would
+    // recreate, on every run, exactly the production side effect it exists to
+    // prove is suppressed. Stub it to a no-op response.
+    (globalThis as { fetch: typeof fetch }).fetch = (() =>
+      Promise.resolve(new Response("{}", { status: 200 }))) as typeof fetch;
+    const g = globalThis as { __gapComposeLastTrigger?: number; __composeDrainInflight?: boolean };
+    const savedTrigger = g.__gapComposeLastTrigger;
+    const savedInflight = g.__composeDrainInflight;
+    try {
+      // Guard ON (the default for this whole file): no spawn.
+      g.__gapComposeLastTrigger = undefined;
+      g.__composeDrainInflight = false;
+      await resolveSubstrateGapWrite({
+        type: "substrateGap_write",
+        gap: {
+          id: "compose-trigger-guard-on-probe",
+          category: "conversation_only",
+          source: "operator_narration",
+          summary: "must not start gap-compose.service while the test guard is on",
+          detected_at: "2026-08-30T00:00:00Z",
+          status: "open",
+        },
+      });
+      expect(spawnCalls.length).toBe(0);
+
+      // Guard OFF: the real production path fires (against the fake Bun.spawn, so
+      // still nothing real launches), proving the guard is additive, not a
+      // standing disable of the trigger.
+      process.env["SUBSTRATE_GAP_SKIP_COMPOSE_TRIGGER"] = "0";
+      g.__gapComposeLastTrigger = undefined;
+      g.__composeDrainInflight = false;
+      await resolveSubstrateGapWrite({
+        type: "substrateGap_write",
+        gap: {
+          id: "compose-trigger-guard-off-probe",
+          category: "conversation_only",
+          source: "operator_narration",
+          summary: "must start gap-compose.service when the test guard is off",
+          detected_at: "2026-08-30T00:00:01Z",
+          status: "open",
+        },
+      });
+      expect(spawnCalls.length).toBe(1);
+      expect(spawnCalls[0]?.[0]).toEqual(["systemctl", "start", "gap-compose.service"]);
+    } finally {
+      process.env["SUBSTRATE_GAP_SKIP_COMPOSE_TRIGGER"] = "1";
+      g.__gapComposeLastTrigger = savedTrigger;
+      g.__composeDrainInflight = savedInflight;
+      (Bun as unknown as { spawn: typeof Bun.spawn }).spawn = realSpawn;
+      (globalThis as { fetch: typeof fetch }).fetch = realFetch;
     }
   });
 });

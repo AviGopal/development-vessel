@@ -563,7 +563,21 @@ export async function resolveSubstrateGapWrite(
 
   if ("early" in outcome) return outcome.early;
   const { action, summaryChanged, reopened, classKey } = outcome;
-  if ((action === "created" || (action === "updated" && (summaryChanged || reopened))) && (gap.status ?? "open") === "open") {
+  // This whole block has a REAL production side effect: it shells out to `systemctl
+  // start gap-compose.service` against whatever systemd this process can reach, and
+  // separately fetches this vessel's own HTTP surface to nudge an in-process compose.
+  // Neither is mockable from the call site, so any test that writes an open gap
+  // through this resolver — without this escape hatch — fires the unit for real.
+  // Measured 2026-08-30: this resolver's own test file creates several open gaps per
+  // run and is included in every full `bun test` pass, including the one compose's
+  // own verify pipeline runs on every candidate fix — so every compose-triggered test
+  // run could itself start another gap-compose.service tick, a self-sustaining loop
+  // that plausibly explains chronic box saturation independent of any single caller's
+  // request volume. SUBSTRATE_GAP_SKIP_COMPOSE_TRIGGER is set only by
+  // substrate-gap.test.ts, before importing this module; unset (the default) in every
+  // real deployment, so production behavior is unchanged.
+  const skipComposeTrigger = process.env["SUBSTRATE_GAP_SKIP_COMPOSE_TRIGGER"] === "1";
+  if (!skipComposeTrigger && (action === "created" || (action === "updated" && (summaryChanged || reopened))) && (gap.status ?? "open") === "open") {
     const g = globalThis as { __gapComposeLastTrigger?: number };
     const nowMs = Date.now();
     if (!g.__gapComposeLastTrigger || nowMs - g.__gapComposeLastTrigger > 60_000) {

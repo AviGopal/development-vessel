@@ -141,7 +141,11 @@ export const SCAFFOLD_MITOSIS_TRACK_TEMPLATE: ActivityTemplate = {
         model: "auto",
         max_tokens: 8000,
       },
-      outputShapes: ["llmCompletionResult"],
+      // Same hollow declaration as template-mitosis-tick, in the camelCase spelling: the step's
+      // resolver is `llm_completion_dispatch`, and nothing in the fleet emits `llmCompletionResult`.
+      // Resolvers emit `llmCompletion` (19 sites) or `llm_completion` (4); neither is this name.
+      // Declaring an output nothing produces makes the template selectable for work it cannot do.
+      outputShapes: ["llm_completion_dispatch"],
     },
     {
       id: "spawn_parallel_track",

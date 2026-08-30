@@ -134,7 +134,13 @@ export const TEMPLATE_MITOSIS_TICK_TEMPLATE: ActivityTemplate = {
         model: "auto",
         max_tokens: 4000,
       },
-      outputShapes: ["llm_completion_result"],
+      // The step's resolver is `llm_completion_dispatch`, and NOTHING in the fleet emits a shape
+      // called `llm_completion_result` — it was advertised here and produced nowhere. The walk
+      // selects producers BY DECLARED OUTPUT SHAPE, so this template advertised a shape it could
+      // never deliver: a hollow producer accruing graded evidence for work it does not do.
+      // Matches the working convention in ingest-doc-as-concepts.ts, which declares the resolver's
+      // own advertised shape (`llm_completion_dispatch` IS in discovery.shapes).
+      outputShapes: ["llm_completion_dispatch"],
     },
     {
       id: "create_variant",

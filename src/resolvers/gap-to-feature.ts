@@ -3244,6 +3244,7 @@ export async function resolveGapToFeature(pointer: GapToFeaturePointer): Promise
     // self-model predicted would land but didn't is over-optimistic (high-information) → bump
     // harder; a correctly-predicted fail bumps normally. Feeds the calibrated self-model.
     if (isNonAttemptComposeResult(cb)) {
+      gapComposeLastAttemptAt.delete(String(gap.id ?? "")); // A compose that never ran must not cost the gap its cooldown.
       // Credit was already exempt here; SELECTION was not. Release the pick-start cooldown
       // stamp so the gap is re-pickable after a SHORT requeue instead of sitting out five
       // minutes for a compose the host never started — and instead of being re-pickable

@@ -28,7 +28,7 @@ function assertInAllowlist(abs: string, workspaceRoot: string): void {
   const raw = process.env["WRITE_ALLOWLIST"];
   if (!raw) {
     // When WRITE_ALLOWLIST is unset, deny any write to enforce explicit allowlisting.
-    // NOTE: This will allow all writes when WRITE_ALLOWLIST is unset. This is a temporary bypass for local development.
+    throw new Error("WRITE_ALLOWLIST is unset; refusing all writes to enforce explicit allowlisting.");
     return;
   }
   const prefixes = raw

@@ -12,6 +12,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { groupLeaderArgv, killProcessGroup } from "../process-group";
+import { isSaturated, loadAverage1m, SATURATION_MULTIPLE } from "../system-load";
 // bun resolved via Bun.which at call-time (no external import needed)
 import type { ResolverResult } from "./types.js";
 
@@ -191,6 +192,29 @@ async function runCheck(
   let exit = -1;
   let out = "";
   let timedOut = false;
+  // DON'T START A SUITE THE BOX CANNOT FINISH.
+  //
+  // Measured 2026-08-30: mitosis-tick fired ~390x/hour while each suite takes minutes, so ~29 ran
+  // concurrently on 14 CPUs and loadavg sat at 41-57 for over half an hour with no downward trend.
+  // At that oversubscription a suite overruns SUITE_CHECK_TIMEOUT_MS and returns `timed_out`, which
+  // this evaluator ALREADY treats as inconclusive-defer rather than a regression — so the run burns
+  // seven CPU-minutes to produce the verdict it would have produced for free, and that burn is part
+  // of what keeps the box saturated.
+  //
+  // Declining to start yields the SAME inconclusive verdict at zero cost, and lifts by itself when
+  // load falls: condition-driven selection, not a static clamp or a timer. Reported through the
+  // existing `timed_out` channel on purpose — inventing a new verdict would risk being read as a
+  // test FAILURE, which is exactly the false-block that already bites the pre-cutover gate.
+  if (isSaturated()) {
+    const load = loadAverage1m();
+    return {
+      name,
+      exit_code: -1,
+      duration_ms: 0,
+      output_tail: `deferred: not started — 1-minute load average ${load ?? "unknown"} exceeds ${SATURATION_MULTIPLE}x the CPU count. At this oversubscription the suite would almost certainly exhaust its timeout and return inconclusive anyway, so it is skipped rather than run. This is not a test failure and not a regression; it re-runs unchanged once load falls.`,
+      timed_out: true,
+    };
+  }
   try {
     // Spawned as its own process-group leader so a timeout can take the WHOLE tree.
     const proc = Bun.spawn(groupLeaderArgv(bunCmd, args), {

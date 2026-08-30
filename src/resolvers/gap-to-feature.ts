@@ -2123,21 +2123,48 @@ export function isNonAttemptComposeResult(cb: Record<string, unknown> | null | u
  *
  * Takes the map as a parameter so the behaviour is unit-testable without a live pool — the
  * same reason `chooseFirstActionable` was extracted with an injected predicate. Returns
- * whether a stamp was actually removed, so a caller (or a test) can assert the effect rather
- * than infer it.
+ * whether a stamp was actually rewritten, so a caller (or a test) can assert the effect
+ * rather than infer it.
  *
  * DELIBERATELY NOT DONE HERE: nothing touches `failed_attempts` or `updateCalibration`. That
  * accounting is already correct for a non-attempt and must stay untouched — this only
  * restores eligibility.
+ *
+ * REQUEUE, NOT RELEASE (2026-08-30). The first version of this DELETED the stamp, making the
+ * gap instantly re-eligible. That over-corrected: this map is not only a penalty, it is the
+ * ONLY rotation pressure in the picker (`eligible` filters on it at the auto-pick site), and
+ * the autonomous lane holds exactly one slot, so BUSY is the majority outcome — 45 of ~80
+ * composes (56%) in a measured 4h window. Releasing on the majority path therefore disabled
+ * rotation: the top-ranked gap was refused, immediately re-admitted, and re-picked, taking
+ * 73 of 83 picks (88%) in a 40-minute window while 62 never-attempted substrate-detected
+ * findings queued behind it.
+ *
+ * Both extremes starve the backlog, in opposite directions:
+ *   - full cooldown on BUSY  → cools gaps that were never tried (the bug this function fixed)
+ *   - no cooldown on BUSY    → the highest-ranked gap monopolises every tick
+ * So a non-attempt costs a SHORT requeue instead: long enough for the picker to advance to
+ * the next candidate, far short of penalising the gap for work the host declined to start.
+ * REQUEUE_MS matches the 45s backoff goal-host already applies to a BUSY verdict, so the two
+ * lanes wait the same amount for the same signal.
  */
-export function clearCooldownIfNonAttempt(
+export const GAP_BUSY_REQUEUE_MS = 45_000;
+
+export function requeueAfterNonAttempt(
   stamps: Map<string, number>,
   gapId: string,
   cb: Record<string, unknown> | null | undefined,
+  opts: { nowMs?: number; cooldownMs?: number; requeueMs?: number } = {},
 ): boolean {
   if (!isNonAttemptComposeResult(cb)) return false;
   if (!gapId) return false;
-  return stamps.delete(gapId);
+  if (!stamps.has(gapId)) return false;
+  const now = opts.nowMs ?? Date.now();
+  const cooldown = opts.cooldownMs ?? GAP_COMPOSE_COOLDOWN_MS;
+  const requeue = opts.requeueMs ?? GAP_BUSY_REQUEUE_MS;
+  // Backdate the stamp so the remaining exclusion is `requeue`, not the full cooldown. A
+  // requeue >= cooldown must never EXTEND the exclusion, hence the clamp at 0.
+  stamps.set(gapId, now - Math.max(0, cooldown - requeue));
+  return true;
 }
 
 // Decide whether a chronically-failing gap should be narrowed into a fresh child.
@@ -2552,7 +2579,7 @@ async function routeCapabilityGapToNewResolver(
   }
   // ...and a retry must be RETRYABLE: release the cooldown the pick stamped, or the "retry"
   // is a five-minute exclusion for a compose that never ran.
-  clearCooldownIfNonAttempt(gapComposeLastAttemptAt, String(gap.id ?? ""), cb);
+  requeueAfterNonAttempt(gapComposeLastAttemptAt, String(gap.id ?? ""), cb);
   return {
     shape: "gapToFeatureReport",
     body: {
@@ -3159,7 +3186,7 @@ export async function resolveGapToFeature(pointer: GapToFeaturePointer): Promise
     // A slice sequence cut short by a capacity refusal never got its attempt either.
     if (!allOk && !pointer.dry_run && !isNonAttemptComposeResult(lastBody)) await bumpFailedAttempts(gap);
     // ...so it must not serve the cooldown either. Same reasoning as the credit exemption above.
-    clearCooldownIfNonAttempt(gapComposeLastAttemptAt, String(gap.id ?? ""), lastBody);
+    requeueAfterNonAttempt(gapComposeLastAttemptAt, String(gap.id ?? ""), lastBody);
     return { shape: "gapToFeatureReport", body: { ok: allOk, stage: "route_compose", route: "capacity_slice_sequence", gap_id: gap.id, gap_category: gap.category, slices: sliceResults } };
   }
 
@@ -3204,9 +3231,10 @@ export async function resolveGapToFeature(pointer: GapToFeaturePointer): Promise
     // harder; a correctly-predicted fail bumps normally. Feeds the calibrated self-model.
     if (isNonAttemptComposeResult(cb)) {
       // Credit was already exempt here; SELECTION was not. Release the pick-start cooldown
-      // stamp so the gap is immediately re-pickable instead of sitting out five minutes for
-      // a compose the host never started.
-      const cooled = clearCooldownIfNonAttempt(gapComposeLastAttemptAt, String(gap.id ?? ""), cb);
+      // stamp so the gap is re-pickable after a SHORT requeue instead of sitting out five
+      // minutes for a compose the host never started — and instead of being re-pickable
+      // instantly, which handed the top-ranked gap 88% of picks (see requeueAfterNonAttempt).
+      const cooled = requeueAfterNonAttempt(gapComposeLastAttemptAt, String(gap.id ?? ""), cb);
       console.log("[gap-to-feature] non-attempt (failure_kind=" + String(cb.failure_kind ?? "-") + " verdict=" + String(cb.verdict ?? "-") + " stage=" + String(cb.stage ?? "-") + ") — gap credit not bumped, category calibration untouched, cooldown " + (cooled ? "released" : "not held"));
     } else {
       const pred = predictLand(gap);

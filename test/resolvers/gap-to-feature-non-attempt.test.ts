@@ -1,5 +1,5 @@
 import { describe, it, expect } from "bun:test";
-import { isNonAttemptComposeResult, clearCooldownIfNonAttempt } from "../../src/resolvers/gap-to-feature.js";
+import { isNonAttemptComposeResult, requeueAfterNonAttempt, GAP_BUSY_REQUEUE_MS } from "../../src/resolvers/gap-to-feature.js";
 
 // Pins the BUSY/capacity distinction at the gap layer.
 //
@@ -71,66 +71,87 @@ describe("isNonAttemptComposeResult", () => {
 // 19:36:52.6 / 19:41:56.7 / 19:47:01.5 — deltas 5:14.6, 5:06.1, 5:04.1, 5:04.8, cooldown-
 // limited to the second rather than tick-limited — and every one of those picks logged
 // verdict=BUSY stage=capacity. Zero composes ran in that window.
-describe("clearCooldownIfNonAttempt", () => {
-  const stampsWith = (id: string) => new Map<string, number>([[id, 1_700_000_000_000]]);
+//
+// REQUEUE, NOT RELEASE (2026-08-30). The first fix DELETED the stamp. That over-corrected:
+// this map is the ONLY rotation pressure in the auto-picker, and with one autonomous slot
+// BUSY is the MAJORITY outcome (45 of ~80 composes, 56%, over a measured 4h window), so
+// releasing on the majority path disabled rotation entirely — the top-ranked gap took 73 of
+// 83 picks (88%) in 40 minutes while 62 never-attempted substrate-detected findings queued.
+// Both extremes starve the backlog: the full cooldown cools gaps that were never tried, and
+// no cooldown lets one gap monopolise every tick. A non-attempt now costs a SHORT requeue.
+describe("requeueAfterNonAttempt", () => {
+  const COOLDOWN = 300_000;
+  const NOW = 1_700_000_000_000;
+  const stampsWith = (id: string) => new Map<string, number>([[id, NOW]]);
+  // Remaining exclusion implied by a stamp, given the cooldown window.
+  const remaining = (stamps: Map<string, number>, id: string) =>
+    COOLDOWN - (NOW - (stamps.get(id) ?? 0));
 
-  it("releases the cooldown when the compose never ran", () => {
-    // THE FIX. Without this the gap waits out five minutes for a compose the host refused
-    // to start, and the highest-priority gap is penalised for the host being busy.
+  it("requeues a BUSY gap to the SHORT delay, not the full cooldown", () => {
     const stamps = stampsWith("g1");
-    expect(clearCooldownIfNonAttempt(stamps, "g1", { ok: false, verdict: "BUSY", stage: "capacity" })).toBe(true);
-    expect(stamps.has("g1")).toBe(false);
+    expect(requeueAfterNonAttempt(stamps, "g1", { verdict: "BUSY", stage: "capacity" },
+      { nowMs: NOW, cooldownMs: COOLDOWN, requeueMs: 45_000 })).toBe(true);
+    expect(remaining(stamps, "g1")).toBe(45_000);
   });
 
-  it("releases it for an environment failure too — the other non-attempt kind", () => {
+  it("does NOT release the gap outright — that is what caused the 88% monopoly", () => {
+    // The regression guard. An entry must still be present and still exclude for a while,
+    // or the top-ranked gap is re-admitted on the very next tick.
     const stamps = stampsWith("g1");
-    expect(clearCooldownIfNonAttempt(stamps, "g1", { ok: false, failure_kind: "environment" })).toBe(true);
-    expect(stamps.has("g1")).toBe(false);
+    requeueAfterNonAttempt(stamps, "g1", { verdict: "BUSY" }, { nowMs: NOW, cooldownMs: COOLDOWN });
+    expect(stamps.has("g1")).toBe(true);
+    expect(remaining(stamps, "g1")).toBeGreaterThan(0);
   });
 
-  it("KEEPS the cooldown after a genuine non-landing compose", () => {
-    // THE OTHER DIRECTION, and the one that matters for not regressing: a real attempt must
-    // still cool the gap, or the picker re-composes the same failing gap every tick — the
-    // exact 17x/60min starvation GAP_COMPOSE_COOLDOWN_MS was introduced to stop.
+  it("requeues an environment failure the same way", () => {
+    const stamps = stampsWith("g1");
+    expect(requeueAfterNonAttempt(stamps, "g1", { failure_kind: "environment" },
+      { nowMs: NOW, cooldownMs: COOLDOWN, requeueMs: 45_000 })).toBe(true);
+    expect(remaining(stamps, "g1")).toBe(45_000);
+  });
+
+  it("KEEPS the full cooldown after a genuine non-landing compose", () => {
+    // A real attempt must still cool the gap, or the picker re-composes the same failing gap
+    // every tick — the starvation GAP_COMPOSE_COOLDOWN_MS exists to stop.
     for (const cb of [
       { ok: false, verdict: "UNFAVORABLE" },
       { ok: false, verdict: "REFUSED", stage: "scope" },
       { ok: false, apply_failed: true },
+      { ok: true, verdict: "FAVORABLE" },
     ]) {
       const stamps = stampsWith("g1");
-      expect(clearCooldownIfNonAttempt(stamps, "g1", cb)).toBe(false);
-      expect(stamps.has("g1")).toBe(true);
+      expect(requeueAfterNonAttempt(stamps, "g1", cb, { nowMs: NOW, cooldownMs: COOLDOWN })).toBe(false);
+      expect(remaining(stamps, "g1")).toBe(COOLDOWN);
     }
   });
 
-  it("KEEPS the cooldown after a successful compose", () => {
+  it("never EXTENDS an exclusion when the requeue exceeds the cooldown", () => {
+    // Clamped at 0: a misconfigured requeue must not make a non-attempt cost MORE than a
+    // real failure — the failure mode of a wrong constant must be less penalty, never more.
     const stamps = stampsWith("g1");
-    expect(clearCooldownIfNonAttempt(stamps, "g1", { ok: true, verdict: "FAVORABLE" })).toBe(false);
-    expect(stamps.has("g1")).toBe(true);
+    requeueAfterNonAttempt(stamps, "g1", { verdict: "BUSY" },
+      { nowMs: NOW, cooldownMs: COOLDOWN, requeueMs: 999_000 });
+    expect(remaining(stamps, "g1")).toBeLessThanOrEqual(COOLDOWN);
   });
 
-  it("only releases the gap it was given, never a neighbour", () => {
-    // The delete key must match the key the pick stamped — String(gap.id). A mismatch here
-    // would be invisible: the cooldown would simply never clear, which is today's bug.
-    const stamps = new Map<string, number>([["g1", 1], ["g2", 2]]);
-    clearCooldownIfNonAttempt(stamps, "g1", { verdict: "BUSY" });
-    expect(stamps.has("g1")).toBe(false);
-    expect(stamps.has("g2")).toBe(true);
+  it("only touches the gap it was given, never a neighbour", () => {
+    const stamps = new Map<string, number>([["g1", NOW], ["g2", NOW]]);
+    requeueAfterNonAttempt(stamps, "g1", { verdict: "BUSY" }, { nowMs: NOW, cooldownMs: COOLDOWN });
+    expect(remaining(stamps, "g1")).toBeLessThan(COOLDOWN);
+    expect(remaining(stamps, "g2")).toBe(COOLDOWN);
   });
 
-  it("is null-safe and id-safe", () => {
-    // The slice path passes a possibly-null lastBody, and a gap with no id must not
-    // delete some other entry by stringifying to "".
+  it("is null-safe, id-safe, and does not invent a stamp that was never held", () => {
     const stamps = stampsWith("g1");
-    expect(clearCooldownIfNonAttempt(stamps, "g1", null)).toBe(false);
-    expect(clearCooldownIfNonAttempt(stamps, "", { verdict: "BUSY" })).toBe(false);
-    expect(stamps.has("g1")).toBe(true);
+    expect(requeueAfterNonAttempt(stamps, "g1", null)).toBe(false);
+    expect(requeueAfterNonAttempt(stamps, "", { verdict: "BUSY" })).toBe(false);
+    expect(remaining(stamps, "g1")).toBe(COOLDOWN);
+    // A gap with no cooldown held must report false rather than claim a requeue.
+    expect(requeueAfterNonAttempt(new Map(), "g1", { verdict: "BUSY" })).toBe(false);
   });
 
-  it("reports false when there was no cooldown to release", () => {
-    // The call site logs this as "cooldown released" vs "not held"; a bare true would make
-    // the log claim a release that never happened.
-    const stamps = new Map<string, number>();
-    expect(clearCooldownIfNonAttempt(stamps, "g1", { verdict: "BUSY" })).toBe(false);
+  it("ships a requeue shorter than the cooldown and aligned to goal-host's BUSY backoff", () => {
+    expect(GAP_BUSY_REQUEUE_MS).toBeGreaterThan(0);
+    expect(GAP_BUSY_REQUEUE_MS).toBeLessThan(COOLDOWN);
   });
 });

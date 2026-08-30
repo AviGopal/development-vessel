@@ -4207,7 +4207,7 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
       // The gap this keeps trying to close is REAL — a manifest that cannot install must
       // not reach origin/dev (ddffdee did exactly that). But the check belongs against the
       // CLONE before staging, where node_modules is not shared. Do not solve it here.
-      command: `cd ${JSON.stringify(vAbs)} && (echo "== install =="; [ -d node_modules ] || { bun install >/dev/null 2>&1; echo "INSTALL_EXIT=$?"; }; echo "== resolve =="; bun install --dry-run >/tmp/fc-dryrun.$$ 2>&1; echo "DRYRUN_EXIT=$?"; tail -6 /tmp/fc-dryrun.$$; rm -f /tmp/fc-dryrun.$$; echo "== typecheck =="; bun run typecheck 2>&1; echo "TC_EXIT=$?"; echo "== shape-dispatch =="; if [ -f ${SHARED_DISPATCH_CHECK} ] && [ -f src/config.ts ] && [ -f src/routes/impulses.ts ]; then bun ${SHARED_DISPATCH_CHECK} ${JSON.stringify(vAbs)} 2>&1; echo "SD_EXIT=$?"; else echo "SD_EXIT=0"; fi; echo "== tests =="; timeout 240 bun test --timeout 20000 2>&1 || true)`,
+      command: `cd ${JSON.stringify(vAbs)} && (echo "== install =="; [ -d node_modules ] || { bun install >/dev/null 2>&1; echo "INSTALL_EXIT=$?"; }; echo "== resolve =="; bun install --dry-run >/tmp/fc-dryrun.$$ 2>&1; echo "DRYRUN_EXIT=$?"; tail -6 /tmp/fc-dryrun.$$; rm -f /tmp/fc-dryrun.$$; echo "== typecheck =="; timeout 300 bun run typecheck 2>&1; echo "TC_EXIT=$?"; echo "== shape-dispatch =="; if [ -f ${SHARED_DISPATCH_CHECK} ] && [ -f src/config.ts ] && [ -f src/routes/impulses.ts ]; then bun ${SHARED_DISPATCH_CHECK} ${JSON.stringify(vAbs)} 2>&1; echo "SD_EXIT=$?"; else echo "SD_EXIT=0"; fi; echo "== tests =="; timeout 240 bun test --timeout 20000 2>&1 || true)`,
       cwd: REPO_ROOT,
     });
     const raw = String((sh.body as { stdout?: unknown })?.stdout ?? "");
@@ -4272,6 +4272,21 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
       return base.endsWith(".ts") && touchedBases.has(base);
     });
     const tcOk = tcExit === 0;
+    // WAS THE TYPECHECK ANSWERED AT ALL? `bun run typecheck` had no timeout, so when the
+    // surrounding shell call was cut off the TC_EXIT marker was never echoed: tcExit became
+    // null and the gate failed the draft with a bare "verify" and no error text. Observed on
+    // compose exec_1788052485529_xepsp7bpe3a (gap route-edit-e0cfd390), whose output ends at
+    // "== typecheck ==\n$ tsc --noEmit" with exit_code null — and whose two edits were CORRECT:
+    // re-applying them verbatim and running `tsc --noEmit` by hand exits 0. A correct patch was
+    // rolled back because a check could not finish.
+    //
+    // Failing closed here is RIGHT and is deliberately kept — an unverifiable edit must not
+    // land. What was wrong is that "could not be checked" was indistinguishable from "does not
+    // compile", both in the report and in the attempt accounting that drives the category
+    // calibration seal. `timeout 300` on the typecheck now yields a real exit code (124) instead
+    // of silence, and the reason below names the distinction.
+    const tcUnanswered = tcExit === null && /== typecheck ==/.test(raw);
+    const tcTimedOut = tcExit === 124;
     // TEST gate, baseline-delta (see testFailureSet): a draft that compiles can still
     // break the suite — that is exactly how 53e4267 landed a no-op and left 5 tests red
     // for 10 days. Block only on failures this draft INTRODUCED, so pre-existing reds in
@@ -4344,7 +4359,8 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
     // consecutive composes when the same mistake was made for INSTALL_EXIT.
     const dryRunOk = dryRunExit === null || dryRunExit === 0;
     const ok = installOk && dryRunOk && tcOk && sdExit === 0 && testOk;
-    const detail = (installOk ? "" : ` | DEPENDENCY INSTALL FAILED (INSTALL_EXIT=${String(installExit)}) — the staged manifest does not install; a typecheck against an already-populated node_modules cannot see this`)
+    const detail = ((tcUnanswered || tcTimedOut) ? ` | TYPECHECK NOT ANSWERED (TC_EXIT=${String(tcExit)}) — the check did not complete, so this is UNVERIFIED, not proven broken. Failing closed is correct (an unverifiable edit must not land), but do not read this as a defect in the draft: it carries no TS error text.` : "")
+      + (installOk ? "" : ` | DEPENDENCY INSTALL FAILED (INSTALL_EXIT=${String(installExit)}) — the staged manifest does not install; a typecheck against an already-populated node_modules cannot see this`)
       + (dryRunOk ? "" : ` | DEPENDENCY RESOLUTION FAILED (DRYRUN_EXIT=${String(dryRunExit)}) — the staged manifest names a dependency that does not resolve, so this change would break a fresh install even though it typechecks here: ${(raw.match(/== resolve ==\n([\s\S]*?)\n== typecheck ==/)?.[1] ?? "").slice(0, 400)}`)
       + (testOk ? "" : [
       confirmedNewTest.length > 0 ? ` | NEW test failures introduced by this draft, REPRODUCED on a second run (${confirmedNewTest.length}): ${confirmedNewTest.slice(0, 5).join(" ; ").slice(0, 600)}` : "",

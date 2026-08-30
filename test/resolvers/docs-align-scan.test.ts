@@ -21,8 +21,19 @@
 // - LIVE-TRUTH JOINS: accuracy/setup findings join against provided
 //   live-truth slices (advertised shapes, endpoints, unit names, paths) —
 //   supplied as inputs so the scan stays deterministic.
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect, afterEach } from "bun:test";
 import { resolveDocsAlignScan } from "../../src/resolvers/docs-align-scan.js";
+
+// When the pointer carries no `vocabulary`, the resolver calls fetchCanonicalVocabulary() over
+// the network. The empty-corpus case below passed no vocabulary, so it made a live call and
+// failed as a 5000ms timeout under substrate load (it ran in 592ms when the fleet was idle —
+// slow, but green, which is how it stayed unnoticed).
+//
+// Stubbing the fetch to fail fast makes it deterministic AND pins something the test previously
+// left unasserted: an unavailable vocabulary must not stop the scan from returning a well-formed
+// empty report. Every other case in this file supplies its own vocabulary and never reaches here.
+const originalFetch = globalThis.fetch;
+afterEach(() => { globalThis.fetch = originalFetch; });
 
 describe("docs_align_scan v1 (implemented behavior)", () => {
   it("scans an inline corpus for all four invariants with no fs access", async () => {
@@ -80,7 +91,8 @@ describe("docs_align_scan v1 (implemented behavior)", () => {
     expect(body.findings.every((f) => f.doc_id === "durable.md")).toBe(true);
   });
 
-  it("returns an empty-findings report for an empty corpus", async () => {
+  it("returns an empty-findings report for an empty corpus, even with no vocabulary available", async () => {
+    globalThis.fetch = (async () => { throw new Error("ECONNREFUSED"); }) as unknown as typeof fetch;
     const res = await resolveDocsAlignScan({ type: "docs_align_scan" });
     expect(res.shape).toBe("docsAlignReport");
     const body = res.body as Record<string, unknown>;

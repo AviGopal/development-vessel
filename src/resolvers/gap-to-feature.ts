@@ -994,7 +994,41 @@ function pickMostLandable(gaps: Record<string, unknown>[]): Record<string, unkno
   // without a git checkout — the same reason computeNewlyFailing was extracted in the cutover
   // resolver. A selection change that only a diff-reader has inspected is the inert-landing
   // risk fc-coverage warns about: only a test actually runs it.
-  const { chosen, skippedPending } = chooseFirstActionable(ranked, (g) => verifyGapCondition(g) === 'pending');
+  // SKIP A LANDED-BUT-UNVERIFIED GAP WHATEVER ITS VERDICT — not just 'pending'.
+  //
+  // This filter used to test `=== 'pending'` only, which protects a gap for exactly one
+  // landing and then stops. Class-3 provenance returns 'pending' for a SINGLE landing and
+  // 'present' for a RE-LAND, so the moment a gap lands twice it flips to 'present', drops out
+  // of this skip, and is re-composed again — which produces a third landing, which is still
+  // 'present'. The first re-land permanently removes the protection and guarantees the next.
+  //
+  // Measured 2026-08-31: `gap-env-gated-write-allowlist` has SIX substrate-authored commits,
+  // every one editing src/resolvers/fs-write.ts — three of them inside 67 minutes on 08-17,
+  // and one on 08-30 as a recommit-recommit-. At ~4% compose success those are among the most
+  // expensive artifacts the lane produces, all spent re-fixing the same file. bafd83d in that
+  // list is the commit §12.6 names as "the inert-diff hole": the operator fix stopped the
+  // FALSE CLOSE and did nothing about the RE-WORK.
+  //
+  // The distinction that matters: a CLASS-1 'present' is MEASURED — the literal is still in
+  // the file, the fix genuinely did not work, retrying is right. A CLASS-3 'present' only
+  // means "landed >= 2 times"; it is evidence of churn, not of a surviving defect, and
+  // treating it as a retry signal is backwards. So skip on the pending-verification STAMP for
+  // gaps that carry no measurable predicate, and leave measured gaps alone.
+  //
+  // Over-skipping is the safe direction here. These gaps are already landed and already
+  // escalated to a human; another compose cannot close them (only a predicate or a human
+  // can), so skipping frees the scarcest resource in the system. chooseFirstActionable still
+  // fails open when every candidate is skipped, so the lane cannot starve.
+  const { chosen, skippedPending } = chooseFirstActionable(ranked, (g) => {
+    const v = verifyGapCondition(g);
+    if (v === 'pending') return true;
+    const m = (g as { classification_metadata?: Record<string, unknown> }).classification_metadata ?? {};
+    const landedAwaitingVerification = typeof m.pending_outcome_verification === 'string'
+      && (m.pending_outcome_verification as string).length >= 7;
+    const hasMeasurablePredicate = typeof m.hardcoded_url === 'string'
+      || typeof m.evidence_resolve === 'string' || typeof m.verify_shape === 'string';
+    return landedAwaitingVerification && !hasMeasurablePredicate;
+  });
   const targetOf = (g: Record<string, unknown>): string =>
     String(((g.classification_metadata ?? g.metadata ?? {}) as Record<string, unknown>).edit_site ?? "(no-target)");
   // TRACED SELECTION DECISION (law 12: record the counterfactual AT decision time). Without

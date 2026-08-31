@@ -63,3 +63,52 @@ describe("chooseFirstActionable", () => {
     expect(PENDING_SCAN_MAX).toBeLessThanOrEqual(50);
   });
 });
+
+// THE RE-LAND TRAP. The predicate above tested `=== 'pending'` only, which protects a gap
+// for exactly ONE landing. Class-3 provenance returns 'pending' for a single landing and
+// 'present' for a re-land, so the first re-land flips the verdict out of the skip and the
+// gap is composed again — producing a third landing, still 'present', forever.
+//
+// Measured 2026-08-31: gap-env-gated-write-allowlist carries SIX substrate-authored commits,
+// all editing src/resolvers/fs-write.ts, three of them within 67 minutes. bafd83d among them
+// is the commit §12.6 names as "the inert-diff hole" — the operator fix stopped the false
+// CLOSE and did nothing about the re-WORK.
+describe("landed-but-unverified gaps are skipped whatever the verdict", () => {
+  const stamped = (id: string, extra: Record<string, unknown> = {}) => ({
+    id,
+    classification_metadata: { pending_outcome_verification: "abc1234def5678", ...extra },
+  });
+
+  // The real predicate used at the call site, replicated so the rule is pinned independently
+  // of verifyGapCondition's live git access.
+  const skip = (g: { classification_metadata?: Record<string, unknown> }, verdict: string) => {
+    if (verdict === "pending") return true;
+    const m = g.classification_metadata ?? {};
+    const landed = typeof m.pending_outcome_verification === "string" && (m.pending_outcome_verification as string).length >= 7;
+    const measurable = typeof m.hardcoded_url === "string" || typeof m.evidence_resolve === "string" || typeof m.verify_shape === "string";
+    return landed && !measurable;
+  };
+
+  it("skips a re-landed gap that has NO predicate — 'present' here means churn, not a live defect", () => {
+    expect(skip(stamped("g-relanded"), "present")).toBe(true);
+  });
+
+  it("still skips the single-landing 'pending' case", () => {
+    expect(skip(stamped("g-once"), "pending")).toBe(true);
+  });
+
+  it("does NOT skip a MEASURED 'present' — the literal is really still there, retry is right", () => {
+    // Class-1: the fix genuinely did not work. This must stay composable.
+    expect(skip(stamped("g-measured", { hardcoded_url: "const X = 1" }), "present")).toBe(false);
+    expect(skip(stamped("g-c2", { evidence_resolve: "someShape" }), "present")).toBe(false);
+  });
+
+  it("does not skip an ordinary gap that never landed", () => {
+    expect(skip({ classification_metadata: {} }, "present")).toBe(false);
+    expect(skip({}, "unknown")).toBe(false);
+  });
+
+  it("ignores a too-short stamp — a truncated sha is not a landing", () => {
+    expect(skip({ classification_metadata: { pending_outcome_verification: "abc" } }, "present")).toBe(false);
+  });
+});

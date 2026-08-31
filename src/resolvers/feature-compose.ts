@@ -4586,9 +4586,10 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
               errorSiteWindow = `\n\nCURRENT CONTENT of ${relPath} lines ${lo + 1}-${hi} (the first error is at line ${errLine}).\n` +
                 `The leading "NNN| " is a LINE-NUMBER GUTTER added for reference — it is NOT part of the file. ` +
                 `Never include it in old_string, new_string or expect_first_line.\n` +
-                `PREFERRED for this repair: emit {"kind":"replace_lines","path":"...","start_line":N,"end_line":M,"expect_first_line":"<line N verbatim, without the gutter>","new_string":"..."} — ` +
-                `you know the error is at line ${errLine}, and this needs only ONE line copied exactly rather than a whole block. ` +
-                `If you use old_string instead, it must be copied VERBATIM from these real bytes; a re-derived or normalised anchor is rejected.\n${gutter}`;
+                `PREFERRED for this repair: emit {"kind":"replace_lines","path":"${relPath}","start_line":N,"end_line":M,"new_string":"<the replacement lines>"}. ` +
+                `You do NOT need to reproduce any existing line — do not send old_string or expect_first_line. The system reads lines N..M from the file itself, ` +
+                `so give it the RANGE and the REPLACEMENT only. The error is at line ${errLine}. ` +
+                `If you send old_string instead it must be copied VERBATIM from these real bytes; a re-derived or normalised anchor is rejected.\n${gutter}`;
             }
           }
           if (!errorSiteWindow && /SD_EXIT=[1-9]/.test(errText)) {
@@ -4617,8 +4618,63 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
           `A change to vessel ${fv.vessel} fails \`bun run lint\` (strict tsc + shape-dispatch agreement: every advertised shape in src/config.ts MUST have a matching case in src/routes/impulses.ts and vice-versa). Lint output:\n\n${errText.slice(0, 4000)}${errorSiteWindow}\n\nPick the SINGLE most-blocking error and emit ONE JSON object {"file":"repos/${fv.vessel.replace(/^repos\//, "")}/<subpath>","old_string":"<a SHORT verbatim UNIQUE substring of that file's CURRENT content>","new_string":"<corrected replacement>"} that fixes it, changing as little else as possible. For a missing dispatch case, copy the shape into the switch next to a sibling case. old_string MUST appear verbatim. No prose, no fences. Escape newlines as \\n.`,
           model,
         ));
-        const ef = typeof fix?.file === "string" ? String(fix.file) : "";
+        const ef = typeof fix?.file === "string" ? String(fix.file)
+          : typeof fix?.path === "string" ? String(fix.path) : "";
         const efAbs = ef ? opAbs(ef) : "";
+
+        // LINE-ADDRESSED REPAIR WITH A SYSTEM-DERIVED ANCHOR.
+        //
+        // This consumer previously read `fix.file` + `fix.old_string` ONLY. A response
+        // shaped {kind:"replace_lines", path, start_line, ...} has neither key, so the
+        // branch below was false and the round ended with no write, no log and no
+        // refusal — `anyFixed` stayed false and `if (!anyFixed) break` spent the whole
+        // 4-round budget as ONE silent no-op. ee6312c made that worse by telling the
+        // model to PREFER exactly that shape, steering it into the dead branch.
+        //
+        // Rather than ask the model to echo file bytes back (it does not do this
+        // reliably: on local-tools-vessel/src/index.ts it emitted
+        // `kill -9 "$__cpid" 2>/dev/null` where line 137 reads `kill -9 -$__cpid
+        // 2>/dev/null`, dropping the `-` and turning a process-GROUP kill into a
+        // process kill), the model now supplies INTENT ONLY — a line range and the
+        // replacement — and the SYSTEM derives the anchor from the bytes it already
+        // read when it built the numbered window. Transcription is removed from the
+        // model's job entirely, so there is nothing for it to normalise.
+        //
+        // Drift is still checked, just system-side: the file is RE-READ here rather
+        // than trusting the copy the window was built from, because an earlier repair
+        // round's edit to the same file shifts line numbers.
+        const rlStart = Number(fix?.start_line);
+        const rlEnd = Number(fix?.end_line);
+        if (efAbs && !fix?.old_string && Number.isInteger(rlStart) && Number.isInteger(rlEnd)) {
+          const cur = await callTool(toolsEndpoint, "fs_read", { path: efAbs });
+          const curContent = (cur.body as { content?: unknown })?.content;
+          if (cur.ok && typeof curContent === "string") {
+            const lines = curContent.split("\n");
+            // 1-indexed inclusive, in-bounds, non-inverted. Out-of-range means the
+            // model mis-read the gutter: refuse rather than clamp, because clamping
+            // would silently edit a line nobody chose.
+            if (rlStart >= 1 && rlEnd >= rlStart && rlEnd <= lines.length) {
+              const replacement = String(fix?.new_string ?? "");
+              const before = lines.slice(0, rlStart - 1);
+              const after = lines.slice(rlEnd);
+              const next = [...before, ...replacement.split("\n"), ...after].join("\n");
+              if (next !== curContent) {   // empty-diff refusal, same as the op applier
+                if (!preEditContent.has(efAbs) && !created.includes(efAbs)) preEditContent.set(efAbs, curContent);
+                const w = await callTool(toolsEndpoint, "fs_write", { path: efAbs, content: next });
+                if (w.ok) {
+                  anyFixed = true;
+                  if (!edited.includes(efAbs) && !created.includes(efAbs)) edited.push(efAbs);
+                  console.log(`[fc-repair] replace_lines applied ${ef}:${rlStart}-${rlEnd} (system-derived anchor)`);
+                }
+              } else {
+                console.warn(`[fc-repair] replace_lines REFUSED ${ef}:${rlStart}-${rlEnd}: empty diff`);
+              }
+            } else {
+              console.warn(`[fc-repair] replace_lines REFUSED ${ef}: line range ${rlStart}-${rlEnd} out of bounds (file has ${lines.length} lines)`);
+            }
+          }
+        }
+
         if (fix?.old_string && efAbs) {
           const cur = await callTool(toolsEndpoint, "fs_read", { path: efAbs });
           const curContent = (cur.body as { content?: unknown })?.content;

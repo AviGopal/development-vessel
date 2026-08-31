@@ -111,6 +111,25 @@ function capFromEnv(): number {
 }
 
 /**
+ * The cap that applies to one lane.
+ *
+ * SHARED BY `acquireComposeSlot` AND `peekComposeCapacity` on purpose. A peek that
+ * computed this independently could disagree with the acquire it is predicting, and
+ * both directions of disagreement are bad in a way that is hard to see: a peek that
+ * is too strict starves the lane while every log line reads "lane full, skipped"
+ * (healthy-looking silence), and a peek that is too lax simply does nothing. One
+ * expression, one behaviour.
+ *
+ * Note it inherits the `COMPOSE_MAX_CONCURRENT=0` quirk — cap 0 yields 1 autonomous
+ * slot and 0 directed ones, inverting the lanes. That is pre-existing and documented
+ * elsewhere; the peek must MIRROR acquire, not quietly fix it.
+ */
+function effectiveCapFor(directed?: boolean): number {
+  const cap = capFromEnv();
+  return directed === true ? cap : Math.max(1, cap - 1);
+}
+
+/**
  * Is the process that took this slot still running?
  *
  * Unreadable or malformed slot files return TRUE (assume alive): a slot we cannot
@@ -195,11 +214,58 @@ async function countLive(now: number): Promise<number> {
  * RESERVATION is a fairness property, and a race that can defeat it is a defect
  * in it rather than a rounding error on it.
  */
+export interface ComposeCapacity {
+  /** Slots this lane could still claim right now. */
+  readonly free: number;
+  /** Live holders observed, after reaping dead and stale ones. */
+  readonly live: number;
+  /** The lane's effective cap, for honest logging. */
+  readonly cap: number;
+}
+
+/**
+ * OBSERVE remaining capacity WITHOUT claiming a slot.
+ *
+ * WHY THIS EXISTS. The gap lane's cost was ordered backwards: it SELECTED a gap and
+ * only then asked whether a compose could run. Selection is not cheap — it reads the
+ * whole gap store and `admitActionableGaps` shells `bun run typecheck` per vessel
+ * (bounded and TTL-cached, but a blocking `spawnSync` all the same). Measured over 48h
+ * on 2026-08-31: 4482 picks, of which 3699 (82.5%) ended in `verdict=BUSY stage=capacity`
+ * — the lane paid full selection price, typechecks included, to be told there was
+ * nowhere to put the result. Peeking first makes those ticks nearly free.
+ *
+ * This CANNOT reduce landings, which is what makes it safe: a pick that ended in BUSY
+ * never composed anything, so skipping it removes cost and no work. It changes when
+ * selection's own side effects run (phantom-typecheck retirement, hopeless escalation)
+ * from every tick to slot-free ticks only — a latency change, not a capability one.
+ *
+ * NOT A RESERVATION. Capacity can vanish between the peek and a later `acquire`; the
+ * O_EXCL claim there remains the only arbiter. This answers "is it worth SELECTING?",
+ * never "is a slot mine?".
+ *
+ * Returns null when capacity cannot be observed, so callers FAIL OPEN and proceed as
+ * before — same contract as the module's acquire path. A capacity signal that cannot
+ * see the filesystem must slow the fleet, never halt it.
+ */
+export async function peekComposeCapacity(
+  opts: { directed?: boolean } = {},
+): Promise<ComposeCapacity | null> {
+  const cap = effectiveCapFor(opts.directed);
+  try {
+    await mkdir(slotDir(), { recursive: true });
+    // Reaps dead/stale holders exactly as acquire would, so a peek can never report a
+    // lane as full on the strength of slots held by ghosts.
+    const live = await countLive(Date.now());
+    return { free: Math.max(0, cap - live), live, cap };
+  } catch {
+    return null;
+  }
+}
+
 export async function acquireComposeSlot(
   composeId: string,
   opts: { directed?: boolean } = {},
 ): Promise<ComposeSlot> {
-  const cap = capFromEnv();
   // RESERVE THE LAST SLOT FOR DIRECTED WORK.
   //
   // A capacity cap alone converts "a directed goal waits behind the boredom
@@ -213,7 +279,7 @@ export async function acquireComposeSlot(
   // work is not lost by waiting — its gap stays open and retries. At the default
   // cap of 2 this is one slot each, which is the point: neither lane can starve
   // the other.
-  const effectiveCap = opts.directed === true ? cap : Math.max(1, cap - 1);
+  const effectiveCap = effectiveCapFor(opts.directed);
   let path: string | null = null;
   try {
     await mkdir(slotDir(), { recursive: true });

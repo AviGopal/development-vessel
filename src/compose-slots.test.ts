@@ -184,3 +184,64 @@ describe("compose slots — the reservation survives a RACE, not just a count", 
     expect((await acquire("directed", { directed: true })).granted).toBe(true);
   });
 });
+
+// ─────────────── PEEK: observe capacity without claiming it ───────────────
+//
+// The gap lane used to SELECT a gap and only then ask whether a compose could run.
+// Selection reads the whole gap store and shells a blocking `bun run typecheck` per
+// vessel. Measured over 48h on 2026-08-31: 4482 picks, 3699 (82.5%) ending
+// `verdict=BUSY stage=capacity` — full selection price paid for a refusal.
+//
+// The property that makes the peek safe is AGREEMENT WITH ACQUIRE. If the two ever
+// compute the lane cap differently, the failure is invisible in the worst direction:
+// a peek that is too strict starves the lane while every log line reads "lane full,
+// skipped", which looks exactly like a quiet, healthy system.
+const freshMod = async () => await import(`./compose-slots.ts?p=${Math.random()}`);
+
+describe("peekComposeCapacity", () => {
+  test("reports the AUTONOMOUS cap (cap-1), not the raw cap", async () => {
+    const { peekComposeCapacity } = await freshMod();
+    // COMPOSE_MAX_CONCURRENT=2 → autonomous sees 1, the reserved slot is directed-only.
+    expect(await peekComposeCapacity()).toMatchObject({ free: 1, live: 0, cap: 1 });
+    expect(await peekComposeCapacity({ directed: true })).toMatchObject({ free: 2, cap: 2 });
+  });
+
+  test("does NOT claim a slot — observing capacity must not consume it", async () => {
+    const { peekComposeCapacity, acquireComposeSlot } = await freshMod();
+    for (let i = 0; i < 5; i++) await peekComposeCapacity();
+    expect(await readdir(dir)).toHaveLength(0);
+    // The slot the peeks would have eaten is still grantable.
+    expect((await acquireComposeSlot("after-peeks")).granted).toBe(true);
+  });
+
+  test("AGREES WITH ACQUIRE: free<=0 exactly when the autonomous lane refuses", async () => {
+    const { peekComposeCapacity, acquireComposeSlot } = await freshMod();
+    expect((await peekComposeCapacity()).free).toBeGreaterThan(0);
+    const held = await acquireComposeSlot("holder");
+    expect(held.granted).toBe(true);
+    // Autonomous cap is now exhausted — and both must say so.
+    expect((await peekComposeCapacity()).free).toBe(0);
+    expect((await acquireComposeSlot("second")).granted).toBe(false);
+    // ...and both must recover together, or the lane starves silently.
+    await held.release();
+    expect((await peekComposeCapacity()).free).toBe(1);
+    expect((await acquireComposeSlot("third")).granted).toBe(true);
+  });
+
+  test("counts a DEAD holder as free, matching acquire's reaping", async () => {
+    const { peekComposeCapacity } = await freshMod();
+    // pid 2^22 is above every default pid_max — reliably absent from /proc.
+    await writeFile(join(dir, "slot-0.slot"), JSON.stringify({ pid: 4194303, at: Date.now() }));
+    expect((await peekComposeCapacity()).free).toBe(1);
+  });
+
+  test("returns null when capacity is UNOBSERVABLE, so the caller fails open", async () => {
+    // A peek that cannot see the filesystem must not report a full lane: that would
+    // halt gap selection entirely. null is the signal to proceed as before.
+    const file = join(dir, "not-a-directory");
+    await writeFile(file, "x");
+    process.env["COMPOSE_SLOT_DIR"] = join(file, "slots");
+    const { peekComposeCapacity } = await freshMod();
+    expect(await peekComposeCapacity()).toBeNull();
+  });
+});

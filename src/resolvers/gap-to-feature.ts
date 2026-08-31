@@ -11,6 +11,7 @@ import { resolveUiWritePassthrough } from "./ui-write-passthrough.js";
 
 const solicitedHumanGaps = new Set<string>();
 import { DISCOVERY_ENDPOINT, METABOB_API_KEY, GOAL_HOST_VESSEL_ENDPOINT } from "../config.js";
+import { peekComposeCapacity } from "../compose-slots.js";
 import { readFile } from "node:fs/promises";
 
 // Mirror feature-compose's path model: repos/<vessel>/... maps to the writable
@@ -1141,7 +1142,14 @@ function defaultTypecheckRunner(vessel: string): { ran: boolean; clean: boolean 
   try {
     const cwd = join(runtimeRoot(), vessel);
     if (!existsSync(join(cwd, "package.json"))) return { ran: false, clean: false };
+    // LOG THE SPAWN. This is a blocking, whole-project typecheck run from inside gap
+    // SELECTION, and until now it was completely silent — so the substrate could not
+    // attribute its own CPU. That is the same defect as local-tools-vessel never logging
+    // the commands it runs, and it is why the cost of selection had to be inferred
+    // rather than measured. One line per run makes the next estimate a measurement.
+    const startedAt = Date.now();
     const res = Bun.spawnSync(["bun", "run", "typecheck"], { cwd, stdout: "pipe", stderr: "pipe", timeout: 120_000 });
+    console.log(`[gap-admission] typecheck vessel=${vessel} exit=${String(res.exitCode)} ms=${Date.now() - startedAt}`);
     return { ran: true, clean: res.exitCode === 0 };
   } catch {
     return { ran: false, clean: false };
@@ -2764,6 +2772,49 @@ export async function resolveGapToFeature(pointer: GapToFeaturePointer): Promise
   // 0. Land→close continuity: complete deferred self-cutover closures BEFORE selection,
   // so an already-landed gap cannot be re-picked and re-landed. Cheap, bounded, best-effort.
   try { await sweepPendingLandVerifications(); } catch { /* never block the tick */ }
+  // 0b. ASK FOR CAPACITY BEFORE PAYING FOR SELECTION (2026-08-31).
+  //
+  // The order used to be backwards: pick a gap, then discover the compose lane is full.
+  // Selection is the expensive half — it reads the whole gap store and
+  // `admitActionableGaps` shells a BLOCKING `bun run typecheck` per vessel (bounded at
+  // TYPECHECK_MAX_RUNS_PER_PASS, TTL-cached, but real). Measured over 48h: 4482 picks,
+  // 3699 of them (82.5%) ending `verdict=BUSY stage=capacity`. Every one of those paid
+  // full selection price for a result the lane had nowhere to put.
+  //
+  // Safe because it cannot cost a landing: a pick that ended BUSY never composed. It
+  // removes cost, not work.
+  //
+  // AFTER the sweep deliberately — the sweep is what CLOSES gaps, and it must keep
+  // running on every tick, including the ones that skip selection.
+  //
+  // AUTO-PICKS ONLY. A pointer naming a gap or a category was explicitly asked for by a
+  // caller and behaves exactly as before (same carve-out as the cooldown filter and the
+  // admission gate). A null peek means capacity is unobservable → FAIL OPEN and select,
+  // matching compose-slots' own contract.
+  if (!pointer.gap_id && !pointer.category) {
+    const capacity = await peekComposeCapacity();
+    if (capacity && capacity.free <= 0) {
+      // Log the SKIP explicitly. A cost fix whose only evidence is the absence of the
+      // old line is unmeasurable, and "nothing happened" is exactly the signal this
+      // codebase has repeatedly mistaken for health.
+      console.log(`[gap-to-feature] selection skipped: compose lane full live=${capacity.live} cap=${capacity.cap}`);
+      // BUSY/capacity-shaped so `isNonAttemptComposeResult` and the caller's existing
+      // 45s backoff classify it exactly as the refusal it replaces. This changes cost,
+      // not cadence. No gap was picked, so no cooldown is stamped and no credit moves.
+      return {
+        shape: "gapToFeatureReport",
+        body: {
+          ok: false,
+          stage: "capacity",
+          verdict: "BUSY",
+          error: "compose lane full — selection skipped",
+          observed: capacity.live,
+          cap: capacity.cap,
+          skipped_selection: true,
+        },
+      };
+    }
+  }
   // 1. Select a gap — landability-ranked when auto-picking (not arbitrary gaps[0]).
   let gap: Record<string, unknown> | null = null;
   try {

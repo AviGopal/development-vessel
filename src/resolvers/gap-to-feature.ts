@@ -3451,8 +3451,9 @@ export async function resolveGapToFeature(pointer: GapToFeaturePointer): Promise
     // self-model predicted would land but (test missing in test suite) didn't is over-optimistic (high-information) → bump
     // harder; a correctly-predicted fail bumps normally. Feeds the calibrated self-model.
     if (isNonAttemptComposeResult(cb)) {
-      (globalThis as any).gapCooldownMap.delete(gap.gap_id);
-      gapComposeLastAttemptAt.delete(String(gap.id)); // Clear cooldown for gaps that never attempted to compose
+      console.log("[gap-to-feature] non-attempt (failure_kind=" + String(cb.failure_kind ?? "-") + ", verdict=" + String(cb.verdict ?? "-") + ", stage=" + String(cb.stage ?? "-") + ") for gap " + String(gap.id ?? "") + " — clearing cooldown");
+      // A compose that never ran must not cost the gap its cooldown.
+      gapComposeLastAttemptAt.delete(String(gap.id));
     } else {
       const pred = predictLand(gap);
       // Bounded one-shot patch_with_tools escalation on an APPLY failure (anchor_not_found /

@@ -2425,15 +2425,42 @@ async function appendComposeLesson(cls: string, reason: string, vessels: string,
     const headers: Record<string, string> = { "Content-Type": "application/json" };
     const apiKey = process.env["METABOB_API_KEY"];
     if (apiKey) headers["Authorization"] = `ApiKey ${apiKey}`;
-    const conceptDbEndpoint = process.env["CONCEPT_DB_ENDPOINT"] ?? "http://127.0.0.1:8260";
-    void fetch(`${DISCOVERY_ENDPOINT}/resolve`, {
+    // POST TO CONCEPT-DB, NOT DISCOVERY (2026-08-31). This mirror computed
+    // `conceptDbEndpoint` (a local duplicate of CONCEPT_DB_ENDPOINT) and never used it — the fetch went to
+    // `${DISCOVERY_ENDPOINT}/resolve`, which does not serve concept_create_write and
+    // rejects an unauthenticated caller outright (measured: HTTP 401 INVALID_API_KEY in
+    // 0.0008s; with a key attached it hung instead, producing the 24 "operation timed out"
+    // warnings seen in a single 24h window).
+    //
+    // The cost of that one wrong hostname is the whole lesson loop. The classifier WORKS —
+    // /workspace/proposals/compose-lessons.jsonl holds 5,797 correctly-classified failure
+    // events since 2026-07-03 (anchor_not_found 1351, semantic_reject 1205, verify_failed
+    // 1017, mis_localized_path 315, wrong_location 128) — and COMPOSE_LESSON_GUIDANCE
+    // already carries written guidance for every one of those classes. The drafter asks for
+    // them (154 reads in 24h). But only ONE class ever reached the corpus, so a drafter that
+    // just failed on anchor_not_found was handed the typecheck lesson instead: concept-db's
+    // relaxation falls back to the LONGEST name, and `typecheck_dangling_reference` (28
+    // chars) was the only row there to win.
+    //
+    // Measured on the live fleet: a direct POST of this exact payload to
+    // http://127.0.0.1:8260 returns HTTP 200 in 0.043s. The corpus was never unreachable —
+    // it was being addressed wrongly.
+    void fetch(`${CONCEPT_DB_ENDPOINT}/v2/impulses/resolve`, {
       method: "POST",
       headers,
+      // Flat pointer only. The previous body ALSO carried top-level `shape`/`content`/
+      // `summary` duplicating what is inside `conceptData` — leftovers from an edit, and
+      // exactly the kind of stray field a resolver may reject the whole request over.
       body: JSON.stringify({
-        pointer: { type: "concept_create_write", conceptData: { source_type: "compose_lesson", shape: "compose_lesson", content: `compose failure class ${cls}: ${COMPOSE_LESSON_GUIDANCE[cls] ?? "avoid repeating this failure class"}`, summary: `compose lesson: ${cls}` } },
-        shape: "compose_lesson",
-          content: `compose failure class ${cls}: ${COMPOSE_LESSON_GUIDANCE[cls] ?? "avoid repeating this failure class"}`,
-          summary: `compose lesson: ${cls}`,
+        pointer: {
+          type: "concept_create_write",
+          conceptData: {
+            source_type: "compose_lesson",
+            shape: "compose_lesson",
+            content: `compose failure class ${cls}: ${COMPOSE_LESSON_GUIDANCE[cls] ?? "avoid repeating this failure class"}`,
+            summary: `compose lesson: ${cls}`,
+          },
+        },
       }),
       signal: AbortSignal.timeout(10_000),
     }).catch((err) => console.warn(`[compose-lessons] concept-db mirror failed: ${(err as Error).message}`));

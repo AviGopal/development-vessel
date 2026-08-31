@@ -2416,7 +2416,29 @@ async function appendComposeLesson(cls: string, reason: string, vessels: string,
   try {
     const { appendFileSync, mkdirSync } = await import("node:fs");
     mkdirSync("/workspace/proposals", { recursive: true });
-    appendFileSync(COMPOSE_LESSONS_PATH, JSON.stringify({ at: new Date().toISOString(), class: cls, reason: reason.slice(0, 200), vessels }) + "\n");
+    // IDENTIFY WHICH GAP THE ATTEMPT WAS FOR.
+    //
+    // This function has exactly ONE call site, at the end of a compose, so each line here is
+    // already one failed compose ATTEMPT. What was missing is which gap it attempted.
+    //
+    // Without that, a compose-report file is the only available proxy for an attempt — and
+    // those are OVERWRITTEN per gap id, so they undercount badly. Measured 2026-08-31: 122
+    // events against 44 report files in 24h. Read as "2.8 events per compose" that looks like
+    // event inflation; read correctly it is ~122 attempts spread over 44 distinct gaps — the
+    // lane retries the same gap about three times on average, and its real throughput is
+    // ~5 composes/hour rather than the ~2/hour the report count implies.
+    //
+    // With gap_id, both questions become answerable from this file alone: attempts per day
+    // (line count) and attempts per gap (group by gap_id) — the latter being how the
+    // recommit/narrowing lineages burn the lane. gap-env-gated-write-allowlist took SIX
+    // landings; nothing in this file could previously show that pattern forming.
+    appendFileSync(COMPOSE_LESSONS_PATH, JSON.stringify({
+      at: new Date().toISOString(),
+      class: cls,
+      reason: reason.slice(0, 200),
+      vessels,
+      ...(gap?.id ? { gap_id: String(gap.id) } : {}),
+    }) + "\n");
   } catch { /* lesson persistence is advisory */ }
   // Mirror the CLASS-grain lesson to concept-db with STABLE content (no timestamps,
   // execution ids, or per-failure reason strings) so exact-content dedup holds:

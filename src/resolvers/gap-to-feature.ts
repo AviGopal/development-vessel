@@ -2854,7 +2854,7 @@ export async function resolveGapToFeature(pointer: GapToFeaturePointer): Promise
   // gap and inherit its edit_site (and file_path/change_site/suspected_real_location) so
   // localizeGap below targets the actual file, not the recommit id. Best-effort.
   {
-    const rcMeta = (gap.classification_metadata ?? {}) as Record<string, unknown>;
+    const rcMeta = (gap.classification_metadata ?? {}) as Record<string, string | Record<string, unknown> | undefined>;
     const sourceGapId = typeof rcMeta.source_gap_id === "string" ? rcMeta.source_gap_id : "";
     const hasOwnSite = !!(rcMeta.edit_site || rcMeta.file_path || rcMeta.change_site || rcMeta.suspected_real_location);
     if (sourceGapId && !hasOwnSite) {

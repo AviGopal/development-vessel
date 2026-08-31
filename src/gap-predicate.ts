@@ -78,8 +78,60 @@ export function countOccurrences(haystack: string, needle: string): number {
  */
 export function derivePredicateLiteral(summary: string, fileContent: string): string | null {
   if (typeof fileContent !== "string" || !fileContent) return null;
+  // Match against CODE ONLY. See stripComments: a literal whose sole occurrence is inside a
+  // comment closes the gap when someone rewords the comment, with the defect still live.
+  const code = stripComments(fileContent);
   for (const cand of extractCandidateLiterals(summary)) {
-    if (countOccurrences(fileContent, cand) === 1) return cand;
+    if (countOccurrences(code, cand) === 1) return cand;
   }
   return null;
+}
+
+/**
+ * Blank out comment spans, preserving length so nothing else shifts.
+ *
+ * WHY: uniqueness alone is not enough. Measured over the live store at the time this was
+ * added — 127 open gaps citing a development-vessel file, 47 yielding a unique literal —
+ * **14 of those 47 (30%) had their only match INSIDE A COMMENT**. The recurring one, shared
+ * by several sibling route-edit gaps, was `re-test path (penalty, not hard exclusion)`:
+ * pure prose. A comment-anchored predicate reads ABSENT the moment someone rewords the
+ * comment, so the gap closes green while the defect it names is untouched — manufacturing
+ * exactly the false closure this file's own header calls worse than no predicate at all.
+ *
+ * A literal appearing once in code AND once in a comment still qualifies: the code
+ * occurrence is the one the oracle should track, and blanking the comment leaves it unique.
+ *
+ * String-aware on purpose: a naive stripper deletes from `//` inside "https://…" and would
+ * blank real code, which fails in the opposite direction — pinning a gap open forever
+ * against a string the file no longer appears to contain.
+ */
+export function stripComments(src: string): string {
+  let out = "";
+  let i = 0;
+  let mode: "code" | "line" | "block" | "sq" | "dq" | "tpl" = "code";
+  while (i < src.length) {
+    const c = src[i]!;
+    const n = src[i + 1];
+    if (mode === "code") {
+      if (c === "/" && n === "/") { mode = "line"; out += "  "; i += 2; continue; }
+      if (c === "/" && n === "*") { mode = "block"; out += "  "; i += 2; continue; }
+      if (c === "'") mode = "sq";
+      else if (c === '"') mode = "dq";
+      else if (c === "`") mode = "tpl";
+      out += c; i++; continue;
+    }
+    if (mode === "line") {
+      if (c === "\n") { mode = "code"; out += c; i++; continue; }
+      out += " "; i++; continue;
+    }
+    if (mode === "block") {
+      if (c === "*" && n === "/") { mode = "code"; out += "  "; i += 2; continue; }
+      out += c === "\n" ? c : " "; i++; continue;   // keep newlines so line numbers hold
+    }
+    // inside a string: copy verbatim, honour escapes, close on the matching quote
+    if (c === "\\") { out += c + (n ?? ""); i += 2; continue; }
+    if ((mode === "sq" && c === "'") || (mode === "dq" && c === '"') || (mode === "tpl" && c === "`")) mode = "code";
+    out += c; i++;
+  }
+  return out;
 }

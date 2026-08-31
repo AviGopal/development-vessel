@@ -4564,7 +4564,31 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
               const ls = gc.split("\n");
               const lo = Math.max(0, errLine - 26);
               const hi = Math.min(ls.length, errLine + 25);
-              errorSiteWindow = `\n\nCURRENT CONTENT of ${relPath} lines ${lo + 1}-${hi} (the first error is at line ${errLine}; copy old_string VERBATIM from these real bytes):\n${ls.slice(lo, hi).join("\n")}`;
+              // NUMBER THE GUTTER, AND OFFER THE LINE-ADDRESSED EDIT.
+              //
+              // This window used to be emitted as raw lines while the prompt said "the
+              // first error is at line N" — the model was given a line number it had no
+              // way to locate in the text, so its only option was to transcribe a
+              // multi-line old_string from memory of the window. It gets that wrong in a
+              // way that matters: observed 2026-08-31 on local-tools-vessel/src/index.ts,
+              // the model emitted `kill -9 "$__cpid" 2>/dev/null` where the real line 137
+              // reads `kill -9 -$__cpid 2>/dev/null`. It dropped the leading `-`, turning a
+              // process-GROUP kill into a process kill — precisely the bug the comment at
+              // line 101 of that same file exists to document. fc-anchor-provenance
+              // correctly REFUSED it, and correctly refused 6 of 6 repairs in a 6h window
+              // (0 accepted), so the repair loop could never converge and no compose landed.
+              //
+              // The guard is right and stays. What changes is the ask: `replace_lines`
+              // already exists and needs only ONE line copied verbatim (expect_first_line)
+              // instead of a whole block, and a numbered gutter makes the error line
+              // addressable. Transcribing one line is a far smaller target than a block.
+              const gutter = ls.slice(lo, hi).map((l, i) => `${String(lo + i + 1).padStart(5, " ")}| ${l}`).join("\n");
+              errorSiteWindow = `\n\nCURRENT CONTENT of ${relPath} lines ${lo + 1}-${hi} (the first error is at line ${errLine}).\n` +
+                `The leading "NNN| " is a LINE-NUMBER GUTTER added for reference — it is NOT part of the file. ` +
+                `Never include it in old_string, new_string or expect_first_line.\n` +
+                `PREFERRED for this repair: emit {"kind":"replace_lines","path":"...","start_line":N,"end_line":M,"expect_first_line":"<line N verbatim, without the gutter>","new_string":"..."} — ` +
+                `you know the error is at line ${errLine}, and this needs only ONE line copied exactly rather than a whole block. ` +
+                `If you use old_string instead, it must be copied VERBATIM from these real bytes; a re-derived or normalised anchor is rejected.\n${gutter}`;
             }
           }
           if (!errorSiteWindow && /SD_EXIT=[1-9]/.test(errText)) {

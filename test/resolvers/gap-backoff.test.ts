@@ -104,3 +104,82 @@ describe("gapIsBackedOff", () => {
     expect(gapIsBackedOff(g, NOW)).toBe(true);
   });
 });
+
+// ─────────── LINEAGE GRAIN: the escape the per-gap version left open ───────────
+//
+// Measured in the first hour after per-gap backoff deployed: it worked exactly as built —
+// route-edit-e32a5778 (failed_attempts 80) stopped being picked — and the lane moved
+// straight to recommit-route-edit-630abe48-anchor_not_found (fa 4) and
+// recommit-recommit-...-syntax_break (fa 2). Three generations of one defect, each
+// individually under the threshold, together a lineage that has failed ten times.
+// Across the open store: 29 recommit-* gaps, NONE above fa 4, plus 15 *-narrowed.
+//
+// A backoff keyed on a gap id is routed around by minting a new id for the same defect,
+// which is precisely what recommit and narrowing do — narrowing explicitly resets
+// failed_attempts to 0 so the child re-enters at normal priority.
+import { lineageBackoffState } from "../../src/resolvers/gap-to-feature.js";
+
+const g = (id: string, m: Record<string, unknown>) => ({ id, classification_metadata: m });
+const index = (...rows: Array<Record<string, unknown>>) =>
+  new Map(rows.map((r) => [String(r.id), r]));
+
+describe("lineageBackoffState", () => {
+  const root = g("route-edit-630abe48", { failed_attempts: 4, last_failed_at: agoMs(9 * 3600_000) });
+  const kid = g("recommit-route-edit-630abe48-anchor_not_found", {
+    failed_attempts: 4, last_failed_at: agoMs(60_000), source_gap_id: "route-edit-630abe48",
+  });
+  const grandkid = g("recommit-recommit-route-edit-630abe48-anchor_not_found-syntax_break", {
+    failed_attempts: 2, last_failed_at: agoMs(30_000),
+    source_gap_id: "recommit-route-edit-630abe48-anchor_not_found",
+  });
+  const byId = index(root, kid, grandkid);
+
+  it("sums failed attempts across the whole lineage", () => {
+    expect(lineageBackoffState(grandkid, byId).attempts).toBe(10);
+    expect(lineageBackoffState(kid, byId).attempts).toBe(8);
+    expect(lineageBackoffState(root, byId).attempts).toBe(4);
+  });
+
+  it("follows parent_gap_id as well as source_gap_id", () => {
+    // Narrowing writes parent_gap_id; recommit writes source_gap_id. Both are structural,
+    // so neither needs the gap id to be parsed as a string.
+    const narrowed = g("x-narrowed", { failed_attempts: 1, parent_gap_id: "route-edit-630abe48" });
+    expect(lineageBackoffState(narrowed, index(root, narrowed)).attempts).toBe(5);
+  });
+
+  it("takes the MOST RECENT failure in the lineage — the part that closes the escape", () => {
+    // A freshly minted child has failed_attempts 0 and NO last_failed_at of its own. Judged
+    // on itself it fails open and is instantly eligible, which is the whole escape.
+    const fresh = g("recommit-fresh", { failed_attempts: 0, source_gap_id: "recommit-route-edit-630abe48-anchor_not_found" });
+    const st = lineageBackoffState(fresh, index(root, kid, fresh));
+    expect(st.attempts).toBe(8);
+    expect(st.lastFailedAtMs).toBe(Date.parse(agoMs(60_000)));
+    // ...and it is therefore HELD, where the per-gap version let it straight through.
+    expect(gapIsBackedOff(fresh, NOW, st)).toBe(true);
+    expect(gapIsBackedOff(fresh, NOW)).toBe(false);
+  });
+
+  it("stops at a missing ancestor, yielding LESS backoff — the safe direction", () => {
+    // A closed ancestor is absent from the open-gap read. Guessing would be worse than
+    // under-counting: under-counting only means the gap is tried sooner.
+    const orphan = g("kid", { failed_attempts: 3, last_failed_at: agoMs(0), source_gap_id: "gone" });
+    expect(lineageBackoffState(orphan, index(orphan)).attempts).toBe(3);
+  });
+
+  it("terminates on a cycle instead of hanging in the selection hot path", () => {
+    const a = g("a", { failed_attempts: 1, source_gap_id: "b" });
+    const b = g("b", { failed_attempts: 1, source_gap_id: "a" });
+    expect(lineageBackoffState(a, index(a, b)).attempts).toBe(2);
+  });
+
+  it("bounds the walk by maxDepth", () => {
+    const rows = Array.from({ length: 20 }, (_, i) =>
+      g(`n${i}`, { failed_attempts: 1, ...(i < 19 ? { source_gap_id: `n${i + 1}` } : {}) }));
+    expect(lineageBackoffState(rows[0]!, index(...rows), 3).attempts).toBeLessThanOrEqual(4);
+  });
+
+  it("reports depth 0 for a gap that is its own root", () => {
+    expect(lineageBackoffState(root, byId).depth).toBe(0);
+    expect(lineageBackoffState(grandkid, byId).depth).toBe(2);
+  });
+});

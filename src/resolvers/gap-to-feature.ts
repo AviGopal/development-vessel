@@ -106,13 +106,100 @@ export function gapBackoffMs(failedAttempts: number): number {
  * metadata at all, and a backoff that excluded them on absence would empty the
  * candidate pool and stop gap work altogether.
  */
-export function gapIsBackedOff(gap: Record<string, unknown>, nowMs: number): boolean {
+export interface LineageBackoffState {
+  /** Failed attempts summed over the whole lineage, not just this gap. */
+  attempts: number;
+  /** The most RECENT failure anywhere in the lineage, ms since epoch, or null. */
+  lastFailedAtMs: number | null;
+  /** How many ancestors were found, for logging. 0 = this gap is its own root. */
+  depth: number;
+}
+
+/**
+ * Total failure effort spent on the DEFECT, not on one gap id.
+ *
+ * MEASURED 2026-08-31, the first hour after per-gap backoff deployed: it did exactly what
+ * it was built to do — `route-edit-e32a5778` (failed_attempts 80) stopped being picked —
+ * and the lane immediately moved to `recommit-route-edit-630abe48-anchor_not_found` and
+ * `recommit-recommit-route-edit-630abe48-anchor_not_found-syntax_break`. Three generations
+ * of one defect, carrying failed_attempts of 4, 4 and 2: each individually below the
+ * threshold that would slow it, together a lineage that has failed ten times.
+ *
+ * Across the open store: 29 recommit-* gaps, none above failed_attempts 4, and 15
+ * *-narrowed gaps. A backoff keyed on a gap id is therefore routed around by minting a
+ * new id for the same defect, which is what both recommit and narrowing do by design
+ * (narrowing explicitly resets failed_attempts to 0 so the child re-enters at normal
+ * priority).
+ *
+ * BOTH LINKS ARE STRUCTURAL, so this needs no id-string parsing: narrowing writes
+ * `parent_gap_id` and recommit writes `source_gap_id`.
+ *
+ * The most recent failure is taken across the LINEAGE, which is the part that actually
+ * closes the escape. A freshly minted child has failed_attempts 0 and no `last_failed_at`
+ * of its own; keyed on itself it fails open and is instantly eligible — the exact hole
+ * this function exists to close. It inherits its parent's clock instead.
+ *
+ * Walks up only as far as the candidate set it is given. An ancestor that is closed (and
+ * so absent from the open-gap read) simply ends the walk, yielding a SMALLER sum and thus
+ * LESS backoff — the safe direction when information is missing.
+ */
+export function lineageBackoffState(
+  gap: Record<string, unknown>,
+  byId: Map<string, Record<string, unknown>>,
+  maxDepth = 8,
+): LineageBackoffState {
+  let attempts = 0;
+  let lastFailedAtMs: number | null = null;
+  let depth = -1;
+  let cur: Record<string, unknown> | undefined = gap;
+  // A malformed store could in principle point a gap at its own ancestor; a seen-set makes
+  // that a short walk rather than a hang inside the selection hot path.
+  const seen = new Set<string>();
+  while (cur && depth < maxDepth) {
+    const id = String(cur.id ?? "");
+    if (id && seen.has(id)) break;
+    if (id) seen.add(id);
+    depth++;
+    const meta = (cur.classification_metadata ?? cur.metadata ?? {}) as Record<string, unknown>;
+    if (typeof meta !== "object" || meta === null) break;
+    const fa = Number(meta.failed_attempts ?? 0);
+    if (Number.isFinite(fa) && fa > 0) attempts += Math.floor(fa);
+    const t = Date.parse(String(meta.last_failed_at ?? ""));
+    if (Number.isFinite(t) && (lastFailedAtMs === null || t > lastFailedAtMs)) lastFailedAtMs = t;
+    const parentId = String(meta.parent_gap_id ?? meta.source_gap_id ?? "");
+    cur = parentId ? byId.get(parentId) : undefined;
+  }
+  return { attempts, lastFailedAtMs, depth };
+}
+
+/**
+ * Is this gap still serving its backoff?
+ *
+ * Reads DURABLE metadata that `bumpFailedAttempts` writes, not the in-process
+ * `gapComposeLastAttemptAt` map. The map is cleared by every restart, and mitosis cutovers
+ * restart this vessel several times a day — an in-process backoff would reset to zero
+ * exactly when a runaway gap is at its worst.
+ *
+ * Pass `state` to apply the backoff at LINEAGE grain (see lineageBackoffState); without it
+ * the gap is judged on its own counters alone, which any recommit or narrowing escapes.
+ *
+ * FAILS OPEN on anything it cannot read: absent, malformed, or future-dated timestamps
+ * return false (eligible). Most gaps in the store carry no such metadata at all, and a
+ * backoff that excluded them on absence would empty the candidate pool and stop gap work
+ * altogether — while looking like a perfectly calm system.
+ */
+export function gapIsBackedOff(
+  gap: Record<string, unknown>,
+  nowMs: number,
+  state?: LineageBackoffState,
+): boolean {
   const meta = (gap.classification_metadata ?? gap.metadata ?? {}) as Record<string, unknown>;
   if (typeof meta !== "object" || meta === null) return false;
-  const wait = gapBackoffMs(Number((meta as Record<string, unknown>).failed_attempts ?? 0));
+  const attempts = state ? state.attempts : Number(meta.failed_attempts ?? 0);
+  const wait = gapBackoffMs(attempts);
   if (wait <= 0) return false;
-  const last = Date.parse(String((meta as Record<string, unknown>).last_failed_at ?? ""));
-  if (!Number.isFinite(last)) return false;
+  const last = state ? state.lastFailedAtMs : Date.parse(String(meta.last_failed_at ?? ""));
+  if (last === null || !Number.isFinite(last)) return false;
   const elapsed = nowMs - last;
   // A negative elapsed means a clock skew or a future stamp — treat as eligible rather
   // than as an infinite wait.
@@ -2932,16 +3019,26 @@ export async function resolveGapToFeature(pointer: GapToFeaturePointer): Promise
     // every restart (and cutovers restart this vessel several times a day), and
     // `last_failed_at` says nothing about a compose currently in flight.
     let backoffExcluded = 0;
+    let deepestLineage = 0;
+    // Index the candidate set once so the backoff can walk parent_gap_id / source_gap_id
+    // chains without re-scanning per gap.
+    const gapsById = new Map<string, Record<string, unknown>>();
+    for (const g of gaps) { const id = String(g.id ?? ""); if (id) gapsById.set(id, g); }
     const eligible = gaps.filter((g) => {
       if (nowMs - (gapComposeLastAttemptAt.get(String(g.id ?? "")) ?? 0) < GAP_COMPOSE_COOLDOWN_MS) return false;
-      if (gapIsBackedOff(g, nowMs)) { backoffExcluded++; return false; }
+      const state = lineageBackoffState(g, gapsById);
+      if (gapIsBackedOff(g, nowMs, state)) {
+        backoffExcluded++;
+        if (state.depth > deepestLineage) deepestLineage = state.depth;
+        return false;
+      }
       return true;
     });
     // Emit the exclusion COUNT, not just its effect. A brake whose only evidence is
     // "fewer picks happened" is indistinguishable from a lane that has gone quiet for
     // some other reason — which is the confusion this codebase keeps paying for.
     if (backoffExcluded > 0) {
-      console.log(`[gap-to-feature] backoff excluded ${backoffExcluded} of ${gaps.length} gaps (eligible=${eligible.length})`);
+      console.log(`[gap-to-feature] backoff excluded ${backoffExcluded} of ${gaps.length} gaps (eligible=${eligible.length}, deepest_lineage=${deepestLineage})`);
     }
     if (pointer.gap_id) {
       // Targeted dispatch BYPASSES the admission gate — the caller explicitly chose this gap

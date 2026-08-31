@@ -1,4 +1,4 @@
-import { METABOB_ENDPOINT } from "../config.js";
+import { METABOB_ENDPOINT, env } from "../config.js";
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
 import { resolveDocsAlignScan } from "./docs-align-scan.js";

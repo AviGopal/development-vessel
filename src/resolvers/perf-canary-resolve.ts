@@ -23,13 +23,13 @@
  * applying, restarting, or reverting anything. Live execution restarts a running vessel
  * (incl. the trace store) and is therefore operator-gated.
  */
-import { METABOB_API_KEY } from "../config.js";
+import { METABOB_API_KEY, env } from "../config.js";
 import { resolveSubstrateGap } from "./substrate-gap.js";
 import { resolveFeatureCompose } from "./feature-compose.js";
 import { resolvePerformanceReachGate } from "./performance-reach-gate.js";
 import type { ResolverResult } from "./types.js";
 
-const DISCOVERY_ENDPOINT = process.env["DISCOVERY_ENDPOINT"] ?? "http://127.0.0.1:8100";
+const DISCOVERY_ENDPOINT = env("DISCOVERY_ENDPOINT", "http://127.0.0.1:8100");
 const RUNTIME_ROOT = process.env["MITOSIS_RUNTIME_DIR"] ?? "/vessels";
 
 export interface PerfCanaryResolvePointer {

@@ -1132,6 +1132,9 @@ export async function admitActionableGaps(
 ): Promise<AdmissionResult> {
   const runner = opts?.typecheckRunner ?? defaultTypecheckRunner;
   const admitted: Record<string, unknown>[] = [];
+  // Gaps naming no existing file. Collected rather than admitted so the fail-open check
+  // below can see whether there is any groundable work to prefer over them.
+  const ungroundable: Record<string, unknown>[] = [];
   const excluded: Array<{ id: string; reason: string }> = [];
   let tscRuns = 0;
   const passCache = new Map<string, boolean | null>(); // vessel -> clean? (this pass; null = unknown)
@@ -1195,9 +1198,37 @@ export async function admitActionableGaps(
       continue;
     }
 
-    // UNKNOWN actionability (feature_compose-routed, no cited file/proposal) → keep existing
-    // behavior (do NOT hard-exclude; the localizer may still derive a site downstream).
-    admitted.push(g);
+    // NO GROUNDABLE TARGET. This branch used to read "do NOT hard-exclude; the localizer may
+    // still derive a site downstream" and admit. Measured on the live fleet 2026-08-31
+    // 01:55-03:16, that assumption is false: 14 picks produced 12
+    // `[fc-grounding] REFUSED ungrounded decompose; targetFiles=[] verify_vessels=[]` and
+    // ZERO compose reports. The localizer never derived a site — grounding refuses first.
+    //
+    // Reaching here means neither hasProposalReport nor citedExistingFile matched, i.e. the
+    // gap names no file that exists. feature-compose's grounding gate rejects exactly that
+    // input, deterministically, so admitting it spends a compose slot to be told no. At a
+    // lane capacity of ~2 composes/hour that was the ENTIRE budget, and it was invisible
+    // from outside: a refusal claims and releases a slot without creating a worktree, so the
+    // lane reads idle (load 4, 0 slots held) while fully consumed.
+    //
+    // Deferred, not condemned — and NOT excluded on failed_attempts, which would recreate
+    // hopeless() at gap grain (see the picker-starves gap's own do_not_fix_by). The test is
+    // a property of the gap: does it name a file that exists. Give it a target and it is
+    // admitted on the very next tick. A targeted `pointer.gap_id` dispatch bypasses this
+    // gate entirely, so an operator can still force one.
+    ungroundable.push(g);
+  }
+
+  // FAIL OPEN. If deferring the ungroundable would leave nothing to work on, admit them
+  // anyway: a starved lane is worse than a refused compose, and this gate must never be the
+  // reason the substrate stops trying. Only skip them when there is real work to do instead.
+  if (admitted.length === 0) {
+    for (const g of ungroundable) admitted.push(g);
+    if (ungroundable.length) {
+      console.log(`[gap-to-feature] auto-pick admission: no groundable candidates; failing open on ${ungroundable.length} ungroundable`);
+    }
+  } else {
+    for (const g of ungroundable) excluded.push({ id: String(g.id ?? ""), reason: "no_groundable_target" });
   }
 
   if (excluded.length) {

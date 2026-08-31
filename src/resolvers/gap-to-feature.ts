@@ -3384,6 +3384,10 @@ export async function resolveGapToFeature(pointer: GapToFeaturePointer): Promise
   // a real "pushed" cutover, never dry_run / staged-only / soft-refuse). A
   // merely-staged or UNFAVORABLE result leaves the gap open so it (or another open
   // gap) is retried — closing on a non-land would lose a real, unfixed gap.
+
+  if (isNonAttemptComposeResult(compose.body as Record<string, unknown>)) {
+    // Handle the non-attempt compose case.
+  }
   const land = genuineLandSignal(cb, !(pointer.dry_run ?? false));
   let closure: { closed: boolean; error?: string; resolution?: string } = { closed: false };
   if (land.landed) {

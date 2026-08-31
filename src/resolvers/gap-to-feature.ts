@@ -1927,6 +1927,19 @@ async function markPendingVerification(gap: Record<string, unknown>, sha: string
 
 export async function sweepPendingLandVerifications(): Promise<{ checked: number; closed: number }> {
   const out = { checked: 0, closed: 0 };
+  // OBSERVABILITY, because this sweep has been silent since it was written.
+  //
+  // It returns {checked, closed} and logs NOTHING, so from outside there is no way to tell
+  // whether it ran, what it examined, or why nothing closed. Measured 2026-08-31: 1606 gaps,
+  // 1025 of them closed, and ZERO carrying closed_reason=landed_verified — the lane this
+  // function exists to drive has never once produced a surviving row. Whether that was a
+  // broken sweep, an empty input, or correct abstention was indistinguishable from the
+  // journal, and that ambiguity is the entire reason it went unexamined.
+  //
+  // Live at the time of writing: 13 gaps carry pending_outcome_verification, 11 of them
+  // have no predicate at all — so the honest answer is "correctly abstaining on an input
+  // that cannot be measured", not "broken". A counter per verdict says that out loud.
+  const tally = { absent: 0, present: 0, pending: 0, unknown: 0, not_in_clone: 0, reverted: 0 };
   try {
     const read = await resolveSubstrateGap({
       type: "substrateGap",
@@ -1947,10 +1960,11 @@ export async function sweepPendingLandVerifications(): Promise<{ checked: number
       const sha = String(meta.pending_outcome_verification);
       // Not yet observable in a clone (pull-sync hasn't converged, or the land was
       // reverted) — leave open; the sweep retries on every tick.
-      if (!shaIsAncestorOfAnyClone(sha)) continue;
+      if (!shaIsAncestorOfAnyClone(sha)) { tally.not_in_clone += 1; continue; }
       // A REVERTED land is not a land. The ancestor check above passes forever once the
       // commit exists, revert or not, so ask explicitly.
       if (shaWasRevertedInAnyClone(sha)) {
+        tally.reverted += 1;
         console.warn(`[gap-sweep] gap ${String(g.id)} NOT closed: landed sha ${sha.slice(0, 12)} was REVERTED — the change is gone from HEAD, so the gap is unresolved and stays open for another attempt`);
         continue;
       }
@@ -1967,6 +1981,7 @@ export async function sweepPendingLandVerifications(): Promise<{ checked: number
       const verdict = await verifyGapConditionAsync(g);
       const gidSweep = String(g.id ?? "");
       if (verdict === "present") {
+        tally.present += 1;
         const editSitePresent = gapEditSite(g, (g.classification_metadata ?? g.metadata ?? {}) as Record<string, unknown>) ?? "";
         if (landedCommitVerdict(gidSweep, editSitePresent) === 'present') {
           escalateRelandToHuman(gidSweep, String(g.category ?? "?"), String(g.summary ?? ""));
@@ -1974,14 +1989,17 @@ export async function sweepPendingLandVerifications(): Promise<{ checked: number
         continue;
       }
       if (verdict === "pending") {
+        tally.pending += 1;
         await markPendingVerification(g, sha, "pending sweep: single landing, no measurement predicate");
         escalatePendingVerification(gidSweep, String(g.category ?? "?"), String(g.summary ?? ""), sha);
         continue;
       }
       if (verdict === "unknown" && !closeOracleEarnedTrust("landed_commit")) {
+        tally.unknown += 1;
         continue; // unmeasured and untrusted — leave open for the next tick
       }
       // verdict === 'absent' (MEASURED resolved) OR 'unknown' with earned trust -> close.
+      tally.absent += 1;
       joinDecisionOutcome(meta, { landed: true, verdict: "FAVORABLE", commit: sha });
       // SUCCESS label for the close-oracle (§12.6 1a): a MEASURED close builds the trustworthy
       // "measured" class posterior. Provenance-only closes no longer happen here, so landed_commit
@@ -2008,7 +2026,17 @@ export async function sweepPendingLandVerifications(): Promise<{ checked: number
       updateCalibration(String(g.category ?? "unknown"), true);
       out.closed += 1;
     }
-  } catch { /* sweep is best-effort — never block the tick */ }
+  } catch (err) {
+    // Was a bare `catch {}`. A sweep that dies mid-batch left NO evidence it had, which is
+    // indistinguishable from a sweep that found nothing — the same ambiguity this tally
+    // exists to remove. Still best-effort; it just says so now.
+    console.warn(`[gap-sweep] aborted after checked=${out.checked}: ${(err as Error)?.message ?? String(err)}`);
+  }
+  // ALWAYS log, including the all-zero case. "checked=0" is a real finding (nothing is
+  // stamped pending) and is not the same as "checked=13 closed=0 pending=11", which says the
+  // machinery works and the INPUT is unmeasurable. Silence conflated those two for the whole
+  // life of this function.
+  console.log(`[gap-sweep] checked=${out.checked} closed=${out.closed} ${JSON.stringify(tally)}`);
   return out;
 }
 

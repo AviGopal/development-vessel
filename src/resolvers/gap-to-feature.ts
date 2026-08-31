@@ -43,6 +43,83 @@ const proposalsDir = (): string => envPath("PROPOSALS_DIR", "/workspace/proposal
 const GAP_COMPOSE_COOLDOWN_MS = parseInt(process.env.GAP_COMPOSE_COOLDOWN_MS ?? "300000", 10);
 const gapComposeLastAttemptAt = new Map<string, number>();
 
+/**
+ * PER-GAP EXPONENTIAL BACKOFF — the brake `hopeless()` cannot apply.
+ *
+ * `hopeless()` is the only existing per-gap check and it is CATEGORY-grain:
+ *
+ *     const r = calib[String(g.category ?? "unknown")];
+ *     if (!r || r.attempts < 8 || r.lands !== 0) return false;
+ *
+ * `r.lands !== 0` means a category that has EVER landed can never seal, however many
+ * attempts one member accumulates. `edit_intent_route` lands routinely, so its members
+ * are structurally unsealable. Measured 2026-08-31 across 425 open gaps: 678 failed
+ * attempts, median 0, p90 4, and a single `edit_intent_route` gap
+ * (`route-edit-e32a5778`) at 58 — the top ten gaps holding 27% of all retry. That gap
+ * landed a commit at 19:44, was never marked as landed, and was composing again by
+ * 19:53.
+ *
+ * The flat 5-minute cooldown treats attempt 1 and attempt 58 identically. This does not:
+ * each successive failure doubles the wait, so a gap that cannot be fixed decays toward
+ * one attempt a day instead of one every 25 minutes, while a gap that fails once is
+ * barely slowed.
+ *
+ *     fa   1     2      3      4      5      6      7      8      9+
+ *     wait 0     10m    20m    40m    80m    2h40   5h20   10h40  24h (capped)
+ *
+ * NOT A SEAL. Every gap stays selectable forever — this changes the RATE, never the
+ * eligibility. That matters because the alternative (a hard per-gap ceiling) is
+ * irreversible without an operator, and a wrong ceiling silently abandons real work;
+ * a wrong backoff only makes it slower, and detection at ~52 gaps/day re-surfaces
+ * anything genuinely live.
+ */
+export const GAP_BACKOFF_BASE_MS = GAP_COMPOSE_COOLDOWN_MS;
+export const GAP_BACKOFF_MAX_MS = 24 * 60 * 60_000;
+
+/**
+ * How long a gap must wait after its Nth consecutive failure. 0 for a gap that has
+ * never failed or failed once — the first retry is deliberately unpenalised, because a
+ * single failure carries almost no evidence that the gap is unfixable.
+ *
+ * The exponent is clamped before the shift: `2 ** 58` is finite but astronomically
+ * larger than the cap, and an unclamped `failed_attempts` read from a store this code
+ * does not own is exactly where a NaN or a negative would turn a rate limit into an
+ * accidental permanent seal.
+ */
+export function gapBackoffMs(failedAttempts: number): number {
+  const fa = Number(failedAttempts);
+  if (!Number.isFinite(fa) || fa <= 1) return 0;
+  const doublings = Math.min(Math.floor(fa) - 1, 16);
+  return Math.min(GAP_BACKOFF_MAX_MS, GAP_BACKOFF_BASE_MS * 2 ** doublings);
+}
+
+/**
+ * Is this gap still serving its backoff?
+ *
+ * Reads the DURABLE `last_failed_at` that `bumpFailedAttempts` writes, not the
+ * in-process `gapComposeLastAttemptAt` map. The map is cleared by every restart, and
+ * mitosis cutovers restart this vessel several times a day — an in-process backoff
+ * would reset to zero exactly when a runaway gap is at its worst.
+ *
+ * FAILS OPEN on anything it cannot read: a missing, malformed, or future-dated
+ * `last_failed_at` returns false (eligible). Most gaps in the store carry no such
+ * metadata at all, and a backoff that excluded them on absence would empty the
+ * candidate pool and stop gap work altogether.
+ */
+export function gapIsBackedOff(gap: Record<string, unknown>, nowMs: number): boolean {
+  const meta = (gap.classification_metadata ?? gap.metadata ?? {}) as Record<string, unknown>;
+  if (typeof meta !== "object" || meta === null) return false;
+  const wait = gapBackoffMs(Number((meta as Record<string, unknown>).failed_attempts ?? 0));
+  if (wait <= 0) return false;
+  const last = Date.parse(String((meta as Record<string, unknown>).last_failed_at ?? ""));
+  if (!Number.isFinite(last)) return false;
+  const elapsed = nowMs - last;
+  // A negative elapsed means a clock skew or a future stamp — treat as eligible rather
+  // than as an infinite wait.
+  if (elapsed < 0) return false;
+  return elapsed < wait;
+}
+
 /** A repos/<vessel>/... path maps to an EXISTING file under the runtime root. */
 function repoPathExists(repoRelative: string): boolean {
   try {
@@ -2849,7 +2926,23 @@ export async function resolveGapToFeature(pointer: GapToFeaturePointer): Promise
     // picks (pointer.gap_id) BYPASS — the caller explicitly chose this gap (same carve-out as the
     // goal-host coalesce skipping requeues, and boredom not throttling explicit requests).
     const nowMs = Date.now();
-    const eligible = gaps.filter((g) => nowMs - (gapComposeLastAttemptAt.get(String(g.id ?? "")) ?? 0) >= GAP_COMPOSE_COOLDOWN_MS);
+    // Two independent brakes, both AUTO-pick only. The in-process cooldown covers the
+    // wall time of a compose that may still be running; the durable per-gap backoff
+    // slows a gap that keeps FAILING. Neither subsumes the other: the map is cleared by
+    // every restart (and cutovers restart this vessel several times a day), and
+    // `last_failed_at` says nothing about a compose currently in flight.
+    let backoffExcluded = 0;
+    const eligible = gaps.filter((g) => {
+      if (nowMs - (gapComposeLastAttemptAt.get(String(g.id ?? "")) ?? 0) < GAP_COMPOSE_COOLDOWN_MS) return false;
+      if (gapIsBackedOff(g, nowMs)) { backoffExcluded++; return false; }
+      return true;
+    });
+    // Emit the exclusion COUNT, not just its effect. A brake whose only evidence is
+    // "fewer picks happened" is indistinguishable from a lane that has gone quiet for
+    // some other reason — which is the confusion this codebase keeps paying for.
+    if (backoffExcluded > 0) {
+      console.log(`[gap-to-feature] backoff excluded ${backoffExcluded} of ${gaps.length} gaps (eligible=${eligible.length})`);
+    }
     if (pointer.gap_id) {
       // Targeted dispatch BYPASSES the admission gate — the caller explicitly chose this gap
       // (same carve-out as the cooldown filter and boredom not throttling explicit requests).

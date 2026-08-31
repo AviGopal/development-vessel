@@ -2463,7 +2463,22 @@ async function appendComposeLesson(cls: string, reason: string, vessels: string,
         },
       }),
       signal: AbortSignal.timeout(10_000),
-    }).catch((err) => console.warn(`[compose-lessons] concept-db mirror failed: ${(err as Error).message}`));
+    })
+      // CHECK THE STATUS, NOT JUST THE PROMISE. `.catch()` alone only sees TRANSPORT
+      // failures — a 4xx/5xx resolves normally, so an auth or schema rejection was
+      // discarded in silence. And success was never logged either, so the only
+      // observable state of this mirror was "no news", which is indistinguishable from
+      // "never ran". That is why a corpus stuck at ONE row for 19 days looked healthy:
+      // 5,797 classified failures upstream, no error downstream, and nothing in between
+      // to say which. Log both outcomes so the next person can tell them apart.
+      .then((resp) => {
+        if (!resp.ok) {
+          console.warn(`[compose-lessons] concept-db mirror rejected class=${cls} http=${resp.status}`);
+        } else {
+          console.log(`[compose-lessons] mirrored class=${cls} to concept-db`);
+        }
+      })
+      .catch((err) => console.warn(`[compose-lessons] concept-db mirror failed: ${(err as Error).message}`));
   } catch (err) {
     console.warn(`[compose-lessons] concept-db mirror failed: ${(err as Error).message}`);
   }

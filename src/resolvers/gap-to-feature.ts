@@ -3390,7 +3390,7 @@ export async function resolveGapToFeature(pointer: GapToFeaturePointer): Promise
     }
   } else if (!(pointer.dry_run ?? false)) {
     // Did not land. EXPECTATION-SETTING: measure the prediction-vs-outcome SURPRISE. A gap the
-    // self-model predicted would land but didn't is over-optimistic (high-information) → bump
+    // self-model predicted would land but (test missing in test suite) didn't is over-optimistic (high-information) → bump
     // harder; a correctly-predicted fail bumps normally. Feeds the calibrated self-model.
     if (isNonAttemptComposeResult(cb)) {
       gapComposeLastAttemptAt.delete(String(gap.id)); // A compose that never ran must not cost the gap its cooldown

@@ -3451,6 +3451,7 @@ export async function resolveGapToFeature(pointer: GapToFeaturePointer): Promise
     // self-model predicted would land but (test missing in test suite) didn't is over-optimistic (high-information) → bump
     // harder; a correctly-predicted fail bumps normally. Feeds the calibrated self-model.
     if (isNonAttemptComposeResult(cb)) {
+      (globalThis as any).gapCooldownMap.delete(gap.gap_id);
       gapComposeLastAttemptAt.delete(String(gap.id)); // Clear cooldown for gaps that never attempted to compose
     } else {
       const pred = predictLand(gap);

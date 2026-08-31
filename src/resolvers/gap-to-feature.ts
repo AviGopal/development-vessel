@@ -1327,7 +1327,53 @@ function genuineLandSignal(composeBody: Record<string, unknown>, landRequested: 
  *   'present' (defect still there), 'absent' (resolved healthy), 'unknown' on transport failure.
  * 'unknown' preserves today's behaviour — no false closes, no blocked closes.
  */
-function verifyGapCondition(gap: Record<string, unknown>): 'present' | 'absent' | 'pending' | 'unknown' {
+/**
+ * CLASS 1b — INVERSE POLARITY. `expected_literal` PRESENT means FIXED; ABSENT means the
+ * defect is still there (or has regressed).
+ *
+ * WHY THIS HAS TO EXIST. Class 1 can only say "this bad literal is still in the file". It
+ * cannot say "this good guard is missing" — and that missing polarity is why automated
+ * predicate derivation has failed twice on this fleet (be26a6b, reverted by 8a5223c).
+ *
+ * The proof is a real autonomous repair. Gap groupbounded-fix-not-propagated was fixed
+ * correctly by Substrate Autonomous in local-tools-vessel 4d0c600 (FAVORABLE, pushed), which
+ * INSERTED a guard:
+ *     ( sleep t;                    __killtree $__cpid; kill -9 -$__cpid )
+ *  -> ( sleep t; kill -0 $__cpid && __killtree $__cpid; kill -9 -$__cpid )
+ * Measured with grep -c -F on both trees: the defect literal `kill -9 -$__cpid 2>/dev/null`
+ * occurs ONCE at 4d0c600^ and ONCE at 4d0c600. The fix was ADDITIVE, so the cited literal
+ * SURVIVED it. A Class-1 predicate — even one derived at gap-CREATION time, when the defect
+ * genuinely was present — would still read 'present' after the correct fix, bypass the
+ * pending->skip-re-compose guard, and manufacture a re-land. Moving derivation earlier does
+ * not help: the polarity is what is wrong.
+ *
+ * Additive fixes are the COMMON case, not an edge case — adding an --exclude-dir, a capacity
+ * guard, a transaction retry, a range branch. None remove a literal a detector would cite.
+ *
+ * STRICTLY ADDITIVE BY CONSTRUCTION: both call sites gate on `!hardcodedUrl`, so no gap
+ * carrying a Class-1 predicate today can change verdict. A gap opts in by carrying
+ * expected_literal and no hardcoded_url.
+ */
+function evaluateExpectedLiteral(editSite: string, expectedLiteral: string): 'present' | 'absent' | 'unknown' {
+  const runtimePath = join(runtimeRoot(), editSite.replace(/^\//, '').replace(/^repos\//, ''));
+  if (!existsSync(runtimePath)) return 'unknown';
+  const contents = readFileSync(runtimePath, 'utf8');
+  // PRESENT means the fix is in place, so the DEFECT is absent. Inverse of Class 1.
+  return contents.includes(expectedLiteral) ? 'absent' : 'present';
+}
+
+/**
+ * Non-empty string, else null. Empty string counts as ABSENT deliberately: it is the only
+ * way to retire a bad predicate, because substrate-gap.ts:522-524 carries any key omitted
+ * from a write forward from the existing row — gap metadata cannot be deleted.
+ */
+function nonEmptyStr(v: unknown): string | null {
+  return typeof v === 'string' && v.length > 0 ? v : null;
+}
+
+// Exported for unit test only — same reason chooseFirstActionable and requeueAfterNonAttempt
+// are: the behaviour is worth pinning without a live pool. No call-site change.
+export function verifyGapCondition(gap: Record<string, unknown>): 'present' | 'absent' | 'pending' | 'unknown' {
   try {
     const meta = (gap.classification_metadata ?? gap.metadata ?? {}) as Record<string, unknown>;
     // MEASUREMENT BEFORE PROVENANCE (§12.6 step 1, 2026-08-14): if this gap declares a Class-2
@@ -1348,6 +1394,11 @@ function verifyGapCondition(gap: Record<string, unknown>): 'present' | 'absent' 
       if (!existsSync(runtimePath)) return 'unknown';
       const contents = readFileSync(runtimePath, 'utf8');
       return contents.includes(hardcodedUrl) ? 'present' : 'absent';
+    }
+    // Class 1b: inverse polarity (expected_literal). Only when Class 1 did not apply.
+    const expectedLiteral = nonEmptyStr(meta['expected_literal']);
+    if (editSite && !hardcodedUrl && expectedLiteral) {
+      return evaluateExpectedLiteral(editSite, expectedLiteral);
     }
     // ── Class 3 (sync): landed commit — a substrate-authored commit referencing this gap id already exists ──
     const gapIdForLandedSync = typeof gap['id'] === 'string' ? (gap['id'] as string) : '';
@@ -1430,6 +1481,11 @@ async function verifyGapConditionAsync(gap: Record<string, unknown>): Promise<'p
       if (!existsSync(runtimePath)) return 'unknown';
       const contents = readFileSync(runtimePath, 'utf8');
       return contents.includes(hardcodedUrl) ? 'present' : 'absent';
+    }
+    // Class 1b: inverse polarity (expected_literal). Only when Class 1 did not apply.
+    const expectedLiteral = nonEmptyStr(meta['expected_literal']);
+    if (editSite && !hardcodedUrl && expectedLiteral) {
+      return evaluateExpectedLiteral(editSite, expectedLiteral);
     }
     // ── Class 3: landed commit — provenance (single landing => 'pending', NOT measurement) ──
     // Only consulted when no Class-2 predicate exists (measurement-before-provenance, above).

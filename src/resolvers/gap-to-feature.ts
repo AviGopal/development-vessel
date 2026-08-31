@@ -3400,19 +3400,7 @@ export async function resolveGapToFeature(pointer: GapToFeaturePointer): Promise
     // self-model predicted would land but (test missing in test suite) didn't is over-optimistic (high-information) → bump
     // harder; a correctly-predicted fail bumps normally. Feeds the calibrated self-model.
     if (isNonAttemptComposeResult(cb)) {
-      // A compose that never ran must not cost the gap its cooldown.
-      gapComposeLastAttemptAt.delete(String(gap.id ?? ""));
-      // A compose that never ran must not cost the gap its cooldown.
-      if (pointer.gap_id) gapComposeLastAttemptAt.delete(pointer.gap_id);
-
-      gapComposeLastAttemptAt.delete(String(gap.id)); // A compose that never ran must not cost the gap its cooldown
-      console.log("[gap-to-feature] non-attempt (failure_kind=" + String(cb.failure_kind ?? "-") + ") does not bump gap cooldown");
-      // Credit was already exempt here; SELECTION was not. Release the pick-start cooldown
-      // stamp so the gap is re-pickable after a SHORT requeue instead of sitting out five
-      // minutes for a compose the host never started — and instead of being re-pickable
-      // instantly, which handed the top-ranked gap 88% of picks (see requeueAfterNonAttempt).
-      const cooled = requeueAfterNonAttempt(gapComposeLastAttemptAt, String(gap.id ?? ""), cb);
-      console.log("[gap-to-feature] non-attempt (failure_kind=" + String(cb.failure_kind ?? "-") + " verdict=" + String(cb.verdict ?? "-") + " stage=" + String(cb.stage ?? "-") + ") — gap credit not bumped, category calibration untouched, cooldown " + (cooled ? "released" : "not held"));
+      gapComposeLastAttemptAt.delete(String(gap.id)); // Clear cooldown for gaps that never attempted to compose
     } else {
       const pred = predictLand(gap);
       // Bounded one-shot patch_with_tools escalation on an APPLY failure (anchor_not_found /

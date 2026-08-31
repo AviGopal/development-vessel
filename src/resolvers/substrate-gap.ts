@@ -35,12 +35,6 @@
 import { WORKSPACE_ROOT as DEFAULT_WORKSPACE_ROOT } from "../config.js";
 import type { ResolverResult } from "./types.js";
 import { readFile, writeFile, rename, mkdir } from "node:fs/promises";
-import { derivePredicateLiteral } from "../gap-predicate.js";
-
-/** Runtime copies of the vessels; the same root citedExistingFile resolves against. */
-function runtimeRootForPredicate(): string {
-  return process.env["MITOSIS_RUNTIME_DIR"] ?? "/vessels";
-}
 import { join } from "node:path";
 
 // Captured ONCE at module load (matches config.ts's own WORKSPACE_ROOT export),
@@ -561,54 +555,6 @@ export async function resolveSubstrateGapWrite(
     gap.first_detected_at = gap.first_detected_at ?? gap.detected_at;
     gaps.push(gap);
     action = "created";
-  }
-
-  // BORN WITH A CLOSURE PREDICATE (2026-08-31).
-  //
-  // A gap with nothing measurable can never close, EVEN WHEN ITS FIX LANDS. Verified
-  // end-to-end: 569881d landed FAVORABLE and deployed, and all five gaps in its lineage
-  // stayed open, because sweepPendingLandVerifications closes only on a MEASURED 'absent'
-  // and a prose-only gap yields 'pending' ("PROVENANCE, not resolution"). That abstention
-  // is correct and must not be relaxed — reach-history closed on a code literal the same
-  // day while the corrupted rows its broken writer produced survived untouched.
-  //
-  // So supply the measurement here instead. Measured at the time of writing: 410 open
-  // gaps, 152 citing a resolvable file, exactly ONE carrying a predicate — hand-written by
-  // an operator. Running this derivation over that population yields 64 (42%).
-  //
-  // STRICTLY ADDITIVE AND NEVER OVERWRITING: an existing hardcoded_url is left alone, a
-  // literal is only accepted when it occurs EXACTLY ONCE in the cited file, and failure to
-  // derive leaves the gap exactly as it was. The provenance field marks these as derived
-  // rather than operator-authored so an audit can tell them apart, and every derivation
-  // logs — a silent side effect in the closure path is the failure mode this whole area
-  // keeps repeating.
-  try {
-    const dm = (gap.classification_metadata ?? {}) as Record<string, unknown>;
-    if (gap.status !== "closed" && typeof dm.hardcoded_url !== "string") {
-      const citedRaw = (dm.edit_site ?? dm.file_path ?? dm.file) as unknown;
-      if (typeof citedRaw === "string" && citedRaw.trim()) {
-        const rel = citedRaw.trim().replace(/^\/vessels\//, "repos/").replace(/:[^/]*$/, "");
-        if (/^repos\/[^/]+\/.+\.(ts|tsx|js)$/.test(rel) && !rel.includes("..")) {
-          const abs = `${runtimeRootForPredicate()}/${rel.replace(/^repos\//, "")}`;
-          const content = await readFile(abs, "utf-8").catch(() => null);
-          if (content) {
-            const lit = derivePredicateLiteral(String(gap.summary ?? ""), content);
-            if (lit) {
-              gap.classification_metadata = {
-                ...dm,
-                hardcoded_url: lit,
-                file_path: dm.file_path ?? rel,
-                predicate_source: "auto_derived_from_summary",
-                predicate_derived_at: new Date().toISOString(),
-              } as never;
-              console.log(`[gap-predicate] derived class-1 predicate for ${String(gap.id)} from ${rel}: ${JSON.stringify(lit.slice(0, 60))}`);
-            }
-          }
-        }
-      }
-    }
-  } catch (err) {
-    console.warn(`[gap-predicate] derivation skipped for ${String(gap.id)} (non-fatal): ${(err as Error).message}`);
   }
 
   await saveGaps(gaps);

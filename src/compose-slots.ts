@@ -26,7 +26,9 @@
 
 import { mkdir, readdir, stat, unlink, writeFile } from "node:fs/promises";
 
-const SLOT_DIR = process.env["COMPOSE_SLOT_DIR"] ?? "/workspace/compose-slots";
+function slotDir(): string {
+  return process.env["COMPOSE_SLOT_DIR"] ?? "/workspace/compose-slots";
+}
 
 /**
  * How long a slot may be held before it is presumed abandoned.
@@ -136,10 +138,10 @@ async function holderAlive(path: string): Promise<boolean> {
 /** Count live slots, deleting stale or ownerless ones. Returns the live count. */
 async function countLive(now: number): Promise<number> {
   let live = 0;
-  const names = await readdir(SLOT_DIR);
+  const names = await readdir(slotDir());
   for (const name of names) {
     if (!name.endsWith(".slot")) continue;
-    const path = `${SLOT_DIR}/${name}`;
+    const path = `${slotDir()}/${name}`;
     try {
       const st = await stat(path);
       if (now - st.mtimeMs > SLOT_STALE_MS) {
@@ -214,7 +216,7 @@ export async function acquireComposeSlot(
   const effectiveCap = opts.directed === true ? cap : Math.max(1, cap - 1);
   let path: string | null = null;
   try {
-    await mkdir(SLOT_DIR, { recursive: true });
+    await mkdir(slotDir(), { recursive: true });
     // Reap dead/stale holders, then refuse on the live count BEFORE trying to
     // claim. Both checks are load-bearing and neither subsumes the other:
     //
@@ -255,7 +257,7 @@ export async function acquireComposeSlot(
     // Still fails open (see the module comment): if every index is taken we refuse,
     // but an unreadable/unwritable directory falls through to the catch below.
     for (let i = 0; i < effectiveCap; i++) {
-      const candidate = `${SLOT_DIR}/slot-${i}.slot`;
+      const candidate = `${slotDir()}/slot-${i}.slot`;
       try {
         // `wx` = O_CREAT | O_EXCL — fails if the file already exists.
         await writeFile(candidate, JSON.stringify({ pid: process.pid, at: Date.now(), composeId }), {

@@ -2759,6 +2759,8 @@ async function routeCapabilityGapToNewResolver(
 }
 
 export async function resolveGapToFeature(pointer: GapToFeaturePointer): Promise<ResolverResult> {
+  // For testing purposes, expose the map.
+  (resolveGapToFeature as any).__test__gapComposeLastAttemptAt = () => gapComposeLastAttemptAt;
   // 0. Land→close continuity: complete deferred self-cutover closures BEFORE selection,
   // so an already-landed gap cannot be re-picked and re-landed. Cheap, bounded, best-effort.
   try { await sweepPendingLandVerifications(); } catch { /* never block the tick */ }
@@ -3393,6 +3395,8 @@ export async function resolveGapToFeature(pointer: GapToFeaturePointer): Promise
     // self-model predicted would land but (test missing in test suite) didn't is over-optimistic (high-information) → bump
     // harder; a correctly-predicted fail bumps normally. Feeds the calibrated self-model.
     if (isNonAttemptComposeResult(cb)) {
+      // A compose that never ran must not cost the gap its cooldown.
+      gapComposeLastAttemptAt.delete(String(gap.id ?? ""));
       // A compose that never ran must not cost the gap its cooldown.
       if (pointer.gap_id) gapComposeLastAttemptAt.delete(pointer.gap_id);
 

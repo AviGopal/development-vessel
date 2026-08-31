@@ -3,6 +3,7 @@
 // live source, preventing accidental overwrites of concurrent edits.
 
 import { resolve, join, dirname, relative, isAbsolute, basename } from "path";
+import { pickRemovedLinePredicate } from "../removed-line-predicate.js";
 import { env } from "../config.js";
 import fs from "node:fs/promises";
 import {
@@ -2831,6 +2832,42 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
       if (stampRow && String(stampRow["status"] ?? "") !== "closed") {
         const stampMeta = (stampRow["classification_metadata"] ?? {}) as Record<string, unknown>;
         if (stampMeta["pending_outcome_verification"] !== newSha) {
+          // STAMP A MEASURABLE PREDICATE, NOT JUST PROVENANCE.
+          //
+          // The sweep closes only on a MEASURED 'absent'; a gap with no predicate yields
+          // 'pending' and correctly abstains. Measured 2026-08-31: 1366 of 1368 gaps carried
+          // no predicate, so landed fixes stamped here sat pending forever and were
+          // recomposed — one gap accumulated SIX substrate-authored commits to the same file.
+          //
+          // A line this commit REMOVED is present-in-parent and absent-at-commit by
+          // construction, so it is a sound class-1 predicate with no timing window. That is
+          // the difference from be26a6b (reverted): that derived from the gap summary AFTER
+          // the fix was mirrored, so the literal read 'present' by construction, and only
+          // ~4 of 15 summary literals named the actual defect. Over five real landing commits
+          // this source produced the actual defect four times, including
+          // `const SLOT_DIR = process.env["COMPOSE_SLOT_DIR"]` and
+          // `const allowlist = process.env["WRITE_ALLOWLIST"]`.
+          //
+          // Absence is VERIFIED here against the post-fix file rather than assumed: a diff
+          // can remove a line that still occurs elsewhere in the file, and such a predicate
+          // would pin the gap open forever. Failure to derive leaves the stamp exactly as it
+          // was — no predicate is the safe outcome, and the sweep handles it by asking a human.
+          let derived: { path: string; line: string } | null = null;
+          try {
+            const cloneRoot = process.env["MITOSIS_PUSH_CLONE_DIR"];
+            const repoDir = cloneRoot ? join(cloneRoot, vessel_name) : hostRepoRoot;
+            const shown = await runGit(gitCmd, ["show", newSha, "--format="], repoDir);
+            if (shown.exit_code === 0 && shown.stdout) {
+              const cand = pickRemovedLinePredicate(shown.stdout, String(stampRow["summary"] ?? ""));
+              if (cand) {
+                const after = await readFile(join(repoDir, cand.path), "utf-8").catch(() => null);
+                if (after !== null && !after.includes(cand.line)) derived = cand;
+                else console.log(`[mitosis-cutover] predicate SKIPPED gap=${gapId}: removed line still present in the post-fix file`);
+              }
+            }
+          } catch (err) {
+            console.warn(`[mitosis-cutover] predicate derivation skipped (non-fatal): ${(err as Error)?.message ?? String(err)}`);
+          }
           await resolveSubstrateGapWrite({
             type: "substrateGap_write",
             gap: {
@@ -2840,10 +2877,19 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
                 ...stampMeta,
                 pending_outcome_verification: newSha,
                 pending_set_at: appliedAt,
+                ...(derived && typeof stampMeta["hardcoded_url"] !== "string"
+                  ? {
+                      hardcoded_url: derived.line,
+                      file_path: `repos/${vessel_name}/${derived.path}`,
+                      predicate_source: "removed_line_of_landing_commit",
+                      predicate_derived_at: appliedAt,
+                      predicate_commit: newSha,
+                    }
+                  : {}),
               },
             },
           } as never);
-          console.log(`[mitosis-cutover] pending-land stamp gap=${gapId} sha=${newSha.slice(0, 12)} (sweep will close as landed_verified)`);
+          console.log(`[mitosis-cutover] pending-land stamp gap=${gapId} sha=${newSha.slice(0, 12)} predicate=${derived ? JSON.stringify(derived.line.slice(0, 48)) : "none"} (sweep will close as landed_verified)`);
         }
       }
     } catch (err) {

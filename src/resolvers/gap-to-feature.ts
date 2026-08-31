@@ -2847,7 +2847,7 @@ export async function resolveGapToFeature(pointer: GapToFeaturePointer): Promise
   }
 
   // RECOMMIT SOURCE-GAP LOCALIZATION (gap recommit-composer-mislocalized-edit-site):
-  // A re_commit gap's id (e.g. "recommit-route-edit-535ee072-verify_failed") should be treated as a new gap for lineage tracking
+  // A re_commit gap's id (e.g. "recommit-route-edit-e32a5778-verify_failed") should be treated as a new gap for lineage tracking
   // repo/vessel path; deriving the edit_site from it mis-localizes to a non-existent
   // repos/<gap-id>/ (ENOENT, failure_class mis_localized_path). The real edit site lives
   // on the SOURCE gap named in classification_metadata.source_gap_id. Fetch that source

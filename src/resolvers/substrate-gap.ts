@@ -64,6 +64,32 @@ function workspaceRoot(): string {
   return WORKSPACE_ROOT_AT_LOAD;
 }
 
+/**
+ * Where THIS module will actually read and write gaps — exported so a test can PROVE it is
+ * isolated instead of hoping.
+ *
+ * A test that sets process.env.WORKSPACE_ROOT before importing this module is only isolated
+ * if it wins the import race. config.ts:43 captures WORKSPACE_ROOT at module load, defaulting
+ * to process.cwd(), and `bun test` shares one module registry across files — so in a
+ * multi-file run ANOTHER suite can import config.ts first and this module's path is already
+ * frozen to a real store by the time the env is set.
+ *
+ * That is not hypothetical. Rows named `falsifier-*` were found in the LIVE gap store at
+ * /workspace/git/super-repo/gaps/gaps.json, written by test/resolvers/substrate-gap-falsifier
+ * .test.ts, and they false-closed under the newly-armed Class-2 verifier. Compose runs the
+ * suite inside the container during verification, so the blast radius is the running
+ * substrate's own state — the same class as the suite that once shelled a real
+ * `systemctl start gap-compose.service`.
+ *
+ * The env capture itself is correct and stays: law 1 makes WORKSPACE_ROOT bootstrap-only,
+ * frozen at process start. The defect is a test that cannot tell whether it won the race.
+ * This getter lets it assert rather than assume, turning silent live-store pollution into a
+ * loud failure in the suite that causes it.
+ */
+export function gapStoreRootForTest(): string {
+  return WORKSPACE_ROOT_AT_LOAD;
+}
+
 export type SubstrateGapCategory =
   | "conversation_only"
   | "training_knowledge"

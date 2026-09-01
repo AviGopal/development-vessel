@@ -41,8 +41,40 @@ process.env["WORKSPACE_ROOT"] = testWorkspace;
 // before import, same as WORKSPACE_ROOT above.
 process.env["SUBSTRATE_GAP_SKIP_COMPOSE_TRIGGER"] = "1";
 
-const { resolveSubstrateGap, resolveSubstrateGapWrite, classifyFalsifier, falsifierCoverage } =
+const { resolveSubstrateGap, resolveSubstrateGapWrite, classifyFalsifier, falsifierCoverage, gapStoreRootForTest } =
   await import("../../src/resolvers/substrate-gap.js");
+
+// PROVE THE ISOLATION, DO NOT ASSUME IT.
+//
+// Setting WORKSPACE_ROOT above only isolates this suite if it wins the import race. config.ts
+// captures WORKSPACE_ROOT at module load defaulting to process.cwd(), and `bun test` shares one
+// module registry across files — so in a MULTI-FILE run another suite can import config.ts
+// first, freezing the path to a real store before the line above ever executes. Single-file
+// runs pass; batches silently write to the real store, which is why this failed only in a
+// batch and looked like flake.
+//
+// It did happen. Rows named `falsifier-*` were found in the LIVE store at
+// /workspace/git/super-repo/gaps/gaps.json — written by THIS suite, which compose runs inside
+// the container during verification — and they FALSE-CLOSED once the Class-2 verifier was
+// armed, each writing a bogus success into the close-oracle calibration.
+//
+// Throwing here converts that into an immediate, unmissable failure in the suite responsible,
+// instead of a mutation of the running substrate's state that nobody notices for weeks.
+// The property that matters is NOT "the path equals mine" — another suite may legitimately
+// win the race with its own tmp root, and writing there is harmless. It is "the path is not a
+// REAL store". Anything under the OS temp dir is disposable; process.cwd() (the repo's tracked
+// gaps/gaps.json) and /workspace/... (the running substrate) are not.
+const resolvedGapRoot = gapStoreRootForTest();
+if (!resolvedGapRoot.startsWith(tmpdir())) {
+  throw new Error(
+    `substrate-gap-falsifier.test.ts is NOT isolated: the resolver will write to ` +
+    `${resolvedGapRoot}/gaps/gaps.json, which is NOT under ${tmpdir()}. This suite lost the ` +
+    `module-load race (config.ts captures WORKSPACE_ROOT at load, defaulting to process.cwd()) ` +
+    `and would pollute a real gap store — it has done exactly that, into the running ` +
+    `substrate's own store. Run it with WORKSPACE_ROOT=$(mktemp -d), or in its own bun test ` +
+    `invocation.`,
+  );
+}
 
 // A vocabulary plausible enough for the classifier to agree to judge with at all
 // (configs_read >= 5 AND >= 50 names — the shared `vocabularyIsJudgeable` threshold).

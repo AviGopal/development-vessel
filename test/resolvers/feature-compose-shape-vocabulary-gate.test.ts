@@ -3,6 +3,7 @@ import {
   detectUnadvertisedShapeLiteral,
   loadFleetShapeVocabulary,
   unadvertisedShapeRefusalReason,
+  shapeVocabularyRefusal,
 } from "../../src/resolvers/feature-compose";
 
 // The EXECUTING shape-vocabulary gate (2026-09-01). Every other compose gate READS the
@@ -115,6 +116,21 @@ describe("detectUnadvertisedShapeLiteral — no false positives", () => {
     expect(f).toEqual([]);
   });
 
+  it("does NOT let an UNCHANGED context opener judge an added shape: in a different object", () => {
+    // Review finding 2, reproduced against the production vocabulary. The first cut let a
+    // pre-existing `evidence_resolve:` context line open the window, so ANY edit landing a
+    // couple of lines below an existing predicate — in an entirely unrelated object — was
+    // judged. Both the opener AND the key must now be added lines.
+    const f = detectUnadvertisedShapeLiteral(
+      diffOf(
+        ["  const other = {", '    shape: "myInternalReturnShape",', "  };"],
+        ["              evidence_resolve: {", '                shape: "trace_failure_pattern_report",', "              },"],
+      ),
+      vocab(),
+    );
+    expect(f).toEqual([]);
+  });
+
   it("does NOT flag a shape name that appears only in an added COMMENT", () => {
     // The corrected predicate site and the gate itself both name the bad shape in prose to
     // explain the defect. A gate that flagged its own documentation refutes itself.
@@ -162,18 +178,189 @@ describe("detectUnadvertisedShapeLiteral — no false positives", () => {
     expect(f).toEqual([]);
   });
 
-  it("flags NOTHING when the committed tree's own predicate site is fed in as if wholly added", () => {
-    // The corpus check, pinned. Uses the REAL fleet vocabulary if this host has one;
-    // when it does not, the fail-open rule applies and the expectation is the same.
+  // HONEST TITLE (was "flags NOTHING when the committed tree's ... is fed in as if wholly
+  // added", which on a host with no fleet layout only ever exercised the FAIL-OPEN branch —
+  // configs_read=0 — while reading as a corpus check. Review called it vacuous; it was.)
+  // The real corpus check is not expressible as a unit test, because it needs the fleet's
+  // config.ts files on disk. It is run against the live container instead; see the commit
+  // message. What IS pinned here: the real loader, and — only where the layout exists —
+  // that the real vocabulary genuinely discriminates.
+  it("uses the REAL loader: where a fleet layout exists it discriminates; where it does not it fails open", () => {
+    // `${import.meta.dir}/../../..` is repos/ in a checkout; absent elsewhere.
+    const real = loadFleetShapeVocabulary([`${import.meta.dir}/../../..`]);
+    const good = diffOf(["  evidence_resolve: {", '    shape: "trace_failure_pattern_report",', "  },"]);
+    const bad = diffOf(["  evidence_resolve: {", '    shape: "failurePatternReport",', "  },"]);
+    expect(detectUnadvertisedShapeLiteral(good, real)).toEqual([]);
+    if (real.configs_read >= 5 && real.shapes.size >= 50) {
+      // The layout is present, so this assertion is real: the advertised name is in the
+      // vocabulary and the internal return-shape name is not.
+      expect(real.shapes.has("trace_failure_pattern_report")).toBe(true);
+      expect(real.shapes.has("failurePatternReport")).toBe(false);
+      expect(detectUnadvertisedShapeLiteral(bad, real).map((f) => f.shape)).toEqual(["failurePatternReport"]);
+    } else {
+      // No layout → the gate must abstain, and say so.
+      expect(detectUnadvertisedShapeLiteral(bad, real)).toEqual([]);
+    }
+  });
+});
+
+describe("detectUnadvertisedShapeLiteral — nested strings are not uses (review finding 1)", () => {
+  // b5bed65 REFUSED ITS OWN DIFF on 4 findings, every one a shape name inside a nested
+  // string literal on an added line — a test fixture, a doc example. Substrate-authored
+  // cutovers demonstrably touch test/ (7 in the last 600 commits), so this was
+  // production-reachable and would have halted a lane that lands ~2 changes/day.
+  const nestedInSrc = [
+    "### /vessels/development-vessel/src/resolvers/z.ts",
+    "--- a/repos/development-vessel/src/resolvers/z.ts",
+    "@@ -1,1 +1,4 @@",
+    `+  const bad = detect(diffOf(['  verify_shape: ${'"'}failurePatternReport${'"'},']), vocab());`,
+    `+  const also = { evidence_resolve: { note: 'shape: ${'"'}failurePatternReport${'"'}' } };`,
+    '+  const impulse = { shape: "someInternalReturnShape", body };',
+  ].join("\n");
+
+  it("does NOT flag an opener or a shape key quoted inside another string — even in a SRC file", () => {
+    // Deliberately a src path, so this proves the ANCHORING guard, not the test-file carve-out.
+    expect(detectUnadvertisedShapeLiteral(nestedInSrc, vocab())).toEqual([]);
+  });
+
+  it("still REFUSES the same name when it is a real key at the start of its own line", () => {
+    // The other half of the guard: anchoring must not have neutered the gate.
+    const real = [
+      "### /vessels/development-vessel/src/resolvers/w.ts",
+      "--- a/repos/development-vessel/src/resolvers/w.ts",
+      "@@ -1,1 +1,3 @@",
+      "+            evidence_resolve: {",
+      '+              shape: "failurePatternReport",',
+      "+            },",
+    ].join("\n");
+    expect(detectUnadvertisedShapeLiteral(real, vocab()).map((f) => f.shape)).toEqual(["failurePatternReport"]);
+  });
+
+  it("REFUSES the one-line object form", () => {
+    const oneLine = [
+      "### /vessels/development-vessel/src/resolvers/v.ts",
+      "--- a/repos/development-vessel/src/resolvers/v.ts",
+      "@@ -1,1 +1,2 @@",
+      '+  evidence_resolve: { shape: "failurePatternReport", nonzero_field: "occurrence_count" },',
+    ].join("\n");
+    expect(detectUnadvertisedShapeLiteral(oneLine, vocab()).map((f) => f.position)).toEqual(["evidence_resolve.shape"]);
+  });
+});
+
+describe("detectUnadvertisedShapeLiteral — per-file test scoping (review finding 1a)", () => {
+  const predicateIn = (path: string): string =>
+    [`### /vessels/development-vessel/${path}`, `--- a/repos/development-vessel/${path}`, "@@ -1,1 +1,3 @@",
+      "+  evidence_resolve: {", '+    shape: "failurePatternReport",', "+  },"].join("\n");
+
+  it("does NOT judge a predicate inside a .test.ts file", () => {
+    expect(detectUnadvertisedShapeLiteral(predicateIn("test/resolvers/q.test.ts"), vocab())).toEqual([]);
+  });
+
+  it("does NOT judge a .spec.tsx file either", () => {
+    expect(detectUnadvertisedShapeLiteral(predicateIn("test/q.spec.tsx"), vocab())).toEqual([]);
+  });
+
+  it("STILL judges the src half of a change that mixes src and test", () => {
+    // `changesAreTestOnly` is the wrong predicate: it requires EVERY path to be a test, and a
+    // realistic change (b5bed65 itself) mixes the two. Scoping must be per file, both ways.
+    const mixed = predicateIn("test/resolvers/q.test.ts") + "\n" + predicateIn("src/resolvers/q.ts");
+    expect(detectUnadvertisedShapeLiteral(mixed, vocab()).map((f) => f.shape)).toEqual(["failurePatternReport"]);
+  });
+
+  it("keeps the file scope across the @@ hunk line", () => {
+    // Regression pin. The first cut recomputed the scope on EVERY header-ish line, including
+    // `@@ -1,1 +1,3 @@` — which names no file — so the scope was reset to false on the line
+    // right after every header and invariant 4 was completely inert. The acceptance diff
+    // still passed (on the anchoring guard alone), so only a negative control exposed it.
+    expect(detectUnadvertisedShapeLiteral(predicateIn("test/resolvers/q.test.ts"), vocab())).toEqual([]);
+  });
+});
+
+describe("detectUnadvertisedShapeLiteral — same-diff advertisement (review finding 3)", () => {
+  it("PASSES a change that advertises a shape in config.ts and uses it in the SAME diff", () => {
+    // An isolated compose edits a worktree under COMPOSE_WS_DIR that no fleet root scans, so
+    // the vocabulary would be the ORIGIN view and a correct self-consistent change would be
+    // refused for naming a shape that IS advertised by the time the sweep runs. Two defences:
+    // the worktree roots threaded from `ws.rootFor(vessel)`, and — layout-independently —
+    // harvesting the diff's own config.ts additions, which is what this pins.
+    const sameDiff = [
+      "### /vessels/development-vessel/src/config.ts",
+      "--- a/repos/development-vessel/src/config.ts",
+      "@@ -70,2 +70,3 @@",
+      '     "learningMode",',
+      '+    "brand_new_shape_advertised_here",',
+      "",
+      "### /vessels/development-vessel/src/resolvers/y.ts",
+      "--- a/repos/development-vessel/src/resolvers/y.ts",
+      "@@ -10,1 +10,4 @@",
+      "+    evidence_resolve: {",
+      '+      shape: "brand_new_shape_advertised_here",',
+      "+    },",
+    ].join("\n");
+    expect(detectUnadvertisedShapeLiteral(sameDiff, vocab())).toEqual([]);
+  });
+
+  it("does NOT let a config.ts addition launder an unrelated unadvertised name", () => {
+    const laundered = [
+      "### /vessels/development-vessel/src/config.ts",
+      "--- a/repos/development-vessel/src/config.ts",
+      "@@ -70,1 +70,2 @@",
+      '+    "some_other_new_shape",',
+      "",
+      "### /vessels/development-vessel/src/resolvers/y.ts",
+      "--- a/repos/development-vessel/src/resolvers/y.ts",
+      "@@ -10,1 +10,4 @@",
+      "+    evidence_resolve: {",
+      '+      shape: "failurePatternReport",',
+      "+    },",
+    ].join("\n");
+    expect(detectUnadvertisedShapeLiteral(laundered, vocab()).map((f) => f.shape)).toEqual(["failurePatternReport"]);
+  });
+});
+
+describe("shapeVocabularyRefusal — the REAL call site entry point", () => {
+  // `resolveFeatureCompose` invokes exactly this function (`semantic_gate = shapeVocabularyRefusal(...)
+  // ?? await verifyPatchAddressesGap(...)`), so these tests exercise the production path —
+  // vocabulary load, fail-open rule, detector, and the SemanticGateVerdict the downstream
+  // `!addresses` branch consumes — rather than a helper with an injected fixture.
+  const badDiff = [
+    "### /vessels/development-vessel/src/resolvers/w.ts",
+    "--- a/repos/development-vessel/src/resolvers/w.ts",
+    "@@ -1,1 +1,3 @@",
+    "+  evidence_resolve: {",
+    '+    shape: "failurePatternReport",',
+    "+  },",
+  ].join("\n");
+
+  it("returns a hard-fail UNFAVORABLE verdict shaped for the existing semantic-gate plumbing", () => {
+    const v = shapeVocabularyRefusal(badDiff, { vocabulary: vocab() });
+    expect(v).not.toBeNull();
+    expect(v!.addresses).toBe(false);          // this is what flips the verdict + rolls back
+    expect(v!.on_live_path).toBe(true);        // not a reachability rejection
+    expect(v!.hard_fail).toBe(true);
+    expect(v!.llm_consulted).toBe(false);      // the judge call is skipped entirely
+    expect(v!.verified).toBe(true);
+    // The reason is persisted as `semantic_gate_reason` and re-injected into the next draft.
+    expect(v!.reason).toContain("failurePatternReport");
+    expect(v!.reason).toContain("discovery.shapes");
+  });
+
+  it("returns null (admit) for a clean diff", () => {
+    const clean = badDiff.replace("failurePatternReport", "trace_failure_pattern_report");
+    expect(shapeVocabularyRefusal(clean, { vocabulary: vocab() })).toBeNull();
+  });
+
+  it("returns null (admit) when the vocabulary cannot be evaluated", () => {
+    expect(shapeVocabularyRefusal(badDiff, { vocabulary: { shapes: new Set(), configs_read: 0 } })).toBeNull();
+  });
+
+  it("returns null (admit) when it must load the vocabulary itself and the layout is absent", () => {
+    // No injected vocabulary → the real loader runs. On a host without the fleet layout the
+    // fail-open rule applies; on one with it, the diff is genuinely bad and would refuse.
+    const v = shapeVocabularyRefusal(badDiff, { vesselRoots: ["/nonexistent-vessel-root"] });
     const real = loadFleetShapeVocabulary();
-    const text = [
-      "              evidence_resolve: {",
-      '                shape: "trace_failure_pattern_report",',
-      "                input: { template_id: p.template_id },",
-      '                nonzero_field: "occurrence_count"',
-      "              },",
-    ];
-    expect(detectUnadvertisedShapeLiteral(diffOf(text), real)).toEqual([]);
+    if (real.configs_read < 5 || real.shapes.size < 50) expect(v).toBeNull();
+    else expect(v).not.toBeNull();
   });
 });
 

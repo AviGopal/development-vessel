@@ -27,7 +27,7 @@
 import { mkdir, readdir, stat, unlink, writeFile } from "node:fs/promises";
 
 function slotDir(): string {
-  return process.env["COMPOSE_SLOT_DIR"] ?? "/workspace/compose-slots";
+  return process.env["COMPOSE_SLOT_DIR"] || "/workspace/compose-slots";
 }
 
 /**

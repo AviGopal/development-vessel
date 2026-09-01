@@ -1493,11 +1493,52 @@ export function priorAttemptFeedbackBlock(meta?: Record<string, unknown> | null)
   const reason = typeof meta.semantic_gate_reason === "string" ? meta.semantic_gate_reason.trim() : "";
   const loc = typeof meta.suspected_real_location === "string" ? meta.suspected_real_location.trim() : "";
   const lessons = (Array.isArray(meta.failure_lessons) ? meta.failure_lessons : []) as Array<Record<string, unknown>>;
-  if (!reason && !loc && lessons.length === 0) return "";
-  const lines = [
-    "",
-    "PRIOR ATTEMPT FEEDBACK — a previous draft for THIS gap was REJECTED by the semantic gate. Do NOT repeat it; your plan MUST address what it missed:",
-  ];
+  // A LANDED attempt is prior-attempt evidence too, and until now it was the ONLY kind that
+  // reached the drafter as silence.
+  //
+  // Every branch of this function reads REJECTION metadata, and the heading below says so:
+  // a draft that PASSED the gate and LANDED contributed nothing to the next attempt. That is
+  // not a rare path — a gap carrying no closure predicate never closes, so it is re-picked
+  // AFTER its fix has landed, and a fresh drafter then reads the same unchanged gap prose
+  // against a file that has already been changed. With no record that the change is already
+  // in the file, re-applying it or reverting it both look reasonable.
+  //
+  // Measured 2026-08-31: four substrate-authored commits (01e3dd9, 22c3fd2, 7eaf97f, c004878)
+  // rewrote the same four lines of gap-to-feature.ts within two hours, alternating between
+  // removing a duplicated gapComposeLastAttemptAt.delete and re-adding it. One of them
+  // introduced `(globalThis as any).gapCooldownMap.delete(gap.gap_id)`, a guaranteed
+  // TypeError. Net progress over four landings: zero.
+  //
+  // The SHA is the one vessel-mitosis-cutover stamps as pending_outcome_verification when a
+  // self-cutover defers closure — the same field sweepPendingLandVerifications reads. Its
+  // presence means "a commit for this gap is already in the tree", which is exactly what the
+  // drafter needs and never had.
+  const landedSha = typeof meta.pending_outcome_verification === "string"
+    && (meta.pending_outcome_verification as string).trim().length >= 7
+    ? (meta.pending_outcome_verification as string).trim()
+    : "";
+  // Unchanged behaviour when there is no history of any kind: same early return as before,
+  // now also requiring the absence of a landed attempt.
+  if (!reason && !loc && lessons.length === 0 && !landedSha) return "";
+  const lines: string[] = [];
+  if (landedSha) {
+    lines.push(
+      "",
+      `PRIOR LANDED ATTEMPT — a previous draft for THIS gap PASSED the semantic gate and LANDED as commit ${landedSha}. The change is ALREADY IN THE FILE you are about to edit.`,
+      "- Do NOT re-apply it, and do NOT revert it. Read the current file: if the described change is already present, the remaining work is whatever the gap asks for that is NOT yet there.",
+      "- If nothing is left to do, say so and produce NO edit. An empty diff is a correct answer here; re-editing the same lines is not.",
+      "- This gap is still open because its closure could not be VERIFIED, not because the fix failed. An open gap is not evidence that the previous attempt was wrong.",
+    );
+  }
+  // The rejection block is emitted only when there IS rejection evidence, so a gap whose only
+  // history is a successful landing does not get a heading announcing a rejection that never
+  // happened.
+  if (reason || loc || lessons.length > 0) {
+    lines.push(
+      "",
+      "PRIOR ATTEMPT FEEDBACK — a previous draft for THIS gap was REJECTED by the semantic gate. Do NOT repeat it; your plan MUST address what it missed:",
+    );
+  }
   if (typeof meta.verify_failure_reason === "string" && meta.verify_failure_reason.trim()) lines.push(`- Typecheck failure from prior attempt: ${meta.verify_failure_reason.trim()}`);
   if (reason) lines.push(`- Rejection reason: ${reason}`);
   if (loc) lines.push(`- The real change site is: ${loc}. Your fix MUST edit that specific path/lines (not just adjacent or related code).`);
@@ -1510,7 +1551,13 @@ export function priorAttemptFeedbackBlock(meta?: Record<string, unknown> | null)
       }
     }
   }
-  lines.push("- A fix that again leaves the named path/lines untouched will be REJECTED again. Target the exact location the gate identified.");
+  // Gated on the same condition as the heading it belongs to. Unconditional, it would tell a
+  // drafter whose gap has ONLY a successful landing that its untouched paths "will be REJECTED
+  // again" — asserting a rejection that never happened, directly under a block saying the
+  // change already landed.
+  if (reason || loc || lessons.length > 0) {
+    lines.push("- A fix that again leaves the named path/lines untouched will be REJECTED again. Target the exact location the gate identified.");
+  }
   return lines.join("\n");
 }
 

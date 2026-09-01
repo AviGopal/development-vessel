@@ -1792,8 +1792,29 @@ async function verifyGapConditionAsync(gap: Record<string, unknown>): Promise<'p
         return 'absent';
       }
     }
-    // No defect signature found — treat as healthy
-    return 'absent';
+    // NO DEFECT SIGNATURE FOUND — THAT IS 'unknown', NOT 'absent' (2026-09-01).
+    //
+    // This returned 'absent', which CLOSES the gap. So a predicate naming only a shape —
+    // no defect_field, no nonzero_field — closed its gap on any HTTP 200 whose body
+    // happened to carry no fetch_error and none of the count keys above. The resolver was
+    // never asked a question about the defect, and its silence was read as an answer.
+    //
+    // Absence of evidence is not evidence of absence, and this is the one path whose whole
+    // purpose is refusing to close on anything but measurement — the provenance class it
+    // exists to replace sits at 0 closes / 766 false closes for precisely this mistake.
+    //
+    // MEASURED against the live store by driving the real sweep with three rows copied from
+    // it, all carrying `evidence_resolve: {shape: "trace_failure_pattern_report"}` and no
+    // field: with the Class-2 envelope armed, checked=8 closed=5 — three of them false,
+    // each writing recordCloseVerdict("measured", false) into the calibration whose
+    // unblemished 7/0 record is the only reason that class is trusted at all. Three
+    // wrongful closes would have carried it to 10/0, crossing CLOSE_ORACLE_MIN_SAMPLES on
+    // measurements that measured nothing.
+    //
+    // 'unknown' is the honest verdict: the sweep abstains, the gap stays open, and a human
+    // or a later measurement decides. A predicate that names no field carries no
+    // proposition, so there is nothing here that could have been found false.
+    return 'unknown';
   } catch {
     // fall through to landed-commit evidence class
   }

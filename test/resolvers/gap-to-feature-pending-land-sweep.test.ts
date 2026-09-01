@@ -32,13 +32,34 @@ function git(repo: string, ...args: string[]): string {
 
 let measuredSha = "";
 let inertSha = "";
+let shapeOnlySha = "";
 
-// Silence the best-effort pool/event emissions AND stand in for the Class-2 self-resolve:
-// an empty {} body carries no defect signature, so verifyGapConditionAsync reads it as 'absent'
-// (healthy) — a clean MEASURED-resolved verdict for the measurable gap.
+// Silence the best-effort pool/event emissions AND stand in for the Class-2 self-resolve.
+//
+// The body must carry a REAL defect signature. It used to be `{}` — and an empty body was
+// read as 'absent' (healthy), which closed the gap. That fall-through was the bug: a
+// resolver that was never asked a question about the defect had its silence taken as an
+// answer, and it false-closed three live rows the moment the Class-2 envelope was armed.
+// verifyGapConditionAsync now returns 'unknown' for a body with no defect signature, so a
+// fixture that wants a MEASURED close has to actually supply one.
+//
+// `count: 1` hits generic heuristic 4 (a count key present and nonzero => 'absent'), which
+// is a positively-measured healthy verdict rather than an absence of information.
 const originalFetch = globalThis.fetch;
 beforeAll(() => {
-  globalThis.fetch = (async () => new Response("{}", { status: 200 })) as typeof fetch;
+  // Respond PER SHAPE. A single shared body cannot exercise both rows: generic heuristic 4
+  // fires on a `count` key even when the predicate declared no field, so a body carrying
+  // `count` would close the shape-only row for the wrong reason and hide the fall-through
+  // this suite now pins.
+  globalThis.fetch = (async (...args: unknown[]) => {
+    const init = args[1] as { body?: string } | undefined;
+    const shape = String(init?.body ?? "");
+    // health_probe: declares nonzero_field "count" -> a positively-measured healthy verdict.
+    if (shape.includes("health_probe")) return new Response(JSON.stringify({ body: { count: 1 } }), { status: 200 });
+    // opaque_probe: a well-formed 200 that answers NOTHING about the defect — no count key,
+    // no fetch_error. This is the shape-only case, and it must read 'unknown'.
+    return new Response(JSON.stringify({ body: { generated_at: "2026-09-01T00:00:00Z", patterns: [] } }), { status: 200 });
+  }) as unknown as typeof fetch;
   const repo = join(CLONES, "development-vessel");
   mkdirSync(repo, { recursive: true });
   git(repo, "init", "-q");
@@ -53,13 +74,19 @@ beforeAll(() => {
   git(repo, "add", "g.txt");
   git(repo, "commit", "-q", "-m", "substrate-authored: apply gap-pending-inert-compose-report via mitosis cutover");
   inertSha = git(repo, "rev-parse", "HEAD");
+  // A third landing, for the shape-only-predicate row below. It needs its OWN commit: the
+  // sweep works per-landing, so two gaps sharing a pending sha do not both get evaluated.
+  writeFileSync(join(repo, "h.txt"), "shape-only\n");
+  git(repo, "add", "h.txt");
+  git(repo, "commit", "-q", "-m", "substrate-authored: apply gap-pending-shape-only-compose-report via mitosis cutover");
+  shapeOnlySha = git(repo, "rev-parse", "HEAD");
 
   mkdirSync(join(ROOT, "gaps"), { recursive: true });
   const now = new Date().toISOString();
   const base = { source: "substrate_detected", detected_at: now, created_at: now, updated_at: now };
   writeFileSync(GAPS_PATH, JSON.stringify([
     // (1) MEASURABLE: a Class-2 predicate measures the condition gone => CLOSES as landed_verified.
-    { ...base, id: "gap-pending-measured", category: "systematic_failure", summary: "landed, and a predicate can verify it", status: "open", classification_metadata: { pending_outcome_verification: measuredSha, pending_set_at: now, evidence_resolve: { shape: "health_probe" } } },
+    { ...base, id: "gap-pending-measured", category: "systematic_failure", summary: "landed, and a predicate can verify it", status: "open", classification_metadata: { pending_outcome_verification: measuredSha, pending_set_at: now, evidence_resolve: { shape: "health_probe", nonzero_field: "count" } } },
     // (2) INERT: a single landing names the gap, but NOTHING can measure resolution => HELD PENDING.
     //     This is the inert-diff (bafd83d) refusal: provenance is not measurement, so no close.
     { ...base, id: "gap-pending-inert", category: "systematic_failure", summary: "landed once, unverifiable — the inert-diff hole", status: "open", classification_metadata: { pending_outcome_verification: inertSha, pending_set_at: now } },
@@ -67,6 +94,17 @@ beforeAll(() => {
     { ...base, id: "gap-pending-unlanded", category: "systematic_failure", summary: "pending sha never reached a clone", status: "open", classification_metadata: { pending_outcome_verification: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef", pending_set_at: now } },
     // (4) ORDINARY: no pending marker => untouched by the sweep.
     { ...base, id: "gap-ordinary-open", category: "systematic_failure", summary: "open gap without pending marker", status: "open", classification_metadata: {} },
+    // (5) SHAPE-ONLY PREDICATE: an evidence_resolve naming a shape and NO field. The resolver
+    //     is never asked a question about the defect, so its 200 carries no answer. This MUST
+    //     hold the gap open ('unknown'), not close it.
+    //
+    //     It used to close. Measured 2026-09-01 by driving this sweep with three rows copied
+    //     verbatim from the live store, each carrying exactly this form: with the Class-2
+    //     envelope armed, checked=8 closed=5 — three of them FALSE, each writing
+    //     recordCloseVerdict("measured", false) into the calibration whose unblemished 7/0
+    //     record is the only reason that evidence class is trusted. They would have carried it
+    //     to 10/0 — past CLOSE_ORACLE_MIN_SAMPLES — on measurements that measured nothing.
+    { ...base, id: "gap-pending-shape-only", category: "systematic_failure", summary: "predicate names a shape but no field — nothing was asked", status: "open", classification_metadata: { pending_outcome_verification: shapeOnlySha, pending_set_at: now, evidence_resolve: { shape: "opaque_probe" } } },
   ]));
 });
 afterAll(() => {
@@ -78,7 +116,7 @@ describe("sweepPendingLandVerifications — close on MEASUREMENT, abstain on pro
   it("closes only the MEASURED-resolved gap; HOLDS the inert single-landing pending; leaves unlanded + ordinary open", async () => {
     const { sweepPendingLandVerifications } = await import("../../src/resolvers/gap-to-feature.js");
     const result = await sweepPendingLandVerifications();
-    expect(result.checked).toBe(3); // the three gaps carrying a pending marker
+    expect(result.checked).toBe(4); // the four gaps carrying a pending marker
     expect(result.closed).toBe(1);  // ONLY the measurable one
 
     const gaps = JSON.parse(readFileSync(GAPS_PATH, "utf8")) as Array<Record<string, unknown>>;
@@ -88,6 +126,13 @@ describe("sweepPendingLandVerifications — close on MEASUREMENT, abstain on pro
     const measured = byId.get("gap-pending-measured") as Record<string, unknown>;
     expect(measured.status).toBe("closed");
     expect((measured.classification_metadata as Record<string, unknown>).closed_reason).toBe("landed_verified");
+
+    // (1b) SHAPE-ONLY PREDICATE: a well-formed 200 that answers nothing about the defect
+    //      must leave the gap OPEN. Pinned by identity, not by the count above, because the
+    //      count alone could be satisfied by the wrong row closing and this one abstaining.
+    const shapeOnly = byId.get("gap-pending-shape-only") as Record<string, unknown>;
+    expect(shapeOnly.status).toBe("open");
+    expect((shapeOnly.classification_metadata as Record<string, unknown>).closed_reason).toBeUndefined();
 
     // (2) THE B1 PROOF: an inert single landing is NOT closed — it is held pending verification.
     const inert = byId.get("gap-pending-inert") as Record<string, unknown>;

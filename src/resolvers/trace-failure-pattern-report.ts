@@ -180,31 +180,30 @@ export async function resolveTraceFailurePatternReport(
               example_trace_ids: p.example_trace_ids,
               successful_task_count: p.successful_task_count,
               total_task_count: p.total_task_count,
-              // THE ADVERTISED SHAPE, NOT THIS RESOLVER'S RETURN-SHAPE NAME.
+              // NO evidence_resolve HERE — REMOVED 2026-09-01, and the reason matters.
               //
-              // The sweep RESOLVES this shape through discovery, so it must be a name the
-              // registry actually serves. Those two names differ here: line 191 returns
-              // `shape: "failurePatternReport"`, while config.ts advertises
-              // `trace_failure_pattern_report` — and only the advertised one is dispatchable
-              // (registry_query confirms: failurePatternReport is not among the 390 advertised
-              // shapes). A predicate naming the return-shape resolves to nothing, yields
-              // 'unknown', and leaves the gap exactly as unclosable as it was with no predicate
-              // at all — a hollow fix that typechecks and passes the semantic gate.
+              // I added one, and it was inverted. `nonzero_field` is a HEALTH field:
+              // verifyGapConditionAsync reads zero/null/undefined as 'present' (defect
+              // stands) and NONZERO as 'absent' (defect gone, CLOSE THE GAP). I passed
+              // `occurrence_count` — a DEFECT COUNT — so more failures would have read as
+              // fixed. A false-close generator, in the one path whose whole purpose is to
+              // refuse closing on anything but measurement (landed_commit sits at 0 closes
+              // / 766 false closes for exactly this reason).
               //
-              // The substrate authored this block itself (route-edit-c9ad6782 → 05458f4, then
-              // 6b6068e) and guessed the name twice: first `trace_failure`, then
-              // `failurePatternReport`. Neither is advertised. This is the same
-              // producer/consumer name mismatch that has silently disabled db-maintenance's
-              // integrity repair (`violating_rows` vs `count`) and the compose lesson mirror —
-              // the class is a name crossing a boundary with no contract to check it.
-              evidence_resolve: {
-                shape: "trace_failure_pattern_report",
-                input: {
-                  template_id: p.template_id,
-                  first_failed_task_id: p.first_failed_task_id
-                },
-                nonzero_field: "occurrence_count"
-              },
+              // It was masked only because the request envelope was malformed and every
+              // Class-2 predicate 400'd. Fixing that envelope in the same change would have
+              // armed this one.
+              //
+              // It was also broken two further ways: this resolver's pointer has no
+              // template_id / first_failed_task_id fields, so `input` was ignored; and its
+              // body carries `patterns[]` with no top-level occurrence_count, so the
+              // heuristic would read undefined -> 'present' and pin these gaps open forever
+              // while firing re-land escalations.
+              //
+              // A correct predicate here needs a field that is NONZERO WHEN HEALTHY. This
+              // detector counts failures; it has no such field. "none" is the honest answer
+              // until the resolver exposes one, and an honest "none" beats a predicate that
+              // closes on the defect.
             },
           },
         });

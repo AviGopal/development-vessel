@@ -1732,7 +1732,23 @@ async function verifyGapConditionAsync(gap: Record<string, unknown>): Promise<'p
     }
     if (!resolveShape) return 'unknown';
     // POST to the vessel's own in-container resolve endpoint.
-    const payload: Record<string, unknown> = { type: resolveShape, ...resolveInput };
+    // THE ROUTE REQUIRES AN ENVELOPE (2026-09-01). This POSTed a FLAT body,
+    // `{type, ...input}`, and src/routes/impulses.ts:1015-1027 requires
+    // `{impulse:{pointer:{...}}}`. Measured against the running vessel:
+    //
+    //   flat {type,...}              -> HTTP 400
+    //   {impulse:{pointer:{...}}}    -> HTTP 200
+    //
+    // and four lines below, `if (!resp.ok) return 'unknown'`. So EVERY Class-2
+    // evidence_resolve / verify_shape predicate in the fleet has been silently inert
+    // since this path was written — not one has ever been evaluated. The gap store
+    // shows the consequence: 703 of 1207 lifetime exits are `expired_not_redetected`,
+    // a 30-day timer, against 20 `landed_verified`.
+    //
+    // Nothing failed loudly because a 400 is indistinguishable from "no defect signal"
+    // once it becomes 'unknown'. Fifth producer/consumer envelope mismatch found today;
+    // this is the one that disabled a whole predicate class.
+    const payload: Record<string, unknown> = { impulse: { pointer: { type: resolveShape, ...resolveInput } } };
     let respBody: Record<string, unknown>;
     try {
       const SELF_RESOLVE_ENDPOINT = process.env['SELF_RESOLVE_ENDPOINT'] ?? `http://localhost:${process.env['PORT'] ?? '8090'}/v2/impulses/resolve`;

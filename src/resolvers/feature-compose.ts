@@ -20,7 +20,7 @@
  * rollback-on-fail. Landing (commit/push) is a SEPARATE downstream cutover step
  * — this resolver stages + reports, matching the mitosis-evaluate/cutover split.
  */
-import { METABOB_API_KEY } from "../config.js";
+import { METABOB_API_KEY, DISCOVERY_SHAPES } from "../config.js";
 import { federatedLlmEgressUrls } from "./federated-llm-egress.js";
 import { acquireComposeWorkspace, type ComposeWorkspace } from "./compose-workspace";
 import type { ResolverResult } from "./types.js";
@@ -29,7 +29,7 @@ import { resolveSubstrateGap, resolveSubstrateGapWrite } from "./substrate-gap.j
 import { writeAuthoringMarker, clearAuthoringMarker } from "./patch-with-tools.js";
 import { vacuousEditReason, nonTerminatingEditReason, deadStoreEditReason, truncatingRewriteReason } from "../vacuous-edit.js";
 import { acquireComposeSlot } from "../compose-slots.js";
-import { existsSync as mountExistsSync } from "node:fs";
+import { existsSync as mountExistsSync, readdirSync, readFileSync } from "node:fs";
 import { regionCandidatesFromText } from "./region-probe.js";
 import { symbolsNeedingDeclaration, renderSymbolDeclarations, typeNamesIn, renderSafeAnchors, safeAnchorLines, locateRegion, type SymbolDeclaration } from "../cross-file-symbols.js";
 import { refuseRederivedEdit } from "../edit-provenance.js";
@@ -1123,6 +1123,256 @@ export function detectArchitectureViolation(
     }
   }
   return violations;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// EXECUTING SHAPE-VOCABULARY GATE (2026-09-01). Every gate above this line READS
+// the diff. None of them RESOLVES anything. That is the hole this closes, and it
+// was measured, not theorised:
+//
+//   The substrate autonomously authored a closure predicate onto a gap write site
+//   in trace-failure-pattern-report.ts. It landed twice (05458f4, then 6b6068e):
+//
+//       evidence_resolve: { shape: "<the resolver's own internal return-shape name>",
+//                           input: {...}, nonzero_field: "occurrence_count" }
+//
+//   `evidence_resolve.shape` is RESOLVED THROUGH DISCOVERY by the closure sweep in
+//   gap-to-feature.ts. The name the drafter wrote was the resolver's internal
+//   RETURN-shape name, not the shape src/config.ts ADVERTISES
+//   (`trace_failure_pattern_report`). A registry query across all 390 advertised
+//   shapes returns no such shape. So the predicate resolved to nothing, produced
+//   'unknown', and left the gap exactly as unclosable as it was with NO predicate —
+//   an entirely inert change that nonetheless passed: typecheck (it is a string
+//   literal, so of course it typechecks), the semantic gate, TWO adversarial
+//   refuters, and the mitosis cutover's FAVORABLE verdict. The system's own log
+//   already states the principle it was missing:
+//
+//       "[fc-coverage] TARGET HAS NO TEST FILE: <path> — every gate below this
+//        point READS the diff; only a test RUNS it."
+//
+//   A NAME CROSSING A BOUNDARY IS ONLY CHECKABLE BY RESOLVING IT. Reading cannot
+//   distinguish a correct shape name from a plausible one; both are string literals
+//   in a valid object. So this gate resolves the name against the vocabulary.
+//
+// SCOPE — deliberately the single highest-value, lowest-false-positive case: a
+// `shape:` value inside an `evidence_resolve` object, and the `verify_shape:`
+// string shorthand (gap-to-feature.ts:1604-1606 documents both forms). Those two
+// positions are DEFINITIONALLY resolved through discovery later; a name there that
+// is not advertised cannot ever resolve. Every other string in a diff is not this
+// gate's business.
+//
+// AUTHORITY — `src/config.ts` `discovery.shapes`, read as a LOCAL FILE (via the
+// compile-time `DISCOVERY_SHAPES` import for this vessel, plus a best-effort scan
+// of the sibling vessels' `src/config.ts`). Deliberately NOT a call to the live
+// discovery registry: a network blip must not be able to make this gate fail
+// OPEN silently or fail CLOSED spuriously, and the compose lane cannot afford a
+// gate whose verdict depends on another unit being up. The live registry
+// (`registry_query`, or GET the discovery endpoint's shape index) is a valid
+// SECONDARY cross-check if one is ever wanted — it is the authority the sweep
+// actually queries — but making the gate DEPEND on it would trade a local
+// certainty for a remote one. Not done, on purpose.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * The advertised shape vocabulary, assembled from local files only.
+ *
+ * `DISCOVERY_SHAPES` (this vessel's own `src/config.ts`) is a compile-time import
+ * and therefore cannot fail to load. But the compose lane edits OTHER vessels too,
+ * and a predicate authored in activity-api naming an activity-api shape is
+ * perfectly correct while being absent from dev-vessel's list. So the vocabulary is
+ * WIDENED — never narrowed — by a best-effort scan of every sibling
+ * `<vessel>/src/config.ts`. Containment, not parsing: any quoted identifier-shaped
+ * literal anywhere in a vessel's config.ts counts. The vessel configs are not
+ * uniform (some inline a `shapes: [...]` array, some assign `DISCOVERY_SHAPES`, some
+ * have no discovery block at all), so structural parsing would be the fragile choice
+ * and its failure mode would be a FALSE REFUSAL. Over-wide is the safe direction
+ * here: it costs a missed catch, never a blocked lane.
+ *
+ * `configs_read` is reported so the caller can refuse to judge when the scan did not
+ * demonstrably work — see `detectUnadvertisedShapeLiteral`'s fail-open rule.
+ */
+export function loadFleetShapeVocabulary(roots?: string[]): { shapes: Set<string>; configs_read: number } {
+  const shapes = new Set<string>(DISCOVERY_SHAPES);
+  let configsRead = 0;
+  const candidateRoots = roots ?? [RUNTIME_ROOT, REPO_ROOT, `${SUPER_REPO_ROOT}/repos`];
+  const seenRoots = new Set<string>();
+  for (const root of candidateRoots) {
+    if (!root || seenRoots.has(root)) continue;
+    seenRoots.add(root);
+    let entries: string[] = [];
+    try {
+      entries = readdirSync(root);
+    } catch { continue; } // root absent (host-side test run, different layout) — additive scan, skip
+    for (const entry of entries) {
+      try {
+        const text = readFileSync(`${root}/${entry}/src/config.ts`, "utf8");
+        configsRead++;
+        for (const m of text.matchAll(/["'`]([A-Za-z_][A-Za-z0-9_.-]{2,80})["'`]/g)) shapes.add(m[1]!);
+      } catch { /* not a vessel dir, or unreadable — skip; the scan is additive */ }
+    }
+  }
+  return { shapes, configs_read: configsRead };
+}
+
+export interface UnadvertisedShapeFinding {
+  shape: string;      // the literal the diff introduced
+  position: string;   // "evidence_resolve.shape" | "verify_shape"
+  snippet: string;    // the added line, for the refusal reason and the re-draft feedback
+}
+
+/**
+ * THE EXECUTING GATE. Returns the shape literals this diff ADDS in a
+ * resolve-position that are not in the advertised vocabulary.
+ *
+ * Invariants, each one load-bearing:
+ *
+ *  1. FAIL OPEN on anything unevaluable. No vocabulary, a suspiciously small
+ *     vocabulary, a scan that did not demonstrably read sibling configs, or a throw
+ *     anywhere → return []. The lane lands ~2 changes/day; halting it because a gate
+ *     cannot SEE is a strictly larger regression than letting one hollow commit
+ *     through. A blind gate must abstain, loudly.
+ *  2. ONLY ADDED LINES ARE JUDGED. The `shape:` line itself must be a `+` line. The
+ *     target files run to thousands of lines and are full of names this gate has no
+ *     business policing; failing a compose for pre-existing content would make every
+ *     edit to a large file un-landable. An opener that is pre-existing CONTEXT with a
+ *     newly-added `shape:` under it is still judged — the added line is the one that
+ *     introduces the name.
+ *  3. COMMENTS ARE NOT CODE. This very file, and the corrected predicate site, both
+ *     NAME the bad shape in prose to explain the defect. A gate that flagged its own
+ *     documentation would be refuted by the corpus on the day it shipped.
+ *
+ * The window (an opener, then the `shape:` within a few lines) is used instead of a
+ * TS parse for the same reason the neighbouring gates are grep-shaped: a parser is a
+ * new failure mode whose failure direction is a false refusal.
+ */
+export function detectUnadvertisedShapeLiteral(
+  diff: string,
+  vocabulary?: { shapes: Set<string>; configs_read: number },
+): UnadvertisedShapeFinding[] {
+  try {
+    const vocab = vocabulary ?? loadFleetShapeVocabulary();
+    // FAIL-OPEN RULE. Refuse to judge unless the vocabulary demonstrably loaded: the
+    // sibling scan read real configs (≥5) AND the resulting set is plausibly a fleet
+    // vocabulary (≥50 names; dev-vessel alone advertises far more than that). Either
+    // check failing means we are looking at a partial or absent view of the fleet's
+    // shape contract, and judging a name against a partial vocabulary produces exactly
+    // the false refusal invariant 1 exists to prevent.
+    if (!vocab || !(vocab.shapes instanceof Set) || vocab.configs_read < 5 || vocab.shapes.size < 50) {
+      console.log(
+        `[fc-shape-vocab] FAIL-OPEN (admitting diff unjudged): shape vocabulary unavailable or implausible ` +
+        `(configs_read=${vocab?.configs_read ?? "n/a"}, vocabulary_size=${vocab?.shapes?.size ?? "n/a"}). ` +
+        `A gate that cannot see must not block the lane.`,
+      );
+      return [];
+    }
+
+    const lines = diff.split("\n");
+    // How far below an opener a `shape:` key may sit and still belong to it. The real
+    // predicate is 4-6 lines (shape / input{...} / nonzero_field); 12 is slack for a
+    // reformat, and bounded so an unrelated later `shape:` is never captured.
+    const WINDOW = 12;
+    const OPENER = /\b(evidence_resolve|verify_shape)\s*['"]?\s*:/;
+    const SHAPE_KEY = /\bshape\s*['"]?\s*:\s*["'`]([A-Za-z_][A-Za-z0-9_.-]*)["'`]/;
+    // `verify_shape` is the STRING SHORTHAND (gap-to-feature.ts:1606) — the shape name
+    // sits directly on the key, with no nested object. Missing this form would leave
+    // half the resolve-positions unchecked.
+    const VERIFY_SHORTHAND = /\bverify_shape\s*['"]?\s*:\s*["'`]([A-Za-z_][A-Za-z0-9_.-]*)["'`]/;
+
+    const findings: UnadvertisedShapeFinding[] = [];
+    const seen = new Set<string>();
+    let sinceOpener = Number.POSITIVE_INFINITY;
+
+    for (const raw of lines) {
+      // Diff bookkeeping lines carry no content — AND they CLOSE the window. The caller
+      // concatenates one diff per edited file into a single string (`### <abs>` headers,
+      // then `--- a/...`), so without this reset an `evidence_resolve:` opener in the last
+      // few lines of one file's hunk would stay open across the boundary and judge an
+      // unrelated `shape:` in the NEXT file's first hunk. That is a false refusal, which
+      // is the one thing this gate must never produce.
+      if (raw.startsWith("+++") || raw.startsWith("---") || raw.startsWith("@@") || raw.startsWith("### ")) {
+        sinceOpener = Number.POSITIVE_INFINITY;
+        continue;
+      }
+      const isAdded = raw.startsWith("+");
+      const isRemoved = raw.startsWith("-");
+      if (isRemoved) continue; // removed content is by definition not introduced
+      const code = (isAdded ? raw.slice(1) : raw.startsWith(" ") ? raw.slice(1) : raw).trim();
+
+      // Invariant 3: prose that NAMES a shape is not a use of it.
+      if (!code || code.startsWith("//") || code.startsWith("*") || code.startsWith("/*")) {
+        if (sinceOpener !== Number.POSITIVE_INFINITY) sinceOpener++;
+        continue;
+      }
+
+      const record = (shape: string, position: string): void => {
+        if (vocab.shapes.has(shape)) return;
+        const key = position + "|" + shape;
+        if (seen.has(key)) return;
+        seen.add(key);
+        findings.push({ shape, position, snippet: code.slice(0, 200) });
+      };
+
+      // Form A — the string shorthand, self-contained on one line.
+      if (isAdded) {
+        const vs = code.match(VERIFY_SHORTHAND);
+        if (vs) record(vs[1]!, "verify_shape");
+      }
+
+      const opened = OPENER.test(code);
+      // Form B — `shape:` inside an evidence_resolve/verify_shape object. Judged only
+      // when the line bearing the literal is one the diff ADDS (invariant 2), and only
+      // inside the window below an opener (which may itself be unchanged context).
+      if ((opened || sinceOpener <= WINDOW) && isAdded) {
+        const sk = code.match(SHAPE_KEY);
+        if (sk) record(sk[1]!, "evidence_resolve.shape");
+      }
+      sinceOpener = opened ? 0 : sinceOpener + 1;
+    }
+
+    // Invariant: BOTH outcomes are logged. A gate whose confirming case is silent is
+    // indistinguishable from a gate that never ran — and in this codebase that exact
+    // ambiguity has cost more diagnostic time than any loud error. If you are reading
+    // logs looking for this gate, its absence means it did not execute.
+    if (findings.length === 0) {
+      console.log(
+        `[fc-shape-vocab] PASS: no unadvertised shape literal introduced in a resolve position ` +
+        `(vocabulary=${vocab.shapes.size} shapes from ${vocab.configs_read} vessel config(s)).`,
+      );
+    } else {
+      console.log(
+        `[fc-shape-vocab] REFUSED: ${findings.length} shape literal(s) introduced in a resolve position are NOT ` +
+        `in the advertised vocabulary (${vocab.shapes.size} shapes from ${vocab.configs_read} vessel config(s)): ` +
+        `${JSON.stringify(findings)}. A name that discovery cannot resolve makes the predicate inert.`,
+      );
+    }
+    return findings;
+  } catch (err) {
+    // Invariant 1, final backstop: a throw inside a verification gate must never be
+    // able to wedge self-development.
+    console.log(`[fc-shape-vocab] FAIL-OPEN (admitting diff unjudged): gate error, non-fatal: ${String(err)}`);
+    return [];
+  }
+}
+
+/**
+ * Render the gate's findings as a semantic-gate refusal reason. Written for the
+ * DRAFTER, not for a human reader: this string is persisted onto the gap as
+ * `semantic_gate_reason` and injected into the next draft by
+ * `priorAttemptFeedbackBlock`, so it must name the wrong value, the position, and
+ * WHERE the right name lives. That feedback path is what turns this gate from a
+ * blocker into a repair — the drafter guessed this name twice in a row precisely
+ * because nothing ever told it the guess was wrong.
+ */
+export function unadvertisedShapeRefusalReason(findings: UnadvertisedShapeFinding[]): string {
+  return (
+    `[fc-shape-vocab] the patch introduces ${findings.length} shape name(s) in a position that is RESOLVED ` +
+    `THROUGH DISCOVERY at closure-sweep time, and none of them is advertised by any vessel's ` +
+    `src/config.ts discovery.shapes: ` +
+    findings.map((f) => `"${f.shape}" (at ${f.position})`).join(", ") +
+    `. An unadvertised name resolves to nothing, so the predicate is INERT even though it typechecks. ` +
+    `Use the shape the owning vessel ADVERTISES in src/config.ts discovery.shapes — NOT the resolver's ` +
+    `internal return-shape name, and not a plausible-looking guess.`
+  );
 }
 
 /**
@@ -4824,6 +5074,29 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
       }
       const diff = diffParts.join("\n\n");
 
+      // EXECUTING SHAPE-VOCABULARY GATE (2026-09-01). Run FIRST, before the
+      // reachability greps and the LLM judge: a name discovery cannot resolve makes
+      // the predicate inert regardless of how reachable or well-argued the code around
+      // it is, and refusing here also spares the judge call. See
+      // `detectUnadvertisedShapeLiteral` for the measured defect (05458f4 / 6b6068e)
+      // and the fail-open rules. It returns [] whenever it cannot evaluate.
+      const shapeVocabFindings = detectUnadvertisedShapeLiteral(diff);
+      // Deliberately routed through the EXISTING `addresses:false` plumbing rather than
+      // a parallel refusal branch: that path already flips the verdict to UNFAVORABLE,
+      // rolls back, and — critically — writes `semantic_gate_reason` onto the gap, which
+      // `priorAttemptFeedbackBlock` injects into the NEXT draft. The drafter guessed the
+      // unadvertised name twice because nothing ever fed the failure back.
+      const shapeVocabRefusal: SemanticGateVerdict | null = shapeVocabFindings.length > 0
+        ? {
+            addresses: false,
+            reason: unadvertisedShapeRefusalReason(shapeVocabFindings),
+            on_live_path: true,
+            hard_fail: true,     // deterministic, no LLM consulted
+            llm_consulted: false,
+            verified: true,      // a resolved-name check IS a real judgment, not a fail-open
+          }
+        : null;
+
       // Reachability facts: for each changed symbol, grep the touched vessels' src/
       // for call-sites (excluding the definition) + classify as entrypoint.
       const symbols = extractChangedSymbols(diff);
@@ -4945,7 +5218,7 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
         } catch { /* rolled back or missing - skip */ }
       }
       const dataFlowFacts = computeDataFlowFacts(diff, postPatchContents);
-      semantic_gate = await verifyPatchAddressesGap({
+      semantic_gate = shapeVocabRefusal ?? await verifyPatchAddressesGap({
         gapSummary,
         gapMeta: pointer.gap?.classification_metadata,
         diff,

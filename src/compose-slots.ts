@@ -107,7 +107,8 @@ function capFromEnv(): number {
   // "unlimited": a wrong cap must make the fleet slow, never the host unusable.
   const raw = Number(process.env["COMPOSE_MAX_CONCURRENT"] ?? 2);
   // A cap of 0 means zero slots; any other invalid value (NaN, negative) falls back to the default of 2.
-  return Number.isFinite(raw) && raw >= 0 ? Math.floor(raw) : 2;
+  if (!Number.isFinite(raw) || raw < 0) return 2;
+  return Math.floor(raw);
 }
 
 /**

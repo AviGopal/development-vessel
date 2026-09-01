@@ -175,11 +175,18 @@ export async function resolveTraceFailurePatternReport(
               failing_capability: p.template_id,
               first_failed_task_id: p.first_failed_task_id,
               failure_mode_types: p.failure_mode_types,
-              evidence_resolve: { shape: 'trace_failure', input: { template_id: p.template_id, first_failed_task_id: p.first_failed_task_id }, nonzero_field: 'occurrence_count' },
               occurrence_count: p.occurrence_count,
               example_trace_ids: p.example_trace_ids,
               successful_task_count: p.successful_task_count,
               total_task_count: p.total_task_count,
+              evidence_resolve: {
+                shape: "failurePatternReport",
+                input: {
+                  template_id: p.template_id,
+                  first_failed_task_id: p.first_failed_task_id
+                },
+                nonzero_field: "occurrence_count"
+              },
             },
           },
         });

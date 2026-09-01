@@ -36,6 +36,10 @@ import { WORKSPACE_ROOT as DEFAULT_WORKSPACE_ROOT } from "../config.js";
 import type { ResolverResult } from "./types.js";
 import { readFile, writeFile, rename, mkdir } from "node:fs/promises";
 import { join } from "node:path";
+// From ../shape-vocabulary.js, NOT from feature-compose.ts where this loader used to
+// live: feature-compose.ts imports THIS module, so importing back would close a cycle.
+// It was extracted rather than copied — see the header of that file.
+import { loadFleetShapeVocabulary, vocabularyIsJudgeable, type ShapeVocabulary } from "../shape-vocabulary.js";
 
 // Captured ONCE at module load (matches config.ts's own WORKSPACE_ROOT export),
 // not re-read at call time. Read-at-call-time was deliberate so tests could set
@@ -253,6 +257,184 @@ async function saveGaps(gaps: SubstrateGap[]): Promise<void> {
   await rename(tmp, GAPS_PATH());
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// FALSIFIER ACCOUNTING (2026-09-01)
+//
+// THE MEASUREMENT that forced this. 487 open gaps; 5 (1.0%) carried any
+// measurable closure predicate. `sweepPendingLandVerifications` closes a gap only
+// on a MEASURED verdict, so a gap with no predicate yields 'pending' and the sweep
+// correctly abstains — FOREVER. The 30-day TTL becomes its only exit. 34
+// consecutive sweep ticks that day were byte-identical:
+//   checked=18 closed=0 {absent:0, present:6, pending:11, unknown:1}
+// The sweep is not broken; abstaining on unmeasurable evidence is the whole point
+// (§12.6). What was missing is that "can this gap ever close?" was not a fact the
+// store held — an operator had to grep for it.
+//
+// WHY THE WRITE PATH AND NOT THE DETECTORS. Category is not the writer:
+// `systematic_failure` alone holds 108 open gaps written by at least four distinct
+// call sites. A per-detector fix reaches a trickle. Every gap in the store, from
+// every writer, passes through resolveSubstrateGapWrite exactly once.
+//
+// WHAT THIS DOES AND DOES NOT DO. It is ACCOUNTING, not invention. It classifies
+// the predicate the writer supplied and stamps the verdict beside it. It never
+// derives, guesses, or synthesises a predicate from the summary — that was tried
+// (be26a6b) and REVERTED as net-negative: of 15 summary-derived literals only ~4
+// named the actual defect; the rest quoted the FIX (inverted polarity) or named
+// anchors the summary said were RETAINED. Worse, the cutover mirrors the fix
+// BEFORE the stamp, so a derived literal read 'present' by construction and
+// manufactured re-lands. And it NEVER REJECTS a gap for lacking a falsifier: 99%
+// have none, and refusing them would halt detection fleet-wide.
+//
+// WHY "unresolvable" IS ITS OWN CLASS, distinct from "none". A Class-2 predicate
+// naming a shape the fleet does not advertise is INERT — it resolves to nothing,
+// yields 'unknown', and leaves the gap exactly as unclosable as no predicate at
+// all, while LOOKING measurable. That is worse than "none", because it reads as
+// covered. Not hypothetical: the substrate authored
+// `evidence_resolve: { shape: "failurePatternReport" }` and landed it twice
+// (05458f4, 6b6068e). The advertised name is `trace_failure_pattern_report`.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * The four verdicts, in the order the rule tries them.
+ *
+ *   class1        — a usable `hardcoded_url`: a literal that must go ABSENT.
+ *   class2        — a usable `evidence_resolve.shape` / `verify_shape` naming an
+ *                   ADVERTISED shape: a re-measurement the sweep can actually run.
+ *   unresolvable  — the same, but naming a shape the fleet does not advertise.
+ *   none          — no predicate at all. The 99% case, and not an error.
+ */
+export type FalsifierClass = "class1" | "class2" | "unresolvable" | "none";
+
+export interface FalsifierClassification {
+  falsifier: FalsifierClass;
+  /** The offending literal, present only on "unresolvable" — an escalation needs the NAME. */
+  unadvertised_shape?: string;
+  /** Which position carried the predicate: "hardcoded_url" | "evidence_resolve.shape" | "verify_shape". */
+  predicate_position?: string;
+  /** ISO timestamp of the classification, so an audit can tell a fresh stamp from a carried-forward one. */
+  classified_at?: string;
+}
+
+/** A predicate string is only usable if it is a non-empty, non-placeholder string. */
+function usablePredicateString(v: unknown): string | null {
+  if (typeof v !== "string") return null;
+  const t = v.trim();
+  if (t.length === 0) return null;
+  if (/\{\{[^}]*\}\}/.test(t)) return null; // an unbound template slot measures nothing
+  return t;
+}
+
+/**
+ * Cached fleet vocabulary. `loadFleetShapeVocabulary` does a full readdir +
+ * readFile sweep of every vessel's config.ts; running that on every gap write —
+ * and gaps are written by a dozen detectors on every tick — would put a
+ * filesystem scan on the hot path of the substrate's own detection loop. The
+ * vocabulary changes only when a vessel's config.ts changes, i.e. at a deploy, so
+ * minutes of staleness is immaterial. Staleness direction is also safe: a
+ * NEWLY-advertised shape read as unadvertised only mis-labels the gap for a few
+ * minutes and never blocks the write.
+ */
+let __vocabCache: { at: number; vocab: ShapeVocabulary } | null = null;
+const VOCAB_TTL_MS = 5 * 60_000;
+function cachedFleetVocabulary(): ShapeVocabulary | null {
+  const now = Date.now();
+  if (__vocabCache && now - __vocabCache.at < VOCAB_TTL_MS) return __vocabCache.vocab;
+  try {
+    const vocab = loadFleetShapeVocabulary();
+    __vocabCache = { at: now, vocab };
+    return vocab;
+  } catch {
+    // FAIL OPEN (constraint D). An unreadable filesystem is not evidence about any
+    // shape name. Callers treat a null vocabulary as "cannot judge" → "class2".
+    return null;
+  }
+}
+
+/**
+ * THE CLASSIFICATION RULE, stated once and in precedence order:
+ *
+ *   1. a usable `hardcoded_url` string                        → "class1"
+ *   2. else a usable shape name at `evidence_resolve.shape`
+ *      or `verify_shape`, checked against the vocabulary      → "class2" | "unresolvable"
+ *   3. else                                                   → "none"
+ *
+ * `hardcoded_url` wins over a Class-2 predicate because that is the sweep's own
+ * precedence: verifyGapCondition tests the literal first and never reaches the
+ * async evidence branch when one is present. The stamp must describe what the
+ * sweep will actually do, not what the metadata merely contains.
+ *
+ * An `evidence_resolve` object present but carrying no usable `shape` classifies
+ * "none", not "unresolvable": "unresolvable" means a name was supplied and does
+ * not resolve, whereas no name at all is the same nothing as no predicate. Saying
+ * "unresolvable" there would blame the writer for a name it never wrote.
+ *
+ * FAIL OPEN below the vocabulary threshold (constraint D, shared with the compose
+ * gate via `vocabularyIsJudgeable`): if the scan did not demonstrably work
+ * (configs_read < 5 or < 50 names — the host-side layout, an isolated worktree, a
+ * container with a different mount), a Class-2 predicate is stamped "class2".
+ * An unreadable filesystem must never be allowed to invent a defect.
+ */
+export function classifyFalsifier(
+  meta: Record<string, unknown> | undefined | null,
+  vocabulary?: ShapeVocabulary | null,
+): FalsifierClassification {
+  const m = (meta ?? {}) as Record<string, unknown>;
+  const at = new Date().toISOString();
+
+  if (usablePredicateString(m["hardcoded_url"])) {
+    return { falsifier: "class1", predicate_position: "hardcoded_url", classified_at: at };
+  }
+
+  const evidenceResolve = m["evidence_resolve"];
+  const fromEvidence =
+    evidenceResolve && typeof evidenceResolve === "object" && !Array.isArray(evidenceResolve)
+      ? usablePredicateString((evidenceResolve as Record<string, unknown>)["shape"])
+      : null;
+  const fromVerifyShape = usablePredicateString(m["verify_shape"]);
+  const shapeName = fromEvidence ?? fromVerifyShape;
+  const position = fromEvidence ? "evidence_resolve.shape" : fromVerifyShape ? "verify_shape" : undefined;
+
+  if (!shapeName || !position) {
+    return { falsifier: "none", classified_at: at };
+  }
+
+  const vocab = vocabulary === undefined ? cachedFleetVocabulary() : vocabulary;
+  if (!vocabularyIsJudgeable(vocab)) {
+    // Cannot see → cannot accuse. Credit the predicate.
+    return { falsifier: "class2", predicate_position: position, classified_at: at };
+  }
+  if (vocab!.shapes.has(shapeName)) {
+    return { falsifier: "class2", predicate_position: position, classified_at: at };
+  }
+  return {
+    falsifier: "unresolvable",
+    unadvertised_shape: shapeName,
+    predicate_position: position,
+    classified_at: at,
+  };
+}
+
+/**
+ * The store-wide coverage census — the aggregate the operator used to compute by
+ * hand. Returned on every read so `falsifier='none'` is answerable FROM THE STORE.
+ * Counted over OPEN gaps only: a closed gap's closability is settled history.
+ *
+ * `unstamped` counts open rows written before this accounting existed (or by a
+ * path whose stamp threw). It is not the same as "none" and must not be folded
+ * into it — conflating "we looked and found nothing" with "we never looked" is
+ * the exact ambiguity this whole mechanism exists to remove.
+ */
+export function falsifierCoverage(gaps: SubstrateGap[]): Record<string, number> {
+  const counts: Record<string, number> = { class1: 0, class2: 0, unresolvable: 0, none: 0, unstamped: 0 };
+  for (const g of gaps) {
+    if ((g.status ?? "open") !== "open") continue;
+    const f = ((g.classification_metadata ?? {}) as Record<string, unknown>)["falsifier"];
+    if (typeof f === "string" && f in counts) counts[f]!++;
+    else counts["unstamped"]!++;
+  }
+  return counts;
+}
+
 export async function resolveSubstrateGap(
   pointer: SubstrateGapReadPointer,
 ): Promise<ResolverResult> {
@@ -284,7 +466,15 @@ export async function resolveSubstrateGap(
 
   return {
     shape: "substrateGap",
-    body: { gaps: results, total: results.length },
+    body: {
+      gaps: results,
+      total: results.length,
+      // ADDITIVE. Existing consumers read `gaps`/`total` only. This is the census
+      // over the WHOLE open store (not the filtered/limited page) so that
+      // "how many open gaps can never close?" is answerable from any read instead
+      // of by hand-grepping the store file.
+      falsifier_coverage: falsifierCoverage(gaps),
+    },
   };
 }
 
@@ -329,6 +519,9 @@ function coerceFlatGapPointer(p: Record<string, unknown>): Record<string, unknow
 
 export async function resolveSubstrateGapWrite(
   pointer: SubstrateGapWritePointer | Record<string, unknown>,
+  // Additive, test-facing: inject a vocabulary rather than depending on the host's
+  // filesystem layout. No production caller passes it (the cached fleet scan is used).
+  opts?: { vocabulary?: ShapeVocabulary | null },
 ): Promise<ResolverResult> {
   const flat = coerceFlatGapPointer(pointer as Record<string, unknown>);
   if (flat) (pointer as Record<string, unknown>)["gap"] = flat;
@@ -428,9 +621,16 @@ export async function resolveSubstrateGapWrite(
   // Serialize the ENTIRE read-modify-write: load, dedup/gate decisions, lineage
   // stamping and save all run inside one critical section (see withGapLock), so
   // concurrent writers can neither share a tmp nor drop each other's gaps.
+  // Load the vocabulary OUTSIDE the lock. `loadFleetShapeVocabulary` is a readdir +
+  // readFile sweep of every vessel's config.ts; holding the gap-store lock across a
+  // filesystem scan would serialise every gap writer in the fleet behind it.
+  // (Cached with a TTL, so this is usually free — see cachedFleetVocabulary.)
+  const vocabForClassify: ShapeVocabulary | null =
+    opts?.vocabulary !== undefined ? opts.vocabulary : cachedFleetVocabulary();
+
   const outcome = await withGapLock(async (): Promise<
     | { early: ResolverResult }
-    | { action: "created" | "updated"; summaryChanged: boolean; reopened: boolean; classKey: string }
+    | { action: "created" | "updated"; summaryChanged: boolean; reopened: boolean; classKey: string; falsifier: FalsifierClass; unadvertisedShape?: string }
   > => {
   const gaps = await loadGaps();
   // Dedup by gap CLASS (volatile-stripped id), not raw id, so timestamped
@@ -557,12 +757,57 @@ export async function resolveSubstrateGapWrite(
     action = "created";
   }
 
+  // ── FALSIFIER STAMP ──────────────────────────────────────────────────────────
+  // AFTER the metadata merge above, deliberately. The carry-forward loop copies an
+  // existing row's `evidence_resolve` into a re-emission that lacks one (detectors
+  // re-emit with fresh, predicate-free metadata every cycle). Classifying the
+  // INCOMING metadata would therefore stamp "none" onto a row that still holds a
+  // perfectly usable predicate — the stamp would lie about exactly the population
+  // it exists to count. Classifying the MERGED object also naturally overwrites a
+  // stale `falsifier` carried forward from the existing row.
+  //
+  // The whole block is fail-open (constraint A outranks this feature): a throw here
+  // leaves the gap unstamped and WRITTEN. A bug in the accounting must never be able
+  // to block the substrate's detection loop.
+  let falsifier: FalsifierClass = "none";
+  let unadvertisedShape: string | undefined;
+  try {
+    const merged = (gap.classification_metadata ?? {}) as Record<string, unknown>;
+    const c = classifyFalsifier(merged, vocabForClassify);
+    falsifier = c.falsifier;
+    unadvertisedShape = c.unadvertised_shape;
+    // ADD BESIDE, NEVER REWRITE (constraint C). The writer's predicate — whatever it
+    // said, however wrong the shape name — survives byte-identical. An "unresolvable"
+    // verdict is a label on the data, not a correction of it; silently mutating a
+    // caller's metadata is how the field-name mismatches in this store became
+    // invisible in the first place.
+    merged["falsifier"] = c.falsifier;
+    if (c.predicate_position) merged["falsifier_position"] = c.predicate_position;
+    else delete merged["falsifier_position"];
+    if (c.unadvertised_shape) merged["falsifier_unadvertised_shape"] = c.unadvertised_shape;
+    else delete merged["falsifier_unadvertised_shape"];  // clear a stale accusation carried from the old row
+    merged["falsifier_classified_at"] = c.classified_at;
+    gap.classification_metadata = merged;
+  } catch (err) {
+    console.error(`[gap-falsifier] classification threw for ${gap.id} (non-fatal, gap still written):`, err);
+  }
+
   await saveGaps(gaps);
-  return { action, summaryChanged, reopened, classKey };
+  return { action, summaryChanged, reopened, classKey, falsifier, unadvertisedShape };
   });
 
   if ("early" in outcome) return outcome.early;
-  const { action, summaryChanged, reopened, classKey } = outcome;
+  const { action, summaryChanged, reopened, classKey, falsifier, unadvertisedShape } = outcome;
+  // ONE LINE PER WRITE. A silent classification is worth nothing: this codebase has
+  // repeatedly shipped mechanisms whose CONFIRMING case emitted no evidence, and a
+  // mechanism that only speaks when it objects is indistinguishable from one that
+  // never ran. Naming the unadvertised shape matters most — that literal is what an
+  // escalation needs, and the drafter guessed `failurePatternReport` twice for want
+  // of exactly this feedback.
+  console.log(
+    `[gap-falsifier] ${action} ${gap.id}: falsifier=${falsifier}` +
+    (unadvertisedShape ? ` unadvertised_shape="${unadvertisedShape}" (predicate is INERT — it will resolve to nothing and the sweep will abstain forever)` : ""),
+  );
   // This whole block has a REAL production side effect: it shells out to `systemctl
   // start gap-compose.service` against whatever systemd this process can reach, and
   // separately fetches this vessel's own HTTP surface to nudge an in-process compose.
@@ -689,6 +934,12 @@ export async function resolveSubstrateGapWrite(
 
   return {
     shape: "substrateGapWriteResult",
-    body: { id: gap.id, action, gap_class: classKey },
+    body: {
+      id: gap.id,
+      action,
+      gap_class: classKey,
+      falsifier,
+      ...(unadvertisedShape ? { falsifier_unadvertised_shape: unadvertisedShape } : {}),
+    },
   };
 }

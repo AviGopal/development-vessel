@@ -33,6 +33,9 @@ import { existsSync as mountExistsSync, readdirSync, readFileSync } from "node:f
 import { regionCandidatesFromText } from "./region-probe.js";
 import { symbolsNeedingDeclaration, renderSymbolDeclarations, typeNamesIn, renderSafeAnchors, safeAnchorLines, locateRegion, type SymbolDeclaration } from "../cross-file-symbols.js";
 import { refuseRederivedEdit } from "../edit-provenance.js";
+import { RUNTIME_ROOT, SUPER_REPO_ROOT, REPO_ROOT, loadFleetShapeVocabulary } from "../shape-vocabulary.js";
+export { loadFleetShapeVocabulary } from "../shape-vocabulary.js";
+export type { ShapeVocabulary } from "../shape-vocabulary.js";
 
 /**
  * How far a planned anchor may sit from the located region before it is treated as
@@ -57,7 +60,8 @@ const FED_TRANSPORT_EGRESS = process.env.FED_TRANSPORT_EGRESS ?? "http://127.0.0
 // "/vessels"). The host repo bind-mount is READ-ONLY from the container; a
 // host-side poller bridges /vessels changes to git. Paths are repos/<vessel>/...
 // in the plan and mapped to ${RUNTIME_ROOT}/<vessel>/... here.
-const RUNTIME_ROOT = process.env.MITOSIS_RUNTIME_DIR ?? "/vessels";
+// RUNTIME_ROOT / SUPER_REPO_ROOT / REPO_ROOT now live in ../shape-vocabulary.ts (the
+// vocabulary loader scans them) and are imported above — one env derivation, not two.
 /**
  * The super-repo push clone.
  *
@@ -67,8 +71,7 @@ const RUNTIME_ROOT = process.env.MITOSIS_RUNTIME_DIR ?? "/vessels";
  * A git command run inside the symlinked runtime path walks up and finds it, so
  * the cutover commits and pushes from the right place without special-casing.
  */
-const SUPER_REPO_ROOT = process.env.MITOSIS_SUPER_REPO_DIR ?? "/workspace/git/super-repo";
-const REPO_ROOT = process.env.MITOSIS_REPO_ROOT ?? RUNTIME_ROOT;
+
 // 90s was fine for SURGICAL plans (small output) but timed out the DECOMPOSE call for
 // MULTI-COMPONENT / architectural changes — the plan there is large (a new migration's
 // full contents + several coordinated edits), so generation runs longer. Raise it so the
@@ -1173,67 +1176,13 @@ export function detectArchitectureViolation(
 // certainty for a remote one. Not done, on purpose.
 // ─────────────────────────────────────────────────────────────────────────────
 
-/**
- * The advertised shape vocabulary, assembled from local files only.
- *
- * `DISCOVERY_SHAPES` (this vessel's own `src/config.ts`) is a compile-time import
- * and therefore cannot fail to load. But the compose lane edits OTHER vessels too,
- * and a predicate authored in activity-api naming an activity-api shape is
- * perfectly correct while being absent from dev-vessel's list. So the vocabulary is
- * WIDENED — never narrowed — by a best-effort scan of every sibling
- * `<vessel>/src/config.ts`. Containment, not parsing: any quoted identifier-shaped
- * literal anywhere in a vessel's config.ts counts. The vessel configs are not
- * uniform (some inline a `shapes: [...]` array, some assign `DISCOVERY_SHAPES`, some
- * have no discovery block at all), so structural parsing would be the fragile choice
- * and its failure mode would be a FALSE REFUSAL. Over-wide is the safe direction
- * here: it costs a missed catch, never a blocked lane.
- *
- * `configs_read` is reported so the caller can refuse to judge when the scan did not
- * demonstrably work — see `detectUnadvertisedShapeLiteral`'s fail-open rule.
- */
-export function loadFleetShapeVocabulary(
-  roots?: string[],
-  vesselRoots?: string[],
-): { shapes: Set<string>; configs_read: number } {
-  const shapes = new Set<string>(DISCOVERY_SHAPES);
-  let configsRead = 0;
-  const harvest = (path: string): void => {
-    const text = readFileSync(path, "utf8"); // throws → caller skips
-    configsRead++;
-    for (const m of text.matchAll(/["'`]([A-Za-z_][A-Za-z0-9_.-]{2,80})["'`]/g)) shapes.add(m[1]!);
-  };
-  // ISOLATED-COMPOSE ROOTS (2026-09-01, review finding 3). A compose that gets its own
-  // worktree edits `${COMPOSE_WS_DIR}/<id>/<vessel>` (compose-workspace.ts), which is
-  // under NONE of the fleet roots below. Without these the vocabulary is the ORIGIN
-  // view, so a change that ADVERTISES a shape in config.ts and USES it in an
-  // evidence_resolve in the SAME diff would be refused for naming a shape that — by
-  // the time the sweep runs — is advertised. Caller passes `ws.rootFor(vessel)` for
-  // every touched vessel; these are vessel roots (contain src/), not roots-of-vessels.
-  for (const vr of vesselRoots ?? []) {
-    if (!vr) continue;
-    try { harvest(`${vr}/src/config.ts`); } catch { /* not isolated / unreadable — additive */ }
-  }
-  const candidateRoots = roots ?? [
-    RUNTIME_ROOT,
-    REPO_ROOT,
-    `${SUPER_REPO_ROOT}/repos`,
-    process.env["MITOSIS_PUSH_CLONE_DIR"] ?? "/workspace/git/vessels",
-  ];
-  const seenRoots = new Set<string>();
-  for (const root of candidateRoots) {
-    if (!root || seenRoots.has(root)) continue;
-    seenRoots.add(root);
-    let entries: string[] = [];
-    try {
-      entries = readdirSync(root);
-    } catch { continue; } // root absent (host-side test run, different layout) — additive scan, skip
-    for (const entry of entries) {
-      try { harvest(`${root}/${entry}/src/config.ts`); }
-      catch { /* not a vessel dir, or unreadable — skip; the scan is additive */ }
-    }
-  }
-  return { shapes, configs_read: configsRead };
-}
+// `loadFleetShapeVocabulary` MOVED to ../shape-vocabulary.ts (2026-09-01) and is
+// re-exported above, so every existing importer of it from this module — including
+// feature-compose-shape-vocabulary-gate.test.ts — is unaffected. It moved because the
+// gap WRITE path (substrate-gap.ts) needs the same vocabulary to tell a usable Class-2
+// closure predicate from an inert one, and this module already imports substrate-gap.ts:
+// importing back would close a cycle. Two copies of the oracle was the other option and
+// is the worse one — a fix applied to one copy of duplicated logic is not a fix.
 
 export interface UnadvertisedShapeFinding {
   shape: string;      // the literal the diff introduced

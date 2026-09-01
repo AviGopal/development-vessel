@@ -309,8 +309,14 @@ export interface FalsifierClassification {
   falsifier: FalsifierClass;
   /** The offending literal, present only on "unresolvable" — an escalation needs the NAME. */
   unadvertised_shape?: string;
-  /** Which position carried the predicate: "hardcoded_url" | "evidence_resolve.shape" | "verify_shape". */
+  /** Which position carried the predicate: "hardcoded_url" | "evidence_resolve.shape" | "verify_shape" | "evidence_resolve.type". */
   predicate_position?: string;
+  /**
+   * Why an "unresolvable" verdict was reached when it is NOT an unadvertised shape — today
+   * only the Class-1-without-edit-site case. An escalation that cannot say WHY a predicate
+   * is inert cannot be acted on, and "unresolvable" alone would read as a bad shape name.
+   */
+  unresolvable_reason?: string;
   /** ISO timestamp of the classification, so an audit can tell a fresh stamp from a carried-forward one. */
   classified_at?: string;
 }
@@ -381,18 +387,58 @@ export function classifyFalsifier(
   const m = (meta ?? {}) as Record<string, unknown>;
   const at = new Date().toISOString();
 
+  // CLASS-1 NEEDS AN EDIT SITE, OR THE SWEEP CANNOT USE IT (2026-09-01, pre-push review).
+  //
+  // verifyGapCondition gates the whole Class-1 branch on BOTH being present —
+  // gap-to-feature.ts:1563 and its async twin at :1650 read `if (editSite && hardcodedUrl)`.
+  // A literal with no file to read it in is never measured, so stamping it `class1` would
+  // reproduce, inside the accounting itself, the exact "looks measurable, is inert" defect
+  // this classification exists to expose. Zero live instances today (1 of 490 open gaps
+  // carries a hardcoded_url and it has an edit_site) — but a census that can lie is worse
+  // than no census, because the lie is what gets acted on.
+  //
+  // `unresolvable` is the honest label: a predicate WAS supplied and cannot be resolved,
+  // which is the same failure the unadvertised-shape case names.
   if (usablePredicateString(m["hardcoded_url"])) {
+    const editSite = usablePredicateString(m["edit_site"]) ?? usablePredicateString(m["file_path"]);
+    if (!editSite) {
+      return {
+        falsifier: "unresolvable",
+        predicate_position: "hardcoded_url",
+        unresolvable_reason: "hardcoded_url without edit_site/file_path — verifyGapCondition never enters the Class-1 branch",
+        classified_at: at,
+      };
+    }
     return { falsifier: "class1", predicate_position: "hardcoded_url", classified_at: at };
   }
 
   const evidenceResolve = m["evidence_resolve"];
-  const fromEvidence =
+  const evidenceObj =
     evidenceResolve && typeof evidenceResolve === "object" && !Array.isArray(evidenceResolve)
-      ? usablePredicateString((evidenceResolve as Record<string, unknown>)["shape"])
+      ? (evidenceResolve as Record<string, unknown>)
       : null;
+  const fromEvidence = evidenceObj ? usablePredicateString(evidenceObj["shape"]) : null;
   const fromVerifyShape = usablePredicateString(m["verify_shape"]);
-  const shapeName = fromEvidence ?? fromVerifyShape;
-  const position = fromEvidence ? "evidence_resolve.shape" : fromVerifyShape ? "verify_shape" : undefined;
+  // SAMPLE-BODY FALLBACK — MIRROR THE SWEEP, DO NOT UNDERCOUNT IT (2026-09-01, review).
+  //
+  // verifyGapConditionAsync (gap-to-feature.ts:1699-1712) does NOT require
+  // `evidence_resolve.shape`: when the object carries a sample body instead, it derives the
+  // shape from `verify_shape`, and failing that from the gap id. Classifying such a gap
+  // `none` says "this can never close" about a gap the sweep can in fact measure.
+  //
+  // This is the live shape of the data, not a hypothetical: the single open evidence_resolve
+  // predicate in the store is sample-body form ({type:"reachHistory", week:"2026-08-17"}),
+  // and the documented `.shape` form has zero live instances. It classified correctly only
+  // because it happens to also carry verify_shape.
+  const fromSampleBodyType = evidenceObj && !fromEvidence ? usablePredicateString(evidenceObj["type"]) : null;
+  const shapeName = fromEvidence ?? fromVerifyShape ?? fromSampleBodyType;
+  const position = fromEvidence
+    ? "evidence_resolve.shape"
+    : fromVerifyShape
+      ? "verify_shape"
+      : fromSampleBodyType
+        ? "evidence_resolve.type"
+        : undefined;
 
   if (!shapeName || !position) {
     return { falsifier: "none", classified_at: at };

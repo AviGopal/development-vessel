@@ -144,10 +144,45 @@ describe("classifyFalsifier — the four verdicts", () => {
     // DO, not merely what the metadata contains — otherwise the census counts a class
     // of work that never happens.
     const c = classifyFalsifier(
-      { hardcoded_url: "const PORT = 8080", evidence_resolve: { shape: "failurePatternReport" } },
+      {
+        hardcoded_url: "const PORT = 8080",
+        // Class-1 only counts WITH an edit site — verifyGapCondition reads
+        // `if (editSite && hardcodedUrl)`. Supplying one here keeps this test about
+        // PRECEDENCE rather than accidentally re-testing the edit-site rule below.
+        edit_site: "repos/development-vessel/src/config.ts",
+        evidence_resolve: { shape: "failurePatternReport" },
+      },
       vocab(),
     );
     expect(c.falsifier).toBe("class1");
+  });
+
+  it('a hardcoded_url with NO edit_site is "unresolvable" — the sweep can never read it', () => {
+    // gap-to-feature.ts:1563 and its async twin at :1650 both gate the whole Class-1
+    // branch on `if (editSite && hardcodedUrl)`. A literal with no file to read it in is
+    // never measured, so stamping it class1 would reproduce the "looks measurable, is
+    // inert" defect INSIDE the accounting built to expose it. Zero live instances today;
+    // a census that can lie is worse than no census, because the lie is what gets acted on.
+    const c = classifyFalsifier({ hardcoded_url: "const PORT = 8080" }, vocab());
+    expect(c.falsifier).toBe("unresolvable");
+    expect(c.predicate_position).toBe("hardcoded_url");
+    expect(c.unresolvable_reason).toContain("edit_site");
+    // and it must NOT be confused with the unadvertised-shape case
+    expect(c.unadvertised_shape).toBeUndefined();
+  });
+
+  it('a SAMPLE-BODY evidence_resolve is class2 — mirror the sweep, do not undercount it', () => {
+    // verifyGapConditionAsync (gap-to-feature.ts:1699-1712) does not require `.shape`: with
+    // a sample body it derives from verify_shape, else from the gap id. Classifying such a
+    // gap "none" asserts "can never close" about one the sweep CAN measure. This is the live
+    // shape of the data — the store's single open evidence_resolve predicate is sample-body
+    // form, and the documented `.shape` form has zero live instances.
+    const c = classifyFalsifier(
+      { evidence_resolve: { type: "trace_failure_pattern_report", week: "2026-08-17" } },
+      vocab(),
+    );
+    expect(c.falsifier).toBe("class2");
+    expect(c.predicate_position).toBe("evidence_resolve.type");
   });
 
   it('an evidence_resolve with NO usable shape is "none", not "unresolvable"', () => {

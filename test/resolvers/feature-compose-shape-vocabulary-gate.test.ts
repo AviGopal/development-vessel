@@ -521,11 +521,11 @@ describe("shape gate — content lines that look like headers", () => {
   ].join("\n");
 
   it("harvests the same-diff advertisement despite a REMOVED line starting with --", () => {
-    expect(detectUnadvertisedShapeLiteral(advertiseThenUse(["--dry-run flag removed"]), V)).toEqual([]);
+    expect(detectUnadvertisedShapeLiteral(advertiseThenUse(["---dry-run flag removed"]), V)).toEqual([]);
   });
 
   it("harvests it despite an ADDED line starting with ++", () => {
-    expect(detectUnadvertisedShapeLiteral(advertiseThenUse(["++counter;"]), V)).toEqual([]);
+    expect(detectUnadvertisedShapeLiteral(advertiseThenUse(["+++counter;"]), V)).toEqual([]);
   });
 
   it("keeps invariant 4 alive across a -- content line inside a test file", () => {
@@ -533,7 +533,7 @@ describe("shape gate — content lines that look like headers", () => {
       "--- a/repos/development-vessel/test/resolvers/q.test.ts",
       "+++ b/repos/development-vessel/test/resolvers/q.test.ts",
       "@@ -1,1 +1,5 @@",
-      "--legacy-peer-deps was removed",
+      "---legacy-peer-deps was removed",
       "+            evidence_resolve: {",
       '+              shape: "failurePatternReport",',
       "+            },",

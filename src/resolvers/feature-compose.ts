@@ -1313,17 +1313,44 @@ export function detectUnadvertisedShapeLiteral(
     // apostrophes in prose, and regex sources — and every one of those miscounts fails in
     // the FALSE-REFUSAL direction, which is precisely what this fix exists to remove.
     // Anchoring has no parsing state and its failure direction is a missed catch.
-    const OPENER = /^["'`]?(evidence_resolve|verify_shape)["'`]?\s*:/;
-    const SHAPE_KEY = /^["'`]?shape["'`]?\s*:\s*["'`]([A-Za-z_][A-Za-z0-9_.-]*)["'`]/;
+    //
+    // NO LEADING OPTIONAL-QUOTE (2026-09-01, re-review). These patterns previously began
+    // `["'`]?` to admit a JSON-style quoted key. That same optional quote also swallowed
+    // the OPENING QUOTE OF A STRING LITERAL, so a quoted EXAMPLE that happened to start
+    // its own trimmed line read as an anchored key. Five src-path reproductions:
+    // a template-literal lesson, a markdown block inside a template, a quoted array
+    // fixture, and — newly introduced by SAME_LINE_SHAPE below — a quoted one-line object
+    // and a quoted verify_shape shorthand. Dropping the optional quote makes a JSON-style
+    // key a MISSED CATCH instead of a false refusal, which is the only acceptable
+    // direction here; this codebase writes bare keys anyway.
+    //
+    // A RESIDUAL SURVIVES AND CANNOT BE FIXED BY ANCHORING: an example written inside a
+    // TEMPLATE LITERAL carries no quote at all on its interior lines, so those lines are
+    // indistinguishable from code to any grep-shaped gate. Zero such instances exist in
+    // the fleet today (a whole-corpus scan finds exactly one anchored opener in non-test
+    // src, a real use). This is the permanent honest limit of a textual gate.
+    // A HEADER IS `---`/`+++` FOLLOWED BY WHITESPACE (2026-09-01, re-review findings 2+3).
+    // Bare startsWith("---") also matches a REMOVED line whose own content begins "--"
+    // (a CLI flag, a SQL comment, an em-dash rule), and startsWith("+++") matches an ADDED
+    // line beginning "++". Both are ordinary content in the caller's `diff -u` output.
+    // The collision silently set inConfig=false / inTestFile=false for the REST of the
+    // file, killing the same-diff config harvest and invariant 4 mid-stream. Real unified
+    // -diff headers are always `--- a/path` / `+++ b/path`, so requiring the separator
+    // costs nothing and removes both.
+    const IS_HEADER = (l: string): boolean =>
+      /^(\+\+\+|---)\s/.test(l) || l.startsWith("@@") || l.startsWith("### ");
+
+    const OPENER = /^(evidence_resolve|verify_shape)["'`]?\s*:/;
+    const SHAPE_KEY = /^shape["'`]?\s*:\s*["'`]([A-Za-z_][A-Za-z0-9_.-]*)["'`]/;
     // `verify_shape` is the STRING SHORTHAND (gap-to-feature.ts:1606) — the shape name
     // sits directly on the key, with no nested object. Missing this form would leave
     // half the resolve-positions unchecked.
-    const VERIFY_SHORTHAND = /^["'`]?verify_shape["'`]?\s*:\s*["'`]([A-Za-z_][A-Za-z0-9_.-]*)["'`]/;
+    const VERIFY_SHORTHAND = /^verify_shape["'`]?\s*:\s*["'`]([A-Za-z_][A-Za-z0-9_.-]*)["'`]/;
     // The one-line object form. Only ever consulted on a line whose OWN start is an
     // anchored opener, so the anchor still governs — this does not reopen the mid-line
     // match that finding 1 was about.
     const SAME_LINE_SHAPE =
-      /^["'`]?(?:evidence_resolve|verify_shape)["'`]?\s*:\s*\{\s*["'`]?shape["'`]?\s*:\s*["'`]([A-Za-z_][A-Za-z0-9_.-]*)["'`]/;
+      /^(?:evidence_resolve|verify_shape)["'`]?\s*:\s*\{\s*["'`]?shape["'`]?\s*:\s*["'`]([A-Za-z_][A-Za-z0-9_.-]*)["'`]/;
     // Invariant 4: a fixture's whole job is to spell out the wrong value.
     const TEST_FILE = /\.(test|spec)\.[cm]?[jt]sx?$/;
 
@@ -1338,7 +1365,7 @@ export function detectUnadvertisedShapeLiteral(
       let inConfig = false;
       const added: string[] = [];
       for (const raw of lines) {
-        if (raw.startsWith("+++") || raw.startsWith("---") || raw.startsWith("@@") || raw.startsWith("### ")) {
+        if (IS_HEADER(raw)) {
           if (!raw.startsWith("@@")) inConfig = /(^|\/)config\.ts\b/.test(raw);
           continue;
         }
@@ -1364,7 +1391,7 @@ export function detectUnadvertisedShapeLiteral(
       // few lines of one file's hunk would stay open across the boundary and judge an
       // unrelated `shape:` in the NEXT file's first hunk. That is a false refusal, which
       // is the one thing this gate must never produce.
-      if (raw.startsWith("+++") || raw.startsWith("---") || raw.startsWith("@@") || raw.startsWith("### ")) {
+      if (IS_HEADER(raw)) {
         sinceOpener = Number.POSITIVE_INFINITY;
         // PER-FILE test scoping (invariant 4). Deliberately NOT `changesAreTestOnly`
         // (L822): that predicate requires EVERY path in the change to be a test, so a

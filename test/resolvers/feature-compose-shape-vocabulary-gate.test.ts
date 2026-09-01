@@ -425,3 +425,132 @@ describe("loadFleetShapeVocabulary", () => {
     expect(detectUnadvertisedShapeLiteral(diffOf(['  verify_shape: "failurePatternReport",']), v)).toEqual([]);
   });
 });
+
+// ─── QUOTED AND EMBEDDED EXAMPLES (2026-09-01, adversarial re-review) ───────────────────
+//
+// The anchored patterns carried a leading `["'`]?` to admit a JSON-style quoted key. That
+// same optional quote swallowed the OPENING QUOTE OF A STRING LITERAL, so a quoted EXAMPLE
+// beginning its own trimmed line read as an anchored key. Five src-path reproductions were
+// confirmed in-container against the production vocabulary — including two introduced by
+// SAME_LINE_SHAPE, which did not exist before the previous fix.
+//
+// These are FALSE REFUSALS on a lane that lands ~2 changes/day, which is strictly worse
+// than the hollow commit the gate exists to prevent. Every case below must PASS.
+describe("shape gate — a quoted or embedded EXAMPLE is not code", () => {
+  const V = vocab();
+
+  it("KNOWN LIMIT: a template-literal example IS refused, and cannot be fixed by anchoring", () => {
+    // NOT a passing behaviour — a pin on the one false-refusal this design cannot remove.
+    // Interior lines of a template literal carry NO quote, so `evidence_resolve: {` at the
+    // start of a trimmed line is byte-identical to code. Anchoring has no parsing state
+    // (deliberately — quote-parity was rejected because every miscount fails toward a
+    // FALSE REFUSAL), so it cannot tell a heredoc example from the real thing.
+    //
+    // Accepted because a whole-fleet scan finds exactly ONE anchored opener in non-test
+    // src, a genuine use: zero instances of this class exist today. If one is ever
+    // authored, this test names the cost and the reason, and the fix is a real parser
+    // rather than a wider regex.
+    const d = diffOf([
+      "const LESSON = `",
+      "Write the predicate like this:",
+      "evidence_resolve: {",
+      '  shape: "failurePatternReport",',
+      "}",
+      "`;",
+    ]);
+    expect(detectUnadvertisedShapeLiteral(d, V)).toHaveLength(1);
+  });
+
+  it("does not refuse a quoted array fixture", () => {
+    expect(detectUnadvertisedShapeLiteral(diffOf([
+      "const FIXTURE = [",
+      "  'evidence_resolve: {',",
+      "  '  shape: \"failurePatternReport\",',",
+      "];",
+    ]), V)).toEqual([]);
+  });
+
+  it("does not refuse a quoted ONE-LINE object — the SAME_LINE_SHAPE regression", () => {
+    expect(detectUnadvertisedShapeLiteral(diffOf([
+      "'evidence_resolve: { shape: \"failurePatternReport\" },',",
+    ]), V)).toEqual([]);
+  });
+
+  it("does not refuse a quoted verify_shape shorthand", () => {
+    expect(detectUnadvertisedShapeLiteral(diffOf([
+      "'verify_shape: \"failurePatternReport\",',",
+    ]), V)).toEqual([]);
+  });
+
+  it("STILL REFUSES the real thing — the fix must not buy safety with the gate's purpose", () => {
+    // The negative control for this whole block. If dropping the leading optional-quote
+    // also stopped catching a genuine bare-key predicate, the gate would be decorative.
+    const f = detectUnadvertisedShapeLiteral(diffOf([
+      "evidence_resolve: {",
+      '  shape: "failurePatternReport",',
+      "},",
+    ]), V);
+    expect(f).toHaveLength(1);
+    expect(f[0]!.shape).toBe("failurePatternReport");
+  });
+});
+
+// ─── HEADER COLLISION (2026-09-01, re-review findings 2 and 3) ──────────────────────────
+//
+// `startsWith("---")` also matches a REMOVED line whose own content begins "--" (a CLI
+// flag, a SQL comment), and `startsWith("+++")` an ADDED line beginning "++". Both are
+// ordinary content in the caller's `diff -u` output. The collision silently cleared the
+// file-scope flags for the REST of the file, killing the same-diff config harvest and
+// invariant 4 mid-stream — each in the false-refusal direction.
+describe("shape gate — content lines that look like headers", () => {
+  const V = vocab();
+  const NEW = "brand_new_shape_xyz";
+
+  const advertiseThenUse = (noise: string[]): string => [
+    "--- a/repos/development-vessel/src/config.ts",
+    "+++ b/repos/development-vessel/src/config.ts",
+    "@@ -1,1 +1,3 @@",
+    ...noise,
+    `+      "${NEW}",`,
+    "--- a/repos/development-vessel/src/resolvers/x.ts",
+    "+++ b/repos/development-vessel/src/resolvers/x.ts",
+    "@@ -1,1 +1,3 @@",
+    "+            evidence_resolve: {",
+    `+              shape: "${NEW}",`,
+    "+            },",
+  ].join("\n");
+
+  it("harvests the same-diff advertisement despite a REMOVED line starting with --", () => {
+    expect(detectUnadvertisedShapeLiteral(advertiseThenUse(["--dry-run flag removed"]), V)).toEqual([]);
+  });
+
+  it("harvests it despite an ADDED line starting with ++", () => {
+    expect(detectUnadvertisedShapeLiteral(advertiseThenUse(["++counter;"]), V)).toEqual([]);
+  });
+
+  it("keeps invariant 4 alive across a -- content line inside a test file", () => {
+    expect(detectUnadvertisedShapeLiteral([
+      "--- a/repos/development-vessel/test/resolvers/q.test.ts",
+      "+++ b/repos/development-vessel/test/resolvers/q.test.ts",
+      "@@ -1,1 +1,5 @@",
+      "--legacy-peer-deps was removed",
+      "+            evidence_resolve: {",
+      '+              shape: "failurePatternReport",',
+      "+            },",
+    ].join("\n"), V)).toEqual([]);
+  });
+
+  it("still treats a REAL --- / +++ header pair as a header", () => {
+    // The guard requires whitespace after the marker; a genuine header always has it.
+    // If this broke, file attribution would collapse and invariant 4 would judge src.
+    const f = detectUnadvertisedShapeLiteral([
+      "--- a/repos/development-vessel/src/resolvers/x.ts",
+      "+++ b/repos/development-vessel/src/resolvers/x.ts",
+      "@@ -1,1 +1,3 @@",
+      "+            evidence_resolve: {",
+      '+              shape: "failurePatternReport",',
+      "+            },",
+    ].join("\n"), V);
+    expect(f).toHaveLength(1);
+  });
+});

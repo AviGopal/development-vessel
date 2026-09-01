@@ -179,8 +179,25 @@ export async function resolveTraceFailurePatternReport(
               example_trace_ids: p.example_trace_ids,
               successful_task_count: p.successful_task_count,
               total_task_count: p.total_task_count,
+              // THE ADVERTISED SHAPE, NOT THIS RESOLVER'S RETURN-SHAPE NAME.
+              //
+              // The sweep RESOLVES this shape through discovery, so it must be a name the
+              // registry actually serves. Those two names differ here: line 191 returns
+              // `shape: "failurePatternReport"`, while config.ts advertises
+              // `trace_failure_pattern_report` — and only the advertised one is dispatchable
+              // (registry_query confirms: failurePatternReport is not among the 390 advertised
+              // shapes). A predicate naming the return-shape resolves to nothing, yields
+              // 'unknown', and leaves the gap exactly as unclosable as it was with no predicate
+              // at all — a hollow fix that typechecks and passes the semantic gate.
+              //
+              // The substrate authored this block itself (route-edit-c9ad6782 → 05458f4, then
+              // 6b6068e) and guessed the name twice: first `trace_failure`, then
+              // `failurePatternReport`. Neither is advertised. This is the same
+              // producer/consumer name mismatch that has silently disabled db-maintenance's
+              // integrity repair (`violating_rows` vs `count`) and the compose lesson mirror —
+              // the class is a name crossing a boundary with no contract to check it.
               evidence_resolve: {
-                shape: "failurePatternReport",
+                shape: "trace_failure_pattern_report",
                 input: {
                   template_id: p.template_id,
                   first_failed_task_id: p.first_failed_task_id

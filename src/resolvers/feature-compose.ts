@@ -1522,6 +1522,13 @@ export function priorAttemptFeedbackBlock(meta?: Record<string, unknown> | null)
   if (!reason && !loc && lessons.length === 0 && !landedSha) return "";
   const lines: string[] = [];
   if (landedSha) {
+    // EMIT EVIDENCE THAT THIS FIRED. Prompt text is not journaled — the pre-existing
+    // rejection heading appears once in 24h of logs — so without this line the block's
+    // effect is unobservable, and "it never fired" is indistinguishable from "it fired and
+    // did nothing". I shipped this block, then discovered at validation time that I had no
+    // way to tell whether it reached a drafter; that is the same defect as the silent
+    // closure sweep and the lesson mirror's swallowed 4xx, in my own change.
+    console.log(`[compose-draft] prior-landed-attempt block emitted for commit ${landedSha}`);
     lines.push(
       "",
       `PRIOR LANDED ATTEMPT — a previous draft for THIS gap PASSED the semantic gate and LANDED as commit ${landedSha}. The change is ALREADY IN THE FILE you are about to edit.`,

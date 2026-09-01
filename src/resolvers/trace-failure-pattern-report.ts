@@ -167,6 +167,7 @@ export async function resolveTraceFailurePatternReport(
           gap: {
             id: gapId,
             category: "systematic_failure",
+            closure_predicate: true,
             source: "substrate_detected",
             summary,
             detected_at: new Date().toISOString(),

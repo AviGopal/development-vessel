@@ -1490,6 +1490,64 @@ export function unadvertisedShapeRefusalReason(findings: UnadvertisedShapeFindin
 }
 
 /**
+ * COVERAGE-ROUTED REFUSAL (2026-09-02): CJS accessors added to an ESM vessel.
+ *
+ * MEASURED, not theorised. The substrate autonomously authored, gated
+ * (verdict=FAVORABLE), typecheck-verified, ran 829 passing tests, LANDED and PUSHED
+ * commit 776391aa0fc2 to origin/dev with no operator hands — and the change was inert:
+ *
+ *     if (_reachVerdict) {
+ *       try { exports.substrateGap.emit(...); } catch {}
+ *     }
+ *
+ * `exports.substrateGap.emit` exists nowhere in the repo, and goal-host-vessel is
+ * `"type": "module"`, so `exports` is UNDEFINED at runtime: every call throws
+ * ReferenceError into a bare `catch {}` and emits nothing, forever. The drafter had
+ * THREE correct `substrateGap_write` POST exemplars in the same file (index.ts:4144,
+ * :5174, :5271) and invented an API instead.
+ *
+ * It passed because the target has NO TEST FILE — which this resolver ITSELF warned
+ * about during that very compose ("every gate below this point READS the diff; only a
+ * test RUNS it"). Correct warning, right moment, and nothing gated on it. This makes
+ * that warning load-bearing, and it is the same rule the shape-vocabulary gate above
+ * states: a name crossing a boundary is only checkable by RESOLVING it. In an ESM
+ * module `exports` resolves to nothing — decidable statically, no network, no LLM.
+ *
+ * SCOPE — deliberately the narrowest high-value case, for the same reason the gate
+ * above is: `exports.x` / `module.exports` ADDED to an ESM vessel CANNOT work, so
+ * refusing it can never block a legitimate change. This is NOT a general
+ * unresolved-identifier checker; that needs scope analysis and would false-positive.
+ * ADDED lines only — removing CJS is the repair, not the defect.
+ *
+ * Returns the drafter-facing reason, or null when there is nothing to refuse
+ * (fail open — never block on an unparseable or empty diff).
+ */
+export function cjsInEsmRefusal(diff: string): string | null {
+  if (!diff) return null;
+  const offenders: string[] = [];
+  for (const raw of diff.split("\n")) {
+    if (!raw.startsWith("+") || raw.startsWith("+++")) continue; // ADDED code only, never a ++ + header
+    const line = raw.slice(1);
+    if (/\bmodule\s*\.\s*exports\b/.test(line) || /\bexports\s*\./.test(line)) {
+      offenders.push(line.trim().slice(0, 120));
+    }
+  }
+  if (offenders.length === 0) return null;
+  return (
+    `[fc-cjs-in-esm] the patch ADDS ${offenders.length} CommonJS accessor(s) to a vessel whose ` +
+    `package.json declares "type": "module": ` +
+    offenders.map((o) => `\`${o}\``).join(", ") +
+    `. In an ESM module the identifier \`exports\` is UNDEFINED at runtime, so this throws ` +
+    `ReferenceError on every call — and wrapped in a bare \`catch {}\` it fails SILENTLY and ` +
+    `does nothing, forever. This is not a style preference; the code cannot work. ` +
+    `To emit an impulse from a vessel, POST it: ` +
+    `fetch(endpoint, { method: "POST", body: JSON.stringify({ impulse: { type: "<shape>_write", ` +
+    `pointer: { type: "<shape>_write", ... } } }) }) — see goal-host-vessel/src/index.ts:4144. ` +
+    `Copy the pattern that already exists in the file you are editing; do not invent an API.`
+  );
+}
+
+/**
  * Is a patch causally connected to the region a gap names?
  *
  * Exported because there are TWO landing routes and only one of them used to ask.
@@ -4188,6 +4246,20 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
   //
   // What this can do is stop the weakness being invisible: a green verdict on an
   // untested module means the diff was READ, never RUN.
+  //
+  // GATED, not merely warned (2026-09-02). This list is READ at the semantic-gate
+  // site below. Until then this warning was advisory only, and 776391aa0fc2 — an
+  // inert `exports.substrateGap.emit` in an ESM vessel — landed and PUSHED through
+  // it with a FAVORABLE verdict and 829 passing tests, because none of those tests
+  // touch the changed lines. The warning was correct and nothing consumed it.
+  //
+  // Deliberately NOT a block on "no test file": measured over 48h, that condition
+  // fires on 85 warnings across 60 verdicts and covers gap-to-feature.ts (13) and
+  // this file (4) — blocking it would halt self-development on the very files the
+  // substrate repairs itself with, the failure mode the `2dbb4a6` note below
+  // describes. Instead, being uncovered ROUTES the diff through a stricter
+  // deterministic check that cannot false-positive.
+  const uncoveredTargets: string[] = [];
   try {
     const { access } = await import("node:fs/promises");
     const rootT = process.env["REPO_ROOT"] ?? process.env["WORKSPACE_ROOT"] ?? "/workspace/git/super-repo";
@@ -4202,6 +4274,7 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
         try { await access(`${rootT}/${c}`); covered = true; break; } catch { /* try next */ }
       }
       if (!covered) {
+        uncoveredTargets.push(tf);
         console.warn(
           `[fc-coverage] TARGET HAS NO TEST FILE: ${tf} — every gate below this point READS the diff; ` +
           `only a test RUNS it. A FAVORABLE verdict here means the change was reviewed, never executed. ` +
@@ -5201,6 +5274,28 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
         vesselRoots: [...touched].map((v) => ws?.rootFor(v)).filter((r): r is string => !!r),
       });
 
+      // THE COVERAGE WARNING, MADE LOAD-BEARING (2026-09-02). Only fires when the
+      // target has no test file — a covered file would have caught this by RUNNING.
+      // Deterministic, no LLM consulted, and it cannot false-positive: `exports.x` in
+      // an ESM vessel is undefined at runtime, so the code cannot work either way.
+      const cjsRefusalReason = uncoveredTargets.length > 0 ? cjsInEsmRefusal(diff) : null;
+      const cjsRefusal = cjsRefusalReason
+        ? {
+            addresses: false,
+            reason: cjsRefusalReason,
+            on_live_path: true,
+            hard_fail: true,   // deterministic
+            llm_consulted: false,
+            verified: true,    // a resolvability check IS a real judgment, not a fail-open
+          }
+        : null;
+      if (cjsRefusal) {
+        console.warn(
+          `[fc-cjs-in-esm] REFUSING: uncovered target(s) ${uncoveredTargets.join(", ")} — ` +
+          `diff adds CommonJS accessors to an ESM vessel (inert at runtime)`,
+        );
+      }
+
       // Reachability facts: for each changed symbol, grep the touched vessels' src/
       // for call-sites (excluding the definition) + classify as entrypoint.
       const symbols = extractChangedSymbols(diff);
@@ -5322,7 +5417,7 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
         } catch { /* rolled back or missing - skip */ }
       }
       const dataFlowFacts = computeDataFlowFacts(diff, postPatchContents);
-      semantic_gate = shapeVocabRefusal ?? await verifyPatchAddressesGap({
+      semantic_gate = shapeVocabRefusal ?? cjsRefusal ?? await verifyPatchAddressesGap({
         gapSummary,
         gapMeta: pointer.gap?.classification_metadata,
         diff,

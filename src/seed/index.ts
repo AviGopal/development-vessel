@@ -40,6 +40,7 @@ import { INGEST_DOC_AS_CONCEPTS_TEMPLATE } from "./ingest-doc-as-concepts.js";
 import { DETECT_STALE_POINTER_TEMPLATE } from "./detect-stale-pointer.js";
 import { DETECT_TEMPLATE_INPUT_LINT_TEMPLATE } from "./detect-template-input-lint.js";
 import { DETECT_GATE_SATURATION_TEMPLATE } from "./detect-gate-saturation.js";
+import { DETECT_REACH_RATE_SHORTFALL_TEMPLATE } from "./detect-reach-rate-shortfall.js";
 import { DETECT_VESSEL_WRITE_ERROR_TEMPLATE } from "./detect-vessel-write-error.js";
 import { DETECT_CHAIN_FETCH_FAILURE_TEMPLATE } from "./detect-chain-fetch-failure.js";
 import { DETECT_PHANTOM_SUCCESS_TRACE_TEMPLATE } from "./detect-phantom-success-trace.js";
@@ -186,6 +187,7 @@ export { INGEST_DOC_AS_CONCEPTS_TEMPLATE } from "./ingest-doc-as-concepts.js";
 export { DETECT_STALE_POINTER_TEMPLATE } from "./detect-stale-pointer.js";
 export { DETECT_TEMPLATE_INPUT_LINT_TEMPLATE } from "./detect-template-input-lint.js";
 export { DETECT_GATE_SATURATION_TEMPLATE } from "./detect-gate-saturation.js";
+export { DETECT_REACH_RATE_SHORTFALL_TEMPLATE } from "./detect-reach-rate-shortfall.js";
 export { DETECT_VESSEL_WRITE_ERROR_TEMPLATE } from "./detect-vessel-write-error.js";
 export { DETECT_CHAIN_FETCH_FAILURE_TEMPLATE } from "./detect-chain-fetch-failure.js";
 export { DETECT_PHANTOM_SUCCESS_TRACE_TEMPLATE } from "./detect-phantom-success-trace.js";
@@ -344,6 +346,7 @@ export const SEED_TEMPLATES: ActivityTemplate[] = [
   DETECT_STALE_POINTER_TEMPLATE,
   DETECT_TEMPLATE_INPUT_LINT_TEMPLATE,
   DETECT_GATE_SATURATION_TEMPLATE,
+  DETECT_REACH_RATE_SHORTFALL_TEMPLATE,
   DETECT_VESSEL_WRITE_ERROR_TEMPLATE,
   DETECT_CHAIN_FETCH_FAILURE_TEMPLATE,
   // substrate self-detection (2026-05-30): author detection templates for

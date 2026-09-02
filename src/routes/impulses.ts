@@ -61,6 +61,7 @@ import { resolveDeadEndDecisionScan } from "../resolvers/dead-end-decision-scan.
 import { resolveDetectorYieldRegistry } from "../resolvers/detector-yield-registry.js";
 import { resolveTemplateInputLintScan } from "../resolvers/template-input-lint-scan.js";
 import { resolveGateSaturationScan } from "../resolvers/gate-saturation-scan.js";
+import { resolveReachRateScan } from "../resolvers/reach-rate-scan.js";
 import { resolvePriorSeedEfficacyScan } from "../resolvers/prior-seed-efficacy-scan.js";
 import { resolveCompositionFlowHealthScan } from "../resolvers/composition-flow-health-scan.js";
 import { resolveCostExpectationScan } from "../resolvers/cost-expectation-scan.js";
@@ -388,6 +389,8 @@ async function dispatchInner(pointer: AnyPointer): Promise<ResolverResult> {
       return resolveTemplateInputLintScan(p as Parameters<typeof resolveTemplateInputLintScan>[0]);
     case "gate_saturation_scan":
       return resolveGateSaturationScan(p as Parameters<typeof resolveGateSaturationScan>[0]);
+    case "reach_rate_scan":
+      return resolveReachRateScan(p as Parameters<typeof resolveReachRateScan>[0]);
     case "prior_seed_efficacy_scan":
       return resolvePriorSeedEfficacyScan(p as Parameters<typeof resolvePriorSeedEfficacyScan>[0]);
     case "composition_flow_health_scan":

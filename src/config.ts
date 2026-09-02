@@ -215,6 +215,13 @@ export const config = {
       // Meta-detector (2026-06-13): gate/filter resolvers saturated at one verdict
       // (e.g. comprehensibility_check at 0% pass) via resolver_pattern_report.
       "gate_saturation_scan",
+      // Detector (2026-09-01): the substrate's REACH rate against its own
+      // execution contract (~90%). Consumes activity-api's groupedExecutionStats
+      // reach_rate (the `reached` goal verdict, NOT the `success` exit status) and
+      // files a gap per family reaching below the floor over enough GRADED runs.
+      // Nothing in the fleet read an aggregate reach statistic before this, which
+      // is why a 5x-60x contract shortfall never produced a gap.
+      "reach_rate_scan",
       // Detector (2026-07-04): is concept-prior seeding of Thompson cells active
       // and helping? Compares seeded vs Beta(1,1) first-attempt outcomes from
       // posterior_update_v1_conditional telemetry; files gap-prior-seed-inactive

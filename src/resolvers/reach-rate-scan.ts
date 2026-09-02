@@ -199,7 +199,12 @@ export async function resolveReachRateScan(
     // zero/null/undefined as 'present' (defect stands), so an ungraded family
     // holds its gap open rather than closing it on absent evidence. That is the
     // conservative side: a false close is worse than a slow one.
-    const reachRate = row && gradedCount > 0 ? asNum(row.reach_rate) : null;
+    // ENFORCE THE VOLUME FLOOR ON THE RE-READ TOO. gradedCount > 0 is not enough: a
+    // single graded run is not evidence the shortfall is gone, and treating it as such
+    // closes the gap on n=1. Below the floor we return null, which reads as 'present'
+    // and holds the gap open until there is enough evidence to decide either way.
+    const enoughVolume = gradedCount >= minGraded;
+    const reachRate = row && enoughVolume ? asNum(row.reach_rate) : null;
     // defect_field is checked BEFORE nonzero_field and is the precise predicate:
     // nonzero_field alone cannot tell 0.04 from 0.95 (both nonzero), so a badly
     // reaching family would close its own gap. This string is present ONLY while
@@ -306,6 +311,15 @@ export async function resolveReachRateScan(
                     activity_id: f.activity_id,
                     window_hours: windowHours,
                     min_reach_rate: minReachRate,
+                    // CARRY THE VOLUME FLOOR INTO THE RE-READ (2026-09-02, review finding).
+                    // Without it the scoped branch applied no volume gate, so a gap filed
+                    // on 0/255 closed the moment ONE later window contained a single graded
+                    // run that reached: 1/1 = 1.0 -> no reach_below_floor -> reach_rate 1.0
+                    // -> heuristic 2 returns 'absent' -> closed. That is the exact polarity
+                    // failure this resolver's own comments claim to avoid, and a false close
+                    // is the one outcome the close-oracle cannot afford (landed_commit sits
+                    // at 0 closes / 772 false for precisely this class).
+                    min_graded_volume: minGraded,
                     dry_run: true,
                   },
                   defect_field: "reach_below_floor",

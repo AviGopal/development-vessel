@@ -78,6 +78,69 @@ describe("reach_rate_scan", () => {
     expect((res.body as { finding_count: number }).finding_count).toBe(1);
   });
 
+  // ── THE n=1 FALSE-CLOSE (2026-09-02, adversarial review) ────────────────────────
+  //
+  // min_graded_volume was applied ONLY in the scan loop. The scoped branch — the read the
+  // falsifier performs when the sweep re-measures — gated on `gradedCount > 0`, and the
+  // emitted evidence_resolve.input did not carry the floor at all. So a gap filed on 0/255
+  // closed the moment one later window held a single graded run that reached: 1/1 = 1.0,
+  // no reach_below_floor, reach_rate 1.0, heuristic 2 returns 'absent', gap closed.
+  //
+  // That is the polarity failure this resolver's own comments claim to avoid, in the one
+  // path that cannot afford it: landed_commit sits at 0 closes / 772 false_closes because
+  // closing on thin evidence is exactly how that class lost its credibility.
+  describe("volume floor on the falsifier re-read", () => {
+    it("does NOT report the defect gone on a single graded run that reached", async () => {
+      const res = await resolveReachRateScan({
+        type: "reach_rate_scan",
+        activity_id: "walk:goal-host",
+        dry_run: true,
+        min_graded_volume: 8,
+        _rows: [
+          { activity_id: "walk:goal-host", count: 300, success_rate: 1.0, reached_count: 1, graded_count: 1, ungraded_count: 299, reach_rate: 1.0 },
+        ],
+      } as never);
+      const b = res.body as Record<string, unknown>;
+      // null (not 1.0) => heuristic 2 reads 'present' => the gap stays open.
+      expect(b["reach_rate"]).toBeNull();
+      // and the defect marker must still be absent-or-present consistently, never a close signal
+      expect(b["reach_below_floor"] === undefined || typeof b["reach_below_floor"] === "string").toBe(true);
+    });
+
+    it("DOES report the rate once the graded volume clears the floor", async () => {
+      // The negative control for the test above: if the floor simply suppressed everything,
+      // the gap could never close even when genuinely fixed.
+      const res = await resolveReachRateScan({
+        type: "reach_rate_scan",
+        activity_id: "walk:goal-host",
+        dry_run: true,
+        min_graded_volume: 8,
+        _rows: [
+          { activity_id: "walk:goal-host", count: 300, success_rate: 1.0, reached_count: 9, graded_count: 10, ungraded_count: 290, reach_rate: 0.9 },
+        ],
+      } as never);
+      const b = res.body as Record<string, unknown>;
+      expect(b["reach_rate"]).toBe(0.9);
+      expect(b["reach_below_floor"]).toBeUndefined();
+    });
+
+    it("carries min_graded_volume into the emitted evidence_resolve.input", async () => {
+      // Without this the sweep re-reads with no floor and the fix above is bypassed at the
+      // only moment it matters.
+      const emits: unknown[] = [];
+      mockEmit(emits);
+      await resolveReachRateScan({
+        type: "reach_rate_scan",
+        min_graded_volume: 8,
+        _rows: [
+          { activity_id: "walk:goal-host", count: 300, success_rate: 0.98, reached_count: 5, graded_count: 100, ungraded_count: 200, reach_rate: 0.05 },
+        ],
+      } as never);
+      const er = gapOf(emits[0]).classification_metadata["evidence_resolve"] as Record<string, unknown>;
+      expect((er["input"] as Record<string, unknown>)["min_graded_volume"]).toBe(8);
+    });
+  });
+
   describe("ungraded handling", () => {
     it("skips a family with high volume but too few GRADED runs", async () => {
       const emits: unknown[] = [];

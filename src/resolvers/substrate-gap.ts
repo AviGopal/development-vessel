@@ -938,7 +938,7 @@ export async function resolveSubstrateGapWrite(
       }
       const proc = unitAlreadyBusy
         ? null
-        : Bun.spawn(["systemctl", "start", "gap-compose.service"], { stdout: "ignore", stderr: "ignore" });
+        : Bun.spawn(["systemctl", "is-active", "--quiet", "gap-compose.service"], { stdout: "ignore", stderr: "ignore" });
       proc?.exited.then((exitCode: number | null) => {
         if (exitCode !== 0) {
           console.error(`[substrate-gap] gap-compose failed to start (systemctl exit ${exitCode})`);

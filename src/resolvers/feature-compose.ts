@@ -1522,12 +1522,104 @@ export function unadvertisedShapeRefusalReason(findings: UnadvertisedShapeFindin
  * Returns the drafter-facing reason, or null when there is nothing to refuse
  * (fail open — never block on an unparseable or empty diff).
  */
+/**
+ * Added CODE lines of a diff — the substrate for the two literal-matching gates below.
+ *
+ * WHY THIS EXISTS, and it was measured, not anticipated. A false-positive sweep of both
+ * gates over 180 real landed commits refused exactly one: `4495163` — the commit that
+ * INTRODUCED the CJS gate. Its diff quotes `exports.substrateGap.emit` in doc-comments and
+ * test fixtures to explain the defect, and a naive line match cannot tell an occurrence
+ * from a description of one. Uncorrected, these gates would block every commit that
+ * documents the class they police, including their own.
+ *
+ * Two exclusions, both narrow:
+ *  - COMMENT LINES (`//`, `*`, `/*`). This is where the false positives actually were.
+ *  - TEST FILES. A test's whole job is to contain the bad example; `feature-compose-
+ *    coverage-gate.test.ts` embeds the inert diff verbatim as its primary fixture.
+ *
+ * NOTE — `stripCommentsAndStrings` is deliberately NOT used here. It blanks template
+ * literal interiors, and the endpoint gate's entire subject lives inside one
+ * (`` `${EP}/v2/impulses/resolve` ``); using it would make that gate silently never fire.
+ * A gate that cannot fire is worse than no gate, because it reads as coverage.
+ */
+function addedCodeLines(diff: string): string[] {
+  const out: string[] = [];
+  let inTestFile = false;
+  for (const raw of diff.split("\n")) {
+    const hdr = /^###\s+(\S+)/.exec(raw) ?? /^\+\+\+\s+[ab]\/(\S+)/.exec(raw);
+    if (hdr?.[1]) { inTestFile = /\.test\.tsx?$/.test(hdr[1]); continue; }
+    if (!raw.startsWith("+") || raw.startsWith("+++")) continue;
+    if (inTestFile) continue;
+    const line = raw.slice(1);
+    const t = line.trimStart();
+    if (t.startsWith("//") || t.startsWith("*") || t.startsWith("/*")) continue; // prose, not code
+    out.push(line);
+  }
+  return out;
+}
+
+/**
+ * IMPULSE-ENDPOINT RESOLVE GATE (2026-09-02). Third in the resolve-don't-read family,
+ * after the shape-vocabulary gate and the CJS-in-ESM gate.
+ *
+ * MEASURED TWICE, on the same task, by the substrate repairing itself:
+ *
+ *   776391aa0fc2 — emitted a gap via `exports.substrateGap.emit(...)`: an invented API,
+ *   undefined in an ESM vessel. The CJS-in-ESM gate now refuses that.
+ *
+ *   62e66a7 — dispatched to REPAIR the above, with the gap, that gate, and a teaching
+ *   refusal all in place. It correctly removed the dead call and wrote a real fetch — to
+ *   `/v2/impulses/substrateGap`, a 404. The CJS gate did not fire (correctly: not CJS),
+ *   so refusal→redraft never engaged and a SECOND inert emitter landed and pushed.
+ *
+ * Both crossed the same boundary — a route/envelope — and nothing in the pipeline
+ * resolved it. That is law 8, not a capability ceiling: the correct call appears
+ * FOUR times in the very file being edited (index.ts:4157, 5187, 5284, 15167).
+ *
+ * AUTHORITY, unusually strong for a gate this cheap: across activity-api and
+ * development-vessel exactly ONE impulse endpoint literal exists — `/v2/impulses/resolve`
+ * — and all 38 impulse callers in goal-host-vessel use it. Verified live WITH A CONTROL,
+ * because a bare 404 is ambiguous here:
+ *     POST /v2/impulses/resolve + a served shape  -> 200
+ *     POST /v2/impulses/substrateGap              -> 404 "Not found"
+ * A 404 from `/resolve` means SHAPE-NOT-SERVED, never endpoint-missing.
+ *
+ * SCOPE — refuse only what cannot work. A LITERAL `/v2/impulses/<segment>` where segment
+ * is not `resolve` addresses no route in the fleet. An interpolated segment (`${…}`)
+ * cannot be resolved statically, so the gate ABSTAINS rather than guess — the same
+ * fail-open discipline as its two siblings.
+ *
+ * Returns the drafter-facing reason, or null when there is nothing to refuse.
+ */
+export function unresolvableImpulseEndpointRefusal(diff: string): string | null {
+  if (!diff) return null;
+  const bad: string[] = [];
+  for (const line of addedCodeLines(diff)) {
+    for (const m of line.matchAll(/\/v2\/impulses\/([A-Za-z0-9_-]+)/g)) {
+      const seg = m[1];
+      if (seg && seg !== "resolve") bad.push(seg);
+    }
+  }
+  if (bad.length === 0) return null;
+  const uniq = [...new Set(bad)];
+  return (
+    `[fc-impulse-endpoint] the patch POSTs to ${uniq.length} impulse route(s) that do not exist: ` +
+    uniq.map((s) => `\`/v2/impulses/${s}\``).join(", ") +
+    `. The fleet exposes exactly ONE impulse endpoint — \`/v2/impulses/resolve\` — and all 38 ` +
+    `impulse callers in goal-host-vessel/src/index.ts use it; \`/v2/impulses/${uniq[0]}\` returns ` +
+    `404 and the call is INERT even though it typechecks. The shape goes in the BODY, not the path:\n` +
+    `  await fetch(\`\${DEV_VESSEL_ENDPOINT}/v2/impulses/resolve\`, { method: "POST",\n` +
+    `    headers: { "Content-Type": "application/json", ...authHeader },\n` +
+    `    body: JSON.stringify({ impulse: { type: "<shape>_write", pointer: { type: "<shape>_write", ... } } }) });\n` +
+    `See goal-host-vessel/src/index.ts:4157. NOTE ALSO: fetch does NOT throw on 404 — a ` +
+    `try/catch around it is not error handling; branch on \`!r.ok\` or the failure is silent.`
+  );
+}
+
 export function cjsInEsmRefusal(diff: string): string | null {
   if (!diff) return null;
   const offenders: string[] = [];
-  for (const raw of diff.split("\n")) {
-    if (!raw.startsWith("+") || raw.startsWith("+++")) continue; // ADDED code only, never a ++ + header
-    const line = raw.slice(1);
+  for (const line of addedCodeLines(diff)) {
     if (/\bmodule\s*\.\s*exports\b/.test(line) || /\bexports\s*\./.test(line)) {
       offenders.push(line.trim().slice(0, 120));
     }
@@ -5296,6 +5388,26 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
         );
       }
 
+      // IMPULSE-ENDPOINT RESOLVE GATE. Deliberately UNCONDITIONAL, unlike the CJS gate
+      // above: a POST to a route that does not exist is inert whether or not the target
+      // has a test file, and a covered file's tests need not exercise the emitter either.
+      // It cannot false-positive — only a LITERAL `/v2/impulses/<seg>` with seg!=="resolve"
+      // is refused, and interpolated segments abstain. Deterministic, no LLM consulted.
+      const endpointRefusalReason = unresolvableImpulseEndpointRefusal(diff);
+      const endpointRefusal = endpointRefusalReason
+        ? {
+            addresses: false,
+            reason: endpointRefusalReason,
+            on_live_path: true,
+            hard_fail: true,
+            llm_consulted: false,
+            verified: true,
+          }
+        : null;
+      if (endpointRefusal) {
+        console.warn(`[fc-impulse-endpoint] REFUSING: diff POSTs to a non-existent impulse route`);
+      }
+
       // Reachability facts: for each changed symbol, grep the touched vessels' src/
       // for call-sites (excluding the definition) + classify as entrypoint.
       const symbols = extractChangedSymbols(diff);
@@ -5417,7 +5529,7 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
         } catch { /* rolled back or missing - skip */ }
       }
       const dataFlowFacts = computeDataFlowFacts(diff, postPatchContents);
-      semantic_gate = shapeVocabRefusal ?? cjsRefusal ?? await verifyPatchAddressesGap({
+      semantic_gate = shapeVocabRefusal ?? cjsRefusal ?? endpointRefusal ?? await verifyPatchAddressesGap({
         gapSummary,
         gapMeta: pointer.gap?.classification_metadata,
         diff,

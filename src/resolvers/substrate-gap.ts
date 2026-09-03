@@ -146,7 +146,7 @@ export interface SubstrateGap {
   // reopen_count increments each time a previously-closed gap is re-detected as
   // open (recurrence) — a durable fix keeps this at 0.
   reopen_count?: number;
-  route?: "dispatchable" | "composable" | "human_required";
+  route?: "dispatchable" | "composable" | "human_required" | "route-edit-e9b22f20";
   remedy?: { vessel: string; impulse_type?: string; goal?: string };
   classification_metadata?: Record<string, unknown>;
   created_at: string;

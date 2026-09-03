@@ -5981,8 +5981,32 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
     const { join } = await import("node:path");
     const reportDir = process.env.PROPOSALS_DIR ?? "/workspace/proposals";
     mkdirSync(reportDir, { recursive: true });
+
+    // A later FAILED attempt must not erase the evidence of an earlier LANDED one.
+    // The report name is keyed only on gap id, so retries overwrite it in place; the
+    // goal-host reconciler then reads the retry's UNFAVORABLE verdict and grades a
+    // commit that IS on origin/dev as not-reached. Preserve the favorable report and
+    // put this attempt beside it under a name that does NOT end in
+    // "-compose-report.json", because other resolvers scan the directory for that suffix.
+    let reportPath = join(reportDir, `${pointer.gap?.id ?? "adhoc"}-compose-report.json`);
+    if (verdict !== "FAVORABLE") {
+      try {
+        const { existsSync, readFileSync } = await import("node:fs");
+        if (existsSync(reportPath)) {
+          const prior = JSON.parse(readFileSync(reportPath, "utf8")) as Record<string, unknown>;
+          const priorCutovers = Array.isArray(prior.cutovers) ? (prior.cutovers as Array<Record<string, unknown>>) : [];
+          const priorLanded = priorCutovers.some((c) => {
+            const res = (c?.result ?? {}) as Record<string, unknown>;
+            return typeof res.new_git_sha === "string" && res.new_git_sha.length > 0;
+          });
+          if (prior.verdict === "FAVORABLE" && priorLanded) {
+            reportPath = reportPath.replace(/\.json$/, `-attempt-${Date.now()}.json`);
+          }
+        }
+      } catch { /* unreadable or corrupt prior report: fall back to overwriting */ }
+    }
     writeFileSync(
-      join(reportDir, `${pointer.gap?.id ?? "adhoc"}-compose-report.json`),
+      reportPath,
       JSON.stringify({ ok: verdict === "FAVORABLE", verdict, spec: String(spec).slice(0, 8000), summary: plan.summary, touched_vessels: [...touched], op_count: ops.length, applied, apply_failed: applyFailed, verify, semantic_gate, rolled_back, restore_failed: restoreFailed, cutovers }, null, 2),
     );
   } catch { /* persistence failure must never fail the compose */ }

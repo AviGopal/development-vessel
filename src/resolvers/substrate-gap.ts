@@ -939,9 +939,9 @@ export async function resolveSubstrateGapWrite(
       const proc = unitAlreadyBusy
         ? null
         : Bun.spawn(["systemctl", "start", "gap-compose.service"], { stdout: "ignore", stderr: "ignore" });
-      void proc?.exited.then((code) => {
-        if (code === 0) console.log("[substrate-gap] gap-compose unit started for " + gap.id + (reopened ? " (reopened)" : ""));
-        else console.warn(`[substrate-gap] gap-compose unit did NOT start for ${gap.id} (systemctl exit ${code}) — masked or missing; relying on the in-process nudge`);
+      void proc?.exited.then((exitCode) => {
+        if (exitCode === 0) console.log("[substrate-gap] gap-compose unit started for " + gap.id + (reopened ? " (reopened)" : ""));
+        else console.warn(`[substrate-gap] gap-compose unit did NOT start for ${gap.id} (systemctl exit ${exitCode}) — masked or missing; relying on the in-process nudge`);
       }).catch(() => { /* spawn-level failure is reported by the nudge path */ });
 
       const gd = globalThis as unknown as { __composeDrainInflight?: boolean; __composeDrainLastAt?: number };

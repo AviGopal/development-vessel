@@ -54,6 +54,45 @@ interface Gap {
 }
 interface Sentinel { outcome_shape?: string; delegated_to?: string }
 
+/**
+ * The expiry threshold that ACTUALLY fires for a gap — not the one the message used to
+ * print. Measured 2026-09-02 on the live store: 703 gaps carried "not re-detected within
+ * 336h TTL" while the minimum true age at expiry was exactly 120.0h.
+ *
+ * The verdict is `isDetectorStale || isExpireStale || …`, where `isDetectorStale` uses
+ * `detectorExpireHours` UNCONDITIONALLY and is evaluated first. Any row old enough for
+ * `expireHours` (336h) is necessarily also old enough for 120h, so `expireHours` is
+ * unreachable in the verdict — dead code that was nonetheless being written onto the
+ * closure record. A record that misstates its own rule teaches the wrong TTL to every
+ * later reader, including the substrate.
+ *
+ * Returns the EARLIER of the two applicable thresholds, so it stays honest if the config
+ * changes rather than hard-coding today's answer.
+ */
+export function effectiveExpiryHours(
+  source: string | undefined,
+  opts: { expireHours: number; detectorExpireHours: number },
+): number {
+  const other = source === "substrate_detected" ? opts.detectorExpireHours : opts.expireHours;
+  return Math.min(opts.detectorExpireHours, other);
+}
+
+/**
+ * The original detection time, preserved.
+ *
+ * The expiry/close writes stamped `detected_at: new Date()`, which destroyed law 7's
+ * metric #2 (detection -> close latency) for all 703 expired gaps: every one reported an
+ * age of ~0. The true ages survived only because a separate `first_detected` field
+ * happened to carry `created_at`. Latency must be computable from the field that names
+ * it, so a close preserves the original instead of restamping it.
+ */
+export function preservedDetectedAt(g: { created_at?: string; updated_at?: string }): string {
+  for (const c of [g.created_at, g.updated_at]) {
+    if (c && Number.isFinite(Date.parse(c))) return c;
+  }
+  return new Date().toISOString();
+}
+
 const STALE_THRESHOLD_MS = 48 * 60 * 60 * 1000; // 48 hours
 
 /** Gap categories considered low-value for auto-close purposes */
@@ -398,7 +437,7 @@ export async function resolveGapLifecycleScan(p: GapLifecycleScanPointer): Promi
         const resp = await fetch(emitUrl, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', ...authHeader },
-          body: JSON.stringify({ impulse: { pointer: { type: 'substrateGap_write', gap: { id: g.id, category: g.category ?? 'other', source: 'substrate_detected', summary: `[auto-closed by gap_lifecycle_scan] ${(g.summary ?? '').slice(0, 160)} — stale low-value (not re-detected >${staleHours}h). Live detectors re-open if still real.`, status: 'closed', detected_at: new Date().toISOString(), classification_metadata: { closed_reason: closeReason, closed_by: 'gap_lifecycle_scan', previous_status: 'open', last_seen: g.updated_at ?? g.created_at } } } } }),
+          body: JSON.stringify({ impulse: { pointer: { type: 'substrateGap_write', gap: { id: g.id, category: g.category ?? 'other', source: 'substrate_detected', summary: `[auto-closed by gap_lifecycle_scan] ${(g.summary ?? '').slice(0, 160)} — stale low-value (not re-detected >${staleHours}h). Live detectors re-open if still real.`, status: 'closed', detected_at: preservedDetectedAt(g), classification_metadata: { closed_reason: closeReason, closed_by: 'gap_lifecycle_scan', previous_status: 'open', last_seen: g.updated_at ?? g.created_at } } } } }),
           signal: AbortSignal.timeout(8_000)
         });
         if (resp.ok) lowValueClosed.push(g.id!);
@@ -444,7 +483,7 @@ export async function resolveGapLifecycleScan(p: GapLifecycleScanPointer): Promi
         const resp = await fetch(emitUrl, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', ...authHeader },
-          body: JSON.stringify({ impulse: { pointer: { type: 'substrateGap_write', gap: { id: g.id, category: g.category ?? 'other', source: 'substrate_detected', summary: `[expired by gap_lifecycle_scan] ${(g.summary ?? '').slice(0, 160)} — not re-detected within ${expireHours}h TTL; detector liveness (upsert-by-id) says this is likely no longer valid. Re-opens automatically if a detector re-emits it.`, status: 'closed', detected_at: new Date().toISOString(), classification_metadata: { closed_reason: 'expired_not_redetected', closed_by: 'gap_lifecycle_scan', previous_status: 'open', first_detected: g.created_at, last_seen: g.updated_at ?? g.created_at } } } } }),
+          body: JSON.stringify({ impulse: { pointer: { type: 'substrateGap_write', gap: { id: g.id, category: g.category ?? 'other', source: 'substrate_detected', summary: `[expired by gap_lifecycle_scan] ${(g.summary ?? '').slice(0, 160)} — not re-detected within ${effectiveExpiryHours(g.source, { expireHours, detectorExpireHours })}h TTL; detector liveness (upsert-by-id) says this is likely no longer valid. Re-opens automatically if a detector re-emits it.`, status: 'closed', detected_at: preservedDetectedAt(g), classification_metadata: { closed_reason: 'expired_not_redetected', closed_by: 'gap_lifecycle_scan', previous_status: 'open', first_detected: g.created_at, last_seen: g.updated_at ?? g.created_at } } } } }),
           signal: AbortSignal.timeout(8_000)
         });
         if (resp.ok) expired.push(g.id!);
@@ -517,7 +556,7 @@ export async function resolveGapLifecycleScan(p: GapLifecycleScanPointer): Promi
           body: JSON.stringify({ impulse: { pointer: { type: "substrateGap_write", gap: {
             id: g.id, category: g.category ?? "other", source: "substrate_detected",
             summary: `[auto-closed by gap_lifecycle_scan] ${(g.summary ?? "").slice(0, 160)} — drafted + apply FAILED (structuredError) + stale >${staleHours}h; likely already-resolved or not patch-tractable. Live detectors will re-open if still real.`,
-            status: "closed", detected_at: new Date().toISOString(),
+            status: "closed", detected_at: preservedDetectedAt(g),
             classification_metadata: { closed_reason: "churned_unlandable", closed_by: "gap_lifecycle_scan", reprobe_evidence: (g as any).reprobe_evidence },
           } } } }),
           signal: AbortSignal.timeout(8_000),

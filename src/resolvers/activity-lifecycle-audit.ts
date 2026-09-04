@@ -60,6 +60,7 @@ interface TraceRow {
   completed_at?: unknown;
   started_at?: unknown;
   created_at?: unknown;
+  executed_at?: unknown;
   metadata?: unknown;
   variant_id?: unknown;
   activity_id?: unknown;
@@ -104,10 +105,9 @@ function traceTimestamp(t: TraceRow): number | null {
     const v = Date.parse(t.started_at);
     if (!Number.isNaN(v)) return v;
   }
-  const ex = (t as { executed_at?: unknown }).executed_at;
-  if (typeof ex === "string") {
-    const w = Date.parse(ex);
-    if (!Number.isNaN(w)) return w;
+  if (typeof t.executed_at === "string") {
+    const v = Date.parse(t.executed_at);
+    if (!Number.isNaN(v)) return v;
   }
   if (typeof t.created_at === "string") {
     const v = Date.parse(t.created_at);

@@ -287,8 +287,20 @@ export async function resolveActivityLifecycleAudit(
   }
 
   const withTraces = stats.filter((s) => s.recent_count > 0);
-  const sortedAsc = [...withTraces].sort((a, b) => a.combined_score - b.combined_score);
-  const sortedDesc = [...withTraces].sort((a, b) => b.combined_score - a.combined_score);
+  // Tie-break on recent_count. combined_score is near-constant in practice — measured
+// live as 0.03, 0.03, 0.03, 0.03, 0.026 — because distinct_signatures is 0 for every
+// template (the traces view projects no signature), which zeroes signature_affinity.
+// With an all-equal comparator a stable sort returns the SAME order in both
+// directions, so sortedAsc and sortedDesc were the same array and the top and bottom
+// slices were the same templates: observed as overlap 2 at hotSetSize 2 over a
+// population of 6, where the slice arithmetic alone guarantees disjointness.
+// recent_count carries real variance (measured 2, 1, 24, 27, 7 across five templates)
+// and is the right secondary key: among equally scored templates the one exercised
+// more in the recent window is the hotter one.
+const byRank = (a: PerTemplateStats, b: PerTemplateStats) =>
+  (a.combined_score - b.combined_score) || (a.recent_count - b.recent_count);
+const sortedAsc = [...withTraces].sort(byRank);
+const sortedDesc = [...withTraces].sort((a, b) => byRank(b, a));
 
   // A ranking over a population smaller than twice the slice size carries no
   // information: the two slices overlap, and once withTraces.length <= hotSetSize

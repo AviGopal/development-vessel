@@ -953,9 +953,7 @@ export async function resolveSubstrateGapWrite(
       if (proc?.exitCode !== 0) {
         console.error(`[substrate-gap] gap-compose failed to start (systemctl exit ${proc?.exitCode})`);
       } else {
-        if (proc?.exitCode === 0) {
-          console.log("[substrate-gap] event-driven gap-compose pickup triggered by " + gap.id + (reopened ? " (reopened)" : ""));
-        }
+        console.log("[substrate-gap] event-driven gap-compose pickup triggered by " + gap.id + (reopened ? " (reopened)" : ""));
       }
 
       const gd = globalThis as unknown as { __composeDrainInflight?: boolean; __composeDrainLastAt?: number };

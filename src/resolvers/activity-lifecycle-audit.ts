@@ -57,6 +57,8 @@ interface TemplateRow {
 interface TraceRow {
   status?: unknown;
   occurred_at?: unknown;
+  completed_at?: unknown;
+  started_at?: unknown;
   created_at?: unknown;
   metadata?: unknown;
   variant_id?: unknown;

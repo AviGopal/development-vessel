@@ -949,14 +949,12 @@ export async function resolveSubstrateGapWrite(
       }
       const proc = unitAlreadyBusy
         ? null
-        : Bun.spawn(["systemctl", "start", "gap-compose.service"], { stdout: "ignore", stderr: "ignore" });
-      proc?.exited.then((exitCode: number | null) => {
-        if (exitCode !== 0) {
-          console.error(`[substrate-gap] gap-compose failed to start (systemctl exit ${exitCode})`);
-        } else {
-          console.log("[substrate-gap] event-driven gap-compose pickup triggered by " + gap.id + (reopened ? " (reopened)" : ""));
-        }
-      });
+        : Bun.spawnSync(["systemctl", "start", "gap-compose.service"], { stdout: "ignore", stderr: "ignore" });
+      if (proc?.exitCode !== 0) {
+        console.error(`[substrate-gap] gap-compose failed to start (systemctl exit ${proc?.exitCode})`);
+      } else {
+        console.log("[substrate-gap] event-driven gap-compose pickup triggered by " + gap.id + (reopened ? " (reopened)" : ""));
+      }
 
       const gd = globalThis as unknown as { __composeDrainInflight?: boolean; __composeDrainLastAt?: number };
       const COMPOSE_MIN_INTERVAL_MS = 90_000;

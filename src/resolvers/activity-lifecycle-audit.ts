@@ -189,17 +189,31 @@ export async function resolveActivityLifecycleAudit(
     offset += rows.length;
   }
 
-  // Traces.
-  const tracesJson = await fetchJson<{ executions?: unknown; traces?: unknown }>(
-    `${tracesUrl}?limit=${traceFetchCap}`,
-    apiKey,
-    20_000,
-  );
-  const traces: TraceRow[] = Array.isArray(tracesJson?.executions)
-    ? (tracesJson?.executions as TraceRow[])
-    : Array.isArray(tracesJson?.traces)
-      ? (tracesJson?.traces as TraceRow[])
-      : [];
+  // Traces. The route caps `limit` at 100 per page (activity-api
+  // execution-traces.ts:888) and silently returns 100 however many are requested —
+  // asking for traceFetchCap in one call yielded 100 traces across ~4,000 arms, so
+  // this resolver saw 1 to 10 distinct templates and could never rank them. Page with
+  // offset, mirroring the templates fetch above, rather than raising a cap that is a
+  // deliberate per-page contract for every consumer of that route.
+  const traces: TraceRow[] = [];
+  let traceOffset = 0;
+  const tracePageSize = 100;
+  while (traces.length < traceFetchCap) {
+    const pageJson = await fetchJson<{ executions?: unknown; traces?: unknown }>(
+      `${tracesUrl}?limit=${tracePageSize}&offset=${traceOffset}`,
+      apiKey,
+      20_000,
+    );
+    const pageRows: TraceRow[] = Array.isArray(pageJson?.executions)
+      ? (pageJson?.executions as TraceRow[])
+      : Array.isArray(pageJson?.traces)
+        ? (pageJson?.traces as TraceRow[])
+        : [];
+    if (pageRows.length === 0) break;
+    traces.push(...pageRows);
+    if (pageRows.length < tracePageSize) break;
+    traceOffset += pageRows.length;
+  }
 
   // Group traces by template_id.
   interface Bucket {

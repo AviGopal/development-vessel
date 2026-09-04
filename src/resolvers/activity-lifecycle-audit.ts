@@ -276,8 +276,17 @@ export async function resolveActivityLifecycleAudit(
   const sortedAsc = [...withTraces].sort((a, b) => a.combined_score - b.combined_score);
   const sortedDesc = [...withTraces].sort((a, b) => b.combined_score - a.combined_score);
 
-  const shouldLoadHot = sortedDesc.slice(0, hotSetSize);
-  const shouldUnload = sortedAsc.slice(0, hotSetSize);
+  // A ranking over a population smaller than twice the slice size carries no
+  // information: the two slices overlap, and once withTraces.length <= hotSetSize
+  // they are literally the SAME SET. Measured 2026-09-04: 7 templates with traces
+  // against the default hotSetSize of 15 produced should_load_hot and should_unload
+  // identical 7/7, and the eviction candidates had success_rate 1 with zero failures.
+  // Emitting that is worse than emitting nothing, because it reaches the gap store as
+  // a real eviction candidate set. Refuse to rank when the population cannot support
+  // it; the existing `shouldUnload.length > 0` guard below then emits no finding.
+  const rankable = withTraces.length >= 2 * hotSetSize;
+  const shouldLoadHot = rankable ? sortedDesc.slice(0, hotSetSize) : [];
+  const shouldUnload = rankable ? sortedAsc.slice(0, hotSetSize) : [];
   const shouldPromoteProposed = stats
     .filter((s) => s.is_proposed && s.recent_success >= promoteThreshold)
     .sort((a, b) => b.combined_score - a.combined_score)

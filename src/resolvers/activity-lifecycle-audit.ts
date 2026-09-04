@@ -284,9 +284,17 @@ export async function resolveActivityLifecycleAudit(
   // Emitting that is worse than emitting nothing, because it reaches the gap store as
   // a real eviction candidate set. Refuse to rank when the population cannot support
   // it; the existing `shouldUnload.length > 0` guard below then emits no finding.
-  const rankable = withTraces.length >= 2 * hotSetSize;
-  const shouldLoadHot = rankable ? sortedDesc.slice(0, hotSetSize) : [];
-  const shouldUnload = rankable ? sortedAsc.slice(0, hotSetSize) : [];
+  // SHRINK THE SLICE; DO NOT GATE THE MECHANISM. An earlier form of this guard
+  // required withTraces.length >= 2 * hotSetSize, which at the live population
+  // (7 templates with traces against a default hotSetSize of 15) is never true —
+  // a permanent off switch on the only arm-count control the substrate has, and
+  // one that reads identically to a genuinely empty result. Half the population
+  // keeps the two slices DISJOINT at any size: at 7 templates the slice is 3,
+  // and 3 + 3 < 7. At a population of 0 or 1 the slice is 0, correctly yielding
+  // empty sets because there is nothing to rank.
+  const sliceSize = Math.min(hotSetSize, Math.floor(withTraces.length / 2));
+  const shouldLoadHot = sortedDesc.slice(0, sliceSize);
+  const shouldUnload = sortedAsc.slice(0, sliceSize);
   const shouldPromoteProposed = stats
     .filter((s) => s.is_proposed && s.recent_success >= promoteThreshold)
     .sort((a, b) => b.combined_score - a.combined_score)

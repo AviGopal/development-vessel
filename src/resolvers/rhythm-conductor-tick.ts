@@ -440,6 +440,9 @@ export async function resolveRhythmConductorTick(
         : null;
   if (structuralBreak && pointer.dry_run !== true) {
     const summary =
+  structuralBreak === "registry_empty"
+    ? "Rhythm registry is EMPTY: rhythm_conductor_tick read zero timeShapedRhythm impulses, so nothing periodic in this substrate has a cadence. Re-seed the registry with TWO pool impulses per family: (1) timeShapedRhythm carrying axis/family/budget/alpha/beta/staleness, and (2) rhythmFamilyGoal carrying {family, goal} for the contract-phrased goal text."
+    : `Rhythm registry is UNMAPPABLE: all ${rhythms.length} rhythm(s) were skipped with no_goal_mapping, so the conductor scores due-ness and has nothing to enqueue. Mount rhythmFamilyGoal pool impulses ({family, goal, member?}) for the affected families.`;
       structuralBreak === "registry_empty"
         ? "Rhythm registry is EMPTY: rhythm_conductor_tick read zero timeShapedRhythm impulses, so nothing periodic in this substrate has a cadence. Re-seed the registry (pool impulses of shape timeShapedRhythm carrying axis/family/budget/alpha/beta/staleness)."
         : `Rhythm registry is UNMAPPABLE: all ${rhythms.length} rhythm(s) were skipped with no_goal_mapping, so the conductor scores due-ness and has nothing to enqueue. Mount rhythmFamilyGoal pool impulses ({family, goal, member?}) for the affected families.`;

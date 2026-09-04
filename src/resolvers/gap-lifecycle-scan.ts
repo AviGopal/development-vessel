@@ -35,7 +35,7 @@ function workspaceRoot(): string {
 
 export interface GapLifecycleScanPointer {
   type: "gap_lifecycle_scan";
-  gapsPath?: string;          // default /workspace/gaps/gaps.json
+  gapsPath?: string;          // default join(workspaceRoot(), "gaps", "gaps.json")
   proposalsDir?: string;      // default /workspace/proposals
   staleHours?: number;        // open+untouched beyond this = stale. default 48
   autoClose?: boolean;        // auto-close churned gaps. default false (seed sets true)

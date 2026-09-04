@@ -96,6 +96,14 @@ function traceTimestamp(t: TraceRow): number | null {
     const v = Date.parse(t.occurred_at);
     if (!Number.isNaN(v)) return v;
   }
+  if (typeof t.completed_at === "string") {
+    const v = Date.parse(t.completed_at);
+    if (!Number.isNaN(v)) return v;
+  }
+  if (typeof t.started_at === "string") {
+    const v = Date.parse(t.started_at);
+    if (!Number.isNaN(v)) return v;
+  }
   if (typeof t.created_at === "string") {
     const v = Date.parse(t.created_at);
     if (!Number.isNaN(v)) return v;

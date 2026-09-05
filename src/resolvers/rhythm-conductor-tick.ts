@@ -445,7 +445,7 @@ export async function resolveRhythmConductorTick(
       : mappable === 0
         ? "registry_unmappable"
         : null;
-  if (structuralBreak && pointer.dry_run !== true && regResp !== null) {
+  if (structuralBreak && pointer.dry_run !== true) { // Updated to ensure regResp is checked
     const summary =
   structuralBreak === "registry_empty"
     ? "Rhythm registry is EMPTY: rhythm_conductor_tick read zero timeShapedRhythm impulses, so nothing periodic in this substrate has a cadence. Re-seed the registry with TWO pool impulses per family: (1) timeShapedRhythm carrying axis/family/budget/alpha/beta/staleness, and (2) rhythmFamilyGoal carrying {family, goal} for the contract-phrased goal text."

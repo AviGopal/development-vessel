@@ -69,7 +69,14 @@ async function drainBoredomQueue(queuePath: string, maxDispatch: number): Promis
         );
         // Mark dispatched on any non-null response (goal-host accepted it). A failed
         // dispatch leaves status:pending so the next tick retries.
-        if (res) { (t as { status?: string }).status = "dispatched"; dispatched += 1; }
+        if (res) { 
+          const r = res as { dispatchId?: string; executionId?: string };
+          (t as { status?: string }).status = "dispatched";
+          if (r.dispatchId || r.executionId) {
+            (t as { dispatch_id?: string }).dispatch_id = r.dispatchId ?? r.executionId;
+          }
+          dispatched += 1; 
+        }
       } catch { /* leave pending; retry next tick */ }
     }
     if (dispatched > 0) {

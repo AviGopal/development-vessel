@@ -2662,6 +2662,15 @@ export async function recordApproachDecision(gap: Record<string, unknown>): Prom
 }
 
 export function joinDecisionOutcome(meta: Record<string, unknown>, outcome: Record<string, unknown>): void {
+  // An absent or fully-joined decision list is not a reason to discard a terminal outcome.
+  // recordApproachDecision pushes a fresh unjoined entry on every PICK, so the ordinary
+  // compose path always has somewhere to write. The mitosis-cutover sweep closes gaps in
+  // BULK with no pick, so it has no unjoined entry and often no decision list at all, and
+  // this function used to drop its landed:true write silently every single time.
+  // Measured 2026-09-05 on the live store: of 44 gaps closed with a landed reason, 25 of the
+  // 32 carrying decisions had EVERY decision reading landed:false, and a further 12 had no
+  // approach_decisions key at all. 37 of 44 landings were invisible.
+  if (meta.approach_decisions === undefined) meta.approach_decisions = [];
   const arr = meta.approach_decisions;
   if (!Array.isArray(arr)) return;
   for (let i = arr.length - 1; i >= 0; i--) {
@@ -2671,6 +2680,8 @@ export function joinDecisionOutcome(meta: Record<string, unknown>, outcome: Reco
       return;
     }
   }
+  arr.push({ at: new Date().toISOString(), appended_by: "joinDecisionOutcome", outcome: { ...outcome, joined_at: new Date().toISOString() } });
+  while (arr.length > 5) arr.shift();
 }
 
 export async function capacitySlices(gap: Record<string, unknown>): Promise<Array<{ file: string; hint: string }>> {

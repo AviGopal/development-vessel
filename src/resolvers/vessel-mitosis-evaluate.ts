@@ -5,6 +5,7 @@ import {
   mkdir,
   copyFile,
   readdir,
+  readFile,
   symlink,
   unlink,
   cp,
@@ -612,6 +613,120 @@ async function runGoldenDriftGate(args: {
   }
 }
 
+/**
+ * A MIGRATION THAT PARSES CAN STILL BREAK EVERY WRITE TO ITS TABLE.
+ *
+ * 2026-09-05: the compose path landed two bodies at one filename. Draft 2 was
+ * unparseable and therefore INERT — it never ran. Draft 1 was perfectly valid SQL:
+ *
+ *     DEFINE FIELD input_schema ON activity TYPE object;
+ *
+ * It applied cleanly ("applied successfully (6 statements)") and took the trace store
+ * offline. `activity` is SCHEMAFULL with 3,886 rows in which that field is NONE, and a
+ * non-`option` field with no DEFAULT makes SurrealDB reject any write that omits it:
+ *
+ *     UPDATE activity SET updated_at = time::now() WHERE ...
+ *     -> "Found NONE for field `input_schema`, ... but expected a object"
+ *
+ * 156 validation errors in 35 minutes; the classifier failed on every template.
+ *
+ * ★ THE ORDERING THAT MATTERS: a syntax or dry-run-parse gate refuses draft 2 (harmless)
+ * and PASSES draft 1 (destructive) — draft 1 returns OK from any parser. Checking that a
+ * migration PARSES is necessary and not sufficient. This gate asks the third question
+ * instead: what does applying it DO to rows that already exist?
+ *
+ * Both hazards are refused here — the malformed shape too, since it is free to detect and
+ * an unparseable migration is never intended.
+ *
+ * ABSTENTION IS THE DEFAULT, as in inertRegexEditRefusal: a false refusal blocks real work,
+ * which is worse than letting one bad migration through. We stay silent when the field is
+ * `option<...>`, when a DEFAULT or VALUE clause supplies a value, when the table is created
+ * in the same file (no pre-existing rows to invalidate), when the name is a nested path such
+ * as `tasks.*` (that types ARRAY ELEMENTS, not a column on every row), and when no
+ * DEFINE FIELD statement is found at all.
+ *
+ * Measured against the whole corpus before shipping: 217 existing .surql files, ONE flagged
+ * — `org_id ON impulse_resolution_metrics TYPE string` in migration 070, which is live in
+ * exactly that state and is a genuine latent instance of this bug, harmless today only
+ * because the table has zero rows. False positives: 0 of 217.
+ */
+export function surqlBreakingFieldRefusal(
+  files: Array<{ path: string; sql: string }>,
+): string | null {
+  const FIELD_RE =
+    /DEFINE\s+FIELD\s+(?:(?:IF\s+NOT\s+EXISTS|OVERWRITE)\s+)*([A-Za-z_][\w.[\]*]*)\s+ON\s+(?:TABLE\s+)?([A-Za-z_]\w*)([^;]*);/gi;
+  const MALFORMED_RE = /DEFINE\s+FIELD\s+(?!.*?\bON\b)[^;]*;/gi;
+  const TABLE_RE =
+    /DEFINE\s+TABLE\s+(?:(?:IF\s+NOT\s+EXISTS|OVERWRITE)\s+)*([A-Za-z_]\w*)/gi;
+
+  for (const f of files) {
+    if (!/\.surql$/i.test(f.path)) continue;
+    // Drop line comments so a documented example never trips the scan.
+    const sql = f.sql
+      .split("\n")
+      .filter((l) => !l.trim().startsWith("--"))
+      .join("\n");
+
+    const created = new Set<string>();
+    for (const m of sql.matchAll(TABLE_RE)) created.add(m[1]!.toLowerCase());
+
+    const malformed = [...sql.matchAll(MALFORMED_RE)];
+    if (malformed.length > 0) {
+      return (
+        `[mitosis-surql] REFUSING ${f.path}: a DEFINE FIELD statement names no table — ` +
+        `${malformed.length} statement(s) like "${malformed[0]![0].trim().slice(0, 80)}". ` +
+        `This cannot parse, so applySQLFile returns false, the file is never recorded in ` +
+        `init_migrations, and it fails again on every subsequent boot.`
+      );
+    }
+
+    for (const m of sql.matchAll(FIELD_RE)) {
+      const [, name, table, rest] = m as unknown as [string, string, string, string];
+      if (name.includes(".")) continue; // `tasks.*` types array ELEMENTS, not a column
+      if (created.has(table.toLowerCase())) continue; // new table => no existing rows
+      const tm = rest.match(
+        /\bTYPE\s+([\s\S]+?)(?=\s+(?:DEFAULT|VALUE|ASSERT|PERMISSIONS|COMMENT|READONLY|REFERENCE|FLEXIBLE)\b|$)/i,
+      );
+      if (!tm) continue; // untyped => not this hazard
+      const type = tm[1]!.trim();
+      if (/^option\s*</i.test(type)) continue; // optional => safe
+      if (/\b(DEFAULT|VALUE)\b/i.test(rest)) continue; // has a value => safe
+      return (
+        `[mitosis-surql] REFUSING ${f.path}: \`DEFINE FIELD ${name} ON ${table} TYPE ${type}\` ` +
+        `adds a NON-OPTIONAL field with no DEFAULT or VALUE clause to a table this file does ` +
+        `not create. On a SCHEMAFULL table with existing rows this makes SurrealDB reject ` +
+        `EVERY write that omits the field ("Found NONE for field \`${name}\`"). ` +
+        `Use \`option<${type}>\`, or supply a DEFAULT/VALUE. ` +
+        `This is the exact shape that took the trace store offline on 2026-09-05.`
+      );
+    }
+  }
+  return null;
+}
+
+/** Read the staged files a mitosis is about to land, tolerating layout differences. */
+async function readStagedFiles(
+  roots: string[],
+  stagedFiles: string[],
+): Promise<Array<{ path: string; sql: string }>> {
+  const out: Array<{ path: string; sql: string }> = [];
+  for (const rel of stagedFiles) {
+    if (!/\.surql$/i.test(rel)) continue;
+    for (const root of roots) {
+      for (const candidate of [join(root, rel), join(root, basename(rel))]) {
+        try {
+          out.push({ path: rel, sql: await readFile(candidate, "utf8") });
+          break;
+        } catch {
+          /* try the next layout */
+        }
+      }
+      if (out.some((o) => o.path === rel)) break;
+    }
+  }
+  return out;
+}
+
 export async function staticEvaluate(
   mitosisRoot: string,
   bunCmd: string,
@@ -973,6 +1088,35 @@ export async function staticEvaluate(
           duration_ms: Date.now() - start,
         };
       }
+    }
+  }
+  // EFFECT CHECK FOR ARTIFACTS `bun run <script>` CANNOT READ.
+  //
+  // Every check above is a package script — lint, typecheck, bun test — and all of them are
+  // TypeScript tools. A staged .surql file is never opened by any of them, so before this
+  // change `static_checks_pass` was returned for migrations that had been *certified without
+  // being read*. That is how a migration that breaks every write to `activity` reached
+  // origin/dev with a green gate on 2026-09-05.
+  if (stagedFiles && stagedFiles.length > 0) {
+    const surql = await readStagedFiles([runRoot, mitosisRoot], stagedFiles);
+    const refusal = surqlBreakingFieldRefusal(surql);
+    if (refusal) {
+      console.error(`[mitosis-evaluate] ${refusal}`);
+      return {
+        attempted: true,
+        ok: false,
+        reason: refusal,
+        checks: completed,
+        duration_ms: Date.now() - start,
+      };
+    }
+    // Say so when a .surql was staged but unreadable, rather than implying it was checked.
+    const staged = stagedFiles.filter((f) => /\.surql$/i.test(f));
+    if (staged.length > 0 && surql.length < staged.length) {
+      console.error(
+        `[mitosis-evaluate] NOTE: ${staged.length - surql.length} staged .surql file(s) could not be read; ` +
+          `they were NOT effect-checked (checked ${surql.length}/${staged.length})`,
+      );
     }
   }
   return {

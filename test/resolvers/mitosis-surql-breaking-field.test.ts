@@ -1,0 +1,130 @@
+import { describe, it, expect } from "bun:test";
+import { surqlBreakingFieldRefusal } from "../../src/resolvers/vessel-mitosis-evaluate.js";
+
+/**
+ * A MIGRATION THAT PARSES CAN STILL BREAK EVERY WRITE TO ITS TABLE.
+ *
+ * On 2026-09-05 the compose path landed two bodies at one filename:
+ *
+ *   draft 1 (6ac1aa6)  DEFINE FIELD input_schema ON activity TYPE object;
+ *                      -> VALID SQL. Applied. Broke every write to `activity`.
+ *   draft 2 (a4b7f1b)  DEFINE FIELD input_schema IF NOT EXISTS;
+ *                      -> unparseable. Never ran. INERT, harmless.
+ *
+ * Both passed `static_checks_pass`, because every check the gate runs is a TypeScript tool
+ * and none of them opens a .surql file.
+ *
+ * THE ORDERING IS THE WHOLE POINT, and I got it backwards first: a syntax/parse gate refuses
+ * draft 2 and PASSES draft 1. Draft 1 returns OK from any parser — it is well-formed SQL with
+ * the wrong semantics. Checking that a migration parses is necessary and NOT sufficient.
+ *
+ * The bodies below are VERBATIM from `git show <sha>:sql/migrations/205-...`, not paraphrases,
+ * so this suite fails if either real-world case stops being caught.
+ *
+ * HALF OF THESE TESTS PIN THE ABSTENTIONS. A false refusal blocks real work, which is worse
+ * than letting one bad migration through — the same discipline as inertRegexEditRefusal.
+ * Corpus-measured before shipping: 217 existing .surql files, 0 false positives.
+ */
+describe("surqlBreakingFieldRefusal — the third question for schema artifacts", () => {
+  // ---- the two real cases ----
+
+  it("REFUSES draft 1 verbatim — valid SQL that broke production", () => {
+    const sql = [
+      "DEFINE FIELD variant_reason ON activity TYPE string;",
+      "DEFINE FIELD retired_at ON activity TYPE datetime;",
+      "DEFINE FIELD retired_reason ON activity TYPE string;",
+      "DEFINE FIELD input_schema ON activity TYPE object;",
+      "DEFINE FIELD output_schema ON activity TYPE object;",
+      "DEFINE FIELD schema_confidence ON activity TYPE float;",
+    ].join("\n");
+    const r = surqlBreakingFieldRefusal([{ path: "sql/migrations/205-x.surql", sql }]);
+    expect(r).not.toBeNull();
+    expect(r).toContain("variant_reason");
+    expect(r).toContain("NON-OPTIONAL");
+  });
+
+  it("REFUSES draft 2 verbatim — the unparseable body, for a different stated reason", () => {
+    const sql = [
+      "DEFINE FIELD variant_reason IF NOT EXISTS;",
+      "DEFINE FIELD retired_at IF NOT EXISTS;",
+    ].join("\n");
+    const r = surqlBreakingFieldRefusal([{ path: "sql/migrations/205-x.surql", sql }]);
+    expect(r).not.toBeNull();
+    expect(r).toContain("names no table");
+  });
+
+  it("ACCEPTS migration 206 — the repair that actually fixed the outage", () => {
+    const sql =
+      'DEFINE FIELD OVERWRITE input_schema ON activity TYPE option<object> FLEXIBLE\n  COMMENT "Structured input schema";\n' +
+      'DEFINE FIELD OVERWRITE retired_at ON activity TYPE option<datetime>\n  COMMENT "When retired";';
+    expect(surqlBreakingFieldRefusal([{ path: "sql/migrations/206-x.surql", sql }])).toBeNull();
+  });
+
+  // ---- abstentions: the gate must stay silent when the migration is safe ----
+
+  it("ABSTAINS when a VALUE clause supplies a value (migration 055's real shape)", () => {
+    const sql =
+      "DEFINE FIELD IF NOT EXISTS retired ON activity TYPE bool\n  VALUE $value OR false\n  COMMENT \"retired\";";
+    expect(surqlBreakingFieldRefusal([{ path: "m.surql", sql }])).toBeNull();
+  });
+
+  it("ABSTAINS when a DEFAULT clause supplies a value", () => {
+    const sql = "DEFINE FIELD tags ON activity TYPE array<string> DEFAULT [];";
+    expect(surqlBreakingFieldRefusal([{ path: "m.surql", sql }])).toBeNull();
+  });
+
+  it("ABSTAINS for a table created in the SAME file — no pre-existing rows to invalidate", () => {
+    const sql = "DEFINE TABLE brand_new SCHEMAFULL;\nDEFINE FIELD a ON brand_new TYPE string;";
+    expect(surqlBreakingFieldRefusal([{ path: "m.surql", sql }])).toBeNull();
+  });
+
+  it("ABSTAINS on nested paths — `tasks.*` types ARRAY ELEMENTS, not a column on every row", () => {
+    // 5 of 6 initial corpus hits were this shape. Refusing them would have been wrong.
+    const sql = "DEFINE FIELD impulse_resolutions.* ON activity_execution_traces TYPE object;";
+    expect(surqlBreakingFieldRefusal([{ path: "m.surql", sql }])).toBeNull();
+  });
+
+  it("ABSTAINS on a field with no TYPE clause at all", () => {
+    const sql = "DEFINE FIELD loose ON activity FLEXIBLE;";
+    expect(surqlBreakingFieldRefusal([{ path: "m.surql", sql }])).toBeNull();
+  });
+
+  it("ABSTAINS on non-.surql files — this gate makes no claim about TypeScript", () => {
+    const sql = "DEFINE FIELD x ON activity TYPE string;";
+    expect(surqlBreakingFieldRefusal([{ path: "src/thing.ts", sql }])).toBeNull();
+  });
+
+  it("ABSTAINS on a commented-out example rather than reading it as code", () => {
+    const sql = "-- DEFINE FIELD input_schema ON activity TYPE object;\nSELECT 1;";
+    expect(surqlBreakingFieldRefusal([{ path: "m.surql", sql }])).toBeNull();
+  });
+
+  it("returns null on empty input and does not throw on junk", () => {
+    expect(surqlBreakingFieldRefusal([])).toBeNull();
+    expect(() => surqlBreakingFieldRefusal([{ path: "m.surql", sql: "" }])).not.toThrow();
+    expect(surqlBreakingFieldRefusal([{ path: "m.surql", sql: ";;;;" }])).toBeNull();
+  });
+
+  // ---- discrimination: the property a parse-only gate does NOT have ----
+
+  it("distinguishes the DESTRUCTIVE draft from the INERT one — a parser cannot", () => {
+    // This is the test that justifies the gate's existence. A syntax check passes the first
+    // and refuses the second, which is exactly backwards with respect to harm.
+    const destructive = "DEFINE FIELD input_schema ON activity TYPE object;";
+    const inert = "DEFINE FIELD input_schema IF NOT EXISTS;";
+    const rd = surqlBreakingFieldRefusal([{ path: "a.surql", sql: destructive }]);
+    const ri = surqlBreakingFieldRefusal([{ path: "b.surql", sql: inert }]);
+    expect(rd).not.toBeNull();
+    expect(ri).not.toBeNull();
+    expect(rd).toContain("Found NONE"); // names the runtime symptom it prevents
+    expect(rd).not.toEqual(ri); // and cites a different cause for each
+  });
+
+  it("scans every staged file, not just the first", () => {
+    const ok = { path: "1.surql", sql: "DEFINE FIELD a ON t TYPE option<string>;" };
+    const bad = { path: "2.surql", sql: "DEFINE FIELD b ON t TYPE string;" };
+    const r = surqlBreakingFieldRefusal([ok, bad]);
+    expect(r).not.toBeNull();
+    expect(r).toContain("2.surql");
+  });
+});

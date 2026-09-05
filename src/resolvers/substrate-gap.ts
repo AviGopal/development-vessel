@@ -960,7 +960,7 @@ export async function resolveSubstrateGapWrite(
         ? null
         : Bun.spawnSync(["systemctl", "start", "gap-compose.service"], { stdout: "inherit", stderr: "inherit" });
       if (proc?.exitCode !== 0) {
-        console.error(`[substrate-gap] gap-compose failed to start (systemctl exit ${proc?.exitCode})`);
+        console.error(`[substrate-gap] gap-compose failed to start (systemctl exit ${proc?.exitCode ?? 'unknown'})`);
       } else if (proc?.exitCode === 0) {
         console.log("[substrate-gap] event-driven gap-compose pickup triggered by " + gap.id + (reopened ? " (reopened)" : ""));
       }

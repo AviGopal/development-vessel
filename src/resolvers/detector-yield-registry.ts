@@ -180,6 +180,38 @@ function isReallyFixed(g: GapRow): boolean {
   return typeof reason === "string" && REALLY_FIXED_REASONS.has(reason);
 }
 
+
+/**
+ * The status decision, EXPORTED so tests bind to the shipped rule rather than a copy of it.
+ *
+ * It lived inline and was tested through a reimplementation in the test file. A negative
+ * control exposed that: sabotaging the real branch left every test green, because the tests
+ * were exercising their own copy. A probe that re-derives the rule tests the probe, not the
+ * gate — the same trap the gate self-probe exists to avoid, reproduced here.
+ */
+export function classifyDetector(
+  a: { emitted: number; really_fixed: number; novel_open: number; landed: number; churned: number; open: number },
+  picks: number | null,
+  dormantThreshold: number,
+): DetectorStatus {
+  if (picks !== null && picks < dormantThreshold) return "DORMANT";
+  // PRODUCTIVE requires a REAL fix or live signal, not merely a closure: `landed` counts
+  // expiry, and 1,202 of 1,241 detectors (97%) reached PRODUCTIVE with zero gaps ever fixed.
+  if (a.really_fixed > 0 || a.novel_open > 0) return "PRODUCTIVE";
+  // CHURN IS EVIDENCE; EXPIRY IS NOT. A churn-dominated detector's gaps were actively
+  // attempted and failed to land — that is a measurement of the detector's output, and it
+  // stands below the volume floor. Expiry means nothing was ever attempted, which is why the
+  // floor exists at all. Erasing this distinction broke the pre-existing
+  // "emitted-but-all-churned is LOW_YIELD" test, and the test was right.
+  if (a.emitted > 0 && a.landed === 0 && a.churned > 0 && a.churned >= a.open) return "LOW_YIELD";
+  // Too few gaps to judge. Absence of evidence, not evidence of uselessness — and retiring on
+  // it is the irreversible half of an asymmetric bet taken without the measurement.
+  if (a.emitted > 0 && a.emitted < RETIREMENT_EVIDENCE_FLOOR) return "UNKNOWN";
+  // At or above the floor with no real fix and no live signal: measured, not suspected.
+  if (a.emitted > 0) return "LOW_YIELD";
+  return "UNKNOWN";
+}
+
 function gapTime(g: GapRow): number {
   const t = Date.parse(g.updated_at ?? g.detected_at ?? g.created_at ?? "");
   return Number.isFinite(t) ? t : NaN;
@@ -349,37 +381,7 @@ export async function resolveDetectorYieldRegistry(
     const picks = snap ? snap.picks : null;
     const novel = snap ? snap.novel_fraction : null;
 
-    let status: DetectorStatus;
-    if (picks !== null && picks < dormantThreshold) {
-      status = "DORMANT";
-    } else if (a.really_fixed > 0 || a.novel_open > 0) {
-      // PRODUCTIVE now requires a REAL fix, not a closure. Previously `landed > 0` qualified,
-      // and landed counts expiry — 1,202 of 1,241 detectors (97%) reached PRODUCTIVE without a
-      // single gap ever being fixed, which saturated the signal and made LOW_YIELD unreachable.
-      status = "PRODUCTIVE";
-    } else if (a.really_fixed === 0 && a.emitted >= RETIREMENT_EVIDENCE_FLOOR) {
-      // LOW_YIELD ON EVIDENCE, NOT ON A BAD DAY.
-      //
-      // The consequences are asymmetric and that asymmetry decides the rule. Retiring a
-      // detector that would have produced a real fix loses that signal permanently and
-      // silently — nothing re-emits a gap nobody is detecting. Keeping a noisy detector costs
-      // pool dilution, which is visible, bounded, and reversible next run. So the burden of
-      // proof sits on retirement.
-      //
-      // The floor is the one the template lifecycle already uses to deprecate an arm
-      // (EVIDENCE_MIN_SAMPLES = 10): below it, "never fixed anything" is indistinguishable
-      // from "has not had the chance yet", and acting on that is guessing. Above it, a
-      // detector that has emitted ten or more gaps and produced zero verified fixes has been
-      // measured, not merely suspected.
-      status = "LOW_YIELD";
-    } else if (a.emitted > 0 && a.landed === 0 && a.churned >= a.open && a.churned > 0) {
-      status = "LOW_YIELD";
-    } else if (a.emitted > 0) {
-      // emitted but no landed/novel-open and not churn-dominated — still low signal
-      status = "LOW_YIELD";
-    } else {
-      status = "UNKNOWN";
-    }
+    const status = classifyDetector(a, picks, dormantThreshold);
 
     rows.push({
       detector_id: det,

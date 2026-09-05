@@ -1,4 +1,5 @@
 import { describe, it, expect } from "bun:test";
+import { classifyDetector } from "../../src/resolvers/detector-yield-registry.js";
 
 /**
  * `gaps_landed` COUNTS FORGETTING AS SUCCESS.
@@ -44,12 +45,24 @@ const countsAsLanded = (reason: string | null | undefined) => !isChurned(reason)
 /** Mirrors the shipped rule: PRODUCTIVE on a real fix or live signal, LOW_YIELD only on evidence. */
 const EVIDENCE_FLOOR = 10;
 const EMIT_CAP = 5;
+/**
+ * Calls the SHIPPED classifier. An earlier version of this file reimplemented the rule, and a
+ * negative control proved the tests were exercising the copy: sabotaging the real branch left
+ * every test green. Bind to the export, never to a paraphrase of it.
+ */
 const classify = (r: { gaps_emitted: number; gaps_really_fixed: number; novel_open: number }) =>
-  r.gaps_really_fixed > 0 || r.novel_open > 0
-    ? "PRODUCTIVE"
-    : r.gaps_really_fixed === 0 && r.gaps_emitted >= EVIDENCE_FLOOR
-      ? "LOW_YIELD"
-      : "UNKNOWN";
+  classifyDetector(
+    {
+      emitted: r.gaps_emitted,
+      really_fixed: r.gaps_really_fixed,
+      novel_open: r.novel_open,
+      landed: 0,
+      churned: 0,
+      open: 0,
+    },
+    null,
+    1,
+  );
 
 describe("landed vs really fixed — forgetting is not resolving", () => {
   it("counts expired_not_redetected as landed today, and as NOT fixed", () => {
@@ -143,6 +156,19 @@ describe("landed vs really fixed — forgetting is not resolving", () => {
     expect(batch.map((r) => r.id)).toEqual(["d79", "d60", "d50", "d40", "d30"]);
     // The remainder is deferred to a run that can see THIS batch's effect, not discarded.
     expect(eligible.length).toBeGreaterThan(batch.length);
+  });
+
+  it("the floor is not bypassed by a looser rule beneath it", () => {
+    // FOUND BY RUNNING IT, NOT READING IT. vessel_architecture_pattern_scan (4 emitted, 0
+    // really fixed) came back LOW_YIELD from the live registry: the original catch-all marked
+    // ANY detector with emitted > 0 as low signal, so the evidence floor directly above it was
+    // INERT — present, typechecking, and changing nothing, because everything it declined to
+    // condemn fell one line further and was condemned anyway.
+    //
+    // A guard that can be walked around is not a guard. This pins the walk-around shut.
+    expect(classify({ gaps_emitted: 4, gaps_really_fixed: 0, novel_open: 0 })).toBe("UNKNOWN");
+    expect(classify({ gaps_emitted: 1, gaps_really_fixed: 0, novel_open: 0 })).toBe("UNKNOWN");
+    expect(classify({ gaps_emitted: 10, gaps_really_fixed: 0, novel_open: 0 })).toBe("LOW_YIELD");
   });
 
   it("a capped run must never read as a finished one", () => {

@@ -792,6 +792,23 @@ export async function resolveSubstrateGapWrite(
     // survived a full rewrite still carrying the placeholder. A self-healing store is the point
     // of scrubbing at the writer rather than at the reader.
     gap.created_at = cleanTs(existing.created_at, gap.created_at ?? now);
+    // A COLLAPSING SUMMARY IS AN ECHO, NOT A REWRITE. The guard below this one catches only
+    // an ABSENT summary. A closing or edit goal is generated as `Close substrate gap <id>:
+    // <summary, truncated>`, and the writer echoes that goal text back as the new summary, so
+    // the incoming value is a LEADING FRAGMENT of the text it destroys. Observed three times
+    // on 2026-09-05 against operator gaps: 4781 chars -> 11, 4519 -> 62, 3300 -> 123, each a
+    // case-insensitive prefix of what it replaced, taking the gap's falsifier and measurements
+    // with it. Because this store REPLACES rather than merges, that erases the very evidence
+    // by which a false closure could be detected.
+    if (
+      typeof gap.summary === "string" &&
+      typeof existing.summary === "string" &&
+      gap.summary.trim().length > 0 &&
+      gap.summary.trim().length < existing.summary.trim().length &&
+      existing.summary.trim().toLowerCase().startsWith(gap.summary.trim().toLowerCase())
+    ) {
+      gap.summary = existing.summary;
+    }
     if (typeof gap.summary !== "string" || gap.summary.length === 0) gap.summary = existing.summary;
     if (gap.remedy === undefined) gap.remedy = existing.remedy;
     // Prevent a close or re-emit that carries no summary from blanking the stored

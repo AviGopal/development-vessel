@@ -49,13 +49,41 @@ describe("chooseFirstActionable", () => {
     expect(calls).toBe(2); // g0 pending, g1 actionable — then it stops
   });
 
-  it("never evaluates more than scanMax candidates", () => {
+  it("keeps the NORMAL path cheap — stops at the first actionable candidate", () => {
+    // This is the guarantee that matters for cost: the real predicate spawns `git log` per
+    // clone, and the normal pick must not walk the pool. One pending, then actionable => 2.
+    let calls = 0;
+    const ranked = rank(...Array.from({ length: 100 }, (_, i) => `g${i}`));
+    const r = chooseFirstActionable(ranked, (g) => { calls++; return g.id === "g0"; }, 5);
+    expect(calls).toBe(2);
+    expect(r.chosen.g.id).toBe("g1");
+  });
+
+  it("spends a BOUNDED second pass when the whole window is pending, instead of returning a known-pending gap", () => {
+    // CHANGED 2026-09-05. This previously pinned calls===5 and chosen==="g0" — i.e. on an
+    // exhausted window it returned the top candidate, which the function had just proved was
+    // pending. The post-selection guard then refused it and the tick did nothing: measured,
+    // gap_to_feature returned ok:true / "pending_verification" on three consecutive probes
+    // while the capability lane authored nothing for hours. Returning a known-pending gap
+    // GUARANTEES the no-op, so the fail-open target changed. The cost bound did not
+    // disappear — it is now scanMax*2, paid only in this abnormal branch.
     let calls = 0;
     const ranked = rank(...Array.from({ length: 100 }, (_, i) => `g${i}`));
     const r = chooseFirstActionable(ranked, () => { calls++; return true; }, 5);
-    expect(calls).toBe(5);
-    expect(r.chosen.g.id).toBe("g0"); // fail-open
-    expect(r.skippedPending).toBe(5);
+    expect(calls).toBe(10);              // 5 in the window + 5 in the bounded second pass
+    expect(r.chosen.g.id).toBe("g10");   // first UNEVALUATED candidate, not the known-pending top
+    expect(r.skippedPending).toBe(10);
+    expect(r.scanExhausted).toBe(true);
+  });
+
+  it("finds an actionable candidate that sits just BEYOND the window", () => {
+    // The exact live shape: pending gaps rank high (they landed before), so they fill the
+    // window while composable work waits at index scanMax+.
+    let calls = 0;
+    const ranked = rank(...Array.from({ length: 100 }, (_, i) => `g${i}`));
+    const r = chooseFirstActionable(ranked, (g) => { calls++; return g.id !== "g7"; }, 5);
+    expect(r.chosen.g.id).toBe("g7");
+    expect(r.scanExhausted).toBe(true);
   });
 
   it("defaults its scan bound so a pick cannot walk an unbounded pool", () => {

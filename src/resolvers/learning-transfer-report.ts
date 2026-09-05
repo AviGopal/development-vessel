@@ -52,6 +52,67 @@ function normId(id: unknown): string {
   return String(id ?? "").replace(/^activity:/, "").replace(/[⟨⟩]/g, "");
 }
 
+/**
+ * AN ARM CANNOT EXECUTE MORE OFTEN THAN IT IS SELECTED.
+ *
+ * `variant_performance_metrics.total_executions` is read by lifecycle decisions — notably
+ * checkAndRetireTemplate, which requires >= 20 executions before it will retire a poor
+ * performer. Measured 2026-09-05 that counter is inflated by orders of magnitude, so every
+ * threshold keyed on it fires far too early:
+ *
+ *   sum(total_executions) over 4,089 arms : 2,158,161
+ *   rows in `execution`                    :    34,314   (63x fewer)
+ *   rows in `thompson_selection_log`       :    49,074
+ *
+ * Joined on a NORMALISED id (normId strips the `activity:` prefix and the corner brackets;
+ * the naive join matches 0 arms and that 0 is an id-namespace artifact, not a finding), the
+ * 66 matched arms with >= 500 claimed executions show 440,228 claims against 2,839
+ * selections — 155x. Worst single arm: slot-binding, 243,063 claimed from 5 selections.
+ *
+ * Selection is the only route by which an arm runs, so ratio >> 1 is not a tuning question,
+ * it is a broken counter. This check exists so the invariant is asserted continuously
+ * instead of being rediscovered: it is the detector for the class, not a repair of it.
+ *
+ * ABSTAINS rather than accuses. An arm with no selection rows at all is NOT reported — the
+ * selection log may simply be retained for a shorter window than the counter, and a
+ * retention gap is indistinguishable from over-counting without a fixed comparison window.
+ * Only arms with BOTH a positive selection count and a ratio above the threshold are named.
+ */
+export interface CounterIntegrityViolation {
+  activity_id: string;
+  total_executions: number;
+  selections: number;
+  ratio: number;
+}
+
+export function counterIntegrity(
+  arms: ReadonlyArray<{ activity_id?: unknown; total_executions?: unknown }>,
+  selectionsByArm: ReadonlyMap<string, number>,
+  opts?: { minExecutions?: number; ratioThreshold?: number; limit?: number },
+): { checked: number; violations: CounterIntegrityViolation[]; worst_ratio: number } {
+  const minExec = opts?.minExecutions ?? 100;
+  const thresh = opts?.ratioThreshold ?? 10;
+  const limit = opts?.limit ?? 10;
+  const violations: CounterIntegrityViolation[] = [];
+  let checked = 0;
+  let worst = 0;
+  for (const a of arms) {
+    const id = normId(a?.activity_id);
+    const te = Number(a?.total_executions ?? 0);
+    if (!id || !Number.isFinite(te) || te < minExec) continue;
+    const sel = selectionsByArm.get(id);
+    if (sel === undefined || sel <= 0) continue;   // abstain: cannot distinguish retention from over-count
+    checked++;
+    const ratio = te / sel;
+    if (ratio > worst) worst = ratio;
+    if (ratio > thresh) {
+      violations.push({ activity_id: id, total_executions: te, selections: sel, ratio: Math.round(ratio) });
+    }
+  }
+  violations.sort((x, y) => y.ratio - x.ratio);
+  return { checked, violations: violations.slice(0, limit), worst_ratio: Math.round(worst) };
+}
+
 export async function resolveLearningTransferReport(
   pointer: LearningTransferReportPointer,
 ): Promise<ResolverResult> {
@@ -63,7 +124,8 @@ export async function resolveLearningTransferReport(
         `SELECT activity_id FROM variant_performance_metrics WHERE total_executions = 0 LIMIT ${limit};` +
         `SELECT count() FROM activity_composition_graph WHERE genuine = true GROUP ALL;` +
         `SELECT parent_activity_id, child_activity_id, success_count FROM activity_composition_graph WHERE genuine = true AND success_count > 0 LIMIT 200;` +
-        `SELECT count() FROM successor_features GROUP ALL;`,
+        `SELECT count() FROM successor_features GROUP ALL;` +
+        `SELECT count() AS n, activity_id FROM thompson_selection_log GROUP BY activity_id;`,
     );
     const total = countOf(batch[0]);
     const uninformed = countOf(batch[1]);
@@ -71,6 +133,11 @@ export async function resolveLearningTransferReport(
     const genuineEdges = countOf(batch[3]);
     const chains = rowsOf(batch[4]);
     const sfCells = countOf(batch[5]);
+    const selByArm = new Map<string, number>();
+    for (const r of rowsOf(batch[6])) {
+      const k = normId(r["activity_id"]);
+      if (k) selByArm.set(k, Number(r["n"] ?? 0));
+    }
     const fraction = total > 0 ? uninformed / total : 0;
 
     const parentKeys = Array.from(new Set(chains.map((c) => normId(c["parent_activity_id"]))));
@@ -101,6 +168,17 @@ export async function resolveLearningTransferReport(
 
     const density = total > 0 ? genuineEdges / total : 0;
     const coverage = total > 0 ? sfCells / total : 0;
+    // COUNTER INTEGRITY. An arm cannot execute more often than it is selected; see
+    // counterIntegrity above for the measured 155x violation this exists to keep visible.
+    const armBatch = await sql(
+      `SELECT activity_id, total_executions FROM variant_performance_metrics WHERE total_executions >= 100;`,
+    );
+    const armRows = rowsOf(armBatch[0]);
+    const integrity = counterIntegrity(
+      armRows as ReadonlyArray<{ activity_id?: unknown; total_executions?: unknown }>,
+      selByArm,
+    );
+
     const body: Record<string, unknown> = {
       scanned: true,
       crystallized_cells: { total, uninformed, fraction, sample_ids: sampleIds },
@@ -113,6 +191,7 @@ export async function resolveLearningTransferReport(
       },
       stalled_credit_chains: { stalled_count: stalledCount, chains_examined: chains.length, parents_matched: matched, sample: stalledSample },
       sf_coverage: { sf_cells: sfCells, variant_cells: total, coverage },
+      counter_integrity: integrity,
       note: "descriptive; no posterior writes",
     };
 

@@ -318,7 +318,7 @@ export async function resolveGapLifecycleScan(p: GapLifecycleScanPointer): Promi
   // is the LIVE directory (compose-lessons.jsonl is written there), and
   // ${WORKSPACE_ROOT}/proposals does not exist. The two pieces of state moved
   // independently, so correcting them together would break the one that works.
-  const gapsPath = p.gapsPath ?? join(workspaceRoot(), "gaps", "gaps.json");
+  const gapsPath = p.gapsPath ?? "/workspace/gaps/gaps.json";
   const proposalsDir = p.proposalsDir ?? "/workspace/proposals";
   const staleHours = p.staleHours ?? 48;
   const autoClose = p.autoClose === true;

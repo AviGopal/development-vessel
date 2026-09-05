@@ -970,7 +970,7 @@ export async function resolveSubstrateGapWrite(
       if (gd.__composeDrainInflight === true) {
         console.log(`[substrate-gap] compose nudge skipped for ${gap.id} — a compose is already in flight`);
       } else if (typeof gd.__composeDrainLastAt === "number" && nowMs - gd.__composeDrainLastAt < COMPOSE_MIN_INTERVAL_MS) {
-        console.warn(`[substrate-gap] compose nudge skipped for ${gap.id} — ${Math.round((nowMs - gd.__composeDrainLastAt) / 1000)}s since last, floor is ${COMPOSE_MIN_INTERVAL_MS / 1000}s`);
+        console.warn(`[substrate-gap] compose nudge skipped for ${gap.id} — ${Math.round((nowMs - gd.__composeDrainLastAt) / 1000)}s since last, floor is ${COMPOSE_MIN_INTERVAL_MS / 1000}s (no closure_predicate to exit)`);
       } else {
         gd.__composeDrainInflight = true;
         gd.__composeDrainLastAt = nowMs;

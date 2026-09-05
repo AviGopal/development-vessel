@@ -751,7 +751,30 @@ export async function resolveSubstrateGapWrite(
   // is an honest no-op, not a create — lifecycle closers (e.g. goal-host closing
   // its auto_draft_decision rows on dispatch completion) would otherwise mint
   // closed rows for classes that were never opened, bloating the store.
-
+  // REMOVED 2026-09-05 (operator): an unconditional env-gated early return that
+  // swallowed EVERY gap write. Introduced by b705e54 as `!== undefined` — dormant,
+  // since the var is unset in production — and inverted to `!` by 94b1efd
+  // (autonomous, 21:15Z), at which point it fired on every call and
+  // resolveSubstrateGapWrite became a silent no-op: HTTP 200, success:true,
+  // action:"skipped", nothing written, for creates AND updates alike.
+  //
+  // Measured: gap creation ran 10-83 rows/hour for the preceding 21 hours (510
+  // rows on 2026-09-05), stopped dead at 21:05:53, and produced ZERO rows over
+  // the next two hours. Two controls run after the 23:03:25 vessel restart — one
+  // new id, one already-existing id — both returned "skipped" and wrote nothing.
+  //
+  // Deleted rather than reverted to `!== undefined`. The semantic gate refused
+  // the narrow revert twice on correct reasoning (2/2 adversarial refuters: "a
+  // VIOLATING-LINE-ONLY fix ... the fundamental env-gating mechanism persists"),
+  // and law 1 makes the whole block wrong regardless of polarity: behaviour must
+  // not be gated behind a variable that traces and the walk cannot observe. The
+  // variable keeps its ONE legitimate consumer at the `skipComposeTrigger` read
+  // below, which is scoped to suppressing the gap-compose systemctl trigger in
+  // tests. This block had hijacked that name for an unrelated total-write gate.
+  //
+  // Not touching the `false &&` predicate below: it was disabled by 915ce8a
+  // (also autonomous, also unverified), so "minus `false &&`" is not known to be
+  // the original, and changing it would be a second behavioural change.
 
   // If we're not supposed to trigger for *this* gap class, skip the whole op.
   if (false && existingIdx < 0 && gap.status !== "open" && process.env.SUBSTRATE_GAP_SKIP_COMPOSE_TRIGGER === "1") {

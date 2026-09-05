@@ -6,6 +6,7 @@
  */
 
 import type { ResolverResult } from "./types.js";
+import { resolveSubstrateGapWrite } from "./substrate-gap.js";
 
 const SURREALDB_URL = process.env["SURREALDB_URL"] ?? "http://127.0.0.1:8000";
 const SURREALDB_USERNAME = process.env["SURREALDB_USERNAME"] ?? "root";
@@ -389,6 +390,64 @@ export async function resolveSchemaAssertDriftScan(
     declarationUnavailable = `declaration_scan_failed: ${(err as Error).message}`;
   }
 
+  // A DETECTOR WITH NO RUNTIME READER IS AN ARCHIVE.
+  //
+  // Returning a report changes nothing on its own — somebody has to be looking. Emit a gap so
+  // the finding enters the pool the picker already reads, which is the only channel that turns
+  // an observation into work.
+  //
+  // Emitted ONLY when something was found. substrateGap_write REPLACES rather than merges, so
+  // an unconditional write would clobber the record on every clean scan, and a scan that found
+  // nothing has nothing to say. The id is stable, so repeated scans restate one gap instead of
+  // accumulating duplicates. A drift that persists after an operator closes the gap will
+  // re-open it — correct here, because the condition is still true.
+  let gapEmitted: string | null = null;
+  const missingCount = declaration?.missing.length ?? 0;
+  const hazardCount = declaration?.hazards.length ?? 0;
+  if (declaration && (missingCount > 0 || hazardCount > 0)) {
+    const id = "schema-declaration-drift-declared-fields-absent-from-the-live-schema";
+    const miss = declaration.missing
+      .slice(0, 20)
+      .map((m) => `${m.table}.${m.field} (declared in ${m.declared_in})`)
+      .join("; ");
+    const haz = (declaration.hazards as unknown as Array<Record<string, unknown>>)
+      .slice(0, 20)
+      .map((h) => `${h["table"]}.${h["field"]} TYPE ${h["type"]} violating_rows=${h["violating_rows"] ?? "?"}`)
+      .join("; ");
+    try {
+      await resolveSubstrateGapWrite({
+        type: "substrateGap_write",
+        gap: {
+          id,
+          category: "systematic_failure",
+          source: "substrate_detected",
+          status: "open",
+          summary:
+            `schema declaration drift: ${missingCount} declared field(s) absent from the live schema, ` +
+            `${hazardCount} confirmed write-blocking hazard(s). ` +
+            `Scanned ${declaration.declared_count} DEFINE FIELD declarations across ` +
+            `${declaration.schemafull_tables} SCHEMAFULL of ${declaration.tables_seen} tables. ` +
+            `A write to a field a SCHEMAFULL table does not declare is DISCARDED silently ` +
+            `(success:true, HTTP 200); a non-optional field with no DEFAULT on a populated table ` +
+            `rejects every write omitting it. ` +
+            (miss ? `MISSING: ${miss}. ` : "") +
+            (haz ? `HAZARDS: ${haz}.` : ""),
+          classification_metadata: {
+            detector: "schema_assert_drift_scan.declaration_drift",
+            missing_count: missingCount,
+            hazard_count: hazardCount,
+            declared_count: declaration.declared_count,
+            schemafull_tables: declaration.schemafull_tables,
+            scanned_at: new Date().toISOString(),
+          },
+        },
+      } as never);
+      gapEmitted = id;
+    } catch {
+      /* non-fatal: the report still returns even when the gap store is unreachable */
+    }
+  }
+
   return {
     shape: "schemaAssertDrift",
     body: {
@@ -397,6 +456,7 @@ export async function resolveSchemaAssertDriftScan(
       drift_count: drifts.length,
       declaration_drift: declaration,
       declaration_unavailable: declarationUnavailable,
+      gap_emitted: gapEmitted,
       checked_at: new Date().toISOString(),
     },
   };

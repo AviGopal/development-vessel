@@ -84,6 +84,10 @@ interface DetectorRow {
   gaps_emitted: number;
   gaps_landed: number;
   gaps_churned: number;
+  /** Closures recording an actual verified fix — `gaps_landed` counts expiry too. */
+  gaps_really_fixed: number;
+  /** Closed with no evidence the condition went away: expiry, stale, or no reason at all. */
+  gaps_closed_unverified: number;
   gaps_open: number;
   picks: number | null;
   last_fired: string | null;     // most-recent gap timestamp (snapshot carries no last_fired)
@@ -136,6 +140,35 @@ function isChurned(g: GapRow): boolean {
   const m = g.classification_metadata ?? {};
   const reason = m["closed_reason"];
   return typeof reason === "string" && /churn/i.test(reason);
+}
+
+/**
+ * A gap CLOSED BECAUSE SOMEONE FIXED IT, as opposed to closed because the store gave up on it.
+ *
+ * `gaps_landed` counts closed-and-not-churned, which is 24.5x too generous. Measured on the
+ * live store: of 1,473 closures, 707 (48.0%) are `expired_not_redetected`, 611 (41.5%) carry
+ * NO reason at all, and only 60 (4.1%) record an actual verified fix. So 1,241 detectors show
+ * gaps_landed > 0 while 1,202 of them (97%) never had a single gap really fixed.
+ *
+ * That matters beyond the report: `landed > 0` is what marks a detector PRODUCTIVE, and
+ * LOW_YIELD requires `landed === 0`. With expiry counted as landing, the curation signal is
+ * saturated — a detector whose every gap timed out looks productive, and almost nothing can
+ * ever be judged low-yield. The fleet cannot be pruned through a lens that calls forgetting
+ * success.
+ *
+ * `expired_not_redetected` is the sharpest case: it means "we stopped seeing it", which is
+ * indistinguishable from "we stopped looking". It is not evidence the condition is gone.
+ */
+const REALLY_FIXED_REASONS = new Set([
+  "landed_verified",
+  "fix_landed_and_verified_by_consequence",
+  "producer_now_exists",
+  "condition_cleared",
+]);
+
+function isReallyFixed(g: GapRow): boolean {
+  const reason = (g.classification_metadata ?? {})["closed_reason"];
+  return typeof reason === "string" && REALLY_FIXED_REASONS.has(reason);
 }
 
 function gapTime(g: GapRow): number {
@@ -242,11 +275,11 @@ export async function resolveDetectorYieldRegistry(
   }
 
   // 2. Join gaps by detector. A gap is "novel-open" if open + recent (within window).
-  interface Agg { emitted: number; landed: number; churned: number; open: number; novel_open: number; lastFired: number }
+  interface Agg { emitted: number; landed: number; churned: number; open: number; novel_open: number; lastFired: number; really_fixed: number; closed_unverified: number }
   const byDetector = new Map<string, Agg>();
   const ensure = (id: string): Agg => {
     let a = byDetector.get(id);
-    if (!a) { a = { emitted: 0, landed: 0, churned: 0, open: 0, novel_open: 0, lastFired: NaN }; byDetector.set(id, a); }
+    if (!a) { a = { emitted: 0, landed: 0, churned: 0, open: 0, novel_open: 0, lastFired: NaN, really_fixed: 0, closed_unverified: 0 }; byDetector.set(id, a); }
     return a;
   };
 
@@ -259,7 +292,14 @@ export async function resolveDetectorYieldRegistry(
     if (Number.isFinite(t) && (!Number.isFinite(a.lastFired) || t > a.lastFired)) a.lastFired = t;
     const status = g.status ?? "open";
     if (status === "closed") {
-      if (isChurned(g)) a.churned += 1; else a.landed += 1;
+      if (isChurned(g)) a.churned += 1;
+      else a.landed += 1;
+      // Counted alongside, never instead: changing what `landed` MEANS would flip ~1,202
+      // detectors to LOW_YIELD at once, and the tick runs with emit_retirement_gaps:true,
+      // so that reclassification would emit mass retirement gaps routing to deprecate.
+      // The measurement is the safe half; acting on it is a separate, operator-gated call.
+      if (isReallyFixed(g)) a.really_fixed += 1;
+      else a.closed_unverified += 1;
     } else if (status === "open") {
       a.open += 1;
       a.novel_open += 1; // already window-filtered ⇒ recent enough to count as live signal
@@ -294,7 +334,7 @@ export async function resolveDetectorYieldRegistry(
   // 4. Build rows.
   const rows: DetectorRow[] = [];
   for (const det of detectorIds) {
-    const a = byDetector.get(det) ?? { emitted: 0, landed: 0, churned: 0, open: 0, novel_open: 0, lastFired: NaN };
+    const a = byDetector.get(det) ?? { emitted: 0, landed: 0, churned: 0, open: 0, novel_open: 0, lastFired: NaN, really_fixed: 0, closed_unverified: 0 };
     const matchKey = snapKeyMatchesDetector(det);
     const snap = matchKey ? snapByKey.get(matchKey) : undefined;
     const picks = snap ? snap.picks : null;
@@ -320,6 +360,8 @@ export async function resolveDetectorYieldRegistry(
       gaps_emitted: a.emitted,
       gaps_landed: a.landed,
       gaps_churned: a.churned,
+      gaps_really_fixed: a.really_fixed,
+      gaps_closed_unverified: a.closed_unverified,
       gaps_open: a.open,
       picks,
       last_fired: Number.isFinite(a.lastFired) ? new Date(a.lastFired).toISOString() : null,
@@ -351,6 +393,29 @@ export async function resolveDetectorYieldRegistry(
     unknown: rows.filter((r) => r.status === "UNKNOWN").length,
   };
 
+  // HOW MUCH OF THE YIELD SIGNAL IS REAL. Surfaced at the top so nobody has to read a
+  // thousand rows to notice that `landed` mostly means `expired`. On the live store this
+  // reads roughly 1,472 landed against 60 really fixed — 24.5x — with 97% of the detectors
+  // that look productive never having had a single gap actually fixed.
+  const landedTotal = rows.reduce((n, r) => n + r.gaps_landed, 0);
+  const fixedTotal = rows.reduce((n, r) => n + r.gaps_really_fixed, 0);
+  const yield_integrity = {
+    gaps_landed_total: landedTotal,
+    gaps_really_fixed_total: fixedTotal,
+    gaps_closed_unverified_total: rows.reduce((n, r) => n + r.gaps_closed_unverified, 0),
+    inflation_ratio: fixedTotal > 0 ? Number((landedTotal / fixedTotal).toFixed(1)) : null,
+    detectors_landed_gt_zero: rows.filter((r) => r.gaps_landed > 0).length,
+    detectors_landed_gt_zero_but_none_fixed: rows.filter(
+      (r) => r.gaps_landed > 0 && r.gaps_really_fixed === 0,
+    ).length,
+    note:
+      "gaps_landed counts closed-and-not-churned, which includes expired_not_redetected and " +
+      "closures with no reason recorded. gaps_really_fixed counts only closures that record a " +
+      "verified fix. status/PRODUCTIVE and retirement emission still key on gaps_landed: " +
+      "changing that would reclassify most detectors at once and, with emit_retirement_gaps, " +
+      "emit mass retirement gaps. That is an operator decision, not a measurement.",
+  };
+
   return {
     shape: "detectorYieldReport",
     body: {
@@ -358,6 +423,7 @@ export async function resolveDetectorYieldRegistry(
       dormant_picks_threshold: dormantThreshold,
       detectors: rows,
       summary,
+      yield_integrity,
       retirement_gaps_emitted: emit ? retirement_gaps_emitted : null,
       gaps_examined: gaps.length,
       completed_at: new Date().toISOString(),

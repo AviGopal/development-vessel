@@ -1380,6 +1380,28 @@ export async function resolvePatchWithTools(pointer: PatchWithToolsPointer): Pro
   };
   try {
     await writeFile(pendingPath, JSON.stringify(pendingBody, null, 2));
+    // ALSO KEEP A PER-GAP COPY. pendingPath is a single shared file
+    // (workspaceRoot/mitosis-pending.json) that every patch_with_tools run overwrites, so
+    // after the next run nothing records what THIS landing did or whether it verified.
+    // Late-landing reconciliation in goal-host-vessel says exactly this when it finds a
+    // commit it cannot credit: "no compose report — uncreditable (patch_with_tools
+    // landings have none); withholding reach", and it is right to withhold, because
+    // crediting a landing on its sha alone is the false positive that gate exists to
+    // prevent. Measured 2026-09-04: 19 of 101 recent landings came this way, none with a
+    // report. pendingBody already carries the target file, the staged files and
+    // final_summary, which holds the verification outcome (e.g. "verified-green: <tool>
+    // applied and typecheck clean"). Writing the same object under a per-gap name costs
+    // one file and turns an unrecorded landing into an inspectable one. This is a pure
+    // addition: nothing reads this path today, so no existing verdict or credit decision
+    // changes. Failure to write it must never fail a landing that already succeeded.
+    try {
+      const pwtEvidenceDir = process.env["PROPOSALS_DIR"] ?? "/workspace/proposals";
+      await mkdir(pwtEvidenceDir, { recursive: true });
+      await writeFile(
+        join(pwtEvidenceDir, `${pendingBody.gap_id}-pwt-landing.json`),
+        JSON.stringify({ ...pendingBody, authored_by: "patch_with_tools", verification: pendingBody.final_summary }, null, 2),
+      );
+    } catch { /* evidence is best-effort; never fail a successful landing over it */ }
   } catch (err) {
     return structuredError(`pending write failed: ${(err as Error).message}`);
   }

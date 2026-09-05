@@ -744,9 +744,18 @@ export function surqlBreakingFieldRefusal(
           `every boot.`
         );
       }
-      // ALTER exists in SurrealDB only as ALTER TABLE ... and never takes ADD COLUMN;
-      // the ANSI form is the shape a drafter reaches for by habit.
-      if (head === "ALTER" && /\bADD\s+COLUMN\b/i.test(stmt)) {
+      // ALTER IS LEGITIMATE HERE, BUT NEVER WITH `ADD`.
+      //
+      // SurrealDB 3.0.0 uses `ALTER TABLE <t> PERMISSIONS ...` to change permissions on an
+      // existing table — migration 121 relies on it, so ALTER cannot simply be blacklisted.
+      // What SurrealDB has no form of is the ANSI column-addition, which is what a drafter
+      // reaches for by habit and what the 2026-09-05 probe produced.
+      //
+      // Matching `ADD COLUMN` alone is not enough: in MySQL the COLUMN keyword is OPTIONAL, so
+      // `ALTER TABLE t ADD source_vessel STRING NOT NULL` is the common short form and would
+      // slip through. Match ADD anywhere in an ALTER instead — verified against the corpus,
+      // which contains ALTER TABLE ... PERMISSIONS and ZERO occurrences of ALTER ... ADD.
+      if (head === "ALTER" && /\bADD\b/i.test(stmt)) {
         return (
           `[mitosis-surql] REFUSING ${f.path}: "ALTER TABLE … ADD COLUMN" is ANSI/MySQL syntax, ` +
           `not SurrealDB. Add a column with \`DEFINE FIELD <name> ON <table> TYPE option<...>\`. ` +

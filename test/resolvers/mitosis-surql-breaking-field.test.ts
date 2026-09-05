@@ -133,6 +133,24 @@ describe("surqlBreakingFieldRefusal — the third question for schema artifacts"
     expect(r).toContain("ANSI/MySQL");
   });
 
+  it("REFUSES `ALTER TABLE … ADD` without the optional COLUMN keyword", () => {
+    // In MySQL the COLUMN keyword is OPTIONAL, so matching `ADD COLUMN` alone leaves the
+    // common short form to slip through — and the retry probe is reworded precisely so the
+    // drafter does not repeat itself verbatim.
+    const sql = "ALTER TABLE impulse_resolution_metrics ADD source_vessel STRING NOT NULL;\n";
+    const r = surqlBreakingFieldRefusal([{ path: "m.surql", sql }]);
+    expect(r).not.toBeNull();
+    expect(r).toContain("ANSI/MySQL");
+  });
+
+  it("ABSTAINS on `ALTER TABLE … PERMISSIONS`, which SurrealDB 3.0.0 really uses", () => {
+    // Migration 121 depends on this form. Blacklisting ALTER outright would refuse a real
+    // migration — the corpus, not intuition, settled which half of ALTER is the hazard.
+    const sql =
+      "ALTER TABLE activity_execution_traces\n  PERMISSIONS FOR select WHERE org_id = $auth.org_id;";
+    expect(surqlBreakingFieldRefusal([{ path: "m.surql", sql }])).toBeNull();
+  });
+
   it("REFUSES any statement whose head verb is not SurrealDB", () => {
     const r = surqlBreakingFieldRefusal([
       { path: "m.surql", sql: "GRANT SELECT ON activity TO someone;" },

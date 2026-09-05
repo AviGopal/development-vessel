@@ -797,6 +797,7 @@ export async function resolveSubstrateGapWrite(
     // problem statement. The guard assigns the existing record's summary onto
     // gap.summary when the incoming summary is not a non-empty string (undefined,
     // empty string, or non-string).
+    gap.remedy = gap.remedy ?? existing.remedy;
     if (typeof gap.summary !== "string" || gap.summary.length === 0) gap.summary = existing.summary;
     // PRESERVE the loop's learned failure-tracking across re-emissions. A detector
     // (e.g. surgical-gap-scan) re-emits the same logical gap every cycle with fresh

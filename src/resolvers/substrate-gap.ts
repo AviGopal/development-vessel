@@ -792,6 +792,11 @@ export async function resolveSubstrateGapWrite(
     // survived a full rewrite still carrying the placeholder. A self-healing store is the point
     // of scrubbing at the writer rather than at the reader.
     gap.created_at = cleanTs(existing.created_at, gap.created_at ?? now);
+    // Prevent a close or re-emit that carries no summary from blanking the stored
+    // problem statement. The guard assigns the existing record's summary onto
+    // gap.summary when the incoming summary is not a non-empty string (undefined,
+    // empty string, or non-string).
+    if (typeof gap.summary !== "string" || gap.summary.length === 0) gap.summary = existing.summary;
     // PRESERVE the loop's learned failure-tracking across re-emissions. A detector
     // (e.g. surgical-gap-scan) re-emits the same logical gap every cycle with fresh
     // classification_metadata that carries NO failed_attempts; a blind overwrite wiped

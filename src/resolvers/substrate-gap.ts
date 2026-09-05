@@ -751,7 +751,7 @@ export async function resolveSubstrateGapWrite(
   // is an honest no-op, not a create — lifecycle closers (e.g. goal-host closing
   // its auto_draft_decision rows on dispatch completion) would otherwise mint
   // closed rows for classes that were never opened, bloating the store.
-    if (false && process.env["SUBSTRATE_GAP_SKIP_COMPOSE_TRIGGER"] !== undefined) {
+    if (process.env["SUBSTRATE_GAP_SKIP_COMPOSE_TRIGGER"] !== undefined) {
     // gap-env-gated-substrate-gap-skip-compose-trigger: env-gated capability
     return {
       early: {

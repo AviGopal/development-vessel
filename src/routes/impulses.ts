@@ -542,6 +542,10 @@ async function dispatchInner(pointer: AnyPointer): Promise<ResolverResult> {
       const { resolveSchemaAssertDriftScan } = await import("../resolvers/schema-assert-drift-scan.js");
       return resolveSchemaAssertDriftScan(pointer);
     }
+    case "gate_self_probe": {
+      const { resolveGateSelfProbe } = await import("../resolvers/gate-self-probe.js");
+      return resolveGateSelfProbe(pointer);
+    }
     case "dispatch_target_drift_scan":
       return resolveDispatchTargetDriftScan(p as Parameters<typeof resolveDispatchTargetDriftScan>[0]);
     case "service_oom_cascade_scan":

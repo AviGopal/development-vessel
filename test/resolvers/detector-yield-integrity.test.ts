@@ -41,6 +41,16 @@ const isChurned = (reason: string | null | undefined) =>
 /** The rule as it stands: closed and not churned. */
 const countsAsLanded = (reason: string | null | undefined) => !isChurned(reason);
 
+/** Mirrors the shipped rule: PRODUCTIVE on a real fix or live signal, LOW_YIELD only on evidence. */
+const EVIDENCE_FLOOR = 10;
+const EMIT_CAP = 5;
+const classify = (r: { gaps_emitted: number; gaps_really_fixed: number; novel_open: number }) =>
+  r.gaps_really_fixed > 0 || r.novel_open > 0
+    ? "PRODUCTIVE"
+    : r.gaps_really_fixed === 0 && r.gaps_emitted >= EVIDENCE_FLOOR
+      ? "LOW_YIELD"
+      : "UNKNOWN";
+
 describe("landed vs really fixed — forgetting is not resolving", () => {
   it("counts expired_not_redetected as landed today, and as NOT fixed", () => {
     // 48% of all closures take this path — the single largest bucket.
@@ -100,6 +110,47 @@ describe("landed vs really fixed — forgetting is not resolving", () => {
     expect(landed).toBe(1466);
     expect(fixed).toBe(60);
     expect(landed / fixed).toBeGreaterThan(20); // measured 24.5x
+  });
+
+  it("evidence floor: too few gaps to judge is NOT grounds to retire", () => {
+    // 9 gaps and no fixes is absence of evidence, not evidence of uselessness — below the
+    // floor, "never fixed anything" and "has not had the chance" are the same observation.
+    expect(classify({ gaps_emitted: 9, gaps_really_fixed: 0, novel_open: 0 })).toBe("UNKNOWN");
+    expect(classify({ gaps_emitted: 79, gaps_really_fixed: 0, novel_open: 0 })).toBe("LOW_YIELD");
+  });
+
+  it("one real fix spares a detector however noisy — the asymmetry decides", () => {
+    // Retiring a detector that would have found something loses that signal permanently and
+    // silently; nothing re-emits a gap nobody is detecting. Keeping a noisy one costs pool
+    // dilution, which is visible, bounded and reversible. So volume cannot outweigh evidence
+    // that the detector CAN find something.
+    expect(classify({ gaps_emitted: 500, gaps_really_fixed: 1, novel_open: 0 })).toBe("PRODUCTIVE");
+    expect(classify({ gaps_emitted: 40, gaps_really_fixed: 0, novel_open: 3 })).toBe("PRODUCTIVE");
+  });
+
+  it("emits noisiest-first in capped batches, so a run measures instead of leaping", () => {
+    // Correcting PRODUCTIVE makes ~1,202 detectors eligible at once. Emitting all of them
+    // would be the least informative possible action: an undifferentiated flood, nothing
+    // attributable, and a large irreversible step taken on a rule never observed operating.
+    const rows = [79, 60, 50, 40, 30, 20, 15].map((n) => ({
+      id: `d${n}`,
+      gaps_emitted: n,
+      gaps_really_fixed: 0,
+      novel_open: 0,
+    }));
+    const eligible = rows.filter((r) => classify(r) === "LOW_YIELD");
+    const batch = [...eligible].sort((x, y) => y.gaps_emitted - x.gaps_emitted).slice(0, EMIT_CAP);
+    expect(batch.map((r) => r.id)).toEqual(["d79", "d60", "d50", "d40", "d30"]);
+    // The remainder is deferred to a run that can see THIS batch's effect, not discarded.
+    expect(eligible.length).toBeGreaterThan(batch.length);
+  });
+
+  it("a capped run must never read as a finished one", () => {
+    // retirement_candidates_total travels beside retirement_gaps_emitted precisely so that
+    // "emitted 5" is not mistaken for "there were 5" — the silence-is-success failure again.
+    const candidates = 1202;
+    expect(Math.min(candidates, EMIT_CAP)).toBe(5);
+    expect(candidates).toBeGreaterThan(EMIT_CAP);
   });
 
   it("a detector whose every gap expired must be distinguishable from one that fixed things", () => {

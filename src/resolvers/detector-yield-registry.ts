@@ -136,6 +136,15 @@ function detectorOf(g: GapRow): string {
   return detectorFromGapId(g.id);
 }
 
+/**
+ * Below this many emitted gaps, "never produced a fix" is indistinguishable from "has not had
+ * the chance yet". Same floor the template lifecycle uses to deprecate an arm.
+ */
+const RETIREMENT_EVIDENCE_FLOOR = Number(process.env["DETECTOR_RETIREMENT_MIN_GAPS"] ?? 10);
+
+/** Retirement gaps emitted per run, so each batch's effect can be observed before the next. */
+const RETIREMENT_EMISSION_CAP = Number(process.env["DETECTOR_RETIREMENT_EMIT_CAP"] ?? 5);
+
 function isChurned(g: GapRow): boolean {
   const m = g.classification_metadata ?? {};
   const reason = m["closed_reason"];
@@ -343,8 +352,26 @@ export async function resolveDetectorYieldRegistry(
     let status: DetectorStatus;
     if (picks !== null && picks < dormantThreshold) {
       status = "DORMANT";
-    } else if (a.landed > 0 || a.novel_open > 0) {
+    } else if (a.really_fixed > 0 || a.novel_open > 0) {
+      // PRODUCTIVE now requires a REAL fix, not a closure. Previously `landed > 0` qualified,
+      // and landed counts expiry — 1,202 of 1,241 detectors (97%) reached PRODUCTIVE without a
+      // single gap ever being fixed, which saturated the signal and made LOW_YIELD unreachable.
       status = "PRODUCTIVE";
+    } else if (a.really_fixed === 0 && a.emitted >= RETIREMENT_EVIDENCE_FLOOR) {
+      // LOW_YIELD ON EVIDENCE, NOT ON A BAD DAY.
+      //
+      // The consequences are asymmetric and that asymmetry decides the rule. Retiring a
+      // detector that would have produced a real fix loses that signal permanently and
+      // silently — nothing re-emits a gap nobody is detecting. Keeping a noisy detector costs
+      // pool dilution, which is visible, bounded, and reversible next run. So the burden of
+      // proof sits on retirement.
+      //
+      // The floor is the one the template lifecycle already uses to deprecate an arm
+      // (EVIDENCE_MIN_SAMPLES = 10): below it, "never fixed anything" is indistinguishable
+      // from "has not had the chance yet", and acting on that is guessing. Above it, a
+      // detector that has emitted ten or more gaps and produced zero verified fixes has been
+      // measured, not merely suspected.
+      status = "LOW_YIELD";
     } else if (a.emitted > 0 && a.landed === 0 && a.churned >= a.open && a.churned > 0) {
       status = "LOW_YIELD";
     } else if (a.emitted > 0) {
@@ -377,12 +404,30 @@ export async function resolveDetectorYieldRegistry(
 
   // 5. Optionally route retirement candidates through the gap path.
   let retirement_gaps_emitted = 0;
+  let retirement_candidates_total = 0;
   if (emit) {
-    for (const r of rows) {
-      if (r.status === "DORMANT" || r.status === "LOW_YIELD") {
-        if (await emitRetirementGap(emitUrl, apiKey, r)) retirement_gaps_emitted += 1;
-      }
+    // RETIRE IN BATCHES, NOISIEST FIRST — the information-positive order.
+    //
+    // Correcting PRODUCTIVE to require a real fix makes ~1,202 detectors newly eligible at
+    // once. Emitting all of them in one pass would be the least informative possible action:
+    // a single undifferentiated flood, no way to attribute any subsequent change in gap
+    // quality to any part of it, and a large irreversible step taken on a rule that has never
+    // been observed operating.
+    //
+    // Retiring the highest-volume zero-yield detectors first maximises noise removed per
+    // decision, and capping the batch means the next run observes the CONSEQUENCE of this one
+    // before going further. Each run is then a measurement rather than a leap, and the cap is
+    // what makes the sequence convergent instead of a one-way door.
+    const candidates = rows
+      .filter((r) => r.status === "DORMANT" || r.status === "LOW_YIELD")
+      .sort((x, y) => y.gaps_emitted - x.gaps_emitted)
+      .slice(0, RETIREMENT_EMISSION_CAP);
+    for (const r of candidates) {
+      if (await emitRetirementGap(emitUrl, apiKey, r)) retirement_gaps_emitted += 1;
     }
+    retirement_candidates_total = rows.filter(
+      (r) => r.status === "DORMANT" || r.status === "LOW_YIELD",
+    ).length;
   }
 
   const summary = {
@@ -425,6 +470,9 @@ export async function resolveDetectorYieldRegistry(
       summary,
       yield_integrity,
       retirement_gaps_emitted: emit ? retirement_gaps_emitted : null,
+      // Reported so a capped run is never mistaken for a finished one.
+      retirement_candidates_total: emit ? retirement_candidates_total : null,
+      retirement_emission_cap: RETIREMENT_EMISSION_CAP,
       gaps_examined: gaps.length,
       completed_at: new Date().toISOString(),
     },

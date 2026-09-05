@@ -84,22 +84,22 @@ describe("runGateProbes — a gate must refuse the bad AND allow the good", () =
 });
 
 describe("the real corpus — every shipped refusal rule still behaves", () => {
-  it("exercises at least the five deterministic rules currently in the chain", () => {
+  it("exercises at least the five deterministic rules currently in the chain", async () => {
     // A shrinking corpus is itself a regression: a rule dropped from the probe is a rule
     // nothing checks any more.
-    expect(gateProbeCases().length).toBeGreaterThanOrEqual(5);
+    expect((await gateProbeCases()).length).toBeGreaterThanOrEqual(5);
   });
 
-  it("ALL rules pass against the live implementations", () => {
+  it("ALL rules pass against the live implementations", async () => {
     // Calls the exported functions themselves, never a reimplementation — a probe that
     // re-derives the rule tests the probe, not the gate.
-    const out = runGateProbes(gateProbeCases());
+    const out = runGateProbes(await gateProbeCases());
     const failing = out.filter((o) => !o.ok);
     expect(failing.map((f) => `${f.rule}: ${f.detail}`)).toEqual([]);
   });
 
-  it("every case names a distinct rule and describes both artifacts", () => {
-    const cases = gateProbeCases();
+  it("every case names a distinct rule and describes both artifacts", async () => {
+    const cases = await gateProbeCases();
     expect(new Set(cases.map((c) => c.rule)).size).toBe(cases.length);
     for (const c of cases) {
       expect(c.hostile_desc.length).toBeGreaterThan(0);

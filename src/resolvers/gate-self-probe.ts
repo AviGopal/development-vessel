@@ -30,12 +30,6 @@
 
 import type { ResolverResult } from "./types.js";
 import { resolveSubstrateGapWrite } from "./substrate-gap.js";
-import {
-  inertRegexEditRefusal,
-  cjsInEsmRefusal,
-  unresolvableImpulseEndpointRefusal,
-} from "./feature-compose.js";
-import { surqlBreakingFieldRefusal } from "./vessel-mitosis-evaluate.js";
 
 export interface GateProbeCase {
   /** Rule under test, named as it appears in the refusal chain. */
@@ -66,7 +60,15 @@ const diff = (path: string, added: string[]): string =>
  * The probe corpus. Each hostile case is a REAL artifact that reached a real gate, not an
  * invention — a case the pipeline actually produced is the only kind proven to be reachable.
  */
-export function gateProbeCases(): GateProbeCase[] {
+export async function gateProbeCases(): Promise<GateProbeCase[]> {
+  // LAZY, NOT STATIC. Importing feature-compose and vessel-mitosis-evaluate at module load
+  // made the FIRST live dispatch exceed the caller's timeout (observed in production
+  // 2026-09-05: call one timed out, call two returned 5/5). A probe that times out on its
+  // first invocation reads as a failure to any scheduler, which is precisely the wrong
+  // signal from the component whose job is to say whether the gates still work.
+  const { inertRegexEditRefusal, cjsInEsmRefusal, unresolvableImpulseEndpointRefusal } =
+    await import("./feature-compose.js");
+  const { surqlBreakingFieldRefusal } = await import("./vessel-mitosis-evaluate.js");
   return [
     {
       rule: "surqlBreakingFieldRefusal/ansi-dialect",
@@ -186,7 +188,7 @@ export function runGateProbes(cases: GateProbeCase[]): GateProbeOutcome[] {
 export async function resolveGateSelfProbe(
   pointer: Record<string, unknown>,
 ): Promise<ResolverResult> {
-  const outcomes = runGateProbes(gateProbeCases());
+  const outcomes = runGateProbes(await gateProbeCases());
   const failures = outcomes.filter((o) => !o.ok);
   const emit = pointer["emit_gap"] !== false;
 

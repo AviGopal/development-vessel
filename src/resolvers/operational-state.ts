@@ -85,6 +85,10 @@ export function deriveRungs(obs: {
   /** Executions from arms it has NEVER graded: ticks, detectors, scheduled work with no goal. */
   executionsOnNeverGradedArms: number | null;
   neverGradedArms: number | null;
+  /** Compose runs that recorded effect coverage, and the targets they examined/left uncovered. */
+  effectComposes: number | null;
+  effectTargetsExamined: number | null;
+  effectTargetsUncovered: number | null;
   armsSelectable: number | null;
   gradedPerDay: number | null;
 }): Rung[] {
@@ -123,16 +127,47 @@ export function deriveRungs(obs: {
       "gate activity counts would measure how often gates ran, not whether every artifact was read",
   });
 
-  rungs.push({
-    rung: 3,
-    question: "Are landed changes known to DO something?",
-    measurable: false,
-    holds: null,
-    observed: {},
-    unmeasured_reason:
-      "effect verification exists per-rule inside the refusal chain, but nothing reports coverage " +
-      "of landed diffs whose changed behaviour was actually executed",
-  });
+  // Every gate in the compose path READS the diff; only a test RUNS it. A FAVORABLE verdict on
+  // a target with no test file means the change was reviewed, never executed — the condition
+  // under which inert and actively harmful changes have landed here before. feature_compose
+  // computed that coverage and only console.warn'd it, so the question was unanswerable; it is
+  // now persisted on the compose trace and read here.
+  rungs.push(
+    obs.effectComposes === null || obs.effectComposes === 0 || obs.effectTargetsExamined === null
+      ? {
+          rung: 3,
+          question: "Are landed changes known to DO something?",
+          measurable: false,
+          holds: null,
+          observed: { composes_reporting_coverage: obs.effectComposes ?? 0 },
+          unmeasured_reason:
+            "no compose trace carries effect coverage yet — feature_compose persists it from " +
+            "this build onward, so this becomes measurable once composes run with it. Absence " +
+            "of the field is absence of measurement, NOT evidence that coverage is fine.",
+        }
+      : (() => {
+          const examined = obs.effectTargetsExamined;
+          const uncovered = obs.effectTargetsUncovered ?? 0;
+          const coveredFrac = examined > 0 ? (examined - uncovered) / examined : null;
+          return {
+            rung: 3,
+            question: "Are landed changes known to DO something?",
+            measurable: coveredFrac !== null,
+            // A majority of changed targets must have something able to execute them. The
+            // threshold is a judgement; the counts beside it are not.
+            holds: coveredFrac !== null ? coveredFrac >= 0.5 : null,
+            observed: {
+              covered_fraction: coveredFrac === null ? null : Number(coveredFrac.toFixed(4)),
+              targets_examined: examined,
+              targets_uncovered: uncovered,
+              composes_reporting_coverage: obs.effectComposes,
+            },
+            ...(coveredFrac === null
+              ? { unmeasured_reason: "composes reported coverage but examined zero targets" }
+              : {}),
+          };
+        })(),
+  );
 
   rungs.push(
     obs.gateRulesTotal === null || obs.gateRulesFailing === null
@@ -410,6 +445,14 @@ export async function resolveOperationalState(
 
   const split = pointer["skip_arm_split"] === true ? null : await armSplit();
 
+  // Effect coverage over recent composes. Only traces written by a build that persists the
+  // field are counted; older ones are absent, not zero.
+  const [effectComposes, effectExamined, effectUncovered] = await Promise.all([
+    count("SELECT count() FROM execution WHERE metadata.effect_targets_examined != NONE GROUP ALL;"),
+    count("SELECT math::sum(metadata.effect_targets_examined) AS count FROM execution WHERE metadata.effect_targets_examined != NONE GROUP ALL;"),
+    count("SELECT math::sum(metadata.effect_targets_uncovered) AS count FROM execution WHERE metadata.effect_targets_examined != NONE GROUP ALL;"),
+  ]);
+
   const rungs = deriveRungs({
     executionsRecent,
     gateRulesTotal,
@@ -422,6 +465,9 @@ export async function resolveOperationalState(
     executionsOnGradedArms: split?.onGradedArms ?? null,
     executionsOnNeverGradedArms: split?.onNeverGradedArms ?? null,
     neverGradedArms: split?.neverGradedArms ?? null,
+    effectComposes,
+    effectTargetsExamined: effectExamined,
+    effectTargetsUncovered: effectUncovered,
     armsSelectable,
     gradedPerDay,
   });

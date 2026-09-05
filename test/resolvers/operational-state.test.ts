@@ -26,6 +26,9 @@ const obs = (over: Partial<Parameters<typeof deriveRungs>[0]> = {}) => ({
   executionsOnGradedArms: 1000,
   executionsOnNeverGradedArms: 0,
   neverGradedArms: 0,
+  effectComposes: 12,
+  effectTargetsExamined: 20,
+  effectTargetsUncovered: 4,
   armsSelectable: 100,
   gradedPerDay: 300,
   ...over,
@@ -59,6 +62,9 @@ describe("deriveRungs — measured, and honest about what it could not measure",
       executionsOnGradedArms: null,
       executionsOnNeverGradedArms: null,
       neverGradedArms: null,
+      effectComposes: null,
+      effectTargetsExamined: null,
+      effectTargetsUncovered: null,
       armsSelectable: null,
       gradedPerDay: null,
     });
@@ -82,15 +88,49 @@ describe("deriveRungs — measured, and honest about what it could not measure",
     expect(zeroed.holds).toBe(false);
   });
 
-  it("reports rungs 2 and 3 as unmeasured WITH a reason, rather than assuming them", () => {
+  it("reports rung 2 as unmeasured WITH a reason, rather than assuming it", () => {
     // Counting gate activity would measure how often gates ran, which is a different claim and
     // would read as a passing verdict for a question nothing answered.
-    for (const n of [2, 3]) {
-      const rung = deriveRungs(obs()).find((x) => x.rung === n)!;
-      expect(rung.measurable).toBe(false);
-      expect(rung.holds).toBeNull();
-      expect(rung.unmeasured_reason!.length).toBeGreaterThan(20);
+    const rung = deriveRungs(obs()).find((x) => x.rung === 2)!;
+    expect(rung.measurable).toBe(false);
+    expect(rung.holds).toBeNull();
+    expect(rung.unmeasured_reason!.length).toBeGreaterThan(20);
+  });
+
+  // ---- rung 3: every gate READS the diff; only a test RUNS it ----
+
+  it("measures rung 3 from persisted compose effect coverage", () => {
+    const r = deriveRungs(obs({ effectComposes: 12, effectTargetsExamined: 20, effectTargetsUncovered: 4 }))
+      .find((x) => x.rung === 3)!;
+    expect(r.measurable).toBe(true);
+    expect(r.observed["covered_fraction"]).toBeCloseTo(0.8);
+    expect(r.holds).toBe(true);
+  });
+
+  it("fails rung 3 when most changed targets have nothing able to execute them", () => {
+    const r = deriveRungs(obs({ effectComposes: 9, effectTargetsExamined: 10, effectTargetsUncovered: 8 }))
+      .find((x) => x.rung === 3)!;
+    expect(r.observed["covered_fraction"]).toBeCloseTo(0.2);
+    expect(r.holds).toBe(false);
+  });
+
+  it("treats NO compose coverage data as unmeasured, never as fine", () => {
+    // The field is new; older traces simply lack it. Absence of the field is absence of
+    // measurement, not evidence that coverage is good — reading it the other way would
+    // manufacture a green rung out of a schema change.
+    for (const v of [null, 0]) {
+      const r = deriveRungs(obs({ effectComposes: v })).find((x) => x.rung === 3)!;
+      expect(r.measurable).toBe(false);
+      expect(r.holds).toBeNull();
+      expect(r.unmeasured_reason).toContain("absence of measurement");
     }
+  });
+
+  it("does not fabricate a perfect score when zero targets were examined", () => {
+    const r = deriveRungs(obs({ effectComposes: 5, effectTargetsExamined: 0, effectTargetsUncovered: 0 }))
+      .find((x) => x.rung === 3)!;
+    expect(r.holds).toBeNull();
+    expect(r.measurable).toBe(false);
   });
 
   it("carries the drift scan's own unavailability through instead of scoring it", () => {

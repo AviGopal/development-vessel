@@ -4464,6 +4464,10 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
   // describes. Instead, being uncovered ROUTES the diff through a stricter
   // deterministic check that cannot false-positive.
   const uncoveredTargets: string[] = [];
+  // Counted alongside so the RATIO is recoverable. Reporting only the uncovered list makes an
+  // empty list ambiguous: it reads the same whether every target had a test or no target was
+  // ever examined — the silence-is-success confusion this codebase keeps paying for.
+  let coverageTargetsExamined = 0;
   try {
     const { access } = await import("node:fs/promises");
     const rootT = process.env["REPO_ROOT"] ?? process.env["WORKSPACE_ROOT"] ?? "/workspace/git/super-repo";
@@ -4473,6 +4477,7 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
         tf.replace(/\.tsx?$/, ".test.ts"),
         tf.replace(/^([^/]+\/[^/]+)\/src\//, "$1/test/").replace(/\.tsx?$/, ".test.ts"),
       ];
+      coverageTargetsExamined += 1;
       let covered = false;
       for (const c of candidates) {
         try { await access(`${rootT}/${c}`); covered = true; break; } catch { /* try next */ }
@@ -6194,6 +6199,15 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
           semantic_reason: String(semantic_gate?.reason ?? "").slice(0, 400),
           hard_fail: semantic_gate?.hard_fail ?? null,
           verify_ok: (verify as Array<Record<string, unknown>>).map((v) => v?.ok ?? null),
+          // EFFECT COVERAGE — was there anything that could EXECUTE the changed code?
+          //
+          // This was computed and only console.warn'd, so nothing downstream could ever answer
+          // "are landed changes known to do something?". Every gate above reads the diff; only
+          // a test runs it, and a FAVORABLE verdict on an uncovered target means the change was
+          // reviewed, never executed. Persisted here so that question stops being unanswerable.
+          effect_targets_examined: coverageTargetsExamined,
+          effect_targets_uncovered: uncoveredTargets.length,
+          effect_uncovered_targets: uncoveredTargets.slice(0, 20),
           rolled_back,
           landed_vessels: landedVessels,
           cutover_refusals: (cutovers as Array<Record<string, unknown>>)
@@ -6251,6 +6265,17 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
       apply_failed: applyFailed,
       verify,
       semantic_gate,
+      effect_coverage: {
+        targets_examined: coverageTargetsExamined,
+        targets_uncovered: uncoveredTargets.length,
+        uncovered: uncoveredTargets.slice(0, 20),
+        // null, not 1.0, when nothing was examined: no targets means no measurement, and a
+        // fabricated perfect score is worse than an honest absence.
+        covered_fraction:
+          coverageTargetsExamined > 0
+            ? Number(((coverageTargetsExamined - uncoveredTargets.length) / coverageTargetsExamined).toFixed(4))
+            : null,
+      },
       rolled_back,
       restore_failed: restoreFailed,
       restored_files: restored.map((f) => f.replace(`${REPO_ROOT}/`, "")),

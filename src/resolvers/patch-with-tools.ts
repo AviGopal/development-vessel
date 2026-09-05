@@ -1293,6 +1293,33 @@ export async function resolvePatchWithTools(pointer: PatchWithToolsPointer): Pro
   }
 }
 
+// ZERO-BEHAVIOUR-DELTA GATE. Same reasoning and the same reuse as the egress gate
+// above: this surgical patcher self-lands via triggerMitosisTick and never runs
+// feature_compose's inert-change checks, so a change feature_compose would REFUSE can
+// land here instead. That is not hypothetical - escalation to this lane is triggered BY
+// feature_compose returning UNFAVORABLE, so the pipeline's answer to "this change is
+// inert" can be to land it through the lane that does not ask. EVIDENCE: commit a336a75
+// (2026-09-05) landed 12 insertions and 0 deletions, every inserted line a comment, and
+// graded reached=true; feature-compose.ts:758 detectZeroBehaviorDelta classifies exactly
+// that shape as inert. Compare the CODE, not a diff: the whole-file pseudo-diff built for
+// the egress gate marks every line added and removed, so a diff-shaped inertness check
+// cannot fire on it. Stripping comments and strings from both images and comparing what
+// remains is the same test vessel-mitosis-cutover already uses for "no functional change".
+{
+  const { stripCommentsAndStrings } = await import("./feature-compose.js");
+  const beforeCode = stripCommentsAndStrings(baseContent).replace(/\s+/g, "");
+  const afterCode = stripCommentsAndStrings(afterSrc).replace(/\s+/g, "");
+  if (beforeCode === afterCode) {
+    await resetTarget();
+    return structuredError("zero_behaviour_delta", {
+      target_file: pointer.target_file,
+      detail: "the patch changes no executable code - comments, strings and whitespace only; feature_compose refuses this shape and escalation must not route around it",
+      before_sha: beforeSha,
+      after_sha: afterSha,
+    });
+  }
+}
+
 // REGION-CONTAINMENT GATE (2026-08-07). Same reasoning as the egress gate above, and
 // the same reuse: this patcher self-lands via the mitosis cutover and never runs
 // feature_compose's semantic gate, so a patch that edits the wrong part of the right

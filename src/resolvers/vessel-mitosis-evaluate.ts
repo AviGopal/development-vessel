@@ -650,6 +650,39 @@ async function runGoldenDriftGate(args: {
  * exactly that state and is a genuine latent instance of this bug, harmless today only
  * because the table has zero rows. False positives: 0 of 217.
  */
+/**
+ * Split SurrealDB source into statements, ignoring semicolons that are not separators.
+ *
+ * Exported for test. A bare `sql.split(";")` flagged 14 of 217 real migrations as containing
+ * unknown statements — every one a false positive from a semicolon inside a COMMENT string,
+ * inside a `fn::` body, or after an inline `--` comment.
+ */
+export function splitSurqlStatements(sql: string): string[] {
+  const out: string[] = [];
+  let buf = "";
+  let quote: string | null = null;
+  let depth = 0;
+  for (let i = 0; i < sql.length; i++) {
+    const c = sql[i]!;
+    const next = sql[i + 1];
+    if (quote) {
+      if (c === "\\") { buf += c + (next ?? ""); i++; continue; }
+      if (c === quote) quote = null;
+      buf += c;
+      continue;
+    }
+    if (c === "'" || c === '"') { quote = c; buf += c; continue; }
+    if (c === "-" && next === "-") { while (i < sql.length && sql[i] !== "\n") i++; continue; }
+    if (c === "/" && next === "*") { i += 2; while (i < sql.length && !(sql[i] === "*" && sql[i + 1] === "/")) i++; i++; continue; }
+    if (c === "{") depth++;
+    if (c === "}") depth = Math.max(0, depth - 1);
+    if (c === ";" && depth === 0) { if (buf.trim()) out.push(buf.trim()); buf = ""; continue; }
+    buf += c;
+  }
+  if (buf.trim()) out.push(buf.trim());
+  return out;
+}
+
 export function surqlBreakingFieldRefusal(
   files: Array<{ path: string; sql: string }>,
 ): string | null {
@@ -669,6 +702,58 @@ export function surqlBreakingFieldRefusal(
 
     const created = new Set<string>();
     for (const m of sql.matchAll(TABLE_RE)) created.add(m[1]!.toLowerCase());
+
+    // FAIL CLOSED ON A DIALECT WE DO NOT RECOGNISE.
+    //
+    // Found by probing this gate in production 2026-09-05. Asked for a required column on an
+    // existing table, the drafter did not write the hazardous DEFINE FIELD shape below — it
+    // wrote ANSI/MySQL:
+    //
+    //     ALTER TABLE impulse_resolution_metrics ADD COLUMN source_vessel STRING NOT NULL;
+    //
+    // SurrealDB has no ALTER TABLE. The statement cannot execute, so applySQLFile fails the
+    // file, it is never recorded in init_migrations, and it fails again on every boot. The
+    // gate ABSTAINED — correct by its own rules, and the rules were too narrow: they modelled
+    // one hazardous shape rather than asking whether the file is SurrealDB at all.
+    //
+    // A statement head outside this set is not a judgement call about style; it is a
+    // statement this database cannot run. Refusing is the fail-closed half of the principle
+    // this gate exists to enforce.
+    const KNOWN_HEADS = new Set([
+      "DEFINE", "REMOVE", "REBUILD", "ALTER", "INFO", "USE", "LET", "BEGIN", "COMMIT",
+      "CANCEL", "THROW", "IF", "FOR", "WHILE", "CONTINUE", "BREAK", "RETURN", "SELECT",
+      "INSERT", "CREATE", "UPSERT", "UPDATE", "DELETE", "RELATE", "LIVE", "KILL", "SHOW",
+      "OPTION", "ANALYZE", "ACCESS",
+    ]);
+    // A NAIVE split(";") PRODUCES A WEDGING GATE.
+    //
+    // Measured before shipping: splitting on bare semicolons flagged 14 of 217 existing
+    // migrations (6.5%) — all false. Semicolons live inside COMMENT "..." strings, inside
+    // fn:: bodies delimited by braces, and after inline `--` comments that a line-leading
+    // comment strip never sees. A fail-closed gate at that false-positive rate does not
+    // protect the loop, it stops it; this file's own history records a fail-closed gate that
+    // "WEDGED autonomous landings within the hour". So split with quote and brace awareness.
+    for (const stmt of splitSurqlStatements(sql)) {
+      const head = stmt.split(/\s+/)[0]!.toUpperCase();
+      if (!KNOWN_HEADS.has(head)) {
+        return (
+          `[mitosis-surql] REFUSING ${f.path}: statement begins with "${head}", which is not a ` +
+          `SurrealDB statement — the file is not in this database's dialect. ` +
+          `Offending statement: "${stmt.slice(0, 90)}". It cannot execute, so applySQLFile ` +
+          `fails the file, it is never recorded in init_migrations, and it fails again on ` +
+          `every boot.`
+        );
+      }
+      // ALTER exists in SurrealDB only as ALTER TABLE ... and never takes ADD COLUMN;
+      // the ANSI form is the shape a drafter reaches for by habit.
+      if (head === "ALTER" && /\bADD\s+COLUMN\b/i.test(stmt)) {
+        return (
+          `[mitosis-surql] REFUSING ${f.path}: "ALTER TABLE … ADD COLUMN" is ANSI/MySQL syntax, ` +
+          `not SurrealDB. Add a column with \`DEFINE FIELD <name> ON <table> TYPE option<...>\`. ` +
+          `Offending statement: "${stmt.slice(0, 90)}".`
+        );
+      }
+    }
 
     const malformed = [...sql.matchAll(MALFORMED_RE)];
     if (malformed.length > 0) {
@@ -1110,12 +1195,19 @@ export async function staticEvaluate(
         duration_ms: Date.now() - start,
       };
     }
-    // Say so when a .surql was staged but unreadable, rather than implying it was checked.
+    // SAY THAT THE CHECK RAN, NOT ONLY THAT IT REFUSED.
+    //
+    // The first version of this gate logged only on refusal. Probing it in production, I could
+    // not tell "ran and abstained" from "never executed" — the two look identical from the
+    // journal, which is the exact silence-is-success confusion this gate was built to end.
+    // An abstention is a verdict and should be visible as one.
     const staged = stagedFiles.filter((f) => /\.surql$/i.test(f));
-    if (staged.length > 0 && surql.length < staged.length) {
+    if (staged.length > 0) {
       console.error(
-        `[mitosis-evaluate] NOTE: ${staged.length - surql.length} staged .surql file(s) could not be read; ` +
-          `they were NOT effect-checked (checked ${surql.length}/${staged.length})`,
+        `[mitosis-surql] checked ${surql.length}/${staged.length} staged .surql file(s), no refusal` +
+          (surql.length < staged.length
+            ? ` — WARNING: ${staged.length - surql.length} could not be read and were NOT checked`
+            : ""),
       );
     }
   }

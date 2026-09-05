@@ -120,6 +120,42 @@ describe("surqlBreakingFieldRefusal — the third question for schema artifacts"
     expect(rd).not.toEqual(ri); // and cites a different cause for each
   });
 
+  // ---- found by probing the gate in production, 2026-09-05 ----
+
+  it("REFUSES the real probe output — ANSI `ALTER TABLE … ADD COLUMN`, verbatim", () => {
+    // Asked for a required column on an existing table, the drafter wrote MySQL, not SurrealDB.
+    // The first version of this gate ABSTAINED here: it modelled one hazardous DEFINE FIELD
+    // shape instead of asking whether the file is SurrealDB at all. It reached origin/dev with
+    // verdict=FAVORABLE and would have failed on every boot forever.
+    const sql = "ALTER TABLE impulse_resolution_metrics ADD COLUMN source_vessel STRING NOT NULL;\n";
+    const r = surqlBreakingFieldRefusal([{ path: "sql/migrations/207-x.surql", sql }]);
+    expect(r).not.toBeNull();
+    expect(r).toContain("ANSI/MySQL");
+  });
+
+  it("REFUSES any statement whose head verb is not SurrealDB", () => {
+    const r = surqlBreakingFieldRefusal([
+      { path: "m.surql", sql: "GRANT SELECT ON activity TO someone;" },
+    ]);
+    expect(r).not.toBeNull();
+    expect(r).toContain("not a\nSurrealDB statement".replace("\n", " "));
+  });
+
+  it("ABSTAINS on the ordinary SurrealDB verbs a real migration uses", () => {
+    // The fail-closed rule must not refuse the dialect it is protecting.
+    const sql = [
+      "BEGIN;",
+      "DEFINE TABLE t SCHEMAFULL;",
+      "DEFINE FIELD a ON t TYPE option<string>;",
+      "DEFINE INDEX idx ON t FIELDS a;",
+      "UPDATE t SET a = 'x' WHERE a IS NONE;",
+      "REMOVE FIELD old ON t;",
+      "REBUILD INDEX idx ON t;",
+      "COMMIT;",
+    ].join("\n");
+    expect(surqlBreakingFieldRefusal([{ path: "m.surql", sql }])).toBeNull();
+  });
+
   it("scans every staged file, not just the first", () => {
     const ok = { path: "1.surql", sql: "DEFINE FIELD a ON t TYPE option<string>;" };
     const bad = { path: "2.surql", sql: "DEFINE FIELD b ON t TYPE string;" };

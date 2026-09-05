@@ -3,6 +3,11 @@ import type { ResolverResult } from "./types.js";
 export interface GitBranchCreatePointer {
   type: "git_branch_create";
   branch_name: string;
+  /**
+   * Regex to validate branch names against.
+   * @default "^(substrate-authored|substrate)/.+$"
+   */
+  branch_name_pattern?: string;
   base?: string;
   cwd?: string;
 }

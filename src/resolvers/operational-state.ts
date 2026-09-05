@@ -231,6 +231,56 @@ export function deriveRungs(obs: {
   return rungs;
 }
 
+export interface LadderSummary {
+  rungs_total: number;
+  rungs_measurable: number;
+  rungs_holding: number;
+  first_broken_rung: number | null;
+  measurement_coverage: number;
+  verdict: "broken" | "insufficient_measurement" | "holds";
+  all_measurable_rungs_hold: boolean;
+}
+
+/**
+ * PURE, and separated from the resolver deliberately.
+ *
+ * The first version of this logic lived inside resolveOperationalState and was tested by
+ * CALLING that resolver — which performs I/O. The test therefore passed where the store was
+ * unreachable and failed where it was reachable, and the pre-cutover gate caught it as a test
+ * regression attributable to the commit and refused to converge. That refusal was correct: a
+ * test whose outcome depends on whether a database answers is testing the environment.
+ *
+ * Summary logic is a pure function of the rungs, so it is tested as one.
+ */
+export function summariseLadder(rungs: Rung[]): LadderSummary {
+  const measured = rungs.filter((r) => r.measurable);
+  const holding = measured.filter((r) => r.holds === true);
+  const firstBroken = measured.find((r) => r.holds === false)?.rung ?? null;
+  return {
+    rungs_total: rungs.length,
+    rungs_measurable: measured.length,
+    rungs_holding: holding.length,
+    first_broken_rung: firstBroken,
+    measurement_coverage:
+      rungs.length === 0 ? 0 : Number((measured.length / rungs.length).toFixed(2)),
+    // THE HEADLINE MUST NOT BE GREEN WHEN ALMOST NOTHING WAS CHECKED. An earlier version
+    // exposed `all_measurable_rungs_hold`, which returned TRUE with one of seven rungs
+    // measured — true to its own name and a green light to any reader, which is the exact
+    // failure this resolver exists to detect. Broken outranks everything, because a rung
+    // observed failing is a finding no amount of missing coverage softens.
+    // `measured * 2 < total` is false for an empty ladder, which fell through to "holds" —
+    // zero rungs measured reported as healthy, the maximal case of the very failure this
+    // field exists to prevent. Nothing measured is never green.
+    verdict:
+      firstBroken !== null
+        ? "broken"
+        : measured.length === 0 || measured.length * 2 < rungs.length
+          ? "insufficient_measurement"
+          : "holds",
+    all_measurable_rungs_hold: measured.length > 0 && holding.length === measured.length,
+  };
+}
+
 export async function resolveOperationalState(
   pointer: Record<string, unknown>,
 ): Promise<ResolverResult> {
@@ -267,10 +317,7 @@ export async function resolveOperationalState(
       const { resolveSchemaAssertDriftScan } = await import("./schema-assert-drift-scan.js");
       const d = (await resolveSchemaAssertDriftScan({})).body as Record<string, unknown>;
       driftUnavailable = (d["declaration_unavailable"] as string | null) ?? null;
-      const dd = d["declaration_drift"] as
-        | { missing?: unknown[]; hazards?: unknown[] }
-        | null
-        | undefined;
+      const dd = d["declaration_drift"] as { missing?: unknown[]; hazards?: unknown[] } | null | undefined;
       if (dd) {
         driftMissing = Array.isArray(dd.missing) ? dd.missing.length : null;
         driftHazards = Array.isArray(dd.hazards) ? dd.hazards.length : null;
@@ -293,39 +340,11 @@ export async function resolveOperationalState(
     gradedPerDay,
   });
 
-  const measured = rungs.filter((r) => r.measurable);
-  const holding = measured.filter((r) => r.holds === true);
-  // The first non-holding measured rung: rungs below it are uninformative, because an upper
-  // rung failing invalidates what the lower ones appear to say.
-  const firstBroken = measured.find((r) => r.holds === false)?.rung ?? null;
-
   return {
     shape: "operationalState",
     body: {
       rungs,
-      rungs_total: rungs.length,
-      rungs_measurable: measured.length,
-      rungs_holding: holding.length,
-      first_broken_rung: firstBroken,
-      measurement_coverage: Number((measured.length / rungs.length).toFixed(2)),
-      // THE HEADLINE FIELD MUST NOT BE GREEN WHEN ALMOST NOTHING WAS CHECKED.
-      //
-      // The first version exposed `all_measurable_rungs_hold`, which returned TRUE with one of
-      // seven rungs measured — true to its own name and a green light to anyone reading it.
-      // That is the exact failure this resolver exists to detect: a component reporting
-      // success about something it did not examine. A caller wants one field, and it has to
-      // be the honest one.
-      //
-      // INSUFFICIENT_MEASUREMENT outranks HOLDS. Broken still outranks both, because a rung
-      // observed to fail is a finding no amount of missing coverage softens.
-      verdict:
-        firstBroken !== null
-          ? "broken"
-          : measured.length * 2 < rungs.length
-            ? "insufficient_measurement"
-            : "holds",
-      // Kept for callers that want the raw conjunction, but never as the headline.
-      all_measurable_rungs_hold: measured.length > 0 && holding.length === measured.length,
+      ...summariseLadder(rungs),
       derived_at: new Date().toISOString(),
     },
   };

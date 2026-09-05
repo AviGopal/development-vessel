@@ -1,5 +1,5 @@
 import { describe, it, expect } from "bun:test";
-import { deriveRungs, resolveOperationalState } from "../../src/resolvers/operational-state.js";
+import { deriveRungs, summariseLadder, type Rung } from "../../src/resolvers/operational-state.js";
 
 /**
  * THE LADDER IS DERIVED, NOT DECLARED.
@@ -127,25 +127,56 @@ describe("deriveRungs — measured, and honest about what it could not measure",
   });
 });
 
-describe("the headline verdict — green only when enough was actually checked", () => {
-  it("says insufficient_measurement rather than holds when most rungs went unmeasured", async () => {
-    // CAUGHT IN A LIVE RUN. The first version exposed `all_measurable_rungs_hold`, which
-    // returned TRUE with ONE of seven rungs measured — true to its own name, and a green light
-    // to anyone reading it. That is the failure this whole resolver exists to detect, so the
-    // headline field has to be the honest one.
-    const r = await resolveOperationalState({ skip_gate_probe: true, skip_drift_scan: true });
-    const b = r.body as Record<string, unknown>;
-    // With the DB unreachable from a test process, coverage is necessarily low.
-    if ((b["rungs_measurable"] as number) * 2 < (b["rungs_total"] as number)) {
-      expect(b["verdict"]).toBe("insufficient_measurement");
-      expect(b["verdict"]).not.toBe("holds");
-    }
-    expect(b["measurement_coverage"]).toBeLessThanOrEqual(1);
+/**
+ * These were written first as calls to resolveOperationalState, which performs I/O. They
+ * therefore passed on a host where the store is unreachable and FAILED inside the vessel where
+ * it answers — and the pre-cutover gate caught exactly that, attributed one newly failing test
+ * to the commit, and refused to converge. The refusal was right: a test whose outcome depends
+ * on whether a database answers is testing the environment, not the code.
+ *
+ * The summary is a pure function of the rungs, so it is tested as one. No I/O.
+ */
+const rung = (n: number, measurable: boolean, holds: boolean | null): Rung => ({
+  rung: n,
+  question: `q${n}`,
+  measurable,
+  holds,
+  observed: {},
+  ...(measurable ? {} : { unmeasured_reason: "unmeasured" }),
+});
+
+describe("summariseLadder — green only when enough was actually checked", () => {
+  it("says insufficient_measurement rather than holds when most rungs went unmeasured", () => {
+    // An earlier version's headline returned TRUE with one of seven rungs measured — true to
+    // its own name, and a green light to any reader. That is the failure this resolver exists
+    // to detect, so the headline has to be the honest field.
+    const s = summariseLadder([
+      rung(1, true, true),
+      ...[2, 3, 4, 5, 6, 7].map((n) => rung(n, false, null)),
+    ]);
+    expect(s.rungs_measurable).toBe(1);
+    expect(s.all_measurable_rungs_hold).toBe(true); // the misleading raw conjunction
+    expect(s.verdict).toBe("insufficient_measurement"); // the honest headline
   });
 
-  it("reports a broken rung even when coverage is thin — a failure is not softened by missing data", async () => {
-    const r = await resolveOperationalState({ skip_gate_probe: true, skip_drift_scan: true });
-    const b = r.body as Record<string, unknown>;
-    if (b["first_broken_rung"] !== null) expect(b["verdict"]).toBe("broken");
+  it("reports broken even when coverage is thin — a failure is not softened by missing data", () => {
+    const s = summariseLadder([rung(1, true, false), ...[2, 3, 4, 5, 6, 7].map((n) => rung(n, false, null))]);
+    expect(s.verdict).toBe("broken");
+    expect(s.first_broken_rung).toBe(1);
+  });
+
+  it("says holds only with a majority measured and none broken", () => {
+    const s = summariseLadder([
+      ...[1, 2, 3, 4].map((n) => rung(n, true, true)),
+      ...[5, 6, 7].map((n) => rung(n, false, null)),
+    ]);
+    expect(s.verdict).toBe("holds");
+    expect(s.measurement_coverage).toBeCloseTo(0.57, 2);
+  });
+
+  it("does not divide by zero on an empty ladder", () => {
+    const s = summariseLadder([]);
+    expect(s.measurement_coverage).toBe(0);
+    expect(s.verdict).toBe("insufficient_measurement");
   });
 });

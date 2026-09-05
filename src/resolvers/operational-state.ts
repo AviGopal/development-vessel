@@ -80,6 +80,11 @@ export function deriveRungs(obs: {
   driftUnavailable: string | null;
   executionsTotal: number | null;
   executionsGraded: number | null;
+  /** Executions from arms the system has graded at least once — the reach-eligible population. */
+  executionsOnGradedArms: number | null;
+  /** Executions from arms it has NEVER graded: ticks, detectors, scheduled work with no goal. */
+  executionsOnNeverGradedArms: number | null;
+  neverGradedArms: number | null;
   armsSelectable: number | null;
   gradedPerDay: number | null;
 }): Rung[] {
@@ -169,9 +174,26 @@ export function deriveRungs(obs: {
         },
   );
 
-  const gradedFrac =
-    obs.executionsTotal && obs.executionsTotal > 0 && obs.executionsGraded !== null
-      ? obs.executionsGraded / obs.executionsTotal
+  // NAME THE DENOMINATOR, OR THE RUNG CANNOT MOVE.
+  //
+  // Measured on the live store: 61.1% of executions (22,374 of 36,645) come from the 1,160
+  // arms of 1,391 the system has NEVER graded — ticks, detectors and scheduled work that has
+  // no goal to reach. Asking whether a cron tick "reached its goal" is a category error, so
+  // dividing by them produced 0.2066 and made the rung unmovable by ANY amount of grading.
+  // Over the arms the system actually grades, coverage is 0.5306.
+  //
+  // The correction must not bury what it corrects. The never-graded share is reported
+  // alongside, because "most executions carry no goal-level signal" is a real condition — it
+  // is simply a DIFFERENT condition from "grading is broken", and conflating them cost this
+  // rung its ability to say anything.
+  const eligible =
+    obs.executionsOnGradedArms !== null && obs.executionsGraded !== null
+      ? obs.executionsOnGradedArms
+      : null;
+  const gradedFrac = eligible && eligible > 0 ? (obs.executionsGraded ?? 0) / eligible : null;
+  const neverShare =
+    obs.executionsOnNeverGradedArms !== null && obs.executionsTotal && obs.executionsTotal > 0
+      ? obs.executionsOnNeverGradedArms / obs.executionsTotal
       : null;
   rungs.push(
     gradedFrac === null
@@ -181,19 +203,26 @@ export function deriveRungs(obs: {
           measurable: false,
           holds: null,
           observed: {},
-          unmeasured_reason: "execution counts unavailable",
+          unmeasured_reason: "per-arm graded/ungraded execution counts unavailable",
         }
       : {
           rung: 6,
           question: "Are outcomes graded often enough to learn from?",
           measurable: true,
-          // Below a majority, selection is being trained on a proxy and any claim about
-          // compounding is unfalsifiable. The threshold is a judgement; the number is not.
+          // Below a majority of the ELIGIBLE population, selection is trained on a proxy and
+          // any claim about compounding is unfalsifiable. The 0.5 threshold is a judgement;
+          // the numbers beside it are not, and are reported so the judgement can be argued.
           holds: gradedFrac >= 0.5,
           observed: {
-            graded_fraction: Number(gradedFrac.toFixed(4)),
+            graded_fraction_of_eligible: Number(gradedFrac.toFixed(4)),
             graded: obs.executionsGraded,
-            total: obs.executionsTotal,
+            eligible: eligible,
+            graded_fraction_of_all: obs.executionsTotal
+              ? Number(((obs.executionsGraded ?? 0) / obs.executionsTotal).toFixed(4))
+              : null,
+            never_graded_arm_share_of_executions:
+              neverShare === null ? null : Number(neverShare.toFixed(4)),
+            never_graded_arms: obs.neverGradedArms,
           },
         },
   );
@@ -281,6 +310,58 @@ export function summariseLadder(rungs: Rung[]): LadderSummary {
   };
 }
 
+/**
+ * Per-arm graded/ungraded execution counts, used to separate the reach-ELIGIBLE population
+ * from ticks and detectors that have no goal to reach. Returns null on any failure so the
+ * caller reports UNMEASURED rather than inventing a denominator.
+ */
+async function armSplit(): Promise<
+  { onGradedArms: number; onNeverGradedArms: number; neverGradedArms: number } | null
+> {
+  const rows = async (where: string): Promise<Map<string, number> | null> => {
+    try {
+      const res = await fetch(`${SURREALDB_URL}/sql`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json",
+          "surreal-ns": SURREALDB_NS,
+          "surreal-db": SURREALDB_DB,
+          Authorization: "Basic " + btoa(`${SURREALDB_USERNAME}:${SURREALDB_PASSWORD}`),
+        },
+        body: `SELECT activity_id, count() FROM execution WHERE ${where} GROUP BY activity_id;`,
+        signal: AbortSignal.timeout(30_000),
+      });
+      if (!res.ok) return null;
+      const data = (await res.json()) as Array<{ status?: string; result?: unknown }>;
+      if (data[0]?.status !== "OK" || !Array.isArray(data[0].result)) return null;
+      const m = new Map<string, number>();
+      for (const r of data[0].result as Array<Record<string, unknown>>) {
+        const id = r["activity_id"];
+        const c = r["count"];
+        if (typeof id === "string" && typeof c === "number") m.set(id, c);
+      }
+      return m;
+    } catch {
+      return null;
+    }
+  };
+  const [g, u] = await Promise.all([rows("reached != NONE"), rows("reached IS NONE")]);
+  if (!g || !u) return null;
+  let onGraded = 0;
+  let onNever = 0;
+  let neverArms = 0;
+  for (const [k, v] of u) {
+    if (g.has(k)) onGraded += v;
+    else {
+      onNever += v;
+      neverArms++;
+    }
+  }
+  for (const v of g.values()) onGraded += v;
+  return { onGradedArms: onGraded, onNeverGradedArms: onNever, neverGradedArms: neverArms };
+}
+
 export async function resolveOperationalState(
   pointer: Record<string, unknown>,
 ): Promise<ResolverResult> {
@@ -327,6 +408,8 @@ export async function resolveOperationalState(
     }
   }
 
+  const split = pointer["skip_arm_split"] === true ? null : await armSplit();
+
   const rungs = deriveRungs({
     executionsRecent,
     gateRulesTotal,
@@ -336,6 +419,9 @@ export async function resolveOperationalState(
     driftUnavailable,
     executionsTotal,
     executionsGraded,
+    executionsOnGradedArms: split?.onGradedArms ?? null,
+    executionsOnNeverGradedArms: split?.onNeverGradedArms ?? null,
+    neverGradedArms: split?.neverGradedArms ?? null,
     armsSelectable,
     gradedPerDay,
   });

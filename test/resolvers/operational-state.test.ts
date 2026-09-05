@@ -23,6 +23,9 @@ const obs = (over: Partial<Parameters<typeof deriveRungs>[0]> = {}) => ({
   driftUnavailable: null,
   executionsTotal: 1000,
   executionsGraded: 900,
+  executionsOnGradedArms: 1000,
+  executionsOnNeverGradedArms: 0,
+  neverGradedArms: 0,
   armsSelectable: 100,
   gradedPerDay: 300,
   ...over,
@@ -53,6 +56,9 @@ describe("deriveRungs — measured, and honest about what it could not measure",
       driftUnavailable: null,
       executionsTotal: null,
       executionsGraded: null,
+      executionsOnGradedArms: null,
+      executionsOnNeverGradedArms: null,
+      neverGradedArms: null,
       armsSelectable: null,
       gradedPerDay: null,
     });
@@ -97,12 +103,41 @@ describe("deriveRungs — measured, and honest about what it could not measure",
 
   // ---- the two rungs gate work cannot substitute for ----
 
-  it("fails rung 6 when most executions carry no goal-level verdict", () => {
-    const rung = deriveRungs(obs({ executionsGraded: 200, executionsTotal: 1000 })).find(
-      (x) => x.rung === 6,
-    )!;
+  it("fails rung 6 when most ELIGIBLE executions carry no goal-level verdict", () => {
+    const rung = deriveRungs(
+      obs({ executionsGraded: 200, executionsTotal: 1000, executionsOnGradedArms: 1000 }),
+    ).find((x) => x.rung === 6)!;
     expect(rung.holds).toBe(false);
-    expect(rung.observed["graded_fraction"]).toBeCloseTo(0.2);
+    expect(rung.observed["graded_fraction_of_eligible"]).toBeCloseTo(0.2);
+  });
+
+  it("does NOT let never-graded ticks drag rung 6 down — but reports their share", () => {
+    // The live store: 22,374 of 36,645 executions (61.1%) come from 1,160 arms that are NEVER
+    // graded. Dividing by them gave 0.2066 and made the rung unmovable by any amount of
+    // grading. Over the eligible population the same data reads 0.53. The correction must not
+    // hide what it corrects, so the never-graded share travels with the verdict.
+    const rung = deriveRungs(
+      obs({
+        executionsTotal: 36645,
+        executionsGraded: 7572,
+        executionsOnGradedArms: 14271,
+        executionsOnNeverGradedArms: 22374,
+        neverGradedArms: 1160,
+      }),
+    ).find((x) => x.rung === 6)!;
+    expect(rung.observed["graded_fraction_of_eligible"]).toBeCloseTo(0.5306, 3);
+    expect(rung.observed["graded_fraction_of_all"]).toBeCloseTo(0.2066, 3);
+    expect(rung.observed["never_graded_arm_share_of_executions"]).toBeCloseTo(0.6106, 3);
+    expect(rung.observed["never_graded_arms"]).toBe(1160);
+    expect(rung.holds).toBe(true);
+  });
+
+  it("reports rung 6 UNMEASURED when the per-arm split is unavailable", () => {
+    // Without the split there is no honest denominator, so it must not fall back to the
+    // conflated one and call the result a measurement.
+    const rung = deriveRungs(obs({ executionsOnGradedArms: null })).find((x) => x.rung === 6)!;
+    expect(rung.measurable).toBe(false);
+    expect(rung.holds).toBeNull();
   });
 
   it("scores rung 7 as a RATE per arm per day, not a total", () => {

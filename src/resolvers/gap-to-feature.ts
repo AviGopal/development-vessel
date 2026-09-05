@@ -966,7 +966,7 @@ export function chooseFirstActionable<T>(
   ranked: Array<{ g: T; s: number }>,
   isPending: (g: T) => boolean,
   scanMax: number = PENDING_SCAN_MAX,
-): { chosen: { g: T; s: number }; skippedPending: number } {
+): { chosen: { g: T; s: number }; skippedPending: number; scanExhausted?: boolean } {
   let skippedPending = 0;
   const limit = Math.min(ranked.length, scanMax);
   for (let i = 0; i < limit; i++) {
@@ -974,7 +974,13 @@ export function chooseFirstActionable<T>(
     if (isPending(cand.g)) { skippedPending++; continue; }
     return { chosen: cand, skippedPending };
   }
-  return { chosen: ranked[0]!, skippedPending };
+  const extendedLimit = Math.min(ranked.length, scanMax * 2);
+  for (let i = limit; i < extendedLimit; i++) {
+    const cand = ranked[i]!;
+    if (isPending(cand.g)) { skippedPending++; continue; }
+    return { chosen: cand, skippedPending, scanExhausted: true };
+  }
+  return { chosen: ranked[extendedLimit] ?? ranked[0]!, skippedPending, scanExhausted: true };
 }
 
 function pickMostLandable(gaps: Record<string, unknown>[]): Record<string, unknown> | null {

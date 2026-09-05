@@ -332,6 +332,99 @@ export function deriveRungs(obs: {
   return rungs;
 }
 
+
+/**
+ * PERSIST EACH DERIVATION, AND REPORT THE DELTA FROM THE LAST ONE.
+ *
+ * Without this the resolver can say what is true NOW and nothing else, which means no action
+ * the substrate takes can ever be associated with a subsequent change in its own condition.
+ * A landing, a retirement, a gap closure — each disappears into a system that has no memory of
+ * what it was like beforehand. Causal association needs two observations and an ordering; this
+ * supplies the first half.
+ *
+ * Written as an impulse rather than to a new table: `impulse` already exists, is SCHEMAFULL
+ * with a FLEXIBLE `pointer`, and is the same channel upkeepAuditLog uses. A new table would
+ * need DDL, and DDL that never applied is how the six missing `activity` fields happened.
+ *
+ * Best-effort. A failure to record history must not cost the caller the current reading —
+ * losing the measurement to protect the archive would be the wrong trade.
+ */
+async function persistSnapshot(body: Record<string, unknown>): Promise<boolean> {
+  try {
+    const id = `opstate-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const payload = JSON.stringify(body).replace(/'/g, "\\'");
+    const res = await fetch(`${SURREALDB_URL}/sql`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+        "surreal-ns": SURREALDB_NS,
+        "surreal-db": SURREALDB_DB,
+        Authorization: "Basic " + btoa(`${SURREALDB_USERNAME}:${SURREALDB_PASSWORD}`),
+      },
+      body:
+        `INSERT INTO impulse { id: '${id}', shape: 'operationalStateSnapshot', ` +
+        `pointer: ${JSON.stringify(body)}, created_at: time::now(), budget: 0 };`,
+      signal: AbortSignal.timeout(15_000),
+    });
+    void payload;
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+/** The previous snapshot's rung verdicts, for a delta. null when there is no history yet. */
+async function previousSnapshot(): Promise<Record<string, unknown> | null> {
+  try {
+    const res = await fetch(`${SURREALDB_URL}/sql`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+        "surreal-ns": SURREALDB_NS,
+        "surreal-db": SURREALDB_DB,
+        Authorization: "Basic " + btoa(`${SURREALDB_USERNAME}:${SURREALDB_PASSWORD}`),
+      },
+      body:
+        "SELECT pointer, created_at FROM impulse WHERE shape = 'operationalStateSnapshot' " +
+        "ORDER BY created_at DESC LIMIT 1;",
+      signal: AbortSignal.timeout(15_000),
+    });
+    if (!res.ok) return null;
+    const data = (await res.json()) as Array<{ status?: string; result?: unknown }>;
+    if (data[0]?.status !== "OK" || !Array.isArray(data[0].result) || data[0].result.length === 0) return null;
+    return (data[0].result[0] as Record<string, unknown>) ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * What CHANGED since the last derivation. Pure, so the comparison is testable without history.
+ *
+ * Reports only rungs whose verdict actually moved, and states explicitly when there is no
+ * prior snapshot — "nothing changed" and "nothing to compare against" are different claims and
+ * conflating them is the failure this whole resolver exists to avoid.
+ */
+export function ladderDelta(
+  current: Rung[],
+  previous: Rung[] | null,
+): { comparable: boolean; changed: Array<{ rung: number; from: string; to: string }>; reason?: string } {
+  if (!previous || previous.length === 0) {
+    return { comparable: false, changed: [], reason: "no prior snapshot — this is the first derivation on record" };
+  }
+  const verdict = (r: Rung) => (!r.measurable ? "unmeasured" : r.holds === true ? "holds" : "broken");
+  const prev = new Map(previous.map((r) => [r.rung, verdict(r)]));
+  const changed: Array<{ rung: number; from: string; to: string }> = [];
+  for (const r of current) {
+    const before = prev.get(r.rung);
+    const after = verdict(r);
+    if (before !== undefined && before !== after) changed.push({ rung: r.rung, from: before, to: after });
+  }
+  return { comparable: true, changed };
+}
+
 export interface LadderSummary {
   rungs_total: number;
   rungs_measurable: number;
@@ -517,12 +610,19 @@ export async function resolveOperationalState(
     gradedPerDay,
   });
 
-  return {
-    shape: "operationalState",
-    body: {
-      rungs,
-      ...summariseLadder(rungs),
-      derived_at: new Date().toISOString(),
-    },
+  const prevRow = pointer["skip_history"] === true ? null : await previousSnapshot();
+  const prevRungs = (prevRow?.["pointer"] as { rungs?: Rung[] } | undefined)?.rungs ?? null;
+  const delta = ladderDelta(rungs, prevRungs);
+
+  const body = {
+    rungs,
+    ...summariseLadder(rungs),
+    delta,
+    previous_snapshot_at: (prevRow?.["created_at"] as string | undefined) ?? null,
+    derived_at: new Date().toISOString(),
   };
+
+  // Record AFTER computing the delta, so this derivation becomes the baseline for the next.
+  const recorded = pointer["skip_history"] === true ? null : await persistSnapshot(body);
+  return { shape: "operationalState", body: { ...body, snapshot_recorded: recorded } };
 }

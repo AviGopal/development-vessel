@@ -1,5 +1,5 @@
 import { describe, it, expect } from "bun:test";
-import { deriveRungs, summariseLadder, type Rung } from "../../src/resolvers/operational-state.js";
+import { deriveRungs, summariseLadder, ladderDelta, type Rung } from "../../src/resolvers/operational-state.js";
 
 /**
  * THE LADDER IS DERIVED, NOT DECLARED.
@@ -236,6 +236,51 @@ const rung = (n: number, measurable: boolean, holds: boolean | null): Rung => ({
   holds,
   observed: {},
   ...(measurable ? {} : { unmeasured_reason: "unmeasured" }),
+});
+
+describe("ladderDelta — an action is only associable with a change if both are observed", () => {
+  const r = (n: number, measurable: boolean, holds: boolean | null): Rung => ({
+    rung: n, question: `q${n}`, measurable, holds, observed: {},
+    ...(measurable ? {} : { unmeasured_reason: "x" }),
+  });
+
+  it("distinguishes NOTHING CHANGED from NOTHING TO COMPARE AGAINST", () => {
+    // The two read identically as an empty change list, and conflating them is the exact
+    // failure this resolver exists to avoid. The first derivation on record has no baseline;
+    // saying "no change" there would assert stability that was never observed.
+    const now = [r(1, true, true)];
+    const first = ladderDelta(now, null);
+    expect(first.comparable).toBe(false);
+    expect(first.reason).toContain("no prior snapshot");
+    const stable = ladderDelta(now, [r(1, true, true)]);
+    expect(stable.comparable).toBe(true);
+    expect(stable.changed).toEqual([]);
+  });
+
+  it("reports a rung that moved, in both directions", () => {
+    const broke = ladderDelta([r(3, true, false)], [r(3, true, true)]);
+    expect(broke.changed).toEqual([{ rung: 3, from: "holds", to: "broken" }]);
+    const fixed = ladderDelta([r(3, true, true)], [r(3, true, false)]);
+    expect(fixed.changed).toEqual([{ rung: 3, from: "broken", to: "holds" }]);
+  });
+
+  it("treats becoming MEASURABLE as a change worth reporting", () => {
+    // Rung 3 went unmeasured -> broken today when its producer went live. That transition is
+    // the single most informative event a rung can have: it means the system can now see
+    // something it was previously blind to, and it must not be silently folded into "broken".
+    const d = ladderDelta([r(3, true, false)], [r(3, false, null)]);
+    expect(d.changed).toEqual([{ rung: 3, from: "unmeasured", to: "broken" }]);
+  });
+
+  it("ignores rungs absent from the prior snapshot rather than inventing a transition", () => {
+    // A newly added rung has no 'from'. Reporting one would fabricate history.
+    const d = ladderDelta([r(1, true, true), r(8, true, false)], [r(1, true, true)]);
+    expect(d.changed).toEqual([]);
+  });
+
+  it("returns an empty comparison for an empty prior snapshot", () => {
+    expect(ladderDelta([r(1, true, true)], []).comparable).toBe(false);
+  });
 });
 
 describe("summariseLadder — green only when enough was actually checked", () => {

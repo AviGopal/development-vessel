@@ -174,6 +174,30 @@ describe("surqlBreakingFieldRefusal — the third question for schema artifacts"
     expect(surqlBreakingFieldRefusal([{ path: "m.surql", sql }])).toBeNull();
   });
 
+  it("REFUSES the real 210 body — invented `OPTION STRING` field syntax, verbatim", () => {
+    // THE ONE THAT ACTUALLY LANDED. Asked for two optional columns on an existing table, the
+    // drafter wrote syntax that appears in ZERO of the 217 corpus files, and every rule above
+    // abstained: the field-shape regex did not match, the names-no-table rule did not fire
+    // because the statement DOES contain `ON`, and `DEFINE` is a known head verb. It reached
+    // origin/dev and would fail to parse on every boot forever.
+    const sql =
+      "DEFINE FIELD org_id OPTION STRING IF NOT EXISTS ON execution_traces;\n" +
+      "DEFINE FIELD ci_status OPTION STRING IF NOT EXISTS ON execution_traces;\n";
+    const r = surqlBreakingFieldRefusal([{ path: "sql/migrations/210-x.surql", sql }]);
+    expect(r).not.toBeNull();
+    expect(r).toContain("does not parse as one");
+  });
+
+  it("ABSTAINS on the canonical field form the corpus actually uses", () => {
+    // The complementary half: failing closed on unrecognised syntax must not refuse the
+    // syntax that 217 real migrations are written in.
+    const sql =
+      "DEFINE FIELD IF NOT EXISTS org_id ON execution_traces TYPE option<string>;\n" +
+      "DEFINE FIELD OVERWRITE retired_at ON activity TYPE option<datetime>;\n" +
+      "DEFINE FIELD tags ON activity TYPE array<string> DEFAULT [];\n";
+    expect(surqlBreakingFieldRefusal([{ path: "m.surql", sql }])).toBeNull();
+  });
+
   it("REFUSES any statement whose head verb is not SurrealDB", () => {
     const r = surqlBreakingFieldRefusal([
       { path: "m.surql", sql: "GRANT SELECT ON activity TO someone;" },

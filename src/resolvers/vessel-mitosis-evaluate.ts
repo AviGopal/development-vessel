@@ -823,6 +823,36 @@ export function surqlBreakingFieldRefusal(
       );
     }
 
+    // A DEFINE FIELD THAT DOES NOT PARSE AS ONE IS MALFORMED, NOT EXEMPT.
+    //
+    // Third miss of the same class, and the one that actually landed. Asked for two optional
+    // columns, the drafter produced:
+    //
+    //     DEFINE FIELD org_id OPTION STRING IF NOT EXISTS ON execution_traces;
+    //
+    // Invented syntax — `OPTION STRING` appears in ZERO of the 217 corpus files, `IF NOT
+    // EXISTS` sits after the name, and `ON` trails at the end. The canonical form is
+    // `DEFINE FIELD IF NOT EXISTS <name> ON <table> TYPE option<string>`.
+    //
+    // Every rule above abstained: the field-shape regex did not match, the names-no-table rule
+    // did not fire because the statement DOES contain `ON`, and `DEFINE` is a known head verb.
+    // So it passed, landed on origin/dev, and would fail to parse on every boot forever.
+    //
+    // The earlier rules ask "is this specific hazard present?", which abstains on anything
+    // unfamiliar. This one asks the complementary question: a statement that CLAIMS to be a
+    // DEFINE FIELD must parse as one. Unrecognised is refused, not waved through.
+    for (const stmt of splitSurqlStatements(sql)) {
+      if (!/^DEFINE\s+FIELD\b/i.test(stmt)) continue;
+      if (FIELD_RE.test(stmt + ";")) { FIELD_RE.lastIndex = 0; continue; }
+      FIELD_RE.lastIndex = 0;
+      return (
+        `[mitosis-surql] REFUSING ${f.path}: a DEFINE FIELD statement does not parse as one — ` +
+        `expected \`DEFINE FIELD [IF NOT EXISTS] <name> ON <table> TYPE <type>\`, got ` +
+        `"${stmt.slice(0, 100)}". Unrecognised field syntax cannot execute, so applySQLFile ` +
+        `fails the file, it is never recorded in init_migrations, and it fails again on every boot.`
+      );
+    }
+
     for (const m of sql.matchAll(FIELD_RE)) {
       const [, name, table, rest] = m as unknown as [string, string, string, string];
       if (name.includes(".")) continue; // `tasks.*` types array ELEMENTS, not a column

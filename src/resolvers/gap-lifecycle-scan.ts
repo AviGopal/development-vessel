@@ -93,6 +93,32 @@ export function preservedDetectedAt(g: { created_at?: string; updated_at?: strin
   return new Date().toISOString();
 }
 
+/**
+ * Has this gap ever actually been attempted?
+ *
+ * Expiry asserts "reality stopped re-detecting this". A gap nobody ever composed has not
+ * been tested against reality at all, so closing it as expired_not_redetected asserts a
+ * test that never ran. It also destroys the evidence that would show whether the category
+ * is landable, and feeds updateCalibration nothing, so the posterior never improves.
+ *
+ * Measured on the live store 2026-09-05, n=450 missing_capability gaps: 369 (82.0%) closed
+ * expired_not_redetected, and only 18 (4.0%) ever produced a compose artifact. Control,
+ * n=373 edit_intent_route: 310 (83.1%) produced an artifact. Capability work is not losing
+ * at compose time; it never reaches compose.
+ *
+ * Two signals must agree, because either alone is ambiguous: a missing failed_attempts
+ * counter does NOT mean "never attempted" - for edit_intent_route it usually means the gap
+ * SUCCEEDED, and 85.4% of those still carry an artifact.
+ */
+export function hasNoAttemptEvidence(g: unknown): boolean {
+  const meta = ((g as { classification_metadata?: Record<string, unknown> } | null)?.classification_metadata) ?? {};
+  const attempts = Number(meta.failed_attempts ?? 0);
+  if (Number.isFinite(attempts) && attempts > 0) return false;
+  const decisions = meta.approach_decisions;
+  if (Array.isArray(decisions) && decisions.length > 0) return false;
+  return true;
+}
+
 const STALE_THRESHOLD_MS = 48 * 60 * 60 * 1000; // 48 hours
 
 /** Gap categories considered low-value for auto-close purposes */
@@ -462,6 +488,11 @@ export async function resolveGapLifecycleScan(p: GapLifecycleScanPointer): Promi
     const isDetectorStale = Number.isFinite(t) && t < detectorExpireBefore;
     const isExpireStale = Number.isFinite(t) && t < (g.source === 'substrate_detected' ? detectorExpireBefore : expireBefore);
     const isBaselineTypecheckStale = isBaselineTypecheckBroken && Number.isFinite(t) && t < Date.now() - 6 * 60 * 60 * 1000;
+    // A gap nobody ever attempted has not been tested against reality, so it is not a
+    // candidate for "not re-detected" expiry. Measured 2026-09-05: of 315 expiry candidates,
+    // 174 (55.2%) had no attempt evidence at all, so with maxExpire=100 a run would have
+    // expired 100 gaps of which roughly 55% were work nobody ever looked at.
+    if (hasNoAttemptEvidence(g)) return false;
     return (isDetectorStale || isExpireStale || isBaselineTypecheckStale) && !lowValueClosed.includes(g.id!);
   });
   const expired: string[] = [];

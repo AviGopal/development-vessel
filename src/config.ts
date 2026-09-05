@@ -296,6 +296,7 @@ export const config = {
       "dispatch_target_drift_scan",
     "schema_assert_drift_scan",
     "gate_self_probe",
+    "operational_state",
       "orphaned_org_write_scan",
       // Phase 2 of obsidian meta-skill prototype (2026-06-01):
       // permissive-scope authoring gate. LLM is asked to read a template body

@@ -546,6 +546,10 @@ async function dispatchInner(pointer: AnyPointer): Promise<ResolverResult> {
       const { resolveGateSelfProbe } = await import("../resolvers/gate-self-probe.js");
       return resolveGateSelfProbe(pointer);
     }
+    case "operational_state": {
+      const { resolveOperationalState } = await import("../resolvers/operational-state.js");
+      return resolveOperationalState(pointer);
+    }
     case "dispatch_target_drift_scan":
       return resolveDispatchTargetDriftScan(p as Parameters<typeof resolveDispatchTargetDriftScan>[0]);
     case "service_oom_cascade_scan":

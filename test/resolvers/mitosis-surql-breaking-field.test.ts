@@ -151,6 +151,29 @@ describe("surqlBreakingFieldRefusal — the third question for schema artifacts"
     expect(surqlBreakingFieldRefusal([{ path: "m.surql", sql }])).toBeNull();
   });
 
+  it("REFUSES the real 209 probe body — ANSI DDL buried inside a DEFINE EVENT, verbatim", () => {
+    // Live drafter output, 2026-09-05 12:26. The gate DID refuse this in production, but on the
+    // trailing `END` — the right verdict for the wrong reason. `DEFINE EVENT ... THEN ... END`
+    // is legitimate SurrealDB, so that rule was a latent wedge; the hazard is the ANSI ADD.
+    const sql =
+      'DEFINE EVENT change_x ON TABLE impulse_resolution_metrics WHEN $event = "CREATE" THEN\n' +
+      "  ALTER TABLE impulse_resolution_metrics ADD origin_vessel TEXT;\n" +
+      '  UPDATE impulse_resolution_metrics SET origin_vessel = "" WHERE origin_vessel IS NONE;\n' +
+      "END;";
+    const r = surqlBreakingFieldRefusal([{ path: "sql/migrations/209-x.surql", sql }]);
+    expect(r).not.toBeNull();
+    expect(r).toContain("ANSI/MySQL"); // the RIGHT reason, not the incidental END
+    expect(r).not.toContain('begins with "END"');
+  });
+
+  it("ABSTAINS on a legitimate DEFINE EVENT … THEN … END with no ANSI inside", () => {
+    const sql =
+      'DEFINE EVENT bump ON TABLE t WHEN $event = "UPDATE" THEN\n' +
+      "  UPDATE t SET updated_at = time::now() WHERE id = $after.id;\n" +
+      "END;";
+    expect(surqlBreakingFieldRefusal([{ path: "m.surql", sql }])).toBeNull();
+  });
+
   it("REFUSES any statement whose head verb is not SurrealDB", () => {
     const r = surqlBreakingFieldRefusal([
       { path: "m.surql", sql: "GRANT SELECT ON activity TO someone;" },

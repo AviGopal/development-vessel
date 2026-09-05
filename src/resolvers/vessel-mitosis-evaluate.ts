@@ -724,6 +724,12 @@ export function surqlBreakingFieldRefusal(
       "CANCEL", "THROW", "IF", "FOR", "WHILE", "CONTINUE", "BREAK", "RETURN", "SELECT",
       "INSERT", "CREATE", "UPSERT", "UPDATE", "DELETE", "RELATE", "LIVE", "KILL", "SHOW",
       "OPTION", "ANALYZE", "ACCESS",
+      // `END` closes a DEFINE EVENT/FUNCTION body (`... THEN ... END;`), which this splitter
+      // sees as its own statement because THEN/END is not brace-delimited. Refusing it would
+      // reject legitimate SurrealDB. Found by the 2026-09-05 production probe, where the gate
+      // fired on END — the right verdict for the wrong reason, and a latent wedge for any real
+      // migration that defines an event. The hazard inside such a body is caught below instead.
+      "END",
     ]);
     // A NAIVE split(";") PRODUCES A WEDGING GATE.
     //
@@ -755,7 +761,12 @@ export function surqlBreakingFieldRefusal(
       // `ALTER TABLE t ADD source_vessel STRING NOT NULL` is the common short form and would
       // slip through. Match ADD anywhere in an ALTER instead — verified against the corpus,
       // which contains ALTER TABLE ... PERMISSIONS and ZERO occurrences of ALTER ... ADD.
-      if (head === "ALTER" && /\bADD\b/i.test(stmt)) {
+      // Match ANYWHERE in the statement, not only when ALTER is the head verb. The production
+      // probe buried the ANSI form inside a DEFINE EVENT body —
+      //   DEFINE EVENT ... THEN  ALTER TABLE t ADD origin_vessel TEXT;  ... END;
+      // — so the statement's head was DEFINE and a head-anchored check never fired. The gate
+      // refused that file only incidentally, on its trailing END. Scan the whole statement.
+      if (/\bALTER\s+TABLE\b[^;]*?\bADD\b/i.test(stmt)) {
         return (
           `[mitosis-surql] REFUSING ${f.path}: "ALTER TABLE … ADD COLUMN" is ANSI/MySQL syntax, ` +
           `not SurrealDB. Add a column with \`DEFINE FIELD <name> ON <table> TYPE option<...>\`. ` +

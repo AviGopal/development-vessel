@@ -41,8 +41,8 @@ export async function resolveAdvertisedShapeCoverageScan(
   const advertised = new Map<string, Set<string>>();
   let vessel_count = 0;
   try {
-    const endpoint = process.env["DISCOVERY_VESSEL_ENDPOINT"] ?? "http://127.0.0.1:8100";
-    const apiKey = (process.env["METABOB_API_KEY"] ?? process.env["DEV_VESSEL_API_KEY"]) || undefined;
+    const endpoint = process.env["DISCOVERY_VESSEL_ENDPOINT"] || "http://127.0.0.1:8100";
+    const apiKey = process.env["METABOB_API_KEY"] || process.env["DEV_VESSEL_API_KEY"] || undefined;
     const res = await fetch(`${endpoint.replace(/\/+$/, "")}/resolve`, {
       method: "POST",
       headers: { "Content-Type": "application/json", ...(apiKey ? { Authorization: `ApiKey ${apiKey}` } : {}) },

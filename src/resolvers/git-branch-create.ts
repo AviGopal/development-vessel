@@ -5,6 +5,7 @@ export interface GitBranchCreatePointer {
   branch_name: string;
   /**
    * Regex to validate branch names against.
+   * @pattern "^[a-zA-Z0-9-._/]+$"
    * @default "^(substrate-authored|substrate)/.+$"
    */
   branch_name_pattern?: string;

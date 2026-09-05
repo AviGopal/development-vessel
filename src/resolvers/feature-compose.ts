@@ -1616,6 +1616,118 @@ export function unresolvableImpulseEndpointRefusal(diff: string): string | null 
   );
 }
 
+/**
+ * A PATCH THAT CHANGES BYTES BUT NOT BEHAVIOUR.
+ *
+ * The pipeline asks "is it valid?" (typecheck/shape-dispatch/tests) and "does it address the
+ * goal?" (the semantic gate). Nothing asks the third question: DOES IT DO ANYTHING. A regex
+ * edit that alters the source but not the decisions the regex drives passes every existing
+ * gate, lands, is recorded as a success, and credits the arm that produced it.
+ *
+ * Observed live 2026-09-05: compose route-edit-5cdf696a returned UNFAVORABLE on a semantic
+ * reject; the RECOMMIT then produced 5cd4e72, which landed autonomously and appended
+ * `|\?\?=` to a GUARD_RE already containing `\?\?`, used unanchored - so the new
+ * alternative can never match anything the old one missed. Proven inert by executing both
+ * regexes over probe strings: zero behavioural differences. That reveals a gradient in the
+ * recommit loop - the cheapest way to satisfy a gate that rejected you is to change nothing
+ * meaningful. `empty_diff_identity_edit` does not catch it: that rule rejects a LITERALLY
+ * empty diff, and this diff is not empty.
+ *
+ * The gate ABSTAINS whenever it cannot be certain. A false refusal blocks real work, which is
+ * worse than letting one inert patch through, so any mixed, unpairable or unparseable diff
+ * returns null.
+ */
+function splitTopLevelAlternatives(src: string): string[] {
+  const out: string[] = [];
+  let depth = 0, cur = "", inClass = false;
+  for (let i = 0; i < src.length; i++) {
+    const c = src[i]!;
+    if (c === "\\") { cur += c + (src[i + 1] ?? ""); i++; continue; }
+    if (inClass) { cur += c; if (c === "]") inClass = false; continue; }
+    if (c === "[") { inClass = true; cur += c; continue; }
+    if (c === "(") depth++;
+    if (c === ")") depth--;
+    if (c === "|" && depth === 0) { out.push(cur); cur = ""; continue; }
+    cur += c;
+  }
+  out.push(cur);
+  return out.filter((x) => x.length > 0);
+}
+
+/** Best-effort: turn a regex alternative into a plain probe string, or null if not literal. */
+function literaliseAlternative(alt: string): string | null {
+  let out = "";
+  for (let i = 0; i < alt.length; i++) {
+    const c = alt[i]!;
+    if (c === "\\") {
+      const n = alt[i + 1];
+      if (n === undefined) return null;
+      if (/[dwsSWDbB]/.test(n)) return null;
+      out += n; i++; continue;
+    }
+    if ("()[]{}*+?^$".includes(c)) {
+      if (c === "(" || c === ")") continue;
+      return null;
+    }
+    out += c;
+  }
+  return out.length ? out : null;
+}
+
+/** Extract a trailing `= /source/flags;` regex literal from a line. */
+export function regexLiteralOfLine(line: string): { src: string; flags: string } | null {
+  const m = line.match(/=\s*\/((?:\\.|\[(?:\\.|[^\]])*\]|[^/\\])+)\/([gimsuy]*)\s*;?\s*$/);
+  if (!m || m[1] === undefined) return null;
+  return { src: m[1], flags: m[2] ?? "" };
+}
+
+export function inertRegexEditRefusal(diff: string): string | null {
+  if (!diff) return null;
+  const removed: string[] = [], added: string[] = [];
+  for (const raw of diff.split("\n")) {
+    if (raw.startsWith("---") || raw.startsWith("+++")) continue;
+    if (raw.startsWith("-")) removed.push(raw.slice(1));
+    else if (raw.startsWith("+")) added.push(raw.slice(1));
+  }
+  if (removed.length === 0 || removed.length !== added.length) return null;
+
+  const pairs: Array<{ o: RegExp; n: RegExp; oSrc: string; nSrc: string }> = [];
+  for (let i = 0; i < removed.length; i++) {
+    const ro = regexLiteralOfLine(removed[i]!), rn = regexLiteralOfLine(added[i]!);
+    if (!ro || !rn) return null;
+    if (ro.src === rn.src && ro.flags === rn.flags) continue;
+    try {
+      pairs.push({
+        o: new RegExp(ro.src, ro.flags.replace(/[gy]/g, "")),
+        n: new RegExp(rn.src, rn.flags.replace(/[gy]/g, "")),
+        oSrc: ro.src, nSrc: rn.src,
+      });
+    } catch { return null; }
+  }
+  if (pairs.length === 0) return null;
+
+  for (const p of pairs) {
+    const cands = new Set<string>();
+    for (const alt of [...splitTopLevelAlternatives(p.oSrc), ...splitTopLevelAlternatives(p.nSrc)]) {
+      const lit = literaliseAlternative(alt);
+      if (lit) { cands.add(lit); cands.add(` ${lit} `); cands.add(`x${lit}y`); }
+    }
+    for (const s of ["", " ", "abc", "const x = 1;", "process.env.FOO"]) cands.add(s);
+    let differs = false;
+    for (const c of cands) if (p.o.test(c) !== p.n.test(c)) { differs = true; break; }
+    if (!differs) {
+      return (
+        `[fc-inert-literal] the patch's ONLY change is a regex literal that behaves IDENTICALLY. ` +
+        `old=/${p.oSrc}/ new=/${p.nSrc}/ agreed on all ${cands.size} probe strings, so the edit ` +
+        `cannot change any decision the regex drives. It typechecks and passes tests because ` +
+        `nothing EXECUTES it. This exact class landed inert on this substrate (5cd4e72). ` +
+        `Either change the behaviour or make no edit.`
+      );
+    }
+  }
+  return null;
+}
+
 export function cjsInEsmRefusal(diff: string): string | null {
   if (!diff) return null;
   const offenders: string[] = [];
@@ -5529,7 +5641,24 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
         } catch { /* rolled back or missing - skip */ }
       }
       const dataFlowFacts = computeDataFlowFacts(diff, postPatchContents);
-      semantic_gate = shapeVocabRefusal ?? cjsRefusal ?? endpointRefusal ?? await verifyPatchAddressesGap({
+      // INERT-LITERAL GATE. Deterministic, no LLM. Refuses a patch whose only change is a
+      // regex literal that behaves identically - the class that landed as 5cd4e72.
+      const inertLiteralReason = inertRegexEditRefusal(diff);
+      const inertLiteralRefusal = inertLiteralReason
+        ? {
+            addresses: false,
+            reason: inertLiteralReason,
+            on_live_path: true,
+            hard_fail: true,
+            llm_consulted: false,
+            verified: true,
+          }
+        : null;
+      if (inertLiteralRefusal) {
+        console.warn(`[fc-inert-literal] REFUSING: the diff's only change is a behaviourally identical regex literal`);
+      }
+
+      semantic_gate = shapeVocabRefusal ?? cjsRefusal ?? endpointRefusal ?? inertLiteralRefusal ?? await verifyPatchAddressesGap({
         gapSummary,
         gapMeta: pointer.gap?.classification_metadata,
         diff,

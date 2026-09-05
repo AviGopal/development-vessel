@@ -4464,6 +4464,7 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
   // describes. Instead, being uncovered ROUTES the diff through a stricter
   // deterministic check that cannot false-positive.
   const uncoveredTargets: string[] = [];
+  let composeExamination: { examined: string[]; unexamined: string[]; by_extension: Record<string, number> } | null = null;
   // Counted alongside so the RATIO is recoverable. Reporting only the uncovered list makes an
   // empty list ambiguous: it reads the same whether every target had a test or no target was
   // ever examined — the silence-is-success confusion this codebase keeps paying for.
@@ -4492,6 +4493,11 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
       }
     }
   } catch { /* advisory only */ }
+
+  try {
+    const { stagedExaminationSplit } = await import("./vessel-mitosis-evaluate.js");
+    composeExamination = stagedExaminationSplit(targetFiles);
+  } catch { /* advisory only — null stays null, which reads as UNMEASURED downstream */ }
 
 // NO ABORT ON A DIRTY BASELINE — that is what baseline-delta blame is FOR.
 //
@@ -6205,6 +6211,12 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
           // "are landed changes known to do something?". Every gate above reads the diff; only
           // a test runs it, and a FAVORABLE verdict on an uncovered target means the change was
           // reviewed, never executed. Persisted here so that question stops being unanswerable.
+          // Rung 2: of the files this change stages, how many can any checker READ?
+          // Computed by the gate itself (stagedExaminationSplit) rather than from a list
+          // maintained here, so the two cannot drift apart.
+          examination_unexamined: composeExamination?.unexamined.length ?? null,
+          examination_examined: composeExamination?.examined.length ?? null,
+          examination_by_extension: composeExamination?.by_extension ?? null,
           effect_targets_examined: coverageTargetsExamined,
           effect_targets_uncovered: uncoveredTargets.length,
           effect_uncovered_targets: uncoveredTargets.slice(0, 20),

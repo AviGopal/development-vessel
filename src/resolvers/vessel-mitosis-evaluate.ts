@@ -101,12 +101,50 @@ interface StaticCheckResult {
   timed_out: boolean;
 }
 
+/**
+ * Extensions this gate can actually READ.
+ *
+ * `.ts`/`.tsx` are covered because every check script here is a TypeScript tool — typecheck,
+ * lint, bun test. `.surql` is covered by surqlBreakingFieldRefusal. Everything else a compose
+ * can stage — .json, .yaml, .md, .sh, .sql — passes through with NOTHING having opened it,
+ * and `static_checks_pass` is returned all the same.
+ *
+ * Exported because rung 2 of operational_state asks whether anything lands unexamined, and
+ * that question must be answered by the gate itself rather than by a list maintained
+ * elsewhere that can drift out of agreement with it.
+ */
+export const CHECKED_EXTENSIONS: ReadonlySet<string> = new Set([".ts", ".tsx", ".surql"]);
+
+/** Split staged paths into what this gate can read and what it cannot. */
+export function stagedExaminationSplit(stagedFiles: string[]): {
+  examined: string[];
+  unexamined: string[];
+  by_extension: Record<string, number>;
+} {
+  const examined: string[] = [];
+  const unexamined: string[] = [];
+  const by_extension: Record<string, number> = {};
+  for (const f of stagedFiles) {
+    const m = /(\.[A-Za-z0-9]+)$/.exec(f);
+    const ext = (m?.[1] ?? "(none)").toLowerCase();
+    by_extension[ext] = (by_extension[ext] ?? 0) + 1;
+    if (CHECKED_EXTENSIONS.has(ext)) examined.push(f);
+    else unexamined.push(f);
+  }
+  return { examined, unexamined, by_extension };
+}
+
 export interface StaticEvalResult {
   attempted: boolean;
   ok: boolean;
   reason: string;
   checks: StaticCheckResult[];
   duration_ms: number;
+  /**
+   * Which staged files this gate could actually read. Recorded so that
+   * `static_checks_pass` can never again mean "passed" for a file nothing opened.
+   */
+  examination?: { examined: number; unexamined: number; unexamined_files: string[]; by_extension: Record<string, number> };
   /**
    * V40: set when a static check was SIGTERM-killed by the timeout (no
    * completed verdict). This is INCONCLUSIVE, not a failure — the caller
@@ -1231,12 +1269,29 @@ export async function staticEvaluate(
       );
     }
   }
+  const examination = stagedFiles ? stagedExaminationSplit(stagedFiles) : null;
+  if (examination && examination.unexamined.length > 0) {
+    console.error(
+      `[mitosis-evaluate] NOTE: ${examination.unexamined.length} staged file(s) have no checker able to read them ` +
+        `(${examination.unexamined.slice(0, 5).join(", ")}) — static_checks_pass covers the rest, not these`,
+    );
+  }
   return {
     attempted: true,
     ok: true,
     reason: "static_checks_pass",
     checks: completed,
     duration_ms: Date.now() - start,
+    ...(examination
+      ? {
+          examination: {
+            examined: examination.examined.length,
+            unexamined: examination.unexamined.length,
+            unexamined_files: examination.unexamined.slice(0, 20),
+            by_extension: examination.by_extension,
+          },
+        }
+      : {}),
   };
 }
 

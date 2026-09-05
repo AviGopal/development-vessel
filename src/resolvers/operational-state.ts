@@ -89,6 +89,10 @@ export function deriveRungs(obs: {
   effectComposes: number | null;
   effectTargetsExamined: number | null;
   effectTargetsUncovered: number | null;
+  /** Compose runs recording which staged files any checker could read, and the counts. */
+  examComposes: number | null;
+  examExamined: number | null;
+  examUnexamined: number | null;
   armsSelectable: number | null;
   gradedPerDay: number | null;
 }): Rung[] {
@@ -116,16 +120,49 @@ export function deriveRungs(obs: {
   // Rungs 2 and 3 are deliberately reported as unmeasured rather than assumed. Counting gate
   // activity would measure how often gates RAN, which is not the same claim and would read as
   // a passing verdict for a question nothing actually answered.
-  rungs.push({
-    rung: 2,
-    question: "Does anything land unexamined — is there a checker that actually reads each staged artifact type?",
-    measurable: false,
-    holds: null,
-    observed: {},
-    unmeasured_reason:
-      "no producer enumerates staged artifact types against the checkers able to parse them; " +
-      "gate activity counts would measure how often gates ran, not whether every artifact was read",
-  });
+  // Every check script in the static gate is a TypeScript tool, so a staged .json, .yaml, .md
+  // or .sh passes with NOTHING having opened it while static_checks_pass is returned all the
+  // same. The gate now reports which staged files it could actually read (CHECKED_EXTENSIONS
+  // lives in the gate, not here, so the two cannot drift), and that is what this reads.
+  rungs.push(
+    obs.examComposes === null || obs.examComposes === 0 || obs.examExamined === null
+      ? {
+          rung: 2,
+          question: "Does anything land unexamined — is there a checker that actually reads each staged artifact type?",
+          measurable: false,
+          holds: null,
+          observed: { composes_reporting_examination: obs.examComposes ?? 0 },
+          unmeasured_reason:
+            "no compose trace carries the examination split yet — feature_compose records it " +
+            "from this build onward. Absence of the field is absence of measurement, NOT " +
+            "evidence that everything staged was read.",
+        }
+      : (() => {
+          const examined = obs.examExamined ?? 0;
+          const unexamined = obs.examUnexamined ?? 0;
+          const total = examined + unexamined;
+          const frac = total > 0 ? examined / total : null;
+          return {
+            rung: 2,
+            question: "Does anything land unexamined — is there a checker that actually reads each staged artifact type?",
+            measurable: frac !== null,
+            // Nothing should land unread. This is stricter than the other rungs on purpose:
+            // an unexamined artifact is not a weak signal, it is no signal, and the session
+            // that produced this rung landed a database-breaking migration through exactly
+            // that hole.
+            holds: frac !== null ? unexamined === 0 : null,
+            observed: {
+              examined_fraction: frac === null ? null : Number(frac.toFixed(4)),
+              staged_examined: examined,
+              staged_unexamined: unexamined,
+              composes_reporting_examination: obs.examComposes,
+            },
+            ...(frac === null
+              ? { unmeasured_reason: "composes reported the split but staged zero files" }
+              : {}),
+          };
+        })(),
+  );
 
   // Every gate in the compose path READS the diff; only a test RUNS it. A FAVORABLE verdict on
   // a target with no test file means the change was reviewed, never executed — the condition
@@ -452,6 +489,11 @@ export async function resolveOperationalState(
     count("SELECT math::sum(metadata.effect_targets_examined) AS count FROM execution WHERE metadata.effect_targets_examined != NONE GROUP ALL;"),
     count("SELECT math::sum(metadata.effect_targets_uncovered) AS count FROM execution WHERE metadata.effect_targets_examined != NONE GROUP ALL;"),
   ]);
+  const [examComposes, examExamined, examUnexamined] = await Promise.all([
+    count("SELECT count() FROM execution WHERE metadata.examination_examined != NONE GROUP ALL;"),
+    count("SELECT math::sum(metadata.examination_examined) AS count FROM execution WHERE metadata.examination_examined != NONE GROUP ALL;"),
+    count("SELECT math::sum(metadata.examination_unexamined) AS count FROM execution WHERE metadata.examination_examined != NONE GROUP ALL;"),
+  ]);
 
   const rungs = deriveRungs({
     executionsRecent,
@@ -468,6 +510,9 @@ export async function resolveOperationalState(
     effectComposes,
     effectTargetsExamined: effectExamined,
     effectTargetsUncovered: effectUncovered,
+    examComposes,
+    examExamined,
+    examUnexamined,
     armsSelectable,
     gradedPerDay,
   });

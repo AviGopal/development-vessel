@@ -29,6 +29,9 @@ const obs = (over: Partial<Parameters<typeof deriveRungs>[0]> = {}) => ({
   effectComposes: 12,
   effectTargetsExamined: 20,
   effectTargetsUncovered: 4,
+  examComposes: 6,
+  examExamined: 10,
+  examUnexamined: 0,
   armsSelectable: 100,
   gradedPerDay: 300,
   ...over,
@@ -65,6 +68,9 @@ describe("deriveRungs — measured, and honest about what it could not measure",
       effectComposes: null,
       effectTargetsExamined: null,
       effectTargetsUncovered: null,
+      examComposes: null,
+      examExamined: null,
+      examUnexamined: null,
       armsSelectable: null,
       gradedPerDay: null,
     });
@@ -88,13 +94,25 @@ describe("deriveRungs — measured, and honest about what it could not measure",
     expect(zeroed.holds).toBe(false);
   });
 
-  it("reports rung 2 as unmeasured WITH a reason, rather than assuming it", () => {
-    // Counting gate activity would measure how often gates ran, which is a different claim and
-    // would read as a passing verdict for a question nothing answered.
-    const rung = deriveRungs(obs()).find((x) => x.rung === 2)!;
-    expect(rung.measurable).toBe(false);
-    expect(rung.holds).toBeNull();
-    expect(rung.unmeasured_reason!.length).toBeGreaterThan(20);
+  // ---- rung 2: every check script is a TypeScript tool ----
+
+  it("holds rung 2 only when NOTHING staged went unread", () => {
+    // Stricter than the other rungs on purpose: an unexamined artifact is not a weak signal,
+    // it is no signal. A database-breaking migration landed through exactly this hole.
+    const ok = deriveRungs(obs({ examComposes: 6, examExamined: 10, examUnexamined: 0 })).find((x) => x.rung === 2)!;
+    expect(ok.holds).toBe(true);
+    const bad = deriveRungs(obs({ examComposes: 6, examExamined: 10, examUnexamined: 1 })).find((x) => x.rung === 2)!;
+    expect(bad.holds).toBe(false);
+    expect(bad.observed["staged_unexamined"]).toBe(1);
+  });
+
+  it("treats NO examination data as unmeasured, never as everything-was-read", () => {
+    for (const v of [null, 0]) {
+      const rung = deriveRungs(obs({ examComposes: v })).find((x) => x.rung === 2)!;
+      expect(rung.measurable).toBe(false);
+      expect(rung.holds).toBeNull();
+      expect(rung.unmeasured_reason).toContain("absence of measurement");
+    }
   });
 
   // ---- rung 3: every gate READS the diff; only a test RUNS it ----

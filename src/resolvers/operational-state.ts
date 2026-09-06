@@ -28,6 +28,38 @@ const SURREALDB_PASSWORD =
 const SURREALDB_NS = process.env["SURREALDB_NAMESPACE"] ?? "activity-system";
 const SURREALDB_DB = process.env["SURREALDB_DATABASE"] ?? "learning_loop";
 
+/**
+ * Competition-set sizes: how many selectable arms share each output-shape signature.
+ * One grouped query (measured ~464ms) rather than scanning every arm. Returns null on failure
+ * so rung 7 reports UNMEASURED rather than inventing a partition.
+ */
+async function familySizes(): Promise<number[] | null> {
+  try {
+    const res = await fetch(`${SURREALDB_URL}/sql`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+        "surreal-ns": SURREALDB_NS,
+        "surreal-db": SURREALDB_DB,
+        Authorization: "Basic " + btoa(`${SURREALDB_USERNAME}:${SURREALDB_PASSWORD}`),
+      },
+      body:
+        "SELECT output_shapes, count() FROM activity " +
+        "WHERE retired = false OR retired IS NONE GROUP BY output_shapes;",
+      signal: AbortSignal.timeout(6_000),
+    });
+    if (!res.ok) return null;
+    const data = (await res.json()) as Array<{ status?: string; result?: unknown }>;
+    if (data[0]?.status !== "OK" || !Array.isArray(data[0].result)) return null;
+    return (data[0].result as Array<Record<string, unknown>>)
+      .map((r) => (typeof r["count"] === "number" ? (r["count"] as number) : 0))
+      .filter((n) => n > 0);
+  } catch {
+    return null;
+  }
+}
+
 /** Returns null on any failure — the caller must treat null as UNMEASURED, never as zero. */
 async function count(sql: string): Promise<number | null> {
   try {
@@ -58,6 +90,53 @@ async function count(sql: string): Promise<number | null> {
   } catch {
     return null;
   }
+}
+
+
+/**
+ * Partition arms by whether evidence about them can change a decision.
+ *
+ * Thompson only has a choice to make where two or more arms produce the shape the walk needs.
+ * That makes "graded executions per arm per day" the wrong denominator over the whole fleet,
+ * for two opposite reasons measured on the live store:
+ *
+ *   SINGLETONS (529 arms, 1 competitor)      evidence buys NOTHING — the arm is selected
+ *                                            regardless of its posterior. They hold ~500
+ *                                            graded outcomes, about a sixth of all evidence,
+ *                                            purchasing no discrimination.
+ *   INTRACTABLE (1,696 arms in 19 families    unreachable at any plausible rate. Separating
+ *   of >20)                                  583 patch_proposal arms needs order 58,000
+ *                                            observations; there are 14. Spending evidence
+ *                                            here is not a shortfall, it is a category error.
+ *   DISCRIMINABLE (2-20 competitors)         the band where an observation converts into a
+ *                                            better decision.
+ *
+ * Reporting a single fleet-wide rate hides all of that behind one number, which is the same
+ * defect rung 6 carried when it divided by ticks that structurally cannot be graded.
+ *
+ * PURE over the family sizes, so the partition is testable without a store.
+ */
+export function competitionBuckets(familySizes: number[]): {
+  singleton_arms: number;
+  discriminable_arms: number;
+  intractable_arms: number;
+  discriminable_families: number;
+  intractable_families: number;
+} {
+  let singleton = 0, discriminable = 0, intractable = 0, dFam = 0, iFam = 0;
+  for (const n of familySizes) {
+    if (!Number.isFinite(n) || n <= 0) continue;
+    if (n === 1) singleton += 1;
+    else if (n <= 20) { discriminable += n; dFam += 1; }
+    else { intractable += n; iFam += 1; }
+  }
+  return {
+    singleton_arms: singleton,
+    discriminable_arms: discriminable,
+    intractable_arms: intractable,
+    discriminable_families: dFam,
+    intractable_families: iFam,
+  };
 }
 
 export interface Rung {
@@ -99,6 +178,8 @@ export function deriveRungs(obs: {
   examUnexamined: number | null;
   armsSelectable: number | null;
   gradedPerDay: number | null;
+  /** Competition-set sizes: how many arms produce each distinct output-shape signature. */
+  familySizes: number[] | null;
 }): Rung[] {
   const rungs: Rung[] = [];
 
@@ -305,10 +386,15 @@ export function deriveRungs(obs: {
 
   // Posterior movement is a RATE requirement, not a bank: evidence decays, so what matters is
   // graded executions per arm per day, not the total ever accumulated.
+  //
+  // MEASURED AGAINST THE POPULATION WHERE EVIDENCE CAN CHANGE A DECISION. A fleet-wide rate
+  // treats a singleton (no competitor, posterior irrelevant) and a 583-way family (unreachable
+  // at any rate) as equally in need of the same evidence. Neither is. The buckets travel with
+  // the verdict so the correction cannot hide what it excluded.
+  const buckets = obs.familySizes ? competitionBuckets(obs.familySizes) : null;
+  const denom = buckets ? buckets.discriminable_arms : obs.armsSelectable;
   const perArmPerDay =
-    obs.gradedPerDay !== null && obs.armsSelectable && obs.armsSelectable > 0
-      ? obs.gradedPerDay / obs.armsSelectable
-      : null;
+    obs.gradedPerDay !== null && denom && denom > 0 ? obs.gradedPerDay / denom : null;
   rungs.push(
     perArmPerDay === null
       ? {
@@ -317,7 +403,7 @@ export function deriveRungs(obs: {
           measurable: false,
           holds: null,
           observed: {},
-          unmeasured_reason: "graded-per-day or selectable-arm count unavailable",
+          unmeasured_reason: "graded-per-day or the competition-set partition was unavailable",
         }
       : {
           rung: 7,
@@ -325,10 +411,20 @@ export function deriveRungs(obs: {
           measurable: true,
           holds: perArmPerDay >= 2.31,
           observed: {
-            graded_per_arm_per_day: Number(perArmPerDay.toFixed(4)),
+            graded_per_discriminable_arm_per_day: Number(perArmPerDay.toFixed(4)),
             required: 2.31,
             graded_per_day: obs.gradedPerDay,
-            selectable_arms: obs.armsSelectable,
+            discriminable_arms: buckets?.discriminable_arms ?? null,
+            // Reported, never silently dropped: 1,696 arms unreachable is the finding, not
+            // an inconvenience to divide away.
+            intractable_arms: buckets?.intractable_arms ?? null,
+            intractable_families: buckets?.intractable_families ?? null,
+            singleton_arms_no_competitor: buckets?.singleton_arms ?? null,
+            arms_selectable_total: obs.armsSelectable,
+            graded_per_arm_per_day_fleetwide:
+              obs.gradedPerDay !== null && obs.armsSelectable
+                ? Number((obs.gradedPerDay / obs.armsSelectable).toFixed(4))
+                : null,
           },
         },
   );
@@ -570,6 +666,7 @@ export async function resolveOperationalState(
       count("SELECT math::sum(metadata.examination_examined) AS count FROM execution WHERE metadata.examination_examined != NONE GROUP ALL;"),
       count("SELECT math::sum(metadata.examination_unexamined) AS count FROM execution WHERE metadata.examination_examined != NONE GROUP ALL;"),
     ]);
+  const fams = pointer["skip_arm_split"] === true ? null : await familySizes();
 
   // Compose the existing producers rather than re-deriving them (law 3).
   let gateRulesTotal: number | null = null;
@@ -630,6 +727,7 @@ export async function resolveOperationalState(
     examUnexamined,
     armsSelectable,
     gradedPerDay,
+    familySizes: fams,
   });
 
   const prevRow = pointer["skip_history"] === true ? null : await previousSnapshot();

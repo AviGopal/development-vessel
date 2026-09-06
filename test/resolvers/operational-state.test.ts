@@ -1,5 +1,5 @@
 import { describe, it, expect } from "bun:test";
-import { deriveRungs, summariseLadder, ladderDelta, type Rung } from "../../src/resolvers/operational-state.js";
+import { deriveRungs, summariseLadder, ladderDelta, competitionBuckets, type Rung } from "../../src/resolvers/operational-state.js";
 
 /**
  * THE LADDER IS DERIVED, NOT DECLARED.
@@ -34,6 +34,7 @@ const obs = (over: Partial<Parameters<typeof deriveRungs>[0]> = {}) => ({
   examUnexamined: 0,
   armsSelectable: 100,
   gradedPerDay: 300,
+  familySizes: [3, 3, 3, 3, 3, 3, 3, 3, 3, 3],
   ...over,
 });
 
@@ -73,6 +74,7 @@ describe("deriveRungs — measured, and honest about what it could not measure",
       examUnexamined: null,
       armsSelectable: null,
       gradedPerDay: null,
+      familySizes: null,
     });
     for (const rung of r) {
       expect(rung.holds).not.toBe(true);
@@ -198,14 +200,45 @@ describe("deriveRungs — measured, and honest about what it could not measure",
     expect(rung.holds).toBeNull();
   });
 
+  it("partitions arms by whether evidence can change a decision", () => {
+    // Measured on the live store: 529 singletons (no competitor, posterior irrelevant),
+    // 1,696 arms in 19 families of >20 (separating 583 patch_proposal arms needs order 58,000
+    // observations; there are 14), and the 2-20 band where an observation actually converts
+    // into a better decision.
+    const b = competitionBuckets([1, 1, 1, 3, 5, 20, 21, 583]);
+    expect(b.singleton_arms).toBe(3);
+    expect(b.discriminable_arms).toBe(28); // 3 + 5 + 20
+    expect(b.intractable_arms).toBe(604); // 21 + 583
+    expect(b.intractable_families).toBe(2);
+  });
+
+  it("rung 7 divides by the DISCRIMINABLE population, and reports what it excluded", () => {
+    // A fleet-wide rate treats a singleton and a 583-way family as equally in need of the same
+    // evidence. Neither is. But the correction must not hide the exclusion: 1,696 unreachable
+    // arms is the finding, not an inconvenience to divide away.
+    const r = deriveRungs(obs({ gradedPerDay: 100, familySizes: [1, 1, 3, 4, 60] })).find((x) => x.rung === 7)!;
+    expect(r.observed["discriminable_arms"]).toBe(7); // 3 + 4
+    expect(r.observed["intractable_arms"]).toBe(60);
+    expect(r.observed["singleton_arms_no_competitor"]).toBe(2);
+    expect(r.observed["graded_per_discriminable_arm_per_day"]).toBeCloseTo(100 / 7, 3);
+    // The fleet-wide number stays visible beside it, so the change of denominator is auditable.
+    expect(r.observed["graded_per_arm_per_day_fleetwide"]).toBeCloseTo(1, 3);
+  });
+
+  it("reports rung 7 UNMEASURED when the partition is unavailable, not fleetwide-by-default", () => {
+    const r = deriveRungs(obs({ familySizes: null, armsSelectable: null })).find((x) => x.rung === 7)!;
+    expect(r.measurable).toBe(false);
+    expect(r.holds).toBeNull();
+  });
+
   it("scores rung 7 as a RATE per arm per day, not a total", () => {
     // Evidence decays, so a large accumulated total says nothing; the same graded volume
     // spread over more arms is a weaker position, and the arithmetic must show that.
-    const few = deriveRungs(obs({ gradedPerDay: 300, armsSelectable: 100 })).find((x) => x.rung === 7)!;
-    const many = deriveRungs(obs({ gradedPerDay: 300, armsSelectable: 3000 })).find((x) => x.rung === 7)!;
+    const few = deriveRungs(obs({ gradedPerDay: 300, familySizes: [10, 10] })).find((x) => x.rung === 7)!;
+    const many = deriveRungs(obs({ gradedPerDay: 300, familySizes: Array(150).fill(20) })).find((x) => x.rung === 7)!;
     expect(few.holds).toBe(true);
     expect(many.holds).toBe(false);
-    expect(many.observed["graded_per_arm_per_day"]).toBeCloseTo(0.1);
+    expect(many.observed["graded_per_discriminable_arm_per_day"]).toBeCloseTo(0.1);
   });
 
   it("fails a gate rung when any refusal rule regressed", () => {

@@ -473,7 +473,7 @@ export async function resolveRhythmConductorTick(
                 detected_at: new Date().toISOString(),
                 status: "open",
                 structural_break: structuralBreak,
-                route: structuralBreak === "registry_unmappable" || structuralBreak === "registry_empty" ? "registry_unmappable" : "dispatchable",
+                route: structuralBreak === "registry_unmappable" || structuralBreak === "registry_empty" ? "registry_unmappable" : structuralBreak === "someCond" ? "someValue" : "dispatchable",
                 classification_metadata: {
                   kind: structuralBreak,
                   considered: rhythms.length,

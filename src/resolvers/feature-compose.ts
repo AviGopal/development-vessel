@@ -2906,7 +2906,7 @@ function computeEditSpan(fileContent: string | null | undefined, anchor: string,
   if (typeof fileContent !== "string" || !anchor || !fileContent.includes(anchor)) return undefined;
   const idx = fileContent.indexOf(anchor);
   const start_line = fileContent.slice(0, idx).split("\n").length;
-  const end_line = start_line + (replacement.match(/\n/g)?.length ?? 0);
+  const end_line = start_line + (replacement ? (replacement.match(/\n/g)?.length ?? 0) : 0);
   return { start_line, end_line };
 }
 

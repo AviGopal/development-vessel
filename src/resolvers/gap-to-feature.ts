@@ -1238,10 +1238,14 @@ function pickMostLandable(gaps: Record<string, unknown>[]): Record<string, unkno
     try {
       const meta = (chosen.g.classification_metadata ?? {}) as Record<string, unknown>;
       const literal = typeof meta["hardcoded_url"] === "string" ? (meta["hardcoded_url"] as string) : "";
-      if (!literal) return; // only Class-1 predicates are measurable this cheaply
       const editSite = typeof meta["edit_site"] === "string" ? (meta["edit_site"] as string) : "";
-      const { measureClass1, stampBaseline } = await import("./causal-adjudication.js");
+      const { measureClass1, stampBaseline, stampEnvironmentBaseline } = await import("./causal-adjudication.js");
+      const actionIdEnv = `pick-${String(chosen.g.id ?? "")}-${new Date().toISOString().slice(0, 16)}`;
+      // EVERY pick gets an environment before-reading, not just the ~1% carrying a predicate.
+      const envOutcome = await stampEnvironmentBaseline(String(chosen.g.id ?? ""), actionIdEnv);
+      console.log(`[gap-to-feature] env-baseline ${envOutcome} for ${String(chosen.g.id ?? "")}`);
       const root = process.env["REPO_ROOT"] ?? process.env["WORKSPACE_ROOT"] ?? "/workspace/git/super-repo";
+      if (!literal) return; // predicate baseline needs a Class-1 literal; the env one is already stamped
       const obs = await measureClass1(root, editSite, literal);
       const actionId = `pick-${String(chosen.g.id ?? "")}-${new Date().toISOString().slice(0, 13)}`;
       const outcome = await stampBaseline(String(chosen.g.id ?? ""), actionId, obs, "class1");

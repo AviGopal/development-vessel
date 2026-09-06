@@ -235,3 +235,64 @@ export async function readBaseline(gapId: string, actionId: string): Promise<Obs
   if (!p || p["measurable"] !== true) return null;
   return { present: p["baseline_present"] === true };
 }
+
+
+// ───────────────────── THE ENVIRONMENT BASELINE: EVERY PICK IS AN EXPERIMENT ─────────────────────
+
+/**
+ * Stamp a before-reading of the ENVIRONMENT at decision time, for every pick.
+ *
+ * The predicate baseline above only fires for gaps that already carry a falsifier — 26 of
+ * 2,376 gaps, about 1%. A mechanism that triggers once in a hundred picks cannot support a
+ * claim about the system's behaviour; it waits on a coincidence and calls the wait evidence.
+ *
+ * The environment is measurable for EVERY pick, so every pick becomes an experiment. The
+ * before-reading is the most recent operationalStateSnapshot: the ladder already derives and
+ * persists itself, so referencing it costs one SELECT rather than re-deriving seven rungs. The
+ * after-reading is whatever snapshot exists once the action has had time to land.
+ *
+ * Referenced by ID rather than copied. A copy would freeze a duplicate of the ladder at pick
+ * time and start drifting from the series it was taken from; an id keeps one authority for
+ * what the system's condition was at that instant.
+ *
+ * Records `baseline_snapshot_id: null` when no snapshot exists yet. That is honest and it is
+ * also the state the ledger was in for its first hour, when every write was being rejected for
+ * a missing org_id and reporting nothing — an absent baseline must read as absent, never as
+ * "the environment was fine".
+ */
+export async function stampEnvironmentBaseline(
+  gapId: string,
+  actionId: string,
+): Promise<"stamped" | "already_stamped" | "failed"> {
+  if (!gapId || !actionId) return "failed";
+  const dup = await surreal(
+    `SELECT id FROM impulse WHERE shape = 'environmentBaseline' ` +
+      `AND pointer.action_id = '${actionId.replace(/'/g, "")}' LIMIT 1;`,
+  );
+  const dupRows = dup?.[0]?.result;
+  if (Array.isArray(dupRows) && dupRows.length > 0) return "already_stamped";
+
+  const snap = await surreal(
+    "SELECT id, created_at FROM impulse WHERE shape = 'operationalStateSnapshot' " +
+      "ORDER BY created_at DESC LIMIT 1;",
+  );
+  const snapRows = snap?.[0]?.result;
+  const latest =
+    Array.isArray(snapRows) && snapRows.length > 0
+      ? (snapRows[0] as Record<string, unknown>)
+      : null;
+
+  const pointer = {
+    gap_id: gapId,
+    action_id: actionId,
+    baseline_snapshot_id: latest ? String(latest["id"]) : null,
+    baseline_snapshot_at: latest ? String(latest["created_at"]) : null,
+    stamped_at: new Date().toISOString(),
+  };
+  const res = await surreal(
+    `INSERT INTO impulse { id: 'ebase-${Date.now()}-${Math.random().toString(36).slice(2, 8)}', ` +
+      `shape: 'environmentBaseline', org_id: 'organizations:substrate', ` +
+      `pointer: ${JSON.stringify(pointer)}, created_at: time::now(), budget: 0 };`,
+  );
+  return res ? "stamped" : "failed";
+}

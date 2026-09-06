@@ -6176,6 +6176,7 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
   //
   // Fire-and-forget and fully swallowed: a trace-store hiccup must never fail or slow a compose,
   // which is exactly why this is `void` with a catch and a short timeout.
+  let emittedExecutionId: string | null = null;
   try {
     const traceEndpoint = process.env["METABOB_ENDPOINT"] ?? "http://127.0.0.1:8080";
     const traceKey = process.env["METABOB_API_KEY"] ?? "";
@@ -6233,7 +6234,8 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
       const traceBody = (await traceRes.json().catch(() => null)) as { data?: { execution_id?: string } } | null; 
       const emittedId = traceBody?.data?.execution_id; 
       if (typeof emittedId === "string" && emittedId.length > 0) { 
-        console.log(`[feature-compose] trace emission persisted execution_id=${emittedId}`); 
+        console.log(`[feature-compose] trace emission persisted execution_id=${emittedId}`);
+        emittedExecutionId = emittedId; 
       } 
     }
   } catch { /* emission must never fail the compose */ }
@@ -6275,6 +6277,7 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
     shape: "featureComposeReport",
     body: {
       ok: effectiveVerdict === "FAVORABLE",
+      execution_id: emittedExecutionId,
       verdict: effectiveVerdict,
       failure_kind: effectiveVerdict === "FAVORABLE" ? null : (classifyEnvironmentFailure(cutovers) ? "environment" : "fix"),
       summary: plan.summary,

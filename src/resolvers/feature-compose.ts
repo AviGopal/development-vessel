@@ -2917,6 +2917,8 @@ function computeEditSpan(fileContent: string | null | undefined, anchor: string,
 /**
  * Was this completion cut off at the token limit?
  *
+ * This is a fix for the blind-edit-anchor-repair repeated failure class syntax_break: "compose for gap the-blind-edit-anchor-repair-is-never-told-which-statement-failed syntax_break: == install == == resolve == DRYRUN_EXIT=0 @types/bun@1.3.14 typescript@5.9.3 bun-types@1.3.14 @types/node@25.9.1 undici-types@7.24.6"
+ *
  * Task #12, 2026-08-10. llm-resolver-vessel returns `stop_reason` on BOTH
  * provider paths and even normalises the openai spelling (`finish_reason:
  * "length"`) to the anthropic one (`"max_tokens"`) — and EVERY consumer read it

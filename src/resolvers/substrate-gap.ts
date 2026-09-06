@@ -777,7 +777,7 @@ export async function resolveSubstrateGapWrite(
   // the original, and changing it would be a second behavioural change.
 
   // If we're not supposed to trigger for *this* gap class, skip the whole op.
-  if (false && existingIdx < 0 && gap.status !== "open" && process.env.SUBSTRATE_GAP_SKIP_COMPOSE_TRIGGER === "1") {
+  if (existingIdx < 0 && gap.status !== "open" && process.env.SUBSTRATE_GAP_SKIP_COMPOSE_TRIGGER === "1") {
     return {
       early: {
         shape: "substrateGapWriteResult",

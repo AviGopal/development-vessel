@@ -77,6 +77,37 @@ const FED_TRANSPORT_EGRESS = process.env.FED_TRANSPORT_EGRESS ?? "http://127.0.0
 // full contents + several coordinated edits), so generation runs longer. Raise it so the
 // system can author more-than-surgical changes. Tool (shell/fs) calls finish in seconds,
 // so the larger cap is harmless to them.
+
+
+export function classifyEnvironmentFailure(t: string): "env_timeout" | "env_unavailable" | "env_cutover_race" | "env_verify_timeout" | null {
+  if (/Timed out after \d+ms/i.test(t)) return "env_timeout";
+  if (/ECONNREFUSED|connect refused/i.test(t)) return "env_unavailable";
+  if (/restarted \(cutover\)|cutover race/i.test(t)) return "env_cutover_race";
+  if (/restart.*verify/i.test(t)) return "env_verify_timeout";
+  return null;
+}
+// In-container authoring targets the WRITABLE runtime (/vessels), like the
+// surgical patchers (patch_with_tools/apply_proposal_as_patch use vessels_root
+// "/vessels"). The host repo bind-mount is READ-ONLY from the container; a
+// host-side poller bridges /vessels changes to git. Paths are repos/<vessel>/...
+// in the plan and mapped to ${RUNTIME_ROOT}/<vessel>/... here.
+// RUNTIME_ROOT / SUPER_REPO_ROOT / REPO_ROOT now live in ../shape-vocabulary.ts (the
+// vocabulary loader scans them) and are imported above — one env derivation, not two.
+/**
+ * The super-repo push clone.
+ *
+ * Vessels that are git submodules each get a clone under MITOSIS_PUSH_CLONE_DIR.
+ * Vessels committed as plain directories in the super-repo have no clone of their
+ * own — they live here, under `repos/<name>`, governed by this clone's .git.
+ * A git command run inside the symlinked runtime path walks up and finds it, so
+ * the cutover commits and pushes from the right place without special-casing.
+ */
+
+// 90s was fine for SURGICAL plans (small output) but timed out the DECOMPOSE call for
+// MULTI-COMPONENT / architectural changes — the plan there is large (a new migration's
+// full contents + several coordinated edits), so generation runs longer. Raise it so the
+// system can author more-than-surgical changes. Tool (shell/fs) calls finish in seconds,
+// so the larger cap is harmless to them.
 const PER_CALL_TIMEOUT_MS = 600_000;
 export const FEATURE_COMPOSE_ENDPOINT = process.env.FEATURE_COMPOSE_ENDPOINT ?? "http://127.0.0.1:8100";
 

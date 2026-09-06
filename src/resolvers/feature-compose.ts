@@ -6182,7 +6182,7 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
     const landedVessels = (cutovers as Array<Record<string, unknown>>)
       .filter((c) => (c?.result as Record<string, unknown> | undefined)?.applied === true)
       .map((c) => String(c.vessel ?? ""));
-    void fetch(`${traceEndpoint}/v2/activities/executions`, {
+    const traceRes = await fetch(`${traceEndpoint}/v2/activities/executions`, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `ApiKey ${traceKey}` },
       body: JSON.stringify({

@@ -3404,7 +3404,7 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
       if (ob["stage"] === "plan" && ob["verdict"] === "REFUSED") {
         const refusalEndpoint = process.env["METABOB_ENDPOINT"] ?? "http://127.0.0.1:8080";
         const refusalKey = process.env["METABOB_API_KEY"] ?? "";
-        const refusalReason = String(ob["error"] ?? "").slice(0, 400);
+        const refusalReason = String(ob["error"] ?? "").slice(0, 800);
         const refusalRes = await fetch(`${refusalEndpoint}/v2/activities/executions`, {
           method: "POST",
           headers: { "Content-Type": "application/json", Authorization: `ApiKey ${refusalKey}` },

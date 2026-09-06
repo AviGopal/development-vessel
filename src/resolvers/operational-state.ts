@@ -139,9 +139,34 @@ export function competitionBuckets(familySizes: number[]): {
   };
 }
 
+/**
+ * Bumped whenever a rung's DEFINITION changes — its denominator, threshold, or what it counts.
+ *
+ * Rung 7 flipped broken -> holds the moment its denominator changed from all selectable arms
+ * to the discriminable population. Nothing in the substrate improved; the measurement did. The
+ * delta reported that transition in exactly the same shape as a real improvement, which is
+ * effect-as-cause in the one instrument built to prevent it — anything reading the ledger to
+ * judge whether an action helped would have credited an edit of mine as progress.
+ *
+ * Keyed by rung so a change to one does not invalidate comparisons of the others.
+ */
+export const RUNG_DEFINITION_VERSION: Readonly<Record<number, number>> = {
+  1: 1,
+  2: 1,
+  3: 1,
+  // 2 = graded over ELIGIBLE executions (arms the system grades at all), not over all
+  // executions including ticks that structurally cannot carry a goal verdict.
+  6: 2,
+  // 2 = graded per DISCRIMINABLE arm (2-20 competitors), not per selectable arm — singletons
+  // cannot use evidence and >20-arm families cannot be separated at any achievable rate.
+  7: 2,
+};
+
 export interface Rung {
   rung: number;
   question: string;
+  /** The definition this reading was produced under. A change here is not a change in the world. */
+  definition_version?: number;
   measurable: boolean;
   /** null whenever measurable is false — never a default that could read as a verdict. */
   holds: boolean | null;
@@ -429,7 +454,8 @@ export function deriveRungs(obs: {
         },
   );
 
-  return rungs;
+  // Stamp the definition each reading was produced under.
+  return rungs.map((r) => ({ ...r, definition_version: RUNG_DEFINITION_VERSION[r.rung] ?? 1 }));
 }
 
 
@@ -510,19 +536,36 @@ async function previousSnapshot(): Promise<Record<string, unknown> | null> {
 export function ladderDelta(
   current: Rung[],
   previous: Rung[] | null,
-): { comparable: boolean; changed: Array<{ rung: number; from: string; to: string }>; reason?: string } {
+): {
+  comparable: boolean;
+  changed: Array<{ rung: number; from: string; to: string }>;
+  redefined: Array<{ rung: number; from_version: number; to_version: number; from: string; to: string }>;
+  reason?: string;
+} {
   if (!previous || previous.length === 0) {
-    return { comparable: false, changed: [], reason: "no prior snapshot — this is the first derivation on record" };
+    return { comparable: false, changed: [], redefined: [], reason: "no prior snapshot — this is the first derivation on record" };
   }
   const verdict = (r: Rung) => (!r.measurable ? "unmeasured" : r.holds === true ? "holds" : "broken");
-  const prev = new Map(previous.map((r) => [r.rung, verdict(r)]));
+  const prev = new Map(previous.map((r) => [r.rung, r]));
   const changed: Array<{ rung: number; from: string; to: string }> = [];
+  const redefined: Array<{ rung: number; from_version: number; to_version: number; from: string; to: string }> = [];
   for (const r of current) {
     const before = prev.get(r.rung);
-    const after = verdict(r);
-    if (before !== undefined && before !== after) changed.push({ rung: r.rung, from: before, to: after });
+    if (!before) continue; // a newly added rung has no 'from'; inventing one would fabricate history
+    const bv = verdict(before);
+    const av = verdict(r);
+    if (bv === av) continue;
+    // A READING TAKEN UNDER A DIFFERENT DEFINITION IS NOT A CHANGE IN THE WORLD. Reported
+    // separately so nothing downstream can credit a redefinition as an improvement.
+    const beforeVer = before.definition_version ?? 1;
+    const afterVer = r.definition_version ?? 1;
+    if (beforeVer !== afterVer) {
+      redefined.push({ rung: r.rung, from_version: beforeVer, to_version: afterVer, from: bv, to: av });
+    } else {
+      changed.push({ rung: r.rung, from: bv, to: av });
+    }
   }
-  return { comparable: true, changed };
+  return { comparable: true, changed, redefined };
 }
 
 export interface LadderSummary {

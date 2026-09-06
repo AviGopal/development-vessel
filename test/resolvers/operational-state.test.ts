@@ -290,6 +290,34 @@ describe("ladderDelta — an action is only associable with a change if both are
     expect(stable.changed).toEqual([]);
   });
 
+  it("does NOT call a redefinition a change in the world", () => {
+    // THE FAILURE THIS EXISTS FOR. Rung 7 flipped broken -> holds the moment its denominator
+    // changed from all selectable arms to the discriminable population. Nothing in the
+    // substrate improved; the measurement did. Reported as a change, it would credit an edit
+    // as progress — effect-as-cause in the one instrument built to prevent it.
+    const before: Rung = { rung: 7, question: "q", measurable: true, holds: false, observed: {}, definition_version: 1 };
+    const after: Rung = { rung: 7, question: "q", measurable: true, holds: true, observed: {}, definition_version: 2 };
+    const d = ladderDelta([after], [before]);
+    expect(d.changed).toEqual([]);
+    expect(d.redefined).toEqual([{ rung: 7, from_version: 1, to_version: 2, from: "broken", to: "holds" }]);
+  });
+
+  it("still reports a real move when the definition held constant", () => {
+    const before: Rung = { rung: 3, question: "q", measurable: true, holds: true, observed: {}, definition_version: 1 };
+    const after: Rung = { rung: 3, question: "q", measurable: true, holds: false, observed: {}, definition_version: 1 };
+    const d = ladderDelta([after], [before]);
+    expect(d.changed).toEqual([{ rung: 3, from: "holds", to: "broken" }]);
+    expect(d.redefined).toEqual([]);
+  });
+
+  it("treats a missing version as 1, so old snapshots compare cleanly", () => {
+    // Snapshots written before versioning carry no field. Defaulting to 1 keeps them
+    // comparable instead of marking every historical rung as redefined.
+    const before: Rung = { rung: 1, question: "q", measurable: true, holds: true, observed: {} };
+    const after: Rung = { rung: 1, question: "q", measurable: true, holds: false, observed: {}, definition_version: 1 };
+    expect(ladderDelta([after], [before]).changed).toEqual([{ rung: 1, from: "holds", to: "broken" }]);
+  });
+
   it("reports a rung that moved, in both directions", () => {
     const broke = ladderDelta([r(3, true, false)], [r(3, true, true)]);
     expect(broke.changed).toEqual([{ rung: 3, from: "holds", to: "broken" }]);

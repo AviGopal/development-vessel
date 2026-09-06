@@ -272,10 +272,40 @@ export async function stampEnvironmentBaseline(
   const dupRows = dup?.[0]?.result;
   if (Array.isArray(dupRows) && dupRows.length > 0) return "already_stamped";
 
-  const snap = await surreal(
+  let snap = await surreal(
     "SELECT id, created_at FROM impulse WHERE shape = 'operationalStateSnapshot' " +
       "ORDER BY created_at DESC LIMIT 1;",
   );
+
+  // SEED THE SERIES IF IT DOES NOT EXIST YET.
+  //
+  // The baseline references the newest snapshot, and operational_state only persists when
+  // something invokes it. Nothing does on a cadence, so the series stayed empty and every
+  // baseline pointed at null — honest, and useless. A reference to a series that is never
+  // written can never become a before/after.
+  //
+  // Derived CHEAPLY on purpose: skip_gate_probe, skip_drift_scan and skip_arm_split are all
+  // set, so this costs a handful of counts rather than re-running the gate corpus and a
+  // per-arm group-by over 36k executions on the selection path. The rungs those flags cover
+  // report UNMEASURED, which is the correct reading — a cheap snapshot must not claim to have
+  // measured what it declined to look at.
+  //
+  // Seeding only when the series is EMPTY, not on every pick: picks run every few minutes and
+  // a snapshot per pick would bury the signal in its own noise. The scheduled derivation, once
+  // one exists, is what should keep the series current.
+  const snapRowsPre = snap?.[0]?.result;
+  if (!Array.isArray(snapRowsPre) || snapRowsPre.length === 0) {
+    try {
+      const { resolveOperationalState } = await import("./operational-state.js");
+      await resolveOperationalState({ skip_gate_probe: true, skip_drift_scan: true, skip_arm_split: true });
+      snap = await surreal(
+        "SELECT id, created_at FROM impulse WHERE shape = 'operationalStateSnapshot' " +
+          "ORDER BY created_at DESC LIMIT 1;",
+      );
+    } catch {
+      /* leave snap as-is; a null baseline_snapshot_id is honest and the adjudicator handles it */
+    }
+  }
   const snapRows = snap?.[0]?.result;
   const latest =
     Array.isArray(snapRows) && snapRows.length > 0

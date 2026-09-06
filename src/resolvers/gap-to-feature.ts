@@ -1220,6 +1220,40 @@ function pickMostLandable(gaps: Record<string, unknown>[]): Record<string, unkno
     distinct_targets_top20: new Set(ranked.slice(0, 20).map((r) => targetOf(r.g))).size,
     runner_up: ranked[1] ? { gap_id: String(ranked[1].g.id ?? ""), target: targetOf(ranked[1].g), score: Number(ranked[1].s.toFixed(4)) } : null,
   })}`);
+
+  // STAMP THE COUNTERFACTUAL AT THE MOMENT OF THE DECISION.
+  //
+  // The log line above already records WHY this gap was chosen (law 12). What it does not
+  // record is the value of the gap's own falsifier BEFORE anything acts on it — and without
+  // that, a later re-measurement can only say "the defect is absent now", which is
+  // indistinguishable from a predicate that was inert all along. That indistinguishability is
+  // how a false close is manufactured, and it looks exactly like success.
+  //
+  // Fire-and-forget on purpose: selection must not block on I/O, and losing a baseline costs a
+  // later verdict of "inconclusive" — honest, and far cheaper than delaying every pick.
+  //
+  // Stamped to its own impulse rather than back onto the gap, because substrateGap_write
+  // REPLACES rather than merges and a partial write erases live fields.
+  void (async () => {
+    try {
+      const meta = (chosen.g.classification_metadata ?? {}) as Record<string, unknown>;
+      const literal = typeof meta["hardcoded_url"] === "string" ? (meta["hardcoded_url"] as string) : "";
+      if (!literal) return; // only Class-1 predicates are measurable this cheaply
+      const editSite = typeof meta["edit_site"] === "string" ? (meta["edit_site"] as string) : "";
+      const { measureClass1, stampBaseline } = await import("./causal-adjudication.js");
+      const root = process.env["REPO_ROOT"] ?? process.env["WORKSPACE_ROOT"] ?? "/workspace/git/super-repo";
+      const obs = await measureClass1(root, editSite, literal);
+      const actionId = `pick-${String(chosen.g.id ?? "")}-${new Date().toISOString().slice(0, 13)}`;
+      const outcome = await stampBaseline(String(chosen.g.id ?? ""), actionId, obs, "class1");
+      console.log(
+        `[gap-to-feature] baseline ${outcome} for ${String(chosen.g.id ?? "")} ` +
+          `(present=${obs === null ? "unmeasurable" : obs.present})`,
+      );
+    } catch {
+      /* never let counterfactual bookkeeping break selection */
+    }
+  })();
+
   return chosen.g;
 }
 

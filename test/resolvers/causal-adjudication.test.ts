@@ -137,3 +137,40 @@ describe("adjudicateAll — horizons are plural because effects have durations",
     expect(r.all_pending).toBe(false);
   });
 });
+
+import { measureClass1 } from "../../src/resolvers/causal-adjudication.js";
+import { mkdtemp, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+/**
+ * The measurement half. A Class-1 predicate says a literal must go ABSENT, so the baseline is
+ * simply whether it is there — but the unreadable case has to stay distinct from the absent
+ * case, or "I could not look" silently becomes "it is gone", which is the false close again.
+ */
+describe("measureClass1 — present, absent, and unreadable are three states", () => {
+  it("reports present when the literal is in the file", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "c1-"));
+    await writeFile(join(dir, "f.ts"), 'const x = "http://127.0.0.1:8080/impulses";\n');
+    expect(await measureClass1(dir, "f.ts", "http://127.0.0.1:8080/impulses")).toEqual({ present: true });
+  });
+
+  it("reports absent when the file exists and the literal does not", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "c1-"));
+    await writeFile(join(dir, "f.ts"), "const x = 1;\n");
+    expect(await measureClass1(dir, "f.ts", "http://127.0.0.1:8080/impulses")).toEqual({ present: false });
+  });
+
+  it("returns null — NOT absent — when the file cannot be read", async () => {
+    // The distinction that matters. Returning {present:false} here would let an unreadable
+    // path adjudicate as a successful removal.
+    expect(await measureClass1("/nonexistent-root", "f.ts", "literal")).toBeNull();
+  });
+
+  it("returns null for an empty edit site or empty literal rather than guessing", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "c1-"));
+    await writeFile(join(dir, "f.ts"), "x\n");
+    expect(await measureClass1(dir, "", "literal")).toBeNull();
+    expect(await measureClass1(dir, "f.ts", "")).toBeNull();
+  });
+});

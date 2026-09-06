@@ -125,3 +125,113 @@ export function adjudicateAll(
     all_pending: per_horizon.length > 0 && per_horizon.every((a) => a.verdict === "pending"),
   };
 }
+
+
+// ─────────────────────── STAMPING THE COUNTERFACTUAL AT DECISION TIME ───────────────────────
+
+const SURREALDB_URL = process.env["SURREALDB_URL"] ?? "http://127.0.0.1:8000";
+const SURREALDB_USERNAME = process.env["SURREALDB_USERNAME"] ?? "root";
+const SURREALDB_PASSWORD =
+  process.env["SURREALDB_PASSWORD"] ?? process.env["SURREAL_PASS"] ?? "root";
+const SURREALDB_NS = process.env["SURREALDB_NAMESPACE"] ?? "activity-system";
+const SURREALDB_DB = process.env["SURREALDB_DATABASE"] ?? "learning_loop";
+
+async function surreal(body: string): Promise<Array<{ status?: string; result?: unknown }> | null> {
+  try {
+    const res = await fetch(`${SURREALDB_URL}/sql`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+        "surreal-ns": SURREALDB_NS,
+        "surreal-db": SURREALDB_DB,
+        Authorization: "Basic " + btoa(`${SURREALDB_USERNAME}:${SURREALDB_PASSWORD}`),
+      },
+      body,
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!res.ok) return null;
+    return (await res.json()) as Array<{ status?: string; result?: unknown }>;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Measure a Class-1 predicate: is the literal still present at its edit site?
+ *
+ * Returns null when the file cannot be read, because "I could not look" must not collapse into
+ * "the literal is gone" — that collapse is precisely how a false close is manufactured.
+ */
+export async function measureClass1(
+  repoRoot: string,
+  editSite: string,
+  literal: string,
+): Promise<Observation> {
+  if (!editSite || !literal) return null;
+  try {
+    const { readFile } = await import("node:fs/promises");
+    const path = editSite.startsWith("/") ? editSite : `${repoRoot}/${editSite}`;
+    const text = await readFile(path, "utf8");
+    return { present: text.includes(literal) };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Record the predicate's value BEFORE the action, keyed by gap id.
+ *
+ * Written as its own impulse rather than back onto the gap. substrateGap_write REPLACES rather
+ * than merges, so a partial write would erase fields on a live gap — a hazard already paid for
+ * five times in this store. A separate row cannot clobber anything, and the adjudicator only
+ * ever needs to read it.
+ *
+ * Idempotent by gap id AND action id: re-picking the same gap for the same action must not
+ * overwrite the original baseline, because the FIRST reading is the counterfactual. A later
+ * one, taken after work has begun, is contaminated by the very action it is meant to judge.
+ */
+export async function stampBaseline(
+  gapId: string,
+  actionId: string,
+  observation: Observation,
+  predicateKind: "class1" | "class2",
+): Promise<"stamped" | "already_stamped" | "failed"> {
+  if (!gapId || !actionId) return "failed";
+  const existing = await surreal(
+    `SELECT id FROM impulse WHERE shape = 'falsifierBaseline' ` +
+      `AND pointer.gap_id = '${gapId.replace(/'/g, "")}' ` +
+      `AND pointer.action_id = '${actionId.replace(/'/g, "")}' LIMIT 1;`,
+  );
+  const rows = existing?.[0]?.result;
+  if (Array.isArray(rows) && rows.length > 0) return "already_stamped";
+  const pointer = {
+    gap_id: gapId,
+    action_id: actionId,
+    predicate_kind: predicateKind,
+    // null is recorded deliberately: an unmeasurable baseline is itself the finding, and it
+    // makes the later verdict inconclusive rather than silently absent.
+    baseline_present: observation === null ? null : observation.present,
+    measurable: observation !== null,
+    stamped_at: new Date().toISOString(),
+  };
+  const res = await surreal(
+    `INSERT INTO impulse { id: 'fbase-${Date.now()}-${Math.random().toString(36).slice(2, 8)}', ` +
+      `shape: 'falsifierBaseline', pointer: ${JSON.stringify(pointer)}, created_at: time::now(), budget: 0 };`,
+  );
+  return res ? "stamped" : "failed";
+}
+
+/** Read back the baseline for a gap+action, or null when none was ever taken. */
+export async function readBaseline(gapId: string, actionId: string): Promise<Observation> {
+  const r = await surreal(
+    `SELECT pointer FROM impulse WHERE shape = 'falsifierBaseline' ` +
+      `AND pointer.gap_id = '${gapId.replace(/'/g, "")}' ` +
+      `AND pointer.action_id = '${actionId.replace(/'/g, "")}' ORDER BY created_at ASC LIMIT 1;`,
+  );
+  const rows = r?.[0]?.result;
+  if (!Array.isArray(rows) || rows.length === 0) return null;
+  const p = (rows[0] as Record<string, unknown>)["pointer"] as Record<string, unknown> | undefined;
+  if (!p || p["measurable"] !== true) return null;
+  return { present: p["baseline_present"] === true };
+}

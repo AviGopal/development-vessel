@@ -310,8 +310,26 @@ export async function stampEnvironmentBaseline(
   // already paid for a gate that "WEDGED autonomous landings within the hour". A re-check
   // after the derivation is cheap, cannot block anything, and turns a duplicate into a no-op
   // reference to whichever snapshot won.
+  // SEED WHEN THE SERIES IS EMPTY **OR STALE**.
+  //
+  // Seeding only-when-empty made the series a single origin point: after the first snapshot it
+  // never grew, so every later baseline referenced an increasingly old reading and a delta
+  // measured hours of drift rather than the action. An organ that silently stops updating is
+  // worse than one that was never built, because its output keeps looking current.
+  //
+  // The staleness bound is the compromise between that and seeding per pick, which would fill
+  // the series with readings taken moments apart — a delta between two of those measures
+  // nothing while looking exactly like a measurement.
+  const staleMs = Number(process.env["OPSTATE_SNAPSHOT_MAX_AGE_MS"] ?? 30 * 60 * 1000);
   const snapRowsPre = snap?.[0]?.result;
-  if (!Array.isArray(snapRowsPre) || snapRowsPre.length === 0) {
+  const newestAt =
+    Array.isArray(snapRowsPre) && snapRowsPre.length > 0
+      ? Date.parse(String((snapRowsPre[0] as Record<string, unknown>)["created_at"] ?? ""))
+      : NaN;
+  // NaN (unparseable timestamp) counts as stale, not as fresh: an unreadable age must not be
+  // taken as proof the snapshot is current.
+  const isStale = !Number.isFinite(newestAt) || Date.now() - newestAt > staleMs;
+  if (!Array.isArray(snapRowsPre) || snapRowsPre.length === 0 || isStale) {
     try {
       // Re-check first: another pick may have seeded while this one was deciding to.
       const recheck = await surreal(
@@ -319,7 +337,13 @@ export async function stampEnvironmentBaseline(
           "ORDER BY created_at DESC LIMIT 1;",
       );
       const recheckRows = recheck?.[0]?.result;
-      if (Array.isArray(recheckRows) && recheckRows.length > 0) {
+      const recheckAt =
+        Array.isArray(recheckRows) && recheckRows.length > 0
+          ? Date.parse(String((recheckRows[0] as Record<string, unknown>)["created_at"] ?? ""))
+          : NaN;
+      // Only accept the re-check if another pick produced a FRESH snapshot. Accepting a stale
+      // one would let the race silently cancel the refresh it was meant to deduplicate.
+      if (Number.isFinite(recheckAt) && Date.now() - recheckAt <= staleMs) {
         snap = recheck;
       } else {
         const { resolveOperationalState } = await import("./operational-state.js");

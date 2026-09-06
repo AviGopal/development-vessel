@@ -217,7 +217,7 @@ export async function stampBaseline(
   };
   const res = await surreal(
     `INSERT INTO impulse { id: 'fbase-${Date.now()}-${Math.random().toString(36).slice(2, 8)}', ` +
-      `shape: 'falsifierBaseline', pointer: ${JSON.stringify(pointer)}, created_at: time::now(), budget: 0 };`,
+      `shape: 'falsifierBaseline', org_id: 'organizations:substrate', pointer: ${JSON.stringify(pointer)}, created_at: time::now(), budget: 0 };`,
   );
   return res ? "stamped" : "failed";
 }

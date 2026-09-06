@@ -363,7 +363,7 @@ async function persistSnapshot(body: Record<string, unknown>): Promise<boolean> 
         Authorization: "Basic " + btoa(`${SURREALDB_USERNAME}:${SURREALDB_PASSWORD}`),
       },
       body:
-        `INSERT INTO impulse { id: '${id}', shape: 'operationalStateSnapshot', ` +
+        `INSERT INTO impulse { id: '${id}', shape: 'operationalStateSnapshot', org_id: 'organizations:substrate', ` +
         `pointer: ${JSON.stringify(body)}, created_at: time::now(), budget: 0 };`,
       signal: AbortSignal.timeout(15_000),
     });

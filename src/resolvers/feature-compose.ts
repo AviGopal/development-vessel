@@ -6228,7 +6228,14 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
         },
       }),
       signal: AbortSignal.timeout(5000),
-    }).catch(() => { /* trace-store unreachable — never fail the compose */ });
+    }).catch(() => null);
+    if (traceRes && traceRes.ok) { 
+      const traceBody = (await traceRes.json().catch(() => null)) as { data?: { execution_id?: string } } | null; 
+      const emittedId = traceBody?.data?.execution_id; 
+      if (typeof emittedId === "string" && emittedId.length > 0) { 
+        console.log(`[feature-compose] trace emission persisted execution_id=${emittedId}`); 
+      } 
+    }
   } catch { /* emission must never fail the compose */ }
 
   // SHADOW-MODE counterfactual record (code_locality): log what the locality

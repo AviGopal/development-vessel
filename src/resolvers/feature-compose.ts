@@ -3971,7 +3971,7 @@ grounding += `\n\nCOMPOSED CHANGE:\n${composedChange}`;
     const symbolBlock = await groundFileSymbols(toolsEndpoint, verifyVessels, targetFiles);
     if (symbolBlock) grounding += '\n\nEXISTING SYMBOLS (authoritative — these are the top-level declarations of the TARGET file(s). Do NOT INVENT a new function, const, type, or field name that is absent here. You MAY edit lines, fields, and expressions INSIDE an existing symbol, and inside an inline handler that has no top-level name (e.g. app.post("/x", async (req) => { ... })) — an in-body line/field edit at the change site is expected and does NOT require you to name a changed top-level symbol):\n' + symbolBlock;
   } catch { /* advisory */ }
-  if (!(/REPLACE|WITH:|INSERT AFTER|ANCHOR/i.test(spec)) || spec.length > 3500) {
+  if (!(/REPLACE|WITH:|INSERT AFTER|ANCHOR/i.test(spec)) && spec.length > 3500) {
     try {
       const refined = await llmCallWithFailover(llmEndpoints, refineSpecPrompt(spec, grounding, composeLessons), model);
       const trimmed = refined.trim();

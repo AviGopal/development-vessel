@@ -6045,6 +6045,7 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
     // environment condition the drafter did not cause and cannot fix.
     if (/env_change_window_held|change[_ ]window( lease)? held|"deferred"\s*:\s*true/i.test(t)) return "env_change_window_held";
     if (/restarted \(cutover\)|cutover race/i.test(t)) return "env_cutover_race";
+    if (/restarted \(verify\)|verify race/i.test(t)) return "env_verify_race";
     return null;
   }
   // DEAD PREDICATE, FIXED (2026-08-09). This tested a top-level `refused` field

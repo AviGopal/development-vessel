@@ -6245,7 +6245,7 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
     const traceEndpoint = process.env["METABOB_ENDPOINT"] ?? "http://127.0.0.1:8080";
     const traceKey = process.env["METABOB_API_KEY"] ?? "";
     const landedVessels = (cutovers as Array<Record<string, unknown>>)
-      .filter((c) => (c?.result as Record<string, unknown> | undefined)?.applied === true)
+      .filter((c) => String(((c?.result as Record<string, unknown> | undefined)?.new_git_sha) ?? "").length > 0)
       .map((c) => String(c.vessel ?? ""))
           .map((v) => v.replace(/[^a-zA-Z0-9-]/g, "")); // sanitize vessel names
     const traceRes = await fetch(`${traceEndpoint}/v2/activities/executions`, {

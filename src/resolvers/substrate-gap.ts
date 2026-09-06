@@ -1004,7 +1004,7 @@ export async function resolveSubstrateGapWrite(
         console.log("[substrate-gap] event-driven gap-compose pickup triggered by " + gap.id + (reopened ? " (reopened)" : ""));
       }
 
-      const gd = globalThis as unknown as { __composeDrainInflight?: boolean; __composeDrainLastAt?: number };
+      const gd = globalThis as unknown as { __composeDrainInflight?: boolean; __composeDrainLastAt?: number; lastComposeFailureClass?: string };
       const COMPOSE_MIN_INTERVAL_MS = 90_000;
       if (gd.__composeDrainInflight === true) {
         console.log(`[substrate-gap] compose nudge skipped for ${gap.id} — a compose is already in flight`);

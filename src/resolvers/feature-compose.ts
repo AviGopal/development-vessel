@@ -6250,7 +6250,7 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
       headers: { "Content-Type": "application/json", Authorization: `ApiKey ${traceKey}` },
       body: JSON.stringify({
         activity_id: "feature_compose",
-        success: verdict === "FAVORABLE",
+        success: verdict === "FAVORABLE" && landedVessels.length > 0,
         duration_ms: Date.now() - traceClockStart,
         cost: 0,
         tokens: { input: 0, output: 0, cache: 0 },

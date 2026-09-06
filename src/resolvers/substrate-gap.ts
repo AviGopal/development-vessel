@@ -1021,11 +1021,9 @@ export async function resolveSubstrateGapWrite(
           if (procOutput) { console.error(`[substrate-gap] gap-compose stdout: ${procOutput}`); }
           if (procErr) { console.error(`[substrate-gap] gap-compose stderr: ${procErr}`); }
           throw new Error(`Failed to trigger gap-compose for ${gap.id}. See logs for details.`);
-        } else {
-          console.log(`[substrate-gap] event-driven gap-compose pickup triggered by ${gap.id}`);
         }
-        // }
-        return { shape: 'compose_nudge_skipped', body: { gapId: gap.id, secondsSinceLastNudge: Math.round((nowMs - gd.__composeDrainLastAt) / 1000) } };
+        console.log(`[substrate-gap] event-driven gap-compose pickup triggered by ${gap.id}`);
+        return { shape: 'compose_nudge_triggered', body: { gapId: gap.id } };
       } else {
         gd.__composeDrainInflight = true;
         gd.__composeDrainLastAt = nowMs;

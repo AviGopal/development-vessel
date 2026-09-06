@@ -1020,6 +1020,7 @@ export async function resolveSubstrateGapWrite(
           console.error(`[substrate-gap] gap-compose.service failed to start for ${gap.id} (exit code ${exitCode})`);
           if (procOutput) { console.error(`[substrate-gap] gap-compose stdout: ${procOutput}`); }
           if (procErr) { console.error(`[substrate-gap] gap-compose stderr: ${procErr}`); }
+          throw new Error(`Failed to trigger gap-compose for ${gap.id}. See logs for details.`);
         } else {
           console.log(`[substrate-gap] event-driven gap-compose pickup triggered by ${gap.id}`);
         }

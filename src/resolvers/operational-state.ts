@@ -41,7 +41,11 @@ async function count(sql: string): Promise<number | null> {
         Authorization: "Basic " + btoa(`${SURREALDB_USERNAME}:${SURREALDB_PASSWORD}`),
       },
       body: sql,
-      signal: AbortSignal.timeout(15_000),
+      // 15s per query meant one slow count could hold the whole derivation past any caller's
+      // patience. A count that cannot answer in 6s under load is not going to produce a useful
+      // reading, and null (UNMEASURED) is the honest result — far better than a timeout that
+      // discards the ten readings that DID succeed.
+      signal: AbortSignal.timeout(6_000),
     });
     if (!res.ok) return null;
     const data = (await res.json()) as Array<{ status?: string; result?: unknown }>;
@@ -530,14 +534,41 @@ async function armSplit(): Promise<
 export async function resolveOperationalState(
   pointer: Record<string, unknown>,
 ): Promise<ResolverResult> {
+  // ONE PARALLEL GROUP, NOT THREE SEQUENTIAL ONES.
+  //
+  // Measured against the live store under load: individual counts run 140-911ms, and these
+  // eleven were issued as three awaited groups, so their latencies added instead of
+  // overlapping. The resolver then exceeded the caller's timeout even with every skip flag
+  // set — a caller saw failure while the work succeeded and the snapshot was written, which is
+  // this session's dominant defect inverted and just as misleading.
+  //
+  // They are all independent, so there is no ordering to preserve. One group bounds the whole
+  // derivation by its SLOWEST query rather than the sum of them.
   const day = "time::now() - 1d";
-  const [executionsRecent, executionsTotal, executionsGraded, armsSelectable, gradedPerDay] =
-    await Promise.all([
+  const [
+    executionsRecent,
+    executionsTotal,
+    executionsGraded,
+    armsSelectable,
+    gradedPerDay,
+    effectComposes,
+    effectExamined,
+    effectUncovered,
+    examComposes,
+    examExamined,
+    examUnexamined,
+  ] = await Promise.all([
       count("SELECT count() FROM execution WHERE executed_at > time::now() - 1h GROUP ALL;"),
       count("SELECT count() FROM execution GROUP ALL;"),
       count("SELECT count() FROM execution WHERE reached != NONE GROUP ALL;"),
       count("SELECT count() FROM activity WHERE retired = false OR retired IS NONE GROUP ALL;"),
       count(`SELECT count() FROM execution WHERE reached != NONE AND executed_at > ${day} GROUP ALL;`),
+      count("SELECT count() FROM execution WHERE metadata.effect_targets_examined != NONE GROUP ALL;"),
+      count("SELECT math::sum(metadata.effect_targets_examined) AS count FROM execution WHERE metadata.effect_targets_examined != NONE GROUP ALL;"),
+      count("SELECT math::sum(metadata.effect_targets_uncovered) AS count FROM execution WHERE metadata.effect_targets_examined != NONE GROUP ALL;"),
+      count("SELECT count() FROM execution WHERE metadata.examination_examined != NONE GROUP ALL;"),
+      count("SELECT math::sum(metadata.examination_examined) AS count FROM execution WHERE metadata.examination_examined != NONE GROUP ALL;"),
+      count("SELECT math::sum(metadata.examination_unexamined) AS count FROM execution WHERE metadata.examination_examined != NONE GROUP ALL;"),
     ]);
 
   // Compose the existing producers rather than re-deriving them (law 3).
@@ -577,16 +608,7 @@ export async function resolveOperationalState(
 
   // Effect coverage over recent composes. Only traces written by a build that persists the
   // field are counted; older ones are absent, not zero.
-  const [effectComposes, effectExamined, effectUncovered] = await Promise.all([
-    count("SELECT count() FROM execution WHERE metadata.effect_targets_examined != NONE GROUP ALL;"),
-    count("SELECT math::sum(metadata.effect_targets_examined) AS count FROM execution WHERE metadata.effect_targets_examined != NONE GROUP ALL;"),
-    count("SELECT math::sum(metadata.effect_targets_uncovered) AS count FROM execution WHERE metadata.effect_targets_examined != NONE GROUP ALL;"),
-  ]);
-  const [examComposes, examExamined, examUnexamined] = await Promise.all([
-    count("SELECT count() FROM execution WHERE metadata.examination_examined != NONE GROUP ALL;"),
-    count("SELECT math::sum(metadata.examination_examined) AS count FROM execution WHERE metadata.examination_examined != NONE GROUP ALL;"),
-    count("SELECT math::sum(metadata.examination_unexamined) AS count FROM execution WHERE metadata.examination_examined != NONE GROUP ALL;"),
-  ]);
+
 
   const rungs = deriveRungs({
     executionsRecent,

@@ -298,15 +298,37 @@ export async function stampEnvironmentBaseline(
   // Seeding only when the series is EMPTY, not on every pick: picks run every few minutes and
   // a snapshot per pick would bury the signal in its own noise. The scheduled derivation, once
   // one exists, is what should keep the series current.
+  // THE SEED CHECK IS NOT ATOMIC, SO BOUND WHAT LOSING THE RACE COSTS.
+  //
+  // Observed: two picks 1.2s apart both found an empty series and both seeded, producing two
+  // near-identical snapshots. Harmless individually, but a burst of picks would fill the
+  // series with readings taken moments apart, and a delta between two such snapshots measures
+  // nothing while looking exactly like a measurement — the same shape as counting expiry as a
+  // landing.
+  //
+  // Not fixed with a lock: a lock on the selection path can wedge selection, and this repo has
+  // already paid for a gate that "WEDGED autonomous landings within the hour". A re-check
+  // after the derivation is cheap, cannot block anything, and turns a duplicate into a no-op
+  // reference to whichever snapshot won.
   const snapRowsPre = snap?.[0]?.result;
   if (!Array.isArray(snapRowsPre) || snapRowsPre.length === 0) {
     try {
-      const { resolveOperationalState } = await import("./operational-state.js");
-      await resolveOperationalState({ skip_gate_probe: true, skip_drift_scan: true, skip_arm_split: true });
-      snap = await surreal(
+      // Re-check first: another pick may have seeded while this one was deciding to.
+      const recheck = await surreal(
         "SELECT id, created_at FROM impulse WHERE shape = 'operationalStateSnapshot' " +
           "ORDER BY created_at DESC LIMIT 1;",
       );
+      const recheckRows = recheck?.[0]?.result;
+      if (Array.isArray(recheckRows) && recheckRows.length > 0) {
+        snap = recheck;
+      } else {
+        const { resolveOperationalState } = await import("./operational-state.js");
+        await resolveOperationalState({ skip_gate_probe: true, skip_drift_scan: true, skip_arm_split: true });
+        snap = await surreal(
+          "SELECT id, created_at FROM impulse WHERE shape = 'operationalStateSnapshot' " +
+            "ORDER BY created_at DESC LIMIT 1;",
+        );
+      }
     } catch {
       /* leave snap as-is; a null baseline_snapshot_id is honest and the adjudicator handles it */
     }

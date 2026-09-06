@@ -265,6 +265,11 @@ export async function stampEnvironmentBaseline(
   actionId: string,
 ): Promise<"stamped" | "already_stamped" | "failed"> {
   if (!gapId || !actionId) return "failed";
+  // NOTE FOR ANY PREDICATE WRITTEN AGAINST THIS SHAPE: in SurrealDB, NONE and NULL are
+  // DISTINCT, so `field != NONE` is TRUE for a field explicitly set to null. A watcher counting
+  // "linked" baselines with `pointer.baseline_snapshot_id != NONE` reported every null-
+  // referencing row as linked and declared the chain closed while zero snapshots existed. Use
+  // `type::is::string(...)` when the question is "does this hold a real id".
   const dup = await surreal(
     `SELECT id FROM impulse WHERE shape = 'environmentBaseline' ` +
       `AND pointer.action_id = '${actionId.replace(/'/g, "")}' LIMIT 1;`,

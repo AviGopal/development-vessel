@@ -3367,7 +3367,37 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
     };
   }
   try {
-    return await resolveFeatureComposeUncapped(pointer);
+    const outcome = await resolveFeatureComposeUncapped(pointer);
+    try {
+      const ob = (outcome?.body ?? {}) as Record<string, unknown>;
+      if (ob["stage"] === "plan" && ob["verdict"] === "REFUSED") {
+        const refusalEndpoint = process.env["METABOB_ENDPOINT"] ?? "http://127.0.0.1:8080";
+        const refusalKey = process.env["METABOB_API_KEY"] ?? "";
+        const refusalReason = String(ob["error"] ?? "").slice(0, 400);
+        const refusalRes = await fetch(`${refusalEndpoint}/v2/activities/executions`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: `ApiKey ${refusalKey}` },
+          body: JSON.stringify({
+            activity_id: "feature_compose",
+            success: false,
+            duration_ms: 0,
+            cost: 0,
+            tokens: { input: 0, output: 0, cache: 0 },
+            error_message: refusalReason,
+            metadata: { gap_id: pointer.gap?.id ?? "adhoc", stage: "plan", outcome: "refused", refusal_reason: refusalReason },
+          }),
+          signal: AbortSignal.timeout(5000),
+        }).catch(() => null);
+        if (refusalRes && refusalRes.ok) {
+          const refusalBody = (await refusalRes.json().catch(() => null)) as { execution_id?: string } | null;
+          const refusalId = refusalBody?.execution_id;
+          if (typeof refusalId === "string" && refusalId.length > 0) {
+            console.log(`[feature-compose] plan-refusal trace persisted execution_id=${refusalId}`);
+          }
+        }
+      }
+    } catch { /* emission must never change the refusal */ }
+    return outcome;
   } finally {
     await slot.release();
   }

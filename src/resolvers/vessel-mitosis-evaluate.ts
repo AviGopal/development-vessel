@@ -863,7 +863,17 @@ export function surqlBreakingFieldRefusal(
       if (!tm) continue; // untyped => not this hazard
       const type = tm[1]!.trim();
       if (/^option\s*</i.test(type)) continue; // optional => safe
-      if (/\b(DEFAULT|VALUE)\b/i.test(rest)) continue; // has a value => safe
+      // `$` is a NON-WORD character, so a bare \b matches inside `$value` — the standard
+      // SurrealDB field variable. That made any non-optional field whose ASSERT or
+      // PERMISSIONS clause mentions `$value` read as "supplies its own value" and skip the
+      // hazard check entirely. Found 2026-09-06 by metamorphic probing (mutate a known-hostile
+      // artifact in semantics-preserving ways, assert the gate still refuses), not by a
+      // hand-written case: 56 DEFINE FIELD statements in the corpus reference `$value`,
+      // including `DEFINE FIELD execution_id ON trace_digest TYPE string ASSERT $value != NONE`
+      // — exactly the non-optional shape this rule exists to refuse. The lookbehind requires a
+      // real clause keyword rather than the tail of a variable name; `VALUE $value OR 0` still
+      // matches on its leading standalone VALUE and stays correctly exempt.
+      if (/(?<!\$)\b(DEFAULT|VALUE)\b/i.test(rest)) continue; // has a real DEFAULT/VALUE clause => safe
       return (
         `[mitosis-surql] REFUSING ${f.path}: \`DEFINE FIELD ${name} ON ${table} TYPE ${type}\` ` +
         `adds a NON-OPTIONAL field with no DEFAULT or VALUE clause to a table this file does ` +

@@ -1000,8 +1000,7 @@ export async function resolveSubstrateGapWrite(
         if (proc?.stderr) {
           console.error(`[substrate-gap] gap-compose stderr: ${proc.stderr.toString()}`);
         }
-
-      } else if (proc?.exitCode === 0) {
+      } else {
         console.log("[substrate-gap] event-driven gap-compose pickup triggered by " + gap.id + (reopened ? " (reopened)" : ""));
       }
 

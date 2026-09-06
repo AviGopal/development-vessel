@@ -114,7 +114,7 @@ export async function resolveInteractorWrite(
     // store. The log is an aggregation aid, not the source of truth.
     return {
       shape,
-      body: { ok: true, id, visibility, logged: false, log_error: err instanceof Error ? err.message : String(err) },
+      body: { ok: true, id, visibility, logged: false, log_error: err instanceof Error ? err.message : String(err), source: "interactor-passthrough-resolver" },
     };
   }
 

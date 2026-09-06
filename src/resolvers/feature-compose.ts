@@ -6341,7 +6341,7 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
       ok: effectiveVerdict === "FAVORABLE",
       execution_id: emittedExecutionId,
       verdict: effectiveVerdict,
-      failure_kind: effectiveVerdict === "FAVORABLE" ? null : (classifyEnvironmentFailure(cutovers) ? "environment" : "fix"),
+      failure_kind: effectiveVerdict === "FAVORABLE" ? null : ((classifyEnvironmentFailure(cutovers) || verify.some((vr) => !vr.ok && (vr.exit_code === null || !vr.output || /timed out after \d+\s*ms/i.test(vr.output)))) ? "environment" : "fix"),
       summary: plan.summary,
       touched_vessels: [...touched],
       op_count: ops.length,

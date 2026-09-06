@@ -6231,8 +6231,8 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
       signal: AbortSignal.timeout(5000),
     }).catch(() => null);
     if (traceRes && traceRes.ok) { 
-      const traceBody = (await traceRes.json().catch(() => null)) as { data?: { execution_id?: string } } | null; 
-      const emittedId = traceBody?.data?.execution_id; 
+      const traceBody = (await traceRes.json().catch(() => null)) as { execution_id?: string; data?: { execution_id?: string } } | null; 
+      const emittedId = traceBody?.execution_id ?? traceBody?.data?.execution_id; 
       if (typeof emittedId === "string" && emittedId.length > 0) { 
         console.log(`[feature-compose] trace emission persisted execution_id=${emittedId}`);
         emittedExecutionId = emittedId; 

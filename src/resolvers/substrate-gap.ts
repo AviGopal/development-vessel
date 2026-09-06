@@ -1009,12 +1009,13 @@ export async function resolveSubstrateGapWrite(
       if (gd.__composeDrainInflight === true) {
         console.log(`[substrate-gap] compose nudge skipped for ${gap.id} — a compose is already in flight`);
       } else if (typeof gd.__composeDrainLastAt === "number" && nowMs - gd.__composeDrainLastAt < COMPOSE_MIN_INTERVAL_MS) {
-        // const proc = Bun.spawn(["systemctl","start","gap-compose.service"], { stdout: "ignore", stderr: "ignore" });
-        // const exitCode = await proc.exited;
-        // if (exitCode !== 0) {
-        //   console.error(`[substrate-gap] gap-compose.service failed to start for ${gap.id} (exit code ${exitCode})`);
-        // } else {
-        //   console.log(`[substrate-gap] event-driven gap-compose pickup triggered by ${gap.id}`);
+        const proc = Bun.spawn(["systemctl","start","gap-compose.service"], { stdout: "ignore", stderr: "ignore" });
+        const exitCode = await proc.exited;
+        if (exitCode !== 0) {
+          console.error(`[substrate-gap] gap-compose.service failed to start for ${gap.id} (exit code ${exitCode})`);
+        } else {
+          console.log(`[substrate-gap] event-driven gap-compose pickup triggered by ${gap.id}`);
+        }
         // }
         return { shape: 'compose_nudge_skipped', body: { gapId: gap.id, secondsSinceLastNudge: Math.round((nowMs - gd.__composeDrainLastAt) / 1000) } };
       } else {

@@ -2983,6 +2983,19 @@ async function routeCapabilityGapToNewResolver(
     land: !(pointer.dry_run ?? false),
   });
   const cb = (compose.body ?? {}) as Record<string, unknown>;
+  try {
+    const reachId = typeof cb["execution_id"] === "string" ? (cb["execution_id"] as string) : "";
+    if (reachId.length > 0) {
+      const reachEndpoint = process.env["METABOB_ENDPOINT"] ?? "http://127.0.0.1:8080";
+      const reachKey = process.env["METABOB_API_KEY"] ?? "";
+      void fetch(`${reachEndpoint}/v2/activities/execution-traces/reach`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...(reachKey ? { Authorization: `ApiKey ${reachKey}` } : {}) },
+        body: JSON.stringify({ execution_id: reachId, reached: cb["ok"] === true }),
+        signal: AbortSignal.timeout(5000),
+      }).catch(() => { /* grading must never affect the compose result */ });
+    }
+  } catch { /* verdict delivery is best effort */ }
 
   if (pointer.dry_run) {
     return { shape: "gapToFeatureReport", body: {

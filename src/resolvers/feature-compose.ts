@@ -3425,6 +3425,9 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
           const refusalBody = (await refusalRes.json().catch(() => null)) as { execution_id?: string } | null;
           const refusalId = refusalBody?.execution_id;
           if (typeof refusalId === "string" && refusalId.length > 0) {
+            if (outcome && typeof outcome === "object" && outcome.body && typeof outcome.body === "object") {
+              (outcome.body as Record<string, unknown>)["execution_id"] = refusalId;
+            }
             console.log(`[feature-compose] plan-refusal trace persisted execution_id=${refusalId}`);
           }
         }

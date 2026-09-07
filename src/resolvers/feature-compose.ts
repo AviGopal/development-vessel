@@ -4904,6 +4904,7 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
         droppedSiblingSites.push({ path: op.path, anchor: (op.old_string ?? "").slice(0, 200), residual: n0 - 1 });
       }
       if (r.ok && !anchorRejected) {
+        setTimeout(() => {}, 0);
         await new Promise((resolve) => setTimeout(resolve, 10)); // throttle repair
         // Blind-edit repair: plan-once decomposition can guess an old_string that
         // does not match the LIVE file (it planned without reading it). Read the

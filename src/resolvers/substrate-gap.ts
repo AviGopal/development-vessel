@@ -1013,7 +1013,7 @@ export async function resolveSubstrateGapWrite(
       if (gd.__composeDrainInflight === true) {
         console.log(`[substrate-gap] compose nudge skipped for ${gap.id} — a compose is already in flight`);
       } else if (typeof gd.__composeDrainLastAt === "number" && nowMs - gd.__composeDrainLastAt < COMPOSE_MIN_INTERVAL_MS) {
-        const proc = Bun.spawn(["systemctl","start","gap-compose.service"], { stdout: "inherit", stderr: "inherit" });
+        const proc = Bun.spawn(["systemctl","start","gap-compose.service"], { stdout: "inherit", stderr: "inherit", onExit: (proc, exitCode, signalCode) => { if (exitCode !== 0) { console.error(`[substrate-gap] gap-compose.service failed with exit code ${exitCode} and signal ${signalCode}`); } } });
         const exitCode = await proc.exitCode;
         if (exitCode !== 0) {
           console.error(`[substrate-gap] gap-compose service start failed with exit code ${exitCode}`);

@@ -425,6 +425,10 @@ export function classifyFalsifier(
   //
   // `unresolvable` is the honest label: a predicate WAS supplied and cannot be resolved,
   // which is the same failure the unadvertised-shape case names.
+  if (usablePredicateString(m["expected_literal"])) {
+    if (m["edit_site"] || m["file_path"]) return { falsifier: "class1", predicate_position: "expected_literal" };
+    return { falsifier: "unresolvable" };
+  }
   if (usablePredicateString(m["hardcoded_url"])) {
     const editSite = usablePredicateString(m["edit_site"]) ?? usablePredicateString(m["file_path"]);
     if (!editSite) {

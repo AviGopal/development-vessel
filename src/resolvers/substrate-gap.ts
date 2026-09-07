@@ -1001,7 +1001,7 @@ export async function resolveSubstrateGapWrite(
           console.error(`[substrate-gap] gap-compose stderr: ${proc.stderr.toString()}`);
         }
       } else {
-        console.log("[substrate-gap] event-driven gap-compose pickup triggered by " + gap.id + (reopened ? " (reopened)" : ""));
+        console.log(`[substrate-gap] event-driven gap-compose pickup triggered by ${gap.id}${reopened ? ' (reopened)' : ''}`);
       }
 
       const gd = globalThis as unknown as { __composeDrainInflight?: boolean; __composeDrainLastAt?: number; lastComposeFailureClass?: string };

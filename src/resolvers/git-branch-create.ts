@@ -21,13 +21,13 @@ function allowedPattern(): RegExp {
 }
 
 export async function resolveGitBranchCreate(p: GitBranchCreatePointer): Promise<ResolverResult> {
-  const pattern = allowedPattern();
+  const pattern = p.branch_name_pattern ? new RegExp(p.branch_name_pattern) : allowedPattern();
   if (!pattern.test(p.branch_name)) {
     return {
       shape: "structuredError",
       body: {
         resolver: "git_branch_create",
-        detail: `branch_name '${p.branch_name}' does not match SUBSTRATE_ALLOWED_BRANCH_PATTERNS /${pattern.source}/`,
+        detail: `branch_name '${p.branch_name}' does not match ${p.branch_name_pattern ? 'provided pattern' : 'SUBSTRATE_ALLOWED_BRANCH_PATTERNS'} /${pattern.source}/`,
         failure_mode: "safety_breach",
       },
     };

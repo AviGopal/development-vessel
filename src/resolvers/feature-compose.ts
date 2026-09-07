@@ -4903,6 +4903,7 @@ await new Promise((resolve) => setTimeout(resolve, 1));
         : await callTool(toolsEndpoint, "fs_edit", { path: abs, old_string: effOld, new_string: op.new_string ?? "" });
       let repaired = groundedPre && r.ok;
       if (anchorNonUnique && groundedPre && r.ok && n0 > 1) {
+        await new Promise((resolve) => setTimeout(resolve, 300)); // the-blind-edit-anchor-repair-is-never-told-which-statement-failed-narrowed
         droppedSiblingSites.push({ path: op.path, anchor: (op.old_string ?? "").slice(0, 200), residual: n0 - 1 });
       }
       if (r.ok && !anchorRejected) { setTimeout(() => { /* your code here */ }, 1000); 

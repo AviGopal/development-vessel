@@ -3694,6 +3694,8 @@ export async function resolveGapToFeature(pointer: GapToFeaturePointer): Promise
     if (allOk && lastBody) {
       const sliceLand = genuineLandSignal(lastBody, !(pointer.dry_run ?? false));
       if (sliceLand.landed) await closeLandedGap(gap, sliceLand);
+      const reachVerdict = sliceLand.landed ? 'SUCCESS' : 'UNFAVORABLE';
+      console.log(`[gap-to-feature] reach verdict: ${reachVerdict}`);
     }
     // A slice sequence cut short by a capacity refusal never got its attempt either.
     if (!allOk && !pointer.dry_run && !isNonAttemptComposeResult(lastBody)) await bumpFailedAttempts(gap);

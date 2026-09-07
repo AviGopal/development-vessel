@@ -3055,7 +3055,10 @@ function classifyComposeFailure(appliedOps: Array<{ ok: boolean; detail?: string
       } catch { /* fall through to generic classification */ }
       return "mis_localized_path";
     }
-    return "anchor_not_found";
+    if (/not found in file|missing anchor string|no match found/i.test(ap.detail ?? "")) {
+      return "anchor_not_found";
+    }
+    return "compose_execution_failure";
   }
   const bad = verifyResults.find((v) => !v.ok);
   if (bad) {

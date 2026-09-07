@@ -442,7 +442,7 @@ export async function resolveRhythmConductorTick(
     const fam = typeof r.body?.family === "string" ? r.body.family : "";
     return !!fam && ((poolGoals[fam]?.length ?? 0) > 0 || !!FAMILY_GOALS[fam]);
   }).length;
-  const structuralBreak =
+  const structuralBreak = regResp === null ? "registry_empty" : (regResp === undefined ? "registry_unmappable" : undefined);
     rhythms.length === 0
       ? "registry_empty"
       : mappable === 0

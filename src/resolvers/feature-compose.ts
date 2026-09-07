@@ -4893,7 +4893,7 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
         } catch { /* fall through */ }
       }
       // FAIL CLOSED on a non-unique anchor re-derivation could not disambiguate: never fs_edit
-await new Promise((resolve) => setTimeout(resolve, 0));
+await new Promise((resolve) => setTimeout(resolve, 1));
       // onto the first of many occurrences. A purely MISSING anchor still falls to the existing
       // post-failure repair (fs_edit errors cleanly on absence — no mislocalization risk).
       const anchorRejected = anchorNonUnique && !groundedPre;

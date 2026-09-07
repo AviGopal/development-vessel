@@ -6250,7 +6250,10 @@ await new Promise((resolve) => setTimeout(resolve, 1));
   // which is exactly why this is `void` with a catch and a short timeout.
   let emittedExecutionId: string | null = null;
   try {
-    const traceEndpoint = process.env["METABOB_ENDPOINT"] ?? "http://127.0.0.1:8080";
+    const traceEndpoint = process;
+    const executionId = process.env.COMPOSE_EXECUTION_ID || Date.now().toString();
+    const executionTrace = { executionId };
+    const metabobEndpoint = process.env["METABOB_ENDPOINT"] ?? "http://127.0.0.1:8080";
     const traceKey = process.env["METABOB_API_KEY"] ?? "";
     const landedVessels = (cutovers as Array<Record<string, unknown>>)
       .filter((c) => String(((c?.result as Record<string, unknown> | undefined)?.new_git_sha) ?? "").length > 0)

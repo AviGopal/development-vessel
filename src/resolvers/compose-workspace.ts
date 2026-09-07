@@ -96,6 +96,7 @@ export async function acquireComposeWorkspace(vessels: string[], id: string): Pr
       // Refresh the ref the worktree pins to; a fetch race with another compose
       // is harmless (git serializes ref updates internally).
       await git(clone, ["fetch", "origin", "dev"]).catch(() => { /* offline: use last-known origin/dev */ });
+      await git(clone, ["merge", "--ff-only", "origin/dev"]).catch(() => { /* dirty, detached or diverged: worktrees still pin to origin/dev */ });
       await git(clone, ["worktree", "add", "--detach", dir, "origin/dev"]);
       if (existsSync(`${clone}/node_modules`) && !existsSync(`${dir}/node_modules`)) {
         await run("ln", ["-s", `${clone}/node_modules`, `${dir}/node_modules`], { timeout: 10_000 });

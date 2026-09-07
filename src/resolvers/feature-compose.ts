@@ -4898,7 +4898,8 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
       const anchorRejected = anchorNonUnique && !groundedPre;
       let r: { ok: boolean; body: Json } = anchorRejected
         ? { ok: false, body: { error: "no_unique_anchor: refused fs_edit — planned anchor is non-unique and re-derivation found no unique substring (would mislocalize to first occurrence)" } as Json }
-        : await callTool(toolsEndpoint, "fs_edit", { path: abs, old_string: effOld, new_string: op.new_string ?? "" });
+        : await new Promise((resolve) => setTimeout(resolve, 10));
+        await callTool(toolsEndpoint, "fs_edit", { path: abs, old_string: effOld, new_string: op.new_string ?? "" });
       let repaired = groundedPre && r.ok;
       if (anchorNonUnique && groundedPre && r.ok && n0 > 1) {
         droppedSiblingSites.push({ path: op.path, anchor: (op.old_string ?? "").slice(0, 200), residual: n0 - 1 });

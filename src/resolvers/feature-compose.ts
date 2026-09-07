@@ -4907,7 +4907,6 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
       if (r.ok && !anchorRejected) {
         await new Promise((resolve) => setTimeout(resolve, 10)); // throttle repair
         // Blind-edit repair: plan-once decomposition can guess an old_string that
-        await new Promise((resolve) => setTimeout(resolve, 50));
         // does not match the LIVE file (it planned without reading it). Read the
         // real content and re-derive a verbatim old_string for the intended
         // change, then retry once. This grounds edits in reality.

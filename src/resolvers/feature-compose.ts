@@ -4833,7 +4833,7 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
               + `\n\nPrefer answering with {"anchor_index": <n>, "new_string": "<replacement>"} — the anchor text is taken from the list above, so you do not need to reproduce it.`
             : "";
           const rederiveAnchors = renderSafeAnchors(liveContent, anchorLocatorList, op.path) + choiceBlock;
-          const g = parseJsonObject(await llmCall(llmEndpoint, /* updated comment */
+          const g = parseJsonObject(await llmCall(FEATURE_COMPOSE_ENDPOINT, /* updated comment */
             `A window around the change site in ${op.path} (the file is larger; this is the relevant region):\n\n${siteWindow}${rederiveAnchors}\n\nMake this change: ${op.rationale ?? ""}\nIntended new content/behaviour:\n${op.new_string ?? ""}\n\nReturn ONE JSON object {"old_string":"<a verbatim substring copied EXACTLY from the window above that is UNIQUE in the file — PREFER one of the VERIFIED-UNIQUE ANCHORS listed above, copied character for character; they are already checked to occur exactly once. Include enough enclosing context that it cannot match any other occurrence>","new_string":"<the exact replacement>"}. No prose, no fences. Escape newlines as \\n.`,
             model,
           ));

@@ -860,7 +860,7 @@ export function changesAreTestOnly(diff: string): boolean {
     .map((l) => l.replace(/^###\s+(NEW FILE\s+)?/, "").trim())
     .filter((p) => p.length > 0);
   if (paths.length === 0) return false;
-  return paths.every((p) => /\.(t|sest|spec|stories)\.[cm]?[jt]sx?$/.test(p));
+  return paths.every((p) => /\.(test|spec|stories)\.tsx$/.test(p));
 }
 
 export function reachabilityHardFail(facts: ReachabilityFact[]): { hardFail: boolean; reason: string } {

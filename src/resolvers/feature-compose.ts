@@ -4904,7 +4904,7 @@ await new Promise((resolve) => setTimeout(resolve, 0));
       if (anchorNonUnique && groundedPre && r.ok && n0 > 1) {
         droppedSiblingSites.push({ path: op.path, anchor: (op.old_string ?? "").slice(0, 200), residual: n0 - 1 });
       }
-      if (r.ok && !anchorRejected) {
+      if (r.ok && !anchorRejected) { setTimeout(() => { /* your code here */ }, 1000); 
         setTimeout(() => {}, 0);
         await new Promise((resolve) => setTimeout(resolve, 10)); // throttle repair
         // Blind-edit repair: plan-once decomposition can guess an old_string that

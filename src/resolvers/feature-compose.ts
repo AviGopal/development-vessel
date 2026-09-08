@@ -4787,8 +4787,18 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
           const idx = liveContent.slice(0, liveContent.indexOf(effOld)).split("\n").length - 1;
           const dist = Math.abs(idx - center);
           if (dist > ANCHOR_REGION_SLACK_LINES) {
-            anchorFarFromRegion = true;
-            console.warn(`[fc-anchor-region] planned anchor for ${op.path} is unique but ${dist} lines from the located region (line ${center + 1}) — re-deriving from the offered anchors instead`);
+            if (regionHint) {
+              anchorFarFromRegion = true;
+              console.warn(`[fc-anchor-region] planned anchor for ${op.path} is unique but ${dist} lines from the EXPLICIT region (line ${center + 1}) — re-deriving from the offered anchors instead`);
+            } else {
+              console.warn(`[fc-anchor-region] planned anchor for ${op.path} is unique but ${dist} lines from a region located ONLY from mined identifiers (line ${center + 1}) — TRUSTING THE UNIQUE ANCHOR: a mined region is a guess, a unique literal match is a fact`);
+            }
+            if (regionHint) {
+              anchorFarFromRegion = true;
+              console.warn(`[fc-anchor-region] planned anchor for ${op.path} is unique but ${dist} lines from the EXPLICIT region (line ${center + 1}) — re-deriving from the offered anchors instead`);
+            } else {
+              console.warn(`[fc-anchor-region] planned anchor for ${op.path} is unique but ${dist} lines from a region located ONLY from mined identifiers (line ${center + 1}) — TRUSTING THE UNIQUE ANCHOR: a mined region is a guess, a unique literal match is a fact`);
+            }
           }
         }
       }

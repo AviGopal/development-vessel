@@ -71,9 +71,9 @@ async function drainBoredomQueue(queuePath: string, maxDispatch: number): Promis
         // dispatch leaves status:pending so the next tick retries.
         if (res) { 
           const r = res as { dispatchId?: string; executionId?: string };
-          (t as { status?: string }).status = "dispatched";
+          (t as { status?: string; dispatchId?: string }).status = "dispatched";
           if (r.dispatchId || r.executionId) {
-            (t as { dispatch_id?: string }).dispatch_id = r.dispatchId ?? r.executionId;
+            (t as { dispatchId?: string }).dispatchId = r.dispatchId ?? r.executionId;
           }
           dispatched += 1; 
         }

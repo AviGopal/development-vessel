@@ -749,6 +749,20 @@ export async function resolveSubstrateGapWrite(
     // without this guard the id check never runs. That exact ordering is what
     // made one malformed row unwritable-store poison.
     existingIdx = gaps.findIndex((g) => hasClassifiableId(g) && g.status !== "closed" && gapClassKey(g.id) === classKey);
+        if (existingIdx >= 0) {
+          const existingGap = gaps[existingIdx];
+          if (existingGap && existingGap.source === incoming.source) {
+            return {
+              early: {
+                shape: 'structuredError',
+                body: {
+                  error: 'decomposition_gap_rejection',
+                  message: 'A decomposition gap cannot repeat its parent.',
+                },
+              },
+            };
+          }
+        }
   }
 
   // Close-if-open semantics: a close/reject write whose class has no existing row

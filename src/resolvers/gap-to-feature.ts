@@ -948,7 +948,7 @@ function blockingWeight(gap: Record<string, unknown>): number {
 }
 
 /** Bounded so the pick cannot spawn a git subprocess per pooled gap. See chooseFirstActionable. */
-export const PENDING_SCAN_MAX = 20;
+export const PENDING_SCAN_MAX = 120; // 2026-09-03, Operation 2: widen the scan window to allow deeper scanning for actionable gaps
 
 /**
  * Walk a score-ranked candidate list and return the highest-ranked entry that is NOT pending.
@@ -1191,14 +1191,14 @@ function pickMostLandable(gaps: Record<string, unknown>[]): Record<string, unkno
   // can), so skipping frees the scarcest resource in the system. chooseFirstActionable still
   // fails open when every candidate is skipped, so the lane cannot starve.
   const { chosen, skippedPending } = chooseFirstActionable(ranked, (g) => {
-    const v = verifyGapCondition(g);
-    if (v === 'pending') return true;
+
     const m = (g as { classification_metadata?: Record<string, unknown> }).classification_metadata ?? {};
     const landedAwaitingVerification = typeof m.pending_outcome_verification === 'string'
       && (m.pending_outcome_verification as string).length >= 7;
     const hasMeasurablePredicate = typeof m.hardcoded_url === 'string'
       || typeof m.evidence_resolve === 'string' || typeof m.verify_shape === 'string' || typeof m.expected_literal === 'string';
-    return landedAwaitingVerification && !hasMeasurablePredicate;
+    if (landedAwaitingVerification && !hasMeasurablePredicate) return true;
+    return verifyGapCondition(g) === 'pending';
   });
   const targetOf = (g: Record<string, unknown>): string =>
     String(((g.classification_metadata ?? g.metadata ?? {}) as Record<string, unknown>).edit_site ?? "(no-target)");

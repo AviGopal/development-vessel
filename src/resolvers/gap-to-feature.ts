@@ -1197,7 +1197,7 @@ function pickMostLandable(gaps: Record<string, unknown>[]): Record<string, unkno
     const landedAwaitingVerification = typeof m.pending_outcome_verification === 'string'
       && (m.pending_outcome_verification as string).length >= 7;
     const hasMeasurablePredicate = typeof m.hardcoded_url === 'string'
-      || typeof m.evidence_resolve === 'string' || typeof m.verify_shape === 'string';
+      || typeof m.evidence_resolve === 'string' || typeof m.verify_shape === 'string' || typeof m.expected_literal === 'string';
     return landedAwaitingVerification && !hasMeasurablePredicate;
   });
   const targetOf = (g: Record<string, unknown>): string =>

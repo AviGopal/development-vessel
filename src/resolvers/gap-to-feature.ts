@@ -2654,7 +2654,7 @@ async function bumpFailedAttempts(gap: Record<string, unknown>, opts: { surprise
           id: `${parentId}-narrowed`,
           category: gap.category,
           source: gap.source,
-          summary: `[narrowed from ${parentId}] ${parentSummary.replace(/^\[narrowed from [\w:.!-]+\]\s*/g, "")}`,
+          summary: "[narrowed from " + parentId + "] " + parentSummary.replace(/^\[narrowed from [\w:.!-]+\]\s*/g, "") + (Array.isArray((meta as Record<string, unknown>)["failure_lessons"]) && ((meta as Record<string, unknown>)["failure_lessons"] as unknown[]).length > 0 ? "\n\nWHY PREVIOUS ATTEMPTS ON THIS GAP FAILED (most recent last):\n" + ((meta as Record<string, unknown>)["failure_lessons"] as Array<Record<string, unknown>>).slice(-3).map((l) => "- " + String(l["class"] ?? "?") + ": " + String(l["reason"] ?? "").slice(0, 300)).join("\n") + "\n\nDo not repeat these failures. Address the specific cause named above." : ""),
           detected_at: gap.detected_at,
           classification_metadata: childMeta,
           status: "open",

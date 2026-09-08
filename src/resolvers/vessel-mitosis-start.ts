@@ -497,7 +497,7 @@ export async function resolveVesselMitosisStart(
       version_id,
       base_version_id: "v1",
       intent_summary: safeIntent,
-      source_root: sourceRoot,
+      sourceRoot,
       mitosis_root: mitosisRoot,
       mitosis_port,
       base_port,

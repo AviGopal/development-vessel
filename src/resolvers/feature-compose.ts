@@ -3935,6 +3935,12 @@ async function resolveFeatureComposeUncapped(pointer: FeatureComposePointer): Pr
               // file, so hoist it. Gated on occurring exactly once, so a legacy mined region that
               // is non-unique keeps the old ordering and still appears last.
               ...((regionHint && text.split(regionHint).length - 1 === 1) ? [regionHint] : []),
+              // The note below is correct about a MINED grounding term, whose first occurrence is
+              // routinely a doc comment far from the code it names. It is not correct about a
+              // region that was produced by checking the deployed file: that is a fact about the
+              // file, so hoist it. Gated on occurring exactly once, so a legacy mined region that
+              // is non-unique keeps the old ordering and still appears last.
+              ...((regionHint && text.split(regionHint).length - 1 === 1) ? [regionHint] : []),
               ...regionCandidatesFromText(`${String(pointer.spec ?? "")}\n${String(pointer.gap?.summary ?? "")}`),
               ...focusHints.slice(1),
               regionHint ?? "",

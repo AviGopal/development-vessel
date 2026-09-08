@@ -32,7 +32,7 @@ const API_KEY = process.env["METABOB_API_KEY"] ?? process.env["DEV_VESSEL_API_KE
 // Lifecycle-internal templates whose deficiencies are structural noise already
 // covered by other detectors (cyclic-flow). Excluded from improvement gaps so we
 // only route GENUINE goal-vessel deficiencies into the autonomous loop.
-const LIFECYCLE_TEMPLATES = /validator-dispatch|slot-binding|lifecycle/i;
+const LIFECYCLE_TEMPLATES = /validator-dispatch|slot-binding|lifecycle|lifecycle/i;
 
 /**
  * Emit a substrateGap for a goal-vessel deficiency so the existing

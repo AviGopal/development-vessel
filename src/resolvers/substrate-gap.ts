@@ -597,7 +597,7 @@ export async function resolveSubstrateGapWrite(
   pointer: SubstrateGapWritePointer | Record<string, unknown>,
   // Additive, test-facing: inject a vocabulary rather than depending on the host's
   // filesystem layout. No production caller passes it (the cached fleet scan is used).
-  opts?: { vocabulary?: ShapeVocabulary | null },
+  opts?: { vocabulary?: ShapeVocabulary | null, anchorNotFoundHandler?: (error: Error) => void },
 ): Promise<ResolverResult> {
   const flat = coerceFlatGapPointer(pointer as Record<string, unknown>);
   if (flat) (pointer as Record<string, unknown>)["gap"] = flat;

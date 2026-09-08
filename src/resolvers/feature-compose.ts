@@ -6311,7 +6311,7 @@ await new Promise((resolve) => setTimeout(resolve, 1));
           effect_targets_uncovered: uncoveredTargets.length,
           effect_uncovered_targets: uncoveredTargets.slice(0, 20),
           rolled_back,
-          landed_vessels: landedVessels.filter((v) => v.length > 0),
+          reached: verdict === "FAVORABLE" && landedVessels.length > 0, landed_vessels: landedVessels.filter((v) => v.length > 0),
           cutover_refusals: (cutovers as Array<Record<string, unknown>>)
             .map((c) => String((c?.result as Record<string, unknown> | undefined)?.kind ?? ""))
             .filter((k) => k.length > 0),

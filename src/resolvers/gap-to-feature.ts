@@ -3254,7 +3254,6 @@ export async function resolveGapToFeature(pointer: GapToFeaturePointer): Promise
     // close-oracle would score as a false-close). The sweep + human escalation own it. (§12.6 step 1)
     console.log(`[gap-to-feature] gap ${String(gap.id ?? '')} PENDING verification at pick time — skipping re-compose`);
     await markPendingVerification(gap, undefined, "pending at pick time (site B): landed once, no measurement predicate — persisted so the candidate filter can exclude it");
-    await markPendingVerification(gap, undefined, "pending at pick time: landed once, no measurement predicate — persisted so the candidate filter can exclude it");
     return {
       shape: "gapToFeatureReport",
       body: { ok: true, gap_id: gap.id as string, gap_category: gap.category as string, verdict: "pending_verification", note: "landed once but unmeasured — held pending verification; not re-composed" },

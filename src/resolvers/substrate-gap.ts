@@ -997,6 +997,17 @@ export async function resolveSubstrateGapWrite(
         : Bun.spawnSync(["systemctl", "start", "gap-compose.service"], { stdout: "pipe", stderr: "pipe" });
       if (proc?.exitCode !== 0) {
         console.error(`[substrate-gap] gap-compose failed to start (systemctl exit ${proc?.exitCode ?? 'unknown'})`);
+        if (proc?.stdout) {
+          console.error(`[substrate-gap] gap-compose stdout: ${proc.stdout.toString()}`);
+        }
+        if (proc?.stderr) {
+          console.error(`[substrate-gap] gap-compose stderr: ${proc.stderr.toString()}`);
+        }
+      } else {
+        console.log(`[substrate-gap] event-driven gap-compose pickup triggered by ${gap.id}${reopened ? ' (reopened)' : ''}`);
+      }
+      if (proc?.exitCode !== 0) {
+        console.error(`[substrate-gap] gap-compose failed to start (systemctl exit ${proc?.exitCode ?? 'unknown'})`);
 
         if (proc?.stdout) {
           console.error(`[substrate-gap] gap-compose stdout: ${proc.stdout.toString()}`);

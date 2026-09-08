@@ -6368,7 +6368,7 @@ await new Promise((resolve) => setTimeout(resolve, 1));
       ok: effectiveVerdict === "FAVORABLE",
       execution_id: emittedExecutionId,
       verdict: effectiveVerdict,
-      failure_kind: effectiveVerdict === "FAVORABLE" ? null : ((classifyEnvironmentFailure(cutovers) || verify.some((vr) => !vr.ok && (vr.exit_code === null || !vr.output || /timed out after \d+\s*ms/i.test(vr.output)))) ? "environment" : "fix"),
+      failure_kind: effectiveVerdict === "FAVORABLE" ? null : classifyEnvironmentFailure(cutovers) || verify.some((vr) => !vr.ok && (vr.exit_code === null || !vr.output || /timed out after \d+\s*ms/i.test(vr.output))) ? "environment" : "fix",
       summary: plan.summary,
       touched_vessels: [...touched],
       op_count: ops.length,

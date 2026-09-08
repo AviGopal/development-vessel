@@ -3078,7 +3078,9 @@ async function appendComposeLesson(cls: string, reason: string, vessels: string,
       const meta = (gap.classification_metadata ?? {}) as Record<string, unknown>;
       const lessons = (Array.isArray(meta.failure_lessons) ? meta.failure_lessons : []) as Array<Record<string, unknown>>;
       const reCommit = lessons.some((l) => l.class === cls);
-      lessons.push({ at: new Date().toISOString(), class: cls, reason: reason.slice(0, 200), raw_excerpt: reason.slice(0, 1500) });
+      const diagLines = reason.split("\n").filter((l) => /error TS\d+|\berror\b|\d+ fail|FAIL|Error:/i.test(l));
+      const diag = diagLines.length > 0 ? diagLines.join("\n") : reason;
+      lessons.push({ at: new Date().toISOString(), class: cls, reason: diag.slice(0, 200), raw_excerpt: diag.slice(0, 1500) });
       while (lessons.length > 8) lessons.shift();
       meta.failure_lessons = lessons;
       // PRESERVE the gap's real identity on write-back. This write only ATTACHES failure

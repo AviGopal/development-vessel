@@ -3253,6 +3253,7 @@ export async function resolveGapToFeature(pointer: GapToFeaturePointer): Promise
     // Landed once but unmeasured — do NOT re-compose (a second landing manufactures a re-land the
     // close-oracle would score as a false-close). The sweep + human escalation own it. (§12.6 step 1)
     console.log(`[gap-to-feature] gap ${String(gap.id ?? '')} PENDING verification at pick time — skipping re-compose`);
+    await markPendingVerification(gap, undefined, "pending at pick time (site B): landed once, no measurement predicate — persisted so the candidate filter can exclude it");
     await markPendingVerification(gap, undefined, "pending at pick time: landed once, no measurement predicate — persisted so the candidate filter can exclude it");
     return {
       shape: "gapToFeatureReport",

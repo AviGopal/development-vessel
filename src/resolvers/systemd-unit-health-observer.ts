@@ -188,7 +188,7 @@ export async function resolveSystemdUnitHealthObserver(
       s.active_state === "failed" ||
       (s.is_oneshot && s.result === "exit-code" && (typeof s.exec_main_status === "number" && s.exec_main_status !== 0)) ||
       (s.is_oneshot && (s.result === "exited" || s.result === "failed" || s.result === "signal")) ||
-      (s.is_oneshot && typeof s.exec_main_status === "number" && s.exec_main_status !== 0) || (s.is_oneshot && s.result === "exit-code" && s.exec_main_status === 1),
+      (s.is_oneshot && typeof s.exec_main_status === "number" && s.exec_main_status !== 0), // (s.is_oneshot && s.result === "exit-code" && s.exec_main_status === 1) is redundant with previous line, and it means if exec_main_status is non-zero, it has already been captured, this line would be true if exit-code is 1, which has been covered already
   );
   const failed_units = failingStates.map((s) => ({
     unit: s.unit,

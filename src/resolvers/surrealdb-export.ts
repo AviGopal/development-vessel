@@ -27,6 +27,8 @@ export interface SurrealdbExportPointer {
   surrealUrl?: string;
   output_dir?: string;
   rowCap?: number;
+  ns?: string;
+  db?: string;
 }
 
 const DEFAULT_TABLES = [

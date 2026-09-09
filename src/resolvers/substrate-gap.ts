@@ -688,7 +688,7 @@ export async function resolveSubstrateGapWrite(
   // an absent field already does, so an unbound slot now behaves exactly like the field not being
   // sent — which is the honest reading of "nothing was bound here".
   const unbound = (v: unknown): boolean => typeof v === "string" && /\{\{[^}]*\}\}/.test(v);
-  const cleanTs = (v: unknown, fallback: string): string => (typeof v === "string" && v.length > 0 && !unbound(v) ? v : fallback);
+  const cleanTs = (v: unknown, fallback: string): string => (typeof v === "string" && v.length > 0 && !unbound(v) && !v.includes('{{') ? v : fallback);
 
   const gap: SubstrateGap = {
     ...incoming,

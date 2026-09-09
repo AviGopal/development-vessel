@@ -593,6 +593,9 @@ function coerceFlatGapPointer(p: Record<string, unknown>): Record<string, unknow
       ? { classification_metadata: p["classification_metadata"] as Record<string, unknown> }
       : {}),
     ...(str("route") ? { route: str("route") } : {}),
+    ...(typeof p["classification_metadata"] === "object" && p["classification_metadata"] !== null && !Array.isArray(p["classification_metadata"])
+      ? { classification_metadata: p["classification_metadata"] as Record<string, unknown> }
+      : {}),
   };
 }
 

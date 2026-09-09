@@ -76,7 +76,6 @@ async function drainBoredomQueue(queuePath: string, maxDispatch: number): Promis
             (t as { dispatchId?: string }).dispatchId = r.dispatchId ?? r.executionId;
           }
           dispatched += 1;
-          dispatched += 1; 
         }
       } catch { /* leave pending; retry next tick */ }
     }

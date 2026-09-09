@@ -5234,7 +5234,7 @@ await new Promise((resolve) => setTimeout(resolve, 1));
       if (passRegressed && basePass !== undefined && curPass2 !== null && curPass2 >= basePass) passRegressed = false;
       const shed = newTest.length - confirmedNewTest.length;
       if (shed > 0 || (curPass2 !== null && curPass !== null && curPass2 !== curPass)) {
-        console.warn(`[feature-compose] FLAKE CONFIRMATION for ${v}: ${shed} of ${newTest.length} "new" failures did not reproduce on a second run (pass ${String(curPass)} -> ${String(curPass2)}). Only reproducible failures block this draft.`);
+        // console.warn(`[feature-compose] FLAKE CONFIRMATION for ${v}: ${shed} of ${newTest.length} "new" failures did not reproduce on a second run (pass ${String(curPass)} -> ${String(curPass2)}). Only reproducible failures block this draft.`);
       }
     }
     const testOk = confirmedNewTest.length === 0 && !passRegressed;

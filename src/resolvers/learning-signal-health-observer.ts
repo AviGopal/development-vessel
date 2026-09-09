@@ -65,6 +65,7 @@ export async function resolveLearningSignalHealthObserver(
   const loaded = concepts.filter((c) => (c.times_loaded ?? 0) > 0);
   const loadedWithSuccess = loaded.filter((c) => (c.times_succeeded ?? 0) > 0);
   const successCreditRatio = loaded.length > 0 ? loadedWithSuccess.length / loaded.length : null; // null = unknown (no loaded data); do NOT report a false 1.0
+  const subgroupSuccessCreditRatios = {}; // to hold ratios per source_type
   const relSum = concepts.reduce((s, c) => s + (c.relevance ?? 0.5), 0);
   const avgRelevance = total > 0 ? relSum / total : 0.5;
 

@@ -20,9 +20,9 @@ export const GATE_SELF_PROBE_TICK_TEMPLATE: ActivityTemplate = {
     {
       id: "run_gate_self_probe",
       description:
-        "Invoke gate_self_probe: run every probe case through the real exported gate functions and report pass/fail per rule.",
+        "Invoke gate_self_probe: run every probe case through the real exported gate functions, validate their outputs match declared shapes, and report pass/fail per rule.",
       resolver: "gate_self_probe",
-      config: { type: "gate_self_probe" },
+      config: { type: "gate_self_probe", validateOutputShapes: true },
       outputShapes: ["gateSelfProbe"],
     },
   ],

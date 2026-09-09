@@ -4943,6 +4943,7 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
           if (!refusal && g && cand && occurs(liveContent, cand) === 1) {
             effOld = cand;
             if (typeof g.new_string === "string") op.new_string = String(g.new_string);
+            if (!groundedPre && rederiveChoices.length === 1) { effOld = String(rederiveChoices[0]); groundedPre = true; }
             groundedPre = true;
           }
         } catch { /* fall through */ }

@@ -4990,6 +4990,7 @@ await new Promise((resolve) => setTimeout(resolve, 1));
               let cand = String(fix.old_string);
               while (cand.length > 12 && live.split(cand).length - 1 !== 1) cand = cand.slice(0, -1);
               if (live.split(cand).length - 1 === 1) fix.old_string = cand;
+              if (live.split(cand).length - 1 !== 1) { const hits = live.split("\n").filter((x) => x.trim().startsWith(cand.trim().slice(0, 40))); if (hits.length === 1) fix.old_string = hits[0]; }
               const fixRefusal = refuseRederivedEdit({
                 candidateAnchor: String(fix.old_string),
                 replacement: String(fix.new_string ?? op.new_string ?? ""),

@@ -867,6 +867,21 @@ export async function resolveSubstrateGapWrite(
     // must win to keep climbing).
     const exMeta = (existing.classification_metadata ?? {}) as Record<string, unknown>;
     const inMeta = (gap.classification_metadata ?? {}) as Record<string, unknown>;
+    // FALSIFIER-ANCHOR IMMUTABILITY: when the EXISTING row carries a measurable
+    // falsifier (expected_literal / hardcoded_url) anchored at an edit_site, an
+    // incoming write that does NOT itself rewrite those falsifier fields must not
+    // re-aim the anchor. Observed 2026-09-09 (gap gate-self-probe-dispatcher-wiring):
+    // the edit-intent route stamped its compose target file over the operator's
+    // edit_site, redirecting the Class-1b predicate to a file NAMED the expected
+    // literal, so the sweep closed the gap "already_resolved" 29 minutes before
+    // the change the predicate was written to verify had landed on origin/dev.
+    const incomingRewritesFalsifier = "expected_literal" in inMeta || "hardcoded_url" in inMeta;
+    const existingHasFalsifierAnchor =
+      (typeof exMeta["expected_literal"] === "string" || typeof exMeta["hardcoded_url"] === "string") &&
+      typeof exMeta["edit_site"] === "string";
+    if (existingHasFalsifierAnchor && !incomingRewritesFalsifier && "edit_site" in inMeta) {
+      inMeta["edit_site"] = exMeta["edit_site"];
+    }
     for (const k of Object.keys(exMeta)) {
       if (!(k in inMeta)) inMeta[k] = exMeta[k];
     }

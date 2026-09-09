@@ -2360,7 +2360,8 @@ export async function sweepPendingLandVerifications(): Promise<{ checked: number
           classification_metadata: {
             ...meta,
             closed_reason: "landed_verified",
-            resolution: `landed via mitosis cutover ${sha} (verified ancestor of clone HEAD)`,
+            close_basis: verdict,
+            resolution: `landed via mitosis cutover ${sha} (${verdict === 'absent' ? 'measured condition check' : 'earned close-oracle trust'})`,
             closed_at: new Date().toISOString(),
           },
           status: "closed",

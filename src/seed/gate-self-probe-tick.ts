@@ -5,7 +5,9 @@ export const GATE_SELF_PROBE_TICK_TEMPLATE = {
   tasks: [
     {
       resolver: 'gate_self_probe',
-      config: { type: 'gate_self_probe' }
+      config: { type: 'gate_self_probe' },
+      id: '',
+      description: ''
     }
   ],
   outputShapes: ["gateSelfProbe"],

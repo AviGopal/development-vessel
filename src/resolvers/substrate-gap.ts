@@ -973,7 +973,7 @@ export async function resolveSubstrateGapWrite(
   // of exactly this feedback.
   console.log(
     `[gap-falsifier] ${action} ${gap.id}: falsifier=${falsifier}` +
-    (unadvertisedShape ? ` unadvertised_shape="${unadvertisedShape}" (predicate is INERT — it will resolve to nothing and the sweep will abstain forever)` : "")
+    (unadvertisedShape ? ` unadvertised_shape="${unadvertisedShape}" (predicate is INERT — it will resolve to nothing and the sweep will abstain forever)` : ""),
   );
   // This whole block has a REAL production side effect: it shells out to `systemctl
   // start gap-compose.service` against whatever systemd this process can reach, and

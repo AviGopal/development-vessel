@@ -3081,6 +3081,33 @@ async function appendComposeLesson(cls: string, reason: string, vessels: string,
       const diagLines = reason.split("\n").filter((l) => /error TS\d+|\berror\b|\d+ fail|FAIL|Error:/i.test(l));
       const diag = diagLines.length > 0 ? diagLines.join("\n") : reason;
       lessons.push({ at: new Date().toISOString(), class: cls, reason: diag.slice(0, 200), raw_excerpt: diag.slice(0, 1500) });
+
+      // Record failure for the lessons that led to this 'cls'
+      (async () => {
+        try {
+          const response = await fetch(`${CONCEPT_DB_ENDPOINT}/impulses/resolve`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-Api-Key': METABOB_API_KEY },
+            body: JSON.stringify({ type: "conceptSearch", source_type: "compose_lesson", query: cls, limit: 8 }),
+          });
+
+          if (response.ok) {
+            interface ConceptRow { id?: string; }
+            const concepts: ConceptRow[] = await response.json();
+
+            for (const concept of concepts) {
+              if (concept.id) {
+                await fetch(`${CONCEPT_DB_ENDPOINT}/usage/${concept.id}/fail`, {
+                  method: 'POST',
+                  headers: { 'X-Api-Key': METABOB_API_KEY },
+                });
+              }
+            }
+          }
+        } catch (e) {
+          // Swallow errors to avoid failing the compose
+        }
+      })();
       while (lessons.length > 8) lessons.shift();
       meta.failure_lessons = lessons;
       // PRESERVE the gap's real identity on write-back. This write only ATTACHES failure

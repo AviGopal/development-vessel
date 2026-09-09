@@ -4987,6 +4987,9 @@ await new Promise((resolve) => setTimeout(resolve, 1));
               // uniqueness test at all. `live` is both the window the model was
               // shown and the module being written, so it serves as both inputs.
               // Fails open.
+              let cand = String(fix.old_string);
+              while (cand.length > 12 && live.split(cand).length - 1 !== 1) cand = cand.slice(0, -1);
+              if (live.split(cand).length - 1 === 1) fix.old_string = cand;
               const fixRefusal = refuseRederivedEdit({
                 candidateAnchor: String(fix.old_string),
                 replacement: String(fix.new_string ?? op.new_string ?? ""),

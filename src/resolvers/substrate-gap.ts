@@ -879,8 +879,12 @@ export async function resolveSubstrateGapWrite(
     const existingHasFalsifierAnchor =
       (typeof exMeta["expected_literal"] === "string" || typeof exMeta["hardcoded_url"] === "string") &&
       typeof exMeta["edit_site"] === "string";
-    if (existingHasFalsifierAnchor && !incomingRewritesFalsifier && "edit_site" in inMeta) {
-      inMeta["edit_site"] = exMeta["edit_site"];
+    if (existingHasFalsifierAnchor && !incomingRewritesFalsifier) {
+      if ("edit_site" in inMeta) {
+        inMeta["edit_site"] = exMeta["edit_site"];
+      } else if (!("edit_site" in inMeta)) {
+        inMeta["edit_site"] = exMeta["edit_site"];
+      }
     }
     for (const k of Object.keys(exMeta)) {
       if (!(k in inMeta)) inMeta[k] = exMeta[k];

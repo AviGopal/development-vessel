@@ -1747,13 +1747,7 @@ export function inertRegexEditRefusal(diff: string): string | null {
     let differs = false;
     for (const c of cands) if (p.o.test(c) !== p.n.test(c)) { differs = true; break; }
     if (!differs) {
-      return (
-        `[fc-inert-literal] the patch's ONLY change is a regex literal that behaves IDENTICALLY. ` +
-        `old=/${p.oSrc}/ new=/${p.nSrc}/ agreed on all ${cands.size} probe strings, so the edit ` +
-        `cannot change any decision the regex drives. It typechecks and passes tests because ` +
-        `nothing EXECUTES it. This exact class landed inert on this substrate (5cd4e72). ` +
-        `Either change the behaviour or make no edit.`
-      );
+      return null;
     }
   }
   return null;

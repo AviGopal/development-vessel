@@ -705,9 +705,9 @@ export async function resolveOperationalState(
       count("SELECT count() FROM execution WHERE metadata.effect_targets_examined != NONE GROUP ALL;"),
       count("SELECT math::sum(metadata.effect_targets_examined) AS count FROM execution WHERE metadata.effect_targets_examined != NONE GROUP ALL;"),
       count("SELECT math::sum(metadata.effect_targets_uncovered) AS count FROM execution WHERE metadata.effect_targets_examined != NONE GROUP ALL;"),
-      count("SELECT count() FROM execution WHERE metadata.examination_examined != NONE GROUP ALL;"),
-      count("SELECT math::sum(metadata.examination_examined) AS count FROM execution WHERE metadata.examination_examined != NONE GROUP ALL;"),
-      count("SELECT math::sum(metadata.examination_unexamined) AS count FROM execution WHERE metadata.examination_examined != NONE GROUP ALL;"),
+      count("SELECT count() FROM execution WHERE metadata.examination_examined != NONE AND executed_at > time::now() - 24h GROUP ALL;"),
+      count("SELECT math::sum(metadata.examination_examined) AS count FROM execution WHERE metadata.examination_examined != NONE AND executed_at > time::now() - 24h GROUP ALL;"),
+      count("SELECT math::sum(metadata.examination_unexamined) AS count FROM execution WHERE metadata.examination_examined != NONE AND executed_at > time::now() - 24h GROUP ALL;"),
     ]);
   const fams = pointer["skip_arm_split"] === true ? null : await familySizes();
 

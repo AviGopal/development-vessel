@@ -1389,6 +1389,60 @@ export async function resolvePatchWithTools(pointer: PatchWithToolsPointer): Pro
     }
   }
 
+  // SEMANTIC GATE ON THE SELF-LANDING PATH (operator-authorized 2026-09-10).
+  //
+  // This route stages a mitosis and self-lands without feature_compose's judge. Measured
+  // 2026-09-10: it carries roughly half of all landings in this vessel (pwt-staged vs
+  // compose-staged commits, 78/53/44/50% across 09-07..09-10), and every regression
+  // documented that week arrived through it - f0cfb91 (inverted boolean, anchor-failure
+  // 3.3%->34.4% for two days), 550f2f7 (refusal body replaced with `return null`, so a
+  // refusal returned no refusal), 6fcdf40 (injected no-op await). All are one-to-two-line
+  // changes that typecheck perfectly: exactly what a compiler cannot see and a judge can.
+  //
+  // verifyPatchAddressesGap is the SAME function feature_compose runs, imported here the
+  // way regionContainmentVerdict already is, so the two lanes cannot drift.
+  //
+  // FAILS OPEN BY CONSTRUCTION. The judge itself returns addresses:true when unreachable
+  // or unparseable, this block is skipped when there is no proposal text to judge against
+  // or no LLM endpoint, and any throw is caught and ignored. A flaky judge must never
+  // wedge landing - the deterministic floors above have already passed.
+  {
+    const proposalText = String(pointer.proposal_text ?? "").trim();
+    if (proposalText && llmEndpoints.length > 0) {
+      try {
+        const { verifyPatchAddressesGap } = await import("./feature-compose.js");
+        const beforeLines2 = baseContent.split("\n");
+        const afterLines2 = afterSrc.split("\n");
+        const bCount = new Map<string, number>();
+        const aCount = new Map<string, number>();
+        for (const l of beforeLines2) bCount.set(l, (bCount.get(l) ?? 0) + 1);
+        for (const l of afterLines2) aCount.set(l, (aCount.get(l) ?? 0) + 1);
+        const diffLines: string[] = [];
+        for (const [l, n] of aCount) { const d = n - (bCount.get(l) ?? 0); for (let i = 0; i < d; i++) diffLines.push(`+${l}`); }
+        for (const [l, n] of bCount) { const d = n - (aCount.get(l) ?? 0); for (let i = 0; i < d; i++) diffLines.push(`-${l}`); }
+        const semVerdict = await verifyPatchAddressesGap({
+          gapSummary: proposalText,
+          diff: `--- a/${pointer.target_file}\n+++ b/${pointer.target_file}\n${diffLines.join("\n")}`,
+          reachability: [],
+          llm: (p: string) => llmCall(llmEndpoints[0]!, p, model),
+          runSemanticJudge: true,
+        });
+        if (!semVerdict.addresses) {
+          console.warn(`[pwt-semantic-gate] REFUSED ${pointer.target_file}: ${semVerdict.reason}`);
+          await resetTarget();
+          return structuredError("semantic_reject", {
+            target_file: pointer.target_file,
+            detail: semVerdict.reason,
+            before_sha: beforeSha,
+            after_sha: afterSha,
+          });
+        }
+        console.log(`[pwt-semantic-gate] PASSED ${pointer.target_file}`);
+      } catch (e) {
+        console.warn(`[pwt-semantic-gate] skipped (${(e as Error).message}) - failing open`);
+      }
+    }
+  }
 // Stage the modified file into a mitosis dir for the cutover machinery.
   const mitosisRoot = join(vesselsRoot, `${vessel}-mitosis-${stamp}`);
   const stagedFile = join(mitosisRoot, subPath);

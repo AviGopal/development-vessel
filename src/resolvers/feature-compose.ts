@@ -4592,7 +4592,8 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
       if (!covered) {
         try {
           const testDir = tf.replace(/^([^/]+\/[^/]+)\/src\//, "$1/test/");
-          const entries = await readdir(testDir, { recursive: true, withFileTypes: false });
+          const testRoot = `${rootT}/${tf.split('/').slice(0, 2).join('/')}/test`;
+          const entries = await readdir(testRoot, { recursive: true, withFileTypes: false });
           const testFiles = entries
             .filter((e: string) => e.endsWith('.test.ts'))
             .slice(0, 200);
@@ -4604,7 +4605,7 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
             `/${basename}.js'`
           ];
           for (const testFile of testFiles) {
-            const content = await readFile(`${testDir}/${testFile}`, 'utf8');
+            const content = await readFile(`${testRoot}/${testFile}`, 'utf8');
             if (needles.some(needle => content.includes(needle))) {
               covered = true;
               break;

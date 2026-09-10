@@ -4944,10 +4944,10 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
         } catch { /* fall through */ }
       }
       // FAIL CLOSED on a non-unique anchor re-derivation could not disambiguate: never fs_edit
-await new Promise((resolve) => setTimeout(resolve, 1));
+
       // onto the first of many occurrences. A purely MISSING anchor still falls to the existing
       // post-failure repair (fs_edit errors cleanly on absence — no mislocalization risk).
-      await new Promise(resolve => setTimeout(resolve, 0));
+      
       const anchorRejected = anchorNonUnique && !groundedPre;
       let r: { ok: boolean; body: Json } = anchorRejected
         ? { ok: false, body: { error: "no_unique_anchor: refused fs_edit — planned anchor is non-unique and re-derivation found no unique substring (would mislocalize to first occurrence)" } as Json }

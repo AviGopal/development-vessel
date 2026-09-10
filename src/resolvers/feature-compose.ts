@@ -1748,7 +1748,7 @@ export function inertRegexEditRefusal(diff: string): string | null {
     let differs = false;
     for (const c of cands) if (p.o.test(c) !== p.n.test(c)) { differs = true; break; }
     if (!differs) {
-      return null;
+      return `[fc-inert-regex] The only change in this patch is to a regex literal that behaves identically (matches ${cands.size} candidate strings equally) to its old version. Old source: '${p.oSrc}', new source: '${p.nSrc}'. Change the behavior of the regex or make no edit.`;
     }
   }
   return null;

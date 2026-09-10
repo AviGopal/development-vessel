@@ -914,6 +914,17 @@ function landabilityScore(gap: Record<string, unknown>): number {
   if (cat === "documentation_drift") s += 0.2;
   // ids that empirically cycle UNFAVORABLE (meta/diagnostic; no surgical diff exists).
   if (/stale-proposal|demand-trace|forward[_-]chain|backlog|unknown/i.test(String(gap.id ?? ""))) s -= 0.3;
+  // A RECOMMIT IS A RETRY OF A KNOWN FAILURE, AND THE PRIOR COULD NOT SEE IT.
+  // Measured over a matched 3-day window: non-recommit composes convert at 26.9%
+  // (76 landings / 283 attempts) while recommit-depth-1 converts at 5.3% (6 / 113)
+  // -- five times worse -- yet recommit is ~32% of all compose attempts against a
+  // backlog of ~423 open gaps. A recommit gap is filed under a NEW id, so its
+  // failed_attempts starts at 0 and the fa penalty below never fires: the selector
+  // scored a retry exactly like fresh work. This is a SCORED down-weight, not a
+  // gate: recommit still runs when the pool is thin, which preserves the 11.6% of
+  // landings it does earn. NOT depth-scaled -- depth-2 measured 22% (4 / 18), no
+  // worse than fresh work, so penalising it harder would contradict the evidence.
+  if (/(^|-)recommit-/i.test(String(gap.id ?? ""))) s -= 0.15;
   // Deprioritise gaps that keep failing to land: each prior UNFAVORABLE attempt drops
   // the score, so the loop stops re-picking a stuck high-rank gap and moves to landable
   // work. Capped so a transient fail doesn't permanently bury a genuine gap.

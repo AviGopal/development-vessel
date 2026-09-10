@@ -69,7 +69,7 @@ export async function resolveRhythmRealitySync(
   try {
     const res = await fetchWithTimeout(
       { impulse: { type: "gap_lifecycle_scan" } },
-      2000,
+      15000,
     );
     if (res.ok) {
       const data = (await res.json()) as { body?: { open?: number } };

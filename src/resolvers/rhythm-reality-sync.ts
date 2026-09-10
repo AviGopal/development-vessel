@@ -120,8 +120,31 @@ export async function resolveRhythmRealitySync(
         updated.push({ id: rhythm.id, family: rhythm.body.family, old_staleness, new_staleness });
       }
     }
+    } else {
+      // Time-based staleness driver for all other families
+      const old_staleness = rhythm.body.staleness;
+      const new_staleness = Math.min(1, old_staleness + 0.1);
+      if (old_staleness !== new_staleness) {
+        try {
+          await fetchWithTimeout(
+            {
+              impulse: {
+                type: "poolImpulse_write",
+                id: rhythm.id,
+                shape: "timeShapedRhythm",
+                source: "rhythm-reality-sync",
+                body: { ...rhythm.body, staleness: new_staleness },
+              },
+            },
+            800,
+          );
+        } catch {
+          // best-effort; still record the update
+        }
+        updated.push({ id: rhythm.id, family: rhythm.body.family, old_staleness, new_staleness });
+      }
     }
-    // family "reality-modeling" and all others: leave staleness unchanged
+    // family "reality-modeling" and all others: staleness now driven by time
   }
 
   // (5) Return report

@@ -5937,7 +5937,15 @@ await new Promise((resolve) => setTimeout(resolve, 1));
   const restoreFailed: string[] = [];
   if ((verdict as string) === "UNFAVORABLE" && !pointer.keep_on_fail) {
     for (const [abs, original] of preEditContent) {
-      const w = await callTool(toolsEndpoint, "fs_write", { path: abs, content: original });
+      // Read current content first to check if it still matches what we expect
+  const current = await callTool(toolsEndpoint, "fs_read", { path: abs });
+  const currentContent = (current.body as { content?: string } | undefined)?.content;
+  if (current.ok === true && typeof currentContent === "string" && currentContent !== original) {
+    console.log(`[feature-compose] SKIPPING ROLLBACK for ${abs} — file content has changed (likely by another concurrent compose)`);
+    continue;  // Skip this file - another compose has modified it
+  }
+
+  const w = await callTool(toolsEndpoint, "fs_write", { path: abs, content: original });
       // VERIFY THE RESTORE, DO NOT ASSUME IT. `rolled_back = true` used to be set
       // unconditionally at the end of this block while `restored` was collected and
       // never read — so a failed fs_write produced a report saying rolled_back:true

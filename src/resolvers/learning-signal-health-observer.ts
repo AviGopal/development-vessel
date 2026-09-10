@@ -116,11 +116,19 @@ export async function resolveLearningSignalHealthObserver(
 
   let gapEmission: "emitted" | "error" | "not_needed" = "not_needed";
   if (oneSided) {
+    // REPORT THE EVIDENCE THAT TRIPPED THIS, NOT THE FLEET PAGE. The fleet counts come
+    // from a relevance-ordered page and are success-biased by construction: they read
+    // 5000/5000 at ratio 1.000 while the verdict was driven by a subgroup at 0 of 15.
+    // A gap whose summary says "ratio 1.000" reads as healthy to whoever acts on it,
+    // which is precisely the misdirection this observer exists to prevent.
+    const triggerSubgroup = Object.entries(subgroups).find(
+      ([, s]) => s.loaded >= MIN_SUBGROUP_VOLUME && s.ratio !== null && s.ratio < ratioThreshold,
+    );
     gapEmission = await emitGap(devVesselUrl, apiKey, {
-      successCreditRatio: successCreditRatio ?? 0,
+      successCreditRatio: triggerSubgroup ? (triggerSubgroup[1].ratio ?? 0) : (successCreditRatio ?? 0),
       avgRelevance,
-      loaded: loaded.length,
-      loadedWithSuccess: loadedWithSuccess.length,
+      loaded: triggerSubgroup ? triggerSubgroup[1].loaded : loaded.length,
+      loadedWithSuccess: triggerSubgroup ? triggerSubgroup[1].credited : loadedWithSuccess.length,
     });
   }
 

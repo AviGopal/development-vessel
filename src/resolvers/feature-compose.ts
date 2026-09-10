@@ -6405,6 +6405,7 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
           examination_unexamined: composeExamination?.unexamined.length ?? null,
           examination_examined: composeExamination?.examined.length ?? null,
           examination_by_extension: composeExamination?.by_extension ?? null,
+          examination_unexamined_files: composeExamination?.unexamined.slice(0, 20) ?? null,
           effect_targets_examined: coverageTargetsExamined,
           effect_targets_uncovered: uncoveredTargets.length,
           effect_uncovered_targets: uncoveredTargets.slice(0, 20),

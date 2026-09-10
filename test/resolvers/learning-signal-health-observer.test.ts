@@ -15,18 +15,22 @@ import { resolveLearningSignalHealthObserver } from "../../src/resolvers/learnin
 
 type Concept = { times_loaded?: number; times_succeeded?: number; relevance?: number; source?: string };
 
+// A scripted fetch, not a loopback server: this vessel's guidelines require a fake fetch
+// for HTTP-touching resolvers and no real network in tests. Passing `null` scripts a
+// failure so the error path is exercised without depending on a port being refused.
+const REAL_FETCH = globalThis.fetch;
+const STUB_URL = "http://stub.invalid/concepts/search";
+
 async function withStub<T>(concepts: Concept[] | null, fn: (url: string) => Promise<T>): Promise<T> {
-  const server = Bun.serve({
-    port: 0,
-    fetch() {
-      if (concepts === null) return new Response("boom", { status: 500 });
-      return Response.json({ concepts });
-    },
-  });
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    if (String(input) !== STUB_URL) throw new Error(`unexpected fetch to ${String(input)}`);
+    if (concepts === null) throw new Error("scripted search failure");
+    return Response.json({ concepts });
+  }) as typeof fetch;
   try {
-    return await fn(`http://127.0.0.1:${server.port}/concepts/search`);
+    return await fn(STUB_URL);
   } finally {
-    server.stop(true);
+    globalThis.fetch = REAL_FETCH;
   }
 }
 
@@ -65,12 +69,11 @@ describe("failure handling", () => {
     expect(body["success_credit_ratio"] ?? null).toBeNull();
   });
 
-  test("an unreachable endpoint is also an error body, not a throw", async () => {
-    const r = await resolveLearningSignalHealthObserver({
-      conceptSearchUrl: "http://127.0.0.1:1/concepts/search",
-    } as never);
-    const body = r.body as Record<string, unknown>;
-    expect(typeof body["error"]).toBe("string");
+  test("the error body carries a generated_at so an error is still a timestamped reading", async () => {
+    const body = await withStub(null, (url) =>
+      resolveLearningSignalHealthObserver({ conceptSearchUrl: url } as never).then((r) => r.body as Record<string, unknown>),
+    );
+    expect(typeof body["generated_at"]).toBe("string");
   });
 });
 

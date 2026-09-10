@@ -1437,7 +1437,12 @@ export async function resolvePatchWithTools(pointer: PatchWithToolsPointer): Pro
             after_sha: afterSha,
           });
         }
-        console.log(`[pwt-semantic-gate] PASSED ${pointer.target_file}`);
+        // PRINT THE REASON, NOT JUST THE VERDICT. verifyPatchAddressesGap fails open —
+// addresses:true when the judge is unreachable or unparseable — and records which
+// in `reason`. Without it, "judged and passed" and "judge unavailable, failed open"
+// are the same log line, and the pass count measures nothing. Observed 2026-09-10:
+// the first PASSED had no inference call in the surrounding window.
+console.log(`[pwt-semantic-gate] PASSED ${pointer.target_file}: llm_consulted=${semVerdict.llm_consulted === true} reason=${String(semVerdict.reason ?? "(none)").slice(0, 200)}`);
       } catch (e) {
         console.warn(`[pwt-semantic-gate] skipped (${(e as Error).message}) - failing open`);
       }

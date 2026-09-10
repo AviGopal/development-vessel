@@ -250,6 +250,8 @@ async function loadGaps(): Promise<SubstrateGap[]> {
     return parsed;
   } catch (err) {
     if ((err as NodeJS.ErrnoException)?.code === "ENOENT") return [];
+    throw new Error("gaps.json could not be loaded or parsed - refusing to treat as empty: " + (err as Error).message);
+
     throw err;
   }
 }

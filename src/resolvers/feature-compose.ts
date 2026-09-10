@@ -4592,25 +4592,17 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
       if (!covered) {
         try {
           const testDir = tf.replace(/^([^/]+\/[^/]+)\/src\//, "$1/test/");
-          const testRoot = `${rootT}/${tf.split('/').slice(0, 2).join('/')}/test`;
-          const entries = await readdir(testRoot, { recursive: true, withFileTypes: false });
-          const testFiles = entries
-            .filter((e: string) => e.endsWith('.test.ts'))
-            .slice(0, 200);
-          const basename = tf.split('/').pop()?.replace(/\.tsx?$/, '') || '';
-          const needles = [
-            `/${basename}"`,
-            `/${basename}.js"`,
-            `/${basename}'`,
-            `/${basename}.js'`
-          ];
-          for (const testFile of testFiles) {
-            const content = await readFile(`${testRoot}/${testFile}`, 'utf8');
-            if (needles.some(needle => content.includes(needle))) {
-              covered = true;
+          const vesselSeg = tf.split('/').slice(0, 2).join('/');
+          const cloneRoot = process.env.VESSEL_CLONE_ROOT || '/workspace/git/vessels';
+          const testRoots = [`${rootT}/${vesselSeg}/test`, `${cloneRoot}/${vesselSeg.split('/').pop()}/test`];
+          let entries;
+          for (const testRoot of testRoots) {
+            try {
+              entries = await readdir(testRoot, { recursive: true, withFileTypes: true });
               break;
-            }
+            } catch { /* try next root */ }
           }
+          if (!entries) continue;
         } catch { /* if readdir fails, leave covered=false */ }
       }
       if (!covered) {

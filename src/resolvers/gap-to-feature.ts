@@ -2678,7 +2678,7 @@ async function bumpFailedAttempts(gap: Record<string, unknown>, opts: { surprise
           method: "POST",
           headers: { "Content-Type": "application/json", ...(METABOB_API_KEY ? { Authorization: "ApiKey " + METABOB_API_KEY } : {}) },
           body: JSON.stringify({
-            goal: "investigate and decompose gap " + parentId + ": " + parentSummary.replace(/^(?:Close substrate gap [\w:.!-]+:\s*)+/, "").replace(/^(?:investigate and decompose (?:gap|goal)[:\s]+(?:[\w:.!-]+[:\s]+)?)+/i, "").slice(0, 400).replace(/^.{400}$/s, (m) => m.replace(/\s\S*$/, "")),
+            goal: "investigate and decompose gap " + parentId + ": " + parentSummary.replace(/^(?:Close substrate gap [\w:.!-]+:\s*)+/, "").replace(/^(?:investigate and decompose (?:gap|goal)[:\s]+(?:[\w:.!-]+[:\s]+)?)+/i, "").slice(0, 400).replace(/^(.{400})$/s, (_m, t) => t.replace(/\s\S*$/, "")),
             tags: ["escalated_from:" + parentId],
           }),
         }).catch(() => { });

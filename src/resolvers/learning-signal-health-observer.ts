@@ -74,8 +74,45 @@ export async function resolveLearningSignalHealthObserver(
   const relSum = concepts.reduce((s, c) => s + (c.relevance ?? 0.5), 0);
   const avgRelevance = total > 0 ? relSum / total : 0.5;
 
+    // PER-SUBGROUP, FETCHED WITH A source_type FILTER SO THE PAGE IS THE WHOLE SUBGROUP.
+  // The fleet page above is ordered by relevance DESC, and relevance is derived from the
+  // success counts this check measures, so its ratio is success-biased at any volume and
+  // cannot carry a verdict. A filtered request has no such ordering problem: it returns
+  // the subgroup itself. Fleet numbers are retained for context only.
+  const SUBGROUP_NAMES = ["compose_lesson"];
+  const MIN_SUBGROUP_VOLUME = 5;
+  const subgroups: Record<string, { loaded: number; credited: number; ratio: number | null }> = {};
+  for (const name of SUBGROUP_NAMES) {
+    try {
+      const subUrl = new URL(searchUrl);
+      subUrl.searchParams.set("source_type", name);
+      subUrl.searchParams.set("limit", "1000");
+      const subRes = await fetch(subUrl.toString(), {
+        headers: apiKey ? { Authorization: `ApiKey ${apiKey}` } : {},
+        signal: AbortSignal.timeout(15_000),
+      });
+      const subJson = (await subRes.json()) as { concepts?: ConceptLike[] };
+      const subRows = Array.isArray(subJson.concepts) ? subJson.concepts : [];
+      const subLoaded = subRows.filter((c) => (c.times_loaded ?? 0) > 0);
+      const subCredited = subLoaded.filter((c) => (c.times_succeeded ?? 0) > 0);
+      subgroups[name] = {
+        loaded: subLoaded.length,
+        credited: subCredited.length,
+        ratio: subLoaded.length > 0 ? subCredited.length / subLoaded.length : null,
+      };
+    } catch {
+      subgroups[name] = { loaded: 0, credited: 0, ratio: null };
+    }
+  }
+  // A SUBGROUP NEEDS ITS OWN FLOOR. minLoadedVolume is 50 and no individual subgroup
+  // reaches it - compose_lesson had 17 loaded - so inheriting it would compute the
+  // breakdown and then suppress it, reproducing one layer down the permanently
+  // "insufficient volume" defect this observer already had at fleet level.
+  const starvedSubgroups = Object.entries(subgroups)
+    .filter(([, s]) => s.loaded >= MIN_SUBGROUP_VOLUME && s.ratio !== null && s.ratio < ratioThreshold)
+    .map(([n, s]) => `${n} ${s.credited}/${s.loaded}`);
   const enoughVolume = loaded.length >= minLoadedVolume;
-  const oneSided = enoughVolume && ((successCreditRatio !== null && successCreditRatio < ratioThreshold) || avgRelevance < 0.5);
+  const oneSided = starvedSubgroups.length > 0 || (enoughVolume && ((successCreditRatio !== null && successCreditRatio < ratioThreshold) || avgRelevance < 0.5));
 
   let gapEmission: "emitted" | "error" | "not_needed" = "not_needed";
   if (oneSided) {

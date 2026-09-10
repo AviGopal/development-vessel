@@ -4576,7 +4576,7 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
   // ever examined — the silence-is-success confusion this codebase keeps paying for.
   let coverageTargetsExamined = 0;
   try {
-    const { access } = await import("node:fs/promises");
+    const { access, readdir, readFile } = await import("node:fs/promises");
     const rootT = process.env["REPO_ROOT"] ?? process.env["WORKSPACE_ROOT"] ?? "/workspace/git/super-repo";
     for (const tf of targetFiles) {
       if (!/\.tsx?$/.test(tf) || /\.test\.tsx?$/.test(tf)) continue;
@@ -4588,6 +4588,29 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
       let covered = false;
       for (const c of candidates) {
         try { await access(`${rootT}/${c}`); covered = true; break; } catch { /* try next */ }
+      }
+      if (!covered) {
+        try {
+          const testDir = tf.replace(/^([^/]+\/[^/]+)\/src\//, "$1/test/");
+          const entries = await readdir(testDir, { recursive: true, withFileTypes: false });
+          const testFiles = entries
+            .filter((e: string) => e.endsWith('.test.ts'))
+            .slice(0, 200);
+          const basename = tf.split('/').pop()?.replace(/\.tsx?$/, '') || '';
+          const needles = [
+            `/${basename}"`,
+            `/${basename}.js"`,
+            `/${basename}'`,
+            `/${basename}.js'`
+          ];
+          for (const testFile of testFiles) {
+            const content = await readFile(`${testDir}/${testFile}`, 'utf8');
+            if (needles.some(needle => content.includes(needle))) {
+              covered = true;
+              break;
+            }
+          }
+        } catch { /* if readdir fails, leave covered=false */ }
       }
       if (!covered) {
         uncoveredTargets.push(tf);

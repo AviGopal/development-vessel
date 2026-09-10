@@ -245,9 +245,12 @@ function hasClassifiableId(g: SubstrateGap): boolean {
 async function loadGaps(): Promise<SubstrateGap[]> {
   try {
     const raw = await readFile(GAPS_PATH(), "utf-8");
-    return JSON.parse(raw) as SubstrateGap[];
-  } catch {
-    return [];
+    const parsed = JSON.parse(raw) as SubstrateGap[];
+    if (!Array.isArray(parsed)) throw new Error("gaps.json did not parse to an array - refusing to treat as empty");
+    return parsed;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException)?.code === "ENOENT") return [];
+    throw err;
   }
 }
 

@@ -30,6 +30,7 @@ import { mkdir, writeFile, readFile, copyFile, unlink } from "node:fs/promises";
 import { dirname, join, resolve, relative, isAbsolute } from "node:path";
 import { METABOB_ENDPOINT, METABOB_API_KEY, env } from "../config.js";
 import type { ResolverResult } from "./types.js";
+import { vacuousEditReason } from "../vacuous-edit.js";
 import { resolveVesselMitosisCutover } from "./vessel-mitosis-cutover.js";
 import { staticEvaluate } from "./vessel-mitosis-evaluate.js";
 import { noProgressStreak } from "./no-progress-streak.js";

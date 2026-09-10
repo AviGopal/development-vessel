@@ -42,6 +42,7 @@ export async function resolveRhythmRealitySync(
     open_gap_count: number;
     updated: Array<{ id: string; family: string; old_staleness: number; new_staleness: number }>;
     considered: number;
+    open_gap_known: boolean;
   };
 }> {
   // (1) Read rhythm registry
@@ -66,6 +67,7 @@ export async function resolveRhythmRealitySync(
 
   // (2) Read open gap count
   let openGapCount = 0;
+  let openGapKnown = false;
   try {
     const res = await fetchWithTimeout(
       { impulse: { type: "gap_lifecycle_scan" } },
@@ -73,10 +75,12 @@ export async function resolveRhythmRealitySync(
     );
     if (res.ok) {
       const data = (await res.json()) as { body?: { open?: number } };
-      openGapCount = typeof data?.body?.open === "number" ? data.body.open : 0;
+      if (typeof data?.body?.open === "number") {
+        openGapCount = data.body.open;
+        openGapKnown = true;
+      }
     }
   } catch {
-    openGapCount = 0;
   }
 
   // (3) Recompute staleness for gap-closing family only
@@ -93,8 +97,9 @@ export async function resolveRhythmRealitySync(
       const cadenceFirst = cadenceImpulses?.[0];
       const cadenceTb = cadenceFirst?.payload?.target_backlog;
       const targetBacklog = (typeof cadenceTb === 'number' && cadenceTb > 0) ? cadenceTb : 400;
-      const new_staleness = Math.min(1, openGapCount / targetBacklog);
-      if (old_staleness !== new_staleness) {
+      if (openGapKnown) {
+        const new_staleness = Math.min(1, openGapCount / targetBacklog);
+        if (old_staleness !== new_staleness) {
         // (4) Write back via poolImpulse_write
         try {
           await fetchWithTimeout(
@@ -115,6 +120,7 @@ export async function resolveRhythmRealitySync(
         updated.push({ id: rhythm.id, family: rhythm.body.family, old_staleness, new_staleness });
       }
     }
+    }
     // family "reality-modeling" and all others: leave staleness unchanged
   }
 
@@ -125,6 +131,7 @@ export async function resolveRhythmRealitySync(
       open_gap_count: openGapCount,
       updated,
       considered: rhythms.length,
+      open_gap_known: openGapKnown,
     },
   };
 }

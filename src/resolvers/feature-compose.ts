@@ -4590,20 +4590,52 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
         try { await access(`${rootT}/${c}`); covered = true; break; } catch { /* try next */ }
       }
       if (!covered) {
+        // RESTORED 2026-09-10. A dispatched edit replaced this block's body with a bare
+        // directory scan: it read the entries, discarded them, and never set `covered`.
+        // It typechecked, passed the gate and deployed, and left the fallback inert — the
+        // same landed-and-does-nothing class this whole check exists to detect.
+        //
+        // Two roots, tried in order, because the first is often stale. `rootT` resolves to
+        // the super-repo, whose SUBMODULE working trees nothing refreshes: measured today
+        // the goal-host tree sat at 2026-08-16 while its clone was at 2026-09-10, and 7 of
+        // 14 vessels were drifted by 4 to 25 days — the drifted ones being exactly the
+        // actively-developed ones. The clone under VESSEL_CLONE_ROOT is what pull-sync
+        // fast-forwards, so it is current.
+        //
+        // The loop must advance on NO MATCH, not merely on a failed readdir. The stale
+        // submodule tree usually HAS a test directory — it simply lacks recently added
+        // files — so stopping at the first readable root would re-create the bug this is
+        // meant to fix.
         try {
-          const testDir = tf.replace(/^([^/]+\/[^/]+)\/src\//, "$1/test/");
-          const vesselSeg = tf.split('/').slice(0, 2).join('/');
-          const cloneRoot = process.env.VESSEL_CLONE_ROOT || '/workspace/git/vessels';
-          const testRoots = [`${rootT}/${vesselSeg}/test`, `${cloneRoot}/${vesselSeg.split('/').pop()}/test`];
-          let entries;
+          const vesselSeg = tf.split("/").slice(0, 2).join("/");
+          const cloneRoot = process.env["VESSEL_CLONE_ROOT"] ?? "/workspace/git/vessels";
+          const testRoots = [`${rootT}/${vesselSeg}/test`, `${cloneRoot}/${vesselSeg.split("/").pop()}/test`];
+          // TWO segments, not one. A single-segment needle is whole-segment safe for a
+          // distinctive name but useless for a generic one: matching `/index"` credited
+          // goal-host's src/index.ts with coverage from a test importing an unrelated
+          // seed/index, which is precisely the false coverage this check must not produce.
+          // `/src/index` and `/resolvers/feature-compose` are specific enough to identify
+          // the module while still ignoring `/gap-lifecycle-scan` for a target named `gap`.
+          const stem = tf.replace(/\.tsx?$/, "").split("/").slice(-2).join("/");
+          const needles = [`/${stem}"`, `/${stem}.js"`, `/${stem}'`, `/${stem}.js'`];
           for (const testRoot of testRoots) {
+            let entries: string[];
             try {
-              entries = await readdir(testRoot, { recursive: true, withFileTypes: true });
-              break;
-            } catch { /* try next root */ }
+              entries = (await readdir(testRoot, { recursive: true })) as unknown as string[];
+            } catch { continue; }
+            // 2000, not 200. The original cap was below the corpus: development-vessel has
+            // 251 test files and the observer's test sat at index 250, so the cap hid it and
+            // the target read as untested. Which files fall outside depends on readdir order,
+            // so the bound silently decided coverage for roughly a fifth of the vessel.
+            // Reading all 251 takes well under a second; the bound exists only to stop a
+            // pathological tree stalling a compose, and 2000 still does that.
+            for (const testFile of entries.filter((e) => String(e).endsWith(".test.ts")).slice(0, 2000)) {
+              const content = await readFile(`${testRoot}/${testFile}`, "utf8");
+              if (needles.some((n) => content.includes(n))) { covered = true; break; }
+            }
+            if (covered) break;
           }
-          if (!entries) continue;
-        } catch { /* if readdir fails, leave covered=false */ }
+        } catch { /* any failure leaves covered false */ }
       }
       if (!covered) {
         uncoveredTargets.push(tf);

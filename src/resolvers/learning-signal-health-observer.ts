@@ -70,8 +70,7 @@ export async function resolveLearningSignalHealthObserver(
   // so a page that fills to its limit returns precisely the concepts that HAVE successes.
   // Measured 2026-09-10: total = loaded = loadedWithSuccess = 5000 against a store of 69,142
   // concepts whose true ratio was 0.456 - the numerator had chosen the denominator.
-  const pageLimit = Number(new URL(searchUrl).searchParams.get("limit") ?? 0);
-  const sampleSaturated = pageLimit > 0 && total >= pageLimit;
+
   const relSum = concepts.reduce((s, c) => s + (c.relevance ?? 0.5), 0);
   const avgRelevance = total > 0 ? relSum / total : 0.5;
 

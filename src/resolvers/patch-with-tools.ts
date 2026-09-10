@@ -1368,6 +1368,27 @@ export async function resolvePatchWithTools(pointer: PatchWithToolsPointer): Pro
   }
 }
 
+  // DETERMINISTIC VACUOUS-EDIT GATE, UNCONDITIONAL. The region-containment gate above
+  // is skipped whenever the proposal names no region, which is 91-97% of proposals
+  // (113 of 4,357 gaps carry a region; 93 of 1,050 open ones), leaving typecheck as the
+  // only substantive check on a path that self-lands via the mitosis cutover. This
+  // refuses only when EVERY added line is a declaration whose identifier is never used
+  // in the result, so it judges the edit's own text rather than its responsiveness, and
+  // being deterministic it cannot false-block under load. Same helper feature_compose
+  // already uses. Evidence: 6dc2005 landed two declarations that nothing reads.
+  {
+    const vacuousReason = vacuousEditReason(baseContent, afterSrc);
+    if (vacuousReason) {
+      await resetTarget();
+      return structuredError("vacuous_edit", {
+        target_file: pointer.target_file,
+        detail: vacuousReason,
+        before_sha: beforeSha,
+        after_sha: afterSha,
+      });
+    }
+  }
+
 // Stage the modified file into a mitosis dir for the cutover machinery.
   const mitosisRoot = join(vesselsRoot, `${vessel}-mitosis-${stamp}`);
   const stagedFile = join(mitosisRoot, subPath);

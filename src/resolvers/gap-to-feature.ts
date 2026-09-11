@@ -1419,6 +1419,28 @@ export async function admitActionableGaps(
     const meta = (g.classification_metadata ?? g.metadata ?? {}) as Record<string, unknown>;
     const failedAttempts = Number(meta.failed_attempts ?? 0);
 
+    // (E3) PHANTOM ANCHOR — retire a gap whose quoted anchor is already gone from the file
+    // it names. Measured 2026-09-11: 17 of 600 open gaps cite a complete anchor with zero
+    // occurrences in their named file, so every retry must fail anchor_not_found forever.
+    // FAIL-OPEN by construction: any parse, path or read problem admits exactly as before.
+    try {
+      const phantomSummary = String(g.summary ?? "");
+      const phantomAnchor = phantomSummary
+        .split(String.fromCharCode(10))
+        .map((l) => l.trim())
+        .find((l) => (l.startsWith("const ") || l.startsWith("let ") || l.startsWith("function ")) && l.endsWith(";") && l.length > 20);
+      const phantomSite = String(meta.edit_site ?? "").split(":")[0];
+      if (phantomAnchor && phantomSite?.startsWith("repos/") && failedAttempts >= 2) {
+        const phantomRoot = process.env["VESSELS_CLONE_ROOT"] ?? "/workspace/git/vessels";
+        const phantomParts = phantomSite.split("/");
+        const phantomAbs = phantomRoot + "/" + phantomParts[1] + "/" + phantomParts.slice(2).join("/");
+        if (existsSync(phantomAbs) && !readFileSync(phantomAbs, "utf8").includes(phantomAnchor)) {
+          excluded.push({ id, reason: "phantom_anchor(" + phantomParts[1] + ")" });
+          continue;
+        }
+      }
+    } catch { /* fail-open: admit as before */ }
+
     // (E2) PHANTOM TYPECHECK — retire when the referenced error is already gone.
     const tc = typecheckClassOf(g);
     if (tc) {

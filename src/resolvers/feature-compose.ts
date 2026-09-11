@@ -3314,7 +3314,7 @@ async function composeLessonsBlock(specText?: string, failureClasses: string[] =
         // (a join of four returned typecheck_dangling_reference, 28 chars, over
         // anchor_not_found). Length is not recency. When the gap has no recorded class
         // the query is omitted entirely, preserving today's behaviour exactly.
-        body: JSON.stringify({ pointer: { type: "conceptSearch", source_type: "compose_lesson", ...(failureClasses[0] ? { query: failureClasses[0] } : { query: specText.slice(0, 400) }), limit: 8 } }),
+        body: JSON.stringify({ pointer: { type: "conceptSearch", source_type: "compose_lesson", ...(failureClasses[0] ? { query: failureClasses[0] } : {}), limit: 8 } }),
         signal: AbortSignal.timeout(8_000),
       });
       if (resp.ok) {

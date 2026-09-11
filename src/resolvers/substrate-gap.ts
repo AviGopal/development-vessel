@@ -95,6 +95,8 @@ export type SubstrateGapCategory =
   | "training_knowledge"
   | "missing_concept"
   | "missing_idiom"
+  | "route-edit-f3fa9300"
+  | "compose_execution_failure"
   // systematic_failure (2026-06-28): an EXISTING capability that fails the same
   // way repeatedly — emitted by trace_failure_pattern_report(emit_gap) so the
   // gap_to_feature -> feature_compose loop authors an improvement. Distinct from
@@ -146,7 +148,7 @@ export interface SubstrateGap {
   // reopen_count increments each time a previously-closed gap is re-detected as
   // open (recurrence) — a durable fix keeps this at 0.
   reopen_count?: number;
-  route?: "dispatchable" | "composable" | "human_required" | "route-edit-e9b22f20";
+  route?: "dispatchable" | "composable" | "human_required" | "route-edit-e9b22f20" | "route-edit-f3fa9300" | "compose_execution_failure";
   remedy?: { vessel: string; impulse_type?: string; goal?: string };
   classification_metadata?: Record<string, unknown>;
   created_at: string;

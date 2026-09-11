@@ -767,7 +767,7 @@ export async function resolveSubstrateGapWrite(
       !(g.summary === incoming.summary && g.category === incoming.category && g.source === incoming.source) && g.status !== "closed" && gapClassKey(g.id) === classKey);
         if (existingIdx >= 0) {
           const existingGap = gaps[existingIdx];
-          if (existingGap && existingGap.source === incoming.source) {
+          if (existingGap && existingGap.summary === incoming.summary && existingGap.category === incoming.category && existingGap.source === incoming.source) {
             return {
               early: {
                 shape: 'structuredError',

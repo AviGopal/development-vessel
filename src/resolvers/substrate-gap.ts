@@ -96,6 +96,7 @@ export type SubstrateGapCategory =
   | "missing_concept"
   | "missing_idiom"
   | "route-edit-f3fa9300"
+  | "route-edit-e96b850c-narrowed"
   | "compose_execution_failure"
   // systematic_failure (2026-06-28): an EXISTING capability that fails the same
   // way repeatedly — emitted by trace_failure_pattern_report(emit_gap) so the

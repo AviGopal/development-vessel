@@ -1055,7 +1055,7 @@ export async function resolveSubstrateGapWrite(
       } else {
         console.log(`[substrate-gap] event-driven gap-compose pickup triggered by ${gap.id}${reopened ? ' (reopened)' : ''}`);
       }
-      if (proc?.exitCode !== 0) {
+      if (proc !== null && proc.exitCode !== 0) {
         console.error(`[substrate-gap] gap-compose failed to start (systemctl exit ${proc?.exitCode ?? 'unknown'})`);
 
         if (proc?.stdout) {

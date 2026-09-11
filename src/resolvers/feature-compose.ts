@@ -1782,6 +1782,13 @@ export function cjsInEsmRefusal(diff: string): string | null {
 /**
  * Is a patch causally connected to the region a gap names?
  *
+  * Is a patch causally connected to the region a gap names?
+ * The problem is `diff.includes(named_symbol)` can be true, even when the `named_symbol`
+ * is in an inert region (e.g. comment or string literal) so no runtime behavior change
+ * will occur. This function is used to gate the generation of `semantic_diff` which is an
+ * expensive operation, so this function is exported for two different landing routes
+ * and only one of them used to ask about inert regions. It has been refactored to check
+ * `addedCodeLines` instead of the raw `diff` and should behave identically for both call sites.
  * Exported because there are TWO landing routes and only one of them used to ask.
  * feature_compose gates here; `patch_with_tools` stages a mitosis and self-lands
  * with no semantic judge at all — which is how `046d754` put an unjudged patch on

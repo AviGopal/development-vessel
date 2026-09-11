@@ -1073,8 +1073,9 @@ export async function resolveSubstrateGapWrite(
       if (gd.__composeDrainInflight === true) {
         console.log(`[substrate-gap] compose nudge skipped for ${gap.id} — a compose is already in flight`);
       } else if (typeof gd.__composeDrainLastAt === "number" && nowMs - gd.__composeDrainLastAt < COMPOSE_MIN_INTERVAL_MS) {
-        const proc = Bun.spawn(["systemctl","start","--no-block","gap-compose.service"], { stdout: "pipe", stderr: "pipe" });
+        const proc = Bun.spawn(["systemctl", "start", "--no-block", "gap-compose.service"], { stdout: "pipe", stderr: "pipe" });
         const exitCode = await proc.exited;
+
         if (exitCode !== 0) {
           const stderr = new TextDecoder().decode(await new Response(proc.stderr).arrayBuffer());
           console.error(`Failed to start gap-compose.service, exit code: ${exitCode}. Stderr: ${stderr}`);
@@ -1082,29 +1083,12 @@ export async function resolveSubstrateGapWrite(
             shape: "structuredError",
             body: {
               error: "gap_service_start_failed",
-              message: `gap-compose.service failed to start, exit code: ${exitCode}`,
-            },
+              message: `gap-compose.service failed to start, exit code: ${exitCode}`
+            }
           };
         }
-        const [stdout, stderr] = await Promise.all([
-          new Response(proc.stdout).text(),
-          new Response(proc.stderr).text(),
-        ]);
-        if (exitCode !== 0) {
-          console.error(`[substrate-gap] gap-compose.service failed with exit code ${exitCode}: stdout=${stdout}, stderr=${stderr}`);
-        } else {
-          console.log(`[substrate-gap] gap-compose.service started successfully for gap ${gap.id}`);
-        }
 
-        if (exitCode !== 0) {
-          console.error(`[substrate-gap] gap-compose.service failed to start for ${gap.id} (exit code ${exitCode})`);
-          if (stdout) { console.error(`[substrate-gap] gap-compose stdout: ${stdout}`); }
-          if (stderr) { console.error(`[substrate-gap] gap-compose stderr: ${stderr}`); }
-          throw new Error(`Failed to trigger gap-compose for ${gap.id}. See logs for details.`);
-        }
-        if (exitCode === 0) {
-          console.log(`[substrate-gap] event-driven gap-compose pickup triggered by ${incoming.id}`);
-        }
+        console.log(`[substrate-gap] event-driven gap-compose pickup triggered by ${incoming.id}`);
         return { shape: 'compose_nudge_triggered', body: { gapId: gap.id } };
       } else {
         gd.__composeDrainInflight = true;

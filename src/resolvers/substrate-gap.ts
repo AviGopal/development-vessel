@@ -1084,27 +1084,14 @@ export async function resolveSubstrateGapWrite(
         } else {
           console.log(`[substrate-gap] gap-compose.service started successfully for gap <id>`);
         }
-        const [procOutput, procErr] = await Promise.all([
-          new Response(proc.stdout).text(),
-          new Response(proc.stderr).text(),
-          proc.exited
-        ]);
-        const exitStatus = await proc.exitCode;
-        if (exitCode === 0) {
-          console.log(`[substrate-gap] event-driven gap-compose pickup triggered by ${incoming.id} (service started successfully)`);
-        } else if (exitCode === 5) {
-          console.error(`[substrate-gap] gap-compose.service failed (exit=${exitCode}): service likely masked or stopped. stdout: ${procOutput}, stderr: ${procErr}`);
-        } else {
-          console.error(`[substrate-gap] gap-compose.service failed with exit code ${exitCode}. stdout: ${procOutput}, stderr: ${procErr}`);
-        }
 
         if (exitCode !== 0) {
           console.error(`[substrate-gap] gap-compose.service failed to start for ${gap.id} (exit code ${exitCode})`);
-          if (procOutput) { console.error(`[substrate-gap] gap-compose stdout: ${procOutput}`); }
-          if (procErr) { console.error(`[substrate-gap] gap-compose stderr: ${procErr}`); }
+          if (stdout) { console.error(`[substrate-gap] gap-compose stdout: ${stdout}`); }
+          if (stderr) { console.error(`[substrate-gap] gap-compose stderr: ${stderr}`); }
           throw new Error(`Failed to trigger gap-compose for ${gap.id}. See logs for details.`);
         }
-        console.log(`[substrate-gap] event-driven gap-compose pickup triggered by ${gap.id}`);
+        console.log(`[substrate-gap] event-driven gap-compose pickup triggered by ${incoming.id}`);
         return { shape: 'compose_nudge_triggered', body: { gapId: gap.id } };
       } else {
         gd.__composeDrainInflight = true;

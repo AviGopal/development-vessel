@@ -6395,6 +6395,7 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
           semantic_reason: String(semantic_gate?.reason ?? "").slice(0, 400),
           hard_fail: semantic_gate?.hard_fail ?? null,
           verify_ok: (verify as Array<Record<string, unknown>>).map((v) => v?.ok ?? null),
+          verify_failed_output: (verify as Array<Record<string, unknown>>).filter((v) => v?.ok === false).map((v) => String(v?.output ?? "").split(String.fromCharCode(10)).filter((l) => l.includes("(fail)") || l.includes("error TS")).slice(0, 10).join(" ; ")).slice(0, 2),
           // EFFECT COVERAGE — was there anything that could EXECUTE the changed code?
           //
           // This was computed and only console.warn'd, so nothing downstream could ever answer

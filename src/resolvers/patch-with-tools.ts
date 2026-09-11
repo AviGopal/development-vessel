@@ -205,7 +205,7 @@ async function triggerMitosisTick(a: {
       mitosis_root: a.mitosisRoot,
       staged_files: a.stagedFiles,
       staged_base_sha: a.baseSha,
-      evaluation_evidence: { verdict: "FAVORABLE", base_success_rate: 1, mitosis_success_rate: 1, cited_trace_ids: [], cited_check_names: citedChecks.length ? citedChecks : ["static_evaluate"] },
+      evaluation_evidence: { verdict: "FAVORABLE", base_success_rate: 1, mitosis_success_rate: 1, cited_trace_ids: [], cited_check_names: citedChecks.length ? citedChecks : ["static_evaluate"], gap_id: a.gapId },
       gap_id: a.gapId,
       proposal_id: a.proposalId,
       skip_push: false,

@@ -53,7 +53,7 @@ const PER_CALL_TIMEOUT_MS = 60_000;
 const MAX_TRANSIENT_RETRIES = 3;
 const TRANSIENT_BACKOFF_MS = 750;
 function isTransientTransportError(msg: string): boolean {
-  return /NO_RESERVATION|no reservation|fetch 50[234]|p2p-circuit|circuit|relay|dial(?:ed)? failed|ECONNRESET|ETIMEDOUT|socket hang up/i.test(msg);
+  return /NO_RESERVATION|no reservation|fetch 50[234]|p2p-circuit|circuit|relay|dial(?:ed)? failed|ECONNRESET|ETIMEDOUT|socket hang up|ENOTFOUND|EHOSTUNREACH|ECONNREFUSED/i.test(msg);
 }
 
 function isSemanticReject(e: unknown): boolean {

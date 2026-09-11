@@ -2890,7 +2890,7 @@ const COMPOSE_LESSONS_PATH = "/workspace/proposals/compose-lessons.jsonl";
 const COMPOSE_LESSON_GUIDANCE: Record<string, string> = {
   empty_diff_identity_edit: "every edit op MUST carry a non-empty old_string copied VERBATIM from the current file content and a new_string that DIFFERS from it — an op whose applied diff is empty is a hard reject",
   anchor_not_found: "old_string anchors must be copied verbatim from the CURRENT file content shown in the grounding — never reconstructed from memory",
-  typecheck_dangling_reference: "when deleting or renaming a symbol, update EVERY reference to it in the same plan — search the grounding for the symbol name first",
+  typecheck_dangling_reference: "a symbol you USE must be DECLARED in the same plan — if the new_string references a constant, helper or type, either it already exists in the grounding or your plan must add its declaration too; and when deleting or renaming a symbol, update EVERY reference to it in the same plan — search the grounding for the symbol name first",
   syntax_break: "deletions must respect block structure — never delete across a function or brace boundary",
   partial_spec_omission: "if the spec lists N numbered items, the plan must implement ALL N — partial implementations are rejected",
   wrong_location: "anchor each edit to the EXACT symbol/site named in the spec, not a similarly-named one",

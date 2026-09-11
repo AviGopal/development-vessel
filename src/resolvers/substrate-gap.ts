@@ -1091,7 +1091,9 @@ export async function resolveSubstrateGapWrite(
           if (stderr) { console.error(`[substrate-gap] gap-compose stderr: ${stderr}`); }
           throw new Error(`Failed to trigger gap-compose for ${gap.id}. See logs for details.`);
         }
-        console.log(`[substrate-gap] event-driven gap-compose pickup triggered by ${incoming.id}`);
+        if (exitCode === 0) {
+          console.log(`[substrate-gap] event-driven gap-compose pickup triggered by ${incoming.id}`);
+        }
         return { shape: 'compose_nudge_triggered', body: { gapId: gap.id } };
       } else {
         gd.__composeDrainInflight = true;

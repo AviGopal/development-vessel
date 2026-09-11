@@ -3332,7 +3332,7 @@ async function composeLessonsBlock(specText?: string, failureClasses: string[] =
           const rawLessons = await Bun.file(COMPOSE_LESSONS_PATH).text().catch(() => "");
           const latestByClass = new Map<string, string>();
           for (const line of rawLessons.split("\n").slice(-400)) { try { const rec = JSON.parse(line) as { class?: string; reason?: string }; if (rec.class && rec.reason) latestByClass.set(rec.class, rec.reason); } catch { /* skip unparseable line */ } }
-          const obs = [...latestByClass.entries()].slice(-8).map(([c, r]) => `- ${c}: ${r.slice(0, 300)}`).join("\n");
+          const obs = [...latestByClass.entries()].slice(-8).map(([c, r]) => `- ${c}: ${r.replace(/\s+/g, " ").trim().slice(0, 300)}`).join("\n");
           const obsBlock = obs ? `\n\nMOST RECENT ACTUAL REJECTION per class — verbatim judge verdicts on real composes, not general advice:\n${obs}` : "";
           return `\n\nKNOWN FAILURE MODES from this substrate's own rejected composes — plans repeating these are rolled back:\n${found.map((r) => `- ${r}`).join("\n")}${obsBlock}`;
         }

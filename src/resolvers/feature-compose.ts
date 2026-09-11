@@ -6297,7 +6297,7 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
     const failedVerify = verify.find((v) => !v.ok);
     const lessonReason = String(
       failedApply?.detail
-      ?? failedVerify?.output
+      ?? (failedVerify ? (failedVerify.output.split("\n").filter((l) => /error TS\d|error:|\(fail\)|expect\(/.test(l)).slice(0, 6).join(" | ") || failedVerify.output) : undefined)
       ?? semantic_gate?.reason
       ?? verdict,
     );

@@ -767,6 +767,47 @@ export async function resolveSubstrateGapWrite(
       // A decomposition gap whose summary only repeats its parent is not a novel finding.
       // Reject it at write time to avoid storing redundant information.
       !(g.summary === incoming.summary && g.category === incoming.category && g.source === incoming.source) && g.status !== "closed" && gapClassKey(g.id) === classKey);
+
+/**
+ * loadGaps reads the current state of the gaps from the filesystem. If the file is missing,
+ * empty, or unparseable, it returns an empty array, NOT throwing an error. This is crucial
+ * because the store is read-modify-write; a transient error or corruption must not cause
+ * the store to silently self-destruct by overwriting valid data with an empty array.
+ * Instead, on a read error, it should log the error and return the previous valid state
+ * (which, in a fresh start or actual corruption, might mean an empty array, but critically
+ * not overwriting existing data with an empty set if the read failed for a transient reason).
+ *
+ * To prevent silent store destruction (incident 2026-09-09), this function now returns
+ * an empty array ONLY if the file genuinely does not exist or is empty. If there's a
+ * parsing error, it will log the error and return an empty array, but the *caller*
+ * should then handle this by not overwriting the file if the read failed due to corruption.
+ * (The saveGaps function should handle not overwriting on a load failure).
+ * For a failed read due to corruption, it should attempt to read previous versions or fail gracefully
+ * without writing an empty array back. The immediate fix here prevents returning empty on ANY
+ * read/parse failure, which would lead to store destruction.
+ */
+async function loadGaps(storePath: string): Promise<SubstrateGap[]> {
+  try {
+    const json = await readFile(storePath, "utf8");
+    if (json.trim() === "") {
+      console.log(`Gap store at ${storePath} is empty.`);
+      return [];
+    }
+    return JSON.parse(json) as SubstrateGap[];
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "ENOENT") {
+      console.log(`Gap store file not found at ${storePath}. Initializing empty.`);
+      return []; // File not found, interpret as empty store
+    } else {
+      console.error(`Error reading or parsing gap store at ${storePath}:`, error);
+      // CRITICAL: Do NOT return an empty array here directly on parse failure.
+      // Returning an empty array would lead to silent store destruction if the file
+      // exists but is corrupt. The caller must decide how to handle this, likely
+      // by not writing back an empty array on a read failure due to corruption.
+      throw error; // Propagate the error so the caller can handle it defensively
+    }
+  }
+}
         if (existingIdx >= 0) {
           const existingGap = gaps[existingIdx];
           if (existingGap && existingGap.summary === incoming.summary && existingGap.category === incoming.category && existingGap.source === incoming.source) {

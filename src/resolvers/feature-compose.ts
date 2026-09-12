@@ -178,7 +178,10 @@ type Json = Record<string, unknown>;
 //
 // lastDraftModel / lastDraftEndpoint record which model the resolver selected for the
 // most recent drafting call and where it came from, so the compose can report that
-// arm's outcome once its verdict is known.
+// arm's outcome once the compose verdict is settled. planDraftModel pins the PLAN
+// call's model: lastDraftModel is cleared immediately before that call and read
+// immediately after it, so the captured value can only come from that call.
+let planDraftModel = "";
 let lastDraftModel = "";
 let lastDraftEndpoint = "";
 async function llmCall(endpoint: string, prompt: string, model: string): Promise<string> {
@@ -4090,7 +4093,9 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
     console.log("[decompose] deterministic verbatim-replacement synthesis applied");
   } else {
     try {
-      planRaw = await llmCallWithFailover(llmEndpoints, decomposePrompt(spec, maxOps, grounding, principles + composeLessons, priorFeedback, netNewTargets), model);
+      lastDraftModel = "";
+planRaw = await llmCallWithFailover(llmEndpoints, decomposePrompt(spec, maxOps, grounding, principles + composeLessons, priorFeedback, netNewTargets), model);
+planDraftModel = lastDraftModel;
     } catch (e) {
       // OBSERVABILITY (2026-08-13): this decompose-throw was SILENT — it returns
       // ok:false and never reaches the [fc-plan] log below, so a draft that dies
@@ -6361,7 +6366,7 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
         headers: { "Content-Type": "application/json", Authorization: "ApiKey " + METABOB_API_KEY },
         body: JSON.stringify({
           type: "llmArmOutcome_write",
-          model: lastDraftModel,
+          model: planDraftModel || lastDraftModel,
           reached: verdict === "FAVORABLE",
           task_type: "feature_compose"
         })

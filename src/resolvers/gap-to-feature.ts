@@ -1429,7 +1429,7 @@ export async function admitActionableGaps(
       if (Array.isArray(repeatLessons) && repeatLessons.length >= 3) {
         const repeatKeys = new Set(
           repeatLessons
-            .map((l) => String((l as Record<string, unknown>)?.["reason"] ?? "").toLowerCase().replace(/[0-9a-f]{8,}/g, "H").replace(/[0-9]+/g, "N").slice(0, 120))
+            .map((l, i) => String((l as Record<string, unknown>)?.["reason"] ?? "").toLowerCase().startsWith("== install") ? "undistilled-build-log-placeholder-" + i : String((l as Record<string, unknown>)?.["reason"] ?? "").toLowerCase().replace(/[0-9a-f]{8,}/g, "H").replace(/[0-9]+/g, "N").slice(0, 120))
             .filter((s) => s.length > 20),
         );
         if (repeatKeys.size === 1) {

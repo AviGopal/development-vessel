@@ -174,7 +174,13 @@ type Json = Record<string, unknown>;
 // window; the 8 firings on record all predate the guard.
 //
 // Removed rather than satisfied at the call site: a parameter no code reads is
-// not a flag, and leaving it would keep a landmine for the next caller.
+// not a flag, and leaving it would keep a landmine for any future caller.
+//
+// lastDraftModel / lastDraftEndpoint record which model the resolver selected for the
+// most recent drafting call and where it came from, so the compose can report that
+// arm's outcome once its verdict is known.
+let lastDraftModel = "";
+let lastDraftEndpoint = "";
 async function llmCall(endpoint: string, prompt: string, model: string): Promise<string> {
   const res = await fetch(endpoint, {
     method: 'POST',
@@ -203,7 +209,9 @@ async function llmCall(endpoint: string, prompt: string, model: string): Promise
   }
 
   const j = (await res.json());
-  console.log("[fc-draft-model] selected=" + String((j as { model_selection?: { selected?: unknown } })?.model_selection?.selected ?? "unknown") + " task=feature_compose");
+  lastDraftModel = String((j as { model_selection?: { selected?: unknown } })?.model_selection?.selected ?? "");
+  lastDraftEndpoint = endpoint;
+  console.log("[fc-draft-model] pick=" + lastDraftModel + " task=feature_compose");
   if (j.error) {
     throw new Error(`llmCall to ${endpoint} returned error in body: ${JSON.stringify(j.error)}`);
   }
@@ -6347,8 +6355,23 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
         }
       } catch { /* unreadable or corrupt prior report: fall back to overwriting */ }
     }
+    if (lastDraftModel && lastDraftEndpoint) {
+      void fetch(lastDraftEndpoint, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: "ApiKey " + METABOB_API_KEY },
+        body: JSON.stringify({
+          type: "llmArmOutcome_write",
+          model: lastDraftModel,
+          reached: verdict === "FAVORABLE",
+          task_type: "feature_compose"
+        })
+      }).catch(() => {});
+      console.log("[fc-draft-model] graded=" + lastDraftModel + " reached=" + String(verdict === "FAVORABLE"));
+    } else {
+      console.log("[fc-draft-model] NOT graded — no drafting call recorded for this compose");
+    }
     writeFileSync(
-      reportPath,
+      (reportPath),
       JSON.stringify({ ok: verdict === "FAVORABLE", verdict, spec: String(spec).slice(0, 8000), summary: plan.summary, touched_vessels: [...touched], op_count: ops.length, applied, apply_failed: applyFailed, verify, semantic_gate, rolled_back, restore_failed: restoreFailed, cutovers }, null, 2),
     );
   } catch { /* persistence failure must never fail the compose */ }

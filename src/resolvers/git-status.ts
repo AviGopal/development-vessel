@@ -42,6 +42,9 @@ export async function resolveGitStatus(
       if (dotGitText.startsWith("gitdir:")) gitDir = dotGitText.slice("gitdir:".length).trim();
     } catch { /* .git is a directory (ordinary checkout) — keep the default */ }
 
+    const rebaseInProgress = await Bun.file(`${gitDir}/rebase-merge`).exists() || await Bun.file(`${gitDir}/rebase-apply`).exists();
+    const conflictInProgress = await Bun.file(`${gitDir}/MERGE_HEAD`).exists() || await Bun.file(`${gitDir}/CHERRY_PICK_HEAD`).exists();
+
     const headRaw = await Bun.file(`${gitDir}/HEAD`).text();
     const head = headRaw.trim();
 
@@ -52,11 +55,11 @@ export async function resolveGitStatus(
       const ref = head.slice(5).trim();
       const refPath = `${gitDir}/${ref}`;
       const commitHash = (await Bun.file(refPath).text()).trim();
-      return { shape: "gitStatus", body: { commitHash, repoPath, ref } };
+      return { shape: "gitStatus", body: { commitHash, repoPath, ref, rebaseInProgress, conflictInProgress } };
     }
 
     // Detached HEAD: the file holds the hash directly.
-    return { shape: "gitStatus", body: { commitHash: head, repoPath, ref: null } };
+    return { shape: "gitStatus", body: { commitHash: head, repoPath, ref: null, rebaseInProgress, conflictInProgress } };
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     return { shape: "gitStatus", body: { error: `failed to read HEAD at ${repoPath}: ${msg}`, repoPath } };

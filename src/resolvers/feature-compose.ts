@@ -212,7 +212,9 @@ async function llmCall(endpoint: string, prompt: string, model: string): Promise
   }
 
   const j = (await res.json());
-  lastDraftModel = String((j as { model_selection?: { selected?: unknown } })?.model_selection?.selected ?? "");
+  lastDraftModel = (j as { fallback_from?: unknown })?.fallback_from
+    ? ""
+    : String((j as { model_selection?: { selected?: unknown } })?.model_selection?.selected ?? "");
   lastDraftEndpoint = endpoint;
   console.log("[fc-draft-model] pick=" + lastDraftModel + " task=feature_compose");
   if (j.error) {

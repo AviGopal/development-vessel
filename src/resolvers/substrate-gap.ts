@@ -1003,6 +1003,7 @@ async function loadGaps(storePath: string): Promise<SubstrateGap[]> {
     // verdict is a label on the data, not a correction of it; silently mutating a
     // caller's metadata is how the field-name mismatches in this store became
     // invisible in the first place.
+    if (typeof merged["falsifier"] === "string" && (merged["falsifier"] as string).length > 24) merged["falsifier_predicate"] = merged["falsifier"];
     merged["falsifier"] = c.falsifier;
     if (c.predicate_position) merged["falsifier_position"] = c.predicate_position;
     else delete merged["falsifier_position"];

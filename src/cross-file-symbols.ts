@@ -350,7 +350,7 @@ export function safeAnchorLines(
   return lines
     .slice(lo, hi)
     .map((l, i) => ({ text: l.trim(), dist: Math.abs(lo + i - center) }))
-    .filter((c) => uniqueInBand.has(c.text) && anchorOccurrences(fileText, c.text) === 1)
+    .filter((c) => uniqueInBand.has(c.text) && anchorOccurrences(fileText, c.text) === 1 && !c.text.trim().startsWith("//") && !c.text.trim().startsWith("/*"))
     .sort((a, b) => a.dist - b.dist)
     .slice(0, maxAnchors)
     .map((c) => c.text);

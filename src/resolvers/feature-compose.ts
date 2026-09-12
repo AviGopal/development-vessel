@@ -5527,7 +5527,8 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
               }
             }
           }
-        } catch { /* grounding is best-effort */ }
+        } catch { /* grounding is best-effort; repair attempt logged next */ }
+        console.warn("[fc-repair] ATTEMPT vessel=" + String(fv.vessel));
         const fix = parseJsonObject(await llmCall(
           // LLM egress, NOT concept-db — see the anchor-repair call above.
           llmEndpoint,

@@ -109,6 +109,7 @@ export function unknownMemberAccesses(replacement: string, moduleText: string): 
       if (!new RegExp(`\\b${prop.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`).test(moduleText)) out.push(whole);
       continue;
     }
+    if (replacement.includes("const " + receiver) || replacement.includes("let " + receiver) || replacement.includes("var " + receiver) || replacement.includes("function " + receiver) || replacement.includes("class " + receiver)) continue;
     if (AMBIENT.has(receiver)) continue;
     // An unknown receiver the module never names at all.
     if (!new RegExp(`\\b${receiver.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`).test(moduleText)) out.push(whole);

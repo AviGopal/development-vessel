@@ -194,7 +194,7 @@ async function triggerMitosisTick(a: {
     if (!ev.ok) {
       const status = ev.timed_out ? "evaluate_inconclusive" : `evaluate_refused:${ev.reason.slice(0, 120)}`;
       console.warn(`[patch-with-tools] cutover gated OUT for ${a.vessel}: ${status}`);
-      return { landed: false, new_git_sha: null, push_status: status };
+      return { landed: false, new_git_sha: null, push_status: 'cutover_failed' };
     }
     const citedChecks = ev.checks.map((c) => c.name).filter((n): n is string => typeof n === "string" && n.length > 0);
     const cut = await resolveVesselMitosisCutover({

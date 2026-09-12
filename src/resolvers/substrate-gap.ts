@@ -246,18 +246,19 @@ function hasClassifiableId(g: SubstrateGap): boolean {
 }
 
 async function loadGaps(): Promise<SubstrateGap[]> {
+  const gapsPath = GAPS_PATH();
   try {
-    const raw = await readFile(GAPS_PATH(), "utf-8");
-    const parsed = JSON.parse(raw) as SubstrateGap[];
+    const content = await readFile(gapsPath, "utf-8");
+    const parsed = JSON.parse(content) as SubstrateGap[];
     if (!Array.isArray(parsed)) throw new Error("gaps.json did not parse to an array - refusing to treat as empty");
     return parsed;
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException)?.code === "ENOENT") {
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException)?.code === "ENOENT") {
       // If the file doesn't exist, this is an empty store, not an error.
       return [];
     }
     // For any other error (parse error, permissions, etc.), treat as an unrecoverable failure.
-    throw new Error("gaps.json could not be loaded or parsed - refusing to treat as empty: " + (err as Error).message);
+    throw new Error("gaps.json could not be loaded or parsed - refusing to treat as empty: " + (e as Error).message);
   }
 }
 

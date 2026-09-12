@@ -1449,7 +1449,7 @@ export async function admitActionableGaps(
         ((meta.failure_lessons as Array<Record<string, unknown>> | undefined) ?? []).length >= 3 &&
         new Set(
           ((meta.failure_lessons as Array<Record<string, unknown>> | undefined) ?? [])
-            .map((l) => String(l?.["reason"] ?? "").toLowerCase().replace(/[0-9a-f]{8,}/g, "H").replace(/[0-9]+/g, "N").slice(0, 120))
+            .map((l, i) => String(l?.["reason"] ?? "").toLowerCase().startsWith("== install") ? "undistilled-build-log-placeholder-b" + i : String(l?.["reason"] ?? "").toLowerCase().replace(/[0-9a-f]{8,}/g, "H").replace(/[0-9]+/g, "N").slice(0, 120))
             .filter((s) => s.length > 20),
         ).size === 1
       ) {

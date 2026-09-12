@@ -5538,7 +5538,8 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
         const ef = typeof fix?.file === "string" ? String(fix.file)
           : typeof fix?.path === "string" ? String(fix.path) : "";
         if (!ef) console.warn("[fc-repair] NO-TARGET vessel=" + String(fv.vessel) + " parsed=" + String(!!fix) + " keys=" + (fix ? Object.keys(fix as Record<string, unknown>).join(",") : "none"));
-        const efAbs = ef ? opAbs(ef) : ""; // repair target resolved above
+        const efAbs = ef ? opAbs(ef) : ""; // repair target resolved
+        console.warn("[fc-repair] RESPONSE keys=" + (fix ? Object.keys(fix as Record<string, unknown>).join(",") : "none") + " hasOld=" + String(!!fix?.old_string) + " start=" + String(fix?.start_line) + " ef=" + String(!!ef));
 
         // LINE-ADDRESSED REPAIR WITH A SYSTEM-DERIVED ANCHOR.
         //

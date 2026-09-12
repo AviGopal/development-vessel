@@ -1,113 +1,73 @@
-import { describe, expect, test, beforeEach, afterEach } from "bun:test";
-import { resolveGapToFeature } from "./gap-to-feature";
-import { ResolverResult } from "./types";
+// Cooldown behaviour is tested through requeueAfterNonAttempt, which gap-to-feature.ts
+// exports with the comment "Exported for unit test only" and which takes a fully
+// injectable signature: the stamps map, the gap id, the compose callback body, and an
+// options object carrying nowMs, cooldownMs and requeueMs. Testing it directly keeps the
+// suite deterministic and avoids reaching into resolver-private state.
+//
+// An earlier version of this file read resolveGapToFeature.gapComposeLastAttemptAt, a
+// property the implementation never defines, and passed a second injected callback to a
+// single-parameter function. It failed all four of its tests from the day it was written.
+// Do not reintroduce that approach: if new behaviour needs a seam, export one.
+import { describe, expect, test } from "bun:test";
+import { requeueAfterNonAttempt, isNonAttemptComposeResult } from "./gap-to-feature";
 
-const GAP_COMPOSE_COOLDOWN_MS = 300_000; // 5 minutes
-
-describe("resolveGapToFeature cooldown logic", () => {
+describe("requeueAfterNonAttempt", () => {
   const gapId = "test-gap-id";
-  const originalEnv = process.env;
+  const opts = { nowMs: 1_000_000, cooldownMs: 300_000, requeueMs: 60_000 };
+  const backdated = opts.nowMs - (opts.cooldownMs - opts.requeueMs);
 
-  beforeEach(() => {
-    // Clear the map before each test to ensure isolation
-    // @ts-ignore - access private map for testing
-    resolveGapToFeature.gapComposeLastAttemptAt.clear();
-    process.env = { ...originalEnv, GAP_COMPOSE_COOLDOWN_MS: String(GAP_COMPOSE_COOLDOWN_MS) };
+  test("a BUSY result backdates the stamp so only the requeue window remains", () => {
+    const stamps = new Map<string, number>([[gapId, 999_000]]);
+    expect(requeueAfterNonAttempt(stamps, gapId, { verdict: "BUSY" }, opts)).toBe(true);
+    expect(stamps.get(gapId)).toBe(backdated);
   });
 
-  afterEach(() => {
-    process.env = originalEnv;
+  test("an environment failure backdates identically", () => {
+    const stamps = new Map<string, number>([[gapId, 999_000]]);
+    expect(requeueAfterNonAttempt(stamps, gapId, { failure_kind: "environment" }, opts)).toBe(true);
+    expect(stamps.get(gapId)).toBe(backdated);
   });
 
-  test("a non-attempt compose result should clear the cooldown for immediate re-eligibility", async () => {
-    // Simulate a genuine attempt
-    // @ts-ignore - access private map for testing
-    resolveGapToFeature.gapComposeLastAttemptAt.set(gapId, Date.now() - 1000); // Set a recent attempt
-
-    const nonAttemptResult: ResolverResult = {
-      shape: "vesselCapability",
-      body: { gap_id: gapId, isNonAttemptComposeResult: true, success: false },
-    };
-
-    // @ts-ignore - mock the callback result
-    await resolveGapToFeature({ gap_id: gapId }, async () => nonAttemptResult);
-
-    // Expect cooldown to be cleared, so the gap is immediately re-eligible
-    // @ts-ignore - access private map for testing
-    expect(resolveGapToFeature.gapComposeLastAttemptAt.has(gapId)).toBe(false);
+  test("a capacity stage backdates identically", () => {
+    const stamps = new Map<string, number>([[gapId, 999_000]]);
+    expect(requeueAfterNonAttempt(stamps, gapId, { stage: "capacity" }, opts)).toBe(true);
+    expect(stamps.get(gapId)).toBe(backdated);
   });
 
-  test("a genuine non-landing compose should sustain cooldown", async () => {
-    const initialAttemptTime = Date.now();
-    // Simulate a genuine attempt
-    // @ts-ignore - access private map for testing
-    resolveGapToFeature.gapComposeLastAttemptAt.set(gapId, initialAttemptTime);
-
-    const genuineNonLandingResult: ResolverResult = {
-      shape: "vesselCapability",
-      body: { gap_id: gapId, isNonAttemptComposeResult: false, success: false },
-    };
-
-    // @ts-ignore - mock the callback result
-    await resolveGapToFeature({ gap_id: gapId }, async () => genuineNonLandingResult);
-
-    // Expect cooldown to be sustained (entry still exists and is not too old)
-    // @ts-ignore - access private map for testing
-    expect(resolveGapToFeature.gapComposeLastAttemptAt.has(gapId)).toBe(true);
-    // @ts-ignore - access private map for testing
-    expect(resolveGapToFeature.gapComposeLastAttemptAt.get(gapId)).toBeGreaterThanOrEqual(initialAttemptTime);
-
-    // Simulate time passing, but not past cooldown
-    const futureTime = initialAttemptTime + GAP_COMPOSE_COOLDOWN_MS / 2; // Half the cooldown
-    // @ts-ignore - Force internal clock for testing if resolveGapToFeature used Date.now() internally
-    // For this test, we are checking the map state directly which is sufficient.
-
-    const reEligibleResult: ResolverResult = {
-      shape: "vesselCapability",
-      body: { gap_id: gapId, isNonAttemptComposeResult: false, success: true }, // A successful landing after cooldown
-    };
-
-    // If enough time hasn't passed, it should still be considered in cooldown if we tried to get it
-    // The actual resolveGapToFeature doesn't actively 'check' for cooldown to remove it, it just sets it.
-    // The important part is that a non-attempt clears it, and a real attempt keeps it.
+  test("a genuine non-landing compose sustains the cooldown", () => {
+    const stamps = new Map<string, number>([[gapId, 999_000]]);
+    expect(requeueAfterNonAttempt(stamps, gapId, { verdict: "UNFAVORABLE" }, opts)).toBe(false);
+    expect(stamps.get(gapId)).toBe(999_000);
   });
 
-  test("a successful compose should sustain cooldown", async () => {
-    const initialAttemptTime = Date.now();
-    // Simulate a genuine attempt
-    // @ts-ignore - access private map for testing
-    resolveGapToFeature.gapComposeLastAttemptAt.set(gapId, initialAttemptTime);
-
-    const successfulResult: ResolverResult = {
-      shape: "vesselCapability",
-      body: { gap_id: gapId, isNonAttemptComposeResult: false, success: true },
-    };
-
-    // @ts-ignore - mock the callback result
-    await resolveGapToFeature({ gap_id: gapId }, async () => successfulResult);
-
-    // Expect cooldown to be sustained
-    // @ts-ignore - access private map for testing
-    expect(resolveGapToFeature.gapComposeLastAttemptAt.has(gapId)).toBe(true);
-    // @ts-ignore - access private map for testing
-    expect(resolveGapToFeature.gapComposeLastAttemptAt.get(gapId)).toBeGreaterThanOrEqual(initialAttemptTime);
+  test("a missing callback body sustains the cooldown", () => {
+    const stamps = new Map<string, number>([[gapId, 999_000]]);
+    expect(requeueAfterNonAttempt(stamps, gapId, null, opts)).toBe(false);
+    expect(stamps.get(gapId)).toBe(999_000);
   });
 
-  test("gap without gap_id should not affect cooldown map", async () => {
-    const initialSize = 0;
-    // @ts-ignore - access private map for testing
-    expect(resolveGapToFeature.gapComposeLastAttemptAt.size).toBe(initialSize);
+  test("an unknown gap id is not stamped", () => {
+    const stamps = new Map<string, number>();
+    expect(requeueAfterNonAttempt(stamps, gapId, { verdict: "BUSY" }, opts)).toBe(false);
+    expect(stamps.has(gapId)).toBe(false);
+  });
 
-    const result: ResolverResult = {
-      shape: "vesselCapability",
-      body: { isNonAttemptComposeResult: true, success: false }, // No gap_id
-    };
+  test("an empty gap id is refused", () => {
+    const stamps = new Map<string, number>([["", 999_000]]);
+    expect(requeueAfterNonAttempt(stamps, "", { verdict: "BUSY" }, opts)).toBe(false);
+  });
 
-    // @ts-ignore - mock the callback result
-    await resolveGapToFeature({ gap_id: undefined }, async () => result);
+  test("a requeue at least as long as the cooldown never extends the exclusion", () => {
+    const stamps = new Map<string, number>([[gapId, 999_000]]);
+    requeueAfterNonAttempt(stamps, gapId, { stage: "capacity" }, { nowMs: 1_000_000, cooldownMs: 60_000, requeueMs: 300_000 });
+    expect(stamps.get(gapId)).toBe(1_000_000);
+  });
 
-    // Expect map size to remain unchanged
-    // @ts-ignore - access private map for testing
-    expect(resolveGapToFeature.gapComposeLastAttemptAt.size).toBe(initialSize);
+  test("the non-attempt predicate covers environment, BUSY and capacity", () => {
+    expect(isNonAttemptComposeResult({ failure_kind: "environment" })).toBe(true);
+    expect(isNonAttemptComposeResult({ verdict: "BUSY" })).toBe(true);
+    expect(isNonAttemptComposeResult({ stage: "capacity" })).toBe(true);
+    expect(isNonAttemptComposeResult({ verdict: "UNFAVORABLE" })).toBe(false);
+    expect(isNonAttemptComposeResult(null)).toBe(false);
   });
 });

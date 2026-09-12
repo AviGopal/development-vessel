@@ -1446,7 +1446,7 @@ export async function admitActionableGaps(
     // FAIL-OPEN by construction: any parse or shape problem admits exactly as before.
     try {
       if (
-        ((meta.failure_lessons as Array<Record<string, unknown>> | undefined) ?? []).length >= 3 &&
+        ((meta.failure_lessons as Array<Record<string, unknown>> | undefined) ?? []).filter((l) => String(l?.["reason"] ?? "").trim().length > 20).length >= 3 &&
         new Set(
           ((meta.failure_lessons as Array<Record<string, unknown>> | undefined) ?? [])
             .map((l, i) => String(l?.["reason"] ?? "").toLowerCase().startsWith("== install") ? "undistilled-build-log-placeholder-b" + i : String(l?.["reason"] ?? "").toLowerCase().replace(/[0-9a-f]{8,}/g, "H").replace(/[0-9]+/g, "N").slice(0, 120))

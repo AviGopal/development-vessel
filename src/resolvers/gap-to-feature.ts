@@ -1426,7 +1426,7 @@ export async function admitActionableGaps(
     // FAIL-OPEN by construction: any parse or shape problem admits exactly as before.
     try {
       const repeatLessons = meta.failure_lessons;
-      if (Array.isArray(repeatLessons) && repeatLessons.length >= 3) {
+      if (Array.isArray(repeatLessons) && repeatLessons.filter((l) => String((l as Record<string, unknown>)?.["reason"] ?? "").trim().length > 20).length >= 3) {
         const repeatKeys = new Set(
           repeatLessons
             .map((l, i) => String((l as Record<string, unknown>)?.["reason"] ?? "").toLowerCase().startsWith("== install") ? "undistilled-build-log-placeholder-" + i : String((l as Record<string, unknown>)?.["reason"] ?? "").toLowerCase().replace(/[0-9a-f]{8,}/g, "H").replace(/[0-9]+/g, "N").slice(0, 120))

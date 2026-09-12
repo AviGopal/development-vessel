@@ -1458,6 +1458,29 @@ export async function admitActionableGaps(
       }
     } catch { /* fail-open: admit as before */ }
 
+    // (E4) IDENTICAL REPEATED FAILURE — a gap whose every recorded attempt failed for the
+    // same normalized reason will fail that way again, so each retry burns a scarce LLM
+    // completion for a guaranteed loss. Measured 2026-09-12: 20 of 1462 open gaps qualify,
+    // representing 71 wasted attempts. Reasons beginning "== install" are EXCLUDED because
+    // that is the undistilled build-log dump the lesson writer stores instead of the error:
+    // those are identical for every failure, so identity there is an artifact, not evidence.
+    // FAIL-OPEN by construction: any parse or shape problem admits exactly as before.
+    try {
+      if (
+        ((meta.failure_lessons as Array<Record<string, unknown>> | undefined) ?? [])
+          .map((l) => String(l?.["reason"] ?? "").toLowerCase().replace(/[0-9a-f]{8,}/g, "H").replace(/[0-9]+/g, "N").slice(0, 120))
+          .filter((s) => s.length > 20 && !s.startsWith("== install")).length >= 3 &&
+        new Set(
+          ((meta.failure_lessons as Array<Record<string, unknown>> | undefined) ?? [])
+            .map((l) => String(l?.["reason"] ?? "").toLowerCase().replace(/[0-9a-f]{8,}/g, "H").replace(/[0-9]+/g, "N").slice(0, 120))
+            .filter((s) => s.length > 20 && !s.startsWith("== install")),
+        ).size === 1
+      ) {
+        excluded.push({ id, reason: "identical_repeated_failure" });
+        continue;
+      }
+    } catch { /* fail-open: admit as before */ }
+
     // (E3) PHANTOM ANCHOR — retire a gap whose quoted anchor is already gone from the file
     // it names. Measured 2026-09-11: 17 of 600 open gaps cite a complete anchor with zero
     // occurrences in their named file, so every retry must fail anchor_not_found forever.

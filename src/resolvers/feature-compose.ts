@@ -5596,7 +5596,8 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
         if (fix?.old_string && efAbs) {
           const cur = await callTool(toolsEndpoint, "fs_read", { path: efAbs });
           const curContent = (cur.body as { content?: unknown })?.content;
-          if (cur.ok && typeof curContent === "string" && curContent.includes(String(fix.old_string))) {
+          if ((cur.ok) && typeof curContent === "string" && !curContent.includes(String(fix.old_string))) console.warn("[fc-repair] ANCHOR-MISS vessel=" + String(fv.vessel) + " file=" + String(ef));
+          if ((cur.ok) && typeof curContent === "string" && curContent.includes(String(fix.old_string))) {
             if (!preEditContent.has(efAbs) && !created.includes(efAbs)) preEditContent.set(efAbs, curContent);
             const w = await callTool(toolsEndpoint, "fs_edit", { path: efAbs, old_string: String(fix.old_string), new_string: String(fix.new_string ?? "") });
             if (w.ok) { anyFixed = true; if (!edited.includes(efAbs) && !created.includes(efAbs)) edited.push(efAbs); }

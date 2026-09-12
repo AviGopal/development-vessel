@@ -6372,7 +6372,7 @@ planDraftModel = lastDraftModel;
           reached: verdict === "FAVORABLE",
           task_type: "feature_compose"
         })
-      }).catch(() => {});
+      }).catch((e) => { console.warn("[fc-draft-model] grade POST FAILED: " + String((e as { message?: unknown })?.message ?? e)); });
       console.log("[fc-draft-model] graded " + lastDraftModel + " reached=" + String(verdict === "FAVORABLE"));
       lastDraftModel = "";
       lastDraftEndpoint = "";

@@ -2204,7 +2204,7 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
   const proposalId = pointer.proposal_id || "unknown-proposal";
   const gapId = pointer.gap_id || "unknown-gap";
   if ((gapId === "unknown-gap" || proposalId === "unknown-proposal") && pointer.adhoc !== true) {
-    return structuredError("cutover_refused_missing_provenance", { gap_id: gapId, proposal_id: proposalId, hint: "every landing must carry gap_id and proposal_id; pass adhoc: true only for consciously unattributed operator work" });
+    return structuredError("cutover_refused_missing_provenance", { gap_id: gapId, proposal_id: proposalId });
   }
   const msg =
     `substrate-authored: apply ${proposalId} via mitosis cutover\n\n` +

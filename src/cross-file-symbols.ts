@@ -53,6 +53,17 @@ function looksLikeIdentifier(t: string): boolean {
 }
 
 /**
+ * Returns true if the trimmed line is a string literal (starts and ends with the same quote).
+ */
+function isStringLiteralLine(text: string): boolean {
+  const t = text.trim();
+  if (t.length < 2) return false;
+  const first = t[0];
+  const last = t[t.length - 1];
+  return (first === "'" && last === "'") || (first === '"' && last === '"') || (first === '`' && last === '`');
+}
+
+/**
  * Which symbols named in the spec are missing from the grounding window?
  *
  * @param spec       the drafting instruction handed to the planner
@@ -350,7 +361,7 @@ export function safeAnchorLines(
   return lines
     .slice(lo, hi)
     .map((l, i) => ({ text: l.trim(), dist: Math.abs(lo + i - center) }))
-    .filter((c) => uniqueInBand.has(c.text) && anchorOccurrences(fileText, c.text) === 1 && !c.text.trim().startsWith("//") && !c.text.trim().startsWith("/*"))
+    .filter((c) => uniqueInBand.has(c.text) && anchorOccurrences(fileText, c.text) === 1 && !c.text.trim().startsWith("//") && !c.text.trim().startsWith("/*") && !isStringLiteralLine(c.text.trim()))
     .sort((a, b) => a.dist - b.dist)
     .slice(0, maxAnchors)
     .map((c) => c.text);

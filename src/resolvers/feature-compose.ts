@@ -6366,7 +6366,9 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
           task_type: "feature_compose"
         })
       }).catch(() => {});
-      console.log("[fc-draft-model] graded=" + lastDraftModel + " reached=" + String(verdict === "FAVORABLE"));
+      console.log("[fc-draft-model] graded " + lastDraftModel + " reached=" + String(verdict === "FAVORABLE"));
+      lastDraftModel = "";
+      lastDraftEndpoint = "";
     } else {
       console.log("[fc-draft-model] NOT graded — no drafting call recorded for this compose");
     }

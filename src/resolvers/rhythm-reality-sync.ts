@@ -83,7 +83,7 @@ export async function resolveRhythmRealitySync(
   } catch {
   }
 
-  // (3) Recompute staleness for gap-closing family only
+  // (3) Recompute staleness for all families - gap-closing uses backlog, others use time-based growth
   const updated: Array<{ id: string; family: string; old_staleness: number; new_staleness: number }> = [];
 
   for (const rhythm of rhythms) {
@@ -120,7 +120,7 @@ export async function resolveRhythmRealitySync(
         updated.push({ id: rhythm.id, family: rhythm.body.family, old_staleness, new_staleness });
       }
     }
-    } else {
+    } else if (rhythm.body.family !== "reality-modeling") {
       // Time-based staleness driver for all other families
       const old_staleness = rhythm.body.staleness;
       const new_staleness = Math.min(1, old_staleness + 0.1);

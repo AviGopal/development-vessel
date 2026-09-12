@@ -361,7 +361,7 @@ export function safeAnchorLines(
   return lines
     .slice(lo, hi)
     .map((l, i) => ({ text: l.trim(), dist: Math.abs(lo + i - center) }))
-    .filter((c) => uniqueInBand.has(c.text) && anchorOccurrences(fileText, c.text) === 1 && !c.text.trim().startsWith("//") && !c.text.trim().startsWith("/*") && !isStringLiteralLine(c.text.trim()))
+    .filter((c) => uniqueInBand.has(c.text) && anchorOccurrences(fileText, c.text) === 1 && !c.text.trim().startsWith("//") && !c.text.trim().startsWith("/*") && c.text.trim().charAt(0) !== '"' && c.text.trim().charAt(0) !== "'" && c.text.trim().charCodeAt(0) !== 96)
     .sort((a, b) => a.dist - b.dist)
     .slice(0, maxAnchors)
     .map((c) => c.text);

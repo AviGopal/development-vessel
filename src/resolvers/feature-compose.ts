@@ -202,7 +202,8 @@ async function llmCall(endpoint: string, prompt: string, model: string): Promise
     throw new Error(`llmCall to ${endpoint} failed with status ${res.status}: ${errorBody.slice(0, 500)}`);
   }
 
-  const j = await res.json();
+  const j = (await res.json());
+  console.log("[fc-draft-model] selected=" + String((j as { model_selection?: { selected?: unknown } })?.model_selection?.selected ?? "unknown") + " task=feature_compose");
   if (j.error) {
     throw new Error(`llmCall to ${endpoint} returned error in body: ${JSON.stringify(j.error)}`);
   }

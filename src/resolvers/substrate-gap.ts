@@ -253,13 +253,13 @@ async function loadGaps(): Promise<SubstrateGap[]> {
     const parsed = JSON.parse(content) as SubstrateGap[];
     if (!Array.isArray(parsed)) throw new Error("gaps.json did not parse to an array - refusing to treat as empty");
     return parsed;
-  } catch (e) {
-    if ((e as NodeJS.ErrnoException)?.code === "ENOENT") {
-      // If the file doesn't exist, this is an empty store, not an error.
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "ENOENT") {
+      // File not found is an empty store, not a fatal crash.
       return [];
     }
-    // For any other error (parse error, permissions, etc.), treat as an unrecoverable failure.
-    throw new Error("gaps.json could not be loaded or parsed - refusing to treat as empty: " + (e as Error).message);
+    // All other errors are fatal: re-throw to propagate the failure.
+    throw error;
   }
 }
 

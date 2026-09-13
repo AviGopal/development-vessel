@@ -131,7 +131,7 @@ function structuredError(detail: string, body: Record<string, unknown> = {}): Re
 // so a correct, typecheck-clean staged patch could sit unlanded indefinitely
 // (the reach-on-rolled-back / staged-but-unlanded half of the cutover-reliability
 // defect). Best-effort: if dispatch fails, boredom selects mitosis-tick later.
-type MitosisLanding = { landed: boolean; new_git_sha: string | null; push_status: string | null };
+type MitosisLanding = { landed: boolean; new_git_sha: string | null; push_status: string | null; attribution_mismatch?: boolean };
 
 /**
  * Resolve the vessel's ACTUAL check script for the landing gate. The gate previously

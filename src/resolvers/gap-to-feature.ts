@@ -793,7 +793,8 @@ export function specFromGap(
               }
             }
           }
-          const from = Math.max(0, startLine - 15);
+          if (startLine === 0) { const toks = Array.from(new Set(String(summary).split(" ").map((w) => w.replace(/[^A-Za-z0-9_]/g, "")).filter((w) => w.length > 5))); for (const id of toks) { const hit = liveLines.findIndex((l) => l.includes("function " + id) || l.includes("const " + id) || l.includes(id + "(")); if (hit >= 0) { startLine = hit + 1; console.log("[gap-to-feature] symbol->line: " + id + " grounds " + firstTarget + " at line " + startLine); break; } } }
+          const from: number = Math.max(0, startLine - 15);
           const windowText = liveLines.slice(from, from + 40).join("\n");
           const anchorLabel = startLine > 0 ? "Anchor (verbatim near edit site)" : "Anchor (verbatim top of file)";
           const vesselName = firstTarget.split('/')[1] ?? 'unknown';

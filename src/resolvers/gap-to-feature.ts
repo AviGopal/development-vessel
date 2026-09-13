@@ -782,7 +782,7 @@ export function specFromGap(
           // compact row first and the expanded detail later, and a complaint about content
           // legibility is about the rendered detail.
           if (startLine === 0) {
-            const region = String(meta.region ?? "").trim();
+            const region = String(meta.region ?? "").trim() || (() => { const t = String(siteStr).trim().split(" ")[0] ?? ""; const ci = t.indexOf(":"); const nm = ci >= 0 ? t.slice(ci + 1) : ""; return Number.isNaN(Number(nm)) ? (nm.startsWith("/") ? nm.slice(1) : nm) : ""; })();
             if (region) {
               const idx = liveLines.map((l, i) => (l.includes(region) ? i : -1)).filter((i) => i >= 0);
               if (idx.length > 0) {

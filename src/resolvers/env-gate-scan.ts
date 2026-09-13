@@ -30,7 +30,7 @@ export interface EnvGateFinding {
 }
 
 const SECRET_RE = /KEY|SECRET|TOKEN|PASSWORD/;
-const GUARD_RE = /if \(!|return null|return FALLBACK|return;|continue;|=== ['"]false['"]|!== ['"]true['"]|\?\?\?|\?\?|\?\?/; // Matches if (!, return null, return FALLBACK, return;, continue;, === 'false', !== 'true', and the nullish-coalescing operator (??).\"]false['\"]|!== ['\"]true['\"]|\?\?\?|\?\?/; // Matches if (!, return null, return FALLBACK, return;, continue;, === 'false', !== 'true', and the nullish-coalescing operator (??)."]|!== ['"]true['"]|\?\?|\?\?|\?\?|\?\?|\?\?/;
+const GUARD_RE = /if \(!|return null|return FALLBACK|return;|continue;|=== ['\"]false['\"]|!== ['\"]true['\"]|\?\?/; // Matches if (!, return null, return FALLBACK, return;, continue;, === 'false', !== 'true', and the nullish-coalescing operator (??)."]false['"]|!== ['"]true['"]|\?\?\?|\?\?|\?\?/; // Matches if (!, return null, return FALLBACK, return;, continue;, === 'false', !== 'true', and the nullish-coalescing operator (??).\"]false['\"]|!== ['\"]true['\"]|\?\?\?|\?\?/; // Matches if (!, return null, return FALLBACK, return;, continue;, === 'false', !== 'true', and the nullish-coalescing operator (??)."]|!== ['"]true['"]|\?\?|\?\?|\?\?|\?\?|\?\?/;
 const ENV_READ_RE = /process\.env(?:\.([A-Z_0-9]+)|\[["']([A-Z_0-9]+)["']\])/;
 
 function collectSetEnvNames(envFile: string, unitsDir: string): Set<string> {

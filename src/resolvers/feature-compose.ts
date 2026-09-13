@@ -6381,7 +6381,7 @@ planDraftModel = lastDraftModel;
     }
     writeFileSync(
       (reportPath),
-      JSON.stringify({ ok: verdict === "FAVORABLE", verdict, spec: String(spec).slice(0, 8000), summary: plan.summary, touched_vessels: [...touched], op_count: ops.length, applied, apply_failed: applyFailed, verify, semantic_gate, rolled_back, restore_failed: restoreFailed, cutovers }, null, 2),
+      JSON.stringify({ ok: verdict === "FAVORABLE", verdict, directed: (pointer as { directed?: boolean }).directed === true, spec: String(spec).slice(0, 8000), summary: plan.summary, touched_vessels: [...touched], op_count: ops.length, applied, apply_failed: applyFailed, verify, semantic_gate, rolled_back, restore_failed: restoreFailed, cutovers }, null, 2),
     );
   } catch { /* persistence failure must never fail the compose */ }
 
@@ -6436,6 +6436,7 @@ planDraftModel = lastDraftModel;
           // Gated route vs the patch_with_tools escalation lane — the distinction that took a
           // manual bisect over commit trailers and gap-id prefixes to establish by hand.
           route: String(pointer.gap?.id ?? "").startsWith("pwt-") ? "escalation" : "gated",
+          directed: (pointer as { directed?: boolean }).directed === true,
           touched_vessels: [...touched],
           op_count: ops.length,
           ops_applied: applied.filter((a) => a.ok).length,

@@ -848,7 +848,29 @@ async function loadGaps(storePath: string): Promise<SubstrateGap[]> {
 }
         if (existingIdx >= 0) {
           const existingGap = gaps[existingIdx];
-          if (existingGap && existingGap.summary === incoming.summary && existingGap.category === incoming.category && existingGap.source === incoming.source) {
+          // The check `existingGap && existingGap.summary === incoming.summary && existingGap.category === incoming.category && existingGap.source === incoming.source`
+          // appears to be attempting to detect if an incoming gap is an "echo" of an existing gap,
+          // where an echo is defined as a gap that is identical across these four fields.
+          // However, `incoming` is not defined in this scope. This was the cause of a prior
+          // `TS2448: Block-scoped variable 'incoming' used before its declaration` error.
+          //
+          // To resolve this, `incoming` needs to be declared at a scope accessible here.
+          // Since the guard is specifically for an 'echo' of an existing gap, and the enclosing
+          // `if (existingIdx >= 0)` block implies `gaps[existingIdx]` (`existingGap`) is the
+          // 'existing' gap, the comparison should be against the `gap` parameter, which is
+          // the 'incoming' data in this context. The prior attempt also had `TS2367:
+          // This comparison appears to be unintentional because the types 'SubstrateGapSource'
+          // and '"walk_flat_pointer"' have no overlap.` for `existingGap.source === incoming.source`
+          // which indicates `incoming.source` was not correctly typed, likely because `incoming`
+          // was implicitly `any` or incorrectly inferred.
+          //
+          // By comparing `existingGap` against `gap` (the incoming data) and ensuring `gap.source`
+          // is correctly typed, we resolve the type overlap issue and the `incoming` declaration
+          // issue. The intent is to prevent writing a gap that is an exact duplicate of an
+          // already existing non-closed gap. The original code was inside `if (existingIdx >= 0)`
+          // meaning an existing gap was found. If this existing gap is identical to the `gap`
+          // that is attempting to be written, then it's an echo and should be rejected.
+          if (existingGap && existingGap.summary === gap.summary && existingGap.category === gap.category && existingGap.source === gap.source) {
             return {
               early: {
                 shape: 'structuredError',

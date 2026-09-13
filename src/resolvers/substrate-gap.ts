@@ -799,7 +799,11 @@ async function loadGaps(storePath: string): Promise<SubstrateGap[]> {
       console.log(`Gap store at ${storePath} is empty.`);
       return [];
     }
-    return JSON.parse(json) as SubstrateGap[];
+    const parsed = JSON.parse(json) as SubstrateGap[];
+    if (!Array.isArray(parsed)) {
+      throw new Error(`Gap store at ${storePath} did not parse to an array`);
+    }
+    return parsed;
   } catch (error) {
     if (error instanceof Error && "code" in error && error.code === "ENOENT") {
       console.log(`Gap store file not found at ${storePath}. Initializing empty.`);

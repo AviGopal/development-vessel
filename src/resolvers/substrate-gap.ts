@@ -258,7 +258,35 @@ async function loadGaps(): Promise<SubstrateGap[]> {
       // File not found is an empty store, not a fatal crash.
       return [];
     }
-    // All other errors are fatal: re-throw to propagate the failure.
+    // On other errors (e.g., JSON parsing error), attempt to salvage data.
+    console.error(`Error loading gaps from ${gapsPath}. Attempting partial recovery.`, error);
+    try {
+      const partialContent = await readFile(gapsPath, "utf-8");
+      // Attempt to find valid JSON objects even if the root isn't an array
+      const regex = /{[^{}]*(?:{[^{}]*}[^{}]*)*}/g;
+      const matches = partialContent.match(regex);
+      if (matches) {
+        const salvagedGaps: SubstrateGap[] = [];
+        for (const match of matches) {
+          try {
+            const obj = JSON.parse(match) as SubstrateGap;
+            // Basic validation to ensure it's a gap-like object
+            if (obj.id && obj.category && obj.source && obj.summary) {
+              salvagedGaps.push(obj);
+            }
+          } catch (e) {
+            // Ignore malformed objects within the file
+          }
+        }
+        if (salvagedGaps.length > 0) {
+          console.warn(`Recovered ${salvagedGaps.length} gaps from a corrupt file.`);
+          return salvagedGaps;
+        }
+      }
+    } catch (salvageError) {
+      console.error("Error during partial recovery attempt:", salvageError);
+    }
+    // If recovery fails, or the error was not ENOENT/parsing, re-throw.
     throw error;
   }
 }

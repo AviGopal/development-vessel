@@ -796,7 +796,11 @@ export function specFromGap(
           if (startLine === 0) { const toks = Array.from(new Set(String(summary).split(" ").map((w) => w.replace(/[^A-Za-z0-9_]/g, "")).filter((w) => w.length > 5))); for (const id of toks) { const hit = liveLines.findIndex((l) => l.includes("function " + id) || l.includes("const " + id) || l.includes(id + "(")); if (hit >= 0) { startLine = hit + 1; console.log("[gap-to-feature] symbol->line: " + id + " grounds " + firstTarget + " at line " + startLine); break; } } }
           const from: number = Math.max(0, startLine - 15);
           const windowText = liveLines.slice(from, from + 40).join("\n");
-          const anchorLabel = startLine > 0 ? "Anchor (verbatim near edit site)" : "Anchor (verbatim top of file)";
+          const premiseTokens = Array.from(new Set(String(summary).split(" ").filter((w) => w.startsWith("/")).map((w) => w.split(",")[0] ?? "").map((w) => w.split(")")[0] ?? "").filter((w) => w.length > 5)));
+          const missingPremise = premiseTokens.filter((t) => !liveLines.some((l) => l.includes("'" + t + "'") || l.includes('"' + t + '"')));
+          if (missingPremise.length > 0) { console.warn("[gap-to-feature] PREMISE UNVERIFIED: gap names " + missingPremise.join(", ") + " but no quoted occurrence exists in " + firstTarget); }
+          const premiseWarning = missingPremise.length > 0 ? (" — PREMISE WARNING: this gap names " + missingPremise.join(", ") + " but NO quoted occurrence of it exists anywhere in this file, so the gap is probably MISLOCALIZED. Do NOT invent an anchor for it. If you cannot identify the real target in the excerpt below, emit ZERO ops and report the false premise instead.") : "";
+          const anchorLabel = startLine > 0 ? ("Anchor (verbatim near edit site)" + premiseWarning) : ("Anchor (verbatim top of file)" + premiseWarning);
           const vesselName = firstTarget.split('/')[1] ?? 'unknown';
           const unique = groundedUniqueAnchor(liveLines, excerptHint || null, startLine);
           const uniqueNote = unique

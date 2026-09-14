@@ -254,6 +254,7 @@ export function deriveRungs(obs: {
           const unexamined = obs.examUnexamined ?? 0;
           const total = examined + unexamined;
           const frac = total > 0 ? examined / total : null;
+          const unexaminedInWindow = obs.examUnexamined ?? 0;
           const allTimeUnexamined = (obs.examUnexamined ?? 0) + (obs.examUnexaminedAllTime ?? 0);
           return {
             rung: 2,
@@ -263,13 +264,15 @@ export function deriveRungs(obs: {
             // an unexamined artifact is not a weak signal, it is no signal, and the session
             // that produced this rung landed a database-breaking migration through exactly
             // that hole.
-            // The latch holds ONLY while the all-time sum is exactly zero — once it ticks
-            // to one, it cannot return to zero and the latch cannot recover.
-            holds: frac !== null ? allTimeUnexamined === 0 : null,
+            // The verdict now uses the windowed count so recovery is possible, while still
+            // keeping the strict zero-tolerance standard for current behavior.
+            holds: frac !== null ? unexaminedInWindow === 0 : null,
             observed: {
               examined_fraction: frac === null ? null : Number(frac.toFixed(4)),
               staged_examined: examined,
               staged_unexamined: unexamined,
+              staged_unexamined_in_window: unexaminedInWindow,
+              staged_unexamined_all_time: allTimeUnexamined,
               composes_reporting_examination: obs.examComposes,
             },
             ...(frac === null

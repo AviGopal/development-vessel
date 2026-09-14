@@ -3812,7 +3812,7 @@ async function resolveFeatureComposeUncapped(pointer: FeatureComposePointer): Pr
     for (const t of targetFiles) {
       const base = t.split("/").pop() ?? t;
       if (base.length === 0) continue;
-      if (new RegExp("/" + base.replace(/[.*+?^${}()|[\]\\]/g, (c) => "\\" + c) + "(?![A-Za-z0-9])").test(grounding)) continue; // visible in the window → groundable, fine
+      if (new RegExp("\\/" + base.replace(/[.*+?^${}()|[\]\\]/g, (c) => "\\" + c) + "(?![A-Za-z0-9])").test(grounding)) continue; // visible in the window → groundable, fine
       let exists = false;
       try {
         const rd = await callTool(toolsEndpoint, "fs_read", { path: `${REPO_ROOT}/${t.replace(/^repos\//, "")}` });

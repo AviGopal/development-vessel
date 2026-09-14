@@ -254,7 +254,12 @@ async function loadGaps(): Promise<SubstrateGap[]> {
     const content = await readFile(gapsPath, "utf-8");
     const parsed = JSON.parse(content) as SubstrateGap[];
     if (!Array.isArray(parsed)) throw new Error("gaps.json did not parse to an array - refusing to treat as empty");
-    return parsed;
+    // Validate all rows before returning to prevent corruption
+    const valid = parsed.filter(hasClassifiableId);
+    if (valid.length < parsed.length) {
+      console.warn(`Filtered ${parsed.length - valid.length} gaps with invalid ids`);
+    }
+    return valid;
   } catch (error) {
     if (error instanceof Error && "code" in error && error.code === "ENOENT") {
       // File not found is an empty store, not a fatal crash.

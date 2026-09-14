@@ -1089,7 +1089,12 @@ function pickMostLandable(gaps: Record<string, unknown>[]): Record<string, unkno
       const hay = (String(other.summary ?? "") + " " + JSON.stringify(om.per_gap_failure_lessons ?? om.failure_lessons ?? om.gap_lessons ?? "")).toLowerCase();
       if ((id.length > 8 && hay.includes(id)) || (cap.length > 3 && hay.includes(cap))) cited++;
     }
-    return 1 + Math.min(1.0, 0.25 * cited);
+    let verifiabilityCredit = 0;
+    const falsifier = String((gm.falsifier ?? '')).toLowerCase();
+    if (falsifier === 'class1' || falsifier === 'class2') {
+      verifiabilityCredit = 0.5; // Small ranking term for verifiability
+    }
+    return (1 + Math.min(1.0, 0.25 * cited)) + verifiabilityCredit;
   };
   // SIGN FIX + DEAD-FILTER FIX (2026-08-06). `* blockingWeight(g)` multiplied the score by
   // up to 1.6 for gaps whose metadata points at the picker/composer itself — the exact

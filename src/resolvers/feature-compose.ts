@@ -3160,7 +3160,7 @@ async function appendComposeLesson(cls: string, reason: string, vessels: string,
       // dispositioned/skipped, not infinitely recommitted). The failure_lessons write above still
       // records the class so the drafter keeps learning.
       const _recommitDepth = (String(gap.id).match(/recommit-/g) ?? []).length;
-      if (reCommit && _recommitDepth < 2) {
+      if (reCommit && _recommitDepth + (String(gap.id).match(/-narrowed/g) ?? []).length < 2) {
         await resolveSubstrateGapWrite({
           type: "substrateGap_write",
           gap: {

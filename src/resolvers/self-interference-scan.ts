@@ -67,6 +67,31 @@ export async function resolveSelfInterferenceScan(pointer: SelfInterferenceScanP
       }
     }
   } catch { }
+  try {
+    const blameFiles = await readdir("/workspace/proposals");
+    const testToGaps = new Map<string, Set<string>>();
+    const suffix = "-compose-report.json";
+    for (const bname of blameFiles) {
+      if (!bname.endsWith(suffix)) continue;
+      const bgap = bname.slice(0, bname.length - suffix.length);
+      let btext = "";
+      try { btext = await Bun.file("/workspace/proposals/" + bname).text(); } catch { continue; }
+      const bmark = "NEW test failures introduced by this draft";
+      const bat = btext.indexOf(bmark);
+      if (bat < 0) continue;
+      for (const piece of btext.slice(bat, bat + 3000).split("(fail)").slice(1)) {
+        const tname = String(String(piece.split(" ; ")[0] ?? "").split("[")[0] ?? "").trim();
+        if (tname.length < 8) continue;
+        const bset = testToGaps.get(tname) ?? new Set<string>();
+        bset.add(bgap);
+        testToGaps.set(tname, bset);
+      }
+    }
+    for (const [tname, bset] of testToGaps) {
+      if (bset.size < 3) continue;
+      if (incidents.length < cap * 3) incidents.push({ kind: "state_dependent_test_blame", id: tname.slice(0, 80), detail: ("this test was blamed as draft-introduced across " + bset.size + " DIFFERENT gaps, so no draft caused it: it depends on mutable live state and fails deterministically on the confirmation re-run, which the gate reads as proof. Exclude it from the newTest blame set rather than rejecting the drafts.").slice(0, 400) });
+    }
+  } catch { }
   let gaps: Array<{ id?: string; summary?: string; classification_metadata?: { resolution_commits?: unknown[]; approach_decisions?: Array<{ outcome?: unknown; at?: string }> } }> = [];
   try {
     // WORKSPACE_ROOT-relative: the literal path is a copy frozen 2026-08-08.

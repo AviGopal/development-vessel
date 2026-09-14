@@ -90,7 +90,7 @@ export async function resolveSelfInterferenceScan(pointer: SelfInterferenceScanP
     let blameEmitted = 0;
     for (const [tname, bset] of [...testToGaps.entries()].sort((a, b) => b[1].size - a[1].size)) {
       if (bset.size < 3) continue;
-      if (blameEmitted++ < 5) incidents.push({ kind: "state_dependent_test_blame", id: tname.slice(0, 80), detail: ("this test was blamed as draft-introduced across " + bset.size + " DIFFERENT gaps, so no draft caused it: it depends on mutable live state and fails deterministically on the confirmation re-run, which the gate reads as proof. Exclude it from the newTest blame set rather than rejecting the drafts.").slice(0, 400) });
+      if (incidents.length < cap * 3) incidents.push({ kind: "state_dependent_test_blame", id: tname.slice(0, 80), detail: ("this test was blamed as draft-introduced across " + bset.size + " DIFFERENT gaps, so no draft caused it: it depends on mutable live state and fails deterministically on the confirmation re-run, which the gate reads as proof. Exclude it from the newTest blame set rather than rejecting the drafts.").slice(0, 400) });
     }
   } catch { }
   let gaps: Array<{ id?: string; summary?: string; classification_metadata?: { resolution_commits?: unknown[]; approach_decisions?: Array<{ outcome?: unknown; at?: string }> } }> = [];

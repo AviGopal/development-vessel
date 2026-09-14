@@ -22,7 +22,9 @@ export async function resolveSelfInterferenceScan(pointer: SelfInterferenceScanP
   } catch { }
   let busyCount = 0;
   try {
-    const lines = (await Bun.file("/workspace/proposals/busy-refusals.jsonl").text()).split("\n").filter((l) => l.trim().length > 0);
+    const busyCutoff = Date.now() - (typeof pointer.window_hours === "number" ? pointer.window_hours : 24) * 3600000;
+    const busyAt = (l: string): number => { try { return Date.parse(String((JSON.parse(l) as { at?: unknown }).at ?? "")); } catch { return NaN; } };
+    const lines = (await Bun.file("/workspace/proposals/busy-refusals.jsonl").text()).split("\n").filter((l) => l.trim().length > 0).filter((l) => { const t = busyAt(l); return Number.isFinite(t) && t >= busyCutoff; });
     busyCount = lines.length;
     for (const l of lines.slice(-cap)) { if (incidents.length < cap * 2) incidents.push({ kind: "compose_busy_refusal", id: "", detail: l.slice(0, 120) }); }
   } catch { }

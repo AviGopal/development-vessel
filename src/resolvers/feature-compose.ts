@@ -6363,17 +6363,28 @@ planDraftModel = lastDraftModel;
       } catch { /* unreadable or corrupt prior report: fall back to overwriting */ }
     }
     if (lastDraftModel && lastDraftEndpoint) {
-      void fetch(lastDraftEndpoint, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: "ApiKey " + METABOB_API_KEY },
+      fetch(lastDraftEndpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `ApiKey ${METABOB_API_KEY}` },
         body: JSON.stringify({
-          type: "llmArmOutcome_write",
+          type: 'llmArmOutcome_write',
           model: planDraftModel || lastDraftModel,
-          reached: verdict === "FAVORABLE",
-          task_type: "feature_compose"
+          reached: verdict === 'FAVORABLE',
+          task_type: 'feature_compose'
+        }),
+        signal: AbortSignal.timeout(60 * 1000)
+      })
+        .then(async (res) => {
+          if (res.ok) {
+            console.log(`[fc-draft-model] graded ${lastDraftModel} reached=${verdict === 'FAVORABLE'} (success)`);
+          } else {
+            const errorBody = await res.text().catch(() => 'No body');
+            console.error(`[fc-draft-model] Failed to grade ${lastDraftModel} (status: ${res.status}): ${errorBody}`);
+          }
         })
-      }).catch((e) => { console.warn("[fc-draft-model] grade POST FAILED: " + String((e as { message?: unknown })?.message ?? e)); });
-      console.log("[fc-draft-model] graded " + lastDraftModel + " reached=" + String(verdict === "FAVORABLE"));
+        .catch((err) => {
+          console.error(`[fc-draft-model] Failed to grade ${lastDraftModel} (network error): ${(err as Error).message}`);
+        });
       lastDraftModel = "";
       lastDraftEndpoint = "";
     } else {

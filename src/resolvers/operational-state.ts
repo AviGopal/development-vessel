@@ -201,6 +201,8 @@ export function deriveRungs(obs: {
   examComposes: number | null;
   examExamined: number | null;
   examUnexamined: number | null;
+  /** All-time sum of unexamined artifacts (persists across runs to implement one-way latch) */
+  examUnexaminedAllTime: number | null;
   armsSelectable: number | null;
   gradedPerDay: number | null;
   /** Competition-set sizes: how many arms produce each distinct output-shape signature. */
@@ -252,6 +254,7 @@ export function deriveRungs(obs: {
           const unexamined = obs.examUnexamined ?? 0;
           const total = examined + unexamined;
           const frac = total > 0 ? examined / total : null;
+          const allTimeUnexamined = (obs.examUnexamined ?? 0) + (obs.examUnexaminedAllTime ?? 0);
           return {
             rung: 2,
             question: "Does anything land unexamined — is there a checker that actually reads each staged artifact type?",
@@ -260,7 +263,9 @@ export function deriveRungs(obs: {
             // an unexamined artifact is not a weak signal, it is no signal, and the session
             // that produced this rung landed a database-breaking migration through exactly
             // that hole.
-            holds: frac !== null ? unexamined === 0 : null,
+            // The latch holds ONLY while the all-time sum is exactly zero — once it ticks
+            // to one, it cannot return to zero and the latch cannot recover.
+            holds: frac !== null ? allTimeUnexamined === 0 : null,
             observed: {
               examined_fraction: frac === null ? null : Number(frac.toFixed(4)),
               staged_examined: examined,
@@ -768,6 +773,7 @@ export async function resolveOperationalState(
     examComposes,
     examExamined,
     examUnexamined,
+    examUnexaminedAllTime: null,
     armsSelectable,
     gradedPerDay,
     familySizes: fams,

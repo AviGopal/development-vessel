@@ -59,7 +59,7 @@ describe("requeueAfterNonAttempt", () => {
 
   test("a requeue at least as long as the cooldown never extends the exclusion", () => {
     const stamps = new Map<string, number>([[gapId, 999_000]]);
-    requeueAfterNonAttempt(stamps, gapId, { stage: "capacity" }, { nowMs: 1_000_000, cooldownMs: 60_000, requeueMs: 300_000 });
+    expect(requeueAfterNonAttempt(stamps, gapId, { stage: "capacity" }, { nowMs: 1_000_000, cooldownMs: 60_000, requeueMs: 300_000 })).toBe(true);
     expect(stamps.get(gapId)).toBe(1_000_000);
   });
 

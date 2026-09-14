@@ -1308,16 +1308,63 @@ export async function resolvePatchWithTools(pointer: PatchWithToolsPointer): Pro
 // remains is the same test vessel-mitosis-cutover already uses for "no functional change".
 {
   const { stripCommentsAndStrings } = await import("./feature-compose.js");
+  function stripCommentsOnly(src: string): string {
+    let result = '';
+    let i = 0;
+    const len = src.length;
+    while (i < len) {
+      if (src[i] === '/' && src[i + 1] === '/') {
+        while (i < len && src[i] !== '\n') {
+          result += ' ';
+          i++;
+        }
+        continue;
+      }
+      if (src[i] === '/' && src[i + 1] === '*') {
+        i += 2;
+        while (i < len - 1 && !(src[i] === '*' && src[i + 1] === '/')) {
+          result += ' ';
+          i++;
+        }
+        i += 2;
+        continue;
+      }
+      if (src[i] === '"' || src[i] === '\'' || src[i] === '`') {
+        const quote = src[i];
+        result += quote;
+        i++;
+        while (i < len && src[i] !== quote) {
+          if (src[i] === '\\') {
+            result += src[i++];
+            result += src[i++];
+            continue;
+          }
+          result += src[i++];
+        }
+        if (i < len) {
+          result += quote;
+          i++;
+        }
+        continue;
+      }
+      result += src[i++];
+    }
+    return result;
+  }
   const beforeCode = stripCommentsAndStrings(baseContent).replace(/\s+/g, "");
   const afterCode = stripCommentsAndStrings(afterSrc).replace(/\s+/g, "");
   if (beforeCode === afterCode) {
-    await resetTarget();
-    return structuredError("zero_behaviour_delta", {
-      target_file: pointer.target_file,
-      detail: "the patch changes no executable code - comments, strings and whitespace only; feature_compose refuses this shape and escalation must not route around it",
-      before_sha: beforeSha,
-      after_sha: afterSha,
-    });
+    const beforeText = stripCommentsOnly(baseContent).replace(/\s+/g, "");
+    const afterText = stripCommentsOnly(afterSrc).replace(/\s+/g, "");
+    if (beforeText === afterText) {
+      await resetTarget();
+      return structuredError("zero_behaviour_delta", {
+        target_file: pointer.target_file,
+        detail: "the patch changes no executable code - comments and whitespace only; feature_compose refuses this shape and escalation must not route around it",
+        before_sha: beforeSha,
+        after_sha: afterSha,
+      });
+    }
   }
 }
 

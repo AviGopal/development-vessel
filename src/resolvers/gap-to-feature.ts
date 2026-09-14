@@ -1403,6 +1403,8 @@ export async function admitActionableGaps(
   // below can see whether there is any groundable work to prefer over them.
   const ungroundable: Record<string, unknown>[] = [];
   const excluded: Array<{ id: string; reason: string }> = [];
+  const CHILD_GAP_MONOPOLY_THRESHOLD = 3; // Arbitrary, but a concrete limit. This may be tuned in the future.
+  const childGapsByEditSite = new Map<string, number>();
   let tscRuns = 0;
   const passCache = new Map<string, boolean | null>(); // vessel -> clean? (this pass; null = unknown)
   const vesselTypecheckClean = (vessel: string): boolean | null => {
@@ -1424,6 +1426,13 @@ export async function admitActionableGaps(
     const cat = String(g.category ?? "");
     const meta = (g.classification_metadata ?? g.metadata ?? {}) as Record<string, unknown>;
     const failedAttempts = Number(meta.failed_attempts ?? 0);
+    // Increment child gap count if this is an auto-minted child gap.
+    if (id.startsWith("recommit-") || id.endsWith("-narrowed")) {
+      const editSite = String(meta.edit_site ?? "");
+      if (editSite) {
+        childGapsByEditSite.set(editSite, (childGapsByEditSite.get(editSite) ?? 0) + 1);
+      }
+    }
 
     // (E4) IDENTICAL REPEATED FAILURE — a gap whose every recorded attempt failed for the
     // same normalized reason will fail that way again, so each retry burns a scarce LLM
@@ -1432,6 +1441,12 @@ export async function admitActionableGaps(
     // FAIL-OPEN by construction: any parse or shape problem admits exactly as before.
     try {
       const repeatLessons = meta.failure_lessons;
+      const editSite = String(meta.edit_site ?? "");
+      const childGapsAtEditSite = childGapsByEditSite.get(editSite) ?? 0;
+      if (editSite && childGapsAtEditSite >= CHILD_GAP_MONOPOLY_THRESHOLD) {
+        excluded.push({ id, reason: `child_gap_monopoly_at_edit_site(${editSite})` });
+        continue;
+      }
       if (Array.isArray(repeatLessons) && repeatLessons.filter((l) => String((l as Record<string, unknown>)?.["reason"] ?? "").trim().length > 20).length >= 3) {
         const repeatKeys = new Set(
           repeatLessons

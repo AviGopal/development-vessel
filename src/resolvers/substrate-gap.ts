@@ -217,9 +217,9 @@ export function gapClassKey(id: string): string {
     .replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi, "U")
     .replace(/\d{4}-\d{2}-\d{2}T[\d:.\-Z]+/g, "T")
     .replace(/\d{4}-\d{2}-\d{2}/g, "D")
+    .replace(/(?<![0-9a-f])(?=[0-9a-f]*[0-9])[0-9a-f]{8}(?![0-9a-f])/gi, "H")
     .replace(/\d{13}/g, "M")
     .replace(/\d{10}/g, "S")
-    .replace(/(?<![0-9a-f])(?=[0-9a-f]*[0-9])[0-9a-f]{8}(?![0-9a-f])/gi, "H")
     .replace(/[0-9a-f]{8}(?=\-[0-9a-f]{4}\-[0-9a-f]{4}\-[0-9a-f]{4}\-[0-9a-f]{12})/gi, "C");
 }
 

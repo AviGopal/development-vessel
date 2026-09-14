@@ -93,5 +93,18 @@ export async function resolveSolicitationOutcomeScan(pointer: SolicitationOutcom
     if (id.startsWith("reland-needs-human-")) recordOperatorEngagement("landed_commit");
     return { solicitation_id: id, outcome: "answered" as const };
   });
-  return { shape: "solicitationOutcomeReport", body: { authored: true, outcomes, answered, pending: outcomes.filter((o) => o.outcome === "pending").length, episode_count: episodes === null ? 0 : episodes.length, horizon_ms: horizon } };
+  const unanswered = outcomes.filter((o) => o.outcome !== "answered");
+  if (unanswered.length >= 20) {
+    const waiting = unanswered.slice(0, 6).map((o) => o.solicitation_id).join(", ");
+    const detail = "The substrate is asking for operator decisions and not getting them: " + unanswered.length + " of " + outcomes.length + " solicitations are unanswered. A sealed gap category's only designed escape is a human verb, so each unanswered escalation is a gap family that can never be reattempted. To answer one: write uiFeedback_write with panel_id set to the solicitation id and the verb in pointer.value, then resolve escalation_disposition_apply. Waiting longest: " + waiting;
+    try {
+      await fetch(process.env["DEV_VESSEL_IMPULSES_URL"] ?? "http://127.0.0.1:8090/v2/impulses/resolve", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ impulse: { type: "substrateGap_write", gap: { id: "operator-escalation-backlog", category: "systematic_failure", source: "substrate_detected", summary: detail, detected_at: new Date().toISOString(), status: "open", classification_metadata: { unanswered_count: unanswered.length, total_solicitations: outcomes.length, answered_count: answered } } } }),
+        signal: AbortSignal.timeout(8000),
+      });
+    } catch { /* advisory only: the report must never fail because gap emission failed */ }
+  }
+  return { shape: "solicitationOutcomeReport", body: { authored: true, outcomes, answered, unanswered: unanswered.length, pending: outcomes.filter((o) => o.outcome === "pending").length, episode_count: episodes === null ? 0 : episodes.length, horizon_ms: horizon } };
 }

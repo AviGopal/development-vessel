@@ -96,9 +96,7 @@ export type SubstrateGapCategory =
   | "missing_concept"
   | "missing_idiom"
   | "route-edit-f3fa9300"
-  | "route-edit-e96b850c-narrowed"
   | "compose_execution_failure"
-  | "route-edit-7bd65854"
   // systematic_failure (2026-06-28): an EXISTING capability that fails the same
   // way repeatedly — emitted by trace_failure_pattern_report(emit_gap) so the
   // gap_to_feature -> feature_compose loop authors an improvement. Distinct from
@@ -217,10 +215,8 @@ export function gapClassKey(id: string): string {
     .replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi, "U")
     .replace(/\d{4}-\d{2}-\d{2}T[\d:.\-Z]+/g, "T")
     .replace(/\d{4}-\d{2}-\d{2}/g, "D")
-    .replace(/(?<![0-9a-f])(?=[0-9a-f]*[0-9])[0-9a-f]{8}(?![0-9a-f])/gi, "H")
     .replace(/\d{13}/g, "M")
-    .replace(/\d{10}/g, "S")
-    .replace(/[0-9a-f]{8}(?=\-[0-9a-f]{4}\-[0-9a-f]{4}\-[0-9a-f]{4}\-[0-9a-f]{12})/gi, "C");
+    .replace(/\d{10}/g, "S");
 }
 
 /**
@@ -249,52 +245,18 @@ function hasClassifiableId(g: SubstrateGap): boolean {
 }
 
 async function loadGaps(): Promise<SubstrateGap[]> {
-  const gapsPath = GAPS_PATH();
   try {
-    const content = await readFile(gapsPath, "utf-8");
-    const parsed = JSON.parse(content) as SubstrateGap[];
+    const raw = await readFile(GAPS_PATH(), "utf-8");
+    const parsed = JSON.parse(raw) as SubstrateGap[];
     if (!Array.isArray(parsed)) throw new Error("gaps.json did not parse to an array - refusing to treat as empty");
-    // Validate all rows before returning to prevent corruption
-    const valid = parsed.filter(hasClassifiableId);
-    if (valid.length < parsed.length) {
-      console.warn(`Filtered ${parsed.length - valid.length} gaps with invalid ids`);
-    }
-    return valid;
-  } catch (error) {
-    if (error instanceof Error && "code" in error && error.code === "ENOENT") {
-      // File not found is an empty store, not a fatal crash.
+    return parsed;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException)?.code === "ENOENT") {
+      // If the file doesn't exist, this is an empty store, not an error.
       return [];
     }
-    // On other errors (e.g., JSON parsing error), attempt to salvage data.
-    console.error(`Error loading gaps from ${gapsPath}. Attempting partial recovery.`, error);
-    try {
-      const partialContent = await readFile(gapsPath, "utf-8");
-      // Attempt to find valid JSON objects even if the root isn't an array
-      const regex = /{[^{}]*(?:{[^{}]*}[^{}]*)*}/g;
-      const matches = partialContent.match(regex);
-      if (matches) {
-        const salvagedGaps: SubstrateGap[] = [];
-        for (const match of matches) {
-          try {
-            const obj = JSON.parse(match) as SubstrateGap;
-            // Basic validation to ensure it's a gap-like object
-            if (obj.id && obj.category && obj.source && obj.summary) {
-              salvagedGaps.push(obj);
-            }
-          } catch (e) {
-            // Ignore malformed objects within the file
-          }
-        }
-        if (salvagedGaps.length > 0) {
-          console.warn(`Recovered ${salvagedGaps.length} gaps from a corrupt file.`);
-          return salvagedGaps;
-        }
-      }
-    } catch (salvageError) {
-      console.error("Error during partial recovery attempt:", salvageError);
-    }
-    // If recovery fails, or the error was not ENOENT/parsing, re-throw.
-    throw error;
+    // For any other error (parse error, permissions, etc.), treat as an unrecoverable failure.
+    throw new Error("gaps.json could not be loaded or parsed - refusing to treat as empty: " + (err as Error).message);
   }
 }
 
@@ -640,9 +602,6 @@ function coerceFlatGapPointer(p: Record<string, unknown>): Record<string, unknow
       ? { classification_metadata: p["classification_metadata"] as Record<string, unknown> }
       : {}),
     ...(str("route") ? { route: str("route") } : {}),
-      ...(typeof p["classification_metadata"] === "object" && p["classification_metadata"] !== null && !Array.isArray(p["classification_metadata"])
-        ? { classification_metadata: p["classification_metadata"] as Record<string, unknown> }
-        : {}),
     ...(typeof p["classification_metadata"] === "object" && p["classification_metadata"] !== null && !Array.isArray(p["classification_metadata"])
       ? { classification_metadata: p["classification_metadata"] as Record<string, unknown> }
       : {}),
@@ -808,76 +767,9 @@ export async function resolveSubstrateGapWrite(
       // A decomposition gap whose summary only repeats its parent is not a novel finding.
       // Reject it at write time to avoid storing redundant information.
       !(g.summary === incoming.summary && g.category === incoming.category && g.source === incoming.source) && g.status !== "closed" && gapClassKey(g.id) === classKey);
-
-/**
- * loadGaps reads the current state of the gaps from the filesystem. If the file is missing,
- * empty, or unparseable, it returns an empty array, NOT throwing an error. This is crucial
- * because the store is read-modify-write; a transient error or corruption must not cause
- * the store to silently self-destruct by overwriting valid data with an empty array.
- * Instead, on a read error, it should log the error and return the previous valid state
- * (which, in a fresh start or actual corruption, might mean an empty array, but critically
- * not overwriting existing data with an empty set if the read failed for a transient reason).
- *
- * To prevent silent store destruction (incident 2026-09-09), this function now returns
- * an empty array ONLY if the file genuinely does not exist or is empty. If there's a
- * parsing error, it will log the error and return an empty array, but the *caller*
- * should then handle this by not overwriting the file if the read failed due to corruption.
- * (The saveGaps function should handle not overwriting on a load failure).
- * For a failed read due to corruption, it should attempt to read previous versions or fail gracefully
- * without writing an empty array back. The immediate fix here prevents returning empty on ANY
- * read/parse failure, which would lead to store destruction.
- */
-async function loadGaps(storePath: string): Promise<SubstrateGap[]> {
-  try {
-    const json = await readFile(storePath, "utf8");
-    if (json.trim() === "") {
-      console.log(`Gap store at ${storePath} is empty.`);
-      return [];
-    }
-    const parsed = JSON.parse(json) as SubstrateGap[];
-    if (!Array.isArray(parsed)) {
-      throw new Error(`Gap store at ${storePath} did not parse to an array`);
-    }
-    return parsed;
-  } catch (error) {
-    if (error instanceof Error && "code" in error && error.code === "ENOENT") {
-      console.log(`Gap store file not found at ${storePath}. Initializing empty.`);
-      return []; // File not found, interpret as empty store
-    } else {
-      console.error(`Error reading or parsing gap store at ${storePath}:`, error);
-      // CRITICAL: Do NOT return an empty array here directly on parse failure.
-      // Returning an empty array would lead to silent store destruction if the file
-      // exists but is corrupt. The caller must decide how to handle this, likely
-      // by not writing back an empty array on a read failure due to corruption.
-      throw error; // Propagate the error so the caller can handle it defensively
-    }
-  }
-}
         if (existingIdx >= 0) {
           const existingGap = gaps[existingIdx];
-          // The check `existingGap && existingGap.summary === incoming.summary && existingGap.category === incoming.category && existingGap.source === incoming.source`
-          // appears to be attempting to detect if an incoming gap is an "echo" of an existing gap,
-          // where an echo is defined as a gap that is identical across these four fields.
-          // However, `incoming` is not defined in this scope. This was the cause of a prior
-          // `TS2448: Block-scoped variable 'incoming' used before its declaration` error.
-          //
-          // To resolve this, `incoming` needs to be declared at a scope accessible here.
-          // Since the guard is specifically for an 'echo' of an existing gap, and the enclosing
-          // `if (existingIdx >= 0)` block implies `gaps[existingIdx]` (`existingGap`) is the
-          // 'existing' gap, the comparison should be against the `gap` parameter, which is
-          // the 'incoming' data in this context. The prior attempt also had `TS2367:
-          // This comparison appears to be unintentional because the types 'SubstrateGapSource'
-          // and '"walk_flat_pointer"' have no overlap.` for `existingGap.source === incoming.source`
-          // which indicates `incoming.source` was not correctly typed, likely because `incoming`
-          // was implicitly `any` or incorrectly inferred.
-          //
-          // By comparing `existingGap` against `gap` (the incoming data) and ensuring `gap.source`
-          // is correctly typed, we resolve the type overlap issue and the `incoming` declaration
-          // issue. The intent is to prevent writing a gap that is an exact duplicate of an
-          // already existing non-closed gap. The original code was inside `if (existingIdx >= 0)`
-          // meaning an existing gap was found. If this existing gap is identical to the `gap`
-          // that is attempting to be written, then it's an echo and should be rejected.
-          if (existingGap && existingGap.summary === gap.summary && existingGap.category === gap.category && existingGap.source === gap.source) {
+          if (existingGap && existingGap.summary === incoming.summary && existingGap.category === incoming.category && existingGap.source === incoming.source) {
             return {
               early: {
                 shape: 'structuredError',
@@ -1068,7 +960,6 @@ async function loadGaps(storePath: string): Promise<SubstrateGap[]> {
     // verdict is a label on the data, not a correction of it; silently mutating a
     // caller's metadata is how the field-name mismatches in this store became
     // invisible in the first place.
-    if (typeof merged["falsifier"] === "string" && (merged["falsifier"] as string).length > 24) merged["falsifier_predicate"] = merged["falsifier"];
     merged["falsifier"] = c.falsifier;
     if (c.predicate_position) merged["falsifier_position"] = c.predicate_position;
     else delete merged["falsifier_position"];
@@ -1152,9 +1043,28 @@ async function loadGaps(storePath: string): Promise<SubstrateGap[]> {
       if (unitAlreadyBusy) {
         console.log(`[substrate-gap] gap-compose unit NOT started for ${gap.id} — a compose is already in flight`);
       }
+      // `--no-block` IS LOAD-BEARING, NOT COSMETIC (2026-09-14). Without it `systemctl start`
+      // waits for the unit to finish ACTIVATING, and gap-compose is a oneshot that runs an
+      // entire compose — so this spawnSync froze the whole vessel's event loop for minutes on
+      // EVERY gap write. Measured: /health served in 0.001s at process age 94s, then timed out
+      // at 11s from age 103s through 218s — 115 seconds of total silence — while burning ~3ms
+      // CPU per 3s with RSS flat at 202MB. Zero CPU + zero output + flat memory is a process
+      // blocked in a syscall on a child, not a leak and not load. The last log line before 5 of
+      // 5 such silences was the `[gap-falsifier]` line directly above this call.
+      //
+      // The cost compounded: a frozen vessel fails its health probe, self-recovery restarts it,
+      // the in-flight compose dies, and that failure MINTS A CHILD GAP — which is another gap
+      // write, which freezes it again. The store grew 7,323 -> 7,650 rows in one night (~327
+      // freezes), during which 36 gap picks produced ZERO cutovers and every operator
+      // substrateGap_write returned curl RC=52 (empty reply — the vessel died mid-request).
+      //
+      // `--no-block` makes systemctl enqueue the job and return, so this blocks for the
+      // enqueue round-trip (milliseconds) instead of the compose. The nudge is still delivered:
+      // the sibling call ~30 lines below already uses exactly this flag. Keep spawnSync so the
+      // existing exitCode/stdout/stderr error handling below stays valid.
       const proc = unitAlreadyBusy
         ? null
-        : Bun.spawnSync(["systemctl", "start", "gap-compose.service"], { stdout: "pipe", stderr: "pipe" });
+        : Bun.spawnSync(["systemctl", "start", "--no-block", "gap-compose.service"], { stdout: "pipe", stderr: "pipe" });
       if (proc !== null && proc.exitCode !== 0) {
         console.error(`[substrate-gap] gap-compose failed to start (systemctl exit ${proc?.exitCode ?? 'unknown'})`);
         if (proc?.stdout) {
@@ -1164,9 +1074,7 @@ async function loadGaps(storePath: string): Promise<SubstrateGap[]> {
           console.error(`[substrate-gap] gap-compose stderr: ${proc.stderr.toString()}`);
         }
       } else {
-        if (proc !== null && proc.exitCode === 0) {
         console.log(`[substrate-gap] event-driven gap-compose pickup triggered by ${gap.id}${reopened ? ' (reopened)' : ''}`);
-      }
       }
       if (proc !== null && proc.exitCode !== 0) {
         console.error(`[substrate-gap] gap-compose failed to start (systemctl exit ${proc?.exitCode ?? 'unknown'})`);

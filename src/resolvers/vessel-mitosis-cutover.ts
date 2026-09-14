@@ -500,7 +500,7 @@ async function emitLandingTrace(appliedBody: Record<string, unknown>, mode: stri
         await fetch(`${ep}/v2/activities/execution-traces/reach`, {
           method: "POST",
           headers: { "Content-Type": "application/json", Authorization: `ApiKey ${key}` },
-          body: JSON.stringify({ execution_id: execId, reached: true, completion_shapes: ["cutoverApplied"] }),
+          body: JSON.stringify({ execution_id: execId, reached: String(appliedBody["push_status"] ?? "") === "pushed", completion_shapes: ["cutoverApplied"] }),
           signal: AbortSignal.timeout(EMIT_TIMEOUT_MS),
         }).catch(() => { /* ungraded is the safe failure — the ribosome simply skips it */ });
       })

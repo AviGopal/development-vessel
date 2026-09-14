@@ -44,6 +44,18 @@ export async function resolveSolicitationOutcomeScan(pointer: SolicitationOutcom
   if (ids.length === 0) {
     return { shape: "solicitationOutcomeReport", body: { authored: true, outcomes: [], answered: 0, episode_count: 0, note: "no outstanding solicitations" } };
   }
+  try {
+    const gapsRaw = await Bun.file((process.env["WORKSPACE_ROOT"] ?? "/workspace") + "/gaps/gaps.json").text();
+    const parsed = JSON.parse(gapsRaw) as unknown;
+    const gapRows = Array.isArray(parsed) ? parsed as Array<{ id?: string; status?: string }> : [];
+    const openIds = new Set(gapRows.filter((g) => String(g?.status ?? "open") === "open").map((g) => String(g?.id ?? "")));
+    const before = ids.length;
+    ids = ids.filter((qid) => openIds.has(qid.replace(/^reland-needs-human-/, "").replace(/^needs-human-/, "")));
+    if (ids.length !== before) console.log("[solicitation-outcome-scan] dropped " + (before - ids.length) + " of " + before + " panels whose gap is closed, rejected or absent");
+  } catch { /* gap store unreadable: fail open, scan every panel as before */ }
+  if (ids.length === 0) {
+    return { shape: "solicitationOutcomeReport", body: { authored: true, outcomes: [], answered: 0, episode_count: 0, note: "no outstanding solicitations with an open gap" } };
+  }
   // ANSWER SURFACE (2026-08-28): a human answering an escalation panel hits stateful-ui-vessel's
   // POST /api/feedback, which emits uiFeedback_write keyed by panel_id; dev-vessel's interactor
   // passthrough appends that to WORKSPACE_ROOT/interactor-log/uiFeedback_write.jsonl. That file is

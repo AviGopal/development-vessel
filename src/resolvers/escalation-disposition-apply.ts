@@ -174,6 +174,49 @@ export async function resolveEscalationDispositionApply(
     meta.human_disposition_at = new Date().toISOString();
     meta.human_disposition_answer = String(answer.value).slice(0, 2000);
 
+    // LIFT LABELLED FIELDS OUT OF THE ANSWER so a human reply can make the gap machine-closable.
+    // MEASURED 2026-09-14 (rg, whole fleet): `human_disposition_answer` and `human_disposition`
+    // each had exactly ONE occurrence — the writes above — and NOTHING read either. So an answer
+    // granted a selection exemption and reset failed_attempts, then discarded its own content:
+    // the gap became selectable again while staying exactly as ungrounded as before, which means
+    // it could be picked forever and never closed on evidence. The proof case sat in the store
+    // from 2026-08-29: an answer whose literal text read "EDIT_SITE (the gap has none, which is
+    // why it cannot be grounded or composed): repos/development-vessel/src/resolvers/
+    // concept-usage-record.ts" supplied exactly the field the gap needed, and it was thrown away.
+    //
+    // classifyFalsifier stamps class1 from `expected_literal`/`hardcoded_url` PLUS `edit_site`,
+    // and class2 from a shape name in the fleet vocabulary. Lifting these three labels is
+    // therefore what converts a human answer into a predicate the sweep can actually run.
+    //
+    // Reads the FULL answer, not the 2000-char copy stored above, so a label near the end of a
+    // long answer still registers — the truncation is for storage, not for parsing.
+    const answerFull = String(answer.value);
+    const labelled = (label: string): string | null => {
+      for (const raw of answerFull.split("\n")) {
+        const line = raw.trim();
+        if (!line.toUpperCase().startsWith(label + ":")) continue;
+        const value = line.slice(label.length + 1).trim();
+        if (value.length > 0) return value;
+      }
+      return null;
+    };
+    // NEVER INFER these from prose. A missing label leaves the field untouched, and an existing
+    // value is replaced only when the answer supplies that label explicitly — otherwise an
+    // operator's paragraph could silently relocate a gap that was already correctly anchored.
+    const answeredEditSite = labelled("EDIT_SITE");
+    if (answeredEditSite && answeredEditSite.startsWith("repos/") && !answeredEditSite.includes("..")) {
+      meta.edit_site = answeredEditSite;
+    }
+    const answeredLiteral = labelled("EXPECTED_LITERAL");
+    if (answeredLiteral) {
+      // Verbatim: this is searched for character-by-character, so it must not be normalised.
+      meta.expected_literal = answeredLiteral;
+    }
+    const answeredShape = labelled("VERIFY_SHAPE");
+    if (answeredShape && /^[A-Za-z_][A-Za-z0-9_]*$/.test(answeredShape)) {
+      meta.verify_shape = answeredShape;
+    }
+
     let status = String(gap.status ?? "open");
     if (verb === "drop") {
       status = "closed";

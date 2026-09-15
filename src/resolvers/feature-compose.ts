@@ -174,16 +174,7 @@ type Json = Record<string, unknown>;
 // window; the 8 firings on record all predate the guard.
 //
 // Removed rather than satisfied at the call site: a parameter no code reads is
-// not a flag, and leaving it would keep a landmine for any future caller.
-//
-// lastDraftModel / lastDraftEndpoint record which model the resolver selected for the
-// most recent drafting call and where it came from, so the compose can report that
-// arm's outcome once the compose verdict is settled. planDraftModel pins the PLAN
-// call's model: lastDraftModel is cleared immediately before that call and read
-// immediately after it, so the captured value can only come from that call.
-let planDraftModel = "";
-let lastDraftModel = "";
-let lastDraftEndpoint = "";
+// not a flag, and leaving it would keep a landmine for the next caller.
 async function llmCall(endpoint: string, prompt: string, model: string): Promise<string> {
   const res = await fetch(endpoint, {
     method: 'POST',
@@ -211,12 +202,7 @@ async function llmCall(endpoint: string, prompt: string, model: string): Promise
     throw new Error(`llmCall to ${endpoint} failed with status ${res.status}: ${errorBody.slice(0, 500)}`);
   }
 
-  const j = (await res.json());
-  lastDraftModel = (j as { fallback_from?: unknown })?.fallback_from
-    ? ""
-    : String((j as { model_selection?: { selected?: unknown } })?.model_selection?.selected ?? "");
-  lastDraftEndpoint = endpoint;
-  console.log("[fc-draft-model] pick=" + lastDraftModel + " task=feature_compose");
+  const j = await res.json();
   if (j.error) {
     throw new Error(`llmCall to ${endpoint} returned error in body: ${JSON.stringify(j.error)}`);
   }
@@ -2847,7 +2833,7 @@ async function groundVesselFiles(toolsEndpoint: string, verifyVessels: string[],
       // un-authorable: it produced 0 ops. Config files are small; adding them keeps the
       // grounding universal so "nothing is loop-unauthorable" holds in practice. (2026-07-01)
       const sh = await callTool(toolsEndpoint, "shell", {
-        command: `cd ${JSON.stringify(vAbs)} 2>/dev/null && { find src -type f \( -name '*.ts' -o -name '*.tsx' \) 2>/dev/null; ls tsconfig.json package.json esbuild.config.mjs 2>/dev/null; find tests -type f -name '*.test.ts' 2>/dev/null; } | sort -u | head -400`,
+        command: `cd ${JSON.stringify(vAbs)} 2>/dev/null && { find src -type f \\( -name '*.ts' -o -name '*.tsx' \\) 2>/dev/null; ls tsconfig.json package.json esbuild.config.mjs 2>/dev/null; } | sort -u | head -400`,
         cwd: REPO_ROOT,
       });
       const raw = String((sh.body as { stdout?: unknown })?.stdout ?? "").trim();
@@ -3160,14 +3146,14 @@ async function appendComposeLesson(cls: string, reason: string, vessels: string,
       // dispositioned/skipped, not infinitely recommitted). The failure_lessons write above still
       // records the class so the drafter keeps learning.
       const _recommitDepth = (String(gap.id).match(/recommit-/g) ?? []).length;
-      if (reCommit && _recommitDepth + (String(gap.id).match(/-narrowed/g) ?? []).length < 2) {
+      if (reCommit && _recommitDepth < 2) {
         await resolveSubstrateGapWrite({
           type: "substrateGap_write",
           gap: {
             id: "recommit-" + String(gap.id) + "-" + cls,
             category: "systematic_failure",
             source: "substrate_detected",
-            summary: String((gap as { summary?: unknown }).summary ?? "") + " [RETRY CONTEXT — compose for gap " + String(gap.id) + " repeated already-recorded failure class " + cls + ": " + reason.slice(0, 150) + ". The specification is above; this failure text is context only and is not the specification.]",
+            summary: "compose for gap " + String(gap.id) + " repeated already-recorded failure class " + cls + ": " + reason.slice(0, 150),
             detected_at: new Date().toISOString(),
             status: "open",
             classification_metadata: { re_commit: true, source_gap_id: String(gap.id), failure_class: cls, edit_site: meta.edit_site, suspected_real_location: meta.suspected_real_location, file_path: meta.file_path },
@@ -3766,7 +3752,33 @@ async function resolveFeatureComposeUncapped(pointer: FeatureComposePointer): Pr
     // ~51KB of whole files — which is what anchor_not_found, the largest failure class,
     // actually is. Each candidate is inert unless it occurs in the file.
     const regionProbes = [regionHint, ...regionCandidatesFromText(`${String(pointer.spec ?? "")}\n${String(pointer.gap?.summary ?? "")}`)].filter(Boolean);
-    try { grounding = await groundVesselFiles(toolsEndpoint, verifyVessels, focusHints, targetFiles, regionProbes); } catch { grounding = ""; }
+    // LOG INSIDE THE CATCH (2026-09-15). This was a BARE catch — no error variable, no output —
+    // so any throw inside groundVesselFiles silently became an empty window, which the
+    // blind-decompose gate ~60 lines below then correctly refused. MEASURED: 48 of 48 grounding
+    // windows reported exactly "(0 bytes)" over 60 minutes, with ZERO grounding-success lines and
+    // ZERO derived-verify_vessels lines; the only fc-grounding output was 36 identical REFUSED
+    // lines while the lane made 3-6 picks per 5-minute sample and produced ZERO cutover verdicts.
+    // The symptom was visible and the cause was discarded, which is why it survived: a failure on
+    // a load-bearing edge that reports nothing cannot be diagnosed from the outside.
+    //
+    // Ruled out before adding this: the tools endpoint is healthy (local-tools-vessel active,
+    // :8230/health 200, fs_read returns real content) and the target files exist in both the
+    // runtime and the staging clone — so it is neither a dead dependency nor a missing file.
+    //
+    // Keep the fail-open behaviour (grounding = "" and carry on); only make the reason visible.
+    try { grounding = await groundVesselFiles(toolsEndpoint, verifyVessels, focusHints, targetFiles, regionProbes); }
+    catch (err) {
+      console.error(
+        `[fc-grounding] groundVesselFiles THREW — window will be empty and the decompose will be refused: ` +
+        `${err instanceof Error ? `${err.name}: ${err.message}` : String(err)} ` +
+        `| verifyVessels=[${verifyVessels.join(",")}] targetFiles=[${targetFiles.join(",")}] ` +
+        `focusHints=${focusHints.length} toolsEndpoint=${toolsEndpoint}`,
+      );
+      if (err instanceof Error && typeof err.stack === "string") {
+        console.error(`[fc-grounding] stack: ${err.stack.split("\n").slice(0, 4).join(" | ")}`);
+      }
+      grounding = "";
+    }
     if (!regionHint && regionProbes.length) {
       const hit = regionProbes.find((p) => grounding.includes(p));
       console.log(`[fc-scope] no region literal; mined ${regionProbes.length} identifier probe(s), grounding centred on ${hit ? `"${hit}"` : "none (fell through to heuristics)"}`);
@@ -3812,7 +3824,7 @@ async function resolveFeatureComposeUncapped(pointer: FeatureComposePointer): Pr
     for (const t of targetFiles) {
       const base = t.split("/").pop() ?? t;
       if (base.length === 0) continue;
-      if (new RegExp("\\/" + base.replace(/[.*+?^${}()|[\]\\]/g, (c) => "\\" + c) + "(?![A-Za-z0-9])").test(grounding)) continue; // visible in the window → groundable, fine
+      if (new RegExp("/" + base.replace(/[.*+?^${}()|[\]\\]/g, (c) => "\\" + c) + "(?![A-Za-z0-9])").test(grounding)) continue; // visible in the window → groundable, fine
       let exists = false;
       try {
         const rd = await callTool(toolsEndpoint, "fs_read", { path: `${REPO_ROOT}/${t.replace(/^repos\//, "")}` });
@@ -4095,9 +4107,7 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
     console.log("[decompose] deterministic verbatim-replacement synthesis applied");
   } else {
     try {
-      lastDraftModel = "";
-planRaw = await llmCallWithFailover(llmEndpoints, decomposePrompt(spec, maxOps, grounding, principles + composeLessons, priorFeedback, netNewTargets), model);
-planDraftModel = lastDraftModel;
+      planRaw = await llmCallWithFailover(llmEndpoints, decomposePrompt(spec, maxOps, grounding, principles + composeLessons, priorFeedback, netNewTargets), model);
     } catch (e) {
       // OBSERVABILITY (2026-08-13): this decompose-throw was SILENT — it returns
       // ok:false and never reaches the [fc-plan] log below, so a draft that dies
@@ -5052,7 +5062,7 @@ planDraftModel = lastDraftModel;
               // swallowed the failure, so every RECOVERABLE anchor miss became a terminal
               // `old_string not found`. Matches the sibling windowed-repair call above.
               llmEndpoint,
-              `The file tool reported this about the failed anchor: ${String((r.body as { error?: unknown })?.error ?? "")} === Current full content of ${op.path}:\n\n${live}\n\nMake this change: ${op.rationale ?? ""}\nThe planned anchor that FAILED to match is next; target the SAME statement it refers to, but you MUST return different text than the failed anchor, copied character-for-character out of the file content above:\n${effOld}\n\nIntended replacement behaviour:\n${op.new_string ?? ""}\n\nEmit ONE JSON object {"old_string":"<verbatim substring copied from the content above>","new_string":"<replacement>"}. old_string MUST appear verbatim in the content above. No prose, no fences.`,
+              `Current full content of ${op.path}:\n\n${live}\n\nMake this change: ${op.rationale ?? ""}\nThe planned anchor that FAILED to match is next; target the SAME statement it refers to, but you MUST return different text than the failed anchor, copied character-for-character out of the file content above:\n${effOld}\n\nIntended replacement behaviour:\n${op.new_string ?? ""}\n\nEmit ONE JSON object {"old_string":"<verbatim UNIQUE substring copied from the content above, targeting the same statement as the planned anchor>","new_string":"<replacement>"}. old_string MUST appear verbatim in the content above. No prose, no fences.`,
               model,
             ));
             if (fix?.old_string) {
@@ -5543,8 +5553,7 @@ planDraftModel = lastDraftModel;
               }
             }
           }
-        } catch { /* grounding is best-effort; repair attempt logged next */ }
-        console.warn("[fc-repair] ATTEMPT vessel=" + String(fv.vessel));
+        } catch { /* grounding is best-effort */ }
         const fix = parseJsonObject(await llmCall(
           // LLM egress, NOT concept-db — see the anchor-repair call above.
           llmEndpoint,
@@ -5553,9 +5562,7 @@ planDraftModel = lastDraftModel;
         ));
         const ef = typeof fix?.file === "string" ? String(fix.file)
           : typeof fix?.path === "string" ? String(fix.path) : "";
-        if (!ef) console.warn("[fc-repair] NO-TARGET vessel=" + String(fv.vessel) + " parsed=" + String(!!fix) + " keys=" + (fix ? Object.keys(fix as Record<string, unknown>).join(",") : "none"));
-        const efAbs = ef ? opAbs(ef) : ""; // repair target resolved
-        console.warn("[fc-repair] RESPONSE keys=" + (fix ? Object.keys(fix as Record<string, unknown>).join(",") : "none") + " hasOld=" + String(!!fix?.old_string) + " start=" + String(fix?.start_line) + " ef=" + String(!!ef));
+        const efAbs = ef ? opAbs(ef) : "";
 
         // LINE-ADDRESSED REPAIR WITH A SYSTEM-DERIVED ANCHOR.
         //
@@ -5613,8 +5620,7 @@ planDraftModel = lastDraftModel;
         if (fix?.old_string && efAbs) {
           const cur = await callTool(toolsEndpoint, "fs_read", { path: efAbs });
           const curContent = (cur.body as { content?: unknown })?.content;
-          if ((cur.ok) && typeof curContent === "string" && !curContent.includes(String(fix.old_string))) console.warn("[fc-repair] ANCHOR-MISS vessel=" + String(fv.vessel) + " file=" + String(ef));
-          if ((cur.ok) && typeof curContent === "string" && curContent.includes(String(fix.old_string))) {
+          if (cur.ok && typeof curContent === "string" && curContent.includes(String(fix.old_string))) {
             if (!preEditContent.has(efAbs) && !created.includes(efAbs)) preEditContent.set(efAbs, curContent);
             const w = await callTool(toolsEndpoint, "fs_edit", { path: efAbs, old_string: String(fix.old_string), new_string: String(fix.new_string ?? "") });
             if (w.ok) { anyFixed = true; if (!edited.includes(efAbs) && !created.includes(efAbs)) edited.push(efAbs); }
@@ -6362,37 +6368,9 @@ planDraftModel = lastDraftModel;
         }
       } catch { /* unreadable or corrupt prior report: fall back to overwriting */ }
     }
-    if (lastDraftModel && lastDraftEndpoint) {
-      fetch(lastDraftEndpoint, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `ApiKey ${METABOB_API_KEY}` },
-        body: JSON.stringify({
-          type: 'llmArmOutcome_write',
-          model: planDraftModel || lastDraftModel,
-          reached: verdict === 'FAVORABLE',
-          task_type: 'feature_compose'
-        }),
-        signal: AbortSignal.timeout(60 * 1000)
-      })
-        .then(async (res) => {
-          if (res.ok) {
-            console.log(`[fc-draft-model] graded ${lastDraftModel} reached=${verdict === 'FAVORABLE'} (success)`);
-          } else {
-            const errorBody = await res.text().catch(() => 'No body');
-            console.error(`[fc-draft-model] Failed to grade ${lastDraftModel} (status: ${res.status}): ${errorBody}`);
-          }
-        })
-        .catch((err) => {
-          console.error(`[fc-draft-model] Failed to grade ${lastDraftModel} (network error): ${(err as Error).message}`);
-        });
-      lastDraftModel = "";
-      lastDraftEndpoint = "";
-    } else {
-      console.log("[fc-draft-model] NOT graded — no drafting call recorded for this compose");
-    }
     writeFileSync(
-      (reportPath),
-      JSON.stringify({ ok: verdict === "FAVORABLE", verdict, directed: (pointer as { directed?: boolean }).directed === true, spec: String(spec).slice(0, 8000), summary: plan.summary, touched_vessels: [...touched], op_count: ops.length, applied, apply_failed: applyFailed, verify, semantic_gate, rolled_back, restore_failed: restoreFailed, cutovers }, null, 2),
+      reportPath,
+      JSON.stringify({ ok: verdict === "FAVORABLE", verdict, spec: String(spec).slice(0, 8000), summary: plan.summary, touched_vessels: [...touched], op_count: ops.length, applied, apply_failed: applyFailed, verify, semantic_gate, rolled_back, restore_failed: restoreFailed, cutovers }, null, 2),
     );
   } catch { /* persistence failure must never fail the compose */ }
 
@@ -6447,7 +6425,6 @@ planDraftModel = lastDraftModel;
           // Gated route vs the patch_with_tools escalation lane — the distinction that took a
           // manual bisect over commit trailers and gap-id prefixes to establish by hand.
           route: String(pointer.gap?.id ?? "").startsWith("pwt-") ? "escalation" : "gated",
-          directed: (pointer as { directed?: boolean }).directed === true,
           touched_vessels: [...touched],
           op_count: ops.length,
           ops_applied: applied.filter((a) => a.ok).length,

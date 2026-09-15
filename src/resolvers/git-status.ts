@@ -53,7 +53,7 @@ export async function resolveGitStatus(
     // correct; what was wrong was reading it from the wrong repository.
     if (head.startsWith("ref: ")) {
       const ref = head.slice(5).trim();
-      const refPath = `${gitDir}/${ref}`;
+      const refPath = `${gitDir}/${ref.startsWith('refs/') ? ref : `refs/heads/${ref}`}`;
       const commitHash = (await Bun.file(refPath).text()).trim();
       return { shape: "gitStatus", body: { commitHash, repoPath, ref, rebaseInProgress, conflictInProgress } };
     }

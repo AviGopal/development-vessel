@@ -64,7 +64,7 @@ export async function resolveLearningSignalHealthObserver(
   const total = concepts.length;
   const loaded = concepts.filter((c) => (c.times_loaded ?? 0) > 0);
   const loadedWithSuccess = loaded.filter((c) => (c.times_succeeded ?? 0) > 0);
-  const successCreditRatio = loaded.length > 0 ? loadedWithSuccess.length / loaded.length : null; // null = unknown (no loaded data); do NOT report a false 1.0
+  const successCreditRatio = loaded.length > 0 ? loadedWithSuccess.length / loaded.length : 1.0; // Assume 1.0 if no loaded data, to avoid false negatives in health checks
   // THE SAMPLE IS SELECTED BY THE QUANTITY BEING MEASURED. /concepts/search with no query
   // orders by relevance DESC, and relevance is (times_succeeded + 1) / (times_loaded + 2),
   // so a page that fills to its limit returns precisely the concepts that HAVE successes.

@@ -71,13 +71,13 @@ const WORKSPACE_ROOT_AT_LOAD = process.env["WORKSPACE_ROOT"] ?? DEFAULT_WORKSPAC
  * 1. INVERT THE DECISION: It returns `true` if the literal is present and should
  *    prevent arming (i.e., indicates the fix is already in place, or a defect is present).
  *    For `expected_literal`, `true` means the literal is present and a gap should NOT be armed.
- *    For `hardcoded_url`, `true` means the literal is present and a gap SHOULD be armed.
- * 2. READ THE SAME TREE THE PREDICATE READS: Uses `runtimeRoot()` for path resolution to align
+ *    For `expected_literal`, `true` means the literal is already present (count > 0) and thus should NOT be armed.
+ *    For `hardcoded_url`, `true` means the literal is *absent* (count === 0) and thus should NOT be armed.2. READ THE SAME TREE THE PREDICATE READS: Uses `runtimeRoot()` for path resolution to align
  *    arming with evaluation.
  * 3. COUNT LITERALLY, NOT BY REGEX: Counts occurrences using string `indexOf` to avoid regex
  *    metacharacter issues.
- * 4. HONOUR THE NAME: Requires exactly one occurrence for `expected_literal` to be considered
- *    'present' (meaning the fix has landed). For `hardcoded_url`, it checks for any occurrence.
+ * 4. HONOUR THE NAME: For `expected_literal`, a non-zero count (meaning already present) will refuse arming.
+ *    For `hardcoded_url`, a zero count (meaning absent) will refuse arming.
  *
  * @param literal The string literal to search for.
  * @param filePath The file path relative to the runtime root.
@@ -85,7 +85,7 @@ const WORKSPACE_ROOT_AT_LOAD = process.env["WORKSPACE_ROOT"] ?? DEFAULT_WORKSPAC
  *                     `true` means the fix is present (e.g., `expected_literal` is present).
  * @returns `true` if the condition for refusal (or defect detection) is met, `false` otherwise.
  */
-function refusePredicateLiteralAlreadyPresent(literal: unknown, filePath: unknown, detectDefect = false): boolean {
+function predicateLiteralNotUnique(literal: unknown, filePath: unknown, detectDefect = false): boolean {
   if (typeof literal !== 'string' || typeof filePath !== 'string') return false;
   const runtimePath = filePath.replace(/^repos\//, "");
 
@@ -99,14 +99,13 @@ function refusePredicateLiteralAlreadyPresent(literal: unknown, filePath: unknow
     }
 
     if (detectDefect) {
-      // For `hardcoded_url`, presence (count > 0) means it's a defect, so we return true.
-      // This means if the hardcoded URL is present, we refuse to arm an 'unresolvable' for it,
-      // indicating it's a gap that needs fixing.
-      return count > 0;
+      // For `hardcoded_url`, absence (count === 0) means it's not a defect *yet*.
+      // We refuse to arm if the URL is *absent* (count === 0), as the gap describes something to remove.
+      return count === 0;
     } else {
-      // For `expected_literal`, exact presence (count === 1) means the fix is landed, so we refuse to arm.
-      // If count is not 1 (0 or >1), it means the fix isn't landed or is messed up, so we allow arming.
-      return count === 1;
+      // For `expected_literal`, presence (count > 0) means the literal is already there.
+      // We refuse to arm if the literal is *present* (count > 0), as the gap describes something to add.
+      return count > 0;
     }
   } catch {
     return false;
@@ -487,13 +486,14 @@ export function classifyFalsifier(
   // `unresolvable` is the honest label: a predicate WAS supplied and cannot be resolved,
   // which is the same failure the unadvertised-shape case names.
   if (usablePredicateString(m["expected_literal"])) {
-    if (refusePredicateLiteralAlreadyPresent(m["expected_literal"], m["edit_site"] ?? m["file_path"])) return { falsifier: "unresolvable" };
+    if (predicateLiteralNotUnique(m["expected_literal"], m["edit_site"] ?? m["file_path"])) return { falsifier: "unresolvable" };
     if (m["edit_site"] || m["file_path"]) return { falsifier: "class1", predicate_position: "expected_literal" };
     return { falsifier: "unresolvable" };
   }
   if (usablePredicateString(m["hardcoded_url"])) {
+    if (predicateLiteralNotUnique(m["hardcoded_url"], m["edit_site"] ?? m["file_path"], true)) return { falsifier: "unresolvable" };
     const editSite = usablePredicateString(m["edit_site"]) ?? usablePredicateString(m["file_path"]);
-    if (!editSite || !refusePredicateLiteralAlreadyPresent(m["hardcoded_url"], editSite)) {
+    if (!editSite || !predicateLiteralNotUnique(m["hardcoded_url"], editSite, true)) {
 
       return {
         falsifier: "unresolvable",

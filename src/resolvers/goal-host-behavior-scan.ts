@@ -125,7 +125,7 @@ const isSuccess = (t: TraceRow): boolean =>
 function classifyEffect(resolvers: string[], activityId: string): EffectClass {
   const hay = (resolvers.join(" ") + " " + activityId).toLowerCase();
   if (/gh[-_]?pr[-_]?merge|gh[-_]?repo[-_]?create|git[-_]?push|force[-_]?deploy|publish|deprecate|delete|destroy/.test(hay)) return "destructive";
-  if (/fs[-_]?write|fs[-_]?edit|code[-_]?replace|apply[-_]?proposal|concept[-_]?create|concept[-_]?write|template[-_]?update|_write\b|mitosis|patch|scaffold/.test(hay)) return "mutate";
+  if (/fs[-_]?write|fs[-_]?edit|code[-_]?replace|apply[-_]?proposal|concept[-_]?create|concept[-_]?write|template[-_]?update|_write\b|mitosis|patch|scaffold|syntax[-_]?break/.test(hay)) return "mutate";
   if (/report|scan|audit|recommend|search|fs[-_]?read|coverage|measure|snapshot|catalog|gate\b|classify|detect/.test(hay)) return "read";
   return "navigate";
 }

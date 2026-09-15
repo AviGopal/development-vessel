@@ -111,6 +111,12 @@ export function preservedDetectedAt(g: { created_at?: string; updated_at?: strin
  * SUCCEEDED, and 85.4% of those still carry an artifact.
  */
 export function hasNoAttemptEvidence(g: unknown): boolean {
+  // Missing_capability gaps require specific attempt evidence - they don't naturally
+  // leave artifacts like edit_intent_route does, so an empty decisions array does
+  // not in fact mean 'never attempted'
+  if (typeof g === 'object' && g !== null && (g as {category?: string}).category === 'missing_capability') {
+    return false;
+  }
   const meta = ((g as { classification_metadata?: Record<string, unknown> } | null)?.classification_metadata) ?? {};
   const attempts = Number(meta.failed_attempts ?? 0);
   if (Number.isFinite(attempts) && attempts > 0) return false;

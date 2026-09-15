@@ -35,6 +35,7 @@
 import { WORKSPACE_ROOT as DEFAULT_WORKSPACE_ROOT } from "../config.js";
 import type { ResolverResult } from "./types.js";
 import { readFile, writeFile, rename, mkdir } from "node:fs/promises";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 // From ../shape-vocabulary.js, NOT from feature-compose.ts where this loader used to
 // live: feature-compose.ts imports THIS module, so importing back would close a cycle.
@@ -60,6 +61,18 @@ import { loadFleetShapeVocabulary, vocabularyIsJudgeable, type ShapeVocabulary }
 // this module (see substrate-gap.test.ts), so capturing at load time changes
 // nothing for them.
 const WORKSPACE_ROOT_AT_LOAD = process.env["WORKSPACE_ROOT"] ?? DEFAULT_WORKSPACE_ROOT;
+
+function predicateLiteralNotUnique(literal: unknown, filePath: unknown, invertPolarity = false): boolean {
+  if (typeof literal !== 'string' || typeof filePath !== 'string') return false;
+  
+  try {
+    const content = readFileSync(join(workspaceRoot(), filePath), 'utf8');
+    const matches = (content.match(new RegExp(literal, 'g')) || []).length;
+    return invertPolarity ? matches === 0 : matches > 0;
+  } catch {
+    return false;
+  }
+}
 function workspaceRoot(): string {
   return WORKSPACE_ROOT_AT_LOAD;
 }
@@ -435,12 +448,13 @@ export function classifyFalsifier(
   // `unresolvable` is the honest label: a predicate WAS supplied and cannot be resolved,
   // which is the same failure the unadvertised-shape case names.
   if (usablePredicateString(m["expected_literal"])) {
+    if (!predicateLiteralNotUnique(m["expected_literal"], m["edit_site"] ?? m["file_path"])) return { falsifier: "unresolvable" };
     if (m["edit_site"] || m["file_path"]) return { falsifier: "class1", predicate_position: "expected_literal" };
     return { falsifier: "unresolvable" };
   }
   if (usablePredicateString(m["hardcoded_url"])) {
     const editSite = usablePredicateString(m["edit_site"]) ?? usablePredicateString(m["file_path"]);
-    if (!editSite) {
+    if (!editSite || predicateLiteralNotUnique(m["hardcoded_url"], editSite, true)) {
       return {
         falsifier: "unresolvable",
         predicate_position: "hardcoded_url",

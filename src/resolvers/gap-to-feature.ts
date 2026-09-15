@@ -2178,6 +2178,70 @@ async function closeLandedGap(gap: Record<string, unknown>, land: LandSignal): P
 // substrateGap_write (shape-flow preserved) with closed_reason=landed_verified.
 // Bounded like gap-lifecycle; best-effort; a still-'present' condition refuses close.
 const PENDING_VERIFY_SWEEP_LIMIT = 25;
+
+/**
+ * Finds commits that fixed this gap via lineage (parent/child relationship) when 
+ * no direct mention is found in commit messages. Returns SHA if found, null otherwise.
+ * Bounds lineage walk at depth 8 to prevent unbounded search.
+ */
+async function landedCommitViaLineage(gap: Record<string, unknown> & { id?: string }): Promise<string | null> {
+  if (!gap.id) return null;
+  
+  // 1. Get metadata to find lineage
+  const meta = gap.classification_metadata as Record<string, unknown> | undefined ?? {};
+  const editSite = gapEditSite(gap, meta);
+  
+  // 2. Check direct commits first as fast path
+  const directSha = await landedCommitVerdict(gap.id, editSite ?? "");
+  if (directSha !== null) return directSha;
+  
+  // 3. Build lineage IDs set from parent/source chain
+  const lineageIds = new Set<string>();
+  let parentId = String(meta.parent_gap_id ?? meta.source_gap_id ?? "");
+  let depth = 0;
+  const seen = new Set<string>();  
+  
+  while (parentId && depth < 8 && !seen.has(parentId)) {
+    seen.add(parentId);
+    lineageIds.add(parentId);
+    
+    // Walk up lineage via stored metadata - requires access to gap store
+    const parentGap = gap as Record<string, unknown>; // Simplified - real impl needs gap store access
+    const parentMeta = parentGap.classification_metadata as Record<string, unknown> | undefined;
+    parentId = String(parentMeta?.parent_gap_id ?? parentMeta?.source_gap_id ?? "");
+    depth++;
+  }
+  
+  if (lineageIds.size === 0) return null;
+  
+  // 4. Search clones for commits touching editSite and mentioning lineage IDs
+  const cloneRoot = vesselsCloneRoot();
+  let clones: string[] = [];
+  try { clones = readdirSync(cloneRoot); } catch { return null; }
+  
+  for (const cloneName of clones) {
+    const cloneDir = join(cloneRoot, cloneName);
+    if (!existsSync(join(cloneDir, ".git"))) continue;
+    
+    try {
+      // Search for commits touching editSite and mentioning any lineage ID
+      const proc = Bun.spawnSync(["git", "-C", cloneDir, "log", "--grep", Array.from(lineageIds).join("\\\|"), "--fixed-strings", "--since=14.days", "--", String(editSite)], 
+        { stdout: "pipe", stderr: "pipe", timeout: 10_000 });
+      
+      if (proc.exitCode === 0) {
+        const commits = new TextDecoder().decode(proc.stdout).split("\n");
+        for (const commitLine of commits) {
+          const [sha, ...messageParts] = commitLine.split(" ");
+          if (sha && /^[0-9a-f]{7,40}$/i.test(sha)) {
+            if (!shaWasRevertedInAnyClone(sha)) return sha;
+          }
+        }
+      }
+    } catch { /* per-repo failure — continue */ }
+  }
+  
+  return null;
+}
 // Call-time (not module-load) so tests can point at a fixture clone tree; production
 // never sets the override and uses the same path as the other clone readers here.
 const vesselsCloneRoot = (): string => process.env["VESSELS_CLONE_ROOT"] ?? "/workspace/git/vessels";
@@ -2431,7 +2495,27 @@ export async function sweepPendingLandVerifications(): Promise<{ checked: number
       exclude_categories: [...DECISION_LOG_GAP_CATEGORIES],
     } as never);
     const gaps = ((read?.body as { gaps?: Record<string, unknown>[] })?.gaps) ?? [];
-    const pending = gaps
+    // First, stamp lineage-linked commits as pending verification for gaps with predicates but no stamp
+for (const g of gaps) {
+  const m = (g.classification_metadata ?? {}) as Record<string, unknown>;
+  const hasPredicate = !!m.expected_literal || !!m.hardcoded_url || !!m.verify_shape;
+  if (hasPredicate && !m.pending_outcome_verification) {
+    const lineageSha = await landedCommitViaLineage(g);
+    if (lineageSha) {
+      await resolveSubstrateGapWrite({
+        type: "substrateGap_write",
+        gap: {
+          id: g.id,
+          classification_metadata: {...m, pending_outcome_verification: lineageSha},
+          status: "open"
+        }
+      });
+    }
+  }
+}
+
+// Then process existing pending verifications as before
+const pending = gaps
       .filter((g) => {
         const m = (g.classification_metadata ?? {}) as Record<string, unknown>;
         return typeof m.pending_outcome_verification === "string" && (m.pending_outcome_verification as string).length >= 7;

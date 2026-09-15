@@ -255,7 +255,8 @@ export function deriveRungs(obs: {
           const total = examined + unexamined;
           const frac = total > 0 ? examined / total : null;
           const unexaminedInWindow = obs.examUnexamined ?? 0;
-          const allTimeUnexamined = (obs.examUnexamined ?? 0) + (obs.examUnexaminedAllTime ?? 0);
+          const remainingUnexamined = obs.examUnexaminedAllTime ?? 0;
+          const allTimeUnexamined = unexaminedInWindow + remainingUnexamined;
           return {
             rung: 2,
             question: "Does anything land unexamined — is there a checker that actually reads each staged artifact type?",

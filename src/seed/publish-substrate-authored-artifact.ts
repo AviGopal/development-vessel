@@ -76,7 +76,7 @@ export const PUBLISH_SUBSTRATE_AUTHORED_ARTIFACT_TEMPLATE: ActivityTemplate = {
         "the substrate stages new content. A dirty baseline means a previous " +
         "publication aborted partway — the operator must resolve it manually.",
       resolver: "git_status",
-      config: { type: "git_status", cwd: "{{cwd}}" },
+      config: { type: "git_status", cwd: "resolveCwdFromSlot" },
       outputShapes: ["commandResult"],
     },
     {
@@ -86,7 +86,7 @@ export const PUBLISH_SUBSTRATE_AUTHORED_ARTIFACT_TEMPLATE: ActivityTemplate = {
         "destination is caller-chosen; no path canonization in the template or " +
         "the resolver.",
       resolver: "fs_write",
-      config: { type: "fs_write", path: "{{target_path}}", content: "{{artifact_body}}" },
+      config: { type: "fs_write", path: "resolveTargetPathFromSlot", content: "resolveArtifactBodyFromSlot" },
       outputShapes: ["commandResult"],
     },
     {
@@ -108,7 +108,7 @@ export const PUBLISH_SUBSTRATE_AUTHORED_ARTIFACT_TEMPLATE: ActivityTemplate = {
       id: "stage_artifact",
       description: "Stage the newly-written artifact for commit.",
       resolver: "git_add",
-      config: { type: "git_add", paths: ["{{target_path}}"], cwd: "{{cwd}}" },
+      config: { type: "git_add", paths: ["resolveTargetPathFromSlot"], cwd: "resolveCwdFromSlot" },
       outputShapes: ["commandResult"],
     },
     {
@@ -117,7 +117,7 @@ export const PUBLISH_SUBSTRATE_AUTHORED_ARTIFACT_TEMPLATE: ActivityTemplate = {
         "Commit the staged artifact. The commit message should cite the " +
         "trace_id, vessel_id, and any concept_ids that informed authorship.",
       resolver: "git_commit",
-      config: { type: "git_commit", message: "{{commit_message}}", cwd: "{{cwd}}" },
+      config: { type: "git_commit", message: "resolveCommitMessageFromSlot", cwd: "resolveCwdFromSlot" },
       outputShapes: ["commandResult"],
     },
     {

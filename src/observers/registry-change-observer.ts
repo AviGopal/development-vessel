@@ -118,11 +118,11 @@ export async function runTopologyChain(): Promise<void> {
 // Closes the recommend→execute loop for topology-discovery probes. The probe
 // templates (probe-reachable-unlearned, probe-untraversed-edge,
 // escalate-unknown-shape) emit an `activityRecommendation` impulse but
-// intentionally do NOT include a dispatch task — the engine does not
+// intentionally do NOT include a dispatch task — the engine does not interpolate `{{}}` in non-llm task configs — cross-task data flow uses slot-binding
 // interpolate `{{}}` in non-llm task configs, and adding a combined resolver
 // would bypass the binding layer (see memoryNote
 // "Cross-task data flow uses slot-binding, not new resolvers or {{}}
-// interpolation").
+// interpolation"). This fix specifically addresses a bug where `publish-substrate-authored-artifact` attempted to use `{{}}` in non-LLM configs, which failed at runtime.
 //
 // Mechanism: when activity-api broadcasts `execution_completed` for one of
 // these probe templates, the observer re-derives the top recommended template

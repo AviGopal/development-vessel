@@ -76,7 +76,7 @@ export const PUBLISH_SUBSTRATE_AUTHORED_ARTIFACT_TEMPLATE: ActivityTemplate = {
         "the substrate stages new content. A dirty baseline means a previous " +
         "publication aborted partway — the operator must resolve it manually.",
       resolver: "git_status",
-      config: { type: "git_status", cwd: "resolveCwdFromSlot" },
+      config: { type: "git_status", cwd: { slot: "cwd" } },
       outputShapes: ["commandResult"],
     },
     {
@@ -86,7 +86,7 @@ export const PUBLISH_SUBSTRATE_AUTHORED_ARTIFACT_TEMPLATE: ActivityTemplate = {
         "destination is caller-chosen; no path canonization in the template or " +
         "the resolver.",
       resolver: "fs_write",
-      config: { type: "fs_write", path: "resolveTargetPathFromSlot", content: "resolveArtifactBodyFromSlot" },
+      config: { type: "fs_write", path: { slot: "target_path" }, content: { slot: "artifact_body" } },
       outputShapes: ["commandResult"],
     },
     {
@@ -98,9 +98,9 @@ export const PUBLISH_SUBSTRATE_AUTHORED_ARTIFACT_TEMPLATE: ActivityTemplate = {
       resolver: "git_branch_create",
       config: {
         type: "git_branch_create",
-        branch_name: "{{target_branch}}",
-        base: "{{base_branch}}",
-        cwd: "{{cwd}}",
+        branch_name: { slot: "target_branch" },
+        base: { slot: "base_branch" },
+        cwd: { slot: "cwd" },
       },
       outputShapes: ["branchCreateResult"],
     },
@@ -108,7 +108,7 @@ export const PUBLISH_SUBSTRATE_AUTHORED_ARTIFACT_TEMPLATE: ActivityTemplate = {
       id: "stage_artifact",
       description: "Stage the newly-written artifact for commit.",
       resolver: "git_add",
-      config: { type: "git_add", paths: ["resolveTargetPathFromSlot"], cwd: "resolveCwdFromSlot" },
+      config: { type: "git_add", paths: [{ slot: "target_path" }], cwd: { slot: "cwd" } },
       outputShapes: ["commandResult"],
     },
     {
@@ -117,7 +117,7 @@ export const PUBLISH_SUBSTRATE_AUTHORED_ARTIFACT_TEMPLATE: ActivityTemplate = {
         "Commit the staged artifact. The commit message should cite the " +
         "trace_id, vessel_id, and any concept_ids that informed authorship.",
       resolver: "git_commit",
-      config: { type: "git_commit", message: "resolveCommitMessageFromSlot", cwd: "resolveCwdFromSlot" },
+      config: { type: "git_commit", message: { slot: "commit_message" }, cwd: { slot: "cwd" } },
       outputShapes: ["commandResult"],
     },
     {
@@ -127,7 +127,7 @@ export const PUBLISH_SUBSTRATE_AUTHORED_ARTIFACT_TEMPLATE: ActivityTemplate = {
         "refuses pushes to main/dev/master/trunk/release regardless of caller " +
         "intent.",
       resolver: "git_push",
-      config: { type: "git_push", branch: "{{target_branch}}", cwd: "{{cwd}}" },
+      config: { type: "git_push", branch: { slot: "target_branch" }, cwd: { slot: "cwd" } },
       outputShapes: ["gitPushResult"],
     },
     {
@@ -139,12 +139,12 @@ export const PUBLISH_SUBSTRATE_AUTHORED_ARTIFACT_TEMPLATE: ActivityTemplate = {
       resolver: "gh_pr_create",
       config: {
         type: "gh_pr_create",
-        owner: "{{owner}}",
-        repo: "{{repo}}",
-        source_branch: "{{target_branch}}",
-        target_branch: "{{base_branch}}",
-        title: "{{pr_title}}",
-        body: "{{pr_body}}",
+        owner: { slot: "owner" },
+        repo: { slot: "repo" },
+        source_branch: { slot: "target_branch" },
+        target_branch: { slot: "base_branch" },
+        title: { slot: "pr_title" },
+        body: { slot: "pr_body" },
       },
       outputShapes: ["prCreateResult"],
     },

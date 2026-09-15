@@ -68,7 +68,7 @@ function predicateLiteralNotUnique(literal: unknown, filePath: unknown, invertPo
   try {
     const content = readFileSync(join(workspaceRoot(), filePath), 'utf8');
     const matches = (content.match(new RegExp(literal, 'g')) || []).length;
-    return invertPolarity ? matches === 0 : matches > 0;
+    return invertPolarity ? matches > 0 : matches === 0;
   } catch {
     return false;
   }

@@ -128,10 +128,17 @@ export async function resolveEscalationDispositionApply(
   const outcomes = Array.isArray(scanBody.outcomes)
     ? (scanBody.outcomes as Array<{ solicitation_id?: string; outcome?: string }>)
     : [];
-  const answeredIds = outcomes
+  const operatorAnswers = await readAnswersByPanel();
+  const answeredFromScan = outcomes
     .filter((o) => o.outcome === "answered")
     .map((o) => String(o.solicitation_id ?? ""))
     .filter(Boolean);
+
+  const answeredPanelIds = Array.from(operatorAnswers.keys()).filter(
+    (panelId) => gapIdFromPanelId(panelId)
+  );
+
+  const answeredIds = Array.from(new Set([...answeredFromScan, ...answeredPanelIds]));
 
   if (answeredIds.length === 0) {
     return {

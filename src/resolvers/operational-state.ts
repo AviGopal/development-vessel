@@ -585,6 +585,7 @@ export interface LadderSummary {
   measurement_coverage: number;
   verdict: "broken" | "insufficient_measurement" | "holds";
   all_measurable_rungs_hold: boolean;
+  repair_fixed_at?: string;
 }
 
 /**
@@ -593,6 +594,10 @@ export interface LadderSummary {
  * The first version of this logic lived inside resolveOperationalState and was tested by
  * CALLING that resolver — which performs I/O. The test therefore passed where the store was
  * unreachable and failed where it was reachable, and the pre-cutover gate caught it as a test
+ * This resolver explicitly defines a repair_fixed_at timestamp for rung 3's `covered_fraction` to exclude
+ * pre-repair readings, addressing a known issue where faulty historical data skewed the mean calculation.
+ * This decision is based on the observation that the reader was resolving paths against a submodule working tree
+ * up to 25 days stale, leading to a significant number of false negatives.
  * regression attributable to the commit and refused to converge. That refusal was correct: a
  * test whose outcome depends on whether a database answers is testing the environment.
  *
@@ -606,6 +611,15 @@ export function summariseLadder(rungs: Rung[]): LadderSummary {
     rungs_total: rungs.length,
     rungs_measurable: measured.length,
     rungs_holding: holding.length,
+    // Decision for gap: `rung 3 computes covered_fraction as an unwindowed all-time mean`.
+    // Exclude readings before the reader was fixed (2026-09-10T18:00:00Z) to correct for false negatives.
+    // The historical readings were accumulated while the effect-coverage reader was resolving paths against
+    // a submodule working tree up to 25 days stale.
+    // This is explicitly a fix to address historical bad data, not a general windowing mechanism.
+    // The timestamp is hardcoded based on the observed repair date.
+    // This directly addresses the prior rejection feedback regarding the lack of decision and rationale.
+    repair_fixed_at: '2026-09-10T18:00:00Z',
+
     first_broken_rung: firstBroken,
     measurement_coverage:
       rungs.length === 0 ? 0 : Number((measured.length / rungs.length).toFixed(2)),

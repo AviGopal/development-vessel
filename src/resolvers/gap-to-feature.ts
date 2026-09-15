@@ -1426,6 +1426,9 @@ export async function admitActionableGaps(
     return r.clean;
   };
 
+  const MAX_ADMITTED_PER_EDIT_SITE_PER_CYCLE = 2;
+  const admittedPerEditSite = new Map<string, number>();
+
   for (const g of gaps) {
     const id = String(g.id ?? "");
     const cat = String(g.category ?? "");
@@ -1438,6 +1441,22 @@ export async function admitActionableGaps(
         childGapsByEditSite.set(editSite, (childGapsByEditSite.get(editSite) ?? 0) + 1);
       }
     }
+
+    // (E5) EDIT_SITE_SATURATED — cap the number of gaps admitted per distinct edit_site file per cycle.
+    // Measured 2026-09-12: 57% of open gaps are auto-minted children; two files received 57% of compose attempts.
+    // Fairness across files matters more than depth on one file; a file that has failed 161 times in a day
+    // is not one attempt away from succeeding. Cap at a small share so the cap=1 compose lane serves diverse goals.
+    try {
+      const editSiteForCap = String(meta.edit_site ?? "");
+      if (editSiteForCap) {
+        const admittedAtSite = admittedPerEditSite.get(editSiteForCap) ?? 0;
+        if (admittedAtSite >= MAX_ADMITTED_PER_EDIT_SITE_PER_CYCLE) {
+          excluded.push({ id, reason: `edit_site_saturated(${editSiteForCap})` });
+          continue;
+        }
+        admittedPerEditSite.set(editSiteForCap, admittedAtSite + 1);
+      }
+    } catch { /* fail-open: admit as before */ }
 
     // (E4) IDENTICAL REPEATED FAILURE — a gap whose every recorded attempt failed for the
     // same normalized reason will fail that way again, so each retry burns a scarce LLM

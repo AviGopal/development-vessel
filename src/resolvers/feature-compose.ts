@@ -3783,6 +3783,19 @@ async function resolveFeatureComposeUncapped(pointer: FeatureComposePointer): Pr
       const hit = regionProbes.find((p) => grounding.includes(p));
       console.log(`[fc-scope] no region literal; mined ${regionProbes.length} identifier probe(s), grounding centred on ${hit ? `"${hit}"` : "none (fell through to heuristics)"}`);
     }
+    const allTargetFilesPresentInGrounding = targetFiles.every(t => {
+      const basename = t.split("/").pop() ?? "";
+      return basename.length === 0 || grounding.includes(basename);
+    });
+    if (!allTargetFilesPresentInGrounding) {
+      const missingFiles = targetFiles.filter(t => {
+        const basename = t.split("/").pop() ?? "";
+        return basename.length !== 0 && !grounding.includes(basename);
+      });
+      const detail = `Grounding window (${grounding.length} bytes) does not contain basenames of all target files: [${missingFiles.join(", ")}] — planning would be blind and the drafter would invent anchors; refusing before the LLM call.`;
+      console.log(`[fc-grounding] REFUSED blind decompose; ${detail}`);
+      return { shape: "featureComposeReport", body: { ok: false, stage: "grounding", verdict: "REFUSED", error: detail } };
+    }
   }
   // REFUSE TO PLAN AGAINST A WINDOW THAT DOES NOT CONTAIN THE TARGET (2026-08-07).
   // There is already a refusal for the case where NO path was derivable. There was

@@ -42,6 +42,7 @@ export async function resolveSelfInterferenceScan(pointer: SelfInterferenceScanP
         const rep = JSON.parse(await Bun.file(`/workspace/proposals/${name}`).text()) as { touched_vessels?: string[]; verdict?: string; at?: string; completed?: string; failure_class?: string; gap_id?: string; verify?: Array<{ output?: string }> };
         const vessel = Array.isArray(rep.touched_vessels) && rep.touched_vessels.length > 0 ? String(rep.touched_vessels[0]) : "unknown";
         const firstOutput = Array.isArray(rep.verify) && rep.verify.length > 0 && typeof rep.verify[0]?.output === "string" ? rep.verify[0].output : undefined;
+        void firstOutput; // Ensure it's not optimized away if not used later explicitly
         const firstError = typeof firstOutput === "string" ? firstOutput.split("\n")[0] : undefined;
         composeReports.push({ vessel, verdict: String(rep.verdict ?? ""), at: rep.at ?? rep.completed, failure_class: rep.failure_class, first_error: firstError, gap_id: rep.gap_id });
       } catch { }
@@ -73,7 +74,7 @@ export async function resolveSelfInterferenceScan(pointer: SelfInterferenceScanP
     const suffix = "-compose-report.json";
     for (const bname of blameFiles) {
       if (!bname.endsWith(suffix)) continue;
-      const bgap = bname.slice(0, bname.length - suffix.length);
+      const bgap = bname.slice(0, bname.length - suffix.length); // Defined here
       let btext = "";
       try { btext = await Bun.file("/workspace/proposals/" + bname).text(); } catch { continue; }
       const bmark = "NEW test failures introduced by this draft";
@@ -83,7 +84,7 @@ export async function resolveSelfInterferenceScan(pointer: SelfInterferenceScanP
         const tname = String(String(piece.split(" ; ")[0] ?? "").split("[")[0] ?? "").trim();
         if (tname.length < 8) continue;
         const bset = testToGaps.get(tname) ?? new Set<string>();
-        bset.add(bgap);
+        bset.add(bgap); // `bgap` is now correctly defined
         testToGaps.set(tname, bset);
       }
     }

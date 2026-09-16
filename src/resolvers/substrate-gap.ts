@@ -398,6 +398,14 @@ export interface FalsifierClassification {
   /** Which position carried the predicate: "hardcoded_url" | "evidence_resolve.shape" | "verify_shape" | "evidence_resolve.type". */
   predicate_position?: string;
   /**
+   * The shape the predicate names, surfaced so the caller can take a BASELINE of it before
+   * anything acts. Returned rather than re-derived at the call site because the precedence
+   * (evidence_resolve.shape, then verify_shape, then the sample body's type) is subtle and a
+   * second copy would drift from this one — which is how a predicate ends up measured at one
+   * address and classified at another.
+   */
+  predicate_shape?: string;
+  /**
    * Why an "unresolvable" verdict was reached when it is NOT an unadvertised shape — today
    * only the Class-1-without-edit-site case. An escalation that cannot say WHY a predicate
    * is inert cannot be acted on, and "unresolvable" alone would read as a bad shape name.
@@ -540,10 +548,10 @@ export function classifyFalsifier(
   const vocab = vocabulary === undefined ? cachedFleetVocabulary() : vocabulary;
   if (!vocabularyIsJudgeable(vocab)) {
     // Cannot see → cannot accuse. Credit the predicate.
-    return { falsifier: "class2", predicate_position: position, classified_at: at };
+    return { falsifier: "class2", predicate_position: position, predicate_shape: shapeName, classified_at: at };
   }
   if (vocab!.shapes.has(shapeName)) {
-    return { falsifier: "class2", predicate_position: position, classified_at: at };
+    return { falsifier: "class2", predicate_position: position, predicate_shape: shapeName, classified_at: at };
   }
   return {
     falsifier: "unresolvable",
@@ -1021,6 +1029,69 @@ export async function resolveSubstrateGapWrite(
     else delete merged["falsifier_unadvertised_shape"];  // clear a stale accusation carried from the old row
     merged["falsifier_classified_at"] = c.classified_at;
     gap.classification_metadata = merged;
+
+    // TAKE THE BEFORE-READING NOW, WHILE "BEFORE" STILL EXISTS.
+    //
+    // A Class-2 predicate names a shape the sweep can re-resolve, which answers "is the
+    // defect present NOW?" and nothing else. Without a value recorded when the gap was
+    // written, two entirely different worlds are indistinguishable afterwards:
+    //
+    //     was present, now absent  — something changed. The fix worked.
+    //     never present at all     — the predicate was inert from the start, and closing
+    //                                on it is a FALSE CLOSE that looks exactly like success.
+    //
+    // Correlation over this substrate's own traces is partly effect-as-cause, because the
+    // system mints structure from its own successes. The only thing that separates the two
+    // readings is a value fixed BEFORE the action, when nobody yet knows which way it will
+    // come out. That is what a baseline is, and it is why it cannot be reconstructed later
+    // from whatever the store happens to hold — a reconstructed baseline is just the after
+    // reading wearing an earlier timestamp.
+    //
+    // ON CREATE ONLY, and that restriction is the whole point. Re-stamping on update would
+    // move the baseline forward every time the gap was touched, so it would converge on the
+    // after-value and quietly stop being evidence of anything. A gap gets one before.
+    //
+    // Fail-open like everything else in this block: a baseline that cannot be taken leaves
+    // the gap written and unstamped. The adjudicator already has an explicit branch for a
+    // missing baseline and says so rather than guessing, which is the correct degradation —
+    // an absent baseline must read as "cannot attribute", never as "no change".
+    if (action === "created" && c.falsifier === "class2" && c.predicate_shape && !merged["causal_baseline_at"]) {
+      try {
+        const selfUrl = process.env["DEV_VESSEL_ENDPOINT"] ?? "http://127.0.0.1:8090";
+        const probe = await fetch(`${selfUrl}/v2/impulses/resolve`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ impulse: { type: c.predicate_shape } }),
+          signal: AbortSignal.timeout(8_000),
+        });
+        if (probe.ok) {
+          const body = (await probe.json()) as unknown;
+          // Store a BOUNDED digest, not the payload. The baseline has to survive in a file
+          // the substrate rewrites constantly, and a large body would bloat every gap and
+          // eventually the store; what adjudication needs is whether the reading CHANGED,
+          // which a stable digest plus a small excerpt answers. Excerpt kept for the human
+          // who has to judge whether the change was the one that mattered.
+          const raw = JSON.stringify(body ?? null);
+          const hasher = new Bun.CryptoHasher("sha256");
+          hasher.update(raw);
+          merged["causal_baseline"] = {
+            shape: c.predicate_shape,
+            digest: hasher.digest("hex").slice(0, 32),
+            excerpt: raw.slice(0, 400),
+            resolved_ok: true,
+          };
+        } else {
+          // A shape that does not resolve at write time is itself a baseline — it records
+          // that the predicate was UNREADABLE before the action, which is exactly the
+          // "never present at all" world the adjudicator must be able to name.
+          merged["causal_baseline"] = { shape: c.predicate_shape, resolved_ok: false, http_status: probe.status };
+        }
+        merged["causal_baseline_at"] = new Date().toISOString();
+        gap.classification_metadata = merged;
+      } catch (e) {
+        console.warn(`[gap-baseline] could not stamp a baseline for ${gap.id} (non-fatal, gap written unstamped): ${String((e as Error)?.message ?? e)}`);
+      }
+    }
   } catch (err) {
     console.error(`[gap-falsifier] classification threw for ${gap.id} (non-fatal, gap still written):`, err);
   }

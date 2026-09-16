@@ -112,7 +112,7 @@ export async function resolveLearningSignalHealthObserver(
     .filter(([, s]) => s.loaded >= MIN_SUBGROUP_VOLUME && s.ratio !== null && s.ratio < ratioThreshold)
     .map(([n, s]) => `${n} ${s.credited}/${s.loaded}`);
   const enoughVolume = loaded.length >= minLoadedVolume;
-  const oneSided = starvedSubgroups.length > 0 || (enoughVolume && ((successCreditRatio !== null && successCreditRatio < ratioThreshold) || avgRelevance < 0.5));
+  const oneSided = starvedSubgroups.length > 0;
 
   let gapEmission: "emitted" | "error" | "not_needed" = "not_needed";
   if (oneSided) {

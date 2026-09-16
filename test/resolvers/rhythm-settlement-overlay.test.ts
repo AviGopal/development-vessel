@@ -27,14 +27,28 @@ describe("rhythmSettlementOverlay", () => {
   test("the beta leg moves beta — THE REGRESSION: this direction did not exist", () => {
     // If this returns anything without a raised `beta`, the penalty leg is gone again and
     // every family's credit is once more a count of attempts.
-    expect(rhythmSettlementOverlay("beta", 2, 1, 10)).toEqual({ beta: 1.5 });
+    expect(rhythmSettlementOverlay("beta", 2, 1, 10)).toEqual({ beta: 1.5, staleness: 10 });
   });
 
   test("the beta leg does NOT decay staleness — a failed dispatch did not answer demand", () => {
     // Decaying here would silence exactly the families that need attention most: a family
     // that could not be dispatched would go quiet as though it had been handled.
-    const overlay = rhythmSettlementOverlay("beta", 2, 1, 10) as Record<string, number>;
-    expect(overlay["staleness"]).toBeUndefined();
+    const overlay = rhythmSettlementOverlay("beta", 2, 1, 10) as { staleness: number };
+    expect(overlay.staleness).toBe(10);
+  });
+
+  test("the beta leg PERSISTS accrued staleness — the regression this nearly shipped with", () => {
+    // Due-ness is scored from a STORED staleness plus the age of the impulse's last write,
+    // and ANY write resets that age. An overlay that touched only `beta` therefore discarded
+    // whatever staleness had accrued since the last write, making a family that could not be
+    // dispatched look FRESHLY HANDLED — the exact opposite of this leg's purpose, and
+    // invisible in the overlay itself because the damage happens in the field it omits.
+    //
+    // If staleness ever goes missing from this overlay again, a penalised family quietly
+    // resets its own demand clock every time it fails.
+    const overlay = rhythmSettlementOverlay("beta", 2, 1, 0.75) as Record<string, number>;
+    expect(overlay["staleness"]).toBeDefined();
+    expect(overlay["staleness"]).toBe(0.75);
   });
 
   test("the beta leg does not touch alpha, and the alpha leg does not touch beta", () => {

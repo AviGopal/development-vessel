@@ -223,10 +223,21 @@ export function rhythmSettlementOverlay(
   alpha: number,
   beta: number,
   staleness: number,
-): { alpha: number; staleness: number } | { beta: number } {
+): { alpha: number; staleness: number } | { beta: number; staleness: number } {
   return leg === "alpha"
     ? { alpha: alpha + 0.5, staleness: Math.max(0, staleness * 0.3) }
-    : { beta: beta + 0.5 };
+    // THE BETA LEG MUST PERSIST THE ACCRUED STALENESS, NOT LEAVE IT IMPLICIT.
+    //
+    // Due-ness is scored from a STORED staleness plus the age of the impulse's last write,
+    // and ANY write resets that age. So a beta settlement that touched only `beta` would
+    // silently discard however much staleness had accrued since the last write — making a
+    // family that could not be dispatched look freshly handled, which is precisely backwards
+    // and the exact opposite of this leg's stated intent.
+    //
+    // Passing the already-computed accrued value back keeps the ledger honest across the
+    // write: the demand a failed dispatch did NOT answer survives into the next tick, so the
+    // family keeps rising toward due instead of being quietly reset by its own penalty.
+    : { beta: beta + 0.5, staleness: Math.max(0, staleness) };
 }
 
 export async function resolveRhythmConductorTick(

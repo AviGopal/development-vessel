@@ -377,3 +377,94 @@ export async function stampEnvironmentBaseline(
   );
   return res ? "stamped" : "failed";
 }
+
+/**
+ * adjudicateStampedBaselines — READ THE BEFORE-READINGS BACK AND ASK WHAT CHANGED.
+ *
+ * THE MISSING LINK THIS CLOSES, and it is not the one it looked like from outside. Baselines
+ * were never the problem: thousands of environment baselines and dozens of falsifier baselines
+ * have been stamped, faithfully, on every pick. What never happened is the COMPARISON. The
+ * pure adjudication functions above have had no callers outside their own tests, so the
+ * substrate has been recording "before" with care and never once asking "and now?".
+ *
+ * That asymmetry is exactly the failure the module header warns about. An after-only reading
+ * cannot separate "was present, now absent" (the fix worked) from "never present at all" (the
+ * predicate was inert and closing on it is a false close that looks identical to success).
+ * Collecting the before-reading and not using it buys none of the protection it was for.
+ *
+ * WHY A STAMPED BASELINE IS NOT ENOUGH ON ITS OWN: the baseline is a fact about the past, and
+ * a fact about the past only becomes causal evidence when something compares it to the
+ * present and says which of the two worlds it is in. Until then it is provenance, not proof.
+ *
+ * HORIZONS ARE PLURAL BECAUSE EFFECTS ARE. A change that shows within a minute and one that
+ * shows after a day are different claims about mechanism, and a single deadline collapses
+ * them into one verdict that is wrong for at least one. An unelapsed horizon returns PENDING
+ * rather than "refuted" — refusing to conclude early is the whole point, and the adjudicator
+ * already encodes that ordering.
+ *
+ * Read-only with respect to source. Never throws into its caller.
+ */
+export async function adjudicateStampedBaselines(
+  repoRoot: string,
+  opts?: { limit?: number; horizonsHours?: number[] },
+): Promise<{
+  examined: number;
+  verdicts: Array<{ gap_id: string; confirmed_at: string | null; any_regression: boolean; all_pending: boolean; detail: string }>;
+  unmeasurable: number;
+  never_present: number;
+}> {
+  const limit = opts?.limit ?? 50;
+  const horizonsHours = opts?.horizonsHours ?? [1, 24];
+  const out: Array<{ gap_id: string; confirmed_at: string | null; any_regression: boolean; all_pending: boolean; detail: string }> = [];
+  let unmeasurable = 0;
+  let neverPresent = 0;
+
+  const rows = await surreal(
+    `SELECT pointer, created_at FROM impulse WHERE shape = 'falsifierBaseline' ` +
+      `ORDER BY created_at DESC LIMIT ${Math.max(1, Math.min(500, limit))};`,
+  );
+  const list = rows?.[0]?.result;
+  if (!Array.isArray(list)) return { examined: 0, verdicts: [], unmeasurable: 0, never_present: 0 };
+
+  for (const r of list as Array<Record<string, unknown>>) {
+    const p = (r["pointer"] ?? {}) as Record<string, unknown>;
+    const gapId = typeof p["gap_id"] === "string" ? p["gap_id"] : "";
+    const editSite = typeof p["edit_site"] === "string" ? p["edit_site"] : "";
+    const literal = typeof p["literal"] === "string" ? p["literal"] : "";
+    if (!gapId) continue;
+
+    // The baseline as recorded. `present` absent entirely means it was unmeasurable THEN,
+    // which is a different world from measurable-and-absent and must stay distinguishable.
+    const rawPresent = p["present"];
+    const baseline: Observation = typeof rawPresent === "boolean" ? { present: rawPresent } : null;
+
+    // The after-reading, taken through the SAME function that produced the before-reading.
+    // Using a second implementation here would be the drift that makes two addresses answer
+    // the same question differently — the defect this fleet keeps paying for.
+    const current = await measureClass1(repoRoot, editSite, literal);
+
+    const stampedAt = typeof r["created_at"] === "string" ? Date.parse(r["created_at"]) : NaN;
+    const ageHours = Number.isFinite(stampedAt) ? (Date.now() - stampedAt) / 3_600_000 : 0;
+    const readings = horizonsHours.map((h) => ({
+      horizon: `${h}h`,
+      elapsed: ageHours >= h,
+      observation: current,
+    }));
+
+    const all = adjudicateAll(baseline, readings);
+    if (baseline === null || current === null) unmeasurable += 1;
+    // THE VERDICT WORTH HAVING. A predicate that was ALREADY absent before the action cannot
+    // be evidence that the action removed it. Counting these separately is the entire reason
+    // the baseline exists: without it, every one of them closes green.
+    if (baseline !== null && baseline.present === false) neverPresent += 1;
+
+    out.push({
+      gap_id: gapId,
+      confirmed_at: all.confirmed_at,
+      any_regression: all.any_regression,
+      all_pending: all.all_pending,
+      detail: all.per_horizon.map((a) => `${a.horizon}:${a.verdict}`).join(","),
+    });
+  }
+  return { examined: out.length, verdicts: out, unmeasurable, never_present: neverPresent };
+}

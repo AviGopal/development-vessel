@@ -2960,6 +2960,38 @@ export function rollbackRestoreIsVerified(original: string, readBack: unknown): 
   return typeof readBack === "string" && readBack === original;
 }
 
+/**
+ * WHOSE BYTES ARE ON DISK? The decision the rollback loop makes per file, extracted so it
+ * can be pinned by a test rather than re-derived by reading a 400-line block.
+ *
+ * THE FAILURE THIS EXISTS FOR, measured 2026-09-16: the guard compared current against the
+ * PRE-EDIT snapshot and skipped the rollback when they differed — a condition a successful
+ * edit guarantees. So rollback was dead for every applied edit from e76b88c (2026-09-10)
+ * onward, while the log blamed "another concurrent compose" and the trace still reported
+ * rolled_back:true. On relevance-sink-vessel that produced 11 skipped rollbacks in one day
+ * and five progressively different parse errors in one file, because each failed compose
+ * adopted the previous failure's wreckage as its baseline.
+ *
+ * The comparison that answers the real question is against what THIS compose last wrote:
+ *   "restore"          current is our edit          -> put `original` back
+ *   "already_restored" current is already original  -> nothing to do, not a conflict
+ *   "conflict"         neither                      -> a third party wrote after us; leave
+ *                                                      it, record it, and do NOT claim a
+ *                                                      rollback happened
+ * An unrecorded postEdit (unreadable path) is deliberately a conflict, not a restore:
+ * absent evidence must not authorise overwriting bytes we cannot prove are ours.
+ */
+export function rollbackOwnership(
+  original: string,
+  postEdit: string | undefined,
+  current: unknown,
+): "restore" | "already_restored" | "conflict" {
+  if (typeof current !== "string") return "conflict";
+  if (current === original) return "already_restored";
+  if (postEdit !== undefined && current === postEdit) return "restore";
+  return "conflict";
+}
+
 function tscErrorSet(raw: string): Set<string> {
   const out = new Set<string>();
   for (const line of raw.split("\n")) {
@@ -4736,6 +4768,24 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
   // edits live in the runtime (defect #2). Snapshot+restore reverts only the
   // files we edited, exactly, with no git dependency.
   const preEditContent = new Map<string, string>();
+  // POST-EDIT SNAPSHOT — the bytes THIS compose last wrote to each live path.
+  //
+  // Rollback needs to answer "are the bytes on disk still mine?", and until now it asked
+  // "have the bytes changed since before I started?" — a question this compose's own
+  // successful edit guarantees the answer to. See the rollback block for the full account.
+  // Recorded at every write site (op apply, and both fc-repair paths), because repair runs
+  // AFTER verify and would otherwise leave a stale snapshot that makes the compare lie.
+  const postEditContent = new Map<string, string>();
+  // Read the bytes back rather than assuming the write landed — same discipline the restore
+  // verifier uses below. A path we cannot read back is simply left unrecorded, which makes
+  // the rollback compare fall through to its conservative branch.
+  const recordPostEdit = async (abs: string): Promise<void> => {
+    try {
+      const back = await callTool(toolsEndpoint, "fs_read", { path: abs });
+      const got = (back.body as { content?: string } | undefined)?.content;
+      if (back.ok === true && typeof got === "string") postEditContent.set(abs, got);
+    } catch { /* unrecorded; the rollback compare handles the absence */ }
+  };
   // Files this plan has ALREADY mutated on disk. A second edit op on the same file
   // must validate its anchor against the file's CURRENT (post-prior-edit) bytes, not
   // the stale first-touch snapshot in preEditContent (which stays for rollback only).
@@ -5107,7 +5157,7 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
       const entry = { path: op.path, kind: op.kind, ok: r.ok, repaired, detail: r.ok ? undefined : JSON.stringify(r.body).slice(0, 200), span: r.ok ? computeEditSpan(liveContent || preEditContent.get(abs), effOld, op.new_string ?? "") : undefined };
       // A successful edit mutated abs on disk; mark it so a later same-file op
       // re-reads current bytes (above) instead of the stale first-touch snapshot.
-      if (r.ok) editedInPlan.add(abs);
+      if (r.ok) { editedInPlan.add(abs); await recordPostEdit(abs); }
       // keep applying remaining ops; verify is the real gate
       return { entry, editedAbs: r.ok ? abs : undefined, failed: !r.ok };
     }
@@ -5619,6 +5669,7 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
                 if (w.ok) {
                   anyFixed = true;
                   if (!edited.includes(efAbs) && !created.includes(efAbs)) edited.push(efAbs);
+                  await recordPostEdit(efAbs);
                   console.log(`[fc-repair] replace_lines applied ${ef}:${rlStart}-${rlEnd} (system-derived anchor)`);
                 }
               } else {
@@ -5636,7 +5687,7 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
           if (cur.ok && typeof curContent === "string" && curContent.includes(String(fix.old_string))) {
             if (!preEditContent.has(efAbs) && !created.includes(efAbs)) preEditContent.set(efAbs, curContent);
             const w = await callTool(toolsEndpoint, "fs_edit", { path: efAbs, old_string: String(fix.old_string), new_string: String(fix.new_string ?? "") });
-            if (w.ok) { anyFixed = true; if (!edited.includes(efAbs) && !created.includes(efAbs)) edited.push(efAbs); }
+            if (w.ok) { anyFixed = true; if (!edited.includes(efAbs) && !created.includes(efAbs)) edited.push(efAbs); await recordPostEdit(efAbs); }
           }
         }
       } catch { /* repair attempt failed; verify stays not-ok */ }
@@ -6036,15 +6087,48 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
   const traceClockStart = Date.now();
   const restored: string[] = [];
   const restoreFailed: string[] = [];
+  // Files left edited because a THIRD PARTY's bytes were on disk. Distinct from
+  // restoreFailed (we tried and could not) and from restored (we did).
+  const rollbackConflicts: string[] = [];
   if ((verdict as string) === "UNFAVORABLE" && !pointer.keep_on_fail) {
     for (const [abs, original] of preEditContent) {
-      // Read current content first to check if it still matches what we expect
-  const current = await callTool(toolsEndpoint, "fs_read", { path: abs });
-  const currentContent = (current.body as { content?: string } | undefined)?.content;
-  if (current.ok === true && typeof currentContent === "string" && currentContent !== original) {
-    console.log(`[feature-compose] SKIPPING ROLLBACK for ${abs} — file content has changed (likely by another concurrent compose)`);
-    continue;  // Skip this file - another compose has modified it
-  }
+      // WHOSE BYTES ARE ON DISK? That is the only question worth asking here, and the
+      // previous form of this guard asked a different one.
+      //
+      // It compared `currentContent !== original` — current against the PRE-EDIT snapshot —
+      // and skipped the rollback when they differed. But a compose that successfully applied
+      // its edit has GUARANTEED they differ; that is what applying an edit means. So the
+      // skip fired on the ordinary path, not on a rare race, and rollback was dead for every
+      // applied edit from 2026-09-10 (e76b88c) onward. The log line blamed "another
+      // concurrent compose", which made a structural failure read as an unlucky one.
+      //
+      // The damage is not that a bad edit survives one compose. It is that the next compose
+      // reads the survivor as its baseline ("has uncommitted changes ... composing against
+      // them rather than discarding them"), so each failed attempt builds on the last one's
+      // wreckage. Measured 2026-09-16 on relevance-sink-vessel: 11 skipped rollbacks in a
+      // day and five progressively different parse errors in the same file. The typecheck
+      // gate was working perfectly throughout and caught every one — a gate whose rollback
+      // declines to run is a gate that only produces opinions.
+      //
+      // Three-way, comparing against what WE last wrote:
+      //   current === postEdit  -> our bytes, still ours. Restore the original.
+      //   current === original  -> someone already restored it (pull-sync / mirror-to-live).
+      //                            Nothing to do; not a conflict, not a failure.
+      //   neither               -> a genuine third-party write landed after ours. Leave it,
+      //                            and RECORD it, because silently continuing is how the
+      //                            trace came to disagree with the disk.
+      // No postEdit recorded (unreadable path) falls through to the conservative branch.
+      const current = await callTool(toolsEndpoint, "fs_read", { path: abs });
+      const currentContent = (current.body as { content?: string } | undefined)?.content;
+      if (current.ok === true) {
+        const own = rollbackOwnership(original, postEditContent.get(abs), currentContent);
+        if (own === "already_restored") continue;
+        if (own === "conflict") {
+          rollbackConflicts.push(abs);
+          console.warn(`[feature-compose] ROLLBACK CONFLICT for ${abs} — the bytes on disk are neither this compose's edit nor the pre-edit original, so a third party wrote after us. Leaving them in place; this file is NOT rolled back and the verdict below says so.`);
+          continue;
+        }
+      }
 
   const w = await callTool(toolsEndpoint, "fs_write", { path: abs, content: original });
       // VERIFY THE RESTORE, DO NOT ASSUME IT. `rolled_back = true` used to be set
@@ -6078,7 +6162,13 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
     }
     // Only claim a rollback that actually happened. A partial restore is a FAILED
     // rollback, not a successful one — the caller needs to know the tree is dirty.
-    rolled_back = restoreFailed.length === 0;
+    //
+    // A CONFLICT COUNTS AS NOT-ROLLED-BACK. It used to `continue` past this line and leave
+    // rolled_back true, so the trace reported a clean revert over a file still carrying an
+    // edit — the same class of lie the restore-verifier above was written to stop, arriving
+    // by the one path that skipped it. If any file was left edited for any reason, this
+    // compose did not roll back.
+    rolled_back = restoreFailed.length === 0 && rollbackConflicts.length === 0;
   }
 
   // 5. LAND (autonomous): on FAVORABLE, push each EXISTING-vessel change through
@@ -6464,6 +6554,10 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
           effect_targets_uncovered: uncoveredTargets.length,
           effect_uncovered_targets: uncoveredTargets.slice(0, 20),
           rolled_back,
+          // Files left edited because a third party's bytes were on disk. Emitted even when
+          // empty so "no conflicts" is a readable fact rather than an absent key — the whole
+          // failure this replaces was invisible precisely because nothing recorded it.
+          rollback_conflicts: rollbackConflicts.map((f) => f.replace(`${REPO_ROOT}/`, "")),
           reached: verdict === "FAVORABLE" && landedVessels.length > 0, landed_vessels: landedVessels.filter((v) => v.length > 0),
           cutover_refusals: (cutovers as Array<Record<string, unknown>>)
             .map((c) => String((c?.result as Record<string, unknown> | undefined)?.kind ?? ""))
@@ -6542,6 +6636,7 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
       },
       rolled_back,
       restore_failed: restoreFailed,
+      rollback_conflicts: rollbackConflicts.map((f) => f.replace(`${REPO_ROOT}/`, "")),
       restored_files: restored.map((f) => f.replace(`${REPO_ROOT}/`, "")),
       created_files: created.map((f) => f.replace(`${REPO_ROOT}/`, "")),
       edited_files: edited.map((f) => f.replace(`${REPO_ROOT}/`, "")),

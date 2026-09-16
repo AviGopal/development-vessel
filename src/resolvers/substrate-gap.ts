@@ -62,6 +62,11 @@ import { loadFleetShapeVocabulary, vocabularyIsJudgeable, type ShapeVocabulary }
 // this module (see substrate-gap.test.ts), so capturing at load time changes
 // nothing for them.
 const WORKSPACE_ROOT_AT_LOAD = process.env["WORKSPACE_ROOT"] ?? DEFAULT_WORKSPACE_ROOT;
+function readFromCorrectWorkspace(path: string): string {
+  // Ensure we read from the live workspace, not a stale one
+  const liveRoot = process.env["WORKSPACE_ROOT"] ?? DEFAULT_WORKSPACE_ROOT;
+  return path.replace(DEFAULT_WORKSPACE_ROOT, liveRoot);
+}
 
 /**
  * Determines if a predicate literal is already present, and whether its presence
@@ -86,6 +91,9 @@ const WORKSPACE_ROOT_AT_LOAD = process.env["WORKSPACE_ROOT"] ?? DEFAULT_WORKSPAC
  * @returns `true` if the condition for refusal (or defect detection) is met, `false` otherwise.
  */
 function predicateLiteralNotUnique(literal: unknown, filePath: unknown, detectDefect = false): boolean {
+  if (typeof filePath === 'string') {
+    filePath = readFromCorrectWorkspace(filePath);
+  }
   if (typeof literal !== 'string' || typeof filePath !== 'string') return false;
   const runtimePath = filePath.replace(/^repos\//, "");
 

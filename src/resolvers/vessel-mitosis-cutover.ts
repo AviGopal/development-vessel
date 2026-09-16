@@ -2450,8 +2450,9 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
 
   // 9b. Vessel-owned deploy hook: run the clone's scripts["substrate:deploy"] with SUBSTRATE_BASE_ROOT so built-artifact vessels place their own runtime files.
   try {
-    const pkg = JSON.parse(await Bun.file(join(hostRepoRoot, "package.json")).text()) as { scripts?: Record<string, string> };
-    if (pkg.scripts && pkg.scripts["substrate:deploy"]) {
+    const pkg = JSON.parse(await Bun.file(join(hostRepoRoot, "package.json")).text()) as { scripts?: Record<string, string>, substrate?: { protected?: boolean } };
+    const isProtected = pkg.substrate?.protected === true;
+    if (!isProtected && pkg.scripts && pkg.scripts["substrate:deploy"]) {
       const dep = Bun.spawnSync([process.execPath, "run", "substrate:deploy"], { cwd: hostRepoRoot, env: { ...process.env, SUBSTRATE_BASE_ROOT: baseRoot, PATH: (process.env.PATH ?? "") + ":/usr/bin:/usr/local/bin:/root/.bun/bin" }, stdout: "pipe", stderr: "pipe" });
       const depOk = (dep.exitCode ?? 1) === 0;
       operations.push({ op: "substrate:deploy hook", status: depOk ? "ok" : "warn", detail: depOk ? undefined : new TextDecoder().decode(dep.stderr).slice(0, 160) });

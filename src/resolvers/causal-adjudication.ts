@@ -408,6 +408,7 @@ export async function adjudicateStampedBaselines(
   repoRoot: string,
   opts?: { limit?: number; horizonsHours?: number[] },
 ): Promise<{
+  /** Count examined, or -1 when the baseline store could not be READ — never conflate that with zero. */
   examined: number;
   verdicts: Array<{ gap_id: string; confirmed_at: string | null; any_regression: boolean; all_pending: boolean; detail: string }>;
   unmeasurable: number;
@@ -419,24 +420,80 @@ export async function adjudicateStampedBaselines(
   let unmeasurable = 0;
   let neverPresent = 0;
 
+  // NO ORDER BY. The impulse table is large and unindexed on shape, so sorting it forces a
+  // full scan plus a sort and blows the query timeout — which returns null, which this
+  // function would then report as "examined 0". That is indistinguishable from "there were no
+  // baselines", and reporting a timeout as an empty result is precisely the silent-failure
+  // shape this whole subsystem exists to eliminate. A bounded unordered read is enough: the
+  // adjudicator does not care which baselines it gets, only that it gets some.
   const rows = await surreal(
     `SELECT pointer, created_at FROM impulse WHERE shape = 'falsifierBaseline' ` +
-      `ORDER BY created_at DESC LIMIT ${Math.max(1, Math.min(500, limit))};`,
+      `LIMIT ${Math.max(1, Math.min(500, limit))};`,
   );
+  // Load the gap store ONCE. The predicate lives on the gap, not the baseline, so every
+  // re-measurement needs it; re-reading per row would turn a bounded sweep into N file reads.
+  const gapsById = new Map<string, Record<string, unknown>>();
+  try {
+    const { readFile } = await import("node:fs/promises");
+    const raw = await readFile(`${repoRoot}/gaps/gaps.json`, "utf8");
+    const parsed = JSON.parse(raw) as unknown;
+    const arr = Array.isArray(parsed) ? parsed : [];
+    for (const g of arr as Array<Record<string, unknown>>) {
+      const id = typeof g["id"] === "string" ? g["id"] : "";
+      if (id) gapsById.set(id, g);
+    }
+  } catch {
+    console.warn("[causal-adjudication] could not read the gap store — predicates unavailable, every reading will be unmeasurable NOW");
+  }
+
   const list = rows?.[0]?.result;
-  if (!Array.isArray(list)) return { examined: 0, verdicts: [], unmeasurable: 0, never_present: 0 };
+  // DISTINGUISH "COULD NOT READ" FROM "NOTHING TO READ". They are different facts and only one
+  // of them is good news. A caller that cannot tell them apart will read a broken query as a
+  // clean bill of health.
+  if (!Array.isArray(list)) {
+    console.warn(
+      "[causal-adjudication] COULD NOT READ BASELINES — the query failed or timed out. " +
+        "This is NOT the same as finding none; no verdict should be inferred from this run.",
+    );
+    return { examined: -1, verdicts: [], unmeasurable: 0, never_present: 0 };
+  }
+  if (list.length === 0) {
+    console.log("[causal-adjudication] read the baseline store successfully and found no stamped falsifier baselines");
+  }
 
   for (const r of list as Array<Record<string, unknown>>) {
     const p = (r["pointer"] ?? {}) as Record<string, unknown>;
     const gapId = typeof p["gap_id"] === "string" ? p["gap_id"] : "";
-    const editSite = typeof p["edit_site"] === "string" ? p["edit_site"] : "";
-    const literal = typeof p["literal"] === "string" ? p["literal"] : "";
     if (!gapId) continue;
 
-    // The baseline as recorded. `present` absent entirely means it was unmeasurable THEN,
-    // which is a different world from measurable-and-absent and must stay distinguishable.
-    const rawPresent = p["present"];
-    const baseline: Observation = typeof rawPresent === "boolean" ? { present: rawPresent } : null;
+    // READ THE FIELDS THAT ARE ACTUALLY STORED. The stamped pointer carries
+    // `baseline_present` and `measurable` — not `present`. Guessing the names cost a full
+    // run that reported all 59 baselines unmeasurable, which is a result that looks like a
+    // finding about the data and was really a finding about my reader.
+    //
+    // `measurable` is load-bearing and not redundant with the boolean beside it. An
+    // unmeasurable baseline and a measurable-but-absent one are different worlds: the first
+    // means we could not see the predicate before the action, the second means we could see
+    // it and it was already gone. Only the second can support "this action removed it", and
+    // only the second makes a close suspicious.
+    const measurableThen = p["measurable"] !== false;
+    const rawPresent = p["baseline_present"];
+    const baseline: Observation =
+      measurableThen && typeof rawPresent === "boolean" ? { present: rawPresent } : null;
+
+    // THE PREDICATE ITSELF IS NOT IN THE BASELINE — it lives on the gap. The baseline records
+    // WHAT WAS TRUE, the gap records HOW TO ASK. Re-measuring therefore needs both, and a
+    // baseline whose gap has since lost its predicate is honestly unmeasurable NOW even
+    // though it was measurable THEN.
+    const g = gapsById.get(gapId);
+    const gmeta = (g?.["classification_metadata"] ?? {}) as Record<string, unknown>;
+    const editSite = typeof gmeta["edit_site"] === "string" ? (gmeta["edit_site"] as string) : "";
+    const literal =
+      typeof gmeta["expected_literal"] === "string"
+        ? (gmeta["expected_literal"] as string)
+        : typeof gmeta["hardcoded_url"] === "string"
+          ? (gmeta["hardcoded_url"] as string)
+          : "";
 
     // The after-reading, taken through the SAME function that produced the before-reading.
     // Using a second implementation here would be the drift that makes two addresses answer

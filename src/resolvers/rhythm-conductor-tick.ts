@@ -200,6 +200,35 @@ function bucketLoadFromProc(): number {
   }
 }
 
+/**
+ * The per-settlement overlay written back onto a rhythm impulse. Extracted from the
+ * conductor so the direction of the posterior can be pinned by a test rather than inferred
+ * from a write buried in a loop — which is how it went unnoticed that only one direction
+ * was ever taken.
+ *
+ * `beta` was read when computing credit_mean and preserved on write-back, and NO code path
+ * incremented it. credit_mean = alpha/(alpha+beta) could therefore only climb: a family
+ * that had never once been dispatchable kept gaining due-ness alongside one that worked
+ * every tick. A success signal recorded at initiation with no matching failure leg is an
+ * attempt log wearing an outcome label.
+ *
+ * Staleness decays ONLY on the alpha leg, and that asymmetry is deliberate. Decay means
+ * "this family's demand has been answered". A family that could not be dispatched has not
+ * had its demand answered, so its staleness must keep accruing and bring it back around —
+ * the difference between "we handled it" and "we tried and could not". Decaying on failure
+ * would silence exactly the families that need attention most.
+ */
+export function rhythmSettlementOverlay(
+  leg: "alpha" | "beta",
+  alpha: number,
+  beta: number,
+  staleness: number,
+): { alpha: number; staleness: number } | { beta: number } {
+  return leg === "alpha"
+    ? { alpha: alpha + 0.5, staleness: Math.max(0, staleness * 0.3) }
+    : { beta: beta + 0.5 };
+}
+
 export async function resolveRhythmConductorTick(
   pointer: RhythmConductorTickPointer,
 ): Promise<ResolverResult> {
@@ -251,6 +280,10 @@ export async function resolveRhythmConductorTick(
       affordable,
       body: b,
       alpha,
+      // `beta` was read just above to compute credit_mean and then dropped on the floor —
+      // it never reached the row, so no later code COULD have incremented it even if it
+      // had wanted to. Carrying it forward is what makes a penalty leg expressible at all.
+      beta,
       staleness,
     };
   });
@@ -277,6 +310,62 @@ export async function resolveRhythmConductorTick(
   const enqueued: Array<{ family: string; goal: string; due_score: number }> = [];
   const skipped: Array<{ family: string; reason: string }> = [];
   let picked = 0;
+
+
+  /**
+   * WHAT THIS POSTERIOR MEANS, stated because it was previously impossible to infer.
+   *
+   * A rhythm family's alpha/beta grade THE CONDUCTOR'S ABILITY TO GET THIS FAMILY'S WORK
+   * SCHEDULED — not whether that work then succeeds. The dispatched goal has its own
+   * posterior; conflating the two would penalise a correctly-scheduled family for a
+   * downstream failure it has no control over, and would make cadence hostage to
+   * execution quality.
+   *
+   * Under that reading the previous code was half-written rather than wrong: firing WAS
+   * the success, so crediting alpha on fire is right. What was missing is that the two
+   * failures the conductor can observe directly moved nothing. `beta` was read when
+   * computing due-ness and carefully preserved on write-back, and no code path anywhere
+   * incremented it — so credit_mean = alpha/(alpha+beta) could only climb, and a family
+   * that had never once been dispatchable kept rising in due-ness alongside one that
+   * worked every tick.
+   *
+   * Both legs are settled here so the write-back stays in exactly one place. PRESERVING
+   * THE IDENTITY FIELDS IS LOAD-BEARING: a bare {due_score, alpha, staleness} write once
+   * STRIPPED `family`, which made the rhythm unmappable after firing exactly once — a
+   * self-erasing registry. Spread the existing body first, then overlay.
+   *
+   * Staleness decays only on a fire. A family that failed to dispatch has NOT had its
+   * demand answered, so its staleness must keep accruing and bring it back around; that
+   * is the difference between "we handled it" and "we tried and could not".
+   */
+  const settleRhythm = async (
+    r: { id: string; body: RhythmBody; alpha: number; beta: number; staleness: number; due_score: number },
+    leg: "alpha" | "beta",
+  ): Promise<void> => {
+    const overlay = rhythmSettlementOverlay(leg, r.alpha, r.beta, r.staleness);
+    try {
+      await fetchJson(
+        endpoint,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            impulse: {
+              type: "poolImpulse_write",
+              id: r.id,
+              shape: "timeShapedRhythm",
+              source: "rhythm-conductor-tick",
+              body: { ...r.body, due_score: r.due_score, ...overlay },
+            },
+          }),
+        },
+        800,
+      );
+    } catch {
+      /* A settlement that cannot be written must not take the tick down with it; the
+         next tick re-derives due-ness from whatever the registry currently holds. */
+    }
+  };
 
   // Law 1: the family→goal mapping is behavioral — read rhythmFamilyGoal pool
   // impulses at use time and merge them over the bootstrap FAMILY_GOALS const
@@ -318,10 +407,24 @@ export async function resolveRhythmConductorTick(
       poolGoals[r.family] ?? (bootstrapGoal ? [{ goal: bootstrapGoal }] : []);
     if (members.length === 0) {
       skipped.push({ family: r.family, reason: "no_goal_mapping" });
+      // A FAMILY THAT CANNOT BE DISPATCHED MUST LOSE CREDIT, OR IT IS SCORED FOREVER ON
+      // WORK IT NEVER DID. Without this the posterior only ever moved one way: alpha rose
+      // on every fire and beta was read, preserved, and never incremented anywhere — so a
+      // family's credit mean climbed toward 1 no matter what happened to it, and an
+      // unmappable family kept whatever standing it had accumulated indefinitely. That is
+      // fire-and-forget on a learning edge: a success signal recorded at initiation is an
+      // attempt log wearing an outcome label.
+      //
+      // Unmappable is the clearest possible negative and the one observed in practice: the
+      // conductor scored the family as due, found nothing to dispatch it to, and moved on.
+      // Penalising it makes a permanently-broken family decay out of contention instead of
+      // being re-scored every tick at undiminished credit.
+      await settleRhythm(r, "beta");
       continue;
     }
 
     let firedThisFamily = false;
+    let failedToEnqueue = false;
     const directResolver = FAMILY_RESOLVERS[r.family];
     if (directResolver) {
       // Resolver-backed family: dispatch the resolver directly against this vessel
@@ -375,6 +478,11 @@ export async function resolveRhythmConductorTick(
         const ok = (enq.body as { enqueued?: boolean } | undefined)?.enqueued === true;
         if (!ok) {
           skipped.push({ family: label, reason: "enqueue_failed" });
+          // The second observable negative: the family was due, mappable, and the dispatch
+          // itself refused. Same reasoning as the unmappable branch above — a failure the
+          // conductor can see directly must move the posterior, or the only thing the
+          // posterior records is how often we tried.
+          failedToEnqueue = true;
           continue;
         }
       }
@@ -391,27 +499,9 @@ export async function resolveRhythmConductorTick(
     // five times as fast as an identical family expressed as one goal, which
     // penalises the decomposition rather than the behaviour.
     if (firedThisFamily && !pointer.dry_run) {
-      await fetchJson(
-        endpoint,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            impulse: {
-              type: "poolImpulse_write",
-              id: r.id,
-              shape: "timeShapedRhythm",
-              source: "rhythm-conductor-tick",
-              // PRESERVE the identity fields (family/axis/budget/beta): a bare
-              // {due_score,alpha,staleness} write STRIPPED family on first fire, so a
-              // rhythm became unmappable ("no_goal_mapping") after firing exactly once —
-              // a self-erasing registry. Spread the existing body, then overlay the decay.
-              body: { ...r.body, due_score: r.due_score, alpha: r.alpha + 0.5, staleness: Math.max(0, r.staleness * 0.3) },
-            },
-          }),
-        },
-        800,
-      );
+      await settleRhythm(r, "alpha");
+    } else if (failedToEnqueue && !pointer.dry_run) {
+      await settleRhythm(r, "beta");
     }
   }
 

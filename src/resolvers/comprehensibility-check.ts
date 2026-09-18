@@ -71,9 +71,16 @@ interface ComprehensibilityScoreBody {
 }
 
 interface FailureModeBody {
+
   shape: "structuredError";
   failure_mode: "comprehensibility_below_floor" | "input_error" | "cascading";
   detail: string;
+  /** The activity that produced this failure */
+  activity?: string;
+  /** Classification of the failure mode */
+  failure_class?: string;
+  /** Whether this failure has an open gap tracking it */
+  has_open_gap?: boolean;
   score?: number;
   floor?: number;
   evaluator_model_id?: string;

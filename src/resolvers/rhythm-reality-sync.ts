@@ -121,26 +121,35 @@ export async function resolveRhythmRealitySync(
         updated.push({ id: rhythm.id, family: rhythm.body.family, old_staleness, new_staleness });
       }
     }
-    } else if (rhythm.body.family !== "reality-modeling") {
-      // Reset staleness on fire by updating last_fire_time
-      await fetchWithTimeout(
-        {
-          impulse: {
-            type: "poolImpulse_write",
-            id: rhythm.id,
-            shape: "timeShapedRhythm",
-            source: "rhythm-reality-sync",
-            body: { ...rhythm.body, last_fire_time: Date.now() },
-          },
-        },
-        800,
-      );
+    } else if (rhythm.body.family === "reality-modeling") {
+      // reality-modeling staleness is always 0
+      if (rhythm.body.staleness !== 0) {
+        try {
+          await fetchWithTimeout(
+            {
+              impulse: {
+                type: "poolImpulse_write",
+                id: rhythm.id,
+                shape: "timeShapedRhythm",
+                source: "rhythm-reality-sync",
+                body: { ...rhythm.body, staleness: 0 },
+              },
+            },
+            800,
+          );
+        } catch {
+          // best-effort; still record the update
+        }
+        updated.push({ id: rhythm.id, family: rhythm.body.family, old_staleness: rhythm.body.staleness, new_staleness: 0 });
+      }
+    } else {
       // Time-based staleness driver for all other families
       const old_staleness = rhythm.body.staleness;
       const currentTime = Date.now();
       const lastFireTime = rhythm.body.last_fire_time ?? currentTime;
       const timeSinceLastFire = (currentTime - lastFireTime) / (24 * 60 * 60 * 1000); // days
       const new_staleness = Math.min(1, old_staleness + timeSinceLastFire * 0.5);
+
       if (old_staleness !== new_staleness) {
         try {
           await fetchWithTimeout(

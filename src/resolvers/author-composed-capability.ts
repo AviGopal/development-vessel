@@ -334,7 +334,14 @@ function hasSubstance(body: unknown): boolean {
   const b = body as Record<string, unknown>;
   if (b["success"] === false || b["error"] || b["shape"] === "structuredError") return false;
   let v: unknown = b["body"] ?? b["content"] ?? b;
-  if (typeof v === "string") { const t = v.trim(); if (t.startsWith("{") || t.startsWith("[")) { try { v = JSON.parse(t); } catch { return t.length > 0; } } else return t.length > 0; }
+  if (typeof v === "string") { 
+    const t = v.trim(); 
+    if (/\b(error|failed|401|403|404|500)\b/i.test(t)) return false;
+    if (t.startsWith("{") || t.startsWith("[")) { 
+      try { v = JSON.parse(t); } 
+      catch { return t.length > 0; } 
+    } else return t.length > 0; 
+  }
   if (v == null) return false;
   if (Array.isArray(v)) return v.length > 0;
   if (typeof v === "object") return Object.keys(v as object).length > 0;

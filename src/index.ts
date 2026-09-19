@@ -397,6 +397,80 @@ setInterval(() => {
   }
 }, GC_INTERVAL_MS).unref();
 
+// ─────────────────────────────────────────────────────────────────────────────
+// ARTIFACT-EXPECTATION OBSERVATION LOOP (2026-09-19). The substrate's verified
+// reaches now persist standing expectations (memoryNote "expectation:<title>",
+// written by goal-host's transform oracle at verdict time). This loop is the
+// commitment-keeping half: on a rhythm it re-checks each expectation against
+// the CURRENT artifact, independently of the original verdict. A violation
+// makes THIS CODE author the investigative gap (worded for the adjudication
+// pathway) and dispatch the restoration goal — no operator files the problem
+// or supplies the next step. Attention is ordered by past violations (an
+// artifact that degraded before is checked first: experience changes future
+// selection). Recovery self-closes the gap and resets the baseline. Healthy
+// ticks do nothing but heartbeat (restraint). Fail-open everywhere.
+const EXP_SCAN_INTERVAL_MS = parseInt(process.env["EXPECTATION_SCAN_INTERVAL_MS"] ?? "300000", 10);
+const EXP_SELF = process.env["DEV_VESSEL_ENDPOINT"] ?? "http://127.0.0.1:8090";
+const EXP_GOAL_HOST = process.env["GOAL_HOST_VESSEL_ENDPOINT"] ?? "http://127.0.0.1:8210";
+const EXP_KEY = process.env["METABOB_API_KEY"] ?? "";
+const EXP_GOAL_TEXT: Record<string, (operand: string, title: string) => string> = {
+  sha256: (o, t) => `Compute the SHA-256 hex digest of the exact string ${o} and store the digest in a memoryNote titled ${t}.`,
+  base64: (o, t) => `Base64-encode the exact string ${o} and store the encoded text in a memoryNote titled ${t}.`,
+  reverse: (o, t) => `Reverse the string ${o} and store the reversed text in a memoryNote titled ${t}.`,
+  uppercase: (o, t) => `Uppercase the string ${o} and store the result in a memoryNote titled ${t}.`,
+  lowercase: (o, t) => `Lowercase the string ${o} and store the result in a memoryNote titled ${t}.`,
+  lettercount: (o, t) => `Count the letters in the word ${o} and store the count in a memoryNote titled ${t}.`,
+  product: (o, t) => `Compute the product ${o} and store the numeric answer in a memoryNote titled ${t}.`,
+};
+async function expResolveNote(prefix: string): Promise<Array<{ title?: string; body?: string }>> {
+  const r = await fetch(`${EXP_SELF}/v2/impulses/resolve`, { method: "POST", headers: { "Content-Type": "application/json", ...(EXP_KEY ? { Authorization: `ApiKey ${EXP_KEY}` } : {}) }, body: JSON.stringify({ impulse: { pointer: { type: "memoryNote", title_prefix: prefix, limit: 25 } } }), signal: AbortSignal.timeout(8000) });
+  const j = (await r.json()) as { body?: { notes?: Array<{ title?: string; body?: string }> } };
+  return j?.body?.notes ?? [];
+}
+async function expWrite(id: string, body: string): Promise<void> {
+  await fetch(`${EXP_SELF}/v2/impulses/resolve`, { method: "POST", headers: { "Content-Type": "application/json", ...(EXP_KEY ? { Authorization: `ApiKey ${EXP_KEY}` } : {}) }, body: JSON.stringify({ impulse: { pointer: { type: "memoryNote_write", note: { id, type: "reference", title: id, body } } } }), signal: AbortSignal.timeout(8000) });
+}
+async function expGapWrite(gap: Record<string, unknown>): Promise<void> {
+  await fetch(`${EXP_SELF}/v2/impulses/resolve`, { method: "POST", headers: { "Content-Type": "application/json", ...(EXP_KEY ? { Authorization: `ApiKey ${EXP_KEY}` } : {}) }, body: JSON.stringify({ impulse: { type: "substrateGap_write", pointer: { type: "substrateGap_write", gap: { ...gap, detected_at: new Date().toISOString() } } } }), signal: AbortSignal.timeout(8000) });
+}
+setInterval(() => { void (async () => {
+  try {
+    const expectations = (await expResolveNote("expectation:")).filter((n) => (n.title ?? "").startsWith("expectation:"));
+    let violationsFound = 0;
+    const parsed = expectations.map((n) => { try { return { title: n.title ?? "", spec: JSON.parse(n.body ?? "{}") as { target_title?: string; family?: string; operand?: string; expected?: string; violations?: number } }; } catch { return null; } }).filter((x): x is NonNullable<typeof x> => !!x && !!x.spec.target_title && !!x.spec.expected);
+    parsed.sort((a, b) => (b.spec.violations ?? 0) - (a.spec.violations ?? 0));
+    for (const e of parsed) {
+      const target = String(e.spec.target_title);
+      const notes = await expResolveNote(target);
+      const live = notes.find((n) => n.title === target);
+      const liveBody = typeof live?.body === "string" ? live.body.trim() : null;
+      const gapId = "gap-artifact-expectation-violated-" + target.replace(/[^A-Za-z0-9_-]/g, "").slice(0, 60);
+      if (liveBody === String(e.spec.expected)) {
+        if ((e.spec.violations ?? 0) > 0) {
+          await expWrite(e.title, JSON.stringify({ ...e.spec, violations: 0, restored_at: new Date().toISOString() }));
+          await expGapWrite({ id: gapId, source: "substrate_detected", status: "closed", summary: `RESOLVED by observation loop: artifact ${target} again byte-equals its expectation ${String(e.spec.expected).slice(0, 60)} (${e.spec.family}(${e.spec.operand})). The violation was observed, an investigative restoration goal was dispatched, and the artifact recovered; baseline reset.` });
+          console.log(`[expectation-scan] ${target} RECOVERED — gap ${gapId} self-closed, violations reset`);
+        }
+        continue;
+      }
+      violationsFound++;
+      const v = (e.spec.violations ?? 0) + 1;
+      await expWrite(e.title, JSON.stringify({ ...e.spec, violations: v, last_violation_at: new Date().toISOString(), last_observed: liveBody === null ? "(absent)" : liveBody.slice(0, 80) }));
+      await expGapWrite({ id: gapId, source: "substrate_detected", status: "open", summary: `Observation loop found a verified artifact no longer valid: memoryNote ${target} was verified to byte-equal ${String(e.spec.expected).slice(0, 80)} (goal determines ${String(e.spec.expected).slice(0, 80)} for ${e.spec.family}(${e.spec.operand})) but now ${liveBody === null ? "is absent" : "stores " + liveBody.slice(0, 80)} — the artifact and its recorded verification disagree (violation #${v}). One mechanism degraded it after verdict; determine which, restore the artifact, preserve the criterion.` });
+      const mk = EXP_GOAL_TEXT[String(e.spec.family)];
+      if (mk && e.spec.operand) {
+        await fetch(`${EXP_GOAL_HOST}/run-goal`, { method: "POST", headers: { "Content-Type": "application/json", ...(EXP_KEY ? { Authorization: `ApiKey ${EXP_KEY}` } : {}) }, body: JSON.stringify({ goal: mk(String(e.spec.operand), target), tags: ["operator:expectation-scan", "restoration", gapId] }), signal: AbortSignal.timeout(10000) }).then((r) => console.log(`[expectation-scan] ${target} VIOLATION #${v} — restoration goal dispatched (http ${r.status}), gap ${gapId} filed`)).catch((err) => console.warn(`[expectation-scan] restoration dispatch failed for ${target}: ${(err as Error).message}`));
+      } else {
+        console.log(`[expectation-scan] ${target} VIOLATION #${v} — gap ${gapId} filed; no goal template for family ${String(e.spec.family)} (investigation left to the repair lane)`);
+      }
+    }
+    await expWrite("expectation-scan-heartbeat", JSON.stringify({ at: new Date().toISOString(), checked: parsed.length, violations_found: violationsFound }));
+    if (parsed.length > 0 || violationsFound > 0) console.log(`[expectation-scan] tick complete checked=${parsed.length} violations=${violationsFound}`);
+  } catch (err) {
+    console.warn(`[expectation-scan] tick failed (non-fatal): ${(err as Error).message}`);
+  }
+})(); }, EXP_SCAN_INTERVAL_MS).unref();
+
 export default server;
 
 

@@ -336,7 +336,22 @@ function hasSubstance(body: unknown): boolean {
   let v: unknown = b["body"] ?? b["content"] ?? b;
   if (typeof v === "string") { 
     const t = v.trim(); 
-    if (/\b(error|failed|401|403|404|500)\b/i.test(t)) return false;
+    // Producer: multiple resolvers. Any output that explicitly flags as an error or failed command
+    // or bare HTTP status codes is treated as lacking substance. However, a report that *describes*
+    // errors/failures should have substance. The regex is adjusted to only match when a string
+    // explicitly *is* an error, failed, or a raw status code, and not just *contains* the word.
+    if (
+      t === "error" ||
+      t === "failed" ||
+      t === "401" ||
+      t === "403" ||
+      t === "404" ||
+      t === "500" ||
+      t.startsWith("Error:") ||
+      t.startsWith("Failed:") ||
+      t.startsWith("HTTP Error:") ||
+      t.match(/^\d{3}\s[A-Za-z]+$/) // e.g., '404 Not Found'
+    ) return false;
     if (t.startsWith("{") || t.startsWith("[")) { 
       try { v = JSON.parse(t); } 
       catch { return t.length > 0; } 

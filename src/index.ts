@@ -471,6 +471,63 @@ setInterval(() => { void (async () => {
   }
 })(); }, EXP_SCAN_INTERVAL_MS).unref();
 
+// ─────────────────────────────────────────────────────────────────────────────
+// TREND-EXPECTATION CHECK (2026-09-19). The artifact loop above keeps
+// commitments about INDIVIDUAL verified artifacts; this loop keeps a standing
+// commitment about the REACH TREND itself. The commitment lives as an impulse
+// (memoryNote "expectation-trend:deterministic-battery" holding the bar, the
+// probe count, and the cadence — read at use time, law 1); when due, this
+// checker GENERATES fresh probe goals itself, dispatches them, and
+// byte-verifies the artifacts IN-PROCESS — independent of goal-host's own
+// verdicts, so an agreeing-wrong producer/verifier pair cannot satisfy it.
+// A score below the committed bar files a substrate_detected gap; recovery on
+// a later check closes it; no standing note -> no work (restraint). History
+// rides in the note so the trend is durable and inspectable.
+const TREND_EXP_TITLE = "expectation-trend:deterministic-battery";
+setInterval(() => { void (async () => {
+  try {
+    const rows = await expResolveNote(TREND_EXP_TITLE);
+    const row = rows.find((x) => x.title === TREND_EXP_TITLE);
+    if (!row || typeof row.body !== "string") return;
+    const spec = JSON.parse(row.body) as { bar_min_r?: number; n?: number; cadence_minutes?: number; last_run_at?: string; open_violation?: boolean; history?: Array<{ at: string; r: number; n: number }> };
+    const cadMs = Math.max(1, spec.cadence_minutes ?? 360) * 60000;
+    const lastAt = spec.last_run_at ? Date.parse(spec.last_run_at) : 0;
+    if (Number.isFinite(lastAt) && lastAt > 0 && Date.now() - lastAt < cadMs) return;
+    const n = Math.max(1, Math.min(6, spec.n ?? 3));
+    const seed = Date.now().toString(36);
+    let r = 0;
+    for (let i = 0; i < n; i++) {
+      const title = `trendcheck-${seed}-${i}`;
+      let goalText = ""; let expected = "";
+      if (i % 3 === 0) { const a = 101 + ((seed.charCodeAt(seed.length - 1) * 7 + i * 37) % 797); const b = 103 + ((seed.charCodeAt(0) * 11 + i * 91) % 793); expected = String(a * b); goalText = `Compute the product ${a}*${b} and store the numeric answer in a memoryNote titled ${title}.`; }
+      else if (i % 3 === 1) { const w = "trend" + seed.slice(-4); expected = w.split("").reverse().join(""); goalText = `Reverse the string ${w} and store the reversed text in a memoryNote titled ${title}.`; }
+      else { const w = "check" + seed.slice(-4); expected = w.toUpperCase(); goalText = `Uppercase the string ${w} and store the result in a memoryNote titled ${title}.`; }
+      try {
+        const dr = await fetch(`${EXP_GOAL_HOST}/run-goal`, { method: "POST", headers: { "Content-Type": "application/json", ...(EXP_KEY ? { Authorization: `ApiKey ${EXP_KEY}` } : {}) }, body: JSON.stringify({ goal: goalText, tags: ["operator:trend-expectation-check"] }), signal: AbortSignal.timeout(10000) });
+        const dj = (await dr.json()) as { dispatchId?: string };
+        if (!dj.dispatchId) continue;
+        for (let w2 = 0; w2 < 30; w2++) { await new Promise((res) => setTimeout(res, 10000)); try { const sr = await fetch(`${EXP_GOAL_HOST}/executions/${dj.dispatchId}`, { headers: { ...(EXP_KEY ? { Authorization: `ApiKey ${EXP_KEY}` } : {}) }, signal: AbortSignal.timeout(8000) }); const sj = (await sr.json()) as { status?: string }; if (sj.status === "completed" || sj.status === "failed") break; } catch {} }
+        const notes = await expResolveNote(title);
+        const live = notes.find((x) => x.title === title);
+        if (live && typeof live.body === "string" && live.body.trim() === expected) r++;
+      } catch { /* a failed probe counts as a miss, never as a crash */ }
+    }
+    const hist = [...(spec.history ?? []).slice(-11), { at: new Date().toISOString(), r, n }];
+    const bar = spec.bar_min_r ?? Math.ceil(n * 0.8);
+    const violated = r < bar;
+    const gapId = "gap-trend-expectation-violated-deterministic-battery";
+    if (violated) {
+      await expGapWrite({ id: gapId, source: "substrate_detected", status: "open", summary: `Standing trend expectation VIOLATED: the deterministic-battery reach check scored ${r}/${n} against the committed bar ${bar}/${n}. Scoring is independent in-process byte-verification of freshly generated probes (not the dispatch verdicts), so this is reach regression, not grading noise. Recent history: ${JSON.stringify(hist.slice(-4))}. Determine which mechanism regressed and restore the bar; the standing commitment is the impulse ${TREND_EXP_TITLE}.` });
+    } else if (spec.open_violation) {
+      await expGapWrite({ id: gapId, source: "substrate_detected", status: "closed", summary: `RESOLVED: trend expectation restored — independent check scored ${r}/${n}, meeting the committed bar ${bar}/${n}. Closed by the trend-expectation checker that filed it.` });
+    }
+    await expWrite(TREND_EXP_TITLE, JSON.stringify({ ...spec, last_run_at: new Date().toISOString(), last_score: `${r}/${n}`, open_violation: violated, history: hist }));
+    console.log(`[trend-expectation] check complete r=${r}/${n} bar=${bar} violated=${violated}`);
+  } catch (err) {
+    console.warn(`[trend-expectation] check failed (non-fatal): ${(err as Error).message}`);
+  }
+})(); }, 120000).unref();
+
 export default server;
 
 

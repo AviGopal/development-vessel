@@ -1606,6 +1606,50 @@ export async function admitActionableGaps(
     // a property of the gap: does it name a file that exists. Give it a target and it is
     // admitted on the very next tick. A targeted `pointer.gap_id` dispatch bypasses this
     // gate entirely, so an operator can still force one.
+    // DISAGREEMENT ADJUDICATION (2026-09-19). A gap describing an execution-vs-
+    // verification disagreement names no file, so it parked here as ungroundable —
+    // measured on gap-probe-count-execution-and-verification-disagree: event pickup
+    // fired in 1s, then attempts=0 forever, and the only improvised action trusted
+    // the WRONG mechanism (formulated writing the verifier's expected value over a
+    // correct producer result). Adjudicate instead of defer: recompute the disputed
+    // transform with an executable method, attribute the fault by comparing the
+    // verifier's stated expectation against the recomputation, mint the edit_site
+    // both mechanisms share (goal-host hosts the floor producer AND the reach
+    // verifier), and admit the gap to the repair lane THIS tick. Fail-open: any
+    // parse or compute failure falls through to the ungroundable deferral unchanged.
+    try {
+      const summaryText = String(g.summary ?? "");
+      const disputed = summaryText.match(/\b(sha-?256|base64|reverse|uppercase|lowercase|lettercount|product)\((\S{1,120})\)/i);
+      if (/disagree|mismatch/i.test(summaryText) && disputed && disputed[1] && disputed[2]) {
+        const family = disputed[1].toLowerCase().replace("-", "");
+        const operand = disputed[2].trim();
+        let truth = "";
+        if (family === "sha256") { const { createHash } = await import("node:crypto"); truth = createHash("sha256").update(operand, "utf8").digest("hex"); }
+        else if (family === "base64") { truth = Buffer.from(operand, "utf8").toString("base64"); }
+        else if (family === "reverse") { truth = operand.split("").reverse().join(""); }
+        else if (family === "uppercase") { truth = operand.toUpperCase(); }
+        else if (family === "lowercase") { truth = operand.toLowerCase(); }
+        else if (family === "lettercount") { truth = String(operand.replace(/-/g, "").length); }
+        else if (family === "product") { const pm = operand.match(/(\d{1,9})\s*[*xX×]\s*(\d{1,9})/); if (pm && pm[1] && pm[2]) truth = String(Number(pm[1]) * Number(pm[2])); }
+        const expectedMatch = summaryText.match(/determines\s+([A-Za-z0-9+/=._-]+)\s+for\b/);
+        const verifierExpected = expectedMatch && expectedMatch[1] ? expectedMatch[1] : "";
+        if (truth && verifierExpected) {
+          const wrongMechanism = verifierExpected === truth ? "producer" : "verifier";
+          const adjudicated = {
+            ...meta,
+            edit_site: "repos/goal-host-vessel/src/index.ts",
+            adjudication: { family, operand, recomputed_truth: truth, verifier_expected: verifierExpected, wrong_mechanism: wrongMechanism, method: "in-process executable recomputation", adjudicated_at: new Date().toISOString() },
+          } as Record<string, unknown>;
+          try {
+            await resolveSubstrateGapWrite({ type: "substrateGap_write", gap: { id, category: g.category, source: g.source, summary: g.summary, detected_at: g.detected_at, classification_metadata: adjudicated, status: "open" } } as never);
+          } catch { /* write-back is best-effort; in-memory admission still proceeds */ }
+          (g as { classification_metadata?: Record<string, unknown> }).classification_metadata = adjudicated;
+          console.log(`[gap-adjudicate] ${id}: recomputed ${family}(${operand})=${truth}; verifier expected ${verifierExpected} -> ${wrongMechanism} is wrong; edit_site minted, admitted`);
+          admitted.push(g);
+          continue;
+        }
+      }
+    } catch { /* fail-open: defer as ungroundable below */ }
     ungroundable.push(g);
   }
 

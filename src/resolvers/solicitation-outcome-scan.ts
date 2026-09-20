@@ -35,8 +35,8 @@ export async function resolveSolicitationOutcomeScan(pointer: SolicitationOutcom
   // 48h. When no ids are supplied, read the outstanding escalation panels from stateful-ui.
   if (ids.length === 0) {
     try {
-      const uiEndpoint = process.env["STATEFUL_UI_VESSEL_ENDPOINT"] ?? "http://127.0.0.1:8270";
-      const uiRes = await fetch(uiEndpoint + "/resolve", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ impulse: { pointer: { type: "uiQuestion" } } }), signal: AbortSignal.timeout(10000) });
+      const uiEndpoint = (await resolveObsidianEndpointViaDiscovery()) ?? process.env["STATEFUL_UI_VESSEL_ENDPOINT"] ?? "http://127.0.0.1:8270";
+    const uiRes = await fetch(uiEndpoint + "/resolve", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ impulse: { pointer: { type: "uiQuestion" } } }), signal: AbortSignal.timeout(10000) });
       const uiJson = (await uiRes.json()) as { body?: { questions?: Array<{ id?: string }> } };
       ids = (uiJson.body?.questions ?? []).map((q) => String(q.id ?? "")).filter((qid) => qid.startsWith("needs-human-") || qid.startsWith("reland-needs-human-"));
     } catch { /* transport failure -> fail open, ids stays empty */ }

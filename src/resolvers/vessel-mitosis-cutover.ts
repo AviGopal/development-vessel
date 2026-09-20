@@ -2643,8 +2643,13 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
         const ghTsUnit = `mitosis-goalhost-restart-${mitosis_version_id}`.replace(/[^A-Za-z0-9_.-]/g, "-").slice(0, 90);
         try {
           const sysdRun = process.env["SYSTEMD_RUN_CMD"] ?? "systemd-run";
+          const ghEndpointQ = (process.env["GOAL_HOST_VESSEL_ENDPOINT"] ?? "http://127.0.0.1:8210").replace(/\/+$/, "");
+          // Fire-time quiesce (gap goal-host-cutover-restart-fires-blind-...): the transient unit
+          // itself polls in_flight before restarting; empty/missing in_flight keeps waiting (NOT quiet).
+          const ghQuiesceScript = `i=0; while [ $i -lt 36 ]; do IF=$(curl -s --max-time 5 ${ghEndpointQ}/health 2>/dev/null | grep -o 'in_flight[^0-9]*[0-9]*' | grep -o '[0-9]*$' | head -1); if [ -n "$IF" ] && [ "$IF" -le 1 ]; then break; fi; sleep 5; i=$((i+1)); done; exec systemctl restart '${unit}'`;
+
           const proc = Bun.spawnSync(
-            [sysdRun, `--on-active=${ghDelay}s`, `--unit=${ghTsUnit}`, "--collect", "systemctl", "restart", unit],
+            [sysdRun, `--on-active=${ghDelay}s`, `--unit=${ghTsUnit}`, "--collect", "/bin/sh", "-c", ghQuiesceScript],
             { stdout: "pipe", stderr: "pipe" },
           );
           vesselRestarted = (proc.exitCode ?? 1) === 0;

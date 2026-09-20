@@ -5137,7 +5137,12 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
               let cand = String(fix.old_string);
               while (cand.length > 12 && live.split(cand).length - 1 !== 1) cand = cand.slice(0, -1);
               if (live.split(cand).length - 1 === 1) fix.old_string = cand;
-              if (live.split(cand).length - 1 !== 1) { const hits = live.split("\n").filter((x) => x.trim().startsWith(cand.trim().slice(0, 40))); if (hits.length === 1) fix.old_string = hits[0]; }
+                // Retain the original old_string from the op (plan-time knowledge of intent),
+              // as the blind-edit repair has already performed its best-effort re-derivation.
+              // Discarding `fix.old_string` here prevents mislocalization due to partial matches.
+              // The `cand` re-derivation above, if it happens, would truncate. Skip it.
+              fix.old_string = op.old_string; // preserve the plan's anchor after blind-edit repair
+
               const fixRefusal = refuseRederivedEdit({
                 candidateAnchor: String(fix.old_string),
                 replacement: String(fix.new_string ?? op.new_string ?? ""),

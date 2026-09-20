@@ -3121,7 +3121,7 @@ async function appendComposeLesson(cls: string, reason: string, vessels: string,
       // Record failure for the lessons that led to this 'cls'
       (async () => {
         try {
-          const response = await fetch(`${CONCEPT_DB_ENDPOINT}/impulses/resolve`, {
+          const response = await fetch(`${CONCEPT_DB_ENDPOINT}/v2/impulses/resolve`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', 'X-Api-Key': METABOB_API_KEY },
             body: JSON.stringify({ type: "conceptSearch", source_type: "compose_lesson", query: cls, limit: 8 }),

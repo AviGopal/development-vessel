@@ -26,7 +26,7 @@
 
 import { createHash } from "node:crypto";
 import { federatedLlmEgressUrls } from "./federated-llm-egress.js";
-import { mkdir, writeFile, readFile, copyFile, unlink } from "node:fs/promises";
+import { mkdir, writeFile, readFile, copyFile, unlink, rename } from "node:fs/promises";
 import { dirname, join, resolve, relative, isAbsolute } from "node:path";
 import { METABOB_ENDPOINT, METABOB_API_KEY, env } from "../config.js";
 import type { ResolverResult } from "./types.js";
@@ -636,7 +636,8 @@ export async function resolvePatchWithTools(pointer: PatchWithToolsPointer): Pro
       if (isNewFile) {
         await unlink(liveSrcPath).catch(() => { /* not yet created */ });
       } else {
-        await writeFile(liveSrcPath, baseContent);
+        await writeFile(liveSrcPath + '.tmp', baseContent);
+        await rename(liveSrcPath + '.tmp', liveSrcPath);
       }
     } catch { /* best-effort */ }
   };

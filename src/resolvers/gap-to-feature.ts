@@ -1448,7 +1448,8 @@ export async function admitActionableGaps(
     // is not one attempt away from succeeding. Cap at a small share so the cap=1 compose lane serves diverse goals.
     try {
       const editSiteForCap = String(meta.edit_site ?? "");
-      if (editSiteForCap) {
+      // human_reported gaps are EXEMPT from the site cap: the cap exists to stop auto-minted child churn (57% of attempts on two files, measured 2026-09-12), but it runs at ADMISSION in iteration order, BEFORE human_reported pick-weighting — so an operator-filed gap on a busy file was starved indefinitely behind route-edit children at the same site (measured 2026-09-20: gap-transform-oracle-verdict-line-omits-the-checked-address, 90 minutes, zero attempts, while the site cap excluded 58-59 gaps per cycle). Operator gaps are rare; exempting them cannot recreate the churn the cap prevents.
+      if (editSiteForCap && String(g.source ?? "") !== "human_reported") {
         const admittedAtSite = admittedPerEditSite.get(editSiteForCap) ?? 0;
         if (admittedAtSite >= MAX_ADMITTED_PER_EDIT_SITE_PER_CYCLE) {
           excluded.push({ id, reason: `edit_site_saturated(${editSiteForCap})` });

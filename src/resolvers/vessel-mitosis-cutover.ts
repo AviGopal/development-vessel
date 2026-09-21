@@ -1134,7 +1134,7 @@ export async function resolveVesselMitosisCutover(
           try {
             if (await pathExists(pendingPath)) { await unlink(pendingPath); pendingCleared = true; }
           } catch { /* best-effort */ }
-          console.error(`[mitosis-cutover] already-applied no-op: live matches staged mitosis content (${currentLiveSha}) for ${mitosis_version_id}; cleared pending=${pendingCleared} — not refusing, change already landed`);
+          console.error(`[mitosis-cutover] already-applied no-op: live matches staged mitosis content (sha=${currentLiveSha}) for ${mitosis_version_id}; cleared pending=${pendingCleared} — not refusing, change already landed`);
           return {
             shape: "cutoverApplied",
             body: {

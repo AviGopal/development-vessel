@@ -4940,9 +4940,14 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
       // Same ordering the offered anchors were built from, so "the region" here and
       // "the region the anchors came from" are by construction the same place.
       const anchorLocatorsForOp = [
+        // EXPLICIT REGION FIRST (2026-09-22): the grounding probe order already honours
+        // "the explicit region literal still wins"; this list appended it LAST, so a
+        // phrase mined from gap prose could out-rank it in locateRegion and the guard
+        // then rejected a CORRECT anchor as "7470 lines from the EXPLICIT region"
+        // (measured: region at 7502, mined match at 32, correct anchor discarded).
+        regionHint ?? "",
         ...regionCandidatesFromText(`${String(pointer.spec ?? "")}\n${String(pointer.gap?.summary ?? "")}`),
         ...focusHints.slice(1),
-        regionHint ?? "",
       ].filter(Boolean);
       const anchorNonUnique = !!effOld && n0 > 1;
       // A UNIQUE ANCHOR IN THE WRONG REGION IS STILL THE WRONG ANCHOR.

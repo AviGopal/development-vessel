@@ -163,6 +163,34 @@ export async function resolveMemoryNoteWrite(
 ): Promise<ResolverResult> {
   const now = new Date().toISOString();
 
+  // Handle retire action first if specified
+  if (pointer.retire === true) {
+    const retireId = pointer.id;
+    if (!retireId) {
+      return {
+        shape: "memoryNoteWriteResult",
+        body: { id: "", action: "rejected", reason: "missing_id" },
+      };
+    }
+
+    const notes = await loadNotes();
+    const initialCount = notes.length;
+    const newNotes = notes.filter((note) => note.id !== retireId);
+    
+    if (newNotes.length === initialCount) {
+      return {
+        shape: "memoryNoteWriteResult",
+        body: { id: retireId, action: "rejected", reason: "not_found" },
+      };
+    }
+    
+    await saveNotes(newNotes);
+    return {
+      shape: "memoryNoteWriteResult",
+      body: { id: retireId, action: "retired" },
+    };
+  }
+
   // A nested `note` object is the canonical envelope; anything else (absent, a
   // string from an LLM-emitted `note` key, a primitive) falls through to the
   // flat pointer. Read the fields from whichever source applies.

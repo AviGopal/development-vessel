@@ -3348,6 +3348,7 @@ async function routeCapabilityGapToNewResolver(
     return { shape: "gapToFeatureReport", body: { ok: true, gap_id: gap.id, gap_category: gap.category, verdict: "pending_verification", note: "landed once but unmeasured — held pending verification; not re-composed" } };
   }
 
+  const isDirected = (pointer as { directed?: boolean }).directed === true;
   const compose = await resolveFeatureCompose({
     type: "feature_compose",
     spec,
@@ -3355,6 +3356,7 @@ async function routeCapabilityGapToNewResolver(
     model: pointer.model,
     dry_run: pointer.dry_run ?? false,
     keep_on_fail: false,
+
     gap: {
       id: String(gap.id ?? ""),
       summary: String(gap.summary ?? gap.title ?? ""),

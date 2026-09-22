@@ -76,7 +76,7 @@ function isStaleProposal(proposal: Record<string, unknown>): boolean {
 
   if (Number.isNaN(createdMs)) return false;
 
-  return Date.now() - createdMs > STALE_MAX_AGE_MS;
+  return Date.now() - createdMs > STALE_MAX_AGE_MS || (proposal["prefer"] === "newest" && hasStaleTag);
 }
 
 // Read at call time, not load time — tests stand up a Bun server per case and

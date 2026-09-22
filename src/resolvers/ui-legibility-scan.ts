@@ -125,6 +125,16 @@ export async function resolveUiLegibilityScan(
   }
 
   const violations: UiLegibilityViolation[] = [];
+  // R4 content form check - detect verbatim monospace code listings when inappropriate
+  const form = (uiView.form ?? {}) as Record<string, unknown>;
+  if (form.renderer === "monospace_code" && typeof uiViewContent === "string" && uiViewContent.split('\n').length <= 1) {
+    violations.push({ 
+      rule: "hex_color_override", 
+      region: "content_form", 
+      kind: "hard_to_see", 
+      detail: "Content was rendered as verbatim monospace code when a single-line value would be more readable" 
+    });
+  }
 
   // R1 px floor over effective --sub-font-* tokens
   const tokens = (gd.effective_tokens ?? {}) as Record<string, string>;

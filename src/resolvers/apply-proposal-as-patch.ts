@@ -1122,6 +1122,8 @@ async function attemptApplyOnce(pointer: ApplyProposalAsPatchPointer): Promise<R
       mitosis_root: mitosisRoot,
       staged_at: new Date().toISOString(),
       authored_by: "apply_proposal_as_patch:multifile",
+      gap_id: chosen.name.replace(/\-report\.json$/, ""),
+      proposal_id: pointer.proposal_id ?? chosen.name.replace(/\-report\.json$/, ""),
       proposal: chosen.name,
       staged_files: orderedStagedFiles,
       base_sha: baseSha,

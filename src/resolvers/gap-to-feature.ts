@@ -1152,7 +1152,7 @@ function pickMostLandable(gaps: Record<string, unknown>[]): Record<string, unkno
     return Number(m.human_exemption_attempts_remaining ?? 0) > 0;
   };
   const humanWeight = (g: Record<string, unknown>): number =>
-    String(g.source ?? "") === "human_reported" || hasLiveHumanExemption(g) ? HUMAN_REPORT_PRIORITY : 1;
+    String(g.source ?? "") === "human_reported" || hasLiveHumanExemption(g) ? HUMAN_REPORT_PRIORITY : (String(g.category) ?? '').startsWith('route-edit') ? 0.5 : 1;
   const ranked = selectionPool
     .map((g) => ({ g, s: landabilityScore(g) * impactOf(g) * humanWeight(g) }))
     .sort((a, b) => b.s - a.s);

@@ -803,6 +803,45 @@ export function surqlBreakingFieldRefusal(
       // probe buried the ANSI form inside a DEFINE EVENT body —
       //   DEFINE EVENT ... THEN  ALTER TABLE t ADD origin_vessel TEXT;  ... END;
       // — so the statement's head was DEFINE and a head-anchored check never fired. The gate
+      // refused that file only incidentally, on its trailing END. Scan the whole statement.
+      if (/\bALTER\s+TABLE\b[^;]*?\bADD\b/i.test(stmt)) {
+        return (
+          `[mitosis-surql] REFUSING ${f.path}: "ALTER TABLE … ADD COLUMN" is ANSI/MySQL syntax, ` +
+          `not SurrealDB. Add a column with \`DEFINE FIELD <name> ON <table> TYPE option<...>\`. ` +
+          `Offending statement: "${stmt.slice(0, 90)}".`
+        );
+      }
+    }
+
+    const malformed = [...sql.matchAll(MALFORMED_RE)];
+    if (malformed.length > 0) {
+      return (
+        `[mitosis-surql] REFUSING ${f.path}: a DEFINE FIELD statement names no table — ` +
+        `${malformed.length} statement(s) like "${malformed[0]![0].trim().slice(0, 80)}". ` +
+        `This cannot parse, so applySQLFile returns false, the file is never recorded in ` +
+        `init_migrations, and it fails again on every subsequent boot.`
+      );
+    }
+
+    // A DEFINE FIELD THAT DOES NOT PARSE AS ONE IS MALFORMED, NOT EXEMPT.
+    //
+    // Third miss of the same class, and the one that actually landed. Asked for two optional
+    // columns, the drafter produced:
+    //
+    //     DEFINE FIELD org_id OPTION STRING IF NOT EXISTS ON execution_traces;
+    //
+    // Invented syntax — `OPTION STRING` appears in ZERO of the 217 corpus files, `IF NOT
+    // EXISTS` sits after the name, and `ON` trails at the end. The canonical form is
+    // `DEFINE FIELD IF NOT EXISTS <name> ON <table> TYPE option<string>`.
+    //
+    // did not fire because the statement DOES contain `ON`, and `DEFINE` is a known head verb.
+    // So it passed, landed on origin/dev, and would fail to parse on every boot forever.
+    //
+    // The earlier rules ask "is this specific hazard present?", which abstains on anything
+    // unfamiliar. This one asks the complementary question: a statement that CLAIMS to be a
+    // DEFINE FIELD must parse as one. Unrecognised is refused, not waved through.
+    for (const stmt of splitSurqlStatements(sql)) {
+      if (!/^DEFINE\s+FIELD\b/i.test(stmt)) continue;
     // Every rule above abstained: the field-shape regex did not match, the names-no-table rule
       if (FIELD_RE.test(stmt + ";")) { FIELD_RE.lastIndex = 0; continue; }
       FIELD_RE.lastIndex = 0;

@@ -4207,7 +4207,7 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
         (issue.wouldMatchWithoutTrailingSemicolon ? " (but would match if trailing semicolon was removed)" : "") +
         ` - please copy anchors verbatim from the window shown to you`
       ).join("\n");
-      planRaw = await llmCallWithFailover(llmEndpoints, decomposePrompt + "\n\n" + promptSuffix, model);
+      planRaw = await llmCallWithFailover(llmEndpoints, decomposePrompt(spec, maxOps, grounding, principles.concat(composeLessons), priorFeedback, netNewTargets) + "\n\n" + promptSuffix, model);
       plan = parseJsonObject(planRaw);
       if (plan) {
         ops = (plan?.ops as PlanOp[] | undefined) ?? [];

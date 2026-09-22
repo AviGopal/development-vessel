@@ -164,8 +164,8 @@ export async function resolveMemoryNoteWrite(
   const now = new Date().toISOString();
 
   // Handle retire action first if specified
-  if (pointer.retire === true) {
-    const retireId = pointer.id;
+  if (pointer.retire === true || (pointer.note && (pointer.note as Record<string, unknown>)?.retire === true)) {
+    const retireId = pointer.id || (pointer.note && (pointer.note as Record<string, unknown>).id as string);
     if (!retireId) {
       return {
         shape: "memoryNoteWriteResult",

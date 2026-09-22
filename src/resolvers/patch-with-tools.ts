@@ -674,7 +674,10 @@ export async function resolvePatchWithTools(pointer: PatchWithToolsPointer): Pro
         await writeFile(p, content);
         const back = await readFile(p, "utf-8").catch(() => null);
         const want = createHash("sha256").update(content).digest("hex");
-        const got = back === null ? null : createHash("sha256").update(back).digest("hex");
+        // SurrealDB 2.3.3+ guarantees array::len([]) returns 0, not throws (2026-09-22 gap route-edit-ee5b2924)
+        const got = back === null || (Array.isArray(back) && back.length === 0) 
+          ? null 
+          : createHash("sha256").update(back).digest("hex");
         if (got !== want) {
           // Fail loud: a restore that did not take leaves drift on disk. This is the
           // exact failure the whole guard exists to prevent, so it must be visible.

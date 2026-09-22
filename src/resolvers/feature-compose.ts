@@ -29,6 +29,26 @@ import { resolveSubstrateGap, resolveSubstrateGapWrite } from "./substrate-gap.j
 import { writeAuthoringMarker, clearAuthoringMarker } from "./patch-with-tools.js";
 import { vacuousEditReason, nonTerminatingEditReason, deadStoreEditReason, truncatingRewriteReason } from "../vacuous-edit.js";
 import { acquireComposeSlot } from "../compose-slots.js";
+
+export function assertAnchorInWindow(window: string, ops: ReadonlyArray<{ kind?: string; path?: string; old_string?: string }>): Array<{ path: string; oldHead: string; wouldMatchWithoutTrailingSemicolon: boolean }> {
+  const missing: Array<{ path: string; oldHead: string; wouldMatchWithoutTrailingSemicolon: boolean }> = [];
+  for (const op of ops) {
+    if (op.kind === "edit" && op.old_string && op.old_string.length > 0) {
+      if (!window.includes(op.old_string)) {
+        const trimmed = op.old_string.trimEnd();
+        const wouldMatch = trimmed.endsWith(";")
+          ? window.includes(trimmed.slice(0, -1))
+          : false;
+        missing.push({
+          path: op.path || "",
+          oldHead: op.old_string.slice(0, 90),
+          wouldMatchWithoutTrailingSemicolon: wouldMatch
+        });
+      }
+    }
+  }
+  return missing;
+}
 import { existsSync as mountExistsSync, readdirSync, readFileSync } from "node:fs";
 import { regionCandidatesFromText } from "./region-probe.js";
 import { symbolsNeedingDeclaration, renderSymbolDeclarations, typeNamesIn, renderSafeAnchors, safeAnchorLines, locateRegion, type SymbolDeclaration } from "../cross-file-symbols.js";
@@ -4174,6 +4194,26 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
       } catch { /* fall through to honest no-ops below */ }
     }
   }
+
+  try {
+    const window = typeof grounding === "string" ? grounding : "";
+    const anchorIssues = assertAnchorInWindow(window, Array.isArray(ops) ? ops : []);
+    if (anchorIssues.length > 0) {
+      for (const issue of anchorIssues) {
+        console.log(`[fc-anchor-provenance] re-draft: anchor not in window at ${issue.path}, "${issue.oldHead}" - would match without semicolon? ${issue.wouldMatchWithoutTrailingSemicolon}`);
+      }
+      const promptSuffix = anchorIssues.map(issue => 
+        `Anchor at ${issue.path}: "${issue.oldHead}" was not found in the window` +
+        (issue.wouldMatchWithoutTrailingSemicolon ? " (but would match if trailing semicolon was removed)" : "") +
+        ` - please copy anchors verbatim from the window shown to you`
+      ).join("\n");
+      planRaw = await llmCallWithFailover(llmEndpoints, decomposePrompt + "\n\n" + promptSuffix, model);
+      plan = parseJsonObject(planRaw);
+      if (plan) {
+        ops = (plan?.ops as PlanOp[] | undefined) ?? [];
+      }
+    }
+  } catch { /* proceed on error */ }
   // DIAGNOSTIC (localizer): the decompose plan is otherwise unlogged, so a mis-localized
   // edit (e.g. onto a dead top-level function) is invisible. Log, per op, the target path
   // and the old_string prefix, plus whether the GROUNDING the drafter saw even contained

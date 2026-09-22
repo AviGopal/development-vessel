@@ -917,7 +917,14 @@ export async function resolvePatchWithTools(pointer: PatchWithToolsPointer): Pro
         }
         const next = fallbackModels.shift();
         if (!next) {
-          return structuredError(`llm failed turn ${turn}: ${msg}`, { history, before_sha: beforeSha });
+          // GAP a-refused-surql-cutover-left-its-live-sync-in-the-live-tree: The cutover failed,
+          // indicating a refused live sync and missing rollback action. Reset the target
+          // to ensure no partial state is left and report the error specifically.
+          await resetTarget();
+          return structuredError(
+            `llm failed turn ${turn}: ${msg}. Live sync refused, no rollback initiated. Target has been reset.`, 
+            { history, before_sha: beforeSha },
+          );
         }
         console.error(`[patch-with-tools] all endpoints exhausted for ${activeModel}; falling back to model ${next}`);
         activeModel = next;

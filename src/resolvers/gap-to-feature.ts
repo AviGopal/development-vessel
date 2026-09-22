@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { ResolverResult } from "./types.js";
 import { resolveFeatureCompose, priorAttemptFeedbackBlock } from "./feature-compose.js";
@@ -1155,6 +1155,22 @@ function pickMostLandable(gaps: Record<string, unknown>[]): Record<string, unkno
   const ranked = selectionPool
     .map((g) => ({ g, s: landabilityScore(g) * impactOf(g) * humanWeight(g) }))
     .sort((a, b) => b.s - a.s);
+  // CLASS-THOMPSON RERANK (Option B): sample theta_c ~ Beta(alpha_c, beta_c) once per class in
+  // the pool, then prefer the winning class; WITHIN a class the landability ranking above still
+  // orders gaps, so the pick is the best-scored gap of the sampled class. chooseFirstActionable
+  // below still walks past pending gaps, so a fully-pending winning class falls through to the
+  // next class instead of starving the tick.
+  const classPosteriorsNow = readClassPosteriors();
+  const classTheta = new Map<string, number>();
+  for (const r of ranked) {
+    const c = gapClassOf(r.g);
+    if (!classTheta.has(c)) classTheta.set(c, sampleClassTheta(c, classPosteriorsNow));
+  }
+  ranked.sort((a, b) => {
+    const ta = classTheta.get(gapClassOf(a.g)) ?? 0.5;
+    const tb = classTheta.get(gapClassOf(b.g)) ?? 0.5;
+    return tb !== ta ? tb - ta : b.s - a.s;
+  });
   // A GAP THAT CANNOT BE COMPOSED MUST NOT CONSUME THE PICK (2026-08-28).
   //
   // The eligibility test ran only AFTER selection: the branches at `pickConditionCheck ===
@@ -1243,6 +1259,24 @@ function pickMostLandable(gaps: Record<string, unknown>[]): Record<string, unkno
     runner_up: ranked[1] ? { gap_id: String(ranked[1].g.id ?? ""), target: targetOf(ranked[1].g), score: Number(ranked[1].s.toFixed(4)) } : null,
   })}`);
 
+  // OPTION A: durable pickDecision record, one JSON line per pick (same pattern as
+  // compose-lessons.jsonl). Fail-open: emission must never block or fail the pick.
+  try {
+    const pickClass = gapClassOf(chosen.g);
+    const pickPost = classPosteriorsNow[pickClass] ?? { alpha: 1, beta: 1 };
+    appendFileSync(PICK_DECISIONS_PATH, JSON.stringify({
+      at: new Date().toISOString(),
+      gap_id: String(chosen.g.id ?? ""),
+      class: pickClass,
+      theta_sampled: Number((classTheta.get(pickClass) ?? 0.5).toFixed(4)),
+      alpha: pickPost.alpha,
+      beta: pickPost.beta,
+      score: Number(chosen.s.toFixed(4)),
+      cooldown_state: { skipped_pending: skippedPending },
+      pool: selectionPool.length,
+      alternatives_top3: ranked.slice(0, 3).map((r) => ({ gap_id: String(r.g.id ?? ""), class: gapClassOf(r.g), score: Number(r.s.toFixed(4)) })),
+    }) + "\n");
+  } catch { /* observability, never control flow */ }
   // STAMP THE COUNTERFACTUAL AT THE MOMENT OF THE DECISION.
   //
   // The log line above already records WHY this gap was chosen (law 12). What it does not
@@ -2174,6 +2208,7 @@ async function closeLandedGap(gap: Record<string, unknown>, land: LandSignal): P
       },
     } as never);
     updateCalibration(String(gap.category ?? "unknown"), true);
+    updateClassPosterior(gapClassOf(gap), true);
     // CLOSURE-CREDIT: reward the filing detector for gap closure (not just filing).
     // Best-effort — never throw; wrapped in its own try/catch.
     try {
@@ -2637,6 +2672,7 @@ const pending = gaps
         },
       } as never);
       updateCalibration(String(g.category ?? "unknown"), true);
+      updateClassPosterior(gapClassOf(g), true);
       out.closed += 1;
     }
   } catch (err) {
@@ -2693,6 +2729,79 @@ function updateCalibration(category: string, landed: boolean): void {
 // posterior is Beta(closes_that_held + 1, false_closes + 1); closeOracleReliability reads its mean.
 // One label per gap (the callers dedup), so a single thrashing gap cannot dominate the posterior.
 // Call-time (not module-load) so tests can point at a fixture file; production never sets it.
+// ---- Gap-class Thompson posterior (Option B) + pickDecision emission (Option A) ----
+// Same local-JSON pattern as CALIB_PATH / close-oracle-calibration: one row per gap CLASS,
+// Beta(alpha, beta) over "a compose attempt on a gap of this class lands".
+const CLASS_POSTERIOR_PATH = process.env["GAP_CLASS_POSTERIOR_PATH"] ?? "/workspace/gap-class-posteriors.json";
+const PICK_DECISIONS_PATH = "/workspace/proposals/pick-decisions.jsonl";
+type ClassPosteriors = Record<string, { alpha: number; beta: number }>;
+export function gapClassOf(g: Record<string, unknown>): string {
+  if (String(g.source ?? "") === "human_reported") return "human";
+  let id = String(g.id ?? "");
+  let recommit = false;
+  while (id.startsWith("recommit-")) { id = id.slice("recommit-".length); recommit = true; }
+  // Lineage stem: id up to the first volatile token (colon nonce, hex hash, long number),
+  // capped at 3 hyphen tokens so per-artifact ids (docs-drift-<doc>) do not each mint a class.
+  const stem = id.split(":")[0]!.replace(/-?[0-9a-f]{6,}.*$/i, "").replace(/-?\d{4,}.*$/, "").replace(/-$/, "").split("-").slice(0, 3).join("-");
+  const base = stem.length >= 3 ? stem : String(g.category ?? "unknown");
+  return (recommit ? "recommit:" : "") + base;
+}
+function readClassPosteriors(): ClassPosteriors {
+  try { return existsSync(CLASS_POSTERIOR_PATH) ? (JSON.parse(readFileSync(CLASS_POSTERIOR_PATH, "utf8")) as ClassPosteriors) : backfillClassPosteriors(); }
+  catch { return {}; }
+}
+// BACKFILL: an absent store seeds beta from historical compose failures (compose-lessons.jsonl
+// rows carry gap_id; the file holds failures only). sqrt-damped so history cannot drown live evidence.
+function backfillClassPosteriors(): ClassPosteriors {
+  const out: ClassPosteriors = {};
+  try {
+    const fails = new Map<string, number>();
+    for (const l of readFileSync("/workspace/proposals/compose-lessons.jsonl", "utf8").split("\n")) {
+      if (!l.trim()) continue;
+      try {
+        const gid = String((JSON.parse(l) as Record<string, unknown>)["gap_id"] ?? "");
+        if (gid) { const c = gapClassOf({ id: gid, source: "" }); fails.set(c, (fails.get(c) ?? 0) + 1); }
+      } catch { /* skip bad line */ }
+    }
+    for (const [c, n] of fails) out[c] = { alpha: 1, beta: 1 + Math.min(30, Math.round(Math.sqrt(n))) };
+    writeFileSync(CLASS_POSTERIOR_PATH, JSON.stringify(out));
+  } catch { /* best-effort; an empty store is fine */ }
+  return out;
+}
+export function updateClassPosterior(cls: string, landed: boolean): void {
+  try {
+    const p = readClassPosteriors();
+    const rec = p[cls] ?? { alpha: 1, beta: 1 };
+    if (landed) rec.alpha += 1; else rec.beta += 1;
+    p[cls] = rec;
+    writeFileSync(CLASS_POSTERIOR_PATH, JSON.stringify(p));
+  } catch { /* best-effort */ }
+}
+// Exploration floor: every class samples from at least Beta(1,1) + its counts, never hard-zero mass.
+export function sampleClassTheta(cls: string, posteriors?: ClassPosteriors): number {
+  const rec = (posteriors ?? readClassPosteriors())[cls] ?? { alpha: 1, beta: 1 };
+  const g = (k: number): number => { // Marsaglia-Tsang Gamma(k,1); valid for k >= 1
+    const d = k - 1 / 3, c = 1 / Math.sqrt(9 * d);
+    for (;;) {
+      let x = 0, v = 0;
+      do { x = Math.sqrt(-2 * Math.log(Math.random() || 1e-12)) * Math.cos(2 * Math.PI * Math.random()); v = 1 + c * x; } while (v <= 0);
+      v = v * v * v;
+      const u = Math.random();
+      if (u < 1 - 0.0331 * x * x * x * x || Math.log(u || 1e-12) < 0.5 * x * x + d * (1 - v + Math.log(v))) return d * v;
+    }
+  };
+  const ga = g(Math.max(1, rec.alpha)), gb = g(Math.max(1, rec.beta));
+  return ga / (ga + gb);
+}
+// Infrastructure refusal: the host could not ground or admit the compose, so no draft ran and
+// the outcome carries zero evidence about the gap class. Covers everything
+// isNonAttemptComposeResult exempts, plus grounding/guard REFUSED (e.g. Grounding window (0 bytes)).
+export function isInfraRefusalBody(cb: Record<string, unknown> | null | undefined): boolean {
+  if (!cb) return false;
+  if (isNonAttemptComposeResult(cb)) return true;
+  const stage = String(cb.stage ?? "");
+  return (stage === "grounding" || stage === "guard") && String(cb.verdict ?? "") === "REFUSED";
+}
 const closeOracleCalibPath = (): string => process.env["CLOSE_ORACLE_CALIB_PATH"] ?? "/workspace/close-oracle-calibration.json";
 type CloseOracleCalib = Record<string, { closes: number; false_closes: number; operator_engaged?: number }>;
 function readCloseOracleCalib(): CloseOracleCalib {
@@ -3285,6 +3394,7 @@ async function routeCapabilityGapToNewResolver(
     const c = await closeLandedGap(gap, land);
     closed = c.closed;
   } else if (!isNonAttemptComposeResult(cb)) {
+    if (!isInfraRefusalBody(cb)) updateClassPosterior(gapClassOf(gap), false);
     // A capacity refusal here is a retry, not a failure — see isNonAttemptComposeResult.
     await bumpFailedAttempts(gap);
   }
@@ -3970,7 +4080,10 @@ export async function resolveGapToFeature(pointer: GapToFeaturePointer): Promise
       console.log(`[gap-to-feature] reach verdict: ${reachVerdict}`);
     }
     // A slice sequence cut short by a capacity refusal never got its attempt either.
-    if (!allOk && !pointer.dry_run && !isNonAttemptComposeResult(lastBody)) await bumpFailedAttempts(gap);
+    if (!allOk && !pointer.dry_run && !isNonAttemptComposeResult(lastBody)) {
+      if (!isInfraRefusalBody(lastBody)) updateClassPosterior(gapClassOf(gap), false);
+      await bumpFailedAttempts(gap);
+    }
     // ...so it must not serve the cooldown either. Same reasoning as the credit exemption above.
     requeueAfterNonAttempt(gapComposeLastAttemptAt, String(gap.id ?? ""), lastBody);
     return { shape: "gapToFeatureReport", body: { ok: allOk, stage: "route_compose", route: "capacity_slice_sequence", gap_id: gap.id, gap_category: gap.category, slices: sliceResults } };
@@ -4083,7 +4196,10 @@ export async function resolveGapToFeature(pointer: GapToFeaturePointer): Promise
           console.warn("[gap-to-feature] pwt escalation error: " + (e as Error).message);
         }
       }
-      if (!_pwtLanded) await bumpFailedAttempts(gap, { surprise: pred.predicted, predictedP: pred.p });
+      if (!_pwtLanded) {
+        if (!isInfraRefusalBody(cb)) updateClassPosterior(gapClassOf(gap), false);
+        await bumpFailedAttempts(gap, { surprise: pred.predicted, predictedP: pred.p });
+      }
     }
   }
 

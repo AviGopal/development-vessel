@@ -538,7 +538,7 @@ async function clearPendingOnReject(
   workspaceRoot: string,
 ): Promise<void> {
   const pendingPath =
-    pointer.pending_pointer_path ?? join(workspaceRoot, "mitosis-pending.json");
+    pointer.pending_pointer_path ?? join(process.env["WORKSPACE_ROOT"] ?? process.cwd(), "mitosis-pending.json");
   try {
     if (await pathExists(pendingPath)) {
       await unlink(pendingPath);
@@ -564,7 +564,7 @@ async function clearPendingIfOwned(
 ): Promise<boolean> {
   if (!mitosisVersionId) return false;
   const pendingPath =
-    pointer.pending_pointer_path ?? join(workspaceRoot, "mitosis-pending.json");
+    pointer.pending_pointer_path ?? join(process.env["WORKSPACE_ROOT"] ?? process.cwd(), "mitosis-pending.json");
   try {
     if (!(await pathExists(pendingPath))) return false;
     const cur = JSON.parse(await readFile(pendingPath, "utf-8")) as { mitosis_version_id?: string };
@@ -1129,7 +1129,7 @@ export async function resolveVesselMitosisCutover(
         const stagedMitosisContent = await readFile(join(mitosisRoot, stagedSentinel));
         const stagedMitosisSha = createHash("sha256").update(stagedMitosisContent).digest("hex").slice(0, 12);
         if (stagedMitosisSha === currentLiveSha) {
-          const pendingPath = pointer.pending_pointer_path ?? join(workspaceRoot, "mitosis-pending.json");
+          const pendingPath = pointer.pending_pointer_path ?? join(process.env["WORKSPACE_ROOT"] ?? process.cwd(), "mitosis-pending.json");
           let pendingCleared = false;
           try {
             if (await pathExists(pendingPath)) { await unlink(pendingPath); pendingCleared = true; }
@@ -2202,8 +2202,27 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
     }
   }
   // 6. git commit.
-  const proposalId = pointer.proposal_id || "unknown-proposal";
-  const gapId = pointer.gap_id || "unknown-gap";
+  // Provenance may ride in the pending file rather than the pointer: the
+  // mitosis-tick template forwards only four pending fields (vessel_name,
+  // base_version_id, mitosis_version_id, mitosis_root), while
+  // apply_proposal_as_patch now records gap_id and proposal_id there. Read it
+  // from the file, scoped to THIS mitosis by version id, before refusing.
+  let pendingGapId = "";
+  let pendingProposalId = "";
+  try {
+    const provenancePendingPath = pointer.pending_pointer_path ?? join(process.env["WORKSPACE_ROOT"] ?? process.cwd(), "mitosis-pending.json");
+    if (await pathExists(provenancePendingPath)) {
+      const cur = JSON.parse(await readFile(provenancePendingPath, "utf-8")) as { mitosis_version_id?: string; gap_id?: string; proposal_id?: string };
+      if (cur.mitosis_version_id === mitosis_version_id) {
+        if (typeof cur.gap_id === "string" && cur.gap_id.length > 0) pendingGapId = cur.gap_id;
+        if (typeof cur.proposal_id === "string" && cur.proposal_id.length > 0) pendingProposalId = cur.proposal_id;
+      }
+    }
+  } catch {
+    // an unreadable pending file leaves the fallback empty
+  }
+  const proposalId = pointer.proposal_id || pendingProposalId || "unknown-proposal";
+  const gapId = pointer.gap_id || pendingGapId || "unknown-gap";
   if ((gapId === "unknown-gap" || proposalId === "unknown-proposal") && pointer.adhoc !== true) {
     return structuredError("cutover_refused_missing_provenance", { gap_id: gapId, proposal_id: proposalId });
   }
@@ -2923,7 +2942,7 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
   }
 
   // Clear the pending slot so the next mitosis can be queued (before FAVORABLE success return).
-  const _preClearPendingPath = pointer.pending_pointer_path ?? join(workspaceRoot, "mitosis-pending.json");
+  const _preClearPendingPath = pointer.pending_pointer_path ?? join(process.env["WORKSPACE_ROOT"] ?? process.cwd(), "mitosis-pending.json");
   try {
     if (await pathExists(_preClearPendingPath)) {
       await unlink(_preClearPendingPath);
@@ -2935,7 +2954,7 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
 
   // 12. Cleanup pending pointer ONLY after successful impulse emit.
   const pendingPath =
-    pointer.pending_pointer_path ?? join(workspaceRoot, "mitosis-pending.json");
+    pointer.pending_pointer_path ?? join(process.env["WORKSPACE_ROOT"] ?? process.cwd(), "mitosis-pending.json");
   try {
     if (await pathExists(pendingPath)) {
       await unlink(pendingPath);

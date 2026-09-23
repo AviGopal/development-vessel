@@ -3835,9 +3835,15 @@ async function resolveFeatureComposeUncapped(pointer: FeatureComposePointer): Pr
       const hit = regionProbes.find((p) => grounding.includes(p));
       console.log(`[fc-scope] no region literal; mined ${regionProbes.length} identifier probe(s), grounding centred on ${hit ? `"${hit}"` : "none (fell through to heuristics)"}`);
     }
+    // A target that does not exist on disk yet is a CREATE: there is nothing to ground,
+    // so it cannot be refused as a blind edit (same rule as the NET-NEW CREATE EXEMPTION below).
+    const { existsSync: existsOnDisk } = await import("node:fs");
+    const existsInTree = (t: string): boolean => {
+      try { return existsOnDisk(`${REPO_ROOT}/${t.replace(/^repos\//, "")}`); } catch { return true; }
+    };
     const allTargetFilesPresentInGrounding = targetFiles.every(t => {
       const basename = t.split("/").pop() ?? "";
-      return basename.length === 0 || grounding.includes(basename);
+      return basename.length === 0 || grounding.includes(basename) || !existsInTree(t);
     });
     if (!allTargetFilesPresentInGrounding) {
       const missingFiles = targetFiles.filter(t => {

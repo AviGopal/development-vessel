@@ -600,6 +600,9 @@ export const config = {
       "host_container_source_drift_observer",
       "disk_space_observer",
       "workspace_hygiene_observer",
+      // self_fact_reconcile (2026-09-22): diffs facts the substrate holds about itself
+      // against the copies it reads, with a planted canary; files self-verifying gaps.
+      "self_fact_reconcile",
       "prune_stale_mitosis",
       "learning_signal_health_observer",
       // selector-reward saturation detector (2026-06-14, SUBSTRATE_AS_MDP §9.3

@@ -167,7 +167,7 @@ export async function sweepAttempts(opts?: { now?: number }): Promise<{ drained:
   const unaccountedScanResult = await resolveUnaccountedLandingScan({ type: "unaccounted_landing_scan" });
   const drained = unaccountedScanResult.body;
   const shasWrittenThisSweep = new Set<string>();
-  if (unaccountedScanResult.shape === 'unaccountedLandings' && Array.isArray((unaccountedScanResult.body as any).unaccounted)) {
+  if (unaccountedScanResult.shape === 'unaccountedLandingReport' && Array.isArray((unaccountedScanResult.body as any).unaccounted)) {
     for (const landing of (unaccountedScanResult.body as any).unaccounted) {
       if (typeof landing.sha === 'string' && /^[0-9a-f]{7,40}$/.test(landing.sha) && !shasWrittenThisSweep.has(landing.sha)) {
         try {
@@ -208,7 +208,7 @@ export async function sweepAttempts(opts?: { now?: number }): Promise<{ drained:
       if (!outcomeRec) {
         const earliestLanding = Math.min(...landingEvents.map(e => new Date(e.at).getTime()));
         if (now - earliestLanding >= 60000) {
-          const preSnapshotRecs = await (readRecords as any)("attemptSnapshot", { key: intent.pre_snapshot_id });
+          const preSnapshotRecs = await readRecords("stateSnapshot", { key: intent.pre_snapshot_id });
           const preSnapshot = preSnapshotRecs?.[0]?.record as { results: CheckResult[] } | undefined;
           if (!preSnapshot) throw new Error(`Pre-snapshot ${intent.pre_snapshot_id} not found for attempt ${attempt_id}`);
 
@@ -219,7 +219,7 @@ export async function sweepAttempts(opts?: { now?: number }): Promise<{ drained:
           });
           const post_snapshot_id = (postSnapshotResult as any).snapshot_id;
 
-          const postSnapshotRecs = await (readRecords as any)("attemptSnapshot", { key: post_snapshot_id });
+          const postSnapshotRecs = await readRecords("stateSnapshot", { key: post_snapshot_id });
           const postSnapshot = postSnapshotRecs?.[0]?.record as { results: CheckResult[] } | undefined;
           if (!postSnapshot) throw new Error(`Post-snapshot ${post_snapshot_id} not found for attempt ${attempt_id}`);
 
@@ -245,7 +245,7 @@ export async function sweepAttempts(opts?: { now?: number }): Promise<{ drained:
         const outcomeRecord = outcomeRec.record as any;
         if (settlementRecs.length === 0) {
           if (now - new Date(outcomeRec.at).getTime() >= settleWindowMs()) {
-            const preSnapshotRecs = await (readRecords as any)("attemptSnapshot", { key: intent.pre_snapshot_id });
+            const preSnapshotRecs = await readRecords("stateSnapshot", { key: intent.pre_snapshot_id });
             const preSnapshot = preSnapshotRecs?.[0]?.record as { results: CheckResult[] } | undefined;
             if (!preSnapshot) throw new Error(`Pre-snapshot ${intent.pre_snapshot_id} not found for attempt ${attempt_id}`);
 
@@ -255,7 +255,7 @@ export async function sweepAttempts(opts?: { now?: number }): Promise<{ drained:
               repos: [intent.repo]
             });
             const settle_snapshot_id = (settleSnapshotResult as any).snapshot_id;
-            const settleSnapshotRecs = await (readRecords as any)("attemptSnapshot", { key: settle_snapshot_id });
+            const settleSnapshotRecs = await readRecords("stateSnapshot", { key: settle_snapshot_id });
             const settleSnapshot = settleSnapshotRecs?.[0]?.record as { results: CheckResult[] } | undefined;
             if (!settleSnapshot) throw new Error(`Settle-snapshot ${settle_snapshot_id} not found for attempt ${attempt_id}`);
 

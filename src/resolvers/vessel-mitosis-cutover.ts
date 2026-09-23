@@ -2272,6 +2272,7 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
         gap_id: gapId,
         proposal_id: proposalId,
         authoring_execution_id: (pointer as { authoring_execution_id?: string }).authoring_execution_id ?? null,
+        attempt_id: (pointer as { attempt_id?: string }).attempt_id,
       }),
       new Promise<{ attempt_id: null; registered: false; error: string }>((resolve) =>
         setTimeout(() => resolve({ attempt_id: null, registered: false, error: "register timeout" }), 120_000)),

@@ -204,7 +204,13 @@ const FACTS: Record<string, FactFn> = {
       for (const v of readdirSync(runtimeRoot())) {
         if (v.includes("-mitosis-") || v === "packages") continue;
         const root = join(runtimeRoot(), v);
-        const tsconfig = join(root, "tsconfig.json");
+        // The SOURCE of a vessel's typecheck scope is its committed tsconfig in the push
+        // clone; /vessels is a runtime copy that an unlanded edit can drift (measured
+        // 2026-09-23 04:00: the live human-surface tsconfig gained "ui/src" with no
+        // commit, and this fact closed its gap on the copy). Read the clone when it
+        // exists; fall back to the runtime copy and say so in the divergence.
+        const cloneTsconfig = join(cloneRoot(), v, "tsconfig.json");
+        const tsconfig = existsSync(cloneTsconfig) ? cloneTsconfig : join(root, "tsconfig.json");
         if (!existsSync(tsconfig)) continue;
         vessels += 1;
         let include: string[] = [];
@@ -285,6 +291,13 @@ async function closeResolved(facts: readonly string[], present: readonly SelfFac
     if (!facts.includes(fact)) continue;
     const id = typeof row["id"] === "string" ? row["id"] : "";
     if (!id || presentIds.has(id)) continue;
+    // Only rows THIS detector filed: the id must be exactly what gapId() builds for
+    // the row's own (fact, key). The compose picker mints "-narrowed" clones that
+    // copy classification_metadata (detector, fact, key) verbatim; measured
+    // 2026-09-23 03:35 and 04:00, two such clones were closed here as "resolved"
+    // while their parent divergence was still present. Not ours; not closed here.
+    const key = typeof meta["divergence_key"] === "string" ? meta["divergence_key"] : "";
+    if (id !== gapId({ fact, key, source: "", copy: "", detail: "", canary: false })) continue;
     const ranAt = new Date().toISOString();
     const res = await resolveSubstrateGapWrite({
       type: "substrateGap_write",

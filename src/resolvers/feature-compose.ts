@@ -3327,16 +3327,31 @@ async function fileLessonsBlock(specText?: string): Promise<string> {
     const { existsSync, readFileSync } = await import("node:fs");
     if (!existsSync(COMPOSE_FILE_LESSONS_PATH)) return "";
     const lines = readFileSync(COMPOSE_FILE_LESSONS_PATH, "utf8").split("\n").filter((l) => l.trim().length > 0).slice(-80);
-    const relevant: Array<{ at: string; files: string[]; tsc: string }> = [];
+    const relevant: Array<{ at: string; files: string[]; tsc: string; kind?: string }> = [];
     for (const ln of lines) {
       try {
-        const e = JSON.parse(ln) as { at?: string; files?: string[]; tsc?: string };
+        const e = JSON.parse(ln) as { at?: string; files?: string[]; tsc?: string; kind?: string };
         if (!Array.isArray(e.files) || !e.tsc) continue;
-        if (e.files.some((f) => specText.includes(String(f)) || specText.includes(String(f).split("/").pop() ?? String(f)))) relevant.push({ at: e.at ?? "", files: e.files.map(String), tsc: String(e.tsc) });
+        if (e.files.some((f) => specText.includes(String(f)) || specText.includes(String(f).split("/").pop() ?? String(f)))) {
+          relevant.push({ at: e.at ?? "", files: e.files.map(String), tsc: String(e.tsc), kind: typeof e.kind === "string" ? e.kind : undefined });
+        }
       } catch { /* skip malformed line */ }
     }
     if (relevant.length === 0) return "";
-    return "\n\nPRIOR TYPECHECK FAILURES ON THESE FILES (verbatim diagnostics from earlier failed attempts on the same files — your op plan MUST avoid re-introducing these errors; declare each new variable exactly once, in the correct scope):\n" + relevant.slice(-3).map((r) => `- [${r.at}] files=${r.files.join(",")}\n${r.tsc.slice(0, 1500)}`).join("\n");
+
+    const consequences = relevant.filter((r) => r.kind === "attempt_consequence");
+    const tscOnly = relevant.filter((r) => r.kind !== "attempt_consequence");
+
+    let block = "";
+    if (tscOnly.length > 0) {
+      block += "\n\nPRIOR TYPECHECK FAILURES ON THESE FILES (verbatim diagnostics from earlier failed attempts on the same files — your op plan MUST avoid re-introducing these errors; declare each new variable exactly once, in the correct scope):\n" + tscOnly.slice(-3).map((r) => `- [${r.at}] files=${r.files.join(",")}\n${r.tsc.slice(0, 1500)}`).join("\n");
+    }
+
+    if (consequences.length > 0) {
+      block += "\n\nCONSEQUENCES OF EARLIER LANDINGS ON THESE FILES (causal attempt ledger: a change that landed on these files later broke a check — do not repeat it):\n" + consequences.slice(-3).map((r) => `- [${r.at}] files=${r.files.join(",")}: ${r.tsc.slice(0, 600)}`).join("\n");
+    }
+
+    return block;
   } catch { return ""; }
 }
 /**

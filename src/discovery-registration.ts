@@ -134,25 +134,50 @@ async function doHeartbeat(): Promise<void> {
   }
 }
 
-/** Non-blocking startup registration. Failure logs but does not crash. */
+/**
+ * Non-blocking startup registration. Failure logs but does not crash.
+ *
+ * The heartbeat/re-register timer is armed WHETHER OR NOT the boot registration
+ * succeeded. It used to be armed only on success, so a vessel whose first
+ * registration was refused transiently (measured 2026-09-23 01:31:47: discovery
+ * answered 401 while identity was rate-limiting the fleet) never tried again —
+ * development-vessel was absent from the registry for over an hour, every
+ * activity whose resolver lives here was unroutable, and the only trace was one
+ * warning line. A vessel that is not registered re-registers on every tick until
+ * it is; a registered one heartbeats, and re-registers when a heartbeat fails.
+ */
 export function startDiscoveryRegistration(): void {
+  const tick = (): void => {
+    if (!registered) {
+      doRegister()
+        .then(() => console.log(`[discovery] registered as ${config.vesselId} (retry)`))
+        .catch((e: unknown) => {
+          console.warn(`[discovery] re-register failed: ${e instanceof Error ? e.message : String(e)}`);
+        });
+      return;
+    }
+    doHeartbeat().catch((err: unknown) => {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.warn(`[discovery] heartbeat failed: ${msg}`);
+      // Re-register on heartbeat failure (TTL may have expired, or the registry lost us)
+      registered = false;
+      doRegister()
+        .then(() => console.log(`[discovery] re-registered as ${config.vesselId}`))
+        .catch((e: unknown) => {
+          console.warn(`[discovery] re-register failed: ${e instanceof Error ? e.message : String(e)}`);
+        });
+    });
+  };
   doRegister()
     .then(() => {
       console.log(`[discovery] registered as ${config.vesselId}`);
-      heartbeatTimer = setInterval(() => {
-        doHeartbeat().catch((err: unknown) => {
-          const msg = err instanceof Error ? err.message : String(err);
-          console.warn(`[discovery] heartbeat failed: ${msg}`);
-          // Re-register on heartbeat failure (TTL may have expired)
-          doRegister().catch((e: unknown) => {
-            console.warn(`[discovery] re-register failed: ${e instanceof Error ? e.message : String(e)}`);
-          });
-        });
-      }, HEARTBEAT_INTERVAL_MS);
     })
     .catch((err: unknown) => {
       const msg = err instanceof Error ? err.message : String(err);
-      console.warn(`[discovery] registration failed (vessel still functional): ${msg}`);
+      console.warn(`[discovery] registration failed (vessel still functional; will retry every ${HEARTBEAT_INTERVAL_MS / 1000}s): ${msg}`);
+    })
+    .finally(() => {
+      if (heartbeatTimer === null) heartbeatTimer = setInterval(tick, HEARTBEAT_INTERVAL_MS);
     });
 }
 

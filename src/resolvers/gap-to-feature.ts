@@ -3492,12 +3492,25 @@ async function routeCapabilityGapToNewResolver(
   };
 }
 
+import { sweepAttempts } from "./attempt-register.js";
+
+let attemptSweepInFlight = false;
+
 export async function resolveGapToFeature(pointer: GapToFeaturePointer): Promise<ResolverResult> {
   // For testing purposes, expose the map.
   (resolveGapToFeature as any).__test__gapComposeLastAttemptAt = () => gapComposeLastAttemptAt;
   // 0. Land→close continuity: complete deferred self-cutover closures BEFORE selection,
   // so an already-landed gap cannot be re-picked and re-landed. Cheap, bounded, best-effort.
   try { await sweepPendingLandVerifications(); } catch { /* never block the tick */ }
+  // Causal attempt ledger: outcomes and settlements for registered landings. Started without
+  // awaiting (snapshots can take tens of seconds) and guarded so sweeps never overlap.
+  if (!attemptSweepInFlight) {
+    attemptSweepInFlight = true;
+    void sweepAttempts()
+      .then((r) => { if (r.outcomes_written || r.settlements_written || r.errors.length) console.log(`[attempt-sweep] outcomes=${r.outcomes_written} settlements=${r.settlements_written} lessons=${r.lessons_written} errors=${r.errors.length}${r.errors.length ? " first=" + r.errors[0] : ""}`); })
+      .catch((e) => console.error(`[attempt-sweep] failed: ${(e as Error).message}`))
+      .finally(() => { attemptSweepInFlight = false; });
+  }
   // 0b. ASK FOR CAPACITY BEFORE PAYING FOR SELECTION (2026-08-31).
   //
   // The order used to be backwards: pick a gap, then discover the compose lane is full.

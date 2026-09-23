@@ -99,6 +99,7 @@ export const config = {
       "git_diff",
       "git_log",
       "attempt_snapshot",
+      "attempt_register",
       "fs_read",
       "fs_write",
       "fileWriteResult",

@@ -2201,6 +2201,32 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
       operations.push({ op: "precutover_suite", status: "warn", detail: `precheck skipped (fail-open): ${(err as Error).message.slice(0, 160)}` });
     }
   }
+  // 5e. RE-STAGE AFTER THE SUITE. The precutover suite runs in THIS clone, and the
+  // development-vessel suite exercises the real cutover/pull-sync paths, so the
+  // tree can be clean-slated between step 5 and step 6. Measured 2026-09-23
+  // 03:07:45 through a git_cmd wrapper: `diff --cached -U0` showed the staged
+  // change, 65 s of suite, then `commit` exited 1 with "nothing to commit, working
+  // tree clean" — the same signature seen at 21:5x and 01:24 with an empty stderr
+  // (the lane reported only stderr). Re-copy the staged files from mitosis_root and
+  // re-add them; idempotent when the suite touched nothing.
+  {
+    const restaged: string[] = [];
+    for (const rel of stagedFiles) {
+      if (isAbsolute(rel) || rel.includes("..")) continue;
+      try {
+        const content = await readFile(join(mitosisRoot, rel));
+        await mkdir(dirname(join(hostRepoRoot, rel)), { recursive: true });
+        await writeFile(join(hostRepoRoot, rel), content);
+        restaged.push(rel);
+      } catch (err) {
+        operations.push({ op: `re-stage ${rel}`, status: "warn", detail: `could not re-copy after suite: ${(err as Error).message.slice(0, 120)}` });
+      }
+    }
+    if (restaged.length > 0) {
+      const readd = await runGit(gitCmd, ["add", "--", ...restaged], hostRepoRoot);
+      operations.push({ op: "git add (re-stage after precutover suite)", status: readd.exit_code === 0 ? "ok" : "warn", detail: readd.exit_code === 0 ? `${restaged.length} file(s)` : readd.stderr.slice(0, 200) });
+    }
+  }
   // 6. git commit.
   // Provenance may ride in the pending file rather than the pointer: the
   // mitosis-tick template forwards only four pending fields (vessel_name,

@@ -39,12 +39,15 @@
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import type { ResolverResult } from "./types.js";
-import { resolveSubstrateGapWrite } from "./substrate-gap.js";
+import { resolveSubstrateGap, resolveSubstrateGapWrite } from "./substrate-gap.js";
+import { createHash } from "node:crypto";
 
 export interface SelfFactReconcilePointer {
   type: "self_fact_reconcile";
   /** Restrict to these fact names; default = every fact in the table. */
   facts?: string[];
+  /** With a single fact: count only this divergence key (the per-gap Class-2 predicate). */
+  key?: string;
   /** Plant the positive-control canary (default true). The sweep's Class-2 re-check passes false. */
   plant_canary?: boolean;
   /** File divergences as gaps (default true). The sweep's re-check passes false. */
@@ -250,12 +253,56 @@ async function fileDivergence(d: SelfFactDivergence): Promise<boolean> {
         divergence_key: d.key,
         // Class-2, self-verifying: the sweep re-runs THIS resolver for THIS fact and
         // reads divergence_count; >0 = still present, 0 = resolved.
-        evidence_resolve: { shape: "self_fact_reconcile", input: { facts: [d.fact], plant_canary: false, file_gaps: false }, nonzero_field: "divergence_count" },
-        falsifier: `class 2: self_fact_reconcile with facts=[${d.fact}] reports divergence_count 0 for key ${d.key}`,
+        evidence_resolve: { shape: "self_fact_reconcile", input: { facts: [d.fact], key: d.key, plant_canary: false, file_gaps: false }, nonzero_field: "divergence_count" },
+        falsifier: `class 2: self_fact_reconcile with facts=[${d.fact}] key=${d.key} reports divergence_count 0`,
       },
     },
   });
   return res.shape !== "structuredError";
+}
+
+/**
+ * Close every open gap this detector filed for one of the checked facts whose
+ * divergence is absent from this run. Read the store by `detector`, compare by
+ * stable id, write status closed with an exercised falsifier (passed, by whom,
+ * when, divergence_count 0). Idempotent: a closed row is not re-closed.
+ */
+async function closeResolved(facts: readonly string[], present: readonly SelfFactDivergence[]): Promise<number> {
+  const presentIds = new Set(present.map(gapId));
+  let closed = 0;
+  let rows: Array<Record<string, unknown>> = [];
+  try {
+    const read = await resolveSubstrateGap({ type: "substrateGap", status: "open", limit: 5000 } as never);
+    rows = (((read as { body?: { gaps?: unknown } }).body?.gaps ?? []) as Array<Record<string, unknown>>);
+  } catch (err) {
+    noteReadError("gap store read for closure", err);
+    return 0;
+  }
+  for (const row of rows) {
+    const meta = (row["classification_metadata"] ?? {}) as Record<string, unknown>;
+    if (meta["detector"] !== SELF_FACT_RECONCILE_ID) continue;
+    const fact = typeof meta["fact"] === "string" ? meta["fact"] : "";
+    if (!facts.includes(fact)) continue;
+    const id = typeof row["id"] === "string" ? row["id"] : "";
+    if (!id || presentIds.has(id)) continue;
+    const ranAt = new Date().toISOString();
+    const res = await resolveSubstrateGapWrite({
+      type: "substrateGap_write",
+      gap: {
+        ...row,
+        status: "closed",
+        summary: `${String(row["summary"] ?? "")} RESOLVED: self_fact_reconcile re-read source and copy at ${ranAt} and found no divergence for this key.`,
+        classification_metadata: {
+          ...meta,
+          falsifier_exercise: { passed: true, detector: SELF_FACT_RECONCILE_ID, ran_at: ranAt, divergence_count: 0 },
+          closed_reason: "predicate_verified_by_detector",
+          close_basis: "self_fact_reconcile",
+        },
+      },
+    });
+    if (res.shape !== "structuredError") closed += 1;
+  }
+  return closed;
 }
 
 // ─── the resolver ───────────────────────────────────────────────────────────
@@ -271,16 +318,29 @@ export async function resolveSelfFactReconcile(pointer: SelfFactReconcilePointer
   for (const f of wanted) results.push(FACTS[f]!(plant && f === canaryFact));
   const all = results.flatMap((r) => r.divergences);
   const canaryFound = !plant || all.some((d) => d.canary);
-  const real = all.filter((d) => !d.canary);
+  // Key scoping: a per-gap predicate asks about ONE (fact, key); everything else is
+  // not this gap's business, so it must not keep the gap open.
+  const keyed = typeof pointer.key === "string" && pointer.key.length > 0 && wanted.length === 1;
+  const real = all.filter((d) => !d.canary && (!keyed || d.key === pointer.key));
   const observed = results.every((r) => r.source_read) && canaryFound;
   let filed = 0;
+  let closed = 0;
   let selfGap = false;
   if (plant && !canaryFound) {
     // The instrument cannot see: say so about ITSELF and file nothing else.
     selfGap = await fileDivergence({ fact: "self_fact_reconcile", key: "canary-not-found", source: "planted canary", copy: "this run", detail: `the planted canary on fact ${canaryFact} was not reported — clean results from this instrument are not evidence until this is fixed`, canary: false });
   } else if (file) {
     for (const d of real) if (await fileDivergence(d)) filed += 1;
+    // CLOSURE BY THE INSTRUMENT THAT FOUND IT. Every open gap this detector filed
+    // for a fact checked on this run, whose divergence is no longer present, is
+    // closed here with an EXERCISED falsifier — the only thing the store's gate
+    // accepts for a held or class-2 gap. A landing never closes these; this does.
+    closed = await closeResolved(wanted, real);
   }
+  // Findings in the form light-dispatch grades (it counts `findings`/`gaps_emitted`,
+  // not `divergences`): one per real divergence, with a stable hash so a repeat run
+  // that finds the same divergences is "productive-but-redundant", not "idle".
+  const findings = real.map((d) => ({ hash: createHash("sha1").update(`${d.fact}:${d.key}`).digest("hex").slice(0, 16), fact: d.fact, key: d.key, detail: d.detail }));
   return {
     shape: "selfFactReconcileReport",
     body: {
@@ -289,6 +349,11 @@ export async function resolveSelfFactReconcile(pointer: SelfFactReconcilePointer
       facts_checked: results.map((r) => ({ fact: r.fact, source_read: r.source_read, copies_read: r.copies_read, divergences: r.divergences.filter((d) => !d.canary).length, note: r.note })),
       divergence_count: real.length,
       divergences: real,
+      findings,
+      findings_count: findings.length,
+      finding_hashes: findings.map((f) => f.hash),
+      gaps_emitted: filed,
+      gaps_closed: closed,
       canary_planted: plant,
       canary_found: canaryFound,
       observed,

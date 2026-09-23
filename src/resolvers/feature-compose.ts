@@ -3184,10 +3184,10 @@ async function appendComposeLesson(cls: string, reason: string, vessels: string,
         gap: {
           id: String(gap.id),
           category: realCategory,
-          source: realSource,
+          
           summary: realSummary || `compose failure lessons for gap ${String(gap.id)}`,
           detected_at: realDetectedAt,
-          status: "open",
+          status: (typeof (gap as { status?: unknown }).status === "string" && (gap as { status?: unknown }).status === "closed") ? "closed" : "open",
           classification_metadata: meta,
         },
       } as never);
@@ -3200,7 +3200,7 @@ async function appendComposeLesson(cls: string, reason: string, vessels: string,
       // dispositioned/skipped, not infinitely recommitted). The failure_lessons write above still
       // records the class so the drafter keeps learning.
       const _recommitDepth = (String(gap.id).match(/recommit-/g) ?? []).length;
-      if (reCommit && _recommitDepth < 2) {
+      if (reCommit && _recommitDepth < 2) { const baseId = String(gap.id).replace(/^(?:recommit-)+/, ""); const baseClosed = baseId === String(gap.id) ? (typeof (gap as { status?: unknown }).status === "string" && (gap as { status?: unknown }).status === "closed") : false; if (baseClosed) { console.log(`[compose-lessons] recommit SKIPPED: base gap ${baseId} is closed`); } else {
         await resolveSubstrateGapWrite({
           type: "substrateGap_write",
           gap: {
@@ -3213,6 +3213,7 @@ async function appendComposeLesson(cls: string, reason: string, vessels: string,
             classification_metadata: { re_commit: true, source_gap_id: String(gap.id), failure_class: cls, edit_site: meta.edit_site, suspected_real_location: meta.suspected_real_location, file_path: meta.file_path },
           },
         } as never);
+      }
       }
     } catch {}
   }

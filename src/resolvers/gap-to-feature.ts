@@ -3596,6 +3596,12 @@ export async function resolveGapToFeature(pointer: GapToFeaturePointer): Promise
       const alreadyInvestigated = mR.investigated_at !== undefined;
       if ((lowConf || highConfMiss) && !alreadyInvestigated) {
         const reason = highConfMiss ? "high_confidence_miss" : "low_confidence_pick";
+        const isReconcileGap = String(gap.category ?? "").includes("reconcile") || String(gap.summary ?? "").includes("reconcile");
+        const failedAttempts = Array.isArray(mR.approach_decisions) ? mR.approach_decisions.filter((d: any) => d.outcome?.landed === false).length : 0;
+        if (isReconcileGap && failedAttempts >= 2) {
+          await resolveDispatchGoal({ type: "dispatch_goal", goal: "skipping reconcile gap " + String(gap.id) + " after " + failedAttempts + " failed attempts: " + String(gap.summary ?? "").slice(0, 240) } as never);
+          return { shape: "gapToFeatureReport", body: { ok: true, stage: "route", routed: "skip_reconcile", gap_id: gap.id, reason: "failed_attempts", predicted_p: predR.p } };
+        }
         await resolveDispatchGoal({ type: "dispatch_goal", goal: "investigate gap " + String(gap.id) + " before composing (" + reason + ", predicted_p=" + predR.p.toFixed(2) + "): " + String(gap.summary ?? "").slice(0, 240) } as never);
         const invMeta = { ...mR, investigated_at: new Date().toISOString(), investigation_reason: reason, last_predicted_p: predR.p };
         await resolveSubstrateGapWrite({ type: "substrateGap_write", gap: { ...gap, classification_metadata: invMeta, status: String(gap.status ?? "open") } } as never);

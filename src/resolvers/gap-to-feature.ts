@@ -3430,12 +3430,10 @@ async function routeCapabilityGapToNewResolver(
     dry_run: pointer.dry_run ?? false,
     keep_on_fail: false,
 
-    directed: isDirected,
-
     gap: {
       id: String(gap.id ?? ""),
       summary: String(gap.summary ?? gap.title ?? ""),
-      classification_metadata: meta,
+      classification_metadata: { ...meta, directed: isDirected },
       category: String(gap.category ?? ""),
     },
     land: !(pointer.dry_run ?? false),

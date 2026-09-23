@@ -37,6 +37,7 @@
 export const LONG_RUNNING_TYPES: ReadonlySet<string> = new Set([
   "feature_compose",
   "patch_with_tools",
+  "gap_to_feature",
   "apply_proposal_as_patch",
   "vessel_mitosis",
   "vessel_mitosis_cutover",

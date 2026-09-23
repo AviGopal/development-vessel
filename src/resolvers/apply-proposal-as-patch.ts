@@ -63,7 +63,7 @@ function isStaleProposal(proposal: Record<string, unknown>): boolean {
     : [];
 
   const hasStaleTag = tagArray.some((t) => STALE_TAGS.has(t));
-  if (!hasStaleTag) return false;
+  if (hasStaleTag) return true;
 
   const created: unknown =
     proposal["created_at"] ?? proposal["createdAt"] ?? proposal["timestamp"];

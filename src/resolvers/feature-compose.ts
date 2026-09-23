@@ -34,7 +34,9 @@ export function assertAnchorInWindow(window: string, ops: ReadonlyArray<{ kind?:
   const missing: Array<{ path: string; oldHead: string; wouldMatchWithoutTrailingSemicolon: boolean }> = [];
   for (const op of ops) {
     if (op.kind === "edit" && op.old_string && op.old_string.length > 0) {
-      if (!window.includes(op.old_string)) {
+      // The window renders target files as `${lineNo}\t${line}` (groundVesselFiles), so a
+      // multi-line anchor can never be a substring of it; strip the prefixes before judging.
+      if (!window.includes(op.old_string) && !window.replace(/^\d+\t/gm, "").includes(op.old_string)) {
         const trimmed = op.old_string.trimEnd();
         const wouldMatch = trimmed.endsWith(";")
           ? window.includes(trimmed.slice(0, -1))

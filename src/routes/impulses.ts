@@ -1034,15 +1034,21 @@ impulsesRouter.post("/resolvers/execute", async (c) => {
 });
 
 impulsesRouter.post("/v2/impulses/resolve", async (c) => {
-  let body: { impulse?: { type?: string; pointer?: { type?: string } } };
+  let body: { impulse?: { type?: string; pointer?: { type?: string } }; type?: string };
   try {
     body = await c.req.json();
   } catch {
     return c.json({ success: false, error: "invalid JSON body" }, 400);
   }
 
-  const pointer = body?.impulse?.pointer ?? body?.impulse;
-  const pointerType = pointer?.type ?? body?.impulse?.type;
+  let pointer: { type?: string } | undefined = body?.impulse?.pointer ?? body?.impulse;
+  let pointerType: string | undefined = pointer?.type ?? body?.impulse?.type;
+
+  if (!pointerType && typeof body.type === "string" && body.type.length > 0) {
+    pointer = body as { type?: string };
+    pointerType = body.type;
+    console.log(`[resolve] bare pointer body accepted (deprecated form) type=${body.type}`);
+  }
 
   if (!pointerType) {
     return c.json({ success: false, error: "pointer.type is required" }, 400);

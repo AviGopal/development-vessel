@@ -18,6 +18,7 @@ import {
   appendFile,
 } from "node:fs/promises";
 import { createHash } from "node:crypto";
+import { registerAttempt } from "./attempt-register.js";
 import type { ResolverResult } from "./types.js";
 import { resolveSubstrateGap, resolveSubstrateGapWrite } from "./substrate-gap.js";
 import { resolveTestSuite } from "./test-suite.js";
@@ -2252,13 +2253,35 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
   if ((gapId === "unknown-gap" || proposalId === "unknown-proposal") && pointer.adhoc !== true) {
     return structuredError("cutover_refused_missing_provenance", { gap_id: gapId, proposal_id: proposalId });
   }
-  const msg =
+  let msg =
     `substrate-authored: apply ${proposalId} via mitosis cutover\n\n` +
     `Applied autonomously by apply_proposal_as_patch + vessel_mitosis_cutover.\n` +
     `Gap: ${gapId}\n` +
     `Proposal: ${proposalId}\n` +
     `Mitosis: ${mitosis_version_id}\n` +
     `Base SHA at staging: ${stagedBaseSha ?? "<unknown>"}\n`;
+    // Causal attempt ledger: record the pre-state and the attempt BEFORE mutating, so the
+  // outcome of this landing can be compared against it later. Record, never block: a
+  // registration failure or timeout leaves the landing to proceed as `unaccounted`.
+  try {
+    const reg = await Promise.race([
+      registerAttempt({
+        route: "vessel_mitosis_cutover",
+        repo: hostRepoRoot,
+        touched_files: pointer.staged_files ?? [],
+        gap_id: gapId,
+        proposal_id: proposalId,
+        authoring_execution_id: (pointer as { authoring_execution_id?: string }).authoring_execution_id ?? null,
+      }),
+      new Promise<{ attempt_id: null; registered: false; error: string }>((resolve) =>
+        setTimeout(() => resolve({ attempt_id: null, registered: false, error: "register timeout" }), 120_000)),
+    ]);
+    if (reg.attempt_id) msg += `\nAttempt-Id: ${reg.attempt_id}\n`;
+    operations.push({ op: "attempt_register", status: reg.attempt_id ? "ok" : "warn", detail: reg.attempt_id ?? reg.error ?? "unregistered" });
+  } catch (err) {
+    operations.push({ op: "attempt_register", status: "warn", detail: `unaccounted: ${(err as Error).message.slice(0, 160)}` });
+  }
+
   const commit = await runGit(gitCmd, ["commit", "-m", msg], hostRepoRoot);
   operations.push({
     op: commit.op,

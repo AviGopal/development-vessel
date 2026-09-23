@@ -167,6 +167,7 @@ import { resolveWorkspaceHygieneObserver } from "../resolvers/workspace-hygiene-
 import { resolveSelfFactReconcile } from "../resolvers/self-fact-reconcile.js";
 import { resolveAttemptLedger } from "../resolvers/attempt-ledger.js";
 import { resolveUnaccountedLandingScan } from "../resolvers/unaccounted-landing-scan.js";
+import { resolveAttemptSnapshot } from "../resolvers/attempt-checks.js";
 import { resolvePruneStaleMitosis } from "../resolvers/prune-stale-mitosis.js";
 import { resolveActivateSubstrateScript } from "../resolvers/activate-substrate-script.js";
 import { resolveLearningSignalHealthObserver } from "../resolvers/learning-signal-health-observer.js";
@@ -791,6 +792,10 @@ async function dispatchInner(pointer: AnyPointer): Promise<ResolverResult> {
     case "unaccounted_landing_scan":
       return resolveUnaccountedLandingScan(
         p as Parameters<typeof resolveUnaccountedLandingScan>[0],
+      );
+    case "attempt_snapshot":
+      return resolveAttemptSnapshot(
+        p as Parameters<typeof resolveAttemptSnapshot>[0],
       );
     case "selector_saturation_audit":
       return resolveSelectorSaturationAudit(

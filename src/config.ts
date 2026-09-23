@@ -98,6 +98,7 @@ export const config = {
       "git_commit",
       "git_diff",
       "git_log",
+      "attempt_snapshot",
       "fs_read",
       "fs_write",
       "fileWriteResult",

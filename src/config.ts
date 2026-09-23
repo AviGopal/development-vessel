@@ -603,6 +603,8 @@ export const config = {
       // self_fact_reconcile (2026-09-22): diffs facts the substrate holds about itself
       // against the copies it reads, with a planted canary; files self-verifying gaps.
       "self_fact_reconcile",
+      // attemptLedger: causal attempt ledger store (causal-attempt-ledger).
+      "attemptLedger",
       "prune_stale_mitosis",
       "learning_signal_health_observer",
       // selector-reward saturation detector (2026-06-14, SUBSTRATE_AS_MDP §9.3

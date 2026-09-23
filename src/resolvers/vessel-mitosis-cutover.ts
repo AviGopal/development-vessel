@@ -2266,7 +2266,7 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
     detail:
       commit.exit_code === 0
         ? commit.stdout.slice(0, 200)
-        : commit.stderr.slice(0, 400),
+        : (commit.stderr + commit.stdout).slice(0, 400),
   });
   if (commit.exit_code !== 0) {
     await unstage("commit_failed");

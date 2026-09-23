@@ -527,6 +527,10 @@ setInterval(() => { void (async () => {
           const notes = await expResolveNote(title);
           const live = notes.find((x) => x.title === title);
           if (live && typeof live.body === "string" && live.body.trim() === probe.expected) r++;
+          try {
+            await fetch(`${EXP_SELF}/v2/impulses/resolve`, { method: "POST", headers: { "Content-Type": "application/json", ...(EXP_KEY ? { Authorization: `ApiKey ${EXP_KEY}` } : {}) }, body: JSON.stringify({ type: "memoryNote_write", note: { id: title, retire: true } }), signal: AbortSignal.timeout(8000) });
+            await fetch(`${EXP_SELF}/v2/impulses/resolve`, { method: "POST", headers: { "Content-Type": "application/json", ...(EXP_KEY ? { Authorization: `ApiKey ${EXP_KEY}` } : {}) }, body: JSON.stringify({ type: "memoryNote_write", note: { id: `expectation:${title}`, retire: true } }), signal: AbortSignal.timeout(8000) });
+          } catch (e) { console.warn(`[trend-expectation] failed to retire probe note '${title}': ${e}`); }
         } catch { /* a failed probe is a miss, never a crash */ }
       }
       const hist = [...(spec.history ?? []).slice(-11), { at: new Date().toISOString(), r, n }];

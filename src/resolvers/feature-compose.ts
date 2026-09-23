@@ -25,6 +25,7 @@ import { federatedLlmEgressUrls } from "./federated-llm-egress.js";
 import { acquireComposeWorkspace, type ComposeWorkspace } from "./compose-workspace";
 import type { ResolverResult } from "./types.js";
 import { resolveVesselMitosisCutover } from "./vessel-mitosis-cutover.js";
+import { registerAttempt } from "./attempt-register.js";
 import { resolveSubstrateGap, resolveSubstrateGapWrite } from "./substrate-gap.js";
 import { writeAuthoringMarker, clearAuthoringMarker } from "./patch-with-tools.js";
 import { vacuousEditReason, nonTerminatingEditReason, deadStoreEditReason, truncatingRewriteReason } from "../vacuous-edit.js";
@@ -6274,6 +6275,19 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
         cutovers.push({ vessel, landed: false, reason: "no push clone — net-new vessel, use scaffold path" });
         continue;
       }
+      // Causal attempt ledger: snapshot the pre-state NOW, before the live copy below mutates
+// the runtime tree. Record, never block: a failure or timeout leaves attempt_id undefined
+// and the cutover registers (late) as before.
+const earlyAttempt = await Promise.race([
+        registerAttempt({
+          route: "feature_compose",
+          repo: `/workspace/git/vessels/${vessel}`,
+          touched_files: changedRel,
+          gap_id: pointer.gap?.id ?? null,
+          authoring_execution_id: (pointer as { authoring_execution_id?: string }).authoring_execution_id ?? null,
+        }).catch(() => ({ attempt_id: null as string | null })),
+        new Promise<{ attempt_id: string | null }>((resolve) => setTimeout(() => resolve({ attempt_id: null }), 120_000)),
+      ]);
       const mitosisRoot = `${REPO_ROOT}/${vessel}-mitosis-fc-${ts}`;
       for (const rel of changedRel) {
         const dir = `${mitosisRoot}/${rel.split("/").slice(0, -1).join("/")}`;
@@ -6320,6 +6334,7 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
         staged_files: changedRel,
         staged_base_sha,
         authoring_execution_id: (pointer as { authoring_execution_id?: string }).authoring_execution_id,
+        attempt_id: earlyAttempt.attempt_id ?? undefined,
         // CITE WHAT WAS ACTUALLY CHECKED. This said ["typecheck"] alone, which
         // UNDER-STATES the evidence: runVerify above runs typecheck AND the
         // shape-dispatch agreement check AND the full suite, and this landing is gated

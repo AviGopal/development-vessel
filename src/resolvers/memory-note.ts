@@ -205,6 +205,7 @@ export async function resolveMemoryNoteWrite(
     for (const k of keys) {
       const v = src[k];
       if (typeof v === "string" && v.length > 0) return v;
+      if (typeof v === "number" || typeof v === "boolean") return String(v);
     }
     return undefined;
   };

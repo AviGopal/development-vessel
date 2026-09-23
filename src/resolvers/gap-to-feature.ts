@@ -3396,6 +3396,8 @@ async function routeCapabilityGapToNewResolver(
     dry_run: pointer.dry_run ?? false,
     keep_on_fail: false,
 
+    directed: isDirected,
+
     gap: {
       id: String(gap.id ?? ""),
       summary: String(gap.summary ?? gap.title ?? ""),

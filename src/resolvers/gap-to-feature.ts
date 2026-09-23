@@ -3065,7 +3065,40 @@ async function bumpFailedAttempts(gap: Record<string, unknown>, opts: { surprise
       try {
         const parentId: string = id;
         const parentSummary = String(gap.summary ?? gap.title ?? "");
-        const childMeta = { ...meta, failed_attempts: 0, parent_gap_id: parentId, narrowed_at: new Date().toISOString() };
+        // A narrowed child is a NEW gap about the same defect. It must not inherit
+        // fields that assert authorship or closure STATE: `detector` and
+        // `evidence_resolve` made self_fact_reconcile close two clones it never filed
+        // (2026-09-23 03:35, 04:00); landing/closed/pending stamps would let the sweep
+        // grade the child on the parent's evidence. Localisation (edit_site, file_path)
+        // and an operator-authored predicate (expected_literal / hardcoded_url /
+        // verify_shape) ARE the defect and stay. A predicate DERIVED from the parent's
+        // landing commit (predicate_source set) goes with its stamps: the parent already
+        // landed that literal and still failed, so the child would be born satisfied.
+        // The store reclassifies `falsifier` on write (substrate-gap.ts), so the class
+        // label is recomputed from what survives, never carried.
+        const INHERIT_NEVER = new Set([
+          "detector", "evidence_resolve", "falsifier_exercise",
+          "pending_outcome_verification", "pending_set_at", "pending_note",
+          "predicate_source", "predicate_derived_at", "predicate_commit",
+          "closed_reason", "close_basis", "closed_at", "resolution", "landed_sha",
+          "operator_hold", "operator_hold_reason", "reopen_note",
+        ]);
+        const derivedPredicate = typeof (meta as Record<string, unknown>)["predicate_source"] === "string";
+        const inherited: Record<string, unknown> = {};
+        for (const [k, v] of Object.entries(meta)) {
+          if (INHERIT_NEVER.has(k)) continue;
+          if (derivedPredicate && (k === "expected_literal" || k === "hardcoded_url")) continue;
+          inherited[k] = v;
+        }
+        const childMeta = { ...inherited, failed_attempts: 0, parent_gap_id: parentId, narrowed_at: new Date().toISOString() };
+        // Without failure lessons the child's summary would be the parent's verbatim
+        // (measured: 222 `-narrowed` rows, many byte-identical to their parent) — a
+        // duplicate that only splits the picker's attention. Narrow only what can be
+        // narrowed.
+        const lessonsForChild = Array.isArray((meta as Record<string, unknown>)["failure_lessons"]) ? ((meta as Record<string, unknown>)["failure_lessons"] as unknown[]) : [];
+        if (lessonsForChild.length === 0) {
+          console.log(`[gap-to-feature] NOT narrowing ${parentId}: no failure_lessons recorded — the child would be a verbatim duplicate`);
+        } else {
         const childRecord: Record<string, unknown> = {
           // Deterministic id so re-narrowing the SAME parent upserts one idempotent child
           // (gapClassKey has no volatile token to strip here) instead of throwing on a
@@ -3081,6 +3114,7 @@ async function bumpFailedAttempts(gap: Record<string, unknown>, opts: { surprise
         await resolveSubstrateGapWrite({ type: "substrateGap_write", gap: childRecord as never });
         const childId = String((childRecord as Record<string,unknown>).id ?? "");
         console.log(`[gap-to-feature] emitted narrowed child gap for chronically-stuck gap ${parentId}: ${childId}`);
+        }
         void fetch(GOAL_HOST_VESSEL_ENDPOINT + "/run-goal", {
           method: "POST",
           headers: { "Content-Type": "application/json", ...(METABOB_API_KEY ? { Authorization: "ApiKey " + METABOB_API_KEY } : {}) },

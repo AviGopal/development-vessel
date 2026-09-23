@@ -2861,6 +2861,13 @@ async function groundVesselFiles(toolsEndpoint: string, verifyVessels: string[],
       const raw = String((sh.body as { stdout?: unknown })?.stdout ?? "").trim();
       if (!raw) continue;
       const files = raw.split("\n").filter(Boolean);
+      // A spec-named target of ANY extension must be groundable: the listing above finds
+      // only .ts/.tsx and three configs, so a named .json/.surql target was never shown and
+      // the basename gate refused the edit. Missing targets stay harmless (fs_read fails; creates still apply).
+      for (const t of targetFiles) {
+        const pfx = `repos/${vRel}/`;
+        if (t.startsWith(pfx) && !files.includes(t.slice(pfx.length))) files.push(t.slice(pfx.length));
+      }
       const tree = files.map((f) => `  repos/${vRel}/${f}`).join("\n");
       // FINER grain: inject current contents while the byte budget holds. The
       // apply step already fs_reads for edits; this lets the PLANNER see existing

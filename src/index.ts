@@ -541,6 +541,25 @@ setInterval(() => { void (async () => {
         await expGapWrite({ id: gapId, source: "substrate_detected", status: "open", summary: `Standing trend expectation VIOLATED for family ${famKey}: independent check scored ${r}/${n} against the committed bar ${bar}/${n} (in-process byte-verification of freshly generated probes, not dispatch verdicts). History: ${JSON.stringify(hist.slice(-4))}. Determine which mechanism regressed and restore the bar; the commitment is the impulse ${row.title}.` });
       } else if (spec.open_violation) {
         await expGapWrite({ id: gapId, source: "substrate_detected", status: "closed", summary: `RESOLVED: trend expectation for family ${famKey} restored — ${r}/${n} meets the bar ${bar}/${n}. Closed by the checker that filed it.` });
+        // After a successful grade, RETIRE the probe notes this checker just generated and graded.
+        // Producer: probe note titles are built by this checker as `${TREND_EXP_PREFIX}${famKey}:probe:` + batch discriminator when dispatching probes
+        // (see the generator near TREND_PROBE_GEN in this file). Matching on that concrete prefix retires the real probe notes we just graded.
+        try {
+          const retirePrefix = `${TREND_EXP_PREFIX}${famKey}:probe:`;
+          const gradedProbes = (await expResolveNote(retirePrefix)).filter(p => (p.title ?? "").startsWith(retirePrefix));
+          for (const g of gradedProbes) {
+            const id = g.title ?? "";
+            if (!id) continue;
+            await fetch(`${EXP_SELF}/v2/impulses/resolve`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json", ...(EXP_KEY ? { Authorization: `ApiKey ${EXP_KEY}` } : {}) },
+              body: JSON.stringify({ impulse: { pointer: { type: "memoryNote_retire", note: { id } } } }),
+              signal: AbortSignal.timeout(8000),
+            });
+          }
+        } catch (e) {
+          console.warn(`[expectation-trend] retire failed for family ${famKey}: ${(e as Error).message}`);
+        }
       }
       await expWrite(row.title, JSON.stringify({ ...spec, last_run_at: new Date().toISOString(), last_score: `${r}/${n}`, open_violation: violated, history: hist }));
       console.log(`[trend-expectation] ${row.title} check complete r=${r}/${n} bar=${bar} violated=${violated}`);

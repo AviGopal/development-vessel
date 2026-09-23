@@ -2,6 +2,19 @@ import { appendFileSync, existsSync, readFileSync, readdirSync, statSync, writeF
 import { join } from "node:path";
 import type { ResolverResult } from "./types.js";
 import { resolveFeatureCompose, priorAttemptFeedbackBlock } from "./feature-compose.js";
+
+// TYPE AUGMENTATION — allow callers to pass an optional 'directed' flag through the
+// FeatureCompose pointer. feature-compose reads it via a local cast
+// `(pointer as { directed?: boolean }).directed`, but the declared type did not include it,
+// so an inline object literal caused TS2353 (excess-property check). Making it optional on
+// the declared interface preserves runtime behavior while silencing the type error at the
+// call site that forwards operator-directed intent.
+declare module "./feature-compose.js" {
+  interface FeatureComposePointer {
+    directed?: boolean;
+  }
+}
+
 import { resolveSubstrateGap, resolveSubstrateGapWrite, DECISION_LOG_GAP_CATEGORIES } from "./substrate-gap.js";
 import { resolveAuthorProducer } from "./author-producer.js";
 import { resolveDocDriftFix } from "./doc-drift-fix.js";

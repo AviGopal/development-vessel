@@ -4146,6 +4146,7 @@ export async function resolveGapToFeature(pointer: GapToFeaturePointer): Promise
     model: pointer.model,
     dry_run: pointer.dry_run ?? false,
     keep_on_fail: false,
+    directed: (pointer as { directed?: boolean }).directed === true,
     // Thread the gap through so the semantic cutover-verification gate (lever 5)
     // can judge the patch AGAINST the gap on a live path and write
     // suspected_real_location back onto the gap when the drafter mis-localized.

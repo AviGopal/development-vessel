@@ -958,6 +958,26 @@ export async function resolveVesselMitosisCutover(
   // this can do honestly, now, is stop the unchecked portion being invisible: a
   // gate that silently verifies 1 of N reads exactly like a gate that verified N.
   const stagedCount = Array.isArray(pointer.staged_files) ? pointer.staged_files.length : 0;
+  // Respect the fleet change_window maintenance lease: if held, do NOT roll back a verified patch.
+  // Instead, soft-refuse immediately so the patch is preserved for the next window, avoiding the
+  // previously observed 90s wait followed by rollback that discarded successful landings.
+  try {
+    const leaseMod: any = await import("./maintenance-lease.js");
+    const leaseRes = leaseMod && typeof leaseMod === "object" && "resolveMaintenanceLease" in leaseMod
+      ? await leaseMod["resolveMaintenanceLease"]({ type: "maintenance_lease", lease: "change_window" })
+      : null;
+    const held = !!(leaseRes && (leaseRes.held === true || (leaseRes.body && leaseRes.body.held === true)));
+    if (held) {
+      console.warn("[mitosis-cutover] change_window lease held — deferring cutover without rollback; preserving verified patch for the next maintenance window.");
+      return softRefuse("maintenance change_window lease held — defer without rollback", {
+        verdict: evaluation_evidence.verdict,
+        lease: "change_window",
+      });
+    }
+  } catch {
+    // Fail-open on lease check errors: inability to read the lease state must not convert
+    // a safe deferral into an unconditional loss path. Proceed with normal cutover logic.
+  }
   // PER-FILE FRESHNESS, when the staging leg recorded it.
   //
   // `staged_base_sha` is the SENTINEL's hash, so it can only ever verify one file.

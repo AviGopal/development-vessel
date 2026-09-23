@@ -605,6 +605,7 @@ export const config = {
       "self_fact_reconcile",
       // attemptLedger: causal attempt ledger store (causal-attempt-ledger).
       "attemptLedger",
+      "unaccounted_landing_scan",
       "prune_stale_mitosis",
       "learning_signal_health_observer",
       // selector-reward saturation detector (2026-06-14, SUBSTRATE_AS_MDP §9.3

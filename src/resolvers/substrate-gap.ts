@@ -1194,6 +1194,45 @@ export async function resolveSubstrateGapWrite(
 
       const gd = globalThis as unknown as { __composeDrainInflight?: boolean; __composeDrainLastAt?: number; lastComposeFailureClass?: string };
       const COMPOSE_MIN_INTERVAL_MS = 90_000;
+      // Capacity guard: do not fire a compose nudge when the autonomous lane has no free slot.
+      // FAIL-CLOSED: if the capacity check fails or returns an unreadable shape, assume no capacity.
+      try {
+        const { peekComposeCapacity } = await import("../compose-slots.js");
+        const __cap = await peekComposeCapacity({ directed: false });
+        const __autoHasFree = (() => {
+          const c = __cap as unknown as {
+            autonomous_free?: boolean;
+            free?: boolean;
+            autonomousFree?: boolean;
+            available?: boolean;
+            autonomousAvailable?: boolean;
+            observed?: number;
+            cap?: number;
+          } | null | undefined;
+          if (!c || typeof c !== "object") return false;
+          if (typeof c.autonomous_free === "boolean") return c.autonomous_free;
+          if (typeof c.autonomousFree === "boolean") return c.autonomousFree;
+          if (typeof c.autonomousAvailable === "boolean") return c.autonomousAvailable;
+          if (typeof c.free === "boolean") return c.free; // some impls expose a single free flag
+          if (typeof c.available === "boolean") return c.available;
+          if (typeof c.observed === "number" && typeof c.cap === "number") {
+            const capNum = c.cap;
+            const obsNum = c.observed;
+            // Autonomous lane holds cap-1 to reserve one for directed work; floor at 1.
+            const autonomousLimit = Math.max(1, capNum - 1);
+            return obsNum < autonomousLimit;
+          }
+          return false; // unknown shape => treat as no capacity
+        })();
+        if (!__autoHasFree) {
+          console.log(`[substrate-gap] compose nudge skipped for ${gap.id} — no autonomous compose capacity`);
+          // Early return: suppress nudge to avoid write-churn on a full/unknown lane.
+          return { shape: 'compose_nudge_suppressed', body: { gapId: gap.id, reason: 'no_capacity' } };
+        }
+      } catch (err) {
+        console.warn(`[substrate-gap] compose capacity check failed; suppressing nudge to avoid churn: ${String(err)}`);
+        return { shape: 'compose_nudge_suppressed', body: { gapId: gap.id, reason: 'capacity_check_failed' } };
+      }
       if (gd.__composeDrainInflight === true) {
         console.log(`[substrate-gap] compose nudge skipped for ${gap.id} — a compose is already in flight`);
       } else if (typeof gd.__composeDrainLastAt === "number" && nowMs - gd.__composeDrainLastAt < COMPOSE_MIN_INTERVAL_MS) {

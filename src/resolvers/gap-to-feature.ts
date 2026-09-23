@@ -1829,6 +1829,16 @@ export function verifyGapCondition(gap: Record<string, unknown>): 'present' | 'a
       const runtimePath = join(runtimeRoot(), editSite.replace(/^\//, '').replace(/^repos\//, ''));
       if (!existsSync(runtimePath)) return 'unknown';
       const contents = readFileSync(runtimePath, 'utf8');
+      // A predicate the LANDING derived from its own diff (a line the commit removed,
+      // stamped at cutover as predicate_source=removed_line_of_landing_commit) is a
+      // DURABILITY sentinel — "is my change still in place?" — not a resolution
+      // predicate. Reading its absence as 'absent' let a landing close a gap with the
+      // evidence it manufactured itself (measured 2026-09-22: two gaps closed
+      // close_basis=absent, three times, over an operator reopen). Its presence means
+      // the change was reverted; its absence means only that the landing persists.
+      if (meta['predicate_source'] === 'removed_line_of_landing_commit') {
+        return contents.includes(hardcodedUrl) ? 'present' : 'pending';
+      }
       return contents.includes(hardcodedUrl) ? 'present' : 'absent';
     }
     // Class 1b: inverse polarity (expected_literal). Only when Class 1 did not apply.
@@ -1916,6 +1926,16 @@ async function verifyGapConditionAsync(gap: Record<string, unknown>): Promise<'p
       const runtimePath = join(runtimeRoot(), editSite.replace(/^\//, '').replace(/^repos\//, ''));
       if (!existsSync(runtimePath)) return 'unknown';
       const contents = readFileSync(runtimePath, 'utf8');
+      // A predicate the LANDING derived from its own diff (a line the commit removed,
+      // stamped at cutover as predicate_source=removed_line_of_landing_commit) is a
+      // DURABILITY sentinel — "is my change still in place?" — not a resolution
+      // predicate. Reading its absence as 'absent' let a landing close a gap with the
+      // evidence it manufactured itself (measured 2026-09-22: two gaps closed
+      // close_basis=absent, three times, over an operator reopen). Its presence means
+      // the change was reverted; its absence means only that the landing persists.
+      if (meta['predicate_source'] === 'removed_line_of_landing_commit') {
+        return contents.includes(hardcodedUrl) ? 'present' : 'pending';
+      }
       return contents.includes(hardcodedUrl) ? 'present' : 'absent';
     }
     // Class 1b: inverse polarity (expected_literal). Only when Class 1 did not apply.
@@ -2605,6 +2625,12 @@ const pending = gaps
     for (const g of pending) {
       out.checked += 1;
       const meta = { ...((g.classification_metadata ?? {}) as Record<string, unknown>) };
+      // An operator hold is a statement that the falsifier cannot yet be exercised; the
+      // sweep never closes over it. It is lifted by an exercised falsifier, not by a landing.
+      if (meta.operator_hold === true) {
+        console.log(`[gap-sweep] gap ${String(g.id)} held by operator_hold — not closed on landing`);
+        continue;
+      }
       const sha = String(meta.pending_outcome_verification);
       // Not yet observable in a clone (pull-sync hasn't converged, or the land was
       // reverted) — leave open; the sweep retries on every tick.

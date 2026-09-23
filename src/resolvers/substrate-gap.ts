@@ -897,6 +897,26 @@ export async function resolveSubstrateGapWrite(
       let reopened = false;
   if (existingIdx >= 0) {
     const existing = gaps[existingIdx]!;
+    // operator_hold is a field the store READS: a held gap cannot be closed by any
+    // writer unless the write carries an exercised, passed falsifier. A landed sha is
+    // provenance, not resolution (2026-09-22: a hold was overridden three times).
+    {
+      const existingMeta = (existing.classification_metadata ?? {}) as Record<string, unknown>;
+      const incomingMeta = (gap.classification_metadata ?? {}) as Record<string, unknown>;
+      const exercised = (incomingMeta["falsifier_exercise"] as { passed?: unknown } | undefined)?.passed === true;
+      if (existingMeta["operator_hold"] === true && String(gap.status ?? "open") === "closed" && !exercised) {
+        return {
+          early: {
+            shape: "structuredError",
+            body: {
+              resolver: "substrateGap_write",
+              failure_mode: "validation_rejected",
+              detail: `gap ${gap.id}: operator_hold is set — a close needs classification_metadata.falsifier_exercise.passed === true, not a landing`,
+            },
+          },
+        };
+      }
+    }
         summaryChanged = existing.summary !== gap.summary;
         // A closed->open transition is a REOPEN, and it is exactly when the gap wants
         // re-picking. Without this the trigger below fires only on a new gap or a changed

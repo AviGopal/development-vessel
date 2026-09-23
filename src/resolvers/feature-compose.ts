@@ -2867,7 +2867,7 @@ async function groundVesselFiles(toolsEndpoint: string, verifyVessels: string[],
       // the basename gate refused the edit. Missing targets stay harmless (fs_read fails; creates still apply).
       for (const t of targetFiles) {
         const pfx = `repos/${vRel}/`;
-        if (t.startsWith(pfx) && !files.includes(t.slice(pfx.length))) files.push(t.slice(pfx.length));
+        if (t.startsWith(pfx) && !files.includes(t.slice(pfx.length)) && (await import("node:fs")).existsSync(`${vAbs}/${t.slice(pfx.length)}`)) files.push(t.slice(pfx.length));
       }
       const tree = files.map((f) => `  repos/${vRel}/${f}`).join("\n");
       // FINER grain: inject current contents while the byte budget holds. The

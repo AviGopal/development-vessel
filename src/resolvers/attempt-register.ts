@@ -280,7 +280,7 @@ export async function sweepAttempts(opts?: { now?: number }): Promise<{ drained:
           }
         }
 
-        if (outcomeRecord.surprise && intent.gap_id && !intent.gap_id.startsWith("unknown")) {
+        if (outcomeRecord.surprise && ((outcomeRecord.unexpected_flips?.length ?? 0) > 0 || outcomeRecord.intended === "unmet") && intent.gap_id && !intent.gap_id.startsWith("unknown")) {
           const reason = `broke: ${outcomeRecord.unexpected_flips.map((f: any) => f.id).join(", ")}`;
           lessons_written += await writeLesson(intent, attempt_id, landedShas, reason);
         }

@@ -1,11 +1,15 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import type { ResolverResult } from './types.js';
 
 export type LedgerKind = "attemptIntent" | "stateSnapshot" | "attemptOutcome" | "attemptSettlement" | "landingEvent";
 
 export function ledgerDir(): string {
-  return process.env.ATTEMPT_LEDGER_DIR ?? "/workspace/attempt-ledger";
+  if (process.env.ATTEMPT_LEDGER_DIR) return process.env.ATTEMPT_LEDGER_DIR;
+  // bun test sets NODE_ENV=test; a test run must never write the live ledger.
+  if (process.env.NODE_ENV === "test") return join(tmpdir(), `attempt-ledger-test-${process.pid}`);
+  return "/workspace/attempt-ledger";
 }
 
 export function appendRecord(kind: LedgerKind, key: string, record: Record<string, unknown>): { appended: boolean; key: string } {

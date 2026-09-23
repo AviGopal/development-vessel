@@ -85,7 +85,7 @@ export async function evaluateChecks(ids: string[], perCheckTimeoutMs = 60000): 
         checkPromise = resolveGateSelfProbe({ type: "gate_self_probe", emit_gap: false } as never).then((res: ResolverResult) => {
           const shape = (res as any).shape;
           const body: any = (res as any).body || {};
-          if (shape === "gateSelfProbeReport") {
+          if (shape === "gateSelfProbe" || shape === "gateSelfProbeReport") {
             if (!Array.isArray(body.outcomes)) {
               return [{ id: "gate_self_probe", verdict: "unknown", detail: "Invalid response structure", definition_version }];
             }

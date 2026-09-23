@@ -6311,6 +6311,7 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
         mitosis_root: mitosisRoot,
         staged_files: changedRel,
         staged_base_sha,
+        authoring_execution_id: (pointer as { authoring_execution_id?: string }).authoring_execution_id,
         // CITE WHAT WAS ACTUALLY CHECKED. This said ["typecheck"] alone, which
         // UNDER-STATES the evidence: runVerify above runs typecheck AND the
         // shape-dispatch agreement check AND the full suite, and this landing is gated

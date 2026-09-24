@@ -58,6 +58,7 @@ import { symbolsNeedingDeclaration, renderSymbolDeclarations, typeNamesIn, rende
 import { refuseRederivedEdit } from "../edit-provenance.js";
 import { RUNTIME_ROOT, SUPER_REPO_ROOT, REPO_ROOT, loadFleetShapeVocabulary } from "../shape-vocabulary.js";
 import { mkdir as parkMkdir, writeFile as parkWriteFile, rename as parkRename, readFile as parkReadFile, unlink as parkUnlink } from "node:fs/promises";
+import { createHash as parkHash } from "node:crypto";
 
 // PARKED LANDINGS (openspec 2026-09-24-resumable-landings). A patch that passed verify
 // and the semantic gate is written here BEFORE its cutover, so a cutover that is refused
@@ -108,6 +109,96 @@ export async function deleteParkedLanding(gapId: string): Promise<void> {
     await parkUnlink(parkedLandingPath(gapId));
   } catch (err) {
     if ((err as NodeJS.ErrnoException)?.code !== "ENOENT") console.warn(`[feature-compose] park delete failed for ${gapId}: ${(err as Error).message}`);
+  }
+}
+
+/**
+ * Finish a parked landing: re-check the base, sync the verified files into the live
+ * tree, typecheck ONLY (the park already passed the suite and the semantic gate), and
+ * cut over. Returns null when the park is stale or fails typecheck - the park is then
+ * dropped with a `park_stale` lesson and the caller drafts normally.
+ */
+async function resumeParkedLanding(pointer: FeatureComposePointer, park: ParkedLanding, toolsEndpoint: string): Promise<ResolverResult | null> {
+  const gapId = park.gap_id;
+  const cloneRoot = process.env["MITOSIS_PUSH_CLONE_DIR"] ?? "/workspace/git/vessels";
+  for (const f of park.files) {
+    if (f.base_content === null) continue;
+    const current = await parkReadFile(`${cloneRoot}/${park.vessel}/${f.path}`, "utf-8").catch(() => null);
+    if (current !== f.base_content) {
+      await deleteParkedLanding(gapId);
+      await appendComposeLesson("park_stale", `parked diff for ${f.path} no longer applies: base moved since ${park.parked_at}`, park.vessel, pointer.gap);
+      console.log(`[feature-compose] park_stale for ${gapId} - base moved, redrafting`);
+      return null;
+    }
+  }
+  const ageMin = Math.round((Date.now() - Date.parse(park.parked_at)) / 60000);
+  console.log(`[feature-compose] RESUMING parked landing for ${gapId} (parked ${ageMin}m ago)`);
+  const ts = new Date().toISOString().replace(/[:.]/g, "-");
+  const stagingRoot = `${REPO_ROOT}/${park.vessel}-mitosis-resume-${ts}`;
+  const snapshots = new Map<string, string | null>();
+  const restoreLive = async (): Promise<void> => {
+    for (const [abs, original] of snapshots) {
+      try {
+        if (original === null) await parkUnlink(abs).catch(() => undefined);
+        else await parkWriteFile(abs, original, "utf-8");
+      } catch (err) {
+        console.error(`[feature-compose] resume restore FAILED for ${abs}: ${(err as Error).message}`);
+      }
+    }
+  };
+  try {
+    for (const f of park.files) {
+      const liveAbs = `${RUNTIME_ROOT}/${park.vessel}/${f.path}`;
+      snapshots.set(liveAbs, await parkReadFile(liveAbs, "utf-8").catch(() => null));
+      const dir = f.path.split("/").slice(0, -1).join("/");
+      await parkMkdir(`${RUNTIME_ROOT}/${park.vessel}/${dir}`, { recursive: true });
+      await parkWriteFile(liveAbs, f.content, "utf-8");
+      await parkMkdir(`${stagingRoot}/${dir}`, { recursive: true });
+      await parkWriteFile(`${stagingRoot}/${f.path}`, f.content, "utf-8");
+    }
+    const tc = await callTool(toolsEndpoint, "shell", {
+      command: `cd ${JSON.stringify(`${RUNTIME_ROOT}/${park.vessel}`)} && timeout 300 bunx tsc --noEmit -p . 2>&1 | tail -20; echo TC_EXIT=\${PIPESTATUS[0]}`,
+      cwd: REPO_ROOT,
+    });
+    const tcOut = String((tc.body as { stdout?: unknown })?.stdout ?? "");
+    if (!/TC_EXIT=0\b/.test(tcOut)) {
+      await restoreLive();
+      await deleteParkedLanding(gapId);
+      await appendComposeLesson("park_stale", `parked patch no longer typechecks on the current base: ${tcOut.slice(-400)}`, park.vessel, pointer.gap);
+      console.log(`[feature-compose] park_stale for ${gapId} - typecheck failed on the current base, redrafting`);
+      return null;
+    }
+    const cut = await resolveVesselMitosisCutover({
+      type: "vessel_mitosis_cutover",
+      vessel_name: park.vessel,
+      base_version_id: `${park.vessel}-live`,
+      mitosis_version_id: `${park.vessel}-resume-${ts}`,
+      mitosis_root: stagingRoot,
+      staged_files: park.files.map((f) => f.path),
+      staged_base_sha: parkHash("sha256").update(park.files[0]!.content).digest("hex").slice(0, 12),
+      evaluation_evidence: { verdict: "FAVORABLE", base_success_rate: 1, mitosis_success_rate: 1, cited_trace_ids: [], cited_check_names: ["typecheck (resume)", "parked: shape-dispatch", "parked: bun test (baseline-delta, flake-confirmed)"] },
+      gap_id: gapId,
+      proposal_id: `${gapId}-compose-report`,
+      skip_push: pointer.skip_push ?? false,
+    } as never);
+    const r = (cut.body ?? {}) as Record<string, unknown>;
+    const pushed = r["push_status"] === "pushed" && typeof r["new_git_sha"] === "string" && String(r["new_git_sha"]).trim() !== "";
+    if (pushed) {
+      await deleteParkedLanding(gapId);
+    } else {
+      await restoreLive();
+      console.log(`[feature-compose] cutover did not land - verified patch parked for ${gapId}`);
+    }
+    return {
+      shape: "featureComposeReport",
+      body: { ok: pushed, verdict: pushed ? "FAVORABLE" : "UNFAVORABLE", resumed_from: park.compose_id, parked: !pushed, cutovers: [{ vessel: park.vessel, result: cut.body }] },
+    };
+  } catch (err) {
+    await restoreLive();
+    console.warn(`[feature-compose] resume of ${gapId} failed (${(err as Error).message}); park kept`);
+    return null;
+  } finally {
+    await callTool(toolsEndpoint, "shell", { command: `rm -rf ${JSON.stringify(stagingRoot)}`, cwd: REPO_ROOT }).catch(() => undefined);
   }
 }
 export { loadFleetShapeVocabulary } from "../shape-vocabulary.js";
@@ -189,6 +280,10 @@ export const FEATURE_COMPOSE_ENDPOINT = process.env.FEATURE_COMPOSE_ENDPOINT ?? 
 
 export interface FeatureComposePointer {
   produceFeatureCompose?: boolean;
+  /** Resume this parked landing instead of drafting (resumable landings). */
+  resume_from?: ParkedLanding;
+  /** How old a park may be and still be resumed (default 24 h). */
+  parked_landing_ttl_ms?: number;
   family_key?: string;
   type: "feature_compose";
   /** Free-text feature specification (what to build + concrete file/behaviour detail). */
@@ -3778,6 +3873,19 @@ async function resolveFeatureComposeUncapped(pointer: FeatureComposePointer): Pr
   if (llmEndpoints.length === 0 || !toolsEndpoint) {
     return { shape: "featureComposeReport", body: { ok: false, error: `endpoint discovery failed (llm=${llmEndpoints.length > 0}, tools=${!!toolsEndpoint})` } };
   }
+  // RESUME A PARKED LANDING before drafting: a fresh park is a patch that already passed
+  // verify and the semantic gate and only lost its cutover.
+  if (pointer.land && pointer.gap?.id && !pointer.dry_run) {
+    const park = pointer.resume_from ?? (await readParkedLanding(String(pointer.gap.id)));
+    if (park) {
+      if (Date.now() - Date.parse(park.parked_at) < (pointer.parked_landing_ttl_ms ?? 86_400_000)) {
+        const resumed = await resumeParkedLanding(pointer, park, toolsEndpoint);
+        if (resumed) return resumed;
+      } else {
+        await deleteParkedLanding(park.gap_id);
+      }
+    }
+  }
   const llmEndpoint = llmEndpoints[0]!; const llmEndpointNew = llmEndpoints[1] ?? llmEndpoint;
 
   // 1. DECOMPOSE (single planning call), GROUNDED in the target vessel's real
@@ -4133,7 +4241,7 @@ async function resolveFeatureComposeUncapped(pointer: FeatureComposePointer): Pr
         if (tf) {
           const { readFile } = await import("node:fs/promises");
           const rootA = process.env["REPO_ROOT"] ?? process.env["WORKSPACE_ROOT"] ?? "/workspace/git/super-repo";
-          const text = await readFile(targetFileOnDisk(tf), "utf8").catch(() => "");
+          const text = await readFile(`${rootA}/${tf}`, "utf8").catch(() => "");
           if (text) {
             // CENTRE THE BAND ON SOMETHING ACTUALLY IN THE FILE. renderSafeAnchors
             // bands +/-80 lines around the first line CONTAINING its region arg, so

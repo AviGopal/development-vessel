@@ -4574,7 +4574,7 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
       const newS = op.new_string ?? "";
       if (!path || !oldS) continue;
       let current = "";
-      try { current = await readFile(`${root}/${path}`, "utf8"); } catch { current = ""; }
+      try { current = await readFile(targetFileOnDisk(path), "utf8"); } catch { current = ""; }
       if (!current || !current.includes(oldS)) continue; // cannot simulate → do not refuse
       const loops = nonTerminatingEditReason(current, current.replace(oldS, newS));
       if (loops) {

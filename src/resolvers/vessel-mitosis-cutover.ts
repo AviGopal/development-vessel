@@ -1482,7 +1482,7 @@ export async function resolveVesselMitosisCutover(
   if (pointer.staged_files && pointer.staged_files.length > 0) {
     // Acquire change-window maintenance lease before mutating /vessels
     // (gap cutover-acquires-change-window-2026-07-09).
-    const acquireResult = await resolveMaintenanceLeaseWrite({
+    const acquireResult = await resolveMaintenanceLeaseWrite({ name: "cutover",
       type: "maintenanceLease_write",
       op: "acquire",
       holder: `cutover:${String(pointer.vessel_name ?? "unknown")}`,
@@ -1500,7 +1500,7 @@ export async function resolveVesselMitosisCutover(
 const leaseWaitMs = Number(process.env["CUTOVER_LEASE_WAIT_MS"] ?? 90000);
 for (let waited = 0; acquireBody.acquired === false && waited < leaseWaitMs; waited += 5000) {
   await new Promise((r) => setTimeout(r, 5000));
-  const retryAcquire = await resolveMaintenanceLeaseWrite({
+  const retryAcquire = await resolveMaintenanceLeaseWrite({ name: "cutover",
     type: "maintenanceLease_write",
     op: "acquire",
     holder: `cutover:${String(pointer.vessel_name ?? "unknown")}`,
@@ -1575,6 +1575,7 @@ for (let waited = 0; acquireBody.acquired === false && waited < leaseWaitMs; wai
     } finally {
       await resolveMaintenanceLeaseWrite({
         type: "maintenanceLease_write",
+        name: "cutover",
         op: "release",
         token,
       });
@@ -1789,7 +1790,7 @@ async function runGitAwareCutover(args: GitCutoverArgs): Promise<ResolverResult>
   const leaseHolder = `cutover:${args.vessel_name}`;
   let leaseToken: string | undefined;
   try {
-    const acq = await resolveMaintenanceLeaseWrite({ type: "maintenanceLease_write", op: "acquire", holder: leaseHolder, ttl_ms: 600_000 });
+    const acq = await resolveMaintenanceLeaseWrite({ type: "maintenanceLease_write", op: "acquire", name: "cutover", holder: leaseHolder, ttl_ms: 600_000 });
     const acqBody = acq.body as { acquired?: boolean; token?: string; held_by?: string; expires_at?: string };
     if (acqBody.acquired === false) {
       return softRefuse(
@@ -1824,10 +1825,10 @@ async function runGitAwareCutover(args: GitCutoverArgs): Promise<ResolverResult>
   if (args.pointer.proposal_id && !leaseToken) {
     const pLeaseHolder = `proposal:${args.pointer.proposal_id}`;
     try {
-      const pAcq = await resolveMaintenanceLeaseWrite({ type: "maintenanceLease_write", op: "acquire", holder: pLeaseHolder, ttl_ms: 600_000 });
+      const pAcq = await resolveMaintenanceLeaseWrite({ type: "maintenanceLease_write", op: "acquire", name: "cutover", holder: pLeaseHolder, ttl_ms: 600_000 });
       const pAcqBody = pAcq.body as { acquired?: boolean; token?: string; held_by?: string; expires_at?: string };
       if (pAcqBody.acquired === false) {
-        if (leaseToken) try { await resolveMaintenanceLeaseWrite({ type: "maintenanceLease_write", op: "release", token: leaseToken }); } catch {}
+        if (leaseToken) try { await resolveMaintenanceLeaseWrite({ type: "maintenanceLease_write", op: "release", name: "cutover", token: leaseToken }); } catch {}
         return softRefuse(`proposal cutover lease held by ${pAcqBody.held_by ?? "unknown"} until ${pAcqBody.expires_at ?? "?"} — skipping redundant cutover`, { kind: "proposal_lease_held", proposal_id: args.pointer.proposal_id, held_by: pAcqBody.held_by });
       }
       proposalLeaseToken = pAcqBody.token;
@@ -1838,10 +1839,10 @@ async function runGitAwareCutover(args: GitCutoverArgs): Promise<ResolverResult>
     return await runGitAwareCutoverInner(args);
   } finally {
     if (proposalLeaseToken) {
-      try { await resolveMaintenanceLeaseWrite({ type: "maintenanceLease_write", op: "release", token: proposalLeaseToken }); } catch { }
+      try { await resolveMaintenanceLeaseWrite({ type: "maintenanceLease_write", op: "release", name: "cutover", token: proposalLeaseToken }); } catch { }
     }
     if (leaseToken) {
-      try { await resolveMaintenanceLeaseWrite({ type: "maintenanceLease_write", op: "release", token: leaseToken }); } catch { }
+      try { await resolveMaintenanceLeaseWrite({ type: "maintenanceLease_write", op: "release", name: "cutover", token: leaseToken }); } catch { }
     }
     // Exit-guaranteed queue-lock clear (root fix for the orphaned mitosis-pending
     // wedge): the inner cutover has many terminal exits (host-sync handoff return,

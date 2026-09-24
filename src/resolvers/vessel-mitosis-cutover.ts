@@ -1523,6 +1523,23 @@ for (let waited = 0; acquireBody.acquired === false && waited < leaseWaitMs; wai
         `mitosis=${mitosis_version_id}; no edit will land this run`,
       );
       // Introduce a brief wait before returning cutoverDeferred
+      // VARIATE WITH INTENT (2026-09-23): the holder that starved this landing is an
+      // ACTIVITY whose posterior graded itself on its own exit (trace-store-reconcile:
+      // alpha 119 / beta 9 while deferring 45 cutovers in 90 min). Feed the fleet
+      // effect back to the holder so Thompson can prefer a variant that releases the
+      // window sooner. Fire-and-forget; a dead activity-api never blocks a deferral.
+      try {
+        const _holder = String(acquireBody.held_by ?? "");
+        if (_holder && !_holder.startsWith("cutover:") && !_holder.startsWith("proposal:")) {
+          const _activityId = _holder.includes(":") ? _holder : `development-vessel:${_holder}`;
+          void fetch(`${env("ACTIVITY_API_ENDPOINT", "http://127.0.0.1:8080")}/v2/activities/feedback`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", ...(process.env["METABOB_API_KEY"] ? { Authorization: `ApiKey ${process.env["METABOB_API_KEY"]}` } : {}) },
+            body: JSON.stringify({ activity_id: _activityId, direction: "negative", intensity: 1, reason: `held change_window past a cutover's ${leaseWaitMs}ms wait (vessel=${String(pointer.vessel_name ?? "unknown")}); a landing was deferred` }),
+            signal: AbortSignal.timeout(10_000),
+          }).catch(() => { });
+        }
+      } catch { /* feedback is advisory */ }
       await new Promise(resolve => setTimeout(resolve, 10000));
       return {
         shape: "cutoverDeferred",

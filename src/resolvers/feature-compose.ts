@@ -6431,6 +6431,10 @@ const earlyAttempt = await Promise.race([
           if (original === null) {
             await callTool(toolsEndpoint, "shell", { command: `rm -f ${JSON.stringify(abs)}`, cwd: REPO_ROOT });
           } else {
+            const cloneAbs = abs.replace(`${RUNTIME_ROOT}/`, `${PUSH_CLONE_ROOT}/`);
+            const liveNow = (await callTool(toolsEndpoint, "fs_read", { path: abs })).body as { content?: unknown };
+            const committedNow = (await callTool(toolsEndpoint, "fs_read", { path: cloneAbs })).body as { content?: unknown };
+            if (typeof liveNow?.content === "string" && liveNow.content === committedNow?.content && liveNow.content !== original) { console.log(`[feature-compose] live-sync rollback SKIPPED ${abs}: live equals the committed clone copy, restoring the snapshot would revert a landing`); restored++; continue; }
             const w = await callTool(toolsEndpoint, "fs_write", { path: abs, content: original });
             // VERIFY THE RESTORE, DO NOT ASSUME IT — the step-4 rollback block
             // above records what happens when this is skipped: a report claiming

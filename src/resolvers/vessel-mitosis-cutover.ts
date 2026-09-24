@@ -967,7 +967,7 @@ export async function resolveVesselMitosisCutover(
   try {
     const leaseMod: any = await import("./maintenance-lease.js");
     const leaseRes = leaseMod && typeof leaseMod === "object" && "resolveMaintenanceLease" in leaseMod
-      ? await leaseMod["resolveMaintenanceLease"]({ type: "maintenance_lease", lease: "change_window" })
+      ? await leaseMod["resolveMaintenanceLease"]({ type: "maintenanceLease", name: "cutover", lease: "change_window" })
       : null;
     const held = !!(leaseRes && (leaseRes.held === true || (leaseRes.body && leaseRes.body.held === true)));
     if (held) {

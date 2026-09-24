@@ -3110,7 +3110,7 @@ async function bumpFailedAttempts(gap: Record<string, unknown>, opts: { surprise
         // duplicate that only splits the picker's attention. Narrow only what can be
         // narrowed.
         const lessonsForChild = Array.isArray((meta as Record<string, unknown>)["failure_lessons"]) ? ((meta as Record<string, unknown>)["failure_lessons"] as unknown[]) : [];
-        if (lessonsForChild.length === 0) {
+        if (lessonsForChild.length === 0 || String((lessonsForChild[lessonsForChild.length - 1] as Record<string, unknown>)?.["reason"] ?? "").startsWith("[deterministic] ")) {
           console.log(`[gap-to-feature] NOT narrowing ${parentId}: no failure_lessons recorded — the child would be a verbatim duplicate`);
         } else {
         const childRecord: Record<string, unknown> = {

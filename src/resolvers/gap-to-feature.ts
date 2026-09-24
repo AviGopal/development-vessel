@@ -1,7 +1,7 @@
 import { appendFileSync, existsSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { ResolverResult } from "./types.js";
-import { resolveFeatureCompose, priorAttemptFeedbackBlock } from "./feature-compose.js";
+import { resolveFeatureCompose, priorAttemptFeedbackBlock, readParkedLanding } from "./feature-compose.js";
 
 // TYPE AUGMENTATION — allow callers to pass an optional 'directed' flag through the
 // FeatureCompose pointer. feature-compose reads it via a local cast
@@ -4334,9 +4334,16 @@ const familySample: string[] = await (async () => {
     return { shape: "gapToFeatureReport", body: { ok: allOk, stage: "route_compose", route: "capacity_slice_sequence", gap_id: gap.id, gap_category: gap.category, slices: sliceResults } };
   }
 
+  // PREFER A FRESH PARK OVER A REDRAFT (resumable landings): a park is a patch for this
+  // gap that already passed verify and the semantic gate and only lost its cutover.
+  const parkTtlMs = Number((pointer as { parked_landing_ttl_ms?: number }).parked_landing_ttl_ms ?? 86_400_000);
+  const park = await readParkedLanding(String(gap.id ?? "")).catch(() => null);
+  const freshPark = park && Date.now() - Date.parse(park.parked_at) < parkTtlMs ? park : null;
+  if (freshPark) console.log(`[gap-to-feature] picked ${String(gap.id)} has a fresh parked landing (${freshPark.compose_id}) - dispatching feature_compose with resume_from`);
   const compose = await resolveFeatureCompose({
     type: "feature_compose",
     spec,
+    ...(freshPark ? { resume_from: freshPark, parked_landing_ttl_ms: parkTtlMs } : {}),
     ...(verifyVessels.length ? { verify_vessels: verifyVessels } : {}),
     model: pointer.model,
     dry_run: pointer.dry_run ?? false,

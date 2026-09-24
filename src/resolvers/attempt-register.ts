@@ -213,7 +213,7 @@ export async function sweepAttempts(opts?: { now?: number }): Promise<{ drained:
           if (!preSnapshot) throw new Error(`Pre-snapshot ${intent.pre_snapshot_id} not found for attempt ${attempt_id}`);
 
           const postSnapshotResult = await takeSnapshot({
-            checks: preSnapshot.results.map((r: CheckResult) => r.id),
+            checks: invariantSelect({ touched_files: intent.touched_files }).checks,
             context: `post:${attempt_id}`,
             repos: [intent.repo]
           });
@@ -250,7 +250,7 @@ export async function sweepAttempts(opts?: { now?: number }): Promise<{ drained:
             if (!preSnapshot) throw new Error(`Pre-snapshot ${intent.pre_snapshot_id} not found for attempt ${attempt_id}`);
 
             const settleSnapshotResult = await takeSnapshot({
-              checks: preSnapshot.results.map((r: CheckResult) => r.id),
+              checks: invariantSelect({ touched_files: intent.touched_files }).checks,
               context: `settle:${attempt_id}`,
               repos: [intent.repo]
             });

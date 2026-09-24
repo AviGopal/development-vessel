@@ -42,11 +42,13 @@ export interface MaintenanceLease {
 
 export interface MaintenanceLeaseReadPointer {
   type: "maintenanceLease";
+  name?: string;
 }
 
 export interface MaintenanceLeaseWritePointer {
   type: "maintenanceLease_write";
   op: "acquire" | "renew" | "release";
+  name?: string;
   holder?: string;
   token?: string;
   ttl_ms?: number;
@@ -69,9 +71,13 @@ export function leasePath(): string {
   );
 }
 
-async function readLease(): Promise<MaintenanceLease | null> {
+export function namedLeasePath(name?: string): string {
+  return name ? `${dirname(leasePath())}/maintenance-${name.replace(/[^a-z0-9_-]/gi, "_")}.json` : leasePath();
+}
+
+async function readLease(name?: string): Promise<MaintenanceLease | null> {
   try {
-    const raw = await readFile(leasePath(), "utf-8");
+    const raw = await readFile(namedLeasePath(name), "utf-8");
     const parsed = JSON.parse(raw) as MaintenanceLease;
     if (!parsed || typeof parsed !== "object" || !parsed.token || !parsed.expires_at) return null;
     return parsed;
@@ -80,8 +86,8 @@ async function readLease(): Promise<MaintenanceLease | null> {
   }
 }
 
-async function writeLease(lease: MaintenanceLease): Promise<void> {
-  const path = leasePath();
+async function writeLease(lease: MaintenanceLease, name?: string): Promise<void> {
+  const path = namedLeasePath(name);
   const dir = dirname(path);
   await mkdir(dir, { recursive: true }).catch((err: NodeJS.ErrnoException) => {
     if (err?.code !== "EEXIST") throw err;
@@ -112,7 +118,10 @@ function clampTtl(requested: number | undefined): number {
 export async function resolveMaintenanceLease(
   _pointer: MaintenanceLeaseReadPointer,
 ): Promise<ResolverResult> {
-  const lease = await readLease();
+  const own = await readLease(_pointer.name);
+  // An unnamed hold means everything: a named read also sees the global hold
+  // (services/gap-drain-observer.ts reads with names "trace_store" and "change_window").
+  const lease = own && !isExpired(own) ? own : _pointer.name ? await readLease() : own;
   if (!lease || isExpired(lease)) {
     return { shape: "maintenanceLease", body: { held: false } };
   }
@@ -140,20 +149,23 @@ export async function resolveMaintenanceLeaseWrite(
         body: { resolver: "maintenanceLease_write", error: "missing_required_field", field: "holder" },
       };
     }
-    const existing = await readLease();
-    if (existing && !isExpired(existing) && existing.holder !== holder) {
-      return {
-        shape: "maintenanceLeaseWriteResult",
-        body: { acquired: false, held_by: existing.holder, expires_at: existing.expires_at },
-      };
+    const existing = await readLease(pointer.name);
+    const globalHold = pointer.name ? await readLease() : null;
+    for (const h of [existing, globalHold]) {
+      if (h && !isExpired(h) && h.holder !== holder) {
+        return {
+          shape: "maintenanceLeaseWriteResult",
+          body: { acquired: false, held_by: h.holder, expires_at: h.expires_at, name: pointer.name ?? null },
+        };
+      }
     }
     const token = randomBytes(16).toString("hex");
     const acquired_at = now.toISOString();
     const expires_at = new Date(now.getTime() + clampTtl(pointer.ttl_ms)).toISOString();
-    await writeLease({ holder, token, acquired_at, expires_at });
+    await writeLease({ holder, token, acquired_at, expires_at }, pointer.name);
     return {
       shape: "maintenanceLeaseWriteResult",
-      body: { acquired: true, token, holder, expires_at },
+      body: { acquired: true, token, holder, expires_at, name: pointer.name ?? null },
     };
   }
 

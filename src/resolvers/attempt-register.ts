@@ -312,6 +312,26 @@ async function writeLesson(intent: any, attempt_id: string, shas: string[], reas
       await resolveSubstrateGapWrite({ type: "substrateGap_write", gap });
       lessonWrittenInGap = 1;
     }
+  } else if (intent.gap_id && !String(intent.gap_id).startsWith("unknown")) {
+    const now = new Date().toISOString();
+    const reason = `<${attempt_id}> landed <${shas.join(', ')}> and ${reason_suffix}`;
+    await resolveSubstrateGapWrite({
+      type: "substrateGap_write",
+      gap: {
+        id: intent.gap_id,
+        category: "attempt_consequence",
+        source: "substrate_detected",
+        status: "open",
+        detected_at: now,
+        summary: `Attempt ${attempt_id} landed ${shas.join(", ")} and ${reason_suffix}. The landing's own gap was never recorded, so this gap carries the consequence to address.`,
+        classification_metadata: {
+          edit_site: Array.isArray(intent.touched_files) ? intent.touched_files[0] : undefined,
+          attempt_id,
+          failure_lessons: [{ class: "attempt_consequence", reason, at: now, attempt_id }],
+        },
+      },
+    } as never);
+    lessonWrittenInGap = 1;
   }
 
   const lessonFile = "/workspace/proposals/compose-file-lessons.jsonl";

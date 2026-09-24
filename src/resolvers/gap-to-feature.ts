@@ -3897,7 +3897,49 @@ export async function resolveGapToFeature(pointer: GapToFeaturePointer): Promise
           return denom > 0 ? x / denom : 0;
         };
         const samples: Array<{ id: string; draw: number }> = [];
-        for (const id of family) {
+// Build Thompson-sampling family via paged read to work around /v2/activities/templates limit=100 cap.
+// Cache per-root for a few minutes to avoid N-page scans on each observer dispatch.
+const familySample: string[] = await (async () => {
+  try {
+    const rootId = normalizeId(selectedTemplateId);
+    type CacheEntry = { ids: string[]; at: number };
+    const g = globalThis as unknown as Record<string, unknown>;
+    const cacheKey = "__dv_variant_family_cache__";
+    const cacheTTLms = 3 * 60_000; // 3 minutes
+    if (!g[cacheKey]) g[cacheKey] = new Map<string, CacheEntry>();
+    const cache = g[cacheKey] as Map<string, CacheEntry>;
+    const hit = cache.get(rootId);
+    const now = Date.now();
+    if (hit && now - hit.at < cacheTTLms && Array.isArray(hit.ids) && hit.ids.length > 0) return hit.ids.slice();
+
+    const limit = 100;
+    const maxPages = 40; // safety bound (<= 4k templates)
+    const baseUrl = reachEndpoint; // same host used elsewhere in this resolver
+    const headers = { "Content-Type": "application/json", ...auth } as Record<string, string>;
+    const collected: string[] = [rootId];
+    for (let page = 0; page < maxPages; page++) {
+      const offset = page * limit;
+      const url = `${baseUrl}/v2/activities/templates?limit=${limit}&offset=${offset}`;
+      const r = await fetch(url, { headers, signal: AbortSignal.timeout(10_000) });
+      if (!r.ok) break;
+      const body = (await r.json().catch(() => ({}))) as { templates?: Array<Record<string, unknown>> };
+      const rows = Array.isArray(body.templates) ? body.templates : [];
+      for (const row of rows) {
+        const vid = String(row["variant_of"] ?? "");
+        const id = String(row["id"] ?? "");
+        if (vid && id && normalizeId(vid) === rootId) collected.push(normalizeId(id));
+      }
+      if (rows.length < limit) break; // last page reached
+    }
+    const uniq = Array.from(new Set(collected));
+    cache.set(rootId, { ids: uniq, at: now });
+    return uniq;
+  } catch {
+    // Fall back to sampling ONLY the selected base when reads fail.
+    return [normalizeId(selectedTemplateId)];
+  }
+})();
+        for (const id of familySample) {
           const activity_id = normalizeId(id);
           let a = 1, b = 1;
           try {

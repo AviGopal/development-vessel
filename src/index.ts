@@ -18,6 +18,11 @@ import { VESSEL_ID } from "./config.js";
 // and it reads exactly this field — but only if the vessel actually emits it.
 // development-vessel did not, so the deferral built for that purpose could never
 // protect the vessel whose runs are the longest in the fleet.
+// DRAIN BUDGET SIZED TO THE STAGE IT PROTECTS (resumable landings 2.1b): the only work a
+// drain must outwait is a cutover's commit+push; everything before it is parked or cheap
+// to redo. Stays below the unit's 300 s TimeoutStopSec so the drain always finishes first.
+const CUTOVER_STAGE_MS = Number(process.env["DEV_VESSEL_CUTOVER_STAGE_MS"] ?? 180_000);
+const DEV_VESSEL_DRAIN_MS = CUTOVER_STAGE_MS + 60_000;
 let readInFlight: () => number = () => 0;
 export function publishInFlight(fn: () => number): void { readInFlight = fn; }
 
@@ -45,7 +50,7 @@ app.get("/health", (c) => {
     //
     // Same number the drain itself uses, read from the same env, so the value the
     // converger trusts is the value the drain will honour.
-    drain_ms: Number(process.env["DEV_VESSEL_DRAIN_MS"] ?? process.env["VESSEL_DRAIN_MS"] ?? 240000),
+    drain_ms: DEV_VESSEL_DRAIN_MS,
     discovery: { registered: isRegistered() },
   });
 });
@@ -317,7 +322,7 @@ async function developmentVesselDrain(sig: string): Promise<void> {
 // composes that would have finished. The ordering invariant still holds and is the
 // whole point: drain budget (240s) < stop timeout (300s), so this deadline fires
 // before systemd's SIGKILL and the process exits on its own terms.
-const deadline = Date.now() + Number(process.env["DEV_VESSEL_DRAIN_MS"] ?? process.env["VESSEL_DRAIN_MS"] ?? 240000);
+const deadline = Date.now() + DEV_VESSEL_DRAIN_MS;
   const markerDir = "/workspace/authoring-inflight";
   const freshMs = Number(process.env["DEV_VESSEL_DRAIN_FRESH_MS"] ?? 600000);
   try {
@@ -333,6 +338,22 @@ const deadline = Date.now() + Number(process.env["DEV_VESSEL_DRAIN_MS"] ?? proce
           } catch { /* vanished mid-scan — not in flight */ }
         }
       } catch { break; }
+      // WAIT ONLY FOR CUTOVERS IN PROGRESS (resumable landings). A compose that passed its
+      // gates has already parked its patch (/workspace/parked-landings) before calling the
+      // cutover, and a draft/verify stage is cheap to redo, so neither is worth holding a
+      // restart for. A cutover mid commit+push holds the change_window lease under name
+      // "cutover" - that is the one stage a restart can still destroy.
+      let cutoversLive = 0;
+      try {
+        const { resolveMaintenanceLease } = await import("./resolvers/maintenance-lease.js");
+        const lease = (await resolveMaintenanceLease({ type: "maintenanceLease" })).body as { holds?: Array<{ name: string | null }> };
+        cutoversLive = (lease.holds ?? []).filter((h) => h.name === "cutover").length;
+      } catch { /* lease unreadable: fall through to the request/marker signals below */ }
+      if (cutoversLive === 0) {
+        console.log(`[development-vessel] ${sig}: drained (0 cutovers in progress; ${inFlightRequests} request(s) and ${live} authoring run(s) in draft/verify are parked or re-picked, not waited for)`);
+        break;
+      }
+      console.log(`[development-vessel] ${sig}: ${cutoversLive} cutover(s) in progress - waiting for push`);
       // Both signals must be quiet: a marker-free vessel can still be mid-compose.
       if (live === 0 && inFlightRequests === 0) { console.log(`[development-vessel] ${sig}: drained (0 authoring runs, 0 requests in flight)`); break; }
       if (live === 0 && inFlightRequests > 0) {

@@ -2109,7 +2109,10 @@ export async function verifyPatchAddressesGap(args: {
   // the gap author already dictated the bytes; the spec is the oracle and a refuter that
   // "disagrees" with it can only be confabulating (measured 2026-09-24 05:26Z, regex escaping).
   const _specExact = (() => {
-    const changed = args.diff.split("\n").filter((l) => /^[+-](?![+-])/.test(l)).map((l) => l.slice(1).trim()).filter((l) => l.length > 0);
+    // SUBSTANTIVE lines only: a bare brace, a lone `);` or a short keyword line is quoted by
+    // accident in almost any gap text, so `includes` on it proves nothing. Require an
+    // identifier-bearing line of some length, and require EVERY such line to be quoted.
+    const changed = args.diff.split("\n").filter((l) => /^[+-](?![+-])/.test(l)).map((l) => l.slice(1).trim()).filter((l) => l.replace(/\s+/g, "").length >= 12 && /[A-Za-z_$][\w$]{2,}/.test(l));
     return changed.length > 0 && changed.every((l) => args.gapSummary.includes(l));
   })();
   if (_specExact) console.log(`[feature-compose] spec-exact patch: refuters not consulted (the spec is the oracle)`);

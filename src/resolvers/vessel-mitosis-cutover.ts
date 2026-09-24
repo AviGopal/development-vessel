@@ -27,6 +27,16 @@ import { resolveActivateSubstrateScript } from "./activate-substrate-script.js";
 import { resolveMaintenanceLeaseWrite } from "./maintenance-lease";
 import { gateLanding, KILL_SWITCH_REASON, landingsStopped } from "./push-policy.js";
 import { CUTOVER_QUIESCE_MAX_MS } from "../compose-slots.js";
+export function selfRestartAlreadyOwed(vesselName: string): string | null {
+  try {
+    const r = Bun.spawnSync(["systemctl", "list-units", "--all", "--plain", "--no-legend", "mitosis-self-restart-*"], { stdout: "pipe", stderr: "pipe" });
+    for (const line of new TextDecoder().decode(r.stdout ?? new Uint8Array()).split("\n")) {
+      const f = line.trim().split(/\s+/);
+      if (f[0] && f[0]!.includes(vesselName) && (f[2] === "active" || f[2] === "activating")) { console.log(`[mitosis-cutover] self-restart already owed by ${f[0]} — not scheduling another`); return f[0]!; }
+    }
+  } catch { /* unobservable: schedule as before */ }
+  return null;
+}
 
 /**
  * vessel_mitosis_cutover — promotes a mitosis track to the canonical position
@@ -2780,7 +2790,7 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
             + `rm -f '${quiesceDir}/${vessel_name}' 2>/dev/null; `
             + `exec systemctl restart '${unit}'`;
           const proc = Bun.spawnSync(
-            [sysdRun, `--on-active=${delaySec}s`, `--unit=${tsUnit}`, "--collect", "/bin/sh", "-c", restartScript],
+            selfRestartAlreadyOwed(vessel_name) ? ["/bin/true"] : [sysdRun, `--on-active=${delaySec}s`, `--unit=${tsUnit}`, "--collect", "/bin/sh", "-c", restartScript],
             { stdout: "pipe", stderr: "pipe" },
           );
           const ok = (proc.exitCode ?? 1) === 0;

@@ -3845,16 +3845,25 @@ export async function resolveGapToFeature(pointer: GapToFeaturePointer): Promise
           const raw = String(s ?? "");
           return raw.replace(/^activity:/, "").replace(/[<>⟨⟩]/g, "");
         };
-        const tRes = await fetch(`${reachEndpoint}/v2/activities/templates?limit=2000`, {
-          method: "GET",
-          headers: { ...auth },
-          signal: AbortSignal.timeout(10_000),
-        });
         let family: string[] = [baseId];
-        if (tRes.ok) {
-          const body = (await tRes.json().catch(() => ({}))) as { templates?: Array<Record<string, unknown>> };
-          const templates = Array.isArray(body.templates) ? body.templates : [];
+        {
+          // /templates clamps limit to 100 (activity-api routes/activities.ts) — one page of a
+          // ~2,800-template catalogue never held the variants, so this family was always [base]
+          // ("family sampled: 1 member(s)", every tick). Page by offset until a short page.
           const baseNorm = normalizeId(baseId);
+          const templates: Array<Record<string, unknown>> = [];
+          for (let offset = 0; offset < 4000; offset += 100) {
+            const tRes = await fetch(`${reachEndpoint}/v2/activities/templates?limit=100&offset=${offset}`, {
+              method: "GET",
+              headers: { ...auth },
+              signal: AbortSignal.timeout(10_000),
+            });
+            if (!tRes.ok) break;
+            const body = (await tRes.json().catch(() => ({}))) as { templates?: Array<Record<string, unknown>> };
+            const page = Array.isArray(body.templates) ? body.templates : [];
+            templates.push(...page);
+            if (page.length < 100) break;
+          }
           for (const t of templates) {
             const id = normalizeId(t["id"]);
             const varOf = normalizeId(t["variant_of"]);

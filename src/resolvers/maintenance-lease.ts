@@ -29,7 +29,7 @@
 
 import { WORKSPACE_ROOT as DEFAULT_WORKSPACE_ROOT } from "../config.js";
 import type { ResolverResult } from "./types.js";
-import { readFile, writeFile, rename, mkdir, unlink } from "node:fs/promises";
+import { readFile, writeFile, rename, mkdir, unlink, readdir } from "node:fs/promises";
 import { join, dirname } from "node:path";
 import { randomBytes } from "node:crypto";
 
@@ -105,6 +105,25 @@ async function deleteLease(name?: string): Promise<void> {
   }
 }
 
+/** Every unexpired hold in the lease directory, the unnamed global first. */
+async function listHolds(): Promise<Array<MaintenanceLease & { name: string | null }>> {
+  let files: string[] = [];
+  try {
+    files = await readdir(dirname(leasePath()));
+  } catch {
+    return [];
+  }
+  const holds: Array<MaintenanceLease & { name: string | null }> = [];
+  for (const f of files) {
+    const m = /^maintenance(?:-(.+))?\.json$/.exec(f);
+    if (!m) continue;
+    const name = m[1] ?? null;
+    const lease = await readLease(name ?? undefined);
+    if (lease && !isExpired(lease)) holds.push({ ...lease, name });
+  }
+  return holds.sort((a, b) => (a.name === null ? -1 : b.name === null ? 1 : 0));
+}
+
 function isExpired(lease: MaintenanceLease): boolean {
   const exp = new Date(lease.expires_at).getTime();
   return !Number.isFinite(exp) || exp <= Date.now();
@@ -121,7 +140,7 @@ export async function resolveMaintenanceLease(
   const own = await readLease(_pointer.name);
   // An unnamed hold means everything: a named read also sees the global hold
   // (services/gap-drain-observer.ts reads with names "trace_store" and "change_window").
-  const lease = own && !isExpired(own) ? own : _pointer.name ? await readLease() : own;
+  const lease = own && !isExpired(own) ? own : _pointer.name ? await readLease() : ((await listHolds())[0] ?? own);
   if (!lease || isExpired(lease)) {
     return { shape: "maintenanceLease", body: { held: false } };
   }
@@ -132,6 +151,9 @@ export async function resolveMaintenanceLease(
       holder: lease.holder,
       acquired_at: lease.acquired_at,
       expires_at: lease.expires_at,
+      holds: _pointer.name
+        ? undefined
+        : (await listHolds()).map((h) => ({ name: h.name, holder: h.holder, acquired_at: h.acquired_at, expires_at: h.expires_at })),
     },
   };
 }
@@ -151,7 +173,9 @@ export async function resolveMaintenanceLeaseWrite(
     }
     const existing = await readLease(pointer.name);
     const globalHold = pointer.name ? await readLease() : null;
-    for (const h of [existing, globalHold]) {
+    // An unnamed acquire is refused while ANY hold exists (named ones included).
+    const namedHolds: MaintenanceLease[] = pointer.name ? [] : await listHolds();
+    for (const h of [existing, globalHold, ...namedHolds]) {
       if (h && !isExpired(h) && h.holder !== holder) {
         return {
           shape: "maintenanceLeaseWriteResult",
@@ -197,14 +221,23 @@ export async function resolveMaintenanceLeaseWrite(
         body: { resolver: "maintenanceLease_write", error: "missing_required_field", field: "token" },
       };
     }
-    const existing = await readLease(pointer.name);
+    let releaseName = pointer.name;
+    let existing = await readLease(releaseName);
+    // A release without a name still releases a hold its caller took under a name.
+    if (!pointer.name && (!existing || existing.token !== token)) {
+      const match = (await listHolds()).find((h) => h.name !== null && h.token === token);
+      if (match) {
+        existing = match;
+        releaseName = match.name ?? undefined;
+      }
+    }
     if (!existing) {
       return { shape: "maintenanceLeaseWriteResult", body: { released: true, note: "already_absent" } };
     }
     if (existing.token !== token) {
       return { shape: "maintenanceLeaseWriteResult", body: { released: false, error: "token_mismatch" } };
     }
-    await deleteLease(pointer.name);
+    await deleteLease(releaseName);
     return { shape: "maintenanceLeaseWriteResult", body: { released: true } };
   }
 

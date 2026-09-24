@@ -372,7 +372,7 @@ async function callTool(endpoint: string, tool: string, args: Json): Promise<{ o
     const res = await fetch(endpoint, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `ApiKey ${METABOB_API_KEY}` },
-      body: JSON.stringify({ impulse: { pointer: { type: tool, ...args } } }),
+      body: JSON.stringify({ impulse: { pointer: { type: tool, ...(tool === "shell" ? { timeout_sec: 300 } : {}), ...args } } }),
       signal: AbortSignal.timeout(PER_CALL_TIMEOUT_MS),
     });
     const body = (await res.json().catch(() => ({}))) as Json;

@@ -4439,7 +4439,9 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
         // Guard 2: consult the whole file before refusing.
         let referencedSomewhere = false;
         for (const op of editOnly) {
-          const names = (op.new_string ?? "").match(/(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=/g) ?? [];
+          const _oldLines = new Set((op.old_string ?? "").split("\n").map((l) => l.trim()));
+          const _addedText = (op.new_string ?? "").split("\n").filter((l) => !_oldLines.has(l.trim())).join("\n");
+          const names = _addedText.match(/(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=/g) ?? [];
           const path = (op.path ?? "").replace(/:\d+.*$/, "").trim();
           if (!path) continue;
           let current = "";

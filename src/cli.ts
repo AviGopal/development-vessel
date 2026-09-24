@@ -42,7 +42,14 @@ async function upsertVersionBumpedSeeds(
         current++;
         continue;
       }
-      const body = { ...(t as Record<string, unknown>), proposed: false, org_id: "organizations:substrate" };
+      // Same tag sanitising activity_create_variant applies before it posts: activity-api's
+      // TagSchema is /^[a-z][a-z0-9]*(\.[a-z][a-z0-9]*)*$/, and seeds carry hyphenated tags
+      // (e.g. "db.maintenance.trace-store") that the variant path always rewrote.
+      const rawTags = (t as { tags?: unknown }).tags;
+      const tags = Array.isArray(rawTags)
+        ? rawTags.map((tag) => (typeof tag === "string" ? tag.toLowerCase().replace(/-/g, ".").replace(/[^a-z0-9.]/g, "") : tag))
+        : rawTags;
+      const body = { ...(t as Record<string, unknown>), tags, proposed: false, org_id: "organizations:substrate" };
       const w = await fetch(`${endpoint}/v2/activities/templates`, { method: "POST", headers, body: JSON.stringify(body), signal: AbortSignal.timeout(15_000) });
       if (w.ok) {
         upserted++;

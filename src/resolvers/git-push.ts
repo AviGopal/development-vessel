@@ -1,4 +1,5 @@
 import type { ResolverResult } from "./types.js";
+import { gateLanding, parseRemoteTarget } from "./push-policy.js";
 
 export interface GitPushPointer {
   type: "git_push";
@@ -22,6 +23,22 @@ export async function resolveGitPush(p: GitPushPointer): Promise<ResolverResult>
     };
   }
   const remote = p.remote ?? "origin";
+  // Same gate as the cutover: the MITOSIS_DIRECT_PUSH=0 emergency stop, then the
+  // pushPolicy scope for the remote's push URL. A volume with no policy file is
+  // grandfathered and pushes as before.
+  const gate = gateLanding({ remoteUrl: await pushUrlOf(remote, p.cwd), branch: p.branch });
+  if (!gate.allowed) {
+    return {
+      shape: "structuredError",
+      body: {
+        resolver: "git_push",
+        detail: gate.reason,
+        failure_mode: "safety_breach",
+        kind: gate.kind,
+        ...(gate.scope ? { push_scope: gate.scope } : {}),
+      },
+    };
+  }
   const args = ["push"];
   if (p.set_upstream !== false) args.push("-u");
   args.push(remote, p.branch);
@@ -41,4 +58,16 @@ export async function resolveGitPush(p: GitPushPointer): Promise<ResolverResult>
     shape: "gitPushResult",
     body: { remote, branch: p.branch, stdout, stderr },
   };
+}
+
+/** Where `git push <remote>` goes: the remote's push URL, or the remote itself when it is already a URL. */
+async function pushUrlOf(remote: string, cwd: string | undefined): Promise<string | null> {
+  try {
+    const proc = Bun.spawn(["git", "remote", "get-url", "--push", remote], { cwd, stdout: "pipe", stderr: "pipe" });
+    const out = (await new Response(proc.stdout).text()).trim();
+    if ((await proc.exited) === 0 && out) return out;
+  } catch {
+    // fall through: not a configured remote name here
+  }
+  return parseRemoteTarget(remote) ? remote : null;
 }

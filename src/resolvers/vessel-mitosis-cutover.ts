@@ -25,6 +25,7 @@ import { resolveTestSuite } from "./test-suite.js";
 import { runBehavioralVerification } from "./behavioral-verification.js";
 import { resolveActivateSubstrateScript } from "./activate-substrate-script.js";
 import { resolveMaintenanceLeaseWrite } from "./maintenance-lease";
+import { gateLanding, KILL_SWITCH_REASON, landingsStopped } from "./push-policy.js";
 import { CUTOVER_QUIESCE_MAX_MS } from "../compose-slots.js";
 
 /**
@@ -270,6 +271,8 @@ async function maybeEmitIntentForRefuse(args: {
   refuse_class: "insufficient_data_verdict" | "live_source_unreadable" | "base_sha_mismatch";
 }): Promise<ResolverResult | null> {
   if (process.env["MITOSIS_HOST_SYNC_MODE"] !== "1") return null;
+  // A host-sync intent is a landing handed to a poller; the emergency stop covers it.
+  if (landingsStopped()) return null;
   const { pointer } = args;
   // Require an explicit mitosis_root + staged_files: host-sync intent is
   // pointer-driven; without these the poller cannot identify what to apply.
@@ -1878,6 +1881,52 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
     );
   }
 
+  // EMERGENCY STOP, then PUSH SCOPE — one gate (push-policy.ts gateLanding) shared
+  // with every other push path in this vessel. MITOSIS_DIRECT_PUSH=0 stops every
+  // landing whatever pushPolicy says: no commit, no in-container push, no host-sync
+  // intent for a poller to push. Otherwise the landing target is the push clone's
+  // origin at `dev`; under a recorded pushPolicy its owner must be
+  // SUBSTRATE_REPO_OWNER, or the target must carry a promotion whose evidence
+  // pushPolicy_write verified. The policy is read here on every landing, so a
+  // withdrawn promotion takes effect on the next landing without a restart. A
+  // volume with no policy file is `grandfathered`: the landing proceeds exactly as
+  // it always has. Refused before anything is written, so the clone is untouched.
+  // A refused landing is not redirected to the owner's own copy of the target; the
+  // refusal names it.
+  // `--push` so the verdict names where `git push origin dev` will actually go
+  // (pushurl / pushInsteadOf expanded), not merely where the clone fetches from.
+  if (landingsStopped()) {
+    return softRefuse(KILL_SWITCH_REASON, { kind: "push_kill_switch", vessel_name });
+  }
+  const scopeRemote = await runGit(pointer.git_cmd ?? "git", ["remote", "get-url", "--push", "origin"], hostRepoRoot);
+  const landingGate = gateLanding({
+    remoteUrl: scopeRemote.exit_code === 0 ? scopeRemote.stdout.trim() : null,
+    branch: "dev",
+  });
+  if (landingGate.kind === "push_kill_switch") {
+    return softRefuse(landingGate.reason, { kind: "push_kill_switch", vessel_name });
+  }
+  const pushScope = landingGate.scope;
+  console.error(
+    `[mitosis-cutover] push-scope regime=${pushScope.regime} allowed=${pushScope.allowed} ` +
+    `target=${pushScope.target ? `${pushScope.target.owner}/${pushScope.target.repo}@${pushScope.target.branch}` : "unknown"} ` +
+    `scope_owner=${pushScope.scope_owner || "unset"} shared=${pushScope.shared} promoted=${pushScope.promoted}`,
+  );
+  if (pushScope.regime === "grandfathered" && pushScope.target && pushScope.scope_owner &&
+      pushScope.target.owner.toLowerCase() !== pushScope.scope_owner.toLowerCase()) {
+    console.error(
+      `[mitosis-cutover] push-scope WARN: landing on ${pushScope.target.owner}, outside SUBSTRATE_REPO_OWNER=${pushScope.scope_owner}; ` +
+      `allowed only because no pushPolicy is recorded`,
+    );
+  }
+  if (!landingGate.allowed) {
+    return softRefuse(landingGate.reason, {
+      kind: "push_scope_refused",
+      vessel_name,
+      push_scope: pushScope,
+    });
+  }
+
   // ---- Host-sync intent emission (2026-06-04, Stage B.3) ----
   // When the cutover runs inside the container, `/workspace/repos` is a
   // read-only bind mount of the host super-repo and direct git writes
@@ -2795,6 +2844,15 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
     host_repo_root: hostRepoRoot,
     vessel_restarted: vesselRestarted,
     applied_at: appliedAt,
+    // Where this landing went and under which push-scope regime, so a trace
+    // answers "which owner's branch did this reach, and on what authority".
+    push_scope: {
+      regime: pushScope.regime,
+      target: pushScope.target,
+      scope_owner: pushScope.scope_owner || null,
+      shared: pushScope.shared,
+      promoted: pushScope.promoted,
+    },
   };
   // Threaded to the pending-land stamp below: a behavioral verification that RAN and
   // FAILED must NOT earn landed_verified credit. Stays false when the check does not run

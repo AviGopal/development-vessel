@@ -38,6 +38,11 @@ const MITOSIS_ENV_KEYS = [
   "MITOSIS_HOST_REPO_ROOT",
 ] as const;
 const savedMitosisEnv: Record<string, string | undefined> = {};
+// The push-scope inputs are read at landing time from the environment and the
+// pushPolicy file. Cleared (and the policy path pointed at a file that does not
+// exist) so a policy or owner on the host running the suite cannot change a verdict.
+const PUSH_SCOPE_ENV_KEYS = ["PUSH_POLICY_PATH", "SUBSTRATE_REPO_OWNER"] as const;
+const savedPushScopeEnv: Record<string, string | undefined> = {};
 
 beforeEach(async () => {
   tmpRoot = await mkdtemp(join(tmpdir(), "mitosis-cut-"));
@@ -50,6 +55,11 @@ beforeEach(async () => {
     savedMitosisEnv[k] = process.env[k];
     delete process.env[k];
   }
+  for (const k of PUSH_SCOPE_ENV_KEYS) {
+    savedPushScopeEnv[k] = process.env[k];
+    delete process.env[k];
+  }
+  process.env["PUSH_POLICY_PATH"] = join(tmpRoot, "no-push-policy.json");
 });
 
 afterEach(async () => {
@@ -60,6 +70,10 @@ afterEach(async () => {
   for (const k of MITOSIS_ENV_KEYS) {
     if (savedMitosisEnv[k] === undefined) delete process.env[k];
     else process.env[k] = savedMitosisEnv[k];
+  }
+  for (const k of PUSH_SCOPE_ENV_KEYS) {
+    if (savedPushScopeEnv[k] === undefined) delete process.env[k];
+    else process.env[k] = savedPushScopeEnv[k];
   }
   await rm(tmpRoot, { recursive: true, force: true });
 });
@@ -769,6 +783,144 @@ describe("vessel_mitosis_cutover", () => {
       if (originalMode !== undefined)
         process.env["MITOSIS_HOST_SYNC_MODE"] = originalMode;
     }
+  });
+
+  // ---- Push scope: SUBSTRATE_REPO_OWNER + the pushPolicy impulse ----
+  //
+  // The remote is an ssh:// URL on a closed local port: it parses as owner/repo, so the
+  // scope gate evaluates a real target, and the clean-slate fetch fails fast instead of
+  // reaching the network (the reset then falls back to the local origin/dev ref).
+  async function pointAtOwner(hostRepoRoot: string, owner: string): Promise<void> {
+    const { spawnSync } = await import("node:child_process");
+    spawnSync("git", ["remote", "set-url", "origin", `ssh://git@127.0.0.1:1/${owner}/development-vessel.git`], { cwd: hostRepoRoot });
+  }
+  async function headOf(repo: string): Promise<string> {
+    const { spawnSync } = await import("node:child_process");
+    return String(spawnSync("git", ["rev-parse", "HEAD"], { cwd: repo }).stdout).trim();
+  }
+  // What the bootstrap writes on a new volume: a policy with no promotion.
+  async function seedFreshInstallPolicy(): Promise<void> {
+    process.env["PUSH_POLICY_PATH"] = join(tmpRoot, "push-policy.json");
+    await writeFile(process.env["PUSH_POLICY_PATH"], JSON.stringify({ promotion: { granted: false }, shared_targets: [], set_by: "bootstrap" }));
+  }
+  // One settled-held attempt and one reached trace, so a promotion can be verified without a ledger or trace store.
+  const KNOWN_EVIDENCE = {
+    settlementVerdict: (id: string) => (id === "att_settled_held_1" ? "held" : null),
+    traceReached: async (id: string) => (id === "exec_verify" ? true : ("missing" as const)),
+  };
+  function gitCutoverPointer(p: { baseRoot: string; mitosisRoot: string; hostRepoRoot: string; baseSha: string; appliedLog: string }) {
+    return {
+      type: "vessel_mitosis_cutover" as const,
+      vessel_name: "development-vessel",
+      base_version_id: "v1",
+      mitosis_version_id: "mitosis-2026-06-03T00-00-00Z",
+      mitosis_root: p.mitosisRoot,
+      base_root: p.baseRoot,
+      host_repo_root: p.hostRepoRoot,
+      staged_base_sha: p.baseSha,
+      staged_files: ["src/resolvers/target.ts"],
+      proposal_id: "proposal-push-scope",
+      gap_id: "gap-push-scope",
+      evaluation_evidence: FAVORABLE_EVIDENCE,
+      skip_push: true,
+      skip_restart: true,
+      applied_log_path: p.appliedLog,
+    };
+  }
+
+  it("push scope: with no pushPolicy recorded, a landing outside SUBSTRATE_REPO_OWNER proceeds as before (grandfathered)", async () => {
+    const fx = await setupForGitCutover();
+    await pointAtOwner(fx.hostRepoRoot, "Upstream");
+    process.env["SUBSTRATE_REPO_OWNER"] = "\"Fork\"";
+    const r = await resolveVesselMitosisCutover(gitCutoverPointer(fx));
+    expect(r.shape).toBe("cutoverApplied");
+    const scope = (r.body as { push_scope: { regime: string; target: { owner: string } } }).push_scope;
+    expect(scope.regime).toBe("grandfathered");
+    expect(scope.target.owner).toBe("Upstream");
+  });
+
+  it("push scope: a fresh install refuses another owner's shared branch, naming the missing promotion, and leaves the clone untouched", async () => {
+    const fx = await setupForGitCutover();
+    await pointAtOwner(fx.hostRepoRoot, "Upstream");
+    process.env["SUBSTRATE_REPO_OWNER"] = "Fork";
+    await seedFreshInstallPolicy();
+    const before = await headOf(fx.hostRepoRoot);
+    const r = await resolveVesselMitosisCutover(gitCutoverPointer(fx));
+    expect(r.shape).toBe("vesselMitosisCutoverResult");
+    const body = r.body as { refused: boolean; kind: string; refusal_reason: string };
+    expect(body.refused).toBe(true);
+    expect(body.kind).toBe("push_scope_refused");
+    expect(body.refusal_reason).toContain("requires a pushPolicy promotion");
+    expect(body.refusal_reason).toContain("Fork/development-vessel@dev");
+    expect(await headOf(fx.hostRepoRoot)).toBe(before);
+  });
+
+  it("push scope: a fresh install lands on its own owner's branch without a promotion", async () => {
+    const fx = await setupForGitCutover();
+    await pointAtOwner(fx.hostRepoRoot, "Fork");
+    process.env["SUBSTRATE_REPO_OWNER"] = "fork";
+    await seedFreshInstallPolicy();
+    const r = await resolveVesselMitosisCutover(gitCutoverPointer(fx));
+    expect(r.shape).toBe("cutoverApplied");
+    const scope = (r.body as { push_scope: { regime: string; shared: boolean } }).push_scope;
+    expect(scope.regime).toBe("policy");
+    expect(scope.shared).toBe(false);
+  });
+
+  it("push scope: a withdrawn promotion is read by the next landing without a restart", async () => {
+    const { resolvePushPolicyWrite } = await import("../../src/resolvers/push-policy.js");
+    process.env["PUSH_POLICY_PATH"] = join(tmpRoot, "push-policy.json");
+    process.env["SUBSTRATE_REPO_OWNER"] = "Fork";
+    // A bare grant is not a promotion: it must cite evidence that resolves.
+    const bare = await resolvePushPolicyWrite({ type: "pushPolicy_write", promotion: { granted: true } }, KNOWN_EVIDENCE);
+    expect(bare.shape).toBe("structuredError");
+    const granted = await resolvePushPolicyWrite({
+      type: "pushPolicy_write",
+      promotion: { granted: true, evidence: { attempt_ids: ["att_settled_held_1"], trace_ids: ["exec_verify"] } },
+      set_by: "test",
+    }, KNOWN_EVIDENCE);
+    expect(granted.shape).toBe("pushPolicyWriteResult");
+
+    const fx = await setupForGitCutover();
+    await pointAtOwner(fx.hostRepoRoot, "Upstream");
+    const r1 = await resolveVesselMitosisCutover(gitCutoverPointer(fx));
+    expect(r1.shape).toBe("cutoverApplied");
+    const s1 = (r1.body as { push_scope: { regime: string; shared: boolean; promoted: boolean } }).push_scope;
+    expect(s1).toMatchObject({ regime: "policy", shared: true, promoted: true });
+
+    // Withdraw in the same process — no restart, no module reload.
+    await resolvePushPolicyWrite({ type: "pushPolicy_write", promotion: { granted: false }, set_by: "test", reason: "withdrawn" }, KNOWN_EVIDENCE);
+    const r2 = await resolveVesselMitosisCutover(gitCutoverPointer(fx));
+    expect(r2.shape).toBe("vesselMitosisCutoverResult");
+    const b2 = r2.body as { kind: string; refusal_reason: string };
+    expect(b2.kind).toBe("push_scope_refused");
+    expect(b2.refusal_reason).toContain("no promotion recorded");
+  });
+
+  it("push scope: an own-owner branch declared shared needs a promotion too", async () => {
+    const { resolvePushPolicyWrite } = await import("../../src/resolvers/push-policy.js");
+    process.env["PUSH_POLICY_PATH"] = join(tmpRoot, "push-policy.json");
+    process.env["SUBSTRATE_REPO_OWNER"] = "Fork";
+    await resolvePushPolicyWrite({ type: "pushPolicy_write", promotion: { granted: false }, shared_targets: ["fork/*@dev"] }, KNOWN_EVIDENCE);
+    const fx = await setupForGitCutover();
+    await pointAtOwner(fx.hostRepoRoot, "Fork");
+    const r = await resolveVesselMitosisCutover(gitCutoverPointer(fx));
+    expect((r.body as { kind?: string }).kind).toBe("push_scope_refused");
+  });
+
+  it("push scope: MITOSIS_DIRECT_PUSH=0 stops the landing even with a promotion", async () => {
+    const { resolvePushPolicyWrite } = await import("../../src/resolvers/push-policy.js");
+    process.env["PUSH_POLICY_PATH"] = join(tmpRoot, "push-policy.json");
+    process.env["SUBSTRATE_REPO_OWNER"] = "Fork";
+    const g = await resolvePushPolicyWrite({ type: "pushPolicy_write", promotion: { granted: true, evidence: { attempt_ids: ["att_settled_held_1"], trace_ids: ["exec_verify"] } } }, KNOWN_EVIDENCE);
+    expect(g.shape).toBe("pushPolicyWriteResult");
+    process.env["MITOSIS_DIRECT_PUSH"] = "0";
+    const fx = await setupForGitCutover();
+    await pointAtOwner(fx.hostRepoRoot, "Fork");
+    const before = await headOf(fx.hostRepoRoot);
+    const r = await resolveVesselMitosisCutover(gitCutoverPointer(fx));
+    expect((r.body as { kind?: string }).kind).toBe("push_kill_switch");
+    expect(await headOf(fx.hostRepoRoot)).toBe(before);
   });
 });
 

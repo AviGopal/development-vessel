@@ -127,6 +127,10 @@ export const config = {
       "docs_decision_deliver",
       "docFixPolicy",
       "docFixPolicy_write",
+      // Push scope (read by vessel_mitosis_cutover at landing time): where a landing may
+      // go, and the evidence-cited promotion that opens another owner's shared branch.
+      "pushPolicy",
+      "pushPolicy_write",
       "docs_decision_answer_scan",
       "substrate_health_tick",
       "compose_topology_tick",

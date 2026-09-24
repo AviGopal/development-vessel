@@ -24,8 +24,9 @@ import type { ActivityTemplate } from "@avigopal/ias-executor-ts";
  *
  * FAILURE-PATH RELEASE: this template schema has no declared on-failure
  * branch (grep of src/seed/*.ts / ActivityTemplate found no such field), so
- * if the reconcile or verify task fails mid-run, `release_lease` is simply
- * never reached and the lease is NOT explicitly released here. The lease's
+ * if the reconcile task fails mid-run, `release_lease` is never reached and the
+ * lease is NOT explicitly released here. `release_lease` runs BEFORE `verify` (a dry-run
+ * read that needs no lease), so a verify failure no longer holds it. The lease's
  * own TTL (see maintenance-lease.ts) is the backstop — acquire_lease's
  * ttl_ms is set to bound the abandoned-lease window rather than relying on
  * an in-template failure branch.
@@ -54,6 +55,10 @@ import type { ActivityTemplate } from "@avigopal/ias-executor-ts";
  */
 export const TRACE_STORE_RECONCILE_TEMPLATE: ActivityTemplate = {
   id: "development-vessel:trace-store-reconcile",
+  // Raise seed_version whenever this body changes: the seeder re-uploads a seed only when
+  // its seed_version exceeds the registered row's (see upsertVersionBumpedSeeds in cli.ts).
+  // 2 = lease named trace_store, release before verify, 900 s reconcile timeout.
+  metadata: { seed_version: 2 },
   name: "trace-store-reconcile",
   description:
     "Acquires the maintenance lease, dispatches activity-api's db_admin " +
@@ -214,6 +219,19 @@ export const TRACE_STORE_RECONCILE_TEMPLATE: ActivityTemplate = {
       outputShapes: ["httpResponse"],
     },
     {
+      id: "release_lease",
+      description:
+        "Release the maintenance lease using the same token acquired above.",
+      resolver: "maintenanceLease_write",
+      config: {
+        type: "maintenanceLease_write",
+        op: "release",
+        name: "trace_store",
+        token: "{{extract_lease_token_text}}",
+      },
+      outputShapes: ["maintenanceLeaseWriteResult"],
+    },
+    {
       id: "verify",
       description:
         "Re-read the traceStore counters (dry_run so this check itself never " +
@@ -227,19 +245,6 @@ export const TRACE_STORE_RECONCILE_TEMPLATE: ActivityTemplate = {
       validation: {
         forbiddenPatterns: ['"over_cap":true'],
       },
-    },
-    {
-      id: "release_lease",
-      description:
-        "Release the maintenance lease using the same token acquired above.",
-      resolver: "maintenanceLease_write",
-      config: {
-        type: "maintenanceLease_write",
-        op: "release",
-        name: "trace_store",
-        token: "{{extract_lease_token_text}}",
-      },
-      outputShapes: ["maintenanceLeaseWriteResult"],
     },
   ],
 };

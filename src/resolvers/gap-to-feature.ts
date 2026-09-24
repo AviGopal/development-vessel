@@ -3847,29 +3847,26 @@ export async function resolveGapToFeature(pointer: GapToFeaturePointer): Promise
         };
         let family: string[] = [baseId];
         {
-          // /templates clamps limit to 100 (activity-api routes/activities.ts) — one page of a
-          // ~2,800-template catalogue never held the variants, so this family was always [base]
-          // ("family sampled: 1 member(s)", every tick). Page by offset until a short page.
+          // Ask the registry for the family instead of scanning the catalogue: the
+          // /templates listing pages LIMIT/START without ORDER BY (2,771 rows paged =
+          // 2,722 distinct, 49 duplicates — the variants fell in the gaps), while
+          // GET /v2/activities/:id/variants returns base + variants directly now that
+          // API-key callers can use it (97ff41d).
           const baseNorm = normalizeId(baseId);
-          const templates: Array<Record<string, unknown>> = [];
-          for (let offset = 0; offset < 4000; offset += 100) {
-            const tRes = await fetch(`${reachEndpoint}/v2/activities/templates?limit=100&offset=${offset}`, {
-              method: "GET",
-              headers: { ...auth },
-              signal: AbortSignal.timeout(10_000),
-            });
-            if (!tRes.ok) break;
-            const body = (await tRes.json().catch(() => ({}))) as { templates?: Array<Record<string, unknown>> };
-            const page = Array.isArray(body.templates) ? body.templates : [];
-            templates.push(...page);
-            if (page.length < 100) break;
-          }
-          for (const t of templates) {
-            const id = normalizeId(t["id"]);
-            const varOf = normalizeId(t["variant_of"]);
-            const retired = Boolean(t["retired"] ?? false);
-            const deprecated = Boolean(t["deprecated"] ?? false);
-            if (!retired && !deprecated && id && varOf && varOf === baseNorm) family.push(id);
+          const fRes = await fetch(`${reachEndpoint}/v2/activities/${encodeURIComponent(baseNorm)}/variants`, {
+            method: "GET",
+            headers: { ...auth },
+            signal: AbortSignal.timeout(10_000),
+          });
+          if (fRes.ok) {
+            const body = (await fRes.json().catch(() => ({}))) as { variants?: Array<Record<string, unknown>> };
+            for (const v of Array.isArray(body.variants) ? body.variants : []) {
+              const id = normalizeId(v["id"]);
+              const varOf = normalizeId(v["variant_of"]);
+              const retired = Boolean(v["retired"] ?? false);
+              const deprecated = Boolean(v["deprecated"] ?? false);
+              if (!retired && !deprecated && id && varOf && varOf === baseNorm) family.push(id);
+            }
           }
           family = Array.from(new Set(family));
         }

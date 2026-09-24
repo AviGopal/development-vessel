@@ -145,7 +145,7 @@ if (slowQueries !== null && slowQueries > 1000 && !dryRun) {
 // verbatim to /run-goal, so the base template ran 12/12 times today while its
 // registered variants (one with the swap-length timeout) never earned a row.
 // A goal lets goal-host select within the family by posterior.
-remedy: { vessel: "goal-host-vessel", goal: "reconcile the trace store back under its configured cap" },
+remedy: { vessel: "development-vessel", impulse_type: "gap_to_feature" },
             summary:
               `Trace store row_count=${rowCount} exceeds cap=${cap} ` +
               `(last_reconciled_at=${lastReconciledAt ?? "never"}). ` +

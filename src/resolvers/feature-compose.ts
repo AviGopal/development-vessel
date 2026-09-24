@@ -39,13 +39,17 @@ export function assertAnchorInWindow(window: string, ops: ReadonlyArray<{ kind?:
       // multi-line anchor can never be a substring of it; strip the prefixes before judging.
       if (!window.includes(op.old_string) && !window.replace(/^\d+\t/gm, "").includes(op.old_string)) {
         const trimmed = op.old_string.trimEnd();
-        const wouldMatch = trimmed.endsWith(";")
-          ? window.includes(trimmed.slice(0, -1))
-          : false;
+        if (trimmed.endsWith(";")) {
+          const semicolonless = trimmed.slice(0, -1);
+          if (window.includes(semicolonless) || window.replace(/^\d+\t/gm, "").includes(semicolonless)) {
+            continue;
+          }
+        }
+
         missing.push({
           path: op.path || "",
           oldHead: op.old_string.slice(0, 90),
-          wouldMatchWithoutTrailingSemicolon: wouldMatch
+          wouldMatchWithoutTrailingSemicolon: false,
         });
       }
     }

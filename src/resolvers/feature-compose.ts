@@ -4453,8 +4453,8 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
             const nm = /(?:const|let|var)\s+([A-Za-z_$][\w$]*)/.exec(decl)?.[1];
             if (!nm) continue;
             const codeOnly = current
-              .replace(/'(?:[^'\\]|\\.)*'/g, "''")
-              .replace(/"(?:[^"\\]|\\.)*"/g, '""');
+              .replace(/'(?:[^'\\\n]|\\.)*'/g, "''")
+              .replace(/"(?:[^"\\\n]|\\.)*"/g, '""');
             if (new RegExp(`\\b${nm}\\b`).test(codeOnly)) { referencedSomewhere = true; break; }
           }
           if (referencedSomewhere) break;

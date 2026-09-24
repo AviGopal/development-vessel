@@ -4445,6 +4445,23 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
       }
     }
   } catch { /* fail open — a gate that cannot read the tree must not block work */ }
+
+  // A single helper to find the on-disk location of a target file, preferring
+  // the PUSH_CLONE_DIR copy (where edits are applied) over the super-repo copy.
+  // This is necessary for gates that read file contents to verify an edit, as
+  // they would otherwise read from a stale submodule checkout.
+  function targetFileOnDisk(tf: string): string {
+    const m = /^repos\/([^/]+)\/(.+)$/.exec(tf);
+    const cloneRoot = process.env["MITOSIS_PUSH_CLONE_DIR"] ?? "/workspace/git/vessels";
+    if (m) {
+      const p = `${cloneRoot}/${m[1]!}/${m[2]!}`;
+      try {
+        if (require("fs").existsSync(p)) return p;
+      } catch {}
+    }
+    const root = process.env["REPO_ROOT"] ?? process.env["WORKSPACE_ROOT"] ?? "/workspace/git/super-repo";
+    return `${root}/${tf}`;
+  }
   try {
     const editOnly = ops.filter((o) => o.kind === "edit");
     if (editOnly.length > 0) {
@@ -4466,8 +4483,7 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
           let current = "";
           try {
             const { readFile } = await import("node:fs/promises");
-            const root = process.env["REPO_ROOT"] ?? process.env["WORKSPACE_ROOT"] ?? "/workspace/git/super-repo";
-            current = await readFile(`${root}/${path}`, "utf8");
+            current = await readFile(targetFileOnDisk(path), "utf8");
           } catch { current = ""; }
           if (!current) { referencedSomewhere = true; break; }   // cannot verify → do not refuse
           for (const decl of names) {

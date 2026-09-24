@@ -3367,7 +3367,7 @@ async function appendComposeLesson(cls: string, reason: string, vessels: string,
       // dispositioned/skipped, not infinitely recommitted). The failure_lessons write above still
       // records the class so the drafter keeps learning.
       const _recommitDepth = (String(gap.id).match(/recommit-/g) ?? []).length;
-      if (reCommit && _recommitDepth < 2) { const baseId = String(gap.id).replace(/^(?:recommit-)+/, ""); const baseClosed = baseId === String(gap.id) ? (typeof (gap as { status?: unknown }).status === "string" && (gap as { status?: unknown }).status === "closed") : false; if (baseClosed) { console.log(`[compose-lessons] recommit SKIPPED: base gap ${baseId} is closed`); } else {
+      if (reCommit && _recommitDepth < 2 && cls !== "scope_refused") { const baseId = String(gap.id).replace(/^(?:recommit-)+/, ""); const baseClosed = baseId === String(gap.id) ? (typeof (gap as { status?: unknown }).status === "string" && (gap as { status?: unknown }).status === "closed") : false; if (baseClosed) { console.log(`[compose-lessons] recommit SKIPPED: base gap ${baseId} is closed`); } else {
         await resolveSubstrateGapWrite({
           type: "substrateGap_write",
           gap: {
@@ -3693,6 +3693,7 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
         const refusalEndpoint = process.env["METABOB_ENDPOINT"] ?? "http://127.0.0.1:8080";
         const refusalKey = process.env["METABOB_API_KEY"] ?? "";
         const refusalReason = String(ob["error"] ?? "").slice(0, 800);
+        if (ob["stage"] === "scope" && pointer.gap?.id) await appendComposeLesson("scope_refused", refusalReason.slice(0, 300), "", pointer.gap).catch(() => {});
         const refusalRes = await fetch(`${refusalEndpoint}/v2/activities/executions`, {
           method: "POST",
           headers: { "Content-Type": "application/json", Authorization: `ApiKey ${refusalKey}` },

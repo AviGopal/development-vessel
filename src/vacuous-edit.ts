@@ -451,8 +451,8 @@ export function vacuousEditReason(before: string, after: string): string | null 
   // literal, so a naive count saw two references and called the binding "used",
   // which is exactly backwards: a key passed as data is not a use of the binding.
   const codeOnly = after
-    .replace(/'(?:[^'\\]|\\.)*'/g, "''")
-    .replace(/"(?:[^"\\]|\\.)*"/g, '""')
+    .replace(/'(?:[^'\\\n]|\\.)*'/g, "''")
+    .replace(/"(?:[^"\\\n]|\\.)*"/g, '""')
     .replace(/`(?:[^`\\]|\\.)*`/g, "``");
   const unused = declaredNames.filter((name) => {
     const refs = codeOnly.match(new RegExp(`\\b${name.replace(/[$]/g, "\\$")}\\b`, "g"));

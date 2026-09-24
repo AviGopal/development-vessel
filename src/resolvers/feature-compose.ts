@@ -4943,7 +4943,7 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
       coverageTargetsExamined += 1;
       let covered = false;
       for (const c of candidates) {
-        try { await access(`${rootT}/${c}`); covered = true; break; } catch { /* try next */ }
+        try { await access(targetFileOnDisk(c)); covered = true; break; } catch { /* try next */ }
       }
       if (!covered) {
         // RESTORED 2026-09-10. A dispatched edit replaced this block's body with a bare

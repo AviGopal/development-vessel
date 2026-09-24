@@ -30,7 +30,7 @@
 import { WORKSPACE_ROOT as DEFAULT_WORKSPACE_ROOT } from "../config.js";
 import type { ResolverResult } from "./types.js";
 import { readFile, writeFile, rename, mkdir, unlink, readdir } from "node:fs/promises";
-import { join, dirname } from "node:path";
+import { join, dirname, basename } from "node:path";
 import { randomBytes } from "node:crypto";
 
 export interface MaintenanceLease {
@@ -71,8 +71,18 @@ export function leasePath(): string {
   );
 }
 
+/**
+ * The lease file's own stem ("maintenance" for the default path). Named holds live beside
+ * it as `<stem>-<name>.json`, so a non-default MAINTENANCE_LEASE_PATH keeps its named holds
+ * private: tests point it into the shared /tmp, and a stem-less `maintenance-<name>.json`
+ * there leaked one test's cutover hold into every other test's view of the lease.
+ */
+function leaseStem(): string {
+  return basename(leasePath()).replace(/\.json$/, "");
+}
+
 export function namedLeasePath(name?: string): string {
-  return name ? `${dirname(leasePath())}/maintenance-${name.replace(/[^a-z0-9_-]/gi, "_")}.json` : leasePath();
+  return name ? `${dirname(leasePath())}/${leaseStem()}-${name.replace(/[^a-z0-9_-]/gi, "_")}.json` : leasePath();
 }
 
 async function readLease(name?: string): Promise<MaintenanceLease | null> {
@@ -114,10 +124,12 @@ async function listHolds(): Promise<Array<MaintenanceLease & { name: string | nu
     return [];
   }
   const holds: Array<MaintenanceLease & { name: string | null }> = [];
+  const stem = leaseStem();
   for (const f of files) {
-    const m = /^maintenance(?:-(.+))?\.json$/.exec(f);
-    if (!m) continue;
-    const name = m[1] ?? null;
+    if (!f.startsWith(stem) || !f.endsWith(".json")) continue;
+    const rest = f.slice(stem.length, -".json".length);
+    if (rest !== "" && !rest.startsWith("-")) continue;
+    const name = rest === "" ? null : rest.slice(1);
     const lease = await readLease(name ?? undefined);
     if (lease && !isExpired(lease)) holds.push({ ...lease, name });
   }

@@ -1109,22 +1109,8 @@ export async function resolveVesselMitosisCutover(
             { stdout: "pipe", stderr: "pipe" },
           );
           if ((headShow.exitCode ?? 1) === 0 && headShow.stdout) {
-            const headContentSha = createHash("sha256").update(headShow.stdout).digest("hex").slice(0, 12);
-            cloneIsCleanAtHead = headContentSha === cloneSha;
-
-            if (headContentSha !== stagedBaseSha && !cloneIsOurOwnStagedContent) {
-              console.error(
-                `[mitosis-cutover] COMMITTED DRIFT: ${stagedSentinel} at HEAD in the push clone is ${headContentSha}, but this mitosis was ` +
-                  `staged from ${stagedBaseSha}. Applying this would revert work that is already committed. Refusing.`,
-              );
-              return softRefuse("staged content base is stale relative to commit tree HEAD", {
-                verdict: evaluation_evidence.verdict,
-                staged_base_sha: stagedBaseSha,
-                commit_tree_head_sha: headContentSha,
-                runtime_tree_sha: currentLiveSha,
-                sentinel: stagedSentinel,
-              });
-            }
+            cloneIsCleanAtHead =
+              createHash("sha256").update(headShow.stdout).digest("hex").slice(0, 12) === cloneSha;
           }
         } catch { /* git unavailable -> cannot prove clean -> fall through to the check */ }
         if ((cloneIsOurOwnStagedContent || cloneIsCleanAtHead) && cloneSha !== stagedBaseSha) {

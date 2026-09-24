@@ -205,6 +205,10 @@ export const TRACE_STORE_RECONCILE_TEMPLATE: ActivityTemplate = {
           },
         }),
         failOnNon2xx: true,
+        // The db_admin valve prunes in batches of 25 rows; a 5,000-row surplus takes
+        // ~6 minutes server-side (measured 376 s, 2026-09-24 07:33Z). The 15 s default
+        // aborted the client every run, the task failed, and release_lease never ran.
+        timeoutMs: 900_000,
       },
       outputShapes: ["httpResponse"],
     },

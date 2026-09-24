@@ -1,5 +1,5 @@
 import { WORKSPACE_ROOT } from "../config.js";
-import { appendFileSync, mkdirSync } from "fs";
+import { appendFileSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync, renameSync, existsSync } from "fs";
 import { join } from "path";
 
 const ACTIVITY_API_URL = process.env["ACTIVITY_API_URL"] ?? "http://127.0.0.1:8080";
@@ -301,6 +301,80 @@ export class GapDrainObserver {
         continue;
       }
       await this.handleGapWritten({ gap_id: gapId, category, route: "dispatchable", remedy: body.remedy, status: "open" });
+    }
+    await this.scanDiscardedLandings().catch(() => undefined);
+  }
+
+  /**
+   * DISCARDED-LANDINGS DETECTOR (resumable landings 1.5). Counts, per hour, composes whose
+   * report shows a FAVORABLE verdict but no cutover that pushed - verified work thrown away
+   * after passing every gate - split by cause, and files a day-keyed gap when non-zero, so
+   * the class is a gap event and not a journal grep.
+   */
+  private async scanDiscardedLandings(): Promise<void> {
+    const g = globalThis as unknown as { __discardedLastScan?: number };
+    const now = Date.now();
+    if (g.__discardedLastScan !== undefined && now - g.__discardedLastScan < 600_000) return;
+    g.__discardedLastScan = now;
+    const dir = existsSync("/workspace/proposals") ? "/workspace/proposals" : join(WORKSPACE_ROOT, "proposals");
+    const byCause = { lease_refused: 0, drain_killed: 0, deferred: 0, other: 0 };
+    const gapIds: string[] = [];
+    let files: string[] = [];
+    try {
+      files = readdirSync(dir).filter((f) => f.endsWith("-compose-report.json"));
+    } catch {
+      return;
+    }
+    for (const f of files) {
+      try {
+        const p = join(dir, f);
+        if (now - statSync(p).mtimeMs > 3_600_000) continue;
+        const r = JSON.parse(readFileSync(p, "utf8")) as { verdict?: string; cutovers?: Array<{ result?: Record<string, unknown> }>; semantic_gate?: { addresses?: boolean } };
+        const cuts = Array.isArray(r.cutovers) ? r.cutovers : [];
+        if (cuts.length === 0) continue;
+        const pushed = cuts.some((c) => c?.result?.["push_status"] === "pushed" && typeof c?.result?.["new_git_sha"] === "string" && String(c.result["new_git_sha"]).trim() !== "");
+        const judged = r.semantic_gate?.addresses === true || cuts.some((c) => c?.result?.["verdict"] === "FAVORABLE");
+        if (pushed || !judged) continue;
+        const t = JSON.stringify(cuts);
+        if (/env_change_window_held|change[_ ]window( lease)? held|lease held/i.test(t)) byCause.lease_refused++;
+        else if (/deferred/i.test(t)) byCause.deferred++;
+        else if (/drain|SIGTERM|draining/i.test(t)) byCause.drain_killed++;
+        else byCause.other++;
+        gapIds.push(f.replace(/-compose-report\.json$/, ""));
+      } catch {
+        /* unreadable report: skip it */
+      }
+    }
+    const total = byCause.lease_refused + byCause.drain_killed + byCause.deferred + byCause.other;
+    const report = { shape: "discardedLandingReport", window_minutes: 60, generated_at: new Date(now).toISOString(), total, by_cause: byCause, gap_ids: gapIds };
+    console.log(`[gap-drain-observer] discarded landings: total=${total} ${JSON.stringify(byCause)}`);
+    try {
+      const poolDir = join(WORKSPACE_ROOT, "pool");
+      mkdirSync(poolDir, { recursive: true });
+      writeFileSync(join(poolDir, "discarded-landings.json.tmp"), JSON.stringify(report, null, 2), "utf8");
+      renameSync(join(poolDir, "discarded-landings.json.tmp"), join(poolDir, "discarded-landings.json"));
+      appendFileSync(join(poolDir, "discarded-landings.jsonl"), JSON.stringify(report) + "\n", "utf8");
+    } catch (err) {
+      console.log("[gap-drain-observer] discarded-landings report write failed (non-fatal):", err);
+    }
+    if (total === 0) return;
+    try {
+      const { resolveSubstrateGapWrite } = await import("../resolvers/substrate-gap.js");
+      const day = new Date(now).toISOString().slice(0, 10);
+      await resolveSubstrateGapWrite({
+        type: "substrateGap_write",
+        gap: {
+          id: `discarded-landings-${day}`,
+          category: "systematic_failure",
+          source: "substrate_detected",
+          status: "open",
+          summary: `${total} verified landing(s) discarded after passing every gate in the last hour (lease_refused=${byCause.lease_refused}, drain_killed=${byCause.drain_killed}, deferred=${byCause.deferred}, other=${byCause.other}): ${gapIds.slice(0, 5).join(", ")}`,
+          detected_at: new Date(now).toISOString(),
+          classification_metadata: { incident_kind: "discarded_landings", by_cause: byCause, gap_ids: gapIds.slice(0, 20) },
+        },
+      } as never);
+    } catch (err) {
+      console.log("[gap-drain-observer] discarded-landings gap write failed (non-fatal):", err);
     }
   }
 

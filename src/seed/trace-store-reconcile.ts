@@ -88,8 +88,9 @@ export const TRACE_STORE_RECONCILE_TEMPLATE: ActivityTemplate = {
         type: "maintenanceLease_write",
         op: "acquire",
         holder: "trace-store-reconcile",
+        // Named: a trace_store hold no longer excludes cutovers, which take "cutover".
+        name: "trace_store",
         // 5 min, not 15 — see "THE TTL IS A DEADLINE FOR OTHER WORK" above.
-        // This lease is the global change_window every cutover must take.
         ttl_ms: 300_000,
       },
       outputShapes: ["maintenanceLeaseWriteResult"],
@@ -235,6 +236,7 @@ export const TRACE_STORE_RECONCILE_TEMPLATE: ActivityTemplate = {
       config: {
         type: "maintenanceLease_write",
         op: "release",
+        name: "trace_store",
         token: "{{extract_lease_token_text}}",
       },
       outputShapes: ["maintenanceLeaseWriteResult"],

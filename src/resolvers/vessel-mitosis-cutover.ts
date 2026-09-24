@@ -2637,7 +2637,27 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
     if (isSelfCutover) {
       const delaySec = process.env["MITOSIS_SELF_RESTART_DELAY_S"] ?? "5";
       const tsUnit = `mitosis-self-restart-${mitosis_version_id}`.replace(/[^A-Za-z0-9_.-]/g, "-").slice(0, 90);
-      if (process.env["MITOSIS_CUTOVER_SKIP_SYSTEMCTL"] === "1") {
+
+      // Prevent duplicate restarts from overlapping quiesce waits by checking for an existing unit.
+      let alreadyScheduled = false;
+      // Don't bother checking systemd if we're going to skip it anyway.
+      if (process.env["MITOSIS_CUTOVER_SKIP_SYSTEMCTL"] !== "1") {
+        try {
+          // Check for both the timer and the service unit. 'list-units' is atomic and safe.
+          // If either exists, a restart is pending or was very recently triggered.
+          const checkProc = Bun.spawnSync(["systemctl", "list-units", "--all", "--no-legend", `${tsUnit}.timer`, `${tsUnit}.service`]);
+          if (checkProc.stdout.toString().trim().length > 0) {
+            alreadyScheduled = true;
+          }
+        } catch (e) {
+          // If systemctl fails, better to allow a potentially redundant restart than to block one.
+          operations.push({ op: "check-existing-restart", status: "warn", detail: `systemctl check failed: ${(e as Error).message}` });
+        }
+      }
+
+      if (alreadyScheduled) {
+        operations.push({ op: `deferred self-restart ${unit}`, status: "ok", detail: `(already scheduled as ${tsUnit})` });
+      } else if (process.env["MITOSIS_CUTOVER_SKIP_SYSTEMCTL"] === "1") {
         vesselRestarted = true;
         operations.push({ op: `deferred self-restart ${unit}`, status: "ok", detail: "(skipped via env)" });
       } else {

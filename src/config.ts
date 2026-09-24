@@ -90,6 +90,7 @@ export const config = {
     "author_composed_capability",
       "feature_compose",
       "gap_compose",
+      "composeOwnership",
       "contentAddressedVesselId",
       "lift_demo_noop",
       "emit_shape", // test-fixture: emit an impulse of a configurable shape (synthetic shape-chains)

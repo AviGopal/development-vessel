@@ -97,9 +97,9 @@ async function writeLease(lease: MaintenanceLease, name?: string): Promise<void>
   await rename(tmp, path);
 }
 
-async function deleteLease(): Promise<void> {
+async function deleteLease(name?: string): Promise<void> {
   try {
-    await unlink(leasePath());
+    await unlink(namedLeasePath(name));
   } catch (err) {
     if ((err as NodeJS.ErrnoException)?.code !== "ENOENT") throw err;
   }
@@ -177,7 +177,7 @@ export async function resolveMaintenanceLeaseWrite(
         body: { resolver: "maintenanceLease_write", error: "missing_required_field", field: "token" },
       };
     }
-    const existing = await readLease();
+    const existing = await readLease(pointer.name);
     if (!existing || existing.token !== token) {
       return {
         shape: "maintenanceLeaseWriteResult",
@@ -185,7 +185,7 @@ export async function resolveMaintenanceLeaseWrite(
       };
     }
     const expires_at = new Date(now.getTime() + clampTtl(pointer.ttl_ms)).toISOString();
-    await writeLease({ ...existing, expires_at });
+    await writeLease({ ...existing, expires_at }, pointer.name);
     return { shape: "maintenanceLeaseWriteResult", body: { renewed: true, token, expires_at } };
   }
 
@@ -197,14 +197,14 @@ export async function resolveMaintenanceLeaseWrite(
         body: { resolver: "maintenanceLease_write", error: "missing_required_field", field: "token" },
       };
     }
-    const existing = await readLease();
+    const existing = await readLease(pointer.name);
     if (!existing) {
       return { shape: "maintenanceLeaseWriteResult", body: { released: true, note: "already_absent" } };
     }
     if (existing.token !== token) {
       return { shape: "maintenanceLeaseWriteResult", body: { released: false, error: "token_mismatch" } };
     }
-    await deleteLease();
+    await deleteLease(pointer.name);
     return { shape: "maintenanceLeaseWriteResult", body: { released: true } };
   }
 

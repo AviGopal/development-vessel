@@ -48,10 +48,10 @@ export function isLongRunningBody(raw: string): boolean {
   if (typeof raw !== "string" || raw.length === 0) return false;
   try {
     const b = JSON.parse(raw) as {
-      impulse?: { pointer?: { type?: unknown } };
+      impulse?: { pointer?: { type?: unknown }; type?: unknown };
       pointer?: { type?: unknown };
     };
-    const t = b?.impulse?.pointer?.type ?? b?.pointer?.type;
+    const t = b?.impulse?.pointer?.type ?? b?.pointer?.type ?? b?.impulse?.type;
     return typeof t === "string" && LONG_RUNNING_TYPES.has(t);
   } catch {
     return false;

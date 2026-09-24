@@ -141,7 +141,11 @@ if (slowQueries !== null && slowQueries > 1000 && !dryRun) {
             category: "trace_store_reconciliation",
             source: "substrate_detected",
               route: "dispatchable",
-              remedy: { vessel: "goal-host-vessel", target_template_id: "development-vessel:trace-store-reconcile" },
+              // A GOAL, not a pinned template id: the drain observer forwards target_template_id
+// verbatim to /run-goal, so the base template ran 12/12 times today while its
+// registered variants (one with the swap-length timeout) never earned a row.
+// A goal lets goal-host select within the family by posterior.
+remedy: { vessel: "goal-host-vessel", goal: "reconcile the trace store back under its configured cap" },
             summary:
               `Trace store row_count=${rowCount} exceeds cap=${cap} ` +
               `(last_reconciled_at=${lastReconciledAt ?? "never"}). ` +

@@ -935,8 +935,9 @@ export async function resolveVesselMitosisCutover(
   // freshness, not unreadability.
   const EMPTY_CONTENT_SHA = createHash("sha256").update("").digest("hex").slice(0, 12);
   const netNewFreshnessOK = stagedBaseSha === EMPTY_CONTENT_SHA && currentLiveSha === null;
+  const stagedContentSha = stagedSentinel && (await pathExists(join(mitosisRoot, stagedSentinel))) ? createHash("sha256").update(await readFile(join(mitosisRoot, stagedSentinel))).digest("hex").slice(0, 12) : null;
   const freshnessOK =
-    netNewFreshnessOK ||
+    netNewFreshnessOK || (!!stagedContentSha && stagedContentSha === currentLiveSha) ||
     (!!stagedBaseSha &&
     !!currentLiveSha &&
     !currentLiveSha.startsWith("<") &&

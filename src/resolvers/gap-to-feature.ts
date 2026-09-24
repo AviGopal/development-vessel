@@ -1482,6 +1482,12 @@ export async function admitActionableGaps(
     const cat = String(g.category ?? "");
     const meta = (g.classification_metadata ?? g.metadata ?? {}) as Record<string, unknown>;
     const failedAttempts = Number(meta.failed_attempts ?? 0);
+
+    const ownedVessel = identifyVessel(g, meta);
+    if (ownedVessel && !ownedVessels().has(ownedVessel)) {
+      excluded.push({ id, reason: `not owned here(${ownedVessel})` });
+      continue;
+    }
     // Increment child gap count if this is an auto-minted child gap.
     if (id.startsWith("recommit-") || id.endsWith("-narrowed")) {
       const editSite = String(meta.edit_site ?? "");
@@ -2359,6 +2365,14 @@ async function landedCommitViaLineage(gap: Record<string, unknown> & { id?: stri
 // Call-time (not module-load) so tests can point at a fixture clone tree; production
 // never sets the override and uses the same path as the other clone readers here.
 const vesselsCloneRoot = (): string => process.env["VESSELS_CLONE_ROOT"] ?? "/workspace/git/vessels";
+
+export function ownedVessels(): Set<string> {
+  try {
+    return new Set(readdirSync(vesselsCloneRoot()).filter((d) => existsSync(join(vesselsCloneRoot(), d, ".git"))));
+  } catch {
+    return new Set();
+  }
+}
 
 /** Deterministic land evidence: is `sha` an ancestor of HEAD in ANY vessel clone? */
 function shaIsAncestorOfAnyClone(sha: string): boolean {

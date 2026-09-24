@@ -57,6 +57,59 @@ import { regionCandidatesFromText } from "./region-probe.js";
 import { symbolsNeedingDeclaration, renderSymbolDeclarations, typeNamesIn, renderSafeAnchors, safeAnchorLines, locateRegion, type SymbolDeclaration } from "../cross-file-symbols.js";
 import { refuseRederivedEdit } from "../edit-provenance.js";
 import { RUNTIME_ROOT, SUPER_REPO_ROOT, REPO_ROOT, loadFleetShapeVocabulary } from "../shape-vocabulary.js";
+import { mkdir as parkMkdir, writeFile as parkWriteFile, rename as parkRename, readFile as parkReadFile, unlink as parkUnlink } from "node:fs/promises";
+
+// PARKED LANDINGS (openspec 2026-09-24-resumable-landings). A patch that passed verify
+// and the semantic gate is written here BEFORE its cutover, so a cutover that is refused
+// (held lease), deferred, or killed by a restart does not throw the verified work away:
+// the next compose for the same gap resumes it instead of redrafting.
+export interface ParkedLanding {
+  gap_id: string;
+  compose_id: string;
+  vessel: string;
+  /** path is vessel-relative; content is the verified file; base_content the pre-edit live file (null if absent). */
+  files: Array<{ path: string; content: string; base_content: string | null }>;
+  verify: { typecheck: boolean; shape_dispatch: boolean; tests: boolean };
+  judge: { addresses: boolean | null; reason: string | null };
+  parked_at: string;
+  reason: string;
+}
+
+function parkedLandingsDir(): string {
+  return process.env["PARKED_LANDINGS_DIR"] ?? "/workspace/parked-landings";
+}
+
+export function parkedLandingPath(gapId: string): string {
+  return `${parkedLandingsDir()}/${gapId.replace(/[^A-Za-z0-9._-]/g, "_")}.json`;
+}
+
+export async function writeParkedLanding(park: ParkedLanding): Promise<void> {
+  try {
+    await parkMkdir(parkedLandingsDir(), { recursive: true });
+    const path = parkedLandingPath(park.gap_id);
+    await parkWriteFile(`${path}.tmp`, JSON.stringify(park, null, 2), "utf-8");
+    await parkRename(`${path}.tmp`, path);
+  } catch (err) {
+    console.warn(`[feature-compose] park write failed for ${park.gap_id}: ${(err as Error).message}`);
+  }
+}
+
+export async function readParkedLanding(gapId: string): Promise<ParkedLanding | null> {
+  try {
+    const park = JSON.parse(await parkReadFile(parkedLandingPath(gapId), "utf-8")) as ParkedLanding;
+    return park && Array.isArray(park.files) && park.files.length > 0 ? park : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function deleteParkedLanding(gapId: string): Promise<void> {
+  try {
+    await parkUnlink(parkedLandingPath(gapId));
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException)?.code !== "ENOENT") console.warn(`[feature-compose] park delete failed for ${gapId}: ${(err as Error).message}`);
+  }
+}
 export { loadFleetShapeVocabulary } from "../shape-vocabulary.js";
 export type { ShapeVocabulary } from "../shape-vocabulary.js";
 
@@ -6300,6 +6353,7 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
   // PRE-SYNC SNAPSHOT of every live file the land-time sync below overwrites, so a
   // cutover that does not land can be undone. See the restore block after the loop.
   const preLiveSync = new Map<string, string | null>(); // abs live path -> bytes, or null if absent
+  let parkedAny = false; // a verified patch was parked before its cutover (resumable landings)
   if (verdict === "FAVORABLE" && pointer.land) {
     const ts = new Date().toISOString().replace(/[:.]/g, "-");
     for (const v of touched) {
@@ -6377,6 +6431,31 @@ const earlyAttempt = await Promise.race([
       }
       const shaRes = await callTool(toolsEndpoint, "shell", { command: `sha256sum ${JSON.stringify(`${vBase}/${changedRel[0]}`)} | cut -c1-12`, cwd: REPO_ROOT });
       const staged_base_sha = String((shaRes.body as { stdout?: unknown })?.stdout ?? "").trim().split(/\s+/)[0];
+      // PARK BEFORE THE CUTOVER: everything up to here (verify + semantic gate) is the
+      // expensive part; if the cutover is refused or the process is restarted, the park
+      // is what survives and the next compose for this gap resumes it.
+      if (pointer.gap?.id) {
+        const parkFiles: ParkedLanding["files"] = [];
+        for (const rel of changedRel) {
+          const content = await parkReadFile(`${vBase}/${rel}`, "utf-8").catch(() => null);
+          if (content === null) break;
+          const liveAbs = `${RUNTIME_ROOT}/${vessel}/${rel}`;
+          parkFiles.push({ path: rel, content, base_content: preLiveSync.get(liveAbs) ?? null });
+        }
+        if (parkFiles.length > 0 && parkFiles.length === changedRel.length) {
+          await writeParkedLanding({
+            gap_id: String(pointer.gap.id),
+            compose_id: `${vessel}-fc-${ts}`,
+            vessel,
+            files: parkFiles,
+            verify: { typecheck: true, shape_dispatch: true, tests: true },
+            judge: { addresses: semantic_gate?.addresses ?? null, reason: semantic_gate?.reason ?? null },
+            parked_at: new Date().toISOString(),
+            reason: "pre-cutover",
+          });
+          parkedAny = true;
+        }
+      }
       const cut = await resolveVesselMitosisCutover({
         type: "vessel_mitosis_cutover",
         vessel_name: vessel,
@@ -6745,6 +6824,10 @@ const earlyAttempt = await Promise.race([
     const r = (((c as Record<string, unknown>)?.result) ?? {}) as Record<string, unknown>;
     return r.push_status === "pushed" && typeof r.new_git_sha === "string" && String(r.new_git_sha).trim() !== "";
   });
+  if (parkedAny && pointer.gap?.id) {
+    if (anyCutoverPushed) await deleteParkedLanding(String(pointer.gap.id));
+    else console.log(`[feature-compose] cutover did not land — verified patch parked for ${pointer.gap.id}`);
+  }
   const allCutoversRefused = pointer.land && verdict === "FAVORABLE" && cutovers.length > 0 && !anyCutoverPushed;
   const effectiveVerdict = allCutoversRefused ? "UNFAVORABLE" : verdict;
   return {
@@ -6752,6 +6835,7 @@ const earlyAttempt = await Promise.race([
     body: {
       ok: effectiveVerdict === "FAVORABLE",
       execution_id: emittedExecutionId,
+      parked: parkedAny && !anyCutoverPushed,
       verdict: effectiveVerdict,
       failure_kind: effectiveVerdict === "FAVORABLE" ? null : classifyEnvironmentFailure(cutovers) || verify.some((vr) => !vr.ok && (vr.exit_code === null || !vr.output || /timed out after \d+\s*ms/i.test(vr.output))) ? "environment" : "fix",
       summary: plan.summary,

@@ -3300,6 +3300,7 @@ function classifyComposeFailure(appliedOps: Array<{ ok: boolean; detail?: string
 async function appendComposeLesson(cls: string, reason: string, vessels: string, gap?: { id?: string; summary?: unknown; category?: unknown; source?: unknown; detected_at?: unknown; classification_metadata?: Record<string, unknown> }): Promise<void> {
   if (gap && gap.id) {
     try {
+      try { const fresh = (((await resolveSubstrateGap({ type: "substrateGap", id: gap.id, limit: 1 } as never))?.body as { gaps?: Array<Record<string, unknown>> } | undefined)?.gaps ?? [])[0]; if (fresh) gap = { ...gap, ...fresh } as NonNullable<typeof gap>; } catch { /* store unreadable: use the caller's snapshot */ }
       const meta = (gap.classification_metadata ?? {}) as Record<string, unknown>;
       const lessons = (Array.isArray(meta.failure_lessons) ? meta.failure_lessons : []) as Array<Record<string, unknown>>;
       const reCommit = lessons.some((l) => l.class === cls);
@@ -3354,7 +3355,7 @@ async function appendComposeLesson(cls: string, reason: string, vessels: string,
           
           summary: realSummary || `compose failure lessons for gap ${String(gap.id)}`,
           detected_at: realDetectedAt,
-          status: (typeof (gap as { status?: unknown }).status === "string" && (gap as { status?: unknown }).status === "closed") ? "closed" : "open",
+          status: (() => { const s = (gap as { status?: unknown }).status; return s === "closed" || s === "superseded" ? s : "open"; })(),
           classification_metadata: meta,
         },
       } as never);

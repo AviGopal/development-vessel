@@ -3946,7 +3946,11 @@ const familySample: string[] = await (async () => {
     return [normalizeId(selectedTemplateId)];
   }
 })();
-        for (const id of familySample) {
+        // Two family sources now exist: `family` (the registry's /variants route, 97ff41d) and
+        // `familySample` (a5b4772's paged read of the unordered /templates listing, which
+        // skips rows and has returned [base] at every tick). Prefer the route when it found
+        // variants; fall back to the paged sample otherwise.
+        for (const id of (family.length > 1 ? family : familySample)) {
           const activity_id = normalizeId(id);
           let a = 1, b = 1;
           try {

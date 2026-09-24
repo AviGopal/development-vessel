@@ -10,6 +10,53 @@
 
 import { resolveDispatch } from "./routes/impulses.js";
 
+/**
+ * UPSERT A SEED WHOSE AUTHOR BUMPED ITS VERSION. Once the catalogue is populated the
+ * seed is skipped entirely (see SEED-IF-EMPTY below) so learned rows are not clobbered —
+ * which also made every edit to a seed file inert on a running substrate (the
+ * trace-store reconcile carried a 900 s timeout in source for hours while the registered
+ * row still aborted at 15 s). A seed opts in to an update by raising
+ * `metadata.seed_version`; it is re-uploaded only when that number exceeds the
+ * registered row's, so untouched seeds and rows the learning loop evolved stay as they are.
+ * Upserted by id straight to activity-api: this is an update of an existing template,
+ * not a mint, so the reuse-before-mint probe (which refuses a second producer of the same
+ * shapes) does not apply.
+ */
+async function upsertVersionBumpedSeeds(
+  templates: ReadonlyArray<unknown>,
+  endpoint: string,
+  apiKey: string | undefined,
+): Promise<void> {
+  const headers: Record<string, string> = { "Content-Type": "application/json", ...(apiKey ? { Authorization: `ApiKey ${apiKey}` } : {}) };
+  let upserted = 0;
+  let current = 0;
+  for (const t of templates) {
+    const tpl = t as { id?: string; metadata?: { seed_version?: unknown } };
+    const want = Number(tpl.metadata?.seed_version ?? 0);
+    if (!tpl.id || !Number.isFinite(want) || want <= 0) continue;
+    try {
+      const r = await fetch(`${endpoint}/v2/activities/templates/${encodeURIComponent(tpl.id)}`, { headers, signal: AbortSignal.timeout(10_000) });
+      const reg = r.ok ? ((await r.json()) as { metadata?: { seed_version?: unknown } }) : null;
+      const have = Number(reg?.metadata?.seed_version ?? 0);
+      if (reg && Number.isFinite(have) && have >= want) {
+        current++;
+        continue;
+      }
+      const body = { ...(t as Record<string, unknown>), proposed: false, org_id: "organizations:substrate" };
+      const w = await fetch(`${endpoint}/v2/activities/templates`, { method: "POST", headers, body: JSON.stringify(body), signal: AbortSignal.timeout(15_000) });
+      if (w.ok) {
+        upserted++;
+        console.log(`[seed] upserted ${tpl.id}: seed_version ${have} -> ${want}`);
+      } else {
+        console.warn(`[seed] upsert of ${tpl.id} refused: HTTP ${w.status} ${(await w.text()).slice(0, 200)}`);
+      }
+    } catch (e) {
+      console.warn(`[seed] version check for ${tpl.id} failed (skipped): ${(e as Error).message}`);
+    }
+  }
+  console.log(`[seed] populated catalogue: ${upserted} version-bumped seed(s) upserted, ${current} already current`);
+}
+
 async function seedTemplates(): Promise<void> {
   // Lazy import so the CLI can boot without §5 seed files during early phases
   const { SEED_TEMPLATES } = await import("./seed/index.js");
@@ -52,7 +99,10 @@ async function seedTemplates(): Promise<void> {
       return true;
     }
   })();
-  if (!catalogueEmpty) return;
+  if (!catalogueEmpty) {
+    await upsertVersionBumpedSeeds(SEED_TEMPLATES, METABOB_ENDPOINT, METABOB_API_KEY);
+    return;
+  }
 
   console.log(`Uploading ${SEED_TEMPLATES.length} bootstrap templates...`);
   const results: Array<{ name: string; variantId: string }> = [];

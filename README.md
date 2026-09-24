@@ -51,6 +51,8 @@ Stdout = JSON impulses. Stderr = the trace summary. Exit codes:
 
 ## HTTP service
 
+> **Developer-only.** This runs one vessel's source on your machine for iteration. The fleet is launched from the image as described in the substrate README § Installation; a change reaches a running fleet only by landing on origin/dev.
+
 ```bash
 bun run start              # serves on $PORT (default 8090)
 bun run dev                # hot-reload variant

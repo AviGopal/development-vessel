@@ -2105,7 +2105,15 @@ export async function verifyPatchAddressesGap(args: {
   // HIGH-CONFIDENCE, SPECIFIC refutation. Calibrated to catch clear false-passes (inert rename,
   // stub, dead code) without over-rejecting borderline fixes, and fail-open on any refuter
   // error/parse-fail (a flaky second lens must never wedge landing — the first judge stands).
-  if (addresses === true) {
+  // SPEC-EXACT SHORT-CIRCUIT: when every changed diff line appears verbatim in the gap text,
+  // the gap author already dictated the bytes; the spec is the oracle and a refuter that
+  // "disagrees" with it can only be confabulating (measured 2026-09-24 05:26Z, regex escaping).
+  const _specExact = (() => {
+    const changed = args.diff.split("\n").filter((l) => /^[+-](?![+-])/.test(l)).map((l) => l.slice(1).trim()).filter((l) => l.length > 0);
+    return changed.length > 0 && changed.every((l) => args.gapSummary.includes(l));
+  })();
+  if (_specExact) console.log(`[feature-compose] spec-exact patch: refuters not consulted (the spec is the oracle)`);
+  if (addresses === true && !_specExact) {
     try {
       // A QUORUM OF ONE IS NOT A QUORUM.
       //

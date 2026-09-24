@@ -4133,7 +4133,7 @@ async function resolveFeatureComposeUncapped(pointer: FeatureComposePointer): Pr
         if (tf) {
           const { readFile } = await import("node:fs/promises");
           const rootA = process.env["REPO_ROOT"] ?? process.env["WORKSPACE_ROOT"] ?? "/workspace/git/super-repo";
-          const text = await readFile(`${rootA}/${tf}`, "utf8").catch(() => "");
+          const text = await readFile(targetFileOnDisk(tf), "utf8").catch(() => "");
           if (text) {
             // CENTRE THE BAND ON SOMETHING ACTUALLY IN THE FILE. renderSafeAnchors
             // bands +/-80 lines around the first line CONTAINING its region arg, so

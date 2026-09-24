@@ -222,6 +222,7 @@ export async function resolveLlmCompletionDispatch(
       ? (pointer.tools.length > 0 ? { tools: pointer.tools } : {})
       : { tools: DEFAULT_LLM_TOOLS }),
     ...(pointer.system_prompt ? { system: pointer.system_prompt } : {}),
+    ...(typeof (pointer as { execution_id?: unknown }).execution_id === "string" ? { execution_id: (pointer as { execution_id?: string }).execution_id } : {}),
   };
 
   // llm-resolver-vessel returns { resolved: true, shape: "llmCompletion", content, usage }

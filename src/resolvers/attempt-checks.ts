@@ -65,7 +65,7 @@ export async function evaluateChecks(ids: string[], perCheckTimeoutMs = 60000): 
             if (!Array.isArray(body.units)) {
               return [{ id: "systemd_units", verdict: "unknown", detail: "Invalid response structure", definition_version }];
             }
-            return body.units.map((unit: any) => {
+            return body.units.filter((unit: any) => !String(unit.unit ?? "").startsWith("mitosis-")).map((unit: any) => {
               let verdict: Verdict = "unknown";
               if (unit.active_state === "active" || (unit.is_oneshot && unit.result === "success")) {
                 verdict = "pass";

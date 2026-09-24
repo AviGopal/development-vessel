@@ -28,6 +28,7 @@ app.get("/health", (c) => {
     vesselId: VESSEL_ID,
     version: "0.1.0",
     in_flight: readInFlight(),
+        in_flight_oldest_ms: readInFlightOldestMs(),
     // ADVERTISE THE DRAIN BUDGET, or the protection built on it cannot apply.
     //
     // substrate-pull-sync gates its safe-convergence path on this field: a vessel
@@ -205,7 +206,13 @@ function quiesced(): boolean {
 // this one stayed unread in the first place.
 let devDraining = false;
 let inFlightRequests = 0;
+const inFlightStarts = new Set<{ at: number }>();
+let readInFlightOldestMs: () => number | null = () => null;
+export function publishInFlightOldest(fn: () => number | null): void {
+  readInFlightOldestMs = fn;
+}
 publishInFlight(() => inFlightRequests);
+publishInFlightOldest(() => { let oldest: number | null = null; for (const s of inFlightStarts) if (oldest === null || s.at < oldest) oldest = s.at; return oldest === null ? null : Date.now() - oldest; });
 const server = Bun.serve({
   port: config.port,
   hostname: config.host,
@@ -213,7 +220,8 @@ const server = Bun.serve({
   fetch: async (req, srv) => {
     // Read the body ONCE to classify, then hand a fresh Request downstream:
     // consuming the stream here would leave the handler with an empty body.
-    let counted = false;
+        let counted = false;
+    let startRec: { at: number } | null = null;
     let forwarded = req;
     try {
       if (req.method === "POST") {
@@ -250,6 +258,8 @@ const server = Bun.serve({
           }
           counted = true;
           inFlightRequests++;
+          startRec = { at: Date.now() };
+          inFlightStarts.add(startRec);
         }
         forwarded = new Request(req.url, {
           method: req.method,
@@ -264,6 +274,7 @@ const server = Bun.serve({
       return await app.fetch(forwarded, srv);
     } finally {
       if (counted) inFlightRequests--;
+      if (startRec) inFlightStarts.delete(startRec);
     }
   },
 });

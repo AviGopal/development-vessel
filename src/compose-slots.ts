@@ -95,6 +95,8 @@ export interface ComposeSlot {
    * changes how the refusal is DESCRIBED, never whether work proceeds.
    */
   readonly race?: boolean;
+  /** Refused because a LIVE slot already works the same gap (opts.gapId); names that composeId. */
+  readonly duplicateOf?: string;
   /** In-flight count observed at decision time, for honest logging. */
   readonly observed: number;
   release(): Promise<void>;
@@ -265,7 +267,7 @@ export async function peekComposeCapacity(
 
 export async function acquireComposeSlot(
   composeId: string,
-  opts: { directed?: boolean } = {},
+  opts: { directed?: boolean; gapId?: string } = {},
 ): Promise<ComposeSlot> {
   // RESERVE THE LAST SLOT FOR DIRECTED WORK.
   //
@@ -296,6 +298,22 @@ export async function acquireComposeSlot(
     // Dropping the count in favour of the claim would over-admit across the
     // version change; dropping the claim in favour of the count restores the race.
     const live = await countLive(Date.now());
+    // PER-GAP GUARD: the same gap must not be composed twice at once (a directed
+    // dispatch racing the autonomous picker, measured 2026-09-24 01:21Z). countLive
+    // has just reaped stale and dead holders, so every remaining slot file is live.
+    if (opts.gapId) {
+      for (const name of await readdir(slotDir())) {
+        if (!name.endsWith(".slot")) continue;
+        try {
+          const { readFile } = await import("node:fs/promises");
+          const raw = JSON.parse(await readFile(`${slotDir()}/${name}`, "utf8")) as { gap_id?: unknown; composeId?: unknown };
+          if (raw.gap_id === opts.gapId) {
+            const dup = typeof raw.composeId === "string" ? raw.composeId : name;
+            return { granted: false, observed: live, duplicateOf: dup, release: async () => {} };
+          }
+        } catch { /* unreadable slot: not evidence */ }
+      }
+    }
     if (live >= effectiveCap) {
       return { granted: false, observed: live, release: async () => {} };
     }
@@ -327,7 +345,7 @@ export async function acquireComposeSlot(
       const candidate = `${slotDir()}/slot-${i}.slot`;
       try {
         // `wx` = O_CREAT | O_EXCL — fails if the file already exists.
-        await writeFile(candidate, JSON.stringify({ pid: process.pid, at: Date.now(), composeId }), {
+        await writeFile(candidate, JSON.stringify({ pid: process.pid, at: Date.now(), composeId, ...(opts.gapId ? { gap_id: opts.gapId } : {}) }), {
           flag: "wx",
         });
         path = candidate;

@@ -175,7 +175,7 @@ async function resumeParkedLanding(pointer: FeatureComposePointer, park: ParkedL
       mitosis_version_id: `${park.vessel}-resume-${ts}`,
       mitosis_root: stagingRoot,
       staged_files: park.files.map((f) => f.path),
-      staged_base_sha: parkHash("sha256").update(park.files[0]!.content).digest("hex").slice(0, 12),
+      staged_base_sha: parkHash("sha256").update(park.files[0]!.base_content ?? park.files[0]!.content).digest("hex").slice(0, 12),
       evaluation_evidence: { verdict: "FAVORABLE", base_success_rate: 1, mitosis_success_rate: 1, cited_trace_ids: [], cited_check_names: ["typecheck (resume)", "parked: shape-dispatch", "parked: bun test (baseline-delta, flake-confirmed)"] },
       gap_id: gapId,
       proposal_id: `${gapId}-compose-report`,
@@ -6539,7 +6539,7 @@ const earlyAttempt = await Promise.race([
           await callTool(toolsEndpoint, "shell", { command: `mkdir -p ${JSON.stringify(liveDir)} && cp ${JSON.stringify(`${vBase}/${rel}`)} ${JSON.stringify(liveAbs)}`, cwd: REPO_ROOT });
         }
       }
-      const shaRes = await callTool(toolsEndpoint, "shell", { command: `sha256sum ${JSON.stringify(`${vBase}/${changedRel[0]}`)} | cut -c1-12`, cwd: REPO_ROOT });
+      const shaRes = await callTool(toolsEndpoint, "shell", { command: `git -C ${JSON.stringify(vBase)} show HEAD:${JSON.stringify(changedRel[0])} | sha256sum | cut -c1-12`, cwd: REPO_ROOT });
       const staged_base_sha = String((shaRes.body as { stdout?: unknown })?.stdout ?? "").trim().split(/\s+/)[0];
       // PARK BEFORE THE CUTOVER: everything up to here (verify + semantic gate) is the
       // expensive part; if the cutover is refused or the process is restarted, the park

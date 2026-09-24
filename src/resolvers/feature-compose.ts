@@ -3494,7 +3494,15 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
   // `directed` is set by goal-host on the operator/edit-intent route. It is NOT
   // inferable from `pointer.gap`, which that route also populates.
   const isDirected = (pointer as { directed?: boolean }).directed === true;
-  const slot = await acquireComposeSlot(slotId, { directed: isDirected });
+  // PER-GAP IN-FLIGHT GUARD: a directed dispatch and the autonomous picker must not
+  // compose the SAME gap concurrently (measured 2026-09-24 01:21Z). compose-slots.ts
+  // refuses a duplicate holder when it is told the gap; say which refusal this is.
+  const _gapIdForSlot = typeof (pointer.gap as { id?: unknown } | undefined)?.id === "string" ? String((pointer.gap as { id: string }).id) : undefined;
+  const slot = await acquireComposeSlot(slotId, { directed: isDirected, gapId: _gapIdForSlot });
+  if (!slot.granted && slot.duplicateOf) {
+    console.error(`[compose-cap] REFUSING compose for ${_gapIdForSlot}: already in flight as ${slot.duplicateOf}`);
+    return { shape: "featureComposeReport", body: { ok: false, verdict: "BUSY", stage: "gap_in_flight", error: `gap already in flight as ${slot.duplicateOf} — retry after it completes` } };
+  }
   if (!slot.granted) {
     // Say WHICH refusal this is. `observed` is read before the atomic claim, so a
     // simultaneous claimant can take the last index in between — and reporting the

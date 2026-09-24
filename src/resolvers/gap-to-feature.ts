@@ -3836,12 +3836,109 @@ export async function resolveGapToFeature(pointer: GapToFeaturePointer): Promise
     }
     try {
       const auth: Record<string, string> = METABOB_API_KEY ? { Authorization: `ApiKey ${METABOB_API_KEY}` } : {};
+      // Thompson-sample the trace-store-reconcile family (base + variants) and dispatch the argmax
+      let selectedTemplateId = "development-vessel:trace-store-reconcile";
+      try {
+        const reachEndpoint = process.env["METABOB_ENDPOINT"] ?? "http://127.0.0.1:8080";
+        const baseId = "development-vessel:trace-store-reconcile";
+        const normalizeId = (s: unknown): string => {
+          const raw = String(s ?? "");
+          return raw.replace(/^activity:/, "").replace(/[<>⟨⟩]/g, "");
+        };
+        const tRes = await fetch(`${reachEndpoint}/v2/activities/templates?limit=2000`, {
+          method: "GET",
+          headers: { ...auth },
+          signal: AbortSignal.timeout(10_000),
+        });
+        let family: string[] = [baseId];
+        if (tRes.ok) {
+          const body = (await tRes.json().catch(() => ({}))) as { templates?: Array<Record<string, unknown>> };
+          const templates = Array.isArray(body.templates) ? body.templates : [];
+          const baseNorm = normalizeId(baseId);
+          for (const t of templates) {
+            const id = normalizeId(t["id"]);
+            const varOf = normalizeId(t["variant_of"]);
+            const retired = Boolean(t["retired"] ?? false);
+            const deprecated = Boolean(t["deprecated"] ?? false);
+            if (!retired && !deprecated && id && varOf && varOf === baseNorm) family.push(id);
+          }
+          family = Array.from(new Set(family));
+        }
+        type Posterior = { alpha: number; beta: number };
+        const sampleNormal = (): number => {
+          // Box–Muller transform
+          let u = 0, v = 0;
+          while (u === 0) u = Math.random();
+          while (v === 0) v = Math.random();
+          return Math.sqrt(-2.0 * Math.log(u)) * Math.cos(2.0 * Math.PI * v);
+        };
+        const sampleGamma = (k: number): number => {
+          if (k <= 0) return 0;
+          if (k < 1) {
+            const u = Math.random();
+            return sampleGamma(1 + k) * Math.pow(u, 1 / k);
+          }
+          const d = k - 1 / 3;
+          const c = 1 / Math.sqrt(9 * d);
+          for (;;) {
+            const x = sampleNormal();
+            let v = 1 + c * x;
+            if (v <= 0) continue;
+            v = v * v * v;
+            const u = Math.random();
+            if (u < 1 - 0.0331 * (x * x) * (x * x)) return d * v;
+            if (Math.log(u) < 0.5 * x * x + d * (1 - v + Math.log(v))) return d * v;
+          }
+        };
+        const sampleBeta = (a: number, b: number): number => {
+          const x = sampleGamma(Math.max(1e-6, a));
+          const y = sampleGamma(Math.max(1e-6, b));
+          const denom = x + y;
+          return denom > 0 ? x / denom : 0;
+        };
+        const samples: Array<{ id: string; draw: number }> = [];
+        for (const id of family) {
+          const activity_id = normalizeId(id);
+          let a = 1, b = 1;
+          try {
+            const pr = await fetch(`${reachEndpoint}/v2/impulses/resolve`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json", ...auth },
+              body: JSON.stringify({ impulse: { pointer: { type: "thompson_posterior", activity_id } } }),
+              signal: AbortSignal.timeout(10_000),
+            });
+            if (pr.ok) {
+              const pj = (await pr.json().catch(() => ({}))) as { content?: unknown };
+              const contentStr = typeof pj.content === "string" ? pj.content : "";
+              const parsed = contentStr ? (JSON.parse(contentStr) as { loaded?: boolean; content?: { alpha?: number; beta?: number } }) : { loaded: false };
+              if (parsed.loaded && parsed.content) {
+                const pa = Number(parsed.content.alpha);
+                const pb = Number(parsed.content.beta);
+                if (Number.isFinite(pa) && pa > 0) a = pa;
+                if (Number.isFinite(pb) && pb > 0) b = pb;
+              }
+            }
+          } catch {
+            // keep default a=b=1 on read error
+          }
+          const draw = sampleBeta(a, b);
+          samples.push({ id: activity_id, draw });
+        }
+        if (samples.length > 0) {
+          let bestIndex = 0;
+          for (let i = 1; i < samples.length; i++) if (samples[i]!.draw > samples[bestIndex]!.draw) bestIndex = i;
+          selectedTemplateId = samples[bestIndex]!.id || selectedTemplateId;
+        }
+        console.log(`[gap-to-feature] trace-store-reconcile family sampled: ${samples.length} member(s) -> ${selectedTemplateId}`);
+      } catch {
+        // fall open to base (selectedTemplateId already set)
+      }
       const res = await fetch(`${GOAL_HOST_VESSEL_ENDPOINT}/run-goal`, {
         method: "POST",
         headers: { "Content-Type": "application/json", ...auth },
         body: JSON.stringify({
           goal: "reconcile the trace store back under its configured cap",
-          targetTemplateId: "development-vessel:trace-store-reconcile",
+          targetTemplateId: selectedTemplateId,
         }),
         signal: AbortSignal.timeout(15_000),
       });

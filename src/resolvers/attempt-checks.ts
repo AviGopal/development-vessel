@@ -48,7 +48,7 @@ export function invariantSelect(opts: { touched_files?: string[]; gap_check_ids?
   return { checks: combinedChecks, baseline };
 }
 
-export async function evaluateChecks(ids: string[], perCheckTimeoutMs = 60000): Promise<CheckResult[]> {
+export async function evaluateChecks(ids: string[], perCheckTimeoutMs = 60000, targetVessel?: string): Promise<CheckResult[]> {
   const results: CheckResult[] = [];
 
   for (const id of ids) {
@@ -58,7 +58,24 @@ export async function evaluateChecks(ids: string[], perCheckTimeoutMs = 60000): 
     switch (id) {
       case "systemd_units":
         definition_version = await getFileSha256Prefix("/vessels/development-vessel/src/resolvers/systemd-unit-health-observer.ts");
-        checkPromise = resolveSystemdUnitHealthObserver({ type: "systemd_unit_health_observer", emit_gap: false } as never).then((res: ResolverResult) => {
+        checkPromise = (async (): Promise<CheckResult[]> => {
+          if (targetVessel) {
+            try {
+              const proc = Bun.spawn(["systemctl", "show", `${targetVessel}.service`, "-p", "LoadState", "--value"], { stdout: "pipe", stderr: "pipe" });
+              const stdout = (await new Response(proc.stdout).text()).trim();
+              await proc.exited;
+
+              if (!stdout) {
+                return [{ id: "systemd_units", verdict: "unknown", detail: "systemctl unavailable", definition_version }];
+              }
+              if (stdout !== "loaded") {
+                return [{ id: "systemd_units", verdict: "unknown", detail: `target not resident on ${process.env["SUBSTRATE_NAME"] ?? "substrate"}`, definition_version }];
+              }
+            } catch (e) {
+              return [{ id: "systemd_units", verdict: "unknown", detail: "systemctl unavailable", definition_version }];
+            }
+          }
+          const res: ResolverResult = await resolveSystemdUnitHealthObserver({ type: "systemd_unit_health_observer", emit_gap: false } as never);
           const shape = (res as any).shape;
           const body: any = (res as any).body || {};
           if (shape === "systemdUnitHealth") {
@@ -78,7 +95,7 @@ export async function evaluateChecks(ids: string[], perCheckTimeoutMs = 60000): 
             return [{ id: "systemd_units", verdict: "unknown", detail: body?.message, definition_version }];
           }
           return [{ id: "systemd_units", verdict: "unknown", detail: "Unexpected resolver shape", definition_version }];
-        });
+        })();
         break;
       case "gate_self_probe":
         definition_version = await getFileSha256Prefix("/vessels/development-vessel/src/resolvers/gate-self-probe.ts");

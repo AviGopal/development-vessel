@@ -126,7 +126,7 @@ export async function registerAttempt(input: { route: string; repo: string; touc
       proposal_id: input.proposal_id ?? null,
       authoring_execution_id: input.authoring_execution_id ?? null,
       dispatch_id: input.dispatch_id ?? null,
-      node: null,
+      node: process.env["SUBSTRATE_NAME"] ?? "substrate",
       prediction: {
         expect_pass: input.prediction?.expect_pass ?? [],
         expect_change: input.prediction?.expect_change ?? [],
@@ -394,6 +394,7 @@ export async function sweepAttempts(opts?: { now?: number }): Promise<{ drained:
             const settlementRecord = {
               attempt_id,
               settlement_seq: 1,
+              node: (intent as { node?: string | null }).node ?? null,
               authoring_execution_id: intent.authoring_execution_id,
               shas: landedShas,
               snapshot_id: settle_snapshot_id,

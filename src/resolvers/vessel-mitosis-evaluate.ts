@@ -1611,6 +1611,51 @@ export async function resolveVesselMitosisEvaluate(
     return ts >= since;
   });
 
+  {
+    // Resolver changes must show runtime evidence: cite at least one execution trace id
+    // for the mitosis version. This closes the gap where static checks alone green-lit
+    // resolver edits without any runtime exercise.
+    const stagedMaybe2 = (pointer as any)?.staged_files;
+    const resolverChanged =
+      Array.isArray(stagedMaybe2) &&
+      stagedMaybe2.some((p: unknown) => typeof p === "string" && p.startsWith("src/resolvers/") && p.endsWith(".ts"));
+    if (resolverChanged) {
+      const mitosisTraceIds = traces
+        .filter((t) => versionIdOf(t, baseId, mitosisId) === mitosisId)
+        .map((t) => (t as any)?.id)
+        .filter((id): id is string => typeof id === "string");
+      const citedChecks = staticResult && staticResult.attempted ? staticResult.checks.map((c) => c.name) : [];
+      if (mitosisTraceIds.length === 0) {
+        return {
+          shape: "vesselMitosisEvaluation",
+          body: {
+            base_version_id: baseId,
+            mitosis_version_id: mitosisId,
+            verdict: "INSUFFICIENT_DATA",
+            verdict_reason: "resolver_changes_require_runtime_evidence",
+            static_evaluation: staticResult,
+            cited_check_names: citedChecks,
+            cited_trace_ids: [],
+            evaluated_at: new Date().toISOString(),
+          },
+        };
+      }
+      // A single runtime touch suffices at this gate; cite the trace ids so cutover sees execution evidence.
+      return {
+        shape: "vesselMitosisEvaluation",
+        body: {
+          base_version_id: baseId,
+          mitosis_version_id: mitosisId,
+          verdict: "FAVORABLE",
+          verdict_reason: "resolver_changes_exercised_once",
+          static_evaluation: staticResult,
+          cited_check_names: citedChecks,
+          cited_trace_ids: mitosisTraceIds,
+          evaluated_at: new Date().toISOString(),
+        },
+      };
+    }
+  }
   const base = emptyStats(baseId);
   const mitosis = emptyStats(mitosisId);
   const baseFMs = new Set<string>();

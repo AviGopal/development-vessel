@@ -1491,7 +1491,8 @@ export async function admitActionableGaps(
     const failedAttempts = Number(meta.failed_attempts ?? 0);
 
     const ownedVessel = identifyVessel(g, meta);
-    if (ownedVessel && !ownedVessels().has(ownedVessel)) {
+    const ownedSet = ownedVessels();
+    if (ownedVessel && ownedSet.size > 0 && !ownedSet.has(ownedVessel)) {
       excluded.push({ id, reason: `not owned here(${ownedVessel})` });
       continue;
     }

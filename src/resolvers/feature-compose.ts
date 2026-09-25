@@ -4474,7 +4474,7 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
         const _delegateRes = await fetch(`${DEV_VESSEL_ENDPOINT}/v2/impulses/resolve`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ impulse: { type: "author_composed_capability", goal: _delegateGoal } }),
+          body: JSON.stringify({ pointer: { type: "author_composed_capability" }, body: { goal: _delegateGoal } }),
           signal: AbortSignal.timeout(120_000),
         });
         if (_delegateRes.ok) {

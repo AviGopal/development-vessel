@@ -172,7 +172,19 @@ export async function sweepAttempts(opts?: { now?: number }): Promise<{ drained:
     for (const landing of (unaccountedScanResult.body as any).unaccounted) {
       if (typeof landing.sha === 'string' && /^[0-9a-f]{7,40}$/.test(landing.sha) && !shasWrittenThisSweep.has(landing.sha)) {
         try {
-          const gap_id = "unaccounted-landing-" + landing.sha.slice(0, 12);
+          const repoKey = String(landing.repo ?? "unknown").split("/").filter(Boolean).pop() ?? "unknown";
+          const gap_id = "unaccounted-landings-" + repoKey;
+
+          const existingGapResult = await resolveSubstrateGap({ type: "substrateGap", id: gap_id, limit: 1 });
+          const existingGap = (existingGapResult.body as any)?.gaps?.[0];
+
+          const shas = (existingGap?.status === "open" && Array.isArray(existingGap.classification_metadata?.shas)) ? [...existingGap.classification_metadata.shas] : [];
+          const first_seen = (existingGap?.status === "open" && existingGap.classification_metadata) ? existingGap.classification_metadata.first_seen : undefined;
+
+          if (!shas.includes(landing.sha)) {
+            shas.push(landing.sha);
+          }
+
           await resolveSubstrateGapWrite({
             type: "substrateGap_write",
             gap: {
@@ -180,9 +192,17 @@ export async function sweepAttempts(opts?: { now?: number }): Promise<{ drained:
               category: "unaccounted_landing",
               source: "substrate_detected",
               status: "open",
-              summary: `Commit <${landing.sha}> in <${landing.repo}> (<${landing.branch}>, <${landing.author}>: <${landing.subject}>) landed with no registered attempt`,
-              classification_metadata: { ...landing, detector: "attempt_sweep" }
-            }
+              summary: `${shas.length} commit(s) in <${landing.repo}> landed with no registered attempt; latest <${landing.sha}> (<${landing.subject}>)`,
+              classification_metadata: {
+                repo: landing.repo,
+                detector: "attempt_sweep",
+                shas,
+                count: shas.length,
+                first_seen: first_seen ?? landing.at ?? new Date(now).toISOString(),
+                last_seen: landing.at ?? new Date(now).toISOString(),
+                close_predicate: "closes when this repo's next landing carries a registered attempt",
+              },
+            },
           });
           shasWrittenThisSweep.add(landing.sha);
         } catch (e) {

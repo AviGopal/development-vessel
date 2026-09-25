@@ -91,7 +91,7 @@ if (slowQueries !== null && slowQueries > 1000 && !dryRun) {
           category: "db_performance",
           source: "substrate_detected",
           route: "dispatchable",
-          remedy: { vessel: "goal-host-vessel", target_template_id: "development-vessel:db_performance_slow_queries" },
+          remedy: { vessel: "development-vessel", impulse_type: "gap_to_feature" },
           summary: `Slow queries exceeded threshold (${slowQueries})`,
           detected_at: new Date().toISOString(),
           status: "open",

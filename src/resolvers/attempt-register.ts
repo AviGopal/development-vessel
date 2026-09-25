@@ -165,6 +165,83 @@ export async function sweepAttempts(opts?: { now?: number }): Promise<{ drained:
   let settlements_written = 0;
   let lessons_written = 0;
 
+  // Fold legacy per-commit unaccounted-landing gaps into per-repo aggregates
+  try {
+    const scan = await resolveSubstrateGap({ type: "substrateGap", category: "unaccounted_landing", limit: 2000 } as any);
+    const allGaps = Array.isArray((scan.body as any)?.gaps) ? ((scan.body as any).gaps as any[]) : [];
+    const legacy = allGaps.filter((g: any) => typeof g?.id === "string" && g.id.startsWith("unaccounted-landing-") && g.status === "open");
+
+    const byRepo = new Map<string, any[]>();
+    for (const g of legacy) {
+      const repoFull = String(g?.classification_metadata?.repo ?? "unknown");
+      const repoKey = repoFull.split("/").filter(Boolean).pop() ?? "unknown";
+      const list = byRepo.get(repoKey);
+      if (list) list.push(g); else byRepo.set(repoKey, [g]);
+    }
+
+    for (const [repoKey, group] of byRepo) {
+      const aggregateId = "unaccounted-landings-" + repoKey;
+      const existingRes = await resolveSubstrateGap({ type: "substrateGap", id: aggregateId, limit: 1 });
+      const existing = (existingRes.body as any)?.gaps?.[0];
+      const existingShas: string[] = (existing?.status === "open" && Array.isArray(existing.classification_metadata?.shas)) ? [...existing.classification_metadata.shas] : [];
+
+      const repoFull = String(group[0]?.classification_metadata?.repo ?? repoKey);
+      const legacyShas: string[] = group
+        .map((g: any) => String(g?.classification_metadata?.sha ?? ""))
+        .filter((s: string) => /^[0-9a-f]{7,40}$/.test(s));
+      const shas = Array.from(new Set<string>([...existingShas, ...legacyShas]));
+
+      const existingFirst = existing?.classification_metadata?.first_seen as string | undefined;
+      const existingLast = existing?.classification_metadata?.last_seen as string | undefined;
+      const ts: number[] = [];
+      for (const g of group) {
+        const cmeta: any = (g as any).classification_metadata ?? {};
+        const candidates = [cmeta.first_seen, cmeta.at, (g as any).at, cmeta.last_seen];
+        for (const v of candidates) {
+          if (typeof v === "string") {
+            const t = Date.parse(v);
+            if (Number.isFinite(t)) ts.push(t);
+          }
+        }
+      }
+      const nowIso = new Date(now).toISOString();
+      const first_seen = existingFirst ?? (ts.length ? new Date(Math.min(...ts)).toISOString() : nowIso);
+      const last_seen = ts.length ? new Date(Math.max(...ts)).toISOString() : (existingLast ?? nowIso);
+
+      await resolveSubstrateGapWrite({
+        type: "substrateGap_write",
+        gap: {
+          id: aggregateId,
+          category: "unaccounted_landing",
+          source: "substrate_detected",
+          status: "open",
+          summary: `${shas.length} commit(s) in <${repoFull}> landed with no registered attempt; folded from legacy`,
+          classification_metadata: {
+            repo: repoFull,
+            detector: "attempt_sweep",
+            shas,
+            count: shas.length,
+            first_seen,
+            last_seen,
+          },
+        },
+      });
+
+      for (const g of group) {
+        await resolveSubstrateGapWrite({
+          type: "substrateGap_write",
+          gap: {
+            ...(g as any),
+            status: "superseded",
+            classification_metadata: { ...(g as any).classification_metadata, duplicate_of: aggregateId },
+          },
+        });
+      }
+    }
+  } catch (e) {
+    errors.push(e instanceof Error ? e.message : String(e));
+  }
+
   const unaccountedScanResult = await resolveUnaccountedLandingScan({ type: "unaccounted_landing_scan" });
   const drained = unaccountedScanResult.body;
   const shasWrittenThisSweep = new Set<string>();

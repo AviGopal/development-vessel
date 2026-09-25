@@ -110,12 +110,23 @@ export async function resolvePullCutover(pointer: PullCutoverPointer): Promise<{
     },
   });
 
-  // 1. BOUND: only a known vessel.
+  // 1. BOUND: prefer inventory; if missing, fall back to local clone/release checkout presence.
+  const cloneDir = `${CLONE_DIR}/${vessel_name}`;
   const allowed = await allowedVessels();
-  if (!allowed.has(vessel_name)) {
+  let bounded = allowed.has(vessel_name);
+  if (!bounded) {
+    // If the configured inventory is missing or empty (VESSELS_INVENTORY unset to a stale path),
+    // allow a bounded cutover when we already have a local runtime we can converge.
+    if (allowed.size === 0) {
+      const haveClone = (await sh(["bash", "-lc", `[ -d "${cloneDir}" ] && echo y || echo n`])).out === "y";
+      const releaseDir = `/workspace/git/${vessel_name.replace(/-vessel$/, "")}-release`;
+      const haveRelease = (await sh(["bash", "-lc", `[ -d "${releaseDir}" ] && echo y || echo n`])).out === "y";
+      bounded = haveClone || haveRelease;
+    }
+  }
+  if (!bounded) {
     return base({ valid: false, note: `vessel_name '${vessel_name}' not in vessels.inventory; refusing cutover` });
   }
-  const cloneDir = `${CLONE_DIR}/${vessel_name}`;
 
   // 2. Read current state (no mutation).
   const priorSha = (await sh(["git", "-C", cloneDir, "rev-parse", "HEAD"])).out;

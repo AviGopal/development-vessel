@@ -1249,6 +1249,8 @@ function pickMostLandable(gaps: Record<string, unknown>[]): Record<string, unkno
       && (m.pending_outcome_verification as string).length >= 7;
     const hasMeasurablePredicate = typeof m.hardcoded_url === 'string'
       || typeof m.evidence_resolve === 'string' || typeof m.verify_shape === 'string' || typeof m.expected_literal === 'string';
+    const operatorHold = ((m as { operator_hold?: unknown }).operator_hold as boolean | undefined) === true;
+    if (operatorHold) return true;
     if (landedAwaitingVerification && !hasMeasurablePredicate) return true;
     return verifyGapCondition(g) === 'pending';
   });
@@ -1268,6 +1270,10 @@ function pickMostLandable(gaps: Record<string, unknown>[]): Record<string, unkno
     impact: Number(impactOf(chosen.g).toFixed(4)),
     pool: selectionPool.length,
     hopeless_excluded: gaps.length - selectionPool.length,
+    operator_hold_excluded: ranked.filter((r) => {
+      const mm = ((r.g as { classification_metadata?: { operator_hold?: unknown } }).classification_metadata) ?? {};
+      return ((mm.operator_hold as boolean | undefined) === true);
+    }).length,
     skipped_pending: skippedPending,
     tied_at_top: ranked.filter((r) => Math.abs(r.s - chosen.s) < 1e-9).length,
     distinct_targets_top20: new Set(ranked.slice(0, 20).map((r) => targetOf(r.g))).size,

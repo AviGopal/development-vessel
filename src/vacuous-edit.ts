@@ -422,8 +422,62 @@ export function vacuousEditReason(before: string, after: string): string | null 
   // deleting a log line (0 added) and rewording one (no new branch) are still
   // refused; only a strict increase in conditionals is allowed through.
   const _logBranches = (ls: string[]) => ls.reduce((n, l) => n + (l.match(/\?/g) ?? []).length, 0);
+  // Allow cost/volume-reducing log-level demotions to pass this gate.
+  // A demotion is moving to a strictly lower-severity level (e.g., info->debug, info->trace).
+  // It is allowed only when the NEW level is below the configured level (default LOG_LEVEL=info),
+  // so it actually reduces emitted logs at runtime. Rewordings or deletions are still refused.
+  const _LOG_LEVELS = ["trace","debug","info","warn","error","fatal"] as const;
+  type _Level = typeof _LOG_LEVELS[number];
+  const _levelIndex = (lvl: string): number => {
+    const i = _LOG_LEVELS.indexOf(lvl as _Level);
+    return i === -1 ? Number.POSITIVE_INFINITY : i;
+  };
+  const _extractLevel = (line: string): _Level | null => {
+    const m = line.match(/\.(trace|debug|info|warn|error|fatal)\s*\(/);
+    return (m?.[1] as _Level | undefined) ?? null;
+  };
+  const _normalizeLog = (line: string): string => line.replace(/\.(trace|debug|info|warn|error|fatal)\s*\(/, ".<LEVEL>(");
+  const _isPureLogLevelDemotion = (deletedLines: string[], addedLines: string[]): boolean => {
+    const cfgNameRaw = (process.env["LOG_LEVEL"] ?? "info").toString().toLowerCase();
+    const cfgIndex = _levelIndex(cfgNameRaw);
+    // normalise into multisets keyed by the logging call with level elided
+    const dels = new Map<string, number[]>();
+    const adds = new Map<string, number[]>();
+    for (const l of deletedLines) {
+      if (!isLoggingCall(l)) return false;
+      const lvl = _extractLevel(l);
+      if (!lvl) return false;
+      const key = _normalizeLog(l);
+      const arr = dels.get(key);
+      (arr ? arr : dels.set(key, []).get(key)!)!.push(_levelIndex(lvl));
+    }
+    for (const l of addedLines) {
+      if (!isLoggingCall(l)) return false;
+      const lvl = _extractLevel(l);
+      if (!lvl) return false;
+      const key = _normalizeLog(l);
+      const arr = adds.get(key);
+      (arr ? arr : adds.set(key, []).get(key)!)!.push(_levelIndex(lvl));
+    }
+    if (dels.size !== adds.size) return false;
+    for (const [k, dIdx] of dels.entries()) {
+      const aIdx = adds.get(k);
+      if (!aIdx || aIdx.length !== dIdx.length) return false;
+      // Pair greedily: highest old with lowest new. Every pair must be a strict demotion
+      // and the new level must fall below the configured level.
+      const dSorted = [...dIdx].sort((a,b)=>b-a);
+      const aSorted = [...aIdx].sort((a,b)=>a-b);
+      for (let i=0; i<dSorted.length; i++) {
+        const oldI = dSorted[i]!;
+        const newI = aSorted[i]!;
+        if (!Number.isFinite(oldI) || !Number.isFinite(newI)) return false;
+        if (!(newI < oldI && newI < cfgIndex)) return false;
+      }
+    }
+    return true;
+  };
   const _distinguishesMore = _logBranches(added) > _logBranches(deleted);
-  if (changed.length > 0 && changed.every(isLoggingCall) && !_distinguishesMore) {
+  if (changed.length > 0 && changed.every(isLoggingCall) && !_distinguishesMore && !_isPureLogLevelDemotion(deleted, added)) {
     return (
       `diagnostic-only edit: every changed line is a logging call ` +
       `(${changed.length} line(s), e.g. \`${(changed[0] ?? "").slice(0, 80)}\`). ` +

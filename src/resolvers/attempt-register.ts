@@ -287,9 +287,8 @@ export async function sweepAttempts(opts?: { now?: number }): Promise<{ drained:
           const shas = (existingGap?.status === "open" && Array.isArray(existingGap.classification_metadata?.shas)) ? [...existingGap.classification_metadata.shas] : [];
           const first_seen = (existingGap?.status === "open" && existingGap.classification_metadata) ? existingGap.classification_metadata.first_seen : undefined;
 
-          if (!shas.includes(landing.sha)) {
-            shas.push(landing.sha);
-          }
+          if (shas.includes(landing.sha)) { shasWrittenThisSweep.add(landing.sha); continue; }
+          shas.push(landing.sha);
 
           await resolveSubstrateGapWrite({
             type: "substrateGap_write",

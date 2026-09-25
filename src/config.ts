@@ -92,6 +92,7 @@ export const config = {
       "gap_compose",
       "composeOwnership",
       "contentAddressedVesselId",
+      "composerInterruptionReport",
       "lift_demo_noop",
       "emit_shape", // test-fixture: emit an impulse of a configurable shape (synthetic shape-chains)
       "git_status",

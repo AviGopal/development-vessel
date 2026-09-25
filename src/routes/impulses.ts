@@ -978,6 +978,10 @@ async function dispatchInner(pointer: AnyPointer): Promise<ResolverResult> {
       return resolveConceptFromTraces(pointer);
     case "failure_count_report":
       return resolveFailureCountReport(pointer);
+    case "composerInterruptionReport": {
+      const { resolveComposerInterruptionSweep } = await import("../resolvers/composer-interruption-sweep.js");
+      return resolveComposerInterruptionSweep(p as Parameters<typeof resolveComposerInterruptionSweep>[0]);
+    }
     case "composeOwnership": {
       const { ownedVessels } = await import("../resolvers/gap-to-feature.js");
       return { shape: "composeOwnership", body: { node: process.env["SUBSTRATE_NAME"] ?? "substrate", owned_repos: [...ownedVessels()].sort() } };

@@ -31,6 +31,20 @@ import { COMPOSE_TOPOLOGY_TICK_TEMPLATE } from "./compose-topology-tick.js";
 import { VESSEL_DEMAND_TICK_TEMPLATE } from "./vessel-demand-tick.js";
 import { GENERATIVE_FRONTIER_GAP_TICK_TEMPLATE } from "./generative-frontier-gap-tick.js";
 import { HARNESS_RUN_MATRIX_TEMPLATE } from "./harness-run-matrix.js";
+import { exec } from 'node:child_process';
+
+// When a cutover lands a change to a seed template, it restarts the main
+// development-vessel service but not the seed service. This leaves the change
+// inert until the next reboot. To fix this, we trigger a restart of the seed
+// service whenever the main vessel service starts. The seed service is
+// idempotent and will only upsert templates with a bumped `seed_version`.
+// The restart is best-effort and failures are non-blocking.
+exec('systemctl --user restart development-vessel-seed.service', (err) => {
+  if (err) {
+    console.error(`[seed-hot-reload] Failed to restart seed service: ${err.message}`);
+  }
+});
+
 import { REPAIR_ACTIVITY_FROM_FAILURES_TEMPLATE } from "./repair-activity-from-failures.js";
 import { TRY_DIRECT_ANSWER_TEMPLATE } from "./try-direct-answer.js";
 import { CLOSE_HEALTH_GAP_TEMPLATE } from "./close-health-gap.js";

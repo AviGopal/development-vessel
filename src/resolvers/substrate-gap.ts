@@ -618,6 +618,7 @@ export function falsifierCoverage(gaps: SubstrateGap[]): Record<string, number> 
 export async function resolveSubstrateGap(
   pointer: SubstrateGapReadPointer,
 ): Promise<ResolverResult> {
+  { const fwd = await forwardToGapStore(pointer as unknown as Record<string, unknown>); if (fwd) return fwd; }
   const gaps = await loadGaps();
   const limit = pointer.limit ?? 50;
 

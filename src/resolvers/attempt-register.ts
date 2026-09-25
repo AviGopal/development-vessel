@@ -125,6 +125,7 @@ export async function registerAttempt(input: { route: string; repo: string; touc
       gap_id: input.gap_id ?? null,
       proposal_id: input.proposal_id ?? null,
       authoring_execution_id: input.authoring_execution_id ?? null,
+      node: null,
       prediction: {
         expect_pass: input.prediction?.expect_pass ?? [],
         expect_change: input.prediction?.expect_change ?? [],
@@ -230,6 +231,7 @@ export async function sweepAttempts(opts?: { now?: number }): Promise<{ drained:
             authoring_execution_id: intent.authoring_execution_id,
             shas: landedShas,
             post_snapshot_id,
+            node: intent.node,
             at: new Date().toISOString(),
             ...outcome
           };

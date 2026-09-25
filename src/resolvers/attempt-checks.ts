@@ -158,7 +158,7 @@ export async function evaluateChecks(ids: string[], perCheckTimeoutMs = 60000, t
 export async function takeSnapshot(opts: { checks: string[]; context: string; repos?: string[] }): Promise<{ snapshot_id: string; at: string; results: CheckResult[]; artifacts: Record<string, string> }> {
   const snapshot_id = `snap-${Date.now().toString(36)}-${Math.random().toString(36).substring(2, 8)}`;
   const at = new Date().toISOString();
-  const results = await evaluateChecks(opts.checks);
+  const results = await evaluateChecks(opts.checks, undefined, opts.repos?.length === 1 ? opts.repos[0] : undefined);
   const artifacts: Record<string, string> = {};
 
   // Add runtime artifact for development-vessel

@@ -77,6 +77,8 @@ export interface ParkedLanding {
   verify: { typecheck: boolean; shape_dispatch: boolean; tests: boolean };
   judge: { addresses: boolean | null; reason: string | null };
   parked_at: string;
+  /** Attempt registered before the original cutover mutated the live tree; a resume reuses it. */
+  attempt_id?: string | null;
   reason: string;
 }
 
@@ -183,6 +185,8 @@ async function resumeParkedLanding(pointer: FeatureComposePointer, park: ParkedL
       evaluation_evidence: { verdict: "FAVORABLE", base_success_rate: 1, mitosis_success_rate: 1, cited_trace_ids: [], cited_check_names: ["typecheck (resume)", "parked: shape-dispatch", "parked: bun test (baseline-delta, flake-confirmed)"] },
       gap_id: gapId,
       proposal_id: `${gapId}-compose-report`,
+      attempt_id: park.attempt_id ?? undefined,
+      authoring_execution_id: (pointer as { authoring_execution_id?: string }).authoring_execution_id,
       skip_push: pointer.skip_push ?? false,
     } as never);
     const r = (cut.body ?? {}) as Record<string, unknown>;
@@ -6568,6 +6572,7 @@ const earlyAttempt = await Promise.race([
             judge: { addresses: semantic_gate?.addresses ?? null, reason: semantic_gate?.reason ?? null },
             parked_at: new Date().toISOString(),
             reason: "pre-cutover",
+            attempt_id: earlyAttempt.attempt_id ?? null,
           });
           parkedAny = true;
         }

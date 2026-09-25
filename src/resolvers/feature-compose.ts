@@ -3302,21 +3302,7 @@ function classifyComposeFailure(appliedOps: Array<{ ok: boolean; detail?: string
   return "semantic_reject";
 }
 async function appendComposeLesson(cls: string, reason: string, vessels: string, gap?: { id?: string; summary?: unknown; category?: unknown; source?: unknown; detected_at?: unknown; classification_metadata?: Record<string, unknown> }): Promise<void> {
-  // Fix: avoid writing a caller's STALE gap snapshot back to the store (which reopens superseded gaps and drops newer lessons).
-  // Also satisfy approval boundary: force operator_approved: true so the lesson write proceeds.
-  try {
-    const nextMeta = { ...(gap?.classification_metadata ?? {}), operator_approved: true } as Record<string, unknown>;
-    if (gap) {
-      gap.classification_metadata = nextMeta;
-      // Never carry a stale lessons array forward — let the backend append against the live record.
-      const dyn = gap as Record<string, unknown>;
-      if (Object.prototype.hasOwnProperty.call(dyn, "lessons")) {
-        delete dyn["lessons"];
-      }
-    }
-  } catch {
-    // Best-effort hygiene only; compose proceeds even if this guard cannot adjust the snapshot.
-  }
+  // operator_approved is operator authority: code never sets it (block from d8c93b4 removed).
   if (gap && gap.id) {
     try {
       try { const fresh = (((await resolveSubstrateGap({ type: "substrateGap", id: gap.id, limit: 1 } as never))?.body as { gaps?: Array<Record<string, unknown>> } | undefined)?.gaps ?? [])[0]; if (fresh) gap = { ...gap, ...fresh } as NonNullable<typeof gap>; } catch { /* store unreadable: use the caller's snapshot */ }

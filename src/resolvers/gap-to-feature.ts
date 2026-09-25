@@ -517,6 +517,7 @@ export async function localizeGap(gap: Record<string, unknown>, opts?: { useLlm?
   // (b) HIGH-CONFIDENCE: an edit-site already named in metadata that maps to a real file.
   for (const f of ["edit_site", "suspected_real_location", "change_site", "file_path"] as const) {
     let v = meta[f];
+    if ((typeof v !== "string" || !v.trim()) && typeof (gap as Record<string, unknown>)[f] === "string") v = (gap as Record<string, unknown>)[f];
     if (typeof v !== "string" || !v.trim()) continue;
     let cand = v.trim();
     // Normalise /vessels/<v>/… and bare <v>/… into repos/<v>/…

@@ -1258,6 +1258,7 @@ function pickMostLandable(gaps: Record<string, unknown>[]): Record<string, unkno
   // this line a 90-way tie at one score over one target file is invisible at every
   // observation point, which is why the sign error above survived beside its own comment.
   console.log(`[gap-to-feature] pick ${JSON.stringify({
+    owner: process.env["SUBSTRATE_NAME"] ?? "substrate",
     gap_id: String(chosen.g.id ?? ""),
     category: String(chosen.g.category ?? ""),
     target: targetOf(chosen.g),

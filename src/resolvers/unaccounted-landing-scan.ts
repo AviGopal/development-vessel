@@ -76,7 +76,9 @@ export async function resolveUnaccountedLandingScan(
   let ingested = 0;
   let bad = 0;
 
+  const ingestedKeys = new Set((await readRecords("landingEvent")).map((r) => r.key));
   for (const fileName of spoolFiles) {
+    if (ingestedKeys.has("spool:" + fileName)) { ingested++; continue; }
     const filePath = join(spoolDir, fileName);
     try {
       const content = readFileSync(filePath, "utf-8");
@@ -118,11 +120,12 @@ export async function resolveUnaccountedLandingScan(
   let accountedCount = 0;
   const unaccountedCommits: UnaccountedCommit[] = [];
 
+  const intentKeys = new Set((await readRecords("attemptIntent")).map((r) => r.key));
   for (const record of uniqueCommits) {
     const isAccounted =
       record.record.attempt_id &&
       record.record.attempt_id.length > 0 &&
-      (await readRecords("attemptIntent", { key: record.record.attempt_id })).length > 0;
+      intentKeys.has(record.record.attempt_id);
 
     if (isAccounted) {
       accountedCount++;

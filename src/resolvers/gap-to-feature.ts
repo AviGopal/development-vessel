@@ -3611,37 +3611,6 @@ export async function resolveGapToFeature(pointer: GapToFeaturePointer): Promise
   // caller and behaves exactly as before (same carve-out as the cooldown filter and the
   // admission gate). A null peek means capacity is unobservable → FAIL OPEN and select,
   // matching compose-slots' own contract.
-  // 0a. AUTONOMOUS-PICK LEASE. A coordinated window (a graded run, a measurement window)
-  // holds the named maintenanceLease "autonomous_pick"; while it is held, auto-picks do not
-  // select. Every in-process trigger (gap-write nudge, gap-drain-observer, interruption
-  // sweep, the pick after each restart) reaches selection through this branch, so one read
-  // here covers them all; masking gap-compose.service did not. Directed pointers (gap_id or
-  // category) are unaffected. An unreadable lease fails open, like the capacity peek below,
-  // and the lease TTL (max 1 h) releases a hold whose keeper died.
-  if (!pointer.gap_id && !pointer.category) {
-    try {
-      const { resolveMaintenanceLease } = await import("./maintenance-lease.js");
-      const lease = await resolveMaintenanceLease({ type: "maintenanceLease", name: "autonomous_pick" });
-      const lb = lease.body as { held?: boolean; holder?: string; expires_at?: string } | undefined;
-      if (lb?.held === true) {
-        console.log(`[gap-to-feature] selection skipped: autonomous_pick lease held by ${lb.holder} until ${lb.expires_at}`);
-        return {
-          shape: "gapToFeatureReport",
-          body: {
-            ok: false,
-            stage: "lease",
-            verdict: "BUSY",
-            error: `autonomous_pick lease held by ${lb.holder}`,
-            lease_holder: lb.holder,
-            lease_expires_at: lb.expires_at,
-            skipped_selection: true,
-          },
-        };
-      }
-    } catch (err) {
-      console.warn(`[gap-to-feature] autonomous_pick lease read failed; proceeding: ${String(err)}`);
-    }
-  }
   if (!pointer.gap_id && !pointer.category) {
     const capacity = await peekComposeCapacity();
     if (capacity && capacity.free <= 0) {

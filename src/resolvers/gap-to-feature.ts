@@ -2824,6 +2824,30 @@ const CLASS_POSTERIOR_PATH = process.env["GAP_CLASS_POSTERIOR_PATH"] ?? "/worksp
 const PICK_DECISIONS_PATH = "/workspace/proposals/pick-decisions.jsonl";
 type ClassPosteriors = Record<string, { alpha: number; beta: number }>;
 export function gapClassOf(g: Record<string, unknown>): string {
+  // HUMAN-REPORTED CLASS BUCKET SPLIT (2026-09-25):
+  // Previously, all operator-filed (human_reported) gaps were grouped into a single
+  // class "human", forcing one Beta to represent ~70 unrelated works and letting
+  // narrow recommit:* classes win the class re-rank. Key the class by the gap's
+  // concrete edit_site stem when present so each operator-filed gap family learns
+  // its own posterior and competes fairly.
+  {
+    const __cat = String((g as Record<string, unknown>).category ?? "");
+    if (__cat === "human_reported") {
+      const __gm = ((g as { classification_metadata?: unknown; metadata?: unknown }).classification_metadata
+        ?? (g as { metadata?: unknown }).metadata
+        ?? {}) as Record<string, unknown>;
+      const __siteRaw = String((__gm.edit_site ?? __gm.change_site ?? __gm.single_file ?? __gm.file_path ?? "") || "");
+      if (__siteRaw) {
+        const __file = __siteRaw.split(/[\\\/]/).pop() ?? __siteRaw;
+        const __stem = __file.replace(/\.[^.]+$/, "").toLowerCase();
+        if (__stem) return `human:${__stem}`;
+      }
+      // Fallback: derive a light-weight bucket from the id so we still avoid a single monolith.
+      const __id = String((g as Record<string, unknown>).id ?? "").toLowerCase();
+      const __tok = (__id.match(/[a-z0-9]+/g) ?? ["unsited"]).slice(0, 1).join("-");
+      return `human:${__tok || "unsited"}`;
+    }
+  }
   if (String(g.source ?? "") === "human_reported") return "human";
   let id = String(g.id ?? "");
   let recommit = false;

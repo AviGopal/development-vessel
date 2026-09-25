@@ -25,7 +25,7 @@ import { federatedLlmEgressUrls } from "./federated-llm-egress.js";
 import { acquireComposeWorkspace, type ComposeWorkspace } from "./compose-workspace";
 import type { ResolverResult } from "./types.js";
 import { resolveVesselMitosisCutover } from "./vessel-mitosis-cutover.js";
-import { registerAttempt } from "./attempt-register.js";
+import { registerAttempt, setAuthoringExecution } from "./attempt-register.js";
 import { resolveSubstrateGap, resolveSubstrateGapWrite } from "./substrate-gap.js";
 import { writeAuthoringMarker, clearAuthoringMarker } from "./patch-with-tools.js";
 import { vacuousEditReason, nonTerminatingEditReason, deadStoreEditReason, truncatingRewriteReason } from "../vacuous-edit.js";
@@ -6506,6 +6506,7 @@ const earlyAttempt = await Promise.race([
           touched_files: changedRel,
           gap_id: pointer.gap?.id ?? null,
           authoring_execution_id: (pointer as { authoring_execution_id?: string }).authoring_execution_id ?? null,
+          dispatch_id: (pointer as { authoring_execution_id?: string }).authoring_execution_id ?? null,
         }).catch(() => ({ attempt_id: null as string | null })),
         new Promise<{ attempt_id: string | null }>((resolve) => setTimeout(() => resolve({ attempt_id: null }), 120_000)),
       ]);
@@ -6903,7 +6904,8 @@ const earlyAttempt = await Promise.race([
       const emittedId = traceBody?.execution_id ?? traceBody?.data?.execution_id; 
       if (typeof emittedId === "string" && emittedId.length > 0) { 
         console.log(`[feature-compose] trace emission persisted execution_id=${emittedId}`);
-        emittedExecutionId = emittedId; 
+        emittedExecutionId = emittedId;
+for (const _c of cutovers as Array<Record<string, unknown>>) { const _ops = (((_c?.result as Record<string, unknown> | undefined)?.operations) ?? []) as Array<{ op?: string; status?: string; detail?: string }>; for (const _o of _ops) if (_o.op === "attempt_register" && _o.status === "ok" && typeof _o.detail === "string" && _o.detail.startsWith("att-")) void setAuthoringExecution(_o.detail, emittedId); } 
       } 
     }
   } catch { /* emission must never fail the compose */ }

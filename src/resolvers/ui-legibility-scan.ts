@@ -76,7 +76,10 @@ export async function resolveUiLegibilityScan(
 
   const resolveObsidian = async (pointer: Record<string, unknown>): Promise<Record<string, unknown> | null> => {
     try {
-      const resp = await fetch(`${obsidianEndpoint}/resolve`, {
+      const t = String((pointer as { type?: unknown }).type ?? "");
+      const humanSurfaceEndpoint = (process.env["HUMAN_SURFACE_ENDPOINT"] ?? "http://localhost:8310").replace(/\/+$/, "");
+      const endpoint = t.startsWith("human_surface:") ? humanSurfaceEndpoint : obsidianEndpoint;
+      const resp = await fetch(`${endpoint}/resolve`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ impulse: { pointer } }),
@@ -89,7 +92,11 @@ export async function resolveUiLegibilityScan(
     }
   };
 
-  const uiViewResp = await resolveObsidian({ type: "obsidian:ui_view" });
+  let uiViewResp = await resolveObsidian({ type: "human_surface:ui_view" });
+  if (!uiViewResp?.content) {
+    const fallback = await resolveObsidian({ type: "obsidian:ui_view" });
+    if (fallback) uiViewResp = fallback;
+  }
   const uiViewContent = typeof uiViewResp?.content === "string" ? uiViewResp.content : null;
   if (!uiViewContent) {
     // AN UNOBSERVABLE TARGET IS A FAILED SCAN, NOT A CLEAN ONE.

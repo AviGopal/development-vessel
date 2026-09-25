@@ -101,7 +101,7 @@ export function settleVerdict(pre: CheckResult[], now: CheckResult[], prediction
   return { verdict, regressed_checks: [...new Set(regressed_checks)], unresolved_checks: [...new Set(unresolved_checks)] };
 }
 
-export async function registerAttempt(input: { route: string; repo: string; touched_files: string[]; gap_id?: string | null; proposal_id?: string | null; authoring_execution_id?: string | null; attempt_id?: string; prediction?: Partial<Prediction> }): Promise<{ attempt_id: string | null; registered: boolean; error?: string }> {
+export async function registerAttempt(input: { route: string; repo: string; touched_files: string[]; gap_id?: string | null; proposal_id?: string | null; authoring_execution_id?: string | null; dispatch_id?: string | null; attempt_id?: string; prediction?: Partial<Prediction> }): Promise<{ attempt_id: string | null; registered: boolean; error?: string }> {
   try {
     const attempt_id = input.attempt_id ?? `att-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 9)}`;
 
@@ -125,6 +125,7 @@ export async function registerAttempt(input: { route: string; repo: string; touc
       gap_id: input.gap_id ?? null,
       proposal_id: input.proposal_id ?? null,
       authoring_execution_id: input.authoring_execution_id ?? null,
+      dispatch_id: input.dispatch_id ?? null,
       node: null,
       prediction: {
         expect_pass: input.prediction?.expect_pass ?? [],
@@ -156,6 +157,34 @@ export function settleWindowMs(): number {
     // ignore errors and use default
   }
   return 900000;
+}
+
+// The execution that authored an attempt is often known only after registration (a compose
+// emits its own execution row at its end). First write wins, so repeat calls are no-ops.
+function authoringPath(): string { return path.join(ledgerDir(), "attemptAuthoring.jsonl"); }
+export async function setAuthoringExecution(attempt_id: string, execution_id: string): Promise<boolean> {
+  try {
+    if (!attempt_id || !execution_id) return false;
+    if ((await authoringOverride(attempt_id)).authoring_execution_id) return false;
+    fs.mkdirSync(ledgerDir(), { recursive: true });
+    fs.appendFileSync(authoringPath(), JSON.stringify({ attempt_id, execution_id, at: new Date().toISOString() }) + "\n");
+    return true;
+  } catch (e) {
+    console.warn(`[attempt-register] setAuthoringExecution failed for ${attempt_id}: ${(e as Error).message}`);
+    return false;
+  }
+}
+export async function authoringOverride(attempt_id: string): Promise<{ authoring_execution_id?: string }> {
+  try {
+    const p = authoringPath();
+    if (!fs.existsSync(p)) return {};
+    for (const line of fs.readFileSync(p, "utf8").split("\n")) {
+      if (!line.trim()) continue;
+      const r = JSON.parse(line) as { attempt_id?: string; execution_id?: string };
+      if (r.attempt_id === attempt_id && typeof r.execution_id === "string") return { authoring_execution_id: r.execution_id };
+    }
+  } catch { /* unreadable override file: fall back to the intent's value */ }
+  return {};
 }
 
 export async function sweepAttempts(opts?: { now?: number }): Promise<{ drained: unknown; outcomes_written: number; settlements_written: number; lessons_written: number; errors: string[] }> {
@@ -328,6 +357,8 @@ export async function sweepAttempts(opts?: { now?: number }): Promise<{ drained:
             authoring_execution_id: intent.authoring_execution_id,
             shas: landedShas,
             post_snapshot_id,
+            dispatch_id: (intent as { dispatch_id?: string | null }).dispatch_id ?? null,
+            ...(await authoringOverride(attempt_id)),
             node: intent.node,
             at: new Date().toISOString(),
             ...outcome
@@ -366,6 +397,8 @@ export async function sweepAttempts(opts?: { now?: number }): Promise<{ drained:
               authoring_execution_id: intent.authoring_execution_id,
               shas: landedShas,
               snapshot_id: settle_snapshot_id,
+              dispatch_id: (intent as { dispatch_id?: string | null }).dispatch_id ?? null,
+              ...(await authoringOverride(attempt_id)),
               ...verdict,
               credit_eligible: verdict.verdict === "held",
             };

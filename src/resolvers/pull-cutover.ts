@@ -110,6 +110,56 @@ export async function resolvePullCutover(pointer: PullCutoverPointer): Promise<{
     },
   });
 
+  if (vessel_name === "human-surface-vessel") {
+    const releaseDir = "/workspace/git/human-surface-release";
+    const haveRelease = (await sh(["bash", "-lc", `[ -d "${releaseDir}" ] && echo y || echo n`])).out === "y";
+    if (!haveRelease) {
+      return base({ valid: false, note: `human-surface-vessel release checkout not found at ${releaseDir}` });
+    }
+
+    await sh(["git", "-C", releaseDir, "fetch", "-q", "origin", "dev"]);
+    const priorSha = (await sh(["git", "-C", releaseDir, "rev-parse", "HEAD"])).out.trim();
+    const originShaRes = await sh(["git", "-C", releaseDir, "rev-parse", "origin/dev"]);
+    if (!originShaRes.ok) {
+      return base({ valid: false, head_sha: priorSha, note: `Could not rev-parse origin/dev for human-surface-vessel: ${originShaRes.err}` });
+    }
+    const originSha = originShaRes.out.trim();
+    const lagged = priorSha !== originSha;
+
+    if (dry_run) {
+      return base({ valid: true, lagged, head_sha: originSha || priorSha, note: lagged ? "runtime behind origin/dev; cutover would converge" : "already converged" });
+    }
+    if (!lagged) {
+      return base({ valid: true, lagged: false, head_sha: priorSha, deployed: false, restarted: false, note: "already converged (no-op)" });
+    }
+
+    // CONVERGE + BUILD + RESTART
+    const reset = await sh(["git", "-C", releaseDir, "reset", "--hard", "-q", "origin/dev"]);
+    if (!reset.ok) {
+      return base({ valid: true, lagged, head_sha: priorSha, deployed: false, note: `git reset failed: ${reset.err.slice(0, 160)}` });
+    }
+    const headSha = (await sh(["git", "-C", releaseDir, "rev-parse", "HEAD"])).out.trim();
+    
+    const built = await sh(["bun", "--cwd", releaseDir, "run", "build"]);
+    if (!built.ok) {
+        return base({ valid: true, lagged, head_sha: headSha, deployed: false, note: `bun run build failed: ${built.err.slice(0,160)}` });
+    }
+
+    const unit = "human-surface.service";
+    const restart = await sh(["systemctl", "restart", unit]);
+    const restarted = restart.ok;
+    
+    return base({ 
+      valid: true,
+      lagged,
+      head_sha: headSha,
+      deployed: true, 
+      restarted,
+      healthy: true, // No health check for UI service in this path
+      note: `human-surface-vessel converged to ${headSha.slice(0,10)}, built, and restart ${restarted ? 'succeeded' : 'failed'}.`
+    });
+  }
+
   // 1. BOUND: prefer inventory; if missing, fall back to local clone/release checkout presence.
   const cloneDir = `${CLONE_DIR}/${vessel_name}`;
   const allowed = await allowedVessels();

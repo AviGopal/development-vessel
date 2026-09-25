@@ -372,7 +372,7 @@ function hasSubstance(body: unknown): boolean {
  * endpoint). llm_completion_dispatch tasks are skipped (always runnable; their
  * input is bound at execution time). (2026-06-27)
  */
-async function validateDataTask(task: PlannedTask): Promise<{ ok: boolean; reason: string }> {
+async function validateDataTask(task: PlannedTask, executionId?: string): Promise<{ ok: boolean; reason: string }> {
     if (
     task.resolver === "llm_completion_dispatch" ||
     task.resolver === "source_code" ||
@@ -410,7 +410,7 @@ async function validateDataTask(task: PlannedTask): Promise<{ ok: boolean; reaso
   }
   // Build a concrete test pointer from the planned config, dropping {{...}} fields
   // (no upstream at validation time) so the resolver runs on its own defaults.
-  const testPointer: Record<string, unknown> = { type: task.resolver };
+  const testPointer: Record<string, unknown> = { type: task.resolver, ...(executionId ? { execution_id: executionId } : {}) };
   for (const [k, val] of Object.entries(task.config)) {
     if (k === "type") continue;
     if (typeof val === "string" && val.includes("{{")) continue;
@@ -607,7 +607,7 @@ export async function resolveAuthorComposedCapability(
     let dataValid = true;
     let dataReason = "";
     for (const t of coerced.tasks) {
-      const v = await validateDataTask(t);
+      const v = await validateDataTask(t, typeof (pointer as { execution_id?: unknown }).execution_id === 'string' ? (pointer as { execution_id?: string }).execution_id : undefined);
       if (!v.ok) { dataValid = false; dataReason = v.reason; break; }
     }
     if (!dataValid) {

@@ -1522,18 +1522,28 @@ export async function resolveVesselMitosisEvaluate(
       };
     }
     if (staticResult.attempted && staticResult.ok) {
-      return {
-        shape: "vesselMitosisEvaluation",
-        body: {
-          base_version_id: baseId,
-          mitosis_version_id: mitosisId,
-          verdict: "FAVORABLE",
-          verdict_reason: "static_checks_pass",
-          static_evaluation: staticResult,
-          cited_check_names: staticResult.checks.map((c) => c.name),
-          evaluated_at: new Date().toISOString(),
-        },
-      };
+      // If only non-resolver files changed, a clean static evaluation is sufficient.
+      // If resolver files changed, require runtime evidence (traces) — do not
+      // return here; fall through to the trace path below.
+      const stagedMaybe = (pointer as any)?.staged_files;
+      const hasResolverChanges =
+        Array.isArray(stagedMaybe) &&
+        stagedMaybe.some((p: unknown) => typeof p === "string" && p.startsWith("src/resolvers/") && p.endsWith(".ts"));
+      if (!hasResolverChanges) {
+        return {
+          shape: "vesselMitosisEvaluation",
+          body: {
+            base_version_id: baseId,
+            mitosis_version_id: mitosisId,
+            verdict: "FAVORABLE",
+            verdict_reason: "static_checks_pass",
+            static_evaluation: staticResult,
+            cited_check_names: staticResult.checks.map((c) => c.name),
+            evaluated_at: new Date().toISOString(),
+          },
+        };
+      }
+      // Resolver changes present: require runtime evidence; continue to trace fetch/evaluation path.
     }
     // staticResult.attempted === false → fall through to trace path.
   }

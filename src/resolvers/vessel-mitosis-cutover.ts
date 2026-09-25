@@ -32,7 +32,7 @@ export function selfRestartAlreadyOwed(vesselName: string): string | null {
     const r = Bun.spawnSync(["systemctl", "list-units", "--all", "--plain", "--no-legend", "mitosis-self-restart-*"], { stdout: "pipe", stderr: "pipe" });
     for (const line of new TextDecoder().decode(r.stdout ?? new Uint8Array()).split("\n")) {
       const f = line.trim().split(/\s+/);
-      if (f[0] && f[0]!.includes(vesselName) && (f[2] === "active" || f[2] === "activating")) { console.log(`[mitosis-cutover] self-restart already owed by ${f[0]} — not scheduling another`); return f[0]!; }
+      if (f[0] && new RegExp(`-${vesselName}(\.|$)`).test(f[0]) && (f[2] === "active" || f[2] === "activating")) { console.log(`[mitosis-cutover] self-restart already owed by ${f[0]} — not scheduling another`); return f[0]!; }
     }
   } catch { /* unobservable: schedule as before */ }
   return null;

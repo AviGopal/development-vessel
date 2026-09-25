@@ -110,7 +110,7 @@ function stripTypeOnly(s: string): string {
  */
 function isLoggingCall(line: string): boolean {
   const s = line.trim().replace(/^[-+]\s*/, "");
-  return /^(?:await\s+)?(?:console\.(?:log|warn|error|info|debug)|tap|logger\.(?:log|warn|error|info|debug))\s*\(/.test(s);
+  return /^(?:await\s+)?(?:console\.(?:log|warn|error|info|debug)|tap|logger\.(?:log|warn|error|info))\s*\(/.test(s);
 }
 
 export function nonTerminatingEditReason(before: string, after: string): string | null {

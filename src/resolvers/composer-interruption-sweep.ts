@@ -114,6 +114,10 @@ export async function resolveComposerInterruptionSweep(pointer: ComposerInterrup
   }
 
   const owned = await getOwnedVesselsSafe();
+
+  if (owned.size === 0) {
+    return { shape: "composerInterruptionReport", body: { node, hours, lines_read, restarts: restartLines.length, lossy: null, foreign_cutovers: null, detail: "owned set unavailable", entries: [] as Entry[] } };
+  }
   const entries: Entry[] = [];
   let lossyCount = 0;
   let foreignCount = 0;
@@ -139,27 +143,12 @@ export async function resolveComposerInterruptionSweep(pointer: ComposerInterrup
     const gapId = `composer-interruption-${node}-${dateTag}`;
     const vessels = Array.from(foreignVessels).sort();
     const summary = `${foreignCount} foreign composer restart(s) observed via cutover: ${vessels.join(", ")}`;
-    const pointerLike = {
-      type: "substrate_gap",
-      id: gapId,
-      category: "attempt_consequence",
-      source: "substrate_detected",
-      status: "open",
-      summary,
-      classification_metadata: {
-        edit_site: "repos/development-vessel/src/resolvers/gap-to-feature.ts",
-        foreign_cutovers: foreignCount,
-        vessels,
-      },
-    } as Record<string, unknown>;
     try {
-      const mod = await import("./substrate-gap.js");
-      const fn = (mod as unknown as { resolveSubstrateGap?: (p: Record<string, unknown>) => Promise<unknown> | unknown }).resolveSubstrateGap;
-      if (typeof fn === "function") {
-        await fn(pointerLike);
-      }
-    } catch {
-      // best-effort: do not fail the report if gap write cannot be dispatched
+      const { resolveSubstrateGapWrite } = await import("./substrate-gap.js");
+      const res = await resolveSubstrateGapWrite({ type: "substrateGap_write", gap: { id: gapId, category: "attempt_consequence", source: "substrate_detected", status: "open", detected_at: new Date().toISOString(), summary, classification_metadata: { edit_site: "repos/development-vessel/src/resolvers/gap-to-feature.ts", foreign_cutovers: foreignCount, vessels } } });
+      if ((res as { shape?: string }).shape === "structuredError") console.warn(`[composer-interruption-sweep] gap write refused for ${gapId}: ${JSON.stringify((res as { body?: unknown }).body).slice(0, 300)}`);
+    } catch (e) {
+      console.warn(`[composer-interruption-sweep] gap write failed for ${gapId}: ${(e as Error).message}`);
     }
   }
 

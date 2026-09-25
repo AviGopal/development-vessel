@@ -37,6 +37,20 @@ import type { ResolverResult } from "./types.js";
 import { readFile, writeFile, rename, mkdir } from "node:fs/promises";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+
+async function forwardToGapStore(pointer: Record<string, unknown>): Promise<ResolverResult | null> {
+  const ep = process.env["GAP_STORE_ENDPOINT"];
+  if (!ep) return null;
+  const key = process.env["METABOB_API_KEY"] ?? process.env["API_KEY"];
+  try {
+    const r = await fetch(ep, { method: "POST", headers: { "Content-Type": "application/json", ...(key ? { Authorization: `ApiKey ${key}` } : {}) }, body: JSON.stringify({ impulse: { pointer } }), signal: AbortSignal.timeout(15_000) });
+    const j = await r.json() as { shape?: string; body?: unknown };
+    return { shape: String(j.shape ?? "structuredError"), body: j.body ?? { detail: `gap store at ${ep} answered HTTP ${r.status}` } } as ResolverResult;
+  } catch (e) {
+    return { shape: "structuredError", body: { resolver: "substrateGap", detail: `gap store at ${ep} unreachable: ${(e as Error).message}` } } as ResolverResult;
+  }
+}
+
 // From ../shape-vocabulary.js, NOT from feature-compose.ts where this loader used to
 // live: feature-compose.ts imports THIS module, so importing back would close a cycle.
 // It was extracted rather than copied — see the header of that file.
@@ -695,6 +709,7 @@ export async function resolveSubstrateGapWrite(
   // filesystem layout. No production caller passes it (the cached fleet scan is used).
   opts?: { vocabulary?: ShapeVocabulary | null, anchorNotFoundHandler?: (error: Error) => void },
 ): Promise<ResolverResult> {
+  { const fwd = await forwardToGapStore(pointer as Record<string, unknown>); if (fwd) return fwd; }
   const flat = coerceFlatGapPointer(pointer as Record<string, unknown>);
   if (flat) (pointer as Record<string, unknown>)["gap"] = flat;
   if ((pointer as Record<string, unknown>)["gap"] === undefined || (pointer as Record<string, unknown>)["gap"] === null) {

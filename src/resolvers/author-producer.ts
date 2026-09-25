@@ -831,6 +831,7 @@ export async function resolveAuthorProducer(pointer: AuthorProducerPointer): Pro
 
     // VALIDATE: invoke resolver X for real with a concrete test pointer.
     const testPointer = buildTestPointer(candidate.task_config, shape, pointer);
+    if (typeof (pointer as { execution_id?: unknown }).execution_id === "string") (testPointer as Record<string, unknown>).execution_id = (pointer as { execution_id?: string }).execution_id;
     // Snapshot probe file paths before the validation probe so writes can be
     // restored regardless of outcome (fixes gap-author-satisfier-stub-pollution).
     const probeFilePaths = extractProbeFilePaths(testPointer as Record<string, unknown>);

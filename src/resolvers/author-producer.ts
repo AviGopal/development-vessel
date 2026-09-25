@@ -301,7 +301,7 @@ function extractProbeFilePaths(testPointer: Record<string, unknown>): string[] {
     const candidates: unknown[] = Array.isArray(val) ? val : [val];
     for (const c of candidates) {
       if (typeof c !== "string" || c.length === 0) continue;
-      const abs = c.startsWith("/") ? c : `/vessels/${c}`;
+      const abs = c.startsWith("/") ? c : c.startsWith("repos/") ? `/vessels/${c.slice("repos/".length)}` : `/vessels/${c}`;
       seen.add(abs);
     }
   }

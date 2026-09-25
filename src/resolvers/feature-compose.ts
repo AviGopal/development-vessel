@@ -3372,7 +3372,7 @@ async function appendComposeLesson(cls: string, reason: string, vessels: string,
       // dispositioned/skipped, not infinitely recommitted). The failure_lessons write above still
       // records the class so the drafter keeps learning.
       const _recommitDepth = (String(gap.id).match(/recommit-/g) ?? []).length;
-      if (reCommit && _recommitDepth < 2 && cls !== "scope_refused") { const baseId = String(gap.id).replace(/^(?:recommit-)+/, ""); const baseClosed = baseId === String(gap.id) ? (typeof (gap as { status?: unknown }).status === "string" && (gap as { status?: unknown }).status === "closed") : false; if (baseClosed) { console.log(`[compose-lessons] recommit SKIPPED: base gap ${baseId} is closed`); } else {
+      if (reCommit && _recommitDepth < 2 && cls !== "scope_refused" && !reason.startsWith("[deterministic] ")) { const baseId = String(gap.id).replace(/^(?:recommit-)+/, ""); const baseClosed = baseId === String(gap.id) ? (typeof (gap as { status?: unknown }).status === "string" && (gap as { status?: unknown }).status === "closed") : false; if (baseClosed) { console.log(`[compose-lessons] recommit SKIPPED: base gap ${baseId} is closed`); } else {
         await resolveSubstrateGapWrite({
           type: "substrateGap_write",
           gap: {
@@ -6761,7 +6761,7 @@ const earlyAttempt = await Promise.race([
       ?? semantic_gate?.reason
       ?? verdict,
     );
-    await appendComposeLesson(lessonClass, lessonReason, [...touched].join(","), pointer.gap);
+    await appendComposeLesson(lessonClass, (semantic_gate?.hard_fail === true && semantic_gate?.llm_consulted === false ? "[deterministic] " : "") + lessonReason, [...touched].join(","), pointer.gap);
     try {
       const tscText = verify.find((v) => !v.ok)?.output ?? "";
       const failedOpFiles = applied.filter((a) => !a.ok).map((a) => a.path);

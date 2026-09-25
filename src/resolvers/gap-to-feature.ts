@@ -515,7 +515,10 @@ export async function localizeGap(gap: Record<string, unknown>, opts?: { useLlm?
   const summary = String(gap.summary ?? gap.title ?? "");
 
   // (b) HIGH-CONFIDENCE: an edit-site already named in metadata that maps to a real file.
-  for (const f of ["edit_site", "suspected_real_location", "change_site", "file_path"] as const) {
+  // suspected_real_location first: it is written back only by the semantic gate after it
+  // refused a draft as mis-localized, so it is newer evidence than the original edit_site.
+  // Trying edit_site first sent every retry back to the file the gate had just rejected.
+  for (const f of ["suspected_real_location", "edit_site", "change_site", "file_path"] as const) {
     let v = meta[f];
     if ((typeof v !== "string" || !v.trim()) && typeof (gap as Record<string, unknown>)[f] === "string") v = (gap as Record<string, unknown>)[f];
     if (typeof v !== "string" || !v.trim()) continue;

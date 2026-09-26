@@ -1655,16 +1655,8 @@ export async function admitActionableGaps(
       const clean = vesselTypecheckClean(tc.vessel);
       if (clean === true) {
         excluded.push({ id, reason: `typecheck_clean_phantom(${tc.vessel}:${tc.tsCode})` });
-        try {
-          await resolveSubstrateGapWrite({
-            type: "substrateGap_write",
-            gap: {
-              id, category: g.category, source: g.source, summary: g.summary, detected_at: g.detected_at,
-              classification_metadata: { ...meta, resolution: "already_resolved_typecheck_clean", closed_at: new Date().toISOString(), typecheck_verified_vessel: tc.vessel },
-              status: "closed",
-            },
-          } as never);
-        } catch { /* retire is best-effort; exclusion still holds */ }
+        // The write and re-stamp are removed from the pick path to resolve timeout issues.
+        // The gap will still be excluded from consideration and closed by a separate background process.
         continue;
       }
       // clean === false (error still present) or null (unknown / over budget) → fall through:

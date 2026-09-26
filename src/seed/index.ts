@@ -82,6 +82,29 @@ import { CONCEPT_USAGE_BACKFILL_TEMPLATE } from "./concept-usage-backfill.js";
 // Horizon-detector ticks (Stage 1 of 2026-06-03-pre-lift-bootstrap-and-architecture-aware-loop)
 import { VESSEL_RESPONSIBILITY_AUDIT_TICK_TEMPLATE } from "./vessel-responsibility-audit-tick.js";
 import { VESSEL_ARCHITECTURE_PATTERN_SCAN_TICK_TEMPLATE } from "./vessel-architecture-pattern-scan-tick.js";
+
+// Attach a content-addressed version to each seed template so a populated
+// catalogue still upserts changed templates on re-seed. The CLI's seeder
+// path imports SEED_TEMPLATES from this module even when the catalogue is
+// not empty; giving each template a seed_version derived from its body lets
+// that updater detect drift and upsert only changed templates.
+queueMicrotask(() => {
+  try {
+    const templates = (SEED_TEMPLATES as unknown as ActivityTemplate[]) ?? [];
+    for (const tpl of templates) {
+      const json = JSON.stringify(tpl);
+      // FNV-1a 32-bit for a stable, inexpensive content hash
+      let h = 0x811c9dc5;
+      for (let i = 0; i < json.length; i++) {
+        h ^= json.charCodeAt(i);
+        h = Math.imul(h >>> 0, 0x01000193) >>> 0;
+      }
+      (tpl as unknown as { seed_version?: number }).seed_version = h >>> 0;
+    }
+  } catch (e) {
+    console.warn(`[seed] seed_version attach failed: ${(e as Error).message}`);
+  }
+});
 import { ACTIVITY_LIFECYCLE_AUDIT_TICK_TEMPLATE } from "./activity-lifecycle-audit-tick.js";
 import { RESOLVER_DISTRIBUTION_AUDIT_TICK_TEMPLATE } from "./resolver-distribution-audit-tick.js";
 // Gap-drain bridges (2026-06-04): close Break 1 (gap → drafter input boundary)

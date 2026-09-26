@@ -35,7 +35,7 @@
 import { WORKSPACE_ROOT as DEFAULT_WORKSPACE_ROOT } from "../config.js";
 import type { ResolverResult } from "./types.js";
 import { readFile, writeFile, rename, mkdir } from "node:fs/promises";
-import { readFileSync } from "node:fs";
+import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 
 async function forwardToGapStore(pointer: Record<string, unknown>): Promise<ResolverResult | null> {
@@ -523,7 +523,7 @@ export function classifyFalsifier(
   if (usablePredicateString(m["hardcoded_url"])) {
     if (predicateLiteralNotUnique(m["hardcoded_url"], m["edit_site"] ?? m["file_path"], true)) return { falsifier: "unresolvable" };
     const editSite = usablePredicateString(m["edit_site"]) ?? usablePredicateString(m["file_path"]);
-    if (!editSite || !predicateLiteralNotUnique(m["hardcoded_url"], editSite, true)) {
+        if (!editSite || !existsSync(join(workspaceRoot(), readFromCorrectWorkspace(editSite).replace(/^repos\//, "")))) {
 
       return {
         falsifier: "unresolvable",

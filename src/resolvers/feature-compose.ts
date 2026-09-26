@@ -3636,6 +3636,15 @@ const DEV_VESSEL_ENDPOINT = process.env["DEV_VESSEL_ENDPOINT"] ?? "http://127.0.
  * visible, costs nothing, and does not lose the work — the gap stays open and is
  * retried when there is room.
  */
+// BASELINE CACHE. Every compose ran a full typecheck and a full `bun test` (up to 240 s)
+// on the untouched tree of each touched vessel before applying its draft, including the
+// many composes that then fail, and nearly all composes between two landings run against
+// the same commit. The baseline of a clean tree at a given HEAD cannot change, so it is
+// cached per vessel@HEAD (clean tree only) and reused within the TTL. The flake
+// confirmation below still re-runs the suite before any rejection.
+const BASELINE_CACHE_TTL_MS = 2 * 60 * 60 * 1000;
+const baselineCache = new Map<string, { at: number; tsErrors: string[]; testFails: string[]; testPass: number | null }>();
+
 export async function resolveFeatureCompose(pointer: FeatureComposePointer): Promise<ResolverResult> {
   // NaN GUARD, not decoration: `Math.max(1, Number("typo"))` is NaN, and
   // `inFlight >= NaN` is ALWAYS FALSE — so a mistyped env var would silently
@@ -4884,6 +4893,18 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
   const baselineTestPass = new Map<string, number>();
   for (const v of touched) {
     const vAbs = vesselRoot(v);
+    const headProbe = await callTool(toolsEndpoint, "shell", { command: `git -C ${JSON.stringify(vAbs)} rev-parse HEAD 2>/dev/null; git -C ${JSON.stringify(vAbs)} status --porcelain 2>/dev/null | head -1`, cwd: REPO_ROOT });
+    const headLines = String((headProbe.body as { stdout?: unknown })?.stdout ?? "").trim().split("\n");
+    const headSha = /^[0-9a-f]{40}$/.test(headLines[0] ?? "") && headLines.length === 1 ? headLines[0] : null;
+    const cacheKey = headSha ? `${v}@${headSha}` : null;
+    const cached = cacheKey ? baselineCache.get(cacheKey) : undefined;
+    if (cached && Date.now() - cached.at < BASELINE_CACHE_TTL_MS) {
+      baselineTsErrors.set(v, new Set(cached.tsErrors));
+      baselineTestFails.set(v, new Set(cached.testFails));
+      if (cached.testPass !== null) baselineTestPass.set(v, cached.testPass);
+      console.log(`[feature-compose] baseline cache HIT ${cacheKey} (typecheck + suite run skipped)`);
+      continue;
+    }
     const b = await callTool(toolsEndpoint, "shell", { command: `cd ${JSON.stringify(vAbs)} && ([ -d node_modules ] || bun install >/dev/null 2>&1; bun run typecheck 2>&1)`, cwd: REPO_ROOT });
     baselineTsErrors.set(v, tscErrorSet(String((b.body as { stdout?: unknown })?.stdout ?? "")));
     // Bounded so a hanging/absent suite can never stall the compose path; a vessel with
@@ -4894,6 +4915,14 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
     // Also record how many PASSED, so verify can catch tests that VANISH (see testPassCount).
     const bp = testPassCount(btRaw);
     if (bp !== null) baselineTestPass.set(v, bp);
+    if (cacheKey) {
+      baselineCache.set(cacheKey, {
+        at: Date.now(),
+        tsErrors: [...(baselineTsErrors.get(v) ?? new Set<string>())],
+        testFails: [...(baselineTestFails.get(v) ?? new Set<string>())],
+        testPass: bp,
+      });
+    }
   }
 
   for (const [v, errs] of baselineTsErrors) { if (errs.size === 0) continue; try { await fetch(`${DEV_VESSEL_ENDPOINT}/v2/impulses/resolve`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ impulse: { type: "substrateGap_write", gap: { id: "baseline-typecheck-broken-" + v.replace(/[^a-zA-Z0-9]+/g, "-"), category: "systematic_failure", source: "substrate_detected", summary: "feature_compose found the UNTOUCHED baseline of " + v + " failing typecheck BEFORE drafting (" + errs.size + " pre-existing tsc errors, e.g. " + Array.from(errs).slice(0, 3).join(" | ").slice(0, 400) + "). Environment fault (stale runtime copy or missing module), not a drafter fault: re-sync this vessel source from its repo baseline. Draft verdicts on this vessel use baseline-delta blame until the baseline is clean.", detected_at: new Date().toISOString(), status: "open" } } }) }); console.log("[feature-compose] baseline-broken environment gap filed for " + v); } catch { /* advisory */ } }

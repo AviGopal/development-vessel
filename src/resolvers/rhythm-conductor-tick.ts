@@ -219,11 +219,17 @@ function bucketLoadFromProc(): number {
  * would silence exactly the families that need attention most.
  */
 export function rhythmSettlementOverlay(
-  leg: "alpha" | "beta",
+  leg: "alpha" | "beta" | "fired" | "reached",
   alpha: number,
   beta: number,
   staleness: number,
-): { alpha: number; staleness: number } | { beta: number; staleness: number } {
+): { alpha: number; staleness: number } | { beta: number; staleness: number } | { staleness: number } {
+  // OUTCOME LEGS (2026-09-26). "fired" answers the family's staleness but earns no credit;
+  // credit is earned only when the dispatched goal's recorded outcome is reached ("reached"),
+  // and an unreached outcome settles "beta". Crediting alpha on fire let a family that never
+  // once reached keep ~0.95 credit (measured: capability-census 0/10 reached at 94%).
+  if (leg === "fired") return { staleness: Math.max(0, staleness * 0.3) };
+  if (leg === "reached") return { alpha: alpha + 0.5, staleness: Math.max(0, staleness) };
   return leg === "alpha"
     ? { alpha: alpha + 0.5, staleness: Math.max(0, staleness * 0.3) }
     // THE BETA LEG MUST PERSIST THE ACCRUED STALENESS, NOT LEAVE IT IMPLICIT.
@@ -324,7 +330,15 @@ export async function resolveRhythmConductorTick(
 
 
   /**
-   * WHAT THIS POSTERIOR MEANS, stated because it was previously impossible to infer.
+   * REVISED 2026-09-26: this posterior now grades OUTCOME, superseding the scheduling reading
+   * below. Crediting alpha on fire meant a family whose dispatched goals never reached kept
+   * rising in credit (capability-census 0/10 reached at 94%, federation-verification 7/46 at
+   * 96%, project-intake 1/8 at 97%, the last driving a self-recursion storm). A fire now only
+   * answers staleness ("fired"); the settle pass below reads each dispatched task's outcome
+   * from goal-host and settles "reached" or "beta". Direct-resolver families keep alpha on
+   * fire because their resolve call returns the outcome synchronously.
+   *
+   * WHAT THIS POSTERIOR MEANT (historical), stated because it was previously impossible to infer.
    *
    * A rhythm family's alpha/beta grade THE CONDUCTOR'S ABILITY TO GET THIS FAMILY'S WORK
    * SCHEDULED — not whether that work then succeeds. The dispatched goal has its own
@@ -351,7 +365,7 @@ export async function resolveRhythmConductorTick(
    */
   const settleRhythm = async (
     r: { id: string; body: RhythmBody; alpha: number; beta: number; staleness: number; due_score: number },
-    leg: "alpha" | "beta",
+    leg: "alpha" | "beta" | "fired" | "reached",
   ): Promise<void> => {
     const overlay = rhythmSettlementOverlay(leg, r.alpha, r.beta, r.staleness);
     try {
@@ -377,6 +391,65 @@ export async function resolveRhythmConductorTick(
          next tick re-derives due-ness from whatever the registry currently holds. */
     }
   };
+
+  // Apply a settlement AND carry it into the in-memory row, so a second settlement of the same
+  // family in this tick builds on the first instead of overwriting it from a stale snapshot.
+  const settleAndCarry = async (r: (typeof scored)[number], leg: "reached" | "beta" | "fired"): Promise<void> => {
+    const o = rhythmSettlementOverlay(leg, r.alpha, r.beta, r.staleness) as { alpha?: number; beta?: number; staleness: number };
+    await settleRhythm(r, leg);
+    if (typeof o.alpha === "number") r.alpha = o.alpha;
+    if (typeof o.beta === "number") r.beta = o.beta;
+    r.staleness = o.staleness;
+    r.body = { ...r.body, ...o };
+  };
+
+  // OUTCOME SETTLEMENT PASS (2026-09-26). The drain records each dispatched task's goal-host
+  // dispatchId next to variables.rhythm_id; read the outcome and settle the family on it.
+  // Bounded: at most 15 outcome reads per tick, tasks older than 7 days are marked expired
+  // without a read, and a record goal-host no longer has (after a day) is marked unknown, so
+  // the pass never rescans the whole queue history.
+  if (!pointer.dry_run) {
+    try {
+      const qPath = pointer.queue_path ?? DEFAULT_QUEUE_PATH;
+      if (existsSync(qPath)) {
+        const q = JSON.parse(readFileSync(qPath, "utf-8")) as {
+          tasks?: Array<{ status?: string; dispatchId?: string; createdAt?: number; settled?: string; variables?: Record<string, unknown> }>;
+          lastUpdated?: number;
+        };
+        const tasks = Array.isArray(q.tasks) ? q.tasks : [];
+        const byId = new Map(scored.map((s) => [s.id, s]));
+        let reads = 0;
+        let changed = false;
+        for (const t of tasks) {
+          if (reads >= 15) break;
+          const rid = typeof t.variables?.["rhythm_id"] === "string" ? String(t.variables["rhythm_id"]) : "";
+          if (t.status !== "dispatched" || !t.dispatchId || !rid || t.settled) continue;
+          const ageMs = typeof t.createdAt === "number" ? Date.now() - t.createdAt : 0;
+          if (ageMs > 7 * 86_400_000) { t.settled = "expired"; changed = true; continue; }
+          const row = byId.get(rid);
+          if (!row) continue;
+          reads += 1;
+          const ex = (await fetchJson(
+            `${GOAL_HOST_ENDPOINT}/executions/${t.dispatchId}`,
+            { method: "GET", headers: API_KEY ? { Authorization: `ApiKey ${API_KEY}` } : {} },
+            3000,
+          )) as { status?: string; reached?: unknown } | null;
+          if (!ex || typeof ex.status !== "string") {
+            if (ageMs > 86_400_000) { t.settled = "unknown"; changed = true; }
+            continue;
+          }
+          if (ex.status !== "completed" && ex.status !== "failed") continue;
+          const leg = ex.reached === true ? "reached" : "beta";
+          await settleAndCarry(row, leg);
+          t.settled = leg === "reached" ? "alpha" : "beta";
+          changed = true;
+        }
+        if (changed) writeFileSync(qPath, JSON.stringify({ ...q, tasks, lastUpdated: Date.now() }, null, 2));
+      }
+    } catch {
+      /* Best-effort: an unreadable queue or outcome leaves tasks unsettled for the next tick. */
+    }
+  }
 
   // Law 1: the family→goal mapping is behavioral — read rhythmFamilyGoal pool
   // impulses at use time and merge them over the bootstrap FAMILY_GOALS const
@@ -510,7 +583,9 @@ export async function resolveRhythmConductorTick(
     // five times as fast as an identical family expressed as one goal, which
     // penalises the decomposition rather than the behaviour.
     if (firedThisFamily && !pointer.dry_run) {
-      await settleRhythm(r, "alpha");
+      // A direct-resolver family's resolve returned its outcome synchronously; an enqueued
+      // goal's outcome is settled later by the outcome pass, so a fire only answers staleness.
+      await settleRhythm(r, directResolver ? "alpha" : "fired");
     } else if (failedToEnqueue && !pointer.dry_run) {
       await settleRhythm(r, "beta");
     }

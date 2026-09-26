@@ -68,7 +68,9 @@ function buildRegistrationPayload() {
     vesselId: config.vesselId,
     vesselName: "development-vessel",
     version: "0.1.0",
-    endpoint: `http://${config.host === "0.0.0.0" ? "localhost" : config.host}:${config.port}`,
+    endpoint: (process.env["VESSEL_ADVERTISE_ENDPOINT"] ?? "").replace(/\/+$/, "")
+      || (process.env["SUBSTRATE_ADVERTISE_HOST"] ? `http://${process.env["SUBSTRATE_ADVERTISE_HOST"]}:${config.port + Number(process.env["SUBSTRATE_ADVERTISE_PORT_OFFSET"] ?? 10_000)}` : "")
+      || `http://${config.host === "0.0.0.0" ? "localhost" : config.host}:${config.port}`,
     // REGISTRATION is the list discovery actually ROUTES on — filtering the /shapes handler
     // alone is inert. Measured 2026-08-06: after /shapes correctly withheld
     // concept_usage_record, concept_search_by_source and concept_select_for_prompt (247 shapes

@@ -35,6 +35,28 @@ async function fetchWithTimeout(body: unknown, timeoutMs: number): Promise<Respo
   }
 }
 
+// RE-READ BEFORE WRITE (2026-09-26). poolImpulse_write REPLACES the body, and this pass spends up to
+// ~15 s (gap_lifecycle_scan) between reading the registry and writing staleness. Writing
+// {...bodyReadAtStart, staleness} therefore silently reverted any alpha/beta the rhythm conductor's
+// outcome settlement (or an operator re-baseline) wrote in between. Overlay staleness on the row as it
+// is NOW; fall back to the start-of-pass body only if the re-read fails.
+async function freshRhythmBody(rhythm: Rhythm): Promise<RhythmBody> {
+  try {
+    const res = await fetchWithTimeout(
+      { impulse: { type: "poolImpulse", shape: "timeShapedRhythm", id: rhythm.id, limit: 1 } },
+      800,
+    );
+    if (res.ok) {
+      const data = (await res.json()) as { body?: { impulses?: Rhythm[] } };
+      const cur = data.body?.impulses?.find((r) => r.id === rhythm.id);
+      if (cur?.body) return cur.body;
+    }
+  } catch {
+    // fall back below
+  }
+  return rhythm.body;
+}
+
 export async function resolveRhythmRealitySync(
   _pointer: RhythmRealitySyncPointer,
 ): Promise<{
@@ -110,7 +132,7 @@ export async function resolveRhythmRealitySync(
                 id: rhythm.id,
                 shape: "timeShapedRhythm",
                 source: "rhythm-reality-sync",
-                body: { ...rhythm.body, staleness: new_staleness },
+                body: { ...(await freshRhythmBody(rhythm)), staleness: new_staleness },
               },
             },
             800,
@@ -132,7 +154,7 @@ export async function resolveRhythmRealitySync(
                 id: rhythm.id,
                 shape: "timeShapedRhythm",
                 source: "rhythm-reality-sync",
-                body: { ...rhythm.body, staleness: 0 },
+                body: { ...(await freshRhythmBody(rhythm)), staleness: 0 },
               },
             },
             800,
@@ -159,7 +181,7 @@ export async function resolveRhythmRealitySync(
                 id: rhythm.id,
                 shape: "timeShapedRhythm",
                 source: "rhythm-reality-sync",
-                body: { ...rhythm.body, staleness: new_staleness },
+                body: { ...(await freshRhythmBody(rhythm)), staleness: new_staleness },
               },
             },
             800,

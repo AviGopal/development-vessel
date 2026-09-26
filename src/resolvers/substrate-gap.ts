@@ -1226,7 +1226,7 @@ export async function resolveSubstrateGapWrite(
       try {
         const { peekComposeCapacity } = await import("../compose-slots.js");
         const __cap = await peekComposeCapacity({ directed: false });
-        const __autoHasFree = (() => {
+        var __autoHasFree = (() => {
           const c = __cap as unknown as {
             autonomous_free?: boolean;
             free?: boolean;
@@ -1252,15 +1252,13 @@ export async function resolveSubstrateGapWrite(
           return false; // unknown shape => treat as no capacity
         })();
         if (!__autoHasFree) {
-          console.log(`[substrate-gap] compose nudge skipped for ${gap.id} — no autonomous compose capacity`);
-          // Early return: suppress nudge to avoid write-churn on a full/unknown lane.
-          return { shape: 'compose_nudge_suppressed', body: { gapId: gap.id, reason: 'no_capacity' } };
+          console.log(`[substrate-gap] compose nudge skipped for ${gap.id} — compose lane full`);
         }
       } catch (err) {
         console.warn(`[substrate-gap] compose capacity check failed; suppressing nudge to avoid churn: ${String(err)}`);
-        return { shape: 'compose_nudge_suppressed', body: { gapId: gap.id, reason: 'capacity_check_failed' } };
+        __autoHasFree = false;
       }
-      if (gd.__composeDrainInflight === true) {
+      if (!__autoHasFree) { /* skip nudge: compose lane full */ } else if (gd.__composeDrainInflight === true) {
         console.log(`[substrate-gap] compose nudge skipped for ${gap.id} — a compose is already in flight`);
       } else if (typeof gd.__composeDrainLastAt === "number" && nowMs - gd.__composeDrainLastAt < COMPOSE_MIN_INTERVAL_MS) {
         const proc = Bun.spawn(["systemctl", "start", "--no-block", "gap-compose.service"], { stdout: "pipe", stderr: "pipe" });

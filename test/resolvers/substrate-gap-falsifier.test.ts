@@ -1,7 +1,7 @@
 import { describe, it, expect } from "bun:test";
 import { tmpdir } from "os";
 import { join } from "path";
-import { rmSync } from "fs";
+import { rmSync, mkdirSync, writeFileSync } from "fs";
 
 // FALSIFIER ACCOUNTING ON THE GAP WRITE PATH (2026-09-01).
 //
@@ -35,6 +35,8 @@ try {
   /* ignore */
 }
 process.env["WORKSPACE_ROOT"] = testWorkspace;
+// Real edit sites for the Class-1 arming guard to read: each class1 case's literal is PRESENT in its file; src/absent.ts exists WITHOUT it.
+for (const [rel, text] of [["src/resolvers/reach-history.ts", 'const U = "http://127.0.0.1:8080/impulses";'], ["development-vessel/src/config.ts", "const PORT = 8080;"], ["src/x.ts", 'fetch("http://127.0.0.1:8080/impulses");'], ["src/absent.ts", "export const nothing = 1;"]] as const) { mkdirSync(join(testWorkspace, rel, ".."), { recursive: true }); writeFileSync(join(testWorkspace, rel), text); }
 // Without this, every open-gap write below shells out to the REAL `systemctl start
 // gap-compose.service` against whatever systemd this test process can reach — measured
 // 2026-08-30, and it is a plausible contributor to chronic box saturation. Must be set
@@ -42,7 +44,7 @@ process.env["WORKSPACE_ROOT"] = testWorkspace;
 process.env["SUBSTRATE_GAP_SKIP_COMPOSE_TRIGGER"] = "1";
 
 const { resolveSubstrateGap, resolveSubstrateGapWrite, classifyFalsifier, falsifierCoverage, gapStoreRootForTest } =
-  await import("../../src/resolvers/substrate-gap.js");
+  await import(`../../src/resolvers/substrate-gap.js?${"falsifier-isolated"}`); // a FRESH module instance: its load-time WORKSPACE_ROOT capture sees THIS suite's root even when another suite already loaded the shared one
 
 // PROVE THE ISOLATION, DO NOT ASSUME IT.
 //
@@ -187,6 +189,16 @@ describe("classifyFalsifier — the four verdicts", () => {
       vocab(),
     );
     expect(c.falsifier).toBe("class1");
+  });
+
+  it("the Class-1 arming guard: a literal the gap would close on must not ALREADY hold at arming time", () => {
+    // hardcoded_url closes when the URL goes ABSENT: arm only if it is present in a READABLE edit_site.
+    expect(classifyFalsifier({ edit_site: "src/x.ts", hardcoded_url: "http://127.0.0.1:8080/impulses" }, vocab()).falsifier).toBe("class1");
+    expect(classifyFalsifier({ edit_site: "src/absent.ts", hardcoded_url: "http://127.0.0.1:8080/impulses" }, vocab()).falsifier).toBe("unresolvable");
+    expect(classifyFalsifier({ edit_site: "src/does-not-exist.ts", hardcoded_url: "http://127.0.0.1:8080/impulses" }, vocab()).falsifier).toBe("unresolvable");
+    // expected_literal closes when the literal becomes PRESENT: an already-present literal must not arm.
+    expect(classifyFalsifier({ edit_site: "src/x.ts", expected_literal: "http://127.0.0.1:8080/impulses" }, vocab()).falsifier).toBe("unresolvable");
+    expect(classifyFalsifier({ edit_site: "src/absent.ts", expected_literal: "NOT_YET_PRESENT_LITERAL" }, vocab()).falsifier).toBe("class1");
   });
 
   it('a hardcoded_url with NO edit_site is "unresolvable" — the sweep can never read it', () => {

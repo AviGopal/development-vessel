@@ -1,8 +1,9 @@
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, writeFile, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { resolveGapToFeature } from "../../src/resolvers/gap-to-feature.js";
+import { gapStoreRootForTest } from "../../src/resolvers/substrate-gap.js";
 
 // Pins the ORDER of capacity and selection.
 //
@@ -87,6 +88,8 @@ describe("gap-to-feature — capacity is checked before selection is paid for", 
     const file = join(dir, "not-a-directory");
     await writeFile(file, "x");
     process.env["COMPOSE_SLOT_DIR"] = join(file, "slots");
+    // An isolated (temp) gap store holds other suites' fixture rows, and selection would compose one for real; empty it so selection ends fast. Never touches a non-temp store.
+    { const root = gapStoreRootForTest(); if (root.startsWith(tmpdir())) { await mkdir(join(root, "gaps"), { recursive: true }); await writeFile(join(root, "gaps", "gaps.json"), "[]"); } }
     // Past the peek, selection reaches for live services this test has no business
     // standing up. A throw from THERE is itself proof the peek did not short-circuit:
     // the skip path returns a body and never throws. Assert the property — "the peek

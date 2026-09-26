@@ -2402,7 +2402,9 @@ const vesselsCloneRoot = (): string => process.env["VESSELS_CLONE_ROOT"] ?? "/wo
 
 export function ownedVessels(): Set<string> {
   try {
-    return new Set(readdirSync(vesselsCloneRoot()).filter((d) => existsSync(join(vesselsCloneRoot(), d, ".git"))));
+    const present = readdirSync(vesselsCloneRoot()).filter((d) => existsSync(join(vesselsCloneRoot(), d, ".git")));
+    const declared = (process.env["SUBSTRATE_PUSH_VESSELS"] ?? "").split(/[\s,]+/).filter(Boolean);
+    return new Set(declared.length > 0 ? present.filter((d) => declared.includes(d)) : present);
   } catch {
     return new Set();
   }

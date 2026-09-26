@@ -2418,6 +2418,30 @@ export function ownedVessels(): Set<string> {
 }
 
 /** Deterministic land evidence: is `sha` an ancestor of HEAD in ANY vessel clone? */
+// SWEEP ONLY ON NEW EVIDENCE. sweepPendingLandVerifications ran before EVERY auto-pick and
+// did a lineage git search per predicate-carrying gap plus serial gap writes and
+// escalations (~60-75 network writes per pass, measured 2026-09-26: selection took over
+// 5 s and re-asked the same human questions). The only new evidence it can use is a new
+// commit in a clone (a landing or a pull-sync convergence), so it runs when the clone
+// HEADs changed since the last sweep. Condition-driven, not a timer; an unreadable
+// fingerprint falls back to sweeping as before.
+let lastSweepHeads: string | null = null;
+function cloneHeadsFingerprint(): string | null {
+  let entries: string[] = [];
+  try { entries = readdirSync(vesselsCloneRoot()).sort(); } catch { return null; }
+  const heads: string[] = [];
+  for (const cloneName of entries) {
+    const cloneDir = join(vesselsCloneRoot(), cloneName);
+    if (!existsSync(join(cloneDir, ".git"))) continue;
+    try {
+      const proc = Bun.spawnSync(["git", "-C", cloneDir, "rev-parse", "HEAD"], { stdout: "pipe", stderr: "pipe", timeout: 5_000 });
+      if (proc.exitCode !== 0) return null;
+      heads.push(`${cloneName}@${new TextDecoder().decode(proc.stdout).trim()}`);
+    } catch { return null; }
+  }
+  return heads.join(",");
+}
+
 function shaIsAncestorOfAnyClone(sha: string): boolean {
   if (!/^[0-9a-f]{7,40}$/i.test(sha)) return false;
   let entries: string[] = [];
@@ -3583,7 +3607,13 @@ export async function resolveGapToFeature(pointer: GapToFeaturePointer): Promise
   (resolveGapToFeature as any).__test__gapComposeLastAttemptAt = () => gapComposeLastAttemptAt;
   // 0. Land→close continuity: complete deferred self-cutover closures BEFORE selection,
   // so an already-landed gap cannot be re-picked and re-landed. Cheap, bounded, best-effort.
-  try { await sweepPendingLandVerifications(); } catch { /* never block the tick */ }
+  try {
+    const heads = cloneHeadsFingerprint();
+    if (heads === null || heads !== lastSweepHeads) {
+      await sweepPendingLandVerifications();
+      lastSweepHeads = heads;
+    }
+  } catch { /* never block the tick */ }
   // Causal attempt ledger: outcomes and settlements for registered landings. Started without
   // awaiting (snapshots can take tens of seconds) and guarded so sweeps never overlap.
   if (!attemptSweepInFlight) {

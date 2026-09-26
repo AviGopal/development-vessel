@@ -1522,6 +1522,13 @@ export async function admitActionableGaps(
       excluded.push({ id, reason: `not owned here(${ownedVessel})` });
       continue;
     }
+    // PROTECTED VESSELS never cut over (vessel-mitosis-start.ts and vessel-mitosis-cutover.ts
+    // refuse them), so a pick aimed at one spends a compose on a landing that cannot happen:
+    // 19 of 123 auto-picks in the 24 h to 2026-09-26 10:20. Same set as those two files.
+    if (ownedVessel === "discovery-vessel" || ownedVessel === "identity-vessel") {
+      excluded.push({ id, reason: `protected_vessel(${ownedVessel})` });
+      continue;
+    }
     // Increment child gap count if this is an auto-minted child gap.
     if (id.startsWith("recommit-") || id.endsWith("-narrowed")) {
       const editSite = String(meta.edit_site ?? "");

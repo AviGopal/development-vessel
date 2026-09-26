@@ -341,7 +341,8 @@ export async function resolveSelfFactReconcile(pointer: SelfFactReconcilePointer
   let selfGap = false;
   if (plant && !canaryFound) {
     // The instrument cannot see: say so about ITSELF and file nothing else.
-    selfGap = await fileDivergence({ fact: "self_fact_reconcile", key: "canary-not-found", source: "planted canary", copy: "this run", detail: `the planted canary on fact ${canaryFact} was not reported — clean results from this instrument are not evidence until this is fixed`, canary: false });
+    await fileDivergence({ fact: "self_fact_reconcile", key: "canary-not-found", source: "planted canary", copy: "this run", detail: `the planted canary on fact ${canaryFact} was not reported — clean results from this instrument are not evidence until this is fixed`, canary: false });
+    selfGap = true;
   } else if (file) {
     for (const d of real) if (await fileDivergence(d)) filed += 1;
     // CLOSURE BY THE INSTRUMENT THAT FOUND IT. Every open gap this detector filed

@@ -3702,6 +3702,13 @@ export async function resolveGapToFeature(pointer: GapToFeaturePointer): Promise
     // `last_failed_at` says nothing about a compose currently in flight.
     let backoffExcluded = 0;
     let deepestLineage = 0;
+    // LINEAGE CAP. A recommit-* gap is a retry minted from a failed compose; each retry gets
+    // a fresh id, so per-gap checks and the time-based backoff never see that the lineage keeps
+    // failing. Measured 2026-09-25/26: recommit-* took 92 of 200 picks (46%) and landed 4
+    // (2 distinct gaps), with lineages carrying 14-18 failed attempts, while roots convert
+    // near 27%. Past the cap a recommit waits for a new root attempt instead of being re-picked.
+    const RECOMMIT_LINEAGE_ATTEMPT_CAP = 6;
+    let lineageCapped = 0;
     // Index the candidate set once so the backoff can walk parent_gap_id / source_gap_id
     // chains without re-scanning per gap.
     const gapsById = new Map<string, Record<string, unknown>>();
@@ -3709,6 +3716,10 @@ export async function resolveGapToFeature(pointer: GapToFeaturePointer): Promise
     const eligible = gaps.filter((g) => {
       if (nowMs - (gapComposeLastAttemptAt.get(String(g.id ?? "")) ?? 0) < GAP_COMPOSE_COOLDOWN_MS) return false;
       const state = lineageBackoffState(g, gapsById);
+      if (String(g.id ?? "").startsWith("recommit-") && state.attempts >= RECOMMIT_LINEAGE_ATTEMPT_CAP) {
+        lineageCapped++;
+        return false;
+      }
       if (gapIsBackedOff(g, nowMs, state)) {
         backoffExcluded++;
         if (state.depth > deepestLineage) deepestLineage = state.depth;
@@ -3719,6 +3730,9 @@ export async function resolveGapToFeature(pointer: GapToFeaturePointer): Promise
     // Emit the exclusion COUNT, not just its effect. A brake whose only evidence is
     // "fewer picks happened" is indistinguishable from a lane that has gone quiet for
     // some other reason — which is the confusion this codebase keeps paying for.
+    if (lineageCapped > 0) {
+      console.log(`[gap-to-feature] lineage cap excluded ${lineageCapped} recommit gap(s) (lineage failed_attempts >= ${RECOMMIT_LINEAGE_ATTEMPT_CAP})`);
+    }
     if (backoffExcluded > 0) {
       console.log(`[gap-to-feature] backoff excluded ${backoffExcluded} of ${gaps.length} gaps (eligible=${eligible.length}, deepest_lineage=${deepestLineage})`);
     }

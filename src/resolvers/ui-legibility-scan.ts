@@ -93,9 +93,10 @@ export async function resolveUiLegibilityScan(
   };
 
   let uiViewResp = await resolveObsidian({ type: "human_surface:ui_view" });
+  let uiSurfaceKind = "human_surface";
   if (!uiViewResp?.content) {
     const fallback = await resolveObsidian({ type: "obsidian:ui_view" });
-    if (fallback) uiViewResp = fallback;
+    if (fallback) { uiViewResp = fallback; uiSurfaceKind = "obsidian"; }
   }
   const uiViewContent = typeof uiViewResp?.content === "string" ? uiViewResp.content : null;
   if (!uiViewContent) {
@@ -132,6 +133,15 @@ export async function resolveUiLegibilityScan(
   }
 
   const violations: UiLegibilityViolation[] = [];
+  // Scope violations to the audited surface to keep finding IDs unique across surfaces.
+  {
+    const scope = `${uiSurfaceKind}:`;
+    const addScope = (v: UiLegibilityViolation): UiLegibilityViolation => (v.region.startsWith(scope) ? v : { ...v, region: `${scope}${v.region}` });
+    const _push = violations.push.bind(violations);
+    violations.push = ((...items: UiLegibilityViolation[]) => _push(...items.map(addScope))) as typeof violations.push;
+    const _unshift = violations.unshift.bind(violations);
+    violations.unshift = ((...items: UiLegibilityViolation[]) => _unshift(...items.map(addScope))) as typeof violations.unshift;
+  }
   // R4 content form check - detect verbatim monospace code listings when inappropriate
   const form = (uiView.form ?? {}) as Record<string, unknown>;
   if (form.renderer === "monospace_code" && typeof uiViewContent === "string" && uiViewContent.split('\n').length <= 1) {

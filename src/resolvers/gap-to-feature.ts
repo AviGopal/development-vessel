@@ -2167,6 +2167,14 @@ async function verifyGapConditionAsync(gap: Record<string, unknown>): Promise<'p
     const editSite = typeof (gap.classification_metadata as Record<string, unknown> | undefined)?.['edit_site'] === 'string'
       ? String((gap.classification_metadata as Record<string, unknown>)['edit_site'])
       : '';
+
+    // For human-surface-vessel, the git-based verification path is broken due to both
+    // source grounding issues (for patch generation) and lack of a push-able clone.
+    // Bypassing landedCommitVerdict avoids errors from an unreachable/un-analyzable repo
+    // and lets the gap correctly remain 'unknown'.
+    if (editSite.includes('/human-surface-vessel/')) {
+      throw new Error('Landed commit verification is not available for human-surface-vessel.');
+    }
     const verdict = landedCommitVerdict(gapId, editSite);
     if (verdict !== null) return verdict;
   } catch {

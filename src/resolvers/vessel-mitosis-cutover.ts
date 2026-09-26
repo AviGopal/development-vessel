@@ -2776,17 +2776,22 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
             // in_flight count observed at that moment so a LOSSY restart is visible
             // afterwards. Best-effort: every write is `2>/dev/null` and nothing here
             // can block the restart.
-            + `mkdir -p '${breadcrumbDir}' 2>/dev/null; `
-            + `IFB=$(curl -s --max-time 5 'http://127.0.0.1:${inflightPort}/health' 2>/dev/null | grep -o '"in_flight"[[:space:]]*:[[:space:]]*[0-9][0-9]*' | grep -o '[0-9]*$' | head -1); `
-            + `printf '{"requester":"mitosis-cutover","reason":"cutover %s","in_flight":%s,"at":"%s"}' `
-            + `  "${mitosis_version_id}" "\${IFB:-null}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" `
-            + `  > '${breadcrumbDir}/${vessel_name}.json' 2>/dev/null; `
+            // The breadcrumb is written AFTER the wait below, so its in_flight is the count
+            // the restart actually cut (restart-attribution labels LOSSY from it). Written
+            // before the wait it recorded the count the wait began with: 69 of 78 restarts
+            // on 2026-09-25/26 were labelled LOSSY that way, whatever the wait achieved.
+            + `INF0=$(curl -s --max-time 5 'http://127.0.0.1:${inflightPort}/health' 2>/dev/null | grep -o '"in_flight"[[:space:]]*:[[:space:]]*[0-9][0-9]*' | grep -o '[0-9]*$' | head -1); `
             + `mkdir -p '${quiesceDir}' 2>/dev/null; : > '${quiesceDir}/${vessel_name}' 2>/dev/null; `
             + `i=0; while [ "$i" -lt ${quiesceIters} ]; do `
             + `  IF=$(curl -s --max-time 5 'http://127.0.0.1:${inflightPort}/health' 2>/dev/null | grep -o '"in_flight"[[:space:]]*:[[:space:]]*[0-9][0-9]*' | grep -o '[0-9]*$' | head -1); `
             + `  if [ -n "$IF" ]; then [ "$IF" -eq 0 ] && break; `
             + `  else [ -z "$(ls -A '${markerDir}' 2>/dev/null)" ] && break; fi; `
             + `  sleep 5; i=$((i+1)); done; `
+            + `mkdir -p '${breadcrumbDir}' 2>/dev/null; `
+            + `IFB=$(curl -s --max-time 5 'http://127.0.0.1:${inflightPort}/health' 2>/dev/null | grep -o '"in_flight"[[:space:]]*:[[:space:]]*[0-9][0-9]*' | grep -o '[0-9]*$' | head -1); `
+            + `printf '{"requester":"mitosis-cutover","reason":"cutover %s","in_flight":%s,"in_flight_at_schedule":%s,"waited_s":%s,"at":"%s"}' `
+            + `  "${mitosis_version_id}" "\${IFB:-null}" "\${INF0:-null}" "$((i*5))" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" `
+            + `  > '${breadcrumbDir}/${vessel_name}.json' 2>/dev/null; `
             + `rm -f '${quiesceDir}/${vessel_name}' 2>/dev/null; `
             + `exec systemctl restart '${unit}'`;
           const proc = Bun.spawnSync(

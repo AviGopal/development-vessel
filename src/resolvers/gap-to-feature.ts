@@ -55,6 +55,11 @@ const proposalsDir = (): string => envPath("PROPOSALS_DIR", "/workspace/proposal
 // missing horizon that let cost-model-miscalibrated re-compose 17x/60min and starve self-authoring.
 const GAP_COMPOSE_COOLDOWN_MS = parseInt(process.env.GAP_COMPOSE_COOLDOWN_MS ?? "300000", 10);
 const gapComposeLastAttemptAt = new Map<string, number>();
+// Per-FILE cooldown across cycles. The per-gap cooldown keys on gap id, and a failing family
+// re-appears under fresh ids (-narrowed, recommit-*, near-duplicate route-edits), so one
+// edit_site took every auto-pick for hours (2026-09-26: 15 of 15 picks on proxy.ts, 0 landed).
+const SITE_COMPOSE_COOLDOWN_MS = 3 * GAP_COMPOSE_COOLDOWN_MS;
+const siteComposeLastAttemptAt = new Map<string, number>();
 
 /**
  * PER-GAP EXPONENTIAL BACKOFF — the brake `hopeless()` cannot apply.
@@ -3752,6 +3757,8 @@ export async function resolveGapToFeature(pointer: GapToFeaturePointer): Promise
     for (const g of gaps) { const id = String(g.id ?? ""); if (id) gapsById.set(id, g); }
     const eligible = gaps.filter((g) => {
       if (nowMs - (gapComposeLastAttemptAt.get(String(g.id ?? "")) ?? 0) < GAP_COMPOSE_COOLDOWN_MS) return false;
+      const siteKey = String(((g.classification_metadata ?? g.metadata ?? {}) as Record<string, unknown>).edit_site ?? "");
+      if (siteKey && String(g.source ?? "") !== "human_reported" && nowMs - (siteComposeLastAttemptAt.get(siteKey) ?? 0) < SITE_COMPOSE_COOLDOWN_MS) return false;
       const state = lineageBackoffState(g, gapsById);
       if (String(g.id ?? "").startsWith("recommit-") && state.attempts >= RECOMMIT_LINEAGE_ATTEMPT_CAP) {
         lineageCapped++;
@@ -3794,7 +3801,11 @@ export async function resolveGapToFeature(pointer: GapToFeaturePointer): Promise
   }
   // Stamp the cooldown at pick-start (covers the whole compose wall time), auto-picks only —
   // a targeted pointer.gap_id must be re-runnable on demand. Mirrors boredom's set-after-select.
-  if (!pointer.gap_id && gap.id) gapComposeLastAttemptAt.set(String(gap.id), Date.now());
+  if (!pointer.gap_id && gap.id) {
+    gapComposeLastAttemptAt.set(String(gap.id), Date.now());
+    const pickedSite = String(((gap.classification_metadata ?? gap.metadata ?? {}) as Record<string, unknown>).edit_site ?? "");
+    if (pickedSite) siteComposeLastAttemptAt.set(pickedSite, Date.now());
+  }
   await recordApproachDecision(gap);
   // SURPRISE-ROUTED EXPLORE/EXPLOIT (2026-07-09): when-to-work-on-what is a measured
   // policy, not a habit. Low-confidence picks are NOT composed on a guess — they route

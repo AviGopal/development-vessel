@@ -4438,7 +4438,21 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
 
   try {
     const window = typeof grounding === "string" ? grounding : "";
-    const anchorIssues = assertAnchorInWindow(window, Array.isArray(ops) ? ops : []);
+    // GOAL-SUPPLIED ANCHORS (value-per-cost-selection 2.6): the window of a large file does not
+    // hold every anchor, so a byte-exact old text the goal itself supplied was discarded and
+    // re-drafted. Accept it when it is in the goal text (minus appended excerpts) and occurs
+    // exactly once in the file the apply step edits (opAbs); everything else is judged as before.
+    const goalSuppliedUnique = (op: PlanOp): boolean => {
+      const old = op.kind === "edit" ? op.old_string ?? "" : "";
+      if (!old || !verbatimSpecSource.includes(old)) return false;
+      if (window.includes(old) || window.replace(/^\d+\t/gm, "").includes(old)) return false;
+      let cur = "";
+      try { cur = readFileSync(opAbs(op.path), "utf8"); } catch { return false; }
+      if (cur.split(old).length - 1 !== 1) return false;
+      console.log(`[fc-anchor-provenance] accepted goal-supplied unique anchor outside window at ${op.path}`);
+      return true;
+    };
+    const anchorIssues = assertAnchorInWindow(window, (Array.isArray(ops) ? ops : []).filter((op) => !goalSuppliedUnique(op)));
     if (anchorIssues.length > 0) {
       for (const issue of anchorIssues) {
         console.log(`[fc-anchor-provenance] re-draft: anchor not in window at ${issue.path}, "${issue.oldHead}" - would match without semicolon? ${issue.wouldMatchWithoutTrailingSemicolon}`);

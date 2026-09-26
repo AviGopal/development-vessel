@@ -393,7 +393,23 @@ export async function resolveGapLifecycleScan(p: GapLifecycleScanPointer): Promi
     return landabilityScore;
   };
   const LANDABILITY_THRESHOLD = 0.2;
-  const unlandable = open.filter((g) => landability(g) < LANDABILITY_THRESHOLD);
+  // Assign and persist predicted landability on each open gap (predict → validate → residual)
+  for (const g of open) {
+    const s = landability(g);
+    (g as Record<string, unknown>)["gap_landability"] = s;
+  }
+  // Write a compact log of predictions for later validation
+  try {
+    const predPath = join(workspaceRoot(), "gaps", "landability_predictions.log");
+    const lines = open.map((g) => JSON.stringify({
+      id: g.id ?? null,
+      category: g.category ?? null,
+      ts: new Date().toISOString(),
+      gap_landability: (g as { gap_landability?: number }).gap_landability ?? landability(g),
+    }));
+    appendFileSync(predPath, lines.join("\n") + "\n");
+  } catch { /* non-fatal */ }
+  const unlandable = open.filter((g) => (((g as { gap_landability?: number }).gap_landability) ?? landability(g)) < LANDABILITY_THRESHOLD);
 
   // Auto-close stale gaps before computing scan result
   const openGapRecords = open.map((g) => ({

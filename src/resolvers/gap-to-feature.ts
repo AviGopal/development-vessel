@@ -2165,7 +2165,10 @@ async function verifyGapConditionAsync(gap: Record<string, unknown>): Promise<'p
   try {
     const gapId = typeof gap.id === 'string' ? gap.id : '';
     const metadata = (gap.classification_metadata as Record<string, unknown> | undefined) ?? {};
-    const editSite = typeof metadata['edit_site'] === 'string' ? String(metadata['edit_site']) : '';
+    let editSite = typeof metadata['edit_site'] === 'string' ? String(metadata['edit_site']) : '';
+    if (editSite.startsWith('/vessels/human-surface-vessel/')) {
+      editSite = editSite.replace('/vessels/human-surface-vessel/', 'repos/human-surface-vessel/');
+    }
     const verdict = landedCommitVerdict(gapId, editSite);
     if (verdict !== null) return verdict;
   } catch {

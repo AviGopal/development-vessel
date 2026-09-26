@@ -185,7 +185,7 @@ async function triggerMitosisTick(a: {
     // TS1xxx + clean-base guard). Refuse on regression; DEFER (not refuse) on an
     // inconclusive timeout so the normal mitosis-tick re-evaluates in a quieter window.
     const bunCmd = Bun.which("bun") ?? "/root/.bun/bin/bun";
-    const vesselsRootForEval = dirname(a.mitosisRoot);
+    const vesselsRootForEval = dirname(dirname(a.mitosisRoot)); // Fix: find live authoring tree in /vessels, not /vessels/mitosis
     const baseRootForEval = join(vesselsRootForEval, a.vessel);
     // Run the vessel's REAL check script (not the ["lint"] default, which is absent in
     // goal-host-vessel and made the gate a silent no-op). Fails closed when neither exists.

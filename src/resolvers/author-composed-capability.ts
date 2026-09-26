@@ -334,8 +334,10 @@ function hasSubstance(body: unknown): boolean {
   const b = body as Record<string, unknown>;
   if (b["success"] === false || b["error"] || b["shape"] === "structuredError") return false;
   let v: unknown = b["body"] ?? b["content"] ?? b;
+  // Scratch for string-body checks (string producers include: llm-completion-dispatch.ts, http-response.ts)
+  let t = "";
   if (typeof v === "string") { 
-    const t = v.trim(); 
+    t = v.trim(); 
     // Producer: multiple resolvers. Any output that explicitly flags as an error or failed command
     // or bare HTTP status codes is treated as lacking substance. However, a report that *describes*
     // errors/failures should have substance. The regex is adjusted to only match when a string

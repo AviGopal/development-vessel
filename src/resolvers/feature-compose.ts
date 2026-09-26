@@ -72,6 +72,26 @@ import { refuseRederivedEdit } from "../edit-provenance.js";
 import { RUNTIME_ROOT, SUPER_REPO_ROOT, REPO_ROOT, loadFleetShapeVocabulary } from "../shape-vocabulary.js";
 import { mkdir as parkMkdir, writeFile as parkWriteFile, rename as parkRename, readFile as parkReadFile, unlink as parkUnlink } from "node:fs/promises";
 import { createHash as parkHash } from "node:crypto";
+import { AsyncLocalStorage } from "node:async_hooks";
+
+// COMPOSE SPEND (openspec value-per-cost-selection, spend-accounting). The llm resolver
+// returns `usage` on every completion and llmCall used to drop it, so every compose report
+// said cost 0 / tokens 0 and nothing could weigh a compose's value against its price. Each
+// compose run gets its own accumulator through AsyncLocalStorage (entered once per composeId
+// around resolveFeatureComposeInner), so concurrent composes never share a total and the
+// string return contract of llmCall / llmCallWithFailover is unchanged for every caller.
+type ComposeUsage = { input_tokens: number; output_tokens: number; calls: number; cost_usd: number };
+const composeUsageStore = new AsyncLocalStorage<ComposeUsage>();
+function recordComposeUsage(usage: unknown): void {
+  const acc = composeUsageStore.getStore();
+  if (!acc) return;
+  const u = (usage && typeof usage === 'object' ? usage : {}) as Record<string, unknown>;
+  const num = (v: unknown): number => (typeof v === "number" && Number.isFinite(v) ? v : 0);
+  acc.calls += 1;
+  acc.input_tokens += num(u["input_tokens"]);
+  acc.output_tokens += num(u["output_tokens"]);
+  acc.cost_usd += num(u["cost_usd"]);
+}
 
 // PARKED LANDINGS (openspec 2026-09-24-resumable-landings). A patch that passed verify
 // and the semantic gate is written here BEFORE its cutover, so a cutover that is refused
@@ -422,6 +442,10 @@ async function llmCall(endpoint: string, prompt: string, model: string): Promise
     resolved = j.resolved;
     stopReason = j.stop_reason;
   }
+
+  // Charge this response to the enclosing compose run BEFORE the throws below: an empty or
+  // truncated completion was still billed. Federated envelopes carry usage beside the content.
+  recordComposeUsage((j.content && typeof j.content === 'object' ? (j.content.body ?? j.content).usage : undefined) ?? j.usage);
 
   if (content === '' && resolved === false) {
     throw new Error(`llmCall to ${endpoint} returned empty content with resolved:false`);
@@ -3831,7 +3855,7 @@ async function resolveFeatureComposeUncapped(pointer: FeatureComposePointer): Pr
     return { shape: "featureComposeReport", body: { ok: false, verdict: "BUSY", stage: "guard", error: "compose already in flight for " + busy + " - retry after it completes" } };
   }
   for (const v of unisolated) composeInFlight.add(v);
-  try { return await resolveFeatureComposeInner(pointer, pointer.gap?.id, ws); } finally { for (const v of unisolated) composeInFlight.delete(v); await ws.release(); }
+  try { return await composeUsageStore.run({ input_tokens: 0, output_tokens: 0, calls: 0, cost_usd: 0 }, () => resolveFeatureComposeInner(pointer, pointer.gap?.id, ws)); } finally { for (const v of unisolated) composeInFlight.delete(v); await ws.release(); }
   } finally { composesInFlight--; }
 }
   // 2026-07-15: Previous edits failed to address the semantic rejection from spec-validation logic at line 1085.
@@ -4438,21 +4462,7 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
 
   try {
     const window = typeof grounding === "string" ? grounding : "";
-    // GOAL-SUPPLIED ANCHORS (value-per-cost-selection 2.6): the window of a large file does not
-    // hold every anchor, so a byte-exact old text the goal itself supplied was discarded and
-    // re-drafted. Accept it when it is in the goal text (minus appended excerpts) and occurs
-    // exactly once in the file the apply step edits (opAbs); everything else is judged as before.
-    const goalSuppliedUnique = (op: PlanOp): boolean => {
-      const old = op.kind === "edit" ? op.old_string ?? "" : "";
-      if (!old || !verbatimSpecSource.includes(old)) return false;
-      if (window.includes(old) || window.replace(/^\d+\t/gm, "").includes(old)) return false;
-      let cur = "";
-      try { cur = readFileSync(opAbs(op.path), "utf8"); } catch { return false; }
-      if (cur.split(old).length - 1 !== 1) return false;
-      console.log(`[fc-anchor-provenance] accepted goal-supplied unique anchor outside window at ${op.path}`);
-      return true;
-    };
-    const anchorIssues = assertAnchorInWindow(window, (Array.isArray(ops) ? ops : []).filter((op) => !goalSuppliedUnique(op)));
+    const anchorIssues = assertAnchorInWindow(window, Array.isArray(ops) ? ops : []);
     if (anchorIssues.length > 0) {
       for (const issue of anchorIssues) {
         console.log(`[fc-anchor-provenance] re-draft: anchor not in window at ${issue.path}, "${issue.oldHead}" - would match without semicolon? ${issue.wouldMatchWithoutTrailingSemicolon}`);
@@ -6910,10 +6920,12 @@ const earlyAttempt = await Promise.race([
         activity_id: "feature_compose",
         success: verdict === "FAVORABLE" && landedVessels.length > 0,
         duration_ms: Date.now() - traceClockStart,
-        cost: 0,
-        tokens: { input: 0, output: 0, cache: 0 },
+        cost: composeUsageStore.getStore()?.cost_usd ?? 0,
+        tokens: { input: composeUsageStore.getStore()?.input_tokens ?? 0, output: composeUsageStore.getStore()?.output_tokens ?? 0, cache: 0 },
         error_message: verdict === "FAVORABLE" ? undefined : String(semantic_gate?.reason ?? "").slice(0, 400),
         metadata: {
+          // This run's accumulated LLM spend ({input_tokens, output_tokens, calls, cost_usd}).
+          llm_usage: composeUsageStore.getStore() ?? null,
           gap_id: pointer.gap?.id ?? "adhoc",
           // Gated route vs the patch_with_tools escalation lane — the distinction that took a
           // manual bisect over commit trailers and gap-id prefixes to establish by hand.

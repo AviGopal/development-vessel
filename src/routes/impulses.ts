@@ -442,6 +442,36 @@ async function dispatchInner(pointer: AnyPointer): Promise<ResolverResult> {
       return resolveMaintenanceLease(p as Parameters<typeof resolveMaintenanceLease>[0]);
     case "maintenanceLease_write":
       return resolveMaintenanceLeaseWrite(p as Parameters<typeof resolveMaintenanceLeaseWrite>[0]);
+    // @shape-dispatch:private (lands before config.ts advertises it; advertised by 4.0a step 2)
+    case "llmSpendSummaryNode": {
+      // CROSS-NODE SPEND (value-per-cost-selection 4.0a). llm-resolver advertises a loopback
+      // endpoint, so discovery on each node lists only that node's llmSpendSummary and a global
+      // spend cap reads one node. development-vessel advertises a routable endpoint on every
+      // node, so it relays its OWN node's llm-resolver summary under a distinct shape name (so no
+      // producer is counted twice). Read at use time; nothing is written. A resolver that refuses
+      // the connection is not spending through this node: it reports zero with unavailable:true.
+      // A timeout or a malformed answer is NOT zero: the body carries no `current`, so the
+      // envelope reader treats this node as unreadable instead of undercounting it.
+      const llmBase = (process.env["LLM_VESSEL_ENDPOINT"] ?? "http://127.0.0.1:8220").replace(/\/+$/, "").replace(/\/resolve$/, "");
+      try {
+        const r = await fetch(`${llmBase}/resolve`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ impulse: { pointer: { type: "llmSpendSummary" } } }),
+          signal: AbortSignal.timeout(3000),
+        });
+        const j = (r.ok ? await r.json() : null) as { body?: Record<string, unknown> } | null;
+        if (!j || !j.body || typeof j.body !== "object") {
+          return { shape: "llmSpendSummaryNode", body: { unavailable: false, reason: `llm-resolver answered HTTP ${r.status} without a spend summary`, source: llmBase } };
+        }
+        return { shape: "llmSpendSummaryNode", body: { ...j.body, source: llmBase } };
+      } catch (err) {
+        if (err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError")) {
+          return { shape: "llmSpendSummaryNode", body: { unavailable: false, reason: "llm-resolver did not answer within 3 s", source: llmBase } };
+        }
+        return { shape: "llmSpendSummaryNode", body: { window_ms: 3_600_000, current: { window_start: new Date().toISOString(), calls: 0, cost_usd: 0 }, previous: null, unavailable: true, reason: "no llm-resolver on this node: " + String(err), source: llmBase } };
+      }
+    }
     case "trace_store_health_observer":
       return resolveTraceStoreHealthObserver(p as Parameters<typeof resolveTraceStoreHealthObserver>[0]);
     case "remedy_effectiveness_observer":

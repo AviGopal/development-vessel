@@ -1375,6 +1375,23 @@ async function attemptApplyOnce(pointer: ApplyProposalAsPatchPointer): Promise<R
 // semantics — targeting must NEVER skip to a different proposal. K bounds per-cycle patch_with_tools
 // (LLM) cost; most non-actionable proposals are rejected cheaply before reaching the patcher.
 export async function resolveApplyProposalAsPatch(pointer: ApplyProposalAsPatchPointer): Promise<ResolverResult> {
+  // SPEND ENVELOPE (value-per-cost-selection 4.3). An UNTARGETED run is the autonomous drain
+  // (funnel-drain's watchdog restart impulse, boredom), and each attempt spends LLM calls in
+  // patch_with_tools, so it obeys the fleet-wide envelope: paused, exhausted or unreadable
+  // refuses before any attempt. A proposal_id-targeted apply is directed work and a dry run
+  // spends nothing, so neither is gated. A refusal names no proposal, so it is terminal.
+  if (!pointer.proposal_id && !pointer.dry_run) {
+    let envelope: { allow: boolean; reason: string; paused?: boolean };
+    try {
+      envelope = await (await import("./gap-to-feature.js")).spendEnvelopeAllows();
+    } catch (err) {
+      envelope = { allow: false, reason: "envelope check failed: " + String(err) };
+    }
+    if (!envelope.allow) {
+      console.log(`[apply-proposal-as-patch] untargeted apply NOT started: spend envelope ${envelope.reason}`);
+      return structuredError("spend envelope: " + envelope.reason, { reason: envelope.paused ? "budget_paused" : "budget_exhausted" });
+    }
+  }
   const maxAttempts = (pointer.proposal_id || pointer.dry_run) ? 1 : Math.max(1, pointer.max_apply_attempts ?? 4);
   let last: ResolverResult | null = null;
   const tried = new Set<string>();

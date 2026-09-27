@@ -3115,8 +3115,20 @@ async function groundVesselFiles(toolsEndpoint: string, verifyVessels: string[],
         cwd: REPO_ROOT,
       });
       const raw = String((sh.body as { stdout?: unknown })?.stdout ?? "").trim();
-      if (!raw) continue;
-      const files = raw.split("\n").filter(Boolean);
+      const files = raw ? raw.split("\n").filter(Boolean) : [];
+      // LOCAL-TOOLS OUTAGE FALLBACK (contained-self-development, drafting reliability). Every
+      // "(0 bytes)" grounding refusal in a week fell within ~30 s of a local-tools restart: the
+      // listing came back empty and the vessel was skipped, so the drafter was refused as blind.
+      // This process shares the filesystem, so ground the spec-named targets from disk instead.
+      if (!raw) {
+        const nodeFs = await import("node:fs");
+        for (const t of targetFiles) {
+          const pfx = `repos/${vRel}/`;
+          if (t.startsWith(pfx) && nodeFs.existsSync(`${vAbs}/${t.slice(pfx.length)}`)) files.push(t.slice(pfx.length));
+        }
+        if (files.length === 0) continue;
+        console.warn(`[fc-grounding] local-tools listing empty for repos/${vRel}; grounding ${files.length} target file(s) from disk`);
+      }
       // A spec-named target of ANY extension must be groundable: the listing above finds
       // only .ts/.tsx and three configs, so a named .json/.surql target was never shown and
       // the basename gate refused the edit. Missing targets stay harmless (fs_read fails; creates still apply).
@@ -3141,8 +3153,12 @@ async function groundVesselFiles(toolsEndpoint: string, verifyVessels: string[],
         if (!target && contentBudget <= 0) break;
         try {
           const rd = await callTool(toolsEndpoint, "fs_read", { path: `${vAbs}/${f}` });
-          const content = (rd.body as { content?: unknown })?.content;
-          if (rd.ok && typeof content === "string") {
+          let content = (rd.body as { content?: unknown })?.content;
+          if (!(rd.ok && typeof content === "string")) {
+            // Same outage fallback for the read itself.
+            try { content = (await import("node:fs")).readFileSync(`${vAbs}/${f}`, "utf-8"); } catch { content = undefined; }
+          }
+          if (typeof content === "string") {
             const effBudget = target ? Math.max(contentBudget, PER_FILE_SLICE) : contentBudget;
             const { slice, centered, head } = focusedSlice(content, effBudget, focusHints, primaryProbe);
             contentBudget -= slice.length;

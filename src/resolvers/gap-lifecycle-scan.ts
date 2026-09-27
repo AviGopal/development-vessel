@@ -735,7 +735,10 @@ export async function resolveGapLifecycleScan(p: GapLifecycleScanPointer): Promi
   // The gap store's classifier re-stamps the falsifier class on write. Only gaps whose falsifier is
   // none are touched; nothing is written in a dry run.
   const falsified: string[] = [];
-  if (!dryRun && p.falsify !== false) {
+  // A node whose gap store is remote (GAP_STORE_ENDPOINT set) reads a LOCAL copy that can be days
+  // stale but writes to the authoritative store, so a falsify write (status "open") could reopen a
+  // gap that is closed there. Only the node that holds the store falsifies.
+  if (!dryRun && p.falsify !== false && !process.env["GAP_STORE_ENDPOINT"]) {
     const maxFalsify = p.maxFalsify ?? 10;
     const metaOf = (g: Gap): Record<string, unknown> => ((g as { classification_metadata?: unknown }).classification_metadata ?? {}) as Record<string, unknown>;
     const classOf = (m: Record<string, unknown>): string => {

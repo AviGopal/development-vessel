@@ -1725,6 +1725,10 @@ export async function admitActionableGaps(
         }
       }
     }
+    // An operator hold removes a gap from autonomous work. The picker's skip honours it, but falls back to
+    // the top-ranked candidate when every candidate is skipped, so a held gap was picked every 1.5-3 min
+    // (09-27 22:20-22:29) and refused at compose. Excluded here, the fallback cannot reach it.
+    if (meta.operator_hold === true) { excluded.push({ id, reason: "operator_hold" }); continue; }
     // FALSIFIER REQUIRED (contained-self-development). When the autonomyScope record names
     // require_falsifier_classes, an autonomous gap is admitted only if its falsifier is one of them;
     // otherwise it needs information, whatever its edit site. A typecheck-class gap keeps its own

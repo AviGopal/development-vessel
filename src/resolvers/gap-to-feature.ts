@@ -1743,6 +1743,14 @@ export async function admitActionableGaps(
           excluded.push({ id, reason: `needs_information(falsifier=${gapFalsifierClass || "unset"}; autonomyScope requires ${requiredClasses.join("/")})` });
           continue;
         }
+        // A class2 check with no measured field reads 'unknown' in the sweep forever: its landing can be
+        // neither closed nor recorded as falsified. c4bb14d (09-27 22:01) landed on such a step, hard-coded
+        // a restart count to 0, and nothing in the system could say so.
+        if (gapFalsifierClass === "class2") {
+          const er = meta.evidence_resolve as Record<string, unknown> | null | undefined;
+          const measured = !!er && typeof er === "object" && ["zero_field", "nonzero_field", "defect_field"].some((fk) => typeof er[fk] === "string");
+          if (!measured) { excluded.push({ id, reason: "needs_information(class2 check names no zero_field/defect_field, so its landing could never be judged)" }); continue; }
+        }
       }
     }
     // Increment child gap count if this is an auto-minted child gap.

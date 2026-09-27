@@ -258,8 +258,9 @@ async function fileDivergence(d: SelfFactDivergence): Promise<boolean> {
         fact: d.fact,
         divergence_key: d.key,
         // Class-2, self-verifying: the sweep re-runs THIS resolver for THIS fact and
-        // reads divergence_count; >0 = still present, 0 = resolved.
-        evidence_resolve: { shape: "self_fact_reconcile", input: { facts: [d.fact], key: d.key, plant_canary: false, file_gaps: false }, nonzero_field: "divergence_count" },
+        // reads divergence_count; >0 = still present, 0 = resolved. That is a DEFECT count, so it is
+        // zero_field — nonzero_field is the sweep's HEALTH form and read divergence_count=1 as resolved.
+        evidence_resolve: { shape: "self_fact_reconcile", input: { facts: [d.fact], key: d.key, plant_canary: false, file_gaps: false }, zero_field: "divergence_count" },
         falsifier: `class 2: self_fact_reconcile with facts=[${d.fact}] key=${d.key} reports divergence_count 0`,
       },
     },

@@ -305,9 +305,24 @@ export async function resolveRhythmConductorTick(
     };
   });
 
+  // SPEND ENVELOPE (value-per-cost-selection 4.3). The conductor dispatches spending work
+  // (family goals to goal-host, gap_lifecycle_scan, the boredom-queue drain), so it obeys the
+  // same fleet-wide envelope as auto-pick: read at use time across every node's pool, paused
+  // or exhausted or unreadable means no family is selected and the queue is not drained. This
+  // replaces "budget > 1" as the way to pause rhythms. The settlement pass above still runs.
+  let envelope: { allow: boolean; reason: string } = { allow: true, reason: "dry run" };
+  if (pointer.dry_run !== true) {
+    try {
+      envelope = await (await import("./gap-to-feature.js")).spendEnvelopeAllows();
+    } catch (err) {
+      envelope = { allow: false, reason: "envelope check failed: " + String(err) };
+    }
+    if (!envelope.allow) console.log(`[rhythm-conductor] no family selected and the queue not drained: spend envelope ${envelope.reason}`);
+  }
+
   // 3. Select top affordable-due families.
   const candidates = scored
-    .filter((r) => r.affordable && r.due_score >= dueThreshold)
+    .filter((r) => envelope.allow && r.affordable && r.due_score >= dueThreshold)
     .sort((a, b) => b.due_score - a.due_score);
 
   // 4. Dedup against pending queue entries by family.
@@ -665,7 +680,7 @@ export async function resolveRhythmConductorTick(
   // Close the loop: dispatch any pending queue tasks (this tick's enqueues plus any
   // left pending by prior ticks). Without this the queue is write-only and no rhythm
   // goal ever runs. Bounded per tick to avoid a dispatch flood; the rest drain next tick.
-  const drained = pointer.dry_run === true
+  const drained = pointer.dry_run === true || !envelope.allow
     ? 0
     : await drainBoredomQueue(pointer.queue_path ?? DEFAULT_QUEUE_PATH, pointer.max_enqueue ?? 2);
 
@@ -675,6 +690,7 @@ export async function resolveRhythmConductorTick(
       enqueued,
       skipped,
       drained,
+      spend_envelope: envelope.reason,
       bucket_load: bucketLoad,
       presence: present,
       considered: rhythms.length,

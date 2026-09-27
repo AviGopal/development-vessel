@@ -1609,7 +1609,12 @@ export async function admitActionableGaps(
     // machine check (tsc). No field: unchanged.
     {
       const requiredClasses = (await autonomyScope()).requireFalsifierClasses;
-      if (requiredClasses && requiredClasses.length > 0 && !typecheckClassOf(g)) {
+      // A typecheck-class gap keeps its own machine check only while its vessel FAILS typecheck now:
+      // a TS code carried into a summary by a failed attempt's lesson otherwise admitted the
+      // fs-edit gap (local-tools typechecks clean) and redrafted it four times.
+      const typecheckClass = typecheckClassOf(g);
+      const typecheckFailingNow = typecheckClass ? vesselTypecheckClean(typecheckClass.vessel) === false : false;
+      if (requiredClasses && requiredClasses.length > 0 && !typecheckFailingNow) {
         const rawFalsifier = meta.falsifier as unknown;
         const gapFalsifierClass = String((rawFalsifier && typeof rawFalsifier === "object" ? (rawFalsifier as { class?: unknown }).class : rawFalsifier) ?? "").toLowerCase();
         if (!requiredClasses.includes(gapFalsifierClass)) {

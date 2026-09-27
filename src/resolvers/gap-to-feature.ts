@@ -1407,6 +1407,10 @@ function pickMostLandable(gaps: Record<string, unknown>[]): Record<string, unkno
       || typeof m.evidence_resolve === 'string' || typeof m.verify_shape === 'string' || typeof m.expected_literal === 'string';
     const operatorHold = ((m as { operator_hold?: unknown }).operator_hold as boolean | undefined) === true;
     if (operatorHold) return true;
+    // A falsified landing still in HEAD: another compose would build on the regression. Held until
+    // its revert is recorded (regressed_by.revert_sha).
+    const regressedBy = m.regressed_by as { revert_sha?: unknown } | null | undefined;
+    if (regressedBy && typeof regressedBy === 'object' && !regressedBy.revert_sha) return true;
     if (landedAwaitingVerification && !hasMeasurablePredicate) return true;
     return verifyGapCondition(g) === 'pending';
   });
@@ -2889,6 +2893,66 @@ async function markPendingVerification(gap: Record<string, unknown>, sha: string
   } catch { /* best-effort */ }
 }
 
+// FALSIFIED AUTONOMOUS LANDING (contained-self-development 8.4a). The sweep measured a
+// single landing 'present' and did nothing: three autonomous landings on 09-27 left their
+// gap's defect in place, two passed the prose judge, and the system recorded none of it — the
+// only verdict was the operator's. This records the system's own verdict, without reverting:
+// the gap's predicate still reports the defect AFTER the edited vessel restarted onto the
+// commit, so the landing did not fix it. Applies only to an attempt intent that says
+// directed:false (an intent from before that field, or no Attempt-Id trailer, is not judged).
+// The clone holding the commit names the vessel it edited, and its unit start time — not this
+// vessel's — says whether the change is running.
+let sweepAwaitingRestart = false;
+function sweepGitOut(cloneDir: string, args: string[]): string | null {
+  let out: string | null = null;
+  try {
+    const p = Bun.spawnSync(["git", "-C", cloneDir, ...args], { stdout: "pipe", stderr: "pipe", timeout: 10_000 });
+    if (p.exitCode === 0) out = new TextDecoder().decode(p.stdout).trim();
+  } catch { /* spawn failed: no output */ }
+  return out;
+}
+async function recordFalsifiedAutonomousLanding(g: Record<string, unknown>, meta: Record<string, unknown>, sha: string): Promise<"recorded" | "awaiting_restart" | "not_applicable"> {
+  if (meta.regressed_by !== undefined && meta.regressed_by !== null) return "not_applicable";
+  if (meta.predicate_source === "removed_line_of_landing_commit") return "not_applicable";
+  let vessel: string | null = null;
+  let cloneDir = "";
+  try {
+    for (const name of readdirSync(vesselsCloneRoot()).sort()) {
+      const dir = join(vesselsCloneRoot(), name);
+      if (existsSync(join(dir, ".git")) && sweepGitOut(dir, ["merge-base", "--is-ancestor", sha, "HEAD"]) !== null) { vessel = name; cloneDir = dir; break; }
+    }
+  } catch { return "not_applicable"; }
+  if (!vessel) return "not_applicable";
+  const attemptId = sweepGitOut(cloneDir, ["log", "-1", "--format=%(trailers:key=Attempt-Id,valueonly)", sha]) ?? "";
+  if (!attemptId) return "not_applicable";
+  const { readRecords, appendRecord } = await import("./attempt-ledger.js");
+  const intent = ((await readRecords("attemptIntent", { key: attemptId }))[0]?.record ?? null) as { directed?: unknown } | null;
+  if (!intent || intent.directed !== false) return "not_applicable";
+  const committedAt = Number(sweepGitOut(cloneDir, ["log", "-1", "--format=%ct", sha]) ?? "0");
+  let startedAt = 0;
+  try {
+    const p = Bun.spawnSync(["systemctl", "show", vessel, "-p", "ActiveEnterTimestamp", "--value", "--timestamp=unix"], { stdout: "pipe", stderr: "pipe", timeout: 5_000 });
+    const m = new TextDecoder().decode(p.stdout).trim().match(/^@(\d+)$/);
+    startedAt = m ? Number(m[1]) : 0;
+  } catch { /* unit unreadable: cannot tell what is running here */ }
+  if (!startedAt || !committedAt) return "not_applicable";
+  const { selfRestartAlreadyOwed } = await import("./vessel-mitosis-cutover.js");
+  if (startedAt <= committedAt || selfRestartAlreadyOwed(vessel)) return "awaiting_restart";
+  const at = new Date().toISOString();
+  await resolveSubstrateGapWrite({
+    type: "substrateGap_write",
+    gap: {
+      id: String(g.id), category: g.category, source: g.source, summary: g.summary, detected_at: g.detected_at, status: "open",
+      classification_metadata: { ...meta, regressed_by: { sha, at, verdict: "present", attempt_id: attemptId, vessel, revert_sha: null, by: "gap-sweep:falsified_after_restart" } },
+    },
+  } as never);
+  joinDecisionOutcome(meta, { landed: true, verdict: "UNFAVORABLE", commit: sha, falsified_after_restart: true });
+  updateClassPosterior(gapClassOf(g), false);
+  await appendRecord("attemptSettlement", `${attemptId}#2`, { attempt_id: attemptId, settlement_seq: 2, verdict: "regressed", credit_eligible: false, shas: [sha], gap_id: String(g.id), source: "falsified_after_restart", at });
+  console.warn(`[gap-sweep] FALSIFIED autonomous landing gap=${String(g.id)} sha=${sha.slice(0, 12)} vessel=${vessel} attempt=${attemptId} — its predicate still reports the defect after ${vessel} restarted onto it; recorded regressed_by, held from re-pick until reverted`);
+  return "recorded";
+}
+
 export async function sweepPendingLandVerifications(): Promise<{ checked: number; closed: number }> {
   const out = { checked: 0, closed: 0 };
   // OBSERVABILITY, because this sweep has been silent since it was written.
@@ -2903,7 +2967,7 @@ export async function sweepPendingLandVerifications(): Promise<{ checked: number
   // Live at the time of writing: 13 gaps carry pending_outcome_verification, 11 of them
   // have no predicate at all — so the honest answer is "correctly abstaining on an input
   // that cannot be measured", not "broken". A counter per verdict says that out loud.
-  const tally = { absent: 0, present: 0, pending: 0, unknown: 0, not_in_clone: 0, reverted: 0 };
+  const tally = { absent: 0, present: 0, pending: 0, unknown: 0, not_in_clone: 0, reverted: 0, awaiting_restart: 0, falsified: 0 };
   try {
     const read = await resolveSubstrateGap({
       type: "substrateGap",
@@ -2972,6 +3036,9 @@ const pending = gaps
       const gidSweep = String(g.id ?? "");
       if (verdict === "present") {
         tally.present += 1;
+        const falsified = await recordFalsifiedAutonomousLanding(g, meta, sha);
+        if (falsified === "awaiting_restart") { tally.awaiting_restart += 1; sweepAwaitingRestart = true; continue; }
+        if (falsified === "recorded") { tally.falsified += 1; continue; }
         const editSitePresent = gapEditSite(g, (g.classification_metadata ?? g.metadata ?? {}) as Record<string, unknown>) ?? "";
         if (landedCommitVerdict(gidSweep, editSitePresent) === 'present') {
           escalateRelandToHuman(gidSweep, String(g.category ?? "?"), String(g.summary ?? ""));
@@ -4085,8 +4152,11 @@ export async function resolveGapToFeature(pointer: GapToFeaturePointer): Promise
   try {
     const heads = cloneHeadsFingerprint();
     if (heads === null || heads !== lastSweepHeads) {
+      sweepAwaitingRestart = false;
       await sweepPendingLandVerifications();
-      lastSweepHeads = heads;
+      // A landing awaiting its vessel's restart is re-examined after the restart, which moves no
+      // clone HEAD — so leave the fingerprint unset and sweep again next tick.
+      lastSweepHeads = sweepAwaitingRestart ? null : heads;
     }
   } catch { /* never block the tick */ }
   // Causal attempt ledger: outcomes and settlements for registered landings. Started without

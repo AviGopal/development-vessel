@@ -39,6 +39,8 @@ export interface GapLifecycleScanPointer {
   proposalsDir?: string;      // default /workspace/proposals
   staleHours?: number;        // open+untouched beyond this = stale. default 48
   autoClose?: boolean;        // auto-close churned gaps. default false (seed sets true)
+  falsify?: boolean;          // gap_falsify pass (contained-self-development 6.1). default true
+  maxFalsify?: number;        // gaps given a falsifier per run. default 10
   maxClose?: number;          // cap auto-closes per run. default 25
   devVesselImpulsesUrl?: string;
   dry_run?: boolean;
@@ -720,6 +722,79 @@ export async function resolveGapLifecycleScan(p: GapLifecycleScanPointer): Promi
     max_failure_lessons,
     failure_count_dist,
   };
+  // GAP FALSIFY (contained-self-development 6.1). Autonomous admission takes only gaps that a
+  // pre-existing machine-checkable falsifier can verify, and no detector writes one before compose:
+  // 286 open gaps outside the autonomy scope had an edit site but no class1/class2 falsifier. This
+  // pass gives a bounded number of them one, deterministically, and says which rule did it
+  // (`predicate_source: gap_falsify:<rule>`) so each rule is graded by whether its gaps later close
+  // by that predicate after a landing (a predicate already satisfied before any landing is a miss).
+  //   inherit           a `-narrowed` child takes its class1/class2 parent's predicate fields
+  //                     (narrowing strips them, so children were never verifiable)
+  //   quoted_identifier a backtick-quoted identifier in the summary that is absent from the
+  //                     edit-site source file becomes `expected_literal` (the fix must introduce it)
+  // The gap store's classifier re-stamps the falsifier class on write. Only gaps whose falsifier is
+  // none are touched; nothing is written in a dry run.
+  const falsified: string[] = [];
+  if (!dryRun && p.falsify !== false) {
+    const maxFalsify = p.maxFalsify ?? 10;
+    const metaOf = (g: Gap): Record<string, unknown> => ((g as { classification_metadata?: unknown }).classification_metadata ?? {}) as Record<string, unknown>;
+    const classOf = (m: Record<string, unknown>): string => {
+      const f = m["falsifier"] as unknown;
+      return String((f && typeof f === "object" ? (f as { class?: unknown }).class : f) ?? "").toLowerCase();
+    };
+    const PREDICATE_FIELDS = ["expected_literal", "hardcoded_url", "evidence_resolve", "verify_shape"];
+    const verifiableById = new Map<string, Record<string, unknown>>();
+    for (const g of gaps) {
+      const m = metaOf(g);
+      if (g.id && (classOf(m) === "class1" || classOf(m) === "class2")) verifiableById.set(g.id, m);
+    }
+    const sourceCache = new Map<string, string | null>();
+    const readEditSite = (site: string): string | null => {
+      const sm = /^repos\/([^/]+)\/(.+?)(?::\d+.*)?$/.exec(site.trim());
+      if (!sm || !/\.(ts|tsx|js|mjs|cjs|py|sh|surql)$/.test(sm[2] ?? "")) return null;
+      const key = `${sm[1]}/${sm[2]}`;
+      if (!sourceCache.has(key)) {
+        try { sourceCache.set(key, readFileSync(join("/workspace/git/vessels", sm[1] ?? "", sm[2] ?? ""), "utf-8")); } catch { sourceCache.set(key, null); }
+      }
+      return sourceCache.get(key) ?? null;
+    };
+    for (const g of open) {
+      if (falsified.length >= maxFalsify) break;
+      const meta = metaOf(g);
+      const cls = classOf(meta);
+      if (!g.id || (cls !== "" && cls !== "none")) continue;
+      let predicate: Record<string, unknown> | null = null;
+      let rule = "";
+      if (g.id.endsWith("-narrowed")) {
+        const parentMeta = verifiableById.get(g.id.slice(0, -"-narrowed".length));
+        if (parentMeta) {
+          const inherited: Record<string, unknown> = {};
+          for (const k of PREDICATE_FIELDS) if (parentMeta[k] !== undefined && parentMeta[k] !== null) inherited[k] = parentMeta[k];
+          if (Object.keys(inherited).length > 0) { predicate = inherited; rule = "inherit"; }
+        }
+      }
+      if (!predicate) {
+        const site = String(meta["edit_site"] ?? "");
+        const text = site ? readEditSite(site) : null;
+        if (text !== null) {
+          const quoted = [...String(g.summary ?? "").matchAll(/`([A-Za-z_][A-Za-z0-9_]{5,})`/g)].map((x) => x[1] ?? "");
+          const absent = quoted.find((q) => q.length > 0 && !text.includes(q));
+          if (absent) { predicate = { expected_literal: absent }; rule = "quoted_identifier"; }
+        }
+      }
+      if (!predicate) continue;
+      try {
+        const resp = await fetch(emitUrl, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", ...authHeader },
+          body: JSON.stringify({ impulse: { pointer: { type: "substrateGap_write", gap: { id: g.id, category: g.category ?? "other", source: g.source ?? "substrate_detected", summary: g.summary ?? "", status: "open", detected_at: preservedDetectedAt(g), classification_metadata: { ...predicate, predicate_source: `gap_falsify:${rule}`, falsified_at: new Date().toISOString() } } } } }),
+          signal: AbortSignal.timeout(8_000),
+        });
+        if (resp.ok) falsified.push(g.id);
+      } catch { /* next run retries */ }
+    }
+    if (falsified.length > 0) console.log(`[gap-falsify] gave ${falsified.length} gap(s) a falsifier: ${falsified.slice(0, 10).join(", ")}`);
+  }
   let funnelHistory: unknown[] = [];
   if (!dryRun) {
     try {
@@ -754,6 +829,7 @@ export async function resolveGapLifecycleScan(p: GapLifecycleScanPointer): Promi
       auto_closed: closed.length, auto_closed_ids: closed.slice(0, 20),
       low_value_closed: lowValueClosed.length,
       expired: expired.length,
+      falsified: falsified.length, falsified_ids: falsified.slice(0, 20),
       expire_hours: expireHours,
       funnel_history: funnelHistory,
       consumption_queue: remainingOpen.filter((g) => !expired.includes(g.id!)).map((g) => ({ id: g.id, category: g.category, landability: landability(g) })).sort((a, b) => b.landability - a.landability).slice(0, 10),

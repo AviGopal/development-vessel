@@ -6183,6 +6183,25 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
     console.log(`[feature-compose] all-edits floor: WITHHELD FAVORABLE - ${failedOps.length} of ${applied.length} op(s) did not apply: ${failedOps.join("; ")}`);
   }
 
+  // AUTONOMY SCOPE FLOOR (contained-self-development 1.3). The final authority on what an autonomous
+  // compose touched: an undirected compose (an unknown trigger counts as autonomous) that applied an
+  // op to a path the `autonomyScope` shape excludes (the lane core) is withheld and rolled back,
+  // whatever its gap claimed. Directed work is never checked. No scope record: unchanged.
+  if (verdict === "FAVORABLE" && (pointer as { directed?: boolean }).directed !== true) {
+    try {
+      const { autonomyScope, autonomyScopeExcludes } = await import("./gap-to-feature.js");
+      const scope = await autonomyScope();
+      const scopeHits = [...new Set(applied.filter((a) => a.ok).map((a) => autonomyScopeExcludes(scope, a.path)).filter((h): h is string => !!h))];
+      if (scopeHits.length > 0) {
+        verdict = "UNFAVORABLE";
+        console.log(`[feature-compose] autonomy-scope floor: WITHHELD FAVORABLE - autonomous compose touched excluded path(s): ${scopeHits.join(", ")}`);
+      }
+    } catch (err) {
+      verdict = "UNFAVORABLE";
+      console.log(`[feature-compose] autonomy-scope floor: WITHHELD FAVORABLE - scope check failed: ${String(err)}`);
+    }
+  }
+
   // 3b. SEMANTIC GATE (2026-06-25, lever 5 — the reach-gate applied to code). Only
   // a typecheck-clean patch reaches here. typecheck=clean ≠ gap-fixed: a net-new
   // dead-code function (zero callers) or an edit to a non-executing path compiles

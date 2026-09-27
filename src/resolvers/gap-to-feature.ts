@@ -3275,7 +3275,20 @@ async function bumpFailedAttempts(gap: Record<string, unknown>, opts: { surprise
         const childId = String((childRecord as Record<string,unknown>).id ?? "");
         console.log(`[gap-to-feature] emitted narrowed child gap for chronically-stuck gap ${parentId}: ${childId}`);
         }
-        void fetch(GOAL_HOST_VESSEL_ENDPOINT + "/run-goal", {
+        // The investigation walk is autonomous spending even when a DIRECTED compose (gap_id)
+        // failed, and directed composes skip the pre-selection block, so this dispatch reads the
+        // same autonomous_pick lease and spend envelope as auto-pick (value-per-cost-selection
+        // 4.2: a siteless gap family was re-walked here 17 times an hour with autonomy held).
+        let invHold = "";
+        try {
+          const { resolveMaintenanceLease } = await import("./maintenance-lease.js");
+          const invLease = (await resolveMaintenanceLease({ type: "maintenanceLease", name: "autonomous_pick" })).body as { held?: boolean; holder?: string } | undefined;
+          if (invLease?.held === true) invHold = "autonomous_pick lease held by " + String(invLease.holder);
+        } catch { /* an unreadable lease fails open, as in the pre-selection block */ }
+        const invEnvelope = invHold ? null : await spendEnvelopeAllows();
+        if (invEnvelope && !invEnvelope.allow) invHold = "spend envelope " + invEnvelope.reason;
+        if (invHold) console.log(`[gap-to-feature] investigation of ${parentId} NOT dispatched: ${invHold}`);
+        else void fetch(GOAL_HOST_VESSEL_ENDPOINT + "/run-goal", {
           method: "POST",
           headers: { "Content-Type": "application/json", ...(METABOB_API_KEY ? { Authorization: "ApiKey " + METABOB_API_KEY } : {}) },
           body: JSON.stringify({
@@ -3684,6 +3697,102 @@ async function llmProducerAdvertised(): Promise<boolean | null> {
   return available;
 }
 
+// SPEND ENVELOPE (value-per-cost-selection 4.1/4.2). Autonomous spending obeys one hourly USD
+// envelope read at use time as a shaped impulse: the newest open poolImpulse of shape
+// `spendEnvelope` ({usd_cap_per_hour, paused, reason}) across EVERY poolImpulse producer that
+// discovery lists, so a record written on either node binds both. Spent = the sum over every
+// distinct llmSpendSummary producer of its current window plus the unexpired share of its
+// previous window (a sliding hour). No record, or a record without a numeric cap and not
+// paused, means no cap, so behaviour is unchanged until an envelope is written. A discovered
+// producer that does not answer makes the envelope UNREADABLE, and once a record has been seen
+// unreadable blocks (fail closed): a partial read could miss the one node that holds the pause.
+// Cached for SPEND_ENVELOPE_TTL_MS so a gap-write burst costs one read.
+export type SpendEnvelopeVerdict = { allow: boolean; reason: string; unreadable?: boolean; paused?: boolean; cap_usd?: number; spent_usd?: number; spend_sources?: number };
+const SPEND_ENVELOPE_TTL_MS = 30_000;
+let spendEnvelopeCache: { at: number; v: SpendEnvelopeVerdict } | null = null;
+// Whether the last COMPLETE read found a record. Unreadable blocks only after one was seen,
+// so a process that has never seen an envelope behaves exactly as before (no cap), which
+// keeps landing safe before any envelope is written and keeps the fail-open capacity tests.
+let spendEnvelopeSeen = false;
+async function discoverResolveUrls(shape: string): Promise<string[] | null> {
+  try {
+    const dr = await fetch(`${DISCOVERY_ENDPOINT}/resolve`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `ApiKey ${METABOB_API_KEY}` },
+      body: JSON.stringify({ pointer: { type: "vesselCapability", shape } }),
+      signal: AbortSignal.timeout(3000),
+    });
+    if (!dr.ok) return null;
+    const vessels = ((await dr.json()) as { content?: { vessels?: Array<{ endpoint?: string; resolve_endpoint?: string }> } }).content?.vessels;
+    if (!Array.isArray(vessels)) return null;
+    // resolve_endpoint is ABSOLUTE for some producers (llm-resolver) and a PATH for others
+    // (development-vessel): join only a path, never prefix an absolute url.
+    const urls = new Set<string>();
+    for (const v of vessels) {
+      const re = String(v.resolve_endpoint ?? "");
+      if (/^https?:\/\//.test(re)) urls.add(re);
+      else if (v.endpoint) urls.add(String(v.endpoint).replace(/\/+$/, "") + (re || "/resolve"));
+    }
+    return [...urls];
+  } catch { return null; }
+}
+async function postEnvelopeRead(url: string, body: unknown): Promise<Record<string, unknown> | null> {
+  try {
+    const r = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `ApiKey ${METABOB_API_KEY}` },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(3000),
+    });
+    if (!r.ok) return null;
+    return (await r.json()) as Record<string, unknown>;
+  } catch { return null; }
+}
+async function readSpendEnvelope(): Promise<SpendEnvelopeVerdict> {
+  const [poolUrls, spendUrls] = await Promise.all([discoverResolveUrls("poolImpulse"), discoverResolveUrls("llmSpendSummary")]);
+  if (!poolUrls || poolUrls.length === 0) return { allow: false, unreadable: true, reason: "envelope unreadable: no poolImpulse producer discovered" };
+  const pools = await Promise.all(poolUrls.map((u) => postEnvelopeRead(u, { impulse: { type: "poolImpulse", shape: "spendEnvelope", status: "open" } })));
+  let newest: { shape?: string; updated_at?: string; body?: unknown } | null = null;
+  for (let i = 0; i < poolUrls.length; i++) {
+    const imps = (pools[i]?.["body"] as { impulses?: unknown } | undefined)?.impulses;
+    if (!Array.isArray(imps)) return { allow: false, unreadable: true, reason: "envelope unreadable: no answer from " + poolUrls[i] };
+    for (const imp of imps as Array<{ shape?: string; updated_at?: string; body?: unknown }>) {
+      if (imp.shape === "spendEnvelope" && (!newest || String(imp.updated_at ?? "") > String(newest.updated_at ?? ""))) newest = imp;
+    }
+  }
+  spendEnvelopeSeen = newest !== null;
+  if (!newest) return { allow: true, reason: "no spendEnvelope record (no cap)" };
+  const env = (newest.body ?? {}) as { usd_cap_per_hour?: unknown; paused?: unknown; reason?: unknown };
+  if (env.paused === true) return { allow: false, paused: true, reason: "paused: " + String(env.reason ?? "no reason given") };
+  const rawCap = env.usd_cap_per_hour;
+  // A cap that is present but not a finite number is a misconfiguration, not "no cap".
+  if (rawCap !== undefined && rawCap !== null && !(typeof rawCap === "number" && Number.isFinite(rawCap))) return { allow: false, unreadable: true, reason: "envelope unreadable: usd_cap_per_hour is not a finite number" };
+  const cap = typeof rawCap === "number" ? rawCap : null;
+  if (cap === null) return { allow: true, reason: "spendEnvelope has no numeric usd_cap_per_hour (no cap)" };
+  if (!spendUrls || spendUrls.length === 0) return { allow: false, unreadable: true, cap_usd: cap, reason: "envelope unreadable: no llmSpendSummary producer discovered" };
+  const sums = await Promise.all(spendUrls.map((u) => postEnvelopeRead(u, { impulse: { pointer: { type: "llmSpendSummary" } } })));
+  let spent = 0;
+  for (let i = 0; i < spendUrls.length; i++) {
+    const b = sums[i]?.["body"] as { window_ms?: number; current?: { window_start?: string; cost_usd?: number }; previous?: { cost_usd?: number } | null } | undefined;
+    if (!b || !b.current || typeof b.current.cost_usd !== "number") return { allow: false, unreadable: true, cap_usd: cap, reason: "envelope unreadable: no spend summary from " + spendUrls[i] };
+    const windowMs = Number(b.window_ms) > 0 ? Number(b.window_ms) : 3_600_000;
+    const elapsed = Date.now() - Date.parse(String(b.current.window_start ?? ""));
+    const prevShare = Number.isFinite(elapsed) ? Math.max(0, 1 - elapsed / windowMs) : 1;
+    spent += b.current.cost_usd + (typeof b.previous?.cost_usd === "number" ? b.previous.cost_usd * prevShare : 0);
+  }
+  const verdict = { cap_usd: cap, spent_usd: spent, spend_sources: spendUrls.length };
+  if (spent >= cap) return { allow: false, ...verdict, reason: "exhausted: spent " + spent.toFixed(3) + " USD of " + cap + " USD/h over " + spendUrls.length + " spend source(s)" };
+  return { allow: true, ...verdict, reason: "within envelope: spent " + spent.toFixed(3) + " USD of " + cap + " USD/h" };
+}
+export async function spendEnvelopeAllows(): Promise<SpendEnvelopeVerdict> {
+  if (spendEnvelopeCache && Date.now() - spendEnvelopeCache.at < SPEND_ENVELOPE_TTL_MS) return spendEnvelopeCache.v;
+  let v: SpendEnvelopeVerdict;
+  try { v = await readSpendEnvelope(); } catch (err) { v = { allow: false, unreadable: true, reason: "envelope unreadable: " + String(err) }; }
+  if (v.unreadable && !spendEnvelopeSeen) v = { ...v, allow: true, reason: v.reason + " (no envelope seen yet: no cap)" };
+  spendEnvelopeCache = { at: Date.now(), v };
+  return v;
+}
+
 export async function resolveGapToFeature(pointer: GapToFeaturePointer): Promise<ResolverResult> {
   // For testing purposes, expose the map.
   (resolveGapToFeature as any).__test__gapComposeLastAttemptAt = () => gapComposeLastAttemptAt;
@@ -3789,6 +3898,26 @@ export async function resolveGapToFeature(pointer: GapToFeaturePointer): Promise
           verdict: "BUSY",
           error: "llm_unavailable: no llm_completion producer advertised — selection skipped",
           reason: "llm_unavailable",
+          skipped_selection: true,
+        },
+      };
+    }
+    // SPEND ENVELOPE (value-per-cost-selection 4.2): exhausted, paused or unreadable means no
+    // auto-pick. BUSY-shaped so isNonAttemptComposeResult classifies it as a non-attempt: no
+    // gap is picked, no cooldown is stamped, no credit moves.
+    const envelope = await spendEnvelopeAllows();
+    if (!envelope.allow) {
+      console.log(`[gap-to-feature] selection skipped: spend envelope ${envelope.reason}`);
+      return {
+        shape: "gapToFeatureReport",
+        body: {
+          ok: false,
+          stage: "budget",
+          verdict: "BUSY",
+          error: "spend envelope: " + envelope.reason + " (selection skipped)",
+          reason: envelope.unreadable ? "budget_unreadable" : envelope.paused ? "budget_paused" : "budget_exhausted",
+          cap_usd: envelope.cap_usd ?? null,
+          spent_usd: envelope.spent_usd ?? null,
           skipped_selection: true,
         },
       };

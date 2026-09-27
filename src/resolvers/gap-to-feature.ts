@@ -504,6 +504,85 @@ async function rankWithLlm(summary: string, hits: Array<{ file: string; score: n
   }
 }
 
+// DECOMPOSITION CONTRACT (contained-self-development 6.3). The investigation step used to dispatch
+// a free-text "investigate and decompose" walk whose output was another gap with no falsifier
+// (384 runs, 4 closures). Every verifiable gap left on 2026-09-27 was design-sized: autonomous
+// single-file drafts on them were refused as incomplete, wrong-file, DESTROY-TO-SATISFY or a
+// hollow literal write. This gives the step a structured output: one bounded LLM call proposes
+// 1-3 single-file steps, each validated deterministically before it is written as a child gap
+// `<parent>-step-<k>` (category `decomposed_step`, so the parent's sealed category does not
+// seal it): the file exists outside the autonomy scope; a shape falsifier names a shape that
+// discovery advertises; a literal falsifier is absent from the file now and names an existing
+// reader in it. Proposals that silence a detector are refused. Depth 1: a step is never
+// decomposed again. Graded by child closure.
+export async function decomposeGap(parent: Record<string, unknown>): Promise<{ written: string[]; reason: string }> {
+  const parentId = String(parent.id ?? "");
+  const meta = (parent.classification_metadata ?? {}) as Record<string, unknown>;
+  if (!parentId) return { written: [], reason: "no parent id" };
+  if (meta.parent_gap_id || /-step-\d+$/.test(parentId)) return { written: [], reason: "a decomposed step is not decomposed again" };
+  const site = String(meta.edit_site ?? "").replace(/:\d+.*$/, "");
+  const siteMatch = /^repos\/([^/]+)\/(.+)$/.exec(site);
+  let excerpt = "";
+  if (siteMatch) { try { excerpt = readFileSync(join("/workspace/git/vessels", siteMatch[1] ?? "", siteMatch[2] ?? ""), "utf-8").slice(0, 7000); } catch { excerpt = ""; } }
+  const predicate: Record<string, unknown> = {};
+  for (const k of ["expected_literal", "hardcoded_url", "evidence_resolve", "verify_shape"]) if (meta[k] !== undefined && meta[k] !== null) predicate[k] = meta[k];
+  const lessons = Array.isArray(meta.failure_lessons) ? (meta.failure_lessons as Array<Record<string, unknown>>).slice(-3).map((l) => "- " + String(l.class ?? "?") + ": " + String(l.reason ?? "").slice(0, 300)).join("\n") : "";
+  const prompt = `A substrate gap could not be closed by one single-file code change. Decompose it into 1 to 3 SMALL steps. Each step changes exactly ONE existing source file and has a machine-checkable falsifier.\n\nGAP ${parentId}:\n${String(parent.summary ?? "").slice(0, 1500)}\n\nITS FALSIFIER: ${JSON.stringify(predicate).slice(0, 600)}\n\nWHY ATTEMPTS FAILED (most recent last):\n${lessons || "(none recorded)"}\n\nEDIT SITE ${site || "(none)"} (excerpt):\n${excerpt}\n\nRespond with ONLY JSON: {"steps":[{"edit_site":"repos/<vessel>/src/<file>","change":"<one sentence>","falsifier":{"verify_shape":"<shape that answers only after the change>"} OR {"evidence_resolve":{"shape":"<shape>","input":{}}} OR {"expected_literal":"<identifier the change introduces>","reader":"<existing function in that file that will read or call it>"}}],"cannot_falsify":"<only if no step can be given a machine check>"}\nRules: prefer a shape-based falsifier; an expected_literal must not exist in the file yet and must be read by the named existing function; never propose removing, weakening or silencing a detector or check; the steps together must close the gap.`;
+  let raw = "";
+  try {
+    const dr = await fetch(`${DISCOVERY_ENDPOINT}/resolve`, { method: "POST", headers: { "Content-Type": "application/json", Authorization: `ApiKey ${METABOB_API_KEY}` }, body: JSON.stringify({ pointer: { type: "vesselCapability", shape: "llm_completion" } }), signal: AbortSignal.timeout(6000) });
+    const dd = (await dr.json()) as { content?: { vessels?: Array<{ endpoint: string; resolve_endpoint?: string }> } };
+    const best = (dd.content?.vessels ?? [])[0];
+    if (!best) return { written: [], reason: "no llm_completion producer" };
+    const ep0 = best.resolve_endpoint ?? "/resolve";
+    const endpoint = ep0.startsWith("http") ? ep0 : `${best.endpoint.replace(/\/$/, "")}${ep0.startsWith("/") ? ep0 : `/${ep0}`}`;
+    const res = await fetch(endpoint, { method: "POST", headers: { "Content-Type": "application/json", Authorization: `ApiKey ${METABOB_API_KEY}` }, body: JSON.stringify({ type: "llm_completion", prompt, model: "auto", max_tokens: 1200, caller: "development-vessel:gap_decompose" }), signal: AbortSignal.timeout(90_000) });
+    const j = (await res.json()) as { content?: string; data?: string };
+    raw = String(j.content ?? j.data ?? "");
+  } catch (err) { return { written: [], reason: "llm call failed: " + String(err) }; }
+  let parsed: { steps?: Array<Record<string, unknown>>; cannot_falsify?: unknown } = {};
+  try { const a = raw.indexOf("{"), b = raw.lastIndexOf("}"); parsed = JSON.parse(raw.slice(a, b + 1)); } catch { return { written: [], reason: "unparseable decomposition" }; }
+  const scope = await autonomyScope();
+  const written: string[] = [];
+  const refusals: string[] = [];
+  let k = 0;
+  for (const st of (parsed.steps ?? []).slice(0, 3)) {
+    k++;
+    const stepSite = String(st.edit_site ?? "").replace(/:\d+.*$/, "");
+    const sm = /^repos\/([^/]+)\/(.+\.(?:ts|tsx|js|mjs))$/.exec(stepSite);
+    const change = String(st.change ?? "").trim();
+    const f = (st.falsifier ?? {}) as Record<string, unknown>;
+    if (!sm || !change) { refusals.push(`step ${k}: no single source file or no change`); continue; }
+    if (autonomyScopeExcludes(scope, stepSite)) { refusals.push(`step ${k}: ${stepSite} is inside the autonomy scope`); continue; }
+    if (/\b(remove|delete|disable|silence|suppress|skip)\b[^.]{0,40}\b(detector|check|gate|falsifier|scan)\b/i.test(change)) { refusals.push(`step ${k}: would silence a detector or check`); continue; }
+    let text = "";
+    try { text = readFileSync(join("/workspace/git/vessels", sm[1] ?? "", sm[2] ?? ""), "utf-8"); } catch { refusals.push(`step ${k}: ${stepSite} does not exist`); continue; }
+    const childPredicate: Record<string, unknown> = {};
+    const shape = typeof f.verify_shape === "string" ? f.verify_shape : (f.evidence_resolve && typeof (f.evidence_resolve as { shape?: unknown }).shape === "string" ? String((f.evidence_resolve as { shape?: unknown }).shape) : "");
+    if (shape) {
+      const producers = await discoverResolveUrls(shape);
+      if (!producers || producers.length === 0) { refusals.push(`step ${k}: shape ${shape} is not advertised`); continue; }
+      if (typeof f.verify_shape === "string") childPredicate.verify_shape = f.verify_shape; else childPredicate.evidence_resolve = f.evidence_resolve;
+    } else if (typeof f.expected_literal === "string" && f.expected_literal.trim().length >= 4) {
+      const lit = f.expected_literal.trim();
+      const reader = String(f.reader ?? "").trim();
+      if (text.includes(lit)) { refusals.push(`step ${k}: literal ${lit} already present`); continue; }
+      if (!reader || !text.includes(reader)) { refusals.push(`step ${k}: reader ${reader || "(none)"} not found in ${stepSite}`); continue; }
+      childPredicate.expected_literal = lit;
+      childPredicate.literal_reader = reader;
+    } else { refusals.push(`step ${k}: no machine-checkable falsifier`); continue; }
+    const childId = `${parentId}-step-${k}`;
+    await resolveSubstrateGapWrite({ type: "substrateGap_write", gap: { id: childId, category: "decomposed_step", source: "substrate_detected", summary: `[step ${k} of ${parentId}] ${change}`, detected_at: new Date().toISOString(), status: "open", classification_metadata: { edit_site: stepSite, parent_gap_id: parentId, predicate_source: "decompose", ...childPredicate } } } as never);
+    written.push(childId);
+  }
+  const reason = written.length > 0 ? `wrote ${written.length} step(s)` + (refusals.length ? `; refused: ${refusals.join("; ")}` : "") : (typeof parsed.cannot_falsify === "string" && parsed.cannot_falsify ? "cannot_falsify: " + parsed.cannot_falsify.slice(0, 200) : "no valid step: " + refusals.join("; "));
+  try {
+    await resolveSubstrateGapWrite({ type: "substrateGap_write", gap: { ...parent, classification_metadata: { ...meta, decomposed_at: new Date().toISOString(), decomposition: { children: written, reason: reason.slice(0, 600) } }, status: String(parent.status ?? "open") } } as never);
+  } catch { /* the children stand on their own */ }
+  console.log(`[gap-decompose] ${parentId}: ${reason.slice(0, 400)}`);
+  return { written, reason };
+}
+
 export interface LocalizeResult {
   file: string;
   description: string;
@@ -3328,7 +3407,12 @@ async function bumpFailedAttempts(gap: Record<string, unknown>, opts: { surprise
         const invEnvelope = invHold ? null : await spendEnvelopeAllows();
         if (invEnvelope && !invEnvelope.allow) invHold = "spend envelope " + invEnvelope.reason;
         if (invHold) console.log(`[gap-to-feature] investigation of ${parentId} NOT dispatched: ${invHold}`);
-        else void fetch(GOAL_HOST_VESSEL_ENDPOINT + "/run-goal", {
+        else void (async () => {
+          // DECOMPOSITION FIRST (contained-self-development 6.3): structured, falsifiable child steps;
+          // the free-text investigation walk only when no valid step could be produced.
+          const decomp = await decomposeGap(gap).catch((e: unknown) => ({ written: [] as string[], reason: "decompose threw: " + String(e) }));
+          if (decomp.written.length > 0) return;
+          await fetch(GOAL_HOST_VESSEL_ENDPOINT + "/run-goal", {
           method: "POST",
           headers: { "Content-Type": "application/json", ...(METABOB_API_KEY ? { Authorization: "ApiKey " + METABOB_API_KEY } : {}) },
           body: JSON.stringify({
@@ -3336,6 +3420,7 @@ async function bumpFailedAttempts(gap: Record<string, unknown>, opts: { surprise
             tags: ["escalated_from:" + parentId],
           }),
         }).catch(() => { });
+        })();
       } catch (err) {
         // Child gap emission is best-effort; never block the parent update.
         console.warn(`[bumpFailedAttempts] child gap emit failed: ${err instanceof Error ? err.message : String(err)}`);
@@ -3937,6 +4022,16 @@ async function findComposeOwner(vessel: string): Promise<{ vesselId: string; url
 export async function resolveGapToFeature(pointer: GapToFeaturePointer): Promise<ResolverResult> {
   // For testing purposes, expose the map.
   (resolveGapToFeature as any).__test__gapComposeLastAttemptAt = () => gapComposeLastAttemptAt;
+  // DECOMPOSE ON REQUEST (contained-self-development 6.3): run the decomposition contract for one
+  // named gap and report what it wrote, so the step can be falsified directly.
+  const decomposeId = (pointer as { decompose_gap_id?: string }).decompose_gap_id;
+  if (typeof decomposeId === "string" && decomposeId) {
+    const read = await resolveSubstrateGap({ type: "substrateGap", id: decomposeId } as never);
+    const found = ((read as { body?: { gaps?: Array<Record<string, unknown>> } }).body?.gaps ?? []).find((g) => String(g.id) === decomposeId);
+    if (!found) return { shape: "gapToFeatureReport", body: { ok: false, stage: "decompose", error: "gap not found: " + decomposeId } };
+    const d = await decomposeGap(found);
+    return { shape: "gapToFeatureReport", body: { ok: d.written.length > 0, stage: "decompose", gap_id: decomposeId, children: d.written, reason: d.reason } };
+  }
   // 0. Land→close continuity: complete deferred self-cutover closures BEFORE selection,
   // so an already-landed gap cannot be re-picked and re-landed. Cheap, bounded, best-effort.
   try {

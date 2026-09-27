@@ -251,12 +251,7 @@ async function llmCall(producer: LlmProducer, prompt: string, model: string): Pr
   throw new Error(`llm unparseable response: ${JSON.stringify(j).slice(0, 120)}`);
 }
 
-const AUTHORING_ROOTS_PATH = process.env.AUTHORING_ROOTS_PATH ?? "/workspace/obsidian/vessels.inventory.json";
-
 async function findLlmEndpoints(): Promise<LlmProducer[]> {
-  if (process.env.NODE_ENV !== "test") {
-    console.log(`[patch-with-tools] Using authoring roots path: ${AUTHORING_ROOTS_PATH}`);
-  }
   try {
     for (const shape of ["llmCompletion", "llm_completion"]) {
       const r = await fetch(`${DISCOVERY_ENDPOINT}/resolve`, {

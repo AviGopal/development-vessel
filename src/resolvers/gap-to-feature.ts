@@ -3793,6 +3793,40 @@ export async function spendEnvelopeAllows(): Promise<SpendEnvelopeVerdict> {
   return v;
 }
 
+/** The compose node that owns `vessel`: the one feature_compose producer whose composeOwnership
+ *  lists it. Null when discovery is unreadable or when zero or several producers claim it. */
+async function findComposeOwner(vessel: string): Promise<{ vesselId: string; url: string } | null> {
+  try {
+    const dr = await fetch(`${DISCOVERY_ENDPOINT}/resolve`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `ApiKey ${METABOB_API_KEY}` },
+      body: JSON.stringify({ pointer: { type: "vesselCapability", shape: "feature_compose" } }),
+      signal: AbortSignal.timeout(5_000),
+    });
+    const dj = await dr.json() as { content?: { vessels?: Array<{ vesselId?: string; endpoint?: string; resolve_endpoint?: string }> } };
+    const rows = dj.content?.vessels ?? [];
+    const owners: Array<{ vesselId: string; url: string }> = [];
+    await Promise.all(rows.map(async (r) => {
+      const ep = String(r.resolve_endpoint ?? "/v2/impulses/resolve");
+      const url = ep.startsWith("http") ? ep : `${String(r.endpoint ?? "").replace(/\/+$/, "")}${ep.startsWith("/") ? ep : `/${ep}`}`;
+      try {
+        const res = await fetch(url, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: `ApiKey ${METABOB_API_KEY}` },
+          body: JSON.stringify({ impulse: { pointer: { type: "composeOwnership" } } }),
+          signal: AbortSignal.timeout(3_000),
+        });
+        const j = await res.json() as { body?: { owned_repos?: unknown } };
+        const owned = j.body?.owned_repos;
+        if (Array.isArray(owned) && owned.map(String).includes(vessel)) owners.push({ vesselId: String(r.vesselId ?? url), url });
+      } catch { /* a producer that does not answer claims nothing */ }
+    }));
+    return owners.length === 1 ? owners[0]! : null;
+  } catch {
+    return null;
+  }
+}
+
 export async function resolveGapToFeature(pointer: GapToFeaturePointer): Promise<ResolverResult> {
   // For testing purposes, expose the map.
   (resolveGapToFeature as any).__test__gapComposeLastAttemptAt = () => gapComposeLastAttemptAt;
@@ -4018,6 +4052,37 @@ export async function resolveGapToFeature(pointer: GapToFeaturePointer): Promise
   }
   if (!gap) {
     return { shape: "gapToFeatureReport", body: { ok: false, stage: "select", error: "no matching open gap", category: pointer.category ?? null } };
+  }
+
+  // OWNER ROUTING FOR DIRECTED GAP WORK (decentralized-compose-ownership). Auto-picks admit only
+  // repos this node owns, but a targeted pointer.gap_id bypassed that filter: a node composed and
+  // landed a repo another node owns, and two nodes composed the same gap. Forward it to the owning
+  // node instead. A forwarded request carries forwarded_from and is never forwarded again; with no
+  // single owner found, compose here as before.
+  const forwardedFrom = (pointer as { forwarded_from?: string }).forwarded_from;
+  if (pointer.gap_id && !forwardedFrom) {
+    const targetVessel = identifyVessel(gap, (gap.classification_metadata ?? gap.metadata ?? {}) as Record<string, unknown>);
+    const owned = ownedVessels();
+    if (targetVessel && owned.size > 0 && !owned.has(targetVessel)) {
+      const owner = await findComposeOwner(targetVessel);
+      if (owner) {
+        console.log(`[gap-to-feature] directed ${String(gap.id)} routed by ownership → ${owner.vesselId} (${targetVessel} is not owned here)`);
+        try {
+          const res = await fetch(owner.url, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", Authorization: `ApiKey ${METABOB_API_KEY}` },
+            body: JSON.stringify({ impulse: { pointer: { ...pointer, forwarded_from: process.env["SUBSTRATE_NAME"] ?? "substrate" } } }),
+            ...({ timeout: false } as RequestInit),   // a compose outlives Bun's ~300 s default fetch cut
+          });
+          const j = await res.json() as { shape?: string; body?: unknown };
+          const fwdBody = j.body && typeof j.body === "object" ? j.body as Record<string, unknown> : { result: j.body ?? null };
+          return { shape: j.shape ?? "gapToFeatureReport", body: { ...fwdBody, routed_to: owner.vesselId } };
+        } catch (e) {
+          return { shape: "gapToFeatureReport", body: { ok: false, stage: "route", gap_id: gap.id, routed_to: owner.vesselId, error: `forward to owner failed: ${(e as Error).message}` } };
+        }
+      }
+      console.log(`[gap-to-feature] directed ${String(gap.id)}: ${targetVessel} is not owned here and no single owner was found; composing here`);
+    }
   }
   // Stamp the cooldown at pick-start (covers the whole compose wall time), auto-picks only —
   // a targeted pointer.gap_id must be re-runnable on demand. Mirrors boredom's set-after-select.

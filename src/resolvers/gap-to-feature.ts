@@ -565,6 +565,14 @@ export async function decomposeGap(parent: Record<string, unknown>): Promise<{ w
     if (shape) {
       const producers = await discoverResolveUrls(shape);
       if (!producers || producers.length === 0) { refusals.push(`step ${k}: shape ${shape} is not advertised`); continue; }
+      // A step whose predicate is the PARENT's own check cannot be verified alone: one step will not
+      // flip it, so a generic step "satisfied" it in prose while the parent's check stayed failing
+      // (the relevance-sink step landed a size check, 04b3e9c, with divergence still 1).
+      const parentEr = meta.evidence_resolve as { shape?: unknown; input?: unknown } | undefined;
+      const childEr = f.evidence_resolve as { shape?: unknown; input?: unknown } | undefined;
+      const sameAsParent = (typeof f.verify_shape === "string" && f.verify_shape === meta.verify_shape)
+        || (!!parentEr && !!childEr && parentEr.shape === childEr.shape && JSON.stringify(parentEr.input ?? {}) === JSON.stringify(childEr.input ?? {}));
+      if (sameAsParent) { refusals.push(`step ${k}: its falsifier is the parent's own check, which one step will not flip`); continue; }
       if (typeof f.verify_shape === "string") childPredicate.verify_shape = f.verify_shape; else childPredicate.evidence_resolve = f.evidence_resolve;
     } else if (typeof f.expected_literal === "string" && f.expected_literal.trim().length >= 4) {
       const lit = f.expected_literal.trim();

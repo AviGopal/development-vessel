@@ -2139,7 +2139,8 @@ export function verifyGapCondition(gap: Record<string, unknown>): 'present' | 'a
     }
     // Second evidence class: resolver-behaviour gaps.
     // classification_metadata may carry:
-    //   evidence_resolve: { shape: string, input?: Record<string,unknown>, defect_field?: string, nonzero_field?: string }
+    //   evidence_resolve: { shape: string, input?: Record<string,unknown>, defect_field?: string, nonzero_field?: string, zero_field?: string }
+    //   nonzero_field is a HEALTH field (0 = defect); zero_field is a DEFECT count (>0 = defect).
     // OR
     //   verify_shape: string  (shorthand — shape name only, defect detected by fetch_error or zero-count heuristic)
     const evidenceResolveRaw = meta['evidence_resolve'];
@@ -2239,6 +2240,7 @@ async function verifyGapConditionAsync(gap: Record<string, unknown>): Promise<'p
     let resolveInput: Record<string, unknown> = {};
     let defectField: string | null = null;
     let nonzeroField: string | null = null;
+    let zeroField: string | null = null;
     if (evidenceResolveRaw !== null && typeof evidenceResolveRaw === 'object') {
       const er = evidenceResolveRaw as Record<string, unknown>;
       resolveShape = typeof er['shape'] === 'string' ? er['shape'] : null;
@@ -2275,6 +2277,7 @@ async function verifyGapConditionAsync(gap: Record<string, unknown>): Promise<'p
         : {};
       defectField = typeof er['defect_field'] === 'string' ? er['defect_field'] : null;
       nonzeroField = typeof er['nonzero_field'] === 'string' ? er['nonzero_field'] : null;
+      zeroField = typeof er['zero_field'] === 'string' ? er['zero_field'] : null;
     } else if (typeof verifyShapeRaw === 'string') {
       resolveShape = verifyShapeRaw;
     }
@@ -2319,6 +2322,16 @@ async function verifyGapConditionAsync(gap: Record<string, unknown>): Promise<'p
     // Defect heuristic 1: explicit defect_field present in response
     if (defectField !== null && inner[defectField] !== undefined && inner[defectField] !== null && inner[defectField] !== '') {
       return 'present';
+    }
+    // Defect heuristic 1b: zero_field is a DEFECT count — >0 the defect stands, exactly 0 it is gone,
+    // anything non-numeric is unmeasured. It exists because defect counts were written as
+    // nonzero_field (below, a HEALTH field): self_fact_reconcile's divergence_count=1 read as fixed and
+    // closed a live divergence landed_verified for a landing that was then reverted. Twice-seen class.
+    if (zeroField !== null) {
+      const zv = inner[zeroField];
+      if (typeof zv === 'number' && zv > 0) return 'present';
+      if (zv === 0) return 'absent';
+      return 'unknown';
     }
     // Defect heuristic 2: explicit nonzero_field should be >0 but is 0 / null / undefined
     if (nonzeroField !== null) {

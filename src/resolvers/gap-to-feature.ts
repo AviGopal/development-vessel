@@ -25,6 +25,7 @@ import { resolveUiWritePassthrough } from "./ui-write-passthrough.js";
 const solicitedHumanGaps = new Set<string>();
 import { DISCOVERY_ENDPOINT, METABOB_API_KEY, GOAL_HOST_VESSEL_ENDPOINT } from "../config.js";
 import { peekComposeCapacity } from "../compose-slots.js";
+import { gateLanding } from "./push-policy.js";
 import { readFile } from "node:fs/promises";
 
 // Mirror feature-compose's path model: repos/<vessel>/... maps to the writable
@@ -1514,6 +1515,8 @@ export async function admitActionableGaps(
 
   const MAX_ADMITTED_PER_EDIT_SITE_PER_CYCLE = 2;
   const admittedPerEditSite = new Map<string, number>();
+  // vessel -> push_scope_refused reason, or null when the landing gate allows it (this pass only).
+  const pushScopeRefusalByVessel = new Map<string, string | null>();
 
   for (const g of gaps) {
     const id = String(g.id ?? "");
@@ -1533,6 +1536,33 @@ export async function admitActionableGaps(
     if (ownedVessel === "discovery-vessel" || ownedVessel === "identity-vessel") {
       excluded.push({ id, reason: `protected_vessel(${ownedVessel})` });
       continue;
+    }
+    // PUSH SCOPE AT ADMISSION (value-per-cost-selection 2.1). The cutover refuses a landing
+    // whose push remote is out of scope (vessel-mitosis-cutover.ts gateLanding), but only
+    // after the draft was paid for. Ask the same gate here, once per vessel per pass, on the
+    // clone the cutover pushes from (MITOSIS_PUSH_CLONE_DIR/<vessel> in direct-push mode).
+    // The cutover stays the final authority and owns the kill switch. Fail-open on any error.
+    if (ownedVessel) {
+      if (!pushScopeRefusalByVessel.has(ownedVessel)) {
+        let refusal: string | null = null;
+        try {
+          const pushCloneRoot = process.env["MITOSIS_PUSH_CLONE_DIR"];
+          if (pushCloneRoot && process.env["MITOSIS_DIRECT_PUSH"] === "1") {
+            const proc = Bun.spawnSync(["git", "-C", join(pushCloneRoot, ownedVessel), "remote", "get-url", "--push", "origin"], { stdout: "pipe", stderr: "pipe", timeout: 5_000 });
+            const landingGate = gateLanding({
+              remoteUrl: proc.exitCode === 0 ? new TextDecoder().decode(proc.stdout).trim() : null,
+              branch: "dev",
+            });
+            if (landingGate.kind === "push_scope_refused") refusal = landingGate.reason;
+          }
+        } catch { refusal = null; }
+        pushScopeRefusalByVessel.set(ownedVessel, refusal);
+        if (refusal) console.log(`[gap-admission] push_scope_refused vessel=${ownedVessel} reason=${refusal}`);
+      }
+      if (pushScopeRefusalByVessel.get(ownedVessel)) {
+        excluded.push({ id, reason: `push_scope_refused(${ownedVessel})` });
+        continue;
+      }
     }
     // Increment child gap count if this is an auto-minted child gap.
     if (id.startsWith("recommit-") || id.endsWith("-narrowed")) {

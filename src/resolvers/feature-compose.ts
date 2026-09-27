@@ -3771,6 +3771,18 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
   // compose the SAME gap concurrently (measured 2026-09-24 01:21Z). compose-slots.ts
   // refuses a duplicate holder when it is told the gap; say which refusal this is.
   const _gapIdForSlot = typeof (pointer.gap as { id?: unknown } | undefined)?.id === "string" ? String((pointer.gap as { id: string }).id) : undefined;
+  // SPEND ENVELOPE AT THE CHOKEPOINT (contained-self-development). gap-to-feature checks the envelope
+  // for auto-picks only; a caller naming a gap started an undirected land:true compose every 10
+  // minutes while autonomy was paused (09-27 14:55-15:25, db_performance_slow_queries). No
+  // undirected compose lands while the envelope refuses; directed and non-landing composes are unaffected.
+  if (!isDirected && (pointer as { land?: boolean }).land !== false) {
+    const { spendEnvelopeAllows } = await import("./gap-to-feature.js");
+    const envelope = await spendEnvelopeAllows();
+    if (!envelope.allow) {
+      console.log(`[feature-compose] undirected compose NOT started: spend envelope ${envelope.reason}`);
+      return { shape: "featureComposeReport", body: { ok: false, verdict: "BUSY", stage: "budget", error: `spend envelope: ${envelope.reason} (undirected compose not started)` } };
+    }
+  }
   const slot = await acquireComposeSlot(slotId, { directed: isDirected, gapId: _gapIdForSlot });
   if (!slot.granted && slot.duplicateOf) {
     console.error(`[compose-cap] REFUSING compose for ${_gapIdForSlot}: already in flight as ${slot.duplicateOf}`);

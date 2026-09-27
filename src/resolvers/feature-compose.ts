@@ -6170,6 +6170,19 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
     }
   }
 
+  // ALL-EDITS FLOOR (value-per-cost-selection 3.5). A FAVORABLE compose MUST have applied every
+  // op it planned. applyFailed is set by the apply loop above but never reached the verdict, so a
+  // compose whose later ops failed (old_string not found, no_unique_anchor, DRIFT-REFUSED) still
+  // typechecked, greened and landed PARTIALLY: 3cced35 and 24a64a8 applied 1 of 3 ops, f49d02e 4
+  // of 5, and each was graded reached. The repair loop does not run once applyFailed is set, so a
+  // failed op is never retried later. Flipping here suppresses the cutover and the
+  // favorable-compose grade exactly as the target-touched floor does.
+  if (verdict === "FAVORABLE" && applyFailed) {
+    verdict = "UNFAVORABLE";
+    const failedOps = applied.filter((a) => !a.ok).map((a) => `${a.path}: ${String(a.detail ?? "failed").slice(0, 120)}`);
+    console.log(`[feature-compose] all-edits floor: WITHHELD FAVORABLE - ${failedOps.length} of ${applied.length} op(s) did not apply: ${failedOps.join("; ")}`);
+  }
+
   // 3b. SEMANTIC GATE (2026-06-25, lever 5 — the reach-gate applied to code). Only
   // a typecheck-clean patch reaches here. typecheck=clean ≠ gap-fixed: a net-new
   // dead-code function (zero callers) or an edit to a non-executing path compiles

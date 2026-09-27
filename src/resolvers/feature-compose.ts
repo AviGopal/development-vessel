@@ -3782,6 +3782,13 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
       console.log(`[feature-compose] undirected compose NOT started: spend envelope ${envelope.reason}`);
       return { shape: "featureComposeReport", body: { ok: false, verdict: "BUSY", stage: "budget", error: `spend envelope: ${envelope.reason} (undirected compose not started)` } };
     }
+    // An operator hold says the gap is not to be composed autonomously. A named-gap caller ignored it
+    // and looped every ~4 s (09-27 22:00: ungrounded refusal -> narrowed child re-emitted -> its write
+    // re-triggered the compose). BUSY is a non-attempt, so this refusal writes nothing back to the store.
+    if ((pointer.gap?.classification_metadata as { operator_hold?: unknown } | undefined)?.operator_hold === true) {
+      console.log(`[feature-compose] undirected compose NOT started: gap ${String(pointer.gap?.id)} is under operator_hold`);
+      return { shape: "featureComposeReport", body: { ok: false, verdict: "BUSY", stage: "operator_hold", error: `gap ${String(pointer.gap?.id)} is under operator_hold (undirected compose not started)` } };
+    }
   }
   const slot = await acquireComposeSlot(slotId, { directed: isDirected, gapId: _gapIdForSlot });
   if (!slot.granted && slot.duplicateOf) {

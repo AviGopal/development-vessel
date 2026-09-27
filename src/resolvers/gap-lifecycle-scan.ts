@@ -761,11 +761,21 @@ export async function resolveGapLifecycleScan(p: GapLifecycleScanPointer): Promi
       }
       return sourceCache.get(key) ?? null;
     };
+    // Spend the quota where autonomy can use it: a gap whose edit site the autonomyScope excludes
+    // can never be autonomous work (the first run gave 9 of its 10 falsifiers to such gaps).
+    let inAutonomyScope: (site: string) => boolean = () => false;
+    try {
+      const { autonomyScope, autonomyScopeExcludes } = await import("./gap-to-feature.js");
+      const scope = await autonomyScope();
+      inAutonomyScope = (site) => autonomyScopeExcludes(scope, site) !== null;
+    } catch { /* scope unreadable: falsify everywhere */ }
     for (const g of open) {
       if (falsified.length >= maxFalsify) break;
       const meta = metaOf(g);
       const cls = classOf(meta);
       if (!g.id || (cls !== "" && cls !== "none")) continue;
+      const scopeSite = String(meta["edit_site"] ?? "");
+      if (scopeSite && inAutonomyScope(scopeSite)) continue;
       let predicate: Record<string, unknown> | null = null;
       let rule = "";
       if (g.id.endsWith("-narrowed")) {

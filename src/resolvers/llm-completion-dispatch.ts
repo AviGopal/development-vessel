@@ -223,7 +223,16 @@ export async function resolveLlmCompletionDispatch(
       : { tools: DEFAULT_LLM_TOOLS }),
     ...(pointer.system_prompt ? { system: pointer.system_prompt } : {}),
     ...(typeof (pointer as { execution_id?: unknown }).execution_id === "string" ? { execution_id: (pointer as { execution_id?: string }).execution_id } : {}),
-    ...(typeof (pointer as { caller?: unknown }).caller === "string" ? { caller: (pointer as { caller?: string }).caller } : {}),
+    // CALLER DEFAULT (value-per-cost-selection 1.5d). Activity-template tasks reach this
+    // resolver through ias-executor's vessel-resolver with no caller, so on 2026-09-27 most of
+    // the ledger's `caller: unknown` spend was untraceable. A caller that names itself wins;
+    // otherwise name this dispatcher plus a slug of the (static, per-template) system prompt,
+    // which tells templates apart without touching the executor.
+    caller: typeof (pointer as { caller?: unknown }).caller === "string" && (pointer as { caller?: string }).caller
+      ? (pointer as { caller?: string }).caller
+      : "development-vessel:llm_completion_dispatch" + (typeof pointer.system_prompt === "string" && pointer.system_prompt.trim()
+        ? ":" + pointer.system_prompt.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").slice(0, 40).replace(/-+$/, "")
+        : ""),
     ...(typeof (pointer as { task_type?: unknown }).task_type === "string" ? { task_type: (pointer as { task_type?: string }).task_type } : {}),
     ...(typeof (pointer as { dispatch_id?: unknown }).dispatch_id === "string" ? { dispatch_id: (pointer as { dispatch_id?: string }).dispatch_id } : {}),
   };

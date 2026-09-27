@@ -1838,7 +1838,11 @@ export async function admitActionableGaps(
   // FAIL OPEN. If deferring the ungroundable would leave nothing to work on, admit them
   // anyway: a starved lane is worse than a refused compose, and this gate must never be the
   // reason the substrate stops trying. Only skip them when there is real work to do instead.
-  if (admitted.length === 0) {
+  // Under containment (the autonomyScope record requires falsifier classes) a target-less gap is
+  // never autonomous work: failing open onto them spent node 1's only slot on leaked test-fixture
+  // gaps (falsifier-merge/pair/c2/heal-*), each refusal minting another -narrowed child.
+  const containedAdmission = ((await autonomyScope()).requireFalsifierClasses ?? []).length > 0;
+  if (admitted.length === 0 && !containedAdmission) {
     for (const g of ungroundable) admitted.push(g);
     if (ungroundable.length) {
       console.log(`[gap-to-feature] auto-pick admission: no groundable candidates; failing open on ${ungroundable.length} ungroundable`);

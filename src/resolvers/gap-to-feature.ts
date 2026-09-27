@@ -1201,6 +1201,16 @@ function pickMostLandable(gaps: Record<string, unknown>[]): Record<string, unkno
   const ranked = selectionPool
     .map((g) => ({ g, s: landabilityScore(g) * impactOf(g) * humanWeight(g) }))
     .sort((a, b) => b.s - a.s);
+  // LANDABILITY FLOOR (value-per-cost-selection 2.5). The class rerank below orders by a sampled
+  // class theta BEFORE score, so a fresh class's uninformed posterior lifted a score-0 candidate
+  // over a 0.9 one. Candidates below the floor are dropped before any posterior is consulted.
+  const LANDABILITY_FLOOR = 0.15;
+  const aboveFloor = ranked.filter((r) => landabilityScore(r.g) >= LANDABILITY_FLOOR);
+  if (aboveFloor.length < ranked.length) {
+    console.log(`[gap-to-feature] landability_floor excluded ${ranked.length - aboveFloor.length} of ${ranked.length} candidates (floor=${LANDABILITY_FLOOR})`);
+    ranked.splice(0, ranked.length, ...aboveFloor);
+  }
+  if (!ranked.length) return null;
   // CLASS-THOMPSON RERANK (Option B): sample theta_c ~ Beta(alpha_c, beta_c) once per class in
   // the pool, then prefer the winning class; WITHIN a class the landability ranking above still
   // orders gaps, so the pick is the best-scored gap of the sampled class. chooseFirstActionable

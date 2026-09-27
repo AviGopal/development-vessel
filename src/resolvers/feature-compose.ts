@@ -2737,6 +2737,58 @@ function synthesizeVerbatimEditOps(specText: string): PlanOp[] | null {
   }];
 }
 
+// DETERMINISTIC EXACT EDITS (value-per-cost-selection 2.7). An operator goal that carries
+// numbered old/new blocks ("Apply exactly these N edits; each old text occurs exactly once")
+// was still sent through the LLM planner: it paid for a plan it did not need and, on a
+// ~100-line block, re-drafted the pre-validated bytes into different edits. Parse the blocks
+// strictly; any deviation returns null and the caller keeps the LLM path unchanged.
+// Rules: the text before the first block names exactly one repo path and says "Apply exactly
+// these N edits"; blocks are numbered 1..N in order, each with one old part and one new part;
+// the scan stops at the first "Done when:" line after the first block, so an appended excerpt
+// is never parsed; one blank line between blocks is a separator, not content; a part wrapped
+// in a markdown fence is unwrapped.
+function parseExactEditBlocks(specText: string): { path: string; edits: Array<{ old: string; new: string }> } | null {
+  if (typeof specText !== "string") return null;
+  const first = /(?:^|\n)EDIT 1\nold:\n/.exec(specText);
+  if (!first) return null;
+  const start = first.index + (first[0].startsWith("\n") ? 1 : 0);
+  const head = specText.slice(0, start);
+  const n = Number(/Apply exactly these (\d+) edits?\b/.exec(head)?.[1] ?? 0);
+  const paths = new Set(head.match(/repos\/[\w.-]+\/[\w./-]+\.\w+/g) ?? []);
+  if (!n || paths.size !== 1) return null;
+  const end = specText.indexOf("\nDone when:", start);
+  if (end < 0) return null;
+  let body = specText.slice(start, end);
+  if (body.endsWith("\n")) body = body.slice(0, -1);
+  const parts = ("\n" + body).split(/\n\n?EDIT (\d+)\nold:\n/);
+  if (parts[0] !== "" || parts.length !== 1 + 2 * n) return null;
+  const fence = /^\x60{3}[\w-]*\n([\s\S]*)\n\x60{3}$/;
+  const unfence = (s: string): string => fence.exec(s)?.[1] ?? s;
+  const edits: Array<{ old: string; new: string }> = [];
+  for (let i = 0; i < n; i++) {
+    if (Number(parts[1 + 2 * i]) !== i + 1) return null;
+    const halves = (parts[2 + 2 * i] ?? "").split("\nnew:\n");
+    if (halves.length !== 2) return null;
+    const oldText = unfence(halves[0] ?? "");
+    const newText = unfence(halves[1] ?? "");
+    if (oldText.trim().length === 0 || oldText === newText) return null;
+    edits.push({ old: oldText, new: newText });
+  }
+  return { path: [...paths][0] ?? "", edits };
+}
+
+// Apply parsed exact edits in order; null unless every old text occurs exactly once at its
+// turn, so an earlier new text can neither consume nor duplicate a later anchor.
+function spliceExactEdits(content: string, edits: Array<{ old: string; new: string }>): string | null {
+  let cur = content;
+  for (const e of edits) {
+    const at = cur.indexOf(e.old);
+    if (at < 0 || cur.indexOf(e.old, at + 1) >= 0) return null;
+    cur = cur.slice(0, at) + e.new + cur.slice(at + e.old.length);
+  }
+  return cur;
+}
+
 // CONSULTATION-ON-AUTHOR (2026-06-28): before planning, concept_search the substrate's
 // own architectural principles (the docs ingested into concept-db, + any web evidence)
 // and inject the top matches so the plan RESPECTS them — the active-consumption wire that
@@ -4384,7 +4436,18 @@ grounding += `\n\nCOMPOSED CHANGE:\n${composedChange}`;
     const symbolBlock = await groundFileSymbols(toolsEndpoint, verifyVessels, targetFiles);
     if (symbolBlock) grounding += '\n\nEXISTING SYMBOLS (authoritative — these are the top-level declarations of the TARGET file(s). Do NOT INVENT a new function, const, type, or field name that is absent here. You MAY edit lines, fields, and expressions INSIDE an existing symbol, and inside an inline handler that has no top-level name (e.g. app.post("/x", async (req) => { ... })) — an in-body line/field edit at the change site is expected and does NOT require you to name a changed top-level symbol):\n' + symbolBlock;
   } catch { /* advisory */ }
-  if (!(/REPLACE|WITH:|INSERT AFTER|ANCHOR/i.test(spec)) && spec.length > 3500) {
+  // value-per-cost-selection 2.7: when the goal's numbered old/new blocks all splice uniquely
+  // into the file the apply step edits (opAbs), apply them verbatim: no spec refinement, no LLM
+  // plan and no anchor re-draft. Verification below is unchanged.
+  const exactOps: PlanOp[] | null = (() => {
+    const parsed = parseExactEditBlocks(typeof pointer.spec === "string" ? pointer.spec : "");
+    if (!parsed) return null;
+    let cur = "";
+    try { cur = readFileSync(opAbs(parsed.path), "utf8"); } catch { return null; }
+    if (spliceExactEdits(cur, parsed.edits) === null) return null;
+    return parsed.edits.map((e) => ({ kind: "edit" as const, path: parsed.path, old_string: e.old, new_string: e.new, rationale: "goal-supplied exact edit applied verbatim" }));
+  })();
+  if (!exactOps && !(/REPLACE|WITH:|INSERT AFTER|ANCHOR/i.test(spec)) && spec.length > 3500) {
     try {
       const refined = await llmCallWithFailover(llmEndpoints, refineSpecPrompt(spec, grounding, composeLessons), model);
       const trimmed = refined.trim();
@@ -4430,7 +4493,12 @@ let vbCut = -1;
 for (const m of pointer.spec.matchAll(/\n[ \t]*VERBATIM EXCERPT of /g)) vbCut = m.index ?? vbCut;
 const verbatimSpecSource = vbCut > 0 ? pointer.spec.slice(0, vbCut) : pointer.spec;
 const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
-  if (verbatimOps) {
+  if (exactOps) {
+    planRaw = "(goal-supplied exact edits applied verbatim; LLM planner bypassed)";
+    plan = { summary: "goal-supplied exact edits applied verbatim", ops: exactOps };
+    ops = exactOps;
+    console.log(`[fc-exact] applying ${exactOps.length} goal-supplied edits verbatim for ${exactOps[0]?.path ?? ""} (no LLM plan)`);
+  } else if (verbatimOps) {
     planRaw = "(deterministic verbatim-replacement synthesis; LLM planner bypassed)";
     plan = { summary: "deterministic edit synthesized from the goal's verbatim old→new replacement", ops: verbatimOps };
     ops = verbatimOps;
@@ -4477,7 +4545,7 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
       return true;
     };
     const anchorIssues = assertAnchorInWindow(window, (Array.isArray(ops) ? ops : []).filter((op) => !goalSuppliedUnique(op)));
-    if (anchorIssues.length > 0) {
+    if (!exactOps && anchorIssues.length > 0) {
       for (const issue of anchorIssues) {
         console.log(`[fc-anchor-provenance] re-draft: anchor not in window at ${issue.path}, "${issue.oldHead}" - would match without semicolon? ${issue.wouldMatchWithoutTrailingSemicolon}`);
       }

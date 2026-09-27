@@ -26,7 +26,7 @@
 
 import { createHash } from "node:crypto";
 import { federatedLlmEgressUrls } from "./federated-llm-egress.js";
-import { mkdir, writeFile, readFile, copyFile, unlink, rename } from "node:fs/promises";
+import { mkdir, writeFile, readFile, copyFile, unlink, rename, stat } from "node:fs/promises";
 import { dirname, join, resolve, relative, isAbsolute } from "node:path";
 import { METABOB_ENDPOINT, METABOB_API_KEY, env } from "../config.js";
 import type { ResolverResult } from "./types.js";
@@ -766,6 +766,41 @@ export async function resolvePatchWithTools(pointer: PatchWithToolsPointer): Pro
   // cycles without improving coverage.
   const maxAttempts = pointer.max_attempts ?? 3;
   const attemptFailures: string[] = [];
+
+  // SELF-FACT-RECONCILE GAP (relevance-sink-vessel:clone): verify the mitosis
+  // clone is a faithful copy of the source. A failed/partial clone can lead
+  // to patching a truncated file, for which the LLM may hallucinate content.
+  // This check is skipped for new files since there is no source to compare against.
+  if (!pointer.is_new_file) {
+    try {
+      // workspaceRoot is the compose workdir (the clone), vesselsRoot is the main repo (the source).
+      const sourcePathForTarget = pointer.target_file.startsWith("repos/")
+        ? pointer.target_file.substring("repos/".length)
+        : pointer.target_file;
+      const sourcePath = resolve(vesselsRoot, sourcePathForTarget);
+
+      // containerPath is the file inside the workspace/clone, which is what will be edited.
+      // It's defined earlier in resolvePatchWithTools, as is `vessel`.
+      const [sourceStats, destStats] = await Promise.all([stat(sourcePath), stat(containerPath)]);
+      if (sourceStats.size !== destStats.size) {
+        return structuredError(
+          `Mitosis clone verification failed for ${pointer.target_file}: size mismatch between source and copy.`,
+          {
+            source_path: sourcePath,
+            source_size: sourceStats.size,
+            dest_path: containerPath,
+            dest_size: destStats.size,
+            vessel: vessel,
+          }
+        );
+      }
+    } catch (e) {
+      // If source doesn't exist or other fs error, we can't compare.
+      // This is not a failure of the clone, but a problem with the check itself.
+      // Do not fail the whole operation for this. Log and continue.
+      console.warn(`[patch-with-tools] Clone verification 'stat' call failed for ${pointer.target_file}: ${(e as Error).message}. This may be expected if the source was removed or is inaccessible.`);
+    }
+  }
 
   // BASELINE TYPECHECK (orphan-staged-edit fix): a large target file may carry pre-existing
   // unrelated TS errors; grading the terminal by ABSOLUTE cleanliness makes a CORRECT edit

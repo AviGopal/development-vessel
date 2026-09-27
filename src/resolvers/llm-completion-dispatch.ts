@@ -223,6 +223,9 @@ export async function resolveLlmCompletionDispatch(
       : { tools: DEFAULT_LLM_TOOLS }),
     ...(pointer.system_prompt ? { system: pointer.system_prompt } : {}),
     ...(typeof (pointer as { execution_id?: unknown }).execution_id === "string" ? { execution_id: (pointer as { execution_id?: string }).execution_id } : {}),
+    ...(typeof (pointer as { caller?: unknown }).caller === "string" ? { caller: (pointer as { caller?: string }).caller } : {}),
+    ...(typeof (pointer as { task_type?: unknown }).task_type === "string" ? { task_type: (pointer as { task_type?: string }).task_type } : {}),
+    ...(typeof (pointer as { dispatch_id?: unknown }).dispatch_id === "string" ? { dispatch_id: (pointer as { dispatch_id?: string }).dispatch_id } : {}),
   };
 
   // llm-resolver-vessel returns { resolved: true, shape: "llmCompletion", content, usage }

@@ -2328,7 +2328,10 @@ async function closeLandedGap(gap: Record<string, unknown>, land: LandSignal): P
       } catch { /* best-effort */ }
       return { closed: false, error: `outcome verification failed: hardcoded literal still present in edit_site after landing` };
     }
-    const closedMeta = { ...((gap.classification_metadata ?? gap.metadata ?? {}) as Record<string, unknown>), resolution, closed_at: new Date().toISOString() };
+    // closed_reason + landed_sha (value-per-cost-selection 5.1): this close is a landing whose outcome
+    // was verified above, the same fact the sweep records as `landed_verified`. Without the reason
+    // the terminal measure (gaps closed by a verified landing) could not count this path at all.
+    const closedMeta = { ...((gap.classification_metadata ?? gap.metadata ?? {}) as Record<string, unknown>), resolution, closed_reason: "landed_verified", ...(land.commit_sha ? { landed_sha: land.commit_sha } : {}), closed_at: new Date().toISOString() };
     const meta = closedMeta;
     joinDecisionOutcome(meta, { landed: true, verdict: "FAVORABLE", commit: land.commit_sha ?? null });
     await resolveSubstrateGapWrite({

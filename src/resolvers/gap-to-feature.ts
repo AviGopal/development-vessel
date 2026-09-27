@@ -624,6 +624,26 @@ export async function localizeGap(gap: Record<string, unknown>, opts?: { useLlm?
       const vesselDir = cand.match(/^repos\/([^/]+)\//)?.[1] ?? "";
       return { file: cand, description: `change site named by detector evidence (${f})`, vessel: vesselDir, method: "metadata_edit_site" };
     }
+    // THE GATE NAMES A SYMBOL, NOT A PATH (contained-self-development, drafting reliability). The
+    // semantic gate writes `suspected_real_location` as a symbol or shape (`self_fact_reconcile`,
+    // `self_fact_reconcile:authoring_root`); the path check above skipped it, so every retry went
+    // back to the edit_site the gate had just rejected, and TARGET-FILE-SCOPE forbade the drafter
+    // from editing where the gate pointed (relevance-sink: 4 attempts at patch-with-tools.ts while
+    // the gate named self_fact_reconcile). Resolve the symbol to the resolver file named after it,
+    // or to the single file in the gap's vessel that mentions it.
+    if (f === "suspected_real_location") {
+      const sym = v.trim().split(/[:\s]/)[0] ?? "";
+      if (/^[A-Za-z_][A-Za-z0-9_]{3,}$/.test(sym)) {
+        const vesselForSym = identifyVessel(gap, meta);
+        if (vesselForSym) {
+          const kebab = sym.replace(/_/g, "-").replace(/([a-z0-9])([A-Z])/g, "$1-$2").toLowerCase();
+          const byName = `repos/${vesselForSym}/src/resolvers/${kebab}.ts`;
+          if (repoPathExists(byName)) return { file: byName, description: `change site named by the semantic gate (${sym}, resolver file)`, vessel: vesselForSym, method: "metadata_edit_site" };
+          const mentions = grepScoreFiles(join(runtimeRoot(), vesselForSym, "src"), vesselForSym, [sym]).filter((h) => h.matched.length > 0);
+          if (mentions.length === 1 && mentions[0]) return { file: mentions[0].file, description: `change site named by the semantic gate (${sym}, sole file mentioning it)`, vessel: vesselForSym, method: "metadata_edit_site" };
+        }
+      }
+    }
   }
 
   // (a) identify the target vessel.

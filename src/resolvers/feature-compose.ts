@@ -4508,7 +4508,12 @@ grounding += `\n\nCOMPOSED CHANGE:\n${composedChange}`;
 let vbCut = -1;
 for (const m of pointer.spec.matchAll(/\n[ \t]*VERBATIM EXCERPT of /g)) vbCut = m.index ?? vbCut;
 const verbatimSpecSource = vbCut > 0 ? pointer.spec.slice(0, vbCut) : pointer.spec;
-const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
+// A verbatim old→new replacement is an INSTRUCTION form, so only a directed goal carries one. An
+// autonomous compose's spec is the gap's own prose, and a bug report that quotes a reproduction
+// ("find this exact anchor … replace it with …" around two fenced snippets) was synthesized into
+// an edit: 11 of 14 attempts on one gap this week, each a TS1005 syntax break
+// (contained-self-development, drafting reliability). Autonomous composes use the planner.
+const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synthesizeVerbatimEditOps(verbatimSpecSource) : null;
   if (exactOps) {
     planRaw = "(goal-supplied exact edits applied verbatim; LLM planner bypassed)";
     plan = { summary: "goal-supplied exact edits applied verbatim", ops: exactOps };
@@ -5276,6 +5281,9 @@ const verbatimOps = synthesizeVerbatimEditOps(verbatimSpecSource);
       const next = [...lines.slice(0, start - 1), ...replacementLines, ...lines.slice(end)].join("\n");
       const wr = await callTool(toolsEndpoint, "fs_write", { path: abs, content: next });
       editedInPlan.add(abs);
+      // Record the post-edit bytes as the edit branch does, or rollback cannot recognise this
+      // compose's own write and reports a spurious ROLLBACK CONFLICT (rolled_back:false).
+      if (wr.ok) await recordPostEdit(abs);
       const entry = { path: op.path, kind: op.kind, ok: wr.ok, detail: wr.ok ? undefined : JSON.stringify(wr.body).slice(0, 200), span: wr.ok ? { start_line: start, end_line: start + Math.max(0, replacementLines.length - 1) } : undefined };
       return { entry, editedAbs: wr.ok ? abs : undefined, failed: !wr.ok };
     }

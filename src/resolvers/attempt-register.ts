@@ -101,7 +101,7 @@ export function settleVerdict(pre: CheckResult[], now: CheckResult[], prediction
   return { verdict, regressed_checks: [...new Set(regressed_checks)], unresolved_checks: [...new Set(unresolved_checks)] };
 }
 
-export async function registerAttempt(input: { route: string; repo: string; touched_files: string[]; gap_id?: string | null; proposal_id?: string | null; authoring_execution_id?: string | null; dispatch_id?: string | null; attempt_id?: string; prediction?: Partial<Prediction> }): Promise<{ attempt_id: string | null; registered: boolean; error?: string }> {
+export async function registerAttempt(input: { route: string; repo: string; touched_files: string[]; gap_id?: string | null; proposal_id?: string | null; authoring_execution_id?: string | null; dispatch_id?: string | null; directed?: boolean; attempt_id?: string; prediction?: Partial<Prediction> }): Promise<{ attempt_id: string | null; registered: boolean; error?: string }> {
   try {
     const attempt_id = input.attempt_id ?? `att-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 9)}`;
 
@@ -126,6 +126,10 @@ export async function registerAttempt(input: { route: string; repo: string; touc
       proposal_id: input.proposal_id ?? null,
       authoring_execution_id: input.authoring_execution_id ?? null,
       dispatch_id: input.dispatch_id ?? null,
+      // Operator-directed vs autonomous. The commit message cannot say (every landing reads
+      // "Applied autonomously"); the sweep reads this through the Attempt-Id trailer and judges only an
+      // explicit false. A caller that does not say records null (unknown), never false.
+      directed: typeof input.directed === "boolean" ? input.directed : null,
       node: process.env["SUBSTRATE_NAME"] ?? "substrate",
       prediction: {
         expect_pass: input.prediction?.expect_pass ?? [],

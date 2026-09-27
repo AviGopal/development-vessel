@@ -4454,7 +4454,10 @@ async function resolveFeatureComposeUncapped(pointer: FeatureComposePointer): Pr
   const criterionSite = String(criterionMeta["edit_site"] ?? "the target file").replace(/:\d+.*$/, "");
   const criterionLines: string[] = [];
   const criterionLiteral = criterionMeta["expected_literal"];
-  if (typeof criterionLiteral === "string" && criterionLiteral.trim()) criterionLines.push(`- After your edit, \`${criterionLiteral}\` MUST appear in ${criterionSite} AND be used on a live code path (declared and read or called). A comment, an unused declaration or a string that merely mentions it does not count.`);
+  const criterionHeuristic = String(criterionMeta["predicate_source"] ?? "").startsWith("gap_falsify:");
+  if (typeof criterionLiteral === "string" && criterionLiteral.trim()) criterionLines.push(criterionHeuristic
+    ? `- A finished fix will contain \`${criterionLiteral}\` in ${criterionSite}, but that is a NECESSARY condition only, not the goal: the goal is the behaviour the gap describes. Introducing or merely reading it without changing that behaviour is a hollow change and will be refused.`
+    : `- After your edit, \`${criterionLiteral}\` MUST appear in ${criterionSite} AND be used on a live code path (declared and read or called). A comment, an unused declaration or a string that merely mentions it does not count.`);
   const criterionRemoved = criterionMeta["hardcoded_url"];
   if (typeof criterionRemoved === "string" && criterionRemoved.trim()) criterionLines.push(`- After your edit, this text MUST NO LONGER appear in ${criterionSite}: ${JSON.stringify(criterionRemoved).slice(0, 300)}`);
   const criterionResolve = criterionMeta["evidence_resolve"] as { shape?: unknown; input?: unknown } | undefined;

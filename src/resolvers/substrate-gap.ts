@@ -1134,7 +1134,21 @@ export async function resolveSubstrateGapWrite(
   if (!skipComposeTrigger && (action === "created" || (action === "updated" && (summaryChanged || reopened))) && (gap.status ?? "open") === "open") {
     const g = globalThis as { __gapComposeLastTrigger?: number };
     const nowMs = Date.now();
+    // SPEND ENVELOPE (value-per-cost-selection 4.2). The nudge starts gap-compose.service and an
+    // in-process compose, so it obeys the same envelope as auto-pick: exhausted, paused or
+    // unreadable means neither starts. The throttle is not stamped, so the next write re-asks
+    // (the helper caches its read for 30 s).
+    let nudgeEnvelope: { allow: boolean; reason: string } = { allow: true, reason: "" };
     if (!g.__gapComposeLastTrigger || nowMs - g.__gapComposeLastTrigger > 60_000) {
+      try {
+        const { spendEnvelopeAllows } = await import("./gap-to-feature.js");
+        nudgeEnvelope = await spendEnvelopeAllows();
+      } catch (err) {
+        nudgeEnvelope = { allow: false, reason: "envelope check failed: " + String(err) };
+      }
+      if (!nudgeEnvelope.allow) console.log(`[substrate-gap] gap-compose nudge NOT started for ${gap.id}: spend envelope ${nudgeEnvelope.reason}`);
+    }
+    if ((!g.__gapComposeLastTrigger || nowMs - g.__gapComposeLastTrigger > 60_000) && nudgeEnvelope.allow) {
       g.__gapComposeLastTrigger = nowMs;
       // START THE UNIT *AND* NUDGE THE COMPOSER DIRECTLY.
       //

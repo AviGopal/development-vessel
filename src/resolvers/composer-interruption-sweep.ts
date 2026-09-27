@@ -116,7 +116,7 @@ export async function resolveComposerInterruptionSweep(pointer: ComposerInterrup
   const owned = await getOwnedVesselsSafe();
 
   if (owned.size === 0) {
-    return { shape: "composerInterruptionReport", body: { node, hours, lines_read, restarts: 0, lossy: null, foreign_cutovers: null, detail: "owned set unavailable", entries: [] as Entry[] } };
+    return { shape: "composerInterruptionReport", body: { node, hours, lines_read, restarts: restartLines.length, lossy: null, foreign_cutovers: null, detail: "owned set unavailable", entries: [] as Entry[] } };
   }
   const entries: Entry[] = [];
   let lossyCount = 0;

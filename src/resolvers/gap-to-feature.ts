@@ -1603,6 +1603,21 @@ export async function admitActionableGaps(
         }
       }
     }
+    // FALSIFIER REQUIRED (contained-self-development). When the autonomyScope record names
+    // require_falsifier_classes, an autonomous gap is admitted only if its falsifier is one of them;
+    // otherwise it needs information, whatever its edit site. A typecheck-class gap keeps its own
+    // machine check (tsc). No field: unchanged.
+    {
+      const requiredClasses = (await autonomyScope()).requireFalsifierClasses;
+      if (requiredClasses && requiredClasses.length > 0 && !typecheckClassOf(g)) {
+        const rawFalsifier = meta.falsifier as unknown;
+        const gapFalsifierClass = String((rawFalsifier && typeof rawFalsifier === "object" ? (rawFalsifier as { class?: unknown }).class : rawFalsifier) ?? "").toLowerCase();
+        if (!requiredClasses.includes(gapFalsifierClass)) {
+          excluded.push({ id, reason: `needs_information(falsifier=${gapFalsifierClass || "unset"}; autonomyScope requires ${requiredClasses.join("/")})` });
+          continue;
+        }
+      }
+    }
     // Increment child gap count if this is an auto-minted child gap.
     if (id.startsWith("recommit-") || id.endsWith("-narrowed")) {
       const editSite = String(meta.edit_site ?? "");
@@ -3819,7 +3834,7 @@ export async function spendEnvelopeAllows(): Promise<SpendEnvelopeVerdict> {
 // file.ts`, or a directory ending in `/`). No record means no scope (behaviour unchanged); once a
 // record has been seen, an unreadable scope excludes everything autonomous (fail closed).
 // Directed work never consults it. Cached 30 s.
-export type AutonomyScope = { excluded: string[]; readable: boolean; reason: string };
+export type AutonomyScope = { excluded: string[]; readable: boolean; reason: string; requireFalsifierClasses?: string[] };
 let autonomyScopeCache: { at: number; v: AutonomyScope } | null = null;
 let autonomyScopeSeen = false;
 export async function autonomyScope(): Promise<AutonomyScope> {
@@ -3846,7 +3861,12 @@ export async function autonomyScope(): Promise<AutonomyScope> {
         autonomyScopeSeen = newest !== null;
         const raw = (newest?.body as { excluded_paths?: unknown } | undefined)?.excluded_paths;
         const excluded = Array.isArray(raw) ? raw.filter((e): e is string => typeof e === "string" && e.trim().length > 0).map((e) => e.trim()) : [];
-        v = { excluded, readable: true, reason: newest ? `autonomyScope: ${excluded.length} excluded path(s)` : "no autonomyScope record" };
+        // require_falsifier_classes: autonomous admission takes only gaps a pre-existing,
+        // machine-checkable falsifier can verify (a post-landing removed-line predicate is true by
+        // construction, so a landing without one cannot be credited as an improvement).
+        const reqRaw = (newest?.body as { require_falsifier_classes?: unknown } | undefined)?.require_falsifier_classes;
+        const requireFalsifierClasses = Array.isArray(reqRaw) ? reqRaw.filter((e): e is string => typeof e === "string" && e.trim().length > 0).map((e) => e.trim().toLowerCase()) : undefined;
+        v = { excluded, readable: true, reason: newest ? `autonomyScope: ${excluded.length} excluded path(s)` : "no autonomyScope record", ...(requireFalsifierClasses ? { requireFalsifierClasses } : {}) };
       }
     }
   } catch (err) {

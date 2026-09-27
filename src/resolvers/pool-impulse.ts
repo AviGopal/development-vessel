@@ -75,11 +75,24 @@ export function resolvePoolImpulseWrite(pointer: {
   status?: 'open' | 'consumed' | 'retired';
   injected_at?: string;
   updated_at?: string;
-}): { shape: string; body: { ok: boolean; id: string } } {
+  /** Compare-and-set: write only if the stored row's updated_at still equals this value. */
+  if_updated_at?: string;
+}): { shape: string; body: { ok: boolean; id: string; conflict?: boolean; current_updated_at?: string | null } } {
   const all = loadImpulses();
   const now = new Date().toISOString();
   const id = pointer.id ?? randomUUID();
   const idx = all.findIndex((imp) => imp.id === id);
+  // COMPARE-AND-SET (2026-09-26). The write REPLACES the body, so a writer that read a row, did slow
+  // work, then wrote {...bodyItRead, change} silently reverted anything written in between (rhythm
+  // alpha/beta lost under rhythm-reality-sync; the falsifier showed a residual ms window even after a
+  // re-read). A caller that passes the updated_at it read gets {ok:false, conflict:true} instead of a
+  // lost update, and re-reads. Writes without if_updated_at behave exactly as before.
+  if (pointer.if_updated_at !== undefined) {
+    const cur = idx >= 0 ? all[idx]!.updated_at : null;
+    if (cur !== pointer.if_updated_at) {
+      return { shape: 'poolImpulse_write', body: { ok: false, id, conflict: true, current_updated_at: cur ?? null } };
+    }
+  }
   if (idx >= 0) {
     const existing = all[idx]!;
     all[idx] = {

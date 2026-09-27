@@ -625,6 +625,11 @@ export async function resolvePatchWithTools(pointer: PatchWithToolsPointer): Pro
       }
     }
   }
+  // Ensure the live authoring tree root exists (self_fact_reconcile: authoring_root)
+  try {
+    const { mkdir } = await import('node:fs/promises');
+    await mkdir(`/vessels/${vessel}/src`, { recursive: true });
+  } catch { /* best-effort — reconcile will verify */ }
   const authoringMarkerPath = await writeAuthoringMarker(workspaceRoot, vessel, pointer.target_file);
 
   // resetTarget — restore the live path to its pre-attempt state. For a net-new

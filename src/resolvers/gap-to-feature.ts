@@ -527,7 +527,7 @@ export async function decomposeGap(parent: Record<string, unknown>): Promise<{ w
   const predicate: Record<string, unknown> = {};
   for (const k of ["expected_literal", "hardcoded_url", "evidence_resolve", "verify_shape"]) if (meta[k] !== undefined && meta[k] !== null) predicate[k] = meta[k];
   const lessons = Array.isArray(meta.failure_lessons) ? (meta.failure_lessons as Array<Record<string, unknown>>).slice(-3).map((l) => "- " + String(l.class ?? "?") + ": " + String(l.reason ?? "").slice(0, 300)).join("\n") : "";
-  const prompt = `A substrate gap could not be closed by one single-file code change. Decompose it into 1 to 3 SMALL steps. Each step changes exactly ONE existing source file and has a machine-checkable falsifier.\n\nGAP ${parentId}:\n${String(parent.summary ?? "").slice(0, 1500)}\n\nITS FALSIFIER: ${JSON.stringify(predicate).slice(0, 600)}\n\nWHY ATTEMPTS FAILED (most recent last):\n${lessons || "(none recorded)"}\n\nEDIT SITE ${site || "(none)"} (excerpt):\n${excerpt}\n\nRespond with ONLY JSON: {"steps":[{"edit_site":"repos/<vessel>/src/<file>","change":"<one sentence>","falsifier":{"verify_shape":"<shape that answers only after the change>"} OR {"evidence_resolve":{"shape":"<shape>","input":{}}} OR {"expected_literal":"<identifier the change introduces>","reader":"<existing function in that file that will read or call it>"}}],"cannot_falsify":"<only if no step can be given a machine check>"}\nRules: prefer a shape-based falsifier; an expected_literal must not exist in the file yet and must be read by the named existing function; never propose removing, weakening or silencing a detector or check; the steps together must close the gap.`;
+  const prompt = `A substrate gap could not be closed by one single-file code change. Decompose it into 1 to 3 SMALL steps. Each step changes exactly ONE existing source file and has a machine-checkable falsifier.\n\nGAP ${parentId}:\n${String(parent.summary ?? "").slice(0, 1500)}\n\nITS FALSIFIER: ${JSON.stringify(predicate).slice(0, 600)}\n\nWHY ATTEMPTS FAILED (most recent last):\n${lessons || "(none recorded)"}\n\nEDIT SITE ${site || "(none)"} (excerpt):\n${excerpt}\n\nRespond with ONLY JSON: {"steps":[{"edit_site":"repos/<vessel>/src/<file>","change":"<one sentence>","falsifier":{"verify_shape":"<shape that answers only after the change>"} OR {"evidence_resolve":{"shape":"<shape>","input":{}}} OR {"expected_literal":"<identifier the change introduces>","reader":"<existing function in that file that will read or call it>"}}],"cannot_falsify":"<only if no step can be given a machine check>"}\nRules: a shape falsifier must name a shape that ALREADY exists and answers today (it currently reports this defect and stops reporting it after the change); a shape the change itself would introduce cannot be a falsifier — for new behaviour use expected_literal with a reader; the reader must be an existing FUNCTION in that file that is called on a live path and will call or read the literal (not a type, interface or comment); never propose a logging-only, comment-only or observation-only step; never propose removing, weakening or silencing a detector or check; the steps together must close the gap.`;
   let raw = "";
   try {
     const dr = await fetch(`${DISCOVERY_ENDPOINT}/resolve`, { method: "POST", headers: { "Content-Type": "application/json", Authorization: `ApiKey ${METABOB_API_KEY}` }, body: JSON.stringify({ pointer: { type: "vesselCapability", shape: "llm_completion" } }), signal: AbortSignal.timeout(6000) });
@@ -555,6 +555,9 @@ export async function decomposeGap(parent: Record<string, unknown>): Promise<{ w
     if (!sm || !change) { refusals.push(`step ${k}: no single source file or no change`); continue; }
     if (autonomyScopeExcludes(scope, stepSite)) { refusals.push(`step ${k}: ${stepSite} is inside the autonomy scope`); continue; }
     if (/\b(remove|delete|disable|silence|suppress|skip)\b[^.]{0,40}\b(detector|check|gate|falsifier|scan)\b/i.test(change)) { refusals.push(`step ${k}: would silence a detector or check`); continue; }
+    // v1.1: an observation-only step is a hollow write (a logging step with a type named as its
+    // "reader" passed v1 and was superseded before any draft).
+    if (/\b(log|logs|logging|console|comment|comments|document|observe|observation)\b/i.test(change) && !/\b(fix|change|replace|route|read|call|return|compute|select|validate|guard|reject|refuse|apply|use)\b/i.test(change)) { refusals.push(`step ${k}: observation-only change`); continue; }
     let text = "";
     try { text = readFileSync(join("/workspace/git/vessels", sm[1] ?? "", sm[2] ?? ""), "utf-8"); } catch { refusals.push(`step ${k}: ${stepSite} does not exist`); continue; }
     const childPredicate: Record<string, unknown> = {};
@@ -568,6 +571,10 @@ export async function decomposeGap(parent: Record<string, unknown>): Promise<{ w
       const reader = String(f.reader ?? "").trim();
       if (text.includes(lit)) { refusals.push(`step ${k}: literal ${lit} already present`); continue; }
       if (!reader || !text.includes(reader)) { refusals.push(`step ${k}: reader ${reader || "(none)"} not found in ${stepSite}`); continue; }
+      // v1.1: the reader must be a FUNCTION in the file (defined or called), not a type or interface.
+      const readerRe = reader.replace(/[.*+?^${}()|[\]\\]/g, (ch) => "\\" + ch);
+      const readerIsFunction = new RegExp("(function\\s+" + readerRe + "\\b|\\b" + readerRe + "\\s*(=\\s*(async\\s*)?\\(|\\())").test(text);
+      if (!readerIsFunction) { refusals.push(`step ${k}: reader ${reader} is not a function in ${stepSite}`); continue; }
       childPredicate.expected_literal = lit;
       childPredicate.literal_reader = reader;
     } else { refusals.push(`step ${k}: no machine-checkable falsifier`); continue; }

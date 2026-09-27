@@ -2641,6 +2641,7 @@ Look specifically for:
 - SURFACE-ONLY change: a rename, comment, whitespace, or reordering that leaves the gap's condition STILL TRUE (e.g. renaming a variable while the env-gate / hardcode / defect it names is untouched).
 - DEAD CODE / STUB: a net-new function/handler with zero callers, an edit to a path that never runs, or a wired-but-empty endpoint.
 - DESTROY-TO-SATISFY: blanking, zeroing, hiding, or removing the value the gap wanted made correct.
+- FABRICATE-TO-SATISFY: creating, at runtime, the very thing the gap's check looks for (an empty directory, placeholder file, stub record or default value at the checked path) so an existence or presence check passes while the real source of the divergence is untouched. (A real case: a gap 'no live authoring tree for obsidian-vessel' was "fixed" by mkdir -p /vessels/<vessel>/src inside an unrelated resolver.)
 - VIOLATING-LINE-ONLY: the gap is "addressed" only by the offending line (env-gated behaviour kept as env, or an LLM call left inlined) rather than the conformant fix (a shaped impulse read at use time / an llm-prompt resolver).
 
 Cite the EXACT lines. Refute ONLY on a specific, defensible flaw — NEVER on vibes or style. If the patch genuinely closes the gap on a live path, do not refute.
@@ -2668,6 +2669,7 @@ CLOSURE CRITERION — your plan is accepted only if it GENUINELY addresses the g
 - SURFACE-SATISFYING is rejected: a rename, a comment, whitespace, or any change that leaves the gap's condition STILL TRUE does not close it. Ask "what makes the gap's condition FALSE?" and do THAT — not the smallest edit to the cited line. (A real case: a gap "WRITE_ALLOWLIST is env-gated" was "fixed" by renaming the local var WRITE_ALLOWLIST -> WRITE_ALLOWLIST_ENV, which left process.env["WRITE_ALLOWLIST"] and the gate intact — rejected as inert.)
 - DEAD CODE / STUB is rejected: a net-new function/handler with zero callers, an edit to a path that never runs, or a wired-but-empty endpoint. Wire the change into a live call path.
 - DESTROY-TO-SATISFY is rejected: blanking, zeroing, hiding, emptying, or removing the value the gap wanted made correct. The surface must READ CORRECTLY after the fix, not be removed.
+- FABRICATE-TO-SATISFY is rejected: creating the checked thing itself (an empty directory, placeholder file or stub record at the path a check looks for) so the check passes while the divergence's real source is untouched. Reconcile the SOURCE the gap names, not the check's observation of it.
 - CONFORMANT FIX (the substrate defines its architecture BY USE): if the gap is an ENV-GATED capability, the fix is a SHAPED IMPULSE read at use time — NOT a rename of the env var or an env tweak. If it is an INLINE LLM call, the fix is an llm-prompt-tier resolver dispatched from an activity. Addressing the gap only BY the violating line is rejected.
 ${grounding ? `
 GROUND TRUTH — the ACTUAL files (and, where shown, their current contents) in the target vessel(s). Use this to bind to REALITY, not assumptions:

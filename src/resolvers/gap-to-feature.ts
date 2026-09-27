@@ -1590,6 +1590,19 @@ export async function admitActionableGaps(
         continue;
       }
     }
+    // AUTONOMY SCOPE (contained-self-development 1.2). Admission is the autonomous path, so a gap
+    // whose edit site is in the lane core is refused here, before any draft. Directed goals never
+    // come through admission. The compose verdict re-checks the paths actually touched.
+    {
+      const siteForScope = String(meta.edit_site || meta.file_path || meta.change_site || meta.suspected_real_location || g.file_path || "");
+      if (siteForScope) {
+        const scopeHit = autonomyScopeExcludes(await autonomyScope(), siteForScope);
+        if (scopeHit) {
+          excluded.push({ id, reason: `autonomy_scope(${scopeHit})` });
+          continue;
+        }
+      }
+    }
     // Increment child gap count if this is an auto-minted child gap.
     if (id.startsWith("recommit-") || id.endsWith("-narrowed")) {
       const editSite = String(meta.edit_site ?? "");
@@ -3796,6 +3809,66 @@ export async function spendEnvelopeAllows(): Promise<SpendEnvelopeVerdict> {
   if (v.unreadable && !spendEnvelopeSeen) v = { ...v, allow: true, reason: v.reason + " (no envelope seen yet: no cap)" };
   spendEnvelopeCache = { at: Date.now(), v };
   return v;
+}
+
+// AUTONOMY SCOPE (contained-self-development 1.1). Autonomous work must not land on the machinery
+// that lands and verifies work (the lane core), or its first failure is the lane refusing its own
+// repair. The excluded paths are a shaped impulse read at use time: the newest open poolImpulse of
+// shape `autonomyScope` ({excluded_paths: string[], reason}) across EVERY poolImpulse producer that
+// discovery lists, so one record binds every node. Entries are repo-relative (`repos/<vessel>/src/
+// file.ts`, or a directory ending in `/`). No record means no scope (behaviour unchanged); once a
+// record has been seen, an unreadable scope excludes everything autonomous (fail closed).
+// Directed work never consults it. Cached 30 s.
+export type AutonomyScope = { excluded: string[]; readable: boolean; reason: string };
+let autonomyScopeCache: { at: number; v: AutonomyScope } | null = null;
+let autonomyScopeSeen = false;
+export async function autonomyScope(): Promise<AutonomyScope> {
+  if (autonomyScopeCache && Date.now() - autonomyScopeCache.at < 30_000) return autonomyScopeCache.v;
+  let v: AutonomyScope;
+  try {
+    const poolUrls = await discoverResolveUrls("poolImpulse");
+    if (!poolUrls || poolUrls.length === 0) {
+      v = { excluded: [], readable: false, reason: "no poolImpulse producer discovered" };
+    } else {
+      let newest: { updated_at?: string; body?: unknown } | null = null;
+      let unreadable: string | null = null;
+      for (const u of poolUrls) {
+        const res = await postEnvelopeRead(u, { impulse: { type: "poolImpulse", shape: "autonomyScope", status: "open" } });
+        const imps = (res?.["body"] as { impulses?: unknown } | undefined)?.impulses;
+        if (!Array.isArray(imps)) { unreadable = "no answer from " + u; break; }
+        for (const imp of imps as Array<{ shape?: string; updated_at?: string; body?: unknown }>) {
+          if (imp.shape === "autonomyScope" && (!newest || String(imp.updated_at ?? "") > String(newest.updated_at ?? ""))) newest = imp;
+        }
+      }
+      if (unreadable) {
+        v = { excluded: [], readable: false, reason: unreadable };
+      } else {
+        autonomyScopeSeen = newest !== null;
+        const raw = (newest?.body as { excluded_paths?: unknown } | undefined)?.excluded_paths;
+        const excluded = Array.isArray(raw) ? raw.filter((e): e is string => typeof e === "string" && e.trim().length > 0).map((e) => e.trim()) : [];
+        v = { excluded, readable: true, reason: newest ? `autonomyScope: ${excluded.length} excluded path(s)` : "no autonomyScope record" };
+      }
+    }
+  } catch (err) {
+    v = { excluded: [], readable: false, reason: "autonomyScope unreadable: " + String(err) };
+  }
+  autonomyScopeCache = { at: Date.now(), v };
+  return v;
+}
+/** The scope entry that excludes `path` from autonomous work, or null. An unreadable scope after a
+ *  record was seen excludes everything. Paths may be absolute, repo-relative or carry `:line`. */
+export function autonomyScopeExcludes(scope: AutonomyScope, path: string): string | null {
+  if (!scope.readable) return autonomyScopeSeen ? `scope unreadable (${scope.reason})` : null;
+  const n = String(path).replace(/:\d+.*$/, "").replace(/\\/g, "/").trim();
+  for (const e of scope.excluded) {
+    const s = e.replace(/^\.\//, "").replace(/^repos\//, "");
+    if (s.endsWith("/")) {
+      if (n.startsWith(s) || n.includes("/" + s)) return e;
+    } else if (n === s || n.endsWith("/" + s)) {
+      return e;
+    }
+  }
+  return null;
 }
 
 /** The compose node that owns `vessel`: the one feature_compose producer whose composeOwnership

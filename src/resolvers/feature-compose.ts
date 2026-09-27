@@ -4106,6 +4106,19 @@ async function resolveFeatureComposeUncapped(pointer: FeatureComposePointer): Pr
     console.log(`[fc-grounding] REFUSED ungrounded decompose; targetFiles=[] verify_vessels=[] gap=${pointer.gap?.id ?? "none"}`);
     return { shape: "featureComposeReport", body: { ok: false, verdict: "REFUSED", stage: "scope", error: ungroundedDetail } };
   }
+  // NO-GAP (free-text) COMPOSE REFUSED BEFORE THE PLANNING CALL (value-per-cost-selection 2.8).
+  // Since 575514d the semantic gate fails closed on a compose with no gap context ("no gap
+  // context (free-text spec) — failed semantic gate"), so a non-dry-run gapless compose can
+  // never be FAVORABLE: 0 of 122 landed in the week to 2026-09-27, each paying a full draft,
+  // apply and typecheck first. Refuse it here with the same outcome at zero LLM cost. A dry run
+  // returns its plan before the gate and is unaffected. Callers that reach this: the walk's
+  // auto-bridge-feature_compose step (it binds no gap), apply-proposal-as-patch's free-text
+  // route, and perf-canary's live attempts.
+  if (!pointer.dry_run && !(pointer.gap && (pointer.gap.id || pointer.gap.summary))) {
+    const noGapDetail = "free-text compose refused before the planning call: no gap context (gap.id or gap.summary), and the semantic gate refuses every compose without one, so a draft could not land";
+    console.log(`[fc-no-gap] REFUSED free-text compose before planning; verify_vessels=[${verifyVessels.join(",")}] spec_head=${JSON.stringify(String(pointer.spec ?? "").slice(0, 80))}`);
+    return { shape: "featureComposeReport", body: { ok: false, verdict: "REFUSED", stage: "scope", error: noGapDetail } };
+  }
   let grounding = "";
   if (verifyVessels.length > 0) {
     // The explicit region literal first, then identifiers mined from the request. Both

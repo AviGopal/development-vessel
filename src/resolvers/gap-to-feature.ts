@@ -2950,9 +2950,14 @@ async function recordFalsifiedAutonomousLanding(g: Record<string, unknown>, meta
       classification_metadata: { ...meta, regressed_by: { sha, at, verdict: "present", attempt_id: attemptId, vessel, revert_sha: null, by: "gap-sweep:falsified_after_restart" } },
     },
   } as never);
-  joinDecisionOutcome(meta, { landed: true, verdict: "UNFAVORABLE", commit: sha, falsified_after_restart: true });
-  updateClassPosterior(gapClassOf(g), false);
-  await appendRecord("attemptSettlement", `${attemptId}#2`, { attempt_id: attemptId, settlement_seq: 2, verdict: "regressed", credit_eligible: false, shas: [sha], gap_id: String(g.id), source: "falsified_after_restart", at });
+  // The gap store can drop the stamp above (lost-update race, filed), so the next sweep may land here
+  // again for the same landing. The local ledger is durable: its #2 settlement is the once-only marker.
+  const alreadySettled = (await readRecords("attemptSettlement", { key: `${attemptId}#2` })).length > 0;
+  if (!alreadySettled) {
+    joinDecisionOutcome(meta, { landed: true, verdict: "UNFAVORABLE", commit: sha, falsified_after_restart: true });
+    updateClassPosterior(gapClassOf(g), false);
+    await appendRecord("attemptSettlement", `${attemptId}#2`, { attempt_id: attemptId, settlement_seq: 2, verdict: "regressed", credit_eligible: false, shas: [sha], gap_id: String(g.id), source: "falsified_after_restart", at });
+  }
   console.warn(`[gap-sweep] FALSIFIED autonomous landing gap=${String(g.id)} sha=${sha.slice(0, 12)} vessel=${vessel} attempt=${attemptId} — its predicate still reports the defect after ${vessel} restarted onto it; recorded regressed_by, held from re-pick until reverted`);
   return "recorded";
 }

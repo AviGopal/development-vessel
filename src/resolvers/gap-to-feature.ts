@@ -1590,22 +1590,6 @@ export async function admitActionableGaps(
         continue;
       }
     }
-    // ACTIONABLE-ONLY ADMISSION (value-per-cost-selection 2.2). A gap with no edit site and no
-    // class1/class2 falsifier gives compose nothing to edit and nothing to verify against; it
-    // needs information (investigation), not a draft. Excluded on every pick, whether or not a
-    // proposal report exists, so the one-shot investigated_at route cannot re-admit it.
-    // Orphan-producer gaps route to author_producer, not compose; a recommit gap with a
-    // source_gap_id inherits its site after selection; a typecheck-class gap (typecheckClassOf, the
-    // phantom-typecheck predicate below) is decided by that check. All keep their existing routes.
-    {
-      const hasEditSite = !!(meta.edit_site || meta.file_path || meta.change_site || meta.suspected_real_location || g.file_path);
-      const falsifierClass = String(meta.falsifier ?? "").toLowerCase();
-      const orphanRoute = cat === "orphaned_capability" || cat === "unreachable_producer" || /orphaned[_-]capability/i.test(id);
-      if (!hasEditSite && falsifierClass !== "class1" && falsifierClass !== "class2" && !orphanRoute && !meta.source_gap_id && !typecheckClassOf(g)) {
-        excluded.push({ id, reason: `needs_information(falsifier=${falsifierClass || "unset"})` });
-        continue;
-      }
-    }
     // Increment child gap count if this is an auto-minted child gap.
     if (id.startsWith("recommit-") || id.endsWith("-narrowed")) {
       const editSite = String(meta.edit_site ?? "");
@@ -3673,6 +3657,32 @@ import { sweepAttempts } from "./attempt-register.js";
 
 let attemptSweepInFlight = false;
 
+// LLM-AVAILABILITY PROBE (value-per-cost-selection 2.4). With no llm_completion producer
+// advertised every compose fails after taking a slot. Absent only when discovery answers OK
+// with an empty producer list; an unreachable or malformed answer is unknown (null) and
+// fails open like the capacity peek. Cached for LLM_PROBE_TTL_MS either way.
+const LLM_PROBE_TTL_MS = 60_000;
+let llmProbeCache: { at: number; available: boolean | null } | null = null;
+async function llmProducerAdvertised(): Promise<boolean | null> {
+  if (llmProbeCache && Date.now() - llmProbeCache.at < LLM_PROBE_TTL_MS) return llmProbeCache.available;
+  let available: boolean | null = null;
+  try {
+    const dr = await fetch(`${DISCOVERY_ENDPOINT}/resolve`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `ApiKey ${METABOB_API_KEY}` },
+      body: JSON.stringify({ pointer: { type: "vesselCapability", shape: "llm_completion" } }),
+      signal: AbortSignal.timeout(3000),
+    });
+    if (dr.ok) {
+      const dd = (await dr.json()) as { content?: { vessels?: unknown } };
+      const vessels = dd.content?.vessels;
+      if (Array.isArray(vessels)) available = vessels.length > 0;
+    }
+  } catch { available = null; }
+  llmProbeCache = { at: Date.now(), available };
+  return available;
+}
+
 export async function resolveGapToFeature(pointer: GapToFeaturePointer): Promise<ResolverResult> {
   // For testing purposes, expose the map.
   (resolveGapToFeature as any).__test__gapComposeLastAttemptAt = () => gapComposeLastAttemptAt;
@@ -3764,6 +3774,20 @@ export async function resolveGapToFeature(pointer: GapToFeaturePointer): Promise
           error: "compose lane full — selection skipped",
           observed: capacity.live,
           cap: capacity.cap,
+          skipped_selection: true,
+        },
+      };
+    }
+    if ((await llmProducerAdvertised()) === false) {
+      console.log(`[gap-to-feature] selection skipped: llm_unavailable (no llm_completion producer advertised)`);
+      return {
+        shape: "gapToFeatureReport",
+        body: {
+          ok: false,
+          stage: "capacity",
+          verdict: "BUSY",
+          error: "llm_unavailable: no llm_completion producer advertised — selection skipped",
+          reason: "llm_unavailable",
           skipped_selection: true,
         },
       };

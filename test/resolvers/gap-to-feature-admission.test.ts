@@ -132,8 +132,11 @@ describe("gap-to-feature actionability admission gate", () => {
     expect(excluded.find((e) => e.id === ORPHAN_NO_PRODUCER.id)!.reason).toContain("orphan_no_producer");
     expect(excluded.find((e) => e.id === ORPHAN_NO_SHAPE.id)!.reason).toContain("orphan_missing_shape");
 
+    // a proposal report alone is not an edit site: with no site and no class1/class2 falsifier the
+    // gap is not compose work (value-per-cost-selection 2.2), whatever proposal a drafter left behind
+    expect(admittedIds).not.toContain(PROPOSAL_BACKED.id);
+    expect(excluded.find((e) => e.id === PROPOSAL_BACKED.id)!.reason).toContain("needs_information");
     // proven-landable path preserved
-    expect(admittedIds).toContain(PROPOSAL_BACKED.id);
     expect(admittedIds).toContain(CITED_FILE.id);
     // mint-on-first-try preserved (fresh provisionable orphan gets its one shot)
     expect(admittedIds).toContain(ORPHAN_FRESH.id);

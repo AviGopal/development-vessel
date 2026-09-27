@@ -20,11 +20,14 @@ import { admitActionableGaps } from "../../src/resolvers/gap-to-feature.js";
 // setting it here is enough.
 process.env["MITOSIS_RUNTIME_DIR"] = new URL("../../", import.meta.url).pathname.replace(/\/$/, "") + "/..";
 
+// Fixtures carry a class2 falsifier so they reach the groundable-target check: a siteless gap
+// WITHOUT a class1/class2 falsifier is excluded earlier as needs_information
+// (value-per-cost-selection 2.2), which the last test below pins.
 const gap = (id: string, meta: Record<string, unknown> = {}) => ({
   id,
   category: "systematic_failure",
   summary: `gap ${id}`,
-  classification_metadata: meta,
+  classification_metadata: { falsifier: "class2", ...meta },
 });
 
 describe("admitActionableGaps — groundable-target requirement", () => {
@@ -79,5 +82,14 @@ describe("admitActionableGaps — groundable-target requirement", () => {
     const real = gap("real", { edit_site: "repos/development-vessel/src/resolvers/gap-to-feature.ts" });
     const { admitted } = await admitActionableGaps([phantom, real]);
     expect(admitted.map((g) => String(g.id))).not.toContain("phantom");
+  });
+
+  it("does not fail open on needs_information — a siteless gap with no class1/class2 falsifier is never admitted", async () => {
+    // value-per-cost-selection 2.2: such a gap gives compose nothing to edit or verify, so the
+    // starved-lane fail-open (which revives ungroundable gaps) must not revive it.
+    const bare = { id: "no-site-no-falsifier", category: "systematic_failure", summary: "gap bare", classification_metadata: { falsifier: "none" } };
+    const { admitted, excluded } = await admitActionableGaps([bare]);
+    expect(admitted.map((g) => String(g.id))).not.toContain("no-site-no-falsifier");
+    expect(excluded.some((e) => e.id === "no-site-no-falsifier" && e.reason.includes("needs_information"))).toBe(true);
   });
 });

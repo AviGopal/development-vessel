@@ -1590,6 +1590,22 @@ export async function admitActionableGaps(
         continue;
       }
     }
+    // ACTIONABLE-ONLY ADMISSION (value-per-cost-selection 2.2). A gap with no edit site and no
+    // class1/class2 falsifier gives compose nothing to edit and nothing to verify against; it
+    // needs information (investigation), not a draft. Excluded on every pick, whether or not a
+    // proposal report exists, so the one-shot investigated_at route cannot re-admit it.
+    // Orphan-producer gaps route to author_producer, not compose; a recommit gap with a
+    // source_gap_id inherits its site after selection; a typecheck-class gap (typecheckClassOf, the
+    // phantom-typecheck predicate below) is decided by that check. All keep their existing routes.
+    {
+      const hasEditSite = !!(meta.edit_site || meta.file_path || meta.change_site || meta.suspected_real_location || g.file_path);
+      const falsifierClass = String(meta.falsifier ?? "").toLowerCase();
+      const orphanRoute = cat === "orphaned_capability" || cat === "unreachable_producer" || /orphaned[_-]capability/i.test(id);
+      if (!hasEditSite && falsifierClass !== "class1" && falsifierClass !== "class2" && !orphanRoute && !meta.source_gap_id && !typecheckClassOf(g)) {
+        excluded.push({ id, reason: `needs_information(falsifier=${falsifierClass || "unset"})` });
+        continue;
+      }
+    }
     // Increment child gap count if this is an auto-minted child gap.
     if (id.startsWith("recommit-") || id.endsWith("-narrowed")) {
       const editSite = String(meta.edit_site ?? "");

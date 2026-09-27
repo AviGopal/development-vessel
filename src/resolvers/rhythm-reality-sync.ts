@@ -154,7 +154,7 @@ export async function resolveRhythmRealitySync(
                 id: rhythm.id,
                 shape: "timeShapedRhythm",
                 source: "rhythm-reality-sync",
-                body: { staleness: 0 },
+                body: { ...(await freshRhythmBody(rhythm)), staleness: 0 },
               },
             },
             800,

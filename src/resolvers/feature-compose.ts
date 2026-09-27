@@ -4446,7 +4446,23 @@ async function resolveFeatureComposeUncapped(pointer: FeatureComposePointer): Pr
   // that as explicit re-draft guidance so the drafter completes the partial fix instead
   // of re-producing it blind. Additive — empty when no prior rejection exists.
   const priorFeedback = priorAttemptFeedbackBlock(pointer.gap?.classification_metadata);
-  const composeLessons = (await composeLessonsBlock(pointer.spec, gapFailureClasses(pointer.gap?.classification_metadata as Record<string, unknown> | undefined))) + (await fileLessonsBlock(pointer.spec));
+  // SUCCESS CRITERION (contained-self-development, drafting reliability; law 8). A gap with a
+  // machine-checkable falsifier is judged by it, but the drafter was never told what it is: the
+  // largest failure class was a semantic-gate "addresses:false" on a partial or wrong change.
+  // State the gap's own predicate as the success criterion of the plan.
+  const criterionMeta = (pointer.gap?.classification_metadata ?? {}) as Record<string, unknown>;
+  const criterionSite = String(criterionMeta["edit_site"] ?? "the target file").replace(/:\d+.*$/, "");
+  const criterionLines: string[] = [];
+  const criterionLiteral = criterionMeta["expected_literal"];
+  if (typeof criterionLiteral === "string" && criterionLiteral.trim()) criterionLines.push(`- After your edit, \`${criterionLiteral}\` MUST appear in ${criterionSite} AND be used on a live code path (declared and read or called). A comment, an unused declaration or a string that merely mentions it does not count.`);
+  const criterionRemoved = criterionMeta["hardcoded_url"];
+  if (typeof criterionRemoved === "string" && criterionRemoved.trim()) criterionLines.push(`- After your edit, this text MUST NO LONGER appear in ${criterionSite}: ${JSON.stringify(criterionRemoved).slice(0, 300)}`);
+  const criterionResolve = criterionMeta["evidence_resolve"] as { shape?: unknown; input?: unknown } | undefined;
+  if (criterionResolve && typeof criterionResolve === "object" && typeof criterionResolve.shape === "string") criterionLines.push(`- The gap is verified by resolving shape \`${criterionResolve.shape}\` with input ${JSON.stringify(criterionResolve.input ?? {}).slice(0, 300)}: after your change that resolve must no longer report this defect.`);
+  const criterionShape = criterionMeta["verify_shape"];
+  if (typeof criterionShape === "string" && criterionShape.trim()) criterionLines.push(`- After your change the shape \`${criterionShape}\` must resolve.`);
+  const successCriterion = criterionLines.length > 0 ? `\n\nSUCCESS CRITERION (the gap's machine-checkable falsifier; the landing is judged by exactly this):\n${criterionLines.join("\n")}\n` : "";
+  const composeLessons = (await composeLessonsBlock(pointer.spec, gapFailureClasses(pointer.gap?.classification_metadata as Record<string, unknown> | undefined))) + (await fileLessonsBlock(pointer.spec)) + successCriterion;
   let spec = pointer.spec;
   // Ground the spec against the REAL target file UNCONDITIONALLY (law 8 — information
   // at use time). The specs most likely to carry SCHEMATIC anchors are exactly the ones

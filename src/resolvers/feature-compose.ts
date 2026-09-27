@@ -401,6 +401,9 @@ async function llmCall(endpoint: string, prompt: string, model: string): Promise
       model,
       max_tokens: 16000,
       task_type: 'feature_compose',
+      // Attribute compose spend (contained-self-development): without a caller every draft was
+      // ledgered `caller: unknown` ($1.06 of $1.31 on node 1 in the first contained hour).
+      caller: 'development-vessel:feature_compose',
     }),
     signal: AbortSignal.timeout(250_000),
   });

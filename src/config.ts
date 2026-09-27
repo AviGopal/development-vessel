@@ -796,6 +796,10 @@ export const config = {
       // reads (see http-retry.ts's pausable-citizen guard).
       "maintenanceLease",
       "maintenanceLease_write",
+      // Cross-node spend (value-per-cost-selection 4.0a): this node's llm-resolver spend
+      // summary relayed through development-vessel's routable endpoint, so the spend envelope
+      // can sum every node's spend (llm-resolver itself advertises only a loopback endpoint).
+      "llmSpendSummaryNode",
       // Self-managed DB reconciliation: reads activity-api's GET /metrics/db
       // traceStore counters (never a live AET scan) and emits a substrateGap
       // when row_count exceeds cap.

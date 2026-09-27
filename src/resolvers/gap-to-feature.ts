@@ -3749,7 +3749,7 @@ async function postEnvelopeRead(url: string, body: unknown): Promise<Record<stri
   } catch { return null; }
 }
 async function readSpendEnvelope(): Promise<SpendEnvelopeVerdict> {
-  const [poolUrls, spendUrls] = await Promise.all([discoverResolveUrls("poolImpulse"), discoverResolveUrls("llmSpendSummary")]);
+  const [poolUrls, spendUrls] = await Promise.all([discoverResolveUrls("poolImpulse"), discoverResolveUrls("llmSpendSummaryNode")]);
   if (!poolUrls || poolUrls.length === 0) return { allow: false, unreadable: true, reason: "envelope unreadable: no poolImpulse producer discovered" };
   const pools = await Promise.all(poolUrls.map((u) => postEnvelopeRead(u, { impulse: { type: "poolImpulse", shape: "spendEnvelope", status: "open" } })));
   let newest: { shape?: string; updated_at?: string; body?: unknown } | null = null;
@@ -3769,8 +3769,10 @@ async function readSpendEnvelope(): Promise<SpendEnvelopeVerdict> {
   if (rawCap !== undefined && rawCap !== null && !(typeof rawCap === "number" && Number.isFinite(rawCap))) return { allow: false, unreadable: true, reason: "envelope unreadable: usd_cap_per_hour is not a finite number" };
   const cap = typeof rawCap === "number" ? rawCap : null;
   if (cap === null) return { allow: true, reason: "spendEnvelope has no numeric usd_cap_per_hour (no cap)" };
-  if (!spendUrls || spendUrls.length === 0) return { allow: false, unreadable: true, cap_usd: cap, reason: "envelope unreadable: no llmSpendSummary producer discovered" };
-  const sums = await Promise.all(spendUrls.map((u) => postEnvelopeRead(u, { impulse: { pointer: { type: "llmSpendSummary" } } })));
+  if (!spendUrls || spendUrls.length === 0) return { allow: false, unreadable: true, cap_usd: cap, reason: "envelope unreadable: no llmSpendSummaryNode producer discovered" };
+  // One llmSpendSummaryNode producer per node (development-vessel relays its own node's
+  // llm-resolver, whose own endpoint is loopback-only), so the sum covers every node (4.0a).
+  const sums = await Promise.all(spendUrls.map((u) => postEnvelopeRead(u, { impulse: { pointer: { type: "llmSpendSummaryNode" } } })));
   let spent = 0;
   for (let i = 0; i < spendUrls.length; i++) {
     const b = sums[i]?.["body"] as { window_ms?: number; current?: { window_start?: string; cost_usd?: number }; previous?: { cost_usd?: number } | null } | undefined;

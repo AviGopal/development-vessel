@@ -3531,6 +3531,43 @@ async function routeCapabilityGapToNewResolver(
     } };
   }
 
+  // LLM AVAILABILITY PROBE (route-edit-03902f38): when discovery does not advertise
+  // an llm_completion producer, autonomous picks should not proceed. Mirror the BUSY
+  // capacity-stage non-attempt returned by the full-lane peek and cache the probe for 60s.
+  try {
+    const p = (pointer as unknown as Record<string, unknown>);
+    const isDirected = p && p["directed"] === true;
+    const autoPick = !isDirected;
+    if (autoPick) {
+      type LlmCache = { t: number; ok: boolean };
+      const g = globalThis as unknown as { __dev_v_llm_probe__?: LlmCache };
+      const now = Date.now();
+      const ttl = 60_000; // 60 seconds
+      let ok = g.__dev_v_llm_probe__ && now - g.__dev_v_llm_probe__.t < ttl ? g.__dev_v_llm_probe__!.ok : undefined;
+      if (typeof ok !== "boolean") {
+        let advertised: string[] = [];
+        try {
+          const cfg = await import("../config.js");
+          const disc = (cfg as Record<string, unknown>)["DISCOVERY"] ?? (cfg as Record<string, unknown>)["discovery"];
+          if (disc && typeof disc === "object" && Array.isArray((disc as { shapes?: unknown }).shapes)) {
+            advertised = ((disc as { shapes?: unknown }).shapes as unknown[]).map((s) => String(s));
+          } else if (Array.isArray((cfg as Record<string, unknown>)["ADVERTISED_SHAPES"])) {
+            advertised = ((cfg as Record<string, unknown>)["ADVERTISED_SHAPES"] as unknown[]).map((s) => String(s));
+          }
+        } catch {
+          // fall through with empty advertised
+        }
+        const hasLlm = advertised.some((s) => s === "llm_completion" || s === "llm_completion_dispatch" || s === "llm-completion" || s === "llm-completion-dispatch");
+        ok = hasLlm;
+        (globalThis as unknown as { __dev_v_llm_probe__?: LlmCache }).__dev_v_llm_probe__ = { t: now, ok };
+      }
+      if (!ok) {
+        return { shape: "gapToFeatureReport", body: { ok: false, route: "compose_capacity_busy", gap_id: gap.id, shape: missingShape, reason: "llm_unavailable" } };
+      }
+    }
+  } catch {
+    // best-effort guard; on failure, proceed as before
+  }
   const kebab = resolverName.replace(/_/g, "-");
   // FOLLOW THE PATTERN (operator 2026-07-01): route through feature_compose, whose
   // verify+repair loop is the tested backstop (its typecheck + shape-dispatch-check

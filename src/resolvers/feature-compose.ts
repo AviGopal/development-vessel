@@ -6748,6 +6748,7 @@ const earlyAttempt = await Promise.race([
           gap_id: pointer.gap?.id ?? null,
           authoring_execution_id: (pointer as { authoring_execution_id?: string }).authoring_execution_id ?? null,
           dispatch_id: (pointer as { authoring_execution_id?: string }).authoring_execution_id ?? null,
+          directed: (pointer as { directed?: boolean }).directed === true,
         }).catch(() => ({ attempt_id: null as string | null })),
         new Promise<{ attempt_id: string | null }>((resolve) => setTimeout(() => resolve({ attempt_id: null }), 120_000)),
       ]);

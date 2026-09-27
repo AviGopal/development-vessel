@@ -41,6 +41,7 @@ export interface GapLifecycleScanPointer {
   autoClose?: boolean;        // auto-close churned gaps. default false (seed sets true)
   falsify?: boolean;          // gap_falsify pass (contained-self-development 6.1). default true
   maxFalsify?: number;        // gaps given a falsifier per run. default 10
+  falsifyQuoted?: boolean;    // re-enable the quoted_identifier rule (weak; default off)
   maxClose?: number;          // cap auto-closes per run. default 25
   devVesselImpulsesUrl?: string;
   dry_run?: boolean;
@@ -786,7 +787,12 @@ export async function resolveGapLifecycleScan(p: GapLifecycleScanPointer): Promi
           if (Object.keys(inherited).length > 0) { predicate = inherited; rule = "inherit"; }
         }
       }
-      if (!predicate) {
+      // quoted_identifier is DISABLED (contained-self-development 6.1d): a word the fix would contain
+      // is not a behaviour, and the first autonomous draft against one satisfied it with a hollow
+      // observation of `tracePersistencePolicy` that the refuters correctly rejected. Only inherited
+      // (operator- or detector-authored) predicates are written; behavioural falsifiers come from
+      // decomposition, not from summary words.
+      if (!predicate && p.falsifyQuoted === true) {
         const site = String(meta["edit_site"] ?? "");
         const text = site ? readEditSite(site) : null;
         if (text !== null) {

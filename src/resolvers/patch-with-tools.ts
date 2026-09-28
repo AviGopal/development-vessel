@@ -174,6 +174,21 @@ async function triggerMitosisTick(a: {
   // soft-refused and NOTHING ever committed ("staged-not-landed"). The cutover
   // keeps its own freshness / provenance / scope-creep gates, so a bad tree still
   // refuses; boredom's later mitosis-tick is a no-op (this already landed).
+
+  // 2026-10-02 self-fact-reconcile: the authoring_root checkouts can diverge from
+  // their canonical state (e.g. become bare repos) and block downstream tools.
+  // Proactively reconcile the authoring root for the target vessel before use.
+  try {
+    const { resolveSelfFactReconcile } = await import("./self-fact-reconcile.js");
+    await resolveSelfFactReconcile({
+      type: "self_fact_reconcile",
+      fact_id: `authoring_root:${a.vessel}:clone`,
+      fix: true,
+    } as never);
+  } catch (e) {
+    console.warn(`[patch-with-tools] pre-flight authoring_root reconcile for ${a.vessel} failed, proceeding: ${(e as Error).message}`);
+  }
+
   const none: MitosisLanding = { landed: false, new_git_sha: null, push_status: null };
   try {
     // GATE UNIFICATION (2026-07-30): path 2 previously fabricated a FAVORABLE verdict and

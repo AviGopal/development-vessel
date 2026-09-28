@@ -515,7 +515,7 @@ async function rankWithLlm(summary: string, hits: Array<{ file: string; score: n
 // discovery advertises; a literal falsifier is absent from the file now and names an existing
 // reader in it. Proposals that silence a detector are refused. Depth 1: a step is never
 // decomposed again. Graded by child closure.
-export async function decomposeGap(parent: Record<string, unknown>): Promise<{ written: string[]; reason: string }> {
+export async function decomposeGap(parent: Record<string, unknown>, opts: { directed?: boolean } = {}): Promise<{ written: string[]; reason: string }> {
   const parentId = String(parent.id ?? "");
   const meta = (parent.classification_metadata ?? {}) as Record<string, unknown>;
   if (!parentId) return { written: [], reason: "no parent id" };
@@ -553,7 +553,9 @@ export async function decomposeGap(parent: Record<string, unknown>): Promise<{ w
     const change = String(st.change ?? "").trim();
     const f = (st.falsifier ?? {}) as Record<string, unknown>;
     if (!sm || !change) { refusals.push(`step ${k}: no single source file or no change`); continue; }
-    if (autonomyScopeExcludes(scope, stepSite)) { refusals.push(`step ${k}: ${stepSite} is inside the autonomy scope`); continue; }
+    // Directed decomposition may target the lane core: the scope contains autonomous work, and the
+    // compose floor already never checks directed work, so refusing its steps here only blocked it.
+    if (!opts.directed && autonomyScopeExcludes(scope, stepSite)) { refusals.push(`step ${k}: ${stepSite} is inside the autonomy scope`); continue; }
     if (/\b(remove|delete|disable|silence|suppress|skip)\b[^.]{0,40}\b(detector|check|gate|falsifier|scan)\b/i.test(change)) { refusals.push(`step ${k}: would silence a detector or check`); continue; }
     // v1.1: an observation-only step is a hollow write (a logging step with a type named as its
     // "reader" passed v1 and was superseded before any draft).
@@ -4217,7 +4219,7 @@ export async function resolveGapToFeature(pointer: GapToFeaturePointer): Promise
     const read = await resolveSubstrateGap({ type: "substrateGap", id: decomposeId } as never);
     const found = ((read as { body?: { gaps?: Array<Record<string, unknown>> } }).body?.gaps ?? []).find((g) => String(g.id) === decomposeId);
     if (!found) return { shape: "gapToFeatureReport", body: { ok: false, stage: "decompose", error: "gap not found: " + decomposeId } };
-    const d = await decomposeGap(found);
+    const d = await decomposeGap(found, { directed: (pointer as { directed?: boolean }).directed === true });
     return { shape: "gapToFeatureReport", body: { ok: d.written.length > 0, stage: "decompose", gap_id: decomposeId, children: d.written, reason: d.reason } };
   }
   // 0. Land→close continuity: complete deferred self-cutover closures BEFORE selection,

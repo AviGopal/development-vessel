@@ -20,3 +20,6 @@ memory/
 # named volume; this copy is never COPYed into the image. A file the substrate
 # rewrites is not a file git should carry.
 pool/
+
+# bun install cache: runtime, never source (9d839e0 committed 422 of these)
+.bun/

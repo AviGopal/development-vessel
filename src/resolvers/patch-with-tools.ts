@@ -178,15 +178,31 @@ async function triggerMitosisTick(a: {
   // 2026-10-02 self-fact-reconcile: the authoring_root checkouts can diverge from
   // their canonical state (e.g. become bare repos) and block downstream tools.
   // Proactively reconcile the authoring root for the target vessel before use.
+  const selfFactReconcileEndpoint = process.env["SELF_FACT_RECONCILE_ENDPOINT"];
+  if (selfFactReconcileEndpoint) {
   try {
     const { resolveSelfFactReconcile } = await import("./self-fact-reconcile.js");
-    await resolveSelfFactReconcile({
-      type: "self_fact_reconcile",
-      fact_id: `authoring_root:${a.vessel}:clone`,
-      fix: true,
-    } as never);
+    if (selfFactReconcileEndpoint) {
+      await fetch(selfFactReconcileEndpoint, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          type: "self_fact_reconcile",
+          facts: ["authoring_root"],
+          key: `authoring_root:${a.vessel}:clone`,
+          fix: true,
+        }),
+      });
+    } else {
+      await resolveSelfFactReconcile({
+        type: "self_fact_reconcile",
+        fact_id: `authoring_root:${a.vessel}:clone`,
+        fix: true,
+      } as never);
+    }
   } catch (e) {
     console.warn(`[patch-with-tools] pre-flight authoring_root reconcile for ${a.vessel} failed, proceeding: ${(e as Error).message}`);
+  }
   }
 
   const none: MitosisLanding = { landed: false, new_git_sha: null, push_status: null };

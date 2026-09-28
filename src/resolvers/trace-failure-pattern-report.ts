@@ -7,6 +7,8 @@ export interface TraceFailurePatternReportPointer {
   type: "trace_failure_pattern_report";
   /** How many recent traces to scan. Default: 200. */
   limit?: number;
+  /** Count failures whose failure_mode.reason contains this text; reported as matching_failures. */
+  reason_contains?: string;
   /** Minimum occurrence count for a pattern to be reported. Default: 3. */
   min_occurrences?: number;
   /**
@@ -37,7 +39,7 @@ interface ExecutionTrace {
   activity_id?: string;
   status?: string;
   tasks?: TraceTask[];
-  failure_mode?: { type?: string } | null;
+  failure_mode?: { type?: string; reason?: string } | null;
   executed_at?: string;
 }
 
@@ -104,12 +106,15 @@ export async function resolveTraceFailurePatternReport(
   const groups = new Map<PatternKey, FailurePattern>();
   let totalFailures = 0;
   let zeroTaskFailures = 0;
+  let matchingFailures = 0;
+  const reasonContains = typeof pointer.reason_contains === "string" ? pointer.reason_contains : "";
 
   for (const tr of traces) {
     // A failed task can be recorded status "success" with a failure_mode (this week's tool-step
     // failures were), so the status field alone hid the whole class from this report.
     if (tr.status !== "failure" && !tr.failure_mode?.type) continue;
     totalFailures++;
+    if (reasonContains && String(tr.failure_mode?.reason ?? "").includes(reasonContains)) matchingFailures++;
     const templateId = stripActivityWrap(tr.activity_id ?? "?");
     if (excludeMeta && (isMetaTemplate(templateId) || DIAGNOSTIC_TEMPLATE_IDS.has(templateId))) continue;
 
@@ -219,6 +224,7 @@ export async function resolveTraceFailurePatternReport(
     body: {
       traces_examined: traces.length,
       total_failures: totalFailures,
+      matching_failures: matchingFailures,
       zero_task_failures: zeroTaskFailures,
       min_occurrences_threshold: minOccurrences,
       patterns_found: patterns.length,

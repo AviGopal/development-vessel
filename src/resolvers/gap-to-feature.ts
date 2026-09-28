@@ -2364,13 +2364,14 @@ async function verifyGapConditionAsync(gap: Record<string, unknown>): Promise<'p
       if (zv === 0) return 'absent';
       return 'unknown';
     }
-    // Defect heuristic 2: explicit nonzero_field should be >0 but is 0 / null / undefined
+    // Defect heuristic 2: explicit nonzero_field is a HEALTH count — a finite number >0 is absent, 0 is present.
+    // null / missing / non-numeric is UNMEASURED and reads unknown. It used to read 'present', which held a gap
+    // open (right for closing) but, since the falsified-landing record, also marks a landing FALSIFIED on an
+    // outage or an under-volume null (wrong). Unknown does neither: the sweep abstains and the gap stays open.
     if (nonzeroField !== null) {
       const val = inner[nonzeroField];
-      if (val === 0 || val === null || val === undefined || val === '') {
-        return 'present';
-      }
-      return 'absent';
+      if (typeof val === 'number' && Number.isFinite(val)) return val > 0 ? 'absent' : 'present';
+      return 'unknown';
     }
     // Defect heuristic 3 (generic): presence of a fetch_error field signals defect
     if (typeof inner['fetch_error'] === 'string' && inner['fetch_error'].length > 0) {

@@ -2991,7 +2991,8 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
     let _prev: string[] | null = null;
     try { _prev = JSON.parse(await readFile(_baseFile, "utf8")) as string[]; } catch { _prev = null; }
     const _newlyFailing = computeNewlyFailing(_prev, _failNow);
-    try {
+    // Only a suite that ran to its summary is a baseline: a killed run lists only part of its failures.
+    if (sb.ran === true) try {
       await mkdir(_baseDir, { recursive: true });
       await writeFile(_baseFile, JSON.stringify(_failNow));
     } catch { /* baseline is best-effort; a missed write costs one noisy cycle, not correctness */ }
@@ -2999,6 +3000,9 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
       console.log(`[mitosis-cutover] post-land suite: no baseline for ${vessel_name} yet — recorded ${_failNow.length} failing test(s), filing nothing (nothing is attributable on first observation)`);
     }
     if (sb.ran === true && _newlyFailing.length > 0) {
+      // A test this landing newly broke withholds its landed_verified credit (the pending-land stamp below).
+      behavioralVerificationFailed = true;
+      console.log(`[mitosis-cutover] post-land suite NEWLY failing=${_newlyFailing.length} vessel=${vessel_name} commit=${String(newSha).slice(0, 10)} — landed_verified credit withheld`);
       await resolveSubstrateGapWrite({
         type: "substrateGap_write",
         gap: {

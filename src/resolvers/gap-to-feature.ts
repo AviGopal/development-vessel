@@ -2373,6 +2373,15 @@ async function verifyGapConditionAsync(gap: Record<string, unknown>): Promise<'p
     // Nothing failed loudly because a 400 is indistinguishable from "no defect signal"
     // once it becomes 'unknown'. Fifth producer/consumer envelope mismatch found today;
     // this is the one that disabled a whole predicate class.
+    // MEASURE WHERE THE STORE IS HELD (2026-09-28). A node that forwards its gap store answers this
+    // check from its OWN filesystem and units, which are not the ones the gap's detector observed:
+    // node 2's self_fact_reconcile saw 1 service repo and 0 divergences and closed a divergence node 1
+    // still measures, crediting an inert landing (9c86aff). Abstain here; the holder's sweep runs over
+    // the same store and measures it where it was observed. Logged, because a silent skip reads as a pass.
+    if (process.env['GAP_STORE_ENDPOINT']) {
+      console.log(`[gap-verify] class2 check for ${String(gap['id'] ?? '')} (${resolveShape}) abstained on this node: the gap store is held elsewhere, so its sweep measures it`);
+      return 'unknown';
+    }
     const payload: Record<string, unknown> = { impulse: { pointer: { type: resolveShape, ...resolveInput } } };
     let respBody: Record<string, unknown>;
     try {

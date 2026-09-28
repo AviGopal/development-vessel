@@ -35,8 +35,36 @@
 import { WORKSPACE_ROOT as DEFAULT_WORKSPACE_ROOT } from "../config.js";
 import type { ResolverResult } from "./types.js";
 import { readFile, writeFile, rename, mkdir } from "node:fs/promises";
-import { readFileSync, existsSync } from "node:fs";
+import { readFileSync, existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+
+// EXPECTATION CALIBRATION, HELD WITH THE GAP STORE (value-per-cost-selection 5.5). Same file and
+// format gap-to-feature reads ({category: {attempts, lands}}). It lives on the node that holds the
+// store because every compose node's outcomes already arrive here as gap writes; a node-local copy
+// saw only its own composes and sealed categories the fleet lands. Path read at call time so tests
+// that point EXPECTATION_CALIB_PATH at a fixture never touch the live file. Loader duplicated, not
+// imported: gap-to-feature imports this module.
+function expectationCalibPath(): string {
+  return process.env["EXPECTATION_CALIB_PATH"] ?? "/workspace/expectation-calibration.json";
+}
+function readExpectationCalibration(): Record<string, { attempts: number; lands: number }> {
+  try {
+    const p = expectationCalibPath();
+    return existsSync(p) ? (JSON.parse(readFileSync(p, "utf8")) as Record<string, { attempts: number; lands: number }>) : {};
+  } catch { return {}; }
+}
+function creditExpectationCalibration(category: string, landed: boolean): void {
+  try {
+    const c = readExpectationCalibration();
+    const rec = c[category] ?? { attempts: 0, lands: 0 };
+    rec.attempts += 1;
+    if (landed) rec.lands += 1;
+    c[category] = rec;
+    writeFileSync(expectationCalibPath(), JSON.stringify(c));
+  } catch (err) {
+    console.warn(`[expectation-calibration] credit failed for ${category}: ${String(err).slice(0, 200)}`);
+  }
+}
 
 async function forwardToGapStore(pointer: Record<string, unknown>): Promise<ResolverResult | null> {
   const ep = process.env["GAP_STORE_ENDPOINT"];
@@ -243,6 +271,8 @@ export interface SubstrateGapReadPointer {
    * decision log) are written with looser typing than SubstrateGapCategory.
    */
   exclude_categories?: string[];
+  /** Also return the store holder's per-category expectation calibration (value-per-cost 5.5). */
+  include_calibration?: boolean;
 }
 
 /**
@@ -655,6 +685,7 @@ export async function resolveSubstrateGap(
       // "how many open gaps can never close?" is answerable from any read instead
       // of by hand-grepping the store file.
       falsifier_coverage: falsifierCoverage(gaps),
+      ...(pointer.include_calibration ? { expectation_calibration: readExpectationCalibration() } : {}),
     },
   };
 }
@@ -996,6 +1027,10 @@ export async function resolveSubstrateGapWrite(
     // must win to keep climbing).
     const exMeta = (existing.classification_metadata ?? {}) as Record<string, unknown>;
     const inMeta = (gap.classification_metadata ?? {}) as Record<string, unknown>;
+    // Captured BEFORE the carry-forward below copies the old row's keys in: a close reason
+    // or attempt count carried from an earlier state is not something this write reports.
+    const incomingClosedReason = inMeta["closed_reason"];
+    const incomingFailedAttempts = inMeta["failed_attempts"];
     // FALSIFIER-ANCHOR IMMUTABILITY: when the EXISTING row carries a measurable
     // falsifier (expected_literal / hardcoded_url) anchored at an edit_site, an
     // incoming write that does NOT itself rewrite those falsifier fields must not
@@ -1042,6 +1077,22 @@ export async function resolveSubstrateGapWrite(
       delete gap.closed_by_trace;
     }
 
+    // EXPECTATION CALIBRATION CREDIT, AT THE HOLDER (value-per-cost-selection 5.5). A rise in
+    // failed_attempts is a compose that did not land (bumpFailedAttempts); a transition into
+    // closed with closed_reason landed_verified is a verified landing (closeLandedGap and the
+    // pending-land sweep). Operator hand-closes carry no such reason and are not counted, per the
+    // 2026-08-28 escalation-disposition ruling. Fail-open: accounting must never block a write.
+    try {
+      const calibCategory = String(gap.category ?? existing.category ?? "unknown");
+      if (typeof incomingFailedAttempts === "number" && incomingFailedAttempts > Number(exMeta["failed_attempts"] ?? 0)) {
+        creditExpectationCalibration(calibCategory, false);
+      }
+      if (gap.status === "closed" && existing.status !== "closed" && incomingClosedReason === "landed_verified") {
+        creditExpectationCalibration(calibCategory, true);
+      }
+    } catch (err) {
+      console.warn(`[expectation-calibration] credit skipped for ${gap.id}: ${String(err).slice(0, 200)}`);
+    }
     gaps[existingIdx] = gap;
     action = "updated";
   } else {

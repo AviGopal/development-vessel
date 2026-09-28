@@ -2570,7 +2570,7 @@ async function closeLandedGap(gap: Record<string, unknown>, land: LandSignal): P
         status: "closed",
       },
     } as never);
-    updateCalibration(String(gap.category ?? "unknown"), true);
+    // Calibration land credit is taken by the gap-store holder from the close written above.
     updateClassPosterior(gapClassOf(gap), true);
     // CLOSURE-CREDIT: reward the filing detector for gap closure (not just filing).
     // Best-effort — never throw; wrapped in its own try/catch.
@@ -3191,7 +3191,7 @@ const pending = gaps
           status: "closed",
         },
       } as never);
-      updateCalibration(String(g.category ?? "unknown"), true);
+      // Calibration land credit is taken by the gap-store holder from the close written above.
       updateClassPosterior(gapClassOf(g), true);
       out.closed += 1;
     }
@@ -3224,19 +3224,27 @@ const pending = gaps
 // The gap-specific signal (landabilityScore p) is judged AGAINST that learned counterfactual.
 const CALIB_PATH = process.env.EXPECTATION_CALIB_PATH ?? "/workspace/expectation-calibration.json";
 type CalibRec = Record<string, { attempts: number; lands: number }>;
+// HELD, NOT LOCAL (value-per-cost-selection 5.5). The calibration is credited by the node that
+// holds the gap store, from the gap writes every compose node sends it (a failed_attempts rise;
+// a close with closed_reason landed_verified). A compose node reads that table, refreshed before
+// each auto-pick, and uses its own file only when the holder cannot be read (logged). On the
+// holder the read resolves locally and returns the same file.
+let heldCalibration: CalibRec | null = null;
+async function refreshHeldCalibration(): Promise<void> {
+  try {
+    const r = await resolveSubstrateGap({ type: "substrateGap", limit: 1, include_calibration: true } as never);
+    const cal = (r.body as { expectation_calibration?: unknown } | undefined)?.expectation_calibration;
+    if (cal && typeof cal === "object") { heldCalibration = cal as CalibRec; return; }
+    console.warn(`[expectation-calibration] gap store returned no calibration (shape=${String(r.shape)}) - using the local file`);
+  } catch (err) {
+    console.warn(`[expectation-calibration] holder read failed: ${String(err).slice(0, 200)} - using the local file`);
+  }
+  heldCalibration = null;
+}
 function readCalibration(): CalibRec {
+  if (heldCalibration) return heldCalibration;
   try { return existsSync(CALIB_PATH) ? (JSON.parse(readFileSync(CALIB_PATH, "utf8")) as CalibRec) : {}; }
   catch { return {}; }
-}
-function updateCalibration(category: string, landed: boolean): void {
-  try {
-    const c = readCalibration();
-    const cat = category || "unknown";
-    const rec = c[cat] ?? { attempts: 0, lands: 0 };
-    rec.attempts += 1; if (landed) rec.lands += 1;
-    c[cat] = rec;
-    writeFileSync(CALIB_PATH, JSON.stringify(c));
-  } catch { /* best-effort */ }
 }
 
 // ── Close-oracle posterior (§12.6 step 1(a), 2026-08-14) ────────────────────────────────
@@ -3530,7 +3538,7 @@ async function bumpFailedAttempts(gap: Record<string, unknown>, opts: { surprise
     // A non-landing attempt the substrate PREDICTED would land is a high-information SURPRISE
     // (over-optimistic self-model) → deprioritise harder (x2) and tally the calibration miss so
     // the self-model is measurable. A correctly-predicted fail bumps normally.
-    updateCalibration(String(gap.category ?? "unknown"), false);
+    // Calibration attempt credit is taken by the gap-store holder from the failed_attempts rise below.
     const weight = opts.surprise ? 2 : 1;
     const fa = Number(meta0.failed_attempts ?? 0) + weight;
     const mis = Number(meta0.mispredicted_lands ?? 0) + (opts.surprise ? 1 : 0);
@@ -4475,6 +4483,7 @@ export async function resolveGapToFeature(pointer: GapToFeaturePointer): Promise
       const { admitted } = await admitActionableGaps(eligible);
       // Empty admitted (whole pool non-actionable — the common all-orphan case) → null,
       // which flows to the graceful "no matching open gap" path, not pickMostLandable([])'s throw.
+      if (admitted.length) await refreshHeldCalibration();
       gap = admitted.length ? pickMostLandable(admitted) : null;
     }
   } catch (e) {

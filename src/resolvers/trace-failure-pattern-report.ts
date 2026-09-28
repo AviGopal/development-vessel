@@ -106,7 +106,9 @@ export async function resolveTraceFailurePatternReport(
   let zeroTaskFailures = 0;
 
   for (const tr of traces) {
-    if (tr.status !== "failure") continue;
+    // A failed task can be recorded status "success" with a failure_mode (this week's tool-step
+    // failures were), so the status field alone hid the whole class from this report.
+    if (tr.status !== "failure" && !tr.failure_mode?.type) continue;
     totalFailures++;
     const templateId = stripActivityWrap(tr.activity_id ?? "?");
     if (excludeMeta && (isMetaTemplate(templateId) || DIAGNOSTIC_TEMPLATE_IDS.has(templateId))) continue;

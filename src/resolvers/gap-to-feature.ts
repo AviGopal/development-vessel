@@ -2986,6 +2986,39 @@ async function recordFalsifiedAutonomousLanding(g: Record<string, unknown>, meta
   return "recorded";
 }
 
+// OPERATOR REGRESSIONS REACH THE LEARNING PATH (contained-self-development 8.20). On 09-28 four
+// autonomous landings passed their own check (three were even closed landed_verified) and were reverted
+// by the operator. The only trace was regressed_by on the gap, read by the picker hold alone: the
+// settlement stayed `held`, the posterior counted a success and no lesson reached the drafter. This
+// feeds that verdict, once, into the same records a falsified landing writes. Acts only on the node
+// that registered the attempt (the ledger is node-local).
+async function recordOperatorRegression(g: Record<string, unknown>): Promise<boolean> {
+  const meta = { ...((g.classification_metadata ?? {}) as Record<string, unknown>) };
+  const rb = meta.regressed_by as { sha?: unknown; attempt_id?: unknown; revert_sha?: unknown; by?: unknown; reason?: unknown; learned_at?: unknown } | null | undefined;
+  if (!rb || typeof rb !== "object" || !rb.revert_sha || !rb.attempt_id || rb.learned_at) return false;
+  if (String(rb.by ?? "").startsWith("gap-sweep")) return false;
+  const attemptId = String(rb.attempt_id);
+  const { readRecords, appendRecord } = await import("./attempt-ledger.js");
+  if ((await readRecords("attemptIntent", { key: attemptId })).length === 0) return false;
+  const at = new Date().toISOString();
+  const sha = String(rb.sha ?? "");
+  if ((await readRecords("attemptSettlement", { key: `${attemptId}#2` })).length === 0) {
+    joinDecisionOutcome(meta, { landed: true, verdict: "UNFAVORABLE", commit: sha, reverted_by: String(rb.revert_sha), operator_regression: true });
+    updateClassPosterior(gapClassOf(g), false);
+    await appendRecord("attemptSettlement", `${attemptId}#2`, { attempt_id: attemptId, settlement_seq: 2, verdict: "regressed", credit_eligible: false, shas: [sha], gap_id: String(g.id), source: "operator_revert", reverted_by: String(rb.revert_sha), at });
+  }
+  const lessons = Array.isArray(meta.failure_lessons) ? [...(meta.failure_lessons as unknown[])] : [];
+  if (!lessons.some((l) => (l as { attempt_id?: unknown; class?: unknown }).attempt_id === attemptId && (l as { class?: unknown }).class === "attempt_consequence")) {
+    lessons.push({ class: "attempt_consequence", reason: `<${attemptId}> landed <${sha.slice(0, 12)}> and was reverted by <${String(rb.revert_sha).slice(0, 12)}>: ${String(rb.reason ?? "judged a regression by the operator").slice(0, 400)}`, at, attempt_id: attemptId });
+  }
+  await resolveSubstrateGapWrite({
+    type: "substrateGap_write",
+    gap: { id: String(g.id), category: g.category, source: g.source, summary: g.summary, detected_at: g.detected_at, status: g.status ?? "open", classification_metadata: { ...meta, failure_lessons: lessons, regressed_by: { ...rb, learned_at: at } } },
+  } as never);
+  console.warn(`[gap-sweep] OPERATOR REGRESSION learned gap=${String(g.id)} sha=${sha.slice(0, 12)} attempt=${attemptId} reverted_by=${String(rb.revert_sha).slice(0, 12)} — settlement regressed, posterior miss, lesson written`);
+  return true;
+}
+
 export async function sweepPendingLandVerifications(): Promise<{ checked: number; closed: number }> {
   const out = { checked: 0, closed: 0 };
   // OBSERVABILITY, because this sweep has been silent since it was written.
@@ -3028,6 +3061,9 @@ for (const g of gaps) {
   }
 }
 
+// Operator reverts reach the learning path before anything else reads these gaps.
+for (const g of gaps) { try { await recordOperatorRegression(g); } catch { /* best-effort; retried next tick */ } }
+
 // Then process existing pending verifications as before
 const pending = gaps
       .filter((g) => {
@@ -3050,7 +3086,11 @@ const pending = gaps
       if (!shaIsAncestorOfAnyClone(sha)) { tally.not_in_clone += 1; continue; }
       // A REVERTED land is not a land. The ancestor check above passes forever once the
       // commit exists, revert or not, so ask explicitly.
-      if (shaWasRevertedInAnyClone(sha)) {
+      // A revert the operator recorded on the gap counts too: route-edit and direct reverts carry no
+      // `This reverts commit` line for the clone check to find.
+      const rbSweep = meta.regressed_by as { sha?: unknown; revert_sha?: unknown } | null | undefined;
+      const operatorReverted = !!rbSweep && typeof rbSweep === "object" && !!rbSweep.revert_sha && String(rbSweep.sha ?? "").startsWith(sha.slice(0, 7));
+      if (operatorReverted || shaWasRevertedInAnyClone(sha)) {
         tally.reverted += 1;
         console.warn(`[gap-sweep] gap ${String(g.id)} NOT closed: landed sha ${sha.slice(0, 12)} was REVERTED — the change is gone from HEAD, so the gap is unresolved and stays open for another attempt`);
         continue;

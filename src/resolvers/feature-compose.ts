@@ -6151,15 +6151,18 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
             }
           }
         } catch { /* grounding is best-effort */ }
-        const fix = parseJsonObject(await llmCall(
-          // LLM egress, NOT concept-db — see the anchor-repair call above.
-          llmEndpoint,
+        const fix = parseJsonObject(await llmCallWithFailover(
+          // LLM egress, NOT concept-db — with failover, like the plan/refine/judge calls.
+          llmEndpoints,
           `A change to vessel ${fv.vessel} fails \`bun run lint\` (strict tsc + shape-dispatch agreement: every advertised shape in src/config.ts MUST have a matching case in src/routes/impulses.ts and vice-versa). Lint output:\n\n${errText.slice(0, 4000)}${errorSiteWindow}\n\nPick the SINGLE most-blocking error and emit ONE JSON object {"file":"repos/${fv.vessel.replace(/^repos\//, "")}/<subpath>","old_string":"<a SHORT verbatim UNIQUE substring of that file's CURRENT content>","new_string":"<corrected replacement>"} that fixes it, changing as little else as possible. For a missing dispatch case, copy the shape into the switch next to a sibling case. old_string MUST appear verbatim. No prose, no fences. Escape newlines as \\n.`,
           model,
         ));
         const ef = typeof fix?.file === "string" ? String(fix.file)
           : typeof fix?.path === "string" ? String(fix.path) : "";
-        const efAbs = ef ? opAbs(ef) : "";
+        // The window labels files vessel-relative (src/...); resolve such a path against the failing
+        // vessel, or opAbs treats its first segment as a vessel name and the write goes nowhere.
+        const efNorm = ef && !ef.startsWith("repos/") && !ef.startsWith("/") ? `repos/${fv.vessel.replace(/^repos\//, "")}/${ef}` : ef;
+        const efAbs = efNorm ? opAbs(efNorm) : "";
 
         // LINE-ADDRESSED REPAIR WITH A SYSTEM-DERIVED ANCHOR.
         //
@@ -6224,9 +6227,9 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
             if (w.ok) { anyFixed = true; if (!edited.includes(efAbs) && !created.includes(efAbs)) edited.push(efAbs); await recordPostEdit(efAbs); }
           }
         }
-      } catch { /* repair attempt failed; verify stays not-ok */ }
+      } catch (err) { console.warn(`[fc-repair] repair round threw for ${fv.vessel}: ${String(err).slice(0, 200)}`); }
     }
-    if (!anyFixed) break;
+    if (!anyFixed) { console.warn(`[fc-repair] round ${attempt} wrote nothing (no parsable fix, unreadable path, or old_string not found) — repair stops`); break; }
     verify = [];
     for (const v of touched) verify.push(await runVerify(v));
   }

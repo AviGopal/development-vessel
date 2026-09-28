@@ -157,13 +157,18 @@ export async function resolveTestSuite(pointer: Record<string, unknown>): Promis
   const onlyTests = Array.isArray(pointer.only_tests)
     ? (pointer.only_tests as unknown[]).filter((t): t is string => typeof t === "string" && t.trim().length > 0)
     : [];
+  // One test file (relative to the vessel root) instead of the whole suite: a failing-test gap is judged in
+  // seconds rather than a suite that exceeds the budget. Path characters only; anything else is ignored.
+  const testFile = typeof pointer.test_file === "string" && /^[A-Za-z0-9_./-]+$/.test(pointer.test_file.trim()) && !pointer.test_file.includes("..")
+    ? pointer.test_file.trim()
+    : "";
   const testFilter = onlyTests.length > 0
     ? ` -t ${JSON.stringify(onlyTests.map((t) => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|"))}`
     : "";
   const command =
     `ROOT=${JSON.stringify(preferredRoot)}; [ -d "$ROOT" ] || ROOT=${JSON.stringify(fallbackRoot)}; ` +
     `echo "VERIFIED_ROOT=$ROOT"; echo "VERIFIED_HEAD=$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)"; ` +
-    `cd "$ROOT" && ([ -d node_modules ] || timeout 120 bun install >/dev/null 2>&1; timeout ${budgetSec} bun test --timeout ${perTestTimeoutMs}${testFilter} 2>&1 || true)`;
+    `cd "$ROOT" && ([ -d node_modules ] || timeout 120 bun install >/dev/null 2>&1; timeout ${budgetSec} bun test${testFile ? " " + JSON.stringify(testFile) : ""} --timeout ${perTestTimeoutMs}${testFilter} 2>&1 || true)`;
 
   let raw = "";
   try {
@@ -186,6 +191,12 @@ export async function resolveTestSuite(pointer: Record<string, unknown>): Promis
   }
 
   const parsed = parseBunSummary(raw);
+  // Requested tests that did not pass: failing, missing, renamed or deleted all count. A failing-test gap
+  // measured by `fail` alone reads a deleted test as fixed; this count stays >0 until the test itself passes.
+  const passLines = raw.split("\n").filter((l) => /^\s*\(pass\)/.test(l));
+  const requestedNotPassing = onlyTests.length > 0
+    ? onlyTests.filter((t) => !passLines.some((l) => l.includes(t))).length
+    : null;
   // A suite that printed no summary at all did not run — do NOT report 0/0/0 as a clean
   // result, or "the suite is missing" becomes indistinguishable from "everything passed".
   const ran = /\d+\s+(pass|fail)\b/.test(raw);
@@ -205,6 +216,8 @@ export async function resolveTestSuite(pointer: Record<string, unknown>): Promis
       total: parsed.total,
       pass: parsed.pass,
       fail: parsed.fail,
+      test_file: testFile || null,
+      requested_not_passing: ran || onlyTests.length === 0 ? requestedNotPassing : null,
       skip: parsed.skip,
       failingTests: parsed.failingTests.slice(0, 25),
       timestamp: new Date().toISOString(),

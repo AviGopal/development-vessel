@@ -3098,6 +3098,15 @@ const pending = gaps
         const m = (g.classification_metadata ?? {}) as Record<string, unknown>;
         return typeof m.pending_outcome_verification === "string" && (m.pending_outcome_verification as string).length >= 7;
       })
+      // Measurable gaps first, newest stamp first: predicate-less stamped gaps can never resolve, and taking
+      // the first N in store order let them hold every slot, so newer landings were never judged.
+      .sort((a, b) => {
+        const ma = (a.classification_metadata ?? {}) as Record<string, unknown>;
+        const mb = (b.classification_metadata ?? {}) as Record<string, unknown>;
+        const pa = ma.expected_literal || ma.hardcoded_url || ma.verify_shape || ma.evidence_resolve ? 0 : 1;
+        const pb = mb.expected_literal || mb.hardcoded_url || mb.verify_shape || mb.evidence_resolve ? 0 : 1;
+        return pa - pb || String(mb.pending_set_at ?? "").localeCompare(String(ma.pending_set_at ?? ""));
+      })
       .slice(0, PENDING_VERIFY_SWEEP_LIMIT);
     for (const g of pending) {
       out.checked += 1;

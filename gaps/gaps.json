@@ -7,7 +7,14 @@
     "detected_at": "2026-05-27T23:00:00Z",
     "status": "closed",
     "created_at": "2026-05-27T23:19:21.227Z",
-    "updated_at": "2026-05-27T23:20:35.817Z"
+    "updated_at": "2026-09-28T10:43:10.365Z",
+    "classification_metadata": {
+      "falsifier": "none",
+      "falsifier_classified_at": "2026-09-28T10:43:10.365Z"
+    },
+    "first_detected_at": "2026-05-27T23:00:00Z",
+    "reopen_count": 2,
+    "closed_at": "2026-09-28T10:43:10.365Z"
   },
   {
     "id": "gap-missing-concept",
@@ -17,6 +24,288 @@
     "detected_at": "2026-05-27T23:00:00Z",
     "status": "open",
     "created_at": "2026-05-27T23:19:21.233Z",
-    "updated_at": "2026-05-27T23:20:35.818Z"
+    "updated_at": "2026-09-28T10:43:10.367Z",
+    "classification_metadata": {
+      "falsifier": "none",
+      "falsifier_classified_at": "2026-09-28T10:43:10.367Z"
+    },
+    "first_detected_at": "2026-05-27T23:00:00Z",
+    "reopen_count": 0
+  },
+  {
+    "id": "some-real-gap",
+    "category": "source_divergence",
+    "source": "substrate_detected",
+    "status": "open",
+    "summary": "a gap that describes itself",
+    "detected_at": "2026-09-28T10:43:04.262Z",
+    "created_at": "2026-09-28T10:41:56.142Z",
+    "updated_at": "2026-09-28T10:43:04.262Z",
+    "classification_metadata": {
+      "falsifier": "none",
+      "falsifier_classified_at": "2026-09-28T10:43:04.265Z"
+    },
+    "first_detected_at": "2026-09-28T10:41:56.142Z",
+    "reopen_count": 0
+  },
+  {
+    "id": "dupe-1786176268999",
+    "category": "source_divergence",
+    "source": "substrate_detected",
+    "status": "open",
+    "summary": "a gap that describes itself",
+    "detected_at": "2026-09-28T10:43:04.270Z",
+    "created_at": "2026-09-28T10:41:56.210Z",
+    "updated_at": "2026-09-28T10:43:04.270Z",
+    "classification_metadata": {
+      "falsifier": "none",
+      "falsifier_classified_at": "2026-09-28T10:43:04.270Z"
+    },
+    "first_detected_at": "2026-09-28T10:41:56.210Z",
+    "reopen_count": 0
+  },
+  {
+    "id": "class-b-1786176268124",
+    "category": "source_divergence",
+    "source": "substrate_detected",
+    "status": "open",
+    "summary": "different class member",
+    "detected_at": "2026-09-28T10:43:04.274Z",
+    "created_at": "2026-09-28T10:41:56.217Z",
+    "updated_at": "2026-09-28T10:43:04.274Z",
+    "classification_metadata": {
+      "falsifier": "none",
+      "falsifier_classified_at": "2026-09-28T10:43:04.274Z"
+    },
+    "first_detected_at": "2026-09-28T10:41:56.217Z",
+    "reopen_count": 0
+  },
+  {
+    "id": "contract-conformance-probe",
+    "category": "other",
+    "source": "contract-conformance-probe",
+    "status": "open",
+    "detected_at": "2026-09-28T10:43:10.186Z",
+    "summary": "Contract conformance probe: payload built from the declared contract.",
+    "created_at": "2026-09-28T10:42:07.245Z",
+    "updated_at": "2026-09-28T10:43:10.186Z",
+    "classification_metadata": {
+      "falsifier": "none",
+      "falsifier_classified_at": "2026-09-28T10:43:10.186Z"
+    },
+    "first_detected_at": "2026-09-28T10:42:07.245Z",
+    "reopen_count": 0
+  },
+  {
+    "id": "flat-summary-probe",
+    "category": "other",
+    "source": "walk_flat_pointer",
+    "status": "open",
+    "detected_at": "2026-09-28T10:43:10.191Z",
+    "summary": "Flat pointer threaded via summary — this must not be rejected.",
+    "created_at": "2026-09-28T10:42:07.248Z",
+    "updated_at": "2026-09-28T10:43:10.191Z",
+    "classification_metadata": {
+      "falsifier": "none",
+      "falsifier_classified_at": "2026-09-28T10:43:10.193Z"
+    },
+    "first_detected_at": "2026-09-28T10:42:07.248Z",
+    "reopen_count": 0
+  },
+  {
+    "id": "flat-detail-probe",
+    "category": "other",
+    "source": "walk_flat_pointer",
+    "status": "open",
+    "detected_at": "2026-09-28T10:43:10.196Z",
+    "summary": "Flat pointer threaded via detail — this must not be rejected.",
+    "created_at": "2026-09-28T10:42:07.251Z",
+    "updated_at": "2026-09-28T10:43:10.196Z",
+    "classification_metadata": {
+      "falsifier": "none",
+      "falsifier_classified_at": "2026-09-28T10:43:10.197Z"
+    },
+    "first_detected_at": "2026-09-28T10:42:07.251Z",
+    "reopen_count": 0
+  },
+  {
+    "id": "flat-description-probe",
+    "category": "other",
+    "source": "walk_flat_pointer",
+    "status": "open",
+    "detected_at": "2026-09-28T10:43:10.199Z",
+    "summary": "Flat pointer threaded via description — this must not be rejected.",
+    "created_at": "2026-09-28T10:42:07.257Z",
+    "updated_at": "2026-09-28T10:43:10.199Z",
+    "classification_metadata": {
+      "falsifier": "none",
+      "falsifier_classified_at": "2026-09-28T10:43:10.200Z"
+    },
+    "first_detected_at": "2026-09-28T10:42:07.257Z",
+    "reopen_count": 0
+  },
+  {
+    "id": "flat-text-probe",
+    "category": "other",
+    "source": "walk_flat_pointer",
+    "status": "open",
+    "detected_at": "2026-09-28T10:43:10.202Z",
+    "summary": "Flat pointer threaded via text — this must not be rejected.",
+    "created_at": "2026-09-28T10:42:07.259Z",
+    "updated_at": "2026-09-28T10:43:10.202Z",
+    "classification_metadata": {
+      "falsifier": "none",
+      "falsifier_classified_at": "2026-09-28T10:43:10.203Z"
+    },
+    "first_detected_at": "2026-09-28T10:42:07.259Z",
+    "reopen_count": 0
+  },
+  {
+    "id": "flat-title-probe",
+    "category": "other",
+    "source": "walk_flat_pointer",
+    "status": "open",
+    "detected_at": "2026-09-28T10:43:10.205Z",
+    "summary": "Flat pointer threaded via title — this must not be rejected.",
+    "created_at": "2026-09-28T10:42:07.262Z",
+    "updated_at": "2026-09-28T10:43:10.205Z",
+    "classification_metadata": {
+      "falsifier": "none",
+      "falsifier_classified_at": "2026-09-28T10:43:10.206Z"
+    },
+    "first_detected_at": "2026-09-28T10:42:07.262Z",
+    "reopen_count": 0
+  },
+  {
+    "id": "placeholder-scrub-probe",
+    "category": "other",
+    "source": "operator_audit",
+    "status": "open",
+    "detected_at": "2026-09-28T10:43:10.208Z",
+    "created_at": "2026-09-28T10:42:07.265Z",
+    "summary": "Probe: unbound timestamp slots must not be persisted verbatim.",
+    "updated_at": "2026-09-28T10:43:10.208Z",
+    "classification_metadata": {
+      "falsifier": "none",
+      "falsifier_classified_at": "2026-09-28T10:43:10.210Z"
+    },
+    "first_detected_at": "2026-09-28T10:42:07.265Z",
+    "reopen_count": 0
+  },
+  {
+    "id": "heal-probe",
+    "category": "other",
+    "source": "operator_audit",
+    "status": "open",
+    "detected_at": "2026-09-28T10:43:10.214Z",
+    "summary": "Second write should heal the stored placeholder.",
+    "created_at": "2026-09-28T10:42:07.271Z",
+    "updated_at": "2026-09-28T10:43:10.228Z",
+    "classification_metadata": {
+      "falsifier": "none",
+      "falsifier_classified_at": "2026-09-28T10:43:10.228Z"
+    },
+    "first_detected_at": "2026-09-28T10:42:07.271Z",
+    "reopen_count": 0
+  },
+  {
+    "id": "post-mutation-probe",
+    "category": "conversation_only",
+    "source": "operator_narration",
+    "summary": "must land in the original workspace, not the decoy",
+    "detected_at": "2026-08-30T00:00:00Z",
+    "status": "open",
+    "created_at": "2026-09-28T10:42:07.544Z",
+    "updated_at": "2026-09-28T10:43:10.372Z",
+    "classification_metadata": {
+      "falsifier": "none",
+      "falsifier_classified_at": "2026-09-28T10:43:10.372Z"
+    },
+    "first_detected_at": "2026-08-30T00:00:00Z",
+    "reopen_count": 0
+  },
+  {
+    "id": "compose-trigger-guard-on-probe",
+    "category": "conversation_only",
+    "source": "operator_narration",
+    "summary": "must not start gap-compose.service while the test guard is on",
+    "detected_at": "2026-08-30T00:00:00Z",
+    "status": "open",
+    "created_at": "2026-09-28T10:42:07.554Z",
+    "updated_at": "2026-09-28T10:43:10.376Z",
+    "classification_metadata": {
+      "falsifier": "none",
+      "falsifier_classified_at": "2026-09-28T10:43:10.376Z"
+    },
+    "first_detected_at": "2026-08-30T00:00:00Z",
+    "reopen_count": 0
+  },
+  {
+    "id": "compose-trigger-guard-off-probe",
+    "category": "conversation_only",
+    "source": "operator_narration",
+    "summary": "must start gap-compose.service when the test guard is off",
+    "detected_at": "2026-08-30T00:00:01Z",
+    "status": "open",
+    "created_at": "2026-09-28T10:42:07.558Z",
+    "updated_at": "2026-09-28T10:43:10.378Z",
+    "classification_metadata": {
+      "falsifier": "none",
+      "falsifier_classified_at": "2026-09-28T10:43:10.378Z"
+    },
+    "first_detected_at": "2026-08-30T00:00:01Z",
+    "reopen_count": 0
+  },
+  {
+    "id": "mitosis_freshness_violation:development-vessel:mitosis-2026-06-03T00-00-00Z",
+    "category": "other",
+    "source": "substrate_detected",
+    "summary": "Mitosis mitosis-2026-06-03T00-00-00Z for development-vessel refused cutover: base_sha_mismatch. staged_base_sha=deadbeef0000, current_live_sha=828e26212c89. Live source has changed since this mitosis was drafted (or was never recorded); re-derive against current. Cites principle: resilient_against_unintended_changes.",
+    "detected_at": "2026-09-28T10:43:14.221Z",
+    "status": "open",
+    "classification_metadata": {
+      "kind": "mitosis_freshness_violation",
+      "vessel_name": "development-vessel",
+      "mitosis_version_id": "mitosis-2026-06-03T00-00-00Z",
+      "base_version_id": "v1",
+      "staged_base_sha": "deadbeef0000",
+      "current_live_sha": "828e26212c89",
+      "freshness_check_path": "/tmp/mitosis-cut-sjJbwL/git/super-repo/repos/development-vessel/src/index.ts",
+      "reason": "base_sha_mismatch",
+      "cite_principle": "resilient_against_unintended_changes",
+      "suggested_remediation": "Drop stale mitosis or re-stage from current base. If this is the first observation of the principle, the operator may seed the gap-closing pipeline; otherwise the next scaffold-mitosis-track will produce a fresh draft.",
+      "falsifier": "none",
+      "falsifier_classified_at": "2026-09-28T10:43:14.221Z"
+    },
+    "created_at": "2026-09-28T10:42:11.658Z",
+    "updated_at": "2026-09-28T10:43:14.221Z",
+    "first_detected_at": "2026-09-28T10:42:11.658Z",
+    "reopen_count": 0
+  },
+  {
+    "id": "mitosis_freshness_violation:development-vessel:mitosis-mismatch-2026-06-04",
+    "category": "other",
+    "source": "substrate_detected",
+    "summary": "Mitosis mitosis-mismatch-2026-06-04 for development-vessel refused cutover: base_sha_mismatch. staged_base_sha=deadbeefcafe, current_live_sha=34ca0763f502. Live source has changed since this mitosis was drafted (or was never recorded); re-derive against current. Cites principle: resilient_against_unintended_changes.",
+    "detected_at": "2026-09-28T10:43:21.318Z",
+    "status": "open",
+    "classification_metadata": {
+      "kind": "mitosis_freshness_violation",
+      "vessel_name": "development-vessel",
+      "mitosis_version_id": "mitosis-mismatch-2026-06-04",
+      "base_version_id": "v1",
+      "staged_base_sha": "deadbeefcafe",
+      "current_live_sha": "34ca0763f502",
+      "freshness_check_path": "/tmp/mitosis-cut-RsLccD/git/super-repo/repos/development-vessel/src/resolvers/target.ts",
+      "reason": "base_sha_mismatch",
+      "cite_principle": "resilient_against_unintended_changes",
+      "suggested_remediation": "Drop stale mitosis or re-stage from current base. If this is the first observation of the principle, the operator may seed the gap-closing pipeline; otherwise the next scaffold-mitosis-track will produce a fresh draft.",
+      "falsifier": "none",
+      "falsifier_classified_at": "2026-09-28T10:43:21.319Z"
+    },
+    "created_at": "2026-09-28T10:42:20.587Z",
+    "updated_at": "2026-09-28T10:43:21.318Z",
+    "first_detected_at": "2026-09-28T10:42:20.587Z",
+    "reopen_count": 0
   }
 ]

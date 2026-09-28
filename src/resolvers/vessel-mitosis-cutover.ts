@@ -3089,7 +3089,9 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
                 ...stampMeta,
                 pending_outcome_verification: newSha,
                 pending_set_at: appliedAt,
-                ...(derived && typeof stampMeta["hardcoded_url"] !== "string"
+                // Only for a gap with no measurable predicate: the removed-line literal otherwise outranks
+                // a stronger evidence_resolve / verify_shape / expected_literal check in classification.
+                ...(derived && typeof stampMeta["hardcoded_url"] !== "string" && !stampMeta["evidence_resolve"] && !stampMeta["verify_shape"] && !stampMeta["expected_literal"]
                   ? {
                       hardcoded_url: derived.line,
                       file_path: `repos/${vessel_name}/${derived.path}`,

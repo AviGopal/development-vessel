@@ -1170,6 +1170,10 @@ export function chooseFirstActionable<T>(
   return { chosen: ranked[extendedLimit] ?? ranked[0]!, skippedPending, scanExhausted: true };
 }
 
+// Whole-store id index for the pick in progress, set by the auto-pick caller just before it calls
+// pickMostLandable. The admitted list alone cannot resolve a narrowed child's parent: the parent
+// is often excluded (pending, held) while its child is admitted.
+let pickLineageIndex: Map<string, Record<string, unknown>> = new Map();
 function pickMostLandable(gaps: Record<string, unknown>[]): Record<string, unknown> | null {
   if (!gaps.length) return null;
   // Learned category-level self-knowledge (expectation-setting step 3, 2026-06-29): strongly
@@ -1444,6 +1448,17 @@ function pickMostLandable(gaps: Record<string, unknown>[]): Record<string, unkno
     const regressedBy = m.regressed_by as { revert_sha?: unknown } | null | undefined;
     if (regressedBy && typeof regressedBy === 'object' && !regressedBy.revert_sha) return true;
     if (landedAwaitingVerification && !hasMeasurablePredicate) return true;
+    // A NARROWED CHILD WAITS WHILE ITS PARENT'S LANDING IS UNJUDGED (2026-09-28). The child repeats
+    // its parent's defect at the same site; composing it now edits the parent's fresh lines with no
+    // record that they are the parent's fix (39bef90 -> bc99f91, b20274c -> 9c86aff, each reversed
+    // within 30 min). Skip only; the parent's landing never closes the child (measurement before
+    // provenance). Once the parent's landing is judged, the stamp clears and the child is eligible.
+    const parentId = typeof m.parent_gap_id === 'string' ? m.parent_gap_id : '';
+    if (parentId) {
+      const parent = pickLineageIndex.get(parentId) ?? gaps.find((p) => String(p.id ?? '') === parentId);
+      const pm = (parent?.classification_metadata ?? {}) as Record<string, unknown>;
+      if (typeof pm.pending_outcome_verification === 'string' && (pm.pending_outcome_verification as string).length >= 7) return true;
+    }
     return verifyGapCondition(g) === 'pending';
   });
   const targetOf = (g: Record<string, unknown>): string =>
@@ -4484,6 +4499,7 @@ export async function resolveGapToFeature(pointer: GapToFeaturePointer): Promise
       // Empty admitted (whole pool non-actionable — the common all-orphan case) → null,
       // which flows to the graceful "no matching open gap" path, not pickMostLandable([])'s throw.
       if (admitted.length) await refreshHeldCalibration();
+      pickLineageIndex = gapsById;
       gap = admitted.length ? pickMostLandable(admitted) : null;
     }
   } catch (e) {

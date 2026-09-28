@@ -176,7 +176,8 @@ export async function resolveTestSuite(pointer: Record<string, unknown>): Promis
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `ApiKey ${METABOB_API_KEY}` },
       // cwd is only the shell's starting directory; the command cd's to the resolved ROOT itself.
-      body: JSON.stringify({ impulse: { pointer: { type: "shell", command, cwd: SUPER_REPO_ROOT } } }),
+      // timeout_sec: without it the shell kills the process group at 30s, before a suite longer than that prints its summary.
+      body: JSON.stringify({ impulse: { pointer: { type: "shell", command, cwd: SUPER_REPO_ROOT, timeout_sec: Math.min(budgetSec + 30, 900) } } }),
       signal: AbortSignal.timeout(timeoutMs + 30_000),
     });
     const j = (await res.json().catch(() => ({}))) as { stdout?: unknown; body?: { stdout?: unknown } };

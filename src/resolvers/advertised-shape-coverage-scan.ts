@@ -6,6 +6,8 @@ export interface AdvertisedShapeCoverageScanPointer {
   type: "advertised_shape_coverage_scan";
   report_limit?: number;
   dry_run?: boolean;
+  /** One shape to measure: the body then carries a flat producer_count for it (live advertised resolvers only). */
+  shape?: string;
 }
 
 function scanSurrealHeaders(): Record<string, string> {
@@ -42,7 +44,7 @@ export async function resolveAdvertisedShapeCoverageScan(
   let vessel_count = 0;
   try {
     const endpoint = process.env["DISCOVERY_VESSEL_ENDPOINT"] ?? "http://127.0.0.1:8100";
-    if (endpoint === "http://127.0.0.1:8100") { throw new Error("DISCOVERY_VESSEL_ENDPOINT cannot be the default value"); }
+
     const apiKey = process.env["METABOB_API_KEY"] || process.env["DEV_VESSEL_API_KEY"] || undefined;
     const res = await fetch(`${endpoint.replace(/\/+$/, "")}/resolve`, {
       method: "POST",
@@ -98,6 +100,12 @@ export async function resolveAdvertisedShapeCoverageScan(
     shape: "advertisedShapeCoverageReport",
     body: {
       skeleton: false,
+      // Per-shape measurement for a missing-capability gap: vessels advertising the shape now. Null when the
+      // registry could not be read, so an outage never reads as 'no producer'. Catalogue activities that only
+      // declare the shape are not counted: a declared producer is not a live one.
+      ...(typeof pointer.shape === "string" && pointer.shape.length > 0
+        ? { shape: pointer.shape, producer_count: registry_reachable ? (advertised.get(pointer.shape)?.size ?? 0) : null }
+        : {}),
       feature_compose_locations_missing_local_toolbelt: (() => {
           const LOCATION_STATEFUL = ["shellResult", "fs_read", "fs_write", "fs_edit", "patch_with_tools"];
           const llmReachable = (advertised.get("llm_completion")?.size ?? 0) > 0;

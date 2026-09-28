@@ -515,6 +515,30 @@ async function rankWithLlm(summary: string, hits: Array<{ file: string; score: n
 // discovery advertises; a literal falsifier is absent from the file now and names an existing
 // reader in it. Proposals that silence a detector are refused. Depth 1: a step is never
 // decomposed again. Graded by child closure.
+// The decomposer used to see only the first 7000 characters of the edit site, so in a large file it never
+// saw the code a gap names and invented readers from whatever sat at the top (goal-host index.ts: sites at
+// lines 7457-15128, excerpt ending near line 150). Show numbered windows around every file line the gap
+// quotes verbatim instead; with no quoted line, the head of the file as before.
+export function quotedSiteExcerpt(text: string, summary: string, cap = 7000): string {
+  const lines = text.split("\n");
+  const quoted = new Set(summary.split("\n").map((l) => l.replace(/^\s*\d+:\s*/, "").trim()).filter((l) => l.length >= 25));
+  const hits: number[] = [];
+  lines.forEach((l, i) => { if (quoted.has(l.trim())) hits.push(i); });
+  if (hits.length === 0) return text.slice(0, cap);
+  let out = "";
+  let last = -1;
+  for (const h of hits) {
+    const from = Math.max(h - 3, last + 1);
+    const to = Math.min(lines.length - 1, h + 3);
+    if (from > to) continue;
+    const chunk = lines.slice(from, to + 1).map((l, j) => `${from + j + 1}: ${l}`).join("\n") + "\n...\n";
+    if (out.length + chunk.length > cap) break;
+    out += chunk;
+    last = to;
+  }
+  return out || text.slice(0, cap);
+}
+
 export async function decomposeGap(parent: Record<string, unknown>, opts: { directed?: boolean } = {}): Promise<{ written: string[]; reason: string }> {
   const parentId = String(parent.id ?? "");
   const meta = (parent.classification_metadata ?? {}) as Record<string, unknown>;
@@ -523,7 +547,7 @@ export async function decomposeGap(parent: Record<string, unknown>, opts: { dire
   const site = String(meta.edit_site ?? "").replace(/:\d+.*$/, "");
   const siteMatch = /^repos\/([^/]+)\/(.+)$/.exec(site);
   let excerpt = "";
-  if (siteMatch) { try { excerpt = readFileSync(join("/workspace/git/vessels", siteMatch[1] ?? "", siteMatch[2] ?? ""), "utf-8").slice(0, 7000); } catch { excerpt = ""; } }
+  if (siteMatch) { try { excerpt = quotedSiteExcerpt(readFileSync(join("/workspace/git/vessels", siteMatch[1] ?? "", siteMatch[2] ?? ""), "utf-8"), String(parent.summary ?? "")); } catch { excerpt = ""; } }
   const predicate: Record<string, unknown> = {};
   for (const k of ["expected_literal", "hardcoded_url", "evidence_resolve", "verify_shape"]) if (meta[k] !== undefined && meta[k] !== null) predicate[k] = meta[k];
   const lessons = Array.isArray(meta.failure_lessons) ? (meta.failure_lessons as Array<Record<string, unknown>>).slice(-3).map((l) => "- " + String(l.class ?? "?") + ": " + String(l.reason ?? "").slice(0, 300)).join("\n") : "";

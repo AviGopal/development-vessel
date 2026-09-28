@@ -5524,6 +5524,22 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
           // plan already touched the file.
           const anchorLocatorList = [...regionCandidatesFromText(`${String(pointer.spec ?? "")}\n${String(pointer.gap?.summary ?? "")}`), ...focusHints.slice(1), regionHint ?? ""].filter(Boolean);
           const rederiveChoices = safeAnchorLines(liveContent, anchorLocatorList);
+          // A LINE WITH AN IDENTICAL TWIN. safeAnchorLines offers only lines that occur once, so a
+          // planned anchor that occurs N times could never be re-derived (a goal-host fix was refused
+          // twice at one line duplicated verbatim at two sites). Offer each occurrence extended upward
+          // by the fewest preceding lines that make it unique; the chosen one keeps the drafter's
+          // new_string with that verbatim prefix put back in front, so no preceding line is lost.
+          const twinPrefixes = new Map<string, string>();
+          if (anchorNonUnique) {
+            for (let at = liveContent.indexOf(effOld); at >= 0; at = liveContent.indexOf(effOld, at + 1)) {
+              let from = liveContent.lastIndexOf("\n", at - 1) + 1;
+              for (let k = 0; k < 4 && from > 0; k++) {
+                from = liveContent.lastIndexOf("\n", from - 2) + 1;
+                const ext = liveContent.slice(from, at) + effOld;
+                if (occurs(liveContent, ext) === 1) { rederiveChoices.push(ext); twinPrefixes.set(ext, liveContent.slice(from, at)); break; }
+              }
+            }
+          }
           // ENUMERATED CHOICE, NOT FREE TEXT.
           //
           // Offering the anchors as prose to copy was not enough. Measured
@@ -5600,7 +5616,8 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
           }
           if (!refusal && g && cand && occurs(liveContent, cand) === 1) {
             effOld = cand;
-            if (typeof g.new_string === "string") op.new_string = String(g.new_string);
+            if (twinPrefixes.has(cand)) op.new_string = twinPrefixes.get(cand)! + (op.new_string ?? "");
+            else if (typeof g.new_string === "string") op.new_string = String(g.new_string);
             if (!groundedPre && rederiveChoices.length === 1) { effOld = String(rederiveChoices[0]); groundedPre = true; }
             groundedPre = true;
           }

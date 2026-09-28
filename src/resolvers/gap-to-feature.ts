@@ -1724,6 +1724,17 @@ export async function admitActionableGaps(
           continue;
         }
       }
+      // The semantic gate writes where the fix really belongs. When that is an excluded path, every draft
+      // at the gap's own edit_site is refused as not addressing it (obsidian authoring-root: 6 refusals on
+      // 09-27, each naming self-fact-reconcile.ts), so the gap is out of autonomous reach.
+      const suspectedSite = String(meta.suspected_real_location ?? "").replace(/:[^/]*$/, "");
+      if (suspectedSite && suspectedSite !== siteForScope) {
+        const suspectedHit = autonomyScopeExcludes(await autonomyScope(), suspectedSite);
+        if (suspectedHit) {
+          excluded.push({ id, reason: `autonomy_scope(suspected_real_location ${suspectedHit})` });
+          continue;
+        }
+      }
     }
     // An operator hold removes a gap from autonomous work. The picker's skip honours it, but falls back to
     // the top-ranked candidate when every candidate is skipped, so a held gap was picked every 1.5-3 min

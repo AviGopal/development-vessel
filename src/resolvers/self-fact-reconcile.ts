@@ -139,7 +139,7 @@ function hasTsSources(dir: string, depth = 2): boolean {
 
 // ─── the rows (selfFactSpec) ────────────────────────────────────────────────
 const ROWS_PATH = "scripts/substrate/self-facts.json";
-export interface SelfFactRow { id: string; instrument: string; profiles: string[]; edit_site: string; must_fail: string; window_hours?: number; n_floor?: number }
+export interface SelfFactRow { id: string; instrument: string; profiles: string[]; edit_site: string; must_fail: string; window_hours?: number; n_floor?: number; unit?: string; pattern?: string; max?: number; must_fail_line?: string; gate?: "active" | "timer" }
 function readRows(): SelfFactRow[] | null {
   const raw = git(["show", `origin/dev:${ROWS_PATH}`], superRepoRoot());
   if (raw === null) return null;
@@ -158,9 +158,61 @@ const nodeProfile = (): string => process.env["PROFILE_EFFECTIVE"] ?? process.en
 // Each returns what it read and where it diverged. `canary` tells the fact to
 // inject one planted divergence on its COPY side (never its source side, so the
 // canary cannot masquerade as a real finding).
-type FactFn = (canary: boolean) => SelfFactResult;
+type FactFn = (canary: boolean, row: SelfFactRow) => SelfFactResult | Promise<SelfFactResult>;
 
 const FACTS: Record<string, FactFn> = {
+  /**
+   * A unit's journal must not show a known defect's signature: ONE generic instrument parameterised by its row
+   * (unit, pattern, max, window_hours, must_fail_line, gate), so a recurring class is a row of DATA, not new code
+   * (REALIGNMENT 2026-09-29 section 7 step 2). Reported under the ROW id. Not observed (source_read false) when
+   * the unit is not running here: gate "active" needs the unit active; gate "timer" needs <unit>.timer active
+   * AND the service started within the window. The must-fail control goes THROUGH the instrument: the canary is
+   * reported only if the row's pattern matches its own must_fail_line, so a pattern that can never match is blind.
+   * The journal is filtered server-side (--grep) and read asynchronously, so a chatty unit never blocks the loop.
+   */
+  journal_pattern: async (canary, row) => {
+    const fact = row.id;
+    const unit = String(row.unit ?? "");
+    const pattern = String(row.pattern ?? "");
+    const max = typeof row.max === "number" && row.max >= 0 ? row.max : 0;
+    const hours = typeof row.window_hours === "number" && row.window_hours > 0 ? row.window_hours : 1;
+    const out: SelfFactDivergence[] = [];
+    const unread = (note: string): SelfFactResult => ({ fact, source_read: false, copies_read: 0, divergences: out, note });
+    if (!/^[A-Za-z0-9@._-]+$/.test(unit) || !pattern) return unread(`row ${row.id}: unit or pattern missing or invalid`);
+    if (unit === "development-vessel") return unread(`row ${row.id}: refuses this vessel's own journal (its detail lines quote the pattern)`);
+    if (row.id in FACTS) return unread(`row ${row.id}: a journal_pattern row id must not equal an instrument name`);
+    let re: RegExp;
+    try { re = new RegExp(pattern); } catch (err) { return unread(`row ${row.id}: invalid pattern: ${String(err)}`); }
+    const sys = (args: string[]): string => new TextDecoder().decode(Bun.spawnSync(["systemctl", ...args], { stdout: "pipe", stderr: "pipe", timeout: 5_000 }).stdout).trim();
+    try {
+      if (row.gate === "timer") {
+        const timer = sys(["is-active", `${unit}.timer`]);
+        if (timer !== "active") return unread(`${unit}.timer is ${timer || "unknown"} on this node`);
+        const m = sys(["show", unit, "-p", "ExecMainStartTimestamp", "--value", "--timestamp=unix"]).match(/^@(\d+)$/);
+        const ranAt = m ? Number(m[1]) : 0;
+        if (!ranAt || Date.now() / 1000 - ranAt > hours * 3600) return unread(`${unit} has not run in the last ${hours}h on this node`);
+      } else {
+        const active = sys(["is-active", unit]);
+        if (active !== "active") return unread(`${unit} is ${active || "unknown"} on this node, so its journal says nothing about the defect`);
+      }
+      const proc = Bun.spawn(["journalctl", "-u", unit, "--since", `-${hours}h`, "--no-pager", "-o", "cat", "--grep", pattern], { stdout: "pipe", stderr: "pipe" });
+      const killer = setTimeout(() => proc.kill(), 30_000);
+      const text = await new Response(proc.stdout).text();
+      const code = await proc.exited;
+      clearTimeout(killer);
+      // journalctl --grep exits 1 when nothing matched: that is a read, not a failure.
+      if (code !== 0 && code !== 1) return unread(`journal of ${unit} unreadable (exit ${code})`);
+      let n = 0;
+      for (const line of text.split("\n")) if (line && re.test(line)) n++;
+      if (n > max) out.push({ fact, key: row.id, source: `journal:${unit}`, copy: `last ${hours}h`, detail: `${n} line(s) in ${unit}'s journal over the last ${hours}h match the ${row.id} pattern (allowed ${max})`, canary: false });
+      if (canary && typeof row.must_fail_line === "string" && re.test(row.must_fail_line)) {
+        out.push({ fact, key: `${row.id}-canary`, source: `journal:${unit}`, copy: `last ${hours}h`, detail: "must-fail control: the row's pattern matches its own must_fail_line", canary: true });
+      }
+      return { fact, source_read: true, copies_read: 1, divergences: out, note: `${n} matching line(s) over ${hours}h` };
+    } catch (err) {
+      return unread(`journal of ${unit} unreadable: ${String(err)}`);
+    }
+  },
   /** The inventory the deploy step reads must equal the inventory the fleet is built from. */
   fleet_inventory_copy: (canary) => {
     const src = readInventory(sourceInventoryPath());
@@ -349,13 +401,19 @@ export async function resolveSelfFactReconcile(pointer: SelfFactReconcilePointer
   const unregistered = inScope.filter((r) => !(r.instrument in FACTS)).map((r) => r.id);
   const runnable = inScope.filter((r) => r.instrument in FACTS);
   const wanted = (Array.isArray(pointer.facts) && pointer.facts.length > 0 ? runnable.filter((r) => pointer.facts!.includes(r.id)) : runnable).map((r) => r.id);
-  rowEditSite = Object.fromEntries(runnable.map((r) => [r.instrument, r.edit_site]));
+  // Keyed by instrument and by row id (journal_pattern reports under its row id), so rows sharing an instrument
+  // keep their own edit sites.
+  rowEditSite = Object.fromEntries(runnable.flatMap((r) => [[r.instrument, r.edit_site], [r.id, r.edit_site]]));
   // EVERY row runs its must-fail control (the canary) on every planted run, so one
   // blind instrument cannot hide behind another row's canary.
   const results: SelfFactResult[] = [];
-  for (const id of wanted) results.push(FACTS[runnable.find((r) => r.id === id)!.instrument]!(plant));
+  for (const id of wanted) { const row = runnable.find((r) => r.id === id)!; results.push(await FACTS[row.instrument]!(plant, row)); }
   const all = results.flatMap((r) => r.divergences);
-  const blindRows = plant ? results.filter((r) => !r.divergences.some((d) => d.canary)).map((r) => r.fact) : [];
+  // A row that could not be READ is unobserved, not blind and not healthy (qa 09-29): it must neither disable the
+  // other rows (it used to trip the canary-not-found self-gap for the whole run) nor let its own findings close.
+  const unobservedRows = results.filter((r) => !r.source_read).map((r) => r.fact);
+  const readFacts = new Set(results.filter((r) => r.source_read).map((r) => r.fact));
+  const blindRows = plant ? results.filter((r) => r.source_read && !r.divergences.some((d) => d.canary)).map((r) => r.fact) : [];
   const canaryFound = rows !== null && blindRows.length === 0;
   const canaryFact = blindRows.join(", ");
   // Key scoping: a per-gap predicate asks about ONE (fact, key); everything else is
@@ -381,7 +439,7 @@ export async function resolveSelfFactReconcile(pointer: SelfFactReconcilePointer
     // for a fact checked on this run, whose divergence is no longer present, is
     // closed here with an EXERCISED falsifier — the only thing the store's gate
     // accepts for a held or class-2 gap. A landing never closes these; this does.
-    closed = await closeResolved(wanted, real);
+    closed = await closeResolved(wanted.filter((id) => readFacts.has(id)), real);
   }
   // Findings in the form light-dispatch grades (it counts `findings`/`gaps_emitted`,
   // not `divergences`): one per real divergence, with a stable hash so a repeat run
@@ -408,6 +466,7 @@ export async function resolveSelfFactReconcile(pointer: SelfFactReconcilePointer
       profile,
       rows_checked: wanted,
       blind_rows: blindRows,
+      unobserved_rows: unobservedRows,
       unregistered_rows: unregistered,
       observed,
       gaps_filed: filed,

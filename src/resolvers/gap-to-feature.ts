@@ -634,11 +634,20 @@ export async function decomposeGap(parent: Record<string, unknown>, opts: { dire
     const childId = `${parentId}-step-${k}`;
     // NEVER OVERWRITE AN OPEN STEP (09-29): child ids are deterministic and three callers re-decompose,
     // so a re-decomposition silently replaced a step's check while its landing was pending.
+    // Any existing step is protected, closed ones too (rewriting a settled step reopened it); only a
+    // step closed as superseded or rejected may be replaced. An unanswerable check refuses: node 2's
+    // forwarded store read returns 503 during node-1 restarts, exactly the window this guard is for.
+    type StepRow = { status?: unknown; classification_metadata?: { closed_reason?: unknown } };
+    let existingRows: StepRow[] | null = null;
     try {
-      const existing = await resolveSubstrateGap({ type: "substrateGap", id: childId, status: "open" } as never);
-      const rows = ((existing?.body as { gaps?: unknown[] } | undefined)?.gaps) ?? [];
-      if (rows.length > 0) { refusals.push(`step ${k}: ${childId} is already open; not overwritten`); continue; }
-    } catch { /* unreadable store: fall through and write, as before */ }
+      const existing = await resolveSubstrateGap({ type: "substrateGap", id: childId } as never);
+      const body = existing?.body as { gaps?: unknown } | undefined;
+      existingRows = Array.isArray(body?.gaps) ? (body!.gaps as StepRow[]) : null;
+    } catch { existingRows = null; }
+    if (existingRows === null) { refusals.push(`step ${k}: could not check whether ${childId} exists; not written`); continue; }
+    const replaceable = (r: StepRow): boolean =>
+      String(r.status ?? "") === "superseded" || /supersed|reject/i.test(String(r.classification_metadata?.closed_reason ?? ""));
+    if (existingRows.some((r) => !replaceable(r))) { refusals.push(`step ${k}: ${childId} already exists; not overwritten`); continue; }
     // Blank the predicate and sentinel fields this child did not choose: the store carries omitted keys
     // forward, and a leftover removed-line hardcoded_url shadowed a new check and inverted it (09-29).
     const cleared: Record<string, unknown> = { hardcoded_url: "", predicate_derived_at: "", predicate_commit: "", pending_outcome_verification: "" };

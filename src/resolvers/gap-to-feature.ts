@@ -2979,7 +2979,14 @@ async function markPendingVerification(gap: Record<string, unknown>, sha: string
         classification_metadata: {
           ...meta0,
           pending_outcome_verification: sha ?? meta0['pending_outcome_verification'] ?? "unknown",
-          pending_set_at: new Date().toISOString(),
+          // Keep the ORIGINAL stamp while the landing is the same one. Re-stamping on every check made
+          // the gaps just checked the newest, so the newest-first sweep slice re-selected the same 24
+          // every tick and 59 measurable pending gaps were never examined (09-29). The check time is
+          // recorded separately and orders the sweep.
+          pending_set_at: (sha === undefined || sha === meta0['pending_outcome_verification']) && typeof meta0['pending_set_at'] === "string"
+            ? meta0['pending_set_at']
+            : new Date().toISOString(),
+          pending_last_checked_at: new Date().toISOString(),
           disposition: "pending_verification",
           pending_note: note,
         },
@@ -3140,14 +3147,16 @@ const pending = gaps
         const m = (g.classification_metadata ?? {}) as Record<string, unknown>;
         return typeof m.pending_outcome_verification === "string" && (m.pending_outcome_verification as string).length >= 7;
       })
-      // Measurable gaps first, newest stamp first: predicate-less stamped gaps can never resolve, and taking
-      // the first N in store order let them hold every slot, so newer landings were never judged.
+      // Measurable gaps first: predicate-less stamped gaps can never resolve, and taking the first N in
+      // store order let them hold every slot. Then LEAST RECENTLY CHECKED first (never-checked, i.e. new
+      // landings, sort first), so every pending gap rotates through the slice. Newest pending_set_at first
+      // was a fixed set, because checking a gap re-stamped it (09-29).
       .sort((a, b) => {
         const ma = (a.classification_metadata ?? {}) as Record<string, unknown>;
         const mb = (b.classification_metadata ?? {}) as Record<string, unknown>;
         const pa = ma.expected_literal || ma.hardcoded_url || ma.verify_shape || ma.evidence_resolve ? 0 : 1;
         const pb = mb.expected_literal || mb.hardcoded_url || mb.verify_shape || mb.evidence_resolve ? 0 : 1;
-        return pa - pb || String(mb.pending_set_at ?? "").localeCompare(String(ma.pending_set_at ?? ""));
+        return pa - pb || String(ma.pending_last_checked_at ?? "").localeCompare(String(mb.pending_last_checked_at ?? ""));
       })
       .slice(0, PENDING_VERIFY_SWEEP_LIMIT);
     for (const g of pending) {

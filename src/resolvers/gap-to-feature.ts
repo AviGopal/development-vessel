@@ -226,10 +226,16 @@ export function gapIsBackedOff(
   return elapsed < wait;
 }
 
-/** A repos/<vessel>/... path maps to an EXISTING file under the runtime root. */
+/**
+ * A repos/<vessel>/... path maps to an EXISTING file under the runtime root OR the vessel clone.
+ * The runtime tree is an image layer that omits most test/ files, while the lane edits the clone,
+ * so a gap whose edit_site is a test file read as ungroundable (measured 2026-09-29 on node 2:
+ * /vessels/activity-api/test held 1 file; 8 open gaps cited clone-only paths, 3 of them class2).
+ */
 function repoPathExists(repoRelative: string): boolean {
+  const rel = repoRelative.replace(/^repos\//, "");
   try {
-    return existsSync(join(runtimeRoot(), repoRelative.replace(/^repos\//, "")));
+    return existsSync(join(runtimeRoot(), rel)) || existsSync(join(vesselsCloneRoot(), rel));
   } catch {
     return false;
   }
@@ -3108,6 +3114,11 @@ async function landedCommitRunningHere(sha: string): Promise<"running" | "not se
     }
   } catch { return "running"; }
   if (!vessel) return "running";
+  // A commit that touches only test files never reaches the runtime (pull-sync mirrors src/ sql/
+  // scripts/ and does not restart for it), so waiting for a restart would hold its gap open
+  // forever. Its check (a test_suite run) reads the clone, which the loop above proved contains it.
+  const touched = (sweepGitOut(cloneDir, ["diff-tree", "--no-commit-id", "--name-only", "-r", sha]) ?? "").split("\n").filter(Boolean);
+  if (touched.length > 0 && touched.every((f) => /^tests?\//.test(f))) return "running";
   let active = "";
   let startedAt = 0;
   try {

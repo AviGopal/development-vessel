@@ -42,7 +42,15 @@ const STATEFUL_UI_ENDPOINT =
  * poolImpulse producer. The user reads node 1's surface (2026-09-29); node 2 reaches it only through
  * node 1's development-vessel, which this record can name. No record: empty list, today's order.
  */
+let askRouteCache: { at: number; ids: string[] } | null = null;
 async function preferredAskVesselIds(discovery: string): Promise<string[]> {
+  // Cached 30 s (the autonomyScope pattern): a sweep escalates ~24 asks at once.
+  if (askRouteCache && Date.now() - askRouteCache.at < 30_000) return askRouteCache.ids;
+  const ids = await readPreferredAskVesselIds(discovery);
+  askRouteCache = { at: Date.now(), ids };
+  return ids;
+}
+async function readPreferredAskVesselIds(discovery: string): Promise<string[]> {
   try {
     const dr = await fetch(`${discovery}/resolve`, {
       method: "POST",
@@ -77,7 +85,13 @@ async function preferredAskVesselIds(discovery: string): Promise<string[]> {
 }
 
 export async function resolveUiWriteTarget(shape: string, forwarded = false): Promise<string[]> {
+  return (await resolveUiWriteTargets(shape, forwarded)).targets;
+}
+
+/** The ordered targets, and whether a humanAskRoute record restricted them to its named vessels. */
+async function resolveUiWriteTargets(shape: string, forwarded = false): Promise<{ targets: string[]; routed: boolean }> {
   const targets: string[] = [];
+  let routed = false;
   // Discovery only when the process was given one: a test run under env -i has none, and must not
   // reach live discovery and post questions onto the live human surface.
   const discovery = process.env["DISCOVERY_ENDPOINT"];
@@ -98,6 +112,25 @@ export async function resolveUiWriteTarget(shape: string, forwarded = false): Pr
         if (p >= 0) return p;
         return preferred.length + (id.startsWith("human-surface") ? 0 : 1);
       };
+      // WITH A ROUTE RECORD, ONLY ITS NAMED TARGETS COUNT (qa, 09-29). Falling through to the next target
+      // delivered node 2's asks to node 2's own unread surface whenever node 1 was restarting; that
+      // answered 200, was recorded as solicited, and was never asked again.
+      if (preferred.length > 0) {
+        routed = true;
+        for (const id of preferred) {
+          if (id === VESSEL_ID) continue;
+          const v = vessels.find((x) => String(x.vesselId ?? "") === id);
+          if (!v) continue;
+          const re = String(v.resolve_endpoint ?? "");
+          const url = /^https?:\/\//.test(re) ? re : (v.endpoint ? String(v.endpoint).replace(/\/+$/, "") + (re || "/resolve") : "");
+          if (url && !targets.includes(url)) targets.push(url);
+        }
+        // Named elsewhere but not discoverable right now (e.g. restarting): deliver nowhere, so the ask
+        // is retried later rather than landing on an unread surface. Named only this vessel (node 1
+        // reading its own route): deliver locally as before.
+        if (preferred.some((id) => id !== VESSEL_ID)) return { targets, routed };
+        routed = false;
+      }
       const ranked = vessels
         .filter((v) => {
           const id = String(v.vesselId ?? "");
@@ -115,18 +148,23 @@ export async function resolveUiWriteTarget(shape: string, forwarded = false): Pr
   } catch { /* discovery unreadable: fall back to the pinned endpoint below */ }
   const pinned = `${STATEFUL_UI_ENDPOINT}/resolve`;
   if (!targets.includes(pinned)) targets.push(pinned);
-  return targets;
+  return { targets, routed };
 }
 
 export async function resolveUiWritePassthrough(
   pointer: UiWritePointer,
 ): Promise<ResolverResult> {
-  const targets = await resolveUiWriteTarget(pointer.type, !!pointer.forwarded_from);
+  const { targets, routed } = await resolveUiWriteTargets(pointer.type, !!pointer.forwarded_from);
   // Mark a write we hand to another node so its passthrough delivers it there and does not forward it.
   const outgoing = pointer.forwarded_from ? pointer : { ...pointer, forwarded_from: VESSEL_ID };
   let res: Response | null = null;
   let lastError = "";
-  for (const url of targets) {
+  // A routed target gets a second try 5 s later to ride out a restart's drain window; unrouted
+  // delivery keeps one try per target and falls through as before.
+  const attempts = targets.flatMap((url) => (routed ? [url, url] : [url]));
+  for (let i = 0; i < attempts.length; i++) {
+    const url = attempts[i]!;
+    if (routed && i > 0) await new Promise((r) => setTimeout(r, 5_000));
     try {
       res = await fetch(url, {
         method: "POST",

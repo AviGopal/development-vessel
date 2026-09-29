@@ -593,6 +593,9 @@ export async function decomposeGap(parent: Record<string, unknown>, opts: { dire
     if (shape) {
       const producers = await discoverResolveUrls(shape);
       if (!producers || producers.length === 0) { refusals.push(`step ${k}: shape ${shape} is not advertised`); continue; }
+      // A CHECK THAT WRITES IS NOT A CHECK (09-29): advertisement alone let 12 uiPanel_write/uiQuestion_write
+      // checks through, and verifying them performed live writes. The verifier refuses them too (487a7e9).
+      if (/_write$/.test(shape)) { refusals.push(`step ${k}: shape ${shape} is a write, not a read`); continue; }
       // A step whose predicate is the PARENT's own check cannot be verified alone: one step will not
       // flip it, so a generic step "satisfied" it in prose while the parent's check stayed failing
       // (the relevance-sink step landed a size check, 04b3e9c, with divergence still 1).
@@ -603,13 +606,23 @@ export async function decomposeGap(parent: Record<string, unknown>, opts: { dire
       if (sameAsParent) { refusals.push(`step ${k}: its falsifier is the parent's own check, which one step will not flip`); continue; }
       // A shape check with no measured field reads 'unknown' in the closure sweep forever: the step can
       // be neither closed nor recorded as falsified. 15 live step/probe predicates were born that way.
-      const measured = !!childEr && ["zero_field", "nonzero_field", "defect_field"].some((fk) => typeof (childEr as Record<string, unknown>)[fk] === "string");
+      // The verifier reads inner[field] FLAT, so the field must be a plain identifier: a path such as
+      // entries.length can only ever read unknown (route-edit-ec962628-step-1, 09-29).
+      const measured = !!childEr && ["zero_field", "nonzero_field", "defect_field"].some((fk) => {
+        const fv = (childEr as Record<string, unknown>)[fk];
+        return typeof fv === "string" && /^[A-Za-z_][A-Za-z0-9_]*$/.test(fv);
+      });
       if (!measured) { refusals.push(`step ${k}: its shape check names no zero_field/defect_field, so it could never be judged`); continue; }
       if (typeof f.verify_shape === "string") childPredicate.verify_shape = f.verify_shape; else childPredicate.evidence_resolve = f.evidence_resolve;
     } else if (typeof f.expected_literal === "string" && f.expected_literal.trim().length >= 4) {
       const lit = f.expected_literal.trim();
       const reader = String(f.reader ?? "").trim();
       if (text.includes(lit)) { refusals.push(`step ${k}: literal ${lit} already present`); continue; }
+      // The verifier reads the RUNNING tree (runtimeRoot), not this clone: a literal present there is
+      // already satisfied, so it could never credit a landing.
+      let runningText = "";
+      try { runningText = readFileSync(join(runtimeRoot(), sm[1] ?? "", sm[2] ?? ""), "utf-8"); } catch { /* not deployed here: the clone check above stands */ }
+      if (runningText.includes(lit)) { refusals.push(`step ${k}: literal ${lit} already present in the running tree`); continue; }
       if (!reader || !text.includes(reader)) { refusals.push(`step ${k}: reader ${reader || "(none)"} not found in ${stepSite}`); continue; }
       // v1.1: the reader must be a FUNCTION in the file (defined or called), not a type or interface.
       const readerRe = reader.replace(/[.*+?^${}()|[\]\\]/g, (ch) => "\\" + ch);
@@ -619,7 +632,20 @@ export async function decomposeGap(parent: Record<string, unknown>, opts: { dire
       childPredicate.literal_reader = reader;
     } else { refusals.push(`step ${k}: no machine-checkable falsifier`); continue; }
     const childId = `${parentId}-step-${k}`;
-    await resolveSubstrateGapWrite({ type: "substrateGap_write", gap: { id: childId, category: "decomposed_step", source: "substrate_detected", summary: `[step ${k} of ${parentId}] ${change}`, detected_at: new Date().toISOString(), status: "open", classification_metadata: { edit_site: stepSite, parent_gap_id: parentId, predicate_source: "decompose", ...childPredicate } } } as never);
+    // NEVER OVERWRITE AN OPEN STEP (09-29): child ids are deterministic and three callers re-decompose,
+    // so a re-decomposition silently replaced a step's check while its landing was pending.
+    try {
+      const existing = await resolveSubstrateGap({ type: "substrateGap", id: childId, status: "open" } as never);
+      const rows = ((existing?.body as { gaps?: unknown[] } | undefined)?.gaps) ?? [];
+      if (rows.length > 0) { refusals.push(`step ${k}: ${childId} is already open; not overwritten`); continue; }
+    } catch { /* unreadable store: fall through and write, as before */ }
+    // Blank the predicate and sentinel fields this child did not choose: the store carries omitted keys
+    // forward, and a leftover removed-line hardcoded_url shadowed a new check and inverted it (09-29).
+    const cleared: Record<string, unknown> = { hardcoded_url: "", predicate_derived_at: "", predicate_commit: "", pending_outcome_verification: "" };
+    if (!("expected_literal" in childPredicate)) { cleared.expected_literal = ""; cleared.literal_reader = ""; }
+    if (!("evidence_resolve" in childPredicate)) cleared.evidence_resolve = null;
+    if (!("verify_shape" in childPredicate)) cleared.verify_shape = "";
+    await resolveSubstrateGapWrite({ type: "substrateGap_write", gap: { id: childId, category: "decomposed_step", source: "substrate_detected", summary: `[step ${k} of ${parentId}] ${change}`, detected_at: new Date().toISOString(), status: "open", classification_metadata: { edit_site: stepSite, parent_gap_id: parentId, predicate_source: "decompose", ...cleared, ...childPredicate } } } as never);
     written.push(childId);
   }
   const reason = written.length > 0 ? `wrote ${written.length} step(s)` + (refusals.length ? `; refused: ${refusals.join("; ")}` : "") : (typeof parsed.cannot_falsify === "string" && parsed.cannot_falsify ? "cannot_falsify: " + parsed.cannot_falsify.slice(0, 200) : "no valid step: " + refusals.join("; "));

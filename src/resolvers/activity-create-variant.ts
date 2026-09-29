@@ -183,6 +183,11 @@ async function enforceCanonicalAnalyzePrompt(template: Record<string, unknown>):
       inventory;
     cfg["prompt"] = promptWithInventory;
     cfg["max_tokens"] = 1500;
+    // SINGLE SHOT (2026-09-29). With no tools field llm_completion_dispatch attaches the default
+    // investigation tools, and this ~41K-char prompt then ran a multi-turn tool loop re-sending full
+    // source files each turn (~470K summed input tokens per call on gpt-5). Everything the analysis
+    // needs is inline (scenario, traces, file inventory), so an explicit empty array opts out.
+    cfg["tools"] = [];
     task["config"] = cfg;
     task["outputShapes"] = ["patch_proposal"];
   }

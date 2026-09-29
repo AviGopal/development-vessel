@@ -3106,7 +3106,9 @@ export async function sweepPendingLandVerifications(): Promise<{ checked: number
     const read = await resolveSubstrateGap({
       type: "substrateGap",
       status: "open",
-      limit: 1000,
+      // NO CONSTANT CAP (2026-09-29, sibling of the auto-pick read in 355d6de): at 1844 open gaps a
+      // 1000 window hid 5 pending landings and 50 predicate-bearing gaps from verification.
+      limit: Number.MAX_SAFE_INTEGER,
       exclude_categories: [...DECISION_LOG_GAP_CATEGORIES],
     } as never);
     const gaps = ((read?.body as { gaps?: Record<string, unknown>[] })?.gaps) ?? [];

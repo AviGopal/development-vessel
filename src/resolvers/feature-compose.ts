@@ -5930,9 +5930,10 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
     // (four times on 2026-09-29: error.test.ts, substrate-gap.test.ts). Before refusing, run the
     // UNTOUCHED base now (a detached worktree at HEAD; the draft is uncommitted) in the same
     // environment: a failure that is red there too is pre-existing, not introduced here. The
-    // fresh base is trusted only if it ran healthily (pass count >= the draft run's), so a
-    // base run that collapsed cannot excuse a real regression.
-    if (confirmedNewTest.length > 0) {
+    // fresh base is trusted only if it ran healthily (at least 90% of the cached base's pass
+    // count), so a base run that collapsed cannot excuse a real regression. A pass-count drop is
+    // re-read the same way: a live-state flip lowers the draft's count and the base's alike.
+    if (confirmedNewTest.length > 0 || passRegressed) {
       const bw = `/tmp/fc-base-${v.replace(/[^a-zA-Z0-9]+/g, "-")}-${Date.now()}`;
       const sh3 = await callTool(toolsEndpoint, "shell", {
         command: `git -C ${JSON.stringify(vAbs)} worktree add -q --detach ${bw} HEAD && ln -s ${JSON.stringify(vAbs + "/node_modules")} ${bw}/node_modules && cd ${bw} && (timeout 240 env -i PATH="$PATH" HOME="$HOME" NODE_ENV=test TZ=UTC WORKSPACE_ROOT="$(mktemp -d)" bun test --timeout 20000 2>&1 || true); git -C ${JSON.stringify(vAbs)} worktree remove --force ${bw} >/dev/null 2>&1; true`,
@@ -5940,15 +5941,23 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
       });
       const raw3 = String((sh3.body as { stdout?: unknown })?.stdout ?? "");
       const basePassNow = testPassCount(raw3);
-      if (basePassNow !== null && (curPass === null || basePassNow >= curPass)) {
+      // Healthy = the fresh base did not collapse. Comparing it with the DRAFT's pass count (as before)
+      // refused every draft that ADDS tests, since the untouched base cannot contain them (qa, 09-29).
+      const healthFloor = Math.floor(0.9 * (basePass ?? curPass ?? 0));
+      if (basePassNow !== null && basePassNow >= healthFloor) {
         const baseNow = testFailureSet(raw3);
         const preExisting = confirmedNewTest.filter((t) => baseNow.has(t));
         if (preExisting.length > 0) {
           console.log(`[feature-compose] base re-read for ${v}: ${preExisting.length} of ${confirmedNewTest.length} "new" failure(s) also fail on the untouched base run now — pre-existing, not blamed on this draft`);
           confirmedNewTest = confirmedNewTest.filter((t) => !baseNow.has(t));
         }
+        // Only a draft that passes FEWER tests than the untouched tree run now has lost coverage.
+        if (passRegressed && curPass !== null && curPass >= basePassNow) {
+          console.log(`[feature-compose] base re-read for ${v}: draft pass ${curPass} >= fresh base ${basePassNow} (cached ${String(basePass)}) — the drop was the environment, not this draft`);
+          passRegressed = false;
+        }
       } else {
-        console.warn(`[feature-compose] base re-read for ${v} did not run healthily (pass ${String(basePassNow)} vs draft ${String(curPass)}) — keeping the refusal`);
+        console.warn(`[feature-compose] base re-read for ${v} did not run healthily (fresh base pass ${String(basePassNow)} < floor ${healthFloor} from cached base ${String(basePass)}) — keeping the refusal`);
       }
     }
     const testOk = confirmedNewTest.length === 0 && !passRegressed;

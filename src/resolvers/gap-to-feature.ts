@@ -3092,6 +3092,38 @@ function sweepGitOut(cloneDir: string, args: string[]): string | null {
   } catch { /* spawn failed: no output */ }
   return out;
 }
+/**
+ * Is the landed commit RUNNING on this node? A measured 'absent' read from this node's runtime file is
+ * evidence only if this node actually serves the vessel on that code: on 2026-09-29 node 2 closed a gap
+ * landed_verified for activity-api, which node 2 does not run, while node 1 still served the old code.
+ * 'running' also covers a commit in no vessel clone (e.g. the super-repo), where this cannot be judged.
+ */
+async function landedCommitRunningHere(sha: string): Promise<"running" | "not served here" | "awaiting restart"> {
+  let vessel: string | null = null;
+  let cloneDir = "";
+  try {
+    for (const name of readdirSync(vesselsCloneRoot()).sort()) {
+      const dir = join(vesselsCloneRoot(), name);
+      if (existsSync(join(dir, ".git")) && sweepGitOut(dir, ["merge-base", "--is-ancestor", sha, "HEAD"]) !== null) { vessel = name; cloneDir = dir; break; }
+    }
+  } catch { return "running"; }
+  if (!vessel) return "running";
+  let active = "";
+  let startedAt = 0;
+  try {
+    active = new TextDecoder().decode(Bun.spawnSync(["systemctl", "is-active", vessel], { stdout: "pipe", stderr: "pipe", timeout: 5_000 }).stdout).trim();
+    const p = Bun.spawnSync(["systemctl", "show", vessel, "-p", "ActiveEnterTimestamp", "--value", "--timestamp=unix"], { stdout: "pipe", stderr: "pipe", timeout: 5_000 });
+    const m = new TextDecoder().decode(p.stdout).trim().match(/^@(\d+)$/);
+    startedAt = m ? Number(m[1]) : 0;
+  } catch { return "awaiting restart"; }
+  if (active !== "active") return "not served here";
+  const committedAt = Number(sweepGitOut(cloneDir, ["log", "-1", "--format=%ct", sha]) ?? "0");
+  if (!startedAt || !committedAt || startedAt <= committedAt) return "awaiting restart";
+  const { selfRestartAlreadyOwed } = await import("./vessel-mitosis-cutover.js");
+  if (selfRestartAlreadyOwed(vessel)) return "awaiting restart";
+  return "running";
+}
+
 async function recordFalsifiedAutonomousLanding(g: Record<string, unknown>, meta: Record<string, unknown>, sha: string): Promise<"recorded" | "awaiting_restart" | "not_applicable"> {
   if (meta.regressed_by !== undefined && meta.regressed_by !== null) return "not_applicable";
   if (meta.predicate_source === "removed_line_of_landing_commit") return "not_applicable";
@@ -3307,6 +3339,15 @@ const pending = gaps
       if (verdict === "unknown" && !closeOracleEarnedTrust("landed_commit")) {
         tally.unknown += 1;
         continue; // unmeasured and untrusted — leave open for the next tick
+      }
+      // CLOSE ONLY WHERE THE FIX RUNS (09-29): this node's runtime file is evidence only if this node serves
+      // the vessel on the landed code. Otherwise leave it open for the node that does.
+      const runningHere = await landedCommitRunningHere(sha);
+      if (runningHere !== "running") {
+        tally.awaiting_restart += 1;
+        sweepAwaitingRestart = true;
+        console.log(`[gap-sweep] gap ${gidSweep} reads ${verdict} but landed ${sha.slice(0, 12)} is ${runningHere} on this node — not closed here`);
+        continue;
       }
       // verdict === 'absent' (MEASURED resolved) OR 'unknown' with earned trust -> close.
       tally.absent += 1;

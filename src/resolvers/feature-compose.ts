@@ -5923,6 +5923,34 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
         // console.warn(`[feature-compose] FLAKE CONFIRMATION for ${v}: ${shed} of ${newTest.length} "new" failures did not reproduce on a second run (pass ${String(curPass)} -> ${String(curPass2)}). Only reproducible failures block this draft.`);
       }
     }
+    // THE BASELINE MUST BE RE-READ UNDER THE SAME CONDITIONS (REALIGNMENT 2026-09-29 step 7).
+    // The baseline above can be up to 2h old (cache) and was taken under whatever live state
+    // held then. A test whose result depends on live services or on suite load order can pass
+    // there, then fail on BOTH draft runs, and a correct draft is refused on an unrelated test
+    // (four times on 2026-09-29: error.test.ts, substrate-gap.test.ts). Before refusing, run the
+    // UNTOUCHED base now (a detached worktree at HEAD; the draft is uncommitted) in the same
+    // environment: a failure that is red there too is pre-existing, not introduced here. The
+    // fresh base is trusted only if it ran healthily (pass count >= the draft run's), so a
+    // base run that collapsed cannot excuse a real regression.
+    if (confirmedNewTest.length > 0) {
+      const bw = `/tmp/fc-base-${v.replace(/[^a-zA-Z0-9]+/g, "-")}-${Date.now()}`;
+      const sh3 = await callTool(toolsEndpoint, "shell", {
+        command: `git -C ${JSON.stringify(vAbs)} worktree add -q --detach ${bw} HEAD && ln -s ${JSON.stringify(vAbs + "/node_modules")} ${bw}/node_modules && cd ${bw} && (timeout 240 env -i PATH="$PATH" HOME="$HOME" NODE_ENV=test TZ=UTC bun test --timeout 20000 2>&1 || true); git -C ${JSON.stringify(vAbs)} worktree remove --force ${bw} >/dev/null 2>&1; true`,
+        cwd: REPO_ROOT,
+      });
+      const raw3 = String((sh3.body as { stdout?: unknown })?.stdout ?? "");
+      const basePassNow = testPassCount(raw3);
+      if (basePassNow !== null && (curPass === null || basePassNow >= curPass)) {
+        const baseNow = testFailureSet(raw3);
+        const preExisting = confirmedNewTest.filter((t) => baseNow.has(t));
+        if (preExisting.length > 0) {
+          console.log(`[feature-compose] base re-read for ${v}: ${preExisting.length} of ${confirmedNewTest.length} "new" failure(s) also fail on the untouched base run now — pre-existing, not blamed on this draft`);
+          confirmedNewTest = confirmedNewTest.filter((t) => !baseNow.has(t));
+        }
+      } else {
+        console.warn(`[feature-compose] base re-read for ${v} did not run healthily (pass ${String(basePassNow)} vs draft ${String(curPass)}) — keeping the refusal`);
+      }
+    }
     const testOk = confirmedNewTest.length === 0 && !passRegressed;
     // installOk gates alongside tcOk: a manifest that cannot install is a broken
     // change no matter how cleanly the source typechecks against a stale node_modules.

@@ -3393,6 +3393,19 @@ function testExecutedCount(raw: string): number | null {
   return pass === null || fail === null ? null : pass + fail;
 }
 
+/** Test files that failed to LOAD in a `bun test` run: the last `N error(s)` summary line, or failing that
+ *  the number of "Unhandled error between tests" markers. 0 when neither appears. */
+function testLoadErrorCount(raw: string): number {
+  let summary: number | null = null;
+  let markers = 0;
+  for (const line of raw.split("\n")) {
+    const e = line.match(/^\s*(\d+)\s+errors?\b/);
+    if (e && e[1]) summary = parseInt(e[1], 10);   // last summary wins, as in testPassCount
+    if (line.includes("Unhandled error between tests")) markers++;
+  }
+  return summary ?? markers;
+}
+
 function classifyComposeFailure(appliedOps: Array<{ ok: boolean; detail?: string }>, verifyResults: Array<{ ok: boolean; output: string }>, semanticReason: string): string {
   const ap = appliedOps.find((a) => !a.ok);
   if (ap) {
@@ -5893,7 +5906,22 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
     // break the suite — that is exactly how 53e4267 landed a no-op and left 5 tests red
     // for 10 days. Block only on failures this draft INTRODUCED, so pre-existing reds in
     // an unrelated test file don't wedge every autonomous edit.
-    const curTest = testFailureSet(raw);
+    // NO SUMMARY: ONE RETRY, THEN NOT A PASS (qa, 09-29). A run killed by the 240 s timeout or the shell's
+    // process-group kill, or a suite that calls process.exit, prints no summary, and every check below
+    // would abstain. When the cached baseline had a summary, run the suite once more and judge the draft
+    // on that run; if it has none either, summaryMissing refuses the draft as unverifiable.
+    let testRaw = raw;
+    let summaryRetryRc: string | null = null;
+    if (baselineTestPass.get(v) !== undefined && testPassCount(raw) === null) {
+      const shR = await callTool(toolsEndpoint, "shell", {
+        command: `cd ${JSON.stringify(vAbs)} && (timeout 240 env -i PATH="$PATH" HOME="$HOME" NODE_ENV=test TZ=UTC WORKSPACE_ROOT="$(mktemp -d)" bun test --timeout 20000 2>&1; echo "SUITE_RC=$?") || true`,
+        cwd: REPO_ROOT,
+      });
+      testRaw = String((shR.body as { stdout?: unknown })?.stdout ?? "");
+      summaryRetryRc = testRaw.match(/SUITE_RC=(\d+)/)?.[1] ?? null;
+      console.log(`[feature-compose] test run for ${v} printed no summary; retried once (rc ${String(summaryRetryRc)}, summary ${testPassCount(testRaw) === null ? "still missing" : "present"})`);
+    }
+    const curTest = testFailureSet(testRaw);
     const baseTest = baselineTestFails.get(v) ?? new Set<string>();
     const newTest = [...curTest].filter((t) => !baseTest.has(t));
     // Tests that VANISH are as bad as tests that fail, and the failure-set delta cannot see
@@ -5902,7 +5930,7 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
     // BOTH counts are known, so a vessel with no suite — or a run that died before printing a
     // summary — never blocks on a missing number.
     const basePass = baselineTestPass.get(v);
-    const curPass = testPassCount(raw);
+    const curPass = testPassCount(testRaw);
     let passRegressed = basePass !== undefined && curPass !== null && curPass < basePass;
     // FLAKE MUST BE CONFIRMED, NOT ASSUMED TO BE A REGRESSION.
     //
@@ -5970,9 +5998,15 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
         // at a constant executed count; deleting, skipping or failing to load tests lowers it. A
         // pass-count comparison let a 1-3 test deletion through whenever the fresh run lost as many
         // passes to noise (qa, 09-29). Genuinely new failures are still judged by confirmedNewTest.
-        const draftExecuted = testExecutedCount(raw);
+        const draftExecuted = testExecutedCount(testRaw);
         const baseExecutedNow = testExecutedCount(raw3);
-        if (passRegressed && draftExecuted !== null && baseExecutedNow !== null && draftExecuted >= baseExecutedNow) {
+        // A file that fails to LOAD counts as one fail however many tests it holds, so the counts are
+        // comparable only when the fresh base had no more load errors than the draft (qa, 09-29).
+        // Known limit: swapping K real tests for K trivial ones keeps the count; only comparing test
+        // names would catch that.
+        const baseLoadErrorsNow = testLoadErrorCount(raw3);
+        const draftLoadErrors = testLoadErrorCount(testRaw);
+        if (passRegressed && draftExecuted !== null && baseExecutedNow !== null && draftExecuted >= baseExecutedNow && baseLoadErrorsNow <= draftLoadErrors) {
           console.log(`[feature-compose] base re-read for ${v}: draft executed ${draftExecuted} tests >= fresh base ${baseExecutedNow} (pass ${String(curPass)} vs ${basePassNow}, cached ${String(basePass)}) — the pass drop was the environment, not this draft`);
           passRegressed = false;
         }
@@ -5980,7 +6014,9 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
         console.warn(`[feature-compose] base re-read for ${v} did not run healthily (fresh base pass ${String(basePassNow)} < floor ${healthFloor} from cached base ${String(basePass)}) — keeping the refusal`);
       }
     }
-    const testOk = confirmedNewTest.length === 0 && !passRegressed;
+    // After the retry above, a missing summary with a baseline that had one means the suite was not judged.
+    const summaryMissing = basePass !== undefined && curPass === null;
+    const testOk = confirmedNewTest.length === 0 && !passRegressed && !summaryMissing;
     // installOk gates alongside tcOk: a manifest that cannot install is a broken
     // change no matter how cleanly the source typechecks against a stale node_modules.
     // ABSENT MARKER MEANS "NOT OBSERVED", NOT "FAILED".
@@ -6009,6 +6045,7 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
       + (testOk ? "" : [
       confirmedNewTest.length > 0 ? ` | NEW test failures introduced by this draft, REPRODUCED on a second run (${confirmedNewTest.length}): ${confirmedNewTest.slice(0, 5).join(" ; ").slice(0, 600)}` : "",
       passRegressed ? ` | PASSING TESTS DISAPPEARED: ${basePass} -> ${curPass} (a draft must not delete coverage or break module load to go green)` : "",
+      summaryMissing ? ` | TEST SUITE PRODUCED NO SUMMARY on two runs (baseline passed ${basePass}; retry rc ${String(summaryRetryRc)}${summaryRetryRc === "124" || summaryRetryRc === "137" ? " = timed out or killed" : summaryRetryRc === "0" ? " = the suite exited early" : ""}): this draft cannot be verified` : "",
     ].join(""));
     return { vessel: v, errors: ok ? 0 : "verify", exit_code: tcExit, ok, output: (raw + detail).trim() };
   };

@@ -145,8 +145,19 @@ export async function resolveComposerInterruptionSweep(pointer: ComposerInterrup
     const summary = `${foreignCount} foreign composer restart(s) observed via cutover: ${vessels.join(", ")}`;
     try {
       const { resolveSubstrateGapWrite } = await import("./substrate-gap.js");
-      const res = await resolveSubstrateGapWrite({ type: "substrateGap_write", gap: { id: gapId, category: "attempt_consequence", source: "substrate_detected", status: "open", detected_at: new Date().toISOString(), summary, classification_metadata: { edit_site: "repos/development-vessel/src/resolvers/gap-to-feature.ts", foreign_cutovers: foreignCount, vessels } } });
-      if ((res as { shape?: string }).shape === "structuredError") console.warn(`[composer-interruption-sweep] gap write refused for ${gapId}: ${JSON.stringify((res as { body?: unknown }).body).slice(0, 300)}`);
+      const gapWritePayload = {
+        id: gapId,
+        category: "attempt_consequence",
+        source: "substrate_detected",
+        status: "open",
+        detected_at: new Date().toISOString(),
+        summary,
+        classification_metadata: { edit_site: "repos/development-vessel/src/resolvers/composer-interruption-sweep.ts", foreign_cutovers: foreignCount, vessels },
+      };
+      const res = await resolveSubstrateGapWrite({ type: "substrateGap_write", gap: gapWritePayload });
+      if ((res as { shape?: string }).shape === "structuredError") {
+        throw new Error(`SubstrateGapWrite refused for ${gapId}: ${JSON.stringify((res as { body?: unknown }).body).slice(0, 300)}`);
+      }
     } catch (e) {
       console.warn(`[composer-interruption-sweep] gap write failed for ${gapId}: ${(e as Error).message}`);
     }

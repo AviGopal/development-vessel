@@ -175,6 +175,9 @@ export const RESOLVER_AUTHOR_TEMPLATE: ActivityTemplate = {
           "- Output ONLY the JSON object. No markdown fences. No commentary.",
         model: "auto",
         max_tokens: 16000,
+        // Single shot (2026-09-29): every input is inlined above, and the default tool loop re-sent
+        // them each turn until the 186 s cut-off while the metered loop kept running.
+        tools: [],
       },
       outputShapes: ["resolverAuthorDraft"],
     },

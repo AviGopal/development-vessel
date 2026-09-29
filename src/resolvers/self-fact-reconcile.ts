@@ -31,10 +31,12 @@
  *
  * ─── LAW-1 DEBT, STATED ─────────────────────────────────────────────────────
  *
- * v1 carries its (fact, source, copies) table IN CODE. The instance-as-impulse
- * form — a `selfFactSpec` shape the tick reads so a new pair is data, not a
- * commit — is the next instance of this class, not this one. The table is small
- * and every entry names its source and its copies so that migration is mechanical.
+ * v2 (2026-09-29): the rows are data. `selfFactSpec` rows are read at use time from
+ * the git object origin/dev:scripts/substrate/self-facts.json in the super-repo
+ * clone, so every node reads the same rows and the authority is a git object, not a
+ * working tree. A row registers an instrument (a function below), the profiles whose
+ * node holds its copies, its edit site and its must-fail control; an instrument with
+ * no row does not run. Instruments are still code; a new instrument is a commit.
  */
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
@@ -135,6 +137,23 @@ function hasTsSources(dir: string, depth = 2): boolean {
   return false;
 }
 
+// ─── the rows (selfFactSpec) ────────────────────────────────────────────────
+const ROWS_PATH = "scripts/substrate/self-facts.json";
+export interface SelfFactRow { id: string; instrument: string; profiles: string[]; edit_site: string; must_fail: string; window_hours?: number; n_floor?: number }
+function readRows(): SelfFactRow[] | null {
+  const raw = git(["show", `origin/dev:${ROWS_PATH}`], superRepoRoot());
+  if (raw === null) return null;
+  try {
+    const j = JSON.parse(raw) as { rows?: unknown };
+    if (!Array.isArray(j.rows)) return noteReadError(`rows ${ROWS_PATH}`, "no rows[] array");
+    return (j.rows as SelfFactRow[]).filter((r) => r && typeof r.id === "string" && typeof r.instrument === "string" && Array.isArray(r.profiles));
+  } catch (err) {
+    return noteReadError(`rows ${ROWS_PATH}`, err);
+  }
+}
+// The node's profile is bootstrap identity (where this node sits), not behaviour.
+const nodeProfile = (): string => process.env["PROFILE_EFFECTIVE"] ?? process.env["PROFILE"] ?? "standalone";
+
 // ─── the facts ──────────────────────────────────────────────────────────────
 // Each returns what it read and where it diverged. `canary` tells the fact to
 // inject one planted divergence on its COPY side (never its source side, so the
@@ -234,12 +253,8 @@ const FACTS: Record<string, FactFn> = {
 };
 
 // ─── gap filing ─────────────────────────────────────────────────────────────
-const EDIT_SITE: Record<string, string> = {
-  fleet_inventory_copy: "repos/development-vessel/src/resolvers/pull-cutover.ts",
-  authoring_root: "repos/development-vessel/src/resolvers/patch-with-tools.ts",
-  manifest_checkout_lag: "repos/development-vessel/src/resolvers/pull-cutover.ts",
-  lane_coverage: "repos/development-vessel/src/resolvers/feature-compose.ts",
-};
+// Edit sites come from the rows read on this run (set by the resolver before filing).
+let rowEditSite: Record<string, string> = {};
 function gapId(d: SelfFactDivergence): string {
   return `self-fact-divergence-${d.fact}-${d.key}`.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 140);
 }
@@ -253,7 +268,7 @@ async function fileDivergence(d: SelfFactDivergence): Promise<boolean> {
       status: "open",
       summary: `self_fact_reconcile found the fact "${d.fact}" diverged at "${d.key}": ${d.detail}. Source: ${d.source}. Copy: ${d.copy}. A copy the system reads about itself no longer matches the thing it copies; the system acted on the copy. Reconcile the copy to its source (or the source to the world), through the lane; this gap closes only when self_fact_reconcile re-reads both and finds no divergence for this fact.`,
       classification_metadata: {
-        edit_site: EDIT_SITE[d.fact] ?? "repos/development-vessel/src/resolvers/self-fact-reconcile.ts",
+        edit_site: rowEditSite[d.fact] ?? "repos/development-vessel/src/resolvers/self-fact-reconcile.ts",
         detector: SELF_FACT_RECONCILE_ID,
         fact: d.fact,
         divergence_key: d.key,
@@ -321,26 +336,42 @@ async function closeResolved(facts: readonly string[], present: readonly SelfFac
 
 // ─── the resolver ───────────────────────────────────────────────────────────
 export async function resolveSelfFactReconcile(pointer: SelfFactReconcilePointer): Promise<ResolverResult> {
-  const wanted = Array.isArray(pointer.facts) && pointer.facts.length > 0 ? pointer.facts.filter((f) => f in FACTS) : Object.keys(FACTS);
   const plant = pointer.plant_canary !== false;
   const file = pointer.file_gaps !== false;
   const ranAt = new Date().toISOString();
   readErrors.length = 0;
-  // The canary rides on the LAST fact run, so a fact-restricted re-check still carries one when asked.
-  const canaryFact = wanted[wanted.length - 1];
+  const rows = readRows();
+  const profile = nodeProfile();
+  // Only rows scoped to this node's profile run here: a node judges only copies it
+  // holds, so a node that does not hold them cannot read clean and close another
+  // node's finding. An unknown instrument is reported, never run.
+  const inScope = (rows ?? []).filter((r) => r.profiles.includes(profile) || r.profiles.includes("*"));
+  const unregistered = inScope.filter((r) => !(r.instrument in FACTS)).map((r) => r.id);
+  const runnable = inScope.filter((r) => r.instrument in FACTS);
+  const wanted = (Array.isArray(pointer.facts) && pointer.facts.length > 0 ? runnable.filter((r) => pointer.facts!.includes(r.id)) : runnable).map((r) => r.id);
+  rowEditSite = Object.fromEntries(runnable.map((r) => [r.instrument, r.edit_site]));
+  // EVERY row runs its must-fail control (the canary) on every planted run, so one
+  // blind instrument cannot hide behind another row's canary.
   const results: SelfFactResult[] = [];
-  for (const f of wanted) results.push(FACTS[f]!(plant && f === canaryFact));
+  for (const id of wanted) results.push(FACTS[runnable.find((r) => r.id === id)!.instrument]!(plant));
   const all = results.flatMap((r) => r.divergences);
-  const canaryFound = !plant || all.some((d) => d.canary);
+  const blindRows = plant ? results.filter((r) => !r.divergences.some((d) => d.canary)).map((r) => r.fact) : [];
+  const canaryFound = rows !== null && blindRows.length === 0;
+  const canaryFact = blindRows.join(", ");
   // Key scoping: a per-gap predicate asks about ONE (fact, key); everything else is
   // not this gap's business, so it must not keep the gap open.
   const keyed = typeof pointer.key === "string" && pointer.key.length > 0 && wanted.length === 1;
   const real = all.filter((d) => !d.canary && (!keyed || d.key === pointer.key));
-  const observed = results.every((r) => r.source_read) && canaryFound;
+  // Zero rows checked is not an observation: a node with nothing in scope says so.
+  const observed = results.length > 0 && results.every((r) => r.source_read) && canaryFound;
   let filed = 0;
   let closed = 0;
   let selfGap = false;
-  if (plant && !canaryFound) {
+  if (plant && rows === null) {
+    // No rows, no instruments ran: say so about ITSELF; there is no built-in fallback.
+    await fileDivergence({ fact: "self_fact_reconcile", key: "rows-unreadable", source: `origin/dev:${ROWS_PATH}`, copy: superRepoRoot(), detail: `the self-fact rows could not be read from git (${readErrors[readErrors.length - 1] ?? "unknown"}) — no row ran, so this run is not evidence`, canary: false });
+    selfGap = true;
+  } else if (plant && !canaryFound) {
     // The instrument cannot see: say so about ITSELF and file nothing else.
     await fileDivergence({ fact: "self_fact_reconcile", key: "canary-not-found", source: "planted canary", copy: "this run", detail: `the planted canary on fact ${canaryFact} was not reported — clean results from this instrument are not evidence until this is fixed`, canary: false });
     selfGap = true;
@@ -371,6 +402,10 @@ export async function resolveSelfFactReconcile(pointer: SelfFactReconcilePointer
       gaps_closed: closed,
       canary_planted: plant,
       canary_found: canaryFound,
+      profile,
+      rows_checked: wanted,
+      blind_rows: blindRows,
+      unregistered_rows: unregistered,
       observed,
       gaps_filed: filed,
       self_gap_filed: selfGap,

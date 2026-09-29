@@ -4461,7 +4461,10 @@ export async function resolveGapToFeature(pointer: GapToFeaturePointer): Promise
       // them all per run is cheap; landability then governs the WHOLE backlog and
       // failed_attempts culls repeat-failers, so nothing high-value is starved by
       // age. This makes the human/operator-request channel reliable. (2026-07-01)
-      limit: pointer.limit ?? 1000,
+      // NO CONSTANT CAP (2026-09-29). 1000 assumed the backlog stays small; at 1838 open gaps the
+      // window ended at 09-23 and aged operator gaps starved again (b11c6fb's class, recurring).
+      // Any number that encodes a backlog size recurs when the store grows, so read it all.
+      limit: pointer.limit ?? Number.MAX_SAFE_INTEGER,
     } as never);
     const gaps = ((read?.body as { gaps?: Record<string, unknown>[] })?.gaps) ?? [];
     // Exclude gaps composed within the cooldown from AUTO-pick (per-candidate filter, exactly

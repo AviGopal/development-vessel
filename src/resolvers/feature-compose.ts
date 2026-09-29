@@ -5103,7 +5103,7 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
     baselineTsErrors.set(v, tscErrorSet(String((b.body as { stdout?: unknown })?.stdout ?? "")));
     // Bounded so a hanging/absent suite can never stall the compose path; a vessel with
     // no tests just yields an empty baseline and an empty post-set, i.e. no gate.
-    const bt = await callTool(toolsEndpoint, "shell", { command: `cd ${JSON.stringify(vAbs)} && (timeout 240 env -i PATH="$PATH" HOME="$HOME" NODE_ENV=test TZ=UTC bun test --timeout 20000 2>&1 || true)`, cwd: REPO_ROOT });
+    const bt = await callTool(toolsEndpoint, "shell", { command: `cd ${JSON.stringify(vAbs)} && (timeout 240 env -i PATH="$PATH" HOME="$HOME" NODE_ENV=test TZ=UTC WORKSPACE_ROOT="$(mktemp -d)" bun test --timeout 20000 2>&1 || true)`, cwd: REPO_ROOT });
     const btRaw = String((bt.body as { stdout?: unknown })?.stdout ?? "");
     baselineTestFails.set(v, testFailureSet(btRaw));
     // Also record how many PASSED, so verify can catch tests that VANISH (see testPassCount).
@@ -5788,7 +5788,7 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
       // The gap this keeps trying to close is REAL — a manifest that cannot install must
       // not reach origin/dev (ddffdee did exactly that). But the check belongs against the
       // CLONE before staging, where node_modules is not shared. Do not solve it here.
-      command: `cd ${JSON.stringify(vAbs)} && (echo "== install =="; [ -d node_modules ] || { bun install >/dev/null 2>&1; echo "INSTALL_EXIT=$?"; }; echo "== resolve =="; bun install --dry-run >/tmp/fc-dryrun.$$ 2>&1; echo "DRYRUN_EXIT=$?"; tail -6 /tmp/fc-dryrun.$$; rm -f /tmp/fc-dryrun.$$; echo "== typecheck =="; timeout 300 bun run typecheck 2>&1; TCE=$?; echo "TC_EXIT=$TCE"; if [ "$TCE" -ne 0 ]; then echo "== shape-dispatch =="; echo "SKIPPED_TYPECHECK_FAILED"; echo "== tests =="; echo "SKIPPED_TYPECHECK_FAILED"; else echo "== shape-dispatch =="; if [ -f ${SHARED_DISPATCH_CHECK} ] && [ -f src/config.ts ] && [ -f src/routes/impulses.ts ]; then bun ${SHARED_DISPATCH_CHECK} ${JSON.stringify(vAbs)} 2>&1; echo "SD_EXIT=$?"; else echo "SD_EXIT=0"; fi; echo "== tests =="; timeout 240 env -i PATH="$PATH" HOME="$HOME" NODE_ENV=test TZ=UTC bun test --timeout 20000 2>&1 || true; fi)`,
+      command: `cd ${JSON.stringify(vAbs)} && (echo "== install =="; [ -d node_modules ] || { bun install >/dev/null 2>&1; echo "INSTALL_EXIT=$?"; }; echo "== resolve =="; bun install --dry-run >/tmp/fc-dryrun.$$ 2>&1; echo "DRYRUN_EXIT=$?"; tail -6 /tmp/fc-dryrun.$$; rm -f /tmp/fc-dryrun.$$; echo "== typecheck =="; timeout 300 bun run typecheck 2>&1; TCE=$?; echo "TC_EXIT=$TCE"; if [ "$TCE" -ne 0 ]; then echo "== shape-dispatch =="; echo "SKIPPED_TYPECHECK_FAILED"; echo "== tests =="; echo "SKIPPED_TYPECHECK_FAILED"; else echo "== shape-dispatch =="; if [ -f ${SHARED_DISPATCH_CHECK} ] && [ -f src/config.ts ] && [ -f src/routes/impulses.ts ]; then bun ${SHARED_DISPATCH_CHECK} ${JSON.stringify(vAbs)} 2>&1; echo "SD_EXIT=$?"; else echo "SD_EXIT=0"; fi; echo "== tests =="; timeout 240 env -i PATH="$PATH" HOME="$HOME" NODE_ENV=test TZ=UTC WORKSPACE_ROOT="$(mktemp -d)" bun test --timeout 20000 2>&1 || true; fi)`,
       cwd: REPO_ROOT,
       // The shell resolver kills the process GROUP at its request timeout, which defaulted to
       // 30s. This pipeline budgets 240s for the test step alone, so the kill landed mid-typecheck
@@ -5910,7 +5910,7 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
     let confirmedNewTest = newTest;
     if (newTest.length > 0 || passRegressed) {
       const sh2 = await callTool(toolsEndpoint, "shell", {
-        command: `cd ${JSON.stringify(vAbs)} && (timeout 240 env -i PATH="$PATH" HOME="$HOME" NODE_ENV=test TZ=UTC bun test --timeout 20000 2>&1 || true)`,
+        command: `cd ${JSON.stringify(vAbs)} && (timeout 240 env -i PATH="$PATH" HOME="$HOME" NODE_ENV=test TZ=UTC WORKSPACE_ROOT="$(mktemp -d)" bun test --timeout 20000 2>&1 || true)`,
         cwd: REPO_ROOT,
       });
       const raw2 = String((sh2.body as { stdout?: unknown })?.stdout ?? "");
@@ -5935,7 +5935,7 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
     if (confirmedNewTest.length > 0) {
       const bw = `/tmp/fc-base-${v.replace(/[^a-zA-Z0-9]+/g, "-")}-${Date.now()}`;
       const sh3 = await callTool(toolsEndpoint, "shell", {
-        command: `git -C ${JSON.stringify(vAbs)} worktree add -q --detach ${bw} HEAD && ln -s ${JSON.stringify(vAbs + "/node_modules")} ${bw}/node_modules && cd ${bw} && (timeout 240 env -i PATH="$PATH" HOME="$HOME" NODE_ENV=test TZ=UTC bun test --timeout 20000 2>&1 || true); git -C ${JSON.stringify(vAbs)} worktree remove --force ${bw} >/dev/null 2>&1; true`,
+        command: `git -C ${JSON.stringify(vAbs)} worktree add -q --detach ${bw} HEAD && ln -s ${JSON.stringify(vAbs + "/node_modules")} ${bw}/node_modules && cd ${bw} && (timeout 240 env -i PATH="$PATH" HOME="$HOME" NODE_ENV=test TZ=UTC WORKSPACE_ROOT="$(mktemp -d)" bun test --timeout 20000 2>&1 || true); git -C ${JSON.stringify(vAbs)} worktree remove --force ${bw} >/dev/null 2>&1; true`,
         cwd: REPO_ROOT,
       });
       const raw3 = String((sh3.body as { stdout?: unknown })?.stdout ?? "");

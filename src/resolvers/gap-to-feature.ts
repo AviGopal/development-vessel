@@ -2378,6 +2378,14 @@ async function verifyGapConditionAsync(gap: Record<string, unknown>): Promise<'p
     // node 2's self_fact_reconcile saw 1 service repo and 0 divergences and closed a divergence node 1
     // still measures, crediting an inert landing (9c86aff). Abstain here; the holder's sweep runs over
     // the same store and measures it where it was observed. Logged, because a silent skip reads as a pass.
+    // A CHECK THAT WRITES IS NOT A CHECK (2026-09-29). Decomposed steps were born with class-2
+    // checks such as uiPanel_write {id:"test",...} and uiQuestion_write: executing them here
+    // performs a live write as 'verification' and reads an unrelated field as a defect count.
+    // Never execute a *_write shape; the gap stays unmeasured until it has a read-shaped check.
+    if (/_write$/.test(resolveShape)) {
+      console.log(`[gap-verify] class2 check for ${String(gap['id'] ?? '')} names a write shape (${resolveShape}) — not executed; unknown`);
+      return 'unknown';
+    }
     if (process.env['GAP_STORE_ENDPOINT']) {
       console.log(`[gap-verify] class2 check for ${String(gap['id'] ?? '')} (${resolveShape}) abstained on this node: the gap store is held elsewhere, so its sweep measures it`);
       return 'unknown';
@@ -2402,6 +2410,14 @@ async function verifyGapConditionAsync(gap: Record<string, unknown>): Promise<'p
     const inner = (typeof respBody['body'] === 'object' && respBody['body'] !== null)
       ? (respBody['body'] as Record<string, unknown>)
       : respBody;
+    // AN INSTRUMENT THAT SAYS IT DID NOT OBSERVE IS NOT A MEASUREMENT (2026-09-29, class-wide).
+    // A zero from a run that read nothing (no rows, unreadable source, missed canary) would
+    // otherwise read as 'absent' and close the gap as verified. Any check whose response says
+    // observed:false or measured:false is unknown; instruments that do not report it are unaffected.
+    if (inner['observed'] === false || inner['measured'] === false) {
+      console.log(`[gap-verify] class2 check for ${String(gap['id'] ?? '')} reported observed/measured false — unknown`);
+      return 'unknown';
+    }
     // Defect heuristic 1: explicit defect_field present in response
     if (defectField !== null && inner[defectField] !== undefined && inner[defectField] !== null && inner[defectField] !== '') {
       return 'present';

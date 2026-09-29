@@ -1,4 +1,4 @@
-import { appendFileSync, existsSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { ResolverResult } from "./types.js";
 import { resolveFeatureCompose, priorAttemptFeedbackBlock, readParkedLanding } from "./feature-compose.js";
@@ -2665,6 +2665,39 @@ const PENDING_VERIFY_SWEEP_LIMIT = 25;
 // persists pending_last_checked_at, so without this a gap stuck at present/unknown/not_in_clone sorted
 // first every tick and held a slot forever. In-process on purpose: no extra store write per checked gap.
 const sweepLastCheckedAt = new Map<string, string>();
+// PERSISTED, because a process lives only 1-3 sweeps (every landing restarts it) and rotating the
+// pending set needs ~7: an in-process map emptied before the rotation finished (qa, 09-29). One small
+// state file, no gap-store write. Resolved at call time; no WORKSPACE_ROOT means no persistence, so a
+// test run can never write a live path.
+function sweepLastCheckedPath(): string | null {
+  const root = process.env["WORKSPACE_ROOT"];
+  return root ? join(root, "state", "sweep-last-checked.json") : null;
+}
+function loadSweepLastChecked(): void {
+  const p = sweepLastCheckedPath();
+  if (!p || !existsSync(p)) return;
+  try {
+    const o = JSON.parse(readFileSync(p, "utf8")) as Record<string, unknown>;
+    for (const [k, v] of Object.entries(o)) {
+      if (typeof v === "string" && v > (sweepLastCheckedAt.get(k) ?? "")) sweepLastCheckedAt.set(k, v);
+    }
+  } catch (err) {
+    console.warn(`[gap-sweep] sweep-last-checked state unreadable at ${p}: ${String(err)}`);
+  }
+}
+function saveSweepLastChecked(): void {
+  const p = sweepLastCheckedPath();
+  if (!p) return;
+  try {
+    mkdirSync(join(p, ".."), { recursive: true });
+    writeFileSync(p, JSON.stringify(Object.fromEntries(sweepLastCheckedAt)));
+  } catch (err) {
+    console.warn(`[gap-sweep] sweep-last-checked state not written at ${p}: ${String(err)}`);
+  }
+}
+// SINGLE-FLIGHT: two sweeps started in the same second several times on 09-29, computing the same slice
+// and escalating twice. A call while one runs gets the running one.
+let sweepInFlight: Promise<{ checked: number; closed: number }> | null = null;
 
 /**
  * Finds commits that fixed this gap via lineage (parent/child relationship) when 
@@ -3099,7 +3132,14 @@ async function recordOperatorRegression(g: Record<string, unknown>): Promise<boo
 }
 
 export async function sweepPendingLandVerifications(): Promise<{ checked: number; closed: number }> {
+  if (sweepInFlight) return sweepInFlight;
+  sweepInFlight = sweepPendingLandVerificationsOnce().finally(() => { sweepInFlight = null; });
+  return sweepInFlight;
+}
+
+async function sweepPendingLandVerificationsOnce(): Promise<{ checked: number; closed: number }> {
   const out = { checked: 0, closed: 0 };
+  loadSweepLastChecked();
   // OBSERVABILITY, because this sweep has been silent since it was written.
   //
   // It returns {checked, closed} and logs NOTHING, so from outside there is no way to tell
@@ -3171,6 +3211,7 @@ const pending = gaps
     for (const g of pending) {
       out.checked += 1;
       sweepLastCheckedAt.set(String(g.id ?? ""), new Date().toISOString());
+      saveSweepLastChecked();
       const meta = { ...((g.classification_metadata ?? {}) as Record<string, unknown>) };
       // An operator hold is a statement that the falsifier cannot yet be exercised; the
       // sweep never closes over it. It is lifted by an exercised falsifier, not by a landing.

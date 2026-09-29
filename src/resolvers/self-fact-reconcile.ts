@@ -393,7 +393,10 @@ export async function resolveSelfFactReconcile(pointer: SelfFactReconcilePointer
       detector: SELF_FACT_RECONCILE_ID,
       ran_at: ranAt,
       facts_checked: results.map((r) => ({ fact: r.fact, source_read: r.source_read, copies_read: r.copies_read, divergences: r.divergences.filter((d) => !d.canary).length, note: r.note })),
-      divergence_count: real.length,
+      // A run that checked no rows, could not read its sources, or missed a canary is NOT a
+      // measurement: report null so the sweep's zero_field reader reads unknown and never
+      // closes a gap on it (qa review 2026-09-29: an empty run returned 0 and would close).
+      divergence_count: observed ? real.length : null,
       divergences: real,
       findings,
       findings_count: findings.length,

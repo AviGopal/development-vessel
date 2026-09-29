@@ -1,4 +1,4 @@
-import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { ResolverResult } from "./types.js";
 import { resolveFeatureCompose, priorAttemptFeedbackBlock, readParkedLanding } from "./feature-compose.js";
@@ -2690,7 +2690,10 @@ function saveSweepLastChecked(): void {
   if (!p) return;
   try {
     mkdirSync(join(p, ".."), { recursive: true });
-    writeFileSync(p, JSON.stringify(Object.fromEntries(sweepLastCheckedAt)));
+    // Atomic: a restart lands mid-sweep, and a kill during a plain write leaves truncated JSON.
+    const tmp = `${p}.${process.pid}.tmp`;
+    writeFileSync(tmp, JSON.stringify(Object.fromEntries(sweepLastCheckedAt)));
+    renameSync(tmp, p);
   } catch (err) {
     console.warn(`[gap-sweep] sweep-last-checked state not written at ${p}: ${String(err)}`);
   }

@@ -741,6 +741,10 @@ export async function resolveGapLifecycleScan(p: GapLifecycleScanPointer): Promi
   // gap that is closed there. Only the node that holds the store falsifies.
   if (!dryRun && p.falsify !== false && !process.env["GAP_STORE_ENDPOINT"]) {
     const maxFalsify = p.maxFalsify ?? 10;
+    // DECOMPOSE BEFORE ADMISSION (contained-self-development 6.2/6.3). Bounded per scan; the scan
+    // runs ~20 times a day, so this is at most ~40 decomposition calls a day, one per gap ever.
+    const maxDecompose = (p as { maxDecompose?: number }).maxDecompose ?? 2;
+    let decomposed = 0;
     const metaOf = (g: Gap): Record<string, unknown> => ((g as { classification_metadata?: unknown }).classification_metadata ?? {}) as Record<string, unknown>;
     const classOf = (m: Record<string, unknown>): string => {
       const f = m["falsifier"] as unknown;
@@ -801,7 +805,26 @@ export async function resolveGapLifecycleScan(p: GapLifecycleScanPointer): Promi
           if (absent) { predicate = { expected_literal: absent }; rule = "quoted_identifier"; }
         }
       }
-      if (!predicate) continue;
+      if (!predicate) {
+        // No deterministic rule applies. Decomposition proposes 1-3 single-file steps and gives each a
+        // checked predicate (file exists, literal absent with a reader, shape advertised and measured),
+        // so the steps are admissible even though the parent is not.
+        const decomposable = decomposed < maxDecompose
+          && scopeSite !== "" && readEditSite(scopeSite) !== null
+          && !meta["decomposed_at"] && !meta["parent_gap_id"] && meta["operator_hold"] !== true
+          && !/-step-\d+$/.test(g.id) && !g.id.startsWith("recommit-") && !g.id.endsWith("-narrowed");
+        if (decomposable) {
+          decomposed++;
+          console.log(`[gap-falsify] decomposing ${g.id} before admission (${decomposed}/${maxDecompose})`);
+          try {
+            const { decomposeGap } = await import("./gap-to-feature.js");
+            await decomposeGap(g as unknown as Record<string, unknown>);
+          } catch (err) {
+            console.warn(`[gap-falsify] decomposition of ${g.id} threw: ${String(err).slice(0, 200)}`);
+          }
+        }
+        continue;
+      }
       try {
         const resp = await fetch(emitUrl, {
           method: "POST",

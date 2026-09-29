@@ -2661,6 +2661,10 @@ async function closeLandedGap(gap: Record<string, unknown>, land: LandSignal): P
 // substrateGap_write (shape-flow preserved) with closed_reason=landed_verified.
 // Bounded like gap-lifecycle; best-effort; a still-'present' condition refuses close.
 const PENDING_VERIFY_SWEEP_LIMIT = 25;
+// When this process last examined each pending gap, whatever the verdict. Only a 'pending' verdict
+// persists pending_last_checked_at, so without this a gap stuck at present/unknown/not_in_clone sorted
+// first every tick and held a slot forever. In-process on purpose: no extra store write per checked gap.
+const sweepLastCheckedAt = new Map<string, string>();
 
 /**
  * Finds commits that fixed this gap via lineage (parent/child relationship) when 
@@ -3156,11 +3160,17 @@ const pending = gaps
         const mb = (b.classification_metadata ?? {}) as Record<string, unknown>;
         const pa = ma.expected_literal || ma.hardcoded_url || ma.verify_shape || ma.evidence_resolve ? 0 : 1;
         const pb = mb.expected_literal || mb.hardcoded_url || mb.verify_shape || mb.evidence_resolve ? 0 : 1;
-        return pa - pb || String(ma.pending_last_checked_at ?? "").localeCompare(String(mb.pending_last_checked_at ?? ""));
+        const lastChecked = (g: Record<string, unknown>, m: Record<string, unknown>): string => {
+          const persisted = String(m.pending_last_checked_at ?? "");
+          const seen = sweepLastCheckedAt.get(String(g.id ?? "")) ?? "";
+          return seen > persisted ? seen : persisted;
+        };
+        return pa - pb || lastChecked(a, ma).localeCompare(lastChecked(b, mb));
       })
       .slice(0, PENDING_VERIFY_SWEEP_LIMIT);
     for (const g of pending) {
       out.checked += 1;
+      sweepLastCheckedAt.set(String(g.id ?? ""), new Date().toISOString());
       const meta = { ...((g.classification_metadata ?? {}) as Record<string, unknown>) };
       // An operator hold is a statement that the falsifier cannot yet be exercised; the
       // sweep never closes over it. It is lifted by an exercised falsifier, not by a landing.

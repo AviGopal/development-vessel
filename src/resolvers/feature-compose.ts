@@ -3378,6 +3378,21 @@ function testPassCount(raw: string): number | null {
   return last;
 }
 
+/** Tests EXECUTED in a `bun test` run (pass + fail from its summary), or null when either count is
+ *  missing. Flips move a test between pass and fail and leave this unchanged; deleting a test,
+ *  marking it skip/todo, or a file that fails to load lowers it. */
+function testExecutedCount(raw: string): number | null {
+  let pass: number | null = null;
+  let fail: number | null = null;
+  for (const line of raw.split("\n")) {
+    const p = line.match(/^\s*(\d+)\s+pass\b/);
+    if (p && p[1]) pass = parseInt(p[1], 10);
+    const f = line.match(/^\s*(\d+)\s+fail\b/);
+    if (f && f[1]) fail = parseInt(f[1], 10);
+  }
+  return pass === null || fail === null ? null : pass + fail;
+}
+
 function classifyComposeFailure(appliedOps: Array<{ ok: boolean; detail?: string }>, verifyResults: Array<{ ok: boolean; output: string }>, semanticReason: string): string {
   const ap = appliedOps.find((a) => !a.ok);
   if (ap) {
@@ -5951,9 +5966,14 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
           console.log(`[feature-compose] base re-read for ${v}: ${preExisting.length} of ${confirmedNewTest.length} "new" failure(s) also fail on the untouched base run now — pre-existing, not blamed on this draft`);
           confirmedNewTest = confirmedNewTest.filter((t) => !baseNow.has(t));
         }
-        // Only a draft that passes FEWER tests than the untouched tree run now has lost coverage.
-        if (passRegressed && curPass !== null && curPass >= basePassNow) {
-          console.log(`[feature-compose] base re-read for ${v}: draft pass ${curPass} >= fresh base ${basePassNow} (cached ${String(basePass)}) — the drop was the environment, not this draft`);
+        // A pass-count drop clears only if no test VANISHED. Flips move tests between pass and fail
+        // at a constant executed count; deleting, skipping or failing to load tests lowers it. A
+        // pass-count comparison let a 1-3 test deletion through whenever the fresh run lost as many
+        // passes to noise (qa, 09-29). Genuinely new failures are still judged by confirmedNewTest.
+        const draftExecuted = testExecutedCount(raw);
+        const baseExecutedNow = testExecutedCount(raw3);
+        if (passRegressed && draftExecuted !== null && baseExecutedNow !== null && draftExecuted >= baseExecutedNow) {
+          console.log(`[feature-compose] base re-read for ${v}: draft executed ${draftExecuted} tests >= fresh base ${baseExecutedNow} (pass ${String(curPass)} vs ${basePassNow}, cached ${String(basePass)}) — the pass drop was the environment, not this draft`);
           passRegressed = false;
         }
       } else {

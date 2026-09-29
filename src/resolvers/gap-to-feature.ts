@@ -1228,12 +1228,9 @@ function pickMostLandable(gaps: Record<string, unknown>[]): Record<string, unkno
         }
 
         if (!alreadyPersisted) {
+          // In-process only until delivery is confirmed: persisting BEFORE the send recorded asks that
+          // threw as asked, so they were never retried (node 2: 316 ids, 09-29). Persist on acceptance.
           solicitedHumanGaps.add(gid);
-          try {
-            appendFileSync(SOLICITED_GAPS_LOG, `${gid}\n`);
-          } catch (e) {
-            console.warn(`[gap-escalation] Failed to write to solicitation log: ${String(e)}`);
-          }
 
           resolveUiWritePassthrough({ type: "uiQuestion_write", id: "needs-human-" + gid, title: "Gap needs a human decision", body: "Gap " + gid + " (" + String((g as Record<string,unknown>).category ?? "?") + ") has failed auto-repair 8+ times with 0 lands. It likely needs a human response: redefine the goal, provide missing information, grant access, or drop it. Summary: " + String((g as Record<string,unknown>).summary ?? "").slice(0, 300), kind: "gap_needs_human", importance: "high" } as never)
             .then((r) => {
@@ -1241,14 +1238,20 @@ function pickMostLandable(gaps: Record<string, unknown>[]): Record<string, unkno
               // attempted. Log ALL THREE outcomes so the absence of a line means "hopeless() never
               // fired", not "the escalation was eaten". Baseline before this change: 0 lines in 7d.
               const shape = (r as { shape?: unknown } | undefined)?.shape;
-              if (shape === "structuredError") {
-                console.warn(`[gap-escalation] uiQuestion_write REJECTED for hopeless gap ${gid}: ${JSON.stringify((r as { body?: unknown }).body).slice(0, 400)} — no human was asked`);
+              const delivered = shape !== "structuredError" && ((r as { body?: { ok?: unknown } } | undefined)?.body?.ok !== false);
+              if (!delivered) {
+                console.warn(`[gap-escalation] uiQuestion_write REJECTED for hopeless gap ${gid}: ${JSON.stringify((r as { body?: unknown }).body).slice(0, 400)} — no human was asked; not recorded as solicited, retried after restart`);
               } else {
+                try {
+                  appendFileSync(SOLICITED_GAPS_LOG, `${gid}\n`);
+                } catch (e) {
+                  console.warn(`[gap-escalation] Failed to write to solicitation log: ${String(e)}`);
+                }
                 console.log(`[gap-escalation] uiQuestion_write accepted for hopeless gap ${gid} (shape=${String(shape)})`);
               }
             })
             .catch((e: unknown) => {
-              console.warn(`[gap-escalation] uiQuestion_write THREW for hopeless gap ${gid}: ${String(e)} — no human was asked`);
+              console.warn(`[gap-escalation] uiQuestion_write THREW for hopeless gap ${gid}: ${String(e)} — no human was asked; not recorded as solicited, retried after restart`);
             });
         }
       }

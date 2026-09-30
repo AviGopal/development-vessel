@@ -144,7 +144,7 @@ export async function resolveComposerInterruptionSweep(pointer: ComposerInterrup
     const vessels = Array.from(foreignVessels).sort();
     const summary = `${foreignCount} foreign composer restart(s) observed via cutover: ${vessels.join(", ")}`;
     try {
-      const { resolveSubstrateGapWrite } = await import("./substrate-gap.js");
+      const resolveSubstrateGapWrite = (await import("./substrate-gap.js")).resolveSubstrateGapWrite;
       const gapWritePayload = {
         id: gapId,
         category: "attempt_consequence",
@@ -154,7 +154,7 @@ export async function resolveComposerInterruptionSweep(pointer: ComposerInterrup
         summary,
         classification_metadata: { edit_site: "repos/development-vessel/src/resolvers/composer-interruption-sweep.ts", foreign_cutovers: foreignCount, vessels },
       };
-      const res = await resolveSubstrateGapWrite({ type: "substrateGap_write", gap: gapWritePayload });
+      const res = await resolveSubstrateGapWrite(gapWritePayload);
       if ((res as { shape?: string }).shape === "structuredError") {
         throw new Error(`SubstrateGapWrite refused for ${gapId}: ${JSON.stringify((res as { body?: unknown }).body).slice(0, 300)}`);
       }

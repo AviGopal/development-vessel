@@ -16,76 +16,121 @@ import type { ResolverResult } from "./types.js";
  * The fix is a writable run-dir on the substrate-workspace volume
  * (/workspace/active-scripts/), seeded fresh from the bind at every boot by
  * substrate-active-scripts-seed.service, and a repointed unit ExecStart that
- * runs the script from the run-dir. This resolver is the write half: any
- * self-dev authoring flow that produces a new script version calls it with
- * { script, content } to overwrite the run-dir copy, and the change is live
- * on the NEXT timer firing — no restart.
+ * runs the script from the run-dir. This resolver is the write half: a
+ * self-dev flow that has COMMITTED a new version of a timer script calls it
+ * with { script } and the committed version goes live on the NEXT timer
+ * firing — no restart.
  *
- * Path safety (a substrate-callable resolver that writes executable timer
- * source is high blast-radius — guard hard):
+ * PROVENANCE, NOT CONTENT. Every unit that runs from the run-dir loads the
+ * fleet EnvironmentFile and runs as root (two of the scripts read the env file
+ * themselves), so whatever lands in the run-dir executes with every fleet
+ * secret. The resolver therefore never takes source from its caller: the bytes
+ * it writes are the git blob `HEAD:scripts/substrate/<script>` of the
+ * super-repo clone — reviewed, attributable, landed code. A pointer carrying
+ * `content` is refused (it was the old contract; accepting it let any caller
+ * that could reach this shape run arbitrary code with the fleet's secrets).
+ * The run-dir and repo root are likewise not pointer fields: a pointer-chosen
+ * run-dir let the existence gate below overwrite any existing .ts the vessel
+ * could write, vessel source included. They are resolver options, supplied
+ * only by in-process callers and tests.
+ *
+ * Path safety:
  *   - `script` is reduced to its basename (no path traversal, no leading /).
  *   - must end in `.ts`.
- *   - the target file MUST already exist in the run-dir. We never create a new
- *     file: the run-dir is the seeded known-script set, so activation can only
- *     REPLACE the content of an existing timer script, never introduce an
- *     arbitrary new executable.
+ *   - the target file MUST already exist in the run-dir (replace-only).
+ *   - the script must be tracked at HEAD under scripts/substrate/.
  *   - optional `base_sha` guard: if supplied, the current run-dir content's
- *     sha256 must match before we overwrite (optimistic-concurrency / stale-
- *     author protection). Mismatch → refused, nothing written.
+ *     sha256 must match before we overwrite. Mismatch → refused.
  */
 
 const DEFAULT_RUN_DIR = "/workspace/active-scripts";
+const SCRIPT_DIR_IN_REPO = "scripts/substrate";
 
 export interface ActivateSubstrateScriptPointer {
   type: "activate_substrate_script";
-  /** Basename of the timer script, e.g. "compose-teacher.ts". */
+  /** Basename of the committed timer script, e.g. "compose-teacher.ts". */
   script?: string;
-  /** Full TypeScript source to make live. */
-  content?: string;
   /** Optional sha256 of the CURRENT run-dir content; overwrite only if it matches. */
   base_sha?: string;
-  /** Override run-dir (tests). Default /workspace/active-scripts. */
+}
+
+/** In-process options; never read from a pointer. */
+export interface ActivateSubstrateScriptOptions {
+  /** Run-dir to write into. Default /workspace/active-scripts. */
   runDir?: string;
+  /** Super-repo clone whose HEAD is the source of truth. Default: located from WORKSPACE_ROOT. */
+  repoRoot?: string;
 }
 
 function sha256(s: string): string {
   return createHash("sha256").update(s, "utf-8").digest("hex");
 }
 
+function refuse(error: string, extra: Record<string, unknown> = {}): ResolverResult {
+  return { shape: "structuredError", body: { error, activated: false, ...extra } };
+}
+
+async function git(args: string[], cwd: string): Promise<{ code: number; stdout: string }> {
+  try {
+    const proc = Bun.spawn(["git", ...args], { cwd, stdout: "pipe", stderr: "pipe" });
+    const [stdout] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
+    return { code: await proc.exited, stdout };
+  } catch {
+    return { code: -1, stdout: "" };
+  }
+}
+
+/**
+ * The super-repo clone. WORKSPACE_ROOT is either the clone itself or the workspace that contains it at
+ * git/super-repo (both layouts are deployed); the first candidate that is a git work tree holding
+ * scripts/substrate wins.
+ */
+async function locateSuperRepo(): Promise<string | null> {
+  const ws = process.env["WORKSPACE_ROOT"] || process.cwd();
+  for (const candidate of [ws, join(ws, "git", "super-repo")]) {
+    try {
+      if (!(await stat(join(candidate, SCRIPT_DIR_IN_REPO))).isDirectory()) continue;
+    } catch {
+      continue;
+    }
+    const top = await git(["rev-parse", "--is-inside-work-tree"], candidate);
+    if (top.code === 0 && top.stdout.trim() === "true") return candidate;
+  }
+  return null;
+}
+
 export async function resolveActivateSubstrateScript(
   pointer: ActivateSubstrateScriptPointer,
+  opts: ActivateSubstrateScriptOptions = {},
 ): Promise<ResolverResult> {
-  const runDir = pointer.runDir ?? DEFAULT_RUN_DIR;
+  const runDir = opts.runDir ?? DEFAULT_RUN_DIR;
   const rawScript = pointer.script;
-  const content = pointer.content;
+  const p = pointer as unknown as Record<string, unknown>;
+
+  // --- provenance: caller-supplied source or location is refused ----------
+  if (p["content"] !== undefined) {
+    return refuse(
+      "activate_substrate_script no longer accepts `content`: the run-dir executes with the fleet " +
+        "EnvironmentFile, so only the committed file HEAD:scripts/substrate/<script> can be activated. " +
+        "Land the change as a commit, then activate it with { script } alone.",
+    );
+  }
+  if (p["runDir"] !== undefined || p["repoRoot"] !== undefined) {
+    return refuse("runDir/repoRoot are not pointer fields; the run-dir and source repo are fixed by the resolver");
+  }
 
   // --- input validation -------------------------------------------------
   if (typeof rawScript !== "string" || !rawScript.trim()) {
-    return {
-      shape: "structuredError",
-      body: { error: "script (basename, *.ts) is required", activated: false },
-    };
-  }
-  if (typeof content !== "string") {
-    return {
-      shape: "structuredError",
-      body: { error: "content (full TS source string) is required", activated: false },
-    };
+    return refuse("script (basename, *.ts) is required");
   }
 
   // --- path safety: basename only, must end .ts -------------------------
   const name = basename(rawScript);
   if (name !== rawScript || name.includes("/") || name.includes("\\") || name.startsWith(".")) {
-    return {
-      shape: "structuredError",
-      body: { error: `path traversal / non-basename script rejected: ${rawScript}`, activated: false },
-    };
+    return refuse(`path traversal / non-basename script rejected: ${rawScript}`);
   }
   if (!name.endsWith(".ts")) {
-    return {
-      shape: "structuredError",
-      body: { error: `script must end in .ts: ${name}`, activated: false },
-    };
+    return refuse(`script must end in .ts: ${name}`);
   }
 
   const target = join(runDir, name);
@@ -95,38 +140,40 @@ export async function resolveActivateSubstrateScript(
   try {
     const st = await stat(target);
     if (!st.isFile()) {
-      return {
-        shape: "structuredError",
-        body: { error: `target is not a regular file: ${target}`, activated: false },
-      };
+      return refuse(`target is not a regular file: ${target}`);
     }
     prevContent = await readFile(target, "utf-8");
   } catch {
-    return {
-      shape: "structuredError",
-      body: {
-        error:
-          `script not present in run-dir (${target}) — activation only replaces ` +
-          `an existing seeded timer script, it never creates new executables`,
-        activated: false,
-      },
-    };
+    return refuse(
+      `script not present in run-dir (${target}) — activation only replaces ` +
+        `an existing seeded timer script, it never creates new executables`,
+    );
   }
+
+  // --- source: the committed blob, never the caller ---------------------
+  const repoRoot = opts.repoRoot ?? (await locateSuperRepo());
+  if (!repoRoot) {
+    return refuse("super-repo clone not found (WORKSPACE_ROOT or WORKSPACE_ROOT/git/super-repo)", { script: name });
+  }
+  const repoPath = `${SCRIPT_DIR_IN_REPO}/${name}`;
+  const headRev = await git(["rev-parse", "HEAD"], repoRoot);
+  const blob = await git(["show", `HEAD:${repoPath}`], repoRoot);
+  if (headRev.code !== 0 || blob.code !== 0) {
+    return refuse(`${repoPath} is not tracked at HEAD of ${repoRoot} — only committed scripts can be activated`, {
+      script: name,
+    });
+  }
+  const content = blob.stdout;
 
   // --- optional base_sha optimistic-concurrency guard -------------------
   if (typeof pointer.base_sha === "string" && pointer.base_sha) {
     const cur = sha256(prevContent);
     if (cur !== pointer.base_sha) {
-      return {
-        shape: "structuredError",
-        body: {
-          error: "base_sha mismatch — run-dir content changed since author read it",
-          activated: false,
-          script: name,
-          expected_base_sha: pointer.base_sha,
-          actual_base_sha: cur,
-        },
-      };
+      return refuse("base_sha mismatch — run-dir content changed since author read it", {
+        script: name,
+        expected_base_sha: pointer.base_sha,
+        actual_base_sha: cur,
+      });
     }
   }
 
@@ -134,14 +181,7 @@ export async function resolveActivateSubstrateScript(
   try {
     await writeFile(target, content, "utf-8");
   } catch (err) {
-    return {
-      shape: "structuredError",
-      body: {
-        error: err instanceof Error ? err.message.slice(0, 200) : String(err),
-        activated: false,
-        script: name,
-      },
-    };
+    return refuse(err instanceof Error ? err.message.slice(0, 200) : String(err), { script: name });
   }
 
   const bytes = Buffer.byteLength(content, "utf-8");
@@ -152,6 +192,7 @@ export async function resolveActivateSubstrateScript(
       script: name,
       run_dir: runDir,
       path: target,
+      source: `${repoPath}@${headRev.stdout.trim()}`,
       bytes,
       sha256: sha256(content),
       prev_sha256: sha256(prevContent),

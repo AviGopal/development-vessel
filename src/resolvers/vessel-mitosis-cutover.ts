@@ -738,9 +738,11 @@ async function clearPendingIfOwned(
  * restart — the autonomy loop's authored output never goes live.
  *
  * Bridge: when a cutover/authoring step stages a scripts/substrate/*.ts file, we
- * ALSO call the activate_substrate_script resolver in-process with the new
- * content, overwriting the run-dir copy so the change is live on the NEXT timer
- * firing — in addition to (never replacing) the git/host-sync durability path.
+ * ALSO call the activate_substrate_script resolver in-process with the script
+ * NAME; the resolver copies the committed HEAD:scripts/substrate/<name> blob into
+ * the run-dir so the change is live on the NEXT timer firing — in addition to
+ * (never replacing) the git/host-sync durability path. No vessel repo carries
+ * scripts/substrate/*.ts, so on a vessel cutover this matches nothing.
  *
  * Strictly scoped to scripts/substrate/*.ts staged files (never vessel source),
  * and strictly non-fatal: any failure here is recorded as a warn op and never
@@ -762,25 +764,14 @@ async function maybeActivateSubstrateScripts(args: {
     const m = rel.match(SUBSTRATE_SCRIPT_RE);
     if (!m) continue;
     const scriptName = basename(m[1]!);
-    const srcPath = join(args.mitosisRoot, rel);
-    let content: string;
     try {
-      content = await readFile(srcPath, "utf-8");
-    } catch (err) {
-      ops.push({
-        op: `activate_substrate_script ${scriptName}`,
-        status: "warn",
-        detail: `read staged content failed: ${(err as Error).message.slice(0, 160)}`,
-      });
-      continue;
-    }
-    try {
-      const res = await resolveActivateSubstrateScript({
-        type: "activate_substrate_script",
-        script: scriptName,
-        content,
-        runDir,
-      });
+      // Provenance: the resolver activates the COMMITTED HEAD:scripts/substrate/<name> of the
+      // super-repo, never bytes read from a staging tree (the run-dir executes with the fleet
+      // EnvironmentFile). A staged script that is not yet committed is refused and reported below.
+      const res = await resolveActivateSubstrateScript(
+        { type: "activate_substrate_script", script: scriptName },
+        { runDir },
+      );
       const body = (res.body ?? {}) as Record<string, unknown>;
       const activated = body["activated"] === true;
       ops.push({

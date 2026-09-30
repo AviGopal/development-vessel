@@ -2433,7 +2433,7 @@ export function priorAttemptFeedbackBlock(meta?: Record<string, unknown> | null)
       "PRIOR ATTEMPT FEEDBACK — a previous draft for THIS gap was REJECTED by the semantic gate. Do NOT repeat it; your plan MUST address what it missed:",
     );
   }
-  if (typeof meta.verify_failure_reason === "string" && meta.verify_failure_reason.trim()) lines.push(`- Typecheck failure from prior attempt: ${meta.verify_failure_reason.trim()}`);
+  if (typeof meta.verify_failure_reason === "string" && meta.verify_failure_reason.trim()) lines.push(`- Verify failure from prior attempt: ${meta.verify_failure_reason.trim()}`);
   if (reason) lines.push(`- Rejection reason: ${reason}`);
   if (loc) lines.push(`- The real change site is: ${loc}. Your fix MUST edit that specific path/lines (not just adjacent or related code).`);
   if (lessons.length > 0) {
@@ -7280,6 +7280,12 @@ const earlyAttempt = await Promise.race([
       const raw = verify.find((v) => !v.ok)?.output ?? "";
       const m = raw.match(/(\S+\.ts\(\d+,\d+\): error TS\d+:[^\n]*)/);
       if (m) return m[1]!;
+      // THE GATE'S OWN REFUSAL IS THE REASON, NOT THE SUITE TAIL (09-30). When the pre-land gate refused
+      // the draft (own check red, a stray test edit, a contract breach), that sentence names what to fix.
+      // The suite tail below is dominated by UNRELATED pre-existing failures: the impulses-templates gap's
+      // record read "Phase 10 P1 — atomic α/β …", and its drafts kept editing the mock-module guard.
+      const gateAt = raw.search(/ \| (THE GAP'S OWN CHECK|THE GAP'S CHECK CANNOT|EDITS A TEST FILE|THE GAP STORE COULD NOT)/);
+      if (gateAt >= 0) return raw.slice(gateAt + 3, gateAt + 3 + 900);
       // NO TSC ERROR MEANS THE FAILURE IS DOWNSTREAM — KEEP THE TAIL, NOT THE HEAD.
       //
       // The fallback was raw.slice(0, 300), which stores the BEGINNING of the verify

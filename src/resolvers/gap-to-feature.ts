@@ -1827,6 +1827,9 @@ export async function admitActionableGaps(
     // the top-ranked candidate when every candidate is skipped, so a held gap was picked every 1.5-3 min
     // (09-27 22:20-22:29) and refused at compose. Excluded here, the fallback cannot reach it.
     if (meta.operator_hold === true) { excluded.push({ id, reason: "operator_hold" }); continue; }
+    // Its own check already passes on the parent (op10 terminal refusal): re-picking cannot help until the sweep
+    // closes it or an operator looks, so it waits out OWN_GREEN_ADMISSION_TTL_MS instead of a cooldown per cycle.
+    if (greenOnParentFresh(meta)) { excluded.push({ id, reason: "own_check_green_on_parent" }); continue; }
     // FALSIFIER REQUIRED (contained-self-development). When the autonomyScope record names
     // require_falsifier_classes, an autonomous gap is admitted only if its falsifier is one of them;
     // otherwise it needs information, whatever its edit site. A typecheck-class gap keeps its own
@@ -3722,6 +3725,36 @@ function predictLand(gap: Record<string, unknown>): { predicted: boolean; p: num
  * `environment` was already excluded at the main call site for exactly this reason;
  * capacity is the same class, so both live here and every call site asks one question.
  */
+/** A TERMINAL refusal (feature-compose op10): the gap is closed, or its own check is already GREEN on the
+ *  parent tree. Unlike a non-attempt the compose DID run, so it keeps its full cooldown; unlike a failure no
+ *  repair can change it, so it never bumps failed_attempts, never narrows and never decomposes (those spawn
+ *  the redispatches that re-composed a fixed gap for 40 min on 2026-09-30). */
+export function isTerminalRefusalResult(cb: Record<string, unknown> | null | undefined): boolean {
+  return String(cb?.failure_kind ?? "") === "terminal_refusal";
+}
+
+/** Hours an OPEN gap whose own check was found GREEN on the parent stays out of admission. The check passing
+ *  without a fix means the gap is already fixed (the sweep will close it) or its check is wrong (an operator
+ *  must look); re-picking it every cooldown can do neither. */
+export const OWN_GREEN_ADMISSION_TTL_MS = 6 * 60 * 60 * 1000;
+export function greenOnParentFresh(meta: Record<string, unknown>, nowMs: number = Date.now()): boolean {
+  const m = meta.own_check_green_on_parent as { at?: unknown } | undefined;
+  const at = typeof m?.at === "string" ? Date.parse(m.at) : NaN;
+  return Number.isFinite(at) && nowMs - at < OWN_GREEN_ADMISSION_TTL_MS;
+}
+
+async function markTerminalRefusal(gap: Record<string, unknown>, cb: Record<string, unknown> | null | undefined): Promise<void> {
+  const why = String(cb?.terminal_refusal ?? "");
+  console.log(`[gap-to-feature] terminal refusal for ${String(gap.id ?? "?")}: ${why || "(no reason)"}; no bump, full cooldown`);
+  if (!why.startsWith("the gap's own check is already GREEN on the parent tree")) return;
+  try {
+    const fresh = await readGapFresh(String(gap.id ?? ""));
+    if (!fresh || String(fresh.status ?? "") !== "open") return;
+    const m0 = ((fresh.classification_metadata ?? {}) as Record<string, unknown>);
+    await resolveSubstrateGapWrite({ type: "substrateGap_write", gap: { ...fresh, classification_metadata: { ...m0, own_check_green_on_parent: { at: new Date().toISOString(), reason: why.slice(0, 300) } } } } as never);
+  } catch { /* best-effort: without the marker the full cooldown still bounds re-picks */ }
+}
+
 export function isNonAttemptComposeResult(cb: Record<string, unknown> | null | undefined): boolean {
   if (!cb) return false;
   if (String(cb.failure_kind ?? "") === "environment") return true;
@@ -3831,6 +3864,10 @@ async function bumpFailedAttempts(gap: Record<string, unknown>, opts: { surprise
   try {
     const id = String(gap.id ?? "");
     if (!id) return;
+    // The write below is unconditional (status open), so on a gap that CLOSED while its compose was in flight it
+    // would REOPEN it with closed_at carried forward. Re-read first; a closed or unreadable row is not bumped.
+    const fresh = await readGapFresh(id);
+    if (!fresh || String(fresh.status ?? "") === "closed") return;
     const meta0 = (gap.classification_metadata ?? gap.metadata ?? {}) as Record<string, unknown>;
     // A non-landing attempt the substrate PREDICTED would land is a high-information SURPRISE
     // (over-optimistic self-model) → deprioritise harder (x2) and tally the calibration miss so
@@ -4299,6 +4336,8 @@ async function routeCapabilityGapToNewResolver(
   if (land.landed) {
     const c = await closeLandedGap(gap, land);
     closed = c.closed;
+  } else if (isTerminalRefusalResult(cb)) {
+    await markTerminalRefusal(gap, cb);
   } else if (!isNonAttemptComposeResult(cb)) {
     if (!isInfraRefusalBody(cb)) updateClassPosterior(gapClassOf(gap), false);
     // A capacity refusal here is a retry, not a failure — see isNonAttemptComposeResult.
@@ -5518,7 +5557,8 @@ const familySample: string[] = await (async () => {
       console.log(`[gap-to-feature] reach verdict: ${reachVerdict}`);
     }
     // A slice sequence cut short by a capacity refusal never got its attempt either.
-    if (!allOk && !pointer.dry_run && !isNonAttemptComposeResult(lastBody)) {
+    if (!allOk && !pointer.dry_run && isTerminalRefusalResult(lastBody)) await markTerminalRefusal(gap, lastBody);
+    else if (!allOk && !pointer.dry_run && !isNonAttemptComposeResult(lastBody)) {
       if (!isInfraRefusalBody(lastBody)) updateClassPosterior(gapClassOf(gap), false);
       await bumpFailedAttempts(gap);
     }
@@ -5597,6 +5637,8 @@ const familySample: string[] = await (async () => {
       console.log("[gap-to-feature] non-attempt (failure_kind=" + String(cb.failure_kind ?? "-") + ", verdict=" + String(cb.verdict ?? "-") + ", stage=" + String(cb.stage ?? "-") + ") for gap " + String(gap.id) + " — clearing cooldown");
       // A compose that never ran must not cost the gap its cooldown.
       gapComposeLastAttemptAt.delete(String(gap.id));
+    } else if (isTerminalRefusalResult(cb)) {
+      await markTerminalRefusal(gap, cb);
     } else {
       const pred = predictLand(gap);
       // Bounded one-shot patch_with_tools escalation on an APPLY failure (anchor_not_found /

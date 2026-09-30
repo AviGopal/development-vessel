@@ -3444,6 +3444,18 @@ export function staticExpectCount(src: string): number {
   return (code.match(/\bexpect\s*\(/g) ?? []).length;
 }
 
+/** A refusal no repair attempt can change, so the compose must stop instead of re-drafting: the gap is
+ *  already closed in the store (a landed fix, or a retirement), or its own check is already GREEN on the
+ *  parent tree (the defect is gone, so no draft can be certified by it). Measured 2026-09-30: after
+ *  33d9994 fixed and closed an activity-api gap, edit-intent redispatches kept composing it for 40 min;
+ *  every draft was refused "already GREEN on the parent" and retried up to the repair cap, starving the
+ *  lane while three admissible gaps waited. */
+export function isTerminalRefusal(contractBreach: string | null, gapClosedInStore: boolean): string | null {
+  if (gapClosedInStore) return "the gap is already CLOSED in the store";
+  if (contractBreach && contractBreach.startsWith("the gap's own check is already GREEN on the parent tree")) return contractBreach;
+  return null;
+}
+
 /**
  * THE CHECK CONTRACT, judged on the draft and its parent. A gap's own check certifies a draft only if it
  * was RED on the parent (a check already green there cannot tell a fix from nothing) and the draft did not
@@ -5866,6 +5878,7 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
   // stored metadata is the authority. An unreadable store fails the gate closed.
   let gateGapMeta: Record<string, unknown> | null = null;
   let gateSource: "store" | "caller" | "store_unreadable" = "caller";
+  let gateGapStatus = "";
   if (pointer.gap) {
     gateGapMeta = { ...((pointer.gap.classification_metadata ?? {}) as Record<string, unknown>) };
     const gid = typeof pointer.gap.id === "string" ? pointer.gap.id : "";
@@ -5875,7 +5888,7 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
         if (!Array.isArray(rows)) gateSource = "store_unreadable";
         else {
           const row = rows.find((r) => String(r.id) === gid);
-          if (row) { gateGapMeta = { ...gateGapMeta, ...((row.classification_metadata ?? {}) as Record<string, unknown>) }; gateSource = "store"; }
+          if (row) { gateGapMeta = { ...gateGapMeta, ...((row.classification_metadata ?? {}) as Record<string, unknown>) }; gateSource = "store"; gateGapStatus = String(row.status ?? ""); }
         }
       } catch {
         gateSource = "store_unreadable";
@@ -5887,6 +5900,8 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
   if (pointer.gap && gateSource === "caller" && typeof pointer.gap.id === "string" && pointer.gap.id && !pointer.gap.id.startsWith("route-edit-") && !(gateGapMeta ?? {}).evidence_resolve) {
     console.warn(`[fc-own-check] gap ${pointer.gap.id} is not in the store and carries no evidence_resolve; its own check cannot run (caller copy)`);
   }
+  const gapClosedInStore = gateSource === "store" && gateGapStatus === "closed";
+  let terminalRefusal: string | null = null;
   const ownCheckRan: string[] = [];
   const runVerify = async (v: string): Promise<{ vessel: string; errors: number | string; exit_code: number | null; ok: boolean; output: string }> => {
     const vAbs = vesselRoot(v);
@@ -6229,13 +6244,16 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
       // No gap on this compose (apply-proposal-as-patch, perf-canary): logged so the ungated path is countable.
       console.log(`[fc-own-check] ${JSON.stringify({ gap: null, vessel: v, source: "none" })}`);
     }
-    const ownOk = ownRed.length === 0 && !ownUnjudged && strayTests.length === 0 && !contractBreach;
+    const terminal = isTerminalRefusal(contractBreach, gapClosedInStore);
+    if (terminal) terminalRefusal = terminal;
+    const ownOk = ownRed.length === 0 && !ownUnjudged && strayTests.length === 0 && !contractBreach && !gapClosedInStore;
     const ok = installOk && dryRunOk && tcOk && sdExit === 0 && testOk && ownOk;
     const detail = ((tcUnanswered || tcTimedOut) ? ` | TYPECHECK NOT ANSWERED (TC_EXIT=${String(tcExit)}) — the check did not complete, so this is UNVERIFIED, not proven broken. Failing closed is correct (an unverifiable edit must not land), but do not read this as a defect in the draft: it carries no TS error text.` : "")
       + (installOk ? "" : ` | DEPENDENCY INSTALL FAILED (INSTALL_EXIT=${String(installExit)}) — the staged manifest does not install; a typecheck against an already-populated node_modules cannot see this`)
       + (dryRunOk ? "" : ` | DEPENDENCY RESOLUTION FAILED (DRYRUN_EXIT=${String(dryRunExit)}) — the staged manifest names a dependency that does not resolve, so this change would break a fresh install even though it typechecks here: ${(raw.match(/== resolve ==\n([\s\S]*?)\n== typecheck ==/)?.[1] ?? "").slice(0, 400)}`)
       + (ownRed.length > 0 ? ` | THE GAP'S OWN CHECK IS STILL RED on this draft (its test file run alone): ${ownRed.slice(0, 5).join(" ; ").slice(0, 400)}. A draft that leaves its own check red does not land; finish every site the check names.` : "")
       + (ownUnjudged ? (gateSource === "store_unreadable" ? " | THE GAP STORE COULD NOT BE READ, so this gap's own check could not be resolved; unverified, not landed." : " | THE GAP'S OWN CHECK PRODUCED NO RESULT on this draft (its test file run alone printed no pass/fail); unverified, not landed.") : "")
+      + (gapClosedInStore ? " | THE GAP IS ALREADY CLOSED in the store (fixed or retired); nothing is left to land for it. Not retried." : "")
       + (contractBreach ? ` | THE GAP'S CHECK CANNOT CERTIFY THIS DRAFT: ${contractBreach}. Fix what the check measures; do not remove or weaken its assertions.` : "")
       + (strayTests.length > 0 ? ` | EDITS A TEST FILE THIS GAP DOES NOT NAME: ${strayTests.join(", ")}. A draft must not change another test's assertions (that is how guards get weakened); fix the code, or leave that test to its own gap.` : "")
       + (testOk ? "" : [
@@ -6346,7 +6364,8 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
   const MAX_REPAIR = 4;
   const MAX_REPAIR_CREATE = MAX_REPAIR + 2;
   const repairCap = created.length > 0 ? MAX_REPAIR_CREATE : MAX_REPAIR;
-  for (let attempt = 0; attempt < repairCap && !applyFailed && verify.length > 0 && !verify.every((v) => v.ok); attempt++) {
+  if (terminalRefusal) console.log(`[fc-own-check] terminal refusal for ${pointer.gap?.id ?? "?"}: ${terminalRefusal}; no repair attempts`);
+  for (let attempt = 0; attempt < repairCap && !applyFailed && !terminalRefusal && verify.length > 0 && !verify.every((v) => v.ok); attempt++) {
     let anyFixed = false;
     for (const fv of verify.filter((v) => !v.ok)) {
       const errText = (fv.output || "").trim();
@@ -7303,11 +7322,13 @@ const earlyAttempt = await Promise.race([
       return raw.length > 900 ? `…(head truncated; tail follows)\n${tail}` : tail;
     })();
     const lessonClass = envClass ?? classifyComposeFailure(applied, verify, String(semantic_gate?.reason ?? ""));
-    if (pointer.gap?.id && firstTscError) {
+    // A compose must never write to a CLOSED gap: the row was fixed or retired, and a rewrite there dropped
+    // its top-level closed_reason (11:29, node 1). Re-checked on the fresh read too (it may close mid-compose).
+    if (pointer.gap?.id && firstTscError && !gapClosedInStore) {
       try {
         const read = await resolveSubstrateGap({ type: "substrateGap", id: pointer.gap.id, limit: 1 } as never);
         const g0 = ((read?.body as { gaps?: Record<string, unknown>[] })?.gaps ?? [])[0];
-        if (g0) {
+        if (g0 && String(g0.status ?? "") !== "closed") {
           const meta = { ...((g0.classification_metadata as Record<string, unknown>) ?? {}), verify_failure_reason: firstTscError };
           await resolveSubstrateGapWrite({ type: "substrateGap_write", gap: { ...(g0 as Record<string, unknown>), classification_metadata: meta } } as never);
         }
@@ -7536,7 +7557,10 @@ for (const _c of cutovers as Array<Record<string, unknown>>) { const _ops = (((_
       execution_id: emittedExecutionId,
       parked: parkedAny && !anyCutoverPushed,
       verdict: effectiveVerdict,
-      failure_kind: effectiveVerdict === "FAVORABLE" ? null : classifyEnvironmentFailure(cutovers) || verify.some((vr) => !vr.ok && (vr.exit_code === null || !vr.output || /timed out after \d+\s*ms/i.test(vr.output))) ? "environment" : "fix",
+      // terminal_refusal: the gap is closed or its own check is already green on the parent; gap-to-feature
+      // counts it as a NON-ATTEMPT (no failed_attempts bump, no -narrowed/decompose redispatch).
+      terminal_refusal: terminalRefusal,
+      failure_kind: effectiveVerdict === "FAVORABLE" ? null : terminalRefusal ? "terminal_refusal" : classifyEnvironmentFailure(cutovers) || verify.some((vr) => !vr.ok && (vr.exit_code === null || !vr.output || /timed out after \d+\s*ms/i.test(vr.output))) ? "environment" : "fix",
       summary: plan.summary,
       touched_vessels: [...touched],
       op_count: ops.length,

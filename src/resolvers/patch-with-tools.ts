@@ -1465,7 +1465,7 @@ export async function resolvePatchWithTools(pointer: PatchWithToolsPointer): Pro
   // being deterministic it cannot false-block under load. Same helper feature_compose
   // already uses. Evidence: 6dc2005 landed two declarations that nothing reads.
   {
-    const vacuousReason = vacuousEditReason(baseContent, afterSrc);
+    const vacuousReason = (pointer.is_new_file ? null : vacuousEditReason(baseContent, afterSrc));
     if (vacuousReason) {
       await resetTarget();
       return structuredError("vacuous_edit", {

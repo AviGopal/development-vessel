@@ -409,12 +409,32 @@ async function findLocalToolsEndpoint(): Promise<string | null> {
   } catch { return null; }
 }
 
+/**
+ * The drafter's tools: exactly the ones TOOL_CATALOG_HELP offers (2026-09-30). A tool call is model output, so any
+ * other name — shell among them, served by the same local-tools endpoint — is refused, never dispatched.
+ */
+export const DRAFTER_TOOLS: ReadonlySet<string> = new Set([
+  "code_search", "code_find_function", "code_find_import", "code_insert_after_line", "code_read_lines",
+  "code_replace_lines", "fs_edit", "fs_write", "code_add_import", "code_verify_typecheck",
+]);
+
+/**
+ * The resolve pointer for a drafter tool call: the args' fields, with `type` fixed to the tool every guard checked.
+ * Built with the args spread after the tool type, a model-written args.type replaced it — a call named as a read passed run-root
+ * containment and the truncation guard and was routed as a write.
+ */
+export function drafterToolPointer(tool: string, args: Record<string, unknown>): Record<string, unknown> {
+  const input = typeof args === "object" && args !== null && !Array.isArray(args) ? args : {};
+  const { type: _modelType, ...rest } = input;
+  return { ...rest, type: tool };
+}
+
 async function callTool(localToolsEndpoint: string, tool: string, args: Record<string, unknown>): Promise<{ ok: boolean; body: unknown }> {
   try {
     const res = await fetch(localToolsEndpoint, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `ApiKey ${METABOB_API_KEY}` },
-      body: JSON.stringify({ impulse: { pointer: { type: tool, ...args } } }),
+      body: JSON.stringify({ impulse: { pointer: drafterToolPointer(tool, args) } }),
       signal: AbortSignal.timeout(PER_CALL_TIMEOUT_MS),
     });
     if (!res.ok) return { ok: false, body: { error: `HTTP ${res.status}` } };
@@ -1083,6 +1103,19 @@ export async function resolvePatchWithTools(pointer: PatchWithToolsPointer): Pro
           tool: "action_guard",
           args: {},
           result: { error: `You emitted "call_tool" with no "tool" field. Name the tool, e.g. { "action": "call_tool", "tool": "code_read_lines", "args": { … } }. This turn did nothing — do not repeat it.` },
+          ok: false,
+        },
+      });
+      continue;
+    }
+    if (!DRAFTER_TOOLS.has(tool)) {
+      history.push({
+        turn,
+        thought_or_action: `call ${tool} (not a drafter tool)`,
+        tool_result: {
+          tool: "action_guard",
+          args: {},
+          result: { error: `"${tool}" is not an available tool. Use exactly one of: ${[...DRAFTER_TOOLS].join(", ")}. This turn did nothing — do not repeat it.` },
           ok: false,
         },
       });

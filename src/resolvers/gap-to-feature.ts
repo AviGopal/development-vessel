@@ -2178,12 +2178,102 @@ function genuineLandSignal(composeBody: Record<string, unknown>, landRequested: 
  * carrying a Class-1 predicate today can change verdict. A gap opts in by carrying
  * expected_literal and no hardcoded_url.
  */
-function evaluateExpectedLiteral(editSite: string, expectedLiteral: string): 'present' | 'absent' | 'unknown' {
+/** Comment-stripped text of every body of `reader` in `src`: a definition (function reader( / reader = ( /
+ *  reader = async ( / a method reader(…) {) or a call taking a callback (afterAll(() => { … })). Brace-matched from
+ *  the first "{" after the name, skipping string and template literals. [] when the reader is not found. */
+/** Index of the body "{" that follows a parameter list ending just before `from`, or -1. An optional return-type
+ *  annotation (": T") is skipped as ONE balanced type expression, so a "{" inside it (Promise<{ a: number }>, or a
+ *  type literal { a: number }) is never mistaken for the body, and a literal that exists only in the return type can
+ *  never count as in-body (qa, 2026-09-30). Then "=>" (arrow) or "{" (function) must follow; an expression-bodied
+ *  arrow has no braced body and returns -1. */
+function bodyAfterParams(src: string, from: number): number {
+  let i = from;
+  const ws = () => { while (i < src.length && /\s/.test(src[i]!)) i++; };
+  ws();
+  if (src[i] === ":") {
+    i++;
+    let depth = 0, started = false, q: string | null = null;
+    for (; i < src.length; i++) {
+      const ch = src[i]!;
+      if (q) { if (ch === "\\") { i++; continue; } if (ch === q) q = null; continue; }
+      if (ch === "'" || ch === '"' || ch === "`") { q = ch; started = true; continue; }
+      if (depth === 0 && ch === "=" && src[i + 1] === ">" && started) break;
+      if (depth === 0 && ch === "{" && started) break;
+      if (ch === "<" || ch === "(" || ch === "[" || ch === "{") { depth++; started = true; continue; }
+      if (ch === ">" || ch === ")" || ch === "]" || ch === "}") { depth--; continue; }
+      if (!/\s/.test(ch)) started = true;
+    }
+  }
+  ws();
+  if (src[i] === "=" && src[i + 1] === ">") { i += 2; ws(); }
+  return src[i] === "{" ? i : -1;
+}
+
+export function readerBodies(src: string, reader: string): string[] {
+  const esc = reader.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const re = new RegExp("(?:function\\s+" + esc + "\\b|\\b" + esc + "\\s*(?:=\\s*(?:async\\s*)?)?\\()", "g");
+  const out: string[] = [];
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(src)) !== null) {
+    // The body must belong to THIS occurrence: a callback inside the call's own parentheses (afterAll(() => {…})),
+    // or a "{" right after the closing ")" (optionally past a return type / "=>") as in a definition. A plain call
+    // such as searchTemplates(q) has no body, and the next "{" further down belongs to something else.
+    const lp = src.indexOf("(", m.index);
+    if (lp < 0) continue;
+    let pd = 0, rp = -1;
+    for (let j = lp; j < src.length; j++) { const c = src[j]; if (c === "(") pd++; else if (c === ")") { pd--; if (pd === 0) { rp = j; break; } } }
+    if (rp < 0) continue;
+    // A DEFINITION (function R( / R = ( / R = async () owns only the "{" after its parameters: a "{" inside them is a
+    // destructuring pattern, not a body. A CALL (R() may be a method definition (body after ")") or take a callback
+    // whose body is the "{" inside its own parentheses (afterAll(() => {…})).
+    const isDefinition = /^function\b|=/.test(m[0]);
+    let open = bodyAfterParams(src, rp + 1);
+    if (open < 0 && !isDefinition) { const inner = src.indexOf("{", lp); if (inner >= 0 && inner < rp) open = inner; }
+    if (open < 0) continue;
+    let depth = 0, i = open, q: string | null = null;
+    for (; i < src.length; i++) {
+      const c = src[i]!;
+      if (q) { if (c === "\\") { i++; continue; } if (c === q) q = null; continue; }
+      if (c === "'" || c === '"' || c === "`") { q = c; continue; }
+      if (c === "/" && src[i + 1] === "/") { const nl = src.indexOf("\n", i); i = nl < 0 ? src.length : nl; continue; }
+      if (c === "/" && src[i + 1] === "*") { const e = src.indexOf("*/", i + 2); i = e < 0 ? src.length : e + 1; continue; }
+      if (c === "{") depth++;
+      else if (c === "}") { depth--; if (depth === 0) break; }
+    }
+    if (depth === 0) out.push(src.slice(open, i + 1).replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:"'`])\/\/.*$/gm, "$1"));
+  }
+  return out;
+}
+
+/** A decomposed step's literal counts only in comment-free code INSIDE its literal_reader: anywhere else in the file
+ *  (a comment, an unrelated function, a module-level constant) proves nothing about the reader. null = the reader
+ *  cannot be located (unknown, never 'fixed'). */
+export function literalInReaderBody(src: string, literal: string, reader: string): boolean | null {
+  const bodies = readerBodies(src, reader);
+  if (bodies.length === 0) return null;
+  return bodies.some((b) => b.includes(literal));
+}
+
+function evaluateExpectedLiteral(editSite: string, expectedLiteral: string, literalReader?: string): 'present' | 'absent' | 'unknown' {
   const runtimePath = join(runtimeRoot(), editSite.replace(/^\//, '').replace(/^repos\//, ''));
   if (!existsSync(runtimePath)) return 'unknown';
   const contents = readFileSync(runtimePath, 'utf8');
+  // A decomposed step names the function that must read its literal; whole-file presence closed steps on a comment,
+  // an unrelated constant (a782ec1) or a helper the draft invented (qa + operator, 2026-09-30).
+  if (literalReader) {
+    const inReader = literalInReaderBody(contents, expectedLiteral, literalReader);
+    return inReader === null ? 'unknown' : inReader ? 'absent' : 'present';
+  }
   // PRESENT means the fix is in place, so the DEFECT is absent. Inverse of Class 1.
   return contents.includes(expectedLiteral) ? 'absent' : 'present';
+}
+
+/** A decomposed step closed ONLY by its literal is not a verification: the literal names new code, so its presence
+ *  proves only that the new code exists (0f7e688 closed landed_verified on such a literal and was a regression). It
+ *  still closes (so it is not re-landed), recorded as landed_literal_only with falsifier_exercise.passed=false. */
+export function isLiteralOnlyStepClose(meta: Record<string, unknown>): boolean {
+  return meta["predicate_source"] === "decompose" && typeof meta["expected_literal"] === "string" && (meta["expected_literal"] as string).trim() !== ""
+    && !meta["evidence_resolve"] && !meta["verify_shape"];
 }
 
 /**
@@ -2232,7 +2322,7 @@ export function verifyGapCondition(gap: Record<string, unknown>): 'present' | 'a
     // Class 1b: inverse polarity (expected_literal). Only when Class 1 did not apply.
     const expectedLiteral = nonEmptyStr(meta['expected_literal']);
     if (editSite && !hardcodedUrl && expectedLiteral) {
-      return evaluateExpectedLiteral(editSite, expectedLiteral);
+      return evaluateExpectedLiteral(editSite, expectedLiteral, nonEmptyStr(meta['literal_reader']) || undefined);
     }
     // ── Class 3 (sync): landed commit — a substrate-authored commit referencing this gap id already exists ──
     const gapIdForLandedSync = typeof gap['id'] === 'string' ? (gap['id'] as string) : '';
@@ -2330,7 +2420,7 @@ async function verifyGapConditionAsync(gap: Record<string, unknown>): Promise<'p
     // Class 1b: inverse polarity (expected_literal). Only when Class 1 did not apply.
     const expectedLiteral = nonEmptyStr(meta['expected_literal']);
     if (editSite && !hardcodedUrl && expectedLiteral) {
-      return evaluateExpectedLiteral(editSite, expectedLiteral);
+      return evaluateExpectedLiteral(editSite, expectedLiteral, nonEmptyStr(meta['literal_reader']) || undefined);
     }
     // ── Class 3: landed commit — provenance (single landing => 'pending', NOT measurement) ──
     // Only consulted when no Class-2 predicate exists (measurement-before-provenance, above).
@@ -2664,8 +2754,9 @@ async function closeLandedGap(gap: Record<string, unknown>, land: LandSignal): P
     // closed_reason + landed_sha (value-per-cost-selection 5.1): this close is a landing whose outcome
     // was verified above, the same fact the sweep records as `landed_verified`. Without the reason
     // the terminal measure (gaps closed by a verified landing) could not count this path at all.
-    const closedMeta = { ...((gap.classification_metadata ?? gap.metadata ?? {}) as Record<string, unknown>), resolution, closed_reason: "landed_verified", ...(land.commit_sha ? { landed_sha: land.commit_sha } : {}), closed_at: new Date().toISOString(),
-      falsifier_exercise: { detector: "closeLandedGap", verdict: verifyResult, passed: verifyResult === "absent", ran_at: new Date().toISOString(), commit: land.commit_sha ?? null } };
+    const literalOnlyClose = isLiteralOnlyStepClose((gap.classification_metadata ?? gap.metadata ?? {}) as Record<string, unknown>);
+    const closedMeta = { ...((gap.classification_metadata ?? gap.metadata ?? {}) as Record<string, unknown>), resolution, closed_reason: literalOnlyClose ? "landed_literal_only" : "landed_verified", ...(land.commit_sha ? { landed_sha: land.commit_sha } : {}), closed_at: new Date().toISOString(),
+      falsifier_exercise: { detector: "closeLandedGap", verdict: literalOnlyClose ? "literal_present" : verifyResult, passed: !literalOnlyClose && verifyResult === "absent", ran_at: new Date().toISOString(), commit: land.commit_sha ?? null } };
     const meta = closedMeta;
     joinDecisionOutcome(meta, { landed: true, verdict: "FAVORABLE", commit: land.commit_sha ?? null });
     await resolveSubstrateGapWrite({
@@ -3496,9 +3587,11 @@ const pending = gaps
           detected_at: g.detected_at,
           classification_metadata: {
             ...meta,
-            closed_reason: "landed_verified",
+            closed_reason: isLiteralOnlyStepClose(meta) ? "landed_literal_only" : "landed_verified",
             close_basis: verdict,
-            falsifier_exercise: { detector: "gap-sweep", verdict, passed: verdict === "absent", ran_at: new Date().toISOString(), commit: sha },
+            falsifier_exercise: isLiteralOnlyStepClose(meta)
+              ? { detector: "gap-sweep", verdict: "literal_present", passed: false, ran_at: new Date().toISOString(), commit: sha }
+              : { detector: "gap-sweep", verdict, passed: verdict === "absent", ran_at: new Date().toISOString(), commit: sha },
             resolution: `landed via mitosis cutover ${sha} (${verdict === 'absent' ? 'measured condition check' : 'earned close-oracle trust'})`,
             closed_at: new Date().toISOString(),
           },

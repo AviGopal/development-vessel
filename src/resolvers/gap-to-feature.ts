@@ -2544,6 +2544,20 @@ async function verifyGapConditionAsync(gap: Record<string, unknown>): Promise<'p
 /** Mark a gap closed once its fix genuinely landed on origin/dev. Best-effort, guarded. */
 async function closeLandedGap(gap: Record<string, unknown>, land: LandSignal): Promise<{ closed: boolean; error?: string }> {
   try {
+    // Re-read the gap: the caller's copy was captured at pick time, before the cutover's pending-land
+    // stamp and before any hold written since. Closing from it overwrote newer fields (the f705b61 close
+    // kept a reverted pending sha) and could not see a hold written after the pick (09-30).
+    const fresh = await readGapFresh(String(gap.id ?? ""));
+    if (fresh) gap = fresh;
+    if (((gap.classification_metadata ?? gap.metadata ?? {}) as Record<string, unknown>).operator_hold === true) {
+      return { closed: false, error: "operator_hold: not closed on landing" };
+    }
+    // A decision made while the landing was in flight (withdrawn, verified_by_operator_review, superseded)
+    // is not overwritten by a machine landed_verified: the sig-count gap was withdrawn on 09-29 with two
+    // landings on it in flight.
+    if (fresh && String(gap.status ?? "open") !== "open") {
+      return { closed: false, error: `already ${String(gap.status)}: not re-closed on landing` };
+    }
     // Outcome-verification (increment 2): use the async verifier which covers both
     // the surgical-class (file+literal) AND the resolver-behaviour class
     // (evidence_resolve / verify_shape). Fall back to the sync verifier result
@@ -2613,6 +2627,11 @@ async function closeLandedGap(gap: Record<string, unknown>, land: LandSignal): P
     } as never);
     return { closed: false, error: "self-cutover: closure deferred to next-tick pick-time outcome verification" };
   }
+    const selfAuthored = land.commit_sha ? selfAuthoredCheckInputs(gap, land.commit_sha) : [];
+    if (selfAuthored.length > 0) {
+      await markAwaitingOperatorReview(gap, land.commit_sha ?? "", selfAuthored);
+      return { closed: false, error: `self-authored check: the landing edited its own check input(s) ${selfAuthored.join(", ")}` };
+    }
     const resolution = `landed via mitosis cutover${land.commit_sha ? ` ${land.commit_sha}` : ""}${land.vessel ? ` (${land.vessel})` : ""}`;
     // Outcome verification: only close when the condition is observed gone.
     // Refuse on 'present' (still broken) AND 'pending' (single landing, unmeasured — provenance,
@@ -2639,7 +2658,8 @@ async function closeLandedGap(gap: Record<string, unknown>, land: LandSignal): P
     // closed_reason + landed_sha (value-per-cost-selection 5.1): this close is a landing whose outcome
     // was verified above, the same fact the sweep records as `landed_verified`. Without the reason
     // the terminal measure (gaps closed by a verified landing) could not count this path at all.
-    const closedMeta = { ...((gap.classification_metadata ?? gap.metadata ?? {}) as Record<string, unknown>), resolution, closed_reason: "landed_verified", ...(land.commit_sha ? { landed_sha: land.commit_sha } : {}), closed_at: new Date().toISOString() };
+    const closedMeta = { ...((gap.classification_metadata ?? gap.metadata ?? {}) as Record<string, unknown>), resolution, closed_reason: "landed_verified", ...(land.commit_sha ? { landed_sha: land.commit_sha } : {}), closed_at: new Date().toISOString(),
+      falsifier_exercise: { detector: "closeLandedGap", verdict: verifyResult, passed: verifyResult === "absent", ran_at: new Date().toISOString(), commit: land.commit_sha ?? null } };
     const meta = closedMeta;
     joinDecisionOutcome(meta, { landed: true, verdict: "FAVORABLE", commit: land.commit_sha ?? null });
     await resolveSubstrateGapWrite({
@@ -3098,6 +3118,78 @@ function sweepGitOut(cloneDir: string, args: string[]): string | null {
   } catch { /* spawn failed: no output */ }
   return out;
 }
+/** The gap as the store holds it now, or null when it cannot be read (the caller keeps its own copy). */
+async function readGapFresh(id: string): Promise<Record<string, unknown> | null> {
+  if (!id) return null;
+  try {
+    const read = await resolveSubstrateGap({ type: "substrateGap", id } as never);
+    const rows = (read as { body?: { gaps?: Array<Record<string, unknown>> } }).body?.gaps;
+    return Array.isArray(rows) ? (rows.find((r) => String(r.id) === id) ?? null) : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Did the landing edit its own check? When a class2 test_suite check's test file, or any path recorded in
+ * check_inputs, is in the landed commit's diff, a passing verdict certifies nothing: the landing wrote the
+ * thing that judges it. Observed 09-29/30: concept-db f705b61 and activity-api 0f96c62 were closed
+ * landed_verified by the tests they had just edited. Returns the offending repos/<vessel>/ paths, or []
+ * when the gap names no check input or the commit is in no clone.
+ */
+function selfAuthoredCheckInputs(gap: Record<string, unknown>, sha: string): string[] {
+  const meta = (gap.classification_metadata ?? gap.metadata ?? {}) as Record<string, unknown>;
+  const inputs = new Set<string>();
+  if (Array.isArray(meta.check_inputs)) for (const p of meta.check_inputs) if (typeof p === "string" && p) inputs.add(p.replace(/^\/+/, ""));
+  const er = meta.evidence_resolve as { shape?: unknown; input?: { vessel?: unknown; test_file?: unknown } } | undefined;
+  if (er && er.shape === "test_suite" && typeof er.input?.vessel === "string" && typeof er.input?.test_file === "string") {
+    inputs.add(`repos/${er.input.vessel}/${er.input.test_file.replace(/^\/+/, "")}`);
+  }
+  if (inputs.size === 0 || !sha) return [];
+  try {
+    for (const name of readdirSync(vesselsCloneRoot()).sort()) {
+      const dir = join(vesselsCloneRoot(), name);
+      if (!existsSync(join(dir, ".git")) || sweepGitOut(dir, ["merge-base", "--is-ancestor", sha, "HEAD"]) === null) continue;
+      const touched = (sweepGitOut(dir, ["diff-tree", "--no-commit-id", "--name-only", "-r", sha]) ?? "").split("\n").filter(Boolean);
+      return touched.map((f) => `repos/${name}/${f}`).filter((f) => inputs.has(f));
+    }
+    console.warn(`[gap-verify] cannot judge self-authorship for ${String(gap.id ?? "?")}: ${sha.slice(0, 12)} is in no vessel clone`);
+  } catch (e) {
+    console.warn(`[gap-verify] cannot judge self-authorship for ${String(gap.id ?? "?")}: ${(e as Error).message}`);
+  }
+  return [];
+}
+
+/**
+ * A landing whose check it edited itself leaves the gap open with disposition awaiting_operator_review and
+ * the landed sha still pending, so the picker does not re-compose it and the sweep skips it cheaply. The
+ * resolution is an operator's recorded verdict (verified_by_operator_review, or a regression).
+ */
+async function markAwaitingOperatorReview(gap: Record<string, unknown>, sha: string, files: string[]): Promise<void> {
+  try {
+    const id = String(gap.id ?? "");
+    if (!id) return;
+    const meta0 = (gap.classification_metadata ?? gap.metadata ?? {}) as Record<string, unknown>;
+    const now = new Date().toISOString();
+    await resolveSubstrateGapWrite({
+      type: "substrateGap_write",
+      gap: {
+        id, category: gap.category, source: gap.source, summary: gap.summary, detected_at: gap.detected_at,
+        classification_metadata: {
+          ...meta0,
+          pending_outcome_verification: sha || meta0["pending_outcome_verification"] || "unknown",
+          pending_set_at: sha === meta0["pending_outcome_verification"] && typeof meta0["pending_set_at"] === "string" ? meta0["pending_set_at"] : now,
+          disposition: "awaiting_operator_review",
+          self_authored_check: { sha, files, at: now },
+        },
+        status: "open",
+      },
+    } as never);
+  } catch (e) {
+    console.warn(`[gap-verify] could not mark ${String(gap.id ?? "?")} awaiting operator review: ${(e as Error).message}`);
+  }
+}
+
 /**
  * Is the landed commit RUNNING on this node? A measured 'absent' read from this node's runtime file is
  * evidence only if this node actually serves the vessel on that code: on 2026-09-29 node 2 closed a gap
@@ -3236,7 +3328,7 @@ async function sweepPendingLandVerificationsOnce(): Promise<{ checked: number; c
   // Live at the time of writing: 13 gaps carry pending_outcome_verification, 11 of them
   // have no predicate at all — so the honest answer is "correctly abstaining on an input
   // that cannot be measured", not "broken". A counter per verdict says that out loud.
-  const tally = { absent: 0, present: 0, pending: 0, unknown: 0, not_in_clone: 0, reverted: 0, awaiting_restart: 0, falsified: 0 };
+  const tally = { absent: 0, present: 0, pending: 0, unknown: 0, not_in_clone: 0, reverted: 0, awaiting_restart: 0, falsified: 0, self_authored: 0 };
   try {
     const read = await resolveSubstrateGap({
       type: "substrateGap",
@@ -3328,6 +3420,8 @@ const pending = gaps
       //                 re-compose (disposition set so the picker skips it -> no manufactured re-land).
       //   'unknown'  -> unmeasured; close only if the landed-commit class has EARNED fail-open trust
       //                 (it never does on provenance alone -> abstain, retry next tick).
+      // Marked on an earlier tick: its check was edited by its own landing, so re-running it proves nothing.
+      if (meta.disposition === "awaiting_operator_review" && (meta.self_authored_check as { sha?: unknown } | undefined)?.sha === sha) { tally.self_authored += 1; continue; }
       const verdict = await verifyGapConditionAsync(g);
       const gidSweep = String(g.id ?? "");
       if (verdict === "present") {
@@ -3360,6 +3454,13 @@ const pending = gaps
         console.log(`[gap-sweep] gap ${gidSweep} reads ${verdict} but landed ${sha.slice(0, 12)} is ${runningHere} on this node — not closed here`);
         continue;
       }
+      const selfAuthoredSweep = selfAuthoredCheckInputs(g, sha);
+      if (selfAuthoredSweep.length > 0) {
+        tally.self_authored += 1;
+        console.log(`[gap-sweep] gap ${gidSweep} reads ${verdict} but landed ${sha.slice(0, 12)} edited its own check input(s) ${selfAuthoredSweep.join(", ")}; not closed (awaiting operator review)`);
+        await markAwaitingOperatorReview(g, sha, selfAuthoredSweep);
+        continue;
+      }
       // verdict === 'absent' (MEASURED resolved) OR 'unknown' with earned trust -> close.
       tally.absent += 1;
       joinDecisionOutcome(meta, { landed: true, verdict: "FAVORABLE", commit: sha });
@@ -3380,6 +3481,7 @@ const pending = gaps
             ...meta,
             closed_reason: "landed_verified",
             close_basis: verdict,
+            falsifier_exercise: { detector: "gap-sweep", verdict, passed: verdict === "absent", ran_at: new Date().toISOString(), commit: sha },
             resolution: `landed via mitosis cutover ${sha} (${verdict === 'absent' ? 'measured condition check' : 'earned close-oracle trust'})`,
             closed_at: new Date().toISOString(),
           },

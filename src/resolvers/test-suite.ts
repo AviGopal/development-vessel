@@ -163,7 +163,7 @@ export async function resolveTestSuite(pointer: Record<string, unknown>): Promis
     ? pointer.test_file.trim()
     : "";
   const testFilter = onlyTests.length > 0
-    ? ` -t ${JSON.stringify(onlyTests.map((t) => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|"))}`
+    ? ` -t ${JSON.stringify(onlyTests.map((t) => t.split(" > ").join(" ").replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|"))}`
     : "";
   const command =
     `ROOT=${JSON.stringify(preferredRoot)}; [ -d "$ROOT" ] || ROOT=${JSON.stringify(fallbackRoot)}; ` +

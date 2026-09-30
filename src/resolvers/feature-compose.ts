@@ -5832,6 +5832,35 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
   // point: a missing dispatch-case registration is typecheck-clean but a real
   // INCOMPLETE wiring — gating on it forces the system to author a ROUTABLE shape.
   const SHARED_DISPATCH_CHECK = "/vessels/packages/shape-dispatch-check/check.ts";
+  // THE GATE READS THE GAP FROM THE STORE, NOT FROM THE CALLER (09-30). Callers build their own gap
+  // object: goal-host's edit-intent route (reached by gap-to-feature's "investigate and decompose"
+  // escalation) passes only {edit_site}, so the own check below found no evidence_resolve and passed
+  // silently; d2e9f9a landed that way with its check red. When pointer.gap.id names a store gap, the
+  // stored metadata is the authority. An unreadable store fails the gate closed.
+  let gateGapMeta: Record<string, unknown> | null = null;
+  let gateSource: "store" | "caller" | "store_unreadable" = "caller";
+  if (pointer.gap) {
+    gateGapMeta = { ...((pointer.gap.classification_metadata ?? {}) as Record<string, unknown>) };
+    const gid = typeof pointer.gap.id === "string" ? pointer.gap.id : "";
+    if (gid) {
+      try {
+        const rows = ((await resolveSubstrateGap({ type: "substrateGap", id: gid, limit: 1 } as never))?.body as { gaps?: Array<Record<string, unknown>> } | undefined)?.gaps;
+        if (!Array.isArray(rows)) gateSource = "store_unreadable";
+        else {
+          const row = rows.find((r) => String(r.id) === gid);
+          if (row) { gateGapMeta = { ...gateGapMeta, ...((row.classification_metadata ?? {}) as Record<string, unknown>) }; gateSource = "store"; }
+        }
+      } catch {
+        gateSource = "store_unreadable";
+      }
+    }
+  }
+  // A real gap id that falls back to the caller's copy without a check is a silent route around the gate
+  // (e.g. an id mismatch from goal-host's hydration); say so rather than pass quietly.
+  if (pointer.gap && gateSource === "caller" && typeof pointer.gap.id === "string" && pointer.gap.id && !pointer.gap.id.startsWith("route-edit-") && !(gateGapMeta ?? {}).evidence_resolve) {
+    console.warn(`[fc-own-check] gap ${pointer.gap.id} is not in the store and carries no evidence_resolve; its own check cannot run (caller copy)`);
+  }
+  const ownCheckRan: string[] = [];
   const runVerify = async (v: string): Promise<{ vessel: string; errors: number | string; exit_code: number | null; ok: boolean; output: string }> => {
     const vAbs = vesselRoot(v);
     const sh = await callTool(toolsEndpoint, "shell", {
@@ -6099,15 +6128,20 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
     let ownRed: string[] = [];
     let ownUnjudged = false;
     let strayTests: string[] = [];
-    if (pointer.gap) {
-      const gapMeta = (pointer.gap.classification_metadata ?? {}) as Record<string, unknown>;
+    let ownRan = false;
+    let ownRef: { test_file: string; only_tests: string[] } | null = null;
+    if (gateGapMeta) {
+      const gapMeta = gateGapMeta;
       const editedRel = edited.filter((p) => p.startsWith(vAbs + "/")).map((p) => p.slice(vAbs.length + 1));
       // A directed goal may name the test it means to change in its spec; that is not a stray edit.
       const specPaths = String(pointer.spec ?? "").match(/(?:repos\/[A-Za-z0-9_-]+\/)?[A-Za-z0-9_./-]+\.test\.[cm]?[jt]sx?|(?:repos\/[A-Za-z0-9_-]+\/)?(?:tests?|__tests__)\/[A-Za-z0-9_./-]+\.[cm]?[jt]sx?/g) ?? [];
       const own = gapOwnTestSuite(gapMeta, v);
+      ownRef = own;
       // Only a DIRECTED goal's spec is the author's statement of intent. An undirected lane gap's spec carries
       // its summary and fix_hint, where a test path may be named precisely because it must NOT be edited.
-      const specIsIntent = (pointer as { directed?: boolean }).directed === true || pointer.gap.category === "edit_intent_route";
+      // goal-host tags EVERY edit-intent compose edit_intent_route, autonomous escalations included, so the
+      // category is not intent (qa, 09-30).
+      const specIsIntent = (pointer as { directed?: boolean }).directed === true;
       strayTests = strayTestEdits(v, editedRel, gapMeta, !own && specIsIntent ? specPaths : []);
       // Skipped when the typecheck already refused this draft: the verdict cannot turn green.
       if (own && tcOk) {
@@ -6120,7 +6154,15 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
         });
         const red = ownCheckStillRed(String((shO.body as { stdout?: unknown })?.stdout ?? ""), own.only_tests);
         if (red === null) ownUnjudged = true; else ownRed = red;
+        ownRan = true;
       }
+      if (gateSource === "store_unreadable") ownUnjudged = true;
+      // Logged on PASS too: a skipped check must be distinguishable from a passed one (qa, 1bc78f8).
+      console.log(`[fc-own-check] ${JSON.stringify({ gap: pointer.gap?.id ?? null, vessel: v, source: gateSource, test_file: ownRef?.test_file ?? null, only: ownRef?.only_tests ?? [], ran: ownRan, red: ownRed, unjudged: ownUnjudged, stray: strayTests, tc_ok: tcOk })}`);
+      if (ownRan && ownRed.length === 0 && !ownUnjudged) ownCheckRan.push(v);
+    } else {
+      // No gap on this compose (apply-proposal-as-patch, perf-canary): logged so the ungated path is countable.
+      console.log(`[fc-own-check] ${JSON.stringify({ gap: null, vessel: v, source: "none" })}`);
     }
     const ownOk = ownRed.length === 0 && !ownUnjudged && strayTests.length === 0;
     const ok = installOk && dryRunOk && tcOk && sdExit === 0 && testOk && ownOk;
@@ -6128,7 +6170,7 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
       + (installOk ? "" : ` | DEPENDENCY INSTALL FAILED (INSTALL_EXIT=${String(installExit)}) — the staged manifest does not install; a typecheck against an already-populated node_modules cannot see this`)
       + (dryRunOk ? "" : ` | DEPENDENCY RESOLUTION FAILED (DRYRUN_EXIT=${String(dryRunExit)}) — the staged manifest names a dependency that does not resolve, so this change would break a fresh install even though it typechecks here: ${(raw.match(/== resolve ==\n([\s\S]*?)\n== typecheck ==/)?.[1] ?? "").slice(0, 400)}`)
       + (ownRed.length > 0 ? ` | THE GAP'S OWN CHECK IS STILL RED on this draft (its test file run alone): ${ownRed.slice(0, 5).join(" ; ").slice(0, 400)}. A draft that leaves its own check red does not land; finish every site the check names.` : "")
-      + (ownUnjudged ? " | THE GAP'S OWN CHECK PRODUCED NO RESULT on this draft (its test file run alone printed no pass/fail); unverified, not landed." : "")
+      + (ownUnjudged ? (gateSource === "store_unreadable" ? " | THE GAP STORE COULD NOT BE READ, so this gap's own check could not be resolved; unverified, not landed." : " | THE GAP'S OWN CHECK PRODUCED NO RESULT on this draft (its test file run alone printed no pass/fail); unverified, not landed.") : "")
       + (strayTests.length > 0 ? ` | EDITS A TEST FILE THIS GAP DOES NOT NAME: ${strayTests.join(", ")}. A draft must not change another test's assertions (that is how guards get weakened); fix the code, or leave that test to its own gap.` : "")
       + (testOk ? "" : [
       confirmedNewTest.length > 0 ? ` | NEW test failures introduced by this draft, REPRODUCED on a second run (${confirmedNewTest.length}): ${confirmedNewTest.slice(0, 5).join(" ; ").slice(0, 600)}` : "",
@@ -7057,7 +7099,7 @@ const earlyAttempt = await Promise.race([
         // that way myself and wrongly concluded this path never ran tests. The cited
         // names are the audit record of why a commit was allowed to land; they must
         // name the checks that actually gated it.
-        evaluation_evidence: { verdict: "FAVORABLE", base_success_rate: 1, mitosis_success_rate: 1, cited_trace_ids: [], cited_check_names: ["typecheck", "shape-dispatch", "bun test (baseline-delta, flake-confirmed)"] },
+        evaluation_evidence: { verdict: "FAVORABLE", base_success_rate: 1, mitosis_success_rate: 1, cited_trace_ids: [], cited_check_names: ["typecheck", "shape-dispatch", "bun test (baseline-delta, flake-confirmed)", ...(ownCheckRan.length > 0 ? [`own-check (gap test_suite, alone: ${ownCheckRan.join(",")})`] : [])] },
         // Provenance: gap id when routed from a gap (goal-host edit-intent passes
         // route-edit-<goal_hash>), and the durable compose-report artifact name as
         // the proposal id — commits become trace-matchable instead of unknown-gap.

@@ -1435,12 +1435,14 @@ function pickMostLandable(gaps: Record<string, unknown>[]): Record<string, unkno
   // failed_attempts 0, landability 1.0, open since 2026-08-16 — roughly one wasted cycle every
   // 7 minutes. Over the same window seven eligible operator-filed gaps were never picked once.
   //
-  // Filter on the SAME predicate the post-selection branches use. Do NOT filter on the stored
-  // classification_metadata.disposition field: markPendingVerification writes it, but the
-  // livelocked gap does not carry it (verified — disposition was null on that record while it
-  // logged PENDING on every pick). 'pending' here is DERIVED at pick time by verifyGapCondition
-  // from landed-commit provenance, so a disposition-based filter would have excluded ten
-  // unrelated gaps and missed the one actually burning the slot.
+  // Filter on the SAME predicate the post-selection branches use. 'pending' here is DERIVED at pick
+  // time by verifyGapCondition from landed-commit provenance, because the livelocked gap did not carry
+  // the stored disposition (it was null on that record while it logged PENDING on every pick).
+  // The stored disposition is filtered too, one layer earlier: admission (admitActionableGaps,
+  // isAwaitingLandVerification) excludes disposition pending_verification, because this skip missed
+  // the gaps it cannot judge at pick time (2026-09-30, compose2: 35 of 75 picks went to gaps whose own
+  // commit had already landed). Admission re-admits one once its landing is known not to have fixed it
+  // (regressed_by, BEHAVIORAL VERIFICATION FAILED, or the sweep's release), so the two layers compose.
   //
   // Walked lazily rather than applied pool-wide: verifyGapCondition -> landedCommitVerdict
   // spawns `git log --grep` per clone plus `git log -1` per matching sha, so evaluating all
@@ -1830,6 +1832,10 @@ export async function admitActionableGaps(
     // A disposition that parks the gap for a human was a label nobody read: an unlocalized needs_information gap
     // was picked on 2026-09-30 12:21 (for a stale test its only green is changing src to match it).
     if (isParkingDisposition(meta.disposition)) { excluded.push({ id, reason: `disposition(${String(meta.disposition)})` }); continue; }
+    // A landing awaiting its verdict is not compose work: re-drafting it spends a draft on code that may already be
+    // fixed (2026-09-30: 35 of 75 compose2 picks went to gaps whose own commit had landed). Re-admitted once the
+    // landing is known not to have fixed it (regressed_by, BEHAVIORAL VERIFICATION FAILED, or the sweep's release).
+    if (isAwaitingLandVerification(g)) { excluded.push({ id, reason: "disposition(pending_verification)" }); continue; }
     // Its own check already passes on the parent (op10 terminal refusal): re-picking cannot help until the sweep
     // closes it or an operator looks, so it waits out OWN_GREEN_ADMISSION_TTL_MS instead of a cooldown per cycle.
     if (greenOnParentFresh(meta)) { excluded.push({ id, reason: "own_check_green_on_parent" }); continue; }
@@ -3164,7 +3170,7 @@ function escalatePendingVerification(gapId: string, category: string, summary: s
 
 /**
  * Mark a gap PENDING-VERIFICATION: keep it open, stamp pending_outcome_verification (so the
- * sweep re-checks it) and disposition:'pending_verification' (so the PICKER skips re-composing it —
+ * sweep re-checks it) and disposition:'pending_verification' (so ADMISSION skips re-composing it —
  * a second landing would read as a re-land and manufacture the false-close the oracle is calibrated
  * against). Best-effort; never throws into the caller.
  */
@@ -3206,6 +3212,35 @@ async function markPendingVerification(gap: Record<string, unknown>, sha: string
       },
     } as never);
   } catch { /* best-effort */ }
+}
+
+/** The row that releases a pending_verification hold, built from the gap as the store holds it NOW, or null when
+ *  there is nothing to release: the row is gone, no longer open (a reopen would undo a close), or no longer held
+ *  pending_verification (a human hold set meanwhile is not the sweep's to lift). The whole fresh row is returned so
+ *  top-level keys (reopen_count, first_detected_at, ...) survive the write. A REVERTED landing also clears its
+ *  pending_outcome_verification stamp ("" is the cleared convention) and records it as reverted_landing: the stamp
+ *  would keep the picker skipping the gap and the sweep re-selecting it every tick. */
+export function releasedRow(fresh: Record<string, unknown> | null, why: string, revertedSha?: string): Record<string, unknown> | null {
+  if (!fresh || String(fresh.status ?? "") !== "open") return null;
+  const lifted = liftLandVerificationHold((fresh.classification_metadata ?? {}) as Record<string, unknown>);
+  if (!lifted) return null;
+  const meta: Record<string, unknown> = { ...lifted, pending_note: `released: ${why}` };
+  if (revertedSha) { meta.pending_outcome_verification = ""; meta.reverted_landing = revertedSha; }
+  return { ...fresh, classification_metadata: meta };
+}
+
+/** The sweep judged a landing NOT to have resolved its gap: lift the pending_verification hold so admission takes
+ *  the gap for another attempt. Decided on a FRESH read, not the sweep's snapshot (releasedRow). */
+async function releaseUnresolvedLanding(gap: Record<string, unknown>, why: string, revertedSha?: string): Promise<void> {
+  const id = String(gap.id ?? "");
+  try {
+    const row = releasedRow(await readGapFresh(id), why, revertedSha);
+    if (!row) return;
+    await resolveSubstrateGapWrite({ type: "substrateGap_write", gap: row } as never);
+    console.warn(`[gap-sweep] released pending_verification on ${id}: ${why}; admitted for another attempt`);
+  } catch (e) {
+    console.warn(`[gap-sweep] could not release pending_verification on ${id}: ${(e as Error).message}`);
+  }
 }
 
 // FALSIFIED AUTONOMOUS LANDING (contained-self-development 8.4a). The sweep measured a
@@ -3516,6 +3551,7 @@ const pending = gaps
       if (operatorReverted || shaWasRevertedInAnyClone(sha)) {
         tally.reverted += 1;
         console.warn(`[gap-sweep] gap ${String(g.id)} NOT closed: landed sha ${sha.slice(0, 12)} was REVERTED — the change is gone from HEAD, so the gap is unresolved and stays open for another attempt`);
+        await releaseUnresolvedLanding(g, `landed ${sha.slice(0, 12)} was reverted`, sha);
         continue;
       }
       // Post-cutover: the async verifier CAN now observe the landed state. Close ONLY on a
@@ -3537,6 +3573,11 @@ const pending = gaps
         const falsified = await recordFalsifiedAutonomousLanding(g, meta, sha);
         if (falsified === "awaiting_restart") { tally.awaiting_restart += 1; sweepAwaitingRestart = true; continue; }
         if (falsified === "recorded") { tally.falsified += 1; continue; }
+        // A MEASURED 'present' while the landing runs here: the change did not fix it, so it gets another attempt.
+        // Class-3 'present' (landed twice) stays held for the human the re-land escalation asks.
+        if (liftLandVerificationHold(meta) && landVerdictIsMeasured(meta) && (await landedCommitRunningHere(sha)) === "running") {
+          await releaseUnresolvedLanding(g, `measured present with landed ${sha.slice(0, 12)} running`);
+        }
         const editSitePresent = gapEditSite(g, (g.classification_metadata ?? g.metadata ?? {}) as Record<string, unknown>) ?? "";
         if (landedCommitVerdict(gidSweep, editSitePresent) === 'present') {
           escalateRelandToHuman(gidSweep, String(g.category ?? "?"), String(g.summary ?? ""));
@@ -3870,6 +3911,34 @@ async function markTerminalRefusal(gap: Record<string, unknown>, cb: Record<stri
 export const PARKING_DISPOSITIONS: readonly string[] = ["needs_information", "needs_info", "awaiting_operator_review"];
 export function isParkingDisposition(d: unknown): boolean {
   return typeof d === "string" && PARKING_DISPOSITIONS.includes(d);
+}
+
+/** A landed gap held for its verdict: disposition pending_verification (markPendingVerification) with nothing yet
+ *  saying the landing failed. regressed_by or a BEHAVIORAL VERIFICATION FAILED summary means it did not fix the
+ *  gap, so the gap is work again; the sweep's not-resolved verdict lifts the disposition (liftLandVerificationHold). */
+export function isAwaitingLandVerification(gap: Record<string, unknown>): boolean {
+  const meta = (gap.classification_metadata ?? gap.metadata ?? {}) as Record<string, unknown>;
+  if (meta.disposition !== "pending_verification") return false;
+  if (meta.regressed_by !== undefined && meta.regressed_by !== null) return false;
+  if (String(gap.summary ?? "").includes("BEHAVIORAL VERIFICATION FAILED")) return false;
+  return true;
+}
+
+/** The metadata that releases a pending_verification hold ("" because the gap store carries omitted keys
+ *  forward), or null when there is no such hold: parking dispositions are a human's to lift, and a null lets the
+ *  sweep write once rather than every tick. */
+export function liftLandVerificationHold(meta: Record<string, unknown>): Record<string, unknown> | null {
+  return meta.disposition === "pending_verification" ? { ...meta, disposition: "" } : null;
+}
+
+/** Whether the verifier's 'present' for this gap is a MEASUREMENT (class 1 literal, class 1b expected literal,
+ *  class 2 resolver behaviour) rather than class-3 provenance, where 'present' only means "landed twice" and goes
+ *  to a human. Mirrors the predicate order in verifyGapConditionAsync. */
+export function landVerdictIsMeasured(meta: Record<string, unknown>): boolean {
+  if (meta.evidence_resolve !== undefined || meta.verify_shape !== undefined) return true;
+  const editSite = typeof meta.file_path === "string" ? meta.file_path : (typeof meta.edit_site === "string" ? meta.edit_site : "");
+  if (!editSite) return false;
+  return nonEmptyStr(meta.hardcoded_url) !== null || nonEmptyStr(meta.expected_literal) !== null;
 }
 
 export function isNonAttemptComposeResult(cb: Record<string, unknown> | null | undefined): boolean {

@@ -3356,6 +3356,58 @@ function testFailureSet(raw: string): Set<string> {
   return out;
 }
 
+/** The gap's own class2 test_suite check for vessel `v`, or null when it has none there. */
+export function gapOwnTestSuite(meta: Record<string, unknown>, v: string): { test_file: string; only_tests: string[] } | null {
+  const er = meta.evidence_resolve as { shape?: unknown; input?: { vessel?: unknown; test_file?: unknown; only_tests?: unknown } } | undefined;
+  if (!er || er.shape !== "test_suite" || !er.input) return null;
+  const vessel = typeof er.input.vessel === "string" ? er.input.vessel.replace(/^repos\//, "") : "";
+  const file = typeof er.input.test_file === "string" ? er.input.test_file.replace(/^\/+/, "") : "";
+  if (!vessel || vessel !== v.replace(/^repos\//, "") || !/^[A-Za-z0-9_./-]+$/.test(file) || file.includes("..")) return null;
+  const only = Array.isArray(er.input.only_tests) ? er.input.only_tests.filter((t): t is string => typeof t === "string" && t.length > 0) : [];
+  return { test_file: file, only_tests: only };
+}
+
+/**
+ * Which of the gap's requested tests are still not green in `raw` (a run of the gap's test file alone).
+ * A requested test that neither passed nor failed (renamed or deleted) counts as not green. Returns null
+ * when the run printed no result at all, so the caller fails closed instead of reading silence as a pass.
+ */
+export function ownCheckStillRed(raw: string, only: string[]): string[] | null {
+  const fails = [...testFailureSet(raw)];
+  const passLines = raw.split("\n").filter((l) => /^\s*\(pass\)/.test(l));
+  if (fails.length === 0 && passLines.length === 0) return null;
+  if (only.length === 0) return fails;
+  const red = only.filter((n) => fails.some((f) => f.includes(n)));
+  const notRun = only.filter((n) => !red.includes(n) && !passLines.some((l) => l.includes(n)));
+  return [...red, ...notRun.map((n) => `${n} (not run)`)];
+}
+
+const TEST_FILE_RE = /(^|\/)(tests?|__tests__)\/|\.test\.[cm]?[jt]sx?$/;
+
+/**
+ * Existing test files a draft edited that its gap does not allow. Editing an unrelated test's assertion is how
+ * a guard gets weakened: 0f96c62 rewrote mock-module-completeness's zero-new-debt assertion into an
+ * allow-list, as 6ac1aa6 had on 09-05. Allowed: the gap's edit_site (a stale-test gap names its test there)
+ * and `alsoAllowed`; never a path in protected_files / protected_src. check_inputs are NOT allowed: they are
+ * what judges the fix (a mock-factory gap's check is the guard it must not edit). `editedRel` are
+ * vessel-relative paths of EDITED files; newly created test files are not passed in.
+ */
+export function strayTestEdits(v: string, editedRel: string[], meta: Record<string, unknown>, alsoAllowed: string[] = []): string[] {
+  const vessel = v.replace(/^repos\//, "");
+  const norm = (p: unknown): string => {
+    if (typeof p !== "string" || !p) return "";
+    const s = p.replace(/:[^/]*$/, "").replace(/^\/+/, "");
+    const pre = `repos/${vessel}/`;
+    return s.startsWith(pre) ? s.slice(pre.length) : s;
+  };
+  const allowed = new Set<string>([norm(meta.edit_site), ...alsoAllowed.map(norm)].filter(Boolean));
+  for (const k of ["protected_files", "protected_src"]) {
+    const list = meta[k];
+    if (Array.isArray(list)) for (const p of list) allowed.delete(norm(p));
+  }
+  return editedRel.filter((p) => TEST_FILE_RE.test(p) && !allowed.has(p));
+}
+
 /**
  * How many tests PASSED, from bun's summary (" 155 pass"). Returns null when no summary
  * line is present (suite absent, or the run died before summarizing).
@@ -6038,10 +6090,46 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
     // non-zero fails — treating an absent marker as failure is what refused six
     // consecutive composes when the same mistake was made for INSTALL_EXIT.
     const dryRunOk = dryRunExit === null || dryRunExit === 0;
-    const ok = installOk && dryRunOk && tcOk && sdExit === 0 && testOk;
+    // THE GAP'S OWN CHECK MUST PASS ON THE DRAFT, AND A DRAFT MAY NOT EDIT A TEST ITS GAP DOES NOT NAME
+    // (09-30). The gate above refuses only what a draft BREAKS. 28b3e8a, ab00882 and bc821d2 broke
+    // nothing and fixed nothing: each left its gap's own class2 test red and landed anyway, one partial
+    // edit per attempt. 0f96c62 (like 6ac1aa6 before it) edited an unrelated test's assertion to accept
+    // its violations. The gap's test file runs ALONE on the draft: the full-suite run above is polluted
+    // across files (be0ee7a's target failed there before AND after its correct fix).
+    let ownRed: string[] = [];
+    let ownUnjudged = false;
+    let strayTests: string[] = [];
+    if (pointer.gap) {
+      const gapMeta = (pointer.gap.classification_metadata ?? {}) as Record<string, unknown>;
+      const editedRel = edited.filter((p) => p.startsWith(vAbs + "/")).map((p) => p.slice(vAbs.length + 1));
+      // A directed goal may name the test it means to change in its spec; that is not a stray edit.
+      const specPaths = String(pointer.spec ?? "").match(/(?:repos\/[A-Za-z0-9_-]+\/)?[A-Za-z0-9_./-]+\.test\.[cm]?[jt]sx?|(?:repos\/[A-Za-z0-9_-]+\/)?(?:tests?|__tests__)\/[A-Za-z0-9_./-]+\.[cm]?[jt]sx?/g) ?? [];
+      const own = gapOwnTestSuite(gapMeta, v);
+      // Only a DIRECTED goal's spec is the author's statement of intent. An undirected lane gap's spec carries
+      // its summary and fix_hint, where a test path may be named precisely because it must NOT be edited.
+      const specIsIntent = (pointer as { directed?: boolean }).directed === true || pointer.gap.category === "edit_intent_route";
+      strayTests = strayTestEdits(v, editedRel, gapMeta, !own && specIsIntent ? specPaths : []);
+      // Skipped when the typecheck already refused this draft: the verdict cannot turn green.
+      if (own && tcOk) {
+        const shO = await callTool(toolsEndpoint, "shell", {
+          command: `cd ${JSON.stringify(vAbs)} && (timeout 180 env -i PATH="$PATH" HOME="$HOME" NODE_ENV=test TZ=UTC WORKSPACE_ROOT="$(mktemp -d)" bun test ${JSON.stringify("./" + own.test_file)} --timeout 20000 2>&1 || true)`,
+          cwd: REPO_ROOT,
+          // The shell resolver kills the process group at 30 s without this; a killed run reads as
+          // no result or "(not run)" and would refuse a correct draft.
+          timeout_sec: 240,
+        });
+        const red = ownCheckStillRed(String((shO.body as { stdout?: unknown })?.stdout ?? ""), own.only_tests);
+        if (red === null) ownUnjudged = true; else ownRed = red;
+      }
+    }
+    const ownOk = ownRed.length === 0 && !ownUnjudged && strayTests.length === 0;
+    const ok = installOk && dryRunOk && tcOk && sdExit === 0 && testOk && ownOk;
     const detail = ((tcUnanswered || tcTimedOut) ? ` | TYPECHECK NOT ANSWERED (TC_EXIT=${String(tcExit)}) — the check did not complete, so this is UNVERIFIED, not proven broken. Failing closed is correct (an unverifiable edit must not land), but do not read this as a defect in the draft: it carries no TS error text.` : "")
       + (installOk ? "" : ` | DEPENDENCY INSTALL FAILED (INSTALL_EXIT=${String(installExit)}) — the staged manifest does not install; a typecheck against an already-populated node_modules cannot see this`)
       + (dryRunOk ? "" : ` | DEPENDENCY RESOLUTION FAILED (DRYRUN_EXIT=${String(dryRunExit)}) — the staged manifest names a dependency that does not resolve, so this change would break a fresh install even though it typechecks here: ${(raw.match(/== resolve ==\n([\s\S]*?)\n== typecheck ==/)?.[1] ?? "").slice(0, 400)}`)
+      + (ownRed.length > 0 ? ` | THE GAP'S OWN CHECK IS STILL RED on this draft (its test file run alone): ${ownRed.slice(0, 5).join(" ; ").slice(0, 400)}. A draft that leaves its own check red does not land; finish every site the check names.` : "")
+      + (ownUnjudged ? " | THE GAP'S OWN CHECK PRODUCED NO RESULT on this draft (its test file run alone printed no pass/fail); unverified, not landed." : "")
+      + (strayTests.length > 0 ? ` | EDITS A TEST FILE THIS GAP DOES NOT NAME: ${strayTests.join(", ")}. A draft must not change another test's assertions (that is how guards get weakened); fix the code, or leave that test to its own gap.` : "")
       + (testOk ? "" : [
       confirmedNewTest.length > 0 ? ` | NEW test failures introduced by this draft, REPRODUCED on a second run (${confirmedNewTest.length}): ${confirmedNewTest.slice(0, 5).join(" ; ").slice(0, 600)}` : "",
       passRegressed ? ` | PASSING TESTS DISAPPEARED: ${basePass} -> ${curPass} (a draft must not delete coverage or break module load to go green)` : "",

@@ -14,6 +14,9 @@
  *
  * `env()` treats empty/whitespace as absent, which is what an empty env var means for a URL.
  */
+import { HttpDiscoveryAdapter, FetchAdapter } from "@avigopal/ias-executor-ts/adapters";
+import type { DiscoveryLookup } from "@avigopal/ias-executor-ts/adapters";
+
 export const env = (key: string, fallback: string): string => {
   const raw = process.env[key];
   return raw === undefined || raw.trim() === "" ? fallback : raw;
@@ -37,6 +40,58 @@ export const METABOB_ENDPOINT = env("METABOB_ENDPOINT", "http://127.0.0.1:8080")
 // default would be wrong. Left as `??` deliberately.
 export const METABOB_API_KEY = process.env["METABOB_API_KEY"] ?? "";
 export const DISCOVERY_ENDPOINT = env("DISCOVERY_ENDPOINT", "http://127.0.0.1:8100");
+
+/**
+ * The shared discovery client (ias-executor-ts HttpDiscoveryAdapter), one instance per process.
+ * Its lookup() keeps a failed lookup (timeout, network, 5xx) apart from a real "no producer"
+ * answer, bounds every lookup by a budget longer than discovery's own peer-forwarding abort, and
+ * remembers a failure only for a short backoff. Resolvers look shapes up through it instead of
+ * each posting their own vesselCapability query with its own timeout and its own meaning of null.
+ */
+export let discovery = new HttpDiscoveryAdapter(new FetchAdapter(), DISCOVERY_ENDPOINT, { apiKey: METABOB_API_KEY });
+/** Drop every remembered lookup and the outdated-adapter log latch (tests only: both are process state). */
+export function __resetDiscoveryForTests(): void {
+  discovery = new HttpDiscoveryAdapter(new FetchAdapter(), DISCOVERY_ENDPOINT, { apiKey: METABOB_API_KEY });
+  outdatedLogged = false;
+}
+/** Swap in a client (tests only), e.g. one shaped like an OLDER ias-executor-ts adapter. */
+export function __setDiscoveryForTests(d: HttpDiscoveryAdapter): void {
+  discovery = d;
+}
+
+/** A discovery lookup as this vessel reads it: the ias DiscoveryLookup, or `adapter_outdated`. */
+export type DevDiscoveryLookup =
+  | DiscoveryLookup
+  | { ok: false; shape: string; reason: "adapter_outdated"; detail: string; cached: false };
+
+// THE OUTDATED-ADAPTER GUARD, the one place that feature-detects. ias-executor-ts reaches this vessel
+// as a copied dist, and a node can still load one from before lookup() existed. Then every lookup is
+// a FAILED lookup (readers fail closed on ok:false, never "no producer"), with no network call and no
+// second implementation of the query here; it is said loudly once per process. The ias dist must be
+// rebuilt before this vessel lands. The retry is a literal because an old dist carries neither
+// failureBackoffMs nor its constant; it is the ias failure backoff, so the verdict is not held longer.
+const OUTDATED_RETRY_MS = 2_000; // = ias DISCOVERY_FAILURE_BACKOFF_MS; a test asserts they match whenever the new dist is loaded
+let outdatedLogged = false;
+const adapterOutdated = (): boolean => typeof (discovery as { lookup?: unknown }).lookup !== "function";
+export async function lookupShape(shape: string): Promise<DevDiscoveryLookup> {
+  if (adapterOutdated()) {
+    if (!outdatedLogged) {
+      outdatedLogged = true;
+      console.error("[discovery] ADAPTER OUTDATED: the loaded @avigopal/ias-executor-ts HttpDiscoveryAdapter has no lookup(); every discovery lookup fails closed until the ias dist is rebuilt and this vessel restarted");
+    }
+    return { ok: false, shape, reason: "adapter_outdated", detail: "the loaded ias-executor-ts dist predates the typed discovery lookup()", cached: false };
+  }
+  return discovery.lookup(shape);
+}
+/** One line that keeps "unreadable" and "absent" apart, in the adapter's own wording. */
+export function describeLookup(r: DevDiscoveryLookup): string {
+  if (!r.ok && r.reason === "adapter_outdated") return `${r.shape} lookup failed (adapter_outdated): ${r.detail}`;
+  return discovery.describe(r);
+}
+/** How long a caller may hold a verdict built on a failed or empty lookup. */
+export function discoveryFailureBackoffMs(): number {
+  return adapterOutdated() ? OUTDATED_RETRY_MS : discovery.failureBackoffMs;
+}
 export const GOAL_HOST_VESSEL_ENDPOINT = env("GOAL_HOST_VESSEL_ENDPOINT", "http://127.0.0.1:8210");
 export const CONCEPT_DB_ENDPOINT = env("CONCEPT_DB_ENDPOINT", "http://127.0.0.1:8260");
 

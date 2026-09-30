@@ -3566,6 +3566,12 @@ function classifyComposeFailure(appliedOps: Array<{ ok: boolean; detail?: string
   if (/not above|instead of|rather than|duplicates|whereas/i.test(semanticReason)) return "wrong_location";
   return "semantic_reject";
 }
+/** The class a failed compose records. An environment condition wins over any draft class; a withhold
+ *  because a shaped policy (the autonomy scope) could not be read is one, so a draft that applied and
+ *  verified cleanly is not recorded as semantic_reject, the class the classifier falls to otherwise. */
+export function composeLessonClass(envClass: string | null, policyUnreadable: string | null, appliedOps: Array<{ ok: boolean; detail?: string }>, verifyResults: Array<{ ok: boolean; output: string }>, semanticReason: string): string {
+  return envClass ?? (policyUnreadable ? "env_policy_unreadable" : classifyComposeFailure(appliedOps, verifyResults, semanticReason));
+}
 async function appendComposeLesson(cls: string, reason: string, vessels: string, gap?: { id?: string; summary?: unknown; category?: unknown; source?: unknown; detected_at?: unknown; classification_metadata?: Record<string, unknown> }): Promise<void> {
   // operator_approved is operator authority: code never sets it (block from d8c93b4 removed).
   if (gap && gap.id) {
@@ -3638,7 +3644,7 @@ async function appendComposeLesson(cls: string, reason: string, vessels: string,
       // dispositioned/skipped, not infinitely recommitted). The failure_lessons write above still
       // records the class so the drafter keeps learning.
       const _recommitDepth = (String(gap.id).match(/recommit-/g) ?? []).length;
-      if (reCommit && _recommitDepth < 2 && cls !== "scope_refused" && !reason.startsWith("[deterministic] ")) { const baseId = String(gap.id).replace(/^(?:recommit-)+/, ""); const baseClosed = baseId === String(gap.id) ? (typeof (gap as { status?: unknown }).status === "string" && (gap as { status?: unknown }).status === "closed") : false; if (baseClosed) { console.log(`[compose-lessons] recommit SKIPPED: base gap ${baseId} is closed`); } else {
+      if (reCommit && _recommitDepth < 2 && cls !== "scope_refused" && cls !== "env_policy_unreadable" && !reason.startsWith("[deterministic] ")) { const baseId = String(gap.id).replace(/^(?:recommit-)+/, ""); const baseClosed = baseId === String(gap.id) ? (typeof (gap as { status?: unknown }).status === "string" && (gap as { status?: unknown }).status === "closed") : false; if (baseClosed) { console.log(`[compose-lessons] recommit SKIPPED: base gap ${baseId} is closed`); } else {
         await resolveSubstrateGapWrite({
           type: "substrateGap_write",
           gap: {
@@ -6622,17 +6628,27 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
   // compose touched: an undirected compose (an unknown trigger counts as autonomous) that applied an
   // op to a path the `autonomyScope` shape excludes (the lane core) is withheld and rolled back,
   // whatever its gap claimed. Directed work is never checked. No scope record: unchanged.
+  // An UNREADABLE scope still withholds (fail closed), but it is an environment condition, not a
+  // draft defect: it is recorded as env_policy_unreadable with the scope's reason, never as the
+  // semantic_reject the classifier falls to when every op applied and verified (09-30, node 2).
+  let policyUnreadable: string | null = null;
   if (verdict === "FAVORABLE" && (pointer as { directed?: boolean }).directed !== true) {
     try {
-      const { autonomyScope, autonomyScopeExcludes } = await import("./gap-to-feature.js");
-      const scope = await autonomyScope();
-      const scopeHits = [...new Set(applied.filter((a) => a.ok).map((a) => autonomyScopeExcludes(scope, a.path)).filter((h): h is string => !!h))];
+      const { autonomyScope, autonomyScopeFloor } = await import("./gap-to-feature.js");
+      const floor = autonomyScopeFloor(await autonomyScope(), applied.filter((a) => a.ok).map((a) => a.path));
+      const scopeHits = floor.hits;
       if (scopeHits.length > 0) {
         verdict = "UNFAVORABLE";
-        console.log(`[feature-compose] autonomy-scope floor: WITHHELD FAVORABLE - autonomous compose touched excluded path(s): ${scopeHits.join(", ")}`);
+        if (floor.unreadable) {
+          policyUnreadable = floor.unreadable;
+          console.log(`[feature-compose] autonomy-scope floor: WITHHELD FAVORABLE - ${policyUnreadable}; failing closed, not a draft defect`);
+        } else {
+          console.log(`[feature-compose] autonomy-scope floor: WITHHELD FAVORABLE - autonomous compose touched excluded path(s): ${scopeHits.join(", ")}`);
+        }
       }
     } catch (err) {
       verdict = "UNFAVORABLE";
+      policyUnreadable = `autonomy scope check failed: ${String(err)}`;
       console.log(`[feature-compose] autonomy-scope floor: WITHHELD FAVORABLE - scope check failed: ${String(err)}`);
     }
   }
@@ -7358,7 +7374,7 @@ const earlyAttempt = await Promise.race([
       const tail = raw.slice(-900);
       return raw.length > 900 ? `…(head truncated; tail follows)\n${tail}` : tail;
     })();
-    const lessonClass = envClass ?? classifyComposeFailure(applied, verify, String(semantic_gate?.reason ?? ""));
+    const lessonClass = composeLessonClass(envClass, policyUnreadable, applied, verify, String(semantic_gate?.reason ?? ""));
     // A compose must never write to a CLOSED gap: the row was fixed or retired, and a rewrite there dropped
     // its top-level closed_reason (11:29, node 1). Re-checked on the fresh read too (it may close mid-compose).
     if (pointer.gap?.id && firstTscError && !gapClosedInStore) {
@@ -7399,6 +7415,7 @@ const earlyAttempt = await Promise.race([
       failedApply?.detail
       ?? (failedVerify ? (failedVerify.output.split("\n").filter((l) => /error TS\d|error:|\(fail\)|expect\(/.test(l)).slice(0, 6).join(" | ") || failedVerify.output) : undefined)
       ?? semantic_gate?.reason
+      ?? policyUnreadable
       ?? verdict,
     );
     await appendComposeLesson(lessonClass, (semantic_gate?.hard_fail === true && semantic_gate?.llm_consulted === false ? "[deterministic] " : "") + lessonReason, [...touched].join(","), pointer.gap);

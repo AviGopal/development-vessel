@@ -23,6 +23,7 @@
 import type { ResolverResult } from "./types.js";
 import { resolveBoredomEnqueue, DEFAULT_QUEUE_PATH } from "./boredom-enqueue.js";
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
+import { lookupShape, describeLookup } from "../config.js";
 
 const DEV_SELF_ENDPOINT = process.env["DEV_VESSEL_SELF_ENDPOINT"] ?? "http://127.0.0.1:8090";
 const GOAL_HOST_ENDPOINT = process.env["GOAL_HOST_VESSEL_ENDPOINT"] ?? "http://127.0.0.1:8210";
@@ -252,16 +253,12 @@ export async function resolveRhythmConductorTick(
   const endpoint = pointer.registry_endpoint ?? `${DEV_SELF_ENDPOINT}/v2/impulses/resolve`;
   const maxEnqueue = pointer.max_enqueue ?? 2;
   const dueThreshold = pointer.due_threshold ?? 1.0;
-  const disc = (await fetchJson(
-    `${process.env["DISCOVERY_ENDPOINT"] ?? "http://127.0.0.1:8100"}/resolve`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `ApiKey ${process.env["METABOB_API_KEY"] ?? ""}` },
-      body: JSON.stringify({ pointer: { type: "vesselCapability", shape: "obsidian:note" } }),
-    },
-    800,
-  )) as { content?: { vessels?: unknown[] } } | null;
-  const present = Array.isArray(disc?.content?.vessels) && (disc?.content?.vessels?.length ?? 0) > 0;
+  // PRESENCE through the shared discovery client. An 800 ms private lookup read every slow
+  // peer-forwarded answer as "no human surface". Presence still fails closed (unknown presence
+  // leaves presence-axis rhythms unaffordable), but the report and log now say which it was.
+  const presenceLookup = await lookupShape("obsidian:note");
+  const present = presenceLookup.ok && presenceLookup.producers.length > 0;
+  if (!presenceLookup.ok) console.log(`[rhythm-conductor] presence unknown, presence-axis rhythms not affordable this tick: ${describeLookup(presenceLookup)}`);
   const bucketLoad = typeof pointer.bucket_load === "number" ? pointer.bucket_load : bucketLoadFromProc();
 
   // 1. Read the rhythm registry.
@@ -693,6 +690,7 @@ export async function resolveRhythmConductorTick(
       spend_envelope: envelope.reason,
       bucket_load: bucketLoad,
       presence: present,
+      presence_lookup: describeLookup(presenceLookup),
       considered: rhythms.length,
       // Names the break in the report too, so an operator reading a single tick sees
       // "registry_unmappable" rather than inferring it from an empty enqueued list.

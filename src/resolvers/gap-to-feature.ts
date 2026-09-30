@@ -23,7 +23,7 @@ import { resolveDispatchGoal } from "./dispatch-goal.js";
 import { resolveUiWritePassthrough } from "./ui-write-passthrough.js";
 
 const solicitedHumanGaps = new Set<string>();
-import { DISCOVERY_ENDPOINT, METABOB_API_KEY, GOAL_HOST_VESSEL_ENDPOINT } from "../config.js";
+import { DISCOVERY_ENDPOINT, METABOB_API_KEY, GOAL_HOST_VESSEL_ENDPOINT, lookupShape, describeLookup, discoveryFailureBackoffMs, __resetDiscoveryForTests } from "../config.js";
 import { peekComposeCapacity } from "../compose-slots.js";
 import { gateLanding } from "./push-policy.js";
 import { readFile } from "node:fs/promises";
@@ -598,7 +598,8 @@ export async function decomposeGap(parent: Record<string, unknown>, opts: { dire
     const shape = typeof f.verify_shape === "string" ? f.verify_shape : (f.evidence_resolve && typeof (f.evidence_resolve as { shape?: unknown }).shape === "string" ? String((f.evidence_resolve as { shape?: unknown }).shape) : "");
     if (shape) {
       const producers = await discoverResolveUrls(shape);
-      if (!producers || producers.length === 0) { refusals.push(`step ${k}: shape ${shape} is not advertised`); continue; }
+      if (!producers.ok) { refusals.push(`step ${k}: could not check that shape ${shape} is advertised (${producers.why})`); continue; }
+      if (producers.urls.length === 0) { refusals.push(`step ${k}: shape ${shape} is not advertised`); continue; }
       // A CHECK THAT WRITES IS NOT A CHECK (09-29): advertisement alone let 12 uiPanel_write/uiQuestion_write
       // checks through, and verifying them performed live writes. The verifier refuses them too (487a7e9).
       if (/_write$/.test(shape)) { refusals.push(`step ${k}: shape ${shape} is a write, not a read`); continue; }
@@ -4587,34 +4588,31 @@ async function llmProducerAdvertised(): Promise<boolean | null> {
 // producer that does not answer makes the envelope UNREADABLE, and once a record has been seen
 // unreadable blocks (fail closed): a partial read could miss the one node that holds the pause.
 // Cached for SPEND_ENVELOPE_TTL_MS so a gap-write burst costs one read.
-export type SpendEnvelopeVerdict = { allow: boolean; reason: string; unreadable?: boolean; paused?: boolean; cap_usd?: number; spent_usd?: number; spend_sources?: number };
+// `lookup_failed` marks an unreadable verdict whose cause was discovery itself (timeout, network,
+// 5xx), as opposed to a discovery answer naming no producer: both fail closed, but only the second
+// says anything about the fleet.
+export type SpendEnvelopeVerdict = { allow: boolean; reason: string; unreadable?: boolean; lookup_failed?: boolean; paused?: boolean; cap_usd?: number; spent_usd?: number; spend_sources?: number };
 const SPEND_ENVELOPE_TTL_MS = 30_000;
+// An UNREADABLE policy verdict is remembered only as long as a failed discovery lookup is, so the
+// next read after a slow peer re-reads instead of refusing for 30 s on one timeout (09-30, node 2).
+const policyUnreadableRetryMs = (): number => discoveryFailureBackoffMs();
 let spendEnvelopeCache: { at: number; v: SpendEnvelopeVerdict } | null = null;
 // Whether the last COMPLETE read found a record. Unreadable blocks only after one was seen,
 // so a process that has never seen an envelope behaves exactly as before (no cap), which
 // keeps landing safe before any envelope is written and keeps the fail-open capacity tests.
 let spendEnvelopeSeen = false;
-async function discoverResolveUrls(shape: string): Promise<string[] | null> {
-  try {
-    const dr = await fetch(`${DISCOVERY_ENDPOINT}/resolve`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `ApiKey ${METABOB_API_KEY}` },
-      body: JSON.stringify({ pointer: { type: "vesselCapability", shape } }),
-      signal: AbortSignal.timeout(3000),
-    });
-    if (!dr.ok) return null;
-    const vessels = ((await dr.json()) as { content?: { vessels?: Array<{ endpoint?: string; resolve_endpoint?: string }> } }).content?.vessels;
-    if (!Array.isArray(vessels)) return null;
-    // resolve_endpoint is ABSOLUTE for some producers (llm-resolver) and a PATH for others
-    // (development-vessel): join only a path, never prefix an absolute url.
-    const urls = new Set<string>();
-    for (const v of vessels) {
-      const re = String(v.resolve_endpoint ?? "");
-      if (/^https?:\/\//.test(re)) urls.add(re);
-      else if (v.endpoint) urls.add(String(v.endpoint).replace(/\/+$/, "") + (re || "/resolve"));
-    }
-    return [...urls];
-  } catch { return null; }
+/** The resolve URL of every producer of `shape`, through the shared discovery client. A lookup
+ *  that could not be answered comes back as `{ok:false}` with its reason, never as an empty list. */
+async function discoverResolveUrls(shape: string): Promise<{ ok: true; urls: string[] } | { ok: false; why: string }> {
+  const r = await lookupShape(shape);
+  if (!r.ok) return { ok: false, why: describeLookup(r) };
+  return { ok: true, urls: [...new Set(r.producers.map((p) => p.resolveEndpoint).filter((u) => u.length > 0))] };
+}
+/** Tests only: forget the policy verdicts, the seen flags and every remembered discovery lookup. */
+export function __resetPolicyReadsForTests(): void {
+  spendEnvelopeCache = null; spendEnvelopeSeen = false;
+  autonomyScopeCache = null; autonomyScopeSeen = false;
+  __resetDiscoveryForTests();
 }
 async function postEnvelopeRead(url: string, body: unknown): Promise<Record<string, unknown> | null> {
   try {
@@ -4629,8 +4627,10 @@ async function postEnvelopeRead(url: string, body: unknown): Promise<Record<stri
   } catch { return null; }
 }
 async function readSpendEnvelope(): Promise<SpendEnvelopeVerdict> {
-  const [poolUrls, spendUrls] = await Promise.all([discoverResolveUrls("poolImpulse"), discoverResolveUrls("llmSpendSummaryNode")]);
-  if (!poolUrls || poolUrls.length === 0) return { allow: false, unreadable: true, reason: "envelope unreadable: no poolImpulse producer discovered" };
+  const [pool, spend] = await Promise.all([discoverResolveUrls("poolImpulse"), discoverResolveUrls("llmSpendSummaryNode")]);
+  if (!pool.ok) return { allow: false, unreadable: true, lookup_failed: true, reason: "envelope unreadable: " + pool.why };
+  const poolUrls = pool.urls;
+  if (poolUrls.length === 0) return { allow: false, unreadable: true, reason: "envelope unreadable: no poolImpulse producer discovered" };
   const pools = await Promise.all(poolUrls.map((u) => postEnvelopeRead(u, { impulse: { type: "poolImpulse", shape: "spendEnvelope", status: "open" } })));
   let newest: { shape?: string; updated_at?: string; body?: unknown } | null = null;
   for (let i = 0; i < poolUrls.length; i++) {
@@ -4649,7 +4649,9 @@ async function readSpendEnvelope(): Promise<SpendEnvelopeVerdict> {
   if (rawCap !== undefined && rawCap !== null && !(typeof rawCap === "number" && Number.isFinite(rawCap))) return { allow: false, unreadable: true, reason: "envelope unreadable: usd_cap_per_hour is not a finite number" };
   const cap = typeof rawCap === "number" ? rawCap : null;
   if (cap === null) return { allow: true, reason: "spendEnvelope has no numeric usd_cap_per_hour (no cap)" };
-  if (!spendUrls || spendUrls.length === 0) return { allow: false, unreadable: true, cap_usd: cap, reason: "envelope unreadable: no llmSpendSummaryNode producer discovered" };
+  if (!spend.ok) return { allow: false, unreadable: true, lookup_failed: true, cap_usd: cap, reason: "envelope unreadable: " + spend.why };
+  const spendUrls = spend.urls;
+  if (spendUrls.length === 0) return { allow: false, unreadable: true, cap_usd: cap, reason: "envelope unreadable: no llmSpendSummaryNode producer discovered" };
   // One llmSpendSummaryNode producer per node (development-vessel relays its own node's
   // llm-resolver, whose own endpoint is loopback-only), so the sum covers every node (4.0a).
   const sums = await Promise.all(spendUrls.map((u) => postEnvelopeRead(u, { impulse: { pointer: { type: "llmSpendSummaryNode" } } })));
@@ -4667,7 +4669,7 @@ async function readSpendEnvelope(): Promise<SpendEnvelopeVerdict> {
   return { allow: true, ...verdict, reason: "within envelope: spent " + spent.toFixed(3) + " USD of " + cap + " USD/h" };
 }
 export async function spendEnvelopeAllows(): Promise<SpendEnvelopeVerdict> {
-  if (spendEnvelopeCache && Date.now() - spendEnvelopeCache.at < SPEND_ENVELOPE_TTL_MS) return spendEnvelopeCache.v;
+  if (spendEnvelopeCache && Date.now() - spendEnvelopeCache.at < (spendEnvelopeCache.v.unreadable ? policyUnreadableRetryMs() : SPEND_ENVELOPE_TTL_MS)) return spendEnvelopeCache.v;
   let v: SpendEnvelopeVerdict;
   try { v = await readSpendEnvelope(); } catch (err) { v = { allow: false, unreadable: true, reason: "envelope unreadable: " + String(err) }; }
   if (v.unreadable && !spendEnvelopeSeen) v = { ...v, allow: true, reason: v.reason + " (no envelope seen yet: no cap)" };
@@ -4683,15 +4685,18 @@ export async function spendEnvelopeAllows(): Promise<SpendEnvelopeVerdict> {
 // file.ts`, or a directory ending in `/`). No record means no scope (behaviour unchanged); once a
 // record has been seen, an unreadable scope excludes everything autonomous (fail closed).
 // Directed work never consults it. Cached 30 s.
-export type AutonomyScope = { excluded: string[]; readable: boolean; reason: string; requireFalsifierClasses?: string[] };
+export type AutonomyScope = { excluded: string[]; readable: boolean; reason: string; lookup_failed?: boolean; requireFalsifierClasses?: string[] };
 let autonomyScopeCache: { at: number; v: AutonomyScope } | null = null;
 let autonomyScopeSeen = false;
 export async function autonomyScope(): Promise<AutonomyScope> {
-  if (autonomyScopeCache && Date.now() - autonomyScopeCache.at < 30_000) return autonomyScopeCache.v;
+  if (autonomyScopeCache && Date.now() - autonomyScopeCache.at < (autonomyScopeCache.v.readable ? 30_000 : policyUnreadableRetryMs())) return autonomyScopeCache.v;
   let v: AutonomyScope;
   try {
-    const poolUrls = await discoverResolveUrls("poolImpulse");
-    if (!poolUrls || poolUrls.length === 0) {
+    const pool = await discoverResolveUrls("poolImpulse");
+    const poolUrls = pool.ok ? pool.urls : [];
+    if (!pool.ok) {
+      v = { excluded: [], readable: false, lookup_failed: true, reason: pool.why };
+    } else if (poolUrls.length === 0) {
       v = { excluded: [], readable: false, reason: "no poolImpulse producer discovered" };
     } else {
       let newest: { updated_at?: string; body?: unknown } | null = null;
@@ -4738,6 +4743,17 @@ export function autonomyScopeExcludes(scope: AutonomyScope, path: string): strin
     }
   }
   return null;
+}
+
+/** The autonomy-scope floor for one autonomous compose: the scope entries its applied paths hit, and,
+ *  when those hits exist only because the scope could not be read, why. That withhold still fails
+ *  closed, but it is an environment condition, not a verdict on the draft. */
+export function autonomyScopeFloor(scope: AutonomyScope, appliedPaths: string[]): { hits: string[]; unreadable: string | null } {
+  const hits = [...new Set(appliedPaths.map((p) => autonomyScopeExcludes(scope, p)).filter((h): h is string => !!h))];
+  const unreadable = hits.length > 0 && !scope.readable
+    ? `autonomy scope unreadable${scope.lookup_failed ? " (discovery lookup failed)" : ""}: ${scope.reason}`
+    : null;
+  return { hits, unreadable };
 }
 
 /** The compose node that owns `vessel`: the one feature_compose producer whose composeOwnership

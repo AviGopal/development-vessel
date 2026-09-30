@@ -139,6 +139,31 @@ describe("test_suite — only_tests isolation filter", () => {
     expect(cmd).not.toContain(" > the leaf case");
   });
 
+  // BASE-TREE RUN (2026-09-30): the precutover gate asks whether a tracked-red test was already red
+  // before the staged change. The run must happen on the COMMITTED ref in a detached worktree, never on
+  // the clone's working tree (which holds the staged change), and an unvalidated ref must not reach git.
+  it("runs on a detached worktree of base_ref, linking node_modules, and removes it", async () => {
+    const cmd = await captureCommand({ only_tests: ["alpha case"], base_ref: "HEAD" });
+    expect(cmd).toContain("worktree add -q --detach \"$BW\" HEAD");
+    expect(cmd).toContain('ln -s "$ROOT/node_modules" "$BW/node_modules"');
+    expect(cmd).toContain('(cd "$BW" && ');
+    expect(cmd).toContain('worktree remove --force "$BW"');
+    expect(cmd).toContain("alpha case");
+    expect(cmd).not.toContain('cd "$ROOT"');
+  });
+  it("uses the working tree as before when no base_ref is given", async () => {
+    const cmd = await captureCommand({ only_tests: ["alpha case"] });
+    expect(cmd).not.toContain("worktree");
+    expect(cmd).toContain('cd "$ROOT"');
+  });
+  it("ignores a base_ref that is not HEAD or a commit sha", async () => {
+    for (const bad of ["HEAD; rm -rf /", "origin/dev", "$(id)", "abc"]) {
+      const cmd = await captureCommand({ base_ref: bad });
+      expect(cmd).not.toContain("worktree");
+    }
+    expect(await captureCommand({ base_ref: "956c79a3" })).toContain("--detach \"$BW\" 956c79a3");
+  });
+
   it("ignores empty or non-string entries rather than emitting an empty pattern", async () => {
     // An empty alternation branch matches everything, which would silently restore the
     // whole-suite behaviour while claiming to be narrowed.

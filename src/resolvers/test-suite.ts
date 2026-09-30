@@ -165,10 +165,27 @@ export async function resolveTestSuite(pointer: Record<string, unknown>): Promis
   const testFilter = onlyTests.length > 0
     ? ` -t ${JSON.stringify(onlyTests.map((t) => t.split(" > ").join(" ").replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|"))}`
     : "";
-  const command =
-    `ROOT=${JSON.stringify(preferredRoot)}; [ -d "$ROOT" ] || ROOT=${JSON.stringify(fallbackRoot)}; ` +
-    `echo "VERIFIED_ROOT=$ROOT"; echo "VERIFIED_HEAD=$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)"; ` +
-    `cd "$ROOT" && ([ -d node_modules ] || timeout 120 bun install >/dev/null 2>&1; env -i PATH="$PATH" HOME="$HOME" NODE_ENV=test TZ=UTC WORKSPACE_ROOT="$(mktemp -d)" timeout ${budgetSec} bun test${testFile ? " " + JSON.stringify(testFile) : ""} --timeout ${perTestTimeoutMs}${testFilter} 2>&1 || true)`;
+  // BASE-TREE RUN (2026-09-30). `base_ref` ("HEAD" or a commit sha; anything else is ignored) runs the
+  // same filtered suite on that COMMITTED tree instead of the clone's working tree, in a detached
+  // worktree with the clone's node_modules linked: the uncommitted staged change is excluded by
+  // construction and the clone's working tree is never touched (the same mechanism feature_compose uses
+  // for its parent-tree runs). For the precutover gate, which must know whether a test an open gap tracks
+  // as red was ALREADY red before the staged change. A missing node_modules or a failed worktree add
+  // prints no summary, so the result reads ran:false and the caller subtracts nothing.
+  const baseRef = typeof pointer.base_ref === "string" && /^(HEAD|[0-9a-f]{7,40})$/.test(pointer.base_ref.trim())
+    ? pointer.base_ref.trim()
+    : "";
+  const bunRun = `env -i PATH="$PATH" HOME="$HOME" NODE_ENV=test TZ=UTC WORKSPACE_ROOT="$(mktemp -d)" timeout ${budgetSec} bun test${testFile ? " " + JSON.stringify(testFile) : ""} --timeout ${perTestTimeoutMs}${testFilter} 2>&1 || true`;
+  const command = baseRef
+    ? `ROOT=${JSON.stringify(preferredRoot)}; [ -d "$ROOT" ] || ROOT=${JSON.stringify(fallbackRoot)}; ` +
+      `git -C "$ROOT" worktree prune >/dev/null 2>&1; BW="$(mktemp -d /tmp/test-suite-base-XXXXXX)"; ` +
+      `if [ -d "$ROOT/node_modules" ] && git -C "$ROOT" worktree add -q --detach "$BW" ${baseRef} >/dev/null 2>&1; then ` +
+      `ln -s "$ROOT/node_modules" "$BW/node_modules"; echo "VERIFIED_ROOT=$BW"; echo "VERIFIED_HEAD=$(git -C "$BW" rev-parse --short HEAD 2>/dev/null || echo unknown)"; ` +
+      `(cd "$BW" && ${bunRun}); fi; ` +
+      `git -C "$ROOT" worktree remove --force "$BW" >/dev/null 2>&1; rm -rf "$BW"; git -C "$ROOT" worktree prune >/dev/null 2>&1; true`
+    : `ROOT=${JSON.stringify(preferredRoot)}; [ -d "$ROOT" ] || ROOT=${JSON.stringify(fallbackRoot)}; ` +
+      `echo "VERIFIED_ROOT=$ROOT"; echo "VERIFIED_HEAD=$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)"; ` +
+      `cd "$ROOT" && ([ -d node_modules ] || timeout 120 bun install >/dev/null 2>&1; ${bunRun})`;
 
   let raw = "";
   try {
@@ -218,6 +235,7 @@ export async function resolveTestSuite(pointer: Record<string, unknown>): Promis
       pass: parsed.pass,
       fail: parsed.fail,
       test_file: testFile || null,
+      base_ref: baseRef || null,
       requested_not_passing: ran || onlyTests.length === 0 ? requestedNotPassing : null,
       skip: parsed.skip,
       failingTests: parsed.failingTests.slice(0, 25),

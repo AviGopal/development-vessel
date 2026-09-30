@@ -100,6 +100,130 @@ export function computeNewlyFailing(prev: string[] | null, now: string[]): strin
   return out;
 }
 
+/**
+ * A FAILING TEST AN OPEN GAP ALREADY TRACKS, AND THAT WAS ALREADY RED BEFORE THE STAGED CHANGE,
+ * IS NOT A REGRESSION (2026-09-30).
+ *
+ * A check-first commit lands a deliberately red test for an open gap (class-2
+ * evidence_resolve.input.only_tests). The baseline refreshes only on a green landing, so
+ * without this subtraction every later cutover on that vessel is refused as a
+ * precutover_regression over tests the gap store already names as filed failures: a
+ * deadlock. Measured 2026-09-30 17:06: a FAVORABLE lane-derived development-vessel patch
+ * refused over 4 tests tracked by open gaps.
+ *
+ * Three bounds, each failing CLOSED (subtract nothing):
+ *   1. MATCH, as in scripts/substrate/substrate-pull-sync.sh (tracked_fail_names): a tracked
+ *      name matches a failing line as its leaf (" > <name>" suffix) or full path
+ *      ("(fail) <name>"), never by substring; each tracked name consumes at most ONE line.
+ *   2. OWN CHECK: a line matching the landing gap's own only_tests is never subtracted, even
+ *      when another open gap (a -step-N sibling) tracks it; the landing must turn it green.
+ *   3. RED ON BASE: a tracked line is subtracted only when the identical line also fails on
+ *      the UNTOUCHED base tree (the clone's HEAD, which excludes the uncommitted staged change).
+ *      A tracked test that is green on base and red on the candidate is a regression this
+ *      change caused, and a gap listing its name must not hide it.
+ */
+export function trackedRedCandidates(newlyFailing: string[], trackedNames: string[] | null, ownNames: string[] = []): string[] {
+  if (trackedNames === null || trackedNames.length === 0) return [];
+  const matches = (line: string, name: string): boolean =>
+    name.trim().length > 0 &&
+    (line === `(fail) ${name}` || line === `✗ ${name}` || line === name || line.endsWith(` > ${name}`));
+  const used = new Set<number>();
+  const out: string[] = [];
+  for (const line of newlyFailing) {
+    if (ownNames.some((n) => matches(line, n))) continue;
+    const i = trackedNames.findIndex((n, k) => !used.has(k) && matches(line, n));
+    if (i >= 0) { used.add(i); out.push(line); }
+  }
+  return out;
+}
+
+/** newlyFailing minus the lines that are tracked (bounds 1-2) AND red on base (bound 3). `redOnBase === null` = base unmeasured → nothing subtracted. */
+export function subtractTrackedRed(newlyFailing: string[], trackedNames: string[] | null, ownNames: string[], redOnBase: string[] | null): string[] {
+  if (redOnBase === null) return [...newlyFailing];
+  const cand = new Set(trackedRedCandidates(newlyFailing, trackedNames, ownNames));
+  const base = new Set(redOnBase);
+  return newlyFailing.filter((l) => !(cand.has(l) && base.has(l)));
+}
+
+/**
+ * The gate's filter. `load` reads tracked names once; `runBase(lines)` runs ONLY those lines on the
+ * base tree and returns its failing lines, or null when it produced no result. The base run happens
+ * at most once (memoized): a candidate on a later call that was not measured then is KEPT.
+ */
+export function makeTrackedRedFilter(
+  load: () => Promise<{ tracked: string[]; own: string[] } | null>,
+  runBase: (lines: string[]) => Promise<string[] | null>,
+): (names: string[]) => Promise<{ kept: string[]; subtracted: string[]; green_on_base: string[]; note?: string }> {
+  let loaded: { tracked: string[]; own: string[] } | null | undefined;
+  let measured: Set<string> | undefined;
+  let redOnBase: string[] | null | undefined;
+  return async (names) => {
+    if (names.length === 0) return { kept: names, subtracted: [], green_on_base: [] };
+    if (loaded === undefined) loaded = await load().catch(() => null);
+    if (loaded === null) return { kept: [...names], subtracted: [], green_on_base: [], note: "open-gap tracked names unreadable, or the landing gap unknown; nothing subtracted" };
+    const cand = trackedRedCandidates(names, loaded.tracked, loaded.own);
+    if (cand.length === 0) return { kept: [...names], subtracted: [], green_on_base: [] };
+    if (redOnBase === undefined) {
+      measured = new Set(cand);
+      redOnBase = await runBase(cand).catch(() => null);
+    }
+    if (redOnBase === null) return { kept: [...names], subtracted: [], green_on_base: [], note: "base-tree run produced no result; nothing subtracted" };
+    const measuredRed = redOnBase.filter((l) => measured!.has(l));
+    const kept = subtractTrackedRed(names, loaded.tracked, loaded.own, measuredRed);
+    const subtracted = names.filter((n) => !kept.includes(n));
+    const green_on_base = cand.filter((l) => measured!.has(l) && !measuredRed.includes(l));
+    return { kept, subtracted, green_on_base };
+  };
+}
+
+/**
+ * The names open gaps track as red for `vessel`, from the same substrateGap read the rest of
+ * this resolver uses (store or GAP_STORE_ENDPOINT forward). Every open gap counts whatever its
+ * disposition or operator_hold: a held gap's red check is still deliberate. Only
+ * evidence_resolve.shape "test_suite" whose input.vessel (optional "repos/" prefix) is this
+ * vessel. `own` = the landing gap's only_tests, read by id regardless of status.
+ * Returns null (subtract nothing) on ANY read failure, and when the landing gap is unknown
+ * (empty id) or its row is not found: its own check could not then be protected.
+ */
+export async function loadTrackedRedNames(
+  vessel: string,
+  ownGapId: string,
+  read: typeof resolveSubstrateGap = resolveSubstrateGap,
+): Promise<{ tracked: string[]; own: string[] } | null> {
+  if (!ownGapId) return null;
+  const rowsOf = (res: unknown): Array<Record<string, unknown>> | null => {
+    const r = res as { shape?: string; body?: { gaps?: unknown } } | null;
+    if (!r || r.shape !== "substrateGap" || !Array.isArray(r.body?.gaps)) return null;
+    return r.body!.gaps as Array<Record<string, unknown>>;
+  };
+  const namesOf = (g: Record<string, unknown>): string[] => {
+    const meta = g["classification_metadata"];
+    if (!meta || typeof meta !== "object") return [];
+    const er = (meta as Record<string, unknown>)["evidence_resolve"];
+    if (!er || typeof er !== "object") return [];
+    const e = er as { shape?: unknown; input?: unknown };
+    if (e.shape !== "test_suite" || !e.input || typeof e.input !== "object") return [];
+    const input = e.input as { vessel?: unknown; only_tests?: unknown };
+    if (String(input.vessel ?? "").replace(/^repos\//, "") !== vessel) return [];
+    return Array.isArray(input.only_tests)
+      ? input.only_tests.filter((t): t is string => typeof t === "string" && /\S/.test(t))
+      : [];
+  };
+  try {
+    const open = rowsOf(await read({ type: "substrateGap", status: "open", limit: 5000 } as never));
+    if (open === null) return null;
+    const ownRows = rowsOf(await read({ type: "substrateGap", id: ownGapId, limit: 1 } as never));
+    if (ownRows === null) return null;
+    const row = ownRows.find((r) => String(r["id"]) === ownGapId);
+    if (!row) return null;
+    const own = namesOf(row);
+    const tracked = open.filter((g) => (g["status"] ?? "open") === "open").flatMap(namesOf);
+    return { tracked, own };
+  } catch {
+    return null;
+  }
+}
+
 export interface VesselMitosisCutoverPointer {
   type: "vessel_mitosis_cutover";
   vessel_name: string;
@@ -2213,6 +2337,27 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
       }
     }
   }
+  // (Hoisted above 5d, 2026-09-30: the pre-cutover gate needs the landing gap id to keep
+  // that gap's own still-red check from being subtracted as "tracked red". Pure reads.)
+  // Provenance may ride in the pending file rather than the pointer: the
+  // mitosis-tick template forwards only four pending fields (vessel_name,
+  // base_version_id, mitosis_version_id, mitosis_root), while
+  // apply_proposal_as_patch now records gap_id and proposal_id there. Read it
+  // from the file, scoped to THIS mitosis by version id, before refusing.
+  let pendingGapId = "";
+  let pendingProposalId = "";
+  try {
+    const provenancePendingPath = pointer.pending_pointer_path ?? join(process.env["WORKSPACE_ROOT"] ?? process.cwd(), "mitosis-pending.json");
+    if (await pathExists(provenancePendingPath)) {
+      const cur = JSON.parse(await readFile(provenancePendingPath, "utf-8")) as { mitosis_version_id?: string; gap_id?: string; proposal_id?: string };
+      if (cur.mitosis_version_id === mitosis_version_id) {
+        if (typeof cur.gap_id === "string" && cur.gap_id.length > 0) pendingGapId = cur.gap_id;
+        if (typeof cur.proposal_id === "string" && cur.proposal_id.length > 0) pendingProposalId = cur.proposal_id;
+      }
+    }
+  } catch {
+    // an unreadable pending file leaves the fallback empty
+  }
   // 5d. PRE-CUTOVER TEST GATE (2026-08-23). The post-land suite (below, after promotion) already
   // computes which tests are NEWLY failing vs the per-vessel baseline and files a gap — but it
   // runs AFTER the commit exists, so a regression lands and is only then noticed. This runs the
@@ -2260,6 +2405,29 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
           }
         } catch { baseline = null; }
         let newlyFailing = computeNewlyFailing(baseline, failNow);
+        // TRACKED RED IS NOT A REGRESSION (2026-09-30): subtract names an OPEN gap for this vessel
+        // deliberately tracks as red (evidence_resolve.only_tests), never the landing gap's own, and
+        // only those that ALSO fail on the untouched base tree (the clone's HEAD in a detached
+        // worktree; the staged change is uncommitted, so it is excluded by construction). Loaded and
+        // measured once. Unreadable store, unknown landing gap or no base result: nothing subtracted.
+        const trackedRedFilter = makeTrackedRedFilter(
+          () => loadTrackedRedNames(String(vessel_name).replace(/^repos\//, ""), pointer.gap_id || pendingGapId),
+          (lines) => runSuiteWith({ only_tests: lines.map((l) => l.replace(/^\s*\(fail\)\s*/, "").trim()), base_ref: "HEAD" }),
+        );
+        const dropTrackedRed = async (names: string[]): Promise<string[]> => {
+          const r = await trackedRedFilter(names);
+          if (r.note) operations.push({ op: "precutover_tracked_red", status: "warn", detail: r.note });
+          if (r.green_on_base.length > 0) {
+            operations.push({ op: "precutover_tracked_red", status: "warn", detail: `${r.green_on_base.length} tracked test(s) are GREEN on the base tree, so counted as regressions: ${r.green_on_base.join(" ; ").slice(0, 300)}` });
+          }
+          if (r.subtracted.length > 0) {
+            const msg = `precutover: ${r.subtracted.length} newly-failing test(s) tracked red by open gaps and red on the base tree, not counted: ${r.subtracted.join(" ; ").slice(0, 400)}`;
+            console.log(`[mitosis-cutover] ${msg}`);
+            operations.push({ op: "precutover_tracked_red", status: "ok", detail: msg });
+          }
+          return r.kept;
+        };
+        newlyFailing = await dropTrackedRed(newlyFailing);
         if (newlyFailing.length > 0) {
           // CONFIRM IN ISOLATION, NOT BY RE-RUNNING THE WHOLE SUITE (2026-08-29).
           //
@@ -2285,7 +2453,7 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
           const failAgain = isolatedNames.length === newlyFailing.length
             ? await runSuiteOnly(isolatedNames)
             : await runSuite();
-          newlyFailing = failAgain === null ? [] : computeNewlyFailing(baseline, failAgain);
+          newlyFailing = failAgain === null ? [] : await dropTrackedRed(computeNewlyFailing(baseline, failAgain));
         }
         if (newlyFailing.length > 0) {
           await unstage("precutover_regression");
@@ -2327,25 +2495,6 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
     }
   }
   // 6. git commit.
-  // Provenance may ride in the pending file rather than the pointer: the
-  // mitosis-tick template forwards only four pending fields (vessel_name,
-  // base_version_id, mitosis_version_id, mitosis_root), while
-  // apply_proposal_as_patch now records gap_id and proposal_id there. Read it
-  // from the file, scoped to THIS mitosis by version id, before refusing.
-  let pendingGapId = "";
-  let pendingProposalId = "";
-  try {
-    const provenancePendingPath = pointer.pending_pointer_path ?? join(process.env["WORKSPACE_ROOT"] ?? process.cwd(), "mitosis-pending.json");
-    if (await pathExists(provenancePendingPath)) {
-      const cur = JSON.parse(await readFile(provenancePendingPath, "utf-8")) as { mitosis_version_id?: string; gap_id?: string; proposal_id?: string };
-      if (cur.mitosis_version_id === mitosis_version_id) {
-        if (typeof cur.gap_id === "string" && cur.gap_id.length > 0) pendingGapId = cur.gap_id;
-        if (typeof cur.proposal_id === "string" && cur.proposal_id.length > 0) pendingProposalId = cur.proposal_id;
-      }
-    }
-  } catch {
-    // an unreadable pending file leaves the fallback empty
-  }
   const proposalId = pointer.proposal_id || pendingProposalId || "unknown-proposal";
   const gapId = pointer.gap_id || pendingGapId || "unknown-gap";
   if ((gapId === "unknown-gap" || proposalId === "unknown-proposal") && pointer.adhoc !== true) {

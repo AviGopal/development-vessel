@@ -48,6 +48,17 @@ export const HUMAN_EXEMPTION_ATTEMPTS = 3;
 
 export type DispositionVerb = "drop" | "redefine" | "provide_information" | "grant_access";
 
+/** A gap parked as needs_information is waiting for exactly what a non-drop answer supplies, so the answer
+ *  must CLEAR that disposition: once admission honours it (gap-to-feature), an answered gap left labelled
+ *  needs_information would stay excluded and the human's answer would silently stop working. Every other
+ *  disposition is kept: awaiting_operator_review is a landing awaiting review, which an escalation answer
+ *  is not. Cleared means the empty string (the store carries omitted keys forward). */
+export function dispositionAfterAnswer(verb: DispositionVerb, current: unknown): unknown {
+  // "needs_info" is gap-lifecycle-scan's spelling of the same parking disposition.
+  if (verb !== "drop" && (current === "needs_information" || current === "needs_info")) return "";
+  return current;
+}
+
 export interface EscalationDispositionApplyPointer {
   type: "escalation_disposition_apply";
   /** Do everything except write. For probing what WOULD be applied. */
@@ -237,6 +248,7 @@ export async function resolveEscalationDispositionApply(
       meta.human_exemption_granted_at = new Date().toISOString();
       // The gap has new information, so its prior failures no longer describe it.
       meta.failed_attempts = 0;
+      if (meta.disposition !== undefined) meta.disposition = dispositionAfterAnswer(verb, meta.disposition);
       status = "open";
     }
 

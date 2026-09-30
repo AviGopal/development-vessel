@@ -8,6 +8,7 @@ import {
   parseDisposition,
   gapIdFromPanelId,
   HUMAN_EXEMPTION_ATTEMPTS,
+  dispositionAfterAnswer,
 } from "../../src/resolvers/escalation-disposition-apply.js";
 
 describe("escalation_disposition_apply — verb parsing", () => {
@@ -94,5 +95,22 @@ describe("parseDisposition accepts the underscored verb names (2026-08-29)", () 
   it("does not let the widening break verb precedence", () => {
     // redefine is checked first on purpose; an answer that mentions both must still redefine.
     expect(parseDisposition("Redefine it; drop the old wording.")).toBe("redefine");
+  });
+});
+
+describe("an answer clears needs_information and nothing else (admission honours disposition)", () => {
+  it("a non-drop answer clears needs_information", () => {
+    for (const v of ["redefine", "provide_information", "grant_access"] as const) expect(dispositionAfterAnswer(v, "needs_information")).toBe("");
+    expect(dispositionAfterAnswer("provide_information", "needs_info")).toBe(""); // gap-lifecycle-scan's spelling
+  });
+  it("keeps awaiting_operator_review: an escalation answer is not a landing review", () => {
+    expect(dispositionAfterAnswer("provide_information", "awaiting_operator_review")).toBe("awaiting_operator_review");
+  });
+  it("drop does not rewrite the disposition here (the drop branch closes the gap)", () => {
+    expect(dispositionAfterAnswer("drop", "needs_information")).toBe("needs_information");
+  });
+  it("leaves other or absent dispositions unchanged", () => {
+    expect(dispositionAfterAnswer("redefine", "pending_verification")).toBe("pending_verification");
+    expect(dispositionAfterAnswer("redefine", undefined)).toBeUndefined();
   });
 });

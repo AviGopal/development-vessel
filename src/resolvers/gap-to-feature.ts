@@ -3077,6 +3077,16 @@ function escalatePendingVerification(gapId: string, category: string, summary: s
  * a second landing would read as a re-land and manufacture the false-close the oracle is calibrated
  * against). Best-effort; never throws into the caller.
  */
+/** pending_last_checked_at for a pending mark. A NEW landing (a sha different from the one already pending) has
+ *  never been examined by the sweep, so it gets "" and sorts FIRST in the least-recently-checked slice; stamping it
+ *  "now" at landing time made every fresh landing look just-checked and wait behind the whole pending set (three
+ *  verified landings sat 60+ min unexamined behind 103 pending gaps, 2026-09-30). A re-mark of the same landing
+ *  keeps the current behaviour. */
+export function pendingCheckedStamp(prevSha: unknown, sha: string | undefined, nowIso: string): string {
+  // Never examined yet (no pending sha before this mark, whatever this one is) or a NEW sha: sort first.
+  return !prevSha || (sha !== undefined && sha !== prevSha) ? "" : nowIso;
+}
+
 async function markPendingVerification(gap: Record<string, unknown>, sha: string | undefined, note: string): Promise<void> {
   try {
     const id = String(gap.id ?? "");
@@ -3096,7 +3106,7 @@ async function markPendingVerification(gap: Record<string, unknown>, sha: string
           pending_set_at: (sha === undefined || sha === meta0['pending_outcome_verification']) && typeof meta0['pending_set_at'] === "string"
             ? meta0['pending_set_at']
             : new Date().toISOString(),
-          pending_last_checked_at: new Date().toISOString(),
+          pending_last_checked_at: pendingCheckedStamp(meta0['pending_outcome_verification'], sha, new Date().toISOString()),
           // Never downgrade a parking disposition: it is what keeps the gap out of admission until a human acts.
           disposition: isParkingDisposition(meta0["disposition"]) ? meta0["disposition"] : "pending_verification",
           pending_note: note,

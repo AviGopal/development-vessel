@@ -3430,6 +3430,36 @@ function testPassCount(raw: string): number | null {
   return last;
 }
 
+/** bun's "N expect() calls" summary: how many assertions the run executed. Null when absent. */
+export function testExpectCount(raw: string): number | null {
+  const m = String(raw ?? "").match(/^\s*(\d+) expect\(\) calls?\s*$/m);
+  return m ? Number(m[1]) : null;
+}
+
+/**
+ * `expect(` call sites in a test file's source, comments stripped. A red test aborts at its first failing
+ * expect, so the RUNTIME count on the parent is only a lower bound; when a draft edits the check file
+ * itself, deleting or commenting out assertions after that point is caught only by counting the source
+ * (qa, 09-30).
+ */
+export function staticExpectCount(src: string): number {
+  const code = String(src ?? "").replace(/\/\*[\s\S]*?\*\//g, "").split("\n").map((l) => l.replace(/(^|[^:"'`])\/\/.*$/, "$1")).join("\n");
+  return (code.match(/\bexpect\s*\(/g) ?? []).length;
+}
+
+/**
+ * THE CHECK CONTRACT, judged on the draft and its parent. A gap's own check certifies a draft only if it
+ * was RED on the parent (a check already green there cannot tell a fix from nothing) and the draft did not
+ * pass it by running FEWER assertions (deleting or commenting out expects, or guarding them behind a
+ * condition that turns false: be0ee7a's auth test passes with 6 of its 13 expects when the token is null).
+ * Returns the breach, or null. `baseRed` null means the parent run could not be judged: no breach claimed.
+ */
+export function checkContractBreach(baseRed: string[] | null, baseExpects: number | null, draftExpects: number | null): string | null {
+  if (baseRed !== null && baseRed.length === 0) return "the gap's own check is already GREEN on the parent tree, so it cannot certify this draft";
+  if (baseExpects !== null && draftExpects !== null && draftExpects < baseExpects) return `the draft passes the check by running FEWER assertions than the parent (${baseExpects} -> ${draftExpects} expect() calls in the check file)`;
+  return null;
+}
+
 /** Tests EXECUTED in a `bun test` run (pass + fail from its summary), or null when either count is
  *  missing. Flips move a test between pass and fail and leave this unchanged; deleting a test,
  *  marking it skip/todo, or a file that fails to load lowers it. */
@@ -6129,6 +6159,9 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
     let ownUnjudged = false;
     let strayTests: string[] = [];
     let ownRan = false;
+    let ownBaseRed: string[] | null = null;
+    let contractBreach: string | null = null;
+    let ownExpects: { base: number | null; draft: number | null; static_base?: number; static_draft?: number } | null = null;
     let ownRef: { test_file: string; only_tests: string[] } | null = null;
     if (gateGapMeta) {
       const gapMeta = gateGapMeta;
@@ -6152,25 +6185,61 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
           // no result or "(not run)" and would refuse a correct draft.
           timeout_sec: 240,
         });
-        const red = ownCheckStillRed(String((shO.body as { stdout?: unknown })?.stdout ?? ""), own.only_tests);
+        const draftRaw = String((shO.body as { stdout?: unknown })?.stdout ?? "");
+        const red = ownCheckStillRed(draftRaw, own.only_tests);
         if (red === null) ownUnjudged = true; else ownRed = red;
         ownRan = true;
+        // THE CHECK CONTRACT (09-30): a green own check certifies the draft only against the parent. Run the
+        // same file on the untouched parent (a detached worktree at HEAD; the draft is uncommitted) and refuse
+        // when it was already green there, or when the draft ran fewer assertions. Only when the draft is green,
+        // since a red draft is refused already. The audit found 0 of 11 open checks meeting the contract.
+        if (red !== null && red.length === 0) {
+          const bwO = `/tmp/fc-own-base-${v.replace(/[^a-zA-Z0-9]+/g, "-")}-${Date.now()}`;
+          const shB = await callTool(toolsEndpoint, "shell", {
+            command: `git -C ${JSON.stringify(vAbs)} worktree prune >/dev/null 2>&1; git -C ${JSON.stringify(vAbs)} worktree add -q --detach ${bwO} HEAD && ln -s ${JSON.stringify(vAbs + "/node_modules")} ${bwO}/node_modules && cd ${bwO} && (timeout 180 env -i PATH="$PATH" HOME="$HOME" NODE_ENV=test TZ=UTC WORKSPACE_ROOT="$(mktemp -d)" bun test ${JSON.stringify("./" + own.test_file)} --timeout 20000 2>&1 || true); cd / && git -C ${JSON.stringify(vAbs)} worktree remove --force ${bwO} >/dev/null 2>&1 || true`,
+            cwd: REPO_ROOT,
+            timeout_sec: 240,
+          });
+          const baseRaw = String((shB.body as { stdout?: unknown })?.stdout ?? "");
+          ownBaseRed = ownCheckStillRed(baseRaw, own.only_tests);
+          contractBreach = checkContractBreach(ownBaseRed, testExpectCount(baseRaw), testExpectCount(draftRaw));
+          ownExpects = { base: testExpectCount(baseRaw), draft: testExpectCount(draftRaw) };
+          // The draft edited the check file itself: compare its assertion sites in source, not only at runtime.
+          if (!contractBreach && editedRel.includes(own.test_file)) {
+            const shS = await callTool(toolsEndpoint, "shell", { command: `git -C ${JSON.stringify(vAbs)} show HEAD:${JSON.stringify(own.test_file).slice(1, -1)} 2>/dev/null || true`, cwd: REPO_ROOT, timeout_sec: 60 });
+            const parentSrc = String((shS.body as { stdout?: unknown })?.stdout ?? "");
+            let draftSrc = "";
+            try { draftSrc = readFileSync(`${vAbs}/${own.test_file}`, "utf8"); } catch { draftSrc = ""; }
+            if (parentSrc && draftSrc) {
+              const before = staticExpectCount(parentSrc), after = staticExpectCount(draftSrc);
+              ownExpects = { ...ownExpects, static_base: before, static_draft: after } as typeof ownExpects;
+              if (after < before) contractBreach = `the draft removes assertion sites from the check file itself (${before} -> ${after} expect( calls in source)`;
+            }
+          }
+          // An unjudgeable parent is an anomaly in an isolated compose (worktree add failed, timeout): the rule
+          // for an unverifiable edit applies. Non-isolated composes (~1%) warn instead of blocking.
+          if (ownBaseRed === null) {
+            if (ws?.isolated(v)) contractBreach = contractBreach ?? "the parent-tree run of the gap's own check produced no result, so the check cannot be shown to certify this draft";
+            else console.warn(`[fc-own-check] parent-tree run of ${own.test_file} could not be judged for ${v} (non-isolated); contract not applied`);
+          }
+        }
       }
       if (gateSource === "store_unreadable") ownUnjudged = true;
       // Logged on PASS too: a skipped check must be distinguishable from a passed one (qa, 1bc78f8).
-      console.log(`[fc-own-check] ${JSON.stringify({ gap: pointer.gap?.id ?? null, vessel: v, source: gateSource, test_file: ownRef?.test_file ?? null, only: ownRef?.only_tests ?? [], ran: ownRan, red: ownRed, unjudged: ownUnjudged, stray: strayTests, tc_ok: tcOk })}`);
-      if (ownRan && ownRed.length === 0 && !ownUnjudged) ownCheckRan.push(v);
+      console.log(`[fc-own-check] ${JSON.stringify({ gap: pointer.gap?.id ?? null, vessel: v, source: gateSource, test_file: ownRef?.test_file ?? null, only: ownRef?.only_tests ?? [], ran: ownRan, red: ownRed, unjudged: ownUnjudged, stray: strayTests, tc_ok: tcOk, base_red: ownBaseRed, expects: ownExpects, contract_breach: contractBreach })}`);
+      if (ownRan && ownRed.length === 0 && !ownUnjudged && !contractBreach) ownCheckRan.push(v);
     } else {
       // No gap on this compose (apply-proposal-as-patch, perf-canary): logged so the ungated path is countable.
       console.log(`[fc-own-check] ${JSON.stringify({ gap: null, vessel: v, source: "none" })}`);
     }
-    const ownOk = ownRed.length === 0 && !ownUnjudged && strayTests.length === 0;
+    const ownOk = ownRed.length === 0 && !ownUnjudged && strayTests.length === 0 && !contractBreach;
     const ok = installOk && dryRunOk && tcOk && sdExit === 0 && testOk && ownOk;
     const detail = ((tcUnanswered || tcTimedOut) ? ` | TYPECHECK NOT ANSWERED (TC_EXIT=${String(tcExit)}) — the check did not complete, so this is UNVERIFIED, not proven broken. Failing closed is correct (an unverifiable edit must not land), but do not read this as a defect in the draft: it carries no TS error text.` : "")
       + (installOk ? "" : ` | DEPENDENCY INSTALL FAILED (INSTALL_EXIT=${String(installExit)}) — the staged manifest does not install; a typecheck against an already-populated node_modules cannot see this`)
       + (dryRunOk ? "" : ` | DEPENDENCY RESOLUTION FAILED (DRYRUN_EXIT=${String(dryRunExit)}) — the staged manifest names a dependency that does not resolve, so this change would break a fresh install even though it typechecks here: ${(raw.match(/== resolve ==\n([\s\S]*?)\n== typecheck ==/)?.[1] ?? "").slice(0, 400)}`)
       + (ownRed.length > 0 ? ` | THE GAP'S OWN CHECK IS STILL RED on this draft (its test file run alone): ${ownRed.slice(0, 5).join(" ; ").slice(0, 400)}. A draft that leaves its own check red does not land; finish every site the check names.` : "")
       + (ownUnjudged ? (gateSource === "store_unreadable" ? " | THE GAP STORE COULD NOT BE READ, so this gap's own check could not be resolved; unverified, not landed." : " | THE GAP'S OWN CHECK PRODUCED NO RESULT on this draft (its test file run alone printed no pass/fail); unverified, not landed.") : "")
+      + (contractBreach ? ` | THE GAP'S CHECK CANNOT CERTIFY THIS DRAFT: ${contractBreach}. Fix what the check measures; do not remove or weaken its assertions.` : "")
       + (strayTests.length > 0 ? ` | EDITS A TEST FILE THIS GAP DOES NOT NAME: ${strayTests.join(", ")}. A draft must not change another test's assertions (that is how guards get weakened); fix the code, or leave that test to its own gap.` : "")
       + (testOk ? "" : [
       confirmedNewTest.length > 0 ? ` | NEW test failures introduced by this draft, REPRODUCED on a second run (${confirmedNewTest.length}): ${confirmedNewTest.slice(0, 5).join(" ; ").slice(0, 600)}` : "",

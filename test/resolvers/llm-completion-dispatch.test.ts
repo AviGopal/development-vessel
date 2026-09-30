@@ -148,6 +148,45 @@ describe("resolveLlmCompletionDispatch", () => {
     expect(body.failure_mode).toBe("verifier_negative");
   });
 
+  it("a dispatch-budget refusal is terminal: no cascade to the next endpoint, and the refusal is passed through", async () => {
+    mockResponses.push({
+      ok: true,
+      status: 200,
+      data: { content: { found: true, vessels: [
+        { vesselId: "a", endpoint: "http://a:9999", resolve_endpoint: "/resolve", health_score: 0.9 },
+        { vesselId: "b", endpoint: "http://b:9999", resolve_endpoint: "/resolve", health_score: 0.5 },
+      ] } },
+    });
+    const budget = { dispatch_id: "d-1", used_input_tokens: 395000, estimate_input_tokens: 20000, cap_input_tokens: 400000 };
+    mockResponses.push({ ok: true, status: 200, data: { resolved: false, shape: "llmCompletion", dispatch_budget_exhausted: true, dispatch_budget: budget, error: "dispatch input-token budget spent" } });
+    mockResponses.push({ ok: true, status: 200, data: { content: "a second arm would have answered" } });
+
+    const result = await resolveLlmCompletionDispatch({
+      type: "llm_completion_dispatch", prompt: "p", dispatch_id: "d-1", execution_id: "d-1",
+    } as never);
+
+    expect(result.shape).toBe("structuredError");
+    const body = result.body as { failure_mode: string; detail: string; dispatch_budget: unknown };
+    expect(body.failure_mode).toBe("dispatch_budget_exhausted");
+    expect(body.dispatch_budget).toEqual(budget);
+    expect(fetchCalls.map((c) => c.url)).toEqual([expect.stringContaining("/resolve"), "http://a:9999/resolve"]);
+  });
+
+  it("forwards the caller's execution_id and dispatch_id to llm-resolver (the budget key)", async () => {
+    mockResponses.push({
+      ok: true,
+      status: 200,
+      data: { content: { found: true, vessels: [{ vesselId: "a", endpoint: "http://a:9999", resolve_endpoint: "/resolve" }] } },
+    });
+    mockResponses.push({ ok: true, status: 200, data: { content: "ok" } });
+    await resolveLlmCompletionDispatch({
+      type: "llm_completion_dispatch", prompt: "p", caller: "goal-host:floor_tool_loop", execution_id: "d-9", dispatch_id: "d-9",
+    } as never);
+    const sent = fetchCalls[1]?.body as Record<string, unknown>;
+    expect(sent.execution_id).toBe("d-9");
+    expect(sent.dispatch_id).toBe("d-9");
+  });
+
   it("picks the vessel with highest health_score", async () => {
     mockResponses.push({
       ok: true,

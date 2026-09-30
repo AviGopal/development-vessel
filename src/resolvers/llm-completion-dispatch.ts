@@ -281,6 +281,29 @@ export async function resolveLlmCompletionDispatch(
     }
     return null;
   };
+  // A DISPATCH-BUDGET REFUSAL IS TERMINAL. llm-resolver refuses once THIS dispatch has sent its
+  // llmModelPolicy.max_input_tokens_per_dispatch allowance. Every other endpoint, and every
+  // federated peer, keeps its own ledger and would serve the same dispatch past the allowance, so
+  // cascading would turn the refusal into a bypass. Stop and pass the refusal through (top-level on
+  // a local answer, under content.body when it crossed the federation transport).
+  const budgetRefusalOf = (c: unknown): ResolverResult | null => {
+    if (!c || typeof c !== "object") return null;
+    const top = c as Record<string, unknown>;
+    const inner = top["content"] && typeof top["content"] === "object" ? (top["content"] as Record<string, unknown>)["body"] : undefined;
+    const r = top["dispatch_budget_exhausted"] === true ? top
+      : inner && typeof inner === "object" && (inner as Record<string, unknown>)["dispatch_budget_exhausted"] === true ? inner as Record<string, unknown>
+      : null;
+    if (!r) return null;
+    return {
+      shape: "structuredError",
+      body: {
+        resolver: "llm_completion_dispatch",
+        detail: typeof r["error"] === "string" ? r["error"] : "dispatch input-token budget spent",
+        failure_mode: "dispatch_budget_exhausted",
+        dispatch_budget: r["dispatch_budget"] ?? null,
+      },
+    };
+  };
 
   for (const endpoint of endpoints) {
     let res: Response;
@@ -355,6 +378,8 @@ export async function resolveLlmCompletionDispatch(
       };
       continue;
     }
+    const refusedLocal = budgetRefusalOf(candidate);
+    if (refusedLocal) return refusedLocal;
     const nested = federatedError(candidate);
     if (!candidate || candidate.error || candidate.resolved === false || candidate.success === false || nested) {
       lastFailure = {
@@ -393,6 +418,8 @@ export async function resolveLlmCompletionDispatch(
           continue;
         }
         const candidate = await res.json().catch(() => null) as LlmResolverResult | null;
+        const refusedFed = budgetRefusalOf(candidate);
+        if (refusedFed) return refusedFed;
         const nested = federatedError(candidate);
         if (!candidate || candidate.error || candidate.resolved === false || candidate.success === false || nested) {
           lastFailure = {

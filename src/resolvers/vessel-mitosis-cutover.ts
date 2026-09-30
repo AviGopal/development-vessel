@@ -291,23 +291,34 @@ export interface VesselMitosisCutoverPointer {
   host_sync_results_path?: string;
 }
 
-interface GitOpResult {
+export interface GitOpResult {
   op: string;
   exit_code: number;
   stdout: string;
   stderr: string;
 }
 
-async function runGit(
+/**
+ * Run git IN THIS PROCESS and report the exit code instead of throwing.
+ *
+ * Exported so feature_compose refreshes push clones through the same spawn
+ * rather than through local-tools' shell: a private remote authenticates via
+ * the container's credential helper, and the secret it reads belongs to this
+ * vessel, not to the agent's shell. `timeoutMs` is optional and unset for
+ * every existing caller here, so their behaviour is unchanged.
+ */
+export async function runGit(
   gitCmd: string,
   args: string[],
   cwd: string,
+  opts: { timeoutMs?: number } = {},
 ): Promise<GitOpResult> {
   try {
     const proc = Bun.spawn([gitCmd, ...args], {
       cwd,
       stdout: "pipe",
       stderr: "pipe",
+      ...(opts.timeoutMs !== undefined ? { timeout: opts.timeoutMs } : {}),
     });
     const [stdout, stderr] = await Promise.all([
       new Response(proc.stdout).text(),

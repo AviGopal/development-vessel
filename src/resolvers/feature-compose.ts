@@ -24,7 +24,7 @@ import { METABOB_API_KEY, DISCOVERY_SHAPES } from "../config.js";
 import { federatedLlmEgressUrls } from "./federated-llm-egress.js";
 import { acquireComposeWorkspace, type ComposeWorkspace } from "./compose-workspace";
 import type { ResolverResult } from "./types.js";
-import { resolveVesselMitosisCutover } from "./vessel-mitosis-cutover.js";
+import { resolveVesselMitosisCutover, runGit, type GitOpResult } from "./vessel-mitosis-cutover.js";
 import { registerAttempt, setAuthoringExecution } from "./attempt-register.js";
 import { resolveSubstrateGap, resolveSubstrateGapWrite } from "./substrate-gap.js";
 import { writeAuthoringMarker, clearAuthoringMarker } from "./patch-with-tools.js";
@@ -572,6 +572,40 @@ async function callTool(endpoint: string, tool: string, args: Json): Promise<{ o
       !res.ok || typeof body?.error === "string" || (body as { shape?: string })?.shape === "structuredError" || body?.success === false;
     return { ok: !errored, body };
   } catch (err) { return { ok: false, body: { error: (err as Error).message } }; }
+}
+
+/**
+ * Refresh a vessel's push clone to origin/dev IN THIS PROCESS.
+ *
+ * WHY NOT THE SHELL TOOL. This used to be `git -C <clone> fetch origin dev 2>&1;
+ * git -C <clone> reset --hard origin/dev 2>&1` sent through local-tools' shell. A
+ * private remote (human-surface-vessel) authenticates through the container's git
+ * credential helper, which reads the substrate's secret env. Secrets live with the
+ * resolver that uses them: this vessel pushes and fetches, so this vessel holds
+ * the credential; the agent's shell must not be able to read it, and once it
+ * cannot, a credentialed fetch through that shell would fail.
+ *
+ * SAME SEMANTICS, NOW VISIBLE. The `;` is kept: a failed fetch (offline, auth)
+ * still resets to the last-known origin/dev. What changes is that nothing is
+ * swallowed — the old call discarded the shell result entirely, so a failed fetch
+ * or reset printed the same success line as a good one. Each non-zero exit is
+ * now logged with its stderr, and `ok` reports whether the reset landed.
+ * Bounded per step at the old call's `timeout_sec: 300`.
+ */
+export async function refreshPushCloneToOriginDev(
+  clonePath: string,
+  cwd: string,
+): Promise<{ ok: boolean; fetch: GitOpResult; reset: GitOpResult }> {
+  const timeoutMs = 300_000;
+  const fetched = await runGit("git", ["-C", clonePath, "fetch", "origin", "dev"], cwd, { timeoutMs });
+  if (fetched.exit_code !== 0) {
+    console.warn(`[feature-compose] push-clone refresh: git -C ${clonePath} fetch origin dev exited ${fetched.exit_code}; resetting to the last-known origin/dev: ${fetched.stderr.trim().slice(0, 300)}`);
+  }
+  const reset = await runGit("git", ["-C", clonePath, "reset", "--hard", "origin/dev"], cwd, { timeoutMs });
+  if (reset.exit_code !== 0) {
+    console.warn(`[feature-compose] push-clone refresh: git -C ${clonePath} reset --hard origin/dev exited ${reset.exit_code}: ${reset.stderr.trim().slice(0, 300)}`);
+  }
+  return { ok: reset.exit_code === 0, fetch: fetched, reset };
 }
 
 function parseJsonObject(raw: string): Json | null {
@@ -5166,11 +5200,8 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
       !mountExistsSync(`${runtimePath}/package.json`);
     if (mountExistsSync(runtimePath) && !isPartialMirror) {
           if (mountExistsSync(`${clonePath}/.git`)) {
-            await callTool(toolsEndpoint, "shell", {
-              command: `git -C ${JSON.stringify(clonePath)} fetch origin dev 2>&1; git -C ${JSON.stringify(clonePath)} reset --hard origin/dev 2>&1`,
-              cwd: PUSH_CLONE_ROOT,
-            });
-            console.log(`[feature-compose] refreshed mirror ${vesselName} to origin/dev`);
+            const refreshed = await refreshPushCloneToOriginDev(clonePath, PUSH_CLONE_ROOT);
+            if (refreshed.ok) console.log(`[feature-compose] refreshed mirror ${vesselName} to origin/dev`);
           }
           continue;
         }
@@ -5182,8 +5213,14 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
       await callTool(toolsEndpoint, "shell", { command: `rm -rf ${JSON.stringify(runtimePath)}`, cwd: PUSH_CLONE_ROOT });
       console.log(`[feature-compose] replaced partial runtime mirror for ${vesselName}`);
     }
-    await callTool(toolsEndpoint, "shell", { command: `git -C ${JSON.stringify(clonePath)} fetch origin dev 2>&1; git -C ${JSON.stringify(clonePath)} reset --hard origin/dev 2>&1 && ln -sfn ${JSON.stringify(clonePath)} ${JSON.stringify(runtimePath)}`, cwd: PUSH_CLONE_ROOT });
-    console.log(`[feature-compose] materialized non-resident vessel ${vesselName} -> ${clonePath}`);
+    // `reset && ln`: the symlink is made only when the reset landed, as before.
+    const refreshed = await refreshPushCloneToOriginDev(clonePath, PUSH_CLONE_ROOT);
+    if (refreshed.ok) {
+      await callTool(toolsEndpoint, "shell", { command: `ln -sfn ${JSON.stringify(clonePath)} ${JSON.stringify(runtimePath)}`, cwd: PUSH_CLONE_ROOT });
+      console.log(`[feature-compose] materialized non-resident vessel ${vesselName} -> ${clonePath}`);
+    } else {
+      console.warn(`[feature-compose] did NOT materialize ${vesselName}: its push clone could not be reset to origin/dev, so ${runtimePath} was not linked`);
+    }
   }
 
   if (dryRun) {

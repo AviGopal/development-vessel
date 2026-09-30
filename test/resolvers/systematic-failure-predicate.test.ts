@@ -20,39 +20,26 @@ import { join } from "node:path";
 // This test exists because nothing else could have caught that: the mismatch is a name
 // crossing a vessel boundary, which is the same silent class as db-maintenance's integrity
 // repair (`violating_rows` vs `count`) and the compose lesson mirror's endpoint.
+//
+// REVERSED 2026-09-01 (e204d06), and this guard now pins the REVERSAL. The predicate was then
+// removed on purpose: `nonzero_field` is a HEALTH field (nonzero reads as "defect gone, close"),
+// and the only candidate field was `occurrence_count`, a DEFECT count, so more failures would
+// have read as fixed: a false-close generator in the one path meant to close only on
+// measurement. The earlier version of this file still demanded `evidence_resolve:` at that site,
+// so on 2026-09-30 the failing-test generator filed it as a gap whose only green was re-adding the
+// harmful predicate (held by operator + qa before any compose). A health-oriented predicate is
+// welcome back; it must not bind nonzero_field to a defect count.
 
 const SRC = readFileSync(join(import.meta.dir, "../../src/resolvers/trace-failure-pattern-report.ts"), "utf8");
-const CONFIG = readFileSync(join(import.meta.dir, "../../src/config.ts"), "utf8");
 
-describe("systematic_failure gaps carry a resolvable closure predicate", () => {
-  it("emits an evidence_resolve predicate at the gap write site", () => {
-    expect(SRC).toContain("evidence_resolve:");
-    expect(SRC).toContain("nonzero_field");
+describe("systematic_failure gaps carry no inverted closure predicate", () => {
+  it("does NOT emit an evidence_resolve predicate at the gap write site (removed on purpose, e204d06)", () => {
+    expect(SRC).not.toMatch(/evidence_resolve:\s*\{/);
   });
 
-  it("names a shape that config.ts ACTUALLY ADVERTISES", () => {
-    // The load-bearing assertion. A predicate naming an unadvertised shape is indistinguishable
-    // from no predicate at all, except that it looks fixed.
-    const m = SRC.match(/evidence_resolve:\s*\{\s*shape:\s*["']([^"']+)["']/);
-    expect(m).not.toBeNull();
-    const shape = m![1]!;
-    expect(CONFIG).toContain(`"${shape}"`);
-  });
-
-  it("does NOT name this resolver's internal return-shape, which is not dispatchable", () => {
-    // The exact mistake the substrate made twice. `failurePatternReport` is what the resolver
-    // RETURNS; it is not what discovery serves.
-    const m = SRC.match(/evidence_resolve:\s*\{\s*shape:\s*["']([^"']+)["']/);
-    expect(m![1]).not.toBe("failurePatternReport");
-    expect(m![1]).not.toBe("trace_failure");
-  });
-
-  it("keys the predicate on the pattern's own identity, not a global count", () => {
-    // Without template_id + first_failed_task_id the predicate would re-measure the WHOLE
-    // report, so one gap could only close when every systematic failure everywhere was gone.
-    const block = SRC.slice(SRC.indexOf("evidence_resolve:"), SRC.indexOf("evidence_resolve:") + 400);
-    expect(block).toContain("template_id");
-    expect(block).toContain("first_failed_task_id");
+  it("never binds nonzero_field (a HEALTH field) to occurrence_count (a DEFECT count)", () => {
+    // The exact inversion: nonzero reads as "defect gone", so more failures would close the gap.
+    expect(SRC).not.toMatch(/nonzero_field\s*:\s*["']occurrence_count["']/);
   });
 
   it("keeps every pre-existing classification_metadata key", () => {

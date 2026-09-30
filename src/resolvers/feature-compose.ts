@@ -1069,9 +1069,6 @@ export function detectZeroBehaviorDelta(diff: string): { isInert: boolean; reaso
  * keeps the full check rather than silently waiving it.
  */
 export function changesAreTestOnly(diff: string): boolean {
-  // Treat .stories.tsx files as test-only alongside .test.ts files
-  if (diff.endsWith('.stories.tsx')) return true;
-  return /\.(spec|test|stories)\.tsx?$|\.stories\.tsx?$/.test(diff);
   const paths = String(diff ?? "")
     .split("\n")
     .filter((l) => l.startsWith("### "))

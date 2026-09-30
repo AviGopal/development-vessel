@@ -131,6 +131,35 @@ describe("patch_with_tools resolver — is_new_file authoring (Seam ③)", () =>
     expect((r.body as { detail: string }).detail).toContain("live source missing");
   });
 
+  it("an EXISTING file whose edit only adds an unused declaration is still refused as vacuous", async () => {
+    // The vacuous-edit gate must keep guarding existing files after new files were exempted
+    // (e23b47b). A draft that removed the gate for every file passed every other test in this
+    // vessel (qa mutation, 2026-09-30), so this pins the existing-file refusal directly.
+    const subPath = "src/resolvers/existing.ts";
+    const targetPath = join(vesselsRoot, "demo-vessel", subPath);
+    const original = "export function live(): number {\n  return 1;\n}\n";
+    writeFileSync(targetPath, original);
+    globalThis.fetch = makeFetch({
+      vesselsRoot,
+      llmActions: [
+        JSON.stringify({ action: "call_tool", tool: "fs_write", args: { path: targetPath, content: original + "const unusedVacuousMarker = 42;\n" } }),
+        JSON.stringify({ action: "done", summary: "added a constant" }),
+      ],
+    });
+    const r = await resolvePatchWithTools({
+      type: "patch_with_tools",
+      proposal_text: "change the behaviour of live()",
+      target_file: `repos/demo-vessel/${subPath}`,
+      vessels_root: vesselsRoot,
+      workspace_root: workspaceRoot,
+      max_attempts: 1,
+    });
+    expect(r.shape).toBe("structuredError");
+    expect(String((r.body as { detail?: unknown }).detail ?? "")).toContain("unusedVacuousMarker");
+    // Refused edits are reset: the live file is byte-identical to its pre-run content.
+    expect(readFileSync(targetPath, "utf-8")).toBe(original);
+  });
+
   it("present target with is_new_file:true errors (new-file collision)", async () => {
     const subPath = "src/resolvers/already-here.ts";
     writeFileSync(join(vesselsRoot, "demo-vessel", subPath), "export const X = 1;\n");

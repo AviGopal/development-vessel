@@ -129,6 +129,16 @@ describe("test_suite — only_tests isolation filter", () => {
     expect(cmd).toContain("apply \\\\+ gate");
   });
 
+  // bun matches -t against the test name with describe and test joined by a SPACE, but only_tests carry bun's
+  // printed " > " form ("Describe > test"). A full-path name therefore matched ZERO tests: bun printed
+  // "matched 0 tests" and no summary, so every full-path check read ran:false and its gap never closed
+  // (2026-09-30: all three verified landings of the afternoon, and every generator-filed gap).
+  it("joins a full-path name's describe separator with a SPACE, the form bun's -t matches", async () => {
+    const cmd = await captureCommand({ only_tests: ["Phase B1: suite > the leaf case"] });
+    expect(cmd).toContain("Phase B1: suite the leaf case");
+    expect(cmd).not.toContain(" > the leaf case");
+  });
+
   it("ignores empty or non-string entries rather than emitting an empty pattern", async () => {
     // An empty alternation branch matches everything, which would silently restore the
     // whole-suite behaviour while claiming to be narrowed.

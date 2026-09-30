@@ -1827,6 +1827,9 @@ export async function admitActionableGaps(
     // the top-ranked candidate when every candidate is skipped, so a held gap was picked every 1.5-3 min
     // (09-27 22:20-22:29) and refused at compose. Excluded here, the fallback cannot reach it.
     if (meta.operator_hold === true) { excluded.push({ id, reason: "operator_hold" }); continue; }
+    // A disposition that parks the gap for a human was a label nobody read: an unlocalized needs_information gap
+    // was picked on 2026-09-30 12:21 (for a stale test its only green is changing src to match it).
+    if (isParkingDisposition(meta.disposition)) { excluded.push({ id, reason: `disposition(${String(meta.disposition)})` }); continue; }
     // Its own check already passes on the parent (op10 terminal refusal): re-picking cannot help until the sweep
     // closes it or an operator looks, so it waits out OWN_GREEN_ADMISSION_TTL_MS instead of a cooldown per cycle.
     if (greenOnParentFresh(meta)) { excluded.push({ id, reason: "own_check_green_on_parent" }); continue; }
@@ -3094,7 +3097,8 @@ async function markPendingVerification(gap: Record<string, unknown>, sha: string
             ? meta0['pending_set_at']
             : new Date().toISOString(),
           pending_last_checked_at: new Date().toISOString(),
-          disposition: "pending_verification",
+          // Never downgrade a parking disposition: it is what keeps the gap out of admission until a human acts.
+          disposition: isParkingDisposition(meta0["disposition"]) ? meta0["disposition"] : "pending_verification",
           pending_note: note,
         },
         status: "open",
@@ -3753,6 +3757,16 @@ async function markTerminalRefusal(gap: Record<string, unknown>, cb: Record<stri
     const m0 = ((fresh.classification_metadata ?? {}) as Record<string, unknown>);
     await resolveSubstrateGapWrite({ type: "substrateGap_write", gap: { ...fresh, classification_metadata: { ...m0, own_check_green_on_parent: { at: new Date().toISOString(), reason: why.slice(0, 300) } } } } as never);
   } catch { /* best-effort: without the marker the full cooldown still bounds re-picks */ }
+}
+
+/** Dispositions that park a gap OUT of autonomous work until a human acts: needs_information (waiting for a fact
+ *  or a localization) and awaiting_operator_review (a landing waiting for review). Admission reads them, and
+ *  generic writers must not overwrite them (markPendingVerification clobbered awaiting_operator_review within
+ *  40 s on 2026-09-30); a human answer clears needs_information (escalation-disposition-apply). */
+// "needs_info" is the spelling gap-lifecycle-scan writes when it parks a chronic re-emitter (qa, 2026-09-30).
+export const PARKING_DISPOSITIONS: readonly string[] = ["needs_information", "needs_info", "awaiting_operator_review"];
+export function isParkingDisposition(d: unknown): boolean {
+  return typeof d === "string" && PARKING_DISPOSITIONS.includes(d);
 }
 
 export function isNonAttemptComposeResult(cb: Record<string, unknown> | null | undefined): boolean {

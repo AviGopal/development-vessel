@@ -43,6 +43,7 @@ import { join } from "node:path";
 import type { ResolverResult } from "./types.js";
 import { resolveSubstrateGap, resolveSubstrateGapWrite, takeBirthVerdict, class2PredicateKey, birthTreeMoved, BIRTH_PENDING_STALE_MS } from "./substrate-gap.js";
 import { createHash } from "node:crypto";
+import { gateCallSites, measureRetryEvidence, noEffectOverlapRefusal, spanRecord, REFUSAL_JOURNAL_GREP, refusalJournalCounts, refusalJournalLine, refusalsNotRecorded, storedRefusalCounts } from "./retry-evidence.js";
 
 export interface SelfFactReconcilePointer {
   type: "self_fact_reconcile";
@@ -139,7 +140,7 @@ function hasTsSources(dir: string, depth = 2): boolean {
 
 // ─── the rows (selfFactSpec) ────────────────────────────────────────────────
 const ROWS_PATH = "scripts/substrate/self-facts.json";
-export interface SelfFactRow { id: string; instrument: string; profiles: string[]; edit_site: string; must_fail: string; window_hours?: number; n_floor?: number; unit?: string; pattern?: string; max?: number; must_fail_line?: string; gate?: "active" | "timer"; must_fail_check?: Record<string, unknown> }
+export interface SelfFactRow { id: string; instrument: string; profiles: string[]; edit_site: string; must_fail: string; window_hours?: number; n_floor?: number; unit?: string; pattern?: string; max?: number; must_fail_line?: string; gate?: "active" | "timer"; must_fail_check?: Record<string, unknown>; repo?: string; site_file?: string; min_sites?: number; journal_unit?: string; journal_grace_minutes?: number; notes?: string }
 function readRows(): SelfFactRow[] | null {
   const raw = git(["show", `origin/dev:${ROWS_PATH}`], superRepoRoot());
   if (raw === null) return null;
@@ -198,6 +199,28 @@ export function __setGapBirthDepsForTests(d: Partial<GapBirthDeps> | null): void
   gapBirthDeps = d ? { ...defaultGapBirthDeps, ...d } : defaultGapBirthDeps;
 }
 
+// ─── the one journal reader ─────────────────────────────────────────────────
+/**
+ * Lines of `unit`'s journal from `sinceHours` ago up to `untilMinutesAgo` ago, filtered server-side by `grep`
+ * (journalctl --grep), read asynchronously with a 30 s kill. Exit 1 is "nothing matched", a read. Shared by every
+ * instrument that reads a journal; `journal.read` is the seam a test replaces.
+ */
+async function readJournalLines(unit: string, sinceHours: number, grep: string, untilMinutesAgo = 0): Promise<{ lines: string[] } | { error: string }> {
+  const args = ["journalctl", "-u", unit, "--since", `-${sinceHours}h`, ...(untilMinutesAgo > 0 ? ["--until", `-${untilMinutesAgo}min`] : []), "--no-pager", "-o", "cat", "--grep", grep];
+  try {
+    const proc = Bun.spawn(args, { stdout: "pipe", stderr: "pipe" });
+    const killer = setTimeout(() => proc.kill(), 30_000);
+    const text = await new Response(proc.stdout).text();
+    const code = await proc.exited;
+    clearTimeout(killer);
+    if (code !== 0 && code !== 1) return { error: `journal of ${unit} unreadable (exit ${code})` };
+    return { lines: text.split("\n").filter((l) => l.length > 0) };
+  } catch (err) {
+    return { error: `journal of ${unit} unreadable: ${String(err)}` };
+  }
+}
+export const journal = { read: readJournalLines };
+
 // ─── the facts ──────────────────────────────────────────────────────────────
 // Each returns what it read and where it diverged. `canary` tells the fact to
 // inject one planted divergence on its COPY side (never its source side, so the
@@ -239,15 +262,10 @@ const FACTS: Record<string, FactFn> = {
         const active = sys(["is-active", unit]);
         if (active !== "active") return unread(`${unit} is ${active || "unknown"} on this node, so its journal says nothing about the defect`);
       }
-      const proc = Bun.spawn(["journalctl", "-u", unit, "--since", `-${hours}h`, "--no-pager", "-o", "cat", "--grep", pattern], { stdout: "pipe", stderr: "pipe" });
-      const killer = setTimeout(() => proc.kill(), 30_000);
-      const text = await new Response(proc.stdout).text();
-      const code = await proc.exited;
-      clearTimeout(killer);
-      // journalctl --grep exits 1 when nothing matched: that is a read, not a failure.
-      if (code !== 0 && code !== 1) return unread(`journal of ${unit} unreadable (exit ${code})`);
+      const read = await journal.read(unit, hours, pattern);
+      if ("error" in read) return unread(read.error);
       let n = 0;
-      for (const line of text.split("\n")) if (line && re.test(line)) n++;
+      for (const line of read.lines) if (re.test(line)) n++;
       if (n > max) out.push({ fact, key: row.id, source: `journal:${unit}`, copy: `last ${hours}h`, detail: `${n} line(s) in ${unit}'s journal over the last ${hours}h match the ${row.id} pattern (allowed ${max})`, canary: false });
       if (canary && typeof row.must_fail_line === "string" && re.test(row.must_fail_line)) {
         out.push({ fact, key: `${row.id}-canary`, source: `journal:${unit}`, copy: `last ${hours}h`, detail: "must-fail control: the row's pattern matches its own must_fail_line", canary: true });
@@ -357,6 +375,77 @@ const FACTS: Record<string, FactFn> = {
       fact, source_read: true, copies_read: 1, divergences: out,
       note: `birth verdicts over ${hours}h: present=${dist.present} absent=${dist.absent} unknown=${dist.unknown} pending=${dist.pending}; absent_same_tree=${absentSameTree} absent_detection_unknown=${absentDetectionUnknown} absent_eval_tree_unread=${absentEvalTreeUnread} unknown_tree_moved=${unknownTreeMoved} (oldest ${parkedAgeH}h); unstamped=${unstamped} stuck=${stuck} unknown_stale=${unknownStale}; supply backlog=${backlog}${baseline !== null ? ` (baseline ${baseline})` : ""}; must-fail control=${control}`,
     };
+  },
+  /**
+   * RETRY EVIDENCE IS ENFORCED AND CLASSED BY STAGE (intervention 2, 09-30). Over the gap store's failure_lessons
+   * written in the window: (1) retries whose edited spans overlap a region an earlier attempt on the same gap
+   * edited with no effect on its own check (the applier refuses those, so the expected count is 0); (2) lessons
+   * whose class contradicts the stage their attempt failed at (a typecheck class on a non-typecheck failure, or a
+   * scope withhold labelled anything but scope). Two must-fail controls run through the same code the lane runs:
+   * a planted gap with both defects must be measured (the canary), and a planted retry that re-edits a no-effect
+   * span must be REFUSED by the applier's own refusal function; if it is not, that is a real divergence.
+   */
+  retry_evidence: async (canary, row) => {
+    const fact = row.id;
+    const hours = typeof row.window_hours === "number" && row.window_hours > 0 ? row.window_hours : 24;
+    const out: SelfFactDivergence[] = [];
+    let rows: Array<Record<string, unknown>> = [];
+    try {
+      const read = await resolveSubstrateGap({ type: "substrateGap", limit: 20000 } as never);
+      const g = (read as { body?: { gaps?: unknown } }).body?.gaps;
+      if (!Array.isArray(g)) return { fact, source_read: false, copies_read: 0, divergences: out, note: "gap store unreadable" };
+      rows = g as Array<Record<string, unknown>>;
+    } catch (err) {
+      noteReadError("gap store read for retry_evidence", err);
+      return { fact, source_read: false, copies_read: 0, divergences: out, note: "gap store unreadable" };
+    }
+    // ENFORCEMENT IS IN THE SOURCE: the per-op gate's call sites, counted at origin/dev in the push clone (the
+    // authority is a git object, not a working tree). A site counts only when its result is branched on.
+    const repo = String(row.repo ?? "development-vessel");
+    const siteFile = String(row.site_file ?? "src/resolvers/feature-compose.ts");
+    const minSites = typeof row.min_sites === "number" && row.min_sites > 0 ? row.min_sites : 4;
+    const srcText = git(["show", `origin/dev:${siteFile}`], join(cloneRoot(), repo));
+    if (srcText === null) return { fact, source_read: false, copies_read: 0, divergences: out, note: `${repo} origin/dev:${siteFile} unreadable; the gate's call sites cannot be counted` };
+    const sites = gateCallSites(srcText);
+    if (sites.consumed < minSites) out.push({ fact, key: "gate-call-sites", source: `${repo} origin/dev:${siteFile}`, copy: `at least ${minSites} branched call sites`, detail: `checkOpNoEffect has ${sites.consumed} branched call site(s) (${sites.calls} calls; unbranched at line(s) ${sites.unconsumed_lines.join(",") || "none"}), fewer than the ${minSites} write sites that must call it: a write path can skip the no-effect constraint`, canary: false });
+    const m = measureRetryEvidence(rows, Date.now() - hours * 3600_000);
+    // Retries that got past apply owe edited spans; none recorded means span recording is broken, and a zero
+    // overlap count over no spans is not evidence of enforcement.
+    if (m.retries_expecting_spans > 0 && m.retries_with_spans === 0) return { fact, source_read: false, copies_read: 1, divergences: out, note: `UNOBSERVED: ${m.retries_expecting_spans} retries in ${hours}h got past apply but none recorded edited spans, so the overlap count is not a measurement (gate sites ${sites.consumed}/${sites.calls})` };
+    // EVERY JOURNALED REFUSAL MUST BE STORED. compose journals each refusal with its gap id; the lessons must hold at
+    // least as many for that gap in the window. The journal is read up to a grace before now, since a compose stores
+    // its refusals only when it ends. A gap whose lesson list is full (8) may have evicted some: not judged.
+    const jUnit = String(row.journal_unit ?? "development-vessel");
+    const grace = typeof row.journal_grace_minutes === "number" && row.journal_grace_minutes >= 0 ? row.journal_grace_minutes : 30;
+    const jr = await journal.read(jUnit, hours, REFUSAL_JOURNAL_GREP, grace);
+    if ("error" in jr) return { fact, source_read: false, copies_read: 1, divergences: out, note: `UNOBSERVED: refusal journal cross-check could not read ${jUnit}: ${jr.error}` };
+    const notRecorded = refusalsNotRecorded(refusalJournalCounts(jr.lines), storedRefusalCounts(rows, Date.now() - hours * 3600_000));
+    if (notRecorded.gaps.length > 0) out.push({ fact, key: "refusals-not-recorded", source: `journal:${jUnit}`, copy: "gap store failure_lessons refusals", detail: `${notRecorded.gaps.length} gap(s) have more journaled no-effect refusals than stored refusal records over ${hours}h (to ${grace} min ago): a refusal was enforced but not recorded, so its repeat cannot escalate. First: ${notRecorded.gaps[0]}`, canary: false });
+    if (m.gaps_stuck_unescalated > 0) out.push({ fact, key: "stuck-on-refusals", source: "gap store failure_lessons", copy: `last ${hours}h`, detail: `${m.gaps_stuck_unescalated} of ${m.gaps_stuck_on_refusals} gaps had one region refused repeatedly with no escalation recorded: a silent refusal loop. First: ${m.offenders.find((o) => o.kind === "stuck_refusal")?.gap ?? "?"}`, canary: false });
+    if (m.retries_overlapping_no_effect > 0) out.push({ fact, key: "overlap", source: "gap store failure_lessons", copy: `last ${hours}h`, detail: `${m.retries_overlapping_no_effect} of ${m.retries_with_spans} retries edited a region a prior attempt on the same gap edited with no effect on its own check (expected 0: the applier refuses these). First: ${m.offenders.find((o) => o.kind === "overlap")?.gap ?? "?"}`, canary: false });
+    const mismatched = m.lessons_with_stage - m.lessons_class_matching_stage;
+    if (mismatched > 0) out.push({ fact, key: "class-stage", source: "gap store failure_lessons", copy: `last ${hours}h`, detail: `${mismatched} of ${m.lessons_with_stage} failure lessons carry a class that contradicts their failing stage. First: ${JSON.stringify(m.offenders.find((o) => o.kind === "class_stage") ?? {})}`, canary: false });
+    // Enforcement controls, every run: a planted overlapping retry must be refused and a planted disjoint one allowed.
+    const base = Array.from({ length: 20 }, (_, i) => `line ${i + 1}`).join("\n");
+    const lock = spanRecord("repos/canary/src/x.ts", base, 3, 5);
+    const refused = { path: "repos/canary/src/x.ts", start: 4, end: 4, region_sha: lock.text_sha, region_start: 3, region_end: 5 };
+    const planted = [
+      { at: new Date().toISOString(), class: "verify_failed", stage: "own_check", no_effect_vs_parent: true, edited_spans: [lock] },
+      { at: new Date().toISOString(), class: "typecheck_dangling_reference", stage: "own_check", edited_spans: [spanRecord("repos/canary/src/x.ts", base, 4, 4)] },
+      { at: new Date().toISOString(), class: "no_effect_region", stage: "apply", edited_spans: [], refusals: [refused] },
+      { at: new Date().toISOString(), class: "no_effect_region", stage: "apply", edited_spans: [], refusals: [refused] },
+    ];
+    if (noEffectOverlapRefusal("repos/canary/src/x.ts", base, { start: 4, end: 4 }, planted) === null) out.push({ fact, key: "enforcement-not-refusing", source: "noEffectOverlapRefusal", copy: "planted retry", detail: "a planted retry re-editing a no-effect span was NOT refused: the no-effect constraint is not enforced", canary: false });
+    if (noEffectOverlapRefusal("repos/canary/src/x.ts", base, { start: 10, end: 11 }, planted) !== null) out.push({ fact, key: "enforcement-over-refusing", source: "noEffectOverlapRefusal", copy: "planted retry", detail: "a planted retry editing a disjoint region was refused: the constraint refuses more than the no-effect span", canary: false });
+    if (canary) {
+      const c = measureRetryEvidence([{ id: CANARY_REPO, classification_metadata: { failure_lessons: planted } }]);
+      const plantedJournal = refusalsNotRecorded(refusalJournalCounts([refusalJournalLine("op", "canary-gap", noEffectOverlapRefusal("repos/canary/src/x.ts", base, { start: 4, end: 4 }, planted) ?? "")]), new Map());
+      const plantedSites = gateCallSites(["const a = checkOpNoEffect(op, base, l);", "if (a) return;", "const b = checkOpNoEffect(op, base, l);", "write(b);"].join("\n"));
+      if (c.retries_overlapping_no_effect === 1 && c.lessons_with_stage - c.lessons_class_matching_stage === 1 && c.gaps_stuck_unescalated === 1 && plantedSites.calls === 2 && plantedSites.consumed === 1 && plantedJournal.gaps.length === 1) {
+        out.push({ fact, key: `${fact}-canary`, source: "planted gap", copy: "this run", detail: "must-fail control: a planted overlapping retry, a stage-contradicting class, an unescalated repeat refusal, an unbranched gate call and an unrecorded journaled refusal were all measured", canary: true });
+      }
+    }
+    return { fact, source_read: true, copies_read: 2, divergences: out, note: `${m.retries_with_spans} retries with spans, ${m.retries_overlapping_no_effect} overlapping; ${m.lessons_class_matching_stage}/${m.lessons_with_stage} lessons class-matches-stage; ${m.gaps_stuck_on_refusals} gap(s) stuck on refusals (${m.gaps_stuck_unescalated} unescalated); gate call sites ${sites.consumed}/${sites.calls} (min ${minSites}) over ${hours}h` };
   },
   /** The inventory the deploy step reads must equal the inventory the fleet is built from. */
   fleet_inventory_copy: (canary) => {

@@ -30,6 +30,7 @@ import { resolveSubstrateGap, resolveSubstrateGapWrite } from "./substrate-gap.j
 import { writeAuthoringMarker, clearAuthoringMarker } from "./patch-with-tools.js";
 import { vacuousEditReason, nonTerminatingEditReason, deadStoreEditReason, truncatingRewriteReason } from "../vacuous-edit.js";
 import { acquireComposeSlot } from "../compose-slots.js";
+import { attemptEvidenceBlock, baseSpanOfOp, checkOpNoEffect, enforcedLessons, escalateRepeatedRefusal, refusalJournalLine, repeatedRefusalRegion, type RefusalRecord, explicitLineHint, hydrateComposeGap, lineCenteredSlice, noEffectOverlapRefusal, noEffectSpans, parentCheckBlock, parseOwnCheckFailures, sameOwnCheckFailures, spanRecord, typecheckSection, type AttemptRecord, type EditedSpan, type FailStage, type GapRowReader, type OwnCheckFailure } from "./retry-evidence.js";
 
 export function assertAnchorInWindow(window: string, ops: ReadonlyArray<{ kind?: string; path?: string; old_string?: string }>): Array<{ path: string; oldHead: string; wouldMatchWithoutTrailingSemicolon: boolean }> {
   const missing: Array<{ path: string; oldHead: string; wouldMatchWithoutTrailingSemicolon: boolean }> = [];
@@ -2467,6 +2468,13 @@ export function priorAttemptFeedbackBlock(meta?: Record<string, unknown> | null)
   if (typeof meta.verify_failure_reason === "string" && meta.verify_failure_reason.trim()) lines.push(`- Verify failure from prior attempt: ${meta.verify_failure_reason.trim()}`);
   if (reason) lines.push(`- Rejection reason: ${reason}`);
   if (loc) lines.push(`- The real change site is: ${loc}. Your fix MUST edit that specific path/lines (not just adjacent or related code).`);
+  // THE STRUCTURED RECORD, AS DATA (09-30): stage, edited spans, effect vs parent, and the own check's
+  // failing Expected/Received lines, verbatim. Journaled so the block's delivery is observable.
+  const evidence = attemptEvidenceBlock(lessons);
+  if (evidence) {
+    console.log(`[compose-draft] prior-attempt record block emitted: ${lessons.filter((l) => l && (l.stage || l.own_check)).length} structured attempt(s), ${noEffectSpans(lessons).length} refused region(s)`);
+    lines.push(evidence);
+  }
   if (lessons.length > 0) {
     lines.push("PER-GAP FAILURE LESSONS — this exact mistake was already made on THIS gap; a plan repeating it will be rolled back:");
     for (const entry of lessons.slice(-5)) {
@@ -2980,9 +2988,15 @@ const PER_FILE_SLICE = 6000;
  */
 const PROBE_MAX_OCCURRENCES = 8;
 
-function focusedSlice(content: string, cap: number, focusHints: string[], primaryProbe: string | string[] = ""): { slice: string; centered: boolean; head: boolean } {
+export function focusedSlice(content: string, cap: number, focusHints: string[], primaryProbe: string | string[] = "", lineHint: { start: number; end: number } | null = null): { slice: string; centered: boolean; head: boolean } {
   const window = Math.min(content.length, cap, PER_FILE_SLICE);
   if (content.length <= window) return { slice: content, centered: false, head: false };
+  // -1. AN EXPLICIT LINE RANGE ("~l.249-264" in the gap) outranks every probe: it is the author's statement of
+  //     where the defect is. The drain gap named ~l.249-264 and 9 drafts were windowed elsewhere (09-30).
+  if (lineHint) {
+    const at = lineCenteredSlice(content, lineHint.start, lineHint.end, window);
+    if (at) return { slice: at.slice, centered: true, head: at.startLine === 1 };
+  }
   const centerOn = (at: number) => {
     const start = Math.max(0, at - Math.floor(window / 3));
     return { slice: content.slice(start, start + window), centered: true, head: start === 0 };
@@ -3131,7 +3145,7 @@ function joinSignature(rawGrepOutput: string): string {
   return parts.join(" ").replace(/\s+/g, " ").trim();
 }
 
-async function groundVesselFiles(toolsEndpoint: string, verifyVessels: string[], focusHints: string[] = [], targetFiles: string[] = [], primaryProbe: string | string[] = ""): Promise<string> {
+async function groundVesselFiles(toolsEndpoint: string, verifyVessels: string[], focusHints: string[] = [], targetFiles: string[] = [], primaryProbe: string | string[] = "", lineHint: { file: string; start: number; end: number } | null = null): Promise<string> {
   const blocks: string[] = [];
   let contentBudget = GROUND_CONTENT_BUDGET;
   for (const v of verifyVessels.slice(0, 6)) {
@@ -3195,7 +3209,7 @@ async function groundVesselFiles(toolsEndpoint: string, verifyVessels: string[],
           }
           if (typeof content === "string") {
             const effBudget = target ? Math.max(contentBudget, PER_FILE_SLICE) : contentBudget;
-            const { slice, centered, head } = focusedSlice(content, effBudget, focusHints, primaryProbe);
+            const { slice, centered, head } = focusedSlice(content, effBudget, focusHints, primaryProbe, lineHint && lineHint.file === `repos/${vRel}/${f}` ? lineHint : null);
             contentBudget -= slice.length;
             const truncated = slice.length < content.length
               ? (centered
@@ -3549,6 +3563,7 @@ function classifyComposeFailure(appliedOps: Array<{ ok: boolean; detail?: string
       } catch { /* fall through to generic classification */ }
       return "mis_localized_path";
     }
+    if (/NO-EFFECT REGION REFUSED/.test(ap.detail ?? "")) return "no_effect_region";
     if (/not found in file|missing anchor string|no match found/i.test(ap.detail ?? "")) {
       return "anchor_not_found";
     }
@@ -3556,8 +3571,12 @@ function classifyComposeFailure(appliedOps: Array<{ ok: boolean; detail?: string
   }
   const bad = verifyResults.find((v) => !v.ok);
   if (bad) {
-    if (/TS1128|TS1005|TS1109|TS1110/.test(bad.output)) return "syntax_break";
-    if (/TS2304|TS2552|TS2554|TS2551|TS2345|TS2322/.test(bad.output)) return "typecheck_dangling_reference";
+    // TS codes are read from the TYPECHECK section only (empty when TC_EXIT=0): the tests section prints
+    // test NAMES, and a passing test named "...TS2304 baseline stays delta-excused" classed a behaviour
+    // failure typecheck_dangling_reference, so recall served typecheck advice for a red own check (09-30).
+    const tc = typecheckSection(bad.output);
+    if (/TS1128|TS1005|TS1109|TS1110/.test(tc)) return "syntax_break";
+    if (/TS2304|TS2552|TS2554|TS2551|TS2345|TS2322/.test(tc)) return "typecheck_dangling_reference";
     return "verify_failed";
   }
   if (/diff is empty|diff field is empty/i.test(semanticReason)) return "empty_diff_identity_edit";
@@ -3569,10 +3588,12 @@ function classifyComposeFailure(appliedOps: Array<{ ok: boolean; detail?: string
 /** The class a failed compose records. An environment condition wins over any draft class; a withhold
  *  because a shaped policy (the autonomy scope) could not be read is one, so a draft that applied and
  *  verified cleanly is not recorded as semantic_reject, the class the classifier falls to otherwise. */
-export function composeLessonClass(envClass: string | null, policyUnreadable: string | null, appliedOps: Array<{ ok: boolean; detail?: string }>, verifyResults: Array<{ ok: boolean; output: string }>, semanticReason: string): string {
-  return envClass ?? (policyUnreadable ? "env_policy_unreadable" : classifyComposeFailure(appliedOps, verifyResults, semanticReason));
+export function composeLessonClass(envClass: string | null, policyUnreadable: string | null, appliedOps: Array<{ ok: boolean; detail?: string }>, verifyResults: Array<{ ok: boolean; output: string }>, semanticReason: string, scopeWithheld = false): string {
+  // A READABLE scope that excludes a touched path withholds a draft that applied and verified cleanly; the
+  // classifier would fall through to semantic_reject for it, the same mislabel as the unreadable case.
+  return envClass ?? (policyUnreadable ? "env_policy_unreadable" : scopeWithheld ? "scope_refused" : classifyComposeFailure(appliedOps, verifyResults, semanticReason));
 }
-async function appendComposeLesson(cls: string, reason: string, vessels: string, gap?: { id?: string; summary?: unknown; category?: unknown; source?: unknown; detected_at?: unknown; classification_metadata?: Record<string, unknown> }): Promise<void> {
+async function appendComposeLesson(cls: string, reason: string, vessels: string, gap?: { id?: string; summary?: unknown; category?: unknown; source?: unknown; detected_at?: unknown; classification_metadata?: Record<string, unknown> }, attempt?: AttemptRecord): Promise<void> {
   // operator_approved is operator authority: code never sets it (block from d8c93b4 removed).
   if (gap && gap.id) {
     try {
@@ -3580,9 +3601,10 @@ async function appendComposeLesson(cls: string, reason: string, vessels: string,
       const meta = (gap.classification_metadata ?? {}) as Record<string, unknown>;
       const lessons = (Array.isArray(meta.failure_lessons) ? meta.failure_lessons : []) as Array<Record<string, unknown>>;
       const reCommit = lessons.some((l) => l.class === cls);
-      const diagLines = reason.split("\n").filter((l) => !l.trim().startsWith("(pass)") && /error TS\d+|\berror\b|\d+ fail|FAIL|Error:/i.test(l));
+      // Expected:/Received: lines are the failure's data; the filter used to drop them.
+      const diagLines = reason.split("\n").filter((l) => !l.trim().startsWith("(pass)") && /error TS\d+|\berror\b|\d+ fail|FAIL|Error:|^\s*\(fail\)|\bExpected\b|\bReceived\b/i.test(l));
       const diag = diagLines.length > 0 ? diagLines.join("\n") : reason;
-      lessons.push({ at: new Date().toISOString(), class: cls, reason: diag.slice(0, 200), raw_excerpt: diag.slice(0, 1500) });
+      lessons.push({ at: new Date().toISOString(), class: cls, reason: diag.slice(0, 200), raw_excerpt: diag.slice(0, 1500), ...(attempt ?? {}) });
 
       // Record failure for the lessons that led to this 'cls'
       (async () => {
@@ -3610,7 +3632,9 @@ async function appendComposeLesson(cls: string, reason: string, vessels: string,
           // Swallow errors to avoid failing the compose
         }
       })();
-      while (lessons.length > 8) lessons.shift();
+      // A lock record (no_effect_vs_parent) is evicted last: it lifts when its region's text changes, not by age,
+      // so refusal lessons cannot push the lock they report out of the window.
+      while (lessons.length > 8) { const i = lessons.findIndex((l) => l?.no_effect_vs_parent !== true); lessons.splice(i >= 0 ? i : 0, 1); }
       meta.failure_lessons = lessons;
       // PRESERVE the gap's real identity on write-back. This write only ATTACHES failure
       // lessons — it must NEVER rewrite the gap's category/summary. Historically it HARDCODED
@@ -3644,7 +3668,7 @@ async function appendComposeLesson(cls: string, reason: string, vessels: string,
       // dispositioned/skipped, not infinitely recommitted). The failure_lessons write above still
       // records the class so the drafter keeps learning.
       const _recommitDepth = (String(gap.id).match(/recommit-/g) ?? []).length;
-      if (reCommit && _recommitDepth < 2 && cls !== "scope_refused" && cls !== "env_policy_unreadable" && !reason.startsWith("[deterministic] ")) { const baseId = String(gap.id).replace(/^(?:recommit-)+/, ""); const baseClosed = baseId === String(gap.id) ? (typeof (gap as { status?: unknown }).status === "string" && (gap as { status?: unknown }).status === "closed") : false; if (baseClosed) { console.log(`[compose-lessons] recommit SKIPPED: base gap ${baseId} is closed`); } else {
+      if (reCommit && _recommitDepth < 2 && cls !== "scope_refused" && cls !== "env_policy_unreadable" && cls !== "no_effect_region" && !reason.startsWith("[deterministic] ")) { const baseId = String(gap.id).replace(/^(?:recommit-)+/, ""); const baseClosed = baseId === String(gap.id) ? (typeof (gap as { status?: unknown }).status === "string" && (gap as { status?: unknown }).status === "closed") : false; if (baseClosed) { console.log(`[compose-lessons] recommit SKIPPED: base gap ${baseId} is closed`); } else {
         await resolveSubstrateGapWrite({
           type: "substrateGap_write",
           gap: {
@@ -3911,6 +3935,44 @@ const DEV_VESSEL_ENDPOINT = process.env["DEV_VESSEL_ENDPOINT"] ?? "http://127.0.
 // confirmation below still re-runs the suite before any rejection.
 const BASELINE_CACHE_TTL_MS = 2 * 60 * 60 * 1000;
 const baselineCache = new Map<string, { at: number; tsErrors: string[]; testFails: string[]; testPass: number | null }>();
+
+/** One vessel's verify result; `stage` and `own` feed the failed attempt's structured lesson record. */
+export type VerifyResult = { vessel: string; errors: number | string; exit_code: number | null; ok: boolean; output: string; stage?: FailStage | null; own?: { test_file: string; failing: OwnCheckFailure[]; no_effect_vs_parent?: boolean; base_sha?: string; parent_cached?: "hit" | "miss" } };
+/** Parent-tree runs of a gap's own check, keyed (gap, vessel, base sha, check). */
+const OWN_PARENT_RUNS = new Map<string, string>();
+
+/**
+ * The structured record a failed compose writes on its gap's failure_lessons, and the lesson reason for an
+ * own-check failure. The own check's failing lines come from `verify[].own` (the gap's test file run alone),
+ * never from `verify[].output` (the full suite, whose first (fail) belonged to another gap's check on 09-30).
+ */
+export function composeAttemptEvidence(
+  applied: ReadonlyArray<{ ok: boolean; base_span?: EditedSpan }>,
+  repairSpans: ReadonlyArray<EditedSpan>,
+  verify: ReadonlyArray<VerifyResult>,
+  scopeWithheld: boolean,
+  policyUnreadable: string | null,
+): { record: AttemptRecord; ownReason: string | undefined } {
+  const failedApply = applied.find((a) => !a.ok);
+  const failedVerify = verify.find((v) => !v.ok);
+  const ownV = verify.find((v) => v.own && v.own.failing.length > 0) ?? verify.find((v) => v.own);
+  const stage: FailStage | null = failedApply ? "apply" : failedVerify ? (failedVerify.stage ?? null) : (scopeWithheld || policyUnreadable) ? "scope" : null;
+  const record: AttemptRecord = {
+    stage,
+    edited_spans: [...applied.filter((a) => a.ok && a.base_span).map((a) => a.base_span!), ...repairSpans],
+    ...(ownV?.own ? { own_check: { test_file: ownV.own.test_file, failing: ownV.own.failing }, ...(ownV.own.no_effect_vs_parent !== undefined ? { no_effect_vs_parent: ownV.own.no_effect_vs_parent } : {}), ...(ownV.own.base_sha ? { base_sha: ownV.own.base_sha } : {}), ...(ownV.own.parent_cached ? { parent_cached: ownV.own.parent_cached } : {}) } : {}),
+  };
+  const ownReason = failedVerify?.stage === "own_check" && failedVerify.own && failedVerify.own.failing.length > 0
+    ? failedVerify.own.failing.slice(0, 3).map((f) => [`(fail) ${f.name}`, f.expected, f.received].filter(Boolean).join("\n")).join("\n")
+    : undefined;
+  return { record, ownReason };
+}
+
+/** The gap store read shared by the pre-prompt hydration and the gate (null = unreadable). */
+const readComposeGapRows: GapRowReader = async (id) => {
+  const rows = ((await resolveSubstrateGap({ type: "substrateGap", id, limit: 1 } as never))?.body as { gaps?: Array<Record<string, unknown>> } | undefined)?.gaps;
+  return Array.isArray(rows) ? rows : null;
+};
 
 export async function resolveFeatureCompose(pointer: FeatureComposePointer): Promise<ResolverResult> {
   // NaN GUARD, not decoration: `Math.max(1, Number("typo"))` is NaN, and
@@ -4203,7 +4265,17 @@ async function resolveFeatureComposeUncapped(pointer: FeatureComposePointer): Pr
   // so grounding windows CENTER on the site instead of the file head (which is blind
   // to a byte-159k change site in a 200 KB file → 0-op decompose). Pure locators;
   // empty for surgical/small-file cases → head-window behaviour preserved.
+  // THE STORE IS READ BEFORE THE PROMPT IS BUILT (09-30). goal-host's edit-intent route (the investigation
+  // escalation included) passes only {edit_site}; the store row was read only at the gate, after the prompt,
+  // so those drafts never saw the gap's lessons, check or line hint. Every read below uses the merged row.
+  const composeGap = await hydrateComposeGap(pointer.gap, readComposeGapRows);
+  if (pointer.gap) pointer = { ...pointer, gap: { ...pointer.gap, classification_metadata: composeGap.meta, ...(pointer.gap.summary ? {} : composeGap.summary ? { summary: composeGap.summary } : {}) } };
   const gapMeta = (pointer.gap?.classification_metadata ?? {}) as Record<string, unknown>;
+  // An explicit "~l.NNN[-MMM]" in the gap's text windows the edit_site file there, ahead of every probe.
+  const lineHintRange = explicitLineHint(String(pointer.gap?.summary ?? "")) ?? explicitLineHint(String(pointer.spec ?? ""));
+  const lineHintFile = typeof gapMeta.edit_site === "string" ? gapMeta.edit_site.replace(/:\d+.*$/, "").trim() : "";
+  const composeLineHint = lineHintRange && lineHintFile ? { file: lineHintFile, ...lineHintRange } : null;
+  if (composeLineHint) console.log(`[fc-grounding] explicit line hint ${composeLineHint.file}:${composeLineHint.start}-${composeLineHint.end} sets the window`);
   // THE REGION IS THE BEST FOCUS HINT THERE IS, AND IT WAS NEVER ONE (2026-08-07).
   // focusedSlice centres the grounding window on a hint it can actually FIND in the
   // file. Every hint available on the goal-host /run-goal path is a whole spec
@@ -4343,7 +4415,7 @@ async function resolveFeatureComposeUncapped(pointer: FeatureComposePointer): Pr
     // runtime and the staging clone — so it is neither a dead dependency nor a missing file.
     //
     // Keep the fail-open behaviour (grounding = "" and carry on); only make the reason visible.
-    try { grounding = await groundVesselFiles(toolsEndpoint, verifyVessels, focusHints, targetFiles, regionProbes); }
+    try { grounding = await groundVesselFiles(toolsEndpoint, verifyVessels, focusHints, targetFiles, regionProbes, composeLineHint); }
     catch (err) {
       console.error(
         `[fc-grounding] groundVesselFiles THREW — window will be empty and the decompose will be refused: ` +
@@ -4627,7 +4699,8 @@ async function resolveFeatureComposeUncapped(pointer: FeatureComposePointer): Pr
   // gate wrote suspected_real_location + semantic_gate_reason onto its metadata. Inject
   // that as explicit re-draft guidance so the drafter completes the partial fix instead
   // of re-producing it blind. Additive — empty when no prior rejection exists.
-  const priorFeedback = priorAttemptFeedbackBlock(pointer.gap?.classification_metadata);
+  const lineageEvidence = composeGap.lineage_lessons.length > 0 ? attemptEvidenceBlock(composeGap.lineage_lessons) : "";
+  const priorFeedback = priorAttemptFeedbackBlock(pointer.gap?.classification_metadata) + (lineageEvidence ? `\n(the record below is this gap's SOURCE gap's; it is the same defect, and its refused regions are enforced here too)${lineageEvidence}` : "");
   // SUCCESS CRITERION (contained-self-development, drafting reliability; law 8). A gap with a
   // machine-checkable falsifier is judged by it, but the drafter was never told what it is: the
   // largest failure class was a semantic-gate "addresses:false" on a partial or wrong change.
@@ -4646,6 +4719,9 @@ async function resolveFeatureComposeUncapped(pointer: FeatureComposePointer): Pr
   if (criterionResolve && typeof criterionResolve === "object" && typeof criterionResolve.shape === "string") criterionLines.push(`- The gap is verified by resolving shape \`${criterionResolve.shape}\` with input ${JSON.stringify(criterionResolve.input ?? {}).slice(0, 300)}: after your change that resolve must no longer report this defect.`);
   const criterionShape = criterionMeta["verify_shape"];
   if (typeof criterionShape === "string" && criterionShape.trim()) criterionLines.push(`- After your change the shape \`${criterionShape}\` must resolve.`);
+  // A decomposed step carries its parent's check by lookup (parent_gap_id), not a truncated prose copy.
+  const parentCheckLine = parentCheckBlock(composeGap.parent_check);
+  if (parentCheckLine) criterionLines.push(parentCheckLine);
   const successCriterion = criterionLines.length > 0 ? `\n\nSUCCESS CRITERION (the gap's machine-checkable falsifier; the landing is judged by exactly this):\n${criterionLines.join("\n")}\n` : "";
   const composeLessons = (await composeLessonsBlock(pointer.spec, gapFailureClasses(pointer.gap?.classification_metadata as Record<string, unknown> | undefined))) + (await fileLessonsBlock(pointer.spec)) + successCriterion;
   let spec = pointer.spec;
@@ -5456,7 +5532,21 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
   // must validate its anchor against the file's CURRENT (post-prior-edit) bytes, not
   // the stale first-touch snapshot in preEditContent (which stays for rollback only).
   const editedInPlan = new Set<string>();
-  const applied: Array<{ path: string; kind: string; ok: boolean; repaired?: boolean; detail?: string; span?: { start_line: number; end_line: number } }> = [];
+  const applied: Array<{ path: string; kind: string; ok: boolean; repaired?: boolean; detail?: string; span?: { start_line: number; end_line: number }; base_span?: EditedSpan }> = [];
+  // THE NO-EFFECT CONSTRAINT (09-30). A prior attempt on this gap whose own check failed IDENTICALLY with and
+  // without its edit proved the region it edited is not on the tested path. An edit overlapping that region is
+  // refused before it is written, here and in fc-repair, and the refusal reason is the op's failure detail.
+  const priorLessons = enforcedLessons({ meta: (pointer.gap?.classification_metadata ?? {}) as Record<string, unknown>, lineage_lessons: composeGap.lineage_lessons });
+  // Only skips the extra base read at the op applier's top when there is no lock to check against.
+  const hasNoEffectLocks = noEffectSpans(priorLessons).length > 0;
+  const repairSpans: EditedSpan[] = [];
+  // Every refusal is journaled here and recorded on the gap as a no_effect_region lesson after the compose.
+  const noEffectRefusals: RefusalRecord[] = [];
+  const noteNoEffectRefusal = (site: string, r: RefusalRecord & { detail: string }): void => {
+    const { detail, ...rec } = r;
+    noEffectRefusals.push(rec);
+    console.warn(refusalJournalLine(site, String(pointer.gap?.id ?? ""), detail));
+  };
   let applyFailed = false;
   // 2026-07-26 apply-reliability (keystone): when a non-unique anchor is
   // disambiguated to ONE of N identical sites, the n0-1 siblings are left
@@ -5465,6 +5555,14 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
   const droppedSiblingSites: Array<{ path: string; anchor: string; residual: number }> = [];
   const applyOneOp = async (op: PlanOp): Promise<{ entry: (typeof applied)[number]; createdAbs?: string; editedAbs?: string; failed: boolean }> => {
     const abs = opAbs(op.path);
+    if (hasNoEffectLocks && (op.kind === "edit" || op.kind === "replace_lines")) {
+      let base = preEditContent.get(abs);
+      if (base === undefined) { const rd0 = await callTool(toolsEndpoint, "fs_read", { path: abs }); const c0 = (rd0.body as { content?: unknown })?.content; base = rd0.ok && typeof c0 === "string" ? c0 : undefined; }
+      if (typeof base === "string") {
+        const opRefusal = checkOpNoEffect(op, base, priorLessons);
+        if (opRefusal) { noteNoEffectRefusal("op", opRefusal); return { entry: { path: op.path, kind: op.kind, ok: false, detail: opRefusal.detail }, failed: true }; }
+      }
+    }
     if (op.kind === "replace_lines") {
       // Line-range replace for edits that CANNOT be uniquely content-anchored — N
       // identical, ADJACENT blocks whose middle duplicates share identical surrounding
@@ -5504,7 +5602,8 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
       // Record the post-edit bytes as the edit branch does, or rollback cannot recognise this
       // compose's own write and reports a spurious ROLLBACK CONFLICT (rolled_back:false).
       if (wr.ok) await recordPostEdit(abs);
-      const entry = { path: op.path, kind: op.kind, ok: wr.ok, detail: wr.ok ? undefined : JSON.stringify(wr.body).slice(0, 200), span: wr.ok ? { start_line: start, end_line: start + Math.max(0, replacementLines.length - 1) } : undefined };
+      const rlBase = preEditContent.get(abs) ?? cur;
+      const entry = { path: op.path, kind: op.kind, ok: wr.ok, detail: wr.ok ? undefined : JSON.stringify(wr.body).slice(0, 200), span: wr.ok ? { start_line: start, end_line: start + Math.max(0, replacementLines.length - 1) } : undefined, base_span: wr.ok && rlBase === cur ? spanRecord(op.path, rlBase, start, end) : undefined };
       return { entry, editedAbs: wr.ok ? abs : undefined, failed: !wr.ok };
     }
     if (op.kind === "create_file") {
@@ -5790,8 +5889,13 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
       // onto the first of many occurrences. A purely MISSING anchor still falls to the existing
       // post-failure repair (fs_edit errors cleanly on absence — no mislocalization risk).
       
+      // Re-derivation may have moved the anchor: the no-effect constraint is checked on the anchor actually written.
+      const reBase = preEditContent.get(abs) ?? liveContent;
+      const rederivedRefusal = reBase && effOld !== (op.old_string ?? "") ? checkOpNoEffect({ path: op.path, kind: "edit", old_string: effOld }, reBase, priorLessons) : null;
       const anchorRejected = anchorNonUnique && !groundedPre;
-      let r: { ok: boolean; body: Json } = anchorRejected
+      let r: { ok: boolean; body: Json } = rederivedRefusal
+        ? (noteNoEffectRefusal("re-derived anchor", rederivedRefusal), { ok: false, body: { error: rederivedRefusal.detail } as Json })
+        : anchorRejected
         ? { ok: false, body: { error: "no_unique_anchor: refused fs_edit — planned anchor is non-unique and re-derivation found no unique substring (would mislocalize to first occurrence)" } as Json }
         : await callTool(toolsEndpoint, "fs_edit", { path: abs, old_string: effOld, new_string: op.new_string ?? "" });
       let repaired = groundedPre && r.ok;
@@ -5799,7 +5903,7 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
         await new Promise((resolve) => setTimeout(resolve, 300)); // the-blind-edit-anchor-repair-is-never-told-which-statement-failed-narrowed
         droppedSiblingSites.push({ path: op.path, anchor: (op.old_string ?? "").slice(0, 200), residual: n0 - 1 });
       }
-      if (!r.ok && !anchorRejected) { 
+      if (!r.ok && !anchorRejected && rederivedRefusal === null) {
         setTimeout(() => {}, 0);
         await new Promise((resolve) => setTimeout(resolve, 10)); // throttle repair
         // Blind-edit repair: plan-once decomposition can guess an old_string that
@@ -5850,7 +5954,9 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
           } catch { /* repair failed; r stays not-ok */ }
         }
       }
-      const entry = { path: op.path, kind: op.kind, ok: r.ok, repaired, detail: r.ok ? undefined : JSON.stringify(r.body).slice(0, 200), span: r.ok ? computeEditSpan(liveContent || preEditContent.get(abs), effOld, op.new_string ?? "") : undefined };
+      const edBase = preEditContent.get(abs);
+      const edSpan = r.ok && typeof edBase === "string" ? baseSpanOfOp(edBase, { kind: "edit", old_string: effOld }) : null;
+      const entry = { path: op.path, kind: op.kind, ok: r.ok, repaired, detail: r.ok ? undefined : (rederivedRefusal?.detail ?? JSON.stringify(r.body).slice(0, 200)), span: r.ok ? computeEditSpan(liveContent || preEditContent.get(abs), effOld, op.new_string ?? "") : undefined, base_span: edSpan && typeof edBase === "string" ? spanRecord(op.path, edBase, edSpan.start, edSpan.end) : undefined };
       // A successful edit mutated abs on disk; mark it so a later same-file op
       // re-reads current bytes (above) instead of the stale first-touch snapshot.
       if (r.ok) { editedInPlan.add(abs); await recordPostEdit(abs); }
@@ -5919,24 +6025,13 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
   // escalation) passes only {edit_site}, so the own check below found no evidence_resolve and passed
   // silently; d2e9f9a landed that way with its check red. When pointer.gap.id names a store gap, the
   // stored metadata is the authority. An unreadable store fails the gate closed.
+  // The same read as the pre-prompt hydration, repeated here so a gap closed mid-compose is seen.
   let gateGapMeta: Record<string, unknown> | null = null;
   let gateSource: "store" | "caller" | "store_unreadable" = "caller";
   let gateGapStatus = "";
   if (pointer.gap) {
-    gateGapMeta = { ...((pointer.gap.classification_metadata ?? {}) as Record<string, unknown>) };
-    const gid = typeof pointer.gap.id === "string" ? pointer.gap.id : "";
-    if (gid) {
-      try {
-        const rows = ((await resolveSubstrateGap({ type: "substrateGap", id: gid, limit: 1 } as never))?.body as { gaps?: Array<Record<string, unknown>> } | undefined)?.gaps;
-        if (!Array.isArray(rows)) gateSource = "store_unreadable";
-        else {
-          const row = rows.find((r) => String(r.id) === gid);
-          if (row) { gateGapMeta = { ...gateGapMeta, ...((row.classification_metadata ?? {}) as Record<string, unknown>) }; gateSource = "store"; gateGapStatus = String(row.status ?? ""); }
-        }
-      } catch {
-        gateSource = "store_unreadable";
-      }
-    }
+    const g = await hydrateComposeGap(pointer.gap, readComposeGapRows);
+    gateGapMeta = g.meta; gateSource = g.source; gateGapStatus = g.status;
   }
   // A real gap id that falls back to the caller's copy without a check is a silent route around the gate
   // (e.g. an id mismatch from goal-host's hydration); say so rather than pass quietly.
@@ -5946,7 +6041,29 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
   const gapClosedInStore = gateSource === "store" && gateGapStatus === "closed";
   let terminalRefusal: string | null = null;
   const ownCheckRan: string[] = [];
-  const runVerify = async (v: string): Promise<{ vessel: string; errors: number | string; exit_code: number | null; ok: boolean; output: string }> => {
+  // The gap's own check on the untouched parent (a detached worktree at HEAD; the draft is uncommitted).
+  // One run per (gap, vessel, base sha, check): the green-draft contract and the red-draft no-effect
+  // comparison share it. An unjudgeable run is not cached.
+  const ownParentRun = async (v: string, vAbs: string, own: { test_file: string; only_tests: string[] }, gapId: string): Promise<{ sha: string; raw: string | null; cached: "hit" | "miss" }> => {
+    const shS = await callTool(toolsEndpoint, "shell", { command: `git -C ${JSON.stringify(vAbs)} rev-parse HEAD 2>/dev/null || true`, cwd: REPO_ROOT, timeout_sec: 30 });
+    const sha = String((shS.body as { stdout?: unknown })?.stdout ?? "").trim();
+    const key = `${gapId}|${v}|${sha}|${own.test_file}|${own.only_tests.join(",")}`;
+    const hit = sha ? OWN_PARENT_RUNS.get(key) : undefined;
+    if (hit !== undefined) return { sha, raw: hit, cached: "hit" };
+    const bwO = `/tmp/fc-own-base-${v.replace(/[^a-zA-Z0-9]+/g, "-")}-${Date.now()}`;
+    const shB = await callTool(toolsEndpoint, "shell", {
+      command: `git -C ${JSON.stringify(vAbs)} worktree prune >/dev/null 2>&1; git -C ${JSON.stringify(vAbs)} worktree add -q --detach ${bwO} HEAD && ln -s ${JSON.stringify(vAbs + "/node_modules")} ${bwO}/node_modules && cd ${bwO} && (timeout 180 env -i PATH="$PATH" HOME="$HOME" NODE_ENV=test TZ=UTC WORKSPACE_ROOT="$(mktemp -d)" bun test ${JSON.stringify("./" + own.test_file)} --timeout 20000 2>&1 || true); cd / && git -C ${JSON.stringify(vAbs)} worktree remove --force ${bwO} >/dev/null 2>&1 || true`,
+      cwd: REPO_ROOT,
+      timeout_sec: 240,
+    });
+    const raw = String((shB.body as { stdout?: unknown })?.stdout ?? "");
+    if (sha && ownCheckStillRed(raw, own.only_tests) !== null) {
+      OWN_PARENT_RUNS.set(key, raw);
+      while (OWN_PARENT_RUNS.size > 64) OWN_PARENT_RUNS.delete(OWN_PARENT_RUNS.keys().next().value as string);
+    }
+    return { sha, raw, cached: "miss" };
+  };
+  const runVerify = async (v: string): Promise<VerifyResult> => {
     const vAbs = vesselRoot(v);
     const sh = await callTool(toolsEndpoint, "shell", {
       // DO NOT RUN A BARE `bun install` HERE — IT CORRUPTS THE SHARED node_modules.
@@ -6218,6 +6335,10 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
     let contractBreach: string | null = null;
     let ownExpects: { base: number | null; draft: number | null; static_base?: number; static_draft?: number } | null = null;
     let ownRef: { test_file: string; only_tests: string[] } | null = null;
+    let ownFailing: OwnCheckFailure[] = [];
+    let ownNoEffect: boolean | undefined;
+    let ownBaseSha: string | undefined;
+    let ownParentCached: "hit" | "miss" | undefined;
     if (gateGapMeta) {
       const gapMeta = gateGapMeta;
       const editedRel = edited.filter((p) => p.startsWith(vAbs + "/")).map((p) => p.slice(vAbs.length + 1));
@@ -6244,18 +6365,25 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
         const red = ownCheckStillRed(draftRaw, own.only_tests);
         if (red === null) ownUnjudged = true; else ownRed = red;
         ownRan = true;
+        // Expected/Received from THIS file's run alone, never from the full-suite log above.
+        ownFailing = parseOwnCheckFailures(draftRaw, own.only_tests);
+        // NO EFFECT VS PARENT (09-30): a RED draft is compared with the parent too. Identical failures (names and
+        // Expected/Received) mean the draft's edits are not on the path the check exercises; the next attempt is
+        // refused those regions. Cached per (gap, vessel, base sha, check), so retries on one base run it once.
+        if (red !== null && red.length > 0 && ownFailing.length > 0) {
+          const parent = await ownParentRun(v, vAbs, own, String(pointer.gap?.id ?? ""));
+          ownBaseSha = parent.sha || undefined;
+          ownParentCached = parent.cached;
+          if (parent.raw !== null && ownCheckStillRed(parent.raw, own.only_tests) !== null) ownNoEffect = sameOwnCheckFailures(ownFailing, parseOwnCheckFailures(parent.raw, own.only_tests));
+        }
         // THE CHECK CONTRACT (09-30): a green own check certifies the draft only against the parent. Run the
         // same file on the untouched parent (a detached worktree at HEAD; the draft is uncommitted) and refuse
         // when it was already green there, or when the draft ran fewer assertions. Only when the draft is green,
         // since a red draft is refused already. The audit found 0 of 11 open checks meeting the contract.
         if (red !== null && red.length === 0) {
-          const bwO = `/tmp/fc-own-base-${v.replace(/[^a-zA-Z0-9]+/g, "-")}-${Date.now()}`;
-          const shB = await callTool(toolsEndpoint, "shell", {
-            command: `git -C ${JSON.stringify(vAbs)} worktree prune >/dev/null 2>&1; git -C ${JSON.stringify(vAbs)} worktree add -q --detach ${bwO} HEAD && ln -s ${JSON.stringify(vAbs + "/node_modules")} ${bwO}/node_modules && cd ${bwO} && (timeout 180 env -i PATH="$PATH" HOME="$HOME" NODE_ENV=test TZ=UTC WORKSPACE_ROOT="$(mktemp -d)" bun test ${JSON.stringify("./" + own.test_file)} --timeout 20000 2>&1 || true); cd / && git -C ${JSON.stringify(vAbs)} worktree remove --force ${bwO} >/dev/null 2>&1 || true`,
-            cwd: REPO_ROOT,
-            timeout_sec: 240,
-          });
-          const baseRaw = String((shB.body as { stdout?: unknown })?.stdout ?? "");
+          const parentRun = await ownParentRun(v, vAbs, own, String(pointer.gap?.id ?? ""));
+          ownParentCached = parentRun.cached;
+          const baseRaw = parentRun.raw ?? "";
           ownBaseRed = ownCheckStillRed(baseRaw, own.only_tests);
           contractBreach = checkContractBreach(ownBaseRed, testExpectCount(baseRaw), testExpectCount(draftRaw));
           ownExpects = { base: testExpectCount(baseRaw), draft: testExpectCount(draftRaw) };
@@ -6304,9 +6432,10 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
       passRegressed ? ` | PASSING TESTS DISAPPEARED: ${basePass} -> ${curPass} (a draft must not delete coverage or break module load to go green)` : "",
       summaryMissing ? ` | TEST SUITE PRODUCED NO SUMMARY on two runs (baseline passed ${basePass}; retry rc ${String(summaryRetryRc)}${summaryRetryRc === "124" || summaryRetryRc === "137" ? " = timed out or killed" : summaryRetryRc === "0" ? " = the suite exited early" : ""}): this draft cannot be verified` : "",
     ].join(""));
-    return { vessel: v, errors: ok ? 0 : "verify", exit_code: tcExit, ok, output: (raw + detail).trim() };
+    const stage: FailStage | null = ok ? null : !installOk ? "install" : !dryRunOk ? "resolve" : !tcOk ? "typecheck" : sdExit !== 0 ? "shape-dispatch" : !testOk ? "tests" : "own_check";
+    return { vessel: v, errors: ok ? 0 : "verify", exit_code: tcExit, ok, output: (raw + detail).trim(), stage, ...(ownRan && ownRef ? { own: { test_file: ownRef.test_file, failing: ownFailing, ...(ownNoEffect !== undefined ? { no_effect_vs_parent: ownNoEffect } : {}), ...(ownBaseSha ? { base_sha: ownBaseSha } : {}), ...(ownParentCached ? { parent_cached: ownParentCached } : {}) } } : {}) };
   };
-  let verify: Array<{ vessel: string; errors: number | string; exit_code: number | null; ok: boolean; output: string }> = [];
+  let verify: VerifyResult[] = [];
   if (edited.length > 0 || created.length > 0) { for (const v of touched) verify.push(await runVerify(v)); }
 
   // TYPECHECK-REPAIR loop (2026-06-25). LLM-authored code routinely carries 1-2
@@ -6552,10 +6681,16 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
               const before = lines.slice(0, rlStart - 1);
               const after = lines.slice(rlEnd);
               const next = [...before, ...replacement.split("\n"), ...after].join("\n");
-              if (next !== curContent) {   // empty-diff refusal, same as the op applier
+              const rlBase = preEditContent.get(efAbs) ?? curContent;
+              const rlRefusal = checkOpNoEffect({ path: efNorm, kind: "replace_lines", start_line: rlStart, end_line: rlEnd }, rlBase, priorLessons);
+              if (rlRefusal) {
+                noteNoEffectRefusal("fc-repair replace_lines", rlRefusal);
+              } else if (next !== curContent) {   // empty-diff refusal, same as the op applier
                 if (!preEditContent.has(efAbs) && !created.includes(efAbs)) preEditContent.set(efAbs, curContent);
+                // Recorded in base coordinates only while the file is still the base (else the lines have moved).
                 const w = await callTool(toolsEndpoint, "fs_write", { path: efAbs, content: next });
                 if (w.ok) {
+                  if (rlBase === curContent) repairSpans.push(spanRecord(efNorm, rlBase, rlStart, rlEnd));
                   anyFixed = true;
                   if (!edited.includes(efAbs) && !created.includes(efAbs)) edited.push(efAbs);
                   await recordPostEdit(efAbs);
@@ -6573,10 +6708,15 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
         if (fix?.old_string && efAbs) {
           const cur = await callTool(toolsEndpoint, "fs_read", { path: efAbs });
           const curContent = (cur.body as { content?: unknown })?.content;
-          if (cur.ok && typeof curContent === "string" && curContent.includes(String(fix.old_string))) {
+          const osBase = typeof curContent === "string" ? (preEditContent.get(efAbs) ?? curContent) : "";
+          const osSpan = osBase ? baseSpanOfOp(osBase, { kind: "edit", old_string: String(fix.old_string) }) : null;
+          const osRefusal = osBase ? checkOpNoEffect({ path: efNorm, kind: "edit", old_string: String(fix.old_string) }, osBase, priorLessons) : null;
+          if (osRefusal) {
+            noteNoEffectRefusal("fc-repair edit", osRefusal);
+          } else if (cur.ok && typeof curContent === "string" && curContent.includes(String(fix.old_string))) {
             if (!preEditContent.has(efAbs) && !created.includes(efAbs)) preEditContent.set(efAbs, curContent);
             const w = await callTool(toolsEndpoint, "fs_edit", { path: efAbs, old_string: String(fix.old_string), new_string: String(fix.new_string ?? "") });
-            if (w.ok) { anyFixed = true; if (!edited.includes(efAbs) && !created.includes(efAbs)) edited.push(efAbs); await recordPostEdit(efAbs); }
+            if (w.ok) { if (osSpan) repairSpans.push(spanRecord(efNorm, osBase, osSpan.start, osSpan.end)); anyFixed = true; if (!edited.includes(efAbs) && !created.includes(efAbs)) edited.push(efAbs); await recordPostEdit(efAbs); }
           }
         }
       } catch (err) { console.warn(`[fc-repair] repair round threw for ${fv.vessel}: ${String(err).slice(0, 200)}`); }
@@ -6632,6 +6772,7 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
   // draft defect: it is recorded as env_policy_unreadable with the scope's reason, never as the
   // semantic_reject the classifier falls to when every op applied and verified (09-30, node 2).
   let policyUnreadable: string | null = null;
+  let scopeWithheld = false;
   if (verdict === "FAVORABLE" && (pointer as { directed?: boolean }).directed !== true) {
     try {
       const { autonomyScope, autonomyScopeFloor } = await import("./gap-to-feature.js");
@@ -6643,6 +6784,7 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
           policyUnreadable = floor.unreadable;
           console.log(`[feature-compose] autonomy-scope floor: WITHHELD FAVORABLE - ${policyUnreadable}; failing closed, not a draft defect`);
         } else {
+          scopeWithheld = true;
           console.log(`[feature-compose] autonomy-scope floor: WITHHELD FAVORABLE - autonomous compose touched excluded path(s): ${scopeHits.join(", ")}`);
         }
       }
@@ -7343,6 +7485,18 @@ const earlyAttempt = await Promise.race([
   ) {
     verdict = "UNFAVORABLE";
   }
+  // NO-EFFECT REFUSALS ARE RECORDED, AND A REPEAT ESCALATES (09-30). Every refusal goes on the gap as a
+  // no_effect_region lesson (with the locked region's text sha); a region refused again on the same gap is
+  // handed to the existing decompose/investigate escalation and journaled, never retried silently.
+  let refusalEvidence: Pick<AttemptRecord, "refusals" | "escalation"> | null = null;
+  if (noEffectRefusals.length > 0 && pointer.gap?.id) {
+    const gid = String(pointer.gap.id);
+    const row = ((await readComposeGapRows(gid).catch(() => null)) ?? []).find((r) => String(r.id) === gid) ?? null;
+    const ownLessons = ((row?.classification_metadata ?? pointer.gap.classification_metadata) as Record<string, unknown> | undefined)?.failure_lessons;
+    const escalation = await escalateRepeatedRefusal(row, ownLessons, noEffectRefusals, async (g, why) => (await import("./gap-to-feature.js")).escalateToDecomposition(g, why));
+    refusalEvidence = { refusals: noEffectRefusals, ...(escalation ? { escalation } : {}) };
+  }
+  let refusalsRecorded = false;
   if (verdict !== "FAVORABLE") {
     const envClass = classifyEnvironmentFailure(cutovers);
     const firstTscError = (() => {
@@ -7374,7 +7528,7 @@ const earlyAttempt = await Promise.race([
       const tail = raw.slice(-900);
       return raw.length > 900 ? `…(head truncated; tail follows)\n${tail}` : tail;
     })();
-    const lessonClass = composeLessonClass(envClass, policyUnreadable, applied, verify, String(semantic_gate?.reason ?? ""));
+    const lessonClass = composeLessonClass(envClass, policyUnreadable, applied, verify, String(semantic_gate?.reason ?? ""), scopeWithheld);
     // A compose must never write to a CLOSED gap: the row was fixed or retired, and a rewrite there dropped
     // its top-level closed_reason (11:29, node 1). Re-checked on the fresh read too (it may close mid-compose).
     if (pointer.gap?.id && firstTscError && !gapClosedInStore) {
@@ -7411,14 +7565,20 @@ const earlyAttempt = await Promise.race([
     // Mirror the classifier's precedence exactly so the two can never diverge again.
     const failedApply = applied.find((a) => !a.ok);
     const failedVerify = verify.find((v) => !v.ok);
+    // THE STRUCTURED ATTEMPT RECORD (09-30), written on the gap's failure_lessons beside the prose: where it
+    // failed, the base regions it edited, the own check's failing Expected/Received, and whether the edit had
+    // any effect on that check. The next attempt's prompt shows it and its applier enforces it.
+    const { record: attemptRecord, ownReason } = composeAttemptEvidence(applied, repairSpans, verify, scopeWithheld, policyUnreadable);
+    if (refusalEvidence && lessonClass === "no_effect_region") { Object.assign(attemptRecord, refusalEvidence); refusalsRecorded = true; }
     const lessonReason = String(
       failedApply?.detail
+      ?? ownReason
       ?? (failedVerify ? (failedVerify.output.split("\n").filter((l) => /error TS\d|error:|\(fail\)|expect\(/.test(l)).slice(0, 6).join(" | ") || failedVerify.output) : undefined)
       ?? semantic_gate?.reason
       ?? policyUnreadable
       ?? verdict,
     );
-    await appendComposeLesson(lessonClass, (semantic_gate?.hard_fail === true && semantic_gate?.llm_consulted === false ? "[deterministic] " : "") + lessonReason, [...touched].join(","), pointer.gap);
+    await appendComposeLesson(lessonClass, (semantic_gate?.hard_fail === true && semantic_gate?.llm_consulted === false ? "[deterministic] " : "") + lessonReason, [...touched].join(","), pointer.gap, attemptRecord);
     try {
       const tscText = verify.find((v) => !v.ok)?.output ?? "";
       const failedOpFiles = applied.filter((a) => !a.ok).map((a) => a.path);
@@ -7428,6 +7588,10 @@ const earlyAttempt = await Promise.race([
         appendFileLesson(COMPOSE_FILE_LESSONS_PATH, JSON.stringify({ at: new Date().toISOString(), files: lessonFiles, class: lessonClass, tsc: tscText.slice(0, 2000) }) + "\n");
       }
     } catch { /* per-file lesson write is best-effort */ }
+  }
+  // Recorded on every verdict: a compose can end FAVORABLE after fc-repair had an edit refused.
+  if (refusalEvidence && !refusalsRecorded) {
+    await appendComposeLesson("no_effect_region", noEffectRefusals.map((r) => `NO-EFFECT REGION REFUSED ${r.path}:${r.start}-${r.end} (locked ${r.region_start}-${r.region_end})`).join("\n"), [...touched].join(","), pointer.gap, { stage: "apply", edited_spans: [], ...refusalEvidence });
   }
   // Persist the compose report as a durable artifact (mirrors gap-to-feature's PROPOSALS_DIR reports). Never fails the compose.
   try {

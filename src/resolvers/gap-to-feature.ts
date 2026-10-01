@@ -2,6 +2,7 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renam
 import { join } from "node:path";
 import type { ResolverResult } from "./types.js";
 import { resolveFeatureCompose, priorAttemptFeedbackBlock, readParkedLanding } from "./feature-compose.js";
+import { attemptEvidenceBlock, explicitLineHint } from "./retry-evidence.js";
 
 // TYPE AUGMENTATION — allow callers to pass an optional 'directed' flag through the
 // FeatureCompose pointer. feature-compose reads it via a local cast
@@ -660,7 +661,7 @@ export async function decomposeGap(
   const parentCheckAsk = opts.parentCheck
     ? `\n\nFIRST, "parent_check": ONE machine check for THIS GAP ITSELF that FAILS on today's tree because of this defect and passes once the defect is fixed. Two forms only. (a) an EXISTING test that fails today because of this defect: {"evidence_resolve":{"shape":"test_suite","input":{"vessel":"repos/${siteVessel || "<vessel>"}","test_file":"<a path from TEST FILES>","only_tests":["<an exact title from EXISTING TESTS>"]},"zero_field":"requested_not_passing"}}. (b) an ADVERTISED READ SHAPE whose answer has a numeric field counting this defect (above 0 today, 0 after the fix): {"evidence_resolve":{"shape":"<shape>","input":{},"zero_field":"<field>"}}. Never a word or literal check, never a write shape, never a test or shape you would have to create. The check is run before it is kept and is discarded unless it fails today. If no such check exists, "parent_check": null.`
     : "";
-  const prompt = `A substrate gap could not be closed by one single-file code change. Decompose it into 1 to 3 SMALL steps. Each step changes exactly ONE existing source file and has a machine-checkable falsifier.\n\nGAP ${parentId}:\n${String(parent.summary ?? "").slice(0, 1500)}\n\nITS FALSIFIER: ${JSON.stringify(predicate).slice(0, 600)}\n\nWHY ATTEMPTS FAILED (most recent last):\n${lessons || "(none recorded)"}\n\nEDIT SITE ${site || "(none)"} (excerpt):\n${excerpt}${vocabularyBlock}${parentCheckAsk}\n\nRespond with ONLY JSON: {${opts.parentCheck ? `"parent_check":{"evidence_resolve":{...}} or null,` : ""}"steps":[{"edit_site":"repos/<vessel>/src/<file>","change":"<one sentence>","falsifier":{"evidence_resolve":{"shape":"<shape>","input":{},"zero_field":"<numeric field in its answer that counts this defect: above 0 today, 0 after the change>"}} OR {"expected_literal":"<identifier the change introduces>","reader":"<existing function in that file that will read or call it>"}}],"cannot_falsify":"<only if no step can be given a machine check>"}\nRules: a shape falsifier must name a shape that ALREADY exists and answers today (it currently reports this defect and stops reporting it after the change); a shape the change itself would introduce cannot be a falsifier — for new behaviour use expected_literal with a reader; the reader must be an existing FUNCTION in that file that is called on a live path and will call or read the literal (not a type, interface or comment); never propose a logging-only, comment-only or observation-only step; never propose removing, weakening or silencing a detector or check; each step must change live behaviour ON ITS OWN when landed alone — never a step that only adds a helper, function or constant for a later step to call (a new function nothing calls is refused as hollow); when the same fix is needed at several sites, make each step fix ONE site completely, inline, the way any site that already does it correctly does; the steps together must close the gap.`;
+  const prompt = `A substrate gap could not be closed by one single-file code change. Decompose it into 1 to 3 SMALL steps. Each step changes exactly ONE existing source file and has a machine-checkable falsifier.\n\nGAP ${parentId}:\n${String(parent.summary ?? "").slice(0, 1500)}\n\nITS FALSIFIER: ${JSON.stringify(predicate).slice(0, 600)}\n\nWHY ATTEMPTS FAILED (most recent last):\n${lessons || "(none recorded)"}\n${attemptEvidenceBlock(meta.failure_lessons)}\n\nEDIT SITE ${site || "(none)"} (excerpt):\n${excerpt}${vocabularyBlock}${parentCheckAsk}\n\nRespond with ONLY JSON: {${opts.parentCheck ? `"parent_check":{"evidence_resolve":{...}} or null,` : ""}"steps":[{"edit_site":"repos/<vessel>/src/<file>","change":"<one sentence>","falsifier":{"evidence_resolve":{"shape":"<shape>","input":{},"zero_field":"<numeric field in its answer that counts this defect: above 0 today, 0 after the change>"}} OR {"expected_literal":"<identifier the change introduces>","reader":"<existing function in that file that will read or call it>"}}],"cannot_falsify":"<only if no step can be given a machine check>"}\nRules: a shape falsifier must name a shape that ALREADY exists and answers today (it currently reports this defect and stops reporting it after the change); a shape the change itself would introduce cannot be a falsifier — for new behaviour use expected_literal with a reader; the reader must be an existing FUNCTION in that file that is called on a live path and will call or read the literal (not a type, interface or comment); never propose a logging-only, comment-only or observation-only step; never propose removing, weakening or silencing a detector or check; each step must change live behaviour ON ITS OWN when landed alone — never a step that only adds a helper, function or constant for a later step to call (a new function nothing calls is refused as hollow); when the same fix is needed at several sites, make each step fix ONE site completely, inline, the way any site that already does it correctly does; the steps together must close the gap.`;
   let raw = "";
   try {
     raw = opts.deps?.llm ? await opts.deps.llm(prompt) : await defaultDecomposeLlm(prompt);
@@ -1181,6 +1182,13 @@ export function specFromGap(
           // plugin) does not and cannot. Prefer the LAST occurrence: these views build a
           // compact row first and the expanded detail later, and a complaint about content
           // legibility is about the rendered detail.
+          // AN EXPLICIT "~l.NNN[-MMM]" IN THE GAP IS THE AUTHOR'S STATEMENT OF THE SITE (09-30): it outranks the
+          // region literal and the first-symbol match below, which grounded the drain gap's 9 drafts elsewhere
+          // while its summary said ~l.249-264.
+          if (startLine === 0) {
+            const hinted = explicitLineHint(String(summary));
+            if (hinted && hinted.start <= liveLines.length) { startLine = hinted.start; console.log(`[gap-to-feature] explicit line hint: ${firstTarget} grounded at line ${startLine}`); }
+          }
           if (startLine === 0) {
             const region = String(meta.region ?? "").trim() || (() => { const t = String(siteStr).trim().split(" ")[0] ?? ""; const ci = t.indexOf(":"); const nm = ci >= 0 ? t.slice(ci + 1) : ""; return Number.isNaN(Number(nm)) ? (nm.startsWith("/") ? nm.slice(1) : nm) : ""; })();
             if (region) {
@@ -4292,6 +4300,67 @@ export function shouldNarrowForChronicFailure(failedAttempts: number, meta: Reco
   return failedAttempts >= 3 && !meta.parent_gap_id && !meta.re_commit && !meta.source_gap_id;
 }
 
+/**
+ * ESCALATE A STUCK GAP: decomposition first, the free-text investigation walk only when no valid step could be
+ * produced. Reached when a gap reaches the chronic-failure threshold, and when one region of a gap is refused
+ * twice by the no-effect constraint (feature_compose). Reads the autonomous_pick lease and the spend envelope,
+ * because it is autonomous spending even after a DIRECTED compose. Always journaled; returns what it did.
+ */
+export async function escalateToDecomposition(gap: Record<string, unknown>, why: string): Promise<string> {
+  const parentId = String(gap.id ?? "");
+  const parentSummary = String(gap.summary ?? gap.title ?? "");
+  if (!parentId) return "not dispatched: no gap id";
+  // The investigation walk is autonomous spending even when a DIRECTED compose (gap_id)
+  // failed, and directed composes skip the pre-selection block, so this dispatch reads the
+  // same autonomous_pick lease and spend envelope as auto-pick (value-per-cost-selection
+  // 4.2: a siteless gap family was re-walked here 17 times an hour with autonomy held).
+  let invHold = "";
+  try {
+    const { resolveMaintenanceLease } = await import("./maintenance-lease.js");
+    const invLease = (await resolveMaintenanceLease({ type: "maintenanceLease", name: "autonomous_pick" })).body as { held?: boolean; holder?: string } | undefined;
+    if (invLease?.held === true) invHold = "autonomous_pick lease held by " + String(invLease.holder);
+  } catch { /* an unreadable lease fails open, as in the pre-selection block */ }
+  const invEnvelope = invHold ? null : await spendEnvelopeAllows();
+  if (invEnvelope && !invEnvelope.allow) invHold = "spend envelope " + invEnvelope.reason;
+  if (invHold) {
+    console.log(`[gap-to-feature] investigation of ${parentId} (${why}) NOT dispatched: ${invHold}`);
+    return "not dispatched: " + invHold;
+  }
+  // ONE DECOMPOSITION PER GAP (gap_falsify: 606 decompositions on one gap). The STORED row decides, read fresh
+  // here (a caller's copy predates any decomposition since). Already decomposed: never decomposed again; when that
+  // decomposition wrote steps they stand and nothing is dispatched, otherwise only the investigation walk runs.
+  const fresh = await readGapFresh(parentId);
+  if (!fresh) {
+    console.log(`[gap-to-feature] escalation of ${parentId} (${why}) NOT dispatched: the stored row could not be read`);
+    return "not dispatched: the stored row could not be read";
+  }
+  const freshMeta = (fresh.classification_metadata ?? fresh.metadata ?? {}) as Record<string, unknown>;
+  const decomposedAt = freshMeta.decomposed_at ? String(freshMeta.decomposed_at) : "";
+  if (decomposedAt) {
+    const prior = freshMeta.decomposition as { children?: unknown } | undefined;
+    console.log(`[gap-to-feature] ${parentId} already decomposed at ${decomposedAt}; not decomposed again`);
+    if (Array.isArray(prior?.children) && prior!.children.length > 0) return `not dispatched: already decomposed at ${decomposedAt}`;
+  }
+  console.log(`[gap-to-feature] escalating ${parentId} (${why}): ${decomposedAt ? "investigation (already decomposed, no step written)" : "decomposition, then investigation if no step is valid"}`);
+  void (async () => {
+    // DECOMPOSITION FIRST (contained-self-development 6.3): structured, falsifiable child steps;
+    // the free-text investigation walk only when no valid step could be produced.
+    if (!decomposedAt) {
+      const decomp = await decomposeGap(gap).catch((e: unknown) => ({ written: [] as string[], reason: "decompose threw: " + String(e) }));
+      if (decomp.written.length > 0) return;
+    }
+    await fetch(GOAL_HOST_VESSEL_ENDPOINT + "/run-goal", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...(METABOB_API_KEY ? { Authorization: "ApiKey " + METABOB_API_KEY } : {}) },
+      body: JSON.stringify({
+        goal: "investigate and decompose gap " + parentId + ": " + parentSummary.replace(/^(?:Close substrate gap [\w:.!-]+:\s*)+/, "").replace(/^(?:investigate and decompose (?:gap|goal)[:\s]+(?:[\w:.!-]+[:\s]+)?)+/i, "").slice(0, 400).replace(/^(.{400})$/s, (_m, t) => t.replace(/\s\S*$/, "")),
+        tags: ["escalated_from:" + parentId],
+      }),
+    }).catch(() => { });
+  })();
+  return decomposedAt ? `dispatched: investigation (already decomposed at ${decomposedAt}, no step written)` : "dispatched: decomposition, then investigation";
+}
+
 // Exported for unit test only (the investigation caller's one-decomposition-per-gap guard). No call-site change.
 export async function bumpFailedAttempts(gap: Record<string, unknown>, opts: { surprise?: boolean; predictedP?: number } = {}): Promise<void> {
   try {
@@ -4394,44 +4463,7 @@ export async function bumpFailedAttempts(gap: Record<string, unknown>, opts: { s
         const childId = String((childRecord as Record<string,unknown>).id ?? "");
         console.log(`[gap-to-feature] emitted narrowed child gap for chronically-stuck gap ${parentId}: ${childId}`);
         }
-        // The investigation walk is autonomous spending even when a DIRECTED compose (gap_id)
-        // failed, and directed composes skip the pre-selection block, so this dispatch reads the
-        // same autonomous_pick lease and spend envelope as auto-pick (value-per-cost-selection
-        // 4.2: a siteless gap family was re-walked here 17 times an hour with autonomy held).
-        let invHold = "";
-        try {
-          const { resolveMaintenanceLease } = await import("./maintenance-lease.js");
-          const invLease = (await resolveMaintenanceLease({ type: "maintenanceLease", name: "autonomous_pick" })).body as { held?: boolean; holder?: string } | undefined;
-          if (invLease?.held === true) invHold = "autonomous_pick lease held by " + String(invLease.holder);
-        } catch { /* an unreadable lease fails open, as in the pre-selection block */ }
-        const invEnvelope = invHold ? null : await spendEnvelopeAllows();
-        if (invEnvelope && !invEnvelope.allow) invHold = "spend envelope " + invEnvelope.reason;
-        if (invHold) console.log(`[gap-to-feature] investigation of ${parentId} NOT dispatched: ${invHold}`);
-        else void (async () => {
-          // DECOMPOSITION FIRST (contained-self-development 6.3): structured, falsifiable child steps;
-          // the free-text investigation walk only when no valid step could be produced.
-          // ONE DECOMPOSITION PER GAP, HERE TOO (gap_falsify v2). The scan's pass honoured decomposed_at; this
-          // caller did not, so every failed attempt paid another LLM call on the same gap (606 on one gap). The
-          // stored row decides (the picked copy predates any decomposition since). A decomposition that wrote
-          // steps stands, so the walk is skipped as it was when those steps were written.
-          const freshMeta = (fresh.classification_metadata ?? fresh.metadata ?? {}) as Record<string, unknown>;
-          if (freshMeta.decomposed_at) {
-            const prior = freshMeta.decomposition as { children?: unknown } | undefined;
-            console.log(`[gap-to-feature] ${parentId} already decomposed at ${String(freshMeta.decomposed_at)}; not decomposed again`);
-            if (Array.isArray(prior?.children) && prior!.children.length > 0) return;
-          } else {
-            const decomp = await decomposeGap(gap).catch((e: unknown) => ({ written: [] as string[], reason: "decompose threw: " + String(e) }));
-            if (decomp.written.length > 0) return;
-          }
-          await fetch(GOAL_HOST_VESSEL_ENDPOINT + "/run-goal", {
-          method: "POST",
-          headers: { "Content-Type": "application/json", ...(METABOB_API_KEY ? { Authorization: "ApiKey " + METABOB_API_KEY } : {}) },
-          body: JSON.stringify({
-            goal: "investigate and decompose gap " + parentId + ": " + parentSummary.replace(/^(?:Close substrate gap [\w:.!-]+:\s*)+/, "").replace(/^(?:investigate and decompose (?:gap|goal)[:\s]+(?:[\w:.!-]+[:\s]+)?)+/i, "").slice(0, 400).replace(/^(.{400})$/s, (_m, t) => t.replace(/\s\S*$/, "")),
-            tags: ["escalated_from:" + parentId],
-          }),
-        }).catch(() => { });
-        })();
+        await escalateToDecomposition(gap, "chronic failure");
       } catch (err) {
         // Child gap emission is best-effort; never block the parent update.
         console.warn(`[bumpFailedAttempts] child gap emit failed: ${err instanceof Error ? err.message : String(err)}`);

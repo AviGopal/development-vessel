@@ -14,6 +14,7 @@ import { describe, it, expect, beforeAll, afterAll } from "bun:test";
 import { mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { openPolicyAnswer } from "./explicit-open-policy.fixture.js";
 
 const ROOT = join(tmpdir(), `admit-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 const PROPOSALS = join(ROOT, "proposals");
@@ -35,20 +36,20 @@ writeFileSync(
 );
 
 // Silence the best-effort retire write (resolveSubstrateGapWrite) so it never hits the network.
-// The policy reads (autonomyScope, spendEnvelope) fail closed when they cannot be read, so this fixture answers
-// them as a read that SUCCEEDS and finds no record: one poolImpulse producer holding no policy impulses.
-const noPolicyRecords = (body: { pointer?: { type?: string; shape?: string }; impulse?: { type?: string } }): Response | null => {
+// The policy reads (autonomyScope, spendEnvelope) fail closed when they cannot be read or hold no record, so this
+// fixture answers them as a read that SUCCEEDS and finds the explicit open records (unrestricted, uncapped).
+const explicitOpenPolicy = (body: { pointer?: { type?: string; shape?: string }; impulse?: { type?: string } }): Response | null => {
   if (body?.pointer?.type === "vesselCapability" && body.pointer.shape === "poolImpulse") {
     return Response.json({ content: { shape: "poolImpulse", vessels: [{ vesselId: "pool-fixture", endpoint: "http://pool.fixture", resolve_endpoint: "/v2/impulses/resolve", origin: "local" }], found: true } });
   }
-  if (body?.impulse?.type === "poolImpulse") return Response.json({ body: { impulses: [] } });
+  if (body?.impulse?.type === "poolImpulse") return openPolicyAnswer(body.impulse.shape);
   return null;
 };
 const originalFetch = globalThis.fetch;
 beforeAll(() => {
   globalThis.fetch = (async (_input: unknown, init?: RequestInit) => {
     const body = init?.body ? JSON.parse(String(init.body)) : {};
-    return noPolicyRecords(body) ?? new Response("{}", { status: 200 });
+    return explicitOpenPolicy(body) ?? new Response("{}", { status: 200 });
   }) as typeof fetch;
   (mod as { __resetPolicyReadsForTests: () => void }).__resetPolicyReadsForTests();
 });

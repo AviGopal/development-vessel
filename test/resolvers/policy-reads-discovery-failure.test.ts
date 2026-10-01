@@ -122,7 +122,7 @@ describe("autonomy scope read through the shared discovery client", () => {
 
 describe("spend envelope read through the shared discovery client", () => {
   it("a lookup failure reads 'lookup failed', and once an envelope was seen it still refuses", async () => {
-    poolRecords = [{ shape: "spendEnvelope", updated_at: "2026-09-30T20:00:00Z", body: { reason: "no cap set" } }];
+    poolRecords = [{ shape: "spendEnvelope", updated_at: "2026-09-30T20:00:00Z", body: { uncapped: true, reason: "no cap set" } }];
     expect((await spendEnvelopeAllows()).allow).toBe(true);
     discoveryMode = "timeout";
     advance(31_000);

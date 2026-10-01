@@ -4,16 +4,17 @@ import { __resetPolicyReadsForTests } from "../../src/resolvers/gap-to-feature.j
 import { writeFileSync, mkdirSync, rmSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { openPolicyAnswer } from "./explicit-open-policy.fixture.js";
 
-// The spend envelope fails closed when it cannot be read, so discovery here names one poolImpulse producer and the
-// envelope read SUCCEEDS with no spendEnvelope record (no cap). Every other request goes to `inner` unchanged.
+// The spend envelope fails closed when it cannot be read or holds no record, so discovery here names one poolImpulse
+// producer and the envelope read SUCCEEDS with an explicit {uncapped: true} record. Every other request goes to `inner` unchanged.
 function withPolicyDiscovery(inner: (input: any, init?: any) => Promise<Response>): typeof fetch {
   return (async (input: any, init?: any) => {
     const body = init?.body ? JSON.parse(String(init.body)) : {};
     if (body?.pointer?.type === "vesselCapability" && body.pointer.shape === "poolImpulse") {
       return Response.json({ content: { shape: "poolImpulse", vessels: [{ vesselId: "pool-fixture", endpoint: "http://pool.fixture", resolve_endpoint: "/v2/impulses/resolve", origin: "local" }], found: true } });
     }
-    if (body?.impulse?.type === "poolImpulse" && body.impulse.shape === "spendEnvelope") return Response.json({ body: { impulses: [] } });
+    if (body?.impulse?.type === "poolImpulse" && body.impulse.shape === "spendEnvelope") return openPolicyAnswer(body.impulse.shape);
     return inner(input, init);
   }) as unknown as typeof fetch;
 }

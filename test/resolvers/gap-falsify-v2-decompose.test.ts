@@ -10,6 +10,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "bun:test"
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { openPolicyAnswer } from "./explicit-open-policy.fixture.js";
 
 const ROOT = join(tmpdir(), `gf2-decompose-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 if (!process.env["WORKSPACE_ROOT"]) process.env["WORKSPACE_ROOT"] = ROOT;
@@ -50,7 +51,7 @@ function install(): void {
       const vessels = ADVERTISED.has(body.pointer.shape) ? [{ vesselId: "dv", endpoint: "http://node.test", resolve_endpoint: "/v2/impulses/resolve", origin: "local" }] : [];
       return Response.json({ content: { shape: body.pointer.shape, vessels, found: vessels.length > 0 } });
     }
-    if (body?.impulse?.type === "poolImpulse") return Response.json({ body: { impulses: [] } });
+    if (body?.impulse?.type === "poolImpulse") return openPolicyAnswer(body.impulse.shape);
     if (url === FWD) {
       const fp = body?.impulse?.pointer ?? {};
       if (fp.type === "substrateGap") return Response.json({ shape: "substrateGap", body: { gaps: [] } });

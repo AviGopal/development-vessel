@@ -160,9 +160,11 @@ export interface SelfFactRow {
   site_pattern?: string; pathspecs?: string[];
   /** typed_seam_sites: a repo whose origin/dev was last fetched or moved longer ago than this reads unobserved (default 6). */
   max_ref_age_hours?: number; super_repo_pathspecs?: string[]; exclude_repos?: string[]; seam_files?: string[];
-  /** pool_record_pin: the pool shape whose newest open record is pinned, the string-array body field compared as a
-   *  set, and the operator-seeded value per node (thisNode()). A node with no entry is not judged (unobserved). */
-  pool_shape?: string; body_field?: string; expected_by_node?: Record<string, string[]>;
+  /** pool_record_pin: the pool shape whose newest open record is pinned, and the operator-seeded value per node
+   *  (thisNode()). A node's value is either a string array (compared as a set of endpoints with `body_field`), or an
+   *  object of body fields, each compared on its own: an array as a set of exact strings, anything else by equality.
+   *  Fields the object does not name (a reason text) are not compared. A node with no entry is not judged (unobserved). */
+  pool_shape?: string; body_field?: string; expected_by_node?: Record<string, string[] | PinnedFields>;
   /** The nodes (thisNode()) this row runs on; absent = every node of its profiles. A node not listed SKIPS the row
    *  (reported like a profile skip) rather than reading it unobserved, so a row about one substrate's nodes in this
    *  fleet-shared file never turns another substrate's whole run unobserved. */
@@ -394,6 +396,42 @@ export function pinDiff(expected: readonly string[], actual: readonly string[]):
   return { added: [...a].filter((x) => !e.has(x)).sort(), removed: [...e].filter((x) => !a.has(x)).sort() };
 }
 export const POOL_PIN_CANARY = "http://canary.planted-by-self-fact-reconcile.invalid:1";
+/** A pinned record body, field by field (pool_record_pin's object form). */
+export type PinnedFields = Record<string, string[] | string | number | boolean | null>;
+/** Per-field differences between a pinned object and a record body: a set field names the entries added and
+ *  removed (exact strings: a path set is never URL-normalised, `dir/` and `dir` are different scopes); a scalar
+ *  names both values. Pinned null matches an absent field. Empty when every pinned field agrees. */
+export function pinFieldDiff(pinned: PinnedFields, body: Record<string, unknown>): string[] {
+  const out: string[] = [];
+  for (const [f, want] of Object.entries(pinned)) {
+    const got = body[f];
+    if (Array.isArray(want)) {
+      const actual = Array.isArray(got) ? got.filter((e): e is string => typeof e === "string").map((e) => e.trim()) : [];
+      const e = new Set(want.map((x) => String(x).trim())), a = new Set(actual);
+      const added = [...a].filter((x) => !e.has(x)).sort(), removed = [...e].filter((x) => !a.has(x)).sort();
+      if (!Array.isArray(got)) out.push(`${f}: expected a set of ${e.size}, found ${JSON.stringify(got ?? null)}`);
+      else if (added.length > 0 || removed.length > 0) out.push(`${f}: added [${added.join(", ")}], removed [${removed.join(", ")}]`);
+    } else if ((want === null && got !== undefined && got !== null) || (want !== null && got !== want)) {
+      out.push(`${f}: expected ${JSON.stringify(want)}, found ${JSON.stringify(got ?? null)}`);
+    }
+  }
+  return out;
+}
+/** pool_record_pin's must-fail control for the object form: the body read with a planted entry in each set field
+ *  and each scalar field perturbed. Returns the planted body and the fields that were planted. */
+function plantPinnedFields(pinned: PinnedFields, body: Record<string, unknown>): { planted: Record<string, unknown>; fields: string[] } {
+  const planted: Record<string, unknown> = { ...body };
+  const fields: string[] = [];
+  for (const [f, want] of Object.entries(pinned)) {
+    const got = body[f];
+    if (Array.isArray(want)) planted[f] = [...(Array.isArray(got) ? got : []), "canary-path-planted-by-self-fact-reconcile/"];
+    else if (typeof want === "number") planted[f] = (typeof got === "number" ? got : want) + 1;
+    else if (typeof want === "boolean") planted[f] = !(typeof got === "boolean" ? got : want);
+    else planted[f] = `${String(got ?? want)}-canary`;
+    fields.push(f);
+  }
+  return { planted, fields };
+}
 
 const FACTS: Record<string, FactFn> = {
   /**
@@ -410,26 +448,47 @@ const FACTS: Record<string, FactFn> = {
     const unread = (note: string): SelfFactResult => ({ fact, source_read: false, copies_read: 0, divergences: [], note });
     const shape = String(row.pool_shape ?? "");
     const field = String(row.body_field ?? "");
-    if (!shape || !field) return unread(`row ${row.id}: pool_shape or body_field missing`);
     const pinned = row.expected_by_node?.[node];
-    if (!Array.isArray(pinned) || !pinned.every((e) => typeof e === "string")) return unread(`row ${row.id}: no pinned ${shape} value for node ${node}, so this node is not judged`);
+    // Two forms: a string array is one endpoint set at `body_field` (substrateNodes); an object pins named body
+    // fields (autonomyScope's excluded_paths and require_falsifier_classes, spendEnvelope's cap and pause).
+    const listForm = Array.isArray(pinned);
+    if (!shape || (listForm && !field)) return unread(`row ${row.id}: pool_shape or body_field missing`);
+    if (listForm ? !(pinned as unknown[]).every((e) => typeof e === "string") : (pinned === null || typeof pinned !== "object" || Object.keys(pinned).length === 0)) return unread(`row ${row.id}: no pinned ${shape} value for node ${node}, so this node is not judged`);
     let rec: { id?: string; updated_at?: string; body?: unknown } | null;
     try { rec = await poolPinDeps.readNewest(shape); } catch (err) { return unread(`pool store unreadable on node ${node}: ${String(err)}`); }
-    const raw = rec ? (rec.body as Record<string, unknown> | null | undefined)?.[field] : undefined;
-    const actual = Array.isArray(raw) ? raw.filter((e): e is string => typeof e === "string") : [];
+    const body = (rec?.body && typeof rec.body === "object" ? rec.body : {}) as Record<string, unknown>;
     const out: SelfFactDivergence[] = [];
     const describe = (d: { added: string[]; removed: string[] }) => `added [${d.added.join(", ")}], removed [${d.removed.join(", ")}]`;
+    const seeded = listForm ? `[${(pinned as string[]).join(", ")}]` : JSON.stringify(pinned);
+    const copy = () => `pool ${shape}/${String(rec?.id ?? "?")}@${node} (updated ${String(rec?.updated_at ?? "?")})`;
+    let entries = 0;
     if (!rec) {
-      out.push({ fact, key: `${node}-missing`, node, source: `${row.id} pinned value`, copy: `pool ${shape}@${node}`, detail: `node ${node} holds no open ${shape} record; the operator-seeded value is [${pinned.join(", ")}]. Without it this node's policy reads take only local producers.`, canary: false });
+      out.push({ fact, key: `${node}-missing`, node, source: `${row.id} pinned value`, copy: `pool ${shape}@${node}`, detail: `node ${node} holds no open ${shape} record; the operator-seeded value is ${seeded}. A trust-root record a node does not hold is read as absent there (closed for autonomyScope and spendEnvelope, local producers only for substrateNodes).`, canary: false });
+    } else if (listForm) {
+      const raw = body[field];
+      const actual = Array.isArray(raw) ? raw.filter((e): e is string => typeof e === "string") : [];
+      entries = actual.length;
+      const d = pinDiff(pinned as string[], actual);
+      if (d.added.length > 0 || d.removed.length > 0) out.push({ fact, key: `${node}-mismatch`, node, source: `${row.id} pinned value`, copy: copy(), detail: `${shape}.${field} on node ${node} differs from the operator-seeded value: ${describe(d)}`, canary: false });
     } else {
-      const d = pinDiff(pinned, actual);
-      if (d.added.length > 0 || d.removed.length > 0) out.push({ fact, key: `${node}-mismatch`, node, source: `${row.id} pinned value`, copy: `pool ${shape}/${String(rec.id ?? "?")}@${node} (updated ${String(rec.updated_at ?? "?")})`, detail: `${shape}.${field} on node ${node} differs from the operator-seeded value: ${describe(d)}`, canary: false });
+      entries = Object.keys(pinned as PinnedFields).length;
+      const d = pinFieldDiff(pinned as PinnedFields, body);
+      if (d.length > 0) out.push({ fact, key: `${node}-mismatch`, node, source: `${row.id} pinned value`, copy: copy(), detail: `${shape} on node ${node} differs from the operator-seeded value: ${d.join("; ")}`, canary: false });
     }
+    // The must-fail control runs on every node that judges this row (each node's own run plants its own copy).
     if (canary) {
-      const planted = pinDiff(pinned, [...actual, POOL_PIN_CANARY]);
-      if (planted.added.includes(pinKey(POOL_PIN_CANARY))) out.push({ fact, key: `${row.id}-canary`, node, source: `${row.id} pinned value`, copy: "planted copy", detail: `must-fail control: a planted endpoint was reported as ${describe(planted)}`, canary: true });
+      if (listForm) {
+        const raw = body[field];
+        const actual = Array.isArray(raw) ? raw.filter((e): e is string => typeof e === "string") : [];
+        const planted = pinDiff(pinned as string[], [...actual, POOL_PIN_CANARY]);
+        if (planted.added.includes(pinKey(POOL_PIN_CANARY))) out.push({ fact, key: `${row.id}-canary`, node, source: `${row.id} pinned value`, copy: "planted copy", detail: `must-fail control on node ${node}: a planted endpoint was reported as ${describe(planted)}`, canary: true });
+      } else {
+        const { planted, fields } = plantPinnedFields(pinned as PinnedFields, body);
+        const reported = pinFieldDiff(pinned as PinnedFields, planted);
+        if (fields.every((f) => reported.some((r) => r.startsWith(`${f}: `)))) out.push({ fact, key: `${row.id}-canary`, node, source: `${row.id} pinned value`, copy: "planted copy", detail: `must-fail control on node ${node}: every pinned field planted (${fields.join(", ")}) was reported`, canary: true });
+      }
     }
-    return { fact, source_read: true, copies_read: rec ? 1 : 0, divergences: out, note: `node ${node}: ${shape} ${rec ? `${actual.length} entr(ies)` : "absent"}; pinned ${pinned.length}` };
+    return { fact, source_read: true, copies_read: rec ? 1 : 0, divergences: out, note: `node ${node}: ${shape} ${rec ? (listForm ? `${entries} entr(ies)` : `${entries} pinned field(s) compared`) : "absent"}; pinned ${listForm ? (pinned as string[]).length : entries}` };
   },
   /**
    * A unit's journal must not show a known defect's signature: ONE generic instrument parameterised by its row

@@ -3597,7 +3597,13 @@ export function composeLessonClass(envClass: string | null, policyUnreadable: st
   // classifier would fall through to semantic_reject for it, the same mislabel as the unreadable case.
   return envClass ?? (policyUnreadable ? "env_policy_unreadable" : scopeWithheld ? "scope_refused" : classifyComposeFailure(appliedOps, verifyResults, semanticReason));
 }
-async function appendComposeLesson(cls: string, reason: string, vessels: string, gap?: { id?: string; summary?: unknown; category?: unknown; source?: unknown; detected_at?: unknown; classification_metadata?: Record<string, unknown> }, attempt?: AttemptRecord): Promise<void> {
+/** The diagnostic lines of a lesson reason (stored cut to 200 chars as `reason`, 1500 as `raw_excerpt`). */
+export function lessonDiag(reason: string): string {
+  // Expected:/Received: lines are the failure's data; the filter used to drop them.
+  const diagLines = reason.split("\n").filter((l) => !l.trim().startsWith("(pass)") && /error TS\d+|\berror\b|\d+ fail|FAIL|Error:|^\s*\(fail\)|\bExpected\b|\bReceived\b/i.test(l));
+  return diagLines.length > 0 ? diagLines.join("\n") : reason;
+}
+export async function appendComposeLesson(cls: string, reason: string, vessels: string, gap?: { id?: string; summary?: unknown; category?: unknown; source?: unknown; detected_at?: unknown; classification_metadata?: Record<string, unknown> }, attempt?: AttemptRecord): Promise<void> {
   // operator_approved is operator authority: code never sets it (block from d8c93b4 removed).
   if (gap && gap.id) {
     try {
@@ -3605,9 +3611,7 @@ async function appendComposeLesson(cls: string, reason: string, vessels: string,
       const meta = (gap.classification_metadata ?? {}) as Record<string, unknown>;
       const lessons = (Array.isArray(meta.failure_lessons) ? meta.failure_lessons : []) as Array<Record<string, unknown>>;
       const reCommit = lessons.some((l) => l.class === cls);
-      // Expected:/Received: lines are the failure's data; the filter used to drop them.
-      const diagLines = reason.split("\n").filter((l) => !l.trim().startsWith("(pass)") && /error TS\d+|\berror\b|\d+ fail|FAIL|Error:|^\s*\(fail\)|\bExpected\b|\bReceived\b/i.test(l));
-      const diag = diagLines.length > 0 ? diagLines.join("\n") : reason;
+      const diag = lessonDiag(reason);
       lessons.push({ at: new Date().toISOString(), class: cls, reason: diag.slice(0, 200), raw_excerpt: diag.slice(0, 1500), ...(attempt ?? {}) });
 
       // Record failure for the lessons that led to this 'cls'
@@ -3666,7 +3670,10 @@ async function appendComposeLesson(cls: string, reason: string, vessels: string,
         : (typeof meta.summary === "string" && (meta.summary as string).trim() ? String(meta.summary) : "");
       const realSource = (typeof gap.source === "string" && gap.source) ? gap.source : "substrate_detected";
       const realDetectedAt = (typeof gap.detected_at === "string" && gap.detected_at) ? gap.detected_at : new Date().toISOString();
-      await resolveSubstrateGapWrite({
+      // THE GAP RECORD IS THE LESSON'S STORE, written first and on its own: it never waits on, or is
+      // skipped by, the concept-db mirror below. A refusal (e.g. the gap store unreachable from this
+      // node) comes back as a structuredError rather than a throw, so it is said, never dropped.
+      const lessonWrite = await resolveSubstrateGapWrite({
         type: "substrateGap_write",
         gap: {
           id: String(gap.id),
@@ -3678,6 +3685,7 @@ async function appendComposeLesson(cls: string, reason: string, vessels: string,
           classification_metadata: meta,
         },
       } as never);
+      if (lessonWrite?.shape === "structuredError") console.warn(`[compose-lessons] gap lesson write REFUSED gap=${String(gap.id)} class=${cls}: ${JSON.stringify(lessonWrite.body).slice(0, 300)}`);
       // RECOMMIT DEPTH CAP (2026-07-27, self-alteration-throughput-zero amplifier). A failed
       // compose files a `recommit-<gap.id>-<cls>` gap → gap-to-feature re-drafts → another
       // compose-report; if it fails again it becomes `recommit-recommit-...` and so on. Measured
@@ -3758,7 +3766,16 @@ async function appendComposeLesson(cls: string, reason: string, vessels: string,
     // Measured on the live fleet: a direct POST of this exact payload to
     // http://127.0.0.1:8260 returns HTTP 200 in 0.043s. The corpus was never unreachable —
     // it was being addressed wrongly.
-    void fetch(`${CONCEPT_DB_ENDPOINT}/v2/impulses/resolve`, {
+    // ADDRESSED THROUGH DISCOVERY, OWN SUBSTRATE ONLY (10-01). The pinned CONCEPT_DB_ENDPOINT default
+    // names a loopback concept-db that a node without one (node 2: concept-db inactive, no env) never
+    // serves, and a peer substrate's concept-db is not this substrate's corpus. Best-effort and AFTER
+    // the gap write above: no producer, or one that does not answer, is "mirror skipped (<reason>)".
+    lastComposeLessonMirror = (async () => {
+      const target = await ownConceptDbResolveUrl("concept_create_write");
+      if (!target.url) { console.log(`[compose-lessons] mirror skipped (${target.why}) class=${cls}`); return; }
+      let resp: Response;
+      try {
+        resp = await fetch(target.url, {
       method: "POST",
       headers,
       // Flat pointer only. The previous body ALSO carried top-level `shape`/`content`/
@@ -3776,24 +3793,37 @@ async function appendComposeLesson(cls: string, reason: string, vessels: string,
         },
       }),
       signal: AbortSignal.timeout(10_000),
-    })
-      // CHECK THE STATUS, NOT JUST THE PROMISE. `.catch()` alone only sees TRANSPORT
-      // failures — a 4xx/5xx resolves normally, so an auth or schema rejection was
-      // discarded in silence. And success was never logged either, so the only
-      // observable state of this mirror was "no news", which is indistinguishable from
-      // "never ran". That is why a corpus stuck at ONE row for 19 days looked healthy:
-      // 5,797 classified failures upstream, no error downstream, and nothing in between
-      // to say which. Log both outcomes so the next person can tell them apart.
-      .then((resp) => {
-        if (!resp.ok) {
-          console.warn(`[compose-lessons] concept-db mirror rejected class=${cls} http=${resp.status}`);
-        } else {
-          console.log(`[compose-lessons] mirrored class=${cls} to concept-db`);
-        }
-      })
-      .catch((err) => console.warn(`[compose-lessons] concept-db mirror failed: ${(err as Error).message}`));
+        });
+      } catch (err) {
+        console.log(`[compose-lessons] mirror skipped (unreachable ${target.url}: ${(err as Error).message}) class=${cls}`);
+        return;
+      }
+      // CHECK THE STATUS, NOT JUST THE PROMISE. A 4xx/5xx resolves normally, so an auth or schema
+      // rejection would be discarded in silence; log both outcomes so they can be told apart.
+      if (!resp.ok) {
+        console.warn(`[compose-lessons] concept-db mirror rejected class=${cls} http=${resp.status}`);
+      } else {
+        console.log(`[compose-lessons] mirrored class=${cls} to concept-db`);
+      }
+    })().catch((err) => console.log(`[compose-lessons] mirror skipped (${(err as Error).message}) class=${cls}`));
   } catch (err) {
-    console.warn(`[compose-lessons] concept-db mirror failed: ${(err as Error).message}`);
+    console.log(`[compose-lessons] mirror skipped (${(err as Error).message}) class=${cls}`);
+  }
+}
+let lastComposeLessonMirror: Promise<void> = Promise.resolve();
+/** Tests only: the concept-db mirror the last appendComposeLesson started (it is never awaited by the compose). */
+export function __lastComposeLessonMirrorForTests(): Promise<void> { return lastComposeLessonMirror; }
+/** The resolve URL of this substrate's own producer of a concept-db shape, through the shared discovery
+ *  client (discoverOwnResolveUrls: a peer substrate's producer never counts). `why` says why there is none. */
+async function ownConceptDbResolveUrl(shape: string): Promise<{ url: string; why?: undefined } | { url: null; why: string }> {
+  try {
+    const { discoverOwnResolveUrls } = await import("./gap-to-feature.js");
+    const r = await discoverOwnResolveUrls(shape);
+    if (!r.ok) return { url: null, why: `${shape} lookup unreadable: ${r.why}` };
+    if (r.urls.length === 0) return { url: null, why: `no own-substrate ${shape} producer${r.foreign > 0 ? `, ${r.foreign} foreign set aside` : ""}` };
+    return { url: r.urls[0]! };
+  } catch (err) {
+    return { url: null, why: `${shape} lookup failed: ${(err as Error).message}` };
   }
 }
 const COMPOSE_FILE_LESSONS_PATH = "/workspace/proposals/compose-file-lessons.jsonl";
@@ -3856,7 +3886,7 @@ export function gapFailureClasses(meta: Record<string, unknown> | undefined): st
   return out;
 }
 
-async function composeLessonsBlock(specText?: string, failureClasses: string[] = []): Promise<string> {
+export async function composeLessonsBlock(specText?: string, failureClasses: string[] = []): Promise<string> {
   // FIRST: semantic recall from concept-db — relevance to the current spec, not
   // JSONL recency. Fails open to the JSONL path when concept-db is down or empty.
   if (specText && specText.trim().length > 0) {
@@ -3864,7 +3894,13 @@ async function composeLessonsBlock(specText?: string, failureClasses: string[] =
       const headers: Record<string, string> = {};
       const apiKey = process.env["METABOB_API_KEY"];
       if (apiKey) headers["Authorization"] = `ApiKey ${apiKey}`;
-      const resp = await fetch(`${DISCOVERY_ENDPOINT}/resolve`, {
+      // OWN SUBSTRATE'S CORPUS ONLY (10-01). This read went to discovery's /resolve, which routes to any
+      // producer it knows: on node 2 (no concept-db of its own) that was a THIRD substrate's concept-db
+      // relayed through node 1, so its "KNOWN FAILURE MODES" were another substrate's. With no own
+      // producer the recall is skipped and the local jsonl below serves it.
+      const target = await ownConceptDbResolveUrl("conceptSearch");
+      if (!target.url) throw new Error(`skipped (${target.why})`);
+      const resp = await fetch(target.url, {
         method: "POST",
         headers: { ...headers, "Content-Type": "application/json" },
         // QUERY BY FAILURE CLASS. The corpus is keyed on these names, so this returns the
@@ -3895,7 +3931,8 @@ async function composeLessonsBlock(specText?: string, failureClasses: string[] =
         }
       }
     } catch (err) {
-      console.warn(`[compose-lessons] concept-db recall failed: ${(err as Error).message}`);
+      const m = (err as Error).message;
+      console.warn(`[compose-lessons] concept-db recall ${m.startsWith("skipped (") ? m : `failed: ${m}`}`);
     }
   }
   console.warn("[compose-lessons] source=fallback=jsonl");
@@ -3956,7 +3993,9 @@ const BASELINE_CACHE_TTL_MS = 2 * 60 * 60 * 1000;
 const baselineCache = new Map<string, { at: number; tsErrors: string[]; testFails: string[]; testPass: number | null }>();
 
 /** One vessel's verify result; `stage` and `own` feed the failed attempt's structured lesson record. */
-export type VerifyResult = { vessel: string; errors: number | string; exit_code: number | null; ok: boolean; output: string; stage?: FailStage | null; constraint_unmet?: MustBeCalledConstraint[]; constraint_unrunnable?: string; own?: { test_file: string; failing: OwnCheckFailure[]; no_effect_vs_parent?: boolean; base_sha?: string; parent_cached?: "hit" | "miss" } };
+export type VerifyResult = { vessel: string; errors: number | string; exit_code: number | null; ok: boolean; output: string; stage?: FailStage | null; constraint_unmet?: MustBeCalledConstraint[]; constraint_unrunnable?: string; own?: { test_file: string; failing: OwnCheckFailure[]; no_effect_vs_parent?: boolean; base_sha?: string; parent_cached?: "hit" | "miss" }; draft?: DraftFailures };
+/** What the pre-land gate blamed on THIS draft (set on a failed runVerify): each list is already net of the parent tree. */
+export type DraftFailures = { own_red: string[]; introduced: string[]; new_ts: string[]; gate_detail: string };
 /** Parent-tree runs of a gap's own check, keyed (gap, vessel, base sha, check). */
 const OWN_PARENT_RUNS = new Map<string, string>();
 
@@ -3982,9 +4021,51 @@ export function composeAttemptEvidence(
     ...(ownV?.own ? { own_check: { test_file: ownV.own.test_file, failing: ownV.own.failing }, ...(ownV.own.no_effect_vs_parent !== undefined ? { no_effect_vs_parent: ownV.own.no_effect_vs_parent } : {}), ...(ownV.own.base_sha ? { base_sha: ownV.own.base_sha } : {}), ...(ownV.own.parent_cached ? { parent_cached: ownV.own.parent_cached } : {}) } : {}),
   };
   const ownReason = failedVerify?.stage === "own_check" && failedVerify.own && failedVerify.own.failing.length > 0
-    ? failedVerify.own.failing.slice(0, 3).map((f) => [`(fail) ${f.name}`, f.expected, f.received].filter(Boolean).join("\n")).join("\n")
+    ? ownFailureLines(failedVerify.own.failing)
     : undefined;
   return { record, ownReason };
+}
+const ownFailureLines = (failing: ReadonlyArray<OwnCheckFailure>): string => failing.slice(0, 3).map((f) => [`(fail) ${f.name}`, f.expected, f.received].filter(Boolean).join("\n")).join("\n");
+
+/**
+ * The lesson reason for a failed verify: THIS draft's failure, never a line already red on the parent tree. In order:
+ * (a) the gap's own check failing on the draft; (b) the tests the gate found the draft introduced (not red at the
+ * parent baseline, reproduced on a second run, not red on a fresh parent run: the gate's own comparison, so it costs
+ * no run); (c) the draft's new tsc errors, the gate's refusal sentence, or the log before its test section. The
+ * suite's (fail) lines are never read: on 09-30 the first one was another gap's falsifier, red on the parent by
+ * design, and it became the lesson of every development-vessel gap (and the key that excluded them as identical).
+ */
+export function draftFailureReason(v: VerifyResult | undefined): string | undefined {
+  if (!v || v.ok) return undefined;
+  const d = v.draft;
+  if (v.own && v.own.failing.length > 0) return ownFailureLines(v.own.failing);
+  if (d && d.own_red.length > 0) return `(fail) the gap's own check${v.own ? ` (${v.own.test_file})` : ""} is still red on this draft: ${d.own_red.slice(0, 5).map((n) => n.replace(/^\(fail\)\s*/, "")).join(" ; ")}`;
+  if (d && d.introduced.length > 0) return d.introduced.slice(0, 5).join("\n");
+  if (d && v.stage === "typecheck" && d.new_ts.length > 0) return d.new_ts.slice(0, 6).join(" | ");
+  if (d && d.gate_detail) return d.gate_detail;
+  if (d && v.stage === "typecheck") return `typecheck failed (TC_EXIT=${String(v.exit_code)}) with no error new against the parent tree`;
+  const testsAt = v.output.indexOf("== tests ==");
+  const head = testsAt >= 0 ? v.output.slice(0, testsAt) : v.output;
+  return head.split("\n").filter((l) => /error TS\d|error:|\(fail\)|expect\(/.test(l)).slice(0, 6).join(" | ") || (testsAt >= 0 ? `verify failed at stage ${String(v.stage ?? "unknown")}` : v.output);
+}
+
+/**
+ * verify_failure_reason, the "Verify failure from prior attempt" line of the next draft's prompt: the draft's new tsc
+ * errors (not in the parent baseline, with their line:col from the log), else the gate's refusal sentence (own check
+ * red, check cannot certify, stray test edit, NEW test failures introduced, PASSING TESTS DISAPPEARED, no summary),
+ * else draftFailureReason. Never the log's first error (a parent tsc error was fed back as the draft's) nor its last
+ * 900 characters (dominated by tests red on the parent). Empty when no verify failed (nothing is written then).
+ */
+export function verifyFailureReason(v: VerifyResult | undefined): string {
+  if (!v || v.ok) return "";
+  const d = v.draft;
+  if (d && d.new_ts.length > 0) {
+    const fresh = new Set(d.new_ts);
+    const located = typecheckSection(v.output).split("\n").filter((l) => /error TS\d+/.test(l) && fresh.has(l.replace(/\(\d+,\d+\)/g, "").trim()));
+    return (located.length > 0 ? located : d.new_ts).slice(0, 6).join("\n");
+  }
+  if (d && d.gate_detail) return d.gate_detail.slice(0, 900);
+  return (draftFailureReason(v) ?? "").slice(0, 900);
 }
 
 /**
@@ -6511,7 +6592,7 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
       summaryMissing ? ` | TEST SUITE PRODUCED NO SUMMARY on two runs (baseline passed ${basePass}; retry rc ${String(summaryRetryRc)}${summaryRetryRc === "124" || summaryRetryRc === "137" ? " = timed out or killed" : summaryRetryRc === "0" ? " = the suite exited early" : ""}): this draft cannot be verified` : "",
     ].join(""));
     const stage: FailStage | null = ok ? null : !installOk ? "install" : !dryRunOk ? "resolve" : !tcOk ? "typecheck" : sdExit !== 0 ? "shape-dispatch" : !testOk ? "tests" : "own_check";
-    return { vessel: v, errors: ok ? 0 : "verify", exit_code: tcExit, ok, output: (raw + detail).trim(), stage, ...(ownRan && ownRef ? { own: { test_file: ownRef.test_file, failing: ownFailing, ...(ownNoEffect !== undefined ? { no_effect_vs_parent: ownNoEffect } : {}), ...(ownBaseSha ? { base_sha: ownBaseSha } : {}), ...(ownParentCached ? { parent_cached: ownParentCached } : {}) } } : {}) };
+    return { vessel: v, errors: ok ? 0 : "verify", exit_code: tcExit, ok, output: (raw + detail).trim(), stage, ...(ownRan && ownRef ? { own: { test_file: ownRef.test_file, failing: ownFailing, ...(ownNoEffect !== undefined ? { no_effect_vs_parent: ownNoEffect } : {}), ...(ownBaseSha ? { base_sha: ownBaseSha } : {}), ...(ownParentCached ? { parent_cached: ownParentCached } : {}) } } : {}), ...(ok ? {} : { draft: { own_red: ownRed, introduced: confirmedNewTest, new_ts: newTs, gate_detail: detail.replace(/^\s*\|\s*/, "").trim() } }) };
   };
   let verify: VerifyResult[] = [];
   if (edited.length > 0 || created.length > 0) { for (const v of touched) verify.push(await runVerify(v)); }
@@ -7589,35 +7670,9 @@ const earlyAttempt = await Promise.race([
   let refusalsRecorded = false;
   if (verdict !== "FAVORABLE") {
     const envClass = classifyEnvironmentFailure(cutovers);
-    const firstTscError = (() => {
-      const raw = verify.find((v) => !v.ok)?.output ?? "";
-      const m = raw.match(/(\S+\.ts\(\d+,\d+\): error TS\d+:[^\n]*)/);
-      if (m) return m[1]!;
-      // THE GATE'S OWN REFUSAL IS THE REASON, NOT THE SUITE TAIL (09-30). When the pre-land gate refused
-      // the draft (own check red, a stray test edit, a contract breach), that sentence names what to fix.
-      // The suite tail below is dominated by UNRELATED pre-existing failures: the impulses-templates gap's
-      // record read "Phase 10 P1 — atomic α/β …", and its drafts kept editing the mock-module guard.
-      const gateAt = raw.search(/ \| (THE GAP'S OWN CHECK|THE GAP'S CHECK CANNOT|EDITS A TEST FILE|THE GAP STORE COULD NOT|CONSTRAINT UNMET)/);
-      if (gateAt >= 0) return raw.slice(gateAt + 3, gateAt + 3 + 900);
-      // NO TSC ERROR MEANS THE FAILURE IS DOWNSTREAM — KEEP THE TAIL, NOT THE HEAD.
-      //
-      // The fallback was raw.slice(0, 300), which stores the BEGINNING of the verify
-      // output. The verify script prints its stages in order (install, typecheck,
-      // shape-dispatch, tests), so the first 300 characters are always the typecheck
-      // banner — and when the failure is in the TEST stage that banner reads
-      // "TC_EXIT=0", i.e. the stored evidence says the thing that PASSED.
-      //
-      // Observed 2026-08-10 on gap-drain-observer-connection-state-is-invisible: the
-      // record ended mid-word at "(pass) comment-only add (no", before ever reaching
-      // the failing test, while its lesson class said typecheck. Neither the operator
-      // nor the drafter re-attempting the gap could learn anything from it, and the
-      // drafter was being taught the wrong failure class.
-      //
-      // Failures are at the END of a staged log, so keep the tail. 900 chars covers a
-      // bun test failure block plus its summary line without bloating the gap record.
-      const tail = raw.slice(-900);
-      return raw.length > 900 ? `…(head truncated; tail follows)\n${tail}` : tail;
-    })();
+    // What the next drafter reads as "Verify failure from prior attempt" (priorAttemptFeedbackBlock): this draft's
+    // failure, never the log's first error or its tail, both of which can be red on the parent (verifyFailureReason).
+    const firstTscError = verifyFailureReason(verify.find((v) => !v.ok));
     const lessonClass = composeLessonClass(envClass, policyUnreadable, applied, verify, String(semantic_gate?.reason ?? ""), scopeWithheld);
     // A compose must never write to a CLOSED gap: the row was fixed or retired, and a rewrite there dropped
     // its top-level closed_reason (11:29, node 1). Re-checked on the fresh read too (it may close mid-compose).
@@ -7681,7 +7736,7 @@ const earlyAttempt = await Promise.race([
     const lessonReason = String(
       failedApply?.detail
       ?? ownReason
-      ?? (failedVerify ? (failedVerify.output.split("\n").filter((l) => /error TS\d|error:|\(fail\)|expect\(/.test(l)).slice(0, 6).join(" | ") || failedVerify.output) : undefined)
+      ?? draftFailureReason(failedVerify)
       ?? semantic_gate?.reason
       ?? policyUnreadable
       ?? verdict,

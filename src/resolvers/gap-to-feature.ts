@@ -1898,6 +1898,26 @@ export interface AdmissionResult {
 }
 
 /**
+ * (E4) The admission exclusion for a gap whose recorded attempts all failed for the same reason, after lowercasing
+ * and masking digits and hex runs (first 120 chars), or null. Measured 2026-09-12: 20-27 of ~1460 open gaps qualify.
+ * Two predicates, kept from what were three copies of this block (the second was the first verbatim, so it never
+ * fired): (1) at least 3 reasons over 20 chars and one distinct key, where an "== install" build-log reason counts
+ * as a key of its own, so it breaks identity; labelled with the lesson count. (2) at least 3 keys over 20 chars once
+ * "== install" reasons are dropped, all identical; that dump is the same for every failure, so it is not evidence.
+ */
+export function identicalRepeatedFailure(lessons: unknown): string | null {
+  if (!Array.isArray(lessons)) return null;
+  const reason = (l: unknown): string => String((l as Record<string, unknown> | null | undefined)?.["reason"] ?? "");
+  const key = (r: string): string => r.toLowerCase().replace(/[0-9a-f]{8,}/g, "H").replace(/[0-9]+/g, "N").slice(0, 120);
+  if (lessons.filter((l) => reason(l).trim().length > 20).length >= 3
+    && new Set(lessons.map((l, i) => reason(l).toLowerCase().startsWith("== install") ? "undistilled-build-log-placeholder-" + i : key(reason(l))).filter((s) => s.length > 20)).size === 1) {
+    return "identical_repeated_failure(" + lessons.length + ")";
+  }
+  const keys = lessons.map((l) => key(reason(l))).filter((s) => s.length > 20 && !s.startsWith("== install"));
+  return keys.length >= 3 && new Set(keys).size === 1 ? "identical_repeated_failure" : null;
+}
+
+/**
  * Filter the AUTO-pick candidate set to actionable gaps. Excludes the two structurally-unclosable
  * classes (no-producer orphans, phantom typecheck-clean gaps) and RETIRES the phantom typecheck
  * gaps whose error is already fixed. See the block comment above for the full rationale. The
@@ -1915,9 +1935,10 @@ export async function admitActionableGaps(
   // nothing here can tell which ones touch the lane core. Reported under one reason key in the
   // usual admission line, so an admitted-zero pass says why.
   if (!scope.readable) {
-    console.log(`[gap-to-feature] autonomy scope unreadable: excluding all autonomous candidates (${scope.reason})`);
-    const excludedAll = gaps.map((g) => ({ id: String(g.id ?? ""), reason: `autonomy_scope_unreadable(${scope.reason})` }));
-    if (excludedAll.length) console.log(`[gap-to-feature] auto-pick admission: ${gaps.length} candidates → 0 admitted, ${excludedAll.length} excluded ${JSON.stringify({ autonomy_scope_unreadable: excludedAll.length })}`);
+    const why = scope.absent ? "autonomy_scope_absent" : "autonomy_scope_unreadable";
+    console.log(`[gap-to-feature] autonomy scope ${scope.absent ? "absent" : "unreadable"}: excluding all autonomous candidates (${scope.reason})`);
+    const excludedAll = gaps.map((g) => ({ id: String(g.id ?? ""), reason: `${why}(${scope.reason})` }));
+    if (excludedAll.length) console.log(`[gap-to-feature] auto-pick admission: ${gaps.length} candidates → 0 admitted, ${excludedAll.length} excluded ${JSON.stringify({ [why]: excludedAll.length })}`);
     return { admitted: [], excluded: excludedAll };
   }
   const admitted: Record<string, unknown>[] = [];
@@ -2107,68 +2128,18 @@ export async function admitActionableGaps(
 
     // (E4) IDENTICAL REPEATED FAILURE — a gap whose every recorded attempt failed for the
     // same normalized reason will fail that way again, so each retry burns a scarce LLM
-    // completion for a guaranteed loss. Measured 2026-09-12: 27 of 1464 open gaps have
-    // three or more attempts whose reasons are identical after masking digits and hashes.
+    // completion for a guaranteed loss (see identicalRepeatedFailure).
     // FAIL-OPEN by construction: any parse or shape problem admits exactly as before.
     try {
-      const repeatLessons = meta.failure_lessons;
       const editSite = String(meta.edit_site ?? "");
       const childGapsAtEditSite = childGapsByEditSite.get(editSite) ?? 0;
       if (editSite && childGapsAtEditSite >= CHILD_GAP_MONOPOLY_THRESHOLD) {
         excluded.push({ id, reason: `child_gap_monopoly_at_edit_site(${editSite})` });
         continue;
       }
-      if (Array.isArray(repeatLessons) && repeatLessons.filter((l) => String((l as Record<string, unknown>)?.["reason"] ?? "").trim().length > 20).length >= 3) {
-        const repeatKeys = new Set(
-          repeatLessons
-            .map((l, i) => String((l as Record<string, unknown>)?.["reason"] ?? "").toLowerCase().startsWith("== install") ? "undistilled-build-log-placeholder-" + i : String((l as Record<string, unknown>)?.["reason"] ?? "").toLowerCase().replace(/[0-9a-f]{8,}/g, "H").replace(/[0-9]+/g, "N").slice(0, 120))
-            .filter((s) => s.length > 20),
-        );
-        if (repeatKeys.size === 1) {
-          excluded.push({ id, reason: "identical_repeated_failure(" + repeatLessons.length + ")" });
-          continue;
-        }
-      }
-    } catch { /* fail-open: admit as before */ }
-
-    // (E4) IDENTICAL REPEATED FAILURE — a gap whose every recorded attempt failed for the
-    // same normalized reason will fail that way again, so each retry burns a scarce LLM
-    // completion for a guaranteed loss. Measured 2026-09-12: 27 of 1464 open gaps have
-    // three or more attempts whose reasons are identical after masking digits and hashes.
-    // FAIL-OPEN by construction: any parse or shape problem admits exactly as before.
-    try {
-      if (
-        ((meta.failure_lessons as Array<Record<string, unknown>> | undefined) ?? []).filter((l) => String(l?.["reason"] ?? "").trim().length > 20).length >= 3 &&
-        new Set(
-          ((meta.failure_lessons as Array<Record<string, unknown>> | undefined) ?? [])
-            .map((l, i) => String(l?.["reason"] ?? "").toLowerCase().startsWith("== install") ? "undistilled-build-log-placeholder-b" + i : String(l?.["reason"] ?? "").toLowerCase().replace(/[0-9a-f]{8,}/g, "H").replace(/[0-9]+/g, "N").slice(0, 120))
-            .filter((s) => s.length > 20),
-        ).size === 1
-      ) {
-        excluded.push({ id, reason: "identical_repeated_failure" });
-        continue;
-      }
-    } catch { /* fail-open: admit as before */ }
-
-    // (E4) IDENTICAL REPEATED FAILURE — a gap whose every recorded attempt failed for the
-    // same normalized reason will fail that way again, so each retry burns a scarce LLM
-    // completion for a guaranteed loss. Measured 2026-09-12: 20 of 1462 open gaps qualify,
-    // representing 71 wasted attempts. Reasons beginning "== install" are EXCLUDED because
-    // that is the undistilled build-log dump the lesson writer stores instead of the error:
-    // those are identical for every failure, so identity there is an artifact, not evidence.
-    // FAIL-OPEN by construction: any parse or shape problem admits exactly as before.
-    try {
-      if (
-        ((meta.failure_lessons as Array<Record<string, unknown>> | undefined) ?? [])
-          .map((l) => String(l?.["reason"] ?? "").toLowerCase().replace(/[0-9a-f]{8,}/g, "H").replace(/[0-9]+/g, "N").slice(0, 120))
-          .filter((s) => s.length > 20 && !s.startsWith("== install")).length >= 3 &&
-        new Set(
-          ((meta.failure_lessons as Array<Record<string, unknown>> | undefined) ?? [])
-            .map((l) => String(l?.["reason"] ?? "").toLowerCase().replace(/[0-9a-f]{8,}/g, "H").replace(/[0-9]+/g, "N").slice(0, 120))
-            .filter((s) => s.length > 20 && !s.startsWith("== install")),
-        ).size === 1
-      ) {
-        excluded.push({ id, reason: "identical_repeated_failure" });
+      const repeated = identicalRepeatedFailure(meta.failure_lessons);
+      if (repeated) {
+        excluded.push({ id, reason: repeated });
         continue;
       }
     } catch { /* fail-open: admit as before */ }
@@ -4381,7 +4352,14 @@ export async function bumpFailedAttempts(gap: Record<string, unknown>, opts: { s
     // would REOPEN it with closed_at carried forward. Re-read first; a closed or unreadable row is not bumped.
     const fresh = await readGapFresh(id);
     if (!fresh || String(fresh.status ?? "") === "closed") return;
-    const meta0 = (gap.classification_metadata ?? gap.metadata ?? {}) as Record<string, unknown>;
+    // BUILD ON THE STORED ROW, NOT THE CALLER'S SNAPSHOT. The snapshot is the gap as it was PICKED;
+    // the compose that just failed wrote its failure lesson to the store in between, and the store
+    // replaces classification_metadata (it carries forward only OMITTED keys). Writing the snapshot
+    // back wiped that lesson whenever the snapshot already held a failure_lessons key, and the
+    // narrowing check below then read the same stale list ("NOT narrowing: no failure_lessons
+    // recorded"). Measured 10-01: every compose followed by a bump lost its lesson, on both nodes.
+    const freshMeta = fresh.classification_metadata ?? fresh.metadata;
+    const meta0 = ((freshMeta && typeof freshMeta === "object" && !Array.isArray(freshMeta)) ? freshMeta : (gap.classification_metadata ?? gap.metadata ?? {})) as Record<string, unknown>;
     // A non-landing attempt the substrate PREDICTED would land is a high-information SURPRISE
     // (over-optimistic self-model) → deprioritise harder (x2) and tally the calibration miss so
     // the self-model is measurable. A correctly-predicted fail bumps normally.
@@ -4884,23 +4862,27 @@ async function llmProducerAdvertised(): Promise<boolean | null> {
 // substrate (discoverOwnResolveUrls: a peer substrate's producers never count), so a record written
 // on either node binds both. Spent = the sum over every
 // distinct llmSpendSummary producer of its current window plus the unexpired share of its
-// previous window (a sliding hour). No record, or a record without a numeric cap and not
-// paused, means no cap, so behaviour is unchanged until an envelope is written. A discovered
-// producer that does not answer makes the envelope UNREADABLE, and once a record has been seen
-// unreadable blocks (fail closed): a partial read could miss the one node that holds the pause.
+// previous window (a sliding hour). NO CAP IS ONLY EVER EXPLICIT: a record {uncapped: true}
+// (and not paused) allows without a cap. Every own producer answering with no spendEnvelope
+// record is ABSENT, and absent refuses exactly like unreadable (`absent: true` names which): a
+// node that holds no record of its own must not read "no record" as "no cap" (10-01, node 2).
+// A record with neither a finite usd_cap_per_hour nor uncapped:true, or with both, refuses too.
+// A discovered producer that does not answer makes the envelope UNREADABLE, and unreadable
+// blocks (fail closed): a partial read could miss the one node that holds the pause.
 // Cached for SPEND_ENVELOPE_TTL_MS so a gap-write burst costs one read.
 // `lookup_failed` marks an unreadable verdict whose cause was discovery itself (timeout, network,
 // 5xx), as opposed to a discovery answer naming no producer: both fail closed, but only the second
 // says anything about the fleet.
-export type SpendEnvelopeVerdict = { allow: boolean; reason: string; unreadable?: boolean; lookup_failed?: boolean; paused?: boolean; cap_usd?: number; spent_usd?: number; spend_sources?: number };
+export type SpendEnvelopeVerdict = { allow: boolean; reason: string; unreadable?: boolean; absent?: boolean; lookup_failed?: boolean; paused?: boolean; cap_usd?: number; spent_usd?: number; spend_sources?: number };
 const SPEND_ENVELOPE_TTL_MS = 30_000;
 // An UNREADABLE policy verdict is remembered only as long as a failed discovery lookup is, so the
 // next read after a slow peer re-reads instead of refusing for 30 s on one timeout (09-30, node 2).
 const policyUnreadableRetryMs = (): number => discoveryFailureBackoffMs();
 let spendEnvelopeCache: { at: number; v: SpendEnvelopeVerdict } | null = null;
-// An UNREADABLE envelope always refuses. A read that SUCCEEDED and found no spendEnvelope record
-// is "no cap" (allow), and only that: whether a record was ever seen is process memory, false at
-// every start, so gating the refusal on it failed open after every restart whose first read failed.
+// An UNREADABLE envelope always refuses, and so does an ABSENT one (a read that succeeded and found
+// no spendEnvelope record on any own producer): "no cap" is a record that says {uncapped: true},
+// never the lack of one. Whether a record was ever seen is process memory, false at every start,
+// so no refusal may be gated on it (it failed open after every restart whose first read failed).
 /** The resolve URL of every producer of `shape`, through the shared discovery client. A lookup
  *  that could not be answered comes back as `{ok:false}` with its reason, never as an empty list. */
 async function discoverResolveUrls(shape: string): Promise<{ ok: true; urls: string[] } | { ok: false; why: string }> {
@@ -4960,27 +4942,22 @@ export async function substrateNodeEndpoints(): Promise<SubstrateNodes> {
     const r = await lookupShape("poolImpulse");
     if (!r.ok) {
       v = { ok: false, why: "substrateNodes unreadable: " + describeLookup(r) };
+      console.log(policyReadLine("substrateNodes", { asked: [], verdict: `unreadable (${v.why})` }));
     } else {
-      const localUrls = [...new Set(r.producers.filter((p) => (p as OwnProducerView).origin === "local").map((p) => p.resolveEndpoint).filter((u) => u.length > 0))];
-      if (localUrls.length === 0) {
+      const local = policyProducers(r.producers.filter((p) => (p as OwnProducerView).origin === "local"));
+      if (local.length === 0) {
         v = { ok: false, why: `substrateNodes unreadable: no local-origin poolImpulse producer (${r.producers.length} non-local ignored)` };
+        console.log(policyReadLine("substrateNodes", { asked: local, verdict: `unreadable (${v.why})` }));
       } else {
-        let newest: { updated_at?: string; body?: unknown } | null = null;
-        let unreadable: string | null = null;
-        for (const u of localUrls) {
-          const res = await postEnvelopeRead(u, { impulse: { type: "poolImpulse", shape: "substrateNodes", status: "open" } });
-          const imps = (res?.["body"] as { impulses?: unknown } | undefined)?.impulses;
-          if (!Array.isArray(imps)) { unreadable = "substrateNodes unreadable: no answer from " + u; break; }
-          for (const imp of imps as Array<{ shape?: string; updated_at?: string; body?: unknown }>) {
-            if (imp.shape === "substrateNodes" && (!newest || String(imp.updated_at ?? "") > String(newest.updated_at ?? ""))) newest = imp;
-          }
-        }
-        if (unreadable) {
-          v = { ok: false, why: unreadable };
+        const read = await readNewestPoolRecord("substrateNodes", local);
+        if (read.silent.length > 0) {
+          v = { ok: false, why: "substrateNodes unreadable: no answer from " + read.silent[0]!.url };
+          console.log(policyReadLine("substrateNodes", { asked: local, answered: read.answered, verdict: `unreadable (${v.why})` }));
         } else {
-          const raw = (newest?.body as { discovery_endpoints?: unknown } | undefined)?.discovery_endpoints;
+          const raw = (read.newest?.body as { discovery_endpoints?: unknown } | undefined)?.discovery_endpoints;
           const endpoints = Array.isArray(raw) ? raw.filter((e): e is string => typeof e === "string" && e.trim().length > 0).map(endpointKey) : [];
-          v = { ok: true, endpoints, reason: newest ? `substrateNodes: ${endpoints.length} node endpoint(s)` : "no substrateNodes record (local producers only)" };
+          v = { ok: true, endpoints, reason: read.newest ? `substrateNodes: ${endpoints.length} node endpoint(s)` : "no substrateNodes record (local producers only)" };
+          console.log(policyReadLine("substrateNodes", { asked: local, answered: read.answered, found: !!read.newest, entries: endpoints.length, verdict: read.newest ? `${endpoints.length} node endpoint(s)` : "no node list: peer rows refused, local rows only" }));
         }
       }
     }
@@ -4992,7 +4969,7 @@ export async function substrateNodeEndpoints(): Promise<SubstrateNodes> {
 }
 /** discoverResolveUrls restricted to this substrate's own producers. A failed lookup, or an unreadable
  *  node list, is `{ok:false}`; `foreign` counts the producers set aside. */
-async function discoverOwnResolveUrls(shape: string): Promise<{ ok: true; urls: string[]; foreign: number } | { ok: false; why: string; lookup_failed: boolean }> {
+export async function discoverOwnResolveUrls(shape: string): Promise<{ ok: true; urls: string[]; producers: PolicyProducer[]; foreign: number } | { ok: false; why: string; lookup_failed: boolean }> {
   const r = await lookupShape(shape);
   if (!r.ok) return { ok: false, why: describeLookup(r), lookup_failed: true };
   // The node list matters only for a peer row that could be own (a listed node's local row). With
@@ -5005,7 +4982,43 @@ async function discoverOwnResolveUrls(shape: string): Promise<{ ok: true; urls: 
     nodeEndpoints = nodes.endpoints;
   }
   const own = r.producers.filter((p) => isOwnSubstrateProducer(p as OwnProducerView, nodeEndpoints));
-  return { ok: true, urls: [...new Set(own.map((p) => p.resolveEndpoint).filter((u) => u.length > 0))], foreign: r.producers.length - own.length };
+  const producers = policyProducers(own);
+  return { ok: true, urls: producers.map((p) => p.url), producers, foreign: r.producers.length - own.length };
+}
+// A policy producer as the read logs it: its resolve URL and the origin discovery stamped on it.
+type PolicyProducer = { url: string; origin: string };
+const policyProducers = (ps: ReadonlyArray<{ resolveEndpoint: string }>): PolicyProducer[] => {
+  const seen = new Map<string, PolicyProducer>();
+  for (const p of ps) if (p.resolveEndpoint.length > 0 && !seen.has(p.resolveEndpoint)) seen.set(p.resolveEndpoint, { url: p.resolveEndpoint, origin: String((p as OwnProducerView).origin ?? "unstamped") });
+  return [...seen.values()];
+};
+type PoolRecord = { shape?: string; updated_at?: string; body?: unknown };
+/** The newest open pool record of `shape` across `producers`, read in parallel. `silent` lists every
+ *  producer that gave no answer (the read is then unreadable); `newest` is null when none holds one. */
+async function readNewestPoolRecord(shape: string, producers: readonly PolicyProducer[]): Promise<{ answered: PolicyProducer[]; silent: PolicyProducer[]; newest: PoolRecord | null }> {
+  const res = await Promise.all(producers.map((p) => postEnvelopeRead(p.url, { impulse: { type: "poolImpulse", shape, status: "open" } })));
+  const answered: PolicyProducer[] = [];
+  const silent: PolicyProducer[] = [];
+  let newest: PoolRecord | null = null;
+  producers.forEach((p, i) => {
+    const imps = (res[i]?.["body"] as { impulses?: unknown } | undefined)?.impulses;
+    if (!Array.isArray(imps)) { silent.push(p); return; }
+    answered.push(p);
+    for (const imp of imps as PoolRecord[]) {
+      if (imp.shape === shape && (!newest || String(imp.updated_at ?? "") > String(newest.updated_at ?? ""))) newest = imp;
+    }
+  });
+  return { answered, silent, newest };
+}
+// ONE JOURNAL LINE PER POLICY READ (on cache refresh, never per cached use): which own producers were
+// asked (count + origins), which answered, whether a record was found and how many entries it holds,
+// and the verdict. "Readable but empty" is a line of its own (record ABSENT among N answering own
+// producers -> closed), so a node reading no policy is visible in the journal, never silent.
+const describeProducers = (ps: readonly PolicyProducer[]): string => `${ps.length} [${ps.map((p) => p.origin).join(", ")}]`;
+export function policyReadLine(shape: string, a: { asked: readonly PolicyProducer[]; answered?: readonly PolicyProducer[]; found?: boolean; entries?: number; verdict: string }): string {
+  const answered = a.answered ? `answered ${describeProducers(a.answered)}` : "answered -";
+  const record = a.found === undefined ? "record -" : a.found ? `record found (${a.entries ?? 0} entr${a.entries === 1 ? "y" : "ies"})` : `record ABSENT among ${a.answered?.length ?? 0} answering own producer(s)`;
+  return `[policy-read] ${shape}: asked ${describeProducers(a.asked)} own producer(s); ${answered}; ${record} → ${a.verdict}`;
 }
 const foreignNote = (n: number): string => (n > 0 ? ` (${n} non-own producer(s) ignored)` : "");
 
@@ -5030,26 +5043,43 @@ async function postEnvelopeRead(url: string, body: unknown): Promise<Record<stri
 }
 async function readSpendEnvelope(): Promise<SpendEnvelopeVerdict> {
   const [pool, spend] = await Promise.all([discoverOwnResolveUrls("poolImpulse"), discoverOwnResolveUrls("llmSpendSummaryNode")]);
-  if (!pool.ok) return { allow: false, unreadable: true, ...(pool.lookup_failed ? { lookup_failed: true } : {}), reason: "envelope unreadable: " + pool.why };
-  const poolUrls = pool.urls;
-  if (poolUrls.length === 0) return { allow: false, unreadable: true, reason: "envelope unreadable: no " + (pool.foreign > 0 ? "own-substrate " : "") + "poolImpulse producer discovered" + foreignNote(pool.foreign) };
-  const pools = await Promise.all(poolUrls.map((u) => postEnvelopeRead(u, { impulse: { type: "poolImpulse", shape: "spendEnvelope", status: "open" } })));
-  let newest: { shape?: string; updated_at?: string; body?: unknown } | null = null;
-  for (let i = 0; i < poolUrls.length; i++) {
-    const imps = (pools[i]?.["body"] as { impulses?: unknown } | undefined)?.impulses;
-    if (!Array.isArray(imps)) return { allow: false, unreadable: true, reason: "envelope unreadable: no answer from " + poolUrls[i] };
-    for (const imp of imps as Array<{ shape?: string; updated_at?: string; body?: unknown }>) {
-      if (imp.shape === "spendEnvelope" && (!newest || String(imp.updated_at ?? "") > String(newest.updated_at ?? ""))) newest = imp;
-    }
+  if (!pool.ok) {
+    const v: SpendEnvelopeVerdict = { allow: false, unreadable: true, ...(pool.lookup_failed ? { lookup_failed: true } : {}), reason: "envelope unreadable: " + pool.why };
+    console.log(policyReadLine("spendEnvelope", { asked: [], verdict: `closed (${v.reason})` }));
+    return v;
   }
-  if (!newest) return { allow: true, reason: "no spendEnvelope record (no cap)" };
-  const env = (newest.body ?? {}) as { usd_cap_per_hour?: unknown; paused?: unknown; reason?: unknown };
-  if (env.paused === true) return { allow: false, paused: true, reason: "paused: " + String(env.reason ?? "no reason given") };
+  if (pool.producers.length === 0) {
+    const v: SpendEnvelopeVerdict = { allow: false, unreadable: true, reason: "envelope unreadable: no " + (pool.foreign > 0 ? "own-substrate " : "") + "poolImpulse producer discovered" + foreignNote(pool.foreign) };
+    console.log(policyReadLine("spendEnvelope", { asked: [], verdict: `closed (${v.reason})` }));
+    return v;
+  }
+  const read = await readNewestPoolRecord("spendEnvelope", pool.producers);
+  const line = (verdict: string, found?: boolean, entries?: number) => console.log(policyReadLine("spendEnvelope", { asked: pool.producers, answered: read.answered, ...(found === undefined ? {} : { found, entries }), verdict }));
+  if (read.silent.length > 0) {
+    const v: SpendEnvelopeVerdict = { allow: false, unreadable: true, reason: "envelope unreadable: no answer from " + read.silent[0]!.url };
+    line(`closed (${v.reason})`);
+    return v;
+  }
+  const newest = read.newest;
+  if (!newest) {
+    const v: SpendEnvelopeVerdict = { allow: false, unreadable: true, absent: true, reason: `envelope absent: no spendEnvelope record among ${read.answered.length} answering own producer(s) (no cap must be explicit: {uncapped: true})` };
+    line("closed (absent)", false, 0);
+    return v;
+  }
+  const env = (newest.body ?? {}) as { usd_cap_per_hour?: unknown; paused?: unknown; uncapped?: unknown; reason?: unknown };
+  const entries = (["usd_cap_per_hour", "paused", "uncapped"] as const).filter((k) => env[k] !== undefined && env[k] !== null).length;
+  const rec = (v: SpendEnvelopeVerdict, verdict: string): SpendEnvelopeVerdict => { line(verdict, true, entries); return v; };
+  if (env.paused === true) return rec({ allow: false, paused: true, reason: "paused: " + String(env.reason ?? "no reason given") }, "closed (paused)");
   const rawCap = env.usd_cap_per_hour;
   // A cap that is present but not a finite number is a misconfiguration, not "no cap".
-  if (rawCap !== undefined && rawCap !== null && !(typeof rawCap === "number" && Number.isFinite(rawCap))) return { allow: false, unreadable: true, reason: "envelope unreadable: usd_cap_per_hour is not a finite number" };
+  if (rawCap !== undefined && rawCap !== null && !(typeof rawCap === "number" && Number.isFinite(rawCap))) return rec({ allow: false, unreadable: true, reason: "envelope unreadable: usd_cap_per_hour is not a finite number" }, "closed (cap not a finite number)");
   const cap = typeof rawCap === "number" ? rawCap : null;
-  if (cap === null) return { allow: true, reason: "spendEnvelope has no numeric usd_cap_per_hour (no cap)" };
+  if (cap !== null && env.uncapped === true) return rec({ allow: false, unreadable: true, reason: "envelope unreadable: the record sets both usd_cap_per_hour and uncapped:true" }, "closed (contradictory record)");
+  if (cap === null) {
+    if (env.uncapped === true) return rec({ allow: true, reason: "spendEnvelope is explicitly uncapped (no cap)" }, "open (explicitly uncapped)");
+    return rec({ allow: false, unreadable: true, reason: "envelope unreadable: the record has no finite usd_cap_per_hour and is not explicitly uncapped" }, "closed (no cap and not uncapped:true)");
+  }
+  line(`cap ${cap} USD/h`, true, entries);
   if (!spend.ok) return { allow: false, unreadable: true, ...(spend.lookup_failed ? { lookup_failed: true } : {}), cap_usd: cap, reason: "envelope unreadable: " + spend.why };
   const spendUrls = spend.urls;
   if (spendUrls.length === 0) return { allow: false, unreadable: true, cap_usd: cap, reason: "envelope unreadable: no " + (spend.foreign > 0 ? "own-substrate " : "") + "llmSpendSummaryNode producer discovered" + foreignNote(spend.foreign) };
@@ -5070,9 +5100,11 @@ async function readSpendEnvelope(): Promise<SpendEnvelopeVerdict> {
   return { allow: true, ...verdict, reason: "within envelope: spent " + spent.toFixed(3) + " USD of " + cap + " USD/h" };
 }
 export async function spendEnvelopeAllows(): Promise<SpendEnvelopeVerdict> {
-  if (spendEnvelopeCache && Date.now() - spendEnvelopeCache.at < (spendEnvelopeCache.v.unreadable ? policyUnreadableRetryMs() : SPEND_ENVELOPE_TTL_MS)) return spendEnvelopeCache.v;
+  // An ABSENT record is a successful read that found nothing, not a transient failure: it is held for
+  // the normal TTL (a 2 s retry would re-read and re-log every 2 s on a node that holds no record).
+  if (spendEnvelopeCache && Date.now() - spendEnvelopeCache.at < (spendEnvelopeCache.v.unreadable && !spendEnvelopeCache.v.absent ? policyUnreadableRetryMs() : SPEND_ENVELOPE_TTL_MS)) return spendEnvelopeCache.v;
   let v: SpendEnvelopeVerdict;
-  try { v = await readSpendEnvelope(); } catch (err) { v = { allow: false, unreadable: true, reason: "envelope unreadable: " + String(err) }; }
+  try { v = await readSpendEnvelope(); } catch (err) { v = { allow: false, unreadable: true, reason: "envelope unreadable: " + String(err) }; console.log(policyReadLine("spendEnvelope", { asked: [], verdict: `closed (${v.reason})` })); }
   if (v.unreadable) v = { ...v, allow: false }; // fail closed, whatever this process has seen before
   spendEnvelopeCache = { at: Date.now(), v };
   return v;
@@ -5083,48 +5115,60 @@ export async function spendEnvelopeAllows(): Promise<SpendEnvelopeVerdict> {
 // repair. The excluded paths are a shaped impulse read at use time: the newest open poolImpulse of
 // shape `autonomyScope` ({excluded_paths: string[], reason}) across every poolImpulse producer of THIS
 // substrate (discoverOwnResolveUrls), so one record binds every node and no peer substrate's does. Entries are repo-relative (`repos/<vessel>/src/
-// file.ts`, or a directory ending in `/`). A read that succeeded and found no record means no scope
-// (behaviour unchanged); an unreadable scope excludes everything autonomous (fail closed), including
-// on a fresh process that has not read one yet.
+// file.ts`, or a directory ending in `/`). NO SCOPE IS ONLY EVER EXPLICIT: a record {unrestricted:
+// true, reason} excludes nothing. A read that succeeded and found no record on any own producer is
+// ABSENT, and absent excludes everything autonomous exactly like unreadable (`absent: true` names
+// which): on 10-01 node 2, holding no record of its own while node 1 was not yet own, read the scope
+// as empty and readable, admitted 229 gaps and composed on an excluded path. A record whose
+// excluded_paths is empty or missing without unrestricted:true, or that sets unrestricted:true AND
+// lists paths, is a misconfiguration and closed too. An unreadable scope excludes everything
+// autonomous (fail closed), including on a fresh process that has not read one yet.
 // Directed work never consults it. Cached 30 s.
-export type AutonomyScope = { excluded: string[]; readable: boolean; reason: string; lookup_failed?: boolean; requireFalsifierClasses?: string[] };
+export type AutonomyScope = { excluded: string[]; readable: boolean; reason: string; absent?: boolean; lookup_failed?: boolean; requireFalsifierClasses?: string[] };
 let autonomyScopeCache: { at: number; v: AutonomyScope } | null = null;
 export async function autonomyScope(): Promise<AutonomyScope> {
-  if (autonomyScopeCache && Date.now() - autonomyScopeCache.at < (autonomyScopeCache.v.readable ? 30_000 : policyUnreadableRetryMs())) return autonomyScopeCache.v;
+  // ABSENT is held for the normal TTL like a readable scope (a successful read; see spendEnvelopeAllows).
+  if (autonomyScopeCache && Date.now() - autonomyScopeCache.at < (autonomyScopeCache.v.readable || autonomyScopeCache.v.absent ? 30_000 : policyUnreadableRetryMs())) return autonomyScopeCache.v;
   let v: AutonomyScope;
   try {
     const pool = await discoverOwnResolveUrls("poolImpulse");
-    const poolUrls = pool.ok ? pool.urls : [];
     if (!pool.ok) {
       v = { excluded: [], readable: false, ...(pool.lookup_failed ? { lookup_failed: true } : {}), reason: pool.why };
-    } else if (poolUrls.length === 0) {
+      console.log(policyReadLine("autonomyScope", { asked: [], verdict: `closed (unreadable: ${v.reason})` }));
+    } else if (pool.producers.length === 0) {
       v = { excluded: [], readable: false, reason: "no " + (pool.foreign > 0 ? "own-substrate " : "") + "poolImpulse producer discovered" + foreignNote(pool.foreign) };
+      console.log(policyReadLine("autonomyScope", { asked: [], verdict: `closed (unreadable: ${v.reason})` }));
     } else {
-      let newest: { updated_at?: string; body?: unknown } | null = null;
-      let unreadable: string | null = null;
-      for (const u of poolUrls) {
-        const res = await postEnvelopeRead(u, { impulse: { type: "poolImpulse", shape: "autonomyScope", status: "open" } });
-        const imps = (res?.["body"] as { impulses?: unknown } | undefined)?.impulses;
-        if (!Array.isArray(imps)) { unreadable = "no answer from " + u; break; }
-        for (const imp of imps as Array<{ shape?: string; updated_at?: string; body?: unknown }>) {
-          if (imp.shape === "autonomyScope" && (!newest || String(imp.updated_at ?? "") > String(newest.updated_at ?? ""))) newest = imp;
-        }
-      }
-      if (unreadable) {
-        v = { excluded: [], readable: false, reason: unreadable };
+      const read = await readNewestPoolRecord("autonomyScope", pool.producers);
+      const line = (verdict: string, found?: boolean, entries?: number) => console.log(policyReadLine("autonomyScope", { asked: pool.producers, answered: read.answered, ...(found === undefined ? {} : { found, entries }), verdict }));
+      const body = (read.newest?.body ?? {}) as { excluded_paths?: unknown; unrestricted?: unknown; require_falsifier_classes?: unknown };
+      const raw = body.excluded_paths;
+      const excluded = Array.isArray(raw) ? raw.filter((e): e is string => typeof e === "string" && e.trim().length > 0).map((e) => e.trim()) : [];
+      if (read.silent.length > 0) {
+        v = { excluded: [], readable: false, reason: "no answer from " + read.silent[0]!.url };
+        line(`closed (unreadable: ${v.reason})`);
+      } else if (!read.newest) {
+        v = { excluded: [], readable: false, absent: true, reason: `autonomyScope absent: no record among ${read.answered.length} answering own producer(s) (no scope must be explicit: {unrestricted: true})` };
+        line("closed (absent)", false, 0);
+      } else if (body.unrestricted === true && excluded.length > 0) {
+        v = { excluded: [], readable: false, reason: `autonomyScope misconfigured: unrestricted:true with ${excluded.length} excluded path(s)` };
+        line("closed (contradictory record)", true, excluded.length);
+      } else if (body.unrestricted !== true && excluded.length === 0) {
+        v = { excluded: [], readable: false, reason: "autonomyScope misconfigured: the record names no excluded_paths and is not explicitly unrestricted" };
+        line("closed (no excluded_paths and not unrestricted:true)", true, 0);
       } else {
-        const raw = (newest?.body as { excluded_paths?: unknown } | undefined)?.excluded_paths;
-        const excluded = Array.isArray(raw) ? raw.filter((e): e is string => typeof e === "string" && e.trim().length > 0).map((e) => e.trim()) : [];
         // require_falsifier_classes: autonomous admission takes only gaps a pre-existing,
         // machine-checkable falsifier can verify (a post-landing removed-line predicate is true by
         // construction, so a landing without one cannot be credited as an improvement).
-        const reqRaw = (newest?.body as { require_falsifier_classes?: unknown } | undefined)?.require_falsifier_classes;
+        const reqRaw = body.require_falsifier_classes;
         const requireFalsifierClasses = Array.isArray(reqRaw) ? reqRaw.filter((e): e is string => typeof e === "string" && e.trim().length > 0).map((e) => e.trim().toLowerCase()) : undefined;
-        v = { excluded, readable: true, reason: newest ? `autonomyScope: ${excluded.length} excluded path(s)` : "no autonomyScope record", ...(requireFalsifierClasses ? { requireFalsifierClasses } : {}) };
+        v = { excluded, readable: true, reason: body.unrestricted === true ? "autonomyScope: explicitly unrestricted" : `autonomyScope: ${excluded.length} excluded path(s)`, ...(requireFalsifierClasses ? { requireFalsifierClasses } : {}) };
+        line(body.unrestricted === true ? "open (explicitly unrestricted)" : `contained (${excluded.length} excluded path(s))`, true, excluded.length);
       }
     }
   } catch (err) {
     v = { excluded: [], readable: false, reason: "autonomyScope unreadable: " + String(err) };
+    console.log(policyReadLine("autonomyScope", { asked: [], verdict: `closed (${v.reason})` }));
   }
   autonomyScopeCache = { at: Date.now(), v };
   return v;
@@ -5132,7 +5176,7 @@ export async function autonomyScope(): Promise<AutonomyScope> {
 /** The scope entry that excludes `path` from autonomous work, or null. An unreadable scope excludes
  *  everything. Paths may be absolute, repo-relative or carry `:line`. */
 export function autonomyScopeExcludes(scope: AutonomyScope, path: string): string | null {
-  if (!scope.readable) return `scope unreadable (${scope.reason})`;
+  if (!scope.readable) return `scope ${scope.absent ? "absent" : "unreadable"} (${scope.reason})`;
   const n = String(path).replace(/:\d+.*$/, "").replace(/\\/g, "/").trim();
   for (const e of scope.excluded) {
     const s = e.replace(/^\.\//, "").replace(/^repos\//, "");
@@ -5151,7 +5195,7 @@ export function autonomyScopeExcludes(scope: AutonomyScope, path: string): strin
 export function autonomyScopeFloor(scope: AutonomyScope, appliedPaths: string[]): { hits: string[]; unreadable: string | null } {
   const hits = [...new Set(appliedPaths.map((p) => autonomyScopeExcludes(scope, p)).filter((h): h is string => !!h))];
   const unreadable = hits.length > 0 && !scope.readable
-    ? `autonomy scope unreadable${scope.lookup_failed ? " (discovery lookup failed)" : ""}: ${scope.reason}`
+    ? `autonomy scope ${scope.absent ? "absent" : "unreadable"}${scope.lookup_failed ? " (discovery lookup failed)" : ""}: ${scope.reason}`
     : null;
   return { hits, unreadable };
 }
@@ -5325,7 +5369,7 @@ export async function resolveGapToFeature(pointer: GapToFeaturePointer): Promise
           stage: "budget",
           verdict: "BUSY",
           error: "spend envelope: " + envelope.reason + " (selection skipped)",
-          reason: envelope.unreadable ? "budget_unreadable" : envelope.paused ? "budget_paused" : "budget_exhausted",
+          reason: envelope.absent ? "budget_absent" : envelope.unreadable ? "budget_unreadable" : envelope.paused ? "budget_paused" : "budget_exhausted",
           cap_usd: envelope.cap_usd ?? null,
           spent_usd: envelope.spent_usd ?? null,
           skipped_selection: true,

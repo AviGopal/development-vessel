@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { resolveGapToFeature, __resetPolicyReadsForTests } from "../../src/resolvers/gap-to-feature.js";
 import { gapStoreRootForTest } from "../../src/resolvers/substrate-gap.js";
+import { openPolicyAnswer } from "./explicit-open-policy.fixture.js";
 
 // Pins the ORDER of capacity and selection.
 //
@@ -19,13 +20,13 @@ import { gapStoreRootForTest } from "../../src/resolvers/substrate-gap.js";
 // ELSE — no cooldown stamped on a gap that was never tried, and no change for a caller
 // who explicitly named what it wanted.
 
-// The policy reads (autonomyScope, spendEnvelope) fail closed when they cannot be read, so this fixture answers
-// them as a read that SUCCEEDS and finds no record: one poolImpulse producer holding no policy impulses.
-const noPolicyRecords = (body: { pointer?: { type?: string; shape?: string }; impulse?: { type?: string } }): Response | null => {
+// The policy reads (autonomyScope, spendEnvelope) fail closed when they cannot be read or hold no record, so this
+// fixture answers them as a read that SUCCEEDS and finds the explicit open records (unrestricted, uncapped).
+const explicitOpenPolicy = (body: { pointer?: { type?: string; shape?: string }; impulse?: { type?: string } }): Response | null => {
   if (body?.pointer?.type === "vesselCapability" && body.pointer.shape === "poolImpulse") {
     return Response.json({ content: { shape: "poolImpulse", vessels: [{ vesselId: "pool-fixture", endpoint: "http://pool.fixture", resolve_endpoint: "/v2/impulses/resolve", origin: "local" }], found: true } });
   }
-  if (body?.impulse?.type === "poolImpulse") return Response.json({ body: { impulses: [] } });
+  if (body?.impulse?.type === "poolImpulse") return openPolicyAnswer(body.impulse.shape);
   return null;
 };
 let dir = "";
@@ -104,11 +105,11 @@ describe("gap-to-feature — capacity is checked before selection is paid for", 
     // the skip path returns a body and never throws. Assert the property — "the peek
     // did not stop us" — rather than a full tick, which is a different test's job.
     // The spend envelope fails closed when unreadable, which would skip selection for a reason this test is
-    // not about: answer the policy reads as a successful read with no record (no cap), and leave every other
+    // not about: answer the policy reads as a successful read of the explicit open records, and leave every other
     // address unreachable as before.
     const originalFetch = globalThis.fetch;
     globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
-      const policy = noPolicyRecords(init?.body ? JSON.parse(String(init.body)) : {});
+      const policy = explicitOpenPolicy(init?.body ? JSON.parse(String(init.body)) : {});
       if (policy) return policy;
       throw new TypeError("Unable to connect. Is the computer able to access the url?");
     }) as unknown as typeof fetch;

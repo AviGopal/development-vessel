@@ -9,6 +9,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, spyOn } from "bun
 import { mkdirSync, readFileSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { openPolicyAnswer } from "./explicit-open-policy.fixture.js";
 
 const ROOT = join(tmpdir(), `gf2-birth-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 if (!process.env["WORKSPACE_ROOT"]) process.env["WORKSPACE_ROOT"] = ROOT;
@@ -30,12 +31,12 @@ let selfResolveMode: "answer" | "http500" = "answer";
 
 const stubFetch = (async (input: unknown, init?: RequestInit) => {
     const body = init?.body ? JSON.parse(String(init.body)) : {};
-    // discovery (the ias client): a pool producer that holds no policy records.
+    // discovery (the ias client): a pool producer that holds the explicit open policy records.
     if (body?.pointer?.type === "vesselCapability") {
       const vessels = [{ vesselId: "dv", endpoint: "http://pool.test", resolve_endpoint: "/v2/impulses/resolve", origin: "local" }];
       return Response.json({ content: { shape: body.pointer.shape, vessels, found: true } });
     }
-    if (body?.impulse?.type === "poolImpulse") return Response.json({ body: { impulses: [] } });
+    if (body?.impulse?.type === "poolImpulse") return openPolicyAnswer(body.impulse.shape);
     const p = body?.impulse?.pointer;
     if (p?.type === "test_suite") {
       selfResolveCalls++;

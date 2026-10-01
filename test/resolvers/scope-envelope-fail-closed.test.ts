@@ -104,7 +104,29 @@ describe("spend envelope: the first read after a restart fails", () => {
 });
 
 describe("controls: a read that succeeds", () => {
-  it("with NO scope record excludes nothing", async () => {
+  // A read that succeeds and finds NO record is ABSENT, and absent is closed like unreadable (it used to be "no
+  // scope" / "no cap": a node holding no record of its own read the lane as unconstrained, 10-01 node 2).
+  it("with NO scope record is ABSENT: closed, every path excluded, and the floor names absent (not unreadable)", async () => {
+    const s = await autonomyScope();
+    expect(s.readable).toBe(false);
+    expect(s.absent).toBe(true);
+    expect(autonomyScopeExcludes(s, FREE_SITE)).not.toBeNull();
+    expect(autonomyScopeExcludes(s, EXCLUDED_SITE)).not.toBeNull();
+    const floor = autonomyScopeFloor(s, [FREE_SITE]);
+    expect(floor.hits.length).toBe(1);
+    expect(floor.unreadable).toContain("autonomy scope absent");
+  });
+
+  it("with NO envelope record is ABSENT: refuses", async () => {
+    const v = await spendEnvelopeAllows();
+    expect(v.unreadable).toBe(true);
+    expect(v.absent).toBe(true);
+    expect(v.allow).toBe(false);
+    expect(v.reason).toContain("envelope absent");
+  });
+
+  it("with an explicit {unrestricted: true} scope excludes nothing", async () => {
+    poolRecords = [{ shape: "autonomyScope", updated_at: "2026-09-30T20:00:00Z", body: { unrestricted: true } }];
     const s = await autonomyScope();
     expect(s.readable).toBe(true);
     expect(s.excluded).toEqual([]);
@@ -113,11 +135,12 @@ describe("controls: a read that succeeds", () => {
     expect(autonomyScopeFloor(s, [FREE_SITE, EXCLUDED_SITE])).toEqual({ hits: [], unreadable: null });
   });
 
-  it("with NO envelope record allows (no cap)", async () => {
+  it("with an explicit {uncapped: true} envelope allows (no cap)", async () => {
+    poolRecords = [{ shape: "spendEnvelope", updated_at: "2026-09-30T20:00:00Z", body: { uncapped: true } }];
     const v = await spendEnvelopeAllows();
     expect(v.unreadable).toBeUndefined();
     expect(v.allow).toBe(true);
-    expect(v.reason).toContain("no spendEnvelope record");
+    expect(v.reason).toContain("explicitly uncapped");
   });
 
   it("with a scope record refuses the excluded path only, and the floor is a real hit", async () => {

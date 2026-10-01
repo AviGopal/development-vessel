@@ -19,12 +19,16 @@
  * span is refused before it is written (noEffectOverlapRefusal), and the failing Expected/Received lines
  * are placed in the prompt as data (attemptEvidenceBlock).
  *
+ * A second constraint rides the same record: `constraints` (must_be_called), imposed when the semantic gate rejects a
+ * symbol the draft introduced as uncalled, enforced before the next draft's verify (checkMustBeCalled), lifted by a
+ * later `constraints_lifted` entry, and escalated once per symbol on a repeat refusal (see the section at the end).
+ *
  * Readers: feature-compose (writer, enforcer, prompt), gap-to-feature (decomposer prompt, grounding line
  * hint), self_fact_reconcile's retry_evidence instrument (the standing measurement).
  */
 import { createHash } from "node:crypto";
 
-export type FailStage = "install" | "resolve" | "typecheck" | "shape-dispatch" | "tests" | "own_check" | "scope" | "apply";
+export type FailStage = "install" | "resolve" | "typecheck" | "shape-dispatch" | "tests" | "own_check" | "scope" | "apply" | "constraint";
 
 export interface EditedSpan {
   path: string;
@@ -61,10 +65,18 @@ export interface AttemptRecord {
   refusals?: RefusalRecord[];
   /** Set when a refusal repeated on a region already refused on this gap: what the escalation did. */
   escalation?: { at: string; region: string; outcome: string };
+  /** Structural constraints the NEXT attempt of this gap (and its lineage) is held to (see checkMustBeCalled). */
+  constraints?: MustBeCalledConstraint[];
+  /** Constraints this attempt showed to be met or moot; a lift cancels every earlier record of that symbol. */
+  constraints_lifted?: ConstraintLift[];
 }
 
-/** One refused op: where it tried to edit and the locked region (by its text) it hit. */
-export interface RefusalRecord { path: string; start: number; end: number; region_sha: string; region_start: number; region_end: number }
+/**
+ * One refused op: where it tried to edit and the locked region (by its text) it hit. A `must_be_called` refusal
+ * reuses the record (and so the once-per-region escalation): region_sha is "must_be_called:<symbol>", path is
+ * where the symbol was introduced, and the line fields are 0.
+ */
+export interface RefusalRecord { path: string; start: number; end: number; region_sha: string; region_start: number; region_end: number; kind?: "must_be_called" }
 
 const sha16 = (s: string): string => createHash("sha256").update(s).digest("hex").slice(0, 16);
 
@@ -106,6 +118,7 @@ export function lessonClassMatchesStage(cls: string, stage: FailStage | null | u
   if (stage === "typecheck") return cls === "verify_failed" || /^env_/.test(cls);
   // A scope withhold applied and verified cleanly: the classifier's semantic_reject fallthrough is the known mislabel.
   if (stage === "scope") return cls === "scope_refused" || cls === "env_policy_unreadable";
+  if (stage === "constraint") return cls === "constraint_unmet" || /^env_/.test(cls);
   return true;
 }
 
@@ -320,7 +333,8 @@ export function storedRefusalCounts(rows: Array<Record<string, unknown>>, sinceM
   for (const row of rows) {
     const lessons = ((row.classification_metadata as Record<string, unknown> | undefined)?.failure_lessons ?? []) as Array<Record<string, unknown>>;
     if (!Array.isArray(lessons)) continue;
-    const n = priorRefusals(lessons.filter((l) => Date.parse(String(l?.at ?? "")) >= sinceMs)).length;
+    // Only no-effect refusals have journal lines to be reconciled against; a constraint refusal is journaled apart.
+    const n = priorRefusals(lessons.filter((l) => Date.parse(String(l?.at ?? "")) >= sinceMs)).filter((r) => r.kind !== "must_be_called").length;
     out.set(String(row.id), { n, saturated: lessons.length >= 8 });
   }
   return out;
@@ -398,14 +412,18 @@ export function lineCenteredSlice(content: string, start: number, end: number, w
 export function attemptEvidenceBlock(lessons: unknown, max = 3): string {
   if (!Array.isArray(lessons)) return "";
   const recs = (lessons as Array<Record<string, unknown>>).filter((l) => l && (Array.isArray(l.edited_spans) || l.own_check || l.stage)).slice(-max);
-  if (recs.length === 0) return "";
+  const active = activeMustBeCalled(lessons);
+  if (recs.length === 0 && active.length === 0) return "";
   const lines: string[] = ["", "PRIOR ATTEMPT RECORD (measured on the previous drafts of THIS gap; data, not advice):"];
   for (const r of recs) {
     const spans = (Array.isArray(r.edited_spans) ? (r.edited_spans as EditedSpan[]) : []).map((s) => `${s.path}:${s.start}-${s.end}`);
     const eff = r.no_effect_vs_parent === true ? "NO EFFECT (the own check failed identically on the parent)" : r.no_effect_vs_parent === false ? "changed the own check's output" : "not measured";
     lines.push(`- attempt ${String(r.at ?? "?")}: failed at stage ${String(r.stage ?? "unknown")}; class ${String(r.class ?? "?")}; edited ${spans.length ? spans.join(", ") : "(nothing applied)"}; effect vs parent: ${eff}`);
-    const refs = Array.isArray(r.refusals) ? (r.refusals as RefusalRecord[]) : [];
+    const allRefs = Array.isArray(r.refusals) ? (r.refusals as RefusalRecord[]) : [];
+    const refs = allRefs.filter((x) => x.kind !== "must_be_called");
+    const crefs = allRefs.filter((x) => x.kind === "must_be_called");
     if (refs.length) lines.push(`    refused by the no-effect lock: ${refs.map((x) => `${x.path}:${x.start}-${x.end} (locked ${x.region_start}-${x.region_end})`).join(", ")}${r.escalation ? `; escalated: ${String((r.escalation as { outcome?: string }).outcome ?? "")}` : ""}`);
+    if (crefs.length) lines.push(`    refused by a constraint: ${crefs.map((x) => x.region_sha.replace(/^must_be_called:/, "must_be_called(") + ")").join(", ")}${!refs.length && r.escalation ? `; escalated: ${String((r.escalation as { outcome?: string }).outcome ?? "")}` : ""}`);
     const oc = r.own_check as { test_file?: string; failing?: OwnCheckFailure[] } | undefined;
     for (const f of (oc?.failing ?? []).slice(0, 4)) {
       lines.push(`    own check ${String(oc?.test_file ?? "")} (fail) ${f.name}`);
@@ -417,6 +435,7 @@ export function attemptEvidenceBlock(lessons: unknown, max = 3): string {
   }
   const refused = noEffectSpans(lessons).map((s) => `${s.path}:${s.start}-${s.end}`);
   if (refused.length) lines.push(`REFUSED REGIONS (an edit op overlapping one of these is refused before it is written): ${[...new Set(refused)].join(", ")}`);
+  for (const c of active) lines.push(`CONSTRAINT must_be_called(${c.symbol}) (introduced in ${c.introduced_in || "?"}): a draft that defines ${c.symbol} is refused before verify unless it also calls it on the live path, outside its own definition. A call in a test file, a comment or string, dead code (if (false), after a return) or a call whose result is discarded does not count.`);
   return lines.join("\n");
 }
 
@@ -515,7 +534,7 @@ export interface RetryEvidenceMeasure {
   offenders: Array<{ gap: string; at: string; kind: "overlap" | "class_stage" | "stuck_refusal"; detail: string }>;
 }
 
-const SPANS_OWED = new Set(["install", "resolve", "typecheck", "shape-dispatch", "tests", "own_check", "scope"]);
+const SPANS_OWED = new Set(["install", "resolve", "typecheck", "shape-dispatch", "tests", "own_check", "scope", "constraint"]);
 
 /**
  * Over gap rows: retries whose edits overlap an earlier no-effect span, and lessons whose class contradicts
@@ -556,4 +575,319 @@ export function measureRetryEvidence(rows: Array<Record<string, unknown>>, since
     }
   }
   return m;
+}
+
+// ─── the must_be_called constraint (a second structural constraint on the same record) ──
+//
+// A fix that needs two coordinated edits (define a symbol AND wire it in) converged one site per attempt: the
+// in-flight gap's drafts either did not define countsTowardInFlight (its own check failed) or defined it with no
+// call site, and the semantic gate rejected that as dead code. Prompt advice ("also call it") was ignored, so the
+// gate's verdict becomes a constraint on the attempt record, enforced deterministically on the next draft before
+// verify: a draft that defines the symbol and does not call it on the live path is refused with a precise reason.
+
+export interface MustBeCalledConstraint {
+  kind: "must_be_called";
+  symbol: string;
+  introduced_in: string;
+  /** Derived from a pre-field lesson's prose (legacyMustBeCalled), so whether an attempt introduced it is unproven. */
+  derived?: true;
+}
+export interface ConstraintLift { symbol: string; why: string }
+
+const IDENT = /^[A-Za-z_$][\w$]*$/;
+const escRe = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+/** Paths that are tests: a call there is not a call on the live path. */
+export const TEST_PATH_RE = /(^|\/)(test|tests|__tests__|__mocks__)\/|\.(test|spec)\.[cm]?[jt]sx?$/;
+/** A gate reason that says a symbol is dead (the LLM judge's words for it). */
+const UNCALLED_REASON_RE = /\b(not called|never called|uncalled|no call[- ]?sites?|no callers?|not invoked|never invoked|dead code|unreachable|not referenced|never referenced|unused)\b/i;
+
+/** Does this source line DEFINE `sym` (function, const/let/var, or a class/object method)? */
+export function definesSymbolLine(line: string, sym: string): boolean {
+  const s = escRe(sym);
+  return new RegExp(`^\\s*(?:export\\s+)?(?:default\\s+)?(?:async\\s+)?function\\s*\\*?\\s*${s}\\s*[(<]`).test(line)
+    || new RegExp(`^\\s*(?:export\\s+)?(?:const|let|var)\\s+${s}\\s*[:=]`).test(line)
+    || new RegExp(`^\\s*(?:(?:public|private|protected|static|async|readonly)\\s+)*${s}\\s*\\([^)]*\\)\\s*(?::[^={]+)?\\{`).test(line);
+}
+
+/** The draft (pre -> post of one file) adds a definition of `sym` that the file did not already have. */
+export function introducesDefinition(pre: string, post: string, sym: string): boolean {
+  const before = new Map<string, number>();
+  for (const l of pre.split("\n")) if (definesSymbolLine(l, sym)) before.set(l.trim(), (before.get(l.trim()) ?? 0) + 1);
+  for (const l of post.split("\n")) {
+    if (!definesSymbolLine(l, sym)) continue;
+    const n = before.get(l.trim()) ?? 0;
+    if (n === 0) return true;
+    before.set(l.trim(), n - 1);
+  }
+  return false;
+}
+
+/**
+ * RECORD: the constraints a semantic-gate REJECTION implies. Every unreachable symbol the draft introduced (a new
+ * definition with no live caller), plus any symbol the gate's reason names as uncalled/dead, provided the draft
+ * introduced it (`introducedIn` returns where, or null). An accepted draft records nothing.
+ */
+export function mustBeCalledFromGate(
+  gate: { addresses?: boolean; on_live_path?: boolean; reason?: string } | null | undefined,
+  facts: ReadonlyArray<{ symbol: string; isNewFunction: boolean; reachable: boolean }>,
+  introducedIn: (symbol: string) => string | null,
+): MustBeCalledConstraint[] {
+  if (!gate || (gate.addresses !== false && gate.on_live_path !== false)) return [];
+  // The gate's own facts: isNewFunction is already "defined on an added line of this draft's diff".
+  const cands = new Set<string>(facts.filter((f) => !f.reachable && f.isNewFunction).map((f) => f.symbol));
+  const reason = String(gate.reason ?? "");
+  // The judge's prose backticks existing APIs too: a backticked name is a candidate only if THIS draft newly defined it.
+  if (UNCALLED_REASON_RE.test(reason)) for (const m of reason.matchAll(/`([A-Za-z_$][\w$]*)(?:\(\))?`/g)) if (m[1] && introducedIn(m[1]) !== null) cands.add(m[1]);
+  return [...cands].filter((symbol) => IDENT.test(symbol)).map((symbol) => ({ kind: "must_be_called" as const, symbol, introduced_in: introducedIn(symbol) ?? "" }));
+}
+
+/**
+ * The constraints in force over a lesson list (lineage first, then own, as enforcedLessons orders them): each symbol's
+ * latest record, unless a LATER lesson lifted it. None when the gap is closed or superseded.
+ */
+export function activeMustBeCalled(lessons: unknown, gapStatus = ""): MustBeCalledConstraint[] {
+  if (!Array.isArray(lessons) || gapStatus === "closed" || gapStatus === "superseded") return [];
+  const act = new Map<string, MustBeCalledConstraint>();
+  for (const l of lessons as Array<Record<string, unknown>>) {
+    if (!l) continue;
+    for (const c of legacyMustBeCalled(l)) act.set(c.symbol, c);
+    for (const c of (Array.isArray(l.constraints) ? l.constraints : []) as MustBeCalledConstraint[]) {
+      if (c && c.kind === "must_be_called" && typeof c.symbol === "string" && IDENT.test(c.symbol)) act.set(c.symbol, { kind: "must_be_called", symbol: c.symbol, introduced_in: String(c.introduced_in ?? ""), ...(c.derived ? { derived: true as const } : {}) });
+    }
+    for (const x of (Array.isArray(l.constraints_lifted) ? l.constraints_lifted : []) as ConstraintLift[]) if (x && typeof x.symbol === "string") act.delete(x.symbol);
+  }
+  return [...act.values()];
+}
+
+/**
+ * MIGRATION for lessons written before `constraints` existed: a semantic_reject lesson whose reason says a backticked
+ * symbol is uncalled/dead implies the same constraint (introduced in the attempt's first edited file). The live
+ * in-flight gap's 04:30 lesson is one; without this its next draft would run unconstrained.
+ */
+export function legacyMustBeCalled(l: Record<string, unknown>): MustBeCalledConstraint[] {
+  if (Array.isArray(l.constraints) || l.class !== "semantic_reject") return [];
+  const reason = String(l.raw_excerpt ?? l.reason ?? "");
+  if (!UNCALLED_REASON_RE.test(reason)) return [];
+  const at = Array.isArray(l.edited_spans) ? String((l.edited_spans as EditedSpan[])[0]?.path ?? "") : "";
+  const syms = new Set([...reason.matchAll(/`([A-Za-z_$][\w$]*)(?:\(\))?`/g)].map((m) => m[1]!).filter((x) => IDENT.test(x)));
+  return [...syms].map((symbol) => ({ kind: "must_be_called" as const, symbol, introduced_in: at, derived: true as const }));
+}
+
+/** The refusal sentence (the exact header the lane, the journal and the next prompt read). */
+export function mustBeCalledReason(symbol: string, detail = ""): string {
+  return `constraint must_be_called(${symbol}) unmet: define AND call it on the live path${detail ? ` (${detail})` : ""}`;
+}
+
+/** The refusal record a constraint refusal leaves (reuses the no-effect refusal record and its escalation). */
+export function mustBeCalledRefusalRecord(c: MustBeCalledConstraint): RefusalRecord {
+  return { path: c.introduced_in, start: 0, end: 0, region_sha: `must_be_called:${c.symbol}`, region_start: 0, region_end: 0, kind: "must_be_called" };
+}
+
+export interface CallSite { path: string; line: number; why?: string }
+
+// The TypeScript parser (ts-morph is a runtime dependency; loaded only when a constraint is enforced).
+type TsApi = typeof import("ts-morph").ts;
+let tsApi: TsApi | null = null;
+async function loadTs(): Promise<TsApi> {
+  if (!tsApi) tsApi = (await import("ts-morph")).ts;
+  return tsApi;
+}
+
+/**
+ * Every reference to `symbol` across `files`, split into LIVE uses and rejected ones with the reason. Parsed, not
+ * grepped, so comments and strings never match. A use is live when it is a call (or the function passed as a value:
+ * an argument, a property value, an array element) that is not in a test file, not inside the symbol's own
+ * definition, not in dead code (the then-branch of `if (false)`/`if (0)`/`while (false)`, or a statement after a
+ * return/throw/break/continue in the same block), and, when the symbol returns a value, does not discard it (a bare
+ * call statement or `void sym()`).
+ */
+export async function liveCallSites(
+  symbol: string,
+  files: ReadonlyArray<{ path: string; content: string }>,
+  hop?: { baseDefines: (name: string, inPath: string) => boolean; depth?: number; seen?: ReadonlySet<string> },
+): Promise<{ live: CallSite[]; rejected: CallSite[]; returns_value: boolean }> {
+  const ts = await loadTs();
+  const parsed = files.filter((f) => f.content.includes(symbol)).map((f) => {
+    const sf = ts.createSourceFile(f.path, f.content, ts.ScriptTarget.Latest, true, /\.[cm]?jsx?$/.test(f.path) ? ts.ScriptKind.JS : f.path.endsWith("x") ? ts.ScriptKind.TSX : ts.ScriptKind.TS);
+    // A file the parser cannot read cleanly cannot be judged: the caller fails closed as an environment condition.
+    const diags = (sf as unknown as { parseDiagnostics?: unknown[] }).parseDiagnostics ?? [];
+    if (diags.length > 0) throw new Error(`constraint check could not parse ${f.path} (${diags.length} parse error(s))`);
+    return { path: f.path, sf };
+  });
+  type N = import("ts-morph").ts.Node;
+  const isFnLike = (n: N): boolean => ts.isFunctionDeclaration(n) || ts.isFunctionExpression(n) || ts.isArrowFunction(n) || ts.isMethodDeclaration(n);
+  const declName = (n: N): string | null => {
+    if ((ts.isFunctionDeclaration(n) || ts.isMethodDeclaration(n) || ts.isVariableDeclaration(n)) && n.name && ts.isIdentifier(n.name)) return n.name.text;
+    return null;
+  };
+  // Does the definition return a value? (an explicit non-void return type, an expression-bodied arrow, or a
+  // `return <expr>` in its own body, not in a nested function)
+  let returnsValue = false;
+  const bodyReturns = (fn: N): boolean => {
+    const f = fn as import("ts-morph").ts.FunctionLikeDeclaration;
+    if (f.type) return !/^(void|never|Promise<void>|undefined)$/.test(f.type.getText().replace(/\s+/g, ""));
+    if (ts.isArrowFunction(fn) && !ts.isBlock(fn.body)) return true;
+    let found = false;
+    const walk = (n: N): void => { if (found) return; if (n !== fn && isFnLike(n)) return; if (ts.isReturnStatement(n) && n.expression) { found = true; return; } ts.forEachChild(n, walk); };
+    if (f.body) walk(f.body);
+    return found;
+  };
+  for (const { sf } of parsed) {
+    const visit = (n: N): void => {
+      if (declName(n) === symbol) {
+        if (ts.isVariableDeclaration(n)) { const init = n.initializer; if (init && (ts.isArrowFunction(init) || ts.isFunctionExpression(init)) && bodyReturns(init)) returnsValue = true; }
+        else if (bodyReturns(n)) returnsValue = true;
+      }
+      ts.forEachChild(n, visit);
+    };
+    visit(sf);
+  }
+  const live: CallSite[] = [];
+  const rejected: CallSite[] = [];
+  const terminates = (s: N): boolean => ts.isReturnStatement(s) || ts.isThrowStatement(s) || ts.isBreakStatement(s) || ts.isContinueStatement(s);
+  // The named function a use sits in (anonymous callbacks climb to theirs); undefined = module top level.
+  const enclosingName = (n: N): string | undefined => {
+    for (let a: N | undefined = n.parent; a; a = a.parent) {
+      if (ts.isFunctionDeclaration(a) || ts.isMethodDeclaration(a)) { if (a.name && ts.isIdentifier(a.name)) return a.name.text; continue; }
+      if (ts.isConstructorDeclaration(a)) { const c = a.parent; if (ts.isClassDeclaration(c) && c.name) return c.name.text; continue; }
+      if ((ts.isArrowFunction(a) || ts.isFunctionExpression(a)) && a.parent && (ts.isVariableDeclaration(a.parent) || ts.isPropertyAssignment(a.parent)) && ts.isIdentifier(a.parent.name)) return a.parent.name.text;
+    }
+    return undefined;
+  };
+  const pending: Array<CallSite & { encl?: string }> = [];
+  const falsy = (e: N): boolean => e.kind === ts.SyntaxKind.FalseKeyword || (ts.isNumericLiteral(e) && Number(e.text) === 0) || (ts.isParenthesizedExpression(e) && falsy(e.expression));
+  for (const { path, sf } of parsed) {
+    const isTest = TEST_PATH_RE.test(path);
+    const visit = (n: N): void => {
+      if (ts.isIdentifier(n) && n.text === symbol) {
+        const p = n.parent;
+        const isDeclName = !!p && (((ts.isFunctionDeclaration(p) || ts.isMethodDeclaration(p) || ts.isVariableDeclaration(p) || ts.isParameter(p) || ts.isPropertyDeclaration(p) || ts.isClassDeclaration(p) || ts.isPropertyAssignment(p) || ts.isPropertySignature(p) || ts.isMethodSignature(p)) && (p as { name?: N }).name === n)
+          || ts.isImportSpecifier(p) || ts.isExportSpecifier(p) || ts.isImportClause(p) || ts.isNamespaceImport(p));
+        if (!isDeclName) {
+          const line = sf.getLineAndCharacterOfPosition(n.getStart(sf)).line + 1;
+          // The use: `sym(...)`, `x.sym(...)`, or the function itself passed as a value.
+          const callee = p && ts.isPropertyAccessExpression(p) && p.name === n ? p : n;
+          const cp = callee.parent;
+          const call = cp && ts.isCallExpression(cp) && cp.expression === callee ? cp : null;
+          const asValue = !call && !!cp && ((ts.isCallExpression(cp) && cp.arguments.includes(callee as import("ts-morph").ts.Expression)) || (ts.isNewExpression(cp) && !!cp.arguments?.includes(callee as import("ts-morph").ts.Expression)) || (ts.isPropertyAssignment(cp) && cp.initializer === callee) || ts.isShorthandPropertyAssignment(cp) || ts.isArrayLiteralExpression(cp));
+          let why: string | null = null;
+          if (!call && !asValue) why = "a reference, not a call";
+          else if (isTest) why = "in a test file";
+          else {
+            for (let a: N | undefined = n, prev: N | undefined; a; prev = a, a = a.parent) {
+              if (declName(a) === symbol) { why = "inside its own definition"; break; }
+              if (prev && (ts.isIfStatement(a) || ts.isWhileStatement(a)) && prev === (ts.isIfStatement(a) ? a.thenStatement : a.statement) && falsy(a.expression)) { why = "dead code (a branch that never runs)"; break; }
+              if (prev && (ts.isBlock(a) || ts.isSourceFile(a) || ts.isCaseClause(a) || ts.isDefaultClause(a) || ts.isModuleBlock(a))) {
+                const stmts = a.statements as unknown as N[];
+                const i = stmts.indexOf(prev);
+                if (i > 0 && stmts.slice(0, i).some(terminates)) { why = "dead code (after a return, throw, break or continue)"; break; }
+              }
+            }
+            if (!why && call && returnsValue) {
+              let up: N = call.parent;
+              while (up && (ts.isAwaitExpression(up) || ts.isParenthesizedExpression(up))) up = up.parent;
+              if (up && (ts.isExpressionStatement(up) || ts.isVoidExpression(up))) why = "its result is discarded";
+            }
+          }
+          if (why) rejected.push({ path, line, why });
+          else pending.push({ path, line, encl: enclosingName(n) });
+        }
+      }
+      ts.forEachChild(n, visit);
+    };
+    visit(sf);
+  }
+  // ONE-HOP LIVENESS: a use inside a function this draft added (absent from the base version of the SAME file) is live
+  // only if that function is itself live-called by the same rule, at most HOP_DEPTH levels deep. Otherwise "sym called from a new uncalled wrap()" passes, which is the
+  // uncalled pattern one level up. A use at module top level, or inside a function the base already has, is live.
+  const depth = hop?.depth ?? 1;
+  for (const c of pending) {
+    const e = c.encl;
+    if (!hop || e === undefined || e === symbol || hop.baseDefines(e, c.path)) { live.push({ path: c.path, line: c.line }); continue; }
+    if (depth >= HOP_DEPTH || hop.seen?.has(e)) { rejected.push({ path: c.path, line: c.line, why: `called only from ${e}, which this draft adds (no live caller within ${HOP_DEPTH} hops)` }); continue; }
+    const up = await liveCallSites(e, files, { baseDefines: hop.baseDefines, depth: depth + 1, seen: new Set([...(hop.seen ?? []), symbol, e]) });
+    if (up.live.length > 0) live.push({ path: c.path, line: c.line });
+    else rejected.push({ path: c.path, line: c.line, why: `called only from ${e}, which this draft adds and nothing live calls` });
+  }
+  return { live, rejected, returns_value: returnsValue };
+}
+/** How many function hops a constrained symbol's call may sit below code that already exists in the base. */
+export const HOP_DEPTH = 2;
+
+/**
+ * THE CONSTRAINT GATE. For each active must_be_called constraint whose symbol THIS draft newly defines (a new definition
+ * in one of `edits`), at least one live use (liveCallSites) must exist. A constraint exists only for a symbol a draft
+ * newly defines, so its calls can only be in files the draft added or modified: the parse set is the draft's touched
+ * files (post-images), never the whole tree, so an unrelated broken file cannot change the verdict. The hop rule's
+ * "function the base already has" is resolved against the BASE VERSION OF THE SAME FILE (`edits[].pre`).
+ *
+ * `readBase(path)` serves only the legacy exception: a constraint derived from an old lesson's prose (no draft proved it
+ * was introduced) is lifted when its DEFINING file's base already defines the symbol (LLM prose backticks existing APIs).
+ * A draft that does not newly define the symbol is not constrained by it. Called at one site in feature_compose.
+ */
+export async function checkMustBeCalled(
+  constraints: ReadonlyArray<MustBeCalledConstraint>,
+  edits: ReadonlyArray<{ path: string; pre: string; post: string }>,
+  readBase: (path: string) => string | null = () => null,
+): Promise<{ unmet: Array<MustBeCalledConstraint & { detail: string }>; lifted: ConstraintLift[]; reason: string }> {
+  const unmet: Array<MustBeCalledConstraint & { detail: string }> = [];
+  const lifted: ConstraintLift[] = [];
+  const files = edits.filter((e) => e.post).map((e) => ({ path: e.path, content: e.post }));
+  const preOf = new Map(edits.map((e) => [e.path, e.pre]));
+  const definesIn = (text: string | null | undefined, name: string): boolean => !!text && text.includes(name) && text.split("\n").some((l) => definesSymbolLine(l, name));
+  // name + file: the caller's own file as it was before this draft.
+  const baseDefines = (name: string, inPath: string): boolean => definesIn(preOf.get(inPath), name);
+  for (const c of constraints) {
+    if (c.derived) {
+      const at = c.introduced_in;
+      const baseText = at ? (preOf.has(at) ? preOf.get(at)! : readBase(at)) : null;
+      if (definesIn(baseText, c.symbol)) {
+        lifted.push({ symbol: c.symbol, why: `named in the gate's prose but ${at} already defined it, so no attempt introduced it` });
+        continue;
+      }
+    }
+    if (!edits.some((e) => introducesDefinition(e.pre, e.post, c.symbol))) continue;
+    const sites = await liveCallSites(c.symbol, files, { baseDefines });
+    if (sites.live.length > 0) continue;
+    const seen = sites.rejected.slice(0, 4).map((x) => `${x.path}:${x.line} ${x.why}`).join("; ");
+    unmet.push({ ...c, detail: seen ? `uses found, none live: ${seen}` : "no call site in the files this draft touched" });
+  }
+  return { unmet, lifted, reason: unmet.map((u) => mustBeCalledReason(u.symbol, u.detail)).join("; ") };
+}
+
+/**
+ * The refusal records and the (once-per-constraint) escalation a compose attempt's FINAL verify implies. Only an unmet
+ * constraint counts: a constraint check that could not run (constraint_unrunnable) is an environment condition, never a
+ * refusal of the draft, so it neither repeats nor escalates.
+ */
+export async function constraintRefusalEvidence(
+  verify: ReadonlyArray<{ constraint_unmet?: MustBeCalledConstraint[] }>,
+  gap: Record<string, unknown> | null,
+  ownLessons: unknown,
+  escalate: (gap: Record<string, unknown>, why: string) => Promise<string>,
+): Promise<{ refusals: RefusalRecord[]; escalation: AttemptRecord["escalation"] }> {
+  const refusals = verify.flatMap((v) => v.constraint_unmet ?? []).map(mustBeCalledRefusalRecord);
+  if (refusals.length === 0) return { refusals, escalation: undefined };
+  return { refusals, escalation: await escalateRepeatedRefusal(gap, ownLessons, refusals, escalate) };
+}
+
+/**
+ * PARK GUARD. Consecutive compose attempts of one gap whose constraint check could not run (env_constraint_unrunnable),
+ * counted from the gap's own lessons (so the count survives restarts), including this attempt. Separately written
+ * no_effect_region lessons are not attempts and are skipped. At 2 or more, returns the journal line the hourly
+ * check-in counts; otherwise null.
+ */
+export const CONSTRAINT_PARK_GREP = "^\\[fc-constraint\\] PARKED gap=";
+export function constraintParkLine(gapId: string, priorLessons: unknown, thisClass: string, reason: string): string | null {
+  if (thisClass !== "env_constraint_unrunnable") return null;
+  let n = 1;
+  const prior = Array.isArray(priorLessons) ? (priorLessons as Array<Record<string, unknown>>) : [];
+  for (let i = prior.length - 1; i >= 0; i--) {
+    const cls = String(prior[i]?.class ?? "");
+    if (cls === "no_effect_region") continue;
+    if (cls !== "env_constraint_unrunnable") break;
+    n++;
+  }
+  if (n < 2) return null;
+  return `[fc-constraint] PARKED gap=${gapId || "none"}: constraint check could not run on ${n} consecutive attempts (${reason.replace(/\s+/g, " ").slice(0, 200)})`;
 }

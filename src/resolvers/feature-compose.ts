@@ -30,7 +30,7 @@ import { resolveSubstrateGap, resolveSubstrateGapWrite } from "./substrate-gap.j
 import { writeAuthoringMarker, clearAuthoringMarker } from "./patch-with-tools.js";
 import { vacuousEditReason, nonTerminatingEditReason, deadStoreEditReason, truncatingRewriteReason } from "../vacuous-edit.js";
 import { acquireComposeSlot } from "../compose-slots.js";
-import { attemptEvidenceBlock, baseSpanOfOp, checkOpNoEffect, enforcedLessons, escalateRepeatedRefusal, refusalJournalLine, repeatedRefusalRegion, type RefusalRecord, explicitLineHint, hydrateComposeGap, lineCenteredSlice, noEffectOverlapRefusal, noEffectSpans, parentCheckBlock, parseOwnCheckFailures, sameOwnCheckFailures, spanRecord, typecheckSection, type AttemptRecord, type EditedSpan, type FailStage, type GapRowReader, type OwnCheckFailure } from "./retry-evidence.js";
+import { activeMustBeCalled, checkMustBeCalled, constraintRefusalEvidence, introducesDefinition, mustBeCalledFromGate, mustBeCalledReason, mustBeCalledRefusalRecord, constraintParkLine, type ConstraintLift, type MustBeCalledConstraint, attemptEvidenceBlock, baseSpanOfOp, checkOpNoEffect, enforcedLessons, escalateRepeatedRefusal, refusalJournalLine, repeatedRefusalRegion, type RefusalRecord, explicitLineHint, hydrateComposeGap, lineCenteredSlice, noEffectOverlapRefusal, noEffectSpans, parentCheckBlock, parseOwnCheckFailures, sameOwnCheckFailures, spanRecord, typecheckSection, type AttemptRecord, type EditedSpan, type FailStage, type GapRowReader, type OwnCheckFailure } from "./retry-evidence.js";
 
 export function assertAnchorInWindow(window: string, ops: ReadonlyArray<{ kind?: string; path?: string; old_string?: string }>): Array<{ path: string; oldHead: string; wouldMatchWithoutTrailingSemicolon: boolean }> {
   const missing: Array<{ path: string; oldHead: string; wouldMatchWithoutTrailingSemicolon: boolean }> = [];
@@ -3588,7 +3588,11 @@ function classifyComposeFailure(appliedOps: Array<{ ok: boolean; detail?: string
 /** The class a failed compose records. An environment condition wins over any draft class; a withhold
  *  because a shaped policy (the autonomy scope) could not be read is one, so a draft that applied and
  *  verified cleanly is not recorded as semantic_reject, the class the classifier falls to otherwise. */
-export function composeLessonClass(envClass: string | null, policyUnreadable: string | null, appliedOps: Array<{ ok: boolean; detail?: string }>, verifyResults: Array<{ ok: boolean; output: string }>, semanticReason: string, scopeWithheld = false): string {
+export function composeLessonClass(envClass: string | null, policyUnreadable: string | null, appliedOps: Array<{ ok: boolean; detail?: string }>, verifyResults: Array<{ ok: boolean; output: string; stage?: FailStage | null; constraint_unrunnable?: string }>, semanticReason: string, scopeWithheld = false): string {
+  // A draft refused by a structural constraint (checkMustBeCalled) before verify: its class says so. A constraint check
+  // that could not run is an environment condition (like env_policy_unreadable), never a draft defect.
+  const cf = verifyResults.find((v) => !v.ok);
+  if (!envClass && !policyUnreadable && !scopeWithheld && !appliedOps.some((a) => !a.ok) && cf?.stage === "constraint") return cf.constraint_unrunnable ? "env_constraint_unrunnable" : "constraint_unmet";
   // A READABLE scope that excludes a touched path withholds a draft that applied and verified cleanly; the
   // classifier would fall through to semantic_reject for it, the same mislabel as the unreadable case.
   return envClass ?? (policyUnreadable ? "env_policy_unreadable" : scopeWithheld ? "scope_refused" : classifyComposeFailure(appliedOps, verifyResults, semanticReason));
@@ -3634,7 +3638,22 @@ async function appendComposeLesson(cls: string, reason: string, vessels: string,
       })();
       // A lock record (no_effect_vs_parent) is evicted last: it lifts when its region's text changes, not by age,
       // so refusal lessons cannot push the lock they report out of the window.
-      while (lessons.length > 8) { const i = lessons.findIndex((l) => l?.no_effect_vs_parent !== true); lessons.splice(i >= 0 ? i : 0, 1); }
+      // An ACTIVE constraint's latest record is protected the same way (it lifts by a later lift record, not by age);
+      // a lifted constraint's records are unprotected and older than their lift, so they go first.
+      const constraintKeep = (): Set<Record<string, unknown>> => {
+        const keep = new Set<Record<string, unknown>>();
+        for (const c of activeMustBeCalled(lessons)) {
+          const last = [...lessons].reverse().find((l) => Array.isArray(l?.constraints) && (l.constraints as MustBeCalledConstraint[]).some((x) => x?.symbol === c.symbol));
+          if (last) keep.add(last);
+        }
+        return keep;
+      };
+      while (lessons.length > 8) {
+        const keep = constraintKeep();
+        let i = lessons.findIndex((l) => l?.no_effect_vs_parent !== true && !keep.has(l));
+        if (i < 0) i = lessons.findIndex((l) => l?.no_effect_vs_parent !== true);
+        lessons.splice(i >= 0 ? i : 0, 1);
+      }
       meta.failure_lessons = lessons;
       // PRESERVE the gap's real identity on write-back. This write only ATTACHES failure
       // lessons — it must NEVER rewrite the gap's category/summary. Historically it HARDCODED
@@ -3668,7 +3687,7 @@ async function appendComposeLesson(cls: string, reason: string, vessels: string,
       // dispositioned/skipped, not infinitely recommitted). The failure_lessons write above still
       // records the class so the drafter keeps learning.
       const _recommitDepth = (String(gap.id).match(/recommit-/g) ?? []).length;
-      if (reCommit && _recommitDepth < 2 && cls !== "scope_refused" && cls !== "env_policy_unreadable" && cls !== "no_effect_region" && !reason.startsWith("[deterministic] ")) { const baseId = String(gap.id).replace(/^(?:recommit-)+/, ""); const baseClosed = baseId === String(gap.id) ? (typeof (gap as { status?: unknown }).status === "string" && (gap as { status?: unknown }).status === "closed") : false; if (baseClosed) { console.log(`[compose-lessons] recommit SKIPPED: base gap ${baseId} is closed`); } else {
+      if (reCommit && _recommitDepth < 2 && cls !== "scope_refused" && cls !== "env_policy_unreadable" && cls !== "no_effect_region" && cls !== "constraint_unmet" && cls !== "env_constraint_unrunnable" && !reason.startsWith("[deterministic] ")) { const baseId = String(gap.id).replace(/^(?:recommit-)+/, ""); const baseClosed = baseId === String(gap.id) ? (typeof (gap as { status?: unknown }).status === "string" && (gap as { status?: unknown }).status === "closed") : false; if (baseClosed) { console.log(`[compose-lessons] recommit SKIPPED: base gap ${baseId} is closed`); } else {
         await resolveSubstrateGapWrite({
           type: "substrateGap_write",
           gap: {
@@ -3937,7 +3956,7 @@ const BASELINE_CACHE_TTL_MS = 2 * 60 * 60 * 1000;
 const baselineCache = new Map<string, { at: number; tsErrors: string[]; testFails: string[]; testPass: number | null }>();
 
 /** One vessel's verify result; `stage` and `own` feed the failed attempt's structured lesson record. */
-export type VerifyResult = { vessel: string; errors: number | string; exit_code: number | null; ok: boolean; output: string; stage?: FailStage | null; own?: { test_file: string; failing: OwnCheckFailure[]; no_effect_vs_parent?: boolean; base_sha?: string; parent_cached?: "hit" | "miss" } };
+export type VerifyResult = { vessel: string; errors: number | string; exit_code: number | null; ok: boolean; output: string; stage?: FailStage | null; constraint_unmet?: MustBeCalledConstraint[]; constraint_unrunnable?: string; own?: { test_file: string; failing: OwnCheckFailure[]; no_effect_vs_parent?: boolean; base_sha?: string; parent_cached?: "hit" | "miss" } };
 /** Parent-tree runs of a gap's own check, keyed (gap, vessel, base sha, check). */
 const OWN_PARENT_RUNS = new Map<string, string>();
 
@@ -3966,6 +3985,52 @@ export function composeAttemptEvidence(
     ? failedVerify.own.failing.slice(0, 3).map((f) => [`(fail) ${f.name}`, f.expected, f.received].filter(Boolean).join("\n")).join("\n")
     : undefined;
   return { record, ownReason };
+}
+
+/**
+ * The must_be_called gate at its one compose call site, per touched vessel: the draft's edits in that vessel (pre-image
+ * from the rollback snapshot, post-image from disk) and the vessel's src as the draft left it. A refusal is a failed
+ * VerifyResult at stage "constraint" whose output carries the refusal sentence (the lesson reason, verify_failure_reason
+ * and the repair round's input); it is returned before the suite runs.
+ */
+export async function constraintVerify(
+  v: string,
+  vAbs: string,
+  constraints: ReadonlyArray<MustBeCalledConstraint>,
+  draft: ReadonlyArray<{ abs: string; rel: string; pre: string }>,
+  gapId: string,
+): Promise<{ refusal: VerifyResult | null; lifted: ConstraintLift[]; unrunnable?: VerifyResult }> {
+  let mbc: Awaited<ReturnType<typeof checkMustBeCalled>>;
+  try {
+    // Only the files this draft added or modified: a constrained symbol is one the draft newly defines, so its calls
+    // can be nowhere else. An untouched file (broken or not) never enters the verdict.
+    const edits = draft.filter((d) => d.abs.startsWith(vAbs + "/")).map((d) => ({ path: d.rel, pre: d.pre, post: readFileSync(d.abs, "utf8") }));
+    // The legacy exception's base read: a file the draft did not touch is its own base.
+    const readBase = (rel: string): string | null => { try { return readFileSync(`${vAbs}/${rel.replace(/^repos\/[^/]+\//, "")}`, "utf8"); } catch { return null; } };
+    mbc = await checkMustBeCalled(constraints, edits, readBase);
+  } catch (err) {
+    // COULD NOT RUN (an unreadable draft file, a file the parser rejects): an ENVIRONMENT condition, not a refusal of the
+    // draft. It still fails closed (constraintGate refuses an otherwise-green draft), but it carries no constraint_unmet,
+    // so it is never classed constraint_unmet and never counts toward the repeat-refusal escalation.
+    const why = String((err as Error)?.message ?? err).slice(0, 200);
+    console.warn(`[fc-constraint] gap=${gapId || "none"} vessel=${v}: the constraint check could not run: ${why}`);
+    return { refusal: null, lifted: [], unrunnable: { vessel: v, errors: "constraint", exit_code: null, ok: false, output: `== constraint == | CONSTRAINT CHECK COULD NOT RUN: ${why}. The must_be_called constraint could not be verified on this draft, so it is not landed (an environment condition, not a draft defect).`, stage: "constraint", constraint_unrunnable: why } };
+  }
+  if (mbc.unmet.length === 0) return { refusal: null, lifted: mbc.lifted };
+  for (const u of mbc.unmet) console.warn(`[fc-constraint] gap=${gapId || "none"} vessel=${v}: ${mustBeCalledReason(u.symbol, u.detail)}`);
+  const detail = ` | CONSTRAINT UNMET: ${mbc.reason}. A prior attempt of this gap was rejected because ${mbc.unmet.map((u) => u.symbol).join(", ")} had no live caller; a draft that defines it must also call it from live code (not a test, not dead code, not discarding its result, not only from a new function nothing live calls).`;
+  return { refusal: { vessel: v, errors: "constraint", exit_code: null, ok: false, output: `== constraint ==${detail}`, stage: "constraint", constraint_unmet: mbc.unmet.map(({ detail: _d, ...c }) => c) }, lifted: mbc.lifted };
+}
+
+/**
+ * The verify result once the constraint gate has spoken: an unmet constraint refuses before the suite; a check that
+ * could not run lets the suite run (so a broken draft keeps its own failure and class) and refuses only a draft that
+ * would otherwise pass. Fail closed either way.
+ */
+export async function constraintGate(cv: Awaited<ReturnType<typeof constraintVerify>>, runSuite: () => Promise<VerifyResult>): Promise<VerifyResult> {
+  if (cv.refusal) return cv.refusal;
+  const r = await runSuite();
+  return cv.unrunnable && r.ok ? cv.unrunnable : r;
 }
 
 /** The gap store read shared by the pre-prompt hydration and the gate (null = unreadable). */
@@ -6063,7 +6128,20 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
     }
     return { sha, raw, cached: "miss" };
   };
+  // THE must_be_called CONSTRAINT (structural, not advice). A prior attempt of this gap (or its source) was rejected
+  // by the semantic gate because a symbol it introduced had no live caller. A draft that defines that symbol again
+  // must also call it on the live path; checked deterministically on the applied draft, BEFORE the suite runs, and
+  // re-checked on every re-verify (a repair round may add the call). Lifts are carried to the attempt record.
+  const activeConstraints = activeMustBeCalled(priorLessons, gateGapStatus);
+  const constraintLifts: ConstraintLift[] = [];
+  const draftRel = (abs: string): string => ws?.rel(abs) ?? abs.replace(`${REPO_ROOT}/`, "");
   const runVerify = async (v: string): Promise<VerifyResult> => {
+    if (activeConstraints.length === 0) return runVerifySuite(v);
+    const cv = await constraintVerify(v, vesselRoot(v), activeConstraints, [...edited, ...created].map((abs) => ({ abs, rel: draftRel(abs), pre: preEditContent.get(abs) ?? "" })), String(pointer.gap?.id ?? ""));
+    for (const l of cv.lifted) if (!constraintLifts.some((x) => x.symbol === l.symbol)) constraintLifts.push(l);
+    return constraintGate(cv, () => runVerifySuite(v));
+  };
+  const runVerifySuite = async (v: string): Promise<VerifyResult> => {
     const vAbs = vesselRoot(v);
     const sh = await callTool(toolsEndpoint, "shell", {
       // DO NOT RUN A BARE `bun install` HERE — IT CORRUPTS THE SHARED node_modules.
@@ -6803,6 +6881,8 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
   // on_live_path=false → flip FAVORABLE→UNFAVORABLE (rolls back below, gap stays open
   // + informed). Skip when the gate is flag-disabled or there were no edits to judge.
   let semantic_gate: (SemanticGateVerdict & { skipped?: string }) | null = null;
+  // must_be_called constraints this gate run implies (on a rejection), written on the attempt record below.
+  let gateConstraints: MustBeCalledConstraint[] = [];
   if (verdict === "FAVORABLE" && SEMANTIC_CUTOVER_GATE) {
     const editedTouched = touched && [...touched].length > 0;
     if (!editedTouched) {
@@ -7042,6 +7122,16 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
           ...semantic_gate,
           reachable_symbols: facts.filter((f) => f.reachable).map((f) => f.symbol).slice(0, 12),
         };
+      }
+
+      // RECORD (and LIFT) must_be_called. A rejection names the symbols this draft introduced with no live caller;
+      // the next attempt is held to calling them. A constrained symbol the gate now finds reachable is lifted: the
+      // gate that imposed the constraint has re-judged it.
+      {
+        const draftFiles = [...edited, ...created].map((abs) => ({ abs, pre: preEditContent.get(abs) ?? "", post: postPatchContents.get(abs) ?? "" }));
+        gateConstraints = mustBeCalledFromGate(semantic_gate, facts, (sym) => { const f = draftFiles.find((d) => introducesDefinition(d.pre, d.post, sym)); return f ? draftRel(f.abs) : null; });
+        for (const c of activeConstraints) if (facts.some((f) => f.symbol === c.symbol && f.reachable) && !constraintLifts.some((x) => x.symbol === c.symbol)) constraintLifts.push({ symbol: c.symbol, why: "the semantic gate judged it reachable" });
+        if (gateConstraints.length > 0) console.log(`[fc-constraint] gap=${String(pointer.gap?.id ?? "none")}: recorded ${gateConstraints.map((c) => `must_be_called(${c.symbol}) introduced in ${c.introduced_in}`).join(", ")}`);
       }
 
       console.log(`[development-vessel] semantic-gate ${JSON.stringify({
@@ -7507,7 +7597,7 @@ const earlyAttempt = await Promise.race([
       // the draft (own check red, a stray test edit, a contract breach), that sentence names what to fix.
       // The suite tail below is dominated by UNRELATED pre-existing failures: the impulses-templates gap's
       // record read "Phase 10 P1 — atomic α/β …", and its drafts kept editing the mock-module guard.
-      const gateAt = raw.search(/ \| (THE GAP'S OWN CHECK|THE GAP'S CHECK CANNOT|EDITS A TEST FILE|THE GAP STORE COULD NOT)/);
+      const gateAt = raw.search(/ \| (THE GAP'S OWN CHECK|THE GAP'S CHECK CANNOT|EDITS A TEST FILE|THE GAP STORE COULD NOT|CONSTRAINT UNMET)/);
       if (gateAt >= 0) return raw.slice(gateAt + 3, gateAt + 3 + 900);
       // NO TSC ERROR MEANS THE FAILURE IS DOWNSTREAM — KEEP THE TAIL, NOT THE HEAD.
       //
@@ -7570,6 +7660,24 @@ const earlyAttempt = await Promise.race([
     // any effect on that check. The next attempt's prompt shows it and its applier enforces it.
     const { record: attemptRecord, ownReason } = composeAttemptEvidence(applied, repairSpans, verify, scopeWithheld, policyUnreadable);
     if (refusalEvidence && lessonClass === "no_effect_region") { Object.assign(attemptRecord, refusalEvidence); refusalsRecorded = true; }
+    // must_be_called on the record: imposed by this attempt's gate, re-asserted when refused, lifted when met or moot.
+    // A refusal repeated on one constraint escalates once, through the same path as a repeated no-effect refusal.
+    const constraintUnmet = verify.flatMap((v) => v.constraint_unmet ?? []);
+    const recordConstraints = [...gateConstraints, ...constraintUnmet.filter((c) => !gateConstraints.some((g) => g.symbol === c.symbol))];
+    // Written (possibly empty) on every gate rejection, so legacyMustBeCalled never re-derives from a new-format lesson.
+    if (recordConstraints.length > 0 || (semantic_gate && (!semantic_gate.addresses || semantic_gate.on_live_path === false))) attemptRecord.constraints = recordConstraints;
+    const lifts = constraintLifts.filter((l) => !recordConstraints.some((c) => c.symbol === l.symbol));
+    if (lifts.length > 0) attemptRecord.constraints_lifted = lifts;
+    if (constraintUnmet.length > 0) {
+      // Escalation needs the stored row and is once per attempt (a no-effect escalation already recorded wins).
+      const gid = String(pointer.gap?.id ?? "");
+      const canEscalate = !!gid && !attemptRecord.escalation;
+      const row = canEscalate ? ((await readComposeGapRows(gid).catch(() => null)) ?? []).find((r) => String(r.id) === gid) ?? null : null;
+      const ownLessons = canEscalate ? ((row?.classification_metadata ?? pointer.gap?.classification_metadata) as Record<string, unknown> | undefined)?.failure_lessons : [];
+      const ce = await constraintRefusalEvidence(verify, row, ownLessons, async (g, why) => (await import("./gap-to-feature.js")).escalateToDecomposition(g, why));
+      attemptRecord.refusals = [...(attemptRecord.refusals ?? []), ...ce.refusals];
+      if (canEscalate && ce.escalation) attemptRecord.escalation = ce.escalation;
+    }
     const lessonReason = String(
       failedApply?.detail
       ?? ownReason
@@ -7578,6 +7686,13 @@ const earlyAttempt = await Promise.race([
       ?? policyUnreadable
       ?? verdict,
     );
+    // PARK GUARD: the constraint check could not run on this gap's consecutive attempts (counted from its stored lessons).
+    if (lessonClass === "env_constraint_unrunnable" && pointer.gap?.id) {
+      const gid = String(pointer.gap.id);
+      const prow = ((await readComposeGapRows(gid).catch(() => null)) ?? []).find((r) => String(r.id) === gid) ?? null;
+      const park = constraintParkLine(gid, ((prow?.classification_metadata ?? pointer.gap.classification_metadata) as Record<string, unknown> | undefined)?.failure_lessons, lessonClass, String(verify.find((v) => v.constraint_unrunnable)?.constraint_unrunnable ?? ""));
+      if (park) console.warn(park);
+    }
     await appendComposeLesson(lessonClass, (semantic_gate?.hard_fail === true && semantic_gate?.llm_consulted === false ? "[deterministic] " : "") + lessonReason, [...touched].join(","), pointer.gap, attemptRecord);
     try {
       const tscText = verify.find((v) => !v.ok)?.output ?? "";
@@ -7778,7 +7893,7 @@ for (const _c of cutovers as Array<Record<string, unknown>>) { const _ops = (((_
       // terminal_refusal: the gap is closed or its own check is already green on the parent; gap-to-feature
       // counts it as a NON-ATTEMPT (no failed_attempts bump, no -narrowed/decompose redispatch).
       terminal_refusal: terminalRefusal,
-      failure_kind: effectiveVerdict === "FAVORABLE" ? null : terminalRefusal ? "terminal_refusal" : classifyEnvironmentFailure(cutovers) || verify.some((vr) => !vr.ok && (vr.exit_code === null || !vr.output || /timed out after \d+\s*ms/i.test(vr.output))) ? "environment" : "fix",
+      failure_kind: effectiveVerdict === "FAVORABLE" ? null : terminalRefusal ? "terminal_refusal" : classifyEnvironmentFailure(cutovers) || verify.some((vr) => !vr.ok && (vr.stage !== "constraint" || !!vr.constraint_unrunnable) && (vr.exit_code === null || !vr.output || /timed out after \d+\s*ms/i.test(vr.output))) ? "environment" : "fix",
       summary: plan.summary,
       touched_vessels: [...touched],
       op_count: ops.length,

@@ -363,6 +363,17 @@ export async function resolveGapLifecycleScan(p: GapLifecycleScanPointer): Promi
   const autoClose = p.autoClose === true;
   const maxClose = p.maxClose ?? 25;
   const dryRun = p.dry_run === true;
+  // ONLY THE NODE THAT HOLDS THE GAP STORE WRITES TO IT. A node with GAP_STORE_ENDPOINT set reads a
+  // LOCAL gaps.json that can be days stale, but every substrateGap_write it sends is forwarded to the
+  // authoritative store. Measured 2026-10-01: node 2 ran this scan from a frozen copy (total 240,
+  // open 205 on every run) and closed 104 gaps on the hub in one run, 84 of them under 2 days old as
+  // "expired_not_redetected >48h". The falsify pass already had this guard; the close passes and
+  // the backlog meta-gap did not. Reads, ranking and the local funnel history still run.
+  const storeHeldElsewhere = Boolean(process.env["GAP_STORE_ENDPOINT"]);
+  const writesHere = !dryRun && !storeHeldElsewhere;
+  if (storeHeldElsewhere && !dryRun) {
+    console.log(`[gap_lifecycle_scan] gap store held elsewhere (GAP_STORE_ENDPOINT set): reading a local copy, so no gap is closed, expired or posted from this node`);
+  }
   const emitUrl = p.devVesselImpulsesUrl ?? DEFAULT_URL;
   const staleBefore = Date.now() - staleHours * 3_600_000;
 
@@ -460,7 +471,7 @@ export async function resolveGapLifecycleScan(p: GapLifecycleScanPointer): Promi
   const autoCloseEmitter: GapEventEmitter = {
     async emit(_event) { /* scan-mode: no-op */ },
   };
-  const { closedIds, closureEvents } = autoClose && !dryRun
+  const { closedIds, closureEvents } = autoClose && writesHere
     ? await autoCloseStaleGaps(openGapRecords, autoCloseStore, autoCloseEmitter)
     : { closedIds: [] as string[], closureEvents: [] as GapClosureEvent[] };
 
@@ -468,7 +479,7 @@ export async function resolveGapLifecycleScan(p: GapLifecycleScanPointer): Promi
   const authHeader: Record<string, string> = apiKey ? { Authorization: `ApiKey ${apiKey}` } : {};
 
   const lowValueClosed: string[] = [];
-  if (autoClose && !dryRun) {
+  if (autoClose && writesHere) {
     for (const id of closedIds.slice(0, maxClose)) {
       const g = open.find((x) => x.id === id);
       if (!g) continue;
@@ -551,7 +562,7 @@ export async function resolveGapLifecycleScan(p: GapLifecycleScanPointer): Promi
     return (isDetectorStale || isExpireStale || isBaselineTypecheckStale) && !lowValueClosed.includes(g.id!);
   });
   const expired: string[] = [];
-  if (autoClose && !dryRun) {
+  if (autoClose && writesHere) {
     for (const g of expiredCandidates.slice(0, maxExpire)) {
       const reopens = (g as { reopen_count?: number }).reopen_count ?? 0;
       if (reopens >= 3) {
@@ -592,7 +603,7 @@ export async function resolveGapLifecycleScan(p: GapLifecycleScanPointer): Promi
     });
     return resp.ok;
   };
-  if (autoClose && !dryRun) {
+  if (autoClose && writesHere) {
     for (const gap of open) {
       if (closedCount >= maxClose) break;
       if (gap.category !== "missing_capability") continue;
@@ -625,7 +636,7 @@ export async function resolveGapLifecycleScan(p: GapLifecycleScanPointer): Promi
   // 1. Auto-close churned gaps (safe: re-emitted next cycle if still real).
   const closed: string[] = [];
 
-  if (autoClose && !dryRun) {
+  if (autoClose && writesHere) {
     for (const g of churned.slice(0, maxClose)) {
       try {
         const reprobe = await dispatchScenario(g as unknown as { [key: string]: unknown; detected_by?: string; classification_metadata?: { scenario?: string } });
@@ -654,7 +665,7 @@ export async function resolveGapLifecycleScan(p: GapLifecycleScanPointer): Promi
 
   // Persistent compose failure auto-close
   const persistentClosed: string[] = [];
-  if (autoClose && !dryRun) {
+  if (autoClose && writesHere) {
     const excludedIds = new Set([...lowValueClosed, ...expired, ...closed]);
     const persistentCandidates = remainingOpen.filter((g) => {
       const lessons = ((g as any).classification_metadata?.failure_lessons ?? []) as unknown[];
@@ -691,7 +702,7 @@ export async function resolveGapLifecycleScan(p: GapLifecycleScanPointer): Promi
   for (const g of staleOpen) byCat[g.category ?? "?"] = (byCat[g.category ?? "?"] ?? 0) + 1;
   const topCats = Object.entries(byCat).sort((a, b) => b[1] - a[1]).slice(0, 5);
   let backlogPosted: number | "error" | null = null;
-  if (!dryRun && staleOpen.length >= 50) {
+  if (writesHere && staleOpen.length >= 50) {
     try {
       const resp = await fetch(emitUrl, {
         method: "POST", headers: { "Content-Type": "application/json", ...authHeader },
@@ -769,7 +780,7 @@ export async function resolveGapLifecycleScan(p: GapLifecycleScanPointer): Promi
   // A node whose gap store is remote (GAP_STORE_ENDPOINT set) reads a LOCAL copy that can be days
   // stale but writes to the authoritative store, so a falsify write (status "open") could reopen a
   // gap that is closed there. Only the node that holds the store falsifies.
-  if (!dryRun && p.falsify !== false && !process.env["GAP_STORE_ENDPOINT"]) {
+  if (writesHere && p.falsify !== false) {
     const maxFalsify = p.maxFalsify ?? 10;
     // DECOMPOSE BEFORE ADMISSION (contained-self-development 6.2/6.3). Bounded per scan; the scan
     // runs ~20 times a day, so this is at most ~40 decomposition calls a day, one per gap ever.
@@ -911,6 +922,7 @@ export async function resolveGapLifecycleScan(p: GapLifecycleScanPointer): Promi
       backlog_meta_gap_posted: backlogPosted,
       top_stale_categories: Object.fromEntries(topCats),
       stale_hours: staleHours, dry_run: dryRun, auto_close: autoClose,
+      writes_skipped: storeHeldElsewhere && !dryRun ? "gap store held elsewhere (GAP_STORE_ENDPOINT)" : null,
       completed_at: new Date().toISOString(),
     },
   };

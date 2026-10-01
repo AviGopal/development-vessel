@@ -38,12 +38,15 @@
  * node holds its copies, its edit site and its must-fail control; an instrument with
  * no row does not run. Instruments are still code; a new instrument is a commit.
  */
-import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ResolverResult } from "./types.js";
 import { resolveSubstrateGap, resolveSubstrateGapWrite, takeBirthVerdict, class2PredicateKey, birthTreeMoved, BIRTH_PENDING_STALE_MS } from "./substrate-gap.js";
 import { createHash } from "node:crypto";
 import { gateCallSites, measureRetryEvidence, noEffectOverlapRefusal, spanRecord, REFUSAL_JOURNAL_GREP, refusalJournalCounts, refusalJournalLine, refusalsNotRecorded, storedRefusalCounts } from "./retry-evidence.js";
+import { HttpDiscoveryAdapter, FetchAdapter } from "@avigopal/ias-executor-ts/adapters";
+import type { DiscoveryLookup } from "@avigopal/ias-executor-ts/adapters";
 
 export interface SelfFactReconcilePointer {
   type: "self_fact_reconcile";
@@ -53,6 +56,8 @@ export interface SelfFactReconcilePointer {
   key?: string;
   /** Plant the positive-control canary (default true). The sweep's Class-2 re-check passes false. */
   plant_canary?: boolean;
+  /** A per-node finding's node. A node that is not this one cannot judge it, so the run reports unobserved. */
+  node?: string;
   /** File divergences as gaps (default true). The sweep's re-check passes false. */
   file_gaps?: boolean;
 }
@@ -64,6 +69,10 @@ export interface SelfFactDivergence {
   readonly copy: string;
   readonly detail: string;
   readonly canary: boolean;
+  /** Set when the finding is about one node's own state (its journal, its process): only that node judges it. */
+  readonly node?: string;
+  /** false = counted in divergence_count (a keyed predicate can read it) but never filed as its own gap. */
+  readonly file?: boolean;
 }
 
 export interface SelfFactResult {
@@ -140,7 +149,18 @@ function hasTsSources(dir: string, depth = 2): boolean {
 
 // ─── the rows (selfFactSpec) ────────────────────────────────────────────────
 const ROWS_PATH = "scripts/substrate/self-facts.json";
-export interface SelfFactRow { id: string; instrument: string; profiles: string[]; edit_site: string; must_fail: string; window_hours?: number; n_floor?: number; unit?: string; pattern?: string; max?: number; must_fail_line?: string; gate?: "active" | "timer"; must_fail_check?: Record<string, unknown>; repo?: string; site_file?: string; min_sites?: number; journal_unit?: string; journal_grace_minutes?: number; notes?: string }
+export interface SelfFactRow {
+  id: string; instrument: string; profiles: string[]; edit_site: string; must_fail: string; window_hours?: number; n_floor?: number; unit?: string; pattern?: string; max?: number; must_fail_line?: string; gate?: "active" | "timer";
+  must_fail_check?: Record<string, unknown>; repo?: string; site_file?: string; min_sites?: number; journal_unit?: string; journal_grace_minutes?: number; notes?: string;
+  /** A standing gap this row's findings belong to; written into each filed gap's metadata and summary. */
+  linked_gap?: string;
+  /** lookup_classification: the shapes its planted failed lookups ask for, and the planted failure modes. */
+  probe_shapes?: string[]; probe_modes?: Array<"timeout" | "network">;
+  /** typed_seam_sites: the site regex (git grep -E), pathspecs per clone and in the super-repo, and what is the seam itself. */
+  site_pattern?: string; pathspecs?: string[];
+  /** typed_seam_sites: a repo whose origin/dev was last fetched or moved longer ago than this reads unobserved (default 6). */
+  max_ref_age_hours?: number; super_repo_pathspecs?: string[]; exclude_repos?: string[]; seam_files?: string[];
+}
 function readRows(): SelfFactRow[] | null {
   const raw = git(["show", `origin/dev:${ROWS_PATH}`], superRepoRoot());
   if (raw === null) return null;
@@ -154,6 +174,119 @@ function readRows(): SelfFactRow[] | null {
 }
 // The node's profile is bootstrap identity (where this node sits), not behaviour.
 const nodeProfile = (): string => process.env["PROFILE_EFFECTIVE"] ?? process.env["PROFILE"] ?? "standalone";
+// Which node this is (bootstrap identity), for findings about one node's own journal or process.
+export const thisNode = (): string => (process.env["SUBSTRATE_NAME"] ?? "").trim() || hostname();
+
+const unitActive = (unit: string): string => new TextDecoder().decode(Bun.spawnSync(["systemctl", "is-active", unit], { stdout: "pipe", stderr: "pipe", timeout: 5_000 }).stdout).trim();
+let isUnitActive = unitActive;
+/** Tests only: stand in for systemctl is-active. */
+export function __setUnitActiveForTests(f: ((unit: string) => string) | null): void { isUnitActive = f ?? unitActive; }
+
+// ─── lookup_classification: a planted failed discovery lookup must read as "lookup failed" ──
+/** The lines the policy readers log for an unreadable policy, built from a lookup's own description
+ *  (gap-to-feature readSpendEnvelope / autonomyScopeExcludes wording). */
+export function policyReaderTexts(lookupText: string): string[] {
+  return [`envelope unreadable: ${lookupText}`, `scope unreadable (${lookupText})`];
+}
+/** A planted failure is read correctly when discovery reported it as failed (ok:false), its description
+ *  says "lookup failed", and no reader line built from it matches the row's defect pattern. An EMPTY ok:true
+ *  answer from an address that cannot answer is the defect itself (a failure read as "no producer"); only an
+ *  answer that names producers means something really answered there, so the plant did not take. */
+export function classifyPlantedLookup(r: { ok: boolean; producers?: unknown[] }, lookupText: string, defect: RegExp): { planted: boolean; misread: string | null } {
+  if (r.ok && Array.isArray(r.producers) && r.producers.length > 0) return { planted: false, misread: null };
+  if (r.ok) return { planted: true, misread: `the failed lookup came back as an empty answer ("${lookupText.slice(0, 120)}")` };
+  if (!/lookup failed/.test(lookupText)) return { planted: true, misread: `described as "${lookupText.slice(0, 120)}", not "lookup failed"` };
+  const hit = policyReaderTexts(lookupText).find((t) => defect.test(t));
+  // Never quote the hit itself: a detail that matches the pattern would be counted when it is logged.
+  return { planted: true, misread: hit ? `a reader line built from it matches the defect pattern (${hit.startsWith("scope") ? "scope" : "envelope"} reader)` : null };
+}
+/** One planted failed lookup through the typed ias seam, on a fresh client (never the process-wide one). */
+async function plantedLookupDefault(shape: string, mode: "timeout" | "network"): Promise<DiscoveryLookup> {
+  if (mode === "network") {
+    // Nothing listens on the discard port; the connection is refused.
+    return new HttpDiscoveryAdapter(new FetchAdapter(), "http://127.0.0.1:9", { lookupBudgetMs: 2_000, failureBackoffMs: 0 }).lookup(shape);
+  }
+  // A discovery that accepts and never answers: the shape of a slow peer union.
+  const server = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Promise<Response>(() => {}) });
+  try {
+    return await new HttpDiscoveryAdapter(new FetchAdapter(), `http://127.0.0.1:${server.port}`, { lookupBudgetMs: 300, failureBackoffMs: 0 }).lookup(shape);
+  } finally {
+    server.stop(true);
+  }
+}
+let plantedLookup = plantedLookupDefault;
+/** Tests only: stand in for the planted lookup (e.g. an adapter that reads a failure as an empty answer). */
+export function __setPlantedLookupForTests(f: typeof plantedLookupDefault | null): void { plantedLookup = f ?? plantedLookupDefault; }
+// describe() through an instance: describeDiscoveryLookup is not value-imported, so an older ias dist still loads (as in config.ts).
+const describer = new HttpDiscoveryAdapter(new FetchAdapter(), "http://127.0.0.1:9");
+const describeLookupText = (r: DiscoveryLookup): string => {
+  const d = (describer as { describe?: (x: DiscoveryLookup) => string }).describe;
+  return typeof d === "function" ? d.call(describer, r) : `${r.shape} lookup failed (adapter_outdated): the loaded ias-executor-ts dist predates the typed discovery lookup()`;
+};
+
+// ─── typed_seam_sites: discovery lookups written outside the typed ias seam ──
+/** Count site lines from `git grep -n <re> <ref> -- …` output ("<ref>:<path>:<line>:<text>"), leaving out the seam files. */
+export function countSiteLines(lines: readonly string[], ref: string, seamFiles: readonly string[]): { count: number; sites: string[] } {
+  const sites: string[] = [];
+  for (const l of lines) {
+    if (!l) continue;
+    const rest = l.startsWith(ref + ":") ? l.slice(ref.length + 1) : l;
+    const m = rest.match(/^([^:]+):(\d+):/);
+    if (!m) continue;
+    if (seamFiles.includes(m[1]!)) continue;
+    sites.push(`${m[1]}:${m[2]}`);
+  }
+  return { count: sites.length, sites };
+}
+/** The sites in one repo at `ref`, or null (said in the read-error ledger) when git could not answer. */
+export function countSites(repoDir: string, ref: string, sitePattern: string, pathspecs: readonly string[], seamFiles: readonly string[] = []): { count: number; sites: string[] } | null {
+  try {
+    const p = Bun.spawnSync(["git", "grep", "-n", "-E", sitePattern, ref, "--", ...pathspecs], { cwd: repoDir, stdout: "pipe", stderr: "pipe" });
+    // git grep exits 1 when nothing matched: a read, zero sites.
+    if (p.exitCode === 1 && new TextDecoder().decode(p.stderr).trim() === "") return { count: 0, sites: [] };
+    if (p.exitCode !== 0) return noteReadError(`git grep in ${repoDir}`, new TextDecoder().decode(p.stderr).trim() || `exit ${p.exitCode}`);
+    return countSiteLines(new TextDecoder().decode(p.stdout).split("\n"), ref, seamFiles);
+  } catch (err) {
+    return noteReadError(`git grep in ${repoDir}`, err);
+  }
+}
+/** Hours since this clone last learned origin/dev: the newest of its FETCH_HEAD mtime (every fetch rewrites it, even one
+ *  that moves nothing) and the reflog time of the ref's last update (a fetch or push that moved it). Null when neither
+ *  exists: a ref never fetched has no age, so it cannot be fresh. */
+export function refAgeHours(repoDir: string, ref = "refs/remotes/origin/dev", nowMs = Date.now()): number | null {
+  let newest = 0;
+  try {
+    const p = Bun.spawnSync(["git", "rev-parse", "--git-path", "FETCH_HEAD"], { cwd: repoDir, stdout: "pipe", stderr: "pipe" });
+    if (p.exitCode === 0) {
+      const rel = new TextDecoder().decode(p.stdout).trim();
+      const fh = rel.startsWith("/") ? rel : join(repoDir, rel);
+      if (existsSync(fh)) newest = Math.max(newest, statSync(fh).mtimeMs);
+    }
+    const l = Bun.spawnSync(["git", "log", "-g", "-n", "1", "--format=%gd", "--date=unix", ref], { cwd: repoDir, stdout: "pipe", stderr: "pipe" });
+    const m = new TextDecoder().decode(l.stdout).match(/@\{(\d+)\}/);
+    if (l.exitCode === 0 && m) newest = Math.max(newest, Number(m[1]) * 1000);
+  } catch (err) {
+    noteReadError(`ref age in ${repoDir}`, err);
+  }
+  return newest > 0 ? (nowMs - newest) / 3_600_000 : null;
+}
+/** The must-fail control: a scratch repo holding exactly one planted site, plus a test file and a .js twin that
+ *  both carry one too and must NOT count. Counted by the same countSites with the row's own pattern and pathspecs. */
+export function scratchSiteCount(sitePattern: string, pathspecs: readonly string[]): number | null {
+  const dir = mkdtempSync(join(tmpdir(), "self-fact-seam-canary-"));
+  try {
+    mkdirSync(join(dir, "src"), { recursive: true });
+    const site = `await fetch(url, { body: JSON.stringify({ pointer: { type: "vesselCapability", shape } }) });\n`;
+    writeFileSync(join(dir, "src", "planted.ts"), site);
+    writeFileSync(join(dir, "src", "planted.test.ts"), site);
+    writeFileSync(join(dir, "src", "planted.js"), site);
+    const g = (args: string[]) => Bun.spawnSync(["git", "-c", "user.name=self-fact-reconcile canary", "-c", "user.email=canary@localhost", ...args], { cwd: dir, stdout: "pipe", stderr: "pipe" }).exitCode;
+    if (g(["init", "-q"]) !== 0 || g(["add", "-A"]) !== 0 || g(["commit", "-q", "-m", "planted site"]) !== 0) return noteReadError("scratch canary repo", "git init/commit failed");
+    return countSites(dir, "HEAD", sitePattern, pathspecs)?.count ?? null;
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
 
 // ─── gap_birth_verdicts: the standing measurement of gap_falsify v2 ─────────
 /**
@@ -447,6 +580,121 @@ const FACTS: Record<string, FactFn> = {
     }
     return { fact, source_read: true, copies_read: 2, divergences: out, note: `${m.retries_with_spans} retries with spans, ${m.retries_overlapping_no_effect} overlapping; ${m.lessons_class_matching_stage}/${m.lessons_with_stage} lessons class-matches-stage; ${m.gaps_stuck_on_refusals} gap(s) stuck on refusals (${m.gaps_stuck_unescalated} unescalated); gate call sites ${sites.consumed}/${sites.calls} (min ${minSites}) over ${hours}h` };
   },
+  /**
+   * A failed discovery lookup must never be read as "no producer" (intervention 1, ias 4719cb4 + dev 8b48805f).
+   * Per node. Two readings, both under the ROW id:
+   *  1. COUNT: lines in `unit`'s journal over window_hours matching `pattern` (the misread signature); more than
+   *     `max` is a finding keyed by this node. Positive control for the counter: the pattern must match its own
+   *     must_fail_line, as in journal_pattern.
+   *  2. PLANTED FAILURE (the must-fail control on the behaviour): for each probe shape and mode, a failed lookup is
+   *     planted through the typed ias seam on a fresh client (a refused connection; a discovery that never
+   *     answers). Its description must say "lookup failed" and no policy-reader line built from it may match
+   *     `pattern`. A misread is a REAL finding (the regression itself), filed against the row's edit site, not a
+   *     blind canary; an EMPTY answer is the misread itself. A plant answered WITH producers is unobserved.
+   * Unlike journal_pattern this reads development-vessel's own journal, so it refuses a pattern that matches any
+   * text this row would itself cause to be logged (its gap ids, details, falsifier), instead of refusing the unit.
+   * Coverage: (2) exercises the seam and its description; a reader that stops calling the seam is typed_seam_sites'.
+   */
+  lookup_classification: async (canary, row) => {
+    const fact = row.id;
+    const node = thisNode();
+    const unit = String(row.unit ?? "");
+    const pattern = String(row.pattern ?? "");
+    const max = typeof row.max === "number" && row.max >= 0 ? row.max : 0;
+    const hours = typeof row.window_hours === "number" && row.window_hours > 0 ? row.window_hours : 1;
+    const shapes = Array.isArray(row.probe_shapes) && row.probe_shapes.length > 0 ? row.probe_shapes : ["poolImpulse"];
+    const modes = Array.isArray(row.probe_modes) && row.probe_modes.length > 0 ? row.probe_modes : (["timeout", "network"] as const);
+    const out: SelfFactDivergence[] = [];
+    const unread = (note: string): SelfFactResult => ({ fact, source_read: false, copies_read: 0, divergences: [], note });
+    if (!/^[A-Za-z0-9@._-]+$/.test(unit) || !pattern) return unread(`row ${row.id}: unit or pattern missing or invalid`);
+    if (row.id in FACTS) return unread(`row ${row.id}: a row id must not equal an instrument name`);
+    let re: RegExp;
+    try { re = new RegExp(pattern); } catch (err) { return unread(`row ${row.id}: invalid pattern: ${String(err)}`); }
+    const countKey = `${node}`;
+    const misreadKey = `${node}-planted-lookup-misread`;
+    const countDetail = (n: number) => `${n} line(s) in ${unit}'s journal on node ${node} over the last ${hours}h read a failed or absent discovery lookup as the ${row.id} signature (allowed ${max})`;
+    // Self-quote guard: everything this row can cause to be logged must be invisible to its own pattern.
+    const selfTexts = [countDetail(999), gapId({ fact, key: countKey, source: "", copy: "", detail: "", canary: false }), gapId({ fact, key: misreadKey, source: "", copy: "", detail: "", canary: false }), `class 2: self_fact_reconcile with facts=[${fact}] key=${misreadKey}`, "planted failed lookup misread", `planted failed lookup misread on node ${node}: poolImpulse/timeout: the failed lookup came back as an empty answer ("no poolImpulse producer"); a reader line built from it matches the defect pattern (envelope reader)`];
+    if (selfTexts.some((t) => re.test(t))) return unread(`row ${row.id}: its pattern matches text this row itself logs, so its count would feed itself`);
+    if (isUnitActive(unit) !== "active") return unread(`${unit} is not active on node ${node}, so its journal says nothing about the defect`);
+    let n = 0;
+    try {
+      // The shared journal reader (journal.read), the same one journal_pattern and retry_evidence use.
+      const j = await journal.read(unit, hours, pattern);
+      if ("error" in j) return unread(j.error);
+      for (const line of j.lines) if (re.test(line)) n++;
+    } catch (err) {
+      return unread(`journal of ${unit} unreadable: ${String(err)}`);
+    }
+    if (n > max) out.push({ fact, key: countKey, node, source: `journal:${unit}@${node}`, copy: `last ${hours}h`, detail: countDetail(n), canary: false });
+    // The planted failures.
+    const misreads: string[] = [];
+    let planted = 0;
+    for (const shape of shapes) for (const mode of modes) {
+      let r: DiscoveryLookup;
+      try { r = await plantedLookup(shape, mode); } catch (err) { misreads.push(`${shape}/${mode}: the seam threw instead of answering: ${String(err).slice(0, 120)}`); planted++; continue; }
+      const c = classifyPlantedLookup(r, describeLookupText(r), re);
+      if (!c.planted) return unread(`the planted ${mode} failure for ${shape} was answered with producers, so the control could not be planted and this run is not evidence`);
+      planted++;
+      if (c.misread) misreads.push(`${shape}/${mode}: ${c.misread}`);
+    }
+    if (misreads.length > 0) out.push({ fact, key: misreadKey, node, source: "planted failed lookup through the ias typed seam", copy: `node ${node}`, detail: `planted failed lookup misread on node ${node}: ${misreads.join("; ").slice(0, 600)}`.replace(new RegExp(re.source, "g"), "[matches the row pattern]"), canary: false });
+    if (canary && typeof row.must_fail_line === "string" && re.test(row.must_fail_line) && planted > 0) {
+      out.push({ fact, key: `${row.id}-canary`, node, source: `journal:${unit}@${node}`, copy: `last ${hours}h`, detail: "must-fail control: the pattern matches its own must_fail_line and the planted lookups ran", canary: true });
+    }
+    return { fact, source_read: true, copies_read: 1, divergences: out, note: `node ${node}: ${n} matching line(s) over ${hours}h; ${planted} planted failed lookup(s), ${misreads.length} misread` };
+  },
+  /**
+   * Discovery lookups must converge on the typed ias seam: the count of lookup sites (`site_pattern`, git grep -E)
+   * at origin/dev in every push clone (minus exclude_repos) and in the super-repo (super_repo_pathspecs), minus the
+   * seam's own files, must not exceed the row's `max`. `max` is the ratchet: lowered by a data commit as sites
+   * migrate, never raised. A count above it is a filed finding (a new or restored copy). A count above zero is also
+   * reported under key `sites-remaining` but never filed: it is the done-condition a standing gap's predicate reads.
+   * Must-fail control: a scratch repo with one planted site (and a test file and a .js twin that must not count) is
+   * counted by the same function with the same pattern and pathspecs; the canary is reported only if that count is 1.
+   * A repo whose ref git cannot read makes the row unobserved (an undercount must not read as progress).
+   */
+  typed_seam_sites: (canary, row) => {
+    const fact = row.id;
+    const sitePattern = String(row.site_pattern ?? "");
+    const pathspecs = Array.isArray(row.pathspecs) && row.pathspecs.length > 0 ? row.pathspecs : ["src"];
+    const superSpecs = Array.isArray(row.super_repo_pathspecs) ? row.super_repo_pathspecs : [];
+    const excludeRepos = Array.isArray(row.exclude_repos) ? row.exclude_repos : [];
+    const seam = Array.isArray(row.seam_files) ? row.seam_files : [];
+    const max = typeof row.max === "number" && row.max >= 0 ? row.max : NaN;
+    const maxAge = typeof row.max_ref_age_hours === "number" && row.max_ref_age_hours > 0 ? row.max_ref_age_hours : 6;
+    const out: SelfFactDivergence[] = [];
+    const unread = (note: string): SelfFactResult => ({ fact, source_read: false, copies_read: 0, divergences: [], note });
+    if (!sitePattern || !Number.isFinite(max)) return unread(`row ${row.id}: site_pattern or max missing`);
+    let repos: string[];
+    try { repos = readdirSync(cloneRoot()).filter((r) => !r.includes("-mitosis-") && !excludeRepos.includes(r) && existsSync(join(cloneRoot(), r, ".git"))).sort(); } catch (err) { return unread(`clone root unreadable: ${String(err).slice(0, 100)}`); }
+    const sites: string[] = [];
+    const refs: string[] = [];
+    const failed: string[] = [];
+    const stale: string[] = [];
+    const tally = (label: string, dir: string, specs: string[]) => {
+      // A stale ref undercounts (sites landed since the last fetch are invisible), so it is unobserved, never progress.
+      const age = refAgeHours(dir);
+      if (age === null || age > maxAge) { stale.push(`${label} (${age === null ? "never fetched" : `${age.toFixed(1)}h`})`); return; }
+      const seamHere = seam.filter((s) => s.startsWith(label + ":")).map((s) => s.slice(label.length + 1));
+      const r = countSites(dir, "origin/dev", sitePattern, specs, seamHere);
+      if (!r) { failed.push(label); return; }
+      refs.push(`${label}@${(git(["rev-parse", "--short", "origin/dev"], dir) ?? "?")}`);
+      for (const s of r.sites) sites.push(`${label}:${s}`);
+    };
+    for (const r of repos) tally(r, join(cloneRoot(), r), pathspecs);
+    if (superSpecs.length > 0) tally("super-repo", superRepoRoot(), superSpecs);
+    if (stale.length > 0) return unread(`origin/dev older than ${maxAge}h in ${stale.join(", ")}; a stale ref undercounts, so this run is not evidence`);
+    if (failed.length > 0) return unread(`git could not count sites in ${failed.join(", ")}; an undercount is not progress`);
+    const count = sites.length;
+    if (count > max) out.push({ fact, key: "over-ceiling", source: `git grep origin/dev (${refs.length} repos)`, copy: `ceiling ${max}`, detail: `${count} discovery lookup site(s) outside the typed ias seam, above the ceiling ${max}: a copy was added or restored. Sites: ${sites.join(" ").slice(0, 900)}`, canary: false });
+    if (count > 0) out.push({ fact, key: "sites-remaining", source: `git grep origin/dev (${refs.length} repos)`, copy: "done at 0", detail: `${count} discovery lookup site(s) remain outside the typed ias seam`, canary: false, file: false });
+    if (canary) {
+      const planted = scratchSiteCount(sitePattern, pathspecs);
+      if (planted === 1) out.push({ fact, key: `${row.id}-canary`, source: "scratch repo with one planted site", copy: "count 1", detail: "must-fail control: the planted site raised the count by exactly one", canary: true });
+    }
+    return { fact, source_read: true, copies_read: refs.length, divergences: out, note: `${count} site(s), ceiling ${max}${count < max ? ` (the ceiling can be lowered to ${count})` : ""}; refs ${refs.join(" ")}` };
+  },
   /** The inventory the deploy step reads must equal the inventory the fleet is built from. */
   fleet_inventory_copy: (canary) => {
     const src = readInventory(sourceInventoryPath());
@@ -541,6 +789,7 @@ const FACTS: Record<string, FactFn> = {
 // ─── gap filing ─────────────────────────────────────────────────────────────
 // Edit sites come from the rows read on this run (set by the resolver before filing).
 let rowEditSite: Record<string, string> = {};
+let rowLinkedGap: Record<string, string> = {};
 function gapId(d: SelfFactDivergence): string {
   return `self-fact-divergence-${d.fact}-${d.key}`.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 140);
 }
@@ -552,16 +801,18 @@ async function fileDivergence(d: SelfFactDivergence): Promise<boolean> {
       category: "self_knowledge",
       source: "substrate_detected",
       status: "open",
-      summary: `self_fact_reconcile found the fact "${d.fact}" diverged at "${d.key}": ${d.detail}. Source: ${d.source}. Copy: ${d.copy}. A copy the system reads about itself no longer matches the thing it copies; the system acted on the copy. Reconcile the copy to its source (or the source to the world), through the lane; this gap closes only when self_fact_reconcile re-reads both and finds no divergence for this fact.`,
+      summary: `self_fact_reconcile found the fact "${d.fact}" diverged at "${d.key}": ${d.detail}. Source: ${d.source}. Copy: ${d.copy}. A copy the system reads about itself no longer matches the thing it copies; the system acted on the copy. Reconcile the copy to its source (or the source to the world), through the lane; this gap closes only when self_fact_reconcile re-reads both and finds no divergence for this fact.${rowLinkedGap[d.fact] ? ` Part of the standing gap ${rowLinkedGap[d.fact]}.` : ""}${d.node ? ` Judged only on node ${d.node}.` : ""}`,
       classification_metadata: {
         edit_site: rowEditSite[d.fact] ?? "repos/development-vessel/src/resolvers/self-fact-reconcile.ts",
         detector: SELF_FACT_RECONCILE_ID,
         fact: d.fact,
         divergence_key: d.key,
+        ...(d.node ? { node: d.node } : {}),
+        ...(rowLinkedGap[d.fact] ? { linked_gap_id: rowLinkedGap[d.fact] } : {}),
         // Class-2, self-verifying: the sweep re-runs THIS resolver for THIS fact and
         // reads divergence_count; >0 = still present, 0 = resolved. That is a DEFECT count, so it is
         // zero_field — nonzero_field is the sweep's HEALTH form and read divergence_count=1 as resolved.
-        evidence_resolve: { shape: "self_fact_reconcile", input: { facts: [d.fact], key: d.key, plant_canary: false, file_gaps: false }, zero_field: "divergence_count" },
+        evidence_resolve: { shape: "self_fact_reconcile", input: { facts: [d.fact], key: d.key, plant_canary: false, file_gaps: false, ...(d.node ? { node: d.node } : {}) }, zero_field: "divergence_count" },
         falsifier: `class 2: self_fact_reconcile with facts=[${d.fact}] key=${d.key} reports divergence_count 0`,
       },
     },
@@ -591,6 +842,8 @@ async function closeResolved(facts: readonly string[], present: readonly SelfFac
     if (meta["detector"] !== SELF_FACT_RECONCILE_ID) continue;
     const fact = typeof meta["fact"] === "string" ? meta["fact"] : "";
     if (!facts.includes(fact)) continue;
+    // A per-node finding is judged only on its node: another node's clean read says nothing about it.
+    if (typeof meta["node"] === "string" && meta["node"] !== thisNode()) continue;
     const id = typeof row["id"] === "string" ? row["id"] : "";
     if (!id || presentIds.has(id)) continue;
     // Only rows THIS detector filed: the id must be exactly what gapId() builds for
@@ -620,6 +873,34 @@ async function closeResolved(facts: readonly string[], present: readonly SelfFac
   return closed;
 }
 
+// ─── per-tick journal lines ─────────────────────────────────────────────────
+/** One line per row per run, so "no divergences on this node" is told apart from "never ran here". A row is
+ *  diverged when it holds a finding that would be filed, unobserved when it could not be read or missed its canary,
+ *  observed otherwise; rows outside this node's profile say so. Any text a row's own pattern would match is masked,
+ *  so a journal-reading row never counts these lines. */
+export function selfFactRowLines(
+  results: readonly SelfFactResult[],
+  blindRows: readonly string[],
+  skipped: ReadonlyArray<{ id: string }>,
+  unregistered: readonly string[],
+  profile: string,
+  patterns: readonly string[] = [],
+): string[] {
+  const masks = patterns.flatMap((p) => { try { return [new RegExp(p, "g")]; } catch { return []; } });
+  const mask = (t: string) => masks.reduce((acc, re) => acc.replace(re, "[row pattern]"), t.replace(/\s+/g, " ").slice(0, 160));
+  const lines: string[] = [];
+  for (const r of results) {
+    const filable = r.divergences.filter((d) => !d.canary && d.file !== false);
+    if (!r.source_read) lines.push(`[self-fact] row ${r.fact}: unobserved (${mask(r.note)})`);
+    else if (blindRows.includes(r.fact)) lines.push(`[self-fact] row ${r.fact}: unobserved (must-fail control not reported)`);
+    else if (filable.length > 0) lines.push(`[self-fact] row ${r.fact}: diverged (${filable.length} finding(s): ${mask(filable.slice(0, 3).map((d) => d.key).join(", "))})`);
+    else lines.push(`[self-fact] row ${r.fact}: observed (${mask(r.note)})`);
+  }
+  for (const id of unregistered) lines.push(`[self-fact] row ${id}: unobserved (no such instrument on this vessel)`);
+  for (const r of skipped) lines.push(`[self-fact] row ${r.id}: skipped (profile ${profile})`);
+  return lines;
+}
+
 // ─── the resolver ───────────────────────────────────────────────────────────
 export async function resolveSelfFactReconcile(pointer: SelfFactReconcilePointer): Promise<ResolverResult> {
   const plant = pointer.plant_canary !== false;
@@ -634,10 +915,13 @@ export async function resolveSelfFactReconcile(pointer: SelfFactReconcilePointer
   const inScope = (rows ?? []).filter((r) => r.profiles.includes(profile) || r.profiles.includes("*"));
   const unregistered = inScope.filter((r) => !(r.instrument in FACTS)).map((r) => r.id);
   const runnable = inScope.filter((r) => r.instrument in FACTS);
-  const wanted = (Array.isArray(pointer.facts) && pointer.facts.length > 0 ? runnable.filter((r) => pointer.facts!.includes(r.id)) : runnable).map((r) => r.id);
+  // A per-node predicate asked of another node checks nothing here: no rows run, the run is unobserved (null).
+  const foreignNode = typeof pointer.node === "string" && pointer.node.length > 0 && pointer.node !== thisNode();
+  const wanted = foreignNode ? [] : (Array.isArray(pointer.facts) && pointer.facts.length > 0 ? runnable.filter((r) => pointer.facts!.includes(r.id)) : runnable).map((r) => r.id);
   // Keyed by instrument and by row id (journal_pattern reports under its row id), so rows sharing an instrument
   // keep their own edit sites.
   rowEditSite = Object.fromEntries(runnable.flatMap((r) => [[r.instrument, r.edit_site], [r.id, r.edit_site]]));
+  rowLinkedGap = Object.fromEntries(runnable.filter((r) => typeof r.linked_gap === "string" && r.linked_gap.length > 0).map((r) => [r.id, r.linked_gap as string]));
   // EVERY row runs its must-fail control (the canary) on every planted run, so one
   // blind instrument cannot hide behind another row's canary.
   const results: SelfFactResult[] = [];
@@ -649,6 +933,15 @@ export async function resolveSelfFactReconcile(pointer: SelfFactReconcilePointer
   const readFacts = new Set(results.filter((r) => r.source_read).map((r) => r.fact));
   const blindRows = plant ? results.filter((r) => r.source_read && !r.divergences.some((d) => d.canary)).map((r) => r.fact) : [];
   const canaryFound = rows !== null && blindRows.length === 0;
+  {
+    // One journal line per row per run (qa 09-30). A predicate asked of another node runs no rows and says so.
+    const askedFor = (id: string) => !Array.isArray(pointer.facts) || pointer.facts.length === 0 || pointer.facts.includes(id);
+    const skippedByProfile = (rows ?? []).filter((r) => !inScope.includes(r) && askedFor(r.id));
+    const patterns = (rows ?? []).map((r) => (typeof r.pattern === "string" ? r.pattern : "")).filter((p) => p.length > 0);
+    if (rows === null) console.log(`[self-fact] rows unreadable on node ${thisNode()}: no row ran`);
+    else if (foreignNode) console.log(`[self-fact] predicate for node ${pointer.node}: not judged on node ${thisNode()}`);
+    for (const line of selfFactRowLines(results, blindRows, skippedByProfile, unregistered.filter(askedFor), profile, patterns)) console.log(line);
+  }
   const canaryFact = blindRows.join(", ");
   // Key scoping: a per-gap predicate asks about ONE (fact, key); everything else is
   // not this gap's business, so it must not keep the gap open.
@@ -668,7 +961,7 @@ export async function resolveSelfFactReconcile(pointer: SelfFactReconcilePointer
     await fileDivergence({ fact: "self_fact_reconcile", key: "canary-not-found", source: "planted canary", copy: "this run", detail: `the planted canary on fact ${canaryFact} was not reported — clean results from this instrument are not evidence until this is fixed`, canary: false });
     selfGap = true;
   } else if (file) {
-    for (const d of real) if (await fileDivergence(d)) filed += 1;
+    for (const d of real) if (d.file !== false && (await fileDivergence(d))) filed += 1;
     // CLOSURE BY THE INSTRUMENT THAT FOUND IT. Every open gap this detector filed
     // for a fact checked on this run, whose divergence is no longer present, is
     // closed here with an EXERCISED falsifier — the only thing the store's gate
@@ -698,6 +991,7 @@ export async function resolveSelfFactReconcile(pointer: SelfFactReconcilePointer
       canary_planted: plant,
       canary_found: canaryFound,
       profile,
+      node: thisNode(),
       rows_checked: wanted,
       blind_rows: blindRows,
       unobserved_rows: unobservedRows,
@@ -709,4 +1003,10 @@ export async function resolveSelfFactReconcile(pointer: SelfFactReconcilePointer
       claim: observed ? "every source and copy was read at use time and the planted canary was reported; divergences above are measured, not inferred" : "this run could not attribute its own negatives — a source was unreadable or the canary was missed — and its clean results are not evidence",
     },
   };
+}
+
+/** One row through its instrument, without filing or closing anything (tests, and a dry read of a proposed row). */
+export async function evaluateSelfFactRow(row: SelfFactRow, canary = true): Promise<SelfFactResult | null> {
+  const fn = FACTS[row.instrument];
+  return fn ? fn(canary, row) : null;
 }

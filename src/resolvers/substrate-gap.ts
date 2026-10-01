@@ -488,7 +488,13 @@ function usablePredicateString(v: unknown): string | null {
  */
 let __vocabCache: { at: number; vocab: ShapeVocabulary } | null = null;
 const VOCAB_TTL_MS = 5 * 60_000;
+// Tests pin the vocabulary: the scan reads fixed fleet roots, so a test run inside a container
+// sees the live fleet (a fixture shape reads "unresolvable") while the same test on a host
+// sees too little to judge (fail open, "class2"). { v: null } pins "cannot judge".
+let __vocabOverride: { v: ShapeVocabulary | null } | null = null;
+export function __setFleetVocabularyForTests(v: { v: ShapeVocabulary | null } | null): void { __vocabOverride = v; }
 function cachedFleetVocabulary(): ShapeVocabulary | null {
+  if (__vocabOverride) return __vocabOverride.v;
   const now = Date.now();
   if (__vocabCache && now - __vocabCache.at < VOCAB_TTL_MS) return __vocabCache.vocab;
   try {

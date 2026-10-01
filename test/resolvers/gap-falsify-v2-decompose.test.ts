@@ -17,7 +17,7 @@ process.env["SUBSTRATE_GAP_SKIP_COMPOSE_TRIGGER"] = "1";
 
 const sg = await import("../../src/resolvers/substrate-gap.js");
 const g2f = await import("../../src/resolvers/gap-to-feature.js");
-const { resolveSubstrateGapWrite, resolveSubstrateGap, __settleBirthEvaluationsForTests } = sg;
+const { resolveSubstrateGapWrite, resolveSubstrateGap, __settleBirthEvaluationsForTests, __setFleetVocabularyForTests } = sg;
 const { decomposeGap, bumpFailedAttempts, __resetPolicyReadsForTests } = g2f;
 
 const RUN = Math.random().toString(36).slice(2, 8);
@@ -91,6 +91,9 @@ function stubLlm(reply: Record<string, unknown>, prompts: string[] = []) {
 const deps = (reply: Record<string, unknown>, prompts: string[] = []) => ({ llm: stubLlm(reply, prompts), shapeDescriptions: async () => DESCRIPTIONS });
 
 beforeAll(() => {
+  // The fixture shapes exist only in this file's discovery stub, not in any fleet config, so the
+  // classifier's filesystem vocabulary must not judge them: pin "cannot judge" on every host.
+  __setFleetVocabularyForTests({ v: null });
   for (const k of ["VESSELS_CLONE_ROOT", "GAP_STORE_ENDPOINT"]) savedEnv[k] = process.env[k];
   delete process.env["GAP_STORE_ENDPOINT"];
   process.env["VESSELS_CLONE_ROOT"] = CLONES;
@@ -103,6 +106,7 @@ beforeAll(() => {
 });
 beforeEach(() => { frameDefects = 2; });
 afterAll(() => {
+  __setFleetVocabularyForTests(null);
   globalThis.fetch = originalFetch;
   for (const [k, v] of Object.entries(savedEnv)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
   __resetPolicyReadsForTests();

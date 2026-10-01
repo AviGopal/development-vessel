@@ -32,7 +32,7 @@ function install(): void {
     if (body?.pointer?.type === "vesselCapability") {
       if (mode === "timeout") throw new DOMException("The operation timed out.", "TimeoutError");
       if (mode === "network") throw new TypeError("Unable to connect. Is the computer able to access the url?");
-      const vessels = [{ vesselId: "development-vessel-local", endpoint: "http://node-a:18090", resolve_endpoint: "/v2/impulses/resolve" }];
+      const vessels = [{ vesselId: "development-vessel-local", endpoint: "http://node-a:18090", resolve_endpoint: "/v2/impulses/resolve", origin: "local" }];
       return Response.json({ content: { shape: body.pointer.shape, vessels, found: true } });
     }
     if (url === POOL && body?.impulse?.type === "poolImpulse") {

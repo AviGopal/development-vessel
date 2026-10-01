@@ -22,7 +22,7 @@ const RUN = Math.random().toString(36).slice(2, 8);
 // them as a read that SUCCEEDS and finds no record: one poolImpulse producer holding no policy impulses.
 const noPolicyRecords = (body: { pointer?: { type?: string; shape?: string }; impulse?: { type?: string } }): Response | null => {
   if (body?.pointer?.type === "vesselCapability" && body.pointer.shape === "poolImpulse") {
-    return Response.json({ content: { shape: "poolImpulse", vessels: [{ vesselId: "pool-fixture", endpoint: "http://pool.fixture", resolve_endpoint: "/v2/impulses/resolve" }], found: true } });
+    return Response.json({ content: { shape: "poolImpulse", vessels: [{ vesselId: "pool-fixture", endpoint: "http://pool.fixture", resolve_endpoint: "/v2/impulses/resolve", origin: "local" }], found: true } });
   }
   if (body?.impulse?.type === "poolImpulse") return Response.json({ body: { impulses: [] } });
   return null;

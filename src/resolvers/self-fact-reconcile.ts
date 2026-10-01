@@ -160,6 +160,13 @@ export interface SelfFactRow {
   site_pattern?: string; pathspecs?: string[];
   /** typed_seam_sites: a repo whose origin/dev was last fetched or moved longer ago than this reads unobserved (default 6). */
   max_ref_age_hours?: number; super_repo_pathspecs?: string[]; exclude_repos?: string[]; seam_files?: string[];
+  /** pool_record_pin: the pool shape whose newest open record is pinned, the string-array body field compared as a
+   *  set, and the operator-seeded value per node (thisNode()). A node with no entry is not judged (unobserved). */
+  pool_shape?: string; body_field?: string; expected_by_node?: Record<string, string[]>;
+  /** The nodes (thisNode()) this row runs on; absent = every node of its profiles. A node not listed SKIPS the row
+   *  (reported like a profile skip) rather than reading it unobserved, so a row about one substrate's nodes in this
+   *  fleet-shared file never turns another substrate's whole run unobserved. */
+  nodes?: string[];
 }
 function readRows(): SelfFactRow[] | null {
   const raw = git(["show", `origin/dev:${ROWS_PATH}`], superRepoRoot());
@@ -362,7 +369,68 @@ export const journal = { read: readJournalLines };
 // canary cannot masquerade as a real finding).
 type FactFn = (canary: boolean, row: SelfFactRow) => SelfFactResult | Promise<SelfFactResult>;
 
+// What pool_record_pin reads: the newest open record of a shape in THIS node's own pool store (the copy the
+// policy readers trust), injectable for tests.
+export interface PoolPinDeps { readNewest: (shape: string) => Promise<{ id?: string; updated_at?: string; body?: unknown } | null> }
+const defaultPoolPinDeps: PoolPinDeps = {
+  readNewest: async (shape) => {
+    const { resolvePoolImpulse } = await import("./pool-impulse.js");
+    return resolvePoolImpulse({ type: "poolImpulse", shape, status: "open", limit: 1 }).body.impulses[0] ?? null;
+  },
+};
+let poolPinDeps: PoolPinDeps = defaultPoolPinDeps;
+/** Tests only: replace what pool_record_pin reads. null restores the default. */
+export function __setPoolPinDepsForTests(d: Partial<PoolPinDeps> | null): void {
+  poolPinDeps = d ? { ...defaultPoolPinDeps, ...d } : defaultPoolPinDeps;
+}
+const pinKey = (e: string): string => {
+  const t = String(e).trim();
+  try { const u = new URL(t); if (u.protocol === "http:" || u.protocol === "https:") return u.origin; } catch { /* not a URL */ }
+  return t.replace(/\/+$/, "");
+};
+/** The set difference between a pinned value and the copy read: empty when they are the same set. */
+export function pinDiff(expected: readonly string[], actual: readonly string[]): { added: string[]; removed: string[] } {
+  const e = new Set(expected.map(pinKey)), a = new Set(actual.map(pinKey));
+  return { added: [...a].filter((x) => !e.has(x)).sort(), removed: [...e].filter((x) => !a.has(x)).sort() };
+}
+export const POOL_PIN_CANARY = "http://canary.planted-by-self-fact-reconcile.invalid:1";
+
 const FACTS: Record<string, FactFn> = {
+  /**
+   * A TRUST-ROOT pool record must equal its operator-seeded value. The policy readers (gap-to-feature) trust a peer
+   * node's producers only when the local `substrateNodes` record lists it, so an unexpected endpoint there is a grant
+   * of policy authority to whoever wrote it. The pinned value lives in this row (a git object the operator authors),
+   * never in the pool it checks. Divergences, per node: the record is missing, or its `body_field` differs from the
+   * pinned set (named entries added and removed). Must-fail control: the record read, plus one planted endpoint, is
+   * compared by the same function and must be reported.
+   */
+  pool_record_pin: async (canary, row) => {
+    const fact = row.id;
+    const node = thisNode();
+    const unread = (note: string): SelfFactResult => ({ fact, source_read: false, copies_read: 0, divergences: [], note });
+    const shape = String(row.pool_shape ?? "");
+    const field = String(row.body_field ?? "");
+    if (!shape || !field) return unread(`row ${row.id}: pool_shape or body_field missing`);
+    const pinned = row.expected_by_node?.[node];
+    if (!Array.isArray(pinned) || !pinned.every((e) => typeof e === "string")) return unread(`row ${row.id}: no pinned ${shape} value for node ${node}, so this node is not judged`);
+    let rec: { id?: string; updated_at?: string; body?: unknown } | null;
+    try { rec = await poolPinDeps.readNewest(shape); } catch (err) { return unread(`pool store unreadable on node ${node}: ${String(err)}`); }
+    const raw = rec ? (rec.body as Record<string, unknown> | null | undefined)?.[field] : undefined;
+    const actual = Array.isArray(raw) ? raw.filter((e): e is string => typeof e === "string") : [];
+    const out: SelfFactDivergence[] = [];
+    const describe = (d: { added: string[]; removed: string[] }) => `added [${d.added.join(", ")}], removed [${d.removed.join(", ")}]`;
+    if (!rec) {
+      out.push({ fact, key: `${node}-missing`, node, source: `${row.id} pinned value`, copy: `pool ${shape}@${node}`, detail: `node ${node} holds no open ${shape} record; the operator-seeded value is [${pinned.join(", ")}]. Without it this node's policy reads take only local producers.`, canary: false });
+    } else {
+      const d = pinDiff(pinned, actual);
+      if (d.added.length > 0 || d.removed.length > 0) out.push({ fact, key: `${node}-mismatch`, node, source: `${row.id} pinned value`, copy: `pool ${shape}/${String(rec.id ?? "?")}@${node} (updated ${String(rec.updated_at ?? "?")})`, detail: `${shape}.${field} on node ${node} differs from the operator-seeded value: ${describe(d)}`, canary: false });
+    }
+    if (canary) {
+      const planted = pinDiff(pinned, [...actual, POOL_PIN_CANARY]);
+      if (planted.added.includes(pinKey(POOL_PIN_CANARY))) out.push({ fact, key: `${row.id}-canary`, node, source: `${row.id} pinned value`, copy: "planted copy", detail: `must-fail control: a planted endpoint was reported as ${describe(planted)}`, canary: true });
+    }
+    return { fact, source_read: true, copies_read: rec ? 1 : 0, divergences: out, note: `node ${node}: ${shape} ${rec ? `${actual.length} entr(ies)` : "absent"}; pinned ${pinned.length}` };
+  },
   /**
    * A unit's journal must not show a known defect's signature: ONE generic instrument parameterised by its row
    * (unit, pattern, max, window_hours, must_fail_line, gate), so a recurring class is a row of DATA, not new code
@@ -914,7 +982,7 @@ export async function resolveSelfFactReconcile(pointer: SelfFactReconcilePointer
   // Only rows scoped to this node's profile run here: a node judges only copies it
   // holds, so a node that does not hold them cannot read clean and close another
   // node's finding. An unknown instrument is reported, never run.
-  const inScope = (rows ?? []).filter((r) => r.profiles.includes(profile) || r.profiles.includes("*"));
+  const inScope = (rows ?? []).filter((r) => (r.profiles.includes(profile) || r.profiles.includes("*")) && (!Array.isArray(r.nodes) || r.nodes.includes(thisNode())));
   const unregistered = inScope.filter((r) => !(r.instrument in FACTS)).map((r) => r.id);
   const runnable = inScope.filter((r) => r.instrument in FACTS);
   // A per-node predicate asked of another node checks nothing here: no rows run, the run is unobserved (null).

@@ -66,6 +66,57 @@ export function resolvePoolImpulse(pointer: {
   };
 }
 
+// TRUST-ROOT POOL SHAPES. A record of one of these shapes decides whom this substrate trusts, so it is
+// written only with an OPERATOR credential: an API key that identity-vessel resolves with the "admin"
+// scope (minted only through identity's bootstrap-admin, which demands the in-container root secret).
+// The fleet service key and the cockpit key carry read/write only, so neither the autonomous lane (goal
+// walks, ReAct tools, in-process writers) nor a federated peer reaching this route through the libp2p
+// ingress (which forwards with the transport's own fleet key) or through discovery's forwarding (which
+// forwards the caller's key) can create, change or retire one. The check lives in this function, the one
+// writer of the pool store, so an in-process caller that passes no credential is refused too; only the
+// HTTP route establishes `auth`, from the request's Authorization header.
+//   substrateNodes: this substrate's discovery endpoints; gap-to-feature's policy reads accept a peer
+//   node's producers only when its endpoint is listed, so a write here is a grant of policy authority.
+//   autonomyScope / spendEnvelope: the containment and the budget the autonomous lane obeys. No
+//   in-process writer exists (both records are operator-written), so gating them breaks nothing internal;
+//   until an admin key is used, the failure direction is operator lock-out, never an outside write.
+export const TRUST_ROOT_POOL_SHAPES: ReadonlySet<string> = new Set(['substrateNodes', 'autonomyScope', 'spendEnvelope']);
+export type PoolWriteAuth = { operator: boolean; why?: string };
+/** The trust-root shape a write would create or modify (by its own shape, or the shape of the row its id names), or null. */
+export function trustRootWriteShape(pointer: { id?: string; shape?: string }): string | null {
+  if (typeof pointer.shape === 'string' && TRUST_ROOT_POOL_SHAPES.has(pointer.shape)) return pointer.shape;
+  if (typeof pointer.id === 'string') {
+    const existing = loadImpulses().find((imp) => imp.id === pointer.id);
+    if (existing && TRUST_ROOT_POOL_SHAPES.has(existing.shape)) return existing.shape;
+  }
+  return null;
+}
+const identityUrl = (): string => (process.env['IDENTITY_VESSEL_URL'] ?? '').trim().replace(/\/+$/, '');
+/** Whether `authHeader` carries an operator credential: identity-vessel's /v1/auth/resolve (the contract
+ *  discovery-vessel's auth middleware and activity-api's validateApiKeyWithFallback use) answers it
+ *  authenticated WITH the "admin" scope. Anything else, including an unreachable identity, is not. */
+export async function operatorCredential(authHeader: string | undefined): Promise<PoolWriteAuth> {
+  const m = /^ApiKey\s+(\S+)$/i.exec(String(authHeader ?? '').trim());
+  if (!m) return { operator: false, why: 'no ApiKey credential presented' };
+  const base = identityUrl();
+  if (!base) return { operator: false, why: 'IDENTITY_VESSEL_URL unset: identity cannot be asked' };
+  try {
+    const res = await fetch(`${base}/v1/auth/resolve`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ impulse: { type: 'authentication', pointer: { type: 'apiKey', apiKey: m[1] } } }),
+      signal: AbortSignal.timeout(5000),
+    });
+    if (!res.ok) return { operator: false, why: `identity answered HTTP ${res.status}` };
+    const j = (await res.json()) as { success?: boolean; data?: { authenticated?: boolean; scopes?: unknown } };
+    if (j?.data?.authenticated !== true) return { operator: false, why: 'credential not authenticated' };
+    const scopes = Array.isArray(j.data.scopes) ? j.data.scopes : [];
+    return scopes.includes('admin') ? { operator: true } : { operator: false, why: 'credential lacks the admin scope' };
+  } catch (err) {
+    return { operator: false, why: 'identity unreachable: ' + String((err as Error)?.message ?? err) };
+  }
+}
+
 export function resolvePoolImpulseWrite(pointer: {
   type: string;
   id?: string;
@@ -77,7 +128,12 @@ export function resolvePoolImpulseWrite(pointer: {
   updated_at?: string;
   /** Compare-and-set: write only if the stored row's updated_at still equals this value. */
   if_updated_at?: string;
-}): { shape: string; body: { ok: boolean; id: string; conflict?: boolean; current_updated_at?: string | null } } {
+}, auth?: PoolWriteAuth): { shape: string; body: { ok: boolean; id: string; conflict?: boolean; current_updated_at?: string | null; error?: string } } {
+  const trustRoot = trustRootWriteShape(pointer);
+  if (trustRoot && auth?.operator !== true) {
+    console.warn(`[pool] REFUSED ${trustRoot} write (id=${String(pointer.id ?? '(new)')}): operator credential required${auth?.why ? ` (${auth.why})` : ''}`);
+    return { shape: 'poolImpulse_write', body: { ok: false, id: String(pointer.id ?? ''), error: `operator_credential_required: ${trustRoot} is a trust-root pool shape${auth?.why ? `; ${auth.why}` : ''}` } };
+  }
   const all = loadImpulses();
   const now = new Date().toISOString();
   const id = pointer.id ?? randomUUID();

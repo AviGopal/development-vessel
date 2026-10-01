@@ -47,7 +47,7 @@ function install(): void {
     const body = init?.body ? JSON.parse(String(init.body)) : {};
     if (body?.pointer?.type === "vesselCapability") {
       if (body.pointer.shape === "llm_completion") { llmLookups++; return Response.json({ content: { vessels: llmMode === "serve" ? [{ endpoint: "http://llm.test", resolve_endpoint: "/resolve" }] : [] } }); }
-      const vessels = ADVERTISED.has(body.pointer.shape) ? [{ vesselId: "dv", endpoint: "http://node.test", resolve_endpoint: "/v2/impulses/resolve" }] : [];
+      const vessels = ADVERTISED.has(body.pointer.shape) ? [{ vesselId: "dv", endpoint: "http://node.test", resolve_endpoint: "/v2/impulses/resolve", origin: "local" }] : [];
       return Response.json({ content: { shape: body.pointer.shape, vessels, found: vessels.length > 0 } });
     }
     if (body?.impulse?.type === "poolImpulse") return Response.json({ body: { impulses: [] } });

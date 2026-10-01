@@ -45,7 +45,7 @@ import { resolveRhythmConductorTick } from "../resolvers/rhythm-conductor-tick.j
 import { resolveRhythmRealitySync } from "../resolvers/rhythm-reality-sync.js";
 import { resolveMemoryNote, resolveMemoryNoteWrite } from "../resolvers/memory-note.js";
 import { resolveSubstrateGap, resolveSubstrateGapWrite } from "../resolvers/substrate-gap.js";
-import { resolvePoolImpulse, resolvePoolImpulseWrite } from "../resolvers/pool-impulse.js";
+import { resolvePoolImpulse, resolvePoolImpulseWrite, trustRootWriteShape, operatorCredential } from "../resolvers/pool-impulse.js";
 import { resolveFsList } from "../resolvers/fs-list.js";
 import { resolveFsGrep } from "../resolvers/fs-grep.js";
 import { resolveHttpFetch } from "../resolvers/http-fetch.js";
@@ -1110,6 +1110,18 @@ impulsesRouter.post("/v2/impulses/resolve", async (c) => {
 
   if (!pointerType) {
     return c.json({ success: false, error: "pointer.type is required" }, 400);
+  }
+
+  // A TRUST-ROOT pool write is the one write that needs WHO is asking (pool-impulse.ts
+  // TRUST_ROOT_POOL_SHAPES); only this route sees the Authorization header, so the credential is
+  // established here and checked by the store's one writer. Every other write is unchanged.
+  if (pointerType === "poolImpulse_write" && trustRootWriteShape(pointer as { id?: string; shape?: string })) {
+    const auth = await operatorCredential(c.req.header("Authorization"));
+    const result = resolvePoolImpulseWrite({ ...(pointer as Record<string, unknown>), type: pointerType } as Parameters<typeof resolvePoolImpulseWrite>[0], auth);
+    // Only the credential refusal is a 403; any other answer (a compare-and-set conflict on a re-seed) keeps the
+    // ordinary envelope every other write gets.
+    if (String(result.body.error ?? "").startsWith("operator_credential_required")) return c.json({ success: false, shape: result.shape, body: result.body, error: result.body.error }, 403);
+    return c.json({ success: true, shape: result.shape, body: result.body });
   }
 
   try {

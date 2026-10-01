@@ -32,7 +32,7 @@ const stubFetch = (async (input: unknown, init?: RequestInit) => {
     const body = init?.body ? JSON.parse(String(init.body)) : {};
     // discovery (the ias client): a pool producer that holds no policy records.
     if (body?.pointer?.type === "vesselCapability") {
-      const vessels = [{ vesselId: "dv", endpoint: "http://pool.test", resolve_endpoint: "/v2/impulses/resolve" }];
+      const vessels = [{ vesselId: "dv", endpoint: "http://pool.test", resolve_endpoint: "/v2/impulses/resolve", origin: "local" }];
       return Response.json({ content: { shape: body.pointer.shape, vessels, found: true } });
     }
     if (body?.impulse?.type === "poolImpulse") return Response.json({ body: { impulses: [] } });

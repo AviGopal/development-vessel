@@ -11,7 +11,7 @@ function withPolicyDiscovery(inner: (input: any, init?: any) => Promise<Response
   return (async (input: any, init?: any) => {
     const body = init?.body ? JSON.parse(String(init.body)) : {};
     if (body?.pointer?.type === "vesselCapability" && body.pointer.shape === "poolImpulse") {
-      return Response.json({ content: { shape: "poolImpulse", vessels: [{ vesselId: "pool-fixture", endpoint: "http://pool.fixture", resolve_endpoint: "/v2/impulses/resolve" }], found: true } });
+      return Response.json({ content: { shape: "poolImpulse", vessels: [{ vesselId: "pool-fixture", endpoint: "http://pool.fixture", resolve_endpoint: "/v2/impulses/resolve", origin: "local" }], found: true } });
     }
     if (body?.impulse?.type === "poolImpulse" && body.impulse.shape === "spendEnvelope") return Response.json({ body: { impulses: [] } });
     return inner(input, init);

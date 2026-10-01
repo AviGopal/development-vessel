@@ -4880,8 +4880,9 @@ async function llmProducerAdvertised(): Promise<boolean | null> {
 
 // SPEND ENVELOPE (value-per-cost-selection 4.1/4.2). Autonomous spending obeys one hourly USD
 // envelope read at use time as a shaped impulse: the newest open poolImpulse of shape
-// `spendEnvelope` ({usd_cap_per_hour, paused, reason}) across EVERY poolImpulse producer that
-// discovery lists, so a record written on either node binds both. Spent = the sum over every
+// `spendEnvelope` ({usd_cap_per_hour, paused, reason}) across every poolImpulse producer of THIS
+// substrate (discoverOwnResolveUrls: a peer substrate's producers never count), so a record written
+// on either node binds both. Spent = the sum over every
 // distinct llmSpendSummary producer of its current window plus the unexpired share of its
 // previous window (a sliding hour). No record, or a record without a numeric cap and not
 // paused, means no cap, so behaviour is unchanged until an envelope is written. A discovered
@@ -4907,10 +4908,112 @@ async function discoverResolveUrls(shape: string): Promise<{ ok: true; urls: str
   if (!r.ok) return { ok: false, why: describeLookup(r) };
   return { ok: true, urls: [...new Set(r.producers.map((p) => p.resolveEndpoint).filter((u) => u.length > 0))] };
 }
+
+// OWN-SUBSTRATE PRODUCERS ONLY (substrate-local policy reads). Discovery unions this node's producers
+// with every federated peer's, so "the newest record across every poolImpulse producer" let a PEER
+// substrate set OUR autonomy scope and spend envelope by writing a permissive record with a later
+// updated_at. The policy readers below take a producer only when it is provably this substrate's:
+//   - origin "local": served from this node's own discovery registry, or
+//   - origin "peer:<E>" with E in this substrate's node list AND origin_upstream "local": served from
+//     the registry of a node of this same substrate (not merely relayed through one, which is how a
+//     third substrate's rows reach node 2 via node 1).
+// Everything else is foreign: other peers, libp2p facades ("overlay"), and every UNSTAMPED row (an
+// older discovery that names no origin is not provably anyone's, so it fails closed, never open).
+// The node list is itself a shaped record read at use time (law 1): the newest open poolImpulse of
+// shape `substrateNodes` ({discovery_endpoints: string[], reason}), read from LOCAL-origin producers
+// only, since a list read through peers could be written by the very peer it is meant to exclude.
+// No record = an empty list: peer rows are refused and local rows are still own, so a standalone node
+// never halts on it (a node of a multi-node substrate then reads only its own pool until the list is
+// written). An UNREADABLE list fails the policy read closed. It is read only when discovery returned a
+// peer row that could be own (a listed node's local row), so a standalone node never reads it. Cached
+// like the scope.
+export type OwnProducerView = { origin?: string; originUpstream?: string | null };
+const endpointKey = (e: string): string => {
+  const t = String(e).trim();
+  try { const u = new URL(t); if (u.protocol === "http:" || u.protocol === "https:") return u.origin; } catch { /* not a URL */ }
+  return t.replace(/\/+$/, "");
+};
+// A FUTURE libp2p POLICY PRODUCER FAILS CLOSED. Discovery stamps a libp2p row in its own registry
+// "overlay" (a facade for a vessel served elsewhere), and "overlay" is never own here. If this
+// substrate ever serves poolImpulse over libp2p from one of its own nodes, these reads will refuse that
+// producer (and, if it is the only one, read unreadable) until the overlay origin is classified: e.g.
+// discovery stamping an own-substrate overlay row by an attested peer id. Do not widen this predicate to
+// accept "overlay" without that classification; an overlay row is registered on behalf of a remote peer.
+// origin_upstream is read ONLY here, as the claim of a node already in the list; nothing else may treat
+// it as an identity.
+/** True iff a discovered producer is this substrate's own (see above). Unstamped rows are never own. */
+export function isOwnSubstrateProducer(p: OwnProducerView, nodeEndpoints: readonly string[]): boolean {
+  if (p.origin === "local") return true;
+  if (typeof p.origin !== "string" || !p.origin.startsWith("peer:")) return false;
+  if (p.originUpstream !== "local") return false;
+  const asked = endpointKey(p.origin.slice("peer:".length));
+  return nodeEndpoints.some((e) => endpointKey(e) === asked);
+}
+type SubstrateNodes = { ok: true; endpoints: string[]; reason: string } | { ok: false; why: string };
+const SUBSTRATE_NODES_TTL_MS = 30_000;
+let substrateNodesCache: { at: number; v: SubstrateNodes } | null = null;
+/** This substrate's discovery endpoints, from the newest open `substrateNodes` poolImpulse on LOCAL producers. */
+export async function substrateNodeEndpoints(): Promise<SubstrateNodes> {
+  if (substrateNodesCache && Date.now() - substrateNodesCache.at < (substrateNodesCache.v.ok ? SUBSTRATE_NODES_TTL_MS : policyUnreadableRetryMs())) return substrateNodesCache.v;
+  let v: SubstrateNodes;
+  try {
+    const r = await lookupShape("poolImpulse");
+    if (!r.ok) {
+      v = { ok: false, why: "substrateNodes unreadable: " + describeLookup(r) };
+    } else {
+      const localUrls = [...new Set(r.producers.filter((p) => (p as OwnProducerView).origin === "local").map((p) => p.resolveEndpoint).filter((u) => u.length > 0))];
+      if (localUrls.length === 0) {
+        v = { ok: false, why: `substrateNodes unreadable: no local-origin poolImpulse producer (${r.producers.length} non-local ignored)` };
+      } else {
+        let newest: { updated_at?: string; body?: unknown } | null = null;
+        let unreadable: string | null = null;
+        for (const u of localUrls) {
+          const res = await postEnvelopeRead(u, { impulse: { type: "poolImpulse", shape: "substrateNodes", status: "open" } });
+          const imps = (res?.["body"] as { impulses?: unknown } | undefined)?.impulses;
+          if (!Array.isArray(imps)) { unreadable = "substrateNodes unreadable: no answer from " + u; break; }
+          for (const imp of imps as Array<{ shape?: string; updated_at?: string; body?: unknown }>) {
+            if (imp.shape === "substrateNodes" && (!newest || String(imp.updated_at ?? "") > String(newest.updated_at ?? ""))) newest = imp;
+          }
+        }
+        if (unreadable) {
+          v = { ok: false, why: unreadable };
+        } else {
+          const raw = (newest?.body as { discovery_endpoints?: unknown } | undefined)?.discovery_endpoints;
+          const endpoints = Array.isArray(raw) ? raw.filter((e): e is string => typeof e === "string" && e.trim().length > 0).map(endpointKey) : [];
+          v = { ok: true, endpoints, reason: newest ? `substrateNodes: ${endpoints.length} node endpoint(s)` : "no substrateNodes record (local producers only)" };
+        }
+      }
+    }
+  } catch (err) {
+    v = { ok: false, why: "substrateNodes unreadable: " + String(err) };
+  }
+  substrateNodesCache = { at: Date.now(), v };
+  return v;
+}
+/** discoverResolveUrls restricted to this substrate's own producers. A failed lookup, or an unreadable
+ *  node list, is `{ok:false}`; `foreign` counts the producers set aside. */
+async function discoverOwnResolveUrls(shape: string): Promise<{ ok: true; urls: string[]; foreign: number } | { ok: false; why: string; lookup_failed: boolean }> {
+  const r = await lookupShape(shape);
+  if (!r.ok) return { ok: false, why: describeLookup(r), lookup_failed: true };
+  // The node list matters only for a peer row that could be own (a listed node's local row). With
+  // none, it is not read: a standalone node's reads never depend on it.
+  const mayBeOwnPeer = r.producers.some((p) => { const v = p as OwnProducerView; return typeof v.origin === "string" && v.origin.startsWith("peer:") && v.originUpstream === "local"; });
+  let nodeEndpoints: string[] = [];
+  if (mayBeOwnPeer) {
+    const nodes = await substrateNodeEndpoints();
+    if (!nodes.ok) return { ok: false, why: nodes.why, lookup_failed: false };
+    nodeEndpoints = nodes.endpoints;
+  }
+  const own = r.producers.filter((p) => isOwnSubstrateProducer(p as OwnProducerView, nodeEndpoints));
+  return { ok: true, urls: [...new Set(own.map((p) => p.resolveEndpoint).filter((u) => u.length > 0))], foreign: r.producers.length - own.length };
+}
+const foreignNote = (n: number): string => (n > 0 ? ` (${n} non-own producer(s) ignored)` : "");
+
 /** Tests only: forget the policy verdicts and every remembered discovery lookup (a fresh process). */
 export function __resetPolicyReadsForTests(): void {
   spendEnvelopeCache = null;
   autonomyScopeCache = null;
+  substrateNodesCache = null;
   __resetDiscoveryForTests();
 }
 async function postEnvelopeRead(url: string, body: unknown): Promise<Record<string, unknown> | null> {
@@ -4926,10 +5029,10 @@ async function postEnvelopeRead(url: string, body: unknown): Promise<Record<stri
   } catch { return null; }
 }
 async function readSpendEnvelope(): Promise<SpendEnvelopeVerdict> {
-  const [pool, spend] = await Promise.all([discoverResolveUrls("poolImpulse"), discoverResolveUrls("llmSpendSummaryNode")]);
-  if (!pool.ok) return { allow: false, unreadable: true, lookup_failed: true, reason: "envelope unreadable: " + pool.why };
+  const [pool, spend] = await Promise.all([discoverOwnResolveUrls("poolImpulse"), discoverOwnResolveUrls("llmSpendSummaryNode")]);
+  if (!pool.ok) return { allow: false, unreadable: true, ...(pool.lookup_failed ? { lookup_failed: true } : {}), reason: "envelope unreadable: " + pool.why };
   const poolUrls = pool.urls;
-  if (poolUrls.length === 0) return { allow: false, unreadable: true, reason: "envelope unreadable: no poolImpulse producer discovered" };
+  if (poolUrls.length === 0) return { allow: false, unreadable: true, reason: "envelope unreadable: no " + (pool.foreign > 0 ? "own-substrate " : "") + "poolImpulse producer discovered" + foreignNote(pool.foreign) };
   const pools = await Promise.all(poolUrls.map((u) => postEnvelopeRead(u, { impulse: { type: "poolImpulse", shape: "spendEnvelope", status: "open" } })));
   let newest: { shape?: string; updated_at?: string; body?: unknown } | null = null;
   for (let i = 0; i < poolUrls.length; i++) {
@@ -4947,9 +5050,9 @@ async function readSpendEnvelope(): Promise<SpendEnvelopeVerdict> {
   if (rawCap !== undefined && rawCap !== null && !(typeof rawCap === "number" && Number.isFinite(rawCap))) return { allow: false, unreadable: true, reason: "envelope unreadable: usd_cap_per_hour is not a finite number" };
   const cap = typeof rawCap === "number" ? rawCap : null;
   if (cap === null) return { allow: true, reason: "spendEnvelope has no numeric usd_cap_per_hour (no cap)" };
-  if (!spend.ok) return { allow: false, unreadable: true, lookup_failed: true, cap_usd: cap, reason: "envelope unreadable: " + spend.why };
+  if (!spend.ok) return { allow: false, unreadable: true, ...(spend.lookup_failed ? { lookup_failed: true } : {}), cap_usd: cap, reason: "envelope unreadable: " + spend.why };
   const spendUrls = spend.urls;
-  if (spendUrls.length === 0) return { allow: false, unreadable: true, cap_usd: cap, reason: "envelope unreadable: no llmSpendSummaryNode producer discovered" };
+  if (spendUrls.length === 0) return { allow: false, unreadable: true, cap_usd: cap, reason: "envelope unreadable: no " + (spend.foreign > 0 ? "own-substrate " : "") + "llmSpendSummaryNode producer discovered" + foreignNote(spend.foreign) };
   // One llmSpendSummaryNode producer per node (development-vessel relays its own node's
   // llm-resolver, whose own endpoint is loopback-only), so the sum covers every node (4.0a).
   const sums = await Promise.all(spendUrls.map((u) => postEnvelopeRead(u, { impulse: { pointer: { type: "llmSpendSummaryNode" } } })));
@@ -4978,8 +5081,8 @@ export async function spendEnvelopeAllows(): Promise<SpendEnvelopeVerdict> {
 // AUTONOMY SCOPE (contained-self-development 1.1). Autonomous work must not land on the machinery
 // that lands and verifies work (the lane core), or its first failure is the lane refusing its own
 // repair. The excluded paths are a shaped impulse read at use time: the newest open poolImpulse of
-// shape `autonomyScope` ({excluded_paths: string[], reason}) across EVERY poolImpulse producer that
-// discovery lists, so one record binds every node. Entries are repo-relative (`repos/<vessel>/src/
+// shape `autonomyScope` ({excluded_paths: string[], reason}) across every poolImpulse producer of THIS
+// substrate (discoverOwnResolveUrls), so one record binds every node and no peer substrate's does. Entries are repo-relative (`repos/<vessel>/src/
 // file.ts`, or a directory ending in `/`). A read that succeeded and found no record means no scope
 // (behaviour unchanged); an unreadable scope excludes everything autonomous (fail closed), including
 // on a fresh process that has not read one yet.
@@ -4990,12 +5093,12 @@ export async function autonomyScope(): Promise<AutonomyScope> {
   if (autonomyScopeCache && Date.now() - autonomyScopeCache.at < (autonomyScopeCache.v.readable ? 30_000 : policyUnreadableRetryMs())) return autonomyScopeCache.v;
   let v: AutonomyScope;
   try {
-    const pool = await discoverResolveUrls("poolImpulse");
+    const pool = await discoverOwnResolveUrls("poolImpulse");
     const poolUrls = pool.ok ? pool.urls : [];
     if (!pool.ok) {
-      v = { excluded: [], readable: false, lookup_failed: true, reason: pool.why };
+      v = { excluded: [], readable: false, ...(pool.lookup_failed ? { lookup_failed: true } : {}), reason: pool.why };
     } else if (poolUrls.length === 0) {
-      v = { excluded: [], readable: false, reason: "no poolImpulse producer discovered" };
+      v = { excluded: [], readable: false, reason: "no " + (pool.foreign > 0 ? "own-substrate " : "") + "poolImpulse producer discovered" + foreignNote(pool.foreign) };
     } else {
       let newest: { updated_at?: string; body?: unknown } | null = null;
       let unreadable: string | null = null;

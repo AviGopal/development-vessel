@@ -41,7 +41,7 @@ function install(): void {
       // What AbortSignal.timeout delivers when discovery is still waiting on a slow peer.
       if (discoveryMode === "timeout") throw new DOMException("The operation timed out.", "TimeoutError");
       if (discoveryMode === "network") throw new TypeError("Unable to connect. Is the computer able to access the url?");
-      const vessels = discoveryMode === "empty" ? [] : [{ vesselId: "development-vessel-local", endpoint: "http://node-a:18090", resolve_endpoint: "/v2/impulses/resolve" }];
+      const vessels = discoveryMode === "empty" ? [] : [{ vesselId: "development-vessel-local", endpoint: "http://node-a:18090", resolve_endpoint: "/v2/impulses/resolve", origin: "local" }];
       return Response.json({ content: { shape: body.pointer.shape, vessels, found: vessels.length > 0 } });
     }
     if (url === POOL && body?.impulse?.type === "poolImpulse") {

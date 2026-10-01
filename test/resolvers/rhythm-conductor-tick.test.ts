@@ -1,13 +1,31 @@
-import { describe, it, expect, afterEach } from "bun:test";
+import { describe, it, expect, afterEach, beforeEach } from "bun:test";
 import { mkdtempSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { resolveRhythmConductorTick } from "../../src/resolvers/rhythm-conductor-tick.js";
+import { __resetPolicyReadsForTests } from "../../src/resolvers/gap-to-feature.js";
 
 const originalFetch = globalThis.fetch;
+beforeEach(() => {
+  __resetPolicyReadsForTests();
+});
 afterEach(() => {
   globalThis.fetch = originalFetch;
+  __resetPolicyReadsForTests();
 });
+
+// The spend envelope fails closed when it cannot be read, so discovery here names one poolImpulse producer and the
+// envelope read SUCCEEDS with no spendEnvelope record (no cap). Every other request goes to `inner` unchanged.
+function withPolicyDiscovery(inner: (input: any, init?: any) => Promise<Response>): typeof fetch {
+  return (async (input: any, init?: any) => {
+    const body = init?.body ? JSON.parse(String(init.body)) : {};
+    if (body?.pointer?.type === "vesselCapability" && body.pointer.shape === "poolImpulse") {
+      return Response.json({ content: { shape: "poolImpulse", vessels: [{ vesselId: "pool-fixture", endpoint: "http://pool.fixture", resolve_endpoint: "/v2/impulses/resolve" }], found: true } });
+    }
+    if (body?.impulse?.type === "poolImpulse" && body.impulse.shape === "spendEnvelope") return Response.json({ body: { impulses: [] } });
+    return inner(input, init);
+  }) as unknown as typeof fetch;
+}
 
 // A due+affordable gap-closing rhythm and a not-due/not-affordable pattern-mining one.
 const RHYTHMS = [
@@ -24,7 +42,7 @@ const RHYTHMS = [
 ];
 
 function scriptedFetch(onDecay: (id: string) => void): typeof fetch {
-  return (async (input: any, init?: any) => {
+  return withPolicyDiscovery(async (input: any, init?: any) => {
     const url = typeof input === "string" ? input : String(input.url ?? input);
     if (url.includes("/v2/impulses/resolve")) {
       const body = init?.body ? JSON.parse(String(init.body)) : {};
@@ -38,7 +56,7 @@ function scriptedFetch(onDecay: (id: string) => void): typeof fetch {
       }
     }
     return new Response("not found", { status: 404 });
-  }) as unknown as typeof fetch;
+  });
 }
 
 describe("rhythm_conductor_tick", () => {
@@ -114,7 +132,7 @@ describe("rhythm_conductor_tick", () => {
     writeFileSync(queuePath, JSON.stringify({ tasks: [], lastUpdated: 0 }));
 
     const posted: Array<{ type?: string; autoClose?: unknown }> = [];
-    globalThis.fetch = (async (input: any, init?: any) => {
+    globalThis.fetch = withPolicyDiscovery(async (input: any, init?: any) => {
       const url = typeof input === "string" ? input : String(input.url ?? input);
       if (url.includes("/v2/impulses/resolve")) {
         const b = init?.body ? JSON.parse(String(init.body)) : {};

@@ -19,8 +19,23 @@ writeFileSync(join(ROOT, "goal-host-vessel", "src", "index.ts"), "export const x
 writeFileSync(join(ROOT, "goal-host-vessel", "package.json"), JSON.stringify({ name: "goal-host-vessel" }));
 mkdirSync(join(ROOT, "proposals"), { recursive: true });
 
+// The policy reads (autonomyScope, spendEnvelope) fail closed when they cannot be read, so this fixture answers
+// them as a read that SUCCEEDS and finds no record: one poolImpulse producer holding no policy impulses.
+const noPolicyRecords = (body: { pointer?: { type?: string; shape?: string }; impulse?: { type?: string } }): Response | null => {
+  if (body?.pointer?.type === "vesselCapability" && body.pointer.shape === "poolImpulse") {
+    return Response.json({ content: { shape: "poolImpulse", vessels: [{ vesselId: "pool-fixture", endpoint: "http://pool.fixture", resolve_endpoint: "/v2/impulses/resolve" }], found: true } });
+  }
+  if (body?.impulse?.type === "poolImpulse") return Response.json({ body: { impulses: [] } });
+  return null;
+};
 const originalFetch = globalThis.fetch;
-beforeAll(() => { globalThis.fetch = (async () => new Response("{}", { status: 200 })) as typeof fetch; });
+beforeAll(() => {
+  globalThis.fetch = (async (_input: unknown, init?: RequestInit) => {
+    const body = init?.body ? JSON.parse(String(init.body)) : {};
+    return noPolicyRecords(body) ?? new Response("{}", { status: 200 });
+  }) as typeof fetch;
+  (mod as { __resetPolicyReadsForTests: () => void }).__resetPolicyReadsForTests();
+});
 afterAll(() => { globalThis.fetch = originalFetch; try { rmSync(ROOT, { recursive: true, force: true }); } catch { /* noop */ } });
 
 const mod = await import("../../src/resolvers/gap-to-feature.js") as Record<string, unknown>;

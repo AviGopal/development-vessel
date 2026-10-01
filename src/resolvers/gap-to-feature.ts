@@ -1909,6 +1909,17 @@ export async function admitActionableGaps(
   opts?: { typecheckRunner?: TypecheckRunner },
 ): Promise<AdmissionResult> {
   const runner = opts?.typecheckRunner ?? defaultTypecheckRunner;
+  // One scope read for the whole pass, so every candidate is judged against the same answer.
+  const scope = await autonomyScope();
+  // An UNREADABLE scope excludes every autonomous candidate, sited or not (no partial admission):
+  // nothing here can tell which ones touch the lane core. Reported under one reason key in the
+  // usual admission line, so an admitted-zero pass says why.
+  if (!scope.readable) {
+    console.log(`[gap-to-feature] autonomy scope unreadable: excluding all autonomous candidates (${scope.reason})`);
+    const excludedAll = gaps.map((g) => ({ id: String(g.id ?? ""), reason: `autonomy_scope_unreadable(${scope.reason})` }));
+    if (excludedAll.length) console.log(`[gap-to-feature] auto-pick admission: ${gaps.length} candidates → 0 admitted, ${excludedAll.length} excluded ${JSON.stringify({ autonomy_scope_unreadable: excludedAll.length })}`);
+    return { admitted: [], excluded: excludedAll };
+  }
   const admitted: Record<string, unknown>[] = [];
   // Gaps naming no existing file. Collected rather than admitted so the fail-open check
   // below can see whether there is any groundable work to prefer over them.
@@ -2005,7 +2016,7 @@ export async function admitActionableGaps(
     {
       const siteForScope = String(meta.edit_site || meta.file_path || meta.change_site || meta.suspected_real_location || g.file_path || "");
       if (siteForScope) {
-        const scopeHit = autonomyScopeExcludes(await autonomyScope(), siteForScope);
+        const scopeHit = autonomyScopeExcludes(scope, siteForScope);
         if (scopeHit) {
           excluded.push({ id, reason: `autonomy_scope(${scopeHit})` });
           continue;
@@ -2016,7 +2027,7 @@ export async function admitActionableGaps(
       // 09-27, each naming self-fact-reconcile.ts), so the gap is out of autonomous reach.
       const suspectedSite = String(meta.suspected_real_location ?? "").replace(/:[^/]*$/, "");
       if (suspectedSite && suspectedSite !== siteForScope) {
-        const suspectedHit = autonomyScopeExcludes(await autonomyScope(), suspectedSite);
+        const suspectedHit = autonomyScopeExcludes(scope, suspectedSite);
         if (suspectedHit) {
           excluded.push({ id, reason: `autonomy_scope(suspected_real_location ${suspectedHit})` });
           continue;
@@ -2046,7 +2057,7 @@ export async function admitActionableGaps(
     // otherwise it needs information, whatever its edit site. A typecheck-class gap keeps its own
     // machine check (tsc). No field: unchanged.
     {
-      const requiredClasses = (await autonomyScope()).requireFalsifierClasses;
+      const requiredClasses = scope.requireFalsifierClasses;
       // A typecheck-class gap keeps its own machine check only while its vessel FAILS typecheck now:
       // a TS code carried into a summary by a failed attempt's lesson otherwise admitted the
       // fs-edit gap (local-tools typechecks clean) and redrafted it four times.
@@ -2287,7 +2298,7 @@ export async function admitActionableGaps(
   // Under containment (the autonomyScope record requires falsifier classes) a target-less gap is
   // never autonomous work: failing open onto them spent node 1's only slot on leaked test-fixture
   // gaps (falsifier-merge/pair/c2/heal-*), each refusal minting another -narrowed child.
-  const containedAdmission = ((await autonomyScope()).requireFalsifierClasses ?? []).length > 0;
+  const containedAdmission = (scope.requireFalsifierClasses ?? []).length > 0;
   if (admitted.length === 0 && !containedAdmission) {
     for (const g of ungroundable) admitted.push(g);
     if (ungroundable.length) {
@@ -4886,10 +4897,9 @@ const SPEND_ENVELOPE_TTL_MS = 30_000;
 // next read after a slow peer re-reads instead of refusing for 30 s on one timeout (09-30, node 2).
 const policyUnreadableRetryMs = (): number => discoveryFailureBackoffMs();
 let spendEnvelopeCache: { at: number; v: SpendEnvelopeVerdict } | null = null;
-// Whether the last COMPLETE read found a record. Unreadable blocks only after one was seen,
-// so a process that has never seen an envelope behaves exactly as before (no cap), which
-// keeps landing safe before any envelope is written and keeps the fail-open capacity tests.
-let spendEnvelopeSeen = false;
+// An UNREADABLE envelope always refuses. A read that SUCCEEDED and found no spendEnvelope record
+// is "no cap" (allow), and only that: whether a record was ever seen is process memory, false at
+// every start, so gating the refusal on it failed open after every restart whose first read failed.
 /** The resolve URL of every producer of `shape`, through the shared discovery client. A lookup
  *  that could not be answered comes back as `{ok:false}` with its reason, never as an empty list. */
 async function discoverResolveUrls(shape: string): Promise<{ ok: true; urls: string[] } | { ok: false; why: string }> {
@@ -4897,10 +4907,10 @@ async function discoverResolveUrls(shape: string): Promise<{ ok: true; urls: str
   if (!r.ok) return { ok: false, why: describeLookup(r) };
   return { ok: true, urls: [...new Set(r.producers.map((p) => p.resolveEndpoint).filter((u) => u.length > 0))] };
 }
-/** Tests only: forget the policy verdicts, the seen flags and every remembered discovery lookup. */
+/** Tests only: forget the policy verdicts and every remembered discovery lookup (a fresh process). */
 export function __resetPolicyReadsForTests(): void {
-  spendEnvelopeCache = null; spendEnvelopeSeen = false;
-  autonomyScopeCache = null; autonomyScopeSeen = false;
+  spendEnvelopeCache = null;
+  autonomyScopeCache = null;
   __resetDiscoveryForTests();
 }
 async function postEnvelopeRead(url: string, body: unknown): Promise<Record<string, unknown> | null> {
@@ -4929,7 +4939,6 @@ async function readSpendEnvelope(): Promise<SpendEnvelopeVerdict> {
       if (imp.shape === "spendEnvelope" && (!newest || String(imp.updated_at ?? "") > String(newest.updated_at ?? ""))) newest = imp;
     }
   }
-  spendEnvelopeSeen = newest !== null;
   if (!newest) return { allow: true, reason: "no spendEnvelope record (no cap)" };
   const env = (newest.body ?? {}) as { usd_cap_per_hour?: unknown; paused?: unknown; reason?: unknown };
   if (env.paused === true) return { allow: false, paused: true, reason: "paused: " + String(env.reason ?? "no reason given") };
@@ -4961,7 +4970,7 @@ export async function spendEnvelopeAllows(): Promise<SpendEnvelopeVerdict> {
   if (spendEnvelopeCache && Date.now() - spendEnvelopeCache.at < (spendEnvelopeCache.v.unreadable ? policyUnreadableRetryMs() : SPEND_ENVELOPE_TTL_MS)) return spendEnvelopeCache.v;
   let v: SpendEnvelopeVerdict;
   try { v = await readSpendEnvelope(); } catch (err) { v = { allow: false, unreadable: true, reason: "envelope unreadable: " + String(err) }; }
-  if (v.unreadable && !spendEnvelopeSeen) v = { ...v, allow: true, reason: v.reason + " (no envelope seen yet: no cap)" };
+  if (v.unreadable) v = { ...v, allow: false }; // fail closed, whatever this process has seen before
   spendEnvelopeCache = { at: Date.now(), v };
   return v;
 }
@@ -4971,12 +4980,12 @@ export async function spendEnvelopeAllows(): Promise<SpendEnvelopeVerdict> {
 // repair. The excluded paths are a shaped impulse read at use time: the newest open poolImpulse of
 // shape `autonomyScope` ({excluded_paths: string[], reason}) across EVERY poolImpulse producer that
 // discovery lists, so one record binds every node. Entries are repo-relative (`repos/<vessel>/src/
-// file.ts`, or a directory ending in `/`). No record means no scope (behaviour unchanged); once a
-// record has been seen, an unreadable scope excludes everything autonomous (fail closed).
+// file.ts`, or a directory ending in `/`). A read that succeeded and found no record means no scope
+// (behaviour unchanged); an unreadable scope excludes everything autonomous (fail closed), including
+// on a fresh process that has not read one yet.
 // Directed work never consults it. Cached 30 s.
 export type AutonomyScope = { excluded: string[]; readable: boolean; reason: string; lookup_failed?: boolean; requireFalsifierClasses?: string[] };
 let autonomyScopeCache: { at: number; v: AutonomyScope } | null = null;
-let autonomyScopeSeen = false;
 export async function autonomyScope(): Promise<AutonomyScope> {
   if (autonomyScopeCache && Date.now() - autonomyScopeCache.at < (autonomyScopeCache.v.readable ? 30_000 : policyUnreadableRetryMs())) return autonomyScopeCache.v;
   let v: AutonomyScope;
@@ -5001,7 +5010,6 @@ export async function autonomyScope(): Promise<AutonomyScope> {
       if (unreadable) {
         v = { excluded: [], readable: false, reason: unreadable };
       } else {
-        autonomyScopeSeen = newest !== null;
         const raw = (newest?.body as { excluded_paths?: unknown } | undefined)?.excluded_paths;
         const excluded = Array.isArray(raw) ? raw.filter((e): e is string => typeof e === "string" && e.trim().length > 0).map((e) => e.trim()) : [];
         // require_falsifier_classes: autonomous admission takes only gaps a pre-existing,
@@ -5018,10 +5026,10 @@ export async function autonomyScope(): Promise<AutonomyScope> {
   autonomyScopeCache = { at: Date.now(), v };
   return v;
 }
-/** The scope entry that excludes `path` from autonomous work, or null. An unreadable scope after a
- *  record was seen excludes everything. Paths may be absolute, repo-relative or carry `:line`. */
+/** The scope entry that excludes `path` from autonomous work, or null. An unreadable scope excludes
+ *  everything. Paths may be absolute, repo-relative or carry `:line`. */
 export function autonomyScopeExcludes(scope: AutonomyScope, path: string): string | null {
-  if (!scope.readable) return autonomyScopeSeen ? `scope unreadable (${scope.reason})` : null;
+  if (!scope.readable) return `scope unreadable (${scope.reason})`;
   const n = String(path).replace(/:\d+.*$/, "").replace(/\\/g, "/").trim();
   for (const e of scope.excluded) {
     const s = e.replace(/^\.\//, "").replace(/^repos\//, "");

@@ -1,5 +1,25 @@
-import { describe, it, expect } from "bun:test";
-import { admitActionableGaps } from "../../src/resolvers/gap-to-feature.js";
+import { describe, it, expect, beforeAll, afterAll } from "bun:test";
+import { admitActionableGaps, __resetPolicyReadsForTests } from "../../src/resolvers/gap-to-feature.js";
+
+// The policy reads (autonomyScope, spendEnvelope) fail closed when they cannot be read, so this fixture answers
+// them as a read that SUCCEEDS and finds no record: one poolImpulse producer holding no policy impulses.
+const noPolicyRecords = (body: { pointer?: { type?: string; shape?: string }; impulse?: { type?: string } }): Response | null => {
+  if (body?.pointer?.type === "vesselCapability" && body.pointer.shape === "poolImpulse") {
+    return Response.json({ content: { shape: "poolImpulse", vessels: [{ vesselId: "pool-fixture", endpoint: "http://pool.fixture", resolve_endpoint: "/v2/impulses/resolve" }], found: true } });
+  }
+  if (body?.impulse?.type === "poolImpulse") return Response.json({ body: { impulses: [] } });
+  return null;
+};
+const originalFetch = globalThis.fetch;
+beforeAll(() => {
+  globalThis.fetch = (async (_input: unknown, init?: RequestInit) => {
+    const policy = noPolicyRecords(init?.body ? JSON.parse(String(init.body)) : {});
+    if (policy) return policy;
+    throw new TypeError("Unable to connect. Is the computer able to access the url?");
+  }) as unknown as typeof fetch;
+  __resetPolicyReadsForTests();
+});
+afterAll(() => { globalThis.fetch = originalFetch; __resetPolicyReadsForTests(); });
 
 // gap-to-feature and feature-compose disagreed about gaps that name no existing file.
 // gap-to-feature logged "no existing edit targets found — composer will scaffold new file"

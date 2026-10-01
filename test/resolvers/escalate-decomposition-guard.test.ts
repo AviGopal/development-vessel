@@ -18,6 +18,15 @@ process.env["SUBSTRATE_GAP_SKIP_COMPOSE_TRIGGER"] = "1";
 const sg = await import("../../src/resolvers/substrate-gap.js");
 const g2f = await import("../../src/resolvers/gap-to-feature.js");
 const RUN = Math.random().toString(36).slice(2, 8);
+// The policy reads (autonomyScope, spendEnvelope) fail closed when they cannot be read, so this fixture answers
+// them as a read that SUCCEEDS and finds no record: one poolImpulse producer holding no policy impulses.
+const noPolicyRecords = (body: { pointer?: { type?: string; shape?: string }; impulse?: { type?: string } }): Response | null => {
+  if (body?.pointer?.type === "vesselCapability" && body.pointer.shape === "poolImpulse") {
+    return Response.json({ content: { shape: "poolImpulse", vessels: [{ vesselId: "pool-fixture", endpoint: "http://pool.fixture", resolve_endpoint: "/v2/impulses/resolve" }], found: true } });
+  }
+  if (body?.impulse?.type === "poolImpulse") return Response.json({ body: { impulses: [] } });
+  return null;
+};
 const originalFetch = globalThis.fetch;
 const savedStoreEndpoint = process.env["GAP_STORE_ENDPOINT"];
 let llmLookups = 0;
@@ -35,6 +44,8 @@ beforeAll(() => {
   globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
     const url = typeof input === "string" ? input : String((input as { url?: string }).url ?? input);
     const body = init?.body ? JSON.parse(String(init.body)) : {};
+    const policy = noPolicyRecords(body);
+    if (policy) return policy;
     if (body?.pointer?.type === "vesselCapability") {
       if (body.pointer.shape === "llm_completion") llmLookups++;
       return Response.json({ content: { vessels: [] } });

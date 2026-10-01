@@ -1266,7 +1266,11 @@ export async function resolveSubstrateGapWrite(
   // the original, and changing it would be a second behavioural change.
 
   // If we're not supposed to trigger for *this* gap class, skip the whole op.
-  if (existingIdx < 0 && gap.status !== "open" && process.env.SUBSTRATE_GAP_SKIP_COMPOSE_TRIGGER === "1") {
+  // CLOSE-IF-OPEN, FOR EVERY WRITER (2026-10-01). A status change with no exact-id row and no open
+  // row of its class is a no-op. This was gated on SUBSTRATE_GAP_SKIP_COMPOSE_TRIGGER === "1", a
+  // test variable deciding production semantics, so in production such a write fell through to an
+  // INSERT: a non-holder forwarding closes from a stale copy minted 90 closed rows that never existed.
+  if (existingIdx < 0 && gap.status !== "open") {
     return {
       early: {
         shape: "substrateGapWriteResult",

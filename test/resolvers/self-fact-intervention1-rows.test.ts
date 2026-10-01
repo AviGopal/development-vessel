@@ -315,3 +315,16 @@ describe("one journal line per row per tick (so 'no divergences here' differs fr
     expect(new RegExp(ROW_A.pattern!).test(quoting[0]!)).toBe(false);
   });
 });
+
+// THE INSTRUMENT MUST NOT COUNT ITSELF (2026-10-01): Row B once read 66 > 65 because the canary's planted
+// lookup was a source literal in this resolver. The canary string is built at runtime; this pins it, so a later
+// "simplify the template literal" refactor cannot silently restore the self-count.
+describe("typed_seam_sites never counts its own instrument file", () => {
+  it("the row's site pattern finds 0 sites in self-fact-reconcile.ts's own source", () => {
+    const SITE_PATTERN = "type:[[:space:]]*['\"]vesselCapability['\"]"; // = the discovery_lookups_on_typed_seam row's site_pattern
+    const p = Bun.spawnSync(["git", "grep", "--no-index", "-n", "-E", SITE_PATTERN, "--", "src/resolvers/self-fact-reconcile.ts"], { stdout: "pipe", stderr: "pipe" });
+    expect([0, 1]).toContain(p.exitCode); // 1 = no match (the expected case); anything else is a broken read
+    const lines = new TextDecoder().decode(p.stdout).split("\n");
+    expect(countSiteLines(lines, "", []).count).toBe(0);
+  });
+});

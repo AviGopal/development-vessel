@@ -276,7 +276,9 @@ export function scratchSiteCount(sitePattern: string, pathspecs: readonly string
   const dir = mkdtempSync(join(tmpdir(), "self-fact-seam-canary-"));
   try {
     mkdirSync(join(dir, "src"), { recursive: true });
-    const site = `await fetch(url, { body: JSON.stringify({ pointer: { type: "vesselCapability", shape } }) });\n`;
+    // Built at runtime so this file's own source never matches the site pattern: the canary is a planted
+    // copy for the counter to find, not a lookup this vessel makes (it once read as the 66th site).
+    const site = `await fetch(url, { body: JSON.stringify({ pointer: { type: "${"vessel" + "Capability"}", shape } }) });\n`;
     writeFileSync(join(dir, "src", "planted.ts"), site);
     writeFileSync(join(dir, "src", "planted.test.ts"), site);
     writeFileSync(join(dir, "src", "planted.js"), site);

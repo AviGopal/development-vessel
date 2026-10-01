@@ -46,6 +46,11 @@ process.env["SUBSTRATE_GAP_SKIP_COMPOSE_TRIGGER"] = "1";
 const { resolveSubstrateGap, resolveSubstrateGapWrite, classifyFalsifier, falsifierCoverage, gapStoreRootForTest } =
   await import(`../../src/resolvers/substrate-gap.js?${"falsifier-isolated"}`); // a FRESH module instance: its load-time WORKSPACE_ROOT capture sees THIS suite's root even when another suite already loaded the shared one
 
+// A class-2 write schedules a birth evaluation (gap_falsify v2). Its default judge resolves the check through
+// this vessel's own endpoint (localhost:8090), i.e. the LIVE vessel. Every write here injects a judge that
+// answers in-process, so no birth resolve leaves the test (qa C1).
+const noNetworkBirthJudge = async (): Promise<string> => "present";
+
 // PROVE THE ISOLATION, DO NOT ASSUME IT.
 //
 // Setting WORKSPACE_ROOT above only isolates this suite if it wins the import race. config.ts
@@ -281,7 +286,7 @@ describe("resolveSubstrateGapWrite — stamps the falsifier on every write", () 
     // refuse. Note the existing identity and description gates DO reject; this one
     // deliberately does not follow them.
     const { result, logs } = await withCapturedLog(() =>
-      resolveSubstrateGapWrite(gapWith("falsifier-none-001"), { vocabulary: vocab() }),
+      resolveSubstrateGapWrite(gapWith("falsifier-none-001"), { vocabulary: vocab(), birthJudge: noNetworkBirthJudge }),
     );
     expect(result.shape).toBe("substrateGapWriteResult");
     const body = result.body as { action: string; falsifier: string };
@@ -298,11 +303,11 @@ describe("resolveSubstrateGapWrite — stamps the falsifier on every write", () 
   it("stamps class1 and class2 through the resolver, and persists the stamp", async () => {
     await resolveSubstrateGapWrite(
       gapWith("falsifier-c1-001", { edit_site: "src/x.ts", hardcoded_url: "http://127.0.0.1:8080/impulses" }),
-      { vocabulary: vocab() },
+      { vocabulary: vocab(), birthJudge: noNetworkBirthJudge },
     );
     await resolveSubstrateGapWrite(
       gapWith("falsifier-c2-001", { evidence_resolve: { shape: "trace_failure_pattern_report", nonzero_field: "occurrence_count" } }),
-      { vocabulary: vocab() },
+      { vocabulary: vocab(), birthJudge: noNetworkBirthJudge },
     );
     const read = await resolveSubstrateGap({ type: "substrateGap", limit: 100 });
     const byId = new Map(
@@ -331,7 +336,7 @@ describe("resolveSubstrateGapWrite — stamps the falsifier on every write", () 
       detector: "trace-recurring-pattern-scan",
     };
     const { result, logs } = await withCapturedLog(() =>
-      resolveSubstrateGapWrite(gapWith("falsifier-unresolvable-001", structuredClone(supplied)), { vocabulary: vocab() }),
+      resolveSubstrateGapWrite(gapWith("falsifier-unresolvable-001", structuredClone(supplied)), { vocabulary: vocab(), birthJudge: noNetworkBirthJudge }),
     );
     const body = result.body as { falsifier: string; falsifier_unadvertised_shape?: string };
     expect(body.falsifier).toBe("unresolvable");
@@ -351,11 +356,11 @@ describe("resolveSubstrateGapWrite — stamps the falsifier on every write", () 
   it("the advertised/unadvertised PAIR is discriminated — same field, one character class apart", async () => {
     await resolveSubstrateGapWrite(
       gapWith("falsifier-pair-good", { evidence_resolve: { shape: "trace_failure_pattern_report" } }),
-      { vocabulary: vocab() },
+      { vocabulary: vocab(), birthJudge: noNetworkBirthJudge },
     );
     const bad = await resolveSubstrateGapWrite(
       gapWith("falsifier-pair-bad", { evidence_resolve: { shape: "failurePatternReport" } }),
-      { vocabulary: vocab() },
+      { vocabulary: vocab(), birthJudge: noNetworkBirthJudge },
     );
     const good = await resolveSubstrateGap({ type: "substrateGap", id: "falsifier-pair-good" });
     const goodMeta = ((good.body as { gaps: Array<Record<string, unknown>> }).gaps[0]!["classification_metadata"] ??
@@ -372,11 +377,11 @@ describe("resolveSubstrateGapWrite — stamps the falsifier on every write", () 
     // the stamp would lie about exactly the population it exists to count.
     await resolveSubstrateGapWrite(
       gapWith("falsifier-merge-001", { evidence_resolve: { shape: "trace_failure_pattern_report" } }),
-      { vocabulary: vocab() },
+      { vocabulary: vocab(), birthJudge: noNetworkBirthJudge },
     );
     const reemit = await resolveSubstrateGapWrite(
       gapWith("falsifier-merge-001", { detector: "some-scan", cycle: 2 }),
-      { vocabulary: vocab() },
+      { vocabulary: vocab(), birthJudge: noNetworkBirthJudge },
     );
     const body = reemit.body as { action: string; falsifier: string };
     expect(body.action).toBe("updated");
@@ -386,11 +391,11 @@ describe("resolveSubstrateGapWrite — stamps the falsifier on every write", () 
   it("a stale unresolvable accusation is CLEARED when a later write supplies an advertised shape", async () => {
     await resolveSubstrateGapWrite(
       gapWith("falsifier-heal-001", { evidence_resolve: { shape: "failurePatternReport" } }),
-      { vocabulary: vocab() },
+      { vocabulary: vocab(), birthJudge: noNetworkBirthJudge },
     );
     await resolveSubstrateGapWrite(
       gapWith("falsifier-heal-001", { evidence_resolve: { shape: "trace_failure_pattern_report" } }),
-      { vocabulary: vocab() },
+      { vocabulary: vocab(), birthJudge: noNetworkBirthJudge },
     );
     const read = await resolveSubstrateGap({ type: "substrateGap", id: "falsifier-heal-001" });
     const meta = ((read.body as { gaps: Array<Record<string, unknown>> }).gaps[0]!["classification_metadata"] ??
@@ -440,7 +445,7 @@ describe("the existing rejection gates are untouched", () => {
   it("identity gate: a gap without an id is still rejected", async () => {
     const r = await resolveSubstrateGapWrite(
       { type: "substrateGap_write", gap: { category: "other", source: "substrate_detected", summary: "no id here" } } as never,
-      { vocabulary: vocab() },
+      { vocabulary: vocab(), birthJudge: noNetworkBirthJudge },
     );
     expect(r.shape).toBe("structuredError");
     const b = r.body as { failure_mode: string; field: string };
@@ -451,7 +456,7 @@ describe("the existing rejection gates are untouched", () => {
   it("description gate: an OPEN gap with an empty summary is still rejected", async () => {
     const r = await resolveSubstrateGapWrite(
       { type: "substrateGap_write", gap: { id: "falsifier-gate-empty", category: "other", source: "substrate_detected", status: "open", summary: "   " } } as never,
-      { vocabulary: vocab() },
+      { vocabulary: vocab(), birthJudge: noNetworkBirthJudge },
     );
     expect(r.shape).toBe("structuredError");
     expect((r.body as { failure_mode: string }).failure_mode).toBe("validation_rejected");
@@ -460,7 +465,7 @@ describe("the existing rejection gates are untouched", () => {
   it("description gate: an uninterpolated {{placeholder}} in the id is still rejected", async () => {
     const r = await resolveSubstrateGapWrite(
       { type: "substrateGap_write", gap: { id: "gap-{{goal.id}}", category: "other", source: "substrate_detected", status: "open", summary: "a real summary" } } as never,
-      { vocabulary: vocab() },
+      { vocabulary: vocab(), birthJudge: noNetworkBirthJudge },
     );
     expect(r.shape).toBe("structuredError");
     expect((r.body as { detail: string }).detail).toContain("placeholder");
@@ -472,7 +477,7 @@ describe("the existing rejection gates are untouched", () => {
     // stamping there would announce a classification of a row that does not exist.
     const r = await resolveSubstrateGapWrite(
       { type: "substrateGap_write", gap: { category: "other", source: "substrate_detected", summary: "no id" } } as never,
-      { vocabulary: vocab() },
+      { vocabulary: vocab(), birthJudge: noNetworkBirthJudge },
     );
     expect((r.body as Record<string, unknown>)["falsifier"]).toBeUndefined();
   });

@@ -153,7 +153,9 @@ async function fetchCatalogue(): Promise<Set<string>> {
  * falls back to curated-only). (2026-06-28)
  */
 let _descCache: { descriptions: Record<string, string>; at: number } | null = null;
-async function fetchShapeDescriptions(): Promise<Record<string, string>> {
+// Exported for gap_falsify v2: the decomposition proposer shows the LLM the same advertised vocabulary
+// (one reader of /registry/shape-descriptions, not a second one).
+export async function fetchShapeDescriptions(): Promise<Record<string, string>> {
   const now = Date.now();
   if (_descCache && now - _descCache.at < CATALOGUE_TTL_MS) return _descCache.descriptions;
   try {

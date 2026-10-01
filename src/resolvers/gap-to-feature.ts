@@ -15,7 +15,7 @@ declare module "./feature-compose.js" {
   }
 }
 
-import { resolveSubstrateGap, resolveSubstrateGapWrite, DECISION_LOG_GAP_CATEGORIES } from "./substrate-gap.js";
+import { resolveSubstrateGap, resolveSubstrateGapWrite, DECISION_LOG_GAP_CATEGORIES, predicateSuspect, class2PredicateKey, reevaluateBirthVerdicts } from "./substrate-gap.js";
 import { resolveAuthorProducer } from "./author-producer.js";
 import { resolveDocDriftFix } from "./doc-drift-fix.js";
 import { resolveReachabilityGapRepair } from "./reachability-gap-repair.js";
@@ -545,36 +545,227 @@ export function quotedSiteExcerpt(text: string, summary: string, cap = 7000): st
   return out || text.slice(0, cap);
 }
 
-export async function decomposeGap(parent: Record<string, unknown>, opts: { directed?: boolean } = {}): Promise<{ written: string[]; reason: string }> {
+// gap_falsify v2: the decomposer was starved (law 8). 786 of 903 proposals in 7 days were refused as "no valid
+// step", mostly invented repos/ paths and shapes: it was never shown the vocabulary it had to name. It now sees
+// (a) the advertised READ shapes with their descriptions (discovery /registry/shape-descriptions, the reader
+// author_composed_capability already uses) and (b) the edit-site vessel's test files and the test names that
+// match the gap's own words, so a check can name something that exists.
+const DECOMPOSE_STOPWORDS = new Set(["about", "after", "again", "because", "before", "being", "between", "cannot", "could", "every", "never", "other", "should", "their", "there", "these", "those", "under", "where", "which", "while", "would", "substrate", "change", "gap", "gaps", "check", "still", "today", "without", "within"]);
+export function decomposeSummaryTerms(summary: string): string[] {
+  const out = new Set<string>();
+  for (const m of summary.matchAll(/[A-Za-z_][A-Za-z0-9_]{4,}/g)) {
+    const w = m[0].toLowerCase();
+    if (!DECOMPOSE_STOPWORDS.has(w)) out.add(w);
+    if (out.size >= 40) break;
+  }
+  return [...out];
+}
+const TEST_SUITE_CHECK_HELP = "runs named tests of a vessel in-container; input {vessel:\"repos/<v>\", test_file:\"<path in that vessel>\", only_tests:[\"<exact test title>\"]}; answers requested_not_passing = how many of the named tests do not pass (a missing test counts as not passing)";
+export function advertisedReadShapesBlock(descriptions: Record<string, string>, terms: string[], cap = 40): string {
+  const rows = Object.entries(descriptions)
+    .filter(([shape]) => shape !== "test_suite" && !/_write$|_delete$|_deprecate$|^vessel_register|^systemd_/.test(shape))
+    .map(([shape, desc]) => {
+      const hay = (shape + " " + desc).toLowerCase();
+      return { shape, desc, score: terms.filter((t) => hay.includes(t)).length };
+    })
+    .sort((a, b) => b.score - a.score || a.shape.localeCompare(b.shape))
+    .slice(0, Math.max(0, cap - 1));
+  return [`- test_suite: ${TEST_SUITE_CHECK_HELP}`, ...rows.map((r) => `- ${r.shape}: ${r.desc.slice(0, 200)}`)].join("\n");
+}
+export function vesselTestInventory(vessel: string, terms: string[]): { files: string[]; matches: Array<{ file: string; name: string }> } {
+  const root = join(vesselsCloneRoot(), vessel);
+  const files: string[] = [];
+  const walk = (rel: string, depth: number): void => {
+    if (depth > 6 || files.length >= 400) return;
+    let entries: import("node:fs").Dirent[] = [];
+    try { entries = readdirSync(join(root, rel), { withFileTypes: true }); } catch { return; }
+    for (const e of entries) {
+      if (e.name === "node_modules" || e.name.startsWith(".")) continue;
+      const r = rel ? `${rel}/${e.name}` : e.name;
+      if (e.isDirectory()) walk(r, depth + 1);
+      else if (/\.(test|spec)\.(ts|tsx|js|mjs)$/.test(e.name)) files.push(r);
+    }
+  };
+  walk("src", 0);
+  walk("test", 0);
+  walk("tests", 0);
+  const matches: Array<{ file: string; name: string }> = [];
+  for (const f of files) {
+    if (matches.length >= 30) break;
+    let text = "";
+    try { text = readFileSync(join(root, f), "utf-8"); } catch { continue; }
+    for (const m of text.matchAll(/\b(?:test|it)(?:\.(?:only|skip|todo|if\([^)]*\)))?\(\s*(["'`])((?:\\.|(?!\1)[^\\\n])*)\1/g)) {
+      const name = m[2] ?? "";
+      const low = name.toLowerCase();
+      if (name && terms.some((t) => low.includes(t))) matches.push({ file: f, name });
+      if (matches.length >= 30) break;
+    }
+  }
+  return { files: files.slice(0, 80), matches };
+}
+
+export interface DecomposeDeps {
+  /** The one bounded LLM call. Default: the llm_completion producer discovery names. */
+  llm?: (prompt: string) => Promise<string>;
+  /** The one judge. Default: evaluateGapCheck. */
+  judge?: (gap: Record<string, unknown>) => Promise<GapCheckVerdict>;
+  /** Advertised shape → description. Default: author-composed-capability fetchShapeDescriptions. */
+  shapeDescriptions?: () => Promise<Record<string, string>>;
+}
+
+async function defaultDecomposeLlm(prompt: string): Promise<string> {
+  const dr = await fetch(`${DISCOVERY_ENDPOINT}/resolve`, { method: "POST", headers: { "Content-Type": "application/json", Authorization: `ApiKey ${METABOB_API_KEY}` }, body: JSON.stringify({ pointer: { type: "vesselCapability", shape: "llm_completion" } }), signal: AbortSignal.timeout(6000) });
+  const dd = (await dr.json()) as { content?: { vessels?: Array<{ endpoint: string; resolve_endpoint?: string }> } };
+  const best = (dd.content?.vessels ?? [])[0];
+  if (!best) throw new Error("no llm_completion producer");
+  const ep0 = best.resolve_endpoint ?? "/resolve";
+  const endpoint = ep0.startsWith("http") ? ep0 : `${best.endpoint.replace(/\/$/, "")}${ep0.startsWith("/") ? ep0 : `/${ep0}`}`;
+  const res = await fetch(endpoint, { method: "POST", headers: { "Content-Type": "application/json", Authorization: `ApiKey ${METABOB_API_KEY}` }, body: JSON.stringify({ type: "llm_completion", prompt, model: "auto", max_tokens: 1200, caller: "development-vessel:gap_decompose" }), signal: AbortSignal.timeout(90_000) });
+  const j = (await res.json()) as { content?: string; data?: string };
+  return String(j.content ?? j.data ?? "");
+}
+
+/** The budget a proposed test_suite check may ask for: the pull-sync failing-test generator's. */
+const PROPOSED_TEST_SUITE_TIMEOUT_MS = 180_000;
+
+export async function decomposeGap(
+  parent: Record<string, unknown>,
+  opts: { directed?: boolean; parentCheck?: boolean; deps?: DecomposeDeps } = {},
+): Promise<{ written: string[]; reason: string; parent_check?: string }> {
   const parentId = String(parent.id ?? "");
   const meta = (parent.classification_metadata ?? {}) as Record<string, unknown>;
   if (!parentId) return { written: [], reason: "no parent id" };
   if (meta.parent_gap_id || /-step-\d+$/.test(parentId)) return { written: [], reason: "a decomposed step is not decomposed again" };
+  const judge = opts.deps?.judge ?? ((g: Record<string, unknown>) => evaluateGapCheck(g));
   const site = String(meta.edit_site ?? "").replace(/:\d+.*$/, "");
   const siteMatch = /^repos\/([^/]+)\/(.+)$/.exec(site);
+  const siteVessel = siteMatch?.[1] ?? "";
   let excerpt = "";
-  if (siteMatch) { try { excerpt = quotedSiteExcerpt(readFileSync(join("/workspace/git/vessels", siteMatch[1] ?? "", siteMatch[2] ?? ""), "utf-8"), String(parent.summary ?? "")); } catch { excerpt = ""; } }
+  if (siteMatch) { try { excerpt = quotedSiteExcerpt(readFileSync(join(vesselsCloneRoot(), siteMatch[1] ?? "", siteMatch[2] ?? ""), "utf-8"), String(parent.summary ?? "")); } catch { excerpt = ""; } }
   const predicate: Record<string, unknown> = {};
   for (const k of ["expected_literal", "hardcoded_url", "evidence_resolve", "verify_shape"]) if (meta[k] !== undefined && meta[k] !== null) predicate[k] = meta[k];
   const lessons = Array.isArray(meta.failure_lessons) ? (meta.failure_lessons as Array<Record<string, unknown>>).slice(-3).map((l) => "- " + String(l.class ?? "?") + ": " + String(l.reason ?? "").slice(0, 300)).join("\n") : "";
-  const prompt = `A substrate gap could not be closed by one single-file code change. Decompose it into 1 to 3 SMALL steps. Each step changes exactly ONE existing source file and has a machine-checkable falsifier.\n\nGAP ${parentId}:\n${String(parent.summary ?? "").slice(0, 1500)}\n\nITS FALSIFIER: ${JSON.stringify(predicate).slice(0, 600)}\n\nWHY ATTEMPTS FAILED (most recent last):\n${lessons || "(none recorded)"}\n\nEDIT SITE ${site || "(none)"} (excerpt):\n${excerpt}\n\nRespond with ONLY JSON: {"steps":[{"edit_site":"repos/<vessel>/src/<file>","change":"<one sentence>","falsifier":{"evidence_resolve":{"shape":"<shape>","input":{},"zero_field":"<numeric field in its answer that counts this defect: above 0 today, 0 after the change>"}} OR {"expected_literal":"<identifier the change introduces>","reader":"<existing function in that file that will read or call it>"}}],"cannot_falsify":"<only if no step can be given a machine check>"}\nRules: a shape falsifier must name a shape that ALREADY exists and answers today (it currently reports this defect and stops reporting it after the change); a shape the change itself would introduce cannot be a falsifier — for new behaviour use expected_literal with a reader; the reader must be an existing FUNCTION in that file that is called on a live path and will call or read the literal (not a type, interface or comment); never propose a logging-only, comment-only or observation-only step; never propose removing, weakening or silencing a detector or check; each step must change live behaviour ON ITS OWN when landed alone — never a step that only adds a helper, function or constant for a later step to call (a new function nothing calls is refused as hollow); when the same fix is needed at several sites, make each step fix ONE site completely, inline, the way any site that already does it correctly does; the steps together must close the gap.`;
+  // LAW-8 INPUTS: what exists to be named.
+  const terms = decomposeSummaryTerms(String(parent.summary ?? ""));
+  let descriptions: Record<string, string> = {};
+  try {
+    descriptions = opts.deps?.shapeDescriptions
+      ? await opts.deps.shapeDescriptions()
+      : await (await import("./author-composed-capability.js")).fetchShapeDescriptions();
+  } catch { descriptions = {}; }
+  const inventory = siteVessel ? vesselTestInventory(siteVessel, terms) : { files: [], matches: [] };
+  const vocabularyBlock = `\n\nADVERTISED READ SHAPES (a shape check must name one of these; name: what it answers):\n${advertisedReadShapesBlock(descriptions, terms)}` +
+    `\n\nTEST FILES IN repos/${siteVessel || "(none)"}:\n${inventory.files.join("\n") || "(none found)"}` +
+    `\n\nEXISTING TESTS WHOSE NAMES MATCH THIS GAP (file :: exact title):\n${inventory.matches.map((m) => `${m.file} :: ${m.name}`).join("\n") || "(none)"}`;
+  const parentCheckAsk = opts.parentCheck
+    ? `\n\nFIRST, "parent_check": ONE machine check for THIS GAP ITSELF that FAILS on today's tree because of this defect and passes once the defect is fixed. Two forms only. (a) an EXISTING test that fails today because of this defect: {"evidence_resolve":{"shape":"test_suite","input":{"vessel":"repos/${siteVessel || "<vessel>"}","test_file":"<a path from TEST FILES>","only_tests":["<an exact title from EXISTING TESTS>"]},"zero_field":"requested_not_passing"}}. (b) an ADVERTISED READ SHAPE whose answer has a numeric field counting this defect (above 0 today, 0 after the fix): {"evidence_resolve":{"shape":"<shape>","input":{},"zero_field":"<field>"}}. Never a word or literal check, never a write shape, never a test or shape you would have to create. The check is run before it is kept and is discarded unless it fails today. If no such check exists, "parent_check": null.`
+    : "";
+  const prompt = `A substrate gap could not be closed by one single-file code change. Decompose it into 1 to 3 SMALL steps. Each step changes exactly ONE existing source file and has a machine-checkable falsifier.\n\nGAP ${parentId}:\n${String(parent.summary ?? "").slice(0, 1500)}\n\nITS FALSIFIER: ${JSON.stringify(predicate).slice(0, 600)}\n\nWHY ATTEMPTS FAILED (most recent last):\n${lessons || "(none recorded)"}\n\nEDIT SITE ${site || "(none)"} (excerpt):\n${excerpt}${vocabularyBlock}${parentCheckAsk}\n\nRespond with ONLY JSON: {${opts.parentCheck ? `"parent_check":{"evidence_resolve":{...}} or null,` : ""}"steps":[{"edit_site":"repos/<vessel>/src/<file>","change":"<one sentence>","falsifier":{"evidence_resolve":{"shape":"<shape>","input":{},"zero_field":"<numeric field in its answer that counts this defect: above 0 today, 0 after the change>"}} OR {"expected_literal":"<identifier the change introduces>","reader":"<existing function in that file that will read or call it>"}}],"cannot_falsify":"<only if no step can be given a machine check>"}\nRules: a shape falsifier must name a shape that ALREADY exists and answers today (it currently reports this defect and stops reporting it after the change); a shape the change itself would introduce cannot be a falsifier — for new behaviour use expected_literal with a reader; the reader must be an existing FUNCTION in that file that is called on a live path and will call or read the literal (not a type, interface or comment); never propose a logging-only, comment-only or observation-only step; never propose removing, weakening or silencing a detector or check; each step must change live behaviour ON ITS OWN when landed alone — never a step that only adds a helper, function or constant for a later step to call (a new function nothing calls is refused as hollow); when the same fix is needed at several sites, make each step fix ONE site completely, inline, the way any site that already does it correctly does; the steps together must close the gap.`;
   let raw = "";
   try {
-    const dr = await fetch(`${DISCOVERY_ENDPOINT}/resolve`, { method: "POST", headers: { "Content-Type": "application/json", Authorization: `ApiKey ${METABOB_API_KEY}` }, body: JSON.stringify({ pointer: { type: "vesselCapability", shape: "llm_completion" } }), signal: AbortSignal.timeout(6000) });
-    const dd = (await dr.json()) as { content?: { vessels?: Array<{ endpoint: string; resolve_endpoint?: string }> } };
-    const best = (dd.content?.vessels ?? [])[0];
-    if (!best) return { written: [], reason: "no llm_completion producer" };
-    const ep0 = best.resolve_endpoint ?? "/resolve";
-    const endpoint = ep0.startsWith("http") ? ep0 : `${best.endpoint.replace(/\/$/, "")}${ep0.startsWith("/") ? ep0 : `/${ep0}`}`;
-    const res = await fetch(endpoint, { method: "POST", headers: { "Content-Type": "application/json", Authorization: `ApiKey ${METABOB_API_KEY}` }, body: JSON.stringify({ type: "llm_completion", prompt, model: "auto", max_tokens: 1200, caller: "development-vessel:gap_decompose" }), signal: AbortSignal.timeout(90_000) });
-    const j = (await res.json()) as { content?: string; data?: string };
-    raw = String(j.content ?? j.data ?? "");
-  } catch (err) { return { written: [], reason: "llm call failed: " + String(err) }; }
-  let parsed: { steps?: Array<Record<string, unknown>>; cannot_falsify?: unknown } = {};
+    raw = opts.deps?.llm ? await opts.deps.llm(prompt) : await defaultDecomposeLlm(prompt);
+  } catch (err) {
+    if (String(err).includes("no llm_completion producer")) return { written: [], reason: "no llm_completion producer" };
+    return { written: [], reason: "llm call failed: " + String(err) };
+  }
+  let parsed: { steps?: Array<Record<string, unknown>>; cannot_falsify?: unknown; parent_check?: unknown } = {};
   try { const a = raw.indexOf("{"), b = raw.lastIndexOf("}"); parsed = JSON.parse(raw.slice(a, b + 1)); } catch { return { written: [], reason: "unparseable decomposition" }; }
   const scope = await autonomyScope();
   const written: string[] = [];
   const refusals: string[] = [];
+
+  // ONE VALIDATION CHAIN for every proposed check: the parent's own (k=0) and each step's. `siblings` are
+  // checks a step may not restate (the parent's pre-existing one, and a parent check proposed in this call).
+  const validateShapeCheck = async (label: string, f: Record<string, unknown>, siblings: Array<Record<string, unknown>>): Promise<{ ok: true; predicate: Record<string, unknown> } | { ok: false; why: string }> => {
+    const shape = typeof f.verify_shape === "string" ? f.verify_shape : (f.evidence_resolve && typeof (f.evidence_resolve as { shape?: unknown }).shape === "string" ? String((f.evidence_resolve as { shape?: unknown }).shape) : "");
+    if (!shape) return { ok: false, why: `${label}: no machine-checkable falsifier` };
+    const producers = await discoverResolveUrls(shape);
+    if (!producers.ok) return { ok: false, why: `${label}: could not check that shape ${shape} is advertised (${producers.why})` };
+    if (producers.urls.length === 0) return { ok: false, why: `${label}: shape ${shape} is not advertised` };
+    // A CHECK THAT WRITES IS NOT A CHECK (09-29): advertisement alone let 12 uiPanel_write/uiQuestion_write
+    // checks through, and verifying them performed live writes. The verifier refuses them too (487a7e9).
+    if (/_write$/.test(shape)) return { ok: false, why: `${label}: shape ${shape} is a write, not a read` };
+    // A step whose predicate is the PARENT's own check cannot be verified alone: one step will not
+    // flip it, so a generic step "satisfied" it in prose while the parent's check stayed failing
+    // (the relevance-sink step landed a size check, 04b3e9c, with divergence still 1).
+    const childEr = f.evidence_resolve as { shape?: unknown; input?: unknown } | undefined;
+    for (const sib of siblings) {
+      const sibEr = sib.evidence_resolve as { shape?: unknown; input?: unknown } | undefined;
+      const same = (typeof f.verify_shape === "string" && f.verify_shape === sib.verify_shape)
+        || (!!sibEr && !!childEr && sibEr.shape === childEr.shape && JSON.stringify(sibEr.input ?? {}) === JSON.stringify(childEr.input ?? {}));
+      if (same) return { ok: false, why: `${label}: its falsifier is the parent's own check, which one step will not flip` };
+    }
+    // A shape check with no measured field reads 'unknown' in the closure sweep forever: the step can
+    // be neither closed nor recorded as falsified. 15 live step/probe predicates were born that way.
+    // The verifier reads inner[field] FLAT, so the field must be a plain identifier: a path such as
+    // entries.length can only ever read unknown (route-edit-ec962628-step-1, 09-29).
+    // A DEFECT_FIELD CHECK IS REFUSED (qa C4 ruling iv): the judge reads it 'present' only when the key is in the
+    // answer, so a key the shape never returns reads 'absent', i.e. fixed, and closes the gap on silence.
+    if (!!childEr && (childEr as Record<string, unknown>)["defect_field"] !== undefined) return { ok: false, why: `${label}: a defect_field check is refused: a missing key reads as fixed` };
+    const measured = !!childEr && ["zero_field", "nonzero_field"].some((fk) => {
+      const fv = (childEr as Record<string, unknown>)[fk];
+      return typeof fv === "string" && /^[A-Za-z_][A-Za-z0-9_]*$/.test(fv);
+    });
+    if (!measured) return { ok: false, why: `${label}: its shape check names no zero_field/nonzero_field, so it could never be judged` };
+    // WHETHER THE SHAPE REPORTS THAT FIELD is not decided here (qa C4 ruling iv): descriptions are prose, and a
+    // lexical match was vacuous (312 of 312 described shapes passed it). The proof is the judge on the real
+    // answer (redNow, below): a zero_field/nonzero_field the shape does not return, or returns non-numeric,
+    // reads 'unknown', so the check is not written.
+    if (shape === "test_suite") {
+      // A NAMED TEST THAT DOES NOT EXIST IS TRIVIALLY RED: requested_not_passing counts a missing test as not
+      // passing, so an invented name reads 'present' forever (the test twin of an absent expected_literal).
+      const er = childEr as Record<string, unknown>;
+      const input = (er.input && typeof er.input === "object" ? er.input : {}) as Record<string, unknown>;
+      const vessel = String(input.vessel ?? "").replace(/^repos\//, "");
+      const testFile = typeof input.test_file === "string" ? input.test_file.trim() : "";
+      const onlyTests = Array.isArray(input.only_tests) ? (input.only_tests as unknown[]).filter((t): t is string => typeof t === "string" && t.trim().length > 0) : [];
+      if (er.zero_field !== "requested_not_passing") return { ok: false, why: `${label}: a test_suite check is judged by zero_field requested_not_passing` };
+      if (!/^[A-Za-z0-9_-]+$/.test(vessel)) return { ok: false, why: `${label}: test_suite check names no vessel` };
+      if (!testFile || !/^[A-Za-z0-9_./-]+$/.test(testFile) || testFile.includes("..")) return { ok: false, why: `${label}: test_suite check names no usable test_file` };
+      if (onlyTests.length === 0) return { ok: false, why: `${label}: test_suite check names no test (only_tests), so it could never be judged` };
+      let testText = "";
+      try { testText = readFileSync(join(vesselsCloneRoot(), vessel, testFile), "utf-8"); } catch { return { ok: false, why: `${label}: test file repos/${vessel}/${testFile} does not exist` }; }
+      const missing = onlyTests.find((t) => t.split(" > ").some((seg) => !testText.includes(seg.trim())));
+      if (missing !== undefined) return { ok: false, why: `${label}: test "${missing.slice(0, 120)}" is not in repos/${vessel}/${testFile}` };
+      const tm = typeof input.timeout_ms === "number" && input.timeout_ms > 0 ? Math.min(input.timeout_ms, PROPOSED_TEST_SUITE_TIMEOUT_MS) : PROPOSED_TEST_SUITE_TIMEOUT_MS;
+      return { ok: true, predicate: { evidence_resolve: { shape: "test_suite", input: { vessel: `repos/${vessel}`, test_file: testFile, only_tests: onlyTests, timeout_ms: tm }, zero_field: "requested_not_passing" } } };
+    }
+    return { ok: true, predicate: typeof f.verify_shape === "string" ? { verify_shape: f.verify_shape } : { evidence_resolve: f.evidence_resolve } };
+  };
+  // RED BEFORE WRITE: a class-2 check is kept only if the one judge reads it 'present' on today's tree.
+  // Where the gap store is held ELSEWHERE the judge abstains (it measures only where the store is held), so the
+  // judgement is deferred to the holder: the write is forwarded without a verdict, and the holder's seam stamps
+  // it pending and evaluates it there; anything but 'present' is then predicate_suspect (not admissible).
+  const deferToHolder = !!process.env["GAP_STORE_ENDPOINT"];
+  const redNow = async (label: string, id: string, pred: Record<string, unknown>): Promise<{ ok: true } | { ok: false; why: string }> => {
+    if (deferToHolder) return { ok: true };
+    let v: GapCheckVerdict = "unknown";
+    try { v = await judge({ id, classification_metadata: { ...pred } }); } catch { v = "unknown"; }
+    return v === "present" ? { ok: true } : { ok: false, why: `${label}: its check reads ${v} on the current tree, not present` };
+  };
+
+  // k=0: THE PARENT'S OWN CHECK (parent-check mode).
+  let parentCheck: Record<string, unknown> | null = null;
+  let parentCheckNote = "";
+  if (opts.parentCheck) {
+    const pc = parsed.parent_check;
+    if (pc && typeof pc === "object") {
+      const f = pc as Record<string, unknown>;
+      if (typeof f.expected_literal === "string" || typeof f.hardcoded_url === "string") {
+        parentCheckNote = "parent check: a literal is not a parent check (a word absent now is trivially red)";
+      } else {
+        const v = await validateShapeCheck("parent check", f, [predicate]);
+        if (!v.ok) parentCheckNote = v.why;
+        else {
+          const red = await redNow("parent check", parentId, v.predicate);
+          if (!red.ok) parentCheckNote = red.why;
+          else parentCheck = v.predicate;
+        }
+      }
+    } else parentCheckNote = "parent check: none proposed";
+    if (parentCheckNote) refusals.push(parentCheckNote);
+  }
+
   let k = 0;
   for (const st of (parsed.steps ?? []).slice(0, 3)) {
     k++;
@@ -593,34 +784,17 @@ export async function decomposeGap(parent: Record<string, unknown>, opts: { dire
     // "reader" passed v1 and was superseded before any draft).
     if (/\b(log|logs|logging|console|comment|comments|document|observe|observation)\b/i.test(change) && !/\b(fix|change|replace|route|read|call|return|compute|select|validate|guard|reject|refuse|apply|use)\b/i.test(change)) { refusals.push(`step ${k}: observation-only change`); continue; }
     let text = "";
-    try { text = readFileSync(join("/workspace/git/vessels", sm[1] ?? "", sm[2] ?? ""), "utf-8"); } catch { refusals.push(`step ${k}: ${stepSite} does not exist`); continue; }
-    const childPredicate: Record<string, unknown> = {};
-    const shape = typeof f.verify_shape === "string" ? f.verify_shape : (f.evidence_resolve && typeof (f.evidence_resolve as { shape?: unknown }).shape === "string" ? String((f.evidence_resolve as { shape?: unknown }).shape) : "");
-    if (shape) {
-      const producers = await discoverResolveUrls(shape);
-      if (!producers.ok) { refusals.push(`step ${k}: could not check that shape ${shape} is advertised (${producers.why})`); continue; }
-      if (producers.urls.length === 0) { refusals.push(`step ${k}: shape ${shape} is not advertised`); continue; }
-      // A CHECK THAT WRITES IS NOT A CHECK (09-29): advertisement alone let 12 uiPanel_write/uiQuestion_write
-      // checks through, and verifying them performed live writes. The verifier refuses them too (487a7e9).
-      if (/_write$/.test(shape)) { refusals.push(`step ${k}: shape ${shape} is a write, not a read`); continue; }
-      // A step whose predicate is the PARENT's own check cannot be verified alone: one step will not
-      // flip it, so a generic step "satisfied" it in prose while the parent's check stayed failing
-      // (the relevance-sink step landed a size check, 04b3e9c, with divergence still 1).
-      const parentEr = meta.evidence_resolve as { shape?: unknown; input?: unknown } | undefined;
-      const childEr = f.evidence_resolve as { shape?: unknown; input?: unknown } | undefined;
-      const sameAsParent = (typeof f.verify_shape === "string" && f.verify_shape === meta.verify_shape)
-        || (!!parentEr && !!childEr && parentEr.shape === childEr.shape && JSON.stringify(parentEr.input ?? {}) === JSON.stringify(childEr.input ?? {}));
-      if (sameAsParent) { refusals.push(`step ${k}: its falsifier is the parent's own check, which one step will not flip`); continue; }
-      // A shape check with no measured field reads 'unknown' in the closure sweep forever: the step can
-      // be neither closed nor recorded as falsified. 15 live step/probe predicates were born that way.
-      // The verifier reads inner[field] FLAT, so the field must be a plain identifier: a path such as
-      // entries.length can only ever read unknown (route-edit-ec962628-step-1, 09-29).
-      const measured = !!childEr && ["zero_field", "nonzero_field", "defect_field"].some((fk) => {
-        const fv = (childEr as Record<string, unknown>)[fk];
-        return typeof fv === "string" && /^[A-Za-z_][A-Za-z0-9_]*$/.test(fv);
-      });
-      if (!measured) { refusals.push(`step ${k}: its shape check names no zero_field/defect_field, so it could never be judged`); continue; }
-      if (typeof f.verify_shape === "string") childPredicate.verify_shape = f.verify_shape; else childPredicate.evidence_resolve = f.evidence_resolve;
+    try { text = readFileSync(join(vesselsCloneRoot(), sm[1] ?? "", sm[2] ?? ""), "utf-8"); } catch { refusals.push(`step ${k}: ${stepSite} does not exist`); continue; }
+    let childPredicate: Record<string, unknown> = {};
+    let childVerdict: "present" | null = null;
+    const hasShape = typeof f.verify_shape === "string" || (!!f.evidence_resolve && typeof (f.evidence_resolve as { shape?: unknown }).shape === "string");
+    if (hasShape) {
+      const v = await validateShapeCheck(`step ${k}`, f, parentCheck ? [predicate, parentCheck] : [predicate]);
+      if (!v.ok) { refusals.push(v.why); continue; }
+      const red = await redNow(`step ${k}`, `${parentId}-step-${k}`, v.predicate);
+      if (!red.ok) { refusals.push(red.why); continue; }
+      childPredicate = v.predicate;
+      childVerdict = deferToHolder ? null : "present";
     } else if (typeof f.expected_literal === "string" && f.expected_literal.trim().length >= 4) {
       const lit = f.expected_literal.trim();
       const reader = String(f.reader ?? "").trim();
@@ -661,15 +835,30 @@ export async function decomposeGap(parent: Record<string, unknown>, opts: { dire
     if (!("expected_literal" in childPredicate)) { cleared.expected_literal = ""; cleared.literal_reader = ""; }
     if (!("evidence_resolve" in childPredicate)) cleared.evidence_resolve = null;
     if (!("verify_shape" in childPredicate)) cleared.verify_shape = "";
-    await resolveSubstrateGapWrite({ type: "substrateGap_write", gap: { id: childId, category: "decomposed_step", source: "substrate_detected", summary: `[step ${k} of ${parentId}] ${change}`, detected_at: new Date().toISOString(), status: "open", classification_metadata: { edit_site: stepSite, parent_gap_id: parentId, predicate_source: "decompose", ...cleared, ...childPredicate } } } as never);
+    const childMeta: Record<string, unknown> = { edit_site: stepSite, parent_gap_id: parentId, predicate_source: "decompose", ...cleared, ...childPredicate };
+    await resolveSubstrateGapWrite(
+      { type: "substrateGap_write", gap: { id: childId, category: "decomposed_step", source: "substrate_detected", summary: `[step ${k} of ${parentId}] ${change}`, detected_at: new Date().toISOString(), status: "open", classification_metadata: childMeta } } as never,
+      childVerdict ? { birthVerdict: { predicate_key: class2PredicateKey(childMeta), verdict: childVerdict } } : undefined,
+    );
     written.push(childId);
   }
-  const reason = written.length > 0 ? `wrote ${written.length} step(s)` + (refusals.length ? `; refused: ${refusals.join("; ")}` : "") : (typeof parsed.cannot_falsify === "string" && parsed.cannot_falsify ? "cannot_falsify: " + parsed.cannot_falsify.slice(0, 200) : "no valid step: " + refusals.join("; "));
+  const stepReason = written.length > 0 ? `wrote ${written.length} step(s)` + (refusals.length ? `; refused: ${refusals.join("; ")}` : "") : (typeof parsed.cannot_falsify === "string" && parsed.cannot_falsify ? "cannot_falsify: " + parsed.cannot_falsify.slice(0, 200) : "no valid step: " + (refusals.join("; ") || "none proposed"));
+  const reason = (parentCheck ? "wrote the parent's own check; " : "") + stepReason;
+  // ONE WRITE OF THE PARENT: the decomposition record, and in parent-check mode its new check. The verdict
+  // the judge just took is handed to the seam in-process so it is not taken twice.
   try {
-    await resolveSubstrateGapWrite({ type: "substrateGap_write", gap: { ...parent, classification_metadata: { ...meta, decomposed_at: new Date().toISOString(), decomposition: { children: written, reason: reason.slice(0, 600) } }, status: String(parent.status ?? "open") } } as never);
+    const parentMeta: Record<string, unknown> = { ...meta, decomposed_at: new Date().toISOString(), decomposition: { children: written, reason: reason.slice(0, 600), ...(opts.parentCheck ? { parent_check: parentCheck ? "written" : parentCheckNote.slice(0, 300) } : {}) } };
+    if (parentCheck) {
+      // verify_shape is blanked, not deleted: the store carries an omitted key forward.
+      Object.assign(parentMeta, { verify_shape: "", ...parentCheck, predicate_source: "gap_falsify:parent_check", falsified_at: new Date().toISOString() });
+    }
+    await resolveSubstrateGapWrite(
+      { type: "substrateGap_write", gap: { ...parent, classification_metadata: parentMeta, status: String(parent.status ?? "open") } } as never,
+      parentCheck && !deferToHolder ? { birthVerdict: { predicate_key: class2PredicateKey(parentMeta), verdict: "present" } } : undefined,
+    );
   } catch { /* the children stand on their own */ }
   console.log(`[gap-decompose] ${parentId}: ${reason.slice(0, 400)}`);
-  return { written, reason };
+  return { written, reason, ...(opts.parentCheck ? { parent_check: parentCheck ? "written" : parentCheckNote } : {}) };
 }
 
 export interface LocalizeResult {
@@ -1840,6 +2029,10 @@ export async function admitActionableGaps(
     // Its own check already passes on the parent (op10 terminal refusal): re-picking cannot help until the sweep
     // closes it or an operator looks, so it waits out OWN_GREEN_ADMISSION_TTL_MS instead of a cooldown per cycle.
     if (greenOnParentFresh(meta)) { excluded.push({ id, reason: "own_check_green_on_parent" }); continue; }
+    // PREDICATE SUSPECT (contained-self-development 8.5; gap_falsify v2). A class-2 check that did not read
+    // 'present' when it was written has never seen the defect: a landing "verified" by it verifies nothing.
+    // The write seam stamps the birth verdict; rows that predate it carry none and are unaffected.
+    { const suspect = predicateSuspect(meta); if (suspect) { excluded.push({ id, reason: `predicate_suspect(${suspect})` }); continue; } }
     // FALSIFIER REQUIRED (contained-self-development). When the autonomyScope record names
     // require_falsifier_classes, an autonomous gap is admitted only if its falsifier is one of them;
     // otherwise it needs information, whatever its edit site. A typecheck-class gap keeps its own
@@ -2393,7 +2586,41 @@ export function verifyGapCondition(gap: Record<string, unknown>): 'present' | 'a
  * evidence class (evidence_resolve / verify_shape in classification_metadata).
  * Called from closeLandedGap so the async fetch does not block the sync path.
  */
-async function verifyGapConditionAsync(gap: Record<string, unknown>): Promise<'present' | 'absent' | 'pending' | 'unknown'> {
+export type GapCheckVerdict = 'present' | 'absent' | 'pending' | 'unknown';
+export interface GapCheckOpts {
+  /** The transport for the class-2 resolve. Injected by tests and by the offline dry estimate; default global fetch. */
+  fetchImpl?: typeof fetch;
+  /** Override the per-shape budget below. */
+  timeoutMs?: number;
+}
+
+/**
+ * THE CLASS-2 BUDGET IS THE CHECK'S OWN (gap_falsify v2). The judge aborted every class-2 resolve at 10 s,
+ * but a test_suite check runs `bun test` with its own budget (input.timeout_ms; the resolver defaults to
+ * 240 s and the pull-sync failing-test generator files 180 s). Aborting first read the check as 'unknown'
+ * while the suite kept running in the shell, so a failing-test gap could be neither admitted nor closed by
+ * its own check. The judge now waits longer than the resolver's own outer bound (its budget + 30 s,
+ * test-suite.ts) so the resolver's report, not our abort, decides. Every other shape keeps 10 s.
+ */
+export function gapCheckTimeoutMs(shape: string, input: Record<string, unknown>): number {
+  if (shape !== 'test_suite') return 10_000;
+  const t = input['timeout_ms'];
+  const budget = typeof t === 'number' && Number.isFinite(t) && t > 0 ? Math.min(t, 840_000) : 240_000;
+  return budget + 60_000;
+}
+
+/**
+ * ONE JUDGE (gap_falsify v2, REALIGNMENT §2.3; contained-self-development 8.5). The verdict a gap's check
+ * gives on the tree now: at birth (substrateGap_write stamps predicate_birth_verdict), in the decomposition
+ * proposer (a proposed check is written only if it reads 'present' before any fix), and at closure
+ * (closeLandedGap and the pending-land sweep). All of them call this, so a fix to the judge is a fix
+ * everywhere; there is no second evaluator.
+ */
+export async function evaluateGapCheck(gap: Record<string, unknown>, opts: GapCheckOpts = {}): Promise<GapCheckVerdict> {
+  return verifyGapConditionAsync(gap, opts);
+}
+
+async function verifyGapConditionAsync(gap: Record<string, unknown>, opts: GapCheckOpts = {}): Promise<GapCheckVerdict> {
   try {
     const meta = (gap.classification_metadata ?? gap.metadata ?? {}) as Record<string, unknown>;
     // MEASUREMENT BEFORE PROVENANCE (§12.6 step 1, 2026-08-14): a Class-2 measurement predicate
@@ -2541,11 +2768,11 @@ async function verifyGapConditionAsync(gap: Record<string, unknown>): Promise<'p
     let respBody: Record<string, unknown>;
     try {
       const SELF_RESOLVE_ENDPOINT = process.env['SELF_RESOLVE_ENDPOINT'] ?? `http://localhost:${process.env['PORT'] ?? '8090'}/v2/impulses/resolve`;
-      const resp = await fetch(SELF_RESOLVE_ENDPOINT, {
+      const resp = await (opts.fetchImpl ?? fetch)(SELF_RESOLVE_ENDPOINT, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
-        signal: AbortSignal.timeout(10_000),
+        signal: AbortSignal.timeout(opts.timeoutMs ?? gapCheckTimeoutMs(resolveShape, resolveInput)),
       });
       if (!resp.ok) return 'unknown';
       respBody = (await resp.json()) as Record<string, unknown>;
@@ -2645,7 +2872,8 @@ async function verifyGapConditionAsync(gap: Record<string, unknown>): Promise<'p
 }
 
 /** Mark a gap closed once its fix genuinely landed on origin/dev. Best-effort, guarded. */
-async function closeLandedGap(gap: Record<string, unknown>, land: LandSignal): Promise<{ closed: boolean; error?: string }> {
+// Exported for unit test only (the predicate_suspect guard, qa C2). No call-site change.
+export async function closeLandedGap(gap: Record<string, unknown>, land: LandSignal): Promise<{ closed: boolean; error?: string }> {
   try {
     // Re-read the gap: the caller's copy was captured at pick time, before the cutover's pending-land
     // stamp and before any hold written since. Closing from it overwrote newer fields (the f705b61 close
@@ -2667,11 +2895,17 @@ async function closeLandedGap(gap: Record<string, unknown>, land: LandSignal): P
     // only when the async path itself throws (belt-and-suspenders).
     let verifyResult: 'present' | 'absent' | 'pending' | 'unknown';
     try {
-      verifyResult = await verifyGapConditionAsync(gap);
+      verifyResult = await evaluateGapCheck(gap);
     } catch {
       verifyResult = verifyGapCondition(gap);
     }
     const gidV = String(gap.id ?? "");
+    // A check that never read 'present' before the fix cannot say the fix worked (8.5): not closed on it.
+    const suspectAtClose = verifyResult === 'absent' ? predicateSuspect((gap.classification_metadata ?? gap.metadata ?? {}) as Record<string, unknown>) : null;
+    if (suspectAtClose) {
+      console.log(`[gap-to-feature] gap ${gidV} reads absent but is NOT closed: predicate_suspect (${suspectAtClose})`);
+      return { closed: false, error: `predicate_suspect: ${suspectAtClose}` };
+    }
     if (verifyResult === 'present') {
       // Defect still present — refuse close. If this 'present' is a RE-LAND (>=2 non-reverted
       // landings, none of which resolved it), the close-oracle is out of coverage: abstain ->
@@ -3472,7 +3706,7 @@ async function sweepPendingLandVerificationsOnce(): Promise<{ checked: number; c
   // Live at the time of writing: 13 gaps carry pending_outcome_verification, 11 of them
   // have no predicate at all — so the honest answer is "correctly abstaining on an input
   // that cannot be measured", not "broken". A counter per verdict says that out loud.
-  const tally = { absent: 0, present: 0, pending: 0, unknown: 0, not_in_clone: 0, reverted: 0, awaiting_restart: 0, falsified: 0, self_authored: 0 };
+  const tally = { absent: 0, present: 0, pending: 0, unknown: 0, not_in_clone: 0, reverted: 0, awaiting_restart: 0, falsified: 0, self_authored: 0, birth_retaken: 0 };
   try {
     const read = await resolveSubstrateGap({
       type: "substrateGap",
@@ -3504,6 +3738,10 @@ for (const g of gaps) {
 
 // Operator reverts reach the learning path before anything else reads these gaps.
 for (const g of gaps) { try { await recordOperatorRegression(g); } catch { /* best-effort; retried next tick */ } }
+
+// BIRTH RE-EVALUATION (qa R1): unknown, or pending past the hour, re-taken BIRTH_REEVAL_PER_TICK per tick,
+// oldest first, on the same birth chain and judge as a write's (substrate-gap reevaluateBirthVerdicts).
+try { tally.birth_retaken = (await reevaluateBirthVerdicts(gaps)).length; } catch (err) { console.warn(`[gap-sweep] birth re-evaluation skipped: ${String(err).slice(0, 200)}`); }
 
 // Then process existing pending verifications as before
 const pending = gaps
@@ -3567,8 +3805,15 @@ const pending = gaps
       //                 (it never does on provenance alone -> abstain, retry next tick).
       // Marked on an earlier tick: its check was edited by its own landing, so re-running it proves nothing.
       if (meta.disposition === "awaiting_operator_review" && (meta.self_authored_check as { sha?: unknown } | undefined)?.sha === sha) { tally.self_authored += 1; continue; }
-      const verdict = await verifyGapConditionAsync(g);
+      const verdict = await evaluateGapCheck(g);
       const gidSweep = String(g.id ?? "");
+      // 8.5: an 'absent' from a check that never read 'present' at birth closes nothing.
+      const suspectSweep = verdict === "absent" ? predicateSuspect(meta) : null;
+      if (suspectSweep) {
+        tally.unknown += 1;
+        console.log(`[gap-sweep] gap ${gidSweep} reads absent but is NOT closed: predicate_suspect (${suspectSweep})`);
+        continue;
+      }
       if (verdict === "present") {
         tally.present += 1;
         const falsified = await recordFalsifiedAutonomousLanding(g, meta, sha);
@@ -4047,7 +4292,8 @@ export function shouldNarrowForChronicFailure(failedAttempts: number, meta: Reco
   return failedAttempts >= 3 && !meta.parent_gap_id && !meta.re_commit && !meta.source_gap_id;
 }
 
-async function bumpFailedAttempts(gap: Record<string, unknown>, opts: { surprise?: boolean; predictedP?: number } = {}): Promise<void> {
+// Exported for unit test only (the investigation caller's one-decomposition-per-gap guard). No call-site change.
+export async function bumpFailedAttempts(gap: Record<string, unknown>, opts: { surprise?: boolean; predictedP?: number } = {}): Promise<void> {
   try {
     const id = String(gap.id ?? "");
     if (!id) return;
@@ -4164,8 +4410,19 @@ async function bumpFailedAttempts(gap: Record<string, unknown>, opts: { surprise
         else void (async () => {
           // DECOMPOSITION FIRST (contained-self-development 6.3): structured, falsifiable child steps;
           // the free-text investigation walk only when no valid step could be produced.
-          const decomp = await decomposeGap(gap).catch((e: unknown) => ({ written: [] as string[], reason: "decompose threw: " + String(e) }));
-          if (decomp.written.length > 0) return;
+          // ONE DECOMPOSITION PER GAP, HERE TOO (gap_falsify v2). The scan's pass honoured decomposed_at; this
+          // caller did not, so every failed attempt paid another LLM call on the same gap (606 on one gap). The
+          // stored row decides (the picked copy predates any decomposition since). A decomposition that wrote
+          // steps stands, so the walk is skipped as it was when those steps were written.
+          const freshMeta = (fresh.classification_metadata ?? fresh.metadata ?? {}) as Record<string, unknown>;
+          if (freshMeta.decomposed_at) {
+            const prior = freshMeta.decomposition as { children?: unknown } | undefined;
+            console.log(`[gap-to-feature] ${parentId} already decomposed at ${String(freshMeta.decomposed_at)}; not decomposed again`);
+            if (Array.isArray(prior?.children) && prior!.children.length > 0) return;
+          } else {
+            const decomp = await decomposeGap(gap).catch((e: unknown) => ({ written: [] as string[], reason: "decompose threw: " + String(e) }));
+            if (decomp.written.length > 0) return;
+          }
           await fetch(GOAL_HOST_VESSEL_ENDPOINT + "/run-goal", {
           method: "POST",
           headers: { "Content-Type": "application/json", ...(METABOB_API_KEY ? { Authorization: "ApiKey " + METABOB_API_KEY } : {}) },

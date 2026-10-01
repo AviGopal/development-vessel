@@ -41,7 +41,7 @@
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import type { ResolverResult } from "./types.js";
-import { resolveSubstrateGap, resolveSubstrateGapWrite } from "./substrate-gap.js";
+import { resolveSubstrateGap, resolveSubstrateGapWrite, takeBirthVerdict, class2PredicateKey, birthTreeMoved, BIRTH_PENDING_STALE_MS } from "./substrate-gap.js";
 import { createHash } from "node:crypto";
 
 export interface SelfFactReconcilePointer {
@@ -139,7 +139,7 @@ function hasTsSources(dir: string, depth = 2): boolean {
 
 // ─── the rows (selfFactSpec) ────────────────────────────────────────────────
 const ROWS_PATH = "scripts/substrate/self-facts.json";
-export interface SelfFactRow { id: string; instrument: string; profiles: string[]; edit_site: string; must_fail: string; window_hours?: number; n_floor?: number; unit?: string; pattern?: string; max?: number; must_fail_line?: string; gate?: "active" | "timer" }
+export interface SelfFactRow { id: string; instrument: string; profiles: string[]; edit_site: string; must_fail: string; window_hours?: number; n_floor?: number; unit?: string; pattern?: string; max?: number; must_fail_line?: string; gate?: "active" | "timer"; must_fail_check?: Record<string, unknown> }
 function readRows(): SelfFactRow[] | null {
   const raw = git(["show", `origin/dev:${ROWS_PATH}`], superRepoRoot());
   if (raw === null) return null;
@@ -153,6 +153,50 @@ function readRows(): SelfFactRow[] | null {
 }
 // The node's profile is bootstrap identity (where this node sits), not behaviour.
 const nodeProfile = (): string => process.env["PROFILE_EFFECTIVE"] ?? process.env["PROFILE"] ?? "standalone";
+
+// ─── gap_birth_verdicts: the standing measurement of gap_falsify v2 ─────────
+/**
+ * An unknown birth verdict not re-taken for this long means re-evaluation is not running (qa R1): the
+ * pending-land sweep re-takes unknowns oldest first every tick (substrate-gap reevaluateBirthVerdicts) and
+ * re-stamps predicate_birth_at when it does, so a 6 h old unknown is one no tick has reached.
+ */
+const BIRTH_UNKNOWN_NOT_RUNNING_MS = 6 * 3600_000;
+/**
+ * The PARKED queue (qa C3′ refinement 2): tree-moved unknowns are never re-taken (HEAD only moves further from
+ * their base) and resolve only by re-detection with a fresh detection sha. Over this many open, or any older
+ * than the age bound, is a divergence: re-detection is not draining them.
+ */
+const BIRTH_TREE_MOVED_PARKED_MAX = 5;
+const BIRTH_TREE_MOVED_PARKED_MAX_AGE_MS = 24 * 3600_000;
+// What the instrument reads, injectable for tests (a stubbed store, a fixed scope).
+export interface GapBirthDeps {
+  readGaps: () => Promise<Array<Record<string, unknown>>>;
+  inAutonomyScope: () => Promise<(site: string) => boolean>;
+  siteReadable: (site: string) => boolean;
+}
+const defaultGapBirthDeps: GapBirthDeps = {
+  readGaps: async () => {
+    const r = await resolveSubstrateGap({ type: "substrateGap", limit: 1_000_000 } as never);
+    const gaps = (r.body as { gaps?: unknown } | undefined)?.gaps;
+    if (r.shape === "structuredError" || !Array.isArray(gaps)) throw new Error("gap store unreadable");
+    return gaps as Array<Record<string, unknown>>;
+  },
+  inAutonomyScope: async () => {
+    const { autonomyScope, autonomyScopeExcludes } = await import("./gap-to-feature.js");
+    const scope = await autonomyScope();
+    return (site: string) => autonomyScopeExcludes(scope, site) !== null;
+  },
+  siteReadable: (site: string) => {
+    // Same path rule as the gap_falsify pass (gap-lifecycle-scan editSiteSourcePath), read at use time.
+    const m = /^repos\/([^/]+)\/(.+?)(?::\d+.*)?$/.exec(site.trim());
+    return !!m && /\.(ts|tsx|js|mjs|cjs|py|sh|surql)$/.test(m[2] ?? "") && existsSync(join(process.env["VESSELS_CLONE_ROOT"] ?? "/workspace/git/vessels", m[1] ?? "", m[2] ?? ""));
+  },
+};
+let gapBirthDeps: GapBirthDeps = defaultGapBirthDeps;
+/** Tests only: replace what gap_birth_verdicts reads. null restores the defaults. */
+export function __setGapBirthDepsForTests(d: Partial<GapBirthDeps> | null): void {
+  gapBirthDeps = d ? { ...defaultGapBirthDeps, ...d } : defaultGapBirthDeps;
+}
 
 // ─── the facts ──────────────────────────────────────────────────────────────
 // Each returns what it read and where it diverged. `canary` tells the fact to
@@ -212,6 +256,107 @@ const FACTS: Record<string, FactFn> = {
     } catch (err) {
       return unread(`journal of ${unit} unreadable: ${String(err)}`);
     }
+  },
+  /**
+   * gap_falsify v2's STANDING MEASUREMENT (the intervention is measured every tick, not validated once).
+   * (a) the birth verdicts the write seam took over the row's window: present / absent / unknown / pending;
+   *     'absent' is split by tree (absent_same_tree: a detection sha was given and the check's dependent files
+   *     did not change between it and the evaluated tree;
+   *     absent_detection_unknown: no detection sha was given, so the queued tree was the base;
+   *     absent_eval_tree_unread: exactly the absents with no tree readable at all, so nothing was compared) and tree-moved unknowns are counted apart, as a parked queue: over BIRTH_TREE_MOVED_PARKED_MAX open or
+   *     any older than BIRTH_TREE_MOVED_PARKED_MAX_AGE_MS is the divergence unknown-tree-moved-parked.
+   *     Class-2 rows born in the window with no verdict, a verdict pending past an hour, or an unknown not
+   *     re-taken for BIRTH_UNKNOWN_NOT_RUNNING_MS (the sweep re-takes unknowns every tick) are a divergence:
+   *     the birth evaluation is not running. A tree-moved unknown is not counted: no re-take can resolve it.
+   * (b) the falsifier supply backlog (gap-lifecycle-scan isFalsifierSupplyCandidate): it must fall or hold, so
+   *     a count above the row's `max` (its recorded baseline) is a divergence.
+   * (c) must-fail control: the row's `must_fail_check` is a class-2 check KNOWN TO PASS on the current tree
+   *     (an inverted predicate). It is run through the seam's own birth evaluator (takeBirthVerdict), which
+   *     must answer 'absent'. 'present' means the evaluator cannot tell an inverted check from a real one:
+   *     the canary is not reported, the row reads blind, and the run files a gap about itself. 'unknown'
+   *     means the control did not RUN (no result, a timeout, a spawn or transport error): that says nothing
+   *     about the evaluator either way, so the row is UNOBSERVED (source_read false; qa R2), never blind and
+   *     never healthy.
+   */
+  gap_birth_verdicts: async (canary, row) => {
+    const fact = row.id;
+    const out: SelfFactDivergence[] = [];
+    const hours = typeof row.window_hours === "number" && row.window_hours > 0 ? row.window_hours : 1;
+    const nowMs = Date.now();
+    let gaps: Array<Record<string, unknown>>;
+    try { gaps = await gapBirthDeps.readGaps(); } catch (err) {
+      noteReadError("gap store for gap_birth_verdicts", err);
+      return { fact, source_read: false, copies_read: 0, divergences: out, note: "gap store unreadable" };
+    }
+    const within = (iso: unknown): boolean => { const t = Date.parse(String(iso ?? "")); return Number.isFinite(t) && nowMs - t <= hours * 3600_000; };
+    const dist: Record<string, number> = { present: 0, absent: 0, unknown: 0, pending: 0 };
+    let absentSameTree = 0;
+    let absentDetectionUnknown = 0;
+    let absentEvalTreeUnread = 0;
+    let unknownTreeMoved = 0;
+    let oldestTreeMovedAt = Infinity;
+    let unstamped = 0;
+    let stuck = 0;
+    let unknownStale = 0;
+    for (const g of gaps) {
+      const m = (g["classification_metadata"] ?? {}) as Record<string, unknown>;
+      const v = m["predicate_birth_verdict"];
+      const bornAt = Date.parse(String(m["predicate_birth_at"] ?? ""));
+      if (typeof v === "string" && within(m["predicate_birth_at"])) {
+        dist[v] = (dist[v] ?? 0) + 1;
+        if (v === "absent") {
+          const has = (f: string): boolean => typeof m[f] === "string" && String(m[f]).length > 0;
+          // EXACTLY the absents taken with no tree readable at all (no evaluated, detected or queued sha):
+          // the one case a tree comparison could not be attempted, so the absent stood unchecked.
+          if (!has("predicate_birth_sha") && !has("predicate_birth_detected_sha") && !has("predicate_birth_queued_sha")) absentEvalTreeUnread++;
+          // A detection sha was given and the check's files did not change since it (a moved tree is stamped unknown).
+          else if (has("predicate_birth_detected_sha")) absentSameTree++;
+          else absentDetectionUnknown++;
+        }
+      }
+      if (v === "unknown" && birthTreeMoved(m) && String(g["status"] ?? "open") === "open") {
+        unknownTreeMoved++;
+        if (Number.isFinite(bornAt)) oldestTreeMovedAt = Math.min(oldestTreeMovedAt, bornAt);
+      }
+      if (v === "pending" && bornAt < nowMs - BIRTH_PENDING_STALE_MS) stuck++;
+      if (v === "unknown" && !birthTreeMoved(m) && String(g["status"] ?? "open") === "open" && bornAt < nowMs - BIRTH_UNKNOWN_NOT_RUNNING_MS) unknownStale++;
+      const cls = String(m["falsifier"] ?? "").toLowerCase();
+      if (cls === "class2" && String(g["status"] ?? "open") === "open" && within(g["created_at"] ?? g["first_detected_at"]) && (v === undefined || v === null || v === "")) unstamped++;
+    }
+    if (unstamped + stuck + unknownStale > 0) out.push({ fact, key: "birth-evaluation-not-running", source: "substrateGap_write birth evaluation", copy: "gap store", detail: `${unstamped} class-2 gap(s) born in the last ${hours}h carry no predicate_birth_verdict, ${stuck} are pending past an hour and ${unknownStale} unknown(s) were not re-taken for ${BIRTH_UNKNOWN_NOT_RUNNING_MS / 3600_000}h: birth evaluation (the write seam's, or the sweep's re-take) is not running`, canary: false });
+    const parkedAgeH = Number.isFinite(oldestTreeMovedAt) ? Math.floor((nowMs - oldestTreeMovedAt) / 3600_000) : 0;
+    if (unknownTreeMoved > BIRTH_TREE_MOVED_PARKED_MAX || (Number.isFinite(oldestTreeMovedAt) && nowMs - oldestTreeMovedAt > BIRTH_TREE_MOVED_PARKED_MAX_AGE_MS)) {
+      out.push({ fact, key: "unknown-tree-moved-parked", source: "tree-moved birth verdicts (open)", copy: "gap store", detail: `${unknownTreeMoved} open class-2 gap(s) are parked as tree-moved unknowns (bound ${BIRTH_TREE_MOVED_PARKED_MAX}), the oldest ${parkedAgeH}h (bound ${BIRTH_TREE_MOVED_PARKED_MAX_AGE_MS / 3600_000}h): they resolve only when the defect is re-detected with a fresh detection sha, and that is not happening`, canary: false });
+    }
+    let backlog = 0;
+    try {
+      const inScope = await gapBirthDeps.inAutonomyScope();
+      const { isFalsifierSupplyCandidate } = await import("./gap-lifecycle-scan.js");
+      backlog = gaps.filter((g) => isFalsifierSupplyCandidate(g as never, inScope, gapBirthDeps.siteReadable)).length;
+    } catch (err) {
+      noteReadError("supply backlog for gap_birth_verdicts", err);
+      return { fact, source_read: false, copies_read: 1, divergences: out, note: "autonomy scope or supply predicate unreadable" };
+    }
+    const baseline = typeof row.max === "number" && row.max >= 0 ? row.max : null;
+    if (baseline !== null && backlog > baseline) out.push({ fact, key: "supply-backlog-rose", source: `row ${row.id} max ${baseline}`, copy: "gap store", detail: `the falsifier supply backlog is ${backlog}, above its recorded baseline ${baseline}: gap_falsify is not keeping up with the gaps filed without a check`, canary: false });
+    let control = "not planted";
+    if (canary) {
+      const chk = row.must_fail_check;
+      if (chk && typeof chk === "object") {
+        const meta: Record<string, unknown> = { ...chk, falsifier: "class2" };
+        const verdict = await takeBirthVerdict(`${fact}-must-fail-control`, meta);
+        control = verdict;
+        // The control did not run: the evaluator is unobserved, not blind and not healthy (qa R2).
+        if (verdict === "unknown") {
+          return { fact, source_read: false, copies_read: 1, divergences: out, note: `canary unobserved: the must-fail control did not run (no result, a timeout or a spawn/transport error), so this run says nothing about the birth evaluator` };
+        }
+        if (verdict === "absent") out.push({ fact, key: `${row.id}-canary`, source: `must_fail_check ${class2PredicateKey(meta).slice(0, 120)}`, copy: "takeBirthVerdict", detail: "must-fail control: a check known to pass on the current tree was stamped absent", canary: true });
+      } else control = "no must_fail_check in the row";
+    }
+    return {
+      fact, source_read: true, copies_read: 1, divergences: out,
+      note: `birth verdicts over ${hours}h: present=${dist.present} absent=${dist.absent} unknown=${dist.unknown} pending=${dist.pending}; absent_same_tree=${absentSameTree} absent_detection_unknown=${absentDetectionUnknown} absent_eval_tree_unread=${absentEvalTreeUnread} unknown_tree_moved=${unknownTreeMoved} (oldest ${parkedAgeH}h); unstamped=${unstamped} stuck=${stuck} unknown_stale=${unknownStale}; supply backlog=${backlog}${baseline !== null ? ` (baseline ${baseline})` : ""}; must-fail control=${control}`,
+    };
   },
   /** The inventory the deploy step reads must equal the inventory the fleet is built from. */
   fleet_inventory_copy: (canary) => {

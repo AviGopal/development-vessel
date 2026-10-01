@@ -312,6 +312,36 @@ async function dispatchScenario(gap: {
   return { reproduced, probe };
 }
 
+/** The source file an edit site names, under the vessel clones, or null when it names no checkable source file. */
+export function editSiteSourcePath(site: string): string | null {
+  const sm = /^repos\/([^/]+)\/(.+?)(?::\d+.*)?$/.exec(site.trim());
+  if (!sm || !/\.(ts|tsx|js|mjs|cjs|py|sh|surql)$/.test(sm[2] ?? "")) return null;
+  return join(process.env["VESSELS_CLONE_ROOT"] ?? "/workspace/git/vessels", sm[1] ?? "", sm[2] ?? "");
+}
+
+/**
+ * THE FALSIFIER SUPPLY BACKLOG (gap_falsify v2): an open gap with no class1/class2 check, whose edit site is an
+ * existing source file outside the autonomy scope, with no operator hold, that is not a decomposed step, a
+ * recommit or a narrowed child. The gap_falsify pass proposes checks from this set; self_fact_reconcile's
+ * gap_birth_verdicts row counts it every tick, so the pass is measured by whether the set shrinks.
+ */
+export function isFalsifierSupplyCandidate(
+  g: { id?: string; status?: string; classification_metadata?: unknown },
+  inAutonomyScope: (site: string) => boolean,
+  siteReadable: (site: string) => boolean,
+): boolean {
+  const id = String(g.id ?? "");
+  if (!id || String(g.status ?? "open") !== "open") return false;
+  const meta = (g.classification_metadata ?? {}) as Record<string, unknown>;
+  const f = meta["falsifier"] as unknown;
+  const cls = String((f && typeof f === "object" ? (f as { class?: unknown }).class : f) ?? "").toLowerCase();
+  if (cls !== "" && cls !== "none") return false;
+  const site = String(meta["edit_site"] ?? "");
+  if (!site || inAutonomyScope(site) || !siteReadable(site)) return false;
+  if (meta["parent_gap_id"] || meta["operator_hold"] === true) return false;
+  return !/-step-\d+$/.test(id) && !id.startsWith("recommit-") && !id.endsWith("-narrowed");
+}
+
 export async function resolveGapLifecycleScan(p: GapLifecycleScanPointer): Promise<ResolverResult> {
   // THE GAP STORE MOVED BEHIND WORKSPACE_ROOT; THIS DEFAULT DID NOT FOLLOW IT.
   //
@@ -758,13 +788,12 @@ export async function resolveGapLifecycleScan(p: GapLifecycleScanPointer): Promi
     }
     const sourceCache = new Map<string, string | null>();
     const readEditSite = (site: string): string | null => {
-      const sm = /^repos\/([^/]+)\/(.+?)(?::\d+.*)?$/.exec(site.trim());
-      if (!sm || !/\.(ts|tsx|js|mjs|cjs|py|sh|surql)$/.test(sm[2] ?? "")) return null;
-      const key = `${sm[1]}/${sm[2]}`;
-      if (!sourceCache.has(key)) {
-        try { sourceCache.set(key, readFileSync(join("/workspace/git/vessels", sm[1] ?? "", sm[2] ?? ""), "utf-8")); } catch { sourceCache.set(key, null); }
+      const path = editSiteSourcePath(site);
+      if (!path) return null;
+      if (!sourceCache.has(path)) {
+        try { sourceCache.set(path, readFileSync(path, "utf-8")); } catch { sourceCache.set(path, null); }
       }
-      return sourceCache.get(key) ?? null;
+      return sourceCache.get(path) ?? null;
     };
     // Spend the quota where autonomy can use it: a gap whose edit site the autonomyScope excludes
     // can never be autonomous work (the first run gave 9 of its 10 falsifiers to such gaps).
@@ -809,16 +838,19 @@ export async function resolveGapLifecycleScan(p: GapLifecycleScanPointer): Promi
         // No deterministic rule applies. Decomposition proposes 1-3 single-file steps and gives each a
         // checked predicate (file exists, literal absent with a reader, shape advertised and measured),
         // so the steps are admissible even though the parent is not.
-        const decomposable = decomposed < maxDecompose
-          && scopeSite !== "" && readEditSite(scopeSite) !== null
-          && !meta["decomposed_at"] && !meta["parent_gap_id"] && meta["operator_hold"] !== true
-          && !/-step-\d+$/.test(g.id) && !g.id.startsWith("recommit-") && !g.id.endsWith("-narrowed");
+        // PARENT-CHECK MODE (gap_falsify v2): the same call also proposes a class-2 check for the gap ITSELF
+        // (an existing failing test, or an advertised read shape with a measured defect count), written onto
+        // the parent only if the one judge reads it 'present' on today's tree. The parent then becomes
+        // admissible on its own check, not an operator's.
+        const decomposable = decomposed < maxDecompose && !meta["decomposed_at"]
+          && isFalsifierSupplyCandidate(g, inAutonomyScope, (site) => readEditSite(site) !== null);
         if (decomposable) {
           decomposed++;
           console.log(`[gap-falsify] decomposing ${g.id} before admission (${decomposed}/${maxDecompose})`);
           try {
             const { decomposeGap } = await import("./gap-to-feature.js");
-            await decomposeGap(g as unknown as Record<string, unknown>);
+            const d = await decomposeGap(g as unknown as Record<string, unknown>, { parentCheck: true });
+            if (d.parent_check === "written") falsified.push(g.id);
           } catch (err) {
             console.warn(`[gap-falsify] decomposition of ${g.id} threw: ${String(err).slice(0, 200)}`);
           }

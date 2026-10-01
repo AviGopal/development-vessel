@@ -624,6 +624,316 @@ if (evidenceResolve && typeof evidenceResolve === "object" && !Array.isArray(evi
   };
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// BIRTH EVALUATION (gap_falsify v2; REALIGNMENT §2.3 "the falsifier fails on the current tree";
+// contained-self-development 8.5). classifyFalsifier LABELS a class-2 check and never RUNS it, so a check
+// that already passes on the unfixed tree (an inverted predicate, or one aimed at the wrong thing) was
+// admitted and then closed its gap as verified on the first landing: the check never saw the defect, so
+// its 'absent' after the landing proves nothing. The seam now runs the check ONCE when a write adds or
+// changes a class-2 predicate, through the one judge (gap-to-feature evaluateGapCheck), and stamps the
+// verdict BESIDE the predicate:
+//   predicate_birth_verdict  pending | present | absent | unknown
+//   predicate_birth_at       when the verdict was taken
+//   predicate_birth_key      which predicate it describes (a stable serialisation of the check)
+// Only 'present' is a check that has seen the defect. Every other verdict is predicate_suspect: not
+// admissible to autonomous work and not closable by its own 'absent'. Rows written before this existed
+// carry no stamp and keep their old treatment until their next write, which evaluates them once.
+// The evaluation runs after the write is saved and never blocks it; evaluations run one at a time.
+// Birth fields on an incoming write are never trusted: the seam owns them. The one trusted channel is
+// the in-process `opts.birthVerdict` (not reachable over HTTP), used by a proposer that has just run the
+// same judge on the same predicate, and honoured only when its key equals the merged predicate's.
+//
+// WHICH TREE (qa C3'). A verdict is about a tree, so the tree is stamped with it:
+//   predicate_birth_sha           HEAD of the repo the check runs in, read when the evaluation STARTS
+//   predicate_birth_detected_sha  the sha the writer detected the defect against (in-process `opts.detectedSha`
+//                                 only, like the verdict; never taken from an incoming write)
+//   predicate_birth_queued_sha    HEAD of the same repo when the evaluation was SCHEDULED (the write, or the
+//                                 sweep's re-take): the base when the writer gave no detection sha
+//   predicate_birth_tree_moved    true when an 'absent' was turned into 'unknown' because the tree moved
+//   predicate_birth_tree_reason   why the tree did or did not count as moved (always stamped with an absent)
+// An 'absent' is compared against the base (the detected sha when given, else the queued sha). If the base is
+// not the evaluated tree AND the check's dependent files changed between them (`git diff --quiet <base>
+// <eval> -- <test file(s)> <edit site path>` exits non-zero), the defect may have been fixed in between, so
+// the absent cannot say "inverted at birth": it is stamped 'unknown' with predicate_birth_tree_moved, which
+// is not suspect (it accuses nothing). HEAD moving without touching those files keeps the 'absent'. A diff
+// that cannot run (an unreadable sha, a missing object) counts as moved: fail toward not-suspect, with the
+// reason recorded. With NO sha readable at all (no clone of that repo here) nothing can have been seen to
+// move, and the absent stands. The repo is the test_suite check's own vessel clone; for any other shape it is
+// the edit site's vessel clone (the tree the defect is claimed to live in; the shape itself is served by a
+// running vessel, so this is the nearest tree, not a proof of the served build).
+//
+// RE-EVALUATION is the pending-land sweep's (reevaluateBirthVerdicts, below): an 'unknown' or a 'pending'
+// whose evaluation died is re-taken there, BIRTH_REEVAL_PER_TICK per tick, oldest first. A write of the same
+// check carries its verdict forward unchanged (there is no second, write-triggered retry path).
+// ─────────────────────────────────────────────────────────────────────────────
+export type BirthVerdict = "pending" | "present" | "absent" | "unknown";
+export type BirthJudge = (gap: Record<string, unknown>) => Promise<string>;
+const BIRTH_FIELDS = ["predicate_birth_verdict", "predicate_birth_at", "predicate_birth_key", "predicate_birth_sha", "predicate_birth_detected_sha", "predicate_birth_queued_sha", "predicate_birth_tree_moved", "predicate_birth_tree_reason"] as const;
+/** A 'pending' older than this means its evaluation died with the process: the sweep re-takes it, and gap_birth_verdicts counts it. */
+export const BIRTH_PENDING_STALE_MS = 3600_000;
+/**
+ * Birth verdicts the pending-land sweep re-takes per tick. A named constant, not a policy read: the sweep reads
+ * no policy record on this path (PENDING_VERIFY_SWEEP_LIMIT beside it is a constant too). Each re-take may run a
+ * test_suite (minutes), one at a time on the birth chain, so the bound is small.
+ */
+export const BIRTH_REEVAL_PER_TICK = 2;
+
+const shaOf = (v: unknown): string | null => (typeof v === "string" && /^[0-9a-f]{7,40}$/.test(v.trim()) ? v.trim() : null);
+/** A tree-moved unknown (see WHICH TREE): stamped at evaluation, read by suspicion, re-take and the standing row. */
+export function birthTreeMoved(meta: Record<string, unknown> | null | undefined): boolean {
+  return ((meta ?? {}) as Record<string, unknown>)["predicate_birth_tree_moved"] === true;
+}
+/** The clone a class-2 check runs in, and the files in it the check depends on (see WHICH TREE). */
+function birthCheckRepo(meta: Record<string, unknown>): { dir: string; files: string[] } | null {
+  const er = (meta["evidence_resolve"] ?? null) as { shape?: unknown; input?: unknown } | null;
+  const input = (er && typeof er.input === "object" && er.input ? er.input : {}) as Record<string, unknown>;
+  const vessel = (er?.shape === "test_suite" ? String(input["vessel"] ?? "") : (/^repos\/([^/:]+)\//.exec(String(meta["edit_site"] ?? ""))?.[1] ?? "")).replace(/^repos\//, "");
+  if (!/^[A-Za-z0-9_.-]+$/.test(vessel) || vessel.includes("..")) return null;
+  const files = new Set<string>();
+  const add = (f: string): void => { const c = f.trim().replace(/^\/+/, "").replace(/:\d+.*$/, ""); if (c && !c.includes("..")) files.add(c); };
+  if (er?.shape === "test_suite" && typeof input["test_file"] === "string") add(input["test_file"]);
+  const inRepo = (p: unknown): string | null => (typeof p === "string" && p.startsWith(`repos/${vessel}/`) ? p.slice(`repos/${vessel}/`.length) : null);
+  const site = inRepo(meta["edit_site"]);
+  if (site) add(site);
+  if (Array.isArray(meta["check_inputs"])) for (const p of meta["check_inputs"]) { const f = inRepo(p); if (f) add(f); }
+  return { dir: join(process.env["VESSELS_CLONE_ROOT"] ?? "/workspace/git/vessels", vessel), files: [...files] };
+}
+/** HEAD of the repo a class-2 check runs in (see WHICH TREE), or null when it cannot be read. */
+function readBirthTreeSha(meta: Record<string, unknown>): string | null {
+  const repo = birthCheckRepo(meta);
+  if (!repo) return null;
+  try {
+    const p = Bun.spawnSync(["git", "-C", repo.dir, "rev-parse", "HEAD"], { stdout: "pipe", stderr: "pipe" });
+    return p.exitCode === 0 ? shaOf(new TextDecoder().decode(p.stdout)) : null;
+  } catch { return null; }
+}
+/**
+ * Did the tree an 'absent' was read on move away from its base in a way that matters to the check (WHICH TREE)?
+ * Moved = the check's dependent files differ between the two shas, or they could not be compared.
+ */
+function birthTreeChange(meta: Record<string, unknown>, base: string | null, baseLabel: string, evalSha: string | null): { moved: boolean; reason: string } {
+  if (!base && !evalSha) return { moved: false, reason: "no tree readable (no detected, queued or evaluated sha): nothing seen to move" };
+  if (!base || !evalSha) return { moved: true, reason: `cannot compare trees: ${base ? "evaluated" : baseLabel} sha unreadable` };
+  if (base.startsWith(evalSha) || evalSha.startsWith(base)) return { moved: false, reason: `evaluated on the ${baseLabel} tree ${evalSha.slice(0, 12)}` };
+  const repo = birthCheckRepo(meta);
+  if (!repo) return { moved: true, reason: "cannot compare trees: no repo for this check" };
+  try {
+    const p = Bun.spawnSync(["git", "-C", repo.dir, "diff", "--quiet", base, evalSha, "--", ...repo.files], { stdout: "pipe", stderr: "pipe" });
+    const span = `${baseLabel} ${base.slice(0, 12)}..${evalSha.slice(0, 12)}`;
+    if (p.exitCode === 0) return { moved: false, reason: `HEAD moved ${span} but ${repo.files.join(", ") || "the tree"} did not change` };
+    if (p.exitCode === 1) return { moved: true, reason: `${repo.files.join(", ") || "the tree"} changed ${span}` };
+    return { moved: true, reason: `diff failed ${span} (exit ${p.exitCode}: ${new TextDecoder().decode(p.stderr).trim().slice(0, 160)})` };
+  } catch (err) {
+    return { moved: true, reason: `diff failed: ${String(err).slice(0, 160)}` };
+  }
+}
+
+function stableStringify(v: unknown): string {
+  if (v === null || typeof v !== "object") return JSON.stringify(v ?? null);
+  if (Array.isArray(v)) return "[" + v.map(stableStringify).join(",") + "]";
+  const o = v as Record<string, unknown>;
+  return "{" + Object.keys(o).sort().filter((k) => o[k] !== undefined).map((k) => JSON.stringify(k) + ":" + stableStringify(o[k])).join(",") + "}";
+}
+
+/** The identity of a gap's class-2 check: which predicate a birth verdict describes. */
+export function class2PredicateKey(meta: Record<string, unknown> | null | undefined): string {
+  const m = (meta ?? {}) as Record<string, unknown>;
+  return stableStringify({ evidence_resolve: m["evidence_resolve"] ?? null, verify_shape: m["verify_shape"] ?? null });
+}
+
+/**
+ * Why a gap's class-2 check cannot be trusted, or null when it can (or the gap predates birth stamps).
+ * Read by admission (not admissible) and by closure (its 'absent' closes nothing).
+ */
+export function predicateSuspect(meta: Record<string, unknown> | null | undefined): string | null {
+  const m = (meta ?? {}) as Record<string, unknown>;
+  const f = m["falsifier"] as unknown;
+  const cls = String((f && typeof f === "object" ? (f as { class?: unknown }).class : f) ?? "").toLowerCase();
+  if (cls !== "class2") return null;
+  const verdict = m["predicate_birth_verdict"];
+  if (verdict === undefined || verdict === null || verdict === "") return null; // written before birth stamps
+  if (m["predicate_birth_key"] !== class2PredicateKey(m)) return "the birth verdict describes a different check";
+  if (verdict === "present") return null;
+  // An unknown because the tree moved between detection and evaluation accuses nothing (WHICH TREE).
+  if (verdict === "unknown" && birthTreeMoved(m)) return null;
+  if (verdict === "absent") return "its check already passes on the unfixed tree (inverted or aimed at the wrong thing)";
+  if (verdict === "pending") return "its check has not been evaluated yet";
+  return "its check could not be evaluated at birth (unresolvable or timed out)";
+}
+
+let __birthJudgeOverride: BirthJudge | null = null;
+/** Tests only: replace the default judge (gap-to-feature evaluateGapCheck). null restores it. */
+export function __setBirthJudgeForTests(j: BirthJudge | null): void { __birthJudgeOverride = j; }
+let __birthChain: Promise<unknown> = Promise.resolve();
+const __birthInflight = new Set<Promise<unknown>>();
+/** Tests only: wait for every scheduled birth evaluation (and its stamp) to finish. */
+export async function __settleBirthEvaluationsForTests(): Promise<void> {
+  while (__birthInflight.size > 0) await Promise.allSettled([...__birthInflight]);
+}
+
+async function defaultBirthJudge(gap: Record<string, unknown>): Promise<string> {
+  const { evaluateGapCheck } = await import("./gap-to-feature.js");
+  return evaluateGapCheck(gap);
+}
+
+async function stampBirthVerdict(id: string, key: string, verdict: BirthVerdict, evalSha: string | null, tree: { moved: boolean; reason: string } | null): Promise<boolean> {
+  return withGapLock(async () => {
+    const gaps = await loadGaps();
+    const row = gaps.find((g) => g.id === id);
+    const meta = (row?.classification_metadata ?? null) as Record<string, unknown> | null;
+    // The predicate changed (or the row went) while the check ran: this verdict describes nothing.
+    if (!row || !meta || meta["predicate_birth_key"] !== key) return false;
+    meta["predicate_birth_verdict"] = verdict;
+    meta["predicate_birth_at"] = new Date().toISOString();
+    if (evalSha) meta["predicate_birth_sha"] = evalSha; else delete meta["predicate_birth_sha"];
+    if (tree?.moved) meta["predicate_birth_tree_moved"] = true; else delete meta["predicate_birth_tree_moved"];
+    if (tree) meta["predicate_birth_tree_reason"] = tree.reason; else delete meta["predicate_birth_tree_reason"];
+    await saveGaps(gaps);
+    return true;
+  });
+}
+
+/**
+ * THE BIRTH EVALUATOR: one class-2 check, one verdict, through the one judge. The seam's scheduled evaluation
+ * runs this, and so does self_fact_reconcile's gap_birth_verdicts row as its must-fail control (a planted
+ * check known to pass on the current tree must come back 'absent'), so the evaluator the seam relies on is
+ * measured every tick, not validated once.
+ */
+export async function takeBirthVerdict(id: string, meta: Record<string, unknown>, judge?: BirthJudge): Promise<"present" | "absent" | "unknown"> {
+  try {
+    const v = await (judge ?? __birthJudgeOverride ?? defaultBirthJudge)({ id, classification_metadata: meta });
+    return v === "present" || v === "absent" ? v : "unknown";
+  } catch (err) {
+    console.warn(`[gap-birth] ${id}: check threw (${String(err).slice(0, 160)}) — unknown`);
+    return "unknown";
+  }
+}
+
+function scheduleBirthEvaluation(job: { id: string; key: string; meta: Record<string, unknown> }, judge: BirthJudge): void {
+  const run = __birthChain.then(async () => {
+    // The tree is read when the evaluation STARTS: the verdict below is about this commit.
+    const evalSha = readBirthTreeSha(job.meta);
+    let verdict: BirthVerdict = await takeBirthVerdict(job.id, job.meta, judge);
+    // The base: the detected sha when the writer gave one, else the tree when this evaluation was queued.
+    const detectedSha = shaOf(job.meta["predicate_birth_detected_sha"]);
+    const queuedSha = shaOf(job.meta["predicate_birth_queued_sha"]);
+    const tree = verdict === "absent" ? birthTreeChange(job.meta, detectedSha ?? queuedSha, detectedSha ? "detected" : "queued", evalSha) : null;
+    const moved = !!tree?.moved;
+    if (moved) verdict = "unknown";
+    try {
+      const stamped = await stampBirthVerdict(job.id, job.key, verdict, evalSha, tree);
+      const shape = String(((job.meta["evidence_resolve"] ?? {}) as { shape?: unknown }).shape ?? job.meta["verify_shape"] ?? "?");
+      console.log(`[gap-birth] ${job.id}: class2 check ${shape} reads ${verdict} on ${evalSha ? evalSha.slice(0, 12) : "an unread tree"}` +
+        (detectedSha ? ` (detected on ${detectedSha.slice(0, 12)})` : " (detection sha unknown)") +
+        (verdict === "present" ? "" : moved ? ` — absent, but the tree moved (${tree!.reason}): unknown, not suspect` : " — predicate_suspect: not admissible, and its absent closes nothing" + (tree ? ` [${tree.reason}]` : "")) +
+        (stamped ? "" : " (not stamped: the predicate changed while it ran)"));
+    } catch (err) {
+      console.warn(`[gap-birth] ${job.id}: stamp failed (${String(err).slice(0, 160)})`);
+    }
+  });
+  __birthChain = run.catch(() => undefined);
+  __birthInflight.add(run);
+  void run.finally(() => __birthInflight.delete(run));
+}
+
+/**
+ * Decide the birth fields of a written row (mutates `merged`). Returns the evaluation to schedule, if any.
+ * `prior` is the stored row's metadata before this write; incoming birth fields are discarded.
+ */
+function applyBirthStamp(
+  gapId: string,
+  status: string,
+  falsifier: FalsifierClass,
+  merged: Record<string, unknown>,
+  prior: Record<string, unknown>,
+  trusted: { predicate_key: string; verdict: "present" | "absent" | "unknown" } | undefined,
+  nowIso: string,
+  detectedSha?: string,
+): { id: string; key: string; meta: Record<string, unknown> } | null {
+  for (const f of BIRTH_FIELDS) delete merged[f];
+  if (falsifier !== "class2") return null;
+  const key = class2PredicateKey(merged);
+  const carryPrior = (): void => { for (const f of BIRTH_FIELDS) if (prior[f] !== undefined) merged[f] = prior[f]; };
+  const priorSameCheck = prior["predicate_birth_key"] === key && typeof prior["predicate_birth_verdict"] === "string";
+  if (status !== "open") { if (priorSameCheck) carryPrior(); return null; }
+  const detected = shaOf(detectedSha);
+  if (trusted && trusted.predicate_key === key) {
+    merged["predicate_birth_key"] = key;
+    merged["predicate_birth_verdict"] = trusted.verdict;
+    merged["predicate_birth_at"] = nowIso;
+    const evalSha = readBirthTreeSha(merged);
+    if (evalSha) merged["predicate_birth_sha"] = evalSha;
+    if (detected) merged["predicate_birth_detected_sha"] = detected;
+    return null;
+  }
+  // NOT A BIRTH: the stored row already carried this very check before birth stamps existed. What it read when
+  // it was born is unknown, and reading it now cannot tell "inverted at birth" from "fixed since", so it keeps
+  // its legacy (unstamped) treatment rather than being marked suspect by a re-emission.
+  if (prior["predicate_birth_key"] === undefined && Object.keys(prior).length > 0 && class2PredicateKey(prior) === key) return null;
+  // The same check carries its verdict forward: re-taking an unknown or a dead pending is the sweep's
+  // (reevaluateBirthVerdicts). The one exception is a tree-moved unknown re-emitted with a NEW detection sha:
+  // only a writer can supply that, so only a write can resolve it.
+  if (priorSameCheck && !(detected && birthTreeMoved(prior) && prior["predicate_birth_verdict"] === "unknown" && shaOf(prior["predicate_birth_detected_sha"]) !== detected)) {
+    carryPrior();
+    return null;
+  }
+  merged["predicate_birth_key"] = key;
+  merged["predicate_birth_verdict"] = "pending";
+  merged["predicate_birth_at"] = nowIso;
+  if (detected) merged["predicate_birth_detected_sha"] = detected;
+  // The tree at SCHEDULE time: the base an absent is compared against when no detection sha was given.
+  const queued = readBirthTreeSha(merged);
+  if (queued) merged["predicate_birth_queued_sha"] = queued;
+  return { id: gapId, key, meta: JSON.parse(JSON.stringify(merged)) as Record<string, unknown> };
+}
+
+/**
+ * SCHEDULED RE-EVALUATION (qa R1), run from the pending-land sweep's tick over the open gaps it already read.
+ * Re-takes, oldest predicate_birth_at first and at most `limit` per call: an 'unknown' (an outage or timeout
+ * at birth), or a 'pending' older than BIRTH_PENDING_STALE_MS (its evaluation died with the process). A
+ * tree-moved unknown is skipped: HEAD only moves further from its detection sha, so re-taking it cannot
+ * resolve it. Each pick is re-stamped 'pending' now (so the next tick does not pick it again, and a pending
+ * past the hour still means "died"), then evaluated on the same birth chain as a write's, through the same
+ * takeBirthVerdict. Only where the store is HELD: the stamp writes the local store.
+ */
+export async function reevaluateBirthVerdicts(gaps: Array<Record<string, unknown>>, limit = BIRTH_REEVAL_PER_TICK, judge?: BirthJudge): Promise<string[]> {
+  if (process.env["GAP_STORE_ENDPOINT"] || limit <= 0) return [];
+  const nowMs = Date.now();
+  const at = (m: Record<string, unknown>): number => { const t = Date.parse(String(m["predicate_birth_at"] ?? "")); return Number.isFinite(t) ? t : 0; };
+  const due = (g: Record<string, unknown>): boolean => {
+    const m = (g["classification_metadata"] ?? {}) as Record<string, unknown>;
+    if (String(g["status"] ?? "open") !== "open" || m["predicate_birth_key"] !== class2PredicateKey(m)) return false;
+    const f = m["falsifier"] as unknown;
+    if (String((f && typeof f === "object" ? (f as { class?: unknown }).class : f) ?? "").toLowerCase() !== "class2") return false;
+    const v = m["predicate_birth_verdict"];
+    return (v === "unknown" && !birthTreeMoved(m)) || (v === "pending" && nowMs - at(m) > BIRTH_PENDING_STALE_MS);
+  };
+  const picks = gaps.filter(due)
+    .sort((a, b) => at((a["classification_metadata"] ?? {}) as Record<string, unknown>) - at((b["classification_metadata"] ?? {}) as Record<string, unknown>))
+    .slice(0, limit);
+  const taken: string[] = [];
+  for (const g of picks) {
+    const id = String(g["id"] ?? "");
+    const job = await withGapLock(async () => {
+      const rows = await loadGaps();
+      const row = rows.find((r) => r.id === id);
+      const meta = (row?.classification_metadata ?? null) as Record<string, unknown> | null;
+      if (!row || !meta || !due(row as unknown as Record<string, unknown>)) return null; // changed since the sweep read it
+      meta["predicate_birth_verdict"] = "pending";
+      meta["predicate_birth_at"] = new Date().toISOString();
+      const queued = readBirthTreeSha(meta); // re-queued now: this is the tree a re-take is compared against
+      if (queued) meta["predicate_birth_queued_sha"] = queued; else delete meta["predicate_birth_queued_sha"];
+      await saveGaps(rows);
+      return { id, key: String(meta["predicate_birth_key"]), meta: JSON.parse(JSON.stringify(meta)) as Record<string, unknown> };
+    });
+    if (!job) continue;
+    console.log(`[gap-birth] ${id}: birth verdict re-taken by the sweep (${String(((g["classification_metadata"] ?? {}) as Record<string, unknown>)["predicate_birth_verdict"])})`);
+    scheduleBirthEvaluation(job, judge ?? __birthJudgeOverride ?? defaultBirthJudge);
+    taken.push(id);
+  }
+  return taken;
+}
+
 /**
  * The store-wide coverage census — the aggregate the operator used to compute by
  * hand. Returned on every read so `falsifier='none'` is answerable FROM THE STORE.
@@ -739,7 +1049,16 @@ export async function resolveSubstrateGapWrite(
   pointer: SubstrateGapWritePointer | Record<string, unknown>,
   // Additive, test-facing: inject a vocabulary rather than depending on the host's
   // filesystem layout. No production caller passes it (the cached fleet scan is used).
-  opts?: { vocabulary?: ShapeVocabulary | null, anchorNotFoundHandler?: (error: Error) => void },
+  opts?: {
+    vocabulary?: ShapeVocabulary | null,
+    anchorNotFoundHandler?: (error: Error) => void,
+    /** In-process only: a verdict the caller just took with the same judge on this exact class-2 check (see BIRTH EVALUATION). */
+    birthVerdict?: { predicate_key: string; verdict: "present" | "absent" | "unknown" },
+    /** Tests only: the judge for this write's birth evaluation. */
+    birthJudge?: BirthJudge,
+    /** In-process only: the commit the writer detected the defect against (see WHICH TREE). */
+    detectedSha?: string,
+  },
 ): Promise<ResolverResult> {
   { const fwd = await forwardToGapStore(pointer as Record<string, unknown>); if (fwd) return fwd; }
   const flat = coerceFlatGapPointer(pointer as Record<string, unknown>);
@@ -849,7 +1168,7 @@ export async function resolveSubstrateGapWrite(
 
   const outcome = await withGapLock(async (): Promise<
     | { early: ResolverResult }
-    | { action: "created" | "updated"; summaryChanged: boolean; reopened: boolean; classKey: string; falsifier: FalsifierClass; unadvertisedShape?: string }
+    | { action: "created" | "updated"; summaryChanged: boolean; reopened: boolean; classKey: string; falsifier: FalsifierClass; unadvertisedShape?: string; birthJob: { id: string; key: string; meta: Record<string, unknown> } | null }
   > => {
   const gaps = await loadGaps();
   // Dedup by gap CLASS (volatile-stripped id), not raw id, so timestamped
@@ -953,8 +1272,12 @@ export async function resolveSubstrateGapWrite(
   let action: "created" | "updated";
       let summaryChanged = false;
       let reopened = false;
+  // The stored row's metadata BEFORE this write: the birth stamp compares against it, never against
+  // the incoming or merged copy (either can carry forward or forge a verdict).
+  let priorMetaForBirth: Record<string, unknown> = {};
   if (existingIdx >= 0) {
     const existing = gaps[existingIdx]!;
+    priorMetaForBirth = { ...((existing.classification_metadata ?? {}) as Record<string, unknown>) };
     // operator_hold is a field the store READS: a held gap cannot be closed by any
     // writer unless the write carries an exercised, passed falsifier. A landed sha is
     // provenance, not resolution (2026-09-22: a hold was overridden three times).
@@ -1118,6 +1441,7 @@ export async function resolveSubstrateGapWrite(
   // to block the substrate's detection loop.
   let falsifier: FalsifierClass = "none";
   let unadvertisedShape: string | undefined;
+  let birthJob: { id: string; key: string; meta: Record<string, unknown> } | null = null;
   try {
     const merged = (gap.classification_metadata ?? {}) as Record<string, unknown>;
     const c = classifyFalsifier(merged, vocabForClassify);
@@ -1134,6 +1458,8 @@ export async function resolveSubstrateGapWrite(
     if (c.unadvertised_shape) merged["falsifier_unadvertised_shape"] = c.unadvertised_shape;
     else delete merged["falsifier_unadvertised_shape"];  // clear a stale accusation carried from the old row
     merged["falsifier_classified_at"] = c.classified_at;
+    // BIRTH EVALUATION: decided here, run after the save (see applyBirthStamp).
+    birthJob = applyBirthStamp(gap.id, String(gap.status ?? "open"), c.falsifier, merged, priorMetaForBirth, opts?.birthVerdict, now, opts?.detectedSha);
     gap.classification_metadata = merged;
 
     // BASELINE STAMPING LIVES ELSEWHERE, DELIBERATELY — DO NOT RE-ADD IT HERE.
@@ -1153,11 +1479,12 @@ export async function resolveSubstrateGapWrite(
   }
 
   await saveGaps(gaps);
-  return { action, summaryChanged, reopened, classKey, falsifier, unadvertisedShape };
+  return { action, summaryChanged, reopened, classKey, falsifier, unadvertisedShape, birthJob };
   });
 
   if ("early" in outcome) return outcome.early;
-  const { action, summaryChanged, reopened, classKey, falsifier, unadvertisedShape } = outcome;
+  const { action, summaryChanged, reopened, classKey, falsifier, unadvertisedShape, birthJob } = outcome;
+  if (birthJob) scheduleBirthEvaluation(birthJob, opts?.birthJudge ?? __birthJudgeOverride ?? defaultBirthJudge);
   // ONE LINE PER WRITE. A silent classification is worth nothing: this codebase has
   // repeatedly shipped mechanisms whose CONFIRMING case emitted no evidence, and a
   // mechanism that only speaks when it objects is indistinguishable from one that

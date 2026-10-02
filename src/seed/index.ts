@@ -15,6 +15,7 @@ import { UI_LEGIBILITY_AUDIT_TICK_TEMPLATE } from "./ui-legibility-audit-tick.js
 import { COST_EXPECTATION_AUDIT_TICK_TEMPLATE } from "./cost-expectation-audit-tick.js";
 import { SELF_ALTERATION_FUNNEL_TICK_TEMPLATE } from "./self-alteration-funnel-tick.js";
 import { GAP_LIFECYCLE_TICK_TEMPLATE } from "./gap-lifecycle-tick.js";
+import { GOAL_REACH_TICK_TEMPLATE } from "./goal-reach-tick.js";
 import { MODEL_OPPORTUNITY_TICK_TEMPLATE } from "./model-opportunity-tick.js";
 import { DETECTOR_META_TICK_TEMPLATE } from "./detector-meta-tick.js";
 import { CODE_LOCALITY_MINING_TICK_TEMPLATE } from "./code-locality-mining-tick.js";
@@ -304,6 +305,7 @@ export { UI_LEGIBILITY_AUDIT_TICK_TEMPLATE } from "./ui-legibility-audit-tick.js
 export { COST_EXPECTATION_AUDIT_TICK_TEMPLATE } from "./cost-expectation-audit-tick.js";
 export { SELF_ALTERATION_FUNNEL_TICK_TEMPLATE } from "./self-alteration-funnel-tick.js";
 export { GAP_LIFECYCLE_TICK_TEMPLATE } from "./gap-lifecycle-tick.js";
+export { GOAL_REACH_TICK_TEMPLATE } from "./goal-reach-tick.js";
 export { MODEL_OPPORTUNITY_TICK_TEMPLATE } from "./model-opportunity-tick.js";
 export { DETECTOR_META_TICK_TEMPLATE } from "./detector-meta-tick.js";
 export { CODE_LOCALITY_MINING_TICK_TEMPLATE } from "./code-locality-mining-tick.js";
@@ -321,6 +323,8 @@ export const SEED_TEMPLATES: ActivityTemplate[] = [
   COST_EXPECTATION_AUDIT_TICK_TEMPLATE,
   SELF_ALTERATION_FUNNEL_TICK_TEMPLATE,
   GAP_LIFECYCLE_TICK_TEMPLATE,
+  // goal-reach seam (slice R): condition-gated, effect-graded, dry-run until goalReachPolicy says otherwise.
+  GOAL_REACH_TICK_TEMPLATE,
   MODEL_OPPORTUNITY_TICK_TEMPLATE,
   DETECTOR_META_TICK_TEMPLATE,
   CODE_LOCALITY_MINING_TICK_TEMPLATE,

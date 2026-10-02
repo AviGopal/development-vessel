@@ -45,10 +45,10 @@
  * redirects are followed by hand, at most MAX_REDIRECTS, and a hop is admitted only to the same host
  * or an allowlisted one, so an admitted URL cannot 302 the fetch somewhere the gate would refuse.
  */
-import { readFile } from "node:fs/promises";
-import { join } from "node:path";
 import type { ResolverResult } from "./types.js";
-import { containmentZones } from "./write-containment.js";
+import { readPolicyFile, shapedPolicyPath } from "../lib/signal-window.js";
+
+const WEB_RESOURCE_ALLOWLIST_POLICY = "webResourceAllowlist";
 
 /** The bootstrap allowlist: what applies until a webResourceAllowlist policy file is seeded. */
 export const BOOTSTRAP_ALLOW_DOMAINS: readonly string[] = [
@@ -91,8 +91,7 @@ export interface WebResourcePointer {
  * bootstrap list applies, and nothing a tool can write is ever read as the policy.
  */
 export function webResourceAllowlistPath(env: Record<string, string | undefined> = process.env): string | null {
-  const superRepo = containmentZones(env).supers[0];
-  return superRepo ? join(superRepo, "policies", "webResourceAllowlist.json") : null;
+  return shapedPolicyPath(WEB_RESOURCE_ALLOWLIST_POLICY, env);
 }
 
 export interface WebResourceAllowlist {
@@ -104,23 +103,20 @@ export interface WebResourceAllowlist {
 }
 
 /** Read at use time. A usable file is an object whose allow_domains is an array of strings (it may
- *  be empty: an explicit "no static origins"). Absent or unusable → the bootstrap list, said so. */
+ *  be empty: an explicit "no static origins"). Absent or unusable → the bootstrap list, said so.
+ *  This caller's fallback is deliberately the bootstrap list (not fail-closed), unchanged. */
 export async function readWebResourceAllowlist(env: Record<string, string | undefined> = process.env): Promise<WebResourceAllowlist> {
-  const path = webResourceAllowlistPath(env);
-  if (!path) return { allow_domains: [...BOOTSTRAP_ALLOW_DOMAINS], source: "bootstrap", path, note: "no live super-repo clone on this node to hold a webResourceAllowlist policy; the bootstrap list applies" };
-  let raw: string;
-  try {
-    raw = await readFile(path, "utf-8");
-  } catch {
-    return { allow_domains: [...BOOTSTRAP_ALLOW_DOMAINS], source: "bootstrap", path, note: "no webResourceAllowlist policy file; the bootstrap list applies" };
-  }
-  try {
-    const p = JSON.parse(raw) as { allow_domains?: unknown; reason?: unknown };
+  const f = await readPolicyFile(WEB_RESOURCE_ALLOWLIST_POLICY, env);
+  const path = f.path;
+  if (f.state === "no_clone" || f.state === "bad_name") return { allow_domains: [...BOOTSTRAP_ALLOW_DOMAINS], source: "bootstrap", path, note: "no live super-repo clone on this node to hold a webResourceAllowlist policy; the bootstrap list applies" };
+  if (f.state === "absent" || f.state === "unreadable") return { allow_domains: [...BOOTSTRAP_ALLOW_DOMAINS], source: "bootstrap", path, note: "no webResourceAllowlist policy file; the bootstrap list applies" };
+  if (f.state === "parsed") {
+    const p = f.value as { allow_domains?: unknown; reason?: unknown } | null;
     if (p && typeof p === "object" && !Array.isArray(p) && Array.isArray(p.allow_domains) && p.allow_domains.every((d) => typeof d === "string")) {
       const domains = (p.allow_domains as string[]).map((d) => d.trim().toLowerCase()).filter(Boolean);
       return { allow_domains: domains, source: "policy", path, ...(typeof p.reason === "string" ? { reason: p.reason } : {}) };
     }
-  } catch { /* unusable: fall through */ }
+  }
   console.error(`[web_resource] webResourceAllowlist policy at ${path} is unusable (needs {allow_domains: string[]}) — the bootstrap list applies`);
   return { allow_domains: [...BOOTSTRAP_ALLOW_DOMAINS], source: "bootstrap", path, note: "the webResourceAllowlist policy file is unusable; the bootstrap list applies" };
 }

@@ -182,6 +182,7 @@ export interface GapView {
   closed_at?: string | null;
   edit_site?: string | null;
   demand_goals?: unknown;
+  reopen_count?: number;
 }
 
 /** One landing on the attempt ledger, classified by ROUTE (never by git author strings). */
@@ -201,6 +202,10 @@ export interface GoalReachPolicy {
   max_detail_reads: number;
   /** R7: how long after a reach the template store may still produce its extracted template. */
   extraction_window_ms: number;
+  /** The caller's floor: a full tick (which loads the whole gap store) runs at most this often. */
+  min_interval_s: number;
+  /** Log and grade would-actions only: no re-dispatch, no record/evidence/limit writes. Flipping it is a recorded step. */
+  dry_run: boolean;
 }
 /** Interim defaults until slice L; overridden by the newest open `goalReachPolicy` pool record (law 1). */
 export const DEFAULT_GOAL_REACH_POLICY: GoalReachPolicy = {
@@ -209,6 +214,8 @@ export const DEFAULT_GOAL_REACH_POLICY: GoalReachPolicy = {
   pending_timeout_ms: 30 * 60_000,
   max_detail_reads: 20,
   extraction_window_ms: 30 * 60_000,
+  min_interval_s: 300,
+  dry_run: true,
 };
 
 export type GoalReachAction =
@@ -234,10 +241,26 @@ export function dispatchGoalHash(d: DispatchObservation): string | null {
  * split is read from the id itself (an obsidian/vault/surface/human id is a surface) or trigger "note".
  * Unverified against every surface; the write guard therefore treats operator AND surface alike.
  */
+/**
+ * Operator ids MACHINE dispatchers stamp. goal-host maps any operator id to trigger "operator", so
+ * these would read as a human without this list. Census of origin/dev operator literals + live
+ * activeDispatches (2026-10-02): rhythm-conductor-tick.ts drain (`rhythm-conductor-drain`),
+ * scripts/substrate/learning-liveness-probe.ts, scripts/substrate/substrate-status.sh (known-answer
+ * probe), scripts/substrate/learning-loop-selftest-tick.ts (its PROBE_TAG, matched by prefix).
+ * Human ids seen live: human-surface, claude-code-operator, codex-operator.
+ */
+export const MACHINE_OPERATOR_IDS: ReadonlySet<string> = new Set(["rhythm-conductor-drain", "learning-liveness-probe", "substrate-status"]);
+export function isHumanOperatorId(op: unknown): boolean {
+  if (typeof op !== "string") return false;
+  const o = op.trim();
+  if (!o) return false;
+  return !MACHINE_OPERATOR_IDS.has(o) && !/^learning-loop-selftest/.test(o);
+}
+
 export function originOf(d: Pick<DispatchObservation, "operator" | "trigger">): GoalReachOrigin {
   const op = typeof d.operator === "string" ? d.operator.trim() : "";
   if (d.trigger === "note") return "surface";
-  if (!op) return "autonomous";
+  if (!isHumanOperatorId(op)) return "autonomous";
   if (/obsidian|vault|surface|human/i.test(op)) return "surface";
   return "operator";
 }
@@ -464,7 +487,7 @@ export const AUTONOMOUS_CLOSE_REASONS: ReadonlySet<string> = new Set([
 const isOperatorRouteSource = (s: unknown): boolean => typeof s === "string" && (s === "human_reported" || /^operator/.test(s));
 /** A dispatch a human made: goal-host trigger "operator" (any operator id) or a surface/note dispatch. */
 const isHumanDispatch = (e: Pick<ChainEntry, "trigger" | "operator">): boolean =>
-  e.trigger === "operator" || e.trigger === "note" || (typeof e.operator === "string" && e.operator.trim().length > 0);
+  e.trigger === "note" || isHumanOperatorId(e.operator);
 
 const normPath = (p: string): string => String(p).replace(/:\d+.*$/, "").replace(/\\/g, "/").replace(/^\.\//, "").replace(/^repos\//, "").trim();
 const samePath = (a: string, b: string): boolean => {
@@ -629,6 +652,106 @@ export function summarize(records: GoalReachRecord[]): GoalReachSummary {
   return s;
 }
 
+// ── the caller condition ──────────────────────────────────────────────────────────────────────────
+
+/**
+ * Should a full tick run now? Cheap by construction (pool records + one activeDispatches page; no gap
+ * store read), so a mis-selection by the idle selector costs almost nothing and earns nothing.
+ * Run iff min_interval_s has passed since the last full tick AND there is work: a non-reached terminal
+ * dispatch no goalReach record holds yet, or a record waiting / redispatching / with its reach's
+ * extraction still undecided.
+ */
+export function tickEligibility(
+  input: { records: Record<string, GoalReachRecord>; peek: Array<{ dispatchId: string; status: string; reached: boolean | null }>; last_run_at: number | null },
+  now: number,
+  policy: Pick<GoalReachPolicy, "min_interval_s">,
+): { run: boolean; reason: string } {
+  if (input.last_run_at !== null && now - input.last_run_at < policy.min_interval_s * 1000) {
+    return { run: false, reason: `min_interval: last full tick ${Math.round((now - input.last_run_at) / 1000)}s ago < ${policy.min_interval_s}s` };
+  }
+  const tracked = new Set<string>();
+  for (const r of Object.values(input.records)) for (const e of r.dispatches) tracked.add(e.dispatchId);
+  const untracked = input.peek.filter((p) => isTerminal(p.status) && p.reached !== true && !tracked.has(p.dispatchId)).length;
+  const recs = Object.values(input.records);
+  const waiting = recs.filter((r) => r.status === "waiting").length;
+  const redispatching = recs.filter((r) => r.status === "redispatching").length;
+  const extraction = recs.filter((r) => needsExtractionCheck(r) || (r.status === "reached" && !r.attribution_final)).length;
+  const reason = `untracked_failures=${untracked} waiting=${waiting} redispatching=${redispatching} extraction_pending=${extraction}`;
+  return { run: untracked + waiting + redispatching + extraction > 0, reason };
+}
+
+// ── the effect grade ──────────────────────────────────────────────────────────────────────────────
+
+export type TickGrade = { verdict: "success" | "neutral" | "failure"; reasons: string[] };
+
+/**
+ * Grade the PREVIOUS tick on its effect, against the state this tick observed before acting.
+ *   failure: an error; a (would-)redispatch while a linked gap was open at action time; a redispatch
+ *     whose "closed" gap the next tick sees open WITHOUT a reopen since (the action read stale state);
+ *     two actions on one goal; a duplicate (goal_hash, dispatch_id) link on a gap; an eligible goal the
+ *     tick decided on but did not act on; or a goal that per the observed state was already eligible
+ *     at the previous tick (every linked gap closed before it, after the goal's last attempt) and got
+ *     no action.
+ *   success: at least one action and no failure. neutral: nothing done and nothing missed.
+ * Dry-run would-actions are graded identically, so the posterior is earned before going live.
+ */
+export function gradeTick(prev: TickLedger | null, observed: { records: GoalReachRecord[]; gaps: GapView[] }): TickGrade {
+  if (!prev) return { verdict: "neutral", reasons: ["no previous tick"] };
+  const reasons: string[] = [];
+  for (const e of prev.errors) reasons.push(`error:${e.slice(0, 120)}`);
+  const gapById = new Map(observed.gaps.map((g) => [g.id, g]));
+  const seen = new Set<string>();
+  for (const a of prev.actions) {
+    if (seen.has(a.goal_hash)) reasons.push(`duplicate_action:${a.goal_hash}`);
+    seen.add(a.goal_hash);
+    if (a.kind !== "redispatch") continue;
+    const openAtAction = a.linked.filter((l) => l.status === "open").map((l) => l.id);
+    if (openAtAction.length > 0) reasons.push(`redispatch_with_open_gap:${a.goal_hash}:${openAtAction.join(",")}`);
+    for (const l of a.linked) {
+      const now = gapById.get(l.id);
+      if (l.status !== "open" && now && now.status === "open" && (now.reopen_count ?? 0) <= l.reopen_count) {
+        reasons.push(`redispatch_contradicted:${a.goal_hash}:${l.id} read closed, open with no reopen since`);
+      }
+    }
+  }
+  for (const g of observed.gaps) {
+    const keys = Array.isArray(g.demand_goals)
+      ? (g.demand_goals as unknown[]).filter((x): x is { source: string; goal_hash: string; dispatch_id: string } => !!x && typeof x === "object" && (x as { source?: unknown }).source === "goal_reach")
+        .map((x) => `${x.goal_hash}|${x.dispatch_id}`)
+      : [];
+    if (new Set(keys).size !== keys.length) reasons.push(`duplicate_link:${g.id}`);
+  }
+  const acted = new Set(prev.actions.map((a) => a.goal_hash));
+  for (const h of prev.eligible) if (!acted.has(h)) reasons.push(`missed_eligible:${h}:decided but not acted on`);
+  for (const r of observed.records) {
+    if (acted.has(r.goal_hash) || prev.eligible.includes(r.goal_hash)) continue;
+    if (r.status === "reached" || r.status === "stopped" || r.status === "redispatching") continue;
+    const linked = r.linked.map((id) => gapById.get(id)).filter((g): g is GapView => !!g);
+    if (linked.length === 0 || linked.some((g) => g.status === "open")) continue;
+    const closes = linked.map((g) => Date.parse(String(g.closed_at ?? ""))).filter(Number.isFinite);
+    if (closes.length !== linked.length) continue;
+    const lastAttempt = Math.max(0, ...r.dispatches.filter((e) => e.startedAt < prev.at).map((e) => e.startedAt));
+    if (Math.max(...closes) < prev.at && closes.some((c) => c > lastAttempt)) reasons.push(`missed_eligible:${r.goal_hash}:all linked gaps closed before the tick`);
+  }
+  if (reasons.length > 0) return { verdict: "failure", reasons };
+  return prev.actions.length > 0 ? { verdict: "success", reasons: [`${prev.actions.length} correct action(s)`] } : { verdict: "neutral", reasons: ["nothing eligible, nothing done"] };
+}
+
+/**
+ * Put the previous tick's grade on THIS execution, in the forms the existing grading reads:
+ *   failure → a structuredError result: the executor records a failed task, light-dispatch posts
+ *     reach:false, activity-api applies beta to this template.
+ *   success / neutral → goalReachTickResult with `information_yield` ("productive" when this tick
+ *     acted, else "idle") and `findings` = this tick's actions (the array light-dispatch counts for
+ *     its own information_yield). See the report for why "neutral" cannot yet avoid the late /reach.
+ */
+export function carryGrade(grade: TickGrade, body: { summary: unknown; actions: TickAction[] } & Record<string, unknown>): ResolverResult {
+  if (grade.verdict === "failure") {
+    return { shape: "structuredError", body: { resolver: "goal_reach_tick", failure_mode: "previous_tick_graded_failure", detail: `previous goal_reach tick graded failure: ${grade.reasons.slice(0, 5).join("; ")}`, previous_tick_grade: grade, ...body, findings: body.actions } };
+  }
+  return { shape: "goalReachTickResult", body: { ...body, previous_tick_grade: grade, findings: body.actions, information_yield: body.actions.length > 0 ? "productive" : "idle" } };
+}
+
 // ── the tick ──────────────────────────────────────────────────────────────────────────────────────
 
 export interface GoalDispatchRequest {
@@ -654,7 +777,28 @@ export interface GoalReachIO {
   fileLimitProposal(p: { goal_hash: string; paths: string[]; gap_ids: string[]; reason: string }): Promise<{ ok: boolean; why?: string }>;
 }
 
+/** One action (or, in dry-run, would-action) a tick took, with the linked gaps as it saw them. */
+export interface TickAction {
+  kind: "redispatch" | "stop" | "ask_human";
+  goal_hash: string;
+  would: boolean;
+  reason?: string;
+  linked: Array<{ id: string; status: string; reopen_count: number }>;
+}
+/** What a tick did, kept so the NEXT tick can grade it against the state it then observes. */
+export interface TickLedger {
+  at: number;
+  dry_run: boolean;
+  actions: TickAction[];
+  /** Goals nextAction said to act on this tick (redispatch/stop/ask_human), recorded at decision time. */
+  eligible: string[];
+  errors: string[];
+}
+
 export interface GoalReachTickResult {
+  ledger: TickLedger;
+  /** The state this tick observed before acting: what grades the previous tick. */
+  observed: { records: GoalReachRecord[]; gaps: GapView[] };
   ok: boolean;
   why?: string;
   summary: GoalReachSummary;
@@ -667,7 +811,11 @@ export interface GoalReachTickResult {
 const errText = (e: unknown): string => String((e as Error)?.message ?? e).slice(0, 300);
 
 export async function runGoalReachTick(io: GoalReachIO, policy: GoalReachPolicy, now = Date.now()): Promise<GoalReachTickResult> {
-  const result: GoalReachTickResult = { ok: true, summary: summarize([]), redispatched: [], stopped: [], asked_human: [], errors: [] };
+  const result: GoalReachTickResult = {
+    ok: true, summary: summarize([]), redispatched: [], stopped: [], asked_human: [], errors: [],
+    ledger: { at: now, dry_run: policy.dry_run, actions: [], eligible: [], errors: [] }, observed: { records: [], gaps: [] },
+  };
+  const tag = policy.dry_run ? "DRY-RUN would " : "";
   const prior = await io.loadRecords();
   const known = new Set<string>();
   const rIssued = new Set<string>();
@@ -676,16 +824,22 @@ export async function runGoalReachTick(io: GoalReachIO, policy: GoalReachPolicy,
     for (const id of r.r_issued) rIssued.add(id);
   }
   const listed = await io.listDispatches({ known, r_issued: rIssued });
-  if (!listed.ok) return { ...result, ok: false, why: `dispatches unreadable: ${listed.why}`, summary: summarize(Object.values(prior)) };
+  if (!listed.ok) { result.ledger.errors.push(`dispatches unreadable: ${listed.why}`); return { ...result, ok: false, why: `dispatches unreadable: ${listed.why}`, summary: summarize(Object.values(prior)) }; }
 
   const records = observe(prior, listed.dispatches, now, policy);
   const live = Object.values(records);
   const gapsRead = await io.readGaps(live.map((r) => r.goal_hash));
   if (!gapsRead.ok) {
     for (const r of live) await io.saveRecord(r);
+    result.ledger.errors.push(`gaps unreadable: ${gapsRead.why}`);
     return { ...result, ok: false, why: `gaps unreadable: ${gapsRead.why}`, summary: summarize(live) };
   }
   const gaps = gapsRead.gaps;
+  for (const rec of live) linkGaps(rec, gaps);
+  result.observed = { records: JSON.parse(JSON.stringify(live)) as GoalReachRecord[], gaps };
+  const gapById = new Map(gaps.map((g) => [g.id, g]));
+  const linkedSnapshot = (rec: GoalReachRecord): TickAction["linked"] =>
+    rec.linked.map((id) => gapById.get(id)).filter((g): g is GapView => !!g).map((g) => ({ id: g.id, status: g.status, reopen_count: g.reopen_count ?? 0 }));
   const scope = await io.scopeExcludes().catch(() => null);
   let landings: LandingView[] | null = null;
 
@@ -739,11 +893,13 @@ export async function runGoalReachTick(io: GoalReachIO, policy: GoalReachPolicy,
 
     const action = nextAction(rec, gaps, policy, { scopeExcludes: scope });
     rec.last_action = { kind: action.kind, ...("reason" in action ? { reason: action.reason } : {}), at: now };
+    if (action.kind === "stop" || action.kind === "ask_human" || action.kind === "redispatch") result.ledger.eligible.push(rec.goal_hash);
     if (action.kind === "stop") {
       rec.status = "stopped";
       rec.stop_reason = action.reason;
       result.stopped.push({ goal_hash: rec.goal_hash, reason: action.reason });
-      console.log(`[goal-reach] STOPPED goal_hash=${rec.goal_hash} reason=${action.reason}`);
+      result.ledger.actions.push({ kind: "stop", goal_hash: rec.goal_hash, would: policy.dry_run, reason: action.reason, linked: linkedSnapshot(rec) });
+      console.log(`[goal-reach] ${policy.dry_run ? "DRY-RUN would stop" : "STOPPED"} goal_hash=${rec.goal_hash} reason=${action.reason}`);
       if (action.limit_proposal && !rec.limit_proposal_filed) {
         try {
           const f = await io.fileLimitProposal({ ...action.limit_proposal, reason: action.reason });
@@ -758,6 +914,8 @@ export async function runGoalReachTick(io: GoalReachIO, policy: GoalReachPolicy,
       // its human). No ask channel exists yet, so the stop reason names the intended addressee.
       rec.stop_reason = `needs_human:ask=${action.addressee}:write_effects:${action.write_shapes.join(",")}`;
       result.asked_human.push({ goal_hash: rec.goal_hash, write_shapes: action.write_shapes });
+      result.ledger.actions.push({ kind: "ask_human", goal_hash: rec.goal_hash, would: policy.dry_run, reason: rec.stop_reason, linked: linkedSnapshot(rec) });
+      console.log(`[goal-reach] ${tag}stop for a human ask goal_hash=${rec.goal_hash} reason=${rec.stop_reason}`);
     } else if (action.kind === "redispatch") {
       const cycle = rec.cycles + 1;
       try {
@@ -769,7 +927,7 @@ export async function runGoalReachTick(io: GoalReachIO, policy: GoalReachPolicy,
           tags: ["dispatcher_reason:goal_reach", `goal_reach:${action.goal_hash}`, `goal_reach_cycle:${cycle}`],
           variables: { source: "goal_reach", goal_reach_goal_hash: action.goal_hash, goal_reach_cycle: cycle },
         });
-        if (!r.ok) result.errors.push(`redispatch ${rec.goal_hash} failed: ${r.why}`);
+        if (!r.ok) { result.errors.push(`redispatch ${rec.goal_hash} failed: ${r.why}`); result.ledger.errors.push(`redispatch ${rec.goal_hash} failed: ${r.why}`); }
         else if (r.coalesced) {
           rec.last_action = { kind: "redispatch_coalesced", reason: `goal-host returned the already-running ${r.dispatch_id}`, at: now };
         } else {
@@ -778,10 +936,14 @@ export async function runGoalReachTick(io: GoalReachIO, policy: GoalReachPolicy,
           rec.status = "redispatching";
           rec.cycles = cycle;
           result.redispatched.push({ goal_hash: rec.goal_hash, dispatch_id: r.dispatch_id });
-          console.log(`[goal-reach] REDISPATCHED goal_hash=${rec.goal_hash} dispatch=${r.dispatch_id} cycle=${cycle}/${policy.max_cycles}`);
+          result.ledger.actions.push({ kind: "redispatch", goal_hash: rec.goal_hash, would: policy.dry_run, linked: linkedSnapshot(rec) });
+          console.log(policy.dry_run
+            ? `[goal-reach] DRY-RUN would redispatch goal_hash=${rec.goal_hash} cycle=${cycle}/${policy.max_cycles} (all ${rec.linked.length} linked gap(s) closed)`
+            : `[goal-reach] REDISPATCHED goal_hash=${rec.goal_hash} dispatch=${r.dispatch_id} cycle=${cycle}/${policy.max_cycles}`);
         }
       } catch (e) {
         result.errors.push(`redispatch ${rec.goal_hash} threw: ${errText(e)}`);
+        result.ledger.errors.push(`redispatch ${rec.goal_hash} threw: ${errText(e)}`);
       }
     }
     rec.updated_at = now;
@@ -1075,8 +1237,8 @@ export function dryRunIO(io: GoalReachIO): GoalReachIO {
     ...io,
     saveRecord: async () => {},
     dispatchGoal: async (req) => ({ ok: true, dispatch_id: `dry-run:${req.goal_hash}`, coalesced: false }),
-    attachExtractionEvidence: async () => ({ ok: false, why: "dry_run" }),
-    fileLimitProposal: async () => ({ ok: false, why: "dry_run" }),
+    attachExtractionEvidence: async (e) => { console.log(`[goal-reach] DRY-RUN would attach extraction evidence goal_hash=${e.goal_hash}`); return { ok: true }; },
+    fileLimitProposal: async (p) => { console.log(`[goal-reach] DRY-RUN would file limitChangeProposal goal_hash=${p.goal_hash} paths=${p.paths.join(",")}`); return { ok: true }; },
   };
 }
 
@@ -1091,18 +1253,72 @@ async function readPolicy(): Promise<GoalReachPolicy> {
     if (asNum(b.pending_timeout_ms) !== null) p.pending_timeout_ms = b.pending_timeout_ms!;
     if (asNum(b.max_detail_reads) !== null) p.max_detail_reads = b.max_detail_reads!;
     if (asNum(b.extraction_window_ms) !== null) p.extraction_window_ms = b.extraction_window_ms!;
+    if (asNum(b.min_interval_s) !== null) p.min_interval_s = b.min_interval_s!;
+    if (typeof b.dry_run === "boolean") p.dry_run = b.dry_run;
     return p;
   } catch { return { ...DEFAULT_GOAL_REACH_POLICY }; }
 }
 
-/** The resolver: `{type:"goal_reach_tick", dry_run?: boolean}` → goalReachTickResult. */
-export async function resolveGoalReachTick(pointer: { type?: string; dry_run?: boolean } = {}): Promise<ResolverResult> {
-  const policy = await readPolicy();
-  const base = defaultGoalReachIO(policy);
-  const io = pointer.dry_run ? dryRunIO(base) : base;
+const LEDGER_SHAPE = "goalReachTickLedger";
+const LEDGER_ID = "goalReachTickLedger:latest";
+interface LedgerRow { ledger: TickLedger | null; last_run_at: number | null }
+
+async function loadLedger(): Promise<LedgerRow> {
+  const { resolvePoolImpulse } = await import("./pool-impulse.js");
+  const res = resolvePoolImpulse({ type: "poolImpulse", id: LEDGER_ID, status: "open", limit: 1 });
+  const b = (res.body.impulses[0]?.body ?? null) as LedgerRow | null;
+  return { ledger: b?.ledger ?? null, last_run_at: typeof b?.last_run_at === "number" ? b.last_run_at : null };
+}
+async function saveLedger(row: LedgerRow): Promise<void> {
+  // R's own grading memory, written in dry-run too: it is not an effect on the goals it observes.
+  const { resolvePoolImpulseWrite } = await import("./pool-impulse.js");
+  resolvePoolImpulseWrite({ type: "poolImpulse_write", id: LEDGER_ID, shape: LEDGER_SHAPE, body: row, source: "goal_reach_tick", status: "open" });
+}
+/** One activeDispatches page per own goal-host, no walk detail: the caller condition's cheap read. */
+async function peekDispatches(): Promise<{ ok: true; rows: Array<{ dispatchId: string; status: string; reached: boolean | null }> } | { ok: false; why: string }> {
+  const prod = await ownUrls("activeDispatches");
+  if (!prod.ok) return { ok: false, why: prod.why };
+  const rows: Array<{ dispatchId: string; status: string; reached: boolean | null }> = [];
+  let answered = 0;
+  for (const url of prod.urls) {
+    const r = await postResolve(url, { type: "activeDispatches", limit: 50, offset: 0 }, 10_000);
+    const ds = (r.json?.["body"] as { dispatches?: Array<Record<string, unknown>> } | undefined)?.dispatches;
+    if (!r.ok || !Array.isArray(ds)) continue;
+    answered++;
+    for (const d of ds) rows.push({ dispatchId: String(d["dispatchId"] ?? ""), status: String(d["status"] ?? ""), reached: typeof d["reached"] === "boolean" ? d["reached"] : null });
+  }
+  return answered > 0 ? { ok: true, rows } : { ok: false, why: "no activeDispatches producer answered" };
+}
+
+/**
+ * The resolver: `{type:"goal_reach_tick", dry_run?: boolean, force?: boolean}`.
+ * 1. Caller condition (tickEligibility): not due → an idle result, nothing read beyond the cheap peek.
+ * 2. Full tick (dry-run per goalReachPolicy.dry_run, default true; a pointer dry_run:true also forces it).
+ * 3. Grade the previous tick against what this tick observed (gradeTick) and carry it (carryGrade).
+ */
+export async function resolveGoalReachTick(pointer: { type?: string; dry_run?: boolean; force?: boolean } = {}): Promise<ResolverResult> {
+  const base = await readPolicy();
+  const policy: GoalReachPolicy = { ...base, dry_run: base.dry_run || pointer.dry_run === true };
+  const now = Date.now();
   try {
-    const r = await runGoalReachTick(io, policy);
-    return { shape: "goalReachTickResult", body: { ...r, policy, dry_run: pointer.dry_run === true } };
+    const row = await loadLedger();
+    if (!pointer.force) {
+      const io0 = defaultGoalReachIO(policy);
+      const [records, peek] = await Promise.all([io0.loadRecords(), peekDispatches()]);
+      if (!peek.ok) return { shape: "structuredError", body: { resolver: "goal_reach_tick", detail: `caller condition unreadable: ${peek.why}` } };
+      const e = tickEligibility({ records, peek: peek.rows, last_run_at: row.last_run_at }, now, policy);
+      if (!e.run) {
+        console.log(`[goal-reach] idle: ${e.reason}`);
+        return carryGrade({ verdict: "neutral", reasons: ["not run: " + e.reason] }, { summary: summarize(Object.values(records)), actions: [], idle: true, idle_reason: e.reason, policy });
+      }
+    }
+    const io = policy.dry_run ? dryRunIO(defaultGoalReachIO(policy)) : defaultGoalReachIO(policy);
+    const r = await runGoalReachTick(io, policy, now);
+    const grade = r.ok ? gradeTick(row.ledger, r.observed) : { verdict: "neutral" as const, reasons: ["this tick could not observe state; previous tick left ungraded"] };
+    await saveLedger({ ledger: r.ok ? r.ledger : row.ledger, last_run_at: now });
+    console.log(`[goal-reach] previous tick graded ${grade.verdict}${grade.reasons.length ? `: ${grade.reasons.slice(0, 3).join("; ")}` : ""}`);
+    const { observed: _observed, ...rest } = r;
+    return carryGrade(grade, { ...rest, summary: r.summary, actions: r.ledger.actions, policy, dry_run: policy.dry_run });
   } catch (e) {
     return { shape: "structuredError", body: { resolver: "goal_reach_tick", detail: errText(e) } };
   }

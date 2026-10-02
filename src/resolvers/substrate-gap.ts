@@ -37,6 +37,7 @@ import type { ResolverResult } from "./types.js";
 import { readFile, writeFile, rename, mkdir } from "node:fs/promises";
 import { readFileSync, existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { carryGoalReachEntries, isGoalReachEntry, mergeDemandGoal, type GoalReachDemandEntry } from "../lib/demand-goals.js";
 
 // EXPECTATION CALIBRATION, HELD WITH THE GAP STORE (value-per-cost-selection 5.5). Same file and
 // format gap-to-feature reads ({category: {attempts, lands}}). It lives on the node that holds the
@@ -299,6 +300,11 @@ export interface SubstrateGapWritePointer {
    *  this value, checked under withGapLock; otherwise a no-op (`skip_reason: status_precondition_failed`).
    *  For read-modify-write callers whose row may be closed between their read and their write. */
   expect_status?: string;
+  /** ARRAY-MERGE APPEND to classification_metadata.demand_goals, applied under withGapLock against the
+   *  STORED array (idempotent on goal_hash+dispatch_id), so two writers attaching goals to one gap at
+   *  once keep both. Only `{source:"goal_reach", ...}` entries are accepted (lib/demand-goals.ts).
+   *  Pair it with expect_status:"open" to attach only to a gap that is still open. */
+  demand_goals_append?: GoalReachDemandEntry[];
 }
 
 const GAPS_PATH = () => join(workspaceRoot(), "gaps", "gaps.json");
@@ -1213,6 +1219,10 @@ export async function resolveSubstrateGapWrite(
   const vocabForClassify: ShapeVocabulary | null =
     opts?.vocabulary !== undefined ? opts.vocabulary : cachedFleetVocabulary();
 
+  const demandGoalAppends: GoalReachDemandEntry[] = (() => {
+    const raw = (pointer as { demand_goals_append?: unknown }).demand_goals_append;
+    return Array.isArray(raw) ? raw.filter(isGoalReachEntry) : [];
+  })();
   const outcome = await withGapLock(async (): Promise<
     | { early: ResolverResult }
     | { action: "created" | "updated"; summaryChanged: boolean; reopened: boolean; classKey: string; falsifier: FalsifierClass; unadvertisedShape?: string; birthJob: { id: string; key: string; meta: Record<string, unknown> } | null }
@@ -1420,6 +1430,7 @@ export async function resolveSubstrateGapWrite(
     // or attempt count carried from an earlier state is not something this write reports.
     const incomingClosedReason = inMeta["closed_reason"];
     const incomingFailedAttempts = inMeta["failed_attempts"];
+    const incomingSetsDemandGoals = "demand_goals" in inMeta;
     // FALSIFIER-ANCHOR IMMUTABILITY: when the EXISTING row carries a measurable
     // falsifier (expected_literal / hardcoded_url) anchored at an edit_site, an
     // incoming write that does NOT itself rewrite those falsifier fields must not
@@ -1442,6 +1453,12 @@ export async function resolveSubstrateGapWrite(
     for (const k of Object.keys(exMeta)) {
       if (!(k in inMeta)) inMeta[k] = exMeta[k];
     }
+    // demand_goals HAS TWO WRITERS (lib/demand-goals.ts). goal-host fileCapabilityGap rewrites the
+    // whole array as strings only (its reader drops objects), so a plain key overwrite would erase
+    // every goal_reach linkage entry on the next capability-gap re-emission. Carry those forward;
+    // the writer's strings stay exactly as sent, so its demand_count and 2-goal floor are unchanged.
+    if (incomingSetsDemandGoals) inMeta["demand_goals"] = carryGoalReachEntries(exMeta["demand_goals"], inMeta["demand_goals"]);
+    for (const e of demandGoalAppends) inMeta["demand_goals"] = mergeDemandGoal(inMeta["demand_goals"], e);
     gap.classification_metadata = inMeta;
 
     // L7 gap-triple lineage on the existing row (all backward-compatible):
@@ -1489,6 +1506,11 @@ export async function resolveSubstrateGapWrite(
     // open row short-circuits above), so seed first_detected_at from the
     // detection time and leave close/reopen fields at their absent default.
     gap.first_detected_at = gap.first_detected_at ?? gap.detected_at;
+    if (demandGoalAppends.length > 0) {
+      const meta = { ...((gap.classification_metadata ?? {}) as Record<string, unknown>) };
+      for (const e of demandGoalAppends) meta["demand_goals"] = mergeDemandGoal(meta["demand_goals"], e);
+      gap.classification_metadata = meta;
+    }
     gaps.push(gap);
     action = "created";
   }

@@ -273,19 +273,24 @@ export async function recordLineageSpend(gapId: string, composeBody: unknown, dr
     const usd = Number(usage?.cost_usd);
     if (!Number.isFinite(usd) || usd <= 0) return;
     const fresh = await readGapFresh(gapId);
-    if (!fresh || String(fresh.status ?? "") === "closed") return;
+    if (!fresh || String(fresh.status ?? "") !== "open") return;
     const m = fresh.classification_metadata ?? fresh.metadata;
     const meta = (m && typeof m === "object" && !Array.isArray(m) ? m : {}) as Record<string, unknown>;
+    // A PATCH, not a row rewrite: only spend_ledger is sent, and the store carries every omitted
+    // metadata key forward, so a key another writer changed since the read is not overwritten.
+    // expect_status:"open" makes the write a no-op if the row was closed in between (never a reopen,
+    // so never an event-driven compose pickup).
     await resolveSubstrateGapWrite({
       type: "substrateGap_write",
+      expect_status: "open",
       gap: {
         id: gapId,
         category: fresh.category,
         source: fresh.source,
         summary: fresh.summary,
         detected_at: fresh.detected_at,
-        classification_metadata: { ...meta, spend_ledger: appendSpendLedger(meta, usd, new Date().toISOString()) },
-        status: String(fresh.status ?? "open"),
+        classification_metadata: { spend_ledger: appendSpendLedger(meta, usd, new Date().toISOString()) },
+        status: "open",
       },
     } as never);
   } catch (err) {
@@ -4497,8 +4502,10 @@ export async function bumpFailedAttempts(gap: Record<string, unknown>, opts: { s
       : {};
     const meta = { ...meta0, ...exemptionPatch, failed_attempts: fa, last_failed_at: new Date().toISOString(), mispredicted_lands: mis, last_predicted_p: opts.predictedP ?? meta0.last_predicted_p };
     joinDecisionOutcome(meta, { landed: false });
-    await resolveSubstrateGapWrite({
+    const bumpWrite = await resolveSubstrateGapWrite({
       type: "substrateGap_write",
+      // Conditional: a row closed since the fresh read above stays closed (no reopen, no compose pickup).
+      expect_status: "open",
       gap: {
         id,
         category: gap.category,
@@ -4509,6 +4516,11 @@ export async function bumpFailedAttempts(gap: Record<string, unknown>, opts: { s
         status: "open",
       },
     } as never);
+    // Closed in between: nothing was written, so nothing is narrowed or escalated from the stale copy.
+    if ((bumpWrite?.body as { skip_reason?: unknown } | undefined)?.skip_reason === "status_precondition_failed") {
+      console.log(`[gap-to-feature] failed-attempt bump for ${id} not written: the row is no longer open`);
+      return;
+    }
     // Emit narrowed child gap when the gap has now reached the chronic-failure
     // threshold (>= 3 failed_attempts). The child carries a tighter description
     // and resets failed_attempts to 0 so it re-enters the dispatch queue at

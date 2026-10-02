@@ -295,6 +295,10 @@ export interface SubstrateGapWritePointer {
     created_at?: string;
     updated_at?: string;
   };
+  /** CONDITIONAL WRITE: applied only if a row with this exact id exists and its stored status equals
+   *  this value, checked under withGapLock; otherwise a no-op (`skip_reason: status_precondition_failed`).
+   *  For read-modify-write callers whose row may be closed between their read and their write. */
+  expect_status?: string;
 }
 
 const GAPS_PATH = () => join(workspaceRoot(), "gaps", "gaps.json");
@@ -1220,6 +1224,21 @@ export async function resolveSubstrateGapWrite(
   // otherwise fall back to class match against a non-closed row.
   const classKey = gapClassKey(gap.id);
   let existingIdx = gaps.findIndex((g) => g.id === gap.id);
+  // CONDITIONAL WRITE (expect_status). A writer that read the row, awaited, and writes it back as
+  // open would otherwise REOPEN a gap the sweep or verifier closed in between, and a reopen fires
+  // the event-driven compose pickup below. Exact id only, checked inside the lock: no class match.
+  const expectStatus = (pointer as { expect_status?: unknown }).expect_status;
+  if (typeof expectStatus === "string") {
+    const stored = existingIdx >= 0 ? String(gaps[existingIdx]!.status ?? "open") : null;
+    if (stored !== expectStatus) {
+      return {
+        early: {
+          shape: "substrateGapWriteResult",
+          body: { id: gap.id, action: "skipped", skip_reason: "status_precondition_failed", expected_status: expectStatus, stored_status: stored },
+        },
+      };
+    }
+  }
   // Consumption gate (loop-economy): do not raise the growth rate when the
   // consumption side has no headroom (same inequality as the spectral-gap
   // governor). A NEW detector-sourced OPEN filing whose gap CLASS already

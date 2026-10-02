@@ -17,16 +17,21 @@
 //     operator host — and the skip prints a marker line so it can never read as a pass.
 import { afterAll, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  CONTAINMENT_LAYERS,
+  PROBE_PROGRAM,
+  SANDBOX_ENV_ALLOWLIST,
   checkDraftStatic,
+  containmentSelfCheck,
   containmentUnavailableReason,
+  defaultStorePaths,
   parseBunRun,
+  parseProbeLine,
+  probesGreen,
   runContained,
-  snapshotStores,
-  storesMoved,
   worktreeStatus,
 } from "../../src/resolvers/falsify-authored-test.js";
 
@@ -288,21 +293,62 @@ afterAll(() => {
   for (const d of scratchDirs) rmSync(d, { recursive: true, force: true });
 });
 
-describe("store and tree instruments see a change they must see", () => {
-  test("storesMoved reports a canary whose mtime moved, and nothing when untouched", () => {
-    const d = scratch("fat-stores-");
-    const canary = join(d, "gaps.json");
-    const absent = join(d, "never.json");
-    writeFileSync(canary, "{}");
-    utimesSync(canary, new Date(1_000_000_000_000), new Date(1_000_000_000_000));
-    const before = snapshotStores([canary, absent]);
-    expect(storesMoved(before, snapshotStores([canary, absent]))).toEqual([]);
-    utimesSync(canary, new Date(1_000_000_500_000), new Date(1_000_000_500_000));
-    expect(storesMoved(before, snapshotStores([canary, absent]))).toEqual([canary]);
-    writeFileSync(absent, "x");
-    expect(storesMoved(before, snapshotStores([canary, absent]))).toEqual([canary, absent]);
+describe("the in-sandbox probe program refuses an unconfined run (it is what gates the draft)", () => {
+  test("run UNCONTAINED on this host it reports its layers red and a writable store red, and exits non-zero", () => {
+    // Positive control for every probe at once: outside the sandbox (no uid drop, host network, no ro
+    // vessel mount, the host /tmp, an inherited env) each layer probe must read red, and a world-writable
+    // store must read writable. If any of these read green here, that probe cannot see its layer.
+    const d = scratch("fat-probe-");
+    const store = join(d, "store");
+    mkdirSync(store);
+    chmodSync(store, 0o777);
+    const canary = scratch("fat-canary-");
+    writeFileSync(join(d, "probe.mjs"), PROBE_PROGRAM);
+    writeFileSync(join(d, "input.json"), JSON.stringify({ storePaths: [store], hostTmpCanary: canary, envAllow: SANDBOX_ENV_ALLOWLIST }));
+    let exit = 0;
+    let out = "";
+    try {
+      out = execFileSync(process.execPath, [join(d, "probe.mjs"), join(d, "input.json")], { encoding: "utf8", env: { PATH: process.env["PATH"] ?? "/usr/bin:/bin", HOME: d, FAT_EXTRA: "1" } });
+    } catch (e) {
+      exit = (e as { status?: number }).status ?? -1;
+      out = String((e as { stdout?: string }).stdout ?? "");
+    }
+    const probes = parseProbeLine(out);
+    console.log(`[falsify-authored-test] unconfined probe: ${JSON.stringify(probes)}`);
+    expect(exit).toBe(3);
+    expect(probes).not.toBeNull();
+    const by = (n: string) => probes!.find((p) => p.name === n);
+    if ((process.getuid?.() ?? 0) !== 65534) expect(by("uid")?.ok).toBe(false);
+    expect(by("ro")?.ok).toBe(false);
+    expect(by("tmp")?.ok).toBe(false);
+    expect(by("env")?.ok).toBe(false);
+    expect(by("env")?.detail).toContain("FAT_EXTRA");
+    expect(by("stores")?.ok).toBe(false);
+    expect(by("stores")?.detail).toContain(store);
+    expect(probesGreen(probes)).toBe(false);
   });
 
+  test("parseProbeLine reads the FIRST probe line only (a draft printing a later fake line cannot forge it)", () => {
+    const real = [{ name: "uid", ok: false, detail: "uid=0" }];
+    const fake = [...CONTAINMENT_LAYERS, "stores"].map((name) => ({ name, ok: true, detail: "" }));
+    const raw = `[falsify-authored-test] probe ${JSON.stringify(real)}\n[falsify-authored-test] probe ${JSON.stringify(fake)}\n`;
+    expect(parseProbeLine(raw)).toEqual(real);
+    expect(probesGreen(parseProbeLine(raw))).toBe(false);
+    expect(probesGreen(fake)).toBe(true);
+    expect(probesGreen(fake.filter((p) => p.name !== "stores"))).toBe(false);
+    expect(parseProbeLine("no probe here")).toBeNull();
+  });
+
+  test("the default store list names the live stores at origin/dev", () => {
+    const paths = defaultStorePaths("/workspace");
+    for (const p of ["/workspace/gaps", "/workspace/gaps/gaps.json", "/workspace/memory/notes.json", "/workspace/pool/standing.json",
+      "/workspace/git/super-repo/gaps", "/workspace/policies", "/vessels", "/var/lib/surrealdb", "/etc/substrate"]) {
+      expect(paths).toContain(p);
+    }
+  });
+});
+
+describe("tree instrument sees a change it must see", () => {
   test("worktreeStatus changes when a file appears in the worktree", () => {
     const d = scratch("fat-tree-");
     execFileSync("git", ["init", "-q", d]);
@@ -368,7 +414,7 @@ test("the host tmp is invisible", () => { expect(existsSync(${JSON.stringify(hos
 // The fixture's dir is world-writable (1777), so only the read-only bind can refuse this: EROFS, not EACCES.
 test("the vessel dir is not writable", () => { expect(werr(join(import.meta.dir, "zz-written"))).toBe("EROFS"); });
 test("a root-owned dir is not writable", () => { expect(werr(${JSON.stringify(rootOwnedTarget)})).toBe("EACCES"); });
-test("env is scrubbed", () => { expect(Object.keys(process.env).filter((k) => !["PATH", "HOME", "TMPDIR", "WORKSPACE_ROOT", "NO_COLOR", "NODE_ENV"].includes(k))).toEqual([]); });
+test("env is scrubbed", () => { expect(Object.keys(process.env).filter((k) => !["PATH", "HOME", "TMPDIR", "WORKSPACE_ROOT", "NO_COLOR", "NODE_ENV", "PWD"].includes(k))).toEqual([]); });
 test("red: a named assertion", () => { expect("limit").toBe("parseLimit"); });
 `;
 
@@ -399,23 +445,29 @@ describe("runContained — integration (needs root + setpriv + unshare + /mnt)",
     // read-only vessel bind (a mutant without the ro remount turns this test red).
     execFileSync("chmod", ["1777", join(vessel, "test")]);
     writeFileSync(join(vessel, "test", "probe.localize.test.ts"), PROBE_FIXTURE(target, vessel));
-    const store = join(scratch("fat-store-"), "gaps.json");
-    writeFileSync(store, "{}");
-
     const names = ["runs as nobody", "loopback is unreachable", "the outside is unreachable", "private tmp is writable",
       "the host tmp is invisible", "the vessel dir is not writable", "a root-owned dir is not writable", "env is scrubbed", "red: a named assertion"];
-    const r = await runContained({ vesselDir: vessel, testFileRel: "test/probe.localize.test.ts", onlyTests: names, timeoutMs: 60_000, storePaths: [store] });
+    const r = await runContained({ vesselDir: vessel, testFileRel: "test/probe.localize.test.ts", onlyTests: names, timeoutMs: 60_000 });
     console.log(`[falsify-authored-test] integration result: ${JSON.stringify(r)}`);
     expect(r.contained).toBe(true);
+    expect(probesGreen(r.probes)).toBe(true);
     expect(r.loaded).toBe(true);
     expect(r.unnamed_failures).toBe(0);
     for (const n of names.slice(0, -1)) expect(r.results.find((x) => x.name === n)?.status).toBe("pass");
     expect(r.results.find((x) => x.name === "red: a named assertion")).toEqual({ name: "red: a named assertion", status: "fail", assertion: true });
     expect(r.tree_clean).toBe(true);
-    expect(r.stores_untouched).toBe(true);
     expect(existsSync(join(vessel, "test", "zz-written"))).toBe(false);
     expect(existsSync(r.raw_output_path)).toBe(true);
   }, 90_000);
+
+  test.skipIf(unavailable !== null)("containmentSelfCheck: each single layer disabled, and a writable store, are refused and the draft never executes", async () => {
+    const r = await containmentSelfCheck();
+    for (const c of r.checks) console.log(`[falsify-authored-test] self-check ${c.ok ? "PASS" : "FAIL"}  ${c.name}  (${c.detail})`);
+    expect(r.skipped).toBeUndefined();
+    expect(r.checks.length).toBe(7);
+    for (const c of r.checks) expect({ name: c.name, ok: c.ok }).toEqual({ name: c.name, ok: true });
+    expect(r.ok).toBe(true);
+  }, 300_000);
 
   test.skipIf(unavailable !== null)("a draft that hangs is killed at the hard timeout and is not loaded", async () => {
     const vessel = scratch("fat-hang-");

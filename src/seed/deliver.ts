@@ -18,7 +18,7 @@
  * never an import). Importing this module, or the seed registry, does nothing.
  */
 import type { ActivityTemplate } from "@avigopal/ias-executor-ts";
-import { METABOB_API_KEY, METABOB_ENDPOINT } from "../config.js";
+import { METABOB_API_KEY, METABOB_ENDPOINT, lookupShape, type DevDiscoveryLookup } from "../config.js";
 
 export interface SeedUpsertCounts {
   /** Seeds uploaded because their seed_version exceeded the registered row's (or no row existed). */
@@ -120,15 +120,76 @@ export async function readCatalogueState(endpoint: string, apiKey: string | unde
 }
 
 /**
+ * LOCAL-ONLY DELIVERY. A node writes seeds only into the catalogue served by ITS OWN activity-api.
+ * A canary node (node 2) points METABOB_ENDPOINT at another node's catalogue; were it to upsert
+ * there, a seed bump it carries would reach the shared catalogue before the owning node runs the
+ * code the seed references, a side door around staged rollout.
+ *
+ * Decided BEFORE any catalogue GET/POST, from one typed discovery lookup of the catalogue shape
+ * (`activityTemplate`, which only activity-api advertises). The catalogue is local only when
+ * THIS node's discovery registry serves a producer of it (origin "local"; a peer row, even one of
+ * this same substrate, is another node's catalogue) AND the configured endpoint is that producer:
+ * its http origin equals the producer's advertised origin, or it is a loopback address (the
+ * vessel dials its co-resident activity-api on 127.0.0.1 while discovery advertises a routable
+ * host). Everything else skips, and it fails CLOSED: a failed lookup, or a producer list without
+ * origin stamps (an older discovery or ias dist), never delivers.
+ */
+export type CatalogueLocality =
+  | { local: true; host: string }
+  | { local: false; host: string; why: string };
+
+const CATALOGUE_SHAPE = "activityTemplate";
+const LOOPBACK = new Set(["127.0.0.1", "localhost", "::1", "[::1]"]);
+const originOf = (u: string): string | null => {
+  try {
+    const x = new URL(u);
+    return x.protocol === "http:" || x.protocol === "https:" ? x.origin : null;
+  } catch {
+    return null;
+  }
+};
+
+export async function catalogueLocality(
+  endpoint: string,
+  lookup: (shape: string) => Promise<DevDiscoveryLookup> = lookupShape,
+): Promise<CatalogueLocality> {
+  let url: URL;
+  try {
+    url = new URL(endpoint);
+  } catch {
+    return { local: false, host: String(endpoint), why: "catalogue endpoint is not a URL" };
+  }
+  const host = url.host;
+  let r: DevDiscoveryLookup;
+  try {
+    r = await lookup(CATALOGUE_SHAPE);
+  } catch (e) {
+    return { local: false, host, why: `${CATALOGUE_SHAPE} lookup failed: ${(e as Error).message}` };
+  }
+  // Formatted here, not via describeLookup: a node loading an older ias dist has no describe(),
+  // and the verdict must still come back as a skip, not a throw.
+  if (!r.ok) return { local: false, host, why: `${CATALOGUE_SHAPE} lookup failed (${r.reason}): ${r.detail}` };
+  type Producer = { resolveEndpoint: string; origin?: unknown };
+  const own = (r.producers as Producer[]).filter((p) => p.origin === "local");
+  if (own.length === 0) {
+    return { local: false, host, why: `this node's registry serves no ${CATALOGUE_SHAPE} producer (${r.producers.length} non-local)` };
+  }
+  if (LOOPBACK.has(url.hostname)) return { local: true, host };
+  if (own.some((p: Producer) => originOf(p.resolveEndpoint) === url.origin)) return { local: true, host };
+  return { local: false, host, why: `endpoint is not this node's ${CATALOGUE_SHAPE} producer` };
+}
+
+/**
  * The server-side delivery: wait (bounded) for activity-api to answer, then upsert
  * version-bumped and brand-new seeds — but ONLY into a populated catalogue. An empty one is
  * left to the cold-start bulk seed: a single seed landing first would make the catalogue
  * non-empty and the bulk seeder would then skip the whole bootstrap set.
  *
- * Targets METABOB_ENDPOINT, the same anchor the seed unit and cli.ts use: the local
- * activity-api on a hub/standalone node, the hub's on a spoke. Two nodes running this are
- * safe together because an upload happens only when the seed's version is STRICTLY greater
- * than the registered one, so a node on an older commit never downgrades a row.
+ * Targets METABOB_ENDPOINT only when it is THIS node's own activity-api (catalogueLocality,
+ * checked before any catalogue request); on a node that reads another node's catalogue it skips
+ * with `[seed-delivery] skipped: remote catalogue <host>`, and the owning node delivers when it
+ * runs the code. Within one catalogue an upload happens only when the seed's version is
+ * STRICTLY greater than the registered one, so an older process never downgrades a row.
  */
 export async function deliverSeedsToPopulatedCatalogue(opts: {
   templates?: ReadonlyArray<unknown>;
@@ -136,9 +197,15 @@ export async function deliverSeedsToPopulatedCatalogue(opts: {
   apiKey?: string;
   attempts?: number;
   intervalMs?: number;
+  lookup?: (shape: string) => Promise<DevDiscoveryLookup>;
 } = {}): Promise<SeedUpsertCounts | null> {
   const endpoint = opts.endpoint ?? METABOB_ENDPOINT;
   const apiKey = opts.apiKey ?? METABOB_API_KEY;
+  const where = await catalogueLocality(endpoint, opts.lookup);
+  if (!where.local) {
+    console.log(`[seed-delivery] skipped: remote catalogue ${where.host} (${where.why})`);
+    return null;
+  }
   const attempts = opts.attempts ?? 10;
   const intervalMs = opts.intervalMs ?? 15_000;
   let last = "";

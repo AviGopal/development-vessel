@@ -25,7 +25,7 @@ async function seedTemplates(): Promise<void> {
   // learning loop (variant-first repair, ribosome extraction, Thompson promotion)
   // like any other — not be reset on restart. So if the catalogue already holds
   // templates, leave them be.
-  const { readCatalogueState, upsertVersionBumpedSeeds } = await import("./seed/deliver.js");
+  const { readCatalogueState, upsertVersionBumpedSeeds, catalogueLocality } = await import("./seed/deliver.js");
   const catalogueEmpty = await (async () => {
     const st = await readCatalogueState(METABOB_ENDPOINT, METABOB_API_KEY);
     if (st.state === "populated") {
@@ -44,6 +44,14 @@ async function seedTemplates(): Promise<void> {
     return true;
   })();
   if (!catalogueEmpty) {
+    // Version-bumped delivery into a POPULATED catalogue is local-only (seed/deliver.ts
+    // catalogueLocality): a node reading another node's catalogue must not push its seed bumps
+    // there ahead of that node's rollout. The cold-start bulk seed below is unchanged.
+    const where = await catalogueLocality(METABOB_ENDPOINT);
+    if (!where.local) {
+      console.log(`[seed-delivery] skipped: remote catalogue ${where.host} (${where.why})`);
+      return;
+    }
     await upsertVersionBumpedSeeds(SEED_TEMPLATES, METABOB_ENDPOINT, METABOB_API_KEY);
     return;
   }

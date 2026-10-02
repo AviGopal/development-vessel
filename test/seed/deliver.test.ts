@@ -18,6 +18,7 @@ import {
   deliverSeedsToPopulatedCatalogue,
   scheduleSeedDelivery,
 } from "../../src/seed/deliver.js";
+import type { DevDiscoveryLookup } from "../../src/config.js";
 
 const originalFetch = globalThis.fetch;
 afterEach(() => {
@@ -47,6 +48,12 @@ function mockRegistry(rows: Record<string, unknown>, opts: { total?: number; get
   }) as unknown as typeof fetch;
   return calls;
 }
+
+/** A discovery answer for `activityTemplate`: each producer as [resolve url, origin]. */
+const lookupOf = (...ps: Array<[string, string | undefined]>) =>
+  async (shape: string): Promise<DevDiscoveryLookup> =>
+    ({ ok: true, shape, cached: false, producers: ps.map(([u, origin], i) => ({ id: `activity-api-${i}`, resolveEndpoint: u, origin })) }) as DevDiscoveryLookup;
+const LOCAL_AAPI = lookupOf([`${EP}/v2/impulses/resolve`, "local"]);
 
 const tpl = (id: string, seed_version?: number) => ({
   id,
@@ -101,7 +108,7 @@ describe("deliverSeedsToPopulatedCatalogue", () => {
     // A version-bumped seed landing first would make the catalogue non-empty, and the cold
     // seeder would then skip the whole bootstrap set.
     const calls = mockRegistry({}, { total: 0 });
-    const r = await deliverSeedsToPopulatedCatalogue({ templates: [tpl("dv:new", 1)], endpoint: EP, apiKey: "k" });
+    const r = await deliverSeedsToPopulatedCatalogue({ templates: [tpl("dv:new", 1)], endpoint: EP, apiKey: "k", lookup: LOCAL_AAPI });
     expect(r).toBeNull();
     expect(calls.filter((c) => c.method === "POST")).toHaveLength(0);
   });
@@ -112,6 +119,7 @@ describe("deliverSeedsToPopulatedCatalogue", () => {
       templates: [tpl("dv:new", 1), tpl("dv:same", 1), tpl("dv:unversioned")],
       endpoint: EP,
       apiKey: "k",
+      lookup: LOCAL_AAPI,
     });
     expect(r).toEqual({ upserted: 1, current: 1, skipped: 0 });
   });
@@ -126,11 +134,81 @@ describe("deliverSeedsToPopulatedCatalogue", () => {
       templates: [tpl("dv:new", 1)],
       endpoint: EP,
       apiKey: "k",
+      lookup: LOCAL_AAPI,
       attempts: 3,
       intervalMs: 1,
     });
     expect(r).toBeNull();
     expect(n).toBe(3);
+  });
+});
+
+describe("deliverSeedsToPopulatedCatalogue — LOCAL-ONLY (a node never writes another node's catalogue)", () => {
+  /** Count every fetch and capture console.log, for one delivery call. */
+  async function run(endpoint: string, lookup: (s: string) => Promise<DevDiscoveryLookup>) {
+    const calls = mockRegistry({}, { total: 120 });
+    const lines: string[] = [];
+    const origLog = console.log;
+    console.log = (...a: unknown[]) => { lines.push(a.map(String).join(" ")); };
+    try {
+      const r = await deliverSeedsToPopulatedCatalogue({ templates: [tpl("dv:new", 1)], endpoint, apiKey: "k", lookup, attempts: 1, intervalMs: 1 });
+      return { r, calls, lines };
+    } finally {
+      console.log = origLog;
+    }
+  }
+
+  it("REMOTE: a canary whose endpoint is another node's activity-api makes zero catalogue requests and says so", async () => {
+    // Node 2's view: its own registry serves no activityTemplate; node 1's arrives as a peer row.
+    const { r, calls, lines } = await run(
+      "http://node1.example:18080",
+      lookupOf(["http://node1.example:18080/v2/impulses/resolve", "peer:http://node1.example:18100"]),
+    );
+    expect(r).toBeNull();
+    expect(calls).toHaveLength(0);
+    expect(lines.some((l) => l.startsWith("[seed-delivery] skipped: remote catalogue node1.example:18080"))).toBe(true);
+  });
+
+  it("REMOTE: an endpoint that is not this node's producer is skipped even when this node runs its own activity-api", async () => {
+    const { r, calls, lines } = await run(
+      "http://node1.example:18080",
+      lookupOf(["http://node2.example:18080/v2/impulses/resolve", "local"], ["http://node1.example:18080/v2/impulses/resolve", "peer:http://node1.example:18100"]),
+    );
+    expect(r).toBeNull();
+    expect(calls).toHaveLength(0);
+    expect(lines.some((l) => l.startsWith("[seed-delivery] skipped: remote catalogue node1.example:18080"))).toBe(true);
+  });
+
+  it("LOCAL by loopback: this node serves activityTemplate and the endpoint is 127.0.0.1 — delivers as before", async () => {
+    const { r, calls } = await run(
+      "http://127.0.0.1:8080",
+      lookupOf(["http://node1.example:18080/v2/impulses/resolve", "local"]),
+    );
+    expect(r).toEqual({ upserted: 1, current: 0, skipped: 0 });
+    expect(calls.filter((c) => c.method === "POST").map((c) => c.url)).toEqual(["http://127.0.0.1:8080/v2/activities/templates"]);
+  });
+
+  it("LOCAL by advertised origin: the endpoint equals this node's own producer — delivers", async () => {
+    const { r } = await run("http://node1.example:18080", lookupOf(["http://node1.example:18080/v2/impulses/resolve", "local"]));
+    expect(r?.upserted).toBe(1);
+  });
+
+  it("FAILS CLOSED when discovery cannot be read: no catalogue request, skip line", async () => {
+    const failed = async (shape: string): Promise<DevDiscoveryLookup> =>
+      ({ ok: false, shape, reason: "timeout", detail: "no answer from discovery within 8000 ms", cached: false }) as DevDiscoveryLookup;
+    const { r, calls, lines } = await run("http://127.0.0.1:8080", failed);
+    expect(r).toBeNull();
+    expect(calls).toHaveLength(0);
+    expect(lines.some((l) => l.startsWith("[seed-delivery] skipped: remote catalogue 127.0.0.1:8080"))).toBe(true);
+  });
+
+  it("FAILS CLOSED when the lookup throws, or when no producer carries an origin stamp", async () => {
+    const thrown = await run("http://127.0.0.1:8080", async () => { throw new Error("boom"); });
+    expect(thrown.r).toBeNull();
+    expect(thrown.calls).toHaveLength(0);
+    const unstamped = await run("http://127.0.0.1:8080", lookupOf(["http://127.0.0.1:8080/v2/impulses/resolve", undefined]));
+    expect(unstamped.r).toBeNull();
+    expect(unstamped.calls).toHaveLength(0);
   });
 });
 

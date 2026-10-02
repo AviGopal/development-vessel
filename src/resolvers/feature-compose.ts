@@ -28,7 +28,7 @@ import { acquireComposeWorkspace, type ComposeWorkspace } from "./compose-worksp
 import type { ResolverResult } from "./types.js";
 import { resolveVesselMitosisCutover, runGit, type GitOpResult } from "./vessel-mitosis-cutover.js";
 import { registerAttempt, setAuthoringExecution } from "./attempt-register.js";
-import { resolveSubstrateGap, resolveSubstrateGapWrite } from "./substrate-gap.js";
+import { resolveSubstrateGap, resolveSubstrateGapWrite, inheritableParentCheck } from "./substrate-gap.js";
 import { writeAuthoringMarker, clearAuthoringMarker } from "./patch-with-tools.js";
 import { vacuousEditReason, nonTerminatingEditReason, deadStoreEditReason, truncatingRewriteReason } from "../vacuous-edit.js";
 import { acquireComposeSlot } from "../compose-slots.js";
@@ -3709,7 +3709,9 @@ export async function appendComposeLesson(cls: string, reason: string, vessels: 
             summary: "compose for gap " + String(gap.id) + " repeated already-recorded failure class " + cls + ": " + reason.slice(0, 150),
             detected_at: new Date().toISOString(),
             status: "open",
-            classification_metadata: { re_commit: true, source_gap_id: String(gap.id), failure_class: cls, edit_site: meta.edit_site, suspected_real_location: meta.suspected_real_location, file_path: meta.file_path },
+            // The recommit is the same defect on the same edit site: it carries its source gap's trusted
+            // test_suite check (inheritableParentCheck) and the operator's hand-off, or it is born unclosable.
+            classification_metadata: { re_commit: true, source_gap_id: String(gap.id), failure_class: cls, edit_site: meta.edit_site, suspected_real_location: meta.suspected_real_location, file_path: meta.file_path, ...inheritableParentCheck(meta, meta.edit_site), ...(meta.directed === true ? { directed: true } : {}) },
           },
         } as never);
       }

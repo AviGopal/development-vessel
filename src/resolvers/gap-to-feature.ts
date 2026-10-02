@@ -16,7 +16,7 @@ declare module "./feature-compose.js" {
   }
 }
 
-import { resolveSubstrateGap, resolveSubstrateGapWrite, DECISION_LOG_GAP_CATEGORIES, predicateSuspect, class2PredicateKey, reevaluateBirthVerdicts } from "./substrate-gap.js";
+import { resolveSubstrateGap, resolveSubstrateGapWrite, DECISION_LOG_GAP_CATEGORIES, predicateSuspect, class2PredicateKey, reevaluateBirthVerdicts, inheritableParentCheck } from "./substrate-gap.js";
 import { resolveAuthorProducer } from "./author-producer.js";
 import { resolveDocDriftFix } from "./doc-drift-fix.js";
 import { resolveReachabilityGapRepair } from "./reachability-gap-repair.js";
@@ -836,7 +836,9 @@ export async function decomposeGap(
     if (!("expected_literal" in childPredicate)) { cleared.expected_literal = ""; cleared.literal_reader = ""; }
     if (!("evidence_resolve" in childPredicate)) cleared.evidence_resolve = null;
     if (!("verify_shape" in childPredicate)) cleared.verify_shape = "";
-    const childMeta: Record<string, unknown> = { edit_site: stepSite, parent_gap_id: parentId, predicate_source: "decompose", ...cleared, ...childPredicate };
+    // A step carries its OWN check (the parent's is refused above: one step will not flip it), but the
+    // operator's hand-off is the parent's: a step of a directed gap is directed too, or it is withheld.
+    const childMeta: Record<string, unknown> = { edit_site: stepSite, parent_gap_id: parentId, predicate_source: "decompose", ...(meta.directed === true || opts.directed === true ? { directed: true } : {}), ...cleared, ...childPredicate };
     await resolveSubstrateGapWrite(
       { type: "substrateGap_write", gap: { id: childId, category: "decomposed_step", source: "substrate_detected", summary: `[step ${k} of ${parentId}] ${change}`, detected_at: new Date().toISOString(), status: "open", classification_metadata: childMeta } } as never,
       childVerdict ? { birthVerdict: { predicate_key: class2PredicateKey(childMeta), verdict: childVerdict } } : undefined,
@@ -4440,6 +4442,10 @@ export async function bumpFailedAttempts(gap: Record<string, unknown>, opts: { s
           if (derivedPredicate && (k === "expected_literal" || k === "hardcoded_url")) continue;
           inherited[k] = v;
         }
+        // THE PARENT'S CHECK COMES BACK when the child's scope still covers it (inheritableParentCheck: a
+        // trusted class-2 test_suite check on the same edit site). Stripping it with the closure stamps above
+        // left every narrowed child of a verifiable parent falsifier=none, so none could ever close verified.
+        Object.assign(inherited, inheritableParentCheck(meta, (meta as Record<string, unknown>)["edit_site"]));
         const childMeta = { ...inherited, failed_attempts: 0, parent_gap_id: parentId, narrowed_at: new Date().toISOString() };
         // Without failure lessons the child's summary would be the parent's verbatim
         // (measured: 222 `-narrowed` rows, many byte-identical to their parent) — a

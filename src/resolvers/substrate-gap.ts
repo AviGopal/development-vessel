@@ -767,6 +767,43 @@ export function predicateSuspect(meta: Record<string, unknown> | null | undefine
   return "its check could not be evaluated at birth (unresolvable or timed out)";
 }
 
+/**
+ * THE PARENT'S CHECK, FOR A CHILD WHOSE SCOPE STILL COVERS IT (narrowed and recommit children).
+ * Measured 10-02: every `-narrowed` and `recommit-` child written 12:00-13:45Z was born falsifier=none
+ * (the narrowed emitter strips evidence_resolve, the recommit emitter never copied it), so a child of a
+ * verifiable parent could never close landed_verified, and ~10 such rows a day were dead on arrival.
+ *
+ * Returns the fields to give the child, or {} when there is nothing honest to inherit:
+ *   - the parent's check must be class-2 and trusted (predicateSuspect null): a check that never read
+ *     'present' is not propagated, and a falsifier-less parent's children stay none;
+ *   - only a `test_suite` check: feature-compose holds a gap's own test_suite check to the CHECK CONTRACT
+ *     (checkContractBreach + ownParentRun): RED on the child's own base tree, GREEN on its draft, with no
+ *     fewer assertions, and no-effect-vs-parent refuses a draft that leaves the failures unchanged. That is
+ *     what stops a child closing on its parent's test without doing the work. A shape check has no such
+ *     at-commit contract, so it is not inherited here;
+ *   - the child's edit site is the parent's, and the check's vessel is that site's vessel.
+ * The birth verdict is NOT copied: the seam judges the child's check afresh on today's tree, so a check the
+ * parent's own landing already satisfied is born 'absent' (predicate_suspect: not admissible, not closable).
+ * A child closes only on a landing stamped for its OWN id, never on its parent's.
+ */
+export function inheritableParentCheck(parentMeta: Record<string, unknown> | null | undefined, childEditSite: unknown): Record<string, unknown> {
+  const m = (parentMeta ?? {}) as Record<string, unknown>;
+  const f = m["falsifier"] as unknown;
+  const cls = String((f && typeof f === "object" ? (f as { class?: unknown }).class : f) ?? "").toLowerCase();
+  if (cls !== "class2" || m["predicate_birth_verdict"] !== "present" || predicateSuspect(m) !== null) return {};
+  const er = m["evidence_resolve"] as { shape?: unknown; input?: unknown; zero_field?: unknown } | null | undefined;
+  if (!er || typeof er !== "object" || er.shape !== "test_suite" || er.zero_field !== "requested_not_passing") return {};
+  const input = (er.input && typeof er.input === "object" ? er.input : {}) as Record<string, unknown>;
+  const onlyTests = Array.isArray(input["only_tests"]) ? (input["only_tests"] as unknown[]).filter((t) => typeof t === "string" && t.trim() !== "") : [];
+  if (onlyTests.length === 0 || typeof input["test_file"] !== "string") return {};
+  const site = (v: unknown): string => String(v ?? "").trim().replace(/:\d+.*$/, "");
+  const parentSite = site(m["edit_site"]);
+  if (!parentSite || site(childEditSite) !== parentSite) return {};
+  const siteVessel = /^repos\/([^/]+)\//.exec(parentSite)?.[1] ?? "";
+  if (!siteVessel || String(input["vessel"] ?? "").replace(/^repos\//, "") !== siteVessel) return {};
+  return { evidence_resolve: JSON.parse(JSON.stringify(er)) as Record<string, unknown>, predicate_source: "gap_falsify:inherit" };
+}
+
 let __birthJudgeOverride: BirthJudge | null = null;
 /** Tests only: replace the default judge (gap-to-feature evaluateGapCheck). null restores it. */
 export function __setBirthJudgeForTests(j: BirthJudge | null): void { __birthJudgeOverride = j; }

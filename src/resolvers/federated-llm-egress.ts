@@ -34,6 +34,25 @@
  * hub renames or re-homes an arm, discovery carries the change.
  */
 
+/**
+ * THE CALLER'S CREDENTIAL RIDES THE LOCAL TRANSPORT HOP AS A HEADER, NEVER IN THE BODY.
+ *
+ * The federation ingress admits a caller only by its own credential (llm_completion is
+ * trust_group in federationShapePolicy) and never lends the node's key, so a resolve that
+ * crosses with none is refused. The local transport takes the Authorization header of the
+ * request it is handed and moves it into the wire pointer itself; the far ingress strips it
+ * before any log or trace. The body this vessel builds is what gets traced, so the key goes on
+ * the header of the transport hop and nowhere else. A URL that is not the local transport —
+ * the egress route or its /v2/impulses/resolve mirror surface — gets no key from here.
+ */
+export function transportHopHeaders(url: string, fedTransportEgress: string, apiKey: string): Record<string, string> {
+  const originOf = (u: string): string => {
+    try { return new URL(u).origin; } catch { return ""; }
+  };
+  const hop = originOf(url) !== "" && originOf(url) === originOf(fedTransportEgress);
+  return { "Content-Type": "application/json", ...(hop && apiKey ? { Authorization: `ApiKey ${apiKey}` } : {}) };
+}
+
 interface DiscoveredVessel {
   vesselId?: string;
   endpoint?: string;

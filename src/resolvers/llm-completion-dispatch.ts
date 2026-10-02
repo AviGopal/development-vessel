@@ -1,5 +1,5 @@
 import { DISCOVERY_ENDPOINT, METABOB_API_KEY } from "../config.js";
-import { federatedLlmEgressUrls } from "./federated-llm-egress.js";
+import { federatedLlmEgressUrls, transportHopHeaders } from "./federated-llm-egress.js";
 
 // Optional override: set LLM_COMPLETION_ENDPOINT to bypass discovery (e.g. for local dev with port-forward).
 const LLM_COMPLETION_ENDPOINT_OVERRIDE = process.env["LLM_COMPLETION_ENDPOINT"] ?? "";
@@ -310,7 +310,9 @@ export async function resolveLlmCompletionDispatch(
     try {
       res = await fetch(endpoint, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        // An endpoint may be the local federation transport (a hub arm mirrored into local
+        // discovery): it then carries this vessel's key as a header, never in requestBody.
+        headers: transportHopHeaders(endpoint, FED_TRANSPORT_EGRESS, METABOB_API_KEY),
         body: JSON.stringify(requestBody),
       });
     } catch (err) {
@@ -405,7 +407,7 @@ export async function resolveLlmCompletionDispatch(
         try {
           res = await fetch(endpoint, {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
+            headers: transportHopHeaders(endpoint, FED_TRANSPORT_EGRESS, METABOB_API_KEY),
             body: JSON.stringify(requestBody),
           });
         } catch (err) {

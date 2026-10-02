@@ -299,6 +299,66 @@ export async function recordLineageSpend(gapId: string, composeBody: unknown, dr
 }
 
 /**
+ * ONE LIVE GAP PER (LINEAGE, CHECK). A narrowed or recommit child born with its parent's check
+ * (inheritableParentCheck) is the same predicate as the parent and its siblings: picking all of them
+ * splits attempts and spend three ways on one check. While such a child is open and able to work, it
+ * HOLDS the predicate, and every other open gap of its lineage with a byte-identical evidence_resolve
+ * is not auto-pickable. Returns held id -> holder id.
+ *
+ * A holder must be workable, or the hold would park the whole lineage: its own check trusted
+ * (predicateSuspect null), no operator hold, no parking disposition, not an identical-repeated-failure
+ * loss. Among several, the narrowed child (it carries the failure lessons) is preferred, then the one
+ * with fewer failed attempts, then the id, so the choice is stable across passes.
+ */
+export function inheritedPredicateHolds(gaps: Record<string, unknown>[]): Map<string, string> {
+  const byId = new Map<string, Record<string, unknown>>();
+  for (const g of gaps) { const id = String(g.id ?? ""); if (id) byId.set(id, g); }
+  const metaOf = (g: Record<string, unknown>): Record<string, unknown> => (g.classification_metadata ?? g.metadata ?? {}) as Record<string, unknown>;
+  const rootOf = (g: Record<string, unknown>): string => {
+    let cur = g;
+    const seen = new Set<string>();
+    for (let i = 0; i < 10; i++) {
+      const id = String(cur.id ?? "");
+      if (seen.has(id)) break;
+      seen.add(id);
+      const m = metaOf(cur);
+      const up = String(m.parent_gap_id ?? m.source_gap_id ?? "");
+      if (!up) return id;
+      const next = byId.get(up);
+      if (!next) return up; // a closed or unread ancestor still names the lineage
+      cur = next;
+    }
+    return String(cur.id ?? "");
+  };
+  const checkKey = (m: Record<string, unknown>): string | null => {
+    const er = m.evidence_resolve;
+    return er && typeof er === "object" && typeof (er as { shape?: unknown }).shape === "string" ? class2PredicateKey({ evidence_resolve: er }) : null;
+  };
+  const groups = new Map<string, { members: string[]; holders: Record<string, unknown>[] }>();
+  for (const g of gaps) {
+    const id = String(g.id ?? "");
+    const m = metaOf(g);
+    const key = checkKey(m);
+    if (!id || !key) continue;
+    const gk = rootOf(g) + "\u0000" + key;
+    const grp = groups.get(gk) ?? { members: [], holders: [] };
+    grp.members.push(id);
+    const isInheritedChild = m.predicate_source === "gap_falsify:inherit" && !!(m.parent_gap_id ?? m.source_gap_id);
+    if (isInheritedChild && predicateSuspect(m) === null && m.operator_hold !== true && !isParkingDisposition(m.disposition) && !identicalRepeatedFailure(m.failure_lessons)) grp.holders.push(g);
+    groups.set(gk, grp);
+  }
+  const held = new Map<string, string>();
+  for (const { members, holders } of groups.values()) {
+    if (holders.length === 0 || members.length < 2) continue;
+    const rank = (g: Record<string, unknown>): [number, number, string] => [String(g.id ?? "").endsWith("-narrowed") ? 0 : 1, Number(metaOf(g).failed_attempts ?? 0) || 0, String(g.id ?? "")];
+    holders.sort((a, b) => { const x = rank(a), y = rank(b); return x[0] - y[0] || x[1] - y[1] || x[2].localeCompare(y[2]); });
+    const holder = String(holders[0]!.id ?? "");
+    for (const id of members) if (id !== holder) held.set(id, holder);
+  }
+  return held;
+}
+
+/**
  * Is this gap still serving its backoff?
  *
  * Reads DURABLE metadata that `bumpFailedAttempts` writes, not the in-process
@@ -5596,7 +5656,12 @@ export async function resolveGapToFeature(pointer: GapToFeaturePointer): Promise
     // chains without re-scanning per gap.
     const gapsById = new Map<string, Record<string, unknown>>();
     for (const g of gaps) { const id = String(g.id ?? ""); if (id) gapsById.set(id, g); }
+    // One live gap per (lineage, check): read over the whole open set, so a holder cooling down still holds.
+    const predicateHolds = pointer.gap_id ? new Map<string, string>() : inheritedPredicateHolds(gaps);
+    const heldLines: string[] = [];
     const eligible = gaps.filter((g) => {
+      const holder = predicateHolds.get(String(g.id ?? ""));
+      if (holder) { heldLines.push(`${String(g.id)}: predicate held by ${holder}`); return false; }
       if (nowMs - (gapComposeLastAttemptAt.get(String(g.id ?? "")) ?? 0) < GAP_COMPOSE_COOLDOWN_MS) return false;
       const siteKey = String(((g.classification_metadata ?? g.metadata ?? {}) as Record<string, unknown>).edit_site ?? "");
       if (siteKey && String(g.source ?? "") !== "human_reported" && nowMs - (siteComposeLastAttemptAt.get(siteKey) ?? 0) < SITE_COMPOSE_COOLDOWN_MS) return false;
@@ -5620,6 +5685,7 @@ export async function resolveGapToFeature(pointer: GapToFeaturePointer): Promise
     // Emit the exclusion COUNT, not just its effect. A brake whose only evidence is
     // "fewer picks happened" is indistinguishable from a lane that has gone quiet for
     // some other reason — which is the confusion this codebase keeps paying for.
+    if (heldLines.length > 0) console.log(`[gap-to-feature] predicate hold excluded ${heldLines.length} gap(s): ${heldLines.slice(0, 5).join("; ")}`);
     if (lineageCapped > 0) {
       console.log(`[gap-to-feature] lineage cap excluded ${lineageCapped} recommit gap(s) (lineage failed_attempts >= ${RECOMMIT_LINEAGE_ATTEMPT_CAP})`);
     }

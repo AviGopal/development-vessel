@@ -24,6 +24,7 @@
  * (incl. the trace store) and is therefore operator-gated.
  */
 import { METABOB_API_KEY, env } from "../config.js";
+import { withWriteGrant } from "./write-containment.js";
 import { resolveSubstrateGap } from "./substrate-gap.js";
 import { resolveFeatureCompose } from "./feature-compose.js";
 import { resolvePerformanceReachGate } from "./performance-reach-gate.js";
@@ -72,7 +73,8 @@ async function callTool(endpoint: string, tool: string, args: Json): Promise<{ o
     const res = await fetch(endpoint, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `ApiKey ${METABOB_API_KEY}` },
-      body: JSON.stringify({ type: tool, ...args }),
+      // Restoring a snapshot into the runtime is a lane write: carry the write grant.
+      body: JSON.stringify({ type: tool, ...withWriteGrant(tool, args as Record<string, unknown>, METABOB_API_KEY) }),
       signal: AbortSignal.timeout(60_000),
     });
     const body = (await res.json().catch(() => ({}))) as Json;

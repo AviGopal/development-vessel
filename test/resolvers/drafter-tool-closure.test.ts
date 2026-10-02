@@ -44,6 +44,8 @@ describe("the drafter's tool set is closed to the catalog it is shown", () => {
 
   test("callTool builds its pointer through drafterToolPointer", () => {
     expect(SRC).not.toMatch(/\{\s*type:\s*tool\s*,\s*\.\.\.args\s*\}/);
-    expect(SRC).toContain("pointer: drafterToolPointer(tool, args)");
+    // The pointer is still built by drafterToolPointer; the lane's write grant is added
+    // around it (and any drafter-supplied grant stripped) — see write-containment.ts.
+    expect(SRC).toContain("pointer: withWriteGrant(tool, withoutGrant(drafterToolPointer(tool, args)), METABOB_API_KEY)");
   });
 });

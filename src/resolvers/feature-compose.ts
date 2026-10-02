@@ -21,6 +21,7 @@
  * — this resolver stages + reports, matching the mitosis-evaluate/cutover split.
  */
 import { METABOB_API_KEY, DISCOVERY_SHAPES } from "../config.js";
+import { withWriteGrant } from "./write-containment.js";
 import { federatedLlmEgressUrls } from "./federated-llm-egress.js";
 import { acquireComposeWorkspace, type ComposeWorkspace } from "./compose-workspace";
 import type { ResolverResult } from "./types.js";
@@ -565,7 +566,9 @@ async function callTool(endpoint: string, tool: string, args: Json): Promise<{ o
     const res = await fetch(endpoint, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `ApiKey ${METABOB_API_KEY}` },
-      body: JSON.stringify({ impulse: { pointer: { type: tool, ...(tool === "shell" ? { timeout_sec: 300 } : {}), ...args } } }),
+      // A write tool carries the lane's write grant for exactly this path (write-containment.ts):
+      // without it local-tools refuses vessel runtime / clone / compose-worktree writes.
+      body: JSON.stringify({ impulse: { pointer: { type: tool, ...(tool === "shell" ? { timeout_sec: 300 } : {}), ...withWriteGrant(tool, args as Record<string, unknown>, METABOB_API_KEY) } } }),
       signal: AbortSignal.timeout(PER_CALL_TIMEOUT_MS),
     });
     const body = (await res.json().catch(() => ({}))) as Json;

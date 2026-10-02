@@ -29,6 +29,7 @@ import { federatedLlmEgressUrls } from "./federated-llm-egress.js";
 import { mkdir, writeFile, readFile, copyFile, unlink, rename } from "node:fs/promises";
 import { dirname, join, resolve, relative, isAbsolute } from "node:path";
 import { METABOB_ENDPOINT, METABOB_API_KEY, env } from "../config.js";
+import { withWriteGrant, WRITE_GRANT_FIELD } from "./write-containment.js";
 import type { ResolverResult } from "./types.js";
 import { vacuousEditReason } from "../vacuous-edit.js";
 import { resolveVesselMitosisCutover } from "./vessel-mitosis-cutover.js";
@@ -429,12 +430,20 @@ export function drafterToolPointer(tool: string, args: Record<string, unknown>):
   return { ...rest, type: tool };
 }
 
+function withoutGrant(p: Record<string, unknown>): Record<string, unknown> {
+  const { [WRITE_GRANT_FIELD]: _drafterGrant, ...rest } = p;
+  return rest;
+}
+
 async function callTool(localToolsEndpoint: string, tool: string, args: Record<string, unknown>): Promise<{ ok: boolean; body: unknown }> {
   try {
     const res = await fetch(localToolsEndpoint, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `ApiKey ${METABOB_API_KEY}` },
-      body: JSON.stringify({ impulse: { pointer: drafterToolPointer(tool, args) } }),
+      // The lane's write grant is added HERE, after the run-root containment check and
+      // outside `args`, so the drafter never sees one and a drafter-supplied grant is
+      // overwritten (write tools) or dropped (any other tool). See write-containment.ts.
+      body: JSON.stringify({ impulse: { pointer: withWriteGrant(tool, withoutGrant(drafterToolPointer(tool, args)), METABOB_API_KEY) } }),
       signal: AbortSignal.timeout(PER_CALL_TIMEOUT_MS),
     });
     if (!res.ok) return { ok: false, body: { error: `HTTP ${res.status}` } };

@@ -3,12 +3,14 @@ import { resolve, relative, dirname } from "path";
 import { mkdir } from "fs/promises";
 import type { ResolverResult } from "./types.js";
 import { resolveInAnyWorkspace } from "./workspace-roots.js";
+import { assertWriteContained } from "./fs-write-containment.js";
 
 export interface FsWritePointer {
   type: "fs_write";
   path: string;
   content: string;
   createDirs?: boolean;
+  write_grant?: unknown;
 }
 
 /**
@@ -50,6 +52,7 @@ export async function resolveFsWrite(pointer: FsWritePointer): Promise<ResolverR
   const workspaceRoot = process.env["WORKSPACE_ROOT"] ?? process.cwd();
   // Validate AND resolve once; every path use below is the absolute form.
   const absPath = resolveInAnyWorkspace(pointer.path, workspaceRoot);
+  assertWriteContained(absPath, pointer.path, pointer.write_grant);
   if (process.env["WRITE_ALLOWLIST"] !== undefined) {
     assertInAllowlist(absPath, workspaceRoot);
   }

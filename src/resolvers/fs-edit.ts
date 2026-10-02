@@ -1,12 +1,14 @@
 import { resolve, relative } from "path";
 import type { ResolverResult } from "./types.js";
 import { resolveInAnyWorkspace } from "./workspace-roots.js";
+import { assertWriteContained } from "./fs-write-containment.js";
 
 export interface FsEditPointer {
   type: "fs_edit";
   path: string;
   oldString: string;
   newString: string;
+  write_grant?: unknown;
 }
 
 export async function resolveFsEdit(pointer: FsEditPointer): Promise<ResolverResult> {
@@ -16,6 +18,7 @@ export async function resolveFsEdit(pointer: FsEditPointer): Promise<ResolverRes
   // Validate AND resolve. A relative path must be read/written under the
   // workspace root, not under this process's cwd — see workspace-roots.ts.
   const absPath = resolveInAnyWorkspace(pointer.path, workspaceRoot);
+  assertWriteContained(absPath, pointer.path, pointer.write_grant);
 
   if (pointer.oldString === pointer.newString) {
     throw new Error("oldString and newString are identical — no edit needed");

@@ -3171,7 +3171,7 @@ export async function closeLandedGap(gap: Record<string, unknown>, land: LandSig
       falsifier_exercise: { detector: "closeLandedGap", verdict: literalOnlyClose ? "literal_present" : verifyResult, passed: !literalOnlyClose && verifyResult === "absent", ran_at: new Date().toISOString(), commit: land.commit_sha ?? null } };
     const meta = closedMeta;
     joinDecisionOutcome(meta, { landed: true, verdict: "FAVORABLE", commit: land.commit_sha ?? null });
-    await resolveSubstrateGapWrite({
+    const landedCloseWrite = await resolveSubstrateGapWrite({
       type: "substrateGap_write",
       gap: {
         id,
@@ -3183,6 +3183,7 @@ export async function closeLandedGap(gap: Record<string, unknown>, land: LandSig
         status: "closed",
       },
     } as never);
+    if (landedCloseWrite?.shape !== "structuredError") await closeAncestorsOnSamePredicate(id, meta);
     // Calibration land credit is taken by the gap-store holder from the close written above.
     updateClassPosterior(gapClassOf(gap), true);
     // CLOSURE-CREDIT: reward the filing detector for gap closure (not just filing).
@@ -3856,6 +3857,72 @@ async function recordOperatorRegression(g: Record<string, unknown>): Promise<boo
   return true;
 }
 
+/**
+ * A CHILD'S VERIFIED CLOSE IS ITS ANCESTORS' MEASUREMENT when they hold the same predicate (qa F2, 10-02).
+ * A narrowed or recommit child carries its parent's check byte-identically (inheritableParentCheck), and while
+ * it is open the parent is held from auto-pick (inheritedPredicateHolds). When the child closes landed_verified
+ * on its own exercised check (passed, verdict absent), that very check now reads absent for the parent too:
+ * the ancestor is closed on that measurement, with the child's falsifier_exercise (verdict, commit) carried
+ * and a resolution naming the child. Not a stamp by id: an ancestor whose evidence_resolve differs in any
+ * byte is never closed, and the walk stops there. Operator-held ancestors are left alone. Ancestors are
+ * closed as `closed_via_child`, not landed_verified, so no landing is credited twice.
+ * Each close is conditional (expect_status "open", checked under the store lock): an ancestor closed or
+ * otherwise changed state since it was read is not overwritten, and the walk stops there, since whatever
+ * settled that ancestor also owns what lies above it.
+ */
+let __ancestorCloseRaceHook: ((ancestorId: string) => Promise<void>) | null = null;
+/** Tests only: runs between an ancestor's read and its close write, to stage a concurrent writer. */
+export function __setAncestorCloseRaceHookForTests(h: ((ancestorId: string) => Promise<void>) | null): void { __ancestorCloseRaceHook = h; }
+export async function closeAncestorsOnSamePredicate(childId: string, childClosedMeta: Record<string, unknown>): Promise<string[]> {
+  const closed: string[] = [];
+  try {
+    const ex = childClosedMeta.falsifier_exercise as { passed?: unknown; verdict?: unknown } | undefined;
+    if (childClosedMeta.closed_reason !== "landed_verified" || !ex || ex.passed !== true || ex.verdict !== "absent") return closed;
+    const er = childClosedMeta.evidence_resolve;
+    if (!er || typeof er !== "object" || typeof (er as { shape?: unknown }).shape !== "string") return closed;
+    const key = class2PredicateKey({ evidence_resolve: er });
+    let up = String(childClosedMeta.parent_gap_id ?? childClosedMeta.source_gap_id ?? "");
+    const seen = new Set<string>([childId]);
+    for (let depth = 0; up && !seen.has(up) && depth < 8; depth++) {
+      seen.add(up);
+      const read = await resolveSubstrateGap({ type: "substrateGap", id: up, limit: 1 } as never);
+      const row = (((read?.body as { gaps?: Record<string, unknown>[] } | undefined)?.gaps) ?? [])[0];
+      if (!row || String(row.id ?? "") !== up) break;
+      const am = (row.classification_metadata ?? row.metadata ?? {}) as Record<string, unknown>;
+      const aer = am.evidence_resolve;
+      if (!aer || typeof aer !== "object" || class2PredicateKey({ evidence_resolve: aer }) !== key) break;
+      if (String(row.status ?? "") === "open" && am.operator_hold !== true) {
+        const resolution = `closed via child ${childId}: same predicate exercised`;
+        if (__ancestorCloseRaceHook) await __ancestorCloseRaceHook(up);
+        const w = await resolveSubstrateGapWrite({
+          type: "substrateGap_write",
+          expect_status: "open",
+          gap: {
+            id: up,
+            category: row.category,
+            source: row.source,
+            summary: row.summary,
+            detected_at: row.detected_at,
+            classification_metadata: { ...am, closed_reason: "closed_via_child", close_basis: "absent", closed_via_child: childId, resolution, falsifier_exercise: { ...(ex as Record<string, unknown>), via_child: childId }, closed_at: new Date().toISOString() },
+            status: "closed",
+          },
+        } as never);
+        const wb = (w?.body ?? {}) as { action?: unknown; skip_reason?: unknown; stored_status?: unknown };
+        if (w?.shape === "structuredError" || wb.action === "skipped") {
+          console.log(`[gap-sweep] ${up}: not closed via child ${childId} (${w?.shape === "structuredError" ? "write refused" : `${String(wb.skip_reason)}, stored ${String(wb.stored_status)}`}); lineage walk stops`);
+          break;
+        }
+        closed.push(up);
+        console.log(`[gap-sweep] ${up}: ${resolution}`);
+      }
+      up = String(am.parent_gap_id ?? am.source_gap_id ?? "");
+    }
+  } catch (err) {
+    console.warn(`[gap-sweep] closing ancestors of ${childId} on its predicate failed: ${String(err).slice(0, 200)}`);
+  }
+  return closed;
+}
+
 export async function sweepPendingLandVerifications(): Promise<{ checked: number; closed: number }> {
   if (sweepInFlight) return sweepInFlight;
   sweepInFlight = sweepPendingLandVerificationsOnce().finally(() => { sweepInFlight = null; });
@@ -4035,7 +4102,17 @@ const pending = gaps
       // never accrues a fake success from a commit count — it earns trust only via human confirmation
       // (solicitation-outcome-scan) and loses it on re-lands. That asymmetry is deliberate.
       recordCloseVerdict("measured", false);
-      await resolveSubstrateGapWrite({
+      const sweepClosedMeta: Record<string, unknown> = {
+        ...meta,
+        closed_reason: isLiteralOnlyStepClose(meta) ? "landed_literal_only" : "landed_verified",
+        close_basis: verdict,
+        falsifier_exercise: isLiteralOnlyStepClose(meta)
+          ? { detector: "gap-sweep", verdict: "literal_present", passed: false, ran_at: new Date().toISOString(), commit: sha }
+          : { detector: "gap-sweep", verdict, passed: verdict === "absent", ran_at: new Date().toISOString(), commit: sha },
+        resolution: `landed via mitosis cutover ${sha} (${verdict === 'absent' ? 'measured condition check' : 'earned close-oracle trust'})`,
+        closed_at: new Date().toISOString(),
+      };
+      const sweepCloseWrite = await resolveSubstrateGapWrite({
         type: "substrateGap_write",
         gap: {
           id: String(g.id),
@@ -4043,19 +4120,11 @@ const pending = gaps
           source: g.source,
           summary: g.summary,
           detected_at: g.detected_at,
-          classification_metadata: {
-            ...meta,
-            closed_reason: isLiteralOnlyStepClose(meta) ? "landed_literal_only" : "landed_verified",
-            close_basis: verdict,
-            falsifier_exercise: isLiteralOnlyStepClose(meta)
-              ? { detector: "gap-sweep", verdict: "literal_present", passed: false, ran_at: new Date().toISOString(), commit: sha }
-              : { detector: "gap-sweep", verdict, passed: verdict === "absent", ran_at: new Date().toISOString(), commit: sha },
-            resolution: `landed via mitosis cutover ${sha} (${verdict === 'absent' ? 'measured condition check' : 'earned close-oracle trust'})`,
-            closed_at: new Date().toISOString(),
-          },
+          classification_metadata: sweepClosedMeta,
           status: "closed",
         },
       } as never);
+      if (sweepCloseWrite?.shape !== "structuredError") await closeAncestorsOnSamePredicate(String(g.id), sweepClosedMeta);
       // Calibration land credit is taken by the gap-store holder from the close written above.
       updateClassPosterior(gapClassOf(g), true);
       out.closed += 1;

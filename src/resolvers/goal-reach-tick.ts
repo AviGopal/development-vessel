@@ -8,7 +8,7 @@
  *
  * STATE. One `goalReach` pool impulse per goal_hash (law 1: a shaped record, read at use time).
  *
- * SHAPE OF THE CODE. Pure functions (observe, linkGaps, nextAction, operatorHands, onReached,
+ * SHAPE OF THE CODE. Pure functions (observe, linkGaps, nextAction, attributeReach, extractionStep,
  * summarize) plus a tick (runGoalReachTick) that drives them through an injected GoalReachIO, so the
  * logic is testable with no node. The default I/O (defaultGoalReachIO) is the only part that talks to
  * the fleet, always by shape through discovery (own-substrate producers), never a pinned port.
@@ -16,6 +16,11 @@
  * WHAT R DOES NOT DO (yet). R2, the per-goal diagnoser that FILES a prerequisite and attaches the
  * goal to it, is not here: a failure with no linked gap is counted (`open_unlinked`) and left alone.
  * A blind retry with nothing fixed is not a cycle.
+ *
+ * R7 IS A MEASUREMENT, not a dispatch: on a reach without hands, R reads the template store for a
+ * template whose provenance (`extracted_from` / `metadata.sourceExecutionId`) is the reaching execution,
+ * records found/absent/unknown, and on absent appends evidence to the ribosome gap. goal-host's own
+ * mintReachedTrace is the extraction path; R only checks that it produced something.
  *
  * THE OBSERVABLE MARK of an R re-dispatch on live traffic: goal-host stamps `trigger: "goal_reach"` on
  * the dispatch record (activeDispatches / goalWalkState / GET /executions/:id), derived from the
@@ -115,11 +120,21 @@ export interface ChainEntry {
 
 export type ReachStatus = "open" | "waiting" | "redispatching" | "reached" | "stopped";
 export type HandsVerdict = "true" | "possible" | "false";
+/**
+ * Who a reach is credited to. `hands`: an operator or surface human touched the chain. `possible`: an
+ * unattributable (unknown-route) landing touched it. `autonomous_other`: no hands, but a non-R autonomous
+ * dispatcher (boredom, rhythm, ...) reached it: reached-without-hands for the user's metric, NOT credited
+ * to R. `r`: R's own re-dispatch reached it with no hands anywhere.
+ */
+export type ReachAttribution = "hands" | "possible" | "autonomous_other" | "r";
+export type ExtractionStatus = "not_attempted" | "pending" | "found" | "absent" | "unknown";
 
 export interface GoalReachRecord {
   goal: string;
   goal_hash: string;
   origin: GoalReachOrigin;
+  /** The operator id the goal's first observed dispatch carried (who an ask goes to), or null. */
+  origin_operator: string | null;
   /** The dispatch chain for this goal_hash, oldest first. */
   dispatches: ChainEntry[];
   /** Dispatch ids this tick issued (re-dispatches). */
@@ -135,10 +150,12 @@ export interface GoalReachRecord {
   status: ReachStatus;
   stop_reason?: string;
   limit_proposal_filed?: boolean;
+  attribution: ReachAttribution;
+  attribution_reasons: string[];
+  /** Set once attribution was taken at reach time; later evidence does not re-grade a reach. */
+  attribution_final: boolean;
+  /** Derived from attribution for the design's field: hands→"true", possible→"possible", else "false". */
   operator_hands: HandsVerdict;
-  operator_hands_reasons: string[];
-  /** Set once the hands verdict was taken at reach time; later evidence does not re-grade a reach. */
-  hands_final: boolean;
   reached_nodes: string[];
   reached_dispatch_id?: string;
   reached_execution_id?: string;
@@ -149,7 +166,8 @@ export interface GoalReachRecord {
   break_signatures: string[];
   landed_write_shapes: string[];
   extracted_template_id?: string;
-  extraction: { status: "handed_off" | "failed" | "not_attempted"; reason?: string; dispatch_id?: string };
+  extraction: { status: ExtractionStatus; reason?: string; checked_at?: number };
+  extraction_evidence_filed?: boolean;
   last_action?: { kind: string; reason?: string; at: number };
   created_at: number;
   updated_at: number;
@@ -181,8 +199,8 @@ export interface GoalReachPolicy {
   pending_timeout_ms: number;
   /** goalWalkState detail reads per tick (bounds the tick's fan-out). */
   max_detail_reads: number;
-  /** R7: hand a hands-free reach to the ribosome's extraction (see handOffExtraction). */
-  extract_on_hands_free_reach: boolean;
+  /** R7: how long after a reach the template store may still produce its extracted template. */
+  extraction_window_ms: number;
 }
 /** Interim defaults until slice L; overridden by the newest open `goalReachPolicy` pool record (law 1). */
 export const DEFAULT_GOAL_REACH_POLICY: GoalReachPolicy = {
@@ -190,7 +208,7 @@ export const DEFAULT_GOAL_REACH_POLICY: GoalReachPolicy = {
   max_cost_usd: 5,
   pending_timeout_ms: 30 * 60_000,
   max_detail_reads: 20,
-  extract_on_hands_free_reach: true,
+  extraction_window_ms: 30 * 60_000,
 };
 
 export type GoalReachAction =
@@ -198,7 +216,7 @@ export type GoalReachAction =
   | { kind: "wait"; waiting_on: string[] }
   | { kind: "redispatch"; goal: string; goal_hash: string }
   | { kind: "stop"; reason: string; limit_proposal?: { goal_hash: string; paths: string[]; gap_ids: string[] } }
-  | { kind: "ask_human"; reason: string; write_shapes: string[] };
+  | { kind: "ask_human"; reason: string; write_shapes: string[]; addressee: string };
 
 // ── classification helpers ────────────────────────────────────────────────────────────────────────
 
@@ -253,9 +271,9 @@ const isTerminal = (status: string): boolean => status !== "running" && status !
 
 function emptyRecord(goal: string, hash: string, origin: GoalReachOrigin, now: number): GoalReachRecord {
   return {
-    goal, goal_hash: hash, origin, dispatches: [], r_issued: [], last_redispatch_at: null,
+    goal, goal_hash: hash, origin, origin_operator: null, dispatches: [], r_issued: [], last_redispatch_at: null,
     linked: [], linked_ever: [], waiting_on: [], cycles: 0, cost_usd: 0, cost_known: true,
-    status: "open", operator_hands: "false", operator_hands_reasons: [], hands_final: false,
+    status: "open", attribution: "r", attribution_reasons: [], attribution_final: false, operator_hands: "false",
     reached_nodes: [], first_failure_at: null, break_signatures: [], landed_write_shapes: [],
     extraction: { status: "not_attempted" }, created_at: now, updated_at: now,
   };
@@ -319,6 +337,7 @@ export function observe(records: Record<string, GoalReachRecord>, dispatches: Di
     if (!rec) {
       if (!(isTerminal(d.status) && d.reached !== true)) continue;
       rec = out[h] = emptyRecord(String(d.goal), h, originOf(d), now);
+      rec.origin_operator = d.operator ?? null;
     }
     if (d.goal_full && typeof d.goal === "string" && d.goal.length > rec.goal.length) rec.goal = d.goal;
     const entry = toChainEntry(d);
@@ -337,7 +356,7 @@ export function observe(records: Record<string, GoalReachRecord>, dispatches: Di
       };
     } else {
       rec.dispatches.push(entry);
-      if (rec.dispatches.length === 1) rec.origin = originOf(d);
+      if (rec.dispatches.length === 1) { rec.origin = originOf(d); rec.origin_operator = d.operator ?? null; }
     }
     touched.add(h);
   }
@@ -378,6 +397,17 @@ function futileSignature(rec: GoalReachRecord): string | null {
   return null;
 }
 
+/**
+ * Writes whose resolver UPSERTS by a caller-supplied id, so replaying them rewrites one row instead of
+ * adding an effect: memoryNote_write (upsert by id), poolImpulse_write (pool-impulse.ts, upsert by id),
+ * substrateGap_write (the id is the idempotency key). Re-running a goal that landed only these needs no ask.
+ */
+export const IDEMPOTENT_BY_KEY_WRITE_SHAPES: ReadonlySet<string> = new Set(["memoryNote_write", "poolImpulse_write", "substrateGap_write"]);
+/** Who an ask goes to: the goal's ORIGIN. An operator-session goal asks that operator id; a surface goal its human. */
+export function askAddressee(rec: Pick<GoalReachRecord, "origin" | "origin_operator">): string {
+  return `${rec.origin}:${rec.origin_operator ?? (rec.origin === "surface" ? "note" : "unknown")}`;
+}
+
 const gapClosedAt = (g: GapView): number => (typeof g.closed_at === "string" ? Date.parse(g.closed_at) : NaN);
 
 export function nextAction(
@@ -412,13 +442,14 @@ export function nextAction(
   const lastAttempt = latest ? latest.startedAt : 0;
   if (!linked.some((g) => gapClosedAt(g) > lastAttempt)) return { kind: "none", reason: "no_new_closure" };
 
-  if (rec.origin !== "autonomous" && rec.landed_write_shapes.length > 0) {
-    return { kind: "ask_human", reason: `${rec.origin} goal landed writes on an earlier attempt`, write_shapes: rec.landed_write_shapes };
+  const unkeyed = rec.landed_write_shapes.filter((w) => !IDEMPOTENT_BY_KEY_WRITE_SHAPES.has(w));
+  if (rec.origin !== "autonomous" && unkeyed.length > 0) {
+    return { kind: "ask_human", reason: `${rec.origin} goal landed writes on an earlier attempt`, write_shapes: unkeyed, addressee: askAddressee(rec) };
   }
   return { kind: "redispatch", goal: rec.goal, goal_hash: rec.goal_hash };
 }
 
-// ── operator hands ────────────────────────────────────────────────────────────────────────────────
+// ── attribution ───────────────────────────────────────────────────────────────────────────────────
 
 /**
  * Close reasons written by an autonomous closer (the store's own sweeps, the lane's verified landing,
@@ -431,6 +462,9 @@ export const AUTONOMOUS_CLOSE_REASONS: ReadonlySet<string> = new Set([
   "expired_not_redetected", "churned_unlandable", "persistent_compose_failure", "walk_artifact",
 ]);
 const isOperatorRouteSource = (s: unknown): boolean => typeof s === "string" && (s === "human_reported" || /^operator/.test(s));
+/** A dispatch a human made: goal-host trigger "operator" (any operator id) or a surface/note dispatch. */
+const isHumanDispatch = (e: Pick<ChainEntry, "trigger" | "operator">): boolean =>
+  e.trigger === "operator" || e.trigger === "note" || (typeof e.operator === "string" && e.operator.trim().length > 0);
 
 const normPath = (p: string): string => String(p).replace(/:\d+.*$/, "").replace(/\\/g, "/").replace(/^\.\//, "").replace(/^repos\//, "").trim();
 const samePath = (a: string, b: string): boolean => {
@@ -439,32 +473,26 @@ const samePath = (a: string, b: string): boolean => {
 };
 
 /**
- * Three-valued: "true" if any write or dispatch on the chain came through an operator route; "possible"
- * if an operator-route (or unattributable) LANDING touched a prerequisite's edit site, or a file of the
- * reaching dispatch, between first failure and reach; else "false". Only "false" is success.
- *   - any dispatch after the first failure that R did not issue (operator replay, or any other
- *     dispatcher re-running the goal: qa's rule, the reach must be attributable to the seam);
- *   - any linked prerequisite filed or last written with an operator-route source (human_reported /
- *     operator_*), which is also how an operator arming a check shows: the store keeps the LAST
- *     writer's source on the row;
- *   - any linked prerequisite closed without an autonomous close reason (hand close).
+ * Attribute a reach. hands: any human (operator or surface) dispatch on the chain after the first
+ * failure (including the one that reached), any linked prerequisite with an operator-route source
+ * (human_reported / operator_*: an operator filing it or arming its check; the store keeps the LAST
+ * writer's source) or closed by hand, or an operator-route landing on an edit site between first failure
+ * and reach. possible: only an unknown-route landing on an edit site. Otherwise credit goes to the
+ * dispatch that reached: R's own → "r", any other autonomous dispatcher → "autonomous_other".
  */
-export function operatorHands(rec: GoalReachRecord, gaps: GapView[], landings: LandingView[], now = Date.now()): { verdict: HandsVerdict; reasons: string[] } {
-  const reasons: string[] = [];
+export function attributeReach(rec: GoalReachRecord, gaps: GapView[], landings: LandingView[], now = Date.now()): { attribution: ReachAttribution; reasons: string[] } {
+  const hands: string[] = [];
   const F = rec.first_failure_at;
   if (F !== null) {
-    for (const e of rec.dispatches) {
-      if (e.startedAt > F && !isRIssued(rec, e)) reasons.push(`non_r_dispatch:${e.dispatchId}:${e.trigger ?? "unknown"}`);
-    }
+    for (const e of rec.dispatches) if (e.startedAt > F && isHumanDispatch(e)) hands.push(`operator_dispatch:${e.dispatchId}:${e.trigger ?? "unknown"}`);
   }
   const byId = new Map(gaps.map((g) => [g.id, g]));
   const linked = rec.linked_ever.map((id) => byId.get(id)).filter((g): g is GapView => !!g);
   for (const g of linked) {
-    if (isOperatorRouteSource(g.source)) reasons.push(`operator_route_gap:${g.id}:${g.source}`);
-    if (g.status !== "open" && !AUTONOMOUS_CLOSE_REASONS.has(String(g.closed_reason ?? ""))) reasons.push(`hand_closed:${g.id}:${g.closed_reason ?? "no_reason"}`);
+    if (isOperatorRouteSource(g.source)) hands.push(`operator_route_gap:${g.id}:${g.source}`);
+    if (g.status !== "open" && !AUTONOMOUS_CLOSE_REASONS.has(String(g.closed_reason ?? ""))) hands.push(`hand_closed:${g.id}:${g.closed_reason ?? "no_reason"}`);
   }
-  if (reasons.length > 0) return { verdict: "true", reasons };
-
+  const possible: string[] = [];
   if (F !== null) {
     const until = rec.reached_at ?? now;
     const sites = [
@@ -474,23 +502,74 @@ export function operatorHands(rec: GoalReachRecord, gaps: GapView[], landings: L
     for (const l of landings) {
       if (l.route === "substrate" || l.at < F || l.at > until) continue;
       const hit = l.files.find((f) => sites.some((s) => samePath(f, s)));
-      if (hit) reasons.push(`${l.route}_landing:${l.sha}:${hit}`);
+      if (!hit) continue;
+      (l.route === "operator" ? hands : possible).push(`${l.route}_landing:${l.sha}:${hit}`);
     }
-    if (reasons.length > 0) return { verdict: "possible", reasons };
   }
-  return { verdict: "false", reasons: [] };
+  if (hands.length > 0) return { attribution: "hands", reasons: hands };
+  if (possible.length > 0) return { attribution: "possible", reasons: possible };
+  const reacher = rec.dispatches.find((e) => e.dispatchId === rec.reached_dispatch_id);
+  if (reacher && isRIssued(rec, reacher)) return { attribution: "r", reasons: [] };
+  return { attribution: "autonomous_other", reasons: [`reached_by:${reacher?.dispatchId ?? "unknown"}:${reacher?.trigger ?? "unknown"}`] };
+}
+const handsOf = (a: ReachAttribution): HandsVerdict => (a === "hands" ? "true" : a === "possible" ? "possible" : "false");
+
+// ── R7: measure learning ──────────────────────────────────────────────────────────────────────────
+
+/** Only a graded reach without hands is measured, and only until a found/absent verdict. */
+export function needsExtractionCheck(rec: GoalReachRecord): boolean {
+  return rec.status === "reached" && rec.attribution_final && (rec.attribution === "r" || rec.attribution === "autonomous_other")
+    && !!rec.reached_execution_id && rec.extraction.status !== "found" && rec.extraction.status !== "absent";
 }
 
-// ── R7: learn ─────────────────────────────────────────────────────────────────────────────────────
+/**
+ * The template whose provenance is `executionId`. The field names are the ribosome's own: the
+ * ribosome-extract template (ias-executor-ts src/templates/lifecycle/ribosome-extract.json) MUST write
+ * `metadata.extracted_from` and `metadata.sourceExecutionId` = lifecycle.executionId, and activity-api's
+ * template write (routes/activities.ts, "Ratchet lineage") persists metadata.extracted_from onto the
+ * `activity` row's top-level `extracted_from` column. `source_execution_id` is the schema's alias.
+ */
+export function matchExtractedTemplate(templates: Array<Record<string, unknown>>, executionId: string): string | null {
+  for (const t of templates) {
+    const m = (t["metadata"] ?? {}) as Record<string, unknown>;
+    const ids = [t["extracted_from"], t["source_execution_id"], m["extracted_from"], m["sourceExecutionId"]];
+    if (ids.some((x) => x === executionId)) return String(t["id"] ?? t["template_id"] ?? "unknown");
+  }
+  return null;
+}
 
-const isRibosomeFamily = (t: string | undefined): boolean => !!t && (t.startsWith("learned-") || /ribosome/i.test(t));
+/**
+ * One measurement step. Unreadable store → "unknown", never "absent". Not found inside the window →
+ * "pending" (the extraction may still land). Not found after it → "absent" and evidence is filed once.
+ * A template counts only if it was written (updated_at) in [reach − 1 min, reach + window].
+ */
+export function extractionStep(
+  rec: GoalReachRecord,
+  read: { ok: true; templates: Array<Record<string, unknown>> } | { ok: false; why: string },
+  now: number,
+  policy: Pick<GoalReachPolicy, "extraction_window_ms">,
+): { extraction: GoalReachRecord["extraction"]; extracted_template_id?: string; file_evidence: boolean } {
+  if (!read.ok) return { extraction: { status: "unknown", reason: `template store unreadable: ${read.why}`, checked_at: now }, file_evidence: false };
+  const from = (rec.reached_at ?? now) - 60_000;
+  const until = (rec.reached_at ?? now) + policy.extraction_window_ms;
+  const inWindow = read.templates.filter((t) => {
+    const at = Date.parse(String(t["updated_at"] ?? t["created_at"] ?? ""));
+    return Number.isFinite(at) && at >= from && at <= until;
+  });
+  const id = matchExtractedTemplate(inWindow, String(rec.reached_execution_id));
+  if (id) return { extraction: { status: "found", checked_at: now }, extracted_template_id: id, file_evidence: false };
+  if (now <= until) return { extraction: { status: "pending", checked_at: now }, file_evidence: false };
+  return { extraction: { status: "absent", reason: `no template with provenance ${rec.reached_execution_id} written within ${Math.round(policy.extraction_window_ms / 60_000)} min of the reach`, checked_at: now }, file_evidence: !rec.extraction_evidence_filed };
+}
 
-/** On a hands-free reach, extract its execution once. Hands "possible"/"true" never teach the catalogue. */
-export function onReached(rec: GoalReachRecord): { kind: "extract"; execution_id: string } | null {
-  if (rec.status !== "reached" || !rec.hands_final || rec.operator_hands !== "false") return null;
-  if (rec.extraction.status !== "not_attempted") return null;
-  if (!rec.reached_execution_id || isRibosomeFamily(rec.reached_template_id)) return null;
-  return { kind: "extract", execution_id: rec.reached_execution_id };
+/** The ribosome gap R's absent verdicts are evidence for. */
+export const RIBOSOME_EVIDENCE_GAP_ID = "the-ribosome-learns-from-self-scan-ticks-and-auth-traces-instead-of-reached-goals";
+/** Append an evidence entry, idempotent per goal_hash; every existing entry is kept. */
+export function appendEvidenceEntry(existing: unknown, entry: { goal_hash: string } & Record<string, unknown>): unknown[] {
+  const base = Array.isArray(existing) ? existing.slice() : [];
+  if (base.some((x) => !!x && typeof x === "object" && (x as { goal_hash?: unknown }).goal_hash === entry.goal_hash)) return base;
+  base.push(entry);
+  return base;
 }
 
 // ── the reader: summary ───────────────────────────────────────────────────────────────────────────
@@ -502,14 +581,20 @@ export interface GoalReachSummary {
   waiting: number;
   redispatching: number;
   reached: number;
-  reached_hands_free: number;
-  /** Reached, but the hands verdict could not be taken yet (ledger unreadable): never counted as success. */
-  reached_hands_ungraded: number;
+  /** The user's metric: reached with no hands, by R or by any other autonomous dispatcher. */
+  reached_without_hands: number;
+  /** R's own credit: reached by R's re-dispatch with no hands. */
+  reached_by_r: number;
+  reached_by_autonomous_other: number;
+  /** Reached, but attribution could not be taken yet (ledger unreadable): never counted as success. */
+  reached_ungraded: number;
   reached_hands_possible: number;
-  reached_hands_true: number;
+  reached_hands: number;
   stopped: number;
   stopped_by_reason: Record<string, number>;
-  extraction_handed_off: number;
+  extraction_found: number;
+  extraction_absent: number;
+  extraction_unknown: number;
 }
 const reasonKey = (r: string | undefined): string => {
   const s = String(r ?? "unknown");
@@ -518,7 +603,8 @@ const reasonKey = (r: string | undefined): string => {
 export function summarize(records: GoalReachRecord[]): GoalReachSummary {
   const s: GoalReachSummary = {
     goals: records.length, open_unlinked: 0, open_linked: 0, waiting: 0, redispatching: 0, reached: 0,
-    reached_hands_free: 0, reached_hands_ungraded: 0, reached_hands_possible: 0, reached_hands_true: 0, stopped: 0, stopped_by_reason: {}, extraction_handed_off: 0,
+    reached_without_hands: 0, reached_by_r: 0, reached_by_autonomous_other: 0, reached_ungraded: 0, reached_hands_possible: 0, reached_hands: 0,
+    stopped: 0, stopped_by_reason: {}, extraction_found: 0, extraction_absent: 0, extraction_unknown: 0,
   };
   for (const r of records) {
     if (r.status === "open") { if (r.linked.length === 0) s.open_unlinked++; else s.open_linked++; }
@@ -526,16 +612,19 @@ export function summarize(records: GoalReachRecord[]): GoalReachSummary {
     else if (r.status === "redispatching") s.redispatching++;
     else if (r.status === "reached") {
       s.reached++;
-      if (!r.hands_final) s.reached_hands_ungraded++;
-      else if (r.operator_hands === "false") s.reached_hands_free++;
-      else if (r.operator_hands === "possible") s.reached_hands_possible++;
-      else s.reached_hands_true++;
+      if (!r.attribution_final) s.reached_ungraded++;
+      else if (r.attribution === "r") { s.reached_without_hands++; s.reached_by_r++; }
+      else if (r.attribution === "autonomous_other") { s.reached_without_hands++; s.reached_by_autonomous_other++; }
+      else if (r.attribution === "possible") s.reached_hands_possible++;
+      else s.reached_hands++;
     } else if (r.status === "stopped") {
       s.stopped++;
       const k = reasonKey(r.stop_reason);
       s.stopped_by_reason[k] = (s.stopped_by_reason[k] ?? 0) + 1;
     }
-    if (r.extraction.status === "handed_off") s.extraction_handed_off++;
+    if (r.extraction.status === "found") s.extraction_found++;
+    else if (r.extraction.status === "absent") s.extraction_absent++;
+    else if (r.extraction.status === "unknown") s.extraction_unknown++;
   }
   return s;
 }
@@ -558,7 +647,10 @@ export interface GoalReachIO {
   loadRecords(): Promise<Record<string, GoalReachRecord>>;
   saveRecord(rec: GoalReachRecord): Promise<void>;
   dispatchGoal(req: GoalDispatchRequest): Promise<{ ok: true; dispatch_id: string; coalesced: boolean } | { ok: false; why: string }>;
-  handOffExtraction(req: { execution_id: string; template_id: string | null; goal_hash: string }): Promise<{ ok: true; dispatch_id: string } | { ok: false; why: string }>;
+  /** Templates written since `fromMs`, with their provenance fields (a READ of the template store). */
+  readTemplatesSince(fromMs: number): Promise<{ ok: true; templates: Array<Record<string, unknown>> } | { ok: false; why: string }>;
+  /** Append an absent-extraction evidence entry to the ribosome gap (idempotent per goal_hash). */
+  attachExtractionEvidence(entry: { goal_hash: string } & Record<string, unknown>): Promise<{ ok: boolean; why?: string }>;
   fileLimitProposal(p: { goal_hash: string; paths: string[]; gap_ids: string[]; reason: string }): Promise<{ ok: boolean; why?: string }>;
 }
 
@@ -598,38 +690,49 @@ export async function runGoalReachTick(io: GoalReachIO, policy: GoalReachPolicy,
   let landings: LandingView[] | null = null;
 
   for (const rec of live) {
-    const wasTerminal = (prior[rec.goal_hash]?.status === "stopped") || (prior[rec.goal_hash]?.status === "reached" && prior[rec.goal_hash]?.hands_final);
+    const wasTerminal = prior[rec.goal_hash]?.status === "stopped";
     linkGaps(rec, gaps);
 
     if (rec.status === "reached") {
-      if (!rec.hands_final) {
+      const before = JSON.stringify(rec);
+      if (!rec.attribution_final) {
         if (landings === null) {
           const from = Math.min(...live.map((r) => r.first_failure_at ?? now));
           const lr = await io.readLandings(from, now).catch((e) => ({ ok: false as const, why: errText(e) }));
-          landings = lr.ok ? lr.landings : [];
-          if (!lr.ok) result.errors.push(`landings unreadable (${lr.why}); hands graded without them would over-credit, so held`);
-          if (!lr.ok) landings = null;
+          if (lr.ok) landings = lr.landings;
+          else result.errors.push(`landings unreadable (${lr.why}); attribution taken without them would over-credit, so held`);
         }
         if (landings !== null) {
-          const h = operatorHands(rec, gaps, landings, now);
-          rec.operator_hands = h.verdict;
-          rec.operator_hands_reasons = h.reasons;
-          rec.hands_final = true;
-          rec.last_action = { kind: "reached", reason: `hands=${h.verdict}`, at: now };
-          console.log(`[goal-reach] REACHED goal_hash=${rec.goal_hash} dispatch=${rec.reached_dispatch_id} hands=${h.verdict}${h.reasons.length ? ` (${h.reasons.slice(0, 3).join("; ")})` : ""}`);
+          const a = attributeReach(rec, gaps, landings, now);
+          rec.attribution = a.attribution;
+          rec.attribution_reasons = a.reasons;
+          rec.operator_hands = handsOf(a.attribution);
+          rec.attribution_final = true;
+          rec.last_action = { kind: "reached", reason: `attribution=${a.attribution}`, at: now };
+          console.log(`[goal-reach] REACHED goal_hash=${rec.goal_hash} dispatch=${rec.reached_dispatch_id} attribution=${a.attribution}${a.reasons.length ? ` (${a.reasons.slice(0, 3).join("; ")})` : ""}`);
         }
       }
-      const learn = policy.extract_on_hands_free_reach ? onReached(rec) : null;
-      if (learn) {
-        try {
-          const r = await io.handOffExtraction({ execution_id: learn.execution_id, template_id: rec.reached_template_id ?? null, goal_hash: rec.goal_hash });
-          rec.extraction = r.ok ? { status: "handed_off", dispatch_id: r.dispatch_id } : { status: "failed", reason: r.why };
-        } catch (e) {
-          rec.extraction = { status: "failed", reason: errText(e) };
+      if (needsExtractionCheck(rec)) {
+        const read = await io.readTemplatesSince((rec.reached_at ?? now) - 60_000).catch((e) => ({ ok: false as const, why: errText(e) }));
+        const step = extractionStep(rec, read, now, policy);
+        rec.extraction = step.extraction;
+        if (step.extracted_template_id) rec.extracted_template_id = step.extracted_template_id;
+        if (step.extraction.status === "found" || step.extraction.status === "absent") {
+          console.log(`[goal-reach] EXTRACTION ${step.extraction.status.toUpperCase()} goal_hash=${rec.goal_hash} execution=${rec.reached_execution_id}${step.extracted_template_id ? ` template=${step.extracted_template_id}` : ""}`);
+        }
+        if (step.file_evidence) {
+          try {
+            const f = await io.attachExtractionEvidence({
+              goal_hash: rec.goal_hash, dispatch_id: rec.reached_dispatch_id ?? null, execution_id: rec.reached_execution_id ?? null,
+              attribution: rec.attribution, reached_at: new Date(rec.reached_at ?? now).toISOString(),
+              window_min: Math.round(policy.extraction_window_ms / 60_000), observed_at: new Date(now).toISOString(), source: "goal_reach_tick",
+            });
+            rec.extraction_evidence_filed = f.ok;
+            if (!f.ok) result.errors.push(`extraction evidence for ${rec.goal_hash} not filed: ${f.why ?? "unknown"}`);
+          } catch (e) { result.errors.push(`extraction evidence for ${rec.goal_hash} threw: ${errText(e)}`); }
         }
       }
-      rec.updated_at = now;
-      await io.saveRecord(rec);
+      if (JSON.stringify(rec) !== before || !prior[rec.goal_hash]) { rec.updated_at = now; await io.saveRecord(rec); }
       continue;
     }
     if (wasTerminal) continue;
@@ -651,7 +754,9 @@ export async function runGoalReachTick(io: GoalReachIO, policy: GoalReachPolicy,
     } else if (action.kind === "ask_human") {
       // No ask channel exists yet: the honest state is stopped-with-reason, visible in the summary.
       rec.status = "stopped";
-      rec.stop_reason = `needs_human:write_effects:${action.write_shapes.join(",")}`;
+      // The ask goes to the goal's ORIGIN (an operator-session goal asks that operator id; a surface goal
+      // its human). No ask channel exists yet, so the stop reason names the intended addressee.
+      rec.stop_reason = `needs_human:ask=${action.addressee}:write_effects:${action.write_shapes.join(",")}`;
       result.asked_human.push({ goal_hash: rec.goal_hash, write_shapes: action.write_shapes });
     } else if (action.kind === "redispatch") {
       const cycle = rec.cycles + 1;
@@ -683,7 +788,7 @@ export async function runGoalReachTick(io: GoalReachIO, policy: GoalReachPolicy,
     await io.saveRecord(rec);
   }
   result.summary = summarize(live);
-  console.log(`[goal-reach] tick goals=${result.summary.goals} unlinked=${result.summary.open_unlinked} waiting=${result.summary.waiting} redispatched=${result.redispatched.length} reached_hands_free=${result.summary.reached_hands_free} stopped=${result.summary.stopped} errors=${result.errors.length}`);
+  console.log(`[goal-reach] tick goals=${result.summary.goals} unlinked=${result.summary.open_unlinked} waiting=${result.summary.waiting} redispatched=${result.redispatched.length} reached_without_hands=${result.summary.reached_without_hands} reached_by_r=${result.summary.reached_by_r} stopped=${result.summary.stopped} errors=${result.errors.length}`);
   return result;
 }
 
@@ -896,39 +1001,61 @@ export function defaultGoalReachIO(policy: GoalReachPolicy): GoalReachIO {
       return { ok: true, dispatch_id: id, coalesced: j["coalesced"] === true };
     },
 
-    async handOffExtraction(req) {
-      // The ribosome's EXISTING extraction path: the `ribosome-extract` template, run by goal-host (the
-      // executor), dispatched by shape. Same variables goal-host's own mintReachedTrace passes. Nothing
-      // here needs ribosome-vessel to be registered in discovery (it advertises no shapes).
-      const prod = await ownUrls("goalDispatchAsync");
-      if (!prod.ok) return { ok: false, why: prod.why };
-      // The FULL lifecycle payload goal-host's mintReachedTrace builds from the trace: without it the
-      // template's LLM tasks get empty placeholders and synthesis fails or is hollow.
-      const trace = await readTrace(req.execution_id);
-      if (!trace) return { ok: false, why: `trace ${req.execution_id} unreadable; a thin lifecycle would hand the ribosome nothing to extract` };
-      const tasks = Array.isArray(trace["tasks"]) ? (trace["tasks"] as Array<{ outputShapes?: unknown }>) : [];
-      const tpl = req.template_id ?? (typeof trace["templateId"] === "string" ? trace["templateId"] : "");
-      const lifecycle = {
-        executionId: req.execution_id, status: trace["status"] === "failed" ? "failed" : "completed",
-        taskCount: tasks.length, durationMs: asNum(trace["durationMs"]) ?? 0, costUsd: asNum(trace["costUsd"]) ?? 0,
-        templateId: tpl, templateName: tpl,
-        templateAuthor: tpl.startsWith("learned-") ? "ribosome-pattern" : "",
-        outputShapes: [...new Set(tasks.flatMap((t) => asStrArr(t.outputShapes)))],
-        depth: Array.isArray(trace["compositionChain"]) ? (trace["compositionChain"] as unknown[]).length : 0,
-        impulseCount: Array.isArray(trace["outputImpulseIds"]) ? (trace["outputImpulseIds"] as unknown[]).length : 0,
-        hasGoalContext: true, goalSignature: req.goal_hash, qualityEligible: true,
-      };
-      const r = await postResolve(prod.urls[0]!, {
-        type: "goalDispatchAsync",
-        goal: `extract reusable template from execution ${req.execution_id}`,
-        targetTemplateId: "ribosome-extract",
-        variables: { executionId: req.execution_id, lifecycle, applyExtraction: true },
-        tags: ["dispatcher_reason:goal_reach_extract", `goal_reach:${req.goal_hash}`],
-      }, 30_000);
-      const j = r.json ?? {};
-      const id = (j["dispatchId"] ?? (j["body"] as Record<string, unknown> | undefined)?.["dispatchId"]) as unknown;
-      if (!r.ok || typeof id !== "string" || !id) return { ok: false, why: `ribosome-extract dispatch HTTP ${r.status}` };
-      return { ok: true, dispatch_id: id };
+    async readTemplatesSince(fromMs) {
+      // READ of the live template store (activity-api `activity` table) through the same route
+      // resolvers/activity-template.ts uses: GET /v2/activities/templates, newest first by created_at.
+      // The list omits provenance and orders by created_at, while the ribosome UPSERTs a deterministic
+      // learned-<slug> (an old created_at, a new updated_at), so: page the whole list, keep rows whose
+      // updated_at is since fromMs, and read each of those in full (GET /templates/:id selects *).
+      const { METABOB_ENDPOINT, METABOB_API_KEY } = await import("../config.js");
+      const headers = { Authorization: `ApiKey ${METABOB_API_KEY}` };
+      const recent: Array<Record<string, unknown>> = [];
+      try {
+        for (let offset = 0, pages = 0; pages < 60; offset += 100, pages++) {
+          const r = await fetch(`${METABOB_ENDPOINT}/v2/activities/templates?limit=100&offset=${offset}`, { headers, signal: AbortSignal.timeout(15_000) });
+          if (!r.ok) return { ok: false, why: `template list HTTP ${r.status}` };
+          const j = (await r.json()) as { templates?: Array<Record<string, unknown>> };
+          const rows = Array.isArray(j.templates) ? j.templates : null;
+          if (!rows) return { ok: false, why: "template list answered without templates[]" };
+          for (const t of rows) if (Date.parse(String(t["updated_at"] ?? t["created_at"] ?? "")) >= fromMs) recent.push(t);
+          if (rows.length < 100) break;
+          if (pages === 59) return { ok: false, why: "template list longer than 6000 rows: scan incomplete" };
+        }
+        const full: Array<Record<string, unknown>> = [];
+        for (const t of recent.slice(0, 200)) {
+          const id = String(t["id"] ?? "").replace(/^activity:/, "").replace(/^⟨|⟩$/g, "");
+          if (!id) continue;
+          const r = await fetch(`${METABOB_ENDPOINT}/v2/activities/templates/${encodeURIComponent(id)}`, { headers, signal: AbortSignal.timeout(10_000) });
+          if (!r.ok) return { ok: false, why: `template ${id} HTTP ${r.status}` };
+          const j = (await r.json()) as Record<string, unknown>;
+          full.push({ ...t, ...((j["template"] ?? j) as Record<string, unknown>) });
+        }
+        if (recent.length > 200) return { ok: false, why: `${recent.length} templates written since the reach: too many to read in full this tick` };
+        return { ok: true, templates: full };
+      } catch (e) { return { ok: false, why: errText(e) }; }
+    },
+
+    async attachExtractionEvidence(entry) {
+      // Resend the ribosome gap's own fields (an open gap must carry its summary) with the evidence entry
+      // appended, guarded by the status read. Single writer of this key (this tick), idempotent per goal_hash.
+      const { resolveSubstrateGap, resolveSubstrateGapWrite } = await import("./substrate-gap.js");
+      const r = await resolveSubstrateGap({ type: "substrateGap", id: RIBOSOME_EVIDENCE_GAP_ID, limit: 5 });
+      const g = ((r.body as { gaps?: Array<Record<string, unknown>> } | null)?.gaps ?? []).find((x) => x["id"] === RIBOSOME_EVIDENCE_GAP_ID);
+      if (!g) return { ok: false, why: `gap ${RIBOSOME_EVIDENCE_GAP_ID} not found` };
+      const meta = (g["classification_metadata"] ?? {}) as Record<string, unknown>;
+      const KEY = "goal_reach_extraction_evidence";
+      const next = appendEvidenceEntry(meta[KEY], entry);
+      if (Array.isArray(meta[KEY]) && (meta[KEY] as unknown[]).length === next.length) return { ok: true };
+      const w = await resolveSubstrateGapWrite({
+        type: "substrateGap_write", expect_status: String(g["status"] ?? "open"),
+        gap: {
+          id: RIBOSOME_EVIDENCE_GAP_ID, category: g["category"], source: g["source"], status: g["status"], summary: g["summary"],
+          detected_at: g["detected_at"], classification_metadata: { [KEY]: next },
+        },
+      } as never);
+      const body = (w.body ?? {}) as Record<string, unknown>;
+      if (w.shape !== "substrateGapWriteResult" || body["skip_reason"]) return { ok: false, why: String(body["skip_reason"] ?? body["detail"] ?? w.shape) };
+      return { ok: true };
     },
 
     async fileLimitProposal(p) {
@@ -948,7 +1075,7 @@ export function dryRunIO(io: GoalReachIO): GoalReachIO {
     ...io,
     saveRecord: async () => {},
     dispatchGoal: async (req) => ({ ok: true, dispatch_id: `dry-run:${req.goal_hash}`, coalesced: false }),
-    handOffExtraction: async () => ({ ok: false, why: "dry_run" }),
+    attachExtractionEvidence: async () => ({ ok: false, why: "dry_run" }),
     fileLimitProposal: async () => ({ ok: false, why: "dry_run" }),
   };
 }
@@ -963,7 +1090,7 @@ async function readPolicy(): Promise<GoalReachPolicy> {
     if (asNum(b.max_cost_usd) !== null) p.max_cost_usd = b.max_cost_usd!;
     if (asNum(b.pending_timeout_ms) !== null) p.pending_timeout_ms = b.pending_timeout_ms!;
     if (asNum(b.max_detail_reads) !== null) p.max_detail_reads = b.max_detail_reads!;
-    if (typeof b.extract_on_hands_free_reach === "boolean") p.extract_on_hands_free_reach = b.extract_on_hands_free_reach;
+    if (asNum(b.extraction_window_ms) !== null) p.extraction_window_ms = b.extraction_window_ms!;
     return p;
   } catch { return { ...DEFAULT_GOAL_REACH_POLICY }; }
 }

@@ -163,6 +163,30 @@ export interface LineageBackoffState {
  * so absent from the open-gap read) simply ends the walk, yielding a SMALLER sum and thus
  * LESS backoff — the safe direction when information is missing.
  */
+/** The classification metadata of `gap` and each open ancestor (parent_gap_id, else source_gap_id), nearest first. */
+function lineageMetas(
+  gap: Record<string, unknown>,
+  byId: Map<string, Record<string, unknown>>,
+  maxDepth: number,
+): Record<string, unknown>[] {
+  const out: Record<string, unknown>[] = [];
+  let cur: Record<string, unknown> | undefined = gap;
+  // A malformed store could in principle point a gap at its own ancestor; a seen-set makes
+  // that a short walk rather than a hang inside the selection hot path.
+  const seen = new Set<string>();
+  while (cur && out.length <= maxDepth) {
+    const id = String(cur.id ?? "");
+    if (id && seen.has(id)) break;
+    if (id) seen.add(id);
+    const meta = (cur.classification_metadata ?? cur.metadata ?? {}) as Record<string, unknown>;
+    if (typeof meta !== "object" || meta === null) break;
+    out.push(meta);
+    const parentId = String(meta.parent_gap_id ?? meta.source_gap_id ?? "");
+    cur = parentId ? byId.get(parentId) : undefined;
+  }
+  return out;
+}
+
 export function lineageBackoffState(
   gap: Record<string, unknown>,
   byId: Map<string, Record<string, unknown>>,
@@ -170,26 +194,103 @@ export function lineageBackoffState(
 ): LineageBackoffState {
   let attempts = 0;
   let lastFailedAtMs: number | null = null;
-  let depth = -1;
-  let cur: Record<string, unknown> | undefined = gap;
-  // A malformed store could in principle point a gap at its own ancestor; a seen-set makes
-  // that a short walk rather than a hang inside the selection hot path.
-  const seen = new Set<string>();
-  while (cur && depth < maxDepth) {
-    const id = String(cur.id ?? "");
-    if (id && seen.has(id)) break;
-    if (id) seen.add(id);
-    depth++;
-    const meta = (cur.classification_metadata ?? cur.metadata ?? {}) as Record<string, unknown>;
-    if (typeof meta !== "object" || meta === null) break;
+  const metas = lineageMetas(gap, byId, maxDepth);
+  for (const meta of metas) {
     const fa = Number(meta.failed_attempts ?? 0);
     if (Number.isFinite(fa) && fa > 0) attempts += Math.floor(fa);
     const t = Date.parse(String(meta.last_failed_at ?? ""));
     if (Number.isFinite(t) && (lastFailedAtMs === null || t > lastFailedAtMs)) lastFailedAtMs = t;
-    const parentId = String(meta.parent_gap_id ?? meta.source_gap_id ?? "");
-    cur = parentId ? byId.get(parentId) : undefined;
   }
-  return { attempts, lastFailedAtMs, depth };
+  return { attempts, lastFailedAtMs, depth: metas.length - 1 };
+}
+
+/**
+ * LINEAGE FAIR SHARE OF THE SPEND ENVELOPE (value-per-cost-selection 4.5).
+ *
+ * MEASURED 2026-10-02 06:00-14:17Z: the $2/h envelope is shared by both nodes and was exhausted
+ * 08:54-~11:30 and again at 14:17. Node 1 spent $1.09-$1.78 per hour on picks of gaps already at
+ * 6-8 failed attempts and landed 1 in 18 (~$6.7 per landing), while node 2 lands at ~$0.85 per
+ * landing; the global cap cannot tell them apart, so the low-yield lineage starved the productive one.
+ *
+ * Every compose's LLM spend is charged to the gap it ran for (`spend_ledger`, written by
+ * recordLineageSpend from the report's `llm_usage`). A lineage (the same parent_gap_id / source_gap_id
+ * walk as lineageBackoffState, so a recommit or a narrowing cannot mint its way out) whose OPEN rows
+ * have spent `lineage_usd_cap_per_window` inside the last `lineage_window_s` is held from auto-pick until
+ * the window rolls. A landing closes the gap, which takes its ledger out of the open read, so what is
+ * summed is spend that has not landed. Rows with no ledger read as $0 (fail open, like gapIsBackedOff):
+ * a hold on absence would empty the pool. Same upward-walk asymmetry as the backoff: a root sees only
+ * its own ledger, a child sees itself and its ancestors.
+ */
+export const SPEND_LEDGER_MAX_ENTRIES = 20;
+export function lineageWindowSpendUsd(
+  gap: Record<string, unknown>,
+  byId: Map<string, Record<string, unknown>>,
+  nowMs: number,
+  windowMs: number,
+  maxDepth = 8,
+): number {
+  let usd = 0;
+  for (const meta of lineageMetas(gap, byId, maxDepth)) {
+    const ledger = Array.isArray(meta.spend_ledger) ? (meta.spend_ledger as Array<Record<string, unknown>>) : [];
+    for (const e of ledger) {
+      const at = Date.parse(String(e?.at ?? ""));
+      const v = Number(e?.usd);
+      // A future stamp (clock skew) still counts: it is spend, and dropping it would fail open forever.
+      if (Number.isFinite(at) && Number.isFinite(v) && v > 0 && nowMs - at < windowMs) usd += v;
+    }
+  }
+  return usd;
+}
+export type LineageSpendPolicy = { lineage_usd_cap?: number; lineage_window_ms?: number };
+/** True iff the policy sets a lineage ceiling and this gap's lineage has spent it inside the window. */
+export function lineageSpendHeld(
+  gap: Record<string, unknown>,
+  byId: Map<string, Record<string, unknown>>,
+  nowMs: number,
+  policy: LineageSpendPolicy | null | undefined,
+): boolean {
+  const cap = policy?.lineage_usd_cap;
+  if (typeof cap !== "number" || !Number.isFinite(cap) || cap <= 0) return false;
+  const windowMs = typeof policy?.lineage_window_ms === "number" && policy.lineage_window_ms > 0 ? policy.lineage_window_ms : 3_600_000;
+  return lineageWindowSpendUsd(gap, byId, nowMs, windowMs) >= cap;
+}
+/** The ledger after charging `usd` at `atIso`: appended, oldest dropped past SPEND_LEDGER_MAX_ENTRIES. */
+export function appendSpendLedger(meta: Record<string, unknown>, usd: number, atIso: string): Array<{ at: string; usd: number }> {
+  const prior = Array.isArray(meta.spend_ledger) ? (meta.spend_ledger as Array<{ at: string; usd: number }>) : [];
+  return [...prior, { at: atIso, usd }].slice(-SPEND_LEDGER_MAX_ENTRIES);
+}
+/**
+ * Charge one compose's LLM spend (the report's `llm_usage.cost_usd`, attached by resolveFeatureCompose)
+ * to the gap it ran for, so lineageSpendHeld can read it. Built on the STORED row, re-read here (the
+ * compose may have written its failure lesson since the pick); a closed or unreadable row is not
+ * written, so a gap that landed is never reopened. Dry runs and zero-cost composes write nothing.
+ * Best effort: a failed write costs one ledger entry, never the compose result.
+ */
+export async function recordLineageSpend(gapId: string, composeBody: unknown, dryRun: boolean): Promise<void> {
+  try {
+    if (!gapId || dryRun) return;
+    const usage = (composeBody as { llm_usage?: { cost_usd?: unknown } } | null | undefined)?.llm_usage;
+    const usd = Number(usage?.cost_usd);
+    if (!Number.isFinite(usd) || usd <= 0) return;
+    const fresh = await readGapFresh(gapId);
+    if (!fresh || String(fresh.status ?? "") === "closed") return;
+    const m = fresh.classification_metadata ?? fresh.metadata;
+    const meta = (m && typeof m === "object" && !Array.isArray(m) ? m : {}) as Record<string, unknown>;
+    await resolveSubstrateGapWrite({
+      type: "substrateGap_write",
+      gap: {
+        id: gapId,
+        category: fresh.category,
+        source: fresh.source,
+        summary: fresh.summary,
+        detected_at: fresh.detected_at,
+        classification_metadata: { ...meta, spend_ledger: appendSpendLedger(meta, usd, new Date().toISOString()) },
+        status: String(fresh.status ?? "open"),
+      },
+    } as never);
+  } catch (err) {
+    console.warn(`[gap-to-feature] lineage spend not recorded for ${gapId}: ${String(err)}`);
+  }
 }
 
 /**
@@ -4789,6 +4890,7 @@ async function routeCapabilityGapToNewResolver(
     },
     land: !(pointer.dry_run ?? false),
   });
+  await recordLineageSpend(String(gap.id ?? ""), compose.body, pointer.dry_run ?? false);
   const cb = (compose.body ?? {}) as Record<string, unknown>;
   try {
     const reachId = typeof cb["execution_id"] === "string" ? (cb["execution_id"] as string) : "";
@@ -4892,7 +4994,16 @@ async function llmProducerAdvertised(): Promise<boolean | null> {
 // `lookup_failed` marks an unreadable verdict whose cause was discovery itself (timeout, network,
 // 5xx), as opposed to a discovery answer naming no producer: both fail closed, but only the second
 // says anything about the fleet.
-export type SpendEnvelopeVerdict = { allow: boolean; reason: string; unreadable?: boolean; absent?: boolean; lookup_failed?: boolean; paused?: boolean; cap_usd?: number; spent_usd?: number; spend_sources?: number };
+// FAIR SHARE (value-per-cost-selection 4.5), optional fields on the same record, each absent = off:
+//   lineage_usd_cap_per_window + lineage_window_s (default 3600): a gap lineage that has spent the
+//     ceiling inside the window without landing is held from auto-pick (lineageSpendHeld), so one
+//     low-yield lineage cannot drain the shared cap;
+//   max_node_share (0 < f <= 1): this node refuses once ITS OWN spend reaches f x cap, leaving the rest of
+//     the shared cap to the other nodes (`node_share_exhausted`). Not yield-weighted: no per-node landing
+//     count is read here (5.3 remains open for that).
+// A field that is present but not a positive finite number (or a share above 1) is a misconfiguration and
+// refuses like a non-finite cap. The global cap stays the hard ceiling either way.
+export type SpendEnvelopeVerdict = { allow: boolean; reason: string; unreadable?: boolean; absent?: boolean; lookup_failed?: boolean; paused?: boolean; cap_usd?: number; spent_usd?: number; spend_sources?: number; lineage_usd_cap?: number; lineage_window_ms?: number; max_node_share?: number; own_spent_usd?: number; node_share_exhausted?: boolean };
 const SPEND_ENVELOPE_TTL_MS = 30_000;
 // An UNREADABLE policy verdict is remembered only as long as a failed discovery lookup is, so the
 // next read after a slow peer re-reads instead of refusing for 30 s on one timeout (09-30, node 2).
@@ -5085,7 +5196,7 @@ async function readSpendEnvelope(): Promise<SpendEnvelopeVerdict> {
     line("closed (absent)", false, 0);
     return v;
   }
-  const env = (newest.body ?? {}) as { usd_cap_per_hour?: unknown; paused?: unknown; uncapped?: unknown; reason?: unknown };
+  const env = (newest.body ?? {}) as { usd_cap_per_hour?: unknown; paused?: unknown; uncapped?: unknown; reason?: unknown; lineage_usd_cap_per_window?: unknown; lineage_window_s?: unknown; max_node_share?: unknown };
   const entries = (["usd_cap_per_hour", "paused", "uncapped"] as const).filter((k) => env[k] !== undefined && env[k] !== null).length;
   const rec = (v: SpendEnvelopeVerdict, verdict: string): SpendEnvelopeVerdict => { line(verdict, true, entries); return v; };
   if (env.paused === true) return rec({ allow: false, paused: true, reason: "paused: " + String(env.reason ?? "no reason given") }, "closed (paused)");
@@ -5098,7 +5209,19 @@ async function readSpendEnvelope(): Promise<SpendEnvelopeVerdict> {
     if (env.uncapped === true) return rec({ allow: true, reason: "spendEnvelope is explicitly uncapped (no cap)" }, "open (explicitly uncapped)");
     return rec({ allow: false, unreadable: true, reason: "envelope unreadable: the record has no finite usd_cap_per_hour and is not explicitly uncapped" }, "closed (no cap and not uncapped:true)");
   }
-  line(`cap ${cap} USD/h`, true, entries);
+  // Fair-share fields (4.5): parsed only under a finite cap; present-but-invalid refuses.
+  const posNum = (v: unknown): number | null | undefined => (v === undefined || v === null ? undefined : typeof v === "number" && Number.isFinite(v) && v > 0 ? v : null);
+  const lineageCap = posNum(env.lineage_usd_cap_per_window);
+  const lineageWindowS = posNum(env.lineage_window_s);
+  const nodeShare = posNum(env.max_node_share);
+  if (lineageCap === null || lineageWindowS === null || nodeShare === null || (typeof nodeShare === "number" && nodeShare > 1)) {
+    return rec({ allow: false, unreadable: true, cap_usd: cap, reason: "envelope unreadable: a fair-share field (lineage_usd_cap_per_window, lineage_window_s, max_node_share) is not a positive finite number (share <= 1)" }, "closed (invalid fair-share field)");
+  }
+  const fair = {
+    ...(lineageCap !== undefined ? { lineage_usd_cap: lineageCap, lineage_window_ms: (lineageWindowS ?? 3600) * 1000 } : {}),
+    ...(nodeShare !== undefined ? { max_node_share: nodeShare } : {}),
+  };
+  line(`cap ${cap} USD/h` + (lineageCap !== undefined ? `, lineage ${lineageCap} USD/${lineageWindowS ?? 3600}s` : "") + (nodeShare !== undefined ? `, node share ${nodeShare}` : ""), true, entries);
   if (!spend.ok) return { allow: false, unreadable: true, ...(spend.lookup_failed ? { lookup_failed: true } : {}), cap_usd: cap, reason: "envelope unreadable: " + spend.why };
   const spendUrls = spend.urls;
   if (spendUrls.length === 0) return { allow: false, unreadable: true, cap_usd: cap, reason: "envelope unreadable: no " + (spend.foreign > 0 ? "own-substrate " : "") + "llmSpendSummaryNode producer discovered" + foreignNote(spend.foreign) };
@@ -5106,16 +5229,21 @@ async function readSpendEnvelope(): Promise<SpendEnvelopeVerdict> {
   // llm-resolver, whose own endpoint is loopback-only), so the sum covers every node (4.0a).
   const sums = await Promise.all(spendUrls.map((u) => postEnvelopeRead(u, { impulse: { pointer: { type: "llmSpendSummaryNode" } } })));
   let spent = 0;
+  let ownSpent = 0;
   for (let i = 0; i < spendUrls.length; i++) {
     const b = sums[i]?.["body"] as { window_ms?: number; current?: { window_start?: string; cost_usd?: number }; previous?: { cost_usd?: number } | null } | undefined;
     if (!b || !b.current || typeof b.current.cost_usd !== "number") return { allow: false, unreadable: true, cap_usd: cap, reason: "envelope unreadable: no spend summary from " + spendUrls[i] };
     const windowMs = Number(b.window_ms) > 0 ? Number(b.window_ms) : 3_600_000;
     const elapsed = Date.now() - Date.parse(String(b.current.window_start ?? ""));
     const prevShare = Number.isFinite(elapsed) ? Math.max(0, 1 - elapsed / windowMs) : 1;
-    spent += b.current.cost_usd + (typeof b.previous?.cost_usd === "number" ? b.previous.cost_usd * prevShare : 0);
+    const nodeSpent = b.current.cost_usd + (typeof b.previous?.cost_usd === "number" ? b.previous.cost_usd * prevShare : 0);
+    spent += nodeSpent;
+    // This node's own relay is the LOCAL-origin producer (discovery stamps it "local").
+    if (spend.producers.find((p) => p.url === spendUrls[i])?.origin === "local") ownSpent += nodeSpent;
   }
-  const verdict = { cap_usd: cap, spent_usd: spent, spend_sources: spendUrls.length };
+  const verdict = { cap_usd: cap, spent_usd: spent, spend_sources: spendUrls.length, ...fair, ...(nodeShare !== undefined ? { own_spent_usd: ownSpent } : {}) };
   if (spent >= cap) return { allow: false, ...verdict, reason: "exhausted: spent " + spent.toFixed(3) + " USD of " + cap + " USD/h over " + spendUrls.length + " spend source(s)" };
+  if (nodeShare !== undefined && ownSpent >= nodeShare * cap) return { allow: false, ...verdict, node_share_exhausted: true, reason: "node share exhausted: this node spent " + ownSpent.toFixed(3) + " USD of its " + (nodeShare * cap).toFixed(3) + " USD/h share (" + nodeShare + " x " + cap + "); fleet total " + spent.toFixed(3) };
   return { allow: true, ...verdict, reason: "within envelope: spent " + spent.toFixed(3) + " USD of " + cap + " USD/h" };
 }
 export async function spendEnvelopeAllows(): Promise<SpendEnvelopeVerdict> {
@@ -5338,6 +5466,8 @@ export async function resolveGapToFeature(pointer: GapToFeaturePointer): Promise
   // caller and behaves exactly as before (same carve-out as the cooldown filter and the
   // admission gate). A null peek means capacity is unobservable → FAIL OPEN and select,
   // matching compose-slots' own contract.
+  // The envelope this auto-pick admitted under; its lineage ceiling (4.5) holds lineages below.
+  let pickEnvelope: SpendEnvelopeVerdict | null = null;
   if (!pointer.gap_id && !pointer.category) {
     const capacity = await peekComposeCapacity();
     if (capacity && capacity.free <= 0) {
@@ -5388,13 +5518,15 @@ export async function resolveGapToFeature(pointer: GapToFeaturePointer): Promise
           stage: "budget",
           verdict: "BUSY",
           error: "spend envelope: " + envelope.reason + " (selection skipped)",
-          reason: envelope.absent ? "budget_absent" : envelope.unreadable ? "budget_unreadable" : envelope.paused ? "budget_paused" : "budget_exhausted",
+          reason: envelope.absent ? "budget_absent" : envelope.unreadable ? "budget_unreadable" : envelope.paused ? "budget_paused" : envelope.node_share_exhausted ? "budget_node_share" : "budget_exhausted",
           cap_usd: envelope.cap_usd ?? null,
           spent_usd: envelope.spent_usd ?? null,
+          ...(envelope.node_share_exhausted ? { own_spent_usd: envelope.own_spent_usd ?? null, max_node_share: envelope.max_node_share ?? null } : {}),
           skipped_selection: true,
         },
       };
     }
+    pickEnvelope = envelope;
   }
   // 1. Select a gap — landability-ranked when auto-picking (not arbitrary gaps[0]).
   let gap: Record<string, unknown> | null = null;
@@ -5447,6 +5579,7 @@ export async function resolveGapToFeature(pointer: GapToFeaturePointer): Promise
     // near 27%. Past the cap a recommit waits for a new root attempt instead of being re-picked.
     const RECOMMIT_LINEAGE_ATTEMPT_CAP = 6;
     let lineageCapped = 0;
+    let lineageSpendCapped = 0;
     // Index the candidate set once so the backoff can walk parent_gap_id / source_gap_id
     // chains without re-scanning per gap.
     const gapsById = new Map<string, Record<string, unknown>>();
@@ -5458,6 +5591,11 @@ export async function resolveGapToFeature(pointer: GapToFeaturePointer): Promise
       const state = lineageBackoffState(g, gapsById);
       if (String(g.id ?? "").startsWith("recommit-") && state.attempts >= RECOMMIT_LINEAGE_ATTEMPT_CAP) {
         lineageCapped++;
+        return false;
+      }
+      // LINEAGE SPEND CEILING (4.5): roots and children alike, read from the envelope this pick admitted under.
+      if (lineageSpendHeld(g, gapsById, nowMs, pickEnvelope)) {
+        lineageSpendCapped++;
         return false;
       }
       if (gapIsBackedOff(g, nowMs, state)) {
@@ -5472,6 +5610,9 @@ export async function resolveGapToFeature(pointer: GapToFeaturePointer): Promise
     // some other reason — which is the confusion this codebase keeps paying for.
     if (lineageCapped > 0) {
       console.log(`[gap-to-feature] lineage cap excluded ${lineageCapped} recommit gap(s) (lineage failed_attempts >= ${RECOMMIT_LINEAGE_ATTEMPT_CAP})`);
+    }
+    if (lineageSpendCapped > 0) {
+      console.log(`[gap-to-feature] lineage spend ceiling held ${lineageSpendCapped} gap(s) (lineage spent >= ${pickEnvelope?.lineage_usd_cap} USD in ${Math.round((pickEnvelope?.lineage_window_ms ?? 3_600_000) / 1000)}s without landing)`);
     }
     if (backoffExcluded > 0) {
       console.log(`[gap-to-feature] backoff excluded ${backoffExcluded} of ${gaps.length} gaps (eligible=${eligible.length}, deepest_lineage=${deepestLineage})`);
@@ -6209,6 +6350,7 @@ const familySample: string[] = await (async () => {
         land: !(pointer.dry_run ?? false),
         max_ops: 8,
       } as never);
+      await recordLineageSpend(String(gap.id ?? ""), sliceCompose.body, pointer.dry_run ?? false);
       lastBody = sliceCompose.body as Record<string, unknown>;
       sliceResults.push({ file: s.file, verdict: lastBody.verdict });
       if (lastBody.verdict === "FAVORABLE") { priorSliceFlow.push(s.file + " landed" + (typeof lastBody.commit_sha === "string" ? " (commit " + lastBody.commit_sha + ")" : "") + (typeof lastBody.summary === "string" ? ": " + String(lastBody.summary).slice(0, 120) : "")); }
@@ -6261,6 +6403,7 @@ const familySample: string[] = await (async () => {
     // backstop). Suppressed in dry_run.
     land: !(pointer.dry_run ?? false),
   });
+  await recordLineageSpend(String(gap.id ?? ""), compose.body, pointer.dry_run ?? false);
 
   const cb = compose.body as Record<string, unknown>;
   try {

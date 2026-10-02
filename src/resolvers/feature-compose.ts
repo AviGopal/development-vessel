@@ -4322,7 +4322,15 @@ async function resolveFeatureComposeUncapped(pointer: FeatureComposePointer): Pr
     return { shape: "featureComposeReport", body: { ok: false, verdict: "BUSY", stage: "guard", error: "compose already in flight for " + busy + " - retry after it completes" } };
   }
   for (const v of unisolated) composeInFlight.add(v);
-  try { return await composeUsageStore.run({ input_tokens: 0, output_tokens: 0, calls: 0, cost_usd: 0 }, () => resolveFeatureComposeInner(pointer, pointer.gap?.id, ws)); } finally { for (const v of unisolated) composeInFlight.delete(v); await ws.release(); }
+  // The run's accumulated spend rides on the report as `llm_usage` (unless the inner run set one), so
+  // the caller can charge it to the gap's lineage (gap-to-feature recordLineageSpend, value-per-cost 4.5).
+  const usage: ComposeUsage = { input_tokens: 0, output_tokens: 0, calls: 0, cost_usd: 0 };
+  try {
+    const r = await composeUsageStore.run(usage, () => resolveFeatureComposeInner(pointer, pointer.gap?.id, ws));
+    const rb = r.body;
+    if (rb && typeof rb === "object" && !Array.isArray(rb) && (rb as Record<string, unknown>)["llm_usage"] === undefined) return { ...r, body: { ...(rb as Record<string, unknown>), llm_usage: { ...usage } } };
+    return r;
+  } finally { for (const v of unisolated) composeInFlight.delete(v); await ws.release(); }
   } finally { composesInFlight--; }
 }
   // 2026-07-15: Previous edits failed to address the semantic rejection from spec-validation logic at line 1085.

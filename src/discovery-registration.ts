@@ -9,6 +9,7 @@ import {
 } from "node:crypto";
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
+import { scheduleSeedDelivery } from "./seed/deliver.js";
 
 const HEARTBEAT_INTERVAL_MS = 60_000;
 
@@ -149,6 +150,12 @@ async function doHeartbeat(): Promise<void> {
  * it is; a registered one heartbeats, and re-registers when a heartbeat fails.
  */
 export function startDiscoveryRegistration(): void {
+  // SEED DELIVERY rides the server's start path. This function is called once, by the vessel
+  // server (src/index.ts) as it comes up, and by nothing a test or a CLI import reaches — so a
+  // new or version-bumped seed reaches a POPULATED catalogue after every deploy, without an
+  // import-time side effect (the suite runs as root in the container, against the live store).
+  // Deferred and once per process; it does not depend on discovery, only on activity-api.
+  scheduleSeedDelivery();
   const tick = (): void => {
     if (!registered) {
       doRegister()

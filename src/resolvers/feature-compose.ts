@@ -22,6 +22,7 @@
  */
 import { METABOB_API_KEY, DISCOVERY_SHAPES } from "../config.js";
 import { withWriteGrant } from "./write-containment.js";
+import { superRepoCheckoutCall } from "./super-repo-checkout.js";
 import { federatedLlmEgressUrls } from "./federated-llm-egress.js";
 import { acquireComposeWorkspace, type ComposeWorkspace } from "./compose-workspace";
 import type { ResolverResult } from "./types.js";
@@ -5413,10 +5414,13 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
       if (dirty) {
         console.log(`[feature-compose] ${vesselName} has uncommitted changes in the super-repo clone; composing against them rather than discarding them`);
       } else {
-        await callTool(toolsEndpoint, "shell", {
-          command: `git -C ${JSON.stringify(SUPER_REPO_ROOT)} checkout origin/dev -- ${JSON.stringify(`repos/${vesselName}`)} 2>&1`,
-          cwd: SUPER_REPO_ROOT,
-        });
+        // Writes the live clone, so it carries a lane write grant bound to SUPER_REPO_ROOT
+        // (super-repo-checkout.ts); local-tools' shell gate refuses it otherwise.
+        const co = await callTool(toolsEndpoint, "shell", superRepoCheckoutCall(SUPER_REPO_ROOT, vesselName, METABOB_API_KEY));
+        if (!co.ok) {
+          // A refused or failed checkout leaves the in-tree copy stale: compose would ground on it silently (qa 10-02).
+          console.warn(`[feature-compose] ${vesselName}: in-tree checkout of origin/dev did not succeed; composing against the existing in-tree copy: ${JSON.stringify(co.body).slice(0, 200)}`);
+        }
       }
       await callTool(toolsEndpoint, "shell", {
         command: `ln -sfn ${JSON.stringify(inTreePath)} ${JSON.stringify(runtimePath)}`,

@@ -1,5 +1,5 @@
 import type { ResolverResult } from '../resolvers/types.js';
-import { resolveWebResource } from './web-resource.js';
+import { resolveWebResource, type SearchProvenance } from './web-resource.js';
 
 /**
  * `http_response` — delegates to the real, trust-gated fetcher.
@@ -41,7 +41,8 @@ export type HttpResponsePointer = {
   type: "http_response";
   url: string;
   max_bytes?: number;
-  allow_domains?: string[];
+  /** Forwarded to web_resource, which verifies it (a same-walk search result that returned url). */
+  provenance?: SearchProvenance;
 };
 
 export async function resolveHttpResponse(
@@ -61,7 +62,7 @@ export async function resolveHttpResponse(
         ok: false,
         error: 'url is required — refusing to fetch an assumed address',
         detail:
-          'No url was bound on this pointer. This resolver previously ignored the pointer and fetched a hardcoded httpbin probe, returning a well-formed answer to a question nobody asked. Bind url (https only; the origin must be on the web_resource trust allowlist).',
+          'No url was bound on this pointer. This resolver previously ignored the pointer and fetched a hardcoded httpbin probe, returning a well-formed answer to a question nobody asked. Bind url (https only; the origin must be on the webResourceAllowlist policy, or be a url a web search in the same walk returned, passed with provenance).',
         resolved: false,
       },
     };
@@ -71,7 +72,7 @@ export async function resolveHttpResponse(
     type: 'web_resource',
     url,
     ...(typeof pointer.max_bytes === 'number' ? { max_bytes: pointer.max_bytes } : {}),
-    ...(Array.isArray(pointer.allow_domains) ? { allow_domains: pointer.allow_domains } : {}),
+    ...(pointer.provenance !== undefined ? { provenance: pointer.provenance } : {}),
   });
 
   // Re-label to the requested shape, keeping the body verbatim — including a `trust:"rejected"`

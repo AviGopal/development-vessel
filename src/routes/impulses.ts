@@ -75,7 +75,7 @@ import { resolveError } from "../resolvers/error.js";
 import { resolveEfficiencyScan } from "../resolvers/efficiency-scan.js";
 import { resolvePerformanceReachGate } from "../resolvers/performance-reach-gate.js";
 import { resolvePerfCanaryResolve } from "../resolvers/perf-canary-resolve.js";
-import { resolveWebResource } from "../resolvers/web-resource.js";
+import { resolveWebResource, resolveWebResourceAllowlist } from "../resolvers/web-resource.js";
 import { resolvePriorFailedAttempts } from "../resolvers/prior-failed-attempts.js";
 import { resolvePriorSuccessfulAttempts } from "../resolvers/prior-successful-attempts.js";
 import { resolveSystemLoadReport } from "../resolvers/system-load-report.js";
@@ -429,6 +429,8 @@ async function dispatchInner(pointer: AnyPointer): Promise<ResolverResult> {
       return resolvePerfCanaryResolve(p as Parameters<typeof resolvePerfCanaryResolve>[0]);
     case "web_resource":
       return resolveWebResource(p as Parameters<typeof resolveWebResource>[0]);
+    case "webResourceAllowlist":
+      return resolveWebResourceAllowlist();
     case "prior_failed_attempts":
       return resolvePriorFailedAttempts(p as Parameters<typeof resolvePriorFailedAttempts>[0]);
     case "prior_successful_attempts":

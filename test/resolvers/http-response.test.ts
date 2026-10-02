@@ -60,25 +60,13 @@ describe("resolveHttpResponse", () => {
   // Pins the 2026-08-16 allowlist entry. ssd.jpl.nasa.gov is the origin the substrate has
   // repeatedly derived as the right source for an ephemeris question and been unable to reach —
   // the goal class failed for want of an origin, not for want of reasoning. If someone removes
-  // the entry, this fails loudly instead of the capability silently disappearing again.
-  // Asserts only that the gate ADMITS the origin: no network call is made, and admission is not
-  // a claim that any particular query works.
+  // the entry from the bootstrap list, this fails loudly instead of the capability silently
+  // disappearing again. No network: admission is checked on the list itself.
   it("admits ssd.jpl.nasa.gov — a read-only public scientific data API, like open-meteo", async () => {
-    const { resolveWebResource } = await import("../../src/resolvers/web-resource.js");
-    const rejected = (await resolveWebResource({
-      type: "web_resource",
-      url: "https://ssd.jpl.nasa.gov/api/horizons.api",
-      allow_domains: ["example.invalid"], // force a refusal to prove the gate is what decides
-    })).body as Record<string, unknown>;
-    expect(rejected["trust"]).toBe("rejected");
-
-    // With the shipped default list, the same origin is NOT refused by the allowlist branch.
-    const body = (await resolveHttpResponse({
-      type: "http_response",
-      url: "https://ssd.jpl.nasa.gov/api/horizons.api?format=text&COMMAND=%27501%27",
-    })).body as Record<string, unknown>;
-    expect(body["trust"]).not.toBe("rejected");
-  }, 20_000);
+    const { BOOTSTRAP_ALLOW_DOMAINS } = await import("../../src/resolvers/web-resource.js");
+    expect(BOOTSTRAP_ALLOW_DOMAINS).toContain("ssd.jpl.nasa.gov");
+    expect(BOOTSTRAP_ALLOW_DOMAINS).toContain("api.open-meteo.com");
+  });
 
   it("refuses non-https urls through the same gate", async () => {
     const body = (await resolveHttpResponse({
@@ -88,13 +76,13 @@ describe("resolveHttpResponse", () => {
     expect(body["trust"]).toBe("rejected");
   });
 
-  it("honours a caller-supplied allowlist override, so the gate is data not a constant", async () => {
+  it("does NOT honour a caller-supplied allowlist override: a caller cannot widen the gate", async () => {
     const body = (await resolveHttpResponse({
       type: "http_response",
       url: "https://example.invalid/thing",
-      allow_domains: ["other.invalid"],
-    })).body as Record<string, unknown>;
+      allow_domains: ["example.invalid"],
+    } as never)).body as Record<string, unknown>;
     expect(body["trust"]).toBe("rejected");
-    expect(body["allow_domains"]).toEqual(["other.invalid"]);
+    expect(body["allow_domains"]).not.toContain("example.invalid");
   });
 });

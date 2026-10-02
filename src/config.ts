@@ -140,6 +140,9 @@ export const config = {
     "performance_reach_gate",
     "perf_canary_resolve",
     "web_resource",
+    // The static half of web_resource's trust gate, read-only (no _write: editing it is an operator
+    // act on the volume, WORKSPACE_ROOT/policies/webResourceAllowlist.json).
+    "webResourceAllowlist",
     "residual_shape_discovery",
     "activate_substrate_script",
     "author_composed_capability",

@@ -27,6 +27,11 @@ export const GOAL_REACH_TICK_TEMPLATE: ActivityTemplate = {
   inputShapes: [],
   outputShapes: ["goalReachTickResult"],
   tags: ["lift.autonomous.loop", "goal_reach", "boredom_target_template"],
+  // Raise whenever this body changes: a populated catalogue receives a seed only when its
+  // seed_version exceeds the registered row's (a row absent from the registry counts as 0) —
+  // see upsertVersionBumpedSeeds in seed/deliver.ts. 1 = first delivery; without it this
+  // template never reached a non-empty catalogue.
+  metadata: { seed_version: 1 },
   variables: [],
   tasks: [
     {

@@ -26,7 +26,7 @@ import { resolveUiWritePassthrough } from "./ui-write-passthrough.js";
 const solicitedHumanGaps = new Set<string>();
 import { DISCOVERY_ENDPOINT, METABOB_API_KEY, GOAL_HOST_VESSEL_ENDPOINT, lookupShape, describeLookup, discoveryFailureBackoffMs, __resetDiscoveryForTests } from "../config.js";
 import { peekComposeCapacity } from "../compose-slots.js";
-import { gateLanding } from "./push-policy.js";
+import { gateLanding, landingsStopped } from "./push-policy.js";
 import { readFile } from "node:fs/promises";
 
 // Mirror feature-compose's path model: repos/<vessel>/... maps to the writable
@@ -1928,6 +1928,19 @@ export async function admitActionableGaps(
   gaps: Record<string, unknown>[],
   opts?: { typecheckRunner?: TypecheckRunner },
 ): Promise<AdmissionResult> {
+  // LANDINGS STOPPED → ADMIT NOTHING. MITOSIS_DIRECT_PUSH=0 is the emergency stop the cutover
+  // refuses every landing on (vessel-mitosis-cutover.ts, push-policy.ts landingsStopped). An
+  // auto-pick admitted here would pay for the typecheck pass below, an LLM draft and compose
+  // worktrees, only to be refused at cutover. Same predicate, same semantics: only an explicit
+  // "0" stops (unset or "1" proceeds, as the cutover does); a pure env read cannot be
+  // unevaluable. This is the only admission call, and only the auto-pick branch (no gap_id)
+  // reaches it, so targeted and operator-directed composes are unaffected. Checked first, so a
+  // stopped pass costs neither the scope read nor a typecheck. One line per pass, not per gap.
+  if (landingsStopped()) {
+    const excludedAll = gaps.map((g) => ({ id: String(g.id ?? ""), reason: "landings_stopped" }));
+    console.log(`[gap-to-feature] auto-pick admission: landings_stopped (MITOSIS_DIRECT_PUSH=0): ${gaps.length} candidates → 0 admitted, ${excludedAll.length} excluded`);
+    return { admitted: [], excluded: excludedAll };
+  }
   const runner = opts?.typecheckRunner ?? defaultTypecheckRunner;
   // One scope read for the whole pass, so every candidate is judged against the same answer.
   const scope = await autonomyScope();

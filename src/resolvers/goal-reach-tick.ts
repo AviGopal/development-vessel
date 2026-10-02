@@ -722,14 +722,18 @@ async function ownUrls(shape: string): Promise<{ ok: true; urls: string[] } | { 
 const asNum = (v: unknown): number | null => (typeof v === "number" && Number.isFinite(v) ? v : null);
 const asStrArr = (v: unknown): string[] => (Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : []);
 
-async function traceCost(executionId: string | null | undefined): Promise<number | null> {
+/** The durable trace of an execution (activity-api), unwrapped, or null when unreadable. */
+async function readTrace(executionId: string | null | undefined): Promise<Record<string, unknown> | null> {
   if (!executionId) return null;
   try {
     const { executionTrace } = await import("./execution-trace.js");
     const t = (await executionTrace({ execution_id: executionId })).body as Record<string, unknown> | null;
-    const inner = (t?.["trace"] ?? t?.["data"] ?? t) as Record<string, unknown> | null;
-    return asNum(inner?.["costUsd"]) ?? asNum(inner?.["cost_usd"]) ?? null;
+    return ((t?.["trace"] ?? t?.["data"] ?? t) as Record<string, unknown> | null) ?? null;
   } catch { return null; }
+}
+async function traceCost(executionId: string | null | undefined): Promise<number | null> {
+  const t = await readTrace(executionId);
+  return asNum(t?.["costUsd"]) ?? asNum(t?.["cost_usd"]) ?? null;
 }
 
 /** Classify ledger landingEvent records by route. Host commits never pass the container hooks: they
@@ -826,6 +830,13 @@ export function defaultGoalReachIO(policy: GoalReachPolicy): GoalReachIO {
 
     async readLandings(fromMs, toMs) {
       try {
+        // DRAIN THE SPOOL FIRST. landingEvent.jsonl fills only when unaccounted_landing_scan ingests the
+        // git-hook spool; reading it undrained misses a landing made since the last scan and grades a
+        // hand-assisted reach "false". goal-host's mintReachedTrace runs the same scan first for the same
+        // reason. A failed drain makes the read unreadable, so the tick holds the hands grade.
+        const { resolveUnaccountedLandingScan } = await import("./unaccounted-landing-scan.js");
+        const drained = await resolveUnaccountedLandingScan({ type: "unaccounted_landing_scan" });
+        if ((drained.body as { spool_readable?: boolean } | null)?.spool_readable !== true) return { ok: false, why: "attempt-ledger spool unreadable" };
         const { readRecords } = await import("./attempt-ledger.js");
         const events = readRecords("landingEvent").map((r) => r.record as Record<string, unknown>);
         const inContainer = new Set(events.filter((e) => e["event"] === "commit" || e["event"] === "rewrite").map((e) => String(e["sha"] ?? "")));
@@ -891,11 +902,21 @@ export function defaultGoalReachIO(policy: GoalReachPolicy): GoalReachIO {
       // here needs ribosome-vessel to be registered in discovery (it advertises no shapes).
       const prod = await ownUrls("goalDispatchAsync");
       if (!prod.ok) return { ok: false, why: prod.why };
-      const tpl = req.template_id ?? "";
+      // The FULL lifecycle payload goal-host's mintReachedTrace builds from the trace: without it the
+      // template's LLM tasks get empty placeholders and synthesis fails or is hollow.
+      const trace = await readTrace(req.execution_id);
+      if (!trace) return { ok: false, why: `trace ${req.execution_id} unreadable; a thin lifecycle would hand the ribosome nothing to extract` };
+      const tasks = Array.isArray(trace["tasks"]) ? (trace["tasks"] as Array<{ outputShapes?: unknown }>) : [];
+      const tpl = req.template_id ?? (typeof trace["templateId"] === "string" ? trace["templateId"] : "");
       const lifecycle = {
-        executionId: req.execution_id, status: "completed", templateId: tpl, templateName: tpl,
-        templateAuthor: tpl.startsWith("learned-") ? "ribosome-pattern" : "", hasGoalContext: true,
-        goalSignature: req.goal_hash, qualityEligible: true,
+        executionId: req.execution_id, status: trace["status"] === "failed" ? "failed" : "completed",
+        taskCount: tasks.length, durationMs: asNum(trace["durationMs"]) ?? 0, costUsd: asNum(trace["costUsd"]) ?? 0,
+        templateId: tpl, templateName: tpl,
+        templateAuthor: tpl.startsWith("learned-") ? "ribosome-pattern" : "",
+        outputShapes: [...new Set(tasks.flatMap((t) => asStrArr(t.outputShapes)))],
+        depth: Array.isArray(trace["compositionChain"]) ? (trace["compositionChain"] as unknown[]).length : 0,
+        impulseCount: Array.isArray(trace["outputImpulseIds"]) ? (trace["outputImpulseIds"] as unknown[]).length : 0,
+        hasGoalContext: true, goalSignature: req.goal_hash, qualityEligible: true,
       };
       const r = await postResolve(prod.urls[0]!, {
         type: "goalDispatchAsync",

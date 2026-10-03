@@ -1,6 +1,18 @@
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect, beforeEach, afterEach, afterAll } from "bun:test";
 import { resolveSystemdRestart } from "../../src/resolvers/systemd-restart.js";
 import { Blob } from "buffer";
+import { installCutoverExecGuard, restoreCutoverExecModules, type ExecGuard } from "./cutover-exec-guard.js";
+
+// No test here may run the HOST's systemctl (measured 2026-10-03: the in-process case below did, and
+// passed or timed out depending on the host). The exec guard blocks and records any systemctl /
+// docker / podman / vessel-ctl spawn; a case that needs an answer declares a route. The resolver
+// has no injectable runner, so the route stubs Bun.spawn, which it reads at call time.
+// The child-process cases below spawn `bun --eval`, which the guard does not cover (a child gets a
+// fresh Bun.spawn); each child replaces its own Bun.spawn before calling the resolver.
+let exec: ExecGuard;
+beforeEach(() => { exec = installCutoverExecGuard(); });
+afterEach(() => { expect(exec.restore()).toEqual([]); });
+afterAll(() => { restoreCutoverExecModules(); });
 
 describe("systemd-restart resolver", () => {
   it("returns systemd_unit_restart shape with required body fields via child process", async () => {
@@ -127,17 +139,22 @@ describe("systemd-restart resolver", () => {
   });
 
   it("returns success:false when restart command fails", async () => {
-    // systemctl restart exits non-zero → no polling
+    // systemctl restart exits non-zero → no polling. Stubbed: the host's systemctl is never run.
+    exec.route({
+      name: "systemctl restart (unit not found)",
+      match: (c) => c === "systemctl restart nonexistent-unit-xyz.service",
+      respond: () => ({ exitCode: 5, stderr: "Failed to restart nonexistent-unit-xyz.service: Unit nonexistent-unit-xyz.service not found.\n" }),
+    });
     const result = await resolveSystemdRestart({
       type: "systemd_restart",
       unit: "nonexistent-unit-xyz",
       timeout_ms: 500,
     });
     expect(result.shape).toBe("systemd_unit_restart");
-    const body = result.body as { success: boolean; active: boolean };
-    // In environments without systemd this may still return false — either way
-    // shape and success/active booleans must be present
-    expect(typeof body.success).toBe("boolean");
-    expect(typeof body.active).toBe("boolean");
+    const body = result.body as { success: boolean; active: boolean; error?: string };
+    expect(body.success).toBe(false);
+    expect(body.active).toBe(false);
+    expect(body.error).toContain("not found");
+    expect(exec.hits).toEqual(["systemctl restart (unit not found)"]);
   });
 });

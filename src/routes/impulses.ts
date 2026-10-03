@@ -1,4 +1,4 @@
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
 import { callerAuthLabel } from "./caller-identity.js";
 import { auditDetectorOutputSanity } from "../lib/detector-output-sanity.js";
 import { resolveContentAddressedVesselId } from "../resolvers/content-addressed-vessel-id.js";
@@ -47,6 +47,7 @@ import { resolveRhythmRealitySync } from "../resolvers/rhythm-reality-sync.js";
 import { resolveMemoryNote, resolveMemoryNoteWrite } from "../resolvers/memory-note.js";
 import { resolveSubstrateGap, resolveSubstrateGapWrite } from "../resolvers/substrate-gap.js";
 import { resolvePoolImpulse, resolvePoolImpulseWrite, trustRootWriteShape, operatorCredential } from "../resolvers/pool-impulse.js";
+import { identityCredential, isWritePointerType } from "../lib/caller-credential.js";
 import { resolveFsList } from "../resolvers/fs-list.js";
 import { resolveFsGrep } from "../resolvers/fs-grep.js";
 import { resolveHttpFetch } from "../resolvers/http-fetch.js";
@@ -1054,6 +1055,21 @@ async function dispatchInner(pointer: AnyPointer): Promise<ResolverResult> {
 export const impulsesRouter = new Hono();
 
 /**
+ * WRITES ARE AUTHENTICATED (both doors below). A write-type pointer (lib/caller-credential.ts
+ * isWritePointerType: every `*_write` shape and the mutating primitives) must carry an ApiKey that
+ * identity-vessel authenticates, or it is refused 401 before any resolver runs. Fails CLOSED: no key,
+ * a refused key, and an unreachable identity are all refusals. Reads are not gated here.
+ * Returns the refusal response, or null when the call may proceed.
+ */
+async function refuseUnauthenticatedWrite(c: Context, pointerType: string): Promise<Response | null> {
+  if (!isWritePointerType(pointerType)) return null;
+  const cred = await identityCredential(c.req.header("Authorization"));
+  if (cred.authenticated) return null;
+  console.warn(`[resolve] REFUSED unauthenticated ${pointerType}: ${cred.why ?? "not authenticated"}`);
+  return c.json({ success: false, error: `caller_credential_required: ${pointerType} is a write; ${cred.why ?? "not authenticated"}` }, 401);
+}
+
+/**
  * Vessel-proxy adapter endpoint.
  *
  * VesselResolverProxy in minibob calls POST /resolvers/execute with:
@@ -1076,6 +1092,8 @@ impulsesRouter.post("/resolvers/execute", async (c) => {
   if (!resolverName) {
     return c.json({ error: "resolver field is required" }, 400);
   }
+
+  { const refused = await refuseUnauthenticatedWrite(c, String(resolverName)); if (refused) return refused; }
 
   try {
     const pointer = { ...(body.config ?? {}), type: resolverName };
@@ -1118,6 +1136,8 @@ impulsesRouter.post("/v2/impulses/resolve", async (c) => {
   if (!pointerType) {
     return c.json({ success: false, error: "pointer.type is required" }, 400);
   }
+
+  { const refused = await refuseUnauthenticatedWrite(c, pointerType); if (refused) return refused; }
 
   // A TRUST-ROOT pool write is the one write that needs WHO is asking (pool-impulse.ts
   // TRUST_ROOT_POOL_SHAPES); only this route sees the Authorization header, so the credential is

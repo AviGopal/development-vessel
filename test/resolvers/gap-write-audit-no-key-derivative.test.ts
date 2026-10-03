@@ -31,6 +31,16 @@ const SECRET = "sk-fixture-another-SECRET-4d1e88b2";
 const AT = "2026-10-03T10:00:00.000Z";
 const OPEN = { id: "audit-nokey-fixture-gap", category: "systematic_failure", source: "human_reported", summary: "an open gap the holder stores", detected_at: AT, status: "open", classification_metadata: {}, created_at: AT, updated_at: AT };
 const realFetch = globalThis.fetch;
+// The resolve route authenticates writes through identity-vessel (lib/caller-credential.ts), so this
+// file's fixture key must be one identity accepts: the stub below answers /v1/auth/resolve for it.
+const IDENTITY = "http://identity.fixture.invalid";
+let savedIdentityUrl: string | undefined;
+const identityAnswer = (init?: { body?: unknown }): Response => {
+  const key = JSON.parse(String(init?.body ?? "{}"))?.impulse?.pointer?.apiKey;
+  return key === SECRET
+    ? Response.json({ success: true, data: { authenticated: true, orgId: "o", userId: "u", scopes: ["read", "write"] } })
+    : Response.json({ success: false, error: "invalid" }, { status: 401 });
+};
 
 /** Every forbidden needle: the key itself and each 8+ char prefix of its sha256 and sha1 hex. */
 function forbidden(): string[] {
@@ -55,10 +65,13 @@ const post = (pointer: Record<string, unknown>) => impulsesRouter.request("/v2/i
 
 beforeEach(() => {
   savedEndpoint = process.env["GAP_STORE_ENDPOINT"];
+  savedIdentityUrl = process.env["IDENTITY_VESSEL_URL"];
+  process.env["IDENTITY_VESSEL_URL"] = IDENTITY;
   process.env["GAP_STORE_ENDPOINT"] = HOLDER;
   lines = []; forwarded = [];
   for (const m of ["log", "warn", "error", "info"] as const) spies.push(spyOn(console, m).mockImplementation((...a: unknown[]) => { lines.push(a.map((x) => (typeof x === "string" ? x : JSON.stringify(x))).join(" ")); }));
   globalThis.fetch = (async (url: unknown, init?: { body?: unknown }) => {
+    if (String(url) === `${IDENTITY}/v1/auth/resolve`) return identityAnswer(init);
     if (String(url) !== HOLDER) return Response.json({ ok: true });
     forwarded.push(String(init?.body ?? ""));
     const p = JSON.parse(String(init?.body ?? "{}"))?.impulse?.pointer ?? {};
@@ -69,6 +82,7 @@ beforeEach(() => {
 afterEach(() => {
   while (spies.length) spies.pop()!.mockRestore();
   if (savedEndpoint === undefined) delete process.env["GAP_STORE_ENDPOINT"]; else process.env["GAP_STORE_ENDPOINT"] = savedEndpoint;
+  if (savedIdentityUrl === undefined) delete process.env["IDENTITY_VESSEL_URL"]; else process.env["IDENTITY_VESSEL_URL"] = savedIdentityUrl;
 });
 afterAll(() => { globalThis.fetch = realFetch; });
 

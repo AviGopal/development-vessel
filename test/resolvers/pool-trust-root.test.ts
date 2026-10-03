@@ -128,10 +128,12 @@ describe("the HTTP route (the door a peer and the lane both use)", () => {
     expect(JSON.stringify(nodesNow())).toBe(before);
   });
 
-  it("no credential gets 403; the deprecated bare body form is gated the same way", async () => {
-    expect((await post(null, { ...seed, id: "sn-anon" })).status).toBe(403);
+  // No credential at all is now refused one step earlier, by the route's write gate (every write
+  // needs an authenticated caller; see resolve-route-write-auth.test.ts), so it is 401, not 403.
+  it("no credential gets 401 from the write gate; the deprecated bare body form is gated the same way", async () => {
+    expect((await post(null, { ...seed, id: "sn-anon" })).status).toBe(401);
     const bare = await impulsesRouter.request("/v2/impulses/resolve", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...seed, id: "sn-bare" }) });
-    expect(bare.status).toBe(403);
+    expect(bare.status).toBe(401);
     expect(nodesNow().some((i) => i.id === "sn-anon" || i.id === "sn-bare")).toBe(false);
   });
 
@@ -149,9 +151,10 @@ describe("the HTTP route (the door a peer and the lane both use)", () => {
     expect(j.body).toMatchObject({ ok: false, conflict: true });
   });
 
-  it("a non-trust-root write through the same route needs no operator (unchanged behaviour)", async () => {
-    const res = await post(null, { type: "poolImpulse_write", id: "plain-2", shape: "timeShapedRhythm", body: {} });
+  it("a non-trust-root write through the same route needs an authenticated caller but no operator", async () => {
+    const res = await post(`ApiKey ${FLEET_KEY}`, { type: "poolImpulse_write", id: "plain-2", shape: "timeShapedRhythm", body: {} });
     expect(res.status).toBe(200);
+    expect((await post(null, { type: "poolImpulse_write", id: "plain-3", shape: "timeShapedRhythm", body: {} })).status).toBe(401);
   });
 });
 

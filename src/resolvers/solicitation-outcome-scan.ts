@@ -112,7 +112,7 @@ export async function resolveSolicitationOutcomeScan(pointer: SolicitationOutcom
     try {
       await fetch(process.env["DEV_VESSEL_IMPULSES_URL"] ?? "http://127.0.0.1:8090/v2/impulses/resolve", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...(process.env["METABOB_API_KEY"] ? { Authorization: `ApiKey ${process.env["METABOB_API_KEY"]}` } : {}) },
         body: JSON.stringify({ impulse: { type: "substrateGap_write", gap: { id: "operator-escalation-backlog", category: "systematic_failure", source: "substrate_detected", summary: detail, detected_at: new Date().toISOString(), status: "open", classification_metadata: { unanswered_count: unanswered.length, total_solicitations: outcomes.length, answered_count: answered } } } }),
         signal: AbortSignal.timeout(8000),
       });

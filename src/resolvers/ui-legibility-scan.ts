@@ -70,6 +70,9 @@ export async function resolveUiLegibilityScan(
 ): Promise<ResolverResult> {
   const obsidianEndpoint = (p.obsidianEndpoint ?? DEFAULT_OBSIDIAN_ENDPOINT).replace(/\/+$/, "");
   const devVesselImpulsesUrl = p.devVesselImpulsesUrl ?? DEFAULT_DEV_VESSEL_URL;
+  // The vessel's own key goes only to its own default endpoint: devVesselImpulsesUrl is caller-supplied,
+  // and this scan is not a gated write, so attaching the key to an arbitrary URL would hand it out.
+  const selfAuth: Record<string, string> = devVesselImpulsesUrl === DEFAULT_DEV_VESSEL_URL && process.env["METABOB_API_KEY"] ? { Authorization: `ApiKey ${process.env["METABOB_API_KEY"]}` } : {};
   const pxFloor = p.px_floor ?? 12;
   const maxChips = p.max_chips_per_row ?? 12;
   const emitGap = p.emit_gap !== false;
@@ -189,7 +192,7 @@ export async function resolveUiLegibilityScan(
       try {
         const resp = await fetch(devVesselImpulsesUrl, {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: { "Content-Type": "application/json", ...selfAuth },
           body: JSON.stringify({
             impulse: {
               pointer: {
@@ -246,7 +249,7 @@ export async function resolveUiLegibilityScan(
     try {
       const listResp = await fetch(devVesselImpulsesUrl, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...selfAuth },
         body: JSON.stringify({
           impulse: {
             // include_held: this scan's own findings include held ones, so it reads them and SKIPS them
@@ -271,7 +274,7 @@ export async function resolveUiLegibilityScan(
         if (!["px_floor", "hex_color_override", "chip_density"].includes(rule)) continue;
         const closeResp = await fetch(devVesselImpulsesUrl, {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: { "Content-Type": "application/json", ...selfAuth },
           body: JSON.stringify({
             impulse: {
               pointer: {

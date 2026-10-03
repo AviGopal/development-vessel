@@ -2,6 +2,7 @@ import { join } from 'node:path';
 import { writeFileSync, readFileSync, existsSync, mkdirSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { WORKSPACE_ROOT } from '../config.js';
+import { identityCredential } from '../lib/caller-credential.js';
 
 const POOL_DIR = join(WORKSPACE_ROOT, 'pool');
 const POOL_FILE = join(POOL_DIR, 'standing.json');
@@ -91,30 +92,14 @@ export function trustRootWriteShape(pointer: { id?: string; shape?: string }): s
   }
   return null;
 }
-const identityUrl = (): string => (process.env['IDENTITY_VESSEL_URL'] ?? '').trim().replace(/\/+$/, '');
 /** Whether `authHeader` carries an operator credential: identity-vessel's /v1/auth/resolve (the contract
  *  discovery-vessel's auth middleware and activity-api's validateApiKeyWithFallback use) answers it
- *  authenticated WITH the "admin" scope. Anything else, including an unreachable identity, is not. */
+ *  authenticated WITH the "admin" scope. Anything else, including an unreachable identity, is not.
+ *  Asked fresh every time (no cache): a trust-root write is rare and must see a revocation at once. */
 export async function operatorCredential(authHeader: string | undefined): Promise<PoolWriteAuth> {
-  const m = /^ApiKey\s+(\S+)$/i.exec(String(authHeader ?? '').trim());
-  if (!m) return { operator: false, why: 'no ApiKey credential presented' };
-  const base = identityUrl();
-  if (!base) return { operator: false, why: 'IDENTITY_VESSEL_URL unset: identity cannot be asked' };
-  try {
-    const res = await fetch(`${base}/v1/auth/resolve`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ impulse: { type: 'authentication', pointer: { type: 'apiKey', apiKey: m[1] } } }),
-      signal: AbortSignal.timeout(5000),
-    });
-    if (!res.ok) return { operator: false, why: `identity answered HTTP ${res.status}` };
-    const j = (await res.json()) as { success?: boolean; data?: { authenticated?: boolean; scopes?: unknown } };
-    if (j?.data?.authenticated !== true) return { operator: false, why: 'credential not authenticated' };
-    const scopes = Array.isArray(j.data.scopes) ? j.data.scopes : [];
-    return scopes.includes('admin') ? { operator: true } : { operator: false, why: 'credential lacks the admin scope' };
-  } catch (err) {
-    return { operator: false, why: 'identity unreachable: ' + String((err as Error)?.message ?? err) };
-  }
+  const cred = await identityCredential(authHeader, { cache: false });
+  if (!cred.authenticated) return { operator: false, why: cred.why };
+  return cred.scopes.includes('admin') ? { operator: true } : { operator: false, why: 'credential lacks the admin scope' };
 }
 
 export function resolvePoolImpulseWrite(pointer: {

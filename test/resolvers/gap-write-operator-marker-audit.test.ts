@@ -36,6 +36,16 @@ const SECRET = "sk-fixture-SECRET-key-value-7f3a9c";
 const AT = "2026-10-03T10:00:00.000Z";
 const OPEN = { id: "audit-fixture-open-gap", category: "systematic_failure", source: "human_reported", summary: "an open gap the holder stores", detected_at: AT, status: "open", classification_metadata: {}, created_at: AT, updated_at: AT };
 const realFetch = globalThis.fetch;
+// The resolve route authenticates writes through identity-vessel (lib/caller-credential.ts), so this
+// file's fixture key must be one identity accepts: the stub below answers /v1/auth/resolve for it.
+const IDENTITY = "http://identity.fixture.invalid";
+let savedIdentityUrl: string | undefined;
+const identityAnswer = (init?: { body?: unknown }): Response => {
+  const key = JSON.parse(String(init?.body ?? "{}"))?.impulse?.pointer?.apiKey;
+  return key === SECRET
+    ? Response.json({ success: true, data: { authenticated: true, orgId: "o", userId: "u", scopes: ["read", "write"] } })
+    : Response.json({ success: false, error: "invalid" }, { status: 401 });
+};
 let lines: string[] = [];
 const spies: Array<ReturnType<typeof spyOn>> = [];
 let savedEndpoint: string | undefined;
@@ -49,10 +59,13 @@ const audit = (): string[] => lines.filter((l) => l.includes("[gap-audit]"));
 
 beforeEach(() => {
   savedEndpoint = process.env["GAP_STORE_ENDPOINT"];
+  savedIdentityUrl = process.env["IDENTITY_VESSEL_URL"];
+  process.env["IDENTITY_VESSEL_URL"] = IDENTITY;
   process.env["GAP_STORE_ENDPOINT"] = HOLDER;
   lines = [];
   for (const m of ["log", "warn", "error", "info"] as const) spies.push(spyOn(console, m).mockImplementation((...a: unknown[]) => { lines.push(a.map((x) => (typeof x === "string" ? x : JSON.stringify(x))).join(" ")); }));
   globalThis.fetch = (async (url: unknown, init?: { body?: unknown }) => {
+    if (String(url) === `${IDENTITY}/v1/auth/resolve`) return identityAnswer(init);
     if (String(url) !== HOLDER) return Response.json({ ok: true });
     const p = JSON.parse(String(init?.body ?? "{}"))?.impulse?.pointer ?? {};
     if (p.type === "substrateGap") return Response.json({ shape: "substrateGap", body: { gaps: p.id === OPEN.id ? [OPEN] : [], total: 1 } });
@@ -62,6 +75,7 @@ beforeEach(() => {
 afterEach(() => {
   while (spies.length) spies.pop()!.mockRestore();
   if (savedEndpoint === undefined) delete process.env["GAP_STORE_ENDPOINT"]; else process.env["GAP_STORE_ENDPOINT"] = savedEndpoint;
+  if (savedIdentityUrl === undefined) delete process.env["IDENTITY_VESSEL_URL"]; else process.env["IDENTITY_VESSEL_URL"] = savedIdentityUrl;
 });
 afterAll(() => { globalThis.fetch = realFetch; });
 

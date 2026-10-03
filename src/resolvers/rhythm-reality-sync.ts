@@ -26,7 +26,7 @@ async function fetchWithTimeout(body: unknown, timeoutMs: number): Promise<Respo
   try {
     return await fetch(IMPULSE_ENDPOINT, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...(process.env["METABOB_API_KEY"] ? { Authorization: `ApiKey ${process.env["METABOB_API_KEY"]}` } : {}) },
       body: JSON.stringify(body),
       signal: controller.signal,
     });

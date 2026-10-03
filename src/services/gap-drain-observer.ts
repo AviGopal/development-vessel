@@ -11,6 +11,12 @@ const RECONNECT_MAX_MS = 30000;
 const DEV_VESSEL_ENDPOINT = process.env["DEV_VESSEL_ENDPOINT"] ?? "http://127.0.0.1:8090"; // env-overridable dev-vessel base URL
 const SELF_RESOLVE_URL = `${DEV_VESSEL_ENDPOINT}/v2/impulses/resolve`;
 
+// THE REMEDY TYPES THIS OBSERVER MAY DISPATCH. The type comes from gap data, and the dispatch carries the
+// node's own key (selfAuthHeaders), so an open set would let any gap writer run any write-gated shape,
+// fs_write and fs_edit included, as this node. The list is the set of types existing remedies use:
+// gap_to_feature (trace-store-health-observer's remedies). A new remedy type is added here, deliberately.
+export const DRAIN_REMEDY_ALLOWLIST: ReadonlySet<string> = new Set(["gap_to_feature"]);
+
 export class GapDrainObserver {
   private ws: WebSocket | null = null;
   private shouldRun = false;
@@ -218,6 +224,11 @@ export class GapDrainObserver {
       return;
     }
     if (!remedy || typeof remedy.impulse_type !== "string" || remedy.impulse_type.length === 0) return;
+    if (!DRAIN_REMEDY_ALLOWLIST.has(remedy.impulse_type)) {
+      console.warn(`[gap-drain-observer] REFUSED remedy for gap ${gapId}: impulse_type ${JSON.stringify(remedy.impulse_type.slice(0, 80))} is not on the drain remedy allowlist (${[...DRAIN_REMEDY_ALLOWLIST].join(", ")})`);
+      this.recordDrain({ action: "refused_remedy_type", gap_id: gapId, category, impulse_type: remedy.impulse_type.slice(0, 80) });
+      return;
+    }
     const gd = globalThis as any;
     gd.__drainBackoff ??= new Map();
     const boEntry = gd.__drainBackoff.get(gapId);

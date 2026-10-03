@@ -62,9 +62,9 @@ import { selfAuthHeaders } from "../lib/self-auth.js";
 import { dirname } from "path";
 import { DISCOVERY_ENDPOINT } from "../config.js";
 import type { ResolverResult } from "./types.js";
+import { surrealTarget } from "../lib/surreal-endpoint.js";
 
 const DEFAULT_DEV_VESSEL_URL = "http://127.0.0.1:8090/v2/impulses/resolve";
-const DEFAULT_SURREAL_URL = "http://127.0.0.1:8000";
 
 /**
  * Generic catch-all "carrier" shapes: shapes that name a TRANSPORT or a
@@ -305,7 +305,13 @@ export async function resolveResidualShapeDiscovery(
   const traceLimit = pointer.trace_limit ?? 8000;
   const minClusterSize = pointer.min_cluster_size ?? 2;
   const maxEmit = pointer.max_emit ?? 20;
-  const surrealUrl = pointer.surrealUrl ?? process.env["SURREALDB_URL"] ?? DEFAULT_SURREAL_URL;
+  // The root login goes only to the configured database (lib/surreal-endpoint.ts): a pointer surrealUrl
+  // that names any other URL is refused, not sent unauthenticated.
+  const surrealTargetResult = surrealTarget(pointer.surrealUrl);
+  if ("refused" in surrealTargetResult) {
+    return { shape: "structuredError", body: { resolver: "residual_shape_discovery", detail: surrealTargetResult.refused, failure_mode: "validation_rejected" } };
+  }
+  const surrealUrl = surrealTargetResult.url;
   const discoveryUrl = pointer.discoveryEndpoint ?? DISCOVERY_ENDPOINT;
   const emitUrl = pointer.devVesselImpulsesUrl ?? DEFAULT_DEV_VESSEL_URL;
   const apiKey = process.env["METABOB_API_KEY"] ?? "";

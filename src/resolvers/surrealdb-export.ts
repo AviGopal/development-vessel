@@ -1,6 +1,7 @@
 import { mkdirSync, writeFileSync, statSync } from "fs";
 import { join } from "path";
 import type { ResolverResult } from "./types.js";
+import { surrealTarget } from "../lib/surreal-endpoint.js";
 
 /**
  * surrealdb_export — substrate-citizen primitive to dump SurrealDB table rows
@@ -40,7 +41,6 @@ const DEFAULT_TABLES = [
 ];
 
 const DEFAULT_ROW_CAP = 100_000;
-const DEFAULT_SURREAL_URL = "http://127.0.0.1:8000";
 
 function isoCompactTs(): string {
   return new Date().toISOString().replace(/[-:]/g, "").replace(/\..+$/, "Z");
@@ -61,7 +61,13 @@ export async function resolveSurrealdbExport(
 ): Promise<ResolverResult> {
   const tables = p.tables ?? DEFAULT_TABLES;
   const rowCap = p.rowCap ?? DEFAULT_ROW_CAP;
-  const surrealUrl = (p.surrealUrl ?? process.env["SURREALDB_URL"] ?? DEFAULT_SURREAL_URL).replace(/\/+$/, "");
+  // The root login goes only to the configured database (lib/surreal-endpoint.ts): a pointer surrealUrl
+  // that names any other URL is refused, not sent unauthenticated.
+  const surrealTargetResult = surrealTarget(p.surrealUrl);
+  if ("refused" in surrealTargetResult) {
+    return { shape: "structuredError", body: { resolver: "surrealdb_export", detail: surrealTargetResult.refused, failure_mode: "validation_rejected" } };
+  }
+  const surrealUrl = surrealTargetResult.url;
   const ns = process.env["SURREALDB_NAMESPACE"] ?? "activity-system";
   const db = process.env["SURREALDB_DATABASE"] ?? "learning_loop";
   const user = process.env["SURREALDB_USERNAME"] ?? "root";

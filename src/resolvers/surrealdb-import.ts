@@ -1,6 +1,7 @@
 import { readdirSync, readFileSync, statSync } from "fs";
 import { join, basename } from "path";
 import type { ResolverResult } from "./types.js";
+import { surrealTarget } from "../lib/surreal-endpoint.js";
 
 /**
  * surrealdb_import — replay a snapshot directory produced by surrealdb_export
@@ -22,7 +23,6 @@ export interface SurrealdbImportPointer {
   dry_run?: boolean;
 }
 
-const DEFAULT_SURREAL_URL = "http://127.0.0.1:8000";
 
 function basicAuthHeader(user: string, pass: string): string {
   return "Basic " + Buffer.from(`${user}:${pass}`).toString("base64");
@@ -56,7 +56,13 @@ export async function resolveSurrealdbImport(
       body: { resolver: "surrealdb_import", detail: `${p.input_dir} is not a directory`, failure_mode: "cascading" },
     };
   }
-  const surrealUrl = (p.surrealUrl ?? process.env["SURREALDB_URL"] ?? DEFAULT_SURREAL_URL).replace(/\/+$/, "");
+  // The root login goes only to the configured database (lib/surreal-endpoint.ts): a pointer surrealUrl
+  // that names any other URL is refused, not sent unauthenticated.
+  const surrealTargetResult = surrealTarget(p.surrealUrl);
+  if ("refused" in surrealTargetResult) {
+    return { shape: "structuredError", body: { resolver: "surrealdb_import", detail: surrealTargetResult.refused, failure_mode: "validation_rejected" } };
+  }
+  const surrealUrl = surrealTargetResult.url;
   const ns = process.env["SURREALDB_NAMESPACE"] ?? "activity-system";
   const db = process.env["SURREALDB_DATABASE"] ?? "learning_loop";
   const user = process.env["SURREALDB_USERNAME"] ?? "root";

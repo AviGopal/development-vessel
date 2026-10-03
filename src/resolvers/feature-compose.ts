@@ -4339,6 +4339,14 @@ const baselineCache = new Map<string, { at: number; tsErrors: string[]; testFail
 
 /** One vessel's verify result; `stage` and `own` feed the failed attempt's structured lesson record. */
 export type VerifyResult = { vessel: string; errors: number | string; exit_code: number | null; ok: boolean; output: string; stage?: FailStage | null; constraint_unmet?: MustBeCalledConstraint[]; constraint_unrunnable?: string; own?: { test_file: string; failing: OwnCheckFailure[]; no_effect_vs_parent?: boolean; base_sha?: string; parent_cached?: "hit" | "miss" }; draft?: DraftFailures };
+/**
+ * The failure_kind a compose reports. gap-to-feature's isNonAttemptComposeResult reads "environment" as a
+ * NON-ATTEMPT (no failed_attempts, no failure lesson, cooldown cleared), so "environment" must mean the checks
+ * could not run, never that they ran and the draft failed them.
+ */
+export function composeFailureKind(input: { verdict: string; terminal_refusal: string | null; cutover_env_class: string | null; verify: ReadonlyArray<VerifyResult> }): "terminal_refusal" | "environment" | "fix" | null {
+  return input.verdict === "FAVORABLE" ? null : input.terminal_refusal ? "terminal_refusal" : input.cutover_env_class || input.verify.some((vr) => !vr.ok && (vr.stage !== "constraint" || !!vr.constraint_unrunnable) && (vr.exit_code === null || !vr.output || /timed out after \d+\s*ms/i.test(vr.output))) ? "environment" : "fix";
+}
 /** What the pre-land gate blamed on THIS draft (set on a failed runVerify): each list is already net of the parent tree. */
 export type DraftFailures = { own_red: string[]; introduced: string[]; new_ts: string[]; gate_detail: string };
 /** Parent-tree runs of a gap's own check, keyed (gap, vessel, base sha, check). */
@@ -8354,7 +8362,7 @@ for (const _c of cutovers as Array<Record<string, unknown>>) { const _ops = (((_
       // terminal_refusal: the gap is closed or its own check is already green on the parent; gap-to-feature
       // counts it as a NON-ATTEMPT (no failed_attempts bump, no -narrowed/decompose redispatch).
       terminal_refusal: terminalRefusal,
-      failure_kind: effectiveVerdict === "FAVORABLE" ? null : terminalRefusal ? "terminal_refusal" : classifyEnvironmentFailure(cutovers) || verify.some((vr) => !vr.ok && (vr.stage !== "constraint" || !!vr.constraint_unrunnable) && (vr.exit_code === null || !vr.output || /timed out after \d+\s*ms/i.test(vr.output))) ? "environment" : "fix",
+      failure_kind: composeFailureKind({ verdict: effectiveVerdict, terminal_refusal: terminalRefusal, cutover_env_class: classifyEnvironmentFailure(cutovers), verify }),
       summary: plan.summary,
       touched_vessels: [...touched],
       op_count: ops.length,

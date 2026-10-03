@@ -2,6 +2,7 @@ import type { ResolverResult } from "./types.js";
 import { selfAuthHeaders } from "../lib/self-auth.js";
 import { readFileSync, readdirSync, appendFileSync } from "node:fs";
 import { join } from "node:path";
+import { regionLiteralVerdict, regionOf, falsifierClassOf } from "../lib/region-literal.js";
 import { WORKSPACE_ROOT as DEFAULT_WORKSPACE_ROOT } from "../config.js";
 
 // Read at call time, not module load, so tests can override WORKSPACE_ROOT —
@@ -46,6 +47,7 @@ export interface GapLifecycleScanPointer {
   maxClose?: number;          // cap auto-closes per run. default 25
   devVesselImpulsesUrl?: string;
   dry_run?: boolean;
+  region_lint?: boolean;      // read-only: list OPEN armed gaps whose region is not a once-literal of edit_site, and return
 }
 
 const DEFAULT_URL = "http://127.0.0.1:8090/v2/impulses/resolve";
@@ -384,6 +386,29 @@ export async function resolveGapLifecycleScan(p: GapLifecycleScanPointer): Promi
     gaps = Array.isArray(parsed) ? parsed : (parsed.gaps ?? []);
   } catch (err) {
     return { shape: "structuredError", body: { resolver: "gap_lifecycle_scan", detail: `gaps store unreadable: ${(err as Error).message}` } };
+  }
+
+  // REGION LINT (2026-10-03): read-only, and returns before anything below can write (the landability log,
+  // the funnel history, closes). Same rule as the arm-time gate in substrateGap_write (lib/region-literal.ts):
+  // an OPEN class2 row with an edit_site and a non-empty region is flagged unless the region occurs exactly once
+  // in edit_site where grounding reads it. These are the rows armed before the gate, which it never re-checks.
+  if (p.region_lint === true) {
+    const flagged: Array<{ id: string; edit_site: string; region: string; occurrences: number | null; error: string }> = [];
+    let armedWithRegion = 0;
+    for (const g of gaps as Array<Gap & { classification_metadata?: Record<string, unknown> }>) {
+      if (g.status !== "open" || typeof g.id !== "string") continue;
+      const meta = (g.classification_metadata ?? {}) as Record<string, unknown>;
+      const site = typeof meta["edit_site"] === "string" ? (meta["edit_site"] as string).trim() : "";
+      const region = regionOf(meta);
+      if (falsifierClassOf(meta) !== "class2" || !site || !region) continue;
+      armedWithRegion++;
+      const v = regionLiteralVerdict(region, site);
+      if (!v.ok) flagged.push({ id: g.id, edit_site: v.edit_site, region: v.region, occurrences: v.occurrences, error: v.error });
+    }
+    return {
+      shape: "gapLifecycleReport",
+      body: { mode: "region_lint", total_gaps: gaps.length, open: gaps.filter((g) => g.status === "open").length, armed_with_region: armedWithRegion, region_lint: flagged, completed_at: new Date().toISOString() },
+    };
   }
 
   // Failed-apply sentinels: gaps the loop drafted + tried to apply + that FAILED.

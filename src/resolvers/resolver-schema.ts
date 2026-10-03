@@ -37,7 +37,7 @@ export interface ResolverSchemaResult {
   known: boolean;
   /** Key the args nest under, e.g. "gap". Absent/empty ⇒ the resolver takes a FLAT pointer. */
   envelope?: string;
-  fields?: Array<{ name: string; required: boolean; type: string; synthesize_from?: string; }>;
+  fields?: Array<{ name: string; required: boolean; type: string; }>;
   required?: string[];
   invocation?: string;
 }
@@ -45,7 +45,7 @@ export interface ResolverSchemaResult {
 interface Contract {
   /** Omit for shapes whose resolver reads a flat pointer. */
   envelope?: string;
-  fields: Array<{ name: string; required: boolean; type: string; synthesize_from?: string; }>;
+  fields: Array<{ name: string; required: boolean; type: string; }>;
   /** Notes the synthesizer benefits from that a field list cannot express. */
   notes?: string;
 }
@@ -96,7 +96,7 @@ const CONTRACTS: Record<string, Contract> = {
   },
   llm_completion_dispatch: {
     fields: [
-      { name: "prompt", required: true, type: "string", synthesize_from: "goal_and_upstream" },
+      { name: "prompt", required: true, type: "string" },
       { name: "system_prompt", required: false, type: "string" },
       { name: "model", required: false, type: "string" },
       { name: "max_tokens", required: false, type: "number" },

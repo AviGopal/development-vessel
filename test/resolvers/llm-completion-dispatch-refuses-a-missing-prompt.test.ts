@@ -27,20 +27,17 @@ import { afterAll, afterEach, beforeEach, describe, expect, it } from "bun:test"
  *     goal-host reads at invocation time to bind a producer's required inputs before invoking it
  *     (goal-host test/required-inputs-are-bound-before-a-producer-is-invoked.test.ts). At base
  *     CONTRACTS has no llm_completion_dispatch entry, so the walk is told known:false. The contract
- *     must name `prompt` as required, with `synthesize_from: "goal_and_upstream"` — the per-field
- *     provenance that lets the walk synthesize it from the goal plus bound upstream content
- *     instead of matching on the field's name.
+ *     must name `prompt` as required. (A per-field `synthesize_from` provenance key was declared
+ *     here once; nothing in the fleet read it, so it was removed — see
+ *     test/lib/contract-field-readers.test.ts.)
  *
  * Fetch is stubbed per test and restored; nothing reaches a real network.
  */
 
 // ── CROSS-REPO CONTRACT FIXTURES (this file is the EMITTER's test: the canonical copies) ──────────
 // Vessels cannot import the super-repo's packages/, so each consuming end copies these blocks
-// verbatim (goal-host reads synthesize_from; llm-resolver and activity-api read malformed_request).
+// verbatim (llm-resolver and activity-api read malformed_request).
 // Blocks are delimited so a super-repo check can compare the copies byte for byte.
-// CONTRACT-FIXTURE synthesize_from BEGIN (emitter: development-vessel test/resolvers/llm-completion-dispatch-refuses-a-missing-prompt.test.ts)
-const SYNTHESIZE_FROM_GOAL_AND_UPSTREAM = "goal_and_upstream";
-// CONTRACT-FIXTURE synthesize_from END
 // CONTRACT-FIXTURE malformed_request BEGIN (emitter: development-vessel test/resolvers/llm-completion-dispatch-refuses-a-missing-prompt.test.ts)
 const MALFORMED_REQUEST = "malformed_request";
 // CONTRACT-FIXTURE malformed_request END
@@ -104,14 +101,13 @@ describe("CONTROL — a request with a prompt dispatches as before", () => {
 });
 
 describe("MUST-FAIL — resolver_schema declares llm_completion_dispatch's required input", () => {
-  it("answers known:true with prompt required and synthesizable from the goal plus upstream content", () => {
+  it("answers known:true with prompt required", () => {
     const b = resolveResolverSchema({ shape: "llm_completion_dispatch" }).body as Body;
     expect(b.known).toBe(true);
     expect(b.envelope).toBeUndefined(); // flat pointer: the dispatcher reads pointer.prompt
     expect(b.required).toEqual(["prompt"]);
     const prompt = (b.fields as Array<Body>).find((f) => f.name === "prompt");
     expect(prompt?.required).toBe(true);
-    expect(prompt?.synthesize_from).toBe(SYNTHESIZE_FROM_GOAL_AND_UPSTREAM);
   });
 
   it("CONFORMANCE: a payload built from the declared required list is accepted and dispatched", async () => {

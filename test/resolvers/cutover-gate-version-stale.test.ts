@@ -53,9 +53,11 @@
 //       authors). Never an env var, never a module constant the process freezes at start.
 //     SEEDED FROM BOOT, NO FALLBACK: no tuning row is seeded anywhere today (migration 152 creates the
 //       table empty and getTuningParam's readers fall back to env/in-code defaults — the law-1 shape this
-//       contract refuses). The row is seeded by an activity-api MIGRATION (sql/migrations/, applied on
-//       unit start, idempotent): it CREATEs the CUTOVER_GATE_STALE_MAX_TICKS row only when absent, so a
-//       learned value is never overwritten. The cutover has NO constant fallback: a missing row, a
+//       contract refuses). CUTOVER_GATE_STALE_MAX_TICKS is an entry (name + default 3) in the
+//       shared tuning-param registry; the bootstrap seeder seeds it; no per-key migration — the one idempotent create-if-absent
+//       seeder that seeds every key read via getTuningParam from the SAME registry the readers use (root
+//       gap tuning-params-are-never-seeded-so-19-of-22-read-keys-run-on-code-constants-…), so a learned
+//       value is never overwritten. The cutover has NO constant fallback: a missing row, a
 //       non-numeric or < 1 value, or an unreachable store (staleBound() returns null or throws) ESCALATES
 //       IMMEDIATELY on that refusal — releases the lock, refusal escalated:true with
 //       escalation_reason "bound_unreadable" (a reached bound is "bound_reached"), and files the class

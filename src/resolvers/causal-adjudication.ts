@@ -136,7 +136,10 @@ const SURREALDB_PASSWORD =
 const SURREALDB_NS = process.env["SURREALDB_NAMESPACE"] ?? "activity-system";
 const SURREALDB_DB = process.env["SURREALDB_DATABASE"] ?? "learning_loop";
 
-async function surreal(body: string): Promise<Array<{ status?: string; result?: unknown }> | null> {
+type SurrealRows = Array<{ status?: string; result?: unknown }>;
+/** Why the most recent surreal() returned null, so a failure log can name its cause. */
+let lastSurrealError = "";
+async function surreal(body: string): Promise<SurrealRows | null> {
   try {
     const res = await fetch(`${SURREALDB_URL}/sql`, {
       method: "POST",
@@ -150,12 +153,14 @@ async function surreal(body: string): Promise<Array<{ status?: string; result?: 
       body,
       signal: AbortSignal.timeout(10_000),
     });
-    if (!res.ok) return null;
-    return (await res.json()) as Array<{ status?: string; result?: unknown }>;
-  } catch {
+    if (!res.ok) { lastSurrealError = `HTTP ${res.status}`; return null; }
+    return (await res.json()) as SurrealRows;
+  } catch (err) {
+    lastSurrealError = err instanceof Error ? err.message : String(err);
     return null;
   }
 }
+const surrealDefault = surreal;
 
 /**
  * Measure a Class-1 predicate: is the literal still present at its edit site?
@@ -263,8 +268,13 @@ export async function readBaseline(gapId: string, actionId: string): Promise<Obs
 export async function stampEnvironmentBaseline(
   gapId: string,
   actionId: string,
+  deps?: {
+    surreal?: (body: string) => Promise<SurrealRows | null>;
+    routedWrite?: (p: { type: "poolImpulse_write"; id: string; shape: string; body: unknown; source: string; status: "open" }) => { ok: boolean; id: string; error?: string };
+  },
 ): Promise<"stamped" | "already_stamped" | "failed"> {
   if (!gapId || !actionId) return "failed";
+  const surreal = deps?.surreal ?? surrealDefault;
   // NOTE FOR ANY PREDICATE WRITTEN AGAINST THIS SHAPE: in SurrealDB, NONE and NULL are
   // DISTINCT, so `field != NONE` is TRUE for a field explicitly set to null. A watcher counting
   // "linked" baselines with `pointer.baseline_snapshot_id != NONE` reported every null-
@@ -276,6 +286,26 @@ export async function stampEnvironmentBaseline(
   );
   const dupRows = dup?.[0]?.result;
   if (Array.isArray(dupRows) && dupRows.length > 0) return "already_stamped";
+
+  // THE LEARNING STORE IS NOT REACHABLE HERE (a spoke: the hub owns it), so every direct write
+  // fails, and every pick lost its counterfactual (38/38 on one spoke). Write the baseline through
+  // the poolImpulse shape instead, in process, the way goal-reach-tick and change-series-tick do:
+  // this vessel serves that shape on every node. Not through discovery /resolve, which unions peer
+  // producers and could land this substrate's baseline in a peer's pool. The snapshot read and the
+  // seed both go to the same unreachable store, so they are skipped and the reference is null.
+  if (dup === null) {
+    const dbCause = lastSurrealError || "no response";
+    const id = `environmentBaseline:${actionId}`;
+    const { resolvePoolImpulse, resolvePoolImpulseWrite } = await import("./pool-impulse.js");
+    if (resolvePoolImpulse({ type: "poolImpulse", id, status: "open" }).body.count > 0) return "already_stamped";
+    const w = (deps?.routedWrite ?? ((p) => resolvePoolImpulseWrite(p).body))({
+      type: "poolImpulse_write", id, shape: "environmentBaseline", source: "causal-adjudication", status: "open",
+      body: { gap_id: gapId, action_id: actionId, baseline_snapshot_id: null, baseline_snapshot_at: null, stamped_at: new Date().toISOString(), routed_via: "poolImpulse" },
+    });
+    if (w.ok) return "stamped";
+    console.warn(`[causal-adjudication] env-baseline failed for ${gapId}: learning store unreachable (${dbCause}); routed poolImpulse write failed (${w.error ?? "no reason given"})`);
+    return "failed";
+  }
 
   let snap = await surreal(
     "SELECT id, created_at FROM impulse WHERE shape = 'operationalStateSnapshot' " +
@@ -375,6 +405,7 @@ export async function stampEnvironmentBaseline(
       `shape: 'environmentBaseline', org_id: 'organizations:substrate', ` +
       `pointer: ${JSON.stringify(pointer)}, created_at: time::now(), budget: 0 };`,
   );
+  if (!res) console.warn(`[causal-adjudication] env-baseline failed for ${gapId}: insert refused (${lastSurrealError || "no response"})`);
   return res ? "stamped" : "failed";
 }
 

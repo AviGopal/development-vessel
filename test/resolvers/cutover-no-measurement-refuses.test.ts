@@ -32,7 +32,13 @@
 //     the no-instrument gap closes, the archived patch goes back through the normal compose path,
 //     not re-admitted verbatim) lives outside the cutover and is NOT unit-tested here: only the
 //     archive record's contents are pinned;
-//   • the next tick does not re-refuse the same tree (it is no longer in the queue).
+//   • the next tick does not re-refuse the same tree. It is no longer in the queue: the tick's
+//     own reader (mitosis_pending_observer) reports has_pending:false, no staged tree for the
+//     vessel is left under the staging root, and the cutover the tick then dispatches with the
+//     empty pending fields returns its EXPLICIT no-pending result — the one that exists today:
+//       { shape: "vesselMitosisCutoverResult", body: { skipped: true, skip_reason: "no_pending_mitosis", cutover_applied: false } }
+//     (named outcome; any other answer, an incidental error included, fails). The archived patch
+//     is still present and byte-unchanged after that tick.
 //
 // KILL SWITCH REMOVED (arms with the-precutover-suite-gate-fails-open-and-has-an-env-kill-switch).
 // CUTOVER_PRECHECK_SUITE=0 must have no effect. The suite is paused only by a SHAPED hold read at
@@ -50,15 +56,16 @@
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import * as cutoverMod from "../../src/resolvers/vessel-mitosis-cutover.js";
 import { resolveMaintenanceLeaseWrite } from "../../src/resolvers/maintenance-lease.js";
-import { mkdtemp, mkdir, writeFile, readFile, rm, stat } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, readFile, rm, stat, readdir } from "node:fs/promises";
+import { resolveMitosisPendingObserver } from "../../src/resolvers/mitosis-pending-observer.js";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join, isAbsolute } from "node:path";
 import {
   installCutoverFetchGuard, routeFleetUnreachable, routeShell,
-  BUN_PASSING, BUN_NO_TESTS, BUN_KILLED_BY_TIMEOUT, type FetchGuard,
-} from "./cutover-fetch-guard.js";
+  BUN_PASSING, BUN_NO_TESTS, BUN_KILLED_BY_TIMEOUT, type FetchGuard, routeFixtureGapStore, FIXTURE_GAP_STORE } from "./cutover-fetch-guard.js";
+import { installCutoverFsGuard, type FsGuard } from "./cutover-fs-guard.js";
 
 const { resolveVesselMitosisCutover, __setOwnCheckDepsForTests } = cutoverMod;
 
@@ -79,6 +86,7 @@ const ENV_KEYS = [
 const saved: Record<string, string | undefined> = {};
 let ws: string;
 let guard: FetchGuard;
+let fsGuard: FsGuard;
 
 const VESSEL = "development-vessel";
 const GAP = "gap-no-measurement-target";
@@ -129,11 +137,15 @@ beforeEach(async () => {
   shellCalls = 0;
   currentHost = "";
   guard = installCutoverFetchGuard();
+  fsGuard = installCutoverFsGuard();
+  process.env["GAP_STORE_ENDPOINT"] = FIXTURE_GAP_STORE; // never the module-load-captured store
+  routeFixtureGapStore(guard);
   routeFleetUnreachable(guard);
 });
 
 afterEach(async () => {
   const violations = guard.restore();
+  const fsViolations = fsGuard.restore();
   __setOwnCheckDepsForTests(null);
   for (const k of ENV_KEYS) {
     if (saved[k] === undefined) delete process.env[k];
@@ -141,6 +153,7 @@ afterEach(async () => {
   }
   await rm(ws, { recursive: true, force: true });
   expect(violations).toEqual([]);
+  expect(fsViolations).toEqual([]);
 });
 
 function git(cwd: string, ...args: string[]): string {
@@ -284,6 +297,28 @@ async function archiveHoldsStaged(s: Fixture, a: Record<string, unknown>): Promi
   return false;
 }
 
+/** The archive's bytes (every file under a directory archive, a patch file, or a ref's tree), or null. */
+async function archiveSnapshot(s: Fixture, a: Record<string, unknown>): Promise<Record<string, string> | null> {
+  const path = typeof a["path"] === "string" ? (a["path"] as string) : "";
+  const ref = typeof a["ref"] === "string" ? (a["ref"] as string) : "";
+  try {
+    if (path) {
+      if (!(await stat(path)).isDirectory()) return { [path]: await readFile(path, "utf8") };
+      const out: Record<string, string> = {};
+      for (const rel of (await readdir(path, { recursive: true })) as string[]) {
+        const full = join(path, rel);
+        if ((await stat(full)).isFile()) out[rel] = await readFile(full, "utf8");
+      }
+      return out;
+    }
+    if (ref) {
+      const r = spawnSync("git", ["ls-tree", "-r", ref], { cwd: s.hostRepoRoot, encoding: "utf8" });
+      return r.status === 0 ? { [ref]: r.stdout } : null;
+    }
+  } catch { return null; }
+  return null;
+}
+
 /** Refused for no measurement, nothing committed or pushed, the lock released, the patch archived and cited. */
 async function expectRefusedReleasedArchived(s: Fixture, r: { shape: string; body?: unknown }): Promise<void> {
   const body = bodyOf(r);
@@ -369,17 +404,39 @@ describe("cutover: a landing no instrument measured is refused (no_measurement_a
     expect(a["staged_files"]).toEqual([TARGET]);
   });
 
-  it("MUST-FAIL F (parking c): the next tick after a no-measurement refusal does not re-refuse the same tree", async () => {
+  it("MUST-FAIL F (parking c): the next tick after a no-measurement refusal sees no pending tree for the vessel and gets the cutover's explicit no_pending_mitosis result; the archived patch is unchanged", async () => {
     const s = await setup();
     suite("no_tests");
     noCheck(s);
     const first = await resolveVesselMitosisCutover(s.pointer as never);
     expect(bodyOf(first)["refuse_class"]).toBe("no_measurement_available");
     const bumps = noInstrumentWrites().length;
-    const next = await resolveVesselMitosisCutover(s.pointer as never);
-    expect(bodyOf(next)["refuse_class"] ?? null).not.toBe("no_measurement_available");
+    const archived = archivedPatchOf(noInstrumentWrites()[0]);
+    expect(archived).not.toBeNull();
+    const archiveBefore = await archiveSnapshot(s, archived!);
+    expect(archiveBefore).not.toBeNull();
+
+    // The next tick, as mitosis-tick runs it: read the queue through its own reader...
+    const obs = (await resolveMitosisPendingObserver({ type: "mitosis_pending_observer", workspaceRoot: ws })).body as { has_pending: boolean; pending: Record<string, string | null> | null };
+    expect(obs.has_pending).toBe(false);
+    // ...no staged tree for this vessel is left where the tick and the hygiene observers look...
+    let staged: string[] = [];
+    try { staged = (await readdir(join(ws, "vessels"))).filter((d) => d.startsWith(`${VESSEL}-`)); } catch { staged = []; }
+    expect(staged).toEqual([]);
+    // ...and the cutover it dispatches with the (empty) pending fields answers its named no-pending result.
+    const p = obs.pending ?? {};
+    const next = await resolveVesselMitosisCutover({
+      ...s.pointer,
+      vessel_name: p["vessel_name"] ?? "",
+      base_version_id: p["base_version_id"] ?? "",
+      mitosis_version_id: p["mitosis_version_id"] ?? "",
+      mitosis_root: p["mitosis_root"] ?? "",
+    } as never);
+    expect({ shape: next.shape, skipped: bodyOf(next)["skipped"], skip_reason: bodyOf(next)["skip_reason"] })
+      .toEqual({ shape: "vesselMitosisCutoverResult", skipped: true, skip_reason: "no_pending_mitosis" });
     expect(noInstrumentWrites().length).toBe(bumps);
     expect(headSubject(s)).toBe("baseline");
+    expect(await archiveSnapshot(s, archived!)).toEqual(archiveBefore);
   });
 
   it("CONTROL 1: the gap's own check ran and PASSED → lands, even though the pre-cutover suite did not run", async () => {
@@ -471,6 +528,28 @@ describe("cutover: the pre-cutover suite has no env kill switch; only a shaped h
     const r = await resolveVesselMitosisCutover(s.pointer as never);
     expect(precheckCalls).toBeGreaterThan(0);
     expect(r.shape).toBe("cutoverApplied");
+  });
+});
+
+describe("cutover fs guard", () => {
+  it("CONTROL: a deliberate write outside the test tmpdir (/workspace/…) is blocked AND recorded, so a swallowing caller still fails the test", async () => {
+    // A directory that does not exist: even if the guard were broken, nothing could be created here.
+    const target = "/workspace/.cutover-fs-guard-control-never-created/x";
+    let swallowed = 0;
+    try { await writeFile(target, "x"); } catch (e) { if ((e as NodeJS.ErrnoException).code === "EACCES") swallowed++; }
+    const nodeFs = await import("node:fs");
+    try { nodeFs.writeFileSync(`${target}-sync`, "x"); } catch (e) { if ((e as NodeJS.ErrnoException).code === "EACCES") swallowed++; }
+    try { await Bun.write(`${target}-bun`, "x"); } catch (e) { if ((e as NodeJS.ErrnoException).code === "EACCES") swallowed++; }
+    // A write inside the tmpdir is allowed (positive control on the allow side).
+    await writeFile(join(ws, "inside.txt"), "ok");
+    expect(await readFile(join(ws, "inside.txt"), "utf8")).toBe("ok");
+    expect(swallowed).toBe(3);
+    expect(fsGuard.violations).toEqual([
+      `fs/promises.writeFile ${target}`,
+      `fs.writeFileSync ${target}-sync`,
+      `Bun.write ${target}-bun`,
+    ]);
+    fsGuard.violations.length = 0; // this test's violations are the point; afterEach checks every other test
   });
 });
 

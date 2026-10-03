@@ -43,7 +43,8 @@ import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { installCutoverFetchGuard, routeFleetUnreachable, routeShell, BUN_PASSING, BUN_NO_TESTS, type FetchGuard } from "./cutover-fetch-guard.js";
+import { installCutoverFetchGuard, routeFleetUnreachable, routeShell, BUN_PASSING, BUN_NO_TESTS, type FetchGuard, routeFixtureGapStore, FIXTURE_GAP_STORE } from "./cutover-fetch-guard.js";
+import { installCutoverFsGuard, type FsGuard } from "./cutover-fs-guard.js";
 
 const { resolveVesselMitosisCutover, __setOwnCheckDepsForTests } = cutoverMod;
 
@@ -66,6 +67,7 @@ const ENV_KEYS = [
 const saved: Record<string, string | undefined> = {};
 let ws: string;
 let guard: FetchGuard;
+let fsGuard: FsGuard;
 /** Pre-cutover suite runs: shell calls made before the cutover's own commit exists in the push clone. */
 let precheckRuns = 0;
 
@@ -122,6 +124,9 @@ beforeEach(async () => {
     runSuite: fail("test_suite run"),
   });
   guard = installCutoverFetchGuard();
+  fsGuard = installCutoverFsGuard();
+  process.env["GAP_STORE_ENDPOINT"] = FIXTURE_GAP_STORE; // never the module-load-captured store
+  routeFixtureGapStore(guard);
   routeFleetUnreachable(guard);
   precheckRuns = 0;
   // The measurement: the pre-cutover suite runs and passes.
@@ -139,6 +144,7 @@ beforeEach(async () => {
 
 afterEach(async () => {
   const violations = guard.restore();
+  const fsViolations = fsGuard.restore();
   __setOwnCheckDepsForTests(null);
   for (const k of ENV_KEYS) {
     if (saved[k] === undefined) delete process.env[k];
@@ -146,6 +152,7 @@ afterEach(async () => {
   }
   await rm(ws, { recursive: true, force: true });
   expect(violations).toEqual([]);               // last, so a violation never skips the cleanup above
+  expect(fsViolations).toEqual([]);
 });
 
 // none: no newer commit. same_file / unrelated_file: N is pushed and the clone fast-forwards to it.

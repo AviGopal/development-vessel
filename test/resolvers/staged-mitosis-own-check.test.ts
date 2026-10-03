@@ -24,7 +24,8 @@ import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { installCutoverFetchGuard, routeFleetUnreachable, routeShell, BUN_PASSING, BUN_NO_TESTS, type FetchGuard } from "./cutover-fetch-guard.js";
+import { installCutoverFetchGuard, routeFleetUnreachable, routeShell, BUN_PASSING, BUN_NO_TESTS, type FetchGuard, routeFixtureGapStore, FIXTURE_GAP_STORE } from "./cutover-fetch-guard.js";
+import { installCutoverFsGuard, type FsGuard } from "./cutover-fs-guard.js";
 
 const { resolveVesselMitosisCutover } = cutoverMod;
 type Deps = { readGap?: (p: Record<string, unknown>) => Promise<unknown>; writeGap?: (p: Record<string, unknown>) => Promise<unknown>; runSuite?: (p: Record<string, unknown>) => Promise<unknown> };
@@ -51,6 +52,7 @@ const ENV_KEYS = [
 const saved: Record<string, string | undefined> = {};
 let ws: string;
 let guard: FetchGuard;
+let fsGuard: FsGuard;
 /** Pre-cutover suite runs: shell calls made while the landing clone still sat at "baseline". */
 let precheckRuns = 0;
 let currentHost = "";
@@ -82,6 +84,9 @@ beforeEach(async () => {
   process.env["MITOSIS_CUTOVER_SKIP_SYSTEMCTL"] = "1";
   process.env["PUSH_POLICY_PATH"] = join(ws, "no-push-policy.json");
   guard = installCutoverFetchGuard();
+  fsGuard = installCutoverFsGuard();
+  process.env["GAP_STORE_ENDPOINT"] = FIXTURE_GAP_STORE; // never the module-load-captured store
+  routeFixtureGapStore(guard);
   routeFleetUnreachable(guard);
   precheckRuns = 0;
   routeShell(guard, measuredPrecheckOnly);
@@ -89,6 +94,7 @@ beforeEach(async () => {
 
 afterEach(async () => {
   const violations = guard.restore();
+  const fsViolations = fsGuard.restore();
   setDeps(null);
   for (const k of ENV_KEYS) {
     if (saved[k] === undefined) delete process.env[k];
@@ -97,6 +103,7 @@ afterEach(async () => {
   await rm(ws, { recursive: true, force: true });
   for (const r of extraRoots.splice(0)) await rm(r, { recursive: true, force: true });
   expect(violations).toEqual([]);               // last, so a violation never skips the cleanup above
+  expect(fsViolations).toEqual([]);
 });
 
 async function setup(): Promise<{ baseRoot: string; mitosisRoot: string; hostRepoRoot: string; baseSha: string; pendingPath: string }> {

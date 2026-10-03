@@ -114,3 +114,40 @@ export const BUN_NO_TESTS =
   "bun test v1.3.14 (0d9b296a)\nNo tests found!\n\nTests need \".test\", \"_test_\", \".spec\" or \"_spec_\" in the filename (ex: \"MyApp.test.ts\")\n\nLearn more about bun test: https://bun.com/docs/cli/test\n";
 /** Killed by `timeout` before any summary (captured as `h.test.ts:`; filename adjusted). */
 export const BUN_KILLED_BY_TIMEOUT = "bun test v1.3.14 (0d9b296a)\n\ntest/resolvers/slow.test.ts:\n";
+
+export const FIXTURE_GAP_STORE = "http://gap-store.fixture/resolve";
+/**
+ * An in-memory gap store behind GAP_STORE_ENDPOINT (read at call time by substrate-gap.ts, which
+ * forwards both reads and writes there). Without it the real resolver uses its gap store under the
+ * WORKSPACE_ROOT captured at MODULE LOAD — the repo checkout on a dev host, the LIVE store in a
+ * container — which no per-test env can redirect. Same merge rule as the real store: omitted
+ * classification_metadata keys carry forward. Set process.env.GAP_STORE_ENDPOINT =
+ * FIXTURE_GAP_STORE in the test's setup (and restore it).
+ */
+export function routeFixtureGapStore(g: FetchGuard): Map<string, Record<string, any>> {
+  const rows = new Map<string, Record<string, any>>();
+  g.route({
+    name: "fixture gap store",
+    match: (u) => u.startsWith("http://gap-store.fixture"),
+    respond: (_u, b) => {
+      const p = (b?.impulse?.pointer ?? {}) as Record<string, any>;
+      if (p["type"] === "substrateGap_write") {
+        const gap = (p["gap"] ?? {}) as Record<string, any>;
+        const id = String(gap["id"] ?? "");
+        const ex = rows.get(id);
+        const meta = { ...((ex?.["classification_metadata"] ?? {}) as object), ...((gap["classification_metadata"] ?? {}) as object) };
+        rows.set(id, { ...(ex ?? {}), ...gap, classification_metadata: meta });
+        return Response.json({ shape: "substrateGapWriteResult", body: { id, action: ex ? "updated" : "created" } });
+      }
+      if (p["type"] === "substrateGap") {
+        let gaps = [...rows.values()];
+        if (typeof p["id"] === "string") gaps = gaps.filter((r) => r["id"] === p["id"]);
+        if (typeof p["status"] === "string") gaps = gaps.filter((r) => r["status"] === p["status"]);
+        if (typeof p["limit"] === "number") gaps = gaps.slice(0, p["limit"]);
+        return Response.json({ shape: "substrateGap", body: { gaps } });
+      }
+      return Response.json({ shape: "structuredError", body: { detail: `fixture gap store: unsupported pointer type ${String(p["type"])}` } });
+    },
+  });
+  return rows;
+}

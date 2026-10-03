@@ -3,7 +3,8 @@ import { resolveVesselMitosisCutover } from "../../src/resolvers/vessel-mitosis-
 import { mkdtemp, mkdir, writeFile, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { installCutoverFetchGuard, routeFleetUnreachable, routeShell, BUN_PASSING, BUN_NO_TESTS, type FetchGuard } from "./cutover-fetch-guard.js";
+import { installCutoverFetchGuard, routeFleetUnreachable, routeShell, BUN_PASSING, BUN_NO_TESTS, type FetchGuard, routeFixtureGapStore, FIXTURE_GAP_STORE } from "./cutover-fetch-guard.js";
+import { installCutoverFsGuard, type FsGuard } from "./cutover-fs-guard.js";
 import { spawnSync as spawnSyncGuard } from "node:child_process";
 
 let tmpRoot: string;
@@ -54,6 +55,10 @@ const savedPushScopeEnv: Record<string, string | undefined> = {};
 // MEASURED by its pre-cutover suite (ran=true) — a landing nothing measured is refused
 // (no_measurement_available), and these tests are about apply/push scope, not about that.
 let guard: FetchGuard;
+let fsGuard: FsGuard;
+/** The in-memory gap store every gap read/write in this file goes to (GAP_STORE_ENDPOINT). */
+let gapStore: Map<string, Record<string, any>>;
+let savedGapStoreEndpoint: string | undefined;
 // Only the PRE-cutover call (landing clone still at its baseline commit) answers ran=true. Once
 // the cutover's commit exists, the post-land suite gets a no-summary answer (ran=false): a
 // post-land ran=true writes /workspace/post-land-baseline/<vessel>.json (an absolute path), and on
@@ -64,6 +69,10 @@ let suiteRuns = 0;
 let currentHost = "";
 beforeEach(() => {
   guard = installCutoverFetchGuard();
+  fsGuard = installCutoverFsGuard();
+  savedGapStoreEndpoint = process.env["GAP_STORE_ENDPOINT"];
+  process.env["GAP_STORE_ENDPOINT"] = FIXTURE_GAP_STORE;
+  gapStore = routeFixtureGapStore(guard);
   routeFleetUnreachable(guard);
   suiteRuns = 0;
   currentHost = "";
@@ -75,7 +84,12 @@ beforeEach(() => {
   });
 });
 afterEach(() => {
-  expect(guard.restore()).toEqual([]);
+  const violations = guard.restore();
+  const fsViolations = fsGuard.restore();
+  if (savedGapStoreEndpoint === undefined) delete process.env["GAP_STORE_ENDPOINT"];
+  else process.env["GAP_STORE_ENDPOINT"] = savedGapStoreEndpoint;
+  expect(violations).toEqual([]);
+  expect(fsViolations).toEqual([]);
 });
 
 beforeEach(async () => {
@@ -312,9 +326,11 @@ describe("vessel_mitosis_cutover", () => {
     expect(body.refusal_reason).toContain("mitosis_freshness_violation");
     expect(body.refusal_reason).toContain("missing_base_sha");
     expect(body.kind).toBe("mitosis_freshness_violation");
-    // Gap landed in WORKSPACE_ROOT/gaps/gaps.json.
-    const gapsPath = join(workspaceRoot, "gaps", "gaps.json");
-    const gaps = JSON.parse(await readFile(gapsPath, "utf8")) as Array<Record<string, unknown>>;
+    // The gap landed in the gap store. Read from the fixture store behind GAP_STORE_ENDPOINT: the
+    // file store lives under a WORKSPACE_ROOT captured at MODULE LOAD (substrate-gap.ts
+    // WORKSPACE_ROOT_AT_LOAD), never this test's tmp root, so reading WORKSPACE_ROOT/gaps/gaps.json
+    // here was ENOENT while the write went to the repo checkout (or a live store in a container).
+    const gaps = [...gapStore.values()] as Array<Record<string, unknown>>;
     expect(gaps.length).toBeGreaterThan(0);
     const cite = gaps.find(
       (g) =>

@@ -257,7 +257,7 @@ export async function resolveObsidianLearnCommands(
       const summary = `obsidian command ${m.command_id} → ${m.reversibility_class} (${m.observation_count} obs, ${(m.post_signature_distribution ?? []).length} post-state(s))`;
       const res = await fetch(`${conceptBase}/v2/impulses/resolve`, {
         method: "POST",
-        headers: auth,
+        headers: authFor(conceptBase, DEFAULT_CONCEPT_DB.replace(/\/+$/, "")),
         body: JSON.stringify({
           impulse: {
             pointer: {

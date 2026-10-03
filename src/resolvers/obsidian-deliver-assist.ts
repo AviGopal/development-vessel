@@ -104,7 +104,7 @@ export async function resolveObsidianDeliverAssist(
       ". If there is no active note, suggest a useful next action. Output ONLY the markdown body — no preamble, no fences.\n\nWorkspace state:\n" + workspace;
     const res = await fetch(llmEndpoint, {
       method: "POST",
-      headers: auth,
+      headers: authFor(llmEndpoint, DEFAULT_LLM_ENDPOINT),
       body: JSON.stringify({ type: "llm_completion", prompt, model, max_tokens: maxTokens }),
       signal: AbortSignal.timeout(timeoutMs),
     });

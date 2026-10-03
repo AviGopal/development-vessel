@@ -157,7 +157,7 @@ export async function resolveVesselExerciseScan(
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        ...(apiKey ? { Authorization: `ApiKey ${apiKey}` } : {}),
+        ...selfAuthHeaders(discoveryEndpoint, DEFAULT_DISCOVERY_ENDPOINT),
       },
       body: JSON.stringify({ pointer: { type: "vesselRegistry" } }),
       signal: AbortSignal.timeout(20_000),

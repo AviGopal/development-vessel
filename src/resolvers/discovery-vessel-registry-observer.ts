@@ -1,4 +1,5 @@
 import type { ResolverResult } from "./types.js";
+import { selfAuthHeaders } from "../lib/self-auth.js";
 
 /**
  * discovery_vessel_registry_observer (round 2, 2026-06-05) — promotes the
@@ -67,6 +68,9 @@ export async function resolveDiscoveryVesselRegistryObserver(
     };
   }
 
+  // A key goes only to the configured discovery endpoint (lib/self-auth.ts selfAuthHeaders): an endpoint
+  // the pointer overrides gets none. There a key the caller supplied is used as before, the node key otherwise.
+  const configured = DEFAULT_ENDPOINT.replace(/\/+$/, "");
   const start = Date.now();
   let resp: Response;
   try {
@@ -74,7 +78,7 @@ export async function resolveDiscoveryVesselRegistryObserver(
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `ApiKey ${apiKey}`,
+        ...(pointer.apiKey && endpoint === configured ? { Authorization: `ApiKey ${pointer.apiKey}` } : selfAuthHeaders(endpoint, configured)),
       },
       body: JSON.stringify({ pointer: { type: "vesselRegistry" } }),
       signal: AbortSignal.timeout(timeoutMs),

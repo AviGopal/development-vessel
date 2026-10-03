@@ -217,7 +217,7 @@ export async function resolveObsidianBehaviorScan(
     try {
       const res = await fetch(`${conceptBase}/v2/impulses/resolve`, {
         method: "POST",
-        headers: auth,
+        headers: authFor(conceptBase, DEFAULT_CONCEPT_DB.replace(/\/+$/, "")),
         body: JSON.stringify({
           impulse: {
             pointer: {

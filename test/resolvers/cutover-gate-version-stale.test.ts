@@ -521,6 +521,47 @@ describe("cutover: a stale gate holds the pending lock only for a bounded number
     expect(git(s.hostRepoRoot, "log", "-1", "--format=%s")).toBe("baseline");
   });
 
+  it("MUST-FAIL: a restart during the same bound outage (a fresh cutover module instance) writes the SAME stable gap id — at most one extra bump, never a second gap", async () => {
+    const s = await setup();
+    const rec = recorder();
+    const throwing = () => { throw new Error("activity-api unreachable"); };
+    // Process A: the instance that was running when the outage began.
+    passingOwnCheck(s, rec.writeGap);
+    setGateDeps({ running: () => GATE_OLD, accepted: () => GATE_ACCEPTED, staleBound: throwing });
+    const a = (await resolveVesselMitosisCutover(pointerFor(s) as never)).body as Record<string, unknown>;
+    expect(a["refuse_class"]).toBe("gate_version_stale");
+    expect(a["escalation_reason"]).toBe("bound_unreadable");
+    // Process B: the vessel restarted mid-outage — a fresh module instance with empty in-process memory.
+    type CutoverMod = typeof cutoverMod & {
+      __setGateVersionDepsForTests?: (d: GateDeps | null) => void;
+      __setOwnCheckDepsForTests?: (d: OwnDeps | null) => void;
+    };
+    const fresh = (await import(`../../src/resolvers/vessel-mitosis-cutover.ts?restart=${Date.now()}`)) as CutoverMod;
+    expect(fresh).not.toBe(cutoverMod as unknown as CutoverMod);
+    try {
+      fresh.__setOwnCheckDepsForTests?.({
+        writeGap: rec.writeGap,
+        readGap: async (p) => ({ shape: "substrateGap", body: { gaps: p["id"] === GAP ? [gapRow] : [] } }),
+        runSuite: async () => ({ shape: "test_suite", body: { vessel: `repos/${VESSEL}`, verified_root: s.hostRepoRoot, ran: true, total: 1, pass: 1, fail: 0, skip: 0, requested_not_passing: 0, failingTests: [] } }),
+      });
+      fresh.__setGateVersionDepsForTests?.({ running: () => GATE_OLD, accepted: () => GATE_ACCEPTED, staleBound: throwing });
+      await writePending(s);
+      const b = (await fresh.resolveVesselMitosisCutover(pointerFor(s) as never)).body as Record<string, unknown>;
+      expect(b["refuse_class"]).toBe("gate_version_stale");
+      expect(b["escalation_reason"]).toBe("bound_unreadable");
+      expect(await exists(s.pendingPath)).toBe(false);
+    } finally {
+      fresh.__setGateVersionDepsForTests?.(null);
+      fresh.__setOwnCheckDepsForTests?.(null);
+    }
+    const ids = rec.writes.map((w) => String(w.gap?.["id"]));
+    expect(ids.length).toBeGreaterThanOrEqual(1);
+    expect(ids.length).toBeLessThanOrEqual(2);               // the restart costs at most one extra bump
+    expect(new Set(ids).size).toBe(1);                       // ...on the same id, never a second gap
+    expect(ids[0]).toBe(STALE_GAP);
+    expect(git(s.hostRepoRoot, "log", "-1", "--format=%s")).toBe("baseline");
+  });
+
   it("MUST-FAIL: after N consecutive gate_version_unmeasurable refusals the lock is released and one gap of that class is written", async () => {
     const s = await setup();
     const rec = recorder();

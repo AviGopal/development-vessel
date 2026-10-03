@@ -1,4 +1,5 @@
 import type { ResolverResult } from "./types.js";
+import { selfAuthHeaders } from "../lib/self-auth.js";
 
 /**
  * concept_usage_record — POST outcome feedback to concept-db.
@@ -81,11 +82,11 @@ export async function resolveConceptUsageRecord(
   const baseUrl = pointer.conceptDbUrl ?? DEFAULT_CONCEPT_DB_URL;
   // concept-db expects the concept_id URL-encoded into the path
   const url = `${baseUrl}/${encodeURIComponent(pointer.concept_id)}/usage`;
-  const apiKey = process.env["METABOB_API_KEY"];
+  // The key goes only to the configured concept-db (lib/self-auth.ts): none to a URL the pointer overrides.
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
+    ...selfAuthHeaders(baseUrl, DEFAULT_CONCEPT_DB_URL),
   };
-  if (apiKey) headers["Authorization"] = `ApiKey ${apiKey}`;
 
   const body: Record<string, unknown> = {
     trace_id: traceId,

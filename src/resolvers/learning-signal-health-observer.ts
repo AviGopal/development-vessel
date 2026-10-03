@@ -50,7 +50,7 @@ export async function resolveLearningSignalHealthObserver(
   let concepts: ConceptLike[] = [];
   try {
     const res = await fetch(searchUrl, {
-      headers: apiKey ? { Authorization: `ApiKey ${apiKey}` } : {},
+      headers: selfAuthHeaders(pointer.conceptSearchUrl ?? DEFAULT_CONCEPT_DB_SEARCH, DEFAULT_CONCEPT_DB_SEARCH),
       signal: AbortSignal.timeout(15_000),
     });
     const json = (await res.json()) as { concepts?: ConceptLike[] };
@@ -89,7 +89,7 @@ export async function resolveLearningSignalHealthObserver(
       subUrl.searchParams.set("source_type", name);
       subUrl.searchParams.set("limit", "1000");
       const subRes = await fetch(subUrl.toString(), {
-        headers: apiKey ? { Authorization: `ApiKey ${apiKey}` } : {},
+        headers: selfAuthHeaders(pointer.conceptSearchUrl ?? DEFAULT_CONCEPT_DB_SEARCH, DEFAULT_CONCEPT_DB_SEARCH),
         signal: AbortSignal.timeout(15_000),
       });
       const subJson = (await subRes.json()) as { concepts?: ConceptLike[] };

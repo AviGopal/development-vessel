@@ -1,5 +1,7 @@
 import { existsSync } from "node:fs";
+import { selfAuthHeaders } from "../lib/self-auth.js";
 import type { ResolverResult } from "./types.js";
+const DEFAULT_CONCEPT_SEARCH_URL = "http://127.0.0.1:8260/concepts/search";
 
 export interface ConceptTruthProbePointer {
   type: "concept_truth_probe";
@@ -9,11 +11,10 @@ export interface ConceptTruthProbePointer {
 }
 
 export async function resolveConceptTruthProbe(pointer: ConceptTruthProbePointer): Promise<ResolverResult> {
-  const baseUrl = pointer.conceptDbUrl ?? "http://127.0.0.1:8260/concepts/search";
+  const baseUrl = pointer.conceptDbUrl ?? DEFAULT_CONCEPT_SEARCH_URL;
   const url = `${baseUrl}?q=${encodeURIComponent(pointer.query ?? "")}&limit=${pointer.limit ?? 8}`;
-  const apiKey = process.env["METABOB_API_KEY"];
-  const headers: Record<string, string> = {};
-  if (apiKey) headers["Authorization"] = `ApiKey ${apiKey}`;
+  // The key goes only to the configured concept-db (lib/self-auth.ts): none to a URL the pointer overrides.
+  const headers: Record<string, string> = selfAuthHeaders(baseUrl, DEFAULT_CONCEPT_SEARCH_URL);
   try {
     const res = await fetch(url, { method: "GET", headers, signal: AbortSignal.timeout(15000) });
     if (!res.ok) {

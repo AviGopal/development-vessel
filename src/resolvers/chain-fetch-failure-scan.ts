@@ -77,8 +77,8 @@ export async function resolveChainFetchFailureScan(
   try { markerRe = new RegExp(pointer.markerPattern ?? DEFAULT_MARKER_PATTERN, "i"); }
   catch { markerRe = new RegExp(DEFAULT_MARKER_PATTERN, "i"); }
 
-  const apiKey = process.env["METABOB_API_KEY"];
-  const authHeader: Record<string, string> = apiKey ? { Authorization: `ApiKey ${apiKey}` } : {};
+  // The key goes only to the configured concept-db (lib/self-auth.ts): none to a URL the pointer overrides.
+  const authHeader: Record<string, string> = selfAuthHeaders(searchUrl, DEFAULT_SEARCH_URL);
 
   // 1. Obtain recent concepts.
   let concepts: ConceptLike[] = [];

@@ -1,4 +1,5 @@
 import type { ResolverResult } from "./types.js";
+import { selfAuthHeaders } from "../lib/self-auth.js";
 
 /**
  * obsidian_command_gate (2026-06-13) — USE the learned action-effect priors to
@@ -122,7 +123,8 @@ export async function resolveObsidianCommandGate(
   const timeoutMs = pointer.timeoutMs ?? 8000;
   const candidates = Array.isArray(pointer.command_ids) ? pointer.command_ids : null;
   const generatedAt = new Date().toISOString();
-  const authHeaders: Record<string, string> = apiKey ? { Authorization: `ApiKey ${apiKey}` } : {};
+  // The key goes only to the configured concept-db (lib/self-auth.ts): none to a URL the pointer overrides.
+  const authHeaders: Record<string, string> = selfAuthHeaders(base, DEFAULT_CONCEPT_DB.replace(/\/+$/, ""), pointer.apiKey);
 
   let priors: Map<string, { rev: Reversibility; count: number }>;
   try {

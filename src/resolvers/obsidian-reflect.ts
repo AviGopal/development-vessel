@@ -75,7 +75,8 @@ export async function resolveObsidianReflect(
   const apiKey = pointer.apiKey ?? API_KEY;
   const timeoutMs = pointer.timeoutMs ?? 10_000;
   const generatedAt = new Date().toISOString();
-  const auth: Record<string, string> = apiKey ? { Authorization: `ApiKey ${apiKey}` } : {};
+  // The key goes only to the configured concept-db (lib/self-auth.ts): none to a URL the pointer overrides.
+  const auth: Record<string, string> = selfAuthHeaders(base, DEFAULT_CONCEPT_DB.replace(/\/+$/, ""), pointer.apiKey);
 
   const behaviorConcepts = await searchConcepts(base, "obsidian_behavior", auth, timeoutMs);
   const surfaceConcepts = await searchConcepts(base, "obsidian_action_effect", auth, timeoutMs);

@@ -1,4 +1,5 @@
 import type { ResolverResult } from "./types.js";
+import { selfAuthHeaders } from "../lib/self-auth.js";
 
 /**
  * concept_write — substrate-side wrapper around concept-db POST /concepts.
@@ -50,11 +51,11 @@ export async function resolveConceptWrite(
   pointer: ConceptWritePointer,
 ): Promise<ResolverResult> {
   const url = pointer.conceptDbUrl ?? DEFAULT_CONCEPT_DB_URL;
-  const apiKey = process.env["METABOB_API_KEY"];
+  // The key goes only to the configured concept-db (lib/self-auth.ts): none to a URL the pointer overrides.
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
+    ...selfAuthHeaders(url, DEFAULT_CONCEPT_DB_URL),
   };
-  if (apiKey) headers["Authorization"] = `ApiKey ${apiKey}`;
 
   const body = {
     name: pointer.name,

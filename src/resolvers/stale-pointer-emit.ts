@@ -72,10 +72,8 @@ export async function resolveStalePointerEmit(
   const dryRun = pointer.dry_run === true;
   const maxEmits = pointer.maxEmits ?? DEFAULT_MAX_EMITS;
 
-  const apiKey = process.env["METABOB_API_KEY"];
-  const authHeader: Record<string, string> = apiKey
-    ? { Authorization: `ApiKey ${apiKey}` }
-    : {};
+  // The key goes only to the configured concept-db (lib/self-auth.ts): none to a URL the pointer overrides.
+  const authHeader: Record<string, string> = selfAuthHeaders(searchUrl, DEFAULT_SEARCH_URL);
 
   // 1. Fetch concepts.
   let concepts: ConceptLike[] = [];

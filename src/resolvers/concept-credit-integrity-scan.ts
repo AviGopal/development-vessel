@@ -2,6 +2,8 @@
 // (all-success with high volume — the blanket-credit / synthetic-backfill signature) so credit-signal
 // corruption is caught by the substrate, not an operator audit.
 import type { ResolverResult } from "./types.js";
+import { selfAuthHeaders } from "../lib/self-auth.js";
+const DEFAULT_CONCEPT_DB_BASE = "http://127.0.0.1:8260";
 
 export interface ConceptCreditIntegrityScanPointer {
   type: "concept_credit_integrity_scan";
@@ -13,15 +15,15 @@ export interface ConceptCreditIntegrityScanPointer {
 interface ConceptRow { id?: string; summary?: string; times_loaded?: number; times_succeeded?: number; loaded?: number; succeeded?: number }
 
 export async function resolveConceptCreditIntegrityScan(pointer: ConceptCreditIntegrityScanPointer): Promise<ResolverResult> {
-  const base = pointer.conceptDbBase ?? "http://127.0.0.1:8260";
+  const base = pointer.conceptDbBase ?? DEFAULT_CONCEPT_DB_BASE;
   const minLoads = typeof pointer.min_loads === "number" ? pointer.min_loads : 100;
   const limit = typeof pointer.limit === "number" ? pointer.limit : 50;
   const offenders: Array<{ id: string; summary: string; loaded: number; succeeded: number }> = [];
   let scanned = 0;
   // Org-scoped read: without ApiKey auth the search resolves under org 'default'
   // and the org-scoped high-usage concepts are invisible (blind-window defect).
-  const apiKey = process.env["METABOB_API_KEY"] ?? "";
-  const authHeaders: Record<string, string> = apiKey ? { Authorization: `ApiKey ${apiKey}` } : {};
+  // The key goes only to the configured concept-db (lib/self-auth.ts): none to a URL the pointer overrides.
+  const authHeaders: Record<string, string> = selfAuthHeaders(base, DEFAULT_CONCEPT_DB_BASE);
   try {
     const res = await fetch(`${base}/concepts/search?limit=${limit}`, { headers: authHeaders, signal: AbortSignal.timeout(10_000) });
     const json = (await res.json()) as { concepts?: ConceptRow[] };

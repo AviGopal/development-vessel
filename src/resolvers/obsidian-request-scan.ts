@@ -313,8 +313,9 @@ export async function resolveObsidianRequestScan(
     let dispatchId: string | undefined;
     let status = "dispatch_failed";
     try {
+      // The key goes only to the configured goal-host (lib/self-auth.ts): none to an overridden goalHostEndpoint.
       const res = await fetch(`${goalHost}/run-goal`, {
-        method: "POST", headers: auth,
+        method: "POST", headers: { "Content-Type": "application/json", ...selfAuthHeaders(goalHost, DEFAULT_GOAL_HOST.replace(/\/+$/, ""), pointer.apiKey) },
         body: JSON.stringify({
           goal: req.text,
           tags: ["dispatcher:obsidian-vessel", "source:inbox"],

@@ -2,6 +2,7 @@
 // Callers should expect graceful degradation (empty result) when concept-db is unreachable.
 
 import type { ResolverResult } from "./types.js";
+import { selfAuthHeaders } from "../lib/self-auth.js";
 
 /**
  * concept_search_by_source — substrate-side reader of concept-db filtered by
@@ -63,9 +64,8 @@ export async function resolveConceptSearchBySource(
   const q = pointer.query ?? "";
   const url = `${baseUrl}?q=${encodeURIComponent(q)}&limit=${limit * 3}`;
 
-  const apiKey = process.env["METABOB_API_KEY"];
-  const headers: Record<string, string> = {};
-  if (apiKey) headers["Authorization"] = `ApiKey ${apiKey}`;
+  // The key goes only to the configured concept-db (lib/self-auth.ts): none to a URL the pointer overrides.
+  const headers: Record<string, string> = selfAuthHeaders(baseUrl, DEFAULT_CONCEPT_DB_URL);
 
   try {
     const resp = await fetch(url, {

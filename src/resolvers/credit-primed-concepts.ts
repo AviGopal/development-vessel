@@ -1,4 +1,5 @@
 import type { ResolverResult } from "./types.js";
+import { selfAuthHeaders } from "../lib/self-auth.js";
 
 /**
  * credit_primed_concepts (2026-06-13) — the FIX half of the learning-signal pair.
@@ -47,8 +48,8 @@ export async function resolveCreditPrimedConcepts(
   const limit = pointer.limit ?? 15;
   const outcome = pointer.outcome ?? "success";
   const traceId = pointer.traceId ?? "drafter-success-credit";
-  const apiKey = process.env["METABOB_API_KEY"] ?? "";
-  const authHeaders: Record<string, string> = apiKey ? { Authorization: `ApiKey ${apiKey}` } : {};
+  // The key goes only to the configured concept-db (lib/self-auth.ts): none to a URL the pointer overrides.
+  const authHeaders: Record<string, string> = selfAuthHeaders(base, DEFAULT_BASE);
 
   // 1. Use explicitly-supplied primed ids when given; else fetch top-N by relevance.
   let ids: string[] = Array.isArray(pointer.conceptIds)

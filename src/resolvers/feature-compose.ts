@@ -3155,6 +3155,29 @@ function joinSignature(rawGrepOutput: string): string {
   return parts.join(" ").replace(/\s+/g, " ").trim();
 }
 
+/** One file's block in the drafter's grounding window (groundVesselFiles): header, slice, truncation marks. */
+export function groundingFileBlock(repoPath: string, content: string, sliced: { slice: string; centered: boolean; head: boolean }, target: boolean): string {
+  const { slice, centered, head } = sliced;
+  const truncated = slice.length < content.length
+    ? (centered
+      ? "\n… (windowed around the change site; head/tail omitted)"
+      : (head ? "\n… (truncated)" : "\n… (truncated)"))
+    : "";
+  const lead = centered && !head ? "… (head omitted)\n" : "";
+  // Number TARGET-file lines with ABSOLUTE line numbers (derived from the slice's
+  // offset in the full file) so the drafter can emit replace_lines ranges. Shown
+  // as `<lineNumber><TAB><line text>`. The apply step re-verifies the boundary
+  // line TEXT (expect_first_line/expect_last_line), so a slightly-off number is
+  // drift-refused, never mis-applied.
+  let shown = slice;
+  if (target) {
+    const at = content.indexOf(slice);
+    const startLine = at >= 0 ? content.slice(0, at).split("\n").length : 1;
+    shown = slice.split("\n").map((l, i) => `${startLine + i}\t${l}`).join("\n");
+  }
+  return `----- ${repoPath} -----\n${lead}${shown}${truncated}`;
+}
+
 async function groundVesselFiles(toolsEndpoint: string, verifyVessels: string[], focusHints: string[] = [], targetFiles: string[] = [], primaryProbe: string | string[] = "", lineHint: { file: string; start: number; end: number } | null = null): Promise<string> {
   const blocks: string[] = [];
   let contentBudget = GROUND_CONTENT_BUDGET;
@@ -3219,26 +3242,9 @@ async function groundVesselFiles(toolsEndpoint: string, verifyVessels: string[],
           }
           if (typeof content === "string") {
             const effBudget = target ? Math.max(contentBudget, PER_FILE_SLICE) : contentBudget;
-            const { slice, centered, head } = focusedSlice(content, effBudget, focusHints, primaryProbe, lineHint && lineHint.file === `repos/${vRel}/${f}` ? lineHint : null);
-            contentBudget -= slice.length;
-            const truncated = slice.length < content.length
-              ? (centered
-                ? "\n… (windowed around the change site; head/tail omitted)"
-                : (head ? "\n… (truncated)" : "\n… (truncated)"))
-              : "";
-            const lead = centered && !head ? "… (head omitted)\n" : "";
-            // Number TARGET-file lines with ABSOLUTE line numbers (derived from the slice's
-            // offset in the full file) so the drafter can emit replace_lines ranges. Shown
-            // as `<lineNumber><TAB><line text>`. The apply step re-verifies the boundary
-            // line TEXT (expect_first_line/expect_last_line), so a slightly-off number is
-            // drift-refused, never mis-applied.
-            let shown = slice;
-            if (target) {
-              const at = content.indexOf(slice);
-              const startLine = at >= 0 ? content.slice(0, at).split("\n").length : 1;
-              shown = slice.split("\n").map((l, i) => `${startLine + i}\t${l}`).join("\n");
-            }
-            contentParts.push(`----- repos/${vRel}/${f} -----\n${lead}${shown}${truncated}`);
+            const sliced = focusedSlice(content, effBudget, focusHints, primaryProbe, lineHint && lineHint.file === `repos/${vRel}/${f}` ? lineHint : null);
+            contentBudget -= sliced.slice.length;
+            contentParts.push(groundingFileBlock(`repos/${vRel}/${f}`, content, sliced, target));
           }
         } catch { /* per-file content best-effort */ }
       }

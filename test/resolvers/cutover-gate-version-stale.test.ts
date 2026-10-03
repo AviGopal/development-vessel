@@ -48,9 +48,28 @@
 //       "gate-version-stale-<vessel>" through the own-check writeGap seam (classification_metadata
 //       carries running_gate_version, accepted_gate_version, gate_version_stale_count).
 //       N is a tuning value read AT USE TIME on every stale refusal — gate deps `staleBound()`; the real
-//       reader asks the shaped tuning-param store (activity-api /v2/tuning-params/
-//       CUTOVER_GATE_STALE_MAX_TICKS, the store learning_policy_writeback authors). Never an env var,
-//       never a module constant the process freezes at start.
+//       reader asks the shaped tuning-param store (activity-api GET /v2/tuning-params/
+//       CUTOVER_GATE_STALE_MAX_TICKS, table substrate_tuning_param, the store learning_policy_writeback
+//       authors). Never an env var, never a module constant the process freezes at start.
+//     SEEDED FROM BOOT, NO FALLBACK: no tuning row is seeded anywhere today (migration 152 creates the
+//       table empty and getTuningParam's readers fall back to env/in-code defaults — the law-1 shape this
+//       contract refuses). The row is seeded by an activity-api MIGRATION (sql/migrations/, applied on
+//       unit start, idempotent): it CREATEs the CUTOVER_GATE_STALE_MAX_TICKS row only when absent, so a
+//       learned value is never overwritten. The cutover has NO constant fallback: a missing row, a
+//       non-numeric or < 1 value, or an unreachable store (staleBound() returns null or throws) ESCALATES
+//       IMMEDIATELY on that refusal — releases the lock, refusal escalated:true with
+//       escalation_reason "bound_unreadable" (a reached bound is "bound_reached"), and files the class
+//       gap with classification_metadata.escalation_reason "bound_unreadable" and a summary saying
+//       "stale bound unreadable".
+//     DEDUPE: the gap store upserts by id (omitted classification_metadata keys carry forward), so ids
+//       are stable per vessel and class. On top of that, while the bound stays unreadable the cutover
+//       writes the bound_unreadable gap ONCE per (vessel, class): an activity-api outage yields exactly
+//       one gap write per vessel, not one per tick. A successful bound read (or the test seam being set
+//       or cleared) ends the outage episode.
+//     UNMEASURABLE IS BOUNDED TOO: gate_version_unmeasurable refusals read the SAME N at use time, count
+//       on a SEPARATE pending field gate_version_unmeasurable_count, and escalate to their own gap
+//       "gate-version-unmeasurable-<vessel>" (refuse_class stays "gate_version_unmeasurable"). A stale
+//       refusal never advances the unmeasurable counter, and vice versa.
 //
 // These drive the REAL resolveVesselMitosisCutover through its git-aware path against a temp clone with
 // a bare origin (no push, no restart, no live services), modelled on staged-mitosis-own-check.test.ts.
@@ -455,6 +474,108 @@ describe("cutover: a stale gate holds the pending lock only for a bounded number
     return { writes, writeGap: async (p: Record<string, unknown>) => { writes.push(p as Write); return { shape: "substrateGapWriteResult", body: { ok: true } }; } };
   };
   const staleWrites = (w: Write[]) => w.filter((x) => x.gap?.["id"] === STALE_GAP);
+  const UNM_GAP = `gate-version-unmeasurable-${VESSEL}`;
+  const unmWrites = (w: Write[]) => w.filter((x) => x.gap?.["id"] === UNM_GAP);
+  const meta = (w: Write) => (w.gap["classification_metadata"] ?? {}) as Record<string, unknown>;
+  const writePending = async (s: Fixture): Promise<void> => {   // a re-staged tree for the same vessel
+    await writeFile(s.pendingPath, JSON.stringify({ vessel_name: VESSEL, base_version_id: "v1", mitosis_version_id: MVID, mitosis_root: s.mitosisRoot, base_sha: s.baseSha, authored_by: "patch_with_tools", gap_id: GAP, proposal: GAP, staged_files: ["src/resolvers/target.ts"] }, null, 2));
+  };
+
+  it("MUST-FAIL: the bound row is absent -> the FIRST stale refusal escalates (bound_unreadable) and releases the lock", async () => {
+    const s = await setup();
+    const rec = recorder();
+    passingOwnCheck(s, rec.writeGap);
+    setGateDeps({ running: () => GATE_OLD, accepted: () => GATE_ACCEPTED, staleBound: () => null });
+    const originBefore = git(s.originRoot, "rev-parse", "dev");
+    const r = await resolveVesselMitosisCutover(pointerFor(s) as never);
+    const body = r.body as Record<string, unknown>;
+    expect(r.shape).toBe("vesselMitosisCutoverResult");
+    expect(body["refuse_class"]).toBe("gate_version_stale");
+    expect(body["escalated"]).toBe(true);
+    expect(body["escalation_reason"]).toBe("bound_unreadable");
+    expect(body["gate_version_stale_count"]).toBe(1);
+    expect(await exists(s.pendingPath)).toBe(false);
+    const gw = staleWrites(rec.writes);
+    expect(gw.length).toBe(1);
+    expect(meta(gw[0]!)["escalation_reason"]).toBe("bound_unreadable");
+    expect(String(gw[0]!.gap["summary"])).toContain("stale bound unreadable");
+    expectNothingLanded(s, originBefore);
+  });
+
+  it("MUST-FAIL: the bound read throws on two consecutive ticks for the same vessel -> exactly ONE gap write (deduped), both ticks escalate", async () => {
+    const s = await setup();
+    const rec = recorder();
+    passingOwnCheck(s, rec.writeGap);
+    setGateDeps({ running: () => GATE_OLD, accepted: () => GATE_ACCEPTED, staleBound: () => { throw new Error("activity-api unreachable"); } });
+    for (let tick = 1; tick <= 2; tick++) {
+      if (tick === 2) await writePending(s);
+      const r = await resolveVesselMitosisCutover(pointerFor(s) as never);
+      const body = r.body as Record<string, unknown>;
+      expect(body["refuse_class"]).toBe("gate_version_stale");
+      expect(body["escalated"]).toBe(true);
+      expect(body["escalation_reason"]).toBe("bound_unreadable");
+      expect(await exists(s.pendingPath)).toBe(false);
+    }
+    expect(staleWrites(rec.writes).length).toBe(1);
+    expect(rec.writes.length).toBe(1);                       // no second id was minted either
+    expect(git(s.hostRepoRoot, "log", "-1", "--format=%s")).toBe("baseline");
+  });
+
+  it("MUST-FAIL: after N consecutive gate_version_unmeasurable refusals the lock is released and one gap of that class is written", async () => {
+    const s = await setup();
+    const rec = recorder();
+    passingOwnCheck(s, rec.writeGap);
+    setGateDeps({ running: () => null, accepted: () => GATE_ACCEPTED, staleBound: () => 3 });
+    const originBefore = git(s.originRoot, "rev-parse", "dev");
+    for (let tick = 1; tick <= 2; tick++) {
+      const r = await resolveVesselMitosisCutover(pointerFor(s) as never);
+      const body = r.body as Record<string, unknown>;
+      expect(body["refuse_class"]).toBe("gate_version_unmeasurable");
+      expect(body["gate_version_unmeasurable_count"]).toBe(tick);
+      expect(body["escalated"]).not.toBe(true);
+      expect(await exists(s.pendingPath)).toBe(true);
+    }
+    expect(unmWrites(rec.writes).length).toBe(0);
+    const r = await resolveVesselMitosisCutover(pointerFor(s) as never);
+    const body = r.body as Record<string, unknown>;
+    expect(body["refuse_class"]).toBe("gate_version_unmeasurable");
+    expect(body["gate_version_unmeasurable_count"]).toBe(3);
+    expect(body["escalated"]).toBe(true);
+    expect(body["escalation_reason"]).toBe("bound_reached");
+    expect(body["deferred"]).toBe(false);
+    expect(await exists(s.pendingPath)).toBe(false);
+    const gw = unmWrites(rec.writes);
+    expect(gw.length).toBe(1);
+    expect(meta(gw[0]!)["gate_version_unmeasurable_count"]).toBe(3);
+    expect(staleWrites(rec.writes).length).toBe(0);
+    expectNothingLanded(s, originBefore);
+  });
+
+  it("CONTRACT: a stale refusal does not advance the unmeasurable counter, and vice versa", async () => {
+    const s = await setup();
+    const rec = recorder();
+    passingOwnCheck(s, rec.writeGap);
+    let running: string | null = GATE_OLD;
+    setGateDeps({ running: () => running, accepted: () => GATE_ACCEPTED, staleBound: () => 2 });
+    const t1 = (await resolveVesselMitosisCutover(pointerFor(s) as never)).body as Record<string, unknown>;
+    expect(t1["refuse_class"]).toBe("gate_version_stale");
+    expect(t1["gate_version_stale_count"]).toBe(1);
+    running = null;                                           // the next tick cannot measure the running gate
+    const t2 = (await resolveVesselMitosisCutover(pointerFor(s) as never)).body as Record<string, unknown>;
+    expect(t2["refuse_class"]).toBe("gate_version_unmeasurable");
+    expect(t2["gate_version_unmeasurable_count"]).toBe(1);   // a shared counter would read 2 and escalate at N=2
+    expect(t2["escalated"]).not.toBe(true);
+    const pend = JSON.parse(await readFile(s.pendingPath, "utf8")) as Record<string, unknown>;
+    expect(pend["gate_version_stale_count"]).toBe(1);
+    expect(pend["gate_version_unmeasurable_count"]).toBe(1);
+    running = GATE_OLD;
+    const t3 = (await resolveVesselMitosisCutover(pointerFor(s) as never)).body as Record<string, unknown>;
+    expect(t3["refuse_class"]).toBe("gate_version_stale");
+    expect(t3["gate_version_stale_count"]).toBe(2);
+    expect(t3["escalated"]).toBe(true);
+    expect(staleWrites(rec.writes).length).toBe(1);
+    expect(unmWrites(rec.writes).length).toBe(0);
+  });
 
   it("MUST-FAIL: after N consecutive gate_version_stale refusals for the same pending, the lock is released and a gap is written", async () => {
     const s = await setup();
@@ -476,6 +597,7 @@ describe("cutover: a stale gate holds the pending lock only for a bounded number
     expect(body["refuse_class"]).toBe("gate_version_stale");
     expect(body["gate_version_stale_count"]).toBe(3);
     expect(body["escalated"]).toBe(true);
+    expect(body["escalation_reason"]).toBe("bound_reached");
     expect(body["deferred"]).toBe(false);
     expect(await exists(s.pendingPath)).toBe(false);          // the lock is released: the queue is not wedged
     const gw = staleWrites(rec.writes);
@@ -487,7 +609,7 @@ describe("cutover: a stale gate holds the pending lock only for a bounded number
     expectNothingLanded(s, originBefore);
   });
 
-  it("CONTROL: below N consecutive stale refusals the lock is kept and no gap is written", async () => {
+  it("CONTRACT: below N consecutive stale refusals the lock is kept and no gap is written", async () => {
     const s = await setup();
     const rec = recorder();
     passingOwnCheck(s, rec.writeGap);

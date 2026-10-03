@@ -15,6 +15,11 @@
 //     GATE_FILES: readonly string[]      vessel-relative landing-gate sources; at least
 //                                        "src/resolvers/vessel-mitosis-cutover.ts" (the cutover) and
 //                                        "src/resolvers/staged-mitosis-gate.ts" (the own-check gate).
+//                                        SINGLE SOURCE: the list is DATA in src/resolvers/gate-files.json
+//                                        (a JSON array of those paths) beside gate-version.ts, read when the
+//                                        module is evaluated. No list in TS code; pull-sync's shell reads the
+//                                        same file from the clone's HEAD (super-repo test
+//                                        validation/scripts/pull-sync-gate-files-unsuppressed.test.sh).
 //     gateVersionOf(read: (rel) => string | null): string | null
 //                                        one hash over GATE_FILES as `read` returns them; null when any
 //                                        file is unreadable (a missing measurement is not a version).
@@ -36,6 +41,16 @@
 //       "gate_version_unmeasurable" (FAIL CLOSED: a missing measurement is a refusal, never a pass).
 //       Both carry running_gate_version / accepted_gate_version, are deferred:true, and KEEP the
 //       pending lock, so the same staged tree lands once the process restarts onto the accepted gate.
+//     BOUNDED HOLD: a stale gate is transient only while a restart is coming. Each gate_version_stale
+//       refusal counts on the pending lock (gate_version_stale_count, reset by a new pending). When the
+//       count reaches N, the refusal is still refuse_class "gate_version_stale" but escalated:true,
+//       deferred:false: it RELEASES the pending lock and files-or-bumps the stable gap
+//       "gate-version-stale-<vessel>" through the own-check writeGap seam (classification_metadata
+//       carries running_gate_version, accepted_gate_version, gate_version_stale_count).
+//       N is a tuning value read AT USE TIME on every stale refusal — gate deps `staleBound()`; the real
+//       reader asks the shaped tuning-param store (activity-api /v2/tuning-params/
+//       CUTOVER_GATE_STALE_MAX_TICKS, the store learning_policy_writeback authors). Never an env var,
+//       never a module constant the process freezes at start.
 //
 // These drive the REAL resolveVesselMitosisCutover through its git-aware path against a temp clone with
 // a bare origin (no push, no restart, no live services), modelled on staged-mitosis-own-check.test.ts.
@@ -54,10 +69,17 @@ import { join } from "node:path";
 const { resolveVesselMitosisCutover } = cutoverMod;
 
 type MaybeAsync<T> = T | Promise<T>;
-type GateDeps = { running?: () => MaybeAsync<string | null>; accepted?: () => MaybeAsync<string | null> };
-type OwnDeps = { readGap?: (p: Record<string, unknown>) => Promise<unknown>; runSuite?: (p: Record<string, unknown>) => Promise<unknown> };
+type GateDeps = { running?: () => MaybeAsync<string | null>; accepted?: () => MaybeAsync<string | null>; staleBound?: () => MaybeAsync<number | null> };
+type OwnDeps = {
+  readGap?: (p: Record<string, unknown>) => Promise<unknown>;
+  writeGap?: (p: Record<string, unknown>) => Promise<unknown>;
+  runSuite?: (p: Record<string, unknown>) => Promise<unknown>;
+};
+/** The bound is pinned high unless a test says otherwise, so no test here reaches the live tuning store. */
 const setGateDeps = (d: GateDeps | null): void => {
-  (cutoverMod as unknown as { __setGateVersionDepsForTests?: (d: GateDeps | null) => void }).__setGateVersionDepsForTests?.(d);
+  (cutoverMod as unknown as { __setGateVersionDepsForTests?: (d: GateDeps | null) => void }).__setGateVersionDepsForTests?.(
+    d ? { staleBound: () => 100, ...d } : null,
+  );
 };
 const setOwnDeps = (d: OwnDeps | null): void => {
   (cutoverMod as unknown as { __setOwnCheckDepsForTests?: (d: OwnDeps | null) => void }).__setOwnCheckDepsForTests?.(d);
@@ -69,6 +91,7 @@ type GateVersionMod = {
   acceptedGateVersion: (cloneRoot: string) => string | null;
 };
 const GATE_VERSION_SRC = join(import.meta.dir, "..", "..", "src", "resolvers", "gate-version.ts");
+const GATE_FILES_JSON = join(import.meta.dir, "..", "..", "src", "resolvers", "gate-files.json");
 const importGateVersion = async (): Promise<GateVersionMod> => (await import(GATE_VERSION_SRC)) as GateVersionMod;
 
 const ENV_KEYS = [
@@ -213,8 +236,9 @@ const gapRow = {
   },
 };
 /** A passing own check, so the gate version is the only thing in these fixtures that can refuse. */
-function passingOwnCheck(s: Fixture): void {
+function passingOwnCheck(s: Fixture, writeGap?: (p: Record<string, unknown>) => Promise<unknown>): void {
   setOwnDeps({
+    ...(writeGap ? { writeGap } : {}),
     readGap: async (p) => ({ shape: "substrateGap", body: { gaps: p["id"] === GAP ? [gapRow] : [] } }),
     runSuite: async () => ({ shape: "test_suite", body: { vessel: `repos/${VESSEL}`, verified_root: s.hostRepoRoot, ran: true, total: 1, pass: 1, fail: 0, skip: 0, requested_not_passing: 0, failingTests: [] } }),
   });
@@ -341,6 +365,7 @@ describe("gate-version: running = what the process loaded, accepted = the clone'
     const gv0 = await importGateVersion();
     await mkdir(join(root, "src", "resolvers"), { recursive: true });
     await copyFile(GATE_VERSION_SRC, join(root, "src", "resolvers", "gate-version.ts"));
+    await copyFile(GATE_FILES_JSON, join(root, "src", "resolvers", "gate-files.json"));
     for (const f of gv0.GATE_FILES) {
       await mkdir(join(root, f, ".."), { recursive: true });
       await writeFile(join(root, f), `// ${f} — the gate this process booted with\n`);
@@ -388,5 +413,115 @@ describe("gate-version: running = what the process loaded, accepted = the clone'
     const notAClone = await mkdtemp(join(tmpdir(), "gate-version-none-"));
     extraDirs.push(notAClone);
     expect(gv.acceptedGateVersion(notAClone)).toBeNull();
+  });
+});
+
+describe("gate-version: GATE_FILES is data in gate-files.json, the single source shared with pull-sync", () => {
+  it("MUST-FAIL: GATE_FILES equals the contents of src/resolvers/gate-files.json", async () => {
+    const listed = JSON.parse(readFileSync(GATE_FILES_JSON, "utf8")) as unknown;
+    expect(Array.isArray(listed)).toBe(true);
+    const gv = await importGateVersion();
+    expect([...gv.GATE_FILES]).toEqual(listed as string[]);
+  });
+
+  it("MUST-FAIL: a copy of the module beside a rewritten gate-files.json reads exactly the files that JSON names", async () => {
+    // Two private copies of the leaf module, each beside a different gate-files.json: what gateVersionOf
+    // asks for must follow the JSON, so a list hidden in code cannot pass.
+    const asked = async (list: string[]): Promise<{ files: readonly string[]; reads: string[] }> => {
+      const root = await mkdtemp(join(tmpdir(), "gate-files-json-"));
+      extraDirs.push(root);
+      await mkdir(join(root, "src", "resolvers"), { recursive: true });
+      await copyFile(GATE_VERSION_SRC, join(root, "src", "resolvers", "gate-version.ts"));
+      await writeFile(join(root, "src", "resolvers", "gate-files.json"), JSON.stringify(list));
+      const gv = (await import(join(root, "src", "resolvers", "gate-version.ts"))) as GateVersionMod;
+      const reads: string[] = [];
+      expect(gv.gateVersionOf((rel) => { reads.push(rel); return `// ${rel}\n`; })).not.toBeNull();
+      return { files: gv.GATE_FILES, reads };
+    };
+    const a = await asked(["src/resolvers/vessel-mitosis-cutover.ts", "src/resolvers/staged-mitosis-gate.ts", "src/resolvers/push-policy.ts"]);
+    expect([...a.files]).toEqual(["src/resolvers/vessel-mitosis-cutover.ts", "src/resolvers/staged-mitosis-gate.ts", "src/resolvers/push-policy.ts"]);
+    expect(a.reads.slice().sort()).toEqual(["src/resolvers/push-policy.ts", "src/resolvers/staged-mitosis-gate.ts", "src/resolvers/vessel-mitosis-cutover.ts"]);
+    const b = await asked(["src/resolvers/only-this-gate.ts"]);
+    expect([...b.files]).toEqual(["src/resolvers/only-this-gate.ts"]);
+    expect(b.reads).toEqual(["src/resolvers/only-this-gate.ts"]);
+  });
+});
+
+describe("cutover: a stale gate holds the pending lock only for a bounded number of ticks", () => {
+  const STALE_GAP = `gate-version-stale-${VESSEL}`;
+  type Write = { gap: Record<string, unknown> };
+  const recorder = () => {
+    const writes: Write[] = [];
+    return { writes, writeGap: async (p: Record<string, unknown>) => { writes.push(p as Write); return { shape: "substrateGapWriteResult", body: { ok: true } }; } };
+  };
+  const staleWrites = (w: Write[]) => w.filter((x) => x.gap?.["id"] === STALE_GAP);
+
+  it("MUST-FAIL: after N consecutive gate_version_stale refusals for the same pending, the lock is released and a gap is written", async () => {
+    const s = await setup();
+    const rec = recorder();
+    passingOwnCheck(s, rec.writeGap);
+    setGateDeps({ running: () => GATE_OLD, accepted: () => GATE_ACCEPTED, staleBound: () => 3 });
+    const originBefore = git(s.originRoot, "rev-parse", "dev");
+    for (let tick = 1; tick <= 2; tick++) {
+      const r = await resolveVesselMitosisCutover(pointerFor(s) as never);
+      const body = r.body as Record<string, unknown>;
+      expect(body["refuse_class"]).toBe("gate_version_stale");
+      expect(body["gate_version_stale_count"]).toBe(tick);
+      expect(await exists(s.pendingPath)).toBe(true);
+    }
+    expect(staleWrites(rec.writes).length).toBe(0);
+    const third = await resolveVesselMitosisCutover(pointerFor(s) as never);
+    const body = third.body as Record<string, unknown>;
+    expect(third.shape).toBe("vesselMitosisCutoverResult");
+    expect(body["refuse_class"]).toBe("gate_version_stale");
+    expect(body["gate_version_stale_count"]).toBe(3);
+    expect(body["escalated"]).toBe(true);
+    expect(body["deferred"]).toBe(false);
+    expect(await exists(s.pendingPath)).toBe(false);          // the lock is released: the queue is not wedged
+    const gw = staleWrites(rec.writes);
+    expect(gw.length).toBe(1);
+    const meta = (gw[0]!.gap["classification_metadata"] ?? {}) as Record<string, unknown>;
+    expect(meta["running_gate_version"]).toBe(GATE_OLD);
+    expect(meta["accepted_gate_version"]).toBe(GATE_ACCEPTED);
+    expect(meta["gate_version_stale_count"]).toBe(3);
+    expectNothingLanded(s, originBefore);
+  });
+
+  it("CONTROL: below N consecutive stale refusals the lock is kept and no gap is written", async () => {
+    const s = await setup();
+    const rec = recorder();
+    passingOwnCheck(s, rec.writeGap);
+    setGateDeps({ running: () => GATE_OLD, accepted: () => GATE_ACCEPTED, staleBound: () => 3 });
+    for (let tick = 1; tick <= 2; tick++) {
+      const r = await resolveVesselMitosisCutover(pointerFor(s) as never);
+      expect((r.body as Record<string, unknown>)["refuse_class"]).toBe("gate_version_stale");
+      expect((r.body as Record<string, unknown>)["escalated"]).not.toBe(true);
+    }
+    expect(await exists(s.pendingPath)).toBe(true);
+    expect(staleWrites(rec.writes).length).toBe(0);
+  });
+
+  it("MUST-FAIL: N is read at use time on every stale refusal, not frozen when the process starts", async () => {
+    const s = await setup();
+    const rec = recorder();
+    passingOwnCheck(s, rec.writeGap);
+    let bound = 5;
+    let reads = 0;
+    setGateDeps({ running: () => GATE_OLD, accepted: () => GATE_ACCEPTED, staleBound: () => { reads++; return bound; } });
+    // Three ticks under N=5: held (a constant N=3 would already have escalated on tick 3).
+    for (let tick = 1; tick <= 3; tick++) {
+      const r = await resolveVesselMitosisCutover(pointerFor(s) as never);
+      expect((r.body as Record<string, unknown>)["refuse_class"]).toBe("gate_version_stale");
+      expect((r.body as Record<string, unknown>)["escalated"]).not.toBe(true);
+      expect(await exists(s.pendingPath)).toBe(true);
+    }
+    expect(reads).toBeGreaterThanOrEqual(3);
+    expect(staleWrites(rec.writes).length).toBe(0);
+    bound = 3;                                                 // the tuning store lowered N between ticks: tick 4 escalates
+    const r = await resolveVesselMitosisCutover(pointerFor(s) as never);
+    expect((r.body as Record<string, unknown>)["refuse_class"]).toBe("gate_version_stale");
+    expect((r.body as Record<string, unknown>)["escalated"]).toBe(true);
+    expect(await exists(s.pendingPath)).toBe(false);
+    expect(staleWrites(rec.writes).length).toBe(1);
   });
 });

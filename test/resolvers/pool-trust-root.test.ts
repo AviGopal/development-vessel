@@ -25,6 +25,8 @@ const { evaluateSelfFactRow, __setPoolPinDepsForTests, thisNode } = sfr;
 const IDENTITY = "http://127.0.0.1:59105";
 const ADMIN_KEY = "admin-key-fixture";
 const FLEET_KEY = "fleet-key-fixture";
+// This process's own key (METABOB_API_KEY): authenticated locally as node-self, scopes ["node"], no admin.
+const NODE_KEY = "node-key-fixture";
 const N1 = "http://host.containers.internal:18100";
 const N2 = "http://host.containers.internal:26100";
 const ROGUE = "http://syzygy.host:18100";
@@ -49,6 +51,7 @@ const nodesNow = () => resolvePoolImpulse({ type: "poolImpulse", shape: "substra
 let warnSpy: ReturnType<typeof spyOn> | null = null;
 beforeEach(() => {
   process.env["IDENTITY_VESSEL_URL"] = IDENTITY;
+  process.env["METABOB_API_KEY"] = NODE_KEY;
   identityMode = "up";
   installIdentity();
   warnSpy = spyOn(console, "warn").mockImplementation(() => {});
@@ -56,6 +59,7 @@ beforeEach(() => {
 afterEach(() => {
   globalThis.fetch = originalFetch;
   delete process.env["IDENTITY_VESSEL_URL"];
+  delete process.env["METABOB_API_KEY"];
   warnSpy?.mockRestore();
   __setPoolPinDepsForTests(null);
 });
@@ -156,6 +160,51 @@ describe("the HTTP route (the door a peer and the lane both use)", () => {
     const res = await post(`ApiKey ${FLEET_KEY}`, { type: "poolImpulse_write", id: "plain-2", shape: "timeShapedRhythm", body: {} });
     expect(res.status).toBe(200);
     expect((await post(null, { type: "poolImpulse_write", id: "plain-3", shape: "timeShapedRhythm", body: {} })).status).toBe(401);
+  });
+});
+
+// calibrationWindow: a blind-calibration sample list (which dispatches are graded, under which seed, where the
+// labels go). Whoever writes it chooses what the calibration measures, so the node's own key (the autonomous
+// lane: node-self, scopes ["node"]) must not be able to write it; only an operator (admin) can.
+describe("calibrationWindow is a trust-root pool shape", () => {
+  const post = (auth: string | null, pointer: Record<string, unknown>) => impulsesRouter.request("/v2/impulses/resolve", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...(auth ? { Authorization: auth } : {}) },
+    body: JSON.stringify({ impulse: pointer }),
+  });
+  const cw = (id: string, extra: Record<string, unknown> = {}) => ({
+    type: "poolImpulse_write", id, shape: "calibrationWindow", status: "open",
+    body: { window_id: id, sample_draw_id: "d1", seed: 7, dispatch_ids: ["a", "b"], declared_at: "2026-10-03T00:00:00Z", closes_at: "2026-10-10T00:00:00Z", label_sink: "calibrationLabel" },
+    ...extra,
+  });
+  const cwRow = (id: string) => resolvePoolImpulse({ type: "poolImpulse", shape: "calibrationWindow", id }).body.impulses[0];
+
+  it("MUST-FAIL: a node-self (node-scoped) key's calibrationWindow write is refused (403) and nothing is stored", async () => {
+    const res = await post(`ApiKey ${NODE_KEY}`, cw("cw-node"));
+    expect(res.status).toBe(403);
+    expect(cwRow("cw-node")).toBeUndefined();
+  });
+
+  it("an admin write succeeds", async () => {
+    const res = await post(`ApiKey ${ADMIN_KEY}`, cw("cw-admin"));
+    expect(res.status).toBe(200);
+    expect(cwRow("cw-admin")).toBeDefined();
+  });
+
+  it("MUST-FAIL: an update by id (shape omitted) of an existing calibrationWindow with the node key is refused; the row is unchanged", async () => {
+    expect((await post(`ApiKey ${ADMIN_KEY}`, cw("cw-upd"))).status).toBe(200);
+    const before = JSON.stringify(cwRow("cw-upd"));
+    const res = await post(`ApiKey ${NODE_KEY}`, { type: "poolImpulse_write", id: "cw-upd", body: { dispatch_ids: ["planted"] } });
+    expect(res.status).toBe(403);
+    const retire = await post(`ApiKey ${NODE_KEY}`, { type: "poolImpulse_write", id: "cw-upd", status: "retired" });
+    expect(retire.status).toBe(403);
+    expect(JSON.stringify(cwRow("cw-upd"))).toBe(before);
+  });
+
+  it("control: a non-trust-root write with the node key still succeeds", async () => {
+    const res = await post(`ApiKey ${NODE_KEY}`, { type: "poolImpulse_write", id: "plain-node", shape: "timeShapedRhythm", body: { x: 1 } });
+    expect(res.status).toBe(200);
+    expect(resolvePoolImpulse({ type: "poolImpulse", id: "plain-node" }).body.impulses).toHaveLength(1);
   });
 });
 

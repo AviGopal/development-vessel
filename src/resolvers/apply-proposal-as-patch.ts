@@ -35,6 +35,7 @@ import { createHash } from "node:crypto";
 import { DISCOVERY_ENDPOINT, METABOB_API_KEY } from "../config.js";
 import type { ResolverResult } from "./types.js";
 import { resolveFeatureCompose } from "./feature-compose.js";
+import { asSemanticDissentStamp } from "./vessel-mitosis-cutover.js";
 
 // ---------------------------------------------------------------------------
 // Staleness-sweep configuration
@@ -936,6 +937,9 @@ async function attemptApplyOnce(pointer: ApplyProposalAsPatchPointer): Promise<R
   let parsedFull: ParsedFull | null = null;
   const tolerantFull = parseFirstJsonObject(chosen.content);
   if (tolerantFull && typeof tolerantFull === "object") parsedFull = tolerantFull as ParsedFull;
+  // A compose report that landed over an advisory semantic-gate addresses:false carries its semantic_dissent
+  // stamp; the pending record keeps it so the tick's re-run cutover lands landed_unverified with it too.
+  const proposalDissent = asSemanticDissentStamp((tolerantFull as { semantic_dissent?: unknown } | null)?.semantic_dissent);
   const newFiles = ((parsedFull?.new_files ?? []) as Array<{ path?: string; content?: string }>).filter(
     (f): f is { path: string; content: string } =>
       f != null && typeof f.path === "string" && typeof f.content === "string",
@@ -1152,6 +1156,7 @@ async function attemptApplyOnce(pointer: ApplyProposalAsPatchPointer): Promise<R
       // already has.
       staged_base_shas: stagedBaseShas,
       multifile: true,
+      ...(proposalDissent ? { semantic_dissent: proposalDissent } : {}),
     };
     try { await writeFile(pendingPath, JSON.stringify(pendingBody, null, 2)); }
     catch (err) { return structuredError(`pending write failed: ${(err as Error).message}`); }
@@ -1258,6 +1263,7 @@ async function attemptApplyOnce(pointer: ApplyProposalAsPatchPointer): Promise<R
     workspace_root: workspaceRoot,
     gap_id: chosen.name.replace(/-report\.json$/, ""),
     proposal_id: pointer.proposal_id ?? chosen.name.replace(/-report\.json$/, ""),
+    ...(proposalDissent ? { semantic_dissent: proposalDissent } : {}),
   });
   // Observability (operator-demo-apply-observability): log apply failures. Re-anchored AFTER the
   // call — the original landing mis-inserted this block inside the argument literal (syntax break).

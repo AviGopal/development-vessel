@@ -2100,6 +2100,15 @@ async function runGitAwareCutover(args: GitCutoverArgs): Promise<ResolverResult>
   }
 }
 
+/** A semantic-dissent stamp (feature-compose semanticGateDisposition): the fields a landing needs from it. */
+export type SemanticDissentStamp = { reason: string; gate_verdict?: unknown; at?: string; later_outcome?: unknown };
+/** The stamp when `x` is one (an object with a string reason), else null. Used on the pointer and the pending record. */
+export function asSemanticDissentStamp(x: unknown): SemanticDissentStamp | null {
+  if (!x || typeof x !== "object" || Array.isArray(x)) return null;
+  const r = (x as { reason?: unknown }).reason;
+  return typeof r === "string" ? (x as SemanticDissentStamp) : null;
+}
+
 async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverResult> {
   const {
     pointer,
@@ -2456,13 +2465,18 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
   // from the file, scoped to THIS mitosis by version id, before refusing.
   let pendingGapId = "";
   let pendingProposalId = "";
+  // A semantic-dissent stamp riding the pending record (a staging of a compose that landed over an advisory
+  // semantic-gate addresses:false): the tick re-runs this cutover with a pointer that forwards only four
+  // pending fields, so the stamp is read from the file, like gap_id.
+  let pendingSemanticDissent: SemanticDissentStamp | null = null;
   try {
     const provenancePendingPath = pointer.pending_pointer_path ?? join(process.env["WORKSPACE_ROOT"] ?? process.cwd(), "mitosis-pending.json");
     if (await pathExists(provenancePendingPath)) {
-      const cur = JSON.parse(await readFile(provenancePendingPath, "utf-8")) as { mitosis_version_id?: string; gap_id?: string; proposal_id?: string };
+      const cur = JSON.parse(await readFile(provenancePendingPath, "utf-8")) as { mitosis_version_id?: string; gap_id?: string; proposal_id?: string; semantic_dissent?: unknown };
       if (cur.mitosis_version_id === mitosis_version_id) {
         if (typeof cur.gap_id === "string" && cur.gap_id.length > 0) pendingGapId = cur.gap_id;
         if (typeof cur.proposal_id === "string" && cur.proposal_id.length > 0) pendingProposalId = cur.proposal_id;
+        pendingSemanticDissent = asSemanticDissentStamp(cur.semantic_dissent);
       }
     }
   } catch {
@@ -2494,8 +2508,10 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
   // (its gap's armed own check went red->green; see semanticGateDisposition). The own check passing is
   // not enough on its own here: the landing is landed_unverified until the post-land by-effect check
   // (the pending-land sweep) measures the defect gone.
-  const semanticDissent = (pointer as { semantic_dissent?: { reason?: unknown } | null }).semantic_dissent;
-  if (semanticDissent && typeof semanticDissent === "object") landedUnverifiedReason = `semantic_dissent: landed over the semantic gate's non-hard-fail addresses:false (${String(semanticDissent.reason ?? "").slice(0, 200)}); post-land by-effect check required`;
+  // The pointer's stamp (a direct feature_compose cutover) or, on a tick re-run, the pending record's.
+  const semanticDissent = asSemanticDissentStamp((pointer as { semantic_dissent?: unknown }).semantic_dissent) ?? pendingSemanticDissent;
+  const dissentFromPendingRecord = semanticDissent !== null && semanticDissent === pendingSemanticDissent;
+  if (semanticDissent) landedUnverifiedReason = `semantic_dissent: landed over the semantic gate's non-hard-fail addresses:false (${String(semanticDissent.reason ?? "").slice(0, 200)}); post-land by-effect check required`;
   {
     // mitosis-tick passes gap_id as "{{extract_gap_id_content}}", and mitosis_pending_observer does not
     // forward gap_id, so it can arrive unsubstituted. Trust only a real id; else the pending file's.
@@ -3405,6 +3421,17 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
   // route-edit-<hash> proposal id has no gap row -> skip, never create a phantom
   // gap), only on a real origin push (pushStatus==="pushed" -> newSha is on
   // origin; host_sync_pending re-commits a different sha host-side), idempotent.
+  // A dissent that rode the PENDING record (not the pointer) has no compose waiting to settle it: record it
+  // here, once pushed, so the gate's calibration sample is not lost. A pointer-carried dissent is settled
+  // by its feature_compose caller.
+  if (dissentFromPendingRecord && semanticDissent && gapId !== "unknown-gap") {
+    try {
+      const { settleSemanticDissent } = await import("./feature-compose.js");
+      await settleSemanticDissent(gapId, semanticDissent as never, { push_status: pushStatus, new_git_sha: newSha });
+    } catch (err) {
+      console.warn(`[mitosis-cutover] gap=${gapId}: pending semantic dissent not settled (${(err as Error)?.message ?? String(err)})`);
+    }
+  }
   if (gapId !== "unknown-gap" && pushStatus === "pushed" && /^[0-9a-f]{7,40}$/i.test(newSha) && !behavioralVerificationFailed) {
     try {
       const stampRead = await resolveSubstrateGap({ type: "substrateGap", id: gapId, limit: 1 } as never);

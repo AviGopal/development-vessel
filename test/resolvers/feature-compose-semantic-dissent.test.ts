@@ -301,14 +301,22 @@ afterEach(() => {
 });
 afterAll(() => { restoreCutoverFetch(); restoreCutoverExecModules(); });
 
-/** A gap row store in memory: the injected readGap/writeGap the recorder, settler and reader take. */
+/**
+ * A gap row store in memory: the injected readGap/writeGap the recorder, settler and reader take. Like the real
+ * store (substrate-gap.ts), a write carries the row's omitted classification_metadata keys forward; every
+ * payload is recorded so a test can assert what a writer SENT (the relocation-hint merge test's pattern).
+ */
 function memoryGap(row: Record<string, unknown>): { deps: GapDeps; writes: Record<string, unknown>[]; current: () => Record<string, unknown> } {
   let cur = structuredClone(row);
   const writes: Record<string, unknown>[] = [];
   return {
     deps: {
       readGap: async (id) => (id === cur.id ? structuredClone(cur) : null),
-      writeGap: async (r) => { writes.push(structuredClone(r)); cur = structuredClone(r); },
+      writeGap: async (r) => {
+        writes.push(structuredClone(r));
+        const sent = structuredClone(r);
+        cur = { ...cur, ...sent, classification_metadata: { ...((cur.classification_metadata ?? {}) as Record<string, unknown>), ...((sent.classification_metadata ?? {}) as Record<string, unknown>) } };
+      },
     },
     writes,
     current: () => cur,
@@ -467,6 +475,30 @@ describe("semantic dissent: a green armed class-2 check outranks a non-hard-fail
       await resolveOutcome("g3", { result: "passed", at: "2026-10-03T09:00:00.000Z" }, store.deps);
       expect(store.writes.length).toBe(0);
     }
+  });
+
+  it("MUST-FAIL (stale full-row write): recordSemanticDissent and resolveDissentOutcome send ONLY semantic_dissent in classification_metadata, with the row's identity and status; the row keeps its other keys", async () => {
+    const gate = await gateSays(GREEN_DRAFT_DIFF);
+    const rec = disposition({ gate, own_check: RED_TO_GREEN, diff: GREEN_DRAFT_DIFF, edit_site: EDIT_SITE, src_files: SRC_FILES }).semantic_dissent!;
+    const record = exported<(g: string, d: Dissent, deps: GapDeps) => Promise<void>>("recordSemanticDissent");
+    const resolveOutcome = exported<(g: string, o: { result: "passed" | "failed"; at: string }, deps: GapDeps) => Promise<unknown>>("resolveDissentOutcome");
+    const row = { id: "g-merge", status: "open", category: "missing_capability", summary: "merge fixture", detected_at: "2026-10-01T00:00:00.000Z", classification_metadata: { edit_site: EDIT_SITE, failure_lessons: [{ class: "verify_failed" }] } };
+    const store = memoryGap(row);
+    await record("g-merge", rec, store.deps);
+    await resolveOutcome("g-merge", { result: "passed", at: "2026-10-03T09:00:00.000Z" }, store.deps);
+    expect(store.writes.length).toBe(2);
+    for (const w of store.writes) {
+      expect(Object.keys((w.classification_metadata ?? {}) as Record<string, unknown>)).toEqual(["semantic_dissent"]);
+      expect({ id: w.id, status: w.status, category: w.category, summary: w.summary }).toEqual({ id: "g-merge", status: "open", category: "missing_capability", summary: "merge fixture" });
+    }
+    const meta = store.current().classification_metadata as Record<string, unknown>;
+    expect(meta.edit_site).toBe(EDIT_SITE);
+    expect((meta.failure_lessons as unknown[]).length).toBe(1);
+    expect(dissentsOf(store.current())).toEqual([{ ...rec, later_outcome: { result: "passed", at: "2026-10-03T09:00:00.000Z" } }]);
+    // The reader on a gap the sweep just CLOSED writes the closed status back, never reopening it.
+    const closed = memoryGap({ ...row, id: "g-closed", status: "closed", classification_metadata: { semantic_dissent: [rec] } });
+    await resolveOutcome("g-closed", { result: "passed", at: "2026-10-03T09:00:00.000Z" }, closed.deps);
+    expect(closed.writes.map((w) => [w.status, Object.keys((w.classification_metadata ?? {}) as Record<string, unknown>)])).toEqual([["closed", ["semantic_dissent"]]]);
   });
 
   it("MUST-FAIL (the reader is called, operator half): the pending-land sweep resolves dissents with 'passed' on a verified landing and 'failed' on a reverted or present one", () => {

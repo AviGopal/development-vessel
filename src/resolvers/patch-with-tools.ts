@@ -32,7 +32,7 @@ import { METABOB_ENDPOINT, METABOB_API_KEY, env } from "../config.js";
 import { withWriteGrant, WRITE_GRANT_FIELD } from "./write-containment.js";
 import type { ResolverResult } from "./types.js";
 import { vacuousEditReason } from "../vacuous-edit.js";
-import { resolveVesselMitosisCutover } from "./vessel-mitosis-cutover.js";
+import { resolveVesselMitosisCutover, asSemanticDissentStamp, type SemanticDissentStamp } from "./vessel-mitosis-cutover.js";
 import { staticEvaluate } from "./vessel-mitosis-evaluate.js";
 import { noProgressStreak } from "./no-progress-streak.js";
 
@@ -110,6 +110,9 @@ export interface PatchWithToolsPointer {
   /** Provenance threaded to the cutover's missing-provenance guard. */
   gap_id?: string;
   proposal_id?: string;
+  /** A semantic-dissent stamp from the proposal (feature_compose landed it over an advisory addresses:false):
+   *  written to the pending record so the re-run cutover lands landed_unverified with it. */
+  semantic_dissent?: SemanticDissentStamp;
 }
 
 type ToolCall = { tool: string; args: Record<string, unknown> };
@@ -1615,6 +1618,7 @@ console.log(`[pwt-semantic-gate] PASSED ${pointer.target_file}: llm_consulted=${
     staged_files: [subPath],
     plan_turns: history.length,
     final_summary: finalReason,
+    ...(asSemanticDissentStamp(pointer.semantic_dissent) ? { semantic_dissent: pointer.semantic_dissent } : {}),
   };
   try {
     await writeFile(pendingPath, JSON.stringify(pendingBody, null, 2));

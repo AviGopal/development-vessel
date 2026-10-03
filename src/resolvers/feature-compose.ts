@@ -3551,6 +3551,22 @@ export type OwnCheckEvidence = { test_file: string; ran: boolean; tc_ok: boolean
 export type SemanticDisposition = { land: boolean; veto: SemanticVeto | null; semantic_dissent?: SemanticDissent; landed_unverified: boolean; post_land_by_effect_check: "required" | "not_required" };
 type GapRowDeps = { readGap: (id: string) => Promise<Record<string, unknown> | null>; writeGap: (row: Record<string, unknown>) => Promise<void> };
 
+/**
+ * A MERGE write of one classification_metadata key: the store's identity fields from the row just read, and
+ * ONLY `key` inside classification_metadata. The store carries every omitted key forward, so a concurrent
+ * writer's keys are never reverted by this read's stale snapshot (the stale full-row write class). Status is
+ * the row's own, so a write onto a closed gap never reopens it.
+ */
+function mergeMetadataKeyWrite(row: Record<string, unknown>, key: string, value: unknown): Record<string, unknown> {
+  return {
+    id: String(row.id ?? ""),
+    category: row.category,
+    summary: row.summary,
+    detected_at: row.detected_at,
+    status: row.status ?? "open",
+    classification_metadata: { [key]: value },
+  };
+}
 /** The gap store through the shaped substrateGap resolvers (the default for the dissent writer and reader). */
 const storeGapRowDeps: GapRowDeps = {
   readGap: async (id) => ((((await resolveSubstrateGap({ type: "substrateGap", id, limit: 1 } as never))?.body as { gaps?: Record<string, unknown>[] } | undefined)?.gaps ?? [])[0] ?? null),
@@ -3629,10 +3645,9 @@ export function semanticGateDisposition(input: { gate: SemanticGateVerdict; own_
 export async function recordSemanticDissent(gapId: string, dissent: SemanticDissent, deps: GapRowDeps = storeGapRowDeps): Promise<void> {
   const row = await deps.readGap(gapId);
   if (!row || String(row.status ?? "") === "closed") return;
-  const meta = { ...((row.classification_metadata as Record<string, unknown>) ?? {}) };
+  const meta = (row.classification_metadata as Record<string, unknown>) ?? {};
   const prior = Array.isArray(meta.semantic_dissent) ? (meta.semantic_dissent as unknown[]) : [];
-  meta.semantic_dissent = [...prior, dissent].slice(-20);
-  await deps.writeGap({ ...row, classification_metadata: meta });
+  await deps.writeGap(mergeMetadataKeyWrite(row, "semantic_dissent", [...prior, dissent].slice(-20)));
 }
 /**
  * NO PHANTOM DISSENT: record a dissent only for a landing that happened — push_status "pushed" with a
@@ -3666,7 +3681,7 @@ export async function resolveDissentOutcome(gapId: string, outcome: { result: "p
   if (!gapId) return 0;
   const row = await deps.readGap(gapId);
   if (!row) return 0;
-  const meta = { ...((row.classification_metadata as Record<string, unknown>) ?? {}) };
+  const meta = (row.classification_metadata as Record<string, unknown>) ?? {};
   const list = Array.isArray(meta.semantic_dissent) ? (meta.semantic_dissent as Array<Record<string, unknown>>) : [];
   const at = outcome.at ?? new Date().toISOString();
   let filled = 0;
@@ -3676,8 +3691,7 @@ export async function resolveDissentOutcome(gapId: string, outcome: { result: "p
     return { ...d, later_outcome: { result: outcome.result, at } };
   });
   if (filled === 0) return 0;
-  meta.semantic_dissent = next;
-  await deps.writeGap({ ...row, classification_metadata: meta });
+  await deps.writeGap(mergeMetadataKeyWrite(row, "semantic_dissent", next));
   return filled;
 }
 /** Vessel-relative path -> text for every source file under `<root>/src` (the read sites hollowWriteIdentifiers scans). */
@@ -8134,7 +8148,7 @@ const earlyAttempt = await Promise.race([
     }
     writeFileSync(
       reportPath,
-      JSON.stringify({ ok: verdict === "FAVORABLE", verdict, spec: String(spec).slice(0, 8000), summary: plan.summary, touched_vessels: [...touched], op_count: ops.length, applied, apply_failed: applyFailed, verify, semantic_gate, rolled_back, restore_failed: restoreFailed, cutovers }, null, 2),
+      JSON.stringify({ ok: verdict === "FAVORABLE", verdict, spec: String(spec).slice(0, 8000), summary: plan.summary, touched_vessels: [...touched], op_count: ops.length, applied, apply_failed: applyFailed, verify, semantic_gate, ...(semanticDissent ? { semantic_dissent: semanticDissent } : {}), rolled_back, restore_failed: restoreFailed, cutovers }, null, 2),
     );
   } catch { /* persistence failure must never fail the compose */ }
 

@@ -960,7 +960,7 @@ async function closeResolved(facts: readonly string[], present: readonly SelfFac
   let closed = 0;
   let rows: Array<Record<string, unknown>> = [];
   try {
-    const read = await resolveSubstrateGap({ type: "substrateGap", status: "open", limit: 5000 } as never);
+    const read = await resolveSubstrateGap({ type: "substrateGap", status: "open", limit: 5000, include_held: true } as never);
     rows = (((read as { body?: { gaps?: unknown } }).body?.gaps ?? []) as Array<Record<string, unknown>>);
   } catch (err) {
     noteReadError("gap store read for closure", err);

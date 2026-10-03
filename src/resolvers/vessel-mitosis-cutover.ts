@@ -291,7 +291,7 @@ export async function loadTrackedRedNames(
       : [];
   };
   try {
-    const open = rowsOf(await read({ type: "substrateGap", status: "open", limit: 5000 } as never));
+    const open = rowsOf(await read({ type: "substrateGap", status: "open", limit: 5000, include_held: true } as never));
     if (open === null) return null;
     const ownRows = rowsOf(await read({ type: "substrateGap", id: ownGapId, limit: 1 } as never));
     if (ownRows === null) return null;

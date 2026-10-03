@@ -51,7 +51,8 @@ try {
     headers,
     signal: AbortSignal.timeout(20000),
     body: JSON.stringify({
-      impulse: { pointer: { type: "substrateGap", status: "open", limit: 200 } },
+      // include_held: a graph report annotates every open gap; held ones are counted separately (heldGapCount).
+      impulse: { pointer: { type: "substrateGap", status: "open", limit: 200, include_held: true } },
     }),
   });
   const gapsData = gapsRes.ok ? ((await gapsRes.json()) as any) : {};
@@ -217,6 +218,7 @@ try {
       coveredShapes: Array.from(coveredShapes),
       gapShapes,
       unlinkedGapShapes,
+      heldGapCount: gaps.filter((g: any) => g?.classification_metadata?.operator_hold === true).length,
       nodes: enrichedNodes,
       links: populatedLinks,
     },

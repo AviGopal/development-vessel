@@ -3994,6 +3994,8 @@ async function sweepPendingLandVerificationsOnce(): Promise<{ checked: number; c
       // 1000 window hid 5 pending landings and 50 predicate-bearing gaps from verification.
       limit: Number.MAX_SAFE_INTEGER,
       exclude_categories: [...DECISION_LOG_GAP_CATEGORIES],
+      // Bookkeeping, not supply: a held gap's landing is still verified (it is only never closed on it).
+      include_held: true,
     } as never);
     const gaps = ((read?.body as { gaps?: Record<string, unknown>[] })?.gaps) ?? [];
     // First, stamp lineage-linked commits as pending verification for gaps with predicates but no stamp

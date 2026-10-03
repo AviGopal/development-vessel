@@ -371,18 +371,22 @@ async function fetchClosedOrphanShapes(emitUrl: string, apiKey: string): Promise
 // the live-producer signal (liveSet from the discovery registry). Self-heals: when
 // the producer re-registers, the emit loop re-writes the gap open. Caller guards on
 // !degraded && liveSet.size>0 so a registry outage never rejects the corpus.
-async function rejectUnreachableOrphanGaps(emitUrl: string, apiKey: string, liveSet: Set<string>): Promise<string[]> {
+async function rejectUnreachableOrphanGaps(emitUrl: string, apiKey: string, liveSet: Set<string>): Promise<{ rejected: string[]; held_skipped: string[] }> {
   const rejected: string[] = [];
+  const heldSkipped: string[] = [];
   try {
     const r = await fetch(emitUrl, {
       method: "POST",
       headers: { "Content-Type": "application/json", ...(apiKey ? { Authorization: `ApiKey ${apiKey}` } : {}) },
-      body: JSON.stringify({ impulse: { pointer: { type: "substrateGap", status: "open", category: "orphaned_capability", limit: 500 } } }),
+      // include_held: held orphan gaps are read and SKIPPED (held_skipped), never rejected. The store's
+      // hold guard covers status "closed" only, so a "rejected" write here would override the hold.
+      body: JSON.stringify({ impulse: { pointer: { type: "substrateGap", status: "open", category: "orphaned_capability", limit: 500, include_held: true } } }),
       signal: AbortSignal.timeout(10_000),
     });
-    const j = (await r.json()) as { body?: { gaps?: Array<{ id?: string; classification_metadata?: { shape?: string } }> } };
+    const j = (await r.json()) as { body?: { gaps?: Array<{ id?: string; classification_metadata?: { shape?: string; operator_hold?: unknown } }> } };
     for (const g of j.body?.gaps ?? []) {
       const id = String(g.id ?? "");
+      if (g.classification_metadata?.operator_hold === true) { heldSkipped.push(id); continue; }
       const shape = g.classification_metadata?.shape ?? id.replace(/^orphaned-capability-/, "");
       if (!shape || liveSet.has(shape)) continue; // mintable — keep open
       await fetch(emitUrl, {
@@ -394,7 +398,7 @@ async function rejectUnreachableOrphanGaps(emitUrl: string, apiKey: string, live
       rejected.push(id);
     }
   } catch { /* best-effort */ }
-  return rejected;
+  return { rejected, held_skipped: heldSkipped };
 }
 
 export async function resolveOrphanedCapabilityScan(
@@ -469,8 +473,11 @@ export async function resolveOrphanedCapabilityScan(
   // Retire VoI-0 orphan gaps whose shape has no live producer (see above).
   const liveSet = new Set(liveShapes);
   let rejectedUnreachable: string[] = [];
+  let heldSkippedUnreachable: string[] = [];
   if (emit && !degraded && liveSet.size > 0) {
-    rejectedUnreachable = await rejectUnreachableOrphanGaps(emitUrl, apiKey, liveSet);
+    const r = await rejectUnreachableOrphanGaps(emitUrl, apiKey, liveSet);
+    rejectedUnreachable = r.rejected;
+    heldSkippedUnreachable = r.held_skipped;
   }
 
   return {
@@ -490,6 +497,7 @@ export async function resolveOrphanedCapabilityScan(
       gaps_emitted: gapsEmitted,
       emitted_shapes: emitted,
       rejected_unreachable: rejectedUnreachable,
+      held_skipped_unreachable: heldSkippedUnreachable,
       capability_orphans: capabilityOrphans.slice(0, 80),
       generated_at: new Date().toISOString(),
     },

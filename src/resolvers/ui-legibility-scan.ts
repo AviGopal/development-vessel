@@ -235,6 +235,7 @@ export async function resolveUiLegibilityScan(
   // express.
   let gapsClosed = 0;
   const closedGapIds: string[] = [];
+  const heldSkipped: string[] = [];
   if (emitGap) {
     const stillOpen = new Set(
       violations.map(
@@ -248,7 +249,10 @@ export async function resolveUiLegibilityScan(
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           impulse: {
-            pointer: { type: "substrateGap", category: "ui_legibility", status: "open", limit: 200 },
+            // include_held: this scan's own findings include held ones, so it reads them and SKIPS them
+            // (counted in held_skipped): a hold says no writer changes the row, and the store refuses a
+            // held close anyway, which would otherwise be counted here as closed on HTTP 200.
+            pointer: { type: "substrateGap", category: "ui_legibility", status: "open", limit: 200, include_held: true },
           },
         }),
         signal: AbortSignal.timeout(10_000),
@@ -262,6 +266,7 @@ export async function resolveUiLegibilityScan(
         if (g["source"] !== "substrate_detected") continue;
         if (stillOpen.has(id)) continue;
         const meta = (g["classification_metadata"] ?? {}) as Record<string, unknown>;
+        if (meta["operator_hold"] === true) { heldSkipped.push(id); continue; }
         const rule = String(meta["rule"] ?? "");
         if (!["px_floor", "hex_color_override", "chip_density"].includes(rule)) continue;
         const closeResp = await fetch(devVesselImpulsesUrl, {
@@ -309,6 +314,7 @@ export async function resolveUiLegibilityScan(
       gaps_emitted: gapsEmitted,
       gaps_closed: gapsClosed,
       closed_gap_ids: closedGapIds,
+      held_skipped: heldSkipped,
       information_yield:
         violations.length > 0 || gapsClosed > 0 ? "productive" : "idle",
       completed_at: new Date().toISOString(),

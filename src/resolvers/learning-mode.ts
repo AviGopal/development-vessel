@@ -119,7 +119,9 @@ export async function resolveLearningMode(pointer: LearningModePointer): Promise
     necessary.set(r.shape, Math.max(necessary.get(r.shape) ?? 0, Number(r.priority_score ?? r.demand_count ?? 1)));
   }
 
-  // Also fold open-gap demanded shapes (substrateGap.expected_output_shapes).
+  // Also fold open-gap demanded shapes (substrateGap.expected_output_shapes). A DEMAND signal, not a
+  // count: it steers the mode toward develop, so it reads the default supply view and a held gap
+  // (operator_hold) creates no demand here.
   const gapsResp = await devResolve({ type: "substrateGap", status: "open", limit: p.limit ?? 200 }) as Record<string, unknown> | null;
   const gaps: Array<{ expected_output_shapes?: string[]; classification_metadata?: { missing_shape?: string } }> =
     ((gapsResp?.body as Record<string, unknown> | undefined)?.gaps ?? []) as Array<{ expected_output_shapes?: string[]; classification_metadata?: { missing_shape?: string } }>;

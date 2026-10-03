@@ -274,6 +274,13 @@ export interface SubstrateGapReadPointer {
   exclude_categories?: string[];
   /** Also return the store holder's per-category expectation calibration (value-per-cost 5.5). */
   include_calibration?: boolean;
+  /**
+   * List held gaps too. A status:"open" list read omits gaps under classification_metadata.operator_hold
+   * by default, because that read is the open-gap SUPPLY (boredom, the auto-pick, demand scans) and a
+   * hold that suppliers can see does not contain. Operator views and bookkeeping readers (dedupe,
+   * landing verification, self-fact closure) pass include_held:true. By-id reads are never filtered.
+   */
+  include_held?: boolean;
 }
 
 /**
@@ -1028,6 +1035,9 @@ export async function resolveSubstrateGap(
   }
   if (pointer.status) {
     results = results.filter((g) => g.status === pointer.status);
+  }
+  if (pointer.status === "open" && !pointer.id && pointer.include_held !== true) {
+    results = results.filter((g) => (g.classification_metadata as { operator_hold?: unknown } | undefined)?.operator_hold !== true);
   }
   if (pointer.exclude_categories && pointer.exclude_categories.length) {
     const excluded = new Set(pointer.exclude_categories);

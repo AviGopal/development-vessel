@@ -87,6 +87,8 @@ let savedSlotDir: string | undefined;
 let logs: string[] = [];
 let logSpy: ReturnType<typeof spyOn> | null = null;
 let warnSpy: ReturnType<typeof spyOn> | null = null;
+/** fs-guard violations a test declares as expected (BLOCKED by the guard, so nothing was written). */
+let expectedFsBlocks: RegExp[] = [];
 
 beforeEach(() => {
   savedEndpoint = process.env["GAP_STORE_ENDPOINT"];
@@ -105,7 +107,8 @@ beforeEach(() => {
 });
 afterEach(() => {
   const fetchV = fetchGuard?.restore() ?? [];
-  const fsV = fsGuard?.restore() ?? [];
+  const fsV = (fsGuard?.restore() ?? []).filter((v) => !expectedFsBlocks.some((re) => re.test(v)));
+  expectedFsBlocks = [];
   const execV = execGuard?.restore() ?? [];
   fetchGuard = fsGuard = execGuard = null as never;
   logSpy?.mockRestore();
@@ -301,5 +304,48 @@ describe("operator_hold contains: the lane's auto-pick admission (kept green)", 
     );
     expect(excluded.find((e) => e.id === "hold-admission-held")?.reason).toBe("operator_hold");
     expect(admitted.map((g) => String(g.id))).toEqual(["hold-admission-unheld"]);
+  });
+});
+
+// A hold survives the writers that re-file the same row, and the counters that report open gaps see
+// it. Detectors re-write their findings by stable id on every scan (ui-legibility-scan, the orphaned
+// capability emit loop) with a full classification_metadata that knows nothing of the hold; if the
+// write path did not carry the hold forward, the next scan would silently lift it. A reporting reader
+// (goal_summary) reads with include_held and must count the held gap, separately.
+describe("operator_hold contains: re-writes and counters", () => {
+  it("[CONTROL] a scanner re-write of a held row (same stable id, through the real substrateGap_write, metadata without the hold) leaves operator_hold true and status open", async () => {
+    fetchGuard!.route({ name: "event publish", match: (u) => u.endsWith("/v2/events/publish"), respond: () => Response.json({ ok: true }) });
+    // A successful gap write mirrors to the pool under config.ts's WORKSPACE_ROOT, frozen at first
+    // import (the checkout in a multi-file run). The fs guard BLOCKS that mkdir (the mirror is
+    // non-fatal and after the store write); it is the one expected block here, nothing else is.
+    expectedFsBlocks = [/^fs\.mkdirSync .*\/pool$/];
+    const w = await resolveSubstrateGapWrite({ type: "substrateGap_write", gap: { id: HELD, category: "systematic_failure", source: "substrate_detected", summary: `fixture ${HELD} (re-observed by a scan)`, detected_at: new Date().toISOString(), status: "open", classification_metadata: { surface: "panel", region: "fixture", kind: "cramped", rule: "chip_density" } } } as never);
+    expect(w.shape).toBe("substrateGapWriteResult");
+    const stored = (JSON.parse(readFileSync(STORE, "utf8")) as Array<{ id: string; status: string; classification_metadata?: Record<string, unknown> }>).find((g) => g.id === HELD);
+    expect(stored?.status).toBe("open");
+    expect(stored?.classification_metadata?.["operator_hold"]).toBe(true);
+    expect(stored?.classification_metadata?.["rule"]).toBe("chip_density");
+    // and the re-written row is still absent from the default supply read
+    expect(ids(await resolveSubstrateGap(BOREDOM_OPEN_READ as never))).not.toContain(HELD);
+  });
+
+  it("[CONTROL] a counting reader (goal_summary) reads with include_held, counts the held gap, and reports it separately", async () => {
+    const { resolveGoalSummary } = await import("../../src/resolvers/goal-summary.js");
+    const saved = { a: process.env["ACTIVITY_API_ENDPOINT"], d: process.env["DEV_VESSEL_ENDPOINT"] };
+    process.env["ACTIVITY_API_ENDPOINT"] = "http://activity.fixture";
+    process.env["DEV_VESSEL_ENDPOINT"] = "http://dev.fixture";
+    try {
+      fetchGuard!.route({ name: "activity", match: (u) => u.startsWith("http://activity.fixture/"), respond: () => Response.json({ templates: [], edges: [] }) });
+      // The dev-vessel resolve is answered by THIS suite's real resolver over its temp store, so the
+      // reader's own pointer (include_held or not) is what decides the count.
+      fetchGuard!.route({ name: "dev gap read", match: (u) => u.startsWith("http://dev.fixture/"), respond: async (_u, b) => Response.json(await resolveSubstrateGap(b?.impulse?.pointer as never)) });
+      const r = await resolveGoalSummary({ type: "goal_summary" });
+      const sg = (r.body as { substrate_gaps?: { total_open_gaps?: number; held_open_gaps?: number } }).substrate_gaps;
+      expect(sg?.total_open_gaps).toBe(2);
+      expect(sg?.held_open_gaps).toBe(1);
+    } finally {
+      if (saved.a === undefined) delete process.env["ACTIVITY_API_ENDPOINT"]; else process.env["ACTIVITY_API_ENDPOINT"] = saved.a;
+      if (saved.d === undefined) delete process.env["DEV_VESSEL_ENDPOINT"]; else process.env["DEV_VESSEL_ENDPOINT"] = saved.d;
+    }
   });
 });

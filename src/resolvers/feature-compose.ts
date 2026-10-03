@@ -4482,6 +4482,29 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
   // compose the SAME gap concurrently (measured 2026-09-24 01:21Z). compose-slots.ts
   // refuses a duplicate holder when it is told the gap; say which refusal this is.
   const _gapIdForSlot = typeof (pointer.gap as { id?: unknown } | undefined)?.id === "string" ? String((pointer.gap as { id: string }).id) : undefined;
+  // OPERATOR HOLD CONTAINS EVERY COMPOSE, directed or not, and the STORED ROW decides it. An operator
+  // hold says the gap is not to be composed. A named-gap caller ignored it and looped every ~4 s
+  // (09-27 22:00); a directed:true caller bypassed it entirely (10-03 redispatch livelock) because the
+  // check sat inside the undirected block; and a pointer is a copy that can omit the hold ({id} only,
+  // or metadata copied before the hold was set) or claim one the store has since lifted. So the
+  // stored row is read by id (the same read hydration uses) before the envelope and the slot, and
+  // decides both ways. An unreadable store fails CLOSED (hold_state_unreadable), as the cutover defers
+  // on gap_store_unavailable: whether this gap is held cannot be known. A gap id with no stored row
+  // is not held. BUSY is a non-attempt, so neither refusal writes anything back to the store.
+  if (_gapIdForSlot) {
+    const lane = isDirected ? "directed" : "undirected";
+    let rows: Array<Record<string, unknown>> | null = null;
+    try { rows = await readComposeGapRows(_gapIdForSlot); } catch { rows = null; }
+    if (rows === null) {
+      console.log(`[feature-compose] ${lane} compose NOT started: gap ${_gapIdForSlot} hold_state_unreadable (gap store unreadable; failing closed)`);
+      return { shape: "featureComposeReport", body: { ok: false, verdict: "BUSY", stage: "hold_state_unreadable", error: `gap ${_gapIdForSlot}: the gap store could not be read, so its operator_hold state is unknown (${lane} compose not started)` } };
+    }
+    const stored = rows.find((r) => String(r.id) === _gapIdForSlot);
+    if ((stored?.classification_metadata as { operator_hold?: unknown } | undefined)?.operator_hold === true) {
+      console.log(`[feature-compose] ${lane} compose NOT started: gap ${_gapIdForSlot} is under operator_hold`);
+      return { shape: "featureComposeReport", body: { ok: false, verdict: "BUSY", stage: "operator_hold", error: `gap ${_gapIdForSlot} is under operator_hold (${lane} compose not started)` } };
+    }
+  }
   // SPEND ENVELOPE AT THE CHOKEPOINT (contained-self-development). gap-to-feature checks the envelope
   // for auto-picks only; a caller naming a gap started an undirected land:true compose every 10
   // minutes while autonomy was paused (09-27 14:55-15:25, db_performance_slow_queries). No
@@ -4492,13 +4515,6 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
     if (!envelope.allow) {
       console.log(`[feature-compose] undirected compose NOT started: spend envelope ${envelope.reason}`);
       return { shape: "featureComposeReport", body: { ok: false, verdict: "BUSY", stage: "budget", error: `spend envelope: ${envelope.reason} (undirected compose not started)` } };
-    }
-    // An operator hold says the gap is not to be composed autonomously. A named-gap caller ignored it
-    // and looped every ~4 s (09-27 22:00: ungrounded refusal -> narrowed child re-emitted -> its write
-    // re-triggered the compose). BUSY is a non-attempt, so this refusal writes nothing back to the store.
-    if ((pointer.gap?.classification_metadata as { operator_hold?: unknown } | undefined)?.operator_hold === true) {
-      console.log(`[feature-compose] undirected compose NOT started: gap ${String(pointer.gap?.id)} is under operator_hold`);
-      return { shape: "featureComposeReport", body: { ok: false, verdict: "BUSY", stage: "operator_hold", error: `gap ${String(pointer.gap?.id)} is under operator_hold (undirected compose not started)` } };
     }
   }
   const slot = await acquireComposeSlot(slotId, { directed: isDirected, gapId: _gapIdForSlot });

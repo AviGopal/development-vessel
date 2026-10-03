@@ -30,7 +30,8 @@ export async function resolveShapeClosureDemand(pointer: ShapeClosureDemandPoint
     classification_metadata?: { kind?: string; missing_shape?: string };
   };
 
-  // 1. Fetch OPEN substrate gaps from the dev-vessel substrateGap resolver.
+  // 1. Fetch OPEN substrate gaps from the dev-vessel substrateGap resolver. Demand SUPPLY (it ranks
+  //    shapes to build), so it reads the default view: a held gap (operator_hold) adds no demand.
   let gaps: Gap[] = [];
   try {
     const r = await fetch(DEV, {

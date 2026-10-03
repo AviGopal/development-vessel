@@ -3623,7 +3623,8 @@ export type SemanticDissent = {
   reason: string;
   gate_verdict: SemanticGateVerdict;
   at: string;
-  later_outcome: null | { result: "passed" | "failed"; at: string; settled_by?: { gap_id: string; check_key: string } };
+  later_outcome: null | { result: "passed" | "failed"; at: string; settled_by?: { gap_id: string; check_key: string } }
+    | { result: "superseded"; at: string; settled_by: { landed_sha: string; check_key: string | null } };
   /** Evidence only: object-literal keys the diff added that nothing in the vessel's own src reads. */
   unread_keys?: string[];
   /** Stamped at landing (settleSemanticDissent): the landed commit, the parent's check, the minted child. */
@@ -3837,16 +3838,26 @@ export async function recordSemanticDissent(gapId: string, dissent: SemanticDiss
  * A pushed landing under dissent is PARTIAL: the record is stamped with the landed sha (landedCloseReason
  * reads it to close landed_partial) and the parent's check identity (resolveDissentOutcome reads it, so that
  * check can never settle the dissent "passed"), and the dissent's reason is minted into a narrowed child gap.
+ *
+ * STALE DISSENT (qa 2a): a pushed landing with NO dissent (its own gate agreed) supersedes the gap's unsettled
+ * dissents of OTHER landings (supersedeStaleDissents), so a dissent never freezes the gap partial forever.
  */
 export async function settleSemanticDissent(
   gapId: string,
   dissent: SemanticDissent | null | undefined,
   cutoverResult: unknown,
   deps: GapRowDeps = storeGapRowDeps,
-): Promise<"recorded" | "not_landed" | "none" | "write_failed"> {
-  if (!dissent || !gapId) return "none";
+): Promise<"recorded" | "superseded" | "not_landed" | "none" | "write_failed"> {
+  if (!gapId) return "none";
   const r = (cutoverResult ?? {}) as Record<string, unknown>;
   const pushed = r["push_status"] === "pushed" && typeof r["new_git_sha"] === "string" && String(r["new_git_sha"]).trim() !== "";
+  if (!dissent) {
+    if (!pushed) return "none";
+    try { return (await supersedeStaleDissents(gapId, String(r["new_git_sha"]).trim(), deps)) > 0 ? "superseded" : "none"; } catch (err) {
+      console.warn(`[fc-semantic-dissent] gap=${gapId}: stale dissents NOT superseded (${(err as Error)?.message ?? String(err)}); the landing may still read partial`);
+      return "write_failed";
+    }
+  }
   if (!pushed) return "not_landed";
   const sha = String(r["new_git_sha"]).trim();
   try {
@@ -3865,6 +3876,30 @@ export async function settleSemanticDissent(
     console.warn(`[fc-semantic-dissent] gap=${gapId}: landed under dissent but the record was NOT written (${(err as Error)?.message ?? String(err)}) — calibration loses this sample`);
     return "write_failed";
   }
+}
+/**
+ * A landing whose own gate AGREED supersedes every unsettled dissent of another landing on the gap:
+ * later_outcome {result:"superseded", settled_by:{landed_sha, check_key}}. That landing then closes on its
+ * own evidence (landedCloseReason: landed_verified). A dissent stamped with THIS sha is left alone. Returns the count.
+ */
+async function supersedeStaleDissents(gapId: string, sha: string, deps: GapRowDeps): Promise<number> {
+  const row = await deps.readGap(gapId);
+  if (!row) return 0;
+  const meta = (row.classification_metadata as Record<string, unknown>) ?? {};
+  const list = Array.isArray(meta.semantic_dissent) ? (meta.semantic_dissent as Array<Record<string, unknown>>) : [];
+  const check = gapCheckIdentity(meta);
+  const at = new Date().toISOString();
+  let n = 0;
+  const next = list.map((d) => {
+    if (!d || d.later_outcome != null) return d;
+    if (typeof d.landed_sha === "string" && d.landed_sha !== "" && (d.landed_sha.startsWith(sha) || sha.startsWith(d.landed_sha))) return d;
+    n += 1;
+    return { ...d, later_outcome: { result: "superseded", at, settled_by: { landed_sha: sha, check_key: check?.key ?? null } } };
+  });
+  if (n === 0) return 0;
+  await deps.writeGap(mergeMetadataKeyWrite(row, "semantic_dissent", next));
+  console.log(`[fc-semantic-dissent] gap=${gapId}: ${n} stale dissent(s) superseded by landing ${sha.slice(0, 12)}, which the gate agreed with`);
+  return n;
 }
 /**
  * THE DISSENT BECOMES THE NEXT GAP: a narrowed child of the landed parent, built by the one narrowed-child

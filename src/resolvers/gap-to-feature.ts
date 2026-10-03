@@ -4866,12 +4866,19 @@ export async function bumpFailedAttempts(gap: Record<string, unknown>, opts: { s
   } catch { /* best-effort */ }
 }
 
-export async function recordApproachDecision(gap: Record<string, unknown>): Promise<void> {
+/** The node an approach decision and its outcome belong to (as registerAttempt stamps attempt intents). */
+const decisionNode = (): string => process.env["SUBSTRATE_NAME"] ?? "substrate";
+
+/** Records the pick's decision and returns its decision_id (null when the write could not be built). */
+export async function recordApproachDecision(gap: Record<string, unknown>): Promise<string | null> {
   try {
     const pred = predictLand(gap);
     const meta = (gap.classification_metadata ?? {}) as Record<string, unknown>;
     const arr = Array.isArray(meta.approach_decisions) ? (meta.approach_decisions as unknown[]) : [];
+    const decisionId = `dec-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 9)}`;
     arr.push({
+      decision_id: decisionId,
+      node: decisionNode(),
       at: new Date().toISOString(),
       predicted_p: pred.p,
       predicted_land: pred.predicted,
@@ -4884,10 +4891,15 @@ export async function recordApproachDecision(gap: Record<string, unknown>): Prom
       type: "substrateGap_write",
       gap: { ...gap, classification_metadata: meta, status: String(gap.status ?? "open") },
     } as never);
-  } catch { /* best-effort */ }
+    return decisionId;
+  } catch { /* best-effort */ return null; }
 }
 
-export function joinDecisionOutcome(meta: Record<string, unknown>, outcome: Record<string, unknown>): void {
+/** OWNED JOIN: an outcome joins the entry with its decision_id, else the newest unjoined entry its own node made
+ *  (or a legacy entry with no node), else it is appended as its own joined entry. It never writes onto another
+ *  node's decision: two nodes picking one gap each keep their own decision/outcome pair. */
+export function joinDecisionOutcome(meta: Record<string, unknown>, outcome: Record<string, unknown>, ref: { decision_id?: string; node?: string } = {}): void {
+  const node = ref.node ?? decisionNode();
   // An absent or fully-joined decision list is not a reason to discard a terminal outcome.
   // recordApproachDecision pushes a fresh unjoined entry on every PICK, so the ordinary
   // compose path always has somewhere to write. The mitosis-cutover sweep closes gaps in
@@ -4900,13 +4912,15 @@ export function joinDecisionOutcome(meta: Record<string, unknown>, outcome: Reco
   const arr = meta.approach_decisions;
   if (!Array.isArray(arr)) return;
   for (let i = arr.length - 1; i >= 0; i--) {
-    const entry = arr[i];
-    if (entry && typeof entry === "object" && !("outcome" in (entry as Record<string, unknown>))) {
-      (entry as Record<string, unknown>).outcome = { ...outcome, joined_at: new Date().toISOString() };
+    const entry = arr[i] as Record<string, unknown> | null;
+    if (!entry || typeof entry !== "object" || "outcome" in entry) continue;
+    const mine = ref.decision_id ? entry.decision_id === ref.decision_id : (entry.node === undefined || entry.node === node);
+    if (mine) {
+      entry.outcome = { ...outcome, joined_at: new Date().toISOString() };
       return;
     }
   }
-  arr.push({ at: new Date().toISOString(), appended_by: "joinDecisionOutcome", outcome: { ...outcome, joined_at: new Date().toISOString() } });
+  arr.push({ at: new Date().toISOString(), appended_by: "joinDecisionOutcome", ...(ref.decision_id ? { decision_id: ref.decision_id } : {}), node, outcome: { ...outcome, joined_at: new Date().toISOString() } });
   while (arr.length > 5) arr.shift();
 }
 

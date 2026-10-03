@@ -1,4 +1,5 @@
 import { Hono } from "hono";
+import { createHash } from "node:crypto";
 import { auditDetectorOutputSanity } from "../lib/detector-output-sanity.js";
 import { resolveContentAddressedVesselId } from "../resolvers/content-addressed-vessel-id.js";
 import { resolveGitStatus } from "../resolvers/git-status.js";
@@ -1128,6 +1129,18 @@ impulsesRouter.post("/v2/impulses/resolve", async (c) => {
     // ordinary envelope every other write gets.
     if (String(result.body.error ?? "").startsWith("operator_credential_required")) return c.json({ success: false, shape: result.shape, body: result.body, error: result.body.error }, 403);
     return c.json({ success: true, shape: result.shape, body: result.body });
+  }
+
+  // CALLER IDENTITY FOR THE GAP-WRITE AUDIT (2026-10-03). Stamped by the route, never taken from the
+  // client: any inbound _route_caller is overwritten. A sha256 fingerprint of the presented key (never the
+  // key) and the remote address the server wrapper stamped (x-dv-remote-addr) or the socket's.
+  if (pointerType === "substrateGap_write" && pointer && typeof pointer === "object") {
+    const m = /^(?:ApiKey|Bearer)\s+(\S+)$/i.exec(String(c.req.header("Authorization") ?? "").trim());
+    const keyFp = m ? "key:sha256:" + createHash("sha256").update(m[1]!).digest("hex").slice(0, 12) : "none";
+    const env = c.env as { requestIP?: (r: Request) => { address?: string } | null } | undefined;
+    let remote = c.req.header("x-dv-remote-addr") ?? "";
+    if (!remote) { try { remote = env?.requestIP?.(c.req.raw)?.address ?? ""; } catch { remote = ""; } }
+    (pointer as Record<string, unknown>)["_route_caller"] = { key_fp: keyFp, remote: remote || "unknown" };
   }
 
   try {

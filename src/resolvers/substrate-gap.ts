@@ -1309,7 +1309,7 @@ function existingRowGates(
  * forward would fail as well). The class-match fallback (a fresh timestamped id landing on an open row of
  * its class) is the holder's alone: here only the exact id is checked.
  */
-async function gateThenForward(pointer: Record<string, unknown>, incoming: Record<string, unknown>): Promise<ResolverResult> {
+async function gateThenForward(pointer: Record<string, unknown>, incoming: Record<string, unknown>, audit: { from?: string }): Promise<ResolverResult> {
   const id = String(incoming["id"]);
   const status = String(incoming["status"] ?? "open");
   const read = await forwardToGapStore({ type: "substrateGap", id, limit: 5 });
@@ -1326,6 +1326,7 @@ async function gateThenForward(pointer: Record<string, unknown>, incoming: Recor
     } as ResolverResult;
   }
   const stored = (rows as SubstrateGap[]).find((g) => g && g.id === id);
+  audit.from = stored ? String(stored.status ?? "open") : "absent";
   const ph = placeholderGate(incoming, id, status, stored);
   if (ph) return ph;
   if (stored) {
@@ -1335,6 +1336,15 @@ async function gateThenForward(pointer: Record<string, unknown>, incoming: Recor
   return (await forwardToGapStore(pointer))!;
 }
 
+/**
+ * OPERATOR-MARKER AUDIT (2026-10-03). The marker grants latitude (release a hold, correct a closed verdict,
+ * close a held gap) and authenticates nothing, so every write carrying it leaves one [gap-audit] line: gap
+ * id, transition (stored status -> written status; "absent" for no row, "?" when the write was refused
+ * before the store was read), marker, outcome, and the caller identity the HTTP route stamped as
+ * _route_caller (a sha256 fingerprint of the presented key, never the key; the remote address). A write
+ * that did not come through the route is caller=in-process.
+ */
+type GapWriteAudit = { from?: string };
 export async function resolveSubstrateGapWrite(
   pointer: SubstrateGapWritePointer | Record<string, unknown>,
   // Additive, test-facing: inject a vocabulary rather than depending on the host's
@@ -1349,6 +1359,43 @@ export async function resolveSubstrateGapWrite(
     /** In-process only: the commit the writer detected the defect against (see WHICH TREE). */
     detectedSha?: string,
   },
+): Promise<ResolverResult> {
+  const marker = operatorMarkerOf(pointer);
+  const audit: GapWriteAudit = {};
+  let r: ResolverResult | undefined;
+  try {
+    r = await resolveSubstrateGapWriteInner(pointer, opts, audit);
+    return r;
+  } finally {
+    if (marker) {
+      const p = pointer as Record<string, unknown>;
+      const g = (p["gap"] && typeof p["gap"] === "object" ? p["gap"] : p) as Record<string, unknown>;
+      const rc = p["_route_caller"] as { key_fp?: unknown; remote?: unknown } | undefined;
+      const caller = rc && typeof rc === "object"
+        ? `${typeof rc.key_fp === "string" ? rc.key_fp : "none"} remote=${typeof rc.remote === "string" ? rc.remote : "unknown"}`
+        : "in-process remote=-";
+      const b = (r?.body ?? {}) as Record<string, unknown>;
+      const outcome = !r ? "threw" : r.shape === "structuredError" ? `structuredError:${String(b["rule"] ?? b["failure_mode"] ?? b["error"] ?? "error")}` : r.shape;
+      console.log(`[gap-audit] operator-marked write gap=${String(g["id"] ?? "(no id)")} transition=${audit.from ?? "?"}->${String(g["status"] ?? "open")} marker=${marker} caller=${caller} outcome=${outcome}`);
+    }
+  }
+}
+
+async function resolveSubstrateGapWriteInner(
+  pointer: SubstrateGapWritePointer | Record<string, unknown>,
+  // Additive, test-facing: inject a vocabulary rather than depending on the host's
+  // filesystem layout. No production caller passes it (the cached fleet scan is used).
+  opts?: {
+    vocabulary?: ShapeVocabulary | null,
+    anchorNotFoundHandler?: (error: Error) => void,
+    /** In-process only: a verdict the caller just took with the same judge on this exact class-2 check (see BIRTH EVALUATION). */
+    birthVerdict?: { predicate_key: string; verdict: "present" | "absent" | "unknown" },
+    /** Tests only: the judge for this write's birth evaluation. */
+    birthJudge?: BirthJudge,
+    /** In-process only: the commit the writer detected the defect against (see WHICH TREE). */
+    detectedSha?: string,
+  },
+  audit: GapWriteAudit = {},
 ): Promise<ResolverResult> {
   // METADATA TYPE GATE (2026-10-03). classification_metadata is a record the store merges key by key.
   // A walk wrote the unrendered STRING "{{goal.classification_metadata}}" here; it was cast to a record
@@ -1472,7 +1519,7 @@ export async function resolveSubstrateGapWrite(
 
   // A node that does not hold the store gates, then forwards (see gateThenForward). Placed after the
   // stateless gates above (metadata type, id, check-input, description) so those run here as well.
-  if (process.env["GAP_STORE_ENDPOINT"]) return gateThenForward(pointer as Record<string, unknown>, incoming as unknown as Record<string, unknown>);
+  if (process.env["GAP_STORE_ENDPOINT"]) return gateThenForward(pointer as Record<string, unknown>, incoming as unknown as Record<string, unknown>, audit);
 
   // TIMESTAMP PLACEHOLDER SCRUB. The gate above rejects uninterpolated {{slots}} in id/category
   // only — deliberately, since a legitimate summary may QUOTE a placeholder when describing an
@@ -1524,6 +1571,7 @@ export async function resolveSubstrateGapWrite(
   // otherwise fall back to class match against a non-closed row.
   const classKey = gapClassKey(gap.id);
   let existingIdx = gaps.findIndex((g) => g.id === gap.id);
+  audit.from = existingIdx >= 0 ? String(gaps[existingIdx]!.status ?? "open") : "absent";
   // PLACEHOLDER GATE, EVERY STATUS (see placeholderGate). Inside the lock because the exemption compares
   // against the stored row with this exact id.
   {
@@ -1638,6 +1686,7 @@ export async function resolveSubstrateGapWrite(
   // row of its class is a no-op. This was gated on SUBSTRATE_GAP_SKIP_COMPOSE_TRIGGER === "1", a
   // test variable deciding production semantics, so in production such a write fell through to an
   // INSERT: a non-holder forwarding closes from a stale copy minted 90 closed rows that never existed.
+  if (existingIdx >= 0) audit.from = String(gaps[existingIdx]!.status ?? "open");
   if (existingIdx < 0 && gap.status !== "open") {
     return {
       early: {

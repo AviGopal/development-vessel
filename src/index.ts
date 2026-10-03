@@ -266,9 +266,15 @@ const server = Bun.serve({
           startRec = { at: Date.now() };
           inFlightStarts.add(startRec);
         }
+        // The remote address for the gap-write audit (routes/impulses.ts): stamped from the socket after
+        // deleting any inbound copy, so a client cannot name its own address. The rebuilt Request has no
+        // socket of its own, which is why the address travels as a header.
+        const headers = new Headers(req.headers);
+        headers.delete("x-dv-remote-addr");
+        headers.set("x-dv-remote-addr", srv.requestIP(req)?.address ?? "unknown");
         forwarded = new Request(req.url, {
           method: req.method,
-          headers: req.headers,
+          headers,
           body: raw,
         });
       }

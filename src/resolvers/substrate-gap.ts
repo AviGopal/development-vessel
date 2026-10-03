@@ -1387,8 +1387,14 @@ export async function resolveSubstrateGapWrite(
     if (stored !== expectStatus) {
       return {
         early: {
-          shape: "substrateGapWriteResult",
-          body: { id: gap.id, action: "skipped", skip_reason: "status_precondition_failed", expected_status: expectStatus, stored_status: stored },
+          // A no-op is not a success (2026-10-03): structuredError, so the route answers success:false.
+          // The body keeps action/skip_reason/stored_status; callers branch on skip_reason.
+          shape: "structuredError",
+          body: {
+            resolver: "substrateGap_write", failure_mode: "no_op",
+            id: gap.id, action: "skipped", skip_reason: "status_precondition_failed", expected_status: expectStatus, stored_status: stored,
+            detail: `gap ${gap.id}: nothing written — expect_status ${expectStatus} but the stored status is ${stored ?? "absent (no row with this id)"}`,
+          },
         },
       };
     }
@@ -1483,8 +1489,13 @@ export async function resolveSubstrateGapWrite(
   if (existingIdx < 0 && gap.status !== "open") {
     return {
       early: {
-        shape: "substrateGapWriteResult",
-        body: { id: gap.id, action: "skipped", skip_reason: "close_without_open_row", gap_class: classKey },
+        // A no-op is not a success (2026-10-03): see the expect_status branch above.
+        shape: "structuredError",
+        body: {
+          resolver: "substrateGap_write", failure_mode: "no_op",
+          id: gap.id, action: "skipped", skip_reason: "close_without_open_row", gap_class: classKey,
+          detail: `gap ${gap.id}: nothing written — a ${String(gap.status)} write needs a stored row with this id or an open row of its class (${classKey}), and there is none`,
+        },
       },
     };
   }

@@ -47,6 +47,33 @@ let ownCheckDeps: OwnCheckDeps = realOwnCheckDeps;
 export function __setOwnCheckDepsForTests(d: Partial<OwnCheckDeps> | null): void {
   ownCheckDeps = d ? { ...realOwnCheckDeps, ...d } : realOwnCheckDeps;
 }
+
+/**
+ * Own-check gate outcome counts since process start. development-vessel has no shared
+ * counters/metrics surface, so they are kept here, returned on every cutover result
+ * (own_check_counters), and logged on each outcome under the stable prefix
+ * "[cutover-own-check] outcome=<name> count=<n>" so a journal grep can tally them.
+ */
+export type OwnCheckOutcome =
+  | "own_check_passed"
+  | "own_check_failed"
+  | "own_check_unmeasurable"
+  | "gap_store_unavailable"
+  | "landed_unverified";
+const ownCheckCounts: Record<OwnCheckOutcome, number> = {
+  own_check_passed: 0,
+  own_check_failed: 0,
+  own_check_unmeasurable: 0,
+  gap_store_unavailable: 0,
+  landed_unverified: 0,
+};
+export function getOwnCheckCounters(): Record<OwnCheckOutcome, number> {
+  return { ...ownCheckCounts };
+}
+function countOwnCheck(outcome: OwnCheckOutcome, detail: string): void {
+  ownCheckCounts[outcome] += 1;
+  console.log(`[cutover-own-check] outcome=${outcome} count=${ownCheckCounts[outcome]} ${detail.slice(0, 300)}`);
+}
 export function selfRestartAlreadyOwed(vesselName: string): string | null {
   try {
     const r = Bun.spawnSync(["systemctl", "list-units", "--all", "--plain", "--no-legend", "mitosis-self-restart-*"], { stdout: "pipe", stderr: "pipe" });
@@ -2012,8 +2039,13 @@ async function runGitAwareCutover(args: GitCutoverArgs): Promise<ResolverResult>
     } catch {}
   }
 
+  // A DEFERRAL keeps its queue lock: the inner cutover marks it preserve_pending (gap store
+  // unavailable — retry this same tree next tick), and the exit clear below then leaves it.
+  let preservePending = false;
   try {
-    return await runGitAwareCutoverInner(args);
+    const inner = await runGitAwareCutoverInner(args);
+    preservePending = (inner.body as Record<string, unknown> | undefined)?.["preserve_pending"] === true;
+    return inner;
   } finally {
     if (proposalLeaseToken) {
       try { await resolveMaintenanceLeaseWrite({ type: "maintenanceLease_write", op: "release", name: "cutover", token: proposalLeaseToken }); } catch { }
@@ -2028,7 +2060,9 @@ async function runGitAwareCutover(args: GitCutoverArgs): Promise<ResolverResult>
     // Ownership-scoped so a next-staged cutover lock is never clobbered. The
     // retryable env_change_window_held deferral returns BEFORE this try, so its
     // lock is correctly retained.
-    try { await clearPendingIfOwned(args.pointer, process.env["WORKSPACE_ROOT"] ?? process.cwd(), args.mitosis_version_id); } catch { }
+    if (!preservePending) {
+      try { await clearPendingIfOwned(args.pointer, process.env["WORKSPACE_ROOT"] ?? process.cwd(), args.mitosis_version_id); } catch { }
+    }
   }
 }
 
@@ -2416,9 +2450,12 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
   //     here, the pending lock is cleared on return, so this tree is NOT retried; the gap stays
   //     open and is recomposed;
   //   • the gap carries no test_suite check, or has no row (patch_with_tools' synthesized ids) →
-  //     proceed, and SAY so in operations: there is no own check to re-establish;
-  //   • the gap store is unreadable → proceed with a warn: the check's existence is unknown, and
-  //     wedging every landing on a store outage is the over-refusal this file has paid for before.
+  //     proceed, SAY so in operations, and stamp the landing record landed_unverified so tallies
+  //     can exclude a landing that only typechecked;
+  //   • the gap store is unreadable → DEFER (gap_store_unavailable): whether an own check exists
+  //     is unknown, and a landing gate fails closed. The pending lock is preserved
+  //     (preserve_pending) so the next tick retries this same tree once the store answers.
+  let landedUnverifiedReason: string | null = null;
   {
     // mitosis-tick passes gap_id as "{{extract_gap_id_content}}", and mitosis_pending_observer does not
     // forward gap_id, so it can arrive unsubstituted. Trust only a real id; else the pending file's.
@@ -2426,8 +2463,17 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
     const ownGapId = pointerGapId || pendingGapId;
     const vesselBare = String(vessel_name).replace(/^repos\//, "");
     const load = await loadOwnCheck(vesselBare, ownGapId, ownCheckDeps.readGap);
-    if (load.status !== "found") {
-      operations.push({ op: "own_check", status: load.status === "unreadable" ? "warn" : "skipped", detail: `no own check re-run: ${load.why}` });
+    if (load.status === "unreadable") {
+      operations.push({ op: "own_check", status: "fail", detail: `gap store unavailable: ${load.why}` });
+      countOwnCheck("gap_store_unavailable", `gap=${ownGapId} vessel=${vesselBare} mitosis=${mitosis_version_id} — deferring, will retry next tick: ${load.why}`);
+      await unstage("gap_store_unavailable");
+      return softRefuse(
+        `gap_store_unavailable: could not read gap ${ownGapId} to find its own class-2 check (${load.why}). Deferring this cutover; the staged tree and its pending lock are kept and retried next tick.`,
+        { kind: "gap_store_unavailable", refuse_class: "gap_store_unavailable", deferred: true, preserve_pending: true, vessel_name, gap_id: ownGapId, staged_files: stagedFiles, own_check_counters: getOwnCheckCounters(), operations },
+      );
+    } else if (load.status === "none") {
+      landedUnverifiedReason = load.why;
+      operations.push({ op: "own_check", status: "skipped", detail: `no own check re-run: ${load.why} — landing stamped landed_unverified` });
     } else {
       const check = load.check;
       const citation = `test_suite ${check.test_file} [${check.only_tests.join(" | ")}]`.slice(0, 400);
@@ -2445,17 +2491,19 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
         verdict = { pass: false, measured: false, reason: `measured ${measuredRoot}, not the staged clone ${hostRepoRoot}` };
       }
       if (!verdict.pass) {
-        const refuseClass = verdict.measured ? "own_check_not_passing" : "own_check_unmeasured";
+        const refuseClass = verdict.measured ? "own_check_failed" : "own_check_unmeasurable";
         operations.push({ op: "own_check", status: "fail", detail: `${citation}: ${verdict.reason}` });
+        countOwnCheck(refuseClass, `gap=${ownGapId} vessel=${vesselBare} mitosis=${mitosis_version_id}: ${verdict.reason}`);
         await unstage(refuseClass);
         return softRefuse(
           verdict.measured
-            ? `own_check_not_passing: gap ${ownGapId}'s own class-2 check does not pass on the staged tree — ${verdict.reason} (${citation}). Typecheck alone does not establish that this change does what the gap asked; refusing.`
-            : `own_check_unmeasured: gap ${ownGapId}'s own class-2 check could not be measured on the staged tree — ${verdict.reason} (${citation}). Refusing: unproduced evidence is not passing evidence; the gap stays open and is recomposed.`,
-          { kind: refuseClass, refuse_class: refuseClass, vessel_name, gap_id: ownGapId, staged_files: stagedFiles, own_check: { ...check, result: sb, verdict }, operations },
+            ? `own_check_failed: gap ${ownGapId}'s own class-2 check does not pass on the staged tree — ${verdict.reason} (${citation}). Typecheck alone does not establish that this change does what the gap asked; refusing.`
+            : `own_check_unmeasurable: gap ${ownGapId}'s own class-2 check could not be measured on the staged tree — ${verdict.reason} (${citation}). Refusing: unproduced evidence is not passing evidence; the gap stays open and is recomposed.`,
+          { kind: refuseClass, refuse_class: refuseClass, vessel_name, gap_id: ownGapId, staged_files: stagedFiles, own_check: { ...check, result: sb, verdict }, own_check_counters: getOwnCheckCounters(), operations },
         );
       }
       operations.push({ op: "own_check", status: "ok", detail: `${citation}: ${verdict.reason}` });
+      countOwnCheck("own_check_passed", `gap=${ownGapId} vessel=${vesselBare} mitosis=${mitosis_version_id}: ${citation}`);
     }
   }
   // 5d. PRE-CUTOVER TEST GATE (2026-08-23). The post-land suite (below, after promotion) already
@@ -3130,6 +3178,12 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
     host_repo_root: hostRepoRoot,
     vessel_restarted: vesselRestarted,
     applied_at: appliedAt,
+    // Whether the landing gap's own class-2 check was re-run and passed on this tree (step
+    // 5d-own). landed_unverified marks a landing that only typechecked — no gap row, a
+    // synthesized id, or a gap with no test_suite check — so tallies can exclude it.
+    ...(landedUnverifiedReason !== null
+      ? { landed_unverified: true, landed_unverified_reason: landedUnverifiedReason }
+      : { own_check_verified: true }),
     // Where this landing went and under which push-scope regime, so a trace
     // answers "which owner's branch did this reach, and on what authority".
     push_scope: {
@@ -3140,6 +3194,9 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
       promoted: pushScope.promoted,
     },
   };
+  if (landedUnverifiedReason !== null) {
+    countOwnCheck("landed_unverified", `vessel=${vessel_name} mitosis=${mitosis_version_id} sha=${String(newSha).slice(0, 12)} gap=${gapId}: ${landedUnverifiedReason}`);
+  }
   // Threaded to the pending-land stamp below: a behavioral verification that RAN and
   // FAILED must NOT earn landed_verified credit. Stays false when the check does not run
   // (no verification_spec) or passes, preserving the existing stamp behaviour there.
@@ -3338,6 +3395,7 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
                 ...stampMeta,
                 pending_outcome_verification: newSha,
                 pending_set_at: appliedAt,
+                ...(landedUnverifiedReason !== null ? { landed_unverified: true, landed_unverified_reason: landedUnverifiedReason } : {}),
                 // Only for a gap with no measurable predicate: the removed-line literal otherwise outranks
                 // a stronger evidence_resolve / verify_shape / expected_literal check in classification.
                 ...(derived && typeof stampMeta["hardcoded_url"] !== "string" && !stampMeta["evidence_resolve"] && !stampMeta["verify_shape"] && !stampMeta["expected_literal"]
@@ -3412,6 +3470,7 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
       ...appliedBody,
       mode: "git_aware",
       operations,
+      own_check_counters: getOwnCheckCounters(),
       cited_evidence: {
         verdict: evaluationEvidence.verdict,
         base_success_rate: evaluationEvidence.base_success_rate,

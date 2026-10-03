@@ -73,6 +73,7 @@ afterEach(async () => {
     else process.env[k] = saved[k];
   }
   await rm(ws, { recursive: true, force: true });
+  for (const r of extraRoots.splice(0)) await rm(r, { recursive: true, force: true });
 });
 
 async function setup(): Promise<{ baseRoot: string; mitosisRoot: string; hostRepoRoot: string; baseSha: string; pendingPath: string }> {
@@ -116,6 +117,16 @@ async function setup(): Promise<{ baseRoot: string; mitosisRoot: string; hostRep
   );
   return { baseRoot, mitosisRoot, hostRepoRoot, baseSha, pendingPath };
 }
+
+/** A second, independent fixture inside one test (fresh workspace root; the first is cleaned by afterEach too). */
+async function setup2() {
+  const prev = ws;
+  ws = await mkdtemp(join(tmpdir(), "own-check-cut2-"));
+  process.env["WORKSPACE_ROOT"] = ws;
+  extraRoots.push(prev);
+  return setup();
+}
+const extraRoots: string[] = [];
 
 /** The pointer mitosis-tick builds for the deferred cutover: a static-only FAVORABLE citing typecheck alone. */
 function deferredPointer(s: { baseRoot: string; mitosisRoot: string; hostRepoRoot: string; baseSha: string; pendingPath: string }) {
@@ -237,7 +248,7 @@ describe("deferred cutover of a staged mitosis: the gap's own evidence, not type
     expect(calls[0]!.pointer["base_ref"]).toBeUndefined();          // the working tree, not a committed base
     expect(calls[0]!.treeContent).toBe(STAGED);                      // measured with the staged change in place
     expect(r.shape).toBe("vesselMitosisCutoverResult");
-    expect(body["refuse_class"]).toBe("own_check_not_passing");
+    expect(body["refuse_class"]).toBe("own_check_failed");
     expect(await headSubject(s.hostRepoRoot)).toBe("baseline");
     // The reason is recorded on the refusal, and the staged tree is discarded from the queue so no
     // later tick re-evaluates it on typecheck alone.
@@ -254,7 +265,7 @@ describe("deferred cutover of a staged mitosis: the gap's own evidence, not type
     });
     const r = await resolveVesselMitosisCutover({ ...deferredPointer(s), gap_id: "{{extract_gap_id_content}}" } as never);
     expect(asked).toBe(GAP);
-    expect((r.body as Record<string, unknown>)["refuse_class"]).toBe("own_check_not_passing");
+    expect((r.body as Record<string, unknown>)["refuse_class"]).toBe("own_check_failed");
     expect(await headSubject(s.hostRepoRoot)).toBe("baseline");
   });
 
@@ -263,7 +274,7 @@ describe("deferred cutover of a staged mitosis: the gap's own evidence, not type
     setDeps({ readGap, runSuite: async () => ({ shape: "structuredError", body: { detail: "no shellResult producer in discovery" } }) });
     const r = await resolveVesselMitosisCutover(deferredPointer(s) as never);
     const body = r.body as Record<string, unknown>;
-    expect(body["refuse_class"]).toBe("own_check_unmeasured");
+    expect(body["refuse_class"]).toBe("own_check_unmeasurable");
     expect(await headSubject(s.hostRepoRoot)).toBe("baseline");
     expect(String(body["refusal_reason"])).toContain("could not be measured");
   });
@@ -306,7 +317,7 @@ describe("deferred cutover of a staged mitosis: the gap's own evidence, not type
     // can read 0 when another passing title contains it; the skip count is what says it did not run.
     setDeps({ readGap, runSuite: async () => suiteBody(s.hostRepoRoot, { pass: 1, skip: 1, requested_not_passing: 0 }) });
     const r = await resolveVesselMitosisCutover(deferredPointer(s) as never);
-    expect((r.body as Record<string, unknown>)["refuse_class"]).toBe("own_check_not_passing");
+    expect((r.body as Record<string, unknown>)["refuse_class"]).toBe("own_check_failed");
     expect(String((r.body as Record<string, unknown>)["refusal_reason"])).toContain("SKIPPED");
     expect(await headSubject(s.hostRepoRoot)).toBe("baseline");
   });
@@ -315,8 +326,86 @@ describe("deferred cutover of a staged mitosis: the gap's own evidence, not type
     const s = await setup();
     setDeps({ readGap, runSuite: async () => suiteBody(s.hostRepoRoot, { total: 0, pass: 0, requested_not_passing: 0 }) });
     const r = await resolveVesselMitosisCutover(deferredPointer(s) as never);
-    expect((r.body as Record<string, unknown>)["refuse_class"]).toBe("own_check_not_passing");
+    expect((r.body as Record<string, unknown>)["refuse_class"]).toBe("own_check_failed");
     expect(await headSubject(s.hostRepoRoot)).toBe("baseline");
+  });
+});
+
+describe("own-check gate: store outage, counters, unverified landings", () => {
+  const counters = (): Record<string, number> =>
+    ((cutoverMod as unknown as { getOwnCheckCounters?: () => Record<string, number> }).getOwnCheckCounters?.() ?? {});
+
+  it("a gap-store OUTAGE defers the cutover (gap_store_unavailable), keeps the pending lock for the next tick, and does not land", async () => {
+    const s = await setup();
+    let ran = 0;
+    setDeps({
+      readGap: async () => { throw new Error("gaps.json could not be loaded or parsed"); },
+      runSuite: async () => { ran++; return suiteBody(s.hostRepoRoot, {}); },
+    });
+    const before = counters()["gap_store_unavailable"] ?? 0;
+    const r = await resolveVesselMitosisCutover(deferredPointer(s) as never);
+    const body = r.body as Record<string, unknown>;
+    expect(r.shape).toBe("vesselMitosisCutoverResult");
+    expect(body["refuse_class"]).toBe("gap_store_unavailable");
+    expect(body["deferred"]).toBe(true);
+    expect(ran).toBe(0);
+    expect(await headSubject(s.hostRepoRoot)).toBe("baseline");
+    expect(await exists(s.pendingPath)).toBe(true);           // retried next tick, not discarded
+    expect(counters()["gap_store_unavailable"]).toBe(before + 1);
+  });
+
+  it("an answer that is not a substrateGap read is an outage too, not 'no check'", async () => {
+    const s = await setup();
+    setDeps({ readGap: async () => ({ shape: "structuredError", body: { detail: "GAP_STORE_ENDPOINT unreachable" } }), runSuite: async () => suiteBody(s.hostRepoRoot, {}) });
+    const r = await resolveVesselMitosisCutover(deferredPointer(s) as never);
+    expect((r.body as Record<string, unknown>)["refuse_class"]).toBe("gap_store_unavailable");
+    expect(await headSubject(s.hostRepoRoot)).toBe("baseline");
+  });
+
+  it("own_check_failed and own_check_unmeasurable are counted separately", async () => {
+    const s = await setup();
+    const c0 = counters();
+    setDeps({ readGap, runSuite: async () => suiteBody(s.hostRepoRoot, { pass: 0, fail: 1, requested_not_passing: 1 }) });
+    await resolveVesselMitosisCutover(deferredPointer(s) as never);
+    const s2 = await setup2();
+    setDeps({ readGap, runSuite: async () => ({ shape: "structuredError", body: { detail: "no shell" } }) });
+    await resolveVesselMitosisCutover(deferredPointer(s2) as never);
+    const c1 = counters();
+    expect(c1["own_check_failed"]).toBe((c0["own_check_failed"] ?? 0) + 1);
+    expect(c1["own_check_unmeasurable"]).toBe((c0["own_check_unmeasurable"] ?? 0) + 1);
+  });
+
+  it("a typecheck-only landing (gap with no row, e.g. a synthesized pwt id) still lands but is stamped landed_unverified in its landing record", async () => {
+    const s = await setup();
+    let ran = 0;
+    setDeps({ readGap: async () => ({ shape: "substrateGap", body: { gaps: [] } }), runSuite: async () => { ran++; return suiteBody(s.hostRepoRoot, {}); } });
+    const before = counters()["landed_unverified"] ?? 0;
+    const r = await resolveVesselMitosisCutover({ ...deferredPointer(s), gap_id: "pwt-development-vessel-target.ts-1a2b3c4d" } as never);
+    expect(r.shape).toBe("cutoverApplied");
+    expect(ran).toBe(0);
+    const body = r.body as Record<string, unknown>;
+    expect(body["landed_unverified"]).toBe(true);
+    expect(String(body["landed_unverified_reason"])).toContain("no gap row");
+    expect(body["own_check_verified"]).toBeUndefined();
+    // The durable landing record (mitosis-applied.jsonl) carries the same stamp.
+    const line = JSON.parse((await readFile(join(ws, "mitosis-applied.jsonl"), "utf8")).trim().split("\n").pop()!);
+    expect(line.body.landed_unverified).toBe(true);
+    expect(counters()["landed_unverified"]).toBe(before + 1);
+  });
+
+  it("a gap whose row carries no test_suite check is landed_unverified too; a verified landing is not", async () => {
+    const s = await setup();
+    const noCheck = { ...gapRow, classification_metadata: { falsifier: "none" } };
+    setDeps({ readGap: async () => ({ shape: "substrateGap", body: { gaps: [noCheck] } }), runSuite: async () => suiteBody(s.hostRepoRoot, {}) });
+    const r = await resolveVesselMitosisCutover(deferredPointer(s) as never);
+    expect(r.shape).toBe("cutoverApplied");
+    expect((r.body as Record<string, unknown>)["landed_unverified"]).toBe(true);
+    const s2 = await setup2();
+    setDeps({ readGap, runSuite: async () => suiteBody(s2.hostRepoRoot, {}) });
+    const v = await resolveVesselMitosisCutover(deferredPointer(s2) as never);
+    expect(v.shape).toBe("cutoverApplied");
+    expect((v.body as Record<string, unknown>)["landed_unverified"]).toBeUndefined();
+    expect((v.body as Record<string, unknown>)["own_check_verified"]).toBe(true);
   });
 });
 

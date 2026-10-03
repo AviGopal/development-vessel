@@ -1162,6 +1162,7 @@ impulsesRouter.post("/v2/impulses/resolve", async (c) => {
     // Only the credential refusal is a 403; any other answer (a compare-and-set conflict on a re-seed) keeps the
     // ordinary envelope every other write gets.
     if (String(result.body.error ?? "").startsWith("operator_credential_required")) return c.json({ success: false, shape: result.shape, body: result.body, error: result.body.error }, 403);
+    if (String(result.body.error ?? "").startsWith("trust_root_shape_immutable")) return c.json({ success: false, shape: result.shape, body: result.body, error: result.body.error }, 409);
     return c.json({ success: true, shape: result.shape, body: result.body });
   }
 

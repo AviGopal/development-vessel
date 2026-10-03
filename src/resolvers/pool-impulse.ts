@@ -138,7 +138,7 @@ export function resolvePoolImpulseWrite(pointer: {
   if_updated_at?: string;
   /** Caller-supplied attestation: NEVER stored. The row's `attested` is the server's stamp or absent. */
   attested?: unknown;
-}, auth?: PoolWriteAuth): { shape: string; body: { ok: boolean; id: string; conflict?: boolean; current_updated_at?: string | null; error?: string } } {
+}, auth?: PoolWriteAuth): { shape: string; body: { ok: boolean; id: string; conflict?: boolean; current_updated_at?: string | null; error?: string; hint?: string } } {
   const trustRoot = trustRootWriteShape(pointer);
   if (trustRoot && auth?.operator !== true) {
     console.warn(`[pool] REFUSED ${trustRoot} write (id=${String(pointer.id ?? '(new)')}): operator credential required${auth?.why ? ` (${auth.why})` : ''}`);
@@ -148,6 +148,14 @@ export function resolvePoolImpulseWrite(pointer: {
   const now = new Date().toISOString();
   const id = pointer.id ?? randomUUID();
   const idx = all.findIndex((imp) => imp.id === id);
+  // TRUST-ROOT MEMBERSHIP IS NOT EDITABLE IN PLACE. An update that names a different shape than the row's
+  // own is refused, operator or not, when either shape is a trust root: out of one would drop the row from
+  // this gate while keeping its id, into one would make a row anyone wrote a trust root. Retire and create.
+  if (trustRoot && idx >= 0 && pointer.shape !== undefined && pointer.shape !== all[idx]!.shape) {
+    const from = all[idx]!.shape;
+    console.warn(`[pool] REFUSED reshape of ${id} from ${from} to ${pointer.shape}: trust-root membership is immutable`);
+    return { shape: 'poolImpulse_write', body: { ok: false, id, error: `trust_root_shape_immutable: ${id} is ${from}; a write may not change it to ${pointer.shape}`, hint: 'retire this row and create a new one instead' } };
+  }
   // COMPARE-AND-SET (2026-09-26). The write REPLACES the body, so a writer that read a row, did slow
   // work, then wrote {...bodyItRead, change} silently reverted anything written in between (rhythm
   // alpha/beta lost under rhythm-reality-sync; the falsifier showed a residual ms window even after a

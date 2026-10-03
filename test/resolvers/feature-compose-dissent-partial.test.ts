@@ -308,6 +308,48 @@ describe("a landing over the lane's own semantic dissent is partial, and the dis
     expect({ isDissentChild: called.has("isDissentChild"), dissentChildCheckRefusal: called.has("dissentChildCheckRefusal") }).toEqual({ isDissentChild: true, dissentChildCheckRefusal: true });
   });
 
+  // ── (2a) STALE DISSENT: a later landing the gate AGREES with supersedes an unsettled dissent ────────
+  // Without this, an unsettled dissent with no landed_sha (recorded before landed_sha was stamped) marks
+  // EVERY later landing on the gap partial, freezing it there.
+  const LEGACY_DISSENT = { reason: "an old 2/2 dissent, recorded before landed_sha was stamped", gate_verdict: { addresses: false, on_live_path: false }, at: "2026-10-02T08:00:00.000Z", later_outcome: null };
+  const NEW_SHA = "9f8e7d6c5b4a39281706f5e4d3c2b1a098765432";
+  const settleFn = () => exported<(g: string, d: unknown, cut: unknown, deps: GapDeps) => Promise<unknown>>("settleSemanticDissent");
+  const reasonFn = () => exported<(m: Record<string, unknown>, sha: string, literalOnly: boolean) => string>("landedCloseReason");
+
+  it("MUST-FAIL (2a): an old unsettled dissent with no landed_sha, then a new landing the gate agrees with -> landed_verified, and the old dissent is settled superseded by that landing's sha and check", async () => {
+    const store = memoryStore([{ ...PARENT_ROW, classification_metadata: { ...metaOf(PARENT_ROW), semantic_dissent: [LEGACY_DISSENT] } }]);
+    expect(reasonFn()(metaOf(store.row(PARENT_ID)), NEW_SHA, false)).toBe("landed_partial"); // the freeze, before the landing
+    const d = exported<(i: unknown) => Disposition>("semanticGateDisposition")({ gate: PASS_GATE, own_check: RED_TO_GREEN, diff: KEY_DIFF, edit_site: EDIT_SITE, src_files: SRC_WITH_READER });
+    expect(d.semantic_dissent ?? null).toBeNull();
+    await settleFn()(PARENT_ID, d.semantic_dissent ?? null, { push_status: "pushed", new_git_sha: NEW_SHA }, store.deps);
+    const meta = metaOf(store.row(PARENT_ID));
+    const list = meta.semantic_dissent as Array<Record<string, unknown>>;
+    expect(list.length).toBe(1);
+    expect(list[0]!.later_outcome).toMatchObject({ result: "superseded", settled_by: { landed_sha: NEW_SHA, check_key: (exported<(m: Record<string, unknown>) => { key: string } | null>("gapCheckIdentity")(OWN_CHECK_META))!.key } });
+    expect(reasonFn()(meta, NEW_SHA, false)).toBe("landed_verified");
+    // No child is minted for an agreeing landing.
+    expect(store.row(`${PARENT_ID}-dissent-narrowed`)).toBeUndefined();
+  });
+
+  it("CONTROL (2a): a new landing that ALSO dissents is still partial", async () => {
+    const store = memoryStore([{ ...PARENT_ROW, classification_metadata: { ...metaOf(PARENT_ROW), semantic_dissent: [LEGACY_DISSENT] } }]);
+    const d = exported<(i: unknown) => Disposition>("semanticGateDisposition")({ gate: DISSENT_GATE, own_check: RED_TO_GREEN, diff: KEY_DIFF, edit_site: EDIT_SITE, src_files: SRC_NO_READER });
+    await settleFn()(PARENT_ID, d.semantic_dissent, { push_status: "pushed", new_git_sha: NEW_SHA }, store.deps);
+    const meta = metaOf(store.row(PARENT_ID));
+    expect(reasonFn()(meta, NEW_SHA, false)).toBe("landed_partial");
+    expect(((meta.semantic_dissent as Array<Record<string, unknown>>)[0]!.later_outcome as Record<string, unknown> | null)?.result ?? null).not.toBe("superseded");
+  });
+
+  it("CONTROL (2a): an agreeing landing that did NOT push supersedes nothing; settled dissents are untouched", async () => {
+    const settled = { ...LEGACY_DISSENT, later_outcome: { result: "failed", at: "2026-10-02T09:00:00.000Z" } };
+    const store = memoryStore([{ ...PARENT_ROW, classification_metadata: { ...metaOf(PARENT_ROW), semantic_dissent: [LEGACY_DISSENT] } }]);
+    await settleFn()(PARENT_ID, null, { push_status: "push_failed", new_git_sha: "" }, store.deps);
+    expect(store.writes).toEqual([]);
+    const done = memoryStore([{ ...PARENT_ROW, classification_metadata: { ...metaOf(PARENT_ROW), semantic_dissent: [settled] } }]);
+    await settleFn()(PARENT_ID, null, { push_status: "pushed", new_git_sha: NEW_SHA }, done.deps);
+    expect(done.writes).toEqual([]);
+  });
+
   // ── (d) zero-local-reader keys are EVIDENCE, never a veto ──────────────────────────────────────
   it("MUST-FAIL (d): with a dissent, the dissent and the child's record list the zero-local-reader key as evidence", async () => {
     const store = memoryStore([PARENT_ROW]);

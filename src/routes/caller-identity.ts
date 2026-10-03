@@ -8,12 +8,14 @@
  * when it carries neither, and "unauthenticated" when there is no successful auth result. The resolve route
  * passes the credential its write gate validated (lib/caller-credential.ts); an in-process write has none.
  */
-export type CallerAuthResult = { authenticated?: boolean; key_id?: unknown; key_name?: unknown; scopes?: unknown };
+/** node_self: the request carried this node's own key (lib/caller-credential.ts), authenticated locally. */
+export type CallerAuthResult = { authenticated?: boolean; node_self?: boolean; key_id?: unknown; key_name?: unknown; scopes?: unknown };
 
 const SAFE = /^[A-Za-z0-9._:@-]{1,128}$/;
 
 export function callerAuthLabel(auth: CallerAuthResult | null | undefined): string {
   if (!auth || auth.authenticated !== true) return "unauthenticated";
+  if (auth.node_self === true) return "authenticated:node-self";
   if (typeof auth.key_id === "string" && SAFE.test(auth.key_id)) return `authenticated:key_id:${auth.key_id}`;
   if (typeof auth.key_name === "string" && SAFE.test(auth.key_name)) return `authenticated:key_name:${auth.key_name}`;
   const scopes = Array.isArray(auth.scopes) ? auth.scopes.filter((s): s is string => typeof s === "string" && SAFE.test(s)) : [];

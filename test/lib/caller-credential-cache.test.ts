@@ -126,7 +126,7 @@ describe("credential cache condition 1: the digest never leaves process memory",
   it("credential-cache the module keeps its cache private and its exports carry no digest after validating", async () => {
     await identityCredential(`ApiKey ${KNOWN_KEY}`);
     const exported = Object.keys(cc).sort();
-    expect(exported).toEqual(["CREDENTIAL_CACHE_MAX_ENTRIES", "CREDENTIAL_VALIDATION_TTL_MS", "MUTATING_PRIMITIVES", "__resetCredentialCacheForTests", "identityCredential", "isWritePointerType"]);
+    expect(exported).toEqual(["CREDENTIAL_CACHE_MAX_ENTRIES", "CREDENTIAL_VALIDATION_TTL_MS", "MUTATING_PRIMITIVES", "__resetCredentialCacheForTests", "identityCredential", "isNodeSelfCredential", "isWritePointerType"]);
     const snapshot = JSON.stringify(Object.fromEntries(Object.entries(cc).map(([k, v]) => [k, v instanceof Set ? [...v] : typeof v === "function" ? "fn" : v])));
     expect(leaks(snapshot, KNOWN_KEY)).toEqual([]);
     const source = readFileSync(join(SRC, "lib", "caller-credential.ts"), "utf8");

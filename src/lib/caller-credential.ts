@@ -32,7 +32,7 @@
 //   the key id when identity's answer carries one (keyId below, passed to callerAuthLabel), else by
 //   scopes. Until every identity answer carries the id, scopes are what the audit shows. The digest
 //   stays internal either way.
-import { createHash } from "node:crypto";
+import { createHash, timingSafeEqual } from "node:crypto";
 
 /** keyId: identity's id for the validated key (an identifier identity issues, not derived from the secret),
  *  when its answer carries one. Audit lines name the caller by it (routes/caller-identity.ts callerAuthLabel). */
@@ -53,9 +53,43 @@ function remember(k: string, cred: CallerCredential): void {
   }
 }
 
-/** Tests only: forget every cached validation. */
+/** Tests only: forget every cached validation and the loud-log window. */
 export function __resetCredentialCacheForTests(): void {
   validated.clear();
+  lastUnreachableLogAt = Number.NEGATIVE_INFINITY;
+}
+
+// THE NODE'S OWN KEY (qa R1, availability). A presented key equal to this process's METABOB_API_KEY is
+// this node writing to itself (its detectors, rhythms, memory and gap filing). It is authenticated
+// locally, identity never asked, so an identity outage (a spoke whose identity is the hub's) cannot
+// stop the node's own self-maintenance. Every other key still needs identity and still fails closed.
+// Compared in constant time over SHA-256 digests of both (equal-length buffers, so a length mismatch
+// neither throws nor leaks timing). METABOB_API_KEY is read at use time, like IDENTITY_VESSEL_URL.
+// The credential is one frozen object, so isNodeSelfCredential cannot be satisfied by an identity
+// answer that merely carries a keyId of "node-self".
+const NODE_SELF: CallerCredential = Object.freeze({ authenticated: true, scopes: Object.freeze(["node"]) as unknown as string[], keyId: "node-self" });
+function isNodeKey(apiKey: string): boolean {
+  const own = process.env["METABOB_API_KEY"] ?? "";
+  if (!own) return false;
+  const a = createHash("sha256").update(apiKey).digest();
+  const b = createHash("sha256").update(own).digest();
+  return timingSafeEqual(a, b);
+}
+/** Whether this credential is the node's own key (authenticated locally, not by identity). */
+export function isNodeSelfCredential(cred: CallerCredential | null | undefined): boolean {
+  return cred === NODE_SELF;
+}
+
+// LOUD, RATE-LIMITED. Identity unreachable is logged once per CREDENTIAL_VALIDATION_TTL_MS window
+// (60 s), naming the identity host only, never a key or anything derived from one.
+let lastUnreachableLogAt = Number.NEGATIVE_INFINITY;
+function logIdentityUnreachable(base: string, detail: string): void {
+  const now = Date.now();
+  if (now - lastUnreachableLogAt < CREDENTIAL_VALIDATION_TTL_MS) return;
+  lastUnreachableLogAt = now;
+  let host = "(unparseable IDENTITY_VESSEL_URL)";
+  try { host = new URL(base).host; } catch { /* keep placeholder */ }
+  console.error(`[caller-credential] IDENTITY UNREACHABLE at ${host}: ${detail}. Writes from any key other than this node's own are refused (401) until identity answers.`);
 }
 
 const identityUrl = (): string => (process.env["IDENTITY_VESSEL_URL"] ?? "").trim().replace(/\/+$/, "");
@@ -65,6 +99,7 @@ export async function identityCredential(authHeader: string | undefined, opts: {
   const m = /^ApiKey\s+(\S+)$/i.exec(String(authHeader ?? "").trim());
   if (!m) return { authenticated: false, scopes: [], why: "no ApiKey credential presented" };
   const apiKey = m[1]!;
+  if (isNodeKey(apiKey)) return NODE_SELF;
   const useCache = opts.cache !== false;
   const k = cacheKey(apiKey);
   if (useCache) {
@@ -96,7 +131,9 @@ export async function identityCredential(authHeader: string | undefined, opts: {
     remember(k, cred);
     return cred;
   } catch (err) {
-    return { authenticated: false, scopes: [], why: "identity unreachable: " + String((err as Error)?.message ?? err) };
+    const detail = String((err as Error)?.message ?? err);
+    logIdentityUnreachable(base, detail);
+    return { authenticated: false, scopes: [], why: "identity unreachable: " + detail };
   }
 }
 

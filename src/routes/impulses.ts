@@ -47,7 +47,7 @@ import { resolveRhythmRealitySync } from "../resolvers/rhythm-reality-sync.js";
 import { resolveMemoryNote, resolveMemoryNoteWrite } from "../resolvers/memory-note.js";
 import { resolveSubstrateGap, resolveSubstrateGapWrite } from "../resolvers/substrate-gap.js";
 import { resolvePoolImpulse, resolvePoolImpulseWrite, trustRootWriteShape, operatorCredential } from "../resolvers/pool-impulse.js";
-import { identityCredential, isWritePointerType, type CallerCredential } from "../lib/caller-credential.js";
+import { identityCredential, isNodeSelfCredential, isWritePointerType, type CallerCredential } from "../lib/caller-credential.js";
 import { resolveFsList } from "../resolvers/fs-list.js";
 import { resolveFsGrep } from "../resolvers/fs-grep.js";
 import { resolveHttpFetch } from "../resolvers/http-fetch.js";
@@ -1161,7 +1161,7 @@ impulsesRouter.post("/v2/impulses/resolve", async (c) => {
     const env = c.env as { requestIP?: (r: Request) => { address?: string } | null } | undefined;
     let remote = c.req.header("x-dv-remote-addr") ?? "";
     if (!remote) { try { remote = env?.requestIP?.(c.req.raw)?.address ?? ""; } catch { remote = ""; } }
-    (pointer as Record<string, unknown>)["_route_caller"] = { auth: callerAuthLabel(writeCred ? { authenticated: writeCred.authenticated, key_id: writeCred.keyId, scopes: writeCred.scopes } : undefined), remote: remote || "unknown" };
+    (pointer as Record<string, unknown>)["_route_caller"] = { auth: callerAuthLabel(writeCred ? { authenticated: writeCred.authenticated, node_self: isNodeSelfCredential(writeCred), key_id: writeCred.keyId, scopes: writeCred.scopes } : undefined), remote: remote || "unknown" };
   }
 
   try {

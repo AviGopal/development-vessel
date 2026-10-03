@@ -195,8 +195,9 @@ describe("keyed-URL sweep: no credential follows a caller-supplied URL on any ro
   it("sees the repo's keyed caller-URL calls (a reader that sees nothing cannot pass)", () => {
     expect(sites.length).toBeGreaterThanOrEqual(150);
     const files = new Set(sites.map((s) => s.file));
-    // tracesUrl, metabobEndpoint, conceptDbUrl, goalHostEndpoint /run-goal, surrealUrl /sql
-    for (const f of ["resolvers/phantom-trace-scan.ts", "resolvers/cyclic-flow-scan.ts", "resolvers/concept-write.ts", "resolvers/vessel-gap-to-cluster.ts", "resolvers/surrealdb-export.ts"]) {
+    // tracesUrl, metabobEndpoint, conceptDbUrl, goalHostEndpoint /run-goal, templatesUrl. (surrealUrl is
+    // not here: since the surreal fix a pointer surrealUrl is refused before any request, so no site remains.)
+    for (const f of ["resolvers/phantom-trace-scan.ts", "resolvers/cyclic-flow-scan.ts", "resolvers/concept-write.ts", "resolvers/vessel-gap-to-cluster.ts", "resolvers/code-needs-report.ts"]) {
       expect(files.has(f)).toBe(true);
     }
     // each exemption still names a real keyed site, so a stale exemption cannot hide a new one

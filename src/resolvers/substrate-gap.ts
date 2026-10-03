@@ -1551,24 +1551,32 @@ export async function resolveSubstrateGapWrite(
   if (existingIdx >= 0) {
     const existing = gaps[existingIdx]!;
     priorMetaForBirth = { ...((existing.classification_metadata ?? {}) as Record<string, unknown>) };
-    // operator_hold is a field the store READS: a held gap cannot be closed by any
-    // writer unless the write carries an exercised, passed falsifier. A landed sha is
-    // provenance, not resolution (2026-09-22: a hold was overridden three times).
+    // operator_hold is a field the store READS (2026-10-03, widened from "refuse a close"). On a row whose
+    // STORED operator_hold is true, a write without the operator marker may not change the status (a
+    // reject moved held gaps as freely as a close used to), may not release the hold (an incoming
+    // operator_hold key other than true would win the carry-forward), and keeps the stored summary,
+    // category and edit_site (applied below). falsifier_exercise.passed in the INCOMING payload no longer
+    // bypasses the hold: it is the writer's own claim, and the live row "{{goal.id}}" carried a forged one.
+    // Lane closers already skip held gaps; the operator moves one with the marker, under the usual rules.
+    let holdKeepsText = false;
     {
       const existingMeta = (existing.classification_metadata ?? {}) as Record<string, unknown>;
       const incomingMeta = (gap.classification_metadata ?? {}) as Record<string, unknown>;
-      const exercised = (incomingMeta["falsifier_exercise"] as { passed?: unknown } | undefined)?.passed === true;
-      if (existingMeta["operator_hold"] === true && String(gap.status ?? "open") === "closed" && !exercised) {
-        return {
-          early: {
-            shape: "structuredError",
-            body: {
-              resolver: "substrateGap_write",
-              failure_mode: "validation_rejected",
-              detail: `gap ${gap.id}: operator_hold is set — a close needs classification_metadata.falsifier_exercise.passed === true, not a landing`,
-            },
-          },
-        };
+      if (existingMeta["operator_hold"] === true && !operatorMarkerOf(pointer)) {
+        const from = String(existing.status ?? "open");
+        const to = String(gap.status ?? "open");
+        const refuse = (detail: string) => ({
+          early: { shape: "structuredError", body: { resolver: "substrateGap_write", failure_mode: "validation_rejected", rule: "operator_hold", detail } } as ResolverResult,
+        });
+        if (to !== from) {
+          console.warn(`[substrate-gap] REFUSED ${from} -> ${to} on held gap ${gap.id}: no operator marker`);
+          return refuse(`gap ${gap.id}: operator_hold is set — a status change (${from} -> ${to}) needs the operator marker (pointer-level operator: "operator:<id>"); classification_metadata.falsifier_exercise.passed in the payload does not bypass the hold`);
+        }
+        if ("operator_hold" in incomingMeta && incomingMeta["operator_hold"] !== true) {
+          console.warn(`[substrate-gap] REFUSED hold release on ${gap.id}: no operator marker`);
+          return refuse(`gap ${gap.id}: operator_hold is set — releasing it needs the operator marker (pointer-level operator: "operator:<id>")`);
+        }
+        holdKeepsText = true;
       }
     }
     // CLOSE NEEDS EVIDENCE (see closeEvidenceOf). Only a TRANSITION into closed: a write to a row that is
@@ -1637,6 +1645,11 @@ export async function resolveSubstrateGapWrite(
         gap.category = existing.category;
       }
       if (kept.length > 0) console.log(`[substrate-gap] ${gap.id}: a ${String(gap.status)} write without the operator marker kept the stored ${kept.join(" and ")}`);
+    }
+    // A HELD row keeps what it says and where it points (see the hold guard above).
+    if (holdKeepsText) {
+      if (typeof existing.summary === "string" && existing.summary.length > 0) gap.summary = existing.summary;
+      if (typeof existing.category === "string" && existing.category.length > 0) gap.category = existing.category;
     }
     // Preserve the original creation time — but run it through the SAME scrub as an incoming
     // value. Restoring `existing.created_at` blind means a row poisoned before the scrub landed
@@ -1715,6 +1728,10 @@ export async function resolveSubstrateGapWrite(
     if (incomingSetsDemandGoals) inMeta["demand_goals"] = carryGoalReachEntries(exMeta["demand_goals"], inMeta["demand_goals"]);
     for (const e of demandGoalAppends) inMeta["demand_goals"] = mergeDemandGoal(inMeta["demand_goals"], e);
     if (closeNote !== undefined) inMeta["close_note"] = closeNote.slice(0, 4000);
+    if (holdKeepsText) {
+      if ("edit_site" in exMeta) inMeta["edit_site"] = exMeta["edit_site"];
+      else delete inMeta["edit_site"];
+    }
     gap.classification_metadata = inMeta;
 
     // L7 gap-triple lineage on the existing row (all backward-compatible):

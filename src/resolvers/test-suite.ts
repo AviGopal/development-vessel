@@ -98,13 +98,67 @@ export function parseBunSummary(raw: string): { total: number; pass: number; fai
   return { total: pass + fail + skip, pass, fail, skip, failingTests: [...seen] };
 }
 
+/**
+ * NAMES ARE DATA, NEVER SHELL TEXT (2026-10-03). `only_tests` come from gap rows, which any gap writer
+ * authors. They used to reach the shell command as ` -t ${JSON.stringify(pattern)}`: a DOUBLE-quoted
+ * string, inside which sh still expands backticks and $VAR, so a test title carrying `systemctl restart x`
+ * executed in the live container (as root: the shell producer's unit sets no User=). The shell producer
+ * takes one command string and no caller env, so the pattern travels base64-encoded (alphabet
+ * [A-Za-z0-9+/=], inert inside single quotes) and is decoded by the shell into ONE argv element:
+ * `--test-name-pattern="$(printf %s '<b64>' | base64 -d)"`. The output of a quoted command substitution
+ * is never re-expanded or split, and no byte of a name appears in the command text, so neither sh nor
+ * the shell producer's lexical containment check ever reads a name as syntax. The `=` form keeps a
+ * pattern that starts with '-' from being read as a flag.
+ *
+ * A name with a control character can never be a bun test title worth matching (and a newline would
+ * split the pattern), and an absurd length or count is not a test selection: both are refused with a
+ * structured error here and, through the same function, at arm time by substrateGap_write.
+ */
+export const ONLY_TESTS_MAX_NAMES = 500;
+export const ONLY_TEST_NAME_MAX_LENGTH = 1024;
+export function onlyTestsProblem(names: unknown): { field: string; detail: string } | null {
+  if (!Array.isArray(names)) return null;
+  if (names.length > ONLY_TESTS_MAX_NAMES) {
+    return { field: "only_tests", detail: `only_tests names ${names.length} tests; at most ${ONLY_TESTS_MAX_NAMES} are accepted` };
+  }
+  for (let i = 0; i < names.length; i++) {
+    const n = names[i];
+    if (typeof n !== "string") continue; // ignored downstream, as before
+    // eslint-disable-next-line no-control-regex
+    const cc = /[\u0000-\u001f\u007f]/.exec(n);
+    if (cc) {
+      return { field: `only_tests[${i}]`, detail: `only_tests[${i}] contains control character 0x${cc[0].charCodeAt(0).toString(16).padStart(2, "0")}; a test title never does` };
+    }
+    if (n.length > ONLY_TEST_NAME_MAX_LENGTH) {
+      return { field: `only_tests[${i}]`, detail: `only_tests[${i}] is ${n.length} characters; at most ${ONLY_TEST_NAME_MAX_LENGTH} are accepted` };
+    }
+  }
+  return null;
+}
+
+/** bun's -t pattern for the named tests: escaped alternation, describe separator joined with a space. */
+export function onlyTestsPattern(onlyTests: string[]): string {
+  return onlyTests.map((t) => t.split(" > ").join(" ").replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|");
+}
+
+/** POSIX single-quoting: nothing inside '...' is special to sh. */
+const shq = (s: string): string => `'${s.replace(/'/g, `'\\''`)}'`;
+
 export async function resolveTestSuite(pointer: Record<string, unknown>): Promise<ResolverResult> {
   const rawVessel = typeof pointer.vessel === "string" ? pointer.vessel.trim() : "";
   if (!rawVessel) {
     return { shape: "structuredError", body: { resolver: "test_suite", detail: "vessel is required (e.g. 'repos/goal-host-vessel')" } };
   }
-  // Accept both "repos/<v>" and a bare vessel name.
+  // Accept both "repos/<v>" and a bare vessel name. The name becomes a path in the shell command, so it
+  // must be a plain name (the same rule the gap store uses for a check's vessel).
   const name = rawVessel.replace(/^repos\//, "");
+  if (!/^[A-Za-z0-9_.-]+$/.test(name) || name.includes("..")) {
+    return { shape: "structuredError", body: { resolver: "test_suite", failure_mode: "validation_rejected", field: "vessel", detail: "vessel must be a plain vessel name ([A-Za-z0-9_.-], no '..'), optionally prefixed with repos/" } };
+  }
+  const onlyTestsBad = onlyTestsProblem(pointer.only_tests);
+  if (onlyTestsBad) {
+    return { shape: "structuredError", body: { resolver: "test_suite", failure_mode: "validation_rejected", field: onlyTestsBad.field, detail: onlyTestsBad.detail } };
+  }
   const rel = `repos/${name}`;
   const preferredRoot = `${VESSEL_CLONES_ROOT}/${name}`;
   const fallbackRoot = `${SUPER_REPO_ROOT}/repos/${name}`;
@@ -162,8 +216,10 @@ export async function resolveTestSuite(pointer: Record<string, unknown>): Promis
   const testFile = typeof pointer.test_file === "string" && /^[A-Za-z0-9_./-]+$/.test(pointer.test_file.trim()) && !pointer.test_file.includes("..")
     ? pointer.test_file.trim()
     : "";
+  // See onlyTestsPattern / NAMES ARE DATA above: the pattern reaches bun as one argv element decoded by
+  // the shell, never as shell text.
   const testFilter = onlyTests.length > 0
-    ? ` -t ${JSON.stringify(onlyTests.map((t) => t.split(" > ").join(" ").replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|"))}`
+    ? ` --test-name-pattern="$(printf %s ${shq(Buffer.from(onlyTestsPattern(onlyTests), "utf8").toString("base64"))} | base64 -d)"`
     : "";
   // BASE-TREE RUN (2026-09-30). `base_ref` ("HEAD" or a commit sha; anything else is ignored) runs the
   // same filtered suite on that COMMITTED tree instead of the clone's working tree, in a detached
@@ -177,13 +233,13 @@ export async function resolveTestSuite(pointer: Record<string, unknown>): Promis
     : "";
   const bunRun = `env -i PATH="$PATH" HOME="$HOME" NODE_ENV=test TZ=UTC WORKSPACE_ROOT="$(mktemp -d)" timeout ${budgetSec} bun test${testFile ? " " + JSON.stringify(testFile) : ""} --timeout ${perTestTimeoutMs}${testFilter} 2>&1 || true`;
   const command = baseRef
-    ? `ROOT=${JSON.stringify(preferredRoot)}; [ -d "$ROOT" ] || ROOT=${JSON.stringify(fallbackRoot)}; ` +
+    ? `ROOT=${shq(preferredRoot)}; [ -d "$ROOT" ] || ROOT=${shq(fallbackRoot)}; ` +
       `git -C "$ROOT" worktree prune >/dev/null 2>&1; BW="$(mktemp -d /tmp/test-suite-base-XXXXXX)"; ` +
       `if [ -d "$ROOT/node_modules" ] && git -C "$ROOT" worktree add -q --detach "$BW" ${baseRef} >/dev/null 2>&1; then ` +
       `ln -s "$ROOT/node_modules" "$BW/node_modules"; echo "VERIFIED_ROOT=$BW"; echo "VERIFIED_HEAD=$(git -C "$BW" rev-parse --short HEAD 2>/dev/null || echo unknown)"; ` +
       `(cd "$BW" && ${bunRun}); fi; ` +
       `git -C "$ROOT" worktree remove --force "$BW" >/dev/null 2>&1; rm -rf "$BW"; git -C "$ROOT" worktree prune >/dev/null 2>&1; true`
-    : `ROOT=${JSON.stringify(preferredRoot)}; [ -d "$ROOT" ] || ROOT=${JSON.stringify(fallbackRoot)}; ` +
+    : `ROOT=${shq(preferredRoot)}; [ -d "$ROOT" ] || ROOT=${shq(fallbackRoot)}; ` +
       `echo "VERIFIED_ROOT=$ROOT"; echo "VERIFIED_HEAD=$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)"; ` +
       `cd "$ROOT" && ([ -d node_modules ] || timeout 120 bun install >/dev/null 2>&1; ${bunRun})`;
 

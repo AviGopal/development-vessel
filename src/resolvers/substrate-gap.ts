@@ -34,6 +34,7 @@
 
 import { WORKSPACE_ROOT as DEFAULT_WORKSPACE_ROOT } from "../config.js";
 import type { ResolverResult } from "./types.js";
+import { onlyTestsProblem } from "./test-suite.js";
 import { readFile, writeFile, rename, mkdir } from "node:fs/promises";
 import { readFileSync, existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -1171,6 +1172,31 @@ export async function resolveSubstrateGapWrite(
           'Note the field is `id`, not `gap_id`: a row written with the wrong key has no identity here.',
       },
     };
+  }
+
+  // CHECK-INPUT GATE (2026-10-03). A test_suite check's only_tests become bun's -t pattern in a shell
+  // command. test_suite itself now passes them as data and refuses an unrunnable name, but a row armed
+  // here is re-run on every tick and carried forward into re-emissions, so a name with a control character
+  // (a newline splits the pattern) or an absurd length is refused at ARM time, by the same rule
+  // (onlyTestsProblem), instead of failing at every later run. Regex metacharacters are fine: test_suite
+  // escapes them, never strips them. OPEN writes only, like the description gate below: a close or reject
+  // re-sends the stored metadata, and a row already holding such a name must stay closable.
+  if ((incoming.status ?? "open") === "open") {
+    const er = ((incoming.classification_metadata ?? {}) as Record<string, unknown>)["evidence_resolve"] as { shape?: unknown; input?: unknown } | null | undefined;
+    if (er && typeof er === "object" && er.shape === "test_suite" && er.input && typeof er.input === "object") {
+      const bad = onlyTestsProblem((er.input as Record<string, unknown>)["only_tests"]);
+      if (bad) {
+        return {
+          shape: "structuredError",
+          body: {
+            resolver: "substrateGap_write",
+            failure_mode: "validation_rejected",
+            field: `classification_metadata.evidence_resolve.input.${bad.field}`,
+            detail: `gap ${incoming.id}: ${bad.detail}`,
+          },
+        };
+      }
+    }
   }
 
   // Description gate: an OPEN gap must describe itself — empty summaries and

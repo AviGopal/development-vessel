@@ -219,4 +219,24 @@ describe("substrateGap_write refuses an unrunnable only_tests at ARM time", () =
       gapStore.__setBirthJudgeForTests?.(null);
     }
   });
+
+  it("CONTROL: a CLOSE that re-sends such stored metadata is not refused by the gate (a poisoned row stays closable)", async () => {
+    const r = await gapStore.resolveSubstrateGapWrite({
+      type: "substrateGap_write",
+      gap: {
+        id: "only-tests-newline-close-control",
+        category: "operator_request",
+        source: "human_reported",
+        status: "closed",
+        detected_at: "2026-10-03T10:00:00Z",
+        summary: "fixture: closing a row whose stored check has a newline title",
+        classification_metadata: {
+          closed_reason: "rejected",
+          evidence_resolve: { shape: "test_suite", input: { vessel: `repos/${FIXTURE_NAME}`, test_file: "fixture.test.ts", only_tests: ["evil\nname"] }, zero_field: "requested_not_passing" },
+        },
+      },
+    });
+    const b = (r.body ?? {}) as Record<string, any>;
+    expect(b.failure_mode === "validation_rejected" && String(b.field ?? "").includes("only_tests")).toBe(false);
+  });
 });

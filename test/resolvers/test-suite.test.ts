@@ -14,6 +14,14 @@
 import { describe, expect, it, test } from "bun:test";
 import { parseBunSummary, resolveTestSuite } from "../../src/resolvers/test-suite.js";
 
+// The -t pattern travels base64-encoded and is decoded by the shell into one argv element (names never
+// appear as shell text; see test-suite-only-tests-no-shell-injection.test.ts). This reads it back.
+const PATTERN_RE = /--test-name-pattern="\$\(printf %s '([A-Za-z0-9+/=]*)' \| base64 -d\)"/;
+function namePattern(cmd: string): string | null {
+  const m = PATTERN_RE.exec(cmd);
+  return m ? Buffer.from(m[1]!, "base64").toString("utf8") : null;
+}
+
 describe("parseBunSummary", () => {
   const REAL = ` 155 pass\n 4 fail\n 321 expect() calls\nRan 159 tests across 7 files. [232.00ms]`;
 
@@ -114,9 +122,7 @@ describe("test_suite — only_tests isolation filter", () => {
 
   it("narrows to the named tests with -t", async () => {
     const cmd = await captureCommand({ only_tests: ["alpha case", "beta case"] });
-    expect(cmd).toContain(" -t ");
-    expect(cmd).toContain("alpha case");
-    expect(cmd).toContain("beta case");
+    expect(namePattern(cmd)).toBe("alpha case|beta case");
   });
 
   // THE LOAD-BEARING PROPERTY. bun's -t is a regex. The real failure that motivated this
@@ -126,7 +132,7 @@ describe("test_suite — only_tests isolation filter", () => {
   // and in the safe-looking direction.
   it("escapes regex metacharacters so a title with '+' matches literally", async () => {
     const cmd = await captureCommand({ only_tests: ["apply + gate = PASS"] });
-    expect(cmd).toContain("apply \\\\+ gate");
+    expect(namePattern(cmd)).toBe("apply \\+ gate = PASS");
   });
 
   // bun matches -t against the test name with describe and test joined by a SPACE, but only_tests carry bun's
@@ -135,8 +141,7 @@ describe("test_suite — only_tests isolation filter", () => {
   // (2026-09-30: all three verified landings of the afternoon, and every generator-filed gap).
   it("joins a full-path name's describe separator with a SPACE, the form bun's -t matches", async () => {
     const cmd = await captureCommand({ only_tests: ["Phase B1: suite > the leaf case"] });
-    expect(cmd).toContain("Phase B1: suite the leaf case");
-    expect(cmd).not.toContain(" > the leaf case");
+    expect(namePattern(cmd)).toBe("Phase B1: suite the leaf case");
   });
 
   // BASE-TREE RUN (2026-09-30): the precutover gate asks whether a tracked-red test was already red
@@ -148,7 +153,7 @@ describe("test_suite — only_tests isolation filter", () => {
     expect(cmd).toContain('ln -s "$ROOT/node_modules" "$BW/node_modules"');
     expect(cmd).toContain('(cd "$BW" && ');
     expect(cmd).toContain('worktree remove --force "$BW"');
-    expect(cmd).toContain("alpha case");
+    expect(namePattern(cmd)).toBe("alpha case");
     expect(cmd).not.toContain('cd "$ROOT"');
   });
   it("uses the working tree as before when no base_ref is given", async () => {
@@ -169,6 +174,7 @@ describe("test_suite — only_tests isolation filter", () => {
     // whole-suite behaviour while claiming to be narrowed.
     const cmd = await captureCommand({ only_tests: ["", "   ", 42, null] });
     expect(cmd).not.toContain(" -t ");
+    expect(namePattern(cmd)).toBeNull();
   });
 });
 

@@ -1,4 +1,5 @@
 import { env } from "../config.js";
+import { selfAuthHeaders } from "../lib/self-auth.js";
 /**
  * learning_mode — shape-driven mode-priority controller (P3, Seam ③).
  * Output shape: learningMode
@@ -88,17 +89,26 @@ export async function resolveLearningMode(pointer: LearningModePointer): Promise
   // env() rather than `?? default`: this container exports some endpoint vars as EMPTY strings,
   // and `??` does not fall back on "" — it would hand a fetch the empty endpoint. Same defect
   // class as 3409fac in config.ts. An explicit pointer field still wins over both.
-  const devBase = (p.devVesselUrl ?? env("DEV_VESSEL_ENDPOINT", "http://127.0.0.1:8090")).replace(/\/$/, "");
-  const DEV = devBase.endsWith("/v2/impulses/resolve") ? devBase : `${devBase}/v2/impulses/resolve`;
-  const ACT = p.activityApiUrl ?? env("ACTIVITY_API_ENDPOINT", "http://127.0.0.1:8080");
-  const API_KEY = p.apiKey ?? process.env["METABOB_API_KEY"] ?? "";
+  const toResolve = (base: string): string => {
+    const b = base.replace(/\/$/, "");
+    return b.endsWith("/v2/impulses/resolve") ? b : `${b}/v2/impulses/resolve`;
+  };
+  const DEV_CONFIGURED = toResolve(env("DEV_VESSEL_ENDPOINT", "http://127.0.0.1:8090"));
+  const DEV = p.devVesselUrl == null ? DEV_CONFIGURED : toResolve(p.devVesselUrl);
+  // The key goes only to the configured dev-vessel route (lib/self-auth.ts): there a caller-supplied
+  // p.apiKey is used as before, the node key otherwise; an overridden devVesselUrl gets none.
+  const devAuth: Record<string, string> = selfAuthHeaders(DEV, DEV_CONFIGURED, p.apiKey);
+  const ACT_CONFIGURED = env("ACTIVITY_API_ENDPOINT", "http://127.0.0.1:8080");
+  const ACT = p.activityApiUrl ?? ACT_CONFIGURED;
+  // Same rule for activity-api: an overridden activityApiUrl gets no key.
+  const actAuth: Record<string, string> = selfAuthHeaders(ACT, ACT_CONFIGURED, p.apiKey);
   const now = Date.now();
 
   const devResolve = async (impulsePointer: Record<string, unknown>): Promise<unknown> => {
     try {
       const r = await fetch(DEV, {
         method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `ApiKey ${API_KEY}` },
+        headers: { "Content-Type": "application/json", ...devAuth },
         body: JSON.stringify({ impulse: { pointer: impulsePointer } }),
         signal: AbortSignal.timeout(8000),
       });
@@ -141,7 +151,7 @@ export async function resolveLearningMode(pointer: LearningModePointer): Promise
     try {
       const r = await fetch(`${ACT}/v2/activities/discover-by-shapes`, {
         method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `ApiKey ${API_KEY}` },
+        headers: { "Content-Type": "application/json", ...actAuth },
         body: JSON.stringify({ output_shapes: necessaryShapes, mode: "candidates_with_scores", direction: "forward" }),
         signal: AbortSignal.timeout(8000),
       });

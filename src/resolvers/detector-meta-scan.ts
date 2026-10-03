@@ -1,4 +1,5 @@
 import type { ResolverResult } from "./types.js";
+import { selfAuthHeaders } from "../lib/self-auth.js";
 import { readFileSync } from "node:fs";
 
 /**
@@ -78,8 +79,7 @@ export async function resolveDetectorMetaScan(p: DetectorMetaScanPointer): Promi
   }
 
   let posted: number | "error" | null = null;
-  const apiKey = process.env["METABOB_API_KEY"];
-  const authHeader: Record<string, string> = apiKey ? { Authorization: `ApiKey ${apiKey}` } : {};
+  const authHeader: Record<string, string> = selfAuthHeaders(emitUrl, DEFAULT_URL);
   if (!dryRun && findings.length > 0) {
     const f = findings[0]!;
     try {

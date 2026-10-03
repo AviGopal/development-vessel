@@ -1,4 +1,5 @@
 import type { ResolverResult } from "./types.js";
+import { selfAuthHeaders } from "../lib/self-auth.js";
 
 /**
  * goal_host_behavior_scan (2026-06-15) — learn how the goal executor OPERATES.
@@ -78,8 +79,7 @@ async function emitGoalHostGap(
       },
     } } },
   };
-  const headers: Record<string, string> = { "Content-Type": "application/json" };
-  if (apiKey) headers["Authorization"] = `ApiKey ${apiKey}`;
+  const headers: Record<string, string> = { "Content-Type": "application/json", ...selfAuthHeaders(emitUrl, DEFAULT_DEV_VESSEL_URL) };
   try {
     const r = await fetch(emitUrl, { method: "POST", headers, body: JSON.stringify(body), signal: AbortSignal.timeout(10_000) });
     return r.ok;
@@ -256,7 +256,10 @@ export async function resolveGoalHostBehaviorScan(
   // Persist each modeled direction as a durable goal_host_behavior prior.
   let persisted = 0, perr = 0;
   if (persist) {
-    const auth = { "Content-Type": "application/json", Authorization: `ApiKey ${apiKey}` };
+    // The key goes only to the configured concept-db (lib/self-auth.ts): there a caller-supplied
+    // p.apiKey is used as before, the node key otherwise; an overridden conceptDbBase gets none.
+    const configuredConcept = DEFAULT_CONCEPT_DB.replace(/\/+$/, "");
+    const auth = { "Content-Type": "application/json", ...(p.apiKey && conceptBase === configuredConcept ? { Authorization: `ApiKey ${p.apiKey}` } : selfAuthHeaders(conceptBase, configuredConcept)) };
     for (const m of model) {
       try {
         const summary = `goal-host: direction [${m.goal_direction}] -> ${m.expected_template} (tier=${m.dominant_tier}, effect=${m.effect_class}, success=${m.success_rate}, n=${m.samples}, consistency=${m.template_consistency})`;

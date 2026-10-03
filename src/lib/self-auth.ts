@@ -13,11 +13,21 @@
 // refuses the write either way (an empty key is not a credential), so the omission changes nothing but
 // the log line. The key is read at use time, like caller-credential.ts reads it.
 
-/** `{ Authorization: "ApiKey <node key>" }` when `url` is exactly `selfUrl` and the key is set; otherwise `{}`. */
-export function selfAuthHeaders(url: string, selfUrl: string): Record<string, string> {
-  const key = process.env["METABOB_API_KEY"] ?? "";
-  if (!key || url !== selfUrl) return {};
-  return { Authorization: `ApiKey ${key}` };
+/**
+ * `{ Authorization: "ApiKey <key>" }` when `url` is exactly `selfUrl`, otherwise `{}`. The key is the
+ * caller's (`callerKey`, a pointer's own apiKey) when one is given, and the node key otherwise. A URL that is
+ * not the configured one gets NO key, the caller's included: internal callers pass the node key down as
+ * `apiKey`, so a pointer key is no proof that it belongs to whoever named the URL.
+ */
+export function selfAuthHeaders(url: string, selfUrl: string, callerKey?: string): Record<string, string> {
+  const key = selfAuthKey(url, selfUrl, callerKey);
+  return key ? { Authorization: `ApiKey ${key}` } : {};
+}
+
+/** The key itself, for helpers that build their own header: the same rule as selfAuthHeaders, "" when none. */
+export function selfAuthKey(url: string, selfUrl: string, callerKey?: string): string {
+  if (url !== selfUrl) return "";
+  return callerKey || (process.env["METABOB_API_KEY"] ?? "");
 }
 
 // UNSET IS NOT AN OVERRIDE. Templates fill endpoint fields from the goal (`'{{goal.devVesselImpulsesUrl}}'`).

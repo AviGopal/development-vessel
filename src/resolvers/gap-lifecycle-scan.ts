@@ -1,4 +1,5 @@
 import type { ResolverResult } from "./types.js";
+import { selfAuthHeaders } from "../lib/self-auth.js";
 import { readFileSync, readdirSync, appendFileSync } from "node:fs";
 import { join } from "node:path";
 import { WORKSPACE_ROOT as DEFAULT_WORKSPACE_ROOT } from "../config.js";
@@ -475,8 +476,9 @@ export async function resolveGapLifecycleScan(p: GapLifecycleScanPointer): Promi
     ? await autoCloseStaleGaps(openGapRecords, autoCloseStore, autoCloseEmitter)
     : { closedIds: [] as string[], closureEvents: [] as GapClosureEvent[] };
 
-  const apiKey = process.env["METABOB_API_KEY"];
-  const authHeader: Record<string, string> = apiKey ? { Authorization: `ApiKey ${apiKey}` } : {};
+  // Every authHeader call below goes to emitUrl (or its own gap route): the node key only when emitUrl is
+  // the configured endpoint (lib/self-auth.ts), never to a URL the pointer overrides.
+  const authHeader: Record<string, string> = selfAuthHeaders(emitUrl, DEFAULT_URL);
 
   const lowValueClosed: string[] = [];
   if (autoClose && writesHere) {

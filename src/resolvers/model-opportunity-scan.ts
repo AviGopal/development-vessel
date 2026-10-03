@@ -1,4 +1,5 @@
 import type { ResolverResult } from "./types.js";
+import { selfAuthHeaders } from "../lib/self-auth.js";
 import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 
@@ -103,8 +104,7 @@ export async function resolveModelOpportunityScan(p: ModelOpportunityScanPointer
     post_status: null as number | "error" | null,
   }));
 
-  const apiKey = process.env["METABOB_API_KEY"];
-  const authHeader: Record<string, string> = apiKey ? { Authorization: `ApiKey ${apiKey}` } : {};
+  const authHeader: Record<string, string> = selfAuthHeaders(emitUrl, DEFAULT_URL);
   if (!dryRun) {
     for (const f of findings.slice(0, maxEmits)) {
       try {

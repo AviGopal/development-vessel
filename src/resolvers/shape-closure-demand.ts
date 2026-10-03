@@ -4,6 +4,7 @@
  */
 
 import type { ResolverResult } from "./types.js";
+import { selfAuthHeaders } from "../lib/self-auth.js";
 
 export interface ShapeClosureDemandPointer {
   type: "shape_closure_demand";
@@ -16,8 +17,10 @@ export async function resolveShapeClosureDemand(pointer: ShapeClosureDemandPoint
   // plus composition-graph orphans, ranks each shape by demand_count x recency x how-blocking.
   const p = pointer as { devVesselUrl?: string; activityApiUrl?: string; apiKey?: string; limit?: number };
   const DEV = p.devVesselUrl ?? "http://127.0.0.1:8090/v2/impulses/resolve";
-  const ACT = p.activityApiUrl ?? "http://127.0.0.1:8080";
-  const API_KEY = p.apiKey ?? process.env.METABOB_API_KEY ?? "";
+  const ACT_CONFIGURED = "http://127.0.0.1:8080";
+  const ACT = p.activityApiUrl ?? ACT_CONFIGURED;
+  // The key goes only to the configured activity-api (lib/self-auth.ts): an overridden activityApiUrl gets none.
+  const actAuth: Record<string, string> = selfAuthHeaders(ACT, ACT_CONFIGURED, p.apiKey);
   const LIMIT = typeof p.limit === "number" ? p.limit : 200;
   const now = Date.now();
 
@@ -51,7 +54,7 @@ export async function resolveShapeClosureDemand(pointer: ShapeClosureDemandPoint
   let edges: Array<{ parent_activity_id?: string; child_activity_id?: string; genuine?: boolean }> = [];
   try {
     const r2 = await fetch(`${ACT}/v2/activities/composition/graph?limit=${LIMIT}`, {
-      headers: API_KEY ? { Authorization: `ApiKey ${API_KEY}` } : {},
+      headers: actAuth,
     });
     if (r2.ok) {
       const j2: any = await r2.json();

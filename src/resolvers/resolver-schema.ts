@@ -37,7 +37,7 @@ export interface ResolverSchemaResult {
   known: boolean;
   /** Key the args nest under, e.g. "gap". Absent/empty ⇒ the resolver takes a FLAT pointer. */
   envelope?: string;
-  fields?: Array<{ name: string; required: boolean; type: string }>;
+  fields?: Array<{ name: string; required: boolean; type: string; synthesize_from?: string; }>;
   required?: string[];
   invocation?: string;
 }
@@ -45,7 +45,7 @@ export interface ResolverSchemaResult {
 interface Contract {
   /** Omit for shapes whose resolver reads a flat pointer. */
   envelope?: string;
-  fields: Array<{ name: string; required: boolean; type: string }>;
+  fields: Array<{ name: string; required: boolean; type: string; synthesize_from?: string; }>;
   /** Notes the synthesizer benefits from that a field list cannot express. */
   notes?: string;
 }
@@ -93,6 +93,16 @@ const CONTRACTS: Record<string, Contract> = {
     ],
     notes:
       'vessel is "repos/<vessel>" or a bare vessel name. landed_sha is the commit the outcome attributes to — supply it whenever the run follows a landing, or the report is an unattributable snapshot.',
+  },
+  llm_completion_dispatch: {
+    fields: [
+      { name: "prompt", required: true, type: "string", synthesize_from: "goal_and_upstream" },
+      { name: "system_prompt", required: false, type: "string" },
+      { name: "model", required: false, type: "string" },
+      { name: "max_tokens", required: false, type: "number" },
+      { name: "tools", required: false, type: "array" },
+    ],
+    notes: "Flat pointer. `prompt` is required.",
   },
 };
 

@@ -168,6 +168,18 @@ const DEFAULT_LLM_TOOLS: LlmTool[] = [
 export async function resolveLlmCompletionDispatch(
   pointer: LlmCompletionDispatchPointer,
 ): Promise<ResolverResult> {
+  if (typeof pointer.prompt !== "string" || !pointer.prompt.trim()) {
+    return {
+      shape: "structuredError",
+      body: {
+        resolver: "llm_completion_dispatch",
+        failure_mode: "malformed_request",
+        field: "prompt",
+        detail: "The 'prompt' field is required and must be a non-empty string.",
+      },
+    };
+  }
+
   const endpoints = LLM_COMPLETION_ENDPOINT_OVERRIDE
     ? [LLM_COMPLETION_ENDPOINT_OVERRIDE]
     : await findLlmCompletionEndpoints();

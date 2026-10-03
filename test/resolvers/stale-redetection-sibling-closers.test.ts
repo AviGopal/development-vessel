@@ -87,6 +87,19 @@ afterAll(() => {
 const exercise = (sha: string): Row => ({ detector: "gap-sweep", verdict: "absent", passed: true, ran_at: new Date().toISOString(), commit: sha });
 const childClose = (sha: string, up: Row): Row => ({ evidence_resolve: ER, edit_site: SITE, closed_reason: "landed_verified", close_basis: "absent", falsifier_exercise: exercise(sha), ...up });
 
+describe("markTerminalRefusal (fixed_elsewhere) on a REOPENED gap", () => {
+  // First: the newer-commit ancestor case below lands a commit after the re-detections, which would then be
+  // the latest commit on the check's subject and (correctly) fix this gap too.
+  it("does not close it fixed_elsewhere on a commit that landed before the re-detection", async () => {
+    const id = `sib-fe-${RUN}`;
+    await seedReopened(id, { falsifier: "class2" });
+    await g2f.markTerminalRefusal(rowOf(id), { terminal_refusal: GREEN });
+    const r = rowOf(id);
+    expect(r["status"]).toBe("open");
+    expect(metaOf(r)["closed_reason"]).toBeUndefined();
+  });
+});
+
 describe("closeAncestorsOnSamePredicate on a REOPENED ancestor", () => {
   it("does not close it on a child's commit that landed before the ancestor's re-detection", async () => {
     const p = `sib-anc-${RUN}`;
@@ -113,16 +126,5 @@ describe("closeDescendantsOnSamePredicate on a REOPENED descendant", () => {
     const closed = await g2f.closeDescendantsOnSamePredicate(parent, childClose(oldSha, {}));
     expect(closed).toEqual([]);
     expect(rowOf(child)["status"]).toBe("open");
-  });
-});
-
-describe("markTerminalRefusal (fixed_elsewhere) on a REOPENED gap", () => {
-  it("does not close it fixed_elsewhere on a commit that landed before the re-detection", async () => {
-    const id = `sib-fe-${RUN}`;
-    await seedReopened(id, { falsifier: "class2" });
-    await g2f.markTerminalRefusal(rowOf(id), { terminal_refusal: GREEN });
-    const r = rowOf(id);
-    expect(r["status"]).toBe("open");
-    expect(metaOf(r)["closed_reason"]).toBeUndefined();
   });
 });

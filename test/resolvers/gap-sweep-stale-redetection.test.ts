@@ -185,7 +185,8 @@ describe("pending-land sweep on a RE-DETECTED gap", () => {
 
   let shaC2 = "";
   it("(b) a NEW landing after the re-detection closes it and credits that landing once", async () => {
-    shaC2 = land(`c2-${RUN}`);
+    // Committer time has whole-second resolution: land C' clearly after the reopen stamp.
+    shaC2 = land(`c2-${RUN}`, new Date(Date.parse(String(rowOf(ids.flap)["reopened_at"] ?? new Date().toISOString())) + 2000).toISOString());
     await stampLanding(ids.flap, shaC2);
     await g2f.sweepPendingLandVerifications();
     const r = rowOf(ids.flap);

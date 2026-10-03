@@ -1124,12 +1124,16 @@ function coerceFlatGapPointer(p: Record<string, unknown>): Record<string, unknow
  */
 const TEMPLATE_TOKEN = /\{\{([\s\S]*?)\}\}/g;
 const JSX_OBJECT_LITERAL = /^\s*[A-Za-z_$][\w$]*\s*:/;
+const TEMPLATE_REFERENCE = /[A-Za-z_$][\w$]*(\??\.|\[)/;
 export function unrenderedBindingToken(s: string): string | null {
   for (const m of s.matchAll(TEMPLATE_TOKEN)) {
     const i = m.index ?? 0;
     const end = i + m[0].length;
     if (s[i - 1] === "`" && s[end] === "`") continue;
-    if (s[i - 1] === "=" || JSX_OBJECT_LITERAL.test(m[1] ?? "")) continue;
+    // JSX exemptions cover literal object contents only: content holding a dotted path or an index reference
+    // (goal.operator, goal?.id, items[0]) is a template reference whatever precedes it (qa: the "=" skip let
+    // closed_by={{goal.operator}} through, the object-literal skip let {{ status: goal.status }} through).
+    if ((s[i - 1] === "=" || JSX_OBJECT_LITERAL.test(m[1] ?? "")) && !TEMPLATE_REFERENCE.test(m[1] ?? "")) continue;
     return m[0];
   }
   return null;

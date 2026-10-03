@@ -3410,6 +3410,30 @@ function testFailureSet(raw: string): Set<string> {
   return out;
 }
 
+/**
+ * The typecheck gate, as a BASELINE DELTA: a draft passes when tsc exits 0, or when the untouched baseline
+ * already failed tsc and the draft added NO NEW error (its error set minus the baseline's is empty) and left
+ * no error in a file it touched. Only a red baseline relaxes, so a clean-baseline vessel keeps the strict
+ * gate. The touched-file rule: a permanently broken baseline (a missing module) makes the baseline set
+ * huge, and `no new error` alone let edits land with a real error in the edited file (2 of 4 reverted
+ * autonomous landings were tcExit=2 in a touched file). A typecheck that did not answer (null), timed out
+ * (124) or failed without printing an error is not explained by the baseline and never relaxes.
+ * `touched` are paths of edited and created files; errors are matched to them by basename (tscErrorSet
+ * lines are "path: error TSnnnn ..." with the position stripped).
+ */
+export function typecheckVerdict(input: { tcExit: number | null; curTs: Set<string>; baseTs: Set<string>; touched: string[] }): { ok: boolean; new_ts: string[]; touched_err: boolean } {
+  const newTs = [...input.curTs].filter((e) => !input.baseTs.has(e));
+  const touchedBases = new Set(input.touched.map((p) => p.split("/").pop() ?? ""));
+  const touchedErr = [...input.curTs].some((e) => {
+    const f = (e.split(/[:(]/)[0] ?? "").trim();
+    const base = f.split("/").pop() ?? "";
+    return base.endsWith(".ts") && touchedBases.has(base);
+  });
+  const answeredWithErrors = input.tcExit !== null && input.tcExit !== 124 && input.curTs.size > 0;
+  const ok = input.tcExit === 0 || (answeredWithErrors && input.baseTs.size > 0 && newTs.length === 0 && !touchedErr);
+  return { ok, new_ts: newTs, touched_err: touchedErr };
+}
+
 /** The gap's own class2 test_suite check for vessel `v`, or null when it has none there. */
 export function gapOwnTestSuite(meta: Record<string, unknown>, v: string): { test_file: string; only_tests: string[] } | null {
   const er = meta.evidence_resolve as { shape?: unknown; input?: { vessel?: unknown; test_file?: unknown; only_tests?: unknown } } | undefined;
@@ -6699,23 +6723,14 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
     const dryRunExit = dr && dr[1] ? parseInt(dr[1], 10) : null;
     // Baseline-delta: pass typecheck if clean, OR if the baseline already had tsc
     // errors and the draft introduced NO NEW ones (post error set minus baseline is
-    // empty). Shape-dispatch (sdExit) still gates strictly. Only relax when baseline
-    // was itself broken, so a clean-baseline vessel keeps the strict tcExit===0 gate.
-    const curTs = tscErrorSet(raw);
-    const baseTs = baselineTsErrors.get(v) ?? new Set<string>();
-    const newTs = [...curTs].filter((e) => !baseTs.has(e));
-    // TIGHTEN the broken-baseline relaxation: never relax away a tsc error located in a
-    // file THIS compose actually touched. A permanently-broken vessel baseline (e.g. a
-    // missing module) makes baseTs huge, so `newTs.length===0` alone let edits LAND with a
-    // real error in the edited file (2/4 reverted autonomous landings were tcExit=2 in a
-    // touched file). Baseline errors in files we did NOT author may still be tolerated.
-    const touchedBases = new Set([...edited, ...created].map((p) => p.split("/").pop() ?? ""));
-    const touchedErr = [...curTs].some((e) => {
-      const f = (e.split(/[:(]/)[0] ?? "").trim();
-      const base = f.split("/").pop() ?? "";
-      return base.endsWith(".ts") && touchedBases.has(base);
-    });
-    const tcOk = tcExit === 0;
+    // empty). Only relax when baseline was itself broken, so a clean-baseline vessel
+    // keeps the strict tcExit===0 gate.
+    // The relaxation itself is typecheckVerdict (it was disabled by a one-line autonomous commit, 03064b74,
+    // which left newTs and touchedErr computed and unread). On a red baseline the verify command above skips
+    // the suite when TC_EXIT is non-zero; the no-summary retry below runs it then, so a relaxed draft is still
+    // judged by the suite and by its own check. KNOWN LIMIT: the same skip leaves SD_EXIT unprinted, which
+    // reads as 0, so shape-dispatch is not checked on a red baseline.
+    const { ok: tcOk, new_ts: newTs } = typecheckVerdict({ tcExit, curTs: tscErrorSet(raw), baseTs: baselineTsErrors.get(v) ?? new Set<string>(), touched: [...edited, ...created] });
     // WAS THE TYPECHECK ANSWERED AT ALL? `bun run typecheck` had no timeout, so when the
     // surrounding shell call was cut off the TC_EXIT marker was never echoed: tcExit became
     // null and the gate failed the draft with a bare "verify" and no error text. Observed on

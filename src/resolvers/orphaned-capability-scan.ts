@@ -102,10 +102,11 @@ const OUTPUT_READ_DUPLICATE = new Set<string>([
 const SELF_REGISTRATION = new Set<string>([
   // discovery returns a shape's own registration for `vesselCapability` as a caller;
   // it's not. Exclude it from the caller count for orphaned capability determination.
-  "vesselCapability"
 ]);
 
 const META_DENY = new Set<string>([
+  // discovery meta
+  "vesselCapability",
   // dev-vessel self-governance / orchestration meta
   "substrateGap", "substrateGap_write", "memoryNote", "memoryNote_write",
   "loadAttribution", "loadAttribution_write", "load_attribution_report",

@@ -14,6 +14,12 @@
 // so `git show HEAD:<file>` fails there and the exemption is never exercised; these use a real
 // clone of a real bare origin.
 //
+// A second route to the same revert: the check reads the clone BEFORE the cutover's clean-slate
+// fetch + `reset --hard origin/dev`, so a clone still at B passes, is moved to N, and the copy lands
+// over N. And the reset was handed staged_base_sha — a 12-char FILE-CONTENT hash, not a revision.
+// The 08-29 control pins the other side: a base matching NO committed version of the file is a
+// staging artefact (the 09-24 deadlock class) and must still proceed.
+//
 // WHY THE RUNTIME TREE LAGS AT B (do not "fix" the fixture by moving it to N): in production the
 // primary freshness gate reads the deployed runtime tree (MITOSIS_RUNTIME_DIR/<vessel>), which
 // trails the push clone by a pull-sync cycle — that lag is how every instance above passed the
@@ -27,7 +33,7 @@
 // injected through the cutover's own test seam.
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import * as cutoverMod from "../../src/resolvers/vessel-mitosis-cutover.js";
-import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, readFile, chmod, rm } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
@@ -118,14 +124,37 @@ afterEach(async () => {
   await rm(ws, { recursive: true, force: true });
 });
 
-type Newer = "none" | "same_file" | "unrelated_file";
+// none: no newer commit. same_file / unrelated_file: N is pushed and the clone fast-forwards to it.
+// same_file_unpulled: N (to F) is pushed but the clone has NOT fetched it yet — it still sits at B
+// when the commit-tree check reads it, and only the cutover's own fetch + reset brings it to N.
+type Newer = "none" | "same_file" | "unrelated_file" | "same_file_unpulled";
+
+// The 08-29 shape: the staging leg recorded its base from a runtime tree that a previous attempt
+// had transiently patched, so staged_base_sha is the hash of content NO commit ever held.
+const F_PATCHED_NEVER_COMMITTED = "// target module\nexport const alpha = 1;\nexport const beta = 2; // transient patch\n";
+
+/** A git_cmd that records each argv (one line per call, args joined by US) then runs real git. */
+async function recordingGit(): Promise<{ cmd: string; calls: () => Promise<string[][]> }> {
+  const log = join(ws, "git-argv.log");
+  const cmd = join(ws, "recording-git.sh");
+  await writeFile(cmd, `#!/bin/sh\n{ for a in "$@"; do printf '%s\\037' "$a"; done; printf '\\n'; } >> ${JSON.stringify(log)}\nexec git "$@"\n`);
+  await chmod(cmd, 0o755);
+  return {
+    cmd,
+    calls: async () => {
+      let raw = "";
+      try { raw = await readFile(log, "utf8"); } catch { /* no calls */ }
+      return raw.split("\n").filter(Boolean).map((l) => l.split("\u001f").filter((a, i, all) => i < all.length - 1 || a !== ""));
+    },
+  };
+}
 
 /**
  * Bare origin with base commit B; the live push clone at MITOSIS_PUSH_CLONE_DIR/<vessel>; a staged
  * mitosis of F computed against B; optionally a newer commit N pushed by another writer and
  * fast-forwarded into the live clone, which is left clean at HEAD.
  */
-async function setup(newer: Newer) {
+async function setup(newer: Newer, opts: { base?: "committed_B" | "uncommitted_patch" } = {}) {
   const origin = join(ws, "origin.git");
   git(ws, "init", "--bare", "-b", "dev", origin);
 
@@ -145,9 +174,11 @@ async function setup(newer: Newer) {
   git(ws, "clone", "-q", "-b", "dev", origin, clone);
   gitIdentity(clone);
 
-  // The runtime tree lags at B (see the header: this is how the primary gate passes).
+  // The runtime tree lags at B (see the header: this is how the primary gate passes). In the 08-29
+  // shape it holds the transient patch the staging leg hashed as its base.
+  const baseContent = opts.base === "uncommitted_patch" ? F_PATCHED_NEVER_COMMITTED : F_AT_B;
   const runtime = join(ws, "runtime", VESSEL);
-  await put(runtime, F, F_AT_B);
+  await put(runtime, F, baseContent);
   await put(runtime, G, G_AT_B);
 
   // The staged mitosis: only F, computed against B.
@@ -159,18 +190,20 @@ async function setup(newer: Newer) {
     const other = join(ws, "other-writer");
     git(ws, "clone", "-q", "-b", "dev", origin, other);
     gitIdentity(other);
-    if (newer === "same_file") await put(other, F, F_AT_N);
+    if (newer !== "unrelated_file") await put(other, F, F_AT_N);
     else await put(other, G, G_AT_N);
     git(other, "add", ".");
-    git(other, "commit", "-m", `N: newer work on ${newer === "same_file" ? F : G}`);
+    git(other, "commit", "-m", `N: newer work on ${newer === "unrelated_file" ? G : F}`);
     git(other, "push", "origin", "dev");
     shaN = git(other, "rev-parse", "HEAD");
-    git(clone, "pull", "-q", "--ff-only", "origin", "dev");
+    if (newer !== "same_file_unpulled") git(clone, "pull", "-q", "--ff-only", "origin", "dev");
   }
-  // The precondition the exemption keys on: the clone is clean and sits at origin/dev's HEAD.
+  // The precondition the exemption keys on: the clone is clean and sits at its origin/dev ref —
+  // N when it has pulled, still B when N has not been fetched yet.
+  const cloneAt = newer === "same_file_unpulled" ? shaB : shaN;
   expect(git(clone, "status", "--porcelain")).toBe("");
-  expect(git(clone, "rev-parse", "HEAD")).toBe(shaN);
-  expect(git(clone, "rev-parse", "origin/dev")).toBe(shaN);
+  expect(git(clone, "rev-parse", "HEAD")).toBe(cloneAt);
+  expect(git(clone, "rev-parse", "origin/dev")).toBe(cloneAt);
 
   const pointer = {
     type: "vessel_mitosis_cutover" as const,
@@ -178,8 +211,8 @@ async function setup(newer: Newer) {
     base_version_id: "v1",
     mitosis_version_id: MVID,
     mitosis_root: mitosisRoot,
-    staged_base_sha: sha12(F_AT_B),
-    staged_base_shas: { [F]: sha12(F_AT_B) },
+    staged_base_sha: sha12(baseContent),
+    staged_base_shas: { [F]: sha12(baseContent) },
     staged_files: [F],
     pending_pointer_path: join(ws, "mitosis-pending.json"),
     applied_log_path: join(ws, "mitosis-applied.jsonl"),
@@ -212,6 +245,49 @@ describe("cutover class A: a stale-base staged edit never overwrites newer commi
       .toEqual({ head_still_has_newer_work: true, head: s.shaN });
     expect(r.shape).toBe("vesselMitosisCutoverResult");
     expect(body["refused"]).toBe(true);
+  });
+
+  it("MUST-FAIL 2: refuses a staged edit built on B when the clone still reads B at the check but the cutover's own fetch + reset brings it to a newer commit to the same file", async () => {
+    // Second route to the same revert: the commit-tree check reads the clone BEFORE the clean-slate
+    // fetch + `reset --hard origin/dev`, so a clone not yet at N passes it, then is moved to N, and
+    // the wholesale copy of the B-based file lands over N.
+    const s = await setup("same_file_unpulled");
+    const r = await resolveVesselMitosisCutover(s.pointer as never);
+    const body = (r.body ?? {}) as Record<string, unknown>;
+    // Whatever HEAD the clone ends on, its F must still carry N's line, and no new commit may sit on N.
+    const headF = git(s.clone, "show", `HEAD:${F}`);
+    const landedOnN = git(s.clone, "rev-list", "--count", `${s.shaN}..HEAD`);
+    expect({ head_still_has_newer_work: headF.includes(NEWER_LINE), commits_on_top_of_N: landedOnN })
+      .toEqual({ head_still_has_newer_work: true, commits_on_top_of_N: "0" });
+    expect(r.shape).toBe("vesselMitosisCutoverResult");
+    expect(body["refused"]).toBe(true);
+  });
+
+  it("MUST-FAIL 3: never hands the 12-char staged file-content hash to git as a revision", async () => {
+    // staged_base_sha is sha256(file bytes).slice(0,12) — not a commit. Passing it to git as a
+    // revision (`reset --hard <contentHash>`) can only fail and fall back, or, if it ever prefixes a
+    // real object, reset the clone to an arbitrary commit. Observed through the pointer's own
+    // git_cmd seam, on a landing that proceeds (so the reset step is certainly reached).
+    const s = await setup("none");
+    const rec = await recordingGit();
+    const r = await resolveVesselMitosisCutover({ ...s.pointer, git_cmd: rec.cmd } as never);
+    expect(r.shape).toBe("cutoverApplied");
+    const calls = await rec.calls();
+    // Positive control: the seam saw the clean-slate reset at all.
+    expect(calls.some((a) => a[0] === "reset" && a.includes("--hard"))).toBe(true);
+    const contentHash = s.pointer.staged_base_sha;
+    expect(calls.filter((a) => a.includes(contentHash)).map((a) => a.join(" "))).toEqual([]);
+  });
+
+  it("CONTROL (08-29): a staged base hashing to uncommitted patched content proceeds on a clean clone with no newer commit to the file", async () => {
+    // Guards against over-correcting into the 09-24 staged_base_sha deadlock: a base matching NO
+    // commit is a staging artefact, not drift, and must not be refused.
+    const s = await setup("none", { base: "uncommitted_patch" });
+    const r = await resolveVesselMitosisCutover(s.pointer as never);
+    expect(String(((r.body ?? {}) as Record<string, unknown>)["refusal_reason"] ?? "")).toBe("");
+    expect(r.shape).toBe("cutoverApplied");
+    expect(git(s.clone, "rev-parse", "HEAD~1")).toBe(s.shaB);
+    expect(git(s.clone, "show", `HEAD:${F}`) + "\n").toBe(F_STAGED);
   });
 
   it("CONTROL: a staged edit whose base equals the clone's HEAD lands", async () => {

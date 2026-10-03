@@ -61,7 +61,9 @@ export function contractFieldKeys(schemaPath: string): Map<string, number[]> {
   const visit = (n: ts.Node): void => {
     // (a) published entries
     if (ts.isPropertyAssignment(n) && propName(n.name) === "fields" && ts.isArrayLiteralExpression(n.initializer)) {
-      for (const el of n.initializer.elements) {
+      for (let el of n.initializer.elements) {
+        // `{…} as X`, `{…} satisfies X`, `({…})` are still entries.
+        while (ts.isAsExpression(el) || ts.isSatisfiesExpression(el) || ts.isParenthesizedExpression(el) || ts.isTypeAssertionExpression(el)) el = el.expression;
         if (!ts.isObjectLiteralExpression(el)) continue;
         for (const p of el.properties) {
           if (ts.isPropertyAssignment(p) || ts.isShorthandPropertyAssignment(p)) add(propName(p.name), p);
@@ -145,7 +147,7 @@ describe("contract field readers: every resolver-contract field key has a reader
       [
         `interface Contract { fields: Array<{ name: string; read_by_access: string; read_by_element?: string; type_only_unread?: string; }> }`,
         `const C: Record<string, Contract> = {`,
-        `  s: { fields: [{ name: "a", read_by_access: "x", read_by_element: "y", read_by_destructure: 1, entry_only_unread: "z" }] },`,
+        `  s: { fields: [{ name: "a", read_by_access: "x", read_by_element: "y", read_by_destructure: 1, entry_only_unread: "z" }, { name: "b", cast_entry_unread: 1 } as never] },`,
         `};`,
         `export const own = C.s.fields.filter((f) => f.name); // contract-file logic reads count; its declarations do not`,
       ].join("\n"),
@@ -169,6 +171,7 @@ describe("contract field readers: every resolver-contract field key has a reader
       type_only_unread: false,
       read_by_destructure: true,
       entry_only_unread: false,
+      cast_entry_unread: false,
     });
   });
 });

@@ -17,7 +17,10 @@ process.env["WORKSPACE_ROOT"] = ROOT;
 
 const pool = await import("../../src/resolvers/pool-impulse.js");
 const { resolvePoolImpulse, resolvePoolImpulseWrite, operatorCredential } = pool;
-const { impulsesRouter } = await import("../../src/routes/impulses.js");
+// A query-string instance of the route module: test/observers/topology-chain.test.ts replaces
+// routes/impulses.js process-wide with mock.module (never undone), whose stub answers writes 200 without
+// reaching the store; the plain specifier would hand this file that stub in a full run.
+const { impulsesRouter } = await import(`../../src/routes/impulses.js?${"pool-trust-root"}`);
 const sfr = await import("../../src/resolvers/self-fact-reconcile.js");
 const { evaluateSelfFactRow, __setPoolPinDepsForTests, thisNode } = sfr;
 

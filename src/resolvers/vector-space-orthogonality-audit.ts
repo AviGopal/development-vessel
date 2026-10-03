@@ -1,5 +1,5 @@
 import type { ResolverResult } from "./types.js";
-import { selfAuthHeaders } from "../lib/self-auth.js";
+import { selfAuthHeaders, selfAuthKey } from "../lib/self-auth.js";
 
 /**
  * vector_space_orthogonality_audit — substrate-detected novel-failure-mode
@@ -181,7 +181,7 @@ export async function resolveVectorSpaceOrthogonalityAudit(
   const apiKey = process.env["METABOB_API_KEY"] ?? "";
 
   const cutoff = Date.now() - windowHours * 3600 * 1000;
-  const traces = (await fetchFailureTraces(metabobEndpoint, apiKey, traceLimit)).filter((t) => {
+  const traces = (await fetchFailureTraces(metabobEndpoint, selfAuthKey(metabobEndpoint, DEFAULT_METABOB_ENDPOINT), traceLimit)).filter((t) => {
     if (!t.executed_at) return true;
     const ts = Date.parse(t.executed_at);
     return Number.isFinite(ts) ? ts >= cutoff : true;
@@ -191,7 +191,7 @@ export async function resolveVectorSpaceOrthogonalityAudit(
   const scored = await Promise.all(
     traces.map(async (t) => {
       const summary = summarizeTrace(t);
-      const nearest = await nearestPrincipleSimilarity(conceptDbUrl, apiKey, summary);
+      const nearest = await nearestPrincipleSimilarity(conceptDbUrl, selfAuthKey(conceptDbUrl, DEFAULT_CONCEPT_DB_URL), summary);
       return { trace: t, summary, nearest };
     }),
   );

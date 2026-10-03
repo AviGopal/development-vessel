@@ -1,4 +1,5 @@
 import type { ResolverResult } from "./types.js";
+import { selfAuthKey } from "../lib/self-auth.js";
 
 /**
  * concept_select_for_prompt — deterministic multi-axis prior selection for
@@ -176,7 +177,7 @@ export async function resolveConceptSelectForPrompt(
   // Pull candidates per source_type in parallel.
   const fetched = await Promise.all(
     sourceTypes.map((st) =>
-      fetchForSourceType(baseUrl, st, pointer.query, candidatesPerSourceType, apiKey),
+      fetchForSourceType(baseUrl, st, pointer.query, candidatesPerSourceType, selfAuthKey(baseUrl, DEFAULT_CONCEPT_DB_URL)),
     ),
   );
 

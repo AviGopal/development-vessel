@@ -1,5 +1,5 @@
 import { readdir, readFile, stat } from "node:fs/promises";
-import { selfAuthHeaders } from "../lib/self-auth.js";
+import { selfAuthHeaders, selfAuthKey } from "../lib/self-auth.js";
 import { join } from "node:path";
 import type { ResolverResult } from "./types.js";
 
@@ -292,7 +292,7 @@ export async function resolveVesselResponsibilityAudit(
   let principles: PrincipleConcept[] = [];
   let fetchError: string | null = null;
   try {
-    principles = await fetchPrinciples(conceptDbUrl, apiKey);
+    principles = await fetchPrinciples(conceptDbUrl, selfAuthKey(conceptDbUrl, DEFAULT_CONCEPT_DB_URL));
   } catch (err) {
     fetchError = (err as Error).message;
   }

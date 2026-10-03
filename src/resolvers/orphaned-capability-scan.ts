@@ -31,7 +31,7 @@
  */
 
 import { METABOB_ENDPOINT, METABOB_API_KEY, DISCOVERY_ENDPOINT } from "../config.js";
-import { selfAuthHeaders } from "../lib/self-auth.js";
+import { selfAuthHeaders, selfAuthKey } from "../lib/self-auth.js";
 import type { ResolverResult } from "./types.js";
 
 const DEFAULT_DEV_VESSEL_URL = "http://127.0.0.1:8090/v2/impulses/resolve";
@@ -417,7 +417,7 @@ export async function resolveOrphanedCapabilityScan(
 
   const [liveShapes, invoked] = await Promise.all([
     fetchRegistryShapes(discoveryUrl),
-    fetchInvokedResolvers(endpoint, apiKey, templateLimit),
+    fetchInvokedResolvers(endpoint, selfAuthKey(endpoint, METABOB_ENDPOINT, pointer.apiKey), templateLimit),
   ]);
 
   // Guard: if discovery returned nothing, or the template corpus could not be

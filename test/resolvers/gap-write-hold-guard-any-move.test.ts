@@ -117,7 +117,7 @@ describe("substrateGap_write: a held gap does not move without the operator mark
   });
 
   it("[CONTROL] an unheld gap may be rejected without the marker", async () => {
-    const r = await write({ gap: { ...FREE, status: "rejected", classification_metadata: { rejected_reason: "fixture" } } });
+    const r = await write({ gap: { ...FREE, status: "rejected", classification_metadata: { rejected_reason: "fixture", closed_by: "hold-guard-fixture-detector" } } });
     expect(r.shape).toBe("substrateGapWriteResult");
     expect(stored(FREE.id)!.status).toBe("rejected");
   });

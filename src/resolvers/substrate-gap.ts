@@ -1194,11 +1194,13 @@ export function operatorMarkerOf(pointer: unknown): string | null {
   return typeof v === "string" && OPERATOR_MARKER.test(v.trim()) ? v.trim() : null;
 }
 /** The keys a close leaves in classification_metadata as its verdict; an open row carries none of them. */
-export const CLOSURE_EVIDENCE_KEYS = ["closed_reason", "closed_by", "close_basis", "landed_sha", "landed_commit", "falsifier_exercise", "close_note"] as const;
+export const CLOSURE_EVIDENCE_KEYS = ["closed_reason", "rejected_reason", "closed_by", "close_basis", "landed_sha", "landed_commit", "falsifier_exercise", "close_note"] as const;
+/** The verdict a close or reject stands on. A write that keeps a row closed (or rejected) does not change these without the operator marker. */
+export const CLOSURE_VERDICT_KEYS = ["closed_reason", "rejected_reason", "closed_by", "close_basis", "landed_sha", "landed_commit", "falsifier_exercise"] as const;
 const nonEmptyString = (v: unknown): v is string => typeof v === "string" && v.trim().length > 0;
 /**
- * CLOSE NEEDS EVIDENCE (2026-10-03). What a write moving an existing row INTO closed must carry:
- * closed_reason (metadata or top level) and one piece of evidence: an exercised falsifier_exercise
+ * CLOSE NEEDS EVIDENCE (2026-10-03). What a write moving an existing row INTO closed or rejected must carry:
+ * closed_reason or rejected_reason (metadata or top level) and one piece of evidence: an exercised falsifier_exercise
  * (an object with a boolean `passed`), a land signal (landed_sha / landed_commit), a named closer
  * (closed_by / close_basis, metadata or top level), or the operator marker. Read from the INCOMING
  * write only, before the store carries the old row's keys forward. Returns the evidence kind, or why not.
@@ -1208,8 +1210,8 @@ export function closeEvidenceOf(
   operator: string | null,
 ): { ok: true; reason: string; evidence: string } | { ok: false; missing: string } {
   const meta = (incoming["classification_metadata"] ?? {}) as Record<string, unknown>;
-  const reason = [meta["closed_reason"], incoming["closed_reason"]].find(nonEmptyString);
-  if (!reason) return { ok: false, missing: "closed_reason (a non-empty string in classification_metadata or on the gap)" };
+  const reason = [meta["closed_reason"], incoming["closed_reason"], meta["rejected_reason"], incoming["rejected_reason"]].find(nonEmptyString);
+  if (!reason) return { ok: false, missing: "closed_reason or rejected_reason (a non-empty string in classification_metadata or on the gap)" };
   const ex = meta["falsifier_exercise"];
   if (ex !== null && typeof ex === "object" && !Array.isArray(ex) && typeof (ex as { passed?: unknown }).passed === "boolean") return { ok: true, reason, evidence: "falsifier_exercise" };
   if (nonEmptyString(meta["landed_sha"]) || nonEmptyString(meta["landed_commit"])) return { ok: true, reason, evidence: "land_signal" };
@@ -1585,12 +1587,13 @@ export async function resolveSubstrateGapWrite(
         holdKeepsText = true;
       }
     }
-    // CLOSE NEEDS EVIDENCE (see closeEvidenceOf). Only a TRANSITION into closed: a write to a row that is
-    // already closed is not gated. Checked before the carry-forward below copies the old row's keys in.
-    if (String(gap.status ?? "open") === "closed" && String(existing.status ?? "open") !== "closed") {
+    // CLOSE NEEDS EVIDENCE (see closeEvidenceOf). Only a TRANSITION into closed or rejected (a reject takes a
+    // gap out of every open-gap supply just as a close does): a write that keeps the status is not gated
+    // here (its verdict keys are kept below). Checked before the carry-forward copies the old row's keys in.
+    if ((String(gap.status ?? "open") === "closed" || String(gap.status ?? "open") === "rejected") && String(existing.status ?? "open") !== String(gap.status)) {
       const ev = closeEvidenceOf(incoming as unknown as Record<string, unknown>, operatorMarkerOf(pointer));
       if (!ev.ok) {
-        console.warn(`[substrate-gap] REFUSED close of ${gap.id}: no ${ev.missing.split(" (")[0]!.split(":")[0]}`);
+        console.warn(`[substrate-gap] REFUSED ${String(gap.status)} of ${gap.id}: no ${ev.missing.split(" (")[0]!.split(":")[0]}`);
         return {
           early: {
             shape: "structuredError",
@@ -1598,12 +1601,12 @@ export async function resolveSubstrateGapWrite(
               resolver: "substrateGap_write",
               failure_mode: "validation_rejected",
               rule: "close_needs_evidence",
-              detail: `gap ${gap.id}: a close needs closed_reason plus evidence; missing ${ev.missing}. The row stays ${String(existing.status ?? "open")}.`,
+              detail: `gap ${gap.id}: a ${String(gap.status)} write needs closed_reason (or rejected_reason) plus evidence; missing ${ev.missing}. The row stays ${String(existing.status ?? "open")}.`,
             },
           },
         };
       }
-      console.log(`[substrate-gap] close of ${gap.id}: closed_reason=${ev.reason} evidence=${ev.evidence}`);
+      console.log(`[substrate-gap] ${String(gap.status)} of ${gap.id}: reason=${ev.reason} evidence=${ev.evidence}`);
     }
         summaryChanged = existing.summary !== gap.summary;
         // A closed->open transition is a REOPEN, and it is exactly when the gap wants
@@ -1745,6 +1748,19 @@ export async function resolveSubstrateGapWrite(
     // stale closed snapshot). No reader of an open row needs them (audited: isLiteralOnlyStepClose, the
     // step-replace check in gap-to-feature, the pending-land sweep, detector-yield-registry, goal-reach-tick
     // read them on closed rows or not at all); reopen_count records the earlier close.
+    // A CLOSED VERDICT IS NOT REWRITTEN (2026-10-03). A write that keeps a row closed (or rejected) keeps the
+    // stored verdict keys unless it carries the operator marker: no swapped closed_reason, no re-pointed
+    // closed_by, no landed_sha added to a hollow close after the fact. The write itself proceeds.
+    if (String(gap.status ?? "open") !== "open" && String(existing.status ?? "open") === String(gap.status) && !operatorMarker) {
+      const kept: string[] = [];
+      for (const k of CLOSURE_VERDICT_KEYS) {
+        const had = k in exMeta;
+        if (JSON.stringify(inMeta[k]) === JSON.stringify(exMeta[k])) continue;
+        if (had) inMeta[k] = exMeta[k]; else delete inMeta[k];
+        kept.push(k);
+      }
+      if (kept.length > 0) console.log(`[substrate-gap] ${gap.id}: a ${String(gap.status)} row keeps its verdict without the operator marker; ignored ${kept.join(", ")}`);
+    }
     if (String(gap.status ?? "open") === "open") {
       const cleared = CLOSURE_EVIDENCE_KEYS.filter((k) => k in inMeta);
       for (const k of cleared) delete inMeta[k];

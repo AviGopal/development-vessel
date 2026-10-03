@@ -95,7 +95,7 @@ describe("substrateGap_write keeps birth fields and does not let a close rewrite
   });
 
   it("[MUST-FAIL] a reject by a non-operator writer keeps the stored summary and category", async () => {
-    const r = await write({ gap: { id: OP.id, category: "other", source: OP.source, summary: "rejected: not a real gap", detected_at: LATER, status: "rejected", classification_metadata: { rejected_reason: "fixture" } } });
+    const r = await write({ gap: { id: OP.id, category: "other", source: OP.source, summary: "rejected: not a real gap", detected_at: LATER, status: "rejected", classification_metadata: { rejected_reason: "fixture", closed_by: "birth-fixture-detector" } } });
     expect(r.shape).toBe("substrateGapWriteResult");
     const row = stored(OP.id)!;
     expect(row.status).toBe("rejected");

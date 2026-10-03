@@ -6,7 +6,7 @@
  * appears in a record, log or row. The label is the identity that VALIDATED the request: the identity-vessel
  * key id or name when the auth result carries one, its scopes when it carries only those, "authenticated"
  * when it carries neither, and "unauthenticated" when there is no successful auth result. The resolve route
- * does not authenticate callers yet, so today it always passes no auth result.
+ * passes the credential its write gate validated (lib/caller-credential.ts); an in-process write has none.
  */
 export type CallerAuthResult = { authenticated?: boolean; key_id?: unknown; key_name?: unknown; scopes?: unknown };
 

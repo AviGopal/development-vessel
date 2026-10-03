@@ -47,7 +47,7 @@ import { resolveRhythmRealitySync } from "../resolvers/rhythm-reality-sync.js";
 import { resolveMemoryNote, resolveMemoryNoteWrite } from "../resolvers/memory-note.js";
 import { resolveSubstrateGap, resolveSubstrateGapWrite } from "../resolvers/substrate-gap.js";
 import { resolvePoolImpulse, resolvePoolImpulseWrite, trustRootWriteShape, operatorCredential } from "../resolvers/pool-impulse.js";
-import { identityCredential, isWritePointerType } from "../lib/caller-credential.js";
+import { identityCredential, isWritePointerType, type CallerCredential } from "../lib/caller-credential.js";
 import { resolveFsList } from "../resolvers/fs-list.js";
 import { resolveFsGrep } from "../resolvers/fs-grep.js";
 import { resolveHttpFetch } from "../resolvers/http-fetch.js";
@@ -1061,12 +1061,12 @@ export const impulsesRouter = new Hono();
  * a refused key, and an unreachable identity are all refusals. Reads are not gated here.
  * Returns the refusal response, or null when the call may proceed.
  */
-async function refuseUnauthenticatedWrite(c: Context, pointerType: string): Promise<Response | null> {
-  if (!isWritePointerType(pointerType)) return null;
+async function refuseUnauthenticatedWrite(c: Context, pointerType: string): Promise<{ refused: Response | null; cred: CallerCredential | null }> {
+  if (!isWritePointerType(pointerType)) return { refused: null, cred: null };
   const cred = await identityCredential(c.req.header("Authorization"));
-  if (cred.authenticated) return null;
+  if (cred.authenticated) return { refused: null, cred };
   console.warn(`[resolve] REFUSED unauthenticated ${pointerType}: ${cred.why ?? "not authenticated"}`);
-  return c.json({ success: false, error: `caller_credential_required: ${pointerType} is a write; ${cred.why ?? "not authenticated"}` }, 401);
+  return { refused: c.json({ success: false, error: `caller_credential_required: ${pointerType} is a write; ${cred.why ?? "not authenticated"}` }, 401), cred: null };
 }
 
 /**
@@ -1093,7 +1093,7 @@ impulsesRouter.post("/resolvers/execute", async (c) => {
     return c.json({ error: "resolver field is required" }, 400);
   }
 
-  { const refused = await refuseUnauthenticatedWrite(c, String(resolverName)); if (refused) return refused; }
+  { const { refused } = await refuseUnauthenticatedWrite(c, String(resolverName)); if (refused) return refused; }
 
   try {
     const pointer = { ...(body.config ?? {}), type: resolverName };
@@ -1137,7 +1137,8 @@ impulsesRouter.post("/v2/impulses/resolve", async (c) => {
     return c.json({ success: false, error: "pointer.type is required" }, 400);
   }
 
-  { const refused = await refuseUnauthenticatedWrite(c, pointerType); if (refused) return refused; }
+  const { refused: writeRefused, cred: writeCred } = await refuseUnauthenticatedWrite(c, pointerType);
+  if (writeRefused) return writeRefused;
 
   // A TRUST-ROOT pool write is the one write that needs WHO is asking (pool-impulse.ts
   // TRUST_ROOT_POOL_SHAPES); only this route sees the Authorization header, so the credential is
@@ -1153,14 +1154,14 @@ impulsesRouter.post("/v2/impulses/resolve", async (c) => {
 
   // CALLER IDENTITY FOR THE GAP-WRITE AUDIT (2026-10-03). Stamped by the route, never taken from the
   // client: any inbound _route_caller is overwritten. NOTHING derived from the presented key (no hash,
-  // digest or prefix): only the identity that validated the request (callerAuthLabel). This route does not
-  // authenticate callers yet, so there is no auth result and the label is "unauthenticated". Plus the
+  // digest or prefix): only the identity that validated the request (callerAuthLabel): the write gate's
+  // credential above, named by its key id when identity's answer carries one, else by its scopes. Plus the
   // remote address the server wrapper stamped from the socket (x-dv-remote-addr), or the socket's own.
   if (pointerType === "substrateGap_write" && pointer && typeof pointer === "object") {
     const env = c.env as { requestIP?: (r: Request) => { address?: string } | null } | undefined;
     let remote = c.req.header("x-dv-remote-addr") ?? "";
     if (!remote) { try { remote = env?.requestIP?.(c.req.raw)?.address ?? ""; } catch { remote = ""; } }
-    (pointer as Record<string, unknown>)["_route_caller"] = { auth: callerAuthLabel(undefined), remote: remote || "unknown" };
+    (pointer as Record<string, unknown>)["_route_caller"] = { auth: callerAuthLabel(writeCred ? { authenticated: writeCred.authenticated, key_id: writeCred.keyId, scopes: writeCred.scopes } : undefined), remote: remote || "unknown" };
   }
 
   try {

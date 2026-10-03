@@ -28,11 +28,15 @@
 //   secret is not retained; the digest never leaves process memory: it is not logged, traced,
 //   persisted, returned in an error, or exposed through /health, /metrics or any export of this
 //   module.
-//   TODO(identity-vessel-auth-result-should-carry-a-key-id-for-audit): once identity's auth result
-//   carries the key id, audit lines name the caller by that id. The digest stays internal.
+//   TODO(identity-vessel-auth-result-should-carry-a-key-id-for-audit): audit lines name the caller by
+//   the key id when identity's answer carries one (keyId below, passed to callerAuthLabel), else by
+//   scopes. Until every identity answer carries the id, scopes are what the audit shows. The digest
+//   stays internal either way.
 import { createHash } from "node:crypto";
 
-export type CallerCredential = { authenticated: boolean; scopes: string[]; why?: string };
+/** keyId: identity's id for the validated key (an identifier identity issues, not derived from the secret),
+ *  when its answer carries one. Audit lines name the caller by it (routes/caller-identity.ts callerAuthLabel). */
+export type CallerCredential = { authenticated: boolean; scopes: string[]; keyId?: string; why?: string };
 
 export const CREDENTIAL_VALIDATION_TTL_MS = 60_000;
 export const CREDENTIAL_CACHE_MAX_ENTRIES = 256;
@@ -81,13 +85,14 @@ export async function identityCredential(authHeader: string | undefined, opts: {
       if (res.status === 401 || res.status === 403) validated.delete(k);
       return { authenticated: false, scopes: [], why: `identity answered HTTP ${res.status}` };
     }
-    const j = (await res.json()) as { success?: boolean; data?: { authenticated?: boolean; scopes?: unknown } };
+    const j = (await res.json()) as { success?: boolean; data?: { authenticated?: boolean; scopes?: unknown; keyId?: unknown; key_id?: unknown } };
     if (j?.data?.authenticated !== true) {
       validated.delete(k);
       return { authenticated: false, scopes: [], why: "credential not authenticated" };
     }
     const scopes = Array.isArray(j.data.scopes) ? j.data.scopes.map(String) : [];
-    const cred: CallerCredential = { authenticated: true, scopes };
+    const rawKeyId = j.data.keyId ?? j.data.key_id;
+    const cred: CallerCredential = { authenticated: true, scopes, ...(typeof rawKeyId === "string" && rawKeyId ? { keyId: rawKeyId } : {}) };
     remember(k, cred);
     return cred;
   } catch (err) {

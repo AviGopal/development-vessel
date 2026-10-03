@@ -6,8 +6,8 @@
 //
 // CONTRACT: the route stamps the identity that VALIDATED the request when an auth result carries one
 // (key id or name; authenticated:<scope> when it carries only a scope), else "unauthenticated", plus the
-// socket remote address. This resolve route has no caller authentication yet, so today every request is
-// stamped unauthenticated. No [gap-audit] line, no other log line, no _route_caller, and no stored or
+// socket remote address. The route authenticates writes, so a gap write is stamped with the credential
+// its write gate validated. No [gap-audit] line, no other log line, no _route_caller, and no stored or
 // forwarded row contains the key, its sha256 or sha1 hex, or any prefix of either of 8+ characters.
 //
 // SEAM: the real impulsesRouter (query-string import past topology-chain's module mock); GAP_STORE_ENDPOINT
@@ -96,12 +96,14 @@ describe("the gap-write audit carries no value derived from the presented key", 
     for (const f of forwarded) expect(leaks(f)).toEqual([]);
   });
 
-  it("[MUST-FAIL] the route stamps unauthenticated, since this route has no caller authentication", async () => {
+  // The route now authenticates writes, so it stamps the identity its write gate validated (here the
+  // fixture key's scopes; identity's answer carries no key id) instead of "unauthenticated".
+  it("[MUST-FAIL] the route stamps the identity its write gate validated, never the key", async () => {
     await post({ type: "substrateGap_write", operator: "operator:avi", gap: { ...OPEN, status: "closed", classification_metadata: { closed_reason: "superseded_by_landing" } } });
     const write = forwarded.map((f) => JSON.parse(f)?.impulse?.pointer).find((p) => p?.type === "substrateGap_write");
-    expect(write?._route_caller).toEqual({ auth: "unauthenticated", remote: "10.9.8.7" });
+    expect(write?._route_caller).toEqual({ auth: "authenticated:read,write", remote: "10.9.8.7" });
     const audit = lines.find((l) => l.includes("[gap-audit]"))!;
-    expect(audit).toContain("caller=unauthenticated");
+    expect(audit).toContain("caller=authenticated:read,write");
   });
 
   it("[CONTROL] the audit line carries the socket remote address", async () => {

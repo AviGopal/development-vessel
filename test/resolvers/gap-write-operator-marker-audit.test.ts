@@ -91,7 +91,7 @@ describe("operator-marked gap writes are audited with the caller identity", () =
     expect(a[0]).toContain(`gap=${OPEN.id}`);
     expect(a[0]).toContain("transition=open->closed");
     expect(a[0]).toContain("marker=operator:avi");
-    expect(a[0]).toContain("caller=unauthenticated");
+    expect(a[0]).toContain("caller=authenticated:read,write");
     expect(a[0]).toContain("remote=10.1.2.3");
   });
 
@@ -113,7 +113,7 @@ describe("operator-marked gap writes are audited with the caller identity", () =
     expect(a).toHaveLength(1);
     expect(a[0]).not.toContain("forged");
     expect(a[0]).not.toContain("1.1.1.1");
-    expect(a[0]).toContain("caller=unauthenticated");
+    expect(a[0]).toContain("caller=authenticated:read,write");
   });
 
   it("[MUST-FAIL] a marked write refused by a gate is audited too, with its outcome", async () => {

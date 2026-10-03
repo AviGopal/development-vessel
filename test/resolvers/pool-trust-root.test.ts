@@ -300,7 +300,7 @@ describe("attested: the server stamps operator trust-root writes; callers cannot
     expect(res.status).toBe(200);
     const row = rowOf("att-forge-admin");
     const att = row?.["attested"] as { by: string; key_id: string | null; at: string };
-    expect(att).toEqual({ by: "operator", key_id: "k1", at: row!["updated_at"] as string });
+    expect(att).toEqual({ by: "operator", key_id: "k1", at: row!["updated_at"] as string, sig: expect.stringMatching(/^[0-9a-f]{64}$/) });
     expect(row!.body).not.toHaveProperty("attested");
   });
 
@@ -319,7 +319,7 @@ describe("attested: the server stamps operator trust-root writes; callers cannot
     expect(row!["status"]).toBe("open");
     expect(row!.body).toEqual(cwBody);
     expect(row!.body).not.toHaveProperty("attested");
-    expect(row!["attested"]).toEqual({ by: "operator", key_id: "k1", at: row!["updated_at"] as string });
+    expect(row!["attested"]).toEqual({ by: "operator", key_id: "k1", at: row!["updated_at"] as string, sig: expect.stringMatching(/^[0-9a-f]{64}$/) });
   });
 
   it("an admin UPDATE by id (shape omitted) of a trust-root row re-stamps it at the update's time", async () => {
@@ -327,7 +327,7 @@ describe("attested: the server stamps operator trust-root writes; callers cannot
     await Bun.sleep(5);
     expect((await post(`ApiKey ${ADMIN_KEY}`, { type: "poolImpulse_write", id: "att-restamp", attested: forged, body: { window_id: "w3", closes_at: "2026-11-01T00:00:00Z" } })).status).toBe(200);
     const row = rowOf("att-restamp");
-    expect(row!["attested"]).toEqual({ by: "operator", key_id: "k1", at: row!["updated_at"] as string });
+    expect(row!["attested"]).toEqual({ by: "operator", key_id: "k1", at: row!["updated_at"] as string, sig: expect.stringMatching(/^[0-9a-f]{64}$/) });
     expect(row!["shape"]).toBe("calibrationWindow");
   });
 
@@ -381,7 +381,7 @@ describe("a trust-root row's shape cannot change in place, in either direction",
     expect((await post(`ApiKey ${ADMIN_KEY}`, { type: "poolImpulse_write", id: "imm-same", shape: "calibrationWindow", body: { window_id: "w-same", seed: 3 } })).status).toBe(200);
     const row = rowOf("imm-same")!;
     expect(row.body).toEqual({ window_id: "w-same", seed: 3 });
-    expect(row["attested"]).toEqual({ by: "operator", key_id: "k1", at: row["updated_at"] as string });
+    expect(row["attested"]).toEqual({ by: "operator", key_id: "k1", at: row["updated_at"] as string, sig: expect.stringMatching(/^[0-9a-f]{64}$/) });
     expect((row["attested"] as { at: string }).at).not.toBe(first);
   });
 
@@ -481,5 +481,70 @@ describe("self_fact_reconcile pool_record_pin: the record must equal the operato
     resolvePoolImpulseWrite({ ...seed, id: "substrate-nodes", body: { discovery_endpoints: [N1, N2, ROGUE] } });
     const r = await evaluateSelfFactRow(row({ [me()]: [N1, N2] }));
     expect(real(r)).toEqual([]);
+  });
+});
+
+// SIGNED ATTESTATION. A reader on another vessel (local-tools-vessel's script runner) gets rows over HTTP from
+// whatever producer discovery lists as "local", and discovery stamps ANY authenticated plain registration
+// "local": a rogue poolImpulse producer could serve rows with a forged `attested` (key ids are not secret).
+// So the stamp carries `sig`: HMAC-SHA256 under this node's own key (METABOB_API_KEY, which only this node's
+// vessels hold; a spoke's is hub-issued per spoke, a root's is minted at random) over the exact row content.
+// A peer's development-vessel signs with ITS key and fails verification here. The wire format is pinned
+// below with an independent implementation, because local-tools-vessel recomputes it.
+describe("attested.sig: the stamp is signed under this node's key over the stored row", () => {
+  const { createHmac } = require("node:crypto") as typeof import("node:crypto");
+  const canon = (v: unknown): string => {
+    if (v === null || typeof v !== "object") return JSON.stringify(v ?? null);
+    if (Array.isArray(v)) return "[" + v.map(canon).join(",") + "]";
+    const o = v as Record<string, unknown>;
+    return "{" + Object.keys(o).filter((k) => o[k] !== undefined).sort().map((k) => JSON.stringify(k) + ":" + canon(o[k])).join(",") + "}";
+  };
+  const expectedSig = (key: string, r: Record<string, unknown>) => {
+    const a = r["attested"] as { key_id: string | null; at: string };
+    return createHmac("sha256", key).update(["substrate-pool-attestation/v1", r["id"], r["shape"], r["status"], canon(r["body"]), a.key_id ?? "", a.at].join("\n")).digest("hex");
+  };
+  const post = (auth: string | null, pointer: Record<string, unknown>) => impulsesRouter.request("/v2/impulses/resolve", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...(auth ? { Authorization: auth } : {}) },
+    body: JSON.stringify({ impulse: pointer }),
+  });
+  const rowOf = (id: string) => resolvePoolImpulse({ type: "poolImpulse", id }).body.impulses[0] as unknown as Record<string, unknown> | undefined;
+  const body = { z_last: 1, script_id: "sig-a", path: "validation/scripts/x.sh", blob_sha: "a".repeat(40), args_schema: [{ name: "m", type: "string", enum: ["q"] }], nested: { b: 2, a: 1 } };
+
+  it("MUST-FAIL: an admin trust-root write carries sig = HMAC(node key, v1 | id | shape | status | canonical(body) | key_id | at)", async () => {
+    expect((await post(`ApiKey ${ADMIN_KEY}`, { type: "poolImpulse_write", id: "sig-a", shape: "scriptRunnerAllowlist", status: "open", body })).status).toBe(200);
+    const r = rowOf("sig-a")!;
+    const sig = (r["attested"] as { sig?: string }).sig;
+    expect(sig).toBe(expectedSig(NODE_KEY, r));
+    // a different key (a peer node's) gives a different signature
+    expect(sig).not.toBe(expectedSig("some-peer-node-key", r));
+  });
+
+  it("MUST-FAIL: the signature covers the body: an admin body change re-signs, and the old sig no longer matches", async () => {
+    expect((await post(`ApiKey ${ADMIN_KEY}`, { type: "poolImpulse_write", id: "sig-b", shape: "scriptRunnerAllowlist", status: "open", body })).status).toBe(200);
+    const first = rowOf("sig-b")!;
+    const firstSig = (first["attested"] as { sig: string }).sig;
+    await Bun.sleep(5);
+    expect((await post(`ApiKey ${ADMIN_KEY}`, { type: "poolImpulse_write", id: "sig-b", body: { ...body, blob_sha: "b".repeat(40) } })).status).toBe(200);
+    const second = rowOf("sig-b")!;
+    expect((second["attested"] as { sig: string }).sig).toBe(expectedSig(NODE_KEY, second));
+    expect((second["attested"] as { sig: string }).sig).not.toBe(firstSig);
+    // the old stamp's sig does not verify over the new body
+    expect(expectedSig(NODE_KEY, { ...second, attested: first["attested"] })).not.toBe(firstSig);
+  });
+
+  it("the key is read at write time; with no node key the row is stamped without sig and the store warns (readers then refuse it)", async () => {
+    delete process.env["METABOB_API_KEY"];
+    const r = resolvePoolImpulseWrite({ type: "poolImpulse_write", id: "sig-nokey", shape: "scriptRunnerAllowlist", status: "open", body }, { operator: true, key_id: "k1" });
+    expect(r.body.ok).toBe(true);
+    const row = rowOf("sig-nokey")!;
+    expect((row["attested"] as { by: string }).by).toBe("operator");
+    expect(row["attested"]).not.toHaveProperty("sig");
+    expect(warnSpy!.mock.calls.some((c) => String(c[0]).includes("unsigned"))).toBe(true);
+  });
+
+  it("a non-trust-root write carries no attestation and so no sig (control)", async () => {
+    expect((await post(`ApiKey ${NODE_KEY}`, { type: "poolImpulse_write", id: "sig-plain", shape: "timeShapedRhythm", body: { x: 1 } })).status).toBe(200);
+    expect(rowOf("sig-plain")).not.toHaveProperty("attested");
   });
 });

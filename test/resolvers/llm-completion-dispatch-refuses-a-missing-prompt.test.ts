@@ -34,6 +34,17 @@ import { afterAll, afterEach, beforeEach, describe, expect, it } from "bun:test"
  * Fetch is stubbed per test and restored; nothing reaches a real network.
  */
 
+// ── CROSS-REPO CONTRACT FIXTURES (this file is the EMITTER's test: the canonical copies) ──────────
+// Vessels cannot import the super-repo's packages/, so each consuming end copies these blocks
+// verbatim (goal-host reads synthesize_from; llm-resolver and activity-api read malformed_request).
+// Blocks are delimited so a super-repo check can compare the copies byte for byte.
+// CONTRACT-FIXTURE synthesize_from BEGIN (emitter: development-vessel test/resolvers/llm-completion-dispatch-refuses-a-missing-prompt.test.ts)
+const SYNTHESIZE_FROM_GOAL_AND_UPSTREAM = "goal_and_upstream";
+// CONTRACT-FIXTURE synthesize_from END
+// CONTRACT-FIXTURE malformed_request BEGIN (emitter: development-vessel test/resolvers/llm-completion-dispatch-refuses-a-missing-prompt.test.ts)
+const MALFORMED_REQUEST = "malformed_request";
+// CONTRACT-FIXTURE malformed_request END
+
 const calls: Array<{ url: string; body: unknown }> = [];
 const ORIGINAL_FETCH = globalThis.fetch;
 const ROW = { vesselId: "llm-resolver-vessel", endpoint: "http://llm-arm:8220", resolve_endpoint: "/resolve", health_score: 1 };
@@ -73,7 +84,7 @@ describe("MUST-FAIL — a missing prompt is refused as malformed_request before 
       expect(calls.map((c) => c.url), "no endpoint (discovery, arm or egress) may be contacted").toEqual([]);
       expect(r.shape).toBe("structuredError");
       const b = r.body as Body;
-      expect(b.failure_mode).toBe("malformed_request");
+      expect(b.failure_mode).toBe(MALFORMED_REQUEST);
       expect(b.resolver).toBe("llm_completion_dispatch");
       expect(b.field).toBe("prompt");
     });
@@ -100,7 +111,7 @@ describe("MUST-FAIL — resolver_schema declares llm_completion_dispatch's requi
     expect(b.required).toEqual(["prompt"]);
     const prompt = (b.fields as Array<Body>).find((f) => f.name === "prompt");
     expect(prompt?.required).toBe(true);
-    expect(prompt?.synthesize_from).toBe("goal_and_upstream");
+    expect(prompt?.synthesize_from).toBe(SYNTHESIZE_FROM_GOAL_AND_UPSTREAM);
   });
 
   it("CONFORMANCE: a payload built from the declared required list is accepted and dispatched", async () => {

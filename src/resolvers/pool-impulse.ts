@@ -7,6 +7,15 @@ import { identityCredential } from '../lib/caller-credential.js';
 const POOL_DIR = join(WORKSPACE_ROOT, 'pool');
 const POOL_FILE = join(POOL_DIR, 'standing.json');
 
+/** Written ONLY by resolvePoolImpulseWrite, on a trust-root write it accepted with an operator credential.
+ *  key_id is identity's id for the validated key (null when identity's answer carried none); at equals the
+ *  row's updated_at for that write. Unlike `source` (caller-supplied), a reader can rely on it. */
+export interface PoolAttestation {
+  by: 'operator';
+  key_id: string | null;
+  at: string;
+}
+
 export interface StandingImpulse {
   id: string;
   shape: string;
@@ -15,6 +24,8 @@ export interface StandingImpulse {
   status: 'open' | 'consumed' | 'retired';
   injected_at: string;
   updated_at: string;
+  /** Present only on a row whose last write was an operator-credentialed trust-root write. */
+  attested?: PoolAttestation;
 }
 
 function loadImpulses(): StandingImpulse[] {
@@ -85,7 +96,8 @@ export function resolvePoolImpulse(pointer: {
 //   where the labels go). Its writer chooses what the calibration measures, so the node's own key (the
 //   autonomous lane, node-self with scopes ["node"]) cannot create it or change it by id.
 export const TRUST_ROOT_POOL_SHAPES: ReadonlySet<string> = new Set(['substrateNodes', 'autonomyScope', 'spendEnvelope', 'calibrationWindow']);
-export type PoolWriteAuth = { operator: boolean; why?: string };
+/** key_id: the validated credential's key id (identity's identifier, never derived from the secret). */
+export type PoolWriteAuth = { operator: boolean; key_id?: string | null; why?: string };
 /** The trust-root shape a write would create or modify (by its own shape, or the shape of the row its id names), or null. */
 export function trustRootWriteShape(pointer: { id?: string; shape?: string }): string | null {
   if (typeof pointer.shape === 'string' && TRUST_ROOT_POOL_SHAPES.has(pointer.shape)) return pointer.shape;
@@ -102,7 +114,15 @@ export function trustRootWriteShape(pointer: { id?: string; shape?: string }): s
 export async function operatorCredential(authHeader: string | undefined): Promise<PoolWriteAuth> {
   const cred = await identityCredential(authHeader, { cache: false });
   if (!cred.authenticated) return { operator: false, why: cred.why };
-  return cred.scopes.includes('admin') ? { operator: true } : { operator: false, why: 'credential lacks the admin scope' };
+  return cred.scopes.includes('admin') ? { operator: true, key_id: cred.keyId ?? null } : { operator: false, why: 'credential lacks the admin scope' };
+}
+
+/** A body as stored: any `attested` key a caller put inside it is dropped (copied, never mutated). The
+ *  attestation lives outside body and only the server writes it, so a body-level one is a forgery. */
+function stripCallerAttestation(body: unknown): unknown {
+  if (body === null || typeof body !== 'object' || Array.isArray(body) || !Object.prototype.hasOwnProperty.call(body, 'attested')) return body;
+  const { attested: _forged, ...rest } = body as Record<string, unknown>;
+  return rest;
 }
 
 export function resolvePoolImpulseWrite(pointer: {
@@ -116,6 +136,8 @@ export function resolvePoolImpulseWrite(pointer: {
   updated_at?: string;
   /** Compare-and-set: write only if the stored row's updated_at still equals this value. */
   if_updated_at?: string;
+  /** Caller-supplied attestation: NEVER stored. The row's `attested` is the server's stamp or absent. */
+  attested?: unknown;
 }, auth?: PoolWriteAuth): { shape: string; body: { ok: boolean; id: string; conflict?: boolean; current_updated_at?: string | null; error?: string } } {
   const trustRoot = trustRootWriteShape(pointer);
   if (trustRoot && auth?.operator !== true) {
@@ -137,26 +159,32 @@ export function resolvePoolImpulseWrite(pointer: {
       return { shape: 'poolImpulse_write', body: { ok: false, id, conflict: true, current_updated_at: cur ?? null } };
     }
   }
+  // SERVER-SIDE ATTESTATION. Reaching here with trustRoot set means the operator check above passed, so
+  // this write is stamped; every other write carries no attestation (a previous stamp is not carried
+  // forward either: it attests the write that made it). pointer.attested is never read.
+  const attestation: PoolAttestation | null = trustRoot ? { by: 'operator', key_id: auth?.key_id ?? null, at: now } : null;
   if (idx >= 0) {
     const existing = all[idx]!;
     all[idx] = {
       id,
       shape: pointer.shape ?? existing.shape,
-      body: pointer.body !== undefined ? pointer.body : existing.body,
+      body: stripCallerAttestation(pointer.body !== undefined ? pointer.body : existing.body),
       source: pointer.source ?? existing.source,
       status: pointer.status ?? existing.status,
       injected_at: existing.injected_at,
       updated_at: now,
+      ...(attestation ? { attested: attestation } : {}),
     };
   } else {
     const entry: StandingImpulse = {
       id,
       shape: pointer.shape ?? '',
-      body: pointer.body ?? null,
+      body: stripCallerAttestation(pointer.body ?? null),
       source: pointer.source ?? '',
       status: pointer.status ?? 'open',
       injected_at: pointer.injected_at ?? now,
       updated_at: now,
+      ...(attestation ? { attested: attestation } : {}),
     };
     all.push(entry);
   }

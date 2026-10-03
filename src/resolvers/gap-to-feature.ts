@@ -1,7 +1,7 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { ResolverResult } from "./types.js";
-import { resolveFeatureCompose, priorAttemptFeedbackBlock, readParkedLanding, resolveDissentOutcome } from "./feature-compose.js";
+import { resolveFeatureCompose, priorAttemptFeedbackBlock, readParkedLanding, resolveDissentOutcome, landedCloseReason, isDissentChild, dissentChildCheckRefusal } from "./feature-compose.js";
 import { attemptEvidenceBlock, explicitLineHint, testTitleInSource } from "./retry-evidence.js";
 
 // TYPE AUGMENTATION — allow callers to pass an optional 'directed' flag through the
@@ -804,7 +804,8 @@ export async function decomposeGap(
   const parentId = String(parent.id ?? "");
   const meta = (parent.classification_metadata ?? {}) as Record<string, unknown>;
   if (!parentId) return { written: [], reason: "no parent id" };
-  if (meta.parent_gap_id || /-step-\d+$/.test(parentId)) return { written: [], reason: "a decomposed step is not decomposed again" };
+  // A child minted from a landing's semantic dissent is born with no check and needs one derived here.
+  if ((meta.parent_gap_id && !isDissentChild(meta)) || /-step-\d+$/.test(parentId)) return { written: [], reason: "a decomposed step is not decomposed again" };
   const judge = opts.deps?.judge ?? ((g: Record<string, unknown>) => evaluateGapCheck(g));
   const site = String(meta.edit_site ?? "").replace(/:\d+.*$/, "");
   const siteMatch = /^repos\/([^/]+)\/(.+)$/.exec(site);
@@ -921,7 +922,10 @@ export async function decomposeGap(
     const pc = parsed.parent_check;
     if (pc && typeof pc === "object") {
       const f = pc as Record<string, unknown>;
-      if (typeof f.expected_literal === "string" || typeof f.hardcoded_url === "string") {
+      const dissentedCheck = dissentChildCheckRefusal(meta, f);
+      if (dissentedCheck) {
+        parentCheckNote = dissentedCheck;
+      } else if (typeof f.expected_literal === "string" || typeof f.hardcoded_url === "string") {
         parentCheckNote = "parent check: a literal is not a parent check (a word absent now is trivially red)";
       } else {
         const v = await validateShapeCheck("parent check", f, [predicate]);
@@ -3252,7 +3256,7 @@ export async function closeLandedGap(gap: Record<string, unknown>, land: LandSig
     // was verified above, the same fact the sweep records as `landed_verified`. Without the reason
     // the terminal measure (gaps closed by a verified landing) could not count this path at all.
     const literalOnlyClose = isLiteralOnlyStepClose((gap.classification_metadata ?? gap.metadata ?? {}) as Record<string, unknown>);
-    const closedMeta = { ...((gap.classification_metadata ?? gap.metadata ?? {}) as Record<string, unknown>), resolution, closed_reason: literalOnlyClose ? "landed_literal_only" : "landed_verified", ...(land.commit_sha ? { landed_sha: land.commit_sha } : {}), closed_at: new Date().toISOString(),
+    const closedMeta = { ...((gap.classification_metadata ?? gap.metadata ?? {}) as Record<string, unknown>), resolution, closed_reason: landedCloseReason((gap.classification_metadata ?? gap.metadata ?? {}) as Record<string, unknown>, land.commit_sha, literalOnlyClose), ...(land.commit_sha ? { landed_sha: land.commit_sha } : {}), closed_at: new Date().toISOString(),
       falsifier_exercise: { detector: "closeLandedGap", verdict: literalOnlyClose ? "literal_present" : verifyResult, passed: !literalOnlyClose && verifyResult === "absent", ran_at: new Date().toISOString(), commit: land.commit_sha ?? null } };
     const meta = closedMeta;
     joinDecisionOutcome(meta, { landed: true, verdict: "FAVORABLE", commit: land.commit_sha ?? null });
@@ -4363,7 +4367,8 @@ const pending = gaps
       if (credited) recordCloseVerdict("measured", false);
       const sweepClosedMeta: Record<string, unknown> = {
         ...meta,
-        closed_reason: isLiteralOnlyStepClose(meta) ? "landed_literal_only" : "landed_verified",
+        // Under the lane's own semantic dissent the landing is partial (landedCloseReason), never verified.
+        closed_reason: landedCloseReason(meta, sha, isLiteralOnlyStepClose(meta)),
         close_basis: verdict,
         falsifier_exercise: isLiteralOnlyStepClose(meta)
           ? { detector: "gap-sweep", verdict: "literal_present", passed: false, ran_at: new Date().toISOString(), commit: sha }
@@ -4831,6 +4836,68 @@ export function requeueAfterNonAttempt(
   return true;
 }
 
+// A narrowed child is a NEW gap about the same defect. It must not inherit
+// fields that assert authorship or closure STATE: `detector` and
+// `evidence_resolve` made self_fact_reconcile close two clones it never filed
+// (2026-09-23 03:35, 04:00); landing/closed/pending stamps would let the sweep
+// grade the child on the parent's evidence. Localisation (edit_site, file_path)
+// and an operator-authored predicate (expected_literal / hardcoded_url /
+// verify_shape) ARE the defect and stay. A predicate DERIVED from the parent's
+// landing commit (predicate_source set) goes with its stamps: the parent already
+// landed that literal and still failed, so the child would be born satisfied.
+// The store reclassifies `falsifier` on write (substrate-gap.ts), so the class
+// label is recomputed from what survives, never carried.
+const NARROWED_INHERIT_NEVER = new Set([
+  "detector", "evidence_resolve", "falsifier_exercise",
+  "pending_outcome_verification", "pending_set_at", "pending_note",
+  "predicate_source", "predicate_derived_at", "predicate_commit",
+  "closed_reason", "close_basis", "closed_at", "resolution", "landed_sha",
+  "operator_hold", "operator_hold_reason", "reopen_note",
+]);
+// checks:"drop" (a child minted from a landing's semantic dissent, feature-compose settleSemanticDissent):
+// the parent's check already passed on the landed tree, so NO predicate of the parent's is carried, nor its
+// dissent records, decomposition or own-check bookkeeping; the child's check is derived afresh.
+const NARROWED_DROP_CHECK = new Set([
+  "expected_literal", "hardcoded_url", "verify_shape", "falsifier", "falsified_at", "semantic_dissent",
+  "decomposed_at", "decomposition", "own_check_broken", "own_check_unmeasurable_count", "own_check_last_reason", "own_check_last_at",
+  "landed_unverified", "landed_unverified_reason", "disposition", "self_authored_check",
+]);
+/**
+ * THE ONE NARROWED-CHILD BUILDER: chronic-failure narrowing (bumpFailedAttempts, checks:"inherit") and the
+ * semantic-dissent child (feature-compose settleSemanticDissent, checks:"drop") both mint through it.
+ * "inherit" keeps operator-authored predicates and gives back the parent's trusted class-2 check when the
+ * child's scope still covers it; "drop" carries no check at all. Returns the row; the caller writes it.
+ */
+export function narrowedChildRecord(
+  parent: Record<string, unknown>,
+  meta: Record<string, unknown>,
+  opts: { id: string; checks: "inherit" | "drop"; summaryTail: string; extra: Record<string, unknown> },
+): Record<string, unknown> {
+  const parentId = String(parent.id ?? "");
+  const parentSummary = String(parent.summary ?? parent.title ?? "");
+  const derivedPredicate = typeof meta["predicate_source"] === "string";
+  const inherited: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(meta)) {
+    if (NARROWED_INHERIT_NEVER.has(k)) continue;
+    if (derivedPredicate && (k === "expected_literal" || k === "hardcoded_url")) continue;
+    if (opts.checks === "drop" && (NARROWED_DROP_CHECK.has(k) || k.startsWith("predicate_"))) continue;
+    inherited[k] = v;
+  }
+  // THE PARENT'S CHECK COMES BACK when the child's scope still covers it (inheritableParentCheck: a
+  // trusted class-2 test_suite check on the same edit site). Stripping it with the closure stamps above
+  // left every narrowed child of a verifiable parent falsifier=none, so none could ever close verified.
+  if (opts.checks === "inherit") Object.assign(inherited, inheritableParentCheck(meta, meta["edit_site"]));
+  return {
+    id: opts.id,
+    category: parent.category,
+    source: parent.source,
+    summary: "[narrowed from " + parentId + "] " + parentSummary.replace(/^\[narrowed from [\w:.!-]+\]\s*/g, "") + opts.summaryTail,
+    detected_at: parent.detected_at,
+    classification_metadata: { ...inherited, failed_attempts: 0, parent_gap_id: parentId, narrowed_at: new Date().toISOString(), ...opts.extra },
+    status: "open",
+  };
+}
+
 // Decide whether a chronically-failing gap should be narrowed into a fresh child.
 //
 // Only narrow a ROOT gap; an already-narrowed child (parent_gap_id set) must not spawn
@@ -4973,57 +5040,19 @@ export async function bumpFailedAttempts(gap: Record<string, unknown>, opts: { s
     if (willExceedThreshold) {
       try {
         const parentId: string = id;
-        const parentSummary = String(gap.summary ?? gap.title ?? "");
-        // A narrowed child is a NEW gap about the same defect. It must not inherit
-        // fields that assert authorship or closure STATE: `detector` and
-        // `evidence_resolve` made self_fact_reconcile close two clones it never filed
-        // (2026-09-23 03:35, 04:00); landing/closed/pending stamps would let the sweep
-        // grade the child on the parent's evidence. Localisation (edit_site, file_path)
-        // and an operator-authored predicate (expected_literal / hardcoded_url /
-        // verify_shape) ARE the defect and stay. A predicate DERIVED from the parent's
-        // landing commit (predicate_source set) goes with its stamps: the parent already
-        // landed that literal and still failed, so the child would be born satisfied.
-        // The store reclassifies `falsifier` on write (substrate-gap.ts), so the class
-        // label is recomputed from what survives, never carried.
-        const INHERIT_NEVER = new Set([
-          "detector", "evidence_resolve", "falsifier_exercise",
-          "pending_outcome_verification", "pending_set_at", "pending_note",
-          "predicate_source", "predicate_derived_at", "predicate_commit",
-          "closed_reason", "close_basis", "closed_at", "resolution", "landed_sha",
-          "operator_hold", "operator_hold_reason", "reopen_note",
-        ]);
-        const derivedPredicate = typeof (meta as Record<string, unknown>)["predicate_source"] === "string";
-        const inherited: Record<string, unknown> = {};
-        for (const [k, v] of Object.entries(meta)) {
-          if (INHERIT_NEVER.has(k)) continue;
-          if (derivedPredicate && (k === "expected_literal" || k === "hardcoded_url")) continue;
-          inherited[k] = v;
-        }
-        // THE PARENT'S CHECK COMES BACK when the child's scope still covers it (inheritableParentCheck: a
-        // trusted class-2 test_suite check on the same edit site). Stripping it with the closure stamps above
-        // left every narrowed child of a verifiable parent falsifier=none, so none could ever close verified.
-        Object.assign(inherited, inheritableParentCheck(meta, (meta as Record<string, unknown>)["edit_site"]));
-        const childMeta = { ...inherited, failed_attempts: 0, parent_gap_id: parentId, narrowed_at: new Date().toISOString() };
-        // Without failure lessons the child's summary would be the parent's verbatim
-        // (measured: 222 `-narrowed` rows, many byte-identical to their parent) — a
-        // duplicate that only splits the picker's attention. Narrow only what can be
-        // narrowed.
         const lessonsForChild = Array.isArray((meta as Record<string, unknown>)["failure_lessons"]) ? ((meta as Record<string, unknown>)["failure_lessons"] as unknown[]) : [];
         if (lessonsForChild.length === 0 || String((lessonsForChild[lessonsForChild.length - 1] as Record<string, unknown>)?.["reason"] ?? "").startsWith("[deterministic] ")) {
           console.log(`[gap-to-feature] NOT narrowing ${parentId}: no failure_lessons recorded — the child would be a verbatim duplicate`);
         } else {
-        const childRecord: Record<string, unknown> = {
-          // Deterministic id so re-narrowing the SAME parent upserts one idempotent child
-          // (gapClassKey has no volatile token to strip here) instead of throwing on a
-          // missing id or spawning a new row every failure.
+        // Deterministic id so re-narrowing the SAME parent upserts one idempotent child
+        // (gapClassKey has no volatile token to strip here) instead of throwing on a
+        // missing id or spawning a new row every failure.
+        const childRecord = narrowedChildRecord(gap, meta, {
           id: `${parentId}-narrowed`,
-          category: gap.category,
-          source: gap.source,
-          summary: "[narrowed from " + parentId + "] " + parentSummary.replace(/^\[narrowed from [\w:.!-]+\]\s*/g, "") + (Array.isArray((meta as Record<string, unknown>)["failure_lessons"]) && ((meta as Record<string, unknown>)["failure_lessons"] as unknown[]).length > 0 ? "\n\nWHY PREVIOUS ATTEMPTS ON THIS GAP FAILED (most recent last):\n" + ((meta as Record<string, unknown>)["failure_lessons"] as Array<Record<string, unknown>>).slice(-3).map((l) => "- " + String(l["class"] ?? "?") + ": " + String(l["reason"] ?? "").slice(0, 300)).join("\n") + "\n\nDo not repeat these failures. Address the specific cause named above." : ""),
-          detected_at: gap.detected_at,
-          classification_metadata: childMeta,
-          status: "open",
-        };
+          checks: "inherit",
+          summaryTail: "\n\nWHY PREVIOUS ATTEMPTS ON THIS GAP FAILED (most recent last):\n" + (lessonsForChild as Array<Record<string, unknown>>).slice(-3).map((l) => "- " + String(l["class"] ?? "?") + ": " + String(l["reason"] ?? "").slice(0, 300)).join("\n") + "\n\nDo not repeat these failures. Address the specific cause named above.",
+          extra: {},
+        });
         await resolveSubstrateGapWrite({ type: "substrateGap_write", gap: childRecord as never });
         const childId = String((childRecord as Record<string,unknown>).id ?? "");
         console.log(`[gap-to-feature] emitted narrowed child gap for chronically-stuck gap ${parentId}: ${childId}`);

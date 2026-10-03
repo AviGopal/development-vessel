@@ -28,7 +28,7 @@ import { acquireComposeWorkspace, type ComposeWorkspace } from "./compose-worksp
 import type { ResolverResult } from "./types.js";
 import { resolveVesselMitosisCutover, runGit, type GitOpResult } from "./vessel-mitosis-cutover.js";
 import { registerAttempt, setAuthoringExecution } from "./attempt-register.js";
-import { resolveSubstrateGap, resolveSubstrateGapWrite, inheritableParentCheck } from "./substrate-gap.js";
+import { resolveSubstrateGap, resolveSubstrateGapWrite, inheritableParentCheck, class2PredicateKey } from "./substrate-gap.js";
 import { writeAuthoringMarker, clearAuthoringMarker } from "./patch-with-tools.js";
 import { markOnComposeFailure, VERIFY_FAILURE_CLASSES } from "./staged-mitosis-gate.js";
 import { vacuousEditReason, nonTerminatingEditReason, deadStoreEditReason, truncatingRewriteReason } from "../vacuous-edit.js";
@@ -3602,9 +3602,35 @@ export function checkContractBreach(baseRed: string[] | null, baseExpects: numbe
  * post-land by-effect check. The dissent is recorded on the gap row (settleSemanticDissent, only once the
  * landing is pushed) with later_outcome:null, which the pending-land sweep fills (resolveDissentOutcome),
  * so the gate's dissents can be calibrated against what the landings actually did.
+ *
+ * A LANDING UNDER DISSENT IS PARTIAL (30e236ed: the gate refused 2/2, the own check went red->green, the
+ * sweep closed it landed_verified and then settled the dissent "passed" on the SAME own check — circular):
+ *   - its close reason is `landed_partial` (landedCloseReason), never `landed_verified`, so the verified-landing
+ *     credit does not count it. This makes counted landings honest and is expected to LOWER the verified count;
+ *     it is not a draft-yield fix;
+ *   - at landing (settleSemanticDissent) the dissent's reason is minted into a narrowed child gap through the
+ *     one narrowed-child builder (gap-to-feature narrowedChildRecord): the parent's edit_site, the reason,
+ *     parent_gap_id, and a falsifier_spec naming the parent's check as the one the child's must differ from;
+ *   - the dissent's later_outcome is settled "passed" only by a check DISTINCT from the parent's own check
+ *     (checksDistinct: never a shared test name), i.e. the child's when it closes (resolveDissentOutcome);
+ *   - object-literal keys the diff adds with no reader in the vessel's own src (unreadObjectLiteralKeys) are
+ *     attached to the dissent as EVIDENCE (unread_keys), never a veto: the scan sees one repo only.
  */
 export type SemanticVeto = "hard_fail" | "self_certification" | "hollow_write" | "edit_site_missed" | "semantic_reject";
-export type SemanticDissent = { reason: string; gate_verdict: SemanticGateVerdict; at: string; later_outcome: null | { result: "passed" | "failed"; at: string } };
+/** A gap check's identity for the dissent distinctness rule: the predicate key plus, for a test_suite check, its test names. */
+export type CheckIdentity = { key: string; vessel: string | null; test_names: string[] };
+export type SemanticDissent = {
+  reason: string;
+  gate_verdict: SemanticGateVerdict;
+  at: string;
+  later_outcome: null | { result: "passed" | "failed"; at: string; settled_by?: { gap_id: string; check_key: string } };
+  /** Evidence only: object-literal keys the diff added that nothing in the vessel's own src reads. */
+  unread_keys?: string[];
+  /** Stamped at landing (settleSemanticDissent): the landed commit, the parent's check, the minted child. */
+  landed_sha?: string;
+  own_check?: CheckIdentity | null;
+  child_gap_id?: string;
+};
 export type OwnCheckEvidence = { test_file: string; ran: boolean; tc_ok: boolean; base_red: string[] | null; draft_red: string[]; contract_breach: string | null };
 export type SemanticDisposition = { land: boolean; veto: SemanticVeto | null; semantic_dissent?: SemanticDissent; landed_unverified: boolean; post_land_by_effect_check: "required" | "not_required" };
 type GapRowDeps = { readGap: (id: string) => Promise<Record<string, unknown> | null>; writeGap: (row: Record<string, unknown>) => Promise<void> };
@@ -3668,6 +3694,100 @@ export function hollowWriteIdentifiers(diff: string, srcFiles: Record<string, st
   }
   return out;
 }
+const TYPE_ONLY_VALUE_RE = /^(?:string|number|boolean|unknown|any|never|void|null|undefined|object|bigint|symbol)(?:\[\])?\s*,?$/;
+const OBJECT_KEY_LINE_RE = /^\s*(?:(["'])([A-Za-z_$][\w$]*)\1|([A-Za-z_$][\w$]*))\s*:(?!:)\s*(\S.*)$/;
+/**
+ * Object-literal keys a diff ADDS in non-test src files (`key: value,` lines) that NO line of the vessel's own
+ * src reads. A read is any mention of the key that is not a `key:` definition (x.key, x["key"], a destructure).
+ * EVIDENCE ONLY, never a veto: it scans the vessel's own repo, so a key another vessel reads (a contract field
+ * goal-host consumes) looks unread here. Also a line scan, not an AST: type members ending in `;` or typed with
+ * a bare primitive are skipped, a destructure-with-rename (`{ key: alias } = x`) is not seen as a read, and a
+ * key also on a removed line is an edit, not a new key.
+ */
+export function unreadObjectLiteralKeys(diff: string, srcFiles: Record<string, string>): string[] {
+  const added = new Set<string>();
+  const removed = new Set<string>();
+  let file = "";
+  for (const l of String(diff ?? "").split("\n")) {
+    if (l.startsWith("### ")) { file = diffFilePaths(l)[0] ?? ""; continue; }
+    const isAdd = /^\+(?!\+\+)/.test(l), isDel = /^-(?!--)/.test(l);
+    if (!isAdd && !isDel) continue;
+    if (!file.startsWith("src/") || TEST_FILE_RE.test(file) || FIXTURE_PATH_RE.test(file)) continue;
+    const m = OBJECT_KEY_LINE_RE.exec(l.slice(1));
+    if (!m) continue;
+    const key = m[2] ?? m[3] ?? "";
+    const value = (m[4] ?? "").trim();
+    if (!key || key === "default" || key === "case" || value.endsWith(";") || value.startsWith("//") || TYPE_ONLY_VALUE_RE.test(value)) continue;
+    (isAdd ? added : removed).add(key);
+  }
+  const srcLines = Object.entries(srcFiles)
+    .filter(([path]) => !TEST_FILE_RE.test(path) && !FIXTURE_PATH_RE.test(path))
+    .flatMap(([, text]) => text.split("\n"));
+  const out: string[] = [];
+  for (const key of added) {
+    if (removed.has(key)) continue;
+    const e = escapeIdent(key);
+    const word = new RegExp(`\\b${e}\\b`);
+    const def = new RegExp(`(?<![.\\w$])(["']?)${e}\\1\\s*\\??:(?!:)`, "g");
+    if (!srcLines.some((l) => word.test(l.replace(def, "")))) out.push(key);
+  }
+  return out;
+}
+/** The identity of a gap row's check (any predicate form), or null when it carries none. */
+export function gapCheckIdentity(meta: Record<string, unknown> | null | undefined): CheckIdentity | null {
+  const m = (meta ?? {}) as Record<string, unknown>;
+  const er = m["evidence_resolve"] && typeof m["evidence_resolve"] === "object" ? (m["evidence_resolve"] as Record<string, unknown>) : null;
+  const vs = typeof m["verify_shape"] === "string" && m["verify_shape"].trim() !== "" ? m["verify_shape"] : null;
+  const lit = typeof m["expected_literal"] === "string" && m["expected_literal"] !== "" ? m["expected_literal"] : null;
+  const url = typeof m["hardcoded_url"] === "string" && m["hardcoded_url"] !== "" ? m["hardcoded_url"] : null;
+  if (!er && !vs && !lit && !url) return null;
+  let vessel: string | null = null;
+  let names: string[] = [];
+  if (er && er["shape"] === "test_suite") {
+    const input = (er["input"] && typeof er["input"] === "object" ? er["input"] : {}) as Record<string, unknown>;
+    vessel = String(input["vessel"] ?? "").replace(/^repos\//, "") || null;
+    names = Array.isArray(input["only_tests"]) ? (input["only_tests"] as unknown[]).filter((t): t is string => typeof t === "string" && t.trim() !== "") : [];
+  }
+  return { key: `${class2PredicateKey({ evidence_resolve: er, verify_shape: vs })}|${JSON.stringify([lit, url])}`, vessel, test_names: names };
+}
+/** Are two checks DIFFERENT checks? No identity is never distinct; a shared test name in one vessel is the same check. */
+export function checksDistinct(a: CheckIdentity | null | undefined, b: CheckIdentity | null | undefined): boolean {
+  if (!a || !b) return false;
+  if (a.key === b.key) return false;
+  if (a.vessel === b.vessel && a.test_names.some((n) => b.test_names.includes(n))) return false;
+  return true;
+}
+/** A gap minted from a landing's semantic dissent (settleSemanticDissent). */
+export function isDissentChild(meta: Record<string, unknown> | null | undefined): boolean {
+  const m = (meta ?? {}) as Record<string, unknown>;
+  return m["narrowed_from"] === "semantic_dissent" && typeof m["parent_gap_id"] === "string" && m["parent_gap_id"] !== "";
+}
+/** Why a check proposed for a dissent child cannot be its check (it is the dissented parent's), or null. */
+export function dissentChildCheckRefusal(childMeta: Record<string, unknown> | null | undefined, proposed: Record<string, unknown>): string | null {
+  if (!isDissentChild(childMeta)) return null;
+  const spec = ((childMeta ?? {})["falsifier_spec"] ?? {}) as { must_differ_from?: CheckIdentity | null };
+  if (!spec.must_differ_from) return null;
+  return checksDistinct(gapCheckIdentity(proposed), spec.must_differ_from) ? null
+    : "parent check: it is the dissented parent's own check (or shares its test name), which already passed; the child needs a different one";
+}
+/**
+ * Does this landing carry a semantic dissent? A dissent whose landed_sha is the landing's (either may be
+ * abbreviated), or — for a dissent recorded before landed_sha was stamped — one still unsettled.
+ */
+export function landedUnderDissent(meta: Record<string, unknown> | null | undefined, sha: string | null | undefined): boolean {
+  const list = Array.isArray((meta ?? {})["semantic_dissent"]) ? ((meta ?? {})["semantic_dissent"] as Array<Record<string, unknown>>) : [];
+  const s = String(sha ?? "").trim();
+  return list.some((d) => {
+    if (!d || typeof d !== "object") return false;
+    if (typeof d.landed_sha === "string" && d.landed_sha !== "") return s.length >= 7 && (d.landed_sha.startsWith(s) || s.startsWith(d.landed_sha));
+    return d.later_outcome == null;
+  });
+}
+/** The closed_reason for a landing close: landed_partial under a dissent, else literal-only, else landed_verified. */
+export function landedCloseReason(meta: Record<string, unknown> | null | undefined, sha: string | null | undefined, literalOnly: boolean): "landed_partial" | "landed_literal_only" | "landed_verified" {
+  if (landedUnderDissent(meta, sha)) return "landed_partial";
+  return literalOnly ? "landed_literal_only" : "landed_verified";
+}
 /** Did the gap's armed own check go red on the parent and green on the draft, with the draft typechecking? */
 export function ownCheckWentRedToGreen(oc: OwnCheckEvidence | null): boolean {
   return !!oc && oc.ran && oc.tc_ok && Array.isArray(oc.base_red) && oc.base_red.length > 0 && oc.draft_red.length === 0 && !oc.contract_breach;
@@ -3687,10 +3807,12 @@ export function semanticGateDisposition(input: { gate: SemanticGateVerdict; own_
   if (hollowWriteIdentifiers(input.diff, input.src_files).length > 0) return refuse("hollow_write");
   const site = editSiteFile(input.edit_site);
   if (site && !paths.some((p) => p === site || p.endsWith(`/${site}`) || site.endsWith(`/${p}`))) return refuse("edit_site_missed");
+  // Evidence for the dissent (and its child), never a veto: see unreadObjectLiteralKeys.
+  const unread = unreadObjectLiteralKeys(input.diff, input.src_files);
   return {
     land: true,
     veto: null,
-    semantic_dissent: { reason: String(g.reason ?? ""), gate_verdict: { ...g }, at: new Date().toISOString(), later_outcome: null },
+    semantic_dissent: { reason: String(g.reason ?? ""), gate_verdict: { ...g }, at: new Date().toISOString(), later_outcome: null, ...(unread.length > 0 ? { unread_keys: unread } : {}) },
     landed_unverified: true,
     post_land_by_effect_check: "required",
   };
@@ -3711,6 +3833,10 @@ export async function recordSemanticDissent(gapId: string, dissent: SemanticDiss
  * NO PHANTOM DISSENT: record a dissent only for a landing that happened — push_status "pushed" with a
  * non-empty new_git_sha. A refused, deferred or unpushed cutover leaves no entry (a parked landing carries
  * its dissent to the resume, which settles it then). Never throws: a lost record is logged, not fatal.
+ *
+ * A pushed landing under dissent is PARTIAL: the record is stamped with the landed sha (landedCloseReason
+ * reads it to close landed_partial) and the parent's check identity (resolveDissentOutcome reads it, so that
+ * check can never settle the dissent "passed"), and the dissent's reason is minted into a narrowed child gap.
  */
 export async function settleSemanticDissent(
   gapId: string,
@@ -3722,8 +3848,18 @@ export async function settleSemanticDissent(
   const r = (cutoverResult ?? {}) as Record<string, unknown>;
   const pushed = r["push_status"] === "pushed" && typeof r["new_git_sha"] === "string" && String(r["new_git_sha"]).trim() !== "";
   if (!pushed) return "not_landed";
+  const sha = String(r["new_git_sha"]).trim();
   try {
-    await recordSemanticDissent(gapId, dissent, deps);
+    const row = await deps.readGap(gapId);
+    const own = gapCheckIdentity((row?.classification_metadata as Record<string, unknown> | undefined) ?? {});
+    const stamped: SemanticDissent = { ...dissent, landed_sha: sha, own_check: own };
+    let childId: string | null = null;
+    if (row && String(row.status ?? "") !== "closed") {
+      try { childId = await mintDissentChild(row, stamped, deps); } catch (err) {
+        console.warn(`[fc-semantic-dissent] gap=${gapId}: the dissent child was NOT minted (${(err as Error)?.message ?? String(err)}); the landing stays partial`);
+      }
+    }
+    await recordSemanticDissent(gapId, childId ? { ...stamped, child_gap_id: childId } : stamped, deps);
     return "recorded";
   } catch (err) {
     console.warn(`[fc-semantic-dissent] gap=${gapId}: landed under dissent but the record was NOT written (${(err as Error)?.message ?? String(err)}) — calibration loses this sample`);
@@ -3731,9 +3867,45 @@ export async function settleSemanticDissent(
   }
 }
 /**
- * THE READER: the landing's post-land by-effect check resolved. Fill later_outcome {result, at} on every
- * dissent of the gap still pending; resolved entries are untouched; nothing pending writes nothing.
- * Called by the pending-land sweep (gap-to-feature sweepPendingLandVerificationsOnce). Returns the count filled.
+ * THE DISSENT BECOMES THE NEXT GAP: a narrowed child of the landed parent, built by the one narrowed-child
+ * builder (gap-to-feature narrowedChildRecord). It keeps the parent's edit_site and drops every check of the
+ * parent's (already green on the landed tree, so a copy would be born satisfied); its falsifier_spec names the
+ * parent's check as the one its own must differ from (read by dissentChildCheckRefusal when decomposeGap
+ * derives the child's check, and by resolveDissentOutcome when the child settles the parent's dissent).
+ */
+async function mintDissentChild(parent: Record<string, unknown>, d: SemanticDissent, deps: GapRowDeps): Promise<string> {
+  const { narrowedChildRecord } = await import("./gap-to-feature.js");
+  const parentId = String(parent.id ?? "");
+  const id = `${parentId}-dissent-narrowed`;
+  const names = d.own_check?.test_names ?? [];
+  const tail = `\n\nLANDED UNDER SEMANTIC DISSENT at ${String(d.landed_sha ?? "").slice(0, 12)}: the gap's own check went red->green, but the semantic gate refused the change: ${d.reason.slice(0, 800)}`
+    + (d.unread_keys && d.unread_keys.length > 0 ? `\nKeys the change added that nothing in this vessel's own src reads (evidence only: another vessel may read them): ${d.unread_keys.join(", ")}.` : "")
+    + `\nThis gap is the part the gate said is missing. Its check must FAIL on today's tree and must be a different check from the parent's own${names.length > 0 ? ` (${names.join("; ").slice(0, 300)})` : ""}, which already passes.`;
+  const child = narrowedChildRecord(parent, (parent.classification_metadata as Record<string, unknown>) ?? {}, {
+    id,
+    checks: "drop",
+    summaryTail: tail,
+    extra: {
+      narrowed_from: "semantic_dissent",
+      dissent: { reason: d.reason, gate_verdict: d.gate_verdict, at: d.at, landed_sha: d.landed_sha ?? null, ...(d.unread_keys && d.unread_keys.length > 0 ? { unread_keys: d.unread_keys } : {}) },
+      falsifier_spec: { derived_from: "semantic_dissent", must_differ_from: d.own_check ?? null, must_fail_on_landed_tree: true },
+    },
+  });
+  await deps.writeGap(child);
+  console.log(`[fc-semantic-dissent] gap=${parentId}: landed partial at ${String(d.landed_sha ?? "").slice(0, 12)}; minted ${id} from the dissent`);
+  return id;
+}
+/**
+ * THE READER: a post-land check resolved. Fill later_outcome {result, at} on the gap's pending dissents;
+ * resolved entries are untouched; nothing to fill writes nothing. Called by the pending-land sweep
+ * (gap-to-feature sweepPendingLandVerificationsOnce). Returns the count filled.
+ *
+ * NOT BY THE SAME CHECK: the sweep's "passed" is this row's own check, and a dissent landed because that check
+ * went red->green, so it cannot also prove the gate wrong. "passed" fills a dissent only when the row's check
+ * is DISTINCT from the dissent's own_check (checksDistinct); a dissent recorded before own_check was stamped is
+ * taken to have landed on the row's check. "failed" (reverted, measured present while running) fills on any route.
+ * A dissent child closing "passed" settles its PARENT's pending dissents, when its check is distinct from the
+ * parent's (settled_by names the child and its check).
  */
 export async function resolveDissentOutcome(gapId: string, outcome: { result: "passed" | "failed"; at?: string }, deps: GapRowDeps = storeGapRowDeps): Promise<number> {
   if (!gapId) return 0;
@@ -3742,14 +3914,36 @@ export async function resolveDissentOutcome(gapId: string, outcome: { result: "p
   const meta = (row.classification_metadata as Record<string, unknown>) ?? {};
   const list = Array.isArray(meta.semantic_dissent) ? (meta.semantic_dissent as Array<Record<string, unknown>>) : [];
   const at = outcome.at ?? new Date().toISOString();
+  const settling = gapCheckIdentity(meta);
   let filled = 0;
+  let refused = 0;
   const next = list.map((d) => {
     if (!d || d.later_outcome != null) return d;
+    if (outcome.result === "passed" && !checksDistinct(settling, (d.own_check as CheckIdentity | null | undefined) ?? settling)) { refused += 1; return d; }
     filled += 1;
     return { ...d, later_outcome: { result: outcome.result, at } };
   });
-  if (filled === 0) return 0;
-  await deps.writeGap(mergeMetadataKeyWrite(row, "semantic_dissent", next));
+  if (refused > 0) console.log(`[fc-semantic-dissent] gap=${gapId}: ${refused} dissent(s) NOT settled passed — the check that passed is the one the gate doubted`);
+  if (filled > 0) await deps.writeGap(mergeMetadataKeyWrite(row, "semantic_dissent", next));
+  if (outcome.result === "passed" && isDissentChild(meta)) filled += await settleParentDissentByChild(gapId, meta, settling, at, deps);
+  return filled;
+}
+async function settleParentDissentByChild(childId: string, childMeta: Record<string, unknown>, childCheck: CheckIdentity | null, at: string, deps: GapRowDeps): Promise<number> {
+  const parentId = String(childMeta.parent_gap_id ?? "");
+  const mustDiffer = ((childMeta.falsifier_spec ?? {}) as { must_differ_from?: CheckIdentity | null }).must_differ_from ?? null;
+  const parent = parentId ? await deps.readGap(parentId) : null;
+  if (!parent || !childCheck) return 0;
+  const pm = (parent.classification_metadata as Record<string, unknown>) ?? {};
+  const list = Array.isArray(pm.semantic_dissent) ? (pm.semantic_dissent as Array<Record<string, unknown>>) : [];
+  let filled = 0;
+  const next = list.map((d) => {
+    if (!d || d.later_outcome != null || d.child_gap_id !== childId) return d;
+    const own = (d.own_check as CheckIdentity | null | undefined) ?? mustDiffer;
+    if (!checksDistinct(childCheck, own) || (mustDiffer && !checksDistinct(childCheck, mustDiffer))) return d;
+    filled += 1;
+    return { ...d, later_outcome: { result: "passed", at, settled_by: { gap_id: childId, check_key: childCheck.key } } };
+  });
+  if (filled > 0) await deps.writeGap(mergeMetadataKeyWrite(parent, "semantic_dissent", next));
   return filled;
 }
 /** Vessel-relative path -> text for every source file under `<root>/src` (the read sites hollowWriteIdentifiers scans). */

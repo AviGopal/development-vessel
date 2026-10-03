@@ -1125,6 +1125,29 @@ export async function resolveSubstrateGapWrite(
   },
 ): Promise<ResolverResult> {
   { const fwd = await forwardToGapStore(pointer as Record<string, unknown>); if (fwd) return fwd; }
+  // METADATA TYPE GATE (2026-10-03). classification_metadata is a record the store merges key by key.
+  // A walk wrote the unrendered STRING "{{goal.classification_metadata}}" here; it was cast to a record
+  // and the carry-forward loop stored one key per character on an operator gap. Present-and-not-an-object
+  // (string, number, boolean, array) is refused, on the enveloped and the flat pointer alike. Absent or
+  // null is "no metadata" and passes.
+  {
+    const p = pointer as Record<string, unknown>;
+    const env = p["gap"];
+    const holder = env !== undefined && env !== null && typeof env === "object" ? (env as Record<string, unknown>) : p;
+    const cm = holder["classification_metadata"];
+    if (cm !== undefined && cm !== null && (typeof cm !== "object" || Array.isArray(cm))) {
+      return {
+        shape: "structuredError",
+        body: {
+          resolver: "substrateGap_write",
+          failure_mode: "validation_rejected",
+          rule: "classification_metadata_must_be_object",
+          field: "gap.classification_metadata",
+          detail: `gap ${String(holder["id"] ?? "(no id)")}: classification_metadata must be an object of named fields, got ${Array.isArray(cm) ? "an array" : `a ${typeof cm}`}`,
+        },
+      };
+    }
+  }
   const flat = coerceFlatGapPointer(pointer as Record<string, unknown>);
   if (flat) (pointer as Record<string, unknown>)["gap"] = flat;
   if ((pointer as Record<string, unknown>)["gap"] === undefined || (pointer as Record<string, unknown>)["gap"] === null) {

@@ -1600,6 +1600,44 @@ export async function resolveSubstrateGapWrite(
         // event-driven, so a reopened gap simply never got picked up again.
         reopened = String(existing.status ?? "open") === "closed" && String(gap.status ?? "open") === "open";
     gap.id = existing.id;
+    // BIRTH FIELDS ARE IMMUTABLE (2026-10-03). source, detected_at and first_detected_at say who filed the
+    // gap and when; walk writes onto operator gaps dropped or rewrote source and restamped detected_at, and
+    // goal-reach-tick attributes reaches by the stored source. The stored value wins whenever it is usable;
+    // an absent (or unbound-slot) stored value may be filled. An attempt to change one is logged.
+    const operatorMarker = operatorMarkerOf(pointer);
+    {
+      const usable = (v: unknown): v is string => typeof v === "string" && v.trim().length > 0 && !unbound(v);
+      const inc = incoming as unknown as Record<string, unknown>;
+      const tried: string[] = [];
+      if (usable(existing.source)) {
+        if (inc["source"] !== undefined && inc["source"] !== existing.source) tried.push(`source ${existing.source} -> ${String(inc["source"])}`);
+        gap.source = existing.source;
+      }
+      if (usable(existing.detected_at)) {
+        if (inc["detected_at"] !== undefined && inc["detected_at"] !== existing.detected_at) tried.push("detected_at");
+        gap.detected_at = existing.detected_at;
+      }
+      if (usable(existing.first_detected_at) && inc["first_detected_at"] !== undefined && inc["first_detected_at"] !== existing.first_detected_at) tried.push("first_detected_at");
+      if (tried.length > 0) console.log(`[substrate-gap] ${gap.id}: kept the stored birth fields; this write tried to change ${tried.join(", ")}`);
+    }
+    // A CLOSE DOES NOT REWRITE WHAT THE GAP SAYS (2026-10-03). The destructive combination observed was a
+    // close or reject that also replaced the summary (with an echo of the closing goal) and the category.
+    // Without the operator marker such a write keeps the stored summary and category; its own text is
+    // kept beside them as classification_metadata.close_note. Open re-emissions still refresh the summary.
+    let closeNote: string | undefined;
+    if ((String(gap.status ?? "open") === "closed" || String(gap.status ?? "open") === "rejected") && !operatorMarker) {
+      const kept: string[] = [];
+      if (typeof existing.summary === "string" && existing.summary.trim().length > 0 && typeof gap.summary === "string" && gap.summary.trim().length > 0 && gap.summary !== existing.summary) {
+        closeNote = gap.summary;
+        gap.summary = existing.summary;
+        kept.push("summary");
+      }
+      if (typeof existing.category === "string" && existing.category.length > 0 && gap.category !== existing.category) {
+        if ((incoming as unknown as Record<string, unknown>)["category"] !== undefined) kept.push(`category (${String(gap.category)})`);
+        gap.category = existing.category;
+      }
+      if (kept.length > 0) console.log(`[substrate-gap] ${gap.id}: a ${String(gap.status)} write without the operator marker kept the stored ${kept.join(" and ")}`);
+    }
     // Preserve the original creation time — but run it through the SAME scrub as an incoming
     // value. Restoring `existing.created_at` blind means a row poisoned before the scrub landed
     // can never heal: every subsequent write faithfully re-preserves the literal
@@ -1676,6 +1714,7 @@ export async function resolveSubstrateGapWrite(
     // the writer's strings stay exactly as sent, so its demand_count and 2-goal floor are unchanged.
     if (incomingSetsDemandGoals) inMeta["demand_goals"] = carryGoalReachEntries(exMeta["demand_goals"], inMeta["demand_goals"]);
     for (const e of demandGoalAppends) inMeta["demand_goals"] = mergeDemandGoal(inMeta["demand_goals"], e);
+    if (closeNote !== undefined) inMeta["close_note"] = closeNote.slice(0, 4000);
     gap.classification_metadata = inMeta;
 
     // L7 gap-triple lineage on the existing row (all backward-compatible):

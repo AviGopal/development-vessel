@@ -67,8 +67,11 @@ describe("substrateGap resolver", () => {
     expect((result.body as { action: string }).action).toBe("updated");
 
     const read = await resolveSubstrateGap({ type: "substrateGap", id: "gap-001" });
-    const body = read.body as { gaps: Array<{ summary: string; status: string }> };
-    expect(body.gaps[0]!.summary).toBe("updated summary");
+    const body = read.body as { gaps: Array<{ summary: string; status: string; classification_metadata?: Record<string, unknown> }> };
+    // A close without the operator marker keeps the stored summary; its own text is kept as close_note
+    // (birth fields and the problem statement are not rewritten by a close, 2026-10-03).
+    expect(body.gaps[0]!.summary).toBe("test gap");
+    expect(body.gaps[0]!.classification_metadata?.["close_note"]).toBe("updated summary");
     expect(body.gaps[0]!.status).toBe("closed");
   });
 

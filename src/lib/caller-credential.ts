@@ -16,16 +16,38 @@
 //
 // CACHE. identity rate-limits /v1/auth/resolve per (source IP, key prefix), and every in-container
 // writer shares 127.0.0.1 and the fleet key, so asking per request would rate-limit the fleet's own
-// gap filing into silent 401s. A POSITIVE answer is reused for VALIDATION_TTL_MS (discovery's TTL),
-// keyed by a SHA-256 of the key so the raw secret is not retained. Negative answers are never
-// cached, and a definitive refusal evicts. Revocation therefore takes effect within the TTL.
+// gap filing into silent 401s. A POSITIVE answer is reused for CREDENTIAL_VALIDATION_TTL_MS
+// (discovery's TTL). Negative answers (a refused key, identity erroring or unreachable) are never
+// cached, and a definitive refusal evicts.
+//   REVOCATION LAG IS AT MOST THE TTL (60 s): a key identity revokes keeps passing this gate from
+//   cache until its entry is CREDENTIAL_VALIDATION_TTL_MS old, then the next request asks identity
+//   and is refused. There is no grace window beyond that.
+//   BOUNDED: at most CREDENTIAL_CACHE_MAX_ENTRIES entries; inserting past the cap evicts the oldest
+//   validation first, so a flood of distinct valid keys cannot grow the map without limit.
+//   THE DIGEST IS A LOOKUP KEY ONLY. The map is keyed by SHA-256 of the presented key so the raw
+//   secret is not retained; the digest never leaves process memory: it is not logged, traced,
+//   persisted, returned in an error, or exposed through /health, /metrics or any export of this
+//   module.
+//   TODO(identity-vessel-auth-result-should-carry-a-key-id-for-audit): once identity's auth result
+//   carries the key id, audit lines name the caller by that id. The digest stays internal.
 import { createHash } from "node:crypto";
 
 export type CallerCredential = { authenticated: boolean; scopes: string[]; why?: string };
 
-const VALIDATION_TTL_MS = 60_000;
+export const CREDENTIAL_VALIDATION_TTL_MS = 60_000;
+export const CREDENTIAL_CACHE_MAX_ENTRIES = 256;
 const validated = new Map<string, { cred: CallerCredential; at: number }>();
 const cacheKey = (apiKey: string): string => createHash("sha256").update(apiKey).digest("hex");
+/** Insert (or refresh) an entry; past the cap, evict the oldest validation first (Map keeps insertion order). */
+function remember(k: string, cred: CallerCredential): void {
+  validated.delete(k);
+  validated.set(k, { cred, at: Date.now() });
+  while (validated.size > CREDENTIAL_CACHE_MAX_ENTRIES) {
+    const oldest = validated.keys().next().value;
+    if (oldest === undefined) break;
+    validated.delete(oldest);
+  }
+}
 
 /** Tests only: forget every cached validation. */
 export function __resetCredentialCacheForTests(): void {
@@ -43,7 +65,8 @@ export async function identityCredential(authHeader: string | undefined, opts: {
   const k = cacheKey(apiKey);
   if (useCache) {
     const hit = validated.get(k);
-    if (hit && Date.now() - hit.at < VALIDATION_TTL_MS) return hit.cred;
+    if (hit && Date.now() - hit.at < CREDENTIAL_VALIDATION_TTL_MS) return hit.cred;
+    if (hit) validated.delete(k);
   }
   const base = identityUrl();
   if (!base) return { authenticated: false, scopes: [], why: "IDENTITY_VESSEL_URL unset: identity cannot be asked" };
@@ -65,7 +88,7 @@ export async function identityCredential(authHeader: string | undefined, opts: {
     }
     const scopes = Array.isArray(j.data.scopes) ? j.data.scopes.map(String) : [];
     const cred: CallerCredential = { authenticated: true, scopes };
-    validated.set(k, { cred, at: Date.now() });
+    remember(k, cred);
     return cred;
   } catch (err) {
     return { authenticated: false, scopes: [], why: "identity unreachable: " + String((err as Error)?.message ?? err) };

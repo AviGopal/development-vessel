@@ -81,7 +81,10 @@ export function resolvePoolImpulse(pointer: {
 //   autonomyScope / spendEnvelope: the containment and the budget the autonomous lane obeys. No
 //   in-process writer exists (both records are operator-written), so gating them breaks nothing internal;
 //   until an admin key is used, the failure direction is operator lock-out, never an outside write.
-export const TRUST_ROOT_POOL_SHAPES: ReadonlySet<string> = new Set(['substrateNodes', 'autonomyScope', 'spendEnvelope']);
+//   calibrationWindow: a blind-calibration sample list (which dispatches are graded, under which seed,
+//   where the labels go). Its writer chooses what the calibration measures, so the node's own key (the
+//   autonomous lane, node-self with scopes ["node"]) cannot create it or change it by id.
+export const TRUST_ROOT_POOL_SHAPES: ReadonlySet<string> = new Set(['substrateNodes', 'autonomyScope', 'spendEnvelope', 'calibrationWindow']);
 export type PoolWriteAuth = { operator: boolean; why?: string };
 /** The trust-root shape a write would create or modify (by its own shape, or the shape of the row its id names), or null. */
 export function trustRootWriteShape(pointer: { id?: string; shape?: string }): string | null {

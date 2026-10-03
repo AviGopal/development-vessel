@@ -158,8 +158,8 @@ export function ownTestSuiteCheckOf(row: Record<string, unknown> | null | undefi
 }
 
 export type OwnCheckLoad =
-  | { status: "found"; check: OwnCheck }
-  | { status: "none"; why: string }
+  | { status: "found"; check: OwnCheck; row: Record<string, unknown> }
+  | { status: "none"; why: string; row?: Record<string, unknown> }
   | { status: "unreadable"; why: string };
 
 /** Read the landing gap's row by id and extract its own test_suite check. */
@@ -182,8 +182,8 @@ export async function loadOwnCheck(
   const row = (r.body!.gaps as Array<Record<string, unknown>>).find((g) => String(g?.["id"]) === gapId);
   if (!row) return { status: "none", why: `no gap row ${gapId}` };
   const check = ownTestSuiteCheckOf(row, vessel);
-  if (!check) return { status: "none", why: `gap ${gapId} carries no test_suite check for ${vessel}` };
-  return { status: "found", check };
+  if (!check) return { status: "none", why: `gap ${gapId} carries no test_suite check for ${vessel}`, row };
+  return { status: "found", check, row };
 }
 
 /**
@@ -230,4 +230,54 @@ export async function markOnComposeFailure(
   } catch (err) {
     return { marked: false, why: `mark failed: ${(err as Error).message}` };
   }
+}
+
+/**
+ * CONSECUTIVE UNMEASURABLE OWN-CHECK RUNS BEFORE THE CHECK, NOT THE TREE, IS TREATED AS BROKEN.
+ * One unmeasurable run is usually the environment (no shell producer, a saturated box). The same gap's
+ * check coming back unmeasurable three cutovers in a row, with no measured run in between, is the check:
+ * a test title that no longer exists (bun: `regex "<name>" matched 0 tests`, no summary), a moved test
+ * file, a vessel it cannot run in. Recomposing code cannot fix that. Three keeps a single flaky outage,
+ * or two, from demoting a sound check, and still stops the lane after a handful of wasted composes.
+ */
+export const OWN_CHECK_UNMEASURABLE_ESCALATE_AT = 3;
+
+/**
+ * The classification_metadata keys to merge into the landing gap's row after an own-check run (the store
+ * carries omitted keys forward, so only these are written), or null when nothing needs writing.
+ *   - unmeasurable: own_check_unmeasurable_count +1, own_check_last_reason, own_check_last_at;
+ *     at OWN_CHECK_UNMEASURABLE_ESCALATE_AT the check is DEMOTED for re-derivation: evidence_resolve is
+ *     written null (the store's classifier then re-stamps the falsifier "none"), and the broken check is
+ *     kept beside it in own_check_broken. That puts the gap in the falsifier supply backlog
+ *     (gap-lifecycle-scan isFalsifierSupplyCandidate) whose gap_falsify pass re-derives a class-2 check
+ *     for the gap itself (decomposeGap parentCheck mode, written only when it reads 'present'), and out
+ *     of autonomous compose wherever require_falsifier_classes is set (gap-to-feature admission).
+ *   - measured (pass or fail): the count resets to 0 when it was non-zero.
+ */
+export function ownCheckOutcomeUpdate(
+  meta: Record<string, unknown> | null | undefined,
+  outcome: { measured: boolean; reason: string },
+  nowIso: string,
+): { update: Record<string, unknown> | null; count: number; escalated: boolean } {
+  const m = (meta ?? {}) as Record<string, unknown>;
+  const prior = typeof m["own_check_unmeasurable_count"] === "number" && Number.isFinite(m["own_check_unmeasurable_count"]) ? (m["own_check_unmeasurable_count"] as number) : 0;
+  const reason = String(outcome.reason ?? "").slice(0, 300);
+  if (outcome.measured) {
+    if (prior === 0) return { update: null, count: 0, escalated: false };
+    return { update: { own_check_unmeasurable_count: 0, own_check_last_reason: reason, own_check_last_at: nowIso }, count: 0, escalated: false };
+  }
+  const count = prior + 1;
+  const update: Record<string, unknown> = { own_check_unmeasurable_count: count, own_check_last_reason: reason, own_check_last_at: nowIso };
+  const escalated = count >= OWN_CHECK_UNMEASURABLE_ESCALATE_AT && m["evidence_resolve"] != null;
+  if (escalated) {
+    update["evidence_resolve"] = null;
+    update["own_check_broken"] = {
+      evidence_resolve: m["evidence_resolve"],
+      unmeasurable_count: count,
+      last_reason: reason,
+      escalated_at: nowIso,
+      route: "gap_falsify parent_check re-derivation (falsifier none)",
+    };
+  }
+  return { update, count, escalated };
 }

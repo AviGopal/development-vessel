@@ -27,7 +27,7 @@ import { resolveActivateSubstrateScript } from "./activate-substrate-script.js";
 import { resolveMaintenanceLeaseWrite } from "./maintenance-lease";
 import { gateLanding, KILL_SWITCH_REASON, landingsStopped } from "./push-policy.js";
 import { CUTOVER_QUIESCE_MAX_MS } from "../compose-slots.js";
-import { judgeOwnCheck, loadOwnCheck, readUnlandableMarker } from "./staged-mitosis-gate.js";
+import { judgeOwnCheck, loadOwnCheck, ownCheckOutcomeUpdate, OWN_CHECK_UNMEASURABLE_ESCALATE_AT, readUnlandableMarker } from "./staged-mitosis-gate.js";
 
 /**
  * The landing gap's own-check dependencies: the gap-store read and the test_suite run. Module-level
@@ -36,12 +36,46 @@ import { judgeOwnCheck, loadOwnCheck, readUnlandableMarker } from "./staged-mito
  */
 type OwnCheckDeps = {
   readGap: (p: Record<string, unknown>) => Promise<unknown>;
+  writeGap: (p: Record<string, unknown>) => Promise<unknown>;
   runSuite: (p: Record<string, unknown>) => Promise<unknown>;
 };
 const realOwnCheckDeps: OwnCheckDeps = {
   readGap: (p) => resolveSubstrateGap(p as never),
+  writeGap: (p) => resolveSubstrateGapWrite(p as never),
   runSuite: (p) => resolveTestSuite(p),
 };
+
+/**
+ * Record an own-check outcome on the landing gap's row (ownCheckOutcomeUpdate decides the keys) through
+ * the same substrateGap_write the pending-land stamp uses. Merge-style: only the changed metadata keys are
+ * sent; the store carries the rest forward. Never throws; what happened is returned for operations.
+ */
+async function stampOwnCheckOutcome(
+  row: Record<string, unknown>,
+  outcome: { measured: boolean; reason: string },
+): Promise<{ count: number; escalated: boolean; written: boolean; detail: string }> {
+  const meta = (row["classification_metadata"] ?? {}) as Record<string, unknown>;
+  const { update, count, escalated } = ownCheckOutcomeUpdate(meta, outcome, new Date().toISOString());
+  if (!update) return { count, escalated, written: false, detail: "nothing to record" };
+  try {
+    const res = (await ownCheckDeps.writeGap({
+      type: "substrateGap_write",
+      gap: {
+        id: row["id"],
+        category: row["category"] ?? "missing_capability",
+        source: row["source"] ?? "substrate_detected",
+        summary: row["summary"] ?? "",
+        detected_at: row["detected_at"] ?? new Date().toISOString(),
+        status: row["status"] ?? "open",
+        classification_metadata: update,
+      },
+    })) as { shape?: string; body?: unknown } | null;
+    if (res?.shape === "structuredError") return { count, escalated, written: false, detail: `gap write refused: ${JSON.stringify(res.body).slice(0, 200)}` };
+    return { count, escalated, written: true, detail: `own_check_unmeasurable_count=${count}${escalated ? " — check demoted for re-derivation" : ""}` };
+  } catch (err) {
+    return { count, escalated, written: false, detail: `gap write threw: ${(err as Error).message.slice(0, 200)}` };
+  }
+}
 let ownCheckDeps: OwnCheckDeps = realOwnCheckDeps;
 /** Tests only. */
 export function __setOwnCheckDepsForTests(d: Partial<OwnCheckDeps> | null): void {
@@ -2471,6 +2505,15 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
         `gap_store_unavailable: could not read gap ${ownGapId} to find its own class-2 check (${load.why}). Deferring this cutover; the staged tree and its pending lock are kept and retried next tick.`,
         { kind: "gap_store_unavailable", refuse_class: "gap_store_unavailable", deferred: true, preserve_pending: true, vessel_name, gap_id: ownGapId, staged_files: stagedFiles, own_check_counters: getOwnCheckCounters(), operations },
       );
+    } else if (load.status === "none" && load.row && ((load.row["classification_metadata"] ?? {}) as Record<string, unknown>)["own_check_broken"] && ((load.row["classification_metadata"] ?? {}) as Record<string, unknown>)["evidence_resolve"] == null) {
+      // Its check was demoted as broken (OWN_CHECK_UNMEASURABLE_ESCALATE_AT unmeasurable runs) and has not been
+      // re-derived yet: the gap is in check repair. A tree staged for it must not land typecheck-only meanwhile.
+      operations.push({ op: "own_check", status: "fail", detail: `gap ${ownGapId}'s check is under repair (own_check_broken)` });
+      await unstage("own_check_under_repair");
+      return softRefuse(
+        `own_check_under_repair: gap ${ownGapId}'s own class-2 check was demoted as broken after ${OWN_CHECK_UNMEASURABLE_ESCALATE_AT} unmeasurable runs and has not been re-derived; refusing to land a change for it on typecheck alone.`,
+        { kind: "own_check_under_repair", refuse_class: "own_check_under_repair", vessel_name, gap_id: ownGapId, staged_files: stagedFiles, operations },
+      );
     } else if (load.status === "none") {
       landedUnverifiedReason = load.why;
       operations.push({ op: "own_check", status: "skipped", detail: `no own check re-run: ${load.why} — landing stamped landed_unverified` });
@@ -2487,9 +2530,21 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
       const sb = r?.shape === "test_suite" ? (r.body ?? null) : null;
       let verdict = judgeOwnCheck(sb, check.only_tests);
       const measuredRoot = typeof sb?.["verified_root"] === "string" ? (sb["verified_root"] as string) : null;
+      let wrongTree = false;
       if (verdict.measured && measuredRoot && resolve(measuredRoot) !== resolve(hostRepoRoot)) {
         verdict = { pass: false, measured: false, reason: `measured ${measuredRoot}, not the staged clone ${hostRepoRoot}` };
+        wrongTree = true;
       }
+      // Consecutive-unmeasurable bookkeeping on the gap row: +1 on unmeasurable (demoting the check at
+      // OWN_CHECK_UNMEASURABLE_ESCALATE_AT), reset on any measured outcome.
+      // A run that measured a different tree says nothing about the check (it is the cutover's own
+      // addressing), so it neither counts toward demotion nor resets the count.
+      const stamp = wrongTree
+        ? { count: Number(((load.row["classification_metadata"] ?? {}) as Record<string, unknown>)["own_check_unmeasurable_count"] ?? 0) || 0, escalated: false, written: false, detail: "nothing to record" }
+        : await stampOwnCheckOutcome(load.row, { measured: verdict.measured, reason: verdict.reason });
+      if (stamp.written) operations.push({ op: "own_check_gap_stamp", status: "ok", detail: stamp.detail });
+      else if (stamp.detail !== "nothing to record") operations.push({ op: "own_check_gap_stamp", status: "warn", detail: stamp.detail });
+      if (stamp.escalated) console.log(`[cutover-own-check] escalated gap=${ownGapId}: ${stamp.count} consecutive unmeasurable runs — check demoted for re-derivation (gap_falsify), not recompose`);
       if (!verdict.pass) {
         const refuseClass = verdict.measured ? "own_check_failed" : "own_check_unmeasurable";
         operations.push({ op: "own_check", status: "fail", detail: `${citation}: ${verdict.reason}` });
@@ -2498,8 +2553,8 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
         return softRefuse(
           verdict.measured
             ? `own_check_failed: gap ${ownGapId}'s own class-2 check does not pass on the staged tree — ${verdict.reason} (${citation}). Typecheck alone does not establish that this change does what the gap asked; refusing.`
-            : `own_check_unmeasurable: gap ${ownGapId}'s own class-2 check could not be measured on the staged tree — ${verdict.reason} (${citation}). Refusing: unproduced evidence is not passing evidence; the gap stays open and is recomposed.`,
-          { kind: refuseClass, refuse_class: refuseClass, vessel_name, gap_id: ownGapId, staged_files: stagedFiles, own_check: { ...check, result: sb, verdict }, own_check_counters: getOwnCheckCounters(), operations },
+            : `own_check_unmeasurable: gap ${ownGapId}'s own class-2 check could not be measured on the staged tree — ${verdict.reason} (${citation}). Refusing: unproduced evidence is not passing evidence. ${stamp.escalated ? `This is unmeasurable run ${stamp.count} in a row: the check is treated as broken and demoted for re-derivation, not recompose.` : `Unmeasurable run ${stamp.count} of ${OWN_CHECK_UNMEASURABLE_ESCALATE_AT} before the check is treated as broken.`}`,
+          { kind: refuseClass, refuse_class: refuseClass, vessel_name, gap_id: ownGapId, staged_files: stagedFiles, own_check: { ...check, result: sb, verdict }, own_check_unmeasurable_count: stamp.count, own_check_escalated: stamp.escalated, own_check_counters: getOwnCheckCounters(), operations },
         );
       }
       operations.push({ op: "own_check", status: "ok", detail: `${citation}: ${verdict.reason}` });

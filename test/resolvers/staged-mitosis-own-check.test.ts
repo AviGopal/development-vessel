@@ -23,7 +23,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const { resolveVesselMitosisCutover } = cutoverMod;
-type Deps = { readGap?: (p: Record<string, unknown>) => Promise<unknown>; runSuite?: (p: Record<string, unknown>) => Promise<unknown> };
+type Deps = { readGap?: (p: Record<string, unknown>) => Promise<unknown>; writeGap?: (p: Record<string, unknown>) => Promise<unknown>; runSuite?: (p: Record<string, unknown>) => Promise<unknown> };
 // Optional on purpose: on a tree without the seam the cutover runs its unpatched path, which is
 // exactly the behaviour the RED tests below must expose (it lands).
 const setDeps = (d: Deps | null): void => {
@@ -406,6 +406,153 @@ describe("own-check gate: store outage, counters, unverified landings", () => {
     expect(v.shape).toBe("cutoverApplied");
     expect((v.body as Record<string, unknown>)["landed_unverified"]).toBeUndefined();
     expect((v.body as Record<string, unknown>)["own_check_verified"]).toBe(true);
+  });
+});
+
+describe("own check that cannot be measured: counted on the gap, and at N routed to check repair", () => {
+  // An in-memory gap store with the real store's merge rule (omitted classification_metadata keys carry
+  // forward; a key sent, even null, replaces) and its real falsifier classifier re-stamping on write.
+  async function memStore(initial: Record<string, unknown>) {
+    const { classifyFalsifier } = await import("../../src/resolvers/substrate-gap.js");
+    const rows = new Map<string, Record<string, unknown>>([[String(initial["id"]), JSON.parse(JSON.stringify(initial))]]);
+    const writes: Array<Record<string, unknown>> = [];
+    return {
+      rows,
+      writes,
+      readGap: async (p: Record<string, unknown>) => ({ shape: "substrateGap", body: { gaps: rows.has(String(p["id"])) ? [JSON.parse(JSON.stringify(rows.get(String(p["id"]))))] : [] } }),
+      writeGap: async (p: Record<string, unknown>) => {
+        const g = p["gap"] as Record<string, unknown>;
+        writes.push(JSON.parse(JSON.stringify(g)));
+        const ex = rows.get(String(g["id"])) ?? {};
+        const inMeta = { ...((g["classification_metadata"] ?? {}) as Record<string, unknown>) };
+        const exMeta = (ex["classification_metadata"] ?? {}) as Record<string, unknown>;
+        for (const k of Object.keys(exMeta)) if (!(k in inMeta)) inMeta[k] = exMeta[k];
+        inMeta["falsifier"] = classifyFalsifier(inMeta).falsifier;
+        rows.set(String(g["id"]), { ...ex, ...g, classification_metadata: inMeta });
+        return { shape: "substrateGapWriteResult", body: { ok: true } };
+      },
+    };
+  }
+  const meta = (st: { rows: Map<string, Record<string, unknown>> }) => (st.rows.get(GAP)!["classification_metadata"] ?? {}) as Record<string, unknown>;
+  const MISSING = "target > a test that was renamed away";
+  const missingRow = {
+    ...gapRow,
+    classification_metadata: {
+      ...gapRow.classification_metadata,
+      falsifier: "class2",
+      evidence_resolve: { shape: "test_suite", input: { vessel: `repos/${VESSEL}`, test_file: TEST_FILE, only_tests: [MISSING] }, zero_field: "requested_not_passing" },
+    },
+  };
+
+  // THE REAL test_suite RESOLVER, with only the network stood in: discovery names a shell producer, and the
+  // shell answers with bun's actual output for a -t filter that matches no test (captured from bun 1.3.14).
+  const originalFetch = globalThis.fetch;
+  function bunNoMatchShell(hostRepoRoot: string): void {
+    globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : String((input as { url?: string }).url ?? input);
+      const body = init?.body ? JSON.parse(String(init.body)) : {};
+      if (body?.pointer?.type === "vesselCapability") return Response.json({ content: { vessels: [{ endpoint: "http://shell.fixture", resolve_endpoint: "/resolve", health_score: 1 }] } });
+      if (url.startsWith("http://shell.fixture")) {
+        return Response.json({ stdout: `VERIFIED_ROOT=${hostRepoRoot}\nVERIFIED_HEAD=abc1234\nbun test v1.3.14 (0d9b296a)\n\n${TEST_FILE}:\n\nerror: regex "${MISSING.replace(" > ", " ")}" matched 0 tests. Searched 1 file (skipping 1 test) [25.00ms]\n` });
+      }
+      return Response.json({});
+    }) as unknown as typeof fetch;
+  }
+  afterEach(() => { globalThis.fetch = originalFetch; });
+
+  it("a gap whose only_tests names a non-existent test, cut over twice, leaves own_check_unmeasurable_count=2 on the gap row", async () => {
+    const st = await memStore(missingRow);
+    for (let i = 1; i <= 2; i++) {
+      const s = i === 1 ? await setup() : await setup2();
+      bunNoMatchShell(s.hostRepoRoot);
+      setDeps({ readGap: st.readGap, writeGap: st.writeGap });           // runSuite: the real resolveTestSuite
+      const r = await resolveVesselMitosisCutover(deferredPointer(s) as never);
+      expect((r.body as Record<string, unknown>)["refuse_class"]).toBe("own_check_unmeasurable");
+      expect(await headSubject(s.hostRepoRoot)).toBe("baseline");
+    }
+    expect(meta(st)["own_check_unmeasurable_count"]).toBe(2);
+    expect(String(meta(st)["own_check_last_reason"])).toContain("did not run");
+    expect(typeof meta(st)["own_check_last_at"]).toBe("string");
+    // Merge-style: only the bookkeeping keys were sent; the check itself is still the gap's.
+    expect(Object.keys(st.writes[1]!["classification_metadata"] as object).sort()).toEqual(["own_check_last_at", "own_check_last_reason", "own_check_unmeasurable_count"]);
+    expect(meta(st)["falsifier"]).toBe("class2");
+  });
+
+  it(`at N=3 the escalation is recorded and the gap is routed to check repair (gap_falsify), not recompose; a staged tree for it then refuses as under repair`, async () => {
+    const { OWN_CHECK_UNMEASURABLE_ESCALATE_AT } = await import("../../src/resolvers/staged-mitosis-gate.js");
+    const { isFalsifierSupplyCandidate } = await import("../../src/resolvers/gap-lifecycle-scan.js");
+    expect(OWN_CHECK_UNMEASURABLE_ESCALATE_AT).toBe(3);
+    const st = await memStore(missingRow);
+    const supply = () => isFalsifierSupplyCandidate(st.rows.get(GAP)! as never, () => false, () => true);
+    expect(supply()).toBe(false);                                       // a class2 gap is not in the re-derivation backlog
+    let last: Record<string, unknown> = {};
+    for (let i = 1; i <= 3; i++) {
+      const s = i === 1 ? await setup() : await setup2();
+      bunNoMatchShell(s.hostRepoRoot);
+      setDeps({ readGap: st.readGap, writeGap: st.writeGap });
+      last = (await resolveVesselMitosisCutover(deferredPointer(s) as never)).body as Record<string, unknown>;
+    }
+    expect(last["own_check_escalated"]).toBe(true);
+    expect(String(last["refusal_reason"])).toContain("demoted for re-derivation");
+    const m = meta(st);
+    expect(m["own_check_unmeasurable_count"]).toBe(3);
+    expect(m["evidence_resolve"]).toBeNull();
+    expect(m["falsifier"]).toBe("none");                                // the store's classifier re-stamped it
+    expect((m["own_check_broken"] as Record<string, unknown>)["evidence_resolve"]).toEqual(missingRow.classification_metadata.evidence_resolve);
+    // The reader: gap_falsify's supply backlog now takes it (parent_check re-derivation), and contained
+    // admission (require_falsifier_classes) no longer admits it to compose.
+    expect(supply()).toBe(true);
+    // The next cutover for this gap does not land typecheck-only while the check is in repair.
+    const s4 = await setup2();
+    let ran = 0;
+    setDeps({ readGap: st.readGap, writeGap: st.writeGap, runSuite: async () => { ran++; return suiteBody(s4.hostRepoRoot, {}); } });
+    const next = await resolveVesselMitosisCutover(deferredPointer(s4) as never);
+    expect((next.body as Record<string, unknown>)["refuse_class"]).toBe("own_check_under_repair");
+    expect(ran).toBe(0);
+    expect(await headSubject(s4.hostRepoRoot)).toBe("baseline");
+  });
+
+  it("a measured FAIL resets the count", async () => {
+    const st = await memStore(missingRow);
+    for (let i = 1; i <= 2; i++) {
+      const s = i === 1 ? await setup() : await setup2();
+      bunNoMatchShell(s.hostRepoRoot);
+      setDeps({ readGap: st.readGap, writeGap: st.writeGap });
+      await resolveVesselMitosisCutover(deferredPointer(s) as never);
+    }
+    expect(meta(st)["own_check_unmeasurable_count"]).toBe(2);
+    globalThis.fetch = originalFetch;
+    const s3 = await setup2();
+    setDeps({ readGap: st.readGap, writeGap: st.writeGap, runSuite: async () => suiteBody(s3.hostRepoRoot, { pass: 0, fail: 1, requested_not_passing: 1 }) });
+    const r = await resolveVesselMitosisCutover(deferredPointer(s3) as never);
+    expect((r.body as Record<string, unknown>)["refuse_class"]).toBe("own_check_failed");
+    expect(meta(st)["own_check_unmeasurable_count"]).toBe(0);
+    expect(meta(st)["evidence_resolve"]).not.toBeNull();
+    // A later unmeasurable run starts the count again from 1, so N means N IN A ROW.
+    const s4 = await setup2();
+    bunNoMatchShell(s4.hostRepoRoot);
+    setDeps({ readGap: st.readGap, writeGap: st.writeGap });
+    await resolveVesselMitosisCutover(deferredPointer(s4) as never);
+    expect(meta(st)["own_check_unmeasurable_count"]).toBe(1);
+  });
+
+  it("a run that measured a DIFFERENT tree neither counts toward demotion nor resets the count", async () => {
+    const st = await memStore({ ...gapRow, classification_metadata: { ...gapRow.classification_metadata, falsifier: "class2", own_check_unmeasurable_count: 2 } });
+    const s = await setup();
+    setDeps({ readGap: st.readGap, writeGap: st.writeGap, runSuite: async () => suiteBody("/somewhere/else", {}) });
+    const r = await resolveVesselMitosisCutover(deferredPointer(s) as never);
+    expect((r.body as Record<string, unknown>)["refuse_class"]).toBe("own_check_unmeasurable");
+    expect(st.writes.length).toBe(0);
+    expect(meta(st)["own_check_unmeasurable_count"]).toBe(2);
+  });
+
+  it("a measured PASS resets the count too (and the landing proceeds)", async () => {
+    const st = await memStore({ ...gapRow, classification_metadata: { ...gapRow.classification_metadata, falsifier: "class2", own_check_unmeasurable_count: 2 } });
+    const s = await setup();
+    setDeps({ readGap: st.readGap, writeGap: st.writeGap, runSuite: async () => suiteBody(s.hostRepoRoot, {}) });
+    const r = await resolveVesselMitosisCutover(deferredPointer(s) as never);
+    expect(r.shape).toBe("cutoverApplied");
+    expect(meta(st)["own_check_unmeasurable_count"]).toBe(0);
   });
 });
 

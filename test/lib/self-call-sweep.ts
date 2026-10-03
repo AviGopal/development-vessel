@@ -583,7 +583,28 @@ function pieces(node: ts.Node, end: "head" | "tail", depth = 0, seen = new Set<t
 /** The headers of `init` put the key behind selfAuthHeaders (a textual check over the expanded headers). */
 function guardedInit(init: ts.Node | undefined): boolean {
   if (!init) return false;
-  return KEY_GUARD.test(headerExprs(init).map((h) => expanded(h, 3, { functions: true })).join("\n"));
+  const hs = headerExprs(init);
+  if (!KEY_GUARD.test(hs.map((h) => expanded(h, 3, { functions: true })).join("\n"))) return false;
+  // A guard next to a raw key is no guard: `{ ...auth, ...selfAuthHeaders(u, D) }` still sends `auth`.
+  // With the guard calls cut out, nothing else the headers are built from may mention Authorization.
+  return !AUTH.test(hs.map(withoutGuardCalls).join("\n"));
+}
+
+/** The header expression and the values it names (not functions), with every selfAuth*(…) call removed. */
+function withoutGuardCalls(h: ts.Node): string {
+  return expandedNodes(h, 3, { functions: false })
+    .map((n) => {
+      let text = n.getText();
+      const calls: string[] = [];
+      const visit = (c: ts.Node): void => {
+        if (ts.isCallExpression(c) && KEY_GUARD.test(c.expression.getText())) calls.push(c.getText());
+        else ts.forEachChild(c, visit);
+      };
+      visit(n);
+      for (const c of calls) text = text.split(c).join("");
+      return text;
+    })
+    .join("\n");
 }
 
 export function isResolveUrl(node: ts.Node): boolean {

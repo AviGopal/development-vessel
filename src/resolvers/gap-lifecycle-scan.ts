@@ -598,7 +598,7 @@ export async function resolveGapLifecycleScan(p: GapLifecycleScanPointer): Promi
     const resp = await fetch(emitUrl, {
       method: "POST",
       headers: { "Content-Type": "application/json", ...authHeader },
-      body: JSON.stringify({ impulse: { pointer: { type: "substrateGap_write", gap: { id: gap.id, category: "missing_capability", source: "substrate_detected", summary: gap.summary ?? "", status: gap.status, detected_at: new Date().toISOString(), classification_metadata: gap.classification_metadata } } } }),
+      body: JSON.stringify({ impulse: { pointer: { type: "substrateGap_write", gap: { id: gap.id, category: "missing_capability", source: "substrate_detected", summary: gap.summary ?? "", status: gap.status, detected_at: new Date().toISOString(), classification_metadata: { ...(gap.classification_metadata ?? {}), ...(gap.closed_by ? { closed_by: gap.closed_by } : {}) } } } } }),
       signal: AbortSignal.timeout(8_000),
     });
     return resp.ok;

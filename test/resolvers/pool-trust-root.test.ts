@@ -208,6 +208,78 @@ describe("calibrationWindow is a trust-root pool shape", () => {
   });
 });
 
+// SERVER-SIDE ATTESTATION. StandingImpulse.source is caller-supplied and proves nothing, so a reader (the
+// human surface) could not tell an operator-written trust-root row from any other. The store's one writer
+// stamps `attested` (outside body) on a trust-root write it accepted with an operator credential, and no
+// caller can supply one: a caller's `attested`, top-level or inside body, is never stored as given.
+describe("attested: the server stamps operator trust-root writes; callers cannot forge it", () => {
+  const post = (auth: string | null, pointer: Record<string, unknown>) => impulsesRouter.request("/v2/impulses/resolve", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...(auth ? { Authorization: auth } : {}) },
+    body: JSON.stringify({ impulse: pointer }),
+  });
+  const forged = { by: "operator", key_id: "forged", at: "1999-01-01T00:00:00.000Z" };
+  const rowOf = (id: string) => resolvePoolImpulse({ type: "poolImpulse", id }).body.impulses[0] as (Record<string, unknown> & { body: Record<string, unknown> }) | undefined;
+
+  it("MUST-FAIL: an admin trust-root write is read back with attested {by:'operator', key_id, at}", async () => {
+    const res = await post(`ApiKey ${ADMIN_KEY}`, { type: "poolImpulse_write", id: "att-admin", shape: "calibrationWindow", body: { window_id: "w1", dispatch_ids: ["a"] } });
+    expect(res.status).toBe(200);
+    const row = rowOf("att-admin");
+    const att = row?.["attested"] as { by: string; key_id: string | null; at: string } | undefined;
+    expect(att?.by).toBe("operator");
+    expect(att?.key_id).toBe("k1");
+    expect(Number.isNaN(Date.parse(String(att?.at)))).toBe(false);
+    expect(att?.at).toBe(row?.["updated_at"] as string);
+    // through the route's read door too
+    const read = await impulsesRouter.request("/v2/impulses/resolve", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ impulse: { type: "poolImpulse", id: "att-admin" } }) });
+    const j = (await read.json()) as { body: { impulses: Array<{ attested?: { by: string } }> } };
+    expect(j.body.impulses[0]?.attested?.by).toBe("operator");
+  });
+
+  it("MUST-FAIL: a node-key NON-trust-root write that supplies attested (top-level and in body) is stored without it", async () => {
+    const res = await post(`ApiKey ${NODE_KEY}`, { type: "poolImpulse_write", id: "att-node", shape: "timeShapedRhythm", attested: forged, body: { x: 1, attested: forged } });
+    expect(res.status).toBe(200);
+    const row = rowOf("att-node");
+    expect(row).toBeDefined();
+    expect(row).not.toHaveProperty("attested");
+    expect(row!.body).not.toHaveProperty("attested");
+    expect(row!.body["x"]).toBe(1);
+  });
+
+  it("an in-process non-trust-root write (no credential) with a forged attested is stored without it", () => {
+    expect(resolvePoolImpulseWrite({ type: "poolImpulse_write", id: "att-inproc", shape: "timeShapedRhythm", body: { y: 2, attested: forged } }).body.ok).toBe(true);
+    const row = rowOf("att-inproc");
+    expect(row).not.toHaveProperty("attested");
+    expect(row!.body).not.toHaveProperty("attested");
+  });
+
+  it("MUST-FAIL: a caller-supplied attested on an admin trust-root write is overwritten by the server's stamp", async () => {
+    const res = await post(`ApiKey ${ADMIN_KEY}`, { type: "poolImpulse_write", id: "att-forge-admin", shape: "calibrationWindow", attested: { by: "forged", key_id: "x", at: "1999-01-01T00:00:00.000Z" }, body: { window_id: "w2", attested: { by: "forged" } } });
+    expect(res.status).toBe(200);
+    const row = rowOf("att-forge-admin");
+    const att = row?.["attested"] as { by: string; key_id: string | null; at: string };
+    expect(att).toEqual({ by: "operator", key_id: "k1", at: row!["updated_at"] as string });
+    expect(row!.body).not.toHaveProperty("attested");
+  });
+
+  it("an admin UPDATE by id (shape omitted) of a trust-root row re-stamps it at the update's time", async () => {
+    expect((await post(`ApiKey ${ADMIN_KEY}`, { type: "poolImpulse_write", id: "att-restamp", shape: "calibrationWindow", body: { window_id: "w3" } })).status).toBe(200);
+    await Bun.sleep(5);
+    expect((await post(`ApiKey ${ADMIN_KEY}`, { type: "poolImpulse_write", id: "att-restamp", attested: forged, body: { window_id: "w3", closes_at: "2026-11-01T00:00:00Z" } })).status).toBe(200);
+    const row = rowOf("att-restamp");
+    expect(row!["attested"]).toEqual({ by: "operator", key_id: "k1", at: row!["updated_at"] as string });
+    expect(row!["shape"]).toBe("calibrationWindow");
+  });
+
+  it("a node-key body update of a plain row cannot plant attested into the stored row or body", async () => {
+    await post(`ApiKey ${NODE_KEY}`, { type: "poolImpulse_write", id: "att-plain-upd", shape: "timeShapedRhythm", body: { z: 1 } });
+    await post(`ApiKey ${NODE_KEY}`, { type: "poolImpulse_write", id: "att-plain-upd", attested: forged, body: { z: 2, attested: forged } });
+    const row = rowOf("att-plain-upd");
+    expect(row).not.toHaveProperty("attested");
+    expect(row!.body).toEqual({ z: 2 });
+  });
+});
+
 describe("self_fact_reconcile pool_record_pin: the record must equal the operator-seeded value", () => {
   const row = (pinned: Record<string, string[]> | undefined): sfr.SelfFactRow => ({
     id: "substrate_nodes_pinned", instrument: "pool_record_pin", profiles: ["*"], edit_site: "repos/development-vessel/src/resolvers/pool-impulse.ts",

@@ -1,10 +1,10 @@
-import { describe, it, expect, beforeEach, afterEach } from "bun:test";
+import { describe, it, expect, beforeEach, afterEach, afterAll } from "bun:test";
 import { resolveVesselMitosisCutover } from "../../src/resolvers/vessel-mitosis-cutover.js";
 import { mkdtemp, mkdir, writeFile, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { installCutoverFetchGuard, routeFleetUnreachable, routeShell, BUN_PASSING, BUN_NO_TESTS, type FetchGuard, routeFixtureGapStore, FIXTURE_GAP_STORE } from "./cutover-fetch-guard.js";
-import { installCutoverFsGuard, type FsGuard } from "./cutover-fs-guard.js";
+import { installCutoverFetchGuard, routeFleetUnreachable, routeShell, BUN_PASSING, BUN_NO_TESTS, type FetchGuard, routeFixtureGapStore, FIXTURE_GAP_STORE, restoreCutoverFetch } from "./cutover-fetch-guard.js";
+import { installCutoverFsGuard, restoreCutoverFsModules, type FsGuard } from "./cutover-fs-guard.js";
 import { spawnSync as spawnSyncGuard } from "node:child_process";
 
 let tmpRoot: string;
@@ -56,6 +56,12 @@ const savedPushScopeEnv: Record<string, string | undefined> = {};
 // (no_measurement_available), and these tests are about apply/push scope, not about that.
 let guard: FetchGuard;
 let fsGuard: FsGuard;
+// Backstop: whatever happened in this file, the next file in the same bun process gets the real
+// fs and fetch (bun's mock.restore() does not undo mock.module; see cutover-fs-guard.ts).
+afterAll(() => {
+  restoreCutoverFsModules();
+  restoreCutoverFetch();
+});
 /** The in-memory gap store every gap read/write in this file goes to (GAP_STORE_ENDPOINT). */
 let gapStore: Map<string, Record<string, any>>;
 let savedGapStoreEndpoint: string | undefined;

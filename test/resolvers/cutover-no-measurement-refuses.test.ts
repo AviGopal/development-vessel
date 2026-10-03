@@ -53,7 +53,7 @@
 // test): discovery names a fixture shell that answers with bun 1.3.14's captured output.
 // skip_push means no push is ever attempted here, so "does not push" is pinned as "no commit was
 // made and the bare origin's dev ref is unchanged".
-import { describe, it, expect, beforeEach, afterEach } from "bun:test";
+import { describe, it, expect, beforeEach, afterEach, afterAll } from "bun:test";
 import * as cutoverMod from "../../src/resolvers/vessel-mitosis-cutover.js";
 import { resolveMaintenanceLeaseWrite } from "../../src/resolvers/maintenance-lease.js";
 import { mkdtemp, mkdir, writeFile, readFile, rm, stat, readdir } from "node:fs/promises";
@@ -64,8 +64,8 @@ import { tmpdir } from "node:os";
 import { join, isAbsolute } from "node:path";
 import {
   installCutoverFetchGuard, routeFleetUnreachable, routeShell,
-  BUN_PASSING, BUN_NO_TESTS, BUN_KILLED_BY_TIMEOUT, type FetchGuard, routeFixtureGapStore, FIXTURE_GAP_STORE } from "./cutover-fetch-guard.js";
-import { installCutoverFsGuard, type FsGuard } from "./cutover-fs-guard.js";
+  BUN_PASSING, BUN_NO_TESTS, BUN_KILLED_BY_TIMEOUT, type FetchGuard, routeFixtureGapStore, FIXTURE_GAP_STORE, restoreCutoverFetch } from "./cutover-fetch-guard.js";
+import { installCutoverFsGuard, restoreCutoverFsModules, type FsGuard } from "./cutover-fs-guard.js";
 
 const { resolveVesselMitosisCutover, __setOwnCheckDepsForTests } = cutoverMod;
 
@@ -87,6 +87,12 @@ const saved: Record<string, string | undefined> = {};
 let ws: string;
 let guard: FetchGuard;
 let fsGuard: FsGuard;
+// Backstop: whatever happened in this file, the next file in the same bun process gets the real
+// fs and fetch (bun's mock.restore() does not undo mock.module; see cutover-fs-guard.ts).
+afterAll(() => {
+  restoreCutoverFsModules();
+  restoreCutoverFetch();
+});
 
 const VESSEL = "development-vessel";
 const GAP = "gap-no-measurement-target";

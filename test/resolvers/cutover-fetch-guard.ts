@@ -31,6 +31,13 @@ export type FetchGuard = {
   restore: () => string[];
 };
 
+/** The real fetch, captured when this helper first loads. */
+const ORIGINAL_FETCH = globalThis.fetch;
+/** Re-installs the real fetch. Idempotent; each cutover file also calls it from afterAll. */
+export function restoreCutoverFetch(): void {
+  globalThis.fetch = ORIGINAL_FETCH;
+}
+
 export function installCutoverFetchGuard(): FetchGuard {
   const original = globalThis.fetch;
   const routes: GuardRoute[] = [];

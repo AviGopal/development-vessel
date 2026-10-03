@@ -36,15 +36,15 @@
 // refusal can only be for the reason each test names: the MUST-FAILs assert the specific
 // refuse_class the stale-base fix uses (stale_base_superseded), never a bare "refused", so they
 // cannot pass as no_measurement_available or any other refusal. Any unstubbed URL fails the test.
-import { describe, it, expect, beforeEach, afterEach } from "bun:test";
+import { describe, it, expect, beforeEach, afterEach, afterAll } from "bun:test";
 import * as cutoverMod from "../../src/resolvers/vessel-mitosis-cutover.js";
 import { mkdtemp, mkdir, writeFile, readFile, chmod, rm } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { installCutoverFetchGuard, routeFleetUnreachable, routeShell, BUN_PASSING, BUN_NO_TESTS, type FetchGuard, routeFixtureGapStore, FIXTURE_GAP_STORE } from "./cutover-fetch-guard.js";
-import { installCutoverFsGuard, type FsGuard } from "./cutover-fs-guard.js";
+import { installCutoverFetchGuard, routeFleetUnreachable, routeShell, BUN_PASSING, BUN_NO_TESTS, type FetchGuard, routeFixtureGapStore, FIXTURE_GAP_STORE, restoreCutoverFetch } from "./cutover-fetch-guard.js";
+import { installCutoverFsGuard, restoreCutoverFsModules, type FsGuard } from "./cutover-fs-guard.js";
 
 const { resolveVesselMitosisCutover, __setOwnCheckDepsForTests } = cutoverMod;
 
@@ -68,6 +68,12 @@ const saved: Record<string, string | undefined> = {};
 let ws: string;
 let guard: FetchGuard;
 let fsGuard: FsGuard;
+// Backstop: whatever happened in this file, the next file in the same bun process gets the real
+// fs and fetch (bun's mock.restore() does not undo mock.module; see cutover-fs-guard.ts).
+afterAll(() => {
+  restoreCutoverFsModules();
+  restoreCutoverFetch();
+});
 /** Pre-cutover suite runs: shell calls made before the cutover's own commit exists in the push clone. */
 let precheckRuns = 0;
 

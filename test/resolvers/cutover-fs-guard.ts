@@ -15,6 +15,13 @@
 // errors, so a throw alone would let the test pass. restore() re-installs the original modules
 // and returns the violations so afterEach can fail the test on any of them.
 //
+// RESTORE IS NOT AUTOMATIC. bun's mock.restore() does NOT undo mock.module (measured on bun
+// 1.3.14: a module mocked in one file stayed mocked for the next file in the same process even
+// after mock.restore()). The only undo is re-mocking with the saved real module objects, which is
+// what restoreCutoverFsModules() does. Each file calls it from afterEach (via restore()) AND from
+// afterAll, so a file that ends early can never leave fs guarded for the next file in the process
+// (pinned by test/resolvers/cutover-guard-leak-probe.test.ts).
+//
 // Scope, stated honestly: child processes (git, the shell producer stand-in) are not covered —
 // they do not go through this process's fs module. Reads are not blocked.
 import { mock } from "bun:test";
@@ -52,6 +59,13 @@ function writeFlags(flags: unknown): boolean {
 }
 
 export type FsGuard = { violations: string[]; restore: () => string[] };
+
+/** Re-installs the real node:fs, node:fs/promises and Bun.write. Idempotent; safe in afterAll. */
+export function restoreCutoverFsModules(): void {
+  mock.module("node:fs/promises", () => ORIG_P);
+  mock.module("node:fs", () => ORIG_S);
+  (Bun as unknown as { write: unknown }).write = ORIG_BUN_WRITE;
+}
 
 export function installCutoverFsGuard(): FsGuard {
   const violations: string[] = [];
@@ -99,9 +113,7 @@ export function installCutoverFsGuard(): FsGuard {
   return {
     violations,
     restore: () => {
-      mock.module("node:fs/promises", () => ORIG_P);
-      mock.module("node:fs", () => ORIG_S);
-      (Bun as unknown as { write: unknown }).write = ORIG_BUN_WRITE;
+      restoreCutoverFsModules();
       return [...violations];
     },
   };

@@ -5239,7 +5239,7 @@ async function routeCapabilityGapToNewResolver(
       gap_id: gap.id, gap_category: gap.category, target_vessel: vessel,
       resolver_name: resolverName, shape: missingShape,
       verdict: cb.verdict ?? null, landed: land.landed, landed_commit: land.commit_sha ?? null,
-      gap_closed: closed,
+      gap_closed: closed, compose: cb,
       note: land.landed
         ? `authored + VERIFIED a new resolver producing "${missingShape}" (feature_compose verify+repair) and landed via cutover${land.commit_sha ? ` ${land.commit_sha}` : ""}`
         : `feature_compose could not land a verified resolver for "${missingShape}" (verdict ${String(cb.verdict)}) — gap deprioritised, picker advances`,
@@ -6714,8 +6714,8 @@ const familySample: string[] = await (async () => {
       if (lastBody.verdict !== "FAVORABLE") break;
     }
     const allOk = sliceResults.length === slices.length && sliceResults.every((r) => r.verdict === "FAVORABLE");
+    const sliceLand: LandSignal = allOk && lastBody ? genuineLandSignal(lastBody, !(pointer.dry_run ?? false)) : { landed: false, commit_sha: null, vessel: null, push_status: null };
     if (allOk && lastBody) {
-      const sliceLand = genuineLandSignal(lastBody, !(pointer.dry_run ?? false));
       if (sliceLand.landed) await closeLandedGap(gap, sliceLand);
       const reachVerdict = sliceLand.landed ? 'SUCCESS' : 'UNFAVORABLE';
       console.log(`[gap-to-feature] reach verdict: ${reachVerdict}`);
@@ -6728,7 +6728,7 @@ const familySample: string[] = await (async () => {
     }
     // ...so it must not serve the cooldown either. Same reasoning as the credit exemption above.
     requeueAfterNonAttempt(gapComposeLastAttemptAt, String(gap.id ?? ""), lastBody);
-    return { shape: "gapToFeatureReport", body: { ok: allOk, stage: "route_compose", route: "capacity_slice_sequence", gap_id: gap.id, gap_category: gap.category, slices: sliceResults } };
+    return { shape: "gapToFeatureReport", body: { ok: allOk, stage: "route_compose", route: "capacity_slice_sequence", gap_id: gap.id, gap_category: gap.category, slices: sliceResults, landed: sliceLand.landed, landed_commit: sliceLand.commit_sha ?? null, compose: lastBody } };
   }
 
   // PREFER A FRESH PARK OVER A REDRAFT (resumable landings): a park is a patch for this

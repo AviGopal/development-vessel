@@ -184,7 +184,7 @@ export async function resolvePhantomTraceScan(
   try {
     const resp = await fetch(tracesUrl, {
       method: "GET",
-      headers: { ...authHeader },
+      headers: { ...selfAuthHeaders(pointer.tracesUrl ?? METABOB_ENDPOINT, METABOB_ENDPOINT) },
       signal: AbortSignal.timeout(15_000),
     });
     if (!resp.ok) {
@@ -270,7 +270,7 @@ export async function resolvePhantomTraceScan(
     try {
       const sResp = await fetch(singleUrl, {
         method: "GET",
-        headers: { ...authHeader },
+        headers: { ...selfAuthHeaders(pointer.tracesUrl ?? METABOB_ENDPOINT, METABOB_ENDPOINT) },
         signal: AbortSignal.timeout(10_000),
       });
       if (sResp.ok) {

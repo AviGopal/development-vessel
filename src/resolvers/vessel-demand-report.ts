@@ -168,7 +168,7 @@ export async function resolveVesselDemandReport(
     while (templates.length < templateFetchCap) {
       const url = `${templatesUrlBase}?limit=${pageSize}&offset=${offset}`;
       const resp = await fetch(url, {
-        headers: { ...auth },
+        headers: { ...selfAuthHeaders(pointer.templatesUrl ?? DEFAULT_TEMPLATES_URL, DEFAULT_TEMPLATES_URL) },
         signal: AbortSignal.timeout(15_000),
       });
       if (!resp.ok) break;
@@ -192,7 +192,7 @@ export async function resolveVesselDemandReport(
   const advertised = new Set<string>();
   try {
     const resp = await fetch(discoveryUrl, {
-      headers: { ...auth },
+      headers: { ...selfAuthHeaders(pointer.discoveryShapesUrl ?? DEFAULT_DISCOVERY_URL, DEFAULT_DISCOVERY_URL) },
       signal: AbortSignal.timeout(10_000),
     });
     if (resp.ok) {

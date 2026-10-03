@@ -1,5 +1,5 @@
 import { env } from "../config.js";
-import { selfAuthHeaders } from "../lib/self-auth.js";
+import { selfAuthHeaders, selfAuthKey } from "../lib/self-auth.js";
 import type { ResolverResult } from "./types.js";
 
 const DEFAULT_DISCOVERY_ENDPOINT = env("DISCOVERY_ENDPOINT", "http://127.0.0.1:8100");
@@ -185,13 +185,13 @@ export async function resolveVesselExerciseScan(
 
   const tracesJson = await fetchJson<{ executions?: ExecutionTrace[] }>(
     `${activityEndpoint}/v2/activities/execution-traces?limit=${trace_limit}`,
-    apiKey
+    selfAuthKey(activityEndpoint, DEFAULT_ACTIVITY_ENDPOINT)
   );
   const traces = tracesJson?.executions ?? [];
 
   const resolutionsJson = await fetchJson<{ resolutions?: ImpulseResolution[] }>(
     `${activityEndpoint}/v2/impulses/resolutions?limit=${resolution_limit}`,
-    apiKey
+    selfAuthKey(activityEndpoint, DEFAULT_ACTIVITY_ENDPOINT)
   );
   const resolutions = resolutionsJson?.resolutions ?? [];
 

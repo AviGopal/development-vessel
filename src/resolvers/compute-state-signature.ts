@@ -1,4 +1,5 @@
 import { readFile } from "fs/promises";
+import { selfAuthKey } from "../lib/self-auth.js";
 import { createHash } from "crypto";
 import type { ResolverResult } from "./types.js";
 
@@ -234,7 +235,9 @@ export async function resolveComputeStateSignature(
   const apiEndpoint = pointer.activityApiEndpoint
     ?? process.env["ACTIVITY_API_ENDPOINT"]
     ?? DEFAULT_ACTIVITY_API;
-  const apiKey = pointer.apiKey ?? process.env["METABOB_API_KEY"] ?? "";
+  // The key goes only to the configured activity-api (lib/self-auth.ts): an overridden
+  // activityApiEndpoint gets none; there a caller-supplied pointer.apiKey is used as before.
+  const apiKey = selfAuthKey(apiEndpoint, process.env["ACTIVITY_API_ENDPOINT"] ?? DEFAULT_ACTIVITY_API, pointer.apiKey);
   const httpTimeout = pointer.httpTimeoutMs ?? DEFAULT_HTTP_TIMEOUT_MS;
   const windowMs = windowMinutes * 60_000;
 

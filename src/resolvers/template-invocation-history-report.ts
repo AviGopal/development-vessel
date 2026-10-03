@@ -1,4 +1,5 @@
 import type { ResolverResult } from "./types.js";
+import { selfAuthHeaders } from "../lib/self-auth.js";
 
 /**
  * template_invocation_history_report — substrate-self-detection of templates
@@ -106,7 +107,7 @@ export async function resolveTemplateInvocationHistoryReport(
     while (templates.length < templateFetchCap) {
       const url = `${templatesUrlBase}?limit=${pageSize}&offset=${offset}`;
       const resp = await fetch(url, {
-        headers: { ...auth },
+        headers: { ...selfAuthHeaders(pointer.templatesUrl ?? DEFAULT_TEMPLATES_URL, DEFAULT_TEMPLATES_URL) },
         signal: AbortSignal.timeout(15_000),
       });
       if (!resp.ok) break;
@@ -130,7 +131,7 @@ export async function resolveTemplateInvocationHistoryReport(
   const traceCount = new Map<string, number>();
   try {
     const resp = await fetch(`${tracesUrlBase}?limit=${traceFetchCap}`, {
-      headers: { ...auth },
+      headers: { ...selfAuthHeaders(pointer.tracesUrl ?? DEFAULT_TRACES_URL, DEFAULT_TRACES_URL) },
       signal: AbortSignal.timeout(20_000),
     });
     if (resp.ok) {

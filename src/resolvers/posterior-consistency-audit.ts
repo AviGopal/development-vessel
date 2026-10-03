@@ -1,5 +1,5 @@
 import type { ResolverResult } from "./types.js";
-import { selfAuthHeaders } from "../lib/self-auth.js";
+import { selfAuthHeaders, selfAuthKey } from "../lib/self-auth.js";
 
 /**
  * posterior_consistency_audit — cross-check claimed Thompson α/β vs empirical
@@ -103,7 +103,7 @@ export async function resolvePosteriorConsistencyAudit(pointer: PosteriorConsist
   for (let guard = 0; guard < 200; guard++) {
     const page = await fetchJson<{ templates?: TemplateMetric[]; data?: TemplateMetric[]; total?: number }>(
       `${endpoint}/v2/activities/templates?limit=${pageSize}&offset=${offset}`,
-      apiKey,
+      selfAuthKey(endpoint, DEFAULT_METABOB_ENDPOINT),
     );
     if (!page) break;
     if (typeof page.total === "number") templateTotal = page.total;
@@ -115,7 +115,7 @@ export async function resolvePosteriorConsistencyAudit(pointer: PosteriorConsist
   }
   const trJson = await fetchJson<{ executions?: Array<{ activity_id?: string; status?: string }> }>(
     `${endpoint}/v2/activities/execution-traces?limit=${pointer.trace_limit ?? 500}`,
-    apiKey,
+    selfAuthKey(endpoint, DEFAULT_METABOB_ENDPOINT),
   );
   const traces = trJson?.executions ?? [];
 

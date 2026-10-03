@@ -1,5 +1,5 @@
 import type { ResolverResult } from "./types.js";
-import { selfAuthHeaders } from "../lib/self-auth.js";
+import { selfAuthHeaders, selfAuthKey } from "../lib/self-auth.js";
 
 /**
  * resolver_distribution_audit — horizon-detector (resolver-distribution horizon).
@@ -218,13 +218,13 @@ export async function resolveResolverDistributionAudit(
   const apiKey = process.env["METABOB_API_KEY"] ?? "";
 
   // 1. Discovery shape registry.
-  const discoveryJson = await fetchJson<Record<string, unknown>>(discoveryUrl, apiKey, 10_000);
+  const discoveryJson = await fetchJson<Record<string, unknown>>(discoveryUrl, selfAuthKey(discoveryUrl, DEFAULT_DISCOVERY_URL), 10_000);
   const shapeRegistry = parseShapeRegistry(discoveryJson);
 
   // 2. Templates.
   const templatesJson = await fetchJson<{ templates?: unknown }>(
     `${templatesUrl}?limit=500`,
-    apiKey,
+    selfAuthKey(templatesUrl, DEFAULT_TEMPLATES_URL),
     15_000,
   );
   const templates: TemplateRow[] = Array.isArray(templatesJson?.templates)
@@ -234,7 +234,7 @@ export async function resolveResolverDistributionAudit(
   // 3. Traces (for invoked-shape calculation).
   const tracesJson = await fetchJson<{ executions?: unknown; traces?: unknown }>(
     `${tracesUrl}?limit=${traceFetchCap}`,
-    apiKey,
+    selfAuthKey(tracesUrl, DEFAULT_TRACES_URL),
     15_000,
   );
   const traces: TraceRow[] = Array.isArray(tracesJson?.executions)
@@ -266,7 +266,7 @@ export async function resolveResolverDistributionAudit(
   // 4. Principles (for responsibility_imbalance).
   const principlesJson = await fetchJson<{ concepts?: unknown }>(
     `${conceptDbUrl}?source_type=architectural_pattern_principle&limit=100`,
-    apiKey,
+    selfAuthKey(conceptDbUrl, DEFAULT_CONCEPT_DB_URL),
     10_000,
   );
   const principles: PrincipleConcept[] = Array.isArray(principlesJson?.concepts)

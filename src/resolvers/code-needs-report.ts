@@ -1,4 +1,5 @@
 import type { ResolverResult } from "./types.js";
+import { selfAuthHeaders } from "../lib/self-auth.js";
 
 /**
  * code_needs_report — synthesizes the substrate's observability surface into
@@ -157,9 +158,9 @@ export async function resolveCodeNeedsReport(
 
   // Fetch traces, templates, advertised shapes in parallel.
   const [tracesResp, templatesResp, shapesResp] = await Promise.all([
-    fetch(tracesUrl, { headers: auth, signal: AbortSignal.timeout(15_000) }).catch(() => null),
-    fetch(templatesUrl + "?limit=200", { headers: auth, signal: AbortSignal.timeout(15_000) }).catch(() => null),
-    fetch(discoveryUrl, { headers: auth, signal: AbortSignal.timeout(10_000) }).catch(() => null),
+    fetch(tracesUrl, { headers: { ...selfAuthHeaders(pointer.tracesUrl ?? DEFAULT_TRACES_URL, DEFAULT_TRACES_URL) }, signal: AbortSignal.timeout(15_000) }).catch(() => null),
+    fetch(templatesUrl + "?limit=200", { headers: { ...selfAuthHeaders(pointer.templatesUrl ?? DEFAULT_TEMPLATES_URL, DEFAULT_TEMPLATES_URL) }, signal: AbortSignal.timeout(15_000) }).catch(() => null),
+    fetch(discoveryUrl, { headers: { ...selfAuthHeaders(pointer.discoveryShapesUrl ?? DEFAULT_DISCOVERY_URL, DEFAULT_DISCOVERY_URL) }, signal: AbortSignal.timeout(10_000) }).catch(() => null),
   ]);
 
   let traces: TraceLike[] = [];

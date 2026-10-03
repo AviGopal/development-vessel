@@ -1,5 +1,5 @@
 import type { ResolverResult } from "./types.js";
-import { selfAuthHeaders } from "../lib/self-auth.js";
+import { selfAuthHeaders, selfAuthKey } from "../lib/self-auth.js";
 
 /**
  * vessel_architecture_pattern_scan — horizon-detector (vessel-architecture horizon).
@@ -166,7 +166,7 @@ export async function resolveVesselArchitecturePatternScan(
   // 1. Traces (recent).
   const tracesJson = await fetchJson<{ executions?: unknown; traces?: unknown }>(
     `${tracesUrl}?limit=${traceFetchCap}`,
-    apiKey,
+    selfAuthKey(tracesUrl, DEFAULT_TRACES_URL),
     20_000,
   );
   const traces: TraceRow[] = (
@@ -179,7 +179,7 @@ export async function resolveVesselArchitecturePatternScan(
 
   // 2. Discovery shapes (advertised).
   const advertised = new Set<string>();
-  const discoveryJson = await fetchJson<Record<string, unknown>>(discoveryUrl, apiKey, 10_000);
+  const discoveryJson = await fetchJson<Record<string, unknown>>(discoveryUrl, selfAuthKey(discoveryUrl, DEFAULT_DISCOVERY_URL), 10_000);
   if (discoveryJson) {
     if (Array.isArray((discoveryJson as { shapes?: unknown }).shapes)) {
       for (const s of (discoveryJson as { shapes: unknown[] }).shapes) {
@@ -194,7 +194,7 @@ export async function resolveVesselArchitecturePatternScan(
   //    via recent trace template_ids → inputShapes / outputShapes.
   const templatesJson = await fetchJson<{ templates?: unknown }>(
     `${templatesUrl}?limit=500`,
-    apiKey,
+    selfAuthKey(templatesUrl, DEFAULT_TEMPLATES_URL),
     15_000,
   );
   const templates: Array<{ id?: unknown; inputShapes?: unknown; outputShapes?: unknown }> = Array.isArray(

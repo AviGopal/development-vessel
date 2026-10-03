@@ -128,7 +128,7 @@ export async function resolvePreconditionRejectionScan(
   try {
     const resp = await fetch(tracesUrl, {
       method: "GET",
-      headers: { ...authHeader },
+      headers: { ...selfAuthHeaders(pointer.tracesUrl ?? DEFAULT_TRACES_URL, DEFAULT_TRACES_URL) },
       signal: AbortSignal.timeout(15_000),
     });
     if (!resp.ok) {

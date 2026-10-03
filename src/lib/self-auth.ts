@@ -42,3 +42,8 @@ export function pointerOverride(value: unknown): string | undefined {
   if (value.trim() === "" || UNRENDERED.test(value)) return undefined;
   return value;
 }
+
+/** True when `url` is exactly the configured endpoint: the predicate behind selfAuthHeaders, for helpers holding a non-key credential (a JWT). */
+export function selfAuthTrusted(url: string, configured: string): boolean {
+  return url === configured;
+}

@@ -1,5 +1,5 @@
 import type { ResolverResult } from "./types.js";
-import { selfAuthHeaders } from "../lib/self-auth.js";
+import { selfAuthHeaders, selfAuthTrusted } from "../lib/self-auth.js";
 
 /**
  * activity_lifecycle_audit — horizon-detector (activity horizon).
@@ -131,10 +131,12 @@ interface PerTemplateStats {
   is_proposed: boolean;
 }
 
-async function fetchJson<T>(url: string, apiKey: string, timeoutMs: number): Promise<T | null> {
+// `trusted`: the URL is the configured endpoint (selfAuthTrusted). Neither the JWT nor the key goes anywhere else.
+async function fetchJson<T>(url: string, apiKey: string, timeoutMs: number, trusted: boolean): Promise<T | null> {
   const headers: Record<string, string> = {};
   const jwt = process.env["CONCEPT_DB_JWT"] ?? process.env["METABOB_JWT"] ?? "";
-  if (jwt) headers["Authorization"] = `Bearer ${jwt}`;
+  if (!trusted) { /* a URL the pointer overrides: no credential */ }
+  else if (jwt) headers["Authorization"] = `Bearer ${jwt}`;
   else if (apiKey) headers["Authorization"] = `ApiKey ${apiKey}`;
   try {
     const resp = await fetch(url, { headers, signal: AbortSignal.timeout(timeoutMs) });
@@ -196,7 +198,7 @@ export async function resolveActivityLifecycleAudit(
   const pageSize = 100;
   while (templates.length < templateFetchCap) {
     const url = `${templatesUrl}?limit=${pageSize}&offset=${offset}`;
-    const json = await fetchJson<{ templates?: unknown }>(url, apiKey, 15_000);
+    const json = await fetchJson<{ templates?: unknown }>(url, apiKey, 15_000, selfAuthTrusted(templatesUrl, DEFAULT_TEMPLATES_URL));
     const rows = Array.isArray(json?.templates) ? (json?.templates as TemplateRow[]) : [];
     if (rows.length === 0) break;
     templates.push(...rows);
@@ -218,6 +220,7 @@ export async function resolveActivityLifecycleAudit(
       `${tracesUrl}?limit=${tracePageSize}&offset=${traceOffset}`,
       apiKey,
       20_000,
+      selfAuthTrusted(tracesUrl, DEFAULT_TRACES_URL),
     );
     const pageRows: TraceRow[] = Array.isArray(pageJson?.executions)
       ? (pageJson?.executions as TraceRow[])

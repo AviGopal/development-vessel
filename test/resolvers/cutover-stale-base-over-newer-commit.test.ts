@@ -29,8 +29,13 @@
 // Drives the REAL resolveVesselMitosisCutover through its git-aware path, with baseRoot and
 // hostRepoRoot derived from MITOSIS_DIRECT_PUSH / MITOSIS_RUNTIME_DIR / MITOSIS_PUSH_CLONE_DIR the
 // way the running vessel derives them. Hermetic: temp dirs, a temp bare origin, no push
-// (skip_push), no restart, the precutover suite gate off, and the gap-store read / suite run
-// injected through the cutover's own test seam.
+// (skip_push), no restart, and the gap-store read / suite run injected through the cutover's own
+// test seam. The pre-cutover suite is NOT switched off by env (that kill switch is being removed):
+// its network goes through the shared cutover fetch guard, where discovery names a fixture shell
+// answering with a passing bun run. So every fixture here is MEASURED (suite ran=true), and a
+// refusal can only be for the reason each test names: the MUST-FAILs assert the specific
+// refuse_class the stale-base fix uses (stale_base_superseded), never a bare "refused", so they
+// cannot pass as no_measurement_available or any other refusal. Any unstubbed URL fails the test.
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import * as cutoverMod from "../../src/resolvers/vessel-mitosis-cutover.js";
 import { mkdtemp, mkdir, writeFile, readFile, chmod, rm } from "node:fs/promises";
@@ -38,6 +43,7 @@ import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { installCutoverFetchGuard, routeFleetUnreachable, routeShell, BUN_PASSING, type FetchGuard } from "./cutover-fetch-guard.js";
 
 const { resolveVesselMitosisCutover, __setOwnCheckDepsForTests } = cutoverMod;
 
@@ -59,6 +65,9 @@ const ENV_KEYS = [
 ] as const;
 const saved: Record<string, string | undefined> = {};
 let ws: string;
+let guard: FetchGuard;
+/** Pre-cutover suite runs: shell calls made before the cutover's own commit exists in the push clone. */
+let precheckRuns = 0;
 
 const VESSEL = "development-vessel";
 const MVID = "mitosis-2026-10-02T00-00-00-000Z";
@@ -101,7 +110,6 @@ beforeEach(async () => {
   process.env["WORKSPACE_ROOT"] = ws;
   process.env["MITOSIS_CUTOVER_SKIP_SYSTEMCTL"] = "1";
   process.env["PUSH_POLICY_PATH"] = join(ws, "no-push-policy.json");
-  process.env["CUTOVER_PRECHECK_SUITE"] = "0";
   // The production layout: the primary freshness gate reads the runtime tree, the commit lands in
   // the push clone.
   process.env["MITOSIS_DIRECT_PUSH"] = "1";
@@ -113,9 +121,20 @@ beforeEach(async () => {
     writeGap: fail("gap write"),
     runSuite: fail("test_suite run"),
   });
+  guard = installCutoverFetchGuard();
+  routeFleetUnreachable(guard);
+  precheckRuns = 0;
+  // The measurement: the pre-cutover suite runs and passes.
+  routeShell(guard, () => {
+    const r = spawnSync("git", ["log", "-1", "--format=%s"], { cwd: join(ws, "git", "vessels", VESSEL), encoding: "utf8" });
+    if (!String(r.stdout).startsWith("substrate-authored")) precheckRuns++;
+    return BUN_PASSING;
+  });
 });
 
 afterEach(async () => {
+  const violations = guard.restore();
+  expect(violations).toEqual([]);
   __setOwnCheckDepsForTests(null);
   for (const k of ENV_KEYS) {
     if (saved[k] === undefined) delete process.env[k];
@@ -245,6 +264,7 @@ describe("cutover class A: a stale-base staged edit never overwrites newer commi
       .toEqual({ head_still_has_newer_work: true, head: s.shaN });
     expect(r.shape).toBe("vesselMitosisCutoverResult");
     expect(body["refused"]).toBe(true);
+    expect(body["refuse_class"]).toBe("stale_base_superseded");
   });
 
   it("MUST-FAIL 2: refuses a staged edit built on B when the clone still reads B at the check but the cutover's own fetch + reset brings it to a newer commit to the same file", async () => {
@@ -261,6 +281,7 @@ describe("cutover class A: a stale-base staged edit never overwrites newer commi
       .toEqual({ head_still_has_newer_work: true, commits_on_top_of_N: "0" });
     expect(r.shape).toBe("vesselMitosisCutoverResult");
     expect(body["refused"]).toBe(true);
+    expect(body["refuse_class"]).toBe("stale_base_superseded");
   });
 
   it("MUST-FAIL 3: never hands the 12-char staged file-content hash to git as a revision", async () => {
@@ -286,6 +307,7 @@ describe("cutover class A: a stale-base staged edit never overwrites newer commi
     const r = await resolveVesselMitosisCutover(s.pointer as never);
     expect(String(((r.body ?? {}) as Record<string, unknown>)["refusal_reason"] ?? "")).toBe("");
     expect(r.shape).toBe("cutoverApplied");
+    expect(precheckRuns).toBeGreaterThan(0);
     expect(git(s.clone, "rev-parse", "HEAD~1")).toBe(s.shaB);
     expect(git(s.clone, "show", `HEAD:${F}`) + "\n").toBe(F_STAGED);
   });
@@ -294,6 +316,7 @@ describe("cutover class A: a stale-base staged edit never overwrites newer commi
     const s = await setup("none");
     const r = await resolveVesselMitosisCutover(s.pointer as never);
     expect(r.shape).toBe("cutoverApplied");
+    expect(precheckRuns).toBeGreaterThan(0);
     expect(git(s.clone, "rev-parse", "HEAD~1")).toBe(s.shaB);
     expect(git(s.clone, "show", `HEAD:${F}`) + "\n").toBe(F_STAGED);
   });
@@ -302,6 +325,7 @@ describe("cutover class A: a stale-base staged edit never overwrites newer commi
     const s = await setup("unrelated_file");
     const r = await resolveVesselMitosisCutover(s.pointer as never);
     expect(r.shape).toBe("cutoverApplied");
+    expect(precheckRuns).toBeGreaterThan(0);
     expect(git(s.clone, "rev-parse", "HEAD~1")).toBe(s.shaN);
     expect(git(s.clone, "show", `HEAD:${F}`) + "\n").toBe(F_STAGED);
     expect(git(s.clone, "show", `HEAD:${G}`) + "\n").toBe(G_AT_N);

@@ -12,7 +12,10 @@
 // These drive the REAL resolveVesselMitosisCutover through its git-aware path against a temp clone
 // with a bare origin (no push, no restart, no live services): the gap store read and the test_suite
 // run are the only stand-ins, injected through the cutover's own test seam. The whole-suite
-// precutover gate (step 5d) is switched off so no live suite is ever started from here.
+// precutover gate (step 5d) is NOT switched off by env (that kill switch is being removed): its
+// network goes through the shared cutover fetch guard, where discovery names a fixture shell that
+// answers with a passing bun run, so no live suite is ever started from here and every landing
+// below is measured. Any unstubbed URL fails the test.
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import * as cutoverMod from "../../src/resolvers/vessel-mitosis-cutover.js";
 import { resolveMaintenanceLeaseWrite } from "../../src/resolvers/maintenance-lease.js";
@@ -21,6 +24,7 @@ import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { installCutoverFetchGuard, routeFleetUnreachable, routeShell, BUN_PASSING, type FetchGuard } from "./cutover-fetch-guard.js";
 
 const { resolveVesselMitosisCutover } = cutoverMod;
 type Deps = { readGap?: (p: Record<string, unknown>) => Promise<unknown>; writeGap?: (p: Record<string, unknown>) => Promise<unknown>; runSuite?: (p: Record<string, unknown>) => Promise<unknown> };
@@ -46,6 +50,11 @@ const ENV_KEYS = [
 ] as const;
 const saved: Record<string, string | undefined> = {};
 let ws: string;
+let guard: FetchGuard;
+/** Pre-cutover suite runs: shell calls made while the landing clone still sat at "baseline". */
+let precheckRuns = 0;
+let currentHost = "";
+const headSubjectSync = (repo: string) => spawnSync("git", ["log", "-1", "--format=%s"], { cwd: repo, encoding: "utf8" }).stdout.trim();
 
 const VESSEL = "development-vessel";
 const GAP = "gap-own-check-target";
@@ -63,10 +72,15 @@ beforeEach(async () => {
   process.env["WORKSPACE_ROOT"] = ws;
   process.env["MITOSIS_CUTOVER_SKIP_SYSTEMCTL"] = "1";
   process.env["PUSH_POLICY_PATH"] = join(ws, "no-push-policy.json");
-  process.env["CUTOVER_PRECHECK_SUITE"] = "0";
+  guard = installCutoverFetchGuard();
+  routeFleetUnreachable(guard);
+  precheckRuns = 0;
+  routeShell(guard, () => { if (currentHost && headSubjectSync(currentHost) === "baseline") precheckRuns++; return BUN_PASSING; });
 });
 
 afterEach(async () => {
+  const violations = guard.restore();
+  expect(violations).toEqual([]);
   setDeps(null);
   for (const k of ENV_KEYS) {
     if (saved[k] === undefined) delete process.env[k];
@@ -88,6 +102,7 @@ async function setup(): Promise<{ baseRoot: string; mitosisRoot: string; hostRep
   const baseSha = createHash("sha256").update(live).digest("hex").slice(0, 12);
   await writeFile(join(mitosisRoot, "src", "resolvers", "target.ts"), STAGED);
   const hostRepoRoot = join(ws, "host-repo");
+  currentHost = hostRepoRoot;
   await mkdir(join(hostRepoRoot, "src", "resolvers"), { recursive: true });
   await writeFile(join(hostRepoRoot, "src", "resolvers", "target.ts"), "// original\n");
   spawnSync("git", ["init", "-b", "dev"], { cwd: hostRepoRoot });
@@ -375,13 +390,14 @@ describe("own-check gate: store outage, counters, unverified landings", () => {
     expect(c1["own_check_unmeasurable"]).toBe((c0["own_check_unmeasurable"] ?? 0) + 1);
   });
 
-  it("a typecheck-only landing (gap with no row, e.g. a synthesized pwt id) still lands but is stamped landed_unverified in its landing record", async () => {
+  it("no gap row (a synthesized pwt id) and a pre-cutover suite that ran (ran=true) lands, measured by the suite; its landing record is stamped landed_unverified (own check not re-run)", async () => {
     const s = await setup();
     let ran = 0;
     setDeps({ readGap: async () => ({ shape: "substrateGap", body: { gaps: [] } }), runSuite: async () => { ran++; return suiteBody(s.hostRepoRoot, {}); } });
     const before = counters()["landed_unverified"] ?? 0;
     const r = await resolveVesselMitosisCutover({ ...deferredPointer(s), gap_id: "pwt-development-vessel-target.ts-1a2b3c4d" } as never);
     expect(r.shape).toBe("cutoverApplied");
+    expect(precheckRuns).toBeGreaterThan(0);                        // the measurement: the pre-cutover suite ran
     expect(ran).toBe(0);
     const body = r.body as Record<string, unknown>;
     expect(body["landed_unverified"]).toBe(true);
@@ -393,12 +409,13 @@ describe("own-check gate: store outage, counters, unverified landings", () => {
     expect(counters()["landed_unverified"]).toBe(before + 1);
   });
 
-  it("a gap whose row carries no test_suite check is landed_unverified too; a verified landing is not", async () => {
+  it("a gap whose row carries no test_suite check lands when the pre-cutover suite ran (ran=true), stamped landed_unverified; a verified landing is not", async () => {
     const s = await setup();
     const noCheck = { ...gapRow, classification_metadata: { falsifier: "none" } };
     setDeps({ readGap: async () => ({ shape: "substrateGap", body: { gaps: [noCheck] } }), runSuite: async () => suiteBody(s.hostRepoRoot, {}) });
     const r = await resolveVesselMitosisCutover(deferredPointer(s) as never);
     expect(r.shape).toBe("cutoverApplied");
+    expect(precheckRuns).toBeGreaterThan(0);
     expect((r.body as Record<string, unknown>)["landed_unverified"]).toBe(true);
     const s2 = await setup2();
     setDeps({ readGap, runSuite: async () => suiteBody(s2.hostRepoRoot, {}) });
@@ -446,19 +463,10 @@ describe("own check that cannot be measured: counted on the gap, and at N routed
 
   // THE REAL test_suite RESOLVER, with only the network stood in: discovery names a shell producer, and the
   // shell answers with bun's actual output for a -t filter that matches no test (captured from bun 1.3.14).
-  const originalFetch = globalThis.fetch;
+  // Routed through the shared fetch guard (later routes win, so this overrides the passing default).
   function bunNoMatchShell(hostRepoRoot: string): void {
-    globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
-      const url = typeof input === "string" ? input : String((input as { url?: string }).url ?? input);
-      const body = init?.body ? JSON.parse(String(init.body)) : {};
-      if (body?.pointer?.type === "vesselCapability") return Response.json({ content: { vessels: [{ endpoint: "http://shell.fixture", resolve_endpoint: "/resolve", health_score: 1 }] } });
-      if (url.startsWith("http://shell.fixture")) {
-        return Response.json({ stdout: `VERIFIED_ROOT=${hostRepoRoot}\nVERIFIED_HEAD=abc1234\nbun test v1.3.14 (0d9b296a)\n\n${TEST_FILE}:\n\nerror: regex "${MISSING.replace(" > ", " ")}" matched 0 tests. Searched 1 file (skipping 1 test) [25.00ms]\n` });
-      }
-      return Response.json({});
-    }) as unknown as typeof fetch;
+    routeShell(guard, () => `VERIFIED_ROOT=${hostRepoRoot}\nVERIFIED_HEAD=abc1234\nbun test v1.3.14 (0d9b296a)\n\n${TEST_FILE}:\n\nerror: regex "${MISSING.replace(" > ", " ")}" matched 0 tests. Searched 1 file (skipping 1 test) [25.00ms]\n`);
   }
-  afterEach(() => { globalThis.fetch = originalFetch; });
 
   it("a gap whose only_tests names a non-existent test, cut over twice, leaves own_check_unmeasurable_count=2 on the gap row", async () => {
     const st = await memStore(missingRow);
@@ -521,7 +529,7 @@ describe("own check that cannot be measured: counted on the gap, and at N routed
       await resolveVesselMitosisCutover(deferredPointer(s) as never);
     }
     expect(meta(st)["own_check_unmeasurable_count"]).toBe(2);
-    globalThis.fetch = originalFetch;
+    routeShell(guard, () => BUN_PASSING);
     const s3 = await setup2();
     setDeps({ readGap: st.readGap, writeGap: st.writeGap, runSuite: async () => suiteBody(s3.hostRepoRoot, { pass: 0, fail: 1, requested_not_passing: 1 }) });
     const r = await resolveVesselMitosisCutover(deferredPointer(s3) as never);

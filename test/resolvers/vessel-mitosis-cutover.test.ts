@@ -3,6 +3,7 @@ import { resolveVesselMitosisCutover } from "../../src/resolvers/vessel-mitosis-
 import { mkdtemp, mkdir, writeFile, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { installCutoverFetchGuard, routeFleetUnreachable, routeShell, BUN_PASSING, type FetchGuard } from "./cutover-fetch-guard.js";
 
 let tmpRoot: string;
 let workspaceRoot: string;
@@ -43,6 +44,26 @@ const savedMitosisEnv: Record<string, string | undefined> = {};
 // exist) so a policy or owner on the host running the suite cannot change a verdict.
 const PUSH_SCOPE_ENV_KEYS = ["PUSH_POLICY_PATH", "SUBSTRATE_REPO_OWNER"] as const;
 const savedPushScopeEnv: Record<string, string | undefined> = {};
+
+// NETWORK: every request must match a declared route (shared cutover fetch guard); an unstubbed
+// URL fails the test. Before the guard, the git-aware landings below sent their pre-cutover and
+// post-land suites to real discovery (127.0.0.1:8100, a module constant): connection-refused on a
+// dev host (read as "suite did not run"), the LIVE fleet inside a substrate container. Now
+// discovery names a fixture shell that answers with a passing bun run, so every landing here is
+// MEASURED by its pre-cutover suite (ran=true) — a landing nothing measured is refused
+// (no_measurement_available), and these tests are about apply/push scope, not about that.
+let guard: FetchGuard;
+/** Shell calls (pre-cutover + post-land suites) answered by the fixture shell in this test. */
+let suiteRuns = 0;
+beforeEach(() => {
+  guard = installCutoverFetchGuard();
+  routeFleetUnreachable(guard);
+  suiteRuns = 0;
+  routeShell(guard, () => { suiteRuns++; return BUN_PASSING; });
+});
+afterEach(() => {
+  expect(guard.restore()).toEqual([]);
+});
 
 beforeEach(async () => {
   tmpRoot = await mkdtemp(join(tmpdir(), "mitosis-cut-"));
@@ -450,6 +471,7 @@ describe("vessel_mitosis_cutover", () => {
       applied_log_path: appliedLog,
     });
     expect(r.shape).toBe("cutoverApplied");
+    expect(suiteRuns).toBeGreaterThan(0); // measured: the pre-cutover suite ran (ran=true)
     const body = r.body as {
       new_git_sha: string;
       push_status: string;
@@ -834,6 +856,7 @@ describe("vessel_mitosis_cutover", () => {
     process.env["SUBSTRATE_REPO_OWNER"] = "\"Fork\"";
     const r = await resolveVesselMitosisCutover(gitCutoverPointer(fx));
     expect(r.shape).toBe("cutoverApplied");
+    expect(suiteRuns).toBeGreaterThan(0);
     const scope = (r.body as { push_scope: { regime: string; target: { owner: string } } }).push_scope;
     expect(scope.regime).toBe("grandfathered");
     expect(scope.target.owner).toBe("Upstream");
@@ -862,6 +885,7 @@ describe("vessel_mitosis_cutover", () => {
     await seedFreshInstallPolicy();
     const r = await resolveVesselMitosisCutover(gitCutoverPointer(fx));
     expect(r.shape).toBe("cutoverApplied");
+    expect(suiteRuns).toBeGreaterThan(0);
     const scope = (r.body as { push_scope: { regime: string; shared: boolean } }).push_scope;
     expect(scope.regime).toBe("policy");
     expect(scope.shared).toBe(false);
@@ -885,6 +909,7 @@ describe("vessel_mitosis_cutover", () => {
     await pointAtOwner(fx.hostRepoRoot, "Upstream");
     const r1 = await resolveVesselMitosisCutover(gitCutoverPointer(fx));
     expect(r1.shape).toBe("cutoverApplied");
+    expect(suiteRuns).toBeGreaterThan(0);
     const s1 = (r1.body as { push_scope: { regime: string; shared: boolean; promoted: boolean } }).push_scope;
     expect(s1).toMatchObject({ regime: "policy", shared: true, promoted: true });
 

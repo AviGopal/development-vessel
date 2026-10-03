@@ -512,7 +512,7 @@ const CALLER_BASE = /^(?:pointer|input|args|payload|impulse|body|req|request)$/;
 const KEY_GUARD = /\bselfAuth(?:Headers)?\b/;
 const STRING_METHODS = /^(?:replace|replaceAll|trim|trimEnd|trimStart|toString|toLowerCase|slice)$/;
 
-type Piece = { text: string } | { ref: string; base?: string };
+type Piece = { text: string } | { ref: string; base?: string; baseNode?: ts.Node };
 
 function pieces(node: ts.Node, end: "head" | "tail", depth = 0, seen = new Set<ts.Node>()): Piece[] {
   if (depth > 12 || seen.has(node)) return [];
@@ -564,7 +564,7 @@ function pieces(node: ts.Node, end: "head" | "tail", depth = 0, seen = new Set<t
         }
       }
     }
-    return [{ ref: name || node.getText(), base: base.getText() }];
+    return [{ ref: name || node.getText(), base: base.getText(), baseNode: base }];
   }
   return [{ ref: node.getText().slice(0, 80) }];
 }
@@ -581,7 +581,46 @@ export function isResolveUrl(node: ts.Node): boolean {
   );
 }
 export function isCallerUrl(node: ts.Node): boolean {
-  return pieces(node, "head").some((p) => "ref" in p && p.base !== undefined && CALLER_BASE.test(p.base));
+  return pieces(node, "head").some((p) => "ref" in p && p.base !== undefined && (CALLER_BASE.test(p.base) || (p.baseNode !== undefined && isRequestValue(p.baseNode))));
+}
+
+// A REQUEST VALUE is what a caller hands this vessel, whatever it is named: `p` and `_pointer` are as
+// caller-supplied as `pointer`. An identifier is one when it is
+//   - the first parameter of a resolver (a function named resolve<Name>: every resolver takes its pointer
+//     first), or any parameter typed as a pointer/payload/input/args/params type, or
+//   - a local bound from one (`const ptr = pointer as X`, `const cfg = p.config ?? {}`), followed through
+//     same-scope declarations.
+const REQUEST_TYPE = /(?:Pointer|Payload|Input|Args|Params)\b/;
+const RESOLVER_NAME = /^resolve[A-Z]/;
+function fnName(fn: ts.SignatureDeclaration): string {
+  if ((ts.isFunctionDeclaration(fn) || ts.isMethodDeclaration(fn) || ts.isFunctionExpression(fn)) && fn.name) return fn.name.getText();
+  const parent = fn.parent;
+  if (parent && ts.isVariableDeclaration(parent) && ts.isIdentifier(parent.name)) return parent.name.text;
+  if (parent && ts.isPropertyAssignment(parent)) return parent.name.getText();
+  return "";
+}
+function isRequestValue(node: ts.Node, depth = 0): boolean {
+  if (depth > 6) return false;
+  let n: ts.Node = node;
+  while (ts.isParenthesizedExpression(n) || ts.isAsExpression(n) || ts.isNonNullExpression(n) || ts.isSatisfiesExpression(n) || ts.isTypeAssertionExpression(n)) n = n.expression;
+  if (ts.isPropertyAccessExpression(n) || ts.isElementAccessExpression(n)) return isRequestValue(n.expression, depth + 1);
+  if (ts.isBinaryExpression(n) && (n.operatorToken.kind === ts.SyntaxKind.QuestionQuestionToken || n.operatorToken.kind === ts.SyntaxKind.BarBarToken)) {
+    return isRequestValue(n.left, depth + 1) || isRequestValue(n.right, depth + 1);
+  }
+  if (!ts.isIdentifier(n)) return false;
+  if (CALLER_BASE.test(n.text)) return true;
+  for (const d of declsOf(n)) {
+    if (d.kind === "param") {
+      const param = ts.isParameter(d.node) ? d.node : d.node.parent;
+      if (!param || !ts.isParameter(param)) continue;
+      if (param.type && REQUEST_TYPE.test(param.type.getText())) return true;
+      const fn = param.parent as ts.SignatureDeclaration;
+      if (fn.parameters[0] === param && RESOLVER_NAME.test(fnName(fn))) return true;
+    } else if (d.kind === "value" && !(ts.isBinaryExpression(d.node) && d.node.operatorToken.kind === ts.SyntaxKind.EqualsToken)) {
+      if (isRequestValue(d.node, depth + 1)) return true;
+    }
+  }
+  return false;
 }
 
 export type ResolveSite = {

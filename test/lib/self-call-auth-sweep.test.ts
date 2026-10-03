@@ -137,4 +137,38 @@ describe("resolve-call sweep: the node key never follows a caller-supplied URL",
       { line: 22, authed: true, callerUrl: true, guarded: true },
     ]);
   });
+
+  // A REQUEST VALUE is caller-supplied whatever it is named (see isRequestValue in ./self-call-sweep.ts).
+  it("reads a request value by its role, not its name (fixture)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "resolve-sweep-req-"));
+    const path = join(dir, "fixture.ts");
+    writeFileSync(
+      path,
+      [
+        `const SELF = "http://127.0.0.1:8090/v2/impulses/resolve";`,
+        `const KEY = process.env.METABOB_API_KEY ?? "";`,
+        `const H = { Authorization: \`ApiKey \${KEY}\` };`,
+        `type ScanPointer = { url?: string; cfg?: { url?: string } };`,
+        // the first parameter of a resolver, named `p`: caller-supplied
+        `export async function resolveScan(p: ScanPointer) { await fetch(p.url ?? SELF, { method: "POST", headers: H }); }`,
+        // a helper parameter typed as a pointer: caller-supplied
+        `async function helper(ptr: ScanPointer) { await fetch(ptr.url ?? SELF, { method: "POST", headers: H }); }`,
+        // a local bound from the pointer: caller-supplied
+        `export async function resolveAlias(pointer: ScanPointer) { const c = pointer.cfg ?? {}; await fetch(c.url ?? SELF, { method: "POST", headers: H }); }`,
+        // NOT a request value: a loop variable named \`p\` over a discovery answer (ui-write-passthrough.ts
+        // readPreferredAskVesselIds). The endpoint comes from discovery, which may get the key.
+        `export async function fromDiscovery(producers: Array<{ endpoint?: string }>) { for (const p of producers) { await fetch(String(p.endpoint) + "/resolve", { method: "POST", headers: H }); } }`,
+        // NOT a request value: a second parameter of a resolver that is not typed as a pointer
+        `export async function resolveTwo(pointer: ScanPointer, base: { url: string }) { await fetch(base.url + "/resolve", { method: "POST", headers: H }); }`,
+      ].join("\n"),
+    );
+    const got = sweepResolveFile(path).map((s) => ({ line: s.line, callerUrl: s.callerUrl }));
+    expect(got).toEqual([
+      { line: 5, callerUrl: true },
+      { line: 6, callerUrl: true },
+      { line: 7, callerUrl: true },
+      { line: 8, callerUrl: false },
+      { line: 9, callerUrl: false },
+    ]);
+  });
 });

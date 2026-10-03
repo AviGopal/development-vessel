@@ -119,6 +119,11 @@ describe("resolve-call sweep: the node key never follows a caller-supplied URL",
         `export async function identity(base: string) { await fetch(\`\${base}/v1/auth/resolve\`, { method: "POST" }); }`,
         `async function post(u: string, init: RequestInit) { return fetch(u, init); }`,
         `export async function viaWrapper(input: { endpoint: string }) { await post(input.endpoint + "/resolve", { method: "POST" }); }`,
+        // A wrapper that sets its own headers: the guard (or its absence) inside it is judged at its callers.
+        `async function emitPlain(u: string, body: unknown) { return fetch(u, { method: "POST", headers: { Authorization: \`ApiKey \${KEY}\` }, body: JSON.stringify(body) }); }`,
+        `async function emitGuarded(u: string, body: unknown) { return fetch(u, { method: "POST", headers: { ...selfAuthHeaders(u, SELF) }, body: JSON.stringify(body) }); }`,
+        `export async function wrapperLeak(pointer: { url?: string }) { await emitPlain(pointer.url ?? SELF, {}); }`,
+        `export async function wrapperGuarded(pointer: { url?: string }) { await emitGuarded(pointer.url ?? SELF, {}); }`,
       ].join("\n"),
     );
     const got = sweepResolveFile(path).map((s) => ({ line: s.line, authed: s.authed, callerUrl: s.callerUrl, guarded: s.guarded }));
@@ -128,6 +133,8 @@ describe("resolve-call sweep: the node key never follows a caller-supplied URL",
       { line: 9, authed: true, callerUrl: true, guarded: false },
       { line: 13, authed: true, callerUrl: true, guarded: true },
       { line: 18, authed: false, callerUrl: true, guarded: false },
+      { line: 21, authed: true, callerUrl: true, guarded: false },
+      { line: 22, authed: true, callerUrl: true, guarded: true },
     ]);
   });
 });

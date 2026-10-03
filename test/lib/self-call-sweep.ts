@@ -289,6 +289,7 @@ type Wrapper = {
   urlIdx: number | "self";
   initIdx: number | null; // the parameter that carries the headers (null: the wrapper sets its own)
   authedInside: boolean;
+  guardedInside: boolean; // the wrapper's own headers put the key behind selfAuthHeaders (see KEY_GUARD)
   writesInside: string[];
   line: number;
   site?: ts.CallExpression; // for a fixed-self wrapper that sets its own headers: where they belong
@@ -332,7 +333,7 @@ const argWrites = (a: ts.Node): string[] => {
   const ns = expandedNodes(a, 2, { functions: false });
   return [...writesIn(ns.map((n) => n.getText()).join("\n")), ...ns.flatMap(dynamicTypes)];
 };
-const FETCH: Wrapper = { urlIdx: 0, initIdx: 1, authedInside: false, writesInside: [], line: 0 };
+const FETCH: Wrapper = { urlIdx: 0, initIdx: 1, authedInside: false, guardedInside: false, writesInside: [], line: 0 };
 
 /** Which parameter supplies the headers of `initArg`, if any. */
 function headerParam(initArg: ts.Node | undefined, params: string[]): number {
@@ -357,11 +358,11 @@ function headerParam(initArg: ts.Node | undefined, params: string[]): number {
   return -1;
 }
 
-type RawSite = { at: ts.CallExpression; writes: string[]; authed: boolean; via?: string; urlArg: ts.Node | "self"; init?: ts.Node };
+type RawSite = { at: ts.CallExpression; writes: string[]; authed: boolean; via?: string; urlArg: ts.Node | "self"; init?: ts.Node; guardedInside: boolean };
 type SweepMode = { match: (n: ts.Node) => boolean; needWrites: boolean };
 
 export function sweepFile(path: string): SweepSite[] {
-  return sweepCalls(path, { match: isSelf, needWrites: true }).map(({ at: _a, urlArg: _u, init: _i, ...site }) => site);
+  return sweepCalls(path, { match: isSelf, needWrites: true }).map(({ at: _a, urlArg: _u, init: _i, guardedInside: _g, ...site }) => site);
 }
 
 function sweepCalls(path: string, mode: SweepMode): Array<SweepSite & RawSite> {
@@ -404,12 +405,15 @@ function sweepCalls(path: string, mode: SweepMode): Array<SweepSite & RawSite> {
       }
       const initArg = inner.initIdx === null ? undefined : call.arguments[inner.initIdx];
       const authedInside = inner.authedInside || authedInit(initArg);
-      const initIdx = authedInside ? -1 : headerParam(initArg, fn.params);
+      const guardedInside = inner.guardedInside || guardedInit(initArg);
+      // A guard's own arguments (`selfAuthHeaders(u, SELF)`) name the URL, not headers the caller supplies.
+      const initIdx = authedInside || guardedInside ? -1 : headerParam(initArg, fn.params);
       const ownHeaders = initIdx < 0 && inner.initIdx !== null;
       wrappers.set(fn.name, {
         urlIdx,
         initIdx: initIdx >= 0 ? initIdx : inner.initIdx === null ? null : null,
         authedInside,
+        guardedInside,
         writesInside: [...new Set([...inner.writesInside, ...call.arguments.flatMap(argWrites)])],
         line: sf.getLineAndCharacterOfPosition(fn.node.getStart()).line + 1,
         ...(urlIdx === "self" ? { site: inner.site ?? (ownHeaders ? call : undefined) } : inner.site ? { site: inner.site } : {}),
@@ -420,7 +424,7 @@ function sweepCalls(path: string, mode: SweepMode): Array<SweepSite & RawSite> {
 
   const sites: Array<SweepSite & RawSite> = [];
   const bySite = new Map<ts.CallExpression, SweepSite & RawSite>();
-  const record = (at: ts.CallExpression, writes: string[], authed: boolean, via: string | undefined, urlArg: ts.Node | "self", init: ts.Node | undefined): void => {
+  const record = (at: ts.CallExpression, writes: string[], authed: boolean, via: string | undefined, urlArg: ts.Node | "self", init: ts.Node | undefined, guardedInside = false): void => {
     const prior = bySite.get(at);
     if (prior) {
       prior.writes = [...new Set([...prior.writes, ...writes])].sort();
@@ -430,6 +434,7 @@ function sweepCalls(path: string, mode: SweepMode): Array<SweepSite & RawSite> {
       at,
       urlArg,
       init,
+      guardedInside,
       file: relative(SRC_ROOT, path),
       line: sf.getLineAndCharacterOfPosition(at.getStart()).line + 1,
       ...(via ? { via } : {}),
@@ -458,13 +463,13 @@ function sweepCalls(path: string, mode: SweepMode): Array<SweepSite & RawSite> {
     const writes = [...new Set([...call.arguments.flatMap(argWrites), ...t.writesInside])];
     if (t.urlIdx === "self" && t.site) {
       // The headers belong at the wrapper's own transport call: report it once, with every caller's writes.
-      if (writes.length > 0 || !mode.needWrites) record(t.site, writes, t.authedInside, undefined, t.site.arguments[0] ?? "self", t.site.arguments[1]);
+      if (writes.length > 0 || !mode.needWrites) record(t.site, writes, t.authedInside, undefined, t.site.arguments[0] ?? "self", t.site.arguments[1], t.guardedInside);
       continue;
     }
     if (writes.length === 0 && mode.needWrites) continue;
     const init = t.initIdx === null ? undefined : call.arguments[t.initIdx];
     const authed = t.authedInside || authedInit(init);
-    record(call, writes, authed, cn !== "fetch" ? `${cn}@${t.line}` : undefined, urlArg, init);
+    record(call, writes, authed, cn !== "fetch" ? `${cn}@${t.line}` : undefined, urlArg, init, t.guardedInside);
   }
   return sites;
 }
@@ -564,6 +569,12 @@ function pieces(node: ts.Node, end: "head" | "tail", depth = 0, seen = new Set<t
   return [{ ref: node.getText().slice(0, 80) }];
 }
 
+/** The headers of `init` put the key behind selfAuthHeaders (a textual check over the expanded headers). */
+function guardedInit(init: ts.Node | undefined): boolean {
+  if (!init) return false;
+  return KEY_GUARD.test(headerExprs(init).map((h) => expanded(h, 3, { functions: true })).join("\n"));
+}
+
 export function isResolveUrl(node: ts.Node): boolean {
   return pieces(node, "tail").some((p) =>
     "text" in p ? RESOLVE_TAIL.test(p.text) && !AUTH_ROUTE_TAIL.test(p.text) : RESOLVE_NAME.test(p.ref.replace(/^.*\./, "")),
@@ -584,8 +595,9 @@ export type ResolveSite = {
 
 export function sweepResolveFile(path: string): ResolveSite[] {
   return sweepCalls(path, { match: isResolveUrl, needWrites: false }).map((s) => {
-    const hdrText = s.init ? headerExprs(s.init).map((h) => expanded(h, 3, { functions: true })).join("\n") : "";
-    const guarded = KEY_GUARD.test(hdrText);
+    // The guard may sit in the headers this call passes, or inside a wrapper that sets its own headers
+    // (`emitGap(url, body)` whose fetch carries `...selfAuthHeaders(url, DEFAULT)`).
+    const guarded = s.guardedInside || guardedInit(s.init);
     return {
       file: s.file,
       line: s.line,

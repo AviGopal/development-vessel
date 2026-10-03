@@ -596,8 +596,13 @@ function withoutGuardCalls(h: ts.Node): string {
     .map((n) => {
       let text = n.getText();
       const calls: string[] = [];
+      const hasGuard = (c: ts.Node): boolean => KEY_GUARD.test(c.getText());
       const visit = (c: ts.Node): void => {
         if (ts.isCallExpression(c) && KEY_GUARD.test(c.expression.getText())) calls.push(c.getText());
+        // `selfAuthTrusted(u, D) ? { Authorization: … } : {}` and `selfAuthTrusted(u, D) && { … }`: the
+        // credential sits behind the guard, so the guarded branch is cut out with it.
+        else if (ts.isConditionalExpression(c) && hasGuard(c.condition)) { calls.push(c.whenTrue.getText()); visit(c.condition); visit(c.whenFalse); }
+        else if (ts.isBinaryExpression(c) && c.operatorToken.kind === ts.SyntaxKind.AmpersandAmpersandToken && hasGuard(c.left)) { calls.push(c.right.getText()); visit(c.left); }
         else ts.forEachChild(c, visit);
       };
       visit(n);

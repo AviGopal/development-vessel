@@ -210,7 +210,7 @@ describe("keyed-URL sweep: no credential follows a caller-supplied URL on any ro
     writeFileSync(
       path,
       [
-        `import { selfAuthHeaders, selfAuthKey } from "./self-auth.js";`,
+        `import { selfAuthHeaders, selfAuthKey, selfAuthTrusted } from "./self-auth.js";`,
         `const TRACES = "http://127.0.0.1:8080/v2/activities/execution-traces";`,
         `const KEY = process.env.METABOB_API_KEY ?? "";`,
         `type P = { tracesUrl?: string; id?: string };`,
@@ -226,6 +226,10 @@ describe("keyed-URL sweep: no credential follows a caller-supplied URL on any ro
         `export async function resolveD(p: P) { const u = p.tracesUrl ?? TRACES; await fetchJson(u, selfAuthKey(u, TRACES)); }`,
         // a pointer value that only fills a PATH segment of a configured URL: not a caller URL, not listed
         `export async function resolveE(p: P) { await fetchById(String(p.id)); }`,
+        // a guard NEXT TO a raw key is no guard: flagged
+        `export async function resolveF(p: P) { const u = p.tracesUrl ?? TRACES; const auth = { Authorization: \`ApiKey \${KEY}\` }; await fetch(u, { headers: { ...auth, ...selfAuthHeaders(u, TRACES) } }); }`,
+        // a credential behind a guard condition: passes
+        `export async function resolveG(p: P) { const u = p.tracesUrl ?? TRACES; await fetch(u, { headers: selfAuthTrusted(u, TRACES) ? { Authorization: \`Bearer \${KEY}\` } : {} }); }`,
       ].join("\n"),
     );
     const got = sweepKeyedCallerUrlFile(path).map((s) => ({ line: s.line, guarded: s.guarded }));
@@ -234,6 +238,8 @@ describe("keyed-URL sweep: no credential follows a caller-supplied URL on any ro
       { line: 8, guarded: true },
       { line: 9, guarded: false },
       { line: 10, guarded: true },
+      { line: 12, guarded: false },
+      { line: 13, guarded: true },
     ]);
   });
 });

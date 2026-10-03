@@ -18,7 +18,11 @@
 //   - SubstrateGapReadPointer gains `include_held?: boolean`; include_held:true lists held gaps too
 //     (operator views, and bookkeeping readers such as dedupe and landing verification).
 //   - feature_compose refuses a held gap with stage "operator_hold" whether directed or not, BEFORE
-//     claiming a slot or any network call (no LLM, no edit), and logs the refusal.
+//     claiming a slot or any other network call (no LLM, no edit), and logs the refusal.
+//   - The hold is decided from the STORED row (read by id), not the pointer, both ways: a pointer
+//     that omits the hold ({id} only, stale metadata) is still refused; a pointer that claims a
+//     hold the store does not hold is not. An unreadable store fails closed with stage
+//     "hold_state_unreadable" (as the cutover defers on gap_store_unavailable).
 //   - Unchanged and kept green: closing a held gap still needs falsifier_exercise.passed, and the
 //     lane's auto-pick admission (admitActionableGaps) still excludes operator_hold. No green test
 //     pinned the latter (gap-drain-backoff.test.ts pins a different, still-open observer defect and
@@ -31,14 +35,15 @@
 // with it set the resolver forwards before its own filter runs, so the test would grade the
 // fixture's filter, not the store's. GAP_STORE_ENDPOINT is cleared per test and the fetch guard
 // runs with zero routes, so an accidental forward is a recorded violation.
-// (b) carries the hold on pointer.gap.classification_metadata and pre-claims a compose slot for the
-// SAME gap id under COMPOSE_SLOT_DIR, so a compose that gets past the hold check stops
-// deterministically at the next stage (stage "gap_in_flight") without drafting.
+// (b) serves the stored row from the GAP_STORE_ENDPOINT in-memory fixture (see the compose describe)
+// and pre-claims a compose slot for the SAME gap id under COMPOSE_SLOT_DIR, so a compose that gets
+// past the hold check stops deterministically at the next stage (stage "gap_in_flight") without
+// drafting.
 import { afterAll, afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import { mkdirSync, readdirSync, rmSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { installCutoverFetchGuard, restoreCutoverFetch, type FetchGuard } from "./cutover-fetch-guard.js";
+import { installCutoverFetchGuard, restoreCutoverFetch, routeFixtureGapStore, FIXTURE_GAP_STORE, type FetchGuard } from "./cutover-fetch-guard.js";
 import { installCutoverFsGuard, restoreCutoverFsModules, type FsGuard } from "./cutover-fs-guard.js";
 import { installCutoverExecGuard, restoreCutoverExecModules, type ExecGuard } from "./cutover-exec-guard.js";
 
@@ -81,6 +86,7 @@ let savedEndpoint: string | undefined;
 let savedSlotDir: string | undefined;
 let logs: string[] = [];
 let logSpy: ReturnType<typeof spyOn> | null = null;
+let warnSpy: ReturnType<typeof spyOn> | null = null;
 
 beforeEach(() => {
   savedEndpoint = process.env["GAP_STORE_ENDPOINT"];
@@ -92,6 +98,7 @@ beforeEach(() => {
   __resetPolicyReadsForTests();
   logs = [];
   logSpy = spyOn(console, "log").mockImplementation((...a: unknown[]) => { logs.push(a.map(String).join(" ")); });
+  warnSpy = spyOn(console, "warn").mockImplementation((...a: unknown[]) => { logs.push(a.map(String).join(" ")); });
   fetchGuard = installCutoverFetchGuard();
   fsGuard = installCutoverFsGuard();
   execGuard = installCutoverExecGuard();
@@ -103,6 +110,8 @@ afterEach(() => {
   fetchGuard = fsGuard = execGuard = null as never;
   logSpy?.mockRestore();
   logSpy = null;
+  warnSpy?.mockRestore();
+  warnSpy = null;
   if (savedEndpoint === undefined) delete process.env["GAP_STORE_ENDPOINT"]; else process.env["GAP_STORE_ENDPOINT"] = savedEndpoint;
   if (savedSlotDir === undefined) delete process.env["COMPOSE_SLOT_DIR"]; else process.env["COMPOSE_SLOT_DIR"] = savedSlotDir;
   expect(fetchV).toEqual([]);
@@ -170,7 +179,28 @@ function routeOpenEnvelope(g: FetchGuard): void {
   g.route({ name: "spend", match: (_u, b) => b?.impulse?.pointer?.type === "llmSpendSummaryNode", respond: () => Response.json({ body: { window_ms: 3_600_000, current: { window_start: new Date(Date.now() - 60_000).toISOString(), cost_usd: 0.1 }, previous: null } }) });
 }
 
+// THE HOLD LIVES IN THE STORE, NOT THE POINTER (round 2). A directed caller's pointer can carry {id}
+// only, or metadata copied before the hold was set; deciding from the pointer is deciding from a
+// stale copy. The compose reads the stored row (the same by-id read hydration uses) before the slot
+// claim, and the stored row decides both ways. If it cannot be read the compose fails CLOSED with
+// stage hold_state_unreadable, as the cutover defers on gap_store_unavailable.
+//
+// The store here is the shared in-memory fixture behind GAP_STORE_ENDPOINT (cutover-fetch-guard.ts
+// routeFixtureGapStore): feature-compose reads through the SHARED substrate-gap instance, whose
+// load-time root may be the checkout, so the forward is the only per-test redirect. An outage is
+// that same endpoint declared unreachable (its route throws).
+const STORE_ROUTE = "fixture gap store";
+const nonStoreHits = (): string[] => fetchGuard!.hits.filter((h) => h !== STORE_ROUTE);
+
 describe("operator_hold contains: feature_compose", () => {
+  let store: Map<string, Record<string, any>>;
+  beforeEach(() => {
+    process.env["GAP_STORE_ENDPOINT"] = FIXTURE_GAP_STORE; // the file-level afterEach restores the caller's value
+    store = routeFixtureGapStore(fetchGuard!);
+    store.set(HELD, row(HELD, { operator_hold: true, operator_hold_reason: "redispatch livelock containment" }));
+    store.set(UNHELD, row(UNHELD, {}));
+  });
+
   it("[MUST-FAIL (b)] a DIRECTED compose of a held gap is refused at stage operator_hold, before any slot, network or draft, and the refusal is logged", async () => {
     preClaimSlot(HELD);
     const r = await resolveFeatureCompose({ type: "feature_compose", spec: `fixture ${HELD}`, directed: true, gap: composeGap(HELD, { operator_hold: true }) } as never);
@@ -178,7 +208,7 @@ describe("operator_hold contains: feature_compose", () => {
     expect(b.ok).toBe(false);
     expect(b.stage).toBe("operator_hold");
     expect(slotFiles()).toEqual(["slot-0.slot"]);
-    expect(fetchGuard!.hits).toEqual([]);
+    expect(nonStoreHits()).toEqual([]);
     expect(logs.some((l) => l.includes("operator_hold") && l.includes(HELD))).toBe(true);
   });
 
@@ -199,7 +229,46 @@ describe("operator_hold contains: feature_compose", () => {
     const b = r.body as Report;
     expect(b.ok).toBe(false);
     expect(b.stage).toBe("gap_in_flight");
-    expect(fetchGuard!.hits).toEqual([]);
+    expect(nonStoreHits()).toEqual([]);
+  });
+
+  it("[MUST-FAIL (store)] a DIRECTED compose whose pointer is {id} only, for a gap HELD in the store, is refused at stage operator_hold before the slot claim", async () => {
+    preClaimSlot(HELD);
+    const r = await resolveFeatureCompose({ type: "feature_compose", spec: `fixture ${HELD}`, directed: true, gap: { id: HELD } } as never);
+    const b = r.body as Report;
+    expect(b.ok).toBe(false);
+    expect(b.stage).toBe("operator_hold");
+    expect(slotFiles()).toEqual(["slot-0.slot"]);
+    expect(nonStoreHits()).toEqual([]);
+    expect(logs.some((l) => l.includes("operator_hold") && l.includes(HELD))).toBe(true);
+  });
+
+  it("[MUST-FAIL (store)] a DIRECTED compose whose pointer carries STALE metadata without the hold, for a gap HELD in the store, is refused at stage operator_hold", async () => {
+    preClaimSlot(HELD);
+    const r = await resolveFeatureCompose({ type: "feature_compose", spec: `fixture ${HELD}`, directed: true, gap: composeGap(HELD, { edit_site: "repos/goal-host-vessel/src/index.ts:1" }) } as never);
+    const b = r.body as Report;
+    expect(b.ok).toBe(false);
+    expect(b.stage).toBe("operator_hold");
+    expect(slotFiles()).toEqual(["slot-0.slot"]);
+  });
+
+  it("[CONTROL (store)] a stored-UNHELD gap whose pointer wrongly claims operator_hold:true is NOT refused for a hold (stored truth wins both ways)", async () => {
+    preClaimSlot(UNHELD);
+    const r = await resolveFeatureCompose({ type: "feature_compose", spec: `fixture ${UNHELD}`, directed: true, gap: composeGap(UNHELD, { operator_hold: true }) } as never);
+    const b = r.body as Report;
+    expect(b.stage).not.toBe("operator_hold");
+    expect(b.stage).toBe("gap_in_flight");
+  });
+
+  it("[MUST-FAIL (outage)] when the stored row cannot be read, a DIRECTED compose refuses with stage hold_state_unreadable (fail closed) before the slot claim", async () => {
+    fetchGuard!.route({ name: "gap store down", match: (u) => u.startsWith("http://gap-store.fixture"), respond: () => { throw new TypeError("Unable to connect"); } });
+    preClaimSlot(UNHELD);
+    const r = await resolveFeatureCompose({ type: "feature_compose", spec: `fixture ${UNHELD}`, directed: true, gap: composeGap(UNHELD, {}) } as never);
+    const b = r.body as Report;
+    expect(b.ok).toBe(false);
+    expect(b.stage).toBe("hold_state_unreadable");
+    expect(slotFiles()).toEqual(["slot-0.slot"]);
+    expect(logs.some((l) => l.includes("hold_state_unreadable") && l.includes(UNHELD))).toBe(true);
   });
 });
 

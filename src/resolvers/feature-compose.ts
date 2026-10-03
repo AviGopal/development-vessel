@@ -3827,6 +3827,38 @@ export function lessonDiag(reason: string): string {
 const RELOCATION_HINT_MAX_FILES = 3;
 const SAFE_SEGMENT_RE = /^[A-Za-z0-9_.-]+$/;
 export type RelocationHint = { files: string[]; derived_from: "own_check_failure"; at: string; test_file: string; failing_tests: string[] };
+/** Local name -> relative module specifier, for a test file's static imports (and, with `dynamic`, its
+ *  `const {a, b} = await import("./x")` / `const m = await import("./x")` bindings). Packages are skipped. */
+export function relativeImportBindings(src: string, dynamic = false): Map<string, string> {
+  const bindings = new Map<string, string>();
+  for (const m of src.matchAll(/import\s+(?:type\s+)?([\s\S]*?)\s+from\s+["']([^"']+)["']/g)) {
+    const clause = m[1] ?? "", spec = m[2] ?? "";
+    if (!spec.startsWith(".")) continue;
+    const named = /\{([\s\S]*?)\}/.exec(clause)?.[1] ?? "";
+    for (const part of named.split(",")) { const local = part.trim().split(/\s+as\s+/).pop()?.replace(/^type\s+/, "").trim(); if (local) bindings.set(local, spec); }
+    const ns = /\*\s+as\s+([A-Za-z_$][\w$]*)/.exec(clause)?.[1]; if (ns) bindings.set(ns, spec);
+    const def = /^([A-Za-z_$][\w$]*)\s*(?:,|$)/.exec(clause.trim())?.[1]; if (def) bindings.set(def, spec);
+  }
+  if (dynamic) {
+    for (const m of src.matchAll(/(?:const|let|var)\s+(\{[^}]*\}|[A-Za-z_$][\w$]*)\s*=\s*\(?\s*await\s+import\(\s*["']([^"']+)["']/g)) {
+      const lhs = m[1] ?? "", spec = m[2] ?? "";
+      if (!spec.startsWith(".")) continue;
+      if (lhs.startsWith("{")) {
+        for (const part of lhs.slice(1, -1).split(",")) { const local = part.trim().split(/\s*:\s*/).pop()?.trim(); if (local && /^[A-Za-z_$][\w$]*$/.test(local)) bindings.set(local, spec); }
+      } else bindings.set(lhs, spec);
+    }
+  }
+  return bindings;
+}
+/** The vessel-relative source file a relative specifier in `test_file` resolves to (ts/tsx/index), or null. */
+export function resolveVesselImport(vesselRoot: string, testFile: string, spec: string): string | null {
+  const testDir = testFile.includes("/") ? testFile.slice(0, testFile.lastIndexOf("/")) : "";
+  const parts = [...testDir.split("/").filter(Boolean)];
+  for (const seg of spec.split("/")) { if (seg === "." || seg === "") continue; if (seg === "..") parts.pop(); else parts.push(seg); }
+  const base = parts.join("/");
+  const cands = /\.[cm]?js$/.test(base) ? [base.replace(/\.([cm]?)js$/, ".$1ts"), base.replace(/\.([cm]?)js$/, ".$1tsx"), base] : /\.[cm]?tsx?$/.test(base) ? [base] : [`${base}.ts`, `${base}.tsx`, `${base}/index.ts`];
+  return cands.find((c) => mountExistsSync(`${vesselRoot}/${c}`)) ?? null;
+}
 export function deriveRelocationHint(input: { vessel_root: string; vessel: string; test_file: string; failing: ReadonlyArray<{ name?: unknown }>; no_effect_vs_parent?: boolean; edit_site?: string }): RelocationHint | null {
   if (input.no_effect_vs_parent !== true) return null;
   // The vessel and test file come from gap metadata: confine the read to the vessel root.
@@ -3839,23 +3871,8 @@ export function deriveRelocationHint(input: { vessel_root: string; vessel: strin
     console.log(`[compose-lessons] relocation hint not derived: ${input.test_file} unreadable in the vessel clone (${(err as NodeJS.ErrnoException)?.code ?? (err as Error)?.message ?? String(err)})`);
     return null;
   }
-  const bindings = new Map<string, string>();
-  for (const m of src.matchAll(/import\s+(?:type\s+)?([\s\S]*?)\s+from\s+["']([^"']+)["']/g)) {
-    const clause = m[1] ?? "", spec = m[2] ?? "";
-    if (!spec.startsWith(".")) continue;
-    const named = /\{([\s\S]*?)\}/.exec(clause)?.[1] ?? "";
-    for (const part of named.split(",")) { const local = part.trim().split(/\s+as\s+/).pop()?.replace(/^type\s+/, "").trim(); if (local) bindings.set(local, spec); }
-    const ns = /\*\s+as\s+([A-Za-z_$][\w$]*)/.exec(clause)?.[1]; if (ns) bindings.set(ns, spec);
-    const def = /^([A-Za-z_$][\w$]*)\s*(?:,|$)/.exec(clause.trim())?.[1]; if (def) bindings.set(def, spec);
-  }
-  const testDir = input.test_file.includes("/") ? input.test_file.slice(0, input.test_file.lastIndexOf("/")) : "";
-  const resolveSpec = (spec: string): string | null => {
-    const parts = [...testDir.split("/").filter(Boolean)];
-    for (const seg of spec.split("/")) { if (seg === "." || seg === "") continue; if (seg === "..") parts.pop(); else parts.push(seg); }
-    const base = parts.join("/");
-    const cands = /\.[cm]?js$/.test(base) ? [base.replace(/\.([cm]?)js$/, ".$1ts"), base.replace(/\.([cm]?)js$/, ".$1tsx"), base] : /\.[cm]?tsx?$/.test(base) ? [base] : [`${base}.ts`, `${base}.tsx`, `${base}/index.ts`];
-    return cands.find((c) => mountExistsSync(`${input.vessel_root}/${c}`)) ?? null;
-  };
+  const bindings = relativeImportBindings(src);
+  const resolveSpec = (spec: string): string | null => resolveVesselImport(input.vessel_root, input.test_file, spec);
   // The current edit_site, vessel-relative when it is in THIS vessel (a site in another vessel excludes nothing here).
   const siteRaw = String(input.edit_site ?? "").replace(/:\d+.*$/, "").trim().replace(/^\/+/, "");
   const siteM = /^repos\/([^/]+)\/(.+)$/.exec(siteRaw);
@@ -3891,6 +3908,24 @@ export function deriveRelocationHint(input: { vessel_root: string; vessel: strin
 // hint: the runtime tree omits test/ and may hold a stale copy. Bounded by one target window (PER_FILE_SLICE): the
 // whole file when it fits, else its imports and the bodies of the named tests.
 const TEST_CALL_START_RE = /\n[ \t]*(?:it|test|describe)(?:\.\w+)?\(/;
+/** The source text of each named test (from its title line to the next it/test/describe), deduplicated: a
+ *  template title run over several labels is one body. Names whose title is not in the file are returned too. */
+function ownCheckNamedBodies(source: string, onlyTests: string[]): { bodies: string[]; unlocated: string[] } {
+  const starts = new Set<number>();
+  const bodies: string[] = [];
+  const unlocated: string[] = [];
+  for (const name of onlyTests) {
+    const leaf = name.split(" > ").pop()?.trim() ?? "";
+    const at = leaf ? testTitleSegmentOffset(source, leaf) : -1;
+    if (at < 0) { unlocated.push(name); continue; }
+    const lineStart = source.lastIndexOf("\n", at) + 1;
+    if (starts.has(lineStart)) continue;
+    starts.add(lineStart);
+    const next = TEST_CALL_START_RE.exec(source.slice(at));
+    bodies.push(source.slice(lineStart, next ? at + next.index : source.length).trimEnd());
+  }
+  return { bodies, unlocated };
+}
 export type OwnCheckGrounding = { vessel: string; test_file: string; only_tests: string[]; source: string; block: string };
 export function ownCheckGrounding(meta: Record<string, unknown>, cloneRoot: string = vesselCloneRootForChecks()): OwnCheckGrounding | null {
   const er = meta.evidence_resolve as { input?: { vessel?: unknown } } | undefined;
@@ -3911,19 +3946,7 @@ export function ownCheckGrounding(meta: Record<string, unknown>, cloneRoot: stri
       ...[...source.matchAll(/^import\s[\s\S]*?["'][^"'\n]+["'];?[ \t]*$/gm)].map((m) => m[0]),
       ...[...source.matchAll(/^[ \t]*(?:const|let)\b[^\n]*\bawait\s+import\([^\n]*$/gm)].map((m) => m[0]),
     ];
-    const starts = new Set<number>();
-    const bodies: string[] = [];
-    const unlocated: string[] = [];
-    for (const name of own.only_tests) {
-      const leaf = name.split(" > ").pop()?.trim() ?? "";
-      const at = leaf ? testTitleSegmentOffset(source, leaf) : -1;
-      if (at < 0) { unlocated.push(name); continue; }
-      const lineStart = source.lastIndexOf("\n", at) + 1;
-      if (starts.has(lineStart)) continue;
-      starts.add(lineStart);
-      const next = TEST_CALL_START_RE.exec(source.slice(at));
-      bodies.push(source.slice(lineStart, next ? at + next.index : source.length).trimEnd());
-    }
+    const { bodies, unlocated } = ownCheckNamedBodies(source, own.only_tests);
     const text = [header.join("\n"), ...bodies].join("\n…\n")
       + (unlocated.length > 0 ? `\n… (${unlocated.length} named test(s) not located in the file)` : "");
     shown = text.length <= PER_FILE_SLICE ? text : `${text.slice(0, PER_FILE_SLICE)}\n… (truncated)`;
@@ -3933,6 +3956,60 @@ export function ownCheckGrounding(meta: Record<string, unknown>, cloneRoot: stri
     + `This test is what your draft is judged by: after your change ${what} MUST PASS. Bind the change to the API it calls, the option names it passes and the identifiers it imports. `
     + `Do NOT edit this file or any other test: a draft that edits it is refused, however green it makes the check.\n${shown}`;
   return { vessel, test_file: own.test_file, only_tests: own.only_tests, source, block };
+}
+// THE MODULES THE CHECK IMPORTS (gap grounding-omits-the-modules-the-check-imports). A check that exercises two
+// source files (goal-target-needs.test.ts imports goal-target-inference.ts AND goal-intent.ts; the dispatch contract
+// check imports resolver-schema.ts dynamically) cannot turn green from the edit_site alone, and the file-scope gate
+// dropped any edit to the second file as off-target. The check's relative imports that resolve into the vessel's
+// src/ (static and dynamic; never test helpers or packages) become targets with their own windows, modules the named
+// tests use first, at most RELOCATION_HINT_MAX_FILES (the relocation hint's cap; same evidence, same bound). An
+// autonomous compose may edit only those inside the autonomy scope; an excluded one is shown read-only in one target
+// window (PER_FILE_SLICE) with the scope entry named.
+export function ownCheckImportedModules(check: { vessel: string; test_file: string; only_tests: string[]; source: string }, cloneRoot: string = vesselCloneRootForChecks()): string[] {
+  const vesselRoot = `${cloneRoot}/${check.vessel}`;
+  const bindings = relativeImportBindings(check.source, true);
+  const specs = [...new Set(bindings.values())];
+  const used = new Set<string>();
+  for (const id of new Set(ownCheckNamedBodies(check.source, check.only_tests).bodies.join("\n").match(/[A-Za-z_$][\w$]*/g) ?? [])) {
+    const spec = bindings.get(id);
+    if (spec) used.add(spec);
+  }
+  const out: string[] = [];
+  for (const spec of [...specs.filter((sp) => used.has(sp)), ...specs.filter((sp) => !used.has(sp))]) {
+    if (out.length >= RELOCATION_HINT_MAX_FILES) break;
+    const rel = resolveVesselImport(vesselRoot, check.test_file, spec);
+    if (!rel || !rel.startsWith("src/") || TEST_FILE_RE.test(rel)) continue;
+    const repoRel = `repos/${check.vessel}/${rel}`;
+    // The same path charset as composeTargetFiles: these paths reach shell commands.
+    if (!/^repos\/[\w.-]+\/[\w./-]+\.\w+$/.test(repoRel) || repoRel.split("/").includes("..")) continue;
+    if (!out.includes(repoRel)) out.push(repoRel);
+  }
+  return out;
+}
+/** Which imported modules become targets and which stay read-only. `excludes` is the autonomy-scope test for an
+ *  autonomous compose (an unreadable scope excludes everything, with its reason); null for a directed compose,
+ *  which never consults the scope. Modules already among the targets are left as they are. */
+export function partitionOwnCheckImports(imports: string[], targetFiles: string[], excludes: ((path: string) => string | null) | null): { targets: string[]; readonly: Array<{ path: string; why: string }> } {
+  const targets: string[] = [];
+  const readonly: Array<{ path: string; why: string }> = [];
+  for (const p of imports) {
+    if (targetFiles.includes(p) || targets.includes(p) || readonly.some((r) => r.path === p)) continue;
+    const why = excludes ? excludes(p) : null;
+    if (why) readonly.push({ path: p, why }); else targets.push(p);
+  }
+  return { targets, readonly };
+}
+/** The prompt text for the imported modules: the added targets by name, each read-only module in one window. */
+export function ownCheckImportsBlock(input: { added: string[]; readonly: Array<{ path: string; why: string; content: string | null }>; focusHints: string[] }): string {
+  const parts: string[] = [];
+  if (input.added.length > 0) parts.push(`MODULES THE CHECK IMPORTS, ADDED AS TARGET FILES: ${input.added.join(", ")}. You MAY edit these: they are target files of this compose (TARGET-FILE-SCOPE covers them) and their windows are under GROUND TRUTH above.`);
+  for (const r of input.readonly.slice(0, RELOCATION_HINT_MAX_FILES)) {
+    const content = r.content ?? "";
+    const { slice } = focusedSlice(content, PER_FILE_SLICE, input.focusHints);
+    parts.push(`----- ${r.path} (READ-ONLY: the check imports it, but this compose may NOT edit it; excluded from autonomous work by ${r.why}. A change needed here cannot land from this compose: make the fix in a target file.) -----\n`
+      + (r.content === null ? "(unreadable)" : `${slice}${slice.length < content.length ? "\n… (windowed)" : ""}`));
+  }
+  return parts.join("\n\n");
 }
 /** The compose's target files: edit_site, the relocation hint's files, then repos/ paths the spec names. */
 export function composeTargetFiles(gapMeta: Record<string, unknown>, spec: string): string[] {
@@ -4965,6 +5042,35 @@ async function resolveFeatureComposeUncapped(pointer: FeatureComposePointer): Pr
   const targetFiles = composeTargetFiles(gapMeta, pointer.spec);
   // The gap's own check, read before planning (shown to the drafter after the blind-window refusals below).
   const ownCheckCtx = ownCheckGrounding(gapMeta);
+  // The modules the check imports become targets (appended, so targetFiles[0] stays the edit_site), unless the
+  // autonomy scope excludes them from this autonomous compose: those are shown read-only.
+  let ownCheckAdded: string[] = [];
+  let ownCheckReadonly: Array<{ path: string; why: string }> = [];
+  // Only when the check's vessel is grounded (verify_vessels names it, or is empty and is derived from the targets
+  // below): an added target outside every grounded vessel would trip the blind-window refusal.
+  const ownCheckVesselGrounded = !!ownCheckCtx && (verifyVessels.length === 0 || verifyVessels.some((v) => v.replace(/^repos\//, "") === ownCheckCtx.vessel));
+  if (ownCheckCtx && !ownCheckVesselGrounded) console.log(`[fc-own-check-grounding] check vessel ${ownCheckCtx.vessel} is not in verify_vessels [${verifyVessels.join(", ")}]; its imports are not added as targets`);
+  if (ownCheckCtx && ownCheckVesselGrounded) {
+    const imports = ownCheckImportedModules(ownCheckCtx);
+    if (imports.length > 0) {
+      let excludes: ((path: string) => string | null) | null = null;
+      if ((pointer as { directed?: boolean }).directed !== true) {
+        try {
+          const { autonomyScope, autonomyScopeExcludes } = await import("./gap-to-feature.js");
+          const scope = await autonomyScope();
+          excludes = (path) => autonomyScopeExcludes(scope, path);
+        } catch (err) {
+          const why = `autonomy scope check failed (${String(err)})`;
+          excludes = () => why;
+        }
+      }
+      const part = partitionOwnCheckImports(imports, targetFiles, excludes);
+      targetFiles.push(...part.targets);
+      ownCheckAdded = part.targets;
+      ownCheckReadonly = part.readonly;
+      console.log(`[fc-own-check-grounding] check imports [${imports.join(", ")}]: added target(s) [${part.targets.join(", ")}], read-only [${part.readonly.map((r) => `${r.path}: ${r.why}`).join("; ")}]`);
+    }
+  }
   // A PATH BINDING IS A PRECONDITION FOR PLANNING (measured 2026-08-06, 72h of this
   // vessel's own journal). Ungrounded decomposes ran 7 / 21 / 94 per day (Aug 4/5/6)
   // against 101 / 159 / 150 grounded, and with no real path in the prompt the planner
@@ -5160,7 +5266,13 @@ async function resolveFeatureComposeUncapped(pointer: FeatureComposePointer): Pr
   // THE OWN CHECK, READ-ONLY (ownCheckGrounding). Appended AFTER the blind-window refusals on purpose: the check's
   // import lines name target basenames, and must never satisfy "the window mentions the target file".
   if (ownCheckCtx) {
-    grounding += `\n\n${ownCheckCtx.block}`;
+    const readRepoFile = (repoRel: string): string | null => {
+      const rel = repoRel.replace(/^repos\//, "");
+      for (const root of [REPO_ROOT, vesselCloneRootForChecks()]) { try { return readFileSync(`${root}/${rel}`, "utf8"); } catch { /* next root */ } }
+      return null;
+    };
+    const importsBlock = ownCheckImportsBlock({ added: ownCheckAdded, readonly: ownCheckReadonly.map((r) => ({ ...r, content: readRepoFile(r.path) })), focusHints });
+    grounding += `\n\n${ownCheckCtx.block}${importsBlock ? `\n\n${importsBlock}` : ""}`;
     console.log(`[fc-own-check-grounding] showed repos/${ownCheckCtx.vessel}/${ownCheckCtx.test_file} read-only (${ownCheckCtx.block.length} bytes, ${ownCheckCtx.only_tests.length} named test(s))`);
   }
   // CROSS-FILE SYMBOL GROUNDING (2026-08-11).

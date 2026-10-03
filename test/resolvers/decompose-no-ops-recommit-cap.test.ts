@@ -17,11 +17,13 @@ const HOLDER = "http://holder.fixture.invalid/v2/impulses/resolve";
 const realFetch = globalThis.fetch;
 let store = new Map<string, Record<string, unknown>>();
 let recommitWrites: string[] = [];
+/** recommit ids that did not exist in the store when written: the children actually minted. */
+let created: string[] = [];
 let savedEndpoint: string | undefined;
 const spies: Array<ReturnType<typeof spyOn>> = [];
 
 beforeEach(() => {
-  store = new Map(); recommitWrites = [];
+  store = new Map(); recommitWrites = []; created = [];
   savedEndpoint = process.env["GAP_STORE_ENDPOINT"];
   process.env["GAP_STORE_ENDPOINT"] = HOLDER;
   for (const m of ["log", "warn", "error"] as const) spies.push(spyOn(console, m).mockImplementation(() => {}));
@@ -34,7 +36,7 @@ beforeEach(() => {
     }
     if (p.type === "substrateGap_write") {
       const g = p.gap as Record<string, unknown>;
-      if (String(g.id).startsWith("recommit-")) recommitWrites.push(String(g.id));
+      if (String(g.id).startsWith("recommit-")) { recommitWrites.push(String(g.id)); if (!store.has(String(g.id))) created.push(String(g.id)); }
       store.set(String(g.id), { ...(store.get(String(g.id)) ?? {}), ...g });
       return Response.json({ shape: "substrateGapWriteResult", body: { id: g.id, action: "updated" } });
     }
@@ -63,9 +65,13 @@ describe("decompose_no_ops recommit cap", () => {
     store.set(children[0]!, child);
     await appendComposeLesson("decompose_no_ops", "drafter returned no ops", "", child as never, { stage: "decompose", edited_spans: [] } as never);
     // Again on the root: the existing child is not rewritten (which could reopen it).
+    const before = recommitWrites.length;
     await appendComposeLesson("decompose_no_ops", "drafter returned no ops", "", root() as never, { stage: "decompose", edited_spans: [] } as never);
+    expect(recommitWrites.length).toBe(before);
+    // Writes to a recommit id include the child's own lesson write-back (its failure_lessons), which is
+    // not a new child; the cap is on children minted.
+    expect(created.length).toBeLessThanOrEqual(1);
     expect(new Set(recommitWrites).size).toBeLessThanOrEqual(1);
-    expect(recommitWrites.length).toBeLessThanOrEqual(1);
   });
 
   it("[MUST-FAIL] the decompose_no_ops lesson names the grounding sizes and whether an own check was present", async () => {

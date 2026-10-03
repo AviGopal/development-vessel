@@ -4095,6 +4095,27 @@ export function composeLandingEvidence(input: { own_check_ran: string[]; scope_d
     ...(d && d.dropped_paths.length > 0 ? { dropped_paths: d.dropped_paths, dropped_reason: d.dropped_reason ?? "dropped by the file-scope gate" } : {}),
   };
 }
+/** The grounding a decompose drafted from, by size: what a no-ops lesson says the drafter was given. */
+export type DecomposeGrounding = {
+  target_files: Array<{ path: string; bytes: number | null }>;
+  grounding_bytes: number;
+  anchors_supplied_bytes: number;
+  own_check: { test_file: string; bytes: number; named_tests: number } | null;
+};
+export function decomposeGrounding(targets: Array<{ path: string; abs: string }>, grounding: string, anchorsSuppliedBytes: number, ownCheck: OwnCheckGrounding | null): DecomposeGrounding {
+  return {
+    target_files: targets.map((t) => { let bytes: number | null = null; try { bytes = readFileSync(t.abs).length; } catch { /* unreadable: null */ } return { path: t.path, bytes }; }),
+    grounding_bytes: grounding.length,
+    anchors_supplied_bytes: anchorsSuppliedBytes,
+    own_check: ownCheck ? { test_file: ownCheck.test_file, bytes: ownCheck.block.length, named_tests: ownCheck.only_tests.length } : null,
+  };
+}
+function describeDecomposeGrounding(g: DecomposeGrounding): string {
+  const targets = g.target_files.slice(0, 2).map((t) => `${t.path.split("/").pop()} ${t.bytes === null ? "unreadable" : `${t.bytes}B`}`).join(", ") + (g.target_files.length > 2 ? ` +${g.target_files.length - 2}` : "");
+  const own = g.own_check ? `${g.own_check.test_file.split("/").pop()} ${g.own_check.bytes}B, ${g.own_check.named_tests} named test(s)` : "absent";
+  return `target=${targets || "none"}; own_check=${own}; anchors=${g.anchors_supplied_bytes}B; grounding=${g.grounding_bytes}B`;
+}
+
 /**
  * A DECOMPOSE THAT ENDS WITH NO OPS SAYS WHY, AND THE WHY BECOMES A LESSON. Both causes used to end
  * in a bare "plan had no ops" with no log, lesson or trace: the anchor re-draft's reply not parsing
@@ -4107,10 +4128,14 @@ export async function recordDecomposeNoOps(
   planRaw: string,
   gap: Parameters<typeof appendComposeLesson>[3],
   record: typeof appendComposeLesson = appendComposeLesson,
+  given?: DecomposeGrounding,
 ): Promise<void> {
+  // WHAT THE DRAFTER WAS GIVEN, first, so it survives the lesson's 200-character cut: a lesson (and the
+  // recommit child it may mint) that carries only "no ops" adds nothing the next attempt can act on.
+  const g = given ? ` [given: ${describeDecomposeGrounding(given)}]` : "";
   const reason = cause === "redraft_unparseable"
-    ? `re-draft unparseable: the anchor re-draft returned no JSON plan (${planRaw.length} chars), so the earlier plan was dropped`
-    : "drafter returned no ops";
+    ? `re-draft unparseable${g}: the anchor re-draft returned no JSON plan (${planRaw.length} chars), so the earlier plan was dropped`
+    : `drafter returned no ops${g}`;
   console.warn(`[fc-decompose] ${reason} gap=${String(gap?.id ?? "(none)")}`);
   try {
     await record("decompose_no_ops", reason, "", gap, { stage: "decompose", edited_spans: [] });
@@ -4244,10 +4269,25 @@ export async function appendComposeLesson(cls: string, reason: string, vessels: 
       // records the class so the drafter keeps learning.
       const _recommitDepth = (String(gap.id).match(/recommit-/g) ?? []).length;
       if (reCommit && _recommitDepth < 2 && cls !== "scope_refused" && cls !== "no_effect_all_dropped" && cls !== "env_policy_unreadable" && cls !== "no_effect_region" && cls !== "constraint_unmet" && cls !== "env_constraint_unrunnable" && !reason.startsWith("[deterministic] ")) { const baseId = String(gap.id).replace(/^(?:recommit-)+/, ""); const baseClosed = baseId === String(gap.id) ? (typeof (gap as { status?: unknown }).status === "string" && (gap as { status?: unknown }).status === "closed") : false; if (baseClosed) { console.log(`[compose-lessons] recommit SKIPPED: base gap ${baseId} is closed`); } else {
-        await resolveSubstrateGapWrite({
+        // THE ROOT PREDICATE a recommit descends from: recorded on every child as root_gap_id. A legacy
+        // depth-1 child names its root as source_gap_id; anything older falls back to the prefix-stripped id.
+        const rootGapId = typeof meta.root_gap_id === "string" && meta.root_gap_id ? meta.root_gap_id
+          : (meta.re_commit === true && typeof meta.source_gap_id === "string" && meta.source_gap_id && !meta.source_gap_id.startsWith("recommit-")) ? meta.source_gap_id
+          : baseId;
+        // DECOMPOSE_NO_OPS: AT MOST ONE CHILD PER ROOT. The drafter producing nothing is a fact about what it
+        // was given, which a recommit of a recommit does not change; so the child is keyed on the root, and
+        // an existing one (any status) is never rewritten, which could reopen it.
+        let recommitId = "recommit-" + String(gap.id) + "-" + cls;
+        let capped = false;
+        if (cls === "decompose_no_ops") {
+          recommitId = "recommit-" + rootGapId + "-" + cls;
+          const existing = recommitId === String(gap.id) ? [gap] : ((((await resolveSubstrateGap({ type: "substrateGap", id: recommitId, limit: 1 } as never))?.body as { gaps?: unknown[] } | undefined)?.gaps) ?? []);
+          if (existing.length > 0) { capped = true; console.log(`[compose-lessons] recommit SKIPPED: ${recommitId} already exists for root ${rootGapId} (one decompose_no_ops child per root)`); }
+        }
+        if (!capped) await resolveSubstrateGapWrite({
           type: "substrateGap_write",
           gap: {
-            id: "recommit-" + String(gap.id) + "-" + cls,
+            id: recommitId,
             category: "systematic_failure",
             source: "substrate_detected",
             summary: "compose for gap " + String(gap.id) + " repeated already-recorded failure class " + cls + ": " + reason.slice(0, 150),
@@ -4255,7 +4295,7 @@ export async function appendComposeLesson(cls: string, reason: string, vessels: 
             status: "open",
             // The recommit is the same defect on the same edit site: it carries its source gap's trusted
             // test_suite check (inheritableParentCheck) and the operator's hand-off, or it is born unclosable.
-            classification_metadata: { re_commit: true, source_gap_id: String(gap.id), failure_class: cls, edit_site: meta.edit_site, suspected_real_location: meta.suspected_real_location, file_path: meta.file_path, ...inheritableParentCheck(meta, meta.edit_site), ...(meta.directed === true ? { directed: true } : {}) },
+            classification_metadata: { re_commit: true, source_gap_id: String(gap.id), root_gap_id: rootGapId, failure_class: cls, edit_site: meta.edit_site, suspected_real_location: meta.suspected_real_location, file_path: meta.file_path, ...inheritableParentCheck(meta, meta.edit_site), ...(meta.directed === true ? { directed: true } : {}) },
           },
         } as never);
       }
@@ -5185,6 +5225,7 @@ async function resolveFeatureComposeUncapped(pointer: FeatureComposePointer): Pr
     return { shape: "featureComposeReport", body: { ok: false, verdict: "REFUSED", stage: "scope", error: noGapDetail } };
   }
   let grounding = "";
+  let anchorsSuppliedBytes = 0;
   if (verifyVessels.length > 0) {
     // The explicit region literal first, then identifiers mined from the request. Both
     // legacy sources of a region are inert in practice (0 of 402 gaps set
@@ -5477,7 +5518,7 @@ async function resolveFeatureComposeUncapped(pointer: FeatureComposePointer): Pr
               regionHint ?? "",
             ].filter(Boolean);
             const anchors = renderSafeAnchors(text, anchorLocators, tf);
-            if (anchors) { symbolBlock += anchors; console.log(`[fc-anchors] supplied verified-unique anchors for ${tf} (${anchorLocators.length} locator candidate(s))`); }
+            if (anchors) { anchorsSuppliedBytes += anchors.length; symbolBlock += anchors; console.log(`[fc-anchors] supplied verified-unique anchors for ${tf} (${anchorLocators.length} locator candidate(s))`); }
           }
         }
       } catch { /* advisory */ }
@@ -5734,7 +5775,7 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
         // delegation failed — fall through to existing error return
       }
     }
-    await recordDecomposeNoOps(redraftUnparseable ? "redraft_unparseable" : "drafter_no_ops", planRaw, pointer.gap);
+    await recordDecomposeNoOps(redraftUnparseable ? "redraft_unparseable" : "drafter_no_ops", planRaw, pointer.gap, appendComposeLesson, decomposeGrounding(targetFiles.map((tf) => ({ path: tf, abs: targetFileOnDisk(tf) })), grounding, anchorsSuppliedBytes, ownCheckCtx));
     const noOpsError = redraftUnparseable ? "plan had no ops: re-draft unparseable" : "plan had no ops";
     return { shape: "featureComposeReport", body: { ok: false, stage: "decompose", error: noOpsError, plan_raw: planRaw.slice(0, 1200) } };
   }

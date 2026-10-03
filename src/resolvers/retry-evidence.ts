@@ -69,6 +69,9 @@ export interface AttemptRecord {
   constraints?: MustBeCalledConstraint[];
   /** Constraints this attempt showed to be met or moot; a lift cancels every earlier record of that symbol. */
   constraints_lifted?: ConstraintLift[];
+  /** Edit ops the file-scope gate dropped as off-target, and why (a drop is recorded, never silent). */
+  dropped_paths?: string[];
+  dropped_reason?: string;
 }
 
 /**
@@ -117,7 +120,7 @@ export function lessonClassMatchesStage(cls: string, stage: FailStage | null | u
   if (TYPECHECK_CLASSES.has(cls)) return stage === "typecheck";
   if (stage === "typecheck") return cls === "verify_failed" || /^env_/.test(cls);
   // A scope withhold applied and verified cleanly: the classifier's semantic_reject fallthrough is the known mislabel.
-  if (stage === "scope") return cls === "scope_refused" || cls === "env_policy_unreadable";
+  if (stage === "scope") return cls === "scope_refused" || cls === "no_effect_all_dropped" || cls === "env_policy_unreadable";
   if (stage === "constraint") return cls === "constraint_unmet" || /^env_/.test(cls);
   return true;
 }
@@ -424,6 +427,9 @@ export function attemptEvidenceBlock(lessons: unknown, max = 3): string {
     const crefs = allRefs.filter((x) => x.kind === "must_be_called");
     if (refs.length) lines.push(`    refused by the no-effect lock: ${refs.map((x) => `${x.path}:${x.start}-${x.end} (locked ${x.region_start}-${x.region_end})`).join(", ")}${r.escalation ? `; escalated: ${String((r.escalation as { outcome?: string }).outcome ?? "")}` : ""}`);
     if (crefs.length) lines.push(`    refused by a constraint: ${crefs.map((x) => x.region_sha.replace(/^must_be_called:/, "must_be_called(") + ")").join(", ")}${!refs.length && r.escalation ? `; escalated: ${String((r.escalation as { outcome?: string }).outcome ?? "")}` : ""}`);
+    // The file-scope gate's drops reach the next draft: an edit it planned there was not applied.
+    const dropped = Array.isArray(r.dropped_paths) ? (r.dropped_paths as unknown[]).map(String) : [];
+    if (dropped.length) lines.push(`    dropped by the file-scope gate (not applied): ${dropped.join(", ")}${r.dropped_reason ? ` — ${String(r.dropped_reason)}` : ""}`);
     const oc = r.own_check as { test_file?: string; failing?: OwnCheckFailure[] } | undefined;
     for (const f of (oc?.failing ?? []).slice(0, 4)) {
       lines.push(`    own check ${String(oc?.test_file ?? "")} (fail) ${f.name}`);

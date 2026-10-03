@@ -1050,6 +1050,15 @@ export async function localizeGap(gap: Record<string, unknown>, opts?: { useLlm?
   // suspected_real_location first: it is written back only by the semantic gate after it
   // refused a draft as mis-localized, so it is newer evidence than the original edit_site.
   // Trying edit_site first sent every retry back to the file the gate had just rejected.
+  // A relocation hint (written when the gap's own check did not move under a draft) names the module the
+  // failing assertion exercises: newer evidence than the edit_site the draft just failed at.
+  const hinted = (meta.relocation_hint as { files?: unknown } | undefined)?.files;
+  if (Array.isArray(hinted)) {
+    for (const h of hinted) {
+      if (typeof h !== "string" || !/^repos\/[^/]+\/.+\.(ts|tsx)$/.test(h) || !repoPathExists(h)) continue;
+      return { file: h, description: "change site named by the own check's failing assertion (relocation_hint)", vessel: h.match(/^repos\/([^/]+)\//)?.[1] ?? "", method: "metadata_edit_site" };
+    }
+  }
   for (const f of ["suspected_real_location", "edit_site", "change_site", "file_path"] as const) {
     let v = meta[f];
     if ((typeof v !== "string" || !v.trim()) && typeof (gap as Record<string, unknown>)[f] === "string") v = (gap as Record<string, unknown>)[f];
@@ -2227,6 +2236,30 @@ export async function admitActionableGaps(
       // The semantic gate writes where the fix really belongs. When that is an excluded path, every draft
       // at the gap's own edit_site is refused as not addressing it (obsidian authoring-root: 6 refusals on
       // 09-27, each naming self-fact-reconcile.ts), so the gap is out of autonomous reach.
+      // A RELOCATION HINT into an excluded path is operator work: the own check's failing assertion exercises a
+      // file the lane may not edit, so every autonomous draft would fail it again. The gap keeps the hint, is
+      // parked (needs_information) and carries an operator routing marker naming the files. A hint inside the
+      // scope never excludes on its own.
+      const hintFiles = ((meta.relocation_hint as { files?: unknown } | undefined)?.files);
+      const hinted = Array.isArray(hintFiles) ? hintFiles.filter((h): h is string => typeof h === "string") : [];
+      const hintHit = hinted.map((h) => autonomyScopeExcludes(scope, h)).find((h): h is string => !!h);
+      if (hintHit) {
+        excluded.push({ id, reason: `autonomy_scope(relocation_hint ${hintHit})` });
+        if (!(meta.operator_routing as { files?: unknown } | undefined)?.files) {
+          // A MERGE: only the two keys are sent; the store carries every omitted key (the hint among them) forward.
+          const routingMeta: Record<string, unknown> = {
+            ...(isParkingDisposition(meta.disposition) ? {} : { disposition: "needs_information" }),
+            operator_routing: { reason: `the own check's failing assertion exercises ${hintHit}, outside the autonomy scope (relocation_hint)`, files: hinted, at: new Date().toISOString() },
+          };
+          try {
+            const w = await resolveSubstrateGapWrite({ type: "substrateGap_write", gap: { id, category: g.category, source: g.source, summary: g.summary, detected_at: g.detected_at, status: g.status ?? "open", classification_metadata: routingMeta } } as never);
+            if (w?.shape === "structuredError") console.warn(`[gap-admission] gap ${id}: operator routing marker REFUSED (${JSON.stringify(w.body).slice(0, 200)}); the exclusion stands without it`);
+          } catch (err) {
+            console.warn(`[gap-admission] gap ${id}: operator routing marker not written (${(err as Error)?.message ?? String(err)}); the exclusion stands without it`);
+          }
+        }
+        continue;
+      }
       const suspectedSite = String(meta.suspected_real_location ?? "").replace(/:[^/]*$/, "");
       if (suspectedSite && suspectedSite !== siteForScope) {
         const suspectedHit = autonomyScopeExcludes(scope, suspectedSite);

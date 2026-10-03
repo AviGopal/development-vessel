@@ -3778,6 +3778,121 @@ export function lessonDiag(reason: string): string {
   const diagLines = reason.split("\n").filter((l) => !l.trim().startsWith("(pass)") && /error TS\d+|\berror\b|\d+ fail|FAIL|Error:|^\s*\(fail\)|\bExpected\b|\bReceived\b/i.test(l));
   return diagLines.length > 0 ? diagLines.join("\n") : reason;
 }
+// RELOCATION HINT (gap a-draft-that-does-not-move-its-own-check-leaves-no-relocation-hint). Measured: one
+// concept-db gap spent ~42 min over 7 composes because its class-2 check exercises config.ts while its edit_site
+// is routes/impulses.ts. Every draft failed the check identically to the parent (no_effect_vs_parent), the next
+// attempt went back to the same file (suspected_real_location is written only by the semantic gate, which a red
+// own check never reaches), and the file-scope gate silently DROPPED the edits to the file that needed changing.
+// A no-effect own check names, through its FAILING assertion's imports, the source module it exercises: that is
+// where the next attempt should edit. Derived from the check's own text only (not the draft's file, not the
+// stack frames a failure prints), excluding test files and the current edit_site.
+const RELOCATION_HINT_MAX_FILES = 3;
+const SAFE_SEGMENT_RE = /^[A-Za-z0-9_.-]+$/;
+export type RelocationHint = { files: string[]; derived_from: "own_check_failure"; at: string; test_file: string; failing_tests: string[] };
+export function deriveRelocationHint(input: { vessel_root: string; vessel: string; test_file: string; failing: ReadonlyArray<{ name?: unknown }>; no_effect_vs_parent?: boolean; edit_site?: string }): RelocationHint | null {
+  if (input.no_effect_vs_parent !== true) return null;
+  // The vessel and test file come from gap metadata: confine the read to the vessel root.
+  const vesselName = input.vessel.replace(/^repos\//, "");
+  if (!SAFE_SEGMENT_RE.test(vesselName) || vesselName.startsWith(".")) return null;
+  if (!input.test_file || input.test_file.startsWith("/") || input.test_file.split("/").some((seg) => seg === ".." || seg === "")) return null;
+  let src = "";
+  try { src = readFileSync(`${input.vessel_root}/${input.test_file}`, "utf8"); } catch { return null; }
+  const bindings = new Map<string, string>();
+  for (const m of src.matchAll(/import\s+(?:type\s+)?([\s\S]*?)\s+from\s+["']([^"']+)["']/g)) {
+    const clause = m[1] ?? "", spec = m[2] ?? "";
+    if (!spec.startsWith(".")) continue;
+    const named = /\{([\s\S]*?)\}/.exec(clause)?.[1] ?? "";
+    for (const part of named.split(",")) { const local = part.trim().split(/\s+as\s+/).pop()?.replace(/^type\s+/, "").trim(); if (local) bindings.set(local, spec); }
+    const ns = /\*\s+as\s+([A-Za-z_$][\w$]*)/.exec(clause)?.[1]; if (ns) bindings.set(ns, spec);
+    const def = /^([A-Za-z_$][\w$]*)\s*(?:,|$)/.exec(clause.trim())?.[1]; if (def) bindings.set(def, spec);
+  }
+  const testDir = input.test_file.includes("/") ? input.test_file.slice(0, input.test_file.lastIndexOf("/")) : "";
+  const resolveSpec = (spec: string): string | null => {
+    const parts = [...testDir.split("/").filter(Boolean)];
+    for (const seg of spec.split("/")) { if (seg === "." || seg === "") continue; if (seg === "..") parts.pop(); else parts.push(seg); }
+    const base = parts.join("/");
+    const cands = /\.[cm]?js$/.test(base) ? [base.replace(/\.([cm]?)js$/, ".$1ts"), base.replace(/\.([cm]?)js$/, ".$1tsx"), base] : /\.[cm]?tsx?$/.test(base) ? [base] : [`${base}.ts`, `${base}.tsx`, `${base}/index.ts`];
+    return cands.find((c) => mountExistsSync(`${input.vessel_root}/${c}`)) ?? null;
+  };
+  // The current edit_site, vessel-relative when it is in THIS vessel (a site in another vessel excludes nothing here).
+  const siteRaw = String(input.edit_site ?? "").replace(/:\d+.*$/, "").trim().replace(/^\/+/, "");
+  const siteM = /^repos\/([^/]+)\/(.+)$/.exec(siteRaw);
+  const site = siteM ? (siteM[1] === vesselName ? siteM[2]! : "") : siteRaw;
+  const files: string[] = [];
+  const names: string[] = [];
+  for (const f of input.failing) {
+    const full = String(f?.name ?? "");
+    const leaf = full.split(" > ").pop()?.trim() ?? "";
+    if (!leaf) continue;
+    const at = src.indexOf(leaf);
+    if (at < 0) continue;
+    names.push(full);
+    const rest = src.slice(at + leaf.length);
+    const next = /\n\s*(?:it|test)(?:\.\w+)?\(/.exec(rest);
+    const body = next ? rest.slice(0, next.index) : rest;
+    for (const id of new Set(body.match(/[A-Za-z_$][\w$]*/g) ?? [])) {
+      const spec = bindings.get(id);
+      if (!spec) continue;
+      const rel = resolveSpec(spec);
+      if (!rel || TEST_FILE_RE.test(rel) || rel === site) continue;
+      const repoRel = `repos/${vesselName}/${rel}`;
+      if (!files.includes(repoRel) && files.length < RELOCATION_HINT_MAX_FILES) files.push(repoRel);
+    }
+  }
+  return files.length > 0 ? { files, derived_from: "own_check_failure", at: new Date().toISOString(), test_file: input.test_file, failing_tests: names.slice(0, 5) } : null;
+}
+/** The compose's target files: edit_site, the relocation hint's files, then repos/ paths the spec names. */
+export function composeTargetFiles(gapMeta: Record<string, unknown>, spec: string): string[] {
+  const editSiteRaw = typeof gapMeta.edit_site === "string" ? gapMeta.edit_site : "";
+  const hint = gapMeta.relocation_hint as { files?: unknown } | undefined;
+  const hinted = Array.isArray(hint?.files) ? hint!.files.filter((f): f is string => typeof f === "string") : [];
+  return Array.from(new Set(
+    [editSiteRaw, ...hinted, ...[...String(spec ?? "").matchAll(/repos\/[\w.-]+\/[\w./-]+\.\w+/g)].map((m) => m[0])]
+      .map((s) => s.replace(/:\d+.*$/, "").trim())
+      .filter((s) => /^repos\/[\w.-]+\/.+\.\w+$/.test(s)),
+  )).slice(0, 4 + hinted.length);
+}
+/**
+ * THE FILE-SCOPE GATE: edit ops on a file outside the compose's target files are dropped as off-target, and
+ * every drop is RETURNED (dropped_paths + reason) so it is recorded on the attempt and the landing evidence,
+ * never silent. A plan whose every op is off-target refuses (no_effect_all_dropped): nothing would land on an
+ * intended file. Empty targetFiles leaves the gate inert.
+ * SIBLING-MIRROR FAN-OUT (structural-add remedy): "add X mirroring the other Y entries" legitimately touches
+ * every site the sibling is registered in (import, membership array, dispatch entry), in files the spec did not
+ * name. An off-target edit whose new_string WIRES IN a top-level identifier an on-target op introduces is a
+ * cross-file registration of the just-created symbol, not drift: it is kept.
+ */
+export function fileScopeGate<O extends { kind: string; path: string; content?: string; new_string?: string }>(ops: O[], targetFiles: string[]): { ops: O[]; dropped_paths: string[]; dropped_reason?: string; refused?: string; refusal_class?: string } {
+  if (targetFiles.length === 0) return { ops, dropped_paths: [] };
+  const norm = (p: string): string => (p ?? "").replace(/:\d+.*$/, "").trim();
+  const onTargetPath = (op: O): boolean => (op.kind !== "edit" && op.kind !== "replace_lines") || targetFiles.includes(norm(op.path));
+  const newSymbols = new Set<string>();
+  for (const op of ops) {
+    if (!onTargetPath(op)) continue;
+    const src = op.kind === "create_file" ? (op.content ?? "") : (op.new_string ?? "");
+    for (const m of src.matchAll(/export\s+(?:const|function|class|type|interface)\s+([A-Za-z_$][\w$]*)/g)) if (m[1] && m[1].length > 2) newSymbols.add(m[1]);
+  }
+  const wiresNewSymbol = (op: O): boolean => { const ns = op.new_string ?? ""; for (const sym of newSymbols) if (ns.includes(sym)) return true; return false; };
+  const isOff = (op: O): boolean => (op.kind === "edit" || op.kind === "replace_lines") && !targetFiles.includes(norm(op.path)) && !wiresNewSymbol(op);
+  const off = ops.filter(isOff);
+  if (off.length === 0) return { ops, dropped_paths: [] };
+  const dropped_paths = [...new Set(off.map((o) => norm(o.path)))];
+  const dropped_reason = `off-target edit(s) outside the compose's target files [${targetFiles.join(", ")}]`;
+  if (off.length === ops.length) return { ops: [], dropped_paths, dropped_reason, refusal_class: "no_effect_all_dropped", refused: "plan is off-target: it edits " + off.map((o) => o.path).join(", ") + " but the spec's target file(s) are " + targetFiles.join(", ") + " - no edit lands on an intended target file" };
+  return { ops: ops.filter((op) => !isOff(op)), dropped_paths, dropped_reason };
+}
+// The check's test file is read from the vessel CLONE, never the runtime tree: the runtime tree is an image
+// layer that omits most test/ files, and a copy there can be stale. Read at call time.
+const vesselCloneRootForChecks = (): string => { const v = process.env["VESSELS_CLONE_ROOT"]; return v && v.trim() ? v : "/workspace/git/vessels"; };
+/** The evidence a FAVORABLE compose hands its landing: the checks that gated it, and any op the file-scope gate dropped. */
+export function composeLandingEvidence(input: { own_check_ran: string[]; scope_drops?: { dropped_paths: string[]; dropped_reason?: string } | null }): { verdict: "FAVORABLE"; base_success_rate: number; mitosis_success_rate: number; cited_trace_ids: string[]; cited_check_names: string[]; dropped_paths?: string[]; dropped_reason?: string } {
+  const d = input.scope_drops;
+  return {
+    verdict: "FAVORABLE", base_success_rate: 1, mitosis_success_rate: 1, cited_trace_ids: [],
+    cited_check_names: ["typecheck", "shape-dispatch", "bun test (baseline-delta, flake-confirmed)", ...(input.own_check_ran.length > 0 ? [`own-check (gap test_suite, alone: ${input.own_check_ran.join(",")})`] : [])],
+    ...(d && d.dropped_paths.length > 0 ? { dropped_paths: d.dropped_paths, dropped_reason: d.dropped_reason ?? "dropped by the file-scope gate" } : {}),
+  };
+}
 export async function appendComposeLesson(cls: string, reason: string, vessels: string, gap?: { id?: string; summary?: unknown; category?: unknown; source?: unknown; detected_at?: unknown; classification_metadata?: Record<string, unknown> }, attempt?: AttemptRecord): Promise<void> {
   // A VERIFY FAILURE MAKES THE GAP'S STAGED MITOSIS UNLANDABLE (2026-10-02). A tree staged for this
   // gap's lineage (e.g. by patch_with_tools) must not be landed later by mitosis-tick on typecheck
@@ -3841,6 +3956,13 @@ export async function appendComposeLesson(cls: string, reason: string, vessels: 
         lessons.splice(i >= 0 ? i : 0, 1);
       }
       meta.failure_lessons = lessons;
+      let relocationHint: RelocationHint | null = null;
+      if (attempt?.no_effect_vs_parent === true && attempt.own_check) {
+        const er = meta.evidence_resolve as { input?: { vessel?: unknown } } | undefined;
+        const v = typeof er?.input?.vessel === "string" ? er.input.vessel.replace(/^repos\//, "") : "";
+        const hint = v ? deriveRelocationHint({ vessel_root: `${vesselCloneRootForChecks()}/${v}`, vessel: v, test_file: attempt.own_check.test_file, failing: attempt.own_check.failing, no_effect_vs_parent: true, edit_site: String(meta.edit_site ?? "") }) : null;
+        if (hint) relocationHint = hint;
+      }
       // PRESERVE the gap's real identity on write-back. This write only ATTACHES failure
       // lessons — it must NEVER rewrite the gap's category/summary. Historically it HARDCODED
       // category:"missing_capability" + summary:"per-gap failure lessons updated" (a resolver
@@ -3852,6 +3974,7 @@ export async function appendComposeLesson(cls: string, reason: string, vessels: 
         : (typeof meta.summary === "string" && (meta.summary as string).trim() ? String(meta.summary) : "");
       const realSource = (typeof gap.source === "string" && gap.source) ? gap.source : "substrate_detected";
       const realDetectedAt = (typeof gap.detected_at === "string" && gap.detected_at) ? gap.detected_at : new Date().toISOString();
+      const lessonStatus = (() => { const s = (gap as { status?: unknown }).status; return s === "closed" || s === "superseded" ? s : "open"; })();
       // THE GAP RECORD IS THE LESSON'S STORE, written first and on its own: it never waits on, or is
       // skipped by, the concept-db mirror below. A refusal (e.g. the gap store unreachable from this
       // node) comes back as a structuredError rather than a throw, so it is said, never dropped.
@@ -3863,11 +3986,28 @@ export async function appendComposeLesson(cls: string, reason: string, vessels: 
           
           summary: realSummary || `compose failure lessons for gap ${String(gap.id)}`,
           detected_at: realDetectedAt,
-          status: (() => { const s = (gap as { status?: unknown }).status; return s === "closed" || s === "superseded" ? s : "open"; })(),
+          status: lessonStatus,
           classification_metadata: meta,
         },
       } as never);
       if (lessonWrite?.shape === "structuredError") console.warn(`[compose-lessons] gap lesson write REFUSED gap=${String(gap.id)} class=${cls}: ${JSON.stringify(lessonWrite.body).slice(0, 300)}`);
+      // The hint is a MERGE: only its key is sent, and the store carries every omitted key forward, so a
+      // concurrent writer's keys are never clobbered by this row snapshot.
+      if (relocationHint) {
+        const hw = await resolveSubstrateGapWrite({
+          type: "substrateGap_write",
+          gap: {
+            id: String(gap.id),
+            category: realCategory,
+            summary: realSummary || `compose failure lessons for gap ${String(gap.id)}`,
+            detected_at: realDetectedAt,
+            status: lessonStatus,
+            classification_metadata: { relocation_hint: relocationHint },
+          },
+        } as never);
+        if (hw?.shape === "structuredError") console.warn(`[compose-lessons] relocation hint write REFUSED gap=${String(gap.id)}: ${JSON.stringify(hw.body).slice(0, 300)}`);
+        else console.log(`[compose-lessons] relocation hint gap=${String(gap.id)} files=[${relocationHint.files.join(", ")}]`);
+      }
       // RECOMMIT DEPTH CAP (2026-07-27, self-alteration-throughput-zero amplifier). A failed
       // compose files a `recommit-<gap.id>-<cls>` gap → gap-to-feature re-drafts → another
       // compose-report; if it fails again it becomes `recommit-recommit-...` and so on. Measured
@@ -3877,7 +4017,7 @@ export async function appendComposeLesson(cls: string, reason: string, vessels: 
       // dispositioned/skipped, not infinitely recommitted). The failure_lessons write above still
       // records the class so the drafter keeps learning.
       const _recommitDepth = (String(gap.id).match(/recommit-/g) ?? []).length;
-      if (reCommit && _recommitDepth < 2 && cls !== "scope_refused" && cls !== "env_policy_unreadable" && cls !== "no_effect_region" && cls !== "constraint_unmet" && cls !== "env_constraint_unrunnable" && !reason.startsWith("[deterministic] ")) { const baseId = String(gap.id).replace(/^(?:recommit-)+/, ""); const baseClosed = baseId === String(gap.id) ? (typeof (gap as { status?: unknown }).status === "string" && (gap as { status?: unknown }).status === "closed") : false; if (baseClosed) { console.log(`[compose-lessons] recommit SKIPPED: base gap ${baseId} is closed`); } else {
+      if (reCommit && _recommitDepth < 2 && cls !== "scope_refused" && cls !== "no_effect_all_dropped" && cls !== "env_policy_unreadable" && cls !== "no_effect_region" && cls !== "constraint_unmet" && cls !== "env_constraint_unrunnable" && !reason.startsWith("[deterministic] ")) { const baseId = String(gap.id).replace(/^(?:recommit-)+/, ""); const baseClosed = baseId === String(gap.id) ? (typeof (gap as { status?: unknown }).status === "string" && (gap as { status?: unknown }).status === "closed") : false; if (baseClosed) { console.log(`[compose-lessons] recommit SKIPPED: base gap ${baseId} is closed`); } else {
         await resolveSubstrateGapWrite({
           type: "substrateGap_write",
           gap: {
@@ -4390,7 +4530,14 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
         const refusalEndpoint = process.env["METABOB_ENDPOINT"] ?? "http://127.0.0.1:8080";
         const refusalKey = process.env["METABOB_API_KEY"] ?? "";
         const refusalReason = String(ob["error"] ?? "").slice(0, 800);
-        if (ob["stage"] === "scope" && pointer.gap?.id) await appendComposeLesson("scope_refused", refusalReason.slice(0, 300), "", pointer.gap).catch(() => {});
+        if (ob["stage"] === "scope" && pointer.gap?.id) {
+          // An all-dropped plan carries its own class and its drops onto the attempt record.
+          const droppedPaths = Array.isArray(ob["dropped_paths"]) ? (ob["dropped_paths"] as unknown[]).map(String) : null;
+          const scopeAttempt: AttemptRecord | undefined = droppedPaths && droppedPaths.length > 0
+            ? { stage: "scope", edited_spans: [], dropped_paths: droppedPaths, dropped_reason: String(ob["dropped_reason"] ?? "") }
+            : undefined;
+          await appendComposeLesson(typeof ob["refuse_class"] === "string" ? String(ob["refuse_class"]) : "scope_refused", refusalReason.slice(0, 300), "", pointer.gap, scopeAttempt).catch(() => {});
+        }
         const refusalRes = await fetch(`${refusalEndpoint}/v2/activities/executions`, {
           method: "POST",
           headers: { "Content-Type": "application/json", Authorization: `ApiKey ${refusalKey}` },
@@ -4664,12 +4811,7 @@ async function resolveFeatureComposeUncapped(pointer: FeatureComposePointer): Pr
     .map((h) => h.trim());
   // TARGET LOCATORS: the classifier's edit_site + any repos/… paths named in the spec.
   // Capped at 4 so a verbose spec can't blow the reserved-window budget.
-  const editSiteRaw = typeof gapMeta.edit_site === "string" ? gapMeta.edit_site : "";
-  const targetFiles = Array.from(new Set(
-    [editSiteRaw, ...[...pointer.spec.matchAll(/repos\/[\w.-]+\/[\w./-]+\.\w+/g)].map((m) => m[0])]
-      .map((s) => s.replace(/:\d+.*$/, "").trim())
-      .filter((s) => /^repos\/[\w.-]+\/.+\.\w+$/.test(s)),
-  )).slice(0, 4);
+  const targetFiles = composeTargetFiles(gapMeta, pointer.spec);
   // A PATH BINDING IS A PRECONDITION FOR PLANNING (measured 2026-08-06, 72h of this
   // vessel's own journal). Ungrounded decomposes ran 7 / 21 / 94 per day (Aug 4/5/6)
   // against 101 / 159 / 150 grounded, and with no real path in the prompt the planner
@@ -5469,43 +5611,15 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
   // when the plan is PURELY off-target (every op is an off-target edit, so nothing would
   // land on an intended file). Empty targetFiles (spec named no repos/ path) leaves the
   // gate inert, matching the target-touched floor further below.
-  if (targetFiles.length > 0) {
-    // SIBLING-MIRROR FAN-OUT (structural-add remedy): "add X mirroring the other Y
-    // entries" legitimately touches every site the sibling is registered (its import +
-    // membership array + dispatch/cadence entry), which live in files the spec did not
-    // name. Collect the NEW top-level identifiers the on-target ops introduce; an
-    // off-target edit whose new_string WIRES one of them in (a cross-file registration of
-    // the just-created symbol) is NOT drift — admit it. Unrelated off-target edits (that
-    // reference no new symbol) are still dropped, and the verify_vessels gate below still
-    // refuses cross-vessel wandering.
-    const onTargetPath = (op: PlanOp): boolean =>
-      (op.kind !== "edit" && op.kind !== "replace_lines") || targetFiles.includes((op.path ?? "").replace(/:\d+.*$/, "").trim());
-    const newSymbols = new Set<string>();
-    for (const op of ops) {
-      if (!onTargetPath(op)) continue;
-      const src = op.kind === "create_file" ? (op.content ?? "") : (op.new_string ?? "");
-      for (const m of src.matchAll(/export\s+(?:const|function|class|type|interface)\s+([A-Za-z_$][\w$]*)/g)) {
-        if (m[1] && m[1].length > 2) newSymbols.add(m[1]);
-      }
-    }
-    const wiresNewSymbol = (op: PlanOp): boolean => {
-      const ns = op.new_string ?? "";
-      for (const sym of newSymbols) if (ns.includes(sym)) return true;
-      return false;
-    };
-    const isOffTargetEdit = (op: PlanOp): boolean =>
-      (op.kind === "edit" || op.kind === "replace_lines")
-      && !targetFiles.includes((op.path ?? "").replace(/:\d+.*$/, "").trim())
-      && !wiresNewSymbol(op);
-    const offTargetEdits = ops.filter(isOffTargetEdit);
-    if (offTargetEdits.length > 0) {
-      if (offTargetEdits.length === ops.length) {
-        return { shape: "featureComposeReport", body: { ok: false, verdict: "REFUSED", stage: "scope", error: "plan is off-target: it edits " + offTargetEdits.map((o) => o.path).join(", ") + " but the spec's target file(s) are " + targetFiles.join(", ") + " - no edit lands on an intended target file" } };
-      }
-      const kept = ops.filter((op) => !isOffTargetEdit(op));
-      console.log(`[feature-compose] file-scope gate: DROPPED ${offTargetEdits.length} off-target edit op(s) [${offTargetEdits.map((o) => o.path).join(", ")}]; targets=[${targetFiles.join(", ")}]; kept ${kept.length} op(s)`);
-      ops = kept;
-    }
+  let scopeDrops: { dropped_paths: string[]; dropped_reason: string } | null = null;
+  const scopeGate = fileScopeGate(ops, targetFiles);
+  if (scopeGate.refused) {
+    return { shape: "featureComposeReport", body: { ok: false, verdict: "REFUSED", stage: "scope", error: scopeGate.refused, refuse_class: scopeGate.refusal_class, dropped_paths: scopeGate.dropped_paths, dropped_reason: scopeGate.dropped_reason } };
+  }
+  if (scopeGate.dropped_paths.length > 0) {
+    console.log(`[feature-compose] file-scope gate: DROPPED ${ops.length - scopeGate.ops.length} off-target edit op(s) [${scopeGate.dropped_paths.join(", ")}]; targets=[${targetFiles.join(", ")}]; kept ${scopeGate.ops.length} op(s)`);
+    ops = scopeGate.ops;
+    scopeDrops = { dropped_paths: scopeGate.dropped_paths, dropped_reason: scopeGate.dropped_reason ?? "" };
   }
 
   // NORMALIZE UNTRUSTED PLANNER OUTPUT. touched_vessels comes straight from the LLM
@@ -7772,7 +7886,7 @@ const earlyAttempt = await Promise.race([
         // that way myself and wrongly concluded this path never ran tests. The cited
         // names are the audit record of why a commit was allowed to land; they must
         // name the checks that actually gated it.
-        evaluation_evidence: { verdict: "FAVORABLE", base_success_rate: 1, mitosis_success_rate: 1, cited_trace_ids: [], cited_check_names: ["typecheck", "shape-dispatch", "bun test (baseline-delta, flake-confirmed)", ...(ownCheckRan.length > 0 ? [`own-check (gap test_suite, alone: ${ownCheckRan.join(",")})`] : [])] },
+        evaluation_evidence: composeLandingEvidence({ own_check_ran: ownCheckRan, scope_drops: scopeDrops }),
         // Provenance: gap id when routed from a gap (goal-host edit-intent passes
         // route-edit-<goal_hash>), and the durable compose-report artifact name as
         // the proposal id — commits become trace-matchable instead of unknown-gap.
@@ -7939,6 +8053,7 @@ const earlyAttempt = await Promise.race([
     // any effect on that check. The next attempt's prompt shows it and its applier enforces it.
     const { record: attemptRecord, ownReason } = composeAttemptEvidence(applied, repairSpans, verify, scopeWithheld, policyUnreadable);
     if (refusalEvidence && lessonClass === "no_effect_region") { Object.assign(attemptRecord, refusalEvidence); refusalsRecorded = true; }
+    if (scopeDrops) Object.assign(attemptRecord, scopeDrops);
     // must_be_called on the record: imposed by this attempt's gate, re-asserted when refused, lifted when met or moot.
     // A refusal repeated on one constraint escalates once, through the same path as a repeated no-effect refusal.
     const constraintUnmet = verify.flatMap((v) => v.constraint_unmet ?? []);
@@ -8085,6 +8200,8 @@ const earlyAttempt = await Promise.race([
           hard_fail: semantic_gate?.hard_fail ?? null,
           // Landed over an advisory addresses:false (semanticGateDisposition): landed_unverified until the by-effect check.
           semantic_dissent: semanticDissent !== null,
+          // Edit ops the file-scope gate dropped as off-target (fileScopeGate): a drop is recorded, never silent.
+          scope_dropped_paths: scopeDrops?.dropped_paths ?? [],
           verify_ok: (verify as Array<Record<string, unknown>>).map((v) => v?.ok ?? null),
           verify_failed_output: (verify as Array<Record<string, unknown>>).filter((v) => v?.ok === false).map((v) => String(v?.output ?? "").split(String.fromCharCode(10)).filter((l) => l.includes("(fail)") || l.includes("error TS")).slice(0, 10).join(" ; ")).slice(0, 2),
           // EFFECT COVERAGE — was there anything that could EXECUTE the changed code?

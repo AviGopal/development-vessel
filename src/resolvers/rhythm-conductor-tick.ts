@@ -636,13 +636,16 @@ export async function resolveRhythmConductorTick(
     const fam = typeof r.body?.family === "string" ? r.body.family : "";
     return !!fam && ((poolGoals[fam]?.length ?? 0) > 0 || !!FAMILY_GOALS[fam]);
   }).length;
-  const structuralBreak = regResp === null ? "registry_empty" : (regResp === undefined ? "registry_unmappable" : undefined);
+  // One expression. An earlier edit split this into a ternary over regResp alone followed by a bare
+  // ternary statement whose value was discarded, so the gap fired only on a failed registry read and
+  // never for zero rhythms or zero mappable. A failed read leaves `rhythms` empty and still reads empty.
+  const structuralBreak =
     rhythms.length === 0
       ? "registry_empty"
       : mappable === 0
         ? "registry_unmappable"
         : null;
-  if (structuralBreak && pointer.dry_run !== true) { // Updated to ensure regResp is checked
+  if (structuralBreak && pointer.dry_run !== true) {
     const summary = structuralBreak === "registry_empty"
       ? "Rhythm registry is EMPTY: rhythm_conductor_tick read zero timeShapedRhythm impulses, so nothing periodic in this substrate has a cadence. Re-seed the registry with TWO pool impulses per family: (1) timeShapedRhythm carrying axis/family/budget/alpha/beta/staleness, and (2) rhythmFamilyGoal carrying {family, goal} for the contract-phrased goal text."
       : `Rhythm registry is UNMAPPABLE: all ${rhythms.length} rhythm(s) were skipped with no_goal_mapping, so the conductor scores due-ness and has nothing to enqueue. Mount rhythmFamilyGoal pool impulses ({family, goal, member?}) for the affected families.`;

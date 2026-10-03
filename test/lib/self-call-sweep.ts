@@ -516,9 +516,9 @@ const RESOLVE_TAIL = /\/(?:v2\/impulses\/)?resolve\/?$/;
 const AUTH_ROUTE_TAIL = /\/auth\/resolve\/?$/;
 const RESOLVE_NAME = /^resolve$|resolve_?(?:url|endpoint|path|route)s?$/i;
 const CALLER_BASE = /^(?:pointer|input|args|payload|impulse|body|req|request)$/;
-// selfAuthHeaders / selfAuthKey / selfAuthCredential (lib/self-auth.ts) attach a credential only when the URL is the
-// configured one.
-const KEY_GUARD = /\bselfAuth(?:Headers|Key|Credential)?\b/;
+// selfAuthHeaders / selfAuthKey / selfAuthTrusted (lib/self-auth.ts) attach a credential only when the URL is the
+// configured one; selfAuthTrusted is the bare predicate, for helpers that hold a non-key credential (a JWT).
+const KEY_GUARD = /\bselfAuth(?:Headers|Key|Credential|Trusted)?\b/;
 const STRING_METHODS = /^(?:replace|replaceAll|trim|trimEnd|trimStart|toString|toLowerCase|slice)$/;
 
 type Piece = { text: string } | { ref: string; base?: string; baseNode?: ts.Node };

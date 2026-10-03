@@ -112,7 +112,7 @@ export async function resolveBuildSignatureDetector(pointer: BuildSignatureDetec
       await resolveSubstrateGapWrite({ type: "substrateGap_write", gap: {
         ...gap,
         status: "closed",
-        classification_metadata: { ...meta, authored_detector_id: detectorId, authored_variant_id: variantId, authored_at: new Date().toISOString() },
+        classification_metadata: { ...meta, authored_detector_id: detectorId, authored_variant_id: variantId, authored_at: new Date().toISOString(), closed_reason: "producer_now_exists", closed_by: "build_signature_detector" },
       } } as never);
     } catch { /* non-fatal */ }
   }

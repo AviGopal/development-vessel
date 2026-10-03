@@ -483,6 +483,8 @@ export const AUTONOMOUS_CLOSE_REASONS: ReadonlySet<string> = new Set([
   "landed_verified", "landed_literal_only", "already_resolved", "condition_gone", "producer_now_exists",
   "predicate_verified_by_detector", "violation_not_reproduced_on_rescan", "closed_via_child",
   "expired_not_redetected", "churned_unlandable", "persistent_compose_failure", "walk_artifact",
+  // doc_drift_fix: a documentation fix that landed through the cutover (close_needs_evidence, 2026-10-03).
+  "doc_fix_landed",
 ]);
 const isOperatorRouteSource = (s: unknown): boolean => typeof s === "string" && (s === "human_reported" || /^operator/.test(s));
 /** A dispatch a human made: goal-host trigger "operator" (any operator id) or a surface/note dispatch. */

@@ -5040,7 +5040,7 @@ async function routeCapabilityGapToNewResolver(
   if (pickConditionCheck === 'absent') {
     console.log(`[gap-to-feature] gap ${String(gap.id ?? '')} condition absent at pick time — closing as already_resolved`);
     try {
-      const arMeta = { ...((gap.classification_metadata ?? gap.metadata ?? {}) as Record<string, unknown>), resolution: 'already_resolved', closed_at: new Date().toISOString() };
+      const arMeta = { ...((gap.classification_metadata ?? gap.metadata ?? {}) as Record<string, unknown>), resolution: 'already_resolved', closed_reason: 'already_resolved', closed_by: 'gap_to_feature.pick_condition_check', closed_at: new Date().toISOString() };
       await resolveSubstrateGapWrite({
         type: "substrateGap_write",
         gap: {
@@ -5950,7 +5950,7 @@ export async function resolveGapToFeature(pointer: GapToFeaturePointer): Promise
         source: gap.source,
         summary: gap.summary,
         detected_at: gap.detected_at,
-        classification_metadata: { ...((gap.classification_metadata ?? gap.metadata ?? {}) as Record<string, unknown>), resolution: "already_resolved", closed_at: closedAt },
+        classification_metadata: { ...((gap.classification_metadata ?? gap.metadata ?? {}) as Record<string, unknown>), resolution: "already_resolved", closed_reason: "already_resolved", closed_by: "gap_to_feature.pick_condition_check", closed_at: closedAt },
         status: "closed",
       },
     } as never);
@@ -6030,7 +6030,7 @@ export async function resolveGapToFeature(pointer: GapToFeaturePointer): Promise
             source: gap.source,
             summary: gap.summary,
             detected_at: gap.detected_at,
-            classification_metadata: { ...mcMeta, resolution: "already_resolved", closed_at: new Date().toISOString() },
+            classification_metadata: { ...mcMeta, resolution: "already_resolved", closed_reason: "already_resolved", closed_by: "gap_to_feature.live_producer_probe", closed_at: new Date().toISOString() },
             status: "closed",
           },
         } as never);
@@ -6327,7 +6327,7 @@ const familySample: string[] = await (async () => {
             source: gap.source,
             summary: gap.summary,
             detected_at: gap.detected_at,
-            classification_metadata: (gap.classification_metadata ?? gap.metadata ?? {}) as Record<string, unknown>,
+            classification_metadata: { ...((gap.classification_metadata ?? gap.metadata ?? {}) as Record<string, unknown>), closed_reason: "producer_now_exists", closed_by: "reachability_gap_repair" },
             status: "closed",
           },
         } as never);
@@ -6379,7 +6379,7 @@ const familySample: string[] = await (async () => {
             source: gap.source,
             summary: gap.summary,
             detected_at: gap.detected_at,
-            classification_metadata: (gap.classification_metadata ?? gap.metadata ?? {}) as Record<string, unknown>,
+            classification_metadata: { ...((gap.classification_metadata ?? gap.metadata ?? {}) as Record<string, unknown>), closed_reason: "producer_now_exists", closed_by: "author_producer" },
             status: "closed",
           },
         } as never);

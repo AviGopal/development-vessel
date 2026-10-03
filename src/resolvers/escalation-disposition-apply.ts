@@ -239,6 +239,7 @@ export async function resolveEscalationDispositionApply(
     if (verb === "drop") {
       status = "closed";
       meta.closed_reason = "human_dropped";
+      meta.closed_by = "escalation_disposition_apply";
       meta.resolution = "closed by human disposition: drop (escalation answered)";
       meta.closed_at = new Date().toISOString();
       delete meta.human_exemption_attempts_remaining;

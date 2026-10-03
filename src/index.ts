@@ -480,7 +480,7 @@ setInterval(() => { void (async () => {
       if (liveBody === String(e.spec.expected)) {
         if ((e.spec.violations ?? 0) > 0) {
           await expWrite(e.title, JSON.stringify({ ...e.spec, violations: 0, restored_at: new Date().toISOString() }));
-          await expGapWrite({ id: gapId, source: "substrate_detected", status: "closed", summary: `RESOLVED by observation loop: artifact ${target} again byte-equals its expectation ${String(e.spec.expected).slice(0, 60)} (${e.spec.family}(${e.spec.operand})). The violation was observed, an investigative restoration goal was dispatched, and the artifact recovered; baseline reset.` });
+          await expGapWrite({ id: gapId, source: "substrate_detected", status: "closed", classification_metadata: { closed_reason: "condition_gone", closed_by: "expectation_observation_loop" }, summary: `RESOLVED by observation loop: artifact ${target} again byte-equals its expectation ${String(e.spec.expected).slice(0, 60)} (${e.spec.family}(${e.spec.operand})). The violation was observed, an investigative restoration goal was dispatched, and the artifact recovered; baseline reset.` });
           console.log(`[expectation-scan] ${target} RECOVERED — gap ${gapId} self-closed, violations reset`);
         }
         continue;
@@ -572,7 +572,7 @@ setInterval(() => { void (async () => {
       if (violated) {
         await expGapWrite({ id: gapId, source: "substrate_detected", status: "open", summary: `Standing trend expectation VIOLATED for family ${famKey}: independent check scored ${r}/${n} against the committed bar ${bar}/${n} (in-process byte-verification of freshly generated probes, not dispatch verdicts). History: ${JSON.stringify(hist.slice(-4))}. Determine which mechanism regressed and restore the bar; the commitment is the impulse ${row.title}.` });
       } else if (spec.open_violation) {
-        await expGapWrite({ id: gapId, source: "substrate_detected", status: "closed", summary: `RESOLVED: trend expectation for family ${famKey} restored — ${r}/${n} meets the bar ${bar}/${n}. Closed by the checker that filed it.` });
+        await expGapWrite({ id: gapId, source: "substrate_detected", status: "closed", classification_metadata: { closed_reason: "condition_gone", closed_by: "trend_expectation_check" }, summary: `RESOLVED: trend expectation for family ${famKey} restored — ${r}/${n} meets the bar ${bar}/${n}. Closed by the checker that filed it.` });
         // After a successful grade, RETIRE the probe notes this checker just generated and graded.
         // Producer: probe note titles are built by this checker as `${TREND_EXP_PREFIX}${famKey}:probe:` + batch discriminator when dispatching probes
         // (see the generator near TREND_PROBE_GEN in this file). Matching on that concrete prefix retires the real probe notes we just graded.

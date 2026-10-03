@@ -254,7 +254,7 @@ export async function resolveDocDriftFix(pointer: DocDriftFixPointer): Promise<R
   const applyRes = await resolveApplyProposalAsPatch({ type: "apply_proposal_as_patch", proposal_id: proposalId } as never);
   const applyBody = (applyRes?.body ?? {}) as Record<string, unknown>;
   const pushed = applyBody.push_status === "pushed" || (applyBody.result as Record<string, unknown> | undefined)?.push_status === "pushed";
-  if (pushed) await upsertGap(gap, { doc_fix: { status: "landed", at: new Date().toISOString() }, resolution: "landed via mitosis cutover (doc_drift_fix)" }, "closed");
+  if (pushed) await upsertGap(gap, { doc_fix: { status: "landed", at: new Date().toISOString() }, resolution: "landed via mitosis cutover (doc_drift_fix)", closed_reason: "doc_fix_landed", closed_by: "doc_drift_fix" }, "closed");
   return report({ ok: applyRes?.shape !== "structuredError" && applyBody.ok !== false, stage: "autoland", verdict: "FAVORABLE",
     gap_id: gap.id, doc_path: docPath, edits: applied.length, proposal_id: proposalId, apply: applyBody, landed: !!pushed });
 }

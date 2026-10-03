@@ -48,14 +48,14 @@ describe("close-if-open applies to every writer (no env gate)", () => {
     }
   });
   it("(b) control: a detector closing its own gap under a fresh timestamped id closes the open row of that class", async () => {
-    const r = await write({ id: "detector-fixture-finding-1789999999999", category: "systematic_failure", source: "substrate_detected", status: "closed", summary: "condition cleared", classification_metadata: { closed_reason: "condition_cleared" } });
+    const r = await write({ id: "detector-fixture-finding-1789999999999", category: "systematic_failure", source: "substrate_detected", status: "closed", summary: "condition cleared", classification_metadata: { closed_reason: "condition_cleared", closed_by: "detector-fixture" } });
     expect(r.body.action).toBe("updated");
     const open = rows().find((g) => g.id === "detector-fixture-finding-1788888888888");
     expect(open?.status).toBe("closed");
     expect(rows().some((g) => g.id === "detector-fixture-finding-1789999999999")).toBe(false);
   });
   it("(c) control: a close for an id the store holds closes that row", async () => {
-    const r = await write({ id: "known-open-gap-fixture", category: "systematic_failure", source: "human_reported", status: "closed", summary: "a known open gap", classification_metadata: { closed_reason: "test" } });
+    const r = await write({ id: "known-open-gap-fixture", category: "systematic_failure", source: "human_reported", status: "closed", summary: "a known open gap", classification_metadata: { closed_reason: "test", closed_by: "substrate-gap-unknown-id-status-change.test" } });
     expect(r.body.action).toBe("updated");
     expect(rows().find((g) => g.id === "known-open-gap-fixture")?.status).toBe("closed");
   });

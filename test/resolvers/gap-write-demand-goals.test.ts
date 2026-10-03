@@ -88,7 +88,7 @@ describe("substrateGap_write demand_goals — two writers", () => {
 
   it("expect_status guards the attach: no linkage is added to a gap closed since it was read", async () => {
     await resolveSubstrateGapWrite({ type: "substrateGap_write", gap: capabilityGap("shapeE", ["goal one", "goal two"]) } as never);
-    await resolveSubstrateGapWrite({ type: "substrateGap_write", gap: { ...capabilityGap("shapeE", ["goal one", "goal two"]), status: "closed", classification_metadata: { closed_reason: "producer_now_exists" } } } as never);
+    await resolveSubstrateGapWrite({ type: "substrateGap_write", gap: { ...capabilityGap("shapeE", ["goal one", "goal two"]), status: "closed", classification_metadata: { closed_reason: "producer_now_exists", closed_by: "gap_lifecycle_scan" } } } as never);
     const r = await resolveSubstrateGapWrite({
       type: "substrateGap_write", expect_status: "open", demand_goals_append: [link("d1")],
       gap: { id: "shapeE", category: "missing_capability", source: "substrate_detected", status: "open", summary: "stale read", detected_at: "2026-10-02T10:00:00Z" },

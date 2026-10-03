@@ -60,6 +60,8 @@ describe("substrateGap resolver", () => {
         summary: "updated summary",
         detected_at: "2026-05-27T23:00:00Z",
         status: "closed",
+        // A close names its reason and its closer (close_needs_evidence, 2026-10-03).
+        classification_metadata: { closed_reason: "test_fixture", closed_by: "substrate-gap.test" },
       },
     });
     expect((result.body as { action: string }).action).toBe("updated");

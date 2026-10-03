@@ -32,7 +32,7 @@ describe("substrateGap_write expect_status", () => {
   it("a stale open write to a row closed since the read is a no-op: it stays closed, is not reopened, metadata untouched", async () => {
     await resolveSubstrateGapWrite({ type: "substrateGap_write", gap: base("race-closed", "open", { failed_attempts: 2 }) } as never);
     const staleCopy = await row("race-closed");
-    await resolveSubstrateGapWrite({ type: "substrateGap_write", gap: { ...base("race-closed", "closed", { ...staleCopy!.classification_metadata, closed_reason: "already_resolved" }) } } as never);
+    await resolveSubstrateGapWrite({ type: "substrateGap_write", gap: { ...base("race-closed", "closed", { ...staleCopy!.classification_metadata, closed_reason: "already_resolved", closed_by: "gap-write-expect-status.test" }) } } as never);
     const r = await resolveSubstrateGapWrite({
       type: "substrateGap_write",
       expect_status: "open",
@@ -47,7 +47,7 @@ describe("substrateGap_write expect_status", () => {
 
   it("control: the same stale write WITHOUT expect_status reopens the row (the hazard)", async () => {
     await resolveSubstrateGapWrite({ type: "substrateGap_write", gap: base("race-control", "open") } as never);
-    await resolveSubstrateGapWrite({ type: "substrateGap_write", gap: base("race-control", "closed", { closed_reason: "already_resolved" }) } as never);
+    await resolveSubstrateGapWrite({ type: "substrateGap_write", gap: base("race-control", "closed", { closed_reason: "already_resolved", closed_by: "gap-write-expect-status.test" }) } as never);
     await resolveSubstrateGapWrite({ type: "substrateGap_write", gap: base("race-control", "open", { failed_attempts: 1 }) } as never);
     const after = await row("race-control");
     expect(after!.status).toBe("open");
@@ -83,7 +83,7 @@ describe("recordLineageSpend writes a ledger patch, conditionally", () => {
     await resolveSubstrateGapWrite({ type: "substrateGap_write", gap: base("spend-race", "open") } as never);
     await Promise.all([
       g2f.recordLineageSpend("spend-race", { llm_usage: { cost_usd: 0.4 } }, false),
-      resolveSubstrateGapWrite({ type: "substrateGap_write", gap: base("spend-race", "closed", { closed_reason: "landed_verified" }) } as never),
+      resolveSubstrateGapWrite({ type: "substrateGap_write", gap: base("spend-race", "closed", { closed_reason: "landed_verified", landed_sha: "fixture0" }) } as never),
     ]);
     const after = await row("spend-race");
     expect(after!.status).toBe("closed");
@@ -95,7 +95,7 @@ describe("recordLineageSpend writes a ledger patch, conditionally", () => {
     const picked = await row("bump-race");
     await Promise.all([
       g2f.bumpFailedAttempts(picked),
-      resolveSubstrateGapWrite({ type: "substrateGap_write", gap: base("bump-race", "closed", { closed_reason: "landed_verified" }) } as never),
+      resolveSubstrateGapWrite({ type: "substrateGap_write", gap: base("bump-race", "closed", { closed_reason: "landed_verified", landed_sha: "fixture0" }) } as never),
     ]);
     const after = await row("bump-race");
     expect(after!.status).toBe("closed");

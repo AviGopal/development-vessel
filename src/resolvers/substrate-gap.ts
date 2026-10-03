@@ -313,6 +313,10 @@ export interface SubstrateGapWritePointer {
    *  once keep both. Only `{source:"goal_reach", ...}` entries are accepted (lib/demand-goals.ts).
    *  Pair it with expect_status:"open" to attach only to a gap that is still open. */
   demand_goals_append?: GoalReachDemandEntry[];
+  /** OPERATOR MARKER: "operator:<id>" when an operator makes this write by hand. Pointer-level on purpose:
+   *  it is never stored, so a later writer that re-sends a row's stored fields cannot inherit it. It is an
+   *  explicitness marker, not authentication (see operatorMarkerOf). */
+  operator?: string;
 }
 
 const GAPS_PATH = () => join(workspaceRoot(), "gaps", "gaps.json");
@@ -1172,6 +1176,44 @@ function unrenderedBindingField(
   return walk(incoming["classification_metadata"], storedMeta, "gap.classification_metadata", 0);
 }
 
+/**
+ * OPERATOR MARKER (2026-10-03). The pointer-level `operator` field, when it is an operator id
+ * ("operator:<id>"), else null. No such marker existed before: operator hand-closes carried ad hoc
+ * metadata (resolution, closure_reason, fix_commits) indistinguishable from a walk's. It is never stored,
+ * so it cannot be carried forward by a writer that re-sends a stored row. It makes an operator write
+ * EXPLICIT; it does not authenticate one (the admin-scope check in pool-impulse.ts operatorCredential is
+ * route-level and would lock out cockpit-key operator writes, so it is not used here).
+ */
+const OPERATOR_MARKER = /^operator:[A-Za-z0-9._@-]+$/;
+export function operatorMarkerOf(pointer: unknown): string | null {
+  const v = (pointer as { operator?: unknown } | null | undefined)?.operator;
+  return typeof v === "string" && OPERATOR_MARKER.test(v.trim()) ? v.trim() : null;
+}
+const nonEmptyString = (v: unknown): v is string => typeof v === "string" && v.trim().length > 0;
+/**
+ * CLOSE NEEDS EVIDENCE (2026-10-03). What a write moving an existing row INTO closed must carry:
+ * closed_reason (metadata or top level) and one piece of evidence: an exercised falsifier_exercise
+ * (an object with a boolean `passed`), a land signal (landed_sha / landed_commit), a named closer
+ * (closed_by / close_basis, metadata or top level), or the operator marker. Read from the INCOMING
+ * write only, before the store carries the old row's keys forward. Returns the evidence kind, or why not.
+ */
+export function closeEvidenceOf(
+  incoming: Record<string, unknown>,
+  operator: string | null,
+): { ok: true; reason: string; evidence: string } | { ok: false; missing: string } {
+  const meta = (incoming["classification_metadata"] ?? {}) as Record<string, unknown>;
+  const reason = [meta["closed_reason"], incoming["closed_reason"]].find(nonEmptyString);
+  if (!reason) return { ok: false, missing: "closed_reason (a non-empty string in classification_metadata or on the gap)" };
+  const ex = meta["falsifier_exercise"];
+  if (ex !== null && typeof ex === "object" && !Array.isArray(ex) && typeof (ex as { passed?: unknown }).passed === "boolean") return { ok: true, reason, evidence: "falsifier_exercise" };
+  if (nonEmptyString(meta["landed_sha"]) || nonEmptyString(meta["landed_commit"])) return { ok: true, reason, evidence: "land_signal" };
+  for (const k of ["closed_by", "close_basis"]) {
+    if (nonEmptyString(meta[k]) || nonEmptyString(incoming[k])) return { ok: true, reason, evidence: k };
+  }
+  if (operator) return { ok: true, reason, evidence: "operator_marker" };
+  return { ok: false, missing: "closure evidence: classification_metadata.falsifier_exercise {passed: boolean}, landed_sha / landed_commit, closed_by / close_basis naming the closer, or the pointer-level operator marker \"operator:<id>\"" };
+}
+
 export async function resolveSubstrateGapWrite(
   pointer: SubstrateGapWritePointer | Record<string, unknown>,
   // Additive, test-facing: inject a vocabulary rather than depending on the host's
@@ -1528,6 +1570,26 @@ export async function resolveSubstrateGapWrite(
           },
         };
       }
+    }
+    // CLOSE NEEDS EVIDENCE (see closeEvidenceOf). Only a TRANSITION into closed: a write to a row that is
+    // already closed is not gated. Checked before the carry-forward below copies the old row's keys in.
+    if (String(gap.status ?? "open") === "closed" && String(existing.status ?? "open") !== "closed") {
+      const ev = closeEvidenceOf(incoming as unknown as Record<string, unknown>, operatorMarkerOf(pointer));
+      if (!ev.ok) {
+        console.warn(`[substrate-gap] REFUSED close of ${gap.id}: no ${ev.missing.split(" (")[0]!.split(":")[0]}`);
+        return {
+          early: {
+            shape: "structuredError",
+            body: {
+              resolver: "substrateGap_write",
+              failure_mode: "validation_rejected",
+              rule: "close_needs_evidence",
+              detail: `gap ${gap.id}: a close needs closed_reason plus evidence; missing ${ev.missing}. The row stays ${String(existing.status ?? "open")}.`,
+            },
+          },
+        };
+      }
+      console.log(`[substrate-gap] close of ${gap.id}: closed_reason=${ev.reason} evidence=${ev.evidence}`);
     }
         summaryChanged = existing.summary !== gap.summary;
         // A closed->open transition is a REOPEN, and it is exactly when the gap wants

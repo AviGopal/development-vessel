@@ -26,7 +26,9 @@ mkdirSync(join(ROOT, "gaps"), { recursive: true });
 const SAVED_WR = process.env["WORKSPACE_ROOT"];
 process.env["WORKSPACE_ROOT"] = ROOT;
 process.env["SUBSTRATE_GAP_SKIP_COMPOSE_TRIGGER"] = "1";
-const { impulsesRouter } = await import("../../src/routes/impulses.js");
+// A query-string import: test/observers/topology-chain.test.ts replaces routes/impulses.js with mock.module,
+// which bun never undoes, so in a full run the plain specifier would hand this file that mock.
+const { impulsesRouter } = await import(`../../src/routes/impulses.js?${"gap-write-marker-audit"}`);
 const { resolveSubstrateGapWrite } = await import("../../src/resolvers/substrate-gap.js");
 if (SAVED_WR === undefined) delete process.env["WORKSPACE_ROOT"]; else process.env["WORKSPACE_ROOT"] = SAVED_WR;
 

@@ -33,7 +33,7 @@ import { writeAuthoringMarker, clearAuthoringMarker } from "./patch-with-tools.j
 import { markOnComposeFailure, VERIFY_FAILURE_CLASSES } from "./staged-mitosis-gate.js";
 import { vacuousEditReason, nonTerminatingEditReason, deadStoreEditReason, truncatingRewriteReason } from "../vacuous-edit.js";
 import { acquireComposeSlot } from "../compose-slots.js";
-import { activeMustBeCalled, checkMustBeCalled, constraintRefusalEvidence, introducesDefinition, mustBeCalledFromGate, mustBeCalledReason, mustBeCalledRefusalRecord, constraintParkLine, type ConstraintLift, type MustBeCalledConstraint, attemptEvidenceBlock, baseSpanOfOp, checkOpNoEffect, enforcedLessons, escalateRepeatedRefusal, refusalJournalLine, repeatedRefusalRegion, type RefusalRecord, explicitLineHint, hydrateComposeGap, lineCenteredSlice, noEffectOverlapRefusal, noEffectSpans, parentCheckBlock, parseOwnCheckFailures, sameOwnCheckFailures, spanRecord, typecheckSection, type AttemptRecord, type EditedSpan, type FailStage, type GapRowReader, type OwnCheckFailure } from "./retry-evidence.js";
+import { activeMustBeCalled, checkMustBeCalled, constraintRefusalEvidence, introducesDefinition, mustBeCalledFromGate, mustBeCalledReason, mustBeCalledRefusalRecord, constraintParkLine, type ConstraintLift, type MustBeCalledConstraint, attemptEvidenceBlock, baseSpanOfOp, checkOpNoEffect, enforcedLessons, escalateRepeatedRefusal, refusalJournalLine, repeatedRefusalRegion, type RefusalRecord, explicitLineHint, hydrateComposeGap, lineCenteredSlice, noEffectOverlapRefusal, noEffectSpans, parentCheckBlock, parseOwnCheckFailures, sameOwnCheckFailures, spanRecord, testTitleSegmentOffset, typecheckSection, type AttemptRecord, type EditedSpan, type FailStage, type GapRowReader, type OwnCheckFailure } from "./retry-evidence.js";
 
 export function assertAnchorInWindow(window: string, ops: ReadonlyArray<{ kind?: string; path?: string; old_string?: string }>): Array<{ path: string; oldHead: string; wouldMatchWithoutTrailingSemicolon: boolean }> {
   const missing: Array<{ path: string; oldHead: string; wouldMatchWithoutTrailingSemicolon: boolean }> = [];
@@ -3883,6 +3883,57 @@ export function deriveRelocationHint(input: { vessel_root: string; vessel: strin
   }
   return files.length > 0 ? { files, derived_from: "own_check_failure", at: new Date().toISOString(), test_file: input.test_file, failing_tests: names.slice(0, 5) } : null;
 }
+// THE OWN CHECK IN THE DRAFTER'S GROUNDING (gap the-drafter-never-sees-the-check-it-must-pass). A gap's class-2 own
+// check was resolved only at verify, to run it; the drafter never saw the API it calls, the options it passes or the
+// identifiers it imports, and on 2026-10-03 drafts on four armed check-first gap families failed their checks
+// identically about fifteen times. The check file is shown READ-ONLY: never a target, and a draft that edits it is
+// still refused (strayTestEdits; the self_certification veto). Read from the vessel clone only, like the relocation
+// hint: the runtime tree omits test/ and may hold a stale copy. Bounded by one target window (PER_FILE_SLICE): the
+// whole file when it fits, else its imports and the bodies of the named tests.
+const TEST_CALL_START_RE = /\n[ \t]*(?:it|test|describe)(?:\.\w+)?\(/;
+export type OwnCheckGrounding = { vessel: string; test_file: string; only_tests: string[]; source: string; block: string };
+export function ownCheckGrounding(meta: Record<string, unknown>, cloneRoot: string = vesselCloneRootForChecks()): OwnCheckGrounding | null {
+  const er = meta.evidence_resolve as { input?: { vessel?: unknown } } | undefined;
+  const vessel = typeof er?.input?.vessel === "string" ? er.input.vessel.replace(/^repos\//, "") : "";
+  if (!SAFE_SEGMENT_RE.test(vessel) || vessel.startsWith(".")) return null;
+  const own = gapOwnTestSuite(meta, vessel);
+  if (!own) return null;
+  let source = "";
+  try { source = readFileSync(`${cloneRoot}/${vessel}/${own.test_file}`, "utf8"); } catch (err) {
+    console.log(`[fc-own-check-grounding] repos/${vessel}/${own.test_file} unreadable in the vessel clone (${(err as NodeJS.ErrnoException)?.code ?? String(err)}): the drafter is not shown its check`);
+    return null;
+  }
+  let shown: string;
+  if (source.length <= PER_FILE_SLICE) shown = source;
+  else if (own.only_tests.length === 0) shown = `${source.slice(0, PER_FILE_SLICE)}\n… (truncated)`;
+  else {
+    const header = [
+      ...[...source.matchAll(/^import\s[\s\S]*?["'][^"'\n]+["'];?[ \t]*$/gm)].map((m) => m[0]),
+      ...[...source.matchAll(/^[ \t]*(?:const|let)\b[^\n]*\bawait\s+import\([^\n]*$/gm)].map((m) => m[0]),
+    ];
+    const starts = new Set<number>();
+    const bodies: string[] = [];
+    const unlocated: string[] = [];
+    for (const name of own.only_tests) {
+      const leaf = name.split(" > ").pop()?.trim() ?? "";
+      const at = leaf ? testTitleSegmentOffset(source, leaf) : -1;
+      if (at < 0) { unlocated.push(name); continue; }
+      const lineStart = source.lastIndexOf("\n", at) + 1;
+      if (starts.has(lineStart)) continue;
+      starts.add(lineStart);
+      const next = TEST_CALL_START_RE.exec(source.slice(at));
+      bodies.push(source.slice(lineStart, next ? at + next.index : source.length).trimEnd());
+    }
+    const text = [header.join("\n"), ...bodies].join("\n…\n")
+      + (unlocated.length > 0 ? `\n… (${unlocated.length} named test(s) not located in the file)` : "");
+    shown = text.length <= PER_FILE_SLICE ? text : `${text.slice(0, PER_FILE_SLICE)}\n… (truncated)`;
+  }
+  const what = own.only_tests.length > 0 ? `its ${own.only_tests.length} named test(s)` : "this file";
+  const block = `THE GAP'S OWN CHECK — repos/${vessel}/${own.test_file} (READ-ONLY CONTEXT; NOT A TARGET FILE).\n`
+    + `This test is what your draft is judged by: after your change ${what} MUST PASS. Bind the change to the API it calls, the option names it passes and the identifiers it imports. `
+    + `Do NOT edit this file or any other test: a draft that edits it is refused, however green it makes the check.\n${shown}`;
+  return { vessel, test_file: own.test_file, only_tests: own.only_tests, source, block };
+}
 /** The compose's target files: edit_site, the relocation hint's files, then repos/ paths the spec names. */
 export function composeTargetFiles(gapMeta: Record<string, unknown>, spec: string): string[] {
   const editSiteRaw = typeof gapMeta.edit_site === "string" ? gapMeta.edit_site : "";
@@ -4912,6 +4963,8 @@ async function resolveFeatureComposeUncapped(pointer: FeatureComposePointer): Pr
   // TARGET LOCATORS: the classifier's edit_site + any repos/… paths named in the spec.
   // Capped at 4 so a verbose spec can't blow the reserved-window budget.
   const targetFiles = composeTargetFiles(gapMeta, pointer.spec);
+  // The gap's own check, read before planning (shown to the drafter after the blind-window refusals below).
+  const ownCheckCtx = ownCheckGrounding(gapMeta);
   // A PATH BINDING IS A PRECONDITION FOR PLANNING (measured 2026-08-06, 72h of this
   // vessel's own journal). Ungrounded decomposes ran 7 / 21 / 94 per day (Aug 4/5/6)
   // against 101 / 159 / 150 grounded, and with no real path in the prompt the planner
@@ -5103,6 +5156,12 @@ async function resolveFeatureComposeUncapped(pointer: FeatureComposePointer): Pr
       const c = (rd.body as { content?: unknown })?.content;
       if (!(rd.ok && typeof c === "string" && c.length > 0)) netNewTargets.push(t);
     } catch { netNewTargets.push(t); }
+  }
+  // THE OWN CHECK, READ-ONLY (ownCheckGrounding). Appended AFTER the blind-window refusals on purpose: the check's
+  // import lines name target basenames, and must never satisfy "the window mentions the target file".
+  if (ownCheckCtx) {
+    grounding += `\n\n${ownCheckCtx.block}`;
+    console.log(`[fc-own-check-grounding] showed repos/${ownCheckCtx.vessel}/${ownCheckCtx.test_file} read-only (${ownCheckCtx.block.length} bytes, ${ownCheckCtx.only_tests.length} named test(s))`);
   }
   // CROSS-FILE SYMBOL GROUNDING (2026-08-11).
   //

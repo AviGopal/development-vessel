@@ -1,5 +1,6 @@
 // A LANDING THAT NOTHING MEASURED IS REFUSED, NOT CUT OVER (check-first).
 //
+// Gap a-landing-with-no-measurement-that-actually-ran-is-cut-over-instead-of-refused.
 // General rule: "nothing measured it" must REFUSE, not land. Instance: a commit landed whose gap
 // carried no class-2 check (the own-check step stamped it landed_unverified) AND whose
 // pre-cutover suite did not run (ran=false). Every instrument abstained, and it still landed:
@@ -9,31 +10,55 @@
 // measurement there.
 //
 // Expected: a cutover needs at least ONE measurement that actually ran — the gap's own class-2
-// check, the pre-cutover suite with ran=true, or a by-effect check. With none it refuses with
-// no_measurement_available, keeps the patch parked (pending lock and staged tree kept, nothing
-// committed), and files or bumps a gap saying this repo / gap has no instrument. A suite that
-// timed out, was killed, or never started is ran=false: no measurement, never a pass.
+// check passing, or the pre-cutover suite with ran=true. With none it refuses with
+// refuse_class no_measurement_available, commits nothing, and files or bumps a gap saying this
+// repo / gap has no instrument. A suite that timed out, was killed, or never started is
+// ran=false: no measurement, never a pass.
+// A by-effect check is not counted as a measurement; known limitation, out of scope.
+//
+// PARKING (field contract pinned here). A no-measurement refusal must not wedge the queue:
+//   • the pending lock (mitosis-pending.json) is RELEASED by the same call;
+//   • the staged patch is ARCHIVED outside mitosis_root, and the no-instrument gap write (through
+//     the cutover's gap-write seam, ownCheckDeps.writeGap) cites it as
+//       classification_metadata.archived_patch = {
+//         gap_id,            // the landing gap
+//         original_base,     // the clone's HEAD commit the patch was staged on, or staged_base_sha
+//         staged_files,      // the staged relative paths
+//         path?: string,     // a directory holding each staged file at its relative path,
+//                            //   or a patch file whose text contains the staged content
+//         ref?: string,      // or a git ref in the landing clone whose tree holds the staged files
+//       }
+//     which is what a re-proposal against the CURRENT base needs. The re-proposal itself (when
+//     the no-instrument gap closes, the archived patch goes back through the normal compose path,
+//     not re-admitted verbatim) lives outside the cutover and is NOT unit-tested here: only the
+//     archive record's contents are pinned;
+//   • the next tick does not re-refuse the same tree (it is no longer in the queue).
+//
+// KILL SWITCH REMOVED (arms with the-precutover-suite-gate-fails-open-and-has-an-env-kill-switch).
+// CUTOVER_PRECHECK_SUITE=0 must have no effect. The suite is paused only by a SHAPED hold read at
+// dispatch: a maintenanceLease named "precutover_suite" (resolveMaintenanceLease, the same
+// lease store the cutover's change_window uses; a named read also sees the unnamed global hold).
+// A paused suite did not run, so it is not a measurement.
 //
 // These drive the REAL resolveVesselMitosisCutover through its git-aware path against a temp
-// clone with a bare origin (skip_push, skip_restart). The gap-store read/write and the own-check
-// run go through the cutover's own test seam (__setOwnCheckDepsForTests). The pre-cutover suite
-// calls the REAL test_suite resolver directly (not through that seam), so only the network is
-// stood in: discovery names a shell producer and the shell answers with bun's actual output for
-// each case, captured from bun 1.3.14 — a repo with no tests ("No tests found!"), a suite killed
-// by `timeout` before its summary, and a passing suite. The real resolver's `ran` regex reads
-// those bytes. CUTOVER_PRECHECK_SUITE is UNSET here, so the suite step really runs: nothing in
-// this file depends on that env kill switch being honoured (see the open gap
-// the-precutover-suite-gate-fails-open-and-has-an-env-kill-switch).
-//
-// skip_push means no push is ever attempted in these fixtures, so "does not push" is pinned as
-// "no commit was made and the bare origin's dev ref is unchanged".
+// clone with a bare origin (skip_push, skip_restart). The own check and the gap store go through
+// __setOwnCheckDepsForTests. The pre-cutover suite calls the REAL test_suite resolver; only the
+// network is stood in, through the shared cutover fetch guard (every unstubbed URL fails the
+// test): discovery names a fixture shell that answers with bun 1.3.14's captured output.
+// skip_push means no push is ever attempted here, so "does not push" is pinned as "no commit was
+// made and the bare origin's dev ref is unchanged".
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import * as cutoverMod from "../../src/resolvers/vessel-mitosis-cutover.js";
+import { resolveMaintenanceLeaseWrite } from "../../src/resolvers/maintenance-lease.js";
 import { mkdtemp, mkdir, writeFile, readFile, rm, stat } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, isAbsolute } from "node:path";
+import {
+  installCutoverFetchGuard, routeFleetUnreachable, routeShell,
+  BUN_PASSING, BUN_NO_TESTS, BUN_KILLED_BY_TIMEOUT, type FetchGuard,
+} from "./cutover-fetch-guard.js";
 
 const { resolveVesselMitosisCutover, __setOwnCheckDepsForTests } = cutoverMod;
 
@@ -53,6 +78,7 @@ const ENV_KEYS = [
 ] as const;
 const saved: Record<string, string | undefined> = {};
 let ws: string;
+let guard: FetchGuard;
 
 const VESSEL = "development-vessel";
 const GAP = "gap-no-measurement-target";
@@ -62,36 +88,19 @@ const STAGED = "// patched by substrate\n";
 const MVID = "mitosis-2026-10-02T23-45-00-000Z";
 const TARGET = "src/resolvers/target.ts";
 
-// bun 1.3.14's real output, captured from: an empty repo (no test files), a suite whose only test
-// hangs and is killed by `timeout 2` before any summary, and a one-test passing suite.
-const BUN_NO_TESTS =
-  "bun test v1.3.14 (0d9b296a)\nNo tests found!\n\nTests need \".test\", \"_test_\", \".spec\" or \"_spec_\" in the filename (ex: \"MyApp.test.ts\")\n\nLearn more about bun test: https://bun.com/docs/cli/test\n";
-const BUN_KILLED_BY_TIMEOUT = "bun test v1.3.14 (0d9b296a)\n\ntest/resolvers/slow.test.ts:\n";
-const BUN_PASSING =
-  "bun test v1.3.14 (0d9b296a)\n\ntest/resolvers/ok.test.ts:\n(pass) ok [0.06ms]\n\n 1 pass\n 0 fail\n 1 expect() calls\nRan 1 test across 1 file. [11.00ms]\n";
-
 type SuiteMode = "no_tests" | "killed" | "dispatch_failed" | "passing";
-const shellCalls: string[] = [];
-const originalFetch = globalThis.fetch;
-/** The pre-cutover (and post-land) suite's network: discovery → a fixture shell that answers per mode. */
-function standInShell(hostRepoRoot: string, mode: SuiteMode): void {
-  globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
-    const url = typeof input === "string" ? input : String((input as { url?: string }).url ?? input);
-    let body: Record<string, any> = {};
-    try { body = init?.body ? JSON.parse(String(init.body)) : {}; } catch { body = {}; }
-    if (body?.pointer?.type === "vesselCapability") {
-      return Response.json({ content: { vessels: [{ endpoint: "http://shell.fixture", resolve_endpoint: "/resolve", health_score: 1 }] } });
-    }
-    if (url.startsWith("http://shell.fixture")) {
-      shellCalls.push(String(body?.impulse?.pointer?.command ?? ""));
-      if (mode === "dispatch_failed") throw new Error("shell producer connection reset");
-      const head = `VERIFIED_ROOT=${hostRepoRoot}\nVERIFIED_HEAD=abc1234\n`;
-      const out = mode === "no_tests" ? BUN_NO_TESTS : mode === "killed" ? BUN_KILLED_BY_TIMEOUT : BUN_PASSING;
-      return Response.json({ stdout: head + out });
-    }
-    // Anything else (trace emission, attempt ledger): an empty answer, never a live endpoint.
-    return Response.json({});
-  }) as unknown as typeof fetch;
+/** Shell calls made while the landing clone still sat at its baseline commit: the PRE-cutover suite. */
+let precheckCalls = 0;
+let shellCalls = 0;
+let currentHost = "";
+function suite(mode: SuiteMode): void {
+  routeShell(guard, () => {
+    shellCalls++;
+    if (currentHost && git(currentHost, "log", "-1", "--format=%s") === "baseline") precheckCalls++;
+    if (mode === "dispatch_failed") throw new Error("shell producer connection reset");
+    const out = mode === "no_tests" ? BUN_NO_TESTS : mode === "killed" ? BUN_KILLED_BY_TIMEOUT : BUN_PASSING;
+    return `VERIFIED_ROOT=${currentHost}\nVERIFIED_HEAD=abc1234\n${out}`;
+  });
 }
 
 const writes: Array<Record<string, unknown>> = [];
@@ -111,19 +120,22 @@ beforeEach(async () => {
   process.env["PUSH_POLICY_PATH"] = join(ws, "no-push-policy.json");
   // CUTOVER_PRECHECK_SUITE deliberately left unset: the suite step runs.
   writes.length = 0;
-  shellCalls.length = 0;
-  // Default: no network reaches anything live, even before a test installs its mode.
-  standInShell(join(ws, "host-repo"), "dispatch_failed");
+  precheckCalls = 0;
+  shellCalls = 0;
+  currentHost = "";
+  guard = installCutoverFetchGuard();
+  routeFleetUnreachable(guard);
 });
 
 afterEach(async () => {
-  globalThis.fetch = originalFetch;
+  const violations = guard.restore();
   __setOwnCheckDepsForTests(null);
   for (const k of ENV_KEYS) {
     if (saved[k] === undefined) delete process.env[k];
     else process.env[k] = saved[k];
   }
   await rm(ws, { recursive: true, force: true });
+  expect(violations).toEqual([]);
 });
 
 function git(cwd: string, ...args: string[]): string {
@@ -153,11 +165,13 @@ async function setup() {
   git(hostRepoRoot, "config", "commit.gpgsign", "false");
   git(hostRepoRoot, "add", ".");
   git(hostRepoRoot, "commit", "-q", "-m", "baseline");
+  const baseCommit = git(hostRepoRoot, "rev-parse", "HEAD");
   const originRoot = join(ws, "host-origin.git");
   git(ws, "init", "-q", "--bare", "-b", "dev", originRoot);
   git(hostRepoRoot, "remote", "add", "origin", originRoot);
   git(hostRepoRoot, "push", "-q", "-u", "origin", "dev");
   const originSha = git(originRoot, "rev-parse", "dev");
+  currentHost = hostRepoRoot;
   // What patch_with_tools leaves behind: the queue lock naming this mitosis and its gap.
   const pendingPath = join(ws, "mitosis-pending.json");
   await writeFile(
@@ -199,7 +213,7 @@ async function setup() {
     skip_push: true,
     skip_restart: true,
   };
-  return { mitosisRoot, hostRepoRoot, originRoot, originSha, pendingPath, pointer };
+  return { mitosisRoot, hostRepoRoot, originRoot, originSha, baseCommit, baseSha, pendingPath, pointer };
 }
 type Fixture = Awaited<ReturnType<typeof setup>>;
 
@@ -218,109 +232,179 @@ const readRow = (row: Record<string, unknown>) => async (p: Record<string, unkno
 function ownCheckBody(hostRepoRoot: string, over: Record<string, unknown>) {
   return { shape: "test_suite", body: { vessel: `repos/${VESSEL}`, verified_root: hostRepoRoot, ran: true, total: 1, pass: 1, fail: 0, skip: 0, requested_not_passing: 0, failingTests: [], ...over } };
 }
+function noCheck(s: Fixture): { ownRuns: () => number } {
+  let n = 0;
+  __setOwnCheckDepsForTests({ readGap: readRow(noCheckRow), writeGap: recordWrite, runSuite: async () => { n++; return ownCheckBody(s.hostRepoRoot, {}); } });
+  return { ownRuns: () => n };
+}
+function ownCheckPasses(s: Fixture): { ownRuns: () => number } {
+  let n = 0;
+  __setOwnCheckDepsForTests({ readGap: readRow(checkedRow), writeGap: recordWrite, runSuite: async () => { n++; return ownCheckBody(s.hostRepoRoot, {}); } });
+  return { ownRuns: () => n };
+}
 
 async function exists(p: string): Promise<boolean> {
   try { await stat(p); return true; } catch { return false; }
 }
 const bodyOf = (r: { body?: unknown }) => (r.body ?? {}) as Record<string, unknown>;
+const headSubject = (s: Fixture) => git(s.hostRepoRoot, "log", "-1", "--format=%s");
 
-/** Refused for no measurement, nothing committed or pushed, the patch still parked. */
-async function expectRefusedAndParked(s: Fixture, r: { shape: string; body?: unknown }): Promise<void> {
+/** The no-instrument gap writes: name the vessel or the landing gap and say there is no measurement / instrument. */
+function noInstrumentWrites(): Array<Record<string, unknown>> {
+  return writes.filter((w) => {
+    const j = JSON.stringify(w);
+    return /no[_ -]?(measurement|instrument)/i.test(j) && (j.includes(VESSEL) || j.includes(GAP));
+  });
+}
+function archivedPatchOf(w: Record<string, unknown> | undefined): Record<string, unknown> | null {
+  const gap = (w?.["gap"] ?? {}) as Record<string, unknown>;
+  const meta = (gap["classification_metadata"] ?? {}) as Record<string, unknown>;
+  const a = meta["archived_patch"];
+  return a && typeof a === "object" ? (a as Record<string, unknown>) : null;
+}
+/** Does the archive the record cites hold the staged content of TARGET (outside mitosis_root)? */
+async function archiveHoldsStaged(s: Fixture, a: Record<string, unknown>): Promise<boolean> {
+  const path = typeof a["path"] === "string" ? (a["path"] as string) : "";
+  const ref = typeof a["ref"] === "string" ? (a["ref"] as string) : "";
+  if (path && isAbsolute(path) && !path.startsWith(s.mitosisRoot)) {
+    try {
+      if ((await stat(path)).isDirectory()) return (await readFile(join(path, TARGET), "utf8")) === STAGED;
+      return (await readFile(path, "utf8")).includes(STAGED.trim());
+    } catch { return false; }
+  }
+  if (ref) {
+    const r = spawnSync("git", ["show", `${ref}:${TARGET}`], { cwd: s.hostRepoRoot, encoding: "utf8" });
+    return r.status === 0 && r.stdout === STAGED;
+  }
+  return false;
+}
+
+/** Refused for no measurement, nothing committed or pushed, the lock released, the patch archived and cited. */
+async function expectRefusedReleasedArchived(s: Fixture, r: { shape: string; body?: unknown }): Promise<void> {
   const body = bodyOf(r);
-  const landed = {
+  expect({
     shape: r.shape,
     refuse_class: body["refuse_class"] ?? null,
-    head_subject: git(s.hostRepoRoot, "log", "-1", "--format=%s"),
+    head_subject: headSubject(s),
     origin_dev: git(s.originRoot, "rev-parse", "dev"),
-  };
-  expect(landed).toEqual({
+  }).toEqual({
     shape: "vesselMitosisCutoverResult",
     refuse_class: "no_measurement_available",
     head_subject: "baseline",
     origin_dev: s.originSha,
   });
-  expect(String(body["refusal_reason"] ?? "")).toContain("no_measurement_available");
-  // Parked: the queue lock survives the exit clear, and the staged tree is intact.
-  expect(await exists(s.pendingPath)).toBe(true);
-  expect(await readFile(join(s.mitosisRoot, TARGET), "utf8")).toBe(STAGED);
-  // The working tree's index is not left dirty with the staged paths.
   expect(git(s.hostRepoRoot, "diff", "--cached", "--name-only")).toBe("");
+  expect(await exists(s.pendingPath)).toBe(false);
+  const a = archivedPatchOf(noInstrumentWrites()[0]);
+  expect(a).not.toBeNull();
+  expect(await archiveHoldsStaged(s, a!)).toBe(true);
 }
 
 describe("cutover: a landing no instrument measured is refused (no_measurement_available), not cut over", () => {
-  it("MUST-FAIL A: no gap check and a pre-cutover suite that did not run (repo with no tests, ran=false) refuses with no_measurement_available, does not push, keeps the patch parked", async () => {
+  it("MUST-FAIL A: no gap check and a pre-cutover suite that did not run (repo with no tests, ran=false) refuses with no_measurement_available, does not push, releases the lock and archives the patch", async () => {
     const s = await setup();
-    standInShell(s.hostRepoRoot, "no_tests");
-    let ownRuns = 0;
-    __setOwnCheckDepsForTests({ readGap: readRow(noCheckRow), writeGap: recordWrite, runSuite: async () => { ownRuns++; return ownCheckBody(s.hostRepoRoot, {}); } });
+    suite("no_tests");
+    const own = noCheck(s);
     const r = await resolveVesselMitosisCutover(s.pointer as never);
-    // Positive control on the seam: the suite step was really attempted (the gap is not about the env switch).
-    expect(shellCalls.length).toBeGreaterThan(0);
-    expect(ownRuns).toBe(0);
-    await expectRefusedAndParked(s, r);
+    // Positive control on the seam: the pre-cutover suite was really attempted.
+    expect(precheckCalls).toBeGreaterThan(0);
+    expect(own.ownRuns()).toBe(0);
+    await expectRefusedReleasedArchived(s, r);
   });
 
   it("MUST-FAIL B: no gap check and a pre-cutover suite KILLED by its timeout before the summary refuses — a timeout is ran=false, never a pass", async () => {
     const s = await setup();
-    standInShell(s.hostRepoRoot, "killed");
-    __setOwnCheckDepsForTests({ readGap: readRow(noCheckRow), writeGap: recordWrite, runSuite: async () => ownCheckBody(s.hostRepoRoot, {}) });
+    suite("killed");
+    noCheck(s);
     const r = await resolveVesselMitosisCutover(s.pointer as never);
-    expect(shellCalls.length).toBeGreaterThan(0);
-    await expectRefusedAndParked(s, r);
+    expect(precheckCalls).toBeGreaterThan(0);
+    await expectRefusedReleasedArchived(s, r);
   });
 
   it("MUST-FAIL B': no gap check and a pre-cutover suite that never started (shell dispatch failed) refuses", async () => {
     const s = await setup();
-    standInShell(s.hostRepoRoot, "dispatch_failed");
-    __setOwnCheckDepsForTests({ readGap: readRow(noCheckRow), writeGap: recordWrite, runSuite: async () => ownCheckBody(s.hostRepoRoot, {}) });
+    suite("dispatch_failed");
+    noCheck(s);
     const r = await resolveVesselMitosisCutover(s.pointer as never);
-    expect(shellCalls.length).toBeGreaterThan(0);
-    await expectRefusedAndParked(s, r);
+    expect(precheckCalls).toBeGreaterThan(0);
+    await expectRefusedReleasedArchived(s, r);
   });
 
   it("MUST-FAIL C: the no-measurement refusal files or bumps a gap saying this repo / gap has no instrument", async () => {
     const s = await setup();
-    standInShell(s.hostRepoRoot, "no_tests");
-    __setOwnCheckDepsForTests({ readGap: readRow(noCheckRow), writeGap: recordWrite, runSuite: async () => ownCheckBody(s.hostRepoRoot, {}) });
+    suite("no_tests");
+    noCheck(s);
     const r = await resolveVesselMitosisCutover(s.pointer as never);
     expect(bodyOf(r)["refuse_class"]).toBe("no_measurement_available");
-    // Either a new gap naming the vessel, or a bump on the landing gap's row — through the gap write seam.
-    const noInstrument = writes.filter((w) => {
-      const j = JSON.stringify(w);
-      return /no[_ -]?(measurement|instrument)/i.test(j) && (j.includes(VESSEL) || j.includes(GAP));
-    });
-    expect(noInstrument.length).toBeGreaterThan(0);
+    expect(noInstrumentWrites().length).toBeGreaterThan(0);
+  });
+
+  it("MUST-FAIL D (parking a): the no-measurement refusal releases the pending lock in the same call and archives the staged patch outside mitosis_root, cited on the no-instrument gap write", async () => {
+    const s = await setup();
+    suite("no_tests");
+    noCheck(s);
+    const r = await resolveVesselMitosisCutover(s.pointer as never);
+    expect(bodyOf(r)["refuse_class"]).toBe("no_measurement_available");
+    expect(await exists(s.pendingPath)).toBe(false);
+    const a = archivedPatchOf(noInstrumentWrites()[0]);
+    expect(a).not.toBeNull();
+    expect(await archiveHoldsStaged(s, a!)).toBe(true);
+  });
+
+  it("MUST-FAIL E (parking b): the archive record carries what a re-proposal against the current base needs — gap id, patch path or ref, original base, staged files", async () => {
+    const s = await setup();
+    suite("no_tests");
+    noCheck(s);
+    const r = await resolveVesselMitosisCutover(s.pointer as never);
+    expect(bodyOf(r)["refuse_class"]).toBe("no_measurement_available");
+    const a = archivedPatchOf(noInstrumentWrites()[0]) ?? {};
+    expect(a["gap_id"]).toBe(GAP);
+    expect(typeof a["path"] === "string" || typeof a["ref"] === "string").toBe(true);
+    expect([s.baseCommit, s.baseSha]).toContain(a["original_base"] as string);
+    expect(a["staged_files"]).toEqual([TARGET]);
+  });
+
+  it("MUST-FAIL F (parking c): the next tick after a no-measurement refusal does not re-refuse the same tree", async () => {
+    const s = await setup();
+    suite("no_tests");
+    noCheck(s);
+    const first = await resolveVesselMitosisCutover(s.pointer as never);
+    expect(bodyOf(first)["refuse_class"]).toBe("no_measurement_available");
+    const bumps = noInstrumentWrites().length;
+    const next = await resolveVesselMitosisCutover(s.pointer as never);
+    expect(bodyOf(next)["refuse_class"] ?? null).not.toBe("no_measurement_available");
+    expect(noInstrumentWrites().length).toBe(bumps);
+    expect(headSubject(s)).toBe("baseline");
   });
 
   it("CONTROL 1: the gap's own check ran and PASSED → lands, even though the pre-cutover suite did not run", async () => {
     const s = await setup();
-    standInShell(s.hostRepoRoot, "no_tests");
-    let ownRuns = 0;
-    __setOwnCheckDepsForTests({ readGap: readRow(checkedRow), writeGap: recordWrite, runSuite: async () => { ownRuns++; return ownCheckBody(s.hostRepoRoot, {}); } });
+    suite("no_tests");
+    const own = ownCheckPasses(s);
     const r = await resolveVesselMitosisCutover(s.pointer as never);
     expect(String(bodyOf(r)["refusal_reason"] ?? "")).toBe("");
     expect(r.shape).toBe("cutoverApplied");
-    expect(ownRuns).toBe(1);
+    expect(own.ownRuns()).toBe(1);
     expect(bodyOf(r)["own_check_verified"]).toBe(true);
-    expect(git(s.hostRepoRoot, "log", "-1", "--format=%s")).not.toBe("baseline");
+    expect(headSubject(s)).not.toBe("baseline");
     expect(git(s.hostRepoRoot, "show", `HEAD:${TARGET}`) + "\n").toBe(STAGED);
   });
 
   it("CONTROL 2: no gap check, but the pre-cutover suite RAN (ran=true, no new failures) → lands; the suite is a measurement", async () => {
     const s = await setup();
-    standInShell(s.hostRepoRoot, "passing");
-    __setOwnCheckDepsForTests({ readGap: readRow(noCheckRow), writeGap: recordWrite, runSuite: async () => ownCheckBody(s.hostRepoRoot, {}) });
+    suite("passing");
+    noCheck(s);
     const r = await resolveVesselMitosisCutover(s.pointer as never);
     expect(String(bodyOf(r)["refusal_reason"] ?? "")).toBe("");
     expect(r.shape).toBe("cutoverApplied");
-    expect(shellCalls.length).toBeGreaterThan(0);
-    expect(git(s.hostRepoRoot, "log", "-1", "--format=%s")).not.toBe("baseline");
+    expect(precheckCalls).toBeGreaterThan(0);
+    expect(headSubject(s)).not.toBe("baseline");
     expect(git(s.hostRepoRoot, "show", `HEAD:${TARGET}`) + "\n").toBe(STAGED);
   });
 
   it("CONTROL 3: the gap's own check ran and FAILED → refused as own_check_failed, distinguishable from no_measurement_available", async () => {
     const s = await setup();
-    standInShell(s.hostRepoRoot, "no_tests");
+    suite("no_tests");
     __setOwnCheckDepsForTests({
       readGap: readRow(checkedRow),
       writeGap: recordWrite,
@@ -332,7 +416,65 @@ describe("cutover: a landing no instrument measured is refused (no_measurement_a
     expect(body["refuse_class"]).toBe("own_check_failed");
     expect(String(body["refusal_reason"] ?? "")).toContain("own_check_failed");
     expect(String(body["refusal_reason"] ?? "")).not.toContain("no_measurement_available");
-    expect(git(s.hostRepoRoot, "log", "-1", "--format=%s")).toBe("baseline");
+    expect(headSubject(s)).toBe("baseline");
     expect(git(s.originRoot, "rev-parse", "dev")).toBe(s.originSha);
+  });
+});
+
+describe("cutover: the pre-cutover suite has no env kill switch; only a shaped hold pauses it", () => {
+  async function holdSuite(): Promise<void> {
+    const acq = await resolveMaintenanceLeaseWrite({ type: "maintenanceLease_write", op: "acquire", name: "precutover_suite", holder: "operator:test", ttl_ms: 60_000 } as never);
+    expect((acq.body as { acquired?: boolean }).acquired).toBe(true);
+  }
+
+  it("MUST-FAIL K1: with CUTOVER_PRECHECK_SUITE=0 set, the pre-cutover suite still runs (the env var has no effect)", async () => {
+    const s = await setup();
+    suite("passing");
+    noCheck(s);
+    process.env["CUTOVER_PRECHECK_SUITE"] = "0";
+    const r = await resolveVesselMitosisCutover(s.pointer as never);
+    expect(precheckCalls).toBeGreaterThan(0);
+    expect(r.shape).toBe("cutoverApplied");
+  });
+
+  it("MUST-FAIL K2: a held maintenanceLease \"precutover_suite\" (a shaped hold read at dispatch) pauses the suite; the landing rests on the gap's own check", async () => {
+    const s = await setup();
+    suite("passing");
+    const own = ownCheckPasses(s);
+    await holdSuite();
+    const r = await resolveVesselMitosisCutover(s.pointer as never);
+    expect(precheckCalls).toBe(0);
+    expect(own.ownRuns()).toBe(1);
+    expect(r.shape).toBe("cutoverApplied");
+  });
+
+  it("MUST-FAIL K3: a held (paused) suite is not a measurement — no gap check plus the hold refuses with no_measurement_available", async () => {
+    const s = await setup();
+    suite("passing");
+    noCheck(s);
+    await holdSuite();
+    const r = await resolveVesselMitosisCutover(s.pointer as never);
+    expect(precheckCalls).toBe(0);
+    expect(bodyOf(r)["refuse_class"]).toBe("no_measurement_available");
+    expect(headSubject(s)).toBe("baseline");
+  });
+
+  it("CONTROL K: with no hold and the env var unset, the pre-cutover suite runs", async () => {
+    const s = await setup();
+    suite("passing");
+    noCheck(s);
+    const r = await resolveVesselMitosisCutover(s.pointer as never);
+    expect(precheckCalls).toBeGreaterThan(0);
+    expect(r.shape).toBe("cutoverApplied");
+  });
+});
+
+describe("cutover fetch guard", () => {
+  it("CONTROL: a deliberate unstubbed fetch is caught — rejected AND recorded, so a swallowing caller still fails the test", async () => {
+    let swallowed = false;
+    try { await fetch("http://127.0.0.1:1/deliberately-unstubbed", { method: "POST", body: "{}" }); } catch { swallowed = true; }
+    expect(swallowed).toBe(true);
+    expect(guard.violations).toEqual(["POST http://127.0.0.1:1/deliberately-unstubbed"]);
+    guard.violations.length = 0; // this test's violation is the point; afterEach checks every other test
   });
 });

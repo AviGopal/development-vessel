@@ -106,13 +106,15 @@ function declsOf(id: ts.Identifier): Decl[] {
     }
     // Declarations directly in this scope (variable statements, for-initializers, functions).
     const scan = (n: ts.Node): void => {
+      // A function declaration names itself in the enclosing scope, though it opens a scope of its own: the
+      // check must come before the early return, or `function f() {}` is never found by name.
+      if (n !== s && ts.isFunctionDeclaration(n) && n.name?.text === name) found.push({ node: n, kind: "function" });
       if (n !== s && isScope(n) && !ts.isBlock(n)) return;
       if (n !== s && ts.isBlock(n)) return;
       if (ts.isVariableDeclaration(n) && ts.isIdentifier(n.name) && n.name.text === name && n.initializer) {
         const init = n.initializer;
         found.push({ node: init, kind: ts.isArrowFunction(init) || ts.isFunctionExpression(init) ? "function" : "value" });
       }
-      if (ts.isFunctionDeclaration(n) && n.name?.text === name) found.push({ node: n, kind: "function" });
       if (ts.isImportDeclaration(n) && ts.isStringLiteral(n.moduleSpecifier) && n.moduleSpecifier.text.startsWith(".")) {
         const nb = n.importClause?.namedBindings;
         if (nb && ts.isNamedImports(nb)) {
@@ -403,10 +405,21 @@ function sweepCalls(path: string, mode: SweepMode): Array<SweepSite & RawSite> {
         urlIdx = "self";
       } else {
         urlIdx = paramIndex(urlArg, fn.params);
+        // Through local values: `const url = \`${baseUrl}?q=…\`; fetch(url, …)` or
+        // `const target = await resolve(name, endpoint); fetch(target, …)` still passes the parameter through.
+        if (urlIdx < 0) {
+          for (const n of expandedNodes(urlArg, 3, { functions: false })) {
+            for (const c of [n, ...(ts.isCallExpression(n) ? n.arguments : [])]) {
+              const i = paramIndex(c, fn.params);
+              if (i >= 0) { urlIdx = i; break; }
+            }
+            if (urlIdx >= 0) break;
+          }
+        }
         if (urlIdx < 0) continue;
         const urlParam = fn.params[urlIdx];
         headPass = inner.headPass && urlArg !== "self" &&
-          pieces(urlArg, "head").some((pc) => "ref" in pc && (pc.base ?? pc.ref) === urlParam);
+          pieces(urlArg, "head").some((pc) => "ref" in pc && ((pc.base ?? pc.ref) === urlParam || pc.ref.split(/[.(]/)[0] === urlParam));
       }
       const initArg = inner.initIdx === null ? undefined : call.arguments[inner.initIdx];
       const authedInside = inner.authedInside || authedInit(initArg);

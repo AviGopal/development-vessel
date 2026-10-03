@@ -230,6 +230,12 @@ describe("keyed-URL sweep: no credential follows a caller-supplied URL on any ro
         `export async function resolveF(p: P) { const u = p.tracesUrl ?? TRACES; const auth = { Authorization: \`ApiKey \${KEY}\` }; await fetch(u, { headers: { ...auth, ...selfAuthHeaders(u, TRACES) } }); }`,
         // a credential behind a guard condition: passes
         `export async function resolveG(p: P) { const u = p.tracesUrl ?? TRACES; await fetch(u, { headers: selfAuthTrusted(u, TRACES) ? { Authorization: \`Bearer \${KEY}\` } : {} }); }`,
+        // BLIND SPOT 1: a helper that builds its URL in a local from its parameter is a pass-through: flagged
+        `async function fetchBase(baseUrl: string, key: string) { const url = \`\${baseUrl}?q=1\`; return fetch(url, { headers: { Authorization: \`ApiKey \${key}\` } }); }`,
+        `export async function resolveH(p: P) { await fetchBase(p.tracesUrl ?? TRACES, KEY); }`,
+        // BLIND SPOT 2: a URL returned by a function DECLARATION from its argument is still the caller's: flagged
+        `function pick(fallback: string): string { return fallback; }`,
+        `export async function resolveI(p: P) { const u = pick(p.tracesUrl ?? TRACES); await fetch(u, { headers: { Authorization: \`ApiKey \${KEY}\` } }); }`,
       ].join("\n"),
     );
     const got = sweepKeyedCallerUrlFile(path).map((s) => ({ line: s.line, guarded: s.guarded }));
@@ -240,6 +246,8 @@ describe("keyed-URL sweep: no credential follows a caller-supplied URL on any ro
       { line: 10, guarded: true },
       { line: 12, guarded: false },
       { line: 13, guarded: true },
+      { line: 15, guarded: false },
+      { line: 17, guarded: false },
     ]);
   });
 });

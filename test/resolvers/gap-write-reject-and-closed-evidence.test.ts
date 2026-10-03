@@ -13,7 +13,7 @@
 //   - A write that keeps a row closed (or rejected) does not change closed_reason, closed_by, close_basis,
 //     landed_sha, landed_commit or falsifier_exercise without the operator marker: stored values are kept,
 //     and a key the stored row does not have is not added. The write itself proceeds.
-// CONTROLS: orphaned_capability_scan's reject, driven for real into the real store; the escalation "drop"
+// CONTROLS: the orphaned_capability_scan reject, driven for real into the real store; the escalation "drop"
 // close payload; an operator-marked verdict correction.
 //
 // SEAM: fresh module instance under this file's temp root; rows are SEEDED into the store file.
@@ -50,7 +50,7 @@ beforeEach(() => {
 afterAll(() => { globalThis.fetch = realFetch; });
 
 describe("substrateGap_write: rejects need evidence and a closed verdict is not rewritten", () => {
-  it("isolation: the store under test is this file's temp root", () => {
+  it("isolation: the store under test is the temp root of this file", () => {
     expect(gapStoreRootForTest()).toBe(ROOT);
   });
 
@@ -86,7 +86,7 @@ describe("substrateGap_write: rejects need evidence and a closed verdict is not 
     expect(meta.note).toBe("annotation");
   });
 
-  it("[CONTROL] orphaned_capability_scan's reject, driven for real, rejects the orphan gap in the real store", async () => {
+  it("[CONTROL] the orphaned_capability_scan reject, driven for real, rejects the orphan gap in the real store", async () => {
     globalThis.fetch = (async (_u: unknown, init?: { body?: unknown }) => {
       const p = JSON.parse(String(init?.body ?? "{}"))?.impulse?.pointer ?? {};
       if (p.type === "substrateGap") return Response.json({ success: true, body: { gaps: [ORPHAN] } });

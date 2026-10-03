@@ -49,8 +49,8 @@ beforeEach(() => {
 });
 afterAll(() => { globalThis.fetch = realFetch; });
 
-describe("substrateGap_write: a reopen clears the last close's evidence", () => {
-  it("isolation: the store under test is this file's temp root", () => {
+describe("substrateGap_write: a reopen clears the evidence of the last close", () => {
+  it("isolation: the store under test is the temp root of this file", () => {
     expect(gapStoreRootForTest()).toBe(ROOT);
   });
 
@@ -71,7 +71,7 @@ describe("substrateGap_write: a reopen clears the last close's evidence", () => 
     expect(stored(CLOSED.id)!.status).toBe("open");
   });
 
-  it("[MUST-FAIL] a reopen that itself echoes the closed row's metadata still clears the closure keys", async () => {
+  it("[MUST-FAIL] a reopen that itself echoes the metadata of the closed row still clears the closure keys", async () => {
     const r = await write({ gap: { ...CLOSED, status: "open" } });
     expect(r.shape).toBe("substrateGapWriteResult");
     const meta = stored(CLOSED.id)!.classification_metadata;

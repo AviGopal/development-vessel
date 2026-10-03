@@ -52,7 +52,7 @@ beforeEach(() => {
 afterAll(() => { globalThis.fetch = realFetch; });
 
 describe("gap_lifecycle_scan producer_now_exists close carries its closer to the store", () => {
-  it("isolation: the store under test is this file's temp root", () => {
+  it("isolation: the store under test is the temp root of this file", () => {
     expect(gapStoreRootForTest()).toBe(ROOT);
   });
 

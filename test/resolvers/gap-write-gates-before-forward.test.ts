@@ -65,7 +65,7 @@ describe("substrateGap_write runs its gates before forwarding to the gap-store h
     expect(writesSeen).toHaveLength(0);
   });
 
-  it("[MUST-FAIL] a close with no evidence is refused against the holder's stored row and never forwarded", async () => {
+  it("[MUST-FAIL] a close with no evidence is refused against the stored row on the holder and never forwarded", async () => {
     const r = await write({ gap: { ...OPEN, status: "closed", classification_metadata: {} } });
     expect(r.shape).toBe("structuredError");
     expect(r.body["rule"]).toBe("close_needs_evidence");

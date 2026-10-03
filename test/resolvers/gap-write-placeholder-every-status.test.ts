@@ -51,7 +51,7 @@ beforeEach(() => {
 afterAll(() => { globalThis.fetch = realFetch; });
 
 describe("substrateGap_write refuses unrendered binding tokens at every status", () => {
-  it("isolation: the store under test is this file's temp root", () => {
+  it("isolation: the store under test is the temp root of this file", () => {
     expect(gapStoreRootForTest()).toBe(ROOT);
   });
 

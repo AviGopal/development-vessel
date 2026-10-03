@@ -42,7 +42,7 @@ beforeEach(() => {
 afterAll(() => { globalThis.fetch = realFetch; });
 
 describe("substrateGap_write refuses a non-object classification_metadata", () => {
-  it("isolation: the store under test is this file's temp root", () => {
+  it("isolation: the store under test is the temp root of this file", () => {
     expect(gapStoreRootForTest()).toBe(ROOT);
   });
 

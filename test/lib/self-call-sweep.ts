@@ -550,7 +550,9 @@ function pieces(node: ts.Node, end: "head" | "tail", depth = 0, seen = new Set<t
     if (ts.isIdentifier(e) && e.text === "String" && node.arguments[0]) return again(node.arguments[0]);
     if (ts.isIdentifier(e)) {
       const fns = declsOf(e).filter((d) => d.kind === "function");
-      if (fns.length) return fns.flatMap((d) => returnedExprs(d.node)).flatMap(again);
+      // What it returns, and (conservatively) its arguments: `toResolve(p.devVesselUrl)` returns a URL
+      // built from its parameter, which the walk cannot map back to the argument any other way.
+      if (fns.length) return [...fns.flatMap((d) => returnedExprs(d.node)).flatMap(again), ...node.arguments.flatMap(again)];
     }
     return [{ ref: e.getText() }];
   }

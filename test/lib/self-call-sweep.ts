@@ -193,15 +193,18 @@ function expandedNodes(node: ts.Node, hops: number, opts: { functions: boolean }
 const expanded = (node: ts.Node, hops: number, opts: { functions: boolean }): string =>
   expandedNodes(node, hops, opts).map((n) => n.getText()).join("\n");
 
-function isSelf(node: ts.Node, seen = new Set<ts.Node>()): boolean {
-  if (SELF_MARKER.test(node.getText())) return true;
+const isSelf = (node: ts.Node): boolean => urlMatches(node, SELF_MARKER);
+
+/** The URL expression, or a declaration it names (a function: what it returns), matches `re`. */
+function urlMatches(node: ts.Node, re: RegExp, seen = new Set<ts.Node>()): boolean {
+  if (re.test(node.getText())) return true;
   for (const id of refIds(node)) {
     for (const d of declsOf(id)) {
       if (seen.has(d.node)) continue;
       seen.add(d.node);
       // For a function, what it RETURNS is the URL; a whole body would match anything it mentions.
       const targets: ts.Node[] = d.kind === "function" ? returnedExprs(d.node) : [d.node];
-      if (targets.some((t) => isSelf(t, seen))) return true;
+      if (targets.some((t) => urlMatches(t, re, seen))) return true;
     }
   }
   return false;
@@ -354,7 +357,14 @@ function headerParam(initArg: ts.Node | undefined, params: string[]): number {
   return -1;
 }
 
+type RawSite = { at: ts.CallExpression; writes: string[]; authed: boolean; via?: string; urlArg: ts.Node | "self"; init?: ts.Node };
+type SweepMode = { match: (n: ts.Node) => boolean; needWrites: boolean };
+
 export function sweepFile(path: string): SweepSite[] {
+  return sweepCalls(path, { match: isSelf, needWrites: true }).map(({ at: _a, urlArg: _u, init: _i, ...site }) => site);
+}
+
+function sweepCalls(path: string, mode: SweepMode): Array<SweepSite & RawSite> {
   const sf = sourceFile(path);
   const fns = namedFunctions(sf);
   const calls: ts.CallExpression[] = [];
@@ -384,7 +394,7 @@ export function sweepFile(path: string): SweepSite[] {
       // A URL that is self on its own (a self default behind `pointer.x ?? SELF`) is a fixed-self call,
       // never a pass-through: the self default is exactly the case this sweep exists for.
       let urlIdx: number | "self";
-      if (urlArg === "self" || isSelf(urlArg)) {
+      if (urlArg === "self" || mode.match(urlArg)) {
         // A fixed-self wrapper only if the caller supplies something (otherwise the call is its own site).
         if (!call.arguments.some((a) => paramIndex(a, fn.params) >= 0)) continue;
         urlIdx = "self";
@@ -408,15 +418,18 @@ export function sweepFile(path: string): SweepSite[] {
     }
   }
 
-  const sites: SweepSite[] = [];
-  const bySite = new Map<ts.CallExpression, SweepSite>();
-  const record = (at: ts.CallExpression, writes: string[], authed: boolean, via?: string): void => {
+  const sites: Array<SweepSite & RawSite> = [];
+  const bySite = new Map<ts.CallExpression, SweepSite & RawSite>();
+  const record = (at: ts.CallExpression, writes: string[], authed: boolean, via: string | undefined, urlArg: ts.Node | "self", init: ts.Node | undefined): void => {
     const prior = bySite.get(at);
     if (prior) {
       prior.writes = [...new Set([...prior.writes, ...writes])].sort();
       return;
     }
-    const site: SweepSite = {
+    const site: SweepSite & RawSite = {
+      at,
+      urlArg,
+      init,
       file: relative(SRC_ROOT, path),
       line: sf.getLineAndCharacterOfPosition(at.getStart()).line + 1,
       ...(via ? { via } : {}),
@@ -432,7 +445,7 @@ export function sweepFile(path: string): SweepSite[] {
     if (!t) continue;
     const urlArg = urlArgOf(call, t);
     if (urlArg === undefined) continue;
-    const self = urlArg === "self" || isSelf(urlArg);
+    const self = urlArg === "self" || mode.match(urlArg);
     // Inside a wrapper, its own transport call is judged at the wrapper's call sites when the caller
     // supplies the URL (pass-through) or the headers.
     const fn = enclosingFn(call, fns);
@@ -445,12 +458,13 @@ export function sweepFile(path: string): SweepSite[] {
     const writes = [...new Set([...call.arguments.flatMap(argWrites), ...t.writesInside])];
     if (t.urlIdx === "self" && t.site) {
       // The headers belong at the wrapper's own transport call: report it once, with every caller's writes.
-      if (writes.length > 0) record(t.site, writes, t.authedInside);
+      if (writes.length > 0 || !mode.needWrites) record(t.site, writes, t.authedInside, undefined, t.site.arguments[0] ?? "self", t.site.arguments[1]);
       continue;
     }
-    if (writes.length === 0) continue;
-    const authed = t.authedInside || authedInit(t.initIdx === null ? undefined : call.arguments[t.initIdx]);
-    record(call, writes, authed, cn !== "fetch" ? `${cn}@${t.line}` : undefined);
+    if (writes.length === 0 && mode.needWrites) continue;
+    const init = t.initIdx === null ? undefined : call.arguments[t.initIdx];
+    const authed = t.authedInside || authedInit(init);
+    record(call, writes, authed, cn !== "fetch" ? `${cn}@${t.line}` : undefined, urlArg, init);
   }
   return sites;
 }
@@ -463,3 +477,132 @@ export function sweepSrc(): SweepSite[] {
 
 export const describeSite = (s: SweepSite): string =>
   `${s.file}:${s.line}${s.via ? ` via ${s.via}` : ""} writes=${s.writes.join(",")}`;
+
+// ── EVERY RESOLVE CALL (not only self-writes) ────────────────────────────────────────────────────────
+// A call to ANY resolve route — this vessel, discovery, or any other vessel: a URL whose LAST piece is
+// `/resolve` or `/v2/impulses/resolve` — must carry Authorization. Every vessel validates its caller
+// against identity-vessel, and an unauthenticated call is refused (or served as anonymous) the same
+// silent way a self-write is. Reads count: the pointer type is often assembled elsewhere, and a
+// credential costs nothing.
+//
+// The node key must not follow a CALLER-SUPPLIED URL: a site whose URL can START with a value read off a
+// request (`pointer.x`, `input.x`, `args.x`, `payload.x`, `impulse.x`, `body.x`, `req.x`), and whose
+// headers carry a key without the selfAuthHeaders(url, SELF) guard, hands the node credential to whoever
+// wrote the pointer. Configured endpoints (env, literals, Config, a discovery answer) may get it.
+//
+// HOW A URL IS READ. Structurally, not by text: `pieces(expr, "head"|"tail")` returns what the URL can
+// start / end with — string text, or a reference it cannot see through. It follows `a + b` (head of a,
+// tail of b), template spans, `??` / `||` / `?:` (every branch), parentheses and casts, string methods
+// (`.replace`, `.trim`, …: the receiver), String(x), `new URL(path, base)`, identifiers through their
+// declarations (same file, relative imports), property reads on a same-file object literal, and calls
+// to a local function (what it returns). A reference it cannot see through ends the walk: a tail
+// reference counts as a resolve URL only when its NAME says so (`resolveUrl`, `RESOLVE_ENDPOINT`,
+// `resolve_endpoint`), and a head reference is caller-supplied only when it reads off a request object.
+const RESOLVE_TAIL = /\/(?:v2\/impulses\/)?resolve\/?$/;
+// identity-vessel's /v1/auth/resolve VALIDATES a credential carried in its body: it is the authentication
+// step itself, so it is not held to "must carry Authorization".
+const AUTH_ROUTE_TAIL = /\/auth\/resolve\/?$/;
+const RESOLVE_NAME = /^resolve$|resolve_?(?:url|endpoint|path|route)s?$/i;
+const CALLER_BASE = /^(?:pointer|input|args|payload|impulse|body|req|request)$/;
+const KEY_GUARD = /\bselfAuth(?:Headers)?\b/;
+const STRING_METHODS = /^(?:replace|replaceAll|trim|trimEnd|trimStart|toString|toLowerCase|slice)$/;
+
+type Piece = { text: string } | { ref: string; base?: string };
+
+function pieces(node: ts.Node, end: "head" | "tail", depth = 0, seen = new Set<ts.Node>()): Piece[] {
+  if (depth > 12 || seen.has(node)) return [];
+  seen.add(node);
+  const again = (n: ts.Node): Piece[] => pieces(n, end, depth + 1, seen);
+  if (ts.isParenthesizedExpression(node) || ts.isAsExpression(node) || ts.isNonNullExpression(node) || ts.isSatisfiesExpression(node) || ts.isTypeAssertionExpression(node) || ts.isAwaitExpression(node)) return again(node.expression);
+  if (ts.isStringLiteralLike(node)) return [{ text: node.text }];
+  if (ts.isTemplateExpression(node)) {
+    if (end === "head") return node.head.text ? [{ text: node.head.text }] : again(node.templateSpans[0]!.expression);
+    const last = node.templateSpans[node.templateSpans.length - 1]!;
+    return last.literal.text ? [{ text: last.literal.text }] : again(last.expression);
+  }
+  if (ts.isBinaryExpression(node)) {
+    const k = node.operatorToken.kind;
+    if (k === ts.SyntaxKind.PlusToken) return again(end === "head" ? node.left : node.right);
+    if (k === ts.SyntaxKind.QuestionQuestionToken || k === ts.SyntaxKind.BarBarToken) return [...again(node.left), ...again(node.right)];
+    return [];
+  }
+  if (ts.isConditionalExpression(node)) return [...again(node.whenTrue), ...again(node.whenFalse)];
+  if (ts.isNewExpression(node) && node.expression.getText() === "URL" && node.arguments?.length) {
+    return end === "head" && node.arguments[1] ? again(node.arguments[1]) : again(node.arguments[0]!);
+  }
+  if (ts.isCallExpression(node)) {
+    const e = node.expression;
+    if (ts.isPropertyAccessExpression(e) && STRING_METHODS.test(e.name.text)) return again(e.expression);
+    if (ts.isIdentifier(e) && e.text === "String" && node.arguments[0]) return again(node.arguments[0]);
+    if (ts.isIdentifier(e)) {
+      const fns = declsOf(e).filter((d) => d.kind === "function");
+      if (fns.length) return fns.flatMap((d) => returnedExprs(d.node)).flatMap(again);
+    }
+    return [{ ref: e.getText() }];
+  }
+  if (ts.isIdentifier(node)) {
+    // (declsOf also returns `name.x = …` assignments, for headers; they are not the name's value)
+    const ds = declsOf(node).filter((d) => d.kind === "value" && !(ts.isBinaryExpression(d.node) && d.node.operatorToken.kind === ts.SyntaxKind.EqualsToken));
+    if (ds.length) return ds.flatMap((d) => again(d.node));
+    return [{ ref: node.text }];
+  }
+  if (ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) {
+    const name = ts.isPropertyAccessExpression(node) ? node.name.text : ts.isStringLiteralLike(node.argumentExpression) ? node.argumentExpression.text : "";
+    let base: ts.Node = node.expression;
+    while (ts.isPropertyAccessExpression(base) || ts.isElementAccessExpression(base) || ts.isNonNullExpression(base) || ts.isParenthesizedExpression(base)) base = base.expression;
+    // A property of a same-file object literal: read the property's value.
+    if (ts.isIdentifier(node.expression) && name) {
+      for (const d of declsOf(node.expression)) {
+        if (d.kind === "value" && ts.isObjectLiteralExpression(d.node)) {
+          const p = d.node.properties.find((x) => ts.isPropertyAssignment(x) && x.name.getText().replace(/["']/g, "") === name);
+          if (p && ts.isPropertyAssignment(p)) return again(p.initializer);
+        }
+      }
+    }
+    return [{ ref: name || node.getText(), base: base.getText() }];
+  }
+  return [{ ref: node.getText().slice(0, 80) }];
+}
+
+export function isResolveUrl(node: ts.Node): boolean {
+  return pieces(node, "tail").some((p) =>
+    "text" in p ? RESOLVE_TAIL.test(p.text) && !AUTH_ROUTE_TAIL.test(p.text) : RESOLVE_NAME.test(p.ref.replace(/^.*\./, "")),
+  );
+}
+export function isCallerUrl(node: ts.Node): boolean {
+  return pieces(node, "head").some((p) => "ref" in p && p.base !== undefined && CALLER_BASE.test(p.base));
+}
+
+export type ResolveSite = {
+  file: string;
+  line: number;
+  via?: string;
+  authed: boolean;
+  callerUrl: boolean; // the URL can start with a value read off a request (see CALLER_BASE)
+  guarded: boolean; // the key goes through selfAuthHeaders, which attaches it only to the self URL
+};
+
+export function sweepResolveFile(path: string): ResolveSite[] {
+  return sweepCalls(path, { match: isResolveUrl, needWrites: false }).map((s) => {
+    const hdrText = s.init ? headerExprs(s.init).map((h) => expanded(h, 3, { functions: true })).join("\n") : "";
+    const guarded = KEY_GUARD.test(hdrText);
+    return {
+      file: s.file,
+      line: s.line,
+      ...(s.via ? { via: s.via } : {}),
+      // selfAuthHeaders is the credential on the self URL; it is judged as authed even where its module
+      // cannot be followed (it lives in lib/self-auth.ts).
+      authed: s.authed || guarded,
+      callerUrl: s.urlArg !== "self" && isCallerUrl(s.urlArg),
+      guarded,
+    };
+  });
+}
+
+export function sweepResolveSrc(): ResolveSite[] {
+  return listTs(SRC_ROOT)
+    .flatMap((p) => sweepResolveFile(p))
+    .sort((a, b) => (a.file === b.file ? a.line - b.line : a.file < b.file ? -1 : 1));
+}
+
+export const describeResolveSite = (s: ResolveSite): string => `${s.file}:${s.line}${s.via ? ` via ${s.via}` : ""}`;

@@ -10,7 +10,7 @@ import { describe, it, expect } from "bun:test";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { sweepSrc, sweepFile, describeSite } from "./self-call-sweep.js";
+import { sweepSrc, sweepFile, describeSite, sweepResolveSrc, sweepResolveFile, describeResolveSite } from "./self-call-sweep.js";
 
 describe("self-call auth sweep", () => {
   const sites = sweepSrc();
@@ -64,6 +64,70 @@ describe("self-call auth sweep", () => {
       { line: 5, writes: ["poolImpulse_write"], authed: false },
       { line: 10, writes: ["fs_write"], authed: true },
       { line: 16, writes: ["<dynamic:t>"], authed: false },
+    ]);
+  });
+});
+
+// CLASS CHECK: the node key never follows a URL a request's pointer can supply. A site whose URL can start
+// with a value read off a request (`pointer.devVesselImpulsesUrl ?? DEFAULT`, `pointer.obsidianEndpoint ??
+// DEFAULT`) and whose headers carry the key without the selfAuthHeaders(url, DEFAULT) guard hands the node
+// credential to whoever wrote the pointer. How a URL is read is documented in ./self-call-sweep.ts
+// (EVERY RESOLVE CALL).
+describe("resolve-call sweep: the node key never follows a caller-supplied URL", () => {
+  const sites = sweepResolveSrc();
+  const keyToCallerUrl = sites.filter((s) => s.authed && s.callerUrl && !s.guarded).map(describeResolveSite);
+  console.log(
+    `resolve-call sweep: ${sites.length} sites in ${new Set(sites.map((s) => s.file)).size} files; ` +
+      `${keyToCallerUrl.length} send a key to a caller-suppliable URL unguarded`,
+  );
+
+  it("the node key never follows a caller-supplied URL without the selfAuthHeaders guard", () => {
+    expect(keyToCallerUrl).toEqual([]);
+  });
+
+  // POSITIVE CONTROLS: a URL reader that sees nothing passes vacuously.
+  it("classifies the repo's resolve calls (a reader that sees nothing cannot pass)", () => {
+    expect(sites.length).toBeGreaterThanOrEqual(150);
+    const inFile = (file: string) => sites.filter((s) => s.file === file);
+    // pointer.registry_endpoint ?? SELF_RESOLVE_URL through a fetchJson wrapper, key behind selfAuthHeaders
+    expect(inFile("resolvers/rhythm-conductor-tick.ts")).toContainEqual(expect.objectContaining({ authed: true, callerUrl: true, guarded: true }));
+    // pointer.devVesselImpulsesUrl ?? "…/v2/impulses/resolve", key attached
+    expect(inFile("resolvers/env-gate-scan.ts")).toContainEqual(expect.objectContaining({ authed: true, callerUrl: true }));
+  });
+
+  it("flags each side of the predicate (fixture)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "resolve-sweep-"));
+    const path = join(dir, "fixture.ts");
+    writeFileSync(
+      path,
+      [
+        `import { selfAuthHeaders } from "./self-auth.js";`,
+        `const DISCOVERY = process.env.DISCOVERY_ENDPOINT ?? "http://127.0.0.1:8100";`,
+        `const SELF = "http://127.0.0.1:8090/v2/impulses/resolve";`,
+        `const KEY = process.env.METABOB_API_KEY ?? "";`,
+        `export async function bareRead() { await fetch(\`\${DISCOVERY}/resolve\`, { method: "POST", headers: { "Content-Type": "application/json" } }); }`,
+        `export async function authedRead() { await fetch(\`\${DISCOVERY}/resolve\`, { method: "POST", headers: { Authorization: \`ApiKey \${KEY}\` } }); }`,
+        `export async function leak(pointer: { url?: string }) {`,
+        `  const url = pointer.url ?? SELF;`,
+        `  await fetch(url, { method: "POST", headers: { Authorization: \`ApiKey \${KEY}\` } });`,
+        `}`,
+        `export async function guarded(pointer: { url?: string }) {`,
+        `  const url = pointer.url ?? SELF;`,
+        `  await fetch(url, { method: "POST", headers: { ...selfAuthHeaders(url, SELF) } });`,
+        `}`,
+        `export async function notResolve() { await fetch(\`\${DISCOVERY}/health\`); }`,
+        `export async function identity(base: string) { await fetch(\`\${base}/v1/auth/resolve\`, { method: "POST" }); }`,
+        `async function post(u: string, init: RequestInit) { return fetch(u, init); }`,
+        `export async function viaWrapper(input: { endpoint: string }) { await post(input.endpoint + "/resolve", { method: "POST" }); }`,
+      ].join("\n"),
+    );
+    const got = sweepResolveFile(path).map((s) => ({ line: s.line, authed: s.authed, callerUrl: s.callerUrl, guarded: s.guarded }));
+    expect(got).toEqual([
+      { line: 5, authed: false, callerUrl: false, guarded: false },
+      { line: 6, authed: true, callerUrl: false, guarded: false },
+      { line: 9, authed: true, callerUrl: true, guarded: false },
+      { line: 13, authed: true, callerUrl: true, guarded: true },
+      { line: 18, authed: false, callerUrl: true, guarded: false },
     ]);
   });
 });

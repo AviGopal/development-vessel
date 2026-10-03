@@ -57,7 +57,15 @@ describe("gap_lifecycle_scan producer_now_exists close carries its closer to the
   });
 
   it("[MUST-FAIL] a discovered producer closes the missing_capability gap in the real store", async () => {
-    await resolveGapLifecycleScan({ type: "gap_lifecycle_scan", gapsPath: STORE, proposalsDir: join(ROOT, "proposals"), autoClose: true, staleHours: 100_000, devVesselImpulsesUrl: "http://fixture.invalid/v2/impulses/resolve" } as never);
+    // The scan writes its funnel history and predictions under WORKSPACE_ROOT, read at call time: point
+    // it at this file's root for the call, so nothing lands in the checkout or in another suite's root.
+    const savedRoot = process.env["WORKSPACE_ROOT"];
+    process.env["WORKSPACE_ROOT"] = ROOT;
+    try {
+      await resolveGapLifecycleScan({ type: "gap_lifecycle_scan", gapsPath: STORE, proposalsDir: join(ROOT, "proposals"), autoClose: true, staleHours: 100_000, devVesselImpulsesUrl: "http://fixture.invalid/v2/impulses/resolve" } as never);
+    } finally {
+      if (savedRoot === undefined) delete process.env["WORKSPACE_ROOT"]; else process.env["WORKSPACE_ROOT"] = savedRoot;
+    }
     expect(storeAnswers.length).toBeGreaterThan(0);
     expect(storeAnswers[0]!.shape).toBe("substrateGapWriteResult");
     const row = stored(GAP.id)!;

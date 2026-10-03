@@ -19,3 +19,16 @@ export function selfAuthHeaders(url: string, selfUrl: string): Record<string, st
   if (!key || url !== selfUrl) return {};
   return { Authorization: `ApiKey ${key}` };
 }
+
+// UNSET IS NOT AN OVERRIDE. Templates fill endpoint fields from the goal (`'{{goal.devVesselImpulsesUrl}}'`).
+// A goal that leaves the field out yields "" or the placeholder text itself. Neither is a URL anyone chose,
+// so both mean "use the configured endpoint", and the node key goes with it. Only a real value overrides,
+// and an override never gets the key (selfAuthHeaders).
+const UNRENDERED = /\{\{[^}]*\}\}/;
+
+/** A pointer's endpoint field as an override: `undefined` when it is absent, not a string, blank, or an unrendered `{{…}}` placeholder. */
+export function pointerOverride(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  if (value.trim() === "" || UNRENDERED.test(value)) return undefined;
+  return value;
+}

@@ -16,6 +16,7 @@ declare module "./feature-compose.js" {
   }
 }
 
+import { appendRecord } from "./attempt-ledger.js";
 import { resolveSubstrateGap, resolveSubstrateGapWrite, DECISION_LOG_GAP_CATEGORIES, predicateSuspect, class2PredicateKey, reevaluateBirthVerdicts, inheritableParentCheck, birthCheckRepo } from "./substrate-gap.js";
 import { resolveAuthorProducer } from "./author-producer.js";
 import { resolveDocDriftFix } from "./doc-drift-fix.js";
@@ -5680,7 +5681,57 @@ async function findComposeOwner(vessel: string): Promise<{ vesselId: string; url
   }
 }
 
+/**
+ * EVERY ADMITTED COMPOSE ATTEMPT ON THE CAUSAL LEDGER. The ledger used to get an attemptIntent only at cutover
+ * (feature-compose registerAttempt), so a failed attempt had no record. A pick now writes an attemptIntent keyed
+ * by its approach decision_id (route gap_to_feature, no snapshot: pre_snapshot_id null, so the landing sweep,
+ * which acts only on intents with landing events, never picks these up), and the attempt's end writes an
+ * attemptOutcome under the same key: landed (commit), failed (stage + class) or refused (terminal refusal, a
+ * non-attempt, or no compose ran). A killed attempt cannot write its own end, so it stays intent-only.
+ * Record, never block: a ledger failure is logged and the compose goes on.
+ */
+export function recordPickIntent(attemptId: string, gap: Record<string, unknown>): void {
+  try {
+    const meta = (gap.classification_metadata ?? gap.metadata ?? {}) as Record<string, unknown>;
+    appendRecord("attemptIntent", attemptId, {
+      attempt_id: attemptId, route: "gap_to_feature", repo: null, touched_files: [], gap_id: String(gap.id ?? ""), proposal_id: null,
+      authoring_execution_id: null, dispatch_id: null, directed: typeof meta.directed === "boolean" ? meta.directed : null,
+      node: decisionNode(), prediction: { expect_pass: [], expect_change: [] }, pre_snapshot_id: null, stage: "pick", registered_at: new Date().toISOString(),
+    });
+  } catch (err) { console.warn(`[gap-to-feature] attempt ledger intent for ${attemptId} not written: ${String(err).slice(0, 200)}`); }
+}
+export function recordAttemptEnd(attemptId: string, gap: Record<string, unknown>, result: { shape?: string; body?: unknown } | null, err?: unknown): void {
+  try {
+    const body = ((result?.body ?? {}) as Record<string, unknown>);
+    const cb = ((body.compose && typeof body.compose === "object" ? body.compose : {}) as Record<string, unknown>);
+    const landed = body.landed === true;
+    const composed = Object.keys(cb).length > 0;
+    const refused = isTerminalRefusalResult(cb) || (composed && isNonAttemptComposeResult(cb));
+    const outcome = err !== undefined ? "failed" : landed ? "landed" : refused || !composed ? "refused" : "failed";
+    const cls = err !== undefined ? "exception" : String(cb.failure_kind ?? cb.error ?? body.error ?? (composed ? cb.verdict : body.verdict ?? body.route) ?? "") || null;
+    appendRecord("attemptOutcome", attemptId, {
+      attempt_id: attemptId, route: "gap_to_feature", gap_id: String(gap.id ?? body.gap_id ?? ""), node: decisionNode(), at: new Date().toISOString(),
+      outcome, landed, stage: String(cb.stage ?? body.stage ?? (err !== undefined ? "exception" : "")) || null, class: landed ? null : (cls ? cls.slice(0, 200) : null),
+      verdict: cb.verdict ?? body.verdict ?? null, commit: typeof body.landed_commit === "string" ? body.landed_commit : null,
+      ...(err !== undefined ? { error: String(err).slice(0, 300) } : {}),
+    });
+  } catch (e) { console.warn(`[gap-to-feature] attempt ledger outcome for ${attemptId} not written: ${String(e).slice(0, 200)}`); }
+}
+
 export async function resolveGapToFeature(pointer: GapToFeaturePointer): Promise<ResolverResult> {
+  const attempt: { id?: string; gap?: Record<string, unknown> } = {};
+  let result: ResolverResult;
+  try {
+    result = await resolveGapToFeatureOnce(pointer, attempt);
+  } catch (err) {
+    if (attempt.id && attempt.gap) recordAttemptEnd(attempt.id, attempt.gap, null, err);
+    throw err;
+  }
+  if (attempt.id && attempt.gap) recordAttemptEnd(attempt.id, attempt.gap, result as { shape?: string; body?: unknown });
+  return result;
+}
+
+async function resolveGapToFeatureOnce(pointer: GapToFeaturePointer, attempt: { id?: string; gap?: Record<string, unknown> }): Promise<ResolverResult> {
   // For testing purposes, expose the map.
   (resolveGapToFeature as any).__test__gapComposeLastAttemptAt = () => gapComposeLastAttemptAt;
   // DECOMPOSE ON REQUEST (contained-self-development 6.3): run the decomposition contract for one
@@ -5981,7 +6032,8 @@ export async function resolveGapToFeature(pointer: GapToFeaturePointer): Promise
     const pickedSite = String(((gap.classification_metadata ?? gap.metadata ?? {}) as Record<string, unknown>).edit_site ?? "");
     if (pickedSite) siteComposeLastAttemptAt.set(pickedSite, Date.now());
   }
-  await recordApproachDecision(gap);
+  const decisionId = await recordApproachDecision(gap);
+  if (decisionId && !pointer.dry_run) { attempt.id = decisionId; attempt.gap = gap; recordPickIntent(decisionId, gap); }
   // SURPRISE-ROUTED EXPLORE/EXPLOIT (2026-07-09): when-to-work-on-what is a measured
   // policy, not a habit. Low-confidence picks are NOT composed on a guess — they route
   // to investigation first. A high-confidence MISS (predicted land >= 0.7 but the last

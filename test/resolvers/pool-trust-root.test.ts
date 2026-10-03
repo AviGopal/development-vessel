@@ -265,6 +265,24 @@ describe("attested: the server stamps operator trust-root writes; callers cannot
     expect(row!.body).not.toHaveProperty("attested");
   });
 
+  // The human surface reads calibration windows with exactly this request and takes `attested` from the ROW
+  // (a sibling of body), ignoring any body-level one. Pin that location through the real route.
+  it("the surface's read: {impulse:{pointer:{type:'poolImpulse', shape:'calibrationWindow', status:'open'}}} returns body.impulses[] rows with attested beside body, never inside it", async () => {
+    const cwBody = { window_id: "w-surface", sample_draw_id: "d9", seed: 42, dispatch_ids: ["x", "y"], declared_at: "2026-10-03T00:00:00Z", closes_at: "2026-10-10T00:00:00Z", label_sink: "calibrationLabel" };
+    expect((await post(`ApiKey ${ADMIN_KEY}`, { type: "poolImpulse_write", id: "att-surface", shape: "calibrationWindow", status: "open", attested: forged, body: { ...cwBody, attested: forged } })).status).toBe(200);
+    const res = await impulsesRouter.request("/v2/impulses/resolve", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ impulse: { pointer: { type: "poolImpulse", shape: "calibrationWindow", status: "open" } } }) });
+    expect(res.status).toBe(200);
+    const j = (await res.json()) as { body: { impulses: Array<Record<string, unknown> & { body: Record<string, unknown> }> } };
+    expect(Array.isArray(j.body.impulses)).toBe(true);
+    const row = j.body.impulses.find((r) => r["id"] === "att-surface");
+    expect(row).toBeDefined();
+    expect(row!["shape"]).toBe("calibrationWindow");
+    expect(row!["status"]).toBe("open");
+    expect(row!.body).toEqual(cwBody);
+    expect(row!.body).not.toHaveProperty("attested");
+    expect(row!["attested"]).toEqual({ by: "operator", key_id: "k1", at: row!["updated_at"] as string });
+  });
+
   it("an admin UPDATE by id (shape omitted) of a trust-root row re-stamps it at the update's time", async () => {
     expect((await post(`ApiKey ${ADMIN_KEY}`, { type: "poolImpulse_write", id: "att-restamp", shape: "calibrationWindow", body: { window_id: "w3" } })).status).toBe(200);
     await Bun.sleep(5);

@@ -1341,7 +1341,8 @@ async function gateThenForward(pointer: Record<string, unknown>, incoming: Recor
  * close a held gap) and authenticates nothing, so every write carrying it leaves one [gap-audit] line: gap
  * id, transition (stored status -> written status; "absent" for no row, "?" when the write was refused
  * before the store was read), marker, outcome, and the caller identity the HTTP route stamped as
- * _route_caller (a sha256 fingerprint of the presented key, never the key; the remote address). A write
+ * _route_caller (the identity that validated the request, or "unauthenticated", never anything derived
+ * from the presented key; and the remote address). A write
  * that did not come through the route is caller=in-process.
  */
 type GapWriteAudit = { from?: string };
@@ -1370,9 +1371,9 @@ export async function resolveSubstrateGapWrite(
     if (marker) {
       const p = pointer as Record<string, unknown>;
       const g = (p["gap"] && typeof p["gap"] === "object" ? p["gap"] : p) as Record<string, unknown>;
-      const rc = p["_route_caller"] as { key_fp?: unknown; remote?: unknown } | undefined;
+      const rc = p["_route_caller"] as { auth?: unknown; remote?: unknown } | undefined;
       const caller = rc && typeof rc === "object"
-        ? `${typeof rc.key_fp === "string" ? rc.key_fp : "none"} remote=${typeof rc.remote === "string" ? rc.remote : "unknown"}`
+        ? `${typeof rc.auth === "string" ? rc.auth : "unauthenticated"} remote=${typeof rc.remote === "string" ? rc.remote : "unknown"}`
         : "in-process remote=-";
       const b = (r?.body ?? {}) as Record<string, unknown>;
       const outcome = !r ? "threw" : r.shape === "structuredError" ? `structuredError:${String(b["rule"] ?? b["failure_mode"] ?? b["error"] ?? "error")}` : r.shape;

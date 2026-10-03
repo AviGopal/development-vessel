@@ -1,5 +1,5 @@
 import { Hono } from "hono";
-import { createHash } from "node:crypto";
+import { callerAuthLabel } from "./caller-identity.js";
 import { auditDetectorOutputSanity } from "../lib/detector-output-sanity.js";
 import { resolveContentAddressedVesselId } from "../resolvers/content-addressed-vessel-id.js";
 import { resolveGitStatus } from "../resolvers/git-status.js";
@@ -1132,15 +1132,15 @@ impulsesRouter.post("/v2/impulses/resolve", async (c) => {
   }
 
   // CALLER IDENTITY FOR THE GAP-WRITE AUDIT (2026-10-03). Stamped by the route, never taken from the
-  // client: any inbound _route_caller is overwritten. A sha256 fingerprint of the presented key (never the
-  // key) and the remote address the server wrapper stamped (x-dv-remote-addr) or the socket's.
+  // client: any inbound _route_caller is overwritten. NOTHING derived from the presented key (no hash,
+  // digest or prefix): only the identity that validated the request (callerAuthLabel). This route does not
+  // authenticate callers yet, so there is no auth result and the label is "unauthenticated". Plus the
+  // remote address the server wrapper stamped from the socket (x-dv-remote-addr), or the socket's own.
   if (pointerType === "substrateGap_write" && pointer && typeof pointer === "object") {
-    const m = /^(?:ApiKey|Bearer)\s+(\S+)$/i.exec(String(c.req.header("Authorization") ?? "").trim());
-    const keyFp = m ? "key:sha256:" + createHash("sha256").update(m[1]!).digest("hex").slice(0, 12) : "none";
     const env = c.env as { requestIP?: (r: Request) => { address?: string } | null } | undefined;
     let remote = c.req.header("x-dv-remote-addr") ?? "";
     if (!remote) { try { remote = env?.requestIP?.(c.req.raw)?.address ?? ""; } catch { remote = ""; } }
-    (pointer as Record<string, unknown>)["_route_caller"] = { key_fp: keyFp, remote: remote || "unknown" };
+    (pointer as Record<string, unknown>)["_route_caller"] = { auth: callerAuthLabel(undefined), remote: remote || "unknown" };
   }
 
   try {

@@ -6,8 +6,8 @@
 //
 // CONTRACT: a substrateGap_write carrying the marker emits one "[gap-audit]" line with the gap id, the
 // transition (stored status -> written status), the marker, the outcome, and the caller identity the HTTP
-// route has: a non-reversible fingerprint of the presented API key (key:sha256:<12 hex>, never the key)
-// and the remote address (the x-dv-remote-addr header the server wrapper stamps, after removing any
+// route has: the identity that validated the request, or "unauthenticated" (never anything derived from
+// the presented key, see gap-write-audit-no-key-derivative.test.ts), and the remote address (the x-dv-remote-addr header the server wrapper stamps, after removing any
 // inbound copy). A client cannot supply its own identity: the route overwrites _route_caller. No log line
 // of any kind contains the key. An in-process write is audited as caller=in-process. A write without the
 // marker emits no audit line.
@@ -16,7 +16,6 @@
 // is never touched. The index.ts wrapper (Bun.serve on import) cannot run under test, so the header stamp
 // there is pinned by source inspection, the weaker check.
 import { afterAll, afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
-import { createHash } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -34,7 +33,6 @@ if (SAVED_WR === undefined) delete process.env["WORKSPACE_ROOT"]; else process.e
 
 const HOLDER = "http://holder.fixture.invalid/v2/impulses/resolve";
 const SECRET = "sk-fixture-SECRET-key-value-7f3a9c";
-const FP = "key:sha256:" + createHash("sha256").update(SECRET).digest("hex").slice(0, 12);
 const AT = "2026-10-03T10:00:00.000Z";
 const OPEN = { id: "audit-fixture-open-gap", category: "systematic_failure", source: "human_reported", summary: "an open gap the holder stores", detected_at: AT, status: "open", classification_metadata: {}, created_at: AT, updated_at: AT };
 const realFetch = globalThis.fetch;
@@ -68,7 +66,7 @@ afterEach(() => {
 afterAll(() => { globalThis.fetch = realFetch; });
 
 describe("operator-marked gap writes are audited with the caller identity", () => {
-  it("[MUST-FAIL] a marked close through the route logs gap, transition, marker, key fingerprint and remote address", async () => {
+  it("[MUST-FAIL] a marked close through the route logs gap, transition, marker, caller auth label and remote address", async () => {
     const res = await post(
       { type: "substrateGap_write", operator: "operator:avi", gap: { ...OPEN, status: "closed", classification_metadata: { closed_reason: "superseded_by_landing" } } },
       { Authorization: `ApiKey ${SECRET}`, "x-dv-remote-addr": "10.1.2.3" },
@@ -79,7 +77,7 @@ describe("operator-marked gap writes are audited with the caller identity", () =
     expect(a[0]).toContain(`gap=${OPEN.id}`);
     expect(a[0]).toContain("transition=open->closed");
     expect(a[0]).toContain("marker=operator:avi");
-    expect(a[0]).toContain(`caller=${FP}`);
+    expect(a[0]).toContain("caller=unauthenticated");
     expect(a[0]).toContain("remote=10.1.2.3");
   });
 
@@ -94,14 +92,14 @@ describe("operator-marked gap writes are audited with the caller identity", () =
 
   it("[MUST-FAIL] a client-supplied _route_caller is overwritten by the route", async () => {
     await post(
-      { type: "substrateGap_write", operator: "operator:avi", _route_caller: { key_fp: "key:sha256:forged", remote: "1.1.1.1" }, gap: { ...OPEN, status: "closed", classification_metadata: { closed_reason: "superseded_by_landing" } } },
+      { type: "substrateGap_write", operator: "operator:avi", _route_caller: { auth: "authenticated:key_id:forged", remote: "1.1.1.1" }, gap: { ...OPEN, status: "closed", classification_metadata: { closed_reason: "superseded_by_landing" } } },
       { Authorization: `ApiKey ${SECRET}`, "x-dv-remote-addr": "10.1.2.3" },
     );
     const a = audit();
     expect(a).toHaveLength(1);
     expect(a[0]).not.toContain("forged");
     expect(a[0]).not.toContain("1.1.1.1");
-    expect(a[0]).toContain(`caller=${FP}`);
+    expect(a[0]).toContain("caller=unauthenticated");
   });
 
   it("[MUST-FAIL] a marked write refused by a gate is audited too, with its outcome", async () => {

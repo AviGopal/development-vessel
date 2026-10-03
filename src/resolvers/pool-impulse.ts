@@ -1,6 +1,6 @@
 import { join } from 'node:path';
 import { writeFileSync, readFileSync, existsSync, mkdirSync } from 'node:fs';
-import { randomUUID } from 'node:crypto';
+import { createHmac, randomUUID } from 'node:crypto';
 import { WORKSPACE_ROOT } from '../config.js';
 import { identityCredential } from '../lib/caller-credential.js';
 
@@ -14,6 +14,30 @@ export interface PoolAttestation {
   by: 'operator';
   key_id: string | null;
   at: string;
+  /** HMAC-SHA256 under this node's METABOB_API_KEY over the stored row (see attestationSig). Absent only
+   *  when the node had no key at write time; a reader must then treat the row as unattested. */
+  sig?: string;
+}
+
+/** Key-sorted JSON, so a body that crossed HTTP and a file round trip signs the same. TWIN: the same
+ *  function in local-tools-vessel src/script-runner.ts (canonicalJson); change both together. */
+export function canonicalJson(v: unknown): string {
+  if (v === null || typeof v !== 'object') return JSON.stringify(v ?? null);
+  if (Array.isArray(v)) return '[' + v.map(canonicalJson).join(',') + ']';
+  const o = v as Record<string, unknown>;
+  return '{' + Object.keys(o).filter((k) => o[k] !== undefined).sort().map((k) => JSON.stringify(k) + ':' + canonicalJson(o[k])).join(',') + '}';
+}
+
+/** SIGNED ATTESTATION. A reader on another vessel takes rows from whatever producer discovery lists as
+ *  "local", and discovery stamps ANY authenticated plain registration "local", so a rogue producer could
+ *  serve a forged `attested` (key ids are not secret). The stamp is therefore signed under this node's own
+ *  key (METABOB_API_KEY: a spoke's is hub-issued per spoke, a root's minted at random), the same key the
+ *  write-containment grants use; a peer's development-vessel signs with its own key and fails a reader
+ *  here. TWIN: local-tools-vessel src/script-runner.ts (attestationSig) verifies exactly this string. */
+export function attestationSig(key: string, row: { id: string; shape: string; status: string; body: unknown }, keyId: string | null, at: string): string {
+  return createHmac('sha256', key)
+    .update(['substrate-pool-attestation/v1', row.id, row.shape, row.status, canonicalJson(row.body), keyId ?? '', at].join('\n'))
+    .digest('hex');
 }
 
 export interface StandingImpulse {
@@ -174,9 +198,21 @@ export function resolvePoolImpulseWrite(pointer: {
   // this write is stamped; every other write carries no attestation (a previous stamp is not carried
   // forward either: it attests the write that made it). pointer.attested is never read.
   const attestation: PoolAttestation | null = trustRoot ? { by: 'operator', key_id: auth?.key_id ?? null, at: now } : null;
+  // Signed over the row exactly as stored (below). The key is read here, at write time, never from a
+  // value frozen at import. No key: stamp unsigned and say so (refusing would lock the operator out;
+  // a reader fails closed on a missing sig anyway).
+  const sign = (stored: StandingImpulse): StandingImpulse => {
+    if (!stored.attested) return stored;
+    const key = process.env['METABOB_API_KEY'] ?? '';
+    if (!key) {
+      console.warn(`[pool] ${stored.shape} ${stored.id} stamped unsigned: this node has no METABOB_API_KEY, so readers will refuse it`);
+      return stored;
+    }
+    return { ...stored, attested: { ...stored.attested, sig: attestationSig(key, stored, stored.attested.key_id, stored.attested.at) } };
+  };
   if (idx >= 0) {
     const existing = all[idx]!;
-    all[idx] = {
+    all[idx] = sign({
       id,
       shape: pointer.shape ?? existing.shape,
       body: stripCallerAttestation(pointer.body !== undefined ? pointer.body : existing.body),
@@ -185,7 +221,7 @@ export function resolvePoolImpulseWrite(pointer: {
       injected_at: existing.injected_at,
       updated_at: now,
       ...(attestation ? { attested: attestation } : {}),
-    };
+    });
   } else {
     const entry: StandingImpulse = {
       id,
@@ -197,7 +233,7 @@ export function resolvePoolImpulseWrite(pointer: {
       updated_at: now,
       ...(attestation ? { attested: attestation } : {}),
     };
-    all.push(entry);
+    all.push(sign(entry));
   }
   saveImpulses(all);
   return { shape: 'poolImpulse_write', body: { ok: true, id } };

@@ -26,7 +26,8 @@ const { identityCredential, __resetCredentialCacheForTests } = cc;
 const { impulsesRouter } = await import(`../../src/routes/impulses.js?${"credential-cache-isolated"}`);
 
 const SRC = join(import.meta.dir, "..", "..", "src");
-const IDENTITY = "http://identity.credential-cache.test:8101";
+// A loopback literal: the credential module sends keys over plain http only to private hosts.
+const IDENTITY = "http://127.0.0.1:59102";
 const GAP_STORE = "http://gapstore.credential-cache.test:8090/v2/impulses/resolve";
 const KNOWN_KEY = "credential-cache-known-test-key-0123456789";
 
@@ -130,8 +131,9 @@ describe("credential cache condition 1: the digest never leaves process memory",
     const snapshot = JSON.stringify(Object.fromEntries(Object.entries(cc).map(([k, v]) => [k, v instanceof Set ? [...v] : typeof v === "function" ? "fn" : v])));
     expect(leaks(snapshot, KNOWN_KEY)).toEqual([]);
     const source = readFileSync(join(SRC, "lib", "caller-credential.ts"), "utf8");
-    // In-memory only: the module imports nothing that persists, logs remotely or traces.
-    expect([...source.matchAll(/^import .* from "([^"]+)";/gm)].map((m) => m[1])).toEqual(["node:crypto"]);
+    // In-memory only: the module imports nothing that persists, logs remotely or traces (node:dns and
+    // node:net classify the identity host as private or public; neither sees a key).
+    expect([...source.matchAll(/^import .* from "([^"]+)";/gm)].map((m) => m[1])).toEqual(["node:crypto", "node:dns", "node:net"]);
   });
 
   it("credential-cache the vessel serves no metrics route and its health handler does not touch the credential module", async () => {

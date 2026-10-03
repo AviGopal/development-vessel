@@ -38,7 +38,8 @@ const OPEN = { id: "audit-fixture-open-gap", category: "systematic_failure", sou
 const realFetch = globalThis.fetch;
 // The resolve route authenticates writes through identity-vessel (lib/caller-credential.ts), so this
 // file's fixture key must be one identity accepts: the stub below answers /v1/auth/resolve for it.
-const IDENTITY = "http://identity.fixture.invalid";
+// A loopback literal: the credential module sends keys over plain http only to private hosts.
+const IDENTITY = "http://127.0.0.1:59104";
 let savedIdentityUrl: string | undefined;
 const identityAnswer = (init?: { body?: unknown }): Response => {
   const key = JSON.parse(String(init?.body ?? "{}"))?.impulse?.pointer?.apiKey;

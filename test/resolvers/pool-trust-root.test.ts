@@ -21,7 +21,8 @@ const { impulsesRouter } = await import("../../src/routes/impulses.js");
 const sfr = await import("../../src/resolvers/self-fact-reconcile.js");
 const { evaluateSelfFactRow, __setPoolPinDepsForTests, thisNode } = sfr;
 
-const IDENTITY = "http://identity.test:8101";
+// A loopback literal: the credential module sends keys over plain http only to private hosts.
+const IDENTITY = "http://127.0.0.1:59105";
 const ADMIN_KEY = "admin-key-fixture";
 const FLEET_KEY = "fleet-key-fixture";
 const N1 = "http://host.containers.internal:18100";

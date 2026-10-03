@@ -33,6 +33,8 @@
 //   scopes. Until every identity answer carries the id, scopes are what the audit shows. The digest
 //   stays internal either way.
 import { createHash, timingSafeEqual } from "node:crypto";
+import dns from "node:dns";
+import { isIP } from "node:net";
 
 /** keyId: identity's id for the validated key (an identifier identity issues, not derived from the secret),
  *  when its answer carries one. Audit lines name the caller by it (routes/caller-identity.ts callerAuthLabel). */
@@ -57,6 +59,7 @@ function remember(k: string, cred: CallerCredential): void {
 export function __resetCredentialCacheForTests(): void {
   validated.clear();
   lastUnreachableLogAt = Number.NEGATIVE_INFINITY;
+  lastCleartextLogAt = Number.NEGATIVE_INFINITY;
 }
 
 // THE NODE'S OWN KEY (qa R1, availability). A presented key equal to this process's METABOB_API_KEY is
@@ -92,6 +95,58 @@ function logIdentityUnreachable(base: string, detail: string): void {
   console.error(`[caller-credential] IDENTITY UNREACHABLE at ${host}: ${detail}. Writes from any key other than this node's own are refused (401) until identity answers.`);
 }
 
+// NO CLEARTEXT KEYS (qa R2). The presented key is POSTed to identity, so it is sent only over https, or
+// over http to a host that cannot be on the public internet: loopback (127.0.0.0/8, ::1, localhost),
+// RFC1918 (10/8, 172.16/12, 192.168/16), link-local (169.254/16, fe80::/10), IPv6 ULA (fc00::/7), or a
+// hostname that RESOLVES (all addresses) only to those. Anything else is not asked at all: identity is
+// treated as unreachable, a loud rate-limited line names the identity host (never a key), and only the
+// node's own key (above) still writes.
+function isPrivateV4(addr: string): boolean {
+  const o = addr.split(".").map((x) => Number(x));
+  if (o.length !== 4 || o.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) return false;
+  const [a, b] = o as [number, number, number, number];
+  return a === 127 || a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 169 && b === 254);
+}
+function isPrivateAddress(raw: string): boolean {
+  const addr = raw.replace(/^\[|\]$/g, "").split("%")[0]!.toLowerCase();
+  const kind = isIP(addr);
+  if (kind === 4) return isPrivateV4(addr);
+  if (kind !== 6) return false;
+  if (addr === "::1") return true;
+  const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/.exec(addr);
+  if (mapped) return isPrivateV4(mapped[1]!);
+  const first = parseInt(addr.split(":")[0] || "0", 16);
+  return (first & 0xfe00) === 0xfc00 || (first & 0xffc0) === 0xfe80;
+}
+let lastCleartextLogAt = Number.NEGATIVE_INFINITY;
+/** null when the key may be sent to `base`; otherwise why not (naming the host only). */
+async function cleartextRefusal(base: string): Promise<string | null> {
+  let url: URL;
+  try { url = new URL(base); } catch { return "IDENTITY_VESSEL_URL is not a URL"; }
+  if (url.protocol === "https:") return null;
+  const host = url.hostname.replace(/^\[|\]$/g, "");
+  let refusal: string | null = null;
+  if (url.protocol !== "http:") refusal = `scheme ${url.protocol} is neither https nor http`;
+  else if (host.toLowerCase() === "localhost") refusal = null;
+  else if (isIP(host)) refusal = isPrivateAddress(host) ? null : "host is a public address over plain http";
+  else {
+    try {
+      const addrs = (await dns.promises.lookup(host, { all: true })) as Array<{ address: string }>;
+      refusal = addrs.length > 0 && addrs.every((a) => isPrivateAddress(a.address)) ? null : "host resolves to a public address over plain http";
+    } catch (err) {
+      refusal = `host does not resolve (${String((err as { code?: string })?.code ?? "lookup failed")}), so it cannot be shown private`;
+    }
+  }
+  if (refusal) {
+    const now = Date.now();
+    if (now - lastCleartextLogAt >= CREDENTIAL_VALIDATION_TTL_MS) {
+      lastCleartextLogAt = now;
+      console.error(`[caller-credential] REFUSED to send a credential in cleartext to identity at ${url.host}: ${refusal}. Identity is treated as unreachable; writes from any key other than this node's own are refused (401). Use https or a private address.`);
+    }
+  }
+  return refusal;
+}
+
 const identityUrl = (): string => (process.env["IDENTITY_VESSEL_URL"] ?? "").trim().replace(/\/+$/, "");
 
 /** What identity-vessel says about `authHeader`. `cache:false` asks identity every time. */
@@ -109,6 +164,8 @@ export async function identityCredential(authHeader: string | undefined, opts: {
   }
   const base = identityUrl();
   if (!base) return { authenticated: false, scopes: [], why: "IDENTITY_VESSEL_URL unset: identity cannot be asked" };
+  const refusal = await cleartextRefusal(base);
+  if (refusal) return { authenticated: false, scopes: [], why: `identity unreachable: cleartext refused (${refusal})` };
   try {
     const res = await fetch(`${base}/v1/auth/resolve`, {
       method: "POST",

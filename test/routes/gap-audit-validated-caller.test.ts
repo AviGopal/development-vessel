@@ -26,7 +26,8 @@ const { impulsesRouter } = await import(`../../src/routes/impulses.js?${"gap-aud
 const { __resetCredentialCacheForTests } = await import("../../src/lib/caller-credential.js");
 if (SAVED_WR === undefined) delete process.env["WORKSPACE_ROOT"]; else process.env["WORKSPACE_ROOT"] = SAVED_WR;
 
-const IDENTITY = "http://identity.validated-caller.invalid";
+// A loopback literal: the credential module sends keys over plain http only to private hosts.
+const IDENTITY = "http://127.0.0.1:59106";
 const HOLDER = "http://holder.validated-caller.invalid/v2/impulses/resolve";
 const SCOPED_KEY = "sk-fixture-validated-caller-scoped-5e21";
 const KEYED_KEY = "sk-fixture-validated-caller-keyed-77c0";

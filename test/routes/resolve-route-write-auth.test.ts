@@ -28,7 +28,8 @@ import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 // which would answer every write 200 without reaching the store and blind the controls below.
 const { impulsesRouter } = await import(`../../src/routes/impulses.js?${"write-auth-isolated"}`);
 
-const IDENTITY = "http://identity.write-auth.test:8101";
+// A loopback literal: the credential module sends keys over plain http only to private hosts.
+const IDENTITY = "http://127.0.0.1:59107";
 const GAP_STORE = "http://gapstore.write-auth.test:8090/v2/impulses/resolve";
 const VALID_KEY = "write-auth-valid-key-fixture";
 const UNSEEN_VALID_KEY = "write-auth-unseen-valid-key-fixture";

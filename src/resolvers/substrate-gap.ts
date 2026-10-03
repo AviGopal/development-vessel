@@ -1222,6 +1222,119 @@ export function closeEvidenceOf(
   return { ok: false, missing: "closure evidence: classification_metadata.falsifier_exercise {passed: boolean}, landed_sha / landed_commit, closed_by / close_basis naming the closer, or the pointer-level operator marker \"operator:<id>\"" };
 }
 
+/** PLACEHOLDER GATE (see unrenderedBindingField): a refusal naming the field, or null. */
+function placeholderGate(incoming: Record<string, unknown>, id: string, status: string, stored: SubstrateGap | undefined): ResolverResult | null {
+  const hit = unrenderedBindingField(incoming, stored as unknown as Record<string, unknown> | undefined);
+  if (!hit) return null;
+  console.warn(`[substrate-gap] REFUSED write to ${id}: unrendered binding ${hit.token} in ${hit.field} (status ${status})`);
+  return {
+    shape: "structuredError",
+    body: {
+      resolver: "substrateGap_write",
+      failure_mode: "validation_rejected",
+      rule: "no_unrendered_placeholders",
+      field: hit.field,
+      detail: `gap ${id}: unrendered binding ${hit.token} in ${hit.field} — bind every slot before writing (a gap that quotes a token names it in backticks, e.g. \`{{goal.id}}\`)`,
+    },
+  } as ResolverResult;
+}
+
+/**
+ * The gates that depend on the STORED row a write lands on. Shared by the store holder (inside the lock)
+ * and by a forwarding node (against the row read from the holder, before forwarding).
+ *
+ * operator_hold (2026-10-03, widened from "refuse a close"): on a row whose STORED operator_hold is true, a
+ * write without the operator marker may not change the status (a reject moved held gaps as freely as a
+ * close used to), may not release the hold (an incoming operator_hold key other than true would win the
+ * carry-forward), and keeps the stored summary, category and edit_site (holdKeepsText, applied by the
+ * caller). falsifier_exercise.passed in the INCOMING payload does not bypass the hold: it is the writer's
+ * own claim, and the live row "{{goal.id}}" carried a forged one. Lane closers already skip held gaps.
+ *
+ * CLOSE NEEDS EVIDENCE (see closeEvidenceOf): a TRANSITION into closed or rejected (a reject takes a gap out
+ * of every open-gap supply just as a close does). A write that keeps the status is not gated here; its
+ * verdict keys are kept by the caller. Read from the incoming write, before any carry-forward.
+ */
+function existingRowGates(
+  pointer: unknown,
+  incoming: Record<string, unknown>,
+  id: string,
+  to: string,
+  existing: SubstrateGap,
+): { refused: ResolverResult } | { holdKeepsText: boolean } {
+  const marker = operatorMarkerOf(pointer);
+  const from = String(existing.status ?? "open");
+  let holdKeepsText = false;
+  const existingMeta = (existing.classification_metadata ?? {}) as Record<string, unknown>;
+  const incomingMeta = (incoming["classification_metadata"] ?? {}) as Record<string, unknown>;
+  if (existingMeta["operator_hold"] === true && !marker) {
+    const refuse = (detail: string) => ({
+      refused: { shape: "structuredError", body: { resolver: "substrateGap_write", failure_mode: "validation_rejected", rule: "operator_hold", detail } } as ResolverResult,
+    });
+    if (to !== from) {
+      console.warn(`[substrate-gap] REFUSED ${from} -> ${to} on held gap ${id}: no operator marker`);
+      return refuse(`gap ${id}: operator_hold is set — a status change (${from} -> ${to}) needs the operator marker (pointer-level operator: "operator:<id>"); classification_metadata.falsifier_exercise.passed in the payload does not bypass the hold`);
+    }
+    if ("operator_hold" in incomingMeta && incomingMeta["operator_hold"] !== true) {
+      console.warn(`[substrate-gap] REFUSED hold release on ${id}: no operator marker`);
+      return refuse(`gap ${id}: operator_hold is set — releasing it needs the operator marker (pointer-level operator: "operator:<id>")`);
+    }
+    holdKeepsText = true;
+  }
+  if ((to === "closed" || to === "rejected") && from !== to) {
+    const ev = closeEvidenceOf(incoming, marker);
+    if (!ev.ok) {
+      console.warn(`[substrate-gap] REFUSED ${to} of ${id}: no ${ev.missing.split(" (")[0]!.split(":")[0]}`);
+      return {
+        refused: {
+          shape: "structuredError",
+          body: {
+            resolver: "substrateGap_write",
+            failure_mode: "validation_rejected",
+            rule: "close_needs_evidence",
+            detail: `gap ${id}: a ${to} write needs closed_reason (or rejected_reason) plus evidence; missing ${ev.missing}. The row stays ${from}.`,
+          },
+        } as ResolverResult,
+      };
+    }
+    console.log(`[substrate-gap] ${to} of ${id}: reason=${ev.reason} evidence=${ev.evidence}`);
+  }
+  return { holdKeepsText };
+}
+
+/**
+ * GATES BEFORE FORWARDING (2026-10-03). A node with GAP_STORE_ENDPOINT set forwards the write to the store
+ * holder. It used to forward before every gate; a holder on the same build re-applies them, a holder on an
+ * older build applied none. So the forwarding node reads the stored row by id from the holder and runs the
+ * row-dependent gates itself; it forwards only a write that passes. An unreadable holder fails closed (the
+ * forward would fail as well). The class-match fallback (a fresh timestamped id landing on an open row of
+ * its class) is the holder's alone: here only the exact id is checked.
+ */
+async function gateThenForward(pointer: Record<string, unknown>, incoming: Record<string, unknown>): Promise<ResolverResult> {
+  const id = String(incoming["id"]);
+  const status = String(incoming["status"] ?? "open");
+  const read = await forwardToGapStore({ type: "substrateGap", id, limit: 5 });
+  const rows = (read?.body as { gaps?: unknown } | undefined)?.gaps;
+  if (!read || read.shape !== "substrateGap" || !Array.isArray(rows)) {
+    console.warn(`[substrate-gap] NOT forwarded ${id}: the gap-store holder could not be read, so the write gates cannot be applied`);
+    return {
+      shape: "structuredError",
+      body: {
+        resolver: "substrateGap_write",
+        failure_mode: "gap_store_unavailable",
+        detail: `gap ${id}: not forwarded — the gap-store holder could not be read (${JSON.stringify(read?.body ?? null).slice(0, 200)}), so the write gates cannot be applied`,
+      },
+    } as ResolverResult;
+  }
+  const stored = (rows as SubstrateGap[]).find((g) => g && g.id === id);
+  const ph = placeholderGate(incoming, id, status, stored);
+  if (ph) return ph;
+  if (stored) {
+    const rg = existingRowGates(pointer, incoming, id, status, stored);
+    if ("refused" in rg) return rg.refused;
+  }
+  return (await forwardToGapStore(pointer))!;
+}
+
 export async function resolveSubstrateGapWrite(
   pointer: SubstrateGapWritePointer | Record<string, unknown>,
   // Additive, test-facing: inject a vocabulary rather than depending on the host's
@@ -1237,7 +1350,6 @@ export async function resolveSubstrateGapWrite(
     detectedSha?: string,
   },
 ): Promise<ResolverResult> {
-  { const fwd = await forwardToGapStore(pointer as Record<string, unknown>); if (fwd) return fwd; }
   // METADATA TYPE GATE (2026-10-03). classification_metadata is a record the store merges key by key.
   // A walk wrote the unrendered STRING "{{goal.classification_metadata}}" here; it was cast to a record
   // and the carry-forward loop stored one key per character on an operator gap. Present-and-not-an-object
@@ -1358,6 +1470,10 @@ export async function resolveSubstrateGapWrite(
     }
   }
 
+  // A node that does not hold the store gates, then forwards (see gateThenForward). Placed after the
+  // stateless gates above (metadata type, id, check-input, description) so those run here as well.
+  if (process.env["GAP_STORE_ENDPOINT"]) return gateThenForward(pointer as Record<string, unknown>, incoming as unknown as Record<string, unknown>);
+
   // TIMESTAMP PLACEHOLDER SCRUB. The gate above rejects uninterpolated {{slots}} in id/category
   // only — deliberately, since a legitimate summary may QUOTE a placeholder when describing an
   // interpolation bug. But that left every other field unguarded, and a template slot reached the
@@ -1408,25 +1524,11 @@ export async function resolveSubstrateGapWrite(
   // otherwise fall back to class match against a non-closed row.
   const classKey = gapClassKey(gap.id);
   let existingIdx = gaps.findIndex((g) => g.id === gap.id);
-  // PLACEHOLDER GATE, EVERY STATUS (see unrenderedBindingField). Inside the lock because the exemption
-  // compares against the stored row with this exact id.
+  // PLACEHOLDER GATE, EVERY STATUS (see placeholderGate). Inside the lock because the exemption compares
+  // against the stored row with this exact id.
   {
-    const hit = unrenderedBindingField(incoming as unknown as Record<string, unknown>, existingIdx >= 0 ? (gaps[existingIdx] as unknown as Record<string, unknown>) : undefined);
-    if (hit) {
-      console.warn(`[substrate-gap] REFUSED write to ${gap.id}: unrendered binding ${hit.token} in ${hit.field} (status ${String(gap.status)})`);
-      return {
-        early: {
-          shape: "structuredError",
-          body: {
-            resolver: "substrateGap_write",
-            failure_mode: "validation_rejected",
-            rule: "no_unrendered_placeholders",
-            field: hit.field,
-            detail: `gap ${gap.id}: unrendered binding ${hit.token} in ${hit.field} — bind every slot before writing (a gap that quotes a token names it in backticks, e.g. \`{{goal.id}}\`)`,
-          },
-        },
-      };
-    }
+    const refused = placeholderGate(incoming as unknown as Record<string, unknown>, String(gap.id), String(gap.status), existingIdx >= 0 ? gaps[existingIdx] : undefined);
+    if (refused) return { early: refused };
   }
   // CONDITIONAL WRITE (expect_status). A writer that read the row, awaited, and writes it back as
   // open would otherwise REOPEN a gap the sweep or verifier closed in between, and a reopen fires
@@ -1559,55 +1661,10 @@ export async function resolveSubstrateGapWrite(
   if (existingIdx >= 0) {
     const existing = gaps[existingIdx]!;
     priorMetaForBirth = { ...((existing.classification_metadata ?? {}) as Record<string, unknown>) };
-    // operator_hold is a field the store READS (2026-10-03, widened from "refuse a close"). On a row whose
-    // STORED operator_hold is true, a write without the operator marker may not change the status (a
-    // reject moved held gaps as freely as a close used to), may not release the hold (an incoming
-    // operator_hold key other than true would win the carry-forward), and keeps the stored summary,
-    // category and edit_site (applied below). falsifier_exercise.passed in the INCOMING payload no longer
-    // bypasses the hold: it is the writer's own claim, and the live row "{{goal.id}}" carried a forged one.
-    // Lane closers already skip held gaps; the operator moves one with the marker, under the usual rules.
-    let holdKeepsText = false;
-    {
-      const existingMeta = (existing.classification_metadata ?? {}) as Record<string, unknown>;
-      const incomingMeta = (gap.classification_metadata ?? {}) as Record<string, unknown>;
-      if (existingMeta["operator_hold"] === true && !operatorMarkerOf(pointer)) {
-        const from = String(existing.status ?? "open");
-        const to = String(gap.status ?? "open");
-        const refuse = (detail: string) => ({
-          early: { shape: "structuredError", body: { resolver: "substrateGap_write", failure_mode: "validation_rejected", rule: "operator_hold", detail } } as ResolverResult,
-        });
-        if (to !== from) {
-          console.warn(`[substrate-gap] REFUSED ${from} -> ${to} on held gap ${gap.id}: no operator marker`);
-          return refuse(`gap ${gap.id}: operator_hold is set — a status change (${from} -> ${to}) needs the operator marker (pointer-level operator: "operator:<id>"); classification_metadata.falsifier_exercise.passed in the payload does not bypass the hold`);
-        }
-        if ("operator_hold" in incomingMeta && incomingMeta["operator_hold"] !== true) {
-          console.warn(`[substrate-gap] REFUSED hold release on ${gap.id}: no operator marker`);
-          return refuse(`gap ${gap.id}: operator_hold is set — releasing it needs the operator marker (pointer-level operator: "operator:<id>")`);
-        }
-        holdKeepsText = true;
-      }
-    }
-    // CLOSE NEEDS EVIDENCE (see closeEvidenceOf). Only a TRANSITION into closed or rejected (a reject takes a
-    // gap out of every open-gap supply just as a close does): a write that keeps the status is not gated
-    // here (its verdict keys are kept below). Checked before the carry-forward copies the old row's keys in.
-    if ((String(gap.status ?? "open") === "closed" || String(gap.status ?? "open") === "rejected") && String(existing.status ?? "open") !== String(gap.status)) {
-      const ev = closeEvidenceOf(incoming as unknown as Record<string, unknown>, operatorMarkerOf(pointer));
-      if (!ev.ok) {
-        console.warn(`[substrate-gap] REFUSED ${String(gap.status)} of ${gap.id}: no ${ev.missing.split(" (")[0]!.split(":")[0]}`);
-        return {
-          early: {
-            shape: "structuredError",
-            body: {
-              resolver: "substrateGap_write",
-              failure_mode: "validation_rejected",
-              rule: "close_needs_evidence",
-              detail: `gap ${gap.id}: a ${String(gap.status)} write needs closed_reason (or rejected_reason) plus evidence; missing ${ev.missing}. The row stays ${String(existing.status ?? "open")}.`,
-            },
-          },
-        };
-      }
-      console.log(`[substrate-gap] ${String(gap.status)} of ${gap.id}: reason=${ev.reason} evidence=${ev.evidence}`);
-    }
+    // operator_hold and close/reject evidence (see existingRowGates).
+    const rowGate = existingRowGates(pointer, incoming as unknown as Record<string, unknown>, String(gap.id), String(gap.status ?? "open"), existing);
+    if ("refused" in rowGate) return { early: rowGate.refused };
+    const holdKeepsText = rowGate.holdKeepsText;
         summaryChanged = existing.summary !== gap.summary;
         // A closed->open transition is a REOPEN, and it is exactly when the gap wants
         // re-picking. Without this the trigger below fires only on a new gap or a changed

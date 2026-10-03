@@ -39,6 +39,7 @@ import { readFile, writeFile, rename, mkdir } from "node:fs/promises";
 import { readFileSync, existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { carryGoalReachEntries, isGoalReachEntry, mergeDemandGoal, type GoalReachDemandEntry } from "../lib/demand-goals.js";
+import { regionLiteralVerdict, regionOf, falsifierClassOf } from "../lib/region-literal.js";
 
 // EXPECTATION CALIBRATION, HELD WITH THE GAP STORE (value-per-cost-selection 5.5). Same file and
 // format gap-to-feature reads ({category: {attempts, lands}}). It lives on the node that holds the
@@ -110,6 +111,52 @@ function readFromCorrectWorkspace(path: string): string {
   // Ensure we read from the live workspace, not a stale one
   const liveRoot = process.env["WORKSPACE_ROOT"] ?? DEFAULT_WORKSPACE_ROOT;
   return path.replace(DEFAULT_WORKSPACE_ROOT, liveRoot);
+}
+
+/**
+ * ARM-TIME REGION GATE (2026-10-03). Compose grounding centres the draft on the line containing
+ * classification_metadata.region; a region that is not a literal of edit_site grounds the draft on the file
+ * top (see lib/region-literal.ts). A write that ARMS a gap with a region must therefore carry a region that
+ * occurs exactly once in edit_site, or it is refused (region_not_literal_once {occurrences, edit_site},
+ * region_spans_lines, or edit_site_unreadable — fail closed).
+ *
+ * THE RULE. Armed = the stamped falsifier is class2 and the row has an edit_site. The check runs only when the
+ * resulting row is OPEN, armed, and carries a non-empty region, AND one of:
+ *   - there was no stored row (a new arm),
+ *   - the stored row was not open (a reopen re-arms),
+ *   - the stored row was not class2 (this write arms it),
+ *   - the region or the edit_site differs from the stored one (compared after carry-forward).
+ * An update to an already-armed open row that leaves region and edit_site as stored is NOT checked, so rows armed
+ * before this gate stay editable; gap_lifecycle_scan {region_lint:true} lists those. Closes, rejects and unarmed
+ * writes are never checked.
+ */
+export function armRegionGate(
+  id: string,
+  status: string,
+  meta: Record<string, unknown>,
+  priorStatus: string,
+  priorMeta: Record<string, unknown>,
+): ResolverResult | null {
+  if (status !== "open") return null;
+  if (falsifierClassOf(meta) !== "class2") return null;
+  const editSite = typeof meta["edit_site"] === "string" ? (meta["edit_site"] as string).trim() : "";
+  const region = regionOf(meta);
+  if (!editSite || !region) return null;
+  const newArm = priorStatus !== "open" || falsifierClassOf(priorMeta) !== "class2";
+  const changed = regionOf(priorMeta) !== region || String(priorMeta["edit_site"] ?? "").trim() !== editSite;
+  if (!newArm && !changed) return null;
+  const v = regionLiteralVerdict(region, editSite);
+  if (v.ok) return null;
+  console.log(`[gap-arm-region] refused ${id}: ${v.error} occurrences=${v.occurrences ?? "n/a"} edit_site=${editSite}`);
+  return {
+    shape: "structuredError",
+    body: {
+      resolver: "substrateGap_write", failure_mode: "validation_rejected", error: v.error,
+      field: v.error === "edit_site_unreadable" ? "classification_metadata.edit_site" : "classification_metadata.region",
+      id, region: v.region, edit_site: v.edit_site, occurrences: v.occurrences,
+      detail: `gap ${id}: ${v.detail}`,
+    },
+  };
 }
 
 /**
@@ -1716,9 +1763,12 @@ async function resolveSubstrateGapWriteInner(
   // The stored row's metadata BEFORE this write: the birth stamp compares against it, never against
   // the incoming or merged copy (either can carry forward or forge a verdict).
   let priorMetaForBirth: Record<string, unknown> = {};
+  // The stored row's status before this write, for the arm-time region gate ("absent" for a new row).
+  let priorStatusForArm = "absent";
   if (existingIdx >= 0) {
     const existing = gaps[existingIdx]!;
     priorMetaForBirth = { ...((existing.classification_metadata ?? {}) as Record<string, unknown>) };
+    priorStatusForArm = String(existing.status ?? "open");
     // operator_hold and close/reject evidence (see existingRowGates).
     const rowGate = existingRowGates(pointer, incoming as unknown as Record<string, unknown>, String(gap.id), String(gap.status ?? "open"), existing);
     if ("refused" in rowGate) return { early: rowGate.refused };
@@ -1990,6 +2040,19 @@ async function resolveSubstrateGapWriteInner(
     // recorded faithfully and nothing ever reads them back to ask what changed.
   } catch (err) {
     console.error(`[gap-falsifier] classification threw for ${gap.id} (non-fatal, gap still written):`, err);
+  }
+
+  // ARM-TIME REGION GATE: after the stamp (arming is decided there), before the save. Outside the fail-open
+  // block above on purpose: a throw here refuses the write, it never lets an unchecked arm through.
+  {
+    let refused: ResolverResult | null;
+    try {
+      refused = armRegionGate(String(gap.id), String(gap.status ?? "open"), (gap.classification_metadata ?? {}) as Record<string, unknown>, priorStatusForArm, priorMetaForBirth);
+    } catch (err) {
+      refused = { shape: "structuredError", body: { resolver: "substrateGap_write", failure_mode: "validation_rejected", error: "region_gate_error", id: gap.id,
+        detail: `gap ${gap.id}: the arm-time region check threw (${String(err).slice(0, 200)}); refused rather than arm unchecked` } };
+    }
+    if (refused) return { early: refused };
   }
 
   await saveGaps(gaps);

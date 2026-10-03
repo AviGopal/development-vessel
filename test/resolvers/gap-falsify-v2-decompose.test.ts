@@ -292,3 +292,74 @@ describe("the gap_falsify pass runs decomposition in parent-check mode", () => {
     } finally { llmMode = "none"; if (prevWs === undefined) delete process.env["WORKSPACE_ROOT"]; else process.env["WORKSPACE_ROOT"] = prevWs; }
   });
 });
+
+// TEMPLATE-TITLED TESTS (gap decompose-rejects-steps-whose-test-titles-are-template-strings, check-first).
+//
+// Measured 2026-10-03: every decomposition of the goal-target-needs check was refused with
+// 'test "[widget/readable] (i) targets are VALID producers ... > [widget/readable] MUST-FAIL (i): LLM a..." is not in
+// repos/goal-host-vessel/test/goal-target-needs.test.ts'. The test exists; its describe and it titles are built with
+// template literals inside a loop over labels, so the RUN name never appears verbatim in the source and the
+// literal includes() check rejected every real check of that file. bun 1.4 has no list or dry-run mode that would
+// enumerate run names without running the file, so a title segment is matched against the source's template
+// literals with each placeholder read as a wildcard: anchored to the whole segment, and never through a template
+// that is nothing but placeholders, which would admit any invented title.
+// The decompose prompt also cut the falsifier JSON at 600 characters, mid test name.
+describe("decompose validates test titles built from template literals", () => {
+  const LABELS_FILE = "test/labels.test.ts";
+  const RUN_NAME = "[widget/readable] targets are valid producers > [widget/readable] MUST-FAIL picks a producer among them";
+  const re = () => import("../../src/resolvers/retry-evidence.js") as Promise<Record<string, any>>;
+  const LABELS_SRC = [
+    'import { describe, it } from "bun:test";',
+    'for (const label of ["widget/readable", "widget/hidden"]) {',
+    "  describe(`[${label}] targets are valid producers`, () => {",
+    "    it(`[${label}] MUST-FAIL picks a producer among them`, () => {});",
+    "  });",
+    "}",
+    "const anyName = (n: string): string => `${n}`;",
+    'it(anyName("a plain literal title"), () => {});',
+    "",
+  ].join("\n");
+  beforeAll(() => {
+    writeFileSync(join(CLONES, "fixture-vessel", LABELS_FILE), LABELS_SRC);
+    tree[RUN_NAME] = "fail";
+  });
+
+  it("MUST-FAIL a parent check naming a run of a template-titled test is written, not refused as absent", async () => {
+    const parent = await parentGap("template-title");
+    const d = await decomposeGap(parent, { parentCheck: true, deps: deps({ parent_check: TS_CHECK(RUN_NAME, LABELS_FILE), steps: [] }) });
+    await __settleBirthEvaluationsForTests();
+    expect(d.parent_check).toBe("written");
+    expect(((metaOf(await row(String(parent.id))).evidence_resolve as { input?: { only_tests?: string[] } }).input ?? {}).only_tests).toEqual([RUN_NAME]);
+  });
+
+  it("CONTROL a title no test in that file produces is still refused, though the file holds a placeholder-only template", async () => {
+    const parent = await parentGap("template-title-invented");
+    const d = await decomposeGap(parent, { parentCheck: true, deps: deps({ parent_check: TS_CHECK("[widget/readable] targets are valid producers > an invented leaf title", LABELS_FILE), steps: [] }) });
+    expect(d.parent_check).toMatch(/is not in/);
+    expect(metaOf(await row(String(parent.id))).evidence_resolve).toBeUndefined();
+  });
+
+  it("MUST-FAIL the title matcher reads placeholders as wildcards, anchors the whole segment, and ignores placeholder-only templates", async () => {
+    const m = await re();
+    expect(typeof m.testTitleInSource).toBe("function");
+    expect(m.testTitleInSource(LABELS_SRC, RUN_NAME)).toBe(true);
+    expect(m.testTitleInSource(LABELS_SRC, "[widget/hidden] targets are valid producers")).toBe(true);
+    expect(m.testTitleInSource(LABELS_SRC, "a plain literal title")).toBe(true);
+    // anchored: a template segment does not match a longer or shorter title
+    expect(m.testTitleInSource(LABELS_SRC, "[widget/readable] targets are valid producers and more")).toBe(false);
+    expect(m.testTitleInSource(LABELS_SRC, "prefix [widget/readable] MUST-FAIL picks a producer among them")).toBe(false);
+    // a template that is only a placeholder admits nothing
+    expect(m.testTitleInSource(LABELS_SRC, "an invented title nobody wrote")).toBe(false);
+  });
+
+  it("MUST-FAIL the decompose prompt carries the whole falsifier, past 600 characters", async () => {
+    const names = Array.from({ length: 12 }, (_, i) => `widget counts rejected frames in a long named scenario number ${i}`);
+    const tail = "widget falsifier tail sentinel that sits past six hundred characters";
+    const parent = await parentGap("long-falsifier", { evidence_resolve: { shape: "test_suite", input: { vessel: "repos/fixture-vessel", test_file: "test/widget.test.ts", only_tests: [...names, tail] }, zero_field: "requested_not_passing" } });
+    const prompts: string[] = [];
+    await decomposeGap(parent, { deps: deps({ steps: [] }, prompts) });
+    expect(prompts.length).toBe(1);
+    expect(JSON.stringify({ evidence_resolve: { only_tests: [...names, tail] } }).length).toBeGreaterThan(600);
+    expect(prompts[0]).toContain(tail);
+  });
+});

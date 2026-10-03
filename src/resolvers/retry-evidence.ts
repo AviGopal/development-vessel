@@ -388,6 +388,39 @@ export function explicitLineHint(text: string): { start: number; end: number } |
   return { start, end };
 }
 
+// ─── test titles ────────────────────────────────────────────────────────────
+
+const TEMPLATE_LITERAL_RE = /`((?:[^`\\]|\\[\s\S])*)`/g;
+const PLACEHOLDER_RE = /\$\{[^}]*\}/;
+const escapeRegExp = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+/**
+ * Where in a test file's source the title segment `segment` (one " > " part of a run name) is written, or -1.
+ * A literal occurrence wins. Otherwise a template literal whose placeholders, read as wildcards, produce
+ * the WHOLE segment (anchored): titles built in a loop (`[${label}] picks a producer`) never appear verbatim,
+ * and bun has no list mode that would enumerate run names without running the file. A template that is
+ * nothing but placeholders (`${name}`) would admit any title, so it never matches.
+ */
+export function testTitleSegmentOffset(src: string, segment: string): number {
+  const seg = segment.trim();
+  if (!seg) return 0;
+  const at = src.indexOf(seg);
+  if (at >= 0) return at;
+  for (const m of src.matchAll(TEMPLATE_LITERAL_RE)) {
+    const body = (m[1] ?? "").trim();
+    if (!PLACEHOLDER_RE.test(body)) continue;
+    const parts = body.split(new RegExp(PLACEHOLDER_RE.source, "g"));
+    if (parts.join("").trim().length === 0) continue;
+    if (new RegExp(`^${parts.map(escapeRegExp).join("[\\s\\S]*?")}$`).test(seg)) return m.index ?? 0;
+  }
+  return -1;
+}
+
+/** Does every " > " segment of the run name `title` occur in the test source (literally or as a template)? */
+export function testTitleInSource(src: string, title: string): boolean {
+  return title.split(" > ").every((seg) => testTitleSegmentOffset(src, seg) >= 0);
+}
+
 /** A window of at most `window` chars that covers lines start..end (from start when the range is larger). */
 export function lineCenteredSlice(content: string, start: number, end: number, window: number): { slice: string; startLine: number } | null {
   const lines = content.split("\n");

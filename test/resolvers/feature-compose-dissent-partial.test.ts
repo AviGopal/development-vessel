@@ -348,6 +348,10 @@ describe("a landing over the lane's own semantic dissent is partial, and the dis
     const done = memoryStore([{ ...PARENT_ROW, classification_metadata: { ...metaOf(PARENT_ROW), semantic_dissent: [settled] } }]);
     await settleFn()(PARENT_ID, null, { push_status: "pushed", new_git_sha: NEW_SHA }, done.deps);
     expect(done.writes).toEqual([]);
+    // A dissent stamped with THIS landing's sha is that landing's own, not a stale one: never superseded by it.
+    const own = memoryStore([{ ...PARENT_ROW, classification_metadata: { ...metaOf(PARENT_ROW), semantic_dissent: [{ ...LEGACY_DISSENT, landed_sha: NEW_SHA }] } }]);
+    await settleFn()(PARENT_ID, null, { push_status: "pushed", new_git_sha: NEW_SHA.slice(0, 12) }, own.deps);
+    expect(own.writes).toEqual([]);
   });
 
   // ── (d) zero-local-reader keys are EVIDENCE, never a veto ──────────────────────────────────────

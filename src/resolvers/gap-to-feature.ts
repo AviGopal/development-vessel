@@ -25,7 +25,7 @@ import { resolveUiWritePassthrough } from "./ui-write-passthrough.js";
 
 const solicitedHumanGaps = new Set<string>();
 import { DISCOVERY_ENDPOINT, METABOB_API_KEY, GOAL_HOST_VESSEL_ENDPOINT, lookupShape, describeLookup, discoveryFailureBackoffMs, __resetDiscoveryForTests } from "../config.js";
-import { peekComposeCapacity } from "../compose-slots.js";
+import { peekComposeCapacity, hasFreeComposeCapacity } from "../compose-slots.js";
 import { gateLanding, landingsStopped } from "./push-policy.js";
 import { readFile } from "node:fs/promises";
 
@@ -5666,7 +5666,7 @@ export async function resolveGapToFeature(pointer: GapToFeaturePointer): Promise
   let pickEnvelope: SpendEnvelopeVerdict | null = null;
   if (!pointer.gap_id && !pointer.category) {
     const capacity = await peekComposeCapacity();
-    if (capacity && capacity.free <= 0) {
+    if (capacity && !hasFreeComposeCapacity(capacity)) {
       // Log the SKIP explicitly. A cost fix whose only evidence is the absence of the
       // old line is unmeasurable, and "nothing happened" is exactly the signal this
       // codebase has repeatedly mistaken for health.

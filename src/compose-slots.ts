@@ -265,6 +265,22 @@ export async function peekComposeCapacity(
   }
 }
 
+/**
+ * Does an OBSERVED capacity leave this lane a slot to claim?
+ *
+ * THE ONE READER of peekComposeCapacity's result, shared by gap-to-feature's selection skip and
+ * substrate-gap's compose nudge so the two cannot disagree about the same slot directory again.
+ * They did: the nudge duck-typed the result through `as unknown as {...}` looking for fields this
+ * type never had, matched none, and read "no capacity" on every write while the lane was empty.
+ *
+ * Takes a non-null capacity on purpose. What an UNOBSERVABLE capacity (null) means is each
+ * caller's own contract (selection fails open, the nudge fails closed), so it stays explicit at
+ * the call site rather than hidden in a default here.
+ */
+export function hasFreeComposeCapacity(capacity: ComposeCapacity): boolean {
+  return capacity.free > 0;
+}
+
 export async function acquireComposeSlot(
   composeId: string,
   opts: { directed?: boolean; gapId?: string } = {},

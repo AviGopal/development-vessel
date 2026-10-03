@@ -2122,33 +2122,10 @@ async function resolveSubstrateGapWriteInner(
       // Capacity guard: do not fire a compose nudge when the autonomous lane has no free slot.
       // FAIL-CLOSED: if the capacity check fails or returns an unreadable shape, assume no capacity.
       try {
-        const { peekComposeCapacity } = await import("../compose-slots.js");
+        const { peekComposeCapacity, hasFreeComposeCapacity } = await import("../compose-slots.js");
         const __cap = await peekComposeCapacity({ directed: false });
-        var __autoHasFree = (() => {
-          const c = __cap as unknown as {
-            autonomous_free?: boolean;
-            free?: boolean;
-            autonomousFree?: boolean;
-            available?: boolean;
-            autonomousAvailable?: boolean;
-            observed?: number;
-            cap?: number;
-          } | null | undefined;
-          if (!c || typeof c !== "object") return false;
-          if (typeof c.autonomous_free === "boolean") return c.autonomous_free;
-          if (typeof c.autonomousFree === "boolean") return c.autonomousFree;
-          if (typeof c.autonomousAvailable === "boolean") return c.autonomousAvailable;
-          if (typeof c.free === "boolean") return c.free; // some impls expose a single free flag
-          if (typeof c.available === "boolean") return c.available;
-          if (typeof c.observed === "number" && typeof c.cap === "number") {
-            const capNum = c.cap;
-            const obsNum = c.observed;
-            // Autonomous lane holds cap-1 to reserve one for directed work; floor at 1.
-            const autonomousLimit = Math.max(1, capNum - 1);
-            return obsNum < autonomousLimit;
-          }
-          return false; // unknown shape => treat as no capacity
-        })();
+        // Null = capacity unobservable: this nudge FAILS CLOSED (no nudge), as before.
+        var __autoHasFree = __cap !== null && hasFreeComposeCapacity(__cap);
         if (!__autoHasFree) {
           console.log(`[substrate-gap] compose nudge skipped for ${gap.id} — compose lane full`);
         }

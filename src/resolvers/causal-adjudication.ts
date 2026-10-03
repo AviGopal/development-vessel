@@ -300,7 +300,8 @@ export async function stampEnvironmentBaseline(
     if (resolvePoolImpulse({ type: "poolImpulse", id, status: "open" }).body.count > 0) return "already_stamped";
     const w = (deps?.routedWrite ?? ((p) => resolvePoolImpulseWrite(p).body))({
       type: "poolImpulse_write", id, shape: "environmentBaseline", source: "causal-adjudication", status: "open",
-      body: { gap_id: gapId, action_id: actionId, baseline_snapshot_id: null, baseline_snapshot_at: null, stamped_at: new Date().toISOString(), routed_via: "poolImpulse" },
+      // No snapshot fields: this stamp holds no baseline and says so, so no reader can take it for one.
+      body: { gap_id: gapId, action_id: actionId, baseline_unavailable: `local learning store unreachable (${dbCause})`, stamped_at: new Date().toISOString(), routed_via: "poolImpulse" },
     });
     if (w.ok) return "stamped";
     console.warn(`[causal-adjudication] env-baseline failed for ${gapId}: learning store unreachable (${dbCause}); routed poolImpulse write failed (${w.error ?? "no reason given"})`);
@@ -398,6 +399,8 @@ export async function stampEnvironmentBaseline(
     action_id: actionId,
     baseline_snapshot_id: latest ? String(latest["id"]) : null,
     baseline_snapshot_at: latest ? String(latest["created_at"]) : null,
+    // Same rule as the routed stamp: a stamp without a snapshot says so rather than reading as a baseline.
+    ...(latest ? {} : { baseline_unavailable: "no operationalStateSnapshot could be read or seeded" }),
     stamped_at: new Date().toISOString(),
   };
   const res = await surreal(
@@ -407,6 +410,23 @@ export async function stampEnvironmentBaseline(
   );
   if (!res) console.warn(`[causal-adjudication] env-baseline failed for ${gapId}: insert refused (${lastSurrealError || "no response"})`);
   return res ? "stamped" : "failed";
+}
+
+/**
+ * The before-reading an environmentBaseline stamp holds, or null when it holds none. A stamp that
+ * carries `baseline_unavailable` (written when the learning store or a snapshot could not be read) is
+ * NO baseline, whatever else it carries; so is a stamp without a real snapshot id (legacy rows wrote
+ * null). Null must be read as "no counterfactual", never as "the environment was fine". Any comparison
+ * of environment before/after goes through this function.
+ */
+export function environmentBeforeReading(stamp: unknown): { snapshot_id: string; snapshot_at: string | null } | null {
+  if (!stamp || typeof stamp !== "object") return null;
+  const p = stamp as Record<string, unknown>;
+  if (p["baseline_unavailable"] !== undefined && p["baseline_unavailable"] !== null) return null;
+  const id = p["baseline_snapshot_id"];
+  if (typeof id !== "string" || id.trim() === "") return null;
+  const at = p["baseline_snapshot_at"];
+  return { snapshot_id: id, snapshot_at: typeof at === "string" ? at : null };
 }
 
 /**

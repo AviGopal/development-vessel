@@ -24,7 +24,7 @@ import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { installCutoverFetchGuard, routeFleetUnreachable, routeShell, BUN_PASSING, type FetchGuard } from "./cutover-fetch-guard.js";
+import { installCutoverFetchGuard, routeFleetUnreachable, routeShell, BUN_PASSING, BUN_NO_TESTS, type FetchGuard } from "./cutover-fetch-guard.js";
 
 const { resolveVesselMitosisCutover } = cutoverMod;
 type Deps = { readGap?: (p: Record<string, unknown>) => Promise<unknown>; writeGap?: (p: Record<string, unknown>) => Promise<unknown>; runSuite?: (p: Record<string, unknown>) => Promise<unknown> };
@@ -55,6 +55,15 @@ let guard: FetchGuard;
 let precheckRuns = 0;
 let currentHost = "";
 const headSubjectSync = (repo: string) => spawnSync("git", ["log", "-1", "--format=%s"], { cwd: repo, encoding: "utf8" }).stdout.trim();
+// Only the PRE-cutover call (landing clone still at its baseline commit) answers ran=true. Once
+// the cutover's commit exists, the post-land suite gets a no-summary answer (ran=false): a
+// post-land ran=true writes /workspace/post-land-baseline/<vessel>.json (an absolute path), and on
+// a substrate node that would replace the real baseline with this fixture's empty failure list.
+function measuredPrecheckOnly(): string {
+  if (!currentHost || headSubjectSync(currentHost) !== "baseline") return BUN_NO_TESTS;
+  precheckRuns++;
+  return BUN_PASSING;
+}
 
 const VESSEL = "development-vessel";
 const GAP = "gap-own-check-target";
@@ -75,12 +84,11 @@ beforeEach(async () => {
   guard = installCutoverFetchGuard();
   routeFleetUnreachable(guard);
   precheckRuns = 0;
-  routeShell(guard, () => { if (currentHost && headSubjectSync(currentHost) === "baseline") precheckRuns++; return BUN_PASSING; });
+  routeShell(guard, measuredPrecheckOnly);
 });
 
 afterEach(async () => {
   const violations = guard.restore();
-  expect(violations).toEqual([]);
   setDeps(null);
   for (const k of ENV_KEYS) {
     if (saved[k] === undefined) delete process.env[k];
@@ -88,6 +96,7 @@ afterEach(async () => {
   }
   await rm(ws, { recursive: true, force: true });
   for (const r of extraRoots.splice(0)) await rm(r, { recursive: true, force: true });
+  expect(violations).toEqual([]);               // last, so a violation never skips the cleanup above
 });
 
 async function setup(): Promise<{ baseRoot: string; mitosisRoot: string; hostRepoRoot: string; baseSha: string; pendingPath: string }> {
@@ -529,7 +538,7 @@ describe("own check that cannot be measured: counted on the gap, and at N routed
       await resolveVesselMitosisCutover(deferredPointer(s) as never);
     }
     expect(meta(st)["own_check_unmeasurable_count"]).toBe(2);
-    routeShell(guard, () => BUN_PASSING);
+    routeShell(guard, measuredPrecheckOnly);
     const s3 = await setup2();
     setDeps({ readGap: st.readGap, writeGap: st.writeGap, runSuite: async () => suiteBody(s3.hostRepoRoot, { pass: 0, fail: 1, requested_not_passing: 1 }) });
     const r = await resolveVesselMitosisCutover(deferredPointer(s3) as never);

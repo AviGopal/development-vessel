@@ -43,7 +43,7 @@ import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { installCutoverFetchGuard, routeFleetUnreachable, routeShell, BUN_PASSING, type FetchGuard } from "./cutover-fetch-guard.js";
+import { installCutoverFetchGuard, routeFleetUnreachable, routeShell, BUN_PASSING, BUN_NO_TESTS, type FetchGuard } from "./cutover-fetch-guard.js";
 
 const { resolveVesselMitosisCutover, __setOwnCheckDepsForTests } = cutoverMod;
 
@@ -125,22 +125,27 @@ beforeEach(async () => {
   routeFleetUnreachable(guard);
   precheckRuns = 0;
   // The measurement: the pre-cutover suite runs and passes.
+  // Only the PRE-cutover call (landing clone still at its baseline commit) answers ran=true. Once
+  // the cutover's commit exists, the post-land suite gets a no-summary answer (ran=false): a
+  // post-land ran=true writes /workspace/post-land-baseline/<vessel>.json (an absolute path), and on
+  // a substrate node that would replace the real baseline with this fixture's empty failure list.
   routeShell(guard, () => {
     const r = spawnSync("git", ["log", "-1", "--format=%s"], { cwd: join(ws, "git", "vessels", VESSEL), encoding: "utf8" });
-    if (!String(r.stdout).startsWith("substrate-authored")) precheckRuns++;
+    if (String(r.stdout).startsWith("substrate-authored")) return BUN_NO_TESTS;
+    precheckRuns++;
     return BUN_PASSING;
   });
 });
 
 afterEach(async () => {
   const violations = guard.restore();
-  expect(violations).toEqual([]);
   __setOwnCheckDepsForTests(null);
   for (const k of ENV_KEYS) {
     if (saved[k] === undefined) delete process.env[k];
     else process.env[k] = saved[k];
   }
   await rm(ws, { recursive: true, force: true });
+  expect(violations).toEqual([]);               // last, so a violation never skips the cleanup above
 });
 
 // none: no newer commit. same_file / unrelated_file: N is pushed and the clone fast-forwards to it.

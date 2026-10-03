@@ -93,10 +93,15 @@ type SuiteMode = "no_tests" | "killed" | "dispatch_failed" | "passing";
 let precheckCalls = 0;
 let shellCalls = 0;
 let currentHost = "";
+// `mode` answers only the PRE-cutover call (landing clone still at its baseline commit). Once
+// the cutover's commit exists, the post-land suite gets a no-summary answer (ran=false): a
+// post-land ran=true writes /workspace/post-land-baseline/<vessel>.json (an absolute path), and on
+// a substrate node that would replace the real baseline with this fixture's empty failure list.
 function suite(mode: SuiteMode): void {
   routeShell(guard, () => {
     shellCalls++;
-    if (currentHost && git(currentHost, "log", "-1", "--format=%s") === "baseline") precheckCalls++;
+    if (!currentHost || git(currentHost, "log", "-1", "--format=%s") !== "baseline") return BUN_NO_TESTS;
+    precheckCalls++;
     if (mode === "dispatch_failed") throw new Error("shell producer connection reset");
     const out = mode === "no_tests" ? BUN_NO_TESTS : mode === "killed" ? BUN_KILLED_BY_TIMEOUT : BUN_PASSING;
     return `VERIFIED_ROOT=${currentHost}\nVERIFIED_HEAD=abc1234\n${out}`;

@@ -3,7 +3,8 @@ import { resolveVesselMitosisCutover } from "../../src/resolvers/vessel-mitosis-
 import { mkdtemp, mkdir, writeFile, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { installCutoverFetchGuard, routeFleetUnreachable, routeShell, BUN_PASSING, type FetchGuard } from "./cutover-fetch-guard.js";
+import { installCutoverFetchGuard, routeFleetUnreachable, routeShell, BUN_PASSING, BUN_NO_TESTS, type FetchGuard } from "./cutover-fetch-guard.js";
+import { spawnSync as spawnSyncGuard } from "node:child_process";
 
 let tmpRoot: string;
 let workspaceRoot: string;
@@ -53,13 +54,25 @@ const savedPushScopeEnv: Record<string, string | undefined> = {};
 // MEASURED by its pre-cutover suite (ran=true) — a landing nothing measured is refused
 // (no_measurement_available), and these tests are about apply/push scope, not about that.
 let guard: FetchGuard;
-/** Shell calls (pre-cutover + post-land suites) answered by the fixture shell in this test. */
+// Only the PRE-cutover call (landing clone still at its baseline commit) answers ran=true. Once
+// the cutover's commit exists, the post-land suite gets a no-summary answer (ran=false): a
+// post-land ran=true writes /workspace/post-land-baseline/<vessel>.json (an absolute path), and on
+// a substrate node that would replace the real baseline with this fixture's empty failure list.
+/** PRE-cutover suite runs answered by the fixture shell in this test (the measurement). */
 let suiteRuns = 0;
+/** The git-aware fixture's landing clone, set by setupForGitCutover. */
+let currentHost = "";
 beforeEach(() => {
   guard = installCutoverFetchGuard();
   routeFleetUnreachable(guard);
   suiteRuns = 0;
-  routeShell(guard, () => { suiteRuns++; return BUN_PASSING; });
+  currentHost = "";
+  routeShell(guard, () => {
+    const subject = currentHost ? String(spawnSyncGuard("git", ["log", "-1", "--format=%s"], { cwd: currentHost, encoding: "utf8" }).stdout).trim() : "";
+    if (subject.startsWith("substrate-authored")) return BUN_NO_TESTS;
+    suiteRuns++;
+    return BUN_PASSING;
+  });
 });
 afterEach(() => {
   expect(guard.restore()).toEqual([]);
@@ -423,6 +436,7 @@ describe("vessel_mitosis_cutover", () => {
       "// patched by substrate\n",
     );
     // Host git repo with the same original baseline.
+    currentHost = join(workspaceRoot, "host-repo");
     const hostRepoRoot = join(workspaceRoot, "host-repo");
     await mkdir(join(hostRepoRoot, "src", "resolvers"), { recursive: true });
     await writeFile(

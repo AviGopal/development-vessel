@@ -99,6 +99,12 @@ const OUTPUT_READ_DUPLICATE = new Set<string>([
   "impulseSignatureConcept", "interactorObservation",
 ]);
 
+const SELF_REGISTRATION = new Set<string>([
+  // discovery returns a shape's own registration for `vesselCapability` as a caller;
+  // it's not. Exclude it from the caller count for orphaned capability determination.
+  "vesselCapability"
+]);
+
 const META_DENY = new Set<string>([
   // dev-vessel self-governance / orchestration meta
   "substrateGap", "substrateGap_write", "memoryNote", "memoryNote_write",
@@ -146,6 +152,7 @@ const META_DENY = new Set<string>([
  * (concept_create_write, conceptLink_write, …) are KEPT. */
 function isOutwardCapability(shape: string): boolean {
   if (META_DENY.has(shape)) return false;
+  if (SELF_REGISTRATION.has(shape)) return false;
   if (INTERNAL_SUFFIX_RE.test(shape)) return false;
   if (OUTPUT_SHAPE_RE.test(shape)) return false;          // produced output, not a resolver
   if (ACTIVITY_API_WRITE.has(shape)) return false;        // trace-store / learning bookkeeping

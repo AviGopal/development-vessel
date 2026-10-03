@@ -28,7 +28,7 @@
  */
 import { createHash } from "node:crypto";
 
-export type FailStage = "install" | "resolve" | "typecheck" | "shape-dispatch" | "tests" | "own_check" | "scope" | "apply" | "constraint";
+export type FailStage = "install" | "resolve" | "typecheck" | "shape-dispatch" | "tests" | "own_check" | "scope" | "apply" | "constraint" | "decompose";
 
 export interface EditedSpan {
   path: string;

@@ -4095,6 +4095,30 @@ export function composeLandingEvidence(input: { own_check_ran: string[]; scope_d
     ...(d && d.dropped_paths.length > 0 ? { dropped_paths: d.dropped_paths, dropped_reason: d.dropped_reason ?? "dropped by the file-scope gate" } : {}),
   };
 }
+/**
+ * A DECOMPOSE THAT ENDS WITH NO OPS SAYS WHY, AND THE WHY BECOMES A LESSON. Both causes used to end
+ * in a bare "plan had no ops" with no log, lesson or trace: the anchor re-draft's reply not parsing
+ * (plan null, earlier ops kept), and the drafter returning an empty ops list. The lesson is recorded
+ * through appendComposeLesson (class decompose_no_ops, stage decompose), the same path verify
+ * failures take, so the drafter reads it on the next attempt. `record` is injectable for tests.
+ */
+export async function recordDecomposeNoOps(
+  cause: "redraft_unparseable" | "drafter_no_ops",
+  planRaw: string,
+  gap: Parameters<typeof appendComposeLesson>[3],
+  record: typeof appendComposeLesson = appendComposeLesson,
+): Promise<void> {
+  const reason = cause === "redraft_unparseable"
+    ? `re-draft unparseable: the anchor re-draft returned no JSON plan (${planRaw.length} chars), so the earlier plan was dropped`
+    : "drafter returned no ops";
+  console.warn(`[fc-decompose] ${reason} gap=${String(gap?.id ?? "(none)")}`);
+  try {
+    await record("decompose_no_ops", reason, "", gap, { stage: "decompose", edited_spans: [] });
+  } catch (err) {
+    console.warn(`[fc-decompose] decompose lesson NOT written gap=${String(gap?.id ?? "(none)")}: ${(err as Error)?.message ?? String(err)}`);
+  }
+}
+
 export async function appendComposeLesson(cls: string, reason: string, vessels: string, gap?: { id?: string; summary?: unknown; category?: unknown; source?: unknown; detected_at?: unknown; classification_metadata?: Record<string, unknown> }, attempt?: AttemptRecord): Promise<void> {
   // A VERIFY FAILURE MAKES THE GAP'S STAGED MITOSIS UNLANDABLE (2026-10-02). A tree staged for this
   // gap's lineage (e.g. by patch_with_tools) must not be landed later by mitosis-tick on typecheck
@@ -5617,6 +5641,9 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
     }
   }
 
+  // Set when the anchor re-draft's reply does not parse: plan is then null with the earlier ops kept,
+  // and the no-ops exit below must say so rather than report a bare "plan had no ops".
+  let redraftUnparseable = false;
   try {
     const window = typeof grounding === "string" ? grounding : "";
     // GOAL-SUPPLIED ANCHORS (value-per-cost-selection 2.6): the window of a large file does not
@@ -5647,6 +5674,8 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
       plan = parseJsonObject(planRaw);
       if (plan) {
         ops = (plan?.ops as PlanOp[] | undefined) ?? [];
+      } else {
+        redraftUnparseable = true;
       }
     }
   } catch { /* proceed on error */ }
@@ -5705,7 +5734,9 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
         // delegation failed — fall through to existing error return
       }
     }
-    return { shape: "featureComposeReport", body: { ok: false, stage: "decompose", error: "plan had no ops", plan_raw: planRaw.slice(0, 1200) } };
+    await recordDecomposeNoOps(redraftUnparseable ? "redraft_unparseable" : "drafter_no_ops", planRaw, pointer.gap);
+    const noOpsError = redraftUnparseable ? "plan had no ops: re-draft unparseable" : "plan had no ops";
+    return { shape: "featureComposeReport", body: { ok: false, stage: "decompose", error: noOpsError, plan_raw: planRaw.slice(0, 1200) } };
   }
   if (ops.length > maxOps) ops.length = maxOps;
 

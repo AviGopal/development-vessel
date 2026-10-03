@@ -1114,18 +1114,22 @@ function coerceFlatGapPointer(p: Record<string, unknown>): Record<string, unknow
 }
 
 /**
- * UNRENDERED BINDING TOKENS (2026-10-03). A template slot ({{name}} or {{name.path}}) that reached the
- * writer unbound. Live rows held id "{{goal.id}}", summary "{{goal.summary}}" and the like, all
- * written as CLOSES, which the open-only description gate never looked at. Matched narrowly, as a
- * binding token, so template-like text that is not a slot (JSX `style={{ color: x }}`) is not one.
- * A token wrapped in backticks is a QUOTATION (a gap describing an interpolation bug names it that way).
+ * UNRENDERED TEMPLATES (2026-10-03). Any {{...}} that reached the writer. Live rows held id "{{goal.id}}",
+ * summary "{{goal.summary}}" and the like, all written as CLOSES, which the open-only description gate never
+ * looked at; and narrower matching (identifier paths only) let {{goal[0]}}, {{goal?.id}},
+ * {{ goal.id | upper }}, {{ goal. id }} and {{#each x}} through. So every {{...}} counts, whatever is inside,
+ * except: a token wrapped in backticks (a QUOTATION: a gap describing an interpolation bug names it that way),
+ * and JSX double braces (an object literal `{{ key: ... }}`, or braces directly after "=" as in
+ * `opts={{...rest}}`). An unterminated "{{" is not a token. ${...} is not a placeholder here.
  */
-const BINDING_TOKEN = /\{\{\s*[A-Za-z_$][\w$-]*(?:\.[\w$-]+)*\s*\}\}/g;
+const TEMPLATE_TOKEN = /\{\{([\s\S]*?)\}\}/g;
+const JSX_OBJECT_LITERAL = /^\s*[A-Za-z_$][\w$]*\s*:/;
 export function unrenderedBindingToken(s: string): string | null {
-  for (const m of s.matchAll(BINDING_TOKEN)) {
+  for (const m of s.matchAll(TEMPLATE_TOKEN)) {
     const i = m.index ?? 0;
     const end = i + m[0].length;
     if (s[i - 1] === "`" && s[end] === "`") continue;
+    if (s[i - 1] === "=" || JSX_OBJECT_LITERAL.test(m[1] ?? "")) continue;
     return m[0];
   }
   return null;

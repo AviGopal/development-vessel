@@ -17,6 +17,14 @@
 // in src/long-running.ts (true for every LONG_RUNNING_TYPES pointer and for
 // llm_completion_dispatch, both envelope spellings, fail-closed like isLongRunningBody), and
 // src/index.ts must count in_flight with it while keeping isLongRunningBody for the drain 503.
+//
+// THE COUNTER AND THE RECORD ARE ONE ADMISSION. /health publishes three in-flight numbers:
+// in_flight (the counter), in_flight_oldest_ms and in_flight_last_progress_ms (both read from
+// the per-request record src/lib/compose-progress.ts admits, which runs the handler under the
+// record so stage stamps land on it). If the counter moves to countsTowardInFlight but the
+// record stays under isLongRunningBody, an llm_completion_dispatch is counted yet has no age:
+// pull-sync sees in_flight=1 with an oldest age that ignores it. So the record must be admitted
+// (admitInFlight) in the same countsTowardInFlight block that increments the counter, once.
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -36,6 +44,16 @@ describe("in-flight counting: an llm_completion_dispatch call is in flight", () 
     expect(typeof counts).toBe("function");
     expect(counts!(wrapped("llm_completion_dispatch", LLM_EXTRA))).toBe(true);
     expect(counts!(bare("llm_completion_dispatch", LLM_EXTRA))).toBe(true);
+  });
+
+  test("src/index.ts admits the in-flight record in the same countsTowardInFlight block as the counter", () => {
+    const src = readFileSync(join(import.meta.dir, "..", "src", "index.ts"), "utf8");
+    const at = src.search(/countsTowardInFlight\s*\(\s*raw\s*\)/);
+    expect(at).toBeGreaterThanOrEqual(0);
+    const block = src.slice(at, at + 1500);
+    expect(block.includes("inFlightRequests++")).toBe(true);
+    expect(/admitInFlight\s*\(/.test(block)).toBe(true);
+    expect((src.match(/admitInFlight\s*\(/g) ?? []).length).toBe(1);
   });
 
   test("src/index.ts counts in_flight with countsTowardInFlight, not with the drain predicate", () => {

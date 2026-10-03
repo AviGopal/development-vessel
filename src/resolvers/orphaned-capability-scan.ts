@@ -371,7 +371,7 @@ async function fetchClosedOrphanShapes(emitUrl: string, apiKey: string): Promise
 // the live-producer signal (liveSet from the discovery registry). Self-heals: when
 // the producer re-registers, the emit loop re-writes the gap open. Caller guards on
 // !degraded && liveSet.size>0 so a registry outage never rejects the corpus.
-async function rejectUnreachableOrphanGaps(emitUrl: string, apiKey: string, liveSet: Set<string>): Promise<{ rejected: string[]; held_skipped: string[] }> {
+export async function rejectUnreachableOrphanGaps(emitUrl: string, apiKey: string, liveSet: Set<string>): Promise<{ rejected: string[]; held_skipped: string[] }> {
   const rejected: string[] = [];
   const heldSkipped: string[] = [];
   try {

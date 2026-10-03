@@ -95,7 +95,10 @@ export function resolvePoolImpulse(pointer: {
 //   calibrationWindow: a blind-calibration sample list (which dispatches are graded, under which seed,
 //   where the labels go). Its writer chooses what the calibration measures, so the node's own key (the
 //   autonomous lane, node-self with scopes ["node"]) cannot create it or change it by id.
-export const TRUST_ROOT_POOL_SHAPES: ReadonlySet<string> = new Set(['substrateNodes', 'autonomyScope', 'spendEnvelope', 'calibrationWindow']);
+//   scriptRunnerAllowlist: the repo scripts local-tools-vessel's script runner may execute with
+//   METABOB_API_KEY injected, each pinned to an approved git blob hash. A row is a grant to run code with
+//   the fleet credential; the runner accepts only rows carrying this writer's operator attestation.
+export const TRUST_ROOT_POOL_SHAPES: ReadonlySet<string> = new Set(['substrateNodes', 'autonomyScope', 'spendEnvelope', 'calibrationWindow', 'scriptRunnerAllowlist']);
 /** key_id: the validated credential's key id (identity's identifier, never derived from the secret). */
 export type PoolWriteAuth = { operator: boolean; key_id?: string | null; why?: string };
 /** The trust-root shape a write would create or modify (by its own shape, or the shape of the row its id names), or null. */

@@ -5718,6 +5718,18 @@ export function recordAttemptEnd(attemptId: string, gap: Record<string, unknown>
   } catch (e) { console.warn(`[gap-to-feature] attempt ledger outcome for ${attemptId} not written: ${String(e).slice(0, 200)}`); }
 }
 
+/** A goal-host 503 whose JSON body says it is draining or quiesced ({retryable:true}, {draining:true}, or an
+ *  error naming either): the dispatch was refused before it ran, so it is not a failed attempt. Anything else
+ *  (another status, a 503 that does not say so, an unparseable body) is a real failure. */
+export function isRetryableDispatchRefusal(status: number, text: string): boolean {
+  if (status !== 503) return false;
+  try {
+    const b = JSON.parse(text) as Record<string, unknown> | null;
+    if (!b || typeof b !== "object") return false;
+    return b.retryable === true || b.draining === true || b.quiesced === true || /\b(quiesc|drain)/i.test(String(b.error ?? ""));
+  } catch { return false; }
+}
+
 export async function resolveGapToFeature(pointer: GapToFeaturePointer): Promise<ResolverResult> {
   const attempt: { id?: string; gap?: Record<string, unknown> } = {};
   let result: ResolverResult;
@@ -6418,6 +6430,10 @@ const familySample: string[] = await (async () => {
         } catch {
           /* best-effort marker write */
         }
+      } else if (isRetryableDispatchRefusal(res.status, text)) {
+        // goal-host is draining or quiesced: the dispatch never ran, so it is not an attempt. No bump; the
+        // gap stays as it is for the next tick.
+        console.log(`[gap-to-feature] trace-store-reconcile for ${String(gap.id ?? "?")}: goal-host refused retryably (${res.status} ${text.slice(0, 160)}); not a failed attempt, left for the next tick`);
       } else {
         await bumpFailedAttempts(gap);
       }

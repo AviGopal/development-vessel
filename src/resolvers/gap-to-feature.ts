@@ -3707,6 +3707,84 @@ function sweepGitOut(cloneDir: string, args: string[]): string | null {
   } catch { /* spawn failed: no output */ }
   return out;
 }
+/**
+ * A RE-DETECTED GAP IS NOT CLOSED ON A LANDING OLDER THAN THE RE-DETECTION (2026-10-03).
+ * performance-inefficiency-execution_traces_list was reopened by the efficiency probe every ~20 min while the
+ * list route stayed slow, and the pending-land sweep re-closed it each time landed_verified on the class2
+ * source-text check of a 09-30 commit: true since 09-30, blind to the latency the detector had just measured.
+ * Every cycle appended another FAVORABLE outcome for that same commit (posterior inflation, 19 in a day).
+ * qa's rule: a close of a reopened row counts only if the commit it credits landed AFTER the re-detection
+ * (the closer's own evidence run is always after it), or the row's check is a standing row that measures the
+ * symptom itself. Otherwise the commit is the fix that did not hold, and nothing closes on it.
+ */
+export const STALE_EVIDENCE_REASON = "stale_evidence_predates_redetection";
+export interface StaleCloseEvidence { reason: typeof STALE_EVIDENCE_REASON; sha: string; committed_at: string | null; redetected_at: string }
+
+/** When the row was last re-detected: the store's reopened_at stamp; for a row reopened before that stamp
+ *  existed (reopen_count > 0, no stamp), its detected_at. null for a row that was never reopened. */
+export function redetectedAtOf(g: Record<string, unknown>): string | null {
+  const ok = (v: unknown): v is string => typeof v === "string" && Number.isFinite(Date.parse(v));
+  if (ok(g.reopened_at)) return g.reopened_at;
+  if (Number(g.reopen_count ?? 0) > 0 && ok(g.detected_at)) return g.detected_at;
+  return null;
+}
+
+/** A standing row: the check measures the symptom itself on every run (a self_fact_reconcile row,
+ *  REALIGNMENT §2.1), not the source a landing changed, so a clean reading after a reopen is fresh evidence. */
+export function checkIsStandingRow(meta: Record<string, unknown>): boolean {
+  const er = meta.evidence_resolve as { shape?: unknown } | undefined;
+  if (er && typeof er === "object" && er.shape === "self_fact_reconcile") return true;
+  return meta.verify_shape === "self_fact_reconcile";
+}
+
+/** The committer time (when it landed on the branch) of a commit in any vessel clone, ISO; null when unknown. */
+function commitTimeInAnyClone(sha: string): string | null {
+  if (!/^[0-9a-f]{7,40}$/i.test(sha)) return null;
+  try {
+    for (const name of readdirSync(vesselsCloneRoot()).sort()) {
+      const dir = join(vesselsCloneRoot(), name);
+      if (!existsSync(join(dir, ".git"))) continue;
+      const ct = Number(sweepGitOut(dir, ["log", "-1", "--format=%ct", sha]) ?? "");
+      if (Number.isFinite(ct) && ct > 0) return new Date(ct * 1000).toISOString();
+    }
+  } catch { /* no clone tree */ }
+  return null;
+}
+
+/** Why closing this row on `sha` would be stale, or null when it may close: the row was re-detected, its check
+ *  is not a standing row, and the commit did not land after the re-detection (an unknown landing time counts as
+ *  not after: nothing proves it). Exported for tests. */
+export function staleCloseEvidence(g: Record<string, unknown>, sha: string): StaleCloseEvidence | null {
+  const redetectedAt = redetectedAtOf(g);
+  if (!redetectedAt) return null;
+  if (checkIsStandingRow((g.classification_metadata ?? g.metadata ?? {}) as Record<string, unknown>)) return null;
+  const committedAt = commitTimeInAnyClone(sha);
+  if (committedAt !== null && Date.parse(committedAt) > Date.parse(redetectedAt)) return null;
+  return { reason: STALE_EVIDENCE_REASON, sha, committed_at: committedAt, redetected_at: redetectedAt };
+}
+
+/** The sweep found the stamped landing stale for a reopened row: record why, and stop holding the row on it
+ *  (pending_outcome_verification cleared, a pending_verification hold lifted) so the sweep does not re-take it
+ *  and the gap is admitted for a landing that can close it. Decided on a FRESH read; open rows only. */
+async function releaseStaleLanding(gap: Record<string, unknown>, stale: StaleCloseEvidence): Promise<void> {
+  const id = String(gap.id ?? "");
+  try {
+    const fresh = await readGapFresh(id);
+    if (!fresh || String(fresh.status ?? "") !== "open") return;
+    const m0 = (fresh.classification_metadata ?? {}) as Record<string, unknown>;
+    const meta: Record<string, unknown> = {
+      ...(liftLandVerificationHold(m0) ?? m0),
+      pending_outcome_verification: "",
+      stale_landing: stale.sha,
+      stale_close_evidence: { ...stale, at: new Date().toISOString() },
+      pending_note: `released: ${stale.reason} (landed ${stale.committed_at ?? "at an unknown time"}, re-detected ${stale.redetected_at})`,
+    };
+    await resolveSubstrateGapWrite({ type: "substrateGap_write", expect_status: "open", gap: { ...fresh, classification_metadata: meta } } as never);
+  } catch (e) {
+    console.warn(`[gap-sweep] could not record stale landing on ${id}: ${(e as Error).message}`);
+  }
+}
+
 /** The gap as the store holds it now, or null when it cannot be read (the caller keeps its own copy). */
 async function readGapFresh(id: string): Promise<Record<string, unknown> | null> {
   if (!id) return null;
@@ -3938,6 +4016,11 @@ export async function closeAncestorsOnSamePredicate(childId: string, childClosed
       const am = (row.classification_metadata ?? row.metadata ?? {}) as Record<string, unknown>;
       const aer = am.evidence_resolve;
       if (!aer || typeof aer !== "object" || class2PredicateKey({ evidence_resolve: aer }) !== key) break;
+      const staleAnc = String(row.status ?? "") === "open" ? staleCloseEvidence(row, String((ex as { commit?: unknown }).commit ?? "")) : null;
+      if (staleAnc) {
+        console.log(`[gap-sweep] ${up}: not closed via child ${childId}: ${staleAnc.reason} (commit ${staleAnc.sha.slice(0, 12) || "none"} landed ${staleAnc.committed_at ?? "unknown"}, re-detected ${staleAnc.redetected_at}); lineage walk stops`);
+        break;
+      }
       if (String(row.status ?? "") === "open" && am.operator_hold !== true) {
         const resolution = `closed via child ${childId}: same predicate exercised`;
         if (__ancestorCloseRaceHook) await __ancestorCloseRaceHook(up);
@@ -4003,6 +4086,8 @@ export async function closeDescendantsOnSamePredicate(parentId: string, parentCl
         if (!aer || typeof aer !== "object" || class2PredicateKey({ evidence_resolve: aer }) !== key || String(am.edit_site ?? "") !== site) continue;
         seen.add(id);
         if (String(row.status ?? "") !== "open" || am.operator_hold === true) continue;
+        const staleDesc = staleCloseEvidence(row, String((ex as { commit?: unknown }).commit ?? ""));
+        if (staleDesc) { console.log(`[gap-sweep] ${id}: not closed via parent ${parentId}: ${staleDesc.reason} (commit ${staleDesc.sha.slice(0, 12) || "none"} landed ${staleDesc.committed_at ?? "unknown"}, re-detected ${staleDesc.redetected_at})`); continue; }
         const resolution = `closed via parent ${parentId}: same predicate exercised`;
         const w = await resolveSubstrateGapWrite({
           type: "substrateGap_write",
@@ -4044,7 +4129,7 @@ async function sweepPendingLandVerificationsOnce(): Promise<{ checked: number; c
   // Live at the time of writing: 13 gaps carry pending_outcome_verification, 11 of them
   // have no predicate at all — so the honest answer is "correctly abstaining on an input
   // that cannot be measured", not "broken". A counter per verdict says that out loud.
-  const tally = { absent: 0, present: 0, pending: 0, unknown: 0, not_in_clone: 0, reverted: 0, awaiting_restart: 0, falsified: 0, self_authored: 0, birth_retaken: 0 };
+  const tally = { absent: 0, present: 0, pending: 0, unknown: 0, not_in_clone: 0, reverted: 0, awaiting_restart: 0, falsified: 0, self_authored: 0, birth_retaken: 0, stale: 0 };
   try {
     const read = await resolveSubstrateGap({
       type: "substrateGap",
@@ -4063,7 +4148,11 @@ for (const g of gaps) {
   const hasPredicate = !!m.expected_literal || !!m.hardcoded_url || !!m.verify_shape;
   if (hasPredicate && !m.pending_outcome_verification) {
     const lineageSha = await landedCommitViaLineage(g);
-    if (lineageSha) {
+    // A reopened row is not re-stamped with a landing older than its re-detection: that is the fix that did
+    // not hold, and stamping it would hand the sweep the stale close it refuses below.
+    const staleLineage = lineageSha ? staleCloseEvidence(g, lineageSha) : null;
+    if (staleLineage) console.log(`[gap-sweep] gap ${String(g.id)}: lineage landing ${lineageSha!.slice(0, 12)} not stamped: ${staleLineage.reason} (landed ${staleLineage.committed_at ?? "unknown"}, re-detected ${staleLineage.redetected_at})`);
+    if (lineageSha && !staleLineage) {
       await resolveSubstrateGapWrite({
         type: "substrateGap_write",
         gap: {
@@ -4133,6 +4222,15 @@ const pending = gaps
         await releaseUnresolvedLanding(g, `landed ${sha.slice(0, 12)} was reverted`, sha);
         // A landing made under a semantic dissent resolves its by-effect check as failed: it is gone.
         await resolveDissentOutcome(String(g.id ?? ""), { result: "failed" }).catch(dissentOutcomeUnwritten(String(g.id ?? ""), "failed"));
+        continue;
+      }
+      // A REOPENED row is not re-closed on a landing older than its re-detection (see staleCloseEvidence):
+      // checked BEFORE the evidence run, which proves nothing about this reopen and can cost a test_suite.
+      const staleSweep = staleCloseEvidence(g, sha);
+      if (staleSweep) {
+        tally.stale += 1;
+        console.warn(`[gap-sweep] gap ${String(g.id)} NOT closed: ${staleSweep.reason} — credited sha ${sha.slice(0, 12)} landed ${staleSweep.committed_at ?? "at an unknown time"}, gap re-detected ${staleSweep.redetected_at}; no outcome appended, released for a landing after the re-detection`);
+        await releaseStaleLanding(g, staleSweep);
         continue;
       }
       // Post-cutover: the async verifier CAN now observe the landed state. Close ONLY on a
@@ -4207,12 +4305,15 @@ const pending = gaps
       }
       // verdict === 'absent' (MEASURED resolved) OR 'unknown' with earned trust -> close.
       tally.absent += 1;
-      joinDecisionOutcome(meta, { landed: true, verdict: "FAVORABLE", commit: sha });
+      // ONE CREDIT PER (gap, landing): a standing row may re-close after a reopen on the landing it already
+      // credited; that close is recorded, but the landing's posterior and the close-oracle are not paid twice.
+      const credited = joinDecisionOutcome(meta, { landed: true, verdict: "FAVORABLE", commit: sha });
+      if (!credited) console.log(`[gap-sweep] gap ${gidSweep}: landing ${sha.slice(0, 12)} already credited FAVORABLE; closing without a second credit`);
       // SUCCESS label for the close-oracle (§12.6 1a): a MEASURED close builds the trustworthy
       // "measured" class posterior. Provenance-only closes no longer happen here, so landed_commit
       // never accrues a fake success from a commit count — it earns trust only via human confirmation
       // (solicitation-outcome-scan) and loses it on re-lands. That asymmetry is deliberate.
-      recordCloseVerdict("measured", false);
+      if (credited) recordCloseVerdict("measured", false);
       const sweepClosedMeta: Record<string, unknown> = {
         ...meta,
         closed_reason: isLiteralOnlyStepClose(meta) ? "landed_literal_only" : "landed_verified",
@@ -4238,7 +4339,7 @@ const pending = gaps
       if (sweepCloseWrite?.shape !== "structuredError") await closeAncestorsOnSamePredicate(String(g.id), sweepClosedMeta);
       if (sweepCloseWrite?.shape !== "structuredError") await closeDescendantsOnSamePredicate(String(g.id), sweepClosedMeta);
       // Calibration land credit is taken by the gap-store holder from the close written above.
-      updateClassPosterior(gapClassOf(g), true);
+      if (credited) updateClassPosterior(gapClassOf(g), true);
       // The by-effect check passed: a landing made under a semantic dissent resolves it as passed.
       if (sweepCloseWrite?.shape !== "structuredError") await resolveDissentOutcome(String(g.id), { result: "passed" }).catch(dissentOutcomeUnwritten(String(g.id), "passed"));
       out.closed += 1;
@@ -4518,7 +4619,11 @@ export async function markTerminalRefusal(gap: Record<string, unknown>, cb: Reco
     const fresh = await readGapFresh(String(gap.id ?? ""));
     if (!fresh || String(fresh.status ?? "") !== "open") return;
     const m0 = ((fresh.classification_metadata ?? {}) as Record<string, unknown>);
-    const fix = predicateSuspect(m0) === null ? fixingCommitSinceBirth(fresh, m0) : null;
+    const fix0 = predicateSuspect(m0) === null ? fixingCommitSinceBirth(fresh, m0) : null;
+    // A reopened gap is not fixed_elsewhere by a commit that landed before its re-detection.
+    const staleFix = fix0 ? staleCloseEvidence(fresh, fix0.sha) : null;
+    if (staleFix) console.log(`[gap-to-feature] ${String(fresh.id)}: not closed fixed_elsewhere: ${staleFix.reason} (${fix0!.sha.slice(0, 12)} landed ${staleFix.committed_at ?? "unknown"}, re-detected ${staleFix.redetected_at})`);
+    const fix = staleFix ? null : fix0;
     if (fix) {
       const w = await resolveSubstrateGapWrite({ type: "substrateGap_write", expect_status: "open", gap: { ...fresh, status: "closed", classification_metadata: { ...m0,
         closed_reason: "fixed_elsewhere", close_basis: "absent", resolution: `fixed elsewhere by ${fix.sha.slice(0, 12)}: own check green on parent ${fix.head.slice(0, 12)}`, closed_at: new Date().toISOString(),
@@ -4899,7 +5004,7 @@ export async function recordApproachDecision(gap: Record<string, unknown>): Prom
 /** OWNED JOIN: an outcome joins the entry with its decision_id, else the newest unjoined entry its own node made
  *  (or a legacy entry with no node), else it is appended as its own joined entry. It never writes onto another
  *  node's decision: two nodes picking one gap each keep their own decision/outcome pair. */
-export function joinDecisionOutcome(meta: Record<string, unknown>, outcome: Record<string, unknown>, ref: { decision_id?: string; node?: string } = {}): void {
+export function joinDecisionOutcome(meta: Record<string, unknown>, outcome: Record<string, unknown>, ref: { decision_id?: string; node?: string } = {}): boolean {
   const node = ref.node ?? decisionNode();
   // An absent or fully-joined decision list is not a reason to discard a terminal outcome.
   // recordApproachDecision pushes a fresh unjoined entry on every PICK, so the ordinary
@@ -4911,18 +5016,29 @@ export function joinDecisionOutcome(meta: Record<string, unknown>, outcome: Reco
   // approach_decisions key at all. 37 of 44 landings were invisible.
   if (meta.approach_decisions === undefined) meta.approach_decisions = [];
   const arr = meta.approach_decisions;
-  if (!Array.isArray(arr)) return;
+  if (!Array.isArray(arr)) return false;
+  // IDEMPOTENT PER (gap, commit) for a FAVORABLE landing (2026-10-03): a gap re-closed on the landing it was
+  // already credited for (19 times in a day for one commit on the trace-list gap) is not a new success.
+  // Returns false so the caller does not pay the landing's posterior again either.
+  if (outcome.landed === true && outcome.verdict === "FAVORABLE" && typeof outcome.commit === "string" && outcome.commit) {
+    const already = arr.some((e) => {
+      const o = (e && typeof e === "object" ? (e as Record<string, unknown>).outcome : undefined) as Record<string, unknown> | undefined;
+      return !!o && o.landed === true && o.verdict === "FAVORABLE" && o.commit === outcome.commit;
+    });
+    if (already) return false;
+  }
   for (let i = arr.length - 1; i >= 0; i--) {
     const entry = arr[i] as Record<string, unknown> | null;
     if (!entry || typeof entry !== "object" || "outcome" in entry) continue;
     const mine = ref.decision_id ? entry.decision_id === ref.decision_id : (entry.node === undefined || entry.node === node);
     if (mine) {
       entry.outcome = { ...outcome, joined_at: new Date().toISOString() };
-      return;
+      return true;
     }
   }
   arr.push({ at: new Date().toISOString(), appended_by: "joinDecisionOutcome", ...(ref.decision_id ? { decision_id: ref.decision_id } : {}), node, outcome: { ...outcome, joined_at: new Date().toISOString() } });
   while (arr.length > 5) arr.shift();
+  return true;
 }
 
 export async function capacitySlices(gap: Record<string, unknown>): Promise<Array<{ file: string; hint: string }>> {

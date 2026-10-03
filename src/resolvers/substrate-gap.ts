@@ -251,6 +251,10 @@ export interface SubstrateGap {
   // reopen_count increments each time a previously-closed gap is re-detected as
   // open (recurrence) — a durable fix keeps this at 0.
   reopen_count?: number;
+  // reopened_at is stamped on the closed -> open transition (the RE-DETECTION time) and carried forward
+  // while the row lives. The pending-land sweep compares a landing's commit time against it: a landing
+  // older than the re-detection is the fix that did not hold, not evidence for a new close.
+  reopened_at?: string;
   route?: "dispatchable" | "composable" | "human_required" | "route-edit-e9b22f20" | "route-edit-f3fa9300" | "compose_execution_failure";
   remedy?: { vessel: string; impulse_type?: string; goal?: string };
   classification_metadata?: Record<string, unknown>;
@@ -1886,8 +1890,11 @@ async function resolveSubstrateGapWriteInner(
     // Carry reopen_count forward; a recurrence (closed → re-detected open)
     // increments it so durability (does the fix hold?) is measurable.
     gap.reopen_count = existing.reopen_count ?? 0;
+    // reopened_at is the store's own stamp, never the writer's: carried forward, set only on a reopen.
+    if (existing.reopened_at) gap.reopened_at = existing.reopened_at; else delete gap.reopened_at;
     if (existing.status === "closed" && gap.status === "open") {
       gap.reopen_count = (existing.reopen_count ?? 0) + 1;
+      gap.reopened_at = now;
     }
     // closed_at / closed_by_trace: stamp on the transition INTO closed (the
     // detection->close latency anchor), preserve while it stays closed, clear
@@ -1924,6 +1931,7 @@ async function resolveSubstrateGapWriteInner(
     // open row short-circuits above), so seed first_detected_at from the
     // detection time and leave close/reopen fields at their absent default.
     gap.first_detected_at = gap.first_detected_at ?? gap.detected_at;
+    delete gap.reopened_at; // a new row has never been reopened, whatever the writer sent
     if (demandGoalAppends.length > 0) {
       const meta = { ...((gap.classification_metadata ?? {}) as Record<string, unknown>) };
       for (const e of demandGoalAppends) meta["demand_goals"] = mergeDemandGoal(meta["demand_goals"], e);

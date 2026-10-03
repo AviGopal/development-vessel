@@ -16,7 +16,7 @@ declare module "./feature-compose.js" {
   }
 }
 
-import { resolveSubstrateGap, resolveSubstrateGapWrite, DECISION_LOG_GAP_CATEGORIES, predicateSuspect, class2PredicateKey, reevaluateBirthVerdicts, inheritableParentCheck } from "./substrate-gap.js";
+import { resolveSubstrateGap, resolveSubstrateGapWrite, DECISION_LOG_GAP_CATEGORIES, predicateSuspect, class2PredicateKey, reevaluateBirthVerdicts, inheritableParentCheck, birthCheckRepo } from "./substrate-gap.js";
 import { resolveAuthorProducer } from "./author-producer.js";
 import { resolveDocDriftFix } from "./doc-drift-fix.js";
 import { resolveReachabilityGapRepair } from "./reachability-gap-repair.js";
@@ -4490,7 +4490,26 @@ export function greenOnParentFresh(meta: Record<string, unknown>, nowMs: number 
   return Number.isFinite(at) && nowMs - at < OWN_GREEN_ADMISSION_TTL_MS;
 }
 
-async function markTerminalRefusal(gap: Record<string, unknown>, cb: Record<string, unknown> | null | undefined): Promise<void> {
+/** The commit that turned a gap's own check green: the newest commit touching the check's subject files (the
+ *  own-check test file, the edit_site, check_inputs; see birthCheckRepo) after the gap's birth tree
+ *  (predicate_birth_sha, else detected_at), on the clone HEAD the parent tree was cut from. null when none. */
+function fixingCommitSinceBirth(gap: Record<string, unknown>, meta: Record<string, unknown>): { sha: string; head: string } | null {
+  const repo = birthCheckRepo(meta);
+  if (!repo || repo.files.length === 0 || !existsSync(join(repo.dir, ".git"))) return null;
+  const head = sweepGitOut(repo.dir, ["rev-parse", "HEAD"]);
+  if (!head) return null;
+  const birth = typeof meta.predicate_birth_sha === "string" ? meta.predicate_birth_sha : "";
+  const since = typeof gap.detected_at === "string" && Number.isFinite(Date.parse(gap.detected_at)) ? gap.detected_at : "";
+  const range = birth && sweepGitOut(repo.dir, ["cat-file", "-e", `${birth}^{commit}`]) !== null ? [`${birth}..HEAD`] : since ? [`--since=${since}`, "HEAD"] : null;
+  if (!range) return null;
+  const sha = sweepGitOut(repo.dir, ["log", "-1", "--format=%H", ...range, "--", ...repo.files]);
+  return sha ? { sha, head } : null;
+}
+
+/** Exported for tests. A green-on-parent refusal with a commit that fixed the check's subject since the gap's
+ *  birth CLOSES the gap fixed_elsewhere (a measurement, naming that commit), instead of re-picking it after
+ *  every exclusion. With no such commit the green is unexplained (flaky, environmental): exclusion only. */
+export async function markTerminalRefusal(gap: Record<string, unknown>, cb: Record<string, unknown> | null | undefined): Promise<void> {
   const why = String(cb?.terminal_refusal ?? "");
   console.log(`[gap-to-feature] terminal refusal for ${String(gap.id ?? "?")}: ${why || "(no reason)"}; no bump, full cooldown`);
   if (!why.startsWith("the gap's own check is already GREEN on the parent tree")) return;
@@ -4498,6 +4517,18 @@ async function markTerminalRefusal(gap: Record<string, unknown>, cb: Record<stri
     const fresh = await readGapFresh(String(gap.id ?? ""));
     if (!fresh || String(fresh.status ?? "") !== "open") return;
     const m0 = ((fresh.classification_metadata ?? {}) as Record<string, unknown>);
+    const fix = predicateSuspect(m0) === null ? fixingCommitSinceBirth(fresh, m0) : null;
+    if (fix) {
+      const w = await resolveSubstrateGapWrite({ type: "substrateGap_write", expect_status: "open", gap: { ...fresh, status: "closed", classification_metadata: { ...m0,
+        closed_reason: "fixed_elsewhere", close_basis: "absent", resolution: `fixed elsewhere by ${fix.sha.slice(0, 12)}: own check green on parent ${fix.head.slice(0, 12)}`, closed_at: new Date().toISOString(),
+        falsifier_exercise: { detector: "gap-to-feature:terminal_refusal", verdict: "absent", passed: true, ran_at: new Date().toISOString(), commit: fix.head, fixed_by: fix.sha } } } } as never);
+      if (w?.shape !== "structuredError" && (w?.body as { action?: unknown } | undefined)?.action !== "skipped") {
+        console.log(`[gap-to-feature] ${String(fresh.id)}: closed fixed_elsewhere by ${fix.sha.slice(0, 12)} (own check green on parent ${fix.head.slice(0, 12)})`);
+        return;
+      }
+    } else {
+      console.log(`[gap-to-feature] ${String(fresh.id)}: green on parent but no fixing commit found — not closing`);
+    }
     await resolveSubstrateGapWrite({ type: "substrateGap_write", gap: { ...fresh, classification_metadata: { ...m0, own_check_green_on_parent: { at: new Date().toISOString(), reason: why.slice(0, 300) } } } } as never);
   } catch { /* best-effort: without the marker the full cooldown still bounds re-picks */ }
 }

@@ -712,7 +712,7 @@ export function birthTreeMoved(meta: Record<string, unknown> | null | undefined)
   return ((meta ?? {}) as Record<string, unknown>)["predicate_birth_tree_moved"] === true;
 }
 /** The clone a class-2 check runs in, and the files in it the check depends on (see WHICH TREE). */
-function birthCheckRepo(meta: Record<string, unknown>): { dir: string; files: string[] } | null {
+export function birthCheckRepo(meta: Record<string, unknown>): { dir: string; files: string[] } | null {
   const er = (meta["evidence_resolve"] ?? null) as { shape?: unknown; input?: unknown } | null;
   const input = (er && typeof er.input === "object" && er.input ? er.input : {}) as Record<string, unknown>;
   const vessel = (er?.shape === "test_suite" ? String(input["vessel"] ?? "") : (/^repos\/([^/:]+)\//.exec(String(meta["edit_site"] ?? ""))?.[1] ?? "")).replace(/^repos\//, "");

@@ -73,13 +73,23 @@
 //       "gate-version-unmeasurable-<vessel>" (refuse_class stays "gate_version_unmeasurable"). A stale
 //       refusal never advances the unmeasurable counter, and vice versa.
 //
+//     SHARED TEST DEFAULT (test/resolvers/cutover-gate-default.ts): the cutover also exports
+//       __setGateVersionDefaultForTests(d | null), a DEFAULT layer under the per-test override:
+//       effective deps = real <- default <- override, key by key, so an explicit override always
+//       wins and clearing it falls back to the default. installCutoverFetchGuard() installs a fixed
+//       equal pair (running == accepted == FIXTURE_GATE_VERSION) there for every cutover file, so
+//       their fixtures are decided by their own subject, not by the gate.
+//
 // These drive the REAL resolveVesselMitosisCutover through its git-aware path against a temp clone with
 // a bare origin (no push, no restart, no live services), modelled on staged-mitosis-own-check.test.ts.
 // The own-check deps are set to a passing check so the gate version is the only thing that can refuse.
 // Seams are reached optionally: on a tree without them the cutover runs its unpatched path, which is
 // exactly what the MUST-FAIL tests expose (it lands).
-import { describe, it, expect, beforeEach, afterEach } from "bun:test";
+import { describe, it, expect, beforeEach, afterEach, afterAll } from "bun:test";
 import * as cutoverMod from "../../src/resolvers/vessel-mitosis-cutover.js";
+import { installCutoverFetchGuard, routeFleetUnreachable, routeShell, BUN_PASSING, BUN_NO_TESTS, type FetchGuard, routeFixtureGapStore, FIXTURE_GAP_STORE, restoreCutoverFetch } from "./cutover-fetch-guard.js";
+import { installCutoverFsGuard, restoreCutoverFsModules, type FsGuard } from "./cutover-fs-guard.js";
+import { clearGateVersionDefault, FIXTURE_GATE_VERSION } from "./cutover-gate-default.js";
 import { mkdtemp, mkdir, writeFile, readFile, rm, stat, copyFile } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
@@ -132,6 +142,22 @@ const ENV_KEYS = [
 const saved: Record<string, string | undefined> = {};
 let ws: string;
 const extraDirs: string[] = [];
+let guard: FetchGuard;
+let fsGuard: FsGuard;
+// Backstop: the next file in the same bun process gets the real fs and fetch (see cutover-fs-guard.ts).
+afterAll(() => {
+  restoreCutoverFsModules();
+  restoreCutoverFetch();
+});
+let currentHost = "";
+const headSubjectSync = (repo: string) => spawnSync("git", ["log", "-1", "--format=%s"], { cwd: repo, encoding: "utf8" }).stdout.trim();
+// As in staged-mitosis-own-check.test.ts: only the PRE-cutover suite run (landing clone still at
+// "baseline") is measured; the post-land run gets a no-summary answer, so nothing writes the
+// absolute /workspace/post-land-baseline path.
+function measuredPrecheckOnly(): string {
+  if (!currentHost || headSubjectSync(currentHost) !== "baseline") return BUN_NO_TESTS;
+  return BUN_PASSING;
+}
 
 const VESSEL = "development-vessel";
 const GAP = "gap-gate-version-target";
@@ -152,10 +178,20 @@ beforeEach(async () => {
   process.env["WORKSPACE_ROOT"] = ws;
   process.env["MITOSIS_CUTOVER_SKIP_SYSTEMCTL"] = "1";
   process.env["PUSH_POLICY_PATH"] = join(ws, "no-push-policy.json");
-  process.env["CUTOVER_PRECHECK_SUITE"] = "0";
+  // The shared cutover setup: fetch guard (which also installs the overridable equal gate-version
+  // default, cutover-gate-default.ts), fs guard, and the in-memory fixture gap store.
+  guard = installCutoverFetchGuard();
+  fsGuard = installCutoverFsGuard();
+  process.env["GAP_STORE_ENDPOINT"] = FIXTURE_GAP_STORE;
+  routeFixtureGapStore(guard);
+  routeFleetUnreachable(guard);
+  routeShell(guard, measuredPrecheckOnly);
+  currentHost = "";
 });
 
 afterEach(async () => {
+  const violations = guard.restore();
+  const fsViolations = fsGuard.restore();
   setGateDeps(null);
   setOwnDeps(null);
   for (const k of ENV_KEYS) {
@@ -164,6 +200,8 @@ afterEach(async () => {
   }
   await rm(ws, { recursive: true, force: true });
   for (const d of extraDirs.splice(0)) await rm(d, { recursive: true, force: true });
+  expect(violations).toEqual([]);
+  expect(fsViolations).toEqual([]);
 });
 
 type Fixture = { baseRoot: string; mitosisRoot: string; hostRepoRoot: string; originRoot: string; baseSha: string; pendingPath: string };
@@ -180,6 +218,7 @@ async function setup(): Promise<Fixture> {
   const baseSha = createHash("sha256").update(live).digest("hex").slice(0, 12);
   await writeFile(join(mitosisRoot, "src", "resolvers", "target.ts"), STAGED);
   const hostRepoRoot = join(ws, "host-repo");
+  currentHost = hostRepoRoot;
   await mkdir(join(hostRepoRoot, "src", "resolvers"), { recursive: true });
   await writeFile(join(hostRepoRoot, "src", "resolvers", "target.ts"), "// original\n");
   git(hostRepoRoot, "init", "-b", "dev");
@@ -358,6 +397,7 @@ describe("cutover: the RUNNING landing gate must be the version the clone accept
     const gv = await importGateVersion();
     const loaded = gv.loadedGateVersion();
     expect(typeof loaded).toBe("string");
+    clearGateVersionDefault();                                  // the shared equal pair must not stand in for the real reader
     // Only the accepted side is injected: the running side is the real default.
     const s = await setup();
     passingOwnCheck(s);
@@ -688,5 +728,45 @@ describe("cutover: a stale gate holds the pending lock only for a bounded number
     expect((r.body as Record<string, unknown>)["escalated"]).toBe(true);
     expect(await exists(s.pendingPath)).toBe(false);
     expect(staleWrites(rec.writes).length).toBe(1);
+  });
+});
+
+describe("shared cutover setup: the equal gate-version default is overridable and never decides a fixture", () => {
+  it("MUST-FAIL (guard on the guard): an explicit mismatch through __setGateVersionDepsForTests refuses gate_version_stale over the shared equal default", async () => {
+    // beforeEach installed the shared default (installCutoverFetchGuard). A full explicit pair wins:
+    const s = await setup();
+    passingOwnCheck(s);
+    setGateDeps({ running: () => GATE_OLD, accepted: () => GATE_ACCEPTED });
+    const r = await resolveVesselMitosisCutover(pointerFor(s) as never);
+    const body = r.body as Record<string, unknown>;
+    expect(body["refuse_class"]).toBe("gate_version_stale");
+    expect(body["running_gate_version"]).toBe(GATE_OLD);
+    expect(body["accepted_gate_version"]).toBe(GATE_ACCEPTED);
+    expect(git(s.hostRepoRoot, "log", "-1", "--format=%s")).toBe("baseline");
+    // ...and so does a PARTIAL one: only `accepted` is overridden, `running` comes from the default layer.
+    setGateDeps({ accepted: () => GATE_ACCEPTED });
+    const p = await resolveVesselMitosisCutover(pointerFor(s) as never);
+    expect((p.body as Record<string, unknown>)["refuse_class"]).toBe("gate_version_stale");
+    expect((p.body as Record<string, unknown>)["running_gate_version"]).toBe(FIXTURE_GATE_VERSION);
+    expect(git(s.hostRepoRoot, "log", "-1", "--format=%s")).toBe("baseline");
+  });
+
+  it("CONTRACT: a fixture that does not override gets equal versions — a passing own check lands", async () => {
+    const s = await setup();
+    passingOwnCheck(s);                                        // no setGateDeps: only the shared default
+    const r = await resolveVesselMitosisCutover(pointerFor(s) as never);
+    expect(r.shape).toBe("cutoverApplied");
+    expect(git(s.hostRepoRoot, "log", "-1", "--format=%s")).not.toBe("baseline");
+  });
+
+  it("CONTRACT: a fixture that does not override is refused by its own subject — a failing own check refuses own_check_failed, not gate_version_*", async () => {
+    const s = await setup();
+    setOwnDeps({
+      readGap: async (p) => ({ shape: "substrateGap", body: { gaps: p["id"] === GAP ? [gapRow] : [] } }),
+      runSuite: async () => ({ shape: "test_suite", body: { vessel: `repos/${VESSEL}`, verified_root: s.hostRepoRoot, ran: true, total: 1, pass: 0, fail: 1, skip: 0, requested_not_passing: 1, failingTests: [`(fail) ${OWN_TEST}`] } }),
+    });
+    const r = await resolveVesselMitosisCutover(pointerFor(s) as never);
+    expect((r.body as Record<string, unknown>)["refuse_class"]).toBe("own_check_failed");
+    expect(git(s.hostRepoRoot, "log", "-1", "--format=%s")).toBe("baseline");
   });
 });

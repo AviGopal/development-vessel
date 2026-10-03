@@ -31,14 +31,20 @@ export type FetchGuard = {
   restore: () => string[];
 };
 
+import { installGateVersionDefault, clearGateVersionDefault } from "./cutover-gate-default.js";
+
 /** The real fetch, captured when this helper first loads. */
 const ORIGINAL_FETCH = globalThis.fetch;
 /** Re-installs the real fetch. Idempotent; each cutover file also calls it from afterAll. */
 export function restoreCutoverFetch(): void {
   globalThis.fetch = ORIGINAL_FETCH;
+  clearGateVersionDefault();
 }
 
 export function installCutoverFetchGuard(): FetchGuard {
+  // The shared cutover setup also installs the overridable equal gate-version default
+  // (cutover-gate-default.ts), so every file's fixtures are decided by their own subject.
+  installGateVersionDefault();
   const original = globalThis.fetch;
   const routes: GuardRoute[] = [];
   const violations: string[] = [];
@@ -64,6 +70,7 @@ export function installCutoverFetchGuard(): FetchGuard {
     hits,
     restore: () => {
       globalThis.fetch = original;
+      clearGateVersionDefault();
       return [...violations];
     },
   };

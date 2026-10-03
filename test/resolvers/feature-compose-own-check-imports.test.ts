@@ -148,3 +148,20 @@ describe("the autonomy scope decides which imports a compose may edit", () => {
     expect(block.length).toBeLessThanOrEqual(TARGET_WINDOW + 1000);
   });
 });
+
+describe("a read-only module is shown as the vessel clone holds it", () => {
+  it("MUST-FAIL the clone copy wins over a stale runtime copy, and the runtime copy is the fallback", () => {
+    expect(typeof fc.readOwnCheckModule).toBe("function");
+    const runtime = join(ROOT, "runtime");
+    const rel = "src/core/lane.ts";
+    mkdirSync(join(runtime, VESSEL, "src", "core"), { recursive: true });
+    writeFileSync(join(runtime, VESSEL, rel), "export const laneCoreThing = 0; // staleRuntimeOnlySentinel\n");
+    const got = fc.readOwnCheckModule(repo(rel), CLONE, runtime) as string | null;
+    expect(got).toContain("laneCoreSentinelIdentifier");
+    expect(got).not.toContain("staleRuntimeOnlySentinel");
+    const onlyRuntime = "src/core/runtime-only.ts";
+    writeFileSync(join(runtime, VESSEL, onlyRuntime), "export const onlyInRuntime = 1;\n");
+    expect(fc.readOwnCheckModule(repo(onlyRuntime), CLONE, runtime)).toContain("onlyInRuntime");
+    expect(fc.readOwnCheckModule(repo("src/core/nowhere.ts"), CLONE, runtime)).toBeNull();
+  });
+});

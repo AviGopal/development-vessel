@@ -41,11 +41,17 @@
 //                 is treated as CURRENT: it is not reopened. The one exception is a row rejected
 //                 for `no_live_producer` (cm.unreachable_reason / cm.rejected_reason), whose
 //                 condition clears when the producer is live again (non-terminal reject).
+//   flap guard    that no_live_producer reopen fires only once the producer has been live for
+//                 >= N consecutive scan records (N = pointer.reopen_after_live_records), counted
+//                 from the newest record back; one live tick is not enough. The scanner reads
+//                 its prior records with a `{ type: "orphanedCapabilityScanRecord" }` resolve to
+//                 the dev-vessel impulses URL (answered as { body: { records: [...] } }, newest
+//                 last), so each record also carries `live_shapes`.
 //                 Lazy backfill of cm.fingerprint onto such rows is optional, keeps their status,
 //                 and is capped per tick by pointer.max_backfill.
 //   scan record   exactly ONE `orphanedCapabilityScanRecord_write` per emitting tick, posted to
 //                 the dev-vessel impulses URL: { record: { detector: "orphaned_capability_scan",
-//                 generated_at, orphans: [{ shape, gap_id, fingerprint }] } } — the full current
+//                 generated_at, live_shapes, orphans: [{ shape, gap_id, fingerprint }] } } — the full current
 //                 orphan set, including orphans whose gap write was suppressed. It replaces per-gap
 //                 re-writes as the "still detected" signal.
 //   expiry        consumed by gap_lifecycle_scan — see
@@ -172,7 +178,11 @@ type Gap = { id: string; status?: string; category?: string; summary?: string; c
 class GapStore {
   gaps = new Map<string, Gap>();
   writes: Gap[] = [];
-  records: any[] = [];
+  records: any[] = []; // record writes this run (cleared by resetWrites)
+  recordHistory: any[] = []; // every record, seeded or written, newest last — what a read returns
+  seedRecord(r: any): void {
+    this.recordHistory.push(r);
+  }
   seed(g: Gap): void {
     this.gaps.set(g.id, { category: "orphaned_capability", ...g });
   }
@@ -226,7 +236,11 @@ function wire(opts: { liveShapes: string[]; store: GapStore; templates?: unknown
       }
       if (pointer.type === "orphanedCapabilityScanRecord_write") {
         opts.store.records.push(pointer.record ?? pointer);
+        opts.store.recordHistory.push(pointer.record ?? pointer);
         return new Response(JSON.stringify({ shape: "orphanedCapabilityScanRecord", body: { ok: true } }), { status: 200 });
+      }
+      if (pointer.type === "orphanedCapabilityScanRecord") {
+        return new Response(JSON.stringify({ shape: "orphanedCapabilityScanRecord", body: { records: opts.store.recordHistory } }), { status: 200 });
       }
       if (pointer.type === "substrateGap") {
         return new Response(JSON.stringify({ shape: "substrateGap", body: { gaps: opts.store.read(pointer) } }), { status: 200 });
@@ -254,6 +268,17 @@ async function scan(extra: Record<string, unknown> = {}): Promise<any> {
 function expectWired(body: any, liveCount: number): void {
   expect(body.degraded).toBe(false);
   expect(body.live_shape_count).toBe(liveCount);
+}
+
+const FLAP_N = 3;
+/** A prior scan-result record as the scanner itself would have written it. */
+function scanRecord(liveShapes: string[], minutesAgo: number): Record<string, unknown> {
+  return {
+    detector: "orphaned_capability_scan",
+    generated_at: new Date(Date.now() - minutesAgo * 60_000).toISOString(),
+    live_shapes: liveShapes,
+    orphans: [],
+  };
 }
 
 function lineOf(content: string, needle: string): number {
@@ -449,12 +474,40 @@ describe("orphaned-capability-scan: callers, history and lifecycle", () => {
   it("lifecycle (b) control: a rejected gap reopens when its producer is live and the shape is still orphaned", async () => {
     const store = new GapStore();
     // Rejected the way the scan rejects today: unreachable, no live producer. That condition has
-    // now cleared, so this row is NOT grandfathered (see the grandfather test below).
+    // now cleared — the producer has been live for N consecutive scan records — so this row is
+    // NOT grandfathered (see the grandfather and flap-guard tests below).
     store.seed({ id: "orphaned-capability-gone_shape", status: "rejected", classification_metadata: { shape: "gone_shape", unreachable_reason: "no_live_producer" } });
+    for (let i = 0; i < FLAP_N; i++) store.seedRecord(scanRecord(["gone_shape", "fs_read"], FLAP_N - i));
     wire({ liveShapes: ["gone_shape", "fs_read"], store });
-    const body = await scan();
+    const body = await scan({ reopen_after_live_records: FLAP_N });
     expectWired(body, 2);
     expect(store.writesFor("orphaned-capability-gone_shape", "open")).toHaveLength(1);
+  });
+
+  it("flap guard: a no_live_producer-rejected gap does NOT reopen when its producer is live in only 1 scan record", async () => {
+    const store = new GapStore();
+    store.seed({ id: "orphaned-capability-gone_shape", status: "rejected", classification_metadata: { shape: "gone_shape", unreachable_reason: "no_live_producer" } });
+    // The producer was dark in every prior record and is live only in this tick.
+    for (let i = 0; i < FLAP_N; i++) store.seedRecord(scanRecord(["fs_read"], FLAP_N - i));
+    wire({ liveShapes: ["gone_shape", "fs_read"], store });
+    const body = await scan({ reopen_after_live_records: FLAP_N });
+    expectWired(body, 2);
+    expect(body.capability_orphans).toContain("gone_shape"); // still reported ...
+    expect(store.writesFor("orphaned-capability-gone_shape", "open")).toHaveLength(0); // ... not reopened
+    expect(store.gaps.get("orphaned-capability-gone_shape")!.status).toBe("rejected");
+  });
+
+  it("flap guard: it reopens once the producer has been live for N consecutive records", async () => {
+    const store = new GapStore();
+    store.seed({ id: "orphaned-capability-gone_shape", status: "rejected", classification_metadata: { shape: "gone_shape", unreachable_reason: "no_live_producer" } });
+    // dark, then live for N consecutive records (newest last)
+    store.seedRecord(scanRecord(["fs_read"], FLAP_N + 1));
+    for (let i = 0; i < FLAP_N; i++) store.seedRecord(scanRecord(["gone_shape", "fs_read"], FLAP_N - i));
+    wire({ liveShapes: ["gone_shape", "fs_read"], store });
+    const body = await scan({ reopen_after_live_records: FLAP_N });
+    expectWired(body, 2);
+    const [w] = store.writesFor("orphaned-capability-gone_shape", "open");
+    expect(w).toBeDefined();
   });
 
   it("lifecycle (c): a caller appearing closes the open gap with consumer_appeared: <file:line>", async () => {
@@ -580,6 +633,7 @@ describe("orphaned-capability-scan: callers, history and lifecycle", () => {
     const rec1 = store.records[0];
     expect(rec1.detector).toBe("orphaned_capability_scan");
     expect(Number.isFinite(Date.parse(rec1.generated_at))).toBe(true);
+    expect(rec1.live_shapes).toEqual(expect.arrayContaining(["alpha_cap", "beta_cap", "gamma_cap", "fs_read"]));
     expect((rec1.orphans as any[]).map((o) => o.gap_id).sort()).toEqual([
       "orphaned-capability-alpha_cap", "orphaned-capability-beta_cap", "orphaned-capability-gamma_cap",
     ]);

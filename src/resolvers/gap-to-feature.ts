@@ -3221,6 +3221,7 @@ export async function closeLandedGap(gap: Record<string, unknown>, land: LandSig
       },
     } as never);
     if (landedCloseWrite?.shape !== "structuredError") await closeAncestorsOnSamePredicate(id, meta);
+    if (landedCloseWrite?.shape !== "structuredError") await closeDescendantsOnSamePredicate(id, meta);
     // Calibration land credit is taken by the gap-store holder from the close written above.
     updateClassPosterior(gapClassOf(gap), true);
     // CLOSURE-CREDIT: reward the filing detector for gap closure (not just filing).
@@ -3968,6 +3969,59 @@ export async function closeAncestorsOnSamePredicate(childId: string, childClosed
   return closed;
 }
 
+/**
+ * A VERIFIED CLOSE IS ITS OPEN DESCENDANTS' MEASUREMENT TOO, when they hold the same predicate. The mirror of
+ * closeAncestorsOnSamePredicate: a recommit-<id>-<cls> child (source_gap_id) or a -narrowed child (parent_gap_id)
+ * carries its parent's check byte-identically on the same edit_site, so once the parent closes landed_verified
+ * on that exercised check (passed, verdict absent) the child's defect reads absent as well. Left open, auto-pick
+ * kept composing it. Each open descendant (grandchildren included) with the identical evidence_resolve and
+ * edit_site closes as `closed_via_parent` with the parent's falsifier_exercise; a child on a different check or
+ * edit_site, and an operator-held child, stay open. Conditional writes (expect_status "open").
+ */
+export async function closeDescendantsOnSamePredicate(parentId: string, parentClosedMeta: Record<string, unknown>): Promise<string[]> {
+  const closed: string[] = [];
+  try {
+    const ex = parentClosedMeta.falsifier_exercise as { passed?: unknown; verdict?: unknown } | undefined;
+    if (parentClosedMeta.closed_reason !== "landed_verified" || !ex || ex.passed !== true || ex.verdict !== "absent") return closed;
+    const er = parentClosedMeta.evidence_resolve;
+    if (!er || typeof er !== "object" || typeof (er as { shape?: unknown }).shape !== "string") return closed;
+    const key = class2PredicateKey({ evidence_resolve: er });
+    const site = String(parentClosedMeta.edit_site ?? "");
+    const read = await resolveSubstrateGap({ type: "substrateGap", status: "open", limit: Number.MAX_SAFE_INTEGER, exclude_categories: [...DECISION_LOG_GAP_CATEGORIES] } as never);
+    const open = (((read?.body as { gaps?: Record<string, unknown>[] } | undefined)?.gaps) ?? []);
+    const metaOf = (r: Record<string, unknown>) => (r.classification_metadata ?? r.metadata ?? {}) as Record<string, unknown>;
+    const queue = [parentId];
+    const seen = new Set<string>([parentId]);
+    while (queue.length > 0 && seen.size < 64) {
+      const up = queue.shift()!;
+      for (const row of open) {
+        const id = String(row.id ?? "");
+        const am = metaOf(row);
+        if (!id || seen.has(id) || String(am.parent_gap_id ?? am.source_gap_id ?? "") !== up) continue;
+        const aer = am.evidence_resolve;
+        if (!aer || typeof aer !== "object" || class2PredicateKey({ evidence_resolve: aer }) !== key || String(am.edit_site ?? "") !== site) continue;
+        seen.add(id);
+        if (String(row.status ?? "") !== "open" || am.operator_hold === true) continue;
+        const resolution = `closed via parent ${parentId}: same predicate exercised`;
+        const w = await resolveSubstrateGapWrite({
+          type: "substrateGap_write",
+          expect_status: "open",
+          gap: { id, category: row.category, source: row.source, summary: row.summary, detected_at: row.detected_at, status: "closed",
+            classification_metadata: { ...am, closed_reason: "closed_via_parent", close_basis: "absent", closed_via_parent: parentId, resolution, falsifier_exercise: { ...(ex as Record<string, unknown>), via_parent: parentId }, closed_at: new Date().toISOString() } },
+        } as never);
+        const wb = (w?.body ?? {}) as { action?: unknown };
+        if (w?.shape === "structuredError" || wb.action === "skipped") { console.log(`[gap-sweep] ${id}: not closed via parent ${parentId} (write refused or skipped)`); continue; }
+        closed.push(id);
+        queue.push(id);
+        console.log(`[gap-sweep] ${id}: ${resolution}`);
+      }
+    }
+  } catch (err) {
+    console.warn(`[gap-sweep] closing descendants of ${parentId} on its predicate failed: ${String(err).slice(0, 200)}`);
+  }
+  return closed;
+}
+
 export async function sweepPendingLandVerifications(): Promise<{ checked: number; closed: number }> {
   if (sweepInFlight) return sweepInFlight;
   sweepInFlight = sweepPendingLandVerificationsOnce().finally(() => { sweepInFlight = null; });
@@ -4181,6 +4235,7 @@ const pending = gaps
         },
       } as never);
       if (sweepCloseWrite?.shape !== "structuredError") await closeAncestorsOnSamePredicate(String(g.id), sweepClosedMeta);
+      if (sweepCloseWrite?.shape !== "structuredError") await closeDescendantsOnSamePredicate(String(g.id), sweepClosedMeta);
       // Calibration land credit is taken by the gap-store holder from the close written above.
       updateClassPosterior(gapClassOf(g), true);
       // The by-effect check passed: a landing made under a semantic dissent resolves it as passed.

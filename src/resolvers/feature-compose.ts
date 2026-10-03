@@ -3867,7 +3867,10 @@ export function composeTargetFiles(gapMeta: Record<string, unknown>, spec: strin
   return Array.from(new Set(
     [editSiteRaw, ...hinted, ...[...String(spec ?? "").matchAll(/repos\/[\w.-]+\/[\w./-]+\.\w+/g)].map((m) => m[0])]
       .map((s) => s.replace(/:\d+.*$/, "").trim())
-      .filter((s) => /^repos\/[\w.-]+\/.+\.\w+$/.test(s)),
+      // A path charset, not `.+`: these paths reach shell commands (`rg ... <file>`), and an edit_site or
+      // relocation_hint comes from a gap row any writer authors. No real target has quotes, $, backticks,
+      // spaces or a '..' segment.
+      .filter((s) => /^repos\/[\w.-]+\/[\w./-]+\.\w+$/.test(s) && !s.split("/").includes("..")),
   )).slice(0, 4 + hinted.length);
 }
 /**
@@ -4462,7 +4465,31 @@ const readComposeGapRows: GapRowReader = async (id) => {
   return Array.isArray(rows) ? rows : null;
 };
 
+/**
+ * ENTRY CHECK (2026-10-03). verify_vessels become paths in many shell commands this resolver sends to the
+ * shell producer (`rg ... ${v}` unquoted, `cd "<abs>"`, `git -C "<abs>"`): a name is a plain vessel
+ * name ([A-Za-z0-9_.-], no '..'), optionally prefixed with repos/, or the compose is refused before any I/O.
+ * Same class as test_suite's only_tests injection; same rule test_suite and the gap store use for a vessel.
+ */
+export function featureComposeInputProblem(pointer: { verify_vessels?: unknown }): string | null {
+  const vs = pointer.verify_vessels;
+  if (vs === undefined || vs === null) return null;
+  if (!Array.isArray(vs)) return "verify_vessels must be an array of vessel names";
+  for (let i = 0; i < vs.length; i++) {
+    const v = vs[i];
+    const name = typeof v === "string" ? v.replace(/^repos\//, "") : "";
+    if (!/^[A-Za-z0-9_.-]+$/.test(name) || name === "." || name.includes("..")) {
+      return `verify_vessels[${i}] is not a plain vessel name ([A-Za-z0-9_.-], no '..', optionally repos/<name>)`;
+    }
+  }
+  return null;
+}
+
 export async function resolveFeatureCompose(pointer: FeatureComposePointer): Promise<ResolverResult> {
+  {
+    const bad = featureComposeInputProblem(pointer);
+    if (bad) return { shape: "featureComposeReport", body: { ok: false, verdict: "REFUSED", stage: "input", error: bad } };
+  }
   // NaN GUARD, not decoration: `Math.max(1, Number("typo"))` is NaN, and
   // `inFlight >= NaN` is ALWAYS FALSE — so a mistyped env var would silently
   // disable the cap while the code still looks like it has one. Any

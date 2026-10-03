@@ -103,6 +103,12 @@ export async function resolvePerfCanaryResolve(pointer: PerfCanaryResolvePointer
   const targetVessel = editSite ? editSite.split("/src/")[0] : null; // "repos/<vessel>"
   const restartUnit = targetVessel ? targetVessel.replace(/^repos\//, "") : null;
 
+  // The unit is interpolated into `systemctl restart <unit>` sent to the shell producer, and edit_site comes
+  // from a gap row any writer authors: the vessel segment must be a plain name and the path a path, or
+  // nothing is planned, restarted or reverted (same class as test_suite's only_tests injection).
+  if (editSite && (!/^repos\/[A-Za-z0-9_.-]+\/src\/[A-Za-z0-9_./-]+(?::\d+(?:-\d+)?)?$/.test(editSite) || editSite.split("/").includes("..") || !restartUnit || !/^[A-Za-z0-9_.-]+$/.test(restartUnit))) {
+    return { shape: "perfCanaryReport", body: { ok: false, error: "gap edit_site is not a plain repos/<vessel>/src/<path> (it names the unit to restart and the file to snapshot)", gap_id: pointer.gap_id } };
+  }
   if (!probePath || !targetVessel || !restartUnit || !editSite) {
     return { shape: "perfCanaryReport", body: { ok: false, error: "gap lacks probe path / edit_site to localize the target vessel", gap_id: pointer.gap_id } };
   }

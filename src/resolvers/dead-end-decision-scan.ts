@@ -41,6 +41,7 @@
  */
 
 import type { ResolverResult } from "./types.js";
+import { selfAuthHeaders } from "../lib/self-auth.js";
 
 const DEFAULT_DEV_VESSEL_URL = "http://127.0.0.1:8090/v2/impulses/resolve";
 const DEFAULT_SURREAL_URL = "http://127.0.0.1:8000";
@@ -192,8 +193,7 @@ async function emitDecisionWithoutAction(
       },
     },
   };
-  const headers: Record<string, string> = { "Content-Type": "application/json" };
-  if (apiKey) headers["Authorization"] = `ApiKey ${apiKey}`;
+  const headers: Record<string, string> = { "Content-Type": "application/json", ...selfAuthHeaders(emitUrl, DEFAULT_DEV_VESSEL_URL) };
   try {
     const r = await fetch(emitUrl, {
       method: "POST",

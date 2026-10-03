@@ -1,4 +1,5 @@
 import type { ResolverResult } from "./types.js";
+import { selfAuthHeaders } from "../lib/self-auth.js";
 
 /**
  * activity_lifecycle_audit — horizon-detector (activity horizon).
@@ -161,8 +162,7 @@ async function emitGap(
   apiKey: string,
   body: Record<string, unknown>,
 ): Promise<{ ok: boolean; status: number | "error" }> {
-  const headers: Record<string, string> = { "Content-Type": "application/json" };
-  if (apiKey) headers["Authorization"] = `ApiKey ${apiKey}`;
+  const headers: Record<string, string> = { "Content-Type": "application/json", ...selfAuthHeaders(emitUrl, DEFAULT_DEV_VESSEL_URL) };
   try {
     const resp = await fetch(emitUrl, {
       method: "POST",

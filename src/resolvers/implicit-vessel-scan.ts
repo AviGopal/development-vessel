@@ -1,4 +1,5 @@
 import type { ResolverResult } from "./types.js";
+import { selfAuthHeaders } from "../lib/self-auth.js";
 
 /**
  * implicit_vessel_scan (2026-07-01) — the GENERIC IMPLICIT-VESSEL CLASSIFIER.
@@ -152,8 +153,7 @@ async function emitImplicitVesselGap(
       },
     },
   };
-  const headers: Record<string, string> = { "Content-Type": "application/json" };
-  if (apiKey) headers["Authorization"] = `ApiKey ${apiKey}`;
+  const headers: Record<string, string> = { "Content-Type": "application/json", ...selfAuthHeaders(emitUrl, DEFAULT_DEV_VESSEL_URL) };
   try {
     const r = await fetch(emitUrl, {
       method: "POST",

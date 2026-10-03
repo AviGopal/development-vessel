@@ -1,4 +1,5 @@
 import type { ResolverResult } from "./types.js";
+import { selfAuthHeaders } from "../lib/self-auth.js";
 
 /**
  * obsidian_assist_feedback_scan (2026-06-15) — closes the obsidian assist LEARNING loop.
@@ -60,6 +61,12 @@ export async function resolveObsidianAssistFeedbackScan(
   const timeoutMs = pointer.timeoutMs ?? 12_000;
   const generatedAt = new Date().toISOString();
   const auth: Record<string, string> = apiKey ? { "Content-Type": "application/json", Authorization: `ApiKey ${apiKey}` } : { "Content-Type": "application/json" };
+  // The node key goes only to a configured endpoint (lib/self-auth.ts selfAuthHeaders), never to a URL the
+  // pointer overrides; a key the caller supplies (pointer.apiKey) is its own and goes where it sends it.
+  const authFor = (url: string, configured: string): Record<string, string> => ({
+    "Content-Type": "application/json",
+    ...(pointer.apiKey ? { Authorization: `ApiKey ${pointer.apiKey}` } : selfAuthHeaders(url, configured)),
+  });
 
   if (!apiKey) return { shape: "obsidianAssistReaction", body: { error: "missing_api_key" } };
 
@@ -180,7 +187,7 @@ export async function resolveObsidianAssistFeedbackScan(
       },
     };
     try {
-      const r = await fetch(emitUrl, { method: "POST", headers: auth, body: JSON.stringify(body), signal: AbortSignal.timeout(10_000) });
+      const r = await fetch(emitUrl, { method: "POST", headers: authFor(emitUrl, DEFAULT_DEV_VESSEL_URL), body: JSON.stringify(body), signal: AbortSignal.timeout(10_000) });
       gapEmitted = r.ok;
     } catch { /* best-effort */ }
   }

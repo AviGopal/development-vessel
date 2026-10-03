@@ -1,5 +1,7 @@
 import * as fs from "node:fs";
+import { selfAuthHeaders } from "../lib/self-auth.js";
 import * as path from "node:path";
+const DEFAULT_DEV_VESSEL_URL = "http://127.0.0.1:8090/v2/impulses/resolve";
 
 /**
  * env_gate_scan — detector for env-var-gated capabilities (defect class).
@@ -100,7 +102,7 @@ export async function resolveEnvGateScan(pointer: EnvGateScanPointer): Promise<{
   }
   const emitted: string[] = [];
   if (pointer.dry_run !== true) {
-    const emitUrl = pointer.devVesselImpulsesUrl ?? "http://127.0.0.1:8090/v2/impulses/resolve";
+    const emitUrl = pointer.devVesselImpulsesUrl ?? DEFAULT_DEV_VESSEL_URL;
     const apiKey = process.env["METABOB_API_KEY"] ?? "";
     const emitCap = pointer.emitCap ?? 3;
     for (const [name, hits] of byVar) {
@@ -112,7 +114,7 @@ export async function resolveEnvGateScan(pointer: EnvGateScanPointer): Promise<{
       try {
         const resp = await fetch(emitUrl, {
           method: "POST",
-          headers: { "Content-Type": "application/json", ...(apiKey ? { Authorization: `ApiKey ${apiKey}` } : {}) },
+          headers: { "Content-Type": "application/json", ...selfAuthHeaders(emitUrl, DEFAULT_DEV_VESSEL_URL) },
           body: JSON.stringify({ impulse: { pointer: { type: "substrateGap_write", gap: {
             id: gapId,
             category: "architectural_pattern",

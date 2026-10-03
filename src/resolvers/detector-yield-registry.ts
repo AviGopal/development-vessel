@@ -44,6 +44,7 @@
  */
 
 import { readFileSync } from "node:fs";
+import { selfAuthHeaders } from "../lib/self-auth.js";
 import { join } from "node:path";
 import { WORKSPACE_ROOT as DEFAULT_WORKSPACE_ROOT } from "../config.js";
 import type { ResolverResult } from "./types.js";
@@ -281,8 +282,7 @@ async function emitRetirementGap(
       },
     },
   };
-  const headers: Record<string, string> = { "Content-Type": "application/json" };
-  if (apiKey) headers["Authorization"] = `ApiKey ${apiKey}`;
+  const headers: Record<string, string> = { "Content-Type": "application/json", ...selfAuthHeaders(emitUrl, DEFAULT_DEV_VESSEL_URL) };
   try {
     const r = await fetch(emitUrl, { method: "POST", headers, body: JSON.stringify(body), signal: AbortSignal.timeout(10_000) });
     return r.ok;

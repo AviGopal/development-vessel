@@ -1,4 +1,5 @@
 import type { ResolverResult } from "./types.js";
+import { selfAuthHeaders } from "../lib/self-auth.js";
 
 /**
  * obsidian_behavior_scan (2026-06-15) — learn the HUMAN, the other side of obsidian.
@@ -107,8 +108,7 @@ async function emitInconsistentGap(
       },
     },
   };
-  const headers: Record<string, string> = { "Content-Type": "application/json" };
-  if (apiKey) headers["Authorization"] = `ApiKey ${apiKey}`;
+  const headers: Record<string, string> = { "Content-Type": "application/json", ...selfAuthHeaders(emitUrl, DEFAULT_DEV_VESSEL_URL) };
   try {
     const r = await fetch(emitUrl, { method: "POST", headers, body: JSON.stringify(body), signal: AbortSignal.timeout(10_000) });
     return r.ok;
@@ -135,6 +135,12 @@ export async function resolveObsidianBehaviorScan(
     return { shape: "obsidianBehaviorModel", body: { error: "missing_api_key", modeled: 0 } };
   }
   const auth = { "Content-Type": "application/json", Authorization: `ApiKey ${apiKey}` };
+  // The node key goes only to a configured endpoint (lib/self-auth.ts selfAuthHeaders), never to a URL the
+  // pointer overrides; a key the caller supplies (pointer.apiKey) is its own and goes where it sends it.
+  const authFor = (url: string, configured: string): Record<string, string> => ({
+    "Content-Type": "application/json",
+    ...(pointer.apiKey ? { Authorization: `ApiKey ${pointer.apiKey}` } : selfAuthHeaders(url, configured)),
+  });
 
   // 1. Read the human's observed actions (reads only — never executes).
   let events: ObservedEvent[] = [];
@@ -287,7 +293,7 @@ export async function resolveObsidianBehaviorScan(
       },
     };
     try {
-      const r = await fetch(emitUrl, { method: "POST", headers: auth, body: JSON.stringify(m), signal: AbortSignal.timeout(10_000) });
+      const r = await fetch(emitUrl, { method: "POST", headers: authFor(emitUrl, DEFAULT_DEV_VESSEL_URL), body: JSON.stringify(m), signal: AbortSignal.timeout(10_000) });
       if (r.ok) gapsEmitted++;
     } catch { /* emit best-effort */ }
   }

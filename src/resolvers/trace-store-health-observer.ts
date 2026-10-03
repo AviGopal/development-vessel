@@ -1,4 +1,5 @@
 import type { ResolverResult } from "./types.js";
+import { selfAuthHeaders } from "../lib/self-auth.js";
 
 /**
  * trace_store_health_observer — closes the substrate's DB self-management
@@ -107,7 +108,7 @@ if (slowQueries !== null && slowQueries > 1000 && !dryRun) {
   try {
     const resp = await fetch(emitUrl, {
       method: "POST",
-      headers: { "Content-Type": "application/json", ...dbAuthHeader },
+      headers: { "Content-Type": "application/json", ...selfAuthHeaders(emitUrl, DEFAULT_EMIT) },
       body: JSON.stringify(emitBody),
       signal: AbortSignal.timeout(10_000),
     });
@@ -164,7 +165,7 @@ remedy: { vessel: "development-vessel", impulse_type: "gap_to_feature" },
     try {
       const resp = await fetch(emitUrl, {
         method: "POST",
-        headers: { "Content-Type": "application/json", ...authHeader },
+        headers: { "Content-Type": "application/json", ...selfAuthHeaders(emitUrl, DEFAULT_EMIT) },
         body: JSON.stringify(body),
         signal: AbortSignal.timeout(10_000),
       });

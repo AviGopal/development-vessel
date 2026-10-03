@@ -58,6 +58,7 @@
  */
 
 import { mkdirSync, appendFileSync } from "fs";
+import { selfAuthHeaders } from "../lib/self-auth.js";
 import { dirname } from "path";
 import { DISCOVERY_ENDPOINT } from "../config.js";
 import type { ResolverResult } from "./types.js";
@@ -250,8 +251,7 @@ async function emitProposal(
       },
     },
   };
-  const headers: Record<string, string> = { "Content-Type": "application/json" };
-  if (apiKey) headers["Authorization"] = `ApiKey ${apiKey}`;
+  const headers: Record<string, string> = { "Content-Type": "application/json", ...selfAuthHeaders(emitUrl, DEFAULT_DEV_VESSEL_URL) };
   try {
     // We emit as a substrateGap of category residual_shape_proposal so the
     // existing gap surface carries it WITHOUT minting anything — propose-only.

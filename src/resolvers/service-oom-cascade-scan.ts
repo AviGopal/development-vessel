@@ -1,4 +1,5 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { selfAuthHeaders } from "../lib/self-auth.js";
 import { dirname } from "node:path";
 import type { ResolverResult } from "./types.js";
 
@@ -184,8 +185,7 @@ const realPorts: ScanPorts = {
   },
   postGap: async (url, body) => {
     const apiKey = process.env["METABOB_API_KEY"];
-    const headers: Record<string, string> = { "Content-Type": "application/json" };
-    if (apiKey) headers["Authorization"] = `ApiKey ${apiKey}`;
+    const headers: Record<string, string> = { "Content-Type": "application/json", ...selfAuthHeaders(url, DEFAULT_DEV_VESSEL_URL) };
     try {
       const resp = await fetch(url, {
         method: "POST",

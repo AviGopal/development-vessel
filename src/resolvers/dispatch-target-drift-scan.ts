@@ -1,4 +1,5 @@
 import { METABOB_ENDPOINT, METABOB_API_KEY } from "../config.js";
+import { selfAuthHeaders } from "../lib/self-auth.js";
 import type { ResolverResult } from "./types.js";
 
 /**
@@ -145,7 +146,7 @@ async function postGap(
   try {
     const resp = await fetch(url, {
       method: "POST",
-      headers: { "Content-Type": "application/json", ...authHeader },
+      headers: { "Content-Type": "application/json", ...selfAuthHeaders(url, DEFAULT_DEV_VESSEL_URL) },
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(10_000),
     });

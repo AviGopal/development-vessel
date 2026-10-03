@@ -1,4 +1,5 @@
 import type { ResolverResult } from "./types.js";
+import { selfAuthHeaders } from "../lib/self-auth.js";
 import { resolveResolverPatternReport } from "./resolver-pattern-report.js";
 
 /**
@@ -159,7 +160,7 @@ export async function resolveGateSaturationScan(
       try {
         const resp = await fetch(emitUrl, {
           method: "POST",
-          headers: { "Content-Type": "application/json", ...authHeader },
+          headers: { "Content-Type": "application/json", ...selfAuthHeaders(emitUrl, DEFAULT_DEV_VESSEL_URL) },
           body: JSON.stringify(body),
           signal: AbortSignal.timeout(10_000),
         });

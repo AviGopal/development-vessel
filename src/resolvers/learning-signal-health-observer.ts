@@ -1,4 +1,5 @@
 import type { ResolverResult } from "./types.js";
+import { selfAuthHeaders } from "../lib/self-auth.js";
 
 /**
  * learning_signal_health_observer (2026-06-13) — promotes a SILENT learning-loop
@@ -162,7 +163,7 @@ async function emitGap(
   try {
     const res = await fetch(devVesselUrl, {
       method: "POST",
-      headers: { "Content-Type": "application/json", ...(apiKey ? { Authorization: `ApiKey ${apiKey}` } : {}) },
+      headers: { "Content-Type": "application/json", ...selfAuthHeaders(devVesselUrl, DEFAULT_DEV_VESSEL_URL) },
       body: JSON.stringify({
         impulse: {
           pointer: {

@@ -23,6 +23,7 @@
  */
 
 import { METABOB_ENDPOINT, METABOB_API_KEY } from "../config.js";
+import { selfAuthHeaders } from "../lib/self-auth.js";
 import type { ResolverResult } from "./types.js";
 
 const DEFAULT_DEV_VESSEL_URL = "http://127.0.0.1:8090/v2/impulses/resolve";
@@ -98,8 +99,7 @@ interface CoverageStats {
  *  autonomous-closure signal for the detector-authoring recursion. */
 async function fetchCoverageStats(emitUrl: string, apiKey: string): Promise<CoverageStats> {
   const stats: CoverageStats = { cited: new Set(), detector_coverage_gaps_open: 0, detector_coverage_gaps_closed: 0 };
-  const headers: Record<string, string> = { "Content-Type": "application/json" };
-  if (apiKey) headers["Authorization"] = `ApiKey ${apiKey}`;
+  const headers: Record<string, string> = { "Content-Type": "application/json", ...selfAuthHeaders(emitUrl, DEFAULT_DEV_VESSEL_URL) };
   try {
     const r = await fetch(emitUrl, {
       method: "POST",
@@ -190,8 +190,7 @@ async function emitGap(emitUrl: string, apiKey: string, c: ProblemCluster, minRe
       },
     },
   };
-  const headers: Record<string, string> = { "Content-Type": "application/json" };
-  if (apiKey) headers["Authorization"] = `ApiKey ${apiKey}`;
+  const headers: Record<string, string> = { "Content-Type": "application/json", ...selfAuthHeaders(emitUrl, DEFAULT_DEV_VESSEL_URL) };
   try {
     const r = await fetch(emitUrl, { method: "POST", headers, body: JSON.stringify(body), signal: AbortSignal.timeout(10_000) });
     return r.ok;

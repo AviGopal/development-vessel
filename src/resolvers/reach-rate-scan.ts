@@ -1,4 +1,5 @@
 import type { ResolverResult } from "./types.js";
+import { selfAuthHeaders } from "../lib/self-auth.js";
 
 /**
  * reach_rate_scan — the substrate's first reader of its own REACH statistic.
@@ -341,9 +342,7 @@ export async function resolveReachRateScan(
           method: "POST",
           headers: {
             "Content-Type": "application/json",
-            ...(process.env["METABOB_API_KEY"]
-              ? { Authorization: `ApiKey ${process.env["METABOB_API_KEY"]}` }
-              : {}),
+            ...selfAuthHeaders(emitUrl, DEFAULT_EMIT),
           },
           body: JSON.stringify(gapBody),
           signal: AbortSignal.timeout(10_000),

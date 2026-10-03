@@ -1,4 +1,5 @@
 import type { ResolverResult } from "./types.js";
+import { selfAuthHeaders } from "../lib/self-auth.js";
 
 /**
  * vessel_demand_report — substrate-self-detection of shape demand without
@@ -278,7 +279,7 @@ export async function resolveVesselDemandReport(
       try {
         const resp = await fetch(emitUrl, {
           method: "POST",
-          headers: { "Content-Type": "application/json", ...auth },
+          headers: { "Content-Type": "application/json", ...selfAuthHeaders(emitUrl, DEFAULT_DEV_VESSEL_URL) },
           body: JSON.stringify(body),
           signal: AbortSignal.timeout(10_000),
         });

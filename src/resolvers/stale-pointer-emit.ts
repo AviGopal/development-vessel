@@ -1,4 +1,5 @@
 import type { ResolverResult } from "./types.js";
+import { selfAuthHeaders } from "../lib/self-auth.js";
 
 /**
  * stale_pointer_emit — deterministic stale-concept-pointer detector + emitter.
@@ -167,7 +168,7 @@ export async function resolveStalePointerEmit(
           method: "POST",
           headers: {
             "Content-Type": "application/json",
-            ...authHeader,
+            ...selfAuthHeaders(emitUrl, DEFAULT_DEV_VESSEL_URL),
           },
           body: JSON.stringify(body),
           signal: AbortSignal.timeout(10_000),

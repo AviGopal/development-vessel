@@ -1,4 +1,5 @@
 import type { ResolverResult } from "./types.js";
+import { selfAuthHeaders } from "../lib/self-auth.js";
 
 /**
  * db_contention_observer (2026-06-21) — closes the substrate's DB-contention
@@ -118,7 +119,7 @@ export async function resolveDbContentionObserver(
     try {
       const resp = await fetch(emitUrl, {
         method: "POST",
-        headers: { "Content-Type": "application/json", ...authHeader },
+        headers: { "Content-Type": "application/json", ...selfAuthHeaders(emitUrl, DEFAULT_EMIT) },
         body: JSON.stringify(body),
         signal: AbortSignal.timeout(10_000),
       });

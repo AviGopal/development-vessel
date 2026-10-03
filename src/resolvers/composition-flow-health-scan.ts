@@ -1,4 +1,6 @@
 import type { ResolverResult } from "./types.js";
+import { selfAuthHeaders } from "../lib/self-auth.js";
+const DEFAULT_DEV_VESSEL_URL = "http://127.0.0.1:8090/v2/impulses/resolve";
 
 /**
  * composition_flow_health_scan — detector for composition-graph flow health.
@@ -46,7 +48,7 @@ export async function resolveCompositionFlowHealthScan(
 ): Promise<ResolverResult> {
   const edgeLimit = pointer.edgeLimit ?? 10000;
   const dryRun = pointer.dry_run === true;
-  const emitUrl = pointer.devVesselImpulsesUrl ?? "http://127.0.0.1:8090/v2/impulses/resolve";
+  const emitUrl = pointer.devVesselImpulsesUrl ?? DEFAULT_DEV_VESSEL_URL;
   const edges = await flowSql(`SELECT parent_activity_id, child_activity_id, genuine FROM activity_composition_graph LIMIT ${edgeLimit}`);
   // Union-find over the GENUINE edge graph (credit mixes only along genuine edges).
   const parent = new Map<string, string>();
@@ -100,7 +102,7 @@ export async function resolveCompositionFlowHealthScan(
       const apiKey = process.env["METABOB_API_KEY"];
       const resp = await fetch(emitUrl, {
         method: "POST",
-        headers: { "Content-Type": "application/json", ...(apiKey ? { Authorization: `ApiKey ${apiKey}` } : {}) },
+        headers: { "Content-Type": "application/json", ...selfAuthHeaders(emitUrl, DEFAULT_DEV_VESSEL_URL) },
         body: JSON.stringify({ impulse: { type: "substrateGap_write", pointer: { type: "substrateGap_write", gap: {
           id: gapId,
           category: "learning_loop",

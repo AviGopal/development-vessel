@@ -1,4 +1,5 @@
 import { readdir, stat, readFile } from "node:fs/promises";
+import { selfAuthHeaders } from "../lib/self-auth.js";
 import { join } from "node:path";
 import type { ResolverResult } from "./types.js";
 
@@ -45,13 +46,12 @@ async function emitPollutionGap(
   abandoned: number,
   oldestAgeDays: number,
 ): Promise<"emitted" | "error"> {
-  const apiKey = process.env["METABOB_API_KEY"] ?? "";
   try {
     const res = await fetch(devVesselUrl, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        ...(apiKey ? { Authorization: `ApiKey ${apiKey}` } : {}),
+        ...selfAuthHeaders(devVesselUrl, DEFAULT_DEV_VESSEL_URL),
       },
       body: JSON.stringify({
         impulse: {

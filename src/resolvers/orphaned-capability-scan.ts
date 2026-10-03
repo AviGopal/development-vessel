@@ -31,6 +31,7 @@
  */
 
 import { METABOB_ENDPOINT, METABOB_API_KEY, DISCOVERY_ENDPOINT } from "../config.js";
+import { selfAuthHeaders } from "../lib/self-auth.js";
 import type { ResolverResult } from "./types.js";
 
 const DEFAULT_DEV_VESSEL_URL = "http://127.0.0.1:8090/v2/impulses/resolve";
@@ -325,8 +326,7 @@ async function emitOrphanGap(
       },
     },
   };
-  const headers: Record<string, string> = { "Content-Type": "application/json" };
-  if (apiKey) headers["Authorization"] = `ApiKey ${apiKey}`;
+  const headers: Record<string, string> = { "Content-Type": "application/json", ...selfAuthHeaders(emitUrl, DEFAULT_DEV_VESSEL_URL) };
   try {
     const r = await fetch(emitUrl, {
       method: "POST",
@@ -351,7 +351,7 @@ async function fetchClosedOrphanShapes(emitUrl: string, apiKey: string): Promise
   try {
     const r = await fetch(emitUrl, {
       method: "POST",
-      headers: { "Content-Type": "application/json", ...(apiKey ? { Authorization: `ApiKey ${apiKey}` } : {}) },
+      headers: { "Content-Type": "application/json", ...selfAuthHeaders(emitUrl, DEFAULT_DEV_VESSEL_URL) },
       body: JSON.stringify({ impulse: { pointer: { type: "substrateGap", status: "closed", category: "orphaned_capability", limit: 500 } } }),
       signal: AbortSignal.timeout(10_000),
     });
@@ -377,7 +377,7 @@ export async function rejectUnreachableOrphanGaps(emitUrl: string, apiKey: strin
   try {
     const r = await fetch(emitUrl, {
       method: "POST",
-      headers: { "Content-Type": "application/json", ...(apiKey ? { Authorization: `ApiKey ${apiKey}` } : {}) },
+      headers: { "Content-Type": "application/json", ...selfAuthHeaders(emitUrl, DEFAULT_DEV_VESSEL_URL) },
       // include_held: held orphan gaps are read and SKIPPED (held_skipped), never rejected. The store's
       // hold guard covers status "closed" only, so a "rejected" write here would override the hold.
       body: JSON.stringify({ impulse: { pointer: { type: "substrateGap", status: "open", category: "orphaned_capability", limit: 500, include_held: true } } }),

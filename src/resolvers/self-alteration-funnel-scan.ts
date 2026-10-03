@@ -1,4 +1,5 @@
 import type { ResolverResult } from "./types.js";
+import { selfAuthHeaders } from "../lib/self-auth.js";
 import { readdirSync, statSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
@@ -200,7 +201,7 @@ export async function resolveSelfAlterationFunnelScan(
       try {
         const resp = await fetch(emitUrl, {
           method: "POST",
-          headers: { "Content-Type": "application/json", ...authHeader },
+          headers: { "Content-Type": "application/json", ...selfAuthHeaders(emitUrl, DEFAULT_DEV_VESSEL_URL) },
           body: JSON.stringify(body),
           signal: AbortSignal.timeout(10_000),
         });

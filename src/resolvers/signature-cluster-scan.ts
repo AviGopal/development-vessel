@@ -15,6 +15,7 @@
  */
 
 import { METABOB_ENDPOINT, METABOB_API_KEY } from "../config.js";
+import { selfAuthHeaders } from "../lib/self-auth.js";
 import type { ResolverResult } from "./types.js";
 
 const DEFAULT_DEV_VESSEL_URL = "http://127.0.0.1:8090/v2/impulses/resolve";
@@ -122,8 +123,7 @@ export async function resolveSignatureClusterScan(pointer: SignatureClusterScanP
         },
       } } },
     };
-    const h: Record<string, string> = { "Content-Type": "application/json" };
-    if (apiKey) h["Authorization"] = `ApiKey ${apiKey}`;
+    const h: Record<string, string> = { "Content-Type": "application/json", ...selfAuthHeaders(emitUrl, DEFAULT_DEV_VESSEL_URL) };
     try { const r = await fetch(emitUrl, { method: "POST", headers: h, body: JSON.stringify(body), signal: AbortSignal.timeout(10_000) }); emitted = r.ok; } catch { /* tolerant */ }
   }
 

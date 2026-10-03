@@ -1,4 +1,5 @@
 import { readFileSync } from "fs";
+import { selfAuthHeaders } from "../lib/self-auth.js";
 import { join } from "path";
 import { WORKSPACE_ROOT } from "../config.js";
 import type { ResolverResult } from "./types.js";
@@ -250,7 +251,7 @@ export async function resolveRemedyEffectivenessObserver(
       try {
         const resp = await fetch(emitUrl, {
           method: "POST",
-          headers: { "Content-Type": "application/json", ...authHeader },
+          headers: { "Content-Type": "application/json", ...selfAuthHeaders(emitUrl, DEFAULT_EMIT) },
           body: JSON.stringify(body),
           signal: AbortSignal.timeout(10_000),
         });

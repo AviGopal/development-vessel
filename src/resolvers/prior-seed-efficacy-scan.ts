@@ -1,4 +1,6 @@
 import type { ResolverResult } from "./types.js";
+import { selfAuthHeaders } from "../lib/self-auth.js";
+const DEFAULT_DEV_VESSEL_URL = "http://127.0.0.1:8090/v2/impulses/resolve";
 
 /**
  * prior_seed_efficacy_scan — detector measuring whether concept-prior seeding of
@@ -28,7 +30,7 @@ export async function resolvePriorSeedEfficacyScan(
   const windowMinutes = pointer.windowMinutes ?? 1440;
   const minSamples = pointer.minSamples ?? 20;
   const dryRun = pointer.dry_run === true;
-  const emitUrl = pointer.devVesselImpulsesUrl ?? "http://127.0.0.1:8090/v2/impulses/resolve";
+  const emitUrl = pointer.devVesselImpulsesUrl ?? DEFAULT_DEV_VESSEL_URL;
   let seeded = 0;
   let seededWins = 0;
   let unseeded = 0;
@@ -85,7 +87,7 @@ export async function resolvePriorSeedEfficacyScan(
         : `Prior seeding is NOT HELPING: over ${seeded} seeded samples the first-attempt win rate (${seededRate === null ? "n/a" : seededRate.toFixed(3)}) is <= unseeded (${unseededRate === null ? "n/a" : unseededRate.toFixed(3)}). Re-examine neighbor selection and seed strength.`;
       const resp = await fetch(emitUrl, {
         method: "POST",
-        headers: { "Content-Type": "application/json", ...(apiKey ? { Authorization: `ApiKey ${apiKey}` } : {}) },
+        headers: { "Content-Type": "application/json", ...selfAuthHeaders(emitUrl, DEFAULT_DEV_VESSEL_URL) },
         body: JSON.stringify({ impulse: { type: "substrateGap_write", pointer: { type: "substrateGap_write", gap: {
           id: gapId,
           category: "learning_loop",

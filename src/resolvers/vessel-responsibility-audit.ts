@@ -1,4 +1,5 @@
 import { readdir, readFile, stat } from "node:fs/promises";
+import { selfAuthHeaders } from "../lib/self-auth.js";
 import { join } from "node:path";
 import type { ResolverResult } from "./types.js";
 
@@ -261,8 +262,7 @@ async function emitGap(
       },
     },
   };
-  const headers: Record<string, string> = { "Content-Type": "application/json" };
-  if (apiKey) headers["Authorization"] = `ApiKey ${apiKey}`;
+  const headers: Record<string, string> = { "Content-Type": "application/json", ...selfAuthHeaders(emitUrl, DEFAULT_DEV_VESSEL_URL) };
   const resp = await fetch(emitUrl, {
     method: "POST",
     headers,

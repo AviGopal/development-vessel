@@ -36,6 +36,7 @@
  */
 
 import { METABOB_ENDPOINT, METABOB_API_KEY, WORKSPACE_ROOT as DEFAULT_WORKSPACE_ROOT } from "../config.js";
+import { selfAuthHeaders } from "../lib/self-auth.js";
 import type { ResolverResult } from "./types.js";
 import { fetchWithRetry } from "./http-retry.js";
 import { readFile } from "node:fs/promises";
@@ -334,7 +335,7 @@ export async function resolveGenerativeFrontierGapTick(
   try {
     const resp = await fetch(emitUrl, {
       method: "POST",
-      headers: { "Content-Type": "application/json", ...auth },
+      headers: { "Content-Type": "application/json", ...selfAuthHeaders(emitUrl, DEFAULT_EMIT_URL) },
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(10_000),
     });

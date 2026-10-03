@@ -1,4 +1,5 @@
 import { readFile } from "node:fs/promises";
+import { selfAuthHeaders } from "../lib/self-auth.js";
 import type { ResolverResult } from "./types.js";
 
 /**
@@ -65,13 +66,12 @@ async function emitSaturationGap(
   devVesselUrl: string,
   snap: SelectorSnapshot,
 ): Promise<"emitted" | "error"> {
-  const apiKey = process.env["METABOB_API_KEY"] ?? "";
   try {
     const res = await fetch(devVesselUrl, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        ...(apiKey ? { Authorization: `ApiKey ${apiKey}` } : {}),
+        ...selfAuthHeaders(devVesselUrl, DEFAULT_DEV_VESSEL_URL),
       },
       body: JSON.stringify({
         impulse: {
@@ -215,13 +215,12 @@ export async function resolveSelectorSaturationAudit(
  * not just re-detection). Stable gap id → upsert, no spam.
  */
 async function emitNoveltyGap(devVesselUrl: string, snap: SelectorSnapshot): Promise<"emitted" | "error"> {
-  const apiKey = process.env["METABOB_API_KEY"] ?? "";
   try {
     const res = await fetch(devVesselUrl, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        ...(apiKey ? { Authorization: `ApiKey ${apiKey}` } : {}),
+        ...selfAuthHeaders(devVesselUrl, DEFAULT_DEV_VESSEL_URL),
       },
       body: JSON.stringify({
         impulse: {

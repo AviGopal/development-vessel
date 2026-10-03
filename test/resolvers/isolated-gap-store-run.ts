@@ -19,7 +19,7 @@ export function runCasesIsolated(casesFile: string): CaseRow[] {
   const root = mkdtempSync(join(tmpdir(), "gap-harness-"));
   const out = join(root, "out.txt");
   try {
-    const env: Record<string, string> = { HOME: process.env["HOME"] ?? "", PATH: process.env["PATH"] ?? "", WORKSPACE_ROOT: root };
+    const env: Record<string, string> = { HOME: process.env["HOME"] ?? "", PATH: process.env["PATH"] ?? "", WORKSPACE_ROOT: root, SUBSTRATE_GAP_SKIP_COMPOSE_TRIGGER: "1" };
     const p = Bun.spawnSync(["bash", "-c", `bun test ${JSON.stringify(casesFile)} > ${JSON.stringify(out)} 2>&1`], { env, cwd: join(import.meta.dir, "..", ".."), timeout: 120_000 });
     const text = (() => { try { return readFileSync(out, "utf8"); } catch { return ""; } })();
     // Child output is quoted ("  | ") when echoed, so its (pass)/(fail) lines are never read as the parent's.

@@ -77,6 +77,7 @@ import { RUNTIME_ROOT, SUPER_REPO_ROOT, REPO_ROOT, loadFleetShapeVocabulary } fr
 import { mkdir as parkMkdir, writeFile as parkWriteFile, rename as parkRename, readFile as parkReadFile, unlink as parkUnlink } from "node:fs/promises";
 import { createHash as parkHash } from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
+import { stampComposeProgress } from "../lib/compose-progress.js";
 
 // COMPOSE SPEND (openspec value-per-cost-selection, spend-accounting). The llm resolver
 // returns `usage` on every completion and llmCall used to drop it, so every compose report
@@ -4894,6 +4895,7 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
 async function resolveFeatureComposeUncapped(pointer: FeatureComposePointer): Promise<ResolverResult> {
   // Tool (shell/fs) calls finish in seconds, but the verify shell call can exceed this cap; therefore the outer budget must be increased
   if (typeof pointer.spec !== "string") pointer = { ...pointer, spec: String(pointer.spec ?? "") };
+  stampComposeProgress("scope", pointer.gap?.id);
   const guards = pointer.verify_vessels?.length ? pointer.verify_vessels : ["__global__"];
   // Per-compose isolation (gap edit-intent-compose-shared-workspace-no-isolation):
   // each compose gets its own git worktree per vessel, so concurrent composes no
@@ -5658,6 +5660,7 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
     ops = verbatimOps;
     console.log("[decompose] deterministic verbatim-replacement synthesis applied");
   } else {
+    stampComposeProgress("plan", pointer.gap?.id);
     try {
       planRaw = await llmCallWithFailover(llmEndpoints, decomposePrompt(spec, maxOps, grounding, principles + composeLessons, priorFeedback, netNewTargets), model);
     } catch (e) {
@@ -6326,6 +6329,7 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
 // 2. APPLY deterministically. Track created/edited for rollback.
   const created: string[] = [];
   const edited: string[] = [];
+  stampComposeProgress("apply", pointer.gap?.id);
   // Pre-edit content snapshot (abs -> original bytes), captured the FIRST time we
   // touch a file, so an UNFAVORABLE verdict can RESTORE it. /vessels is NOT a git
   // repo, so the old `git checkout` rollback silently no-op'd and left broken
@@ -6895,6 +6899,7 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
   const constraintLifts: ConstraintLift[] = [];
   const draftRel = (abs: string): string => ws?.rel(abs) ?? abs.replace(`${REPO_ROOT}/`, "");
   const runVerify = async (v: string): Promise<VerifyResult> => {
+    stampComposeProgress("verify", pointer.gap?.id);
     if (activeConstraints.length === 0) return runVerifySuite(v);
     const cv = await constraintVerify(v, vesselRoot(v), activeConstraints, [...edited, ...created].map((abs) => ({ abs, rel: draftRel(abs), pre: preEditContent.get(abs) ?? "" })), String(pointer.gap?.id ?? ""));
     for (const l of cv.lifted) if (!constraintLifts.some((x) => x.symbol === l.symbol)) constraintLifts.push(l);
@@ -7239,6 +7244,7 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
       }
       if (gateSource === "store_unreadable") ownUnjudged = true;
       // Logged on PASS too: a skipped check must be distinguishable from a passed one (qa, 1bc78f8).
+      stampComposeProgress("own_check", pointer.gap?.id);
       console.log(`[fc-own-check] ${JSON.stringify({ gap: pointer.gap?.id ?? null, vessel: v, source: gateSource, test_file: ownRef?.test_file ?? null, only: ownRef?.only_tests ?? [], ran: ownRan, red: ownRed, unjudged: ownUnjudged, stray: strayTests, tc_ok: tcOk, base_red: ownBaseRed, expects: ownExpects, contract_breach: contractBreach })}`);
       if (ownRan && ownRed.length === 0 && !ownUnjudged && !contractBreach) ownCheckRan.push(v);
       if (ownRan && ownRef && !ownUnjudged) ownEvidence.set(v, { test_file: ownRef.test_file, ran: ownRan, tc_ok: tcOk, base_red: ownBaseRed, draft_red: ownRed, contract_breach: contractBreach });
@@ -8138,6 +8144,7 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
       // the remaining suspect is worktree lifecycle: vBase resolving elsewhere, or the
       // worktree being reclaimed, between apply and staging. This line makes the comparison
       // observable instead of inferred. Log-only; it changes no behaviour.
+      stampComposeProgress("cutover", pointer.gap?.id);
       console.log(`[fc-stage] vessel=${vessel} vBase=${vBase} isolated=${String(ws?.isolated(vessel) ?? false)} edited=${JSON.stringify(edited)} created=${JSON.stringify(created)} changedRel=${JSON.stringify(changedRel)}`);
       if (changedRel.length === 0) {
         console.warn(`[fc-stage] SKIPPED staging for ${vessel}: no edited/created path is under vBase — nothing will be copied into the mitosis dir, so the cutover will find an empty diff and the commit will fail`);

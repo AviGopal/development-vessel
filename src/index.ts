@@ -8,6 +8,7 @@ import { startConceptBridgeObserver } from "./observers/concept-bridge-observer.
 import { startAutocompleteConceptWriter } from "./observers/autocomplete-concept-writer.js";
 import { startFailureCreditObserver } from "./observers/failure-credit-observer.js";
 import { GapDrainObserver } from "./services/gap-drain-observer.js";
+import { admitInFlight, releaseInFlight, runInFlight, inFlightOldestMs, inFlightProgressHealth, type InFlightRecord } from "./lib/compose-progress.js";
 
 const app = new Hono();
 
@@ -34,6 +35,9 @@ app.get("/health", (c) => {
     version: "0.1.0",
     in_flight: readInFlight(),
         in_flight_oldest_ms: readInFlightOldestMs(),
+    // Stage-transition progress (src/lib/compose-progress.ts): pull-sync keeps a past-ceiling
+    // restart deferred while a compose is still moving, instead of killing it on age alone.
+    ...inFlightProgressHealth(),
     // ADVERTISE THE DRAIN BUDGET, or the protection built on it cannot apply.
     //
     // substrate-pull-sync gates its safe-convergence path on this field: a vessel
@@ -211,13 +215,12 @@ function quiesced(): boolean {
 // this one stayed unread in the first place.
 let devDraining = false;
 let inFlightRequests = 0;
-const inFlightStarts = new Set<{ at: number }>();
 let readInFlightOldestMs: () => number | null = () => null;
 export function publishInFlightOldest(fn: () => number | null): void {
   readInFlightOldestMs = fn;
 }
 publishInFlight(() => inFlightRequests);
-publishInFlightOldest(() => { let oldest: number | null = null; for (const s of inFlightStarts) if (oldest === null || s.at < oldest) oldest = s.at; return oldest === null ? null : Date.now() - oldest; });
+publishInFlightOldest(() => inFlightOldestMs());
 const server = Bun.serve({
   port: config.port,
   hostname: config.host,
@@ -226,7 +229,7 @@ const server = Bun.serve({
     // Read the body ONCE to classify, then hand a fresh Request downstream:
     // consuming the stream here would leave the handler with an empty body.
         let counted = false;
-    let startRec: { at: number } | null = null;
+    let startRec: InFlightRecord | null = null;
     let forwarded = req;
     try {
       if (req.method === "POST") {
@@ -263,8 +266,7 @@ const server = Bun.serve({
           }
           counted = true;
           inFlightRequests++;
-          startRec = { at: Date.now() };
-          inFlightStarts.add(startRec);
+          startRec = admitInFlight();
         }
         // The remote address for the gap-write audit (routes/impulses.ts): stamped from the socket after
         // deleting any inbound copy, so a client cannot name its own address. The rebuilt Request has no
@@ -282,10 +284,10 @@ const server = Bun.serve({
       forwarded = req; // unreadable body → forward untouched, never count
     }
     try {
-      return await app.fetch(forwarded, srv);
+      return await (startRec ? runInFlight(startRec, () => app.fetch(forwarded, srv)) : app.fetch(forwarded, srv));
     } finally {
       if (counted) inFlightRequests--;
-      if (startRec) inFlightStarts.delete(startRec);
+      releaseInFlight(startRec);
     }
   },
 });

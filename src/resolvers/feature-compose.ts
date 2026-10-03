@@ -4345,7 +4345,12 @@ export type VerifyResult = { vessel: string; errors: number | string; exit_code:
  * could not run, never that they ran and the draft failed them.
  */
 export function composeFailureKind(input: { verdict: string; terminal_refusal: string | null; cutover_env_class: string | null; verify: ReadonlyArray<VerifyResult> }): "terminal_refusal" | "environment" | "fix" | null {
-  return input.verdict === "FAVORABLE" ? null : input.terminal_refusal ? "terminal_refusal" : input.cutover_env_class || input.verify.some((vr) => !vr.ok && (vr.stage !== "constraint" || !!vr.constraint_unrunnable) && (vr.exit_code === null || !vr.output || /timed out after \d+\s*ms/i.test(vr.output))) ? "environment" : "fix";
+  // THE OWN CHECK RAN AND JUDGED ITS DEFECT TESTS RED: a fix failure, whatever any other stage did. A failed
+  // own_check entry carries the vessel's whole-suite log, where bun's "timed out after 20000ms" for an unrelated
+  // slow test matched the timeout pattern below, so a red draft read as an environment non-attempt (compose2,
+  // 10-03). `own` is set only when the check ran; `draft.own_red` is non-empty only when that run was judged red.
+  const ownCheckStayedRed = input.verify.some((vr) => !vr.ok && !!vr.own && (vr.draft?.own_red.length ?? 0) > 0);
+  return input.verdict === "FAVORABLE" ? null : input.terminal_refusal ? "terminal_refusal" : ownCheckStayedRed ? "fix" : input.cutover_env_class || input.verify.some((vr) => !vr.ok && (vr.stage !== "constraint" || !!vr.constraint_unrunnable) && (vr.exit_code === null || !vr.output || /timed out after \d+\s*ms/i.test(vr.output))) ? "environment" : "fix";
 }
 /** What the pre-land gate blamed on THIS draft (set on a failed runVerify): each list is already net of the parent tree. */
 export type DraftFailures = { own_red: string[]; introduced: string[]; new_ts: string[]; gate_detail: string };

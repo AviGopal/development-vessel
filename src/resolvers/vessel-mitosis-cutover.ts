@@ -2490,6 +2490,12 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
   //     is unknown, and a landing gate fails closed. The pending lock is preserved
   //     (preserve_pending) so the next tick retries this same tree once the store answers.
   let landedUnverifiedReason: string | null = null;
+  // SEMANTIC DISSENT: feature_compose landed this draft over an advisory semantic-gate addresses:false
+  // (its gap's armed own check went red->green; see semanticGateDisposition). The own check passing is
+  // not enough on its own here: the landing is landed_unverified until the post-land by-effect check
+  // (the pending-land sweep) measures the defect gone.
+  const semanticDissent = (pointer as { semantic_dissent?: { reason?: unknown } | null }).semantic_dissent;
+  if (semanticDissent && typeof semanticDissent === "object") landedUnverifiedReason = `semantic_dissent: landed over the semantic gate's non-hard-fail addresses:false (${String(semanticDissent.reason ?? "").slice(0, 200)}); post-land by-effect check required`;
   {
     // mitosis-tick passes gap_id as "{{extract_gap_id_content}}", and mitosis_pending_observer does not
     // forward gap_id, so it can arrive unsubstituted. Trust only a real id; else the pending file's.
@@ -2515,7 +2521,8 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
         { kind: "own_check_under_repair", refuse_class: "own_check_under_repair", vessel_name, gap_id: ownGapId, staged_files: stagedFiles, operations },
       );
     } else if (load.status === "none") {
-      landedUnverifiedReason = load.why;
+      // Keep a dissent stamp set above: both reasons hold.
+      landedUnverifiedReason = landedUnverifiedReason !== null ? `${landedUnverifiedReason}; ${load.why}` : load.why;
       operations.push({ op: "own_check", status: "skipped", detail: `no own check re-run: ${load.why} — landing stamped landed_unverified` });
     } else {
       const check = load.check;

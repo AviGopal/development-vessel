@@ -109,6 +109,8 @@ export interface ParkedLanding {
   files: Array<{ path: string; content: string; base_content: string | null }>;
   verify: { typecheck: boolean; shape_dispatch: boolean; tests: boolean };
   judge: { addresses: boolean | null; reason: string | null };
+  /** A landing over an advisory semantic-gate addresses:false: a resume must land it landed_unverified too. */
+  semantic_dissent?: SemanticDissent | null;
   parked_at: string;
   /** Attempt registered before the original cutover mutated the live tree; a resume reuses it. */
   attempt_id?: string | null;
@@ -218,11 +220,13 @@ async function resumeParkedLanding(pointer: FeatureComposePointer, park: ParkedL
       evaluation_evidence: { verdict: "FAVORABLE", base_success_rate: 1, mitosis_success_rate: 1, cited_trace_ids: [], cited_check_names: ["typecheck (resume)", "parked: shape-dispatch", "parked: bun test (baseline-delta, flake-confirmed)"] },
       gap_id: gapId,
       proposal_id: `${gapId}-compose-report`,
+      ...(park.semantic_dissent ? { semantic_dissent: park.semantic_dissent } : {}),
       attempt_id: park.attempt_id ?? undefined,
       authoring_execution_id: (pointer as { authoring_execution_id?: string }).authoring_execution_id,
       skip_push: pointer.skip_push ?? false,
     } as never);
     const r = (cut.body ?? {}) as Record<string, unknown>;
+    await settleSemanticDissent(gapId, park.semantic_dissent, r);
     const pushed = r["push_status"] === "pushed" && typeof r["new_git_sha"] === "string" && String(r["new_git_sha"]).trim() !== "";
     if (pushed) {
       await deleteParkedLanding(gapId);
@@ -3522,6 +3526,172 @@ export function checkContractBreach(baseRed: string[] | null, baseExpects: numbe
   return null;
 }
 
+/**
+ * SEMANTIC DISSENT (gap semantic-gate-refuters-overturn-a-green-class2-draft-by-misreading-the-requirement).
+ *
+ * Measured: the only draft in a 2 h window that turned its gap's ARMED class-2 own check red->green was
+ * overturned by the LLM semantic gate (addresses:false, on_live_path:false, hard_fail:false) on a misreading
+ * of the requirement. A green armed check is the strongest evidence a compose has; an unexplained judge
+ * opinion must not outrank it. So, on such a draft, a non-hard-fail addresses:false is ADVISORY. The gate
+ * keeps its VETO only where it cites a concrete, checkable defect:
+ *   hard_fail          — a deterministic refusal (reachability, inert diff, CJS-in-ESM, …);
+ *   self_certification — the diff touches only tests, fixtures or the gap's own check file;
+ *   hollow_write       — the diff introduces an identifier (a defined symbol or an assigned field) no src
+ *                        line READS;
+ *   edit_site_missed   — the diff misses the gap's edit_site entirely (an absent edit_site is not checkable,
+ *                        so it is not a veto).
+ * Otherwise the draft LANDS stamped semantic_dissent, and its landing is landed_unverified with a mandatory
+ * post-land by-effect check. The dissent is recorded on the gap row (settleSemanticDissent, only once the
+ * landing is pushed) with later_outcome:null, which the pending-land sweep fills (resolveDissentOutcome),
+ * so the gate's dissents can be calibrated against what the landings actually did.
+ */
+export type SemanticVeto = "hard_fail" | "self_certification" | "hollow_write" | "edit_site_missed" | "semantic_reject";
+export type SemanticDissent = { reason: string; gate_verdict: SemanticGateVerdict; at: string; later_outcome: null | { result: "passed" | "failed"; at: string } };
+export type OwnCheckEvidence = { test_file: string; ran: boolean; tc_ok: boolean; base_red: string[] | null; draft_red: string[]; contract_breach: string | null };
+export type SemanticDisposition = { land: boolean; veto: SemanticVeto | null; semantic_dissent?: SemanticDissent; landed_unverified: boolean; post_land_by_effect_check: "required" | "not_required" };
+type GapRowDeps = { readGap: (id: string) => Promise<Record<string, unknown> | null>; writeGap: (row: Record<string, unknown>) => Promise<void> };
+
+/** The gap store through the shaped substrateGap resolvers (the default for the dissent writer and reader). */
+const storeGapRowDeps: GapRowDeps = {
+  readGap: async (id) => ((((await resolveSubstrateGap({ type: "substrateGap", id, limit: 1 } as never))?.body as { gaps?: Record<string, unknown>[] } | undefined)?.gaps ?? [])[0] ?? null),
+  writeGap: async (row) => { await resolveSubstrateGapWrite({ type: "substrateGap_write", gap: row } as never); },
+};
+
+const FIXTURE_PATH_RE = /(^|\/)fixtures?\//;
+const VESSEL_TOP_DIR_RE = /\/(?:src|test|tests|__tests__|fixtures|scripts|ui)\//;
+/** Vessel-relative paths of the files a "### <path>" diff touches. */
+function diffFilePaths(diff: string): string[] {
+  return String(diff ?? "").split("\n").filter((l) => l.startsWith("### "))
+    .map((l) => l.replace(/^###\s+(NEW FILE\s+)?/, "").trim()).filter(Boolean)
+    .map((p) => { const i = p.search(VESSEL_TOP_DIR_RE); return i >= 0 ? p.slice(i + 1) : p.replace(/^\/+/, ""); });
+}
+/** The vessel-relative file an edit_site ("repos/<vessel>/<path>[:line]") names, or "" when it names none. */
+function editSiteFile(site: string | null): string {
+  return String(site ?? "").replace(/:\d+.*$/, "").replace(/^\/+/, "").replace(/^repos\/[A-Za-z0-9_-]+\//, "").trim();
+}
+const escapeIdent = (id: string): string => id.replace(/\$/g, "\\$");
+/**
+ * Identifiers a diff introduces (newly defined functions/consts, assigned fields `x.f = …`) that no src line
+ * READS. A read is a line (test and fixture files excluded) mentioning the identifier that is not its own
+ * definition or assignment. An identifier the diff also removes is a rename/edit, not a new write.
+ */
+export function hollowWriteIdentifiers(diff: string, srcFiles: Record<string, string>): string[] {
+  const lines = String(diff ?? "").split("\n");
+  const added = lines.filter((l) => /^\+(?!\+\+)/.test(l)).map((l) => l.slice(1));
+  const removed = lines.filter((l) => /^-(?!--)/.test(l)).map((l) => l.slice(1)).join("\n");
+  const ids = new Set<string>(extractChangedSymbols(diff).filter((s) => s.isNewFunction).map((s) => s.symbol));
+  for (const l of added) for (const m of l.matchAll(/\.([A-Za-z_$][\w$]*)\s*=(?![=>])/g)) ids.add(m[1]!);
+  const srcLines = Object.entries(srcFiles)
+    .filter(([path]) => !TEST_FILE_RE.test(path) && !FIXTURE_PATH_RE.test(path))
+    .flatMap(([, text]) => text.split("\n"));
+  const out: string[] = [];
+  for (const id of ids) {
+    const e = escapeIdent(id);
+    const word = new RegExp(`\\b${e}\\b`);
+    if (word.test(removed)) continue;
+    const write = new RegExp(`(?:function|const|let|var|class)\\s+${e}\\b|\\.?\\b${e}\\s*=(?![=>])`);
+    if (!srcLines.some((l) => word.test(l) && !write.test(l))) out.push(id);
+  }
+  return out;
+}
+/** Did the gap's armed own check go red on the parent and green on the draft, with the draft typechecking? */
+export function ownCheckWentRedToGreen(oc: OwnCheckEvidence | null): boolean {
+  return !!oc && oc.ran && oc.tc_ok && Array.isArray(oc.base_red) && oc.base_red.length > 0 && oc.draft_red.length === 0 && !oc.contract_breach;
+}
+/** What the semantic gate's verdict means for this draft: land, land under dissent, or veto (and why). Pure. */
+export function semanticGateDisposition(input: { gate: SemanticGateVerdict; own_check: OwnCheckEvidence | null; diff: string; edit_site: string | null; src_files: Record<string, string> }): SemanticDisposition {
+  const g = input.gate;
+  const refuse = (veto: SemanticVeto): SemanticDisposition => ({ land: false, veto, landed_unverified: false, post_land_by_effect_check: "not_required" });
+  if (g.addresses && g.on_live_path !== false) return { land: true, veto: null, landed_unverified: false, post_land_by_effect_check: "not_required" };
+  if (g.hard_fail === true) return refuse("hard_fail");
+  const oc = input.own_check;
+  // Without a red->green armed check there is no evidence to outrank the gate: its refusal stands.
+  if (!ownCheckWentRedToGreen(oc)) return refuse("semantic_reject");
+  const paths = diffFilePaths(input.diff);
+  if (paths.length === 0) return refuse("semantic_reject");
+  if (paths.every((p) => TEST_FILE_RE.test(p) || FIXTURE_PATH_RE.test(p) || p === oc!.test_file)) return refuse("self_certification");
+  if (hollowWriteIdentifiers(input.diff, input.src_files).length > 0) return refuse("hollow_write");
+  const site = editSiteFile(input.edit_site);
+  if (site && !paths.some((p) => p === site || p.endsWith(`/${site}`) || site.endsWith(`/${p}`))) return refuse("edit_site_missed");
+  return {
+    land: true,
+    veto: null,
+    semantic_dissent: { reason: String(g.reason ?? ""), gate_verdict: { ...g }, at: new Date().toISOString(), later_outcome: null },
+    landed_unverified: true,
+    post_land_by_effect_check: "required",
+  };
+}
+/**
+ * Append a dissent to the gap row's classification_metadata.semantic_dissent, where calibration reads it.
+ * It deliberately does NOT write semantic_gate_reason: priorAttemptFeedbackBlock reads that as "your last
+ * draft was rejected", and a landed dissent was not. Called only through settleSemanticDissent.
+ */
+export async function recordSemanticDissent(gapId: string, dissent: SemanticDissent, deps: GapRowDeps = storeGapRowDeps): Promise<void> {
+  const row = await deps.readGap(gapId);
+  if (!row || String(row.status ?? "") === "closed") return;
+  const meta = { ...((row.classification_metadata as Record<string, unknown>) ?? {}) };
+  const prior = Array.isArray(meta.semantic_dissent) ? (meta.semantic_dissent as unknown[]) : [];
+  meta.semantic_dissent = [...prior, dissent].slice(-20);
+  await deps.writeGap({ ...row, classification_metadata: meta });
+}
+/**
+ * NO PHANTOM DISSENT: record a dissent only for a landing that happened — push_status "pushed" with a
+ * non-empty new_git_sha. A refused, deferred or unpushed cutover leaves no entry (a parked landing carries
+ * its dissent to the resume, which settles it then). Never throws: a lost record is logged, not fatal.
+ */
+export async function settleSemanticDissent(
+  gapId: string,
+  dissent: SemanticDissent | null | undefined,
+  cutoverResult: unknown,
+  deps: GapRowDeps = storeGapRowDeps,
+): Promise<"recorded" | "not_landed" | "none" | "write_failed"> {
+  if (!dissent || !gapId) return "none";
+  const r = (cutoverResult ?? {}) as Record<string, unknown>;
+  const pushed = r["push_status"] === "pushed" && typeof r["new_git_sha"] === "string" && String(r["new_git_sha"]).trim() !== "";
+  if (!pushed) return "not_landed";
+  try {
+    await recordSemanticDissent(gapId, dissent, deps);
+    return "recorded";
+  } catch (err) {
+    console.warn(`[fc-semantic-dissent] gap=${gapId}: landed under dissent but the record was NOT written (${(err as Error)?.message ?? String(err)}) — calibration loses this sample`);
+    return "write_failed";
+  }
+}
+/**
+ * THE READER: the landing's post-land by-effect check resolved. Fill later_outcome {result, at} on every
+ * dissent of the gap still pending; resolved entries are untouched; nothing pending writes nothing.
+ * Called by the pending-land sweep (gap-to-feature sweepPendingLandVerificationsOnce). Returns the count filled.
+ */
+export async function resolveDissentOutcome(gapId: string, outcome: { result: "passed" | "failed"; at?: string }, deps: GapRowDeps = storeGapRowDeps): Promise<number> {
+  if (!gapId) return 0;
+  const row = await deps.readGap(gapId);
+  if (!row) return 0;
+  const meta = { ...((row.classification_metadata as Record<string, unknown>) ?? {}) };
+  const list = Array.isArray(meta.semantic_dissent) ? (meta.semantic_dissent as Array<Record<string, unknown>>) : [];
+  const at = outcome.at ?? new Date().toISOString();
+  let filled = 0;
+  const next = list.map((d) => {
+    if (!d || d.later_outcome != null) return d;
+    filled += 1;
+    return { ...d, later_outcome: { result: outcome.result, at } };
+  });
+  if (filled === 0) return 0;
+  meta.semantic_dissent = next;
+  await deps.writeGap({ ...row, classification_metadata: meta });
+  return filled;
+}
+/** Vessel-relative path -> text for every source file under `<root>/src` (the read sites hollowWriteIdentifiers scans). */
+function readVesselSrcTree(root: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  let rels: string[] = [];
+  try { rels = readdirSync(`${root}/src`, { recursive: true }) as string[]; } catch { return out; }
+  for (const rel of rels) {
+    if (!/\.[cm]?[jt]sx?$/.test(rel)) continue;
+    try { out[`src/${rel}`] = readFileSync(`${root}/src/${rel}`, "utf8"); } catch { /* unreadable: contributes no read sites */ }
+  }
+  return out;
+}
+
 /** Tests EXECUTED in a `bun test` run (pass + fail from its summary), or null when either count is
  *  missing. Flips move a test between pass and fail and leave this unchanged; deleting a test,
  *  marking it skip/todo, or a file that fails to load lowers it. */
@@ -6212,6 +6382,8 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
   const gapClosedInStore = gateSource === "store" && gateGapStatus === "closed";
   let terminalRefusal: string | null = null;
   const ownCheckRan: string[] = [];
+  // Per-vessel own-check evidence, read by the semantic-gate disposition (semanticGateDisposition).
+  const ownEvidence = new Map<string, OwnCheckEvidence>();
   // The gap's own check on the untouched parent (a detached worktree at HEAD; the draft is uncommitted).
   // One run per (gap, vessel, base sha, check): the green-draft contract and the red-draft no-effect
   // comparison share it. An unjudgeable run is not cached.
@@ -6595,6 +6767,7 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
       // Logged on PASS too: a skipped check must be distinguishable from a passed one (qa, 1bc78f8).
       console.log(`[fc-own-check] ${JSON.stringify({ gap: pointer.gap?.id ?? null, vessel: v, source: gateSource, test_file: ownRef?.test_file ?? null, only: ownRef?.only_tests ?? [], ran: ownRan, red: ownRed, unjudged: ownUnjudged, stray: strayTests, tc_ok: tcOk, base_red: ownBaseRed, expects: ownExpects, contract_breach: contractBreach })}`);
       if (ownRan && ownRed.length === 0 && !ownUnjudged && !contractBreach) ownCheckRan.push(v);
+      if (ownRan && ownRef && !ownUnjudged) ownEvidence.set(v, { test_file: ownRef.test_file, ran: ownRan, tc_ok: tcOk, base_red: ownBaseRed, draft_red: ownRed, contract_breach: contractBreach });
     } else {
       // No gap on this compose (apply-proposal-as-patch, perf-canary): logged so the ungated path is countable.
       console.log(`[fc-own-check] ${JSON.stringify({ gap: null, vessel: v, source: "none" })}`);
@@ -6987,6 +7160,8 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
   // on_live_path=false → flip FAVORABLE→UNFAVORABLE (rolls back below, gap stays open
   // + informed). Skip when the gate is flag-disabled or there were no edits to judge.
   let semantic_gate: (SemanticGateVerdict & { skipped?: string }) | null = null;
+  // A landing over an advisory addresses:false carries this stamp to the cutover (landed_unverified) and the park.
+  let semanticDissent: SemanticDissent | null = null;
   // must_be_called constraints this gate run implies (on a rejection), written on the attempt record below.
   let gateConstraints: MustBeCalledConstraint[] = [];
   if (verdict === "FAVORABLE" && SEMANTIC_CUTOVER_GATE) {
@@ -7251,7 +7426,28 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
         reason: semantic_gate.reason,
       })}`);
 
-      if (!semantic_gate.addresses || semantic_gate.on_live_path === false) {
+      // THE DISPOSITION: on a draft that turned its gap's armed own check red->green, a non-hard-fail
+      // addresses:false is advisory (semanticGateDisposition). The vessels' post-patch src is read only
+      // when the hollow-write rule can matter: the gate refused without a hard fail and a check went green.
+      const ownCheckEv = [...touched].map((v) => ownEvidence.get(v)).find((e): e is OwnCheckEvidence => !!e) ?? null;
+      const dissentPossible = (!semantic_gate.addresses || semantic_gate.on_live_path === false) && semantic_gate.hard_fail !== true && ownCheckWentRedToGreen(ownCheckEv);
+      const dispositionSrc: Record<string, string> = {};
+      if (dissentPossible) for (const v of touched) Object.assign(dispositionSrc, readVesselSrcTree(vesselRoot(v)));
+      const editSiteMeta = (gateGapMeta ?? pointer.gap?.classification_metadata ?? {}) as Record<string, unknown>;
+      const disposition = semanticGateDisposition({
+        gate: semantic_gate,
+        own_check: ownCheckEv,
+        diff,
+        edit_site: typeof editSiteMeta.edit_site === "string" ? editSiteMeta.edit_site : null,
+        src_files: dispositionSrc,
+      });
+      if (disposition.semantic_dissent) {
+        semanticDissent = disposition.semantic_dissent;
+        console.log(`[fc-semantic-dissent] ${JSON.stringify({ gap_id: pointer.gap?.id ?? null, own_check: ownCheckEv?.test_file ?? null, reason: semanticDissent.reason.slice(0, 300), landing: "landed_unverified" })}`);
+      } else if (dissentPossible && disposition.veto) {
+        console.log(`[fc-semantic-dissent] ${JSON.stringify({ gap_id: pointer.gap?.id ?? null, own_check: ownCheckEv?.test_file ?? null, veto: disposition.veto })}`);
+      }
+      if (!disposition.land) {
         verdict = "UNFAVORABLE";
         // Per-gap failure lesson write-back on every UNFAVORABLE semantic-gate rejection.
         // The pointer may carry no gap id in the route-edit compose flow, so we also
@@ -7549,6 +7745,7 @@ const earlyAttempt = await Promise.race([
             files: parkFiles,
             verify: { typecheck: true, shape_dispatch: true, tests: true },
             judge: { addresses: semantic_gate?.addresses ?? null, reason: semantic_gate?.reason ?? null },
+            ...(semanticDissent ? { semantic_dissent: semanticDissent } : {}),
             parked_at: new Date().toISOString(),
             reason: "pre-cutover",
             attempt_id: earlyAttempt.attempt_id ?? null,
@@ -7581,9 +7778,11 @@ const earlyAttempt = await Promise.race([
         // the proposal id — commits become trace-matchable instead of unknown-gap.
         gap_id: pointer.gap?.id ?? "adhoc-spec",
         proposal_id: `${pointer.gap?.id ?? "adhoc"}-compose-report`,
+        ...(semanticDissent ? { semantic_dissent: semanticDissent } : {}),
         skip_push: pointer.skip_push ?? false,
       } as never);
       cutovers.push({ vessel, result: cut.body });
+      if (pointer.gap?.id) await settleSemanticDissent(String(pointer.gap.id), semanticDissent, cut.body);
         try { await callTool(toolsEndpoint, "shell", { command: `rm -rf ${JSON.stringify(mitosisRoot)}`, cwd: REPO_ROOT }); } catch { /* best-effort staging teardown */ }
     }
   }
@@ -7884,6 +8083,8 @@ const earlyAttempt = await Promise.race([
           semantic_addresses: semantic_gate?.addresses ?? null,
           semantic_reason: String(semantic_gate?.reason ?? "").slice(0, 400),
           hard_fail: semantic_gate?.hard_fail ?? null,
+          // Landed over an advisory addresses:false (semanticGateDisposition): landed_unverified until the by-effect check.
+          semantic_dissent: semanticDissent !== null,
           verify_ok: (verify as Array<Record<string, unknown>>).map((v) => v?.ok ?? null),
           verify_failed_output: (verify as Array<Record<string, unknown>>).filter((v) => v?.ok === false).map((v) => String(v?.output ?? "").split(String.fromCharCode(10)).filter((l) => l.includes("(fail)") || l.includes("error TS")).slice(0, 10).join(" ; ")).slice(0, 2),
           // EFFECT COVERAGE — was there anything that could EXECUTE the changed code?

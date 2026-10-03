@@ -1,7 +1,7 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { ResolverResult } from "./types.js";
-import { resolveFeatureCompose, priorAttemptFeedbackBlock, readParkedLanding } from "./feature-compose.js";
+import { resolveFeatureCompose, priorAttemptFeedbackBlock, readParkedLanding, resolveDissentOutcome } from "./feature-compose.js";
 import { attemptEvidenceBlock, explicitLineHint } from "./retry-evidence.js";
 
 // TYPE AUGMENTATION — allow callers to pass an optional 'directed' flag through the
@@ -3777,6 +3777,14 @@ async function landedCommitRunningHere(sha: string): Promise<"running" | "not se
   return "running";
 }
 
+/** The catch for a dissent-outcome write: logged, never fatal to the sweep (calibration loses one sample). */
+function dissentOutcomeUnwritten(gapId: string, result: "passed" | "failed"): (err: unknown) => number {
+  return (err) => {
+    console.warn(`[gap-sweep] gap ${gapId}: semantic-dissent outcome '${result}' NOT written (${(err as Error)?.message ?? String(err)})`);
+    return 0;
+  };
+}
+
 async function recordFalsifiedAutonomousLanding(g: Record<string, unknown>, meta: Record<string, unknown>, sha: string): Promise<"recorded" | "awaiting_restart" | "not_applicable"> {
   if (meta.regressed_by !== undefined && meta.regressed_by !== null) return "not_applicable";
   if (meta.predicate_source === "removed_line_of_landing_commit") return "not_applicable";
@@ -4029,6 +4037,8 @@ const pending = gaps
         tally.reverted += 1;
         console.warn(`[gap-sweep] gap ${String(g.id)} NOT closed: landed sha ${sha.slice(0, 12)} was REVERTED — the change is gone from HEAD, so the gap is unresolved and stays open for another attempt`);
         await releaseUnresolvedLanding(g, `landed ${sha.slice(0, 12)} was reverted`, sha);
+        // A landing made under a semantic dissent resolves its by-effect check as failed: it is gone.
+        await resolveDissentOutcome(String(g.id ?? ""), { result: "failed" }).catch(dissentOutcomeUnwritten(String(g.id ?? ""), "failed"));
         continue;
       }
       // Post-cutover: the async verifier CAN now observe the landed state. Close ONLY on a
@@ -4056,11 +4066,18 @@ const pending = gaps
         tally.present += 1;
         const falsified = await recordFalsifiedAutonomousLanding(g, meta, sha);
         if (falsified === "awaiting_restart") { tally.awaiting_restart += 1; sweepAwaitingRestart = true; continue; }
-        if (falsified === "recorded") { tally.falsified += 1; continue; }
+        // A semantic dissent's by-effect check fails only on a 'present' ATTRIBUTABLE to the landing (the
+        // landed code is running here); a 'present' read before the restart says nothing about it.
+        if (falsified === "recorded") {
+          await resolveDissentOutcome(gidSweep, { result: "failed" }).catch(dissentOutcomeUnwritten(gidSweep, "failed"));
+          tally.falsified += 1;
+          continue;
+        }
         // A MEASURED 'present' while the landing runs here: the change did not fix it, so it gets another attempt.
         // Class-3 'present' (landed twice) stays held for the human the re-land escalation asks.
         if (liftLandVerificationHold(meta) && landVerdictIsMeasured(meta) && (await landedCommitRunningHere(sha)) === "running") {
           await releaseUnresolvedLanding(g, `measured present with landed ${sha.slice(0, 12)} running`);
+          await resolveDissentOutcome(gidSweep, { result: "failed" }).catch(dissentOutcomeUnwritten(gidSweep, "failed"));
         }
         const editSitePresent = gapEditSite(g, (g.classification_metadata ?? g.metadata ?? {}) as Record<string, unknown>) ?? "";
         if (landedCommitVerdict(gidSweep, editSitePresent) === 'present') {
@@ -4127,6 +4144,8 @@ const pending = gaps
       if (sweepCloseWrite?.shape !== "structuredError") await closeAncestorsOnSamePredicate(String(g.id), sweepClosedMeta);
       // Calibration land credit is taken by the gap-store holder from the close written above.
       updateClassPosterior(gapClassOf(g), true);
+      // The by-effect check passed: a landing made under a semantic dissent resolves it as passed.
+      if (sweepCloseWrite?.shape !== "structuredError") await resolveDissentOutcome(String(g.id), { result: "passed" }).catch(dissentOutcomeUnwritten(String(g.id), "passed"));
       out.closed += 1;
     }
   } catch (err) {

@@ -211,6 +211,45 @@ describe("calibrationWindow is a trust-root pool shape", () => {
   });
 });
 
+// scriptRunnerAllowlist: which repo scripts local-tools-vessel's script runner may execute WITH the fleet
+// credential injected, each pinned to an approved git blob hash. A write here is a grant to run code with
+// METABOB_API_KEY, so the node's own key (the autonomous lane) must not create or change one; only an
+// operator (admin) can, and the runner accepts only rows carrying the server's operator attestation.
+describe("scriptRunnerAllowlist is a trust-root pool shape", () => {
+  const post = (auth: string | null, pointer: Record<string, unknown>) => impulsesRouter.request("/v2/impulses/resolve", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...(auth ? { Authorization: auth } : {}) },
+    body: JSON.stringify({ impulse: pointer }),
+  });
+  const entry = (id: string, extra: Record<string, unknown> = {}) => ({
+    type: "poolImpulse_write", id, shape: "scriptRunnerAllowlist", status: "open",
+    body: { script_id: id, path: "validation/scripts/run-weekly-harness.sh", blob_sha: "0".repeat(40), args_schema: [], timeout_s: 600, max_output_bytes: 65536 },
+    ...extra,
+  });
+  const row = (id: string) => resolvePoolImpulse({ type: "poolImpulse", shape: "scriptRunnerAllowlist", id }).body.impulses[0];
+
+  it("MUST-FAIL: a node-self (node-scoped) key's scriptRunnerAllowlist write is refused (403) and nothing is stored", async () => {
+    const res = await post(`ApiKey ${NODE_KEY}`, entry("sra-node"));
+    expect(res.status).toBe(403);
+    expect(row("sra-node")).toBeUndefined();
+  });
+
+  it("MUST-FAIL: an update by id (shape omitted) of an approved entry with the node key is refused; the pinned hash is unchanged", async () => {
+    expect((await post(`ApiKey ${ADMIN_KEY}`, entry("sra-upd"))).status).toBe(200);
+    const before = JSON.stringify(row("sra-upd"));
+    const res = await post(`ApiKey ${NODE_KEY}`, { type: "poolImpulse_write", id: "sra-upd", body: { script_id: "sra-upd", path: "x.sh", blob_sha: "f".repeat(40) } });
+    expect(res.status).toBe(403);
+    expect(JSON.stringify(row("sra-upd"))).toBe(before);
+  });
+
+  it("an admin write succeeds and is stamped attested.by = operator (what the runner requires)", async () => {
+    const res = await post(`ApiKey ${ADMIN_KEY}`, entry("sra-admin"));
+    expect(res.status).toBe(200);
+    const r = row("sra-admin") as unknown as { attested?: { by: string } } | undefined;
+    expect(r?.attested?.by).toBe("operator");
+  });
+});
+
 // SERVER-SIDE ATTESTATION. StandingImpulse.source is caller-supplied and proves nothing, so a reader (the
 // human surface) could not tell an operator-written trust-root row from any other. The store's one writer
 // stamps `attested` (outside body) on a trust-root write it accepted with an operator credential, and no

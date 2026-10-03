@@ -1193,6 +1193,8 @@ export function operatorMarkerOf(pointer: unknown): string | null {
   const v = (pointer as { operator?: unknown } | null | undefined)?.operator;
   return typeof v === "string" && OPERATOR_MARKER.test(v.trim()) ? v.trim() : null;
 }
+/** The keys a close leaves in classification_metadata as its verdict; an open row carries none of them. */
+export const CLOSURE_EVIDENCE_KEYS = ["closed_reason", "closed_by", "close_basis", "landed_sha", "landed_commit", "falsifier_exercise", "close_note"] as const;
 const nonEmptyString = (v: unknown): v is string => typeof v === "string" && v.trim().length > 0;
 /**
  * CLOSE NEEDS EVIDENCE (2026-10-03). What a write moving an existing row INTO closed must carry:
@@ -1735,6 +1737,18 @@ export async function resolveSubstrateGapWrite(
     if (holdKeepsText) {
       if ("edit_site" in exMeta) inMeta["edit_site"] = exMeta["edit_site"];
       else delete inMeta["edit_site"];
+    }
+    // AN OPEN ROW CARRIES NO CLOSURE EVIDENCE (2026-10-03). The carry-forward above copies the last close's
+    // closed_reason / closed_by / landed_sha / falsifier_exercise into a reopened row, where a walk echoing
+    // the row with status "closed" would pass close_needs_evidence on a verdict nobody produced for this
+    // close. Cleared on every write whose resulting status is open (a reopen, or an open write echoing a
+    // stale closed snapshot). No reader of an open row needs them (audited: isLiteralOnlyStepClose, the
+    // step-replace check in gap-to-feature, the pending-land sweep, detector-yield-registry, goal-reach-tick
+    // read them on closed rows or not at all); reopen_count records the earlier close.
+    if (String(gap.status ?? "open") === "open") {
+      const cleared = CLOSURE_EVIDENCE_KEYS.filter((k) => k in inMeta);
+      for (const k of cleared) delete inMeta[k];
+      if (cleared.length > 0) console.log(`[substrate-gap] ${gap.id}: open row, cleared closure evidence ${cleared.join(", ")}`);
     }
     gap.classification_metadata = inMeta;
 

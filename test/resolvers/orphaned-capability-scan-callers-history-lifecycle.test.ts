@@ -37,12 +37,33 @@
 //                 cm.closed_by = "orphaned_capability_scan", cm.consumer_appeared = "<file>:<line>"
 //                 (or a commit sha)
 //   gap id        `orphaned-capability-<shape with "-" normalised to "_">`
+//   grandfather   a closed/rejected row with NO fingerprint (written before fingerprints existed)
+//                 is treated as CURRENT: it is not reopened. The one exception is a row rejected
+//                 for `no_live_producer` (cm.unreachable_reason / cm.rejected_reason), whose
+//                 condition clears when the producer is live again (non-terminal reject).
+//                 Lazy backfill of cm.fingerprint onto such rows is optional, keeps their status,
+//                 and is capped per tick by pointer.max_backfill.
+//   scan record   exactly ONE `orphanedCapabilityScanRecord_write` per emitting tick, posted to
+//                 the dev-vessel impulses URL: { record: { detector: "orphaned_capability_scan",
+//                 generated_at, orphans: [{ shape, gap_id, fingerprint }] } } — the full current
+//                 orphan set, including orphans whose gap write was suppressed. It replaces per-gap
+//                 re-writes as the "still detected" signal.
+//   expiry        gap_lifecycle_scan takes the records as pointer.scan_records (newest last) and
+//                 pointer.absent_scans_to_expire (N). For an orphaned_capability gap, when records
+//                 are supplied: present in the LATEST record ⇒ never expired, whatever its age;
+//                 absent from each of the latest N records ⇒ expired (closed_reason
+//                 "expired_not_redetected"), whatever its age. No records ⇒ the age rule unchanged.
+//
+// CALL vs REGISTRATION (qa ruling): a CALL — `pointer: { type: "X" }` — counts in ANY file,
+// the producer's own vessel included. REGISTRATION syntax (discovery list entries, `case "X":`
+// labels, SUPPORTED_SHAPES sets, the pointer interface) never counts.
 
 import { describe, it, expect, beforeEach, afterEach, spyOn } from "bun:test";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { resolveOrphanedCapabilityScan } from "../../src/resolvers/orphaned-capability-scan.js";
+import { resolveGapLifecycleScan } from "../../src/resolvers/gap-lifecycle-scan.js";
 
 // ---------------------------------------------------------------------------------------------
 // Fixtures
@@ -155,6 +176,7 @@ type Gap = { id: string; status?: string; category?: string; summary?: string; c
 class GapStore {
   gaps = new Map<string, Gap>();
   writes: Gap[] = [];
+  records: any[] = [];
   seed(g: Gap): void {
     this.gaps.set(g.id, { category: "orphaned_capability", ...g });
   }
@@ -177,6 +199,7 @@ class GapStore {
   }
   resetWrites(): void {
     this.writes = [];
+    this.records = [];
   }
 }
 
@@ -204,6 +227,10 @@ function wire(opts: { liveShapes: string[]; store: GapStore; templates?: unknown
       if (pointer.type === "substrateGap_write" && pointer.gap?.id) {
         opts.store.write(pointer.gap as Gap);
         return new Response(JSON.stringify({ shape: "substrateGap", body: { ok: true } }), { status: 200 });
+      }
+      if (pointer.type === "orphanedCapabilityScanRecord_write") {
+        opts.store.records.push(pointer.record ?? pointer);
+        return new Response(JSON.stringify({ shape: "orphanedCapabilityScanRecord", body: { ok: true } }), { status: 200 });
       }
       if (pointer.type === "substrateGap") {
         return new Response(JSON.stringify({ shape: "substrateGap", body: { gaps: opts.store.read(pointer) } }), { status: 200 });
@@ -308,6 +335,7 @@ describe("orphaned-capability-scan: callers, history and lifecycle", () => {
     put(ws, "repos/widget-vessel/src/config.ts", `export const SHAPES = [\n  "widget_render",\n  "widget_status",\n];\n`);
     put(ws, "repos/widget-vessel/src/routes/impulses.ts",
       `export function route(t: string) {\n  switch (t) {\n    case "widget_render":\n      return 1;\n  }\n  return 0;\n}\n`);
+    put(ws, "repos/widget-vessel/src/shapes.ts", `export const SUPPORTED_SHAPES = new Set<string>(["widget_render", "widget_status"]);\n`);
     const store = new GapStore();
     wire({ liveShapes: ["widget_render", "fs_read"], store });
     const body = await scan({ emit_gaps: false });
@@ -322,6 +350,21 @@ describe("orphaned-capability-scan: callers, history and lifecycle", () => {
       `export function route(t: string) {\n  switch (t) {\n    case "widget_render":\n      return 1;\n  }\n  return 0;\n}\n`);
     put(ws, "repos/dashboard-vessel/src/panel.ts",
       `declare function resolve(i: unknown): Promise<unknown>;\nexport async function draw(id: string) {\n  return resolve({ pointer: { type: "widget_render", id } });\n}\n`);
+    const store = new GapStore();
+    wire({ liveShapes: ["widget_render", "fs_read"], store });
+    const body = await scan({ emit_gaps: false });
+    expectWired(body, 2);
+    expect(body.capability_orphans).not.toContain("widget_render");
+  });
+
+  it("control: a CALL in the producer's OWN vessel counts too — calls count in any file, registration in none", async () => {
+    // The shape of development-vessel's feature-compose.ts:5087, which calls author_composed_capability
+    // from inside the vessel that registers it.
+    put(ws, "repos/widget-vessel/src/config.ts", `export const SHAPES = [\n  "widget_render",\n];\n`);
+    put(ws, "repos/widget-vessel/src/routes/impulses.ts",
+      `export function route(t: string) {\n  switch (t) {\n    case "widget_render":\n      return 1;\n  }\n  return 0;\n}\n`);
+    put(ws, "repos/widget-vessel/src/resolvers/compose.ts",
+      `declare function resolve(i: unknown): Promise<unknown>;\nexport async function delegate(goal: string) {\n  return resolve({ pointer: { type: "widget_render", goal } });\n}\n`);
     const store = new GapStore();
     wire({ liveShapes: ["widget_render", "fs_read"], store });
     const body = await scan({ emit_gaps: false });
@@ -409,7 +452,9 @@ describe("orphaned-capability-scan: callers, history and lifecycle", () => {
 
   it("lifecycle (b) control: a rejected gap reopens when its producer is live and the shape is still orphaned", async () => {
     const store = new GapStore();
-    store.seed({ id: "orphaned-capability-gone_shape", status: "rejected", classification_metadata: { shape: "gone_shape" } });
+    // Rejected the way the scan rejects today: unreachable, no live producer. That condition has
+    // now cleared, so this row is NOT grandfathered (see the grandfather test below).
+    store.seed({ id: "orphaned-capability-gone_shape", status: "rejected", classification_metadata: { shape: "gone_shape", unreachable_reason: "no_live_producer" } });
     wire({ liveShapes: ["gone_shape", "fs_read"], store });
     const body = await scan();
     expectWired(body, 2);
@@ -458,6 +503,7 @@ describe("orphaned-capability-scan: callers, history and lifecycle", () => {
     expect(body.capability_orphans).toContain("problem_detection");
     expect(body.gaps_emitted).toBe(0);
     expect(store.writes).toHaveLength(0);
+    expect(store.records).toHaveLength(0);
   });
 
   it("flood guard: emit mode is capped per tick and never writes one id twice", async () => {
@@ -486,5 +532,161 @@ describe("orphaned-capability-scan: callers, history and lifecycle", () => {
     expect(second.capability_orphan_count).toBe(2); // still orphaned — still reported
     expect(second.gaps_emitted).toBe(0);
     expect(store.writes.filter((w) => w.status === "open")).toHaveLength(0);
+  });
+
+  it("grandfathered rows don't reopen, AND a never-gapped lost caller still emits", async () => {
+    // Closed/rejected orphan rows written before fingerprints existed carry none. Treating
+    // "no fingerprint" as "stale" would reopen the whole legacy corpus in one deploy.
+    const legacy = ["legacy_a", "legacy_b", "legacy_c", "legacy_d", "legacy_e"];
+    const store = new GapStore();
+    legacy.forEach((sh, i) =>
+      store.seed({
+        id: `orphaned-capability-${sh}`,
+        status: i % 2 === 0 ? "closed" : "rejected",
+        classification_metadata: { shape: sh, ...(i % 2 === 0 ? { closed_reason: "bridge_minted" } : { rejected_reason: "not_worth_closing" }) },
+      }),
+    );
+    // ... while the af61dee lost caller has never had a gap at all.
+    for (const [rel, c] of Object.entries(DEV_VESSEL_PRODUCER)) put(ws, rel, c);
+    const { removalSha } = replayAf61dee(ws, "after");
+    wire({ liveShapes: [...legacy, "author_composed_capability", "fs_read"], store });
+    const MAX_BACKFILL = 2;
+    const body = await scan({ max_backfill: MAX_BACKFILL });
+    expectWired(body, legacy.length + 2);
+
+    // (i) no reopen wave: every legacy row keeps its status
+    for (const sh of legacy) {
+      const id = `orphaned-capability-${sh}`;
+      expect(store.writesFor(id, "open")).toHaveLength(0);
+      expect(store.gaps.get(id)!.status).not.toBe("open");
+    }
+    // (ii) any lazy fingerprint backfill is capped per tick and never flips status
+    const legacyWrites = store.writes.filter((w) => legacy.some((sh) => w.id === `orphaned-capability-${sh}`));
+    expect(legacyWrites.length).toBeLessThanOrEqual(MAX_BACKFILL);
+    for (const w of legacyWrites) {
+      expect(["closed", "rejected", undefined]).toContain(w.status);
+      expect(typeof w.classification_metadata?.fingerprint).toBe("string");
+    }
+    // (iii) the never-gapped lost caller is still emitted, as a lost caller
+    const [g] = store.writesFor("orphaned-capability-author_composed_capability", "open");
+    expect(g).toBeDefined();
+    expect(g!.classification_metadata?.orphan_kind).toBe("lost_caller");
+    expect(g!.classification_metadata?.lost_caller?.commit).toBe(removalSha);
+  });
+
+  it("MUST-FAIL scan-result record: each emitting tick writes exactly ONE record carrying the full orphan set and fingerprints (not one write per gap)", async () => {
+    const store = new GapStore();
+    wire({ liveShapes: ["alpha_cap", "beta_cap", "gamma_cap", "fs_read"], store });
+    const first = await scan();
+    expectWired(first, 4);
+    expect(first.capability_orphan_count).toBe(3);
+    expect(store.records).toHaveLength(1);
+    const rec1 = store.records[0];
+    expect(rec1.detector).toBe("orphaned_capability_scan");
+    expect(Number.isFinite(Date.parse(rec1.generated_at))).toBe(true);
+    expect((rec1.orphans as any[]).map((o) => o.gap_id).sort()).toEqual([
+      "orphaned-capability-alpha_cap", "orphaned-capability-beta_cap", "orphaned-capability-gamma_cap",
+    ]);
+    for (const o of rec1.orphans as any[]) expect(typeof o.fingerprint).toBe("string");
+
+    // Second, unchanged tick: no gap re-writes (dedup), but the record still says "still detected".
+    store.resetWrites();
+    const second = await scan();
+    expectWired(second, 4);
+    expect(store.writes.filter((w) => w.status === "open")).toHaveLength(0);
+    expect(store.records).toHaveLength(1);
+    expect((store.records[0].orphans as any[]).length).toBe(3);
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// gap_lifecycle_scan's expiry, decided by the scan-result records rather than by gap age.
+//
+// gap-lifecycle-scan.ts's expired_not_redetected pass (the write at :583) decides by AGE only
+// (updated_at older than detectorExpireHours) — and its own summary admits "a detector that never
+// ran is indistinguishable from a defect that was repaired". Once the orphan scan stops re-writing
+// unchanged gaps (flood guard above), age alone would expire every live orphan. The decision is
+// inline in resolveGapLifecycleScan (no narrower export exists), so it is driven through that
+// function with a temp gaps.json, a temp proposals dir, WORKSPACE_ROOT at the temp dir, a fetch
+// spy for every write, and the records injected as pointer.scan_records.
+// ---------------------------------------------------------------------------------------------
+
+describe("gap-lifecycle-scan: orphan expiry reads the per-tick scan-result record", () => {
+  const H = 3_600_000;
+  const iso = (msAgo: number) => new Date(Date.now() - msAgo).toISOString();
+
+  function orphanGap(shape: string, updatedMsAgo: number): Gap {
+    return {
+      id: `orphaned-capability-${shape}`,
+      category: "orphaned_capability",
+      source: "substrate_detected",
+      status: "open",
+      summary: `Resolver "${shape}" is live but uncalled`,
+      created_at: iso(updatedMsAgo + H),
+      updated_at: iso(updatedMsAgo),
+      // attempt evidence, so hasNoAttemptEvidence() does not exempt it from expiry
+      classification_metadata: { shape, failed_attempts: 1 },
+    };
+  }
+  const record = (gapIds: string[], minutesAgo: number) => ({
+    detector: "orphaned_capability_scan",
+    generated_at: iso(minutesAgo * 60_000),
+    orphans: gapIds.map((gap_id) => ({ gap_id, shape: gap_id.replace(/^orphaned-capability-/, ""), fingerprint: "fp" })),
+  });
+
+  async function runLifecycle(gaps: Gap[], extra: Record<string, unknown>): Promise<{ expired: string[]; body: any }> {
+    mkdirSync(join(ws, "gaps"), { recursive: true });
+    mkdirSync(join(ws, "proposals", ".applied"), { recursive: true });
+    const gapsPath = join(ws, "gaps", "gaps.json");
+    writeFileSync(gapsPath, JSON.stringify(gaps));
+    const writes: Gap[] = [];
+    fetchSpy?.mockRestore();
+    fetchSpy = spyOn(globalThis, "fetch").mockImplementation((async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const b = init?.body ? JSON.parse(String(init.body)) : {};
+      const ptr = b?.impulse?.pointer ?? {};
+      if (ptr.type === "substrateGap_write" && ptr.gap) writes.push(ptr.gap);
+      return new Response(JSON.stringify({ shape: "ok", body: {} }), { status: 200 });
+    }) as unknown as typeof fetch);
+    const r = (await resolveGapLifecycleScan({
+      type: "gap_lifecycle_scan",
+      gapsPath,
+      proposalsDir: join(ws, "proposals"),
+      staleHours: 48,
+      autoClose: true,
+      falsify: false,
+      devVesselImpulsesUrl: DEV,
+      ...extra,
+    } as never)) as { body: any };
+    const expired = writes
+      .filter((w) => w.status === "closed" && w.classification_metadata?.closed_reason === "expired_not_redetected")
+      .map((w) => w.id);
+    return { expired, body: r.body };
+  }
+
+  it("MUST-FAIL: an orphan gap still present in the LATEST scan record does not expire, however old", async () => {
+    const old = orphanGap("still_here", 400 * H); // far past every age threshold
+    const recs = [record(["orphaned-capability-other"], 30), record(["orphaned-capability-other"], 20), record([old.id], 10)];
+    const { expired } = await runLifecycle([old], { scan_records: recs, absent_scans_to_expire: 3 });
+    expect(expired).not.toContain(old.id);
+  });
+
+  it("MUST-FAIL: an orphan gap absent from N consecutive scan records expires, however fresh", async () => {
+    const fresh = orphanGap("gone_quiet", 60_000); // touched a minute ago
+    const recs = [record([fresh.id], 40), record(["orphaned-capability-other"], 30), record(["orphaned-capability-other"], 20), record(["orphaned-capability-other"], 10)];
+    const { expired } = await runLifecycle([fresh], { scan_records: recs, absent_scans_to_expire: 3 });
+    expect(expired).toContain(fresh.id);
+  });
+
+  it("control: absent from only N-1 records, a fresh orphan gap does not expire", async () => {
+    const fresh = orphanGap("briefly_quiet", 60_000);
+    const recs = [record([fresh.id], 30), record(["orphaned-capability-other"], 20), record(["orphaned-capability-other"], 10)];
+    const { expired } = await runLifecycle([fresh], { scan_records: recs, absent_scans_to_expire: 3 });
+    expect(expired).not.toContain(fresh.id);
+  });
+
+  it("control: with no scan records supplied, the age rule is unchanged (an old orphan gap expires)", async () => {
+    const old = orphanGap("aged_out", 400 * H);
+    const { expired } = await runLifecycle([old], {});
+    expect(expired).toContain(old.id);
   });
 });

@@ -301,6 +301,77 @@ describe("attested: the server stamps operator trust-root writes; callers cannot
   });
 });
 
+// TRUST-ROOT MEMBERSHIP IS NOT EDITABLE IN PLACE. A row's shape decides whether it is a trust root, so an
+// update by id may not move a row out of a trust-root shape (that would drop it from the gate and keep its
+// id) nor into one (that would turn an ordinary row, written by anyone, into a trust root). The node key is
+// refused by the credential check (403); an operator gets 409: retire the row and create a new one.
+describe("a trust-root row's shape cannot change in place, in either direction", () => {
+  const post = (auth: string | null, pointer: Record<string, unknown>) => impulsesRouter.request("/v2/impulses/resolve", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...(auth ? { Authorization: auth } : {}) },
+    body: JSON.stringify({ impulse: pointer }),
+  });
+  const rowOf = (id: string) => resolvePoolImpulse({ type: "poolImpulse", id }).body.impulses[0] as (Record<string, unknown> & { body: Record<string, unknown> }) | undefined;
+
+  it("MUST-FAIL (A): an admin update that changes a calibrationWindow row's shape is 409 trust_root_shape_immutable; the row is unchanged and still attested", async () => {
+    expect((await post(`ApiKey ${ADMIN_KEY}`, { type: "poolImpulse_write", id: "imm-cw", shape: "calibrationWindow", body: { window_id: "w-imm" } })).status).toBe(200);
+    const before = JSON.stringify(rowOf("imm-cw"));
+    const res = await post(`ApiKey ${ADMIN_KEY}`, { type: "poolImpulse_write", id: "imm-cw", shape: "timeShapedRhythm", body: { x: 1 } });
+    expect(res.status).toBe(409);
+    const j = (await res.json()) as { success: boolean; error?: string; body?: { ok: boolean; error?: string; hint?: string } };
+    expect(j.success).toBe(false);
+    expect(String(j.error)).toContain("trust_root_shape_immutable");
+    expect(j.body?.hint).toContain("retire");
+    expect(JSON.stringify(rowOf("imm-cw"))).toBe(before);
+    expect(rowOf("imm-cw")!["shape"]).toBe("calibrationWindow");
+    expect((rowOf("imm-cw")!["attested"] as { by: string }).by).toBe("operator");
+  });
+
+  it("MUST-FAIL (A, in process): the store writer itself refuses the reshape even with operator auth", () => {
+    expect(resolvePoolImpulseWrite({ type: "poolImpulse_write", id: "imm-sn", shape: "substrateNodes", body: { discovery_endpoints: [N1] } }, { operator: true }).body.ok).toBe(true);
+    const r = resolvePoolImpulseWrite({ type: "poolImpulse_write", id: "imm-sn", shape: "autonomyScope" }, { operator: true });
+    expect(r.body.ok).toBe(false);
+    expect(r.body.error).toContain("trust_root_shape_immutable");
+    expect(rowOf("imm-sn")!["shape"]).toBe("substrateNodes");
+  });
+
+  it("control (A): an admin update keeping the same trust-root shape succeeds and re-stamps", async () => {
+    expect((await post(`ApiKey ${ADMIN_KEY}`, { type: "poolImpulse_write", id: "imm-same", shape: "calibrationWindow", body: { window_id: "w-same" } })).status).toBe(200);
+    const first = (rowOf("imm-same")!["attested"] as { at: string }).at;
+    await Bun.sleep(5);
+    expect((await post(`ApiKey ${ADMIN_KEY}`, { type: "poolImpulse_write", id: "imm-same", shape: "calibrationWindow", body: { window_id: "w-same", seed: 3 } })).status).toBe(200);
+    const row = rowOf("imm-same")!;
+    expect(row.body).toEqual({ window_id: "w-same", seed: 3 });
+    expect(row["attested"]).toEqual({ by: "operator", key_id: "k1", at: row["updated_at"] as string });
+    expect((row["attested"] as { at: string }).at).not.toBe(first);
+  });
+
+  it("MUST-FAIL (B): a node-key update by id that names shape calibrationWindow on an ordinary row is refused (403); the row is unchanged", async () => {
+    expect((await post(`ApiKey ${NODE_KEY}`, { type: "poolImpulse_write", id: "promo-node", shape: "timeShapedRhythm", body: { r: 1 } })).status).toBe(200);
+    const before = JSON.stringify(rowOf("promo-node"));
+    const res = await post(`ApiKey ${NODE_KEY}`, { type: "poolImpulse_write", id: "promo-node", shape: "calibrationWindow", body: { window_id: "planted" } });
+    expect(res.status).toBe(403);
+    expect(JSON.stringify(rowOf("promo-node"))).toBe(before);
+  });
+
+  it("MUST-FAIL (B): an ADMIN promotion of an ordinary row into a trust-root shape is 409 too (create a new trust-root row instead); the row is unchanged", async () => {
+    expect((await post(`ApiKey ${NODE_KEY}`, { type: "poolImpulse_write", id: "promo-admin", shape: "timeShapedRhythm", body: { r: 2 } })).status).toBe(200);
+    const before = JSON.stringify(rowOf("promo-admin"));
+    const res = await post(`ApiKey ${ADMIN_KEY}`, { type: "poolImpulse_write", id: "promo-admin", shape: "calibrationWindow", body: { window_id: "promoted" } });
+    expect(res.status).toBe(409);
+    expect(String(((await res.json()) as { error?: string }).error)).toContain("trust_root_shape_immutable");
+    expect(JSON.stringify(rowOf("promo-admin"))).toBe(before);
+    expect(rowOf("promo-admin")).not.toHaveProperty("attested");
+  });
+
+  it("control: an admin CREATE of a new trust-root row (fresh id) still succeeds, and an ordinary row may change between ordinary shapes", async () => {
+    expect((await post(`ApiKey ${ADMIN_KEY}`, { type: "poolImpulse_write", id: "promo-fresh", shape: "calibrationWindow", body: { window_id: "fresh" } })).status).toBe(200);
+    expect((await post(`ApiKey ${NODE_KEY}`, { type: "poolImpulse_write", id: "plain-reshape", shape: "timeShapedRhythm", body: {} })).status).toBe(200);
+    expect((await post(`ApiKey ${NODE_KEY}`, { type: "poolImpulse_write", id: "plain-reshape", shape: "someOtherShape", body: {} })).status).toBe(200);
+    expect(rowOf("plain-reshape")!["shape"]).toBe("someOtherShape");
+  });
+});
+
 describe("self_fact_reconcile pool_record_pin: the record must equal the operator-seeded value", () => {
   const row = (pinned: Record<string, string[]> | undefined): sfr.SelfFactRow => ({
     id: "substrate_nodes_pinned", instrument: "pool_record_pin", profiles: ["*"], edit_site: "repos/development-vessel/src/resolvers/pool-impulse.ts",

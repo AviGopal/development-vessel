@@ -3421,7 +3421,7 @@ function testFailureSet(raw: string): Set<string> {
  * `touched` are paths of edited and created files; errors are matched to them by basename (tscErrorSet
  * lines are "path: error TSnnnn ..." with the position stripped).
  */
-export function typecheckVerdict(input: { tcExit: number | null; curTs: Set<string>; baseTs: Set<string>; touched: string[] }): { ok: boolean; new_ts: string[]; touched_err: boolean } {
+export function typecheckVerdict(input: { tcExit: number | null; curTs: Set<string>; baseTs: Set<string>; touched: string[] }): { ok: boolean; relaxed: boolean; new_ts: string[]; touched_err: boolean } {
   const newTs = [...input.curTs].filter((e) => !input.baseTs.has(e));
   const touchedBases = new Set(input.touched.map((p) => p.split("/").pop() ?? ""));
   const touchedErr = [...input.curTs].some((e) => {
@@ -3431,7 +3431,29 @@ export function typecheckVerdict(input: { tcExit: number | null; curTs: Set<stri
   });
   const answeredWithErrors = input.tcExit !== null && input.tcExit !== 124 && input.curTs.size > 0;
   const ok = input.tcExit === 0 || (answeredWithErrors && input.baseTs.size > 0 && newTs.length === 0 && !touchedErr);
-  return { ok, new_ts: newTs, touched_err: touchedErr };
+  return { ok, relaxed: ok && input.tcExit !== 0, new_ts: newTs, touched_err: touchedErr };
+}
+
+/**
+ * The verify pipeline run in a vessel root: install marker, dependency dry-run, typecheck, shape-dispatch, suite.
+ * SHAPE-DISPATCH RUNS WHATEVER THE TYPECHECK SAID (gap on-a-red-typecheck-baseline-the-shape-dispatch-check-is-
+ * skipped-and-reads-as-passed). It was skipped when TC_EXIT was non-zero, which is exactly the case the baseline-delta
+ * relaxation lets through, so relaxed drafts landed with it unchecked; bun runs TypeScript without typechecking, so
+ * the check is meaningful on a red baseline. The suite is still skipped on a failing typecheck (a patch that does not
+ * parse should not pay for 1900 tests, a07c8ce); the verify step's no-summary retry runs it for a relaxed draft.
+ */
+export function composeVerifyCommand(vAbs: string, sharedDispatchCheck: string): string {
+  return `cd ${JSON.stringify(vAbs)} && (echo "== install =="; [ -d node_modules ] || { bun install >/dev/null 2>&1; echo "INSTALL_EXIT=$?"; }; echo "== resolve =="; bun install --dry-run >/tmp/fc-dryrun.$$ 2>&1; echo "DRYRUN_EXIT=$?"; tail -6 /tmp/fc-dryrun.$$; rm -f /tmp/fc-dryrun.$$; echo "== typecheck =="; timeout 300 bun run typecheck 2>&1; TCE=$?; echo "TC_EXIT=$TCE"; echo "== shape-dispatch =="; if [ -f ${sharedDispatchCheck} ] && [ -f src/config.ts ] && [ -f src/routes/impulses.ts ]; then bun ${sharedDispatchCheck} ${JSON.stringify(vAbs)} 2>&1; echo "SD_EXIT=$?"; else echo "SD_EXIT=0"; fi; if [ "$TCE" -ne 0 ]; then echo "== tests =="; echo "SKIPPED_TYPECHECK_FAILED"; else echo "== tests =="; timeout 240 env -i PATH="$PATH" HOME="$HOME" NODE_ENV=test TZ=UTC WORKSPACE_ROOT="$(mktemp -d)" bun test --timeout 20000 2>&1 || true; fi)`;
+}
+/** The shape-dispatch exit from verify output, or null when the run printed no SD_EXIT marker. */
+export function shapeDispatchExit(raw: string): number | null {
+  const m = String(raw ?? "").match(/SD_EXIT=(\d+)/);
+  return m && m[1] ? parseInt(m[1], 10) : null;
+}
+/** Shape-dispatch passes on exit 0. A missing marker fails a draft whose typecheck passed only through the
+ *  baseline relaxation (the case the check used to be skipped in); a strict draft reads it as before. */
+export function shapeDispatchOk(sdExit: number | null, tc: { relaxed: boolean }): boolean {
+  return sdExit === 0 || (sdExit === null && !tc.relaxed);
 }
 
 /** The gap's own class2 test_suite check for vessel `v`, or null when it has none there. */
@@ -6840,7 +6862,7 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
       // The gap this keeps trying to close is REAL — a manifest that cannot install must
       // not reach origin/dev (ddffdee did exactly that). But the check belongs against the
       // CLONE before staging, where node_modules is not shared. Do not solve it here.
-      command: `cd ${JSON.stringify(vAbs)} && (echo "== install =="; [ -d node_modules ] || { bun install >/dev/null 2>&1; echo "INSTALL_EXIT=$?"; }; echo "== resolve =="; bun install --dry-run >/tmp/fc-dryrun.$$ 2>&1; echo "DRYRUN_EXIT=$?"; tail -6 /tmp/fc-dryrun.$$; rm -f /tmp/fc-dryrun.$$; echo "== typecheck =="; timeout 300 bun run typecheck 2>&1; TCE=$?; echo "TC_EXIT=$TCE"; if [ "$TCE" -ne 0 ]; then echo "== shape-dispatch =="; echo "SKIPPED_TYPECHECK_FAILED"; echo "== tests =="; echo "SKIPPED_TYPECHECK_FAILED"; else echo "== shape-dispatch =="; if [ -f ${SHARED_DISPATCH_CHECK} ] && [ -f src/config.ts ] && [ -f src/routes/impulses.ts ]; then bun ${SHARED_DISPATCH_CHECK} ${JSON.stringify(vAbs)} 2>&1; echo "SD_EXIT=$?"; else echo "SD_EXIT=0"; fi; echo "== tests =="; timeout 240 env -i PATH="$PATH" HOME="$HOME" NODE_ENV=test TZ=UTC WORKSPACE_ROOT="$(mktemp -d)" bun test --timeout 20000 2>&1 || true; fi)`,
+      command: composeVerifyCommand(vAbs, SHARED_DISPATCH_CHECK),
       cwd: REPO_ROOT,
       // The shell resolver kills the process GROUP at its request timeout, which defaulted to
       // 30s. This pipeline budgets 240s for the test step alone, so the kill landed mid-typecheck
@@ -6850,9 +6872,10 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
       timeout_sec: 720,
     });
     const raw = String((sh.body as { stdout?: unknown })?.stdout ?? "");
-    const tc = raw.match(/TC_EXIT=(\d+)/); const sd = raw.match(/SD_EXIT=(\d+)/);
+    const tc = raw.match(/TC_EXIT=(\d+)/);
     const tcExit = tc && tc[1] ? parseInt(tc[1], 10) : null;
-    const sdExit = sd && sd[1] ? parseInt(sd[1], 10) : 0;
+    // A MISSING SD_EXIT is null, not a pass (shapeDispatchExit); judged with the typecheck verdict below.
+    const sdExit = shapeDispatchExit(raw);
     // A VERIFY THAT NEVER INSTALLS CANNOT SEE A MANIFEST THAT NO LONGER INSTALLS.
     //
     // This ran `[ -d node_modules ] || bun install`, so the install was skipped
@@ -6899,9 +6922,10 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
     // The relaxation itself is typecheckVerdict (it was disabled by a one-line autonomous commit, 03064b74,
     // which left newTs and touchedErr computed and unread). On a red baseline the verify command above skips
     // the suite when TC_EXIT is non-zero; the no-summary retry below runs it then, so a relaxed draft is still
-    // judged by the suite and by its own check. KNOWN LIMIT: the same skip leaves SD_EXIT unprinted, which
-    // reads as 0, so shape-dispatch is not checked on a red baseline.
-    const { ok: tcOk, new_ts: newTs } = typecheckVerdict({ tcExit, curTs: tscErrorSet(raw), baseTs: baselineTsErrors.get(v) ?? new Set<string>(), touched: [...edited, ...created] });
+    // judged by the suite and by its own check. Shape-dispatch runs whatever the typecheck result
+    // (composeVerifyCommand), and a missing SD_EXIT on a relaxed draft refuses (shapeDispatchOk).
+    const { ok: tcOk, new_ts: newTs, relaxed: tcRelaxed } = typecheckVerdict({ tcExit, curTs: tscErrorSet(raw), baseTs: baselineTsErrors.get(v) ?? new Set<string>(), touched: [...edited, ...created] });
+    const sdOk = shapeDispatchOk(sdExit, { relaxed: tcRelaxed });
     // WAS THE TYPECHECK ANSWERED AT ALL? `bun run typecheck` had no timeout, so when the
     // surrounding shell call was cut off the TC_EXIT marker was never echoed: tcExit became
     // null and the gate failed the draft with a bare "verify" and no error text. Observed on
@@ -7151,7 +7175,7 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
     const terminal = isTerminalRefusal(contractBreach, gapClosedInStore);
     if (terminal) terminalRefusal = terminal;
     const ownOk = ownRed.length === 0 && !ownUnjudged && strayTests.length === 0 && !contractBreach && !gapClosedInStore;
-    const ok = installOk && dryRunOk && tcOk && sdExit === 0 && testOk && ownOk;
+    const ok = installOk && dryRunOk && tcOk && sdOk && testOk && ownOk;
     const detail = ((tcUnanswered || tcTimedOut) ? ` | TYPECHECK NOT ANSWERED (TC_EXIT=${String(tcExit)}) — the check did not complete, so this is UNVERIFIED, not proven broken. Failing closed is correct (an unverifiable edit must not land), but do not read this as a defect in the draft: it carries no TS error text.` : "")
       + (installOk ? "" : ` | DEPENDENCY INSTALL FAILED (INSTALL_EXIT=${String(installExit)}) — the staged manifest does not install; a typecheck against an already-populated node_modules cannot see this`)
       + (dryRunOk ? "" : ` | DEPENDENCY RESOLUTION FAILED (DRYRUN_EXIT=${String(dryRunExit)}) — the staged manifest names a dependency that does not resolve, so this change would break a fresh install even though it typechecks here: ${(raw.match(/== resolve ==\n([\s\S]*?)\n== typecheck ==/)?.[1] ?? "").slice(0, 400)}`)
@@ -7165,7 +7189,7 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
       passRegressed ? ` | PASSING TESTS DISAPPEARED: ${basePass} -> ${curPass} (a draft must not delete coverage or break module load to go green)` : "",
       summaryMissing ? ` | TEST SUITE PRODUCED NO SUMMARY on two runs (baseline passed ${basePass}; retry rc ${String(summaryRetryRc)}${summaryRetryRc === "124" || summaryRetryRc === "137" ? " = timed out or killed" : summaryRetryRc === "0" ? " = the suite exited early" : ""}): this draft cannot be verified` : "",
     ].join(""));
-    const stage: FailStage | null = ok ? null : !installOk ? "install" : !dryRunOk ? "resolve" : !tcOk ? "typecheck" : sdExit !== 0 ? "shape-dispatch" : !testOk ? "tests" : "own_check";
+    const stage: FailStage | null = ok ? null : !installOk ? "install" : !dryRunOk ? "resolve" : !tcOk ? "typecheck" : !sdOk ? "shape-dispatch" : !testOk ? "tests" : "own_check";
     return { vessel: v, errors: ok ? 0 : "verify", exit_code: tcExit, ok, output: (raw + detail).trim(), stage, ...(ownRan && ownRef ? { own: { test_file: ownRef.test_file, failing: ownFailing, ...(ownNoEffect !== undefined ? { no_effect_vs_parent: ownNoEffect } : {}), ...(ownBaseSha ? { base_sha: ownBaseSha } : {}), ...(ownParentCached ? { parent_cached: ownParentCached } : {}) } } : {}), ...(ok ? {} : { draft: { own_red: ownRed, introduced: confirmedNewTest, new_ts: newTs, gate_detail: detail.replace(/^\s*\|\s*/, "").trim() } }) };
   };
   let verify: VerifyResult[] = [];
@@ -8142,7 +8166,7 @@ const earlyAttempt = await Promise.race([
         // CITE WHAT WAS ACTUALLY CHECKED. This said ["typecheck"] alone, which
         // UNDER-STATES the evidence: runVerify above runs typecheck AND the
         // shape-dispatch agreement check AND the full suite, and this landing is gated
-        // on all three (`tcOk && sdExit === 0 && testOk`), with the test half
+        // on all three (`tcOk && sdOk && testOk`), with the test half
         // baseline-delta and flake-confirmed by a second run. A trace that cites only
         // typecheck makes the cutover look test-blind to anyone auditing it — I read it
         // that way myself and wrongly concluded this path never ran tests. The cited

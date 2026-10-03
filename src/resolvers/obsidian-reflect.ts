@@ -1,4 +1,5 @@
 import { promises as fs } from "node:fs";
+import { selfAuthHeaders } from "../lib/self-auth.js";
 import path from "node:path";
 import type { ResolverResult } from "./types.js";
 
@@ -155,9 +156,12 @@ export async function resolveObsidianReflect(
   let vaultWrite: { wrote: boolean; refused?: boolean; reason?: string } | null = null;
   if (writeToVault) {
     try {
+      // A key goes only to the configured plugin endpoint (lib/self-auth.ts selfAuthHeaders): an endpoint
+      // the pointer overrides gets none. There a key the caller supplied is used as before, the node key otherwise.
+      const configured = DEFAULT_OBSIDIAN_ENDPOINT.replace(/\/+$/, "");
       const res = await fetch(`${obsidianEndpoint}/resolve`, {
         method: "POST",
-        headers: { "Content-Type": "application/json", ...(apiKey ? { Authorization: `ApiKey ${apiKey}` } : {}) },
+        headers: { "Content-Type": "application/json", ...(pointer.apiKey && obsidianEndpoint === configured ? { Authorization: `ApiKey ${pointer.apiKey}` } : selfAuthHeaders(obsidianEndpoint, configured)) },
         body: JSON.stringify({ type: "obsidian:write_note", pointer: { type: "obsidian:write_note", path: vaultNotePath, content } }),
         signal: AbortSignal.timeout(timeoutMs),
       });

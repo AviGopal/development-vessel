@@ -1,4 +1,5 @@
 import type { ResolverResult } from "./types.js";
+import { selfAuthHeaders } from "../lib/self-auth.js";
 import { readdir } from "node:fs/promises";
 
 /**
@@ -148,9 +149,9 @@ export async function readFreshLiveEditPulse(): Promise<{ note_path: string | nu
  */
 async function listInboxViaPlugin(
   obsidianEndpoint: string,
+  auth: Record<string, string>, // no key on an overridden endpoint (see authFor in resolveObsidianRequestScan)
 ): Promise<string[] | null> {
   try {
-    const auth: Record<string, string> = { "Content-Type": "application/json", ...(API_KEY ? { Authorization: `ApiKey ${API_KEY}` } : {}) };
     const res = await fetch(`${obsidianEndpoint}/resolve`, {
       method: "POST", headers: auth,
       body: JSON.stringify({ type: "obsidian:search", pointer: { type: "obsidian:search", query: "-", folder: "Substrate/Inbox", limit: 50 } }),
@@ -166,10 +167,10 @@ async function listInboxViaPlugin(
   return null;
 }
 
-async function listInboxFiles(inboxPath: string, obsidianEndpoint?: string): Promise<string[]> {
+async function listInboxFiles(inboxPath: string, obsidianEndpoint?: string, auth: Record<string, string> = {}): Promise<string[]> {
   // 1. Try plugin HTTP enumeration (works for host/remote vaults)
   if (obsidianEndpoint) {
-    const pluginPaths = await listInboxViaPlugin(obsidianEndpoint);
+    const pluginPaths = await listInboxViaPlugin(obsidianEndpoint, auth);
     if (pluginPaths !== null && pluginPaths.length > 0) {
       return [inboxPath, ...pluginPaths.filter((p) => p !== inboxPath)];
     }
@@ -220,19 +221,28 @@ export async function resolveObsidianRequestScan(
   const timeoutMs = pointer.timeoutMs ?? 12_000;
   const generatedAt = new Date().toISOString();
   const auth: Record<string, string> = { "Content-Type": "application/json", ...(apiKey ? { Authorization: `ApiKey ${apiKey}` } : {}) };
+  // Without an override the endpoint IS the configured one (discovery's answer, else the default).
+  const configuredObsidian = pointer.obsidianEndpoint == null ? obsidian : DEFAULT_OBSIDIAN_ENDPOINT.replace(/\/+$/, "");
+  // A key goes only to a configured endpoint (lib/self-auth.ts selfAuthHeaders): a URL the pointer
+  // overrides gets none. On the configured endpoint a key the caller supplied (pointer.apiKey) is used as
+  // before, and the node key otherwise.
+  const authFor = (url: string, configured: string): Record<string, string> => ({
+    "Content-Type": "application/json",
+    ...(pointer.apiKey && url === configured ? { Authorization: `ApiKey ${pointer.apiKey}` } : selfAuthHeaders(url, configured)),
+  });
 
   if (!apiKey) return { shape: "obsidianRequestScan", body: { error: "missing_api_key" } };
 
   // 1. Read the operator's inbox — the main note AND every .md under the Substrate/Inbox/
   // directory they asked us to watch. Each note's content is kept per-file so we can mark
   // processed tasks in the RIGHT file. A plain read; observer-skip does not apply.
-  const inboxFiles = await listInboxFiles(inboxPath, obsidian);
+  const inboxFiles = await listInboxFiles(inboxPath, obsidian, authFor(obsidian, configuredObsidian));
   const fileLines = new Map<string, string[]>();
   let readAny = false;
   for (const path of inboxFiles) {
     try {
       const res = await fetch(`${obsidian}/resolve`, {
-        method: "POST", headers: auth,
+        method: "POST", headers: authFor(obsidian, configuredObsidian),
         body: JSON.stringify({ type: "obsidian:note", pointer: { type: "obsidian:note", path, includeFrontmatter: true } }),
         signal: AbortSignal.timeout(Math.min(timeoutMs, 8000)),
       });
@@ -252,7 +262,7 @@ export async function resolveObsidianRequestScan(
   if (!readAny) {
     // No inbox content anywhere — seed the main file so the operator knows the channel exists.
     const seed = `# Substrate Inbox\n\n_Write a request as an unchecked task and I'll pick it up, tell you in [[Now]] that I'm working on it, and deliver the result under Substrate/._\n\n- [ ] (example) summarize my open notes into a briefing\n`;
-    await writeNote(obsidian, auth, inboxPath, seed, timeoutMs).catch(() => {});
+    await writeNote(obsidian, authFor(obsidian, configuredObsidian), inboxPath, seed, timeoutMs).catch(() => {});
     return { shape: "obsidianRequestScan", body: { seeded_inbox: true, inbox_path: inboxPath, requests_found: 0, generated_at: generatedAt } };
   }
 
@@ -261,7 +271,7 @@ export async function resolveObsidianRequestScan(
   // Now.md is the in-flight board; Outbox.md is the durable record of RESOLVED work
   // (recently closed gaps + freshly minted capabilities). Write it EVERY scan, regardless
   // of whether there are new requests, so it always reflects current status. Best-effort.
-  const outboxWrote = await writeOutbox(obsidian, auth, timeoutMs).catch(() => false);
+  const outboxWrote = await writeOutbox(obsidian, auth, authFor(obsidian, configuredObsidian), timeoutMs).catch(() => false);
 
   // 2. Parse UNPROCESSED requests across ALL inbox files: unchecked tasks `- [ ] <text>`.
   const requests: ParsedRequest[] = [];
@@ -347,7 +357,7 @@ export async function resolveObsidianRequestScan(
     statusLines.push(`- ${icon} **${d.text}** — ${d.dispatchId ? `working (dispatch \`${d.dispatchId}\`)` : `could not start: ${d.status}`}`);
   }
   statusLines.push("");
-  const statusWrote = await writeNote(obsidian, auth, statusPath, statusLines.join("\n"), timeoutMs).catch(() => false);
+  const statusWrote = await writeNote(obsidian, authFor(obsidian, configuredObsidian), statusPath, statusLines.join("\n"), timeoutMs).catch(() => false);
 
   // 4b. Mark processed in the RIGHT file so requests are not re-dispatched. Group the
   // dispatched items by their source file and write each back to its own note.
@@ -366,7 +376,7 @@ export async function resolveObsidianRequestScan(
       if (d && d.dispatchId) return raw.replace(/\[\s\]/, "[x]") + ` ⟶ dispatched \`${d.dispatchId}\` (see [[Now]])`;
       return raw;
     }).join("\n");
-    const ok = await writeNote(obsidian, auth, path, updated, timeoutMs).catch(() => false);
+    const ok = await writeNote(obsidian, authFor(obsidian, configuredObsidian), path, updated, timeoutMs).catch(() => false);
     if (ok) filesMarked++;
   }
 
@@ -411,6 +421,7 @@ async function writeNote(
 async function writeOutbox(
   obsidian: string,
   auth: Record<string, string>,
+  obsidianAuth: Record<string, string>, // the plugin write: no key on an overridden endpoint
   timeoutMs: number,
 ): Promise<boolean> {
   const DEV = process.env["DEV_VESSEL_SELF_ENDPOINT"] ?? "http://127.0.0.1:8090";
@@ -460,5 +471,5 @@ async function writeOutbox(
   for (const m of minted) lines.push(`- \`${m}\``);
   lines.push("");
 
-  return writeNote(obsidian, auth, "Substrate/Outbox.md", lines.join("\n"), timeoutMs).catch(() => false);
+  return writeNote(obsidian, obsidianAuth, "Substrate/Outbox.md", lines.join("\n"), timeoutMs).catch(() => false);
 }

@@ -193,6 +193,15 @@ export async function resolveImplicitVesselScan(
     };
   }
   const auth = { "Content-Type": "application/json", Authorization: `ApiKey ${apiKey}` };
+  // Without an override the endpoint IS the configured one (discovery's answer, else the default).
+  const configuredObsidian = pointer.obsidianEndpoint == null ? endpoint : DEFAULT_OBSIDIAN_ENDPOINT.replace(/\/+$/, "");
+  // A key goes only to a configured endpoint (lib/self-auth.ts selfAuthHeaders): a URL the pointer
+  // overrides gets none. On the configured endpoint a key the caller supplied (pointer.apiKey) is used as
+  // before, and the node key otherwise.
+  const authFor = (url: string, configured: string): Record<string, string> => ({
+    "Content-Type": "application/json",
+    ...(pointer.apiKey && url === configured ? { Authorization: `ApiKey ${pointer.apiKey}` } : selfAuthHeaders(url, configured)),
+  });
 
   // Today the only implicit vessel is the human via obsidian; the read path is
   // the obsidian observe substrate. Other actors would slot in additional read
@@ -217,7 +226,7 @@ export async function resolveImplicitVesselScan(
   try {
     const res = await fetch(`${endpoint}/resolve`, {
       method: "POST",
-      headers: auth,
+      headers: authFor(endpoint, configuredObsidian),
       body: JSON.stringify({
         impulse: { pointer: { type: "obsidian:event_observed", limit: eventLimit } },
       }),

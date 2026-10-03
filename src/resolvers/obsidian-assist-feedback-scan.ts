@@ -61,11 +61,12 @@ export async function resolveObsidianAssistFeedbackScan(
   const timeoutMs = pointer.timeoutMs ?? 12_000;
   const generatedAt = new Date().toISOString();
   const auth: Record<string, string> = apiKey ? { "Content-Type": "application/json", Authorization: `ApiKey ${apiKey}` } : { "Content-Type": "application/json" };
-  // The node key goes only to a configured endpoint (lib/self-auth.ts selfAuthHeaders), never to a URL the
-  // pointer overrides; a key the caller supplies (pointer.apiKey) is its own and goes where it sends it.
+  // A key goes only to a configured endpoint (lib/self-auth.ts selfAuthHeaders): a URL the pointer
+  // overrides gets none. On the configured endpoint a key the caller supplied (pointer.apiKey) is used as
+  // before, and the node key otherwise.
   const authFor = (url: string, configured: string): Record<string, string> => ({
     "Content-Type": "application/json",
-    ...(pointer.apiKey ? { Authorization: `ApiKey ${pointer.apiKey}` } : selfAuthHeaders(url, configured)),
+    ...(pointer.apiKey && url === configured ? { Authorization: `ApiKey ${pointer.apiKey}` } : selfAuthHeaders(url, configured)),
   });
 
   if (!apiKey) return { shape: "obsidianAssistReaction", body: { error: "missing_api_key" } };
@@ -75,7 +76,7 @@ export async function resolveObsidianAssistFeedbackScan(
   try {
     const res = await fetch(`${obsidian}/resolve`, {
       method: "POST",
-      headers: auth,
+      headers: authFor(obsidian, DEFAULT_OBSIDIAN_ENDPOINT.replace(/\/+$/, "")),
       body: JSON.stringify({ type: "obsidian:event_observed", pointer: { type: "obsidian:event_observed", limit: eventLimit } }),
       signal: AbortSignal.timeout(timeoutMs),
     });
@@ -116,7 +117,7 @@ export async function resolveObsidianAssistFeedbackScan(
     let delivered = false;
     try {
       const res = await fetch(`${obsidian}/resolve`, {
-        method: "POST", headers: auth,
+        method: "POST", headers: authFor(obsidian, DEFAULT_OBSIDIAN_ENDPOINT.replace(/\/+$/, "")),
         body: JSON.stringify({ type: "obsidian:note", pointer: { type: "obsidian:note", path } }),
         signal: AbortSignal.timeout(6_000),
       });

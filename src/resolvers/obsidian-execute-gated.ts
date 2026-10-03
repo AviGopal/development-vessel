@@ -1,4 +1,5 @@
 import type { ResolverResult } from "./types.js";
+import { selfAuthHeaders } from "../lib/self-auth.js";
 import { resolveObsidianCommandGate } from "./obsidian-command-gate.js";
 
 /**
@@ -87,10 +88,13 @@ export async function resolveObsidianExecuteGated(
   if (!apiKey) {
     return { shape: "gatedExecuteResult", body: { command_id: commandId, executed: false, error: "missing_api_key" } };
   }
+  // A key goes only to the configured plugin endpoint (lib/self-auth.ts selfAuthHeaders): an endpoint the
+  // pointer overrides gets none. There a key the caller supplied is used as before, the node key otherwise.
+  const configured = DEFAULT_OBSIDIAN_ENDPOINT.replace(/\/+$/, "");
   try {
     const res = await fetch(`${endpoint}/resolve`, {
       method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `ApiKey ${apiKey}` },
+      headers: { "Content-Type": "application/json", ...(pointer.apiKey && endpoint === configured ? { Authorization: `ApiKey ${pointer.apiKey}` } : selfAuthHeaders(endpoint, configured)) },
       body: JSON.stringify({ impulse: { pointer: { type: "obsidian:execute_command", command_id: commandId } } }),
       signal: AbortSignal.timeout(timeoutMs),
     });

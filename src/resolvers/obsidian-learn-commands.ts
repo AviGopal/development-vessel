@@ -1,4 +1,5 @@
 import type { ResolverResult } from "./types.js";
+import { selfAuthHeaders } from "../lib/self-auth.js";
 
 /**
  * obsidian_learn_commands (2026-06-15) — the AUTONOMOUS learn loop, in-substrate.
@@ -92,6 +93,7 @@ async function learnViaCatalog(
   endpoint: string,
   conceptBase: string,
   auth: Record<string, string>,
+  conceptAuth: Record<string, string>,
   maxCatalog: number,
   timeoutMs: number,
   generatedAt: string,
@@ -118,7 +120,7 @@ async function learnViaCatalog(
     };
   }
 
-  const known = await knownCommandIds(conceptBase, auth, timeoutMs);
+  const known = await knownCommandIds(conceptBase, conceptAuth, timeoutMs);
   const fresh = commands.filter((c) => c.id && !known.has(c.id)).slice(0, maxCatalog);
 
   let persisted = 0;
@@ -136,7 +138,7 @@ async function learnViaCatalog(
     try {
       const res = await fetch(`${conceptBase}/v2/impulses/resolve`, {
         method: "POST",
-        headers: auth,
+        headers: conceptAuth,
         body: JSON.stringify({
           impulse: {
             pointer: {
@@ -201,10 +203,17 @@ export async function resolveObsidianLearnCommands(
     return { shape: "obsidianLearnResult", body: { error: "missing_api_key", learned: 0, persisted: 0 } };
   }
   const auth = { "Content-Type": "application/json", Authorization: `ApiKey ${apiKey}` };
+  // A key goes only to a configured endpoint (lib/self-auth.ts selfAuthHeaders): a URL the pointer
+  // overrides gets none. On the configured endpoint a key the caller supplied (pointer.apiKey) is used as
+  // before, and the node key otherwise.
+  const authFor = (url: string, configured: string): Record<string, string> => ({
+    "Content-Type": "application/json",
+    ...(pointer.apiKey && url === configured ? { Authorization: `ApiKey ${pointer.apiKey}` } : selfAuthHeaders(url, configured)),
+  });
 
   // CATALOG mode (default): non-intrusive surface learning, safe on the live vault.
   if (learnMode === "catalog") {
-    return learnViaCatalog(endpoint, conceptBase, auth, maxCatalog, Math.min(timeoutMs, 15_000), generatedAt);
+    return learnViaCatalog(endpoint, conceptBase, authFor(endpoint, DEFAULT_OBSIDIAN_ENDPOINT.replace(/\/+$/, "")), authFor(conceptBase, DEFAULT_CONCEPT_DB.replace(/\/+$/, "")), maxCatalog, Math.min(timeoutMs, 15_000), generatedAt);
   }
 
   // PROBE mode (opt-in, intrusive): execute the grant-covered command subset.
@@ -213,7 +222,7 @@ export async function resolveObsidianLearnCommands(
   try {
     const res = await fetch(`${endpoint}/resolve`, {
       method: "POST",
-      headers: auth,
+      headers: authFor(endpoint, DEFAULT_OBSIDIAN_ENDPOINT.replace(/\/+$/, "")),
       body: JSON.stringify({
         impulse: { pointer: { type: "obsidian:action_effect_model", granted_classes: grantedClasses, max_commands: maxCommands } },
       }),

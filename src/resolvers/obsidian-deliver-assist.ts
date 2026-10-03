@@ -1,4 +1,5 @@
 import type { ResolverResult } from "./types.js";
+import { selfAuthHeaders } from "../lib/self-auth.js";
 import { readFreshLiveEditPulse } from "./obsidian-request-scan.js";
 
 /**
@@ -53,6 +54,13 @@ export async function resolveObsidianDeliverAssist(
   const timeoutMs = pointer.timeoutMs ?? 30_000;
   const generatedAt = new Date().toISOString();
   const auth: Record<string, string> = { "Content-Type": "application/json", ...(apiKey ? { Authorization: `ApiKey ${apiKey}` } : {}) };
+  // A key goes only to a configured endpoint (lib/self-auth.ts selfAuthHeaders): a URL the pointer
+  // overrides gets none. On the configured endpoint a key the caller supplied (pointer.apiKey) is used as
+  // before, and the node key otherwise.
+  const authFor = (url: string, configured: string): Record<string, string> => ({
+    "Content-Type": "application/json",
+    ...(pointer.apiKey && url === configured ? { Authorization: `ApiKey ${pointer.apiKey}` } : selfAuthHeaders(url, configured)),
+  });
 
   if (!apiKey) return { shape: "obsidianAssistDelivered", body: { delivered: false, error: "missing_api_key" } };
   if (!assistPath.startsWith("Substrate/")) {
@@ -73,7 +81,7 @@ export async function resolveObsidianDeliverAssist(
   try {
     const res = await fetch(`${obsidian}/resolve`, {
       method: "POST",
-      headers: auth,
+      headers: authFor(obsidian, DEFAULT_OBSIDIAN_ENDPOINT.replace(/\/+$/, "")),
       body: JSON.stringify({ type: "obsidian:workspace_state", pointer: { type: "obsidian:workspace_state" } }),
       signal: AbortSignal.timeout(Math.min(timeoutMs, 8000)),
     });
@@ -115,7 +123,7 @@ export async function resolveObsidianDeliverAssist(
   try {
     const res = await fetch(`${obsidian}/resolve`, {
       method: "POST",
-      headers: auth,
+      headers: authFor(obsidian, DEFAULT_OBSIDIAN_ENDPOINT.replace(/\/+$/, "")),
       body: JSON.stringify({ type: "obsidian:write_note", pointer: { type: "obsidian:write_note", path: assistPath, content: noteBody } }),
       signal: AbortSignal.timeout(Math.min(timeoutMs, 8000)),
     });

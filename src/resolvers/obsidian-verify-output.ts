@@ -1,4 +1,5 @@
 import type { ResolverResult } from "./types.js";
+import { selfAuthHeaders } from "../lib/self-auth.js";
 
 /**
  * obsidian_verify_output (2026-06-15) — INDEPENDENT output verification.
@@ -80,6 +81,13 @@ export async function resolveObsidianVerifyOutput(
   const timeoutMs = pointer.timeoutMs ?? 8_000;
   const generatedAt = new Date().toISOString();
   const auth: Record<string, string> = { "Content-Type": "application/json", ...(apiKey ? { Authorization: `ApiKey ${apiKey}` } : {}) };
+  // A key goes only to a configured endpoint (lib/self-auth.ts selfAuthHeaders): a URL the pointer
+  // overrides gets none. On the configured endpoint a key the caller supplied (pointer.apiKey) is used as
+  // before, and the node key otherwise.
+  const authFor = (url: string, configured: string): Record<string, string> => ({
+    "Content-Type": "application/json",
+    ...(pointer.apiKey && url === configured ? { Authorization: `ApiKey ${pointer.apiKey}` } : selfAuthHeaders(url, configured)),
+  });
 
   if (!apiKey) return { shape: "obsidianOutputVerification", body: { verified: false, error: "missing_api_key" } };
   if (!path) return { shape: "obsidianOutputVerification", body: { verified: false, error: "missing_path" } };
@@ -89,7 +97,7 @@ export async function resolveObsidianVerifyOutput(
   let exists = false;
   try {
     const res = await fetch(`${obsidian}/resolve`, {
-      method: "POST", headers: auth,
+      method: "POST", headers: authFor(obsidian, DEFAULT_OBSIDIAN_ENDPOINT.replace(/\/+$/, "")),
       body: JSON.stringify({ type: "obsidian:note", pointer: { type: "obsidian:note", path } }),
       signal: AbortSignal.timeout(timeoutMs),
     });

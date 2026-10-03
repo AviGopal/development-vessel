@@ -149,10 +149,21 @@ async function cleartextRefusal(base: string): Promise<string | null> {
 
 const identityUrl = (): string => (process.env["IDENTITY_VESSEL_URL"] ?? "").trim().replace(/\/+$/, "");
 
-/** What identity-vessel says about `authHeader`. `cache:false` asks identity every time. */
-export async function identityCredential(authHeader: string | undefined, opts: { cache?: boolean } = {}): Promise<CallerCredential> {
+/** Why `authHeader` carries no usable ApiKey: one reason per case, so a refusal says which one it was.
+ *  Never echoes any part of the header (a key sent without a scheme would otherwise be logged whole). */
+function missingApiKeyReason(authHeader: string | undefined, xApiKeyPresented = false): string {
+  const h = String(authHeader ?? "").trim();
+  if (!h) return xApiKeyPresented ? "only an x-api-key header was presented; this route reads Authorization: ApiKey <key>" : "no Authorization header";
+  if (/^ApiKey$/i.test(h)) return "Authorization: ApiKey with an empty key";
+  if (!/^ApiKey\s/i.test(h)) return "Authorization scheme is not ApiKey";
+  return "malformed ApiKey credential (expected one key after the scheme)";
+}
+
+/** What identity-vessel says about `authHeader`. `cache:false` asks identity every time. `xApiKeyPresented`
+ *  only refines the reason when no ApiKey is presented; an x-api-key header is never read as a credential. */
+export async function identityCredential(authHeader: string | undefined, opts: { cache?: boolean; xApiKeyPresented?: boolean } = {}): Promise<CallerCredential> {
   const m = /^ApiKey\s+(\S+)$/i.exec(String(authHeader ?? "").trim());
-  if (!m) return { authenticated: false, scopes: [], why: "no ApiKey credential presented" };
+  if (!m) return { authenticated: false, scopes: [], why: missingApiKeyReason(authHeader, opts.xApiKeyPresented === true) };
   const apiKey = m[1]!;
   if (isNodeKey(apiKey)) return NODE_SELF;
   const useCache = opts.cache !== false;

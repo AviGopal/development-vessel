@@ -4021,6 +4021,13 @@ export function partitionOwnCheckImports(imports: string[], targetFiles: string[
   }
   return { targets, readonly };
 }
+/** A read-only imported module's text as the vessel CLONE holds it (what the draft's own check runs against; the
+ *  runtime copy can be stale), the runtime tree only when the clone lacks it, else null. */
+export function readOwnCheckModule(repoRel: string, cloneRoot: string = vesselCloneRootForChecks(), runtimeRoot: string = REPO_ROOT): string | null {
+  const rel = repoRel.replace(/^repos\//, "");
+  for (const root of [cloneRoot, runtimeRoot]) { try { return readFileSync(`${root}/${rel}`, "utf8"); } catch { /* next root */ } }
+  return null;
+}
 /** The prompt text for the imported modules: the added targets by name, each read-only module in one window. */
 export function ownCheckImportsBlock(input: { added: string[]; readonly: Array<{ path: string; why: string; content: string | null }>; focusHints: string[] }): string {
   const parts: string[] = [];
@@ -5288,12 +5295,7 @@ async function resolveFeatureComposeUncapped(pointer: FeatureComposePointer): Pr
   // THE OWN CHECK, READ-ONLY (ownCheckGrounding). Appended AFTER the blind-window refusals on purpose: the check's
   // import lines name target basenames, and must never satisfy "the window mentions the target file".
   if (ownCheckCtx) {
-    const readRepoFile = (repoRel: string): string | null => {
-      const rel = repoRel.replace(/^repos\//, "");
-      for (const root of [REPO_ROOT, vesselCloneRootForChecks()]) { try { return readFileSync(`${root}/${rel}`, "utf8"); } catch { /* next root */ } }
-      return null;
-    };
-    const importsBlock = ownCheckImportsBlock({ added: ownCheckAdded, readonly: ownCheckReadonly.map((r) => ({ ...r, content: readRepoFile(r.path) })), focusHints });
+    const importsBlock = ownCheckImportsBlock({ added: ownCheckAdded, readonly: ownCheckReadonly.map((r) => ({ ...r, content: readOwnCheckModule(r.path) })), focusHints });
     grounding += `\n\n${ownCheckCtx.block}${importsBlock ? `\n\n${importsBlock}` : ""}`;
     console.log(`[fc-own-check-grounding] showed repos/${ownCheckCtx.vessel}/${ownCheckCtx.test_file} read-only (${ownCheckCtx.block.length} bytes, ${ownCheckCtx.only_tests.length} named test(s))`);
   }

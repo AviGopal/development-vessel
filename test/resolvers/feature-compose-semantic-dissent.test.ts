@@ -306,13 +306,16 @@ afterAll(() => { restoreCutoverFetch(); restoreCutoverExecModules(); });
  * store (substrate-gap.ts), a write carries the row's omitted classification_metadata keys forward; every
  * payload is recorded so a test can assert what a writer SENT (the relocation-hint merge test's pattern).
  */
-function memoryGap(row: Record<string, unknown>): { deps: GapDeps; writes: Record<string, unknown>[]; current: () => Record<string, unknown> } {
+function memoryGap(row: Record<string, unknown>): { deps: GapDeps; writes: Record<string, unknown>[]; current: () => Record<string, unknown>; others: Map<string, Record<string, unknown>> } {
   let cur = structuredClone(row);
   const writes: Record<string, unknown>[] = [];
+  // Rows written under another id (the narrowed child a pushed landing under dissent mints) are kept apart.
+  const others = new Map<string, Record<string, unknown>>();
   return {
     deps: {
-      readGap: async (id) => (id === cur.id ? structuredClone(cur) : null),
+      readGap: async (id) => (id === cur.id ? structuredClone(cur) : (others.has(id) ? structuredClone(others.get(id)!) : null)),
       writeGap: async (r) => {
+        if (r.id !== cur.id) { others.set(String(r.id), structuredClone(r)); return; }
         writes.push(structuredClone(r));
         const sent = structuredClone(r);
         cur = { ...cur, ...sent, classification_metadata: { ...((cur.classification_metadata ?? {}) as Record<string, unknown>), ...((sent.classification_metadata ?? {}) as Record<string, unknown>) } };
@@ -320,6 +323,7 @@ function memoryGap(row: Record<string, unknown>): { deps: GapDeps; writes: Recor
     },
     writes,
     current: () => cur,
+    others,
   };
 }
 const dissentsOf = (row: Record<string, unknown>): unknown[] | undefined =>
@@ -443,7 +447,9 @@ describe("semantic dissent: a green armed class-2 check outranks a non-hard-fail
     }
     const landed = memoryGap({ id: "g1", status: "open", classification_metadata: { edit_site: EDIT_SITE } });
     await settle("g1", rec, { push_status: "pushed", new_git_sha: "4bba1a5302a4ccd1cacf8df837f457629af2546b" }, landed.deps);
-    expect(dissentsOf(landed.current())).toEqual([rec]);
+    // Stamped at landing (landed partial): the sha, the parent's check (none on this row) and the minted child.
+    expect(dissentsOf(landed.current())).toEqual([{ ...rec, landed_sha: "4bba1a5302a4ccd1cacf8df837f457629af2546b", own_check: null, child_gap_id: "g1-dissent-narrowed" }]);
+    expect([...landed.others.keys()]).toEqual(["g1-dissent-narrowed"]);
 
     // And the compose records through the settler only, after the cutover answered.
     const direct = callSitesInFile(FC_PATH, "recordSemanticDissent").map((c) => c.fn);
@@ -459,15 +465,23 @@ describe("semantic dissent: a green armed class-2 check outranks a non-hard-fail
     });
   });
 
+  // CHANGED PIN (landed_partial, 2026-10-03): a "passed" from the gap's OWN check no longer settles its dissent —
+  // that check is the one the gate doubted (circular). "failed" still fills; "passed" fills only from a distinct
+  // check (feature-compose-dissent-partial.test.ts pins that path).
   it("MUST-FAIL (the reader): when the by-effect check resolves, every pending dissent gets later_outcome {result, at}; resolved ones are untouched", async () => {
     const resolveOutcome = exported<(g: string, o: { result: "passed" | "failed"; at: string }, deps: GapDeps) => Promise<unknown>>("resolveDissentOutcome");
     const done = { reason: "old", gate_verdict: { addresses: false }, at: "2026-10-01T00:00:00.000Z", later_outcome: { result: "failed", at: "2026-10-01T05:00:00.000Z" } };
     const pending = { reason: MISREAD, gate_verdict: { addresses: false, on_live_path: false }, at: "2026-10-03T07:03:00.000Z", later_outcome: null };
-    for (const result of ["passed", "failed"] as const) {
+    {
       const store = memoryGap({ id: "g2", status: "open", classification_metadata: { edit_site: EDIT_SITE, semantic_dissent: [done, pending] } });
-      await resolveOutcome("g2", { result, at: "2026-10-03T09:00:00.000Z" }, store.deps);
-      expect(dissentsOf(store.current())).toEqual([done, { ...pending, later_outcome: { result, at: "2026-10-03T09:00:00.000Z" } }]);
+      await resolveOutcome("g2", { result: "failed", at: "2026-10-03T09:00:00.000Z" }, store.deps);
+      expect(dissentsOf(store.current())).toEqual([done, { ...pending, later_outcome: { result: "failed", at: "2026-10-03T09:00:00.000Z" } }]);
       expect((store.current().classification_metadata as Record<string, unknown>).edit_site).toBe(EDIT_SITE);
+    }
+    {
+      const store = memoryGap({ id: "g2", status: "open", classification_metadata: { edit_site: EDIT_SITE, semantic_dissent: [done, pending] } });
+      await resolveOutcome("g2", { result: "passed", at: "2026-10-03T09:00:00.000Z" }, store.deps);
+      expect(store.writes.length).toBe(0); // the gap's own check cannot settle its own dissent as passed
     }
     // Nothing pending (or no dissent at all): no write.
     for (const meta of [{ semantic_dissent: [done] }, { edit_site: EDIT_SITE }]) {
@@ -485,7 +499,7 @@ describe("semantic dissent: a green armed class-2 check outranks a non-hard-fail
     const row = { id: "g-merge", status: "open", category: "missing_capability", summary: "merge fixture", detected_at: "2026-10-01T00:00:00.000Z", classification_metadata: { edit_site: EDIT_SITE, failure_lessons: [{ class: "verify_failed" }] } };
     const store = memoryGap(row);
     await record("g-merge", rec, store.deps);
-    await resolveOutcome("g-merge", { result: "passed", at: "2026-10-03T09:00:00.000Z" }, store.deps);
+    await resolveOutcome("g-merge", { result: "failed", at: "2026-10-03T09:00:00.000Z" }, store.deps);
     expect(store.writes.length).toBe(2);
     for (const w of store.writes) {
       expect(Object.keys((w.classification_metadata ?? {}) as Record<string, unknown>)).toEqual(["semantic_dissent"]);
@@ -494,10 +508,10 @@ describe("semantic dissent: a green armed class-2 check outranks a non-hard-fail
     const meta = store.current().classification_metadata as Record<string, unknown>;
     expect(meta.edit_site).toBe(EDIT_SITE);
     expect((meta.failure_lessons as unknown[]).length).toBe(1);
-    expect(dissentsOf(store.current())).toEqual([{ ...rec, later_outcome: { result: "passed", at: "2026-10-03T09:00:00.000Z" } }]);
+    expect(dissentsOf(store.current())).toEqual([{ ...rec, later_outcome: { result: "failed", at: "2026-10-03T09:00:00.000Z" } }]);
     // The reader on a gap the sweep just CLOSED writes the closed status back, never reopening it.
     const closed = memoryGap({ ...row, id: "g-closed", status: "closed", classification_metadata: { semantic_dissent: [rec] } });
-    await resolveOutcome("g-closed", { result: "passed", at: "2026-10-03T09:00:00.000Z" }, closed.deps);
+    await resolveOutcome("g-closed", { result: "failed", at: "2026-10-03T09:00:00.000Z" }, closed.deps);
     expect(closed.writes.map((w) => [w.status, Object.keys((w.classification_metadata ?? {}) as Record<string, unknown>)])).toEqual([["closed", ["semantic_dissent"]]]);
   });
 

@@ -1109,6 +1109,69 @@ function coerceFlatGapPointer(p: Record<string, unknown>): Record<string, unknow
   };
 }
 
+/**
+ * UNRENDERED BINDING TOKENS (2026-10-03). A template slot ({{name}} or {{name.path}}) that reached the
+ * writer unbound. Live rows held id "{{goal.id}}", summary "{{goal.summary}}" and the like, all
+ * written as CLOSES, which the open-only description gate never looked at. Matched narrowly, as a
+ * binding token, so template-like text that is not a slot (JSX `style={{ color: x }}`) is not one.
+ * A token wrapped in backticks is a QUOTATION (a gap describing an interpolation bug names it that way).
+ */
+const BINDING_TOKEN = /\{\{\s*[A-Za-z_$][\w$-]*(?:\.[\w$-]+)*\s*\}\}/g;
+export function unrenderedBindingToken(s: string): string | null {
+  for (const m of s.matchAll(BINDING_TOKEN)) {
+    const i = m.index ?? 0;
+    const end = i + m[0].length;
+    if (s[i - 1] === "`" && s[end] === "`") continue;
+    return m[0];
+  }
+  return null;
+}
+/**
+ * The first field of an incoming gap holding an unrendered binding token, or null. id, category,
+ * source, summary, and every string under classification_metadata (objects and arrays, bounded).
+ * A value byte-identical to the STORED row's value at the same field is exempt, except the id:
+ * read-modify-write callers re-send stored summaries and metadata, and a row written before this
+ * gate must stay writable rather than wedge every later close of it.
+ */
+function unrenderedBindingField(
+  incoming: Record<string, unknown>,
+  stored: Record<string, unknown> | undefined,
+): { field: string; token: string } | null {
+  for (const k of ["id", "category", "source", "summary"]) {
+    const v = incoming[k];
+    if (typeof v !== "string") continue;
+    const t = unrenderedBindingToken(v);
+    if (!t) continue;
+    if (k !== "id" && stored && stored[k] === v) continue;
+    return { field: `gap.${k}`, token: t };
+  }
+  const storedMeta = stored?.["classification_metadata"];
+  let budget = 5000;
+  const walk = (v: unknown, s: unknown, path: string, depth: number): { field: string; token: string } | null => {
+    if (--budget < 0 || depth > 12) return null;
+    if (typeof v === "string") {
+      const t = unrenderedBindingToken(v);
+      return t && s !== v ? { field: path, token: t } : null;
+    }
+    if (Array.isArray(v)) {
+      for (let i = 0; i < v.length; i++) {
+        const hit = walk(v[i], Array.isArray(s) ? s[i] : undefined, `${path}.${i}`, depth + 1);
+        if (hit) return hit;
+      }
+      return null;
+    }
+    if (v !== null && typeof v === "object") {
+      const so = s !== null && typeof s === "object" && !Array.isArray(s) ? (s as Record<string, unknown>) : {};
+      for (const [k, child] of Object.entries(v as Record<string, unknown>)) {
+        const hit = walk(child, so[k], `${path}.${k}`, depth + 1);
+        if (hit) return hit;
+      }
+    }
+    return null;
+  };
+  return walk(incoming["classification_metadata"], storedMeta, "gap.classification_metadata", 0);
+}
+
 export async function resolveSubstrateGapWrite(
   pointer: SubstrateGapWritePointer | Record<string, unknown>,
   // Additive, test-facing: inject a vocabulary rather than depending on the host's
@@ -1227,7 +1290,9 @@ export async function resolveSubstrateGapWrite(
   // Closes/rejections of existing junk rows pass through untouched.
   if ((incoming.status ?? "open") === "open") {
     const summaryText = typeof incoming.summary === "string" ? incoming.summary.trim() : "";
-    // Placeholder check covers id/category only: a legitimate gap SUMMARY may quote {{placeholders}} when describing an interpolation bug.
+    // This early check covers id/category of OPEN writes only. The every-status gate inside the lock
+    // (unrenderedBindingField) covers id, category, source, summary and metadata; a summary that quotes a
+    // token names it in backticks.
     const gateFields = `${incoming.id} ${incoming.category}`;
     if (summaryText.length === 0 || gateFields.includes("{{")) {
       return {
@@ -1293,6 +1358,26 @@ export async function resolveSubstrateGapWrite(
   // otherwise fall back to class match against a non-closed row.
   const classKey = gapClassKey(gap.id);
   let existingIdx = gaps.findIndex((g) => g.id === gap.id);
+  // PLACEHOLDER GATE, EVERY STATUS (see unrenderedBindingField). Inside the lock because the exemption
+  // compares against the stored row with this exact id.
+  {
+    const hit = unrenderedBindingField(incoming as unknown as Record<string, unknown>, existingIdx >= 0 ? (gaps[existingIdx] as unknown as Record<string, unknown>) : undefined);
+    if (hit) {
+      console.warn(`[substrate-gap] REFUSED write to ${gap.id}: unrendered binding ${hit.token} in ${hit.field} (status ${String(gap.status)})`);
+      return {
+        early: {
+          shape: "structuredError",
+          body: {
+            resolver: "substrateGap_write",
+            failure_mode: "validation_rejected",
+            rule: "no_unrendered_placeholders",
+            field: hit.field,
+            detail: `gap ${gap.id}: unrendered binding ${hit.token} in ${hit.field} — bind every slot before writing (a gap that quotes a token names it in backticks, e.g. \`{{goal.id}}\`)`,
+          },
+        },
+      };
+    }
+  }
   // CONDITIONAL WRITE (expect_status). A writer that read the row, awaited, and writes it back as
   // open would otherwise REOPEN a gap the sweep or verifier closed in between, and a reopen fires
   // the event-driven compose pickup below. Exact id only, checked inside the lock: no class match.

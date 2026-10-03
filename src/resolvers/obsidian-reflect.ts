@@ -161,7 +161,7 @@ export async function resolveObsidianReflect(
       const configured = DEFAULT_OBSIDIAN_ENDPOINT.replace(/\/+$/, "");
       const res = await fetch(`${obsidianEndpoint}/resolve`, {
         method: "POST",
-        headers: { "Content-Type": "application/json", ...(pointer.apiKey && obsidianEndpoint === configured ? { Authorization: `ApiKey ${pointer.apiKey}` } : selfAuthHeaders(obsidianEndpoint, configured)) },
+        headers: { "Content-Type": "application/json", ...selfAuthHeaders(obsidianEndpoint, configured, pointer.apiKey) },
         body: JSON.stringify({ type: "obsidian:write_note", pointer: { type: "obsidian:write_note", path: vaultNotePath, content } }),
         signal: AbortSignal.timeout(timeoutMs),
       });

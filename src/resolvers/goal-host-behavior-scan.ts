@@ -259,7 +259,7 @@ export async function resolveGoalHostBehaviorScan(
     // The key goes only to the configured concept-db (lib/self-auth.ts): there a caller-supplied
     // p.apiKey is used as before, the node key otherwise; an overridden conceptDbBase gets none.
     const configuredConcept = DEFAULT_CONCEPT_DB.replace(/\/+$/, "");
-    const auth = { "Content-Type": "application/json", ...(p.apiKey && conceptBase === configuredConcept ? { Authorization: `ApiKey ${p.apiKey}` } : selfAuthHeaders(conceptBase, configuredConcept)) };
+    const auth = { "Content-Type": "application/json", ...selfAuthHeaders(conceptBase, configuredConcept, p.apiKey) };
     for (const m of model) {
       try {
         const summary = `goal-host: direction [${m.goal_direction}] -> ${m.expected_template} (tier=${m.dominant_tier}, effect=${m.effect_class}, success=${m.success_rate}, n=${m.samples}, consistency=${m.template_consistency})`;

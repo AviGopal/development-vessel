@@ -86,7 +86,7 @@ export async function resolveObsidianVerifyOutput(
   // before, and the node key otherwise.
   const authFor = (url: string, configured: string): Record<string, string> => ({
     "Content-Type": "application/json",
-    ...(pointer.apiKey && url === configured ? { Authorization: `ApiKey ${pointer.apiKey}` } : selfAuthHeaders(url, configured)),
+    ...selfAuthHeaders(url, configured, pointer.apiKey),
   });
 
   if (!apiKey) return { shape: "obsidianOutputVerification", body: { verified: false, error: "missing_api_key" } };

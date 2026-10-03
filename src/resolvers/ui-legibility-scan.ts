@@ -33,7 +33,7 @@
  */
 
 import type { ResolverResult } from "./types.js";
-import { pointerOverride } from "../lib/self-auth.js";
+import { pointerOverride, selfAuthHeaders } from "../lib/self-auth.js";
 
 const DEFAULT_OBSIDIAN_ENDPOINT = "http://127.0.0.1:27182";
 const DEFAULT_DEV_VESSEL_URL = "http://127.0.0.1:8090/v2/impulses/resolve";
@@ -74,7 +74,7 @@ export async function resolveUiLegibilityScan(
   const devVesselImpulsesUrl = pointerOverride(p.devVesselImpulsesUrl) ?? DEFAULT_DEV_VESSEL_URL;
   // The vessel's own key goes only to its own default endpoint: devVesselImpulsesUrl is caller-supplied,
   // and this scan is not a gated write, so attaching the key to an arbitrary URL would hand it out.
-  const selfAuth: Record<string, string> = devVesselImpulsesUrl === DEFAULT_DEV_VESSEL_URL && process.env["METABOB_API_KEY"] ? { Authorization: `ApiKey ${process.env["METABOB_API_KEY"]}` } : {};
+  const selfAuth: Record<string, string> = selfAuthHeaders(devVesselImpulsesUrl, DEFAULT_DEV_VESSEL_URL);
   const pxFloor = p.px_floor ?? 12;
   const maxChips = p.max_chips_per_row ?? 12;
   const emitGap = p.emit_gap !== false;

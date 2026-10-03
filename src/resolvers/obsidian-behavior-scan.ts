@@ -140,7 +140,7 @@ export async function resolveObsidianBehaviorScan(
   // before, and the node key otherwise.
   const authFor = (url: string, configured: string): Record<string, string> => ({
     "Content-Type": "application/json",
-    ...(pointer.apiKey && url === configured ? { Authorization: `ApiKey ${pointer.apiKey}` } : selfAuthHeaders(url, configured)),
+    ...selfAuthHeaders(url, configured, pointer.apiKey),
   });
 
   // 1. Read the human's observed actions (reads only — never executes).

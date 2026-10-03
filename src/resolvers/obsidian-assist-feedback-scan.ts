@@ -66,7 +66,7 @@ export async function resolveObsidianAssistFeedbackScan(
   // before, and the node key otherwise.
   const authFor = (url: string, configured: string): Record<string, string> => ({
     "Content-Type": "application/json",
-    ...(pointer.apiKey && url === configured ? { Authorization: `ApiKey ${pointer.apiKey}` } : selfAuthHeaders(url, configured)),
+    ...selfAuthHeaders(url, configured, pointer.apiKey),
   });
 
   if (!apiKey) return { shape: "obsidianAssistReaction", body: { error: "missing_api_key" } };

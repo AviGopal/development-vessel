@@ -200,7 +200,7 @@ export async function resolveImplicitVesselScan(
   // before, and the node key otherwise.
   const authFor = (url: string, configured: string): Record<string, string> => ({
     "Content-Type": "application/json",
-    ...(pointer.apiKey && url === configured ? { Authorization: `ApiKey ${pointer.apiKey}` } : selfAuthHeaders(url, configured)),
+    ...selfAuthHeaders(url, configured, pointer.apiKey),
   });
 
   // Today the only implicit vessel is the human via obsidian; the read path is

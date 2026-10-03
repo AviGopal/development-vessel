@@ -78,7 +78,7 @@ export async function resolveDiscoveryVesselRegistryObserver(
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        ...(pointer.apiKey && endpoint === configured ? { Authorization: `ApiKey ${pointer.apiKey}` } : selfAuthHeaders(endpoint, configured)),
+        ...selfAuthHeaders(endpoint, configured, pointer.apiKey),
       },
       body: JSON.stringify({ pointer: { type: "vesselRegistry" } }),
       signal: AbortSignal.timeout(timeoutMs),

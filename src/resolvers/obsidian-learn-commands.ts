@@ -208,7 +208,7 @@ export async function resolveObsidianLearnCommands(
   // before, and the node key otherwise.
   const authFor = (url: string, configured: string): Record<string, string> => ({
     "Content-Type": "application/json",
-    ...(pointer.apiKey && url === configured ? { Authorization: `ApiKey ${pointer.apiKey}` } : selfAuthHeaders(url, configured)),
+    ...selfAuthHeaders(url, configured, pointer.apiKey),
   });
 
   // CATALOG mode (default): non-intrusive surface learning, safe on the live vault.

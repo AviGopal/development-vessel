@@ -94,7 +94,7 @@ export async function resolveObsidianExecuteGated(
   try {
     const res = await fetch(`${endpoint}/resolve`, {
       method: "POST",
-      headers: { "Content-Type": "application/json", ...(pointer.apiKey && endpoint === configured ? { Authorization: `ApiKey ${pointer.apiKey}` } : selfAuthHeaders(endpoint, configured)) },
+      headers: { "Content-Type": "application/json", ...selfAuthHeaders(endpoint, configured, pointer.apiKey) },
       body: JSON.stringify({ impulse: { pointer: { type: "obsidian:execute_command", command_id: commandId } } }),
       signal: AbortSignal.timeout(timeoutMs),
     });

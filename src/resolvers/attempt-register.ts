@@ -14,7 +14,8 @@ export interface Prediction {
 }
 
 export interface AttemptOutcome {
-  intended: "met" | "unmet" | "unknown";
+  /** "vacuous": the prediction named no check to pass, so nothing was promised and nothing can be met. */
+  intended: "met" | "unmet" | "unknown" | "vacuous";
   intended_vacuous: boolean;
   unexpected_flips: Array<{ id: string; pre: string; post: string }>;
   unknown_checks: string[];
@@ -26,8 +27,8 @@ export function compareOutcome(pre: CheckResult[], post: CheckResult[], predicti
   const preById = new Map(pre.map(r => [r.id, r]));
   const postById = new Map(post.map(r => [r.id, r]));
 
-  let intended: "met" | "unmet" | "unknown" = "met";
   const intended_vacuous = prediction.expect_pass.length === 0;
+  let intended: AttemptOutcome["intended"] = intended_vacuous ? "vacuous" : "met";
   if (!intended_vacuous) {
     for (const id of prediction.expect_pass) {
       const postResult = postById.get(id);

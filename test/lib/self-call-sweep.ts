@@ -290,6 +290,7 @@ type Wrapper = {
   initIdx: number | null; // the parameter that carries the headers (null: the wrapper sets its own)
   authedInside: boolean;
   guardedInside: boolean; // the wrapper's own headers put the key behind selfAuthHeaders (see KEY_GUARD)
+  headPass: boolean; // the URL parameter is where the URL STARTS (not only a path segment or query value)
   writesInside: string[];
   line: number;
   site?: ts.CallExpression; // for a fixed-self wrapper that sets its own headers: where they belong
@@ -333,7 +334,7 @@ const argWrites = (a: ts.Node): string[] => {
   const ns = expandedNodes(a, 2, { functions: false });
   return [...writesIn(ns.map((n) => n.getText()).join("\n")), ...ns.flatMap(dynamicTypes)];
 };
-const FETCH: Wrapper = { urlIdx: 0, initIdx: 1, authedInside: false, guardedInside: false, writesInside: [], line: 0 };
+const FETCH: Wrapper = { urlIdx: 0, initIdx: 1, authedInside: false, guardedInside: false, headPass: true, writesInside: [], line: 0 };
 
 /** Which parameter supplies the headers of `initArg`, if any. */
 function headerParam(initArg: ts.Node | undefined, params: string[]): number {
@@ -358,11 +359,11 @@ function headerParam(initArg: ts.Node | undefined, params: string[]): number {
   return -1;
 }
 
-type RawSite = { at: ts.CallExpression; writes: string[]; authed: boolean; via?: string; urlArg: ts.Node | "self"; init?: ts.Node; guardedInside: boolean };
+type RawSite = { at: ts.CallExpression; writes: string[]; authed: boolean; via?: string; urlArg: ts.Node | "self"; init?: ts.Node; guardedInside: boolean; headPass?: boolean };
 type SweepMode = { match: (n: ts.Node) => boolean; needWrites: boolean };
 
 export function sweepFile(path: string): SweepSite[] {
-  return sweepCalls(path, { match: isSelf, needWrites: true }).map(({ at: _a, urlArg: _u, init: _i, guardedInside: _g, ...site }) => site);
+  return sweepCalls(path, { match: isSelf, needWrites: true }).map(({ at: _a, urlArg: _u, init: _i, guardedInside: _g, headPass: _h, ...site }) => site);
 }
 
 function sweepCalls(path: string, mode: SweepMode): Array<SweepSite & RawSite> {
@@ -395,6 +396,7 @@ function sweepCalls(path: string, mode: SweepMode): Array<SweepSite & RawSite> {
       // A URL that is self on its own (a self default behind `pointer.x ?? SELF`) is a fixed-self call,
       // never a pass-through: the self default is exactly the case this sweep exists for.
       let urlIdx: number | "self";
+      let headPass = false;
       if (urlArg === "self" || mode.match(urlArg)) {
         // A fixed-self wrapper only if the caller supplies something (otherwise the call is its own site).
         if (!call.arguments.some((a) => paramIndex(a, fn.params) >= 0)) continue;
@@ -402,6 +404,9 @@ function sweepCalls(path: string, mode: SweepMode): Array<SweepSite & RawSite> {
       } else {
         urlIdx = paramIndex(urlArg, fn.params);
         if (urlIdx < 0) continue;
+        const urlParam = fn.params[urlIdx];
+        headPass = inner.headPass && urlArg !== "self" &&
+          pieces(urlArg, "head").some((pc) => "ref" in pc && (pc.base ?? pc.ref) === urlParam);
       }
       const initArg = inner.initIdx === null ? undefined : call.arguments[inner.initIdx];
       const authedInside = inner.authedInside || authedInit(initArg);
@@ -414,6 +419,7 @@ function sweepCalls(path: string, mode: SweepMode): Array<SweepSite & RawSite> {
         initIdx: initIdx >= 0 ? initIdx : inner.initIdx === null ? null : null,
         authedInside,
         guardedInside,
+        headPass,
         writesInside: [...new Set([...inner.writesInside, ...call.arguments.flatMap(argWrites)])],
         line: sf.getLineAndCharacterOfPosition(fn.node.getStart()).line + 1,
         ...(urlIdx === "self" ? { site: inner.site ?? (ownHeaders ? call : undefined) } : inner.site ? { site: inner.site } : {}),
@@ -424,7 +430,7 @@ function sweepCalls(path: string, mode: SweepMode): Array<SweepSite & RawSite> {
 
   const sites: Array<SweepSite & RawSite> = [];
   const bySite = new Map<ts.CallExpression, SweepSite & RawSite>();
-  const record = (at: ts.CallExpression, writes: string[], authed: boolean, via: string | undefined, urlArg: ts.Node | "self", init: ts.Node | undefined, guardedInside = false): void => {
+  const record = (at: ts.CallExpression, writes: string[], authed: boolean, via: string | undefined, urlArg: ts.Node | "self", init: ts.Node | undefined, guardedInside = false, headPass = true): void => {
     const prior = bySite.get(at);
     if (prior) {
       prior.writes = [...new Set([...prior.writes, ...writes])].sort();
@@ -435,6 +441,7 @@ function sweepCalls(path: string, mode: SweepMode): Array<SweepSite & RawSite> {
       urlArg,
       init,
       guardedInside,
+      headPass,
       file: relative(SRC_ROOT, path),
       line: sf.getLineAndCharacterOfPosition(at.getStart()).line + 1,
       ...(via ? { via } : {}),
@@ -469,7 +476,7 @@ function sweepCalls(path: string, mode: SweepMode): Array<SweepSite & RawSite> {
     if (writes.length === 0 && mode.needWrites) continue;
     const init = t.initIdx === null ? undefined : call.arguments[t.initIdx];
     const authed = t.authedInside || authedInit(init);
-    record(call, writes, authed, cn !== "fetch" ? `${cn}@${t.line}` : undefined, urlArg, init, t.guardedInside);
+    record(call, writes, authed, cn !== "fetch" ? `${cn}@${t.line}` : undefined, urlArg, init, t.guardedInside, t.headPass);
   }
   return sites;
 }
@@ -509,7 +516,9 @@ const RESOLVE_TAIL = /\/(?:v2\/impulses\/)?resolve\/?$/;
 const AUTH_ROUTE_TAIL = /\/auth\/resolve\/?$/;
 const RESOLVE_NAME = /^resolve$|resolve_?(?:url|endpoint|path|route)s?$/i;
 const CALLER_BASE = /^(?:pointer|input|args|payload|impulse|body|req|request)$/;
-const KEY_GUARD = /\bselfAuth(?:Headers)?\b/;
+// selfAuthHeaders / selfAuthKey / selfAuthCredential (lib/self-auth.ts) attach a credential only when the URL is the
+// configured one.
+const KEY_GUARD = /\bselfAuth(?:Headers|Key|Credential)?\b/;
 const STRING_METHODS = /^(?:replace|replaceAll|trim|trimEnd|trimStart|toString|toLowerCase|slice)$/;
 
 type Piece = { text: string } | { ref: string; base?: string; baseNode?: ts.Node };
@@ -657,3 +666,30 @@ export function sweepResolveSrc(): ResolveSite[] {
 }
 
 export const describeResolveSite = (s: ResolveSite): string => `${s.file}:${s.line}${s.via ? ` via ${s.via}` : ""}`;
+
+// ── THE KEY TO ANY CALLER-SUPPLIED URL (not only resolve routes) ──────────────────────────────────────
+// The node key must not follow a URL a request can supply, whatever route it names: traces, templates,
+// concept search, /run-goal, a PATCH on a gap. A site is any transport call whose URL can START with a
+// request value (isCallerUrl), whose headers carry Authorization, and whose key is not behind the
+// selfAuthHeaders guard (here or inside the helper that sets the headers).
+export type KeyedUrlSite = { file: string; line: number; via?: string; guarded: boolean };
+
+export function sweepKeyedCallerUrlFile(path: string): KeyedUrlSite[] {
+  return sweepCalls(path, { match: isCallerUrl, needWrites: false })
+    .filter((s) => s.urlArg !== "self" && s.headPass !== false && isCallerUrl(s.urlArg) && (s.authed || s.guardedInside || guardedInit(s.init)))
+    .map((s) => ({ file: s.file, line: s.line, ...(s.via ? { via: s.via } : {}), guarded: s.guardedInside || guardedInit(s.init) || guardedArgs(s) }));
+}
+
+/** Through a helper, the caller may pass the credential itself (`fetchJson(url, selfAuthKey(url, D))`). */
+function guardedArgs(s: { via?: string; at: ts.CallExpression }): boolean {
+  if (!s.via) return false;
+  return s.at.arguments.some((a) => KEY_GUARD.test(expanded(a, 3, { functions: false })));
+}
+
+export function sweepKeyedCallerUrlSrc(): KeyedUrlSite[] {
+  return listTs(SRC_ROOT)
+    .flatMap((p) => sweepKeyedCallerUrlFile(p))
+    .sort((a, b) => (a.file === b.file ? a.line - b.line : a.file < b.file ? -1 : 1));
+}
+
+export const describeKeyedUrlSite = (s: KeyedUrlSite): string => `${s.file}:${s.line}${s.via ? ` via ${s.via}` : ""}`;

@@ -10,7 +10,7 @@ import { describe, it, expect } from "bun:test";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { sweepSrc, sweepFile, describeSite, sweepResolveSrc, sweepResolveFile, describeResolveSite } from "./self-call-sweep.js";
+import { sweepSrc, sweepFile, describeSite, sweepResolveSrc, sweepResolveFile, describeResolveSite, sweepKeyedCallerUrlSrc, sweepKeyedCallerUrlFile, describeKeyedUrlSite } from "./self-call-sweep.js";
 
 describe("self-call auth sweep", () => {
   const sites = sweepSrc();
@@ -169,6 +169,70 @@ describe("resolve-call sweep: the node key never follows a caller-supplied URL",
       { line: 7, callerUrl: true },
       { line: 8, callerUrl: false },
       { line: 9, callerUrl: false },
+    ]);
+  });
+});
+
+// CLASS CHECK, ANY ROUTE: the rule is not about /resolve. A credential (the node key, or the database's root
+// login) must not follow ANY URL a request can supply: traces, templates, concept search, /run-goal, a gap
+// PATCH, a SurrealDB /sql. How a site is read: sweepKeyedCallerUrlFile in ./self-call-sweep.ts.
+//
+// EXEMPT (reason recorded, not a leak):
+//   http-fetch.ts: a generic fetch whose URL is the pointer's by design; it attaches the node key only when
+//   the parsed hostname is 127.0.0.1/localhost, a locality check the sweep cannot read.
+const KEYED_URL_EXEMPT: Record<string, string> = {
+  "resolvers/http-fetch.ts": "key only when the parsed hostname is 127.0.0.1/localhost",
+};
+describe("keyed-URL sweep: no credential follows a caller-supplied URL on any route", () => {
+  const sites = sweepKeyedCallerUrlSrc();
+  const unguarded = sites.filter((s) => !s.guarded && !(s.file in KEYED_URL_EXEMPT)).map(describeKeyedUrlSite);
+  console.log(`keyed-URL sweep: ${sites.length} keyed caller-URL sites; ${unguarded.length} unguarded`);
+
+  it("no credential follows a caller-supplied URL without the selfAuth guard", () => {
+    expect(unguarded).toEqual([]);
+  });
+
+  it("sees the repo's keyed caller-URL calls (a reader that sees nothing cannot pass)", () => {
+    expect(sites.length).toBeGreaterThanOrEqual(150);
+    const files = new Set(sites.map((s) => s.file));
+    // tracesUrl, metabobEndpoint, conceptDbUrl, goalHostEndpoint /run-goal, surrealUrl /sql
+    for (const f of ["resolvers/phantom-trace-scan.ts", "resolvers/cyclic-flow-scan.ts", "resolvers/concept-write.ts", "resolvers/vessel-gap-to-cluster.ts", "resolvers/surrealdb-export.ts"]) {
+      expect(files.has(f)).toBe(true);
+    }
+    // each exemption still names a real keyed site, so a stale exemption cannot hide a new one
+    for (const f of Object.keys(KEYED_URL_EXEMPT)) expect(files.has(f)).toBe(true);
+  });
+
+  it("flags each side (fixture)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "keyed-url-sweep-"));
+    const path = join(dir, "fixture.ts");
+    writeFileSync(
+      path,
+      [
+        `import { selfAuthHeaders, selfAuthKey } from "./self-auth.js";`,
+        `const TRACES = "http://127.0.0.1:8080/v2/activities/execution-traces";`,
+        `const KEY = process.env.METABOB_API_KEY ?? "";`,
+        `type P = { tracesUrl?: string; id?: string };`,
+        `async function fetchJson(url: string, key: string) { return fetch(url, { headers: { Authorization: \`ApiKey \${key}\` } }); }`,
+        `async function fetchById(id: string) { return fetch(\`\${TRACES}/\${id}\`, { headers: { Authorization: \`ApiKey \${KEY}\` } }); }`,
+        // a caller-supplied traces URL with the key, direct: flagged
+        `export async function resolveA(p: P) { await fetch(p.tracesUrl ?? TRACES, { headers: { Authorization: \`ApiKey \${KEY}\` } }); }`,
+        // the same, guarded: passes
+        `export async function resolveB(p: P) { const u = p.tracesUrl ?? TRACES; await fetch(u, { headers: { ...selfAuthHeaders(u, TRACES) } }); }`,
+        // through a helper with the raw key: flagged
+        `export async function resolveC(p: P) { await fetchJson(p.tracesUrl ?? TRACES, KEY); }`,
+        // through a helper, the caller passes a guarded key: passes
+        `export async function resolveD(p: P) { const u = p.tracesUrl ?? TRACES; await fetchJson(u, selfAuthKey(u, TRACES)); }`,
+        // a pointer value that only fills a PATH segment of a configured URL: not a caller URL, not listed
+        `export async function resolveE(p: P) { await fetchById(String(p.id)); }`,
+      ].join("\n"),
+    );
+    const got = sweepKeyedCallerUrlFile(path).map((s) => ({ line: s.line, guarded: s.guarded }));
+    expect(got).toEqual([
+      { line: 7, guarded: false },
+      { line: 8, guarded: true },
+      { line: 9, guarded: false },
+      { line: 10, guarded: true },
     ]);
   });
 });

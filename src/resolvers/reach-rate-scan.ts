@@ -135,14 +135,15 @@ function asNum(v: unknown, dflt = 0): number {
 async function fetchStats(
   apiBase: string,
   pointer: Record<string, unknown>,
+  configuredBase: string,
 ): Promise<{ rows: StatsRow[]; top: Record<string, unknown> } | { error: string }> {
-  const apiKey = process.env["METABOB_API_KEY"];
   try {
     const r = await fetch(`${apiBase.replace(/\/$/, "")}/v2/impulses/resolve`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        ...(apiKey ? { Authorization: `ApiKey ${apiKey}` } : {}),
+        // The key goes only to the configured activity-api (lib/self-auth.ts): none to an overridden activity_api_url.
+        ...selfAuthHeaders(apiBase, configuredBase),
       },
       // THE ROUTE REQUIRES AN ENVELOPE. A flat {type,...} body is HTTP 400 — the
       // mismatch that silently disabled every Class-2 predicate in the fleet.
@@ -169,7 +170,8 @@ export async function resolveReachRateScan(
   const minGraded = asNum(pointer.min_graded_volume, DEFAULT_MIN_GRADED_VOLUME);
   const limit = asNum(pointer.limit, DEFAULT_LIMIT);
   const maxEmits = asNum(pointer.max_emits, DEFAULT_MAX_EMITS);
-  const apiBase = pointer.activity_api_url ?? process.env["ACTIVITY_API_URL"] ?? DEFAULT_API;
+  const configuredApiBase = process.env["ACTIVITY_API_URL"] ?? DEFAULT_API;
+  const apiBase = pointer.activity_api_url ?? configuredApiBase;
   const emitUrl = pointer.dev_vessel_impulses_url ?? DEFAULT_EMIT;
   const scopedTo = typeof pointer.activity_id === "string" && pointer.activity_id.trim()
     ? pointer.activity_id.trim()
@@ -187,7 +189,7 @@ export async function resolveReachRateScan(
       window_hours: windowHours,
       limit,
       ...(scopedTo ? { activity_id: scopedTo } : {}),
-    });
+    }, configuredApiBase);
     if ("error" in got) fetchError = got.error;
     else rows = got.rows;
   }

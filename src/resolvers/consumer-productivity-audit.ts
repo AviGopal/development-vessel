@@ -1,4 +1,5 @@
 import { METABOB_ENDPOINT, METABOB_API_KEY } from "../config.js";
+import { selfAuthKey } from "../lib/self-auth.js";
 import type { ResolverResult } from "./types.js";
 
 /**
@@ -186,7 +187,7 @@ async function discoverConsumers(
   try {
     const res = await fetch(`${metabob.replace(/\/+$/, "")}/v2/activities/discover-by-shapes`, {
       method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `ApiKey ${apiKey}` },
+      headers: { "Content-Type": "application/json", ...(apiKey ? { Authorization: `ApiKey ${apiKey}` } : {}) },
       body: JSON.stringify({ required_shapes: [shape], mode: "backward", limit: 500 }),
       signal: AbortSignal.timeout(timeoutMs),
     });
@@ -222,7 +223,7 @@ async function fetchTemplate(
   try {
     const res = await fetch(
       `${metabob.replace(/\/+$/, "")}/v2/activities/templates/${encodeURIComponent(id)}`,
-      { headers: { Authorization: `ApiKey ${apiKey}` }, signal: AbortSignal.timeout(timeoutMs) },
+      { headers: { ...(apiKey ? { Authorization: `ApiKey ${apiKey}` } : {}) }, signal: AbortSignal.timeout(timeoutMs) },
     );
     if (!res.ok) return null;
     const json = (await res.json()) as { template?: Template } & Template;
@@ -264,7 +265,7 @@ async function hasProductiveTrace(
   try {
     const res = await fetch(
       `${metabob.replace(/\/+$/, "")}/v2/activities/execution-traces?limit=500`,
-      { headers: { Authorization: `ApiKey ${apiKey}` }, signal: AbortSignal.timeout(timeoutMs) },
+      { headers: { ...(apiKey ? { Authorization: `ApiKey ${apiKey}` } : {}) }, signal: AbortSignal.timeout(timeoutMs) },
     );
     if (!res.ok) return false;
     const json = (await res.json()) as {
@@ -428,7 +429,7 @@ export async function resolveConsumerProductivityAudit(
 
   const reports: ShapeReport[] = [];
   for (const shape of shapes) {
-    reports.push(await auditShape(metabob, apiKey, shape, requireTrace, timeoutMs));
+    reports.push(await auditShape(metabob, selfAuthKey(metabob, METABOB_ENDPOINT, pointer.apiKey), shape, requireTrace, timeoutMs));
   }
 
   const claimedCovered = reports.filter((r) => r.candidate_count > 0).length;

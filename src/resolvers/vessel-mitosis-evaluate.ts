@@ -1,4 +1,5 @@
 import { join, dirname, basename } from "path";
+import { selfAuthTrusted } from "../lib/self-auth.js";
 import {
   stat,
   lstat,
@@ -1550,7 +1551,10 @@ export async function resolveVesselMitosisEvaluate(
 
   const apiKey = process.env["METABOB_API_KEY"];
   const bearerToken = process.env["ACTIVITY_API_TOKEN"] ?? process.env["VESSEL_JWT"];
-  const headers: Record<string, string> = apiKey ? { Authorization: `ApiKey ${apiKey}` } : bearerToken ? { Authorization: `Bearer ${bearerToken}` } : {};
+  // Neither credential goes to an overridden tracesUrl (lib/self-auth.ts selfAuthTrusted).
+  const headers: Record<string, string> = selfAuthTrusted(pointer.tracesUrl ?? DEFAULT_TRACES_URL, DEFAULT_TRACES_URL)
+    ? (apiKey ? { Authorization: `ApiKey ${apiKey}` } : bearerToken ? { Authorization: `Bearer ${bearerToken}` } : {})
+    : {};
 
   let traces: TraceLike[] = [];
   try {

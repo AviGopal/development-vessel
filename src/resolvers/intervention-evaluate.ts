@@ -4,6 +4,7 @@ import {
   METABOB_ENDPOINT,
   WORKSPACE_ROOT as DEFAULT_WORKSPACE_ROOT,
 } from "../config.js";
+import { selfAuthHeaders } from "../lib/self-auth.js";
 import { readFile, writeFile, rename, mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import type { ResolverResult } from "./types.js";
@@ -122,9 +123,8 @@ interface TraceRow {
 
 async function fetchTraces(tracesUrl: string): Promise<TraceRow[]> {
   try {
-    const headers: Record<string, string> = METABOB_API_KEY
-      ? { Authorization: `ApiKey ${METABOB_API_KEY}` }
-      : {};
+    // The key goes only to the configured traces URL (lib/self-auth.ts): none to an overridden tracesUrl.
+    const headers: Record<string, string> = selfAuthHeaders(tracesUrl, DEFAULT_TRACES);
     const res = await fetch(tracesUrl, {
       method: "GET",
       headers,

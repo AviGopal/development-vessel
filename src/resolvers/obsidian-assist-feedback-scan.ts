@@ -139,7 +139,7 @@ export async function resolveObsidianAssistFeedbackScan(
     if (delivered || views > 0) {
       try {
         const res = await fetch(`${metabob}/v2/activities/impulse-relevance`, {
-          method: "POST", headers: auth,
+          method: "POST", headers: authFor(metabob, DEFAULT_METABOB.replace(/\/+$/, "")),
           body: JSON.stringify({
             impulse_id: `obsidian:assist:${cls}`,
             activity_variant_id: `obsidian-assist-engagement:${cls}`,

@@ -1,4 +1,5 @@
 import type { ResolverResult } from "./types.js";
+import { selfAuthHeaders } from "../lib/self-auth.js";
 
 /**
  * llm_quota_observer (round 2, 2026-06-05) — promotes LLM-provider quota state
@@ -93,7 +94,8 @@ export async function resolveLlmQuotaObserver(
   try {
     resp = await fetch(url, {
       method: "GET",
-      headers: { Authorization: `ApiKey ${apiKey}` },
+      // The key goes only to the configured endpoint (lib/self-auth.ts): none to an overridden apiEndpoint.
+      headers: selfAuthHeaders(endpoint, DEFAULT_API_ENDPOINT.replace(/\/+$/, ""), pointer.apiKey),
       signal: AbortSignal.timeout(timeoutMs),
     });
   } catch (err) {

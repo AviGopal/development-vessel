@@ -1,4 +1,5 @@
 import { promises as fs } from "node:fs";
+import { selfAuthKey, selfAuthHeaders } from "../lib/self-auth.js";
 import path from "node:path";
 import { METABOB_ENDPOINT, METABOB_API_KEY } from "../config.js";
 import type { ResolverResult } from "./types.js";
@@ -184,7 +185,7 @@ async function dispatchAuthor(
   try {
     const res = await fetch(`${goalHost.replace(/\/+$/, "")}/run-goal`, {
       method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `ApiKey ${apiKey}` },
+      headers: { "Content-Type": "application/json", ...(apiKey ? { Authorization: `ApiKey ${apiKey}` } : {}) },
       body: JSON.stringify({
         goal: `author an activity from recurring trace pattern ${patternId}`,
         targetTemplateId: DRAFTER_TEMPLATE_ID,
@@ -220,7 +221,7 @@ export async function resolveTraceRecurringPatternScan(
   const PAGE_SIZE = 100;
   const traces: TraceRow[] = [];
   let offset = 0;
-  const authHeaders = { Authorization: `ApiKey ${apiKey}` };
+  const authHeaders = selfAuthHeaders(metabob, METABOB_ENDPOINT, pointer.apiKey); // none to an overridden metabobEndpoint
   const windowStartMs = new Date(windowStart).getTime();
   try {
     while (traces.length < fetchLimit) {
@@ -320,7 +321,7 @@ export async function resolveTraceRecurringPatternScan(
 
   let dispatched: { ok: boolean; detail: string } | null = null;
   if (pointer.dispatch && !writeError) {
-    dispatched = await dispatchAuthor(goalHost, apiKey, patternId, patternsDir, timeoutMs);
+    dispatched = await dispatchAuthor(goalHost, selfAuthKey(goalHost, DEFAULT_GOAL_HOST, pointer.apiKey), patternId, patternsDir, timeoutMs);
   }
 
   return {

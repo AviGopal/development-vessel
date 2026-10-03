@@ -1,4 +1,5 @@
 import { promises as fs } from "node:fs";
+import { selfAuthKey } from "../lib/self-auth.js";
 import path from "node:path";
 import { METABOB_ENDPOINT, METABOB_API_KEY, DISCOVERY_ENDPOINT } from "../config.js";
 import type { ResolverResult } from "./types.js";
@@ -91,7 +92,7 @@ async function lookupOwningVessel(
   try {
     const res = await fetch(`${discovery.replace(/\/+$/, "")}/resolve`, {
       method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `ApiKey ${apiKey}` },
+      headers: { "Content-Type": "application/json", ...(apiKey ? { Authorization: `ApiKey ${apiKey}` } : {}) },
       body: JSON.stringify({ pointer: { type: "vesselRegistry" } }),
       signal: AbortSignal.timeout(timeoutMs),
     });
@@ -116,7 +117,7 @@ async function fetchConceptIds(
   try {
     const res = await fetch(`${conceptDb.replace(/\/+$/, "")}/v2/impulses/resolve`, {
       method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `ApiKey ${apiKey}` },
+      headers: { "Content-Type": "application/json", ...(apiKey ? { Authorization: `ApiKey ${apiKey}` } : {}) },
       body: JSON.stringify({ impulse: { pointer: { type: "concept_search_by_source", source: shape, limit: 5 } } }),
       signal: AbortSignal.timeout(timeoutMs),
     });
@@ -193,7 +194,7 @@ async function dispatchAuthor(
   try {
     const res = await fetch(`${goalHost.replace(/\/+$/, "")}/run-goal`, {
       method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `ApiKey ${apiKey}` },
+      headers: { "Content-Type": "application/json", ...(apiKey ? { Authorization: `ApiKey ${apiKey}` } : {}) },
       body: JSON.stringify({
         goal: `author a vessel-shape bridge consumer from pattern ${patternId}`,
         targetTemplateId: DRAFTER_TEMPLATE_ID,
@@ -237,10 +238,10 @@ export async function resolveVesselGapToCluster(
     return { shape: "vesselBridgeCluster", body: { error: "missing_api_key", generated_at: generatedAt } };
   }
 
-  const owner = await lookupOwningVessel(discovery, apiKey, shape, timeoutMs);
+  const owner = await lookupOwningVessel(discovery, selfAuthKey(discovery, DISCOVERY_ENDPOINT, pointer.apiKey), shape, timeoutMs);
   const vesselId = pointer.vesselId ?? owner?.vesselId ?? "unknown-vessel";
   const vesselEndpoint = owner?.endpoint ?? "";
-  const conceptIds = await fetchConceptIds(conceptDb, apiKey, shape, timeoutMs);
+  const conceptIds = await fetchConceptIds(conceptDb, selfAuthKey(conceptDb, DEFAULT_CONCEPT_DB, pointer.apiKey), shape, timeoutMs);
 
   const patternId = `vessel-bridge-${slug(shape)}`;
   const cluster = buildCluster({ patternId, shape, vesselId, vesselEndpoint, conceptDb, conceptIds, generatedAt });
@@ -257,7 +258,7 @@ export async function resolveVesselGapToCluster(
 
   let dispatched: { ok: boolean; detail: string } | null = null;
   if (pointer.dispatch && !writeError) {
-    dispatched = await dispatchAuthor(goalHost, apiKey, patternId, patternsDir, timeoutMs);
+    dispatched = await dispatchAuthor(goalHost, selfAuthKey(goalHost, DEFAULT_GOAL_HOST, pointer.apiKey), patternId, patternsDir, timeoutMs);
   }
 
   return {

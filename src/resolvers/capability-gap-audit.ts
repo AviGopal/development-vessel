@@ -174,8 +174,8 @@ export async function resolveCapabilityGapAudit(
   const apiKey = process.env["METABOB_API_KEY"] ?? METABOB_API_KEY;
 
   // Fetch recent traces + advertised shapes in parallel.
-  const headers: Record<string, string> = {};
-  if (apiKey) headers["Authorization"] = `ApiKey ${apiKey}`;
+  // The key goes only to the configured activity-api (lib/self-auth.ts), never to an overridden endpoint.
+  const headers: Record<string, string> = selfAuthHeaders(endpoint, METABOB_ENDPOINT);
   let traces: ExecutionTrace[] = [];
   try {
     const r = await fetch(`${endpoint}/v2/activities/execution-traces?limit=${traceLimit}`, {

@@ -256,7 +256,7 @@ export async function resolveVesselExerciseScan(
     const cell = cells.find((c) => c.vessel_id === vessel_id);
     if (!cell) continue;
 
-    const probeResult = await dispatchProbe(goalHostEndpoint, apiKey, vessel_id);
+    const probeResult = await dispatchProbe(goalHostEndpoint, selfAuthKey(goalHostEndpoint, DEFAULT_GOAL_HOST_ENDPOINT), vessel_id);
     cell.probe_dispatched = true;
     probes_dispatched++;
 

@@ -1,4 +1,5 @@
 import { promises as fs } from "node:fs";
+import { selfAuthKey } from "../lib/self-auth.js";
 import path from "node:path";
 import type { ResolverResult } from "./types.js";
 import { resolveCreditVesselShapes } from "./credit-vessel-shapes.js";
@@ -180,7 +181,7 @@ async function fetchRegistry(
 ): Promise<RegistryVessel[]> {
   const res = await fetch(`${endpoint.replace(/\/+$/, "")}/resolve`, {
     method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `ApiKey ${apiKey}` },
+    headers: { "Content-Type": "application/json", ...(apiKey ? { Authorization: `ApiKey ${apiKey}` } : {}) },
     body: JSON.stringify({ pointer: { type: "vesselRegistry" } }),
     signal: AbortSignal.timeout(timeoutMs),
   });
@@ -200,7 +201,7 @@ async function shapeHasMatch(
   try {
     const res = await fetch(`${metabob.replace(/\/+$/, "")}/v2/activities/discover-by-shapes`, {
       method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `ApiKey ${apiKey}` },
+      headers: { "Content-Type": "application/json", ...(apiKey ? { Authorization: `ApiKey ${apiKey}` } : {}) },
       body: JSON.stringify({ required_shapes: [shape], mode, limit: 1 }),
       signal: AbortSignal.timeout(timeoutMs),
     });
@@ -324,7 +325,7 @@ async function dispatchClusterAuthor(
   try {
     const res = await fetch(`${goalHost.replace(/\/+$/, "")}/run-goal`, {
       method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `ApiKey ${apiKey}` },
+      headers: { "Content-Type": "application/json", ...(apiKey ? { Authorization: `ApiKey ${apiKey}` } : {}) },
       body: JSON.stringify({
         goal: `author an activity that observes the arrived vessel from pattern ${patternId}`,
         targetTemplateId: DRAFTER_TEMPLATE_ID,
@@ -369,7 +370,7 @@ export async function resolveVesselArrivalScan(
 
   let registry: RegistryVessel[];
   try {
-    registry = await fetchRegistry(discovery, apiKey, timeoutMs);
+    registry = await fetchRegistry(discovery, selfAuthKey(discovery, DEFAULT_DISCOVERY, pointer.apiKey), timeoutMs);
   } catch (err) {
     return {
       shape: "vesselArrivalReport",
@@ -439,7 +440,7 @@ export async function resolveVesselArrivalScan(
     for (const shape of shapes) {
       const consumerProductivity = verdictByShape.get(shape) ?? "uncovered";
       const hasConsumer = consumerProductivity === "productively_consumed";
-      const hasProducer = await shapeHasMatch(metabob, apiKey, shape, "forward", timeoutMs);
+      const hasProducer = await shapeHasMatch(metabob, selfAuthKey(metabob, DEFAULT_METABOB, pointer.apiKey), shape, "forward", timeoutMs);
       const coverage: ShapeCoverage =
         hasProducer && hasConsumer
           ? "covered"
@@ -534,7 +535,7 @@ export async function resolveVesselArrivalScan(
         }
         // Dispatch the author only when this gap's cluster is NEW (anti-spam).
         if (dispatchAuthor && !existed && apiKey) {
-          const d = await dispatchClusterAuthor(goalHost, apiKey, `arrival-${slug(v.vessel_id)}`, patternsDir, timeoutMs);
+          const d = await dispatchClusterAuthor(goalHost, selfAuthKey(goalHost, DEFAULT_GOAL_HOST, pointer.apiKey), `arrival-${slug(v.vessel_id)}`, patternsDir, timeoutMs);
           if (d.ok) authorsDispatched += 1;
           else clusterErrors.push(`dispatch:${v.vessel_id}:${d.detail.slice(0, 60)}`);
         }

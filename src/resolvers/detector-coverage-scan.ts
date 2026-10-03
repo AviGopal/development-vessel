@@ -23,7 +23,7 @@
  */
 
 import { METABOB_ENDPOINT, METABOB_API_KEY } from "../config.js";
-import { selfAuthHeaders } from "../lib/self-auth.js";
+import { selfAuthHeaders, selfAuthKey } from "../lib/self-auth.js";
 import type { ResolverResult } from "./types.js";
 
 const DEFAULT_DEV_VESSEL_URL = "http://127.0.0.1:8090/v2/impulses/resolve";
@@ -207,8 +207,8 @@ export async function resolveDetectorCoverageScan(pointer: DetectorCoverageScanP
   const emit = pointer.emit_gap !== false;
   const apiKey = process.env["METABOB_API_KEY"] ?? METABOB_API_KEY;
 
-  const headers: Record<string, string> = {};
-  if (apiKey) headers["Authorization"] = `ApiKey ${apiKey}`;
+  // The key goes only to the configured activity-api (lib/self-auth.ts), never to an overridden endpoint.
+  const headers: Record<string, string> = selfAuthHeaders(endpoint, METABOB_ENDPOINT);
   let traces: ExecutionTrace[] = [];
   try {
     const r = await fetch(`${endpoint}/v2/activities/execution-traces?limit=${traceLimit}`, { headers, signal: AbortSignal.timeout(20_000) });
@@ -217,7 +217,7 @@ export async function resolveDetectorCoverageScan(pointer: DetectorCoverageScanP
 
   const coverageStats = await fetchCoverageStats(emitUrl, apiKey);
   const cited = coverageStats.cited;
-  const authoredDetectorCount = await fetchAuthoredDetectorCount(endpoint, apiKey);
+  const authoredDetectorCount = await fetchAuthoredDetectorCount(endpoint, selfAuthKey(endpoint, METABOB_ENDPOINT));
 
   const cutoff = Date.now() - windowHours * 3600 * 1000;
   const failures = traces.filter((tr) => {

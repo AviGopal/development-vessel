@@ -1,4 +1,5 @@
 import type { ResolverResult } from "./types.js";
+import { selfAuthKey } from "../lib/self-auth.js";
 // Replaces the drafter-trigger-tick random scenario pick with a priority-weighted selection.
 import { readFile, readdir } from "node:fs/promises";
 
@@ -60,7 +61,7 @@ async function dispatchDrafter(
   try {
     const res = await fetch(url, {
       method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `ApiKey ${apiKey}` },
+      headers: { "Content-Type": "application/json", ...(apiKey ? { Authorization: `ApiKey ${apiKey}` } : {}) },
       body: JSON.stringify({
         template_id: drafterId,
         ...(parentExecutionId ? { parent_execution_id: parentExecutionId } : {}),
@@ -278,7 +279,7 @@ type Cand = {
     dispatch_result = await dispatchDrafter(
       top.scenario_id, scenariosDir,
       p.light_dispatch_url ?? DEFAULT_LIGHT_DISPATCH,
-      p.drafter_template_id ?? DEFAULT_DRAFTER, apiKey,
+      p.drafter_template_id ?? DEFAULT_DRAFTER, selfAuthKey(p.light_dispatch_url ?? DEFAULT_LIGHT_DISPATCH, DEFAULT_LIGHT_DISPATCH, p.apiKey),
       p.parent_execution_id, p.composition_chain,
     );
   }

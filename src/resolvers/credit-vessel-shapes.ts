@@ -1,4 +1,5 @@
 import type { ResolverResult } from "./types.js";
+import { selfAuthHeaders } from "../lib/self-auth.js";
 
 /**
  * credit_vessel_shapes (2026-06-13) — the REWARD EDGE for vessel interactions.
@@ -79,9 +80,10 @@ export async function resolveCreditVesselShapes(
     };
   }
 
+  // The key goes only to the configured activity-api (lib/self-auth.ts): none to an overridden metabobEndpoint.
   const authHeaders: Record<string, string> = {
     "Content-Type": "application/json",
-    Authorization: `ApiKey ${apiKey}`,
+    ...selfAuthHeaders(endpoint, DEFAULT_METABOB.replace(/\/+$/, ""), pointer.apiKey),
   };
 
   let credited = 0;

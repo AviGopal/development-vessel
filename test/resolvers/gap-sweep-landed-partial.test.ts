@@ -1,26 +1,23 @@
 // CHECK-FIRST, END TO END THROUGH THE REAL PENDING-LAND SWEEP: a landing made under the lane's own semantic
 // dissent closes `landed_partial`, the verified-landing credit does not move, and the sweep's own check (the
 // one the gate doubted) does not settle the dissent as passed. A landing with no dissent is the control.
-// Companion to feature-compose-dissent-partial.test.ts (the seams); this file runs sweepPendingLandVerifications
-// on a tmp gap store, tmp clone tree and tmp calibration files. Real git, no network (fetch stubbed).
-// In a multi-file run the store root is frozen by whichever file imported config.ts first (substrate-gap.ts
-// gapStoreRootForTest), so rows are seeded into THAT root, which must be a temp dir, under run-unique ids.
+// Companion to feature-compose-dissent-partial.test.ts (the seams).
+//
+// ISOLATION: the gap store's root is frozen by whichever module imports config.ts first (substrate-gap.ts
+// gapStoreRootForTest), so in a multi-file `bun test` run this file cannot choose its store. The sweep therefore
+// runs in a FRESH `bun` process whose WORKSPACE_ROOT, VESSELS_CLONE_ROOT and calibration paths are this file's
+// temp dir; it can never read or write a real store. Real git; no network (fetch stubbed in the child).
 import { describe, it, expect, beforeAll, afterAll } from "bun:test";
-import { mkdirSync, writeFileSync, readFileSync, rmSync, existsSync } from "node:fs";
+import { mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { gapCheckIdentity } from "../../src/resolvers/feature-compose.js";
 
 const ROOT = join(tmpdir(), `sweep-landed-partial-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 const CLONES = join(ROOT, "clones");
-const RUN = Math.random().toString(36).slice(2, 8);
-const PARTIAL = `sweep-partial-${RUN}`;
-const VERIFIED = `sweep-verified-${RUN}`;
-let GAPS_PATH = "";
+const GAPS_PATH = join(ROOT, "gaps", "gaps.json");
 const CALIB = join(ROOT, "expectation-calibration.json");
-process.env.WORKSPACE_ROOT = ROOT;
-process.env.VESSELS_CLONE_ROOT = CLONES;
-process.env.EXPECTATION_CALIB_PATH = CALIB;
-process.env.CLOSE_ORACLE_CALIB_PATH = join(ROOT, "close-oracle-calibration.json");
+const GTF = new URL("../../src/resolvers/gap-to-feature.ts", import.meta.url).pathname;
 
 function git(repo: string, ...args: string[]): string {
   const p = Bun.spawnSync(["git", "-C", repo, ...args], { stdout: "pipe", stderr: "pipe" });
@@ -31,10 +28,7 @@ function git(repo: string, ...args: string[]): string {
 const CHECK = { evidence_resolve: { shape: "health_probe", input: {}, nonzero_field: "count" } };
 let partialSha = "";
 let verifiedSha = "";
-const originalFetch = globalThis.fetch;
-beforeAll(async () => {
-  // health_probe answers a measured healthy count: the check reads 'absent' (fixed) for both rows.
-  globalThis.fetch = (async () => new Response(JSON.stringify({ body: { count: 1 } }), { status: 200 })) as unknown as typeof fetch;
+beforeAll(() => {
   const repo = join(CLONES, "development-vessel");
   mkdirSync(join(repo, "test"), { recursive: true });
   git(repo, "init", "-q");
@@ -54,35 +48,43 @@ beforeAll(async () => {
   git(repo, "commit", "-q", "-m", "landed with the gate's agreement");
   verifiedSha = git(repo, "rev-parse", "HEAD");
 
-  const { gapCheckIdentity } = await import("../../src/resolvers/feature-compose.js");
-  const { gapStoreRootForTest } = await import("../../src/resolvers/substrate-gap.js");
-  const root = gapStoreRootForTest();
-  if (!root.startsWith(tmpdir()) && !root.startsWith("/tmp/")) throw new Error(`gap store root ${root} is not a temp dir`);
-  GAPS_PATH = join(root, "gaps", "gaps.json");
-  mkdirSync(join(root, "gaps"), { recursive: true });
-  const existing = existsSync(GAPS_PATH) ? (JSON.parse(readFileSync(GAPS_PATH, "utf8")) as unknown[]) : [];
+  mkdirSync(join(ROOT, "gaps"), { recursive: true });
   const now = new Date().toISOString();
   const base = { source: "substrate_detected", detected_at: now, created_at: now, updated_at: now, status: "open" };
-  const dissent = { reason: "2/2 refuters: the key is named but nothing reads it", gate_verdict: { addresses: false, on_live_path: false }, at: now, landed_sha: partialSha, own_check: gapCheckIdentity(CHECK), child_gap_id: `${PARTIAL}-dissent-narrowed`, later_outcome: null };
+  const dissent = { reason: "2/2 refuters: the key is named but nothing reads it", gate_verdict: { addresses: false, on_live_path: false }, at: now, landed_sha: partialSha, own_check: gapCheckIdentity(CHECK), child_gap_id: "sweep-partial-dissent-narrowed", later_outcome: null };
   writeFileSync(GAPS_PATH, JSON.stringify([
-    ...existing,
-    { ...base, id: PARTIAL, category: "cat_partial", summary: "landed under dissent", classification_metadata: { ...CHECK, pending_outcome_verification: partialSha, pending_set_at: now, semantic_dissent: [dissent] } },
-    { ...base, id: VERIFIED, category: "cat_verified", summary: "landed with the gate", classification_metadata: { ...CHECK, pending_outcome_verification: verifiedSha, pending_set_at: now } },
+    { ...base, id: "sweep-partial", category: "cat_partial", summary: "landed under dissent", classification_metadata: { ...CHECK, pending_outcome_verification: partialSha, pending_set_at: now, semantic_dissent: [dissent] } },
+    { ...base, id: "sweep-verified", category: "cat_verified", summary: "landed with the gate", classification_metadata: { ...CHECK, pending_outcome_verification: verifiedSha, pending_set_at: now } },
   ]));
   writeFileSync(CALIB, JSON.stringify({}));
 });
-afterAll(() => {
-  globalThis.fetch = originalFetch;
-  try { rmSync(ROOT, { recursive: true, force: true }); } catch { /* noop */ }
-});
+afterAll(() => { try { rmSync(ROOT, { recursive: true, force: true }); } catch { /* noop */ } });
+
+/** Run the real sweep once in a fresh process bound to ROOT. health_probe answers a measured healthy count. */
+function sweepInIsolation(): { exit: number; out: string } {
+  const code = [
+    `globalThis.fetch = (async () => new Response(JSON.stringify({ body: { count: 1 } }), { status: 200 }));`,
+    `const { sweepPendingLandVerifications } = await import(${JSON.stringify(GTF)});`,
+    `const r = await sweepPendingLandVerifications();`,
+    `console.log("SWEEP_RESULT " + JSON.stringify(r));`,
+  ].join("\n");
+  const env: Record<string, string> = {
+    HOME: process.env.HOME ?? ROOT, PATH: process.env.PATH ?? "",
+    WORKSPACE_ROOT: ROOT, VESSELS_CLONE_ROOT: CLONES, EXPECTATION_CALIB_PATH: CALIB,
+    CLOSE_ORACLE_CALIB_PATH: join(ROOT, "close-oracle-calibration.json"),
+    SUBSTRATE_GAP_SKIP_COMPOSE_TRIGGER: "1", NODE_ENV: "test", TZ: "UTC",
+  };
+  const p = Bun.spawnSync(["bun", "-e", code], { env, cwd: ROOT, stdout: "pipe", stderr: "pipe", timeout: 120_000 });
+  return { exit: p.exitCode ?? -1, out: new TextDecoder().decode(p.stdout) + new TextDecoder().decode(p.stderr) };
+}
 
 describe("the pending-land sweep: a landing under semantic dissent is partial", () => {
-  it("MUST-FAIL: the dissent landing closes landed_partial, the sweep's same own check leaves its dissent unsettled, and the verified-landing credit does not count it; the no-dissent CONTROL closes landed_verified and is credited", async () => {
-    const { sweepPendingLandVerifications } = await import("../../src/resolvers/gap-to-feature.js");
-    await sweepPendingLandVerifications();
+  it("MUST-FAIL: the dissent landing closes landed_partial, the sweep's same own check leaves its dissent unsettled, and the verified-landing credit does not count it; the no-dissent CONTROL closes landed_verified and is credited", () => {
+    const run = sweepInIsolation();
+    expect({ exit: run.exit, ran: run.out.includes("SWEEP_RESULT ") }, run.out.slice(-2000)).toEqual({ exit: 0, ran: true });
     const byId = new Map((JSON.parse(readFileSync(GAPS_PATH, "utf8")) as Array<Record<string, unknown>>).map((g) => [g.id, g]));
-    const p = byId.get(PARTIAL)!;
-    const v = byId.get(VERIFIED)!;
+    const p = byId.get("sweep-partial")!;
+    const v = byId.get("sweep-verified")!;
     const pm = p.classification_metadata as Record<string, unknown>;
     const vm = v.classification_metadata as Record<string, unknown>;
     const calib = JSON.parse(readFileSync(CALIB, "utf8")) as Record<string, { attempts: number; lands: number }>;
@@ -92,7 +94,7 @@ describe("the pending-land sweep: a landing under semantic dissent is partial", 
       verified: [v.status, vm.closed_reason],
       verified_credit: calib.cat_verified?.lands ?? 0,
       partial_credit: calib.cat_partial?.lands ?? 0,
-    }).toEqual({
+    }, run.out.slice(-2000)).toEqual({
       partial: ["closed", "landed_partial"],
       partial_dissent_outcome: null,
       verified: ["closed", "landed_verified"],

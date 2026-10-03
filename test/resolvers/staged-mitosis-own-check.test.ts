@@ -1,0 +1,358 @@
+// A STAGED MITOSIS WHOSE GAP VERIFY FAILED IS NEVER CUT OVER ON TYPECHECK ALONE.
+//
+// Measured on node 1 (activity-api landing fb9a985): patch_with_tools staged a mitosis whose
+// in-loop gate refused it (evaluate_refused:static_eval_unavailable); the same gap's attempt then
+// FAILED its verify and the lane minted recommit-recommit-…-verify_failed-verify_failed. The staged
+// root and its mitosis-pending.json survived ("change_window lease held — deferring cutover without
+// rollback; preserving verified patch"), and the deferred mitosis-tick re-evaluated it with
+// scripts=["typecheck"], cutover logged verdict=FAVORABLE cited_checks=["bun run typecheck"]
+// cited_traces=0, and the change landed and pushed. The gap's class-2 test_suite check was never
+// re-run against the tree that landed.
+//
+// These drive the REAL resolveVesselMitosisCutover through its git-aware path against a temp clone
+// with a bare origin (no push, no restart, no live services): the gap store read and the test_suite
+// run are the only stand-ins, injected through the cutover's own test seam. The whole-suite
+// precutover gate (step 5d) is switched off so no live suite is ever started from here.
+import { describe, it, expect, beforeEach, afterEach } from "bun:test";
+import * as cutoverMod from "../../src/resolvers/vessel-mitosis-cutover.js";
+import { resolveMaintenanceLeaseWrite } from "../../src/resolvers/maintenance-lease.js";
+import { mkdtemp, mkdir, writeFile, readFile, rm, stat } from "node:fs/promises";
+import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+const { resolveVesselMitosisCutover } = cutoverMod;
+type Deps = { readGap?: (p: Record<string, unknown>) => Promise<unknown>; runSuite?: (p: Record<string, unknown>) => Promise<unknown> };
+// Optional on purpose: on a tree without the seam the cutover runs its unpatched path, which is
+// exactly the behaviour the RED tests below must expose (it lands).
+const setDeps = (d: Deps | null): void => {
+  (cutoverMod as unknown as { __setOwnCheckDepsForTests?: (d: Deps | null) => void }).__setOwnCheckDepsForTests?.(d);
+};
+
+const ENV_KEYS = [
+  "WORKSPACE_ROOT",
+  "MITOSIS_CUTOVER_SKIP_SYSTEMCTL",
+  "MITOSIS_DIRECT_PUSH",
+  "MITOSIS_RUNTIME_DIR",
+  "MITOSIS_PUSH_CLONE_DIR",
+  "MITOSIS_HOST_SYNC_MODE",
+  "MITOSIS_HOST_REPO_ROOT",
+  "PUSH_POLICY_PATH",
+  "SUBSTRATE_REPO_OWNER",
+  "CUTOVER_PRECHECK_SUITE",
+  "MAINTENANCE_LEASE_PATH",
+  "GAP_STORE_ENDPOINT",
+] as const;
+const saved: Record<string, string | undefined> = {};
+let ws: string;
+
+const VESSEL = "development-vessel";
+const GAP = "gap-own-check-target";
+const TEST_FILE = "test/resolvers/target.test.ts";
+const OWN_TEST = "target > does what the gap asked";
+const STAGED = "// patched by substrate\n";
+const MVID = "mitosis-2026-10-02T23-30-03-248Z";
+
+beforeEach(async () => {
+  ws = await mkdtemp(join(tmpdir(), "own-check-cut-"));
+  for (const k of ENV_KEYS) {
+    saved[k] = process.env[k];
+    delete process.env[k];
+  }
+  process.env["WORKSPACE_ROOT"] = ws;
+  process.env["MITOSIS_CUTOVER_SKIP_SYSTEMCTL"] = "1";
+  process.env["PUSH_POLICY_PATH"] = join(ws, "no-push-policy.json");
+  process.env["CUTOVER_PRECHECK_SUITE"] = "0";
+});
+
+afterEach(async () => {
+  setDeps(null);
+  for (const k of ENV_KEYS) {
+    if (saved[k] === undefined) delete process.env[k];
+    else process.env[k] = saved[k];
+  }
+  await rm(ws, { recursive: true, force: true });
+});
+
+async function setup(): Promise<{ baseRoot: string; mitosisRoot: string; hostRepoRoot: string; baseSha: string; pendingPath: string }> {
+  const reposRoot = join(ws, "git", "super-repo", "repos");
+  const baseRoot = join(reposRoot, VESSEL);
+  const mitosisRoot = join(ws, "vessels", `${VESSEL}-mitosis-2026-10-02T23-30-03-248Z`);
+  await mkdir(join(baseRoot, "src", "resolvers"), { recursive: true });
+  await mkdir(join(mitosisRoot, "src", "resolvers"), { recursive: true });
+  await writeFile(join(baseRoot, "src", "index.ts"), "// base index\n");
+  const live = "// original (live)\n";
+  await writeFile(join(baseRoot, "src", "resolvers", "target.ts"), live);
+  const baseSha = createHash("sha256").update(live).digest("hex").slice(0, 12);
+  await writeFile(join(mitosisRoot, "src", "resolvers", "target.ts"), STAGED);
+  const hostRepoRoot = join(ws, "host-repo");
+  await mkdir(join(hostRepoRoot, "src", "resolvers"), { recursive: true });
+  await writeFile(join(hostRepoRoot, "src", "resolvers", "target.ts"), "// original\n");
+  spawnSync("git", ["init", "-b", "dev"], { cwd: hostRepoRoot });
+  spawnSync("git", ["config", "user.email", "test@example.com"], { cwd: hostRepoRoot });
+  spawnSync("git", ["config", "user.name", "Test"], { cwd: hostRepoRoot });
+  spawnSync("git", ["add", "."], { cwd: hostRepoRoot });
+  spawnSync("git", ["commit", "-m", "baseline"], { cwd: hostRepoRoot });
+  const originRoot = join(ws, "host-origin.git");
+  spawnSync("git", ["init", "--bare", "-b", "dev", originRoot]);
+  spawnSync("git", ["remote", "add", "origin", originRoot], { cwd: hostRepoRoot });
+  spawnSync("git", ["push", "-u", "origin", "dev"], { cwd: hostRepoRoot });
+  // What patch_with_tools leaves behind: the shared queue lock naming this mitosis and its gap.
+  const pendingPath = join(ws, "mitosis-pending.json");
+  await writeFile(
+    pendingPath,
+    JSON.stringify({
+      vessel_name: VESSEL,
+      base_version_id: "v1",
+      mitosis_version_id: MVID,
+      mitosis_root: mitosisRoot,
+      base_sha: baseSha,
+      authored_by: "patch_with_tools",
+      gap_id: GAP,
+      proposal: GAP,
+      staged_files: ["src/resolvers/target.ts"],
+    }, null, 2),
+  );
+  return { baseRoot, mitosisRoot, hostRepoRoot, baseSha, pendingPath };
+}
+
+/** The pointer mitosis-tick builds for the deferred cutover: a static-only FAVORABLE citing typecheck alone. */
+function deferredPointer(s: { baseRoot: string; mitosisRoot: string; hostRepoRoot: string; baseSha: string; pendingPath: string }) {
+  return {
+    type: "vessel_mitosis_cutover" as const,
+    vessel_name: VESSEL,
+    base_version_id: "v1",
+    mitosis_version_id: MVID,
+    mitosis_root: s.mitosisRoot,
+    base_root: s.baseRoot,
+    host_repo_root: s.hostRepoRoot,
+    staged_base_sha: s.baseSha,
+    staged_files: ["src/resolvers/target.ts"],
+    proposal_id: GAP,
+    gap_id: GAP,
+    pending_pointer_path: s.pendingPath,
+    applied_log_path: join(ws, "mitosis-applied.jsonl"),
+    evaluation_evidence: {
+      verdict: "FAVORABLE",
+      verdict_reason: "static_checks_pass",
+      base_success_rate: 1,
+      mitosis_success_rate: 1,
+      cited_trace_ids: [],
+      cited_check_names: ["bun run typecheck"],
+    },
+    skip_push: true,
+    skip_restart: true,
+  };
+}
+
+const gapRow = {
+  id: GAP,
+  status: "open",
+  category: "missing_capability",
+  summary: "target does what the gap asked",
+  classification_metadata: {
+    falsifier: { class: "class2" },
+    edit_site: `repos/${VESSEL}/src/resolvers/target.ts`,
+    evidence_resolve: {
+      shape: "test_suite",
+      input: { vessel: `repos/${VESSEL}`, test_file: TEST_FILE, only_tests: [OWN_TEST] },
+      zero_field: "requested_not_passing",
+    },
+  },
+};
+const readGap = async (p: Record<string, unknown>) =>
+  ({ shape: "substrateGap", body: { gaps: p["id"] === GAP ? [gapRow] : [] } });
+
+function suiteBody(hostRepoRoot: string, over: Record<string, unknown>) {
+  return { shape: "test_suite", body: { vessel: `repos/${VESSEL}`, verified_root: hostRepoRoot, ran: true, total: 1, pass: 1, fail: 0, skip: 0, requested_not_passing: 0, failingTests: [], ...over } };
+}
+
+async function headSubject(repo: string): Promise<string> {
+  return spawnSync("git", ["log", "-1", "--format=%s"], { cwd: repo, encoding: "utf8" }).stdout.trim();
+}
+
+async function exists(p: string): Promise<boolean> {
+  try { await stat(p); return true; } catch { return false; }
+}
+
+describe("deferred cutover of a staged mitosis: the gap's own evidence, not typecheck alone", () => {
+  it("(a) a staged mitosis whose gap verify FAILED is never cut over by the deferred path", async () => {
+    const s = await setup();
+    setDeps({ readGap, runSuite: async () => suiteBody(s.hostRepoRoot, {}) });
+    // The record the lane leaves on the pending lock when the attempt's verify fails.
+    const record = {
+      unlandable: true,
+      gap_id: `recommit-recommit-${GAP}-verify_failed`,
+      pending_gap_id: GAP,
+      mitosis_version_id: MVID,
+      mitosis_root: s.mitosisRoot,
+      failure_class: "verify_failed",
+      reason: "the edited vessel must pass its own check after the change",
+      at: new Date().toISOString(),
+    };
+    const pending = JSON.parse(await readFile(s.pendingPath, "utf8"));
+    await writeFile(s.pendingPath, JSON.stringify({ ...pending, unlandable: record }));
+
+    const r = await resolveVesselMitosisCutover(deferredPointer(s) as never);
+    const body = r.body as Record<string, unknown>;
+    expect(r.shape).toBe("vesselMitosisCutoverResult");
+    expect(body["refused"]).toBe(true);
+    expect(body["refuse_class"]).toBe("staged_mitosis_unlandable");
+    expect(String(body["refusal_reason"])).toContain("verify_failed");
+    expect(await headSubject(s.hostRepoRoot)).toBe("baseline");
+    // The queue lock is released so the next staging is not blocked behind a tree that can never land.
+    expect(await exists(s.pendingPath)).toBe(false);
+  });
+
+  it("(a') the lane's verify-failure writer marks the pending mitosis of the same gap lineage, and the cutover then refuses it", async () => {
+    const s = await setup();
+    setDeps({ readGap, runSuite: async () => suiteBody(s.hostRepoRoot, {}) });
+    const gate = await import("../../src/resolvers/staged-mitosis-gate.js");
+    // The failing compose was for the recommit child (its own failure mints recommit-recommit-…):
+    // the same defect on the same edit site as the gap the pending mitosis was staged for.
+    const m = await gate.markOnComposeFailure(`recommit-${GAP}-verify_failed`, "verify_failed", "1 own test failing", s.pendingPath);
+    expect(m.marked).toBe(true);
+    expect(JSON.parse(await readFile(s.pendingPath, "utf8")).unlandable.failure_class).toBe("verify_failed");
+    const r = await resolveVesselMitosisCutover(deferredPointer(s) as never);
+    expect((r.body as Record<string, unknown>)["refuse_class"]).toBe("staged_mitosis_unlandable");
+    expect(await headSubject(s.hostRepoRoot)).toBe("baseline");
+  });
+
+  it("(b) a deferred cutover re-runs the gap's own class-2 check on the STAGED tree, cites it, and refuses when it fails", async () => {
+    const s = await setup();
+    const calls: Array<{ pointer: Record<string, unknown>; treeContent: string }> = [];
+    setDeps({
+      readGap,
+      runSuite: async (p) => {
+        calls.push({ pointer: p, treeContent: await readFile(join(s.hostRepoRoot, "src", "resolvers", "target.ts"), "utf8") });
+        return suiteBody(s.hostRepoRoot, { pass: 0, fail: 1, requested_not_passing: 1, failingTests: [`(fail) ${OWN_TEST}`] });
+      },
+    });
+    const r = await resolveVesselMitosisCutover(deferredPointer(s) as never);
+    const body = r.body as Record<string, unknown>;
+    expect(calls.length).toBe(1);
+    expect(calls[0]!.pointer["test_file"]).toBe(TEST_FILE);
+    expect(calls[0]!.pointer["only_tests"]).toEqual([OWN_TEST]);
+    expect(calls[0]!.pointer["base_ref"]).toBeUndefined();          // the working tree, not a committed base
+    expect(calls[0]!.treeContent).toBe(STAGED);                      // measured with the staged change in place
+    expect(r.shape).toBe("vesselMitosisCutoverResult");
+    expect(body["refuse_class"]).toBe("own_check_not_passing");
+    expect(await headSubject(s.hostRepoRoot)).toBe("baseline");
+    // The reason is recorded on the refusal, and the staged tree is discarded from the queue so no
+    // later tick re-evaluates it on typecheck alone.
+    expect(String(body["refusal_reason"])).toContain("1/1 requested test(s) not passing");
+    expect(await exists(s.pendingPath)).toBe(false);
+  });
+
+  it("(b'') an unsubstituted template gap_id from mitosis-tick still finds the gap's own check through the pending file", async () => {
+    const s = await setup();
+    let asked: unknown = null;
+    setDeps({
+      readGap: async (p) => { asked = p["id"]; return readGap(p); },
+      runSuite: async () => suiteBody(s.hostRepoRoot, { pass: 0, fail: 1, requested_not_passing: 1 }),
+    });
+    const r = await resolveVesselMitosisCutover({ ...deferredPointer(s), gap_id: "{{extract_gap_id_content}}" } as never);
+    expect(asked).toBe(GAP);
+    expect((r.body as Record<string, unknown>)["refuse_class"]).toBe("own_check_not_passing");
+    expect(await headSubject(s.hostRepoRoot)).toBe("baseline");
+  });
+
+  it("(b') an own check that could not be measured refuses the landing instead of passing it", async () => {
+    const s = await setup();
+    setDeps({ readGap, runSuite: async () => ({ shape: "structuredError", body: { detail: "no shellResult producer in discovery" } }) });
+    const r = await resolveVesselMitosisCutover(deferredPointer(s) as never);
+    const body = r.body as Record<string, unknown>;
+    expect(body["refuse_class"]).toBe("own_check_unmeasured");
+    expect(await headSubject(s.hostRepoRoot)).toBe("baseline");
+    expect(String(body["refusal_reason"])).toContain("could not be measured");
+  });
+
+  it("(c) positive control: a staged patch whose verify passed still cuts over after a change_window deferral", async () => {
+    const s = await setup();
+    setDeps({ readGap, runSuite: async () => suiteBody(s.hostRepoRoot, {}) });
+    // First tick: another holder has the change window → the cutover defers, preserving the patch.
+    const acq = await resolveMaintenanceLeaseWrite({ type: "maintenanceLease_write", op: "acquire", name: "cutover", holder: "trace-store-reconcile", ttl_ms: 60_000 } as never);
+    const token = (acq.body as { token?: string }).token;
+    expect(typeof token).toBe("string");
+    const first = await resolveVesselMitosisCutover(deferredPointer(s) as never);
+    expect(first.shape).toBe("vesselMitosisCutoverResult");
+    expect(String((first.body as Record<string, unknown>)["refusal_reason"])).toContain("change_window");
+    expect(await exists(s.pendingPath)).toBe(true);
+    await resolveMaintenanceLeaseWrite({ type: "maintenanceLease_write", op: "release", name: "cutover", token } as never);
+    // Next tick: the window is free and the gap's own check passes on the staged tree → it lands.
+    const second = await resolveVesselMitosisCutover(deferredPointer(s) as never);
+    expect(second.shape).toBe("cutoverApplied");
+    expect(await headSubject(s.hostRepoRoot)).not.toBe("baseline");
+    expect(await readFile(join(s.hostRepoRoot, "src", "resolvers", "target.ts"), "utf8")).toBe(STAGED);
+  });
+
+  it("(c') the landing cites the own check it re-ran", async () => {
+    const s = await setup();
+    let ran = 0;
+    setDeps({ readGap, runSuite: async () => { ran++; return suiteBody(s.hostRepoRoot, {}); } });
+    const r = await resolveVesselMitosisCutover(deferredPointer(s) as never);
+    expect(r.shape).toBe("cutoverApplied");
+    expect(ran).toBe(1);
+    const ops = (r.body as { operations: Array<{ op: string; status: string; detail?: string }> }).operations;
+    const own = ops.find((o) => o.op === "own_check");
+    expect(own?.status).toBe("ok");
+    expect(own?.detail ?? "").toContain(OWN_TEST);
+  });
+
+  it("(d) a SKIPPED own test is not a passing own test, even when requested_not_passing reads 0", async () => {
+    const s = await setup();
+    // requested_not_passing counts names by substring over (pass) lines, so a skipped requested test
+    // can read 0 when another passing title contains it; the skip count is what says it did not run.
+    setDeps({ readGap, runSuite: async () => suiteBody(s.hostRepoRoot, { pass: 1, skip: 1, requested_not_passing: 0 }) });
+    const r = await resolveVesselMitosisCutover(deferredPointer(s) as never);
+    expect((r.body as Record<string, unknown>)["refuse_class"]).toBe("own_check_not_passing");
+    expect(String((r.body as Record<string, unknown>)["refusal_reason"])).toContain("SKIPPED");
+    expect(await headSubject(s.hostRepoRoot)).toBe("baseline");
+  });
+
+  it("(d') zero tests ran is not a pass", async () => {
+    const s = await setup();
+    setDeps({ readGap, runSuite: async () => suiteBody(s.hostRepoRoot, { total: 0, pass: 0, requested_not_passing: 0 }) });
+    const r = await resolveVesselMitosisCutover(deferredPointer(s) as never);
+    expect((r.body as Record<string, unknown>)["refuse_class"]).toBe("own_check_not_passing");
+    expect(await headSubject(s.hostRepoRoot)).toBe("baseline");
+  });
+});
+
+describe("staged-mitosis-gate primitives", () => {
+  it("gapLineageRoot strips each recommit- prefix with its trailing failure class", async () => {
+    const { gapLineageRoot, sameGapLineage } = await import("../../src/resolvers/staged-mitosis-gate.js");
+    expect(gapLineageRoot("recommit-recommit-route-edit-e32a5778-verify_failed-verify_failed")).toBe("route-edit-e32a5778");
+    expect(gapLineageRoot("recommit-route-edit-e32a5778-anchor_not_found")).toBe("route-edit-e32a5778");
+    expect(gapLineageRoot("route-edit-e32a5778")).toBe("route-edit-e32a5778");
+    expect(sameGapLineage("recommit-gap-a-verify_failed", "gap-a")).toBe(true);
+    expect(sameGapLineage("recommit-gap-a-verify_failed", "gap-b")).toBe(false);
+    expect(sameGapLineage("", "")).toBe(false);
+  });
+
+  it("markOnComposeFailure only marks for verify-stage classes and only the same lineage", async () => {
+    const s = await setup();
+    const { markOnComposeFailure } = await import("../../src/resolvers/staged-mitosis-gate.js");
+    expect((await markOnComposeFailure(GAP, "anchor_not_found", "x", s.pendingPath)).marked).toBe(false);
+    expect((await markOnComposeFailure("some-other-gap", "verify_failed", "x", s.pendingPath)).marked).toBe(false);
+    expect(JSON.parse(await readFile(s.pendingPath, "utf8")).unlandable).toBeUndefined();
+    const m = await markOnComposeFailure(GAP, "syntax_break", "TS1005", s.pendingPath);
+    expect(m.marked).toBe(true);
+    const pending = JSON.parse(await readFile(s.pendingPath, "utf8"));
+    expect(pending.unlandable.failure_class).toBe("syntax_break");
+    expect(pending.unlandable.reason).toBe("TS1005");
+  });
+
+  it("judgeOwnCheck: skip, no summary, zero passes and unreported counts are never a pass", async () => {
+    const { judgeOwnCheck } = await import("../../src/resolvers/staged-mitosis-gate.js");
+    const ok = { ran: true, pass: 1, fail: 0, skip: 0, requested_not_passing: 0 };
+    expect(judgeOwnCheck(ok, ["t"]).pass).toBe(true);
+    expect(judgeOwnCheck({ ...ok, skip: 1 }, ["t"])).toMatchObject({ pass: false, measured: true });
+    expect(judgeOwnCheck({ ...ok, ran: false }, ["t"])).toMatchObject({ pass: false, measured: false });
+    expect(judgeOwnCheck({ ...ok, pass: 0 }, ["t"])).toMatchObject({ pass: false, measured: true });
+    expect(judgeOwnCheck({ ...ok, requested_not_passing: null }, ["t"])).toMatchObject({ pass: false, measured: true });
+    expect(judgeOwnCheck({ ...ok, requested_not_passing: 1 }, ["t"]).pass).toBe(false);
+    expect(judgeOwnCheck(null, ["t"])).toMatchObject({ pass: false, measured: false });
+  });
+});

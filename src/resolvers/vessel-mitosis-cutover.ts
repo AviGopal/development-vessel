@@ -27,6 +27,26 @@ import { resolveActivateSubstrateScript } from "./activate-substrate-script.js";
 import { resolveMaintenanceLeaseWrite } from "./maintenance-lease";
 import { gateLanding, KILL_SWITCH_REASON, landingsStopped } from "./push-policy.js";
 import { CUTOVER_QUIESCE_MAX_MS } from "../compose-slots.js";
+import { judgeOwnCheck, loadOwnCheck, readUnlandableMarker } from "./staged-mitosis-gate.js";
+
+/**
+ * The landing gap's own-check dependencies: the gap-store read and the test_suite run. Module-level
+ * so a test can stand in for both without a live store or shell producer (precedent:
+ * __setBirthJudgeForTests in substrate-gap.ts). null restores the real resolvers.
+ */
+type OwnCheckDeps = {
+  readGap: (p: Record<string, unknown>) => Promise<unknown>;
+  runSuite: (p: Record<string, unknown>) => Promise<unknown>;
+};
+const realOwnCheckDeps: OwnCheckDeps = {
+  readGap: (p) => resolveSubstrateGap(p as never),
+  runSuite: (p) => resolveTestSuite(p),
+};
+let ownCheckDeps: OwnCheckDeps = realOwnCheckDeps;
+/** Tests only. */
+export function __setOwnCheckDepsForTests(d: Partial<OwnCheckDeps> | null): void {
+  ownCheckDeps = d ? { ...realOwnCheckDeps, ...d } : realOwnCheckDeps;
+}
 export function selfRestartAlreadyOwed(vesselName: string): string | null {
   try {
     const r = Bun.spawnSync(["systemctl", "list-units", "--all", "--plain", "--no-legend", "mitosis-self-restart-*"], { stdout: "pipe", stderr: "pipe" });
@@ -1031,6 +1051,26 @@ export async function resolveVesselMitosisCutover(
       `mitosis_root not found on disk: ${mitosisRoot}`,
       { verdict: evaluation_evidence.verdict, mitosis_root: mitosisRoot },
     );
+  }
+
+  // A STAGED TREE WHOSE GAP VERIFY FAILED DOES NOT LAND LATER ON TYPECHECK ALONE (2026-10-02).
+  // Measured on node 1: a patch_with_tools mitosis was gated out, its gap's attempt then FAILED
+  // verify (the lane minted recommit-…-verify_failed), the change_window defer below "preserved"
+  // the tree, and the next mitosis-tick re-evaluated it with typecheck only and pushed it. The
+  // lane records a verify failure on the pending lock (markStagedMitosisUnlandable); read it here,
+  // BEFORE the lease defer, so a marked tree is discarded rather than preserved for another tick.
+  {
+    const marker = await readUnlandableMarker({
+      mitosisVersionId: mitosis_version_id,
+      ...(pointer.pending_pointer_path ? { pendingPath: pointer.pending_pointer_path } : {}),
+    });
+    if (marker) {
+      await clearPendingOnReject(pointer, process.env["WORKSPACE_ROOT"] ?? process.cwd());
+      return softRefuse(
+        `staged_mitosis_unlandable: gap ${String(marker["gap_id"] ?? "?")} recorded ${String(marker["failure_class"] ?? "a verify failure")} for this staged tree at ${String(marker["at"] ?? "?")} — ${String(marker["reason"] ?? "").slice(0, 200)}. A tree whose own verify failed is never cut over by a later typecheck-only evaluation.`,
+        { kind: "staged_mitosis_unlandable", refuse_class: "staged_mitosis_unlandable", vessel_name, gap_id: String(marker["gap_id"] ?? ""), unlandable: marker },
+      );
+    }
   }
 
   // ---- Mitosis freshness gate (Stage B.2 2026-06-03) ----
@@ -2359,6 +2399,64 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
     }
   } catch {
     // an unreadable pending file leaves the fallback empty
+  }
+  // 5d-own. THE LANDING GAP'S OWN CLASS-2 CHECK MUST PASS ON THE STAGED TREE (2026-10-02).
+  // The whole-suite gate below refuses only tests NEWLY failing against the landed baseline. A
+  // gap's own check-first test was already red at that baseline, so it can never be "newly
+  // failing": a tree that leaves it red passes that gate, and a mitosis-tick verdict cites only
+  // `bun run typecheck`. Measured: a staged activity-api tree whose gap verify had FAILED landed
+  // that way (cited_checks=["bun run typecheck"], cited_traces=0). So re-run the gap's own
+  // test_suite check (evidence_resolve.input: test_file + only_tests) here, where the clone's
+  // working tree holds exactly the staged content, and require it to PASS — every requested test
+  // passing, none failing, NONE SKIPPED. Not fail-open, and not behind CUTOVER_PRECHECK_SUITE:
+  //   • measured and not passing → refuse (the reason is recorded; the pending lock is discarded
+  //     by the exit clear, so no later tick re-evaluates this tree on typecheck alone);
+  //   • not measurable (no summary, no shell producer, a different tree measured) → refuse too —
+  //     evidence that could not be produced is not evidence that passed. Like every exit from
+  //     here, the pending lock is cleared on return, so this tree is NOT retried; the gap stays
+  //     open and is recomposed;
+  //   • the gap carries no test_suite check, or has no row (patch_with_tools' synthesized ids) →
+  //     proceed, and SAY so in operations: there is no own check to re-establish;
+  //   • the gap store is unreadable → proceed with a warn: the check's existence is unknown, and
+  //     wedging every landing on a store outage is the over-refusal this file has paid for before.
+  {
+    // mitosis-tick passes gap_id as "{{extract_gap_id_content}}", and mitosis_pending_observer does not
+    // forward gap_id, so it can arrive unsubstituted. Trust only a real id; else the pending file's.
+    const pointerGapId = typeof pointer.gap_id === "string" && pointer.gap_id.trim() && !pointer.gap_id.includes("{{") ? pointer.gap_id.trim() : "";
+    const ownGapId = pointerGapId || pendingGapId;
+    const vesselBare = String(vessel_name).replace(/^repos\//, "");
+    const load = await loadOwnCheck(vesselBare, ownGapId, ownCheckDeps.readGap);
+    if (load.status !== "found") {
+      operations.push({ op: "own_check", status: load.status === "unreadable" ? "warn" : "skipped", detail: `no own check re-run: ${load.why}` });
+    } else {
+      const check = load.check;
+      const citation = `test_suite ${check.test_file} [${check.only_tests.join(" | ")}]`.slice(0, 400);
+      let res: unknown;
+      try {
+        res = await ownCheckDeps.runSuite({ vessel: `repos/${vesselBare}`, test_file: check.test_file, only_tests: check.only_tests, gap_id: ownGapId, proposal_id: pointer.proposal_id });
+      } catch (err) {
+        res = { shape: "structuredError", body: { detail: (err as Error).message } };
+      }
+      const r = res as { shape?: string; body?: Record<string, unknown> } | null;
+      const sb = r?.shape === "test_suite" ? (r.body ?? null) : null;
+      let verdict = judgeOwnCheck(sb, check.only_tests);
+      const measuredRoot = typeof sb?.["verified_root"] === "string" ? (sb["verified_root"] as string) : null;
+      if (verdict.measured && measuredRoot && resolve(measuredRoot) !== resolve(hostRepoRoot)) {
+        verdict = { pass: false, measured: false, reason: `measured ${measuredRoot}, not the staged clone ${hostRepoRoot}` };
+      }
+      if (!verdict.pass) {
+        const refuseClass = verdict.measured ? "own_check_not_passing" : "own_check_unmeasured";
+        operations.push({ op: "own_check", status: "fail", detail: `${citation}: ${verdict.reason}` });
+        await unstage(refuseClass);
+        return softRefuse(
+          verdict.measured
+            ? `own_check_not_passing: gap ${ownGapId}'s own class-2 check does not pass on the staged tree — ${verdict.reason} (${citation}). Typecheck alone does not establish that this change does what the gap asked; refusing.`
+            : `own_check_unmeasured: gap ${ownGapId}'s own class-2 check could not be measured on the staged tree — ${verdict.reason} (${citation}). Refusing: unproduced evidence is not passing evidence; the gap stays open and is recomposed.`,
+          { kind: refuseClass, refuse_class: refuseClass, vessel_name, gap_id: ownGapId, staged_files: stagedFiles, own_check: { ...check, result: sb, verdict }, operations },
+        );
+      }
+      operations.push({ op: "own_check", status: "ok", detail: `${citation}: ${verdict.reason}` });
+    }
   }
   // 5d. PRE-CUTOVER TEST GATE (2026-08-23). The post-land suite (below, after promotion) already
   // computes which tests are NEWLY failing vs the per-vessel baseline and files a gap — but it

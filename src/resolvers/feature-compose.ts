@@ -30,6 +30,7 @@ import { resolveVesselMitosisCutover, runGit, type GitOpResult } from "./vessel-
 import { registerAttempt, setAuthoringExecution } from "./attempt-register.js";
 import { resolveSubstrateGap, resolveSubstrateGapWrite, inheritableParentCheck } from "./substrate-gap.js";
 import { writeAuthoringMarker, clearAuthoringMarker } from "./patch-with-tools.js";
+import { markOnComposeFailure, VERIFY_FAILURE_CLASSES } from "./staged-mitosis-gate.js";
 import { vacuousEditReason, nonTerminatingEditReason, deadStoreEditReason, truncatingRewriteReason } from "../vacuous-edit.js";
 import { acquireComposeSlot } from "../compose-slots.js";
 import { activeMustBeCalled, checkMustBeCalled, constraintRefusalEvidence, introducesDefinition, mustBeCalledFromGate, mustBeCalledReason, mustBeCalledRefusalRecord, constraintParkLine, type ConstraintLift, type MustBeCalledConstraint, attemptEvidenceBlock, baseSpanOfOp, checkOpNoEffect, enforcedLessons, escalateRepeatedRefusal, refusalJournalLine, repeatedRefusalRegion, type RefusalRecord, explicitLineHint, hydrateComposeGap, lineCenteredSlice, noEffectOverlapRefusal, noEffectSpans, parentCheckBlock, parseOwnCheckFailures, sameOwnCheckFailures, spanRecord, typecheckSection, type AttemptRecord, type EditedSpan, type FailStage, type GapRowReader, type OwnCheckFailure } from "./retry-evidence.js";
@@ -3608,6 +3609,13 @@ export function lessonDiag(reason: string): string {
   return diagLines.length > 0 ? diagLines.join("\n") : reason;
 }
 export async function appendComposeLesson(cls: string, reason: string, vessels: string, gap?: { id?: string; summary?: unknown; category?: unknown; source?: unknown; detected_at?: unknown; classification_metadata?: Record<string, unknown> }, attempt?: AttemptRecord): Promise<void> {
+  // A VERIFY FAILURE MAKES THE GAP'S STAGED MITOSIS UNLANDABLE (2026-10-02). A tree staged for this
+  // gap's lineage (e.g. by patch_with_tools) must not be landed later by mitosis-tick on typecheck
+  // alone once the gap's own verify has failed: the cutover reads this mark and discards the tree.
+  if (gap?.id && VERIFY_FAILURE_CLASSES.has(cls)) {
+    const m = await markOnComposeFailure(String(gap.id), cls, reason);
+    if (!m.marked) console.log(`[compose-lessons] staged mitosis not marked for gap=${String(gap.id)} class=${cls}: ${m.why}`);
+  }
   // operator_approved is operator authority: code never sets it (block from d8c93b4 removed).
   if (gap && gap.id) {
     try {

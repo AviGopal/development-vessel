@@ -28,6 +28,7 @@ import { DISCOVERY_ENDPOINT, METABOB_API_KEY, GOAL_HOST_VESSEL_ENDPOINT, lookupS
 import { peekComposeCapacity, hasFreeComposeCapacity } from "../compose-slots.js";
 import { gateLanding, landingsStopped } from "./push-policy.js";
 import { readFile } from "node:fs/promises";
+import { selfAuthHeaders } from "../lib/self-auth.js";
 
 // Mirror feature-compose's path model: repos/<vessel>/... maps to the writable
 // runtime ${MITOSIS_RUNTIME_DIR}/<vessel>/..., and the drafter writes proposal reports
@@ -2973,9 +2974,11 @@ async function verifyGapConditionAsync(gap: Record<string, unknown>, opts: GapCh
     let respBody: Record<string, unknown>;
     try {
       const SELF_RESOLVE_ENDPOINT = process.env['SELF_RESOLVE_ENDPOINT'] ?? `http://localhost:${process.env['PORT'] ?? '8090'}/v2/impulses/resolve`;
+      // The check's resolve shape comes from the gap, so it can be a write: carry the node key, or this
+      // vessel's own write gate refuses it (lib/self-auth.ts).
       const resp = await (opts.fetchImpl ?? fetch)(SELF_RESOLVE_ENDPOINT, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...selfAuthHeaders(SELF_RESOLVE_ENDPOINT, SELF_RESOLVE_ENDPOINT) },
         body: JSON.stringify(payload),
         signal: AbortSignal.timeout(opts.timeoutMs ?? gapCheckTimeoutMs(resolveShape, resolveInput)),
       });

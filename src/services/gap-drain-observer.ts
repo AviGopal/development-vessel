@@ -1,6 +1,7 @@
 import { WORKSPACE_ROOT } from "../config.js";
 import { appendFileSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync, renameSync, existsSync } from "fs";
 import { join } from "path";
+import { selfAuthHeaders } from "../lib/self-auth.js";
 
 const ACTIVITY_API_URL = process.env["ACTIVITY_API_URL"] ?? "http://127.0.0.1:8080";
 const METABOB_API_KEY = process.env["METABOB_API_KEY"] ?? "";
@@ -8,6 +9,7 @@ const RECONNECT_INITIAL_MS = 1000;
 const RECONNECT_MAX_MS = 30000;
 
 const DEV_VESSEL_ENDPOINT = process.env["DEV_VESSEL_ENDPOINT"] ?? "http://127.0.0.1:8090"; // env-overridable dev-vessel base URL
+const SELF_RESOLVE_URL = `${DEV_VESSEL_ENDPOINT}/v2/impulses/resolve`;
 
 export class GapDrainObserver {
   private ws: WebSocket | null = null;
@@ -248,9 +250,11 @@ export class GapDrainObserver {
     g.__drainInflight.add(category);
     const startedAt = Date.now();
     try {
-      const resp = await fetch(`${DEV_VESSEL_ENDPOINT}/v2/impulses/resolve`, { // env-overridable
+      // The remedy's impulse type comes from the gap record, so it can be a write: carry the node key,
+      // or this vessel's own write gate refuses the dispatch (lib/self-auth.ts).
+      const resp = await fetch(SELF_RESOLVE_URL, { // env-overridable
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...selfAuthHeaders(SELF_RESOLVE_URL, SELF_RESOLVE_URL) },
         body: JSON.stringify({ impulse: { type: remedy.impulse_type, triggered_by: "gap-drain", gap_id: gapId } }),
         signal: AbortSignal.timeout(120000),
       });

@@ -24,8 +24,11 @@ import type { ResolverResult } from "./types.js";
 import { resolveBoredomEnqueue, DEFAULT_QUEUE_PATH } from "./boredom-enqueue.js";
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import { lookupShape, describeLookup } from "../config.js";
+import { selfAuthHeaders } from "../lib/self-auth.js";
 
 const DEV_SELF_ENDPOINT = process.env["DEV_VESSEL_SELF_ENDPOINT"] ?? "http://127.0.0.1:8090";
+// This vessel's own resolve route: the only URL its node key is sent to (lib/self-auth.ts).
+const SELF_RESOLVE_URL = `${DEV_SELF_ENDPOINT}/v2/impulses/resolve`;
 const GOAL_HOST_ENDPOINT = process.env["GOAL_HOST_VESSEL_ENDPOINT"] ?? "http://127.0.0.1:8210";
 const API_KEY = process.env["METABOB_API_KEY"] ?? "";
 
@@ -250,7 +253,10 @@ export function rhythmSettlementOverlay(
 export async function resolveRhythmConductorTick(
   pointer: RhythmConductorTickPointer,
 ): Promise<ResolverResult> {
-  const endpoint = pointer.registry_endpoint ?? `${DEV_SELF_ENDPOINT}/v2/impulses/resolve`;
+  const endpoint = pointer.registry_endpoint ?? SELF_RESOLVE_URL;
+  // Every call below goes to `endpoint`. When that is this vessel's own route, the node key rides along:
+  // the route refuses unauthenticated writes (settlements, gap filing). A caller-supplied endpoint gets none.
+  const selfHeaders: Record<string, string> = { "Content-Type": "application/json", ...selfAuthHeaders(endpoint, SELF_RESOLVE_URL) };
   const maxEnqueue = pointer.max_enqueue ?? 2;
   const dueThreshold = pointer.due_threshold ?? 1.0;
   // PRESENCE through the shared discovery client. An 800 ms private lookup read every slow
@@ -266,7 +272,7 @@ export async function resolveRhythmConductorTick(
     endpoint,
     {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: selfHeaders,
       body: JSON.stringify({ impulse: { type: "poolImpulse", shape: "timeShapedRhythm", limit: 50 } }),
     },
     800,
@@ -385,7 +391,7 @@ export async function resolveRhythmConductorTick(
         endpoint,
         {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: selfHeaders,
           body: JSON.stringify({
             impulse: {
               type: "poolImpulse_write",
@@ -470,7 +476,7 @@ export async function resolveRhythmConductorTick(
     endpoint,
     {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: selfHeaders,
       body: JSON.stringify({ impulse: { type: "poolImpulse", shape: "rhythmFamilyGoal", limit: 50 } }),
     },
     800,
@@ -531,7 +537,7 @@ export async function resolveRhythmConductorTick(
             endpoint,
             {
               method: "POST",
-              headers: { "Content-Type": "application/json" },
+              headers: selfHeaders,
               body: JSON.stringify({ impulse: { pointer: directResolver } }),
             },
             60_000,
@@ -646,7 +652,7 @@ export async function resolveRhythmConductorTick(
         endpoint,
         {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: selfHeaders,
           body: JSON.stringify({
             impulse: {
               type: "substrateGap_write",

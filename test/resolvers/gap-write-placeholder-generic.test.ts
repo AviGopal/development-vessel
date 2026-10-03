@@ -90,3 +90,35 @@ describe("substrateGap_write refuses any un-quoted double-brace template", () =>
     expect((await writeSummary("an object opens with {{ and never closes")).shape).toBe("substrateGapWriteResult");
   });
 });
+
+// THE JSX EXEMPTIONS DO NOT COVER TEMPLATE REFERENCES (check-first, qa 2026-10-03). The "=" and
+// object-literal exemptions exempted ANY content: closed_by={{goal.operator}} and {{ status: goal.status }}
+// passed. An exemption for JSX never applies when the content holds a dotted path or an index reference
+// (/[A-Za-z_$][\w$]*(\??\.|\[)/). The backtick quotation exemption is unchanged: quoting is how a gap names
+// a template reference on purpose.
+describe("the JSX exemptions never cover a dotted path or index reference", () => {
+  it("[MUST-FAIL] closed_by={{goal.operator}} is refused", async () => {
+    const r = await writeMeta("closed_by={{goal.operator}}");
+    expect(r.shape).toBe("structuredError");
+  });
+
+  it("[MUST-FAIL] an object-literal-looking {{ status: goal.status }} is refused", async () => {
+    const r = await writeMeta("{{ status: goal.status }}");
+    expect(r.shape).toBe("structuredError");
+  });
+
+  it("[MUST-FAIL] an attribute-position index reference x={{items[0]}} is refused", async () => {
+    const r = await writeSummary("x={{items[0]}}");
+    expect(r.shape).toBe("structuredError");
+  });
+
+  it("[CONTROL] genuine JSX values with literal object contents are still allowed", async () => {
+    expect((await writeMeta("<C prop={{ x: 1 }} />")).shape).toBe("substrateGapWriteResult");
+    expect((await writeMeta("<C data={{ a: \"x\" }} />")).shape).toBe("substrateGapWriteResult");
+    expect((await writeMeta("{{ key: 1 }}")).shape).toBe("substrateGapWriteResult");
+  });
+
+  it("[CONTROL] a backtick-quoted dotted reference is still a quotation", async () => {
+    expect((await writeSummary("the writer echoed `{{goal.operator}}` into closed_by")).shape).toBe("substrateGapWriteResult");
+  });
+});

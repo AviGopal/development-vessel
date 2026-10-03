@@ -3810,7 +3810,11 @@ export function deriveRelocationHint(input: { vessel_root: string; vessel: strin
   if (!SAFE_SEGMENT_RE.test(vesselName) || vesselName.startsWith(".")) return null;
   if (!input.test_file || input.test_file.startsWith("/") || input.test_file.split("/").some((seg) => seg === ".." || seg === "")) return null;
   let src = "";
-  try { src = readFileSync(`${input.vessel_root}/${input.test_file}`, "utf8"); } catch { return null; }
+  try { src = readFileSync(`${input.vessel_root}/${input.test_file}`, "utf8"); } catch (err) {
+    // Not in the vessel clone (the runtime tree is never read for a check): no evidence, no hint. Said, not silent.
+    console.log(`[compose-lessons] relocation hint not derived: ${input.test_file} unreadable in the vessel clone (${(err as NodeJS.ErrnoException)?.code ?? (err as Error)?.message ?? String(err)})`);
+    return null;
+  }
   const bindings = new Map<string, string>();
   for (const m of src.matchAll(/import\s+(?:type\s+)?([\s\S]*?)\s+from\s+["']([^"']+)["']/g)) {
     const clause = m[1] ?? "", spec = m[2] ?? "";
@@ -4550,7 +4554,9 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
           const scopeAttempt: AttemptRecord | undefined = droppedPaths && droppedPaths.length > 0
             ? { stage: "scope", edited_spans: [], dropped_paths: droppedPaths, dropped_reason: String(ob["dropped_reason"] ?? "") }
             : undefined;
-          await appendComposeLesson(typeof ob["refuse_class"] === "string" ? String(ob["refuse_class"]) : "scope_refused", refusalReason.slice(0, 300), "", pointer.gap, scopeAttempt).catch(() => {});
+          await appendComposeLesson(typeof ob["refuse_class"] === "string" ? String(ob["refuse_class"]) : "scope_refused", refusalReason.slice(0, 300), "", pointer.gap, scopeAttempt).catch((err) => {
+            console.warn(`[compose-lessons] scope-refusal lesson NOT written gap=${String(pointer.gap?.id)} class=${String(ob["refuse_class"] ?? "scope_refused")}: ${(err as Error)?.message ?? String(err)}`);
+          });
         }
         const refusalRes = await fetch(`${refusalEndpoint}/v2/activities/executions`, {
           method: "POST",

@@ -18,9 +18,17 @@ import { openPolicyAnswer } from "./explicit-open-policy.fixture.js";
 
 const ROOT = join(tmpdir(), `admit-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 const PROPOSALS = join(ROOT, "proposals");
+const SAVED_ENV: Record<string, string | undefined> = {
+  MITOSIS_RUNTIME_DIR: process.env.MITOSIS_RUNTIME_DIR, PROPOSALS_DIR: process.env.PROPOSALS_DIR,
+  GAP_TYPECHECK_MAX_RUNS_PER_PASS: process.env.GAP_TYPECHECK_MAX_RUNS_PER_PASS, VESSELS_CLONE_ROOT: process.env.VESSELS_CLONE_ROOT,
+};
 process.env.MITOSIS_RUNTIME_DIR = ROOT;
 process.env.PROPOSALS_DIR = PROPOSALS;
 process.env.GAP_TYPECHECK_MAX_RUNS_PER_PASS = "8";
+// repoPathExists falls back to VESSELS_CLONE_ROOT (default /workspace/git/vessels): an empty fixture dir, so a real
+// clone tree (in a container) can never answer for a fixture path.
+process.env.VESSELS_CLONE_ROOT = join(ROOT, "clones");
+mkdirSync(join(ROOT, "clones"), { recursive: true });
 
 // Build the fixture vessel tree BEFORE the resolver module loads.
 mkdirSync(join(ROOT, "goal-host-vessel", "src"), { recursive: true });
@@ -53,7 +61,11 @@ beforeAll(() => {
   }) as typeof fetch;
   (mod as { __resetPolicyReadsForTests: () => void }).__resetPolicyReadsForTests();
 });
-afterAll(() => { globalThis.fetch = originalFetch; try { rmSync(ROOT, { recursive: true, force: true }); } catch { /* noop */ } });
+afterAll(() => {
+  globalThis.fetch = originalFetch;
+  for (const [k, v] of Object.entries(SAVED_ENV)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+  try { rmSync(ROOT, { recursive: true, force: true }); } catch { /* noop */ }
+});
 
 const mod = await import("../../src/resolvers/gap-to-feature.js");
 const { admitActionableGaps, typecheckClassOf, citedExistingFile, hasProposalReport } = mod;

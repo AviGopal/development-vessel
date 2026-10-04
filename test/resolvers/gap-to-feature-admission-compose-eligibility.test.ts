@@ -14,6 +14,9 @@
 import { describe, it, expect, beforeAll, afterAll } from "bun:test";
 import { admitActionableGaps, __resetPolicyReadsForTests } from "../../src/resolvers/gap-to-feature.js";
 import { openPolicyAnswer } from "./explicit-open-policy.fixture.js";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 const originalFetch = globalThis.fetch;
 beforeAll(() => {
@@ -29,9 +32,24 @@ beforeAll(() => {
 });
 afterAll(() => { globalThis.fetch = originalFetch; __resetPolicyReadsForTests(); });
 
-// citedExistingFile resolves under MITOSIS_RUNTIME_DIR: point it at this checkout's parent so the control's edit site
-// exists on disk (as gap-to-feature-groundable-admission.test.ts does), or the control is deferred as ungroundable.
-process.env["MITOSIS_RUNTIME_DIR"] = new URL("../../", import.meta.url).pathname.replace(/\/$/, "") + "/..";
+// HERMETIC VESSEL TREE. citedExistingFile and structuredTscErrorOf resolve a repos/<vessel>/... path through
+// repoPathExists: MITOSIS_RUNTIME_DIR (default /vessels), then VESSELS_CLONE_ROOT (default /workspace/git/vessels).
+// Both are read at call time, so pointing them at a temp fixture here grades the same cases in a container, in a
+// checkout and in a bare `git archive` export: the cited file exists in the runtime fixture, the "missing" file
+// exists nowhere, and the clone root is an empty dir so no real tree can answer for either.
+const FIXTURE = mkdtempSync(join(tmpdir(), "admission-eligibility-"));
+const SAVED_ENV = { runtime: process.env["MITOSIS_RUNTIME_DIR"], clones: process.env["VESSELS_CLONE_ROOT"] };
+process.env["MITOSIS_RUNTIME_DIR"] = join(FIXTURE, "runtime");
+process.env["VESSELS_CLONE_ROOT"] = join(FIXTURE, "clones");
+mkdirSync(join(FIXTURE, "runtime", "development-vessel", "src", "resolvers"), { recursive: true });
+writeFileSync(join(FIXTURE, "runtime", "development-vessel", "src", "resolvers", "gap-to-feature.ts"), "export const fixture = 1;\n");
+mkdirSync(join(FIXTURE, "clones"), { recursive: true });
+afterAll(() => {
+  for (const [k, v] of [["MITOSIS_RUNTIME_DIR", SAVED_ENV.runtime], ["VESSELS_CLONE_ROOT", SAVED_ENV.clones]] as const) {
+    if (v === undefined) delete process.env[k]; else process.env[k] = v;
+  }
+  rmSync(FIXTURE, { recursive: true, force: true });
+});
 
 const SITE = "repos/development-vessel/src/resolvers/gap-to-feature.ts";
 const gap = (id: string, meta: Record<string, unknown>, status = "open") => ({

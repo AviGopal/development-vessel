@@ -34,6 +34,7 @@ import { tmpdir } from "node:os";
 import { join, resolve, sep } from "node:path";
 
 const SCRATCH = mkdtempSync(join(process.env["TEST_SCRATCH_PARENT"] ?? tmpdir(), "gap-drain-backoff-"));
+const priorWorkspaceRoot = process.env["WORKSPACE_ROOT"];
 process.env["WORKSPACE_ROOT"] = SCRATCH;
 
 type Obs = { handleEvent: (e: { type: string; data: unknown }) => Promise<void> };
@@ -69,8 +70,15 @@ beforeAll(async () => {
 });
 
 afterAll(() => {
-  if (ROOT !== "" && priorStore !== null) writeFileSync(join(ROOT, "gaps", "gaps.json"), priorStore, "utf8");
+  // An ABSENT store is restored too: when another suite froze the root, the rows written here would
+  // otherwise stay in that shared store (substrate-gap.test.ts then read an extra open row).
+  if (ROOT !== "") {
+    if (priorStore !== null) writeFileSync(join(ROOT, "gaps", "gaps.json"), priorStore, "utf8");
+    else rmSync(join(ROOT, "gaps", "gaps.json"), { force: true });
+  }
   if (SCRATCH.includes("gap-drain-backoff-")) rmSync(SCRATCH, { recursive: true, force: true });
+  if (priorWorkspaceRoot === undefined) delete process.env["WORKSPACE_ROOT"];
+  else process.env["WORKSPACE_ROOT"] = priorWorkspaceRoot;
 });
 
 type Call = { url: string; impulse: Record<string, unknown> };

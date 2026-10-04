@@ -20,7 +20,12 @@ beforeAll(() => {
   }) as unknown as typeof fetch;
   __resetPolicyReadsForTests();
 });
-afterAll(() => { globalThis.fetch = originalFetch; __resetPolicyReadsForTests(); });
+afterAll(() => {
+  globalThis.fetch = originalFetch;
+  __resetPolicyReadsForTests();
+  if (originalRuntimeDir === undefined) delete process.env["MITOSIS_RUNTIME_DIR"];
+  else process.env["MITOSIS_RUNTIME_DIR"] = originalRuntimeDir;
+});
 
 // gap-to-feature and feature-compose disagreed about gaps that name no existing file.
 // gap-to-feature logged "no existing edit targets found — composer will scaffold new file"
@@ -39,6 +44,9 @@ afterAll(() => { globalThis.fetch = originalFetch; __resetPolicyReadsForTests();
 // this every path fails to resolve, every gap looks ungroundable, the fail-open admits
 // everything, and the assertions below silently pass on nothing. Read at call time, so
 // setting it here is enough.
+// Restore it in afterAll: a later file in the same run (fs-write, fs-edit) reads it as the vessel runtime, and
+// under the post-land suite this checkout sits in /tmp, so a leaked value made every /tmp write fail closed.
+const originalRuntimeDir = process.env["MITOSIS_RUNTIME_DIR"];
 process.env["MITOSIS_RUNTIME_DIR"] = new URL("../../", import.meta.url).pathname.replace(/\/$/, "") + "/..";
 
 // Fixtures carry a class2 falsifier so they reach the groundable-target check: a siteless gap

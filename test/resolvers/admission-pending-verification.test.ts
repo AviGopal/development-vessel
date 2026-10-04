@@ -13,6 +13,8 @@ import { tmpdir } from "node:os";
 import { openPolicyAnswer } from "./explicit-open-policy.fixture.js";
 
 const ROOT = join(tmpdir(), `admit-pv-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+// Both are restored in afterAll: later files in the run read MITOSIS_RUNTIME_DIR as the vessel runtime.
+const priorEnv = { MITOSIS_RUNTIME_DIR: process.env.MITOSIS_RUNTIME_DIR, PROPOSALS_DIR: process.env.PROPOSALS_DIR };
 process.env.MITOSIS_RUNTIME_DIR = ROOT;
 process.env.PROPOSALS_DIR = join(ROOT, "proposals");
 mkdirSync(join(ROOT, "goal-host-vessel", "src"), { recursive: true });
@@ -37,7 +39,11 @@ beforeAll(() => {
   }) as typeof fetch;
   (mod as { __resetPolicyReadsForTests: () => void }).__resetPolicyReadsForTests();
 });
-afterAll(() => { globalThis.fetch = originalFetch; try { rmSync(ROOT, { recursive: true, force: true }); } catch { /* noop */ } });
+afterAll(() => {
+  globalThis.fetch = originalFetch;
+  for (const [k, v] of Object.entries(priorEnv)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+  try { rmSync(ROOT, { recursive: true, force: true }); } catch { /* noop */ }
+});
 
 const mod = await import("../../src/resolvers/gap-to-feature.js") as Record<string, unknown>;
 const admitActionableGaps = mod.admitActionableGaps as (g: Record<string, unknown>[], o?: unknown) => Promise<{ admitted: Record<string, unknown>[]; excluded: Array<{ id: string; reason: string }> }>;

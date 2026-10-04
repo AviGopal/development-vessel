@@ -27,6 +27,14 @@ export interface TraceFailurePatternReportPointer {
    * gap id (no timestamp) so re-emissions collapse onto one open row.
    */
   emit_gap?: boolean;
+  /** Optional: when present, fetch a windowed aggregate over this many hours instead of latest-N list */
+  window_hours?: number;
+  /** Optional: backstop window end, measured in hours ago (pairs with window_hours) */
+  until_hours_ago?: number;
+  /** Optional: filter by a known failure class instead of free-text reason_contains */
+  failure_class?: string;
+  /** Optional: rate ceiling for this class; excess_failures = max(0, matched_total - max_count) */
+  max_count?: number;
 }
 
 interface TraceTask {
@@ -101,6 +109,77 @@ export async function resolveTraceFailurePatternReport(
   }
   const data = await res.json() as { executions?: ExecutionTrace[] };
   const traces = data.executions ?? [];
+
+  // Windowed signature count: if the caller requests a time window, prefer the
+  // server-side aggregate (traceAggregateReport) over scanning the latest-N list.
+  // This carries a measured flag so a failed read is surfaced as 'unknown', not 'zero'.
+  const windowHours = typeof (pointer as unknown as { window_hours?: unknown }).window_hours === "number"
+    ? (pointer as unknown as { window_hours?: number }).window_hours
+    : undefined;
+  if (typeof windowHours === "number" && Number.isFinite(windowHours) && windowHours > 0) {
+    const until = (pointer as unknown as { until_hours_ago?: unknown }).until_hours_ago;
+    const failureClass = (pointer as unknown as { failure_class?: unknown }).failure_class;
+    const maxCount = (pointer as unknown as { max_count?: unknown }).max_count;
+
+    const aggPointer: Record<string, unknown> = {
+      type: "traceAggregateReport",
+      window_hours: windowHours,
+    };
+    if (typeof until === "number" && Number.isFinite(until)) aggPointer["until_hours_ago"] = until;
+    if (typeof failureClass === "string" && failureClass.length > 0) aggPointer["failure_class"] = failureClass;
+    if (typeof pointer.reason_contains === "string" && pointer.reason_contains.length > 0) {
+      aggPointer["reason_contains"] = pointer.reason_contains;
+    }
+
+    const aggRes = await fetch(
+      `${METABOB_ENDPOINT}/v2/impulses/resolve`,
+      {
+        method: "POST",
+        headers: { Authorization: `ApiKey ${METABOB_API_KEY}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ impulse: { pointer: aggPointer } }),
+      },
+    );
+
+    if (!aggRes.ok) {
+      return {
+        shape: "failurePatternReport",
+        body: {
+          measured: false,
+          matching_failures: null,
+          excess_failures: 0,
+          gaps_emitted: 0,
+        },
+      };
+    }
+
+    let matched: number | null = null;
+    let measured = false;
+    try {
+      const wire = await aggRes.json() as { success?: boolean; content?: string };
+      if (wire?.success === true && typeof wire.content === "string") {
+        const report = JSON.parse(wire.content) as { matched_total?: number | null; measured?: boolean };
+        matched = (report.matched_total ?? null);
+        measured = Boolean(report.measured);
+      }
+    } catch {
+      // fall through with measured=false, matched=null
+      measured = false;
+      matched = null;
+    }
+
+    const max = typeof maxCount === "number" && Number.isFinite(maxCount as number) ? (maxCount as number) : undefined;
+    const excess = matched != null && typeof max === "number" ? Math.max(0, matched - max) : 0;
+
+    return {
+      shape: "failurePatternReport",
+      body: {
+        measured,
+        matching_failures: matched,
+        excess_failures: excess,
+        gaps_emitted: 0, // check-mode path: never emits gaps
+      },
+    };
+  }
 
   type PatternKey = string;
   const groups = new Map<PatternKey, FailurePattern>();

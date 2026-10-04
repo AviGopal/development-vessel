@@ -145,6 +145,20 @@ describe("substrateGap_write compose nudge — the drain observer's eligibility 
     expect(skipCounts()["held"]).toBe(1);
   });
 
+  it("a STORED hold the rewrite omits still holds: the gate reads the merged row, not the incoming metadata", async () => {
+    process.env["SUBSTRATE_GAP_SKIP_COMPOSE_TRIGGER"] = "1"; // seed the held row without nudging
+    await write("write-nudge-held-carried", { ...ARMED_AT_SITE, operator_hold: true });
+    delete process.env["SUBSTRATE_GAP_SKIP_COMPOSE_TRIGGER"];
+    const r = await mod.resolveSubstrateGapWrite({
+      type: "substrateGap_write",
+      gap: { id: "write-nudge-held-carried", category: "systematic_failure", source: "substrate_detected", summary: "write nudge eligibility probe, summary changed", detected_at: "2026-10-03T00:00:00Z", status: "open", classification_metadata: { ...ARMED_AT_SITE } },
+    } as never, { vocabulary: vocab, birthJudge: judge });
+    expect((r.body as { action?: string }).action).toBe("updated");
+    expect(nudges.length).toBe(0);
+    expect(spawns.length).toBe(0);
+    expect(skipCounts()["held"]).toBe(1);
+  });
+
   it("a closed armed gap with an edit site is not nudged", async () => {
     await write("write-nudge-closed", ARMED_AT_SITE, "closed");
     expect(nudges.length).toBe(0);

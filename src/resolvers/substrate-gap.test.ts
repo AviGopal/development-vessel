@@ -1,12 +1,18 @@
 import { afterAll, afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { stubGapEventPublish } from "../../test/resolvers/stub-gap-event-publish.js";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-// Gap writes here must not reach the live event bus (test/resolvers/stub-gap-event-publish.ts).
-const gapEventPublishStub = stubGapEventPublish();
-afterAll(() => gapEventPublishStub.restore());
+// Gap writes here must not reach the live event bus. Same stub as test/resolvers/stub-gap-event-publish.ts, inlined:
+// src/ compiles under rootDir src, so it cannot import from test/. Only the publish URL is intercepted.
+const fetchBeforeStub = globalThis.fetch;
+const publishStub = (async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+  const url = typeof input === "string" ? input : input instanceof URL ? input.href : (input as Request).url;
+  if (url.endsWith("/v2/events/publish")) return new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
+  return fetchBeforeStub(input as never, init);
+}) as typeof fetch;
+globalThis.fetch = publishStub;
+afterAll(() => { if (globalThis.fetch === publishStub) globalThis.fetch = fetchBeforeStub; });
 
 // ISOLATION BY CONSTRUCTION (fd86777's pattern, applied to this sibling suite 2026-09-29).
 // substrate-gap.ts captures WORKSPACE_ROOT when it LOADS and `bun test` shares one module

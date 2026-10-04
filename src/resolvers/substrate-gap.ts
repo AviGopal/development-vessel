@@ -2107,7 +2107,26 @@ async function resolveSubstrateGapWriteInner(
   // substrate-gap.test.ts, before importing this module; unset (the default) in every
   // real deployment, so production behavior is unchanged.
   const skipComposeTrigger = process.env["SUBSTRATE_GAP_SKIP_COMPOSE_TRIGGER"] === "1";
-  if (!skipComposeTrigger && (action === "created" || (action === "updated" && (summaryChanged || reopened))) && (gap.status ?? "open") === "open") {
+  const nudgeCandidate = !skipComposeTrigger && (action === "created" || (action === "updated" && (summaryChanged || reopened))) && (gap.status ?? "open") === "open";
+  // ELIGIBILITY FIRST, on the row this write just stored: the drain observer's predicate (gap-to-feature
+  // composeEligibilitySkipReason, the picker's too). An unarmed, site-less or held gap is not compose work, so it
+  // must not start the unit, nudge, or spend the throttle below. Skips are counted into the observer's per-window
+  // summary, never logged per event. A predicate that throws refuses the nudge (fail closed, as the capacity check).
+  let nudgeEligible = false;
+  if (nudgeCandidate) {
+    try {
+      const { composeEligibilitySkipReason } = await import("./gap-to-feature.js");
+      const skip = composeEligibilitySkipReason(gap as unknown as Record<string, unknown>);
+      if (skip === null) nudgeEligible = true;
+      else {
+        const { countComposeNudgeSkip } = await import("../services/gap-drain-observer.js");
+        countComposeNudgeSkip(skip);
+      }
+    } catch (err) {
+      console.warn(`[substrate-gap] compose nudge eligibility check failed; suppressing nudge: ${String(err)}`);
+    }
+  }
+  if (nudgeEligible) {
     const g = globalThis as { __gapComposeLastTrigger?: number };
     const nowMs = Date.now();
     // SPEND ENVELOPE (value-per-cost-selection 4.2). The nudge starts gap-compose.service and an

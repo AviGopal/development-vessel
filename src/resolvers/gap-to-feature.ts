@@ -4660,6 +4660,24 @@ export function isAwaitingLandVerification(gap: Record<string, unknown>): boolea
   return true;
 }
 
+/** Why a gap row is not compose work, or null when it is: THE ONE ELIGIBILITY PREDICATE shared by the autonomous
+ *  picker's admission, the drain observer's compose nudge and the gap-write path's compose nudge, so a nudge never
+ *  fires for a gap the picker cannot take and the two cannot drift. Eligible = open, armed (falsifier class1/class2,
+ *  as a string or {class}), naming an edit site (edit_site, file_path, change_site, suspected_real_location or a
+ *  row-level file_path), and not held (operator_hold, a parking disposition, a landing awaiting its verdict). */
+export type ComposeEligibilitySkipReason = "not_open" | "unarmed" | "no_edit_site" | "held";
+export function composeEligibilitySkipReason(row: Record<string, unknown>): ComposeEligibilitySkipReason | null {
+  if (String(row["status"] ?? "open") !== "open") return "not_open";
+  const rawMeta = row["classification_metadata"] ?? row["metadata"];
+  const meta = (rawMeta && typeof rawMeta === "object" ? rawMeta : {}) as Record<string, unknown>;
+  const rawFalsifier = meta["falsifier"];
+  const falsifierClass = String((rawFalsifier && typeof rawFalsifier === "object" ? (rawFalsifier as { class?: unknown }).class : rawFalsifier) ?? "").toLowerCase();
+  if (falsifierClass !== "class1" && falsifierClass !== "class2") return "unarmed";
+  if (!(meta["edit_site"] || meta["file_path"] || meta["change_site"] || meta["suspected_real_location"] || row["file_path"])) return "no_edit_site";
+  if (meta["operator_hold"] === true || isParkingDisposition(meta["disposition"]) || isAwaitingLandVerification(row)) return "held";
+  return null;
+}
+
 /** The metadata that releases a pending_verification hold ("" because the gap store carries omitted keys
  *  forward), or null when there is no such hold: parking dispositions are a human's to lift, and a null lets the
  *  sweep write once rather than every tick. */

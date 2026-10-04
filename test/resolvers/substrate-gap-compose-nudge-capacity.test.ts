@@ -90,11 +90,19 @@ afterEach(() => {
   __resetPolicyReadsForTests();
 });
 
-const writeOpenGap = (id: string) =>
-  mod.resolveSubstrateGapWrite({
+// The nudge fires only for a gap the lane can compose (composeEligibilitySkipReason: open, armed, an edit site, not
+// held), so the probe is a class1 gap at an existing edit site; capacity is then the only thing that varies.
+const writeOpenGap = (id: string) => {
+  mkdirSync(join(mod.gapStoreRootForTest(), "src"), { recursive: true });
+  writeFileSync(join(mod.gapStoreRootForTest(), "src", "nudge-capacity-probe.ts"), "export const probe = 1;\n");
+  return mod.resolveSubstrateGapWrite({
     type: "substrateGap_write",
-    gap: { id, category: "conversation_only", source: "operator_narration", summary: `nudge capacity probe ${id}`, detected_at: "2026-10-03T00:00:00Z", status: "open" },
-  } as never);
+    gap: {
+      id, category: "conversation_only", source: "operator_narration", summary: `nudge capacity probe ${id}`, detected_at: "2026-10-03T00:00:00Z", status: "open",
+      classification_metadata: { edit_site: "src/nudge-capacity-probe.ts", expected_literal: "NUDGE_CAPACITY_PROBE_LITERAL_NOT_YET_PRESENT" },
+    },
+  } as never, { vocabulary: { shapes: new Set(["substrateGap"]), configs_read: 1 }, birthJudge: async () => "present" });
+};
 
 describe("substrateGap_write compose nudge — reads the real peekComposeCapacity shape", () => {
   it("with the autonomous slot FREE, an open gap write fires the gap_to_feature nudge and never logs lane full", async () => {

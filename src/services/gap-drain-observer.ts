@@ -2,6 +2,7 @@ import { WORKSPACE_ROOT } from "../config.js";
 import { appendFileSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync, renameSync, existsSync } from "fs";
 import { join } from "path";
 import { selfAuthHeaders } from "../lib/self-auth.js";
+import type { ComposeEligibilitySkipReason } from "../resolvers/gap-to-feature.js";
 
 const ACTIVITY_API_URL = process.env["ACTIVITY_API_URL"] ?? "http://127.0.0.1:8080";
 const METABOB_API_KEY = process.env["METABOB_API_KEY"] ?? "";
@@ -23,7 +24,9 @@ export const DRAIN_REMEDY_ALLOWLIST: ReadonlySet<string> = new Set(["gap_to_feat
 // not held (operator_hold, a parking disposition, a landing awaiting its verdict: admission's own predicates).
 // Measured 24h: the most-nudged ids were absent, closed, rejected, falsifier none and falsifier unresolvable,
 // none of which admission can pick. The event payload carries no classification_metadata, so the row is read.
-export type ComposeNudgeSkipReason = "not_found" | "not_open" | "unarmed" | "no_edit_site" | "held" | "read_failed";
+// The row predicate itself is gap-to-feature's composeEligibilitySkipReason, the one the picker and the gap-write
+// nudge use too; this module adds only what reading a row by id can fail with.
+export type ComposeNudgeSkipReason = ComposeEligibilitySkipReason | "not_found" | "read_failed";
 const NUDGE_ROW_TTL_MS = 60_000;
 const NUDGE_SUMMARY_WINDOW_MS = 60_000;
 const emptySkipCounts = (): Record<ComposeNudgeSkipReason, number> => ({ not_found: 0, not_open: 0, unarmed: 0, no_edit_site: 0, held: 0, read_failed: 0 });
@@ -61,19 +64,23 @@ export async function composeNudgeSkipReason(gapId: string): Promise<ComposeNudg
     return "read_failed";
   }
   if (!row) return "not_found";
-  if (String(row["status"] ?? "open") !== "open") return "not_open";
-  const meta = (row["classification_metadata"] ?? row["metadata"] ?? {}) as Record<string, unknown>;
-  const rawFalsifier = meta["falsifier"];
-  const falsifierClass = String((rawFalsifier && typeof rawFalsifier === "object" ? (rawFalsifier as { class?: unknown }).class : rawFalsifier) ?? "").toLowerCase();
-  if (falsifierClass !== "class1" && falsifierClass !== "class2") return "unarmed";
-  if (!(meta["edit_site"] || meta["file_path"] || meta["change_site"] || meta["suspected_real_location"] || row["file_path"])) return "no_edit_site";
-  const { isParkingDisposition, isAwaitingLandVerification } = await import("../resolvers/gap-to-feature.js");
-  if (meta["operator_hold"] === true || isParkingDisposition(meta["disposition"]) || isAwaitingLandVerification(row)) return "held";
-  return null;
+  const { composeEligibilitySkipReason } = await import("../resolvers/gap-to-feature.js");
+  return composeEligibilitySkipReason(row);
 }
 
 function countNudgeSkip(reason: ComposeNudgeSkipReason): void {
   nudgeSkipCounts[reason] += 1;
+}
+
+/** The gap-write path's compose nudge skips into the SAME per-window summary as this observer (one drain-log line
+ *  per window, nothing per event). */
+export function countComposeNudgeSkip(reason: ComposeNudgeSkipReason): void {
+  countNudgeSkip(reason);
+  flushNudgeSkipSummary(appendDrainLine);
+}
+
+export function __composeNudgeSkipCountsForTests(): Record<ComposeNudgeSkipReason, number> {
+  return { ...nudgeSkipCounts };
 }
 
 /** One drain-log line per window carrying every skip reason; nothing when nothing was skipped. */

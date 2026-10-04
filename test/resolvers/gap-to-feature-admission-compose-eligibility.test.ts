@@ -7,9 +7,10 @@
 // the same predicate (gap-to-feature composeEligibilitySkipReason), so a nudge never fires for a gap the picker
 // cannot take and the two cannot drift.
 //
-// Routes that are not compose keep their existing exemption: an orphan / unreachable-producer gap (author_producer's
-// one mint), a recommit gap carrying source_gap_id (inherits its site after selection), a typecheck-class gap
-// (tsc is its check). The last test pins that the fresh-orphan route is untouched.
+// Exemptions, each for its stated reason only: an orphan / unreachable-producer gap is not compose (author_producer's
+// one mint); a typecheck-class gap has tsc as its check (and the phantom-typecheck retirement downstream); a recommit
+// gap carrying source_gap_id inherits its SITE after selection, so only the site is waived and it must still be armed,
+// open and unheld. The last test pins that the fresh-orphan route is untouched.
 import { describe, it, expect, beforeAll, afterAll } from "bun:test";
 import { admitActionableGaps, __resetPolicyReadsForTests } from "../../src/resolvers/gap-to-feature.js";
 import { openPolicyAnswer } from "./explicit-open-policy.fixture.js";
@@ -84,6 +85,18 @@ describe("admitActionableGaps — one eligibility predicate with the compose nud
   it("an armed falsifier written as {class} counts as armed, as the nudge reads it", async () => {
     const { ids } = await admittedIds([gap("elig-object-falsifier", { falsifier: { class: "class2" }, edit_site: SITE })]);
     expect(ids).toEqual(["elig-object-falsifier"]);
+  });
+
+  it("a recommit child (source_gap_id) is held to the same predicate: unarmed and sited is not admitted", async () => {
+    // Measured 2026-10-03: 452 open recommit children were sited and unarmed, and the old gate admitted every one.
+    // The recommit exemption's reason is the SITE (inherited after selection), so only the site is waived.
+    const { ids } = await admittedIds([gap("recommit-elig-unarmed", { falsifier: "none", edit_site: SITE, source_gap_id: "elig-parent" })]);
+    expect(ids).toEqual([]);
+  });
+
+  it("a recommit child (source_gap_id) that is armed but siteless keeps its route: its site is inherited after selection", async () => {
+    const { ids } = await admittedIds([gap("recommit-elig-armed-siteless", { falsifier: "class2", source_gap_id: "elig-parent" })]);
+    expect(ids).toEqual(["recommit-elig-armed-siteless"]);
   });
 
   it("route carve-out unchanged: a fresh orphaned-capability gap (no site, unarmed) keeps its one author_producer shot", async () => {

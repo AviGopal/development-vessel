@@ -28,6 +28,10 @@ import { join, resolve, sep } from "node:path";
 
 const SCRATCH = mkdtempSync(join(process.env["TEST_SCRATCH_PARENT"] ?? tmpdir(), "gap-drain-nudge-"));
 process.env["WORKSPACE_ROOT"] = SCRATCH;
+// Route store reads through the holder-forwarding path (forwardToGapStore) so they reach the fetch mock and can be
+// COUNTED: without this the read is a direct scratch-file parse and a "read once per id" assertion would be vacuous.
+// Port 1 is never contacted: every fetch is mocked below.
+process.env["GAP_STORE_ENDPOINT"] = "http://127.0.0.1:1/gap-store";
 
 type Obs = { handleEvent: (e: { type: string; data: unknown }) => Promise<void> };
 type GateMod = {
@@ -153,6 +157,9 @@ beforeEach(() => {
     const ptr = ((impulse["pointer"] ?? impulse) as Record<string, unknown>);
     if (ptr["type"] === "substrateGap") {
       const want = (ptr["id"] ?? ptr["gap_id"]) as string | undefined;
+      if (want === "nudge-probe-read-fails") {
+        return new Response(JSON.stringify({ shape: "structuredError", body: { detail: "holder unreachable" } }), { status: 502 });
+      }
       const rows = readGapStore().filter((r) => want === undefined || r["id"] === want);
       return new Response(JSON.stringify({ success: true, shape: "substrateGap", body: { gaps: rows, total: rows.length } }), { status: 200 });
     }
@@ -226,8 +233,15 @@ describe("gap-drain observer: a written gap the lane cannot compose never nudges
     const s = summaries();
     expect(s.length).toBe(1);
     expect(s[0]!["skipped"]).toEqual({ not_found: 2, not_open: 1, unarmed: 2, no_edit_site: 0, held: 0, read_failed: 0 });
-    // The store is read once per distinct gap within a window, not once per event.
-    expect(calls.filter((c) => ((c.impulse["pointer"] ?? c.impulse) as Record<string, unknown>)["type"] === "substrateGap").length).toBeLessThanOrEqual(4);
+    // The store is read once per distinct gap within a window, not once per event: 4 ids, 5 events.
+    expect(calls.filter((c) => ((c.impulse["pointer"] ?? c.impulse) as Record<string, unknown>)["type"] === "substrateGap").length).toBe(4);
+  });
+});
+
+describe("gap-drain observer: a failed store read is not absence", () => {
+  test("a read the holder cannot answer is not nudged; counted read_failed, not not_found", async () => {
+    writeGapStore([gapRow("nudge-probe-read-fails", {}, ARMED)]);
+    await expectSkipped("nudge-probe-read-fails", "read_failed");
   });
 });
 

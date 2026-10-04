@@ -9,6 +9,7 @@ import { startAutocompleteConceptWriter } from "./observers/autocomplete-concept
 import { startFailureCreditObserver } from "./observers/failure-credit-observer.js";
 import { GapDrainObserver } from "./services/gap-drain-observer.js";
 import { admitInFlight, releaseInFlight, runInFlight, inFlightOldestMs, inFlightProgressHealth, type InFlightRecord } from "./lib/compose-progress.js";
+import { markerQuiesced } from "./lib/quiesce-marker.js";
 
 const app = new Hono();
 
@@ -199,15 +200,11 @@ app.route("/", impulsesRouter);
 const QUIESCE_MARKER = process.env["QUIESCE_MARKER"] ?? "/workspace/quiesce/development-vessel";
 const QUIESCE_MAX_MS = Number(process.env["QUIESCE_MAX_MS"] ?? 20 * 60_000);
 function quiesced(): boolean {
-  try {
-    const { statSync } = require("node:fs") as typeof import("node:fs");
-    const st = statSync(QUIESCE_MARKER);
-    // Fail open on a stale marker: a converger that died must not close admission
-    // forever. Same reasoning as the compose-slot staleness backstop.
-    return Date.now() - st.mtimeMs < QUIESCE_MAX_MS;
-  } catch {
-    return false;
-  }
+  // Fail open on a stale marker (mtime past QUIESCE_MAX_MS): a converger that died must not close
+  // admission forever. Same reasoning as the compose-slot staleness backstop. And fail open on a
+  // marker past its own expires_at: a tick SIGKILLed at its TimeoutStartSec never removes it
+  // (src/lib/quiesce-marker.ts).
+  return markerQuiesced(QUIESCE_MARKER, QUIESCE_MAX_MS);
 }
 
 // Declared HERE rather than beside the drain below: the request handler is the

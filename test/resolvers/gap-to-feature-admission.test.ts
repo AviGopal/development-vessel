@@ -100,7 +100,8 @@ const CITED_FILE = {
   source: "substrate_detected",
   summary: "fix the thing",
   status: "open",
-  classification_metadata: { edit_site: "repos/goal-host-vessel/src/index.ts:12" },
+  // Armed (class2): admission takes only open + armed + sited + unheld gaps (composeEligibilitySkipReason).
+  classification_metadata: { edit_site: "repos/goal-host-vessel/src/index.ts:12", falsifier: "class2" },
 };
 const PHANTOM_TYPECHECK = {
   id: "detect-unclassified_failure_recurring_typecheck_goal_host_vessel_src_index_l619_ts2322_variant",

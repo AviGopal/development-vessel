@@ -56,7 +56,9 @@ describe("admitActionableGaps — groundable-target requirement", () => {
     // The real shape: `systematic-failure-feature_compose-zero` carried target=None and
     // failed_attempts=21 while still winning picks.
     const withTarget = gap("has-target", { edit_site: "repos/development-vessel/src/resolvers/gap-to-feature.ts" });
-    const noTarget = gap("systematic-failure-feature_compose-zero");
+    // Ungroundable = the cited file is absent. A siteless gap no longer reaches this gate (admission takes only
+    // armed + sited gaps), so the fixture names a file that does not exist.
+    const noTarget = gap("systematic-failure-feature_compose-zero", { edit_site: "repos/nonexistent-vessel/src/x.ts" });
     const { admitted, excluded } = await admitActionableGaps([noTarget, withTarget]);
     const ids = admitted.map((g) => String(g.id));
     expect(ids).toContain("has-target");
@@ -67,7 +69,9 @@ describe("admitActionableGaps — groundable-target requirement", () => {
   it("FAILS OPEN when nothing groundable exists — a starved lane is worse", async () => {
     // This gate must never be the reason the substrate stops trying. With no groundable
     // candidate, the ungroundable ones are admitted rather than leaving an empty set.
-    const { admitted, excluded } = await admitActionableGaps([gap("a"), gap("b")]);
+    // Sited at a file that does not exist: ungroundable, but armed and sited, so this gate is what decides.
+    const missing = { edit_site: "repos/nonexistent-vessel/src/x.ts" };
+    const { admitted, excluded } = await admitActionableGaps([gap("a", missing), gap("b", missing)]);
     expect(admitted.map((g) => String(g.id)).sort()).toEqual(["a", "b"]);
     expect(excluded.some((e) => e.reason === "no_groundable_target")).toBe(false);
   });

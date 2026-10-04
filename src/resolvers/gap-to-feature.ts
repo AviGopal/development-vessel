@@ -2208,20 +2208,36 @@ export async function admitActionableGaps(
         continue;
       }
     }
-    // ACTIONABLE-ONLY ADMISSION (value-per-cost-selection 2.2). A gap with no edit site and no
-    // class1/class2 falsifier gives compose nothing to edit and nothing to verify against; it
-    // needs information (investigation), not a draft. Excluded on every pick, whether or not a
-    // proposal report exists, so the one-shot investigated_at route cannot re-admit it.
-    // Orphan-producer gaps route to author_producer, not compose; a recommit gap with a
-    // source_gap_id inherits its site after selection; a typecheck-class gap (typecheckClassOf, the
-    // phantom-typecheck predicate below) is decided by that check. All keep their existing routes.
+    // ACTIONABLE-ONLY ADMISSION (value-per-cost-selection 2.2), ONE PREDICATE WITH THE COMPOSE NUDGE. A compose
+    // candidate is admitted only when composeEligibilitySkipReason passes it: open, armed (class1/class2), naming an
+    // edit site, not held. That is the predicate the gap-write path and the drain observer nudge on, so a nudge never
+    // fires for a gap this pick cannot take. This gate used to be "edit site OR armed": a sited gap with falsifier
+    // none gave compose nothing to verify against and was admitted (1661 of the 1961 open gaps that passed it on
+    // 2026-10-03); an armed siteless one gave it nothing to edit. Either needs information, not a draft, on every
+    // pick, whether or not a proposal report exists, so the one-shot investigated_at route cannot re-admit it.
+    // Exemptions, each for its stated reason only. Orphan-producer gaps are not compose (author_producer's one mint);
+    // a typecheck-class gap (typecheckClassOf, the phantom-typecheck predicate below) is decided by that check. Their
+    // holds are read further down. A recommit gap with a source_gap_id inherits its SITE after selection, so it is
+    // waived the edit-site requirement only: it must still be open, armed and unheld (452 sited, unarmed recommit
+    // children were admitted on 2026-10-03 by the old "site OR armed" rule).
     {
-      const hasEditSite = !!(meta.edit_site || meta.file_path || meta.change_site || meta.suspected_real_location || g.file_path);
-      const falsifierClass = String(meta.falsifier ?? "").toLowerCase();
       const orphanRoute = cat === "orphaned_capability" || cat === "unreachable_producer" || /orphaned[_-]capability/i.test(id);
-      if (!hasEditSite && falsifierClass !== "class1" && falsifierClass !== "class2" && !orphanRoute && !meta.source_gap_id && !typecheckClassOf(g)) {
-        excluded.push({ id, reason: `needs_information(falsifier=${falsifierClass || "unset"})` });
-        continue;
+      if (!orphanRoute && !typecheckClassOf(g)) {
+        const verdict = composeEligibilitySkipReason(g);
+        const skip = verdict === "no_edit_site" && meta.source_gap_id ? null : verdict;
+        if (skip !== null) {
+          const rawFalsifier = meta.falsifier as unknown;
+          const falsifierClass = String((rawFalsifier && typeof rawFalsifier === "object" ? (rawFalsifier as { class?: unknown }).class : rawFalsifier) ?? "").toLowerCase();
+          const reason =
+            skip === "unarmed" ? `needs_information(falsifier=${falsifierClass || "unset"})`
+            : skip === "no_edit_site" ? `needs_information(no_edit_site; falsifier=${falsifierClass})`
+            : skip === "not_open" ? `not_open(${String(g.status ?? "")})`
+            : meta.operator_hold === true ? "operator_hold"
+            : isParkingDisposition(meta.disposition) ? `disposition(${String(meta.disposition)})`
+            : "disposition(pending_verification)";
+          excluded.push({ id, reason });
+          continue;
+        }
       }
     }
     // AUTONOMY SCOPE (contained-self-development 1.2). Admission is the autonomous path, so a gap

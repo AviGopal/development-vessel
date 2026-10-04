@@ -297,7 +297,7 @@ describe("operator_hold contains: the lane's auto-pick admission (kept green)", 
 
   it("[CONTROL] admission excludes a held gap with reason operator_hold and admits its unheld twin", async () => {
     routeOpenEnvelope(fetchGuard!);
-    const twin = (id: string, extra: Record<string, unknown>) => ({ id, category: "systematic_failure", source: "substrate_detected", summary: "fix the thing", status: "open", classification_metadata: { edit_site: "repos/goal-host-vessel/src/index.ts:1", ...extra } });
+    const twin = (id: string, extra: Record<string, unknown>) => ({ id, category: "systematic_failure", source: "substrate_detected", summary: "fix the thing", status: "open", classification_metadata: { edit_site: "repos/goal-host-vessel/src/index.ts:1", falsifier: "class2", ...extra } }); // armed: admission takes only armed sited gaps
     const { admitted, excluded } = await admitActionableGaps(
       [twin("hold-admission-held", { operator_hold: true }), twin("hold-admission-unheld", {})] as unknown as Record<string, unknown>[],
       { typecheckRunner: () => ({ ran: false, clean: false }) } as never,

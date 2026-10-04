@@ -50,7 +50,8 @@ const runner = (_v: string) => ({ ran: true, clean: false });
 function gap(id: string, meta: Record<string, unknown>, summary = "fix the thing"): Record<string, unknown> {
   return {
     id, category: "systematic_failure", source: "substrate_detected", summary, status: "open",
-    classification_metadata: { edit_site: "repos/goal-host-vessel/src/index.ts:1", ...meta },
+    // Armed (class2): admission takes only open + armed + sited + unheld gaps (composeEligibilitySkipReason).
+    classification_metadata: { edit_site: "repos/goal-host-vessel/src/index.ts:1", falsifier: "class2", ...meta },
   };
 }
 async function admit(gs: Record<string, unknown>[]) {

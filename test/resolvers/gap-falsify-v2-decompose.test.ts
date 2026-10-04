@@ -7,6 +7,7 @@
 // Driven through the real decomposeGap, the real validation, the real judge and the real store, with the LLM and
 // the shape descriptions injected and globalThis.fetch standing in for discovery and the vessel's own resolve.
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "bun:test";
+import { snapshotGapStore } from "./gap-store-snapshot.js";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -91,7 +92,10 @@ function stubLlm(reply: Record<string, unknown>, prompts: string[] = []) {
 }
 const deps = (reply: Record<string, unknown>, prompts: string[] = []) => ({ llm: stubLlm(reply, prompts), shapeDescriptions: async () => DESCRIPTIONS });
 
+// Leave the shared gap store as this file found it (test/resolvers/gap-store-snapshot.ts).
+let gapStore: { restore: () => Promise<void> } | null = null;
 beforeAll(() => {
+  gapStore = snapshotGapStore(sg.gapStoreRootForTest(), __settleBirthEvaluationsForTests);
   // The fixture shapes exist only in this file's discovery stub, not in any fleet config, so the
   // classifier's filesystem vocabulary must not judge them: pin "cannot judge" on every host.
   __setFleetVocabularyForTests({ v: null });
@@ -106,7 +110,8 @@ beforeAll(() => {
   __resetPolicyReadsForTests();
 });
 beforeEach(() => { frameDefects = 2; });
-afterAll(() => {
+afterAll(async () => {
+  await gapStore?.restore();
   __setFleetVocabularyForTests(null);
   globalThis.fetch = originalFetch;
   for (const [k, v] of Object.entries(savedEnv)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }

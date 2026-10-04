@@ -1,20 +1,31 @@
 import { describe, it, expect, beforeAll, afterAll } from "bun:test";
 import { Hono } from "hono";
-import { impulsesRouter } from "../src/routes/impulses.js";
 import { tmpdir } from "os";
 import { join } from "path";
 import { mkdirSync, writeFileSync } from "fs";
 
 const testDir = join(tmpdir(), `dev-vessel-integration-${Date.now()}`);
 
+// WORKSPACE_ROOT must be set BEFORE the router is imported, not in beforeAll.
+// The router transitively loads modules that capture WORKSPACE_ROOT at module
+// load (config.ts, resolvers/substrate-gap.ts), and `bun test` shares one module
+// registry across every file in the run. A static import here froze those
+// modules to process.cwd() — the vessel checkout — for the rest of the process,
+// so every later suite's gap writes landed in the tracked gaps/gaps.json and
+// substrate-gap.test.ts read 50 foreign open rows instead of its own store.
+// Restore the previous value afterwards rather than deleting it.
+const priorWorkspaceRoot = process.env["WORKSPACE_ROOT"];
+mkdirSync(testDir, { recursive: true });
+process.env["WORKSPACE_ROOT"] = testDir;
+const { impulsesRouter } = await import("../src/routes/impulses.js");
+
 beforeAll(() => {
-  mkdirSync(testDir, { recursive: true });
   writeFileSync(join(testDir, "probe.txt"), "integration test content");
-  process.env["WORKSPACE_ROOT"] = testDir;
 });
 
 afterAll(() => {
-  delete process.env["WORKSPACE_ROOT"];
+  if (priorWorkspaceRoot === undefined) delete process.env["WORKSPACE_ROOT"];
+  else process.env["WORKSPACE_ROOT"] = priorWorkspaceRoot;
 });
 
 function makeApp() {

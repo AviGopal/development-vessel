@@ -10,6 +10,7 @@
 //   - a falsifier-less parent's children stay none (nothing is fabricated);
 //   - a parent whose check read 'absent' at birth (it never saw the defect) gives nothing.
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "bun:test";
+import { snapshotGapStore } from "./gap-store-snapshot.js";
 import { mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -35,7 +36,10 @@ type Row = Record<string, unknown>;
 const SITE = "repos/activity-api/src/routes/trace-aggregate-report.ts";
 const CHECK = { shape: "test_suite", input: { vessel: "activity-api", test_file: "src/routes/trace-aggregate-report.failure-class.test.ts", only_tests: ["Y1-read-a: traceAggregateReport reads the authoritative execution table > queries FROM execution"], timeout_ms: 120001 }, zero_field: "requested_not_passing" };
 
+// Leave the shared gap store as this file found it (test/resolvers/gap-store-snapshot.ts).
+let gapStore: { restore: () => Promise<void> } | null = null;
 beforeAll(() => {
+  gapStore = snapshotGapStore(sg.gapStoreRootForTest(), sg.__settleBirthEvaluationsForTests);
   delete process.env["GAP_STORE_ENDPOINT"];
   const root = sg.gapStoreRootForTest();
   if (!root.startsWith(tmpdir()) && !root.startsWith("/tmp/")) throw new Error(`gap store root ${root} is not a temp dir`);
@@ -53,7 +57,8 @@ beforeAll(() => {
   console.log = () => {};
   console.warn = () => {};
 });
-afterAll(() => {
+afterAll(async () => {
+  await gapStore?.restore();
   globalThis.fetch = originalFetch;
   console.log = origLog;
   console.warn = origWarn;

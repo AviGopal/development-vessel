@@ -13,6 +13,7 @@
 // appendComposeLesson, bumpFailedAttempts and composeLessonsBlock against the real (temp) gap store, with
 // globalThis.fetch standing in for discovery and concept-db.
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "bun:test";
+import { snapshotGapStore } from "./gap-store-snapshot.js";
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -44,7 +45,10 @@ const origLog = console.log;
 const origWarn = console.warn;
 const savedStoreEndpoint = process.env["GAP_STORE_ENDPOINT"];
 
+// Leave the shared gap store as this file found it (test/resolvers/gap-store-snapshot.ts).
+let gapStore: { restore: () => Promise<void> } | null = null;
 beforeAll(() => {
+  gapStore = snapshotGapStore(sg.gapStoreRootForTest(), sg.__settleBirthEvaluationsForTests);
   delete process.env["GAP_STORE_ENDPOINT"];
   const root = sg.gapStoreRootForTest();
   if (!root.startsWith(tmpdir()) && !root.startsWith("/tmp/")) throw new Error(`gap store root ${root} is not a temp dir`);
@@ -73,7 +77,8 @@ beforeAll(() => {
   console.log = (...a: unknown[]) => { logs.push(a.map(String).join(" ")); };
   console.warn = (...a: unknown[]) => { logs.push(a.map(String).join(" ")); };
 });
-afterAll(() => {
+afterAll(async () => {
+  await gapStore?.restore();
   globalThis.fetch = originalFetch;
   console.log = origLog;
   console.warn = origWarn;

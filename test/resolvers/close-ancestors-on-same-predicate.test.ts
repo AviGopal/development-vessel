@@ -4,6 +4,7 @@
 // evidence_resolve close on that measurement: closed_via_child, the child's falsifier_exercise carried. An
 // ancestor whose check differs is never closed. Driven against the real (temp) gap store.
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { snapshotGapStore } from "./gap-store-snapshot.js";
 import { mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -22,7 +23,10 @@ const originalFetch = globalThis.fetch;
 const savedStore = process.env["GAP_STORE_ENDPOINT"];
 type Row = Record<string, unknown>;
 
+// Leave the shared gap store as this file found it (test/resolvers/gap-store-snapshot.ts).
+let gapStore: { restore: () => Promise<void> } | null = null;
 beforeAll(() => {
+  gapStore = snapshotGapStore(sg.gapStoreRootForTest(), sg.__settleBirthEvaluationsForTests);
   delete process.env["GAP_STORE_ENDPOINT"];
   const root = sg.gapStoreRootForTest();
   if (!root.startsWith(tmpdir()) && !root.startsWith("/tmp/")) throw new Error(`gap store root ${root} is not a temp dir`);
@@ -30,7 +34,8 @@ beforeAll(() => {
   globalThis.fetch = (async () => Response.json({ content: { vessels: [] } })) as unknown as typeof fetch;
   sg.__setBirthJudgeForTests(async () => "present");
 });
-afterAll(() => {
+afterAll(async () => {
+  await gapStore?.restore();
   globalThis.fetch = originalFetch;
   sg.__setBirthJudgeForTests(null);
   if (savedStore !== undefined) process.env["GAP_STORE_ENDPOINT"] = savedStore;

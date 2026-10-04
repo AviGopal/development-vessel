@@ -172,7 +172,12 @@ describe("reachability-gap-repair resolver", () => {
     const base = join(tmpdir(), `reachability-gap-repair-test-${Date.now()}`);
     mkdirSync(join(base, "gaps"), { recursive: true });
     writeFileSync(join(base, "gaps", "gaps.json"), JSON.stringify([GAP]));
+    // Restore in finally: a failed assertion below used to skip the restore and leave WORKSPACE_ROOT pointing at
+    // this fixture store for every later file in the run (solicitation-outcome-scan then read it as the live gap
+    // store and dropped its panels).
+    const priorWorkspaceRoot = process.env["WORKSPACE_ROOT"];
     process.env["WORKSPACE_ROOT"] = base;
+    try {
 
     globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = typeof input === "string" ? input : input.toString();
@@ -195,7 +200,10 @@ describe("reachability-gap-repair resolver", () => {
     expect(body["gap_id"]).toBe("reach-gap-widget-report");
     expect(body["producer_id"]).toBe("development-vessel:make-widget-report");
     expect(body["proposed_optional_input_shapes"]).toEqual(["rawWidgetTrace"]);
-    delete process.env["WORKSPACE_ROOT"];
+    } finally {
+      if (priorWorkspaceRoot === undefined) delete process.env["WORKSPACE_ROOT"];
+      else process.env["WORKSPACE_ROOT"] = priorWorkspaceRoot;
+    }
   });
 
   it("returns UNFAVORABLE when the producer template cannot be fetched", async () => {

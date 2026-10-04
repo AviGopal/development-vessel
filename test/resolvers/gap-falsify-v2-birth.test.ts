@@ -6,6 +6,7 @@
 // Driven through the real write seam, the real judge and the real admission, with globalThis.fetch standing in
 // for the vessel's own resolve endpoint (the test_suite answer) and for discovery. No source-text assertions.
 import { afterAll, afterEach, beforeAll, describe, expect, it, spyOn } from "bun:test";
+import { snapshotGapStore } from "./gap-store-snapshot.js";
 import { mkdirSync, readFileSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -74,7 +75,10 @@ async function admissionReason(g: Record<string, unknown>): Promise<string | nul
   return admitted.some((a) => a.id === g.id) ? null : "not admitted";
 }
 
+// Leave the shared gap store as this file found it (test/resolvers/gap-store-snapshot.ts).
+let gapStore: { restore: () => Promise<void> } | null = null;
 beforeAll(() => {
+  gapStore = snapshotGapStore(gapStoreRootForTest(), __settleBirthEvaluationsForTests);
   for (const k of ["VESSELS_CLONE_ROOT", "SUBSTRATE_PUSH_VESSELS", "GAP_STORE_ENDPOINT"]) savedEnv[k] = process.env[k];
   delete process.env["GAP_STORE_ENDPOINT"];
   process.env["VESSELS_CLONE_ROOT"] = join(ROOT, "no-clones"); // no clones: every vessel counts as owned here
@@ -83,7 +87,8 @@ beforeAll(() => {
   __resetPolicyReadsForTests();
 });
 afterEach(() => { selfResolveMode = "answer"; });
-afterAll(() => {
+afterAll(async () => {
+  await gapStore?.restore();
   globalThis.fetch = originalFetch;
   for (const [k, v] of Object.entries(savedEnv)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
   __resetPolicyReadsForTests();
@@ -270,6 +275,10 @@ describe("C1: no birth resolve leaves a test that injects the judge", () => {
     const birthCalls = (): number => urls.filter((u) => !u.endsWith("/v2/events/publish")).length;
     __setBirthJudgeForTests(null);
     globalThis.fetch = thrower;
+    // The positive control below counts the gap-written publish, and a scratch-root store refuses that publish
+    // unless a test opts in (substrate-gap.ts, gapEventPublishFromScratchAllowed). This file's store is always
+    // scratch once nothing leaks a real root into the run, so opt in here; the thrower keeps it off any bus.
+    sg.__allowGapEventPublishFromScratchForTests(true);
     try {
       const id = `gf2-guard-injected-${RUN}`;
       await write(id, testSuiteCheck("widget counts rejected frames"), { birthJudge: async () => "present" });
@@ -286,7 +295,7 @@ describe("C1: no birth resolve leaves a test that injects the judge", () => {
       expect(birthCalls()).toBeGreaterThan(0);
       expect(urls.some((u) => u.endsWith("/v2/impulses/resolve"))).toBe(true);
       expect(metaOf(await row(id2)).predicate_birth_verdict).toBe("unknown");
-    } finally { install(); }
+    } finally { sg.__allowGapEventPublishFromScratchForTests(false); install(); }
   });
 });
 

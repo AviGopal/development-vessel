@@ -104,3 +104,47 @@ describe("admitActionableGaps — one eligibility predicate with the compose nud
     expect(ids).toEqual(["orphaned-capability-elig-probe"]);
   });
 });
+
+// THE TYPECHECK EXEMPTION NEEDS A STRUCTURED TSC ERROR. typecheckClassOf matched any TSxxxx token in a gap's id or
+// summary, so a failure lesson or a narrative mentioning a TS code exempted the gap from the eligibility predicate:
+// 225 live open gaps passed this gate on that exemption alone (2026-10-03). The exemption now requires
+// classification_metadata.tsc_error {code: "TSnnnn", file} whose file exists in the vessel tree grounding reads
+// (MITOSIS_RUNTIME_DIR), and nothing else. The typecheck runner is injected so no real tsc runs.
+describe("admitActionableGaps — the typecheck exemption requires a structured tsc error", () => {
+  const stillErrors = () => ({ ran: true, clean: false });
+  const admitTc = async (gaps: Array<Record<string, unknown>>) => {
+    const r = await admitActionableGaps(gaps, { typecheckRunner: stillErrors });
+    return { ids: r.admitted.map((g) => String(g.id)), excluded: r.excluded };
+  };
+
+  it("a summary that mentions TS2345 with no structured tsc error is held to the predicate (unarmed, sited: excluded)", async () => {
+    const g = { id: "tc-substring-sited", category: "systematic_failure", status: "open", summary: `TS2345 at ${SITE}:10`, classification_metadata: { falsifier: "none", edit_site: SITE } };
+    const { ids, excluded } = await admitTc([g]);
+    expect(ids).toEqual([]);
+    expect(excluded.find((e) => e.id === "tc-substring-sited")?.reason ?? "").toContain("needs_information(falsifier=none");
+  });
+
+  it("an id carrying _ts2322_ with no structured tsc error is held to the predicate (unarmed, siteless: excluded)", async () => {
+    const g = { id: "detect-unclassified_failure_development_vessel_src_index_l10_ts2322_variant", category: "systematic_failure", status: "open", summary: "recurring failure", classification_metadata: { falsifier: "none" } };
+    const { ids } = await admitTc([g]);
+    expect(ids).toEqual([]);
+  });
+
+  it("CONTROL: a structured tsc_error at an existing file is exempt (unarmed, no edit_site, still erroring: admitted)", async () => {
+    const g = { id: "tc-structured", category: "typecheck_error", status: "open", summary: "a compile error", classification_metadata: { falsifier: "none", tsc_error: { code: "TS2345", file: SITE, line: 10 } } };
+    const { ids } = await admitTc([g]);
+    expect(ids).toEqual(["tc-structured"]);
+  });
+
+  it("a structured tsc_error whose file does not exist is not exempt", async () => {
+    const g = { id: "tc-structured-missing-file", category: "typecheck_error", status: "open", summary: "a compile error", classification_metadata: { falsifier: "none", tsc_error: { code: "TS2345", file: "repos/development-vessel/src/no-such-file.ts" } } };
+    const { ids } = await admitTc([g]);
+    expect(ids).toEqual([]);
+  });
+
+  it("a structured tsc_error whose code is not a TS code is not exempt", async () => {
+    const g = { id: "tc-structured-bad-code", category: "typecheck_error", status: "open", summary: "a compile error", classification_metadata: { falsifier: "none", tsc_error: { code: "2345", file: SITE } } };
+    const { ids } = await admitTc([g]);
+    expect(ids).toEqual([]);
+  });
+});

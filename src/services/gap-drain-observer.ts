@@ -17,6 +17,89 @@ const SELF_RESOLVE_URL = `${DEV_VESSEL_ENDPOINT}/v2/impulses/resolve`;
 // gap_to_feature (trace-store-health-observer's remedies). A new remedy type is added here, deliberately.
 export const DRAIN_REMEDY_ALLOWLIST: ReadonlySet<string> = new Set(["gap_to_feature"]);
 
+// COMPOSE-NUDGE ELIGIBILITY. A written gap nudges the composer only when its STORE ROW exists, is open, is
+// armed (falsifier class1/class2: the classes the lane's admission accepts, normalised the way gap-to-feature
+// reads `falsifier`, string or {class}), names an edit site (the fields admission's hasEditSite accepts), and is
+// not held (operator_hold, a parking disposition, a landing awaiting its verdict: admission's own predicates).
+// Measured 24h: the most-nudged ids were absent, closed, rejected, falsifier none and falsifier unresolvable,
+// none of which admission can pick. The event payload carries no classification_metadata, so the row is read.
+export type ComposeNudgeSkipReason = "not_found" | "not_open" | "unarmed" | "no_edit_site" | "held" | "read_failed";
+const NUDGE_ROW_TTL_MS = 60_000;
+const NUDGE_SUMMARY_WINDOW_MS = 60_000;
+const emptySkipCounts = (): Record<ComposeNudgeSkipReason, number> => ({ not_found: 0, not_open: 0, unarmed: 0, no_edit_site: 0, held: 0, read_failed: 0 });
+// One read per distinct gap per TTL window; a burst of writes for one id reuses the in-flight read.
+const nudgeRowCache = new Map<string, { at: number; row: Promise<Record<string, unknown> | null> }>();
+let nudgeSkipCounts = emptySkipCounts();
+let nudgeSkipWindowStart = Date.now();
+
+async function readGapRowForNudge(gapId: string): Promise<Record<string, unknown> | null> {
+  const now = Date.now();
+  const hit = nudgeRowCache.get(gapId);
+  if (hit && now - hit.at < NUDGE_ROW_TTL_MS) return hit.row;
+  if (nudgeRowCache.size > 2000) {
+    for (const [k, v] of nudgeRowCache) if (now - v.at >= NUDGE_ROW_TTL_MS) nudgeRowCache.delete(k);
+  }
+  const row = (async () => {
+    const { resolveSubstrateGap } = await import("../resolvers/substrate-gap.js");
+    const r = await resolveSubstrateGap({ type: "substrateGap", id: gapId, limit: 1 });
+    // Anything but a substrateGap answer (an unreachable holder's structuredError) is a failed read, not absence.
+    if (r.shape !== "substrateGap") throw new Error(`gap store answered ${r.shape}`);
+    const rows = ((r.body as { gaps?: unknown }).gaps ?? []) as Array<Record<string, unknown>>;
+    return rows.find((x) => x["id"] === gapId) ?? null;
+  })();
+  nudgeRowCache.set(gapId, { at: now, row });
+  row.catch(() => nudgeRowCache.delete(gapId));
+  return row;
+}
+
+export async function composeNudgeSkipReason(gapId: string): Promise<ComposeNudgeSkipReason | null> {
+  if (!gapId) return "not_found";
+  let row: Record<string, unknown> | null;
+  try {
+    row = await readGapRowForNudge(gapId);
+  } catch {
+    return "read_failed";
+  }
+  if (!row) return "not_found";
+  if (String(row["status"] ?? "open") !== "open") return "not_open";
+  const meta = (row["classification_metadata"] ?? row["metadata"] ?? {}) as Record<string, unknown>;
+  const rawFalsifier = meta["falsifier"];
+  const falsifierClass = String((rawFalsifier && typeof rawFalsifier === "object" ? (rawFalsifier as { class?: unknown }).class : rawFalsifier) ?? "").toLowerCase();
+  if (falsifierClass !== "class1" && falsifierClass !== "class2") return "unarmed";
+  if (!(meta["edit_site"] || meta["file_path"] || meta["change_site"] || meta["suspected_real_location"] || row["file_path"])) return "no_edit_site";
+  const { isParkingDisposition, isAwaitingLandVerification } = await import("../resolvers/gap-to-feature.js");
+  if (meta["operator_hold"] === true || isParkingDisposition(meta["disposition"]) || isAwaitingLandVerification(row)) return "held";
+  return null;
+}
+
+function countNudgeSkip(reason: ComposeNudgeSkipReason): void {
+  nudgeSkipCounts[reason] += 1;
+}
+
+/** One drain-log line per window carrying every skip reason; nothing when nothing was skipped. */
+function flushNudgeSkipSummary(write: (entry: Record<string, unknown>) => void, force = false): void {
+  const now = Date.now();
+  if (!force && now - nudgeSkipWindowStart < NUDGE_SUMMARY_WINDOW_MS) return;
+  const counts = nudgeSkipCounts;
+  const total = Object.values(counts).reduce((a, b) => a + b, 0);
+  const windowMs = now - nudgeSkipWindowStart;
+  nudgeSkipCounts = emptySkipCounts();
+  nudgeSkipWindowStart = now;
+  if (total === 0) return;
+  write({ action: "compose_nudge_skipped_summary", skipped: counts, total, window_ms: windowMs });
+  console.log(`[gap-drain-observer] compose nudges skipped in ${windowMs}ms: ${JSON.stringify(counts)}`);
+}
+
+export function __resetComposeNudgeGateForTests(): void {
+  nudgeRowCache.clear();
+  nudgeSkipCounts = emptySkipCounts();
+  nudgeSkipWindowStart = Date.now();
+}
+
+export function __flushComposeNudgeSkipSummaryForTests(): void {
+  flushNudgeSkipSummary(appendDrainLine, true);
+}
+
 export class GapDrainObserver {
   private ws: WebSocket | null = null;
   private shouldRun = false;
@@ -33,6 +116,7 @@ export class GapDrainObserver {
 
   stop(): void {
     this.shouldRun = false;
+    flushNudgeSkipSummary(appendDrainLine, true);
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
@@ -131,6 +215,14 @@ export class GapDrainObserver {
    * picker would select the same highest-scoring gap each time.
    */
   private async nudgeComposableDrain(gapId: string, category: string): Promise<void> {
+    // Eligibility before the in-flight/cooldown guards, so every skip reason is counted whatever the lane state.
+    const skip = await composeNudgeSkipReason(gapId);
+    if (skip !== null) {
+      countNudgeSkip(skip);
+      flushNudgeSkipSummary((e) => this.recordDrain(e));
+      return;
+    }
+    flushNudgeSkipSummary((e) => this.recordDrain(e));
     const g = globalThis as unknown as { __composeDrainInflight?: boolean; __composeDrainLastAt?: number };
         const MIN_INTERVAL_MS = Number(process.env["COMPOSE_DRAIN_MIN_INTERVAL_MS"] ?? 90_000);
     const now = Date.now();
@@ -290,6 +382,7 @@ export class GapDrainObserver {
   }
 
   private async handleExecutionCompleted(): Promise<void> {
+    flushNudgeSkipSummary(appendDrainLine);
     const g = globalThis as unknown as { __drainLastScan?: number; __drainInflight?: Set<string> };
     const now = Date.now();
     if (g.__drainLastScan !== undefined && now - g.__drainLastScan < 60000) return;
@@ -394,13 +487,17 @@ export class GapDrainObserver {
   }
 
   private recordDrain(entry: Record<string, unknown>): void {
-    try {
-      const dir = join(WORKSPACE_ROOT, "pool");
-      mkdirSync(dir, { recursive: true });
-      const line = JSON.stringify({ ...entry, recorded_at: new Date().toISOString() }) + "\n";
-      appendFileSync(join(dir, "drain-log.jsonl"), line, "utf8");
-    } catch (err) {
-      console.log("[gap-drain-observer] recordDrain failed (non-fatal):", err);
-    }
+    appendDrainLine(entry);
+  }
+}
+
+function appendDrainLine(entry: Record<string, unknown>): void {
+  try {
+    const dir = join(WORKSPACE_ROOT, "pool");
+    mkdirSync(dir, { recursive: true });
+    const line = JSON.stringify({ ...entry, recorded_at: new Date().toISOString() }) + "\n";
+    appendFileSync(join(dir, "drain-log.jsonl"), line, "utf8");
+  } catch (err) {
+    console.log("[gap-drain-observer] recordDrain failed (non-fatal):", err);
   }
 }

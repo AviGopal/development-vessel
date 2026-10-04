@@ -1,7 +1,12 @@
-import { describe, it, expect } from "bun:test";
+import { afterAll, describe, it, expect } from "bun:test";
+import { stubGapEventPublish } from "./stub-gap-event-publish.js";
 import { tmpdir } from "os";
 import { join } from "path";
 import { rmSync, mkdirSync, writeFileSync } from "fs";
+
+// Gap writes here must not reach the live event bus (test/resolvers/stub-gap-event-publish.ts).
+const gapEventPublishStub = stubGapEventPublish();
+afterAll(() => gapEventPublishStub.restore());
 
 // FALSIFIER ACCOUNTING ON THE GAP WRITE PATH (2026-09-01).
 //

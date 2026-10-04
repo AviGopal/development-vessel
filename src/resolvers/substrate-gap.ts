@@ -37,7 +37,8 @@ import type { ResolverResult } from "./types.js";
 import { onlyTestsProblem } from "./test-suite.js";
 import { readFile, writeFile, rename, mkdir } from "node:fs/promises";
 import { readFileSync, existsSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve as resolvePath, sep } from "node:path";
+import { tmpdir } from "node:os";
 import { carryGoalReachEntries, isGoalReachEntry, mergeDemandGoal, type GoalReachDemandEntry } from "../lib/demand-goals.js";
 import { regionLiteralVerdict, regionOf, falsifierClassOf } from "../lib/region-literal.js";
 
@@ -238,6 +239,26 @@ function workspaceRoot(): string {
  */
 export function gapStoreRootForTest(): string {
   return WORKSPACE_ROOT_AT_LOAD;
+}
+
+/**
+ * A SCRATCH gap store: one rooted in the temp dir, the way every gap-writing test and the in-container suite runs
+ * (WORKSPACE_ROOT="$(mktemp -d)") isolate themselves. The deployed store root (/workspace) never is one.
+ */
+export function isScratchGapStoreRoot(root: string): boolean {
+  const r = resolvePath(root);
+  const t = resolvePath(tmpdir());
+  return r === t || r.startsWith(t + sep) || r.startsWith("/tmp/");
+}
+
+// THE GAP-WRITTEN PUBLISH STAYS OFF THE LIVE BUS IN TESTS. Inside a container the publish URL is the live
+// activity-api and the suite runs there (post-land, compose verify): a listener counted 38 publishes from four
+// gap-writing test files in one run. A write to a scratch store is a test's, so its publish is refused (logged once
+// per module instance) unless a test opts in to observe it.
+let gapEventPublishFromScratchAllowed = false;
+let gapEventPublishRefusalLogged = false;
+export function __allowGapEventPublishFromScratchForTests(on: boolean): void {
+  gapEventPublishFromScratchAllowed = on;
 }
 
 export type SubstrateGapCategory =
@@ -2256,7 +2277,12 @@ async function resolveSubstrateGapWriteInner(
     console.log("[substrate-gap-mirror] pool mirror failed (non-fatal):", err);
   }
 
-  try {
+  const publishRefused = isScratchGapStoreRoot(workspaceRoot()) && !gapEventPublishFromScratchAllowed;
+  if (publishRefused && !gapEventPublishRefusalLogged) {
+    gapEventPublishRefusalLogged = true;
+    console.log(`[substrate-gap-event-publish] gap store ${workspaceRoot()} is a scratch root: devvessel.gap.written is not published from it`);
+  }
+  if (!publishRefused) try {
     const activityApiUrl = process.env["ACTIVITY_API_ENDPOINT"] ?? process.env["ACTIVITY_API_URL"] ?? "http://127.0.0.1:8080";
     const response = await fetch(`${activityApiUrl}/v2/events/publish`, {
       method: "POST",

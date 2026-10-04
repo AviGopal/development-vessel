@@ -6,10 +6,15 @@
 // keep both, and (b) never let writer 1's string-only rewrite erase writer 2's linkage, while leaving
 // writer 1's strings and demand_count exactly as it sent them. Driven through the real store under a
 // temp WORKSPACE_ROOT (fresh module instance, same isolation as substrate-gap.test.ts).
-import { describe, expect, it } from "bun:test";
+import { afterAll, describe, expect, it } from "bun:test";
+import { stubGapEventPublish } from "./stub-gap-event-publish.js";
 import { mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+
+// Gap writes here must not reach the live event bus (test/resolvers/stub-gap-event-publish.ts).
+const gapEventPublishStub = stubGapEventPublish();
+afterAll(() => gapEventPublishStub.restore());
 
 const ROOT = join(tmpdir(), `gap-write-demand-goals-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 mkdirSync(ROOT, { recursive: true });

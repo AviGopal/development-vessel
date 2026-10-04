@@ -12,9 +12,14 @@
 // wrong structure, and the failure looks like the caller's fault. This is deliberately a test
 // that CAN disagree — it builds the payload from the declared `required` list and calls the real
 // resolver, rather than asserting the declaration against itself.
-import { describe, expect, it } from "bun:test";
+import { afterAll, describe, expect, it } from "bun:test";
+import { stubGapEventPublish } from "./stub-gap-event-publish.js";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
+
+// Gap writes here must not reach the live event bus (test/resolvers/stub-gap-event-publish.ts).
+const gapEventPublishStub = stubGapEventPublish();
+afterAll(() => gapEventPublishStub.restore());
 // The conformance tests call the REAL gap writer, which persists to
 // `${WORKSPACE_ROOT}/gaps/gaps.json`. Point it at a throwaway root BEFORE importing, or the
 // probe rows land in the repo's tracked gap store — a test that mutates shared substrate state

@@ -1,7 +1,12 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { stubGapEventPublish } from "../../test/resolvers/stub-gap-event-publish.js";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+
+// Gap writes here must not reach the live event bus (test/resolvers/stub-gap-event-publish.ts).
+const gapEventPublishStub = stubGapEventPublish();
+afterAll(() => gapEventPublishStub.restore());
 
 // ISOLATION BY CONSTRUCTION (fd86777's pattern, applied to this sibling suite 2026-09-29).
 // substrate-gap.ts captures WORKSPACE_ROOT when it LOADS and `bun test` shares one module

@@ -2014,11 +2014,41 @@ export function hasProposalReport(gapId: string): boolean {
 }
 
 /**
+ * A STRUCTURED tsc error: classification_metadata.tsc_error {code: "TSnnnn", file, vessel?, line?} whose file exists
+ * in the vessel tree grounding reads (repoPathExists: MITOSIS_RUNTIME_DIR, then the vessel clones). `file` is
+ * repo-relative ("repos/<vessel>/src/x.ts"), vessel-prefixed ("<vessel>/src/x.ts"), or vessel-relative with
+ * `vessel` set. This, and only this, makes a gap typecheck-class for admission's exemption from the compose
+ * eligibility predicate: a TSxxxx token in an id or summary (typecheckClassOf's substring parse) is not a
+ * measured error, it is text (a failure lesson, a narrative), and it exempted 225 live open gaps on 2026-10-03.
+ * The typecheck detector (scripts/substrate/typecheck-scenario-gen.ts) does not write this field today.
+ */
+export function structuredTscErrorOf(gap: Record<string, unknown>): { vessel: string; tsCode: string; file: string } | null {
+  const rawMeta = gap.classification_metadata ?? gap.metadata;
+  const meta = (rawMeta && typeof rawMeta === "object" ? rawMeta : {}) as Record<string, unknown>;
+  const te = meta.tsc_error;
+  if (!te || typeof te !== "object") return null;
+  const { code, file, vessel } = te as { code?: unknown; file?: unknown; vessel?: unknown };
+  const tsCode = typeof code === "string" ? code.trim().toUpperCase() : "";
+  if (!/^TS\d{4,5}$/.test(tsCode)) return null;
+  const vesselField = typeof vessel === "string" ? vessel.trim() : "";
+  let cand = (typeof file === "string" ? file.trim() : "").replace(/^\/vessels\//, "repos/").replace(/^\/+/, "");
+  if (!cand) return null;
+  if (!/^repos\//.test(cand)) cand = vesselField ? `repos/${vesselField}/${cand}` : /^[^/]+\/(src|tests?)\//.test(cand) ? `repos/${cand}` : cand;
+  cand = cand.replace(/:\d+(?::\d+)?$/, "");
+  const m = cand.match(/^repos\/([^/]+)\/.+\.(ts|tsx)$/);
+  if (!m || !m[1] || (vesselField && vesselField !== m[1]) || !repoPathExists(cand)) return null;
+  return { vessel: m[1], tsCode, file: cand };
+}
+
+/**
  * Parse a typecheck-class gap: one whose id/summary encodes a TSxxxx error at a specific vessel
  * source file (the phantom-churn shape). Returns { vessel, tsCode } when both a TS code and an
  * EXISTING vessel dir are derivable, else null (→ not a typecheck-class gap; no tsc run).
  */
 export function typecheckClassOf(gap: Record<string, unknown>): { vessel: string; tsCode: string } | null {
+  // A structured error names its vessel and code exactly; the substring parse below is the fallback.
+  const structured = structuredTscErrorOf(gap);
+  if (structured) return { vessel: structured.vessel, tsCode: structured.tsCode };
   const id = String(gap.id ?? "");
   const summary = String(gap.summary ?? gap.title ?? "");
   const hay = `${id}\n${summary}`;
@@ -2216,13 +2246,14 @@ export async function admitActionableGaps(
     // 2026-10-03); an armed siteless one gave it nothing to edit. Either needs information, not a draft, on every
     // pick, whether or not a proposal report exists, so the one-shot investigated_at route cannot re-admit it.
     // Exemptions, each for its stated reason only. Orphan-producer gaps are not compose (author_producer's one mint);
-    // a typecheck-class gap (typecheckClassOf, the phantom-typecheck predicate below) is decided by that check. Their
-    // holds are read further down. A recommit gap with a source_gap_id inherits its SITE after selection, so it is
+    // a gap carrying a STRUCTURED tsc error at an existing file (structuredTscErrorOf) is decided by tsc and the
+    // phantom-typecheck retirement below; a TSxxxx token in its id or summary alone is not that. Their holds are read
+    // further down. A recommit gap with a source_gap_id inherits its SITE after selection, so it is
     // waived the edit-site requirement only: it must still be open, armed and unheld (452 sited, unarmed recommit
     // children were admitted on 2026-10-03 by the old "site OR armed" rule).
     {
       const orphanRoute = cat === "orphaned_capability" || cat === "unreachable_producer" || /orphaned[_-]capability/i.test(id);
-      if (!orphanRoute && !typecheckClassOf(g)) {
+      if (!orphanRoute && !structuredTscErrorOf(g)) {
         const verdict = composeEligibilitySkipReason(g);
         const skip = verdict === "no_edit_site" && meta.source_gap_id ? null : verdict;
         if (skip !== null) {

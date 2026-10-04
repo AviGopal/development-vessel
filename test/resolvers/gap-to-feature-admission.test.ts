@@ -109,7 +109,8 @@ const PHANTOM_TYPECHECK = {
   source: "substrate_detected",
   summary: "TS2322 at repos/goal-host-vessel/src/index.ts:619",
   status: "open",
-  classification_metadata: {},
+  // Typecheck-class only by its STRUCTURED error (structuredTscErrorOf); the TS code in the id/summary is not enough.
+  classification_metadata: { tsc_error: { code: "TS2322", file: "repos/goal-host-vessel/src/index.ts", line: 619 } },
 };
 
 const PHANTOM_IDENTITY = {
@@ -118,7 +119,8 @@ const PHANTOM_IDENTITY = {
   source: "substrate_detected",
   summary: "TS2345 at repos/identity-vessel/src/index.ts:10",
   status: "open",
-  classification_metadata: {},
+  // Typecheck-class only by its STRUCTURED error (structuredTscErrorOf); the TS code in the id/summary is not enough.
+  classification_metadata: { tsc_error: { code: "TS2345", file: "repos/identity-vessel/src/index.ts", line: 10 } },
 };
 
 describe("gap-to-feature actionability admission gate", () => {

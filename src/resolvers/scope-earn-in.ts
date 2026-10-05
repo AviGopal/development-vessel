@@ -9,7 +9,15 @@
  * behaviours its regressions have historically broken:
  *   - REGRESSIONS: the gap store is the inventory. A row whose edit site is the file and that carries
  *     classification_metadata.regressed_by (a falsified or reverted landing) or reopen_count > 0 (a closure that did
- *     not hold). No regression history on record proposes nothing: vacuous coverage is the gameable-metric class.
+ *     not hold).
+ *   - QUALIFY RULE (a), NO REGRESSION HISTORY (user ruling 2026-10-05T21:55Z, criterion wiring-2026-10-05-qualify-a,
+ *     qa's conditions): such a file qualifies when its EXISTING tests kill mutants of the file ITSELF. Candidates are
+ *     the test files at the runtime sha that import it; the importing tests must be green there unmutated; a small,
+ *     deterministic, bounded set of operator mutants of the file (selectMutants: negate a condition, empty a function
+ *     body, flip a boolean, flip a comparison; mutants_per_file from the rhythm body) is applied one at a time by
+ *     test_suite's runner in the detached worktree at the runtime sha; every mutant must apply, and killed/applied must
+ *     reach mutation_score_threshold, read at use time from the scope-earn-in rhythm body (default 0.8). Zero importing
+ *     tests or zero mutants is never coverage: vacuous coverage is the gameable-metric class.
  *   - MAPPED: each regression's own row is armed (falsifier class1/class2) with a test_suite check naming its tests.
  *     An unmapped regression keeps the file excluded and names the missing check.
  *   - COVERED BY MUTATION: on the accepted tree (the vessel clone's HEAD, base_ref HEAD) the must-fail is green, and
@@ -35,9 +43,11 @@
  * EXIT METRIC (§7 step 9): criterion-made changes applied with no operator record edit in between. Each change record
  * stores the scope row's prior attestation; an operator write in between resets the consecutive count.
  */
+import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { readdirSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { createRequire } from "node:module";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { join, posix } from "node:path";
 import type { ResolverResult } from "./types.js";
 import { WORKSPACE_ROOT } from "../config.js";
 import { readFamilyRhythm, rhythmDueScore, writeFamilyRhythm, type RhythmBody } from "./rhythm-conductor-tick.js";
@@ -45,7 +55,13 @@ import { gapCheckKeys } from "./gap-to-feature.js";
 import { resolvePoolImpulse, resolvePoolImpulseWrite, type PoolWriteAuth } from "./pool-impulse.js";
 
 export const SCOPE_EARN_IN_FAMILY = "scope-earn-in";
-export const SCOPE_CRITERION_VERSION = "wiring-2026-10-03";
+/**
+ * The criterion's version. Changing what qualifies changes this, and the exit counts widenings under ONE version only
+ * (qa 10-05): a criterion tuned until something qualifies must not keep its count.
+ */
+export const SCOPE_CRITERION_VERSION = "wiring-2026-10-05-qualify-a";
+/** Recorded on the first widening made under this version. */
+export const SCOPE_CRITERION_NOTE = "LOOSENING: criterion wiring-2026-10-05-qualify-a admits non-vacuous coverage without regression history (qualify rule a), approved by the user 2026-10-05T21:55Z; an L12 intervention by the operator, not a criterion-made change";
 export const SCOPE_EVALUATOR = "scope_earn_in_apply";
 export const PROPOSAL_SHAPE = "autonomyScopeProposal";
 export const CHANGE_SHAPE = "autonomyScopeChange";
@@ -77,6 +93,25 @@ export const EVALUATOR_FILES: readonly string[] = [
   "repos/development-vessel/src/resolvers/retry-evidence.ts",
 ];
 export const EVALUATOR_FILE_REASON = "refused: the path is one of the evaluator's own files (EVALUATOR_FILES)";
+/**
+ * NEVER PROPOSED (qa 10-05): trust-boundary modules the operator excluded on 10-05 that are not the evaluator's own
+ * files. No criterion moves them into autonomous reach, whatever their coverage: a lane landing there could widen what
+ * a landing may write, push or certify. Refused by the proposer and the evaluator alike, like EVALUATOR_FILES.
+ */
+export const NEVER_PROPOSE_FILES: Readonly<Record<string, string>> = {
+  "repos/development-vessel/src/resolvers/write-containment.ts": "the write-containment gate of the lane's file writes",
+  "repos/development-vessel/src/resolvers/super-repo-checkout.ts": "the super-repo checkout the runtime glue is executed from",
+  "repos/development-vessel/src/resolvers/behavioral-verification.ts": "the behavioral verdict of a landing",
+  "repos/development-vessel/src/removed-line-predicate.ts": "the removed-line predicate of the landing verdict",
+  "repos/development-vessel/src/vacuous-edit.ts": "the vacuous-edit refusal of the landing verdict",
+  "repos/development-vessel/src/resolvers/staged-mitosis-gate.ts": "the staged gate a landing must pass",
+  // Read 10-05: it scopes where a landing may push (SUBSTRATE_REPO_OWNER, shared targets) and accepts promotions.
+  "repos/development-vessel/src/resolvers/push-policy.ts": "the push scope of a landing and its promotion acceptance",
+};
+export const NEVER_PROPOSE_REASON = "refused: the path is a trust-boundary module no criterion widens onto (NEVER_PROPOSE_FILES)";
+export function isNeverPropose(path: string): boolean {
+  return Object.prototype.hasOwnProperty.call(NEVER_PROPOSE_FILES, canonicalScopePath(path));
+}
 export function isEvaluatorFile(path: string): boolean {
   const target = canonicalScopePath(path);
   return EVALUATOR_FILES.some((f) => target === f || (target.endsWith("/") && f.startsWith(target)));
@@ -102,6 +137,10 @@ export type ScopeEarnInDeps = {
   unitsText: () => string | null;
   /** The commit the RUNTIME runs for a vessel (pull-sync's last-good pin), or null when none is recorded. */
   runtimeSha: (vessel: string) => string | null;
+  /** A vessel file's content at a commit of the vessel clone, or null when it cannot be read. */
+  readFileAt: (vessel: string, sha: string, path: string) => string | null;
+  /** Test files (vessel-relative) at a commit whose text contains `needle`; [] when none, null when unreadable. */
+  testFilesMentioning: (vessel: string, sha: string, needle: string) => string[] | null;
   now: () => number;
 };
 
@@ -147,8 +186,32 @@ const defaultDeps: ScopeEarnInDeps = {
       return null;
     }
   },
+  readFileAt: (vessel, sha, path) => vesselGit(vessel, ["show", `${sha}:${path}`]),
+  testFilesMentioning: (vessel, sha, needle) => {
+    const r = vesselGitRun(vessel, ["grep", "-l", "-F", "-e", needle, sha, "--", "*.test.ts", "*.test.tsx", "*.test.js", "*.test.mjs", "*.spec.ts", "*.spec.js"]);
+    if (!r) return null;
+    if (r.status === 1) return [];
+    if (r.status !== 0) return null;
+    return r.stdout.split("\n").map((l) => l.trim()).filter(Boolean).map((l) => l.slice(l.indexOf(":") + 1)).sort();
+  },
   now: () => Date.now(),
 };
+/** Read-only git in the vessel clone test_suite runs in (VESSEL_CLONES_ROOT, else the super-repo's submodule). */
+function vesselGitRun(vessel: string, args: string[]): { status: number; stdout: string } | null {
+  const name = vessel.replace(/^repos\//, "");
+  if (!/^[A-Za-z0-9_.-]+$/.test(name) || name.includes("..")) return null;
+  for (const root of [join(process.env["MITOSIS_VESSEL_CLONES"] ?? "/workspace/git/vessels", name), join(WORKSPACE_ROOT, "repos", name)]) {
+    if (!existsSync(join(root, ".git"))) continue;
+    const r = spawnSync("git", ["-c", "safe.directory=*", "-C", root, ...args], { encoding: "utf8", timeout: 15_000, maxBuffer: 16 * 1024 * 1024 });
+    if (r.error || r.status === null) return null;
+    return { status: r.status, stdout: r.stdout ?? "" };
+  }
+  return null;
+}
+function vesselGit(vessel: string, args: string[]): string | null {
+  const r = vesselGitRun(vessel, args);
+  return r && r.status === 0 ? r.stdout : null;
+}
 let depsOverride: Partial<ScopeEarnInDeps> | null = null;
 /** Tests only: replace any dependency (null restores the defaults). */
 export function __setScopeEarnInDepsForTests(d: Partial<ScopeEarnInDeps> | null): void { depsOverride = d; }
@@ -235,12 +298,32 @@ export function redForTheRightReason(report: Record<string, unknown> | null, tit
   return missing === undefined ? null : `the named test "${missing.slice(0, 120)}" is not among the run's failures (a load error, or it passes)`;
 }
 
+/**
+ * Whether a test source IMPORTS a vessel file (both vessel-relative): a static `from "…"` / bare `import "…"`, a dynamic
+ * `import("…")` or a `require("…")` whose RELATIVE specifier resolves to the file (extension optional, /index allowed).
+ * Comments are stripped first; a path in an ordinary string, a look-alike name or a bare package does not count.
+ */
+export function testImportsFile(source: string, testFile: string, fileRel: string): boolean {
+  const code = source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:"'`\\])\/\/.*$/gm, "$1");
+  const strip = (p: string) => p.replace(/\.(?:[cm]?[jt]sx?)$/, "").replace(/\/index$/, "");
+  const want = strip(posix.normalize(fileRel.replace(/\\/g, "/")));
+  const re = /(?:\bfrom\s*|\bimport\s*\(\s*|\brequire\s*\(\s*|\bimport\s+)(["'])([^"'\n]+)\1/g;
+  for (const m of code.matchAll(re)) {
+    const spec = m[2]!;
+    if (!spec.startsWith("./") && !spec.startsWith("../")) continue;
+    const resolved = strip(posix.normalize(posix.join(posix.dirname(testFile.replace(/\\/g, "/")), spec)));
+    if (resolved === want) return true;
+  }
+  return false;
+}
+
 export type EarnInEvaluation = { path: string; verdict: "covered" | "not_covered" | "unjudgeable"; reason_key: string; reason: string; evidence: Row[]; ran_checks: boolean };
 
 /** The widening criterion for one excluded entry, judged now on the live store and the accepted tree. */
-export async function evaluateWidening(path: string, gaps: Row[], d: ScopeEarnInDeps = deps()): Promise<EarnInEvaluation> {
+export async function evaluateWidening(path: string, gaps: Row[], d: ScopeEarnInDeps = deps(), knobs: Row = {}): Promise<EarnInEvaluation> {
   const out = (verdict: EarnInEvaluation["verdict"], reason_key: string, reason: string, evidence: Row[] = [], ran = false): EarnInEvaluation => ({ path, verdict, reason_key, reason, evidence, ran_checks: ran });
   if (isEvaluatorFile(path)) return out("not_covered", "evaluator_file", EVALUATOR_FILE_REASON);
+  if (isNeverPropose(path)) return out("not_covered", "never_propose", NEVER_PROPOSE_REASON);
   if (path.endsWith("/")) return out("not_covered", "directory", "not_evaluated(directory): the criterion is applied per file");
   const glue = runtimeGlueReason(path, d.unitsText());
   if (glue) return out("not_covered", "runtime_glue", glue);
@@ -249,7 +332,7 @@ export async function evaluateWidening(path: string, gaps: Row[], d: ScopeEarnIn
   if (!m) return out("not_covered", "not_a_vessel_file", `${target} is not a vessel file`);
   const [, vessel, fileRel] = m as unknown as [string, string, string];
   const regs = gaps.filter((g) => siteOf(g) === target && isRegression(g));
-  if (regs.length === 0) return out("not_covered", "no_regression_history", "no_regression_history: no gap on record shows a regression in this file, so there is nothing for the criterion to cover");
+  if (regs.length === 0) return evaluateCoverage(vessel, fileRel, d, out, knobs);
   // 1. MAP every regression before running anything: one unmapped regression decides the file.
   const mapped: Array<{ id: string; mf: NonNullable<ReturnType<typeof armedMustFail>>; guard: string }> = [];
   for (const g of regs) {
@@ -284,6 +367,129 @@ export async function evaluateWidening(path: string, gaps: Row[], d: ScopeEarnIn
   return out("covered", "qualified", `every regression (${mapped.length}) maps to an armed must-fail that reddens under mutation`, evidence, true);
 }
 
+type OutFn = (verdict: EarnInEvaluation["verdict"], reason_key: string, reason: string, evidence?: Row[], ran?: boolean) => EarnInEvaluation;
+/** The shaped knobs of qualify rule (a), read at use time from the scope-earn-in rhythm body (law 1). */
+export function coverageKnobs(body: Row): { threshold: number; k: number; maxTests: number } {
+  const t = body["mutation_score_threshold"];
+  const threshold = typeof t === "number" && Number.isFinite(t) && t > 0 && t <= 1 ? t : 0.8;
+  const k = Math.min(MAX_MUTANTS, Math.max(1, Math.floor(posNum(body["mutants_per_file"], 6))));
+  const maxTests = Math.min(10, Math.max(1, Math.floor(posNum(body["max_importing_tests"], 3))));
+  return { threshold, k, maxTests };
+}
+const MAX_MUTANTS = 20;
+export type Mutant = { operator: "negate_condition" | "empty_body" | "flip_boolean" | "flip_comparison"; start: number; end: number; original: string; replacement: string; line: number };
+const OPERATORS: Mutant["operator"][] = ["negate_condition", "empty_body", "flip_boolean", "flip_comparison"];
+const FLIP: Record<string, string> = { "===": "!==", "!==": "===", "==": "!=", "!=": "==", "<": ">=", ">=": "<", ">": "<=", "<=": ">" };
+type TsModule = typeof import("typescript");
+let tsMod: TsModule | null | undefined;
+/** The TypeScript parser, loaded once on first use; null when it is not installed (then no mutant is selectable). */
+function loadTs(): TsModule | null {
+  if (tsMod === undefined) {
+    try { tsMod = createRequire(import.meta.url)("typescript") as TsModule; } catch { tsMod = null; }
+  }
+  return tsMod;
+}
+/**
+ * The operator mutants of a source, deterministic and bounded: every site per operator in source order, then up to k
+ * picked round-robin across the operators that have sites, evenly spaced within each operator. Each operator keeps the
+ * source parseable (a parenthesised negation, an empty block, a keyword or operator token swap), so a kill is a
+ * behaviour change, never a syntax error. Needs the TypeScript parser (loaded once).
+ */
+export function selectMutants(src: string, k: number, ts: TsModule | null = loadTs()): Mutant[] {
+  if (!ts) return [];
+  const sf = ts.createSourceFile("m.ts", src, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  const sites: Record<Mutant["operator"], Mutant[]> = { negate_condition: [], empty_body: [], flip_boolean: [], flip_comparison: [] };
+  const lineOf = (pos: number) => sf.getLineAndCharacterOfPosition(pos).line + 1;
+  const add = (operator: Mutant["operator"], node: { getStart(): number; getEnd(): number }, replacement: (orig: string) => string) => {
+    const start = node.getStart(), end = node.getEnd();
+    const original = src.slice(start, end);
+    sites[operator].push({ operator, start, end, original, replacement: replacement(original), line: lineOf(start) });
+  };
+  const visit = (n: import("typescript").Node): void => {
+    if ((ts.isIfStatement(n) || ts.isWhileStatement(n) || ts.isDoStatement(n)) && n.expression) add("negate_condition", n.expression, (o) => `!(${o})`);
+    else if (ts.isConditionalExpression(n)) add("negate_condition", n.condition, (o) => `!(${o})`);
+    if ((ts.isFunctionDeclaration(n) || ts.isMethodDeclaration(n) || ts.isFunctionExpression(n) || ts.isArrowFunction(n) || ts.isGetAccessorDeclaration(n)) && n.body && ts.isBlock(n.body) && n.body.statements.length > 0) {
+      add("empty_body", n.body, () => "{}");
+    }
+    if ((n.kind === ts.SyntaxKind.TrueKeyword || n.kind === ts.SyntaxKind.FalseKeyword) && !ts.isLiteralTypeNode(n.parent)) {
+      add("flip_boolean", n, (o) => (o === "true" ? "false" : "true"));
+    }
+    if (ts.isBinaryExpression(n) && FLIP[n.operatorToken.getText(sf)] !== undefined) add("flip_comparison", n.operatorToken, (o) => FLIP[o]!);
+    ts.forEachChild(n, visit);
+  };
+  visit(sf);
+  const ops = OPERATORS.filter((o) => sites[o].length > 0);
+  if (ops.length === 0) return [];
+  const want = Math.min(MAX_MUTANTS, Math.max(1, Math.floor(k)));
+  const quota: Record<string, number> = {};
+  let left = want;
+  while (left > 0 && ops.some((o) => (quota[o] ?? 0) < sites[o].length)) {
+    for (const o of ops) if (left > 0 && (quota[o] ?? 0) < sites[o].length) { quota[o] = (quota[o] ?? 0) + 1; left -= 1; }
+  }
+  const out: Mutant[] = [];
+  for (const o of ops) {
+    const n = sites[o].length, q = quota[o] ?? 0;
+    for (let i = 0; i < q; i += 1) out.push(sites[o][Math.min(n - 1, Math.floor(((i + 0.5) * n) / q))]!);
+  }
+  return out.sort((a, b) => a.start - b.start);
+}
+
+/**
+ * QUALIFY RULE (a): a file with no regression history, judged on whether its EXISTING tests kill mutants of the file
+ * itself (see the header). Cheap reads first, so a file with no importing test or no mutable site runs nothing.
+ */
+async function evaluateCoverage(vessel: string, fileRel: string, d: ScopeEarnInDeps, out: OutFn, knobsBody: Row): Promise<EarnInEvaluation> {
+  const NOHIST = "no_regression_history";
+  const { threshold, k, maxTests } = coverageKnobs(knobsBody);
+  const runtime = d.runtimeSha(vessel);
+  if (!runtime) return out("unjudgeable", "no_runtime_pin", `no runtime sha recorded for ${vessel} (pull-sync last-good pin): the accepted tree is unknown`);
+  const src = d.readFileAt(vessel, runtime, fileRel);
+  if (src === null) return out("unjudgeable", "target_unreadable", `${fileRel} could not be read at the runtime sha ${runtime.slice(0, 12)}`);
+  const stem = (fileRel.split("/").pop() ?? fileRel).replace(/\.[cm]?[jt]sx?$/, "");
+  const needle = stem === "index" ? (fileRel.split("/").slice(-2, -1)[0] ?? stem) : stem;
+  const listed = d.testFilesMentioning(vessel, runtime, needle);
+  if (listed === null) return out("unjudgeable", "test_listing_failed", `the test files at the runtime sha ${runtime.slice(0, 12)} could not be listed`);
+  const importing: string[] = [];
+  for (const t of listed) {
+    const tsrc = d.readFileAt(vessel, runtime, t);
+    if (tsrc === null) return out("unjudgeable", "test_source_unreadable", `${t} could not be read at the runtime sha ${runtime.slice(0, 12)}`);
+    if (testImportsFile(tsrc, t, fileRel)) importing.push(t);
+  }
+  if (importing.length === 0) return out("not_covered", "no_coverage", `${NOHIST}, and no_coverage: 0 importing test files at the runtime sha (zero tests never qualify)`);
+  const ts = loadTs();
+  if (!ts) return out("unjudgeable", "no_parser", "the TypeScript parser is not loadable here, so no mutant can be selected");
+  const mutants = selectMutants(src, k, ts);
+  if (mutants.length === 0) return out("not_covered", "no_coverage", `${NOHIST}, and no_coverage: 0 mutants (no condition, function body, boolean or comparison to mutate)`);
+  // The killers: importing test files green at the runtime sha unmutated (a red one would "kill" every mutant).
+  const killers: string[] = [];
+  const red: string[] = [];
+  let ran = false;
+  for (const t of importing.slice(0, maxTests)) {
+    ran = true;
+    const r = await d.runCheck({ vessel: `repos/${vessel}`, test_file: t, base_ref: runtime }).catch(() => null);
+    if (!r || r["ran"] !== true || !(Number(r["total"] ?? 0) > 0)) return out("unjudgeable", "must_fail_did_not_run", `${t} did not run on the runtime tree ${runtime.slice(0, 12)}`, [], true);
+    if (Number(r["fail"] ?? 1) !== 0) red.push(t); else killers.push(t);
+  }
+  if (killers.length === 0) return out("not_covered", "no_coverage", `${NOHIST}, and no_coverage: every importing test is red at the runtime sha ${runtime.slice(0, 12)} unmutated (${red.join(", ")})`, [], ran);
+  const results: Row[] = [];
+  let killed = 0;
+  for (const m of mutants) {
+    let by: string | null = null;
+    for (const t of killers) {
+      const r = await d.runCheck({ vessel: `repos/${vessel}`, test_file: t, base_ref: runtime, mutate_edit: { file: fileRel, start: m.start, end: m.end, original: m.original, replacement: m.replacement, operator: m.operator } }).catch(() => null);
+      if (!r || (r["mutation"] as Row | undefined)?.["applied"] !== true) return out("unjudgeable", "mutation_not_applied", `the ${m.operator} mutant at ${fileRel}:${m.line} could not be applied at the runtime sha ${runtime.slice(0, 12)}`, [], true);
+      const failing = Array.isArray(r["failingTests"]) ? (r["failingTests"] as unknown[]) : [];
+      if (r["ran"] === true && Number(r["total"] ?? 0) > 0 && Number(r["fail"] ?? 0) > 0 && failing.length > 0) { by = t; break; }
+    }
+    if (by) killed += 1;
+    results.push({ operator: m.operator, line: m.line, killed_by: by });
+  }
+  const score = killed / mutants.length;
+  const evidence = [{ basis: "mutation_coverage", runtime_sha: runtime, file: fileRel, importing_tests: killers, red_importing_tests: red, mutants: results, killed, applied: mutants.length, score, threshold }];
+  if (score >= threshold) return out("covered", "qualified_by_coverage", `${NOHIST}, qualified_by_coverage: ${killers.length} importing test file(s) kill ${killed}/${mutants.length} mutants (score ${score.toFixed(2)} >= threshold ${threshold})`, evidence, true);
+  return out("not_covered", "no_coverage", `${NOHIST}, and no_coverage: mutation score ${killed}/${mutants.length} (${score.toFixed(2)}) is below the threshold ${threshold}`, evidence, true);
+}
+
 /** The tightening evidence for a path: its open, unreverted regressions in the live store. */
 export function evaluateTightening(path: string, gaps: Row[]): Row[] {
   const target = canonicalScopePath(path);
@@ -304,12 +510,26 @@ export function holdLineage(evidence: Row[], gaps: Row[]): { lineage_roots: stri
   return { lineage_roots: roots, lineage_checks: checks };
 }
 
-/** The exit metric over the change records. */
-export function scopeEarnInExitMetric(changes: Row[]): { criterion_changes_applied: number; consecutive_without_operator_edit: number; exit_met: boolean } {
-  const recs = changes.filter((c) => (c["body"] as Row | undefined)?.["applied_by"] === SCOPE_EVALUATOR);
-  const latest = recs.slice().sort((a, b) => Number((b["body"] as Row)["seq"] ?? 0) - Number((a["body"] as Row)["seq"] ?? 0))[0];
-  const consecutive = latest ? Number((latest["body"] as Row)["consecutive_criterion_changes"] ?? 0) : 0;
-  return { criterion_changes_applied: recs.length, consecutive_without_operator_edit: consecutive, exit_met: consecutive >= 2 };
+/**
+ * The exit metric over the change records (qa rulings 10-05): consecutive criterion-made WIDENINGS under the current
+ * criterion version with no operator edit in between. Tightenings and expiries neither count nor break the chain; a
+ * record whose prior attestation is not the evaluator's (an operator edited the scope before it) restarts the count;
+ * a widening under another version does not count; and a live record last attested by anyone but the evaluator (an
+ * operator edit after the last change) zeroes it.
+ */
+export function scopeEarnInExitMetric(changes: Row[], currentAttestedBy?: string): { criterion_version: string; criterion_changes_applied: number; widenings_this_version: number; consecutive_without_operator_edit: number; exit_met: boolean } {
+  const recs = changes.map((c) => (c["body"] ?? {}) as Row).filter((b) => b["applied_by"] === SCOPE_EVALUATOR)
+    .sort((a, b) => Number(a["seq"] ?? 0) - Number(b["seq"] ?? 0));
+  let consecutive = 0;
+  let widenings = 0;
+  for (const b of recs) {
+    if (String(b["prior_attested_by"] ?? "") !== "evaluator") consecutive = 0;
+    if (b["change"] !== "widen" || b["criterion_version"] !== SCOPE_CRITERION_VERSION) continue;
+    widenings += 1;
+    consecutive += 1;
+  }
+  if (currentAttestedBy !== undefined && currentAttestedBy !== "evaluator") consecutive = 0;
+  return { criterion_version: SCOPE_CRITERION_VERSION, criterion_changes_applied: recs.length, widenings_this_version: widenings, consecutive_without_operator_edit: consecutive, exit_met: consecutive >= 2 };
 }
 
 const posNum = (v: unknown, dflt: number): number => (typeof v === "number" && Number.isFinite(v) && v > 0 ? v : dflt);
@@ -369,7 +589,7 @@ export async function resolveScopeEarnInTick(pointer: ScopeEarnInTickPointer): P
     const path = canonicalScopePath(entry);
     if (pending.has(path)) { evaluated.push({ path, verdict: "not_covered", reason_key: "proposal_pending", reason: "a proposal for this path is already pending" }); continue; }
     if (ranFiles >= perTick) { evaluated.push({ path, verdict: "not_covered", reason_key: "deferred", reason: "deferred: this tick's max_per_tick is spent" }); continue; }
-    const ev = await evaluateWidening(path, gaps, d);
+    const ev = await evaluateWidening(path, gaps, d, rhythm.body);
     if (ev.ran_checks) ranFiles += 1;
     if (ev.verdict === "unjudgeable") unjudgeable += 1;
     evaluated.push({ path: ev.path, verdict: ev.verdict, reason_key: ev.reason_key, reason: ev.reason });
@@ -378,7 +598,7 @@ export async function resolveScopeEarnInTick(pointer: ScopeEarnInTickPointer): P
   // TIGHTENINGS: an in-scope file with an open, unreverted regression. Less evidence, and a TTL.
   const sites = new Set(gaps.filter(isOpenRegression).map(siteOf).filter((s): s is string => !!s && s.startsWith("repos/")));
   for (const path of sites) {
-    if (excludes(scope, path) || pending.has(path) || isEvaluatorFile(path)) continue;
+    if (excludes(scope, path) || pending.has(path) || isEvaluatorFile(path) || isNeverPropose(path)) continue;
     write(path, "tighten", { ttl_hours: ttlHours, evidence: evaluateTightening(path, gaps) });
   }
 
@@ -399,9 +619,15 @@ export async function resolveScopeEarnInTick(pointer: ScopeEarnInTickPointer): P
     body: {
       fired: proposed.length > 0, reason: leg === "alpha" ? "proposed" : leg === "beta" ? "unjudgeable" : "nothing_to_propose",
       settlement: leg ?? (pointer.dry_run ? "none" : "ran"), due_score: due.due_score, criterion_version: SCOPE_CRITERION_VERSION,
-      proposed, evaluated, by_reason, exit_metric: scopeEarnInExitMetric(d.poolRead(CHANGE_SHAPE)), dry_run: pointer.dry_run === true,
+      proposed, evaluated, by_reason, exit_metric: scopeEarnInExitMetric(d.poolRead(CHANGE_SHAPE), liveAttestedBy(d)), dry_run: pointer.dry_run === true,
     },
   };
+}
+
+/** Who last attested the newest local autonomyScope record, or undefined when none is held here. */
+function liveAttestedBy(d: ScopeEarnInDeps): string | undefined {
+  const row = d.poolRead("autonomyScope").slice().sort((a, b) => String(b["updated_at"] ?? "").localeCompare(String(a["updated_at"] ?? "")))[0];
+  return row ? String(((row["attested"] ?? {}) as Row)["by"] ?? "unattested") : undefined;
 }
 
 /** Excluded entries by reason_key. */
@@ -420,7 +646,7 @@ export function scopeEarnInJournalLine(evaluated: Array<{ path: string; verdict:
   }
   const pairs = evaluated.slice(0, max).map((e) => `${e.path.replace(/^repos\//, "")}:${e.reason_key}`);
   const more = evaluated.length > max ? ` (+${evaluated.length - max} more)` : "";
-  return `[scope-earn-in] tick: ${evaluated.length} excluded entr(ies) → qualified=${verdicts.qualified} not_covered=${verdicts.not_covered} unjudgeable=${verdicts.unjudgeable}; by reason ${JSON.stringify(scopeEarnInReasonCounts(evaluated))}; ${pairs.join(" ")}${more}`;
+  return `[scope-earn-in] tick: criterion=${SCOPE_CRITERION_VERSION} ${evaluated.length} excluded entr(ies) → qualified=${verdicts.qualified} not_covered=${verdicts.not_covered} unjudgeable=${verdicts.unjudgeable}; by reason ${JSON.stringify(scopeEarnInReasonCounts(evaluated))}; ${pairs.join(" ")}${more}`;
 }
 
 type Applied = { path: string; change: "widen" | "tighten" | "expire"; change_id: string };
@@ -451,6 +677,7 @@ export async function applyScopeProposals(): Promise<{ applied: Applied[]; refus
   }
   const changes = d.poolRead(CHANGE_SHAPE);
   let lastConsecutive = scopeEarnInExitMetric(changes).consecutive_without_operator_edit;
+  let firstWidenNoted = changes.some((c) => { const b = (c["body"] ?? {}) as Row; return b["change"] === "widen" && b["criterion_version"] === SCOPE_CRITERION_VERSION; });
   let seq = changes.reduce((m, c) => Math.max(m, Number(((c["body"] ?? {}) as Row)["seq"] ?? 0)), 0);
 
   // THE ONE autonomyScope WRITE, under the evaluator grant (the grant-scan test counts exactly one construction).
@@ -465,15 +692,18 @@ export async function applyScopeProposals(): Promise<{ applied: Applied[]; refus
     const w = writeScopeBody(prior, excluded, holds);
     if (!w.body.ok) { refused.push({ path, reason: `scope write refused: ${w.body.error ?? (w.body.conflict ? "concurrent edit" : "unknown")}` }); return null; }
     const priorBy = String(((prior["attested"] ?? {}) as Row)["by"] ?? "unattested");
-    const consecutive = priorBy === "evaluator" ? lastConsecutive + 1 : 1;
+    // Widenings under this criterion version only (scopeEarnInExitMetric); an operator edit before this change restarts it.
+    const consecutive = (priorBy === "evaluator" ? lastConsecutive : 0) + (change === "widen" ? 1 : 0);
     lastConsecutive = consecutive;
+    const note = change === "widen" && !firstWidenNoted ? { criterion_note: SCOPE_CRITERION_NOTE } : {};
+    if (change === "widen") firstWidenNoted = true;
     const changeId = idFor("scope-change", path, change, nowIso);
     d.poolWrite({
       type: "poolImpulse_write", id: changeId, shape: CHANGE_SHAPE, source: SCOPE_EVALUATOR,
       body: {
         path, change, proposal_id: proposalId, applied_by: SCOPE_EVALUATOR, criterion_version: SCOPE_CRITERION_VERSION, evidence,
         prior_excluded_paths: excludedOf(prior), excluded_paths_after: excluded, undo: { excluded_paths: excludedOf(prior), tightening_holds: priorHolds },
-        prior_attested_by: priorBy, consecutive_criterion_changes: consecutive, seq: ++seq, applied_at: nowIso, scope_record_id: String(prior["id"]), ...extra,
+        prior_attested_by: priorBy, consecutive_criterion_changes: consecutive, seq: ++seq, applied_at: nowIso, scope_record_id: String(prior["id"]), ...note, ...extra,
       },
     });
     applied.push({ path, change, change_id: changeId });
@@ -529,9 +759,12 @@ export async function applyScopeProposals(): Promise<{ applied: Applied[]; refus
     const isExcluded = cur.some((e) => canonicalScopePath(e) === path);
     if (!path || (change !== "widen" && change !== "tighten")) { consume(p, { applied: false, reason: "malformed proposal" }); refused.push({ path, reason: "malformed proposal" }); continue; }
     if (isEvaluatorFile(path)) { consume(p, { applied: false, reason: EVALUATOR_FILE_REASON }); refused.push({ path, reason: EVALUATOR_FILE_REASON }); continue; }
+    if (isNeverPropose(path)) { consume(p, { applied: false, reason: NEVER_PROPOSE_REASON }); refused.push({ path, reason: NEVER_PROPOSE_REASON }); continue; }
     if (change === "widen") {
       if (!isExcluded) { consume(p, { applied: false, reason: "noop: not in excluded_paths" }); continue; }
-      const ev = await evaluateWidening(path, gaps, d);
+      // The evaluator reads the shaped knobs itself at use time, never from the proposal.
+      const knobs = ((await d.readRhythm().catch(() => null))?.body ?? {}) as Row;
+      const ev = await evaluateWidening(path, gaps, d, knobs);
       if (ev.verdict !== "covered") { consume(p, { applied: false, reason: ev.reason }); refused.push({ path, reason: ev.reason }); continue; }
       const id = writeScope(cur.filter((e) => canonicalScopePath(e) !== path), curHolds.filter((h) => str(h["path"]) !== path), "widen", path, ev.evidence, String(p["id"]));
       consume(p, { applied: !!id, change_id: id });

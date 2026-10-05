@@ -155,6 +155,30 @@ const shq = (s: string): string => `'${s.replace(/'/g, `'\\''`)}'`;
  */
 export const MUTATE_SHA_RE = /^[0-9a-f]{7,40}$/;
 export const MUTATE_FILE_RE = /^[A-Za-z0-9_][A-Za-z0-9_./-]*$/;
+/**
+ * THE OPERATOR MUTANT (qualify rule a, 2026-10-05): one deterministic edit of one file (scope_earn_in's selectMutants),
+ * applied inside the detached base-tree worktree ($BW) only when the file's text at [start, end) is exactly `original`.
+ * The edit travels as base64 JSON decoded by bun inside the worktree, so the mutant's text never reaches the shell as
+ * text. Prints MUTATION_APPLIED=1 when the file changed, MUTATION_FAILED=1 otherwise.
+ */
+export type MutationEdit = { file: string; start: number; end: number; original: string; replacement: string; operator?: string };
+export const MUTATE_EDIT_MAX = 8192;
+export function mutationEditProblem(e: unknown): string | null {
+  const m = (e ?? {}) as Record<string, unknown>;
+  if (typeof m.file !== "string" || !MUTATE_FILE_RE.test(m.file) || m.file.includes("..")) return "file must be a vessel-relative path (no '..')";
+  if (!Number.isInteger(m.start) || !Number.isInteger(m.end) || (m.start as number) < 0 || (m.end as number) <= (m.start as number)) return "start/end must be integers with 0 <= start < end";
+  if (typeof m.original !== "string" || m.original.length === 0 || m.original.length !== (m.end as number) - (m.start as number)) return "original must be the exact non-empty text at [start, end)";
+  if (typeof m.replacement !== "string" || m.replacement === m.original) return "replacement must be a string that differs from original";
+  if (m.original.length + m.replacement.length > MUTATE_EDIT_MAX) return `the edit is larger than ${MUTATE_EDIT_MAX} characters`;
+  return null;
+}
+export function mutationEditScript(e: MutationEdit): string {
+  const data = Buffer.from(JSON.stringify({ file: e.file, start: e.start, end: e.end, original: e.original, replacement: e.replacement }), "utf8").toString("base64");
+  const js = `const fs=require("fs");const m=JSON.parse(Buffer.from(process.env.MUT_EDIT,"base64").toString("utf8"));` +
+    `const s=fs.readFileSync(m.file,"utf8");if(s.slice(m.start,m.end)!==m.original)process.exit(3);` +
+    `fs.writeFileSync(m.file,s.slice(0,m.start)+m.replacement+s.slice(m.end));`;
+  return `if (cd "$BW" && MUT_EDIT=${shq(data)} bun -e ${shq(js)}) >/dev/null 2>&1; then echo "MUTATION_APPLIED=1"; else echo "MUTATION_FAILED=1"; fi`;
+}
 export function mutationRevertScript(sha: string, file: string): string {
   const d = `"$BW.mutation.diff"`;
   return `if git -C "$BW" diff --no-color ${sha}^ ${sha} -- ${shq(file)} > ${d} 2>/dev/null && [ -s ${d} ] && git -C "$BW" apply -R ${d} >/dev/null 2>&1; ` +
@@ -188,6 +212,15 @@ export async function resolveTestSuite(pointer: Record<string, unknown>): Promis
       return { shape: "structuredError", body: { resolver: "test_suite", failure_mode: "validation_rejected", field: "mutate_revert", detail: "mutate_revert needs base_ref (HEAD or a sha), a commit sha and a vessel-relative file path (no '..'); a mutation runs only on a pinned tree" } };
     }
     mutate = { sha, file };
+  }
+  // mutate_edit {file, start, end, original, replacement}: one operator mutant (mutationEditScript), same rules.
+  let edit: MutationEdit | null = null;
+  if (pointer.mutate_edit !== undefined && pointer.mutate_edit !== null) {
+    const pinned = typeof pointer.base_ref === "string" && /^(HEAD|[0-9a-f]{7,40})$/.test(pointer.base_ref.trim());
+    const bad = !pinned ? "a mutation runs only on a pinned tree (base_ref)" : mutate ? "mutate_edit and mutate_revert are exclusive" : mutationEditProblem(pointer.mutate_edit);
+    if (bad) return { shape: "structuredError", body: { resolver: "test_suite", failure_mode: "validation_rejected", field: "mutate_edit", detail: `mutate_edit: ${bad}` } };
+    const m = pointer.mutate_edit as MutationEdit;
+    edit = { file: m.file, start: m.start, end: m.end, original: m.original, replacement: m.replacement, ...(typeof m.operator === "string" ? { operator: m.operator.slice(0, 40) } : {}) };
   }
   const rel = `repos/${name}`;
   const preferredRoot = `${VESSEL_CLONES_ROOT}/${name}`;
@@ -267,8 +300,8 @@ export async function resolveTestSuite(pointer: Record<string, unknown>): Promis
       `git -C "$ROOT" worktree prune >/dev/null 2>&1; BW="$(mktemp -d /tmp/test-suite-base-XXXXXX)"; ` +
       `if [ -d "$ROOT/node_modules" ] && git -C "$ROOT" worktree add -q --detach "$BW" ${baseRef} >/dev/null 2>&1; then ` +
       `ln -s "$ROOT/node_modules" "$BW/node_modules"; echo "VERIFIED_ROOT=$BW"; echo "VERIFIED_HEAD=$(git -C "$BW" rev-parse --short HEAD 2>/dev/null || echo unknown)"; ` +
-      (mutate
-        ? `MUT="$(${mutationRevertScript(mutate.sha, mutate.file)})"; echo "$MUT"; case "$MUT" in *MUTATION_APPLIED=1*) (cd "$BW" && ${bunRun});; esac; fi; `
+      (mutate || edit
+        ? `MUT="$(${mutate ? mutationRevertScript(mutate.sha, mutate.file) : mutationEditScript(edit!)})"; echo "$MUT"; case "$MUT" in *MUTATION_APPLIED=1*) (cd "$BW" && ${bunRun});; esac; fi; `
         : `(cd "$BW" && ${bunRun}); fi; `) +
       `git -C "$ROOT" worktree remove --force "$BW" >/dev/null 2>&1; rm -rf "$BW"; git -C "$ROOT" worktree prune >/dev/null 2>&1; true`
     : `ROOT=${shq(preferredRoot)}; [ -d "$ROOT" ] || ROOT=${shq(fallbackRoot)}; ` +
@@ -327,6 +360,7 @@ export async function resolveTestSuite(pointer: Record<string, unknown>): Promis
       requested_not_passing: ran || onlyTests.length === 0 ? requestedNotPassing : null,
       // The mutation actually changed the pinned tree's file; a run without it measured nothing about coverage.
       ...(mutate ? { mutation: { sha: mutate.sha, file: mutate.file, applied: /^MUTATION_APPLIED=1$/m.test(raw) } } : {}),
+      ...(edit ? { mutation: { kind: "edit", file: edit.file, operator: edit.operator ?? null, start: edit.start, applied: /^MUTATION_APPLIED=1$/m.test(raw) } } : {}),
       skip: parsed.skip,
       failingTests: parsed.failingTests.slice(0, 25),
       timestamp: new Date().toISOString(),

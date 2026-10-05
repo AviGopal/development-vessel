@@ -392,7 +392,7 @@ export async function rejectUnreachableOrphanGaps(emitUrl: string, apiKey: strin
       await fetch(emitUrl, {
         method: "POST",
         headers: { "Content-Type": "application/json", ...(apiKey ? { Authorization: `ApiKey ${apiKey}` } : {}) },
-        body: JSON.stringify({ impulse: { pointer: { type: "substrateGap_write", gap: { id, status: "rejected", classification_metadata: { shape, unreachable_reason: "no_live_producer", rejected_reason: "no_live_producer", closed_by: "orphaned_capability_scan" } } } } }),
+        body: JSON.stringify({ impulse: { pointer: { type: "substrateGap_write", gap: { id, status: "rejected", classification_metadata: { shape, unreachable_reason: "no_live_producer", rejected_reason: "no_live_producer", rejected_by: "orphaned_capability_scan", rejected_at: new Date().toISOString(), terminal: false, closed_by: "orphaned_capability_scan" } } } } }),
         signal: AbortSignal.timeout(10_000),
       }).catch(() => {});
       rejected.push(id);

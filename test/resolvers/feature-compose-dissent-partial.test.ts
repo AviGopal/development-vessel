@@ -167,6 +167,37 @@ describe("a landing over the lane's own semantic dissent is partial, and the dis
     expect(reason({ ...metaOf(PARENT_ROW), semantic_dissent: [old] }, LANDED_SHA, false)).toBe("landed_verified");
   });
 
+  // A landing the cutover stamped landed_unverified (own check skipped, typecheck only) with NO dissent was
+  // still closed landed_verified (bbadb86, 2026-10-05: a hollow write; the parent then closed via child).
+  it("MUST-FAIL (e): a landing stamped landed_unverified with no dissent closes landed_partial, not landed_verified", async () => {
+    const reason = exported<(m: Record<string, unknown>, sha: string, literalOnly: boolean) => string>("landedCloseReason");
+    const meta = { ...metaOf(PARENT_ROW), landed_unverified: true, landed_unverified_reason: "own check skipped; typecheck only" };
+    expect(reason(meta, LANDED_SHA, false)).toBe("landed_partial");
+    expect(reason(meta, LANDED_SHA.slice(0, 12), false)).toBe("landed_partial");
+    expect(reason(meta, LANDED_SHA, true)).toBe("landed_partial"); // literal-only does not upgrade it
+  });
+
+  it("CONTROL (e): landed_unverified false/absent stays landed_verified, and a pending_outcome_verification equal to the sha alone does not downgrade (the sweep's measured close carries it)", async () => {
+    const reason = exported<(m: Record<string, unknown>, sha: string, literalOnly: boolean) => string>("landedCloseReason");
+    expect(reason({ ...metaOf(PARENT_ROW), landed_unverified: false }, LANDED_SHA, false)).toBe("landed_verified");
+    expect(reason({ ...metaOf(PARENT_ROW), pending_outcome_verification: LANDED_SHA }, LANDED_SHA, false)).toBe("landed_verified");
+    expect(reason({ ...metaOf(PARENT_ROW), landed_unverified: "true" }, LANDED_SHA, false)).toBe("landed_verified"); // only the boolean the cutover stamps
+  });
+
+  it("MUST-FAIL (e, binding): the flag applies to the landing it was stamped for, not to a later one", async () => {
+    const reason = exported<(m: Record<string, unknown>, sha: string, literalOnly: boolean) => string>("landedCloseReason");
+    const bound = { ...metaOf(PARENT_ROW), landed_unverified: true, landed_unverified_sha: LANDED_SHA };
+    expect(reason(bound, LANDED_SHA.slice(0, 12), false)).toBe("landed_partial");
+    expect(reason(bound, "2222222bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", false)).toBe("landed_verified");
+  });
+
+  it("MUST-FAIL (e, cutover): the gap-row stamp binds landed_unverified to the new sha and clears it on a verified landing", () => {
+    const src = readFileSync(new URL("../../src/resolvers/vessel-mitosis-cutover.ts", import.meta.url).pathname, "utf8");
+    const stamp = src.slice(src.indexOf("pending_outcome_verification: newSha"), src.indexOf("pending_outcome_verification: newSha") + 900);
+    expect(/landed_unverified:\s*true[^}]*landed_unverified_sha:\s*newSha/.test(stamp)).toBe(true);
+    expect(/landed_unverified:\s*false[^}]*landed_unverified_sha:\s*""/.test(stamp)).toBe(true);
+  });
+
   it("MUST-FAIL (a, wiring AST): both landing closers — closeLandedGap and the pending-land sweep — take closed_reason from landedCloseReason", () => {
     const sites = ["closeLandedGap", "sweepPendingLandVerificationsOnce"].map((fn) => [fn, closedReasonInitializers(fnNamed(GTF_PATH, fn))] as const);
     for (const [fn, inits] of sites) {

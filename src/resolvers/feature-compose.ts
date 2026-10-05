@@ -3784,9 +3784,25 @@ export function landedUnderDissent(meta: Record<string, unknown> | null | undefi
     return d.later_outcome == null;
   });
 }
-/** The closed_reason for a landing close: landed_partial under a dissent, else literal-only, else landed_verified. */
+/**
+ * Did the cutover stamp THIS landing landed_unverified? The flag is bound to landed_unverified_sha; a row stamped
+ * before the sha was recorded counts as this landing's (partial is the safe reading).
+ */
+export function landedUnverifiedHere(meta: Record<string, unknown> | null | undefined, sha: string | null | undefined): boolean {
+  const m = (meta ?? {}) as Record<string, unknown>;
+  if (m["landed_unverified"] !== true) return false;
+  const bound = typeof m["landed_unverified_sha"] === "string" ? (m["landed_unverified_sha"] as string).trim() : "";
+  if (bound === "") return true;
+  const s = String(sha ?? "").trim();
+  return s.length >= 7 && (bound.startsWith(s) || s.startsWith(bound));
+}
+/**
+ * The closed_reason for a landing close: landed_partial under a dissent or when the cutover stamped the landing
+ * landed_unverified (own check skipped, typecheck only), else literal-only, else landed_verified.
+ * pending_outcome_verification alone is not a downgrade: the sweep's measured close carries it.
+ */
 export function landedCloseReason(meta: Record<string, unknown> | null | undefined, sha: string | null | undefined, literalOnly: boolean): "landed_partial" | "landed_literal_only" | "landed_verified" {
-  if (landedUnderDissent(meta, sha)) return "landed_partial";
+  if (landedUnderDissent(meta, sha) || landedUnverifiedHere(meta, sha)) return "landed_partial";
   return literalOnly ? "landed_literal_only" : "landed_verified";
 }
 /** Did the gap's armed own check go red on the parent and green on the draft, with the draft typechecking? */

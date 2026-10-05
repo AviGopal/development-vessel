@@ -3484,7 +3484,11 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
                 ...stampMeta,
                 pending_outcome_verification: newSha,
                 pending_set_at: appliedAt,
-                ...(landedUnverifiedReason !== null ? { landed_unverified: true, landed_unverified_reason: landedUnverifiedReason } : {}),
+                // Bound to THIS landing's sha, and cleared on a verified one: the store carries omitted keys
+                // forward, so an earlier landing's flag would otherwise downgrade a later verified close.
+                ...(landedUnverifiedReason !== null
+                  ? { landed_unverified: true, landed_unverified_reason: landedUnverifiedReason, landed_unverified_sha: newSha }
+                  : { landed_unverified: false, landed_unverified_reason: "", landed_unverified_sha: "" }),
                 // Only for a gap with no measurable predicate: the removed-line literal otherwise outranks
                 // a stronger evidence_resolve / verify_shape / expected_literal check in classification.
                 ...(derived && typeof stampMeta["hardcoded_url"] !== "string" && !stampMeta["evidence_resolve"] && !stampMeta["verify_shape"] && !stampMeta["expected_literal"]

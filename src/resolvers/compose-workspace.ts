@@ -29,13 +29,16 @@
  */
 
 import { execFile } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, symlinkSync } from "node:fs";
 import { promisify } from "node:util";
 
 const run = promisify(execFile);
 
-const CLONE_ROOT = process.env["MITOSIS_PUSH_CLONE_DIR"] ?? "/workspace/git/vessels";
-const WS_ROOT = process.env["COMPOSE_WS_DIR"] ?? "/workspace/git/compose";
+// Read at call time, not at module load: a value frozen at import is whatever the environment held
+// when the first importer loaded this module (in one bun test process, another test file's), not what
+// the caller runs under now.
+const cloneRoot = (): string => process.env["MITOSIS_PUSH_CLONE_DIR"] ?? "/workspace/git/vessels";
+const wsRoot = (): string => process.env["COMPOSE_WS_DIR"] ?? "/workspace/git/compose";
 
 export interface ComposeWorkspace {
   /** Unique id of this compose's workspace (directory name under WS_ROOT). */
@@ -63,10 +66,13 @@ async function git(cloneDir: string, args: string[]): Promise<void> {
  * `git worktree prune` on each clone then drops the dangling registrations.
  */
 const STALE_MS = 2 * 60 * 60 * 1000;
-async function sweepStaleWorkspaces(activeClones: Iterable<string>): Promise<void> {
+// The shared-packages link (linkSharedPackages) lives beside the workspaces and is never swept.
+const SHARED_PACKAGES = "packages";
+async function sweepStaleWorkspaces(WS_ROOT: string, activeClones: Iterable<string>): Promise<void> {
   try {
     const { readdirSync, statSync } = await import("node:fs");
     for (const entry of readdirSync(WS_ROOT)) {
+      if (entry === SHARED_PACKAGES) continue;
       const dir = `${WS_ROOT}/${entry}`;
       try {
         if (Date.now() - statSync(dir).mtimeMs < STALE_MS) continue;
@@ -79,12 +85,39 @@ async function sweepStaleWorkspaces(activeClones: Iterable<string>): Promise<voi
   } catch { /* WS_ROOT absent or unreadable — nothing to sweep */ }
 }
 
+/**
+ * A vessel names the super-repo's shared packages as file:../../packages/<pkg> (identity-vessel:
+ * @avigopal/vessel-discovery-client). From a worktree at WS_ROOT/<id>/<vessel> that path is
+ * WS_ROOT/packages, which nothing provided, so the verify's `bun install --dry-run` failed on every
+ * identity-vessel compose. The runtime resolves the same dependency at $MITOSIS_RUNTIME_DIR/packages
+ * (mirror-to-live and the image rewrite it there), so link WS_ROOT/packages to that copy. An existing
+ * path (directory, file or any link) is never touched; with no runtime packages directory nothing is
+ * linked and the dependency stays unresolved (the verify refuses, as before). Only the link is written;
+ * nothing under the runtime tree. pull-sync gives its clone layout the same link (substrate-pull-sync.sh
+ * clone_shared_packages).
+ */
+export function linkSharedPackages(WS_ROOT: string = wsRoot()): void {
+  const target = `${process.env["MITOSIS_RUNTIME_DIR"] ?? "/vessels"}/packages`;
+  const link = `${WS_ROOT}/${SHARED_PACKAGES}`;
+  try {
+    if (!existsSync(target)) return;
+    try { lstatSync(link); return; } catch { /* absent: create it */ }
+    mkdirSync(WS_ROOT, { recursive: true });
+    symlinkSync(target, link);
+  } catch (err) {
+    console.warn(`[compose-workspace] shared packages link unavailable: ${(err as Error)?.message ?? err}`);
+  }
+}
+
 export async function acquireComposeWorkspace(vessels: string[], id: string): Promise<ComposeWorkspace> {
   const roots = new Map<string, string>(); // vessel -> worktree abs
   const clones = new Map<string, string>(); // vessel -> clone abs (for release)
 
+  const CLONE_ROOT = cloneRoot();
+  const WS_ROOT = wsRoot(); // one value for the whole workspace: acquire and release agree
   const candidateClones = vessels.map((v) => `${CLONE_ROOT}/${strip(v)}`).filter((c) => existsSync(`${c}/.git`));
-  await sweepStaleWorkspaces(candidateClones);
+  await sweepStaleWorkspaces(WS_ROOT, candidateClones);
+  linkSharedPackages(WS_ROOT);
 
   for (const raw of vessels) {
     const vessel = strip(raw);

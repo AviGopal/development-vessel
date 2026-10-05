@@ -92,6 +92,26 @@ describe("trust-root completion: applicable vs judged, in a line that can fail",
   });
 });
 
+describe("the -unjudged gap's own predicate (its evidence_resolve) can read present and resolved", () => {
+  async function predicate(rows: unknown[]) {
+    __setPoolPinDepsForTests({ readNewest: async (shape) => (shape === "autonomyScope" ? heldScope : null), readChanges: async () => [] });
+    const repo = join(ROOT, `super-pred-${n++}`);
+    mkdirSync(join(repo, "scripts", "substrate"), { recursive: true });
+    writeFileSync(join(repo, "scripts", "substrate", "self-facts.json"), JSON.stringify({ rows }));
+    const g = (args: string[]) => Bun.spawnSync(["git", ...args], { cwd: repo, env: { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" } });
+    g(["init", "-q"]); g(["add", "."]); g(["commit", "-qm", "rows"]); g(["update-ref", "refs/remotes/origin/dev", "HEAD"]);
+    process.env["SUPER_REPO_ROOT"] = repo;
+    const spy = spyOn(console, "log").mockImplementation(() => {});
+    try {
+      return (await resolveSelfFactReconcile({ type: "self_fact_reconcile", facts: ["trust_root_completion"], key: `${me()}-unjudged`, plant_canary: false, file_gaps: false })).body as { divergence_count: number | null };
+    } finally { spy.mockRestore(); }
+  }
+  it("present: a dropped held row ⇒ divergence_count 1; resolved: the row judged ⇒ 0", async () => {
+    expect((await predicate([scopeRow({ [me()]: { excluded_paths: PATHS } }, { nodes: ["other-node"] })])).divergence_count).toBe(1);
+    expect((await predicate([scopeRow({ [me()]: { excluded_paths: PATHS } })])).divergence_count).toBe(0);
+  });
+});
+
 describe("the unpinned canary is liveness-only and says so", () => {
   it("MUST-FAIL: its detail labels it a liveness-only control", async () => {
     __setPoolPinDepsForTests({ readNewest: async () => heldScope });

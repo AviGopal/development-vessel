@@ -273,7 +273,10 @@ describe("one journal line per row per tick (so 'no divergences here' differs fr
       spy.mockRestore();
       process.env["SUPER_REPO_ROOT"] = prev;
     }
-    const lines = logged.filter((l) => l.startsWith("[self-fact]"));
+    // One line per row, plus exactly one trust-root completion line per run (it can fail; it is not a row).
+    const lines = logged.filter((l) => l.startsWith("[self-fact] row "));
+    expect(logged.filter((l) => l.startsWith("[self-fact] completion: ")).length).toBe(1);
+    expect(logged.filter((l) => l.startsWith("[self-fact]")).length).toBe(lines.length + 1);
     expect(lines.length).toBe(3);
     expect(lines.filter((l) => l.startsWith(`[self-fact] row ${OBS.id}: observed (`)).length).toBe(1);
     expect(lines.filter((l) => l.startsWith(`[self-fact] row ${UNOBS.id}: unobserved (`)).length).toBe(1);
@@ -298,7 +301,10 @@ describe("one journal line per row per tick (so 'no divergences here' differs fr
       spy.mockRestore();
       process.env["SUPER_REPO_ROOT"] = prev;
     }
-    const lines = logged.filter((l) => l.startsWith("[self-fact]"));
+    // One line per row, plus exactly one trust-root completion line per run (it can fail; it is not a row).
+    const lines = logged.filter((l) => l.startsWith("[self-fact] row "));
+    expect(logged.filter((l) => l.startsWith("[self-fact] completion: ")).length).toBe(1);
+    expect(logged.filter((l) => l.startsWith("[self-fact]")).length).toBe(lines.length + 1);
     expect(lines.length).toBe(3);
     for (const id of [RETRY.id, BIRTH.id]) expect(lines.filter((l) => new RegExp(`^\\[self-fact\\] row ${id}: (observed|unobserved|diverged) \\(`).test(l)).length).toBe(1);
     expect(lines).toContain(`[self-fact] row ${BIRTH_SKIP.id}: skipped (profile standalone)`);

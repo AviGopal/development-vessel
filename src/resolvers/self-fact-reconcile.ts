@@ -523,8 +523,10 @@ const FACTS: Record<string, FactFn> = {
       const seededFor = Object.keys(row.expected_by_node ?? {});
       const unpinned = (n: string, rec: PoolPinRecord): SelfFactDivergence => ({ fact, key: `${n}-unpinned`, node: n, source: `${row.id} pinned value`, copy: `pool ${shape}/${String(rec.id ?? "?")}@${n} (updated ${String(rec.updated_at ?? "?")})`, detail: `node ${n} holds a ${shape} record but ${row.id} pins no value for it (pinned for: ${seededFor.join(", ") || "none"}), so this trust root is unguarded on ${n}; seed its value under expected_by_node["${n}"] (and \`nodes\`, if the row lists nodes)`, canary: false });
       const out = [unpinned(node, held)];
-      // Must-fail control through the same builder: a planted node id holding a planted record is reported unpinned.
-      if (canary) { const planted = unpinned(`${node}-planted`, { id: "planted" }); if (planted.key.endsWith("-unpinned")) out.push({ ...planted, key: `${row.id}-canary`, copy: "planted copy", detail: `must-fail control on node ${node}: a planted node holding ${shape} with no pinned value was reported unpinned`, canary: true }); }
+      // LIVENESS-ONLY control: it is built by the same function as the finding, so it cannot fail; it shows only that
+      // this branch ran (so the row is not read as blind). The completion line (trust_rows_applicable/judged) is the
+      // check here that can fail.
+      if (canary) { const planted = unpinned(`${node}-planted`, { id: "planted" }); out.push({ ...planted, key: `${row.id}-canary`, copy: "planted copy", detail: `liveness-only control on node ${node} (cannot fail; shows the unpinned branch ran): a planted node holding ${shape} with no pinned value was reported unpinned`, canary: true }); }
       return { fact, source_read: true, copies_read: 1, divergences: out, note: `node ${node}: ${shape} held, no pinned value for this node (unpinned)` };
     }
     if (listForm ? !(pinned as unknown[]).every((e) => typeof e === "string") : (pinned === null || typeof pinned !== "object" || Object.keys(pinned).length === 0)) return unread(`row ${row.id}: no pinned ${shape} value for node ${node}, so this node is not judged`);
@@ -1112,6 +1114,9 @@ export function selfFactRowLines(
   return lines;
 }
 
+// The fact a trust-root completion finding is filed under (not a row: every run computes it).
+const TRUST_COMPLETION_FACT = "trust_root_completion";
+
 // ─── the resolver ───────────────────────────────────────────────────────────
 export async function resolveSelfFactReconcile(pointer: SelfFactReconcilePointer): Promise<ResolverResult> {
   const plant = pointer.plant_canary !== false;
@@ -1128,18 +1133,31 @@ export async function resolveSelfFactReconcile(pointer: SelfFactReconcilePointer
   // A trust-root pin row that does not list this node still runs here when this node HOLDS the pinned shape with
   // no value pinned for it: that trust root is unguarded, and the instrument reports it (`<node>-unpinned`). A node
   // holding no such record skips the row as before, so another substrate's rows never turn this run unobserved.
-  const unpinnedHolders = new Set<SelfFactRow>();
-  for (const r of rows ?? []) {
-    if (!profileOk(r) || nodeListed(r) || r.instrument !== "pool_record_pin" || typeof r.pool_shape !== "string" || r.pool_shape.length === 0) continue;
-    if (r.expected_by_node && Object.prototype.hasOwnProperty.call(r.expected_by_node, thisNode())) continue;
-    try { if (await poolPinDeps.readNewest(r.pool_shape)) unpinnedHolders.add(r); } catch { unpinnedHolders.add(r); /* the instrument reports the store unreadable */ }
+  // Which trust-root pin rows this node must judge: every pool_record_pin row in its profile whose shape it HOLDS,
+  // read here independently of the row filter below (an unreadable store counts as held: the row reports it).
+  const heldPinRows = new Set<SelfFactRow>();
+  {
+    const heldByShape = new Map<string, boolean>();
+    for (const r of rows ?? []) {
+      if (!profileOk(r) || r.instrument !== "pool_record_pin" || typeof r.pool_shape !== "string" || r.pool_shape.length === 0) continue;
+      if (!heldByShape.has(r.pool_shape)) {
+        let held = true;
+        try { held = (await poolPinDeps.readNewest(r.pool_shape)) !== null; } catch { held = true; }
+        heldByShape.set(r.pool_shape, held);
+      }
+      if (heldByShape.get(r.pool_shape)) heldPinRows.add(r);
+    }
   }
+  const pinnedHere = (r: SelfFactRow) => !!r.expected_by_node && Object.prototype.hasOwnProperty.call(r.expected_by_node, thisNode());
+  const unpinnedHolders = new Set([...heldPinRows].filter((r) => !nodeListed(r) && !pinnedHere(r)));
   const inScope = (rows ?? []).filter((r) => profileOk(r) && (nodeListed(r) || unpinnedHolders.has(r)));
   const unregistered = inScope.filter((r) => !(r.instrument in FACTS)).map((r) => r.id);
   const runnable = inScope.filter((r) => r.instrument in FACTS);
   // A per-node predicate asked of another node checks nothing here: no rows run, the run is unobserved (null).
   const foreignNode = typeof pointer.node === "string" && pointer.node.length > 0 && pointer.node !== thisNode();
-  const wanted = foreignNode ? [] : (Array.isArray(pointer.facts) && pointer.facts.length > 0 ? runnable.filter((r) => pointer.facts!.includes(r.id)) : runnable).map((r) => r.id);
+  // The completion check (a fact of its own) needs every held pin row run, so asking for it runs them too.
+  const completionAsked = !foreignNode && rows !== null && (!Array.isArray(pointer.facts) || pointer.facts.length === 0 || pointer.facts.includes(TRUST_COMPLETION_FACT));
+  const wanted = foreignNode ? [] : (Array.isArray(pointer.facts) && pointer.facts.length > 0 ? runnable.filter((r) => pointer.facts!.includes(r.id) || (completionAsked && heldPinRows.has(r))) : runnable).map((r) => r.id);
   // Keyed by instrument and by row id (journal_pattern reports under its row id), so rows sharing an instrument
   // keep their own edit sites.
   rowEditSite = Object.fromEntries(runnable.flatMap((r) => [[r.instrument, r.edit_site], [r.id, r.edit_site]]));
@@ -1149,6 +1167,16 @@ export async function resolveSelfFactReconcile(pointer: SelfFactReconcilePointer
   const results: SelfFactResult[] = [];
   for (const id of wanted) { const row = runnable.find((r) => r.id === id)!; results.push(await FACTS[row.instrument]!(plant, row)); }
   const all = results.flatMap((r) => r.divergences);
+  // TRUST-ROOT COMPLETION: applicable = held pin rows; judged = those this run read. Fewer judged than applicable
+  // (a row a filter dropped, or one read unobserved) leaves a trust root unguarded here: <node>-unjudged.
+  const trustCompletion = completionAsked ? (() => {
+    const applicable = [...heldPinRows].map((r) => r.id);
+    const judged = applicable.filter((id) => results.some((x) => x.fact === id && x.source_read));
+    return { node: thisNode(), applicable, judged, unjudged: applicable.filter((id) => !judged.includes(id)) };
+  })() : null;
+  if (trustCompletion && trustCompletion.unjudged.length > 0) {
+    all.push({ fact: TRUST_COMPLETION_FACT, key: `${trustCompletion.node}-unjudged`, node: trustCompletion.node, source: "pool_record_pin rows in this node's profile whose shape it holds", copy: `this self-fact run on ${trustCompletion.node}`, detail: `node ${trustCompletion.node} holds the pinned shape of ${trustCompletion.applicable.length} trust-root pin row(s) but judged ${trustCompletion.judged.length}; unjudged: ${trustCompletion.unjudged.join(", ")} (dropped by a row filter or read unobserved), so those trust roots are unguarded on this node`, canary: false });
+  }
   // A row that could not be READ is unobserved, not blind and not healthy (qa 09-29): it must neither disable the
   // other rows (it used to trip the canary-not-found self-gap for the whole run) nor let its own findings close.
   const unobservedRows = results.filter((r) => !r.source_read).map((r) => r.fact);
@@ -1163,14 +1191,19 @@ export async function resolveSelfFactReconcile(pointer: SelfFactReconcilePointer
     if (rows === null) console.log(`[self-fact] rows unreadable on node ${thisNode()}: no row ran`);
     else if (foreignNode) console.log(`[self-fact] predicate for node ${pointer.node}: not judged on node ${thisNode()}`);
     for (const line of selfFactRowLines(results, blindRows, skippedByProfile, unregistered.filter(askedFor), profile, patterns)) console.log(line);
+    if (trustCompletion) console.log(`[self-fact] completion: thisNode=${trustCompletion.node} trust_rows_applicable=${trustCompletion.applicable.length} judged=${trustCompletion.judged.length}`);
   }
   const canaryFact = blindRows.join(", ");
   // Key scoping: a per-gap predicate asks about ONE (fact, key); everything else is
   // not this gap's business, so it must not keep the gap open.
-  const keyed = typeof pointer.key === "string" && pointer.key.length > 0 && wanted.length === 1;
+  // (Asked about the completion fact alone, the held pin rows run too; the key still scopes to the one finding.)
+  const keyed = typeof pointer.key === "string" && pointer.key.length > 0 && (wanted.length === 1 || (Array.isArray(pointer.facts) && pointer.facts.length === 1 && pointer.facts[0] === TRUST_COMPLETION_FACT));
   const real = all.filter((d) => !d.canary && (!keyed || d.key === pointer.key));
   // Zero rows checked is not an observation: a node with nothing in scope says so.
-  const observed = results.length > 0 && results.every((r) => r.source_read) && canaryFound;
+  // Asked about the completion fact alone, the completion count IS the measurement (it read the store for every
+  // pin row itself), so a dropped row (no result) or an unobserved one still reads present, never unknown.
+  const completionOnly = Array.isArray(pointer.facts) && pointer.facts.length === 1 && pointer.facts[0] === TRUST_COMPLETION_FACT;
+  const observed = completionOnly ? trustCompletion !== null && canaryFound : results.length > 0 && results.every((r) => r.source_read) && canaryFound;
   let filed = 0;
   let closed = 0;
   let selfGap = false;
@@ -1188,7 +1221,7 @@ export async function resolveSelfFactReconcile(pointer: SelfFactReconcilePointer
     // for a fact checked on this run, whose divergence is no longer present, is
     // closed here with an EXERCISED falsifier — the only thing the store's gate
     // accepts for a held or class-2 gap. A landing never closes these; this does.
-    closed = await closeResolved(wanted.filter((id) => readFacts.has(id)), real);
+    closed = await closeResolved([...wanted.filter((id) => readFacts.has(id)), ...(trustCompletion ? [TRUST_COMPLETION_FACT] : [])], real);
   }
   // Findings in the form light-dispatch grades (it counts `findings`/`gaps_emitted`,
   // not `divergences`): one per real divergence, with a stable hash so a repeat run
@@ -1214,6 +1247,7 @@ export async function resolveSelfFactReconcile(pointer: SelfFactReconcilePointer
       canary_found: canaryFound,
       profile,
       node: thisNode(),
+      trust_completion: trustCompletion,
       rows_checked: wanted,
       blind_rows: blindRows,
       unobserved_rows: unobservedRows,

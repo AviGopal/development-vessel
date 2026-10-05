@@ -6,12 +6,22 @@ import { identityCredential } from '../lib/caller-credential.js';
 
 const POOL_DIR = join(WORKSPACE_ROOT, 'pool');
 const POOL_FILE = join(POOL_DIR, 'standing.json');
+// Tests only: the store file. WORKSPACE_ROOT is captured when config.ts first loads, which under a multi-file
+// `bun test` is whichever file imported it first (often a non-temp cwd), so a suite that writes the pool names its own.
+let poolFileOverride: string | null = null;
+export function __setPoolFileForTests(path: string | null): void { poolFileOverride = path; }
+const poolFile = (): string => poolFileOverride ?? POOL_FILE;
 
-/** Written ONLY by resolvePoolImpulseWrite, on a trust-root write it accepted with an operator credential.
+/** Written ONLY by resolvePoolImpulseWrite, on a trust-root write it accepted with an operator credential (or, for
+ *  autonomyScope alone, from the accepted evaluator: EVALUATOR_TRUST_ROOT_WRITERS).
  *  key_id is identity's id for the validated key (null when identity's answer carried none); at equals the
  *  row's updated_at for that write. Unlike `source` (caller-supplied), a reader can rely on it. */
 export interface PoolAttestation {
-  by: 'operator';
+  /** 'operator': an admin-scoped credential. 'evaluator': the accepted in-process evaluator named in `evaluator`
+   *  (EVALUATOR_TRUST_ROOT_WRITERS), which re-derived the change's evidence itself (no trust root as such: REALIGNMENT
+   *  §7 step 9 / §10 item 1, 10-02 rulings). */
+  by: 'operator' | 'evaluator';
+  evaluator?: string;
   key_id: string | null;
   at: string;
   /** HMAC-SHA256 under this node's METABOB_API_KEY over the stored row (see attestationSig). Absent only
@@ -53,9 +63,9 @@ export interface StandingImpulse {
 }
 
 function loadImpulses(): StandingImpulse[] {
-  if (!existsSync(POOL_FILE)) return [];
+  if (!existsSync(poolFile())) return [];
   try {
-    const raw = readFileSync(POOL_FILE, 'utf8');
+    const raw = readFileSync(poolFile(), 'utf8');
     const parsed = JSON.parse(raw) as unknown;
     if (Array.isArray(parsed)) return parsed as StandingImpulse[];
     return [];
@@ -65,12 +75,12 @@ function loadImpulses(): StandingImpulse[] {
 }
 
 function saveImpulses(impulses: StandingImpulse[]): void {
-  mkdirSync(POOL_DIR, { recursive: true });
-  const tmp = POOL_FILE + '.tmp.' + Date.now();
+  mkdirSync(poolFileOverride ? join(poolFileOverride, '..') : POOL_DIR, { recursive: true });
+  const tmp = poolFile() + '.tmp.' + Date.now();
   writeFileSync(tmp, JSON.stringify(impulses, null, 2), 'utf8');
   // atomic rename
   const fs = require('node:fs') as typeof import('node:fs');
-  fs.renameSync(tmp, POOL_FILE);
+  fs.renameSync(tmp, poolFile());
 }
 
 export function resolvePoolImpulse(pointer: {
@@ -123,8 +133,18 @@ export function resolvePoolImpulse(pointer: {
 //   METABOB_API_KEY injected, each pinned to an approved git blob hash. A row is a grant to run code with
 //   the fleet credential; the runner accepts only rows carrying this writer's operator attestation.
 export const TRUST_ROOT_POOL_SHAPES: ReadonlySet<string> = new Set(['substrateNodes', 'autonomyScope', 'spendEnvelope', 'calibrationWindow', 'scriptRunnerAllowlist']);
-/** key_id: the validated credential's key id (identity's identifier, never derived from the secret). */
-export type PoolWriteAuth = { operator: boolean; key_id?: string | null; why?: string };
+/** key_id: the validated credential's key id (identity's identifier, never derived from the secret).
+ *  evaluator: set only by in-process code (the HTTP route builds auth from the Authorization header alone, and a
+ *  pointer field of that name is never read), naming the accepted evaluator making the write. */
+export type PoolWriteAuth = { operator: boolean; key_id?: string | null; why?: string; evaluator?: string };
+/**
+ * THE ACCEPTED EVALUATOR'S GRANT (scope earn-in, 2026-10-05). The user ruled 10-02 that limits change when the
+ * system's evidence supports it, applied only by the previously ACCEPTED evaluator, never by the proposer and never
+ * by an operator approval step (REALIGNMENT §7 step 9). One trust-root shape, one evaluator: autonomyScope may also be
+ * written by scope_earn_in_apply (scope-earn-in.ts), which re-runs the criterion itself before writing. Every other
+ * trust-root shape still needs the operator credential, and so does every other evaluator name.
+ */
+export const EVALUATOR_TRUST_ROOT_WRITERS: Readonly<Record<string, string>> = { autonomyScope: 'scope_earn_in_apply' };
 /** The trust-root shape a write would create or modify (by its own shape, or the shape of the row its id names), or null. */
 export function trustRootWriteShape(pointer: { id?: string; shape?: string }): string | null {
   if (typeof pointer.shape === 'string' && TRUST_ROOT_POOL_SHAPES.has(pointer.shape)) return pointer.shape;
@@ -167,7 +187,8 @@ export function resolvePoolImpulseWrite(pointer: {
   attested?: unknown;
 }, auth?: PoolWriteAuth): { shape: string; body: { ok: boolean; id: string; conflict?: boolean; current_updated_at?: string | null; error?: string; hint?: string } } {
   const trustRoot = trustRootWriteShape(pointer);
-  if (trustRoot && auth?.operator !== true) {
+  const evaluatorGrant = !!trustRoot && auth?.operator !== true && typeof auth?.evaluator === 'string' && EVALUATOR_TRUST_ROOT_WRITERS[trustRoot] === auth.evaluator;
+  if (trustRoot && auth?.operator !== true && !evaluatorGrant) {
     console.warn(`[pool] REFUSED ${trustRoot} write (id=${String(pointer.id ?? '(new)')}): operator credential required${auth?.why ? ` (${auth.why})` : ''}`);
     return { shape: 'poolImpulse_write', body: { ok: false, id: String(pointer.id ?? ''), error: `operator_credential_required: ${trustRoot} is a trust-root pool shape${auth?.why ? `; ${auth.why}` : ''}` } };
   }
@@ -197,7 +218,9 @@ export function resolvePoolImpulseWrite(pointer: {
   // SERVER-SIDE ATTESTATION. Reaching here with trustRoot set means the operator check above passed, so
   // this write is stamped; every other write carries no attestation (a previous stamp is not carried
   // forward either: it attests the write that made it). pointer.attested is never read.
-  const attestation: PoolAttestation | null = trustRoot ? { by: 'operator', key_id: auth?.key_id ?? null, at: now } : null;
+  const attestation: PoolAttestation | null = !trustRoot ? null
+    : evaluatorGrant ? { by: 'evaluator', evaluator: auth!.evaluator!, key_id: null, at: now }
+    : { by: 'operator', key_id: auth?.key_id ?? null, at: now };
   // Signed over the row exactly as stored (below). The key is read here, at write time, never from a
   // value frozen at import. No key: stamp unsigned and say so (refusing would lock the operator out;
   // a reader fails closed on a missing sig anyway).

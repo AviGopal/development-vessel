@@ -169,6 +169,7 @@ import { resolveDiskSpaceObserver } from "../resolvers/disk-space-observer.js";
 import { resolveWorkspaceHygieneObserver } from "../resolvers/workspace-hygiene-observer.js";
 import { resolveSelfFactReconcile } from "../resolvers/self-fact-reconcile.js";
 import { resolveGapCheckSupplyTick } from "../resolvers/gap-check-supply.js";
+import { resolveScopeEarnInTick } from "../resolvers/scope-earn-in.js";
 import { resolveAttemptLedger } from "../resolvers/attempt-ledger.js";
 import { resolveUnaccountedLandingScan } from "../resolvers/unaccounted-landing-scan.js";
 import { resolveAttemptSnapshot } from "../resolvers/attempt-checks.js";
@@ -833,6 +834,10 @@ async function dispatchInner(pointer: AnyPointer): Promise<ResolverResult> {
     case "gap_check_supply_tick":
       return resolveGapCheckSupplyTick(
         p as Parameters<typeof resolveGapCheckSupplyTick>[0],
+      );
+    case "scope_earn_in_tick":
+      return resolveScopeEarnInTick(
+        p as Parameters<typeof resolveScopeEarnInTick>[0],
       );
     case "attemptLedger":
       return resolveAttemptLedger(

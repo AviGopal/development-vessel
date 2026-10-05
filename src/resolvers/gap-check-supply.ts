@@ -271,7 +271,8 @@ export function checkSupplySettlementLeg(c: { dispatched: number; armed: number;
   return c.refused > 0 ? "beta" : null;
 }
 
-async function readFamilyRhythm(): Promise<{ id: string; body: RhythmBody & Row; updated_at?: string } | null> {
+/** A rhythm family's timeShapedRhythm row, read now (shared with every tick that gates on its own family). */
+export async function readFamilyRhythm(family: string = CHECK_SUPPLY_FAMILY): Promise<{ id: string; body: RhythmBody & Row; updated_at?: string } | null> {
   try {
     const res = await fetch(SELF_RESOLVE_URL, {
       method: "POST",
@@ -282,7 +283,7 @@ async function readFamilyRhythm(): Promise<{ id: string; body: RhythmBody & Row;
     });
     if (!res.ok) return null;
     const j = (await res.json()) as { body?: { impulses?: Array<{ id?: unknown; body?: Row; updated_at?: unknown }> } };
-    const hit = (j.body?.impulses ?? []).find((r) => r?.body?.["family"] === CHECK_SUPPLY_FAMILY);
+    const hit = (j.body?.impulses ?? []).find((r) => r?.body?.["family"] === family);
     if (!hit || !hit.body) return null;
     return { id: String(hit.id ?? ""), body: hit.body as RhythmBody & Row, ...(typeof hit.updated_at === "string" ? { updated_at: hit.updated_at } : {}) };
   } catch {
@@ -290,12 +291,13 @@ async function readFamilyRhythm(): Promise<{ id: string; body: RhythmBody & Row;
   }
 }
 
-async function settleFamily(rhythm: { id: string; body: RhythmBody & Row }, leg: "alpha" | "beta", d: { staleness: number; alpha: number; beta: number }): Promise<void> {
+/** Settle a report-graded family's rhythm (the conductor left it pending: directFamilySettlement). */
+export async function settleFamily(rhythm: { id: string; body: RhythmBody & Row }, leg: "alpha" | "beta", d: { staleness: number; alpha: number; beta: number }, source = "gap-check-supply-tick"): Promise<void> {
   try {
     await fetch(SELF_RESOLVE_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json", ...selfAuthHeaders(SELF_RESOLVE_URL, SELF_RESOLVE_URL) },
-      body: JSON.stringify({ impulse: { type: "poolImpulse_write", id: rhythm.id, shape: "timeShapedRhythm", source: "gap-check-supply-tick",
+      body: JSON.stringify({ impulse: { type: "poolImpulse_write", id: rhythm.id, shape: "timeShapedRhythm", source,
         body: { ...rhythm.body, ...rhythmSettlementOverlay(leg, d.alpha, d.beta, d.staleness) } } }),
       signal: AbortSignal.timeout(5_000),
     });

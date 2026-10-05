@@ -5568,6 +5568,7 @@ async function routeCapabilityGapToNewResolver(
 import { sweepAttempts } from "./attempt-register.js";
 
 let attemptSweepInFlight = false;
+let scopeApplyInFlight = false;
 
 // LLM-AVAILABILITY PROBE (value-per-cost-selection 2.4). With no llm_completion producer
 // advertised every compose fails after taking a slot. Absent only when discovery answers OK
@@ -6094,6 +6095,17 @@ async function resolveGapToFeatureOnce(pointer: GapToFeaturePointer, attempt: { 
       .then((r) => { if (r.outcomes_written || r.settlements_written || r.errors.length) console.log(`[attempt-sweep] outcomes=${r.outcomes_written} settlements=${r.settlements_written} lessons=${r.lessons_written} errors=${r.errors.length}${r.errors.length ? " first=" + r.errors[0] : ""}`); })
       .catch((e) => console.error(`[attempt-sweep] failed: ${(e as Error).message}`))
       .finally(() => { attemptSweepInFlight = false; });
+  }
+  // 0a. THE ACCEPTED EVALUATOR OF SCOPE PROPOSALS (scope earn-in, REALIGNMENT §7 step 9). Beside the landing sweep:
+  // the deployed code re-derives each autonomyScopeProposal's evidence itself and only then changes autonomyScope
+  // (scope-earn-in.ts applyScopeProposals). Not awaited (a mutation run takes minutes) and never overlapping.
+  if (!scopeApplyInFlight) {
+    scopeApplyInFlight = true;
+    void import("./scope-earn-in.js")
+      .then((m) => m.applyScopeProposals())
+      .then((r) => { if (r.applied.length || r.refused.length) console.log(`[scope-earn-in] applied=${JSON.stringify(r.applied.map((a) => `${a.change}:${a.path}`))} refused=${JSON.stringify(r.refused).slice(0, 400)}`); })
+      .catch((e) => console.error(`[scope-earn-in] evaluator failed: ${(e as Error).message}`))
+      .finally(() => { scopeApplyInFlight = false; });
   }
   // 0b. ASK FOR CAPACITY BEFORE PAYING FOR SELECTION (2026-08-31).
   //

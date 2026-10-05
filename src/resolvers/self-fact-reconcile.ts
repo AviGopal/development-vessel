@@ -373,13 +373,52 @@ type FactFn = (canary: boolean, row: SelfFactRow) => SelfFactResult | Promise<Se
 
 // What pool_record_pin reads: the newest open record of a shape in THIS node's own pool store (the copy the
 // policy readers trust), injectable for tests.
-export interface PoolPinDeps { readNewest: (shape: string) => Promise<{ id?: string; updated_at?: string; body?: unknown } | null> }
+export type PoolPinRecord = { id?: string; updated_at?: string; body?: unknown; attested?: { by?: string; evaluator?: string } };
+export interface PoolPinDeps {
+  readNewest: (shape: string) => Promise<PoolPinRecord | null>;
+  /** The criterion's change records (autonomyScopeChange), any status. */
+  readChanges: () => Promise<Array<{ body?: unknown }>>;
+}
 const defaultPoolPinDeps: PoolPinDeps = {
   readNewest: async (shape) => {
     const { resolvePoolImpulse } = await import("./pool-impulse.js");
     return resolvePoolImpulse({ type: "poolImpulse", shape, status: "open", limit: 1 }).body.impulses[0] ?? null;
   },
+  readChanges: async () => {
+    const { resolvePoolImpulse } = await import("./pool-impulse.js");
+    return resolvePoolImpulse({ type: "poolImpulse", shape: "autonomyScopeChange", status: "open" }).body.impulses;
+  },
 };
+/**
+ * A SCOPE CHANGE THE CRITERION MADE IS NOT DRIFT (REALIGNMENT §7 step 9). The pinned autonomyScope is the operator-
+ * seeded value; the accepted evaluator (scope-earn-in.ts) may change the live record by the adopted criterion,
+ * writing it with the evaluator attestation and an append-only autonomyScopeChange record. The pin accepts that, and
+ * only that: the live record must carry the pool's evaluator attestation, and its change records (written by that
+ * same evaluator) must form
+ * an unbroken chain from the pinned excluded_paths to the record's current excluded_paths (each record's prior set is
+ * the previous record's after set). Then the expected excluded_paths is the chain's end. Anything else (an unattested
+ * or operator-attested edit, a broken chain, a record changed after the last change) is compared to the pin and filed.
+ */
+export function evaluatorAcceptedExcluded(pinned: readonly string[], rec: PoolPinRecord | null, changes: Array<{ body?: unknown }>): { excluded: string[]; accepted: number } | null {
+  // The pool's writer stamps by:"evaluator" only under its one grant (pool-impulse EVALUATOR_TRUST_ROOT_WRITERS), and
+  // the change records must name that same evaluator; the grant's name is not repeated here (grant-scan test).
+  const evaluator = rec?.attested?.by === "evaluator" ? String(rec.attested.evaluator ?? "") : "";
+  if (!rec || !evaluator) return null;
+  const current = (rec.body as { excluded_paths?: unknown } | undefined)?.excluded_paths;
+  if (!Array.isArray(current)) return null;
+  const set = (a: readonly unknown[]) => [...new Set(a.map(String))].sort().join("\n");
+  const chain = changes.map((c) => (c.body ?? {}) as { applied_by?: unknown; seq?: unknown; prior_excluded_paths?: unknown; excluded_paths_after?: unknown })
+    .filter((b) => b.applied_by === evaluator && Array.isArray(b.prior_excluded_paths) && Array.isArray(b.excluded_paths_after))
+    .sort((a, b) => Number(a.seq ?? 0) - Number(b.seq ?? 0));
+  // The latest record whose prior set is the pinned set starts the chain; it must run unbroken to the live record.
+  let start = -1;
+  for (let i = chain.length - 1; i >= 0; i--) if (set(chain[i]!.prior_excluded_paths as unknown[]) === set(pinned)) { start = i; break; }
+  if (start < 0) return null;
+  for (let i = start + 1; i < chain.length; i++) if (set(chain[i]!.prior_excluded_paths as unknown[]) !== set(chain[i - 1]!.excluded_paths_after as unknown[])) return null;
+  const end = chain[chain.length - 1]!.excluded_paths_after as unknown[];
+  if (set(end) !== set(current)) return null;
+  return { excluded: end.map(String), accepted: chain.length - start };
+}
 let poolPinDeps: PoolPinDeps = defaultPoolPinDeps;
 /** Tests only: replace what pool_record_pin reads. null restores the default. */
 export function __setPoolPinDepsForTests(d: Partial<PoolPinDeps> | null): void {
@@ -448,13 +487,14 @@ const FACTS: Record<string, FactFn> = {
     const unread = (note: string): SelfFactResult => ({ fact, source_read: false, copies_read: 0, divergences: [], note });
     const shape = String(row.pool_shape ?? "");
     const field = String(row.body_field ?? "");
-    const pinned = row.expected_by_node?.[node];
+    let pinned = row.expected_by_node?.[node];
+    let acceptedNote = "";
     // Two forms: a string array is one endpoint set at `body_field` (substrateNodes); an object pins named body
     // fields (autonomyScope's excluded_paths and require_falsifier_classes, spendEnvelope's cap and pause).
     const listForm = Array.isArray(pinned);
     if (!shape || (listForm && !field)) return unread(`row ${row.id}: pool_shape or body_field missing`);
     if (listForm ? !(pinned as unknown[]).every((e) => typeof e === "string") : (pinned === null || typeof pinned !== "object" || Object.keys(pinned).length === 0)) return unread(`row ${row.id}: no pinned ${shape} value for node ${node}, so this node is not judged`);
-    let rec: { id?: string; updated_at?: string; body?: unknown } | null;
+    let rec: PoolPinRecord | null;
     try { rec = await poolPinDeps.readNewest(shape); } catch (err) { return unread(`pool store unreadable on node ${node}: ${String(err)}`); }
     const body = (rec?.body && typeof rec.body === "object" ? rec.body : {}) as Record<string, unknown>;
     const out: SelfFactDivergence[] = [];
@@ -472,6 +512,14 @@ const FACTS: Record<string, FactFn> = {
       if (d.added.length > 0 || d.removed.length > 0) out.push({ fact, key: `${node}-mismatch`, node, source: `${row.id} pinned value`, copy: copy(), detail: `${shape}.${field} on node ${node} differs from the operator-seeded value: ${describe(d)}`, canary: false });
     } else {
       entries = Object.keys(pinned as PinnedFields).length;
+      // autonomyScope: a change made by the accepted evaluator through the criterion moves the expected excluded_paths.
+      const pinnedPaths = (pinned as PinnedFields)["excluded_paths"];
+      if (shape === "autonomyScope" && Array.isArray(pinnedPaths)) {
+        let changes: Array<{ body?: unknown }> = [];
+        try { changes = await poolPinDeps.readChanges(); } catch { changes = []; }
+        const ok = evaluatorAcceptedExcluded(pinnedPaths, rec, changes);
+        if (ok) { pinned = { ...(pinned as PinnedFields), excluded_paths: ok.excluded }; acceptedNote = `; ${ok.accepted} evaluator change(s) accepted`; }
+      }
       const d = pinFieldDiff(pinned as PinnedFields, body);
       if (d.length > 0) out.push({ fact, key: `${node}-mismatch`, node, source: `${row.id} pinned value`, copy: copy(), detail: `${shape} on node ${node} differs from the operator-seeded value: ${d.join("; ")}`, canary: false });
     }
@@ -488,7 +536,7 @@ const FACTS: Record<string, FactFn> = {
         if (fields.every((f) => reported.some((r) => r.startsWith(`${f}: `)))) out.push({ fact, key: `${row.id}-canary`, node, source: `${row.id} pinned value`, copy: "planted copy", detail: `must-fail control on node ${node}: every pinned field planted (${fields.join(", ")}) was reported`, canary: true });
       }
     }
-    return { fact, source_read: true, copies_read: rec ? 1 : 0, divergences: out, note: `node ${node}: ${shape} ${rec ? (listForm ? `${entries} entr(ies)` : `${entries} pinned field(s) compared`) : "absent"}; pinned ${listForm ? (pinned as string[]).length : entries}` };
+    return { fact, source_read: true, copies_read: rec ? 1 : 0, divergences: out, note: `node ${node}: ${shape} ${rec ? (listForm ? `${entries} entr(ies)` : `${entries} pinned field(s) compared`) : "absent"}; pinned ${listForm ? (pinned as string[]).length : entries}${acceptedNote}` };
   },
   /**
    * A unit's journal must not show a known defect's signature: ONE generic instrument parameterised by its row

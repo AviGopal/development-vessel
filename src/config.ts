@@ -674,6 +674,8 @@ export const config = {
       "self_fact_reconcile",
       // gap_check_supply_tick: writes a failing test for each gap with no check, then arms it once red at HEAD.
       "gap_check_supply_tick",
+      // scope_earn_in_tick: proposes autonomyScope changes by the adopted earn-in criterion (never writes the scope).
+      "scope_earn_in_tick",
       // attemptLedger: causal attempt ledger store (causal-attempt-ledger).
       "attemptLedger",
       "unaccounted_landing_scan",

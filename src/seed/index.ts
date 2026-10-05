@@ -166,6 +166,7 @@ import {
 } from "./shadow-state-observer-ticks.js";
 import { SELF_FACT_RECONCILE_TICK_TEMPLATE } from "./self-fact-reconcile-tick.js";
 import { GAP_CHECK_SUPPLY_TICK_TEMPLATE } from "./gap-check-supply-tick.js";
+import { SCOPE_EARN_IN_TICK_TEMPLATE } from "./scope-earn-in-tick.js";
 
 export { SHIP_CHANGE_TEMPLATE } from "./ship-change.js";
 export { BRANCH_HEALTH_TEMPLATE } from "./branch-health.js";
@@ -247,6 +248,7 @@ export {
 } from "./shadow-state-observer-ticks.js";
 export { SELF_FACT_RECONCILE_TICK_TEMPLATE } from "./self-fact-reconcile-tick.js";
 export { GAP_CHECK_SUPPLY_TICK_TEMPLATE } from "./gap-check-supply-tick.js";
+export { SCOPE_EARN_IN_TICK_TEMPLATE } from "./scope-earn-in-tick.js";
 export { OBSERVE_ORTHOGONAL_PATTERNS_TEMPLATE } from "./observe-orthogonal-patterns.js";
 export { ENACT_ORTHOGONAL_DECISIONS_TEMPLATE } from "./enact-orthogonal-decisions.js";
 export { COMPLETE_VESSEL_SCAFFOLD_TEMPLATE } from "./complete-vessel-scaffold.js";
@@ -607,6 +609,7 @@ export const SEED_TEMPLATES: ActivityTemplate[] = [
   WORKSPACE_HYGIENE_OBSERVER_TICK_TEMPLATE,
   SELF_FACT_RECONCILE_TICK_TEMPLATE,
   GAP_CHECK_SUPPLY_TICK_TEMPLATE,
+  SCOPE_EARN_IN_TICK_TEMPLATE,
   PRUNE_STALE_MITOSIS_TICK_TEMPLATE,
   LEARNING_SIGNAL_HEALTH_OBSERVER_TICK_TEMPLATE,
   SELECTOR_SATURATION_AUDIT_TICK_TEMPLATE,

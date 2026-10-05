@@ -144,6 +144,23 @@ export function onlyTestsPattern(onlyTests: string[]): string {
 /** POSIX single-quoting: nothing inside '...' is special to sh. */
 const shq = (s: string): string => `'${s.replace(/'/g, `'\\''`)}'`;
 
+/**
+ * THE MUTATION RUNNER (scope earn-in, 2026-10-05). "Covered" means a mutation (WIRING 10-03): a regression class
+ * counts as covered only if removing the shipped guard makes an armed test go red. The guard is the change a commit
+ * made to one file (the landing that fixed the regression, or the revert that removed it), so the mutation is that
+ * commit's diff on that file, REVERSE-APPLIED inside the detached base-tree worktree ($BW): never in the clone, and
+ * only on a pinned tree. Prints MUTATION_APPLIED=1 when the file changed, MUTATION_FAILED=1 otherwise (the commit
+ * did not touch the file, or its change no longer applies at the pinned tree). sha and file are validated by the
+ * caller (MUTATE_SHA_RE / MUTATE_FILE_RE) before they reach this text.
+ */
+export const MUTATE_SHA_RE = /^[0-9a-f]{7,40}$/;
+export const MUTATE_FILE_RE = /^[A-Za-z0-9_][A-Za-z0-9_./-]*$/;
+export function mutationRevertScript(sha: string, file: string): string {
+  const d = `"$BW.mutation.diff"`;
+  return `if git -C "$BW" diff --no-color ${sha}^ ${sha} -- ${shq(file)} > ${d} 2>/dev/null && [ -s ${d} ] && git -C "$BW" apply -R ${d} >/dev/null 2>&1; ` +
+    `then echo "MUTATION_APPLIED=1"; else echo "MUTATION_FAILED=1"; fi; rm -f ${d}`;
+}
+
 export async function resolveTestSuite(pointer: Record<string, unknown>): Promise<ResolverResult> {
   const rawVessel = typeof pointer.vessel === "string" ? pointer.vessel.trim() : "";
   if (!rawVessel) {
@@ -158,6 +175,19 @@ export async function resolveTestSuite(pointer: Record<string, unknown>): Promis
   const onlyTestsBad = onlyTestsProblem(pointer.only_tests);
   if (onlyTestsBad) {
     return { shape: "structuredError", body: { resolver: "test_suite", failure_mode: "validation_rejected", field: onlyTestsBad.field, detail: onlyTestsBad.detail } };
+  }
+  // mutate_revert {sha, file}: the mutation runner (mutationRevertScript). Only on a pinned tree (base_ref), and
+  // refused outright when malformed: a mutation silently dropped would run the unmutated tree and read as "survives".
+  const mutateRaw = pointer.mutate_revert as { sha?: unknown; file?: unknown } | undefined;
+  let mutate: { sha: string; file: string } | null = null;
+  if (mutateRaw !== undefined && mutateRaw !== null) {
+    const sha = typeof mutateRaw.sha === "string" ? mutateRaw.sha.trim() : "";
+    const file = typeof mutateRaw.file === "string" ? mutateRaw.file.trim() : "";
+    const pinned = typeof pointer.base_ref === "string" && /^(HEAD|[0-9a-f]{7,40})$/.test(pointer.base_ref.trim());
+    if (!pinned || !MUTATE_SHA_RE.test(sha) || !MUTATE_FILE_RE.test(file) || file.includes("..")) {
+      return { shape: "structuredError", body: { resolver: "test_suite", failure_mode: "validation_rejected", field: "mutate_revert", detail: "mutate_revert needs base_ref (HEAD or a sha), a commit sha and a vessel-relative file path (no '..'); a mutation runs only on a pinned tree" } };
+    }
+    mutate = { sha, file };
   }
   const rel = `repos/${name}`;
   const preferredRoot = `${VESSEL_CLONES_ROOT}/${name}`;
@@ -237,7 +267,9 @@ export async function resolveTestSuite(pointer: Record<string, unknown>): Promis
       `git -C "$ROOT" worktree prune >/dev/null 2>&1; BW="$(mktemp -d /tmp/test-suite-base-XXXXXX)"; ` +
       `if [ -d "$ROOT/node_modules" ] && git -C "$ROOT" worktree add -q --detach "$BW" ${baseRef} >/dev/null 2>&1; then ` +
       `ln -s "$ROOT/node_modules" "$BW/node_modules"; echo "VERIFIED_ROOT=$BW"; echo "VERIFIED_HEAD=$(git -C "$BW" rev-parse --short HEAD 2>/dev/null || echo unknown)"; ` +
-      `(cd "$BW" && ${bunRun}); fi; ` +
+      (mutate
+        ? `MUT="$(${mutationRevertScript(mutate.sha, mutate.file)})"; echo "$MUT"; case "$MUT" in *MUTATION_APPLIED=1*) (cd "$BW" && ${bunRun});; esac; fi; `
+        : `(cd "$BW" && ${bunRun}); fi; `) +
       `git -C "$ROOT" worktree remove --force "$BW" >/dev/null 2>&1; rm -rf "$BW"; git -C "$ROOT" worktree prune >/dev/null 2>&1; true`
     : `ROOT=${shq(preferredRoot)}; [ -d "$ROOT" ] || ROOT=${shq(fallbackRoot)}; ` +
       `echo "VERIFIED_ROOT=$ROOT"; echo "VERIFIED_HEAD=$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)"; ` +
@@ -293,6 +325,8 @@ export async function resolveTestSuite(pointer: Record<string, unknown>): Promis
       test_file: testFile || null,
       base_ref: baseRef || null,
       requested_not_passing: ran || onlyTests.length === 0 ? requestedNotPassing : null,
+      // The mutation actually changed the pinned tree's file; a run without it measured nothing about coverage.
+      ...(mutate ? { mutation: { sha: mutate.sha, file: mutate.file, applied: /^MUTATION_APPLIED=1$/m.test(raw) } } : {}),
       skip: parsed.skip,
       failingTests: parsed.failingTests.slice(0, 25),
       timestamp: new Date().toISOString(),

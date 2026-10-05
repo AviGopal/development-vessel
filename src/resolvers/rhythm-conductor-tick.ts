@@ -181,6 +181,9 @@ export const FAMILY_RESOLVERS: Record<string, Record<string, unknown>> = {
   // test reads red at HEAD (gap-check-supply.ts). settled_by "report": the resolver settles its own family from
   // its report when it completes, so the conductor never credits it for an exit (directFamilySettlement).
   "gap-check-supply": { type: "gap_check_supply_tick", settled_by: "report" },
+  // Proposes autonomyScope changes by the adopted earn-in criterion (scope-earn-in.ts); runs must-fails and mutations
+  // for minutes, so it too settles its own family from its report.
+  "scope-earn-in": { type: "scope_earn_in_tick", settled_by: "report" },
 };
 
 /**

@@ -286,7 +286,7 @@ async function emitOrphanGap(
       pointer: {
         type: "substrateGap_write",
         gap: {
-          id: `orphaned-capability-${shape}`,
+          id: `orphaned-capability-${shape.replace(/-/g, "_")}`,
           category: "orphaned_capability",
           source: "substrate_detected",
           summary:

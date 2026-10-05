@@ -189,6 +189,9 @@ describe("a landing over the lane's own semantic dissent is partial, and the dis
     const bound = { ...metaOf(PARENT_ROW), landed_unverified: true, landed_unverified_sha: LANDED_SHA };
     expect(reason(bound, LANDED_SHA.slice(0, 12), false)).toBe("landed_partial");
     expect(reason(bound, "2222222bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", false)).toBe("landed_verified");
+    // An unknown or too-short closing sha cannot prove the flag belongs to another landing.
+    expect(reason(bound, "", false)).toBe("landed_partial");
+    expect(reason(bound, "abc", false)).toBe("landed_partial");
   });
 
   it("MUST-FAIL (e, cutover): the gap-row stamp binds landed_unverified to the new sha and clears it on a verified landing", () => {

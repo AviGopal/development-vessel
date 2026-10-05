@@ -3794,7 +3794,8 @@ export function landedUnverifiedHere(meta: Record<string, unknown> | null | unde
   const bound = typeof m["landed_unverified_sha"] === "string" ? (m["landed_unverified_sha"] as string).trim() : "";
   if (bound === "") return true;
   const s = String(sha ?? "").trim();
-  return s.length >= 7 && (bound.startsWith(s) || s.startsWith(bound));
+  if (s.length < 7) return true; // the closing landing is unknown: partial is the safe reading
+  return bound.startsWith(s) || s.startsWith(bound);
 }
 /**
  * The closed_reason for a landing close: landed_partial under a dissent or when the cutover stamped the landing

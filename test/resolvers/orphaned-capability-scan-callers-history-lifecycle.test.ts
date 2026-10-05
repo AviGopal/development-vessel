@@ -393,6 +393,86 @@ describe("orphaned-capability-scan: callers, history and lifecycle", () => {
     expect(body.capability_orphans).not.toContain("widget_render");
   });
 
+  // ---- 2b. the caller rule as a CLASS -----------------------------------------------------------
+  //
+  // The test above puts three registration forms on ONE shape and two names it literally, so a patch
+  // that hand-lists those names (the b5147869 `SELF_REGISTRATION = new Set([...])` instance) or
+  // recognises only those three syntaxes passes it. Below, every shape name is random per run (no
+  // literal list can match), each REGISTRATION form stands alone on its own shape, and each CALL form
+  // (a pointer:{type} or a resolve call, single- and multi-line — the multi-line form is the
+  // majority in this fleet) stands alone too, in another vessel AND in the producer's own vessel.
+
+  const RUN = Math.random().toString(16).slice(2, 10);
+  const REG_FORMS: Array<{ form: string; shape: string; files: (s: string) => Record<string, string> }> = [
+    { form: "discovery list entry", shape: `rf_list_${RUN}`, files: (s) => ({ "repos/regonly-vessel/src/config.ts": `export const RESOLVER_SHAPES = [\n  "residual_shape_discovery",\n  "${s}",\n];\n` }) },
+    { form: "case label", shape: `rf_case_${RUN}`, files: (s) => ({ "repos/regonly-vessel/src/routes/impulses.ts": `export function route(t: string) {\n  switch (t) {\n    case "${s}":\n      return 1;\n  }\n  return 0;\n}\n` }) },
+    { form: "SUPPORTED_SHAPES set", shape: `rf_set_${RUN}`, files: (s) => ({ "repos/regonly-vessel/src/shapes.ts": `export const SUPPORTED_SHAPES = new Set<string>(["${s}"]);\n` }) },
+    { form: "pointer interface member", shape: `rf_iface_${RUN}`, files: (s) => ({ "repos/regonly-vessel/src/resolvers/iface.ts": `export interface IfacePointer {\n  type: "${s}";\n  goal?: string;\n}\n` }) },
+    { form: "error-envelope resolver name", shape: `rf_err_${RUN}`, files: (s) => ({ "repos/regonly-vessel/src/resolvers/err.ts": `export function fail(detail: string) {\n  return { shape: "structuredError", body: { resolver: "${s}", error: detail } };\n}\n` }) },
+  ];
+  const CALL_FORMS: Array<{ form: string; code: (s: string) => string }> = [
+    { form: "single-line pointer:{type}", code: (s) => `declare function resolve(i: unknown): Promise<unknown>;\nexport const a = () => resolve({ pointer: { type: "${s}", id: "x" } });\n` },
+    { form: "multi-line pointer:{type}", code: (s) => `declare function resolve(i: unknown): Promise<unknown>;\nexport async function b(goal: string) {\n  return resolve({\n    pointer: {\n      type: "${s}",\n      goal,\n    },\n  });\n}\n` },
+    { form: "single-line resolve call impulse:{type}", code: (s) => `export const c = (url: string) => fetch(url, { method: "POST", body: JSON.stringify({ impulse: { type: "${s}", gap_id: "g" } }) });\n` },
+    { form: "multi-line resolve call impulse:{type}", code: (s) => `export async function d(url: string) {\n  return fetch(url, {\n    method: "POST",\n    body: JSON.stringify({\n      impulse: {\n        type: "${s}",\n        name: "n",\n      },\n    }),\n  });\n}\n` },
+  ];
+  /** Each call form on its own shape, once from another vessel ("cx") and once from the producer's own ("co"). Every shape is also registered by its producer. */
+  function callFixtures(): { shapes: string[]; files: Record<string, string> } {
+    const shapes: string[] = [];
+    const files: Record<string, string> = {};
+    const reg: string[] = [];
+    CALL_FORMS.forEach((f, i) => {
+      for (const where of ["cx", "co"] as const) {
+        const s = `${where}_f${i}_${RUN}`;
+        shapes.push(s);
+        reg.push(s);
+        const rel = where === "cx" ? `repos/consumer-vessel/src/call-${i}.ts` : `repos/producer-vessel/src/resolvers/delegate-${i}.ts`;
+        files[rel] = f.code(s);
+      }
+    });
+    files["repos/producer-vessel/src/config.ts"] = `export const RESOLVER_SHAPES = [\n${reg.map((s) => `  "${s}",`).join("\n")}\n];\n`;
+    files["repos/producer-vessel/src/routes/impulses.ts"] = `export function route(t: string) {\n  switch (t) {\n${reg.map((s) => `    case "${s}":\n      return 1;`).join("\n")}\n  }\n  return 0;\n}\n`;
+    return { shapes, files };
+  }
+
+  it("own registration is not a caller (class): each registration form ALONE — discovery entry, case label, SUPPORTED_SHAPES, pointer interface, error-envelope resolver name — leaves its random-named shape orphaned", async () => {
+    for (const f of REG_FORMS) for (const [rel, c] of Object.entries(f.files(f.shape))) put(ws, rel, c);
+    const store = new GapStore();
+    const shapes = REG_FORMS.map((f) => f.shape);
+    wire({ liveShapes: [...shapes, "fs_read"], store });
+    const body = await scan({ emit_gaps: false });
+    expectWired(body, shapes.length + 1);
+    expect(body.orphan_candidate_count).toBe(shapes.length);
+    const missing = REG_FORMS.filter((f) => !(body.capability_orphans as string[]).includes(f.shape)).map((f) => f.form);
+    expect(missing, "registration forms counted as a caller").toEqual([]);
+  });
+
+  it("control (class): each CALL form alone — pointer:{type} and resolve-call impulse:{type}, single- and multi-line, from another vessel and from the producer's own — keeps its random-named shape off the orphan list", async () => {
+    const { shapes, files } = callFixtures();
+    for (const [rel, c] of Object.entries(files)) put(ws, rel, c);
+    const store = new GapStore();
+    wire({ liveShapes: [...shapes, "fs_read"], store });
+    const body = await scan({ emit_gaps: false });
+    expectWired(body, shapes.length + 1);
+    expect(body.orphan_candidate_count).toBe(shapes.length);
+    const lost = shapes.filter((s) => (body.capability_orphans as string[]).includes(s));
+    expect(lost, "call forms not counted as a caller").toEqual([]);
+  });
+
+  it("caller rule (class): in one workspace holding both, the orphan list is EXACTLY the registration-only shapes — no call-form shape, no registration-only shape missing", async () => {
+    for (const f of REG_FORMS) for (const [rel, c] of Object.entries(f.files(f.shape))) put(ws, rel, c);
+    const { shapes: called, files } = callFixtures();
+    for (const [rel, c] of Object.entries(files)) put(ws, rel, c);
+    const regOnly = REG_FORMS.map((f) => f.shape);
+    const store = new GapStore();
+    wire({ liveShapes: [...regOnly, ...called, "fs_read"], store });
+    const body = await scan({ emit_gaps: false });
+    expectWired(body, regOnly.length + called.length + 1);
+    const ours = new Set([...regOnly, ...called]);
+    const got = (body.capability_orphans as string[]).filter((s) => ours.has(s)).sort();
+    expect(got).toEqual([...regOnly].sort());
+  });
+
   // ---- 3. roots ----------------------------------------------------------------------------------
 
   it("positive-control root: a known caller under scripts/ or packages/ (outside repos/) is found, so the shape is not orphaned", async () => {

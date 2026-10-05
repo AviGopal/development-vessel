@@ -23,7 +23,7 @@
 // Hermetic: the gap store, scope, rhythm, check runner and human report are injected fakes; the pool is the real
 // store pointed at this file's own temp file (never the workspace's); fetch is a guard that records any
 // call as a violation; host-lifecycle exec is blocked. The one real subprocess is git on a temp repository.
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -562,5 +562,74 @@ describe("scope earn-in: the mutation runner is test_suite's base-tree run (must
     expect(readFileSync(join(repo, "src", "f.ts"), "utf8")).toContain("guard");
     const out2 = execFileSync("bash", ["-c", `BW=${JSON.stringify(wt)}; ${revert ? revert(guardSha, "src/g.ts") : "echo none"}`], { encoding: "utf8" });
     expect(out2).toContain("MUTATION_FAILED=1");
+  });
+});
+
+describe("scope earn-in: every tick says why each excluded file cannot qualify (must-fail at base)", () => {
+  it("the report carries an outcome and a reason key for EVERY excluded entry, and one journal line counts them", async () => {
+    gaps = [regression("reg-a1", FILE_A), regression("reg-b2", FILE_B, { evidence_resolve: undefined, falsifier: { class: "unset" } }), regression("reg-c1", FILE_C)];
+    survives.add("guards reg-c1");
+    const spy = spyOn(console, "log").mockImplementation(() => {});
+    let body: Row;
+    let lines: string[] = [];
+    try { body = await tick(); } finally { lines = spy.mock.calls.map((c) => String(c[0])); spy.mockRestore(); }
+    const ev = body!["evaluated"] as Row[];
+    // Every excluded entry is accounted for, each with a non-empty reason and a reason key.
+    expect(ev.map((e) => e["path"]).sort()).toEqual([...BASE_EXCLUDED].sort());
+    for (const e of ev) {
+      expect(String(e["reason"] ?? "").length).toBeGreaterThan(0);
+      expect(String(e["reason_key"] ?? "").length).toBeGreaterThan(0);
+    }
+    const key = (p: string) => ev.find((e) => e["path"] === p)!["reason_key"];
+    expect(key(FILE_A)).toBe("qualified");
+    expect(key(FILE_B)).toBe("unmapped_regression");
+    expect(key(FILE_C)).toBe("survives_mutation");
+    expect(key(GLUE)).toBe("runtime_glue");
+    expect(key("repos/identity-vessel/")).toBe("directory");
+    const counts = body!["by_reason"] as Record<string, number>;
+    expect(Object.values(counts).reduce((a, b) => a + b, 0)).toBe(BASE_EXCLUDED.length);
+    expect(counts["qualified"]).toBe(1);
+    // One compact journal line: verdict counts, reason counts, and file:reason pairs.
+    const line = lines.filter((l) => l.startsWith("[scope-earn-in] tick:"));
+    expect(line.length).toBe(1);
+    expect(line[0]).toContain(`${BASE_EXCLUDED.length} excluded entr(ies)`);
+    expect(line[0]).toContain("qualified=1");
+    expect(line[0]).toContain('"unmapped_regression":1');
+    expect(line[0]).toContain("development-vessel/src/resolvers/fixture-earn-b.ts:unmapped_regression");
+  });
+
+  it("a missing runtime pin is named as its own reason, not folded into not_covered", async () => {
+    gaps = [regression("reg-a1", FILE_A)];
+    runtimePin = null;
+    const spy = spyOn(console, "log").mockImplementation(() => {});
+    let body: Row;
+    try { body = await tick(); } finally { spy.mockRestore(); }
+    expect((body!["evaluated"] as Row[]).find((e) => e["path"] === FILE_A)!["reason_key"]).toBe("no_runtime_pin");
+    expect((body!["by_reason"] as Record<string, number>)["no_runtime_pin"]).toBe(1);
+  });
+});
+
+describe("scope earn-in: a tightening hold carries its regression's lineage (must-fail at base)", () => {
+  it("a hold placed by the evaluator names the evidence gap and that gap's own check", async () => {
+    gaps = [regression("reg-t1", IN_SCOPE, { regressed_by: { sha: "0badc0de", revert_sha: null, by: "gap-sweep" }, landed_sha: undefined }, "open")];
+    propose(IN_SCOPE, "tighten", { ttl_hours: 48 });
+    await apply();
+    const hold = ((scopeRow()["body"] as Row)["tightening_holds"] as Row[])[0]!;
+    expect(hold["lineage_roots"]).toEqual(["reg-t1"]);
+    expect(hold["lineage_checks"]).toEqual(["test/resolvers/fixture-earn.test.ts|guards reg-t1"]);
+  });
+
+  it("a hold placed before it carried its lineage is backfilled from its tighten change record, without a new change", async () => {
+    gaps = [regression("reg-t1", IN_SCOPE, { regressed_by: { sha: "0badc0de", revert_sha: null, by: "gap-sweep" }, landed_sha: undefined }, "open")];
+    // The live shape of the first tick's holds: path, expiry, no lineage; the change record names the evidence gap.
+    const w = pool.resolvePoolImpulseWrite({ type: "poolImpulse_write", id: SCOPE_ID, shape: "autonomyScope", body: { excluded_paths: [...BASE_EXCLUDED, IN_SCOPE], require_falsifier_classes: ["class2"], tightening_holds: [{ path: IN_SCOPE, expires_at: new Date(nowMs + 72 * 3600_000).toISOString(), placed_at: new Date(nowMs).toISOString(), by: "scope_earn_in_apply" }] } }, { operator: false, evaluator: "scope_earn_in_apply" } as never);
+    expect(w.body.ok).toBe(true);
+    pool.resolvePoolImpulseWrite({ type: "poolImpulse_write", id: "scope-change-old", shape: "autonomyScopeChange", body: { path: IN_SCOPE, change: "tighten", applied_by: "scope_earn_in_apply", seq: 1, evidence: [{ gap_id: "reg-t1" }], prior_excluded_paths: BASE_EXCLUDED, excluded_paths_after: [...BASE_EXCLUDED, IN_SCOPE] } });
+    const r = await apply();
+    expect(r["applied"]).toEqual([]);
+    const hold = ((scopeRow()["body"] as Row)["tightening_holds"] as Row[])[0]!;
+    expect(hold["lineage_roots"]).toEqual(["reg-t1"]);
+    expect(excludedNow()).toContain(IN_SCOPE);
+    expect(changes().length).toBe(1);
   });
 });

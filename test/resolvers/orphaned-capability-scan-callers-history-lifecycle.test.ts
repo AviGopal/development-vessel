@@ -531,6 +531,81 @@ describe("orphaned-capability-scan: callers, history and lifecycle", () => {
     expect(store.writesFor(id, "open")).toHaveLength(0);
   });
 
+  // ---- 4a. fingerprint suppression + dedupe as a CLASS ------------------------------------------
+  //
+  // lifecycle (a) seeds the literal "stale-fingerprint", and the flood guard re-scans two shapes once,
+  // so "suppress unless the fingerprint is that string" or "never suppress a closed row" pass what the
+  // check selected. Below: stale fingerprints are random per run; one store mixes CURRENT and stale
+  // rows and must re-emit exactly the stale set; the fingerprint must be a deterministic function of
+  // the shape (a random or time-based one would never be "current" and would re-flood every tick);
+  // and dedupe must still emit a shape that is new. Rejected rows here never carry no_live_producer
+  // (that reopen belongs to the flap guard).
+
+  const fpShape = (i: number) => `fp_${i}_${RUN}`;
+  const gid = (s: string) => `orphaned-capability-${s}`;
+  const openFingerprint = (store: GapStore, s: string): unknown => store.writesFor(gid(s), "open").at(-1)?.classification_metadata?.fingerprint;
+
+  it("fingerprint class: in ONE store, rows closed under their CURRENT fingerprint stay suppressed while closed/rejected rows with random stale fingerprints re-emit — exactly the stale set", async () => {
+    const shapes = [0, 1, 2, 3, 4].map(fpShape);
+    const store = new GapStore();
+    wire({ liveShapes: [...shapes, "fs_read"], store });
+    const first = await scan();
+    expectWired(first, shapes.length + 1);
+    for (const s of shapes) expect(typeof openFingerprint(store, s), `first emit of ${s} carries a fingerprint`).toBe("string");
+    // 0,1: closed as of the current fingerprint. 2,3: closed under a stale one. 4: rejected (operator) under a stale one.
+    for (const i of [0, 1]) store.gaps.set(gid(shapes[i]!), { ...store.gaps.get(gid(shapes[i]!))!, status: "closed" });
+    for (const i of [2, 3]) {
+      const row = store.gaps.get(gid(shapes[i]!))!;
+      store.gaps.set(gid(shapes[i]!), { ...row, status: "closed", classification_metadata: { ...row.classification_metadata, fingerprint: `stale-${crypto.randomUUID()}` } });
+    }
+    {
+      const row = store.gaps.get(gid(shapes[4]!))!;
+      store.gaps.set(gid(shapes[4]!), { ...row, status: "rejected", classification_metadata: { ...row.classification_metadata, fingerprint: `stale-${crypto.randomUUID()}`, rejected_reason: "operator_retired", rejected_by: "operator", terminal: false } });
+    }
+    store.resetWrites();
+    const second = await scan();
+    expectWired(second, shapes.length + 1);
+    const reopened = [...new Set(store.writes.filter((w) => w.status === "open").map((w) => w.id))].sort();
+    expect(reopened).toEqual([2, 3, 4].map((i) => gid(shapes[i]!)).sort());
+    for (const i of [2, 3, 4]) expect(openFingerprint(store, shapes[i]!)).toBe(store.gaps.get(gid(shapes[i]!))!.classification_metadata!.fingerprint);
+  });
+
+  it("fingerprint class: the fingerprint is deterministic — two fresh stores scanning the same fixture write the same fingerprint per shape, and distinct shapes get distinct fingerprints", async () => {
+    const shapes = [5, 6, 7].map(fpShape);
+    const fps: Array<Record<string, unknown>> = [];
+    for (let run = 0; run < 2; run++) {
+      const store = new GapStore();
+      wire({ liveShapes: [...shapes, "fs_read"], store });
+      const body = await scan();
+      expectWired(body, shapes.length + 1);
+      fps.push(Object.fromEntries(shapes.map((s) => [s, openFingerprint(store, s)])));
+    }
+    for (const s of shapes) expect(typeof fps[0]![s], `fingerprint for ${s}`).toBe("string");
+    expect(fps[1]).toEqual(fps[0]!);
+    expect(new Set(shapes.map((s) => fps[0]![s])).size).toBe(shapes.length);
+  });
+
+  it("dedupe class: across repeated unchanged re-scans nothing is re-written, and a shape that becomes orphaned later still emits exactly once", async () => {
+    const [a, b, c] = [8, 9, 10].map(fpShape) as [string, string, string];
+    const store = new GapStore();
+    wire({ liveShapes: [a, b, "fs_read"], store });
+    const first = await scan();
+    expectWired(first, 3);
+    expect(first.gaps_emitted).toBe(2);
+    for (let k = 0; k < 3; k++) {
+      store.resetWrites();
+      const again = await scan();
+      expectWired(again, 3);
+      expect(again.capability_orphan_count).toBe(2);
+      expect(store.writes.filter((w) => w.status === "open").map((w) => w.id)).toEqual([]);
+    }
+    store.resetWrites();
+    wire({ liveShapes: [a, b, c, "fs_read"], store });
+    const grown = await scan();
+    expectWired(grown, 4);
+    expect(store.writes.filter((w) => w.status === "open").map((w) => w.id)).toEqual([gid(c)]);
+  });
+
   it("lifecycle (b): retiring an unreachable orphan gap is a TYPED reject — actor, at, reason — and non-terminal", async () => {
     const store = new GapStore();
     store.seed({ id: "orphaned-capability-gone_shape", status: "open", classification_metadata: { shape: "gone_shape" } });

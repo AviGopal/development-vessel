@@ -56,6 +56,7 @@ const GUARD = "a1b2c3d4e5f6a7b8c9d0a1b2c3d4e5f6a7b8c9d0";
 const RUNTIME = "0123456789abcdef0123456789abcdef01234567";
 const EVAL_FILE = `repos/${V}/src/resolvers/scope-earn-in.ts`;
 const BASE_EXCLUDED = [FILE_A, FILE_B, FILE_C, GLUE, UNIT_GLUE, "repos/identity-vessel/"];
+const FIXTURE_OPERATIONAL = new Set([FILE_A, FILE_B, FILE_C, IN_SCOPE, GLUE, UNIT_GLUE, "repos/identity-vessel/"]);
 
 const originalFetch = globalThis.fetch;
 let violations: string[] = [];
@@ -209,7 +210,9 @@ beforeEach(() => {
     unitsText: () => unitsText,
     runtimeSha: () => runtimePin,
     readFileAt: (vessel: string, sha: string, path: string) => { sourceReads.push({ vessel, sha, path }); return treeFiles.has(path) ? treeFiles.get(path)! : null; },
-    testFilesMentioning: (_vessel: string, _sha: string, needle: string) => (listFails ? null : [...treeFiles.entries()].filter(([p, c]) => /\.test\.ts$/.test(p) && c !== null && c.includes(needle)).map(([p]) => p).sort()),
+    // The fixtures are OPERATIONAL here (fixture-only); every real path is classified by the shipped table.
+    classify: (path: string) => (FIXTURE_OPERATIONAL.has(path) ? { class: "operational", reason: "test fixture" } : ((earn?.["SCOPE_CLASSIFICATION"] as Record<string, Row> | undefined)?.[path] as never) ?? null),
+    testFilesMentioning: (_vessel: string, _sha: string, needle: string) => (listFails ? null : [...treeFiles.entries()].filter(([p, c]) => /\.test\.ts$/.test(p) && c !== null && c.includes(needle)).map(([p]) => p)),
     now: () => nowMs,
   });
 });
@@ -927,11 +930,14 @@ describe("scope earn-in: qualify rule (a), the file's own tests kill its mutants
 const NEVER = [
   "src/resolvers/write-containment.ts", "src/resolvers/super-repo-checkout.ts", "src/resolvers/behavioral-verification.ts",
   "src/removed-line-predicate.ts", "src/vacuous-edit.ts", "src/resolvers/staged-mitosis-gate.ts", "src/resolvers/push-policy.ts",
-];
+  // qa 10-05 (second ruling): push capability, landing stage, pre-land gate, settlement, ingress, bootstrap config, the
+  // judge's own tests; the credit writer lives in activity-api (below).
+  "src/resolvers/git-push.ts", "src/resolvers/vessel-mitosis-cutover.ts", "src/resolvers/vessel-mitosis-evaluate.ts",
+  "src/resolvers/attempt-register.ts", "src/routes/impulses.ts", "src/config.ts", "test/resolvers/system-authored-gap-checks.test.ts",
+].map((rel) => ({ path: `repos/${V}/${rel}`, rel })).concat([{ path: "repos/activity-api/src/lib/posterior-update.ts", rel: "src/lib/posterior-update.ts" }]);
 describe("scope earn-in: never-propose trust-boundary modules (must-fail at base)", () => {
-  for (const rel of NEVER) {
-    it(`${rel}: never proposed by the tick and refused by the evaluator, even when its tests kill every mutant`, async () => {
-      const path = `repos/${V}/${rel}`;
+  for (const { path, rel } of NEVER) {
+    it(`${path}: never proposed by the tick and refused by the evaluator, even when its tests kill every mutant`, async () => {
       seedScope([...BASE_EXCLUDED, path]);
       treeFiles.set(rel, TARGET_SRC);
       treeFiles.set(COVER_TEST, `import "../../${rel.replace(/\.ts$/, ".js")}";\n`);
@@ -1012,5 +1018,125 @@ describe("scope earn-in: the exit counts widenings under ONE criterion version (
     const m = earn!.scopeEarnInExitMetric([rec(1, "widen", NEW_VERSION, "operator"), rec(2, "widen", NEW_VERSION)], "operator");
     expect(m["consecutive_without_operator_edit"]).toBe(0);
     expect(m["exit_met"]).toBe(false);
+  });
+});
+
+// EVERY EXCLUDED ENTRY IS CLASSIFIED (qa 10-05, second ruling): JUDGE/TRUST (never proposable; it evolves only by a future
+// gate-evolution shadow promotion) or OPERATIONAL (earn-in eligible), as data in code with a reason each. An entry the
+// table does not classify is refused (fail closed). The live record's 46 entries on node1, 10-05 22:45Z:
+const LIVE_EXCLUDED_10_05 = [
+  "repos/cycle-demo-3/", "repos/discovery-vessel/", "repos/human-surface-vessel/", "repos/identity-vessel/", "scripts/substrate/",
+  "scripts/bootstrap-seeder.ts",
+  "repos/activity-api/src/lib/posterior-update.ts", "repos/boredom-vessel/src/index.ts", "repos/llm-resolver-vessel/src/index.ts",
+  "repos/goal-host-vessel/src/index.ts", "repos/goal-host-vessel/src/goal-target-inference.ts", "repos/concept-db/tests/write-shapes.test.ts",
+  ...[
+    "src/config.ts", "src/index.ts", "src/routes/impulses.ts", "src/removed-line-predicate.ts", "src/vacuous-edit.ts",
+    "src/lib/caller-credential.ts", "src/lib/self-auth.ts",
+    "src/resolvers/attempt-register.ts", "src/resolvers/git-push.ts", "src/resolvers/maintenance-lease.ts", "src/resolvers/push-policy.ts",
+    "src/resolvers/vessel-mitosis-cutover.ts", "src/resolvers/vessel-mitosis-evaluate.ts", "src/resolvers/write-containment.ts",
+    "src/resolvers/super-repo-checkout.ts", "src/resolvers/behavioral-verification.ts", "src/resolvers/staged-mitosis-gate.ts",
+    "src/resolvers/apply-proposal-as-patch.ts", "src/resolvers/gap-lifecycle-scan.ts", "src/resolvers/pull-cutover.ts",
+    "src/resolvers/substrate-gap.ts", "src/resolvers/composer-interruption-sweep.ts",
+    "src/resolvers/feature-compose.ts", "src/resolvers/gap-to-feature.ts", "src/resolvers/pool-impulse.ts", "src/resolvers/rhythm-conductor-tick.ts",
+    "src/resolvers/self-fact-reconcile.ts", "src/resolvers/scope-earn-in.ts", "src/resolvers/test-suite.ts", "src/resolvers/retry-evidence.ts",
+    "test/resolvers/scope-earn-in.test.ts", "test/resolvers/evaluator-grant-scan.test.ts", "test/resolvers/scope-change-pin.test.ts",
+    "test/resolvers/system-authored-gap-checks.test.ts",
+  ].map((r) => `repos/${V}/${r}`),
+];
+const OPERATIONAL_10_05 = [
+  "repos/cycle-demo-3/", "repos/boredom-vessel/src/index.ts", "repos/llm-resolver-vessel/src/index.ts",
+  "repos/goal-host-vessel/src/goal-target-inference.ts", "repos/concept-db/tests/write-shapes.test.ts",
+  `repos/${V}/src/resolvers/maintenance-lease.ts`, `repos/${V}/src/resolvers/composer-interruption-sweep.ts`,
+];
+describe("scope earn-in: every excluded entry is classified judge/trust or operational (must-fail at base)", () => {
+  it("the shipped table classifies all 46 live entries, each with a reason; exactly the operational set is earn-in eligible", () => {
+    expect(LIVE_EXCLUDED_10_05.length).toBe(46);
+    const table = earn?.["SCOPE_CLASSIFICATION"] as Record<string, { class: string; reason: string }> | undefined;
+    expect(table).toBeDefined();
+    const missing = LIVE_EXCLUDED_10_05.filter((p) => !table![p]);
+    expect(missing).toEqual([]);
+    for (const p of LIVE_EXCLUDED_10_05) {
+      expect(["judge_trust", "operational"]).toContain(table![p]!.class);
+      expect(table![p]!.reason.length).toBeGreaterThan(8);
+    }
+    expect(LIVE_EXCLUDED_10_05.filter((p) => table![p]!.class === "operational").sort()).toEqual([...OPERATIONAL_10_05].sort());
+    // Every evaluator file is JUDGE/TRUST in the table too.
+    for (const f of earn!["EVALUATOR_FILES"] as string[]) expect(table![f]?.class).toBe("judge_trust");
+  });
+
+  it("FAIL CLOSED: an excluded entry the table does not classify is refused by the tick and the evaluator, whatever its coverage", async () => {
+    const ORPHAN = `repos/${V}/src/resolvers/fixture-unclassified.ts`;
+    seedScope([...BASE_EXCLUDED, ORPHAN]);
+    treeFiles.set("src/resolvers/fixture-unclassified.ts", TARGET_SRC);
+    treeFiles.set(COVER_TEST, `import "../../src/resolvers/fixture-unclassified.js";\n`);
+    const { body } = await quietTick();
+    expect(evOf(body, ORPHAN)["reason_key"]).toBe("unclassified");
+    expect(proposals().filter((p) => (p["body"] as Row)["path"] === ORPHAN)).toEqual([]);
+    propose(ORPHAN, "widen");
+    const r = await apply();
+    expect(r["applied"]).toEqual([]);
+    expect(String(((r["refused"] as Row[]).find((x) => x["path"] === ORPHAN) ?? {})["reason"])).toContain("unclassified");
+    expect(excludedNow()).toContain(ORPHAN);
+    // Absent from excluded_paths: refused by name, not read as a no-op.
+    seedScope(BASE_EXCLUDED);
+    propose(ORPHAN, "widen");
+    const r2 = await apply();
+    expect(String(((r2["refused"] as Row[]).find((x) => x["path"] === ORPHAN) ?? {})["reason"])).toContain("unclassified");
+  });
+
+  it("the tick report carries the classification of every excluded entry", async () => {
+    const { body } = await quietTick();
+    const cls = body["classification"] as Row[];
+    expect(cls.map((c) => c["path"]).sort()).toEqual([...BASE_EXCLUDED].sort());
+    for (const c of cls) { expect(c["class"]).toBe("operational"); expect(String(c["reason"]).length).toBeGreaterThan(0); }
+  });
+});
+
+describe("scope earn-in: which tests ran, and a shaped run budget per tick (must-fail at base)", () => {
+  const T = (n: number) => `test/resolvers/fixture-cover-${n}.test.ts`;
+  beforeEach(() => {
+    for (const n of [4, 2, 3, 1]) { treeFiles.set(T(n), `import { a } from "../../src/resolvers/fixture-earn-a.js";\n`); kills.set(T(n), "all"); }
+  });
+
+  it("the default cap of 3 importing tests keeps path order (whatever order the listing returns), and the tick logs the tests used per file", async () => {
+    const { body, lines } = await quietTick();
+    const e = evOf(body, FILE_A);
+    expect(e["tests_used"]).toEqual([T(1), T(2), T(3)]);
+    expect(e["importing_tests"]).toBe(4);
+    const line = lines.find((l) => l.startsWith("[scope-earn-in] coverage ") && l.includes("fixture-earn-a.ts"));
+    expect(line).toBeDefined();
+    expect(line!).toContain(`${T(1)}, ${T(2)}, ${T(3)}`);
+    expect(line!).toContain("of 4 importing");
+  });
+
+  it("the run budget is read from the rhythm body; exhausting it is unjudgeable_budget, never a pass, and stops further runs", async () => {
+    rhythm = dueRhythm({ max_test_runs_per_tick: 4 });
+    const { body } = await quietTick();
+    const e = evOf(body, FILE_A);
+    expect(e["verdict"]).toBe("unjudgeable");
+    expect(e["reason_key"]).toBe("unjudgeable_budget");
+    expect(proposals()).toEqual([]);
+    expect(checks.length).toBe(4);
+    expect(body["test_runs_used"]).toBe(4);
+    expect(body["test_runs_budget"]).toBe(4);
+    // Running out of budget is not evidence against the family: no beta.
+    expect(settled.map((x) => x.leg)).not.toContain("beta");
+  });
+
+  it("a budget that covers the work leaves the verdict unchanged and reports the runs used", async () => {
+    rhythm = dueRhythm({ max_test_runs_per_tick: 200 });
+    const { body } = await quietTick();
+    expect(evOf(body, FILE_A)["reason_key"]).toBe("qualified_by_coverage");
+    expect(body["test_runs_used"]).toBe(checks.length);
+    expect(Number(body["test_runs_used"])).toBeGreaterThan(0);
+  });
+
+  it("the evaluator applies the same budget to its own re-run", async () => {
+    propose(FILE_A, "widen");
+    rhythm = dueRhythm({ max_test_runs_per_tick: 2 });
+    const r = await apply();
+    expect(r["applied"]).toEqual([]);
+    expect(String(((r["refused"] as Row[])[0] ?? {})["reason"])).toContain("budget");
+    expect(checks.length).toBe(2);
   });
 });

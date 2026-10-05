@@ -118,6 +118,13 @@ export interface RhythmBody {
   beta?: number;
   staleness?: number;
   paces?: string;
+  /** Exploration (shaped, law 1): the least credit_mean the due formula uses, so a family whose posterior sank under
+   *  penalties still comes due in bounded time. Default EXPLORE_CREDIT_FLOOR. */
+  explore_credit_floor?: number;
+  /** Any of these marks the family PAUSED (rhythmPausedBy): never explored, never due, until lifted explicitly. */
+  hold?: unknown;
+  operator_pause?: unknown;
+  quarantine?: unknown;
 }
 interface RhythmImpulse {
   id?: string;
@@ -267,25 +274,54 @@ export function rhythmSettlementOverlay(
     : { beta: beta + 0.5, staleness: Math.max(0, staleness) };
 }
 
+/** The default exploration floor on credit_mean (rhythm body explore_credit_floor overrides it at use time). */
+export const EXPLORE_CREDIT_FLOOR = 0.1;
+
 /**
- * A rhythm's due-ness, the one formula: due_score = credit_mean * staleness / max(budget, 0.05), where staleness
- * accrues by the age of the impulse's last write (a day to saturate), except for gap-closing, whose staleness is
- * exactly what was stored. Read by the conductor and by any resolver that gates itself on its own family's rhythm
- * (gap-check-supply), so the two cannot disagree about whether a family is due.
+ * PAUSED (binding; REALIGNMENT §7 step 9: a hold is never lifted by outgrowing it). A family is paused when its budget
+ * exceeds 1 (the conductor's historical pause: never affordable) or its body carries hold, operator_pause or
+ * quarantine. A paused family gets no exploration and is never due, however stale, until the pause is lifted
+ * explicitly. Returns what paused it, or null.
+ */
+export function rhythmPausedBy(b: RhythmBody): string | null {
+  for (const k of ["hold", "operator_pause", "quarantine"] as const) {
+    const v = b[k];
+    if (v !== undefined && v !== null && v !== false) return k;
+  }
+  if (typeof b.budget === "number" && b.budget > 1) return "budget>1";
+  return null;
+}
+
+/**
+ * A rhythm's due-ness, the one formula:
+ *   due_score = max(credit_mean, explore_credit_floor) * staleness / max(budget, 0.05)
+ * where staleness accrues by the age of the impulse's last write (one per day) and is NOT capped at 1. Before
+ * 10-05 it saturated at 1, so any family with credit_mean / max(budget, 0.05) < 1 was permanently undue: node 1 had
+ * 7 of 14 such families (5 sunk by penalties, 2 paused). EXPLORATION: an unpaused family therefore comes due within
+ *   t_due <= 24 h * (threshold * max(budget, 0.05) / max(credit_mean, floor) - stored_staleness)
+ * of its last write; e.g. credit 1/11 (floored to 0.1), budget 0.2, threshold 1: 24 h * 0.2 / 0.1 = 48 h; at the
+ * default floor no unpaused family with budget <= 1 waits more than 24 h * 1 / 0.1 = 10 days. A family whose due score
+ * crossed the threshold before staleness reached 1 crosses it at exactly the same moment as before (the formula is
+ * unchanged below 1 whenever credit_mean >= the floor), so a healthy family's cadence is unchanged.
+ * gap-closing keeps its stored staleness. A PAUSED family (rhythmPausedBy) scores 0.
+ * Read by the conductor and by every resolver that gates itself on its own family's rhythm, so they cannot disagree.
  */
 export function rhythmDueScore(
   b: RhythmBody,
   updatedAt: unknown,
   nowMs: number = Date.now(),
-): { alpha: number; beta: number; staleness: number; budget: number; due_score: number } {
+): { alpha: number; beta: number; staleness: number; budget: number; due_score: number; paused_by: string | null } {
   const alpha = typeof b.alpha === "number" ? b.alpha : 1;
   const beta = typeof b.beta === "number" ? b.beta : 1;
   const rawStaleness = typeof b.staleness === "number" ? b.staleness : 0;
   const ageHours = typeof updatedAt === "string" ? (nowMs - new Date(updatedAt).getTime()) / 3600000 : 0;
-  const staleness = b.family === "gap-closing" ? rawStaleness : Math.min(1, rawStaleness + Math.max(0, ageHours) / 24);
+  const staleness = b.family === "gap-closing" ? rawStaleness : rawStaleness + Math.max(0, ageHours) / 24;
   const budget = typeof b.budget === "number" ? b.budget : 1;
   const denom = alpha + beta > 0 ? alpha + beta : 1;
-  return { alpha, beta, staleness, budget, due_score: (alpha / denom) * staleness / Math.max(budget, 0.05) };
+  const paused_by = rhythmPausedBy(b);
+  if (paused_by) return { alpha, beta, staleness, budget, due_score: 0, paused_by };
+  const floor = typeof b.explore_credit_floor === "number" && b.explore_credit_floor >= 0 && b.explore_credit_floor <= 1 ? b.explore_credit_floor : EXPLORE_CREDIT_FLOOR;
+  return { alpha, beta, staleness, budget, due_score: Math.max(alpha / denom, floor) * staleness / Math.max(budget, 0.05), paused_by: null };
 }
 
 /**
@@ -371,9 +407,10 @@ export async function resolveRhythmConductorTick(
   // 2. Score + affordability.
   const scored = rhythms.map((r) => {
     const b = r.body ?? {};
-    const { alpha, beta, staleness, budget, due_score } = rhythmDueScore(b, r.updated_at);
+    const { alpha, beta, staleness, budget, due_score, paused_by } = rhythmDueScore(b, r.updated_at);
+    // A paused family is never selected (rhythmPausedBy), whatever its score.
     const affordable =
-      budget <= 1 - bucketLoad / 3 && (b.axis === "presence" ? present : true);
+      !paused_by && budget <= 1 - bucketLoad / 3 && (b.axis === "presence" ? present : true);
     return {
       id: typeof r.id === "string" ? r.id : "",
       family: typeof b.family === "string" ? b.family : "",
@@ -592,19 +629,12 @@ export async function resolveRhythmConductorTick(
     // A resolver-backed family needs no goal text: it is dispatched directly below.
     if (members.length === 0 && !FAMILY_RESOLVERS[r.family]) {
       skipped.push({ family: r.family, reason: "no_goal_mapping" });
-      // A FAMILY THAT CANNOT BE DISPATCHED MUST LOSE CREDIT, OR IT IS SCORED FOREVER ON
-      // WORK IT NEVER DID. Without this the posterior only ever moved one way: alpha rose
-      // on every fire and beta was read, preserved, and never incremented anywhere — so a
-      // family's credit mean climbed toward 1 no matter what happened to it, and an
-      // unmappable family kept whatever standing it had accumulated indefinitely. That is
-      // fire-and-forget on a learning edge: a success signal recorded at initiation is an
-      // attempt log wearing an outcome label.
-      //
-      // Unmappable is the clearest possible negative and the one observed in practice: the
-      // conductor scored the family as due, found nothing to dispatch it to, and moved on.
-      // Penalising it makes a permanently-broken family decay out of contention instead of
-      // being re-scored every tick at undiminished credit.
-      await settleRhythm(r, "beta");
+      // It once settled beta here ("a family that cannot be dispatched must lose credit") so that an unmappable
+      // family would decay out of contention.
+      // CORRECTED 10-05 (REALIGNMENT §2.2): an unmapped family is a CONFIGURATION fact about this node (no
+      // rhythmFamilyGoal, no goal text, no resolver at this code version), not an observed outcome of the family's
+      // work. Settling beta here sank five families' credit until they could never come due again (credit 1/11 at
+      // budget 0.2). The skip is reported (skipped, structural_break) and settles NEITHER leg.
       continue;
     }
 

@@ -43,7 +43,7 @@ import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ResolverResult } from "./types.js";
 import { resolveSubstrateGap, resolveSubstrateGapWrite, takeBirthVerdict, class2PredicateKey, birthTreeMoved, BIRTH_PENDING_STALE_MS } from "./substrate-gap.js";
-import { createHash } from "node:crypto";
+import { createHash, createPrivateKey, createPublicKey } from "node:crypto";
 import { gateCallSites, measureRetryEvidence, noEffectOverlapRefusal, spanRecord, REFUSAL_JOURNAL_GREP, refusalJournalCounts, refusalJournalLine, refusalsNotRecorded, storedRefusalCounts } from "./retry-evidence.js";
 import { HttpDiscoveryAdapter, FetchAdapter } from "@avigopal/ias-executor-ts/adapters";
 import type { DiscoveryLookup } from "@avigopal/ias-executor-ts/adapters";
@@ -163,11 +163,13 @@ export interface SelfFactRow {
   /** pool_record_pin: the pool shape whose newest open record is pinned, and the operator-seeded value per node
    *  (thisNode()). A node's value is either a string array (compared as a set of endpoints with `body_field`), or an
    *  object of body fields, each compared on its own: an array as a set of exact strings, anything else by equality.
-   *  Fields the object does not name (a reason text) are not compared. A node with no entry is not judged (unobserved). */
+   *  Fields the object does not name (a reason text) are not compared. A node with no entry that HOLDS the shape is an
+   *  `<node>-unpinned` divergence (an unguarded trust root); one holding no such record is not judged (unobserved). */
   pool_shape?: string; body_field?: string; expected_by_node?: Record<string, string[] | PinnedFields>;
   /** The nodes (thisNode()) this row runs on; absent = every node of its profiles. A node not listed SKIPS the row
    *  (reported like a profile skip) rather than reading it unobserved, so a row about one substrate's nodes in this
-   *  fleet-shared file never turns another substrate's whole run unobserved. */
+   *  fleet-shared file never turns another substrate's whole run unobserved. Exception: a pool_record_pin row runs on
+   *  an unlisted node that holds its shape with no pinned value, and reports it unpinned. */
   nodes?: string[];
 }
 function readRows(): SelfFactRow[] | null {
@@ -183,8 +185,27 @@ function readRows(): SelfFactRow[] | null {
 }
 // The node's profile is bootstrap identity (where this node sits), not behaviour.
 const nodeProfile = (): string => process.env["PROFILE_EFFECTIVE"] ?? process.env["PROFILE"] ?? "standalone";
-// Which node this is (bootstrap identity), for findings about one node's own journal or process.
-export const thisNode = (): string => (process.env["SUBSTRATE_NAME"] ?? "").trim() || hostname();
+// Which node this is (bootstrap identity), for findings about one node's own journal or process, and the key its
+// trust-root pins are seeded under (expected_by_node). An operator-set SUBSTRATE_NAME names it (the name the rest of
+// the vessel already reports). Without one, the vessel's own Ed25519 identity key names it: discovery registration
+// creates that key once under the volume, so a container recreate keeps it, while the hostname changes on every
+// recreate (node1's did on 2026-10-04 and its pins stopped matching). The id is a digest of the PUBLIC key only.
+// The hostname is the last resort, when no key is readable yet; absence is not cached, so a key created later is used.
+const IDENTITY_KEY_PATH_DEFAULT = "/workspace/keys/development-vessel.ed25519.pem"; // as discovery-registration.ts
+let volumeNodeIdCache: { path: string; id: string } | null = null;
+export function volumeNodeId(): string | null {
+  const path = process.env["VESSEL_IDENTITY_KEY_PATH"] ?? IDENTITY_KEY_PATH_DEFAULT;
+  if (volumeNodeIdCache?.path === path) return volumeNodeIdCache.id;
+  try {
+    const spki = createPublicKey(createPrivateKey(readFileSync(path, "utf8"))).export({ format: "der", type: "spki" }) as Buffer;
+    const id = `key-${createHash("sha256").update(spki.subarray(-32)).digest("hex").slice(0, 12)}`;
+    volumeNodeIdCache = { path, id };
+    return id;
+  } catch {
+    return null;
+  }
+}
+export const thisNode = (): string => (process.env["SUBSTRATE_NAME"] ?? "").trim() || volumeNodeId() || hostname();
 
 const unitActive = (unit: string): string => new TextDecoder().decode(Bun.spawnSync(["systemctl", "is-active", unit], { stdout: "pipe", stderr: "pipe", timeout: 5_000 }).stdout).trim();
 let isUnitActive = unitActive;
@@ -493,6 +514,19 @@ const FACTS: Record<string, FactFn> = {
     // fields (autonomyScope's excluded_paths and require_falsifier_classes, spendEnvelope's cap and pause).
     const listForm = Array.isArray(pinned);
     if (!shape || (listForm && !field)) return unread(`row ${row.id}: pool_shape or body_field missing`);
+    // No pinned value for this node: a trust root it HOLDS is then unguarded here, which is a finding, never a quiet
+    // skip (the node's identity changed, or it was never seeded). A node holding no such record is not judged.
+    if (pinned === undefined) {
+      let held: PoolPinRecord | null;
+      try { held = await poolPinDeps.readNewest(shape); } catch (err) { return unread(`pool store unreadable on node ${node}: ${String(err)}`); }
+      if (!held) return unread(`row ${row.id}: no pinned ${shape} value for node ${node} and no ${shape} record held, so this node is not judged`);
+      const seededFor = Object.keys(row.expected_by_node ?? {});
+      const unpinned = (n: string, rec: PoolPinRecord): SelfFactDivergence => ({ fact, key: `${n}-unpinned`, node: n, source: `${row.id} pinned value`, copy: `pool ${shape}/${String(rec.id ?? "?")}@${n} (updated ${String(rec.updated_at ?? "?")})`, detail: `node ${n} holds a ${shape} record but ${row.id} pins no value for it (pinned for: ${seededFor.join(", ") || "none"}), so this trust root is unguarded on ${n}; seed its value under expected_by_node["${n}"] (and \`nodes\`, if the row lists nodes)`, canary: false });
+      const out = [unpinned(node, held)];
+      // Must-fail control through the same builder: a planted node id holding a planted record is reported unpinned.
+      if (canary) { const planted = unpinned(`${node}-planted`, { id: "planted" }); if (planted.key.endsWith("-unpinned")) out.push({ ...planted, key: `${row.id}-canary`, copy: "planted copy", detail: `must-fail control on node ${node}: a planted node holding ${shape} with no pinned value was reported unpinned`, canary: true }); }
+      return { fact, source_read: true, copies_read: 1, divergences: out, note: `node ${node}: ${shape} held, no pinned value for this node (unpinned)` };
+    }
     if (listForm ? !(pinned as unknown[]).every((e) => typeof e === "string") : (pinned === null || typeof pinned !== "object" || Object.keys(pinned).length === 0)) return unread(`row ${row.id}: no pinned ${shape} value for node ${node}, so this node is not judged`);
     let rec: PoolPinRecord | null;
     try { rec = await poolPinDeps.readNewest(shape); } catch (err) { return unread(`pool store unreadable on node ${node}: ${String(err)}`); }
@@ -1089,7 +1123,18 @@ export async function resolveSelfFactReconcile(pointer: SelfFactReconcilePointer
   // Only rows scoped to this node's profile run here: a node judges only copies it
   // holds, so a node that does not hold them cannot read clean and close another
   // node's finding. An unknown instrument is reported, never run.
-  const inScope = (rows ?? []).filter((r) => (r.profiles.includes(profile) || r.profiles.includes("*")) && (!Array.isArray(r.nodes) || r.nodes.includes(thisNode())));
+  const profileOk = (r: SelfFactRow) => r.profiles.includes(profile) || r.profiles.includes("*");
+  const nodeListed = (r: SelfFactRow) => !Array.isArray(r.nodes) || r.nodes.includes(thisNode());
+  // A trust-root pin row that does not list this node still runs here when this node HOLDS the pinned shape with
+  // no value pinned for it: that trust root is unguarded, and the instrument reports it (`<node>-unpinned`). A node
+  // holding no such record skips the row as before, so another substrate's rows never turn this run unobserved.
+  const unpinnedHolders = new Set<SelfFactRow>();
+  for (const r of rows ?? []) {
+    if (!profileOk(r) || nodeListed(r) || r.instrument !== "pool_record_pin" || typeof r.pool_shape !== "string" || r.pool_shape.length === 0) continue;
+    if (r.expected_by_node && Object.prototype.hasOwnProperty.call(r.expected_by_node, thisNode())) continue;
+    try { if (await poolPinDeps.readNewest(r.pool_shape)) unpinnedHolders.add(r); } catch { unpinnedHolders.add(r); /* the instrument reports the store unreadable */ }
+  }
+  const inScope = (rows ?? []).filter((r) => profileOk(r) && (nodeListed(r) || unpinnedHolders.has(r)));
   const unregistered = inScope.filter((r) => !(r.instrument in FACTS)).map((r) => r.id);
   const runnable = inScope.filter((r) => r.instrument in FACTS);
   // A per-node predicate asked of another node checks nothing here: no rows run, the run is unobserved (null).

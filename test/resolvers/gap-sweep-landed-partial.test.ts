@@ -25,7 +25,8 @@ function git(repo: string, ...args: string[]): string {
   return new TextDecoder().decode(p.stdout).trim();
 }
 
-const CHECK = { evidence_resolve: { shape: "health_probe", input: {}, nonzero_field: "count" } };
+// A pinnable own check, so the control's close can carry the sweep's own independent verdict.
+const CHECK = { evidence_resolve: { shape: "test_suite", input: { vessel: "repos/development-vessel", test_file: "test/own.test.ts", only_tests: ["own"] }, zero_field: "requested_not_passing" } };
 let partialSha = "";
 let verifiedSha = "";
 beforeAll(() => {
@@ -60,10 +61,12 @@ beforeAll(() => {
 });
 afterAll(() => { try { rmSync(ROOT, { recursive: true, force: true }); } catch { /* noop */ } });
 
-/** Run the real sweep once in a fresh process bound to ROOT. health_probe answers a measured healthy count. */
+/** Run the real sweep once in a fresh process bound to ROOT. The own check reads green at HEAD and at every pinned
+ *  tree but the verified landing's parent (partialSha), where it is red: that landing flips it. */
 function sweepInIsolation(): { exit: number; out: string } {
   const code = [
-    `globalThis.fetch = (async () => new Response(JSON.stringify({ body: { count: 1 } }), { status: 200 }));`,
+    `const PARENT = ${JSON.stringify(partialSha)};`,
+    `globalThis.fetch = (async (_u, init) => { let b = {}; try { b = JSON.parse(String(init?.body ?? "{}")); } catch {} const ref = b?.impulse?.pointer?.base_ref; return new Response(JSON.stringify({ body: { ran: true, requested_not_passing: ref === PARENT ? 1 : 0 } }), { status: 200 }); });`,
     `const { sweepPendingLandVerifications } = await import(${JSON.stringify(GTF)});`,
     `const r = await sweepPendingLandVerifications();`,
     `console.log("SWEEP_RESULT " + JSON.stringify(r));`,

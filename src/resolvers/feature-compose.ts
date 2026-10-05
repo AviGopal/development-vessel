@@ -3798,13 +3798,38 @@ export function landedUnverifiedHere(meta: Record<string, unknown> | null | unde
   return bound.startsWith(s) || s.startsWith(bound);
 }
 /**
- * The closed_reason for a landing close: landed_partial under a dissent or when the cutover stamped the landing
- * landed_unverified (own check skipped, typecheck only), else literal-only, else landed_verified.
- * pending_outcome_verification alone is not a downgrade: the sweep's measured close carries it.
+ * THE INDEPENDENT LANDING VERDICT (REALIGNMENT §2.1 item 2). The label the EVALUATOR (the pending-land sweep,
+ * gap-to-feature independentLandingVerdict) writes after re-running the gap's own check on commit-pinned trees:
+ * grounded only when the check was red at the landing's parent and green at the landed sha. Stored on the gap
+ * row as classification_metadata.goal_verification_label.
  */
-export function landedCloseReason(meta: Record<string, unknown> | null | undefined, sha: string | null | undefined, literalOnly: boolean): "landed_partial" | "landed_literal_only" | "landed_verified" {
+export const LANDING_LABELER = "sweep-parent-child";
+export type GoalVerificationLabel = { grounded: boolean; labeler: string; sha: string; parent: string; tests: string[]; ran_at: string; reason?: string };
+/**
+ * A label for THIS landing, or null. Bound like landedUnverifiedHere binds its flag, but failing the other way: a
+ * label from any other labeler (the lander's own claim), an unbound one, or one for another sha is no label at all.
+ * A label read from a stored row is a RECORD, never authority: any substrateGap_write writer can set it.
+ */
+export function landingLabelHere(meta: Record<string, unknown> | null | undefined, sha: string | null | undefined): GoalVerificationLabel | null {
+  const l = (meta ?? {})["goal_verification_label"] as Partial<GoalVerificationLabel> | null | undefined;
+  if (!l || typeof l !== "object" || l.labeler !== LANDING_LABELER) return null;
+  const bound = typeof l.sha === "string" ? l.sha.trim() : "";
+  const s = String(sha ?? "").trim();
+  if (bound.length < 7 || s.length < 7 || !(bound.startsWith(s) || s.startsWith(bound))) return null;
+  return l as GoalVerificationLabel;
+}
+/**
+ * The closed_reason for a landing close: landed_partial under a dissent or when the cutover stamped the landing
+ * landed_unverified (own check skipped, typecheck only), else literal-only, else landed_verified ONLY on
+ * `independent`: a grounded label for this sha that the sweep computed IN THIS PASS from its own pinned re-run
+ * (gap-to-feature independentLandingVerdict). A label stored on the row is not consulted: it is forgeable. Without
+ * it the close waits ("awaiting_independent_verdict"): the gap's predicate reading 'absent' at HEAD, the lander's
+ * own red->green, or a stored label never verifies a landing by itself.
+ */
+export function landedCloseReason(meta: Record<string, unknown> | null | undefined, sha: string | null | undefined, literalOnly: boolean, independent: GoalVerificationLabel | null = null): "landed_partial" | "landed_literal_only" | "landed_verified" | "awaiting_independent_verdict" {
   if (landedUnderDissent(meta, sha) || landedUnverifiedHere(meta, sha)) return "landed_partial";
-  return literalOnly ? "landed_literal_only" : "landed_verified";
+  if (literalOnly) return "landed_literal_only";
+  return landingLabelHere({ goal_verification_label: independent }, sha)?.grounded === true ? "landed_verified" : "awaiting_independent_verdict";
 }
 /** Did the gap's armed own check go red on the parent and green on the draft, with the draft typechecking? */
 export function ownCheckWentRedToGreen(oc: OwnCheckEvidence | null): boolean {

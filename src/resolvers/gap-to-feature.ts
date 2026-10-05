@@ -1,7 +1,8 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { ResolverResult } from "./types.js";
-import { resolveFeatureCompose, priorAttemptFeedbackBlock, readParkedLanding, resolveDissentOutcome, landedCloseReason, isDissentChild, dissentChildCheckRefusal } from "./feature-compose.js";
+import { resolveFeatureCompose, priorAttemptFeedbackBlock, readParkedLanding, resolveDissentOutcome, landedCloseReason, landingLabelHere, LANDING_LABELER, isDissentChild, dissentChildCheckRefusal } from "./feature-compose.js";
+import type { GoalVerificationLabel } from "./feature-compose.js";
 import { attemptEvidenceBlock, explicitLineHint, testTitleInSource } from "./retry-evidence.js";
 
 // TYPE AUGMENTATION — allow callers to pass an optional 'directed' flag through the
@@ -3256,6 +3257,14 @@ export async function closeLandedGap(gap: Record<string, unknown>, land: LandSig
     // was verified above, the same fact the sweep records as `landed_verified`. Without the reason
     // the terminal measure (gaps closed by a verified landing) could not count this path at all.
     const literalOnlyClose = isLiteralOnlyStepClose((gap.classification_metadata ?? gap.metadata ?? {}) as Record<string, unknown>);
+    // THE LANDER DOES NOT GRADE ITSELF (independent landing verdict): a verified close needs a grounded label the
+    // sweep computed in its own pass (independentLandingVerdict); this path never has one and never reads the stored
+    // label, so it never closes landed_verified. Hold it pending; the sweep re-runs the gap's own check at the
+    // landing's parent and at the landed sha and closes it there.
+    if (landedCloseReason((gap.classification_metadata ?? gap.metadata ?? {}) as Record<string, unknown>, land.commit_sha, literalOnlyClose) === "awaiting_independent_verdict") {
+      await markPendingVerification(gap, land.commit_sha ?? undefined, "landed; awaiting the sweep's independent verdict (own check red at parent, green at the landed sha)");
+      return { closed: false, error: "awaiting independent verdict: closed only by the sweep's parent/child re-run of the gap's own check" };
+    }
     const closedMeta = { ...((gap.classification_metadata ?? gap.metadata ?? {}) as Record<string, unknown>), resolution, closed_reason: landedCloseReason((gap.classification_metadata ?? gap.metadata ?? {}) as Record<string, unknown>, land.commit_sha, literalOnlyClose), ...(land.commit_sha ? { landed_sha: land.commit_sha } : {}), closed_at: new Date().toISOString(),
       falsifier_exercise: { detector: "closeLandedGap", verdict: literalOnlyClose ? "literal_present" : verifyResult, passed: !literalOnlyClose && verifyResult === "absent", ran_at: new Date().toISOString(), commit: land.commit_sha ?? null } };
     const meta = closedMeta;
@@ -3909,6 +3918,73 @@ async function markAwaitingOperatorReview(gap: Record<string, unknown>, sha: str
 }
 
 /**
+ * THE PINNED RE-RUN behind the independent landing verdict: the landing's parent (from the vessel clone holding
+ * it) and the gap's own check judged by THE ONE JUDGE (evaluateGapCheck) with test_suite's base_ref, which runs
+ * it in a detached worktree of that commit (test-suite.ts BASE-TREE RUN). Injectable for tests only.
+ */
+export type PinnedCheckDeps = {
+  parentOf: (sha: string) => string | null;
+  runAt: (gap: Record<string, unknown>, ref: string) => Promise<GapCheckVerdict>;
+};
+const defaultPinnedCheckDeps: PinnedCheckDeps = {
+  parentOf: (sha) => {
+    try {
+      for (const name of readdirSync(vesselsCloneRoot()).sort()) {
+        const dir = join(vesselsCloneRoot(), name);
+        if (!existsSync(join(dir, ".git")) || sweepGitOut(dir, ["merge-base", "--is-ancestor", sha, "HEAD"]) === null) continue;
+        const p = sweepGitOut(dir, ["rev-parse", "--verify", "--quiet", `${sha}^`]);
+        return p && /^[0-9a-f]{40}$/.test(p) ? p : null;
+      }
+    } catch { /* unreadable clone root: no parent */ }
+    return null;
+  },
+  runAt: (gap, ref) => {
+    const meta = (gap.classification_metadata ?? gap.metadata ?? {}) as Record<string, unknown>;
+    const er = meta.evidence_resolve as { input?: Record<string, unknown> } & Record<string, unknown>;
+    // Only the pinned check: a class-1 literal on the same row would be read from the runtime file at HEAD for both refs.
+    const { hardcoded_url: _u, expected_literal: _l, ...pinnedMeta } = meta;
+    return evaluateGapCheck({ ...gap, classification_metadata: { ...pinnedMeta, evidence_resolve: { ...er, input: { ...(er.input ?? {}), base_ref: ref } } } });
+  },
+};
+let pinnedCheckDeps: PinnedCheckDeps | null = null;
+/** Tests only: replace the pinned re-run (null restores the default). */
+export function __setPinnedCheckForTests(d: PinnedCheckDeps | null): void { pinnedCheckDeps = d; }
+
+/**
+ * Re-run the gap's OWN check (classification_metadata.evidence_resolve, shape test_suite) at the landing's parent
+ * and at the landed sha. Red at parent AND green at sha => a grounded label; a deterministic other outcome => an
+ * ungrounded label (recorded, so it is not re-run every tick); FAIL CLOSED otherwise: no test_suite check, no
+ * parent, a run that throws or cannot judge => no label. The lander's own evidence on the row is never read.
+ */
+export async function independentLandingVerdict(gap: Record<string, unknown>, sha: string, deps: PinnedCheckDeps = pinnedCheckDeps ?? defaultPinnedCheckDeps): Promise<{ label: GoalVerificationLabel | null; reason: string }> {
+  const meta = (gap.classification_metadata ?? gap.metadata ?? {}) as Record<string, unknown>;
+  const er = meta.evidence_resolve as { shape?: unknown; input?: unknown } | null | undefined;
+  if (!er || typeof er !== "object" || er.shape !== "test_suite" || !er.input || typeof er.input !== "object") {
+    return { label: null, reason: "the gap's check is not a test_suite evidence_resolve, so it cannot be re-run on a commit-pinned tree" };
+  }
+  if (!/^[0-9a-f]{7,40}$/i.test(sha)) return { label: null, reason: "the landed sha is not a commit id" };
+  const input = er.input as { test_file?: unknown; only_tests?: unknown };
+  const named = Array.isArray(input.only_tests) ? input.only_tests.filter((t): t is string => typeof t === "string" && t.length > 0) : [];
+  const tests = named.length > 0 ? named : typeof input.test_file === "string" ? [input.test_file] : [];
+  let parent: string | null = null;
+  try { parent = deps.parentOf(sha); } catch { parent = null; }
+  if (!parent) return { label: null, reason: `no parent found for ${sha.slice(0, 12)} in any vessel clone` };
+  let atParent: GapCheckVerdict;
+  let atSha: GapCheckVerdict;
+  try {
+    atParent = await deps.runAt(gap, parent);
+    atSha = await deps.runAt(gap, sha);
+  } catch (err) {
+    return { label: null, reason: `the pinned re-run failed: ${String((err as Error)?.message ?? err).slice(0, 200)}` };
+  }
+  const judged = (v: GapCheckVerdict) => v === "present" || v === "absent";
+  if (!judged(atParent) || !judged(atSha)) return { label: null, reason: `the pinned re-run could not judge (parent ${atParent}, landed ${atSha})` };
+  const grounded = atParent === "present" && atSha === "absent";
+  const reason = grounded ? "red at parent, green at the landed sha" : `parent ${atParent === "present" ? "red" : "green"}, landed ${atSha === "present" ? "red" : "green"}: the landing did not flip its own check`;
+  return { label: { grounded, labeler: LANDING_LABELER, sha, parent, tests, ran_at: new Date().toISOString(), ...(grounded ? {} : { reason }) }, reason };
+}
+
+/**
  * Is the landed commit RUNNING on this node? A measured 'absent' read from this node's runtime file is
  * evidence only if this node actually serves the vessel on that code: on 2026-09-29 node 2 closed a gap
  * landed_verified for activity-api, which node 2 does not run, while node 1 still served the old code.
@@ -4180,7 +4256,7 @@ async function sweepPendingLandVerificationsOnce(): Promise<{ checked: number; c
   // Live at the time of writing: 13 gaps carry pending_outcome_verification, 11 of them
   // have no predicate at all — so the honest answer is "correctly abstaining on an input
   // that cannot be measured", not "broken". A counter per verdict says that out loud.
-  const tally = { absent: 0, present: 0, pending: 0, unknown: 0, not_in_clone: 0, reverted: 0, awaiting_restart: 0, falsified: 0, self_authored: 0, birth_retaken: 0, stale: 0 };
+  const tally = { absent: 0, present: 0, pending: 0, unknown: 0, not_in_clone: 0, reverted: 0, awaiting_restart: 0, falsified: 0, self_authored: 0, birth_retaken: 0, stale: 0, unlabelled: 0 };
   try {
     const read = await resolveSubstrateGap({
       type: "substrateGap",
@@ -4354,6 +4430,30 @@ const pending = gaps
         await markAwaitingOperatorReview(g, sha, selfAuthoredSweep);
         continue;
       }
+      // THE INDEPENDENT LANDING VERDICT, taken here by the evaluator and BEFORE any credit: a read at HEAD does not
+      // say this landing flipped the check. Re-run the gap's own check at the landing's parent and at the landed
+      // sha (once per landing: a deterministic outcome is stored as the label, grounded or not). Without a
+      // grounded label the landing is not closed verified; a run that could not judge leaves it for the next tick.
+      // Only a label computed in THIS pass counts: a stored grounded label is a record any gap writer can forge, so it
+      // never substitutes for the re-run; a stored UNGROUNDED one may skip it (the fail-safe direction).
+      let independentLabel: GoalVerificationLabel | null = null;
+      if (landedCloseReason(meta, sha, isLiteralOnlyStepClose(meta)) === "awaiting_independent_verdict") {
+        let ivReason = "an ungrounded verdict for this landing is already recorded";
+        if (landingLabelHere(meta, sha)?.grounded !== false) {
+          const iv = await independentLandingVerdict(g, sha);
+          ivReason = iv.reason;
+          if (iv.label) {
+            meta.goal_verification_label = iv.label;
+            if (iv.label.grounded) independentLabel = iv.label;
+            else await markPendingVerification({ ...g, classification_metadata: meta }, sha, `independent verdict: ${iv.reason}`);
+          }
+        }
+        if (landedCloseReason(meta, sha, isLiteralOnlyStepClose(meta), independentLabel) === "awaiting_independent_verdict") {
+          tally.unlabelled += 1;
+          console.log(`[gap-sweep] gap ${gidSweep} reads ${verdict} but landed ${sha.slice(0, 12)} is NOT closed: no grounded independent verdict (${ivReason})`);
+          continue;
+        }
+      }
       // verdict === 'absent' (MEASURED resolved) OR 'unknown' with earned trust -> close.
       tally.absent += 1;
       // ONE CREDIT PER (gap, landing): a standing row may re-close after a reopen on the landing it already
@@ -4368,7 +4468,7 @@ const pending = gaps
       const sweepClosedMeta: Record<string, unknown> = {
         ...meta,
         // Under the lane's own semantic dissent the landing is partial (landedCloseReason), never verified.
-        closed_reason: landedCloseReason(meta, sha, isLiteralOnlyStepClose(meta)),
+        closed_reason: landedCloseReason(meta, sha, isLiteralOnlyStepClose(meta), independentLabel),
         close_basis: verdict,
         falsifier_exercise: isLiteralOnlyStepClose(meta)
           ? { detector: "gap-sweep", verdict: "literal_present", passed: false, ran_at: new Date().toISOString(), commit: sha }

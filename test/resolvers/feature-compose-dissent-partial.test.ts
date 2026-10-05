@@ -146,12 +146,15 @@ function closedReasonInitializers(fn: ts.Node): string[] {
   return out;
 }
 
+/** The grounded label the pending-land sweep computes in its own pass (independent landing verdict): the only route to landed_verified. */
+const swept = (sha: string) => ({ grounded: true, labeler: "sweep-parent-child", sha, parent: "0".repeat(40), tests: [OWN_TEST_NAME], ran_at: "2026-10-05T00:00:00.000Z" });
+
 describe("a landing over the lane's own semantic dissent is partial, and the dissent becomes the next gap", () => {
   // ── (a) landed_partial ──────────────────────────────────────────────────────────────────────────
   it("MUST-FAIL (a): own check red->green + gate dissent 2/2 -> the close reason for that landing is landed_partial, not landed_verified", async () => {
     const store = memoryStore([PARENT_ROW]);
     await landUnderDissent(store);
-    const reason = exported<(m: Record<string, unknown>, sha: string, literalOnly: boolean) => string>("landedCloseReason");
+    const reason = exported<(m: Record<string, unknown>, sha: string, literalOnly: boolean, independent?: unknown) => string>("landedCloseReason");
     const meta = metaOf(store.row(PARENT_ID));
     expect(reason(meta, LANDED_SHA, false)).toBe("landed_partial");
     expect(reason(meta, LANDED_SHA.slice(0, 12), false)).toBe("landed_partial"); // the sweep's pending sha may be abbreviated
@@ -159,18 +162,19 @@ describe("a landing over the lane's own semantic dissent is partial, and the dis
   });
 
   it("CONTROL (a): a no-dissent landing still closes landed_verified (and a literal-only one landed_literal_only)", async () => {
-    const reason = exported<(m: Record<string, unknown>, sha: string, literalOnly: boolean) => string>("landedCloseReason");
-    expect(reason(metaOf(PARENT_ROW), LANDED_SHA, false)).toBe("landed_verified");
+    const reason = exported<(m: Record<string, unknown>, sha: string, literalOnly: boolean, independent?: unknown) => string>("landedCloseReason");
+    expect(reason(metaOf(PARENT_ROW), LANDED_SHA, false, swept(LANDED_SHA))).toBe("landed_verified");
+    expect(reason(metaOf(PARENT_ROW), LANDED_SHA, false)).toBe("awaiting_independent_verdict"); // no sweep label: not verified
     expect(reason(metaOf(PARENT_ROW), LANDED_SHA, true)).toBe("landed_literal_only");
     // A dissent recorded for a DIFFERENT, earlier landing (already settled) does not make this one partial.
     const old = { reason: "old", gate_verdict: {}, at: "2026-09-30T00:00:00.000Z", landed_sha: "1111111aaaaaaa", later_outcome: { result: "failed", at: "2026-09-30T01:00:00.000Z" } };
-    expect(reason({ ...metaOf(PARENT_ROW), semantic_dissent: [old] }, LANDED_SHA, false)).toBe("landed_verified");
+    expect(reason({ ...metaOf(PARENT_ROW), semantic_dissent: [old] }, LANDED_SHA, false, swept(LANDED_SHA))).toBe("landed_verified");
   });
 
   // A landing the cutover stamped landed_unverified (own check skipped, typecheck only) with NO dissent was
   // still closed landed_verified (bbadb86, 2026-10-05: a hollow write; the parent then closed via child).
   it("MUST-FAIL (e): a landing stamped landed_unverified with no dissent closes landed_partial, not landed_verified", async () => {
-    const reason = exported<(m: Record<string, unknown>, sha: string, literalOnly: boolean) => string>("landedCloseReason");
+    const reason = exported<(m: Record<string, unknown>, sha: string, literalOnly: boolean, independent?: unknown) => string>("landedCloseReason");
     const meta = { ...metaOf(PARENT_ROW), landed_unverified: true, landed_unverified_reason: "own check skipped; typecheck only" };
     expect(reason(meta, LANDED_SHA, false)).toBe("landed_partial");
     expect(reason(meta, LANDED_SHA.slice(0, 12), false)).toBe("landed_partial");
@@ -178,17 +182,17 @@ describe("a landing over the lane's own semantic dissent is partial, and the dis
   });
 
   it("CONTROL (e): landed_unverified false/absent stays landed_verified, and a pending_outcome_verification equal to the sha alone does not downgrade (the sweep's measured close carries it)", async () => {
-    const reason = exported<(m: Record<string, unknown>, sha: string, literalOnly: boolean) => string>("landedCloseReason");
-    expect(reason({ ...metaOf(PARENT_ROW), landed_unverified: false }, LANDED_SHA, false)).toBe("landed_verified");
-    expect(reason({ ...metaOf(PARENT_ROW), pending_outcome_verification: LANDED_SHA }, LANDED_SHA, false)).toBe("landed_verified");
-    expect(reason({ ...metaOf(PARENT_ROW), landed_unverified: "true" }, LANDED_SHA, false)).toBe("landed_verified"); // only the boolean the cutover stamps
+    const reason = exported<(m: Record<string, unknown>, sha: string, literalOnly: boolean, independent?: unknown) => string>("landedCloseReason");
+    expect(reason({ ...metaOf(PARENT_ROW), landed_unverified: false }, LANDED_SHA, false, swept(LANDED_SHA))).toBe("landed_verified");
+    expect(reason({ ...metaOf(PARENT_ROW), pending_outcome_verification: LANDED_SHA }, LANDED_SHA, false, swept(LANDED_SHA))).toBe("landed_verified");
+    expect(reason({ ...metaOf(PARENT_ROW), landed_unverified: "true" }, LANDED_SHA, false, swept(LANDED_SHA))).toBe("landed_verified"); // only the boolean the cutover stamps
   });
 
   it("MUST-FAIL (e, binding): the flag applies to the landing it was stamped for, not to a later one", async () => {
-    const reason = exported<(m: Record<string, unknown>, sha: string, literalOnly: boolean) => string>("landedCloseReason");
+    const reason = exported<(m: Record<string, unknown>, sha: string, literalOnly: boolean, independent?: unknown) => string>("landedCloseReason");
     const bound = { ...metaOf(PARENT_ROW), landed_unverified: true, landed_unverified_sha: LANDED_SHA };
     expect(reason(bound, LANDED_SHA.slice(0, 12), false)).toBe("landed_partial");
-    expect(reason(bound, "2222222bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", false)).toBe("landed_verified");
+    expect(reason(bound, "2222222bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", false, swept("2222222bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"))).toBe("landed_verified");
     // An unknown or too-short closing sha cannot prove the flag belongs to another landing.
     expect(reason(bound, "", false)).toBe("landed_partial");
     expect(reason(bound, "abc", false)).toBe("landed_partial");
@@ -348,7 +352,7 @@ describe("a landing over the lane's own semantic dissent is partial, and the dis
   const LEGACY_DISSENT = { reason: "an old 2/2 dissent, recorded before landed_sha was stamped", gate_verdict: { addresses: false, on_live_path: false }, at: "2026-10-02T08:00:00.000Z", later_outcome: null };
   const NEW_SHA = "9f8e7d6c5b4a39281706f5e4d3c2b1a098765432";
   const settleFn = () => exported<(g: string, d: unknown, cut: unknown, deps: GapDeps) => Promise<unknown>>("settleSemanticDissent");
-  const reasonFn = () => exported<(m: Record<string, unknown>, sha: string, literalOnly: boolean) => string>("landedCloseReason");
+  const reasonFn = () => exported<(m: Record<string, unknown>, sha: string, literalOnly: boolean, independent?: unknown) => string>("landedCloseReason");
 
   it("MUST-FAIL (2a): an old unsettled dissent with no landed_sha, then a new landing the gate agrees with -> landed_verified, and the old dissent is settled superseded by that landing's sha and check", async () => {
     const store = memoryStore([{ ...PARENT_ROW, classification_metadata: { ...metaOf(PARENT_ROW), semantic_dissent: [LEGACY_DISSENT] } }]);
@@ -360,7 +364,7 @@ describe("a landing over the lane's own semantic dissent is partial, and the dis
     const list = meta.semantic_dissent as Array<Record<string, unknown>>;
     expect(list.length).toBe(1);
     expect(list[0]!.later_outcome).toMatchObject({ result: "superseded", settled_by: { landed_sha: NEW_SHA, check_key: (exported<(m: Record<string, unknown>) => { key: string } | null>("gapCheckIdentity")(OWN_CHECK_META))!.key } });
-    expect(reasonFn()(meta, NEW_SHA, false)).toBe("landed_verified");
+    expect(reasonFn()(meta, NEW_SHA, false, swept(NEW_SHA))).toBe("landed_verified");
     // No child is minted for an agreeing landing.
     expect(store.row(`${PARENT_ID}-dissent-narrowed`)).toBeUndefined();
   });

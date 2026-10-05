@@ -46,7 +46,9 @@ function land(name: string, when?: string): string {
   return git({}, "rev-parse", "HEAD");
 }
 
-const HEALTHY = { shape: "health_probe", nonzero_field: "count" };
+// A pinnable own check (test_suite), so a close can carry the sweep's independent verdict; the pinned re-run is
+// injected below (every landing here flips it: red at its parent, green at the landing).
+const HEALTHY = { shape: "test_suite", input: { vessel: "repos/activity-api", test_file: "test/execution-traces-list.test.ts", only_tests: ["the list answers fast"] }, zero_field: "requested_not_passing" };
 const STANDING = { shape: "self_fact_reconcile", input: { facts: ["trace_list_p99"], key: "k", plant_canary: false, file_gaps: false }, zero_field: "divergence_count" };
 const T0 = "2026-09-30T07:00:00.000Z";
 let shaC = "";
@@ -92,9 +94,14 @@ beforeAll(() => {
   process.env["CLOSE_ORACLE_CALIB_PATH"] = CALIB;
   process.env["EXPECTATION_CALIB_PATH"] = join(ROOT, "expectation-calibration.json");
   sg.__setBirthJudgeForTests(async () => "present");
+  const parentOf = (sha: string): string | null => { try { return git({}, "rev-parse", `${sha}^`); } catch { return null; } };
+  g2f.__setPinnedCheckForTests({
+    parentOf,
+    runAt: async (gap, ref) => (ref === parentOf(String(metaOf(gap as Row)["pending_outcome_verification"] ?? "")) ? "present" : "absent"),
+  });
   globalThis.fetch = (async (...args: unknown[]) => {
     const body = String((args[1] as { body?: string } | undefined)?.body ?? "");
-    if (body.includes("health_probe")) return Response.json({ body: { count: 1 } });
+    if (body.includes("test_suite")) return Response.json({ body: { ran: true, requested_not_passing: 0 } });
     if (body.includes("self_fact_reconcile")) return Response.json({ body: { divergence_count: 0 } });
     return Response.json({ content: { vessels: [] } });
   }) as unknown as typeof fetch;
@@ -135,6 +142,7 @@ beforeAll(() => {
 afterAll(() => {
   globalThis.fetch = originalFetch;
   sg.__setBirthJudgeForTests(null);
+  g2f.__setPinnedCheckForTests(null);
   if (savedStore !== undefined) process.env["GAP_STORE_ENDPOINT"] = savedStore;
   for (const [k, v] of [["VESSELS_CLONE_ROOT", saved.clones], ["CLOSE_ORACLE_CALIB_PATH", saved.calib], ["EXPECTATION_CALIB_PATH", saved.exp]] as const) {
     if (v === undefined) delete process.env[k]; else process.env[k] = v;
@@ -201,21 +209,21 @@ describe("pending-land sweep on a RE-DETECTED gap", () => {
     expect(favorables(rowOf(ids.flap), shaC2)).toBe(1);
   });
 
-  it("(c') a standing row reopened and re-closed on the same landing credits it once, not per close", async () => {
+  it("(c') a standing row reopened is not stale, and is not re-credited; its live read check cannot be re-run pinned, so it is not re-closed verified", async () => {
     await redetect(ids.standing);
     const calibBefore = measuredCloses();
     await g2f.sweepPendingLandVerifications();
     let r = rowOf(ids.standing);
-    // The standing row measures the symptom: a reopen followed by a clean measurement may close it.
-    expect(r["status"]).toBe("closed");
+    // The standing row measures the symptom, so the stale guard does not hold it...
     expect(metaOf(r)["stale_close_evidence"]).toBeUndefined();
-    // ...but its landing was already credited at T0: no second FAVORABLE, no second measured close.
+    // ...but self_fact_reconcile is a live read, not a check a commit-pinned tree can re-run: no independent
+    // landing verdict, so no verified close (independent-landing-verdict.test.ts, a198907/b585a03).
+    expect(r["status"]).toBe("open");
     expect(favorables(r, shaStanding)).toBe(1);
     expect(measuredCloses()).toBe(calibBefore);
-    await redetect(ids.standing);
     await g2f.sweepPendingLandVerifications();
     r = rowOf(ids.standing);
-    expect(r["status"]).toBe("closed");
+    expect(r["status"]).toBe("open");
     expect(favorables(r, shaStanding)).toBe(1);
   });
 });

@@ -63,6 +63,7 @@ let execGuard: ExecGuard | null = null;
 let gaps: Row[] = [];
 let rhythm: { id: string; body: Row; updated_at?: string } | null = null;
 let settled: Array<{ leg: string }> = [];
+let paceSeq = 0;
 let checks: Row[] = [];
 let reports: Row[] = [];
 let writes: Array<{ pointer: Row; auth: unknown; nargs: number }> = [];
@@ -153,7 +154,16 @@ beforeEach(() => {
       return { excluded: ((r["body"] as Row)["excluded_paths"] as string[]) ?? [], readable: true, reason: "test" };
     },
     readRhythm: async () => rhythm,
-    settle: async (_r: unknown, leg: string) => { settled.push({ leg }); },
+    // The family's rhythm row as the pool would hold it: a write merges its overlay and moves updated_at; a write with
+    // ifUpdatedAt is a compare-and-set that fails when the row moved since it was read.
+    pace: async (_r: unknown, overlay: Row, ifUpdatedAt?: string) => {
+      if (!rhythm) return false;
+      if (ifUpdatedAt !== undefined && ifUpdatedAt !== rhythm.updated_at) return false;
+      paceSeq += 1;
+      rhythm = { ...rhythm, updated_at: new Date(nowMs + paceSeq).toISOString(), body: { ...rhythm.body, ...overlay } };
+      settled.push({ leg: "alpha" in overlay ? "alpha" : "beta" in overlay ? "beta" : "ran" });
+      return true;
+    },
     runCheck: async (input: Row) => fakeCheck(input),
     poolRead: (shape: string) => poolRows(shape),
     poolWrite: (pointer: Row, ...rest: unknown[]) => {
@@ -222,7 +232,7 @@ describe("scope earn-in: the proposing activity (must-fail at base)", () => {
       expect(c["mutate_revert"]).toEqual({ sha: GUARD, file: "src/resolvers/fixture-earn-a.ts" });
     }
     expect((body["proposed"] as Row[]).map((x) => x["path"])).toEqual([FILE_A]);
-    expect(settled).toEqual([{ leg: "alpha" }]);
+    expect(settled).toEqual([{ leg: "ran" }, { leg: "alpha" }]);
   });
 
   it("a file with an unmapped regression gets no proposal and the reason names the missing check", async () => {
@@ -470,7 +480,7 @@ describe("scope earn-in: the evaluator's own files and the runtime tree (must-fa
     expect(rj["applied"]).toEqual([]);
     expect(String(((rj["refused"] as Row[])[0] ?? {})["reason"])).toContain("EVALUATOR_FILES");
     const all = earn!["EVALUATOR_FILES"] as string[];
-    for (const f of ["src/resolvers/scope-earn-in.ts", "src/resolvers/pool-impulse.ts", "src/resolvers/test-suite.ts", "src/resolvers/gap-to-feature.ts", "src/resolvers/feature-compose.ts", "test/resolvers/scope-earn-in.test.ts", "test/resolvers/evaluator-grant-scan.test.ts", "src/resolvers/self-fact-reconcile.ts", "test/resolvers/scope-change-pin.test.ts"]) {
+    for (const f of ["src/resolvers/scope-earn-in.ts", "src/resolvers/pool-impulse.ts", "src/resolvers/test-suite.ts", "src/resolvers/gap-to-feature.ts", "src/resolvers/feature-compose.ts", "test/resolvers/scope-earn-in.test.ts", "test/resolvers/evaluator-grant-scan.test.ts", "src/resolvers/self-fact-reconcile.ts", "test/resolvers/scope-change-pin.test.ts", "src/resolvers/rhythm-conductor-tick.ts"]) {
       expect(all).toContain(`repos/${V}/${f}`);
     }
   });
@@ -631,5 +641,49 @@ describe("scope earn-in: a tightening hold carries its regression's lineage (mus
     expect(hold["lineage_roots"]).toEqual(["reg-t1"]);
     expect(excludedNow()).toContain(IN_SCOPE);
     expect(changes().length).toBe(1);
+  });
+});
+
+describe("scope earn-in: a tick that ran closes its due slot (must-fail at base)", () => {
+  it("a tick with zero proposals still refreshes the family's pacing, so its due score drops below the threshold", async () => {
+    gaps = [regression("reg-b2", FILE_B, { evidence_resolve: undefined, falsifier: { class: "unset" } })];
+    const spy = spyOn(console, "log").mockImplementation(() => {});
+    let body: Row;
+    try { body = await tick(); } finally { spy.mockRestore(); }
+    expect(body!["proposed"]).toEqual([]);
+    expect(settled).toEqual([{ leg: "ran" }]);
+    expect(rhythm!.body["staleness"]).toBe(0);
+    const due = conductor.rhythmDueScore(rhythm!.body as never, rhythm!.updated_at, nowMs);
+    expect(due.due_score).toBeLessThan(1);
+  });
+
+  it("two consecutive calls within the cadence: the second returns not_due, evaluates nothing and logs no tick line", async () => {
+    gaps = [regression("reg-a1", FILE_A), regression("reg-b2", FILE_B, { evidence_resolve: undefined, falsifier: { class: "unset" } })];
+    const spy = spyOn(console, "log").mockImplementation(() => {});
+    let first: Row, second: Row;
+    let lines: string[] = [];
+    try {
+      first = await tick();
+      const checksAfterFirst = checks.length;
+      const linesAfterFirst = spy.mock.calls.length;
+      nowMs += 60_000; // a minute later: well inside any cadence
+      second = await tick();
+      expect(checks.length).toBe(checksAfterFirst);
+      expect(spy.mock.calls.length).toBe(linesAfterFirst);
+    } finally { lines = spy.mock.calls.map((c) => String(c[0])); spy.mockRestore(); }
+    expect(first!["reason"]).not.toBe("not_due");
+    expect(second!["reason"]).toBe("not_due");
+    expect(second!["evaluated"]).toBeUndefined();
+    expect(lines.filter((l) => l.startsWith("[scope-earn-in] tick:")).length).toBe(1);
+  });
+
+  it("two concurrent callers that read the same due row: exactly one evaluates", async () => {
+    gaps = [regression("reg-b2", FILE_B, { evidence_resolve: undefined, falsifier: { class: "unset" } })];
+    const spy = spyOn(console, "log").mockImplementation(() => {});
+    let a: Row, b: Row;
+    try { [a, b] = await Promise.all([tick(), tick()]); } finally { spy.mockRestore(); }
+    const reasons = [a!["reason"], b!["reason"]];
+    expect(reasons.filter((r) => r === "not_due").length).toBe(1);
+    expect([a!, b!].filter((r) => Array.isArray(r["evaluated"])).length).toBe(1);
   });
 });

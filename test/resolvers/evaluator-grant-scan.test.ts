@@ -91,3 +91,116 @@ describe("the evaluator grant is constructed only by the applier (must-fail at b
     for (const a of POOL_ALLOWED) expect(pool).toContain(a);
   });
 });
+
+// THE EVALUATOR'S IMPORT CLOSURE (qa, 10-05: no self-certification by import). EVALUATOR_FILES keeps the evaluator out
+// of the lane's reach, but a guarded file that imports a lane-editable module can be loosened through that module.
+// Semantics, stated:
+//   - roots: the item-3 evaluator src files below (scope-earn-in, pool-impulse, test-suite, self-fact-reconcile,
+//     rhythm-conductor-tick);
+//   - edges: static `import … from`, `export … from` and dynamic `import("…")` with a relative specifier inside src/;
+//     type-only imports (`import type`, `export type`, or a brace list whose every name is `type`) are erased at
+//     runtime and do not count;
+//   - traversal goes THROUGH excluded modules (an excluded file importing a lane-editable one still puts it on the
+//     judge's path) and stops only at gap-to-feature.ts and feature-compose.ts, item 1's verdict path, whose closure
+//     qa ruled report-only;
+//   - guarded = EVALUATOR_FILES ∪ the excluded dev-vessel src entries of autonomyScope. The committed record
+//     (scripts/substrate/autonomy-scope.json) lives in the super-repo, not in this vessel's tree, so EXCLUDED_SRC
+//     mirrors its development-vessel src entries.
+// The set of lane-editable modules reached must EQUAL KNOWN_UNGUARDED exactly: a new edge reddens it, and removing
+// debt forces the list to shrink with it. Each entry names its importer and role.
+const EXCLUDED_SRC = [
+  "src/resolvers/feature-compose.ts", "src/resolvers/vessel-mitosis-cutover.ts", "src/resolvers/pull-cutover.ts",
+  "src/resolvers/push-policy.ts", "src/resolvers/git-push.ts", "src/resolvers/gap-to-feature.ts",
+  "src/resolvers/substrate-gap.ts", "src/resolvers/apply-proposal-as-patch.ts", "src/resolvers/pool-impulse.ts",
+  "src/resolvers/maintenance-lease.ts", "src/resolvers/rhythm-conductor-tick.ts", "src/routes/impulses.ts",
+  "src/index.ts", "src/config.ts", "src/resolvers/attempt-register.ts", "src/resolvers/gap-lifecycle-scan.ts",
+  "src/resolvers/self-fact-reconcile.ts", "src/resolvers/vessel-mitosis-evaluate.ts",
+  // Excluded by the operator 10-05 (live record and autonomy-scope.json): the evaluator's and the lane's own guards.
+  "src/lib/caller-credential.ts", "src/lib/self-auth.ts", "src/resolvers/write-containment.ts",
+  "src/resolvers/super-repo-checkout.ts", "src/resolvers/behavioral-verification.ts",
+  "src/resolvers/removed-line-predicate.ts", "src/resolvers/vacuous-edit.ts", "src/resolvers/staged-mitosis-gate.ts",
+  "src/resolvers/retry-evidence.ts",
+];
+const CLOSURE_ROOTS = ["src/resolvers/scope-earn-in.ts", "src/resolvers/pool-impulse.ts", "src/resolvers/test-suite.ts", "src/resolvers/self-fact-reconcile.ts", "src/resolvers/rhythm-conductor-tick.ts"];
+const REPORT_ONLY = ["src/resolvers/gap-to-feature.ts", "src/resolvers/feature-compose.ts"];
+// The lane-editable modules still on the evaluator's path, each REVIEWED (qa, 10-05): why it may stay unguarded.
+// None of them decides a verdict, a scope write or a credential; a lane landing in one can at worst degrade
+// plumbing or a notice, which the evaluator's own re-run and the guarded files would not certify.
+const KNOWN_UNGUARDED: Record<string, string> = {
+  "src/resolvers/ui-write-passthrough.ts": "scope-earn-in (dynamic) — notice path, humans-informed: delivers the change notice, fire-and-forget, never read by the write or the verdict",
+  "src/resolvers/boredom-enqueue.ts": "rhythm-conductor-tick:24 — plumbing: the conductor's goal enqueue into the boredom queue, not the due formula or the evaluator's pacing",
+  "src/lib/region-literal.ts": "substrate-gap:43 — arming: the arm-time region-literal gate on gap writes; it decides whether a region arms, not a landing or a scope change",
+  "src/lib/demand-goals.ts": "substrate-gap:42 — plumbing: merges demand_goals entries (goal↔gap linkage) on gap writes",
+  "src/shape-vocabulary.ts": "substrate-gap:89 — arming: the advertised shape vocabulary used to judge a Class-2 predicate usable at birth",
+  "src/services/gap-drain-observer.ts": "substrate-gap (dynamic) — telemetry: counts compose-nudge skips",
+  "src/compose-slots.ts": "substrate-gap (dynamic) — plumbing: the cross-process compose capacity bound read when nudging compose",
+};
+
+/** Runtime import specifiers of a source text (relative only): static, re-export and dynamic; type-only erased. */
+export function runtimeImports(src: string): string[] {
+  const code = stripComments(src);
+  const out: string[] = [];
+  const stat = /(?:^|[;\n])\s*(import|export)\s+([^;"'`]*?)\s*from\s*["'](\.[^"']+)["']/g;
+  for (const m of code.matchAll(stat)) {
+    const clause = m[2]!.trim();
+    if (/^type\b/.test(clause)) continue;
+    const braces = clause.match(/^\{([^}]*)\}$/);
+    if (braces && braces[1]!.split(",").map((x) => x.trim()).filter(Boolean).every((x) => /^type\s/.test(x))) continue;
+    out.push(m[3]!);
+  }
+  for (const m of code.matchAll(/(?:^|[;\n])\s*import\s*["'](\.[^"']+)["']/g)) out.push(m[1]!);
+  for (const m of code.matchAll(/\bimport\(\s*["'](\.[^"']+)["']\s*\)/g)) out.push(m[1]!);
+  return out;
+}
+function resolveSpec(fromRel: string, spec: string): string | null {
+  const base = join(VESSEL_ROOT, fromRel, "..", spec);
+  for (const c of [base.replace(/\.js$/, ".ts"), `${base}.ts`, join(base, "index.ts")]) {
+    try { if (statSync(c).isFile()) return relative(VESSEL_ROOT, c); } catch { /* next */ }
+  }
+  return null;
+}
+function unguardedClosure(): Map<string, string> {
+  const guarded = new Set<string>([...EXCLUDED_SRC, ...(EVALUATOR_FILES_SRC())]);
+  const reached = new Map<string, string>();
+  const seen = new Set<string>(CLOSURE_ROOTS);
+  const queue = [...CLOSURE_ROOTS];
+  while (queue.length) {
+    const f = queue.shift()!;
+    if (REPORT_ONLY.includes(f) && !CLOSURE_ROOTS.includes(f)) continue;
+    for (const spec of runtimeImports(readFileSync(join(VESSEL_ROOT, f), "utf8"))) {
+      const r = resolveSpec(f, spec);
+      if (!r || !r.startsWith("src/") || seen.has(r)) continue;
+      seen.add(r);
+      queue.push(r);
+      if (!guarded.has(r)) reached.set(r, f);
+    }
+  }
+  return reached;
+}
+function EVALUATOR_FILES_SRC(): string[] {
+  const text = readFileSync(join(VESSEL_ROOT, APPLIER), "utf8");
+  const block = text.match(/export const EVALUATOR_FILES[^=]*=\s*\[([\s\S]*?)\];/);
+  return block ? [...block[1]!.matchAll(/"repos\/development-vessel\/([^"]+)"/g)].map((m) => m[1]!) : [];
+}
+
+describe("the evaluator's import closure (control: green at base)", () => {
+  it("positive control: the import scanner sees every runtime form and ignores type-only imports", () => {
+    expect(runtimeImports(`import { a } from "./x.js";\nexport { b } from "./y.js";\nconst m = await import("./z.js");\nimport "./side.js";`).sort())
+      .toEqual(["./side.js", "./x.js", "./y.js", "./z.js"]);
+    expect(runtimeImports(`import type { A } from "./t1.js";\nexport type { B } from "./t2.js";\nimport { type C, type D } from "./t3.js";`)).toEqual([]);
+    expect(runtimeImports(`import { type C, d } from "./t4.js";`)).toEqual(["./t4.js"]);
+  });
+});
+
+describe("the evaluator imports nothing the lane can edit beyond the recorded debt (must-fail at base)", () => {
+  it("every lane-editable module reached from the evaluator is exactly the known list", () => {
+    // The applier's own list of evaluator files, read from source: the closure is judged against the shipped list.
+    expect(EVALUATOR_FILES_SRC()).toContain("src/resolvers/rhythm-conductor-tick.ts");
+    // The operator-excluded modules on the evaluator's own closure are evaluator files too (10-05).
+    for (const f of ["src/lib/caller-credential.ts", "src/lib/self-auth.ts", "src/resolvers/retry-evidence.ts"]) expect(EVALUATOR_FILES_SRC()).toContain(f);
+    // Every remaining entry carries a reviewed reason, not a bare provenance note.
+    for (const [m, why] of Object.entries(KNOWN_UNGUARDED)) expect(why.split(" — ")[1] ?? "", m).toMatch(/^(notice path|plumbing|arming|telemetry)\b/);
+    const reached = unguardedClosure();
+    expect([...reached.keys()].sort()).toEqual(Object.keys(KNOWN_UNGUARDED).sort());
+  });
+});

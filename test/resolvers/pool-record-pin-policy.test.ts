@@ -96,8 +96,15 @@ describe("autonomyScope pinned on every node", () => {
     expect(d.map((x) => x.key)).toEqual([`${N2}-missing`]);
   });
 
-  it("a node with no pinned value is not judged (unobserved), never clean", async () => {
+  it("MUST-FAIL: a node HOLDING autonomyScope with no pinned value is unpinned (an unguarded trust root), never skipped", async () => {
     copies = { [N2]: { autonomyScope: scopeRec(PATHS) } };
+    const r = await asNode(N2, () => evaluateSelfFactRow(scopeRow({ [N1]: scopePin })));
+    expect(r?.source_read).toBe(true);
+    expect(real(r).map((x) => x.key)).toEqual([`${N2}-unpinned`]);
+  });
+
+  it("a node holding NO autonomyScope record and no pinned value is not judged (unobserved), never clean", async () => {
+    copies = { [N2]: {} };
     const r = await asNode(N2, () => evaluateSelfFactRow(scopeRow({ [N1]: scopePin })));
     expect(r?.source_read).toBe(false);
   });

@@ -448,16 +448,31 @@ describe("self_fact_reconcile pool_record_pin: the record must equal the operato
     expect(r?.divergences.some((d) => d.canary)).toBe(true);
   });
 
-  it("a node with no pinned value is not judged (unobserved), never clean", async () => {
+  // A trust root this node HOLDS with no pinned value for this node is unguarded: that is a finding, never a quiet
+  // skip (node1 lost both pins to a hostname change on 2026-10-04 and nothing said so for a day).
+  it("MUST-FAIL: a node holding the record with no pinned value is an UNPINNED divergence, and the canary is reported", async () => {
     stub({ id: "substrate-nodes", body: { discovery_endpoints: [ROGUE] } });
+    const r = await evaluateSelfFactRow(row({ "some-other-node": [N1] }));
+    expect(r?.source_read).toBe(true);
+    const d = real(r);
+    expect(d.map((x) => x.key)).toEqual([`${me()}-unpinned`]);
+    expect(d[0]!.detail).toContain("some-other-node");
+    expect(r?.divergences.some((x) => x.canary)).toBe(true);
+  });
+
+  it("control: a node holding NO record of the shape and no pinned value is not judged (unobserved), never clean", async () => {
+    stub(null);
     const r = await evaluateSelfFactRow(row({ "some-other-node": [N1] }));
     expect(r?.source_read).toBe(false);
   });
 
-  it("a row naming other nodes is SKIPPED on this node: the run stays observed (not turned unobserved by a foreign row)", async () => {
+  // Runs the resolver over one row naming only "other-node" (a row about another substrate's nodes in this
+  // fleet-shared file), with this node's pool store holding `held` for the row's shape.
+  async function runForeignRow(dir: string, held: { id?: string; body?: unknown } | null) {
     const { resolveSelfFactReconcile } = sfr;
+    stub(held);
     const prev = process.env["SUPER_REPO_ROOT"];
-    const repo = join(ROOT, "super");
+    const repo = join(ROOT, dir);
     mkdirSync(join(repo, "scripts", "substrate"), { recursive: true });
     const rows = { rows: [{ ...row({ "other-node": [N1] }), nodes: ["other-node"] }] };
     await Bun.write(join(repo, "scripts", "substrate", "self-facts.json"), JSON.stringify(rows));
@@ -466,13 +481,24 @@ describe("self_fact_reconcile pool_record_pin: the record must equal the operato
     process.env["SUPER_REPO_ROOT"] = repo;
     const logSpy = spyOn(console, "log").mockImplementation(() => {});
     try {
-      const r = (await resolveSelfFactReconcile({ type: "self_fact_reconcile", file_gaps: false })).body as { rows_checked: string[]; unobserved_rows: string[] };
-      expect(r.rows_checked).toEqual([]);
-      expect(r.unobserved_rows).toEqual([]);
+      return (await resolveSelfFactReconcile({ type: "self_fact_reconcile", file_gaps: false })).body as { rows_checked: string[]; unobserved_rows: string[]; divergences: Array<{ key: string }> };
     } finally {
       logSpy.mockRestore();
       if (prev === undefined) delete process.env["SUPER_REPO_ROOT"]; else process.env["SUPER_REPO_ROOT"] = prev;
     }
+  }
+
+  it("a row naming other nodes is SKIPPED on a node that holds no such record: the run stays observed (not turned unobserved by a foreign row)", async () => {
+    const r = await runForeignRow("super-foreign-none", null);
+    expect(r.rows_checked).toEqual([]);
+    expect(r.unobserved_rows).toEqual([]);
+  });
+
+  it("MUST-FAIL: a trust-root pin row that does not list this node still runs here when this node HOLDS the record, and reports it unpinned", async () => {
+    const r = await runForeignRow("super-foreign-held", { id: "substrate-nodes", body: { discovery_endpoints: [ROGUE] } });
+    expect(r.rows_checked).toEqual(["substrate_nodes_pinned"]);
+    expect(r.unobserved_rows).toEqual([]);
+    expect(r.divergences.map((d) => d.key)).toEqual([`${me()}-unpinned`]);
   });
 
   it("through the real pool store: an operator-seeded record matches; a later non-operator rewrite is refused, so it still matches", async () => {

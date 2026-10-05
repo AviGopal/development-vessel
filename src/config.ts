@@ -672,6 +672,8 @@ export const config = {
       // self_fact_reconcile (2026-09-22): diffs facts the substrate holds about itself
       // against the copies it reads, with a planted canary; files self-verifying gaps.
       "self_fact_reconcile",
+      // gap_check_supply_tick: writes a failing test for each gap with no check, then arms it once red at HEAD.
+      "gap_check_supply_tick",
       // attemptLedger: causal attempt ledger store (causal-attempt-ledger).
       "attemptLedger",
       "unaccounted_landing_scan",

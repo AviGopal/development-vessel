@@ -503,7 +503,7 @@ export function gapEditSite(gap: Record<string, unknown>, meta: Record<string, u
   return typeof top === "string" && top.trim() ? top.trim() : undefined;
 }
 
-function identifyVessel(gap: Record<string, unknown>, meta: Record<string, unknown>): string | null {
+export function identifyVessel(gap: Record<string, unknown>, meta: Record<string, unknown>): string | null {
   // 1. explicit metadata.vessel
   const mv = typeof meta.vessel === "string" ? meta.vessel.trim() : "";
   if (mv && vesselDirExists(mv)) return mv;
@@ -2269,7 +2269,7 @@ export async function admitActionableGaps(
             : skip === "no_edit_site" ? `needs_information(no_edit_site; falsifier=${falsifierClass})`
             : skip === "not_open" ? `not_open(${String(g.status ?? "")})`
             : meta.operator_hold === true ? "operator_hold"
-            : isParkingDisposition(meta.disposition) ? `disposition(${String(meta.disposition)})`
+            : isParkingDisposition(meta.disposition) || meta.disposition === CHECK_SUPPLY_DISPOSITION ? `disposition(${String(meta.disposition)})`
             : "disposition(pending_verification)";
           excluded.push({ id, reason });
           continue;
@@ -2851,6 +2851,8 @@ export interface GapCheckOpts {
   fetchImpl?: typeof fetch;
   /** Override the per-shape budget below. */
   timeoutMs?: number;
+  /** Observes the class-2 check's own report (e.g. test_suite's ran/fail/failingTests); never changes the verdict. */
+  onReport?: (report: Record<string, unknown>) => void;
 }
 
 /**
@@ -3045,6 +3047,7 @@ async function verifyGapConditionAsync(gap: Record<string, unknown>, opts: GapCh
     const inner = (typeof respBody['body'] === 'object' && respBody['body'] !== null)
       ? (respBody['body'] as Record<string, unknown>)
       : respBody;
+    try { opts.onReport?.(inner); } catch { /* an observer cannot change or break the verdict */ }
     // AN INSTRUMENT THAT SAYS IT DID NOT OBSERVE IS NOT A MEASUREMENT (2026-09-29, class-wide).
     // A zero from a run that read nothing (no rows, unreadable source, missed canary) would
     // otherwise read as 'absent' and close the gap as verified. Any check whose response says
@@ -4801,6 +4804,11 @@ export function isParkingDisposition(d: unknown): boolean {
   return typeof d === "string" && PARKING_DISPOSITIONS.includes(d);
 }
 
+/** A gap with no check of its own whose failing test the substrate is writing (gap-check-supply): written on the
+ *  row when the tick dispatches that test's edit goal, and cleared ("") by the write that arms the gap from it.
+ *  Not a parking disposition: no human is waited on, the supply tick is. The eligibility predicate holds it. */
+export const CHECK_SUPPLY_DISPOSITION = "needs_localization";
+
 /** A landed gap held for its verdict: disposition pending_verification (markPendingVerification) with nothing yet
  *  saying the landing failed. regressed_by or a BEHAVIORAL VERIFICATION FAILED summary means it did not fix the
  *  gap, so the gap is work again; the sweep's not-resolved verdict lifts the disposition (liftLandVerificationHold). */
@@ -4816,7 +4824,7 @@ export function isAwaitingLandVerification(gap: Record<string, unknown>): boolea
  *  picker's admission, the drain observer's compose nudge and the gap-write path's compose nudge, so a nudge never
  *  fires for a gap the picker cannot take and the two cannot drift. Eligible = open, armed (falsifier class1/class2,
  *  as a string or {class}), naming an edit site (edit_site, file_path, change_site, suspected_real_location or a
- *  row-level file_path), and not held (operator_hold, a parking disposition, a landing awaiting its verdict). */
+ *  row-level file_path), and not held (operator_hold, a parking disposition, a check being supplied (CHECK_SUPPLY_DISPOSITION), a landing awaiting its verdict). */
 export type ComposeEligibilitySkipReason = "not_open" | "unarmed" | "no_edit_site" | "held";
 export function composeEligibilitySkipReason(row: Record<string, unknown>): ComposeEligibilitySkipReason | null {
   if (String(row["status"] ?? "open") !== "open") return "not_open";
@@ -4826,7 +4834,7 @@ export function composeEligibilitySkipReason(row: Record<string, unknown>): Comp
   const falsifierClass = String((rawFalsifier && typeof rawFalsifier === "object" ? (rawFalsifier as { class?: unknown }).class : rawFalsifier) ?? "").toLowerCase();
   if (falsifierClass !== "class1" && falsifierClass !== "class2") return "unarmed";
   if (!(meta["edit_site"] || meta["file_path"] || meta["change_site"] || meta["suspected_real_location"] || row["file_path"])) return "no_edit_site";
-  if (meta["operator_hold"] === true || isParkingDisposition(meta["disposition"]) || isAwaitingLandVerification(row)) return "held";
+  if (meta["operator_hold"] === true || isParkingDisposition(meta["disposition"]) || meta["disposition"] === CHECK_SUPPLY_DISPOSITION || isAwaitingLandVerification(row)) return "held";
   return null;
 }
 

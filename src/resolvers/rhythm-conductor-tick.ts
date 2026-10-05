@@ -109,7 +109,7 @@ export interface RhythmConductorTickPointer {
   bucket_load?: number;
 }
 
-interface RhythmBody {
+export interface RhythmBody {
   axis?: string;
   axis_code?: number;
   family?: string;
@@ -175,9 +175,23 @@ const FAMILY_VARIABLES: Record<string, Record<string, unknown>> = { "project-int
  * For a resolver-backed maintenance family, resolve it directly against this vessel — the
  * scan is self-correcting (live detectors re-open a wrongly-closed gap) and idempotent.
  */
-const FAMILY_RESOLVERS: Record<string, Record<string, unknown>> = {
+export const FAMILY_RESOLVERS: Record<string, Record<string, unknown>> = {
   "gap-organizing": { type: "gap_lifecycle_scan", autoClose: true, dry_run: false, maxClose: 25 },
+  // Writes a failing test for each open gap that has no check of its own, then arms the gap from it once the
+  // test reads red at HEAD (gap-check-supply.ts). settled_by "report": the resolver settles its own family from
+  // its report when it completes, so the conductor never credits it for an exit (directFamilySettlement).
+  "gap-check-supply": { type: "gap_check_supply_tick", settled_by: "report" },
 };
+
+/**
+ * How the conductor settles a resolver-backed family after its direct call. A family whose resolver settles by
+ * its own REPORT is left PENDING here (no alpha, no beta): the call may outlive this wait (an arm step runs a test
+ * suite for minutes) and returning is not success (REALIGNMENT §2.2, exit-graded credit). Every other direct
+ * family keeps its historical alpha on a synchronous return.
+ */
+export function directFamilySettlement(spec: Record<string, unknown> | undefined, _response: unknown): "alpha" | "pending" {
+  return spec?.["settled_by"] === "report" ? "pending" : "alpha";
+}
 
 async function fetchJson(url: string, init: RequestInit, timeoutMs: number): Promise<unknown> {
   const ctrl = new AbortController();
@@ -250,6 +264,27 @@ export function rhythmSettlementOverlay(
     : { beta: beta + 0.5, staleness: Math.max(0, staleness) };
 }
 
+/**
+ * A rhythm's due-ness, the one formula: due_score = credit_mean * staleness / max(budget, 0.05), where staleness
+ * accrues by the age of the impulse's last write (a day to saturate), except for gap-closing, whose staleness is
+ * exactly what was stored. Read by the conductor and by any resolver that gates itself on its own family's rhythm
+ * (gap-check-supply), so the two cannot disagree about whether a family is due.
+ */
+export function rhythmDueScore(
+  b: RhythmBody,
+  updatedAt: unknown,
+  nowMs: number = Date.now(),
+): { alpha: number; beta: number; staleness: number; budget: number; due_score: number } {
+  const alpha = typeof b.alpha === "number" ? b.alpha : 1;
+  const beta = typeof b.beta === "number" ? b.beta : 1;
+  const rawStaleness = typeof b.staleness === "number" ? b.staleness : 0;
+  const ageHours = typeof updatedAt === "string" ? (nowMs - new Date(updatedAt).getTime()) / 3600000 : 0;
+  const staleness = b.family === "gap-closing" ? rawStaleness : Math.min(1, rawStaleness + Math.max(0, ageHours) / 24);
+  const budget = typeof b.budget === "number" ? b.budget : 1;
+  const denom = alpha + beta > 0 ? alpha + beta : 1;
+  return { alpha, beta, staleness, budget, due_score: (alpha / denom) * staleness / Math.max(budget, 0.05) };
+}
+
 export async function resolveRhythmConductorTick(
   pointer: RhythmConductorTickPointer,
 ): Promise<ResolverResult> {
@@ -273,23 +308,23 @@ export async function resolveRhythmConductorTick(
     {
       method: "POST",
       headers: selfHeaders,
-      body: JSON.stringify({ impulse: { type: "poolImpulse", shape: "timeShapedRhythm", limit: 50 } }),
+      // NO LIMIT: the registry outgrew the old limit of 50, and the pool returns newest-updated first, so a family
+      // past the 50th row (a newly seeded one that has never been written back) was never scored or fired.
+      body: JSON.stringify({ impulse: { type: "poolImpulse", shape: "timeShapedRhythm" } }),
     },
     800,
-  )) as { body?: { impulses?: RhythmImpulse[] } } | null;
+  )) as { body?: { impulses?: RhythmImpulse[]; count?: number } } | null;
   const rhythms = Array.isArray(regResp?.body?.impulses) ? regResp!.body!.impulses! : [];
+  // COMPLETION CHECK: the rows read must be every row the registry holds. A producer that still truncates is
+  // said out loud and reported, never read as "these are all the families".
+  const registeredCount = typeof regResp?.body?.count === "number" ? regResp.body.count : null;
+  const registryComplete = registeredCount === null ? null : rhythms.length === registeredCount;
+  if (registryComplete === false) console.log(`[rhythm-conductor] registry read INCOMPLETE: read ${rhythms.length} of ${registeredCount} timeShapedRhythm rows; families past the read are not scored this tick`);
 
   // 2. Score + affordability.
   const scored = rhythms.map((r) => {
     const b = r.body ?? {};
-    const alpha = typeof b.alpha === "number" ? b.alpha : 1;
-    const beta = typeof b.beta === "number" ? b.beta : 1;
-    const rawStaleness = typeof b.staleness === "number" ? b.staleness : 0;
-    const ageHours = typeof r.updated_at === "string" ? (Date.now() - new Date(r.updated_at).getTime()) / 3600000 : 0;
-    const staleness = b.family === "gap-closing" ? rawStaleness : Math.min(1, rawStaleness + Math.max(0, ageHours) / 24);
-    const budget = typeof b.budget === "number" ? b.budget : 1;
-    const denom = alpha + beta > 0 ? alpha + beta : 1;
-    const due_score = (alpha / denom) * staleness / Math.max(budget, 0.05);
+    const { alpha, beta, staleness, budget, due_score } = rhythmDueScore(b, r.updated_at);
     const affordable =
       budget <= 1 - bucketLoad / 3 && (b.axis === "presence" ? present : true);
     return {
@@ -342,7 +377,7 @@ export async function resolveRhythmConductorTick(
     pendingReasons = [];
   }
 
-  const enqueued: Array<{ family: string; goal: string; due_score: number }> = [];
+  const enqueued: Array<{ family: string; goal: string; due_score: number; settlement?: string }> = [];
   const skipped: Array<{ family: string; reason: string }> = [];
   let picked = 0;
 
@@ -507,7 +542,8 @@ export async function resolveRhythmConductorTick(
     const bootstrapGoal: string | undefined = FAMILY_GOALS[r.family];
     const members: Array<{ goal: string; member?: string }> =
       poolGoals[r.family] ?? (bootstrapGoal ? [{ goal: bootstrapGoal }] : []);
-    if (members.length === 0) {
+    // A resolver-backed family needs no goal text: it is dispatched directly below.
+    if (members.length === 0 && !FAMILY_RESOLVERS[r.family]) {
       skipped.push({ family: r.family, reason: "no_goal_mapping" });
       // A FAMILY THAT CANNOT BE DISPATCHED MUST LOSE CREDIT, OR IT IS SCORED FOREVER ON
       // WORK IT NEVER DID. Without this the posterior only ever moved one way: alpha rose
@@ -526,6 +562,7 @@ export async function resolveRhythmConductorTick(
     }
 
     let firedThisFamily = false;
+    let directLeg: "alpha" | "pending" = "alpha";
     let failedToEnqueue = false;
     const directResolver = FAMILY_RESOLVERS[r.family];
     if (directResolver) {
@@ -533,7 +570,7 @@ export async function resolveRhythmConductorTick(
       // instead of enqueuing an NL goal that goal-host cannot walk into an invocation.
       if (!pointer.dry_run && picked < maxEnqueue) {
         try {
-          await fetchJson(
+          const directResponse = await fetchJson(
             endpoint,
             {
               method: "POST",
@@ -543,7 +580,8 @@ export async function resolveRhythmConductorTick(
             60_000,
           );
           firedThisFamily = true;
-          enqueued.push({ family: r.family, goal: `direct:${String(directResolver.type)}`, due_score: Math.round(r.due_score * 100) / 100 });
+          directLeg = directFamilySettlement(directResolver, directResponse);
+          enqueued.push({ family: r.family, goal: `direct:${String(directResolver.type)}`, due_score: Math.round(r.due_score * 100) / 100, ...(directLeg === "pending" ? { settlement: "pending" } : {}) });
           picked += 1;
         } catch {
           skipped.push({ family: r.family, reason: "direct_dispatch_failed" });
@@ -603,7 +641,8 @@ export async function resolveRhythmConductorTick(
     if (firedThisFamily && !pointer.dry_run) {
       // A direct-resolver family's resolve returned its outcome synchronously; an enqueued
       // goal's outcome is settled later by the outcome pass, so a fire only answers staleness.
-      await settleRhythm(r, directResolver ? "alpha" : "fired");
+      // A report-settled family is PENDING: its resolver settles it from its report (directFamilySettlement).
+      if (!(directResolver && directLeg === "pending")) await settleRhythm(r, directResolver ? "alpha" : "fired");
     } else if (failedToEnqueue && !pointer.dry_run) {
       await settleRhythm(r, "beta");
     }
@@ -634,7 +673,8 @@ export async function resolveRhythmConductorTick(
   // asking "could this family EVER map?" is answerable on every tick.
   const mappable = rhythms.filter((r) => {
     const fam = typeof r.body?.family === "string" ? r.body.family : "";
-    return !!fam && ((poolGoals[fam]?.length ?? 0) > 0 || !!FAMILY_GOALS[fam]);
+    // A resolver-backed family (FAMILY_RESOLVERS) is mapped too: it is dispatched directly, not by goal text.
+    return !!fam && ((poolGoals[fam]?.length ?? 0) > 0 || !!FAMILY_GOALS[fam] || !!FAMILY_RESOLVERS[fam]);
   }).length;
   // One expression. An earlier edit split this into a ternary over regResp alone followed by a bare
   // ternary statement whose value was discarded, so the gap fired only on a failed registry read and
@@ -701,6 +741,8 @@ export async function resolveRhythmConductorTick(
       presence: present,
       presence_lookup: describeLookup(presenceLookup),
       considered: rhythms.length,
+      registry_registered: registeredCount,
+      registry_complete: registryComplete,
       // Names the break in the report too, so an operator reading a single tick sees
       // "registry_unmappable" rather than inferring it from an empty enqueued list.
       structural_break: structuralBreak,

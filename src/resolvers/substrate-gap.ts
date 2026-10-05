@@ -767,7 +767,8 @@ if (evidenceResolve && typeof evidenceResolve === "object" && !Array.isArray(evi
 // check carries its verdict forward unchanged (there is no second, write-triggered retry path).
 // ─────────────────────────────────────────────────────────────────────────────
 export type BirthVerdict = "pending" | "present" | "absent" | "unknown";
-export type BirthJudge = (gap: Record<string, unknown>) => Promise<string>;
+/** The one judge. `opts.onReport` observes the check's own report (what ran, what failed) without changing the verdict. */
+export type BirthJudge = (gap: Record<string, unknown>, opts?: { onReport?: (report: Record<string, unknown>) => void }) => Promise<string>;
 const BIRTH_FIELDS = ["predicate_birth_verdict", "predicate_birth_at", "predicate_birth_key", "predicate_birth_sha", "predicate_birth_detected_sha", "predicate_birth_queued_sha", "predicate_birth_tree_moved", "predicate_birth_tree_reason"] as const;
 /** A 'pending' older than this means its evaluation died with the process: the sweep re-takes it, and gap_birth_verdicts counts it. */
 export const BIRTH_PENDING_STALE_MS = 3600_000;
@@ -908,9 +909,9 @@ export async function __settleBirthEvaluationsForTests(): Promise<void> {
   while (__birthInflight.size > 0) await Promise.allSettled([...__birthInflight]);
 }
 
-async function defaultBirthJudge(gap: Record<string, unknown>): Promise<string> {
+async function defaultBirthJudge(gap: Record<string, unknown>, opts?: { onReport?: (report: Record<string, unknown>) => void }): Promise<string> {
   const { evaluateGapCheck } = await import("./gap-to-feature.js");
-  return evaluateGapCheck(gap);
+  return evaluateGapCheck(gap, opts?.onReport ? { onReport: opts.onReport } : {});
 }
 
 async function stampBirthVerdict(id: string, key: string, verdict: BirthVerdict, evalSha: string | null, tree: { moved: boolean; reason: string } | null): Promise<boolean> {
@@ -944,6 +945,18 @@ export async function takeBirthVerdict(id: string, meta: Record<string, unknown>
     console.warn(`[gap-birth] ${id}: check threw (${String(err).slice(0, 160)}) — unknown`);
     return "unknown";
   }
+}
+
+/**
+ * takeBirthVerdict through the same judge, also returning the check's own report (null when the judge gave none),
+ * for a caller that must know WHY a check read present, e.g. that its named tests failed on an assertion rather
+ * than on a load error (gap-check-supply).
+ */
+export async function takeBirthVerdictWithReport(id: string, meta: Record<string, unknown>): Promise<{ verdict: "present" | "absent" | "unknown"; report: Record<string, unknown> | null }> {
+  let report: Record<string, unknown> | null = null;
+  const base = __birthJudgeOverride ?? defaultBirthJudge;
+  const verdict = await takeBirthVerdict(id, meta, (g) => base(g, { onReport: (r) => { report = r; } }));
+  return { verdict, report };
 }
 
 function scheduleBirthEvaluation(job: { id: string; key: string; meta: Record<string, unknown> }, judge: BirthJudge): void {

@@ -1,4 +1,5 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { gapLineageRoot } from "./staged-mitosis-gate.js";
 import { join } from "node:path";
 import type { ResolverResult } from "./types.js";
 import { resolveFeatureCompose, priorAttemptFeedbackBlock, readParkedLanding, resolveDissentOutcome, landedCloseReason, landingLabelHere, LANDING_LABELER, isDissentChild, dissentChildCheckRefusal } from "./feature-compose.js";
@@ -2174,6 +2175,7 @@ export async function admitActionableGaps(
   // below can see whether there is any groundable work to prefer over them.
   const ungroundable: Record<string, unknown>[] = [];
   const excluded: Array<{ id: string; reason: string }> = [];
+  const candidatesById = new Map(gaps.map((x) => [String(x.id ?? ""), x] as [string, Record<string, unknown>]));
   const CHILD_GAP_MONOPOLY_THRESHOLD = 3; // Arbitrary, but a concrete limit. This may be tuned in the future.
   const childGapsByEditSite = new Map<string, number>();
   let tscRuns = 0;
@@ -2283,7 +2285,11 @@ export async function admitActionableGaps(
       const siteForScope = String(meta.edit_site || meta.file_path || meta.change_site || meta.suspected_real_location || g.file_path || "");
       if (siteForScope) {
         const scopeHit = autonomyScopeExcludes(scope, siteForScope);
-        if (scopeHit) {
+        // A tightening hold does not block the repair of its own regression (gapInHoldLineage).
+        const hold = scopeHit ? scopeHoldFor(scope, scopeHit) : null;
+        if (scopeHit && hold && gapInHoldLineage(g, hold, candidatesById)) {
+          console.log(`[gap-admission] gap ${id}: in the lineage of the tightening hold on ${hold.path}; the hold does not exclude its own repair`);
+        } else if (scopeHit) {
           excluded.push({ id, reason: `autonomy_scope(${scopeHit})` });
           continue;
         }
@@ -5890,7 +5896,65 @@ export async function spendEnvelopeAllows(): Promise<SpendEnvelopeVerdict> {
 // lists paths, is a misconfiguration and closed too. An unreadable scope excludes everything
 // autonomous (fail closed), including on a fresh process that has not read one yet.
 // Directed work never consults it. Cached 30 s.
-export type AutonomyScope = { excluded: string[]; readable: boolean; reason: string; absent?: boolean; lookup_failed?: boolean; requireFalsifierClasses?: string[] };
+export type AutonomyScope = { excluded: string[]; readable: boolean; reason: string; absent?: boolean; lookup_failed?: boolean; requireFalsifierClasses?: string[]; holds?: ScopeHold[] };
+
+/**
+ * A TIGHTENING HOLD MUST NOT BLOCK THE REPAIR OF ITS OWN REGRESSION (scope earn-in, qa ruling 10-05). The evaluator
+ * (scope-earn-in.ts) adds a file with an open, unreverted regression to excluded_paths with a TTL hold, and stores on
+ * the hold the regression's lineage: lineage_roots (the gap ids its evidence names) and lineage_checks (those gaps'
+ * own test_suite checks, "<test_file>|<test title>"). The hold keeps every OTHER autonomous change off the file, but
+ * a gap in that lineage is the repair itself, so it stays eligible:
+ *   - the evidence gap, or any gap whose id, parent_gap_id, root_gap_id or source_gap_id (walked up the candidate
+ *     set) reduces to a root once recommit- prefixes and -narrowed / -step-N / -cN suffixes are stripped;
+ *   - or any gap whose own check names one of the regressing checks.
+ * A hold with no lineage (no evidence gap) exempts nothing. Only the held entry is exempted; any other excluded path
+ * still excludes.
+ */
+export type ScopeHold = { path: string; expires_at?: string; lineage_roots: string[]; lineage_checks: string[] };
+const strList = (v: unknown): string[] => (Array.isArray(v) ? v.filter((e): e is string => typeof e === "string" && e.trim().length > 0).map((e) => e.trim()) : []);
+export function parseScopeHolds(raw: unknown): ScopeHold[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.filter((h): h is Record<string, unknown> => !!h && typeof h === "object" && typeof (h as { path?: unknown }).path === "string")
+    .map((h) => ({ path: String(h.path).trim(), ...(typeof h.expires_at === "string" ? { expires_at: h.expires_at } : {}), lineage_roots: strList(h.lineage_roots), lineage_checks: strList(h.lineage_checks) }));
+}
+/** A gap's own test_suite check, as "<test_file>|<title>" keys (one per named test). */
+export function gapCheckKeys(gap: Record<string, unknown>): string[] {
+  const meta = (gap.classification_metadata ?? gap.metadata ?? {}) as Record<string, unknown>;
+  const er = meta.evidence_resolve as { shape?: unknown; input?: Record<string, unknown> } | null | undefined;
+  if (!er || typeof er !== "object" || er.shape !== "test_suite" || !er.input) return [];
+  const file = typeof er.input.test_file === "string" ? er.input.test_file.trim() : "";
+  return strList(er.input.only_tests).map((t) => `${file}|${t}`);
+}
+/** A gap id's lineage stem: recommit- layers removed (gapLineageRoot), then -narrowed / -step-N / -cN suffixes. */
+export function gapLineageStem(id: string): string {
+  let s = gapLineageRoot(id);
+  for (let prev = ""; prev !== s;) { prev = s; s = s.replace(/-(?:narrowed|step-\d+|c\d+)$/, ""); }
+  return s;
+}
+/** The hold behind an excluded entry, when that entry is a tightening hold. */
+export function scopeHoldFor(scope: AutonomyScope, entry: string): ScopeHold | null {
+  const n = (p: string) => p.replace(/^\.\//, "").replace(/^repos\//, "");
+  return (scope.holds ?? []).find((h) => n(h.path) === n(entry)) ?? null;
+}
+export function gapInHoldLineage(gap: Record<string, unknown>, hold: ScopeHold, byId: Map<string, Record<string, unknown>> = new Map()): boolean {
+  if (hold.lineage_roots.length === 0 && hold.lineage_checks.length === 0) return false;
+  const roots = new Set(hold.lineage_roots.flatMap((r) => [r, gapLineageStem(r)]));
+  const ids: string[] = [];
+  const seen = new Set<string>();
+  let cur: Record<string, unknown> | undefined = gap;
+  for (let depth = 0; cur && depth <= 8; depth++) {
+    const id = String(cur.id ?? "");
+    if (seen.has(id)) break;
+    seen.add(id);
+    const meta = (cur.classification_metadata ?? cur.metadata ?? {}) as Record<string, unknown>;
+    ids.push(id, ...[meta.parent_gap_id, meta.root_gap_id, meta.source_gap_id].filter((v): v is string => typeof v === "string" && v.length > 0));
+    const parent = String(meta.parent_gap_id ?? meta.source_gap_id ?? "");
+    cur = parent ? byId.get(parent) : undefined;
+  }
+  if (ids.some((id) => id && (roots.has(id) || roots.has(gapLineageStem(id))))) return true;
+  const checks = new Set(hold.lineage_checks);
+  return gapCheckKeys(gap).some((k) => checks.has(k));
+}
 let autonomyScopeCache: { at: number; v: AutonomyScope } | null = null;
 export async function autonomyScope(): Promise<AutonomyScope> {
   // ABSENT is held for the normal TTL like a readable scope (a successful read; see spendEnvelopeAllows).
@@ -5928,7 +5992,8 @@ export async function autonomyScope(): Promise<AutonomyScope> {
         // construction, so a landing without one cannot be credited as an improvement).
         const reqRaw = body.require_falsifier_classes;
         const requireFalsifierClasses = Array.isArray(reqRaw) ? reqRaw.filter((e): e is string => typeof e === "string" && e.trim().length > 0).map((e) => e.trim().toLowerCase()) : undefined;
-        v = { excluded, readable: true, reason: body.unrestricted === true ? "autonomyScope: explicitly unrestricted" : `autonomyScope: ${excluded.length} excluded path(s)`, ...(requireFalsifierClasses ? { requireFalsifierClasses } : {}) };
+        const holds = parseScopeHolds((body as { tightening_holds?: unknown }).tightening_holds);
+        v = { excluded, readable: true, reason: body.unrestricted === true ? "autonomyScope: explicitly unrestricted" : `autonomyScope: ${excluded.length} excluded path(s)`, ...(requireFalsifierClasses ? { requireFalsifierClasses } : {}), ...(holds.length ? { holds } : {}) };
         line(body.unrestricted === true ? "open (explicitly unrestricted)" : `contained (${excluded.length} excluded path(s))`, true, excluded.length);
       }
     }
@@ -5958,8 +6023,10 @@ export function autonomyScopeExcludes(scope: AutonomyScope, path: string): strin
 /** The autonomy-scope floor for one autonomous compose: the scope entries its applied paths hit, and,
  *  when those hits exist only because the scope could not be read, why. That withhold still fails
  *  closed, but it is an environment condition, not a verdict on the draft. */
-export function autonomyScopeFloor(scope: AutonomyScope, appliedPaths: string[]): { hits: string[]; unreadable: string | null } {
-  const hits = [...new Set(appliedPaths.map((p) => autonomyScopeExcludes(scope, p)).filter((h): h is string => !!h))];
+export function autonomyScopeFloor(scope: AutonomyScope, appliedPaths: string[], gap?: Record<string, unknown> | null): { hits: string[]; unreadable: string | null } {
+  // A held entry does not withhold the compose of a gap in that hold's lineage (gapInHoldLineage); every other hit does.
+  const hits = [...new Set(appliedPaths.map((p) => autonomyScopeExcludes(scope, p)).filter((h): h is string => !!h))]
+    .filter((h) => { const hold = gap ? scopeHoldFor(scope, h) : null; return !(hold && gap && gapInHoldLineage(gap, hold)); });
   const unreadable = hits.length > 0 && !scope.readable
     ? `autonomy scope ${scope.absent ? "absent" : "unreadable"}${scope.lookup_failed ? " (discovery lookup failed)" : ""}: ${scope.reason}`
     : null;

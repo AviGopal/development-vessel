@@ -7904,7 +7904,8 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
   if (verdict === "FAVORABLE" && (pointer as { directed?: boolean }).directed !== true) {
     try {
       const { autonomyScope, autonomyScopeFloor } = await import("./gap-to-feature.js");
-      const floor = autonomyScopeFloor(await autonomyScope(), applied.filter((a) => a.ok).map((a) => a.path));
+      // The gap's row lets a tightening hold pass the repair of its own regression (gapInHoldLineage).
+      const floor = autonomyScopeFloor(await autonomyScope(), applied.filter((a) => a.ok).map((a) => a.path), (pointer.gap ?? null) as Record<string, unknown> | null);
       const scopeHits = floor.hits;
       if (scopeHits.length > 0) {
         verdict = "UNFAVORABLE";

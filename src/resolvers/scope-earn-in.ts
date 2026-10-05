@@ -42,6 +42,7 @@ import type { ResolverResult } from "./types.js";
 import { WORKSPACE_ROOT } from "../config.js";
 import { rhythmDueScore, type RhythmBody } from "./rhythm-conductor-tick.js";
 import { readFamilyRhythm, redForTheRightReason, settleFamily } from "./gap-check-supply.js";
+import { gapCheckKeys } from "./gap-to-feature.js";
 import { resolvePoolImpulse, resolvePoolImpulseWrite, type PoolWriteAuth } from "./pool-impulse.js";
 
 export const SCOPE_EARN_IN_FAMILY = "scope-earn-in";
@@ -212,53 +213,54 @@ function guardCommit(row: Row): string | null {
   return null;
 }
 
-export type EarnInEvaluation = { path: string; verdict: "covered" | "not_covered" | "unjudgeable"; reason: string; evidence: Row[]; ran_checks: boolean };
+/** reason_key: the compact class of the outcome ("qualified" when covered), counted in the tick's journal line. */
+export type EarnInEvaluation = { path: string; verdict: "covered" | "not_covered" | "unjudgeable"; reason_key: string; reason: string; evidence: Row[]; ran_checks: boolean };
 
 /** The widening criterion for one excluded entry, judged now on the live store and the accepted tree. */
 export async function evaluateWidening(path: string, gaps: Row[], d: ScopeEarnInDeps = deps()): Promise<EarnInEvaluation> {
-  const out = (verdict: EarnInEvaluation["verdict"], reason: string, evidence: Row[] = [], ran = false): EarnInEvaluation => ({ path, verdict, reason, evidence, ran_checks: ran });
-  if (isEvaluatorFile(path)) return out("not_covered", EVALUATOR_FILE_REASON);
-  if (path.endsWith("/")) return out("not_covered", "not_evaluated(directory): the criterion is applied per file");
+  const out = (verdict: EarnInEvaluation["verdict"], reason_key: string, reason: string, evidence: Row[] = [], ran = false): EarnInEvaluation => ({ path, verdict, reason_key, reason, evidence, ran_checks: ran });
+  if (isEvaluatorFile(path)) return out("not_covered", "evaluator_file", EVALUATOR_FILE_REASON);
+  if (path.endsWith("/")) return out("not_covered", "directory", "not_evaluated(directory): the criterion is applied per file");
   const glue = runtimeGlueReason(path, d.unitsText());
-  if (glue) return out("not_covered", glue);
+  if (glue) return out("not_covered", "runtime_glue", glue);
   const target = canonicalScopePath(path);
   const m = target.match(/^repos\/([^/]+)\/(.+)$/);
-  if (!m) return out("not_covered", `${target} is not a vessel file`);
+  if (!m) return out("not_covered", "not_a_vessel_file", `${target} is not a vessel file`);
   const [, vessel, fileRel] = m as unknown as [string, string, string];
   const regs = gaps.filter((g) => siteOf(g) === target && isRegression(g));
-  if (regs.length === 0) return out("not_covered", "no_regression_history: no gap on record shows a regression in this file, so there is nothing for the criterion to cover");
+  if (regs.length === 0) return out("not_covered", "no_regression_history", "no_regression_history: no gap on record shows a regression in this file, so there is nothing for the criterion to cover");
   // 1. MAP every regression before running anything: one unmapped regression decides the file.
   const mapped: Array<{ id: string; mf: NonNullable<ReturnType<typeof armedMustFail>>; guard: string }> = [];
   for (const g of regs) {
     const id = String(g["id"]);
     const mf = armedMustFail(g);
-    if (!mf) return out("not_covered", `regression ${id} maps to no armed must-fail (it needs a class1/class2 test_suite check naming its tests)`);
-    if (mf.vessel !== vessel) return out("not_covered", `regression ${id}'s must-fail lives in ${mf.vessel}, not ${vessel}: the mutation cannot run in that tree`);
+    if (!mf) return out("not_covered", "unmapped_regression", `regression ${id} maps to no armed must-fail (it needs a class1/class2 test_suite check naming its tests)`);
+    if (mf.vessel !== vessel) return out("not_covered", "must_fail_other_vessel", `regression ${id}'s must-fail lives in ${mf.vessel}, not ${vessel}: the mutation cannot run in that tree`);
     const guard = guardCommit(g);
-    if (!guard) return out("not_covered", `regression ${id} has no guard commit (landed_sha / landed_commit / regressed_by.revert_sha) to mutate`);
+    if (!guard) return out("not_covered", "no_guard_commit", `regression ${id} has no guard commit (landed_sha / landed_commit / regressed_by.revert_sha) to mutate`);
     mapped.push({ id, mf, guard });
   }
   // 2. COVERED BY MUTATION: green on the accepted tree (the sha the RUNTIME runs, never the clone's HEAD, which may be
   // pushed but not mirrored), red there with the guard removed.
   const runtime = d.runtimeSha(vessel);
-  if (!runtime) return out("unjudgeable", `no runtime sha recorded for ${vessel} (pull-sync last-good pin): the accepted tree is unknown`);
+  if (!runtime) return out("unjudgeable", "no_runtime_pin", `no runtime sha recorded for ${vessel} (pull-sync last-good pin): the accepted tree is unknown`);
   const evidence: Row[] = [];
   for (const { id, mf, guard } of mapped) {
     const input = { vessel: `repos/${vessel}`, ...(mf.test_file ? { test_file: mf.test_file } : {}), only_tests: mf.only_tests, base_ref: runtime };
     const plain = await d.runCheck(input).catch(() => null);
-    if (!plain || plain["ran"] !== true) return out("unjudgeable", `regression ${id}: its must-fail did not run on the runtime tree ${runtime.slice(0, 12)}`, evidence, true);
-    if (Number(plain["requested_not_passing"] ?? 1) !== 0) return out("not_covered", `regression ${id}: its must-fail is red at the runtime sha ${runtime.slice(0, 12)} without any mutation (the defect is live where it runs)`, evidence, true);
+    if (!plain || plain["ran"] !== true) return out("unjudgeable", "must_fail_did_not_run", `regression ${id}: its must-fail did not run on the runtime tree ${runtime.slice(0, 12)}`, evidence, true);
+    if (Number(plain["requested_not_passing"] ?? 1) !== 0) return out("not_covered", "red_at_runtime", `regression ${id}: its must-fail is red at the runtime sha ${runtime.slice(0, 12)} without any mutation (the defect is live where it runs)`, evidence, true);
     const mutated = await d.runCheck({ ...input, mutate_revert: { sha: guard, file: fileRel } }).catch(() => null);
-    if (!mutated || (mutated["mutation"] as Row | undefined)?.["applied"] !== true) return out("unjudgeable", `regression ${id}: reverting ${guard.slice(0, 12)} on ${fileRel} could not be applied at the runtime sha ${runtime.slice(0, 12)}`, evidence, true);
+    if (!mutated || (mutated["mutation"] as Row | undefined)?.["applied"] !== true) return out("unjudgeable", "mutation_not_applied", `regression ${id}: reverting ${guard.slice(0, 12)} on ${fileRel} could not be applied at the runtime sha ${runtime.slice(0, 12)}`, evidence, true);
     const wrong = redForTheRightReason(mutated, mf.only_tests);
-    if (wrong) return out("not_covered", `regression ${id}: its must-fail survives the mutation (reverting ${guard.slice(0, 12)} on ${fileRel}): ${wrong}`, evidence, true);
+    if (wrong) return out("not_covered", "survives_mutation", `regression ${id}: its must-fail survives the mutation (reverting ${guard.slice(0, 12)} on ${fileRel}): ${wrong}`, evidence, true);
     evidence.push({
       gap_id: id, runtime_sha: runtime, must_fail: { vessel: `repos/${vessel}`, test_file: mf.test_file, only_tests: mf.only_tests }, guard_commit: guard,
       unmutated: { green: true, verified_head: plain["verified_head"] ?? null },
       mutated: { red: true, verified_head: mutated["verified_head"] ?? null, failing: ((mutated["failingTests"] as unknown[]) ?? []).slice(0, 10) },
     });
   }
-  return out("covered", `every regression (${mapped.length}) maps to an armed must-fail that reddens under mutation`, evidence, true);
+  return out("covered", "qualified", `every regression (${mapped.length}) maps to an armed must-fail that reddens under mutation`, evidence, true);
 }
 
 /** The tightening evidence for a path: its open, unreverted regressions in the live store. */
@@ -268,6 +270,17 @@ export function evaluateTightening(path: string, gaps: Row[]): Row[] {
     const rb = metaOf(g)["regressed_by"] as Row;
     return { gap_id: String(g["id"]), regressed_by: { sha: rb["sha"] ?? null, by: rb["by"] ?? null } };
   });
+}
+
+/**
+ * The lineage a tightening hold carries (gap-to-feature gapInHoldLineage): the gap ids its evidence names, and those
+ * gaps' own test_suite checks. Empty when the evidence names no gap: such a hold exempts nothing.
+ */
+export function holdLineage(evidence: Row[], gaps: Row[]): { lineage_roots: string[]; lineage_checks: string[] } {
+  const roots = [...new Set(evidence.map((e) => str(e["gap_id"])).filter(Boolean))];
+  const byId = new Map(gaps.map((g) => [String(g["id"]), g] as [string, Row]));
+  const checks = [...new Set(roots.flatMap((r) => (byId.has(r) ? gapCheckKeys(byId.get(r)!) : [])))];
+  return { lineage_roots: roots, lineage_checks: checks };
 }
 
 /** The exit metric over the change records. */
@@ -322,12 +335,12 @@ export async function resolveScopeEarnInTick(pointer: ScopeEarnInTickPointer): P
   // WIDENINGS: each excluded entry, by the full criterion.
   for (const entry of scope.excluded) {
     const path = canonicalScopePath(entry);
-    if (pending.has(path)) { evaluated.push({ path, verdict: "not_covered", reason: "a proposal for this path is already pending" }); continue; }
-    if (ranFiles >= perTick) { evaluated.push({ path, verdict: "not_covered", reason: "deferred: this tick's max_per_tick is spent" }); continue; }
+    if (pending.has(path)) { evaluated.push({ path, verdict: "not_covered", reason_key: "proposal_pending", reason: "a proposal for this path is already pending" }); continue; }
+    if (ranFiles >= perTick) { evaluated.push({ path, verdict: "not_covered", reason_key: "deferred", reason: "deferred: this tick's max_per_tick is spent" }); continue; }
     const ev = await evaluateWidening(path, gaps, d);
     if (ev.ran_checks) ranFiles += 1;
     if (ev.verdict === "unjudgeable") unjudgeable += 1;
-    evaluated.push({ path: ev.path, verdict: ev.verdict, reason: ev.reason });
+    evaluated.push({ path: ev.path, verdict: ev.verdict, reason_key: ev.reason_key, reason: ev.reason });
     if (ev.verdict === "covered") write(path, "widen", { evidence: ev.evidence });
   }
   // TIGHTENINGS: an in-scope file with an open, unreverted regression. Less evidence, and a TTL.
@@ -339,14 +352,37 @@ export async function resolveScopeEarnInTick(pointer: ScopeEarnInTickPointer): P
 
   const leg: "alpha" | "beta" | null = proposed.length > 0 ? "alpha" : unjudgeable > 0 && ranFiles === unjudgeable ? "beta" : null;
   if (leg && !pointer.dry_run) await d.settle(rhythm, leg, due);
+  // VISIBILITY: every excluded entry's outcome and reason, in the report and as ONE journal line, so an exit the
+  // criterion cannot reach (every file stuck on the same missing check, say) is visible on the first tick.
+  const by_reason = scopeEarnInReasonCounts(evaluated);
+  console.log(scopeEarnInJournalLine(evaluated));
   return {
     shape: "scopeEarnInReport",
     body: {
       fired: proposed.length > 0, reason: leg === "alpha" ? "proposed" : leg === "beta" ? "unjudgeable" : "nothing_to_propose",
       settlement: leg ?? "none", due_score: due.due_score, criterion_version: SCOPE_CRITERION_VERSION,
-      proposed, evaluated, exit_metric: scopeEarnInExitMetric(d.poolRead(CHANGE_SHAPE)), dry_run: pointer.dry_run === true,
+      proposed, evaluated, by_reason, exit_metric: scopeEarnInExitMetric(d.poolRead(CHANGE_SHAPE)), dry_run: pointer.dry_run === true,
     },
   };
+}
+
+/** Excluded entries by reason_key. */
+export function scopeEarnInReasonCounts(evaluated: Array<{ reason_key: string }>): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const e of evaluated) out[e.reason_key] = (out[e.reason_key] ?? 0) + 1;
+  return out;
+}
+/** The tick's one compact journal line: counts by verdict and by reason, then up to `max` file:reason pairs. */
+export function scopeEarnInJournalLine(evaluated: Array<{ path: string; verdict: string; reason_key: string }>, max = 12): string {
+  const verdicts = { qualified: 0, not_covered: 0, unjudgeable: 0 };
+  for (const e of evaluated) {
+    if (e.verdict === "covered") verdicts.qualified += 1;
+    else if (e.verdict === "unjudgeable") verdicts.unjudgeable += 1;
+    else verdicts.not_covered += 1;
+  }
+  const pairs = evaluated.slice(0, max).map((e) => `${e.path.replace(/^repos\//, "")}:${e.reason_key}`);
+  const more = evaluated.length > max ? ` (+${evaluated.length - max} more)` : "";
+  return `[scope-earn-in] tick: ${evaluated.length} excluded entr(ies) → qualified=${verdicts.qualified} not_covered=${verdicts.not_covered} unjudgeable=${verdicts.unjudgeable}; by reason ${JSON.stringify(scopeEarnInReasonCounts(evaluated))}; ${pairs.join(" ")}${more}`;
 }
 
 type Applied = { path: string; change: "widen" | "tighten" | "expire"; change_id: string };
@@ -367,7 +403,7 @@ export async function applyScopeProposals(): Promise<{ applied: Applied[]; refus
   // reading the scope over discovery or the whole gap store.
   const openProposals = d.poolRead(PROPOSAL_SHAPE);
   const holds0 = Array.isArray((row?.["body"] as Row | undefined)?.["tightening_holds"]) ? (((row!["body"] as Row)["tightening_holds"]) as Row[]) : [];
-  if (openProposals.length === 0 && !holds0.some((h) => Date.parse(String(h["expires_at"] ?? "")) <= now)) return { applied, refused, waiting: null };
+  if (openProposals.length === 0 && !holds0.some((h) => Date.parse(String(h["expires_at"] ?? "")) <= now || !Array.isArray(h["lineage_roots"]))) return { applied, refused, waiting: null };
   const effective = await d.readScope();
   const excludedOf = (r: Row | null): string[] => (Array.isArray((r?.["body"] as Row | undefined)?.["excluded_paths"]) ? ((r!["body"] as Row)["excluded_paths"] as string[]) : []);
   const sameSet = (a: string[], b: string[]) => a.length === b.length && a.every((x) => b.includes(x));
@@ -379,14 +415,16 @@ export async function applyScopeProposals(): Promise<{ applied: Applied[]; refus
   let lastConsecutive = scopeEarnInExitMetric(changes).consecutive_without_operator_edit;
   let seq = changes.reduce((m, c) => Math.max(m, Number(((c["body"] ?? {}) as Row)["seq"] ?? 0)), 0);
 
+  // THE ONE autonomyScope WRITE, under the evaluator grant (the grant-scan test counts exactly one construction).
+  const writeScopeBody = (prior: Row, excluded: string[], holds: Row[]) => d.poolWrite({
+    type: "poolImpulse_write", id: String(prior["id"]), shape: "autonomyScope", source: SCOPE_EVALUATOR, if_updated_at: String(prior["updated_at"] ?? ""),
+    body: { ...((prior["body"] ?? {}) as Row), excluded_paths: excluded, tightening_holds: holds },
+  }, { operator: false, evaluator: SCOPE_EVALUATOR });
   const writeScope = (excluded: string[], holds: Row[], change: Applied["change"], path: string, evidence: Row[], proposalId: string | null, extra: Row = {}): string | null => {
     const prior = row!;
     const priorBody = (prior["body"] ?? {}) as Row;
     const priorHolds = Array.isArray(priorBody["tightening_holds"]) ? (priorBody["tightening_holds"] as Row[]) : [];
-    const w = d.poolWrite({
-      type: "poolImpulse_write", id: String(prior["id"]), shape: "autonomyScope", source: SCOPE_EVALUATOR, if_updated_at: String(prior["updated_at"] ?? ""),
-      body: { ...priorBody, excluded_paths: excluded, tightening_holds: holds },
-    }, { operator: false, evaluator: SCOPE_EVALUATOR });
+    const w = writeScopeBody(prior, excluded, holds);
     if (!w.body.ok) { refused.push({ path, reason: `scope write refused: ${w.body.error ?? (w.body.conflict ? "concurrent edit" : "unknown")}` }); return null; }
     const priorBy = String(((prior["attested"] ?? {}) as Row)["by"] ?? "unattested");
     const consecutive = priorBy === "evaluator" ? lastConsecutive + 1 : 1;
@@ -424,15 +462,32 @@ export async function applyScopeProposals(): Promise<{ applied: Applied[]; refus
     }
   }
 
-  // 2. PROPOSALS, each re-judged from scratch.
+  // 1b. A HOLD PLACED BEFORE IT CARRIED ITS LINEAGE gets it from its own tighten change record's evidence, so it stops
+  // blocking the repair of its regression (gapInHoldLineage). Not a limit change: excluded_paths is unchanged, so no
+  // change record and no notice; the write is the evaluator's, so the exit metric's chain is not reset.
   const gaps = await d.readGaps();
+  {
+    const held = row!;
+    const holds = Array.isArray(((held["body"] ?? {}) as Row)["tightening_holds"]) ? ((((held["body"] ?? {}) as Row)["tightening_holds"]) as Row[]) : [];
+    if (holds.some((h) => !Array.isArray(h["lineage_roots"]))) {
+      const next = holds.map((h) => {
+        if (Array.isArray(h["lineage_roots"])) return h;
+        const rec = changes.map((c) => (c["body"] ?? {}) as Row).filter((b) => b["change"] === "tighten" && canonicalScopePath(str(b["path"])) === canonicalScopePath(str(h["path"])))
+          .sort((a, b) => Number(b["seq"] ?? 0) - Number(a["seq"] ?? 0))[0];
+        return { ...h, ...holdLineage(Array.isArray(rec?.["evidence"]) ? (rec!["evidence"] as Row[]) : [], gaps) };
+      });
+      if (writeScopeBody(held, excludedOf(held), next).body.ok) row = localScope();
+    }
+  }
+
+  // 2. PROPOSALS, each re-judged from scratch.
   const consume = (p: Row, outcome: Row) => d.poolWrite({ type: "poolImpulse_write", id: String(p["id"]), shape: PROPOSAL_SHAPE, status: "consumed", body: { ...((p["body"] ?? {}) as Row), outcome: { ...outcome, at: nowIso, by: SCOPE_EVALUATOR } } });
   for (const p of d.poolRead(PROPOSAL_SHAPE).slice(0, MAX_APPLY_PER_PASS)) {
     const body = (p["body"] ?? {}) as Row;
     const path = canonicalScopePath(str(body["path"]));
     const change = body["change"];
     const cur = excludedOf(row);
-    const curHolds = Array.isArray(((row["body"] ?? {}) as Row)["tightening_holds"]) ? ((((row["body"] ?? {}) as Row)["tightening_holds"]) as Row[]) : [];
+    const curHolds = Array.isArray(((row!["body"] ?? {}) as Row)["tightening_holds"]) ? ((((row!["body"] ?? {}) as Row)["tightening_holds"]) as Row[]) : [];
     const isExcluded = cur.some((e) => canonicalScopePath(e) === path);
     if (!path || (change !== "widen" && change !== "tighten")) { consume(p, { applied: false, reason: "malformed proposal" }); refused.push({ path, reason: "malformed proposal" }); continue; }
     if (isEvaluatorFile(path)) { consume(p, { applied: false, reason: EVALUATOR_FILE_REASON }); refused.push({ path, reason: EVALUATOR_FILE_REASON }); continue; }
@@ -448,7 +503,7 @@ export async function applyScopeProposals(): Promise<{ applied: Applied[]; refus
       if (evidence.length === 0) { const reason = "not reproduced: no open, unreverted regression on this path in the store"; consume(p, { applied: false, reason }); refused.push({ path, reason }); continue; }
       const ttl = Math.min(MAX_TTL_HOURS, posNum(body["ttl_hours"], 72));
       const expires = new Date(now + ttl * 3600_000).toISOString();
-      const id = writeScope([...cur, path], [...curHolds, { path, expires_at: expires, placed_at: nowIso, by: SCOPE_EVALUATOR }], "tighten", path, evidence, String(p["id"]), { expires_at: expires });
+      const id = writeScope([...cur, path], [...curHolds, { path, expires_at: expires, placed_at: nowIso, by: SCOPE_EVALUATOR, ...holdLineage(evidence, gaps) }], "tighten", path, evidence, String(p["id"]), { expires_at: expires });
       consume(p, { applied: !!id, change_id: id });
     }
   }

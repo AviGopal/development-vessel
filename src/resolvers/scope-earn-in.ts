@@ -40,8 +40,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { ResolverResult } from "./types.js";
 import { WORKSPACE_ROOT } from "../config.js";
-import { rhythmDueScore, type RhythmBody } from "./rhythm-conductor-tick.js";
-import { readFamilyRhythm, redForTheRightReason, settleFamily } from "./gap-check-supply.js";
+import { readFamilyRhythm, rhythmDueScore, writeFamilyRhythm, type RhythmBody } from "./rhythm-conductor-tick.js";
 import { gapCheckKeys } from "./gap-to-feature.js";
 import { resolvePoolImpulse, resolvePoolImpulseWrite, type PoolWriteAuth } from "./pool-impulse.js";
 
@@ -69,6 +68,13 @@ export const EVALUATOR_FILES: readonly string[] = [
   // The judge of scope changes: self-fact autonomy_scope_pinned, and the test that pins what it accepts.
   "repos/development-vessel/src/resolvers/self-fact-reconcile.ts",
   "repos/development-vessel/test/resolvers/scope-change-pin.test.ts",
+  // The evaluator's pacing (readFamilyRhythm / writeFamilyRhythm and the due formula) lives here.
+  "repos/development-vessel/src/resolvers/rhythm-conductor-tick.ts",
+  // Operator-excluded 10-05 and on the evaluator's own import closure (evaluator-grant-scan.test.ts): the trust-root
+  // gate's identity check, the self-call auth of the rhythm read/write, and a self-fact row helper.
+  "repos/development-vessel/src/lib/caller-credential.ts",
+  "repos/development-vessel/src/lib/self-auth.ts",
+  "repos/development-vessel/src/resolvers/retry-evidence.ts",
 ];
 export const EVALUATOR_FILE_REASON = "refused: the path is one of the evaluator's own files (EVALUATOR_FILES)";
 export function isEvaluatorFile(path: string): boolean {
@@ -86,7 +92,8 @@ export type ScopeEarnInDeps = {
   readGaps: () => Promise<Row[]>;
   readScope: () => Promise<Scope>;
   readRhythm: () => Promise<Rhythm | null>;
-  settle: (rhythm: Rhythm, leg: "alpha" | "beta", d: { staleness: number; alpha: number; beta: number }) => Promise<void>;
+  /** Merge `overlay` into the family's rhythm row; with ifUpdatedAt a compare-and-set (false: someone moved it first). */
+  pace: (rhythm: Rhythm, overlay: Row, ifUpdatedAt?: string) => Promise<boolean>;
   /** One test_suite run (its body), or null when it could not be asked. */
   runCheck: (input: Row) => Promise<Row | null>;
   poolRead: (shape: string) => Row[];
@@ -109,7 +116,7 @@ const defaultDeps: ScopeEarnInDeps = {
     return autonomyScope();
   },
   readRhythm: () => readFamilyRhythm(SCOPE_EARN_IN_FAMILY),
-  settle: (rhythm, leg, d) => settleFamily(rhythm, leg, d, "scope-earn-in-tick"),
+  pace: (rhythm, overlay, ifUpdatedAt) => writeFamilyRhythm(rhythm, overlay, "scope-earn-in-tick", ifUpdatedAt),
   runCheck: async (input) => {
     const { resolveTestSuite } = await import("./test-suite.js");
     const r = await resolveTestSuite({ type: "test_suite", ...input });
@@ -214,6 +221,20 @@ function guardCommit(row: Row): string | null {
 }
 
 /** reason_key: the compact class of the outcome ("qualified" when covered), counted in the tick's journal line. */
+/**
+ * RED FOR THE RIGHT REASON (the judge of a check run; moved here from gap-check-supply.ts, which is lane-editable,
+ * because the evaluator must not depend on a file the lane can change. Item 2 imports it from here): the check's own run report shows the run collected tests and EVERY named test is one of
+ * its failures. A load or collection error ("Cannot find module", a syntax error, nothing ran) leaves the named
+ * tests absent from the failures, so it is not a reproduction, however red the run reads.
+ */
+export function redForTheRightReason(report: Record<string, unknown> | null, titles: string[]): string | null {
+  if (!report) return "no run report: the check's failure cannot be attributed";
+  if (report["ran"] === false || !(Number(report["total"] ?? 0) > 0)) return "the test file did not run (load or collection error)";
+  const failing = Array.isArray(report["failingTests"]) ? (report["failingTests"] as unknown[]).map(String) : [];
+  const missing = titles.find((t) => !failing.some((f) => f.includes(t)));
+  return missing === undefined ? null : `the named test "${missing.slice(0, 120)}" is not among the run's failures (a load error, or it passes)`;
+}
+
 export type EarnInEvaluation = { path: string; verdict: "covered" | "not_covered" | "unjudgeable"; reason_key: string; reason: string; evidence: Row[]; ran_checks: boolean };
 
 /** The widening criterion for one excluded entry, judged now on the live store and the accepted tree. */
@@ -301,6 +322,9 @@ function excludes(scope: Scope, path: string): boolean {
   });
 }
 
+/** What a tick that passed the due gate writes before its work: its demand is being answered now. */
+export const RAN_PACING: Readonly<Row> = { staleness: 0 };
+
 export interface ScopeEarnInTickPointer { type: "scope_earn_in_tick"; settled_by?: string; dry_run?: boolean }
 
 /** THE PROPOSER. Never writes autonomyScope, never passes a credential. */
@@ -312,6 +336,14 @@ export async function resolveScopeEarnInTick(pointer: ScopeEarnInTickPointer): P
   const due = rhythmDueScore(rhythm.body, rhythm.updated_at, now);
   const threshold = posNum(rhythm.body["due_threshold"], 1);
   if (due.due_score < threshold) return { shape: "scopeEarnInReport", body: { fired: false, reason: "not_due", due_score: due.due_score, due_threshold: threshold } };
+  // CLAIM THE SLOT BEFORE THE WORK (live 10-05: a tick that proposed nothing never settled, so the family stayed due
+  // forever and every caller, the conductor and the boredom selector alike, re-ran all evaluations every ~30 s). A tick
+  // that passes the gate first resets the family's pacing (RAN_PACING: staleness 0, updated_at now) by a
+  // compare-and-set on the row it read, so the next caller within the cadence reads not_due and a concurrent caller
+  // that read the same row loses the CAS. Credit for the outcome is a separate leg written after the work.
+  if (!pointer.dry_run && !(await d.pace(rhythm, RAN_PACING, rhythm.updated_at))) {
+    return { shape: "scopeEarnInReport", body: { fired: false, reason: "not_due", detail: "another tick claimed this due slot (rhythm row moved since it was read)", due_score: due.due_score } };
+  }
   const perTick = Math.floor(posNum(rhythm.body["max_per_tick"], 2));
   const ttlHours = Math.min(MAX_TTL_HOURS, posNum(rhythm.body["tighten_ttl_hours"], 72));
 
@@ -351,7 +383,13 @@ export async function resolveScopeEarnInTick(pointer: ScopeEarnInTickPointer): P
   }
 
   const leg: "alpha" | "beta" | null = proposed.length > 0 ? "alpha" : unjudgeable > 0 && ranFiles === unjudgeable ? "beta" : null;
-  if (leg && !pointer.dry_run) await d.settle(rhythm, leg, due);
+  if (leg && !pointer.dry_run) {
+    // The credit leg, on the row as it is now (the claim already moved it): alpha or beta only; staleness stays reset.
+    const fresh = (await d.readRhythm()) ?? rhythm;
+    const a = typeof fresh.body["alpha"] === "number" ? (fresh.body["alpha"] as number) : due.alpha;
+    const b = typeof fresh.body["beta"] === "number" ? (fresh.body["beta"] as number) : due.beta;
+    await d.pace(fresh, leg === "alpha" ? { alpha: a + 0.5 } : { beta: b + 0.5 });
+  }
   // VISIBILITY: every excluded entry's outcome and reason, in the report and as ONE journal line, so an exit the
   // criterion cannot reach (every file stuck on the same missing check, say) is visible on the first tick.
   const by_reason = scopeEarnInReasonCounts(evaluated);
@@ -360,7 +398,7 @@ export async function resolveScopeEarnInTick(pointer: ScopeEarnInTickPointer): P
     shape: "scopeEarnInReport",
     body: {
       fired: proposed.length > 0, reason: leg === "alpha" ? "proposed" : leg === "beta" ? "unjudgeable" : "nothing_to_propose",
-      settlement: leg ?? "none", due_score: due.due_score, criterion_version: SCOPE_CRITERION_VERSION,
+      settlement: leg ?? (pointer.dry_run ? "none" : "ran"), due_score: due.due_score, criterion_version: SCOPE_CRITERION_VERSION,
       proposed, evaluated, by_reason, exit_metric: scopeEarnInExitMetric(d.poolRead(CHANGE_SHAPE)), dry_run: pointer.dry_run === true,
     },
   };

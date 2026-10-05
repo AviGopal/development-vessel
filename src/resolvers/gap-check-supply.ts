@@ -53,7 +53,9 @@ import {
   isParkingDisposition,
   vesselTestInventory,
 } from "./gap-to-feature.js";
-import { rhythmDueScore, rhythmSettlementOverlay, type RhythmBody } from "./rhythm-conductor-tick.js";
+import { readFamilyRhythm, rhythmDueScore, rhythmSettlementOverlay, type RhythmBody } from "./rhythm-conductor-tick.js";
+// The check-run judge lives with the evaluator (scope-earn-in.ts, an excluded file): item 2 reads it from there.
+import { redForTheRightReason } from "./scope-earn-in.js";
 import { resolveDispatchGoal } from "./dispatch-goal.js";
 import { testTitleInSource } from "./retry-evidence.js";
 import { onlyTestsProblem } from "./test-suite.js";
@@ -224,19 +226,6 @@ export function existingTestFor(vessel: string, site: string): string | null {
   return null;
 }
 
-/**
- * RED FOR THE RIGHT REASON: the check's own run report shows the run collected tests and EVERY named test is one of
- * its failures. A load or collection error ("Cannot find module", a syntax error, nothing ran) leaves the named
- * tests absent from the failures, so it is not a reproduction, however red the run reads.
- */
-export function redForTheRightReason(report: Record<string, unknown> | null, titles: string[]): string | null {
-  if (!report) return "no run report: the check's failure cannot be attributed";
-  if (report["ran"] === false || !(Number(report["total"] ?? 0) > 0)) return "the test file did not run (load or collection error)";
-  const failing = Array.isArray(report["failingTests"]) ? (report["failingTests"] as unknown[]).map(String) : [];
-  const missing = titles.find((t) => !failing.some((f) => f.includes(t)));
-  return missing === undefined ? null : `the named test "${missing.slice(0, 120)}" is not among the run's failures (a load error, or it passes)`;
-}
-
 /** The share measures over armed gaps whose check was born at or after sinceMs. */
 export function checkSupplyMeasures(rows: Row[], sinceMs: number): Record<string, number | null> {
   let armed = 0, sys = 0, sysRed = 0;
@@ -271,26 +260,6 @@ export function checkSupplySettlementLeg(c: { dispatched: number; armed: number;
   return c.refused > 0 ? "beta" : null;
 }
 
-/** A rhythm family's timeShapedRhythm row, read now (shared with every tick that gates on its own family). */
-export async function readFamilyRhythm(family: string = CHECK_SUPPLY_FAMILY): Promise<{ id: string; body: RhythmBody & Row; updated_at?: string } | null> {
-  try {
-    const res = await fetch(SELF_RESOLVE_URL, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", ...selfAuthHeaders(SELF_RESOLVE_URL, SELF_RESOLVE_URL) },
-      // No limit: the registry holds more rows than any fixed page, and this family's row may be past it.
-      body: JSON.stringify({ impulse: { type: "poolImpulse", shape: "timeShapedRhythm" } }),
-      signal: AbortSignal.timeout(5_000),
-    });
-    if (!res.ok) return null;
-    const j = (await res.json()) as { body?: { impulses?: Array<{ id?: unknown; body?: Row; updated_at?: unknown }> } };
-    const hit = (j.body?.impulses ?? []).find((r) => r?.body?.["family"] === family);
-    if (!hit || !hit.body) return null;
-    return { id: String(hit.id ?? ""), body: hit.body as RhythmBody & Row, ...(typeof hit.updated_at === "string" ? { updated_at: hit.updated_at } : {}) };
-  } catch {
-    return null;
-  }
-}
-
 /** Settle a report-graded family's rhythm (the conductor left it pending: directFamilySettlement). */
 export async function settleFamily(rhythm: { id: string; body: RhythmBody & Row }, leg: "alpha" | "beta", d: { staleness: number; alpha: number; beta: number }, source = "gap-check-supply-tick"): Promise<void> {
   try {
@@ -319,7 +288,7 @@ export async function resolveGapCheckSupplyTick(pointer: GapCheckSupplyTickPoint
 
   // 1. CADENCE: this family's rhythm, read now. Seeding it is the bootstrap seeder's job, not this resolver's:
   // the conductor only calls a family it has read, so a self-seed here could never run.
-  const rhythm = await readFamilyRhythm();
+  const rhythm = await readFamilyRhythm(CHECK_SUPPLY_FAMILY);
   if (!rhythm) return { shape: "gapCheckSupplyReport", body: { fired: false, reason: "no_rhythm", family: CHECK_SUPPLY_FAMILY } };
   const due = rhythmDueScore(rhythm.body, rhythm.updated_at, now);
   const threshold = posNum(rhythm.body["due_threshold"], 1);

@@ -288,6 +288,50 @@ export function rhythmDueScore(
   return { alpha, beta, staleness, budget, due_score: (alpha / denom) * staleness / Math.max(budget, 0.05) };
 }
 
+/**
+ * A rhythm family's timeShapedRhythm row, read now: every tick that gates itself on its own family (gap-check-supply,
+ * scope-earn-in). Lives here, beside the pacing formula, in an excluded module: the evaluator's pacing must not
+ * depend on a lane-editable file (no self-certification by import).
+ */
+export async function readFamilyRhythm(family: string): Promise<{ id: string; body: RhythmBody & Record<string, unknown>; updated_at?: string } | null> {
+  try {
+    const res = await fetch(SELF_RESOLVE_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...selfAuthHeaders(SELF_RESOLVE_URL, SELF_RESOLVE_URL) },
+      // No limit: the registry holds more rows than any fixed page, and this family's row may be past it.
+      body: JSON.stringify({ impulse: { type: "poolImpulse", shape: "timeShapedRhythm" } }),
+      signal: AbortSignal.timeout(5_000),
+    });
+    if (!res.ok) return null;
+    const j = (await res.json()) as { body?: { impulses?: Array<{ id?: unknown; body?: Record<string, unknown>; updated_at?: unknown }> } };
+    const hit = (j.body?.impulses ?? []).find((r) => r?.body?.["family"] === family);
+    if (!hit || !hit.body) return null;
+    return { id: String(hit.id ?? ""), body: hit.body as RhythmBody & Record<string, unknown>, ...(typeof hit.updated_at === "string" ? { updated_at: hit.updated_at } : {}) };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Write a family's rhythm row with `overlay` merged into its body. With `ifUpdatedAt`, a compare-and-set: false when
+ * another writer moved the row first (or the write failed), so two callers cannot both claim one due slot.
+ */
+export async function writeFamilyRhythm(rhythm: { id: string; body: RhythmBody & Record<string, unknown> }, overlay: Record<string, unknown>, source: string, ifUpdatedAt?: string): Promise<boolean> {
+  try {
+    const res = await fetch(SELF_RESOLVE_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...selfAuthHeaders(SELF_RESOLVE_URL, SELF_RESOLVE_URL) },
+      body: JSON.stringify({ impulse: { type: "poolImpulse_write", id: rhythm.id, shape: "timeShapedRhythm", source, body: { ...rhythm.body, ...overlay }, ...(ifUpdatedAt ? { if_updated_at: ifUpdatedAt } : {}) } }),
+      signal: AbortSignal.timeout(5_000),
+    });
+    if (!res.ok) return false;
+    const j = (await res.json().catch(() => ({}))) as { body?: { ok?: unknown } };
+    return j.body?.ok === true;
+  } catch {
+    return false;
+  }
+}
+
 export async function resolveRhythmConductorTick(
   pointer: RhythmConductorTickPointer,
 ): Promise<ResolverResult> {

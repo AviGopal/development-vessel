@@ -76,6 +76,21 @@ let mutationFails = new Set<string>();
 // Green at the clone HEAD but red at the runtime sha: the fix is pushed, not mirrored.
 let redAtRuntimeOnly = new Set<string>();
 let runtimePin: string | null = RUNTIME;
+// QUALIFY RULE (a), user ruling 10-05 21:55Z, as reworked for qa: a file with no regression history qualifies when its
+// EXISTING tests kill deterministic mutants of the file ITSELF. The fake tree below holds the target sources and test
+// sources at the runtime sha; the fake runner decides, per test file, which mutants it kills.
+const NEW_VERSION = "wiring-2026-10-05-qualify-a";
+const COVER_TEST = "test/resolvers/fixture-cover.test.ts";
+const OTHER_TEST = "test/resolvers/fixture-other.test.ts";
+// A small, mutable target: two functions, an if, a comparison and a boolean, so every operator has a site.
+const TARGET_SRC = `export function a(x: number): number {\n  if (x > 0) return x;\n  return -x;\n}\nexport function flag(): boolean {\n  return true;\n}\nexport const ok = (n: number) => n === 1;\n`;
+let treeFiles = new Map<string, string | null>();
+let listFails = false;
+let sourceReads: Array<{ vessel: string; sha: string; path: string }> = [];
+// test file -> "all" (kills every mutant), "none" (asserts nothing about the file), or a set of operator names it kills.
+let kills = new Map<string, "all" | "none" | Set<string>>();
+let redTests = new Set<string>();
+let editFails = false;
 
 const dueRhythm = (extra: Row = {}): { id: string; body: Row; updated_at: string } => ({
   id: "rhythm-scope-earn-in", updated_at: new Date(nowMs).toISOString(),
@@ -100,6 +115,19 @@ function fakeCheck(input: Row): Row {
   const mutated = !!input["mutate_revert"];
   if (mutated && mutationFails.has(title)) return { ran: false, total: 0, mutation: { applied: false }, failingTests: [], requested_not_passing: null };
   const atRuntime = input["base_ref"] === RUNTIME;
+  // A whole-test-file run (no only_tests): the coverage path.
+  if (only.length === 0) {
+    const tf = String(input["test_file"] ?? "");
+    const edit = input["mutate_edit"] as Row | undefined;
+    if (edit && editFails) return { ran: false, total: 0, pass: 0, fail: 0, failingTests: [], mutation: { kind: "edit", applied: false }, base_ref: input["base_ref"] ?? null };
+    const k = kills.get(tf) ?? "none";
+    const killed = !!edit && (k === "all" || (k instanceof Set && k.has(String(edit["operator"]))));
+    const red = killed || redTests.has(tf);
+    return {
+      ran: true, total: 3, pass: red ? 2 : 3, fail: red ? 1 : 0, failingTests: red ? [`(fail) ${tf} > a test`] : [], requested_not_passing: null,
+      verified_head: "feedc0de", base_ref: input["base_ref"] ?? null, ...(edit ? { mutation: { kind: "edit", file: edit["file"], applied: true } } : {}),
+    };
+  }
   const red = mutated ? !survives.has(title) : redAtHead.has(title) || (atRuntime && redAtRuntimeOnly.has(title));
   return {
     ran: true, total: only.length, pass: red ? 0 : only.length, fail: red ? only.length : 0,
@@ -140,6 +168,13 @@ afterAll(() => {
 beforeEach(() => {
   violations = []; gaps = []; settled = []; checks = []; reports = []; writes = [];
   survives = new Set(); redAtHead = new Set(); mutationFails = new Set(); redAtRuntimeOnly = new Set(); runtimePin = RUNTIME;
+  sourceReads = []; listFails = false; editFails = false; redTests = new Set();
+  kills = new Map([[COVER_TEST, "all"]]);
+  treeFiles = new Map<string, string | null>([
+    ["src/resolvers/fixture-earn-a.ts", TARGET_SRC], ["src/resolvers/fixture-earn-b.ts", TARGET_SRC], ["src/resolvers/fixture-earn-c.ts", TARGET_SRC],
+    // By default no test imports a fixture file: the regression-history tests above see no coverage.
+    [COVER_TEST, `import { describe, it } from "bun:test";\n`],
+  ]);
   unitsText = `ExecStart=/usr/bin/bun \${SUBSTRATE_ROOT}/${UNIT_GLUE}\n`;
   nowMs = Date.parse("2026-10-05T12:00:00.000Z");
   rhythm = dueRhythm();
@@ -173,6 +208,8 @@ beforeEach(() => {
     report: async (panel: Row) => { reports.push(panel); },
     unitsText: () => unitsText,
     runtimeSha: () => runtimePin,
+    readFileAt: (vessel: string, sha: string, path: string) => { sourceReads.push({ vessel, sha, path }); return treeFiles.has(path) ? treeFiles.get(path)! : null; },
+    testFilesMentioning: (_vessel: string, _sha: string, needle: string) => (listFails ? null : [...treeFiles.entries()].filter(([p, c]) => /\.test\.ts$/.test(p) && c !== null && c.includes(needle)).map(([p]) => p).sort()),
     now: () => nowMs,
   });
 });
@@ -213,7 +250,7 @@ describe("scope earn-in: the proposing activity (must-fail at base)", () => {
     const p = ps[0]!["body"] as Row;
     expect(p["path"]).toBe(FILE_A);
     expect(p["change"]).toBe("widen");
-    expect(p["criterion_version"]).toBe("wiring-2026-10-03");
+    expect(p["criterion_version"]).toBe(NEW_VERSION);
     const ev = p["evidence"] as Row[];
     expect(ev.map((e) => e["gap_id"]).sort()).toEqual(["reg-a1", "reg-a2"]);
     for (const e of ev) {
@@ -445,13 +482,13 @@ describe("scope earn-in: the accepted evaluator applies proposals (must-fail at 
     propose(FILE_B, "widen");
     await apply();
     let m = earn!.scopeEarnInExitMetric(changes());
-    expect(m).toEqual({ criterion_changes_applied: 2, consecutive_without_operator_edit: 2, exit_met: true });
+    expect(m).toEqual({ criterion_version: NEW_VERSION, criterion_changes_applied: 2, widenings_this_version: 2, consecutive_without_operator_edit: 2, exit_met: true });
     // An operator edits the record: the next criterion change starts the count again.
     seedScope(excludedNow());
     propose(FILE_C, "widen");
     await apply();
     m = earn!.scopeEarnInExitMetric(changes());
-    expect(m).toEqual({ criterion_changes_applied: 3, consecutive_without_operator_edit: 1, exit_met: false });
+    expect(m).toEqual({ criterion_version: NEW_VERSION, criterion_changes_applied: 3, widenings_this_version: 3, consecutive_without_operator_edit: 1, exit_met: false });
     expect((await tick())["exit_metric"]).toEqual(m);
   });
 });
@@ -551,6 +588,49 @@ describe("scope earn-in: the mutation runner is test_suite's base-tree run (must
     }
   });
 
+  it("mutate_edit: the operator mutant is applied inside the detached worktree only, from base64 data, and only on a pinned tree", async () => {
+    const edit = { file: "src/resolvers/fixture-earn-a.ts", start: 3, end: 7, original: "port", replacement: "PORT; $(id) `x` 'q'", operator: "flip_boolean" };
+    const { cmd, body } = await captureCommand({ base_ref: "HEAD", mutate_edit: edit });
+    expect(cmd).toContain("worktree add -q --detach \"$BW\" HEAD");
+    expect(cmd).toContain("MUTATION_APPLIED=1");
+    // The mutant's text never reaches the shell as text.
+    expect(cmd).not.toContain("$(id)");
+    expect(cmd).not.toContain('cd "$ROOT" &&');
+    expect((body["mutation"] as Row)["kind"]).toBe("edit");
+    expect((body["mutation"] as Row)["applied"]).toBe(true);
+    for (const bad of [
+      { mutate_edit: edit },
+      { base_ref: "HEAD", mutate_edit: { ...edit, file: "../etc/passwd" } },
+      { base_ref: "HEAD", mutate_edit: { ...edit, start: 9, end: 2 } },
+      { base_ref: "HEAD", mutate_edit: { ...edit, original: "" } },
+      { base_ref: "HEAD", mutate_edit: edit, mutate_revert: { sha: GUARD, file: "src/a.ts" } },
+    ]) {
+      const r = await captureCommand(bad);
+      expect(r.cmd).toBe("");
+      expect(r.body["failure_mode"]).toBe("validation_rejected");
+    }
+  });
+
+  it("the edit script really changes the file in a worktree of a real repository when the original text matches, and refuses when it does not", () => {
+    const repo = join(ROOT, "editrepo");
+    const wt = join(ROOT, "editwt");
+    mkdirSync(join(repo, "src"), { recursive: true });
+    const git = (...a: string[]) => execFileSync("git", ["-C", repo, "-c", "user.name=t", "-c", "user.email=t@t", ...a], { encoding: "utf8" }).trim();
+    git("init", "-q");
+    writeFileSync(join(repo, "src", "f.ts"), "export const f = () => true;\n");
+    git("add", "."); git("commit", "-q", "-m", "base");
+    git("worktree", "add", "-q", "--detach", wt, "HEAD");
+    const script = (testSuite as Record<string, any>)["mutationEditScript"] as undefined | ((e: Row) => string);
+    expect(script).toBeInstanceOf(Function);
+    const at = "export const f = () => ".length;
+    const out = execFileSync("bash", ["-c", `BW=${JSON.stringify(wt)}; ${script!({ file: "src/f.ts", start: at, end: at + 4, original: "true", replacement: "false" })}`], { encoding: "utf8" });
+    expect(out).toContain("MUTATION_APPLIED=1");
+    expect(readFileSync(join(wt, "src", "f.ts"), "utf8")).toBe("export const f = () => false;\n");
+    expect(readFileSync(join(repo, "src", "f.ts"), "utf8")).toBe("export const f = () => true;\n");
+    const out2 = execFileSync("bash", ["-c", `BW=${JSON.stringify(wt)}; ${script!({ file: "src/f.ts", start: at, end: at + 4, original: "true", replacement: "false" })}`], { encoding: "utf8" });
+    expect(out2).toContain("MUTATION_FAILED=1");
+  });
+
   it("the revert script really removes the guard in a worktree of a real repository, and says when it cannot", () => {
     const repo = join(ROOT, "mutrepo");
     const wt = join(ROOT, "mutwt");
@@ -615,7 +695,9 @@ describe("scope earn-in: every tick says why each excluded file cannot qualify (
     let body: Row;
     try { body = await tick(); } finally { spy.mockRestore(); }
     expect((body!["evaluated"] as Row[]).find((e) => e["path"] === FILE_A)!["reason_key"]).toBe("no_runtime_pin");
-    expect((body!["by_reason"] as Record<string, number>)["no_runtime_pin"]).toBe(1);
+    // FILE_B and FILE_C have no regression history: qualify rule (a) reads their tests at the runtime sha too, so
+    // without a pin they are unjudgeable for the same reason (never a pass).
+    expect((body!["by_reason"] as Record<string, number>)["no_runtime_pin"]).toBe(3);
   });
 });
 
@@ -685,5 +767,250 @@ describe("scope earn-in: a tick that ran closes its due slot (must-fail at base)
     const reasons = [a!["reason"], b!["reason"]];
     expect(reasons.filter((r) => r === "not_due").length).toBe(1);
     expect([a!, b!].filter((r) => Array.isArray(r["evaluated"])).length).toBe(1);
+  });
+});
+
+// QUALIFY RULE (a) — user ruling 2026-10-05T21:55Z, reworked to qa's conditions (10-05 ~22:30Z). A file with no
+// regression history qualifies only when its EXISTING tests kill mutants of the file ITSELF: the importing test files at
+// the runtime sha (green there unmutated), a small deterministic set of mutants of the target (negate a condition, empty
+// a function body, flip a boolean, flip a comparison) applied in the detached worktree at the runtime sha, every
+// selected mutant applied, and killed/applied >= the threshold read at use time from the scope-earn-in rhythm body
+// (mutation_score_threshold, default 0.8). Zero importing tests or zero mutants is never coverage.
+const evOf = (body: Row, path: string): Row => (body["evaluated"] as Row[]).find((e) => e["path"] === path)!;
+async function quietTick(pointer: Row = {}): Promise<{ body: Row; lines: string[] }> {
+  const spy = spyOn(console, "log").mockImplementation(() => {});
+  let body: Row;
+  let lines: string[] = [];
+  try { body = await tick(pointer); } finally { lines = spy.mock.calls.map((c) => String(c[0])); spy.mockRestore(); }
+  return { body: body!, lines };
+}
+const editRuns = () => checks.filter((c) => c["mutate_edit"]);
+const IMPORTS_A = `import { describe, it } from "bun:test";\nimport { a } from "../../src/resolvers/fixture-earn-a.js";\n`;
+
+describe("scope earn-in: qualify rule (a), the file's own tests kill its mutants (must-fail at base)", () => {
+  beforeEach(() => { treeFiles.set(COVER_TEST, IMPORTS_A); });
+  it("the criterion version is bumped for the loosening", () => {
+    expect(earn?.["SCOPE_CRITERION_VERSION"]).toBe(NEW_VERSION);
+  });
+
+  it("CONTROL: a no-history file whose importing test kills every mutant is covered and proposed, with the mutants as evidence", async () => {
+    const { body } = await quietTick();
+    const e = evOf(body, FILE_A);
+    expect(e["reason_key"]).toBe("qualified_by_coverage");
+    expect(e["verdict"]).toBe("covered");
+    const p = proposals().map((x) => x["body"] as Row).find((b) => b["path"] === FILE_A)!;
+    expect(p["change"]).toBe("widen");
+    expect(p["criterion_version"]).toBe(NEW_VERSION);
+    const ev = (p["evidence"] as Row[])[0]!;
+    expect(ev["basis"]).toBe("mutation_coverage");
+    expect(ev["runtime_sha"]).toBe(RUNTIME);
+    expect(ev["importing_tests"]).toEqual([COVER_TEST]);
+    const ms = ev["mutants"] as Row[];
+    expect(ms.length).toBeGreaterThanOrEqual(4);
+    // Every operator has a site in the fixture, so every operator is represented.
+    expect([...new Set(ms.map((m) => m["operator"]))].sort()).toEqual(["empty_body", "flip_boolean", "flip_comparison", "negate_condition"]);
+    expect(ms.every((m) => m["killed_by"] === COVER_TEST)).toBe(true);
+    expect(ev["score"]).toBe(1);
+    expect(ev["threshold"]).toBe(0.8);
+    // The target and the test were read at the RUNTIME sha; every run is pinned there; each mutant ran as an edit.
+    expect(sourceReads.every((r) => r.sha === RUNTIME)).toBe(true);
+    for (const c of checks) expect(c["base_ref"]).toBe(RUNTIME);
+    expect(editRuns().length).toBe(ms.length);
+    for (const c of editRuns()) expect((c["mutate_edit"] as Row)["file"]).toBe("src/resolvers/fixture-earn-a.ts");
+  });
+
+  it("VACUITY: an importing test that asserts nothing about the file lets every mutant survive: not covered", async () => {
+    kills.set(COVER_TEST, "none");
+    const { body } = await quietTick();
+    const e = evOf(body, FILE_A);
+    expect(e["reason_key"]).toBe("no_coverage");
+    expect(String(e["reason"])).toContain("mutation score 0");
+    expect(proposals().filter((p) => (p["body"] as Row)["path"] === FILE_A)).toEqual([]);
+    expect(editRuns().length).toBeGreaterThan(0);
+  });
+
+  it("VACUITY: no test imports the file (zero tests) is not covered, and no mutant runs", async () => {
+    treeFiles.set(COVER_TEST, `// mentions fixture-earn-a but imports nothing of it\nimport { b } from "../../src/resolvers/fixture-earn-b.js";\nconst s = "../../src/resolvers/fixture-earn-a.js";\n`);
+    const { body } = await quietTick();
+    const e = evOf(body, FILE_A);
+    expect(e["reason_key"]).toBe("no_coverage");
+    expect(String(e["reason"])).toContain("0 importing test");
+    expect(editRuns().filter((c) => (c["mutate_edit"] as Row)["file"] === "src/resolvers/fixture-earn-a.ts")).toEqual([]);
+  });
+
+  it("VACUITY: a target with no mutable site (zero mutants) is not covered", async () => {
+    treeFiles.set("src/resolvers/fixture-earn-a.ts", `export const A = 1;\nexport type T = { x: number };\n`);
+    const { body } = await quietTick();
+    expect(evOf(body, FILE_A)["reason_key"]).toBe("no_coverage");
+    expect(String(evOf(body, FILE_A)["reason"])).toContain("0 mutants");
+  });
+
+  it("a mutant that does not apply makes the file unjudgeable, never covered", async () => {
+    editFails = true;
+    const { body } = await quietTick();
+    expect(evOf(body, FILE_A)["verdict"]).toBe("unjudgeable");
+    expect(evOf(body, FILE_A)["reason_key"]).toBe("mutation_not_applied");
+    expect(proposals()).toEqual([]);
+  });
+
+  it("an importing test red at the runtime sha unmutated is no killer; with no green importing test the file is not covered", async () => {
+    redTests.add(COVER_TEST);
+    const { body } = await quietTick();
+    expect(evOf(body, FILE_A)["reason_key"]).toBe("no_coverage");
+    expect(String(evOf(body, FILE_A)["reason"])).toContain("red at the runtime sha");
+    expect(editRuns()).toEqual([]);
+  });
+
+  it("the threshold is read from the rhythm body at use time: a borderline file flips with it", async () => {
+    // Kills two of the four operators: score 0.5 (or near it) on the fixture.
+    kills.set(COVER_TEST, new Set(["negate_condition", "flip_comparison"]));
+    rhythm = dueRhythm({ mutation_score_threshold: 0.4 });
+    const lo = await quietTick();
+    expect(evOf(lo.body, FILE_A)["reason_key"]).toBe("qualified_by_coverage");
+    const score = ((proposals().map((p) => p["body"] as Row).find((b) => b["path"] === FILE_A)!["evidence"] as Row[])[0]!["score"]) as number;
+    expect(score).toBeGreaterThan(0.4);
+    expect(score).toBeLessThan(0.8);
+    clearPool(); seedScope(BASE_EXCLUDED); checks = [];
+    rhythm = dueRhythm({ mutation_score_threshold: 0.9 });
+    const hi = await quietTick();
+    expect(evOf(hi.body, FILE_A)["reason_key"]).toBe("no_coverage");
+    expect(String(evOf(hi.body, FILE_A)["reason"])).toContain("threshold 0.9");
+  });
+
+  it("mutant selection is deterministic and bounded by mutants_per_file from the rhythm body", () => {
+    const sel = earn!["selectMutants"] as (src: string, k: number) => Array<Row>;
+    expect(sel).toBeInstanceOf(Function);
+    const big = Array.from({ length: 40 }, (_, i) => `export function f${i}(x: number) { if (x > ${i}) return true; return false; }`).join("\n");
+    const a1 = sel(big, 5);
+    const a2 = sel(big, 5);
+    expect(a1).toEqual(a2);
+    expect(a1.length).toBe(5);
+    expect(sel(big, 50).length).toBeLessThanOrEqual(20);
+    // Every mutant is a real, syntactically valid change of the source.
+    for (const m of a1) {
+      const s = Number(m["start"]), e = Number(m["end"]);
+      expect(big.slice(s, e)).toBe(String(m["original"]));
+      expect(String(m["replacement"])).not.toBe(String(m["original"]));
+    }
+  });
+
+  it("an unreadable test listing is unjudgeable, not covered and not no_coverage", async () => {
+    listFails = true;
+    expect(evOf((await quietTick()).body, FILE_A)["verdict"]).toBe("unjudgeable");
+    expect(proposals()).toEqual([]);
+  });
+
+  it("evaluator files and directories stay refused even when their tests kill every mutant", async () => {
+    seedScope([...BASE_EXCLUDED, EVAL_FILE]);
+    treeFiles.set("src/resolvers/scope-earn-in.ts", TARGET_SRC);
+    treeFiles.set(COVER_TEST, `import "../../src/resolvers/scope-earn-in.js";\n`);
+    const { body } = await quietTick();
+    expect(evOf(body, EVAL_FILE)["reason_key"]).toBe("evaluator_file");
+    expect(evOf(body, "repos/identity-vessel/")["reason_key"]).toBe("directory");
+  });
+
+  it("the tick line names the criterion version and splits no-history files into qualified_by_coverage and no_coverage", async () => {
+    const { body, lines } = await quietTick();
+    const counts = body["by_reason"] as Record<string, number>;
+    expect(counts["qualified_by_coverage"]).toBe(1);
+    expect(counts["no_coverage"]).toBe(2); // FILE_B, FILE_C: no importing test
+    expect(counts["no_regression_history"]).toBeUndefined();
+    const line = lines.filter((l) => l.startsWith("[scope-earn-in] tick:"));
+    expect(line.length).toBe(1);
+    expect(line[0]).toContain(`criterion=${NEW_VERSION}`);
+    expect(line[0]).toContain("fixture-earn-a.ts:qualified_by_coverage");
+  });
+});
+
+// NEVER_PROPOSE (qa 10-05): the trust-boundary modules the operator excluded at 18:53Z that are not the evaluator's own
+// files are refused like evaluator files, whatever their coverage.
+const NEVER = [
+  "src/resolvers/write-containment.ts", "src/resolvers/super-repo-checkout.ts", "src/resolvers/behavioral-verification.ts",
+  "src/removed-line-predicate.ts", "src/vacuous-edit.ts", "src/resolvers/staged-mitosis-gate.ts", "src/resolvers/push-policy.ts",
+];
+describe("scope earn-in: never-propose trust-boundary modules (must-fail at base)", () => {
+  for (const rel of NEVER) {
+    it(`${rel}: never proposed by the tick and refused by the evaluator, even when its tests kill every mutant`, async () => {
+      const path = `repos/${V}/${rel}`;
+      seedScope([...BASE_EXCLUDED, path]);
+      treeFiles.set(rel, TARGET_SRC);
+      treeFiles.set(COVER_TEST, `import "../../${rel.replace(/\.ts$/, ".js")}";\n`);
+      const { body } = await quietTick();
+      expect(evOf(body, path)["reason_key"]).toBe("never_propose");
+      expect(proposals().filter((p) => (p["body"] as Row)["path"] === path)).toEqual([]);
+      propose(path, "widen");
+      const r = await apply();
+      expect(r["applied"]).toEqual([]);
+      expect(String(((r["refused"] as Row[]).find((x) => x["path"] === path) ?? {})["reason"])).toContain("NEVER_PROPOSE");
+      expect(excludedNow()).toContain(path);
+      // Absent from excluded_paths: refused by name, not read as a no-op.
+      seedScope(BASE_EXCLUDED);
+      propose(path, "widen");
+      const r2 = await apply();
+      expect(String(((r2["refused"] as Row[]).find((x) => x["path"] === path) ?? {})["reason"])).toContain("NEVER_PROPOSE");
+    });
+  }
+  it("the evaluator-owned trust modules stay covered by EVALUATOR_FILES", () => {
+    for (const f of ["src/lib/caller-credential.ts", "src/lib/self-auth.ts", "src/resolvers/retry-evidence.ts"]) expect(earn!.isEvaluatorFile(`repos/${V}/${f}`)).toBe(true);
+  });
+});
+
+describe("scope earn-in: the evaluator applies a coverage widening, recorded as a loosening (must-fail at base)", () => {
+  beforeEach(() => { treeFiles.set(COVER_TEST, IMPORTS_A); });
+  it("re-runs the mutants itself, stamps the version, and the FIRST widening under the version carries the loosening note", async () => {
+    treeFiles.set(COVER_TEST, `import { a } from "../../src/resolvers/fixture-earn-a.js";\nimport { b } from "../../src/resolvers/fixture-earn-b.js";\n`);
+    propose(FILE_A, "widen", { evidence: [{ gap_id: "fabricated" }] });
+    const r = await apply();
+    expect((r["applied"] as Row[]).map((a) => a["path"])).toEqual([FILE_A]);
+    expect(excludedNow()).not.toContain(FILE_A);
+    expect(editRuns().length).toBeGreaterThan(0);
+    const first = changes()[0]!["body"] as Row;
+    expect(first["criterion_version"]).toBe(NEW_VERSION);
+    expect((first["evidence"] as Row[])[0]!["basis"]).toBe("mutation_coverage");
+    expect(String(first["criterion_note"])).toContain("LOOSENING");
+    expect(String(first["criterion_note"])).toContain("2026-10-05T21:55Z");
+    expect(String(first["criterion_note"])).toContain("L12");
+    propose(FILE_B, "widen");
+    await apply();
+    const second = changes().map((c) => c["body"] as Row).find((b) => b["path"] === FILE_B)!;
+    expect(second["criterion_version"]).toBe(NEW_VERSION);
+    expect(second["criterion_note"]).toBeUndefined();
+  });
+
+  it("the evaluator reads the threshold itself: a proposal made under a lower threshold is refused after the rhythm raises it", async () => {
+    kills.set(COVER_TEST, new Set(["negate_condition", "flip_comparison"]));
+    propose(FILE_A, "widen");
+    rhythm = dueRhythm({ mutation_score_threshold: 0.95 });
+    const r = await apply();
+    expect(r["applied"]).toEqual([]);
+    expect(String(((r["refused"] as Row[])[0] ?? {})["reason"])).toContain("threshold 0.95");
+    expect(excludedNow()).toContain(FILE_A);
+  });
+});
+
+describe("scope earn-in: the exit counts widenings under ONE criterion version (must-fail at base)", () => {
+  const rec = (seq: number, change: string, version: string, prior = "evaluator"): Row => ({
+    id: `c${seq}`, body: { seq, change, criterion_version: version, applied_by: "scope_earn_in_apply", prior_attested_by: prior, path: `p${seq}` },
+  });
+  it("tightenings and expiries do not count toward the exit, and do not break the chain", () => {
+    const m = earn!.scopeEarnInExitMetric([rec(1, "tighten", NEW_VERSION, "operator"), rec(2, "widen", NEW_VERSION), rec(3, "tighten", NEW_VERSION), rec(4, "expire", NEW_VERSION)]);
+    expect(m["consecutive_without_operator_edit"]).toBe(1);
+    expect(m["exit_met"]).toBe(false);
+    const m2 = earn!.scopeEarnInExitMetric([rec(1, "tighten", NEW_VERSION, "operator"), rec(2, "widen", NEW_VERSION), rec(3, "tighten", NEW_VERSION), rec(4, "widen", NEW_VERSION)]);
+    expect(m2["consecutive_without_operator_edit"]).toBe(2);
+    expect(m2["exit_met"]).toBe(true);
+  });
+  it("widenings under an older criterion version do not count", () => {
+    const m = earn!.scopeEarnInExitMetric([rec(1, "widen", "wiring-2026-10-03", "operator"), rec(2, "widen", "wiring-2026-10-03"), rec(3, "widen", NEW_VERSION)]);
+    expect(m["widenings_this_version"]).toBe(1);
+    expect(m["consecutive_without_operator_edit"]).toBe(1);
+    expect(m["exit_met"]).toBe(false);
+  });
+  it("an operator edit after the last change (the live record attested by the operator) zeroes the count", () => {
+    // Without the trailing operator edit the same records meet the exit; with it they do not.
+    expect(earn!.scopeEarnInExitMetric([rec(1, "widen", NEW_VERSION, "operator"), rec(2, "widen", NEW_VERSION)])["exit_met"]).toBe(true);
+    const m = earn!.scopeEarnInExitMetric([rec(1, "widen", NEW_VERSION, "operator"), rec(2, "widen", NEW_VERSION)], "operator");
+    expect(m["consecutive_without_operator_edit"]).toBe(0);
+    expect(m["exit_met"]).toBe(false);
   });
 });

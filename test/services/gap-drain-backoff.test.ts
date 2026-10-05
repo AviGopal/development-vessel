@@ -191,6 +191,107 @@ describe("gap-drain observer: a 200 that was not an attempt must not clear backo
   });
 });
 
+// THE CLASS, NOT THE EXAMPLE. The test above names one verdict, so a patch reading
+// `body.verdict === "pending_verification"` passes it while every BUSY / capacity / lease / budget /
+// environment non-attempt still clears backoff. The cases below are the report bodies gap-to-feature
+// actually returns for work it did not do (copied from its return sites), each anchored to the
+// exported predicate isNonAttemptComposeResult (pending_verification is the one non-attempt the
+// predicate does not cover; the gap names it explicitly). The predicate is loaded by dynamic import:
+// a static import would freeze WORKSPACE_ROOT before this file points it at its scratch dir.
+let isNonAttempt: (cb: Record<string, unknown> | null | undefined) => boolean = () => {
+  throw new Error("isNonAttemptComposeResult not loaded");
+};
+beforeAll(async () => {
+  const gtf = await import("../../src/resolvers/gap-to-feature.js");
+  isNonAttempt = gtf.isNonAttemptComposeResult;
+});
+
+/** Every non-attempt body gap_to_feature answers HTTP 200 with (gap-to-feature.ts return sites). */
+function nonAttemptBodies(id: string): Array<{ label: string; body: Record<string, unknown> }> {
+  return [
+    { label: "pending_verification (held, not re-composed)", body: { ok: true, gap_id: id, gap_category: "drain_backoff_probe", verdict: "pending_verification", note: "landed once but unmeasured — held pending verification; not re-composed" } },
+    { label: "BUSY stage lease", body: { ok: false, stage: "lease", verdict: "BUSY", error: "autonomous_pick lease held by probe", lease_holder: "probe", lease_expires_at: new Date(Date.now() + 60_000).toISOString(), skipped_selection: true } },
+    { label: "BUSY stage capacity (lane full)", body: { ok: false, stage: "capacity", verdict: "BUSY", error: "compose lane full — selection skipped", observed: 2, cap: 2, skipped_selection: true } },
+    { label: "BUSY stage capacity (llm_unavailable)", body: { ok: false, stage: "capacity", verdict: "BUSY", error: "llm_unavailable: no llm_completion producer advertised — selection skipped", reason: "llm_unavailable", skipped_selection: true } },
+    { label: "BUSY stage budget", body: { ok: false, stage: "budget", verdict: "BUSY", error: "spend envelope: exhausted (selection skipped)", reason: "budget_exhausted", cap_usd: 1, spent_usd: 1, skipped_selection: true } },
+    { label: "compose-forwarded BUSY capacity", body: { ok: false, gap_id: id, verdict: "BUSY", stage: "capacity", error: "compose slots full" } },
+    { label: "failure_kind environment", body: { ok: false, gap_id: id, verdict: "UNFAVORABLE", failure_kind: "environment", error: "workspace unavailable" } },
+  ];
+}
+
+describe("gap-drain observer: every non-attempt 200 keeps the gap backed off (class)", () => {
+  test("fixture anchor: every non-attempt body except pending_verification satisfies gap-to-feature's isNonAttemptComposeResult", () => {
+    const bodies = nonAttemptBodies("anchor");
+    expect(bodies.length).toBeGreaterThanOrEqual(7);
+    for (const { label, body } of bodies) {
+      if (body["verdict"] === "pending_verification") continue;
+      expect(isNonAttempt(body), `fixture "${label}" must be a non-attempt per isNonAttemptComposeResult`).toBe(true);
+    }
+    // and the predicate is not vacuous: a real landing is an attempt
+    expect(isNonAttempt({ ok: true, verdict: "FAVORABLE", commit: "abc1234" })).toBe(false);
+  });
+
+  test("class: each non-attempt report gap_to_feature returns with HTTP 200 (pending_verification, BUSY lease/capacity/llm_unavailable/budget, failure_kind environment) leaves an expired backoff entry in force", async () => {
+    const wrong: string[] = [];
+    for (const [i, { label }] of nonAttemptBodies("x").entries()) {
+      const id = `drain-probe-nonattempt-${i}-${Math.random().toString(36).slice(2, 8)}`;
+      const { body } = nonAttemptBodies(id)[i]!;
+      writeGapStore([gapRow(id, {})]);
+      calls = [];
+      g.__drainInflight = new Set();
+      // Expired: the gap is eligible now, so it IS dispatched, and the 200 that comes back is a non-attempt.
+      g.__drainBackoff!.set(id, { until: Date.now() - 1, attempts: 2 });
+      dispatchResponse = report(body);
+      const before = Date.now();
+      await makeObserver().handleEvent(writtenEvent(id));
+      if (dispatches().length !== 1) { wrong.push(`${label}: dispatched ${dispatches().length}x (expected 1)`); continue; }
+      const entry = g.__drainBackoff!.get(id);
+      if (!entry) wrong.push(`${label}: backoff entry was CLEARED by a 200 non-attempt`);
+      else if (!(entry.until > before)) wrong.push(`${label}: backoff entry not in force (until=${entry.until} <= ${before})`);
+    }
+    expect(wrong).toEqual([]);
+  });
+
+  test("class: a non-attempt 200 for a gap with NO prior backoff entry creates one in force", async () => {
+    const wrong: string[] = [];
+    for (const [i, { label }] of nonAttemptBodies("x").entries()) {
+      const id = `drain-probe-nonattempt-fresh-${i}-${Math.random().toString(36).slice(2, 8)}`;
+      const { body } = nonAttemptBodies(id)[i]!;
+      writeGapStore([gapRow(id, {})]);
+      calls = [];
+      g.__drainInflight = new Set();
+      g.__drainBackoff!.delete(id);
+      dispatchResponse = report(body);
+      const before = Date.now();
+      await makeObserver().handleEvent(writtenEvent(id));
+      const entry = g.__drainBackoff!.get(id);
+      if (dispatches().length !== 1) wrong.push(`${label}: dispatched ${dispatches().length}x (expected 1)`);
+      else if (!entry || !(entry.until > before)) wrong.push(`${label}: no backoff entry in force after a non-attempt`);
+    }
+    expect(wrong).toEqual([]);
+  });
+
+  test("control: for every real landing (FAVORABLE with a commit) after an expired backoff, the entry is cleared — backoff is not sticky", async () => {
+    // Kills the over-broad fix "never clear backoff on a 200": the same gaps, the same expired entries,
+    // a real attempt instead of a non-attempt.
+    const wrong: string[] = [];
+    for (let i = 0; i < nonAttemptBodies("x").length; i++) {
+      const id = `drain-probe-real-${i}-${Math.random().toString(36).slice(2, 8)}`;
+      writeGapStore([gapRow(id, {})]);
+      calls = [];
+      g.__drainInflight = new Set();
+      g.__drainBackoff!.set(id, { until: Date.now() - 1, attempts: 2 + i });
+      const body = { ok: true, gap_id: id, gap_category: "drain_backoff_probe", verdict: "FAVORABLE", commit: `c0ffee${i}` };
+      expect(isNonAttempt(body)).toBe(false);
+      dispatchResponse = report(body);
+      await makeObserver().handleEvent(writtenEvent(id));
+      if (dispatches().length !== 1) wrong.push(`#${i}: dispatched ${dispatches().length}x`);
+      else if (g.__drainBackoff!.has(id)) wrong.push(`#${i}: a real landing left the backoff entry in place`);
+    }
+    expect(wrong).toEqual([]);
+  });
+});
+
 describe("gap-drain observer: a gap admission would exclude is never dispatched", () => {
   test("a written gap whose row carries classification_metadata.operator_hold true is not dispatched", async () => {
     const id = "drain-probe-operator-hold";

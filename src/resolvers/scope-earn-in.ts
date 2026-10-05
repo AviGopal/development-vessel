@@ -94,23 +94,68 @@ export const EVALUATOR_FILES: readonly string[] = [
 ];
 export const EVALUATOR_FILE_REASON = "refused: the path is one of the evaluator's own files (EVALUATOR_FILES)";
 /**
- * NEVER PROPOSED (qa 10-05): trust-boundary modules the operator excluded on 10-05 that are not the evaluator's own
- * files. No criterion moves them into autonomous reach, whatever their coverage: a lane landing there could widen what
- * a landing may write, push or certify. Refused by the proposer and the evaluator alike, like EVALUATOR_FILES.
+ * EVERY EXCLUDED ENTRY IS CLASSIFIED (qa 10-05): JUDGE/TRUST entries decide a credential, containment, verdict, credit,
+ * settlement, push or ingress (or are the evaluator's own files); no criterion widens onto them, and they evolve only
+ * by a future gate-evolution shadow promotion. OPERATIONAL entries decide none of those and are earn-in eligible. An
+ * excluded entry the table does not name is refused (fail closed): adding an exclusion means classifying it here.
  */
-export const NEVER_PROPOSE_FILES: Readonly<Record<string, string>> = {
-  "repos/development-vessel/src/resolvers/write-containment.ts": "the write-containment gate of the lane's file writes",
-  "repos/development-vessel/src/resolvers/super-repo-checkout.ts": "the super-repo checkout the runtime glue is executed from",
-  "repos/development-vessel/src/resolvers/behavioral-verification.ts": "the behavioral verdict of a landing",
-  "repos/development-vessel/src/removed-line-predicate.ts": "the removed-line predicate of the landing verdict",
-  "repos/development-vessel/src/vacuous-edit.ts": "the vacuous-edit refusal of the landing verdict",
-  "repos/development-vessel/src/resolvers/staged-mitosis-gate.ts": "the staged gate a landing must pass",
-  // Read 10-05: it scopes where a landing may push (SUBSTRATE_REPO_OWNER, shared targets) and accepts promotions.
-  "repos/development-vessel/src/resolvers/push-policy.ts": "the push scope of a landing and its promotion acceptance",
+export type ScopeClass = { class: "judge_trust" | "operational"; reason: string };
+export const SCOPE_CLASSIFICATION: Readonly<Record<string, ScopeClass>> = {
+  "repos/cycle-demo-3/": { class: "operational", reason: "a demo vessel: decides no credential, containment, verdict, credit, settlement, push or ingress" },
+  "repos/discovery-vessel/": { class: "judge_trust", reason: "the routing fixed point every shape resolves through (ingress)" },
+  "repos/human-surface-vessel/": { class: "judge_trust", reason: "the human ingress surface and its proxy (ingress, auth)" },
+  "repos/identity-vessel/": { class: "judge_trust", reason: "the single credential validator (credential)" },
+  "scripts/substrate/": { class: "judge_trust", reason: "runtime glue executed from the clone, ungated, incl. pull-sync and its gates" },
+  "scripts/bootstrap-seeder.ts": { class: "judge_trust", reason: "bootstrap tier: mints the first templates before any gate exists" },
+  "repos/activity-api/src/lib/posterior-update.ts": { class: "judge_trust", reason: "the credit writer: posterior updates every selection learns from (credit)" },
+  "repos/boredom-vessel/src/index.ts": { class: "operational", reason: "idle-work selection: decides no credential, containment, verdict, credit, settlement, push or ingress" },
+  "repos/llm-resolver-vessel/src/index.ts": { class: "operational", reason: "the LLM resolver service: decides no credential, containment, verdict, credit, settlement, push or ingress" },
+  "repos/goal-host-vessel/src/index.ts": { class: "judge_trust", reason: "the dispatch ingress for every goal (ingress, auth)" },
+  "repos/goal-host-vessel/src/goal-target-inference.ts": { class: "operational", reason: "goal target inference: decides no credential, containment, verdict, credit, settlement, push or ingress" },
+  "repos/concept-db/tests/write-shapes.test.ts": { class: "operational", reason: "a concept-db write-shape test: decides no credential, containment, verdict, credit, settlement, push or ingress" },
+  "repos/development-vessel/src/config.ts": { class: "judge_trust", reason: "bootstrap config: endpoints, keys and roots every module reads" },
+  "repos/development-vessel/src/index.ts": { class: "judge_trust", reason: "the vessel's HTTP entry: route and auth construction (ingress)" },
+  "repos/development-vessel/src/routes/impulses.ts": { class: "judge_trust", reason: "impulse ingress and its auth construction (ingress)" },
+  "repos/development-vessel/src/removed-line-predicate.ts": { class: "judge_trust", reason: "the removed-line predicate of the landing verdict (verdict)" },
+  "repos/development-vessel/src/vacuous-edit.ts": { class: "judge_trust", reason: "the vacuous-edit refusal of the landing verdict (verdict)" },
+  "repos/development-vessel/src/lib/caller-credential.ts": { class: "judge_trust", reason: "evaluator file: the trust-root gate's identity check (credential)" },
+  "repos/development-vessel/src/lib/self-auth.ts": { class: "judge_trust", reason: "evaluator file: self-call auth of the rhythm read/write (credential)" },
+  "repos/development-vessel/src/resolvers/attempt-register.ts": { class: "judge_trust", reason: "the attempt ledger's settlement of landings (settlement)" },
+  "repos/development-vessel/src/resolvers/git-push.ts": { class: "judge_trust", reason: "the push capability (push)" },
+  "repos/development-vessel/src/resolvers/maintenance-lease.ts": { class: "operational", reason: "an advisory DB-maintenance lock: decides no credential, containment, verdict, credit, settlement, push or ingress" },
+  "repos/development-vessel/src/resolvers/push-policy.ts": { class: "judge_trust", reason: "where a landing may push and promotion acceptance (push)" },
+  "repos/development-vessel/src/resolvers/vessel-mitosis-cutover.ts": { class: "judge_trust", reason: "the landing stage that stamps verdict flags (verdict)" },
+  "repos/development-vessel/src/resolvers/vessel-mitosis-evaluate.ts": { class: "judge_trust", reason: "the pre-land gate (verdict)" },
+  "repos/development-vessel/src/resolvers/write-containment.ts": { class: "judge_trust", reason: "the write-containment gate of the lane's file writes (containment)" },
+  "repos/development-vessel/src/resolvers/super-repo-checkout.ts": { class: "judge_trust", reason: "the super-repo checkout the runtime glue is executed from (containment)" },
+  "repos/development-vessel/src/resolvers/behavioral-verification.ts": { class: "judge_trust", reason: "the behavioral verdict of a landing (verdict)" },
+  "repos/development-vessel/src/resolvers/staged-mitosis-gate.ts": { class: "judge_trust", reason: "the staged gate a landing must pass (verdict)" },
+  "repos/development-vessel/src/resolvers/apply-proposal-as-patch.ts": { class: "judge_trust", reason: "stages proposal code for the landing cutover (verdict path)" },
+  "repos/development-vessel/src/resolvers/gap-lifecycle-scan.ts": { class: "judge_trust", reason: "auto-closes gaps (verdict)" },
+  "repos/development-vessel/src/resolvers/pull-cutover.ts": { class: "judge_trust", reason: "the deploy step that converges the runtime to origin/dev (push/deploy)" },
+  "repos/development-vessel/src/resolvers/substrate-gap.ts": { class: "judge_trust", reason: "the gap store: write auth and closure verdicts (verdict, credential)" },
+  "repos/development-vessel/src/resolvers/composer-interruption-sweep.ts": { class: "operational", reason: "sweeps interrupted composes: decides no credential, containment, verdict, credit, settlement, push or ingress" },
+  "repos/development-vessel/src/resolvers/feature-compose.ts": { class: "judge_trust", reason: "evaluator file: drafts, verifies and lands (verdict)" },
+  "repos/development-vessel/src/resolvers/gap-to-feature.ts": { class: "judge_trust", reason: "evaluator file: the landing sweep and scope application (verdict)" },
+  "repos/development-vessel/src/resolvers/pool-impulse.ts": { class: "judge_trust", reason: "evaluator file: the pool's one writer and its trust-root grants (credential)" },
+  "repos/development-vessel/src/resolvers/rhythm-conductor-tick.ts": { class: "judge_trust", reason: "evaluator file: the evaluator's pacing (judge)" },
+  "repos/development-vessel/src/resolvers/self-fact-reconcile.ts": { class: "judge_trust", reason: "evaluator file: the judge of scope changes (judge)" },
+  "repos/development-vessel/src/resolvers/scope-earn-in.ts": { class: "judge_trust", reason: "evaluator file: this criterion (judge)" },
+  "repos/development-vessel/src/resolvers/test-suite.ts": { class: "judge_trust", reason: "evaluator file: the test and mutation runner (judge)" },
+  "repos/development-vessel/src/resolvers/retry-evidence.ts": { class: "judge_trust", reason: "evaluator file: a self-fact row helper (judge)" },
+  "repos/development-vessel/test/resolvers/scope-earn-in.test.ts": { class: "judge_trust", reason: "evaluator file: the criterion's tests (judge)" },
+  "repos/development-vessel/test/resolvers/evaluator-grant-scan.test.ts": { class: "judge_trust", reason: "evaluator file: pins the evaluator grant (judge)" },
+  "repos/development-vessel/test/resolvers/scope-change-pin.test.ts": { class: "judge_trust", reason: "evaluator file: pins what the scope judge accepts (judge)" },
+  "repos/development-vessel/test/resolvers/system-authored-gap-checks.test.ts": { class: "judge_trust", reason: "the judge's tests of system-authored gap checks (judge)" },
 };
-export const NEVER_PROPOSE_REASON = "refused: the path is a trust-boundary module no criterion widens onto (NEVER_PROPOSE_FILES)";
-export function isNeverPropose(path: string): boolean {
-  return Object.prototype.hasOwnProperty.call(NEVER_PROPOSE_FILES, canonicalScopePath(path));
+export const NEVER_PROPOSE_REASON = "refused: the path is a judge/trust module no criterion widens onto (NEVER_PROPOSE, SCOPE_CLASSIFICATION)";
+export const UNCLASSIFIED_REASON = "refused: the path is unclassified in SCOPE_CLASSIFICATION (fail closed)";
+export function classifyScopePath(path: string): ScopeClass | null {
+  const p = canonicalScopePath(path);
+  return Object.prototype.hasOwnProperty.call(SCOPE_CLASSIFICATION, p) ? SCOPE_CLASSIFICATION[p]! : null;
+}
+export function isNeverPropose(path: string, classify: (p: string) => ScopeClass | null = classifyScopePath): boolean {
+  return classify(canonicalScopePath(path))?.class === "judge_trust";
 }
 export function isEvaluatorFile(path: string): boolean {
   const target = canonicalScopePath(path);
@@ -139,6 +184,8 @@ export type ScopeEarnInDeps = {
   runtimeSha: (vessel: string) => string | null;
   /** A vessel file's content at a commit of the vessel clone, or null when it cannot be read. */
   readFileAt: (vessel: string, sha: string, path: string) => string | null;
+  /** The entry's class (SCOPE_CLASSIFICATION), or null when unclassified. */
+  classify: (path: string) => ScopeClass | null;
   /** Test files (vessel-relative) at a commit whose text contains `needle`; [] when none, null when unreadable. */
   testFilesMentioning: (vessel: string, sha: string, needle: string) => string[] | null;
   now: () => number;
@@ -187,6 +234,7 @@ const defaultDeps: ScopeEarnInDeps = {
     }
   },
   readFileAt: (vessel, sha, path) => vesselGit(vessel, ["show", `${sha}:${path}`]),
+  classify: (path) => classifyScopePath(path),
   testFilesMentioning: (vessel, sha, needle) => {
     const r = vesselGitRun(vessel, ["grep", "-l", "-F", "-e", needle, sha, "--", "*.test.ts", "*.test.tsx", "*.test.js", "*.test.mjs", "*.spec.ts", "*.spec.js"]);
     if (!r) return null;
@@ -317,13 +365,27 @@ export function testImportsFile(source: string, testFile: string, fileRel: strin
   return false;
 }
 
-export type EarnInEvaluation = { path: string; verdict: "covered" | "not_covered" | "unjudgeable"; reason_key: string; reason: string; evidence: Row[]; ran_checks: boolean };
+export type EarnInEvaluation = { path: string; verdict: "covered" | "not_covered" | "unjudgeable"; reason_key: string; reason: string; evidence: Row[]; ran_checks: boolean; tests_used?: string[]; importing_tests?: number };
+/** The tick's (or one evaluator pass's) test-run budget: baselines and mutant runs, max_test_runs_per_tick. */
+export type RunBudget = { limit: number; used: number };
+const BUDGET_OUT = Symbol("budget");
+export function runBudget(body: Row): RunBudget {
+  return { limit: Math.max(1, Math.floor(posNum(body["max_test_runs_per_tick"], 40))), used: 0 };
+}
+/** One test_suite run against the budget: BUDGET_OUT (nothing ran) once it is spent. */
+async function budgetedRun(d: ScopeEarnInDeps, b: RunBudget, input: Row): Promise<Row | null | typeof BUDGET_OUT> {
+  if (b.used >= b.limit) return BUDGET_OUT;
+  b.used += 1;
+  return d.runCheck(input).catch(() => null);
+}
 
 /** The widening criterion for one excluded entry, judged now on the live store and the accepted tree. */
-export async function evaluateWidening(path: string, gaps: Row[], d: ScopeEarnInDeps = deps(), knobs: Row = {}): Promise<EarnInEvaluation> {
+export async function evaluateWidening(path: string, gaps: Row[], d: ScopeEarnInDeps = deps(), knobs: Row = {}, budget: RunBudget = runBudget(knobs)): Promise<EarnInEvaluation> {
   const out = (verdict: EarnInEvaluation["verdict"], reason_key: string, reason: string, evidence: Row[] = [], ran = false): EarnInEvaluation => ({ path, verdict, reason_key, reason, evidence, ran_checks: ran });
   if (isEvaluatorFile(path)) return out("not_covered", "evaluator_file", EVALUATOR_FILE_REASON);
-  if (isNeverPropose(path)) return out("not_covered", "never_propose", NEVER_PROPOSE_REASON);
+  const cls = d.classify(canonicalScopePath(path));
+  if (!cls) return out("not_covered", "unclassified", UNCLASSIFIED_REASON);
+  if (cls.class === "judge_trust") return out("not_covered", "never_propose", `${NEVER_PROPOSE_REASON}: ${cls.reason}`);
   if (path.endsWith("/")) return out("not_covered", "directory", "not_evaluated(directory): the criterion is applied per file");
   const glue = runtimeGlueReason(path, d.unitsText());
   if (glue) return out("not_covered", "runtime_glue", glue);
@@ -332,7 +394,8 @@ export async function evaluateWidening(path: string, gaps: Row[], d: ScopeEarnIn
   if (!m) return out("not_covered", "not_a_vessel_file", `${target} is not a vessel file`);
   const [, vessel, fileRel] = m as unknown as [string, string, string];
   const regs = gaps.filter((g) => siteOf(g) === target && isRegression(g));
-  if (regs.length === 0) return evaluateCoverage(vessel, fileRel, d, out, knobs);
+  if (regs.length === 0) return evaluateCoverage(vessel, fileRel, d, out, knobs, budget);
+  const spent = (): EarnInEvaluation => out("unjudgeable", "unjudgeable_budget", `the tick's test-run budget (max_test_runs_per_tick ${budget.limit}) is spent: not judged, never a pass`, [], budget.used > 0);
   // 1. MAP every regression before running anything: one unmapped regression decides the file.
   const mapped: Array<{ id: string; mf: NonNullable<ReturnType<typeof armedMustFail>>; guard: string }> = [];
   for (const g of regs) {
@@ -351,10 +414,12 @@ export async function evaluateWidening(path: string, gaps: Row[], d: ScopeEarnIn
   const evidence: Row[] = [];
   for (const { id, mf, guard } of mapped) {
     const input = { vessel: `repos/${vessel}`, ...(mf.test_file ? { test_file: mf.test_file } : {}), only_tests: mf.only_tests, base_ref: runtime };
-    const plain = await d.runCheck(input).catch(() => null);
+    const plain = await budgetedRun(d, budget, input);
+    if (plain === BUDGET_OUT) return spent();
     if (!plain || plain["ran"] !== true) return out("unjudgeable", "must_fail_did_not_run", `regression ${id}: its must-fail did not run on the runtime tree ${runtime.slice(0, 12)}`, evidence, true);
     if (Number(plain["requested_not_passing"] ?? 1) !== 0) return out("not_covered", "red_at_runtime", `regression ${id}: its must-fail is red at the runtime sha ${runtime.slice(0, 12)} without any mutation (the defect is live where it runs)`, evidence, true);
-    const mutated = await d.runCheck({ ...input, mutate_revert: { sha: guard, file: fileRel } }).catch(() => null);
+    const mutated = await budgetedRun(d, budget, { ...input, mutate_revert: { sha: guard, file: fileRel } });
+    if (mutated === BUDGET_OUT) return spent();
     if (!mutated || (mutated["mutation"] as Row | undefined)?.["applied"] !== true) return out("unjudgeable", "mutation_not_applied", `regression ${id}: reverting ${guard.slice(0, 12)} on ${fileRel} could not be applied at the runtime sha ${runtime.slice(0, 12)}`, evidence, true);
     const wrong = redForTheRightReason(mutated, mf.only_tests);
     if (wrong) return out("not_covered", "survives_mutation", `regression ${id}: its must-fail survives the mutation (reverting ${guard.slice(0, 12)} on ${fileRel}): ${wrong}`, evidence, true);
@@ -438,7 +503,11 @@ export function selectMutants(src: string, k: number, ts: TsModule | null = load
  * QUALIFY RULE (a): a file with no regression history, judged on whether its EXISTING tests kill mutants of the file
  * itself (see the header). Cheap reads first, so a file with no importing test or no mutable site runs nothing.
  */
-async function evaluateCoverage(vessel: string, fileRel: string, d: ScopeEarnInDeps, out: OutFn, knobsBody: Row): Promise<EarnInEvaluation> {
+async function evaluateCoverage(vessel: string, fileRel: string, d: ScopeEarnInDeps, out0: OutFn, knobsBody: Row, budget: RunBudget): Promise<EarnInEvaluation> {
+  let used: string[] | undefined;
+  let importingCount: number | undefined;
+  const out: OutFn = (...a) => ({ ...out0(...a), ...(used ? { tests_used: used, importing_tests: importingCount } : {}) });
+  const spent = (): EarnInEvaluation => out("unjudgeable", "unjudgeable_budget", `the tick's test-run budget (max_test_runs_per_tick ${budget.limit}) is spent: not judged, never a pass`, [], budget.used > 0);
   const NOHIST = "no_regression_history";
   const { threshold, k, maxTests } = coverageKnobs(knobsBody);
   const runtime = d.runtimeSha(vessel);
@@ -464,9 +533,14 @@ async function evaluateCoverage(vessel: string, fileRel: string, d: ScopeEarnInD
   const killers: string[] = [];
   const red: string[] = [];
   let ran = false;
-  for (const t of importing.slice(0, maxTests)) {
+  importing.sort();
+  used = importing.slice(0, maxTests);
+  importingCount = importing.length;
+  console.log(`[scope-earn-in] coverage ${fileRel}: tests [${used.join(", ")}] (${used.length} of ${importing.length} importing, cap ${maxTests}, path order); ${mutants.length} mutant(s)`);
+  for (const t of used) {
     ran = true;
-    const r = await d.runCheck({ vessel: `repos/${vessel}`, test_file: t, base_ref: runtime }).catch(() => null);
+    const r = await budgetedRun(d, budget, { vessel: `repos/${vessel}`, test_file: t, base_ref: runtime });
+    if (r === BUDGET_OUT) return spent();
     if (!r || r["ran"] !== true || !(Number(r["total"] ?? 0) > 0)) return out("unjudgeable", "must_fail_did_not_run", `${t} did not run on the runtime tree ${runtime.slice(0, 12)}`, [], true);
     if (Number(r["fail"] ?? 1) !== 0) red.push(t); else killers.push(t);
   }
@@ -476,7 +550,8 @@ async function evaluateCoverage(vessel: string, fileRel: string, d: ScopeEarnInD
   for (const m of mutants) {
     let by: string | null = null;
     for (const t of killers) {
-      const r = await d.runCheck({ vessel: `repos/${vessel}`, test_file: t, base_ref: runtime, mutate_edit: { file: fileRel, start: m.start, end: m.end, original: m.original, replacement: m.replacement, operator: m.operator } }).catch(() => null);
+      const r = await budgetedRun(d, budget, { vessel: `repos/${vessel}`, test_file: t, base_ref: runtime, mutate_edit: { file: fileRel, start: m.start, end: m.end, original: m.original, replacement: m.replacement, operator: m.operator } });
+      if (r === BUDGET_OUT) return spent();
       if (!r || (r["mutation"] as Row | undefined)?.["applied"] !== true) return out("unjudgeable", "mutation_not_applied", `the ${m.operator} mutant at ${fileRel}:${m.line} could not be applied at the runtime sha ${runtime.slice(0, 12)}`, [], true);
       const failing = Array.isArray(r["failingTests"]) ? (r["failingTests"] as unknown[]) : [];
       if (r["ran"] === true && Number(r["total"] ?? 0) > 0 && Number(r["fail"] ?? 0) > 0 && failing.length > 0) { by = t; break; }
@@ -572,6 +647,7 @@ export async function resolveScopeEarnInTick(pointer: ScopeEarnInTickPointer): P
   const gaps = await d.readGaps();
   const pending = new Set(d.poolRead(PROPOSAL_SHAPE).map((p) => canonicalScopePath(str((p["body"] as Row | undefined)?.["path"]))));
   const evaluated: Array<Omit<EarnInEvaluation, "evidence" | "ran_checks">> = [];
+  const budget = runBudget(rhythm.body);
   const proposed: Row[] = [];
   let ranFiles = 0;
   let unjudgeable = 0;
@@ -589,16 +665,19 @@ export async function resolveScopeEarnInTick(pointer: ScopeEarnInTickPointer): P
     const path = canonicalScopePath(entry);
     if (pending.has(path)) { evaluated.push({ path, verdict: "not_covered", reason_key: "proposal_pending", reason: "a proposal for this path is already pending" }); continue; }
     if (ranFiles >= perTick) { evaluated.push({ path, verdict: "not_covered", reason_key: "deferred", reason: "deferred: this tick's max_per_tick is spent" }); continue; }
-    const ev = await evaluateWidening(path, gaps, d, rhythm.body);
-    if (ev.ran_checks) ranFiles += 1;
-    if (ev.verdict === "unjudgeable") unjudgeable += 1;
-    evaluated.push({ path: ev.path, verdict: ev.verdict, reason_key: ev.reason_key, reason: ev.reason });
+    const ev = await evaluateWidening(path, gaps, d, rhythm.body, budget);
+    // A spent budget is not evidence against the family: it neither counts as a ran file nor as unjudgeable.
+    if (ev.reason_key !== "unjudgeable_budget") {
+      if (ev.ran_checks) ranFiles += 1;
+      if (ev.verdict === "unjudgeable") unjudgeable += 1;
+    }
+    evaluated.push({ path: ev.path, verdict: ev.verdict, reason_key: ev.reason_key, reason: ev.reason, ...(ev.tests_used ? { tests_used: ev.tests_used, importing_tests: ev.importing_tests } : {}) });
     if (ev.verdict === "covered") write(path, "widen", { evidence: ev.evidence });
   }
   // TIGHTENINGS: an in-scope file with an open, unreverted regression. Less evidence, and a TTL.
   const sites = new Set(gaps.filter(isOpenRegression).map(siteOf).filter((s): s is string => !!s && s.startsWith("repos/")));
   for (const path of sites) {
-    if (excludes(scope, path) || pending.has(path) || isEvaluatorFile(path) || isNeverPropose(path)) continue;
+    if (excludes(scope, path) || pending.has(path) || isEvaluatorFile(path) || isNeverPropose(path, d.classify)) continue;
     write(path, "tighten", { ttl_hours: ttlHours, evidence: evaluateTightening(path, gaps) });
   }
 
@@ -619,7 +698,9 @@ export async function resolveScopeEarnInTick(pointer: ScopeEarnInTickPointer): P
     body: {
       fired: proposed.length > 0, reason: leg === "alpha" ? "proposed" : leg === "beta" ? "unjudgeable" : "nothing_to_propose",
       settlement: leg ?? (pointer.dry_run ? "none" : "ran"), due_score: due.due_score, criterion_version: SCOPE_CRITERION_VERSION,
-      proposed, evaluated, by_reason, exit_metric: scopeEarnInExitMetric(d.poolRead(CHANGE_SHAPE), liveAttestedBy(d)), dry_run: pointer.dry_run === true,
+      proposed, evaluated, by_reason, test_runs_used: budget.used, test_runs_budget: budget.limit,
+      classification: scope.excluded.map((e) => { const p = canonicalScopePath(e); const c = d.classify(p); return { path: p, class: c?.class ?? "unclassified", reason: c?.reason ?? UNCLASSIFIED_REASON }; }),
+      exit_metric: scopeEarnInExitMetric(d.poolRead(CHANGE_SHAPE), liveAttestedBy(d)), dry_run: pointer.dry_run === true,
     },
   };
 }
@@ -749,6 +830,7 @@ export async function applyScopeProposals(): Promise<{ applied: Applied[]; refus
   }
 
   // 2. PROPOSALS, each re-judged from scratch.
+  let applyBudget: RunBudget | undefined;
   const consume = (p: Row, outcome: Row) => d.poolWrite({ type: "poolImpulse_write", id: String(p["id"]), shape: PROPOSAL_SHAPE, status: "consumed", body: { ...((p["body"] ?? {}) as Row), outcome: { ...outcome, at: nowIso, by: SCOPE_EVALUATOR } } });
   for (const p of d.poolRead(PROPOSAL_SHAPE).slice(0, MAX_APPLY_PER_PASS)) {
     const body = (p["body"] ?? {}) as Row;
@@ -759,12 +841,15 @@ export async function applyScopeProposals(): Promise<{ applied: Applied[]; refus
     const isExcluded = cur.some((e) => canonicalScopePath(e) === path);
     if (!path || (change !== "widen" && change !== "tighten")) { consume(p, { applied: false, reason: "malformed proposal" }); refused.push({ path, reason: "malformed proposal" }); continue; }
     if (isEvaluatorFile(path)) { consume(p, { applied: false, reason: EVALUATOR_FILE_REASON }); refused.push({ path, reason: EVALUATOR_FILE_REASON }); continue; }
-    if (isNeverPropose(path)) { consume(p, { applied: false, reason: NEVER_PROPOSE_REASON }); refused.push({ path, reason: NEVER_PROPOSE_REASON }); continue; }
+    const cls = d.classify(path);
+    if (!cls && change === "widen") { consume(p, { applied: false, reason: UNCLASSIFIED_REASON }); refused.push({ path, reason: UNCLASSIFIED_REASON }); continue; }
+    if (cls?.class === "judge_trust") { consume(p, { applied: false, reason: NEVER_PROPOSE_REASON }); refused.push({ path, reason: NEVER_PROPOSE_REASON }); continue; }
     if (change === "widen") {
       if (!isExcluded) { consume(p, { applied: false, reason: "noop: not in excluded_paths" }); continue; }
       // The evaluator reads the shaped knobs itself at use time, never from the proposal.
       const knobs = ((await d.readRhythm().catch(() => null))?.body ?? {}) as Row;
-      const ev = await evaluateWidening(path, gaps, d, knobs);
+      applyBudget ??= runBudget(knobs);
+      const ev = await evaluateWidening(path, gaps, d, knobs, applyBudget);
       if (ev.verdict !== "covered") { consume(p, { applied: false, reason: ev.reason }); refused.push({ path, reason: ev.reason }); continue; }
       const id = writeScope(cur.filter((e) => canonicalScopePath(e) !== path), curHolds.filter((h) => str(h["path"]) !== path), "widen", path, ev.evidence, String(p["id"]));
       consume(p, { applied: !!id, change_id: id });

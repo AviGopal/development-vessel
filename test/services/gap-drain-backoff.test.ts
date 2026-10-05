@@ -310,6 +310,106 @@ describe("gap-drain observer: a gap admission would exclude is never dispatched"
   });
 });
 
+// THE HOLD CLASS, NOT TWO FIELDS. The two tests above name operator_hold and one disposition, so a
+// patch that checks exactly those two literals passes while the parking dispositions
+// (needs_information, needs_info, awaiting_operator_review) are still dispatched. The grid below is
+// driven by admission's own exported predicates: held = operator_hold === true || isParkingDisposition
+// || isAwaitingLandVerification (which releases a pending_verification landing once regressed_by or a
+// BEHAVIORAL VERIFICATION FAILED summary says it did not fix the gap). Arming is an axis too: the
+// remedy gaps this path drains are often unarmed, and a hold must not depend on arming (nor may an
+// unarmed, unheld gap stop being dispatched). Predicates load by dynamic import (WORKSPACE_ROOT).
+type HoldPreds = {
+  parking: readonly string[];
+  isParking: (d: unknown) => boolean;
+  awaitingLand: (gap: Record<string, unknown>) => boolean;
+};
+let holdPreds: HoldPreds | null = null;
+beforeAll(async () => {
+  const gtf = await import("../../src/resolvers/gap-to-feature.js");
+  holdPreds = { parking: gtf.PARKING_DISPOSITIONS, isParking: gtf.isParkingDisposition, awaitingLand: gtf.isAwaitingLandVerification };
+});
+
+type HoldCase = { label: string; row: Record<string, unknown>; held: boolean };
+function holdGrid(tag: string): HoldCase[] {
+  const p = holdPreds!;
+  const out: HoldCase[] = [];
+  const holds: Array<[string, Record<string, unknown>]> = [["hold=absent", {}], ["hold=false", { operator_hold: false }], ["hold=true", { operator_hold: true, operator_hold_reason: "probe" }]];
+  const dispositions: Array<[string, Record<string, unknown>]> = [
+    ["disp=absent", {}],
+    ["disp=''", { disposition: "" }],
+    ["disp=pending_verification", { disposition: "pending_verification" }],
+    ...p.parking.map((d): [string, Record<string, unknown>] => [`disp=${d}`, { disposition: d }]),
+  ];
+  const regressed: Array<[string, Record<string, unknown>]> = [["regressed=no", {}], ["regressed=yes", { regressed_by: { sha: "deadbee", verdict: "present" } }]];
+  const summaries: Array<[string, string]> = [["summary=plain", ""], ["summary=BVF", " — BEHAVIORAL VERIFICATION FAILED after landing"]];
+  const arming: Array<[string, Record<string, unknown>]> = [["unarmed", {}], ["armed", { falsifier: "class2", edit_site: "repos/development-vessel/src/services/gap-drain-observer.ts" }]];
+  let n = 0;
+  for (const [hl, hm] of holds) for (const [dl, dm] of dispositions) for (const [rl, rm] of regressed) for (const [sl, ss] of summaries) for (const [al, am] of arming) {
+    const id = `drain-probe-hold-${tag}-${n++}-${Math.random().toString(36).slice(2, 8)}`;
+    const row = gapRow(id, { ...am, ...hm, ...dm, ...rm });
+    row["summary"] = `probe gap ${id}${ss}`;
+    const meta = row["classification_metadata"] as Record<string, unknown>;
+    const held = meta["operator_hold"] === true || p.isParking(meta["disposition"]) || p.awaitingLand(row);
+    out.push({ label: [hl, dl, rl, sl, al].join(" "), row, held });
+  }
+  return out;
+}
+
+async function dispatchCountFor(c: HoldCase): Promise<number> {
+  const id = c.row["id"] as string;
+  writeGapStore([c.row]);
+  calls = [];
+  g.__drainInflight = new Set();
+  g.__drainBackoff = new Map();
+  dispatchResponse = report({ ok: true, gap_id: id, gap_category: "drain_backoff_probe", verdict: "FAVORABLE", commit: "abc1234" });
+  await makeObserver().handleEvent(writtenEvent(id));
+  return dispatches().length;
+}
+
+describe("gap-drain observer: the admission hold class decides dispatch (grid)", () => {
+  test("grid anchor: the hold grid covers every PARKING_DISPOSITIONS entry and both sides of isAwaitingLandVerification", () => {
+    const p = holdPreds!;
+    expect(p.parking.length).toBeGreaterThanOrEqual(3);
+    const grid = holdGrid("anchor");
+    for (const d of p.parking) expect(grid.some((c) => c.held && (c.row["classification_metadata"] as Record<string, unknown>)["disposition"] === d)).toBe(true);
+    expect(grid.some((c) => c.held && p.awaitingLand(c.row))).toBe(true);
+    // pending_verification released by regressed_by / BVF: not held unless something else holds it
+    expect(grid.some((c) => !c.held && (c.row["classification_metadata"] as Record<string, unknown>)["disposition"] === "pending_verification")).toBe(true);
+    expect(grid.filter((c) => c.held).length).toBeGreaterThan(0);
+    expect(grid.filter((c) => !c.held).length).toBeGreaterThan(0);
+  });
+
+  test("class: every HELD row (operator_hold, each parking disposition, a pending_verification landing awaiting its verdict), armed or not, is never dispatched", async () => {
+    const wrong: string[] = [];
+    for (const c of holdGrid("held").filter((x) => x.held)) {
+      const n = await dispatchCountFor(c);
+      if (n !== 0) wrong.push(`${c.label}: dispatched ${n}x`);
+    }
+    expect(wrong).toEqual([]);
+  });
+
+  test("class: a written gap whose row parks it for a human (needs_information, needs_info, awaiting_operator_review) is not dispatched", async () => {
+    const wrong: string[] = [];
+    for (const d of holdPreds!.parking) {
+      const id = `drain-probe-parked-${d}-${Math.random().toString(36).slice(2, 8)}`;
+      const n = await dispatchCountFor({ label: d, row: gapRow(id, { disposition: d }), held: true });
+      if (n !== 0) wrong.push(`disposition ${d}: dispatched ${n}x`);
+    }
+    expect(wrong).toEqual([]);
+  });
+
+  test("control: every UNHELD row in the same grid (incl. unarmed, operator_hold false, a pending_verification landing released by regressed_by or BVF) is dispatched exactly once", async () => {
+    // Kills the over-broad fixes "skip anything with a disposition", "skip unarmed rows", "skip
+    // pending_verification whatever its release state".
+    const wrong: string[] = [];
+    for (const c of holdGrid("unheld").filter((x) => !x.held)) {
+      const n = await dispatchCountFor(c);
+      if (n !== 1) wrong.push(`${c.label}: dispatched ${n}x (expected 1)`);
+    }
+    expect(wrong).toEqual([]);
+  });
+});
+
 describe("gap-drain observer: controls (current correct behaviour)", () => {
   test("a 200 report showing a real attempt (FAVORABLE landing) clears an existing backoff", async () => {
     const id = "drain-probe-real-attempt";

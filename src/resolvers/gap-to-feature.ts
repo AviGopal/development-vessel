@@ -4102,14 +4102,19 @@ export async function registeredLandingVerdict(gap: Record<string, unknown>, kin
   }
   const judged = (v: GapCheckVerdict) => v === "present" || v === "absent";
   if (!judged(atParent.verdict) || !judged(atSha.verdict)) return { label: null, reason: `the registered verifier could not judge (parent ${atParent.verdict}, landed ${atSha.verdict})` };
-  const grounded = atParent.verdict === "present" && atSha.verdict === "absent";
-  const reason = grounded ? `red at parent, green at the landed sha (verifier ${d.id}@${d.version})` : `parent ${atParent.verdict === "present" ? "red" : "green"}, landed ${atSha.verdict === "present" ? "red" : "green"}: the landing did not flip its own check`;
+  const wouldGround = atParent.verdict === "present" && atSha.verdict === "absent";
+  // SHADOW (qa 10-05): the three rules above rest on the verifier's self-report (source paths, lineage, id/version)
+  // and on a control it chose, so a lane-authored verifier could satisfy them all. Until the evaluator derives the
+  // verifier's identity and lineage itself and picks the control blind, a registered verifier's verdict is
+  // CALIBRATION EVIDENCE only: recorded with grounded forced false and shadow:true, never a close.
+  const flipped = wouldGround ? `red at parent, green at the landed sha (verifier ${d.id}@${d.version})` : `parent ${atParent.verdict === "present" ? "red" : "green"}, landed ${atSha.verdict === "present" ? "red" : "green"}: the landing did not flip its own check`;
+  const reason = `shadow verdict, never a close: ${flipped}`;
   return {
     label: {
-      grounded, labeler: LANDING_LABELER, sha, parent, tests: [],
+      grounded: false, shadow: true, labeler: LANDING_LABELER, sha, parent, tests: [],
       ran_at: new Date().toISOString(),
-      verifier: { id: d.id, version: d.version, kind, control: { ref: d.must_fail.ref, verdict: control.verdict } },
-      ...(grounded ? {} : { reason }),
+      verifier: { id: d.id, version: d.version, kind, control: { ref: d.must_fail.ref, verdict: control.verdict }, observed: { parent: atParent.verdict, landed: atSha.verdict, would_ground: wouldGround } },
+      reason,
     },
     reason,
   };

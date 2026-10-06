@@ -3804,7 +3804,7 @@ export function landedUnverifiedHere(meta: Record<string, unknown> | null | unde
  * row as classification_metadata.goal_verification_label.
  */
 export const LANDING_LABELER = "sweep-parent-child";
-export type GoalVerificationLabel = { grounded: boolean; labeler: string; sha: string; parent: string; tests: string[]; ran_at: string; reason?: string; verifier?: { id: string; version: string; kind: string; control: { ref: string; verdict: string } } };
+export type GoalVerificationLabel = { grounded: boolean; labeler: string; sha: string; parent: string; tests: string[]; ran_at: string; reason?: string; shadow?: boolean; verifier?: { id: string; version: string; kind: string; control: { ref: string; verdict: string }; observed?: { parent: string; landed: string; would_ground: boolean } } };
 /**
  * A label for THIS landing, or null. Bound like landedUnverifiedHere binds its flag, but failing the other way: a
  * label from any other labeler (the lander's own claim), an unbound one, or one for another sha is no label at all.
@@ -3829,7 +3829,9 @@ export function landingLabelHere(meta: Record<string, unknown> | null | undefine
 export function landedCloseReason(meta: Record<string, unknown> | null | undefined, sha: string | null | undefined, literalOnly: boolean, independent: GoalVerificationLabel | null = null): "landed_partial" | "landed_literal_only" | "landed_verified" | "awaiting_independent_verdict" {
   if (landedUnderDissent(meta, sha) || landedUnverifiedHere(meta, sha)) return "landed_partial";
   if (literalOnly) return "landed_literal_only";
-  return landingLabelHere({ goal_verification_label: independent }, sha)?.grounded === true ? "landed_verified" : "awaiting_independent_verdict";
+  // A SHADOW label (a registered verifier's calibration evidence) never verifies a landing, whatever it claims.
+  const l = landingLabelHere({ goal_verification_label: independent }, sha);
+  return l?.grounded === true && l.shadow !== true ? "landed_verified" : "awaiting_independent_verdict";
 }
 /** Did the gap's armed own check go red on the parent and green on the draft, with the draft typechecking? */
 export function ownCheckWentRedToGreen(oc: OwnCheckEvidence | null): boolean {

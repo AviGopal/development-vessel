@@ -98,6 +98,9 @@ export const EVALUATOR_FILES: readonly string[] = [
   // The operator-mutant applier test_suite runs, and the test that runs the evaluator's real commands through the gate (10-06).
   "repos/development-vessel/src/lib/apply-mutant.ts",
   "repos/development-vessel/test/resolvers/test-suite-mutate-shell-gate.test.ts",
+  "repos/development-vessel/test/resolvers/self-fact-gate-fed-rows.test.ts",
+  "repos/development-vessel/test/resolvers/activate-gate-fed-run-dir.test.ts",
+  "repos/development-vessel/test/helpers/ungated-rows-source.ts",
 ];
 export const EVALUATOR_FILE_REASON = "refused: the path is one of the evaluator's own files (EVALUATOR_FILES)";
 /**
@@ -154,6 +157,9 @@ export const SCOPE_CLASSIFICATION: Readonly<Record<string, ScopeClass>> = {
   "repos/development-vessel/test/resolvers/rhythm-conductor-psi-affordability.test.ts": { class: "judge_trust", reason: "evaluator file: pins the pacing's affordability source (judge tests)" },
   "repos/development-vessel/src/lib/apply-mutant.ts": { class: "judge_trust", reason: "evaluator file: the operator-mutant applier the coverage judge runs" },
   "repos/development-vessel/test/resolvers/test-suite-mutate-shell-gate.test.ts": { class: "judge_trust", reason: "evaluator file: pins that the judge's real commands pass the shell gate and that a refusal is reported (judge tests)" },
+  "repos/development-vessel/test/resolvers/self-fact-gate-fed-rows.test.ts": { class: "judge_trust", reason: "evaluator file: pins that the self-fact judge reads its expected trust-root values only from the gate-accepted copy, failing closed otherwise" },
+  "repos/development-vessel/test/resolvers/activate-gate-fed-run-dir.test.ts": { class: "judge_trust", reason: "evaluator file: pins that the gate-fed run-dir and gate-public dir are never written by activate_substrate_script" },
+  "repos/development-vessel/test/helpers/ungated-rows-source.ts": { class: "judge_trust", reason: "evaluator file: the test fixture that declares the ungated rows path for the self-fact judge tests" },
   "repos/development-vessel/test/resolvers/scope-earn-in.test.ts": { class: "judge_trust", reason: "evaluator file: the criterion's tests (judge)" },
   "repos/development-vessel/test/resolvers/evaluator-grant-scan.test.ts": { class: "judge_trust", reason: "evaluator file: pins the evaluator grant (judge)" },
   "repos/development-vessel/test/resolvers/scope-change-pin.test.ts": { class: "judge_trust", reason: "evaluator file: pins what the scope judge accepts (judge)" },

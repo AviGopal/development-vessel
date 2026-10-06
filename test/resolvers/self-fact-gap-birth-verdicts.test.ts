@@ -11,6 +11,9 @@ import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { useUngatedRowsSource } from "../helpers/ungated-rows-source.js";
+// These tests exercise the ungated rows path (origin/dev); a gated node reads the gate-fed copy instead.
+useUngatedRowsSource();
 
 const ROOT = join(tmpdir(), `gf2-selffact-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 if (!process.env["WORKSPACE_ROOT"]) process.env["WORKSPACE_ROOT"] = ROOT;

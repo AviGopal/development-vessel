@@ -172,15 +172,75 @@ export interface SelfFactRow {
    *  an unlisted node that holds its shape with no pinned value, and reports it unpinned. */
   nodes?: string[];
 }
+// THE ROWS COME FROM WHAT THE GATE ACCEPTED, OR NOTHING (2026-10-06). The rows carry the judge's EXPECTED values
+// (incl. the trust-root pins), so reading them from an unjudged candidate let any commit on origin/dev change what
+// the judge accepts before Gate P decided (compose2 judged a new spend pin "observed" at 02:20:28Z, before its
+// promote request at 02:23:45). This vessel cannot read /workspace/.gate (its unit masks it), so pull-sync (root)
+// publishes the accepted copy to a dir this vessel can only read, with a marker written last:
+//   <dir>/source.json = { schema: 1, gated, source: accepted|image|clone, accepted_sha, self_facts_sha256, … }
+// gated + source "accepted" + a 40-hex accepted_sha + the file's sha256 equal to self_facts_sha256 ⇒ that copy;
+// gated:false ⇒ origin/dev (an ungated node has no accepted copy; behaviour as before); ANYTHING ELSE ⇒ no rows
+// (fail closed: the run reports unjudged and files rows-unreadable naming the reason). A missing marker is never
+// read as "ungated": the writer publishes one on every node, so its absence is unknown, not permission.
+const gatePublicDir = (): string => process.env["SELF_FACTS_PUBLIC_DIR"] ?? "/workspace/.gate-public";
+let rowsSource = `origin/dev:${ROWS_PATH}`;
+function readRowsRaw(): string | null {
+  const dir = gatePublicDir();
+  const markerPath = join(dir, "source.json");
+  const closed = (reason: string, err?: unknown): null => {
+    rowsSource = markerPath;
+    console.warn(`[self-fact-rows] FAIL CLOSED: ${reason}`);
+    return noteReadError(`rows source ${markerPath}`, err === undefined ? reason : `${reason}: ${err instanceof Error ? err.message : String(err)}`);
+  };
+  let text: string;
+  try {
+    text = readFileSync(markerPath, "utf8");
+  } catch (err) {
+    const code = (err as { code?: string } | null)?.code;
+    return code === "ENOENT" ? closed("marker absent (no gate-fed source.json)") : closed(`marker unreadable (${code ?? "error"})`, err);
+  }
+  let m: Record<string, unknown>;
+  try {
+    const parsed: unknown = JSON.parse(text);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return closed("marker unparseable (not an object)");
+    m = parsed as Record<string, unknown>;
+  } catch (err) {
+    return closed("marker unparseable", err);
+  }
+  if (m["schema"] !== 1) return closed(`marker schema ${String(m["schema"])} is not 1`);
+  if (m["gated"] === false) {
+    rowsSource = `origin/dev:${ROWS_PATH} (marker: ungated)`;
+    console.log(`[self-fact-rows] source: ${rowsSource}`);
+    return git(["show", `origin/dev:${ROWS_PATH}`], superRepoRoot());
+  }
+  if (m["gated"] !== true) return closed("marker gated is neither true nor false");
+  if (m["source"] !== "accepted") return closed(`gated copy not accepted (source=${String(m["source"])})`);
+  const acceptedSha = m["accepted_sha"];
+  if (typeof acceptedSha !== "string" || !/^[0-9a-f]{40}$/.test(acceptedSha)) return closed(`bad accepted_sha (${String(acceptedSha).slice(0, 48)})`);
+  const want = m["self_facts_sha256"];
+  if (typeof want !== "string" || !/^[0-9a-f]{64}$/.test(want)) return closed("hash absent (no self_facts_sha256)");
+  const rowsPath = join(dir, "self-facts.json");
+  let bytes: Buffer;
+  try {
+    bytes = readFileSync(rowsPath);
+  } catch (err) {
+    return closed("gate-fed self-facts.json unreadable", err);
+  }
+  const got = createHash("sha256").update(bytes).digest("hex");
+  if (got !== want) return closed(`hash mismatch (self-facts.json ${got.slice(0, 12)} ≠ marker ${want.slice(0, 12)})`);
+  rowsSource = `${rowsPath}@accepted ${acceptedSha.slice(0, 12)}`;
+  console.log(`[self-fact-rows] source: ${rowsSource}`);
+  return bytes.toString("utf8");
+}
 function readRows(): SelfFactRow[] | null {
-  const raw = git(["show", `origin/dev:${ROWS_PATH}`], superRepoRoot());
+  const raw = readRowsRaw();
   if (raw === null) return null;
   try {
     const j = JSON.parse(raw) as { rows?: unknown };
-    if (!Array.isArray(j.rows)) return noteReadError(`rows ${ROWS_PATH}`, "no rows[] array");
+    if (!Array.isArray(j.rows)) return noteReadError(`rows ${rowsSource}`, "no rows[] array");
     return (j.rows as SelfFactRow[]).filter((r) => r && typeof r.id === "string" && typeof r.instrument === "string" && Array.isArray(r.profiles));
   } catch (err) {
-    return noteReadError(`rows ${ROWS_PATH}`, err);
+    return noteReadError(`rows ${rowsSource}`, err);
   }
 }
 // The node's profile is bootstrap identity (where this node sits), not behaviour.
@@ -1209,7 +1269,7 @@ export async function resolveSelfFactReconcile(pointer: SelfFactReconcilePointer
   let selfGap = false;
   if (plant && rows === null) {
     // No rows, no instruments ran: say so about ITSELF; there is no built-in fallback.
-    await fileDivergence({ fact: "self_fact_reconcile", key: "rows-unreadable", source: `origin/dev:${ROWS_PATH}`, copy: superRepoRoot(), detail: `the self-fact rows could not be read from git (${readErrors[readErrors.length - 1] ?? "unknown"}) — no row ran, so this run is not evidence`, canary: false });
+    await fileDivergence({ fact: "self_fact_reconcile", key: "rows-unreadable", source: rowsSource, copy: superRepoRoot(), detail: `the self-fact rows could not be read from ${rowsSource} (${readErrors[readErrors.length - 1] ?? "unknown"}) — no row ran, so this run is not evidence`, canary: false });
     selfGap = true;
   } else if (plant && !canaryFound) {
     // The instrument cannot see: say so about ITSELF and file nothing else.

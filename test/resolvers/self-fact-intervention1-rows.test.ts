@@ -25,6 +25,9 @@ import {
   type SelfFactResult,
   type SelfFactDivergence,
 } from "../../src/resolvers/self-fact-reconcile.js";
+import { useUngatedRowsSource } from "../helpers/ungated-rows-source.js";
+// These tests exercise the ungated rows path (origin/dev); a gated node reads the gate-fed copy instead.
+useUngatedRowsSource();
 
 const ROW_A: SelfFactRow = {
   id: "policy_reads_classify_failed_lookups",

@@ -1,5 +1,5 @@
 import { writeFile, readFile, stat } from "node:fs/promises";
-import { basename, join } from "node:path";
+import { basename, join, resolve as resolvePath, sep } from "node:path";
 import { createHash } from "node:crypto";
 import type { ResolverResult } from "./types.js";
 
@@ -44,6 +44,21 @@ import type { ResolverResult } from "./types.js";
  */
 
 const DEFAULT_RUN_DIR = "/workspace/active-scripts";
+// GATE-FED DIRS (2026-10-06). The run-dir and the gate-public dir are written only by pull-sync (root) and the boot
+// seed, from the copy Gate P accepted, and development-vessel's unit mounts them read-only. A script change reaches
+// them by landing and promotion, never by this resolver: a write here would put an unjudged blob where the fleet runs
+// it. The gate-public dir is refused outright; a read-only run-dir answers with the same reason, not a raw error.
+const GATE_FED_REFUSAL = "the run dir is gate-fed; land the change and let Gate P promote it";
+const gatePublicDir = (): string => process.env["SELF_FACTS_PUBLIC_DIR"] ?? "/workspace/.gate-public";
+/** A write error that means "this dir is not ours to write" (read-only mount or permission), not a transient fault. */
+export function isGateFedWriteError(err: unknown): boolean {
+  const code = (err as { code?: unknown } | null)?.code;
+  return code === "EROFS" || code === "EACCES" || code === "EPERM";
+}
+const isUnder = (dir: string, root: string): boolean => {
+  const d = resolvePath(dir); const r = resolvePath(root);
+  return d === r || d.startsWith(r.endsWith(sep) ? r : r + sep);
+};
 const SCRIPT_DIR_IN_REPO = "scripts/substrate";
 
 export interface ActivateSubstrateScriptPointer {
@@ -133,6 +148,10 @@ export async function resolveActivateSubstrateScript(
     return refuse(`script must end in .ts: ${name}`);
   }
 
+  if (isUnder(runDir, gatePublicDir())) {
+    return refuse(`${GATE_FED_REFUSAL} (${runDir} is under the gate-public dir)`, { script: name, gate_fed: true });
+  }
+
   const target = join(runDir, name);
 
   // --- existence gate: only REPLACE a known seeded script ---------------
@@ -181,6 +200,7 @@ export async function resolveActivateSubstrateScript(
   try {
     await writeFile(target, content, "utf-8");
   } catch (err) {
+    if (isGateFedWriteError(err)) return refuse(GATE_FED_REFUSAL, { script: name, gate_fed: true, code: (err as { code?: string }).code });
     return refuse(err instanceof Error ? err.message.slice(0, 200) : String(err), { script: name });
   }
 

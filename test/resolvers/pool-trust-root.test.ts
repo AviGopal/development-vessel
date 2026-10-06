@@ -10,6 +10,9 @@ import { afterAll, afterEach, beforeEach, describe, expect, it, spyOn } from "bu
 import { mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { useUngatedRowsSource } from "../helpers/ungated-rows-source.js";
+// These tests exercise the ungated rows path (origin/dev); a gated node reads the gate-fed copy instead.
+useUngatedRowsSource();
 
 const ROOT = join(tmpdir(), `pool-trust-root-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 mkdirSync(ROOT, { recursive: true });

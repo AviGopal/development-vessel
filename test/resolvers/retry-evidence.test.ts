@@ -17,6 +17,9 @@ import {
 } from "../../src/resolvers/retry-evidence.js";
 import { composeLessonClass, composeAttemptEvidence, focusedSlice, priorAttemptFeedbackBlock, type VerifyResult } from "../../src/resolvers/feature-compose.js";
 import { specFromGap } from "../../src/resolvers/gap-to-feature.js";
+import { useUngatedRowsSource } from "../helpers/ungated-rows-source.js";
+// These tests exercise the ungated rows path (origin/dev); a gated node reads the gate-fed copy instead.
+useUngatedRowsSource();
 
 // The gap's own check, run alone (bun test ./test/own.test.ts).
 const OWN_RAW = `bun test v1.3.14 (0d9b296a)

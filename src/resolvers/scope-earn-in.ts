@@ -95,6 +95,9 @@ export const EVALUATOR_FILES: readonly string[] = [
   "repos/development-vessel/test/resolvers/shape-open-landing-verdict.test.ts",
   // The pacing's affordability source (PSI, not load average) is pinned by this test (10-06).
   "repos/development-vessel/test/resolvers/rhythm-conductor-psi-affordability.test.ts",
+  // The operator-mutant applier test_suite runs, and the test that runs the evaluator's real commands through the gate (10-06).
+  "repos/development-vessel/src/lib/apply-mutant.ts",
+  "repos/development-vessel/test/resolvers/test-suite-mutate-shell-gate.test.ts",
 ];
 export const EVALUATOR_FILE_REASON = "refused: the path is one of the evaluator's own files (EVALUATOR_FILES)";
 /**
@@ -149,6 +152,8 @@ export const SCOPE_CLASSIFICATION: Readonly<Record<string, ScopeClass>> = {
   "repos/development-vessel/src/resolvers/retry-evidence.ts": { class: "judge_trust", reason: "evaluator file: a self-fact row helper (judge)" },
   "repos/development-vessel/test/resolvers/shape-open-landing-verdict.test.ts": { class: "judge_trust", reason: "evaluator file: pins the shape-open landing verdict's trust rules and shadow mode (judge tests)" },
   "repos/development-vessel/test/resolvers/rhythm-conductor-psi-affordability.test.ts": { class: "judge_trust", reason: "evaluator file: pins the pacing's affordability source (judge tests)" },
+  "repos/development-vessel/src/lib/apply-mutant.ts": { class: "judge_trust", reason: "evaluator file: the operator-mutant applier the coverage judge runs" },
+  "repos/development-vessel/test/resolvers/test-suite-mutate-shell-gate.test.ts": { class: "judge_trust", reason: "evaluator file: pins that the judge's real commands pass the shell gate and that a refusal is reported (judge tests)" },
   "repos/development-vessel/test/resolvers/scope-earn-in.test.ts": { class: "judge_trust", reason: "evaluator file: the criterion's tests (judge)" },
   "repos/development-vessel/test/resolvers/evaluator-grant-scan.test.ts": { class: "judge_trust", reason: "evaluator file: pins the evaluator grant (judge)" },
   "repos/development-vessel/test/resolvers/scope-change-pin.test.ts": { class: "judge_trust", reason: "evaluator file: pins what the scope judge accepts (judge)" },
@@ -558,6 +563,7 @@ async function evaluateCoverage(vessel: string, fileRel: string, d: ScopeEarnInD
     for (const t of killers) {
       const r = await budgetedRun(d, budget, { vessel: `repos/${vessel}`, test_file: t, base_ref: runtime, mutate_edit: { file: fileRel, start: m.start, end: m.end, original: m.original, replacement: m.replacement, operator: m.operator } });
       if (r === BUDGET_OUT) return spent();
+      if (r && typeof r["gate_refused"] === "string") return out("unjudgeable", "gate_refused", `the ${m.operator} mutant run for ${fileRel}:${m.line} was refused by the shell gate: ${r["gate_refused"]}`, [], true);
       if (!r || (r["mutation"] as Row | undefined)?.["applied"] !== true) return out("unjudgeable", "mutation_not_applied", `the ${m.operator} mutant at ${fileRel}:${m.line} could not be applied at the runtime sha ${runtime.slice(0, 12)}`, [], true);
       const failing = Array.isArray(r["failingTests"]) ? (r["failingTests"] as unknown[]) : [];
       if (r["ran"] === true && Number(r["total"] ?? 0) > 0 && Number(r["fail"] ?? 0) > 0 && failing.length > 0) { by = t; break; }

@@ -1,5 +1,6 @@
 import type { ResolverResult } from "./types.js";
 import fs from "node:fs";
+import { fileURLToPath } from "node:url";
 
 /**
  * Resolver for the `test_suite` shape — runs a vessel's test suite INSIDE the container
@@ -158,8 +159,8 @@ export const MUTATE_FILE_RE = /^[A-Za-z0-9_][A-Za-z0-9_./-]*$/;
 /**
  * THE OPERATOR MUTANT (qualify rule a, 2026-10-05): one deterministic edit of one file (scope_earn_in's selectMutants),
  * applied inside the detached base-tree worktree ($BW) only when the file's text at [start, end) is exactly `original`.
- * The edit travels as base64 JSON decoded by bun inside the worktree, so the mutant's text never reaches the shell as
- * text. Prints MUTATION_APPLIED=1 when the file changed, MUTATION_FAILED=1 otherwise.
+ * The edit travels as base64 JSON decoded by the checked-in applier (src/lib/apply-mutant.ts) inside the worktree, so
+ * the mutant's text never reaches the shell as text. Prints MUTATION_APPLIED=1 when the file changed, MUTATION_FAILED=1 otherwise.
  */
 export type MutationEdit = { file: string; start: number; end: number; original: string; replacement: string; operator?: string };
 export const MUTATE_EDIT_MAX = 8192;
@@ -172,12 +173,12 @@ export function mutationEditProblem(e: unknown): string | null {
   if (m.original.length + m.replacement.length > MUTATE_EDIT_MAX) return `the edit is larger than ${MUTATE_EDIT_MAX} characters`;
   return null;
 }
+/** The checked-in applier (an EVALUATOR file), run as a program FILE so it passes the shell gate's
+ *  opaque-inline-interpreter rule as designed; resolved from this module, i.e. the running evaluator's own tree. */
+export const MUTANT_APPLIER_PATH = fileURLToPath(new URL("../lib/apply-mutant.ts", import.meta.url));
 export function mutationEditScript(e: MutationEdit): string {
   const data = Buffer.from(JSON.stringify({ file: e.file, start: e.start, end: e.end, original: e.original, replacement: e.replacement }), "utf8").toString("base64");
-  const js = `const fs=require("fs");const m=JSON.parse(Buffer.from(process.env.MUT_EDIT,"base64").toString("utf8"));` +
-    `const s=fs.readFileSync(m.file,"utf8");if(s.slice(m.start,m.end)!==m.original)process.exit(3);` +
-    `fs.writeFileSync(m.file,s.slice(0,m.start)+m.replacement+s.slice(m.end));`;
-  return `if (cd "$BW" && MUT_EDIT=${shq(data)} bun -e ${shq(js)}) >/dev/null 2>&1; then echo "MUTATION_APPLIED=1"; else echo "MUTATION_FAILED=1"; fi`;
+  return `if (cd "$BW" && bun run ${shq(MUTANT_APPLIER_PATH)} ${shq(data)}) >/dev/null 2>&1; then echo "MUTATION_APPLIED=1"; else echo "MUTATION_FAILED=1"; fi`;
 }
 export function mutationRevertScript(sha: string, file: string): string {
   const d = `"$BW.mutation.diff"`;
@@ -309,6 +310,7 @@ export async function resolveTestSuite(pointer: Record<string, unknown>): Promis
       `cd "$ROOT" && ([ -d node_modules ] || timeout 120 bun install >/dev/null 2>&1; ${bunRun})`;
 
   let raw = "";
+  let gateRefused: string | null = null;
   try {
     const res = await fetch(shellEndpoint, {
       method: "POST",
@@ -325,6 +327,10 @@ export async function resolveTestSuite(pointer: Record<string, unknown>): Promis
     // which would surface as ran:false and read as "the suite is missing" rather than
     // "I called it wrong". Observed exactly that on first live probe.
     raw = String(j?.stdout ?? j?.body?.stdout ?? "");
+    // A shell-gate refusal answers {error} with no stdout. Name it: without this it reads as ran:false and, for a
+    // mutant, as "not applied", which hides that the GATE refused the evaluator's run (2026-10-06).
+    const err = (j as { error?: unknown; body?: { error?: unknown } })?.error ?? (j as { body?: { error?: unknown } })?.body?.error;
+    if (typeof err === "string" && /refused by containment/i.test(err)) gateRefused = err.slice(0, 300);
   } catch (err) {
     return { shape: "structuredError", body: { resolver: "test_suite", vessel: rel, detail: `shell dispatch failed: ${(err as Error).message}` } };
   }
@@ -352,6 +358,7 @@ export async function resolveTestSuite(pointer: Record<string, unknown>): Promis
       gap_id: typeof pointer.gap_id === "string" ? pointer.gap_id : null,
       proposal_id: typeof pointer.proposal_id === "string" ? pointer.proposal_id : null,
       ran,
+      ...(gateRefused ? { gate_refused: gateRefused } : {}),
       total: parsed.total,
       pass: parsed.pass,
       fail: parsed.fail,

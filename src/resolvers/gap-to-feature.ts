@@ -3934,6 +3934,27 @@ async function markAwaitingOperatorReview(gap: Record<string, unknown>, sha: str
 export type PinnedCheckDeps = {
   parentOf: (sha: string) => string | null;
   runAt: (gap: Record<string, unknown>, ref: string) => Promise<GapCheckVerdict>;
+  /** A registered producer of pinnedCheckVerdict for a non-test_suite check kind (default: discovery). */
+  verifierFor?: (kind: string) => Promise<RegisteredVerifier | null>;
+  /** The files the landing changed (parent..sha), or null when they cannot be read (default: the vessel clone). */
+  changedFiles?: (sha: string, parent: string) => string[] | null;
+};
+/**
+ * A REGISTERED VERIFIER: a producer of shape `pinnedCheckVerdict` for one check kind (the gap's
+ * evidence_resolve.shape). Its descriptor is what it says about itself; the three trust rules below decide whether
+ * the evaluator believes its answers. `run` judges the check at a commit-pinned ref.
+ */
+export type VerifierDescriptor = {
+  id: string; version: string; kind: string;
+  /** Repo-relative paths of the verifier's own source (independence: the landing must not touch them). */
+  source_paths: string[];
+  lineage?: { authored_sha?: string; registered_by_gap?: string };
+  /** A check and ref on which the verifier MUST read red (present): run in every verdict pass. */
+  must_fail?: { check: Record<string, unknown>; ref: string };
+};
+export type RegisteredVerifier = {
+  descriptor: VerifierDescriptor;
+  run: (check: Record<string, unknown>, ref: string) => Promise<{ verdict: GapCheckVerdict; verifier: { id: string; version: string } }>;
 };
 const defaultPinnedCheckDeps: PinnedCheckDeps = {
   parentOf: (sha) => {
@@ -3954,7 +3975,47 @@ const defaultPinnedCheckDeps: PinnedCheckDeps = {
     const { hardcoded_url: _u, expected_literal: _l, ...pinnedMeta } = meta;
     return evaluateGapCheck({ ...gap, classification_metadata: { ...pinnedMeta, evidence_resolve: { ...er, input: { ...(er.input ?? {}), base_ref: ref } } } });
   },
+  verifierFor: (kind) => defaultVerifierFor(kind),
+  changedFiles: (sha, parent) => defaultChangedFiles(sha, parent),
 };
+// The default registry read: own-substrate producers of pinnedCheckVerdict, asked to describe the kind; the first
+// that answers with a descriptor for it is used. Answers travel as {body:{...}} resolve envelopes.
+const PINNED_VERDICT_SHAPE = "pinnedCheckVerdict";
+async function defaultVerifierFor(kind: string): Promise<RegisteredVerifier | null> {
+  const own = await discoverOwnResolveUrls(PINNED_VERDICT_SHAPE);
+  if (!own.ok) return null;
+  for (const url of own.urls) {
+    const res = await postEnvelopeRead(url, { impulse: { type: PINNED_VERDICT_SHAPE, op: "describe", kind } });
+    const d = ((res?.["body"] ?? res) as { verifier?: VerifierDescriptor } | null)?.verifier;
+    if (!d || d.kind !== kind || typeof d.id !== "string" || typeof d.version !== "string") continue;
+    return {
+      descriptor: d,
+      run: async (check, ref) => {
+        const r = await postEnvelopeRead(url, { impulse: { type: PINNED_VERDICT_SHAPE, kind, check, ref } });
+        const b = (r?.["body"] ?? r) as { verdict?: unknown; verifier?: { id?: unknown; version?: unknown } } | null;
+        const v = b?.verdict;
+        return {
+          verdict: v === "present" || v === "absent" || v === "pending" ? v : "unknown",
+          verifier: { id: String(b?.verifier?.id ?? ""), version: String(b?.verifier?.version ?? "") },
+        };
+      },
+    };
+  }
+  return null;
+}
+function defaultChangedFiles(sha: string, parent: string): string[] | null {
+  try {
+    for (const name of readdirSync(vesselsCloneRoot()).sort()) {
+      const dir = join(vesselsCloneRoot(), name);
+      if (!existsSync(join(dir, ".git")) || sweepGitOut(dir, ["merge-base", "--is-ancestor", sha, "HEAD"]) === null) continue;
+      const out = sweepGitOut(dir, ["diff", "--name-only", parent, sha]);
+      if (out === null) return null;
+      // Repo-relative to the vessel; verifier source paths are named super-repo style (repos/<vessel>/...).
+      return out.split("\n").map((f) => f.trim()).filter((f) => f.length > 0).flatMap((f) => [f, `repos/${name}/${f}`]);
+    }
+  } catch { /* unreadable clone root */ }
+  return null;
+}
 let pinnedCheckDeps: PinnedCheckDeps | null = null;
 /** Tests only: replace the pinned re-run (null restores the default). */
 export function __setPinnedCheckForTests(d: PinnedCheckDeps | null): void { pinnedCheckDeps = d; }
@@ -3968,6 +4029,9 @@ export function __setPinnedCheckForTests(d: PinnedCheckDeps | null): void { pinn
 export async function independentLandingVerdict(gap: Record<string, unknown>, sha: string, deps: PinnedCheckDeps = pinnedCheckDeps ?? defaultPinnedCheckDeps): Promise<{ label: GoalVerificationLabel | null; reason: string }> {
   const meta = (gap.classification_metadata ?? gap.metadata ?? {}) as Record<string, unknown>;
   const er = meta.evidence_resolve as { shape?: unknown; input?: unknown } | null | undefined;
+  if (er && typeof er === "object" && typeof er.shape === "string" && er.shape.length > 0 && er.shape !== "test_suite" && er.input && typeof er.input === "object") {
+    return registeredLandingVerdict(gap, er.shape, er.input as Record<string, unknown>, sha, deps);
+  }
   if (!er || typeof er !== "object" || er.shape !== "test_suite" || !er.input || typeof er.input !== "object") {
     return { label: null, reason: "the gap's check is not a test_suite evidence_resolve, so it cannot be re-run on a commit-pinned tree" };
   }
@@ -3991,6 +4055,78 @@ export async function independentLandingVerdict(gap: Record<string, unknown>, sh
   const grounded = atParent === "present" && atSha === "absent";
   const reason = grounded ? "red at parent, green at the landed sha" : `parent ${atParent === "present" ? "red" : "green"}, landed ${atSha === "present" ? "red" : "green"}: the landing did not flip its own check`;
   return { label: { grounded, labeler: LANDING_LABELER, sha, parent, tests, ran_at: new Date().toISOString(), ...(grounded ? {} : { reason }) }, reason };
+}
+
+/**
+ * THE SHAPE-OPEN VERDICT: a non-test_suite check is judged by a REGISTERED producer of pinnedCheckVerdict for its
+ * kind, at the landing's parent and at the landed sha. The evaluator keeps exactly three trust rules over whatever
+ * verifier it finds, and any refusal is NO label (the close waits; never a pass):
+ *   1. INDEPENDENCE: not from the lander's lineage. The landing's changed files must not include the verifier's
+ *      source, the verifier must not be authored in the landed commit, and it must not be registered for this gap or
+ *      its parent/root. Changed files that cannot be read fail closed.
+ *   2. CAN-FAIL: the verifier declares a must-fail control, and the control, RUN IN THIS PASS, reads red (present).
+ *      A declared control is never taken on the verifier's word.
+ *   3. SAME INSTRUMENT: the described verifier id+version answered at the control, the parent and the landing.
+ */
+export async function registeredLandingVerdict(gap: Record<string, unknown>, kind: string, check: Record<string, unknown>, sha: string, deps: PinnedCheckDeps): Promise<{ label: GoalVerificationLabel | null; reason: string }> {
+  if (!/^[0-9a-f]{7,40}$/i.test(sha)) return { label: null, reason: "the landed sha is not a commit id" };
+  let reg: RegisteredVerifier | null = null;
+  try { reg = deps.verifierFor ? await deps.verifierFor(kind) : null; } catch { reg = null; }
+  if (!reg) return { label: null, reason: `no registered pinnedCheckVerdict producer for check kind '${kind}': awaiting an independent verifier` };
+  const d = reg.descriptor;
+  let parent: string | null = null;
+  try { parent = deps.parentOf(sha); } catch { parent = null; }
+  if (!parent) return { label: null, reason: `no parent found for ${sha.slice(0, 12)} in any vessel clone` };
+  // 1. independence
+  const lineageRefusal = verifierLineageRefusal(gap, d, sha, (() => { try { return deps.changedFiles ? deps.changedFiles(sha, parent!) : null; } catch { return null; } })());
+  if (lineageRefusal) return { label: null, reason: `verifier ${d.id}@${d.version} refused (lineage): ${lineageRefusal}` };
+  // 2. can-fail
+  if (!d.must_fail || typeof d.must_fail !== "object" || !d.must_fail.check || typeof d.must_fail.ref !== "string" || d.must_fail.ref.length === 0) {
+    return { label: null, reason: `verifier ${d.id}@${d.version} refused: it declares no must-fail control, so it cannot be shown to fail` };
+  }
+  const same = (v: { id: string; version: string }) => v.id === d.id && v.version === d.version;
+  let control: Awaited<ReturnType<RegisteredVerifier["run"]>>;
+  let atParent: Awaited<ReturnType<RegisteredVerifier["run"]>>;
+  let atSha: Awaited<ReturnType<RegisteredVerifier["run"]>>;
+  try {
+    control = await reg.run(d.must_fail.check, d.must_fail.ref);
+    if (control.verdict !== "present") return { label: null, reason: `verifier ${d.id}@${d.version} refused: its must-fail control read ${control.verdict} in this pass (must read red)` };
+    atParent = await reg.run(check, parent);
+    atSha = await reg.run(check, sha);
+  } catch (err) {
+    return { label: null, reason: `the registered verifier failed: ${String((err as Error)?.message ?? err).slice(0, 200)}` };
+  }
+  // 3. same instrument
+  if (!same(control.verifier) || !same(atParent.verifier) || !same(atSha.verifier)) {
+    return { label: null, reason: `verifier ${d.id}@${d.version} refused: not the same instrument at every ref (control ${control.verifier.id}@${control.verifier.version}, parent ${atParent.verifier.id}@${atParent.verifier.version}, landed ${atSha.verifier.id}@${atSha.verifier.version})` };
+  }
+  const judged = (v: GapCheckVerdict) => v === "present" || v === "absent";
+  if (!judged(atParent.verdict) || !judged(atSha.verdict)) return { label: null, reason: `the registered verifier could not judge (parent ${atParent.verdict}, landed ${atSha.verdict})` };
+  const grounded = atParent.verdict === "present" && atSha.verdict === "absent";
+  const reason = grounded ? `red at parent, green at the landed sha (verifier ${d.id}@${d.version})` : `parent ${atParent.verdict === "present" ? "red" : "green"}, landed ${atSha.verdict === "present" ? "red" : "green"}: the landing did not flip its own check`;
+  return {
+    label: {
+      grounded, labeler: LANDING_LABELER, sha, parent, tests: [],
+      ran_at: new Date().toISOString(),
+      verifier: { id: d.id, version: d.version, kind, control: { ref: d.must_fail.ref, verdict: control.verdict } },
+      ...(grounded ? {} : { reason }),
+    },
+    reason,
+  };
+}
+/** Rule 1 (independence): a reason the verifier is from the lander's lineage, or null when it is not. */
+export function verifierLineageRefusal(gap: Record<string, unknown>, d: VerifierDescriptor, sha: string, changed: string[] | null): string | null {
+  if (!Array.isArray(d.source_paths) || d.source_paths.length === 0) return "it names no source paths, so the landing's reach into it cannot be judged";
+  if (changed === null) return "the landing's changed files could not be read, so independence cannot be judged";
+  const touched = d.source_paths.filter((p) => changed.includes(p));
+  if (touched.length > 0) return `the landing changed its source (${touched.join(", ")})`;
+  const authored = String(d.lineage?.authored_sha ?? "").trim();
+  if (authored.length >= 7 && (sha.startsWith(authored) || authored.startsWith(sha))) return `it was authored in the landed commit ${authored.slice(0, 12)}`;
+  const by = String(d.lineage?.registered_by_gap ?? "").trim();
+  const meta = (gap.classification_metadata ?? gap.metadata ?? {}) as Record<string, unknown>;
+  const lineageIds = [gap.id, gap.parent_gap_id, gap.root_gap_id, gap.same_root_as, meta.parent_gap_id, meta.root_gap_id, meta.same_root_as].filter((x): x is string => typeof x === "string" && x.length > 0);
+  if (by.length > 0 && lineageIds.includes(by)) return `it was registered for this gap's lineage (${by})`;
+  return null;
 }
 
 /**

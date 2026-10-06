@@ -3804,7 +3804,7 @@ export function landedUnverifiedHere(meta: Record<string, unknown> | null | unde
  * row as classification_metadata.goal_verification_label.
  */
 export const LANDING_LABELER = "sweep-parent-child";
-export type GoalVerificationLabel = { grounded: boolean; labeler: string; sha: string; parent: string; tests: string[]; ran_at: string; reason?: string };
+export type GoalVerificationLabel = { grounded: boolean; labeler: string; sha: string; parent: string; tests: string[]; ran_at: string; reason?: string; verifier?: { id: string; version: string; kind: string; control: { ref: string; verdict: string } } };
 /**
  * A label for THIS landing, or null. Bound like landedUnverifiedHere binds its flag, but failing the other way: a
  * label from any other labeler (the lander's own claim), an unbound one, or one for another sha is no label at all.

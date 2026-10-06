@@ -93,6 +93,8 @@ export const EVALUATOR_FILES: readonly string[] = [
   "repos/development-vessel/src/resolvers/retry-evidence.ts",
   // The shape-open landing verdict's trust rules and shadow mode are pinned by this test (10-05).
   "repos/development-vessel/test/resolvers/shape-open-landing-verdict.test.ts",
+  // The pacing's affordability source (PSI, not load average) is pinned by this test (10-06).
+  "repos/development-vessel/test/resolvers/rhythm-conductor-psi-affordability.test.ts",
 ];
 export const EVALUATOR_FILE_REASON = "refused: the path is one of the evaluator's own files (EVALUATOR_FILES)";
 /**
@@ -146,6 +148,7 @@ export const SCOPE_CLASSIFICATION: Readonly<Record<string, ScopeClass>> = {
   "repos/development-vessel/src/resolvers/test-suite.ts": { class: "judge_trust", reason: "evaluator file: the test and mutation runner (judge)" },
   "repos/development-vessel/src/resolvers/retry-evidence.ts": { class: "judge_trust", reason: "evaluator file: a self-fact row helper (judge)" },
   "repos/development-vessel/test/resolvers/shape-open-landing-verdict.test.ts": { class: "judge_trust", reason: "evaluator file: pins the shape-open landing verdict's trust rules and shadow mode (judge tests)" },
+  "repos/development-vessel/test/resolvers/rhythm-conductor-psi-affordability.test.ts": { class: "judge_trust", reason: "evaluator file: pins the pacing's affordability source (judge tests)" },
   "repos/development-vessel/test/resolvers/scope-earn-in.test.ts": { class: "judge_trust", reason: "evaluator file: the criterion's tests (judge)" },
   "repos/development-vessel/test/resolvers/evaluator-grant-scan.test.ts": { class: "judge_trust", reason: "evaluator file: pins the evaluator grant (judge)" },
   "repos/development-vessel/test/resolvers/scope-change-pin.test.ts": { class: "judge_trust", reason: "evaluator file: pins what the scope judge accepts (judge)" },

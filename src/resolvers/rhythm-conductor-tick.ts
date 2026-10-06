@@ -14,6 +14,8 @@
  *
  * due_score = credit_mean * staleness / max(budget, 0.05)
  * affordable = budget <= (1 - bucketLoad/3)  AND  (axis!=presence || present)
+ * bucketLoad  = the worse of PSI cpu/io "some avg60" against shaped rhythmPacing thresholds
+ *               (per-core loadavg only when PSI cannot be read; an explicit pointer bucket_load wins)
  *
  * This is a data-plane conductor: it never restarts anything, it only shifts
  * what the autonomous loop picks up next. Rate-limited by top-K selection and
@@ -23,6 +25,7 @@
 import type { ResolverResult } from "./types.js";
 import { resolveBoredomEnqueue, DEFAULT_QUEUE_PATH } from "./boredom-enqueue.js";
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
+import { cpus } from "node:os";
 import { lookupShape, describeLookup } from "../config.js";
 import { selfAuthHeaders } from "../lib/self-auth.js";
 
@@ -219,13 +222,95 @@ async function fetchJson(url: string, init: RequestInit, timeoutMs: number): Pro
   }
 }
 
-function bucketLoadFromProc(): number {
-  try {
-    const load = parseFloat(readFileSync("/proc/loadavg", "utf-8").split(/\s+/)[0] ?? "0");
-    return load < 1 ? 0 : load < 3 ? 1 : load < 8 ? 2 : 3;
-  } catch {
-    return 0;
+// ─── affordability: price by CONTENTION, not by load average ────────────────────────────────
+// The bucket was computed from /proc/loadavg. A load average counts runnable AND uninterruptible
+// tasks, so on a workstation it can read high with nothing contended: on 2026-10-06 node1 read load
+// 23-25 on 16 cores (bucket 2, ceiling 0.333) and enqueued nothing for ~8 h while PSI said the host
+// was idle (cpu some avg60 ~3%, io 0). PSI "some avg60" is the share of the last minute in which at
+// least one task was stalled waiting for the resource: a contention measure. The bucket is the worse
+// of cpu and io against thresholds read at use time from the shaped rhythmPacing record (law 1).
+
+/** Bucket thresholds on PSI "some avg60" (%): below t[0] ⇒ 0, below t[1] ⇒ 1, below t[2] ⇒ 2, else 3. */
+export const DEFAULT_PSI_BUCKET_THRESHOLDS: { cpu: number[]; io: number[] } = { cpu: [15, 30, 50], io: [10, 20, 40] };
+
+/** The "some" line's avg60 as a percentage, or null when the text is not PSI. */
+export function parsePsiSomeAvg60(text: string): number | null {
+  const m = /^some\s+.*\bavg60=([0-9]+(?:\.[0-9]+)?)/m.exec(text);
+  if (!m) return null;
+  const v = parseFloat(m[1]!);
+  return Number.isFinite(v) ? v : null;
+}
+
+const bucketOn = (v: number, t: number[]): number => (v < t[0]! ? 0 : v < t[1]! ? 1 : v < t[2]! ? 2 : 3);
+
+/** The per-core loadavg bucket (the fallback when PSI cannot be read). */
+const loadavgBucket = (load: number, cores: number): number => {
+  const per = load / Math.max(1, cores);
+  return per < 0.25 ? 0 : per < 0.75 ? 1 : per < 2 ? 2 : 3;
+};
+
+export function affordabilityBucket(input: {
+  psiCpu: number | null;
+  psiIo: number | null;
+  load: number;
+  cores: number;
+  thresholds: { cpu: number[]; io: number[] };
+}): { bucket: number; source: "psi" | "loadavg" } {
+  if (input.psiCpu === null && input.psiIo === null) return { bucket: loadavgBucket(input.load, input.cores), source: "loadavg" };
+  const cpuB = input.psiCpu === null ? 0 : bucketOn(input.psiCpu, input.thresholds.cpu);
+  const ioB = input.psiIo === null ? 0 : bucketOn(input.psiIo, input.thresholds.io);
+  return { bucket: Math.max(cpuB, ioB), source: "psi" };
+}
+
+type LoadReaders = { psiCpu: () => string; psiIo: () => string; loadavg: () => string; cores: () => number };
+const DEFAULT_LOAD_READERS: LoadReaders = {
+  psiCpu: () => readFileSync("/proc/pressure/cpu", "utf-8"),
+  psiIo: () => readFileSync("/proc/pressure/io", "utf-8"),
+  loadavg: () => readFileSync("/proc/loadavg", "utf-8"),
+  cores: () => cpus().length,
+};
+let loadReaders: LoadReaders = DEFAULT_LOAD_READERS;
+/** Tests only: replace the /proc readers. null restores the defaults. */
+export function __setLoadReadersForTests(r: LoadReaders | null): void { loadReaders = r ?? DEFAULT_LOAD_READERS; }
+
+let psiFallbacks = 0;
+/** How many ticks in this process fell back to loadavg because PSI could not be read. */
+export function psiFallbackCount(): number { return psiFallbacks; }
+
+const validThresholds = (t: unknown): t is number[] =>
+  Array.isArray(t) && t.length === 3 && t.every((x) => typeof x === "number" && Number.isFinite(x) && x >= 0) && t[0] <= t[1] && t[1] <= t[2];
+
+/** The shaped thresholds from the rhythmPacing pool record, else the defaults. */
+async function readPsiThresholds(endpoint: string, headers: Record<string, string>): Promise<{ cpu: number[]; io: number[] }> {
+  const resp = (await fetchJson(
+    endpoint,
+    { method: "POST", headers, body: JSON.stringify({ impulse: { type: "poolImpulse", shape: "rhythmPacing", limit: 1 } }) },
+    800,
+  )) as { body?: { impulses?: Array<{ body?: { psi_bucket_thresholds?: { cpu?: unknown; io?: unknown } } }> } } | null;
+  const t = resp?.body?.impulses?.[0]?.body?.psi_bucket_thresholds;
+  return {
+    cpu: validThresholds(t?.cpu) ? t!.cpu : DEFAULT_PSI_BUCKET_THRESHOLDS.cpu,
+    io: validThresholds(t?.io) ? t!.io : DEFAULT_PSI_BUCKET_THRESHOLDS.io,
+  };
+}
+
+async function measureAffordability(endpoint: string, headers: Record<string, string>): Promise<{
+  bucket: number; source: "psi" | "loadavg"; psi_cpu: number | null; psi_io: number | null; load: number; cores: number; psi_fallback: number;
+}> {
+  const readPsi = (f: () => string): number | null => { try { return parsePsiSomeAvg60(f()); } catch { return null; } };
+  const psiCpu = readPsi(loadReaders.psiCpu);
+  const psiIo = readPsi(loadReaders.psiIo);
+  let load = 0;
+  try { load = parseFloat(loadReaders.loadavg().split(/\s+/)[0] ?? "0") || 0; } catch { load = 0; }
+  let cores = 1;
+  try { cores = Math.max(1, loadReaders.cores()); } catch { cores = 1; }
+  const thresholds = await readPsiThresholds(endpoint, headers);
+  const r = affordabilityBucket({ psiCpu, psiIo, load, cores, thresholds });
+  if (r.source === "loadavg") {
+    psiFallbacks += 1;
+    console.warn(`[rhythm-conductor] PSI unreadable (/proc/pressure/cpu and /proc/pressure/io): affordability falls back to the per-core load average (load=${load.toFixed(2)} cores=${cores} -> bucket ${r.bucket}); psi_fallback=${psiFallbacks}`);
   }
+  return { bucket: r.bucket, source: r.source, psi_cpu: psiCpu, psi_io: psiIo, load, cores, psi_fallback: psiFallbacks };
 }
 
 /**
@@ -383,7 +468,10 @@ export async function resolveRhythmConductorTick(
   const presenceLookup = await lookupShape("obsidian:note");
   const present = presenceLookup.ok && presenceLookup.producers.length > 0;
   if (!presenceLookup.ok) console.log(`[rhythm-conductor] presence unknown, presence-axis rhythms not affordable this tick: ${describeLookup(presenceLookup)}`);
-  const bucketLoad = typeof pointer.bucket_load === "number" ? pointer.bucket_load : bucketLoadFromProc();
+  const pinned = typeof pointer.bucket_load === "number";
+  const afford = pinned ? null : await measureAffordability(endpoint, selfHeaders);
+  const bucketLoad = pinned ? (pointer.bucket_load as number) : afford!.bucket;
+  if (afford) console.log(`[rhythm-conductor] affordability bucket ${afford.bucket} from ${afford.source} (psi_cpu=${afford.psi_cpu ?? "?"} psi_io=${afford.psi_io ?? "?"} load=${afford.load.toFixed(2)} cores=${afford.cores} psi_fallback=${afford.psi_fallback})`);
 
   // 1. Read the rhythm registry.
   const regResp = (await fetchJson(
@@ -815,6 +903,12 @@ export async function resolveRhythmConductorTick(
       drained,
       spend_envelope: envelope.reason,
       bucket_load: bucketLoad,
+      load_source: pinned ? "pointer" : afford!.source,
+      psi_cpu: afford?.psi_cpu ?? null,
+      psi_io: afford?.psi_io ?? null,
+      load: afford?.load ?? null,
+      cores: afford?.cores ?? null,
+      psi_fallback: afford?.psi_fallback ?? psiFallbacks,
       presence: present,
       presence_lookup: describeLookup(presenceLookup),
       considered: rhythms.length,

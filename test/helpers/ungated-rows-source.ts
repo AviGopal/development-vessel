@@ -4,11 +4,13 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import * as sfr from "../../src/resolvers/self-fact-reconcile.js";
 
 export function useUngatedRowsSource(): string {
   const dir = join(tmpdir(), `gate-public-ungated-${Date.now()}-${Math.random().toString(36).slice(2)}`);
   mkdirSync(dir, { recursive: true });
   writeFileSync(join(dir, "source.json"), JSON.stringify({ schema: 1, gated: false, source: "clone", accepted_sha: null, self_facts_sha256: null, writer: "pull-sync", written_at: new Date().toISOString() }));
-  process.env["SELF_FACTS_PUBLIC_DIR"] = dir;
+  const set = (sfr as Record<string, unknown>)["__setGatePublicDirForTests"] as ((d: string) => void) | undefined;
+  if (set) set(dir); else process.env["SELF_FACTS_PUBLIC_DIR"] = dir;
   return dir;
 }

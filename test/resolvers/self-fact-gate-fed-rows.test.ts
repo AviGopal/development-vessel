@@ -14,7 +14,10 @@ import { join } from "node:path";
 const ROOT = join(tmpdir(), `self-fact-gate-fed-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 mkdirSync(ROOT, { recursive: true });
 process.env["WORKSPACE_ROOT"] = ROOT;
-const { resolveSelfFactReconcile } = await import("../../src/resolvers/self-fact-reconcile.js");
+const sfr = await import("../../src/resolvers/self-fact-reconcile.js") as Record<string, unknown>;
+const resolveSelfFactReconcile = sfr["resolveSelfFactReconcile"] as typeof import("../../src/resolvers/self-fact-reconcile.js").resolveSelfFactReconcile;
+const __setGatePublicDirForTests = (d: string | null): void => { const f = sfr["__setGatePublicDirForTests"] as ((d: string | null) => void) | undefined; if (f) f(d); else if (d === null) delete process.env["SELF_FACTS_PUBLIC_DIR"]; else process.env["SELF_FACTS_PUBLIC_DIR"] = d; };
+const GATE_PUBLIC_DIR = sfr["GATE_PUBLIC_DIR"] as string | undefined;
 
 const SUPER = join(ROOT, "super");
 const PUB = join(ROOT, "gate-public");
@@ -38,14 +41,14 @@ async function run(plant = false) {
 beforeAll(() => {
   for (const k of ["SUPER_REPO_ROOT", "SELF_FACTS_PUBLIC_DIR", "PROFILE", "PROFILE_EFFECTIVE"]) saved[k] = process.env[k];
   process.env["SUPER_REPO_ROOT"] = SUPER;
-  process.env["SELF_FACTS_PUBLIC_DIR"] = PUB;
+  __setGatePublicDirForTests(PUB);
   process.env["PROFILE_EFFECTIVE"] = "standalone";
   mkdirSync(join(SUPER, "scripts", "substrate"), { recursive: true });
   git("init", "-q");
   writeFileSync(join(SUPER, "scripts", "substrate", "self-facts.json"), rowsJson("row_origin"));
   git("add", "."); git("commit", "-q", "-m", "rows"); git("update-ref", "refs/remotes/origin/dev", "HEAD");
 });
-afterAll(() => { for (const [k, v] of Object.entries(saved)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; } rmSync(ROOT, { recursive: true, force: true }); });
+afterAll(() => { __setGatePublicDirForTests(null); for (const [k, v] of Object.entries(saved)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; } rmSync(ROOT, { recursive: true, force: true }); });
 
 describe("self-fact rows come from the gate-accepted copy, or nothing", () => {
   it("MUST-FAIL (a): gated + accepted + matching hash ⇒ the gate-public rows, not origin/dev", async () => {
@@ -101,6 +104,23 @@ describe("self-fact rows come from the gate-accepted copy, or nothing", () => {
     const b = await run(true);
     expect(b.self_gap_filed).toBe(true);
     expect(b.read_errors.join(" ")).toContain("marker absent");
+  });
+  it("MUST-FAIL (i): SELF_FACTS_PUBLIC_DIR in the environment is IGNORED; a forged valid dir there is never read", async () => {
+    __setGatePublicDirForTests(null); // production: no test injection
+    const forged = join(ROOT, "forged");
+    mkdirSync(forged, { recursive: true });
+    writeFileSync(join(forged, "self-facts.json"), rowsJson("row_forged"));
+    writeFileSync(join(forged, "source.json"), JSON.stringify(good({ self_facts_sha256: sha(rowsJson("row_forged")) })));
+    process.env["SELF_FACTS_PUBLIC_DIR"] = forged;
+    try {
+      expect(GATE_PUBLIC_DIR).toBe("/workspace/.gate-public");
+      const b = await run();
+      expect(b.unregistered_rows).not.toContain("row_forged");
+      expect(b.read_errors.join(" ")).not.toContain(forged);
+    } finally {
+      delete process.env["SELF_FACTS_PUBLIC_DIR"];
+      __setGatePublicDirForTests(PUB);
+    }
   });
   it("CONTROL (f): an ungated marker ⇒ origin/dev rows, as before", async () => {
     publish({ schema: 1, gated: false, source: "clone", accepted_sha: null, self_facts_sha256: null, writer: "pull-sync", written_at: "2026-10-06T00:00:00Z" });

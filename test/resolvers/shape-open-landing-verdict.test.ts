@@ -59,17 +59,28 @@ const deps = (r: Registered | null, changed: string[] = ["repos/other/src/x.ts"]
 });
 
 describe("shape-open independent landing verdict", () => {
-  it("MUST-FAIL: a registered pinnedCheckVerdict producer for a non-test_suite kind grounds a gap red@parent -> green@landing", async () => {
+  // SHADOW MODE (qa 10-05): every trust rule above rests on the verifier's own self-report (source paths, lineage,
+  // id/version) and a control the verifier chose, so a lane-authored verifier could game all three. Until the
+  // evaluator derives identity/lineage itself and picks the control blind, a registered verifier runs in SHADOW: its
+  // verdict is recorded as calibration evidence with grounded FORCED false and shadow:true, and it never closes a gap.
+  it("MUST-FAIL (shadow): a registered verifier's red@parent -> green@landing is recorded as shadow evidence, grounded forced false, never landed_verified", async () => {
     const r = registered(descriptor());
     const out = await verdict(fixtureGap(), SHA, deps(r));
-    expect(out.label?.grounded).toBe(true);
+    expect(out.label).not.toBeNull();
+    expect(out.label?.grounded).toBe(false);
+    expect((out.label as Record<string, unknown>)?.shadow).toBe(true);
     expect(out.label?.labeler).toBe(fc.LANDING_LABELER);
     expect(out.label?.parent).toBe(PARENT);
-    expect(out.label?.verifier).toMatchObject({ id: "fixture-verifier", version: "1", kind: "fixture_kind", control: { ref: CONTROL_REF, verdict: "present" } });
+    expect(out.label?.verifier).toMatchObject({ id: "fixture-verifier", version: "1", kind: "fixture_kind", control: { ref: CONTROL_REF, verdict: "present" }, observed: { parent: "present", landed: "absent", would_ground: true } });
     // the control ran in this pass, then the parent and the landing
     expect(r.calls).toEqual([CONTROL_REF, PARENT, SHA]);
-    // and the close reads it as verified
-    expect(fc.landedCloseReason({}, SHA, false, out.label as never)).toBe("landed_verified");
+    // the close keeps waiting: shadow evidence never verifies a landing
+    expect(fc.landedCloseReason({}, SHA, false, out.label as never)).toBe("awaiting_independent_verdict");
+    expect(out.reason).toMatch(/shadow/);
+  });
+  it("MUST-FAIL (shadow): a forged label claiming grounded:true with shadow:true still does not verify", async () => {
+    const forged = { grounded: true, shadow: true, labeler: fc.LANDING_LABELER, sha: SHA, parent: PARENT, tests: [], ran_at: "2026-10-05T00:00:00Z" };
+    expect(fc.landedCloseReason({}, SHA, false, forged as never)).toBe("awaiting_independent_verdict");
   });
 
   it("MUST-FAIL: a verifier whose source the landing touched is from the lander's lineage: refused", async () => {
@@ -132,6 +143,7 @@ describe("shape-open independent landing verdict", () => {
     const r: Registered = { descriptor: d, run: async (_c, ref) => ({ verdict: ref === CONTROL_REF ? "present" : "absent", verifier: { id: d.id, version: d.version } }) };
     const out = await verdict(fixtureGap(), SHA, deps(r));
     expect(out.label?.grounded).toBe(false);
+    expect(out.label?.verifier).toMatchObject({ observed: { parent: "absent", landed: "absent", would_ground: false } });
     expect(out.label?.reason).toMatch(/did not flip/);
     expect(fc.landedCloseReason({}, SHA, false, out.label as never)).toBe("awaiting_independent_verdict");
   });

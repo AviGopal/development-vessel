@@ -182,7 +182,12 @@ export interface SelfFactRow {
 // gated:false ⇒ origin/dev (an ungated node has no accepted copy; behaviour as before); ANYTHING ELSE ⇒ no rows
 // (fail closed: the run reports unjudged and files rows-unreadable naming the reason). A missing marker is never
 // read as "ungated": the writer publishes one on every node, so its absence is unknown, not permission.
-const gatePublicDir = (): string => process.env["SELF_FACTS_PUBLIC_DIR"] ?? "/workspace/.gate-public";
+// A CONSTANT, never an env var: the env is writable by the root shell and the substrate (write-containment.ts),
+// so an override would let a restart point the judge at a forged marker. Tests inject the dir through the setter.
+export const GATE_PUBLIC_DIR = "/workspace/.gate-public";
+let gatePublicDirOverride: string | null = null;
+export function __setGatePublicDirForTests(dir: string | null): void { gatePublicDirOverride = dir; }
+const gatePublicDir = (): string => gatePublicDirOverride ?? GATE_PUBLIC_DIR;
 let rowsSource = `origin/dev:${ROWS_PATH}`;
 function readRowsRaw(): string | null {
   const dir = gatePublicDir();

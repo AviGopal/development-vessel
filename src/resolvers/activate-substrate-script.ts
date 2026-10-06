@@ -49,7 +49,11 @@ const DEFAULT_RUN_DIR = "/workspace/active-scripts";
 // them by landing and promotion, never by this resolver: a write here would put an unjudged blob where the fleet runs
 // it. The gate-public dir is refused outright; a read-only run-dir answers with the same reason, not a raw error.
 const GATE_FED_REFUSAL = "the run dir is gate-fed; land the change and let Gate P promote it";
-const gatePublicDir = (): string => process.env["SELF_FACTS_PUBLIC_DIR"] ?? "/workspace/.gate-public";
+// A constant (never env): the same gate-public dir the self-fact judge reads. Tests inject it via the setter.
+const GATE_PUBLIC_DIR = "/workspace/.gate-public";
+let gatePublicDirOverride: string | null = null;
+export function __setGatePublicDirForTests(dir: string | null): void { gatePublicDirOverride = dir; }
+const gatePublicDir = (): string => gatePublicDirOverride ?? GATE_PUBLIC_DIR;
 /** A write error that means "this dir is not ours to write" (read-only mount or permission), not a transient fault. */
 export function isGateFedWriteError(err: unknown): boolean {
   const code = (err as { code?: unknown } | null)?.code;

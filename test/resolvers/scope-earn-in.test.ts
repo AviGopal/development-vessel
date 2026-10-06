@@ -92,6 +92,7 @@ let sourceReads: Array<{ vessel: string; sha: string; path: string }> = [];
 let kills = new Map<string, "all" | "none" | Set<string>>();
 let redTests = new Set<string>();
 let editFails = false;
+let editGateRefused = false;
 
 const dueRhythm = (extra: Row = {}): { id: string; body: Row; updated_at: string } => ({
   id: "rhythm-scope-earn-in", updated_at: new Date(nowMs).toISOString(),
@@ -120,6 +121,7 @@ function fakeCheck(input: Row): Row {
   if (only.length === 0) {
     const tf = String(input["test_file"] ?? "");
     const edit = input["mutate_edit"] as Row | undefined;
+    if (edit && editGateRefused) return { ran: false, total: 0, pass: 0, fail: 0, failingTests: [], mutation: { kind: "edit", applied: false }, gate_refused: "write refused by containment", base_ref: input["base_ref"] ?? null };
     if (edit && editFails) return { ran: false, total: 0, pass: 0, fail: 0, failingTests: [], mutation: { kind: "edit", applied: false }, base_ref: input["base_ref"] ?? null };
     const k = kills.get(tf) ?? "none";
     const killed = !!edit && (k === "all" || (k instanceof Set && k.has(String(edit["operator"]))));
@@ -169,7 +171,7 @@ afterAll(() => {
 beforeEach(() => {
   violations = []; gaps = []; settled = []; checks = []; reports = []; writes = [];
   survives = new Set(); redAtHead = new Set(); mutationFails = new Set(); redAtRuntimeOnly = new Set(); runtimePin = RUNTIME;
-  sourceReads = []; listFails = false; editFails = false; redTests = new Set();
+  sourceReads = []; listFails = false; editFails = false; editGateRefused = false; redTests = new Set();
   kills = new Map([[COVER_TEST, "all"]]);
   treeFiles = new Map<string, string | null>([
     ["src/resolvers/fixture-earn-a.ts", TARGET_SRC], ["src/resolvers/fixture-earn-b.ts", TARGET_SRC], ["src/resolvers/fixture-earn-c.ts", TARGET_SRC],
@@ -846,6 +848,15 @@ describe("scope earn-in: qualify rule (a), the file's own tests kill its mutants
     const { body } = await quietTick();
     expect(evOf(body, FILE_A)["reason_key"]).toBe("no_coverage");
     expect(String(evOf(body, FILE_A)["reason"])).toContain("0 mutants");
+  });
+
+  it("MUST-FAIL: a shell-gate refusal of the mutant run is reported as gate_refused with the refusal, never mutation_not_applied", async () => {
+    editGateRefused = true;
+    const { body } = await quietTick();
+    expect(evOf(body, FILE_A)["verdict"]).toBe("unjudgeable");
+    expect(evOf(body, FILE_A)["reason_key"]).toBe("gate_refused");
+    expect(String(evOf(body, FILE_A)["reason"])).toContain("refused by containment");
+    expect(proposals()).toEqual([]);
   });
 
   it("a mutant that does not apply makes the file unjudgeable, never covered", async () => {

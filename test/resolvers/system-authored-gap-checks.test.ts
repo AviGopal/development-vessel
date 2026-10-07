@@ -100,6 +100,8 @@ beforeAll(() => {
     const url = typeof input === "string" ? input : String((input as { url?: string }).url ?? input);
     const body = init?.body ? JSON.parse(String(init.body)) : {};
     const imp = body?.impulse ?? {};
+    // goal-host's dispatch record, read back for a dispatched goal's outcome: unknown here (404), so nothing is graded.
+    if (/\/executions\/[^/?#]+$/.test(url)) return new Response("not found", { status: 404 });
     if (url.endsWith("/run-goal")) {
       goals.push({ goal: String(body.goal ?? ""), variables: body.variables });
       return Response.json({ dispatchId: `d-${goals.length}` }, { status: 202 });
@@ -479,7 +481,8 @@ describe("system-authored gap checks: (e) graded by the tick's report, not the e
 
   it("the tick's report decides the leg: something done = success, all refused = failure, nothing done = neither", () => {
     expect(supply).not.toBeNull();
-    expect(supply!.checkSupplySettlementLeg({ dispatched: 1, armed: 0, refused: 0 })).toBe("alpha");
+    // A dispatch alone is no longer pinned to alpha: credit comes from an armed check (gap-check-supply-outcome.test.ts,
+    // gap gap-check-supply-never-reads-its-dispatch-outcome-so-a-failed-test-writing-goal-sits-goal-dispatched-forever).
     expect(supply!.checkSupplySettlementLeg({ dispatched: 0, armed: 1, refused: 2 })).toBe("alpha");
     expect(supply!.checkSupplySettlementLeg({ dispatched: 0, armed: 0, refused: 1 })).toBe("beta");
     expect(supply!.checkSupplySettlementLeg({ dispatched: 0, armed: 0, refused: 0 })).toBeNull();
@@ -491,9 +494,7 @@ describe("system-authored gap checks: (e) graded by the tick's report, not the e
     rhythms = [dueRhythm({ max_per_tick: 50 })];
     const t = Date.now() + 3000 * 3600_000;
     await tick({ now_ms: t });
-    const mine = rhythmWrites.filter((w) => w["id"] === `rhythm-gap-check-supply-${RUN}`);
-    expect(mine.length).toBe(1);
-    expect(((mine[0]!["body"] ?? {}) as Row)["alpha"]).toBe(3.5);
+    // What a dispatching tick settles is pinned in gap-check-supply-outcome.test.ts (same gap); here only the idle half.
     rhythmWrites = [];
     const idle = await tick({ now_ms: t + 60_000 }); // everything is inside its backoff
     expect((idle["dispatched"] as unknown[]).length).toBe(0);

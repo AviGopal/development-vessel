@@ -201,7 +201,9 @@ describe("operator_hold contains: feature_compose", () => {
     process.env["GAP_STORE_ENDPOINT"] = FIXTURE_GAP_STORE; // the file-level afterEach restores the caller's value
     store = routeFixtureGapStore(fetchGuard!);
     store.set(HELD, row(HELD, { operator_hold: true, operator_hold_reason: "redispatch livelock containment" }));
-    store.set(UNHELD, row(UNHELD, {}));
+    // ARMED (class2 + an edit site): compose admission (compose-admission.test.ts) refuses an unarmed store gap on
+    // every route, so an unheld gap must be compose work for these controls to reach the slot claim they assert.
+    store.set(UNHELD, row(UNHELD, { falsifier: "class2", edit_site: "repos/goal-host-vessel/src/index.ts" }));
   });
 
   it("[MUST-FAIL (b)] a DIRECTED compose of a held gap is refused at stage operator_hold, before any slot, network or draft, and the refusal is logged", async () => {

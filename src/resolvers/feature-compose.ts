@@ -5074,6 +5074,24 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
       console.log(`[feature-compose] ${lane} compose NOT started: gap ${_gapIdForSlot} is under operator_hold`);
       return { shape: "featureComposeReport", body: { ok: false, verdict: "BUSY", stage: "operator_hold", error: `gap ${_gapIdForSlot} is under operator_hold (${lane} compose not started)` } };
     }
+    // ADMISSION ON EVERY ROUTE (2026-10-07). A compose that would land, naming a gap the
+    // store holds, runs THE eligibility predicate the picker, the drain nudge and the gap-write nudge share
+    // (composeEligibilitySkipReason: open, armed class1/class2, an edit site, not held incl. pending_verification)
+    // on the STORED row. goal-host's edit-intent route reached this function with none of that: boredom's
+    // gap-goal supply landed the unarmed, pending-verification gap-env-gated-sf-discount four times this way.
+    // EVERY caller, directed or not: `directed` is goal-host's operatorOrigin, i.e. trigger "operator", which any
+    // dispatcher that sets the request's `operator` field gets (development-vessel's own expectation-scan and
+    // trend-expectation-check dispatches do, for attribution), so it is not an authority to compose an unarmed
+    // gap. A non-landing compose and an id the store does not hold (route-edit-*) are unaffected. A refusal is a
+    // non-attempt.
+    if (stored && (pointer as { land?: boolean }).land !== false) {
+      const { composeEligibilitySkipReason } = await import("./gap-to-feature.js");
+      const why = composeEligibilitySkipReason(stored);
+      if (why) {
+        console.log(`[feature-compose] ${lane} compose NOT started: gap ${_gapIdForSlot} is ineligible (${why})`);
+        return { shape: "featureComposeReport", body: { ok: false, verdict: "REFUSED", stage: "ineligible", error: `gap ${_gapIdForSlot} is not compose work: ${why} (${lane} compose not started)` } };
+      }
+    }
   }
   // SPEND ENVELOPE AT THE CHOKEPOINT (contained-self-development). gap-to-feature checks the envelope
   // for auto-picks only; a caller naming a gap started an undirected land:true compose every 10

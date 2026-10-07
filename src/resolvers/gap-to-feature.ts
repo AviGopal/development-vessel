@@ -3938,6 +3938,8 @@ export type PinnedCheckDeps = {
   verifierFor?: (kind: string) => Promise<RegisteredVerifier | null>;
   /** The files the landing changed (parent..sha), or null when they cannot be read (default: the vessel clone). */
   changedFiles?: (sha: string, parent: string) => string[] | null;
+  /** A vessel-relative file's content at a commit, or null when absent (default: `git show` in the vessel clone). */
+  readAt?: (ref: string, path: string) => string | null;
 };
 /**
  * A REGISTERED VERIFIER: a producer of shape `pinnedCheckVerdict` for one check kind (the gap's
@@ -3977,6 +3979,7 @@ const defaultPinnedCheckDeps: PinnedCheckDeps = {
   },
   verifierFor: (kind) => defaultVerifierFor(kind),
   changedFiles: (sha, parent) => defaultChangedFiles(sha, parent),
+  readAt: (ref, path) => defaultReadAt(ref, path),
 };
 // The default registry read: own-substrate producers of pinnedCheckVerdict, asked to describe the kind; the first
 // that answers with a descriptor for it is used. Answers travel as {body:{...}} resolve envelopes.
@@ -4016,6 +4019,59 @@ function defaultChangedFiles(sha: string, parent: string): string[] | null {
   } catch { /* unreadable clone root */ }
   return null;
 }
+function defaultReadAt(ref: string, path: string): string | null {
+  try {
+    for (const name of readdirSync(vesselsCloneRoot()).sort()) {
+      const dir = join(vesselsCloneRoot(), name);
+      if (!existsSync(join(dir, ".git")) || sweepGitOut(dir, ["merge-base", "--is-ancestor", ref, "HEAD"]) === null) continue;
+      return sweepGitOut(dir, ["show", `${ref}:${path}`]);
+    }
+  } catch { /* unreadable clone root */ }
+  return null;
+}
+
+const CLOSURE_IMPORT_RE = /(?:\bfrom\s*|\bimport\s*\(\s*|\bimport\s+|\brequire\s*\(\s*)["'](\.{1,2}\/[^"']+)["']/g;
+const CLOSURE_MAX_FILES = 200;
+/**
+ * THE CHECK'S OWN SURROUNDINGS: the check file plus every NON-src file it reaches through relative imports, read at
+ * `ref` (the parent: what the armed check depended on). src/ is excluded because that is where a fix belongs; a
+ * helper, fixture, mock or other test the check imports is part of the instrument. Resolution follows TS ESM
+ * conventions (an import of ./x.js is ./x.ts). Bounded; a file that cannot be read is simply not followed.
+ */
+export function checkInstrumentClosure(testFile: string, ref: string, readAt: (ref: string, path: string) => string | null): string[] {
+  const norm = (p: string): string => {
+    const out: string[] = [];
+    for (const seg of p.split("/")) {
+      if (seg === "" || seg === ".") continue;
+      if (seg === "..") out.pop(); else out.push(seg);
+    }
+    return out.join("/");
+  };
+  const candidates = (spec: string): string[] => {
+    const bare = spec.replace(/\.(?:[cm]?js|jsx)$/, "");
+    return [spec, `${bare}.ts`, `${bare}.tsx`, `${bare}.js`, `${bare}.mjs`, `${bare}.json`, `${bare}/index.ts`, `${bare}/index.js`];
+  };
+  const seen = new Set<string>([testFile]);
+  const queue = [testFile];
+  while (queue.length > 0 && seen.size < CLOSURE_MAX_FILES) {
+    const file = queue.shift()!;
+    const src = readAt(ref, file);
+    if (src === null) continue;
+    const dir = file.includes("/") ? file.slice(0, file.lastIndexOf("/")) : "";
+    for (const m of src.matchAll(CLOSURE_IMPORT_RE)) {
+      for (const cand of candidates(norm(`${dir}/${m[1]}`))) {
+        if (cand.startsWith("src/")) break; // the fix's territory, never part of the instrument
+        if (seen.has(cand)) break;
+        if (readAt(ref, cand) === null) continue;
+        seen.add(cand);
+        queue.push(cand);
+        break;
+      }
+    }
+  }
+  return [...seen];
+}
+
 let pinnedCheckDeps: PinnedCheckDeps | null = null;
 /** Tests only: replace the pinned re-run (null restores the default). */
 export function __setPinnedCheckForTests(d: PinnedCheckDeps | null): void { pinnedCheckDeps = d; }
@@ -4042,6 +4098,24 @@ export async function independentLandingVerdict(gap: Record<string, unknown>, sh
   let parent: string | null = null;
   try { parent = deps.parentOf(sha); } catch { parent = null; }
   if (!parent) return { label: null, reason: `no parent found for ${sha.slice(0, 12)} in any vessel clone` };
+  // THE LANDING MUST NOT TOUCH ITS OWN INSTRUMENT. The landed-sha run below uses the LANDED copy of the check, so a
+  // landing that weakens the check file, or a helper, fixture or mock it imports, would ground itself. Read the
+  // landing's changed files and the check's non-src import closure at the parent; if they meet, the label is
+  // ungrounded (recorded, so it is not re-run). Changed files that cannot be read: no label, fail closed. Injected
+  // deps without changedFiles (tests of the run seam alone) are not judged here; the default deps always are.
+  if (deps.changedFiles) {
+    let changed: string[] | null = null;
+    try { changed = deps.changedFiles(sha, parent); } catch { changed = null; }
+    if (changed === null) return { label: null, reason: `the landing's changed files cannot be read (${parent.slice(0, 12)}..${sha.slice(0, 12)}), so a landing that edits its own check cannot be ruled out` };
+    const testFile = typeof input.test_file === "string" ? input.test_file.replace(/^repos\/[^/]+\//, "") : "";
+    const instrument = testFile ? checkInstrumentClosure(testFile, parent, deps.readAt ?? ((ref, path) => defaultReadAt(ref, path))) : [];
+    const changedSet = new Set(changed.map((f) => f.replace(/^repos\/[^/]+\//, "")));
+    const touched = instrument.filter((f) => changedSet.has(f));
+    if (touched.length > 0) {
+      const reason = `the landing modified its own check: ${touched.slice(0, 5).join(", ")} (the check's file or what it imports outside src/), so its red->green cannot certify the landing`;
+      return { label: { grounded: false, labeler: LANDING_LABELER, sha, parent, tests, ran_at: new Date().toISOString(), reason }, reason };
+    }
+  }
   let atParent: GapCheckVerdict;
   let atSha: GapCheckVerdict;
   try {

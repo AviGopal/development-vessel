@@ -164,11 +164,13 @@ describe("shape-open independent landing verdict", () => {
   it("CONTROL: a test_suite gap labels exactly as before and never consults the registry", async () => {
     let asked = 0;
     const gap = { id: "g-ts", classification_metadata: { evidence_resolve: { shape: "test_suite", input: { vessel: "repos/x", test_file: "test/a.test.ts" } } } };
+    // The test_suite path reads the landing's changed files (a landing must not edit its own check:
+    // landing-verdict-own-check-tamper.test.ts); a src-only landing leaves the label exactly as before.
     const out = await verdict(gap, SHA, {
       parentOf: () => PARENT,
       runAt: async (_g, ref) => (ref === PARENT ? "present" : "absent"),
       verifierFor: async () => { asked++; return null; },
-      changedFiles: () => { asked++; return null; },
+      changedFiles: () => ["src/y.ts", "repos/x/src/y.ts"],
     });
     expect(asked).toBe(0);
     const { ran_at, ...rest } = out.label!;

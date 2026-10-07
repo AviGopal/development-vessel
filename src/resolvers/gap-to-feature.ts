@@ -1,4 +1,4 @@
-import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync, readlinkSync } from "node:fs";
 import { gapLineageRoot } from "./staged-mitosis-gate.js";
 import { join } from "node:path";
 import type { ResolverResult } from "./types.js";
@@ -3451,11 +3451,26 @@ async function landedCommitViaLineage(gap: Record<string, unknown> & { id?: stri
 // never sets the override and uses the same path as the other clone readers here.
 const vesselsCloneRoot = (): string => process.env["VESSELS_CLONE_ROOT"] ?? "/workspace/git/vessels";
 
+// Unit directories a mask can live in (persistent /etc, runtime /run); call-time so tests can point at a fixture.
+export const systemdUnitDirs = (): string[] => (process.env["SYSTEMD_UNIT_DIRS"] ?? "/etc/systemd/system:/run/systemd/system").split(":").filter(Boolean);
+
+/** Whether this node has MASKED the vessel's unit (<vessel>.service is a symlink to /dev/null). An unreadable
+ *  directory or a vessel with no unit (a library clone) is not masked. */
+export function vesselUnitMasked(vessel: string): boolean {
+  for (const dir of systemdUnitDirs()) {
+    try { if (readlinkSync(join(dir, `${vessel}.service`)) === "/dev/null") return true; } catch { /* absent, not a link, or unreadable */ }
+  }
+  return false;
+}
+
+// A NODE OWNS COMPOSES ONLY FOR VESSELS IT RUNS (2026-10-07). Clone presence alone let compose2, which masks
+// activity-api, compose and land activity-api code it never serves (its landings can never be verified there).
+// A vessel whose unit is masked here is not owned, whatever SUBSTRATE_PUSH_VESSELS says.
 export function ownedVessels(): Set<string> {
   try {
     const present = readdirSync(vesselsCloneRoot()).filter((d) => existsSync(join(vesselsCloneRoot(), d, ".git")));
     const declared = (process.env["SUBSTRATE_PUSH_VESSELS"] ?? "").split(/[\s,]+/).filter(Boolean);
-    return new Set(declared.length > 0 ? present.filter((d) => declared.includes(d)) : present);
+    return new Set((declared.length > 0 ? present.filter((d) => declared.includes(d)) : present).filter((d) => !vesselUnitMasked(d)));
   } catch {
     return new Set();
   }

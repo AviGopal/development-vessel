@@ -60,10 +60,14 @@ describe("the gap-written publish is refused from a scratch gap store", () => {
   test("control: the same write with the test opt-in reaches the listener (the address is live)", async () => {
     publishes = [];
     mod.__allowGapEventPublishFromScratchForTests?.(true);
+    // The publish authenticates (gap-event-publish-auth.test.ts): with no key it is skipped, so the control supplies one.
+    const savedKey = process.env["METABOB_API_KEY"];
+    process.env["METABOB_API_KEY"] = "mb-test-isolation-key";
     try {
       await mod.resolveSubstrateGapWrite(gap("publish-isolation-probe-b") as never, { vocabulary: null });
     } finally {
       mod.__allowGapEventPublishFromScratchForTests?.(false);
+      if (savedKey === undefined) delete process.env["METABOB_API_KEY"]; else process.env["METABOB_API_KEY"] = savedKey;
     }
     expect(publishes).toEqual(["publish-isolation-probe-b"]);
   });

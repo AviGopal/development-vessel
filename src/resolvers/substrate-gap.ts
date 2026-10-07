@@ -256,6 +256,11 @@ export function isScratchGapStoreRoot(root: string): boolean {
 // gap-writing test files in one run. A write to a scratch store is a test's, so its publish is refused (logged once
 // per module instance) unless a test opts in to observe it.
 let gapEventPublishFromScratchAllowed = false;
+/** devvessel.gap.written publishes skipped because no API key was configured (module lifetime). */
+let gapEventPublishNoKey = 0;
+export function gapEventPublishSkippedNoKey(): number {
+  return gapEventPublishNoKey;
+}
 let gapEventPublishRefusalLogged = false;
 export function __allowGapEventPublishFromScratchForTests(on: boolean): void {
   gapEventPublishFromScratchAllowed = on;
@@ -2314,11 +2319,18 @@ async function resolveSubstrateGapWriteInner(
     gapEventPublishRefusalLogged = true;
     console.log(`[substrate-gap-event-publish] gap store ${workspaceRoot()} is a scratch root: devvessel.gap.written is not published from it`);
   }
-  if (!publishRefused) try {
+  // AUTHENTICATED, OR NOT AT ALL (2026-10-07, harm-stop): this used to publish with only `X-Internal-Api-Key:
+  // development-vessel`, a literal that activity-api checked for presence and never against a secret. The hub's
+  // activity-api is reachable from the internet, so that header path let anyone post to the bus and the trace store,
+  // and activity-api is removing it. Publish with this vessel's API key (read at use time; SUBSTRATE_API_KEY is the
+  // rename alias); with no key, publish nothing and count it.
+  const publishKey = process.env["SUBSTRATE_API_KEY"] || process.env["METABOB_API_KEY"] || process.env["API_KEY"] || "";
+  if (!publishRefused && !publishKey) gapEventPublishNoKey += 1;
+  if (!publishRefused && publishKey) try {
     const activityApiUrl = process.env["ACTIVITY_API_ENDPOINT"] ?? process.env["ACTIVITY_API_URL"] ?? "http://127.0.0.1:8080";
     const response = await fetch(`${activityApiUrl}/v2/events/publish`, {
       method: "POST",
-      headers: { "Content-Type": "application/json", "X-Internal-Api-Key": "development-vessel" },
+      headers: { "Content-Type": "application/json", Authorization: `ApiKey ${publishKey}` },
       body: JSON.stringify({
         type: "devvessel.gap.written",
         source_vessel_id: "development-vessel",

@@ -384,8 +384,30 @@ export async function resolveGapCheckSupplyTick(pointer: GapCheckSupplyTickPoint
   // 3. DISPATCH: one test-writing goal per treatment-arm needs-localization gap, fewest attempts and oldest first.
   const candidates = open
     .filter((r) => !touched.has(String(r["id"])) && checkSupplyDisposition(r) !== null)
-    .sort((a, b) => (Number(ledgerOf(metaOf(a)).attempts ?? 0) - Number(ledgerOf(metaOf(b)).attempts ?? 0))
-      || String(a["first_detected_at"] ?? a["detected_at"] ?? "").localeCompare(String(b["first_detected_at"] ?? b["detected_at"] ?? "")));
+    .sort((a, b) => {
+      const metaA = metaOf(a);
+      const metaB = metaOf(b);
+
+      const hasEditSiteA = !!(metaA["edit_site"] || metaA["edit_site_raw"]);
+      const hasEditSiteB = !!(metaB["edit_site"] || metaB["edit_site_raw"]);
+
+      if (hasEditSiteA && !hasEditSiteB) return -1;
+      if (!hasEditSiteA && hasEditSiteB) return 1;
+
+      const hasFalsifierSpecA = !!metaA["falsifier_spec"];
+      const hasFalsifierSpecB = !!metaB["falsifier_spec"];
+
+      if (hasFalsifierSpecA && !hasFalsifierSpecB) return -1;
+      if (!hasFalsifierSpecA && hasFalsifierSpecB) return 1;
+
+      const attemptsA = Number(ledgerOf(metaA).attempts ?? 0);
+      const attemptsB = Number(ledgerOf(metaB).attempts ?? 0);
+      if (attemptsA !== attemptsB) return attemptsA - attemptsB;
+
+      const detectedAtA = String(a["first_detected_at"] ?? a["detected_at"] ?? "");
+      const detectedAtB = String(b["first_detected_at"] ?? b["detected_at"] ?? "");
+      return detectedAtA.localeCompare(detectedAtB);
+    });
   // ONE IN-FLIGHT APPEND PER TEST FILE: a title appended to a shared file is attributed to the one gap waiting on it.
   const busyFiles = new Set(open.map((r) => ledgerOf(metaOf(r))).filter((l) => l.state === "goal_dispatched" && l.mode === "append" && l.vessel && l.test_file).map((l) => `${l.vessel}/${l.test_file}`));
   for (const row of candidates) {

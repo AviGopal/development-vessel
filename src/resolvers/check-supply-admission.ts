@@ -90,26 +90,46 @@ export async function readWithin<T>(read: () => Promise<T | null>, ms: number): 
 }
 
 /**
- * A TEST-WRITING COMPOSE LANDS TEST FILES ONLY (slice G revision R3). An admitted test_writing compose runs land:true
- * with no falsifier of its own, and "Do not change src/." is goal prose the drafter can ignore. THE RULE: a path is
- * resolved to its vessel-relative form (after repos/<vessel>/, or after .../vessels/<vessel>/ for an absolute runtime
- * or clone path; a bare relative path is taken as vessel-relative). It is a test path when that relative path starts
- * with test/, tests/ or __tests__/ (fixtures under them included), or its basename is *.test.<ext> / *.spec.<ext>
- * (ext ts|tsx|js|jsx|mts|cts|mjs|cjs) anywhere in the vessel: the supply appends to co-located tests such as
- * src/resolvers/gap-to-feature.test.ts. Everything else is refused, including package.json, config, scripts, a
- * src/test/ helper and any path with a '..' segment. Which vessel a path may touch stays the verify_vessels gate's job.
+ * THE SUPPLY'S CHECK FILE NAME (B′): one per gap, defined once. gap-check-supply's checkSupplyTestFile places it at
+ * test/checks/<this>; the R3 gate below allows a test_writing compose to write exactly that path and nothing else.
+ * The gap id lower-cased, every non-alphanumeric run as "-", trimmed, at most 60 characters, suffix ".check.ts".
+ * bun's default discovery collects only *.test.* / *.spec.* / *_test.* / *_spec.* names, so a .check.ts never runs
+ * in a whole-suite run (pre-cutover, post-land, pull-sync); test_suite runs it as ./<path> (P0).
  */
-export function testWritingPathIsTest(path: string): boolean {
-  const p = String(path ?? "").replace(/:\d+.*$/, "").trim().replace(/\\/g, "/");
-  if (!p || p.split("/").includes("..")) return false;
-  const rel = /(?:^|\/)repos\/[^/]+\/(.+)$/.exec(p)?.[1] ?? /\/vessels\/[^/]+\/(.+)$/.exec(p)?.[1] ?? p.replace(/^\.\//, "");
-  if (/^(?:test|tests|__tests__)\//.test(rel)) return true;
-  const base = rel.split("/").pop() ?? "";
-  return /\.(?:test|spec)\.(?:ts|tsx|js|jsx|mts|cts|mjs|cjs)$/.test(base);
+export function checkSupplyCheckFile(gapId: string): string {
+  const slug = String(gapId ?? "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 60).replace(/-+$/, "");
+  return `${slug || "unnamed"}.check.ts`;
 }
 
-/** The paths a compose in `composeMode` may not land: every non-test path when the mode is test_writing, else none. */
-export function testWritingDiffOutsideTests(composeMode: unknown, paths: string[]): string[] {
+/** The vessel-relative path of a gap's check: test/checks/<checkSupplyCheckFile(gapId)>. */
+export function checkSupplyCheckPath(gapId: string): string {
+  return `test/checks/${checkSupplyCheckFile(gapId)}`;
+}
+
+/** A diff path in its vessel-relative form (after repos/<vessel>/ or .../vessels/<vessel>/), or null for a '..' path. */
+function vesselRelativePath(path: string): string | null {
+  const p = String(path ?? "").replace(/:\d+.*$/, "").trim().replace(/\\/g, "/");
+  if (!p || p.split("/").includes("..")) return null;
+  return /(?:^|\/)repos\/[^/]+\/(.+)$/.exec(p)?.[1] ?? /\/vessels\/[^/]+\/(.+)$/.exec(p)?.[1] ?? p.replace(/^(?:\.\/)+/, "");
+}
+
+/**
+ * A TEST-WRITING COMPOSE LANDS ITS ONE CHECK FILE ONLY (slice G revision R3, narrowed by B′ P1). An admitted
+ * test_writing compose runs land:true with no falsifier of its own, and "Do not change src/." is goal prose the
+ * drafter can ignore. THE RULE: a path is resolved to its vessel-relative form (after repos/<vessel>/, or after
+ * .../vessels/<vessel>/ for an absolute runtime or clone path; a bare relative path is taken as vessel-relative), and
+ * the ONLY path allowed is exactly test/checks/<checkSupplyCheckFile(gapId)>. Every other path is refused: another
+ * gap's check, any discovered *.test.ts (an intended red there reads as a regression in every whole-suite run),
+ * fixtures, src, package.json, config, a '..' path. No gap id allows nothing (fail closed). Which vessel a path may
+ * touch stays the verify_vessels gate's job.
+ */
+export function testWritingPathAllowed(path: string, gapId: unknown): boolean {
+  if (typeof gapId !== "string" || gapId.length === 0) return false;
+  return vesselRelativePath(path) === checkSupplyCheckPath(gapId);
+}
+
+/** The paths a compose in `composeMode` may not land: every path but the gap's check when the mode is test_writing, else none. */
+export function testWritingDiffOutsideTests(composeMode: unknown, paths: string[], gapId?: unknown): string[] {
   if (composeMode !== CHECK_SUPPLY_COMPOSE_MODE) return [];
-  return [...new Set(paths.filter((p) => !testWritingPathIsTest(p)))];
+  return [...new Set(paths.filter((p) => !testWritingPathAllowed(p, gapId)))];
 }

@@ -6408,15 +6408,15 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
   if (scopeGate.refused) {
     return { shape: "featureComposeReport", body: { ok: false, verdict: "REFUSED", stage: "scope", error: scopeGate.refused, refuse_class: scopeGate.refusal_class, dropped_paths: scopeGate.dropped_paths, dropped_reason: scopeGate.dropped_reason } };
   }
-  // A TEST-WRITING COMPOSE LANDS TEST FILES ONLY (check-supply-admission.ts testWritingPathIsTest): refused at PLAN
-  // time, before any op is applied, when the plan touches a non-test path. The landing floor below re-checks every
-  // path actually written (fc-repair included).
+  // A TEST-WRITING COMPOSE LANDS ITS ONE CHECK FILE ONLY (check-supply-admission.ts testWritingPathAllowed): refused at
+  // PLAN time, before any op is applied, when the plan touches any path but test/checks/<checkSupplyCheckFile(gap id)>.
+  // The landing floor below re-checks every path actually written (fc-repair included).
   {
     const { testWritingDiffOutsideTests } = await import("./check-supply-admission.js");
-    const outsideTests = testWritingDiffOutsideTests((pointer as { compose_mode?: unknown }).compose_mode, ops.map((op) => op.path));
+    const outsideTests = testWritingDiffOutsideTests((pointer as { compose_mode?: unknown }).compose_mode, ops.map((op) => op.path), pointer.gap?.id);
     if (outsideTests.length > 0) {
-      console.log(`[feature-compose] test-writing compose REFUSED at plan: non-test path(s) [${outsideTests.join(", ")}] (stage test_writing_diff_outside_tests)`);
-      return { shape: "featureComposeReport", body: { ok: false, verdict: "REFUSED", stage: "test_writing_diff_outside_tests", error: `a test_writing compose may change test files only; the plan touches ${outsideTests.join(", ")}`, outside_tests: outsideTests } };
+      console.log(`[feature-compose] test-writing compose REFUSED at plan: path(s) other than its check file [${outsideTests.join(", ")}] (stage test_writing_diff_outside_tests)`);
+      return { shape: "featureComposeReport", body: { ok: false, verdict: "REFUSED", stage: "test_writing_diff_outside_tests", error: `a test_writing compose may write only its gap's check file (test/checks/<gap>.check.ts); the plan touches ${outsideTests.join(", ")}`, outside_tests: outsideTests } };
     }
   }
   if (scopeGate.dropped_paths.length > 0) {
@@ -8081,7 +8081,7 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
   let testWritingOutside: string[] = [];
   if (verdict === "FAVORABLE") {
     const { testWritingDiffOutsideTests } = await import("./check-supply-admission.js");
-    testWritingOutside = testWritingDiffOutsideTests((pointer as { compose_mode?: unknown }).compose_mode, [...applied.filter((a) => a.ok).map((a) => a.path), ...edited, ...created]);
+    testWritingOutside = testWritingDiffOutsideTests((pointer as { compose_mode?: unknown }).compose_mode, [...applied.filter((a) => a.ok).map((a) => a.path), ...edited, ...created], pointer.gap?.id);
     if (testWritingOutside.length > 0) {
       verdict = "UNFAVORABLE";
       scopeWithheld = true;

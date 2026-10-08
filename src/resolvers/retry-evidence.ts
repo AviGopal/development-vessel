@@ -251,7 +251,10 @@ export function classifyCheckRun(raw: string): CheckRunClass {
     if (kind !== "fail") { block = []; continue; }
     const trailer: string[] = [];
     while (i + 1 < lines.length && TIMEOUT_TRAILER.test(lines[i + 1]!)) trailer.push(lines[++i]!);
-    failures.push(classifyFailureBlock(r[3] ?? "", block, trailer));
+    // A name seen before is bun's "N tests failed:" recap (a whole-suite run re-prints every failure, with no block;
+    // measured: a single-file run prints none): the first block is the failure.
+    const name = r[3] ?? "";
+    if (!failures.some((f) => f.name === name)) failures.push(classifyFailureBlock(name, block, trailer));
     block = [];
   }
   const text = stripAnsi(raw);

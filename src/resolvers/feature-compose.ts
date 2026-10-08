@@ -7591,8 +7591,10 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
       testWriting = await csaV.judgeTestWritingCheck({
         gapId: String(pointer.gap?.id ?? ""),
         vesselRoot: vAbs,
-        // The arm step reads the ledger's edit site first (gap-check-supply.ts): the same order here, so they agree.
-        editSite: twLedger.edit_site ?? twMeta.edit_site ?? null,
+        // THE ARM STEP'S EDIT SITE (gap-check-supply.ts reads check_supply.edit_site only), so verify and arm agree. The
+        // ledger's is null exactly when the gap's own edit_site is unusable (another vessel, not in the clone, not src):
+        // the goal then gave generic import guidance, and demanding that site here would be an incurable refusal.
+        editSite: twLedger.edit_site ?? null,
         runs: csaV.TEST_WRITING_CHECK_RUNS,
         run: async (rel) => {
           const shT = await callTool(toolsEndpoint, "shell", {

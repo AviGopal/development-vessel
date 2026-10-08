@@ -327,6 +327,33 @@ describe("system-authored gap checks: (c) a landed test arms the gap only when r
     for (const g of goals) expect(g.goal).not.toContain(EXISTING_TEST);
   });
 
+  it("a re-dispatched check arms from the NEW titles only (the previous attempt's titles are its baseline)", async () => {
+    expect(supply).not.toBeNull();
+    const t0 = Date.now() + 1250 * 3600_000;
+    const { id, testFile } = await landTest("sgc-baseline", (t) => `import { expect, test } from "bun:test";\nimport { containShell } from "../../src/shell-containment.js";\ntest("${t}", () => { expect(containShell("ls")).toBe(true); });\n`, t0);
+    // attempt 1 lands GREEN: nothing is armed, the gap waits out its backoff
+    verdictFor = (gid) => (gid === id ? "absent" : "present");
+    await tick({ now_ms: t0 + 3600_000 });
+    expect(ledgerOf(metaOf(await storeRow(id)))["state"]).toBe("green_at_head");
+    const oldTitle = `sgc-baseline reproduces ${RUN}`;
+    // attempt 2: the same check file; its existing title is the baseline
+    rhythms = [dueRhythm({ max_per_tick: 50, max_attempts: 10 })];
+    await tick({ now_ms: t0 + 30 * 3600_000 });
+    const led = ledgerOf(metaOf(await storeRow(id)));
+    expect(led["state"]).toBe("goal_dispatched");
+    expect(led["test_file"]).toBe(testFile);
+    expect(led["baseline_titles"]).toEqual([oldTitle]);
+    const newTitle = `sgc-baseline new red ${RUN}`;
+    writeFileSync(join(CLONES, VESSEL, testFile), readFileSync(join(CLONES, VESSEL, testFile), "utf-8") + `test("${newTitle}", () => { expect(containShell("GIT_DIR=.git git config core.hooksPath /tmp/h")).toBe(false); });\n`);
+    verdictFor = () => "present";
+    await tick({ now_ms: t0 + 31 * 3600_000 });
+    const m = metaOf(await storeRow(id));
+    expect(m["falsifier"]).toBe("class2");
+    expect(((m["evidence_resolve"] as Row)["input"] as Row)["test_file"]).toBe(testFile);
+    expect(((m["evidence_resolve"] as Row)["input"] as Row)["only_tests"]).toEqual([newTitle]);
+    expect(m["edit_site"]).toBe(SITE);
+  });
+
   it("a test GREEN at HEAD does NOT arm the gap (fail closed)", async () => {
     expect(supply).not.toBeNull();
     const { id } = await landTest("sgc-arm-green", (t) => `import { expect, test } from "bun:test";\nimport { containShell } from "../../src/shell-containment.js";\ntest("${t}", () => { expect(containShell("ls")).toBe(true); });\n`, Date.now() + 2000 * 3600_000);

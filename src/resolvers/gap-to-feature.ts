@@ -3895,10 +3895,8 @@ function selfAuthoredCheckInputs(gap: Record<string, unknown>, sha: string): str
   const meta = (gap.classification_metadata ?? gap.metadata ?? {}) as Record<string, unknown>;
   const inputs = new Set<string>();
   if (Array.isArray(meta.check_inputs)) for (const p of meta.check_inputs) if (typeof p === "string" && p) inputs.add(p.replace(/^\/+/, ""));
-  const er = meta.evidence_resolve as { shape?: unknown; input?: { vessel?: unknown; test_file?: unknown } } | undefined;
-  if (er && er.shape === "test_suite" && typeof er.input?.vessel === "string" && typeof er.input?.test_file === "string") {
-    inputs.add(`repos/${er.input.vessel}/${er.input.test_file.replace(/^\/+/, "")}`);
-  }
+  const subject = checkInstrumentSubject(meta);
+  if (subject && subject.vessel) inputs.add(`repos/${subject.vessel}/${subject.testFile}`);
   if (inputs.size === 0 || !sha) return [];
   try {
     for (const name of readdirSync(vesselsCloneRoot()).sort()) {
@@ -4090,6 +4088,26 @@ export function checkInstrumentClosure(testFile: string, ref: string, readAt: (r
   return [...seen];
 }
 
+/** The gap's test_suite check as one normalized subject, for every reader of its instrument: the bare vessel name
+ *  (gap-check-supply writes "repos/<v>") and the vessel-relative test_file (no leading '/', no "repos/<v>/").
+ *  null when the check is not a test_suite naming a test_file. */
+function checkInstrumentSubject(meta: Record<string, unknown>): { vessel: string; testFile: string } | null {
+  const er = meta.evidence_resolve as { shape?: unknown; input?: { vessel?: unknown; test_file?: unknown } } | null | undefined;
+  if (!er || er.shape !== "test_suite" || typeof er.input?.test_file !== "string") return null;
+  const testFile = er.input.test_file.replace(/^\/+/, "").replace(/^repos\/[^/]+\//, "");
+  if (!testFile) return null;
+  return { vessel: typeof er.input.vessel === "string" ? er.input.vessel.replace(/^repos\//, "") : "", testFile };
+}
+/** THE CHECK'S INSTRUMENT at `ref` (vessel-relative): its test_file plus its non-src import closure. [] when the gap's
+ *  check is not a test_suite with a test_file. The one definition the independent verdict's guard and
+ *  fixingCommitSinceBirth share: a change to any of these files changes the judge, not the judged. */
+function checkInstrumentSet(meta: Record<string, unknown>, ref: string, readAt: (ref: string, path: string) => string | null): string[] {
+  const subject = checkInstrumentSubject(meta);
+  return subject ? checkInstrumentClosure(subject.testFile, ref, readAt) : [];
+}
+/** Tests only. */
+export const __selfAuthoredCheckInputsForTests = (gap: Record<string, unknown>, sha: string): string[] => selfAuthoredCheckInputs(gap, sha);
+
 let pinnedCheckDeps: PinnedCheckDeps | null = null;
 /** Tests only: replace the pinned re-run (null restores the default). */
 export function __setPinnedCheckForTests(d: PinnedCheckDeps | null): void { pinnedCheckDeps = d; }
@@ -4125,8 +4143,7 @@ export async function independentLandingVerdict(gap: Record<string, unknown>, sh
     let changed: string[] | null = null;
     try { changed = deps.changedFiles(sha, parent); } catch { changed = null; }
     if (changed === null) return { label: null, reason: `the landing's changed files cannot be read (${parent.slice(0, 12)}..${sha.slice(0, 12)}), so a landing that edits its own check cannot be ruled out` };
-    const testFile = typeof input.test_file === "string" ? input.test_file.replace(/^repos\/[^/]+\//, "") : "";
-    const instrument = testFile ? checkInstrumentClosure(testFile, parent, deps.readAt ?? ((ref, path) => defaultReadAt(ref, path))) : [];
+    const instrument = checkInstrumentSet(meta, parent, deps.readAt ?? ((ref, path) => defaultReadAt(ref, path)));
     const changedSet = new Set(changed.map((f) => f.replace(/^repos\/[^/]+\//, "")));
     const touched = instrument.filter((f) => changedSet.has(f));
     if (touched.length > 0) {
@@ -4987,18 +5004,34 @@ export function greenOnParentFresh(meta: Record<string, unknown>, nowMs: number 
 }
 
 /** The commit that turned a gap's own check green: the newest commit touching the check's subject files (the
- *  own-check test file, the edit_site, check_inputs; see birthCheckRepo) after the gap's birth tree
- *  (predicate_birth_sha, else detected_at), on the clone HEAD the parent tree was cut from. null when none. */
-function fixingCommitSinceBirth(gap: Record<string, unknown>, meta: Record<string, unknown>): { sha: string; head: string } | null {
+ *  edit_site, check_inputs; see birthCheckRepo) after the gap's birth tree (predicate_birth_sha, else detected_at),
+ *  on the clone HEAD the parent tree was cut from. null when none.
+ *  THE CHECK IS NOT ITS OWN SUBJECT: its instrument (checkInstrumentSet, read at the birth tree and at HEAD: the
+ *  test_file and its non-src import closure, as the independent verdict's guard reads it) is excluded from the
+ *  subject files, and ANY commit in the range touching it means the green was read on a different judge than the
+ *  one the gap was born with: `held` names the stage (instrument-only, the fixing commit itself, or a separate
+ *  commit since birth) and the caller does not close. v1: no re-run of the original check on the new tree. */
+function fixingCommitSinceBirth(gap: Record<string, unknown>, meta: Record<string, unknown>): { sha: string; head: string; held?: { stage: string; instrument_commit: string; files: string[] } } | null {
   const repo = birthCheckRepo(meta);
   if (!repo || repo.files.length === 0 || !existsSync(join(repo.dir, ".git"))) return null;
   const head = sweepGitOut(repo.dir, ["rev-parse", "HEAD"]);
   if (!head) return null;
   const birth = typeof meta.predicate_birth_sha === "string" ? meta.predicate_birth_sha : "";
   const since = typeof gap.detected_at === "string" && Number.isFinite(Date.parse(gap.detected_at)) ? gap.detected_at : "";
-  const range = birth && sweepGitOut(repo.dir, ["cat-file", "-e", `${birth}^{commit}`]) !== null ? [`${birth}..HEAD`] : since ? [`--since=${since}`, "HEAD"] : null;
+  const birthOk = !!birth && sweepGitOut(repo.dir, ["cat-file", "-e", `${birth}^{commit}`]) !== null;
+  const range = birthOk ? [`${birth}..HEAD`] : since ? [`--since=${since}`, "HEAD"] : null;
   if (!range) return null;
-  const sha = sweepGitOut(repo.dir, ["log", "-1", "--format=%H", ...range, "--", ...repo.files]);
+  const readAt = (ref: string, path: string): string | null => sweepGitOut(repo.dir, ["show", `${ref}:${path}`]);
+  const instrument = [...new Set([...(birthOk ? checkInstrumentSet(meta, birth, readAt) : []), ...checkInstrumentSet(meta, head, readAt)])];
+  const subjects = repo.files.filter((f) => !instrument.includes(f));
+  // No pathspec would match EVERY commit in the range: a check with no subject beyond its own instrument has no fixing commit.
+  const sha = subjects.length > 0 ? sweepGitOut(repo.dir, ["log", "-1", "--format=%H", ...range, "--", ...subjects]) : null;
+  const instrumentSha = instrument.length > 0 ? sweepGitOut(repo.dir, ["log", "-1", "--format=%H", ...range, "--", ...instrument]) : null;
+  if (instrumentSha) {
+    const files = (sweepGitOut(repo.dir, ["diff-tree", "--no-commit-id", "--name-only", "-r", instrumentSha]) ?? "").split("\n").filter((f) => instrument.includes(f));
+    const stage = !sha ? "own_green_instrument_only_commit" : sha === instrumentSha ? "own_green_mixed_instrument_commit" : "own_green_instrument_changed_since_birth";
+    return { sha: sha || instrumentSha, head, held: { stage, instrument_commit: instrumentSha, files } };
+  }
   return sha ? { sha, head } : null;
 }
 
@@ -5013,7 +5046,10 @@ export async function markTerminalRefusal(gap: Record<string, unknown>, cb: Reco
     const fresh = await readGapFresh(String(gap.id ?? ""));
     if (!fresh || String(fresh.status ?? "") !== "open") return;
     const m0 = ((fresh.classification_metadata ?? {}) as Record<string, unknown>);
-    const fix0 = predicateSuspect(m0) === null ? fixingCommitSinceBirth(fresh, m0) : null;
+    const found = predicateSuspect(m0) === null ? fixingCommitSinceBirth(fresh, m0) : null;
+    const held = found?.held ?? null;
+    if (held) console.log(`[gap-to-feature] ${String(fresh.id)}: not closed fixed_elsewhere: ${held.stage}: ${held.instrument_commit.slice(0, 12)} touched the gap's own check (${held.files.slice(0, 5).join(", ") || "its instrument"}), so its green on parent is not a measurement of a fix`);
+    const fix0 = held ? null : found;
     // A reopened gap is not fixed_elsewhere by a commit that landed before its re-detection.
     const staleFix = fix0 ? staleCloseEvidence(fresh, fix0.sha) : null;
     if (staleFix) console.log(`[gap-to-feature] ${String(fresh.id)}: not closed fixed_elsewhere: ${staleFix.reason} (${fix0!.sha.slice(0, 12)} landed ${staleFix.committed_at ?? "unknown"}, re-detected ${staleFix.redetected_at})`);
@@ -5026,10 +5062,11 @@ export async function markTerminalRefusal(gap: Record<string, unknown>, cb: Reco
         console.log(`[gap-to-feature] ${String(fresh.id)}: closed fixed_elsewhere by ${fix.sha.slice(0, 12)} (own check green on parent ${fix.head.slice(0, 12)})`);
         return;
       }
-    } else {
+    } else if (!held) {
       console.log(`[gap-to-feature] ${String(fresh.id)}: green on parent but no fixing commit found — not closing`);
     }
-    await resolveSubstrateGapWrite({ type: "substrateGap_write", gap: { ...fresh, classification_metadata: { ...m0, own_check_green_on_parent: { at: new Date().toISOString(), reason: why.slice(0, 300) } } } } as never);
+    await resolveSubstrateGapWrite({ type: "substrateGap_write", gap: { ...fresh, classification_metadata: { ...m0, own_check_green_on_parent: { at: new Date().toISOString(), reason: why.slice(0, 300),
+      ...(held ? { stage: held.stage, instrument_commit: held.instrument_commit, instrument_files: held.files.slice(0, 10) } : {}) } } } } as never);
   } catch { /* best-effort: without the marker the full cooldown still bounds re-picks */ }
 }
 

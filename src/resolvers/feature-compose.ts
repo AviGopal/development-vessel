@@ -5063,10 +5063,30 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
   // is not held. BUSY is a non-attempt, so neither refusal writes anything back to the store.
   // Set when the store holds this gap and the compose would land: such a compose takes the landing lease below.
   let landingLeaseGap: string | null = null;
+  // THE COMPOSE MODE IS THIS RESOLVER'S VERDICT, NEVER THE CALLER'S (slice G): a caller-supplied compose_mode is dropped
+  // here and set only by the check-supply admission below.
+  delete (pointer as { compose_mode?: unknown }).compose_mode;
   if (_gapIdForSlot) {
     const lane = isDirected ? "directed" : "undirected";
+    // THE CHECK SUPPLY'S MARKER (check-supply-admission.ts): a structured pointer field goal-host builds from the
+    // supply's dispatch variables, verified against the gap's ledger below. Unmarked composes take the path unchanged.
+    const csa = await import("./check-supply-admission.js");
+    const supplyMarker = csa.checkSupplyMarkerOf(pointer);
     let rows: Array<Record<string, unknown>> | null = null;
-    try { rows = await readComposeGapRows(_gapIdForSlot); } catch { rows = null; }
+    if (supplyMarker) {
+      // FAIL CLOSED, NAMED: whether the supply dispatched this gap cannot be known without its ledger.
+      rows = await csa.readWithin(() => readComposeGapRows(_gapIdForSlot), csa.checkSupplyLedgerWait().read_timeout_ms);
+      if (rows === null) {
+        console.log(`[feature-compose] ${lane} compose NOT started: gap ${_gapIdForSlot} check_supply_ledger_unreadable (gap store unreadable or timed out; failing closed)`);
+        return { shape: "featureComposeReport", body: { ok: false, verdict: "REFUSED", stage: "check_supply_ledger_unreadable", error: `gap ${_gapIdForSlot}: its check_supply ledger could not be read, so the supply's dispatch cannot be verified (${lane} compose not started)` } };
+      }
+      if (!rows.some((r) => String(r.id) === _gapIdForSlot)) {
+        console.log(`[feature-compose] ${lane} compose NOT started: gap ${_gapIdForSlot} check_supply_gap_missing (a check_supply compose names a gap the store does not hold)`);
+        return { shape: "featureComposeReport", body: { ok: false, verdict: "REFUSED", stage: "check_supply_gap_missing", error: `gap ${_gapIdForSlot}: a check_supply compose names a gap the store does not hold (${lane} compose not started)` } };
+      }
+    } else {
+      try { rows = await readComposeGapRows(_gapIdForSlot); } catch { rows = null; }
+    }
     if (rows === null) {
       console.log(`[feature-compose] ${lane} compose NOT started: gap ${_gapIdForSlot} hold_state_unreadable (gap store unreadable; failing closed)`);
       return { shape: "featureComposeReport", body: { ok: false, verdict: "BUSY", stage: "hold_state_unreadable", error: `gap ${_gapIdForSlot}: the gap store could not be read, so its operator_hold state is unknown (${lane} compose not started)` } };
@@ -5088,7 +5108,40 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
     // non-attempt.
     if (stored && (pointer as { land?: boolean }).land !== false) {
       const { composeEligibilitySkipReason } = await import("./gap-to-feature.js");
-      const why = composeEligibilitySkipReason(stored);
+      let why = composeEligibilitySkipReason(stored);
+      // TEST-WRITING WORK (slice G): the one exception to "unarmed", for a compose the gap's own check_supply ledger
+      // says the supply dispatched with THIS dispatch id. The marker alone admits nothing. The supply writes the
+      // ledger after goal-host's 202, so a ledger that does not match yet is re-read, bounded, before refusing.
+      if (why === "unarmed" && supplyMarker) {
+        const authoring = (pointer as { authoring_execution_id?: unknown }).authoring_execution_id;
+        const wait = csa.checkSupplyLedgerWait();
+        let row: Record<string, unknown> = stored;
+        let verdict = csa.checkSupplyAdmission(row, supplyMarker, _gapIdForSlot, authoring, why);
+        for (let i = 1; !verdict.admit && verdict.why === "ledger_mismatch" && i < wait.attempts; i++) {
+          await new Promise((r) => setTimeout(r, wait.delay_ms));
+          const again = await csa.readWithin(() => readComposeGapRows(_gapIdForSlot), wait.read_timeout_ms);
+          if (again === null) {
+            console.log(`[feature-compose] ${lane} compose NOT started: gap ${_gapIdForSlot} check_supply_ledger_unreadable (re-read failed; failing closed)`);
+            return { shape: "featureComposeReport", body: { ok: false, verdict: "REFUSED", stage: "check_supply_ledger_unreadable", error: `gap ${_gapIdForSlot}: its check_supply ledger could not be re-read, so the supply's dispatch cannot be verified (${lane} compose not started)` } };
+          }
+          const next = again.find((r) => String(r.id) === _gapIdForSlot);
+          if (!next) {
+            console.log(`[feature-compose] ${lane} compose NOT started: gap ${_gapIdForSlot} check_supply_gap_missing (gone on re-read)`);
+            return { shape: "featureComposeReport", body: { ok: false, verdict: "REFUSED", stage: "check_supply_gap_missing", error: `gap ${_gapIdForSlot}: a check_supply compose names a gap the store no longer holds (${lane} compose not started)` } };
+          }
+          row = next;
+          why = composeEligibilitySkipReason(row);
+          verdict = csa.checkSupplyAdmission(row, supplyMarker, _gapIdForSlot, authoring, why);
+        }
+        if (verdict.admit) {
+          (pointer as { compose_mode?: string }).compose_mode = csa.CHECK_SUPPLY_COMPOSE_MODE;
+          console.log(`[feature-compose] ${lane} compose ADMITTED as test-writing work: gap ${_gapIdForSlot} is unarmed, its check_supply ledger names dispatch ${supplyMarker.dispatch_id} (compose_mode=${csa.CHECK_SUPPLY_COMPOSE_MODE})`);
+          why = null;
+        } else {
+          console.log(`[feature-compose] ${lane} compose NOT started: gap ${_gapIdForSlot} is ineligible (${why ?? "check_supply_state_changed"}; check_supply ${verdict.why})`);
+          return { shape: "featureComposeReport", body: { ok: false, verdict: "REFUSED", stage: "ineligible", check_supply_refusal: verdict.why, error: `gap ${_gapIdForSlot} is not compose work: ${why ?? "check_supply_state_changed"} (${lane} compose not started)` } };
+        }
+      }
       if (why) {
         console.log(`[feature-compose] ${lane} compose NOT started: gap ${_gapIdForSlot} is ineligible (${why})`);
         return { shape: "featureComposeReport", body: { ok: false, verdict: "REFUSED", stage: "ineligible", error: `gap ${_gapIdForSlot} is not compose work: ${why} (${lane} compose not started)` } };

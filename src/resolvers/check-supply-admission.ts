@@ -208,12 +208,12 @@ export type TestWritingJudgement = {
 /**
  * B′ P2: THE VERIFY OF A test_writing COMPOSE. The check file test/checks/<checkSupplyCheckFile(gapId)> must exist in
  * the vessel root, import the gap's edit site (W2, checkImportsEditSite: static, before anything runs), and, run ALONE
- * `runs` times through `run` (feature_compose's shell; the caller supplies the command), be the same assertion red
- * every time (retry-evidence.ts testWritingRunsVerdict: the shared classifier). ok only then.
+ * up to `runs` times through `run` (feature_compose's shell; the caller supplies the command; stopping at the first run
+ * that is not an assertion red), be the same assertion red every time (retry-evidence.ts testWritingRunsVerdict: the shared classifier). ok only then.
  */
 export async function judgeTestWritingCheck(input: { gapId: string; vesselRoot: string; editSite: unknown; run: (checkRel: string) => Promise<string>; runs?: number }): Promise<TestWritingJudgement> {
   const { existsSync, readFileSync } = await import("node:fs");
-  const { testWritingRunsVerdict } = await import("./retry-evidence.js");
+  const { checkRunVerdict, classifyCheckRun, testWritingRunsVerdict } = await import("./retry-evidence.js");
   const checkRel = checkSupplyCheckPath(input.gapId);
   const abs = `${input.vesselRoot}/${checkRel}`;
   const out = (stage: TestWritingJudgement["stage"], reason: string, extra: Partial<TestWritingJudgement> = {}): TestWritingJudgement => ({ ok: stage === null, stage, reason, check_file: checkRel, edit_site: vesselRelativeEditSite(input.editSite), runs: [], ...extra });
@@ -224,7 +224,14 @@ export async function judgeTestWritingCheck(input: { gapId: string; vesselRoot: 
   if (!site.ok) return out(site.stage, site.reason, { edit_site: site.edit_site });
   const raws: string[] = [];
   const n = Math.max(1, Math.floor(input.runs ?? TEST_WRITING_CHECK_RUNS));
-  for (let i = 0; i < n; i++) raws.push(await input.run(checkRel).catch((err) => `RUN_FAILED ${String(err).slice(0, 200)}`));
+  // THE BUDGET (qa): each run is `timeout 180` inside a compose capped at 900 s, so only an ASSERTION red earns the
+  // repeats. A run that is wrong_reason or green already decides (wrong_reason; or not_red / flaky against an earlier
+  // red run), so the loop stops there; testWritingRunsVerdict judges the runs that were taken, by the same rules.
+  for (let i = 0; i < n; i++) {
+    const raw = await input.run(checkRel).catch((err) => `RUN_FAILED ${String(err).slice(0, 200)}`);
+    raws.push(raw);
+    if (checkRunVerdict(classifyCheckRun(raw)).verdict !== "assertion_red") break;
+  }
   const v = testWritingRunsVerdict(raws);
   const runs = v.runs.map((r) => ({ verdict: r.verdict, keys: r.keys.map((k) => k.replace("\u0000", " :: ")), red: r.red.slice(0, 10), unhandled: r.unhandled }));
   if (!v.ok) return out(v.stage, v.reason, { edit_site: site.edit_site, runs, ...(v.cause ? { cause: v.cause } : {}) });

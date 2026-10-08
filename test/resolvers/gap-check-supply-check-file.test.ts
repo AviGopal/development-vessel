@@ -242,4 +242,28 @@ describe("B′ P3: the arm step measures the landed .check.ts through P0 and jud
     expect(ledgerOf(await storeRow(id))["state"]).toBe("armed");
     expect(metaOf(await storeRow(id))["edit_site"]).toBe(SITE);
   });
+
+  it("[MUST-FAIL] W2 at arm: a check whose only link to the edit site is a TYPE-ONLY import (erased at runtime) is NOT armed", async () => {
+    const id = T("p3-typeonly");
+    await seed(id);
+    await tick(later());
+    const title = `p3 typeonly ${RUN}`;
+    // an assertion red that never touches the erased binding: only W2 can refuse it
+    writeFileSync(join(CLONES, VESSEL, checkPathOf(id)), `${H}import type * as mod from "../../src/widget";\ntest("${title}", () => { expect(2).toBe(1); });\n`);
+    await tick(later());
+    expect(metaOf(await storeRow(id))["evidence_resolve"]).toBeUndefined();
+    expect(ledgerOf(await storeRow(id))["state"]).toBe("arm_refused");
+    expect(String(ledgerOf(await storeRow(id))["reason"])).toMatch(/test_writing_check_misses_edit_site/);
+  });
+
+  it("[CONTROL] W2 at arm: a type import PLUS a separate value import of the edit site arms", async () => {
+    const id = T("p3-typeplus");
+    await seed(id);
+    await tick(later());
+    const title = `p3 typeplus ${RUN}`;
+    writeFileSync(join(CLONES, VESSEL, checkPathOf(id)), `${H}import type { widget as W } from "../../src/widget";\nimport * as mod from "../../src/widget";\ntest("${title}", () => { const w: typeof W = mod.widget; expect(w).toBe(2); });\n`);
+    await tick(later());
+    expect(ledgerOf(await storeRow(id))["state"]).toBe("armed");
+    expect(metaOf(await storeRow(id))["edit_site"]).toBe(SITE);
+  });
 });

@@ -267,7 +267,13 @@ const E2E: Record<string, Record<string, unknown>> = {
   forgedcut: testSuiteCheck("development-vessel", "test/forgedcut.test.ts", "never red"),
   // b585a03: the landing fabricated the directory its own check reads (check_inputs), red->green or not.
   selfauth: { ...testSuiteCheck("development-vessel", "test/selfauth.test.ts", "reads the vault"), check_inputs: [`repos/development-vessel/${SELF_INPUT}`] },
+  // A supply-armed check (vessel "repos/<v>", as gap-check-supply writes it) whose landing edited its OWN test_file:
+  // the sweep's self-authored hold must fire, not only the independent verdict's later instrument guard.
+  supplyedit: testSuiteCheck("development-vessel", "test/supplyedit.test.ts", "edited by its landing"),
+  // CONTROL: the same self-edit with a bare vessel name, held as before.
+  bareedit: { evidence_resolve: { shape: "test_suite", input: { vessel: "development-vessel", test_file: "test/bareedit.test.ts", only_tests: ["edited by its landing"] }, zero_field: "requested_not_passing" } },
 };
+const SELF_EDITS: Record<string, string> = { supplyedit: "test/supplyedit.test.ts", bareedit: "test/bareedit.test.ts" };
 let e2eReady = false;
 beforeAll(() => {
   // The real sweep spawns git; the exec guard is per-test, and this setup runs outside any test.
@@ -286,7 +292,7 @@ beforeAll(() => {
     const parent = git(repo, "rev-parse", "HEAD");
     // Test-only landings are "running" without a restart; none edits its own check's test file, except selfauth,
     // which writes the very input its check reads.
-    const file = k === "selfauth" ? join(repo, SELF_INPUT) : join(repo, "test", `landing-${k}.test.ts`);
+    const file = k === "selfauth" ? join(repo, SELF_INPUT) : SELF_EDITS[k] ? join(repo, SELF_EDITS[k]!) : join(repo, "test", `landing-${k}.test.ts`);
     mkdirSync(join(file, ".."), { recursive: true });
     writeFileSync(file, `// ${k}\n`);
     git(repo, "add", ".");
@@ -357,9 +363,10 @@ describe("independent landing verdict: end to end through the real pending-land 
       return { status: g.status, closed_reason: m.closed_reason ?? null, label: l ? { grounded: l.grounded, labeler: l.labeler, sha: l.sha, parent: l.parent } : null };
     };
     const seen = Object.fromEntries(Object.keys(E2E).map((k) => [k, view(k)]));
-    const disposition = ((byId.get("ilv-selfauth")!.classification_metadata as Record<string, unknown>).disposition) ?? null;
+    const dispositionOf = (k: string) => ((byId.get(`ilv-${k}`)!.classification_metadata as Record<string, unknown>).disposition) ?? null;
+    const disposition = dispositionOf("selfauth");
     const lbl = (k: string, grounded: boolean) => ({ grounded, labeler: "sweep-parent-child", sha: shas[k]!.sha, parent: shas[k]!.parent });
-    expect({ ...seen, selfauth_disposition: disposition }, run.out.slice(-3000)).toEqual({
+    expect({ ...seen, selfauth_disposition: disposition, supplyedit_disposition: dispositionOf("supplyedit"), bareedit_disposition: dispositionOf("bareedit") }, run.out.slice(-3000)).toEqual({
       control: { status: "closed", closed_reason: "landed_verified", label: lbl("control", true) },
       errors: { status: "open", closed_reason: null, label: null },
       readshape: { status: "open", closed_reason: null, label: null },
@@ -369,6 +376,11 @@ describe("independent landing verdict: end to end through the real pending-land 
       forgedcut: { status: "open", closed_reason: null, label: lbl("forgedcut", true) },
       selfauth: { status: "open", closed_reason: null, label: null },
       selfauth_disposition: "awaiting_operator_review",
+      // MUST-FAIL (i): held by the sweep's self-authored check (no pinned re-run, so no label), vessel prefix or not.
+      supplyedit: { status: "open", closed_reason: null, label: null },
+      supplyedit_disposition: "awaiting_operator_review",
+      bareedit: { status: "open", closed_reason: null, label: null },
+      bareedit_disposition: "awaiting_operator_review",
     });
   });
 });

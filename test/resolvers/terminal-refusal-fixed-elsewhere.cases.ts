@@ -116,3 +116,117 @@ describe("markTerminalRefusal on a gap whose own check is green on the parent", 
     expect(typeof (m["own_check_green_on_parent"] as Row | undefined)?.["at"]).toBe("string");
   });
 });
+
+// THE CHECK IS NOT ITS OWN FIX. A commit since birth that touches the gap's OWN check (its test_file, or a non-src
+// file the check imports: the instrument, as the independent verdict's guard computes it) can make the check green
+// by changing the judge, not the judged. Such a green is NOT a fixed_elsewhere measurement: the gap stays open with
+// the exclusion marker carrying a NAMED stage. MIXED (one commit touching the edit_site AND the check) and SPLIT
+// (an edit_site commit, then a later instrument commit) are held too (v1: no re-run of the original check).
+describe("markTerminalRefusal: a commit that touched the gap's own check is not a fixed_elsewhere fix", () => {
+  const held = async (id: string, stage: string): Promise<void> => {
+    const r = await row(id);
+    const m = metaOf(r);
+    expect({ status: r["status"], closed_reason: m["closed_reason"] ?? null, stage: (m["own_check_green_on_parent"] as Row | undefined)?.["stage"] ?? null })
+      .toEqual({ status: "open", closed_reason: null, stage });
+    expect(typeof (m["own_check_green_on_parent"] as Row | undefined)?.["at"]).toBe("string");
+  };
+  const mark = (): Mark => {
+    const f = (g2f as Row)["markTerminalRefusal"] as Mark | undefined;
+    expect(typeof f).toBe("function");
+    return f!;
+  };
+
+  it("MUST-FAIL (ii-a): a commit touching ONLY the gap's test_file is held (own_green_instrument_only_commit)", async () => {
+    commitFile("src/ia.ts", "export const ia = 1; // defect\n", "seed ia");
+    commitFile("test/ia.test.ts", "// ia > b: expects 2\n", "seed ia test");
+    const id = `fe-ia-${RUN}`;
+    const born = await write(id, { edit_site: `repos/${VESSEL}/src/ia.ts`, evidence_resolve: er("test/ia.test.ts") });
+    commitFile("test/ia.test.ts", "// ia > b: expects 1 (the check bent to the defect)\n", "weaken the check");
+    await mark()(born, { failure_kind: "terminal_refusal", terminal_refusal: GREEN });
+    await held(id, "own_green_instrument_only_commit");
+  });
+
+  it("MUST-FAIL (ii-b): a commit touching ONLY a test-only helper the check imports is held (own_green_instrument_only_commit)", async () => {
+    commitFile("src/ib.ts", "export const ib = 1;\n", "seed ib");
+    commitFile("test/helpers/ib-helper.ts", "export const expected = 2;\n", "seed ib helper");
+    commitFile("test/ib.test.ts", "import { expected } from \"./helpers/ib-helper.js\";\n// ib > b\n", "seed ib test");
+    const id = `fe-ib-${RUN}`;
+    // check_inputs names the helper (as a supply may): before the fix it was a SUBJECT file, so its edit closed the gap.
+    const born = await write(id, { edit_site: `repos/${VESSEL}/src/ib.ts`, check_inputs: [`repos/${VESSEL}/test/helpers/ib-helper.ts`], evidence_resolve: er("test/ib.test.ts") });
+    commitFile("test/helpers/ib-helper.ts", "export const expected = 1;\n", "bend the helper");
+    await mark()(born, { failure_kind: "terminal_refusal", terminal_refusal: GREEN });
+    await held(id, "own_green_instrument_only_commit");
+  });
+
+  it("MUST-FAIL (ii-mixed): ONE commit touching the edit_site AND the test_file is held (own_green_mixed_instrument_commit)", async () => {
+    commitFile("src/im.ts", "export const im = 1;\n", "seed im");
+    commitFile("test/im.test.ts", "// im > b: expects 2\n", "seed im test");
+    const id = `fe-im-${RUN}`;
+    const born = await write(id, { edit_site: `repos/${VESSEL}/src/im.ts`, evidence_resolve: er("test/im.test.ts") });
+    mkdirSync(join(REPO, "src"), { recursive: true });
+    writeFileSync(join(REPO, "src/im.ts"), "export const im = 3;\n");
+    writeFileSync(join(REPO, "test/im.test.ts"), "// im > b: expects 3\n");
+    git("add", "src/im.ts", "test/im.test.ts");
+    git("commit", "-q", "-m", "change both the site and its check");
+    await mark()(born, { failure_kind: "terminal_refusal", terminal_refusal: GREEN });
+    await held(id, "own_green_mixed_instrument_commit");
+  });
+
+  it("MUST-FAIL (ii-split): an edit_site commit FOLLOWED by an instrument-only commit is held (own_green_instrument_changed_since_birth)", async () => {
+    commitFile("src/is.ts", "export const is = 1;\n", "seed is");
+    commitFile("test/is.test.ts", "// is > b\n", "seed is test");
+    const id = `fe-is-${RUN}`;
+    const born = await write(id, { edit_site: `repos/${VESSEL}/src/is.ts`, evidence_resolve: er("test/is.test.ts") });
+    commitFile("src/is.ts", "export const is = 2;\n", "touch the site");
+    commitFile("test/is.test.ts", "// is > b (rewritten)\n", "then rewrite the check");
+    await mark()(born, { failure_kind: "terminal_refusal", terminal_refusal: GREEN });
+    await held(id, "own_green_instrument_changed_since_birth");
+  });
+
+  it("CONTROL: an edit_site-only commit still closes fixed_elsewhere when the check imports an UNCHANGED test helper", async () => {
+    commitFile("src/ic.ts", "export const ic = 1;\n", "seed ic");
+    commitFile("test/helpers/ic-helper.ts", "export const h = 1;\n", "seed ic helper");
+    commitFile("test/ic.test.ts", "import { h } from \"./helpers/ic-helper\";\n// ic > b\n", "seed ic test");
+    const id = `fe-ic-${RUN}`;
+    const born = await write(id, { edit_site: `repos/${VESSEL}/src/ic.ts`, evidence_resolve: er("test/ic.test.ts") });
+    const fix = commitFile("src/ic.ts", "export const ic = 2;\n", "fix ic");
+    await mark()(born, { failure_kind: "terminal_refusal", terminal_refusal: GREEN });
+    const r = await row(id);
+    expect({ status: r["status"], closed_reason: metaOf(r)["closed_reason"], fixed_by: (metaOf(r)["falsifier_exercise"] as Row | undefined)?.["fixed_by"] })
+      .toEqual({ status: "closed", closed_reason: "fixed_elsewhere", fixed_by: fix });
+  });
+
+  it("CONTROL: a gap whose check has no subject beyond its own test_file is never attributed to an unrelated commit", async () => {
+    commitFile("test/io.test.ts", "// io > b\n", "seed io test");
+    const id = `fe-io-${RUN}`;
+    const born = await write(id, { evidence_resolve: er("test/io.test.ts") });
+    commitFile("docs/io.md", "unrelated\n", "unrelated after birth");
+    await mark()(born, { failure_kind: "terminal_refusal", terminal_refusal: GREEN });
+    const r = await row(id);
+    expect({ status: r["status"], closed_reason: metaOf(r)["closed_reason"] ?? null }).toEqual({ status: "open", closed_reason: null });
+  });
+});
+
+// SELF-AUTHORED CHECK INPUTS, as the supply arms them: evidence_resolve.input.vessel is "repos/<v>" (gap-check-supply),
+// so the path built from it must be repos/<v>/<test_file>, never repos/repos/<v>/... (which matched nothing, and the
+// sweep's self-authored hold never fired for a supply-armed gap). A bare "<v>" is the control.
+describe("selfAuthoredCheckInputs: the check's vessel with or without a repos/ prefix", () => {
+  type SelfAuth = (gap: Row, sha: string) => string[];
+  const fn = (): SelfAuth => {
+    const f = (g2f as Row)["__selfAuthoredCheckInputsForTests"] as SelfAuth | undefined;
+    expect(typeof f, "gap-to-feature must export __selfAuthoredCheckInputsForTests").toBe("function");
+    return f!;
+  };
+  it("MUST-FAIL (i): a supply-armed check (vessel repos/<v>) whose landing edited its test_file is self-authored at repos/<v>/<test_file>", () => {
+    const sha = commitFile("test/sa.test.ts", "// sa > b (edited by the landing)\n", "landing edits its own check");
+    const gap = { id: `fe-sa-${RUN}`, classification_metadata: { evidence_resolve: { shape: "test_suite", input: { vessel: `repos/${VESSEL}`, test_file: "test/sa.test.ts", only_tests: ["sa > b"] } } } };
+    expect(fn()(gap, sha)).toEqual([`repos/${VESSEL}/test/sa.test.ts`]);
+  });
+  it("CONTROL: a bare vessel name gives the same repos/<v>/<test_file>; a landing not touching the check gives []", () => {
+    const sha = commitFile("test/sb.test.ts", "// sb > b (edited)\n", "landing edits its own check (bare vessel)");
+    const gap = { id: `fe-sb-${RUN}`, classification_metadata: { evidence_resolve: { shape: "test_suite", input: { vessel: VESSEL, test_file: "test/sb.test.ts" } } } };
+    expect(fn()(gap, sha)).toEqual([`repos/${VESSEL}/test/sb.test.ts`]);
+    const other = commitFile("src/sb.ts", "export const sb = 1;\n", "landing elsewhere");
+    expect(fn()(gap, other)).toEqual([]);
+  });
+});

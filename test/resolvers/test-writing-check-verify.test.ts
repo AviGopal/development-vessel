@@ -124,6 +124,19 @@ for (const [label, bin, present] of [["host bun", HOST_BUN, true], ["bun 1.4.2",
       expect(c.failures.find((f) => f.name === "next one")).toMatchObject({ cls: "assertion" });
     });
 
+    t("[MUST-FAIL] a failure bun prints twice (the multi-file \"N tests failed:\" recap) is classified once, by its first block", () => {
+      expect(typeof classify).toBe("function");
+      const root = vessel("tw-recap", `import { widget } from "../../src/x";\n${Array.from({ length: 12 }, (_, i) => `test("many ${i}", () => { expect(widget).toBe(${i + 2}); });`).join("\n")}\n`);
+      const p = Bun.spawnSync([bin, "test", `./test/checks/${checkFile("tw-recap")}`], { cwd: root, env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "", TMPDIR: tmpdir() }, stdout: "pipe", stderr: "pipe" });
+      const raw = new TextDecoder().decode(p.stdout) + new TextDecoder().decode(p.stderr);
+      // measured: a single-file run prints no recap (12 and 15 failures, 1.3.14 and 1.4.2); a whole-suite run does
+      const fails = raw.split("\n").filter((l) => l.startsWith("(fail) "));
+      expect(fails.length).toBe(12);
+      const c = classify!(raw + `\n12 tests failed:\n${fails.join("\n")}\n`);
+      expect(c.failures.length).toBe(12);
+      expect(c.failures.every((f) => f.cls === "assertion")).toBe(true);
+    });
+
     t("[MUST-FAIL] a ReferenceError and a plain throw are not assertions: wrong_reason", async () => {
       const a = await verdict("tw-ref", `import { widget } from "../../src/x";\ntest("ref red", () => { // @ts-ignore\n expect(widget + nope).toBe(1); });\n`);
       expect(a.stage).toBe("test_writing_check_wrong_reason");
@@ -251,6 +264,16 @@ describe("feature-compose verify: the test_writing check is judged after the sui
     expect(block).toContain("timeout_sec: 240");
     expect(block).toContain("[fc-test-writing-check]");
     expect(FC).toMatch(/const testWritingMode = \(pointer as \{ compose_mode\?: unknown \}\)\.compose_mode === csaV\.CHECK_SUPPLY_COMPOSE_MODE;/);
+  });
+
+  test("[MUST-FAIL] the verify reads the edit site the ARM step reads: the supply ledger's only (never the gap's own edit_site behind it)", () => {
+    // gap-check-supply arms with checkImportsEditSite(…, ledger.edit_site ?? null, …). ledger.edit_site is null exactly
+    // when the gap's own edit_site is unusable (another vessel, not in the clone, not src): demanding it here would be
+    // a refusal the drafter cannot cure, of a check the arm would accept.
+    const call = FC.indexOf("judgeTestWritingCheck({");
+    const block = FC.slice(call, call + 800);
+    expect(block).toContain("editSite: twLedger.edit_site ?? null,");
+    expect(block).not.toContain("twMeta.edit_site");
   });
 
   test("[CONTROL] the full-suite gate is UNCHANGED for every mode (a .check.ts is never discovered, so 'no new reds' holds by itself)", () => {

@@ -1766,7 +1766,6 @@ for (let waited = 0; acquireBody.acquired === false && waited < leaseWaitMs; wai
         `after waiting ${leaseWaitMs}ms — vessel=${String(pointer.vessel_name ?? "unknown")} ` +
         `mitosis=${mitosis_version_id}; no edit will land this run`,
       );
-      // Introduce a brief wait before returning cutoverDeferred
       // VARIATE WITH INTENT (2026-09-23): the holder that starved this landing is an
       // ACTIVITY whose posterior graded itself on its own exit (trace-store-reconcile:
       // alpha 119 / beta 9 while deferring 45 cutovers in 90 min). Feed the fleet
@@ -1784,7 +1783,6 @@ for (let waited = 0; acquireBody.acquired === false && waited < leaseWaitMs; wai
           }).catch(() => { });
         }
       } catch { /* feedback is advisory */ }
-      await new Promise(resolve => setTimeout(resolve, 10000));
       return {
         shape: "cutoverDeferred",
         body: {

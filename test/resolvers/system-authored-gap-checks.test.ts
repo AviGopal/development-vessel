@@ -5,10 +5,12 @@
 // arming gaps by hand-writing failing tests. These tests pin the organs that let the substrate write those
 // checks itself, through the paths that already exist:
 //   (a) a gap with no check (or no verified edit site) is classified needs-localization and is not compose work;
-//   (b) a rhythm-paced tick dispatches ONE test-writing edit goal per such gap, naming one test file and
-//       forbidding src edits, bounded per tick and backed off per gap;
+//   (b) a rhythm-paced tick dispatches ONE test-writing edit goal per such gap, naming its one out-of-suite check file
+//       test/checks/<slug>.check.ts (B′: never an existing or discovered *.test.ts) and forbidding src edits,
+//       bounded per tick and backed off per gap;
 //   (c) when the test lands, it must import the edit site and the one judge must read it RED at HEAD FOR THE
-//       RIGHT REASON (every named test among the run's failures, not a load error) before the gap is armed
+//       RIGHT REASON (every named test among the run's failures, each an ASSERTION by the shared classifier the
+//       report's red_reason carries, not a load error) before the gap is armed
 //       through the ordinary substrateGap_write birth seam; anything else arms nothing (fail closed);
 //   (d) the cadence is read from a timeShapedRhythm impulse at use time, never from a timer or env constant, and
 //       the conductor reads the WHOLE registry (a family past the 50th row is still fired);
@@ -16,7 +18,8 @@
 //   (f) a control arm by hash(gap id) parity is classified but never sent a goal.
 // Controls: an already-armed gap and an operator-held gap get no goal. The shell-gate GIT_DIR form from
 // local-tools-vessel is the concrete needs-localization fixture: its vessel already has a test importing
-// src/shell-containment.ts, so the goal appends to that file. Only the goal text and target are asserted.
+// src/shell-containment.ts, and under B′ the goal still names the gap's own check file (no append). Only the goal
+// text and target are asserted.
 //
 // Hermetic: temp gap store, temp clone and runtime roots, fetch stubbed (any unexpected URL is a violation),
 // the birth judge replaced, host-lifecycle exec blocked. Nothing runs a test suite or reaches the fleet.
@@ -59,9 +62,11 @@ const RUN = Math.random().toString(36).slice(2, 8);
 const VESSEL = "local-tools-vessel";
 const SITE = `repos/${VESSEL}/src/shell-containment.ts`;
 const GIT_DIR_SUMMARY = "shell gate allows the GIT_DIR form: `GIT_DIR=.git git config core.hooksPath /tmp/h` is let through by local-tools-vessel src/shell-containment.ts containShell, so a hooksPath rewrite escapes containment";
-const GOAL_RE = /^Write a failing test in repos\/local-tools-vessel\/test\/[A-Za-z0-9_.-]+\.test\.ts that reproduces: [\s\S]+\. Do not change src\/\.$/;
-const APPEND_RE = /^Append a failing test to repos\/local-tools-vessel\/src\/shell-containment\.test\.ts that reproduces: [\s\S]+\. Change no other file\.$/;
+const GOAL_RE = /^Write ONE failing test in repos\/local-tools-vessel\/test\/checks\/[a-z0-9-]+\.check\.ts that reproduces: [\s\S]+\. [\s\S]*Do not change src\/[\s\S]*$/;
+const CHECK_RE = /^test\/checks\/[a-z0-9-]+\.check\.ts$/;
 const EXISTING_TEST = "src/shell-containment.test.ts";
+/** What test_suite's red_reason says for a run whose named tests all failed on an assertion. */
+const assertionRedReason = (t: string[]): Row => ({ ran: true, pass: 0, unhandled: false, unhandled_cause: null, unhandled_error: null, failures: t.map((name) => ({ name, cls: "assertion", error: "error: expect(received).toBe(expected)" })) });
 
 const originalFetch = globalThis.fetch;
 const origLog = console.log;
@@ -71,7 +76,7 @@ let violations: string[] = [];
 let rhythms: Array<Record<string, unknown>> = [];
 let verdictFor: (id: string) => string = () => "present";
 // The run report the judge observes. Default: every named test failed on an assertion.
-let reportFor: (id: string, onlyTests: string[]) => Row | null = (_id, t) => ({ ran: true, total: t.length, fail: t.length, failingTests: t.map((x) => `(fail) ${x}`) });
+let reportFor: (id: string, onlyTests: string[]) => Row | null = (_id, t) => ({ ran: true, total: t.length, fail: t.length, failingTests: t.map((x) => `(fail) ${x}`), red_reason: assertionRedReason(t) });
 let judged: string[] = [];
 let rhythmWrites: Row[] = [];
 let directCalls: Row[] = [];
@@ -90,7 +95,7 @@ beforeAll(() => {
   if (!root.startsWith(tmpdir()) && !root.startsWith("/tmp/")) throw new Error(`gap store root ${root} is not a temp dir`);
   mkdirSync(join(root, "gaps"), { recursive: true });
   mkdirSync(join(CLONES, VESSEL, "src"), { recursive: true });
-  mkdirSync(join(CLONES, VESSEL, "test"), { recursive: true });
+  mkdirSync(join(CLONES, VESSEL, "test", "checks"), { recursive: true });
   mkdirSync(join(RUNTIME, VESSEL, "src"), { recursive: true });
   writeFileSync(join(CLONES, VESSEL, "src", "shell-containment.ts"), "export function containShell(cmd: string): boolean { return true; }\n");
   writeFileSync(join(RUNTIME, VESSEL, "src", "shell-containment.ts"), "export function containShell(cmd: string): boolean { return true; }\n");
@@ -146,7 +151,7 @@ afterAll(async () => {
 beforeEach(() => {
   goals = []; violations = []; judged = []; verdictFor = () => "present"; rhythms = [dueRhythm()];
   rhythmWrites = []; directCalls = []; registryOverride = null;
-  reportFor = (_id, t) => ({ ran: true, total: t.length, fail: t.length, failingTests: t.map((x) => `(fail) ${x}`) });
+  reportFor = (_id, t) => ({ ran: true, total: t.length, fail: t.length, failingTests: t.map((x) => `(fail) ${x}`), red_reason: assertionRedReason(t) });
   execGuard = installCutoverExecGuard();
   g2f.__resetPolicyReadsForTests();
 });
@@ -205,7 +210,7 @@ describe("system-authored gap checks: (a) classification", () => {
 });
 
 describe("system-authored gap checks: (b) the rhythm tick dispatches one test-writing goal per gap", () => {
-  it("one goal per needs-localization gap: GIT_DIR appends to the existing test of its edit site; armed and held gaps get none", async () => {
+  it("one goal per needs-localization gap: GIT_DIR gets its own check file even though a test already imports its edit site; armed and held gaps get none", async () => {
     expect(supply).not.toBeNull();
     const gitDir = GIT_DIR_ID, armed = T("sgc-armed"), held = T("sgc-held"), fresh = T("sgc-fresh");
     await seed(gitDir, GIT_DIR_SUMMARY, {});
@@ -216,9 +221,10 @@ describe("system-authored gap checks: (b) the rhythm tick dispatches one test-wr
     const goalFor = (id: string) => goals.filter((g) => g.variables?.["gap_id"] === id);
     expect(goalFor(armed).length).toBe(0);
     expect(goalFor(held).length).toBe(0);
-    // an existing test already imports the edit site: append to it, one file, no other change
+    // an existing test already imports the edit site: NO append (B′), the gap's own check file, src forbidden
     expect(goalFor(gitDir).length).toBe(1);
-    expect(goalFor(gitDir)[0]!.goal).toMatch(APPEND_RE);
+    expect(goalFor(gitDir)[0]!.goal).toMatch(GOAL_RE);
+    expect(goalFor(gitDir)[0]!.goal).not.toContain(EXISTING_TEST);
     expect(goalFor(gitDir)[0]!.goal).toContain("GIT_DIR=.git git config core.hooksPath /tmp/h");
     // no test covers an unnamed site: a new test file, src forbidden
     expect(goalFor(fresh).length).toBe(1);
@@ -228,9 +234,9 @@ describe("system-authored gap checks: (b) the rhythm tick dispatches one test-wr
     expect(m["gap_check_supply_arm"]).toBe("treatment");
     const ledger = ledgerOf(m);
     expect(ledger["state"]).toBe("goal_dispatched");
-    expect(ledger["test_file"]).toBe(EXISTING_TEST);
+    expect(ledger["test_file"]).toMatch(CHECK_RE);
     expect(ledger["edit_site"]).toBe(SITE);
-    expect(ledger["baseline_titles"]).toEqual(["allows ls"]);
+    expect(ledger["baseline_titles"]).toEqual([]);
     expect(ledger["vessel"]).toBe(VESSEL);
     expect(ledger["attempts"]).toBe(1);
     expect(metaOf(await storeRow(armed))["check_supply"]).toBeUndefined();
@@ -269,12 +275,12 @@ async function landTest(prefix: string, content: (title: string) => string, at: 
   rhythms = [dueRhythm({ max_per_tick: 50 })];
   await tick({ now_ms: at });
   const testFile = String(ledgerOf(metaOf(await storeRow(id)))["test_file"] ?? "");
-  expect(testFile).toMatch(/^test\/[A-Za-z0-9_.-]+\.test\.ts$/);
+  expect(testFile).toMatch(CHECK_RE);
   const title = `${prefix} reproduces ${RUN}`;
   writeFileSync(join(CLONES, VESSEL, testFile), content(title));
   return { id, title, testFile };
 }
-const IMPORTING_RED = (title: string): string => `import { expect, test } from "bun:test";\nimport { containShell } from "../src/shell-containment.js";\ntest("${title}", () => { expect(containShell("GIT_DIR=.git git config core.hooksPath /tmp/h")).toBe(false); });\n`;
+const IMPORTING_RED = (title: string): string => `import { expect, test } from "bun:test";\nimport { containShell } from "../../src/shell-containment.js";\ntest("${title}", () => { expect(containShell("GIT_DIR=.git git config core.hooksPath /tmp/h")).toBe(false); });\n`;
 
 describe("system-authored gap checks: (c) a landed test arms the gap only when red at HEAD for the right reason", () => {
   it("CONTROL: an importing test whose named test fails on an assertion arms the gap through substrateGap_write", async () => {
@@ -303,33 +309,27 @@ describe("system-authored gap checks: (c) a landed test arms the gap only when r
     expect(typeof measures["red_at_head_share"]).toBe("number");
   });
 
-  it("a test appended to the existing file arms from the NEW title only; one in-flight append per file", async () => {
+  it("NO APPEND (B′): two gaps on the same edit site each get their own check file in the same tick; nothing is busy", async () => {
     expect(supply).not.toBeNull();
-    // two gaps on the same edit site: the first gets the append goal, the second waits while the file is held
     const first = T("sgc-append-first"), second = T("sgc-append-second");
     await seed(first, `append fixture ${RUN}: local-tools-vessel src/shell-containment.ts containShell lets GIT_DIR=.git through`, {});
     await seed(second, `append fixture two ${RUN}: local-tools-vessel src/shell-containment.ts containShell lets GIT_DIR=../.git through`, {});
-    for (const g of [GIT_DIR_ID]) { const m0 = metaOf(await storeRow(g)); if (ledgerOf(m0)["state"] === "goal_dispatched") await sg.resolveSubstrateGapWrite({ type: "substrateGap_write", gap: { ...(await storeRow(g))!, classification_metadata: { check_supply: { ...ledgerOf(m0), state: "exhausted" } } } } as never); }
     rhythms = [dueRhythm({ max_per_tick: 50, max_attempts: 10 })];
     await tick({ now_ms: Date.now() + 1200 * 3600_000 });
     expect(goals.filter((g) => g.variables?.["gap_id"] === first).length).toBe(1);
-    expect(goals.filter((g) => g.variables?.["gap_id"] === second).length).toBe(0);
-    expect(ledgerOf(metaOf(await storeRow(first)))["test_file"]).toBe(EXISTING_TEST);
-    const before = readFileSync(join(CLONES, VESSEL, EXISTING_TEST), "utf-8");
-    const title = `appended GIT_DIR form ${RUN}`;
-    writeFileSync(join(CLONES, VESSEL, EXISTING_TEST), before + `test("${title}", () => { expect(containShell("GIT_DIR=.git git config core.hooksPath /tmp/h")).toBe(false); });\n`);
-    await tick({ now_ms: Date.now() + 1300 * 3600_000 });
-    const m = metaOf(await storeRow(first));
-    expect(m["falsifier"]).toBe("class2");
-    expect(((m["evidence_resolve"] as Row)["input"] as Row)["test_file"]).toBe(EXISTING_TEST);
-    expect(((m["evidence_resolve"] as Row)["input"] as Row)["only_tests"]).toEqual([title]);
-    expect(m["edit_site"]).toBe(SITE);
-    expect(metaOf(await storeRow(second))["evidence_resolve"]).toBeUndefined();
+    expect(goals.filter((g) => g.variables?.["gap_id"] === second).length).toBe(1);
+    const f1 = String(ledgerOf(metaOf(await storeRow(first)))["test_file"]);
+    const f2 = String(ledgerOf(metaOf(await storeRow(second)))["test_file"]);
+    expect(f1).toMatch(CHECK_RE);
+    expect(f2).toMatch(CHECK_RE);
+    expect(f1).not.toBe(f2);
+    // the existing test is untouched by either goal
+    for (const g of goals) expect(g.goal).not.toContain(EXISTING_TEST);
   });
 
   it("a test GREEN at HEAD does NOT arm the gap (fail closed)", async () => {
     expect(supply).not.toBeNull();
-    const { id } = await landTest("sgc-arm-green", (t) => `import { expect, test } from "bun:test";\nimport { containShell } from "../src/shell-containment.js";\ntest("${t}", () => { expect(containShell("ls")).toBe(true); });\n`, Date.now() + 2000 * 3600_000);
+    const { id } = await landTest("sgc-arm-green", (t) => `import { expect, test } from "bun:test";\nimport { containShell } from "../../src/shell-containment.js";\ntest("${t}", () => { expect(containShell("ls")).toBe(true); });\n`, Date.now() + 2000 * 3600_000);
     verdictFor = (gid) => (gid === id ? "absent" : "present");
     await tick({ now_ms: Date.now() + 2100 * 3600_000 });
     expect(judged).toContain(id);
@@ -357,7 +357,7 @@ describe("system-authored gap checks: (c) a landed test arms the gap only when r
     rhythms = [dueRhythm({ max_per_tick: 50, max_attempts: 10 })];
     await tick({ now_ms: Date.now() + 2600 * 3600_000 });
     const testFile = String(ledgerOf(metaOf(await storeRow(id)))["test_file"] ?? "");
-    expect(testFile).toMatch(/^test\/[A-Za-z0-9_.-]+\.test\.ts$/);
+    expect(testFile).toMatch(CHECK_RE);
     writeFileSync(join(CLONES, VESSEL, testFile), `import { expect, test } from "bun:test";\ntest("noimport red ${RUN}", () => { expect(1).toBe(2); });\n`);
     await tick({ now_ms: Date.now() + 2700 * 3600_000 });
     const m = metaOf(await storeRow(id));
@@ -374,8 +374,8 @@ describe("system-authored gap checks: (c) a landed test arms the gap only when r
     rhythms = [dueRhythm({ max_per_tick: 50, max_attempts: 10 })];
     await tick({ now_ms: Date.now() + 2800 * 3600_000 });
     const testFile = String(ledgerOf(metaOf(await storeRow(id)))["test_file"] ?? "");
-    expect(testFile).toMatch(/^test\/[A-Za-z0-9_.-]+\.test\.ts$/);
-    writeFileSync(join(CLONES, VESSEL, testFile), `import { expect, test } from "bun:test";\nimport { site_y_ts } from "../src/site-y.js";\ntest("otherimport red ${RUN}", () => { expect(site_y_ts).toBe(2); });\n`);
+    expect(testFile).toMatch(CHECK_RE);
+    writeFileSync(join(CLONES, VESSEL, testFile), `import { expect, test } from "bun:test";\nimport { site_y_ts } from "../../src/site-y.js";\ntest("otherimport red ${RUN}", () => { expect(site_y_ts).toBe(2); });\n`);
     await tick({ now_ms: Date.now() + 2900 * 3600_000 });
     const m = metaOf(await storeRow(id));
     expect(m["evidence_resolve"]).toBeUndefined();
@@ -391,8 +391,8 @@ describe("system-authored gap checks: (c) a landed test arms the gap only when r
     rhythms = [dueRhythm({ max_per_tick: 50, max_attempts: 10 })];
     await tick({ now_ms: Date.now() + 3000 * 3600_000 });
     const testFile = String(ledgerOf(metaOf(await storeRow(id)))["test_file"] ?? "");
-    expect(testFile).toMatch(/^test\/[A-Za-z0-9_.-]+\.test\.ts$/);
-    writeFileSync(join(CLONES, VESSEL, testFile), `import { expect, test } from "bun:test";\nimport { site_x_ts } from "../src/site-x.js";\ntest("siteimport red ${RUN}", () => { expect(site_x_ts).toBe(2); });\n`);
+    expect(testFile).toMatch(CHECK_RE);
+    writeFileSync(join(CLONES, VESSEL, testFile), `import { expect, test } from "bun:test";\nimport { site_x_ts } from "../../src/site-x.js";\ntest("siteimport red ${RUN}", () => { expect(site_x_ts).toBe(2); });\n`);
     await tick({ now_ms: Date.now() + 3100 * 3600_000 });
     const m = metaOf(await storeRow(id));
     expect(m["falsifier"]).toBe("class2");
@@ -402,13 +402,25 @@ describe("system-authored gap checks: (c) a landed test arms the gap only when r
   it("a test that fails to LOAD (red, but the named test is not among the failures) does NOT arm", async () => {
     expect(supply).not.toBeNull();
     const { id } = await landTest("sgc-loadfail", IMPORTING_RED, Date.now() + 2400 * 3600_000);
-    reportFor = (gid, t) => (gid === id ? { ran: true, total: 1, fail: 1, failingTests: ["(fail) (unnamed)"], error: "Cannot find module" } : { ran: true, total: t.length, fail: t.length, failingTests: t.map((x) => `(fail) ${x}`) });
+    reportFor = (gid, t) => (gid === id ? { ran: true, total: 1, fail: 1, failingTests: ["(fail) (unnamed)"], red_reason: { ran: true, pass: 0, unhandled: true, unhandled_cause: "module", unhandled_error: "error: Cannot find module", failures: [] } } : { ran: true, total: t.length, fail: t.length, failingTests: t.map((x) => `(fail) ${x}`), red_reason: assertionRedReason(t) });
     await tick({ now_ms: Date.now() + 2500 * 3600_000 });
     expect(judged).toContain(id);
     const m = metaOf(await storeRow(id));
     expect(m["evidence_resolve"]).toBeUndefined();
     expect(m["falsifier"]).not.toBe("class2");
     expect(ledgerOf(m)["state"]).toBe("arm_refused");
+  });
+
+  it("[B′] a named test that IS among the failures but failed for a wrong reason (the shared classifier says network) does NOT arm", async () => {
+    expect(supply).not.toBeNull();
+    const { id } = await landTest("sgc-wrongreason", IMPORTING_RED, Date.now() + 2450 * 3600_000);
+    reportFor = (gid, t) => ({ ran: true, total: t.length, fail: t.length, failingTests: t.map((x) => `(fail) ${x}`), red_reason: gid === id ? { ...assertionRedReason(t), failures: t.map((name) => ({ name, cls: "wrong_reason", cause: "network", error: "TypeError: Unable to connect." })) } : assertionRedReason(t) });
+    await tick({ now_ms: Date.now() + 2550 * 3600_000 });
+    expect(judged).toContain(id);
+    const m = metaOf(await storeRow(id));
+    expect(m["evidence_resolve"]).toBeUndefined();
+    expect(ledgerOf(m)["state"]).toBe("arm_refused");
+    expect(String(ledgerOf(m)["reason"])).toContain("network");
   });
 });
 

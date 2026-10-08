@@ -1110,7 +1110,11 @@ function scheduleBirthEvaluation(job: { id: string; key: string; meta: Record<st
       const shape = String(((job.meta["evidence_resolve"] ?? {}) as { shape?: unknown }).shape ?? job.meta["verify_shape"] ?? "?");
       console.log(`[gap-birth] ${job.id}: class2 check ${shape} reads ${verdict} on ${evalSha ? evalSha.slice(0, 12) : "an unread tree"}` +
         (detectedSha ? ` (detected on ${detectedSha.slice(0, 12)})` : " (detection sha unknown)") +
-        (verdict === "present" ? "" : moved ? ` — absent, but the tree moved (${tree!.reason}): unknown, not suspect` : " — predicate_suspect: not admissible, and its absent closes nothing" + (tree ? ` [${tree.reason}]` : "")) +
+        (verdict === "present" ? "" : moved ? ` — absent, but the tree moved (${tree!.reason}): unknown, not suspect`
+          // An unmeasured check accuses nothing, so it is not labelled a suspect; it is still held (predicateSuspect:
+          // not admissible, closes nothing) until the sweep re-takes it and it reads present.
+          : verdict === "unknown" ? " — unknown: the check could not be measured at birth; held (not admissible, closes nothing) until a re-take reads present"
+          : " — predicate_suspect: not admissible, and its absent closes nothing" + (tree ? ` [${tree.reason}]` : "")) +
         (stamped ? "" : " (not stamped: the predicate changed while it ran)"));
     } catch (err) {
       console.warn(`[gap-birth] ${job.id}: stamp failed (${String(err).slice(0, 160)})`);

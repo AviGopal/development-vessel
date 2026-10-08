@@ -345,6 +345,17 @@ export async function resolveTestSuite(pointer: Record<string, unknown>): Promis
   // A suite that printed no summary at all did not run — do NOT report 0/0/0 as a clean
   // result, or "the suite is missing" becomes indistinguishable from "everything passed".
   const ran = /\d+\s+(pass|fail)\b/.test(raw);
+  // A NAME FILTER THAT MATCHED NO TEST IN A FILE THAT LOADED IS A MEASUREMENT (2026-10-08). When none of the named
+  // tests exists, bun (1.3.14) collects the file(s) and prints, instead of a summary:
+  //   error: regex "<pattern>" matched 0 tests. Searched 1 file (skipping 10 tests)
+  // ("Searched N files" for several). Every named test is then missing, i.e. not passing (the contract
+  // TEST_SUITE_CHECK_HELP states), so requested_not_passing is only_tests.length rather than null. Read as null,
+  // every test-first gap (its check names a test the lane must ADD) was born unknown and held out of the lane.
+  // `ran` keeps its meaning (a summary was printed: tests executed): the own-check gate, scope earn-in and the
+  // cutover gate on ran === true, and the own-check gate deliberately counts a vanished title as unmeasurable.
+  // A file that fails to LOAD prints a summary (0 pass / 1 fail / 1 error), so it never reaches this branch; a
+  // missing test file ("had no matches") or any output without this line stays null.
+  const filterMatchedNone = !ran && onlyTests.length > 0 && /^error: regex .* matched 0 tests\. Searched \d+ files?\b/m.test(raw);
 
   return {
     shape: "test_suite",
@@ -364,7 +375,8 @@ export async function resolveTestSuite(pointer: Record<string, unknown>): Promis
       fail: parsed.fail,
       test_file: testFile || null,
       base_ref: baseRef || null,
-      requested_not_passing: ran || onlyTests.length === 0 ? requestedNotPassing : null,
+      requested_not_passing: ran || onlyTests.length === 0 ? requestedNotPassing : filterMatchedNone ? onlyTests.length : null,
+      ...(filterMatchedNone ? { filter_matched_none: true } : {}),
       // The mutation actually changed the pinned tree's file; a run without it measured nothing about coverage.
       ...(mutate ? { mutation: { sha: mutate.sha, file: mutate.file, applied: /^MUTATION_APPLIED=1$/m.test(raw) } } : {}),
       ...(edit ? { mutation: { kind: "edit", file: edit.file, operator: edit.operator ?? null, start: edit.start, applied: /^MUTATION_APPLIED=1$/m.test(raw) } } : {}),

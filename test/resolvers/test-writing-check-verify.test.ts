@@ -34,6 +34,7 @@ type JudgeInput = { gapId: string; vesselRoot: string; editSite: string | null; 
 const judge = csa["judgeTestWritingCheck"] as undefined | ((i: JudgeInput) => Promise<Judgement>);
 const detailOf = csa["testWritingDetail"] as undefined | ((j: Judgement) => string);
 const RUNS = csa["TEST_WRITING_CHECK_RUNS"];
+const armRefusal = re["armRedReasonRefusal"] as undefined | ((rr: unknown, titles: string[]) => { cause?: string; reason: string } | null);
 const classify = re["classifyCheckRun"] as undefined | ((raw: string) => { ran: boolean; unhandled: boolean; failures: Array<{ name: string; cls: string; cause?: string }> });
 const checkFile = csa["checkSupplyCheckFile"] as (id: string) => string;
 
@@ -135,6 +136,65 @@ for (const [label, bin, present] of [["host bun", HOST_BUN, true], ["bun 1.4.2",
       const c = classify!(raw + `\n12 tests failed:\n${fails.join("\n")}\n`);
       expect(c.failures.length).toBe(12);
       expect(c.failures.every((f) => f.cls === "assertion")).toBe(true);
+    });
+
+    t("[MUST-FAIL] (qa nocmp) a check that THROWS an Error whose message mimics an expect() line is not an assertion, in the verify and at the arm", async () => {
+      // bun prints a thrown Error as `error: <message>`, so this error line also starts `error: expect(`; only the
+      // missing Expected/Received block tells it from a real assertion failure.
+      const body = `import * as mod from "../../src/x";\ntest("forged", () => { if (mod.widget !== 2) throw new Error("expect(received).toBe(expected)"); });\n`;
+      const j = await verdict("tw-forged", body);
+      expect(j.ok).toBe(false);
+      expect(j.stage).toBe("test_writing_check_wrong_reason");
+      expect(j.cause).toBe("non_assertion");
+      const root = vessel("tw-forged-arm", body);
+      const raw = await runner(bin, root)(`test/checks/${checkFile("tw-forged-arm")}`);
+      expect(raw).toMatch(/^error: expect\(received\)\.toBe\(expected\)$/m);
+      const c = classify!(raw);
+      expect(c.failures).toEqual([expect.objectContaining({ name: "forged", cls: "wrong_reason", cause: "non_assertion" })]);
+      expect(typeof armRefusal).toBe("function");
+      expect(armRefusal!(c, ["forged"])).toMatchObject({ cause: "non_assertion" });
+    });
+
+    t("[MUST-FAIL] (qa budget) a wrong-reason run 1 stops the verify: exactly 1 run recorded, stage and cause unchanged", async () => {
+      expect(typeof judge).toBe("function");
+      const root = vessel("tw-budget-wrong", `import { widget } from "../../src/x";\nimport { y } from "../../src/absent";\ntest("mm", () => { expect(widget + y).toBe(2); });\n`);
+      let calls = 0;
+      const base = runner(bin, root);
+      const j = await judge!({ gapId: "tw-budget-wrong", vesselRoot: root, editSite: SITE, run: async (rel) => { calls += 1; return base(rel); }, runs: 3 });
+      expect(j).toMatchObject({ ok: false, stage: "test_writing_check_wrong_reason", cause: "module" });
+      expect(calls).toBe(1);
+      expect(j.runs.length).toBe(1);
+    });
+
+    t("[MUST-FAIL] (qa budget) a GREEN run 1 stops the verify: exactly 1 run, not_red", async () => {
+      const root = vessel("tw-budget-green", `import { widget } from "../../src/x";\ntest("g", () => { expect(widget).toBe(1); });\n`);
+      let calls = 0;
+      const base = runner(bin, root);
+      const j = await judge!({ gapId: "tw-budget-green", vesselRoot: root, editSite: SITE, run: async (rel) => { calls += 1; return base(rel); }, runs: 3 });
+      expect(j.stage).toBe("test_writing_check_not_red");
+      expect(calls).toBe(1);
+      expect(j.runs.length).toBe(1);
+    });
+
+    t("[CONTROL] (qa budget) an assertion-red check still records 3 runs", async () => {
+      const root = vessel("tw-budget-red", `import { widget } from "../../src/x";\ntest("r", () => { expect(widget).toBe(2); });\n`);
+      let calls = 0;
+      const base = runner(bin, root);
+      const j = await judge!({ gapId: "tw-budget-red", vesselRoot: root, editSite: SITE, run: async (rel) => { calls += 1; return base(rel); }, runs: 3 });
+      expect(j).toMatchObject({ ok: true, stage: null });
+      expect(calls).toBe(3);
+      expect(j.runs.length).toBe(3);
+    });
+
+    t("[MUST-FAIL] (qa budget) a red run 1 then a GREEN run 2 stops at 2 runs, flaky", async () => {
+      const counter = join(mkdtempSync(join(tmpdir(), "tw-budget-counter-")), "n");
+      writeFileSync(counter, "0");
+      const root2 = vessel("tw-budget-flip", `import { readFileSync, writeFileSync } from "node:fs";\nimport { widget } from "../../src/x";\nconst n = Number(readFileSync(${JSON.stringify(counter)}, "utf8")); writeFileSync(${JSON.stringify(counter)}, String(n + 1));\ntest("flip", () => { expect(n === 0 ? widget : 2).toBe(2); });\n`);
+      let calls2 = 0;
+      const base2 = runner(bin, root2);
+      const j2 = await judge!({ gapId: "tw-budget-flip", vesselRoot: root2, editSite: SITE, run: async (rel) => { calls2 += 1; return base2(rel); }, runs: 3 });
+      expect(j2.stage).toBe("test_writing_check_flaky");
+      expect(calls2).toBe(2);
     });
 
     t("[MUST-FAIL] a ReferenceError and a plain throw are not assertions: wrong_reason", async () => {

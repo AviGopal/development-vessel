@@ -11,8 +11,11 @@
 // bare pointer, get a report). Those two tests had NEVER passed: the old implementation
 // fetched /api/test-store/summaries, an endpoint that exists nowhere in the fleet, so every
 // call threw. They are replaced here with tests of the contract that actually runs.
-import { describe, expect, it, test } from "bun:test";
-import { parseBunSummary, resolveTestSuite } from "../../src/resolvers/test-suite.js";
+import { afterAll, describe, expect, it, test } from "bun:test";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { onlyTestsPattern, parseBunSummary, resolveTestSuite } from "../../src/resolvers/test-suite.js";
 
 // The -t pattern travels base64-encoded and is decoded by the shell into one argv element (names never
 // appear as shell text; see test-suite-only-tests-no-shell-injection.test.ts). This reads it back.
@@ -234,4 +237,96 @@ describe("test_suite — per-test timeout", () => {
       expect(cmd).toContain("--timeout 20000");
     }
   });
+});
+
+// ---- A filter that matched no test in a file that LOADED is a measurement (2026-10-08) ----
+//
+// requested_not_passing counts a missing test as not passing (TEST_SUITE_CHECK_HELP). But when NONE of the
+// named tests exists, bun 1.3.14 prints `error: regex "<p>" matched 0 tests. Searched 1 file (skipping N tests)`,
+// exits 1 and prints NO summary, so `ran` was false and requested_not_passing came back null: the class-2 judge
+// read that as unknown, and every test-first gap (its falsifier names a test the lane must ADD) was born unknown
+// and stamped not admissible. The output here is bun's REAL output on fixture files in a temp dir, carried to the
+// resolver through the stubbed shell transport.
+describe("test_suite — a name filter that matched no test", () => {
+  const originalFetch = globalThis.fetch;
+  const dir = mkdtempSync(join(tmpdir(), "test-suite-matched0-"));
+  writeFileSync(join(dir, "loads.test.ts"), `import { describe, expect, test } from "bun:test";\ndescribe("Suite", () => { test("existing case", () => expect(1).toBe(1)); test("other case", () => expect(2).toBe(2)); });\n`);
+  writeFileSync(join(dir, "syntax.test.ts"), `import { expect, test } from "bun:test";\ntest("existing case", () => { expect(1).toBe(1) ;\n`);
+
+  /** bun's real output for `bun test <file> --test-name-pattern=<the resolver's pattern>` in the fixture dir. */
+  function realBunOutput(file: string, onlyTests: string[]): string {
+    const p = Bun.spawnSync([process.execPath, "test", `./${file}`, `--test-name-pattern=${onlyTestsPattern(onlyTests)}`], {
+      cwd: dir,
+      env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "", TMPDIR: tmpdir() },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    return new TextDecoder().decode(p.stdout) + new TextDecoder().decode(p.stderr);
+  }
+
+  async function resolveWith(stdout: string, onlyTests: string[]): Promise<Record<string, unknown>> {
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const body = typeof init?.body === "string" ? init.body : "";
+      if (body.includes("vesselCapability")) {
+        return new Response(JSON.stringify({ content: { vessels: [{ endpoint: "http://shell.test", resolve_endpoint: "/resolve", health_score: 1 }] } }), { status: 200 });
+      }
+      if (String(input).startsWith("http://shell.test")) return new Response(JSON.stringify({ stdout }), { status: 200 });
+      return new Response("{}", { status: 200 });
+    }) as typeof fetch;
+    try {
+      const r = await resolveTestSuite({ type: "test_suite", vessel: "development-vessel", test_file: "test/x.test.ts", only_tests: onlyTests });
+      expect(r.shape).toBe("test_suite");
+      return r.body as Record<string, unknown>;
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  }
+
+  test("[must-fail] a loadable file with none of the named tests reports requested_not_passing = the number of named tests", async () => {
+    const one = realBunOutput("loads.test.ts", ["no such named test"]);
+    expect(one).toMatch(/^error: regex .* matched 0 tests\. Searched 1 file/m); // the bun text this relies on
+    expect((await resolveWith(one, ["no such named test"]))["requested_not_passing"]).toBe(1);
+    const names = ["absent one", "Suite > absent two"];
+    const two = realBunOutput("loads.test.ts", names);
+    const b = await resolveWith(two, names);
+    expect(b["requested_not_passing"]).toBe(2);
+    // No test executed: `ran` keeps its meaning (a summary was printed), so readers that gate on it are unchanged.
+    expect(b["ran"]).toBe(false);
+    expect(b["filter_matched_none"]).toBe(true);
+  });
+
+  test("[control] a test file that does not exist stays unmeasured (null)", async () => {
+    const out = realBunOutput("absent.test.ts", ["existing case"]);
+    expect(out).toContain("had no matches");
+    const b = await resolveWith(out, ["existing case"]);
+    expect(b["requested_not_passing"]).toBeNull();
+    expect(b["ran"]).toBe(false);
+  });
+
+  test("[control] output with no summary and no 'Searched N file' line stays unmeasured (null)", async () => {
+    expect((await resolveWith("bun: command not found\n", ["existing case"]))["requested_not_passing"]).toBeNull();
+  });
+
+  // bun 1.3.14 reports a file that fails to LOAD (syntax or import error) as one failed test WITH a summary
+  // (`0 pass / 1 fail / 1 error`), so it was already a measurement before this change: pinned, unchanged.
+  test("[control] a file that fails to load prints a summary and counts the named test as not passing (unchanged)", async () => {
+    const out = realBunOutput("syntax.test.ts", ["existing case"]);
+    expect(out).toContain("Unhandled error between tests");
+    const b = await resolveWith(out, ["existing case"]);
+    expect(b["ran"]).toBe(true);
+    expect(b["requested_not_passing"]).toBe(1);
+    expect(b["filter_matched_none"]).toBeUndefined();
+  });
+
+  test("[control] an existing named test reads ran, total 1, requested_not_passing 0", async () => {
+    const b = await resolveWith(realBunOutput("loads.test.ts", ["Suite > existing case"]), ["Suite > existing case"]);
+    expect(b).toMatchObject({ ran: true, total: 1, requested_not_passing: 0 });
+  });
+
+  test("[control] a run that matched SOME named tests keeps counting the missing ones (unchanged)", async () => {
+    const names = ["Suite > existing case", "no such named test"];
+    const b = await resolveWith(realBunOutput("loads.test.ts", names), names);
+    expect(b).toMatchObject({ ran: true, requested_not_passing: 1 });
+  });
+  afterAll(() => rmSync(dir, { recursive: true, force: true }));
 });

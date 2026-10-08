@@ -129,6 +129,37 @@ describe("birth evaluation at the substrateGap_write seam", () => {
     expect(await admissionReason(g)).toContain("predicate_suspect");
   });
 
+  // THE BIRTH LOG NAMES WHAT THE VERDICT IS (2026-10-08). The suffix used to read "predicate_suspect: not admissible,
+  // and its absent closes nothing" for EVERY non-present verdict, so an unmeasured check (unknown) and an accused one
+  // (absent: it already passes on the unfixed tree) read the same in the journal. Admissibility is unchanged: an
+  // unknown birth is still excluded by predicateSuspect and closes nothing; only the label tells them apart.
+  it("[must-fail] an unknown birth verdict is logged as unknown, not as predicate_suspect; an absent one still is", async () => {
+    const lines: string[] = [];
+    const spy = spyOn(console, "log").mockImplementation(((...a: unknown[]) => { lines.push(a.map(String).join(" ")); }) as never);
+    const unknownId = `gf2-birth-unknown-label-${RUN}`;
+    const absentId = `gf2-birth-absent-label-${RUN}`;
+    try {
+      selfResolveMode = "http500";
+      await write(unknownId, testSuiteCheck("widget counts rejected frames"));
+      await __settleBirthEvaluationsForTests();
+      selfResolveMode = "answer";
+      await write(absentId, testSuiteCheck("widget already passes"));
+      await __settleBirthEvaluationsForTests();
+    } finally {
+      spy.mockRestore();
+    }
+    const unknownLine = lines.find((l) => l.includes(`[gap-birth] ${unknownId}:`)) ?? "";
+    const absentLine = lines.find((l) => l.includes(`[gap-birth] ${absentId}:`)) ?? "";
+    expect(unknownLine).toContain("reads unknown");
+    expect(unknownLine).not.toContain("predicate_suspect");
+    expect(absentLine).toContain("predicate_suspect: not admissible"); // control: a real suspect keeps its label
+    // Admissibility unchanged: predicateSuspect (what admission and closure read) still accuses the unknown birth;
+    // admission itself is pinned by "an unresolvable check is stamped unknown and is NOT admissible" above.
+    const g = await row(unknownId);
+    expect(metaOf(g).predicate_birth_verdict).toBe("unknown");
+    expect(predicateSuspect(metaOf(g))).toBe("its check could not be evaluated at birth (unresolvable or timed out)");
+  });
+
   it("a check that times out is stamped unknown", async () => {
     const id = `gf2-birth-timeout-${RUN}`;
     await write(id, testSuiteCheck("widget counts rejected frames"), { birthJudge: (g: Record<string, unknown>) => evaluateGapCheck(g, { timeoutMs: 5, fetchImpl: ((_u: unknown, init?: RequestInit) => new Promise((_r, rej) => init?.signal?.addEventListener("abort", () => rej(new DOMException("timed out", "TimeoutError"))))) as unknown as typeof fetch }) });

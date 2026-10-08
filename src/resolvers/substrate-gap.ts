@@ -41,6 +41,7 @@ import { join, resolve as resolvePath, sep } from "node:path";
 import { tmpdir } from "node:os";
 import { carryGoalReachEntries, isGoalReachEntry, mergeDemandGoal, type GoalReachDemandEntry } from "../lib/demand-goals.js";
 import { regionLiteralVerdict, regionOf, falsifierClassOf } from "../lib/region-literal.js";
+import { countLiteralOnEvaluatorTree, evaluatorEditSite } from "../lib/evaluator-tree.js";
 
 // EXPECTATION CALIBRATION, HELD WITH THE GAP STORE (value-per-cost-selection 5.5). Same file and
 // format gap-to-feature reads ({category: {attempts, lands}}). It lives on the node that holds the
@@ -108,11 +109,6 @@ import { loadFleetShapeVocabulary, vocabularyIsJudgeable, type ShapeVocabulary }
 // this module (see substrate-gap.test.ts), so capturing at load time changes
 // nothing for them.
 const WORKSPACE_ROOT_AT_LOAD = process.env["WORKSPACE_ROOT"] ?? DEFAULT_WORKSPACE_ROOT;
-function readFromCorrectWorkspace(path: string): string {
-  // Ensure we read from the live workspace, not a stale one
-  const liveRoot = process.env["WORKSPACE_ROOT"] ?? DEFAULT_WORKSPACE_ROOT;
-  return path.replace(DEFAULT_WORKSPACE_ROOT, liveRoot);
-}
 
 /**
  * ARM-TIME REGION GATE (2026-10-03). Compose grounding centres the draft on the line containing
@@ -160,57 +156,6 @@ export function armRegionGate(
   };
 }
 
-/**
- * Determines if a predicate literal is already present, and whether its presence
- * indicates a state of 'armed' or 'unarmed' for gap resolution.
- *
- * This function addresses four issues identified in the substrate gap:
- * 1. INVERT THE DECISION: It returns `true` if the literal is present and should
- *    prevent arming (i.e., indicates the fix is already in place, or a defect is present).
- *    For `expected_literal`, `true` means the literal is present and a gap should NOT be armed.
- *    For `expected_literal`, `true` means the literal is already present (count > 0) and thus should NOT be armed.
- *    For `hardcoded_url`, `true` means the literal is *absent* (count === 0) and thus should NOT be armed.2. READ THE SAME TREE THE PREDICATE READS: Uses `runtimeRoot()` for path resolution to align
- *    arming with evaluation.
- * 3. COUNT LITERALLY, NOT BY REGEX: Counts occurrences using string `indexOf` to avoid regex
- *    metacharacter issues.
- * 4. HONOUR THE NAME: For `expected_literal`, a non-zero count (meaning already present) will refuse arming.
- *    For `hardcoded_url`, a zero count (meaning absent) will refuse arming.
- *
- * @param literal The string literal to search for.
- * @param filePath The file path relative to the runtime root.
- * @param detectDefect If true, `true` means a defect (e.g., `hardcoded_url` is present). If false (default),
- *                     `true` means the fix is present (e.g., `expected_literal` is present).
- * @returns `true` if the condition for refusal (or defect detection) is met, `false` otherwise.
- */
-function predicateLiteralNotUnique(literal: unknown, filePath: unknown, detectDefect = false): boolean {
-  if (typeof filePath === 'string') {
-    filePath = readFromCorrectWorkspace(filePath);
-  }
-  if (typeof literal !== 'string' || typeof filePath !== 'string') return false;
-  const runtimePath = filePath.replace(/^repos\//, "");
-
-  try {
-    const content = readFileSync(join(workspaceRoot(), runtimePath), 'utf8');
-    let count = 0;
-    let lastIndex = 0;
-    while ((lastIndex = content.indexOf(literal, lastIndex)) !== -1) {
-      count++;
-      lastIndex += literal.length;
-    }
-
-    if (detectDefect) {
-      // For `hardcoded_url`, absence (count === 0) means it's not a defect *yet*.
-      // We refuse to arm if the URL is *absent* (count === 0), as the gap describes something to remove.
-      return count === 0;
-    } else {
-      // For `expected_literal`, presence (count > 0) means the literal is already there.
-      // We refuse to arm if the literal is *present* (count > 0), as the gap describes something to add.
-      return count > 0;
-    }
-  } catch {
-    return false;
-  }
-}
 function workspaceRoot(): string {
   return WORKSPACE_ROOT_AT_LOAD;
 }
@@ -687,8 +632,10 @@ export interface FalsifierClassification {
    */
   predicate_shape?: string;
   /**
-   * Why an "unresolvable" verdict was reached when it is NOT an unadvertised shape — today
-   * only the Class-1-without-edit-site case. An escalation that cannot say WHY a predicate
+   * Why an "unresolvable" verdict was reached when it is NOT an unadvertised shape — a literal
+   * predicate with no edit site, a site missing or unreadable on the evaluator's tree, a literal
+   * already in its fixed state there, or a non-unique compose anchor. Stored on the row as
+   * `falsifier_unresolvable_reason`. An escalation that cannot say WHY a predicate
    * is inert cannot be acted on, and "unresolvable" alone would read as a bad shape name.
    */
   unresolvable_reason?: string;
@@ -780,16 +727,26 @@ export function classifyFalsifier(
   //
   // `unresolvable` is the honest label: a predicate WAS supplied and cannot be resolved,
   // which is the same failure the unadvertised-shape case names.
-  if (usablePredicateString(m["expected_literal"])) {
-    if (predicateLiteralNotUnique(m["expected_literal"], m["edit_site"] ?? m["file_path"])) return { falsifier: "unresolvable" };
-    if (m["edit_site"] || m["file_path"]) return { falsifier: "class1", predicate_position: "expected_literal" };
-    return { falsifier: "unresolvable" };
-  }
-  if (usablePredicateString(m["hardcoded_url"])) {
-    if (predicateLiteralNotUnique(m["hardcoded_url"], m["edit_site"] ?? m["file_path"], true)) return { falsifier: "unresolvable" };
-    const editSite = usablePredicateString(m["edit_site"]) ?? usablePredicateString(m["file_path"]);
-        if (!editSite || !existsSync(join(workspaceRoot(), readFromCorrectWorkspace(editSite).replace(/^repos\//, "")))) {
-
+  // THE ARMING GUARD READS THE EVALUATOR'S TREE (lib/evaluator-tree.ts). It read WORKSPACE_ROOT, which in the
+  // container is the super-repo clone and never holds <vessel>/src/..., so every hardcoded_url gap with an edit site
+  // was born unresolvable under the false reason "without edit_site", and a read error passed silently. The site is
+  // chosen by the evaluator's own precedence (file_path, then edit_site, :line stripped) and read where it reads it;
+  // a missing or unreadable site is its own reason, never "0 occurrences".
+  const siteRead = (literal: string, editSite: string): { reason: string } | { count: number } => {
+    const r = countLiteralOnEvaluatorTree(editSite, literal);
+    if (r.ok) return { count: r.count };
+    return {
+      reason: r.kind === "missing"
+        ? `edit_site_missing: ${editSite} does not exist at ${r.path} (the evaluator's tree, MITOSIS_RUNTIME_DIR) — verifyGapCondition answers 'unknown'`
+        : `edit_site_unreadable: ${editSite} cannot be read at ${r.path} (${r.error}) — verifyGapCondition cannot measure it`,
+    };
+  };
+  // hardcoded_url FIRST, as the evaluator does (verifyGapCondition enters Class 1b only when no hardcoded_url is set):
+  // a row carrying both was labelled by the expected_literal polarity and measured by the hardcoded_url one.
+  const hardcodedUrl = usablePredicateString(m["hardcoded_url"]);
+  if (hardcodedUrl) {
+    const editSite = evaluatorEditSite(m);
+    if (!editSite) {
       return {
         falsifier: "unresolvable",
         predicate_position: "hardcoded_url",
@@ -797,7 +754,44 @@ export function classifyFalsifier(
         classified_at: at,
       };
     }
+    const r = siteRead(hardcodedUrl, editSite);
+    if ("reason" in r) return { falsifier: "unresolvable", predicate_position: "hardcoded_url", unresolvable_reason: r.reason, classified_at: at };
+    if (r.count === 0) {
+      // A landing's durability sentinel (the line its commit removed) is absent by construction; the evaluator reads
+      // it present/pending, never as a resolution predicate. Say so, so a census can tell it from an inert literal.
+      const sentinel = m["predicate_source"] === "removed_line_of_landing_commit";
+      return {
+        falsifier: "unresolvable",
+        predicate_position: "hardcoded_url",
+        unresolvable_reason: sentinel
+          ? `literal_absent (durability sentinel): the removed line is absent from ${editSite} on the evaluator's tree — the landing persists; nothing to arm`
+          : `literal_absent: hardcoded_url occurs 0 times in ${editSite} on the evaluator's tree — the gap would read fixed before any change`,
+        classified_at: at,
+      };
+    }
     return { falsifier: "class1", predicate_position: "hardcoded_url", classified_at: at };
+  }
+  const expectedLiteral = usablePredicateString(m["expected_literal"]);
+  if (expectedLiteral) {
+    const editSite = evaluatorEditSite(m);
+    if (!editSite) {
+      return { falsifier: "unresolvable", predicate_position: "expected_literal", unresolvable_reason: "expected_literal without edit_site/file_path — verifyGapCondition never enters the Class-1b branch", classified_at: at };
+    }
+    const r = siteRead(expectedLiteral, editSite);
+    // A site that does not exist yet is the one case kept as class1: the fix may create the file, and the evaluator
+    // measures it once it exists ('unknown' until then). Unreadable is not that: it can never be measured.
+    if ("reason" in r && r.reason.startsWith("edit_site_unreadable")) {
+      return { falsifier: "unresolvable", predicate_position: "expected_literal", unresolvable_reason: r.reason, classified_at: at };
+    }
+    if ("count" in r && r.count > 0) {
+      return {
+        falsifier: "unresolvable",
+        predicate_position: "expected_literal",
+        unresolvable_reason: `literal_already_present: expected_literal occurs ${r.count} time(s) in ${editSite} on the evaluator's tree — the gap would read fixed before any change`,
+        classified_at: at,
+      };
+    }
+    return { falsifier: "class1", predicate_position: "expected_literal", classified_at: at };
   }
 
   const evidenceResolve = m["evidence_resolve"];
@@ -1791,7 +1785,7 @@ async function resolveSubstrateGapWriteInner(
   })();
   const outcome = await withGapLock(async (): Promise<
     | { early: ResolverResult }
-    | { action: "created" | "updated"; summaryChanged: boolean; reopened: boolean; classKey: string; falsifier: FalsifierClass; unadvertisedShape?: string; birthJob: { id: string; key: string; meta: Record<string, unknown> } | null }
+    | { action: "created" | "updated"; summaryChanged: boolean; reopened: boolean; classKey: string; falsifier: FalsifierClass; unadvertisedShape?: string; unresolvableReason?: string; birthJob: { id: string; key: string; meta: Record<string, unknown> } | null }
   > => {
   const gaps = await loadGaps();
   // Dedup by gap CLASS (volatile-stripped id), not raw id, so timestamped
@@ -2178,12 +2172,14 @@ async function resolveSubstrateGapWriteInner(
   // to block the substrate's detection loop.
   let falsifier: FalsifierClass = "none";
   let unadvertisedShape: string | undefined;
+  let unresolvableReason: string | undefined;
   let birthJob: { id: string; key: string; meta: Record<string, unknown> } | null = null;
   try {
     const merged = (gap.classification_metadata ?? {}) as Record<string, unknown>;
     const c = classifyFalsifier(merged, vocabForClassify);
     falsifier = c.falsifier;
     unadvertisedShape = c.unadvertised_shape;
+    unresolvableReason = c.unresolvable_reason;
     // ADD BESIDE, NEVER REWRITE (constraint C). The writer's predicate — whatever it
     // said, however wrong the shape name — survives byte-identical. An "unresolvable"
     // verdict is a label on the data, not a correction of it; silently mutating a
@@ -2194,6 +2190,10 @@ async function resolveSubstrateGapWriteInner(
     else delete merged["falsifier_position"];
     if (c.unadvertised_shape) merged["falsifier_unadvertised_shape"] = c.unadvertised_shape;
     else delete merged["falsifier_unadvertised_shape"];  // clear a stale accusation carried from the old row
+    // WHY it is unresolvable travels with the label: the classifier returned it and the row dropped it, so a census
+    // of unresolvable rows could not tell an inert predicate from a mis-addressed read.
+    if (c.unresolvable_reason) merged["falsifier_unresolvable_reason"] = c.unresolvable_reason;
+    else delete merged["falsifier_unresolvable_reason"];
     merged["falsifier_classified_at"] = c.classified_at;
     // BIRTH EVALUATION: decided here, run after the save (see applyBirthStamp).
     birthJob = applyBirthStamp(gap.id, String(gap.status ?? "open"), c.falsifier, merged, priorMetaForBirth, opts?.birthVerdict, now, opts?.detectedSha);
@@ -2237,11 +2237,11 @@ async function resolveSubstrateGapWriteInner(
   }
 
   await saveGaps(gaps);
-  return { action, summaryChanged, reopened, classKey, falsifier, unadvertisedShape, birthJob };
+  return { action, summaryChanged, reopened, classKey, falsifier, unadvertisedShape, unresolvableReason, birthJob };
   });
 
   if ("early" in outcome) return outcome.early;
-  const { action, summaryChanged, reopened, classKey, falsifier, unadvertisedShape, birthJob } = outcome;
+  const { action, summaryChanged, reopened, classKey, falsifier, unadvertisedShape, unresolvableReason, birthJob } = outcome;
   if (birthJob) scheduleBirthEvaluation(birthJob, opts?.birthJudge ?? __birthJudgeOverride ?? defaultBirthJudge);
   // ONE LINE PER WRITE. A silent classification is worth nothing: this codebase has
   // repeatedly shipped mechanisms whose CONFIRMING case emitted no evidence, and a
@@ -2251,7 +2251,8 @@ async function resolveSubstrateGapWriteInner(
   // of exactly this feedback.
   console.log(
     `[gap-falsifier] ${action} ${gap.id}: falsifier=${falsifier}` +
-    (unadvertisedShape ? ` unadvertised_shape="${unadvertisedShape}" (predicate is INERT — it will resolve to nothing and the sweep will abstain forever)` : ""),
+    (unadvertisedShape ? ` unadvertised_shape="${unadvertisedShape}" (predicate is INERT — it will resolve to nothing and the sweep will abstain forever)` : "") +
+    (unresolvableReason ? ` reason="${unresolvableReason.slice(0, 200)}"` : ""),
   );
   // This whole block has a REAL production side effect: it shells out to `systemctl
   // start gap-compose.service` against whatever systemd this process can reach, and
@@ -2498,6 +2499,7 @@ async function resolveSubstrateGapWriteInner(
       gap_class: classKey,
       falsifier,
       ...(unadvertisedShape ? { falsifier_unadvertised_shape: unadvertisedShape } : {}),
+      ...(unresolvableReason ? { falsifier_unresolvable_reason: unresolvableReason } : {}),
     },
   };
 }

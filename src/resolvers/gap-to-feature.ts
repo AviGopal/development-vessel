@@ -32,6 +32,7 @@ import { peekComposeCapacity, hasFreeComposeCapacity } from "../compose-slots.js
 import { gateLanding, landingsStopped } from "./push-policy.js";
 import { readFile } from "node:fs/promises";
 import { selfAuthHeaders } from "../lib/self-auth.js";
+import { evaluatorTreeRoot, evaluatorTreePath } from "../lib/evaluator-tree.js";
 
 // Mirror feature-compose's path model: repos/<vessel>/... maps to the writable
 // runtime ${MITOSIS_RUNTIME_DIR}/<vessel>/..., and the drafter writes proposal reports
@@ -49,7 +50,9 @@ const envPath = (key: string, fallback: string): string => {
   const raw = process.env[key];
   return raw === undefined || raw.trim() === "" ? fallback : raw;
 };
-const runtimeRoot = (): string => envPath("MITOSIS_RUNTIME_DIR", "/vessels");
+// The evaluator's tree is ONE resolver (lib/evaluator-tree.ts), shared with the class-1 classifier in substrate-gap
+// so the label and the measurement read the same file.
+const runtimeRoot = evaluatorTreeRoot;
 const proposalsDir = (): string => envPath("PROPOSALS_DIR", "/workspace/proposals");
 
 // COMPOSE-HORIZON DEDUP — the one selection primitive, applied at the compose horizon.
@@ -2720,7 +2723,7 @@ export function literalInReaderBody(src: string, literal: string, reader: string
 }
 
 function evaluateExpectedLiteral(editSite: string, expectedLiteral: string, literalReader?: string): 'present' | 'absent' | 'unknown' {
-  const runtimePath = join(runtimeRoot(), editSite.replace(/^\//, '').replace(/^repos\//, ''));
+  const runtimePath = evaluatorTreePath(editSite);
   if (!existsSync(runtimePath)) return 'unknown';
   const contents = readFileSync(runtimePath, 'utf8');
   // A decomposed step names the function that must read its literal; whole-file presence closed steps on a comment,
@@ -2769,7 +2772,7 @@ export function verifyGapCondition(gap: Record<string, unknown>): 'present' | 'a
     if (editSite && hardcodedUrl) {
       // editSite is repo-relative like repos/some-vessel/src/file.ts
       // Map to runtime path using the same pattern as line 21
-      const runtimePath = join(runtimeRoot(), editSite.replace(/^\//, '').replace(/^repos\//, ''));
+      const runtimePath = evaluatorTreePath(editSite);
       if (!existsSync(runtimePath)) return 'unknown';
       const contents = readFileSync(runtimePath, 'utf8');
       // A predicate the LANDING derived from its own diff (a line the commit removed,
@@ -2903,7 +2906,7 @@ async function verifyGapConditionAsync(gap: Record<string, unknown>, opts: GapCh
     const editSite = rawEditSite ? rawEditSite.replace(/:\d+$/, '') : null;
     const hardcodedUrl = typeof meta['hardcoded_url'] === 'string' ? meta['hardcoded_url'] : null;
     if (editSite && hardcodedUrl) {
-      const runtimePath = join(runtimeRoot(), editSite.replace(/^\//, '').replace(/^repos\//, ''));
+      const runtimePath = evaluatorTreePath(editSite);
       if (!existsSync(runtimePath)) return 'unknown';
       const contents = readFileSync(runtimePath, 'utf8');
       // A predicate the LANDING derived from its own diff (a line the commit removed,

@@ -9,15 +9,16 @@
  * the drafter edits unrelated code. A region occurring twice grounds on whichever occurrence grounding
  * picks (the last), which the author did not choose. So a region is usable only when it occurs EXACTLY ONCE.
  *
- * The file is read where grounding reads it, not where the class-1 literal check reads it
- * (WORKSPACE_ROOT + the path minus `repos/`, which is not a vessel tree in the container). A gate that
- * counts in a different tree than its consumer certifies nothing.
+ * The file is read where grounding reads it — the evaluator's tree, which the class-1 literal check now reads
+ * too (it read WORKSPACE_ROOT + the path minus `repos/`, which is not a vessel tree in the container). A gate
+ * that counts in a different tree than its consumer certifies nothing.
  *
  * FAIL CLOSED. An unreadable edit_site (missing, a `:line` suffix, prose, two paths) is its own verdict,
  * never "0 occurrences, absent": ENOENT read as "absent" is how the class-1 arming guard came to never fire.
  */
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { evaluatorTreeRoot } from "./evaluator-tree.js";
 
 export type RegionLiteralError = "region_not_literal_once" | "region_spans_lines" | "edit_site_unreadable";
 
@@ -25,11 +26,9 @@ export type RegionLiteralVerdict =
   | { ok: true; occurrences: 1; edit_site: string; region: string }
   | { ok: false; error: RegionLiteralError; occurrences: number | null; edit_site: string; region: string; detail: string };
 
-/** The runtime tree grounding reads. Read at call time; an empty value is unset (same rule as gap-to-feature envPath). */
-function groundingRoot(): string {
-  const raw = process.env["MITOSIS_RUNTIME_DIR"];
-  return raw === undefined || raw.trim() === "" ? "/vessels" : raw;
-}
+/** The runtime tree grounding reads: the evaluator's tree (lib/evaluator-tree.ts), read at call time. Only the ROOT is
+ *  shared — this gate keeps its own stricter site rule (a bare repos/<vessel>/<path>, no :line suffix). */
+const groundingRoot = evaluatorTreeRoot;
 
 /** The region as grounding uses it: trimmed; empty means no region. */
 export function regionOf(meta: Record<string, unknown> | null | undefined): string {

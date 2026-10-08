@@ -31,6 +31,7 @@ export type FetchGuard = {
   restore: () => string[];
 };
 
+import type { LandingLease, SubstrateGapLeasePointer } from "../../src/resolvers/substrate-gap.js";
 import { installGateVersionDefault, clearGateVersionDefault } from "./cutover-gate-default.js";
 
 /** The real fetch, captured when this helper first loads. */
@@ -138,12 +139,15 @@ export const FIXTURE_GAP_STORE = "http://gap-store.fixture/resolve";
  * classification_metadata keys carry forward. Set process.env.GAP_STORE_ENDPOINT =
  * FIXTURE_GAP_STORE in the test's setup (and restore it).
  */
+let leaseRuleModule: Promise<typeof import("../../src/resolvers/substrate-gap.js")> | null = null;
+const leaseRule = () => (leaseRuleModule ??= import(`../../src/resolvers/substrate-gap.js?${"fixture-lease-rule"}`));
 export function routeFixtureGapStore(g: FetchGuard): Map<string, Record<string, any>> {
   const rows = new Map<string, Record<string, any>>();
+  const leases = new Map<string, LandingLease>();
   g.route({
     name: "fixture gap store",
     match: (u) => u.startsWith("http://gap-store.fixture"),
-    respond: (_u, b) => {
+    respond: async (_u, b) => {
       const p = (b?.impulse?.pointer ?? {}) as Record<string, any>;
       if (p["type"] === "substrateGap_write") {
         const gap = (p["gap"] ?? {}) as Record<string, any>;
@@ -159,6 +163,27 @@ export function routeFixtureGapStore(g: FetchGuard): Map<string, Record<string, 
         if (typeof p["status"] === "string") gaps = gaps.filter((r) => r["status"] === p["status"]);
         if (typeof p["limit"] === "number") gaps = gaps.slice(0, p["limit"]);
         return Response.json({ shape: "substrateGap", body: { gaps } });
+      }
+      // THE LANDING LEASE, decided with the holder's own rule (substrate-gap.ts decideLandingLease, loaded from a
+      // query-isolated instance so this helper never fixes the shared instance's load-time store root). The state is keyed by
+      // gap id and seeded from the row when this fixture holds one; a gap it holds no row for (suites that stub
+      // the cutover's gap read instead) still gets a lease, so this fixture never answers no_row. A grant is
+      // mirrored onto a held row's classification_metadata.landing_lease, as the holder persists it.
+      if (p["type"] === "substrateGapLease_write") {
+        const { decideLandingLease, landingLeaseOf } = await leaseRule();
+        const id = String(p["gap_id"] ?? "");
+        const row = rows.get(id);
+        const current = row ? landingLeaseOf(row["classification_metadata"]) : (leases.get(id) ?? null);
+        const d = decideLandingLease(current, p as SubstrateGapLeasePointer, Date.now());
+        if (d.next !== undefined) {
+          if (d.next === null) leases.delete(id); else leases.set(id, d.next);
+          if (row) {
+            const meta = { ...((row["classification_metadata"] ?? {}) as Record<string, unknown>) };
+            if (d.next === null) delete meta["landing_lease"]; else meta["landing_lease"] = d.next;
+            rows.set(id, { ...row, classification_metadata: meta });
+          }
+        }
+        return Response.json({ shape: "substrateGapLease", body: d.verdict });
       }
       return Response.json({ shape: "structuredError", body: { detail: `fixture gap store: unsupported pointer type ${String(p["type"])}` } });
     },

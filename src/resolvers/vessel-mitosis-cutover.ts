@@ -20,7 +20,7 @@ import {
 import { createHash } from "node:crypto";
 import { registerAttempt } from "./attempt-register.js";
 import type { ResolverResult } from "./types.js";
-import { resolveSubstrateGap, resolveSubstrateGapWrite } from "./substrate-gap.js";
+import { resolveSubstrateGap, resolveSubstrateGapWrite, resolveSubstrateGapLease, landingLeaseOf, isLandingLeaseVerdict, countLandingLeaseRefusal, landingLeaseRefusalCounts, type LandingLeaseVerdict } from "./substrate-gap.js";
 import { resolveTestSuite } from "./test-suite.js";
 import { runBehavioralVerification } from "./behavioral-verification.js";
 import { resolveActivateSubstrateScript } from "./activate-substrate-script.js";
@@ -38,11 +38,14 @@ type OwnCheckDeps = {
   readGap: (p: Record<string, unknown>) => Promise<unknown>;
   writeGap: (p: Record<string, unknown>) => Promise<unknown>;
   runSuite: (p: Record<string, unknown>) => Promise<unknown>;
+  /** The landing-lease op (substrateGapLease_write) at the gap-store holder. */
+  lease: (p: Record<string, unknown>) => Promise<unknown>;
 };
 const realOwnCheckDeps: OwnCheckDeps = {
   readGap: (p) => resolveSubstrateGap(p as never),
   writeGap: (p) => resolveSubstrateGapWrite(p as never),
   runSuite: (p) => resolveTestSuite(p),
+  lease: (p) => resolveSubstrateGapLease(p),
 };
 
 /**
@@ -2014,6 +2017,87 @@ interface GitCutoverArgs {
   hostRepoRoot: string;
   evaluationEvidence: VesselMitosisCutoverPointer["evaluation_evidence"];
   stagedBaseSha: string | undefined;
+  /** Set by the landing-lease gate when THIS cutover holds the gap's landing lease; released on the outcome. */
+  landingLease?: { gapId: string; holder: string; held: boolean };
+}
+
+/**
+ * The landing gap's id: the pointer's when it is a real id, else the pending record's for THIS mitosis
+ * (mitosis-tick forwards only four pending fields). Pure read; same rule as the own-check step below.
+ */
+async function cutoverGapIdOf(pointer: VesselMitosisCutoverPointer, mitosis_version_id: string): Promise<string> {
+  const pointerGapId = typeof pointer.gap_id === "string" && pointer.gap_id.trim() && !pointer.gap_id.includes("{{") ? pointer.gap_id.trim() : "";
+  if (pointerGapId) return pointerGapId;
+  try {
+    const path = pointer.pending_pointer_path ?? join(process.env["WORKSPACE_ROOT"] ?? process.cwd(), "mitosis-pending.json");
+    if (await pathExists(path)) {
+      const cur = JSON.parse(await readFile(path, "utf-8")) as { mitosis_version_id?: string; gap_id?: string };
+      if (cur.mitosis_version_id === mitosis_version_id && typeof cur.gap_id === "string" && cur.gap_id.length > 0) return cur.gap_id;
+    }
+  } catch { /* unreadable pending record: no gap id from it */ }
+  return "";
+}
+
+/**
+ * LANDING-LEASE GATE (substrate-gap.ts LANDING LEASE). Two nodes sharing one gap-store holder cut over the
+ * same gap 75 s apart (2026-10-07). Before anything is applied, a cutover of a gap the store holds must
+ * hold that gap's landing lease, read through the store:
+ *   - the row carries a lease: RENEW it (granted only if THIS node holds it and it has not lapsed);
+ *   - the row carries none: ACQUIRE it (a cutover not preceded by a compose, e.g. a mitosis-tick re-run of
+ *     a staged tree, is its own admission) — never "no lease seen ⇒ go";
+ *   - held by another node, lapsed, or not knowable: refuse landing_lease_not_held through softRefuse
+ *     (a refusal trace is posted). Not knowable (store unreadable, no lease verdict) also DEFERS
+ *     (preserve_pending), like gap_store_unavailable.
+ * No stored row (route-edit-*, pwt-*, adhoc): no lease to hold, proceed as before.
+ */
+async function landingLeaseGate(args: GitCutoverArgs): Promise<ResolverResult | null> {
+  const gapId = await cutoverGapIdOf(args.pointer, args.mitosis_version_id);
+  if (!gapId) return null;
+  const { thisNode } = await import("./self-fact-reconcile.js");
+  const holder = thisNode();
+  const refuse = (unknown: boolean, why: string, v?: Partial<LandingLeaseVerdict>): ResolverResult => {
+    countLandingLeaseRefusal(unknown ? "cutover_unknown" : "cutover_not_held");
+    return softRefuse(
+      `landing_lease_not_held: gap ${gapId} — ${why}. This node (${holder}) does not hold the gap's landing lease, so this cutover does not land${unknown ? "; deferred, the staged tree and its pending lock are kept and retried" : ""}.`,
+      { kind: "landing_lease_not_held", refuse_class: "landing_lease_not_held", vessel_name: args.vessel_name, gap_id: gapId, holder, held_by: v?.held_by ?? null, until: v?.until ?? null, lease_unknown: unknown, ...(unknown ? { deferred: true, preserve_pending: true } : {}), landing_lease_refusals: landingLeaseRefusalCounts() },
+    );
+  };
+  // An unreadable store is the own-check step's gap_store_unavailable deferral, taken here, earlier: same class,
+  // counter and pending-lock rule, so a store outage reads as one thing wherever it is met.
+  const unreadable = (why: string): ResolverResult => {
+    countLandingLeaseRefusal("cutover_unknown");
+    countOwnCheck("gap_store_unavailable", `gap=${gapId} vessel=${args.vessel_name} mitosis=${args.mitosis_version_id} — landing lease unknown, deferring: ${why}`);
+    return softRefuse(
+      `gap_store_unavailable: could not read gap ${gapId} to check its landing lease (${why}). Deferring this cutover; the staged tree and its pending lock are kept and retried next tick.`,
+      { kind: "gap_store_unavailable", refuse_class: "gap_store_unavailable", deferred: true, preserve_pending: true, vessel_name: args.vessel_name, gap_id: gapId, holder, lease_unknown: true, own_check_counters: getOwnCheckCounters(), landing_lease_refusals: landingLeaseRefusalCounts() },
+    );
+  };
+  let res: unknown;
+  try { res = await ownCheckDeps.readGap({ type: "substrateGap", id: gapId, limit: 1 }); } catch (err) { return unreadable(`gap store read threw: ${(err as Error).message.slice(0, 200)}`); }
+  const r = res as { shape?: string; body?: { gaps?: unknown } } | null;
+  if (!r || r.shape !== "substrateGap" || !Array.isArray(r.body?.gaps)) return unreadable(`gap store answered ${r?.shape ?? "nothing"}`);
+  const row = (r.body!.gaps as Array<Record<string, unknown>>).find((g) => String(g?.["id"]) === gapId);
+  if (!row) return null;
+  const current = landingLeaseOf(row["classification_metadata"]);
+  const action = current ? "renew" : "acquire";
+  let v: LandingLeaseVerdict;
+  try {
+    const lr = (await ownCheckDeps.lease({ type: "substrateGapLease_write", action, gap_id: gapId, holder, attempt: args.mitosis_version_id })) as { shape?: string; body?: unknown } | null;
+    v = lr?.shape === "substrateGapLease" && isLandingLeaseVerdict(lr.body) ? lr.body : { action, gap_id: gapId, granted: false, unknown: true, reason: `no lease verdict (${lr?.shape ?? "nothing"})` };
+  } catch (err) {
+    v = { action, gap_id: gapId, granted: false, unknown: true, reason: `lease op threw: ${(err as Error).message.slice(0, 200)}` };
+  }
+  if (!v.granted) {
+    const unknown = v.unknown === true;
+    const why = unknown ? `the lease state is unknown (${v.reason ?? "?"})`
+      : v.reason === "lapsed" ? `its lease lapsed at ${v.until ?? "?"}`
+      : v.held_by ? `the lease is held by ${v.held_by} until ${v.until ?? "?"}${v.reason === "lapsed_held_by_other" ? " (lapsed)" : ""}`
+      : `the lease was not granted (${v.reason ?? "?"})`;
+    return refuse(unknown, why, v);
+  }
+  if (args.landingLease) Object.assign(args.landingLease, { gapId, holder, held: true });
+  console.error(`[mitosis-cutover] landing lease ${action === "renew" ? "renewed" : "acquired"} gap=${gapId} holder=${holder} until=${v.until ?? "?"}`);
+  return null;
 }
 
 async function runGitAwareCutover(args: GitCutoverArgs): Promise<ResolverResult> {
@@ -2076,11 +2160,22 @@ async function runGitAwareCutover(args: GitCutoverArgs): Promise<ResolverResult>
   // A DEFERRAL keeps its queue lock: the inner cutover marks it preserve_pending (gap store
   // unavailable — retry this same tree next tick), and the exit clear below then leaves it.
   let preservePending = false;
+  const landingLease = { gapId: "", holder: "", held: false };
   try {
-    const inner = await runGitAwareCutoverInner(args);
+    const inner = await runGitAwareCutoverInner({ ...args, landingLease });
     preservePending = (inner.body as Record<string, unknown> | undefined)?.["preserve_pending"] === true;
     return inner;
   } finally {
+    // THE LANDING LEASE ENDS WITH THIS CUTOVER'S OUTCOME: landed, refused or failed (a throw included).
+    // A deferral (preserve_pending) keeps it: the same tree is retried, and that retry renews it.
+    if (landingLease.held && !preservePending) {
+      try {
+        await ownCheckDeps.lease({ type: "substrateGapLease_write", action: "release", gap_id: landingLease.gapId, holder: landingLease.holder });
+        console.error(`[mitosis-cutover] landing lease released gap=${landingLease.gapId} holder=${landingLease.holder}`);
+      } catch (err) {
+        console.error(`[mitosis-cutover] landing lease release FAILED gap=${landingLease.gapId}: ${(err as Error).message.slice(0, 200)} (expires at its until)`);
+      }
+    }
     if (proposalLeaseToken) {
       try { await resolveMaintenanceLeaseWrite({ type: "maintenanceLease_write", op: "release", name: "cutover", token: proposalLeaseToken }); } catch { }
     }
@@ -2180,6 +2275,12 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
       vessel_name,
       push_scope: pushScope,
     });
+  }
+
+  // LANDING LEASE, before anything is applied (host-sync emission and `git add` included).
+  {
+    const refused = await landingLeaseGate(args);
+    if (refused) return refused;
   }
 
   // ---- Host-sync intent emission (2026-06-04, Stage B.3) ----

@@ -10,6 +10,7 @@ import { startFailureCreditObserver } from "./observers/failure-credit-observer.
 import { GapDrainObserver } from "./services/gap-drain-observer.js";
 import { admitInFlight, releaseInFlight, runInFlight, inFlightOldestMs, inFlightProgressHealth, type InFlightRecord } from "./lib/compose-progress.js";
 import { markerQuiesced } from "./lib/quiesce-marker.js";
+import { landingLeaseRefusalCounts } from "./resolvers/substrate-gap.js";
 
 const app = new Hono();
 
@@ -56,6 +57,10 @@ app.get("/health", (c) => {
     // Same number the drain itself uses, read from the same env, so the value the
     // converger trusts is the value the drain will honour.
     drain_ms: DEV_VESSEL_DRAIN_MS,
+    // Landing-lease refusals in this process (substrate-gap.ts LANDING LEASE): composes refused because
+    // another node holds the gap's lease (compose_held) or its state was unknown (compose_unknown), and
+    // cutovers refused landing_lease_not_held (cutover_not_held / cutover_unknown).
+    landing_lease_refusals: landingLeaseRefusalCounts(),
     discovery: { registered: isRegistered() },
   });
 });

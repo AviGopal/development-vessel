@@ -28,7 +28,7 @@ import { acquireComposeWorkspace, type ComposeWorkspace } from "./compose-worksp
 import type { ResolverResult } from "./types.js";
 import { resolveVesselMitosisCutover, runGit, type GitOpResult } from "./vessel-mitosis-cutover.js";
 import { registerAttempt, setAuthoringExecution } from "./attempt-register.js";
-import { resolveSubstrateGap, resolveSubstrateGapWrite, inheritableParentCheck, class2PredicateKey } from "./substrate-gap.js";
+import { resolveSubstrateGap, resolveSubstrateGapWrite, inheritableParentCheck, class2PredicateKey, resolveSubstrateGapLease, countLandingLeaseRefusal, landingLeaseRefusalCounts, isLandingLeaseVerdict, type LandingLeaseVerdict } from "./substrate-gap.js";
 import { writeAuthoringMarker, clearAuthoringMarker } from "./patch-with-tools.js";
 import { markOnComposeFailure, VERIFY_FAILURE_CLASSES } from "./staged-mitosis-gate.js";
 import { vacuousEditReason, nonTerminatingEditReason, deadStoreEditReason, truncatingRewriteReason } from "../vacuous-edit.js";
@@ -5061,6 +5061,8 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
   // decides both ways. An unreadable store fails CLOSED (hold_state_unreadable), as the cutover defers
   // on gap_store_unavailable: whether this gap is held cannot be known. A gap id with no stored row
   // is not held. BUSY is a non-attempt, so neither refusal writes anything back to the store.
+  // Set when the store holds this gap and the compose would land: such a compose takes the landing lease below.
+  let landingLeaseGap: string | null = null;
   if (_gapIdForSlot) {
     const lane = isDirected ? "directed" : "undirected";
     let rows: Array<Record<string, unknown>> | null = null;
@@ -5091,6 +5093,7 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
         console.log(`[feature-compose] ${lane} compose NOT started: gap ${_gapIdForSlot} is ineligible (${why})`);
         return { shape: "featureComposeReport", body: { ok: false, verdict: "REFUSED", stage: "ineligible", error: `gap ${_gapIdForSlot} is not compose work: ${why} (${lane} compose not started)` } };
       }
+      landingLeaseGap = _gapIdForSlot;
     }
   }
   // SPEND ENVELOPE AT THE CHOKEPOINT (contained-self-development). gap-to-feature checks the envelope
@@ -5105,7 +5108,35 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
       return { shape: "featureComposeReport", body: { ok: false, verdict: "BUSY", stage: "budget", error: `spend envelope: ${envelope.reason} (undirected compose not started)` } };
     }
   }
+  // THE LANDING LEASE (substrate-gap.ts LANDING LEASE). Every guard above is node-local; two nodes sharing
+  // one gap-store holder composed and landed the same gap 75 s apart (2026-10-07). A landing compose of a
+  // store gap takes the gap's one lease at the holder before it claims a slot. Held by another node, or not
+  // known (the holder unreachable or not answering a lease verdict): BUSY, a non-attempt — nothing is
+  // written back to the gap and no slot is claimed. The lease is held through the cutover's outcome: the
+  // cutover releases it when it lands, refuses or fails; this exit releases it only when nothing is left
+  // pending for a cutover (see releaseOrKeepLandingLease).
+  let landingLease: { gapId: string; holder: string; attempt: string } | null = null;
+  if (landingLeaseGap) {
+    const { thisNode } = await import("./self-fact-reconcile.js");
+    const holder = thisNode();
+    let v: LandingLeaseVerdict;
+    try {
+      const r = await resolveSubstrateGapLease({ type: "substrateGapLease_write", action: "acquire", gap_id: landingLeaseGap, holder, attempt: slotId });
+      v = r.shape === "substrateGapLease" && isLandingLeaseVerdict(r.body) ? r.body : { action: "acquire", gap_id: landingLeaseGap, granted: false, unknown: true, reason: `no lease verdict (${r.shape})` };
+    } catch (err) {
+      v = { action: "acquire", gap_id: landingLeaseGap, granted: false, unknown: true, reason: `lease op threw: ${(err as Error).message.slice(0, 200)}` };
+    }
+    if (!v.granted) {
+      const unknown = v.unknown === true || !v.held_by;
+      countLandingLeaseRefusal(unknown ? "compose_unknown" : "compose_held");
+      const stage = unknown ? "landing_lease_unknown" : "landing_lease_held";
+      console.log(`[feature-compose] compose NOT started: gap ${landingLeaseGap} ${stage}${v.held_by ? ` held_by=${v.held_by} until=${v.until ?? "?"}` : ""} (this node ${holder})${v.reason ? `: ${v.reason}` : ""}`);
+      return { shape: "featureComposeReport", body: { ok: false, verdict: "BUSY", stage, held_by: v.held_by ?? null, until: v.until ?? null, landing_lease_refusals: landingLeaseRefusalCounts(), error: unknown ? `gap ${landingLeaseGap}: the landing lease could not be read or taken at the gap-store holder (${v.reason ?? "unknown"}); abstaining` : `gap ${landingLeaseGap}: the landing lease is held by ${v.held_by} until ${v.until ?? "?"}` } };
+    }
+    landingLease = { gapId: landingLeaseGap, holder, attempt: slotId };
+  }
   const slot = await acquireComposeSlot(slotId, { directed: isDirected, gapId: _gapIdForSlot });
+  if (!slot.granted) await releaseOrKeepLandingLease(landingLease, null);
   if (!slot.granted && slot.duplicateOf) {
     console.error(`[compose-cap] REFUSING compose for ${_gapIdForSlot}: already in flight as ${slot.duplicateOf}`);
     return { shape: "featureComposeReport", body: { ok: false, verdict: "BUSY", stage: "gap_in_flight", error: `gap already in flight as ${slot.duplicateOf} — retry after it completes` } };
@@ -5144,6 +5175,7 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
       },
     };
   }
+  let leaseOutcome: ResolverResult | null = null;
   try {
     const outcome = await resolveFeatureComposeUncapped(pointer);
     try {
@@ -5188,9 +5220,44 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
         }
       }
     } catch { /* emission must never change the refusal */ }
+    leaseOutcome = outcome;
     return outcome;
   } finally {
     await slot.release();
+    await releaseOrKeepLandingLease(landingLease, leaseOutcome);
+  }
+}
+
+/**
+ * A cutover this compose handed its landing to and that is still PENDING: it deferred, keeping its staged
+ * tree and pending lock (preserve_pending), or returned cutoverDeferred (the change window was held) —
+ * either way a later tick re-runs that cutover. Anything else (landed, refused, failed, never reached) is
+ * an outcome.
+ */
+export function cutoverPendingIn(outcome: ResolverResult | null): boolean {
+  const cutovers = ((outcome?.body ?? {}) as { cutovers?: unknown }).cutovers;
+  if (!Array.isArray(cutovers)) return false;
+  return cutovers.some((c) => {
+    const r = ((c ?? {}) as { result?: unknown }).result as Record<string, unknown> | undefined;
+    return !!r && typeof r === "object" && (r["preserve_pending"] === true || r["deferred"] === true);
+  });
+}
+
+/**
+ * The compose exit's share of the landing lease. A cutover still pending keeps it, RENEWED here (a stage
+ * boundary), so another node stays refused until that cutover's outcome. Otherwise it is released: the
+ * cutover already released it on its own outcome (a second release by this holder is a no-op), or the
+ * compose ended without anything for a cutover. Never throws.
+ */
+export async function releaseOrKeepLandingLease(lease: { gapId: string; holder: string; attempt: string } | null, outcome: ResolverResult | null): Promise<void> {
+  if (!lease) return;
+  const pending = cutoverPendingIn(outcome);
+  try {
+    const r = await resolveSubstrateGapLease({ type: "substrateGapLease_write", action: pending ? "renew" : "release", gap_id: lease.gapId, holder: lease.holder, attempt: lease.attempt });
+    const b = (r.body ?? {}) as LandingLeaseVerdict;
+    console.log(`[feature-compose] landing lease ${pending ? `kept for the pending cutover (renewed=${String(b.granted)})` : `released=${String(b.released ?? false)}`} gap=${lease.gapId} holder=${lease.holder}`);
+  } catch (err) {
+    console.warn(`[feature-compose] landing lease ${pending ? "renew" : "release"} FAILED gap=${lease.gapId} holder=${lease.holder}: ${(err as Error).message.slice(0, 200)} (expires at its until)`);
   }
 }
 

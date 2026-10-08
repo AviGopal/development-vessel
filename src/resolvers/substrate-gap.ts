@@ -495,6 +495,136 @@ async function saveGaps(gaps: SubstrateGap[]): Promise<void> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// LANDING LEASE (2026-10-08): ONE landing lease per gap, held at the gap-store HOLDER.
+//
+// Measured 2026-10-07: two nodes composed and landed the same gap 75 s apart (node1 214f9fbd, compose2
+// c1a1ed7f), the second replacing the first. Every coordination primitive was node-local: the compose
+// slot directory, composeInFlight, gap-to-feature's maps, the maintenance-lease file. A node with
+// GAP_STORE_ENDPOINT set forwards its gap reads and writes to the holder, so every node that shares a
+// holder shares ONE store, and an op serialized at that holder is a lease for all of them.
+//
+// THE OP. substrateGapLease_write {action, gap_id, holder, attempt?, ttl_ms?}. On the holder it runs
+// inside withGapLock (the same serialization every gap write takes) against a fresh read of the row:
+//   acquire — grant when the row has no landing_lease, or it expired, or its holder is the caller;
+//   renew   — grant only when the caller holds it and it has not expired (a lapsed claim is not renewed);
+//   release — clear it only when the caller holds it (otherwise a no-op).
+// A grant persists classification_metadata.landing_lease = {holder, attempt, acquired_at, until} on the
+// row through saveGaps; updated_at is NOT touched (supply order reads recency). substrateGap_write can
+// neither set nor clear it: the write path pins the stored value (see the save in resolveSubstrateGapWrite).
+// A row the holder does not hold is refused (no_row): there is nothing to persist the lease on.
+//
+// ABSTAIN ON UNKNOWN. A non-holder forwards the op; a failed forward or an answer that is not a lease
+// verdict returns {granted:false, unknown:true}. Never "no lease seen ⇒ go".
+//
+// EXPIRY. A crashed holder blocks other nodes for at most the TTL (default 2 h). Live holders renew at
+// stage boundaries (compose exit with a cutover pending; cutover entry).
+// ─────────────────────────────────────────────────────────────────────────────
+// The pure rule is exported so a fixture store can serve the op with the holder's exact rule. It stays in
+// this (scope-excluded) file: it decides who may land, so the lane must not be able to edit it.
+export const LANDING_LEASE_TTL_MS_DEFAULT = 2 * 3600_000;
+const LANDING_LEASE_TTL_MS_MAX = 12 * 3600_000;
+export type LandingLease = { holder: string; attempt: string; acquired_at: string; until: string };
+export type LandingLeaseAction = "acquire" | "renew" | "release";
+export type SubstrateGapLeasePointer = { type?: string; action: LandingLeaseAction; gap_id: string; holder: string; attempt?: string; ttl_ms?: number };
+export type LandingLeaseVerdict = {
+  action: LandingLeaseAction;
+  gap_id: string;
+  granted: boolean;
+  /** release only: whether a lease held by the caller was cleared. */
+  released?: boolean;
+  holder?: string;
+  until?: string;
+  held_by?: string;
+  unknown?: boolean;
+  reason?: string;
+};
+
+export function landingLeaseOf(meta: unknown): LandingLease | null {
+  const l = (meta as { landing_lease?: unknown } | null | undefined)?.landing_lease as Record<string, unknown> | undefined;
+  if (!l || typeof l !== "object" || typeof l["holder"] !== "string" || typeof l["until"] !== "string") return null;
+  return { holder: l["holder"], attempt: String(l["attempt"] ?? ""), acquired_at: String(l["acquired_at"] ?? ""), until: l["until"] };
+}
+const leaseLive = (l: LandingLease, now: number): boolean => { const t = Date.parse(l.until); return Number.isFinite(t) && t > now; };
+
+/**
+ * THE decision, pure: the stored lease (or null), the request, the clock -> the verdict and the lease to
+ * store (undefined = leave as is, null = clear). Exported so a fixture store can serve the op with the
+ * holder's exact rule.
+ */
+export function decideLandingLease(current: LandingLease | null, req: SubstrateGapLeasePointer, now: number): { verdict: LandingLeaseVerdict; next: LandingLease | null | undefined } {
+  const base = { action: req.action, gap_id: req.gap_id };
+  if (req.action === "release") {
+    if (current && current.holder === req.holder) return { verdict: { ...base, granted: true, released: true, holder: req.holder }, next: null };
+    return { verdict: { ...base, granted: true, released: false, ...(current ? { held_by: current.holder } : {}), reason: current ? "not_holder" : "no_lease" }, next: undefined };
+  }
+  const ttlRaw = Number(req.ttl_ms ?? LANDING_LEASE_TTL_MS_DEFAULT);
+  const ttl = Number.isFinite(ttlRaw) && ttlRaw > 0 ? Math.min(ttlRaw, LANDING_LEASE_TTL_MS_MAX) : LANDING_LEASE_TTL_MS_DEFAULT;
+  const mine = !!current && current.holder === req.holder;
+  const live = !!current && leaseLive(current, now);
+  const ok = req.action === "renew" ? mine && live : !current || !live || mine;
+  if (!ok) {
+    const reason = req.action === "renew" ? (!current ? "no_lease" : !mine ? (live ? "held_by_other" : "lapsed_held_by_other") : "lapsed") : "held_by_other";
+    return { verdict: { ...base, granted: false, ...(current ? { held_by: current.holder, until: current.until } : {}), reason }, next: undefined };
+  }
+  const until = new Date(now + ttl).toISOString();
+  const next: LandingLease = { holder: req.holder, attempt: String(req.attempt ?? (mine ? current!.attempt : "")), acquired_at: mine && live ? current!.acquired_at : new Date(now).toISOString(), until };
+  return { verdict: { ...base, granted: true, holder: req.holder, until }, next };
+}
+
+/** A lease verdict as the holder sends it; anything else is not one. */
+export function isLandingLeaseVerdict(body: unknown): body is LandingLeaseVerdict {
+  const b = body as Record<string, unknown> | null;
+  return !!b && typeof b === "object" && typeof b["granted"] === "boolean" && typeof b["gap_id"] === "string";
+}
+
+/**
+ * Landing-lease refusals since process start, by kind. Served on development-vessel /health
+ * (landing_lease) and on every refusing compose / cutover body. A separate process (gap-compose.service)
+ * counts its own refusals, which /health does not see.
+ */
+const landingLeaseRefusals = { compose_held: 0, compose_unknown: 0, cutover_not_held: 0, cutover_unknown: 0 };
+export type LandingLeaseRefusalKind = keyof typeof landingLeaseRefusals;
+export function countLandingLeaseRefusal(kind: LandingLeaseRefusalKind): void { landingLeaseRefusals[kind]++; }
+export function landingLeaseRefusalCounts(): Record<LandingLeaseRefusalKind, number> { return { ...landingLeaseRefusals }; }
+
+export async function resolveSubstrateGapLease(pointer: SubstrateGapLeasePointer | Record<string, unknown>): Promise<ResolverResult> {
+  const p = pointer as SubstrateGapLeasePointer;
+  const action = p.action;
+  const gapId = typeof p.gap_id === "string" ? p.gap_id.trim() : "";
+  const holder = typeof p.holder === "string" ? p.holder.trim() : "";
+  if ((action !== "acquire" && action !== "renew" && action !== "release") || !gapId || !holder) {
+    return { shape: "structuredError", body: { resolver: "substrateGapLease_write", failure_mode: "validation_rejected", detail: "substrateGapLease_write needs action acquire|renew|release, a gap_id and a holder" } } as ResolverResult;
+  }
+  const req: SubstrateGapLeasePointer = { type: "substrateGapLease_write", action, gap_id: gapId, holder, ...(p.attempt !== undefined ? { attempt: String(p.attempt) } : {}), ...(p.ttl_ms !== undefined ? { ttl_ms: Number(p.ttl_ms) } : {}) };
+  if (process.env["GAP_STORE_ENDPOINT"]) {
+    const fwd = await forwardToGapStore(req as unknown as Record<string, unknown>);
+    if (fwd && fwd.shape === "substrateGapLease" && isLandingLeaseVerdict(fwd.body)) return fwd;
+    const reason = `gap-store holder gave no lease verdict: ${JSON.stringify(fwd?.body ?? null).slice(0, 200)}`;
+    return { shape: "substrateGapLease", body: { action, gap_id: gapId, granted: false, unknown: true, reason } satisfies LandingLeaseVerdict } as ResolverResult;
+  }
+  try {
+    const verdict = await withGapLock(async (): Promise<LandingLeaseVerdict> => {
+      const gaps = await loadGaps();
+      const g = gaps.find((r) => r && r.id === gapId);
+      if (!g) return { action, gap_id: gapId, granted: action === "release", ...(action === "release" ? { released: false } : {}), reason: "no_row" };
+      const meta = (g.classification_metadata ?? {}) as Record<string, unknown>;
+      const d = decideLandingLease(landingLeaseOf(meta), req, Date.now());
+      if (d.next !== undefined) {
+        const m = { ...meta };
+        if (d.next === null) delete m["landing_lease"]; else m["landing_lease"] = d.next;
+        g.classification_metadata = m as SubstrateGap["classification_metadata"];
+        await saveGaps(gaps);
+      }
+      return d.verdict;
+    });
+    if (verdict.action !== "release" || verdict.released) console.log(`[landing-lease] ${action} gap=${gapId} holder=${holder} granted=${verdict.granted}${verdict.held_by ? ` held_by=${verdict.held_by}` : ""}${verdict.reason ? ` reason=${verdict.reason}` : ""}`);
+    return { shape: "substrateGapLease", body: verdict } as ResolverResult;
+  } catch (err) {
+    return { shape: "substrateGapLease", body: { action, gap_id: gapId, granted: false, unknown: true, reason: `gap store unreadable: ${(err as Error).message.slice(0, 200)}` } satisfies LandingLeaseVerdict } as ResolverResult;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // FALSIFIER ACCOUNTING (2026-09-01)
 //
 // THE MEASUREMENT that forced this. 487 open gaps; 5 (1.0%) carried any
@@ -2092,6 +2222,14 @@ async function resolveSubstrateGapWriteInner(
         detail: `gap ${gap.id}: the arm-time region check threw (${String(err).slice(0, 200)}); refused rather than arm unchecked` } };
     }
     if (refused) return { early: refused };
+  }
+
+  // THE LANDING LEASE IS THE LEASE OP'S ALONE (see LANDING LEASE). A write that echoes a metadata snapshot
+  // would otherwise re-plant a released lease or clobber a live one; the stored value is kept as stored.
+  {
+    const m = gap.classification_metadata as Record<string, unknown> | undefined;
+    if ("landing_lease" in priorMetaForBirth) gap.classification_metadata = { ...(m ?? {}), landing_lease: priorMetaForBirth["landing_lease"] } as SubstrateGap["classification_metadata"];
+    else if (m && "landing_lease" in m) { const c = { ...m }; delete c["landing_lease"]; gap.classification_metadata = c as SubstrateGap["classification_metadata"]; }
   }
 
   await saveGaps(gaps);

@@ -198,6 +198,9 @@ describe("the evaluator imports nothing the lane can edit beyond the recorded de
     expect(EVALUATOR_FILES_SRC()).toContain("src/resolvers/rhythm-conductor-tick.ts");
     // The operator-excluded modules on the evaluator's own closure are evaluator files too (10-05).
     for (const f of ["src/lib/caller-credential.ts", "src/lib/self-auth.ts", "src/resolvers/retry-evidence.ts"]) expect(EVALUATOR_FILES_SRC()).toContain(f);
+    // The shared evaluator tree the class-1 classifier and verifyGapCondition read through, and the supply test-writing
+    // admission on feature-compose's verdict path, are evaluator files too (10-08).
+    for (const f of ["src/lib/evaluator-tree.ts", "src/resolvers/check-supply-admission.ts"]) expect(EVALUATOR_FILES_SRC()).toContain(f);
     // Every remaining entry carries a reviewed reason, not a bare provenance note.
     for (const [m, why] of Object.entries(KNOWN_UNGUARDED)) expect(why.split(" — ")[1] ?? "", m).toMatch(/^(notice path|plumbing|arming|telemetry)\b/);
     const reached = unguardedClosure();

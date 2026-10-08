@@ -88,3 +88,28 @@ export async function readWithin<T>(read: () => Promise<T | null>, ms: number): 
     if (timer) clearTimeout(timer);
   }
 }
+
+/**
+ * A TEST-WRITING COMPOSE LANDS TEST FILES ONLY (slice G revision R3). An admitted test_writing compose runs land:true
+ * with no falsifier of its own, and "Do not change src/." is goal prose the drafter can ignore. THE RULE: a path is
+ * resolved to its vessel-relative form (after repos/<vessel>/, or after .../vessels/<vessel>/ for an absolute runtime
+ * or clone path; a bare relative path is taken as vessel-relative). It is a test path when that relative path starts
+ * with test/, tests/ or __tests__/ (fixtures under them included), or its basename is *.test.<ext> / *.spec.<ext>
+ * (ext ts|tsx|js|jsx|mts|cts|mjs|cjs) anywhere in the vessel: the supply appends to co-located tests such as
+ * src/resolvers/gap-to-feature.test.ts. Everything else is refused, including package.json, config, scripts, a
+ * src/test/ helper and any path with a '..' segment. Which vessel a path may touch stays the verify_vessels gate's job.
+ */
+export function testWritingPathIsTest(path: string): boolean {
+  const p = String(path ?? "").replace(/:\d+.*$/, "").trim().replace(/\\/g, "/");
+  if (!p || p.split("/").includes("..")) return false;
+  const rel = /(?:^|\/)repos\/[^/]+\/(.+)$/.exec(p)?.[1] ?? /\/vessels\/[^/]+\/(.+)$/.exec(p)?.[1] ?? p.replace(/^\.\//, "");
+  if (/^(?:test|tests|__tests__)\//.test(rel)) return true;
+  const base = rel.split("/").pop() ?? "";
+  return /\.(?:test|spec)\.(?:ts|tsx|js|jsx|mts|cts|mjs|cjs)$/.test(base);
+}
+
+/** The paths a compose in `composeMode` may not land: every non-test path when the mode is test_writing, else none. */
+export function testWritingDiffOutsideTests(composeMode: unknown, paths: string[]): string[] {
+  if (composeMode !== CHECK_SUPPLY_COMPOSE_MODE) return [];
+  return [...new Set(paths.filter((p) => !testWritingPathIsTest(p)))];
+}

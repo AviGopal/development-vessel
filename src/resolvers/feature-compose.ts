@@ -6408,6 +6408,17 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
   if (scopeGate.refused) {
     return { shape: "featureComposeReport", body: { ok: false, verdict: "REFUSED", stage: "scope", error: scopeGate.refused, refuse_class: scopeGate.refusal_class, dropped_paths: scopeGate.dropped_paths, dropped_reason: scopeGate.dropped_reason } };
   }
+  // A TEST-WRITING COMPOSE LANDS TEST FILES ONLY (check-supply-admission.ts testWritingPathIsTest): refused at PLAN
+  // time, before any op is applied, when the plan touches a non-test path. The landing floor below re-checks every
+  // path actually written (fc-repair included).
+  {
+    const { testWritingDiffOutsideTests } = await import("./check-supply-admission.js");
+    const outsideTests = testWritingDiffOutsideTests((pointer as { compose_mode?: unknown }).compose_mode, ops.map((op) => op.path));
+    if (outsideTests.length > 0) {
+      console.log(`[feature-compose] test-writing compose REFUSED at plan: non-test path(s) [${outsideTests.join(", ")}] (stage test_writing_diff_outside_tests)`);
+      return { shape: "featureComposeReport", body: { ok: false, verdict: "REFUSED", stage: "test_writing_diff_outside_tests", error: `a test_writing compose may change test files only; the plan touches ${outsideTests.join(", ")}`, outside_tests: outsideTests } };
+    }
+  }
   if (scopeGate.dropped_paths.length > 0) {
     console.log(`[feature-compose] file-scope gate: DROPPED ${ops.length - scopeGate.ops.length} off-target edit op(s) [${scopeGate.dropped_paths.join(", ")}]; targets=[${targetFiles.join(", ")}]; kept ${scopeGate.ops.length} op(s)`);
     ops = scopeGate.ops;
@@ -8064,6 +8075,20 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
     }
   }
 
+  // TEST-WRITING FLOOR (slice G revision R3): the final word on what a test_writing compose may land, over every path
+  // it wrote (applied ops, fc-repair edits, created files). Withheld, and so rolled back, like the scope floors above:
+  // it must sit before the ROLLBACK step, which runs on the verdict as it stands then.
+  let testWritingOutside: string[] = [];
+  if (verdict === "FAVORABLE") {
+    const { testWritingDiffOutsideTests } = await import("./check-supply-admission.js");
+    testWritingOutside = testWritingDiffOutsideTests((pointer as { compose_mode?: unknown }).compose_mode, [...applied.filter((a) => a.ok).map((a) => a.path), ...edited, ...created]);
+    if (testWritingOutside.length > 0) {
+      verdict = "UNFAVORABLE";
+      scopeWithheld = true;
+      console.log(`[feature-compose] test-writing floor: WITHHELD FAVORABLE - test_writing_diff_outside_tests: [${testWritingOutside.join(", ")}]`);
+    }
+  }
+
   // 3b. SEMANTIC GATE (2026-06-25, lever 5 — the reach-gate applied to code). Only
   // a typecheck-clean patch reaches here. typecheck=clean ≠ gap-fixed: a net-new
   // dead-code function (zero callers) or an edit to a non-executing path compiles
@@ -9116,6 +9141,7 @@ for (const _c of cutovers as Array<Record<string, unknown>>) { const _ops = (((_
       created_files: created.map((f) => f.replace(`${REPO_ROOT}/`, "")),
       edited_files: edited.map((f) => f.replace(`${REPO_ROOT}/`, "")),
       cutovers: pointer.land ? cutovers : undefined,
+      ...(testWritingOutside.length > 0 ? { stage: "test_writing_diff_outside_tests", outside_tests: testWritingOutside } : {}),
       next: verdict === "FAVORABLE"
         ? "staged + typecheck-clean; dispatch a cutover (commit/push) to land"
         : "rolled back; inspect applied[].detail and verify[] then refine the spec",

@@ -1398,8 +1398,9 @@ const premiseTokens = Array.from(new Set(String(summary).split(" ").filter((w) =
           const missingPremise = premiseTokens.filter((t) => !liveLines.some((l) => l.includes("'" + t + "'") || l.includes('"' + t + '"')));
           if (missingPremise.length > 0) { console.warn("[gap-to-feature] PREMISE UNVERIFIED: gap names " + missingPremise.join(", ") + " but no quoted occurrence exists in " + firstTarget); }
           const premiseWarning = missingPremise.length > 0 ? (" — PREMISE WARNING: this gap names " + missingPremise.join(", ") + " but NO quoted occurrence of it exists anywhere in this file, so the gap is probably MISLOCALIZED. Do NOT invent an anchor for it. If you cannot identify the real target in the excerpt below, emit ZERO ops and report the false premise instead.") : "";
-          const approvalWarning = (meta?.operator_approved === true || meta?.approval_boundary === "operator_approved") ? "" : (" — APPROVAL BOUNDARY: this gap has no operator approval. Only an operator can grant approval; code must never write, set or default operator_approved. The drafter MUST emit ZERO ops and report this boundary.");
-          const anchorLabel = startLine > 0 ? ("Anchor (verbatim near edit site)" + premiseWarning + approvalWarning) : ("Anchor (verbatim top of file)" + premiseWarning + approvalWarning);
+          // No approval clause here: the boundary that removes a gap from autonomous work is operator_hold (filer-set,
+          // enforced at admission and pick). A prose ban on every unapproved gap was ignored by drafters, except to forge approval.
+          const anchorLabel = startLine > 0 ? ("Anchor (verbatim near edit site)" + premiseWarning) : ("Anchor (verbatim top of file)" + premiseWarning);
           const vesselName = firstTarget.split('/')[1] ?? 'unknown';
           const unique = groundedUniqueAnchor(liveLines, excerptHint || null, startLine);
           const uniqueNote = unique

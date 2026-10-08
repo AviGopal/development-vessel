@@ -1,4 +1,4 @@
-import { afterAll, describe, it, expect } from "bun:test";
+import { afterAll, afterEach, beforeEach, describe, it, expect } from "bun:test";
 import { stubGapEventPublish } from "./stub-gap-event-publish.js";
 import { tmpdir } from "os";
 import { join } from "path";
@@ -47,6 +47,12 @@ for (const [rel, text] of [["src/resolvers/reach-history.ts", 'const U = "http:/
 // 2026-08-30, and it is a plausible contributor to chronic box saturation. Must be set
 // before import, same as WORKSPACE_ROOT above.
 process.env["SUBSTRATE_GAP_SKIP_COMPOSE_TRIGGER"] = "1";
+// The class-1 arming guard reads the edit site where verifyGapCondition reads it: MITOSIS_RUNTIME_DIR (read at call
+// time). The fixtures above live in testWorkspace, so point the evaluator's tree there for each test and restore it,
+// rather than leaving a process-wide value for the next suite.
+let prevRuntimeDir: string | undefined;
+beforeEach(() => { prevRuntimeDir = process.env["MITOSIS_RUNTIME_DIR"]; process.env["MITOSIS_RUNTIME_DIR"] = testWorkspace; });
+afterEach(() => { if (prevRuntimeDir === undefined) delete process.env["MITOSIS_RUNTIME_DIR"]; else process.env["MITOSIS_RUNTIME_DIR"] = prevRuntimeDir; });
 
 const { resolveSubstrateGap, resolveSubstrateGapWrite, classifyFalsifier, falsifierCoverage, gapStoreRootForTest } =
   await import(`../../src/resolvers/substrate-gap.js?${"falsifier-isolated"}`); // a FRESH module instance: its load-time WORKSPACE_ROOT capture sees THIS suite's root even when another suite already loaded the shared one

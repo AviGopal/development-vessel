@@ -101,6 +101,12 @@ export const EVALUATOR_FILES: readonly string[] = [
   "repos/development-vessel/test/resolvers/self-fact-gate-fed-rows.test.ts",
   "repos/development-vessel/test/resolvers/activate-gate-fed-run-dir.test.ts",
   "repos/development-vessel/test/helpers/ungated-rows-source.ts",
+  // On the evaluator's own import closure since d2041286 (substrate-gap): the shared evaluator tree root the class-1
+  // classifier and verifyGapCondition read through (10-08).
+  "repos/development-vessel/src/lib/evaluator-tree.ts",
+  // The supply test-writing admission ledger check and the R3 path rule (b3bddb41), on feature-compose's verdict path;
+  // REPORT_ONLY so the closure scan never flags it, and it must never be earned out of scope (10-08).
+  "repos/development-vessel/src/resolvers/check-supply-admission.ts",
 ];
 export const EVALUATOR_FILE_REASON = "refused: the path is one of the evaluator's own files (EVALUATOR_FILES)";
 /**
@@ -160,6 +166,8 @@ export const SCOPE_CLASSIFICATION: Readonly<Record<string, ScopeClass>> = {
   "repos/development-vessel/test/resolvers/self-fact-gate-fed-rows.test.ts": { class: "judge_trust", reason: "evaluator file: pins that the self-fact judge reads its expected trust-root values only from the gate-accepted copy, failing closed otherwise" },
   "repos/development-vessel/test/resolvers/activate-gate-fed-run-dir.test.ts": { class: "judge_trust", reason: "evaluator file: pins that the gate-fed run-dir and gate-public dir are never written by activate_substrate_script" },
   "repos/development-vessel/test/helpers/ungated-rows-source.ts": { class: "judge_trust", reason: "evaluator file: the test fixture that declares the ungated rows path for the self-fact judge tests" },
+  "repos/development-vessel/src/lib/evaluator-tree.ts": { class: "judge_trust", reason: "evaluator file: the shared evaluator tree the class-1 classifier and verifyGapCondition read through (verdict)" },
+  "repos/development-vessel/src/resolvers/check-supply-admission.ts": { class: "judge_trust", reason: "evaluator file: the supply test-writing admission ledger check and R3 path rule on feature-compose's verdict path (verdict)" },
   "repos/development-vessel/test/resolvers/scope-earn-in.test.ts": { class: "judge_trust", reason: "evaluator file: the criterion's tests (judge)" },
   "repos/development-vessel/test/resolvers/evaluator-grant-scan.test.ts": { class: "judge_trust", reason: "evaluator file: pins the evaluator grant (judge)" },
   "repos/development-vessel/test/resolvers/scope-change-pin.test.ts": { class: "judge_trust", reason: "evaluator file: pins what the scope judge accepts (judge)" },

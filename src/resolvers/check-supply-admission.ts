@@ -20,7 +20,7 @@
  */
 import { CHECK_SUPPLY_DISPOSITION, isAwaitingLandVerification, isParkingDisposition } from "./gap-to-feature.js";
 
-/** The compose mode an admitted supply compose runs in. Written and carried only in slice G; nothing reads it yet. */
+/** The compose mode an admitted supply compose runs in: read by the R3 diff gates and the verify's check judgement (B′). */
 export const CHECK_SUPPLY_COMPOSE_MODE = "test_writing";
 
 export type CheckSupplyMarker = { gap_id: string; dispatch_id: string };
@@ -132,4 +132,112 @@ export function testWritingPathAllowed(path: string, gapId: unknown): boolean {
 export function testWritingDiffOutsideTests(composeMode: unknown, paths: string[], gapId?: unknown): string[] {
   if (composeMode !== CHECK_SUPPLY_COMPOSE_MODE) return [];
   return [...new Set(paths.filter((p) => !testWritingPathAllowed(p, gapId)))];
+}
+
+/**
+ * W2: THE CHECK MUST IMPORT THE GAP'S EDIT SITE (B′). A red that does not load the module the gap names reproduces
+ * nothing the lane can fix (expect(1).toBe(2) is red for every gap). The rule, shared by feature_compose's verify and
+ * gap-check-supply's arm step so they agree:
+ *   - an edit site is given (vessel-relative after stripping repos/<vessel>/ and any :line suffix): it must be a TS/JS
+ *     module (.ts .tsx .js .jsx .mts .cts .mjs .cjs, not .d.ts), else edit_site_not_importable; and the check must
+ *     import it (scope-earn-in.ts testImportsFile: static `from`, bare `import "…"`, a namespace import, dynamic
+ *     `import(…)`, `require(…)`; comments stripped; extension optional, /index allowed), else
+ *     test_writing_check_misses_edit_site.
+ *   - no edit site: the check must import an EXISTING src/ module of its vessel (the first one found becomes the edit
+ *     site), else test_writing_check_misses_edit_site.
+ * Known limit (v1, accepted): a check importing the edit site only through a re-export or barrel module is refused.
+ */
+export type EditSiteImport = { ok: true; edit_site: string } | { ok: false; stage: "edit_site_not_importable" | "test_writing_check_misses_edit_site"; reason: string; edit_site: string | null };
+const IMPORTABLE_RE = /\.(?:[cm]?[jt]sx?)$/;
+export function vesselRelativeEditSite(editSite: unknown): string | null {
+  if (typeof editSite !== "string" || !editSite.trim()) return null;
+  const s = editSite.trim().replace(/:\d+.*$/, "").replace(/\\/g, "/");
+  return (/(?:^|\/)repos\/[^/]+\/(.+)$/.exec(s)?.[1] ?? /\/vessels\/[^/]+\/(.+)$/.exec(s)?.[1] ?? s.replace(/^(?:\.\/)+/, "")) || null;
+}
+export async function checkImportsEditSite(source: string, checkRel: string, editSite: unknown, srcExists: (rel: string) => boolean): Promise<EditSiteImport> {
+  const { testImportsFile } = await import("./scope-earn-in.js");
+  const rel = vesselRelativeEditSite(editSite);
+  if (rel) {
+    if (rel.split("/").includes("..") || !IMPORTABLE_RE.test(rel) || /\.d\.[cm]?ts$/.test(rel)) {
+      return { ok: false, stage: "edit_site_not_importable", edit_site: rel, reason: `the gap's edit site ${rel} is not an importable TS/JS module, so no check can import it; a test-writing compose cannot reproduce it (the gap needs a different check)` };
+    }
+    if (!testImportsFile(source, checkRel, rel)) {
+      return { ok: false, stage: "test_writing_check_misses_edit_site", edit_site: rel, reason: `the check does not import the edit site ${rel}: import it (e.g. import * as mod from "${posixRelative(checkRel, rel)}") and assert on what it does` };
+    }
+    return { ok: true, edit_site: rel };
+  }
+  const code = source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:"'`\\])\/\/.*$/gm, "$1");
+  for (const m of code.matchAll(/(?:\bfrom\s*|\bimport\s*\(\s*|\brequire\s*\(\s*|\bimport\s+)(["'])(\.{1,2}\/[^"'\n]+)\1/g)) {
+    const resolved = posixJoin(checkRel, m[2]!).replace(/\.(?:[cm]?[jt]sx?)$/, "");
+    if (!resolved.startsWith("src/")) continue;
+    for (const cand of [`${resolved}.ts`, `${resolved}.tsx`, `${resolved}.js`, `${resolved}/index.ts`, `${resolved}.mts`]) {
+      if (srcExists(cand) && testImportsFile(source, checkRel, cand)) return { ok: true, edit_site: cand };
+    }
+  }
+  return { ok: false, stage: "test_writing_check_misses_edit_site", edit_site: null, reason: "the gap names no edit site and the check imports no existing src/ module of its vessel: import the module the defect lives in and assert on it" };
+}
+function posixJoin(fromFile: string, spec: string): string {
+  const parts = fromFile.split("/").slice(0, -1);
+  for (const seg of spec.split("/")) {
+    if (seg === "." || seg === "") continue;
+    if (seg === "..") parts.pop(); else parts.push(seg);
+  }
+  return parts.join("/");
+}
+function posixRelative(fromFile: string, toRel: string): string {
+  const from = fromFile.split("/").slice(0, -1), to = toRel.replace(IMPORTABLE_RE, "").split("/");
+  let i = 0;
+  while (i < from.length && i < to.length - 1 && from[i] === to[i]) i++;
+  const up = from.length - i;
+  return `${up === 0 ? "./" : "../".repeat(up)}${to.slice(i).join("/")}`;
+}
+
+/** W1: how many times the verify runs the check (every run must be the same assertion red). */
+export const TEST_WRITING_CHECK_RUNS = 3;
+
+export type TestWritingJudgement = {
+  ok: boolean;
+  stage: null | "test_writing_check_not_red" | "test_writing_check_wrong_reason" | "test_writing_check_flaky" | "test_writing_check_misses_edit_site" | "edit_site_not_importable";
+  cause?: string;
+  reason: string;
+  check_file: string;
+  edit_site: string | null;
+  runs: Array<{ verdict: string; keys: string[]; red: string[]; unhandled: boolean }>;
+};
+
+/**
+ * B′ P2: THE VERIFY OF A test_writing COMPOSE. The check file test/checks/<checkSupplyCheckFile(gapId)> must exist in
+ * the vessel root, import the gap's edit site (W2, checkImportsEditSite: static, before anything runs), and, run ALONE
+ * `runs` times through `run` (feature_compose's shell; the caller supplies the command), be the same assertion red
+ * every time (retry-evidence.ts testWritingRunsVerdict: the shared classifier). ok only then.
+ */
+export async function judgeTestWritingCheck(input: { gapId: string; vesselRoot: string; editSite: unknown; run: (checkRel: string) => Promise<string>; runs?: number }): Promise<TestWritingJudgement> {
+  const { existsSync, readFileSync } = await import("node:fs");
+  const { testWritingRunsVerdict } = await import("./retry-evidence.js");
+  const checkRel = checkSupplyCheckPath(input.gapId);
+  const abs = `${input.vesselRoot}/${checkRel}`;
+  const out = (stage: TestWritingJudgement["stage"], reason: string, extra: Partial<TestWritingJudgement> = {}): TestWritingJudgement => ({ ok: stage === null, stage, reason, check_file: checkRel, edit_site: vesselRelativeEditSite(input.editSite), runs: [], ...extra });
+  let source: string | null = null;
+  try { source = existsSync(abs) ? readFileSync(abs, "utf8") : null; } catch { source = null; }
+  if (source === null) return out("test_writing_check_not_red", `the check file ${checkRel} was not written in this vessel: the supply's goal asks for exactly that file`);
+  const site = await checkImportsEditSite(source, checkRel, input.editSite, (rel) => existsSync(`${input.vesselRoot}/${rel}`));
+  if (!site.ok) return out(site.stage, site.reason, { edit_site: site.edit_site });
+  const raws: string[] = [];
+  const n = Math.max(1, Math.floor(input.runs ?? TEST_WRITING_CHECK_RUNS));
+  for (let i = 0; i < n; i++) raws.push(await input.run(checkRel).catch((err) => `RUN_FAILED ${String(err).slice(0, 200)}`));
+  const v = testWritingRunsVerdict(raws);
+  const runs = v.runs.map((r) => ({ verdict: r.verdict, keys: r.keys.map((k) => k.replace("\u0000", " :: ")), red: r.red.slice(0, 10), unhandled: r.unhandled }));
+  if (!v.ok) return out(v.stage, v.reason, { edit_site: site.edit_site, runs, ...(v.cause ? { cause: v.cause } : {}) });
+  return out(null, `the check is the same assertion red on ${n} runs and imports ${site.edit_site}`, { edit_site: site.edit_site, runs });
+}
+
+/**
+ * The detail line a refused check adds to the verify output. It never carries bun's "timed out after <n>ms" text:
+ * composeFailureKind reads that pattern in a verify output as an ENVIRONMENT non-attempt, and a check refused for
+ * timing out is the draft's fault.
+ */
+export function testWritingDetail(j: TestWritingJudgement): string {
+  if (j.ok) return "";
+  const text = ` | THE TEST-WRITING CHECK ${j.check_file} IS REFUSED (${j.stage}${j.cause ? `: ${j.cause}` : ""}): ${j.reason}`;
+  return text.replace(/timed out after (\d+)\s*ms/gi, "timed out ($1 ms budget)").slice(0, 1200);
 }

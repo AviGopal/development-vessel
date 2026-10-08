@@ -159,6 +159,177 @@ export function parseOwnCheckFailures(raw: string, only: string[] = []): OwnChec
   return out;
 }
 
+// ─── red for the right reason: the shared classifier of one check file's run ─────────────────────────────────
+
+/**
+ * WHY A CHECK RUN IS RED (B′, 2026-10-08). One classifier for every reader that must know whether a check file's red
+ * is a REPRODUCTION (an expect() assertion failing on the defect) or something else: feature_compose's test_writing
+ * verify (judgeTestWritingCheck, check-supply-admission.ts), test_suite's `red_reason` field, and gap-check-supply's
+ * arm step, so the lane that writes a check and the step that arms it can never disagree. It lives in this evaluator
+ * file (EVALUATOR_FILES, judge_trust), which imports nothing project-local, so no autonomous landing can loosen it.
+ *
+ * Measured on bun 1.3.14 and 1.4.2 (`bun test ./<file>`), ANSI stripped first (a coloured run's ✓/✗ read as pass/fail):
+ *   - an assertion prints a source excerpt ("N | …", a caret), `error: expect(received).<matcher>(expected)`, then
+ *     Expected/Received lines (toEqual prints a diff and "- Expected  - n" / "+ Received  + n" instead), the stack
+ *     ("at …"), and THEN the "(fail) <name> [t]" line: a failure's block is the text since the previous result line.
+ *   - a test that times out prints "(fail) <name> [t]" FIRST and "  ^ this test timed out after <n>ms." AFTER it, so
+ *     that trailer belongs to the failure before it, never to the next block.
+ *   - a refused connection: "error: Unable to connect…" (1.3.14) / "TypeError: Unable to connect…" (1.4.2), code
+ *     "ConnectionRefused" (no "ECONNREFUSED" text); a ReferenceError / TypeError has no "error:" prefix.
+ *   - a file that fails to LOAD (missing module, syntax error "Unexpected end of file", a NAMED import of a missing
+ *     export "SyntaxError: Export named 'x' not found in module …") prints "# Unhandled error between tests", the
+ *     error between dashed lines, and a summary "0 pass / 1 fail / 1 error" with NO "(fail)" line.
+ * A failure is an ASSERTION when its error line starts `error: expect(`, Expected/Received (or the diff header) was
+ * printed, and its ERROR TEXT names no wrong reason. The error text is the block minus source-excerpt lines, caret
+ * lines, stack lines, Expected lines and diff lines (none of those is the error: an excerpt can hold any word, and the
+ * Expected side is the author's literal), plus the timeout trailer. Received lines ARE scanned: a Received that says
+ * ECONNREFUSED is a network dependency, not a reproduction.
+ */
+export type RedCause = "network" | "timeout" | "missing_export" | "module" | "syntax" | "reference" | "non_assertion" | "load_error" | "did_not_run";
+export type ClassifiedFailure = { name: string; cls: "assertion" | "wrong_reason"; cause?: RedCause; error: string | null };
+export type CheckRunClass = { ran: boolean; pass: number; unhandled: boolean; unhandled_cause: RedCause | null; unhandled_error: string | null; failures: ClassifiedFailure[] };
+
+// eslint-disable-next-line no-control-regex
+const ANSI_RE = /\x1b\[[0-9;?]*[ -/]*[@-~]/g;
+export function stripAnsi(s: string): string { return String(s ?? "").replace(ANSI_RE, ""); }
+
+/** Wrong-reason markers, in the order a cause is named (the most specific first). */
+const WRONG_REASON_MARKERS: ReadonlyArray<[RedCause, RegExp]> = [
+  ["missing_export", /Export named ['"`][^'"`]+['"`] not found|does not provide an export named/],
+  ["module", /Cannot find module|Cannot find package|Could not resolve/],
+  ["network", /ECONNREFUSED|ConnectionRefused|Unable to connect|ECONNRESET|ENOTFOUND|EAI_AGAIN|fetch failed/],
+  ["timeout", /timed out|Timeout/],
+  ["syntax", /SyntaxError|Unexpected end of file|Unexpected token/],
+  ["reference", /ReferenceError/],
+];
+const causeOf = (text: string): RedCause | null => WRONG_REASON_MARKERS.find(([, rx]) => rx.test(text))?.[0] ?? null;
+// "(pass)"/"(fail)" without colour; with colour (FORCE_COLOR) bun prints "✓"/"✗" (and "»" skip, "✎" todo) instead.
+const RESULT_LINE = /^\s*(?:\((pass|fail|skip|todo)\)|([✓✗»✎]))\s*(.*?)\s*(?:\[[\d.]+m?s\])?\s*$/;
+const RESULT_KIND: Readonly<Record<string, string>> = { "✓": "pass", "✗": "fail", "»": "skip", "✎": "todo" };
+const TIMEOUT_TRAILER = /^\s*\^\s*this test timed out\b/;
+const isExcerpt = (l: string): boolean => /^\s*\d+\s*\|/.test(l) || /^\s*\^\s*$/.test(l) || /^\s*at\s/.test(l);
+const isExpectedOrDiff = (l: string): boolean => /^\s*Expected\b/.test(l) || /^\s*[-+]\s/.test(l);
+const ERROR_LINE = /^\s*(?:error|[A-Za-z]*Error):\s?/;
+const capLine = (s: string, n = 240): string => (s.length > n ? s.slice(0, n) + "…" : s);
+
+/** Classify one failure's block (the lines bun printed for it) plus any trailer printed after its (fail) line. */
+function classifyFailureBlock(name: string, block: string[], trailer: string[]): ClassifiedFailure {
+  const errLine = block.find((l) => !isExcerpt(l) && ERROR_LINE.test(l))?.trim() ?? null;
+  const errorText = [...block.filter((l) => l.trim() && !isExcerpt(l) && !isExpectedOrDiff(l)), ...trailer].join("\n");
+  const cause = causeOf(errorText);
+  const printedComparison = block.some((l) => /^\s*Expected\b[^:]*:/.test(l) || /^\s*Received\b/.test(l) || /^\s*-\s+Expected\s+-\s*\d/.test(l));
+  if (!cause && errLine && /^error: expect\(/.test(errLine) && printedComparison) return { name, cls: "assertion", error: capLine(errLine) };
+  return { name, cls: "wrong_reason", cause: cause ?? "non_assertion", error: errLine ? capLine(errLine) : trailer[0] ? capLine(trailer[0].trim()) : null };
+}
+
+/** The shared classifier: what one `bun test ./<check file>` run printed, failure by failure. */
+export function classifyCheckRun(raw: string): CheckRunClass {
+  const lines = stripAnsi(raw).split("\n");
+  const failures: ClassifiedFailure[] = [];
+  let pass = 0;
+  let unhandled = false;
+  let unhandledText: string[] = [];
+  let block: string[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]!;
+    if (/^\s*#\s*Unhandled error between tests/.test(line)) {
+      unhandled = true;
+      // The error sits between the next two dashed lines.
+      let j = i + 1, dashes = 0;
+      for (; j < lines.length && dashes < 2; j++) {
+        if (/^\s*-{5,}\s*$/.test(lines[j]!)) { dashes += 1; continue; }
+        if (dashes === 1) unhandledText.push(lines[j]!);
+      }
+      i = j - 1;
+      block = [];
+      continue;
+    }
+    const r = RESULT_LINE.exec(line);
+    if (!r) { block.push(line); continue; }
+    const kind = r[1] ?? RESULT_KIND[r[2] ?? ""] ?? "";
+    if (kind === "pass") pass += 1;
+    if (kind !== "fail") { block = []; continue; }
+    const trailer: string[] = [];
+    while (i + 1 < lines.length && TIMEOUT_TRAILER.test(lines[i + 1]!)) trailer.push(lines[++i]!);
+    failures.push(classifyFailureBlock(r[3] ?? "", block, trailer));
+    block = [];
+  }
+  const text = stripAnsi(raw);
+  const ran = /^\s*\d+\s+pass\b/m.test(text) && /^\s*\d+\s+fail\b/m.test(text);
+  unhandledText = unhandledText.filter((l) => l.trim() && !isExcerpt(l));
+  return {
+    ran, pass, unhandled,
+    unhandled_cause: unhandled ? causeOf(unhandledText.join("\n")) ?? "load_error" : null,
+    unhandled_error: unhandled ? capLine((unhandledText.find((l) => ERROR_LINE.test(l)) ?? unhandledText[0] ?? "").trim()) || null : null,
+    failures: failures.slice(0, 50),
+  };
+}
+
+/** The drafter-facing cure for each wrong reason (carried in the refusal, read by the next attempt's prompt). */
+export const RED_REASON_GUIDANCE: Readonly<Record<RedCause, string>> = {
+  missing_export: "the check failed to LOAD because it imports a name the edit site does not export (bun ESM: a missing named export is a load error, not a red). Import the edit site as a NAMESPACE, e.g. import * as mod from \"<edit_site path>\", and assert on it, e.g. expect(typeof (mod as Record<string, unknown>)[\"newThing\"]).toBe(\"function\"), so the red is an assertion failure",
+  module: "the check failed to LOAD: a module it imports cannot be found. Import the edit site by its exact relative path from test/checks/ (e.g. \"../../src/<file>\"); if the defect is that a symbol is missing, import the module as a namespace (import * as mod) and assert typeof on it",
+  network: "the check's failure is a network error: a reproduction must not reach a service. Exercise the edit site in-process and assert on what it returns",
+  timeout: "a test in the check did not finish in time: a reproduction must not wait on services, timers or a hung promise. Call the edit site directly and assert on its result",
+  syntax: "the check does not parse (a syntax error): write it as valid TypeScript that loads",
+  reference: "the check throws a ReferenceError (a name that is not defined): import what it uses",
+  non_assertion: "a test in the check fails by throwing, not by an expect() assertion. Assert on the edit site's values with expect(...) so the red names the defect (to check that a symbol exists, assert typeof on a namespace import)",
+  load_error: "the check failed to LOAD (an unhandled error between tests): it must load cleanly and fail on an expect() assertion",
+  did_not_run: "the check printed no bun summary, so it did not run",
+};
+
+export type CheckRunVerdict = { verdict: "assertion_red" | "not_red" | "wrong_reason"; cause?: RedCause; reason: string; keys: string[]; red: string[]; unhandled: boolean };
+/** One run's verdict. keys identify the red by (test name + error class) only, never by Received. */
+export function checkRunVerdict(c: CheckRunClass): CheckRunVerdict {
+  const red = c.failures.map((f) => f.name);
+  const base = { red, unhandled: c.unhandled, keys: [] as string[] };
+  if (c.unhandled) return { ...base, verdict: "wrong_reason", cause: c.unhandled_cause ?? "load_error", reason: `${RED_REASON_GUIDANCE[c.unhandled_cause ?? "load_error"]} [${c.unhandled_error ?? "unhandled error between tests"}]` };
+  if (!c.ran) return { ...base, verdict: "wrong_reason", cause: "did_not_run", reason: RED_REASON_GUIDANCE.did_not_run };
+  if (c.failures.length === 0) return { ...base, verdict: "not_red", reason: `the check is GREEN (${c.pass} pass, no failing test): it reproduces nothing` };
+  const wrong = c.failures.find((f) => f.cls !== "assertion");
+  if (wrong) return { ...base, verdict: "wrong_reason", cause: wrong.cause ?? "non_assertion", reason: `test "${capLine(wrong.name, 120)}": ${RED_REASON_GUIDANCE[wrong.cause ?? "non_assertion"]}${wrong.cause === "timeout" || !wrong.error ? "" : ` [${wrong.error}]`}` };
+  return { ...base, verdict: "assertion_red", reason: "every failing test fails on an expect() assertion", keys: c.failures.map((f) => `${f.name}\u0000${f.error ?? ""}`).sort() };
+}
+
+export type TestWritingStage = "test_writing_check_not_red" | "test_writing_check_wrong_reason" | "test_writing_check_flaky";
+/**
+ * W1: the verdict over N runs of the same check. Any wrong-reason run refuses (wrong_reason, first such run's cause);
+ * all green refuses (not_red); runs that disagree (one green, or a different failure SET by name + error class)
+ * refuse as flaky; identical assertion reds pass.
+ */
+export function testWritingRunsVerdict(raws: string[]): { ok: true; runs: CheckRunVerdict[] } | { ok: false; stage: TestWritingStage; cause?: RedCause; reason: string; runs: CheckRunVerdict[] } {
+  const runs = raws.map((r) => checkRunVerdict(classifyCheckRun(r)));
+  if (runs.length === 0) return { ok: false, stage: "test_writing_check_not_red", reason: "the check was not run", runs };
+  const wrong = runs.findIndex((r) => r.verdict === "wrong_reason");
+  if (wrong >= 0) return { ok: false, stage: "test_writing_check_wrong_reason", cause: runs[wrong]!.cause, reason: `run ${wrong + 1}/${runs.length}: ${runs[wrong]!.reason}`, runs };
+  if (runs.every((r) => r.verdict === "not_red")) return { ok: false, stage: "test_writing_check_not_red", reason: runs[0]!.reason, runs };
+  const k0 = runs[0]!.keys.join("\n");
+  const differs = runs.findIndex((r) => r.verdict !== "assertion_red" || r.keys.join("\n") !== k0);
+  if (differs >= 0) {
+    const names = (r: CheckRunVerdict): string => (r.red.length ? r.red.slice(0, 5).join(" ; ") : "green");
+    return { ok: false, stage: "test_writing_check_flaky", reason: `the check's red is not reproducible: run 1 failed [${names(runs[0]!)}], run ${differs + 1} [${names(runs[differs]!)}]; a reproduction fails the same tests the same way every run (no shared state, counters, clocks or randomness in what it asserts)`, runs };
+  }
+  return { ok: true, runs };
+}
+
+/**
+ * The ARM step's right-reason rule over a test_suite report's `red_reason` (classifyCheckRun of the same run), for the
+ * named tests: null when every named test failed on an assertion; else why not. A report without red_reason (an
+ * older test_suite) refuses: the red cannot be attributed (fail closed).
+ */
+export function armRedReasonRefusal(redReason: unknown, titles: string[]): { cause?: RedCause; reason: string } | null {
+  const c = redReason as CheckRunClass | null | undefined;
+  if (!c || typeof c !== "object" || !Array.isArray(c.failures)) return { reason: "the check's run report carries no red_reason classification, so its red cannot be attributed" };
+  if (c.unhandled) return { cause: c.unhandled_cause ?? "load_error", reason: RED_REASON_GUIDANCE[c.unhandled_cause ?? "load_error"] };
+  if (!c.ran) return { cause: "did_not_run", reason: RED_REASON_GUIDANCE.did_not_run };
+  for (const t of titles) {
+    const f = c.failures.find((x) => x.name.includes(t));
+    if (!f) return { reason: `the named test "${t.slice(0, 120)}" is not among the classified failures` };
+    if (f.cls !== "assertion") return { cause: f.cause ?? "non_assertion", reason: `test "${t.slice(0, 120)}": ${RED_REASON_GUIDANCE[f.cause ?? "non_assertion"]}` };
+  }
+  return null;
+}
+
 /** Same failing tests with the same Expected/Received: the draft changed nothing the check can see. */
 export function sameOwnCheckFailures(a: OwnCheckFailure[], b: OwnCheckFailure[]): boolean {
   if (a.length === 0 || a.length !== b.length) return false;

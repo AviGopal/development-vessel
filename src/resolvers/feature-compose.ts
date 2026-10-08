@@ -4868,7 +4868,7 @@ const BASELINE_CACHE_TTL_MS = 2 * 60 * 60 * 1000;
 const baselineCache = new Map<string, { at: number; tsErrors: string[]; testFails: string[]; testPass: number | null }>();
 
 /** One vessel's verify result; `stage` and `own` feed the failed attempt's structured lesson record. */
-export type VerifyResult = { vessel: string; errors: number | string; exit_code: number | null; ok: boolean; output: string; stage?: FailStage | null; constraint_unmet?: MustBeCalledConstraint[]; constraint_unrunnable?: string; own?: { test_file: string; failing: OwnCheckFailure[]; no_effect_vs_parent?: boolean; base_sha?: string; parent_cached?: "hit" | "miss" }; draft?: DraftFailures };
+export type VerifyResult = { vessel: string; errors: number | string; exit_code: number | null; ok: boolean; output: string; stage?: FailStage | null; constraint_unmet?: MustBeCalledConstraint[]; constraint_unrunnable?: string; own?: { test_file: string; failing: OwnCheckFailure[]; no_effect_vs_parent?: boolean; base_sha?: string; parent_cached?: "hit" | "miss" }; draft?: DraftFailures; test_writing?: import("./check-supply-admission.js").TestWritingJudgement };
 /**
  * The failure_kind a compose reports. gap-to-feature's isNonAttemptComposeResult reads "environment" as a
  * NON-ATTEMPT (no failed_attempts, no failure lesson, cooldown cleared), so "environment" must mean the checks
@@ -7577,6 +7577,36 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
     // After the retry above, a missing summary with a baseline that had one means the suite was not judged.
     const summaryMissing = basePass !== undefined && curPass === null;
     const testOk = confirmedNewTest.length === 0 && !passRegressed && !summaryMissing;
+    // B′ P2 (+ W1, W2): A test_writing COMPOSE IS VERIFIED BY ITS OWN CHECK. Its one file, test/checks/<gap>.check.ts
+    // (P1), is out of suite: bun's default discovery never runs a *.check.ts, so testOk above ("no new reds") holds for
+    // it by construction, for every mode, and says nothing about it. Run it ALONE, TEST_WRITING_CHECK_RUNS times, and
+    // require the same assertion red each time (the shared classifier, retry-evidence.ts), importing the gap's edit site
+    // (check-supply-admission.ts judgeTestWritingCheck). Skipped when the typecheck already refused this draft.
+    const csaV = await import("./check-supply-admission.js");
+    const testWritingMode = (pointer as { compose_mode?: unknown }).compose_mode === csaV.CHECK_SUPPLY_COMPOSE_MODE;
+    let testWriting: import("./check-supply-admission.js").TestWritingJudgement | null = null;
+    if (testWritingMode && tcOk) {
+      const twMeta = (gateGapMeta ?? {}) as Record<string, unknown>;
+      const twLedger = (twMeta.check_supply && typeof twMeta.check_supply === "object" ? twMeta.check_supply : {}) as { edit_site?: unknown };
+      testWriting = await csaV.judgeTestWritingCheck({
+        gapId: String(pointer.gap?.id ?? ""),
+        vesselRoot: vAbs,
+        // The arm step reads the ledger's edit site first (gap-check-supply.ts): the same order here, so they agree.
+        editSite: twLedger.edit_site ?? twMeta.edit_site ?? null,
+        runs: csaV.TEST_WRITING_CHECK_RUNS,
+        run: async (rel) => {
+          const shT = await callTool(toolsEndpoint, "shell", {
+            command: `cd ${JSON.stringify(vAbs)} && (timeout 180 env -i PATH="$PATH" HOME="$HOME" NODE_ENV=test TZ=UTC WORKSPACE_ROOT="$(mktemp -d)" bun test ${JSON.stringify("./" + rel)} --timeout 20000 2>&1 || true)`,
+            cwd: REPO_ROOT,
+            // The shell resolver kills the process group at 30 s without this.
+            timeout_sec: 240,
+          });
+          return String((shT.body as { stdout?: unknown })?.stdout ?? "");
+        },
+      });
+      console.log(`[fc-test-writing-check] ${JSON.stringify({ gap: pointer.gap?.id ?? null, vessel: v, check_file: testWriting.check_file, edit_site: testWriting.edit_site, stage: testWriting.stage ?? "passed", cause: testWriting.cause ?? null, runs: testWriting.runs })}`);
+    }
+    const testWritingOk = !testWriting || testWriting.ok;
     // installOk gates alongside tcOk: a manifest that cannot install is a broken
     // change no matter how cleanly the source typechecks against a stale node_modules.
     // ABSENT MARKER MEANS "NOT OBSERVED", NOT "FAILED".
@@ -7628,7 +7658,7 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
       // goal-host tags EVERY edit-intent compose edit_intent_route, autonomous escalations included, so the
       // category is not intent (qa, 09-30).
       const specIsIntent = (pointer as { directed?: boolean }).directed === true;
-      strayTests = strayTestEdits(v, editedRel, gapMeta, !own && specIsIntent ? specPaths : []);
+      strayTests = strayTestEdits(v, editedRel, gapMeta, [...(!own && specIsIntent ? specPaths : []), ...(testWritingMode ? [csaV.checkSupplyCheckPath(String(pointer.gap?.id ?? ""))] : [])]);
       // Skipped when the typecheck already refused this draft: the verdict cannot turn green.
       if (own && tcOk) {
         const shO = await callTool(toolsEndpoint, "shell", {
@@ -7697,7 +7727,7 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
     const terminal = isTerminalRefusal(contractBreach, gapClosedInStore);
     if (terminal) terminalRefusal = terminal;
     const ownOk = ownRed.length === 0 && !ownUnjudged && strayTests.length === 0 && !contractBreach && !gapClosedInStore;
-    const ok = installOk && dryRunOk && tcOk && sdOk && testOk && ownOk;
+    const ok = installOk && dryRunOk && tcOk && sdOk && testOk && ownOk && testWritingOk;
     const detail = ((tcUnanswered || tcTimedOut) ? ` | TYPECHECK NOT ANSWERED (TC_EXIT=${String(tcExit)}) — the check did not complete, so this is UNVERIFIED, not proven broken. Failing closed is correct (an unverifiable edit must not land), but do not read this as a defect in the draft: it carries no TS error text.` : "")
       + (installOk ? "" : ` | DEPENDENCY INSTALL FAILED (INSTALL_EXIT=${String(installExit)}) — the staged manifest does not install; a typecheck against an already-populated node_modules cannot see this`)
       + (dryRunOk ? "" : ` | DEPENDENCY RESOLUTION FAILED (DRYRUN_EXIT=${String(dryRunExit)}) — the staged manifest names a dependency that does not resolve, so this change would break a fresh install even though it typechecks here: ${(raw.match(/== resolve ==\n([\s\S]*?)\n== typecheck ==/)?.[1] ?? "").slice(0, 400)}`)
@@ -7705,6 +7735,7 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
       + (ownUnjudged ? (gateSource === "store_unreadable" ? " | THE GAP STORE COULD NOT BE READ, so this gap's own check could not be resolved; unverified, not landed." : " | THE GAP'S OWN CHECK PRODUCED NO RESULT on this draft (its test file run alone printed no pass/fail); unverified, not landed.") : "")
       + (gapClosedInStore ? " | THE GAP IS ALREADY CLOSED in the store (fixed or retired); nothing is left to land for it. Not retried." : "")
       + (contractBreach ? ` | THE GAP'S CHECK CANNOT CERTIFY THIS DRAFT: ${contractBreach}. Fix what the check measures; do not remove or weaken its assertions.` : "")
+      + (testWritingOk ? "" : csaV.testWritingDetail(testWriting!))
       + (strayTests.length > 0 ? ` | EDITS A TEST FILE THIS GAP DOES NOT NAME: ${strayTests.join(", ")}. A draft must not change another test's assertions (that is how guards get weakened); fix the code, or leave that test to its own gap.` : "")
       + (testOk ? "" : [
       confirmedNewTest.length > 0 ? ` | NEW test failures introduced by this draft, REPRODUCED on a second run (${confirmedNewTest.length}): ${confirmedNewTest.slice(0, 5).join(" ; ").slice(0, 600)}` : "",
@@ -7712,7 +7743,7 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
       summaryMissing ? ` | TEST SUITE PRODUCED NO SUMMARY on two runs (baseline passed ${basePass}; retry rc ${String(summaryRetryRc)}${summaryRetryRc === "124" || summaryRetryRc === "137" ? " = timed out or killed" : summaryRetryRc === "0" ? " = the suite exited early" : ""}): this draft cannot be verified` : "",
     ].join(""));
     const stage: FailStage | null = ok ? null : !installOk ? "install" : !dryRunOk ? "resolve" : !tcOk ? "typecheck" : !sdOk ? "shape-dispatch" : !testOk ? "tests" : "own_check";
-    return { vessel: v, errors: ok ? 0 : "verify", exit_code: tcExit, ok, output: (raw + detail).trim(), stage, ...(ownRan && ownRef ? { own: { test_file: ownRef.test_file, failing: ownFailing, ...(ownNoEffect !== undefined ? { no_effect_vs_parent: ownNoEffect } : {}), ...(ownBaseSha ? { base_sha: ownBaseSha } : {}), ...(ownParentCached ? { parent_cached: ownParentCached } : {}) } } : {}), ...(ok ? {} : { draft: { own_red: ownRed, introduced: confirmedNewTest, new_ts: newTs, gate_detail: detail.replace(/^\s*\|\s*/, "").trim() } }) };
+    return { vessel: v, errors: ok ? 0 : "verify", exit_code: tcExit, ok, output: (raw + detail).trim(), stage, ...(testWriting ? { test_writing: testWriting } : {}), ...(ownRan && ownRef ? { own: { test_file: ownRef.test_file, failing: ownFailing, ...(ownNoEffect !== undefined ? { no_effect_vs_parent: ownNoEffect } : {}), ...(ownBaseSha ? { base_sha: ownBaseSha } : {}), ...(ownParentCached ? { parent_cached: ownParentCached } : {}) } } : {}), ...(ok ? {} : { draft: { own_red: ownRed, introduced: confirmedNewTest, new_ts: newTs, gate_detail: detail.replace(/^\s*\|\s*/, "").trim() } }) };
   };
   let verify: VerifyResult[] = [];
   if (edited.length > 0 || created.length > 0) { for (const v of touched) verify.push(await runVerify(v)); }

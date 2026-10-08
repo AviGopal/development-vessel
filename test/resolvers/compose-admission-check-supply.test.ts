@@ -319,3 +319,72 @@ describe("feature_compose admission: a supply-dispatched test-writing goal", () 
     expect(b.stage).toBe("hold_state_unreadable");
   });
 });
+
+// REVISION (qa, slice G): mutants that survived the first suite.
+//   T1  dropping the parking-disposition branch from the hold re-check passed 20/0: a gap a HUMAN parked after the
+//       supply dispatched it (ledger still goal_dispatched, dispatch id matching) must stay refused.
+//   T2  dropping `delete pointer.compose_mode` passed 20/0: the mode is this resolver's verdict, so a caller-supplied
+//       compose_mode never survives the call and never enables admission (or the test-writing diff gate).
+describe("feature_compose admission: revision controls (surviving mutants)", () => {
+  let store: Map<string, Record<string, any>>;
+  beforeEach(() => {
+    process.env["GAP_STORE_ENDPOINT"] = FIXTURE_GAP_STORE;
+    store = routeFixtureGapStore(fetchGuard!);
+    store.set(SUPPLY, supplyRow(SUPPLY, D1));
+    store.set(PLAIN, plainRow(PLAIN));
+    routeOpenEnvelope(fetchGuard!);
+  });
+
+  for (const parked of ["needs_information", "needs_info", "awaiting_operator_review"]) {
+    it(`[CONTROL T1] a supply gap PARKED by a human after dispatch (disposition ${parked}, ledger still matching) is refused`, async () => {
+      store.set(SUPPLY, supplyRow(SUPPLY, D1, { disposition: parked }));
+      preClaimSlot(SUPPLY);
+      const b = (await supplyCompose(SUPPLY, { directed: true })).body as Report;
+      expect(b.stage).toBe("ineligible");
+      expect(String(b.error)).toContain("not compose work: unarmed");
+      expect(slotFiles()).toEqual(["slot-0.slot"]);
+      expect(logs.some((l) => l.includes("compose_mode=test_writing"))).toBe(false);
+    });
+  }
+
+  const pointerOf = (gapId: string, extra: Record<string, unknown>): Record<string, unknown> => ({
+    type: "feature_compose", directed: true, authoring_execution_id: D1, spec: "GOAL: write a failing test", verify_vessels: ["repos/development-vessel"], land: true,
+    gap: { id: gapId, summary: "fixture", category: "edit_intent_route", classification_metadata: { edit_site: `repos/development-vessel/${TEST_FILE}` } },
+    ...extra,
+  });
+
+  it("[CONTROL T2] a caller-supplied compose_mode on an UNMARKED pointer is absent after the call", async () => {
+    preClaimSlot(ROUTE_ONLY);
+    const p = pointerOf(ROUTE_ONLY, { compose_mode: "test_writing" });
+    const b = (await resolveFeatureCompose(p as never)).body as Report;
+    expect(b.stage).toBe("gap_in_flight");
+    expect("compose_mode" in p).toBe(false);
+  });
+
+  it("[CONTROL T2] a caller-supplied compose_mode on a REFUSED marked pointer is absent after the call", async () => {
+    store.set(SUPPLY, supplyRow(SUPPLY, "dispatch-csa-fixture-someone-else"));
+    preClaimSlot(SUPPLY);
+    const p = pointerOf(SUPPLY, { compose_mode: "test_writing", check_supply: { gap_id: SUPPLY, dispatch_id: D1 } });
+    const b = (await resolveFeatureCompose(p as never)).body as Report;
+    expect(b.stage).toBe("ineligible");
+    expect("compose_mode" in p).toBe(false);
+  });
+
+  it("[CONTROL T2] compose_mode=test_writing from the caller on an unmarked unarmed gap does NOT enable admission", async () => {
+    preClaimSlot(PLAIN);
+    const p = pointerOf(PLAIN, { compose_mode: "test_writing" });
+    const b = (await resolveFeatureCompose(p as never)).body as Report;
+    expect(b.stage).toBe("ineligible");
+    expect(String(b.error)).toContain("not compose work: unarmed");
+    expect("compose_mode" in p).toBe(false);
+    expect(logs.some((l) => l.includes("compose_mode=test_writing"))).toBe(false);
+  });
+
+  it("[CONTROL T2] an admitted marked compose carries compose_mode=test_writing (the only writer)", async () => {
+    preClaimSlot(SUPPLY);
+    const p = pointerOf(SUPPLY, { check_supply: { gap_id: SUPPLY, dispatch_id: D1 } });
+    const b = (await resolveFeatureCompose(p as never)).body as Report;
+    expect(b.stage).toBe("gap_in_flight");
+    expect(p["compose_mode"]).toBe("test_writing");
+  });
+});

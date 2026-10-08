@@ -276,10 +276,25 @@ export async function resolveTestSuite(pointer: Record<string, unknown>): Promis
     ? (pointer.only_tests as unknown[]).filter((t): t is string => typeof t === "string" && t.trim().length > 0)
     : [];
   // One test file (relative to the vessel root) instead of the whole suite: a failing-test gap is judged in
-  // seconds rather than a suite that exceeds the budget. Path characters only; anything else is ignored.
-  const testFile = typeof pointer.test_file === "string" && /^[A-Za-z0-9_./-]+$/.test(pointer.test_file.trim()) && !pointer.test_file.includes("..")
-    ? pointer.test_file.trim()
-    : "";
+  // seconds rather than a suite that exceeds the budget.
+  //
+  // A PATH, NEVER A FILTER (2026-10-08). bun treats a bare positional argument as a substring FILTER over the
+  // files it discovers, not as a path (measured on 1.3.14 and 1.4.2): `bun test "test/checks/gap-x.check.ts"`
+  // matches nothing (not a *.test.* name) and prints no summary, so that check read ran:false forever; and
+  // `bun test "test/a/x.test.ts"` also runs `pkg/test/a/x.test.ts`. A `./`-prefixed argument is a path: exactly
+  // that file runs (feature_compose's own-check runs already pass `"./" + test_file`). So: strip any leading
+  // "./", refuse by name anything that is not a plain vessel-relative path — absolute, any "..", a non-path
+  // character, or nothing left — and run "./<path>". A refused value used to be silently dropped, which ran the
+  // WHOLE suite in place of the one file asked for: a measurement of something else under the check's name.
+  // The body still reports the bare path, the form gap checks store and readers key on.
+  let testFile = "";
+  if (typeof pointer.test_file === "string" && pointer.test_file.trim().length > 0) {
+    const rel = pointer.test_file.trim().replace(/^(\.\/)+/, "");
+    if (!rel || rel.startsWith("/") || rel.includes("..") || !/^[A-Za-z0-9_./-]+$/.test(rel)) {
+      return { shape: "structuredError", body: { resolver: "test_suite", failure_mode: "validation_rejected", field: "test_file", detail: "test_file must be a vessel-relative path ([A-Za-z0-9_./-], not absolute, no '..'); it runs as ./<test_file>" } };
+    }
+    testFile = rel;
+  }
   // See onlyTestsPattern / NAMES ARE DATA above: the pattern reaches bun as one argv element decoded by
   // the shell, never as shell text.
   const testFilter = onlyTests.length > 0
@@ -295,7 +310,7 @@ export async function resolveTestSuite(pointer: Record<string, unknown>): Promis
   const baseRef = typeof pointer.base_ref === "string" && /^(HEAD|[0-9a-f]{7,40})$/.test(pointer.base_ref.trim())
     ? pointer.base_ref.trim()
     : "";
-  const bunRun = `env -i PATH="$PATH" HOME="$HOME" NODE_ENV=test TZ=UTC WORKSPACE_ROOT="$(mktemp -d)" timeout ${budgetSec} bun test${testFile ? " " + JSON.stringify(testFile) : ""} --timeout ${perTestTimeoutMs}${testFilter} 2>&1 || true`;
+  const bunRun = `env -i PATH="$PATH" HOME="$HOME" NODE_ENV=test TZ=UTC WORKSPACE_ROOT="$(mktemp -d)" timeout ${budgetSec} bun test${testFile ? " " + JSON.stringify("./" + testFile) : ""} --timeout ${perTestTimeoutMs}${testFilter} 2>&1 || true`;
   const command = baseRef
     ? `ROOT=${shq(preferredRoot)}; [ -d "$ROOT" ] || ROOT=${shq(fallbackRoot)}; ` +
       `git -C "$ROOT" worktree prune >/dev/null 2>&1; BW="$(mktemp -d /tmp/test-suite-base-XXXXXX)"; ` +

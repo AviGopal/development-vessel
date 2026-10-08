@@ -1,3 +1,4 @@
+import { classifyCheckRun } from "./retry-evidence.js";
 import type { ResolverResult } from "./types.js";
 import fs from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -397,6 +398,10 @@ export async function resolveTestSuite(pointer: Record<string, unknown>): Promis
       ...(edit ? { mutation: { kind: "edit", file: edit.file, operator: edit.operator ?? null, start: edit.start, applied: /^MUTATION_APPLIED=1$/m.test(raw) } } : {}),
       skip: parsed.skip,
       failingTests: parsed.failingTests.slice(0, 25),
+      // WHY THE ONE FILE IS RED (B′): the shared classifier's reading of this run (retry-evidence.ts classifyCheckRun),
+      // so the arm step judges a check's red by the same rule feature_compose's test_writing verify uses. Only for a
+      // run of one test_file: a whole-suite run is not a check's measurement.
+      ...(testFile ? { red_reason: classifyCheckRun(raw) } : {}),
       timestamp: new Date().toISOString(),
     },
   };

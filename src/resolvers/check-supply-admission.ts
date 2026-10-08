@@ -141,8 +141,9 @@ export function testWritingDiffOutsideTests(composeMode: unknown, paths: string[
  *   - an edit site is given (vessel-relative after stripping repos/<vessel>/ and any :line suffix): it must be a TS/JS
  *     module (.ts .tsx .js .jsx .mts .cts .mjs .cjs, not .d.ts), else edit_site_not_importable; and the check must
  *     import it (scope-earn-in.ts testImportsFile: static `from`, bare `import "…"`, a namespace import, dynamic
- *     `import(…)`, `require(…)`; comments stripped; extension optional, /index allowed), else
- *     test_writing_check_misses_edit_site.
+ *     `import(…)`, `require(…)`; comments stripped; extension optional, /index allowed; a TYPE-ONLY import —
+ *     `import type …`, `export type … from`, braces whose every specifier is `type X` — is erased at runtime, so it
+ *     never loads the module and does not count), else test_writing_check_misses_edit_site.
  *   - no edit site: the check must import an EXISTING src/ module of its vessel (the first one found becomes the edit
  *     site), else test_writing_check_misses_edit_site.
  * Known limit (v1, accepted): a check importing the edit site only through a re-export or barrel module is refused.
@@ -161,7 +162,7 @@ export async function checkImportsEditSite(source: string, checkRel: string, edi
     if (rel.split("/").includes("..") || !IMPORTABLE_RE.test(rel) || /\.d\.[cm]?ts$/.test(rel)) {
       return { ok: false, stage: "edit_site_not_importable", edit_site: rel, reason: `the gap's edit site ${rel} is not an importable TS/JS module, so no check can import it; a test-writing compose cannot reproduce it (the gap needs a different check)` };
     }
-    if (!testImportsFile(source, checkRel, rel)) {
+    if (!testImportsFile(source, checkRel, rel, { runtimeOnly: true })) {
       return { ok: false, stage: "test_writing_check_misses_edit_site", edit_site: rel, reason: `the check does not import the edit site ${rel}: import it (e.g. import * as mod from "${posixRelative(checkRel, rel)}") and assert on what it does` };
     }
     return { ok: true, edit_site: rel };
@@ -171,7 +172,7 @@ export async function checkImportsEditSite(source: string, checkRel: string, edi
     const resolved = posixJoin(checkRel, m[2]!).replace(/\.(?:[cm]?[jt]sx?)$/, "");
     if (!resolved.startsWith("src/")) continue;
     for (const cand of [`${resolved}.ts`, `${resolved}.tsx`, `${resolved}.js`, `${resolved}/index.ts`, `${resolved}.mts`]) {
-      if (srcExists(cand) && testImportsFile(source, checkRel, cand)) return { ok: true, edit_site: cand };
+      if (srcExists(cand) && testImportsFile(source, checkRel, cand, { runtimeOnly: true })) return { ok: true, edit_site: cand };
     }
   }
   return { ok: false, stage: "test_writing_check_misses_edit_site", edit_site: null, reason: "the gap names no edit site and the check imports no existing src/ module of its vessel: import the module the defect lives in and assert on it" };

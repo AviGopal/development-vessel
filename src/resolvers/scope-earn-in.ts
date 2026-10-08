@@ -375,8 +375,12 @@ export function redForTheRightReason(report: Record<string, unknown> | null, tit
  * Whether a test source IMPORTS a vessel file (both vessel-relative): a static `from "…"` / bare `import "…"`, a dynamic
  * `import("…")` or a `require("…")` whose RELATIVE specifier resolves to the file (extension optional, /index allowed).
  * Comments are stripped first; a path in an ordinary string, a look-alike name or a bare package does not count.
+ * `runtimeOnly` (W2, check-supply-admission.ts checkImportsEditSite): a TYPE-ONLY `from` clause (`import type …`,
+ * `export type …`, or braces whose every specifier is `type X`) is erased by the transpiler, so the module never loads
+ * and it does not count. Off by default: the coverage caller below selects candidate killer tests, where a type-only
+ * importer may still load the file transitively and over-inclusion is conservative.
  */
-export function testImportsFile(source: string, testFile: string, fileRel: string): boolean {
+export function testImportsFile(source: string, testFile: string, fileRel: string, opts: { runtimeOnly?: boolean } = {}): boolean {
   const code = source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:"'`\\])\/\/.*$/gm, "$1");
   const strip = (p: string) => p.replace(/\.(?:[cm]?[jt]sx?)$/, "").replace(/\/index$/, "");
   const want = strip(posix.normalize(fileRel.replace(/\\/g, "/")));
@@ -384,10 +388,26 @@ export function testImportsFile(source: string, testFile: string, fileRel: strin
   for (const m of code.matchAll(re)) {
     const spec = m[2]!;
     if (!spec.startsWith("./") && !spec.startsWith("../")) continue;
+    if (opts.runtimeOnly && m[0].startsWith("from") && typeOnlyClause(code.slice(0, m.index))) continue;
     const resolved = strip(posix.normalize(posix.join(posix.dirname(testFile.replace(/\\/g, "/")), spec)));
     if (resolved === want) return true;
   }
   return false;
+}
+
+/**
+ * The `import|export …` clause governing a `from` (the code before it, its LAST keyword): true when the transpiler
+ * erases it. A default binding named `type` (`import type from`, `import type, {…}`) and `{}` (a side-effect import) load.
+ */
+function typeOnlyClause(before: string): boolean {
+  const kw = /^[\s\S]*\b(?:import|export)\s+([^;"'`]*)$/.exec(before.slice(-4000));
+  if (!kw) return false;
+  const clause = kw[1]!.trim();
+  if (/^type\s+\S/.test(clause) && !/^type\s*,/.test(clause)) return true;
+  const braces = /^\{([^}]*)\}$/.exec(clause);
+  if (!braces) return false;
+  const specs = braces[1]!.split(",").map((x) => x.trim()).filter(Boolean);
+  return specs.length > 0 && specs.every((x) => /^type\s+(?!as\b)\S/.test(x));
 }
 
 export type EarnInEvaluation = { path: string; verdict: "covered" | "not_covered" | "unjudgeable"; reason_key: string; reason: string; evidence: Row[]; ran_checks: boolean; tests_used?: string[]; importing_tests?: number };

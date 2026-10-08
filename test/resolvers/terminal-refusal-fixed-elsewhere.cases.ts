@@ -183,6 +183,30 @@ describe("markTerminalRefusal: a commit that touched the gap's own check is not 
     await held(id, "own_green_instrument_changed_since_birth");
   });
 
+  it("MUST-FAIL (S1): a helper in the check's BIRTH closure, gone from HEAD's (a later commit deleted it), is still instrument: held (own_green_instrument_only_commit)", async () => {
+    commitFile("src/ig.ts", "export const ig = 1;\n", "seed ig");
+    commitFile("test/helpers/ig-helper.ts", "export const expected = 2;\n", "seed ig helper");
+    commitFile("test/ig.test.ts", "import { expected } from \"./helpers/ig-helper.js\";\n// ig > b\n", "seed ig test");
+    const id = `fe-ig-${RUN}`;
+    // check_inputs names the helper: read at HEAD only, the deleted helper is no longer instrument, so it is a subject
+    // file and its deletion reads as the fix. Only the birth-tree closure keeps it in the instrument.
+    const born = await write(id, { edit_site: `repos/${VESSEL}/src/ig.ts`, check_inputs: [`repos/${VESSEL}/test/helpers/ig-helper.ts`], evidence_resolve: er("test/ig.test.ts") });
+    git("rm", "-q", "test/helpers/ig-helper.ts");
+    git("commit", "-q", "-m", "delete the helper the check imported");
+    await mark()(born, { failure_kind: "terminal_refusal", terminal_refusal: GREEN });
+    await held(id, "own_green_instrument_only_commit");
+  });
+
+  it("MUST-FAIL (S2): a test_file named super-repo style (repos/<v>/test/...) is the same instrument: a commit touching it is held (own_green_instrument_only_commit)", async () => {
+    commitFile("src/ip.ts", "export const ip = 1;\n", "seed ip");
+    commitFile("test/ip.test.ts", "// ip > b: expects 2\n", "seed ip test");
+    const id = `fe-ip-${RUN}`;
+    const born = await write(id, { edit_site: `repos/${VESSEL}/src/ip.ts`, evidence_resolve: er(`repos/${VESSEL}/test/ip.test.ts`) });
+    commitFile("test/ip.test.ts", "// ip > b: expects 1\n", "weaken the prefixed check");
+    await mark()(born, { failure_kind: "terminal_refusal", terminal_refusal: GREEN });
+    await held(id, "own_green_instrument_only_commit");
+  });
+
   it("CONTROL: an edit_site-only commit still closes fixed_elsewhere when the check imports an UNCHANGED test helper", async () => {
     commitFile("src/ic.ts", "export const ic = 1;\n", "seed ic");
     commitFile("test/helpers/ic-helper.ts", "export const h = 1;\n", "seed ic helper");

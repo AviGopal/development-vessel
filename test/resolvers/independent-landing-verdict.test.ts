@@ -272,8 +272,10 @@ const E2E: Record<string, Record<string, unknown>> = {
   supplyedit: testSuiteCheck("development-vessel", "test/supplyedit.test.ts", "edited by its landing"),
   // CONTROL: the same self-edit with a bare vessel name, held as before.
   bareedit: { evidence_resolve: { shape: "test_suite", input: { vessel: "development-vessel", test_file: "test/bareedit.test.ts", only_tests: ["edited by its landing"] }, zero_field: "requested_not_passing" } },
+  // A test_file named super-repo style (repos/<v>/test/...): the landing editing test/prefixedit.test.ts edited its check.
+  prefixedit: testSuiteCheck("development-vessel", "repos/development-vessel/test/prefixedit.test.ts", "edited by its landing"),
 };
-const SELF_EDITS: Record<string, string> = { supplyedit: "test/supplyedit.test.ts", bareedit: "test/bareedit.test.ts" };
+const SELF_EDITS: Record<string, string> = { supplyedit: "test/supplyedit.test.ts", bareedit: "test/bareedit.test.ts", prefixedit: "test/prefixedit.test.ts" };
 let e2eReady = false;
 beforeAll(() => {
   // The real sweep spawns git; the exec guard is per-test, and this setup runs outside any test.
@@ -366,7 +368,7 @@ describe("independent landing verdict: end to end through the real pending-land 
     const dispositionOf = (k: string) => ((byId.get(`ilv-${k}`)!.classification_metadata as Record<string, unknown>).disposition) ?? null;
     const disposition = dispositionOf("selfauth");
     const lbl = (k: string, grounded: boolean) => ({ grounded, labeler: "sweep-parent-child", sha: shas[k]!.sha, parent: shas[k]!.parent });
-    expect({ ...seen, selfauth_disposition: disposition, supplyedit_disposition: dispositionOf("supplyedit"), bareedit_disposition: dispositionOf("bareedit") }, run.out.slice(-3000)).toEqual({
+    expect({ ...seen, selfauth_disposition: disposition, supplyedit_disposition: dispositionOf("supplyedit"), bareedit_disposition: dispositionOf("bareedit"), prefixedit_disposition: dispositionOf("prefixedit") }, run.out.slice(-3000)).toEqual({
       control: { status: "closed", closed_reason: "landed_verified", label: lbl("control", true) },
       errors: { status: "open", closed_reason: null, label: null },
       readshape: { status: "open", closed_reason: null, label: null },
@@ -381,6 +383,9 @@ describe("independent landing verdict: end to end through the real pending-land 
       supplyedit_disposition: "awaiting_operator_review",
       bareedit: { status: "open", closed_reason: null, label: null },
       bareedit_disposition: "awaiting_operator_review",
+      // MUST-FAIL (S2): the repos/<v>/ prefix on test_file is stripped, so the self-edit is held, never re-run.
+      prefixedit: { status: "open", closed_reason: null, label: null },
+      prefixedit_disposition: "awaiting_operator_review",
     });
   });
 });

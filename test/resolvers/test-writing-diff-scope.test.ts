@@ -135,11 +135,12 @@ describe("test-writing compose: the diff is confined to the gap's one check file
     expect([...FC.matchAll(/testWritingDiffOutsideTests\([^\n]*, pointer\.gap\?\.id\)/g)].length).toBe(2);
   });
 
-  test("[CONTROL] compose_mode is READ only by these two gates (besides the entry delete and the admission write)", () => {
+  test("[MUST-FAIL] compose_mode is READ only by the two R3 gates and the verify's one testWritingMode read (besides the entry delete and the admission write)", () => {
     const sites = [...FC.matchAll(/\.compose_mode\b/g)].map((m) => FC.slice(Math.max(0, m.index! - 80), m.index! + 80));
     expect(sites.filter((s) => s.includes("testWritingDiffOutsideTests(")).length).toBe(2);
+    expect(sites.filter((s) => s.includes("const testWritingMode = (pointer")).length).toBe(1);
     expect(sites.filter((s) => s.includes("delete (pointer")).length).toBe(1);
     expect(sites.filter((s) => s.includes("compose_mode = csa.CHECK_SUPPLY_COMPOSE_MODE")).length).toBe(1);
-    expect(sites.length).toBe(4);
+    expect(sites.length).toBe(5);
   });
 });

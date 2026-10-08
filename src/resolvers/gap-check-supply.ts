@@ -11,20 +11,24 @@
  *      (CHECK_SUPPLY_DISPOSITION, which the shared eligibility predicate holds) is written only on a row this
  *      tick dispatches for, never as a bulk label.
  *   2. DISPATCH: for at most the rhythm's max_per_tick such gaps, ONE edit-intent goal per gap through
- *      dispatch_goal. When an existing test file of the vessel already imports the gap's edit site
- *      (vesselTestInventory + its imports), the goal appends to it: "Append a failing test to repos/<vessel>/<file>
- *      that reproduces: <symptom>. Change no other file."; only when none covers it: "Write a failing test in
- *      repos/<vessel>/test/<name>.test.ts that reproduces: <symptom>. Do not change src/." One file per goal. The
- *      row's check_supply ledger records the attempt and the titles the file already held; a gap is not asked
+ *      dispatch_goal, naming the gap's own OUT-OF-SUITE check file (B′): "Write ONE failing test in
+ *      repos/<vessel>/test/checks/<slug>.check.ts that reproduces: <symptom>. …" (checkSupplyGoal: one test whose
+ *      assertion fails because of the defect, the edit site imported as a namespace, no network, no src changes).
+ *      bun's default discovery never runs a *.check.ts, so the intended red never reaches the pre-cutover suite, the
+ *      post-land suite or pull-sync; the supply never APPENDS to an existing *.test.ts (a red there reads as a
+ *      regression everywhere), and feature_compose's R3 gate lets a test_writing compose write that one path only.
+ *      One file per goal. The row's check_supply ledger records the attempt and the titles the file already held; a gap is not asked
  *      again until its backoff (backoff_hours * 2^(attempts-1)) has passed, and after max_attempts it is marked
  *      exhausted, so the tick cannot livelock on a gap whose test never lands. CONTROL ARM: by hash(gap id)
  *      parity half the gaps are recorded (gap_check_supply_arm "control") and never sent a goal, so the supply's
  *      effect can be measured against gaps it did not touch.
  *   3. ARM: once new test titles exist in that file, they become a test_suite check. The test must IMPORT the
- *      edit site (the gap's own, the one its summary names, or the test's src import). The ONE judge
- *      (takeBirthVerdict, the birth seam's) runs it and its run report is read too: only 'present' with every
- *      named test among the run's failures (red for the right reason: an assertion, not a load or collection
- *      error) is written, through substrateGap_write with the verdict as the in-process trusted birth stamp,
+ *      edit site (the gap's own, the one its summary names, or, with none, an existing src module the test imports:
+ *      check-supply-admission.ts checkImportsEditSite, the rule feature_compose's verify applies). The ONE judge
+ *      (takeBirthVerdict, the birth seam's) runs it through test_suite (P0: ./<check path>) and its run report is
+ *      read too: only 'present' with every named test among the run's failures AND each an ASSERTION by the shared
+ *      classifier the report carries (red_reason, retry-evidence.ts classifyCheckRun: not a load error, a network
+ *      call or a timeout) is written, through substrateGap_write with the verdict as the in-process trusted birth stamp,
  *      clearing the disposition in the same write. Green at HEAD, red for the wrong reason, or a test that does
  *      not import the edit site writes no check: the gap stays unarmed (fail closed). No region is written, so
  *      the arm-time region gate has nothing to refuse; the write still passes through it.
@@ -41,7 +45,7 @@
  */
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
-import { dirname, join, normalize } from "node:path";
+import { join, normalize } from "node:path";
 import type { ResolverResult } from "./types.js";
 import { class2PredicateKey, resolveSubstrateGap, resolveSubstrateGapWrite, takeBirthVerdictWithReport } from "./substrate-gap.js";
 import {
@@ -51,13 +55,13 @@ import {
   identifyVessel,
   isAwaitingLandVerification,
   isParkingDisposition,
-  vesselTestInventory,
 } from "./gap-to-feature.js";
+import { checkImportsEditSite, checkSupplyCheckPath, vesselRelativeEditSite } from "./check-supply-admission.js";
 import { readFamilyRhythm, rhythmDueScore, rhythmSettlementOverlay, type RhythmBody } from "./rhythm-conductor-tick.js";
 // The check-run judge lives with the evaluator (scope-earn-in.ts, an excluded file): item 2 reads it from there.
 import { redForTheRightReason } from "./scope-earn-in.js";
 import { resolveDispatchGoal } from "./dispatch-goal.js";
-import { testTitleInSource } from "./retry-evidence.js";
+import { armRedReasonRefusal, testTitleInSource } from "./retry-evidence.js";
 import { onlyTestsProblem } from "./test-suite.js";
 import { selfAuthHeaders } from "../lib/self-auth.js";
 
@@ -141,10 +145,10 @@ export function checkSupplyVessel(row: Row): string | null {
   return null;
 }
 
-/** The test file a gap's check is written to: one per gap, under the vessel's test/ directory. */
+/** The file a gap's check is written to: one per gap, OUT OF SUITE, test/checks/<checkSupplyCheckFile(gapId)> (the slug
+ *  is defined once, in check-supply-admission.ts, where feature_compose's R3 gate allows exactly this path). */
 export function checkSupplyTestFile(gapId: string): string {
-  const slug = gapId.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 60).replace(/-+$/, "");
-  return `test/gap-${slug || "unnamed"}.test.ts`;
+  return checkSupplyCheckPath(gapId);
 }
 
 /** A gap's experiment arm, stable for its id: hash parity. Control-arm gaps are classified but get no goal, so the
@@ -160,14 +164,32 @@ const symptomOf = (summary: string): string => summary
   .slice(0, 600)
   .replace(/[\s.]+$/, "");
 
-/** The goal for a NEW test file: the one file to write, the symptom to reproduce, and no src edits. */
-export function checkSupplyGoal(vessel: string, testFile: string, summary: string): string {
-  return `Write a failing test in repos/${vessel}/${testFile} that reproduces: ${symptomOf(summary)}. Do not change src/.`;
+/** The edit site as the check imports it: its path relative to the check file, without the extension. */
+function importSpecifier(testFile: string, siteRel: string): string {
+  const from = testFile.split("/").slice(0, -1);
+  const to = siteRel.replace(/\.(?:[cm]?[jt]sx?)$/, "").split("/");
+  let i = 0;
+  while (i < from.length && i < to.length - 1 && from[i] === to[i]) i++;
+  const up = from.length - i;
+  return `${up === 0 ? "./" : "../".repeat(up)}${to.slice(i).join("/")}`;
 }
 
-/** The goal for an EXISTING test file that already covers the edit site: append to it, change nothing else. */
-export function checkSupplyAppendGoal(vessel: string, testFile: string, summary: string): string {
-  return `Append a failing test to repos/${vessel}/${testFile} that reproduces: ${symptomOf(summary)}. Change no other file.`;
+/**
+ * The goal: the one check file to write, the symptom to reproduce, and what feature_compose's verify will enforce
+ * (judgeTestWritingCheck): ONE test whose expect() assertion fails because of the defect, the edit site imported
+ * (as a namespace, so a missing export is an assertion red, not a load error), no network, no src edits. The lead
+ * sentence names only the check path (goal-host's edit-intent route targets the file the lead sentence names); the
+ * edit site is named by its import specifier.
+ */
+export function checkSupplyGoal(vessel: string, testFile: string, summary: string, site: string | null = null): string {
+  const siteRel = vesselRelativeEditSite(site);
+  const imp = siteRel && /\.(?:[cm]?[jt]sx?)$/.test(siteRel)
+    ? `Import the module the defect lives in as a namespace, import * as mod from "${importSpecifier(testFile, siteRel)}", and assert on it`
+    : "Import the src module the defect lives in as a namespace (import * as mod from \"../../src/<file>\") and assert on it";
+  return `Write ONE failing test in repos/${vessel}/${testFile} that reproduces: ${symptomOf(summary)}. ` +
+    `Its expect() assertion fails because of the defect, not because the file fails to load: ${imp} ` +
+    `(for a symbol that must exist: expect(typeof (mod as Record<string, unknown>)["name"]).toBe("function")). ` +
+    "No network, no services, no timers. Do not change src/ or any other file.";
 }
 
 /** String-literal test titles declared in a test file (template titles with placeholders are not runnable names). */
@@ -181,25 +203,6 @@ export function declaredTestTitles(src: string): string[] {
   return titles;
 }
 
-/** Every existing src file the test imports through a relative path, as repos/<vessel>/src/… */
-export function testImportTargets(vessel: string, testFile: string, src: string): string[] {
-  const out: string[] = [];
-  for (const m of src.matchAll(/\bfrom\s+["'](\.{1,2}\/[^"']+)["']/g)) {
-    const rel = normalize(join(dirname(testFile), m[1] ?? "")).replace(/\.js$/, ".ts");
-    if (!rel.startsWith("src/") || rel.includes("..")) continue;
-    for (const cand of rel.endsWith(".ts") ? [rel] : [`${rel}.ts`, `${rel}/index.ts`]) {
-      const site = `repos/${vessel}/${cand}`;
-      if (existsSync(join(clonesRoot(), vessel, cand)) && !out.includes(site)) { out.push(site); break; }
-    }
-  }
-  return out;
-}
-
-/** The edit site the test exercises: its first relative import that resolves to one existing src file. */
-export function testImportTarget(vessel: string, testFile: string, src: string): string | null {
-  return testImportTargets(vessel, testFile, src)[0] ?? null;
-}
-
 /** The gap's localized edit site in its vessel: its own edit site, else a src file its summary names that exists. */
 export function checkSupplySite(row: Row, vessel: string): string | null {
   const own = gapEditSite(row, metaOf(row))?.replace(/:\d+.*$/, "");
@@ -208,20 +211,6 @@ export function checkSupplySite(row: Row, vessel: string): string | null {
     const rel = normalize(m[1] ?? "");
     if (!rel.startsWith("src/") || rel.includes("..")) continue;
     if (existsSync(join(clonesRoot(), vessel, rel))) return `repos/${vessel}/${rel}`;
-  }
-  return null;
-}
-
-/** An existing test file of the vessel (vesselTestInventory's walk) that already imports the edit site, or null. */
-export function existingTestFor(vessel: string, site: string): string | null {
-  const base = site.replace(/^.*\//, "").replace(/\.ts$/, "");
-  const files = vesselTestInventory(vessel, []).files
-    .slice()
-    .sort((a, b) => Number(b.includes(`${base}.test.`)) - Number(a.includes(`${base}.test.`)));
-  for (const f of files) {
-    let src = "";
-    try { src = readFileSync(join(clonesRoot(), vessel, f), "utf-8"); } catch { continue; }
-    if (testImportTargets(vessel, f, src).includes(site)) return f;
   }
   return null;
 }
@@ -329,11 +318,12 @@ export async function resolveGapCheckSupplyTick(pointer: GapCheckSupplyTickPoint
     if (titles.length === 0) continue; // nothing appended yet: still waiting on the goal
     armBudget -= 1;
     touched.add(id);
-    const imports = testImportTargets(ledger.vessel, ledger.test_file, src);
-    const editSite = ledger.edit_site ?? imports[0] ?? null;
-    const why = onlyTestsProblem(titles)?.detail
-      ?? (!editSite ? "no edit site: the gap names none and the test imports no existing src file"
-        : !imports.includes(editSite) ? `the test does not import the edit site ${editSite}` : null);
+    // W2, THE VERIFY'S RULE (check-supply-admission.ts checkImportsEditSite): the gap's edit site, imported in any
+    // form testImportsFile reads; with none, an existing src module the test imports becomes it.
+    const vesselDir = ledger.vessel;
+    const site = await checkImportsEditSite(src, ledger.test_file, ledger.edit_site ?? null, (rel) => existsSync(join(clonesRoot(), vesselDir, rel)));
+    const editSite = site.ok ? `repos/${vesselDir}/${site.edit_site}` : null;
+    const why = onlyTestsProblem(titles)?.detail ?? (site.ok ? null : `${site.stage}: ${site.reason}`);
     if (why) {
       refused += 1;
       notArmed.push({ id, reason: why });
@@ -342,7 +332,11 @@ export async function resolveGapCheckSupplyTick(pointer: GapCheckSupplyTickPoint
     }
     const evidence_resolve = { shape: "test_suite", input: { vessel: `repos/${ledger.vessel}`, test_file: ledger.test_file, only_tests: titles }, zero_field: "requested_not_passing" };
     const { verdict, report } = await takeBirthVerdictWithReport(id, { ...meta, evidence_resolve, edit_site: editSite });
-    const wrongReason = verdict === "present" ? redForTheRightReason(report, titles) : null;
+    // RED FOR THE RIGHT REASON, BY THE SHARED CLASSIFIER: every named test among the failures (redForTheRightReason)
+    // AND each an assertion in the report's red_reason (retry-evidence.ts), the rule feature_compose's verify applies.
+    // A report without red_reason cannot attribute its red: nothing is armed.
+    const classified = verdict === "present" ? armRedReasonRefusal((report as Record<string, unknown> | null)?.["red_reason"], titles) : null;
+    const wrongReason = verdict === "present" ? redForTheRightReason(report, titles) ?? (classified ? `${classified.cause ? `${classified.cause}: ` : ""}${classified.reason}` : null) : null;
     if (verdict !== "present" || wrongReason) {
       // GREEN AT HEAD, OR RED FOR THE WRONG REASON, ARMS NOTHING. An unknown stays dispatched and is judged again.
       const state = verdict === "unknown" ? "goal_dispatched" : verdict === "absent" ? "green_at_head" : "arm_refused";
@@ -399,8 +393,6 @@ export async function resolveGapCheckSupplyTick(pointer: GapCheckSupplyTickPoint
       if (hasFalsifierA !== hasFalsifierB) return hasFalsifierA ? -1 : 1; // stated falsifier FIRST
       return String(a["first_detected_at"] ?? a["detected_at"] ?? "").localeCompare(String(b["first_detected_at"] ?? b["detected_at"] ?? ""));
     });
-  // ONE IN-FLIGHT APPEND PER TEST FILE: a title appended to a shared file is attributed to the one gap waiting on it.
-  const busyFiles = new Set(open.map((r) => ledgerOf(metaOf(r))).filter((l) => l.state === "goal_dispatched" && l.mode === "append" && l.vessel && l.test_file).map((l) => `${l.vessel}/${l.test_file}`));
   for (const row of candidates) {
     if (dispatched.length >= perTick && controlMarked.length >= perTick) break;
     const id = String(row["id"]);
@@ -426,18 +418,17 @@ export async function resolveGapCheckSupplyTick(pointer: GapCheckSupplyTickPoint
     }
     const vessel = checkSupplyVessel(row);
     if (!vessel) { skipped.push({ id, reason: "no_vessel" }); continue; }
-    // An existing test that already imports the edit site is appended to; a new file only when none covers it.
+    // ALWAYS THE GAP'S OWN CHECK FILE (B′), never an existing test and never an older ledger's discovered *.test.ts:
+    // an intended red in a file bun discovers reads as a regression in every whole-suite run.
     const site = checkSupplySite(row, vessel);
-    const existing = site ? existingTestFor(vessel, site) : null;
-    if (existing && busyFiles.has(`${vessel}/${existing}`) && ledger.test_file !== existing) { skipped.push({ id, reason: `test_file_busy(${existing})` }); continue; }
-    const testFile = existing ?? ledger.test_file ?? checkSupplyTestFile(id);
-    const mode = existing ? "append" : "new_file";
-    // The titles the target file already holds (an existing test, or a previous attempt's refused test): only
-    // titles added after this dispatch can arm the gap.
+    const testFile = checkSupplyTestFile(id);
+    const mode = "check_file";
+    // The titles the check file already holds (a previous attempt's landed, refused check): only titles added after
+    // this dispatch can arm the gap.
     let baselineTitles: string[] = [];
     try { baselineTitles = declaredTestTitles(readFileSync(join(clonesRoot(), vessel, testFile), "utf-8")); } catch { baselineTitles = []; }
     const summary = String(row["summary"] ?? "");
-    const goal = existing ? checkSupplyAppendGoal(vessel, testFile, summary) : checkSupplyGoal(vessel, testFile, summary);
+    const goal = checkSupplyGoal(vessel, testFile, summary, site);
     if (pointer.dry_run) { dispatched.push({ id, goal, dispatch_id: null }); continue; }
     const r = await resolveDispatchGoal({ type: "dispatch_goal", goal, variables: { gap_id: id, check_supply: true }, timeout_ms: 15_000 });
     if (r.shape !== "goalDispatchResult") {
@@ -447,7 +438,6 @@ export async function resolveGapCheckSupplyTick(pointer: GapCheckSupplyTickPoint
     }
     const dispatchId = ((r.body ?? {}) as { dispatch_id?: string | null }).dispatch_id ?? null;
     dispatched.push({ id, goal, dispatch_id: dispatchId });
-    if (existing) busyFiles.add(`${vessel}/${existing}`);
     await writeMeta(row, {
       ...(holdable ? { disposition: CHECK_SUPPLY_DISPOSITION } : {}),
       gap_check_supply_arm: "treatment",

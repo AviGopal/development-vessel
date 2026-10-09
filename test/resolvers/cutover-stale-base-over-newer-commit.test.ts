@@ -36,6 +36,10 @@
 // refusal can only be for the reason each test names: the MUST-FAILs assert the specific
 // refuse_class the stale-base fix uses (stale_base_superseded), never a bare "refused", so they
 // cannot pass as no_measurement_available or any other refusal. Any unstubbed URL fails the test.
+//
+// NOT a protected judge test unless it is listed: pull-sync protects only the .test.* entries of
+// scripts/substrate/autonomy-scope.json's excluded_paths, and this file is not among them at this
+// commit, so an autonomous landing may edit it.
 import { describe, it, expect, beforeEach, afterEach, afterAll } from "bun:test";
 import * as cutoverMod from "../../src/resolvers/vessel-mitosis-cutover.js";
 import { mkdtemp, mkdir, writeFile, readFile, chmod, rm } from "node:fs/promises";
@@ -166,7 +170,9 @@ afterEach(async () => {
 // when the commit-tree check reads it, and only the cutover's own fetch + reset brings it to N.
 // same_file_reverted: N (to F) is followed by R, an operator revert that restores F to exactly B's
 // content; the clone fast-forwards to R. F has newer COMMITS but no newer CONTENT.
-type Newer = "none" | "same_file" | "unrelated_file" | "same_file_unpulled" | "same_file_reverted";
+// same_file_already_staged: N sets F to EXACTLY the staged content (the edit already landed); the
+// clone fast-forwards to N, so HEAD holds what this mitosis would write.
+type Newer = "none" | "same_file" | "unrelated_file" | "same_file_unpulled" | "same_file_reverted" | "same_file_already_staged";
 
 // The 08-29 shape: the staging leg recorded its base from a runtime tree that a previous attempt
 // had transiently patched, so staged_base_sha is the hash of content NO commit ever held.
@@ -229,7 +235,8 @@ async function setup(newer: Newer, opts: { base?: "committed_B" | "uncommitted_p
     const other = join(ws, "other-writer");
     git(ws, "clone", "-q", "-b", "dev", origin, other);
     gitIdentity(other);
-    if (newer !== "unrelated_file") await put(other, F, F_AT_N);
+    if (newer === "same_file_already_staged") await put(other, F, F_STAGED);
+    else if (newer !== "unrelated_file") await put(other, F, F_AT_N);
     else await put(other, G, G_AT_N);
     git(other, "add", ".");
     git(other, "commit", "-m", `N: newer work on ${newer === "unrelated_file" ? G : F}${opts.newerGap ? `\n\nGap: ${opts.newerGap}` : ""}`);
@@ -367,6 +374,21 @@ describe("cutover class A: a stale-base staged edit never overwrites newer commi
     expect(precheckRuns).toBeGreaterThan(0);
     expect(git(s.clone, "rev-parse", "HEAD~1")).toBe(s.shaN);
     expect(git(s.clone, "show", `HEAD:${F}`) + "\n").toBe(F_STAGED);
+  });
+
+  it("CONTROL: re-landing content HEAD already holds is not refused as superseded, and reverts nothing", async () => {
+    // The commit after the staged base that set F IS this edit (landed already, e.g. a retry whose
+    // pending pointer survived). It sits after the base in F's history, so a guard without the
+    // "HEAD already holds the staged content" exemption names it as newer work: a false refusal.
+    const s = await setup("same_file_already_staged", { newerGap: "gap-x" });
+    const r = await resolveVesselMitosisCutover(s.pointer as never);
+    const body = (r.body ?? {}) as Record<string, unknown>;
+    // Past the stale-base guard, the cutover's existing verdict for this case is no_diff (staged files
+    // byte-identical to HEAD: nothing to commit). That is the outcome to reach, not stale_base_superseded.
+    expect(body["refuse_class"]).not.toBe("stale_base_superseded");
+    expect({ kind: body["kind"], newer_commits: body["newer_commits"] }).toEqual({ kind: "no_diff", newer_commits: undefined });
+    expect(git(s.clone, "show", `HEAD:${F}`) + "\n").toBe(F_STAGED);
+    expect(git(s.clone, "rev-list", "--count", `${s.shaN}..HEAD`)).toBe("0");
   });
 
   it("MUST-FAIL (recoverability): the stale-base refusal names the intervening commit and the gap from its Gap: trailer", async () => {

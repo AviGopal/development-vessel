@@ -9,8 +9,8 @@
 // file is outside what the supply asked for.
 //
 // THE RULE (testWritingDiffOutsideTests(compose_mode, paths, gap_id)). A path is resolved to its vessel-relative form
-// (after repos/<vessel>/, or after .../vessels/<vessel>/ for an absolute runtime or clone path; a bare relative path
-// is taken as vessel-relative). In compose_mode "test_writing" the ONLY path that may be written is exactly
+// (after /workspace/git/compose/<compose-id>/<vessel>/ for an isolated compose worktree, after repos/<vessel>/, or
+// after .../vessels/<vessel>/ for an absolute runtime or clone path; a bare relative path is taken as vessel-relative). In compose_mode "test_writing" the ONLY path that may be written is exactly
 // test/checks/<checkSupplyCheckFile(gap_id)>. Every other path is refused: another gap's check file, any *.test.ts
 // (under test/ or co-located in src/), fixtures, src, package.json, config, '..' paths. No gap id ⇒ nothing is
 // allowed (fail closed). Which vessel a path may touch stays the verify_vessels gate's job.
@@ -35,6 +35,7 @@ const FC = readFileSync(join(import.meta.dir, "..", "..", "src", "resolvers", "f
 
 const GAP = "gap-Env_gated SF.discount";
 const CHECK = "test/checks/gap-env-gated-sf-discount.check.ts";
+const COMPOSE = "/workspace/git/compose/fc-mv04xoq8-muxfq1/development-vessel";
 
 describe("checkSupplyCheckFile: one check file name per gap id, defined once", () => {
   test("[MUST-FAIL] the slug is the gap id lower-cased with every non-alphanumeric run as '-', suffix .check.ts", () => {
@@ -96,9 +97,38 @@ describe("test-writing compose: the diff is confined to the gap's one check file
       `repos/development-vessel/${CHECK}`,
       `/vessels/development-vessel/${CHECK}`,
       `/workspace/git/vessels/development-vessel/${CHECK}`,
+      `${COMPOSE}/${CHECK}`,
       CHECK,
       `./${CHECK}`,
     ], GAP)).toEqual([]);
+  });
+
+  // An isolated compose (compose-workspace.ts acquireComposeWorkspace) writes under WS_ROOT/<compose-id>/<vessel>/, and the
+  // landing floor passes those created[] paths as they are. Observed 10-08: the gap's own check in that form was refused.
+  test("[MUST-FAIL] the compose-worktree form is resolved exactly: /workspace/git/compose/<compose-id>/<vessel>/<rest>, two single segments", () => {
+    expect(typeof outside).toBe("function");
+    for (const p of [
+      // src, and another gap's check, in compose form
+      "/workspace/git/compose/fc-x/development-vessel/src/a.ts",
+      `${COMPOSE}/test/checks/some-other-gap.check.ts`,
+      // '..' in a segment slot the root consumes (resolves outside the compose root) and in the rest
+      `/workspace/git/compose/../development-vessel/${CHECK}`,
+      `/workspace/git/compose/fc-x/../${CHECK}`,
+      `${COMPOSE}/test/checks/../../${CHECK}`,
+      // ONE segment is not a worktree root (roots are always <compose-id>/<vessel>): the two segments peeled are
+      // development-vessel and test, so the rest is checks/<file>, which is not the gap's check.
+      `/workspace/git/compose/development-vessel/${CHECK}`,
+      // a nested repos/<x>/ inside the worktree is not a vessel root: the compose root is anchored and read first
+      `${COMPOSE}/src/repos/x/${CHECK}`,
+    ]) expect(outside!("test_writing", [p], GAP)).toEqual([p]);
+    // Last, so every refusal above is evaluated even where the root is mis-peeled (the CONTROL above pins it too).
+    expect(outside!("test_writing", [`${COMPOSE}/${CHECK}`], GAP)).toEqual([]);
+  });
+
+  test("[MUST-FAIL] W2's edit site resolves the compose-worktree form too (vesselRelativeEditSite)", () => {
+    const rel = mod["vesselRelativeEditSite"] as (s: unknown) => string | null;
+    expect(rel(`${COMPOSE}/src/resolvers/a.ts:12`)).toBe("src/resolvers/a.ts");
+    expect(rel("repos/development-vessel/src/resolvers/a.ts")).toBe("src/resolvers/a.ts");
   });
 
   test("[CONTROL] an ordinary compose (no compose_mode, or any other value) is unaffected whatever it touches", () => {

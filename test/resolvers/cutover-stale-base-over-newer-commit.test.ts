@@ -164,7 +164,9 @@ afterEach(async () => {
 // none: no newer commit. same_file / unrelated_file: N is pushed and the clone fast-forwards to it.
 // same_file_unpulled: N (to F) is pushed but the clone has NOT fetched it yet — it still sits at B
 // when the commit-tree check reads it, and only the cutover's own fetch + reset brings it to N.
-type Newer = "none" | "same_file" | "unrelated_file" | "same_file_unpulled";
+// same_file_reverted: N (to F) is followed by R, an operator revert that restores F to exactly B's
+// content; the clone fast-forwards to R. F has newer COMMITS but no newer CONTENT.
+type Newer = "none" | "same_file" | "unrelated_file" | "same_file_unpulled" | "same_file_reverted";
 
 // The 08-29 shape: the staging leg recorded its base from a runtime tree that a previous attempt
 // had transiently patched, so staged_base_sha is the hash of content NO commit ever held.
@@ -191,7 +193,7 @@ async function recordingGit(): Promise<{ cmd: string; calls: () => Promise<strin
  * mitosis of F computed against B; optionally a newer commit N pushed by another writer and
  * fast-forwarded into the live clone, which is left clean at HEAD.
  */
-async function setup(newer: Newer, opts: { base?: "committed_B" | "uncommitted_patch" } = {}) {
+async function setup(newer: Newer, opts: { base?: "committed_B" | "uncommitted_patch"; newerGap?: string } = {}) {
   const origin = join(ws, "origin.git");
   git(ws, "init", "--bare", "-b", "dev", origin);
 
@@ -230,7 +232,12 @@ async function setup(newer: Newer, opts: { base?: "committed_B" | "uncommitted_p
     if (newer !== "unrelated_file") await put(other, F, F_AT_N);
     else await put(other, G, G_AT_N);
     git(other, "add", ".");
-    git(other, "commit", "-m", `N: newer work on ${newer === "unrelated_file" ? G : F}`);
+    git(other, "commit", "-m", `N: newer work on ${newer === "unrelated_file" ? G : F}${opts.newerGap ? `\n\nGap: ${opts.newerGap}` : ""}`);
+    if (newer === "same_file_reverted") {
+      await put(other, F, F_AT_B);
+      git(other, "add", ".");
+      git(other, "commit", "-m", "R: revert N; F is B's content again");
+    }
     git(other, "push", "origin", "dev");
     shaN = git(other, "rev-parse", "HEAD");
     if (newer !== "same_file_unpulled") git(clone, "pull", "-q", "--ff-only", "origin", "dev");
@@ -347,5 +354,27 @@ describe("cutover class A: a stale-base staged edit never overwrites newer commi
     expect(git(s.clone, "rev-parse", "HEAD~1")).toBe(s.shaN);
     expect(git(s.clone, "show", `HEAD:${F}`) + "\n").toBe(F_STAGED);
     expect(git(s.clone, "show", `HEAD:${G}`) + "\n").toBe(G_AT_N);
+  });
+
+  it("CONTROL: a revert that restored the file to the staged base's content lands (the guard compares content, not commit identity)", async () => {
+    // Newer COMMITS touched F (N, then the revert R), but HEAD's F is byte-identical to the staged
+    // base, so the wholesale copy reverts nothing. A guard keyed on "any commit to F after the base
+    // commit" would refuse this; one keyed on content must not.
+    const s = await setup("same_file_reverted");
+    const r = await resolveVesselMitosisCutover(s.pointer as never);
+    expect(String(((r.body ?? {}) as Record<string, unknown>)["refusal_reason"] ?? "")).toBe("");
+    expect(r.shape).toBe("cutoverApplied");
+    expect(precheckRuns).toBeGreaterThan(0);
+    expect(git(s.clone, "rev-parse", "HEAD~1")).toBe(s.shaN);
+    expect(git(s.clone, "show", `HEAD:${F}`) + "\n").toBe(F_STAGED);
+  });
+
+  it("MUST-FAIL (recoverability): the stale-base refusal names the intervening commit and the gap from its Gap: trailer", async () => {
+    const s = await setup("same_file", { newerGap: "gap-newer-work-on-target" });
+    const r = await resolveVesselMitosisCutover(s.pointer as never);
+    const body = (r.body ?? {}) as Record<string, unknown>;
+    expect(body["refuse_class"]).toBe("stale_base_superseded");
+    expect(String(body["refusal_reason"] ?? "")).toContain(s.shaN);
+    expect(body["newer_commits"]).toEqual([{ file: F, sha: s.shaN, gap: "gap-newer-work-on-target" }]);
   });
 });

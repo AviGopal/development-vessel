@@ -159,6 +159,29 @@ export async function deleteParkedLanding(gapId: string): Promise<void> {
   }
 }
 
+/** POSIX single-quoted shell word: bash reads every byte between the quotes literally. */
+export function shq(s: string): string {
+  return "'" + s.replace(/'/g, "'\\''") + "'";
+}
+
+/**
+ * Why a park cannot be resumed as it stands, or null. The resume joins park.vessel and each f.path
+ * onto RUNTIME_ROOT, the push clone and its staging root, and hands the vessel path to the tools
+ * shell, so the vessel must be a plain name and every path vessel-relative.
+ */
+export function parkedLandingProblem(park: ParkedLanding): string | null {
+  if (typeof park.vessel !== "string" || !/^[a-z0-9][a-z0-9-]*$/.test(park.vessel)) return "vessel is not a plain vessel name ([a-z0-9][a-z0-9-]*)";
+  for (const [i, f] of (park.files ?? []).entries()) {
+    const p = (f as { path?: unknown } | null)?.path;
+    if (typeof p !== "string" || p === "") return `files[${i}].path is empty`;
+    if (p.startsWith("/")) return `files[${i}].path is absolute`;
+    if (p.includes("\\")) return `files[${i}].path contains a backslash`;
+    if (p.includes("\0")) return `files[${i}].path contains a NUL byte`;
+    if (p.split("/").includes("..")) return `files[${i}].path has a '..' segment`;
+  }
+  return null;
+}
+
 /**
  * Finish a parked landing: re-check the base, sync the verified files into the live
  * tree, typecheck ONLY (the park already passed the suite and the semantic gate), and
@@ -166,6 +189,15 @@ export async function deleteParkedLanding(gapId: string): Promise<void> {
  * dropped with a `park_stale` lesson and the caller drafts normally.
  */
 export async function resumeParkedLanding(pointer: FeatureComposePointer, park: ParkedLanding, toolsEndpoint: string): Promise<ResolverResult | null> {
+  // VALIDATED BEFORE ANY I/O: refused like park_stale (the park is dropped and the caller redrafts).
+  const invalid = parkedLandingProblem(park);
+  if (invalid) {
+    const parkId = String(pointer.gap?.id ?? park.gap_id);
+    await deleteParkedLanding(parkId);
+    await appendComposeLesson("park_invalid", `parked landing refused before resume: ${invalid}`, "", pointer.gap);
+    console.log(`[feature-compose] park_invalid for ${parkId} - ${invalid} (vessel=${JSON.stringify(String(park.vessel)).slice(0, 80)}); park deleted, redrafting`);
+    return null;
+  }
   const gapId = park.gap_id;
   const cloneRoot = process.env["MITOSIS_PUSH_CLONE_DIR"] ?? "/workspace/git/vessels";
   for (const f of park.files) {
@@ -209,7 +241,7 @@ export async function resumeParkedLanding(pointer: FeatureComposePointer, park: 
       await parkWriteFile(`${stagingRoot}/${f.path}`, f.content, "utf-8");
     }
     const tc = await callTool(toolsEndpoint, "shell", {
-      command: `cd ${JSON.stringify(`${RUNTIME_ROOT}/${park.vessel}`)} && timeout 300 bunx tsc --noEmit -p . 2>&1 | tail -20; echo TC_EXIT=\${PIPESTATUS[0]}`,
+      command: `cd ${shq(`${RUNTIME_ROOT}/${park.vessel}`)} && timeout 300 bunx tsc --noEmit -p . 2>&1 | tail -20; echo TC_EXIT=\${PIPESTATUS[0]}`,
       cwd: REPO_ROOT,
     });
     const tcOut = String((tc.body as { stdout?: unknown })?.stdout ?? "");
@@ -254,7 +286,7 @@ export async function resumeParkedLanding(pointer: FeatureComposePointer, park: 
     console.warn(`[feature-compose] resume of ${gapId} failed (${(err as Error).message}); park kept`);
     return null;
   } finally {
-    await callTool(toolsEndpoint, "shell", { command: `rm -rf ${JSON.stringify(stagingRoot)}`, cwd: REPO_ROOT }).catch(() => undefined);
+    await callTool(toolsEndpoint, "shell", { command: `rm -rf ${shq(stagingRoot)}`, cwd: REPO_ROOT }).catch(() => undefined);
   }
 }
 export { loadFleetShapeVocabulary } from "../shape-vocabulary.js";
@@ -336,7 +368,7 @@ export const FEATURE_COMPOSE_ENDPOINT = process.env.FEATURE_COMPOSE_ENDPOINT ?? 
 
 export interface FeatureComposePointer {
   produceFeatureCompose?: boolean;
-  /** Resume this parked landing instead of drafting (resumable landings). */
+  /** IGNORED: a park is read only from disk by gap.id (readParkedLanding). A supplied value is logged and dropped. */
   resume_from?: ParkedLanding;
   /** How old a park may be and still be resumed (default 24 h). */
   parked_landing_ttl_ms?: number;
@@ -5534,8 +5566,11 @@ async function resolveFeatureComposeUncapped(pointer: FeatureComposePointer): Pr
   }
   // RESUME A PARKED LANDING before drafting: a fresh park is a patch that already passed
   // verify and the semantic gate and only lost its cutover.
+  // The park is read from disk by gap id only: a pointer-supplied park would let the caller choose what
+  // the resume writes into the live tree and hands to the shell.
+  if (pointer.resume_from !== undefined) console.log("[feature-compose] resume_from in the pointer ignored; the park is read from disk by gap id");
   if (pointer.land && pointer.gap?.id && !pointer.dry_run) {
-    const park = pointer.resume_from ?? (await readParkedLanding(String(pointer.gap.id)));
+    const park = await readParkedLanding(String(pointer.gap.id));
     if (park) {
       if (Date.now() - Date.parse(park.parked_at) < (pointer.parked_landing_ttl_ms ?? 86_400_000)) {
         const resumed = await resumeParkedLanding(pointer, park, toolsEndpoint);

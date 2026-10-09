@@ -31,6 +31,7 @@ import { join } from "node:path";
 import { installCutoverFetchGuard, restoreCutoverFetch, routeFixtureGapStore, FIXTURE_GAP_STORE, type FetchGuard } from "./cutover-fetch-guard.js";
 import { installCutoverFsGuard, restoreCutoverFsModules, type FsGuard } from "./cutover-fs-guard.js";
 import { installCutoverExecGuard, restoreCutoverExecModules, type ExecGuard } from "./cutover-exec-guard.js";
+import { isolateRuntimeRoot } from "../helpers/runtime-root.js";
 
 const ROOT = join(tmpdir(), `compose-admission-check-supply-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 if (!ROOT.startsWith(tmpdir())) throw new Error("refusing to run against a non-temp workspace root");
@@ -38,6 +39,9 @@ mkdirSync(join(ROOT, "gaps"), { recursive: true });
 const SAVED_WR = process.env["WORKSPACE_ROOT"];
 process.env["WORKSPACE_ROOT"] = ROOT;
 process.env["SUBSTRATE_GAP_SKIP_COMPOSE_TRIGGER"] = "1";
+// This file drives feature_compose: give it its own temp runtime root whatever loaded the module first
+// (test/helpers/runtime-root.ts); it refuses to run before any write when it cannot.
+await isolateRuntimeRoot("compose-admission-check-supply", { who: "compose-admission-check-supply.test.ts" });
 const sg = await import(`../../src/resolvers/substrate-gap.js?${"compose-admission-check-supply-isolated"}`);
 if (SAVED_WR === undefined) delete process.env["WORKSPACE_ROOT"]; else process.env["WORKSPACE_ROOT"] = SAVED_WR;
 void sg;

@@ -15,7 +15,11 @@ import { afterAll, afterEach, beforeEach, describe, expect, it } from "bun:test"
 import { installCutoverFetchGuard, restoreCutoverFetch, routeDiscoveryNoShell, routeFixtureGapStore, FIXTURE_GAP_STORE, type FetchGuard } from "./cutover-fetch-guard.js";
 import { installCutoverExecGuard, restoreCutoverExecModules, type ExecGuard } from "./cutover-exec-guard.js";
 import { installCutoverFsGuard, restoreCutoverFsModules, type FsGuard } from "./cutover-fs-guard.js";
+import { isolateRuntimeRoot } from "../helpers/runtime-root.js";
 
+// This file drives feature_compose: give it its own temp runtime root whatever loaded the module first
+// (test/helpers/runtime-root.ts); it refuses to run before any write when it cannot.
+await isolateRuntimeRoot("gap-and-pointer-vessel-names-never-reach-a-shell", { who: "gap-and-pointer-vessel-names-never-reach-a-shell.test.ts" });
 const fc = (await import("../../src/resolvers/feature-compose.js")) as Record<string, any>;
 const { resolvePerfCanaryResolve } = await import("../../src/resolvers/perf-canary-resolve.js");
 

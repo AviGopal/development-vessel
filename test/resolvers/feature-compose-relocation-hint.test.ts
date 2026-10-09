@@ -48,11 +48,12 @@
 // tests named CONTRACT are red at base only because their function does not exist yet.
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { isolateRuntimeRoot } from "../helpers/runtime-root.js";
 
-const ROOT = join(tmpdir(), `reloc-hint-${Date.now()}-${Math.random().toString(36).slice(2)}`);
-const VESSELS = join(ROOT, "vessels");
+// The runtime tree is this file's own temp root, also where feature-compose's load-time RUNTIME_ROOT /
+// REPO_ROOT point whatever loaded the module first (test/helpers/runtime-root.ts; refuses when it cannot).
+const { root: ROOT, runtime: VESSELS } = await isolateRuntimeRoot("reloc-hint", { who: "feature-compose-relocation-hint.test.ts" });
 const CLONE = join(ROOT, "clone");
 const savedEnv: Record<string, string | undefined> = {};
 for (const k of ["MITOSIS_RUNTIME_DIR", "MITOSIS_REPO_ROOT", "VESSELS_CLONE_ROOT", "GAP_STORE_ENDPOINT"]) savedEnv[k] = process.env[k];

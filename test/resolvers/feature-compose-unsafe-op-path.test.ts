@@ -19,17 +19,15 @@
 //
 // The tools shell is a RECORDER: no command sent to it is ever run, so no payload in this file executes.
 import { describe, it, expect, beforeEach, afterEach, afterAll } from "bun:test";
-import { mkdtempSync, existsSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { mkdir, writeFile, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { isolateRuntimeRoot } from "../helpers/runtime-root.js";
 
-// feature-compose captures RUNTIME_ROOT / REPO_ROOT at module load: fix them before importing it.
-const ROOT = mkdtempSync(join(tmpdir(), "fc-unsafe-op-path-"));
-const RUNTIME = join(ROOT, "runtime");
-process.env["MITOSIS_RUNTIME_DIR"] = RUNTIME;
-process.env["MITOSIS_REPO_ROOT"] = RUNTIME;
-process.env["MITOSIS_SUPER_REPO_DIR"] = join(ROOT, "no-super-repo");
+// feature-compose captures RUNTIME_ROOT / REPO_ROOT / SUPER_REPO_ROOT at module load, and in a whole-suite
+// run an earlier file may already have frozen them to the live /vessels: the helper gives this file its
+// own temp roots regardless of load order, and refuses to run (before any write) when it cannot.
+const { root: ROOT, runtime: RUNTIME } = await isolateRuntimeRoot("fc-unsafe-op-path", { superRepo: true, who: "feature-compose-unsafe-op-path.test.ts" });
 
 const fc = (await import("../../src/resolvers/feature-compose.js")) as Record<string, any>;
 const csa = (await import("../../src/resolvers/check-supply-admission.js")) as Record<string, any>;

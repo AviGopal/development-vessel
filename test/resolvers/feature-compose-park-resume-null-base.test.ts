@@ -14,17 +14,16 @@
 // recorder, so what is pinned is whether the resume reaches the cutover, and with what base. The
 // push clone is a real clone of a real bare origin. No network: every fetch is answered here.
 import { describe, it, expect, beforeEach, afterEach, afterAll, mock } from "bun:test";
-import { mkdtempSync } from "node:fs";
 import { mkdir, writeFile, rm, readFile } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { isolateRuntimeRoot } from "../helpers/runtime-root.js";
 
-// feature-compose captures RUNTIME_ROOT / REPO_ROOT at module load: fix them before importing it.
-const ROOT = mkdtempSync(join(tmpdir(), "fc-park-resume-"));
-process.env["MITOSIS_RUNTIME_DIR"] = join(ROOT, "runtime");
-process.env["MITOSIS_REPO_ROOT"] = join(ROOT, "runtime");
+// feature-compose captures RUNTIME_ROOT / REPO_ROOT at module load, and in a whole-suite run an earlier
+// file may already have frozen them to the live /vessels: the helper gives this file its own temp root
+// regardless of load order, and refuses to run (before any write) when it cannot.
+const { root: ROOT } = await isolateRuntimeRoot("fc-park-resume", { who: "feature-compose-park-resume-null-base.test.ts" });
 
 const realCutover = await import("../../src/resolvers/vessel-mitosis-cutover.js");
 let cutoverCalls: Array<Record<string, unknown>> = [];

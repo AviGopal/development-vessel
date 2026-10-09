@@ -20,9 +20,13 @@ import { join } from "node:path";
 import { installCutoverFetchGuard, restoreCutoverFetch, routeFixtureGapStore, FIXTURE_GAP_STORE, type FetchGuard } from "./cutover-fetch-guard.js";
 import { installCutoverFsGuard, restoreCutoverFsModules, type FsGuard } from "./cutover-fs-guard.js";
 import { installCutoverExecGuard, restoreCutoverExecModules, type ExecGuard } from "./cutover-exec-guard.js";
+import { isolateRuntimeRoot } from "../helpers/runtime-root.js";
 
 const ROOT = join(tmpdir(), `compose-landing-lease-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 mkdirSync(ROOT, { recursive: true });
+// This file drives feature_compose: give it its own temp runtime root whatever loaded the module first
+// (test/helpers/runtime-root.ts); it refuses to run before any write when it cannot.
+await isolateRuntimeRoot("compose-landing-lease-admission", { who: "compose-landing-lease-admission.test.ts" });
 const fc = await import("../../src/resolvers/feature-compose.js");
 const sg = await import("../../src/resolvers/substrate-gap.js");
 const { thisNode } = await import("../../src/resolvers/self-fact-reconcile.js");

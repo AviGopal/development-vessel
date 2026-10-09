@@ -108,6 +108,39 @@ describe("autonomyFloorPaths — MUST-FAIL: an excluded repair edit reaches the 
   });
 });
 
+describe("autonomy floor — MUST-FAIL: an unmapped path WITHHOLDS at the floor, not only in the helper", () => {
+  // The helper cases above prove unmappable forms come back as `unmapped`; this pins that the floor then
+  // acts on them. No seam drives the floor decision (it is inline in resolveFeatureComposeInner), so the
+  // decision is pinned structurally: a mutant `if (floorInput.unmapped.length > 0 && false)` must fail.
+  it("the unmapped `if` is exactly `<local>.unmapped.length > 0`, sets verdict UNFAVORABLE and scopeWithheld true, and precedes the scopeHits branch", () => {
+    const calls: ts.CallExpression[] = [];
+    walk(inner, (n) => { if (ts.isCallExpression(n) && ts.isIdentifier(n.expression) && n.expression.text === "autonomyFloorPaths") calls.push(n); });
+    expect(calls.length).toBe(1);
+    const decl = calls[0]!.parent;
+    const local = ts.isVariableDeclaration(decl) && ts.isIdentifier(decl.name) ? decl.name.text : "";
+    expect(local).not.toBe("");
+    const guard = directedGuard();
+    expect(guard).toBeDefined();
+    // Every `if` in the guard whose condition reads `<local>.unmapped`: exactly one, and its condition is the bare comparison.
+    const unmappedIfs: ts.IfStatement[] = [];
+    walk(guard!.thenStatement, (n) => { if (ts.isIfStatement(n) && n.expression.getText(sf).includes(`${local}.unmapped`)) unmappedIfs.push(n); });
+    expect(unmappedIfs.length).toBe(1);
+    const u = unmappedIfs[0]!;
+    expect(u.expression.getText(sf)).toBe(`${local}.unmapped.length > 0`);
+    // Both assignments are direct statements of its block (not nested under a further condition).
+    expect(ts.isBlock(u.thenStatement)).toBe(true);
+    const direct = (u.thenStatement as ts.Block).statements.map((s) => s.getText(sf));
+    expect(direct).toContain('verdict = "UNFAVORABLE";');
+    expect(direct).toContain("scopeWithheld = true;");
+    // It decides first: the scopeHits branch is its else, and no scopeHits `if` precedes it.
+    expect(u.elseStatement && ts.isIfStatement(u.elseStatement)).toBe(true);
+    expect((u.elseStatement as ts.IfStatement).expression.getText(sf)).toBe("scopeHits.length > 0");
+    let firstHitsIf = Number.POSITIVE_INFINITY;
+    walk(guard!.thenStatement, (n) => { if (ts.isIfStatement(n) && n.expression.getText(sf).includes("scopeHits")) firstHitsIf = Math.min(firstHitsIf, n.getStart(sf)); });
+    expect(u.getStart(sf)).toBeLessThan(firstHitsIf);
+  });
+});
+
 describe("autonomyFloorPaths — CONTROLS", () => {
   it("an in-scope repair edit passes", () => {
     const r = seam()([IN_SCOPE_APPLIED], [`${WS_ROOT}/src/resolvers/sample-helper.ts`], [`${WS_ROOT}/src/resolvers/sample-new.ts`], isolatedWs, "/vessels");

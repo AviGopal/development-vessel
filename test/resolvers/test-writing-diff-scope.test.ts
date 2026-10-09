@@ -95,6 +95,7 @@ describe("test-writing compose: the diff is confined to the gap's one check file
     expect(typeof outside).toBe("function");
     expect(outside!("test_writing", [
       `repos/development-vessel/${CHECK}`,
+      `./repos/development-vessel/${CHECK}`,
       `/vessels/development-vessel/${CHECK}`,
       `/workspace/git/vessels/development-vessel/${CHECK}`,
       `${COMPOSE}/${CHECK}`,
@@ -129,6 +130,20 @@ describe("test-writing compose: the diff is confined to the gap's one check file
     const rel = mod["vesselRelativeEditSite"] as (s: unknown) => string | null;
     expect(rel(`${COMPOSE}/src/resolvers/a.ts:12`)).toBe("src/resolvers/a.ts");
     expect(rel("repos/development-vessel/src/resolvers/a.ts")).toBe("src/resolvers/a.ts");
+  });
+
+  // repos/<vessel>/ is a vessel root only at the START of a path (an op path, or a gap's edit site): a repos/<x>/ directory
+  // nested inside a runtime, clone or bare vessel-relative path is just a directory in that vessel.
+  test("[MUST-FAIL] a nested repos/<x>/ inside a runtime, clone or bare path is not a vessel root", () => {
+    expect(typeof outside).toBe("function");
+    for (const p of [
+      `/vessels/v/src/repos/x/${CHECK}`,
+      `/workspace/git/vessels/v/src/repos/x/${CHECK}`,
+      `src/repos/x/${CHECK}`,
+    ]) expect(outside!("test_writing", [p], GAP)).toEqual([p]);
+    const rel = mod["vesselRelativeEditSite"] as (s: unknown) => string | null;
+    expect(rel("/vessels/v/src/repos/x/a.ts")).toBe("src/repos/x/a.ts");
+    expect(rel("./repos/development-vessel/src/resolvers/a.ts")).toBe("src/resolvers/a.ts");
   });
 
   test("[CONTROL] an ordinary compose (no compose_mode, or any other value) is unaffected whatever it touches", () => {

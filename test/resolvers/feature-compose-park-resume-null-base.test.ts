@@ -48,7 +48,7 @@ const TOOLS = "http://tools.fixture/resolve";
 const sha12 = (s: string) => createHash("sha256").update(s).digest("hex").slice(0, 12);
 
 const ORIGINAL_FETCH = globalThis.fetch;
-const ENV_KEYS = ["MITOSIS_PUSH_CLONE_DIR", "PARKED_LANDINGS_DIR"] as const;
+const ENV_KEYS = ["MITOSIS_PUSH_CLONE_DIR", "PARKED_LANDINGS_DIR", "GAP_STORE_ENDPOINT"] as const;
 const saved: Record<string, string | undefined> = {};
 let ws: string;
 let shellCommands: string[] = [];
@@ -73,6 +73,10 @@ beforeEach(async () => {
   for (const k of ENV_KEYS) saved[k] = process.env[k];
   process.env["MITOSIS_PUSH_CLONE_DIR"] = join(ws, "git", "vessels");
   process.env["PARKED_LANDINGS_DIR"] = join(ws, "parked");
+  // The park_stale lesson reads and writes the gap row. Forward the store to a URL this file answers
+  // as unavailable: without it the real resolver writes the store under the WORKSPACE_ROOT captured
+  // at module load, which on a substrate node is the live store.
+  process.env["GAP_STORE_ENDPOINT"] = "http://gap-store.fixture/resolve";
   cutoverCalls = [];
   shellCommands = [];
   // The resume's typecheck goes through the tools shell: answer it as a pass. Every other request

@@ -2390,17 +2390,11 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
       status: cleanFetch.exit_code === 0 ? "ok" : "warn",
       detail: cleanFetch.exit_code === 0 ? "clean-slate fetch" : `fetch unavailable (host-sync is durable path): ${cleanFetch.stderr.slice(0, 160)}`,
     });
-    // Hard-reset to the authored base (stagedBaseSha) or origin/dev if unknown.
-    // By resetting to the base the vessel authored against, the committed tree
-    // reflects only the intended delta. The subsequent `git push origin dev`
-    // will detect if origin/dev has advanced and trigger a `git rebase origin/dev`,
-    // performing a proper 3-way merge rather than clobbering concurrent landings.
-    const resetTarget = args.stagedBaseSha ? args.stagedBaseSha : "origin/dev";
-    let reset = await runGit(gitCmd, ["reset", "--hard", resetTarget], hostRepoRoot);
-    if (reset.exit_code !== 0 && args.stagedBaseSha) {
-       // Fallback to origin/dev if the staged base sha is not found locally.
-       reset = await runGit(gitCmd, ["reset", "--hard", "origin/dev"], hostRepoRoot);
-    }
+    // Hard-reset to origin/dev. NOT to stagedBaseSha: that is sha256(file bytes).slice(0,12) of
+    // the staged file, not a revision, so `reset --hard <it>` could only fail and fall back here
+    // (or, if it ever prefixed a real object, reset the clone to an arbitrary commit). Newer work
+    // on a staged file is guarded below, against the tree this reset produces.
+    const reset = await runGit(gitCmd, ["reset", "--hard", "origin/dev"], hostRepoRoot);
     operations.push({
       op: reset.op,
       status: reset.exit_code === 0 ? "ok" : "fail",
@@ -2424,6 +2418,57 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
       status: clean.exit_code === 0 ? "ok" : "warn",
       detail: clean.exit_code === 0 ? "untracked dropped" : clean.stderr.slice(0, 160),
     });
+  }
+
+  // 2c. A STAGED FILE BUILT ON AN OLDER VERSION NEVER OVERWRITES NEWER COMMITTED WORK.
+  //
+  // copyTree copies each staged file WHOLESALE, so if a commit changed that file after the version
+  // the edit was built on, the copy reverts it — whichever region it touched (21179d8 deleted
+  // 51e30de's forwardToGapStore this way). The freshness checks above read the runtime tree and the
+  // clone BEFORE the fetch + reset just above moved it, so this reads the tree actually about to be
+  // written over. Content, not commit identity: walk the file's history newest-first to the newest
+  // commit whose content equals the staged base; any commit to the file after it is newer work.
+  // A base matching no commit is a staging artefact (the 08-29 transient patch) and proceeds; a
+  // revert back to the base's content leaves nothing newer and proceeds. Fail-open on git errors.
+  // Only commit shas go to git here, never the content hash.
+  {
+    const hash12 = (t: string) => createHash("sha256").update(t).digest("hex").slice(0, 12);
+    const perFile = (pointer as { staged_base_shas?: Record<string, string> }).staged_base_shas ?? {};
+    const superseded: Array<{ file: string; sha: string; gap: string | null }> = [];
+    for (const rel of stagedFiles) {
+      const base = perFile[rel] || (rel === stagedFiles[0] ? stagedBaseSha : undefined);
+      if (!base) continue;
+      const log = await runGit(gitCmd, ["log", "-n", "200", "--format=%H%x1f%B%x1e", "HEAD", "--", rel], hostRepoRoot);
+      if (log.exit_code !== 0) continue;
+      const entries = log.stdout.split("\x1e").map((e) => e.trim()).filter(Boolean).map((e) => {
+        const [sha, msg = ""] = e.split("\x1f");
+        return { sha: sha!.trim(), gap: /^Gap:\s*(\S+)/m.exec(msg)?.[1] ?? null };
+      });
+      const stagedHash = await readFile(join(mitosisRoot, rel), "utf8").then(hash12, () => null);
+      let anchor = -1;
+      for (let i = 0; i < entries.length; i++) {
+        const shown = await runGit(gitCmd, ["show", `${entries[i]!.sha}:${rel}`], hostRepoRoot);
+        if (shown.exit_code !== 0) continue;
+        const h = hash12(shown.stdout);
+        if (i === 0 && h === stagedHash) { anchor = 0; break; } // HEAD already holds this staged content: nothing to revert
+        if (h === base) { anchor = i; break; }
+      }
+      if (anchor > 0) superseded.push(...entries.slice(0, anchor).map((e) => ({ file: rel, ...e })));
+      else if (anchor < 0) console.error(`[mitosis-cutover] stale-base check: ${rel} staged base ${base} matches no commit in the last ${entries.length} touching it — staging artefact, proceeding`);
+    }
+    if (superseded.length > 0) {
+      const named = superseded.map((c) => `${c.file}@${c.sha.slice(0, 12)}${c.gap ? ` (gap ${c.gap})` : ""}`).join(", ");
+      console.error(`[mitosis-cutover] STALE BASE: ${superseded.length} newer commit(s) changed staged file(s) after the version this mitosis was built on; the wholesale copy would revert them: ${named}. Refusing; re-stage from origin/dev.`);
+      return softRefuse(`stale_base_superseded: staged edit built on an older version; newer commit(s) ${superseded.map((c) => c.sha).join(", ")} would be reverted`, {
+        kind: "stale_base_superseded",
+        refuse_class: "stale_base_superseded",
+        vessel_name,
+        mitosis_version_id,
+        staged_base_sha: stagedBaseSha,
+        newer_commits: superseded,
+        operations,
+      });
+    }
   }
 
   // 3. Copy staged files into the (now clean) host repo clone.

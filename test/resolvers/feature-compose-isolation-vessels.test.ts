@@ -17,10 +17,14 @@
 // Controls: a single-vessel gap and an explicit verify_vessels that already covers every target are unchanged.
 //
 // Seam: composeIsolationVessels (feature-compose), reached as an optional export so its absence reads as a red assertion.
+// The call site is driven once through the exported resolveFeatureCompose, with every network call answered by a fixture
+// fetch (the autonomy scope is unreadable, as it is in any test env) and every root under this file's temp root.
 import { describe, expect, it } from "bun:test";
+import { existsSync, mkdirSync, readdirSync } from "node:fs";
+import { join } from "node:path";
 import { isolateRuntimeRoot } from "../helpers/runtime-root.js";
 
-await isolateRuntimeRoot("fc-isolation-vessels", { who: "feature-compose-isolation-vessels.test.ts" });
+const { root: ISO_ROOT } = await isolateRuntimeRoot("fc-isolation-vessels", { who: "feature-compose-isolation-vessels.test.ts" });
 const fc = (await import("../../src/resolvers/feature-compose.js")) as Record<string, any>;
 
 const PRIOR_SEED = "repos/activity-api/src/lib/prior-seed.ts";
@@ -113,5 +117,47 @@ describe("a compose isolates and grounds every target file's vessel", () => {
     expect(isInfraRefusalBody({ ok: false, verdict: "REFUSED", stage: "grounding" })).toBe(true);
     expect(isInfraRefusalBody({ ok: false, verdict: "REFUSED", stage: "target_vessel_not_isolated" })).toBe(true);
     expect(isInfraRefusalBody({ ok: false, verdict: "REFUSED", stage: "scope" })).toBe(false);
+  });
+});
+
+describe("the call site: resolveFeatureCompose refuses before acquiring a workspace", () => {
+  it("MUST-FAIL: an undirected compose whose edit_site vessel is outside verify_vessels refuses at target_vessel_not_isolated, with no workspace", async () => {
+    const ws = join(ISO_ROOT, "call-site");
+    mkdirSync(join(ws, "empty-clones"), { recursive: true });
+    mkdirSync(join(ws, "units"), { recursive: true });
+    const env: Record<string, string> = {
+      MITOSIS_PUSH_CLONE_DIR: join(ws, "empty-clones"), VESSELS_CLONE_ROOT: join(ws, "empty-clones"), SYSTEMD_UNIT_DIRS: join(ws, "units"),
+      COMPOSE_WS_DIR: join(ws, "compose-ws"), COMPOSE_SLOT_DIR: join(ws, "slots"), PARKED_LANDINGS_DIR: join(ws, "parked"),
+      GAP_STORE_ENDPOINT: "http://gap-store.fixture/resolve", METABOB_ENDPOINT: "http://activity-api.fixture",
+    };
+    const saved: Record<string, string | undefined> = {};
+    for (const [k, v] of Object.entries(env)) { saved[k] = process.env[k]; process.env[k] = v; }
+    const origFetch = globalThis.fetch, origLog = console.log, origWarn = console.warn, origErr = console.error;
+    const logs: string[] = [];
+    const capture = (...a: unknown[]) => { logs.push(a.map(String).join(" ")); };
+    console.log = capture; console.warn = capture; console.error = capture;
+    globalThis.fetch = (async () => new Response("unavailable (test)", { status: 503 })) as unknown as typeof fetch;
+    let r: any;
+    try {
+      r = await fc.resolveFeatureCompose({
+        type: "feature_compose",
+        spec: `Address the gap.\nTARGET FILES:\n  - ${CONCEPT}`,
+        verify_vessels: ["repos/concept-db"],
+        land: false,
+        skip_push: true,
+        gap: { summary: "prior seeding full-text-searches concept text with machine identifiers", classification_metadata: { edit_site: PRIOR_SEED, suspected_real_location: CONCEPT } },
+      });
+    } finally {
+      globalThis.fetch = origFetch; console.log = origLog; console.warn = origWarn; console.error = origErr;
+      for (const [k, v] of Object.entries(saved)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+    }
+    expect(r?.body?.verdict).toBe("REFUSED");
+    expect(r?.body?.stage).toBe("target_vessel_not_isolated");
+    expect(String(r?.body?.error ?? "")).toContain("autonomy scope");
+    expect(logs.some((l) => l.includes("[fc-isolation] REFUSED"))).toBe(true);
+    // acquireComposeWorkspace creates COMPOSE_WS_DIR/<compose-id>/<vessel> worktrees; nothing may exist there.
+    const wsDir = env["COMPOSE_WS_DIR"]!;
+    expect(existsSync(wsDir) ? readdirSync(wsDir) : []).toEqual([]);
+    expect(logs.some((l) => l.includes("[compose] ") || l.includes("composeId"))).toBe(false);
   });
 });

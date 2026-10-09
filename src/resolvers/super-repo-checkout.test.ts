@@ -15,7 +15,7 @@ const SUPER = "/workspace/git/super-repo";
 describe("feature_compose in-tree materialization carries a lane write grant", () => {
   it("passes the gate's grant check with the fleet key, bound to exactly the cwd it sends", () => {
     const call = superRepoCheckoutCall(SUPER, "human-surface-vessel", KEY);
-    expect(call.command).toBe(`git -C "${SUPER}" checkout origin/dev -- "repos/human-surface-vessel" 2>&1`);
+    expect(call.command).toBe(`git -C '${SUPER}' checkout origin/dev -- 'repos/human-surface-vessel' 2>&1`);
     expect(call.cwd).toBe(SUPER);
     expect(WRITE_GRANT_FIELD).toBe("write_grant");
     expect(verifyWriteGrant(KEY, call.cwd, (call as Record<string, unknown>)[WRITE_GRANT_FIELD])).toBe(true);

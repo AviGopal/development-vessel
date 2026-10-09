@@ -24,6 +24,7 @@ import { METABOB_API_KEY, DISCOVERY_SHAPES } from "../config.js";
 import { withWriteGrant } from "./write-containment.js";
 import { superRepoCheckoutCall } from "./super-repo-checkout.js";
 import { planPathProblem } from "./vessel-paths.js";
+import { shq } from "./shell-quote.js";
 import { federatedLlmEgressUrls } from "./federated-llm-egress.js";
 import { acquireComposeWorkspace, type ComposeWorkspace } from "./compose-workspace";
 import type { ResolverResult } from "./types.js";
@@ -160,9 +161,56 @@ export async function deleteParkedLanding(gapId: string): Promise<void> {
   }
 }
 
-/** POSIX single-quoted shell word: bash reads every byte between the quotes literally. */
-export function shq(s: string): string {
-  return "'" + s.replace(/'/g, "'\\''") + "'";
+export { shq };
+
+/**
+ * A symbol that may be spliced into a grep -E pattern: a plain identifier (no `$`, which a pattern would read as an
+ * anchor and a double-quoted shell word as a variable), else null. The reachability symbols come from drafted source
+ * (a changed declaration, an enclosing function, a route string's last segment, a name in the gap's text), so anything
+ * else is dropped, never quoted into a pattern.
+ */
+export function grepSymbol(s: unknown): string | null {
+  return typeof s === "string" && /^[A-Za-z_][A-Za-z0-9_]*$/.test(s) ? s : null;
+}
+/** References to `symbol` under `root`, minus its definition lines (`full`: also skip build dirs and import/export lines). */
+export function reachabilityCallersCommand(symbol: string, root: string, full: boolean): string | null {
+  const s = grepSymbol(symbol);
+  if (s === null) return null;
+  const refs = `\\b${s}\\b`;
+  const decl = `(function|const|let|var)[[:space:]]+${s}\\b`;
+  const method = `^[^:]+:[0-9]+:[[:space:]]*${s}[[:space:]]*\\([^)]*\\)[[:space:]]*(:[^={]+)?\\{`;
+  return full
+    ? `grep -rEn --exclude-dir=node_modules --exclude-dir=.git --exclude-dir=dist ${shq(refs)} ${shq(root)} 2>/dev/null | grep -vE ${shq(decl)} | grep -vE ${shq(method)} | grep -vE ${shq(":[0-9]+:[[:space:]]*(import|export)[[:space:]{]")} || true`
+    : `grep -rEn ${shq(refs)} ${shq(root)} 2>/dev/null | grep -vE ${shq(decl)} | grep -vE ${shq(method)} || true`;
+}
+/** An exported declaration of `symbol`, or a route / dispatch / lifecycle reference to it (`full`: also export default / export { }). */
+export function reachabilityEntrypointCommand(symbol: string, root: string, full: boolean): string | null {
+  const s = grepSymbol(symbol);
+  if (s === null) return null;
+  const alts = [
+    `export[[:space:]]+(async[[:space:]]+)?(function|const|let)[[:space:]]+${s}\\b`,
+    ...(full ? [`export[[:space:]]+default[[:space:]]+(async[[:space:]]+)?(function[[:space:]]+)?${s}\\b`, `export[[:space:]]*\\{[^}]*${s}\\b`] : []),
+    `case[[:space:]]+["']${s}["']`,
+    `['"]${s}['"][[:space:]]*[:,)]`,
+    `\\.(on|get|post|put|delete|use)\\([^)]*${s}`,
+    `router\\.[a-z]+\\([^)]*${s}`,
+  ];
+  return `grep -rEn ${shq(`(${alts.join("|")})`)} ${shq(root)} 2>/dev/null || true`;
+}
+/** The first lines mentioning `name` under `root` (the semantic judge's code context). */
+export function symbolMentionsCommand(name: string, root: string): string | null {
+  const s = grepSymbol(name);
+  return s === null ? null : `grep -rEn ${shq(`\\b${s}\\b`)} ${shq(root)} 2>/dev/null | head -8 || true`;
+}
+/**
+ * The semantic gate's diff of one edited file against its pre-edit copy at `tmp`, its two header lines relabelled
+ * `--- a/<path under repos/>`, then the copy removed. The sed program is built here and handed over as ONE quoted word:
+ * the path is never spliced inside a quoted program, so a quote in it cannot end the program. `#`, `&` and `\` in the
+ * label (sed's delimiter, match and escape characters here) become `_`.
+ */
+export function semanticGateDiffCommand(tmp: string, abs: string): string {
+  const label = abs.replace(/^.*\/repos\//, "").replace(/[#&\\\n]/g, "_");
+  return `diff -u ${shq(tmp)} ${shq(abs)} | sed ${shq(`1,2s#.*#--- a/${label}#`)}; rm -f ${shq(tmp)}`;
 }
 
 /**
@@ -2604,14 +2652,14 @@ async function groundFileSymbols(toolsEndpoint: string, verifyVessels: string[],
   // so each path is passed to rg verbatim (no -g glob needed for an explicit file).
   if (targetFiles.length > 0) {
     for (const f of targetFiles.slice(0, 4)) {
-      const cmd = `rg -oNI --no-heading '^(export )?(async )?(function|const|let|interface|type) [A-Za-z0-9_]+' ${JSON.stringify(f)} | sort -u | head -200`;
+      const cmd = `rg -oNI --no-heading '^(export )?(async )?(function|const|let|interface|type) [A-Za-z0-9_]+' ${shq(f)} | sort -u | head -200`;
       await resolveSymbols(cmd, f);
     }
     return blocks.join('\n\n');
   }
   // Fallback (no named target): whole-vessel symbol survey (-g '*.ts' filters the dir).
   for (const v of verifyVessels.slice(0, 6)) {
-    const cmd = `rg -oNI --no-heading -g '*.ts' '^(export )?(async )?(function|const|let|interface|type) [A-Za-z0-9_]+' ${v} | sort -u | head -200`;
+    const cmd = `rg -oNI --no-heading -g '*.ts' '^(export )?(async )?(function|const|let|interface|type) [A-Za-z0-9_]+' ${shq(v)} | sort -u | head -200`;
     await resolveSymbols(cmd, v);
   }
   return blocks.join('\n\n');
@@ -3310,7 +3358,7 @@ async function groundVesselFiles(toolsEndpoint: string, verifyVessels: string[],
       // un-authorable: it produced 0 ops. Config files are small; adding them keeps the
       // grounding universal so "nothing is loop-unauthorable" holds in practice. (2026-07-01)
       const sh = await callTool(toolsEndpoint, "shell", {
-        command: `cd ${JSON.stringify(vAbs)} 2>/dev/null && { find src -type f \\( -name '*.ts' -o -name '*.tsx' \\) 2>/dev/null; ls tsconfig.json package.json esbuild.config.mjs 2>/dev/null; } | sort -u | head -400`,
+        command: `cd ${shq(vAbs)} 2>/dev/null && { find src -type f \\( -name '*.ts' -o -name '*.tsx' \\) 2>/dev/null; ls tsconfig.json package.json esbuild.config.mjs 2>/dev/null; } | sort -u | head -400`,
         cwd: REPO_ROOT,
       });
       const raw = String((sh.body as { stdout?: unknown })?.stdout ?? "").trim();
@@ -3567,7 +3615,7 @@ export function typecheckVerdict(input: { tcExit: number | null; curTs: Set<stri
  * parse should not pay for 1900 tests, a07c8ce); the verify step's no-summary retry runs it for a relaxed draft.
  */
 export function composeVerifyCommand(vAbs: string, sharedDispatchCheck: string): string {
-  return `cd ${JSON.stringify(vAbs)} && (echo "== install =="; [ -d node_modules ] || { bun install >/dev/null 2>&1; echo "INSTALL_EXIT=$?"; }; echo "== resolve =="; bun install --dry-run >/tmp/fc-dryrun.$$ 2>&1; echo "DRYRUN_EXIT=$?"; tail -6 /tmp/fc-dryrun.$$; rm -f /tmp/fc-dryrun.$$; echo "== typecheck =="; timeout 300 bun run typecheck 2>&1; TCE=$?; echo "TC_EXIT=$TCE"; echo "== shape-dispatch =="; if [ -f ${sharedDispatchCheck} ] && [ -f src/config.ts ] && [ -f src/routes/impulses.ts ]; then bun ${sharedDispatchCheck} ${JSON.stringify(vAbs)} 2>&1; echo "SD_EXIT=$?"; else echo "SD_EXIT=0"; fi; if [ "$TCE" -ne 0 ]; then echo "== tests =="; echo "SKIPPED_TYPECHECK_FAILED"; else echo "== tests =="; timeout 240 env -i PATH="$PATH" HOME="$HOME" NODE_ENV=test TZ=UTC WORKSPACE_ROOT="$(mktemp -d)" bun test --timeout 20000 2>&1 || true; fi)`;
+  return `cd ${shq(vAbs)} && (echo "== install =="; [ -d node_modules ] || { bun install >/dev/null 2>&1; echo "INSTALL_EXIT=$?"; }; echo "== resolve =="; bun install --dry-run >/tmp/fc-dryrun.$$ 2>&1; echo "DRYRUN_EXIT=$?"; tail -6 /tmp/fc-dryrun.$$; rm -f /tmp/fc-dryrun.$$; echo "== typecheck =="; timeout 300 bun run typecheck 2>&1; TCE=$?; echo "TC_EXIT=$TCE"; echo "== shape-dispatch =="; if [ -f ${shq(sharedDispatchCheck)} ] && [ -f src/config.ts ] && [ -f src/routes/impulses.ts ]; then bun ${shq(sharedDispatchCheck)} ${shq(vAbs)} 2>&1; echo "SD_EXIT=$?"; else echo "SD_EXIT=0"; fi; if [ "$TCE" -ne 0 ]; then echo "== tests =="; echo "SKIPPED_TYPECHECK_FAILED"; else echo "== tests =="; timeout 240 env -i PATH="$PATH" HOME="$HOME" NODE_ENV=test TZ=UTC WORKSPACE_ROOT="$(mktemp -d)" bun test --timeout 20000 2>&1 || true; fi)`;
 }
 /** The shape-dispatch exit from verify output, or null when the run printed no SD_EXIT marker. */
 export function shapeDispatchExit(raw: string): number | null {
@@ -5952,7 +6000,7 @@ async function resolveFeatureComposeUncapped(pointer: FeatureComposePointer): Pr
           // nothing to extract, so it silently found no types to resolve. The
           // symbol looked resolved (`resolved 1/3`) while conveying almost nothing.
           const sh = await callTool(toolsEndpoint, "shell", {
-            command: `cd ${JSON.stringify(`${REPO_ROOT}/${vRel}`)} 2>/dev/null && grep -rnE -A3 ${JSON.stringify(pattern)} src --include='*.ts' --include='*.tsx' --exclude='*.test.ts' 2>/dev/null | head -4`,
+            command: `cd ${shq(`${REPO_ROOT}/${vRel}`)} 2>/dev/null && grep -rnE -A3 ${shq(pattern)} src --include='*.ts' --include='*.tsx' --exclude='*.test.ts' 2>/dev/null | head -4`,
             cwd: REPO_ROOT,
           });
           const raw = String((sh.body as { stdout?: unknown })?.stdout ?? "").trim();
@@ -5990,7 +6038,7 @@ async function resolveFeatureComposeUncapped(pointer: FeatureComposePointer): Pr
             // the grep against the live tree, not by reading it.
             const pattern = `^(export[[:space:]]+)?(interface|type|class)[[:space:]]+${t}\\b`;
             const sh = await callTool(toolsEndpoint, "shell", {
-              command: `cd ${JSON.stringify(`${REPO_ROOT}/${vRel}`)} 2>/dev/null && grep -rnE ${JSON.stringify(pattern)} src --include='*.ts' --include='*.tsx' --exclude='*.test.ts' 2>/dev/null | head -1`,
+              command: `cd ${shq(`${REPO_ROOT}/${vRel}`)} 2>/dev/null && grep -rnE ${shq(pattern)} src --include='*.ts' --include='*.tsx' --exclude='*.test.ts' 2>/dev/null | head -1`,
               cwd: REPO_ROOT,
             });
             const hit = String((sh.body as { stdout?: unknown })?.stdout ?? "").trim();
@@ -6649,7 +6697,7 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
     const inTreePath = `${SUPER_REPO_ROOT}/repos/${vesselName}`;
     if (!mountExistsSync(`${clonePath}/.git`) && mountExistsSync(`${inTreePath}/package.json`)) {
       const st = await callTool(toolsEndpoint, "shell", {
-        command: `git -C ${JSON.stringify(SUPER_REPO_ROOT)} fetch origin dev 2>&1 >/dev/null; git -C ${JSON.stringify(SUPER_REPO_ROOT)} status --porcelain -- ${JSON.stringify(`repos/${vesselName}`)}`,
+        command: `git -C ${shq(SUPER_REPO_ROOT)} fetch origin dev 2>&1 >/dev/null; git -C ${shq(SUPER_REPO_ROOT)} status --porcelain -- ${shq(`repos/${vesselName}`)}`,
         cwd: SUPER_REPO_ROOT,
       });
       const dirty = String((st.body as { stdout?: unknown })?.stdout ?? "").trim().length > 0;
@@ -6665,7 +6713,7 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
         }
       }
       await callTool(toolsEndpoint, "shell", {
-        command: `ln -sfn ${JSON.stringify(inTreePath)} ${JSON.stringify(runtimePath)}`,
+        command: `ln -sfn ${shq(inTreePath)} ${shq(runtimePath)}`,
         cwd: SUPER_REPO_ROOT,
       });
       console.log(`[feature-compose] materialized in-tree vessel ${vesselName} -> ${inTreePath}`);
@@ -6687,13 +6735,13 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
       // A previous cutover file-mirror left a partial tree (only landed files, no
       // package.json/.git) - it blocks staging and lets edits bypass typecheck.
       // Replace it with the full clone symlink.
-      await callTool(toolsEndpoint, "shell", { command: `rm -rf ${JSON.stringify(runtimePath)}`, cwd: PUSH_CLONE_ROOT });
+      await callTool(toolsEndpoint, "shell", { command: `rm -rf ${shq(runtimePath)}`, cwd: PUSH_CLONE_ROOT });
       console.log(`[feature-compose] replaced partial runtime mirror for ${vesselName}`);
     }
     // `reset && ln`: the symlink is made only when the reset landed, as before.
     const refreshed = await refreshPushCloneToOriginDev(clonePath, PUSH_CLONE_ROOT);
     if (refreshed.ok) {
-      await callTool(toolsEndpoint, "shell", { command: `ln -sfn ${JSON.stringify(clonePath)} ${JSON.stringify(runtimePath)}`, cwd: PUSH_CLONE_ROOT });
+      await callTool(toolsEndpoint, "shell", { command: `ln -sfn ${shq(clonePath)} ${shq(runtimePath)}`, cwd: PUSH_CLONE_ROOT });
       console.log(`[feature-compose] materialized non-resident vessel ${vesselName} -> ${clonePath}`);
     } else {
       console.warn(`[feature-compose] did NOT materialize ${vesselName}: its push clone could not be reset to origin/dev, so ${runtimePath} was not linked`);
@@ -6720,7 +6768,7 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
   const baselineTestPass = new Map<string, number>();
   for (const v of touched) {
     const vAbs = vesselRoot(v);
-    const headProbe = await callTool(toolsEndpoint, "shell", { command: `git -C ${JSON.stringify(vAbs)} rev-parse HEAD 2>/dev/null; git -C ${JSON.stringify(vAbs)} status --porcelain 2>/dev/null | head -1`, cwd: REPO_ROOT });
+    const headProbe = await callTool(toolsEndpoint, "shell", { command: `git -C ${shq(vAbs)} rev-parse HEAD 2>/dev/null; git -C ${shq(vAbs)} status --porcelain 2>/dev/null | head -1`, cwd: REPO_ROOT });
     const headLines = String((headProbe.body as { stdout?: unknown })?.stdout ?? "").trim().split("\n");
     const headSha = /^[0-9a-f]{40}$/.test(headLines[0] ?? "") && headLines.length === 1 ? headLines[0] : null;
     const cacheKey = headSha ? `${v}@${headSha}` : null;
@@ -6732,11 +6780,11 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
       console.log(`[feature-compose] baseline cache HIT ${cacheKey} (typecheck + suite run skipped)`);
       continue;
     }
-    const b = await callTool(toolsEndpoint, "shell", { command: `cd ${JSON.stringify(vAbs)} && ([ -d node_modules ] || bun install >/dev/null 2>&1; bun run typecheck 2>&1)`, cwd: REPO_ROOT });
+    const b = await callTool(toolsEndpoint, "shell", { command: `cd ${shq(vAbs)} && ([ -d node_modules ] || bun install >/dev/null 2>&1; bun run typecheck 2>&1)`, cwd: REPO_ROOT });
     baselineTsErrors.set(v, tscErrorSet(String((b.body as { stdout?: unknown })?.stdout ?? "")));
     // Bounded so a hanging/absent suite can never stall the compose path; a vessel with
     // no tests just yields an empty baseline and an empty post-set, i.e. no gate.
-    const bt = await callTool(toolsEndpoint, "shell", { command: `cd ${JSON.stringify(vAbs)} && (timeout 240 env -i PATH="$PATH" HOME="$HOME" NODE_ENV=test TZ=UTC WORKSPACE_ROOT="$(mktemp -d)" bun test --timeout 20000 2>&1 || true)`, cwd: REPO_ROOT });
+    const bt = await callTool(toolsEndpoint, "shell", { command: `cd ${shq(vAbs)} && (timeout 240 env -i PATH="$PATH" HOME="$HOME" NODE_ENV=test TZ=UTC WORKSPACE_ROOT="$(mktemp -d)" bun test --timeout 20000 2>&1 || true)`, cwd: REPO_ROOT });
     const btRaw = String((bt.body as { stdout?: unknown })?.stdout ?? "");
     baselineTestFails.set(v, testFailureSet(btRaw));
     // Also record how many PASSED, so verify can catch tests that VANISH (see testPassCount).
@@ -7009,7 +7057,7 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
       // local-tools fs_write does not create parent dirs — mkdir -p first so
       // net-new vessel files (in a not-yet-existing dir) land.
       const dir = abs.slice(0, abs.lastIndexOf("/"));
-      await callTool(toolsEndpoint, "shell", { command: `mkdir -p ${JSON.stringify(dir)}`, cwd: REPO_ROOT });
+      await callTool(toolsEndpoint, "shell", { command: `mkdir -p ${shq(dir)}`, cwd: REPO_ROOT });
       // CREATE MUST NOT DESTROY. The plan contract is explicit — "Only create_file
       // may introduce a NEW path" — but this branch issued an unconditional
       // fs_write, and unlike the edit branch below it never snapshots
@@ -7049,7 +7097,7 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
         const absent = !(pre.ok && typeof preContent === "string" && preContent.length > 0);
         if (absent && (op.new_string ?? "").length > 0) {
           const dir = abs.slice(0, abs.lastIndexOf("/"));
-          await callTool(toolsEndpoint, "shell", { command: `mkdir -p ${JSON.stringify(dir)}`, cwd: REPO_ROOT });
+          await callTool(toolsEndpoint, "shell", { command: `mkdir -p ${shq(dir)}`, cwd: REPO_ROOT });
           const r = await callTool(toolsEndpoint, "fs_write", { path: abs, content: op.new_string ?? "" });
           const entry = { path: op.path, kind: op.kind, ok: r.ok, detail: r.ok ? undefined : JSON.stringify(r.body).slice(0, 200), span: r.ok ? { start_line: 1, end_line: (op.new_string ?? "").split("\n").length } : undefined };
           return { entry, createdAbs: r.ok ? abs : undefined, failed: !r.ok };
@@ -7091,7 +7139,7 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
       // first of N), or one that rewrote the region would ground against text that no
       // longer exists. preEditContent is left untouched (rollback keeps the original).
       if (!liveContent || editedInPlan.has(abs)) {
-        const cat0 = await callTool(toolsEndpoint, "shell", { command: `cat ${JSON.stringify(abs)}`, cwd: REPO_ROOT });
+        const cat0 = await callTool(toolsEndpoint, "shell", { command: `cat ${shq(abs)}`, cwd: REPO_ROOT });
         const c0 = String((cat0.body as { stdout?: unknown })?.stdout ?? "");
         if (c0) { liveContent = c0; if (!preEditContent.has(abs)) preEditContent.set(abs, c0); }
       }
@@ -7315,7 +7363,7 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
         // does not match the LIVE file (it planned without reading it). Read the
         // real content and re-derive a verbatim old_string for the intended
         // change, then retry once. This grounds edits in reality.
-        const cat = await callTool(toolsEndpoint, "shell", { command: `cat ${JSON.stringify(abs)}`, cwd: REPO_ROOT });
+        const cat = await callTool(toolsEndpoint, "shell", { command: `cat ${shq(abs)}`, cwd: REPO_ROOT });
         const live = String((cat.body as { stdout?: unknown })?.stdout ?? "");
         if (live) {
           try {
@@ -7455,14 +7503,14 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
   // One run per (gap, vessel, base sha, check): the green-draft contract and the red-draft no-effect
   // comparison share it. An unjudgeable run is not cached.
   const ownParentRun = async (v: string, vAbs: string, own: { test_file: string; only_tests: string[] }, gapId: string): Promise<{ sha: string; raw: string | null; cached: "hit" | "miss" }> => {
-    const shS = await callTool(toolsEndpoint, "shell", { command: `git -C ${JSON.stringify(vAbs)} rev-parse HEAD 2>/dev/null || true`, cwd: REPO_ROOT, timeout_sec: 30 });
+    const shS = await callTool(toolsEndpoint, "shell", { command: `git -C ${shq(vAbs)} rev-parse HEAD 2>/dev/null || true`, cwd: REPO_ROOT, timeout_sec: 30 });
     const sha = String((shS.body as { stdout?: unknown })?.stdout ?? "").trim();
     const key = `${gapId}|${v}|${sha}|${own.test_file}|${own.only_tests.join(",")}`;
     const hit = sha ? OWN_PARENT_RUNS.get(key) : undefined;
     if (hit !== undefined) return { sha, raw: hit, cached: "hit" };
     const bwO = `/tmp/fc-own-base-${v.replace(/[^a-zA-Z0-9]+/g, "-")}-${Date.now()}`;
     const shB = await callTool(toolsEndpoint, "shell", {
-      command: `git -C ${JSON.stringify(vAbs)} worktree prune >/dev/null 2>&1; git -C ${JSON.stringify(vAbs)} worktree add -q --detach ${bwO} HEAD && ln -s ${JSON.stringify(vAbs + "/node_modules")} ${bwO}/node_modules && cd ${bwO} && (timeout 180 env -i PATH="$PATH" HOME="$HOME" NODE_ENV=test TZ=UTC WORKSPACE_ROOT="$(mktemp -d)" bun test ${JSON.stringify("./" + own.test_file)} --timeout 20000 2>&1 || true); cd / && git -C ${JSON.stringify(vAbs)} worktree remove --force ${bwO} >/dev/null 2>&1 || true`,
+      command: `git -C ${shq(vAbs)} worktree prune >/dev/null 2>&1; git -C ${shq(vAbs)} worktree add -q --detach ${shq(bwO)} HEAD && ln -s ${shq(vAbs + "/node_modules")} ${shq(bwO + "/node_modules")} && cd ${shq(bwO)} && (timeout 180 env -i PATH="$PATH" HOME="$HOME" NODE_ENV=test TZ=UTC WORKSPACE_ROOT="$(mktemp -d)" bun test ${shq("./" + own.test_file)} --timeout 20000 2>&1 || true); cd / && git -C ${shq(vAbs)} worktree remove --force ${shq(bwO)} >/dev/null 2>&1 || true`,
       cwd: REPO_ROOT,
       timeout_sec: 240,
     });
@@ -7614,7 +7662,7 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
     let summaryRetryRc: string | null = null;
     if (baselineTestPass.get(v) !== undefined && testPassCount(raw) === null) {
       const shR = await callTool(toolsEndpoint, "shell", {
-        command: `cd ${JSON.stringify(vAbs)} && (timeout 240 env -i PATH="$PATH" HOME="$HOME" NODE_ENV=test TZ=UTC WORKSPACE_ROOT="$(mktemp -d)" bun test --timeout 20000 2>&1; echo "SUITE_RC=$?") || true`,
+        command: `cd ${shq(vAbs)} && (timeout 240 env -i PATH="$PATH" HOME="$HOME" NODE_ENV=test TZ=UTC WORKSPACE_ROOT="$(mktemp -d)" bun test --timeout 20000 2>&1; echo "SUITE_RC=$?") || true`,
         cwd: REPO_ROOT,
       });
       testRaw = String((shR.body as { stdout?: unknown })?.stdout ?? "");
@@ -7653,7 +7701,7 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
     let confirmedNewTest = newTest;
     if (newTest.length > 0 || passRegressed) {
       const sh2 = await callTool(toolsEndpoint, "shell", {
-        command: `cd ${JSON.stringify(vAbs)} && (timeout 240 env -i PATH="$PATH" HOME="$HOME" NODE_ENV=test TZ=UTC WORKSPACE_ROOT="$(mktemp -d)" bun test --timeout 20000 2>&1 || true)`,
+        command: `cd ${shq(vAbs)} && (timeout 240 env -i PATH="$PATH" HOME="$HOME" NODE_ENV=test TZ=UTC WORKSPACE_ROOT="$(mktemp -d)" bun test --timeout 20000 2>&1 || true)`,
         cwd: REPO_ROOT,
       });
       const raw2 = String((sh2.body as { stdout?: unknown })?.stdout ?? "");
@@ -7679,7 +7727,7 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
     if (confirmedNewTest.length > 0 || passRegressed) {
       const bw = `/tmp/fc-base-${v.replace(/[^a-zA-Z0-9]+/g, "-")}-${Date.now()}`;
       const sh3 = await callTool(toolsEndpoint, "shell", {
-        command: `git -C ${JSON.stringify(vAbs)} worktree add -q --detach ${bw} HEAD && ln -s ${JSON.stringify(vAbs + "/node_modules")} ${bw}/node_modules && cd ${bw} && (timeout 240 env -i PATH="$PATH" HOME="$HOME" NODE_ENV=test TZ=UTC WORKSPACE_ROOT="$(mktemp -d)" bun test --timeout 20000 2>&1 || true); git -C ${JSON.stringify(vAbs)} worktree remove --force ${bw} >/dev/null 2>&1; true`,
+        command: `git -C ${shq(vAbs)} worktree add -q --detach ${shq(bw)} HEAD && ln -s ${shq(vAbs + "/node_modules")} ${shq(bw + "/node_modules")} && cd ${shq(bw)} && (timeout 240 env -i PATH="$PATH" HOME="$HOME" NODE_ENV=test TZ=UTC WORKSPACE_ROOT="$(mktemp -d)" bun test --timeout 20000 2>&1 || true); git -C ${shq(vAbs)} worktree remove --force ${shq(bw)} >/dev/null 2>&1; true`,
         cwd: REPO_ROOT,
       });
       const raw3 = String((sh3.body as { stdout?: unknown })?.stdout ?? "");
@@ -7738,7 +7786,7 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
         runs: csaV.TEST_WRITING_CHECK_RUNS,
         run: async (rel) => {
           const shT = await callTool(toolsEndpoint, "shell", {
-            command: `cd ${JSON.stringify(vAbs)} && (timeout 180 env -i PATH="$PATH" HOME="$HOME" NODE_ENV=test TZ=UTC WORKSPACE_ROOT="$(mktemp -d)" bun test ${JSON.stringify("./" + rel)} --timeout 20000 2>&1 || true)`,
+            command: `cd ${shq(vAbs)} && (timeout 180 env -i PATH="$PATH" HOME="$HOME" NODE_ENV=test TZ=UTC WORKSPACE_ROOT="$(mktemp -d)" bun test ${shq("./" + rel)} --timeout 20000 2>&1 || true)`,
             cwd: REPO_ROOT,
             // The shell resolver kills the process group at 30 s without this.
             timeout_sec: 240,
@@ -7804,7 +7852,7 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
       // Skipped when the typecheck already refused this draft: the verdict cannot turn green.
       if (own && tcOk) {
         const shO = await callTool(toolsEndpoint, "shell", {
-          command: `cd ${JSON.stringify(vAbs)} && (timeout 180 env -i PATH="$PATH" HOME="$HOME" NODE_ENV=test TZ=UTC WORKSPACE_ROOT="$(mktemp -d)" bun test ${JSON.stringify("./" + own.test_file)} --timeout 20000 2>&1 || true)`,
+          command: `cd ${shq(vAbs)} && (timeout 180 env -i PATH="$PATH" HOME="$HOME" NODE_ENV=test TZ=UTC WORKSPACE_ROOT="$(mktemp -d)" bun test ${shq("./" + own.test_file)} --timeout 20000 2>&1 || true)`,
           cwd: REPO_ROOT,
           // The shell resolver kills the process group at 30 s without this; a killed run reads as
           // no result or "(not run)" and would refuse a correct draft.
@@ -7838,7 +7886,7 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
           ownExpects = { base: testExpectCount(baseRaw), draft: testExpectCount(draftRaw) };
           // The draft edited the check file itself: compare its assertion sites in source, not only at runtime.
           if (!contractBreach && editedRel.includes(own.test_file)) {
-            const shS = await callTool(toolsEndpoint, "shell", { command: `git -C ${JSON.stringify(vAbs)} show HEAD:${JSON.stringify(own.test_file).slice(1, -1)} 2>/dev/null || true`, cwd: REPO_ROOT, timeout_sec: 60 });
+            const shS = await callTool(toolsEndpoint, "shell", { command: `git -C ${shq(vAbs)} show ${shq("HEAD:" + own.test_file)} 2>/dev/null || true`, cwd: REPO_ROOT, timeout_sec: 60 });
             const parentSrc = String((shS.body as { stdout?: unknown })?.stdout ?? "");
             let draftSrc = "";
             try { draftSrc = readFileSync(`${vAbs}/${own.test_file}`, "utf8"); } catch { draftSrc = ""; }
@@ -8307,7 +8355,7 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
       for (const [abs, original] of preEditContent) {
         const tmp = `/tmp/fc-orig-${Math.random().toString(36).slice(2)}`;
         await callTool(toolsEndpoint, "fs_write", { path: tmp, content: original });
-        const d = await callTool(toolsEndpoint, "shell", { command: `diff -u ${JSON.stringify(tmp)} ${JSON.stringify(abs)} | sed '1,2s#.*#--- a/${abs.replace(/^.*\/repos\//, "").replace(/[#&]/g, "_")}#'; rm -f ${JSON.stringify(tmp)}`, cwd: REPO_ROOT });
+        const d = await callTool(toolsEndpoint, "shell", { command: semanticGateDiffCommand(tmp, abs), cwd: REPO_ROOT });
         const dt = String((d.body as { stdout?: unknown })?.stdout ?? "");
         if (dt.trim()) diffParts.push(`### ${abs}\n${dt}`);
       }
@@ -8378,6 +8426,7 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
       const symbols = extractChangedSymbols(diff);
       const facts: ReachabilityFact[] = [];
       for (const { symbol, isNewFunction } of symbols) {
+        if (grepSymbol(symbol) === null) { console.log("[fc-reachability] a changed symbol that is not a plain identifier was dropped"); continue; }
         let callerCount = 0;
         let isEntrypoint = false;
         let codeHit = "";
@@ -8394,14 +8443,14 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
           // floor is PRESERVED: a symbol defined and never referenced anywhere still
           // yields 0 references (the definition line is excluded) → unreachable.
           const callQ = await callTool(toolsEndpoint, "shell", {
-            command: `grep -rEn --exclude-dir=node_modules --exclude-dir=.git --exclude-dir=dist "\\b${symbol}\\b" ${JSON.stringify(vAbs)} 2>/dev/null | grep -vE "(function|const|let|var)[[:space:]]+${symbol}\\b" | grep -vE "^[^:]+:[0-9]+:[[:space:]]*${symbol}[[:space:]]*\\([^)]*\\)[[:space:]]*(:[^={]+)?\\{" | grep -vE ":[0-9]+:[[:space:]]*(import|export)[[:space:]{]" || true`,
+            command: reachabilityCallersCommand(symbol, vAbs, true)!,
             cwd: REPO_ROOT,
           });
           const callOut = String((callQ.body as { stdout?: unknown })?.stdout ?? "").trim();
           if (callOut) { callerCount += callOut.split("\n").filter(Boolean).length; codeHit ||= callOut.split("\n").slice(0, 4).join("\n"); }
           // Entrypoint: exported, OR a route/dispatch/lifecycle reference to the symbol.
           const entQ = await callTool(toolsEndpoint, "shell", {
-            command: `grep -rEn "(export[[:space:]]+(async[[:space:]]+)?(function|const|let)[[:space:]]+${symbol}\\b|export[[:space:]]+default[[:space:]]+(async[[:space:]]+)?(function[[:space:]]+)?${symbol}\\b|export[[:space:]]*\\{[^}]*${symbol}\\b|case[[:space:]]+[\\"']${symbol}[\\"']|['\\"]${symbol}['\\"][[:space:]]*[:,)]|\\.(on|get|post|put|delete|use)\\([^)]*${symbol}|router\\.[a-z]+\\([^)]*${symbol})" ${JSON.stringify(vAbs)} 2>/dev/null || true`,
+            command: reachabilityEntrypointCommand(symbol, vAbs, true)!,
             cwd: REPO_ROOT,
           });
           if (String((entQ.body as { stdout?: unknown })?.stdout ?? "").trim()) isEntrypoint = true;
@@ -8421,7 +8470,7 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
       if (facts.length === 0 && edited.length > 0) {
         const curContents = new Map<string, string>();
         for (const abs of edited) {
-          const rd = await callTool(toolsEndpoint, "shell", { command: `cat ${JSON.stringify(abs)}`, cwd: REPO_ROOT });
+          const rd = await callTool(toolsEndpoint, "shell", { command: `cat ${shq(abs)}`, cwd: REPO_ROOT });
           const c = String((rd.body as { stdout?: unknown })?.stdout ?? "");
           if (c) curContents.set(abs, c);
         }
@@ -8429,6 +8478,7 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
         const seenSym = new Set<string>();
         for (const names of encl.values()) for (const symbol of names) {
           if (seenSym.has(symbol)) continue;
+          if (grepSymbol(symbol) === null) { console.log("[fc-reachability] an enclosing symbol that is not a plain identifier was dropped"); continue; }
           seenSym.add(symbol);
           let callerCount = 0;
           let isEntrypoint = false;
@@ -8438,13 +8488,13 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
             // symmetrical with the primary reachability loop above so a symbol
             // referenced-not-called counts as live and the dead-code floor holds.
             const callQ = await callTool(toolsEndpoint, "shell", {
-              command: `grep -rEn "\\b${symbol}\\b" ${JSON.stringify(vAbs)} 2>/dev/null | grep -vE "(function|const|let|var)[[:space:]]+${symbol}\\b" | grep -vE "^[^:]+:[0-9]+:[[:space:]]*${symbol}[[:space:]]*\\([^)]*\\)[[:space:]]*(:[^={]+)?\\{" || true`,
+              command: reachabilityCallersCommand(symbol, vAbs, false)!,
               cwd: REPO_ROOT,
             });
             const callOut = String((callQ.body as { stdout?: unknown })?.stdout ?? "").trim();
             if (callOut) callerCount += callOut.split("\n").filter(Boolean).length;
             const entQ = await callTool(toolsEndpoint, "shell", {
-              command: `grep -rEn "(export[[:space:]]+(async[[:space:]]+)?(function|const|let)[[:space:]]+${symbol}\\b|case[[:space:]]+[\\"']${symbol}[\\"']|['\\"]${symbol}['\\"][[:space:]]*[:,)]|\\.(on|get|post|put|delete|use)\\([^)]*${symbol}|router\\.[a-z]+\\([^)]*${symbol})" ${JSON.stringify(vAbs)} 2>/dev/null || true`,
+              command: reachabilityEntrypointCommand(symbol, vAbs, false)!,
               cwd: REPO_ROOT,
             });
             if (String((entQ.body as { stdout?: unknown })?.stdout ?? "").trim()) isEntrypoint = true;
@@ -8459,9 +8509,11 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
       const gapSummary = String(pointer.gap?.summary ?? pointer.spec.split("\n").find((l) => l.trim()) ?? "");
       const gapNamed = (gapSummary.match(/\b[A-Za-z_$][\w$]{3,}\b/g) ?? []).filter((w) => /[A-Z_]/.test(w)).slice(0, 6);
       for (const name of new Set([...gapNamed, ...facts.filter((f) => f.reachable).map((f) => f.symbol)])) {
+        const mentionsOf = (root: string) => symbolMentionsCommand(name, root);
+        if (mentionsOf("") === null) continue; // not a plain identifier: dropped, never quoted into a pattern
         for (const v of touched) {
           const vAbs = `${vesselRoot(v)}/src`;
-          const g = await callTool(toolsEndpoint, "shell", { command: `grep -rEn "\\b${name}\\b" ${JSON.stringify(vAbs)} 2>/dev/null | head -8 || true`, cwd: REPO_ROOT });
+          const g = await callTool(toolsEndpoint, "shell", { command: mentionsOf(vAbs)!, cwd: REPO_ROOT });
           const gt = String((g.body as { stdout?: unknown })?.stdout ?? "").trim();
           if (gt) { codeContext += `\n# ${name} in ${v}:\n${gt}\n`; if (codeContext.length > 6000) break; }
         }
@@ -8753,7 +8805,7 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
       }
     }
     for (const f of created) {
-      await callTool(toolsEndpoint, "shell", { command: `rm -f ${JSON.stringify(f)}`, cwd: REPO_ROOT });
+      await callTool(toolsEndpoint, "shell", { command: `rm -f ${shq(f)}`, cwd: REPO_ROOT });
     }
     // Only claim a rollback that actually happened. A partial restore is a FAILED
     // rollback, not a successful one — the caller needs to know the tree is dirty.
@@ -8800,7 +8852,7 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
         console.warn(`[fc-stage] SKIPPED staging for ${vessel}: no edited/created path is under vBase — nothing will be copied into the mitosis dir, so the cutover will find an empty diff and the commit will fail`);
         continue;
       }
-      const clone = await callTool(toolsEndpoint, "shell", { command: `test -d /workspace/git/vessels/${vessel} && echo yes || echo no`, cwd: REPO_ROOT });
+      const clone = await callTool(toolsEndpoint, "shell", { command: `test -d ${shq(`/workspace/git/vessels/${vessel}`)} && echo yes || echo no`, cwd: REPO_ROOT });
       if (!String((clone.body as { stdout?: unknown })?.stdout ?? "").includes("yes")) {
         cutovers.push({ vessel, landed: false, reason: "no push clone — net-new vessel, use scaffold path" });
         continue;
@@ -8823,7 +8875,7 @@ const earlyAttempt = await Promise.race([
       const mitosisRoot = `${REPO_ROOT}/${vessel}-mitosis-fc-${ts}`;
       for (const rel of changedRel) {
         const dir = `${mitosisRoot}/${rel.split("/").slice(0, -1).join("/")}`;
-        await callTool(toolsEndpoint, "shell", { command: `mkdir -p ${JSON.stringify(dir)} && cp ${JSON.stringify(`${vBase}/${rel}`)} ${JSON.stringify(`${mitosisRoot}/${rel}`)}`, cwd: REPO_ROOT });
+        await callTool(toolsEndpoint, "shell", { command: `mkdir -p ${shq(dir)} && cp ${shq(`${vBase}/${rel}`)} ${shq(`${mitosisRoot}/${rel}`)}`, cwd: REPO_ROOT });
         // LAND-TIME runtime sync (isolation follow-up): the cutover freshness
         // gate compares staged_base_sha against the LIVE file at
         // ${RUNTIME_ROOT}/<vessel>/<rel>. Pre-isolation, the compose's apply
@@ -8846,16 +8898,16 @@ const earlyAttempt = await Promise.race([
           // nothing repaired it — pull-sync only compares clone to origin.
           if (!preLiveSync.has(liveAbs)) {
             const cur = await callTool(toolsEndpoint, "shell", {
-              command: `test -f ${JSON.stringify(liveAbs)} && cat ${JSON.stringify(liveAbs)} || printf '\\0ABSENT\\0'`,
+              command: `test -f ${shq(liveAbs)} && cat ${shq(liveAbs)} || printf '\\0ABSENT\\0'`,
               cwd: REPO_ROOT,
             });
             const raw = String((cur.body as { stdout?: unknown })?.stdout ?? "");
             preLiveSync.set(liveAbs, raw === "\0ABSENT\0" ? null : raw);
           }
-          await callTool(toolsEndpoint, "shell", { command: `mkdir -p ${JSON.stringify(liveDir)} && cp ${JSON.stringify(`${vBase}/${rel}`)} ${JSON.stringify(liveAbs)}`, cwd: REPO_ROOT });
+          await callTool(toolsEndpoint, "shell", { command: `mkdir -p ${shq(liveDir)} && cp ${shq(`${vBase}/${rel}`)} ${shq(liveAbs)}`, cwd: REPO_ROOT });
         }
       }
-      const shaRes = await callTool(toolsEndpoint, "shell", { command: `git -C ${JSON.stringify(vBase)} show HEAD:${JSON.stringify(changedRel[0])} | sha256sum | cut -c1-12`, cwd: REPO_ROOT });
+      const shaRes = await callTool(toolsEndpoint, "shell", { command: `git -C ${shq(vBase)} show ${shq(`HEAD:${changedRel[0]}`)} | sha256sum | cut -c1-12`, cwd: REPO_ROOT });
       const staged_base_sha = String((shaRes.body as { stdout?: unknown })?.stdout ?? "").trim().split(/\s+/)[0];
       // PARK BEFORE THE CUTOVER: everything up to here (verify + semantic gate) is the
       // expensive part; if the cutover is refused or the process is restarted, the park
@@ -8914,7 +8966,7 @@ const earlyAttempt = await Promise.race([
       } as never);
       cutovers.push({ vessel, result: cut.body });
       if (pointer.gap?.id) await settleSemanticDissent(String(pointer.gap.id), semanticDissent, cut.body);
-        try { await callTool(toolsEndpoint, "shell", { command: `rm -rf ${JSON.stringify(mitosisRoot)}`, cwd: REPO_ROOT }); } catch { /* best-effort staging teardown */ }
+        try { await callTool(toolsEndpoint, "shell", { command: `rm -rf ${shq(mitosisRoot)}`, cwd: REPO_ROOT }); } catch { /* best-effort staging teardown */ }
     }
   }
 
@@ -8938,7 +8990,7 @@ const earlyAttempt = await Promise.race([
       for (const [abs, original] of preLiveSync) {
         try {
           if (original === null) {
-            await callTool(toolsEndpoint, "shell", { command: `rm -f ${JSON.stringify(abs)}`, cwd: REPO_ROOT });
+            await callTool(toolsEndpoint, "shell", { command: `rm -f ${shq(abs)}`, cwd: REPO_ROOT });
           } else {
             const cloneAbs = abs.replace(`${RUNTIME_ROOT}/`, `${PUSH_CLONE_ROOT}/`);
             const liveNow = (await callTool(toolsEndpoint, "fs_read", { path: abs })).body as { content?: unknown };

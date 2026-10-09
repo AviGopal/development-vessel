@@ -319,7 +319,7 @@ describe("feature-compose verify: the test_writing check is judged after the sui
     const block = FC.slice(Math.max(0, call - 1500), call + 1500);
     expect(block).toContain("if (testWritingMode && tcOk)");
     expect(block).toContain("runs: csaV.TEST_WRITING_CHECK_RUNS");
-    expect(block).toContain('bun test ${JSON.stringify("./" + rel)} --timeout 20000');
+    expect(block).toContain('bun test ${shq("./" + rel)} --timeout 20000');
     expect(block).toContain('env -i PATH="$PATH" HOME="$HOME" NODE_ENV=test TZ=UTC WORKSPACE_ROOT="$(mktemp -d)"');
     expect(block).toContain("timeout_sec: 240");
     expect(block).toContain("[fc-test-writing-check]");

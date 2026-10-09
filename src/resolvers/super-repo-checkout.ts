@@ -14,13 +14,14 @@
 // write targets are under the vessel runtime, a compose worktree or /tmp (lexically,
 // never the super-repo path), its paths are shell variables, or it only reads.
 import { signWriteGrant, type WriteGrant } from "./write-containment.js";
+import { shq } from "./shell-quote.js";
 
 export type SuperRepoCheckoutCall = { command: string; cwd: string; write_grant?: WriteGrant };
 
 /** The shell args for refreshing `repos/<vessel>` in the super-repo clone from origin/dev, with a grant bound to `superRoot` when a key is held. */
 export function superRepoCheckoutCall(superRoot: string, vesselName: string, key: string | undefined, now: number = Date.now()): SuperRepoCheckoutCall {
   const call: SuperRepoCheckoutCall = {
-    command: `git -C ${JSON.stringify(superRoot)} checkout origin/dev -- ${JSON.stringify(`repos/${vesselName}`)} 2>&1`,
+    command: `git -C ${shq(superRoot)} checkout origin/dev -- ${shq(`repos/${vesselName}`)} 2>&1`,
     cwd: superRoot,
   };
   if (key) call.write_grant = signWriteGrant(key, superRoot, now);

@@ -33,6 +33,8 @@ const ISOLATED = /\bisolateRuntimeRoot\s*\(/;
 
 /** Files in the class that are not isolated, with the reason each cannot write through a frozen root. */
 const ALLOWED: Record<string, string> = {
+  "test/resolvers/compose-admission.test.ts":
+    "protected judge test (autonomy-scope excluded): it must not import the lane-editable test/helpers/runtime-root.ts until that helper is an evaluator file (scope-earn-in EVALUATOR_FILES + autonomy-scope), as test/helpers/ungated-rows-source.ts is; it drives only admission refusals (trap run: nothing landed under /vessels, alone or after a /vessels loader)",
   "test/resolvers/retry-evidence.test.ts":
     "imports only pure feature-compose helpers statically and steers MITOSIS_RUNTIME_DIR per test for gap-to-feature's specFromGap, which reads it at call time; drives no feature_compose write (trap run: nothing landed under /vessels, alone or after a /vessels loader)",
 };

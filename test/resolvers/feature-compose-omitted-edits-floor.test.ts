@@ -174,3 +174,71 @@ describe("omittedExactEditsRefusal — CONTROLS: ambiguous or legitimately short
     expect(seam()(undefined, [], reader(null))).toBeNull();
   });
 });
+
+// SOLE-COVER CASES (qa mutation review). Each fixture is covered by exactly ONE branch of the seam,
+// so removing that branch must turn the null into a refusal; each is paired with the same fixture
+// minus that one cover, which must refuse, so the fixture is proven to parse and to reach the branch.
+describe("omittedExactEditsRefusal — each coverage branch is the SOLE cover of one fixture", () => {
+  it("old_string only: one op spans both olds (whitespace drifted), carries neither new, the file still holds both olds: null", () => {
+    const merged: Op = { kind: "edit", path: PATH, old_string: `   ${E1.old}\n\n  ${E2.old}  `, new_string: "// rewritten by hand" };
+    const after = `${E1.old}\n${E2.old}\n`;
+    expect(seam()(exactSpec([E1, E2]), [merged], reader(after))).toBeNull();
+    // Paired: the same op spanning only E1 leaves E2 uncovered.
+    expect(seam()(exactSpec([E1, E2]), [{ ...merged, old_string: E1.old }], reader(after))).toMatch(/omits EDIT 2\b/);
+  });
+  it("post-apply new present only: a prior attempt landed an insertion (its old stays in the file), no op covers it: null", () => {
+    const INS = { old: "const alpha = 1;", new: "const alpha = 1;\nconst delta = 4;" };
+    const after = `${INS.new}\n${E2.new}\n${E3.new}\n`;
+    expect(seam()(exactSpec([INS, E2, E3]), [op(E2), op(E3)], reader(after))).toBeNull();
+    // Paired: the insertion not in the file (old still there, new absent) is an omission.
+    expect(seam()(exactSpec([INS, E2, E3]), [op(E2), op(E3)], reader(`${INS.old}\n${E2.new}\n${E3.new}\n`))).toMatch(/omits EDIT 1\b/);
+  });
+  it("post-apply old absent only: a prior attempt landed a deletion (new is empty), no op covers it: null", () => {
+    const DEL = { old: "const omega = 9;", new: "" };
+    const after = `${E2.new}\n${E3.new}\n`;
+    expect(seam()(exactSpec([DEL, E2, E3]), [op(E2), op(E3)], reader(after))).toBeNull();
+    // Paired: the deletion's old text still in the file is an omission.
+    expect(seam()(exactSpec([DEL, E2, E3]), [op(E2), op(E3)], reader(`${DEL.old}\n${after}`))).toMatch(/omits EDIT 1\b/);
+  });
+  it("count rule only: as many ops as edits, one of them unrelated, EDIT 2 uncovered: null (the floor judges only SHORTER plans)", () => {
+    const unrelated: Op = { kind: "edit", path: PATH, old_string: "// header", new_string: "// header, tidied" };
+    expect(seam()(exactSpec([E1, E2]), [op(E1), unrelated], reader(null))).toBeNull();
+    // Paired: without the unrelated op the plan is shorter and EDIT 2 is uncovered.
+    expect(seam()(exactSpec([E1, E2]), [op(E1)], reader(null))).toMatch(/omits EDIT 2\b/);
+  });
+});
+
+// EXACT WIRING. No seam drives the real compose path with a stubbed planner: the floor runs inside
+// resolveFeatureComposeInner (not exported) only after a discovered LLM plan, a real apply and a real
+// verify, so the guard and the lesson argument are pinned on the syntax tree.
+describe("omitted-edits floor wiring — exact", () => {
+  function omissionGuard(): ts.IfStatement | undefined {
+    let found: ts.IfStatement | undefined;
+    walk(inner, (n) => { if (!found && ts.isIfStatement(n) && ts.isIdentifier(n.expression) && n.expression.text === "omissionReason") found = n; });
+    return found;
+  }
+  it("the guard is the bare `if (omissionReason)` and its FIRST statement flips verdict to UNFAVORABLE", () => {
+    const g = omissionGuard();
+    expect(g).toBeDefined();
+    expect(g!.getText(sf)).toMatch(/^if \(omissionReason\) \{\s*verdict = "UNFAVORABLE";/);
+    const then = g!.thenStatement;
+    expect(ts.isBlock(then)).toBe(true);
+    const first = (then as ts.Block).statements[0];
+    expect(first && ts.isExpressionStatement(first) && assignsUnfavorable(first)).toBe(true);
+    // It sits inside the FAVORABLE-guarded block that assigns omissionReason from the seam.
+    const outer = g!.parent?.parent;
+    expect(outer && ts.isIfStatement(outer) && outer.expression.getText(sf) === 'verdict === "FAVORABLE"').toBe(true);
+  });
+  it("the lesson class reads omissionReason: composeLessonClass's reason argument names it, and that reason classifies partial_spec_omission", () => {
+    const calls: ts.CallExpression[] = [];
+    walk(inner, (n) => { if (ts.isCallExpression(n) && ts.isIdentifier(n.expression) && n.expression.text === "composeLessonClass") calls.push(n); });
+    expect(calls.length).toBe(1);
+    const reasonArg = calls[0]!.arguments[4];
+    expect(reasonArg).toBeDefined();
+    expect(mentions(reasonArg!, "omissionReason")).toBe(true);
+    expect(reasonArg!.getText(sf)).toContain("semantic_gate?.reason ?? omissionReason");
+    // The real classifier on the real seam's reason for an omission withhold.
+    const reason = seam()(exactSpec([E1, E2, E3]), [op(E1), op(E3)], reader(`${E1.new}\n${E2.old}\n${E3.new}\n`));
+    expect(fc.composeLessonClass(null, null, [{ ok: true }, { ok: true }], [{ ok: true, output: "" }], String(null ?? reason ?? ""))).toBe("partial_spec_omission");
+  });
+});

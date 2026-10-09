@@ -132,7 +132,10 @@ export function resolvePoolImpulse(pointer: {
 //   scriptRunnerAllowlist: the repo scripts local-tools-vessel's script runner may execute with
 //   METABOB_API_KEY injected, each pinned to an approved git blob hash. A row is a grant to run code with
 //   the fleet credential; the runner accepts only rows carrying this writer's operator attestation.
-export const TRUST_ROOT_POOL_SHAPES: ReadonlySet<string> = new Set(['substrateNodes', 'autonomyScope', 'spendEnvelope', 'calibrationWindow', 'scriptRunnerAllowlist']);
+//   operatorHold: one operator hold per row (src/lib/operator-hold.ts reads it, fail-closed). A hold the
+//   autonomous lane could write could also be LIFTED by it, which would be the lane lifting its own
+//   containment, so it is operator-only: it is deliberately absent from EVALUATOR_TRUST_ROOT_WRITERS.
+export const TRUST_ROOT_POOL_SHAPES: ReadonlySet<string> = new Set(['substrateNodes', 'autonomyScope', 'spendEnvelope', 'calibrationWindow', 'scriptRunnerAllowlist', 'operatorHold']);
 /** key_id: the validated credential's key id (identity's identifier, never derived from the secret).
  *  evaluator: set only by in-process code (the HTTP route builds auth from the Authorization header alone, and a
  *  pointer field of that name is never read), naming the accepted evaluator making the write. */
@@ -164,6 +167,34 @@ export async function operatorCredential(authHeader: string | undefined): Promis
   return cred.scopes.includes('admin') ? { operator: true, key_id: cred.keyId ?? null } : { operator: false, why: 'credential lacks the admin scope' };
 }
 
+/** The fields every operatorHold body carries (the gap store's operator_hold vocabulary: by/at/reason, plus what
+ *  makes a hold reviewable): hold_id (== the row id), scope, active, by, at, reason, evidence, lift, review_by, harm. */
+export const OPERATOR_HOLD_FIELDS: readonly string[] = ['hold_id', 'scope', 'active', 'by', 'at', 'reason', 'evidence', 'lift', 'review_by', 'harm'];
+const nonEmptyString = (v: unknown): boolean => typeof v === 'string' && v.trim().length > 0;
+const isoString = (v: unknown): boolean => typeof v === 'string' && /^\d{4}-\d{2}-\d{2}T/.test(v) && Number.isFinite(Date.parse(v));
+/**
+ * The operatorHold fields a body is missing or carries in the wrong form, in OPERATOR_HOLD_FIELDS order; [] when
+ * valid. `rowId` is the id the row is stored under, which hold_id must equal (one record per hold, and a reader
+ * that asks for a hold by id must get a body that names the same hold). Shared by the writer (refuses the write) and
+ * the reader (src/lib/operator-hold.ts: a malformed row reads held).
+ */
+export function operatorHoldProblems(rowId: string | undefined, body: unknown): string[] {
+  const b = (body !== null && typeof body === 'object' && !Array.isArray(body) ? body : {}) as Record<string, unknown>;
+  const ok: Record<string, boolean> = {
+    hold_id: nonEmptyString(b.hold_id) && b.hold_id === rowId,
+    scope: nonEmptyString(b.scope),
+    active: typeof b.active === 'boolean',
+    by: nonEmptyString(b.by),
+    at: isoString(b.at),
+    reason: nonEmptyString(b.reason),
+    evidence: nonEmptyString(b.evidence) || (Array.isArray(b.evidence) && b.evidence.length > 0 && b.evidence.every(nonEmptyString)),
+    lift: nonEmptyString(b.lift),
+    review_by: isoString(b.review_by),
+    harm: typeof b.harm === 'boolean',
+  };
+  return OPERATOR_HOLD_FIELDS.filter((f) => !ok[f]);
+}
+
 /** A body as stored: any `attested` key a caller put inside it is dropped (copied, never mutated). The
  *  attestation lives outside body and only the server writes it, so a body-level one is a forgery. */
 function stripCallerAttestation(body: unknown): unknown {
@@ -185,7 +216,7 @@ export function resolvePoolImpulseWrite(pointer: {
   if_updated_at?: string;
   /** Caller-supplied attestation: NEVER stored. The row's `attested` is the server's stamp or absent. */
   attested?: unknown;
-}, auth?: PoolWriteAuth): { shape: string; body: { ok: boolean; id: string; conflict?: boolean; current_updated_at?: string | null; error?: string; hint?: string } } {
+}, auth?: PoolWriteAuth): { shape: string; body: { ok: boolean; id: string; conflict?: boolean; current_updated_at?: string | null; error?: string; hint?: string; missing?: string[] } } {
   const trustRoot = trustRootWriteShape(pointer);
   const evaluatorGrant = !!trustRoot && auth?.operator !== true && typeof auth?.evaluator === 'string' && EVALUATOR_TRUST_ROOT_WRITERS[trustRoot] === auth.evaluator;
   if (trustRoot && auth?.operator !== true && !evaluatorGrant) {
@@ -203,6 +234,17 @@ export function resolvePoolImpulseWrite(pointer: {
     const from = all[idx]!.shape;
     console.warn(`[pool] REFUSED reshape of ${id} from ${from} to ${pointer.shape}: trust-root membership is immutable`);
     return { shape: 'poolImpulse_write', body: { ok: false, id, error: `trust_root_shape_immutable: ${id} is ${from}; a write may not change it to ${pointer.shape}`, hint: 'retire this row and create a new one instead' } };
+  }
+  // OPERATOR HOLD SHAPE. Validated on the row as it WOULD be stored (an update keeps the existing body when it sends
+  // none, so a status-only retire of a valid hold passes). A malformed hold is refused rather than stored: the reader
+  // would read it held anyway, but a refused write tells the operator which fields to supply.
+  if ((pointer.shape ?? (idx >= 0 ? all[idx]!.shape : undefined)) === 'operatorHold') {
+    const effectiveBody = stripCallerAttestation(pointer.body !== undefined ? pointer.body : idx >= 0 ? all[idx]!.body : null);
+    const missing = operatorHoldProblems(id, effectiveBody);
+    if (missing.length > 0) {
+      console.warn(`[pool] REFUSED operatorHold write (id=${id}): missing ${missing.join(', ')}`);
+      return { shape: 'poolImpulse_write', body: { ok: false, id, error: `operator_hold_invalid: missing or invalid ${missing.join(', ')}`, missing, hint: `an operatorHold body carries ${OPERATOR_HOLD_FIELDS.join(', ')}; hold_id equals the row id, at and review_by are ISO timestamps, evidence is a non-empty string or array, active and harm are booleans` } };
+    }
   }
   // COMPARE-AND-SET (2026-09-26). The write REPLACES the body, so a writer that read a row, did slow
   // work, then wrote {...bodyItRead, change} silently reverted anything written in between (rhythm

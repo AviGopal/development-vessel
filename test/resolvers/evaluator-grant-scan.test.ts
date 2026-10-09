@@ -96,7 +96,8 @@ describe("the evaluator grant is constructed only by the applier (must-fail at b
 // of the lane's reach, but a guarded file that imports a lane-editable module can be loosened through that module.
 // Semantics, stated:
 //   - roots: the item-3 evaluator src files below (scope-earn-in, pool-impulse, test-suite, self-fact-reconcile,
-//     rhythm-conductor-tick);
+//     rhythm-conductor-tick), and check-supply-admission (an evaluator file on feature-compose's verdict path, whose
+//     own imports feature-compose's REPORT_ONLY stop would otherwise hide);
 //   - edges: static `import … from`, `export … from` and dynamic `import("…")` with a relative specifier inside src/;
 //     type-only imports (`import type`, `export type`, or a brace list whose every name is `type`) are erased at
 //     runtime and do not count;
@@ -121,7 +122,7 @@ const EXCLUDED_SRC = [
   "src/resolvers/removed-line-predicate.ts", "src/resolvers/vacuous-edit.ts", "src/resolvers/staged-mitosis-gate.ts",
   "src/resolvers/retry-evidence.ts",
 ];
-const CLOSURE_ROOTS = ["src/resolvers/scope-earn-in.ts", "src/resolvers/pool-impulse.ts", "src/resolvers/test-suite.ts", "src/resolvers/self-fact-reconcile.ts", "src/resolvers/rhythm-conductor-tick.ts"];
+const CLOSURE_ROOTS = ["src/resolvers/scope-earn-in.ts", "src/resolvers/pool-impulse.ts", "src/resolvers/test-suite.ts", "src/resolvers/self-fact-reconcile.ts", "src/resolvers/rhythm-conductor-tick.ts", "src/resolvers/check-supply-admission.ts"];
 const REPORT_ONLY = ["src/resolvers/gap-to-feature.ts", "src/resolvers/feature-compose.ts"];
 // The lane-editable modules still on the evaluator's path, each REVIEWED (qa, 10-05): why it may stay unguarded.
 // None of them decides a verdict, a scope write or a credential; a lane landing in one can at worst degrade
@@ -201,6 +202,8 @@ describe("the evaluator imports nothing the lane can edit beyond the recorded de
     // The shared evaluator tree the class-1 classifier and verifyGapCondition read through, and the supply test-writing
     // admission on feature-compose's verdict path, are evaluator files too (10-08).
     for (const f of ["src/lib/evaluator-tree.ts", "src/resolvers/check-supply-admission.ts"]) expect(EVALUATOR_FILES_SRC()).toContain(f);
+    // The leaf helpers the supply admission check and feature-compose's plan-path rule and shell commands read (10-08).
+    for (const f of ["src/resolvers/vessel-paths.ts", "src/resolvers/shell-quote.ts"]) expect(EVALUATOR_FILES_SRC()).toContain(f);
     // Every remaining entry carries a reviewed reason, not a bare provenance note.
     for (const [m, why] of Object.entries(KNOWN_UNGUARDED)) expect(why.split(" — ")[1] ?? "", m).toMatch(/^(notice path|plumbing|arming|telemetry)\b/);
     const reached = unguardedClosure();

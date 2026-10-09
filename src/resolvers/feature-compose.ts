@@ -23,7 +23,7 @@
 import { METABOB_API_KEY, DISCOVERY_SHAPES } from "../config.js";
 import { withWriteGrant } from "./write-containment.js";
 import { superRepoCheckoutCall } from "./super-repo-checkout.js";
-import { planPathProblem } from "./vessel-paths.js";
+import { planPathProblem, vesselRelativePath } from "./vessel-paths.js";
 import { shq } from "./shell-quote.js";
 import { federatedLlmEgressUrls } from "./federated-llm-egress.js";
 import { acquireComposeWorkspace, type ComposeWorkspace } from "./compose-workspace";
@@ -4500,6 +4500,35 @@ export function composeTargetFiles(gapMeta: Record<string, unknown>, spec: strin
   )).slice(0, 4 + hinted.length);
 }
 /**
+ * THE VESSELS A COMPOSE ISOLATES (gap an-undirected-compose-isolates-the-wrong-vessel-...). The caller's verify_vessels
+ * plus every target file's vessel (repos/<v>/... => repos/<v>, the plan-path rule decides the form): the picker derives
+ * its verify set from the localized edit target (suspected_real_location first), while composeTargetFiles puts the gap's
+ * edit_site first, so the two named different vessels and the grounding window could not contain the edit_site. An added
+ * vessel is one the compose may write, so it is added only when it is not protected (the admission set), the autonomy
+ * scope does not exclude the target (autonomous composes; `excludes` is null for a directed one), and this node owns it
+ * (gap-to-feature ownedVessels: a clone, unit not masked). Otherwise the compose refuses before workspace acquisition.
+ * An empty verify set is left to the compose's own derivation; a vessel the caller named is never re-judged here.
+ */
+export function composeIsolationVessels(verifyVessels: string[], targetFiles: string[], opts: { directed: boolean; owned: Set<string>; excludes: ((path: string) => string | null) | null }): { vessels: string[]; added: string[]; refused?: undefined } | { refused: { stage: "target_vessel_not_isolated"; vessel: string; file: string; reason: string }; vessels?: undefined } {
+  if (verifyVessels.length === 0) return { vessels: verifyVessels, added: [] };
+  const named = new Set(verifyVessels.map((v) => v.replace(/^repos\//, "")));
+  const added: string[] = [];
+  for (const file of targetFiles) {
+    if (planPathProblem(file) !== null || vesselRelativePath(file) === null) continue;
+    const name = file.replace(/^(?:\.\/)+/, "").split("/")[1] ?? "";
+    if (!name || named.has(name)) continue;
+    const vessel = `repos/${name}`;
+    const refuse = (reason: string) => ({ refused: { stage: "target_vessel_not_isolated" as const, vessel, file, reason } });
+    if (name === "discovery-vessel" || name === "identity-vessel") return refuse(`target ${file} is in protected vessel ${name}, which a compose never writes`);
+    const scopeHit = opts.excludes ? opts.excludes(file) : null;
+    if (scopeHit) return refuse(`target ${file} is excluded from autonomous work by the autonomy scope (${scopeHit})`);
+    if (!opts.owned.has(name)) return refuse(`target ${file} is in ${name}, which is not owned here (no clone, or its unit is masked), so it cannot be isolated`);
+    named.add(name);
+    added.push(vessel);
+  }
+  return { vessels: [...verifyVessels, ...added], added };
+}
+/**
  * THE FILE-SCOPE GATE: edit ops on a file outside the compose's target files are dropped as off-target, and
  * every drop is RETURNED (dropped_paths + reason) so it is recorded on the attempt and the landing evidence,
  * never silent. A plan whose every op is off-target refuses (no_effect_all_dropped): nothing would land on an
@@ -5478,6 +5507,27 @@ async function resolveFeatureComposeUncapped(pointer: FeatureComposePointer): Pr
   // Tool (shell/fs) calls finish in seconds, but the verify shell call can exceed this cap; therefore the outer budget must be increased
   if (typeof pointer.spec !== "string") pointer = { ...pointer, spec: String(pointer.spec ?? "") };
   stampComposeProgress("scope", pointer.gap?.id);
+  // EVERY TARGET FILE'S VESSEL IS ISOLATED AND GROUNDED (composeIsolationVessels), decided before the workspace is acquired.
+  {
+    const named = (pointer.verify_vessels ?? []).map((v) => v.replace(/^repos\//, ""));
+    const isoTargets = named.length > 0 ? composeTargetFiles((pointer.gap?.classification_metadata ?? {}) as Record<string, unknown>, pointer.spec) : [];
+    if (isoTargets.some((f) => { const d = vesselDirOf(f); return !!d && !named.includes(d.slice("repos/".length)); })) {
+      const directed = (pointer as { directed?: boolean }).directed === true;
+      const { autonomyScope, autonomyScopeExcludes, ownedVessels } = await import("./gap-to-feature.js");
+      let excludes: ((path: string) => string | null) | null = null;
+      if (!directed) {
+        try { const scope = await autonomyScope(); excludes = (path) => autonomyScopeExcludes(scope, path); }
+        catch (err) { const why = `autonomy scope check failed (${String(err)})`; excludes = () => why; }
+      }
+      const iso = composeIsolationVessels(pointer.verify_vessels ?? [], isoTargets, { directed, owned: ownedVessels(), excludes });
+      if (iso.refused) {
+        console.log(`[fc-isolation] REFUSED before workspace acquisition (stage ${iso.refused.stage}): ${iso.refused.reason}; verify_vessels=[${(pointer.verify_vessels ?? []).join(",")}] gap=${pointer.gap?.id ?? "none"}`);
+        return { shape: "featureComposeReport", body: { ok: false, verdict: "REFUSED", stage: iso.refused.stage, error: iso.refused.reason, vessel: iso.refused.vessel, target_file: iso.refused.file } };
+      }
+      console.log(`[fc-isolation] added target vessel(s) [${iso.added.join(",")}] to verify_vessels=[${(pointer.verify_vessels ?? []).join(",")}] gap=${pointer.gap?.id ?? "none"}`);
+      pointer = { ...pointer, verify_vessels: iso.vessels };
+    }
+  }
   const guards = pointer.verify_vessels?.length ? pointer.verify_vessels : ["__global__"];
   // Per-compose isolation (gap edit-intent-compose-shared-workspace-no-isolation):
   // each compose gets its own git worktree per vessel, so concurrent composes no

@@ -4908,12 +4908,13 @@ export function sampleClassTheta(cls: string, posteriors?: ClassPosteriors): num
 }
 // Infrastructure refusal: the host could not ground or admit the compose, so no draft ran and
 // the outcome carries zero evidence about the gap class. Covers everything
-// isNonAttemptComposeResult exempts, plus grounding/guard REFUSED (e.g. Grounding window (0 bytes)).
+// isNonAttemptComposeResult exempts, plus grounding/guard REFUSED (e.g. Grounding window (0 bytes)), and a target
+// vessel this node cannot isolate (feature-compose composeIsolationVessels; it was a grounding refusal before).
 export function isInfraRefusalBody(cb: Record<string, unknown> | null | undefined): boolean {
   if (!cb) return false;
   if (isNonAttemptComposeResult(cb)) return true;
   const stage = String(cb.stage ?? "");
-  return (stage === "grounding" || stage === "guard") && String(cb.verdict ?? "") === "REFUSED";
+  return (stage === "grounding" || stage === "guard" || stage === "target_vessel_not_isolated") && String(cb.verdict ?? "") === "REFUSED";
 }
 const closeOracleCalibPath = (): string => process.env["CLOSE_ORACLE_CALIB_PATH"] ?? "/workspace/close-oracle-calibration.json";
 type CloseOracleCalib = Record<string, { closes: number; false_closes: number; operator_engaged?: number }>;

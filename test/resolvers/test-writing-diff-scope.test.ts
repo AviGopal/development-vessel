@@ -146,6 +146,50 @@ describe("test-writing compose: the diff is confined to the gap's one check file
     expect(rel("./repos/development-vessel/src/resolvers/a.ts")).toBe("src/resolvers/a.ts");
   });
 
+  // EVERY PATH FORM A PRODUCER EMITS (the control set; one row per form):
+  //   plan ops, applied: the planner's op.path, repos/<vessel>/<rest> (decompose schema, feature-compose.ts vesselDirOf)
+  //   edited/created, isolated: opAbs -> ws.rootFor(vessel) = /workspace/git/compose/<id>/<vessel>/<rest> (compose-workspace.ts)
+  //   edited/created, not isolated: opAbs -> REPO_ROOT/<vessel>/<rest>, REPO_ROOT = RUNTIME_ROOT = /vessels (shape-vocabulary.ts)
+  //   fc-repair edits: efNorm repos/<vessel>/<rest> -> opAbs, so one of the two forms above
+  //   W2 and supply-ledger edit sites: repos/<vessel>/src/<rest> (gap-check-supply.ts checkSupplySite and the armed ledger)
+  // Not emitted by a producer, kept as existing controls: the push-clone root /workspace/git/vessels/<vessel>/, ./repos/<v>/,
+  // and the bare vessel-relative test/ and ./test/ forms.
+  test("[CONTROL] every path form a producer emits resolves to its vessel-relative path", () => {
+    expect(typeof outside).toBe("function");
+    const rel = mod["vesselRelativeEditSite"] as (s: unknown) => string | null;
+    // plan ops and applied
+    expect(outside!("test_writing", [`repos/development-vessel/${CHECK}`], GAP)).toEqual([]);
+    // edited/created (and fc-repair), isolated
+    expect(outside!("test_writing", [`${COMPOSE}/${CHECK}`], GAP)).toEqual([]);
+    // edited/created (and fc-repair), not isolated
+    expect(outside!("test_writing", [`/vessels/development-vessel/${CHECK}`], GAP)).toEqual([]);
+    // W2 edit site and the supply ledger's edit site
+    expect(rel("repos/development-vessel/src/resolvers/a.ts")).toBe("src/resolvers/a.ts");
+    expect(rel("repos/development-vessel/src/resolvers/a.ts:12")).toBe("src/resolvers/a.ts");
+    // existing controls, no producer
+    expect(outside!("test_writing", [`/workspace/git/vessels/development-vessel/${CHECK}`, `./repos/development-vessel/${CHECK}`, CHECK, `./${CHECK}`], GAP)).toEqual([]);
+    expect(rel("/vessels/development-vessel/src/resolvers/a.ts")).toBe("src/resolvers/a.ts");
+    expect(rel("/workspace/git/vessels/development-vessel/src/resolvers/a.ts")).toBe("src/resolvers/a.ts");
+    expect(rel(`${COMPOSE}/src/resolvers/a.ts`)).toBe("src/resolvers/a.ts");
+    expect(rel("src/resolvers/a.ts")).toBe("src/resolvers/a.ts");
+  });
+
+  // Every root is ANCHORED at the path start. A repos/<x>/, vessels/<x>/ or workspace/git/compose/<id>/<x>/ directory nested
+  // anywhere else (inside src/ of a bare, runtime, clone, compose or repos path, or under any other prefix) is a directory
+  // of that vessel, not a root, so it never resolves to the gap's check. One assertion over the whole list names every escape.
+  test("[MUST-FAIL] a root nested inside a path is not a root: repos/, vessels/ and compose/ under src/ in every form, or any other prefix", () => {
+    expect(typeof outside).toBe("function");
+    const nested: string[] = [];
+    for (const inner of ["repos/x", "vessels/x", "workspace/git/vessels/x", "workspace/git/compose/fc-x/x"]) {
+      for (const outer of ["src", "/vessels/v/src", "/workspace/git/vessels/v/src", `${COMPOSE}/src`, "repos/v/src"]) nested.push(`${outer}/${inner}/${CHECK}`);
+    }
+    nested.push(`/foo/vessels/v/${CHECK}`, `/foo/repos/v/${CHECK}`, `/foo/workspace/git/compose/fc-x/v/${CHECK}`, `/foo/workspace/git/vessels/v/${CHECK}`, `/repos/v/${CHECK}`);
+    expect(outside!("test_writing", nested, GAP)).toEqual(nested);
+    const rel = mod["vesselRelativeEditSite"] as (s: unknown) => string | null;
+    expect(rel("src/vessels/x/a.ts")).toBe("src/vessels/x/a.ts");
+    expect(rel("/vessels/v/src/vessels/x/a.ts")).toBe("src/vessels/x/a.ts");
+  });
+
   test("[CONTROL] an ordinary compose (no compose_mode, or any other value) is unaffected whatever it touches", () => {
     expect(typeof outside).toBe("function");
     for (const m of [undefined, null, "", "normal", "TEST_WRITING"]) expect(outside!(m, ["repos/v/src/foo.ts", "repos/v/package.json", "repos/v/test/a.test.ts"], GAP)).toEqual([]);

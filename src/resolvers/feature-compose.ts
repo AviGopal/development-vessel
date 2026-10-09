@@ -2837,6 +2837,30 @@ function parseExactEditBlocks(specText: string): { path: string; edits: Array<{ 
   return { path: [...paths][0] ?? "", edits };
 }
 
+// OMITTED-EDITS FLOOR (landing-verdict S2). The all-edits floor sees only a PLANNED op that failed
+// to apply; a plan that never contained the op ("Apply exactly these 3 edits" planned as 2 ops, all
+// applied) typechecked and greened the same partial landing. Only the strict numbered form above is
+// read, so prose and looser dialects pass unchanged. It only refuses: with fewer ops than edits, an
+// edit counts as omitted only when nothing covers it: no op's old_string holds its old text (adjacent
+// edits merged), no op's new text holds its new text, and the post-apply file still holds its old
+// text without its new text (an edit a prior attempt landed is covered). Whitespace runs are ignored.
+export function omittedExactEditsRefusal(spec: unknown, ops: ReadonlyArray<{ old_string?: string; new_string?: string; content?: string }>, readPostApply: (path: string) => string | null): string | null {
+  const parsed = typeof spec === "string" ? parseExactEditBlocks(spec) : null;
+  if (!parsed || ops.length >= parsed.edits.length) return null;
+  const norm = (s: string): string => s.replace(/\s+/g, " ").trim();
+  const olds = ops.map((o) => norm(o.old_string ?? ""));
+  const news = ops.map((o) => norm(`${o.new_string ?? ""} ${o.content ?? ""}`));
+  const raw = readPostApply(parsed.path);
+  const after = raw === null ? null : norm(raw);
+  const missing = parsed.edits.flatMap((e, i) => {
+    const o = norm(e.old), n = norm(e.new);
+    const covered = olds.some((s) => s.includes(o)) || (n !== "" && news.some((s) => s.includes(n)))
+      || (after !== null && (!after.includes(o) || (n !== "" && after.includes(n))));
+    return covered ? [] : [`EDIT ${i + 1}`];
+  });
+  return missing.length > 0 ? `the plan omits ${missing.join(", ")} of the ${parsed.edits.length} exact edits the spec enumerates (${ops.length} op(s) planned)` : null;
+}
+
 // Apply parsed exact edits in order; null unless every old text occurs exactly once at its
 // turn, so an earlier new text can neither consume nor duplicate a later anchor.
 function spliceExactEdits(content: string, edits: Array<{ old: string; new: string }>): string | null {
@@ -8076,6 +8100,18 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
     console.log(`[feature-compose] all-edits floor: WITHHELD FAVORABLE - ${failedOps.length} of ${applied.length} op(s) did not apply: ${failedOps.join("; ")}`);
   }
 
+  // OMITTED-EDITS FLOOR (landing-verdict S2): a plan with fewer ops than the goal's numbered exact
+  // edits, one of them covered by nothing, is withheld like a failed op. Its reason is the lesson's
+  // reason, so the classifier records partial_spec_omission (the semantic gate is skipped once withheld).
+  let omissionReason: string | null = null;
+  if (verdict === "FAVORABLE") {
+    omissionReason = omittedExactEditsRefusal(pointer.spec, ops, (p) => { try { return readFileSync(opAbs(p), "utf8"); } catch { return null; } });
+    if (omissionReason) {
+      verdict = "UNFAVORABLE";
+      console.log(`[feature-compose] omitted-edits floor: WITHHELD FAVORABLE - ${omissionReason}`);
+    }
+  }
+
   // AUTONOMY SCOPE FLOOR (contained-self-development 1.3). The final authority on what an autonomous
   // compose touched: an undirected compose (an unknown trigger counts as autonomous) that applied an
   // op to a path the `autonomyScope` shape excludes (the lane core) is withheld and rolled back,
@@ -8868,7 +8904,7 @@ const earlyAttempt = await Promise.race([
     // What the next drafter reads as "Verify failure from prior attempt" (priorAttemptFeedbackBlock): this draft's
     // failure, never the log's first error or its tail, both of which can be red on the parent (verifyFailureReason).
     const firstTscError = verifyFailureReason(verify.find((v) => !v.ok));
-    const lessonClass = composeLessonClass(envClass, policyUnreadable, applied, verify, String(semantic_gate?.reason ?? ""), scopeWithheld);
+    const lessonClass = composeLessonClass(envClass, policyUnreadable, applied, verify, String(semantic_gate?.reason ?? omissionReason ?? ""), scopeWithheld);
     // A compose must never write to a CLOSED gap: the row was fixed or retired, and a rewrite there dropped
     // its top-level closed_reason (11:29, node 1). Re-checked on the fresh read too (it may close mid-compose).
     if (pointer.gap?.id && firstTscError && !gapClosedInStore) {
@@ -8934,6 +8970,7 @@ const earlyAttempt = await Promise.race([
       ?? ownReason
       ?? draftFailureReason(failedVerify)
       ?? semantic_gate?.reason
+      ?? omissionReason
       ?? policyUnreadable
       ?? verdict,
     );

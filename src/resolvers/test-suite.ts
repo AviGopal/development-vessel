@@ -311,7 +311,7 @@ export async function resolveTestSuite(pointer: Record<string, unknown>): Promis
   const baseRef = typeof pointer.base_ref === "string" && /^(HEAD|[0-9a-f]{7,40})$/.test(pointer.base_ref.trim())
     ? pointer.base_ref.trim()
     : "";
-  const bunRun = `env -i PATH="$PATH" HOME="$HOME" NODE_ENV=test TZ=UTC WORKSPACE_ROOT="$(mktemp -d)" timeout ${budgetSec} bun test${testFile ? " " + JSON.stringify("./" + testFile) : ""} --timeout ${perTestTimeoutMs}${testFilter} 2>&1 || true`;
+  const bunRun = `env -i PATH="$PATH" HOME="$HOME" NODE_ENV=test TZ=UTC WORKSPACE_ROOT="$(mktemp -d)" timeout ${budgetSec} bun test${testFile ? " " + shq("./" + testFile) : ""} --timeout ${perTestTimeoutMs}${testFilter} 2>&1 || true`;
   const command = baseRef
     ? `ROOT=${shq(preferredRoot)}; [ -d "$ROOT" ] || ROOT=${shq(fallbackRoot)}; ` +
       `git -C "$ROOT" worktree prune >/dev/null 2>&1; BW="$(mktemp -d /tmp/test-suite-base-XXXXXX)"; ` +

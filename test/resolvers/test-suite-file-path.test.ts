@@ -108,7 +108,7 @@ describe("test_suite — test_file is run as a path, not a bun filter", () => {
 
   test("[must-fail] a './'-prefixed test_file is accepted once, never doubled", async () => {
     const r = await run({ test_file: "./test/a/x.test.ts" });
-    expect(r.command).toContain(`bun test "./test/a/x.test.ts" --timeout`);
+    expect(r.command).toContain(`bun test './test/a/x.test.ts' --timeout`);
     expect(r.command).not.toContain("././");
     expect(r.body).toMatchObject({ ran: true, total: 1, test_file: "test/a/x.test.ts" });
   });

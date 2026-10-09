@@ -80,6 +80,7 @@ import { RUNTIME_ROOT, SUPER_REPO_ROOT, REPO_ROOT, loadFleetShapeVocabulary } fr
 import { mkdir as parkMkdir, writeFile as parkWriteFile, rename as parkRename, readFile as parkReadFile, unlink as parkUnlink } from "node:fs/promises";
 import { createHash as parkHash } from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
+import { posix as floorPosix } from "node:path";
 import { stampComposeProgress } from "../lib/compose-progress.js";
 import { bindDraftedAnchor, lineMatchesDrafted, renderControlBytes, renderWindowForDrafter } from "../control-bytes.js";
 
@@ -2864,6 +2865,37 @@ export function omittedExactEditsRefusal(spec: unknown, ops: ReadonlyArray<{ old
     return covered ? [] : [`EDIT ${i + 1}`];
   });
   return missing.length > 0 ? `the plan omits ${missing.join(", ")} of the ${parsed.edits.length} exact edits the spec enumerates (${ops.length} op(s) planned)` : null;
+}
+
+// AUTONOMY FLOOR INPUT. The floor must judge every path the cutover will stage, and that is
+// `[...created, ...edited]`, not the applied ops alone: fc-repair's replace_lines and old_string fixes
+// record their writes in `edited` only, so an undirected repair edit to an excluded importer passed
+// the floor and landed (write-containment admits it because it relies on this floor). The applied
+// ops' paths go through as they are; every absolute edited/created path is mapped back to
+// `repos/<vessel>/<rel>` the way the rest of the compose does (ws.rel, else under repoRoot) and
+// normalised, so a model-supplied `..` cannot step around an entry. A path that does not land
+// inside exactly one vessel is returned as unmapped, and the caller withholds (fail closed).
+export function autonomyFloorPaths(
+  applied: ReadonlyArray<{ ok: boolean; path: string }>,
+  edited: ReadonlyArray<string>,
+  created: ReadonlyArray<string>,
+  ws?: Pick<ComposeWorkspace, "rel">,
+  repoRoot: string = REPO_ROOT,
+): { paths: string[]; unmapped: Array<{ path: string; reason: string }> } {
+  const paths = applied.filter((a) => a.ok).map((a) => a.path);
+  const unmapped: Array<{ path: string; reason: string }> = [];
+  for (const abs of [...edited, ...created]) {
+    const rel = ws?.rel(abs) ?? (abs.startsWith(`${repoRoot}/`) ? abs.slice(repoRoot.length + 1) : undefined);
+    if (rel === undefined) { unmapped.push({ path: abs, reason: `outside every compose worktree and ${repoRoot}` }); continue; }
+    const norm = floorPosix.normalize(rel);
+    const vessel = norm.split("/")[0] ?? "";
+    if (norm.startsWith("/") || vessel === "" || vessel === "." || vessel === ".." || !norm.includes("/")) {
+      unmapped.push({ path: abs, reason: `does not resolve to a file inside one vessel (${norm})` });
+      continue;
+    }
+    paths.push(`repos/${norm}`);
+  }
+  return { paths: [...new Set(paths)], unmapped };
 }
 
 // Apply parsed exact edits in order; null unless every old text occurs exactly once at its
@@ -8129,10 +8161,16 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
   if (verdict === "FAVORABLE" && (pointer as { directed?: boolean }).directed !== true) {
     try {
       const { autonomyScope, autonomyScopeFloor } = await import("./gap-to-feature.js");
+      // Every path the cutover will stage, repair edits included (autonomyFloorPaths); one it cannot map fails closed.
+      const floorInput = autonomyFloorPaths(applied, edited, created, ws);
       // The gap's row lets a tightening hold pass the repair of its own regression (gapInHoldLineage).
-      const floor = autonomyScopeFloor(await autonomyScope(), applied.filter((a) => a.ok).map((a) => a.path), (pointer.gap ?? null) as Record<string, unknown> | null);
+      const floor = autonomyScopeFloor(await autonomyScope(), floorInput.paths, (pointer.gap ?? null) as Record<string, unknown> | null);
       const scopeHits = floor.hits;
-      if (scopeHits.length > 0) {
+      if (floorInput.unmapped.length > 0) {
+        verdict = "UNFAVORABLE";
+        scopeWithheld = true;
+        console.log(`[feature-compose] autonomy-scope floor: WITHHELD FAVORABLE - unmappable written path(s), failing closed: ${floorInput.unmapped.map((u) => `${u.path} (${u.reason})`).join(", ")}${scopeHits.length > 0 ? `; excluded path(s) also hit: ${scopeHits.join(", ")}` : ""}`);
+      } else if (scopeHits.length > 0) {
         verdict = "UNFAVORABLE";
         if (floor.unreadable) {
           policyUnreadable = floor.unreadable;

@@ -112,12 +112,14 @@ export function checkSupplyCheckPath(gapId: string): string {
  * so a nested repos/<x>/ inside the worktree is not read as a vessel root. A one-segment form is not a worktree root.
  */
 const COMPOSE_WORKTREE_RE = /^\/workspace\/git\/compose\/[^/]+\/[^/]+\/(.+)$/;
+/** repos/<vessel>/ is a vessel root only at the start of a path (after any ./): one nested inside a runtime, clone or bare path is a directory of that vessel. */
+const REPOS_ROOT_RE = /^(?:\.\/)*repos\/[^/]+\/(.+)$/;
 
 /** A diff path in its vessel-relative form (after /workspace/git/compose/<id>/<vessel>/, repos/<vessel>/ or .../vessels/<vessel>/), or null for a '..' path. */
 function vesselRelativePath(path: string): string | null {
   const p = String(path ?? "").replace(/:\d+.*$/, "").trim().replace(/\\/g, "/");
   if (!p || p.split("/").includes("..")) return null;
-  return COMPOSE_WORKTREE_RE.exec(p)?.[1] ?? /(?:^|\/)repos\/[^/]+\/(.+)$/.exec(p)?.[1] ?? /\/vessels\/[^/]+\/(.+)$/.exec(p)?.[1] ?? p.replace(/^(?:\.\/)+/, "");
+  return COMPOSE_WORKTREE_RE.exec(p)?.[1] ?? REPOS_ROOT_RE.exec(p)?.[1] ?? /\/vessels\/[^/]+\/(.+)$/.exec(p)?.[1] ?? p.replace(/^(?:\.\/)+/, "");
 }
 
 /**
@@ -161,7 +163,7 @@ const IMPORTABLE_RE = /\.(?:[cm]?[jt]sx?)$/;
 export function vesselRelativeEditSite(editSite: unknown): string | null {
   if (typeof editSite !== "string" || !editSite.trim()) return null;
   const s = editSite.trim().replace(/:\d+.*$/, "").replace(/\\/g, "/");
-  return (COMPOSE_WORKTREE_RE.exec(s)?.[1] ?? /(?:^|\/)repos\/[^/]+\/(.+)$/.exec(s)?.[1] ?? /\/vessels\/[^/]+\/(.+)$/.exec(s)?.[1] ?? s.replace(/^(?:\.\/)+/, "")) || null;
+  return (COMPOSE_WORKTREE_RE.exec(s)?.[1] ?? REPOS_ROOT_RE.exec(s)?.[1] ?? /\/vessels\/[^/]+\/(.+)$/.exec(s)?.[1] ?? s.replace(/^(?:\.\/)+/, "")) || null;
 }
 export async function checkImportsEditSite(source: string, checkRel: string, editSite: unknown, srcExists: (rel: string) => boolean): Promise<EditSiteImport> {
   const { testImportsFile } = await import("./scope-earn-in.js");

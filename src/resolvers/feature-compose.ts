@@ -23,6 +23,7 @@
 import { METABOB_API_KEY, DISCOVERY_SHAPES } from "../config.js";
 import { withWriteGrant } from "./write-containment.js";
 import { superRepoCheckoutCall } from "./super-repo-checkout.js";
+import { planPathProblem } from "./vessel-paths.js";
 import { federatedLlmEgressUrls } from "./federated-llm-egress.js";
 import { acquireComposeWorkspace, type ComposeWorkspace } from "./compose-workspace";
 import type { ResolverResult } from "./types.js";
@@ -680,6 +681,24 @@ function parseJsonObject(raw: string): Json | null {
 function vesselDirOf(repoRelPath: string): string | null {
   const m = repoRelPath.match(/^repos\/([^/]+)\//);
   return m ? `repos/${m[1]}` : null;
+}
+
+/**
+ * The repair round's target (fc-repair's `fix.file` / `fix.path`, model output) as a repos/<vessel>/ path, or null. A
+ * vessel-relative target (the error window labels files src/...) resolves against the failing vessel, as before; the
+ * result must then pass the plan-path rule (planPathProblem), because it is joined onto a root and written like an op.
+ */
+export function repairTargetPath(ef: string, vessel: string): string | null {
+  if (!ef) return null;
+  const norm = !ef.startsWith("repos/") && !ef.startsWith("/") ? `repos/${vessel.replace(/^repos\//, "")}/${ef}` : ef;
+  return planPathProblem(norm) ? null : norm;
+}
+
+/** Why a planner's touched_vessels entry is not a plain vessel name, or null. These names reach shell commands too. */
+function touchedVesselProblem(t: unknown): string | null {
+  if (typeof t !== "string") return "a touched vessel must be a string";
+  const name = (vesselDirOf(t) ?? t).replace(/^repos\//, "");
+  return /^[A-Za-z0-9_.-]+$/.test(name) && name !== "." && !name.includes("..") ? null : "a touched vessel must be a plain vessel name ([A-Za-z0-9_.-], no '..')";
 }
 
 // ───────────────────────────── SEMANTIC CUTOVER-VERIFICATION GATE ─────────────────────────────
@@ -6111,6 +6130,7 @@ grounding += `\n\nCOMPOSED CHANGE:\n${composedChange}`;
   const exactOps: PlanOp[] | null = (() => {
     const parsed = parseExactEditBlocks(typeof pointer.spec === "string" ? pointer.spec : "");
     if (!parsed) return null;
+    if (planPathProblem(parsed.path)) return null;
     let cur = "";
     try { cur = readFileSync(opAbs(parsed.path), "utf8"); } catch { return null; }
     if (spliceExactEdits(cur, parsed.edits) === null) return null;
@@ -6205,6 +6225,23 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
 
   // Set when the anchor re-draft's reply does not parse: plan is then null with the earlier ops kept,
   // and the no-ops exit below must say so rather than report a bare "plan had no ops".
+  // THE PLAN-PATH CHOKE POINT. An op path is model output, joined onto a vessel root and handed to the tools shell (bash -c)
+  // below. Every op path, and every touched_vessels name, passes planPathProblem / touchedVesselProblem here, before the
+  // first op is applied and before any path is joined onto a root; one violation refuses the whole plan. The reason names
+  // the rule only: it reaches the drafter as a lesson and the journal, and must never carry the value.
+  const unsafeOpPathRefusal = async (candidate: Json | null, candidateOps: unknown): Promise<ResolverResult | null> => {
+    const why = (Array.isArray(candidateOps) ? candidateOps : []).map((o) => planPathProblem((o as PlanOp | null)?.path)).find((w) => w !== null)
+      ?? (Array.isArray(candidate?.touched_vessels) ? (candidate!.touched_vessels as unknown[]) : []).map(touchedVesselProblem).find((w) => w !== null)
+      ?? null;
+    if (!why) return null;
+    console.log(`[fc-unsafe-op-path] plan REFUSED before any op was applied: ${why}`);
+    await appendComposeLesson("unsafe_op_path", `plan refused before apply: ${why}`, "", pointer.gap).catch(() => undefined);
+    return { shape: "featureComposeReport", body: { ok: false, verdict: "REFUSED", stage: "unsafe_op_path", error: `plan refused before any op was applied: ${why}` } };
+  };
+  {
+    const refused = await unsafeOpPathRefusal(plan, ops);
+    if (refused) return refused;
+  }
   let redraftUnparseable = false;
   try {
     const window = typeof grounding === "string" ? grounding : "";
@@ -6241,6 +6278,10 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
       }
     }
   } catch { /* proceed on error */ }
+  {
+    const refused = await unsafeOpPathRefusal(plan, ops);
+    if (refused) return refused;
+  }
   // DIAGNOSTIC (localizer): the decompose plan is otherwise unlogged, so a mis-localized
   // edit (e.g. onto a dead top-level function) is invisible. Log, per op, the target path
   // and the old_string prefix, plus whether the GROUNDING the drafter saw even contained
@@ -6909,6 +6950,9 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
   // (addresses:false) and the existing re-draft path fixes the missed sites.
   const droppedSiblingSites: Array<{ path: string; anchor: string; residual: number }> = [];
   const applyOneOp = async (op: PlanOp): Promise<{ entry: (typeof applied)[number]; createdAbs?: string; editedAbs?: string; failed: boolean }> => {
+    // Second layer under the plan-acceptance choke point: no op path is joined onto a root without passing the rule.
+    const unsafe = planPathProblem(op.path);
+    if (unsafe) return { entry: { path: "(unsafe op path withheld)", kind: op.kind, ok: false, detail: `op refused: ${unsafe}` }, failed: true };
     const abs = opAbs(op.path);
     if (hasNoEffectLocks && (op.kind === "edit" || op.kind === "replace_lines")) {
       let base = preEditContent.get(abs);
@@ -8050,7 +8094,9 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
           : typeof fix?.path === "string" ? String(fix.path) : "";
         // The window labels files vessel-relative (src/...); resolve such a path against the failing
         // vessel, or opAbs treats its first segment as a vessel name and the write goes nowhere.
-        const efNorm = ef && !ef.startsWith("repos/") && !ef.startsWith("/") ? `repos/${fv.vessel.replace(/^repos\//, "")}/${ef}` : ef;
+        // Through the plan-path rule (repairTargetPath): a target that fails it is not written, and is not echoed.
+        const efNorm = repairTargetPath(ef, fv.vessel) ?? "";
+        if (ef && !efNorm) console.warn(`[fc-repair] repair target refused: it does not pass the plan-path rule (planPathProblem)`);
         const efAbs = efNorm ? opAbs(efNorm) : "";
 
         // LINE-ADDRESSED REPAIR WITH A SYSTEM-DERIVED ANCHOR.

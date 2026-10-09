@@ -19,6 +19,7 @@
  * retry it then reads the previous attempt's dispatch id). The marked path re-reads, bounded, before refusing.
  */
 import { CHECK_SUPPLY_DISPOSITION, isAwaitingLandVerification, isParkingDisposition } from "./gap-to-feature.js";
+import { planPathProblem, underVesselRoot, vesselRelativePath } from "./vessel-paths.js";
 
 /** The compose mode an admitted supply compose runs in: read by the R3 diff gates and the verify's check judgement (B′). */
 export const CHECK_SUPPLY_COMPOSE_MODE = "test_writing";
@@ -106,39 +107,7 @@ export function checkSupplyCheckPath(gapId: string): string {
   return `test/checks/${checkSupplyCheckFile(gapId)}`;
 }
 
-/**
- * THE VESSEL ROOTS a written or planned path can carry, each ANCHORED at the path start, so a repos/, vessels/ or compose
- * directory nested anywhere inside a path is a directory of that vessel, never a root. They are the roots the producers use:
- *   - /workspace/git/compose/<compose-id>/<vessel>/: an isolated compose's worktree (compose-workspace.ts
- *     acquireComposeWorkspace: WS_ROOT/<id>/<vessel>, exactly two single segments; a one-segment form is not a root);
- *   - /workspace/git/vessels/<vessel>/: the push clones (MITOSIS_PUSH_CLONE_DIR);
- *   - /vessels/<vessel>/: the runtime root (RUNTIME_ROOT; opAbs writes there when a compose is not isolated);
- *   - repos/<vessel>/ after any ./: a planner op path, and every edit site gap-check-supply writes.
- */
-const VESSEL_ROOTS: readonly RegExp[] = [
-  /^\/workspace\/git\/compose\/[^/]+\/[^/]+\/(.+)$/,
-  /^\/workspace\/git\/vessels\/[^/]+\/(.+)$/,
-  /^\/vessels\/[^/]+\/(.+)$/,
-  /^(?:\.\/)*repos\/[^/]+\/(.+)$/,
-];
-function underVesselRoot(p: string): string | undefined {
-  for (const re of VESSEL_ROOTS) { const m = re.exec(p); if (m) return m[1]; }
-  return undefined;
-}
-/**
- * A path under no root is taken as vessel-relative only when it starts (after any ./) with test/ or src/: the two
- * vessel-relative trees the gates name (the check's test/checks/<file>, and the src/ an edit site lives in). No producer
- * emits a bare path; the bare and ./ forms are the existing controls. Anything else resolves to nothing (refused).
- */
-const VESSEL_RELATIVE_TOP_RE = /^(?:test|src)\//;
-
-/** A diff path in its vessel-relative form (under one of VESSEL_ROOTS, or a bare test/ or src/ path), or null: a '..' path, or a path under no root. */
-function vesselRelativePath(path: string): string | null {
-  const p = String(path ?? "").replace(/:\d+.*$/, "").trim().replace(/\\/g, "/");
-  if (!p || p.split("/").includes("..")) return null;
-  const bare = p.replace(/^(?:\.\/)+/, "");
-  return underVesselRoot(p) ?? (VESSEL_RELATIVE_TOP_RE.test(bare) ? bare : null);
-}
+export { planPathProblem, vesselRelativePath };
 
 /**
  * A TEST-WRITING COMPOSE LANDS ITS ONE CHECK FILE ONLY (slice G revision R3, narrowed by B′ P1). An admitted

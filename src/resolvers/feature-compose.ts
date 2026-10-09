@@ -37,6 +37,40 @@ import { vacuousEditReason, nonTerminatingEditReason, deadStoreEditReason, trunc
 import { acquireComposeSlot } from "../compose-slots.js";
 import { activeMustBeCalled, checkMustBeCalled, constraintRefusalEvidence, introducesDefinition, mustBeCalledFromGate, mustBeCalledReason, mustBeCalledRefusalRecord, constraintParkLine, type ConstraintLift, type MustBeCalledConstraint, attemptEvidenceBlock, baseSpanOfOp, checkOpNoEffect, enforcedLessons, escalateRepeatedRefusal, refusalJournalLine, repeatedRefusalRegion, type RefusalRecord, explicitLineHint, hydrateComposeGap, lineCenteredSlice, noEffectOverlapRefusal, noEffectSpans, parentCheckBlock, parseOwnCheckFailures, sameOwnCheckFailures, spanRecord, testTitleSegmentOffset, typecheckSection, type AttemptRecord, type EditedSpan, type FailStage, type GapRowReader, type OwnCheckFailure } from "./retry-evidence.js";
 
+/**
+ * The blind-edit repair's anchor decision. Pure: the caller's fs_edit is the only effect.
+ *
+ * The plan's anchor already FAILED to match, so the anchor written is the model's re-derived
+ * one, and only when it occurs EXACTLY ONCE, verbatim, in the live file. Anything else is
+ * refused by name and never shortened: a truncated prefix can cut a statement in half and
+ * then receive a new_string written for the whole statement, which is the wrong-site
+ * corruption the plan's-anchor override was added against. That override checked the
+ * failed anchor instead, so every repair was refused (anchor_not_from_window).
+ */
+export function blindRepairEdit(
+  live: string,
+  fix: { readonly old_string?: unknown; readonly new_string?: unknown },
+  plannedNewString: string,
+): { old_string: string; new_string: string } | { refused: string; detail: string } {
+  const anchor = String(fix.old_string ?? "");
+  const replacement = String(fix.new_string ?? plannedNewString);
+  const provenance = refuseRederivedEdit({
+    candidateAnchor: renderControlBytes(anchor).text,
+    replacement,
+    window: renderControlBytes(live).text,
+    moduleText: live,
+  });
+  if (provenance) return { refused: provenance.kind, detail: provenance.detail };
+  const bound = bindDraftedAnchor(live, anchor);
+  if ("refused" in bound) return { refused: bound.refused, detail: bound.detail };
+  const hits = bound.anchor ? live.split(bound.anchor).length - 1 : 0;
+  if (hits !== 1) {
+    const refused = hits === 0 ? "repair_anchor_absent" : "repair_anchor_non_unique";
+    return { refused, detail: `${refused}: the re-derived anchor occurs ${hits}x in the live file, not exactly once — ${JSON.stringify(anchor.slice(0, 120))}` };
+  }
+  return { old_string: bound.anchor, new_string: replacement };
+}
+
 export function assertAnchorInWindow(window: string, ops: ReadonlyArray<{ kind?: string; path?: string; old_string?: string }>): Array<{ path: string; oldHead: string; wouldMatchWithoutTrailingSemicolon: boolean }> {
   const missing: Array<{ path: string; oldHead: string; wouldMatchWithoutTrailingSemicolon: boolean }> = [];
   for (const op of ops) {
@@ -7427,33 +7461,17 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
               model,
             ));
             if (fix?.old_string) {
-              // Same two questions as the windowed re-derivation above, and this
-              // path needs them more: it applies the returned anchor with no
-              // uniqueness test at all. `live` is both the window the model was
-              // shown and the module being written, so it serves as both inputs.
-              // Fails open.
-              let cand = String(fix.old_string);
-              while (cand.length > 12 && live.split(cand).length - 1 !== 1) cand = cand.slice(0, -1);
-              if (live.split(cand).length - 1 === 1) fix.old_string = cand;
-                // Retain the original old_string from the op (plan-time knowledge of intent),
-              // as the blind-edit repair has already performed its best-effort re-derivation.
-              // Discarding `fix.old_string` here prevents mislocalization due to partial matches.
-              // The `cand` re-derivation above, if it happens, would truncate. Skip it.
-              fix.old_string = op.old_string; // preserve the plan's anchor after blind-edit repair
-
-              const fixRefusal = refuseRederivedEdit({
-                candidateAnchor: renderControlBytes(String(fix.old_string)).text,
-                replacement: String(fix.new_string ?? op.new_string ?? ""),
-                window: renderControlBytes(live).text,
-                moduleText: live,
-              });
-              if (fixRefusal) {
-                console.warn(`[fc-anchor-provenance] REFUSED blind-edit repair to ${op.path}: ${fixRefusal.kind} — ${fixRefusal.detail}`);
+              // Same two questions as the windowed re-derivation above, plus a
+              // uniqueness test: blindRepairEdit (top of module) applies the model's
+              // anchor only when it occurs exactly once, verbatim, in `live`, and
+              // refuses it by name otherwise (fails closed, never truncates). `live`
+              // is both the window the model was shown and the module being written.
+              const pick = blindRepairEdit(live, fix, op.new_string ?? "");
+              if ("refused" in pick) {
+                if (pick.refused === "ambiguous_control_byte_anchor") r = { ok: false, body: { error: pick.detail } as Json };
+                else console.warn(`[fc-anchor-provenance] REFUSED blind-edit repair to ${op.path}: ${pick.refused} — ${pick.detail}`);
               } else {
-                const boundFix = bindDraftedAnchor(live, String(fix.old_string));
-                r = "refused" in boundFix
-                  ? { ok: false, body: { error: boundFix.detail } as Json }
-                  : await callTool(toolsEndpoint, "fs_edit", { path: abs, old_string: boundFix.anchor, new_string: String(fix.new_string ?? op.new_string ?? "") });
+                r = await callTool(toolsEndpoint, "fs_edit", { path: abs, old_string: pick.old_string, new_string: pick.new_string });
                 repaired = r.ok;
               }
             }

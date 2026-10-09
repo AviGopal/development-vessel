@@ -164,16 +164,21 @@ export async function deleteParkedLanding(gapId: string): Promise<void> {
  * cut over. Returns null when the park is stale or fails typecheck - the park is then
  * dropped with a `park_stale` lesson and the caller drafts normally.
  */
-async function resumeParkedLanding(pointer: FeatureComposePointer, park: ParkedLanding, toolsEndpoint: string): Promise<ResolverResult | null> {
+export async function resumeParkedLanding(pointer: FeatureComposePointer, park: ParkedLanding, toolsEndpoint: string): Promise<ResolverResult | null> {
   const gapId = park.gap_id;
   const cloneRoot = process.env["MITOSIS_PUSH_CLONE_DIR"] ?? "/workspace/git/vessels";
   for (const f of park.files) {
-    if (f.base_content === null) continue;
+    // A null base means "absent when parked" only if it is still absent. An un-isolated compose parks
+    // null for a file that exists (it takes no pre-sync snapshot), and the cutover below would then
+    // be handed hash(content) as its base, which no commit holds, so its stale-base guard reads it as
+    // a staging artefact and the whole-file copy lands over any commit made since. A file present in
+    // the clone with no recorded base cannot be shown fresh: treat the park as stale and redraft.
     const current = await parkReadFile(`${cloneRoot}/${park.vessel}/${f.path}`, "utf-8").catch(() => null);
     if (current !== f.base_content) {
       await deleteParkedLanding(gapId);
-      await appendComposeLesson("park_stale", `parked diff for ${f.path} no longer applies: base moved since ${park.parked_at}`, park.vessel, pointer.gap);
-      console.log(`[feature-compose] park_stale for ${gapId} - base moved, redrafting`);
+      const why = f.base_content === null ? "no base was recorded and the file exists in the clone" : `base moved since ${park.parked_at}`;
+      await appendComposeLesson("park_stale", `parked diff for ${f.path} no longer applies: ${why}`, park.vessel, pointer.gap);
+      console.log(`[feature-compose] park_stale for ${gapId} - ${why}, redrafting`);
       return null;
     }
   }

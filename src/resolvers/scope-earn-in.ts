@@ -107,6 +107,10 @@ export const EVALUATOR_FILES: readonly string[] = [
   // The supply test-writing admission ledger check and the R3 path rule (b3bddb41), on feature-compose's verdict path;
   // REPORT_ONLY so the closure scan never flags it, and it must never be earned out of scope (10-08).
   "repos/development-vessel/src/resolvers/check-supply-admission.ts",
+  // Leaf helpers on that verdict path: the plan-path rule check-supply-admission and feature-compose import, and the shq
+  // quoting every shell value feature-compose builds goes through (10-08).
+  "repos/development-vessel/src/resolvers/vessel-paths.ts",
+  "repos/development-vessel/src/resolvers/shell-quote.ts",
 ];
 export const EVALUATOR_FILE_REASON = "refused: the path is one of the evaluator's own files (EVALUATOR_FILES)";
 /**
@@ -168,6 +172,8 @@ export const SCOPE_CLASSIFICATION: Readonly<Record<string, ScopeClass>> = {
   "repos/development-vessel/test/helpers/ungated-rows-source.ts": { class: "judge_trust", reason: "evaluator file: the test fixture that declares the ungated rows path for the self-fact judge tests" },
   "repos/development-vessel/src/lib/evaluator-tree.ts": { class: "judge_trust", reason: "evaluator file: the shared evaluator tree the class-1 classifier and verifyGapCondition read through (verdict)" },
   "repos/development-vessel/src/resolvers/check-supply-admission.ts": { class: "judge_trust", reason: "evaluator file: the supply test-writing admission ledger check and R3 path rule on feature-compose's verdict path (verdict)" },
+  "repos/development-vessel/src/resolvers/vessel-paths.ts": { class: "judge_trust", reason: "evaluator file: the vessel path forms and plan-path rule check-supply-admission and feature-compose read (verdict)" },
+  "repos/development-vessel/src/resolvers/shell-quote.ts": { class: "judge_trust", reason: "evaluator file: the shell quoting every value in feature-compose's shell commands goes through (verdict)" },
   "repos/development-vessel/test/resolvers/scope-earn-in.test.ts": { class: "judge_trust", reason: "evaluator file: the criterion's tests (judge)" },
   "repos/development-vessel/test/resolvers/evaluator-grant-scan.test.ts": { class: "judge_trust", reason: "evaluator file: pins the evaluator grant (judge)" },
   "repos/development-vessel/test/resolvers/scope-change-pin.test.ts": { class: "judge_trust", reason: "evaluator file: pins what the scope judge accepts (judge)" },

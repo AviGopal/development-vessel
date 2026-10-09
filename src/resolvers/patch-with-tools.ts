@@ -35,6 +35,7 @@ import { vacuousEditReason } from "../vacuous-edit.js";
 import { resolveVesselMitosisCutover, asSemanticDissentStamp, type SemanticDissentStamp } from "./vessel-mitosis-cutover.js";
 import { staticEvaluate } from "./vessel-mitosis-evaluate.js";
 import { noProgressStreak } from "./no-progress-streak.js";
+import { readOperatorHold, classifyVesselsRoot } from "../lib/operator-hold.js";
 
 const DISCOVERY_ENDPOINT = env("DISCOVERY_ENDPOINT", "http://127.0.0.1:8100");
 // Federation-transport egress (dev-vessel has no libp2p deps). Mirrors feature-compose /
@@ -614,9 +615,35 @@ export async function clearAuthoringMarker(markerPath: string | null): Promise<v
   }
 }
 
+/** The operator hold on this resolver's live-tree writes, and the scope its record must carry. */
+export const LIVE_TREE_HOLD_ID = "pwt-live-tree-writes";
+export const LIVE_TREE_HOLD_SCOPE = "patch_with_tools:live_tree_writes";
+
 export async function resolvePatchWithTools(pointer: PatchWithToolsPointer): Promise<ResolverResult> {
   const workspaceRoot = pointer.workspace_root ?? process.env.WORKSPACE_ROOT ?? "/workspace";
   const vesselsRoot = pointer.vessels_root ?? "/vessels";
+  // LIVE-TREE WRITES ARE HELD (operatorHold pwt-live-tree-writes). This resolver edits the tree it is
+  // pointed at in place, and on /vessels that is the RUNNING code: edited code ran in production twice
+  // (pull-sync reads authoring markers from a directory this resolver no longer writes to, so it restarted
+  // vessels mid-edit). Checked FIRST, before the authoring marker, any snapshot and any tool call, so a held
+  // run touches nothing. Every caller (apply_proposal_as_patch, gap-to-feature's apply-failure escalation,
+  // goal-host's edit-intent escalation, a direct resolve) ends here, so this one reader covers them all.
+  // A compose worktree or a test sandbox is not a live tree and is not held (lib/operator-hold.ts).
+  {
+    const root = classifyVesselsRoot(vesselsRoot);
+    if (root.kind === "live") {
+      const hold = readOperatorHold(LIVE_TREE_HOLD_ID, { scope: LIVE_TREE_HOLD_SCOPE });
+      if (hold.held) {
+        const reason = typeof (hold.record?.body as { reason?: unknown } | undefined)?.reason === "string"
+          ? String((hold.record!.body as { reason: string }).reason)
+          : "patch_with_tools writes to live vessel trees are held until an operator-attested lift";
+        return structuredError(`live-tree writes held: ${root.real} (${hold.why})`, {
+          stage: "live_tree_writes_held", verdict: "REFUSED", hold_id: LIVE_TREE_HOLD_ID, why: hold.why, reason,
+          vessels_root: root.real, target_file: pointer.target_file,
+        });
+      }
+    }
+  }
   const maxIters = pointer.max_iterations ?? MAX_ITERATIONS;
   const model = pointer.model ?? "auto";
   // fallbackModels (the outer model-failover list) is DERIVED from the live policy arms

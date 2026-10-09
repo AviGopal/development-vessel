@@ -23,6 +23,8 @@
 //   deployed:false WITHOUT restarting.
 // - dry_run is TRULY read-only: it mutates nothing (no fetch/reset/mirror/restart).
 
+import { shq } from "./shell-quote.js";
+
 interface PullCutoverPointer {
   type: "pull_cutover";
   vessel_name: string;
@@ -109,10 +111,15 @@ export async function resolvePullCutover(pointer: PullCutoverPointer): Promise<{
       restarted: false, healthy: true, reverted: false, dry_run, ...v,
     },
   });
+  // A caller-supplied name: it becomes directory paths, a unit name and shell arguments below, so it must be a plain
+  // vessel name before anything is run. The note names the rule, not the value.
+  if (typeof vessel_name !== "string" || !/^[A-Za-z0-9_.-]+$/.test(vessel_name) || vessel_name === "." || vessel_name.includes("..")) {
+    return base({ valid: false, note: "vessel_name must be a plain vessel name ([A-Za-z0-9_.-], no '..'); refusing cutover" });
+  }
 
   if (vessel_name === "human-surface-vessel") {
     const releaseDir = "/workspace/git/human-surface-release";
-    const haveRelease = (await sh(["bash", "-lc", `[ -d "${releaseDir}" ] && echo y || echo n`])).out === "y";
+    const haveRelease = (await sh(["bash", "-lc", `[ -d ${shq(releaseDir)} ] && echo y || echo n`])).out === "y";
     if (!haveRelease) {
       return base({ valid: false, note: `human-surface-vessel release checkout not found at ${releaseDir}` });
     }
@@ -168,9 +175,9 @@ export async function resolvePullCutover(pointer: PullCutoverPointer): Promise<{
     // If the configured inventory is missing or empty (VESSELS_INVENTORY unset to a stale path),
     // allow a bounded cutover when we already have a local runtime we can converge.
     if (allowed.size === 0) {
-      const haveClone = (await sh(["bash", "-lc", `[ -d "${cloneDir}" ] && echo y || echo n`])).out === "y";
+      const haveClone = (await sh(["bash", "-lc", `[ -d ${shq(cloneDir)} ] && echo y || echo n`])).out === "y";
       const releaseDir = `/workspace/git/${vessel_name.replace(/-vessel$/, "")}-release`;
-      const haveRelease = (await sh(["bash", "-lc", `[ -d "${releaseDir}" ] && echo y || echo n`])).out === "y";
+      const haveRelease = (await sh(["bash", "-lc", `[ -d ${shq(releaseDir)} ] && echo y || echo n`])).out === "y";
       bounded = haveClone || haveRelease;
     }
   }

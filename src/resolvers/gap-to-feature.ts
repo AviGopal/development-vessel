@@ -33,6 +33,7 @@ import { gateLanding, landingsStopped } from "./push-policy.js";
 import { readFile } from "node:fs/promises";
 import { selfAuthHeaders } from "../lib/self-auth.js";
 import { evaluatorTreeRoot, evaluatorTreePath } from "../lib/evaluator-tree.js";
+import { readOperatorHold } from "../lib/operator-hold.js";
 
 // Mirror feature-compose's path model: repos/<vessel>/... maps to the writable
 // runtime ${MITOSIS_RUNTIME_DIR}/<vessel>/..., and the drafter writes proposal reports
@@ -4927,12 +4928,16 @@ export function isInfraRefusalBody(cb: Record<string, unknown> | null | undefine
  * semantic/verify rejects); any error or non-land falls through to bumpFailedAttempts unchanged. NB
  * classification_metadata is an OBJECT (property access, not .includes/.push).
  *
- * A HELD ESCALATION IS NOT GRADED. When pwt refuses at entry as an infrastructure refusal (isInfraRefusalBody:
- * the operator hold on live-tree writes, stage live_tree_writes_held), no draft ran: the outcome changes neither
- * failed_attempts nor the class posterior. The consumed one-shot is persisted with a pwt_escalation_held stamp
- * instead, because the bump is what used to carry the metadata to the store; without that write the next tick
- * would escalate again, be held again and never be graded, at one compose per tick. Consequence: a gap held
- * here does not re-escalate after the hold lifts until an operator clears pwt_escalated.
+ * A HELD ESCALATION IS NOT GRADED, AND IS NOT AN ATTEMPT. When pwt refuses at entry as an infrastructure refusal
+ * (isInfraRefusalBody: the operator hold on live-tree writes, stage live_tree_writes_held), no draft ran: the
+ * outcome changes neither failed_attempts nor the class posterior, and it does NOT consume the one-shot
+ * (pwt_escalated stays unset, so the lift needs no cleanup). Only a pwt_escalation_held {hold_id, at, stage, why}
+ * stamp is written to the stored row.
+ * RATE LIMIT BY THE STAMP. Without one, every tick would escalate again, be held again and never be graded, so the
+ * gap would never accrue failed_attempts. So while the stamp names a hold that readOperatorHold still reads held,
+ * the escalation is SKIPPED: pwt is not called, and the compose's own apply failure is graded exactly as it is with
+ * no escalation (posterior + bump). Only the held refusal itself goes ungraded, once. Once the hold lifts, the next
+ * apply failure escalates for real.
  *
  * Exported with injectable deps for the grading tests; the call site passes none.
  */
@@ -4942,6 +4947,8 @@ export interface PwtEscalationDeps {
   bumpFailedAttempts: (gap: Record<string, unknown>, opts: { surprise?: boolean; predictedP?: number }) => Promise<void>;
   closeLandedGap: (gap: Record<string, unknown>, land: LandSignal) => Promise<{ closed: boolean; error?: string }>;
   persistGapMeta: (gap: Record<string, unknown>, patch: Record<string, unknown>) => Promise<void>;
+  /** Whether the hold a pwt_escalation_held stamp names still reads held (lib/operator-hold.ts readOperatorHold). */
+  holdStillHeld: (holdId: string) => boolean;
 }
 /** Merge `patch` into the STORED row's classification_metadata (bumpFailedAttempts' build-on-the-stored-row rule). */
 async function persistGapMetaPatch(gap: Record<string, unknown>, patch: Record<string, unknown>): Promise<void> {
@@ -4963,6 +4970,7 @@ const defaultPwtEscalationDeps = (): PwtEscalationDeps => ({
   bumpFailedAttempts,
   closeLandedGap,
   persistGapMeta: persistGapMetaPatch,
+  holdStillHeld: (holdId) => readOperatorHold(holdId).held,
 });
 export async function escalateApplyFailureToPwt(
   gap: Record<string, unknown>,
@@ -4970,12 +4978,19 @@ export async function escalateApplyFailureToPwt(
   spec: string,
   pred: { predicted: boolean; p: number },
   deps: PwtEscalationDeps = defaultPwtEscalationDeps(),
-): Promise<{ escalated: boolean; landed: boolean; held: boolean }> {
+): Promise<{ escalated: boolean; landed: boolean; held: boolean; skipped_held: boolean }> {
   const _gm = ((gap as { classification_metadata?: Record<string, unknown> }).classification_metadata ??= {});
   let _pwtLanded = false;
   let escalated = false;
   let held = false;
-  if (cb.apply_failed && !_gm.pwt_escalated) {
+  const priorHold = (_gm.pwt_escalation_held && typeof _gm.pwt_escalation_held === "object") ? _gm.pwt_escalation_held as Record<string, unknown> : null;
+  const priorHoldId = typeof priorHold?.hold_id === "string" && priorHold.hold_id ? priorHold.hold_id : null;
+  let stillHeld = false;
+  if (cb.apply_failed && !_gm.pwt_escalated && priorHoldId) {
+    try { stillHeld = deps.holdStillHeld(priorHoldId); } catch { stillHeld = true; }
+    if (stillHeld) console.log(`[gap-to-feature] pwt escalation for ${String(gap.id)} SKIPPED: hold ${priorHoldId} (stamped ${String(priorHold?.at ?? "-")}) still held — grading the compose failure as with no escalation`);
+  }
+  if (cb.apply_failed && !_gm.pwt_escalated && !stillHeld) {
     _gm.pwt_escalated = true; // one-shot BEFORE the attempt: a crash/retry can never re-escalate
     escalated = true;
     try {
@@ -4999,9 +5014,11 @@ export async function escalateApplyFailureToPwt(
       const rb = (((result as unknown as Record<string, unknown>)?.body ?? result ?? {}) as Record<string, unknown>);
       if (isInfraRefusalBody(rb)) {
         held = true;
+        delete _gm.pwt_escalated; // a held refusal is not an attempt: the one-shot is not consumed
         const stamp = { at: new Date().toISOString(), stage: String(rb.stage ?? ""), hold_id: rb.hold_id ?? null, why: String(rb.why ?? rb.detail ?? "").slice(0, 300) };
         console.log(`[gap-to-feature] pwt escalation for ${String(gap.id)} NOT RUN (${stamp.stage}${stamp.hold_id ? ` ${String(stamp.hold_id)}` : ""}: ${stamp.why}) — no failed_attempts bump, no class-posterior beta`);
-        try { await deps.persistGapMeta(gap, { pwt_escalated: true, pwt_escalation_held: stamp }); }
+        _gm.pwt_escalation_held = stamp;
+        try { await deps.persistGapMeta(gap, { pwt_escalation_held: stamp }); }
         catch (e) { console.warn("[gap-to-feature] pwt escalation hold stamp not written: " + (e as Error).message); }
       } else {
         const _land = (rb.landing ?? {}) as Record<string, unknown>;
@@ -5020,7 +5037,7 @@ export async function escalateApplyFailureToPwt(
     if (!isInfraRefusalBody(cb)) deps.updateClassPosterior(gapClassOf(gap), false);
     await deps.bumpFailedAttempts(gap, { surprise: pred.predicted, predictedP: pred.p });
   }
-  return { escalated, landed: _pwtLanded, held };
+  return { escalated, landed: _pwtLanded, held, skipped_held: stillHeld };
 }
 const closeOracleCalibPath = (): string => process.env["CLOSE_ORACLE_CALIB_PATH"] ?? "/workspace/close-oracle-calibration.json";
 type CloseOracleCalib = Record<string, { closes: number; false_closes: number; operator_engaged?: number }>;

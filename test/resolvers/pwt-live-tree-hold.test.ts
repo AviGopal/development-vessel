@@ -260,7 +260,7 @@ describe("t5: a held refusal through the gap-to-feature grading path", () => {
     expect(g2f.isInfraRefusalBody({ stage: "live_tree_writes_held", verdict: "REFUSED" })).toBe(true);
   });
 
-  it("changes neither failed_attempts nor the class posterior, and consumes the one-shot durably", async () => {
+  it("changes neither failed_attempts nor the class posterior; stamps pwt_escalation_held and does NOT consume the one-shot; escalates for real once lifted", async () => {
     const escalate = (g2f as Record<string, unknown>).escalateApplyFailureToPwt as undefined | ((...a: unknown[]) => Promise<Record<string, unknown>>);
     expect(typeof escalate).toBe("function");
     const posterior: Array<[string, boolean]> = [];
@@ -268,15 +268,26 @@ describe("t5: a held refusal through the gap-to-feature grading path", () => {
     const closes: unknown[] = [];
     const metaWrites: Array<Record<string, unknown>> = [];
     const pwtCalls: Array<Record<string, unknown>> = [];
-    const gap = { id: "demo-gap-1", category: "bug", source: "detector", summary: "s", classification_metadata: { edit_site: `repos/demo-vessel/${SUB}` } };
-    const out = await escalate!(gap, { ok: false, apply_failed: true, op_count: 1, rolled_back: true, verdict: "UNFAVORABLE" }, "make live() return 2", { predicted: false, p: 0.2 }, {
+    // The stored gap row: persistGapMeta merges into it, and each "tick" picks a fresh copy of it, as the picker does.
+    const row: Record<string, unknown> = { id: "demo-gap-1", category: "bug", source: "detector", summary: "s", status: "open", classification_metadata: { edit_site: `repos/demo-vessel/${SUB}` } };
+    const pick = (): Record<string, unknown> => JSON.parse(JSON.stringify(row));
+    const deps = {
       // The real resolver, pointed at the sandbox live tree (the call site passes MITOSIS_RUNTIME_DIR ?? /vessels).
-      resolvePwt: (p: Record<string, unknown>) => { pwtCalls.push(p); return resolvePatchWithTools({ ...p, vessels_root: live, workspace_root: ws } as never); },
+      resolvePwt: (p: Record<string, unknown>) => { pwtCalls.push(p); return resolvePatchWithTools({ ...p, vessels_root: live, workspace_root: ws, max_attempts: 1, max_iterations: 2 } as never); },
       updateClassPosterior: (cls: string, landed: boolean) => { posterior.push([cls, landed]); },
       bumpFailedAttempts: async (g: unknown) => { bumps.push(g); },
       closeLandedGap: async (g: unknown) => { closes.push(g); return { closed: true }; },
-      persistGapMeta: async (_g: unknown, patch: Record<string, unknown>) => { metaWrites.push(patch); },
-    });
+      persistGapMeta: async (_g: unknown, patch: Record<string, unknown>) => {
+        metaWrites.push(patch);
+        row.classification_metadata = { ...(row.classification_metadata as Record<string, unknown>), ...patch };
+      },
+      // holdStillHeld left to the real reader (readOperatorHold over the sandbox pool store).
+    };
+    const withRealHoldReader = { ...deps, holdStillHeld: (id: string) => (holdMod.readOperatorHold as (id: string) => { held: boolean })(id).held };
+    const applyFailure = { ok: false, apply_failed: true, op_count: 1, rolled_back: true, verdict: "UNFAVORABLE" };
+
+    // Tick 1 — hold record ABSENT: pwt is called, refuses at entry, and the refusal is not graded.
+    const out = await escalate!(pick(), applyFailure, "make live() return 2", { predicted: false, p: 0.2 }, withRealHoldReader);
     expect(pwtCalls.length).toBe(1);
     expect(out.held).toBe(true);
     expect(out.landed).toBe(false);
@@ -284,10 +295,37 @@ describe("t5: a held refusal through the gap-to-feature grading path", () => {
     expect(bumps).toEqual([]);
     expect(closes).toEqual([]);
     expect(metaWrites.length).toBe(1);
-    expect(metaWrites[0]!.pwt_escalated).toBe(true);
-    expect((metaWrites[0]!.pwt_escalation_held as Record<string, unknown>).hold_id).toBe(HOLD_ID);
+    const meta1 = row.classification_metadata as Record<string, unknown>;
+    expect(meta1.pwt_escalated).toBeUndefined();
+    expect((meta1.pwt_escalation_held as Record<string, unknown>).hold_id).toBe(HOLD_ID);
+    expect((meta1.pwt_escalation_held as Record<string, unknown>).stage).toBe("live_tree_writes_held");
+    expect(typeof (meta1.pwt_escalation_held as Record<string, unknown>).at).toBe("string");
     expect(calls.tools).toBe(0);
     expect(readdirSync(ws)).toEqual([]);
+
+    // Tick 2 — still held: the stamp rate-limits; pwt is NOT called, and the compose's apply failure is graded as
+    // it would be with no escalation (one posterior beta, one bump).
+    const out2 = await escalate!(pick(), applyFailure, "make live() return 2", { predicted: false, p: 0.2 }, withRealHoldReader);
+    expect(out2.skipped_held).toBe(true);
+    expect(pwtCalls.length).toBe(1);
+    expect(posterior.length).toBe(1);
+    expect(bumps.length).toBe(1);
+
+    // Tick 3 — the operator lifts the hold (attested active:false): the next apply failure ESCALATES for real and
+    // pwt reaches the (stubbed) tools.
+    expect(operatorWrite(holdBody({ active: false })).body.ok).toBe(true);
+    globalThis.fetch = stubFetch([
+      JSON.stringify({ action: "call_tool", tool: "code_search", args: { path: join(live, "demo-vessel", SUB), pattern: "return 1" } }),
+      JSON.stringify({ action: "fail", reason: "test script ends here" }),
+    ]);
+    const out3 = await escalate!(pick(), applyFailure, "make live() return 2", { predicted: false, p: 0.2 }, withRealHoldReader);
+    expect(out3.escalated).toBe(true);
+    expect(out3.held).toBe(false);
+    expect(out3.skipped_held).toBe(false);
+    expect(pwtCalls.length).toBe(2);
+    expect(calls.tools).toBeGreaterThan(0);
+    expect(calls.offOrigin).toEqual([]);
+    expect(readFileSync(join(live, "demo-vessel", SUB), "utf8")).toBe(ORIGINAL);
   });
 
   it("control: a genuine (non-held) pwt failure still bumps and still records the class posterior", async () => {
@@ -302,6 +340,7 @@ describe("t5: a held refusal through the gap-to-feature grading path", () => {
       bumpFailedAttempts: async (g: unknown) => { bumps.push(g); },
       closeLandedGap: async () => ({ closed: true }),
       persistGapMeta: async () => { /* not expected */ },
+      holdStillHeld: () => { throw new Error("not expected: no hold stamp on this gap"); },
     });
     expect(out.held).toBe(false);
     expect(posterior.length).toBe(1);

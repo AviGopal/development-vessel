@@ -1265,6 +1265,15 @@ async function attemptApplyOnce(pointer: ApplyProposalAsPatchPointer): Promise<R
     proposal_id: pointer.proposal_id ?? chosen.name.replace(/-report\.json$/, ""),
     ...(proposalDissent ? { semantic_dissent: proposalDissent } : {}),
   });
+  // HELD, NOT FAILED. patch_with_tools refused at entry under the operator hold on live-tree writes
+  // (lib/operator-hold.ts): no draft ran and nothing was touched. Returned before the .rejected/ record (the
+  // drafter's prior_failed_attempts reads it as a failed patch) and before the .applied/ mark (which would
+  // consume the proposal, so it could never apply once the hold lifts). The body names no proposal, so the
+  // bounded-retry loop stops here instead of trying the next one against the same hold.
+  if (result.shape === "structuredError" && (result.body as Record<string, unknown> | undefined)?.stage === "live_tree_writes_held") {
+    console.log(`[apply_proposal_as_patch] ${chosen.name} NOT applied: patch_with_tools live-tree writes are held (${String((result.body as Record<string, unknown>).why ?? "")}); proposal left unconsumed`);
+    return result;
+  }
   // Observability (operator-demo-apply-observability): log apply failures. Re-anchored AFTER the
   // call — the original landing mis-inserted this block inside the argument literal (syntax break).
   if (result.shape === "structuredError") {

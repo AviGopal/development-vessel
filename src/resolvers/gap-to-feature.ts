@@ -4914,7 +4914,113 @@ export function isInfraRefusalBody(cb: Record<string, unknown> | null | undefine
   if (!cb) return false;
   if (isNonAttemptComposeResult(cb)) return true;
   const stage = String(cb.stage ?? "");
-  return (stage === "grounding" || stage === "guard" || stage === "target_vessel_not_isolated") && String(cb.verdict ?? "") === "REFUSED";
+  // live_tree_writes_held: patch_with_tools refused at entry under the operator hold on live-tree writes
+  // (lib/operator-hold.ts). No draft ran and nothing was touched, so it says nothing about the class.
+  return (stage === "grounding" || stage === "guard" || stage === "target_vessel_not_isolated" || stage === "live_tree_writes_held") && String(cb.verdict ?? "") === "REFUSED";
+}
+
+/**
+ * GRADING AFTER A feature_compose APPLY FAILURE, with the bounded one-shot patch_with_tools escalation
+ * (anchor_not_found / localization miss). feature_compose already rolled back on applyFailed (nothing to
+ * double-land); pwt reads-then-edits the target agentically where blind-draft could not match old_string.
+ * One-shot PER GAP LINEAGE via pwt_escalated (no cross-tick loop); fires ONLY on apply_failed (never on
+ * semantic/verify rejects); any error or non-land falls through to bumpFailedAttempts unchanged. NB
+ * classification_metadata is an OBJECT (property access, not .includes/.push).
+ *
+ * A HELD ESCALATION IS NOT GRADED. When pwt refuses at entry as an infrastructure refusal (isInfraRefusalBody:
+ * the operator hold on live-tree writes, stage live_tree_writes_held), no draft ran: the outcome changes neither
+ * failed_attempts nor the class posterior. The consumed one-shot is persisted with a pwt_escalation_held stamp
+ * instead, because the bump is what used to carry the metadata to the store; without that write the next tick
+ * would escalate again, be held again and never be graded, at one compose per tick. Consequence: a gap held
+ * here does not re-escalate after the hold lifts until an operator clears pwt_escalated.
+ *
+ * Exported with injectable deps for the grading tests; the call site passes none.
+ */
+export interface PwtEscalationDeps {
+  resolvePwt: (p: Record<string, unknown>) => Promise<ResolverResult>;
+  updateClassPosterior: (cls: string, landed: boolean) => void;
+  bumpFailedAttempts: (gap: Record<string, unknown>, opts: { surprise?: boolean; predictedP?: number }) => Promise<void>;
+  closeLandedGap: (gap: Record<string, unknown>, land: LandSignal) => Promise<{ closed: boolean; error?: string }>;
+  persistGapMeta: (gap: Record<string, unknown>, patch: Record<string, unknown>) => Promise<void>;
+}
+/** Merge `patch` into the STORED row's classification_metadata (bumpFailedAttempts' build-on-the-stored-row rule). */
+async function persistGapMetaPatch(gap: Record<string, unknown>, patch: Record<string, unknown>): Promise<void> {
+  const id = String(gap.id ?? "");
+  if (!id) return;
+  const fresh = await readGapFresh(id);
+  if (!fresh || String(fresh.status ?? "") === "closed") return;
+  const freshMeta = fresh.classification_metadata ?? fresh.metadata;
+  const meta0 = ((freshMeta && typeof freshMeta === "object" && !Array.isArray(freshMeta)) ? freshMeta : (gap.classification_metadata ?? {})) as Record<string, unknown>;
+  await resolveSubstrateGapWrite({
+    type: "substrateGap_write",
+    expect_status: "open",
+    gap: { id, category: gap.category, source: gap.source, summary: gap.summary, detected_at: gap.detected_at, classification_metadata: { ...meta0, ...patch }, status: "open" },
+  } as never);
+}
+const defaultPwtEscalationDeps = (): PwtEscalationDeps => ({
+  resolvePwt: async (p) => (await import("./patch-with-tools.js")).resolvePatchWithTools(p as never),
+  updateClassPosterior,
+  bumpFailedAttempts,
+  closeLandedGap,
+  persistGapMeta: persistGapMetaPatch,
+});
+export async function escalateApplyFailureToPwt(
+  gap: Record<string, unknown>,
+  cb: Record<string, unknown>,
+  spec: string,
+  pred: { predicted: boolean; p: number },
+  deps: PwtEscalationDeps = defaultPwtEscalationDeps(),
+): Promise<{ escalated: boolean; landed: boolean; held: boolean }> {
+  const _gm = ((gap as { classification_metadata?: Record<string, unknown> }).classification_metadata ??= {});
+  let _pwtLanded = false;
+  let escalated = false;
+  let held = false;
+  if (cb.apply_failed && !_gm.pwt_escalated) {
+    _gm.pwt_escalated = true; // one-shot BEFORE the attempt: a crash/retry can never re-escalate
+    escalated = true;
+    try {
+      const result = await deps.resolvePwt({
+        type: "patch_with_tools",
+        proposal_text: spec + `\n\nPRIOR FEATURE-COMPOSE APPLY FAILURE ON THIS FILE (do not repeat it): op_count=${cb.op_count}, apply_failed, rolled_back=${cb.rolled_back}`,
+        // `gap.file_path` is ALWAYS undefined — measured 0 of 360 live gaps carry a
+        // top-level file_path, while 104 carry classification_metadata.edit_site. So
+        // this handed patch_with_tools `undefined`, deriveVesselFromPath threw
+        // "undefined is not an object (evaluating 'filePath.match')", and the
+        // escalation had never once run. Worse, pwt_escalated is set one-shot ABOVE
+        // this line, so every gap that reached here was permanently marked escalated
+        // by a crash. Same field order identifyVessel() already uses.
+        target_file: gapEditSite(gap, _gm),
+        gap_id: gap.id,
+        proposal_id: gap.id,
+        // Explicit, not the resolver's silent `?? "/vessels"` default: the value
+        // becomes visible in the trace, which is the point of threading it.
+        vessels_root: process.env["MITOSIS_RUNTIME_DIR"] ?? "/vessels",
+      });
+      const rb = (((result as unknown as Record<string, unknown>)?.body ?? result ?? {}) as Record<string, unknown>);
+      if (isInfraRefusalBody(rb)) {
+        held = true;
+        const stamp = { at: new Date().toISOString(), stage: String(rb.stage ?? ""), hold_id: rb.hold_id ?? null, why: String(rb.why ?? rb.detail ?? "").slice(0, 300) };
+        console.log(`[gap-to-feature] pwt escalation for ${String(gap.id)} NOT RUN (${stamp.stage}${stamp.hold_id ? ` ${String(stamp.hold_id)}` : ""}: ${stamp.why}) — no failed_attempts bump, no class-posterior beta`);
+        try { await deps.persistGapMeta(gap, { pwt_escalated: true, pwt_escalation_held: stamp }); }
+        catch (e) { console.warn("[gap-to-feature] pwt escalation hold stamp not written: " + (e as Error).message); }
+      } else {
+        const _land = (rb.landing ?? {}) as Record<string, unknown>;
+        const _sha = (rb.new_git_sha ?? rb.commit_sha ?? _land.new_git_sha) as string | undefined;
+        const _pushed = rb.push_status === "pushed" || _land.push_status === "pushed" || _land.landed === true;
+        if (rb.mitosisStaged && _pushed && _sha) {
+          await deps.closeLandedGap(gap, { landed: true, commit_sha: String(_sha), vessel: "development-vessel", push_status: "pushed" });
+          _pwtLanded = true;
+        }
+      }
+    } catch (e) {
+      console.warn("[gap-to-feature] pwt escalation error: " + (e as Error).message);
+    }
+  }
+  if (!_pwtLanded && !held) {
+    if (!isInfraRefusalBody(cb)) deps.updateClassPosterior(gapClassOf(gap), false);
+    await deps.bumpFailedAttempts(gap, { surprise: pred.predicted, predictedP: pred.p });
+  }
+  return { escalated, landed: _pwtLanded, held };
 }
 const closeOracleCalibPath = (): string => process.env["CLOSE_ORACLE_CALIB_PATH"] ?? "/workspace/close-oracle-calibration.json";
 type CloseOracleCalib = Record<string, { closes: number; false_closes: number; operator_engaged?: number }>;
@@ -7499,45 +7605,8 @@ const familySample: string[] = await (async () => {
       // error or non-land falls through to bumpFailedAttempts unchanged. NB classification_metadata
       // is an OBJECT — the coaxed draft (daf6d36) used .includes/.push on it (runtime crash) + a
       // bogus threading string; corrected here to property access + the real resolver signature.
-      const _gm = ((gap as { classification_metadata?: Record<string, unknown> }).classification_metadata ??= {});
-      let _pwtLanded = false;
-      if (cb.apply_failed && !_gm.pwt_escalated) {
-        _gm.pwt_escalated = true; // one-shot BEFORE the attempt: a crash/retry can never re-escalate
-        try {
-          const { resolvePatchWithTools } = await import('./patch-with-tools.js');
-          const result = await resolvePatchWithTools({
-            type: "patch_with_tools",
-            proposal_text: spec + `\n\nPRIOR FEATURE-COMPOSE APPLY FAILURE ON THIS FILE (do not repeat it): op_count=${cb.op_count}, apply_failed, rolled_back=${cb.rolled_back}`,
-            // `gap.file_path` is ALWAYS undefined — measured 0 of 360 live gaps carry a
-            // top-level file_path, while 104 carry classification_metadata.edit_site. So
-            // this handed patch_with_tools `undefined`, deriveVesselFromPath threw
-            // "undefined is not an object (evaluating 'filePath.match')", and the
-            // escalation had never once run. Worse, pwt_escalated is set one-shot ABOVE
-            // this line, so every gap that reached here was permanently marked escalated
-            // by a crash. Same field order identifyVessel() already uses.
-            target_file: gapEditSite(gap, _gm),
-            gap_id: gap.id,
-            proposal_id: gap.id,
-            // Explicit, not the resolver's silent `?? "/vessels"` default: the value
-            // becomes visible in the trace, which is the point of threading it.
-            vessels_root: process.env["MITOSIS_RUNTIME_DIR"] ?? "/vessels",
-          } as never);
-          const rb = (((result as unknown as Record<string, unknown>)?.body ?? result ?? {}) as Record<string, unknown>);
-          const _land = (rb.landing ?? {}) as Record<string, unknown>;
-          const _sha = (rb.new_git_sha ?? rb.commit_sha ?? _land.new_git_sha) as string | undefined;
-          const _pushed = rb.push_status === "pushed" || _land.push_status === "pushed" || _land.landed === true;
-          if (rb.mitosisStaged && _pushed && _sha) {
-            await closeLandedGap(gap, { landed: true, commit_sha: String(_sha), vessel: "development-vessel", push_status: "pushed" });
-            _pwtLanded = true;
-          }
-        } catch (e) {
-          console.warn("[gap-to-feature] pwt escalation error: " + (e as Error).message);
-        }
-      }
-      if (!_pwtLanded) {
-        if (!isInfraRefusalBody(cb)) updateClassPosterior(gapClassOf(gap), false);
-        await bumpFailedAttempts(gap, { surprise: pred.predicted, predictedP: pred.p });
-      }
+      // The escalation and its grading live in escalateApplyFailureToPwt; a HELD escalation is not graded.
+      await escalateApplyFailureToPwt(gap, cb, spec, pred);
     }
   }
 

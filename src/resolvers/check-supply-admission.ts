@@ -106,18 +106,26 @@ export function checkSupplyCheckPath(gapId: string): string {
   return `test/checks/${checkSupplyCheckFile(gapId)}`;
 }
 
-/** A diff path in its vessel-relative form (after repos/<vessel>/ or .../vessels/<vessel>/), or null for a '..' path. */
+/**
+ * An isolated compose's worktree root is <WS_ROOT>/<compose-id>/<vessel> (compose-workspace.ts acquireComposeWorkspace,
+ * WS_ROOT /workspace/git/compose): exactly two single segments under the root, anchored at the start and tried first,
+ * so a nested repos/<x>/ inside the worktree is not read as a vessel root. A one-segment form is not a worktree root.
+ */
+const COMPOSE_WORKTREE_RE = /^\/workspace\/git\/compose\/[^/]+\/[^/]+\/(.+)$/;
+
+/** A diff path in its vessel-relative form (after /workspace/git/compose/<id>/<vessel>/, repos/<vessel>/ or .../vessels/<vessel>/), or null for a '..' path. */
 function vesselRelativePath(path: string): string | null {
   const p = String(path ?? "").replace(/:\d+.*$/, "").trim().replace(/\\/g, "/");
   if (!p || p.split("/").includes("..")) return null;
-  return /(?:^|\/)repos\/[^/]+\/(.+)$/.exec(p)?.[1] ?? /\/vessels\/[^/]+\/(.+)$/.exec(p)?.[1] ?? p.replace(/^(?:\.\/)+/, "");
+  return COMPOSE_WORKTREE_RE.exec(p)?.[1] ?? /(?:^|\/)repos\/[^/]+\/(.+)$/.exec(p)?.[1] ?? /\/vessels\/[^/]+\/(.+)$/.exec(p)?.[1] ?? p.replace(/^(?:\.\/)+/, "");
 }
 
 /**
  * A TEST-WRITING COMPOSE LANDS ITS ONE CHECK FILE ONLY (slice G revision R3, narrowed by B′ P1). An admitted
  * test_writing compose runs land:true with no falsifier of its own, and "Do not change src/." is goal prose the
- * drafter can ignore. THE RULE: a path is resolved to its vessel-relative form (after repos/<vessel>/, or after
- * .../vessels/<vessel>/ for an absolute runtime or clone path; a bare relative path is taken as vessel-relative), and
+ * drafter can ignore. THE RULE: a path is resolved to its vessel-relative form (after /workspace/git/compose/<id>/<vessel>/
+ * for an isolated compose worktree, after repos/<vessel>/, or after .../vessels/<vessel>/ for an absolute runtime or
+ * clone path; a bare relative path is taken as vessel-relative), and
  * the ONLY path allowed is exactly test/checks/<checkSupplyCheckFile(gapId)>. Every other path is refused: another
  * gap's check, any discovered *.test.ts (an intended red there reads as a regression in every whole-suite run),
  * fixtures, src, package.json, config, a '..' path. No gap id allows nothing (fail closed). Which vessel a path may
@@ -138,7 +146,7 @@ export function testWritingDiffOutsideTests(composeMode: unknown, paths: string[
  * W2: THE CHECK MUST IMPORT THE GAP'S EDIT SITE (B′). A red that does not load the module the gap names reproduces
  * nothing the lane can fix (expect(1).toBe(2) is red for every gap). The rule, shared by feature_compose's verify and
  * gap-check-supply's arm step so they agree:
- *   - an edit site is given (vessel-relative after stripping repos/<vessel>/ and any :line suffix): it must be a TS/JS
+ *   - an edit site is given (vessel-relative after stripping a compose-worktree root or repos/<vessel>/, and any :line suffix): it must be a TS/JS
  *     module (.ts .tsx .js .jsx .mts .cts .mjs .cjs, not .d.ts), else edit_site_not_importable; and the check must
  *     import it (scope-earn-in.ts testImportsFile: static `from`, bare `import "…"`, a namespace import, dynamic
  *     `import(…)`, `require(…)`; comments stripped; extension optional, /index allowed; a TYPE-ONLY import —
@@ -153,7 +161,7 @@ const IMPORTABLE_RE = /\.(?:[cm]?[jt]sx?)$/;
 export function vesselRelativeEditSite(editSite: unknown): string | null {
   if (typeof editSite !== "string" || !editSite.trim()) return null;
   const s = editSite.trim().replace(/:\d+.*$/, "").replace(/\\/g, "/");
-  return (/(?:^|\/)repos\/[^/]+\/(.+)$/.exec(s)?.[1] ?? /\/vessels\/[^/]+\/(.+)$/.exec(s)?.[1] ?? s.replace(/^(?:\.\/)+/, "")) || null;
+  return (COMPOSE_WORKTREE_RE.exec(s)?.[1] ?? /(?:^|\/)repos\/[^/]+\/(.+)$/.exec(s)?.[1] ?? /\/vessels\/[^/]+\/(.+)$/.exec(s)?.[1] ?? s.replace(/^(?:\.\/)+/, "")) || null;
 }
 export async function checkImportsEditSite(source: string, checkRel: string, editSite: unknown, srcExists: (rel: string) => boolean): Promise<EditSiteImport> {
   const { testImportsFile } = await import("./scope-earn-in.js");

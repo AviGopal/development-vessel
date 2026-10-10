@@ -246,3 +246,57 @@ describe("the pick-time reader sees the last JUDGED decision, so high_confidence
     expect(G2F).toContain("const highConfMiss = isHighConfidenceMiss(mR.approach_decisions);");
   });
 });
+
+describe("the auto-pick does not re-pick a gap whose compose is in flight", () => {
+  const sgP = import("../../src/resolvers/substrate-gap.js");
+  const originalFetch = globalThis.fetch;
+  const savedPush = process.env["MITOSIS_DIRECT_PUSH"];
+  afterAll(() => {
+    globalThis.fetch = originalFetch;
+    if (savedPush === undefined) delete process.env["MITOSIS_DIRECT_PUSH"]; else process.env["MITOSIS_DIRECT_PUSH"] = savedPush;
+  });
+  it("in-flight holds are counted: two holders, one release, still in flight; the second release frees it", () => {
+    expect(typeof g2f.beginComposeInFlight).toBe("function");
+    g2f.beginComposeInFlight("inflight-count");
+    g2f.beginComposeInFlight("inflight-count");
+    g2f.endComposeInFlight("inflight-count");
+    expect(g2f.composeInFlight("inflight-count")).toBe(true);
+    g2f.endComposeInFlight("inflight-count");
+    expect(g2f.composeInFlight("inflight-count")).toBe(false);
+  });
+  it("an open gap held in flight is excluded from the auto-pick candidate set, with a counted log line", async () => {
+    const sg = await sgP;
+    const { openPolicyAnswer } = await import("./explicit-open-policy.fixture.js");
+    const root = sg.gapStoreRootForTest();
+    if (!sg.isScratchGapStoreRoot(root)) throw new Error(`gap store root ${root} is not a scratch root`);
+    globalThis.fetch = (async (_input: unknown, init?: RequestInit) => {
+      const body = init?.body ? JSON.parse(String(init.body)) : {};
+      if (body?.pointer?.type === "vesselCapability" && body.pointer.shape === "poolImpulse") {
+        return Response.json({ content: { shape: "poolImpulse", vessels: [{ vesselId: "pool-fixture", endpoint: "http://pool.fixture", resolve_endpoint: "/v2/impulses/resolve", origin: "local" }], found: true } });
+      }
+      if (body?.impulse?.type === "poolImpulse") return openPolicyAnswer(body.impulse.shape);
+      throw new TypeError("Unable to connect. Is the computer able to access the url?");
+    }) as unknown as typeof fetch;
+    g2f.__resetPolicyReadsForTests?.();
+    const id = `inflight-${Math.random().toString(36).slice(2, 8)}`;
+    await seedGap(id);
+    (g2f.beginComposeInFlight ?? (() => {}))(id);
+    // Landings stopped: admission admits nothing, so the pass ends at select without composing.
+    process.env["MITOSIS_DIRECT_PUSH"] = "0";
+    const lines: string[] = [];
+    const orig = console.log;
+    console.log = (...a: unknown[]) => { lines.push(a.map(String).join(" ")); };
+    try { await g2f.resolveGapToFeature({ type: "gapToFeature" } as never); } finally { console.log = orig; (g2f.endComposeInFlight ?? (() => {}))(id); }
+    const line = lines.find((l) => l.includes("compose in flight excluded"));
+    expect(line).toBeDefined();
+    expect(line).toContain(id);
+  });
+  it("the hold is taken at pick time and released in resolveGapToFeature's finally (return and throw)", () => {
+    const { readFileSync } = require("node:fs") as typeof import("node:fs");
+    const G2F = readFileSync(join(import.meta.dir, "..", "..", "src", "resolvers", "gap-to-feature.ts"), "utf8");
+    const i = G2F.indexOf("export async function resolveGapToFeature(");
+    const wrapper = G2F.slice(i, G2F.indexOf("async function resolveGapToFeatureOnce(", i));
+    expect(wrapper).toMatch(/\} finally \{\s*if \(attempt\.inFlightGapId\) endComposeInFlight\(attempt\.inFlightGapId\);\s*\}/);
+    expect(G2F).toMatch(/attempt\.inFlightGapId = String\(gap\.id\); beginComposeInFlight\(attempt\.inFlightGapId\);[^\n]*\n\s*const decisionId = await recordApproachDecision\(gap\);/);
+  });
+});

@@ -65,6 +65,18 @@ const proposalsDir = (): string => envPath("PROPOSALS_DIR", "/workspace/proposal
 // missing horizon that let cost-model-miscalibrated re-compose 17x/60min and starve self-authoring.
 const GAP_COMPOSE_COOLDOWN_MS = parseInt(process.env.GAP_COMPOSE_COOLDOWN_MS ?? "300000", 10);
 const gapComposeLastAttemptAt = new Map<string, number>();
+// COMPOSES IN FLIGHT, by gap id (count of running resolveGapToFeature calls holding the gap). The cooldown above
+// expires after GAP_COMPOSE_COOLDOWN_MS while a compose can run far longer, so the auto-pick re-picked a gap whose
+// compose was still running: measured, one gap picked at 22:54 and again at 23:19 with the first compose live, and
+// the two outcomes then joined each other's decisions. The auto-pick excludes a gap held here; the hold is taken at
+// pick time and released when resolveGapToFeature returns or throws. In-process, like the cooldown map.
+const gapComposeInFlight = new Map<string, number>();
+export function beginComposeInFlight(id: string): void { if (id) gapComposeInFlight.set(id, (gapComposeInFlight.get(id) ?? 0) + 1); }
+export function endComposeInFlight(id: string): void {
+  const n = (gapComposeInFlight.get(id) ?? 0) - 1;
+  if (n > 0) gapComposeInFlight.set(id, n); else gapComposeInFlight.delete(id);
+}
+export function composeInFlight(id: string): boolean { return (gapComposeInFlight.get(id) ?? 0) > 0; }
 // Per-FILE cooldown across cycles. The per-gap cooldown keys on gap id, and a failing family
 // re-appears under fresh ids (-narrowed, recommit-*, near-duplicate route-edits), so one
 // edit_site took every auto-pick for hours (2026-09-26: 15 of 15 picks on proxy.ts, 0 landed).
@@ -6604,19 +6616,21 @@ export function isRetryableDispatchRefusal(status: number, text: string): boolea
 }
 
 export async function resolveGapToFeature(pointer: GapToFeaturePointer): Promise<ResolverResult> {
-  const attempt: { id?: string; gap?: Record<string, unknown> } = {};
+  const attempt: { id?: string; gap?: Record<string, unknown>; inFlightGapId?: string } = {};
   let result: ResolverResult;
   try {
     result = await resolveGapToFeatureOnce(pointer, attempt);
   } catch (err) {
     if (attempt.id && attempt.gap) recordAttemptEnd(attempt.id, attempt.gap, null, err);
     throw err;
+  } finally {
+    if (attempt.inFlightGapId) endComposeInFlight(attempt.inFlightGapId);
   }
   if (attempt.id && attempt.gap) recordAttemptEnd(attempt.id, attempt.gap, result as { shape?: string; body?: unknown });
   return result;
 }
 
-async function resolveGapToFeatureOnce(pointer: GapToFeaturePointer, attempt: { id?: string; gap?: Record<string, unknown> }): Promise<ResolverResult> {
+async function resolveGapToFeatureOnce(pointer: GapToFeaturePointer, attempt: { id?: string; gap?: Record<string, unknown>; inFlightGapId?: string }): Promise<ResolverResult> {
   // For testing purposes, expose the map.
   (resolveGapToFeature as any).__test__gapComposeLastAttemptAt = () => gapComposeLastAttemptAt;
   // DECOMPOSE ON REQUEST (contained-self-development 6.3): run the decomposition contract for one
@@ -6833,9 +6847,11 @@ async function resolveGapToFeatureOnce(pointer: GapToFeaturePointer, attempt: { 
     // One live gap per (lineage, check): read over the whole open set, so a holder cooling down still holds.
     const predicateHolds = pointer.gap_id ? new Map<string, string>() : inheritedPredicateHolds(gaps);
     const heldLines: string[] = [];
+    const inFlightLines: string[] = [];
     const eligible = gaps.filter((g) => {
       const holder = predicateHolds.get(String(g.id ?? ""));
       if (holder) { heldLines.push(`${String(g.id)}: predicate held by ${holder}`); return false; }
+      if (composeInFlight(String(g.id ?? ""))) { inFlightLines.push(String(g.id)); return false; }
       if (nowMs - (gapComposeLastAttemptAt.get(String(g.id ?? "")) ?? 0) < GAP_COMPOSE_COOLDOWN_MS) return false;
       const siteKey = String(((g.classification_metadata ?? g.metadata ?? {}) as Record<string, unknown>).edit_site ?? "");
       if (siteKey && String(g.source ?? "") !== "human_reported" && nowMs - (siteComposeLastAttemptAt.get(siteKey) ?? 0) < SITE_COMPOSE_COOLDOWN_MS) return false;
@@ -6859,6 +6875,7 @@ async function resolveGapToFeatureOnce(pointer: GapToFeaturePointer, attempt: { 
     // Emit the exclusion COUNT, not just its effect. A brake whose only evidence is
     // "fewer picks happened" is indistinguishable from a lane that has gone quiet for
     // some other reason — which is the confusion this codebase keeps paying for.
+    if (inFlightLines.length > 0) console.log(`[gap-to-feature] compose in flight excluded ${inFlightLines.length} gap(s) from the auto-pick: ${inFlightLines.slice(0, 5).join(", ")}`);
     if (heldLines.length > 0) console.log(`[gap-to-feature] predicate hold excluded ${heldLines.length} gap(s): ${heldLines.slice(0, 5).join("; ")}`);
     if (lineageCapped > 0) {
       console.log(`[gap-to-feature] lineage cap excluded ${lineageCapped} recommit gap(s) (lineage failed_attempts >= ${RECOMMIT_LINEAGE_ATTEMPT_CAP})`);
@@ -6928,6 +6945,8 @@ async function resolveGapToFeatureOnce(pointer: GapToFeaturePointer, attempt: { 
     const pickedSite = String(((gap.classification_metadata ?? gap.metadata ?? {}) as Record<string, unknown>).edit_site ?? "");
     if (pickedSite) siteComposeLastAttemptAt.set(pickedSite, Date.now());
   }
+  // Held until resolveGapToFeature returns: the auto-pick must not re-pick a gap whose compose is still running.
+  if (!pointer.dry_run && gap.id) { attempt.inFlightGapId = String(gap.id); beginComposeInFlight(attempt.inFlightGapId); }
   const decisionId = await recordApproachDecision(gap);
   if (decisionId && !pointer.dry_run) { attempt.id = decisionId; attempt.gap = gap; recordPickIntent(decisionId, gap); }
   // SURPRISE-ROUTED EXPLORE/EXPLOIT (2026-07-09): when-to-work-on-what is a measured

@@ -26,10 +26,22 @@ type DefaultSeam = (d: Record<string, unknown> | null) => void;
 const seam = (): DefaultSeam | undefined =>
   (cutoverMod as unknown as { __setGateVersionDefaultForTests?: DefaultSeam }).__setGateVersionDefaultForTests;
 
+// THE AUTONOMY-SCOPE DEFAULT rides the same install/clear. The cutover refuses an undirected landing
+// when the autonomy scope excludes a staged file or cannot be read (vessel-mitosis-cutover.ts
+// AUTONOMY-SCOPE CHOKEPOINT); a cutover fixture has no pool to read one from, so every suite about
+// another gate would refuse on this one. The default layer answers an explicitly unrestricted scope.
+// cutover-autonomy-scope.test.ts, whose subject this gate is, clears it and reads the real scope.
+type ScopeDefaultSeam = (r: (() => Promise<unknown>) | null) => void;
+const scopeSeam = (): ScopeDefaultSeam | undefined =>
+  (cutoverMod as unknown as { __setAutonomyScopeDefaultForTests?: ScopeDefaultSeam }).__setAutonomyScopeDefaultForTests;
+export const FIXTURE_UNRESTRICTED_SCOPE = { excluded: [] as string[], readable: true, reason: "fixture: explicitly unrestricted (cutover test default)" };
+
 export function installGateVersionDefault(): void {
   seam()?.({ running: () => FIXTURE_GATE_VERSION, accepted: () => FIXTURE_GATE_VERSION });
+  scopeSeam()?.(async () => FIXTURE_UNRESTRICTED_SCOPE);
 }
 
 export function clearGateVersionDefault(): void {
   seam()?.(null);
+  scopeSeam()?.(null);
 }

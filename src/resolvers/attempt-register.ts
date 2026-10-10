@@ -1,5 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { createHmac, timingSafeEqual } from "node:crypto";
 import { appendRecord, readRecords, ledgerDir } from "./attempt-ledger.js";
 import { invariantSelect, takeSnapshot, type CheckResult } from "./attempt-checks.js";
 import { resolveUnaccountedLandingScan } from "./unaccounted-landing-scan.js";
@@ -102,6 +103,34 @@ export function settleVerdict(pre: CheckResult[], now: CheckResult[], prediction
   return { verdict, regressed_checks: [...new Set(regressed_checks)], unresolved_checks: [...new Set(unresolved_checks)] };
 }
 
+/**
+ * THE DIRECTED-INTENT STAMP. The cutover lands an autonomous change only outside the autonomy scope's
+ * excluded paths, and a directed (operator) landing is exempt, so "directed" must be something the lane
+ * cannot write. A `directed: true` field alone is not: the ledger is a workspace data file (tool writes
+ * reach it) and attempt-ledger.ts is lane-editable. So an intent registered directed carries an HMAC,
+ * keyed with this node's fleet key (METABOB_API_KEY, read at use time), over exactly the fields the
+ * cutover binds the landing to: the attempt id, the route, the repo (whose basename is the vessel), the gap id
+ * and the touched files. A walk
+ * cannot mint one (its arguments are LLM-synthesised and the key is scrubbed from the agent shell env:
+ * the write-grant argument in write-containment.ts). No key, no stamp: the intent then reads autonomous.
+ * What it attests is that the in-process caller (feature_compose) registered this attempt directed.
+ */
+export function directedIntentStamp(key: string, i: { attempt_id: string; route: string; repo: string; gap_id: string | null; touched_files: readonly string[] }): string {
+  return createHmac("sha256", key)
+    .update(`substrate-directed-intent/v1\n${i.attempt_id}\n${i.route}\n${i.repo}\n${i.gap_id ?? ""}\n${JSON.stringify([...i.touched_files].map(String).sort())}`)
+    .digest("hex");
+}
+/** True when `intent` is registered directed and carries a stamp that verifies under `key` for its own fields. */
+export function verifyDirectedIntentStamp(key: string | undefined, intent: Record<string, unknown> | null | undefined): boolean {
+  if (!key || !intent || intent["directed"] !== true || typeof intent["directed_stamp"] !== "string") return false;
+  if (typeof intent["attempt_id"] !== "string" || typeof intent["route"] !== "string" || typeof intent["repo"] !== "string" || !Array.isArray(intent["touched_files"])) return false;
+  const gap = intent["gap_id"];
+  if (gap !== null && typeof gap !== "string") return false;
+  const want = Buffer.from(directedIntentStamp(key, { attempt_id: intent["attempt_id"], route: intent["route"], repo: intent["repo"], gap_id: gap, touched_files: intent["touched_files"] as string[] }), "hex");
+  const got = Buffer.from(intent["directed_stamp"], "hex");
+  return got.length === want.length && timingSafeEqual(got, want);
+}
+
 export async function registerAttempt(input: { route: string; repo: string; touched_files: string[]; gap_id?: string | null; proposal_id?: string | null; authoring_execution_id?: string | null; dispatch_id?: string | null; directed?: boolean; attempt_id?: string; decision_id?: string | null; prediction?: Partial<Prediction> }): Promise<{ attempt_id: string | null; registered: boolean; error?: string }> {
   try {
     const attempt_id = input.attempt_id ?? `att-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 9)}`;
@@ -142,8 +171,13 @@ export async function registerAttempt(input: { route: string; repo: string; touc
       pre_snapshot_id,
       registered_at: new Date().toISOString(),
     };
+    // Directed only when the caller said so AND this node can stamp it (directedIntentStamp).
+    const stampKey = process.env["METABOB_API_KEY"];
+    const stamped = intent.directed === true && stampKey
+      ? { ...intent, directed_stamp: directedIntentStamp(stampKey, { attempt_id, route: intent.route, repo: intent.repo, gap_id: intent.gap_id, touched_files: intent.touched_files }) }
+      : intent;
 
-    await appendRecord("attemptIntent", attempt_id, intent);
+    await appendRecord("attemptIntent", attempt_id, stamped);
 
     return { attempt_id, registered: true };
   } catch (e) {

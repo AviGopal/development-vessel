@@ -18,7 +18,9 @@ import {
   appendFile,
 } from "node:fs/promises";
 import { createHash } from "node:crypto";
-import { registerAttempt } from "./attempt-register.js";
+import { registerAttempt, verifyDirectedIntentStamp } from "./attempt-register.js";
+import { readRecords } from "./attempt-ledger.js";
+import type { AutonomyScope } from "./gap-to-feature.js";
 import type { ResolverResult } from "./types.js";
 import { resolveSubstrateGap, resolveSubstrateGapWrite, resolveSubstrateGapLease, landingLeaseOf, isLandingLeaseVerdict, countLandingLeaseRefusal, landingLeaseRefusalCounts, type LandingLeaseVerdict } from "./substrate-gap.js";
 import { resolveTestSuite } from "./test-suite.js";
@@ -2240,6 +2242,109 @@ async function landingLeaseGate(args: GitCutoverArgs): Promise<ResolverResult | 
   return null;
 }
 
+/**
+ * AUTONOMY-SCOPE CHOKEPOINT. Every landing passes runGitAwareCutover, whatever route staged it
+ * (feature_compose, patch_with_tools via apply_proposal_as_patch, a mitosis-tick re-run, a park resume, a
+ * direct dispatch). The autonomy floor used to live only in feature_compose (its AUTONOMY SCOPE FLOOR) and in
+ * gap-to-feature admission, so the patch_with_tools route staged and landed with no scope check at all, and
+ * write-containment admits scope-excluded lane writes on the promise that the landing withholds them. This is
+ * where that promise is kept: a landing that is not DIRECTED is refused when any staged file falls under an
+ * autonomyScope excluded path, and when the scope cannot be read (fail closed).
+ *
+ * The scope is the lane's own reader (gap-to-feature autonomyScope, the newest own-substrate autonomyScope
+ * pool record, as admission and the compose floor read it) and the lane's own floor (autonomyScopeFloor,
+ * which lets a tightening hold pass the repair of its own regression when the gap row is in its lineage).
+ * Staged paths are vessel-relative; the scope names them `repos/<vessel>/<path>`.
+ *
+ * DIRECTED is not self-declared. Nothing the lane can write counts: not a `directed` flag on this pointer,
+ * not one in mitosis-pending.json (apply_proposal_as_patch writes that file), not an unstamped ledger line.
+ * A landing is directed only when pointer.attempt_id names an attemptIntent that feature_compose registered
+ * directed (route feature_compose) carrying a directed stamp that verifies under this node's key
+ * (attempt-register.ts directedIntentStamp), the intent's repo is this landing's vessel, every staged file
+ * is one of that intent's touched files, and the intent names this landing's gap. Anything else (no attempt id, no intent, an unstamped or forged
+ * intent, another route, other files, another gap, no key) is autonomous and checked.
+ *
+ * A refusal here is a NON-ATTEMPT (nothing was applied: it runs before the landing lease, the host-sync
+ * handoff, the clone reset and the copy, so the clone is untouched), logged once through softRefuse with the
+ * excluded entry and the file, and counted (getAutonomyScopeRefusalCounts).
+ */
+export type AutonomyScopeRefusal = "autonomy_scope_excluded" | "autonomy_scope_unreadable" | "autonomy_scope_unmappable";
+const autonomyScopeRefusalCounts: Record<AutonomyScopeRefusal, number> = { autonomy_scope_excluded: 0, autonomy_scope_unreadable: 0, autonomy_scope_unmappable: 0 };
+export function getAutonomyScopeRefusalCounts(): Record<AutonomyScopeRefusal, number> {
+  return { ...autonomyScopeRefusalCounts };
+}
+type ScopeReader = () => Promise<AutonomyScope>;
+const realScopeReader: ScopeReader = async () => (await import("./gap-to-feature.js")).autonomyScope();
+/** Tests only: the DEFAULT layer under the real reader (the shared cutover test setup installs a fixture
+ *  scope here so suites about other gates are not refused by this one); null restores the real reader. */
+let scopeReaderDefault: ScopeReader | null = null;
+export function __setAutonomyScopeDefaultForTests(r: ScopeReader | null): void {
+  scopeReaderDefault = r;
+}
+
+/** Whether this landing is directed, by the stamped ledger intent only (see AUTONOMY-SCOPE CHOKEPOINT). */
+async function directedLandingOrigin(pointer: VesselMitosisCutoverPointer, stagedFiles: string[], gapId: string): Promise<{ directed: boolean; why: string }> {
+  const attemptId = (pointer as { attempt_id?: unknown }).attempt_id;
+  if (typeof attemptId !== "string" || !attemptId.trim() || attemptId.includes("{{")) return { directed: false, why: "no attempt id" };
+  let intent: Record<string, unknown> | null = null;
+  try { intent = ((await readRecords("attemptIntent", { key: attemptId.trim() }))[0]?.record ?? null) as Record<string, unknown> | null; }
+  catch (err) { return { directed: false, why: `attempt ledger unreadable: ${(err as Error).message.slice(0, 120)}` }; }
+  if (!intent) return { directed: false, why: `no attemptIntent ${attemptId}` };
+  if (intent["directed"] !== true) return { directed: false, why: `attemptIntent ${attemptId} is not directed` };
+  if (intent["route"] !== "feature_compose") return { directed: false, why: `attemptIntent ${attemptId} route ${String(intent["route"])} is not feature_compose` };
+  if (!verifyDirectedIntentStamp(process.env["METABOB_API_KEY"], intent)) return { directed: false, why: `attemptIntent ${attemptId} carries no directed stamp that verifies here` };
+  // The stamp binds the repo; the landing's vessel must be that repo, or a directed intent for one vessel's
+  // src/index.ts would pass another vessel's (attempt and gap ids are public in commit trailers).
+  if (basename(String(intent["repo"])) !== pointer.vessel_name) return { directed: false, why: `attemptIntent ${attemptId} is for repo ${String(intent["repo"])}, landing is ${pointer.vessel_name}` };
+  const touched = new Set((intent["touched_files"] as unknown[]).map((f) => String(f).replace(/^\.\//, "")));
+  const extra = stagedFiles.filter((f) => !touched.has(f.replace(/^\.\//, "")));
+  if (extra.length > 0) return { directed: false, why: `staged file(s) outside attemptIntent ${attemptId}: ${extra.slice(0, 3).join(", ")}` };
+  const intentGap = typeof intent["gap_id"] === "string" ? intent["gap_id"] : "";
+  if (intentGap ? intentGap !== gapId : !(gapId === "" || gapId === "adhoc-spec")) return { directed: false, why: `attemptIntent ${attemptId} names gap ${intentGap || "none"}, landing is ${gapId || "none"}` };
+  return { directed: true, why: `stamped directed attemptIntent ${attemptId}` };
+}
+
+async function autonomyScopeLandingGate(args: GitCutoverArgs): Promise<ResolverResult | null> {
+  const { pointer, vessel_name, stagedFiles } = args;
+  const gapId = await cutoverGapIdOf(pointer, args.mitosis_version_id);
+  const origin = await directedLandingOrigin(pointer, stagedFiles, gapId);
+  if (origin.directed) return null;
+  const refuse = (kind: AutonomyScopeRefusal, reason: string, extra: Record<string, unknown>): ResolverResult => {
+    autonomyScopeRefusalCounts[kind] += 1;
+    return softRefuse(`${kind}: ${reason}; not directed (${origin.why}). Nothing was applied.`, {
+      kind, refuse_class: kind, non_attempt: true, vessel_name, gap_id: gapId, staged_files: stagedFiles, ...extra,
+      autonomy_scope_refusals: getAutonomyScopeRefusalCounts(),
+    });
+  };
+  const safeVessel = /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(vessel_name) && !vessel_name.includes("..");
+  const badFiles = stagedFiles.filter((f) => !f || isAbsolute(f) || f.split("/").includes(".."));
+  if (!safeVessel || badFiles.length > 0) {
+    return refuse("autonomy_scope_unmappable", `cannot name the staged files in the autonomy scope (vessel ${JSON.stringify(vessel_name)}${badFiles.length ? `, files ${badFiles.slice(0, 3).join(", ")}` : ""}), failing closed`, {});
+  }
+  const files = stagedFiles.map((f) => `repos/${vessel_name}/${f.replace(/^\.\//, "")}`);
+  try {
+    const { autonomyScopeExcludes, autonomyScopeFloor, scopeHoldFor } = await import("./gap-to-feature.js");
+    const scope = await (scopeReaderDefault ?? realScopeReader)();
+    let floor = autonomyScopeFloor(scope, files, null);
+    // A tightening hold passes the repair of its own regression: read the gap row only when a hit is a hold.
+    if (floor.hits.length > 0 && scope.readable && gapId && floor.hits.some((h) => scopeHoldFor(scope, h))) {
+      let row: Record<string, unknown> | null = null;
+      try {
+        const res = (await ownCheckDeps.readGap({ type: "substrateGap", id: gapId, limit: 1 })) as { shape?: string; body?: { gaps?: unknown } } | null;
+        row = res?.shape === "substrateGap" && Array.isArray(res.body?.gaps) ? ((res.body!.gaps as Array<Record<string, unknown>>).find((g) => String(g?.["id"]) === gapId) ?? null) : null;
+      } catch { row = null; }
+      if (row) floor = autonomyScopeFloor(scope, files, row);
+    }
+    if (floor.hits.length === 0) return null;
+    if (floor.unreadable) return refuse("autonomy_scope_unreadable", `${floor.unreadable}, failing closed`, { scope_reason: scope.reason });
+    const excluded = files.map((file) => ({ entry: autonomyScopeExcludes(scope, file), file })).filter((e): e is { entry: string; file: string } => !!e.entry && floor.hits.includes(e.entry));
+    const named = excluded.map((e) => `'${e.entry}' (file ${e.file})`).join(", ");
+    return refuse("autonomy_scope_excluded", `autonomous landing touches autonomy-scope excluded path ${named}`, { excluded });
+  } catch (err) {
+    return refuse("autonomy_scope_unreadable", `autonomy scope check failed: ${String(err).slice(0, 200)}, failing closed`, {});
+  }
+}
+
 async function runGitAwareCutover(args: GitCutoverArgs): Promise<ResolverResult> {
   // CHANGE-WINDOW LEASE (Seam 2A, 2026-07-09): the cutover is the substrate's
   // only self-mutation chokepoint — commit + push + restart. Without a lease,
@@ -2415,6 +2520,12 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
       vessel_name,
       push_scope: pushScope,
     });
+  }
+
+  // AUTONOMY SCOPE, before anything is applied or leased (host-sync emission and `git add` included).
+  {
+    const refused = await autonomyScopeLandingGate(args);
+    if (refused) return refused;
   }
 
   // LANDING LEASE, before anything is applied (host-sync emission and `git add` included).

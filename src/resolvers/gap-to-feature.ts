@@ -5519,6 +5519,26 @@ export function shouldNarrowForChronicFailure(failedAttempts: number, meta: Reco
 }
 
 /**
+ * The inputs a chronic escalation acts on, as one comparable string: the falsifier class, the edit site, the arming
+ * state (composeEligibilitySkipReason) and the last attempt outcome (the newest failure lesson). Equal fingerprints
+ * mean the escalation would act on the same state it already acted on.
+ */
+export function chronicEscalationFingerprint(row: Record<string, unknown>, why: string): string {
+  const meta = (row.classification_metadata ?? row.metadata ?? {}) as Record<string, unknown>;
+  const rawFalsifier = meta.falsifier as unknown;
+  const falsifier = String((rawFalsifier && typeof rawFalsifier === "object" ? (rawFalsifier as { class?: unknown }).class : rawFalsifier) ?? "").toLowerCase();
+  const lessons = Array.isArray(meta.failure_lessons) ? meta.failure_lessons as Array<Record<string, unknown> | null> : [];
+  const last = lessons[lessons.length - 1] ?? null;
+  return JSON.stringify({
+    why,
+    falsifier,
+    edit_site: gapEditSite(row, meta) ?? "",
+    arming: composeEligibilitySkipReason(row) ?? "eligible",
+    last_outcome: last ? [String(last.class ?? ""), String(last.reason ?? "").slice(0, 300), String(last.at ?? "")] : null,
+  });
+}
+
+/**
  * ESCALATE A STUCK GAP: decomposition first, the free-text investigation walk only when no valid step could be
  * produced. Reached when a gap reaches the chronic-failure threshold, and when one region of a gap is refused
  * twice by the no-effect constraint (feature_compose). Reads the autonomous_pick lease and the spend envelope,
@@ -5559,6 +5579,19 @@ export async function escalateToDecomposition(gap: Record<string, unknown>, why:
     console.log(`[gap-to-feature] ${parentId} already decomposed at ${decomposedAt}; not decomposed again`);
     if (Array.isArray(prior?.children) && prior!.children.length > 0) return `not dispatched: already decomposed at ${decomposedAt}`;
   }
+  // ONE ESCALATION PER STATE (gap-lane livelock, 2026-10-10). An escalation that writes no step changes nothing the
+  // next tick reads, so the same inputs escalated again on every chronic tick (node1: 126 investigations of one gap
+  // in 24 h). The stored row carries the fingerprint of the inputs it last escalated on (chronic_escalation); the
+  // same fingerprint is not escalated again. Keyed on state, not on a clock: a changed falsifier, edit site, arming
+  // state or a new attempt outcome escalates again. Stamped before the dispatch, as pwt_escalated is.
+  const fingerprint = chronicEscalationFingerprint(fresh, why);
+  const priorEscalation = freshMeta.chronic_escalation as { fingerprint?: unknown; at?: unknown } | undefined;
+  if (priorEscalation && priorEscalation.fingerprint === fingerprint) {
+    console.log(`[gap-to-feature] escalation of ${parentId} (${why}) NOT dispatched: inputs unchanged since the escalation at ${String(priorEscalation.at ?? "?")}`);
+    return `not dispatched: inputs unchanged since the escalation at ${String(priorEscalation.at ?? "?")}`;
+  }
+  try { await persistGapMetaPatch(fresh, { chronic_escalation: { fingerprint, at: new Date().toISOString(), why } }); }
+  catch (e) { console.warn(`[gap-to-feature] escalation stamp for ${parentId} not written: ${(e as Error).message}`); }
   console.log(`[gap-to-feature] escalating ${parentId} (${why}): ${decomposedAt ? "investigation (already decomposed, no step written)" : "decomposition, then investigation if no step is valid"}`);
   void (async () => {
     // DECOMPOSITION FIRST (contained-self-development 6.3): structured, falsifiable child steps;
@@ -5653,8 +5686,16 @@ export async function bumpFailedAttempts(gap: Record<string, unknown>, opts: { s
         // Deterministic id so re-narrowing the SAME parent upserts one idempotent child
         // (gapClassKey has no volatile token to strip here) instead of throwing on a
         // missing id or spawning a new row every failure.
+        // ONE CHILD, EMITTED ONCE (gap-lane livelock, 2026-10-10): the deterministic id made a re-narrowing an upsert, so
+        // every chronic tick rewrote the existing child (node1: "emitted narrowed child" for the same child each tick,
+        // each write re-publishing it). A stored child, open or closed, is left as it is.
+        const plannedChildId = `${parentId}-narrowed`;
+        const storedChild = await readGapFresh(plannedChildId);
+        if (storedChild) {
+          console.log(`[gap-to-feature] narrowed child ${plannedChildId} already exists (status=${String(storedChild.status ?? "?")}); not emitted again`);
+        } else {
         const childRecord = narrowedChildRecord(gap, meta, {
-          id: `${parentId}-narrowed`,
+          id: plannedChildId,
           checks: "inherit",
           summaryTail: "\n\nWHY PREVIOUS ATTEMPTS ON THIS GAP FAILED (most recent last):\n" + (lessonsForChild as Array<Record<string, unknown>>).slice(-3).map((l) => "- " + String(l["class"] ?? "?") + ": " + String(l["reason"] ?? "").slice(0, 300)).join("\n") + "\n\nDo not repeat these failures. Address the specific cause named above.",
           extra: {},
@@ -5662,6 +5703,7 @@ export async function bumpFailedAttempts(gap: Record<string, unknown>, opts: { s
         await resolveSubstrateGapWrite({ type: "substrateGap_write", gap: childRecord as never });
         const childId = String((childRecord as Record<string,unknown>).id ?? "");
         console.log(`[gap-to-feature] emitted narrowed child gap for chronically-stuck gap ${parentId}: ${childId}`);
+        }
         }
         await escalateToDecomposition(gap, "chronic failure");
       } catch (err) {

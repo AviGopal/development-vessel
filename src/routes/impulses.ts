@@ -370,11 +370,12 @@ async function dispatchInner(pointer: AnyPointer): Promise<ResolverResult> {
       // attested_verified: whether the row carries an operator stamp whose signature verifies under THIS node's key
       // (operator-hold's check). A reader on another vessel trusts this verdict from its own node's route instead of
       // holding the key: anyone who can verify the HMAC can also forge it. Added here, not in the store, so
-      // in-process readers see rows exactly as stored.
-      const { resolvePoolImpulse } = await import("../resolvers/pool-impulse.js");
+      // in-process readers see rows exactly as stored. Never true for a row whose shape is not a trust root: only a
+      // trust-root write is stamped, so a stanza on any other row is not this store's attestation.
+      const { resolvePoolImpulse, TRUST_ROOT_POOL_SHAPES } = await import("../resolvers/pool-impulse.js");
       const { verifyOperatorAttestation } = await import("../lib/operator-hold.js");
       const r = resolvePoolImpulse(pointer as Parameters<typeof resolvePoolImpulse>[0]);
-      return { ...r, body: { ...r.body, impulses: r.body.impulses.map((imp) => ({ ...imp, attested_verified: verifyOperatorAttestation(imp).ok })) } };
+      return { ...r, body: { ...r.body, impulses: r.body.impulses.map((imp) => ({ ...imp, attested_verified: TRUST_ROOT_POOL_SHAPES.has(imp.shape) && verifyOperatorAttestation(imp).ok })) } };
     }
     case "poolImpulse_write": {
       const { resolvePoolImpulseWrite } = await import("../resolvers/pool-impulse.js");

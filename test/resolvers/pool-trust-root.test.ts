@@ -630,6 +630,16 @@ describe("posteriorReplayAuthorization is a trust-root pool shape, and the pool 
     expect(rows.get("pra-good")?.["attested_verified"]).toBe(true);
   });
 
+  it("MUST-FAIL: a row of an ORDINARY shape reads attested_verified:false, even with an operator stanza signed under this node's key", async () => {
+    const plain = { id: "plain-signed", shape: "timeShapedRhythm", body, source: "x", status: "open", injected_at: body.at, updated_at: body.at };
+    const sig = createHmac("sha256", NODE_KEY).update(["substrate-pool-attestation/v1", plain.id, plain.shape, "open", canon(body), "k1", body.at].join("\n")).digest("hex");
+    writeFileSync(FILE, JSON.stringify([{ ...plain, attested: { by: "operator", key_id: "k1", at: body.at, sig } }, { ...plain, id: "plain-bare" }]));
+    const res = await impulsesRouter.request("/v2/impulses/resolve", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ impulse: { type: "poolImpulse", shape: "timeShapedRhythm", status: "open" } }) });
+    const rows = new Map(((await res.json()) as { body: { impulses: Array<Record<string, unknown>> } }).body.impulses.map((r) => [String(r["id"]), r]));
+    expect(rows.get("plain-signed")?.["attested_verified"]).toBe(false);
+    expect(rows.get("plain-bare")?.["attested_verified"]).toBe(false);
+  });
+
   it("control: an operator write through the store's one writer reads back attested_verified:true", async () => {
     expect(resolvePoolImpulseWrite(w, { operator: true, key_id: "k1" }).body.ok).toBe(true);
     const r = (await read()).get("pra-1");

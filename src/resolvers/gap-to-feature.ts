@@ -5619,6 +5619,24 @@ export async function bumpFailedAttempts(gap: Record<string, unknown>, opts: { s
 /** The node an approach decision and its outcome belong to (as registerAttempt stamps attempt intents). */
 const decisionNode = (): string => process.env["SUBSTRATE_NAME"] ?? "substrate";
 
+/** The most recent approach decision that HAS an outcome. The reader at pick time runs after recordApproachDecision
+ *  pushed this pick's fresh, unjoined entry, so "the last entry" was always that fresh entry and never a judged one:
+ *  high_confidence_miss could not fire (0 lines in 24 h). */
+export function lastJudgedDecision(decs: unknown): Record<string, unknown> | undefined {
+  if (!Array.isArray(decs)) return undefined;
+  for (let i = decs.length - 1; i >= 0; i--) {
+    const e = decs[i] as Record<string, unknown> | null;
+    if (e && typeof e === "object" && e.outcome && typeof e.outcome === "object") return e;
+  }
+  return undefined;
+}
+/** The self-model predicted a land (p >= 0.7) on the most recent judged decision, and it did not land. */
+export function isHighConfidenceMiss(decs: unknown): boolean {
+  const last = lastJudgedDecision(decs);
+  const out = last?.outcome as Record<string, unknown> | undefined;
+  return !!(last && Number(last.predicted_p ?? 0) >= 0.7 && out && out.landed === false);
+}
+
 /** Records the pick's decision and returns its decision_id (null when the write could not be built). */
 export async function recordApproachDecision(gap: Record<string, unknown>): Promise<string | null> {
   try {
@@ -6922,10 +6940,7 @@ async function resolveGapToFeatureOnce(pointer: GapToFeaturePointer, attempt: { 
     try {
       const predR = predictLand(gap);
       const mR = (gap.classification_metadata ?? {}) as Record<string, unknown>;
-      const decs = Array.isArray(mR.approach_decisions) ? mR.approach_decisions as Array<Record<string, unknown>> : [];
-      const last = decs.length ? decs[decs.length - 1] : undefined;
-      const lastOutcome = last ? last.outcome as Record<string, unknown> | undefined : undefined;
-      const highConfMiss = !!(last && Number(last.predicted_p ?? 0) >= 0.7 && lastOutcome && lastOutcome.landed === false);
+      const highConfMiss = isHighConfidenceMiss(mR.approach_decisions);
       const lowConf = predR.p < 0.35;
       const alreadyInvestigated = mR.investigated_at !== undefined;
       if ((lowConf || highConfMiss) && !alreadyInvestigated) {

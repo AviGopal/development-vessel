@@ -215,3 +215,34 @@ describe("no decision_id is never a silent positional join", () => {
     expect(counters()["positional_single"]).toBe(before + 1);
   });
 });
+
+describe("the pick-time reader sees the last JUDGED decision, so high_confidence_miss can fire", () => {
+  // The base reader, used when the export is absent, so a red here is the behaviour and not a missing symbol.
+  const baseReader = (decs: Row[]): boolean => {
+    const last = decs.length ? decs[decs.length - 1] : undefined;
+    const out = last?.outcome as Row | undefined;
+    return !!(last && Number(last.predicted_p ?? 0) >= 0.7 && out && out.landed === false);
+  };
+  const isMiss = (decs: Row[]): boolean => (typeof g2f.isHighConfidenceMiss === "function" ? g2f.isHighConfidenceMiss(decs) : baseReader(decs));
+  it("after a decision with predicted_p 0.8 and outcome landed:false, the next pick (its fresh entry pushed) reads a high-confidence miss", async () => {
+    await seedGap(`join-hcm-${RUN}`);
+    const g0 = await row(`join-hcm-${RUN}`);
+    g0.classification_metadata.approach_decisions = [{ decision_id: "dec-prev", node: "n", at: "2026-10-09T22:54:00Z", predicted_p: 0.8, outcome: { landed: false } }];
+    await resolveSubstrateGapWrite({ type: "substrateGap_write", gap: g0 } as never);
+    const picked = await row(`join-hcm-${RUN}`);
+    const dNext = await g2f.recordApproachDecision(picked);   // mutates picked's decision list, as the pick does
+    const decs = picked.classification_metadata.approach_decisions as Row[];
+    expect(decs[decs.length - 1]!.decision_id).toBe(dNext);
+    expect(isMiss(decs)).toBe(true);
+  });
+  it("a landed or low-confidence last judged decision is not a miss; an unjoined-only list is not a miss", () => {
+    expect(isMiss([{ predicted_p: 0.9, outcome: { landed: true } }, { predicted_p: 0.9 }])).toBe(false);
+    expect(isMiss([{ predicted_p: 0.5, outcome: { landed: false } }, { predicted_p: 0.9 }])).toBe(false);
+    expect(isMiss([{ predicted_p: 0.9 }])).toBe(false);
+  });
+  it("the routing block reads isHighConfidenceMiss on the picked gap's decisions", () => {
+    const { readFileSync } = require("node:fs") as typeof import("node:fs");
+    const G2F = readFileSync(join(import.meta.dir, "..", "..", "src", "resolvers", "gap-to-feature.ts"), "utf8");
+    expect(G2F).toContain("const highConfMiss = isHighConfidenceMiss(mR.approach_decisions);");
+  });
+});

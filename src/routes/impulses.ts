@@ -47,6 +47,7 @@ import { resolveRhythmRealitySync } from "../resolvers/rhythm-reality-sync.js";
 import { resolveMemoryNote, resolveMemoryNoteWrite } from "../resolvers/memory-note.js";
 import { resolveSubstrateGap, resolveSubstrateGapWrite, resolveSubstrateGapLease } from "../resolvers/substrate-gap.js";
 import { resolvePoolImpulse, resolvePoolImpulseWrite, trustRootWriteShape, operatorCredential } from "../resolvers/pool-impulse.js";
+import { operatorDirectGrant, runWithOperatorDirectGrant, OPERATOR_AUTHORIZATION_HEADER, type OperatorDirectGrant } from "../lib/operator-direct.js";
 import { identityCredential, isNodeSelfCredential, isWritePointerType, type CallerCredential } from "../lib/caller-credential.js";
 import { resolveFsList } from "../resolvers/fs-list.js";
 import { resolveFsGrep } from "../resolvers/fs-grep.js";
@@ -1209,8 +1210,23 @@ impulsesRouter.post("/v2/impulses/resolve", async (c) => {
     (pointer as Record<string, unknown>)["_route_caller"] = { auth: callerAuthLabel(writeCred ? { authenticated: writeCred.authenticated, node_self: isNodeSelfCredential(writeCred), key_id: writeCred.keyId, scopes: writeCred.scopes } : undefined), remote: routeRemote(c) };
   }
 
+  // OPERATOR-DIRECTED (lib/operator-direct.ts): a feature_compose carrying the operator's own credential in
+  // X-Operator-Authorization runs under a grant when identity says that key has "operator:direct" (or "admin");
+  // registerAttempt stamps an intent directed only under one. The header is never logged.
+  let operatorGrant: OperatorDirectGrant | null = null;
+  if (pointerType === "feature_compose") {
+    const opAuth = c.req.header(OPERATOR_AUTHORIZATION_HEADER);
+    if (opAuth) {
+      const gapId = (pointer as { gap?: { id?: unknown } }).gap?.id;
+      const g = await operatorDirectGrant(opAuth, { gap_id: typeof gapId === "string" ? gapId : null });
+      operatorGrant = g.grant;
+      console.log(`[operator-direct] feature_compose gap=${typeof gapId === "string" ? gapId : "<none>"}: ${g.grant ? `granted (key_id ${g.grant.key_id ?? "<none>"})` : `not granted (${g.why ?? "refused"}); runs autonomous`}`);
+    }
+  }
+
   try {
-    const result = await resolveDispatch({ ...(pointer as Record<string, unknown>), type: pointerType });
+    const dispatchOnce = () => resolveDispatch({ ...(pointer as Record<string, unknown>), type: pointerType });
+    const result = operatorGrant ? await runWithOperatorDirectGrant(operatorGrant, dispatchOnce) : await dispatchOnce();
     // Wire-level boundary lie fix (V1, 2026-06-06): a resolver that returns
     // shape:"structuredError" is signalling a substantive failure (missing
     // required field, vessel-not-found, etc). The HTTP envelope must reflect

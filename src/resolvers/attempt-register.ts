@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { appendRecord, readRecords, ledgerDir } from "./attempt-ledger.js";
+import { currentOperatorDirectGrant, OPERATOR_DIRECT_SCOPE } from "../lib/operator-direct.js";
 import { invariantSelect, takeSnapshot, type CheckResult } from "./attempt-checks.js";
 import { resolveUnaccountedLandingScan } from "./unaccounted-landing-scan.js";
 import { resolveSubstrateGap, resolveSubstrateGapWrite } from "./substrate-gap.js";
@@ -147,6 +148,15 @@ export async function registerAttempt(input: { route: string; repo: string; touc
     });
     const pre_snapshot_id = (snapshot as any).snapshot_id;
 
+    // DIRECTED NEEDS THE OPERATOR'S KEY (lib/operator-direct.ts). A caller saying directed:true registers directed
+    // only under an operator-direct grant: identity validated the operator's own forwarded credential with the
+    // "operator:direct" scope (or "admin", interim), for this attempt's gap. Without one the intent is registered
+    // autonomous (directed:false), whatever the pointer said, and the cutover then applies the autonomy scope.
+    const grant = input.directed === true ? currentOperatorDirectGrant() : null;
+    const directedGranted = input.directed === true && grant !== null && grant.gap_id === (input.gap_id ?? null);
+    if (input.directed === true && !directedGranted) {
+      console.warn(`[attempt-register] ${attempt_id}: directed requested without an ${OPERATOR_DIRECT_SCOPE} grant${grant ? ` (grant is for gap ${grant.gap_id ?? "<none>"}, not ${input.gap_id ?? "<none>"})` : ""}; registered autonomous`);
+    }
     const intent = {
       attempt_id,
       route: input.route,
@@ -159,7 +169,9 @@ export async function registerAttempt(input: { route: string; repo: string; touc
       // Operator-directed vs autonomous. The commit message cannot say (every landing reads
       // "Applied autonomously"); the sweep reads this through the Attempt-Id trailer and judges only an
       // explicit false. A caller that does not say records null (unknown), never false.
-      directed: typeof input.directed === "boolean" ? input.directed : null,
+      directed: input.directed === true ? directedGranted : (typeof input.directed === "boolean" ? input.directed : null),
+      // Which operator key directed it (identity's key id), when it was directed; null otherwise.
+      directed_by_key_id: directedGranted ? grant!.key_id : null,
       // The gap_to_feature pick's approach decision (dec-…) this attempt executes. The Attempt-Id trailer names
       // this intent, so this is the one link from a landed commit back to the decision its outcome joins.
       decision_id: typeof input.decision_id === "string" && input.decision_id ? input.decision_id : null,

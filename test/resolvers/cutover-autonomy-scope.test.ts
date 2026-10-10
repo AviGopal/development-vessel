@@ -31,7 +31,7 @@
 import { describe, it, expect, beforeEach, afterEach, afterAll, spyOn } from "bun:test";
 import * as cutoverMod from "../../src/resolvers/vessel-mitosis-cutover.js";
 import { registerAttempt } from "../../src/resolvers/attempt-register.js";
-import { appendRecord } from "../../src/resolvers/attempt-ledger.js";
+import { appendRecord, readRecords } from "../../src/resolvers/attempt-ledger.js";
 import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -42,13 +42,18 @@ import { installCutoverFsGuard, restoreCutoverFsModules, type FsGuard } from "./
 
 const { resolveVesselMitosisCutover, __setOwnCheckDepsForTests } = cutoverMod;
 const { __resetPolicyReadsForTests, autonomyScopeExcludes } = await import("../../src/resolvers/gap-to-feature.js");
+// AUTHENTICATED DIRECTED (lib/operator-direct.ts): a directed intent is stamped only under a grant identity gave the
+// operator's own key ("operator:direct", or "admin" interim). Imported softly so the must-fails below are red at a
+// parent without the module for the behaviour (it stamps every directed:true), not for a missing import.
+type OperatorDirect = typeof import("../../src/lib/operator-direct.js");
+const od = (await import("../../src/lib/operator-direct.js").catch(() => null)) as OperatorDirect | null;
 /** Present only on a tree with the chokepoint; on the parent this is a no-op (the parent has no scope read to stub). */
 const clearScopeDefault = (): void => (cutoverMod as unknown as { __setAutonomyScopeDefaultForTests?: (r: null) => void }).__setAutonomyScopeDefaultForTests?.(null);
 
 const ENV_KEYS = [
   "WORKSPACE_ROOT", "MITOSIS_CUTOVER_SKIP_SYSTEMCTL", "MITOSIS_DIRECT_PUSH", "MITOSIS_RUNTIME_DIR", "MITOSIS_PUSH_CLONE_DIR",
   "MITOSIS_HOST_SYNC_MODE", "MITOSIS_HOST_REPO_ROOT", "PUSH_POLICY_PATH", "SUBSTRATE_REPO_OWNER", "CUTOVER_PRECHECK_SUITE",
-  "MAINTENANCE_LEASE_PATH", "GAP_STORE_ENDPOINT", "ATTEMPT_LEDGER_DIR", "METABOB_API_KEY",
+  "MAINTENANCE_LEASE_PATH", "GAP_STORE_ENDPOINT", "ATTEMPT_LEDGER_DIR", "METABOB_API_KEY", "IDENTITY_VESSEL_URL",
 ] as const;
 const saved: Record<string, string | undefined> = {};
 let ws: string;
@@ -62,6 +67,28 @@ afterAll(() => {
 });
 
 const AT = "2026-10-10T10:00:00.000Z";
+// identity-vessel stand-in (fixture keys only). Every key is the same user/org/role; only the scopes differ.
+const IDENTITY = "http://127.0.0.1:59199";
+const RW_KEY = "rw-key-fixture";            // the cockpit key / goal-host's fleet key today: read, write
+const OP_DIRECT_KEY = "opdirect-key-fixture"; // the operator key deployment will issue: operator:direct
+const ADMIN_KEY = "admin-key-fixture";      // the interim fallback
+const VERDICT_KEY = "verdict-key-fixture";  // verdict:human only: labels, never directs
+const IDENTITY_KEYS: Record<string, { keyId: string; scopes: string[] }> = {
+  [RW_KEY]: { keyId: "k-rw", scopes: ["read", "write"] },
+  [OP_DIRECT_KEY]: { keyId: "k-opdirect", scopes: ["read", "write", "verdict:human", "operator:direct"] },
+  [ADMIN_KEY]: { keyId: "k-admin", scopes: ["read", "write", "admin"] },
+  [VERDICT_KEY]: { keyId: "k-verdict", scopes: ["read", "write", "verdict:human"] },
+};
+function routeIdentity(g: FetchGuard): void {
+  g.route({
+    name: "identity (auth resolve)",
+    match: (u) => u === `${IDENTITY}/v1/auth/resolve`,
+    respond: (_u, b) => {
+      const k = IDENTITY_KEYS[String(b?.impulse?.pointer?.apiKey ?? "")];
+      return k ? Response.json({ success: true, data: { authenticated: true, orgId: "o", userId: "u", role: "user", keyId: k.keyId, scopes: k.scopes } }) : Response.json({ success: false }, { status: 401 });
+    },
+  });
+}
 const FIXTURE_KEY = "f1-fixture-node-key";
 const EXCLUDED_DV = "src/resolvers/feature-compose.ts";
 const SCOPE_BODY = {
@@ -117,6 +144,8 @@ beforeEach(async () => {
     return `VERIFIED_ROOT=${currentHost}\nVERIFIED_HEAD=abc1234\n${BUN_NO_TESTS}`;
   });
   routeScope(guard); // after routeShell: later routes win, so the poolImpulse lookup is answered here
+  process.env["IDENTITY_VESSEL_URL"] = IDENTITY;
+  routeIdentity(guard);
   errLines = [];
   errSpy = spyOn(console, "error").mockImplementation((...a: unknown[]) => { errLines.push(a.map(String).join(" ")); });
 });
@@ -212,12 +241,24 @@ function ownCheckPasses(s: Fixture, row: Record<string, unknown>): void {
     runSuite: async () => ({ shape: "test_suite", body: { vessel: `repos/${s.vessel}`, verified_root: s.hostRepoRoot, ran: true, total: 1, pass: 1, fail: 0, skip: 0, requested_not_passing: 0, failingTests: [] } }),
   });
 }
-/** feature_compose's registration, as feature-compose.ts calls it before the cutover. */
-async function registerCompose(gap: string, files: string[], directed: boolean): Promise<string> {
-  const reg = await registerAttempt({ route: "feature_compose", repo: "/workspace/git/vessels/development-vessel", touched_files: files, gap_id: gap, authoring_execution_id: null, dispatch_id: null, directed, decision_id: null });
+/**
+ * feature_compose's registration, as feature-compose.ts calls it before the cutover. `operatorKey` is the key the
+ * operator's /run-goal request carried (goal-host forwards it as X-Operator-Authorization); the resolve route asks
+ * identity for a grant for this gap and runs the compose under it, as done here.
+ */
+async function registerCompose(gap: string, files: string[], directed: boolean, operatorKey?: string, grantGap: string = gap): Promise<string> {
+  const register = () => registerAttempt({ route: "feature_compose", repo: "/workspace/git/vessels/development-vessel", touched_files: files, gap_id: gap, authoring_execution_id: null, dispatch_id: null, directed, decision_id: null });
+  let reg: Awaited<ReturnType<typeof registerAttempt>>;
+  if (od && operatorKey) {
+    const { grant } = await od.operatorDirectGrant(`ApiKey ${operatorKey}`, { gap_id: grantGap });
+    reg = grant ? await od.runWithOperatorDirectGrant(grant, register) : await register();
+  } else {
+    reg = await register();
+  }
   expect(reg.attempt_id).toBeTruthy();
   return reg.attempt_id!;
 }
+const intentOf = (attemptId: string) => readRecords("attemptIntent", { key: attemptId })[0]?.record as Record<string, unknown> | undefined;
 
 const bodyOf = (r: { body?: unknown }) => (r.body ?? {}) as Record<string, unknown>;
 const headSubject = (s: Fixture) => git(s.hostRepoRoot, "log", "-1", "--format=%s");
@@ -304,7 +345,7 @@ describe("cutover: directedness is not self-declared", () => {
 
   it("MUST-FAIL (h) a stamped directed intent covers only the files it registered: staging an extra excluded file under it is autonomous, and refused", async () => {
     const gap = "gap-f1-directed-overreach";
-    const attemptId = await registerCompose(gap, ["src/resolvers/target.ts"], true);
+    const attemptId = await registerCompose(gap, ["src/resolvers/target.ts"], true, OP_DIRECT_KEY);
     const s = await setup({ route: "feature_compose", files: ["src/resolvers/target.ts", EXCLUDED_DV], gap, attemptId });
     ownCheckPasses(s, gapRow(gap, s.vessel, "repos/development-vessel/src/resolvers/target.ts"));
     const r = await resolveVesselMitosisCutover(s.pointer as never);
@@ -313,7 +354,7 @@ describe("cutover: directedness is not self-declared", () => {
 
   it("MUST-FAIL (i) a stamped directed intent binds its vessel: replaying a development-vessel src/index.ts intent onto goal-host-vessel src/index.ts is autonomous, and refused", async () => {
     const gap = "gap-f1-directed-replay";
-    const attemptId = await registerCompose(gap, ["src/index.ts"], true);
+    const attemptId = await registerCompose(gap, ["src/index.ts"], true, OP_DIRECT_KEY);
     const s = await setup({ route: "feature_compose", vessel: "goal-host-vessel", files: ["src/index.ts"], gap, attemptId });
     ownCheckPasses(s, gapRow(gap, s.vessel, "repos/goal-host-vessel/src/index.ts"));
     const r = await resolveVesselMitosisCutover(s.pointer as never);
@@ -322,12 +363,59 @@ describe("cutover: directedness is not self-declared", () => {
 
   it("CONTROL (b) an operator-directed landing of the same excluded file (feature_compose registered it directed) lands", async () => {
     const gap = "gap-f1-directed";
-    const attemptId = await registerCompose(gap, [EXCLUDED_DV], true);
+    const attemptId = await registerCompose(gap, [EXCLUDED_DV], true, OP_DIRECT_KEY);
     const s = await setup({ route: "feature_compose", files: [EXCLUDED_DV], gap, attemptId });
     ownCheckPasses(s, gapRow(gap, s.vessel, `repos/development-vessel/${EXCLUDED_DV}`));
     const r = await resolveVesselMitosisCutover(s.pointer as never);
     await expectLanded(s, r, [EXCLUDED_DV]);
   });
+});
+
+describe("cutover: directed is the operator key's scope, not the request's say-so", () => {
+  it("MUST-FAIL (f1) a feature_compose sent with an operator field and directed:true, carrying a read/write key, is NOT directed: no stamp, and refused on an excluded path", async () => {
+    const gap = "gap-f1-rw-key";
+    const attemptId = await registerCompose(gap, [EXCLUDED_DV], true, RW_KEY);
+    expect(intentOf(attemptId)?.["directed"]).toBe(false);
+    expect(intentOf(attemptId)?.["directed_stamp"]).toBeUndefined();
+    const s = await setup({ route: "feature_compose", files: [EXCLUDED_DV], gap, attemptId, pointerExtra: { directed: true, operator: "avi" } });
+    ownCheckPasses(s, gapRow(gap, s.vessel, `repos/development-vessel/${EXCLUDED_DV}`, { directed: true }));
+    const r = await resolveVesselMitosisCutover(s.pointer as never);
+    await expectScopeRefused(s, r, "autonomy_scope_excluded", [{ entry: SCOPE_BODY.excluded_paths[0]!, file: `repos/development-vessel/${EXCLUDED_DV}` }]);
+  });
+
+  it("MUST-FAIL (f1') a verdict:human key (labels only) does not direct a compose: the two scopes are separate", async () => {
+    const gap = "gap-f1-verdict-key";
+    const attemptId = await registerCompose(gap, [EXCLUDED_DV], true, VERDICT_KEY);
+    expect(intentOf(attemptId)?.["directed"]).toBe(false);
+    const s = await setup({ route: "feature_compose", files: [EXCLUDED_DV], gap, attemptId });
+    ownCheckPasses(s, gapRow(gap, s.vessel, `repos/development-vessel/${EXCLUDED_DV}`));
+    const r = await resolveVesselMitosisCutover(s.pointer as never);
+    await expectScopeRefused(s, r, "autonomy_scope_excluded", [{ entry: SCOPE_BODY.excluded_paths[0]!, file: `repos/development-vessel/${EXCLUDED_DV}` }]);
+  });
+
+  it("MUST-FAIL (f1'') an operator grant for another gap does not direct this one", async () => {
+    const gap = "gap-f1-other-gap";
+    const attemptId = await registerCompose(gap, [EXCLUDED_DV], true, OP_DIRECT_KEY, "gap-somewhere-else");
+    expect(intentOf(attemptId)?.["directed"]).toBe(false);
+    const s = await setup({ route: "feature_compose", files: [EXCLUDED_DV], gap, attemptId });
+    ownCheckPasses(s, gapRow(gap, s.vessel, `repos/development-vessel/${EXCLUDED_DV}`));
+    const r = await resolveVesselMitosisCutover(s.pointer as never);
+    await expectScopeRefused(s, r, "autonomy_scope_excluded", [{ entry: SCOPE_BODY.excluded_paths[0]!, file: `repos/development-vessel/${EXCLUDED_DV}` }]);
+  });
+
+  for (const [label, key, keyId] of [["(f2) an operator:direct-scoped key", OP_DIRECT_KEY, "k-opdirect"], ["(f3) an admin-scoped key (interim)", ADMIN_KEY, "k-admin"]] as const) {
+    it(`MUST-FAIL ${label} directs: the intent is stamped, names the key, and the excluded file lands`, async () => {
+      const gap = `gap-f1-${keyId}`;
+      const attemptId = await registerCompose(gap, [EXCLUDED_DV], true, key);
+      expect(intentOf(attemptId)?.["directed"]).toBe(true);
+      expect(typeof intentOf(attemptId)?.["directed_stamp"]).toBe("string");
+      expect(intentOf(attemptId)?.["directed_by_key_id"]).toBe(keyId);
+      const s = await setup({ route: "feature_compose", files: [EXCLUDED_DV], gap, attemptId });
+      ownCheckPasses(s, gapRow(gap, s.vessel, `repos/development-vessel/${EXCLUDED_DV}`));
+      const r = await resolveVesselMitosisCutover(s.pointer as never);
+      await expectLanded(s, r, [EXCLUDED_DV]);
+    });
+  }
 });
 
 describe("cutover: open files land; the scope fails closed", () => {
@@ -353,7 +441,7 @@ describe("cutover: open files land; the scope fails closed", () => {
   it("CONTROL (d') the scope is unreadable: a directed landing never consults it and lands", async () => {
     scopeMode = "unreadable";
     const gap = "gap-f1-unreadable-directed";
-    const attemptId = await registerCompose(gap, [EXCLUDED_DV], true);
+    const attemptId = await registerCompose(gap, [EXCLUDED_DV], true, OP_DIRECT_KEY);
     const s = await setup({ route: "feature_compose", files: [EXCLUDED_DV], gap, attemptId });
     ownCheckPasses(s, gapRow(gap, s.vessel, `repos/development-vessel/${EXCLUDED_DV}`));
     const r = await resolveVesselMitosisCutover(s.pointer as never);

@@ -367,8 +367,14 @@ async function dispatchInner(pointer: AnyPointer): Promise<ResolverResult> {
       return resolveResolverSchema(p as Record<string, unknown>);
     }
     case "poolImpulse": {
+      // attested_verified: whether the row carries an operator stamp whose signature verifies under THIS node's key
+      // (operator-hold's check). A reader on another vessel trusts this verdict from its own node's route instead of
+      // holding the key: anyone who can verify the HMAC can also forge it. Added here, not in the store, so
+      // in-process readers see rows exactly as stored.
       const { resolvePoolImpulse } = await import("../resolvers/pool-impulse.js");
-      return resolvePoolImpulse(pointer as Parameters<typeof resolvePoolImpulse>[0]);
+      const { verifyOperatorAttestation } = await import("../lib/operator-hold.js");
+      const r = resolvePoolImpulse(pointer as Parameters<typeof resolvePoolImpulse>[0]);
+      return { ...r, body: { ...r.body, impulses: r.body.impulses.map((imp) => ({ ...imp, attested_verified: verifyOperatorAttestation(imp).ok })) } };
     }
     case "poolImpulse_write": {
       const { resolvePoolImpulseWrite } = await import("../resolvers/pool-impulse.js");

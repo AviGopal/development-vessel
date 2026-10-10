@@ -577,3 +577,66 @@ describe("attested.sig: the stamp is signed under this node's key over the store
     expect(rowOf("sig-plain")).not.toHaveProperty("attested");
   });
 });
+
+// posteriorReplayAuthorization: the operator's go for activity-api's β-leak replay writes. activity-api trusts the
+// attested_verified verdict that THIS node's poolImpulse read adds (it never holds the attestation key), so the
+// verdict must be false for anything but an operator stamp that verifies under this node's key.
+describe("posteriorReplayAuthorization is a trust-root pool shape, and the pool read reports attested_verified", () => {
+  const { createHmac } = require("node:crypto") as typeof import("node:crypto");
+  const { writeFileSync } = require("node:fs") as typeof import("node:fs");
+  const FILE = join(ROOT, "replay-auth-pool.json");
+  const body = { node: "local-dev-spoke", list_sha256: "a".repeat(64), eligibility_sha256: "b".repeat(64), by: "operator:avi", at: "2026-10-10T00:00:00Z", reason: "test", review_by: "2026-10-17T00:00:00Z" };
+  const w = { type: "poolImpulse_write", id: "pra-1", shape: "posteriorReplayAuthorization", status: "open" as const, body };
+  const read = async () => {
+    const res = await impulsesRouter.request("/v2/impulses/resolve", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ impulse: { type: "poolImpulse", shape: "posteriorReplayAuthorization", status: "open" } }) });
+    expect(res.status).toBe(200);
+    const j = (await res.json()) as { body: { impulses: Array<Record<string, unknown>> } };
+    return new Map(j.body.impulses.map((r) => [String(r["id"]), r]));
+  };
+  // The writer's signature, recomputed here independently (as in the attested.sig describe above).
+  const canon = (v: unknown): string => {
+    if (v === null || typeof v !== "object") return JSON.stringify(v ?? null);
+    if (Array.isArray(v)) return "[" + v.map(canon).join(",") + "]";
+    const o = v as Record<string, unknown>;
+    return "{" + Object.keys(o).filter((k) => o[k] !== undefined).sort().map((k) => JSON.stringify(k) + ":" + canon(o[k])).join(",") + "}";
+  };
+  const sigUnder = (key: string, id: string, at: string) => createHmac("sha256", key).update(["substrate-pool-attestation/v1", id, "posteriorReplayAuthorization", "open", canon(body), "k1", at].join("\n")).digest("hex");
+  const row = (id: string, attested: Record<string, unknown> | undefined) => ({ id, shape: "posteriorReplayAuthorization", body, source: "x", status: "open", injected_at: body.at, updated_at: body.at, ...(attested ? { attested } : {}) });
+
+  beforeEach(() => { pool.__setPoolFileForTests(FILE); writeFileSync(FILE, "[]"); });
+  afterEach(() => pool.__setPoolFileForTests(null));
+
+  it("MUST-FAIL: a write without an operator credential is refused and nothing is stored", () => {
+    for (const auth of [undefined, { operator: false }, { operator: false, evaluator: "scope_earn_in_apply" }]) {
+      const r = resolvePoolImpulseWrite(w, auth);
+      expect(r.body.ok).toBe(false);
+      expect(r.body.error).toContain("operator_credential_required");
+    }
+    expect(resolvePoolImpulse({ type: "poolImpulse", shape: "posteriorReplayAuthorization" }).body.count).toBe(0);
+  });
+
+  it("MUST-FAIL: forged, unsigned, peer-signed and unattested rows read attested_verified:false through the route", async () => {
+    writeFileSync(FILE, JSON.stringify([
+      row("pra-forged", { by: "operator", key_id: "k1", at: body.at, sig: "f".repeat(64) }),
+      row("pra-unsigned", { by: "operator", key_id: "k1", at: body.at }),
+      row("pra-peer", { by: "operator", key_id: "k1", at: body.at, sig: sigUnder("some-peer-node-key", "pra-peer", body.at) }),
+      row("pra-evaluator", { by: "evaluator", evaluator: "scope_earn_in_apply", key_id: null, at: body.at, sig: sigUnder(NODE_KEY, "pra-evaluator", body.at) }),
+      row("pra-none", undefined),
+      // positive control in the same file: this node's key, the writer's exact string
+      row("pra-good", { by: "operator", key_id: "k1", at: body.at, sig: sigUnder(NODE_KEY, "pra-good", body.at) }),
+    ]));
+    const rows = await read();
+    for (const id of ["pra-forged", "pra-unsigned", "pra-peer", "pra-evaluator", "pra-none"]) expect([id, rows.get(id)?.["attested_verified"]]).toEqual([id, false]);
+    expect(rows.get("pra-good")?.["attested_verified"]).toBe(true);
+  });
+
+  it("control: an operator write through the store's one writer reads back attested_verified:true", async () => {
+    expect(resolvePoolImpulseWrite(w, { operator: true, key_id: "k1" }).body.ok).toBe(true);
+    const r = (await read()).get("pra-1");
+    expect(r?.["attested"]).toMatchObject({ by: "operator", key_id: "k1" });
+    expect(r?.["attested_verified"]).toBe(true);
+    // ...and false once this node's key is not the one it was signed under
+    process.env["METABOB_API_KEY"] = "a-different-node-key";
+    expect((await read()).get("pra-1")?.["attested_verified"]).toBe(false);
+  });
+});

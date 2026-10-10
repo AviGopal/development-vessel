@@ -135,7 +135,10 @@ export function resolvePoolImpulse(pointer: {
 //   operatorHold: one operator hold per row (src/lib/operator-hold.ts reads it, fail-closed). A hold the
 //   autonomous lane could write could also be LIFTED by it, which would be the lane lifting its own
 //   containment, so it is operator-only: it is deliberately absent from EVALUATOR_TRUST_ROOT_WRITERS.
-export const TRUST_ROOT_POOL_SHAPES: ReadonlySet<string> = new Set(['substrateNodes', 'autonomyScope', 'spendEnvelope', 'calibrationWindow', 'scriptRunnerAllowlist', 'operatorHold']);
+//   posteriorReplayAuthorization: the operator's go for activity-api's β-leak replay writes, naming the node and
+//   the pinned list / eligibility shas. activity-api reads it from THIS node's route and trusts the
+//   attested_verified verdict the poolImpulse read adds (routes/impulses.ts); it never holds the attestation key.
+export const TRUST_ROOT_POOL_SHAPES: ReadonlySet<string> = new Set(['substrateNodes', 'autonomyScope', 'spendEnvelope', 'calibrationWindow', 'scriptRunnerAllowlist', 'operatorHold', 'posteriorReplayAuthorization']);
 /** key_id: the validated credential's key id (identity's identifier, never derived from the secret).
  *  evaluator: set only by in-process code (the HTTP route builds auth from the Authorization header alone, and a
  *  pointer field of that name is never read), naming the accepted evaluator making the write. */

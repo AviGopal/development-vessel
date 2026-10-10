@@ -121,7 +121,9 @@ describe("self-fact rows come from the gate-accepted copy, or nothing", () => {
       delete process.env["SELF_FACTS_PUBLIC_DIR"];
       __setGatePublicDirForTests(PUB);
     }
-  });
+    // It runs the node's REAL accepted self-fact rows (the override is cleared); one
+    // of them reads the journal for seconds, so bun's 5 s default flaps in-container.
+  }, 30_000);
   it("CONTROL (f): an ungated marker ⇒ origin/dev rows, as before", async () => {
     publish({ schema: 1, gated: false, source: "clone", accepted_sha: null, self_facts_sha256: null, writer: "pull-sync", written_at: "2026-10-06T00:00:00Z" });
     const b = await run();

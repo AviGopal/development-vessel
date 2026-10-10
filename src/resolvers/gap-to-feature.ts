@@ -4944,7 +4944,7 @@ export function isInfraRefusalBody(cb: Record<string, unknown> | null | undefine
 export interface PwtEscalationDeps {
   resolvePwt: (p: Record<string, unknown>) => Promise<ResolverResult>;
   updateClassPosterior: (cls: string, landed: boolean) => void;
-  bumpFailedAttempts: (gap: Record<string, unknown>, opts: { surprise?: boolean; predictedP?: number }) => Promise<void>;
+  bumpFailedAttempts: (gap: Record<string, unknown>, opts: { surprise?: boolean; predictedP?: number; decisionId?: string }) => Promise<void>;
   closeLandedGap: (gap: Record<string, unknown>, land: LandSignal) => Promise<{ closed: boolean; error?: string }>;
   persistGapMeta: (gap: Record<string, unknown>, patch: Record<string, unknown>) => Promise<void>;
   /** Whether the hold a pwt_escalation_held stamp names still reads held (lib/operator-hold.ts readOperatorHold). */
@@ -4978,6 +4978,7 @@ export async function escalateApplyFailureToPwt(
   spec: string,
   pred: { predicted: boolean; p: number },
   deps: PwtEscalationDeps = defaultPwtEscalationDeps(),
+  ref: { decision_id?: string } = {},
 ): Promise<{ escalated: boolean; landed: boolean; held: boolean; skipped_held: boolean }> {
   const _gm = ((gap as { classification_metadata?: Record<string, unknown> }).classification_metadata ??= {});
   let _pwtLanded = false;
@@ -5035,7 +5036,7 @@ export async function escalateApplyFailureToPwt(
   }
   if (!_pwtLanded && !held) {
     if (!isInfraRefusalBody(cb)) deps.updateClassPosterior(gapClassOf(gap), false);
-    await deps.bumpFailedAttempts(gap, { surprise: pred.predicted, predictedP: pred.p });
+    await deps.bumpFailedAttempts(gap, { surprise: pred.predicted, predictedP: pred.p, decisionId: ref.decision_id });
   }
   return { escalated, landed: _pwtLanded, held, skipped_held: stillHeld };
 }
@@ -5485,7 +5486,9 @@ export async function escalateToDecomposition(gap: Record<string, unknown>, why:
 }
 
 // Exported for unit test only (the investigation caller's one-decomposition-per-gap guard). No call-site change.
-export async function bumpFailedAttempts(gap: Record<string, unknown>, opts: { surprise?: boolean; predictedP?: number } = {}): Promise<void> {
+// `decisionId` is the pick's approach decision (resolveGapToFeature's attempt.id): the failure joins THAT decision.
+// Without it the join was positional (newest unjoined entry), so two overlapping picks of one gap swapped outcomes.
+export async function bumpFailedAttempts(gap: Record<string, unknown>, opts: { surprise?: boolean; predictedP?: number; decisionId?: string } = {}): Promise<void> {
   try {
     const id = String(gap.id ?? "");
     if (!id) return;
@@ -5521,7 +5524,7 @@ export async function bumpFailedAttempts(gap: Record<string, unknown>, opts: { s
       ? { human_exemption_attempts_remaining: exRem - 1, human_exemption_spent_at: new Date().toISOString() }
       : {};
     const meta = { ...meta0, ...exemptionPatch, failed_attempts: fa, last_failed_at: new Date().toISOString(), mispredicted_lands: mis, last_predicted_p: opts.predictedP ?? meta0.last_predicted_p };
-    joinDecisionOutcome(meta, { landed: false });
+    joinDecisionOutcome(meta, { landed: false }, opts.decisionId ? { decision_id: opts.decisionId } : {});
     const bumpWrite = await resolveSubstrateGapWrite({
       type: "substrateGap_write",
       // Conditional: a row closed since the fresh read above stays closed (no reopen, no compose pickup).
@@ -5817,6 +5820,7 @@ async function routeCapabilityGapToNewResolver(
   missingShape: string,
   meta: Record<string, unknown>,
   pointer: GapToFeaturePointer,
+  decisionId?: string,
 ): Promise<ResolverResult> {
   const targetVessel = typeof meta.target_vessel === "string" ? meta.target_vessel.trim() : "";
   // Validate target_vessel against the runtime root (module-level vesselDirExists, absolute
@@ -5946,7 +5950,7 @@ async function routeCapabilityGapToNewResolver(
   } else if (!isNonAttemptComposeResult(cb)) {
     if (!isInfraRefusalBody(cb)) updateClassPosterior(gapClassOf(gap), false);
     // A capacity refusal here is a retry, not a failure — see isNonAttemptComposeResult.
-    await bumpFailedAttempts(gap);
+    await bumpFailedAttempts(gap, { decisionId });
   }
   // ...and a retry must be RETRYABLE: release the cooldown the pick stamped, or the "retry"
   // is a five-minute exclusion for a compose that never ran.
@@ -7227,7 +7231,7 @@ const familySample: string[] = await (async () => {
         // gap stays as it is for the next tick.
         console.log(`[gap-to-feature] trace-store-reconcile for ${String(gap.id ?? "?")}: goal-host refused retryably (${res.status} ${text.slice(0, 160)}); not a failed attempt, left for the next tick`);
       } else {
-        await bumpFailedAttempts(gap);
+        await bumpFailedAttempts(gap, { decisionId: attempt.id });
       }
       return {
         shape: "gapToFeatureReport",
@@ -7242,7 +7246,7 @@ const familySample: string[] = await (async () => {
         },
       };
     } catch (e) {
-      await bumpFailedAttempts(gap);
+      await bumpFailedAttempts(gap, { decisionId: attempt.id });
       return {
         shape: "gapToFeatureReport",
         body: {
@@ -7279,7 +7283,7 @@ const familySample: string[] = await (async () => {
   if (String(gap.category ?? "") === "unreachable_producer") {
     const repaired = await resolveReachabilityGapRepair({ type: "reachability_gap_repair", gap_id: String(gap.id ?? ""), dry_run: pointer.dry_run });
     const rb = (repaired?.body ?? {}) as Record<string, unknown>;
-    if (!pointer.dry_run && rb["verdict"] !== "FAVORABLE") await bumpFailedAttempts(gap);
+    if (!pointer.dry_run && rb["verdict"] !== "FAVORABLE") await bumpFailedAttempts(gap, { decisionId: attempt.id });
     if (!pointer.dry_run && rb["verdict"] === "FAVORABLE") {
       try {
         await resolveSubstrateGapWrite({
@@ -7325,7 +7329,7 @@ const familySample: string[] = await (async () => {
     // every run FOREVER (observed: residual_shape_discovery MINT_FAILED hourly with
     // failed_attempts unset), starving other gaps — the same liveness bug as the
     // detector-re-emit wipe, on a different code path. Bump so the loop moves on. (2026-07-01)
-    if (!pointer.dry_run && !minted) await bumpFailedAttempts(gap);
+    if (!pointer.dry_run && !minted) await bumpFailedAttempts(gap, { decisionId: attempt.id });
     // CLOSE-ON-MINT (2026-07-01): a minted bridge IS the closure — the resolver is now
     // invoked by a Thompson-selectable activity, so it is no longer orphaned. Without
     // closing, the open-filtered picker re-selects the SAME top orphaned gap every run
@@ -7380,12 +7384,12 @@ const familySample: string[] = await (async () => {
     if (String(cgMeta.kind ?? "") === "capability_gap") {
       const missingShape = String(cgMeta.missing_shape ?? "").trim();
       if (missingShape) {
-        const cgResult = await routeCapabilityGapToNewResolver(gap, missingShape, cgMeta, pointer);
+        const cgResult = await routeCapabilityGapToNewResolver(gap, missingShape, cgMeta, pointer, attempt.id);
         // Same liveness fix: this route's failure returns (ok:false) never bumped
         // failed_attempts either, so a capability_gap the author can't satisfy would
         // be re-selected forever. Bump on failure so the loop moves on. (2026-07-01)
         if (!pointer.dry_run && (cgResult?.body as { ok?: boolean } | undefined)?.ok === false) {
-          await bumpFailedAttempts(gap);
+          await bumpFailedAttempts(gap, { decisionId: attempt.id });
         }
         return cgResult;
       }
@@ -7532,7 +7536,7 @@ const familySample: string[] = await (async () => {
     if (!allOk && !pointer.dry_run && isTerminalRefusalResult(lastBody)) await markTerminalRefusal(gap, lastBody);
     else if (!allOk && !pointer.dry_run && !isNonAttemptComposeResult(lastBody)) {
       if (!isInfraRefusalBody(lastBody)) updateClassPosterior(gapClassOf(gap), false);
-      await bumpFailedAttempts(gap);
+      await bumpFailedAttempts(gap, { decisionId: attempt.id });
     }
     // ...so it must not serve the cooldown either. Same reasoning as the credit exemption above.
     requeueAfterNonAttempt(gapComposeLastAttemptAt, String(gap.id ?? ""), lastBody);
@@ -7623,7 +7627,7 @@ const familySample: string[] = await (async () => {
       // is an OBJECT — the coaxed draft (daf6d36) used .includes/.push on it (runtime crash) + a
       // bogus threading string; corrected here to property access + the real resolver signature.
       // The escalation and its grading live in escalateApplyFailureToPwt; a HELD escalation is not graded.
-      await escalateApplyFailureToPwt(gap, cb, spec, pred);
+      await escalateApplyFailureToPwt(gap, cb, spec, pred, undefined, { decision_id: attempt.id });
     }
   }
 

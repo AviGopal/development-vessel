@@ -31,6 +31,6 @@ describe("a goal-host 503 that says retryable/draining/quiesced is not a failed 
     const i = SRC.indexOf("const dispatched = res.ok;");
     expect(i).toBeGreaterThan(0);
     const branch = SRC.slice(i, SRC.indexOf('dispatch_status: res.status', i));
-    expect(branch).toMatch(/\} else if \(isRetryableDispatchRefusal\(res\.status, text\)\) \{[\s\S]*?\} else \{\s*await bumpFailedAttempts\(gap\);/);
+    expect(branch).toMatch(/\} else if \(isRetryableDispatchRefusal\(res\.status, text\)\) \{[\s\S]*?\} else \{\s*await bumpFailedAttempts\(gap, \{ decisionId: attempt\.id \}\);/);
   });
 });

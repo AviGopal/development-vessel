@@ -3,7 +3,10 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import type { ResolverResult } from './types.js';
 
-export type LedgerKind = "attemptIntent" | "stateSnapshot" | "attemptOutcome" | "attemptSettlement" | "landingEvent";
+// attemptRevert: the auto-revert's once-per-landing marker (gap-to-feature autoRevertRegressedLandings), one
+// record per status transition, keyed `<reverted attempt id>#revert:<seq>:<status>` (appendRecord refuses a
+// repeated key, so a transition is a new key, never a rewrite); the reader takes the latest by file order.
+export type LedgerKind = "attemptIntent" | "stateSnapshot" | "attemptOutcome" | "attemptSettlement" | "landingEvent" | "attemptRevert";
 
 export function ledgerDir(): string {
   if (process.env.ATTEMPT_LEDGER_DIR) return process.env.ATTEMPT_LEDGER_DIR;
@@ -18,6 +21,7 @@ const VALID_LEDGER_KINDS: ReadonlySet<string> = new Set<LedgerKind>([
   "attemptOutcome",
   "attemptSettlement",
   "landingEvent",
+  "attemptRevert",
 ]);
 
 type LedgerRecord = {

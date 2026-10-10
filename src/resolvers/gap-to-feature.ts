@@ -5645,9 +5645,20 @@ export async function recordApproachDecision(gap: Record<string, unknown>): Prom
   } catch { /* best-effort */ return null; }
 }
 
-/** OWNED JOIN: an outcome joins the entry with its decision_id, else the newest unjoined entry its own node made
- *  (or a legacy entry with no node), else it is appended as its own joined entry. It never writes onto another
- *  node's decision: two nodes picking one gap each keep their own decision/outcome pair. */
+/** How each joinDecisionOutcome call was attributed, since process start. by_id: joined the entry its decision_id
+ *  names. by_id_appended: the named entry was gone (shifted out by the 5-entry cap, or already joined), appended
+ *  under that id. positional_single: no decision_id, exactly one unjoined entry of this node, joined it.
+ *  unattributed_ambiguous: no decision_id and two or more candidates, appended as its own unattributed entry rather
+ *  than guessing. appended_no_candidate: no decision_id and nothing unjoined (the bulk-close shape). Every
+ *  non-by_id path also logs a [decision-join] line carrying the running count. */
+const decisionJoinCounts = { by_id: 0, by_id_appended: 0, positional_single: 0, unattributed_ambiguous: 0, appended_no_candidate: 0 };
+export function decisionJoinCounters(): Readonly<typeof decisionJoinCounts> { return { ...decisionJoinCounts }; }
+
+/** OWNED JOIN: an outcome joins the entry with its decision_id. WITHOUT one it is NEVER silently positional: it
+ *  joins the only unjoined entry its own node made (or a legacy entry with no node) when there is exactly one, and
+ *  with two or more it does not guess (guessing is what swapped the outcomes of two overlapping picks); the outcome
+ *  is appended as its own entry marked unattributed. Each path is counted (decisionJoinCounters) and logged. It
+ *  never writes onto another node's decision: two nodes picking one gap each keep their own decision/outcome pair. */
 export function joinDecisionOutcome(meta: Record<string, unknown>, outcome: Record<string, unknown>, ref: { decision_id?: string; node?: string } = {}): boolean {
   const node = ref.node ?? decisionNode();
   // An absent or fully-joined decision list is not a reason to discard a terminal outcome.
@@ -5671,16 +5682,37 @@ export function joinDecisionOutcome(meta: Record<string, unknown>, outcome: Reco
     });
     if (already) return false;
   }
-  for (let i = arr.length - 1; i >= 0; i--) {
-    const entry = arr[i] as Record<string, unknown> | null;
-    if (!entry || typeof entry !== "object" || "outcome" in entry) continue;
-    const mine = ref.decision_id ? entry.decision_id === ref.decision_id : (entry.node === undefined || entry.node === node);
-    if (mine) {
+  const unjoined = (arr as Array<Record<string, unknown> | null>).filter((e): e is Record<string, unknown> => !!e && typeof e === "object" && !("outcome" in e));
+  const what = `landed=${String(outcome.landed)}${outcome.commit ? ` commit=${String(outcome.commit).slice(0, 12)}` : ""}`;
+  let extra: Record<string, unknown> = {};
+  if (ref.decision_id) {
+    const entry = unjoined.find((e) => e.decision_id === ref.decision_id);
+    if (entry) {
+      decisionJoinCounts.by_id += 1;
       entry.outcome = { ...outcome, joined_at: new Date().toISOString() };
       return true;
     }
+    decisionJoinCounts.by_id_appended += 1;
+    console.log(`[decision-join] ${what}: decision ${ref.decision_id} is not an unjoined entry (capped out or already joined); appended under its id (by_id_appended=${decisionJoinCounts.by_id_appended})`);
+    extra = { decision_id: ref.decision_id };
+  } else {
+    const candidates = unjoined.filter((e) => e.node === undefined || e.node === node);
+    if (candidates.length === 1) {
+      decisionJoinCounts.positional_single += 1;
+      console.warn(`[decision-join] ${what}: NO decision_id; joined the only unjoined entry of ${node} (${String(candidates[0]!.decision_id ?? "legacy, no id")}) positionally (positional_single=${decisionJoinCounts.positional_single})`);
+      candidates[0]!.outcome = { ...outcome, joined_at: new Date().toISOString(), attributed_by: "positional_single" };
+      return true;
+    }
+    if (candidates.length > 1) {
+      decisionJoinCounts.unattributed_ambiguous += 1;
+      console.warn(`[decision-join] ${what}: NO decision_id and ${candidates.length} unjoined entries of ${node}; not guessing, appended as unattributed (unattributed_ambiguous=${decisionJoinCounts.unattributed_ambiguous})`);
+      extra = { unattributed: true, candidates: candidates.length };
+    } else {
+      decisionJoinCounts.appended_no_candidate += 1;
+      console.log(`[decision-join] ${what}: NO decision_id and no unjoined entry of ${node}; appended (appended_no_candidate=${decisionJoinCounts.appended_no_candidate})`);
+    }
   }
-  arr.push({ at: new Date().toISOString(), appended_by: "joinDecisionOutcome", ...(ref.decision_id ? { decision_id: ref.decision_id } : {}), node, outcome: { ...outcome, joined_at: new Date().toISOString() } });
+  arr.push({ at: new Date().toISOString(), appended_by: "joinDecisionOutcome", ...extra, node, outcome: { ...outcome, joined_at: new Date().toISOString() } });
   while (arr.length > 5) arr.shift();
   return true;
 }

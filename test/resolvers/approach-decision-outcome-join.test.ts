@@ -185,3 +185,33 @@ describe("source pins: every landing join site carries the decision, and the dec
     for (const l of calls) expect(l).toMatch(/, (\{ decision_id: (attempt\.id|decisionId) \}|ref)\);$/);
   });
 });
+
+describe("no decision_id is never a silent positional join", () => {
+  const counters = (): Record<string, number> => (typeof g2f.decisionJoinCounters === "function" ? g2f.decisionJoinCounters() : {}) as Record<string, number>;
+  it("two unjoined entries of this node and no decision_id: neither is guessed; the outcome is appended unattributed and counted", () => {
+    const node = process.env["SUBSTRATE_NAME"] ?? "substrate";
+    const meta: Row = { approach_decisions: [
+      { decision_id: "dec-old", node, at: "2026-10-09T22:54:00Z", predicted_p: 0.5 },
+      { decision_id: "dec-new", node, at: "2026-10-09T23:19:00Z", predicted_p: 0.5 },
+    ] };
+    const before = counters()["unattributed_ambiguous"] ?? 0;
+    g2f.joinDecisionOutcome(meta, { landed: false });
+    const decs = meta.approach_decisions as Row[];
+    expect(decs[0]!.outcome).toBeUndefined();
+    expect(decs[1]!.outcome).toBeUndefined();
+    expect(decs).toHaveLength(3);
+    expect(decs[2]!.unattributed).toBe(true);
+    expect(decs[2]!.outcome.landed).toBe(false);
+    expect(counters()["unattributed_ambiguous"]).toBe(before + 1);
+  });
+  it("exactly one unjoined entry of this node and no decision_id: joined, marked and counted as the positional fallback", () => {
+    const node = process.env["SUBSTRATE_NAME"] ?? "substrate";
+    const meta: Row = { approach_decisions: [{ decision_id: "dec-only", node, at: "2026-10-09T22:54:00Z" }] };
+    const before = counters()["positional_single"] ?? 0;
+    g2f.joinDecisionOutcome(meta, { landed: true, verdict: "FAVORABLE", commit: "abc1234" });
+    const only = (meta.approach_decisions as Row[])[0]!;
+    expect(only.outcome.commit).toBe("abc1234");
+    expect(only.outcome.attributed_by).toBe("positional_single");
+    expect(counters()["positional_single"]).toBe(before + 1);
+  });
+});

@@ -606,11 +606,16 @@ describe("vessel_mitosis_cutover", () => {
     expect(hostContent).toBe("// original\n");
   });
 
-  it("host-sync mode: emits intent file instead of direct git writes", async () => {
-    const { baseRoot, mitosisRoot, hostRepoRoot, baseSha } =
+  // ---- HOST-SYNC HANDOFF RETIRED ----
+  // MITOSIS_HOST_SYNC_MODE=1 used to divert a FAVORABLE landing into a host-sync intent (and, below, to
+  // turn some refusals into intents). No poller consumes the queue, and an env flip the substrate can
+  // make must not change where a landing goes (law 1). These pin the retirement; the full set, including
+  // the autonomy-scope rows, is test/resolvers/cutover-host-sync-retired.test.ts. The former
+  // "surfaces git_sha when poller result is present" test was deleted with the path it covered.
+  it("host-sync retired: MITOSIS_HOST_SYNC_MODE=1 is not read — a FAVORABLE landing commits git-aware and writes no intent", async () => {
+    const { baseRoot, mitosisRoot, hostRepoRoot, baseSha, appliedLog } =
       await setupForGitCutover();
-    const intentPath = join(workspaceRoot, "host-sync-intent.jsonl");
-    const resultsPath = join(workspaceRoot, "host-sync-results.jsonl");
+    const intentPath = join(workspaceRoot, "mitosis-applied-host-sync.jsonl");
     const originalMode = process.env["MITOSIS_HOST_SYNC_MODE"];
     process.env["MITOSIS_HOST_SYNC_MODE"] = "1";
     try {
@@ -627,28 +632,26 @@ describe("vessel_mitosis_cutover", () => {
         proposal_id: "proposal-host-sync-test",
         gap_id: "gap-host-sync-test",
         evaluation_evidence: FAVORABLE_EVIDENCE,
-        host_sync_intent_path: intentPath,
-        host_sync_results_path: resultsPath,
+        skip_push: true,
+        skip_restart: true,
+        applied_log_path: appliedLog,
       });
       expect(r.shape).toBe("cutoverApplied");
       const body = r.body as Record<string, unknown>;
-      expect(body["mode"]).toBe("host_sync");
-      expect(body["push_status"]).toBe("host_sync_pending");
-      expect(typeof body["host_sync_intent_id"]).toBe("string");
-      // Host repo MUST be unchanged.
+      expect(body["mode"]).toBe("git_aware");
+      expect(body["host_sync_intent_id"]).toBeUndefined();
       const hostContent = await readFile(
         join(hostRepoRoot, "src", "resolvers", "target.ts"),
         "utf8",
       );
-      expect(hostContent).toBe("// original\n");
-      // Intent file populated.
-      const raw = await readFile(intentPath, "utf8");
-      const line = JSON.parse(raw.split("\n")[0]!) as Record<string, unknown>;
-      expect(line["status"]).toBe("pending");
-      expect(line["intent_id"]).toBe(body["host_sync_intent_id"]);
-      expect(line["staged_files"]).toEqual(["src/resolvers/target.ts"]);
-      expect(line["base_sha"]).toBe(baseSha);
-      expect(line["mitosis_root"]).toBe(mitosisRoot);
+      expect(hostContent).toBe("// patched by substrate\n");
+      let exists = true;
+      try {
+        await stat(intentPath);
+      } catch {
+        exists = false;
+      }
+      expect(exists).toBe(false);
     } finally {
       if (originalMode === undefined)
         delete process.env["MITOSIS_HOST_SYNC_MODE"];
@@ -656,51 +659,9 @@ describe("vessel_mitosis_cutover", () => {
     }
   });
 
-  it("host-sync mode: surfaces git_sha when poller result is present", async () => {
-    const { baseRoot, mitosisRoot, hostRepoRoot, baseSha } =
-      await setupForGitCutover();
-    const intentPath = join(workspaceRoot, "hs-intent-2.jsonl");
-    const resultsPath = join(workspaceRoot, "hs-results-2.jsonl");
-    // Pre-seed a result that won't match this intent.
-    await writeFile(
-      resultsPath,
-      JSON.stringify({
-        intent_id: "00000000-aaaa-bbbb-cccc-000000000000",
-        git_sha: "deadbeefcafebabe",
-        push_status: "pushed",
-      }) + "\n",
-    );
-    const originalMode = process.env["MITOSIS_HOST_SYNC_MODE"];
-    process.env["MITOSIS_HOST_SYNC_MODE"] = "1";
-    try {
-      const r = await resolveVesselMitosisCutover({
-        type: "vessel_mitosis_cutover",
-        vessel_name: "development-vessel",
-        base_version_id: "v1",
-        mitosis_version_id: "m-x",
-        mitosis_root: mitosisRoot,
-        base_root: baseRoot,
-        host_repo_root: hostRepoRoot,
-        staged_base_sha: baseSha,
-        staged_files: ["src/resolvers/target.ts"],
-        evaluation_evidence: FAVORABLE_EVIDENCE,
-        host_sync_intent_path: intentPath,
-        host_sync_results_path: resultsPath,
-      });
-      const body = r.body as Record<string, unknown>;
-      // No matching intent_id yet → still pending.
-      expect(body["push_status"]).toBe("host_sync_pending");
-      expect(body["new_git_sha"]).toBeNull();
-    } finally {
-      if (originalMode === undefined)
-        delete process.env["MITOSIS_HOST_SYNC_MODE"];
-      else process.env["MITOSIS_HOST_SYNC_MODE"] = originalMode;
-    }
-  });
+  // ---- Part A (2026-06-04) RETIRED: a soft-refuse emits no host-sync intent, whatever the env ----
 
-  // ---- Part A (2026-06-04): soft-refuse emits host-sync intent ----
-
-  it("soft-refuse INSUFFICIENT_DATA verdict emits host-sync intent when diff exists and host_sync_mode=1", async () => {
+  it("host-sync retired: soft-refuse INSUFFICIENT_DATA verdict emits NO host-sync intent even with MITOSIS_HOST_SYNC_MODE=1 and a real diff", async () => {
     const { baseRoot, mitosisRoot, baseSha } = await setupForGitCutover();
     const intentPath = join(workspaceRoot, "insuf-intent.jsonl");
     const originalMode = process.env["MITOSIS_HOST_SYNC_MODE"];
@@ -726,13 +687,17 @@ describe("vessel_mitosis_cutover", () => {
         },
         host_sync_intent_path: intentPath,
       });
-      expect(r.shape).toBe("cutoverApplied");
+      expect(r.shape).toBe("vesselMitosisCutoverResult");
       const body = r.body as Record<string, unknown>;
-      expect(body["mode"]).toBe("host_sync");
-      expect(body["emitted_via_refuse_fallback"]).toBe(true);
-      expect(body["refuse_class"]).toBe("insufficient_data_verdict");
-      const raw = await readFile(intentPath, "utf8");
-      expect(raw.split("\n").filter((l) => l.trim()).length).toBe(1);
+      expect(body["refused"]).toBe(true);
+      expect(body["emitted_via_refuse_fallback"]).toBeUndefined();
+      let exists = true;
+      try {
+        await stat(intentPath);
+      } catch {
+        exists = false;
+      }
+      expect(exists).toBe(false);
     } finally {
       if (originalMode === undefined)
         delete process.env["MITOSIS_HOST_SYNC_MODE"];
@@ -781,7 +746,7 @@ describe("vessel_mitosis_cutover", () => {
     }
   });
 
-  it("soft-refuse base_sha_mismatch emits host-sync intent so poller re-verifies host-side", async () => {
+  it("host-sync retired: soft-refuse base_sha_mismatch emits NO host-sync intent even with MITOSIS_HOST_SYNC_MODE=1", async () => {
     const { baseRoot, mitosisRoot } = await setupForGitCutover();
     const intentPath = join(workspaceRoot, "mismatch-intent.jsonl");
     const originalMode = process.env["MITOSIS_HOST_SYNC_MODE"];
@@ -800,10 +765,18 @@ describe("vessel_mitosis_cutover", () => {
         evaluation_evidence: FAVORABLE_EVIDENCE,
         host_sync_intent_path: intentPath,
       });
-      expect(r.shape).toBe("cutoverApplied");
+      expect(r.shape).toBe("vesselMitosisCutoverResult");
       const body = r.body as Record<string, unknown>;
-      expect(body["emitted_via_refuse_fallback"]).toBe(true);
-      expect(body["refuse_class"]).toBe("base_sha_mismatch");
+      expect(body["refused"]).toBe(true);
+      expect(String(body["refusal_reason"])).toContain("base_sha_mismatch");
+      expect(body["emitted_via_refuse_fallback"]).toBeUndefined();
+      let exists = true;
+      try {
+        await stat(intentPath);
+      } catch {
+        exists = false;
+      }
+      expect(exists).toBe(false);
     } finally {
       if (originalMode === undefined)
         delete process.env["MITOSIS_HOST_SYNC_MODE"];

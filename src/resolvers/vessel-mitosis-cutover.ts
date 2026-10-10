@@ -617,96 +617,6 @@ function structuredError(detail: string, extra?: Record<string, unknown>): Resol
 }
 
 /**
- * Soft-refuse with optional host-sync intent fallback (Part A, 2026-06-04).
- *
- * When the cutover refuses for a class of reason where the cutover-side
- * verification is structurally weaker than the host-side poller (e.g.
- * INSUFFICIENT_DATA verdict because the container's activity-api view is
- * sparse; live_source_unreadable / base_sha_mismatch because the container's
- * bind mount lags the host tree), AND a non-empty mitosis dir with a real
- * diff vs the host exists, AND `MITOSIS_HOST_SYNC_MODE=1`, we still emit
- * the host-sync intent. The host-sync poller runs its own freshness check
- * against the real host source — moving the safety verdict from cutover-side
- * (wrong baseRoot) to host-sync-side (real host paths).
- *
- * UNFAVORABLE is never emitted: a static-eval FAIL means the patch broke
- * lint/tests and the substrate must not push it regardless of where the
- * freshness check lives. `missing_base_sha` is never emitted either — without
- * a recorded baseline the host-side poller has nothing to verify against.
- */
-async function maybeEmitIntentForRefuse(args: {
-  pointer: VesselMitosisCutoverPointer;
-  vessel_name: string;
-  base_version_id: string;
-  mitosis_version_id: string;
-  evaluation_evidence: VesselMitosisCutoverPointer["evaluation_evidence"];
-  staged_base_sha?: string;
-  refuse_class: "insufficient_data_verdict" | "live_source_unreadable" | "base_sha_mismatch";
-}): Promise<ResolverResult | null> {
-  if (process.env["MITOSIS_HOST_SYNC_MODE"] !== "1") return null;
-  // A host-sync intent is a landing handed to a poller; the emergency stop covers it.
-  if (landingsStopped()) return null;
-  const { pointer } = args;
-  // Require an explicit mitosis_root + staged_files: host-sync intent is
-  // pointer-driven; without these the poller cannot identify what to apply.
-  if (!pointer.mitosis_root) return null;
-  if (!Array.isArray(pointer.staged_files) || pointer.staged_files.length === 0) {
-    return null;
-  }
-  const mitosisRoot = resolve(pointer.mitosis_root);
-  if (!(await pathExists(mitosisRoot))) return null;
-  // Verify at least one staged file is present in the mitosis dir AND differs
-  // from its baseRoot counterpart (or has no counterpart). A mitosis with no
-  // real diff is a no-op; don't churn the poller queue with no-op intents.
-  const workspaceRoot = process.env["WORKSPACE_ROOT"] ?? process.cwd();
-  const reposRoot = join(workspaceRoot, "git", "super-repo", "repos");
-  const baseRoot = pointer.base_root
-    ? resolve(pointer.base_root)
-    : join(reposRoot, args.vessel_name);
-  let hasRealDiff = false;
-  for (const rel of pointer.staged_files) {
-    if (isAbsolute(rel) || rel.includes("..")) continue;
-    const mPath = join(mitosisRoot, rel);
-    if (!(await pathExists(mPath))) continue;
-    try {
-      const mContent = await readFile(mPath);
-      const bPath = join(baseRoot, rel);
-      if (!(await pathExists(bPath))) {
-        hasRealDiff = true;
-        break;
-      }
-      const bContent = await readFile(bPath);
-      if (!mContent.equals(bContent)) {
-        hasRealDiff = true;
-        break;
-      }
-    } catch {
-      // unreadable on this side; let the host-sync poller decide
-      hasRealDiff = true;
-      break;
-    }
-  }
-  if (!hasRealDiff) return null;
-  const intent = await emitHostSyncIntent({
-    pointer,
-    vessel_name: args.vessel_name,
-    base_version_id: args.base_version_id,
-    mitosis_version_id: args.mitosis_version_id,
-    mitosisRoot,
-    stagedFiles: pointer.staged_files,
-    evaluationEvidence: args.evaluation_evidence,
-    stagedBaseSha: args.staged_base_sha,
-  });
-  // Annotate the body so observers can distinguish "FAVORABLE → emit" from
-  // "soft-refuse → host-sync defers verification".
-  if (intent.shape === "cutoverApplied" && intent.body && typeof intent.body === "object") {
-    (intent.body as Record<string, unknown>)["emitted_via_refuse_fallback"] = true;
-    (intent.body as Record<string, unknown>)["refuse_class"] = args.refuse_class;
-  }
-  return intent;
-}
-
-/**
  * Soft-refuse: returned when the audited NO is a normal outcome of the
  * evaluate→cutover chain (verdict ≠ FAVORABLE, insufficient cited traces,
  * stale base SHA, etc). Emits `vesselMitosisCutoverResult` with applied:false
@@ -930,8 +840,8 @@ async function clearPendingOnReject(
  * Clear the queue lock ONLY when it belongs to THIS mitosis (exact
  * mitosis_version_id match), so a concurrently-staged NEXT cutover's pending
  * pointer is never clobbered. Called from the runGitAwareCutover finally so any
- * freshnessOK-path terminal exit (host-sync handoff return, structuredError /
- * softRefuse reject, or an uncaught throw) can no longer orphan
+ * freshnessOK-path terminal exit (structuredError / softRefuse reject, or an
+ * uncaught throw) can no longer orphan
  * mitosis-pending.json and freeze ALL pull-sync for the lock's TTL.
  */
 async function clearPendingIfOwned(
@@ -1144,7 +1054,7 @@ export async function resolveVesselMitosisCutover(
     // pass {{evaluate_pair}}); keep this as a hard error so the bug is loud.
     return structuredError("evaluation_evidence is required");
   }
-  console.error(`[mitosis-cutover] verdict=${evaluation_evidence.verdict} cited_checks=${JSON.stringify(evaluation_evidence.cited_check_names ?? null)} cited_traces=${Array.isArray(evaluation_evidence.cited_trace_ids) ? evaluation_evidence.cited_trace_ids.length : 0} base_sha=${pointer.staged_base_sha} host_sync=${process.env["MITOSIS_HOST_SYNC_MODE"] ?? "unset"} host_repo_root=${pointer.host_repo_root ?? process.env["MITOSIS_HOST_REPO_ROOT"] ?? "unset"}`);
+  console.error(`[mitosis-cutover] verdict=${evaluation_evidence.verdict} cited_checks=${JSON.stringify(evaluation_evidence.cited_check_names ?? null)} cited_traces=${Array.isArray(evaluation_evidence.cited_trace_ids) ? evaluation_evidence.cited_trace_ids.length : 0} base_sha=${pointer.staged_base_sha} host_repo_root=${pointer.host_repo_root ?? process.env["MITOSIS_HOST_REPO_ROOT"] ?? "unset"}`);
   // Freshness gate: surface staleness/push-readiness rejections explicitly so
   // mitoses don't get stuck silently in EVALUATE_OR_CUTOVER. The staged_base_sha
   // freshness is re-checked against the live source below (assertFreshness), but
@@ -1156,7 +1066,7 @@ export async function resolveVesselMitosisCutover(
       : null;
     const freshnessMaxAgeMs = Number(process.env["MITOSIS_STAGED_MAX_AGE_MS"] ?? "") || null;
     const stale = stagedAgeMs != null && freshnessMaxAgeMs != null && stagedAgeMs > freshnessMaxAgeMs;
-    console.error(`[mitosis-cutover] gate verdict=${evaluation_evidence.verdict} staged_age_ms=${stagedAgeMs ?? "unknown"} max_age_ms=${freshnessMaxAgeMs ?? "unset"} stale=${stale} push_ready=${process.env["MITOSIS_DIRECT_PUSH"] === "1" ? "direct" : (process.env["MITOSIS_HOST_SYNC_MODE"] ?? "unset")}`);
+    console.error(`[mitosis-cutover] gate verdict=${evaluation_evidence.verdict} staged_age_ms=${stagedAgeMs ?? "unknown"} max_age_ms=${freshnessMaxAgeMs ?? "unset"} stale=${stale} push_ready=${process.env["MITOSIS_DIRECT_PUSH"] === "1" ? "direct" : "unset"}`);
     if (stale) {
       console.error(`[mitosis-cutover] REJECT reason=stale_mitosis staged_age_ms=${stagedAgeMs} max_age_ms=${freshnessMaxAgeMs}`);
       await clearPendingOnReject(pointer, process.env["WORKSPACE_ROOT"] ?? process.cwd());
@@ -1171,25 +1081,6 @@ export async function resolveVesselMitosisCutover(
     // Audited NO — normal outcome when verdict is INSUFFICIENT_DATA / NEUTRAL /
     // UNFAVORABLE. Soft-refuse so mitosis-tick doesn't show as failure on every
     // tick when there's nothing to cut over.
-    //
-    // Part A (2026-06-04): for INSUFFICIENT_DATA / NEUTRAL — verdicts where the
-    // cutover-side evaluation is structurally weaker than the host-side poller
-    // can verify — still emit a host-sync intent if we have a real diff. The
-    // poller re-verifies against the host source. UNFAVORABLE is a static-eval
-    // FAIL and must never emit.
-    const v = evaluation_evidence.verdict;
-    if (v === "INSUFFICIENT_DATA" || v === "NEUTRAL" || v == null) {
-      const intent = await maybeEmitIntentForRefuse({
-        pointer,
-        vessel_name,
-        base_version_id,
-        mitosis_version_id,
-        evaluation_evidence,
-        staged_base_sha: pointer.staged_base_sha,
-        refuse_class: "insufficient_data_verdict",
-      });
-      if (intent) return intent;
-    }
     await clearPendingOnReject(pointer, process.env["WORKSPACE_ROOT"] ?? process.cwd());
     return softRefuse(
       `verdict not FAVORABLE (got ${evaluation_evidence.verdict})`,
@@ -1614,25 +1505,6 @@ export async function resolveVesselMitosisCutover(
     // failure mode. The freshness violation IS the substrate's audited NO.
     // The substrateGap_write above carries the cited evidence; this return
     // carries the verdict-acknowledged structure downstream observers expect.
-    //
-    // Part A (2026-06-04): for `live_source_unreadable` / `base_sha_mismatch`
-    // — failures the host-side poller is structurally better placed to verify
-    // (real host paths vs container bind mount) — still emit a host-sync
-    // intent if we have a real diff. The poller re-runs the freshness check
-    // against the host source. `missing_base_sha` is not emitted: without a
-    // recorded baseline the poller has nothing to verify against.
-    if (reason === "live_source_unreadable" || reason === "base_sha_mismatch") {
-      const intent = await maybeEmitIntentForRefuse({
-        pointer,
-        vessel_name,
-        base_version_id,
-        mitosis_version_id,
-        evaluation_evidence,
-        staged_base_sha: stagedBaseSha,
-        refuse_class: reason,
-      });
-      if (intent) return intent;
-    }
     await clearPendingOnReject(pointer, workspaceRoot);
     return softRefuse(
       `mitosis_freshness_violation (${reason})`,
@@ -2264,8 +2136,8 @@ async function landingLeaseGate(args: GitCutoverArgs): Promise<ResolverResult | 
  * is one of that intent's touched files, and the intent names this landing's gap. Anything else (no attempt id, no intent, an unstamped or forged
  * intent, another route, other files, another gap, no key) is autonomous and checked.
  *
- * A refusal here is a NON-ATTEMPT (nothing was applied: it runs before the landing lease, the host-sync
- * handoff, the clone reset and the copy, so the clone is untouched), logged once through softRefuse with the
+ * A refusal here is a NON-ATTEMPT (nothing was applied: it runs before the landing lease, the clone reset
+ * and the copy, so the clone is untouched), logged once through softRefuse with the
  * excluded entry and the file, and counted (getAutonomyScopeRefusalCounts).
  */
 export type AutonomyScopeRefusal = "autonomy_scope_excluded" | "autonomy_scope_unreadable" | "autonomy_scope_unmappable";
@@ -2428,8 +2300,8 @@ async function runGitAwareCutover(args: GitCutoverArgs): Promise<ResolverResult>
       try { await resolveMaintenanceLeaseWrite({ type: "maintenanceLease_write", op: "release", name: "cutover", token: leaseToken }); } catch { }
     }
     // Exit-guaranteed queue-lock clear (root fix for the orphaned mitosis-pending
-    // wedge): the inner cutover has many terminal exits (host-sync handoff return,
-    // structuredError/softRefuse rejects, uncaught throw) that never reach the
+    // wedge): the inner cutover has many terminal exits (structuredError/softRefuse
+    // rejects, uncaught throw) that never reach the
     // finalize clears, so an orphaned lock froze ALL pull-sync for its 30-min TTL.
     // Ownership-scoped so a next-staged cutover lock is never clobbered. The
     // retryable env_change_window_held deferral returns BEFORE this try, so its
@@ -2522,34 +2394,16 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
     });
   }
 
-  // AUTONOMY SCOPE, before anything is applied or leased (host-sync emission and `git add` included).
+  // AUTONOMY SCOPE, before anything is applied or leased (`git add` included).
   {
     const refused = await autonomyScopeLandingGate(args);
     if (refused) return refused;
   }
 
-  // LANDING LEASE, before anything is applied (host-sync emission and `git add` included).
+  // LANDING LEASE, before anything is applied (`git add` included).
   {
     const refused = await landingLeaseGate(args);
     if (refused) return refused;
-  }
-
-  // ---- Host-sync intent emission (2026-06-04, Stage B.3) ----
-  // When the cutover runs inside the container, `/workspace/repos` is a
-  // read-only bind mount of the host super-repo and direct git writes
-  // would fail. Setting MITOSIS_HOST_SYNC_MODE=1 redirects the
-  // commit + push to a host-side poller via an intent file.
-  if (process.env["MITOSIS_HOST_SYNC_MODE"] === "1") {
-    return await emitHostSyncIntent({
-      pointer,
-      vessel_name,
-      base_version_id,
-      mitosis_version_id,
-      mitosisRoot,
-      stagedFiles,
-      evaluationEvidence,
-      stagedBaseSha,
-    });
   }
 
   // 1. Resilience: walk mitosis tree, enforce allowed file set.

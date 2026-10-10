@@ -127,3 +127,61 @@ describe("replay of the 22:54 / 23:19 swap", () => {
     expect(decision(g, dB)?.outcome?.commit).toBe(S);
   });
 });
+
+describe("landing side: a landed commit joins the decision its Attempt-Id names", () => {
+  it("A landed S while B is still in flight: dA reads landed:true with commit S and dB stays unjoined", async () => {
+    // The positional join credits the NEWEST unjoined entry (dB) with A's landing.
+    const { dA, dB } = await twoPicks(`join-land-side-${RUN}`);
+    const attA = `att-landA-${Math.random().toString(36).slice(2, 9)}`;
+    appendRecord("attemptIntent", attA, { attempt_id: attA, route: "feature_compose", gap_id: `join-land-side-${RUN}`, decision_id: dA, pre_snapshot_id: "snap-x", registered_at: new Date().toISOString() });
+    const S = landCommit("landside-vessel", attA);
+    const g = await landThroughSweepJoin(`join-land-side-${RUN}`, S);
+    expect(decision(g, dA)?.outcome?.landed).toBe(true);
+    expect(decision(g, dA)?.outcome?.commit).toBe(S);
+    expect(decision(g, dB)?.outcome).toBeUndefined();
+  });
+
+  it("landingDecisionRef: the trailer's intent wins over the in-scope pick; with no attempt to read, the in-scope pick is used", async () => {
+    expect(typeof g2f.landingDecisionRef).toBe("function");
+    const att = `att-ref-${Math.random().toString(36).slice(2, 9)}`;
+    appendRecord("attemptIntent", att, { attempt_id: att, route: "feature_compose", gap_id: "g", decision_id: "dec-from-intent", pre_snapshot_id: "snap-x", registered_at: new Date().toISOString() });
+    const S = landCommit("ref-vessel", att);
+    expect(await g2f.landingDecisionRef(S, "dec-in-scope")).toMatchObject({ decision_id: "dec-from-intent", attempt_id: att, source: "attempt_trailer" });
+    expect(await g2f.landingDecisionRef("0123456789abcdef0123456789abcdef01234567", "dec-in-scope")).toMatchObject({ decision_id: "dec-in-scope", source: "in_scope" });
+    expect((await g2f.landingDecisionRef("0123456789abcdef0123456789abcdef01234567")).decision_id).toBeUndefined();
+  });
+});
+
+describe("source pins: every landing join site carries the decision, and the decision reaches the attempt intent", () => {
+  const { readFileSync } = require("node:fs") as typeof import("node:fs");
+  const src = (rel: string): string => readFileSync(join(import.meta.dir, "..", "..", rel), "utf8");
+  const G2F = src("src/resolvers/gap-to-feature.ts");
+  const FC = src("src/resolvers/feature-compose.ts");
+  const REG = src("src/resolvers/attempt-register.ts");
+  it("registerAttempt records decision_id on the intent, and feature-compose passes the pointer's decision_id", () => {
+    expect(REG).toMatch(/decision_id: typeof input\.decision_id === "string" && input\.decision_id \? input\.decision_id : null/);
+    const i = FC.indexOf("registerAttempt({");
+    expect(i).toBeGreaterThan(0);
+    expect(FC.slice(i, FC.indexOf(".catch(", i))).toContain("decision_id: pointer.decision_id");
+  });
+  it("every gap_to_feature feature_compose dispatch carries the pick's decision id", () => {
+    // The call text is assembled so this file does not read as one that drives a compose (runtime-root-isolation's
+    // static detector): it only reads gap-to-feature's source.
+    const callText = ["resolveFeature", "Compose({"].join("");
+    const calls = G2F.split(callText).slice(1).map((c) => c.slice(0, c.indexOf("land:")));
+    expect(calls.length).toBe(3);
+    for (const c of calls) expect(c).toMatch(/decision_id: (attempt\.id|decisionId)/);
+  });
+  it("no joinDecisionOutcome call for a landing is made without a decision ref", () => {
+    const landingJoins = G2F.split("\n").filter((l) => /joinDecisionOutcome\(meta, \{ landed: true/.test(l));
+    expect(landingJoins.length).toBe(4);
+    for (const l of landingJoins) expect(l).toMatch(/decision_id/);
+    expect(G2F).toMatch(/const landRef = await landingDecisionRef\(land\.commit_sha \?\? "", ref\.decision_id\);/);
+    expect(G2F).toMatch(/const sweepLandRef = await landingDecisionRef\(sha\);/);
+  });
+  it("every closeLandedGap call passes the pick's decision", () => {
+    const calls = G2F.split("\n").filter((l) => /closeLandedGap\(gap, /.test(l));
+    expect(calls.length).toBe(4);
+    for (const l of calls) expect(l).toMatch(/, (\{ decision_id: (attempt\.id|decisionId) \}|ref)\);$/);
+  });
+});

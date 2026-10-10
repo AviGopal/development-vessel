@@ -102,7 +102,7 @@ export function settleVerdict(pre: CheckResult[], now: CheckResult[], prediction
   return { verdict, regressed_checks: [...new Set(regressed_checks)], unresolved_checks: [...new Set(unresolved_checks)] };
 }
 
-export async function registerAttempt(input: { route: string; repo: string; touched_files: string[]; gap_id?: string | null; proposal_id?: string | null; authoring_execution_id?: string | null; dispatch_id?: string | null; directed?: boolean; attempt_id?: string; prediction?: Partial<Prediction> }): Promise<{ attempt_id: string | null; registered: boolean; error?: string }> {
+export async function registerAttempt(input: { route: string; repo: string; touched_files: string[]; gap_id?: string | null; proposal_id?: string | null; authoring_execution_id?: string | null; dispatch_id?: string | null; directed?: boolean; attempt_id?: string; decision_id?: string | null; prediction?: Partial<Prediction> }): Promise<{ attempt_id: string | null; registered: boolean; error?: string }> {
   try {
     const attempt_id = input.attempt_id ?? `att-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 9)}`;
 
@@ -131,6 +131,9 @@ export async function registerAttempt(input: { route: string; repo: string; touc
       // "Applied autonomously"); the sweep reads this through the Attempt-Id trailer and judges only an
       // explicit false. A caller that does not say records null (unknown), never false.
       directed: typeof input.directed === "boolean" ? input.directed : null,
+      // The gap_to_feature pick's approach decision (dec-…) this attempt executes. The Attempt-Id trailer names
+      // this intent, so this is the one link from a landed commit back to the decision its outcome joins.
+      decision_id: typeof input.decision_id === "string" && input.decision_id ? input.decision_id : null,
       node: process.env["SUBSTRATE_NAME"] ?? "substrate",
       prediction: {
         expect_pass: input.prediction?.expect_pass ?? [],

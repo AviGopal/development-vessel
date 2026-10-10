@@ -481,6 +481,9 @@ export interface FeatureComposePointer {
    * only the reachability hard-fail still applies.
    */
   gap?: { id?: string; summary?: string; classification_metadata?: Record<string, unknown>; category?: string };
+  /** The gap_to_feature pick's approach decision id (dec-…). Recorded on the attempt intent so a landing's
+   *  Attempt-Id trailer maps back to the decision its outcome belongs to. */
+  decision_id?: string;
 }
 
 interface PlanOp {
@@ -8937,6 +8940,7 @@ const earlyAttempt = await Promise.race([
           authoring_execution_id: (pointer as { authoring_execution_id?: string }).authoring_execution_id ?? null,
           dispatch_id: (pointer as { authoring_execution_id?: string }).authoring_execution_id ?? null,
           directed: (pointer as { directed?: boolean }).directed === true,
+          decision_id: pointer.decision_id ?? null,
         }).catch(() => ({ attempt_id: null as string | null })),
         new Promise<{ attempt_id: string | null }>((resolve) => setTimeout(() => resolve({ attempt_id: null }), 120_000)),
       ]);

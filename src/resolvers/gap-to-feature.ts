@@ -3148,7 +3148,9 @@ async function verifyGapConditionAsync(gap: Record<string, unknown>, opts: GapCh
 
 /** Mark a gap closed once its fix genuinely landed on origin/dev. Best-effort, guarded. */
 // Exported for unit test only (the predicate_suspect guard, qa C2). No call-site change.
-export async function closeLandedGap(gap: Record<string, unknown>, land: LandSignal): Promise<{ closed: boolean; error?: string }> {
+// `ref.decision_id` is the in-scope pick's decision; the landed commit's Attempt-Id → intent mapping wins over it
+// (landingDecisionRef), so this path and the sweep credit the same decision for one landing.
+export async function closeLandedGap(gap: Record<string, unknown>, land: LandSignal, ref: { decision_id?: string } = {}): Promise<{ closed: boolean; error?: string }> {
   try {
     // Re-read the gap: the caller's copy was captured at pick time, before the cutover's pending-land
     // stamp and before any hold written since. Closing from it overwrote newer fields (the f705b61 close
@@ -3282,7 +3284,8 @@ export async function closeLandedGap(gap: Record<string, unknown>, land: LandSig
     const closedMeta = { ...((gap.classification_metadata ?? gap.metadata ?? {}) as Record<string, unknown>), resolution, closed_reason: landedCloseReason((gap.classification_metadata ?? gap.metadata ?? {}) as Record<string, unknown>, land.commit_sha, literalOnlyClose), ...(land.commit_sha ? { landed_sha: land.commit_sha } : {}), closed_at: new Date().toISOString(),
       falsifier_exercise: { detector: "closeLandedGap", verdict: literalOnlyClose ? "literal_present" : verifyResult, passed: !literalOnlyClose && verifyResult === "absent", ran_at: new Date().toISOString(), commit: land.commit_sha ?? null } };
     const meta = closedMeta;
-    joinDecisionOutcome(meta, { landed: true, verdict: "FAVORABLE", commit: land.commit_sha ?? null });
+    const landRef = await landingDecisionRef(land.commit_sha ?? "", ref.decision_id);
+    joinDecisionOutcome(meta, { landed: true, verdict: "FAVORABLE", commit: land.commit_sha ?? null }, landRef.decision_id ? { decision_id: landRef.decision_id } : {});
     const landedCloseWrite = await resolveSubstrateGapWrite({
       type: "substrateGap_write",
       gap: {
@@ -3797,6 +3800,39 @@ function sweepGitOut(cloneDir: string, args: string[]): string | null {
   return out;
 }
 /**
+ * WHICH APPROACH DECISION A LANDED COMMIT BELONGS TO (credit 1b). The cutover writes an Attempt-Id trailer naming the
+ * attempt intent registerAttempt wrote, and that intent records the pick's decision_id (dec-…). This is the one
+ * mapping every landing join uses (the sweep, closeLandedGap, a falsified or reverted landing), so a park resumed by
+ * a later pick credits the pick that registered the attempt, whichever path joins first. `inScope` is the caller's
+ * own pick, used only when the commit names no attempt with a decision (no clone holds the sha yet, no trailer, an
+ * intent from before decision_id, or an intent on another node's ledger). The source used is returned.
+ */
+export async function landingDecisionRef(sha: string, inScope?: string): Promise<{ decision_id?: string; attempt_id?: string; source: "attempt_trailer" | "in_scope" | "none" }> {
+  let attemptId = "";
+  let fromTrailer = "";
+  try {
+    if (sha && /^[0-9a-f]{7,40}$/i.test(sha)) {
+      for (const name of readdirSync(vesselsCloneRoot()).sort()) {
+        const dir = join(vesselsCloneRoot(), name);
+        if (!existsSync(join(dir, ".git")) || sweepGitOut(dir, ["cat-file", "-e", `${sha}^{commit}`]) === null) continue;
+        attemptId = (sweepGitOut(dir, ["log", "-1", "--format=%(trailers:key=Attempt-Id,valueonly)", sha]) ?? "").split("\n")[0]!.trim();
+        break;
+      }
+    }
+    if (attemptId) {
+      const { readRecords } = await import("./attempt-ledger.js");
+      const intent = (await readRecords("attemptIntent", { key: attemptId }))[0]?.record as { decision_id?: unknown } | undefined;
+      if (typeof intent?.decision_id === "string" && intent.decision_id) fromTrailer = intent.decision_id;
+    }
+  } catch { /* unreadable clone root or ledger: fall back to the caller's pick */ }
+  if (fromTrailer) {
+    if (inScope && inScope !== fromTrailer) console.warn(`[gap-to-feature] landing ${sha.slice(0, 12)} names attempt ${attemptId} of decision ${fromTrailer}; the in-scope pick ${inScope} is not credited for it`);
+    return { decision_id: fromTrailer, attempt_id: attemptId, source: "attempt_trailer" };
+  }
+  if (inScope) return { decision_id: inScope, ...(attemptId ? { attempt_id: attemptId } : {}), source: "in_scope" };
+  return { ...(attemptId ? { attempt_id: attemptId } : {}), source: "none" };
+}
+/**
  * A RE-DETECTED GAP IS NOT CLOSED ON A LANDING OLDER THAN THE RE-DETECTION (2026-10-03).
  * performance-inefficiency-execution_traces_list was reopened by the efficiency probe every ~20 min while the
  * list route stayed slow, and the pending-land sweep re-closed it each time landed_verified on the class2
@@ -4305,7 +4341,7 @@ async function recordFalsifiedAutonomousLanding(g: Record<string, unknown>, meta
   const attemptId = sweepGitOut(cloneDir, ["log", "-1", "--format=%(trailers:key=Attempt-Id,valueonly)", sha]) ?? "";
   if (!attemptId) return "not_applicable";
   const { readRecords, appendRecord } = await import("./attempt-ledger.js");
-  const intent = ((await readRecords("attemptIntent", { key: attemptId }))[0]?.record ?? null) as { directed?: unknown } | null;
+  const intent = ((await readRecords("attemptIntent", { key: attemptId }))[0]?.record ?? null) as { directed?: unknown; decision_id?: unknown } | null;
   if (!intent || intent.directed !== false) return "not_applicable";
   const committedAt = Number(sweepGitOut(cloneDir, ["log", "-1", "--format=%ct", sha]) ?? "0");
   let startedAt = 0;
@@ -4329,7 +4365,7 @@ async function recordFalsifiedAutonomousLanding(g: Record<string, unknown>, meta
   // again for the same landing. The local ledger is durable: its #2 settlement is the once-only marker.
   const alreadySettled = (await readRecords("attemptSettlement", { key: `${attemptId}#2` })).length > 0;
   if (!alreadySettled) {
-    joinDecisionOutcome(meta, { landed: true, verdict: "UNFAVORABLE", commit: sha, falsified_after_restart: true });
+    joinDecisionOutcome(meta, { landed: true, verdict: "UNFAVORABLE", commit: sha, falsified_after_restart: true }, typeof intent.decision_id === "string" && intent.decision_id ? { decision_id: intent.decision_id } : {});
     updateClassPosterior(gapClassOf(g), false);
     await appendRecord("attemptSettlement", `${attemptId}#2`, { attempt_id: attemptId, settlement_seq: 2, verdict: "regressed", credit_eligible: false, shas: [sha], gap_id: String(g.id), source: "falsified_after_restart", at });
   }
@@ -4350,11 +4386,12 @@ async function recordOperatorRegression(g: Record<string, unknown>): Promise<boo
   if (String(rb.by ?? "").startsWith("gap-sweep")) return false;
   const attemptId = String(rb.attempt_id);
   const { readRecords, appendRecord } = await import("./attempt-ledger.js");
-  if ((await readRecords("attemptIntent", { key: attemptId })).length === 0) return false;
+  const regIntent = (await readRecords("attemptIntent", { key: attemptId }))[0]?.record as { decision_id?: unknown } | undefined;
+  if (!regIntent) return false;
   const at = new Date().toISOString();
   const sha = String(rb.sha ?? "");
   if ((await readRecords("attemptSettlement", { key: `${attemptId}#2` })).length === 0) {
-    joinDecisionOutcome(meta, { landed: true, verdict: "UNFAVORABLE", commit: sha, reverted_by: String(rb.revert_sha), operator_regression: true });
+    joinDecisionOutcome(meta, { landed: true, verdict: "UNFAVORABLE", commit: sha, reverted_by: String(rb.revert_sha), operator_regression: true }, typeof regIntent.decision_id === "string" && regIntent.decision_id ? { decision_id: regIntent.decision_id } : {});
     updateClassPosterior(gapClassOf(g), false);
     await appendRecord("attemptSettlement", `${attemptId}#2`, { attempt_id: attemptId, settlement_seq: 2, verdict: "regressed", credit_eligible: false, shas: [sha], gap_id: String(g.id), source: "operator_revert", reverted_by: String(rb.revert_sha), at });
   }
@@ -4719,7 +4756,8 @@ const pending = gaps
       tally.absent += 1;
       // ONE CREDIT PER (gap, landing): a standing row may re-close after a reopen on the landing it already
       // credited; that close is recorded, but the landing's posterior and the close-oracle are not paid twice.
-      const credited = joinDecisionOutcome(meta, { landed: true, verdict: "FAVORABLE", commit: sha });
+      const sweepLandRef = await landingDecisionRef(sha);
+      const credited = joinDecisionOutcome(meta, { landed: true, verdict: "FAVORABLE", commit: sha }, sweepLandRef.decision_id ? { decision_id: sweepLandRef.decision_id } : {});
       if (!credited) console.log(`[gap-sweep] gap ${gidSweep}: landing ${sha.slice(0, 12)} already credited FAVORABLE; closing without a second credit`);
       // SUCCESS label for the close-oracle (§12.6 1a): a MEASURED close builds the trustworthy
       // "measured" class posterior. Provenance-only closes no longer happen here, so landed_commit
@@ -4945,7 +4983,7 @@ export interface PwtEscalationDeps {
   resolvePwt: (p: Record<string, unknown>) => Promise<ResolverResult>;
   updateClassPosterior: (cls: string, landed: boolean) => void;
   bumpFailedAttempts: (gap: Record<string, unknown>, opts: { surprise?: boolean; predictedP?: number; decisionId?: string }) => Promise<void>;
-  closeLandedGap: (gap: Record<string, unknown>, land: LandSignal) => Promise<{ closed: boolean; error?: string }>;
+  closeLandedGap: (gap: Record<string, unknown>, land: LandSignal, ref?: { decision_id?: string }) => Promise<{ closed: boolean; error?: string }>;
   persistGapMeta: (gap: Record<string, unknown>, patch: Record<string, unknown>) => Promise<void>;
   /** Whether the hold a pwt_escalation_held stamp names still reads held (lib/operator-hold.ts readOperatorHold). */
   holdStillHeld: (holdId: string) => boolean;
@@ -5026,7 +5064,7 @@ export async function escalateApplyFailureToPwt(
         const _sha = (rb.new_git_sha ?? rb.commit_sha ?? _land.new_git_sha) as string | undefined;
         const _pushed = rb.push_status === "pushed" || _land.push_status === "pushed" || _land.landed === true;
         if (rb.mitosisStaged && _pushed && _sha) {
-          await deps.closeLandedGap(gap, { landed: true, commit_sha: String(_sha), vessel: "development-vessel", push_status: "pushed" });
+          await deps.closeLandedGap(gap, { landed: true, commit_sha: String(_sha), vessel: "development-vessel", push_status: "pushed" }, ref);
           _pwtLanded = true;
         }
       }
@@ -5904,7 +5942,7 @@ async function routeCapabilityGapToNewResolver(
     dry_run: pointer.dry_run ?? false,
     keep_on_fail: false,
     directed: isDirected,
-
+    ...(decisionId ? { decision_id: decisionId } : {}),
     gap: {
       id: String(gap.id ?? ""),
       summary: String(gap.summary ?? gap.title ?? ""),
@@ -5943,7 +5981,7 @@ async function routeCapabilityGapToNewResolver(
   const land = genuineLandSignal(cb, true);
   let closed = false;
   if (land.landed) {
-    const c = await closeLandedGap(gap, land);
+    const c = await closeLandedGap(gap, land, { decision_id: decisionId });
     closed = c.closed;
   } else if (isTerminalRefusalResult(cb)) {
     await markTerminalRefusal(gap, cb);
@@ -7510,6 +7548,7 @@ const familySample: string[] = await (async () => {
         model: pointer.model,
         dry_run: pointer.dry_run ?? false,
         keep_on_fail: false,
+        ...(attempt.id ? { decision_id: attempt.id } : {}),
         gap: {
           id: String(gap.id ?? ""),
           summary: String(gap.summary ?? gap.title ?? ""),
@@ -7528,7 +7567,7 @@ const familySample: string[] = await (async () => {
     const allOk = sliceResults.length === slices.length && sliceResults.every((r) => r.verdict === "FAVORABLE");
     const sliceLand: LandSignal = allOk && lastBody ? genuineLandSignal(lastBody, !(pointer.dry_run ?? false)) : { landed: false, commit_sha: null, vessel: null, push_status: null };
     if (allOk && lastBody) {
-      if (sliceLand.landed) await closeLandedGap(gap, sliceLand);
+      if (sliceLand.landed) await closeLandedGap(gap, sliceLand, { decision_id: attempt.id });
       const reachVerdict = sliceLand.landed ? 'SUCCESS' : 'UNFAVORABLE';
       console.log(`[gap-to-feature] reach verdict: ${reachVerdict}`);
     }
@@ -7558,6 +7597,8 @@ const familySample: string[] = await (async () => {
     dry_run: pointer.dry_run ?? false,
     keep_on_fail: false,
     directed: (pointer as { directed?: boolean }).directed === true,
+    // The pick's decision rides to registerAttempt, so the landing's Attempt-Id maps back to it.
+    ...(attempt.id ? { decision_id: attempt.id } : {}),
     // Thread the gap through so the semantic cutover-verification gate (lever 5)
     // can judge the patch AGAINST the gap on a live path and write
     // suspected_real_location back onto the gap when the drafter mis-localized.
@@ -7600,7 +7641,7 @@ const familySample: string[] = await (async () => {
   const land = genuineLandSignal(cb, !(pointer.dry_run ?? false));
   let closure: { closed: boolean; error?: string; resolution?: string } = { closed: false };
   if (land.landed) {
-    closure = await closeLandedGap(gap, land);
+    closure = await closeLandedGap(gap, land, { decision_id: attempt.id });
     if (closure.closed) {
       closure.resolution = `landed via mitosis cutover${land.commit_sha ? ` ${land.commit_sha}` : ""}${land.vessel ? ` (${land.vessel})` : ""}`;
     }

@@ -2275,25 +2275,10 @@ export async function admitActionableGaps(
     // further down. A recommit gap with a source_gap_id inherits its SITE after selection, so it is
     // waived the edit-site requirement only: it must still be open, armed and unheld (452 sited, unarmed recommit
     // children were admitted on 2026-10-03 by the old "site OR armed" rule).
+    // The predicate and its exemptions live in composeAdmissionExclusion, which the targeted entry calls too.
     {
-      const orphanRoute = cat === "orphaned_capability" || cat === "unreachable_producer" || /orphaned[_-]capability/i.test(id);
-      if (!orphanRoute && !structuredTscErrorOf(g)) {
-        const verdict = composeEligibilitySkipReason(g);
-        const skip = verdict === "no_edit_site" && meta.source_gap_id ? null : verdict;
-        if (skip !== null) {
-          const rawFalsifier = meta.falsifier as unknown;
-          const falsifierClass = String((rawFalsifier && typeof rawFalsifier === "object" ? (rawFalsifier as { class?: unknown }).class : rawFalsifier) ?? "").toLowerCase();
-          const reason =
-            skip === "unarmed" ? `needs_information(falsifier=${falsifierClass || "unset"})`
-            : skip === "no_edit_site" ? `needs_information(no_edit_site; falsifier=${falsifierClass})`
-            : skip === "not_open" ? `not_open(${String(g.status ?? "")})`
-            : meta.operator_hold === true ? "operator_hold"
-            : isParkingDisposition(meta.disposition) || meta.disposition === CHECK_SUPPLY_DISPOSITION ? `disposition(${String(meta.disposition)})`
-            : "disposition(pending_verification)";
-          excluded.push({ id, reason });
-          continue;
-        }
-      }
+      const exclusion = composeAdmissionExclusion(g);
+      if (exclusion) { excluded.push({ id, reason: exclusion.reason }); continue; }
     }
     // AUTONOMY SCOPE (contained-self-development 1.2). Admission is the autonomous path, so a gap
     // whose edit site is in the lane core is refused here, before any draft. Directed goals never
@@ -2577,6 +2562,61 @@ export async function admitActionableGaps(
     console.log(`[gap-to-feature] auto-pick admission: ${gaps.length} candidates → ${admitted.length} admitted, ${excluded.length} excluded ${JSON.stringify(byReason)}`);
   }
   return { admitted, excluded };
+}
+
+/**
+ * THE COMPOSE ADMISSION EXCLUSION: composeEligibilitySkipReason (the predicate feature_compose refuses on) with the
+ * exemptions admission grants, each for its stated reason (see admitActionableGaps). Null admits. One function for
+ * every autonomous entry: the auto-pick admission and the targeted entry (targetedComposeExclusion), so a gap
+ * compose would refuse is not admitted by either. `skip` is the predicate's own verdict; `reason` is admission's
+ * exclusion label.
+ */
+export function composeAdmissionExclusion(g: Record<string, unknown>): { skip: ComposeEligibilitySkipReason; reason: string } | null {
+  const id = String(g.id ?? "");
+  const cat = String(g.category ?? "");
+  const meta = (g.classification_metadata ?? g.metadata ?? {}) as Record<string, unknown>;
+  const orphanRoute = cat === "orphaned_capability" || cat === "unreachable_producer" || /orphaned[_-]capability/i.test(id);
+  if (orphanRoute || structuredTscErrorOf(g)) return null;
+  const verdict = composeEligibilitySkipReason(g);
+  const skip = verdict === "no_edit_site" && meta.source_gap_id ? null : verdict;
+  if (skip === null) return null;
+  const rawFalsifier = meta.falsifier as unknown;
+  const falsifierClass = String((rawFalsifier && typeof rawFalsifier === "object" ? (rawFalsifier as { class?: unknown }).class : rawFalsifier) ?? "").toLowerCase();
+  const reason =
+    skip === "unarmed" ? `needs_information(falsifier=${falsifierClass || "unset"})`
+    : skip === "no_edit_site" ? `needs_information(no_edit_site; falsifier=${falsifierClass})`
+    : skip === "not_open" ? `not_open(${String(g.status ?? "")})`
+    : meta.operator_hold === true ? "operator_hold"
+    : isParkingDisposition(meta.disposition) || meta.disposition === CHECK_SUPPLY_DISPOSITION ? `disposition(${String(meta.disposition)})`
+    : "disposition(pending_verification)";
+  return { skip, reason };
+}
+
+/** Categories resolveGapToFeature routes to a resolver other than feature_compose (trace-store reconcile seed,
+ *  doc_drift_fix, author_producer). The compose gate does not judge them. A test pins that every category branch in
+ *  resolveGapToFeatureOnce is listed here. */
+export const NON_COMPOSE_ROUTE_CATEGORIES: ReadonlySet<string> = new Set(["trace_store_reconciliation", "documentation_drift", "unreachable_producer", "orphaned_capability"]);
+
+/**
+ * THE TARGETED ENTRY'S ADMISSION (gap-lane livelock, 2026-10-10). A pointer.gap_id dispatch bypassed admitActionableGaps.
+ * gap-drain-observer sends exactly that for every write of a route:dispatchable gap whose remedy is gap_to_feature.
+ * On node1 an unarmed detector gap (db_performance_slow_queries_*), rewritten every ~10 min, was dispatched each time,
+ * refused by feature_compose as ineligible (unarmed), and graded a failed attempt: 125 refusals, re-narrowings and
+ * re-escalations in 24 h. An autonomous targeted dispatch (not dry_run, not directed) of a gap on the feature_compose
+ * route now runs the same exclusion as admission, before any decision is recorded or slot touched. It returns a
+ * non-attempt report and one counted line naming compose_ineligible_<skip>. Directed dispatches are left to
+ * feature_compose's own check, whose refusal is a non-attempt (isNonAttemptComposeResult).
+ */
+export function targetedComposeExclusion(gap: Record<string, unknown>, pointer: { gap_id?: string; dry_run?: boolean; directed?: boolean; triggered_by?: string }): ResolverResult | null {
+  if (!pointer.gap_id || pointer.dry_run === true || pointer.directed === true) return null;
+  if (NON_COMPOSE_ROUTE_CATEGORIES.has(String(gap.category ?? ""))) return null;
+  const capKind = String(((gap.classification_metadata ?? gap.metadata ?? {}) as Record<string, unknown>).kind ?? "");
+  if (capKind === "capability_gap") return null;
+  const exclusion = composeAdmissionExclusion(gap);
+  if (!exclusion) return null;
+  const key = `compose_ineligible_${exclusion.skip}`;
+  console.log(`[gap-to-feature] targeted admission: gap ${String(gap.id ?? "")} → 0 admitted, 1 excluded ${JSON.stringify({ [key]: 1 })} (${exclusion.reason}; triggered_by=${String(pointer.triggered_by ?? "-")})`);
+  return { shape: "gapToFeatureReport", body: { ok: false, stage: "select", verdict: "REFUSED", reason: key, exclusion: exclusion.reason, gap_id: gap.id, non_attempt: true } };
 }
 
 // CLOSE-ON-LAND (2026-06-29). A landed gap previously stayed status:open, so the
@@ -5312,6 +5352,10 @@ export function isNonAttemptComposeResult(cb: Record<string, unknown> | null | u
   if (String(cb.failure_kind ?? "") === "environment") return true;
   if (String(cb.verdict ?? "") === "BUSY") return true;
   if (String(cb.stage ?? "") === "capacity") return true;
+  // feature_compose's admission refusal (stage "ineligible": not compose work, nothing started). Its own comment
+  // calls it a non-attempt; graded as a failure it bumped failed_attempts on every drain tick, which narrowed and
+  // escalated the gap again each time (gap-lane livelock, 2026-10-10).
+  if (String(cb.verdict ?? "") === "REFUSED" && String(cb.stage ?? "") === "ineligible") return true;
   return false;
 }
 
@@ -6906,6 +6950,12 @@ async function resolveGapToFeatureOnce(pointer: GapToFeaturePointer, attempt: { 
   }
   if (!gap) {
     return { shape: "gapToFeatureReport", body: { ok: false, stage: "select", error: "no matching open gap", category: pointer.category ?? null } };
+  }
+  // ADMISSION FOR THE TARGETED ENTRY: the auto-pick branch ran admitActionableGaps above; a targeted autonomous
+  // dispatch runs the same exclusion here, before any decision, cooldown or in-flight mark.
+  {
+    const refused = targetedComposeExclusion(gap, pointer as Parameters<typeof targetedComposeExclusion>[1]);
+    if (refused) return refused;
   }
 
   // OWNER ROUTING FOR DIRECTED GAP WORK (decentralized-compose-ownership). Auto-picks admit only

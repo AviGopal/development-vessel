@@ -3403,6 +3403,23 @@ export async function closeLandedGap(gap: Record<string, unknown>, land: LandSig
 // substrateGap_write (shape-flow preserved) with closed_reason=landed_verified.
 // Bounded like gap-lifecycle; best-effort; a still-'present' condition refuses close.
 const PENDING_VERIFY_SWEEP_LIMIT = 25;
+/** The gaps the pending-land sweep may verify: stamped with a landed sha (pending_outcome_verification) and NOT
+ *  under operator_hold. An operator hold is a statement that the falsifier cannot yet be exercised; the sweep never
+ *  closes over it (it is lifted by an exercised falsifier, not by a landing), so a held gap is dropped BEFORE the
+ *  PENDING_VERIFY_SWEEP_LIMIT slice. Taken after it, held gaps sorted first and spent the slots: 158 of 350 checks
+ *  in a day went to held gaps that were skipped on arrival (diag-s1, 2026-10-10). `held` counts the stamped gaps
+ *  dropped for a hold, for the sweep's tally line. Exported for tests. */
+export function pendingSweepCandidates(gaps: Record<string, unknown>[]): { unheld: Record<string, unknown>[]; held: number } {
+  const unheld: Record<string, unknown>[] = [];
+  let held = 0;
+  for (const g of gaps) {
+    const m = (g.classification_metadata ?? {}) as Record<string, unknown>;
+    if (!(typeof m.pending_outcome_verification === "string" && m.pending_outcome_verification.length >= 7)) continue;
+    if (m.operator_hold === true) { held += 1; continue; }
+    unheld.push(g);
+  }
+  return { unheld, held };
+}
 // When this process last examined each pending gap, whatever the verdict. Only a 'pending' verdict
 // persists pending_last_checked_at, so without this a gap stuck at present/unknown/not_in_clone sorted
 // first every tick and held a slot forever. In-process on purpose: no extra store write per checked gap.
@@ -4606,7 +4623,7 @@ async function sweepPendingLandVerificationsOnce(): Promise<{ checked: number; c
   // Live at the time of writing: 13 gaps carry pending_outcome_verification, 11 of them
   // have no predicate at all — so the honest answer is "correctly abstaining on an input
   // that cannot be measured", not "broken". A counter per verdict says that out loud.
-  const tally = { absent: 0, present: 0, pending: 0, unknown: 0, not_in_clone: 0, reverted: 0, awaiting_restart: 0, falsified: 0, self_authored: 0, birth_retaken: 0, stale: 0, unlabelled: 0 };
+  const tally = { absent: 0, present: 0, pending: 0, unknown: 0, not_in_clone: 0, reverted: 0, awaiting_restart: 0, falsified: 0, self_authored: 0, birth_retaken: 0, stale: 0, unlabelled: 0, held: 0 };
   try {
     const read = await resolveSubstrateGap({
       type: "substrateGap",
@@ -4615,7 +4632,8 @@ async function sweepPendingLandVerificationsOnce(): Promise<{ checked: number; c
       // 1000 window hid 5 pending landings and 50 predicate-bearing gaps from verification.
       limit: Number.MAX_SAFE_INTEGER,
       exclude_categories: [...DECISION_LOG_GAP_CATEGORIES],
-      // Bookkeeping, not supply: a held gap's landing is still verified (it is only never closed on it).
+      // Bookkeeping, not supply: held gaps are read so the lineage stamp, operator regressions and birth re-takes
+      // below see them. They never take a verification slot (pendingSweepCandidates); the tally counts them.
       include_held: true,
     } as never);
     const gaps = ((read?.body as { gaps?: Record<string, unknown>[] })?.gaps) ?? [];
@@ -4650,11 +4668,9 @@ for (const g of gaps) { try { await recordOperatorRegression(g); } catch { /* be
 try { tally.birth_retaken = (await reevaluateBirthVerdicts(gaps)).length; } catch (err) { console.warn(`[gap-sweep] birth re-evaluation skipped: ${String(err).slice(0, 200)}`); }
 
 // Then process existing pending verifications as before
-const pending = gaps
-      .filter((g) => {
-        const m = (g.classification_metadata ?? {}) as Record<string, unknown>;
-        return typeof m.pending_outcome_verification === "string" && (m.pending_outcome_verification as string).length >= 7;
-      })
+const candidates = pendingSweepCandidates(gaps);
+tally.held = candidates.held;
+const pending = candidates.unheld
       // Measurable gaps first: predicate-less stamped gaps can never resolve, and taking the first N in
       // store order let them hold every slot. Then LEAST RECENTLY CHECKED first (never-checked, i.e. new
       // landings, sort first), so every pending gap rotates through the slice. Newest pending_set_at first
@@ -4677,12 +4693,6 @@ const pending = gaps
       sweepLastCheckedAt.set(String(g.id ?? ""), new Date().toISOString());
       saveSweepLastChecked();
       const meta = { ...((g.classification_metadata ?? {}) as Record<string, unknown>) };
-      // An operator hold is a statement that the falsifier cannot yet be exercised; the
-      // sweep never closes over it. It is lifted by an exercised falsifier, not by a landing.
-      if (meta.operator_hold === true) {
-        console.log(`[gap-sweep] gap ${String(g.id)} held by operator_hold — not closed on landing`);
-        continue;
-      }
       const sha = String(meta.pending_outcome_verification);
       // Not yet observable in a clone (pull-sync hasn't converged, or the land was
       // reverted) — leave open; the sweep retries on every tick.

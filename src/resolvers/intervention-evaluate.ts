@@ -405,19 +405,72 @@ export interface InterventionRefusedWritePointer {
   refusal: Omit<RefusalRecord, "refused_at"> & { refused_at?: string };
 }
 
+/**
+ * WHO WROTE A REFUSAL RECORD. interventionRefused rows are read as the substrate's own refusal history (the
+ * S3 push-away count among them), so a writer must not be able to rewrite someone else's record by reusing
+ * its id. The route (routes/impulses.ts) passes the principal its write gate validated: "node-self" for this
+ * node's own key, `key_id:<id>` when identity's answer carries a key id, else null (identity named no key, so
+ * two callers cannot be told apart). The record stores it as written_by; a caller-supplied written_by is
+ * overwritten. A write reusing an existing id is refused unless BOTH principals are identifiable and equal:
+ * a record with no written_by (the evaluator's own in-process records, and every record written before this)
+ * cannot be rewritten through this shape at all. A new id is still created by any authenticated writer.
+ */
+export interface InterventionRefusedWriteContext {
+  principal?: string | null;
+}
+export type RefusalWritePrincipalSource = { authenticated?: boolean; node_self?: boolean; key_id?: unknown };
+export function refusalWriterPrincipal(cred: RefusalWritePrincipalSource | null | undefined): string | null {
+  if (!cred || cred.authenticated !== true) return null;
+  if (cred.node_self === true) return "node-self";
+  if (typeof cred.key_id === "string" && /^[A-Za-z0-9._:@-]{1,128}$/.test(cred.key_id)) return `key_id:${cred.key_id}`;
+  return null;
+}
+
+/** Why `refusal` is not a writable refusal record, or null. Checked before any read of its fields. */
+function refusalProblem(refusal: unknown): string | null {
+  if (refusal === null || typeof refusal !== "object" || Array.isArray(refusal)) return "refusal must be an object";
+  const r = refusal as Record<string, unknown>;
+  if (typeof r["id"] !== "string" || r["id"].trim().length === 0) return "refusal.id must be a non-empty string";
+  if (r["proposed_change"] === null || typeof r["proposed_change"] !== "object" || Array.isArray(r["proposed_change"])) return "refusal.proposed_change must be an object";
+  if (typeof r["refusal_basis"] !== "string") return "refusal.refusal_basis must be a string";
+  if (r["refused_at"] !== undefined && typeof r["refused_at"] !== "string") return "refusal.refused_at must be a string when given";
+  return null;
+}
+
 export async function resolveInterventionRefusedWrite(
   pointer: InterventionRefusedWritePointer,
+  ctx: InterventionRefusedWriteContext = {},
 ): Promise<ResolverResult> {
+  const problem = refusalProblem((pointer as { refusal?: unknown } | null | undefined)?.refusal);
+  if (problem) {
+    return { shape: "structuredError", body: { error: `intervention_refused_invalid: ${problem}`, detail: problem } };
+  }
+  const principal = typeof ctx.principal === "string" && ctx.principal ? ctx.principal : null;
   const now = new Date().toISOString();
   const incoming = pointer.refusal;
-  const record: RefusalRecord = {
+  const record: RefusalRecord & { written_by: string } = {
     ...incoming,
     refused_at: incoming.refused_at ?? now,
+    written_by: principal ?? "unidentified",
   };
   const records = await loadRefusals();
   const idx = records.findIndex((r) => r.id === record.id);
-  if (idx >= 0) records[idx] = record;
-  else records.push(record);
+  if (idx >= 0) {
+    const owner = (records[idx] as RefusalRecord & { written_by?: unknown }).written_by;
+    if (!principal || typeof owner !== "string" || owner !== principal) {
+      console.warn(`[interventionRefused_write] REFUSED overwrite of ${record.id}: written by ${typeof owner === "string" ? owner : "<no recorded writer>"}, caller ${principal ?? "<unidentified>"}`);
+      return {
+        shape: "structuredError",
+        body: {
+          error: `intervention_refused_foreign_overwrite: ${record.id} exists and was not written by this caller's principal`,
+          detail: "an existing refusal record can be rewritten only by the identified principal that wrote it",
+        },
+      };
+    }
+    records[idx] = record;
+  } else {
+    records.push(record);
+  }
   await saveRefusals(records);
   return {
     shape: "interventionRefusedWriteResult",

@@ -117,6 +117,7 @@ import {
   resolveInterventionEvaluate,
   resolveInterventionRefused,
   resolveInterventionRefusedWrite,
+  refusalWriterPrincipal,
 } from "../resolvers/intervention-evaluate.js";
 import { resolveCompositionCoverageReport } from "../resolvers/composition-coverage-report.js";
 import { resolveVesselCompletenessReport } from "../resolvers/vessel-completeness-report.js";
@@ -1184,6 +1185,18 @@ impulsesRouter.post("/v2/impulses/resolve", async (c) => {
     if (String(result.body.error ?? "").startsWith("operator_credential_required")) return c.json({ success: false, shape: result.shape, body: result.body, error: result.body.error }, 403);
     if (String(result.body.error ?? "").startsWith("trust_root_shape_immutable")) return c.json({ success: false, shape: result.shape, body: result.body, error: result.body.error }, 409);
     if (String(result.body.error ?? "").startsWith("operator_hold_invalid")) return c.json({ success: false, shape: result.shape, body: result.body, error: result.body.error }, 422);
+    return c.json({ success: true, shape: result.shape, body: result.body });
+  }
+
+  // A REFUSAL RECORD names its writer (intervention-evaluate.ts refusalWriterPrincipal): the principal this
+  // route's write gate validated, never a pointer field. A malformed record is a 400 with the reason, and a
+  // rewrite of another principal's record is a 403; the resolver answers both as a structuredError.
+  if (pointerType === "interventionRefused_write") {
+    const principal = refusalWriterPrincipal(writeCred ? { authenticated: writeCred.authenticated, node_self: isNodeSelfCredential(writeCred), key_id: writeCred.keyId } : undefined);
+    const result = await resolveInterventionRefusedWrite({ ...(pointer as Record<string, unknown>), type: pointerType } as Parameters<typeof resolveInterventionRefusedWrite>[0], { principal });
+    const err = String((result.body as Record<string, unknown> | undefined)?.["error"] ?? "");
+    if (err.startsWith("intervention_refused_invalid")) return c.json({ success: false, shape: result.shape, body: result.body, error: err }, 400);
+    if (err.startsWith("intervention_refused_foreign_overwrite")) return c.json({ success: false, shape: result.shape, body: result.body, error: err }, 403);
     return c.json({ success: true, shape: result.shape, body: result.body });
   }
 

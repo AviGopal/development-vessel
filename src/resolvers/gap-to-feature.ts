@@ -3979,6 +3979,87 @@ async function releaseStaleLanding(gap: Record<string, unknown>, stale: StaleClo
   }
 }
 
+/**
+ * THE NON-DISCRIMINATING CHECK (diag-s1, 2026-10-10). The independent landing verdict re-runs the gap's own check
+ * at the landing's parent and at the landed sha. "parent green, landed green" means the check passed on the tree
+ * the landing started from: it never saw the defect, so no re-run of it can ground this landing. The sweep stored
+ * that label and, on every later tick, re-read the check at HEAD, skipped the re-run (a stored ungrounded label) and
+ * logged "is NOT closed: no grounded independent verdict" for the same landing (the gap that landed c1a1ed7fc986:
+ * 48 times in 72 h), holding a sweep slot each time. Only a non-shadow label counts: a shadow label is calibration
+ * evidence from a registered verifier, never a verdict. Exported for tests.
+ */
+export const NON_DISCRIMINATING_CHECK = "non_discriminating_check";
+export function nonDiscriminatingLandingLabel(label: GoalVerificationLabel | null | undefined): boolean {
+  return !!label && label.grounded === false && label.shadow !== true && typeof label.reason === "string" && label.reason.startsWith("parent green, landed green");
+}
+/** Whether the row's pending hold was released (pending_released) on this landing. */
+export function pendingReleasedFor(meta: Record<string, unknown>, sha: string): boolean {
+  const rel = meta.pending_released as { landed?: unknown } | null | undefined;
+  const landed = rel && typeof rel === "object" && typeof rel.landed === "string" ? rel.landed.trim() : "";
+  const s = String(sha ?? "").trim();
+  return landed.length >= 7 && s.length >= 7 && (landed.startsWith(s) || s.startsWith(landed));
+}
+
+const nonDiscriminatingEscalated = new Set<string>();
+/** Ask a human about a released non-discriminating check, on the needs-human-<gap> panel: the id the answer path
+ *  reads (solicitation_outcome_scan, escalation_disposition_apply gapIdFromPanelId), whose non-drop answer clears
+ *  needs_information and whose labelled lines (VERIFY_SHAPE:, EDIT_SITE:, EXPECTED_LITERAL:) re-arm the gap. */
+function escalateNonDiscriminatingCheck(gapId: string, category: string, summary: string, sha: string, parent: string, checkName: string): void {
+  if (!gapId || nonDiscriminatingEscalated.has(gapId)) return;
+  nonDiscriminatingEscalated.add(gapId);
+  void resolveUiWritePassthrough({ type: "uiQuestion_write", id: "needs-human-" + gapId, title: "Gap's own check does not discriminate — needs a human decision", body: "Gap " + gapId + " (" + category + ") landed " + sha.slice(0, 12) + ", but its own check (" + checkName + ") is GREEN at the landing's parent " + parent.slice(0, 12) + " as well as at the landed sha: it never saw the defect, so it cannot say whether the landing fixed anything. The gap is released from pending verification (not closed) and parked needs_information. Please answer: redefine the goal, provide missing information (a line VERIFY_SHAPE: <shape>, EDIT_SITE: repos/<vessel>/src/... or EXPECTED_LITERAL: <text> re-arms it with a check that sees the defect), grant access, or drop it. Summary: " + summary.slice(0, 300), kind: "gap_needs_human", importance: "medium" } as never)
+    .then((r) => {
+      const shape = (r as { shape?: unknown } | undefined)?.shape;
+      if (shape === "structuredError") console.warn(`[gap-escalation] non-discriminating-check uiQuestion_write REJECTED for ${gapId} — no human was asked`);
+      else console.log(`[gap-escalation] non-discriminating-check uiQuestion_write accepted for ${gapId} (shape=${String(shape)})`);
+    })
+    .catch((e: unknown) => console.warn(`[gap-escalation] non-discriminating-check uiQuestion_write THREW for ${gapId}: ${String(e)} — no human was asked`));
+}
+
+/** Release the pending hold of a landing whose check does not discriminate (nonDiscriminatingLandingLabel), on a
+ *  FRESH read, open rows only. NOT a close and no outcome is appended: pending_outcome_verification is cleared ("",
+ *  the store's cleared convention) so the sweep stops re-selecting the gap; pending_released names the check and the
+ *  landing; the disposition parks it needs_information (admission holds it, a human answer clears it), never ""
+ *  (re-admitted, compose would refuse it green-on-parent every cooldown). A landing held for operator review stays
+ *  as it is. true when the release was written. */
+async function releaseNonDiscriminatingCheck(gap: Record<string, unknown>, sha: string, label: GoalVerificationLabel): Promise<boolean> {
+  const id = String(gap.id ?? "");
+  try {
+    const fresh = await readGapFresh(id);
+    if (!fresh || String(fresh.status ?? "") !== "open") return false;
+    const m0 = (fresh.classification_metadata ?? {}) as Record<string, unknown>;
+    if (m0.disposition === "awaiting_operator_review") return false;
+    const er = (m0.evidence_resolve ?? null) as { shape?: unknown; input?: { vessel?: unknown; test_file?: unknown } } | null;
+    const check = {
+      shape: typeof er?.shape === "string" ? er.shape : null,
+      vessel: typeof er?.input?.vessel === "string" ? er.input.vessel : null,
+      test_file: typeof er?.input?.test_file === "string" ? er.input.test_file : null,
+      tests: Array.isArray(label.tests) ? label.tests : [],
+    };
+    const checkName = [check.vessel, check.test_file].filter(Boolean).join("/") || check.shape || "its check";
+    const at = new Date().toISOString();
+    const meta: Record<string, unknown> = {
+      ...m0,
+      goal_verification_label: label,
+      pending_outcome_verification: "",
+      disposition: isParkingDisposition(m0.disposition) ? m0.disposition : "needs_information",
+      pending_released: { reason: NON_DISCRIMINATING_CHECK, check, landed: sha, parent: label.parent, label_reason: label.reason ?? null, at },
+      pending_note: `released: ${NON_DISCRIMINATING_CHECK}: ${checkName} is green at parent ${String(label.parent ?? "").slice(0, 12)} and at landed ${sha.slice(0, 12)}`,
+    };
+    const w = await resolveSubstrateGapWrite({ type: "substrateGap_write", expect_status: "open", gap: { ...fresh, classification_metadata: meta } } as never);
+    if (w?.shape === "structuredError" || (w?.body as { action?: unknown } | undefined)?.action === "skipped") {
+      console.warn(`[gap-sweep] could not release pending_verification on ${id} (${NON_DISCRIMINATING_CHECK}): write ${w?.shape === "structuredError" ? "refused" : "skipped"}`);
+      return false;
+    }
+    console.warn(`[gap-sweep] released pending_verification on ${id}: ${NON_DISCRIMINATING_CHECK} (${checkName} green at parent ${String(label.parent ?? "").slice(0, 12)} and at landed ${sha.slice(0, 12)}); not closed, parked ${String(meta.disposition)}, a human is asked`);
+    escalateNonDiscriminatingCheck(id, String(fresh.category ?? "?"), String(fresh.summary ?? ""), sha, String(label.parent ?? ""), checkName);
+    return true;
+  } catch (e) {
+    console.warn(`[gap-sweep] could not release pending_verification on ${id} (${NON_DISCRIMINATING_CHECK}): ${(e as Error).message}`);
+    return false;
+  }
+}
+
 /** The gap as the store holds it now, or null when it cannot be read (the caller keeps its own copy). */
 async function readGapFresh(id: string): Promise<Record<string, unknown> | null> {
   if (!id) return null;
@@ -4623,7 +4704,7 @@ async function sweepPendingLandVerificationsOnce(): Promise<{ checked: number; c
   // Live at the time of writing: 13 gaps carry pending_outcome_verification, 11 of them
   // have no predicate at all — so the honest answer is "correctly abstaining on an input
   // that cannot be measured", not "broken". A counter per verdict says that out loud.
-  const tally = { absent: 0, present: 0, pending: 0, unknown: 0, not_in_clone: 0, reverted: 0, awaiting_restart: 0, falsified: 0, self_authored: 0, birth_retaken: 0, stale: 0, unlabelled: 0, held: 0 };
+  const tally = { absent: 0, present: 0, pending: 0, unknown: 0, not_in_clone: 0, reverted: 0, awaiting_restart: 0, falsified: 0, self_authored: 0, birth_retaken: 0, stale: 0, unlabelled: 0, held: 0, non_discriminating: 0 };
   try {
     const read = await resolveSubstrateGap({
       type: "substrateGap",
@@ -4647,7 +4728,10 @@ for (const g of gaps) {
     // not hold, and stamping it would hand the sweep the stale close it refuses below.
     const staleLineage = lineageSha ? staleCloseEvidence(g, lineageSha) : null;
     if (staleLineage) console.log(`[gap-sweep] gap ${String(g.id)}: lineage landing ${lineageSha!.slice(0, 12)} not stamped: ${staleLineage.reason} (landed ${staleLineage.committed_at ?? "unknown"}, re-detected ${staleLineage.redetected_at})`);
-    if (lineageSha && !staleLineage) {
+    // A landing released for a non-discriminating check is not re-stamped: that would restart the loop it ended.
+    const releasedLineage = !!lineageSha && pendingReleasedFor(m, lineageSha);
+    if (releasedLineage) console.log(`[gap-sweep] gap ${String(g.id)}: lineage landing ${lineageSha!.slice(0, 12)} not stamped: released (${NON_DISCRIMINATING_CHECK})`);
+    if (lineageSha && !staleLineage && !releasedLineage) {
       await resolveSubstrateGapWrite({
         type: "substrateGap_write",
         gap: {
@@ -4799,15 +4883,25 @@ const pending = candidates.unheld
       let independentLabel: GoalVerificationLabel | null = null;
       if (landedCloseReason(meta, sha, isLiteralOnlyStepClose(meta)) === "awaiting_independent_verdict") {
         let ivReason = "an ungrounded verdict for this landing is already recorded";
-        if (landingLabelHere(meta, sha)?.grounded !== false) {
+        const storedLabel = landingLabelHere(meta, sha);
+        let ungroundedLabel: GoalVerificationLabel | null = storedLabel?.grounded === false ? storedLabel : null;
+        let freshUngrounded = false;
+        if (!ungroundedLabel) {
           const iv = await independentLandingVerdict(g, sha);
           ivReason = iv.reason;
           if (iv.label) {
             meta.goal_verification_label = iv.label;
             if (iv.label.grounded) independentLabel = iv.label;
-            else await markPendingVerification({ ...g, classification_metadata: meta }, sha, `independent verdict: ${iv.reason}`);
+            else { ungroundedLabel = iv.label; freshUngrounded = true; }
           }
         }
+        // A check green at the landing's parent AND at the landed sha never saw the defect: re-reading it can never
+        // ground this landing, so the gap leaves pending (needs_information, a human asked) instead of looping here.
+        if (nonDiscriminatingLandingLabel(ungroundedLabel) && (await releaseNonDiscriminatingCheck(g, sha, ungroundedLabel!))) {
+          tally.non_discriminating += 1;
+          continue;
+        }
+        if (freshUngrounded) await markPendingVerification({ ...g, classification_metadata: meta }, sha, `independent verdict: ${ivReason}`);
         if (landedCloseReason(meta, sha, isLiteralOnlyStepClose(meta), independentLabel) === "awaiting_independent_verdict") {
           tally.unlabelled += 1;
           console.log(`[gap-sweep] gap ${gidSweep} reads ${verdict} but landed ${sha.slice(0, 12)} is NOT closed: no grounded independent verdict (${ivReason})`);

@@ -22,6 +22,7 @@ import { registerAttempt } from "./attempt-register.js";
 import type { ResolverResult } from "./types.js";
 import { resolveSubstrateGap, resolveSubstrateGapWrite, resolveSubstrateGapLease, landingLeaseOf, isLandingLeaseVerdict, countLandingLeaseRefusal, landingLeaseRefusalCounts, type LandingLeaseVerdict } from "./substrate-gap.js";
 import { resolveTestSuite } from "./test-suite.js";
+import { resolveUiWritePassthrough } from "./ui-write-passthrough.js";
 import { resolveActivateSubstrateScript } from "./activate-substrate-script.js";
 import { resolveMaintenanceLeaseWrite } from "./maintenance-lease";
 import { gateLanding, KILL_SWITCH_REASON, landingsStopped } from "./push-policy.js";
@@ -39,12 +40,15 @@ type OwnCheckDeps = {
   runSuite: (p: Record<string, unknown>) => Promise<unknown>;
   /** The landing-lease op (substrateGapLease_write) at the gap-store holder. */
   lease: (p: Record<string, unknown>) => Promise<unknown>;
+  /** The human ask (uiQuestion_write) for a landing with no measurable predicate. */
+  ask: (p: Record<string, unknown>) => Promise<unknown>;
 };
 const realOwnCheckDeps: OwnCheckDeps = {
   readGap: (p) => resolveSubstrateGap(p as never),
   writeGap: (p) => resolveSubstrateGapWrite(p as never),
   runSuite: (p) => resolveTestSuite(p),
   lease: (p) => resolveSubstrateGapLease(p),
+  ask: (p) => resolveUiWritePassthrough(p as never),
 };
 
 /**
@@ -79,6 +83,145 @@ async function stampOwnCheckOutcome(
   }
 }
 let ownCheckDeps: OwnCheckDeps = realOwnCheckDeps;
+
+/**
+ * Whether a landing's gap can be MEASURED by the pending-land sweep: a class-1 literal, class-1b expected literal or
+ * class-2 resolver check (landVerdictIsMeasured, the sweep's own predicate order). A hardcoded_url that a previous
+ * landing derived from its own diff (predicate_source removed_line_of_landing_commit) does not count: the sweep reads
+ * it as a durability sentinel and answers 'pending', never 'absent', so it can never verify anything.
+ */
+export async function pendingLandMeasurable(meta: Record<string, unknown>): Promise<boolean> {
+  const { landVerdictIsMeasured } = await import("./gap-to-feature.js");
+  if (meta["predicate_source"] === "removed_line_of_landing_commit") {
+    const { hardcoded_url: _sentinel, ...rest } = meta;
+    return landVerdictIsMeasured(rest);
+  }
+  return landVerdictIsMeasured(meta);
+}
+
+/**
+ * The human ask for a landing with nothing to measure it, on the needs-human-<gap> panel: the id the answer path
+ * reads (solicitation_outcome_scan, escalation_disposition_apply gapIdFromPanelId), whose labelled lines
+ * (VERIFY_SHAPE:, EDIT_SITE:, EXPECTED_LITERAL:) arm the gap with a check. One line names the gap and where the ask
+ * went; the passthrough does not log its own destination, so the line says it was handed to it. Fire-and-forget.
+ */
+function askHumanUnmeasurableLanding(row: Record<string, unknown>, sha: string): void {
+  const gapId = String(row["id"] ?? "");
+  const panel = `needs-human-${gapId}`;
+  const summary = String(row["summary"] ?? "");
+  console.log(`[mitosis-cutover] pending-land UNMEASURABLE gap=${gapId} sha=${sha.slice(0, 12)} reason=no_predicate -> human lane: uiQuestion_write ${panel} handed to ui-write-passthrough`);
+  void ownCheckDeps.ask({
+    type: "uiQuestion_write",
+    id: panel,
+    title: "Landed change has nothing to verify it — needs a human decision",
+    body: "Gap " + gapId + " (" + String(row["category"] ?? "?") + ") landed " + sha.slice(0, 12) + ", but it carries no measurable predicate (no evidence_resolve / verify_shape check, no literal at an edit site), so the pending-land sweep can never say whether the change fixed anything. Rather than leave it silently pending, a human is asked. Please answer: confirm the fix, redefine the goal, provide a check (a line VERIFY_SHAPE: <shape>, EDIT_SITE: repos/<vessel>/src/... or EXPECTED_LITERAL: <text> arms it), or drop it. Summary: " + summary.slice(0, 300),
+    kind: "gap_needs_human",
+    importance: "medium",
+  })
+    .then((r) => {
+      const res = r as { shape?: unknown; body?: { ok?: unknown; error?: unknown } } | undefined;
+      if (res?.shape === "structuredError" || res?.body?.ok === false) console.warn(`[mitosis-cutover] pending-land UNMEASURABLE ask ${panel} REJECTED (${String(res?.body?.error ?? res?.shape)}) — no human was asked`);
+    })
+    .catch((e: unknown) => console.warn(`[mitosis-cutover] pending-land UNMEASURABLE ask ${panel} THREW: ${String(e)} — no human was asked`));
+}
+
+/**
+ * The pending-land stamp of a pushed landing (called from the git-aware cutover once the push succeeded). Reads and
+ * writes the gap through the own-check deps seam, so a test drives the real stamp against a fixture store.
+ */
+export async function stampPendingLand(a: {
+  gapId: string; newSha: string; appliedAt: string; vessel_name: string; hostRepoRoot: string; gitCmd: string;
+  landedUnverifiedReason: string | null;
+}): Promise<void> {
+  const { gapId, newSha, appliedAt, vessel_name, hostRepoRoot, gitCmd, landedUnverifiedReason } = a;
+  try {
+    const stampRead = await ownCheckDeps.readGap({ type: "substrateGap", id: gapId, limit: 1 });
+    const stampRow = ((stampRead as { body?: { gaps?: Array<Record<string, unknown>> } }).body?.gaps ?? [])[0];
+    if (stampRow && String(stampRow["status"] ?? "") !== "closed") {
+      const stampMeta = (stampRow["classification_metadata"] ?? {}) as Record<string, unknown>;
+      if (stampMeta["pending_outcome_verification"] !== newSha) {
+        // STAMP A MEASURABLE PREDICATE, NOT JUST PROVENANCE.
+        //
+        // The sweep closes only on a MEASURED 'absent'; a gap with no predicate yields
+        // 'pending' and correctly abstains. Measured 2026-08-31: 1366 of 1368 gaps carried
+        // no predicate, so landed fixes stamped here sat pending forever and were
+        // recomposed — one gap accumulated SIX substrate-authored commits to the same file.
+        //
+        // A line this commit REMOVED is present-in-parent and absent-at-commit by
+        // construction, so it is a sound class-1 predicate with no timing window. That is
+        // the difference from be26a6b (reverted): that derived from the gap summary AFTER
+        // the fix was mirrored, so the literal read 'present' by construction, and only
+        // ~4 of 15 summary literals named the actual defect. Over five real landing commits
+        // this source produced the actual defect four times, including
+        // `const SLOT_DIR = process.env["COMPOSE_SLOT_DIR"]` and
+        // `const allowlist = process.env["WRITE_ALLOWLIST"]`.
+        //
+        // Absence is VERIFIED here against the post-fix file rather than assumed: a diff
+        // can remove a line that still occurs elsewhere in the file, and such a predicate
+        // would pin the gap open forever. Failure to derive leaves the stamp exactly as it
+        // was — no predicate is the safe outcome, and the sweep handles it by asking a human.
+        let derived: { path: string; line: string } | null = null;
+        try {
+          const cloneRoot = process.env["MITOSIS_PUSH_CLONE_DIR"];
+          const repoDir = cloneRoot ? join(cloneRoot, vessel_name) : hostRepoRoot;
+          const shown = await runGit(gitCmd, ["show", newSha, "--format="], repoDir);
+          if (shown.exit_code === 0 && shown.stdout) {
+            const cand = pickRemovedLinePredicate(shown.stdout, String(stampRow["summary"] ?? ""));
+            if (cand) {
+              const after = await readFile(join(repoDir, cand.path), "utf-8").catch(() => null);
+              if (after !== null && !after.includes(cand.line)) derived = cand;
+              else console.log(`[mitosis-cutover] predicate SKIPPED gap=${gapId}: removed line still present in the post-fix file`);
+            }
+          }
+        } catch (err) {
+          console.warn(`[mitosis-cutover] predicate derivation skipped (non-fatal): ${(err as Error)?.message ?? String(err)}`);
+        }
+        // MEASURABLE OR ASKED, NEVER SILENTLY PENDING (operator ruling 2026-10-10, retiring verification_spec).
+        // Judged on the row as it stood BEFORE this landing derived anything: the removed-line literal below is
+        // a durability sentinel (verifyGapCondition answers 'pending', never 'absent', for it), so it cannot
+        // make a landing measurable. With no predicate the sweep can only ever abstain, so the gap goes to the
+        // human lane now, on the needs-human-<gap> panel the answer path reads, and the row says why.
+        const measurable = await pendingLandMeasurable(stampMeta);
+        const unmeasurable = measurable ? null : { reason: "no_predicate", at: appliedAt, sha: newSha, asked: `needs-human-${gapId}` };
+        await ownCheckDeps.writeGap({
+          type: "substrateGap_write",
+          gap: {
+            ...stampRow,
+            status: "open",
+            classification_metadata: {
+              ...stampMeta,
+              pending_outcome_verification: newSha,
+              pending_set_at: appliedAt,
+              // Bound to THIS landing's sha, and cleared on a verified one: the store carries omitted keys
+              // forward, so an earlier landing's flag would otherwise downgrade a later verified close.
+              ...(landedUnverifiedReason !== null
+                ? { landed_unverified: true, landed_unverified_reason: landedUnverifiedReason, landed_unverified_sha: newSha }
+                : { landed_unverified: false, landed_unverified_reason: "", landed_unverified_sha: "" }),
+              // Cleared on a measurable landing: the store carries omitted keys forward.
+              pending_unmeasurable: unmeasurable ?? "",
+              // Only for a gap with no measurable predicate: the removed-line literal otherwise outranks
+              // a stronger evidence_resolve / verify_shape / expected_literal check in classification.
+              ...(derived && typeof stampMeta["hardcoded_url"] !== "string" && !stampMeta["evidence_resolve"] && !stampMeta["verify_shape"] && !stampMeta["expected_literal"]
+                ? {
+                    hardcoded_url: derived.line,
+                    file_path: `repos/${vessel_name}/${derived.path}`,
+                    predicate_source: "removed_line_of_landing_commit",
+                    predicate_derived_at: appliedAt,
+                    predicate_commit: newSha,
+                  }
+                : {}),
+            },
+          },
+        });
+        if (unmeasurable) askHumanUnmeasurableLanding(stampRow, newSha);
+        console.log(`[mitosis-cutover] pending-land stamp gap=${gapId} sha=${newSha.slice(0, 12)} predicate=${derived ? JSON.stringify(derived.line.slice(0, 48)) : "none"} (sweep will close as landed_verified)`);
+      }
+    }
+  } catch (err) {
+    console.warn("[mitosis-cutover] pending-land stamp errored (non-fatal):", err);
+  }
+}
+
 /** Tests only. */
 export function __setOwnCheckDepsForTests(d: Partial<OwnCheckDeps> | null): void {
   ownCheckDeps = d ? { ...realOwnCheckDeps, ...d } : realOwnCheckDeps;
@@ -3544,82 +3687,7 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
     }
   }
   if (gapId !== "unknown-gap" && pushStatus === "pushed" && /^[0-9a-f]{7,40}$/i.test(newSha) && !landingCreditWithheld) {
-    try {
-      const stampRead = await resolveSubstrateGap({ type: "substrateGap", id: gapId, limit: 1 } as never);
-      const stampRow = ((stampRead as { body?: { gaps?: Array<Record<string, unknown>> } }).body?.gaps ?? [])[0];
-      if (stampRow && String(stampRow["status"] ?? "") !== "closed") {
-        const stampMeta = (stampRow["classification_metadata"] ?? {}) as Record<string, unknown>;
-        if (stampMeta["pending_outcome_verification"] !== newSha) {
-          // STAMP A MEASURABLE PREDICATE, NOT JUST PROVENANCE.
-          //
-          // The sweep closes only on a MEASURED 'absent'; a gap with no predicate yields
-          // 'pending' and correctly abstains. Measured 2026-08-31: 1366 of 1368 gaps carried
-          // no predicate, so landed fixes stamped here sat pending forever and were
-          // recomposed — one gap accumulated SIX substrate-authored commits to the same file.
-          //
-          // A line this commit REMOVED is present-in-parent and absent-at-commit by
-          // construction, so it is a sound class-1 predicate with no timing window. That is
-          // the difference from be26a6b (reverted): that derived from the gap summary AFTER
-          // the fix was mirrored, so the literal read 'present' by construction, and only
-          // ~4 of 15 summary literals named the actual defect. Over five real landing commits
-          // this source produced the actual defect four times, including
-          // `const SLOT_DIR = process.env["COMPOSE_SLOT_DIR"]` and
-          // `const allowlist = process.env["WRITE_ALLOWLIST"]`.
-          //
-          // Absence is VERIFIED here against the post-fix file rather than assumed: a diff
-          // can remove a line that still occurs elsewhere in the file, and such a predicate
-          // would pin the gap open forever. Failure to derive leaves the stamp exactly as it
-          // was — no predicate is the safe outcome, and the sweep handles it by asking a human.
-          let derived: { path: string; line: string } | null = null;
-          try {
-            const cloneRoot = process.env["MITOSIS_PUSH_CLONE_DIR"];
-            const repoDir = cloneRoot ? join(cloneRoot, vessel_name) : hostRepoRoot;
-            const shown = await runGit(gitCmd, ["show", newSha, "--format="], repoDir);
-            if (shown.exit_code === 0 && shown.stdout) {
-              const cand = pickRemovedLinePredicate(shown.stdout, String(stampRow["summary"] ?? ""));
-              if (cand) {
-                const after = await readFile(join(repoDir, cand.path), "utf-8").catch(() => null);
-                if (after !== null && !after.includes(cand.line)) derived = cand;
-                else console.log(`[mitosis-cutover] predicate SKIPPED gap=${gapId}: removed line still present in the post-fix file`);
-              }
-            }
-          } catch (err) {
-            console.warn(`[mitosis-cutover] predicate derivation skipped (non-fatal): ${(err as Error)?.message ?? String(err)}`);
-          }
-          await resolveSubstrateGapWrite({
-            type: "substrateGap_write",
-            gap: {
-              ...stampRow,
-              status: "open",
-              classification_metadata: {
-                ...stampMeta,
-                pending_outcome_verification: newSha,
-                pending_set_at: appliedAt,
-                // Bound to THIS landing's sha, and cleared on a verified one: the store carries omitted keys
-                // forward, so an earlier landing's flag would otherwise downgrade a later verified close.
-                ...(landedUnverifiedReason !== null
-                  ? { landed_unverified: true, landed_unverified_reason: landedUnverifiedReason, landed_unverified_sha: newSha }
-                  : { landed_unverified: false, landed_unverified_reason: "", landed_unverified_sha: "" }),
-                // Only for a gap with no measurable predicate: the removed-line literal otherwise outranks
-                // a stronger evidence_resolve / verify_shape / expected_literal check in classification.
-                ...(derived && typeof stampMeta["hardcoded_url"] !== "string" && !stampMeta["evidence_resolve"] && !stampMeta["verify_shape"] && !stampMeta["expected_literal"]
-                  ? {
-                      hardcoded_url: derived.line,
-                      file_path: `repos/${vessel_name}/${derived.path}`,
-                      predicate_source: "removed_line_of_landing_commit",
-                      predicate_derived_at: appliedAt,
-                      predicate_commit: newSha,
-                    }
-                  : {}),
-              },
-            },
-          } as never);
-          console.log(`[mitosis-cutover] pending-land stamp gap=${gapId} sha=${newSha.slice(0, 12)} predicate=${derived ? JSON.stringify(derived.line.slice(0, 48)) : "none"} (sweep will close as landed_verified)`);
-        }
-      }
-    } catch (err) {
-      console.warn("[mitosis-cutover] pending-land stamp errored (non-fatal):", err);
-    }
+    await stampPendingLand({ gapId, newSha, appliedAt, vessel_name, hostRepoRoot, gitCmd, landedUnverifiedReason });
   }
   const workspaceRoot = process.env["WORKSPACE_ROOT"] ?? process.cwd();
   const logPath =

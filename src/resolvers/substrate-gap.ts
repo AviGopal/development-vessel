@@ -870,7 +870,8 @@ if (evidenceResolve && typeof evidenceResolve === "object" && !Array.isArray(evi
 // The evaluation runs after the write is saved and never blocks it; evaluations run one at a time.
 // Birth fields on an incoming write are never trusted: the seam owns them. The one trusted channel is
 // the in-process `opts.birthVerdict` (not reachable over HTTP), used by a proposer that has just run the
-// same judge on the same predicate, and honoured only when its key equals the merged predicate's.
+// same judge on the same predicate. It is honoured only when it is a verdict MINTED by
+// takeBirthVerdictWithReport (see MINTED BIRTH VERDICTS, below), for this gap id and this check.
 //
 // WHICH TREE (qa C3'). A verdict is about a tree, so the tree is stamped with it:
 //   predicate_birth_sha           HEAD of the repo the check runs in, read when the evaluation STARTS
@@ -1081,11 +1082,62 @@ export async function takeBirthVerdict(id: string, meta: Record<string, unknown>
  * for a caller that must know WHY a check read present, e.g. that its named tests failed on an assertion rather
  * than on a load error (gap-check-supply).
  */
-export async function takeBirthVerdictWithReport(id: string, meta: Record<string, unknown>): Promise<{ verdict: "present" | "absent" | "unknown"; report: Record<string, unknown> | null }> {
+export async function takeBirthVerdictWithReport(id: string, meta: Record<string, unknown>): Promise<{ verdict: "present" | "absent" | "unknown"; report: Record<string, unknown> | null; stamp: MintedBirthVerdict }> {
   let report: Record<string, unknown> | null = null;
   const base = __birthJudgeOverride ?? defaultBirthJudge;
-  const verdict = await takeBirthVerdict(id, meta, (g) => base(g, { onReport: (r) => { report = r; } }));
-  return { verdict, report };
+  // The judge sees a snapshot, and the stamp is bound to that snapshot: mutating `meta` while the check runs
+  // cannot move the stamp onto a check that was not judged.
+  const judged = JSON.parse(JSON.stringify(meta ?? {})) as Record<string, unknown>;
+  const verdict = await takeBirthVerdict(id, judged, (g) => base(g, { onReport: (r) => { report = r; } }));
+  return { verdict, report, stamp: mintBirthVerdict(id, judged, verdict) };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MINTED BIRTH VERDICTS (PLAN4 finding 2). The trusted channel (`opts.birthVerdict`) used to be honoured for
+// ANY object whose predicate_key matched, so a caller could hand the seam `{ predicate_key, verdict: "present" }`
+// for a check it never ran, and the row was born trusted: admissible, and closable by its own 'absent'. The
+// callers that pass it (gap-to-feature decomposeGap, gap-check-supply's arm step) are lane-editable, so the
+// seam now honours only a verdict this module minted:
+//   - minted ONLY by takeBirthVerdictWithReport, which runs the seam's own judge (the default judge, or the
+//     test override) and takes no caller-supplied judge (takeBirthVerdict, which does, mints nothing);
+//   - frozen, so an 'absent' cannot be flipped to 'present' after minting;
+//   - recorded in a module-private WeakSet, so a structurally identical literal, a spread copy or a
+//     JSON round-trip of a minted verdict is not one (identity, not shape, is the credential; the set is not
+//     exported, so no caller can add to it);
+//   - bound to the gap id it was judged for and to the check it judged (evidence_resolve + verify_shape, with a
+//     blank verify_shape read as none, because writers blank it deliberately and the judge reads "" as no shape).
+// Why this and not a token or HMAC: everything here is one process, so a secret would be readable by the same
+// code that could forge with it; object identity in a private set is the smallest credential an import of
+// this module cannot manufacture. What it does NOT close (in-process test seams, same class, listed so they
+// are not mistaken for covered): __setBirthJudgeForTests and the write's `opts.birthJudge` both let a caller
+// choose the judge, and so the verdict.
+// ─────────────────────────────────────────────────────────────────────────────
+declare const MINTED_BIRTH_VERDICT_BRAND: unique symbol;
+/** A birth verdict minted by takeBirthVerdictWithReport; the only form `opts.birthVerdict` honours. */
+export type MintedBirthVerdict = {
+  readonly gap_id: string;
+  readonly predicate_key: string;
+  readonly check: string;
+  readonly verdict: "present" | "absent" | "unknown";
+  readonly [MINTED_BIRTH_VERDICT_BRAND]: true;
+};
+const MINTED_BIRTH_VERDICTS = new WeakSet<object>();
+/** The check a birth verdict is bound to: class2PredicateKey's fields, a blank verify_shape read as none. */
+function birthCheckBinding(meta: Record<string, unknown> | null | undefined): string {
+  const m = (meta ?? {}) as Record<string, unknown>;
+  const vs = m["verify_shape"];
+  return stableStringify({ evidence_resolve: m["evidence_resolve"] ?? null, verify_shape: typeof vs === "string" && vs.trim() === "" ? null : vs ?? null });
+}
+function mintBirthVerdict(id: string, meta: Record<string, unknown>, verdict: "present" | "absent" | "unknown"): MintedBirthVerdict {
+  const stamp = Object.freeze({ gap_id: id, predicate_key: class2PredicateKey(meta), check: birthCheckBinding(meta), verdict }) as unknown as MintedBirthVerdict;
+  MINTED_BIRTH_VERDICTS.add(stamp);
+  return stamp;
+}
+/** The trusted verdict for this write, or null: minted here, for this gap id, for this exact check. */
+function mintedVerdictFor(trusted: unknown, gapId: string, merged: Record<string, unknown>): "present" | "absent" | "unknown" | null {
+  if (!trusted || typeof trusted !== "object" || !MINTED_BIRTH_VERDICTS.has(trusted)) return null;
+  const t = trusted as MintedBirthVerdict;
+  return t.gap_id === gapId && t.check === birthCheckBinding(merged) ? t.verdict : null;
 }
 
 function scheduleBirthEvaluation(job: { id: string; key: string; meta: Record<string, unknown> }, judge: BirthJudge): void {
@@ -1129,7 +1181,7 @@ function applyBirthStamp(
   falsifier: FalsifierClass,
   merged: Record<string, unknown>,
   prior: Record<string, unknown>,
-  trusted: { predicate_key: string; verdict: "present" | "absent" | "unknown" } | undefined,
+  trusted: MintedBirthVerdict | undefined,
   nowIso: string,
   detectedSha?: string,
 ): { id: string; key: string; meta: Record<string, unknown> } | null {
@@ -1140,9 +1192,12 @@ function applyBirthStamp(
   const priorSameCheck = prior["predicate_birth_key"] === key && typeof prior["predicate_birth_verdict"] === "string";
   if (status !== "open") { if (priorSameCheck) carryPrior(); return null; }
   const detected = shaOf(detectedSha);
-  if (trusted && trusted.predicate_key === key) {
+  // Only a verdict MINTED by takeBirthVerdictWithReport for this gap and this check (MINTED BIRTH VERDICTS);
+  // anything else, a literal with the right key included, is ignored and the seam judges the check itself.
+  const trustedVerdict = mintedVerdictFor(trusted, gapId, merged);
+  if (trustedVerdict) {
     merged["predicate_birth_key"] = key;
-    merged["predicate_birth_verdict"] = trusted.verdict;
+    merged["predicate_birth_verdict"] = trustedVerdict;
     merged["predicate_birth_at"] = nowIso;
     const evalSha = readBirthTreeSha(merged);
     if (evalSha) merged["predicate_birth_sha"] = evalSha;
@@ -1575,8 +1630,8 @@ export async function resolveSubstrateGapWrite(
   opts?: {
     vocabulary?: ShapeVocabulary | null,
     anchorNotFoundHandler?: (error: Error) => void,
-    /** In-process only: a verdict the caller just took with the same judge on this exact class-2 check (see BIRTH EVALUATION). */
-    birthVerdict?: { predicate_key: string; verdict: "present" | "absent" | "unknown" },
+    /** In-process only: a verdict minted by takeBirthVerdictWithReport for this gap's exact class-2 check (see MINTED BIRTH VERDICTS). Anything else is ignored. */
+    birthVerdict?: MintedBirthVerdict,
     /** Tests only: the judge for this write's birth evaluation. */
     birthJudge?: BirthJudge,
     /** In-process only: the commit the writer detected the defect against (see WHICH TREE). */
@@ -1611,8 +1666,8 @@ async function resolveSubstrateGapWriteInner(
   opts?: {
     vocabulary?: ShapeVocabulary | null,
     anchorNotFoundHandler?: (error: Error) => void,
-    /** In-process only: a verdict the caller just took with the same judge on this exact class-2 check (see BIRTH EVALUATION). */
-    birthVerdict?: { predicate_key: string; verdict: "present" | "absent" | "unknown" },
+    /** In-process only: a verdict minted by takeBirthVerdictWithReport for this gap's exact class-2 check (see MINTED BIRTH VERDICTS). Anything else is ignored. */
+    birthVerdict?: MintedBirthVerdict,
     /** Tests only: the judge for this write's birth evaluation. */
     birthJudge?: BirthJudge,
     /** In-process only: the commit the writer detected the defect against (see WHICH TREE). */

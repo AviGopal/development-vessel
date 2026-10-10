@@ -191,16 +191,22 @@ describe("birth evaluation at the substrateGap_write seam", () => {
     expect(metaOf(await row(id)).predicate_birth_verdict).toBe("absent");
   });
 
+  // The trusted verdict must be MINTED by the seam's own judge (takeBirthVerdictWithReport); a literal is ignored
+  // (birth-verdict-unforgeable.test.ts pins the refusal).
   it("a trusted in-process verdict for the exact check is honoured without a second evaluation; for another check it is not", async () => {
     const id = `gf2-birth-trusted-${RUN}`;
     const check = testSuiteCheck("widget counts rejected frames");
+    __setBirthJudgeForTests(stubTransportJudge);
+    let minted: Awaited<ReturnType<typeof sg.takeBirthVerdictWithReport>>;
+    try { minted = await sg.takeBirthVerdictWithReport(id, check); } finally { __setBirthJudgeForTests(null); }
+    expect(minted.verdict).toBe("present");
     const before = selfResolveCalls;
-    await write(id, check, { birthVerdict: { predicate_key: class2PredicateKey(check), verdict: "present" } });
+    await write(id, check, { birthVerdict: minted.stamp });
     await __settleBirthEvaluationsForTests();
     expect(selfResolveCalls).toBe(before);
     expect(metaOf(await row(id)).predicate_birth_verdict).toBe("present");
     const id2 = `gf2-birth-trusted-mismatch-${RUN}`;
-    await write(id2, testSuiteCheck("widget already passes"), { birthVerdict: { predicate_key: class2PredicateKey(check), verdict: "present" } });
+    await write(id2, testSuiteCheck("widget already passes"), { birthVerdict: minted.stamp });
     await __settleBirthEvaluationsForTests();
     expect(metaOf(await row(id2)).predicate_birth_verdict).toBe("absent");
   });

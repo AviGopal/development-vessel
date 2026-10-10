@@ -19,7 +19,7 @@ declare module "./feature-compose.js" {
 }
 
 import { appendRecord } from "./attempt-ledger.js";
-import { resolveSubstrateGap, resolveSubstrateGapWrite, DECISION_LOG_GAP_CATEGORIES, predicateSuspect, class2PredicateKey, reevaluateBirthVerdicts, inheritableParentCheck, birthCheckRepo } from "./substrate-gap.js";
+import { resolveSubstrateGap, resolveSubstrateGapWrite, DECISION_LOG_GAP_CATEGORIES, predicateSuspect, class2PredicateKey, reevaluateBirthVerdicts, inheritableParentCheck, birthCheckRepo, takeBirthVerdictWithReport, type MintedBirthVerdict } from "./substrate-gap.js";
 import { resolveAuthorProducer } from "./author-producer.js";
 import { resolveDocDriftFix } from "./doc-drift-fix.js";
 import { resolveReachabilityGapRepair } from "./reachability-gap-repair.js";
@@ -926,16 +926,20 @@ export async function decomposeGap(
   // judgement is deferred to the holder: the write is forwarded without a verdict, and the holder's seam stamps
   // it pending and evaluates it there; anything but 'present' is then predicate_suspect (not admissible).
   const deferToHolder = !!process.env["GAP_STORE_ENDPOINT"];
-  const redNow = async (label: string, id: string, pred: Record<string, unknown>): Promise<{ ok: true } | { ok: false; why: string }> => {
+  // The seam's own judge mints the verdict the write may hand over (MINTED BIRTH VERDICTS in substrate-gap); an
+  // injected deps.judge gates only, and the seam then judges the written check itself.
+  const redNow = async (label: string, id: string, pred: Record<string, unknown>): Promise<{ ok: true; stamp?: MintedBirthVerdict } | { ok: false; why: string }> => {
     if (deferToHolder) return { ok: true };
     let v: GapCheckVerdict = "unknown";
-    try { v = await judge({ id, classification_metadata: { ...pred } }); } catch { v = "unknown"; }
-    return v === "present" ? { ok: true } : { ok: false, why: `${label}: its check reads ${v} on the current tree, not present` };
+    let stamp: MintedBirthVerdict | undefined;
+    try { if (opts.deps?.judge) v = await judge({ id, classification_metadata: { ...pred } }); else ({ verdict: v, stamp } = await takeBirthVerdictWithReport(id, { ...pred })); } catch { v = "unknown"; }
+    return v === "present" ? { ok: true, stamp } : { ok: false, why: `${label}: its check reads ${v} on the current tree, not present` };
   };
 
   // k=0: THE PARENT'S OWN CHECK (parent-check mode).
   let parentCheck: Record<string, unknown> | null = null;
   let parentCheckNote = "";
+  let parentVerdict: MintedBirthVerdict | null = null;
   if (opts.parentCheck) {
     const pc = parsed.parent_check;
     if (pc && typeof pc === "object") {
@@ -951,7 +955,7 @@ export async function decomposeGap(
         else {
           const red = await redNow("parent check", parentId, v.predicate);
           if (!red.ok) parentCheckNote = red.why;
-          else parentCheck = v.predicate;
+          else { parentCheck = v.predicate; parentVerdict = red.stamp ?? null; }
         }
       }
     } else parentCheckNote = "parent check: none proposed";
@@ -978,7 +982,7 @@ export async function decomposeGap(
     let text = "";
     try { text = readFileSync(join(vesselsCloneRoot(), sm[1] ?? "", sm[2] ?? ""), "utf-8"); } catch { refusals.push(`step ${k}: ${stepSite} does not exist`); continue; }
     let childPredicate: Record<string, unknown> = {};
-    let childVerdict: "present" | null = null;
+    let childVerdict: MintedBirthVerdict | null = null;
     const hasShape = typeof f.verify_shape === "string" || (!!f.evidence_resolve && typeof (f.evidence_resolve as { shape?: unknown }).shape === "string");
     if (hasShape) {
       const v = await validateShapeCheck(`step ${k}`, f, parentCheck ? [predicate, parentCheck] : [predicate]);
@@ -986,7 +990,7 @@ export async function decomposeGap(
       const red = await redNow(`step ${k}`, `${parentId}-step-${k}`, v.predicate);
       if (!red.ok) { refusals.push(red.why); continue; }
       childPredicate = v.predicate;
-      childVerdict = deferToHolder ? null : "present";
+      childVerdict = red.stamp ?? null;
     } else if (typeof f.expected_literal === "string" && f.expected_literal.trim().length >= 4) {
       const lit = f.expected_literal.trim();
       const reader = String(f.reader ?? "").trim();
@@ -1032,7 +1036,7 @@ export async function decomposeGap(
     const childMeta: Record<string, unknown> = { edit_site: stepSite, parent_gap_id: parentId, predicate_source: "decompose", ...(meta.directed === true || opts.directed === true ? { directed: true } : {}), ...cleared, ...childPredicate };
     await resolveSubstrateGapWrite(
       { type: "substrateGap_write", gap: { id: childId, category: "decomposed_step", source: "substrate_detected", summary: `[step ${k} of ${parentId}] ${change}`, detected_at: new Date().toISOString(), status: "open", classification_metadata: childMeta } } as never,
-      childVerdict ? { birthVerdict: { predicate_key: class2PredicateKey(childMeta), verdict: childVerdict } } : undefined,
+      childVerdict ? { birthVerdict: childVerdict } : undefined,
     );
     written.push(childId);
   }
@@ -1048,7 +1052,7 @@ export async function decomposeGap(
     }
     await resolveSubstrateGapWrite(
       { type: "substrateGap_write", gap: { ...parent, classification_metadata: parentMeta, status: String(parent.status ?? "open") } } as never,
-      parentCheck && !deferToHolder ? { birthVerdict: { predicate_key: class2PredicateKey(parentMeta), verdict: "present" } } : undefined,
+      parentCheck && parentVerdict ? { birthVerdict: parentVerdict } : undefined,
     );
   } catch { /* the children stand on their own */ }
   console.log(`[gap-decompose] ${parentId}: ${reason.slice(0, 400)}`);

@@ -47,7 +47,7 @@ import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { join, normalize } from "node:path";
 import type { ResolverResult } from "./types.js";
-import { class2PredicateKey, resolveSubstrateGap, resolveSubstrateGapWrite, takeBirthVerdictWithReport } from "./substrate-gap.js";
+import { resolveSubstrateGap, resolveSubstrateGapWrite, takeBirthVerdictWithReport } from "./substrate-gap.js";
 import {
   CHECK_SUPPLY_DISPOSITION,
   composeEligibilitySkipReason,
@@ -331,7 +331,7 @@ export async function resolveGapCheckSupplyTick(pointer: GapCheckSupplyTickPoint
       continue;
     }
     const evidence_resolve = { shape: "test_suite", input: { vessel: `repos/${ledger.vessel}`, test_file: ledger.test_file, only_tests: titles }, zero_field: "requested_not_passing" };
-    const { verdict, report } = await takeBirthVerdictWithReport(id, { ...meta, evidence_resolve, edit_site: editSite });
+    const { verdict, report, stamp } = await takeBirthVerdictWithReport(id, { ...meta, evidence_resolve, edit_site: editSite });
     // RED FOR THE RIGHT REASON, BY THE SHARED CLASSIFIER: every named test among the failures (redForTheRightReason)
     // AND each an assertion in the report's red_reason (retry-evidence.ts), the rule feature_compose's verify applies.
     // A report without red_reason cannot attribute its red: nothing is armed.
@@ -346,14 +346,13 @@ export async function resolveGapCheckSupplyTick(pointer: GapCheckSupplyTickPoint
       continue;
     }
     if (pointer.dry_run) { armed.push(id); continue; }
-    const key = class2PredicateKey({ evidence_resolve, verify_shape: meta["verify_shape"] ?? null });
     const w = await writeMeta(row, {
       evidence_resolve,
       edit_site: editSite,
       predicate_source: CHECK_SUPPLY_SOURCE,
       disposition: meta["disposition"] === CHECK_SUPPLY_DISPOSITION ? "" : meta["disposition"] ?? "",
       check_supply: { ...ledger, state: "armed", armed_at: nowIso, red_at_head: true, last_verdict: verdict },
-    }, { birthVerdict: { predicate_key: key, verdict: "present" } });
+    }, { birthVerdict: stamp }); // the verdict minted by the run above: the seam honours nothing else
     if (w.shape === "structuredError") {
       const reason = `arm write refused: ${JSON.stringify(w.body).slice(0, 200)}`;
       refused += 1;

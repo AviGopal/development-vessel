@@ -1,0 +1,14 @@
+bun test v1.3.14 (0d9b296a)
+
+test/checks/throw.check.ts:
+1 | import { expect, test } from "bun:test";
+2 | import * as mod from "../../src/x";
+3 | test("throw red", () => { if (mod.widget === 1) throw new Error("plain failure, no assertion"); expect(1).toBe(1); });
+                                                                                                 ^
+error: plain failure, no assertion
+      at <anonymous> (/tmp/fx/test/checks/throw.check.ts:3:94)
+(fail) throw red [0.11ms]
+
+ 0 pass
+ 1 fail
+Ran 1 test across 1 file. [9.00ms]

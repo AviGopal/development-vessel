@@ -179,11 +179,19 @@ export function parseOwnCheckFailures(raw: string, only: string[] = []): OwnChec
  *   - a file that fails to LOAD (missing module, syntax error "Unexpected end of file", a NAMED import of a missing
  *     export "SyntaxError: Export named 'x' not found in module …") prints "# Unhandled error between tests", the
  *     error between dashed lines, and a summary "0 pass / 1 fail / 1 error" with NO "(fail)" line.
- * A failure is an ASSERTION when its error line starts `error: expect(`, Expected/Received (or the diff header) was
- * printed, and its ERROR TEXT names no wrong reason. The error text is the block minus source-excerpt lines, caret
- * lines, stack lines, Expected lines and diff lines (none of those is the error: an excerpt can hold any word, and the
- * Expected side is the author's literal), plus the timeout trailer. Received lines ARE scanned: a Received that says
- * ECONNREFUSED is a network dependency, not a reproduction.
+ *   - a custom-message assertion, expect(x, "msg"), prints `error: msg` (not `error: expect(`), then the same
+ *     Expected/Received lines; an Error the test LOGS (console.error) prints its own excerpt and `error: …` line in
+ *     the same block, BEFORE the failure's own.
+ * The failure's OWN error is the LAST error line of its block (an earlier one is something the code logged). A failure
+ * is an ASSERTION when that line is `error: …` and the matcher's printout after it, up to the stack, holds
+ * Expected/Received (or the diff header), and its ERROR TEXT names no wrong reason. The error text is the block FROM
+ * that line on, minus source-excerpt lines, caret lines, stack lines, Expected lines and diff lines (none of those is
+ * the error: an excerpt can hold any word, and the Expected side is the author's literal), plus the timeout trailer.
+ * The network and timeout markers do not read an assertion's error line or its printout: those are the author's
+ * message and the VALUES compared (a Received "Timeout reached" or "ECONNREFUSED" is data the code under test returned,
+ * not a wait or a connection the check made); a real timeout is the trailer, a real refused connection is a thrown
+ * error with no comparison after it. A failure that is NOT an assertion names its cause from the whole block, so a
+ * refused connection the code logged before throwing still reads network.
  */
 export type RedCause = "network" | "timeout" | "missing_export" | "module" | "syntax" | "reference" | "non_assertion" | "load_error" | "did_not_run";
 export type ClassifiedFailure = { name: string; cls: "assertion" | "wrong_reason"; cause?: RedCause; error: string | null };
@@ -202,7 +210,10 @@ const WRONG_REASON_MARKERS: ReadonlyArray<[RedCause, RegExp]> = [
   ["syntax", /SyntaxError|Unexpected end of file|Unexpected token/],
   ["reference", /ReferenceError/],
 ];
-const causeOf = (text: string): RedCause | null => WRONG_REASON_MARKERS.find(([, rx]) => rx.test(text))?.[0] ?? null;
+/** Markers that read only `valueFree` text: never an assertion's message or the values it compared. */
+const VALUE_BLIND: ReadonlySet<RedCause> = new Set<RedCause>(["network", "timeout"]);
+const causeOf = (text: string, valueFree: string = text): RedCause | null =>
+  WRONG_REASON_MARKERS.find(([c, rx]) => rx.test(VALUE_BLIND.has(c) ? valueFree : text))?.[0] ?? null;
 // "(pass)"/"(fail)" without colour; with colour (FORCE_COLOR) bun prints "✓"/"✗" (and "»" skip, "✎" todo) instead.
 const RESULT_LINE = /^\s*(?:\((pass|fail|skip|todo)\)|([✓✗»✎]))\s*(.*?)\s*(?:\[[\d.]+m?s\])?\s*$/;
 const RESULT_KIND: Readonly<Record<string, string>> = { "✓": "pass", "✗": "fail", "»": "skip", "✎": "todo" };
@@ -214,12 +225,24 @@ const capLine = (s: string, n = 240): string => (s.length > n ? s.slice(0, n) + 
 
 /** Classify one failure's block (the lines bun printed for it) plus any trailer printed after its (fail) line. */
 function classifyFailureBlock(name: string, block: string[], trailer: string[]): ClassifiedFailure {
-  const errLine = block.find((l) => !isExcerpt(l) && ERROR_LINE.test(l))?.trim() ?? null;
-  const errorText = [...block.filter((l) => l.trim() && !isExcerpt(l) && !isExpectedOrDiff(l)), ...trailer].join("\n");
-  const cause = causeOf(errorText);
-  const printedComparison = block.some((l) => /^\s*Expected\b[^:]*:/.test(l) || /^\s*Received\b/.test(l) || /^\s*-\s+Expected\s+-\s*\d/.test(l));
-  if (!cause && errLine && /^error: expect\(/.test(errLine) && printedComparison) return { name, cls: "assertion", error: capLine(errLine) };
-  return { name, cls: "wrong_reason", cause: cause ?? "non_assertion", error: errLine ? capLine(errLine) : trailer[0] ? capLine(trailer[0].trim()) : null };
+  // The LAST error line is the failure's own; an earlier one is an error the code under test logged.
+  let at = -1;
+  for (let i = block.length - 1; i >= 0; i--) if (!isExcerpt(block[i]!) && ERROR_LINE.test(block[i]!)) { at = i; break; }
+  const tail = at >= 0 ? block.slice(at) : block;
+  const errLine = at >= 0 ? block[at]!.trim() : null;
+  // The matcher's printout: the lines after the error line, up to the stack.
+  const stack = tail.findIndex((l, i) => i > 0 && /^\s*at\s/.test(l));
+  const printoutEnd = at >= 0 ? (stack < 0 ? tail.length : stack) : 0;
+  const printedComparison = tail.slice(1, printoutEnd).some((l) => /^\s*Expected\b[^:]*:/.test(l) || /^\s*Received\b/.test(l) || /^\s*-\s+Expected\s+-\s*\d/.test(l));
+  const scanned = (ls: string[]): string[] => ls.filter((l) => l.trim() && !isExcerpt(l) && !isExpectedOrDiff(l));
+  const errorText = [...scanned(tail), ...trailer].join("\n");
+  // An assertion's message and printout are the author's literal and the compared values: not read for network/timeout.
+  const valueFree = printedComparison ? [...scanned(tail.slice(printoutEnd)), ...trailer].join("\n") : errorText;
+  const cause = causeOf(errorText, valueFree);
+  if (!cause && errLine && /^error:/.test(errLine) && printedComparison) return { name, cls: "assertion", error: capLine(errLine) };
+  // Not an assertion: name the cause from the whole block (a logged refused connection before a throw still says network).
+  const why = cause ?? causeOf([...scanned(block), ...trailer].join("\n"));
+  return { name, cls: "wrong_reason", cause: why ?? "non_assertion", error: errLine ? capLine(errLine) : trailer[0] ? capLine(trailer[0].trim()) : null };
 }
 
 /** The shared classifier: what one `bun test ./<check file>` run printed, failure by failure. */

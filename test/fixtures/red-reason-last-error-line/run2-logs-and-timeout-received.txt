@@ -1,0 +1,78 @@
+bun test v1.3.14 (0d9b296a)
+
+test/checks/q.check.ts:
+error: module-level log at import
+1 | import { describe, test, expect } from "bun:test";
+2 | console.error("error: module-level log at import");
+3 | describe("grp", () => {
+4 |   test("first after module log", () => { expect(1).toBe(2); });
+                                                       ^
+error: expect(received).toBe(expected)
+
+Expected: 2
+Received: 1
+
+      at <anonymous> (/tmp/fx/test/checks/q.check.ts:4:52)
+(fail) grp > first after module log [0.13ms]
+Error: something the code logs
+1 | import { describe, test, expect } from "bun:test";
+2 | console.error("error: module-level log at import");
+3 | describe("grp", () => {
+4 |   test("first after module log", () => { expect(1).toBe(2); });
+5 |   test("logs Error then asserts", () => { console.error("Error: something the code logs"); expect(1).toBe(2); });
+                                                                                                         ^
+error: expect(received).toBe(expected)
+
+Expected: 2
+Received: 1
+
+      at <anonymous> (/tmp/fx/test/checks/q.check.ts:5:102)
+(fail) grp > logs Error then asserts [0.04ms]
+[x] warning: nope
+1 | import { describe, test, expect } from "bun:test";
+2 | console.error("error: module-level log at import");
+3 | describe("grp", () => {
+4 |   test("first after module log", () => { expect(1).toBe(2); });
+5 |   test("logs Error then asserts", () => { console.error("Error: something the code logs"); expect(1).toBe(2); });
+6 |   test("logs warn then asserts", () => { console.warn("[x] warning: nope"); expect("a").toBe("b"); });
+                                                                                            ^
+error: expect(received).toBe(expected)
+
+Expected: "b"
+Received: "a"
+
+      at <anonymous> (/tmp/fx/test/checks/q.check.ts:6:89)
+(fail) grp > logs warn then asserts [0.06ms]
+2 | console.error("error: module-level log at import");
+3 | describe("grp", () => {
+4 |   test("first after module log", () => { expect(1).toBe(2); });
+5 |   test("logs Error then asserts", () => { console.error("Error: something the code logs"); expect(1).toBe(2); });
+6 |   test("logs warn then asserts", () => { console.warn("[x] warning: nope"); expect("a").toBe("b"); });
+7 |   test("expect with received containing Timeout", () => { expect("Timeout reached").toBe("ok"); });
+                                                                                        ^
+error: expect(received).toBe(expected)
+
+Expected: "ok"
+Received: "Timeout reached"
+
+      at <anonymous> (/tmp/fx/test/checks/q.check.ts:7:85)
+(fail) grp > expect with received containing Timeout [0.05ms]
+3 | describe("grp", () => {
+4 |   test("first after module log", () => { expect(1).toBe(2); });
+5 |   test("logs Error then asserts", () => { console.error("Error: something the code logs"); expect(1).toBe(2); });
+6 |   test("logs warn then asserts", () => { console.warn("[x] warning: nope"); expect("a").toBe("b"); });
+7 |   test("expect with received containing Timeout", () => { expect("Timeout reached").toBe("ok"); });
+8 |   test("loop of expects", () => { for (const e of ["a","b"]) expect("xa").not.toContain(e); });
+                                                                                  ^
+error: expect(received).not.toContain(expected)
+
+Expected to not contain: "a"
+Received: "xa"
+
+      at <anonymous> (/tmp/fx/test/checks/q.check.ts:8:79)
+(fail) grp > loop of expects [0.13ms]
+
+ 0 pass
+ 5 fail
+ 5 expect() calls
+Ran 5 tests across 1 file. [13.00ms]

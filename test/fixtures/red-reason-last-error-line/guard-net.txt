@@ -1,0 +1,17 @@
+bun test v1.3.14 (0d9b296a)
+
+test/checks/net.check.ts:
+1 | import { expect, test } from "bun:test";
+2 | test("net red", async () => { const r = await fetch("http://127.0.0.1:1/"); expect(r.ok).toBe(true); });
+                                                  ^
+error: Unable to connect. Is the computer able to access the url?
+  path: "http://127.0.0.1:1/",
+ errno: 0,
+  code: "ConnectionRefused"
+
+      at async <anonymous> (/tmp/fx/test/checks/net.check.ts:2:47)
+(fail) net red [0.44ms]
+
+ 0 pass
+ 1 fail
+Ran 1 test across 1 file. [9.00ms]

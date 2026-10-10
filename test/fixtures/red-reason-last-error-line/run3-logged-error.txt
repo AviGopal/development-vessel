@@ -1,0 +1,47 @@
+bun test v1.3.14 (0d9b296a)
+
+test/checks/r.check.ts:
+(pass) pass first [0.06ms]
+[mod] failed: 1 | import { test, expect } from "bun:test";
+2 | test("pass first", () => { expect(1).toBe(1); });
+3 | test("code logs caught Error object then assertion fails", () => { try { throw new Error("connect refused"); } catch (e) { console.error("[mod] failed:", e); } expect(1).toBe(2); });
+                                                                                       ^
+error: connect refused
+      at <anonymous> (/tmp/fx/test/checks/r.check.ts:3:84)
+
+1 | import { test, expect } from "bun:test";
+2 | test("pass first", () => { expect(1).toBe(1); });
+3 | test("code logs caught Error object then assertion fails", () => { try { throw new Error("connect refused"); } catch (e) { console.error("[mod] failed:", e); } expect(1).toBe(2); });
+                                                                                                                                                                              ^
+error: expect(received).toBe(expected)
+
+Expected: 2
+Received: 1
+
+      at <anonymous> (/tmp/fx/test/checks/r.check.ts:3:171)
+(fail) code logs caught Error object then assertion fails [0.19ms]
+1 | import { test, expect } from "bun:test";
+2 | test("pass first", () => { expect(1).toBe(1); });
+3 | test("code logs caught Error object then assertion fails", () => { try { throw new Error("connect refused"); } catch (e) { console.error("[mod] failed:", e); } expect(1).toBe(2); });
+4 | test("code logs Error object alone", () => { console.error(new TypeError("bad arg")); expect(1).toBe(2); });
+                                                                   ^
+TypeError: bad arg
+      at <anonymous> (/tmp/fx/test/checks/r.check.ts:4:64)
+
+1 | import { test, expect } from "bun:test";
+2 | test("pass first", () => { expect(1).toBe(1); });
+3 | test("code logs caught Error object then assertion fails", () => { try { throw new Error("connect refused"); } catch (e) { console.error("[mod] failed:", e); } expect(1).toBe(2); });
+4 | test("code logs Error object alone", () => { console.error(new TypeError("bad arg")); expect(1).toBe(2); });
+                                                                                                    ^
+error: expect(received).toBe(expected)
+
+Expected: 2
+Received: 1
+
+      at <anonymous> (/tmp/fx/test/checks/r.check.ts:4:97)
+(fail) code logs Error object alone [0.06ms]
+
+ 1 pass
+ 2 fail
+ 3 expect() calls
+Ran 3 tests across 1 file. [10.00ms]

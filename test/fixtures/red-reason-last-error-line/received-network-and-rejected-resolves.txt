@@ -1,0 +1,46 @@
+bun test v1.3.14 (0d9b296a)
+
+test/checks/recv.check.ts:
+1 | import { expect, test } from "bun:test";
+2 | test("received ECONNREFUSED", () => { expect("connect ECONNREFUSED 127.0.0.1:1").toBe("ok"); });
+                                                                                     ^
+error: expect(received).toBe(expected)
+
+Expected: "ok"
+Received: "connect ECONNREFUSED 127.0.0.1:1"
+
+      at <anonymous> (/tmp/fx/test/checks/recv.check.ts:2:82)
+(fail) received ECONNREFUSED [0.20ms]
+1 | import { expect, test } from "bun:test";
+2 | test("received ECONNREFUSED", () => { expect("connect ECONNREFUSED 127.0.0.1:1").toBe("ok"); });
+3 | test("received ConnectionRefused object", () => { expect({ code: "ConnectionRefused" }).toEqual({ code: "ok" }); });
+                                                                                            ^
+error: expect(received).toEqual(expected)
+
+  {
+-   "code": "ok",
++   "code": "ConnectionRefused",
+  }
+
+- Expected  - 1
++ Received  + 1
+
+      at <anonymous> (/tmp/fx/test/checks/recv.check.ts:3:89)
+(fail) received ConnectionRefused object [0.14ms]
+1 | import { expect, test } from "bun:test";
+2 | test("received ECONNREFUSED", () => { expect("connect ECONNREFUSED 127.0.0.1:1").toBe("ok"); });
+3 | test("received ConnectionRefused object", () => { expect({ code: "ConnectionRefused" }).toEqual({ code: "ok" }); });
+4 | test("resolves on a rejected promise", async () => { await expect(Promise.reject(new Error("ECONNREFUSED timed out"))).resolves.toBe(1); });
+                                                                                                                                    ^
+error: 
+
+Expected promise that resolves
+Received promise that rejected: Promise { <rejected> }
+
+      at <anonymous> (/tmp/fx/test/checks/recv.check.ts:4:129)
+(fail) resolves on a rejected promise [0.21ms]
+
+ 0 pass
+ 3 fail
+ 3 expect() calls
+Ran 3 tests across 1 file. [15.00ms]

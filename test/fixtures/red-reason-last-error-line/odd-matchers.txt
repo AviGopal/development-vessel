@@ -1,0 +1,93 @@
+bun test v1.3.14 (0d9b296a)
+
+test/checks/odd.check.ts:
+1 | import { expect, test } from "bun:test";
+2 | test("toThrow msg", () => { expect(() => { throw new TypeError("a"); }).toThrow("b"); });
+                                                                            ^
+error: expect(received).toThrow(expected)
+
+Expected substring: "b"
+Received message: "a"
+
+      at <anonymous> (/tmp/fx/test/checks/odd.check.ts:2:73)
+(fail) toThrow msg [0.17ms]
+1 | import { expect, test } from "bun:test";
+2 | test("toThrow msg", () => { expect(() => { throw new TypeError("a"); }).toThrow("b"); });
+3 | test("toEqual errors", () => { expect(new Error("x")).toEqual(new Error("y")); });
+                                                          ^
+error: expect(received).toEqual(expected)
+
+Expected: [Error: y]
+Received: [Error: x]
+
+      at <anonymous> (/tmp/fx/test/checks/odd.check.ts:3:55)
+(fail) toEqual errors [0.08ms]
+1 | import { expect, test } from "bun:test";
+2 | test("toThrow msg", () => { expect(() => { throw new TypeError("a"); }).toThrow("b"); });
+3 | test("toEqual errors", () => { expect(new Error("x")).toEqual(new Error("y")); });
+4 | test("toEqual multiline strings", () => { expect("line1\nerror: boom\nTimeout x").toEqual("line1\nok"); });
+                                                                                      ^
+error: expect(received).toEqual(expected)
+
+  "line1
+- ok"
++ error: boom
++ Timeout x"
+
+- Expected  - 1
++ Received  + 2
+
+      at <anonymous> (/tmp/fx/test/checks/odd.check.ts:4:83)
+(fail) toEqual multiline strings [0.04ms]
+1 | import { expect, test } from "bun:test";
+2 | test("toThrow msg", () => { expect(() => { throw new TypeError("a"); }).toThrow("b"); });
+3 | test("toEqual errors", () => { expect(new Error("x")).toEqual(new Error("y")); });
+4 | test("toEqual multiline strings", () => { expect("line1\nerror: boom\nTimeout x").toEqual("line1\nok"); });
+5 | test("received object with Error", () => { expect({ e: "ECONNREFUSED", s: "Timeout" }).toEqual({ e: "ok" }); });
+                                                                                           ^
+error: expect(received).toEqual(expected)
+
+  {
+-   "e": "ok",
++   "e": "ECONNREFUSED",
++   "s": "Timeout",
+  }
+
+- Expected  - 1
++ Received  + 2
+
+      at <anonymous> (/tmp/fx/test/checks/odd.check.ts:5:88)
+(fail) received object with Error [0.06ms]
+1 | import { expect, test } from "bun:test";
+2 | test("toThrow msg", () => { expect(() => { throw new TypeError("a"); }).toThrow("b"); });
+3 | test("toEqual errors", () => { expect(new Error("x")).toEqual(new Error("y")); });
+4 | test("toEqual multiline strings", () => { expect("line1\nerror: boom\nTimeout x").toEqual("line1\nok"); });
+5 | test("received object with Error", () => { expect({ e: "ECONNREFUSED", s: "Timeout" }).toEqual({ e: "ok" }); });
+6 | test("custom msg timeout word", () => { expect(1, "should not have timed out").toBe(2); });
+                                                                                   ^
+error: should not have timed out
+
+Expected: 2
+Received: 1
+
+      at <anonymous> (/tmp/fx/test/checks/odd.check.ts:6:80)
+(fail) custom msg timeout word [0.04ms]
+2 | test("toThrow msg", () => { expect(() => { throw new TypeError("a"); }).toThrow("b"); });
+3 | test("toEqual errors", () => { expect(new Error("x")).toEqual(new Error("y")); });
+4 | test("toEqual multiline strings", () => { expect("line1\nerror: boom\nTimeout x").toEqual("line1\nok"); });
+5 | test("received object with Error", () => { expect({ e: "ECONNREFUSED", s: "Timeout" }).toEqual({ e: "ok" }); });
+6 | test("custom msg timeout word", () => { expect(1, "should not have timed out").toBe(2); });
+7 | test("rejects", async () => { await expect(Promise.reject(new Error("boom"))).resolves.toBe(1); });
+                                                                                           ^
+error: 
+
+Expected promise that resolves
+Received promise that rejected: Promise { <rejected> }
+
+      at <anonymous> (/tmp/fx/test/checks/odd.check.ts:7:88)
+(fail) rejects [0.15ms]
+
+ 0 pass
+ 6 fail
+ 6 expect() calls
+Ran 6 tests across 1 file. [12.00ms]

@@ -22,7 +22,6 @@ import { registerAttempt } from "./attempt-register.js";
 import type { ResolverResult } from "./types.js";
 import { resolveSubstrateGap, resolveSubstrateGapWrite, resolveSubstrateGapLease, landingLeaseOf, isLandingLeaseVerdict, countLandingLeaseRefusal, landingLeaseRefusalCounts, type LandingLeaseVerdict } from "./substrate-gap.js";
 import { resolveTestSuite } from "./test-suite.js";
-import { runBehavioralVerification } from "./behavioral-verification.js";
 import { resolveActivateSubstrateScript } from "./activate-substrate-script.js";
 import { resolveMaintenanceLeaseWrite } from "./maintenance-lease";
 import { gateLanding, KILL_SWITCH_REASON, landingsStopped } from "./push-policy.js";
@@ -3419,53 +3418,21 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
   if (landedUnverifiedReason !== null) {
     countOwnCheck("landed_unverified", `vessel=${vessel_name} mitosis=${mitosis_version_id} sha=${String(newSha).slice(0, 12)} gap=${gapId}: ${landedUnverifiedReason}`);
   }
-  // Threaded to the pending-land stamp below: a behavioral verification that RAN and
-  // FAILED must NOT earn landed_verified credit. Stays false when the check does not run
-  // (no verification_spec) or passes, preserving the existing stamp behaviour there.
-  let behavioralVerificationFailed = false;
-  // Post-landing behavioral verification (gap cutover-gate-no-behavioral-verification):
-  // execute the driving gap's structured verification_spec; a failure rewrites the
-  // gap summary, which re-triggers gap-compose pickup.
-  if (gapId !== "unknown-gap") {
-    try {
-      const gapRead = await resolveSubstrateGap({ type: "substrateGap", id: gapId, limit: 1 } as never);
-      const gapRow = ((gapRead as { body?: { gaps?: Array<Record<string, unknown>> } }).body?.gaps ?? [])[0];
-      const meta = (gapRow?.["classification_metadata"] ?? {}) as Record<string, unknown>;
-      const spec = meta["verification_spec"];
-      if (gapRow && spec) {
-        const outcome = await runBehavioralVerification(spec);
-        if (outcome.ran) {
-          const priorSummary = String(gapRow["summary"] ?? "");
-          const nextSummary = outcome.passed
-            ? priorSummary
-            : `BEHAVIORAL VERIFICATION FAILED after ${String(newSha)}: ${priorSummary}`;
-          if (!outcome.passed) {
-            behavioralVerificationFailed = true;
-            console.log(`[mitosis-cutover] behavioral-verification FAILED gap=${gapId} commit=${String(newSha)}`);
-          }
-          await resolveSubstrateGapWrite({
-            type: "substrateGap_write",
-            gap: {
-              ...gapRow,
-              summary: nextSummary,
-              classification_metadata: {
-                ...meta,
-                verification_outcome: { passed: outcome.passed, at: appliedAt, commit: newSha, observed: outcome.observed ?? null, error: outcome.error ?? null },
-              },
-            },
-          } as never);
-        }
-      }
-    } catch (err) {
-      console.warn("[mitosis-cutover] behavioral-verification errored (non-fatal):", err);
-    }
-  }
+  // Threaded to the pending-land stamp below: a landing that newly broke a test in its vessel's
+  // post-land suite must NOT earn landed_verified credit. Stays false when the suite does not run
+  // or shows nothing newly failing, preserving the existing stamp behaviour there.
+  //
+  // RETIRED (2026-10-10, operator ruling "retire the spec"): a structured
+  // classification_metadata.verification_spec used to be executed here by
+  // behavioral-verification.ts. Nothing in any repo ever wrote a verification_spec, so it
+  // returned {ran:false} on every landing and its joint (behavioral-verification-input) read
+  // severed. A landing with no measurable predicate is now flagged to the human lane at the
+  // pending-land stamp instead of being "verified" by a mechanism with no input.
+  let landingCreditWithheld = false;
 
   // Post-landing SUITE verification, in-band (gap change-fitness-lane-is-out-of-band-github-ci).
   //
-  // The behavioral verification above only runs when the driving gap carries a
-  // verification_spec, and returns {ran:false} otherwise — which is the common case, so most
-  // landings were verified by nothing that the substrate could observe. The lanes that DID
+  // Most landings were verified by nothing that the substrate could observe. The lanes that DID
   // check a landed change both sat outside the system: GitHub Actions (runs in no vessel,
   // untraced, outcome arrives as an env-gated webhook) and host-pull-sync.sh (host-side,
   // detection-only, writes an operator log and emits no shape). External CI is an antipattern
@@ -3529,7 +3496,7 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
     }
     if (sb.ran === true && _newlyFailing.length > 0) {
       // A test this landing newly broke withholds its landed_verified credit (the pending-land stamp below).
-      behavioralVerificationFailed = true;
+      landingCreditWithheld = true;
       console.log(`[mitosis-cutover] post-land suite NEWLY failing=${_newlyFailing.length} vessel=${vessel_name} commit=${String(newSha).slice(0, 10)} — landed_verified credit withheld`);
       await resolveSubstrateGapWrite({
         type: "substrateGap_write",
@@ -3576,7 +3543,7 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
       console.warn(`[mitosis-cutover] gap=${gapId}: pending semantic dissent not settled (${(err as Error)?.message ?? String(err)})`);
     }
   }
-  if (gapId !== "unknown-gap" && pushStatus === "pushed" && /^[0-9a-f]{7,40}$/i.test(newSha) && !behavioralVerificationFailed) {
+  if (gapId !== "unknown-gap" && pushStatus === "pushed" && /^[0-9a-f]{7,40}$/i.test(newSha) && !landingCreditWithheld) {
     try {
       const stampRead = await resolveSubstrateGap({ type: "substrateGap", id: gapId, limit: 1 } as never);
       const stampRow = ((stampRead as { body?: { gaps?: Array<Record<string, unknown>> } }).body?.gaps ?? [])[0];

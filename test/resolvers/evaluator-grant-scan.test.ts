@@ -129,6 +129,14 @@ const EXCLUDED_SRC = [
   "src/judge/gap-attempt-credit.ts",
   "src/judge/gap-landing-verdict.ts",
   "src/judge/gap-admission.ts",
+  // The opening act (10-11): the helpers the core imports that qa ruled closed (BOUNDARY.md 10.2), the operator:direct
+  // grant check and the refusal record's writer check (harm fix).
+  "src/resolvers/attempt-ledger.ts",
+  "src/lib/operator-hold.ts",
+  "src/test-child-env.ts",
+  "src/resolvers/patch-with-tools.ts",
+  "src/lib/operator-direct.ts",
+  "src/resolvers/intervention-evaluate.ts",
 ];
 const CLOSURE_ROOTS = ["src/resolvers/scope-earn-in.ts", "src/resolvers/pool-impulse.ts", "src/resolvers/test-suite.ts", "src/resolvers/self-fact-reconcile.ts", "src/resolvers/rhythm-conductor-tick.ts", "src/resolvers/check-supply-admission.ts"];
 const REPORT_ONLY = ["src/resolvers/gap-to-feature.ts", "src/resolvers/feature-compose.ts"];

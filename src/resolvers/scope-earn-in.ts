@@ -115,6 +115,24 @@ export const EVALUATOR_FILES: readonly string[] = [
   // evaluator, feature-compose's verify), and the test that pins it and classifies every spawn (10-11).
   "repos/development-vessel/src/test-child-env.ts",
   "repos/development-vessel/test/resolvers/vessel-mitosis-evaluate-child-env.test.ts",
+  // The gap-judge core split out of gap-to-feature (BOUNDARY.md 5.4): every gate, verdict, credit and floor input the
+  // lane is judged by, and the import-graph must-fail that keeps the residue free of them (the opening act, 10-11).
+  "repos/development-vessel/src/judge/gap-eligibility.ts",
+  "repos/development-vessel/src/judge/gap-policy.ts",
+  "repos/development-vessel/src/judge/gap-check-judge.ts",
+  "repos/development-vessel/src/judge/gap-attempt-credit.ts",
+  "repos/development-vessel/src/judge/gap-landing-verdict.ts",
+  "repos/development-vessel/src/judge/gap-admission.ts",
+  "repos/development-vessel/test/resolvers/judge-modules-closed.test.ts",
+  // The open helpers the core imports directly, closed by qa ruling (BOUNDARY.md 10.2): settlement evidence, the hold
+  // predicates, and the patch-with-tools judge whose "held" report the grader trusts; and the operator:direct grant
+  // check every directed stamp reads (harm fix, qa).
+  "repos/development-vessel/src/resolvers/attempt-ledger.ts",
+  "repos/development-vessel/src/lib/operator-hold.ts",
+  "repos/development-vessel/src/resolvers/patch-with-tools.ts",
+  "repos/development-vessel/src/lib/operator-direct.ts",
+  // The runtime-root helper the protected tests import: a lane edit there would change what they assert against.
+  "repos/development-vessel/test/helpers/runtime-root.ts",
 ];
 export const EVALUATOR_FILE_REASON = "refused: the path is one of the evaluator's own files (EVALUATOR_FILES)";
 /**
@@ -184,6 +202,51 @@ export const SCOPE_CLASSIFICATION: Readonly<Record<string, ScopeClass>> = {
   "repos/development-vessel/test/resolvers/evaluator-grant-scan.test.ts": { class: "judge_trust", reason: "evaluator file: pins the evaluator grant (judge)" },
   "repos/development-vessel/test/resolvers/scope-change-pin.test.ts": { class: "judge_trust", reason: "evaluator file: pins what the scope judge accepts (judge)" },
   "repos/development-vessel/test/resolvers/system-authored-gap-checks.test.ts": { class: "judge_trust", reason: "the judge's tests of system-authored gap checks (judge)" },
+  // THE OPENING ACT (10-11): the gap-judge core and everything it trusts, closed in the same operator act that opens the
+  // gap-to-feature residue on one node. Every entry decides a verdict, credit, settlement, credential or containment,
+  // or is a protected test pinning one.
+  "repos/development-vessel/src/judge/gap-eligibility.ts": { class: "judge_trust", reason: "evaluator file: the eligibility, hold and outcome predicates every admission and close reads (verdict)" },
+  "repos/development-vessel/src/judge/gap-policy.ts": { class: "judge_trust", reason: "evaluator file: the autonomy scope, spend envelope and own-producer trust readers (containment)" },
+  "repos/development-vessel/src/judge/gap-check-judge.ts": { class: "judge_trust", reason: "evaluator file: the one gap check judge every birth, arm and close reads (verdict)" },
+  "repos/development-vessel/src/judge/gap-attempt-credit.ts": { class: "judge_trust", reason: "evaluator file: attempt credit, landability and the floor inputs (credit)" },
+  "repos/development-vessel/src/judge/gap-landing-verdict.ts": { class: "judge_trust", reason: "evaluator file: close, pending-land sweep, settlement and auto-revert (verdict, settlement)" },
+  "repos/development-vessel/src/judge/gap-admission.ts": { class: "judge_trust", reason: "evaluator file: admission, pick gates, arming and the owner route (verdict)" },
+  "repos/development-vessel/test/resolvers/judge-modules-closed.test.ts": { class: "judge_trust", reason: "evaluator file: pins that the core is closed and the residue holds no judge (judge tests)" },
+  "repos/development-vessel/src/resolvers/attempt-ledger.ts": { class: "judge_trust", reason: "evaluator file: the intent and settlement records the credit and revert read (settlement)" },
+  "repos/development-vessel/src/lib/operator-hold.ts": { class: "judge_trust", reason: "evaluator file: the hold predicates the landing verdict gates on (verdict)" },
+  "repos/development-vessel/src/resolvers/patch-with-tools.ts": { class: "judge_trust", reason: "evaluator file: its semantic gate is a judge and the grader trusts its held report (verdict)" },
+  "repos/development-vessel/src/lib/operator-direct.ts": { class: "judge_trust", reason: "evaluator file: the operator:direct grant check every directed stamp reads (credential)" },
+  "repos/development-vessel/src/resolvers/intervention-evaluate.ts": { class: "judge_trust", reason: "the refusal record's writer check: only its writer may rewrite it (credential, verdict)" },
+  "repos/development-vessel/test/helpers/runtime-root.ts": { class: "judge_trust", reason: "evaluator file: the runtime-root helper the protected tests import (judge tests)" },
+  "repos/development-vessel/test/judge-split/": { class: "judge_trust", reason: "the split pins: stored-row behaviour of every non-pure extraction (judge tests)" },
+  "repos/development-vessel/test/resolvers/composer-interruption-sweep-owned-set.test.ts": { class: "judge_trust", reason: "pins the owned set the sweep reads from the policy module (judge tests)" },
+  "repos/development-vessel/test/resolvers/gap-attempt-credit-escalate-wiring.test.ts": { class: "judge_trust", reason: "pins the credit escalation wiring (judge tests)" },
+  "repos/development-vessel/test/resolvers/gap-landing-verdict-ask-wiring.test.ts": { class: "judge_trust", reason: "pins every residue call into a landing-verdict escalation passes the ask (judge tests)" },
+  "repos/development-vessel/test/resolvers/gap-admission-capability-settle.test.ts": { class: "judge_trust", reason: "pins the capability route settle (judge tests)" },
+  "repos/development-vessel/test/resolvers/cutover-autonomy-scope.test.ts": { class: "judge_trust", reason: "pins the cutover's autonomy-scope chokepoint (containment tests)" },
+  "repos/development-vessel/test/resolvers/cutover-host-sync-retired.test.ts": { class: "judge_trust", reason: "pins the retired host-sync handoff (containment tests)" },
+  "repos/development-vessel/test/resolvers/birth-verdict-unforgeable.test.ts": { class: "judge_trust", reason: "pins that only a minted birth verdict is honoured (verdict tests)" },
+  "repos/development-vessel/test/resolvers/auto-revert.test.ts": { class: "judge_trust", reason: "pins the auto-revert reader and writer (settlement tests)" },
+  "repos/development-vessel/test/resolvers/cutover-revert-of.test.ts": { class: "judge_trust", reason: "pins that revert_of keeps the landing gates (verdict tests)" },
+  "repos/development-vessel/test/resolvers/feature-compose-semantic-gate-unconditional.test.ts": { class: "judge_trust", reason: "pins the unconditional semantic gate (verdict tests)" },
+  "repos/development-vessel/test/resolvers/feature-compose-plan-gates.test.ts": { class: "judge_trust", reason: "pins that a throwing plan gate refuses (verdict tests)" },
+  "repos/development-vessel/test/resolvers/patch-with-tools-semantic-fail-closed.test.ts": { class: "judge_trust", reason: "pins the patch-with-tools semantic gate failing closed (verdict tests)" },
+  "repos/development-vessel/test/resolvers/patch-with-tools.test.ts": { class: "judge_trust", reason: "the patch-with-tools judge's tests (verdict tests)" },
+  "repos/development-vessel/test/resolvers/refuter-quorum.test.ts": { class: "judge_trust", reason: "pins the refuter quorum (verdict tests)" },
+  "repos/development-vessel/test/resolvers/feature-compose-adversarial-quorum.test.ts": { class: "judge_trust", reason: "pins that a refuter outage refuses the patch (verdict tests)" },
+  "repos/development-vessel/test/resolvers/intervention-refused-write-principal.test.ts": { class: "judge_trust", reason: "pins the refusal record's writer check (credential tests)" },
+  "repos/development-vessel/test/lib/operator-direct.test.ts": { class: "judge_trust", reason: "pins the operator:direct grant check (credential tests)" },
+  "repos/activity-api/src/services/variant-creator.ts": { class: "judge_trust", reason: "holds the variant retirement verdict (verdict)" },
+  "repos/activity-api/src/policy/gate-input-rows.ts": { class: "judge_trust", reason: "the gate-input tuning rows a gate reads and who may write them (credential, verdict)" },
+  "repos/activity-api/src/policy/gate-input-rows.test.ts": { class: "judge_trust", reason: "pins the gate-input tuning rows (credential tests)" },
+  "repos/activity-api/src/routes/goal-verification-label-write.ts": { class: "judge_trust", reason: "the human verdict label write and its verdict-scope check (credential, verdict)" },
+  "repos/activity-api/src/routes/goal-verification-label-write.test.ts": { class: "judge_trust", reason: "pins the verdict-scope check on human labels (credential tests)" },
+  "repos/activity-api/sql/migrations/219-goal-verification-label-principal.surql": { class: "judge_trust", reason: "the label principal field the verdict-scope check stamps (credential)" },
+  "repos/goal-host-vessel/src/oracle-label-consumer.ts": { class: "judge_trust", reason: "acts on a human label only when its principal carries the verdict scope (verdict, credential)" },
+  "repos/goal-host-vessel/src/operator-credential.ts": { class: "judge_trust", reason: "carries the operator's own credential to feature_compose (credential)" },
+  "repos/goal-host-vessel/test/oracle-label-principal.test.ts": { class: "judge_trust", reason: "pins the label principal check (credential tests)" },
+  "repos/goal-host-vessel/test/operator-credential-forwarding.test.ts": { class: "judge_trust", reason: "pins the operator credential forwarding (credential tests)" },
+  "repos/relevance-sink-vessel/src/index.ts": { class: "judge_trust", reason: "the relevance penalty write and its caller check (credential, credit)" },
 };
 export const NEVER_PROPOSE_REASON = "refused: the path is a judge/trust module no criterion widens onto (NEVER_PROPOSE, SCOPE_CLASSIFICATION)";
 export const UNCLASSIFIED_REASON = "refused: the path is unclassified in SCOPE_CLASSIFICATION (fail closed)";

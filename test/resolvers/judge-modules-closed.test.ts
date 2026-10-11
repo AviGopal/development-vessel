@@ -21,13 +21,16 @@ const ROOT = join(import.meta.dir, "..", "..");
 const RESIDUE = "src/resolvers/gap-to-feature.ts";
 /** The core, by name. A seventh module must be added here on purpose, and so reach the act's lists. */
 const CORE = ["src/judge/gap-admission.ts", "src/judge/gap-attempt-credit.ts", "src/judge/gap-check-judge.ts", "src/judge/gap-eligibility.ts", "src/judge/gap-landing-verdict.ts", "src/judge/gap-policy.ts"];
-/** qa 10.2: CLOSE rulings whose excluded_paths entries ride the same act. They count as closed only through this
- *  explicit list until the act lands, and then they move to the mirror below and this list empties. */
-const PENDING_CLOSED = ["src/resolvers/attempt-ledger.ts", "src/lib/operator-hold.ts", "src/test-child-env.ts", "src/resolvers/patch-with-tools.ts", "src/lib/operator-direct.ts"];
-/** The core's own entries, pending the same act (excluded_paths, EVALUATOR_FILES, SCOPE_CLASSIFICATION judge_trust). */
-const PENDING_ACT = [...CORE, "test/resolvers/judge-modules-closed.test.ts"];
+/** qa 10.2: CLOSE rulings whose excluded_paths entries rode the opening act. The act landed them in the mirror below
+ *  (and in EVALUATOR_FILES / judge_trust), so this list is EMPTY and asserted empty: nothing is closed by promise. */
+const PENDING_CLOSED: string[] = [];
+/** The core's own entries pending the act: EMPTY since the opening act listed them (excluded_paths, EVALUATOR_FILES,
+ *  SCOPE_CLASSIFICATION judge_trust). Asserted empty, so a module can never again be "closed pending" by this list. */
+const PENDING_ACT: string[] = [];
 /** Mirror of the committed autonomy-scope excluded_paths for development-vessel src (as evaluator-grant-scan keeps
- *  one: the record lives in the super-repo, not this tree). */
+ *  one: the record lives in the super-repo, not this tree). The committed seed is the FLEET DEFAULT and keeps the
+ *  gap-to-feature residue excluded; the opening act opens it only in one node's live record and that node's pin
+ *  (self-facts.json autonomy_scope_pinned expected_by_node), so the mirror keeps it too. */
 const EXCLUDED_SRC_MIRROR = [
   "src/resolvers/feature-compose.ts", "src/resolvers/vessel-mitosis-cutover.ts", "src/resolvers/pull-cutover.ts",
   "src/resolvers/push-policy.ts", "src/resolvers/git-push.ts", "src/resolvers/gap-to-feature.ts",
@@ -39,6 +42,12 @@ const EXCLUDED_SRC_MIRROR = [
   "src/removed-line-predicate.ts", "src/vacuous-edit.ts", "src/resolvers/staged-mitosis-gate.ts", "src/resolvers/retry-evidence.ts",
   "src/resolvers/scope-earn-in.ts", "src/resolvers/test-suite.ts", "src/lib/apply-mutant.ts", "src/lib/evaluator-tree.ts",
   "src/resolvers/check-supply-admission.ts",
+  // The opening act (10-11): the gap-judge core, the four helpers qa ruled closed, the operator:direct grant check and
+  // the refusal record's writer check.
+  "src/judge/gap-eligibility.ts", "src/judge/gap-policy.ts", "src/judge/gap-check-judge.ts", "src/judge/gap-attempt-credit.ts",
+  "src/judge/gap-landing-verdict.ts", "src/judge/gap-admission.ts",
+  "src/resolvers/attempt-ledger.ts", "src/lib/operator-hold.ts", "src/test-child-env.ts", "src/resolvers/patch-with-tools.ts",
+  "src/lib/operator-direct.ts", "src/resolvers/intervention-evaluate.ts",
 ];
 /** The closed->residue edges, each by design (BOUNDARY.md 3.1), pinned exactly, by the residue SYMBOL each takes, so a
  *  new edge or a new symbol on an existing edge reddens (qa Q1: all four are routing/entry, none a judge input):
@@ -231,6 +240,9 @@ describe("the gap-judge core is closed and the residue holds no judge", () => {
   });
 
   it("MUST-FAIL (iii): every core module is an evaluator file and a judge_trust entry, or explicitly pending the act", async () => {
+    // The opening act landed: nothing is pending, so every core module and every closed helper is held to the lists.
+    expect(PENDING_ACT).toEqual([]);
+    expect(PENDING_CLOSED).toEqual([]);
     const ev = new Set(evaluatorFiles());
     const earn = (await import(join(ROOT, "src/resolvers/scope-earn-in.ts"))) as { SCOPE_CLASSIFICATION?: Record<string, { class: string }> };
     for (const m of [...CORE, "test/resolvers/judge-modules-closed.test.ts"]) {

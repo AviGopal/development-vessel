@@ -165,6 +165,9 @@ const ALLOWED_ROOTS = (() => { const s = new Set<string>([resolve(tmpdir())]); t
 const toPath = (p: unknown): string | null => typeof p === "string" ? resolve(p) : p instanceof URL ? resolve(fileURLToPath(p)) : null;
 const insideTmp = (abs: string) => ALLOWED_ROOTS.some((r) => abs === r || abs.startsWith(r + "/"));
 export const fsLog = { writes: [] as Array<{ op: string; path: string; data: string | null }>, blocked: [] as string[] };
+/** Files a test makes readable at a fixed (non-tmp) path, e.g. /workspace/proposals/<id>-compose-report.json, served
+ *  by readFile/readFileSync/existsSync without touching the disk. Cleared by beginPin. */
+export const readOverlay = new Map<string, string>();
 function installFsGuard(): void {
   fsLog.writes = [];
   fsLog.blocked = [];
@@ -190,6 +193,9 @@ function installFsGuard(): void {
     const sync = `${name}Sync`;
     if (typeof ORIG_S[sync] === "function") S[sync] = (...a: unknown[]) => { for (const t of pick(a)) check(`fs.${sync}`, t, a[1]); return ORIG_S[sync](...a); };
   }
+  P["readFile"] = async (...a: unknown[]) => { const k = toPath(a[0]); if (k && readOverlay.has(k)) return readOverlay.get(k); return ORIG_P["readFile"](...a); };
+  S["readFileSync"] = (...a: unknown[]) => { const k = toPath(a[0]); if (k && readOverlay.has(k)) return readOverlay.get(k); return ORIG_S["readFileSync"](...a); };
+  S["existsSync"] = (...a: unknown[]) => { const k = toPath(a[0]); if (k && readOverlay.has(k)) return true; return ORIG_S["existsSync"](...a); };
   P["default"] = P; S["promises"] = P; S["default"] = S;
   mock.module("node:fs/promises", () => P);
   mock.module("node:fs", () => S);
@@ -207,8 +213,8 @@ export const calls = {
 };
 const BUSY: Res = { shape: "featureComposeReport", body: { ok: false, verdict: "BUSY", stage: "capacity", error: "pin fixture: lane full" } };
 export const script = {
-  /** feature_compose answers, consumed in order; the last one repeats. */
-  compose: [BUSY] as Res[],
+  /** feature_compose answers, consumed in order; the last one repeats. A function is called with the pointer. */
+  compose: [BUSY] as Array<Res | ((p: Row) => Res)>,
   reachability: { shape: "reachabilityGapRepairReport", body: { verdict: "UNFAVORABLE" } } as Res,
   author: { shape: "structuredError", body: { error: "pin fixture: mint failed" } } as Res,
   uiWrite: { shape: "structuredError", body: { ok: false, error: "pin fixture: no surface" } } as Res,
@@ -217,6 +223,7 @@ export const script = {
 export function resetScripts(): void {
   for (const k of Object.keys(calls) as Array<keyof typeof calls>) calls[k].length = 0;
   script.compose = [BUSY];
+  readOverlay.clear();
   script.reachability = { shape: "reachabilityGapRepairReport", body: { verdict: "UNFAVORABLE" } };
   script.author = { shape: "structuredError", body: { error: "pin fixture: mint failed" } };
   script.uiWrite = { shape: "structuredError", body: { ok: false, error: "pin fixture: no surface" } };
@@ -243,7 +250,7 @@ const ORIG: Record<keyof typeof SPECS, Record<string, any>> = {
 function installModuleStandIns(): void {
   mock.module(SPECS.fc, () => ({
     ...ORIG.fc,
-    resolveFeatureCompose: async (p: Row) => { calls.compose.push(p); const r = script.compose.length > 1 ? script.compose.shift()! : script.compose[0]!; return structuredClone(r); },
+    resolveFeatureCompose: async (p: Row) => { calls.compose.push(p); const r = script.compose.length > 1 ? script.compose.shift()! : script.compose[0]!; return structuredClone(typeof r === "function" ? r(p) : r); },
     readParkedLanding: async () => null,
   }));
   mock.module(SPECS.rgr, () => ({ ...ORIG.rgr, resolveReachabilityGapRepair: async (p: Row) => { calls.reachability.push(p); return structuredClone(script.reachability); } }));
@@ -314,3 +321,31 @@ export async function tick<T>(fn: () => Promise<T>): Promise<{ result: T; lines:
   } finally { console.log = orig.log; console.warn = orig.warn; console.error = orig.error; }
 }
 export const RUN = Math.random().toString(36).slice(2, 8);
+
+/** The failed_attempts values the store recorded for a gap, one per write that changed it (starting value first). */
+export function faTrail(id: string, initial = 0): number[] {
+  const out = [initial];
+  for (const w of writesFor(id)) {
+    const fa = Number(w.meta.failed_attempts ?? 0);
+    if (fa !== out[out.length - 1]) out.push(fa);
+  }
+  return out;
+}
+/** Class-posterior writes for `cls` this test made (identified by content, wherever the load-time path points). */
+export function posteriorWrites(cls: string): Array<{ alpha: number; beta: number }> {
+  const out: Array<{ alpha: number; beta: number }> = [];
+  for (const w of fsLog.writes) {
+    if (w.op !== "fs.writeFileSync" || !w.data) continue;
+    try { const o = JSON.parse(w.data) as Row; const r = o?.[cls]; if (r && typeof r.alpha === "number" && typeof r.beta === "number") out.push({ alpha: r.alpha, beta: r.beta }); } catch { /* not JSON */ }
+  }
+  return out;
+}
+/** The compose answers the pins script. */
+export const COMPOSE = {
+  busy: BUSY,
+  unfavorable: { shape: "featureComposeReport", body: { ok: false, verdict: "UNFAVORABLE", stage: "verify", failure_kind: "verify_failed" } } as Res,
+  applyFailed: { shape: "featureComposeReport", body: { ok: false, verdict: "UNFAVORABLE", stage: "apply", apply_failed: true, op_count: 3, rolled_back: true } } as Res,
+  terminal: (why: string): Res => ({ shape: "featureComposeReport", body: { ok: false, verdict: "REFUSED", stage: "own_check", failure_kind: "terminal_refusal", terminal_refusal: why } }),
+  landed: (sha: string): Res => ({ shape: "featureComposeReport", body: { ok: true, verdict: "FAVORABLE", cutovers: [{ vessel: "pin", result: { shape: "cutoverApplied", applied: true, push_status: "pushed", new_git_sha: sha } }] } }),
+  stagedOnly: { shape: "featureComposeReport", body: { ok: true, verdict: "FAVORABLE", cutovers: [{ vessel: "pin", result: { shape: "cutoverApplied", applied: true, push_status: "local_only" } }] } } as Res,
+};

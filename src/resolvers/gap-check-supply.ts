@@ -52,10 +52,10 @@ import {
   CHECK_SUPPLY_DISPOSITION,
   composeEligibilitySkipReason,
   gapEditSite,
-  identifyVessel,
   isAwaitingLandVerification,
   isParkingDisposition,
-} from "./gap-to-feature.js";
+} from "../judge/gap-eligibility.js";
+import { identifyVessel } from "./gap-to-feature.js";
 import { checkImportsEditSite, checkSupplyCheckPath, vesselRelativeEditSite } from "./check-supply-admission.js";
 import { readFamilyRhythm, rhythmDueScore, rhythmSettlementOverlay, type RhythmBody } from "./rhythm-conductor-tick.js";
 // The check-run judge lives with the evaluator (scope-earn-in.ts, an excluded file): item 2 reads it from there.

@@ -202,7 +202,7 @@ let isNonAttempt: (cb: Record<string, unknown> | null | undefined) => boolean = 
   throw new Error("isNonAttemptComposeResult not loaded");
 };
 beforeAll(async () => {
-  const gtf = await import("../../src/resolvers/gap-to-feature.js");
+  const gtf = await import("../../src/judge/gap-eligibility.js");
   isNonAttempt = gtf.isNonAttemptComposeResult;
 });
 
@@ -325,7 +325,7 @@ type HoldPreds = {
 };
 let holdPreds: HoldPreds | null = null;
 beforeAll(async () => {
-  const gtf = await import("../../src/resolvers/gap-to-feature.js");
+  const gtf = await import("../../src/judge/gap-eligibility.js");
   holdPreds = { parking: gtf.PARKING_DISPOSITIONS, isParking: gtf.isParkingDisposition, awaitingLand: gtf.isAwaitingLandVerification };
 });
 

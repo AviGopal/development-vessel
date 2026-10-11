@@ -121,6 +121,9 @@ const EXCLUDED_SRC = [
   "src/resolvers/super-repo-checkout.ts", "src/resolvers/behavioral-verification.ts",
   "src/resolvers/removed-line-predicate.ts", "src/resolvers/vacuous-edit.ts", "src/resolvers/staged-mitosis-gate.ts",
   "src/resolvers/retry-evidence.ts",
+  // The gap-to-feature judge split (BOUNDARY.md 5.4): the closed gap-judge-core modules, excluded in the same qa act
+  // that lands them (autonomy-scope.json excluded_paths, EVALUATOR_FILES, SCOPE_CLASSIFICATION).
+  "src/judge/gap-eligibility.ts",
 ];
 const CLOSURE_ROOTS = ["src/resolvers/scope-earn-in.ts", "src/resolvers/pool-impulse.ts", "src/resolvers/test-suite.ts", "src/resolvers/self-fact-reconcile.ts", "src/resolvers/rhythm-conductor-tick.ts", "src/resolvers/check-supply-admission.ts"];
 const REPORT_ONLY = ["src/resolvers/gap-to-feature.ts", "src/resolvers/feature-compose.ts"];

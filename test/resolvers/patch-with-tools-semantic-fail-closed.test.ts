@@ -24,6 +24,7 @@ import { join } from "node:path";
 const FC = "../../src/resolvers/feature-compose.js";
 const REAL_FC = { ...(await import(FC)) } as Record<string, unknown>;
 const gtf = (await import("../../src/resolvers/gap-to-feature.js")) as unknown as { isInfraRefusalBody: (b: Record<string, unknown>) => boolean };
+const gtfElig = (await import("../../src/judge/gap-eligibility.js")) as unknown as { isInfraRefusalBody: (b: Record<string, unknown>) => boolean };
 const restoreFc = () => { mock.module(FC, () => ({ ...REAL_FC })); };
 
 const originalFetch = globalThis.fetch;
@@ -114,7 +115,7 @@ const run = () => resolvePatchWithTools({
 });
 const summary = (r: { shape: string; body: unknown }) => {
   const b = (r.body ?? {}) as Record<string, unknown>;
-  return { shape: r.shape, detail: b.detail ?? null, infra: gtf.isInfraRefusalBody(b), live_target_left: existsSync(join(vesselsRoot, "demo-vessel", SUB)) };
+  return { shape: r.shape, detail: b.detail ?? null, infra: gtfElig.isInfraRefusalBody(b), live_target_left: existsSync(join(vesselsRoot, "demo-vessel", SUB)) };
 };
 
 describe("patch_with_tools: the semantic gate passes only a judged patch", () => {

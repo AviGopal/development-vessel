@@ -9,7 +9,7 @@
 // permanently marked as already-escalated.
 
 import { describe, expect, it } from "bun:test";
-import { gapEditSite } from "../../src/resolvers/gap-to-feature.js";
+import { gapEditSite } from "../../src/judge/gap-eligibility.js";
 
 describe("gapEditSite", () => {
   it("reads edit_site — the field real gaps actually carry", () => {

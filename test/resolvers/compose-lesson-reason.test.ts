@@ -9,7 +9,7 @@
 
 import { describe, it, expect } from "bun:test";
 import { composeAttemptEvidence, draftFailureReason, lessonDiag, type VerifyResult } from "../../src/resolvers/feature-compose.js";
-import { identicalRepeatedFailure } from "../../src/resolvers/gap-to-feature.js";
+import { identicalRepeatedFailure } from "../../src/judge/gap-eligibility.js";
 
 const PARENT_RED = "in-flight counting: an llm_completion_dispatch call is in flight";
 // The full verify log as runVerify captures it: the suite's FIRST failure is the parent-red falsifier.

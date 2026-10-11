@@ -2,7 +2,7 @@ import { WORKSPACE_ROOT } from "../config.js";
 import { appendFileSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync, renameSync, existsSync } from "fs";
 import { join } from "path";
 import { selfAuthHeaders } from "../lib/self-auth.js";
-import type { ComposeEligibilitySkipReason } from "../resolvers/gap-to-feature.js";
+import type { ComposeEligibilitySkipReason } from "../judge/gap-eligibility.js";
 
 const ACTIVITY_API_URL = process.env["ACTIVITY_API_URL"] ?? "http://127.0.0.1:8080";
 const METABOB_API_KEY = process.env["METABOB_API_KEY"] ?? "";
@@ -64,7 +64,7 @@ export async function composeNudgeSkipReason(gapId: string): Promise<ComposeNudg
     return "read_failed";
   }
   if (!row) return "not_found";
-  const { composeEligibilitySkipReason } = await import("../resolvers/gap-to-feature.js");
+  const { composeEligibilitySkipReason } = await import("../judge/gap-eligibility.js");
   return composeEligibilitySkipReason(row);
 }
 

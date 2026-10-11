@@ -18,7 +18,7 @@
  * The supply writes its ledger AFTER goal-host's 202, so a compose can read the store before the write lands (on a
  * retry it then reads the previous attempt's dispatch id). The marked path re-reads, bounded, before refusing.
  */
-import { CHECK_SUPPLY_DISPOSITION, isAwaitingLandVerification, isParkingDisposition } from "./gap-to-feature.js";
+import { CHECK_SUPPLY_DISPOSITION, isAwaitingLandVerification, isParkingDisposition } from "../judge/gap-eligibility.js";
 import { planPathProblem, underVesselRoot, vesselRelativePath } from "./vessel-paths.js";
 
 /** The compose mode an admitted supply compose runs in: read by the R3 diff gates and the verify's check judgement (B′). */

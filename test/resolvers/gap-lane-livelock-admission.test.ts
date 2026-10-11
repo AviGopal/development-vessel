@@ -40,6 +40,7 @@ for (const [k, v] of Object.entries(SCRATCH_ENV)) { SAVED_ENV[k] = process.env[k
 
 const sg = await import("../../src/resolvers/substrate-gap.js");
 const g2f = await import("../../src/resolvers/gap-to-feature.js") as typeof import("../../src/resolvers/gap-to-feature.js") & Record<string, unknown>;
+const elig = await import("../../src/judge/gap-eligibility.js");
 const RUN = Math.random().toString(36).slice(2, 8);
 const SITE = "repos/development-vessel/src/resolvers/gap-to-feature.ts";
 mkdirSync(join(SCRATCH, "runtime", "development-vessel", "src", "resolvers"), { recursive: true });
@@ -148,6 +149,8 @@ describe("(b) one predicate, and compose's eligibility refusal is a non-attempt"
   const SRC_DIR = join(import.meta.dir, "..", "..", "src");
   const g2fSrc = readFileSync(join(SRC_DIR, "resolvers", "gap-to-feature.ts"), "utf8");
   const fcSrc = readFileSync(join(SRC_DIR, "resolvers", "feature-compose.ts"), "utf8");
+  // The predicate moved to the closed gap-eligibility module (gap-to-feature judge split): compose imports it from there.
+  const eligSrc = readFileSync(join(SRC_DIR, "judge", "gap-eligibility.ts"), "utf8");
 
   it("the admission exclusion IS composeEligibilitySkipReason on every non-exempt row (same function, same verdicts)", () => {
     const gate = g2f["composeAdmissionExclusion"] as (g: Row) => { skip: string } | null;
@@ -158,12 +161,13 @@ describe("(b) one predicate, and compose's eligibility refusal is a non-attempt"
       { id: "p4", status: "open", classification_metadata: { falsifier: "class1", edit_site: SITE, operator_hold: true } },
       { id: "p5", status: "open", classification_metadata: { falsifier: { class: "class2" }, edit_site: SITE } },
     ];
-    for (const r of rows) expect(gate(r)?.skip ?? null).toBe(g2f.composeEligibilitySkipReason(r));
+    for (const r of rows) expect(gate(r)?.skip ?? null).toBe(elig.composeEligibilitySkipReason(r));
   });
 
-  it("compose imports the predicate from gap-to-feature, and src defines it exactly once", () => {
-    expect(fcSrc).toMatch(/const \{ composeEligibilitySkipReason \} = await import\("\.\/gap-to-feature\.js"\)/);
-    expect(g2fSrc.match(/export function composeEligibilitySkipReason\(/g)?.length).toBe(1);
+  it("compose imports the predicate from gap-eligibility, and src defines it exactly once", () => {
+    expect(fcSrc).toMatch(/const \{ composeEligibilitySkipReason \} = await import\("\.\.\/judge\/gap-eligibility\.js"\)/);
+    expect(eligSrc.match(/export function composeEligibilitySkipReason\(/g)?.length).toBe(1);
+    expect(g2fSrc).not.toMatch(/function composeEligibilitySkipReason\(/);
     expect(fcSrc).not.toMatch(/function composeEligibilitySkipReason\(/);
     const admission = g2fSrc.slice(g2fSrc.indexOf("export async function admitActionableGaps("), g2fSrc.indexOf("// CLOSE-ON-LAND (2026-06-29)"));
     expect(admission).toContain("composeAdmissionExclusion(g)");
@@ -187,9 +191,9 @@ describe("(b) one predicate, and compose's eligibility refusal is a non-attempt"
   });
 
   it("feature_compose's REFUSED/ineligible (not compose work) is a non-attempt; other REFUSED stages are not", () => {
-    expect(g2f.isNonAttemptComposeResult({ ok: false, verdict: "REFUSED", stage: "ineligible", error: "gap x is not compose work: unarmed" })).toBe(true);
-    expect(g2f.isNonAttemptComposeResult({ ok: false, verdict: "REFUSED", stage: "scope" })).toBe(false);
-    expect(g2f.isNonAttemptComposeResult({ ok: false, verdict: "UNFAVORABLE", stage: "ineligible" })).toBe(false);
+    expect(elig.isNonAttemptComposeResult({ ok: false, verdict: "REFUSED", stage: "ineligible", error: "gap x is not compose work: unarmed" })).toBe(true);
+    expect(elig.isNonAttemptComposeResult({ ok: false, verdict: "REFUSED", stage: "scope" })).toBe(false);
+    expect(elig.isNonAttemptComposeResult({ ok: false, verdict: "UNFAVORABLE", stage: "ineligible" })).toBe(false);
   });
 });
 

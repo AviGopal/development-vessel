@@ -373,7 +373,8 @@ describe("shapeVocabularyRefusal fails closed when the vocabulary cannot be load
 //   - writes nothing the next drafter reads as a rejection: no failure lesson, no semantic_gate_reason, no
 //     suspected_real_location, so priorAttemptFeedbackBlock over the gap afterwards is still empty.
 // CONTROL: a judge that JUDGED addresses:false is still a charged "fix" failure and is still taught.
-const gtf = (await import("../../src/resolvers/gap-to-feature.js")) as unknown as {
+await import("../../src/resolvers/gap-to-feature.js"); // loaded as before the move (module side effects unchanged)
+const gtfElig = (await import("../../src/judge/gap-eligibility.js")) as unknown as {
   isNonAttemptComposeResult: (b: Record<string, unknown>) => boolean;
   isInfraRefusalBody: (b: Record<string, unknown>) => boolean;
 };
@@ -394,7 +395,7 @@ describe("a semantic judge outage is an infrastructure refusal: a non-attempt, n
       storeGap = STORE_GAP();
       planOps = [editOp("  return base + 1;", "  return base + 2;")];
       const r = await fc.resolveFeatureCompose(pointer());
-      expect({ verdict: r.body.verdict, failure_kind: r.body.failure_kind, non_attempt: gtf.isNonAttemptComposeResult(r.body), infra: gtf.isInfraRefusalBody(r.body) })
+      expect({ verdict: r.body.verdict, failure_kind: r.body.failure_kind, non_attempt: gtfElig.isNonAttemptComposeResult(r.body), infra: gtfElig.isInfraRefusalBody(r.body) })
         .toEqual({ verdict: "UNFAVORABLE", failure_kind: "environment", non_attempt: true, infra: true });
     });
     it(`MUST-FAIL: ${what} is NOT fed to the next drafter: no lesson, no semantic_gate_reason, the feedback block stays empty`, async () => {
@@ -419,7 +420,7 @@ describe("a semantic judge outage is an infrastructure refusal: a non-attempt, n
     storeGap = STORE_GAP();
     planOps = [editOp("  return base + 1;", "  return base + 2;")];
     const r = await fc.resolveFeatureCompose(pointer());
-    expect({ verdict: r.body.verdict, failure_kind: r.body.failure_kind, non_attempt: gtf.isNonAttemptComposeResult(r.body) })
+    expect({ verdict: r.body.verdict, failure_kind: r.body.failure_kind, non_attempt: gtfElig.isNonAttemptComposeResult(r.body) })
       .toEqual({ verdict: "UNFAVORABLE", failure_kind: "fix", non_attempt: false });
     const meta = (storeGap!.classification_metadata ?? {}) as Record<string, unknown>;
     expect(String(meta.semantic_gate_reason ?? "")).toContain("compute still adds 1");

@@ -1,5 +1,6 @@
 import { describe, it, expect } from "bun:test";
-import { isNonAttemptComposeResult, requeueAfterNonAttempt, GAP_BUSY_REQUEUE_MS } from "../../src/resolvers/gap-to-feature.js";
+import { requeueAfterNonAttempt, GAP_BUSY_REQUEUE_MS } from "../../src/resolvers/gap-to-feature.js";
+import { isNonAttemptComposeResult } from "../../src/judge/gap-eligibility.js";
 
 // Pins the BUSY/capacity distinction at the gap layer.
 //

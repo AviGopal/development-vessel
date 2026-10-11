@@ -113,7 +113,7 @@ describe("a compose isolates and grounds every target file's vessel", () => {
   });
 
   it("MUST-FAIL: the early refusal is an infrastructure refusal for the picker, as the grounding refusal it replaces was", async () => {
-    const { isInfraRefusalBody } = (await import("../../src/resolvers/gap-to-feature.js")) as Record<string, any>;
+    const { isInfraRefusalBody } = (await import("../../src/judge/gap-eligibility.js")) as Record<string, any>;
     expect(isInfraRefusalBody({ ok: false, verdict: "REFUSED", stage: "grounding" })).toBe(true);
     expect(isInfraRefusalBody({ ok: false, verdict: "REFUSED", stage: "target_vessel_not_isolated" })).toBe(true);
     expect(isInfraRefusalBody({ ok: false, verdict: "REFUSED", stage: "scope" })).toBe(false);

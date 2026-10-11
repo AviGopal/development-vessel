@@ -5365,7 +5365,7 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
     // gap. A non-landing compose and an id the store does not hold (route-edit-*) are unaffected. A refusal is a
     // non-attempt.
     if (stored && (pointer as { land?: boolean }).land !== false) {
-      const { composeEligibilitySkipReason } = await import("./gap-to-feature.js");
+      const { composeEligibilitySkipReason } = await import("../judge/gap-eligibility.js");
       let why = composeEligibilitySkipReason(stored);
       // TEST-WRITING WORK (slice G): the one exception to "unarmed", for a compose the gap's own check_supply ledger
       // says the supply dispatched with THIS dispatch id. The marker alone admits nothing. The supply writes the

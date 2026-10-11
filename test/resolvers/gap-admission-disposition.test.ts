@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { PARKING_DISPOSITIONS, isParkingDisposition } from "../../src/resolvers/gap-to-feature";
+import { PARKING_DISPOSITIONS, isParkingDisposition } from "../../src/judge/gap-eligibility";
 
 // Admission honours dispositions that park a gap for a human (2026-09-30: an unlocalized needs_information gap
 // was picked; for a stale test its only green is changing src to match it). markPendingVerification keeps them.

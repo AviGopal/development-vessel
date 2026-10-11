@@ -2331,7 +2331,7 @@ async function resolveSubstrateGapWriteInner(
   let nudgeEligible = false;
   if (nudgeCandidate) {
     try {
-      const { composeEligibilitySkipReason } = await import("./gap-to-feature.js");
+      const { composeEligibilitySkipReason } = await import("../judge/gap-eligibility.js");
       const skip = composeEligibilitySkipReason(gap as unknown as Record<string, unknown>);
       if (skip === null) nudgeEligible = true;
       else {

@@ -93,7 +93,7 @@ let ownCheckDeps: OwnCheckDeps = realOwnCheckDeps;
  * it as a durability sentinel and answers 'pending', never 'absent', so it can never verify anything.
  */
 export async function pendingLandMeasurable(meta: Record<string, unknown>): Promise<boolean> {
-  const { landVerdictIsMeasured } = await import("./gap-to-feature.js");
+  const { landVerdictIsMeasured } = await import("../judge/gap-eligibility.js");
   if (meta["predicate_source"] === "removed_line_of_landing_commit") {
     const { hardcoded_url: _sentinel, ...rest } = meta;
     return landVerdictIsMeasured(rest);

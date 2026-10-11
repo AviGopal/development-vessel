@@ -45,6 +45,7 @@ delete process.env["GAP_STORE_ENDPOINT"];
 
 const sg = await import("../../src/resolvers/substrate-gap.js");
 const g2f = await import("../../src/resolvers/gap-to-feature.js");
+const elig = await import("../../src/judge/gap-eligibility.js");
 // The organ under test. Absent at the base, so every test below fails on its own assertion, not on a load error.
 const supply = (await import("../../src/resolvers/gap-check-supply.js").catch(() => null)) as null | {
   checkSupplyDisposition: (row: Record<string, unknown>) => string | null;
@@ -194,10 +195,10 @@ describe("system-authored gap checks: (a) classification", () => {
     const sitedNoCheck: Row = { id: "y", status: "open", summary: "s", classification_metadata: { edit_site: SITE, falsifier: "none" } };
     expect(supply!.checkSupplyDisposition(noCheck)).toBe("needs_localization");
     expect(supply!.checkSupplyDisposition(sitedNoCheck)).toBe("needs_localization");
-    expect(g2f.composeEligibilitySkipReason(noCheck)).not.toBeNull();
-    expect(g2f.composeEligibilitySkipReason(sitedNoCheck)).not.toBeNull();
+    expect(elig.composeEligibilitySkipReason(noCheck)).not.toBeNull();
+    expect(elig.composeEligibilitySkipReason(sitedNoCheck)).not.toBeNull();
     // the written disposition is one the shared eligibility predicate reads as held
-    expect(g2f.composeEligibilitySkipReason({ id: "z", status: "open", classification_metadata: { falsifier: "class2", edit_site: SITE, disposition: "needs_localization" } })).toBe("held");
+    expect(elig.composeEligibilitySkipReason({ id: "z", status: "open", classification_metadata: { falsifier: "class2", edit_site: SITE, disposition: "needs_localization" } })).toBe("held");
   });
 
   it("CONTROL: armed, held, parked and closed gaps are not needs-localization", () => {
@@ -301,7 +302,7 @@ describe("system-authored gap checks: (c) a landed test arms the gap only when r
     expect(m["predicate_source"]).toBe("gap_check_supply");
     expect(m["disposition"]).toBe("");
     expect(ledgerOf(m)["state"]).toBe("armed");
-    expect(g2f.composeEligibilitySkipReason((await storeRow(id))!)).toBeNull();
+    expect(elig.composeEligibilitySkipReason((await storeRow(id))!)).toBeNull();
     const measures = (body["measures"] ?? {}) as Row;
     expect(Number(measures["armed_system_authored"])).toBeGreaterThanOrEqual(1);
     expect(Number(measures["system_authored_red_at_head"])).toBeGreaterThanOrEqual(1);
@@ -364,7 +365,7 @@ describe("system-authored gap checks: (c) a landed test arms the gap only when r
     expect(m["evidence_resolve"]).toBeUndefined();
     expect(m["falsifier"]).not.toBe("class2");
     expect(ledgerOf(m)["state"]).toBe("green_at_head");
-    expect(g2f.composeEligibilitySkipReason((await storeRow(id))!)).not.toBeNull();
+    expect(elig.composeEligibilitySkipReason((await storeRow(id))!)).not.toBeNull();
   });
 
   it("a trivial red that does not import the edit site (expect(1).toBe(2)) does NOT arm", async () => {

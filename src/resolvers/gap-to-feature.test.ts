@@ -9,7 +9,8 @@
 // single-parameter function. It failed all four of its tests from the day it was written.
 // Do not reintroduce that approach: if new behaviour needs a seam, export one.
 import { describe, expect, test } from "bun:test";
-import { requeueAfterNonAttempt, isNonAttemptComposeResult } from "./gap-to-feature";
+import { requeueAfterNonAttempt } from "./gap-to-feature";
+import { isNonAttemptComposeResult } from "../judge/gap-eligibility";
 
 describe("requeueAfterNonAttempt", () => {
   const gapId = "test-gap-id";

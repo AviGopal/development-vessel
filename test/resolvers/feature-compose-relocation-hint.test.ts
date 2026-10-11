@@ -70,6 +70,7 @@ setTreeEnv();
 
 const sg = await import("../../src/resolvers/substrate-gap.js");
 const g2f = await import("../../src/resolvers/gap-to-feature.js");
+const elig = await import("../../src/judge/gap-eligibility.js");
 const fc = await import("../../src/resolvers/feature-compose.js");
 const RUN = Math.random().toString(36).slice(2, 8);
 
@@ -424,7 +425,7 @@ describe("relocation hint: a hinted file outside the autonomy scope is operator 
     expect(String(ex?.reason ?? "")).toContain("relocation_hint");
     const meta = metaOf(await storeRow(id));
     expect((meta["relocation_hint"] as Hint | undefined)?.files).toEqual([repo(B)]);
-    expect(g2f.isParkingDisposition(meta["disposition"])).toBe(true);
+    expect(elig.isParkingDisposition(meta["disposition"])).toBe(true);
     const routing = meta["operator_routing"] as { files?: string[]; reason?: string } | undefined;
     expect(routing?.files).toEqual([repo(B)]);
     expect(String(routing?.reason ?? "").length).toBeGreaterThan(0);

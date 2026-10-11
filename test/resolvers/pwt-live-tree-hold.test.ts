@@ -18,6 +18,7 @@ import { join } from "node:path";
 import { resolvePatchWithTools } from "../../src/resolvers/patch-with-tools.js";
 import { resolvePoolImpulseWrite, __setPoolFileForTests, attestationSig } from "../../src/resolvers/pool-impulse.js";
 import * as g2f from "../../src/resolvers/gap-to-feature.js";
+import * as elig from "../../src/judge/gap-eligibility.js";
 
 // Loaded leniently so the behavioural tests below fail on BEHAVIOUR (not on a missing module) at a
 // base that has no hold at all.
@@ -257,7 +258,7 @@ describe("controls", () => {
 
 describe("t5: a held refusal through the gap-to-feature grading path", () => {
   it("is an infrastructure refusal (no class-posterior beta)", () => {
-    expect(g2f.isInfraRefusalBody({ stage: "live_tree_writes_held", verdict: "REFUSED" })).toBe(true);
+    expect(elig.isInfraRefusalBody({ stage: "live_tree_writes_held", verdict: "REFUSED" })).toBe(true);
   });
 
   it("changes neither failed_attempts nor the class posterior; stamps pwt_escalation_held and does NOT consume the one-shot; escalates for real once lifted", async () => {

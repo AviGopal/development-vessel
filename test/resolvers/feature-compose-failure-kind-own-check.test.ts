@@ -11,7 +11,7 @@
 
 import { describe, it, expect } from "bun:test";
 import { composeFailureKind, type VerifyResult } from "../../src/resolvers/feature-compose.js";
-import { isNonAttemptComposeResult } from "../../src/resolvers/gap-to-feature.js";
+import { isNonAttemptComposeResult } from "../../src/judge/gap-eligibility.js";
 
 const SUITE_WITH_A_SLOW_UNRELATED_TEST = [
   "== typecheck ==",

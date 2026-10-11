@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { checkContractBreach, isTerminalRefusal } from "../../src/resolvers/feature-compose";
-import { OWN_GREEN_ADMISSION_TTL_MS, greenOnParentFresh, isNonAttemptComposeResult, isTerminalRefusalResult, requeueAfterNonAttempt } from "../../src/resolvers/gap-to-feature";
+import { requeueAfterNonAttempt } from "../../src/resolvers/gap-to-feature";
+import { OWN_GREEN_ADMISSION_TTL_MS, greenOnParentFresh, isNonAttemptComposeResult, isTerminalRefusalResult } from "../../src/judge/gap-eligibility";
 
 // A refusal no repair attempt can change must stop the compose instead of re-drafting (2026-09-30:
 // a fixed and closed gap was re-composed for 40 min, every draft refused "already GREEN on the parent").

@@ -46,10 +46,11 @@ afterAll(() => {
 });
 
 const mod = await import("../../src/resolvers/gap-to-feature.js") as Record<string, unknown>;
+const elig = await import("../../src/judge/gap-eligibility.js") as Record<string, unknown>;
 const admitActionableGaps = mod.admitActionableGaps as (g: Record<string, unknown>[], o?: unknown) => Promise<{ admitted: Record<string, unknown>[]; excluded: Array<{ id: string; reason: string }> }>;
-const isAwaitingLandVerification = mod.isAwaitingLandVerification as (g: Record<string, unknown>) => boolean;
-const liftLandVerificationHold = mod.liftLandVerificationHold as (m: Record<string, unknown>) => Record<string, unknown> | null;
-const landVerdictIsMeasured = mod.landVerdictIsMeasured as (m: Record<string, unknown>) => boolean;
+const isAwaitingLandVerification = elig.isAwaitingLandVerification as (g: Record<string, unknown>) => boolean;
+const liftLandVerificationHold = elig.liftLandVerificationHold as (m: Record<string, unknown>) => Record<string, unknown> | null;
+const landVerdictIsMeasured = elig.landVerdictIsMeasured as (m: Record<string, unknown>) => boolean;
 const releasedRow = mod.releasedRow as (fresh: Record<string, unknown> | null, why: string, revertedSha?: string) => Record<string, unknown> | null;
 
 const runner = (_v: string) => ({ ran: true, clean: false });

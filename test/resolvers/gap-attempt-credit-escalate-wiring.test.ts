@@ -27,13 +27,26 @@ const passesEscalate = (c: ts.CallExpression): boolean => {
 };
 
 describe("bumpFailedAttempts escalates only through the callback, and every residue call site passes it", () => {
-  it("MUST-FAIL (1): every bumpFailedAttempts call in gap-to-feature passes escalate: escalateToDecomposition", () => {
+  it("MUST-FAIL (1): every residue call that can bump hands the closed code escalateToDecomposition", () => {
+    // After the landing-verdict extraction (L2) the residue no longer bumps itself: it calls the closed graders and
+    // route settles, which bump on its behalf. Each such call must carry the callback.
+    const BUMPERS = new Set(["bumpFailedAttempts", "gradeTraceStoreDispatch", "gradeTraceStoreDispatchError", "settleReachabilityRepair", "settleAuthorProducerMint", "gradeCapabilityRouteResult", "gradeCapabilityCompose", "gradeSliceSequence", "gradeComposeOutcome"]);
     const sf = parse("resolvers/gap-to-feature.ts");
     const calls: ts.CallExpression[] = [];
-    walk(sf, (n) => { if (ts.isCallExpression(n) && ts.isIdentifier(n.expression) && n.expression.text === "bumpFailedAttempts") calls.push(n); });
-    expect(calls.length).toBeGreaterThan(0);
-    const missing = calls.filter((c) => !passesEscalate(c)).map((c) => `line ${sf.getLineAndCharacterOfPosition(c.getStart()).line + 1}: ${c.getText().slice(0, 120)}`);
+    walk(sf, (n) => { if (ts.isCallExpression(n) && ts.isIdentifier(n.expression) && BUMPERS.has(n.expression.text)) calls.push(n); });
+    expect(calls.length).toBe(8); // the eight graders and route settles
+    const missing = calls.filter((c) => !c.arguments.some((a) => /\bescalateToDecomposition\b/.test(a.getText()))).map((c) => `line ${sf.getLineAndCharacterOfPosition(c.getStart()).line + 1}: ${c.getText().slice(0, 120)}`);
     expect(missing).toEqual([]);
+    // ...and inside the closed landing verdict every bump forwards the callback it was handed.
+    const lv = parse("judge/gap-landing-verdict.ts");
+    const lvMissing: string[] = [];
+    walk(lv, (n) => {
+      if (ts.isCallExpression(n) && calleeName(n) === "bumpFailedAttempts" && !(ts.isPropertyAccessExpression(n.expression) && n.expression.expression.getText() === "deps")) {
+        const opts = n.arguments[1];
+        if (!opts || !/\bescalate\b/.test(opts.getText())) lvMissing.push(n.getText().slice(0, 120));
+      }
+    });
+    expect(lvMissing).toEqual([]);
   });
 
   it("MUST-FAIL (2): the pwt-escalation deps hand bump the same callback", () => {

@@ -22,7 +22,7 @@ import ts from "typescript";
 const SRC = join(import.meta.dir, "..", "..", "src");
 const parse = (rel: string): ts.SourceFile => ts.createSourceFile(rel, readFileSync(join(SRC, rel), "utf8"), ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
 function walk(n: ts.Node, visit: (n: ts.Node) => void): void { visit(n); n.forEachChild((c) => walk(c, visit)); }
-const ENTRY: Record<string, number> = { closeLandedGap: 2, sweepIfCloneHeadsMoved: 0, sweepPendingLandVerifications: 0, escalateApplyFailureToPwt: 5 };
+const ENTRY: Record<string, number> = { closeLandedGap: 2, sweepIfCloneHeadsMoved: 0, sweepPendingLandVerifications: 0, escalateApplyFailureToPwt: 5, gradeCapabilityCompose: 3, gradeSliceSequence: 5, gradeComposeOutcome: 5 };
 
 describe("the landing verdict asks through the channel it is handed", () => {
   it("MUST-FAIL (1): the closed module never imports ui-write-passthrough and asks only through `ask(`", () => {

@@ -19,7 +19,7 @@
  *   resolveUiWritePassthrough was called.
  * - `escalate`: the chronic-failure escalation, handed to the bump as in gap-attempt-credit.
  */
-import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { ResolverResult } from "../resolvers/types.js";
 import { resolveDissentOutcome, landedCloseReason, landingLabelHere, LANDING_LABELER } from "../resolvers/feature-compose.js";
@@ -28,14 +28,14 @@ import { appendRecord } from "../resolvers/attempt-ledger.js";
 import { resolveSubstrateGap, resolveSubstrateGapWrite, DECISION_LOG_GAP_CATEGORIES, predicateSuspect, class2PredicateKey, reevaluateBirthVerdicts, birthCheckRepo } from "../resolvers/substrate-gap.js";
 import { METABOB_API_KEY, METABOB_ENDPOINT, GOAL_HOST_VESSEL_ENDPOINT } from "../config.js";
 import { readOperatorHold } from "../lib/operator-hold.js";
-import { gapEditSite, isInfraRefusalBody, isParkingDisposition, liftLandVerificationHold, landVerdictIsMeasured } from "./gap-eligibility.js";
+import { gapEditSite, isInfraRefusalBody, isParkingDisposition, liftLandVerificationHold, landVerdictIsMeasured, isNonAttemptComposeResult, isTerminalRefusalResult } from "./gap-eligibility.js";
 import { vesselsCloneRoot, discoverOwnResolveUrls, postEnvelopeRead, autonomyScope, autonomyScopeExcludes, type AutonomyScope } from "./gap-policy.js";
 import { isLiteralOnlyStepClose, verifyGapCondition, type GapCheckVerdict, evaluateGapCheck, shaWasRevertedInAnyClone, landedCommitVerdict, sweepGitOut } from "./gap-check-judge.js";
 /** The human-question channel (ui-write-passthrough), handed in per call: an effect the lane keeps open (qa 10.2). */
 export type Ask = (pointer: Record<string, unknown>) => Promise<unknown>;
 /** The chronic-failure escalation (gap-to-feature escalateToDecomposition), handed in per call as in gap-attempt-credit. */
 export type Escalate = (gap: Record<string, unknown>, why: string) => Promise<unknown>;
-import { landingDecisionRef, readGapFresh, gapClassOf, updateClassPosterior, joinDecisionOutcome, persistGapMetaPatch, bumpFailedAttempts } from "./gap-attempt-credit.js";
+import { landingDecisionRef, readGapFresh, gapClassOf, updateClassPosterior, joinDecisionOutcome, persistGapMetaPatch, bumpFailedAttempts, predictLand, isRetryableDispatchRefusal } from "./gap-attempt-credit.js";
 
 export const solicitedHumanGaps = new Set<string>();
 
@@ -2229,4 +2229,222 @@ export async function markTerminalRefusal(gap: Record<string, unknown>, cb: Reco
     await resolveSubstrateGapWrite({ type: "substrateGap_write", gap: { ...fresh, classification_metadata: { ...m0, own_check_green_on_parent: { at: new Date().toISOString(), reason: why.slice(0, 300),
       ...(held ? { stage: held.stage, instrument_commit: held.instrument_commit, instrument_files: held.files.slice(0, 10) } : {}) } } } } as never);
   } catch { /* best-effort: without the marker the full cooldown still bounds re-picks */ }
+}
+
+// ── EXTRACTED FROM THE RESIDUE (gap-to-feature judge split, BOUNDARY.md 1.5 [extract] rows, L2) ──
+
+/** THE CAPABILITY-ROUTE COMPOSE GRADER, extracted from routeCapabilityGapToNewResolver: a genuine land closes,
+ *  a terminal refusal is marked, anything else that was an attempt is a class miss and a bump. */
+export async function gradeCapabilityCompose(gap: Record<string, unknown>, cb: Record<string, unknown>, decisionId: string | undefined, deps: { ask: Ask; escalate: Escalate }): Promise<{ land: LandSignal; closed: boolean }> {
+  const land = genuineLandSignal(cb, true);
+  let closed = false;
+  if (land.landed) {
+    const c = await closeLandedGap(gap, land, { decision_id: decisionId, ask: deps.ask });
+    closed = c.closed;
+  } else if (isTerminalRefusalResult(cb)) {
+    await markTerminalRefusal(gap, cb);
+  } else if (!isNonAttemptComposeResult(cb)) {
+    if (!isInfraRefusalBody(cb)) updateClassPosterior(gapClassOf(gap), false);
+    // A capacity refusal here is a retry, not a failure — see isNonAttemptComposeResult.
+    await bumpFailedAttempts(gap, { decisionId, escalate: deps.escalate });
+  }
+  return { land, closed };
+}
+
+/** THE MISSING-CAPABILITY LIVE-PRODUCER PROBE CLOSE, extracted from resolveGapToFeatureOnce: a live producer of the
+ *  gap's candidate shape (and, when named, an existing edit_site) closes the gap already_resolved without a compose.
+ *  Returns the report to answer with, or null to go on composing. */
+export async function liveProducerProbeClose(gap: Record<string, unknown>): Promise<ResolverResult | null> {
+  if (String(gap.category ?? "") === "missing_capability") {
+  const mcMeta = (gap.classification_metadata ?? gap.metadata ?? {}) as Record<string, unknown>;
+  const mcEditSite = typeof mcMeta["edit_site"] === "string" ? mcMeta["edit_site"] as string : undefined;
+  const mcSummary = typeof gap.summary === "string" ? gap.summary as string : "";
+  const _quotedMatch = mcSummary.match(/"([^"]+)"/);
+  const _metaShape = typeof (gap as Record<string, unknown>).classification_metadata === "object" && (gap as Record<string, unknown>).classification_metadata !== null
+    ? ((gap as Record<string, unknown>).classification_metadata as Record<string, unknown>).shape as string | undefined
+    : undefined;
+  const candidateShape: string = (_quotedMatch?.[1]) ?? (_metaShape ?? "") ?? (mcSummary.match(/[a-z][a-z0-9_:-]{2,}/)?.[0] ?? "");
+  const mcCandidateShape = candidateShape || undefined;
+  let mcAlreadyResolved = false;
+  if (mcCandidateShape) {
+    try {
+      const mcDiscoveryEndpoint = process.env["DISCOVERY_ENDPOINT"] ?? "http://127.0.0.1:8100";
+      const mcProbeRes = await fetch(
+        `${mcDiscoveryEndpoint}/vessels?shape=${encodeURIComponent(mcCandidateShape)}`,
+        { signal: AbortSignal.timeout(3000) },
+      );
+      if (mcProbeRes.ok) {
+        const mcProbeBody = (await mcProbeRes.json()) as { vessels?: unknown[] };
+        if (Array.isArray(mcProbeBody.vessels) && mcProbeBody.vessels.length > 0) {
+          if (mcEditSite) {
+            try {
+              statSync(mcEditSite);
+              mcAlreadyResolved = true;
+            } catch {
+              // File absent — capability registered but file not present; let composer run
+            }
+          } else {
+            mcAlreadyResolved = true;
+          }
+        }
+      }
+    } catch {
+      // Discovery unreachable or timeout — proceed with normal compose
+    }
+  }
+  if (mcAlreadyResolved) {
+    const mcClosureNote = `already_resolved: live producer found for shape '${mcCandidateShape ?? mcSummary}'${
+      mcEditSite ? ` and edit_site '${mcEditSite}' exists in container tree` : ""
+    }; gap closed without recompose to prevent duplicate-identifier patches`;
+    try {
+      await resolveSubstrateGapWrite({
+        type: "substrateGap_write",
+        gap: {
+          id: String(gap.id ?? ""),
+          category: gap.category,
+          source: gap.source,
+          summary: gap.summary,
+          detected_at: gap.detected_at,
+          classification_metadata: { ...mcMeta, resolution: "already_resolved", closed_reason: "already_resolved", closed_by: "gap_to_feature.live_producer_probe", closed_at: new Date().toISOString() },
+          status: "closed",
+        },
+      } as never);
+    } catch { /* best-effort */ }
+    return {
+      shape: "gapToFeatureReport",
+      body: {
+        ok: true,
+        gap_id: gap.id,
+        gap_category: gap.category,
+        verdict: "already_resolved",
+        note: mcClosureNote,
+      },
+    };
+  }
+  }
+  return null;
+}
+
+/** THE TRACE-STORE ROUTE'S CREDIT, extracted from resolveGapToFeatureOnce: a dispatch goal-host refused retryably
+ *  (draining, quiesced) never ran and is not an attempt; any other refused dispatch is a failed attempt. */
+export async function gradeTraceStoreDispatch(gap: Record<string, unknown>, status: number, text: string, decisionId: string | undefined, escalate: Escalate): Promise<void> {
+  if (isRetryableDispatchRefusal(status, text)) {
+    // goal-host is draining or quiesced: the dispatch never ran, so it is not an attempt. No bump; the
+    // gap stays as it is for the next tick.
+    console.log(`[gap-to-feature] trace-store-reconcile for ${String(gap.id ?? "?")}: goal-host refused retryably (${status} ${text.slice(0, 160)}); not a failed attempt, left for the next tick`);
+  } else {
+    await bumpFailedAttempts(gap, { decisionId, escalate });
+  }
+}
+/** A trace-store dispatch that threw is a failed attempt. */
+export async function gradeTraceStoreDispatchError(gap: Record<string, unknown>, decisionId: string | undefined, escalate: Escalate): Promise<void> {
+  await bumpFailedAttempts(gap, { decisionId, escalate });
+}
+
+/** THE REACHABILITY ROUTE'S SETTLE, extracted from resolveGapToFeatureOnce: a repair that is not FAVORABLE is a
+ *  failed attempt; a FAVORABLE one closes the gap producer_now_exists. */
+export async function settleReachabilityRepair(gap: Record<string, unknown>, rb: Record<string, unknown>, dryRun: boolean | undefined, decisionId: string | undefined, escalate: Escalate): Promise<void> {
+  if (!dryRun && rb["verdict"] !== "FAVORABLE") await bumpFailedAttempts(gap, { decisionId, escalate });
+  if (!dryRun && rb["verdict"] === "FAVORABLE") {
+    try {
+      await resolveSubstrateGapWrite({
+        type: "substrateGap_write",
+        gap: {
+          id: String(gap.id ?? ""),
+          category: gap.category,
+          source: gap.source,
+          summary: gap.summary,
+          detected_at: gap.detected_at,
+          classification_metadata: { ...((gap.classification_metadata ?? gap.metadata ?? {}) as Record<string, unknown>), closed_reason: "producer_now_exists", closed_by: "reachability_gap_repair" },
+          status: "closed",
+        },
+      } as never);
+    } catch { /* best-effort */ }
+  }
+}
+
+/** THE ORPHAN ROUTE'S SETTLE, extracted from resolveGapToFeatureOnce: a bridge that did not mint is a failed attempt
+ *  (MINT_FAILED would otherwise re-select forever); a minted bridge closes the gap producer_now_exists. */
+export async function settleAuthorProducerMint(gap: Record<string, unknown>, minted: boolean, dryRun: boolean | undefined, decisionId: string | undefined, escalate: Escalate): Promise<void> {
+  if (!dryRun && !minted) await bumpFailedAttempts(gap, { decisionId, escalate });
+  if (!dryRun && minted) {
+    try {
+      await resolveSubstrateGapWrite({
+        type: "substrateGap_write",
+        gap: {
+          id: String(gap.id ?? ""),
+          category: gap.category,
+          source: gap.source,
+          summary: gap.summary,
+          detected_at: gap.detected_at,
+          classification_metadata: { ...((gap.classification_metadata ?? gap.metadata ?? {}) as Record<string, unknown>), closed_reason: "producer_now_exists", closed_by: "author_producer" },
+          status: "closed",
+        },
+      } as never);
+    } catch { /* best-effort */ }
+  }
+}
+
+/** THE CAPABILITY-GAP ROUTE'S CREDIT, extracted from resolveGapToFeatureOnce: a route answer with ok:false is a
+ *  failed attempt (a capability_gap the author cannot satisfy would otherwise re-select forever). */
+export async function gradeCapabilityRouteResult(gap: Record<string, unknown>, cgResult: ResolverResult | null | undefined, dryRun: boolean | undefined, decisionId: string | undefined, escalate: Escalate): Promise<void> {
+  if (!dryRun && (cgResult?.body as { ok?: boolean } | undefined)?.ok === false) {
+    await bumpFailedAttempts(gap, { decisionId, escalate });
+  }
+}
+
+/** THE CAPACITY-SLICE SEQUENCE GRADER, extracted from resolveGapToFeatureOnce: every slice FAVORABLE and genuinely
+ *  landed closes; a sequence cut short by a terminal refusal is marked; one cut short by a real failure is a class miss
+ *  and a bump. Returns the land signal the report carries. */
+export async function gradeSliceSequence(gap: Record<string, unknown>, lastBody: Record<string, unknown> | null, allOk: boolean, dryRun: boolean | undefined, decisionId: string | undefined, deps: { ask: Ask; escalate: Escalate }): Promise<LandSignal> {
+  const sliceLand: LandSignal = allOk && lastBody ? genuineLandSignal(lastBody, !(dryRun ?? false)) : { landed: false, commit_sha: null, vessel: null, push_status: null };
+  if (allOk && lastBody) {
+    if (sliceLand.landed) await closeLandedGap(gap, sliceLand, { decision_id: decisionId, ask: deps.ask });
+    const reachVerdict = sliceLand.landed ? 'SUCCESS' : 'UNFAVORABLE';
+    console.log(`[gap-to-feature] reach verdict: ${reachVerdict}`);
+  }
+  // A slice sequence cut short by a capacity refusal never got its attempt either.
+  if (!allOk && !dryRun && isTerminalRefusalResult(lastBody)) await markTerminalRefusal(gap, lastBody);
+  else if (!allOk && !dryRun && !isNonAttemptComposeResult(lastBody)) {
+    if (!isInfraRefusalBody(lastBody)) updateClassPosterior(gapClassOf(gap), false);
+    await bumpFailedAttempts(gap, { decisionId, escalate: deps.escalate });
+  }
+  return sliceLand;
+}
+
+/** THE MAIN COMPOSE GRADER, extracted from resolveGapToFeatureOnce: a genuine land closes; a non-landing compose that
+ *  was not an attempt is reported back (the caller clears its cooldown); a terminal refusal is marked; any other
+ *  failure goes to the apply-failure grader (patch_with_tools escalation, class miss, surprise-weighted bump). */
+export async function gradeComposeOutcome(gap: Record<string, unknown>, cb: Record<string, unknown>, spec: string, dryRun: boolean | undefined, decisionId: string | undefined, deps: { ask: Ask; escalate: Escalate }): Promise<{ land: LandSignal; closure: { closed: boolean; error?: string; resolution?: string }; nonAttempt: boolean }> {
+  const land = genuineLandSignal(cb, !(dryRun ?? false));
+  let closure: { closed: boolean; error?: string; resolution?: string } = { closed: false };
+  let nonAttempt = false;
+  if (land.landed) {
+    closure = await closeLandedGap(gap, land, { decision_id: decisionId, ask: deps.ask });
+    if (closure.closed) {
+      closure.resolution = `landed via mitosis cutover${land.commit_sha ? ` ${land.commit_sha}` : ""}${land.vessel ? ` (${land.vessel})` : ""}`;
+    }
+  } else if (!(dryRun ?? false)) {
+    // Did not land. EXPECTATION-SETTING: measure the prediction-vs-outcome SURPRISE. A gap the
+    // self-model predicted would land but (test missing in test suite) didn't is over-optimistic (high-information) → bump
+    // harder; a correctly-predicted fail bumps normally. Feeds the calibrated self-model.
+    if (isNonAttemptComposeResult(cb)) {
+      nonAttempt = true;
+    } else if (isTerminalRefusalResult(cb)) {
+      await markTerminalRefusal(gap, cb);
+    } else {
+      const pred = predictLand(gap);
+      // Bounded one-shot patch_with_tools escalation on an APPLY failure (anchor_not_found /
+      // localization miss — ~40% of autonomous compose failures). feature_compose already rolled
+      // back on applyFailed (nothing to double-land); pwt reads-then-edits the target agentically
+      // where blind-draft could not match old_string. One-shot PER GAP LINEAGE via pwt_escalated
+      // (no cross-tick loop); fires ONLY on apply_failed (never on semantic/verify rejects); any
+      // error or non-land falls through to bumpFailedAttempts unchanged. NB classification_metadata
+      // is an OBJECT — the coaxed draft (daf6d36) used .includes/.push on it (runtime crash) + a
+      // bogus threading string; corrected here to property access + the real resolver signature.
+      // The escalation and its grading live in escalateApplyFailureToPwt; a HELD escalation is not graded.
+      await escalateApplyFailureToPwt(gap, cb, spec, pred, defaultPwtEscalationDeps({ escalate: deps.escalate }), { decision_id: decisionId, ask: deps.ask });
+    }
+  }
+  return { land, closure, nonAttempt };
 }

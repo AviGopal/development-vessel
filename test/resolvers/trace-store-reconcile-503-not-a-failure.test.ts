@@ -29,9 +29,14 @@ describe("a goal-host 503 that says retryable/draining/quiesced is not a failed 
     expect(p!(503, "<html>Service Unavailable</html>")).toBe(false);
   });
   it("the trace-store-reconcile route consults it before bumping, and still bumps a real failure", () => {
+    // The route's credit moved to the closed landing verdict (gap-to-feature judge split, L2): the residue hands
+    // every not-dispatched answer to gradeTraceStoreDispatch, which consults the predicate before bumping.
     const i = SRC.indexOf("const dispatched = res.ok;");
     expect(i).toBeGreaterThan(0);
     const branch = SRC.slice(i, SRC.indexOf('dispatch_status: res.status', i));
-    expect(branch).toMatch(/\} else if \(isRetryableDispatchRefusal\(res\.status, text\)\) \{[\s\S]*?\} else \{\s*await bumpFailedAttempts\(gap, \{ decisionId: attempt\.id, escalate: escalateToDecomposition \}\);/);
+    expect(branch).toMatch(/\} else \{\s*await gradeTraceStoreDispatch\(gap, res\.status, text, attempt\.id, escalateToDecomposition\);/);
+    const LV = readFileSync(join(import.meta.dir, "..", "..", "src", "judge", "gap-landing-verdict.ts"), "utf8");
+    const g = LV.slice(LV.indexOf("export async function gradeTraceStoreDispatch("));
+    expect(g.slice(0, g.indexOf("\n}\n"))).toMatch(/if \(isRetryableDispatchRefusal\(status, text\)\) \{[\s\S]*?\} else \{\s*await bumpFailedAttempts\(gap, \{ decisionId, escalate \}\);/);
   });
 });

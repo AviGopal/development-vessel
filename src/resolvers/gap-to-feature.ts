@@ -1,8 +1,7 @@
-import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import type { ResolverResult } from "./types.js";
-import { resolveFeatureCompose, priorAttemptFeedbackBlock, readParkedLanding, resolveDissentOutcome, landedCloseReason, landingLabelHere, LANDING_LABELER, isDissentChild, dissentChildCheckRefusal } from "./feature-compose.js";
-import type { GoalVerificationLabel } from "./feature-compose.js";
+import { resolveFeatureCompose, priorAttemptFeedbackBlock, readParkedLanding, isDissentChild, dissentChildCheckRefusal } from "./feature-compose.js";
 import { attemptEvidenceBlock, explicitLineHint, testTitleInSource } from "./retry-evidence.js";
 
 // TYPE AUGMENTATION — allow callers to pass an optional 'directed' flag through the
@@ -17,8 +16,7 @@ declare module "./feature-compose.js" {
   }
 }
 
-import { appendRecord } from "./attempt-ledger.js";
-import { resolveSubstrateGap, resolveSubstrateGapWrite, DECISION_LOG_GAP_CATEGORIES, predicateSuspect, class2PredicateKey, reevaluateBirthVerdicts, birthCheckRepo, takeBirthVerdictWithReport, type MintedBirthVerdict } from "./substrate-gap.js";
+import { resolveSubstrateGap, resolveSubstrateGapWrite, DECISION_LOG_GAP_CATEGORIES, predicateSuspect, class2PredicateKey, takeBirthVerdictWithReport, type MintedBirthVerdict } from "./substrate-gap.js";
 import { resolveAuthorProducer } from "./author-producer.js";
 import { resolveDocDriftFix } from "./doc-drift-fix.js";
 import { resolveReachabilityGapRepair } from "./reachability-gap-repair.js";
@@ -32,12 +30,11 @@ import { peekComposeCapacity, hasFreeComposeCapacity } from "../compose-slots.js
 import { gateLanding, landingsStopped } from "./push-policy.js";
 import { readFile } from "node:fs/promises";
 import { evaluatorTreeRoot } from "../lib/evaluator-tree.js";
-import { readOperatorHold } from "../lib/operator-hold.js";
-import { gapEditSite, identicalRepeatedFailure, isInfraRefusalBody, isTerminalRefusalResult, greenOnParentFresh, isParkingDisposition, CHECK_SUPPLY_DISPOSITION, isAwaitingLandVerification, type ComposeEligibilitySkipReason, composeEligibilitySkipReason, liftLandVerificationHold, landVerdictIsMeasured, isNonAttemptComposeResult } from "../judge/gap-eligibility.js";
-import { vesselDirExists, identifyVessel, vesselsCloneRoot, ownedVessels, type SpendEnvelopeVerdict, discoverResolveUrls, discoverOwnResolveUrls, postEnvelopeRead, spendEnvelopeAllows, type AutonomyScope, scopeHoldFor, gapInHoldLineage, autonomyScope, autonomyScopeExcludes } from "../judge/gap-policy.js";
-import { isLiteralOnlyStepClose, verifyGapCondition, type GapCheckVerdict, evaluateGapCheck, shaWasRevertedInAnyClone, landedCommitVerdict, sweepGitOut } from "../judge/gap-check-judge.js";
-import { landabilityScore, landingDecisionRef, readGapFresh, refreshHeldCalibration, readCalibration, gapClassOf, readClassPosteriors, updateClassPosterior, sampleClassTheta, persistGapMetaPatch, predictLand, bumpFailedAttempts, isHighConfidenceMiss, recordApproachDecision, joinDecisionOutcome, recordPickIntent, recordAttemptEnd, isRetryableDispatchRefusal } from "../judge/gap-attempt-credit.js";
-import { solicitedHumanGaps, type Ask, type LandSignal, genuineLandSignal, closeLandedGap, markPendingVerification, kickAutoRevert, sweepIfCloneHeadsMoved, defaultPwtEscalationDeps, escalateApplyFailureToPwt, markTerminalRefusal } from "../judge/gap-landing-verdict.js";
+import { gapEditSite, identicalRepeatedFailure, greenOnParentFresh, isParkingDisposition, CHECK_SUPPLY_DISPOSITION, isAwaitingLandVerification, type ComposeEligibilitySkipReason, composeEligibilitySkipReason, isNonAttemptComposeResult } from "../judge/gap-eligibility.js";
+import { vesselDirExists, identifyVessel, vesselsCloneRoot, ownedVessels, type SpendEnvelopeVerdict, discoverResolveUrls, spendEnvelopeAllows, scopeHoldFor, gapInHoldLineage, autonomyScope, autonomyScopeExcludes } from "../judge/gap-policy.js";
+import { verifyGapCondition, type GapCheckVerdict, evaluateGapCheck } from "../judge/gap-check-judge.js";
+import { landabilityScore, readGapFresh, refreshHeldCalibration, readCalibration, gapClassOf, readClassPosteriors, sampleClassTheta, persistGapMetaPatch, predictLand, isHighConfidenceMiss, recordApproachDecision, recordPickIntent, recordAttemptEnd } from "../judge/gap-attempt-credit.js";
+import { solicitedHumanGaps, type Ask, markPendingVerification, kickAutoRevert, sweepIfCloneHeadsMoved, gradeCapabilityCompose, liveProducerProbeClose, gradeTraceStoreDispatch, gradeTraceStoreDispatchError, settleReachabilityRepair, settleAuthorProducerMint, gradeCapabilityRouteResult, gradeSliceSequence, gradeComposeOutcome } from "../judge/gap-landing-verdict.js";
 import { withTestChildEnv } from "../test-child-env.js";
 
 // Mirror feature-compose's path model: repos/<vessel>/... maps to the writable
@@ -2921,18 +2918,7 @@ async function routeCapabilityGapToNewResolver(
 
   // CLOSE-ON-LAND: only when feature_compose GENUINELY landed on origin/dev; otherwise
   // deprioritise so the picker advances (mirrors the main gap_to_feature flow).
-  const land = genuineLandSignal(cb, true);
-  let closed = false;
-  if (land.landed) {
-    const c = await closeLandedGap(gap, land, { decision_id: decisionId, ask: askHuman });
-    closed = c.closed;
-  } else if (isTerminalRefusalResult(cb)) {
-    await markTerminalRefusal(gap, cb);
-  } else if (!isNonAttemptComposeResult(cb)) {
-    if (!isInfraRefusalBody(cb)) updateClassPosterior(gapClassOf(gap), false);
-    // A capacity refusal here is a retry, not a failure — see isNonAttemptComposeResult.
-    await bumpFailedAttempts(gap, { decisionId, escalate: escalateToDecomposition });
-  }
+  const { land, closed } = await gradeCapabilityCompose(gap, cb, decisionId, { ask: askHuman, escalate: escalateToDecomposition });
   // ...and a retry must be RETRYABLE: release the cooldown the pick stamped, or the "retry"
   // is a five-minute exclusion for a compose that never ran.
   requeueAfterNonAttempt(gapComposeLastAttemptAt, String(gap.id ?? ""), cb);
@@ -3448,72 +3434,9 @@ async function resolveGapToFeatureOnce(pointer: GapToFeaturePointer, attempt: { 
   // live producer of the candidate shape named in the gap summary. If found, and (when
   // edit_site is present) the file exists via statSync, close the gap without composing
   // to prevent duplicate-identifier patches from re-applying already-landed patches.
-  if (String(gap.category ?? "") === "missing_capability") {
-    const mcMeta = (gap.classification_metadata ?? gap.metadata ?? {}) as Record<string, unknown>;
-    const mcEditSite = typeof mcMeta["edit_site"] === "string" ? mcMeta["edit_site"] as string : undefined;
-    const mcSummary = typeof gap.summary === "string" ? gap.summary as string : "";
-    const _quotedMatch = mcSummary.match(/"([^"]+)"/);
-    const _metaShape = typeof (gap as Record<string, unknown>).classification_metadata === "object" && (gap as Record<string, unknown>).classification_metadata !== null
-      ? ((gap as Record<string, unknown>).classification_metadata as Record<string, unknown>).shape as string | undefined
-      : undefined;
-    const candidateShape: string = (_quotedMatch?.[1]) ?? (_metaShape ?? "") ?? (mcSummary.match(/[a-z][a-z0-9_:-]{2,}/)?.[0] ?? "");
-    const mcCandidateShape = candidateShape || undefined;
-    let mcAlreadyResolved = false;
-    if (mcCandidateShape) {
-      try {
-        const mcDiscoveryEndpoint = process.env["DISCOVERY_ENDPOINT"] ?? "http://127.0.0.1:8100";
-        const mcProbeRes = await fetch(
-          `${mcDiscoveryEndpoint}/vessels?shape=${encodeURIComponent(mcCandidateShape)}`,
-          { signal: AbortSignal.timeout(3000) },
-        );
-        if (mcProbeRes.ok) {
-          const mcProbeBody = (await mcProbeRes.json()) as { vessels?: unknown[] };
-          if (Array.isArray(mcProbeBody.vessels) && mcProbeBody.vessels.length > 0) {
-            if (mcEditSite) {
-              try {
-                statSync(mcEditSite);
-                mcAlreadyResolved = true;
-              } catch {
-                // File absent — capability registered but file not present; let composer run
-              }
-            } else {
-              mcAlreadyResolved = true;
-            }
-          }
-        }
-      } catch {
-        // Discovery unreachable or timeout — proceed with normal compose
-      }
-    }
-    if (mcAlreadyResolved) {
-      const mcClosureNote = `already_resolved: live producer found for shape '${mcCandidateShape ?? mcSummary}'${
-        mcEditSite ? ` and edit_site '${mcEditSite}' exists in container tree` : ""
-      }; gap closed without recompose to prevent duplicate-identifier patches`;
-      try {
-        await resolveSubstrateGapWrite({
-          type: "substrateGap_write",
-          gap: {
-            id: String(gap.id ?? ""),
-            category: gap.category,
-            source: gap.source,
-            summary: gap.summary,
-            detected_at: gap.detected_at,
-            classification_metadata: { ...mcMeta, resolution: "already_resolved", closed_reason: "already_resolved", closed_by: "gap_to_feature.live_producer_probe", closed_at: new Date().toISOString() },
-            status: "closed",
-          },
-        } as never);
-      } catch { /* best-effort */ }
-      return {
-        shape: "gapToFeatureReport",
-        body: {
-          ok: true,
-          gap_id: gap.id,
-          gap_category: gap.category,
-          verdict: "already_resolved",
-          note: mcClosureNote,
-        },
-      };
-    }
+  {
+    const probed = await liveProducerProbeClose(gap);
+    if (probed) return probed;
   }
 
   // 1a0. TRACE-STORE-RECONCILIATION gaps dispatch the seeded
@@ -3731,12 +3654,8 @@ const familySample: string[] = await (async () => {
         } catch {
           /* best-effort marker write */
         }
-      } else if (isRetryableDispatchRefusal(res.status, text)) {
-        // goal-host is draining or quiesced: the dispatch never ran, so it is not an attempt. No bump; the
-        // gap stays as it is for the next tick.
-        console.log(`[gap-to-feature] trace-store-reconcile for ${String(gap.id ?? "?")}: goal-host refused retryably (${res.status} ${text.slice(0, 160)}); not a failed attempt, left for the next tick`);
       } else {
-        await bumpFailedAttempts(gap, { decisionId: attempt.id, escalate: escalateToDecomposition });
+        await gradeTraceStoreDispatch(gap, res.status, text, attempt.id, escalateToDecomposition);
       }
       return {
         shape: "gapToFeatureReport",
@@ -3751,7 +3670,7 @@ const familySample: string[] = await (async () => {
         },
       };
     } catch (e) {
-      await bumpFailedAttempts(gap, { decisionId: attempt.id, escalate: escalateToDecomposition });
+      await gradeTraceStoreDispatchError(gap, attempt.id, escalateToDecomposition);
       return {
         shape: "gapToFeatureReport",
         body: {
@@ -3788,23 +3707,7 @@ const familySample: string[] = await (async () => {
   if (String(gap.category ?? "") === "unreachable_producer") {
     const repaired = await resolveReachabilityGapRepair({ type: "reachability_gap_repair", gap_id: String(gap.id ?? ""), dry_run: pointer.dry_run });
     const rb = (repaired?.body ?? {}) as Record<string, unknown>;
-    if (!pointer.dry_run && rb["verdict"] !== "FAVORABLE") await bumpFailedAttempts(gap, { decisionId: attempt.id, escalate: escalateToDecomposition });
-    if (!pointer.dry_run && rb["verdict"] === "FAVORABLE") {
-      try {
-        await resolveSubstrateGapWrite({
-          type: "substrateGap_write",
-          gap: {
-            id: String(gap.id ?? ""),
-            category: gap.category,
-            source: gap.source,
-            summary: gap.summary,
-            detected_at: gap.detected_at,
-            classification_metadata: { ...((gap.classification_metadata ?? gap.metadata ?? {}) as Record<string, unknown>), closed_reason: "producer_now_exists", closed_by: "reachability_gap_repair" },
-            status: "closed",
-          },
-        } as never);
-      } catch { /* best-effort */ }
-    }
+    await settleReachabilityRepair(gap, rb, pointer.dry_run, attempt.id, escalateToDecomposition);
     return {
       shape: "gapToFeatureReport",
       body: { ok: rb["verdict"] === "FAVORABLE", stage: "route_reachability", gap_id: gap.id, gap_category: gap.category, route: "reachability_gap_repair", repair: rb },
@@ -3834,29 +3737,13 @@ const familySample: string[] = await (async () => {
     // every run FOREVER (observed: residual_shape_discovery MINT_FAILED hourly with
     // failed_attempts unset), starving other gaps — the same liveness bug as the
     // detector-re-emit wipe, on a different code path. Bump so the loop moves on. (2026-07-01)
-    if (!pointer.dry_run && !minted) await bumpFailedAttempts(gap, { decisionId: attempt.id, escalate: escalateToDecomposition });
+    await settleAuthorProducerMint(gap, minted, pointer.dry_run, attempt.id, escalateToDecomposition);
     // CLOSE-ON-MINT (2026-07-01): a minted bridge IS the closure — the resolver is now
     // invoked by a Thompson-selectable activity, so it is no longer orphaned. Without
     // closing, the open-filtered picker re-selects the SAME top orphaned gap every run
     // and re-mints it idempotently, never advancing to the other orphaned resolvers
     // (observed: repairPolicy re-picked + re-MINTED though auto-bridge-repairPolicy
     // already existed). Mirrors closeLandedGap on the feature_compose path (~L1071).
-    if (!pointer.dry_run && minted) {
-      try {
-        await resolveSubstrateGapWrite({
-          type: "substrateGap_write",
-          gap: {
-            id: String(gap.id ?? ""),
-            category: gap.category,
-            source: gap.source,
-            summary: gap.summary,
-            detected_at: gap.detected_at,
-            classification_metadata: { ...((gap.classification_metadata ?? gap.metadata ?? {}) as Record<string, unknown>), closed_reason: "producer_now_exists", closed_by: "author_producer" },
-            status: "closed",
-          },
-        } as never);
-      } catch { /* best-effort */ }
-    }
     return {
       shape: "gapToFeatureReport",
       body: {
@@ -3893,9 +3780,7 @@ const familySample: string[] = await (async () => {
         // Same liveness fix: this route's failure returns (ok:false) never bumped
         // failed_attempts either, so a capability_gap the author can't satisfy would
         // be re-selected forever. Bump on failure so the loop moves on. (2026-07-01)
-        if (!pointer.dry_run && (cgResult?.body as { ok?: boolean } | undefined)?.ok === false) {
-          await bumpFailedAttempts(gap, { decisionId: attempt.id, escalate: escalateToDecomposition });
-        }
+        await gradeCapabilityRouteResult(gap, cgResult, pointer.dry_run, attempt.id, escalateToDecomposition);
         return cgResult;
       }
     }
@@ -4032,18 +3917,7 @@ const familySample: string[] = await (async () => {
       if (lastBody.verdict !== "FAVORABLE") break;
     }
     const allOk = sliceResults.length === slices.length && sliceResults.every((r) => r.verdict === "FAVORABLE");
-    const sliceLand: LandSignal = allOk && lastBody ? genuineLandSignal(lastBody, !(pointer.dry_run ?? false)) : { landed: false, commit_sha: null, vessel: null, push_status: null };
-    if (allOk && lastBody) {
-      if (sliceLand.landed) await closeLandedGap(gap, sliceLand, { decision_id: attempt.id, ask: askHuman });
-      const reachVerdict = sliceLand.landed ? 'SUCCESS' : 'UNFAVORABLE';
-      console.log(`[gap-to-feature] reach verdict: ${reachVerdict}`);
-    }
-    // A slice sequence cut short by a capacity refusal never got its attempt either.
-    if (!allOk && !pointer.dry_run && isTerminalRefusalResult(lastBody)) await markTerminalRefusal(gap, lastBody);
-    else if (!allOk && !pointer.dry_run && !isNonAttemptComposeResult(lastBody)) {
-      if (!isInfraRefusalBody(lastBody)) updateClassPosterior(gapClassOf(gap), false);
-      await bumpFailedAttempts(gap, { decisionId: attempt.id, escalate: escalateToDecomposition });
-    }
+    const sliceLand = await gradeSliceSequence(gap, lastBody, allOk, pointer.dry_run, attempt.id, { ask: askHuman, escalate: escalateToDecomposition });
     // ...so it must not serve the cooldown either. Same reasoning as the credit exemption above.
     requeueAfterNonAttempt(gapComposeLastAttemptAt, String(gap.id ?? ""), lastBody);
     return { shape: "gapToFeatureReport", body: { ok: allOk, stage: "route_compose", route: "capacity_slice_sequence", gap_id: gap.id, gap_category: gap.category, slices: sliceResults, landed: sliceLand.landed, landed_commit: sliceLand.commit_sha ?? null, compose: lastBody } };
@@ -4105,37 +3979,15 @@ const familySample: string[] = await (async () => {
   if (isNonAttemptComposeResult(compose.body as Record<string, unknown>)) {
     // Handle the non-attempt compose case.
   }
-  const land = genuineLandSignal(cb, !(pointer.dry_run ?? false));
-  let closure: { closed: boolean; error?: string; resolution?: string } = { closed: false };
-  if (land.landed) {
-    closure = await closeLandedGap(gap, land, { decision_id: attempt.id, ask: askHuman });
-    if (closure.closed) {
-      closure.resolution = `landed via mitosis cutover${land.commit_sha ? ` ${land.commit_sha}` : ""}${land.vessel ? ` (${land.vessel})` : ""}`;
-    }
-  } else if (!(pointer.dry_run ?? false)) {
-    // Did not land. EXPECTATION-SETTING: measure the prediction-vs-outcome SURPRISE. A gap the
-    // self-model predicted would land but (test missing in test suite) didn't is over-optimistic (high-information) → bump
-    // harder; a correctly-predicted fail bumps normally. Feeds the calibrated self-model.
-    if (isNonAttemptComposeResult(cb)) {
+  const { land, closure, nonAttempt } = await gradeComposeOutcome(gap, cb, spec, pointer.dry_run, attempt.id, { ask: askHuman, escalate: escalateToDecomposition });
+  {
+    // The grader judged a compose that never ran (a non-attempt): it costs the gap no cooldown.
+    if (nonAttempt) {
       delete gap.cooldown_until;
       gapComposeLastAttemptAt.delete(String(gap.id)); // A compose that never ran must not cost its gap a cooldown
       console.log("[gap-to-feature] non-attempt (failure_kind=" + String(cb.failure_kind ?? "-") + ", verdict=" + String(cb.verdict ?? "-") + ", stage=" + String(cb.stage ?? "-") + ") for gap " + String(gap.id) + " — clearing cooldown");
       // A compose that never ran must not cost the gap its cooldown.
       gapComposeLastAttemptAt.delete(String(gap.id));
-    } else if (isTerminalRefusalResult(cb)) {
-      await markTerminalRefusal(gap, cb);
-    } else {
-      const pred = predictLand(gap);
-      // Bounded one-shot patch_with_tools escalation on an APPLY failure (anchor_not_found /
-      // localization miss — ~40% of autonomous compose failures). feature_compose already rolled
-      // back on applyFailed (nothing to double-land); pwt reads-then-edits the target agentically
-      // where blind-draft could not match old_string. One-shot PER GAP LINEAGE via pwt_escalated
-      // (no cross-tick loop); fires ONLY on apply_failed (never on semantic/verify rejects); any
-      // error or non-land falls through to bumpFailedAttempts unchanged. NB classification_metadata
-      // is an OBJECT — the coaxed draft (daf6d36) used .includes/.push on it (runtime crash) + a
-      // bogus threading string; corrected here to property access + the real resolver signature.
-      // The escalation and its grading live in escalateApplyFailureToPwt; a HELD escalation is not graded.
-      await escalateApplyFailureToPwt(gap, cb, spec, pred, defaultPwtEscalationDeps({ escalate: escalateToDecomposition }), { decision_id: attempt.id, ask: askHuman });
     }
   }
 

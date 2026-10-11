@@ -2,7 +2,7 @@ import { describe, it, expect, beforeAll, afterAll } from "bun:test";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
-import { verifyGapCondition } from "../../src/resolvers/gap-to-feature.js";
+import { verifyGapCondition } from "../../src/judge/gap-check-judge.js";
 
 // Class 1 can only say "this bad literal is still in the file". It cannot say "this good
 // guard is missing" — and that missing polarity is why automated predicate derivation has

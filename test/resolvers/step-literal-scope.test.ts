@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { isLiteralOnlyStepClose, literalInReaderBody } from "../../src/resolvers/gap-to-feature";
+import { isLiteralOnlyStepClose, literalInReaderBody } from "../../src/judge/gap-check-judge";
 
 // A decomposed step's literal counts only in comment-free code inside its literal_reader, and a close that rests
 // only on such a literal is recorded landed_literal_only, not landed_verified (2026-09-30: a782ec1 closed on a

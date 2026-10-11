@@ -70,26 +70,26 @@ afterAll(() => { try { rmSync(ROOT, { recursive: true, force: true }); } catch {
 
 describe("landedCommitVerdict — re-land awareness (§12.6)", () => {
   it("returns null when no commit references the gap", async () => {
-    const { landedCommitVerdict } = await import("../../src/resolvers/gap-to-feature.js");
+    const { landedCommitVerdict } = await import("../../src/judge/gap-check-judge.js");
     expect(landedCommitVerdict("gap-unmentioned-9999", EDIT)).toBe(null);
   });
   it("returns 'pending' for a single non-reverted landing (provenance, NOT measured resolution)", async () => {
-    const { landedCommitVerdict } = await import("../../src/resolvers/gap-to-feature.js");
+    const { landedCommitVerdict } = await import("../../src/judge/gap-check-judge.js");
     // A single landing is proof a change LANDED, not proof it RESOLVED the gap. Returning 'pending'
     // (was 'absent') is what closes the inert-diff hole: the close-oracle abstains instead of
     // closing green on the commit count — only a measurement predicate can yield 'absent'.
     expect(landedCommitVerdict("gap-single-landing-0001", EDIT)).toBe("pending");
   });
   it("returns 'present' for a RE-LAND (>=2 non-reverted commits) — the bafd83d hole", async () => {
-    const { landedCommitVerdict } = await import("../../src/resolvers/gap-to-feature.js");
+    const { landedCommitVerdict } = await import("../../src/judge/gap-check-judge.js");
     expect(landedCommitVerdict("gap-reland-demo-0002", EDIT)).toBe("present");
   });
   it("returns null when the only landing was reverted (no valid landing remains)", async () => {
-    const { landedCommitVerdict } = await import("../../src/resolvers/gap-to-feature.js");
+    const { landedCommitVerdict } = await import("../../src/judge/gap-check-judge.js");
     expect(landedCommitVerdict("gap-reverted-land-0003", EDIT)).toBe(null);
   });
   it("ignores a commit in a different vessel when editSite scopes to the target vessel", async () => {
-    const { landedCommitVerdict } = await import("../../src/resolvers/gap-to-feature.js");
+    const { landedCommitVerdict } = await import("../../src/judge/gap-check-judge.js");
     expect(landedCommitVerdict("gap-scoped-elsewhere-0004", EDIT)).toBe(null);
   });
   it("treats a conventional-commits `revert(scope):` as a revert, not a second landing", async () => {
@@ -98,7 +98,7 @@ describe("landedCommitVerdict — re-land awareness (§12.6)", () => {
     // drops to zero-net → a single remaining landing is NOT created and the verdict is NOT
     // 'present'. Against the pre-fix code both the subject test and the trailer grep miss it,
     // the revert counts as a second landing, and this returns 'present' — a false close.
-    const { landedCommitVerdict } = await import("../../src/resolvers/gap-to-feature.js");
+    const { landedCommitVerdict } = await import("../../src/judge/gap-check-judge.js");
     expect(landedCommitVerdict("gap-conventional-revert-0005", EDIT)).not.toBe("present");
   });
 });

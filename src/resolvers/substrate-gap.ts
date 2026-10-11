@@ -1040,7 +1040,7 @@ export async function __settleBirthEvaluationsForTests(): Promise<void> {
 }
 
 async function defaultBirthJudge(gap: Record<string, unknown>, opts?: { onReport?: (report: Record<string, unknown>) => void }): Promise<string> {
-  const { evaluateGapCheck } = await import("./gap-to-feature.js");
+  const { evaluateGapCheck } = await import("../judge/gap-check-judge.js");
   return evaluateGapCheck(gap, opts?.onReport ? { onReport: opts.onReport } : {});
 }
 

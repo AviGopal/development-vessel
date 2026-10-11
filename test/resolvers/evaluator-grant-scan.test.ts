@@ -125,6 +125,7 @@ const EXCLUDED_SRC = [
   // that lands them (autonomy-scope.json excluded_paths, EVALUATOR_FILES, SCOPE_CLASSIFICATION).
   "src/judge/gap-eligibility.ts",
   "src/judge/gap-policy.ts",
+  "src/judge/gap-check-judge.ts",
 ];
 const CLOSURE_ROOTS = ["src/resolvers/scope-earn-in.ts", "src/resolvers/pool-impulse.ts", "src/resolvers/test-suite.ts", "src/resolvers/self-fact-reconcile.ts", "src/resolvers/rhythm-conductor-tick.ts", "src/resolvers/check-supply-admission.ts"];
 const REPORT_ONLY = ["src/resolvers/gap-to-feature.ts", "src/resolvers/feature-compose.ts"];

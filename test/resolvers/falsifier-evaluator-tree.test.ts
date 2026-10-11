@@ -27,7 +27,7 @@ process.env["SUBSTRATE_GAP_SKIP_COMPOSE_TRIGGER"] = "1";
 const mod = await import(`../../src/resolvers/substrate-gap.js?${"c1-evaluator-tree"}`);
 if (!mod.gapStoreRootForTest().startsWith(tmpdir())) throw new Error(`refusing to run: gap store ${mod.gapStoreRootForTest()} is not under ${tmpdir()}`);
 const { classifyFalsifier, resolveSubstrateGapWrite, resolveSubstrateGap } = mod;
-const { verifyGapCondition } = await import("../../src/resolvers/gap-to-feature.js");
+const { verifyGapCondition } = await import("../../src/judge/gap-check-judge.js");
 
 const LIT = 'fetch("http://127.0.0.1:8080/impulses")';
 const put = (root: string, rel: string, text: string): void => {

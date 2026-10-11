@@ -1,4 +1,5 @@
 import type { ResolverResult } from "./types.js";
+import { GIT_LOG_CONTRACT } from "./git-log.js";
 
 /**
  * Resolver for the `resolver_schema` shape — this vessel's answer to "what pointer args does
@@ -104,6 +105,10 @@ const CONTRACTS: Record<string, Contract> = {
     ],
     notes: "Flat pointer. `prompt` is required.",
   },
+  // Read-only commit history. Declared in git-log.ts and rendered from the constants the resolver
+  // enforces (repo name pattern, limit cap, since charset/length), so the two cannot drift. All
+  // fields optional: the walk passed none and got exit 128 because nothing told it they exist.
+  git_log: GIT_LOG_CONTRACT,
 };
 
 /** The shapes this vessel publishes a contract for. Exported for the conformance test. */
@@ -131,7 +136,9 @@ export function resolveResolverSchema(pointer: Record<string, unknown>): Resolve
     required,
     invocation: c.envelope
       ? `pointer:{type:"${shape}", ${c.envelope}:{${required.join(", ")}}}`
-      : `pointer:{type:"${shape}", ${required.join(", ")}}`,
+      : required.length > 0
+        ? `pointer:{type:"${shape}", ${required.join(", ")}}`
+        : `pointer:{type:"${shape}"}`,
     ...(c.notes ? { notes: c.notes } : {}),
   } as ResolverSchemaResult;
   return { shape: "resolver_schema", body: result as unknown as Record<string, unknown> };

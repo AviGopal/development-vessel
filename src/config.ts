@@ -883,10 +883,21 @@ export const config = {
     authScheme: "ApiKey" as const,
     resolveTimeoutMs: 10_000,
     // Optional per-shape descriptions advertised on registration so a decomposition
-    // planner can match this vessel's resolvers from descriptions alone. Empty by
-    // default (descriptions are not hand-maintained); discovery-registration reads
-    // it as optional/backward-compat. Declared here so the read typechecks.
-    shapeDescriptions: {} as Record<string, string>,
+    // planner can match this vessel's resolvers from descriptions alone. Mostly empty
+    // (descriptions are not hand-maintained); an entry is added where a resolver's
+    // pointer fields were unbindable without one. discovery-registration reads it as
+    // optional/backward-compat.
+    shapeDescriptions: {
+      // git_log's pointer fields, advertised so a planner and arg synthesis can bind them: the walk
+      // never passed a cwd, and without one git ran in the runtime mirror (no .git, exit 128).
+      git_log:
+        "Read-only `git log` of the substrate's own clones. With no args it reads the super-repo clone. " +
+        "Pointer fields (all optional): repo — a vessel name (e.g. \"development-vessel\") to read that vessel's clone; " +
+        "cwd — a directory inside the super-repo clone or a vessel clone (anything outside is refused; exclusive with repo); " +
+        "limit — commits to return, integer 1-200 (default 5); format — git pretty format (default \"%s\", e.g. \"%h %ad %s\"); " +
+        "since — a date or relative time such as \"24 hours ago\" or \"2026-10-01\", passed as --since. " +
+        "No value may begin with '-'. Returns commandResult {exitCode, stdout, stderr, cwd}.",
+    } as Record<string, string>,
   },
 } as const;
 

@@ -60,12 +60,21 @@ describe("resolver_schema", () => {
     }
   });
 
-  it("every declared shape answers known:true with a non-empty required list", () => {
+  // A read whose every field is optional (an empty pointer is a complete call) declares no required
+  // field. Named here, one by one, so an EMPTY required list cannot slip in for any other shape.
+  const ALL_OPTIONAL = new Set(["git_log"]);
+  it("every declared shape answers known:true with a non-empty required list (all-optional reads named)", () => {
     expect(CONTRACT_SHAPES.length).toBeGreaterThan(0);
     for (const shape of CONTRACT_SHAPES) {
       const r = body(resolveResolverSchema({ shape }));
       expect(r.known).toBe(true);
-      expect((r.required as string[]).length).toBeGreaterThan(0);
+      expect((r.fields as unknown[]).length).toBeGreaterThan(0);
+      if (ALL_OPTIONAL.has(shape)) {
+        expect(r.required).toEqual([]);
+        expect(r.invocation).toBe(`pointer:{type:"${shape}"}`);
+      } else {
+        expect((r.required as string[]).length).toBeGreaterThan(0);
+      }
     }
   });
 });

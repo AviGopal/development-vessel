@@ -48,6 +48,12 @@ function makeFetch(opts: { vesselsRoot: string; llmActions: string[] }): typeof 
       return new Response(JSON.stringify({ body: { arms: [{ model: "qwen/qwen3-32b" }] } }), { status: 200 });
     }
 
+    // The semantic judge (verifyPatchAddressesGap, run on a staged patch) is answered with a verdict, not with the
+    // next scripted action: it fails CLOSED on an answer with no boolean `addresses`, and it used to read the
+    // leftover `{"action":"done"}` as a pass. Matched on its prompt; the ReAct turns never send this sentence.
+    if (url.endsWith("/llm") && String(body?.prompt ?? "").includes("You verify whether a self-authored CODE PATCH GENUINELY addresses a substrate gap")) {
+      return new Response(JSON.stringify({ content: JSON.stringify({ addresses: true, on_live_path: true, reason: "fixture judge: the staged patch addresses the request" }) }), { status: 200 });
+    }
     // LLM endpoint — emit queued action objects.
     if (url.endsWith("/llm")) {
       const content = llmActions[Math.min(llmTurn, llmActions.length - 1)] ?? '{"action":"fail","reason":"out of script"}';

@@ -45,6 +45,8 @@ const saved: Record<string, string | undefined> = {};
 let ws: string;
 let logs: string[] = [];
 let planOps: Array<Record<string, unknown>> = [];
+// How the fixture judge answers: a verdict, an outage (HTTP 400, so the LLM call throws), or prose with no JSON.
+let judgeMode: "ok" | "down" | "garbage" = "ok";
 let calls: Array<{ type: string; command?: string; path?: string }> = [];
 const snapshots = new Map<string, string>();
 
@@ -85,7 +87,7 @@ beforeEach(async () => {
   process.env["GAP_STORE_ENDPOINT"] = "http://gap-store.fixture/resolve";
   process.env["COMPOSE_SLOT_DIR"] = join(ws, "slots");
   process.env["COMPOSE_WS_DIR"] = join(ws, "compose-ws");
-  logs = []; calls = []; snapshots.clear();
+  logs = []; calls = []; snapshots.clear(); judgeMode = "ok";
   const sink = (...a: unknown[]) => { logs.push(a.map(String).join(" ")); };
   console.log = sink; console.warn = sink; console.error = sink;
   globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
@@ -142,7 +144,11 @@ beforeEach(async () => {
         return Response.json({ content: JSON.stringify({ summary: "fixture plan", touched_vessels: [`repos/${VESSEL}`], ops: planOps }) });
       }
       if (prompt.includes("ADVERSARIAL reviewer")) return Response.json({ content: JSON.stringify({ refuted: false, confidence: 0.1, reason: "no refutation" }) });
-      if (prompt.includes("addresses")) return Response.json({ content: JSON.stringify({ addresses: true, on_live_path: true, reason: "fixture judge: the change addresses the gap" }) });
+      if (prompt.includes("addresses")) {
+        if (judgeMode === "down") return new Response("judge unavailable (test)", { status: 400 });
+        if (judgeMode === "garbage") return Response.json({ content: "Looks reasonable to me; the change seems fine." });
+        return Response.json({ content: JSON.stringify({ addresses: true, on_live_path: true, reason: "fixture judge: the change addresses the gap" }) });
+      }
       return new Response("unavailable (test)", { status: 400 });
     }
     if (body?.pointer?.type === "vesselCapability") {
@@ -182,7 +188,11 @@ function pointer() {
 }
 
 
-type Fc = { resolveFeatureCompose: (p: unknown) => Promise<{ body: Record<string, any> }> };
+type Fc = {
+  resolveFeatureCompose: (p: unknown) => Promise<{ body: Record<string, any> }>;
+  verifyPatchAddressesGap: (a: Record<string, unknown>) => Promise<Record<string, unknown>>;
+  shapeVocabularyRefusal: (diff: string, opts?: Record<string, unknown>) => Record<string, unknown> | null;
+};
 // A FRESH module instance per mode: the query makes Bun load feature-compose again, so its module-level
 // constants are evaluated under THIS environment whatever an earlier test file froze.
 let seq = 0;
@@ -257,3 +267,53 @@ for (const mode of ["off", "unset"] as const) {
     }
   });
 }
+
+// ── FAIL CLOSED: A JUDGE THAT DID NOT JUDGE IS NOT A PASS ────────────────────────────────────────────────────
+// verifyPatchAddressesGap returned addresses:true when the injected judge threw (an outage) and when it answered
+// with no parseable verdict, so every judge outage passed whatever cleared the deterministic floors. Both now
+// return addresses:false (verified:false); the compose that carries such a patch is not FAVORABLE.
+const LIVE_DIFF = [
+  `--- a/${VESSEL}/${TARGET}`, `+++ b/${VESSEL}/${TARGET}`, "@@ -4,1 +4,1 @@", "-  return base + 1;", "+  return base + 2;", "",
+].join("\n");
+const LIVE_FACTS = [{ symbol: "compute", isNewFunction: false, callerCount: 2, isEntrypoint: true, reachable: true }];
+const judgeArgs = (llm: (p: string) => Promise<string>) => ({ gapSummary: "compute adds 1; it must add 2", diff: LIVE_DIFF, reachability: LIVE_FACTS, llm, runSemanticJudge: true });
+
+describe("verifyPatchAddressesGap fails closed when its judge does not judge", () => {
+  it("CONTROL: a judge verdict of addresses:true passes the clean diff, judged", async () => {
+    const fc = await freshFc("unset");
+    const v = await fc.verifyPatchAddressesGap(judgeArgs(async (p) => p.includes("ADVERSARIAL reviewer")
+      ? JSON.stringify({ refuted: false, confidence: 0.1, reason: "none" })
+      : JSON.stringify({ addresses: true, on_live_path: true, reason: "judged: it adds 2" })));
+    expect({ addresses: v.addresses, verified: v.verified, llm_consulted: v.llm_consulted }).toEqual({ addresses: true, verified: true, llm_consulted: true });
+  });
+  it("MUST-FAIL: the injected judge THROWS (an outage) -> addresses:false, unverified, the outage named", async () => {
+    const fc = await freshFc("unset");
+    const v = await fc.verifyPatchAddressesGap(judgeArgs(async () => { throw new Error("all LLM endpoints failed (test)"); }));
+    expect({ addresses: v.addresses, verified: v.verified }).toEqual({ addresses: false, verified: false });
+    expect(String(v.reason)).toContain("all LLM endpoints failed (test)");
+  });
+  it("MUST-FAIL: the judge answers with NO parseable verdict -> addresses:false, unverified", async () => {
+    const fc = await freshFc("unset");
+    for (const answer of ["Looks reasonable to me.", "{\"addresses\": \"yes\"}", "{not json at all}"]) {
+      const v = await fc.verifyPatchAddressesGap(judgeArgs(async () => answer));
+      expect({ answer, addresses: v.addresses, verified: v.verified }).toEqual({ answer, addresses: false, verified: false });
+    }
+  });
+  it("MUST-FAIL (compose): a judge outage leaves the clean edit NOT FAVORABLE, refused at the semantic stage", async () => {
+    const fc = await freshFc("unset");
+    judgeMode = "down";
+    planOps = [editOp("  return base + 1;", "  return base + 2;")];
+    const r = await fc.resolveFeatureCompose(pointer());
+    const g = (r.body.semantic_gate ?? {}) as Record<string, unknown>;
+    expect(Array.isArray(r.body.verify) && r.body.verify.every((v: { ok?: boolean }) => v.ok === true)).toBe(true);
+    expect({ verdict: r.body.verdict, addresses: g.addresses, verified: g.verified }).toEqual({ verdict: "UNFAVORABLE", addresses: false, verified: false });
+  });
+  it("MUST-FAIL (compose): an unparseable judge answer leaves the clean edit NOT FAVORABLE", async () => {
+    const fc = await freshFc("unset");
+    judgeMode = "garbage";
+    planOps = [editOp("  return base + 1;", "  return base + 2;")];
+    const r = await fc.resolveFeatureCompose(pointer());
+    const g = (r.body.semantic_gate ?? {}) as Record<string, unknown>;
+    expect({ verdict: r.body.verdict, addresses: g.addresses, verified: g.verified }).toEqual({ verdict: "UNFAVORABLE", addresses: false, verified: false });
+  });
+});

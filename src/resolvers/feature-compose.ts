@@ -2468,16 +2468,17 @@ export async function verifyPatchAddressesGap(args: {
     const archViolations = detectArchitectureViolation(args.diff);
     raw = await args.llm(semanticJudgePrompt(args.gapSummary, args.gapMeta, args.diff, args.reachability, args.data_flow ?? [], args.codeContext ?? "", archViolations, containmentNote));
   } catch (e) {
-    // Judge unreachable: do NOT block on the judge alone (the deterministic floor
-    // already passed). Treat as addresses=true-but-unverified so a flaky LLM cannot
-    // wedge landing; log surfaces it. (2026-07-20: code drifted to addresses:false,
-    // contradicting this contract — every judge outage sank otherwise-clean patches.)
-    return { addresses: true, reason: `semantic judge unavailable (${(e as Error).message}); deterministic floors passed — fail-open, unverified by judge`, on_live_path: true, llm_consulted: false, verified: false };
+    // FAIL CLOSED. An unjudged patch does not pass: an unreachable judge is not a verdict, and passing it
+    // (as this did) let every judge outage land whatever cleared the deterministic floors, stamped as if
+    // judged. Not a hard_fail: an outage names no defect in the patch, so a draft that turned its gap's
+    // armed check red->green still lands under dissent (landed_unverified) by semanticGateDisposition.
+    return { addresses: false, reason: `semantic judge unavailable (${(e as Error).message}); the patch was not judged, so it does not pass (fail closed)`, on_live_path: true, llm_consulted: false, verified: false };
   }
   const m = raw.match(/\{[\s\S]*\}/g);
   const parsed = m ? (parseJsonObject(m[0]) as Partial<SemanticGateVerdict> | null) : null;
   if (!parsed || parsed === null || typeof parsed.addresses !== "boolean") {
-    return { addresses: true, reason: "composed change applied successfully", on_live_path: true, llm_consulted: true };
+    // FAIL CLOSED, as above: an answer with no parseable verdict is not a verdict.
+    return { addresses: false, reason: "semantic judge answered without a parseable verdict (no JSON object with a boolean `addresses`); the patch was not judged, so it does not pass (fail closed)", on_live_path: true, llm_consulted: true, verified: false };
   }
   const sus = typeof parsed.suspected_real_location === "string" && parsed.suspected_real_location.trim()
     ? parsed.suspected_real_location.trim()

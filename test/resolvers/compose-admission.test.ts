@@ -42,7 +42,7 @@ if (SAVED_WR === undefined) delete process.env["WORKSPACE_ROOT"]; else process.e
 const { resolveSubstrateGap, resolveSubstrateGapWrite, gapStoreRootForTest } = sg;
 
 const { resolveFeatureCompose } = await import("../../src/resolvers/feature-compose.js");
-const { admitActionableGaps } = await import("../../src/resolvers/gap-to-feature.js");
+const { admitActionableGaps } = await import("../../src/judge/gap-admission.js");
 const { __resetPolicyReadsForTests } = await import("../../src/judge/gap-policy.js");
 
 const STORE = join(ROOT, "gaps", "gaps.json");

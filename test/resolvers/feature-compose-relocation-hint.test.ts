@@ -70,6 +70,7 @@ setTreeEnv();
 
 const sg = await import("../../src/resolvers/substrate-gap.js");
 const g2f = await import("../../src/resolvers/gap-to-feature.js");
+const g2fAdmission = await import("../../src/judge/gap-admission.js");
 const g2fPolicy = await import("../../src/judge/gap-policy.js");
 const elig = await import("../../src/judge/gap-eligibility.js");
 const fc = await import("../../src/resolvers/feature-compose.js");
@@ -420,7 +421,7 @@ describe("relocation hint: a hinted file outside the autonomy scope is operator 
     const id = `reloc-excluded-${RUN}`;
     const hint = { files: [repo(B)], derived_from: "own_check_failure", at: new Date().toISOString() };
     const snap = await seedGap(id, { ...ownCheckMeta(OWN_TEST, [FAILING_B]), relocation_hint: hint });
-    const r = await g2f.admitActionableGaps([snap], { typecheckRunner: cleanRunner });
+    const r = await g2fAdmission.admitActionableGaps([snap], { typecheckRunner: cleanRunner });
     expect(r.admitted.map((g) => String(g.id))).not.toContain(id);
     const ex = r.excluded.find((e) => e.id === id);
     expect(String(ex?.reason ?? "")).toContain("relocation_hint");
@@ -437,7 +438,7 @@ describe("relocation hint: a hinted file outside the autonomy scope is operator 
     const id = `reloc-inscope-${RUN}`;
     const hint = { files: [repo(B)], derived_from: "own_check_failure", at: new Date().toISOString() };
     const snap = await seedGap(id, { ...ownCheckMeta(OWN_TEST, [FAILING_B]), relocation_hint: hint });
-    const r = await g2f.admitActionableGaps([snap], { typecheckRunner: cleanRunner });
+    const r = await g2fAdmission.admitActionableGaps([snap], { typecheckRunner: cleanRunner });
     expect(r.admitted.map((g) => String(g.id))).toContain(id);
     expect(metaOf(await storeRow(id))["operator_routing"]).toBeUndefined();
   });

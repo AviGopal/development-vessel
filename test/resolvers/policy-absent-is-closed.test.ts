@@ -17,8 +17,9 @@ mkdirSync(ROOT, { recursive: true });
 if (!process.env["WORKSPACE_ROOT"]) process.env["WORKSPACE_ROOT"] = ROOT;
 
 const g2f = await import("../../src/resolvers/gap-to-feature.js");
+const g2fAdmission = await import("../../src/judge/gap-admission.js");
 const g2fPolicy = await import("../../src/judge/gap-policy.js");
-const { admitActionableGaps } = g2f;
+const { admitActionableGaps } = g2fAdmission;
 const { autonomyScope, autonomyScopeExcludes, spendEnvelopeAllows, __resetPolicyReadsForTests } = g2fPolicy;
 
 const originalFetch = globalThis.fetch;

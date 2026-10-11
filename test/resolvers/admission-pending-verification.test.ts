@@ -46,10 +46,11 @@ afterAll(() => {
 });
 
 const mod = await import("../../src/resolvers/gap-to-feature.js") as Record<string, unknown>;
+const modAdmission = await import("../../src/judge/gap-admission.js") as Record<string, unknown>;
 const modLanding = await import("../../src/judge/gap-landing-verdict.js") as Record<string, unknown>;
 const modPolicy = await import("../../src/judge/gap-policy.js") as Record<string, unknown>;
 const elig = await import("../../src/judge/gap-eligibility.js") as Record<string, unknown>;
-const admitActionableGaps = mod.admitActionableGaps as (g: Record<string, unknown>[], o?: unknown) => Promise<{ admitted: Record<string, unknown>[]; excluded: Array<{ id: string; reason: string }> }>;
+const admitActionableGaps = modAdmission.admitActionableGaps as (g: Record<string, unknown>[], o?: unknown) => Promise<{ admitted: Record<string, unknown>[]; excluded: Array<{ id: string; reason: string }> }>;
 const isAwaitingLandVerification = elig.isAwaitingLandVerification as (g: Record<string, unknown>) => boolean;
 const liftLandVerificationHold = elig.liftLandVerificationHold as (m: Record<string, unknown>) => Record<string, unknown> | null;
 const landVerdictIsMeasured = elig.landVerdictIsMeasured as (m: Record<string, unknown>) => boolean;
@@ -136,7 +137,7 @@ describe("the sweep's not-resolved verdict lifts the hold, so the gap is re-admi
   // The sweep branches call git/systemctl and the gap store, so their wiring is pinned by source position
   // (precedent: drafter-tool-closure.test.ts).
   // The sweep moved to the closed gap-landing-verdict module (gap-to-feature judge split); admission stays in the residue.
-  const src = readFileSync(join(import.meta.dir, "../../src/resolvers/gap-to-feature.ts"), "utf8") + "\n" + readFileSync(join(import.meta.dir, "../../src/judge/gap-landing-verdict.ts"), "utf8");
+  const src = readFileSync(join(import.meta.dir, "../../src/resolvers/gap-to-feature.ts"), "utf8") + "\n" + readFileSync(join(import.meta.dir, "../../src/judge/gap-landing-verdict.ts"), "utf8") + "\n" + readFileSync(join(import.meta.dir, "../../src/judge/gap-admission.ts"), "utf8");
   const windowOf = (startAnchor: string, endAnchor: string): string => {
     const s = src.indexOf(startAnchor);
     expect(s).toBeGreaterThan(-1);

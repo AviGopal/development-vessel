@@ -1,5 +1,5 @@
 import { describe, it, expect } from "bun:test";
-import { chooseFirstActionable, PENDING_SCAN_MAX } from "../../src/resolvers/gap-to-feature.js";
+import { chooseFirstActionable, PENDING_SCAN_MAX } from "../../src/judge/gap-admission.js";
 
 // Pins the selection-time skip for gaps held in 'pending verification'.
 //

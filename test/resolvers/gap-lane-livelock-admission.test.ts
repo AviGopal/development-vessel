@@ -40,6 +40,7 @@ for (const [k, v] of Object.entries(SCRATCH_ENV)) { SAVED_ENV[k] = process.env[k
 
 const sg = await import("../../src/resolvers/substrate-gap.js");
 const g2f = await import("../../src/resolvers/gap-to-feature.js") as typeof import("../../src/resolvers/gap-to-feature.js") & Record<string, unknown>;
+const g2fAdmission = await import("../../src/judge/gap-admission.js") as typeof import("../../src/judge/gap-admission.js") & Record<string, unknown>;
 const g2fPolicy = await import("../../src/judge/gap-policy.js") as typeof import("../../src/judge/gap-policy.js") & Record<string, unknown>;
 const elig = await import("../../src/judge/gap-eligibility.js");
 const RUN = Math.random().toString(36).slice(2, 8);
@@ -137,11 +138,11 @@ describe("(a) the 125x shape: a targeted autonomous dispatch never spends the la
 
   it("the same gate passes the armed, sited gap A; auto-pick admission over [U, U-narrowed, A] admits only A", async () => {
     const rowA: Row = { id: A, category: "systematic_failure", status: "open", summary: "armed probe", classification_metadata: { falsifier: "class2", edit_site: SITE } };
-    const gate = g2f["composeAdmissionExclusion"] as (g: Row) => { skip: string; reason: string } | null;
+    const gate = g2fAdmission["composeAdmissionExclusion"] as (g: Row) => { skip: string; reason: string } | null;
     expect(gate(rowA)).toBeNull();
     expect(gate((await read(U))!)?.skip).toBe("unarmed");
     expect(gate((await read(UN))!)?.skip).toBe("unarmed");
-    const { admitted } = await g2f.admitActionableGaps([(await read(U))!, (await read(UN))!, rowA]);
+    const { admitted } = await g2fAdmission.admitActionableGaps([(await read(U))!, (await read(UN))!, rowA]);
     expect(admitted.map((g) => String(g.id))).toEqual([A]);
   });
 });
@@ -154,7 +155,7 @@ describe("(b) one predicate, and compose's eligibility refusal is a non-attempt"
   const eligSrc = readFileSync(join(SRC_DIR, "judge", "gap-eligibility.ts"), "utf8");
 
   it("the admission exclusion IS composeEligibilitySkipReason on every non-exempt row (same function, same verdicts)", () => {
-    const gate = g2f["composeAdmissionExclusion"] as (g: Row) => { skip: string } | null;
+    const gate = g2fAdmission["composeAdmissionExclusion"] as (g: Row) => { skip: string } | null;
     const rows: Row[] = [
       { id: "p1", status: "open", classification_metadata: { falsifier: "none", edit_site: SITE } },
       { id: "p2", status: "open", classification_metadata: { falsifier: "class2" } },
@@ -170,9 +171,12 @@ describe("(b) one predicate, and compose's eligibility refusal is a non-attempt"
     expect(eligSrc.match(/export function composeEligibilitySkipReason\(/g)?.length).toBe(1);
     expect(g2fSrc).not.toMatch(/function composeEligibilitySkipReason\(/);
     expect(fcSrc).not.toMatch(/function composeEligibilitySkipReason\(/);
-    const admission = g2fSrc.slice(g2fSrc.indexOf("export async function admitActionableGaps("), g2fSrc.indexOf("// CLOSE-ON-LAND (2026-06-29)"));
+    // Admission moved to the closed gap-admission module (gap-to-feature judge split, A).
+    const admSrc = readFileSync(join(SRC_DIR, "judge", "gap-admission.ts"), "utf8");
+    expect(g2fSrc).not.toMatch(/function (admitActionableGaps|composeAdmissionExclusion)\(/);
+    const admission = admSrc.slice(admSrc.indexOf("export async function admitActionableGaps("), admSrc.indexOf("export function composeAdmissionExclusion("));
     expect(admission).toContain("composeAdmissionExclusion(g)");
-    const gateFn = g2fSrc.slice(g2fSrc.indexOf("export function composeAdmissionExclusion("));
+    const gateFn = admSrc.slice(admSrc.indexOf("export function composeAdmissionExclusion("));
     expect(gateFn.slice(0, gateFn.indexOf("\n}\n"))).toContain("composeEligibilitySkipReason(g)");
   });
 
@@ -186,7 +190,7 @@ describe("(b) one predicate, and compose's eligibility refusal is a non-attempt"
   it("every category the resolver routes away from feature_compose is in the gate's exempt set (no drift)", () => {
     const once = g2fSrc.slice(g2fSrc.indexOf("async function resolveGapToFeatureOnce("));
     const routed = [...once.matchAll(/String\(gap\.category \?\? ""\) === "([a-z_]+)"/g)].map((m) => m[1]).filter((c) => c !== "missing_capability");
-    const exempt = g2f["NON_COMPOSE_ROUTE_CATEGORIES"] as ReadonlySet<string>;
+    const exempt = g2fAdmission["NON_COMPOSE_ROUTE_CATEGORIES"] as ReadonlySet<string>;
     expect(routed.length).toBeGreaterThan(0);
     for (const c of routed) expect(exempt.has(c!)).toBe(true);
   });

@@ -16,7 +16,8 @@ import { describe, it, expect, beforeAll, afterAll } from "bun:test";
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve, sep } from "node:path";
-import { admitActionableGaps, specFromGap } from "../../src/resolvers/gap-to-feature.js";
+import { specFromGap } from "../../src/resolvers/gap-to-feature.js";
+import { admitActionableGaps } from "../../src/judge/gap-admission.js";
 import { __resetPolicyReadsForTests } from "../../src/judge/gap-policy.js";
 import { openPolicyAnswer } from "./explicit-open-policy.fixture.js";
 

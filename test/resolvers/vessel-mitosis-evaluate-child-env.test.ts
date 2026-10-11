@@ -150,7 +150,7 @@ describe("gap-to-feature admission: the default typecheck runner spawns with the
     const driver = join(root, "drive.ts");
     writeFileSync(
       driver,
-      `const g = (await import(${JSON.stringify(join(SRC, "resolvers", "gap-to-feature.ts"))})) as Record<string, unknown>;\n` +
+      `const g = (await import(${JSON.stringify(join(SRC, "judge", "gap-admission.ts"))})) as Record<string, unknown>;\n` +
         `const run = g["defaultTypecheckRunner"] as ((v: string) => unknown) | undefined;\n` +
         `console.log("RUNNER=" + (typeof run === "function" ? JSON.stringify(run(${JSON.stringify(vessel)})) : "absent"));\n` +
         `process.exit(0);\n`,
@@ -180,8 +180,8 @@ describe("gap-to-feature admission: the default typecheck runner spawns with the
   });
 
   test("[MUST-FAIL] the runner's Bun.spawnSync passes `env` from the shared helper (source)", () => {
-    const src = readFileSync(join(SRC, "resolvers", "gap-to-feature.ts"), "utf8");
-    const sf = ts.createSourceFile("gap-to-feature.ts", src, ts.ScriptTarget.Latest, true);
+    const src = readFileSync(join(SRC, "judge", "gap-admission.ts"), "utf8");
+    const sf = ts.createSourceFile("gap-admission.ts", src, ts.ScriptTarget.Latest, true);
     let fn: ts.FunctionDeclaration | undefined;
     sf.forEachChild((n) => { if (ts.isFunctionDeclaration(n) && n.name?.text === "defaultTypecheckRunner") fn = n; });
     expect(fn).toBeDefined();
@@ -451,7 +451,7 @@ function childSpawnCensus(srcRoot: string = SRC): SpawnSite[] {
 const siteKey = (s: SpawnSite): string => `${s.file}#${s.fn}#${s.kind}:${s.head}`;
 
 /** The evaluator path: its test/suite/typecheck/install children must be scrubbed and can never be allowlisted. */
-const EVALUATOR_FILES = ["src/resolvers/feature-compose.ts", "src/resolvers/gap-to-feature.ts", "src/resolvers/vessel-mitosis-evaluate.ts", "src/resolvers/test-suite.ts", "src/test-child-env.ts"];
+const EVALUATOR_FILES = ["src/resolvers/feature-compose.ts", "src/resolvers/gap-to-feature.ts", "src/judge/gap-admission.ts", "src/resolvers/vessel-mitosis-evaluate.ts", "src/resolvers/test-suite.ts", "src/test-child-env.ts"];
 const RUNS_VESSEL_CODE = /^(bun|bunx|node|npm|npx|process\.execPath)$|bunCmd|execPath/;
 
 const GIT = "git binary, runs no vessel code; inherits the env (repo-local config risk: PLAN4 §8, lower-risk follow-up)";
@@ -478,7 +478,7 @@ const CHILD_SPAWN_ALLOWLIST: Record<string, [number, string]> = {
   "src/resolvers/feature-compose.ts#ownParentRun#sh:git": [4, GIT_SH],
   "src/resolvers/feature-compose.ts#resolveFeatureComposeInner#sh:git": [5, GIT_SH],
   "src/resolvers/feature-compose.ts#runVerifySuite#sh:git": [3, GIT_SH],
-  "src/resolvers/gap-to-feature.ts#admitActionableGaps#argv:git": [1, GIT],
+  "src/judge/gap-admission.ts#admitActionableGaps#argv:git": [1, GIT],
   "src/judge/gap-landing-verdict.ts#cloneHeadsFingerprint#argv:git": [1, GIT],
   "src/judge/gap-landing-verdict.ts#landedCommitRunningHere#argv:systemctl": [2, UNIT],
   "src/judge/gap-check-judge.ts#landedCommitVerdict#argv:git": [2, GIT],
@@ -555,7 +555,8 @@ describe("CLASS CHECK: every child-process spawn in src is scrubbed or conscious
     const sites = childSpawnCensus().filter((s) => EVALUATOR_FILES.includes(s.file) && RUNS_VESSEL_CODE.test(s.head));
     // the known scrubbed sites exist (not vacuous): evaluate runCheck, admission typecheck, compose builders, test-suite
     expect(sites.filter((s) => s.file === "src/resolvers/vessel-mitosis-evaluate.ts").length).toBeGreaterThanOrEqual(1);
-    expect(sites.filter((s) => s.file === "src/resolvers/gap-to-feature.ts").length).toBeGreaterThanOrEqual(1);
+    // admission's typecheck runner moved to the closed gap-admission module (gap-to-feature judge split, A)
+    expect(sites.filter((s) => s.file === "src/judge/gap-admission.ts").length).toBeGreaterThanOrEqual(1);
     expect(sites.filter((s) => s.file === "src/resolvers/test-suite.ts").length).toBeGreaterThanOrEqual(3);
     expect(sites.filter((s) => s.file === "src/resolvers/feature-compose.ts").length).toBeGreaterThanOrEqual(15);
     expect(sites.filter((s) => !s.scrubbed).map((s) => `${s.file}:${s.line} ${siteKey(s)} ${s.detail}`)).toEqual([]);

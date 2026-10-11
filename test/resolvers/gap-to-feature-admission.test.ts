@@ -68,8 +68,9 @@ afterAll(() => {
 });
 
 const mod = await import("../../src/resolvers/gap-to-feature.js");
+const modAdmission = await import("../../src/judge/gap-admission.js");
 const modPolicy = await import("../../src/judge/gap-policy.js");
-const { admitActionableGaps, typecheckClassOf, citedExistingFile, hasProposalReport } = mod;
+const { admitActionableGaps, typecheckClassOf, citedExistingFile, hasProposalReport } = modAdmission;
 
 // Typecheck runner: goal-host-vessel is CLEAN (phantom error already fixed); anything else errors.
 const cleanRunner = (vessel: string) => ({ ran: true, clean: vessel === "goal-host-vessel" });

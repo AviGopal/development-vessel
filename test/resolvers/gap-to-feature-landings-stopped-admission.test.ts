@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll, afterEach } from "bun:test";
-import { admitActionableGaps, resolveGapToFeature } from "../../src/resolvers/gap-to-feature.js";
+import { resolveGapToFeature } from "../../src/resolvers/gap-to-feature.js";
+import { admitActionableGaps } from "../../src/judge/gap-admission.js";
 import { __resetPolicyReadsForTests } from "../../src/judge/gap-policy.js";
 import { openPolicyAnswer } from "./explicit-open-policy.fixture.js";
 

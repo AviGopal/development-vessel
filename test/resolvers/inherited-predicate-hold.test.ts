@@ -13,8 +13,9 @@ if (!process.env["WORKSPACE_ROOT"]) process.env["WORKSPACE_ROOT"] = ROOT;
 process.env["SUBSTRATE_GAP_SKIP_COMPOSE_TRIGGER"] = "1";
 const sg = await import("../../src/resolvers/substrate-gap.js");
 const g2f = await import("../../src/resolvers/gap-to-feature.js");
+const g2fAdmission = await import("../../src/judge/gap-admission.js");
 const g2fPolicy = await import("../../src/judge/gap-policy.js");
-const { inheritedPredicateHolds } = g2f;
+const { inheritedPredicateHolds } = g2fAdmission;
 const { class2PredicateKey } = sg;
 
 const ER = { shape: "test_suite", input: { vessel: "activity-api", test_file: "src/a.test.ts", only_tests: ["a > b"] }, zero_field: "requested_not_passing" };

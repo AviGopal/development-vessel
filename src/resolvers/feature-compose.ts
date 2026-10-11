@@ -6615,7 +6615,13 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
         return { shape: "featureComposeReport", body: { ok: false, stage: "plan", verdict: "REFUSED", error: dead } };
       }
     }
-  } catch { /* fail open — a gate that cannot read the tree must not block work */ }
+  } catch (err) {
+    // FAIL CLOSED. A file that cannot be read or simulated is skipped above (`continue`), so what reaches here
+    // is the gate itself breaking (a helper throw). A broken non-termination / dead-store gate does not admit.
+    const why = `plan gate error (non-termination / dead-store check could not judge the plan): ${String(err).slice(0, 200)}; refused (fail closed)`;
+    console.log(`[fc-nonterminating] REFUSED plan: ${why}`);
+    return { shape: "featureComposeReport", body: { ok: false, stage: "plan", verdict: "REFUSED", error: why } };
+  }
 
   // A single helper to find the on-disk location of a target file, preferring
   // the PUSH_CLONE_DIR copy (where edits are applied) over the super-repo copy.
@@ -6678,8 +6684,11 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
       }
     }
   } catch (err) {
-    // A gate must never break convergence: an error here admits the plan.
-    console.warn(`[fc-vacuous] gate error (non-fatal, admitting plan):`, err);
+    // FAIL CLOSED. An unreadable target is handled above (it admits: "cannot verify → do not refuse"), so what
+    // reaches here is the gate itself breaking (a helper throw). A broken vacuous-plan gate does not admit.
+    const why = `vacuous plan gate error (the plan could not be judged): ${String(err).slice(0, 200)}; refused (fail closed)`;
+    console.warn(`[fc-vacuous] REFUSING plan: ${why}`);
+    return { shape: "featureComposeReport", body: { ok: false, verdict: "REFUSED", stage: "scope", error: why } };
   }
 
   // DETERMINISTIC FILE-SCOPE GATE (drafter binding-constraint remedy): when the spec

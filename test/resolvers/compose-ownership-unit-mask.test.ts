@@ -15,7 +15,6 @@ import { afterAll, afterEach, beforeEach, describe, expect, it } from "bun:test"
 import { mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import * as g2f from "../../src/resolvers/gap-to-feature.js";
 import * as g2fPolicy from "../../src/judge/gap-policy.js";
 const ownedVessels = g2fPolicy.ownedVessels;
 // Namespace read so a missing export fails ITS test, not the whole file.

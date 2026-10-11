@@ -46,7 +46,11 @@ let ws: string;
 let logs: string[] = [];
 let planOps: Array<Record<string, unknown>> = [];
 // How the fixture judge answers: a verdict, an outage (HTTP 400, so the LLM call throws), or prose with no JSON.
-let judgeMode: "ok" | "down" | "garbage" = "ok";
+let judgeMode: "ok" | "down" | "garbage" | "reject" = "ok";
+// The gap row the fixture gap store holds (null: the store has no rows). Every write is merged into it, as the real
+// store carries omitted classification_metadata keys forward, and recorded.
+let storeGap: Record<string, any> | null = null;
+let gapWrites: Array<Record<string, any>> = [];
 let calls: Array<{ type: string; command?: string; path?: string }> = [];
 const snapshots = new Map<string, string>();
 
@@ -87,7 +91,7 @@ beforeEach(async () => {
   process.env["GAP_STORE_ENDPOINT"] = "http://gap-store.fixture/resolve";
   process.env["COMPOSE_SLOT_DIR"] = join(ws, "slots");
   process.env["COMPOSE_WS_DIR"] = join(ws, "compose-ws");
-  logs = []; calls = []; snapshots.clear(); judgeMode = "ok";
+  logs = []; calls = []; snapshots.clear(); judgeMode = "ok"; storeGap = null; gapWrites = [];
   const sink = (...a: unknown[]) => { logs.push(a.map(String).join(" ")); };
   console.log = sink; console.warn = sink; console.error = sink;
   globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
@@ -147,6 +151,7 @@ beforeEach(async () => {
       if (prompt.includes("addresses")) {
         if (judgeMode === "down") return new Response("judge unavailable (test)", { status: 400 });
         if (judgeMode === "garbage") return Response.json({ content: "Looks reasonable to me; the change seems fine." });
+        if (judgeMode === "reject") return Response.json({ content: JSON.stringify({ addresses: false, on_live_path: true, reason: "fixture judge: compute still adds 1 on the path the gap names" }) });
         return Response.json({ content: JSON.stringify({ addresses: true, on_live_path: true, reason: "fixture judge: the change addresses the gap" }) });
       }
       return new Response("unavailable (test)", { status: 400 });
@@ -158,8 +163,17 @@ beforeEach(async () => {
       return Response.json({ content: { vessels: [] } });
     }
     if (url.startsWith("http://gap-store.fixture")) {
-      const t = String(body?.impulse?.pointer?.type ?? "");
-      if (t === "substrateGap") return Response.json({ shape: "substrateGap", body: { gaps: [] } });
+      const ptr = (body?.impulse?.pointer ?? {}) as Record<string, any>;
+      const t = String(ptr.type ?? "");
+      if (t === "substrateGap") {
+        const rows = storeGap && (ptr.id === undefined || ptr.id === storeGap.id) ? [structuredClone(storeGap)] : [];
+        return Response.json({ shape: "substrateGap", body: { gaps: rows } });
+      }
+      if (t === "substrateGap_write" && storeGap && ptr.gap?.id === storeGap.id) {
+        gapWrites.push(structuredClone(ptr.gap));
+        storeGap = { ...storeGap, ...ptr.gap, classification_metadata: { ...(storeGap.classification_metadata ?? {}), ...(ptr.gap.classification_metadata ?? {}) } };
+        return Response.json({ shape: "substrateGapWriteResult", body: { action: "updated", id: storeGap.id } });
+      }
       return Response.json({ shape: "substrateGapWriteResult", body: { action: "noop" } });
     }
     return new Response("unavailable (test)", { status: 400 });
@@ -189,6 +203,7 @@ function pointer() {
 
 
 type Fc = {
+  priorAttemptFeedbackBlock: (meta?: Record<string, unknown> | null) => string;
   resolveFeatureCompose: (p: unknown) => Promise<{ body: Record<string, any> }>;
   verifyPatchAddressesGap: (a: Record<string, unknown>) => Promise<Record<string, unknown>>;
   shapeVocabularyRefusal: (diff: string, opts?: Record<string, unknown>) => Record<string, unknown> | null;
@@ -346,5 +361,67 @@ describe("shapeVocabularyRefusal fails closed when the vocabulary cannot be load
     const clean = VOCAB_DIFF.replace("failurePatternReport", "trace_failure_pattern_report");
     const v = fc.shapeVocabularyRefusal(clean, { vesselRoots: throwingRoots });
     expect({ addresses: v?.addresses, hard_fail: v?.hard_fail }).toEqual({ addresses: false, hard_fail: true });
+  });
+});
+
+// ── AN OUTAGE IS A NON-ATTEMPT: IT FAILS CLOSED, YET IT IS NEITHER CHARGED NOR TAUGHT ─────────────────────────────
+// qa ruling: "semantic judge unavailable" (an outage, or an answer with no parseable verdict) is an INFRA refusal, a
+// non-attempt like classifyEnvironmentFailure's env_* classes. So the compose that carries it:
+//   - reports failure_kind "environment", which gap-to-feature's isNonAttemptComposeResult reads as a non-attempt
+//     (no failed_attempts bump, no class-posterior beta, cooldown cleared);
+//   - writes nothing the next drafter reads as a rejection: no failure lesson, no semantic_gate_reason, no
+//     suspected_real_location, so priorAttemptFeedbackBlock over the gap afterwards is still empty.
+// CONTROL: a judge that JUDGED addresses:false is still a charged "fix" failure and is still taught.
+const gtf = (await import("../../src/resolvers/gap-to-feature.js")) as unknown as {
+  isNonAttemptComposeResult: (b: Record<string, unknown>) => boolean;
+  isInfraRefusalBody: (b: Record<string, unknown>) => boolean;
+};
+const STORE_GAP = () => ({
+  id: "fixture-gap-semgate", status: "open", category: "missing_capability", source: "substrate_detected",
+  summary: `compute in repos/${VESSEL}/${TARGET} adds 1; it must add 2`,
+  spec: `In repos/${VESSEL}/${TARGET}, compute must add 2, not 1.`,
+  detected_at: "2026-10-10T00:00:00.000Z",
+  classification_metadata: { edit_site: `repos/${VESSEL}/${TARGET}` },
+});
+
+describe("a semantic judge outage is an infrastructure refusal: a non-attempt, not a rejection", () => {
+  for (const mode of ["down", "garbage"] as const) {
+    const what = mode === "down" ? "an outage" : "an unparseable answer";
+    it(`MUST-FAIL: ${what} is a NON-ATTEMPT: failure_kind environment, so gap-to-feature does not bump failed_attempts`, async () => {
+      const fc = await freshFc("unset");
+      judgeMode = mode;
+      storeGap = STORE_GAP();
+      planOps = [editOp("  return base + 1;", "  return base + 2;")];
+      const r = await fc.resolveFeatureCompose(pointer());
+      expect({ verdict: r.body.verdict, failure_kind: r.body.failure_kind, non_attempt: gtf.isNonAttemptComposeResult(r.body), infra: gtf.isInfraRefusalBody(r.body) })
+        .toEqual({ verdict: "UNFAVORABLE", failure_kind: "environment", non_attempt: true, infra: true });
+    });
+    it(`MUST-FAIL: ${what} is NOT fed to the next drafter: no lesson, no semantic_gate_reason, the feedback block stays empty`, async () => {
+      const fc = await freshFc("unset");
+      judgeMode = mode;
+      storeGap = STORE_GAP();
+      planOps = [editOp("  return base + 1;", "  return base + 2;")];
+      const r = await fc.resolveFeatureCompose(pointer());
+      expect(r.body.verdict).toBe("UNFAVORABLE");
+      const meta = (storeGap!.classification_metadata ?? {}) as Record<string, unknown>;
+      expect({
+        semantic_gate_reason: meta.semantic_gate_reason ?? null,
+        suspected_real_location: meta.suspected_real_location ?? null,
+        failure_lessons: Array.isArray(meta.failure_lessons) ? (meta.failure_lessons as Array<{ class?: unknown }>).map((l) => l.class) : [],
+        feedback: fc.priorAttemptFeedbackBlock(meta),
+      }).toEqual({ semantic_gate_reason: null, suspected_real_location: null, failure_lessons: [], feedback: "" });
+    });
+  }
+  it("CONTROL: a judge that JUDGED addresses:false is still a charged fix failure, and is still taught to the next draft", async () => {
+    const fc = await freshFc("unset");
+    judgeMode = "reject";
+    storeGap = STORE_GAP();
+    planOps = [editOp("  return base + 1;", "  return base + 2;")];
+    const r = await fc.resolveFeatureCompose(pointer());
+    expect({ verdict: r.body.verdict, failure_kind: r.body.failure_kind, non_attempt: gtf.isNonAttemptComposeResult(r.body) })
+      .toEqual({ verdict: "UNFAVORABLE", failure_kind: "fix", non_attempt: false });
+    const meta = (storeGap!.classification_metadata ?? {}) as Record<string, unknown>;
+    expect(String(meta.semantic_gate_reason ?? "")).toContain("compute still adds 1");
+    expect(fc.priorAttemptFeedbackBlock(meta)).toContain("REJECTED by the semantic gate");
   });
 });

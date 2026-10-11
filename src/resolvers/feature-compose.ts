@@ -827,6 +827,15 @@ export interface SemanticGateVerdict {
   // Deterministic diff-substance (grep-derived, no LLM): changed symbols found reachable
   // on a live path. Surfaced so the grader has a non-LLM reachability signal to require.
   reachable_symbols?: string[];
+  // INFRA, NOT A VERDICT: the judge could not judge (an outage, or an answer with no parseable verdict). Code-set,
+  // never read from model JSON. A refusal carrying it is a NON-ATTEMPT (semanticGateInfraRefusal): it fails closed,
+  // yet it says nothing about the draft, so it is neither charged to the gap nor taught to the next drafter.
+  judge_unavailable?: boolean;
+}
+
+/** A semantic-gate refusal that is infrastructure (the judge could not judge), not a judgment of the patch. */
+export function semanticGateInfraRefusal(g: SemanticGateVerdict | null | undefined): boolean {
+  return !!g && g.addresses === false && g.judge_unavailable === true && g.hard_fail !== true;
 }
 
 /**
@@ -2482,13 +2491,13 @@ export async function verifyPatchAddressesGap(args: {
     // (as this did) let every judge outage land whatever cleared the deterministic floors, stamped as if
     // judged. Not a hard_fail: an outage names no defect in the patch, so a draft that turned its gap's
     // armed check red->green still lands under dissent (landed_unverified) by semanticGateDisposition.
-    return { addresses: false, reason: `semantic judge unavailable (${(e as Error).message}); the patch was not judged, so it does not pass (fail closed)`, on_live_path: true, llm_consulted: false, verified: false };
+    return { addresses: false, reason: `semantic judge unavailable (${(e as Error).message}); the patch was not judged, so it does not pass (fail closed)`, on_live_path: true, llm_consulted: false, verified: false, judge_unavailable: true };
   }
   const m = raw.match(/\{[\s\S]*\}/g);
   const parsed = m ? (parseJsonObject(m[0]) as Partial<SemanticGateVerdict> | null) : null;
   if (!parsed || parsed === null || typeof parsed.addresses !== "boolean") {
     // FAIL CLOSED, as above: an answer with no parseable verdict is not a verdict.
-    return { addresses: false, reason: "semantic judge answered without a parseable verdict (no JSON object with a boolean `addresses`); the patch was not judged, so it does not pass (fail closed)", on_live_path: true, llm_consulted: true, verified: false };
+    return { addresses: false, reason: "semantic judge answered without a parseable verdict (no JSON object with a boolean `addresses`); the patch was not judged, so it does not pass (fail closed)", on_live_path: true, llm_consulted: true, verified: false, judge_unavailable: true };
   }
   const sus = typeof parsed.suspected_real_location === "string" && parsed.suspected_real_location.trim()
     ? parsed.suspected_real_location.trim()
@@ -5117,13 +5126,15 @@ export type VerifyResult = { vessel: string; errors: number | string; exit_code:
  * NON-ATTEMPT (no failed_attempts, no failure lesson, cooldown cleared), so "environment" must mean the checks
  * could not run, never that they ran and the draft failed them.
  */
-export function composeFailureKind(input: { verdict: string; terminal_refusal: string | null; cutover_env_class: string | null; verify: ReadonlyArray<VerifyResult> }): "terminal_refusal" | "environment" | "fix" | null {
+export function composeFailureKind(input: { verdict: string; terminal_refusal: string | null; cutover_env_class: string | null; verify: ReadonlyArray<VerifyResult>; semantic_judge_unavailable?: boolean }): "terminal_refusal" | "environment" | "fix" | null {
   // THE OWN CHECK RAN AND JUDGED ITS DEFECT TESTS RED: a fix failure, whatever any other stage did. A failed
   // own_check entry carries the vessel's whole-suite log, where bun's "timed out after 20000ms" for an unrelated
   // slow test matched the timeout pattern below, so a red draft read as an environment non-attempt (compose2,
   // 10-03). `own` is set only when the check ran; `draft.own_red` is non-empty only when that run was judged red.
   const ownCheckStayedRed = input.verify.some((vr) => !vr.ok && !!vr.own && (vr.draft?.own_red.length ?? 0) > 0);
-  return input.verdict === "FAVORABLE" ? null : input.terminal_refusal ? "terminal_refusal" : ownCheckStayedRed ? "fix" : input.cutover_env_class || input.verify.some((vr) => !vr.ok && (vr.stage !== "constraint" || !!vr.constraint_unrunnable) && (vr.exit_code === null || !vr.output || /timed out after \d+\s*ms/i.test(vr.output))) ? "environment" : "fix";
+  // THE SEMANTIC JUDGE COULD NOT JUDGE (semanticGateInfraRefusal): the draft passed every check that ran, and the one
+  // that refused it was an outage, so the refusal is infrastructure: a non-attempt, like an env_* class.
+  return input.verdict === "FAVORABLE" ? null : input.terminal_refusal ? "terminal_refusal" : ownCheckStayedRed ? "fix" : input.semantic_judge_unavailable ? "environment" : input.cutover_env_class || input.verify.some((vr) => !vr.ok && (vr.stage !== "constraint" || !!vr.constraint_unrunnable) && (vr.exit_code === null || !vr.output || /timed out after \d+\s*ms/i.test(vr.output))) ? "environment" : "fix";
 }
 /** What the pre-land gate blamed on THIS draft (set on a failed runVerify): each list is already net of the parent tree. */
 export type DraftFailures = { own_red: string[]; introduced: string[]; new_ts: string[]; gate_detail: string };
@@ -8726,7 +8737,15 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
       } else if (dissentPossible && disposition.veto) {
         console.log(`[fc-semantic-dissent] ${JSON.stringify({ gap_id: pointer.gap?.id ?? null, own_check: ownCheckEv?.test_file ?? null, veto: disposition.veto })}`);
       }
-      if (!disposition.land) {
+      // AN OUTAGE IS NOT A REJECTION. The judge could not judge, so nothing below is written: no failure lesson, no
+      // semantic_gate_reason, no suspected_real_location. priorAttemptFeedbackBlock would hand any of them to the
+      // next drafter as "a previous draft was REJECTED by the semantic gate".
+      const judgeUnavailable = semanticGateInfraRefusal(semantic_gate);
+      if (!disposition.land && judgeUnavailable) {
+        verdict = "UNFAVORABLE";
+        console.log(`[fc-semantic-gate] REFUSED as infrastructure (judge unavailable, a non-attempt; nothing taught to the next draft): ${semantic_gate.reason.slice(0, 200)}`);
+      }
+      if (!disposition.land && !judgeUnavailable) {
         verdict = "UNFAVORABLE";
         // Per-gap failure lesson write-back on every UNFAVORABLE semantic-gate rejection.
         // The pointer may carry no gap id in the route-edit compose flow, so we also
@@ -9255,7 +9274,10 @@ const earlyAttempt = await Promise.race([
       const park = constraintParkLine(gid, ((prow?.classification_metadata ?? pointer.gap.classification_metadata) as Record<string, unknown> | undefined)?.failure_lessons, lessonClass, String(verify.find((v) => v.constraint_unrunnable)?.constraint_unrunnable ?? ""));
       if (park) console.warn(park);
     }
-    await appendComposeLesson(lessonClass, (semantic_gate?.hard_fail === true && semantic_gate?.llm_consulted === false ? "[deterministic] " : "") + lessonReason, [...touched].join(","), pointer.gap, attemptRecord);
+    // An infrastructure refusal (the semantic judge could not judge) is not a lesson about this draft: the compose
+    // lesson is the next drafter's prior-attempt evidence and the gap's failure_lessons, so it is not written.
+    if (semanticGateInfraRefusal(semantic_gate)) console.log(`[compose-lessons] not recorded: the semantic judge could not judge (infrastructure, a non-attempt)`);
+    else await appendComposeLesson(lessonClass, (semantic_gate?.hard_fail === true && semantic_gate?.llm_consulted === false ? "[deterministic] " : "") + lessonReason, [...touched].join(","), pointer.gap, attemptRecord);
     try {
       const tscText = verify.find((v) => !v.ok)?.output ?? "";
       const failedOpFiles = applied.filter((a) => !a.ok).map((a) => a.path);
@@ -9459,7 +9481,7 @@ for (const _c of cutovers as Array<Record<string, unknown>>) { const _ops = (((_
       // terminal_refusal: the gap is closed or its own check is already green on the parent; gap-to-feature
       // counts it as a NON-ATTEMPT (no failed_attempts bump, no -narrowed/decompose redispatch).
       terminal_refusal: terminalRefusal,
-      failure_kind: composeFailureKind({ verdict: effectiveVerdict, terminal_refusal: terminalRefusal, cutover_env_class: classifyEnvironmentFailure(cutovers), verify }),
+      failure_kind: composeFailureKind({ verdict: effectiveVerdict, terminal_refusal: terminalRefusal, cutover_env_class: classifyEnvironmentFailure(cutovers), verify, semantic_judge_unavailable: semanticGateInfraRefusal(semantic_gate) }),
       summary: plan.summary,
       touched_vessels: [...touched],
       op_count: ops.length,

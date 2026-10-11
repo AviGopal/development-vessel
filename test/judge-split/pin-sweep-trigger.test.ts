@@ -15,16 +15,17 @@ import { beginPin, endPin, restoreHarness, seed, stored, execRoute, git, tick, R
 
 const { resolveGapToFeature } = await import("../../src/resolvers/gap-to-feature.js");
 
-const savedRoot = process.env["VESSELS_CLONE_ROOT"];
+let savedRoot: string | undefined;
 let root = "";
 let n = 0;
 beforeEach(() => {
   beginPin();
+  savedRoot = process.env["VESSELS_CLONE_ROOT"];
   root = mkdtempSync(join(tmpdir(), "judge-pin-clones-"));
   process.env["VESSELS_CLONE_ROOT"] = root;
 });
 afterEach(() => {
-  process.env["VESSELS_CLONE_ROOT"] = savedRoot;
+  if (savedRoot === undefined) delete process.env["VESSELS_CLONE_ROOT"]; else process.env["VESSELS_CLONE_ROOT"] = savedRoot;
   expect(endPin()).toEqual({ fetch: [], fs: [], exec: [] });
 });
 afterAll(() => restoreHarness());

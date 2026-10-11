@@ -18,12 +18,9 @@ const { resolveGapToFeature } = await import("../../src/resolvers/gap-to-feature
 
 const OWNED = `pinowned-${RUN}`;
 const OTHER = `pinother-${RUN}`;
-for (const v of [OWNED, OTHER]) {
-  mkdirSync(join(SCRATCH, "runtime", v, "src"), { recursive: true });
-  writeFileSync(join(SCRATCH, "runtime", v, "src", "site.ts"), "export const site = 1;\n");
-}
-const savedRoot = process.env["VESSELS_CLONE_ROOT"];
-const savedName = process.env["SUBSTRATE_NAME"];
+// Captured after beginPin (which applies the harness env), so each test restores what the harness set.
+let savedRoot: string | undefined;
+let savedName: string | undefined;
 /** A clone root owning `owned` (a .git dir is what ownedVessels reads). */
 function ownClones(...owned: string[]): void {
   const root = mkdtempSync(join(tmpdir(), "judge-pin-own-"));
@@ -60,9 +57,18 @@ const gapAt = (tag: string, vessel: string): string => {
 };
 const directed = (id: string, extra: Row = {}) => tick(() => resolveGapToFeature({ type: "gap_to_feature", gap_id: id, dry_run: true, ...extra } as never));
 
-beforeEach(() => { beginPin(); delete process.env["SUBSTRATE_NAME"]; });
+beforeEach(() => {
+  beginPin();
+  savedRoot = process.env["VESSELS_CLONE_ROOT"];
+  savedName = process.env["SUBSTRATE_NAME"];
+  delete process.env["SUBSTRATE_NAME"];
+  for (const v of [OWNED, OTHER]) {
+    mkdirSync(join(SCRATCH, "runtime", v, "src"), { recursive: true });
+    writeFileSync(join(SCRATCH, "runtime", v, "src", "site.ts"), "export const site = 1;\n");
+  }
+});
 afterEach(() => {
-  process.env["VESSELS_CLONE_ROOT"] = savedRoot;
+  if (savedRoot === undefined) delete process.env["VESSELS_CLONE_ROOT"]; else process.env["VESSELS_CLONE_ROOT"] = savedRoot;
   if (savedName === undefined) delete process.env["SUBSTRATE_NAME"]; else process.env["SUBSTRATE_NAME"] = savedName;
   expect(endPin()).toEqual({ fetch: [], fs: [], exec: [] });
 });

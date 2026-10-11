@@ -57,14 +57,25 @@ const ENV: Record<string, string | undefined> = {
   MITOSIS_PUSH_CLONE_DIR: undefined,
   SUBSTRATE_PUSH_VESSELS: undefined,
 };
+// ACTIVATION IS PER FILE. `bun test` runs every file in one process with one module registry, so this module
+// evaluates once while each pin file's afterAll tears the harness down (restoreHarness). activate() therefore
+// applies the env, the scratch tree and the module stand-ins idempotently, and beginPin() calls it, so a file that
+// runs after another judge-split file is set up again rather than finding the stand-ins restored and the env gone.
 const SAVED_ENV: Record<string, string | undefined> = {};
-for (const [k, v] of Object.entries(ENV)) {
-  SAVED_ENV[k] = process.env[k];
-  if (v === undefined) delete process.env[k]; else process.env[k] = v;
+let SAVED_WR: string | undefined;
+let active = false;
+function activate(): void {
+  if (active) return;
+  active = true;
+  for (const [k, v] of Object.entries(ENV)) {
+    SAVED_ENV[k] = process.env[k];
+    if (v === undefined) delete process.env[k]; else process.env[k] = v;
+  }
+  for (const d of ["ledger", "runtime", "clones", "proposals", "parked", "compose-slots", "units"]) realFs.mkdirSync(join(SCRATCH, d), { recursive: true });
+  SAVED_WR = process.env["WORKSPACE_ROOT"];
+  if (!SAVED_WR) process.env["WORKSPACE_ROOT"] = join(SCRATCH, "ws");
+  installModuleStandIns();
 }
-for (const d of ["ledger", "runtime", "clones", "proposals", "parked", "compose-slots", "units"]) realFs.mkdirSync(join(SCRATCH, d), { recursive: true });
-const SAVED_WR = process.env["WORKSPACE_ROOT"];
-if (!SAVED_WR) process.env["WORKSPACE_ROOT"] = join(SCRATCH, "ws");
 
 // ── the in-memory gap store ─────────────────────────────────────────────────────────────────────────────────
 export type StoreWrite = { id: string; status: string; meta: Row; gap: Row; pointer: Row };
@@ -277,7 +288,8 @@ function installModuleStandIns(): void {
 function restoreModuleStandIns(): void {
   for (const k of Object.keys(SPECS) as Array<keyof typeof SPECS>) mock.module(SPECS[k], () => ORIG[k]);
 }
-installModuleStandIns();
+// Applied at import too, so the env is in place before the test file first loads gap-to-feature.
+activate();
 
 // ── per-test install / restore ──────────────────────────────────────────────────────────────────────────────
 const { installCutoverExecGuard, restoreCutoverExecModules } = await import("../resolvers/cutover-exec-guard.js");
@@ -293,6 +305,7 @@ export function git(dir: string, ...args: string[]): string {
 }
 /** beforeEach: fresh store, scripts, router and guards. */
 export function beginPin(): void {
+  activate();
   resetStore();
   resetScripts();
   installFetch();
@@ -301,18 +314,25 @@ export function beginPin(): void {
 }
 /** afterEach: restore fetch/fs/exec and return what the guards saw (unrouted requests, blocked writes, blocked
  *  execs), minus the fs blocks the test declared expected. */
+/** Writes to fixed production paths the code under test makes and this process cannot redirect, BLOCKED by the guard
+ *  (so nothing is written): the pick-decision log, and the class posteriors when the process loaded gap-to-feature
+ *  with GAP_CLASS_POSTERIOR_PATH unset (posteriorWrites still counts them, by content). */
+const FIXED_PATH_BLOCKS = [/\/workspace\/proposals\/pick-decisions\.jsonl$/, /\/gap-class-posteriors\.json$/];
 export function endPin(expectedFsBlocks: RegExp[] = []): { fetch: string[]; fs: string[]; exec: string[] } {
   globalThis.fetch = ORIGINAL_FETCH;
   restoreFs();
   const exec = execGuard?.restore() ?? [];
   execGuard = null;
-  return { fetch: [...net.violations], fs: fsLog.blocked.filter((b) => !expectedFsBlocks.some((re) => re.test(b))), exec };
+  const expected = [...FIXED_PATH_BLOCKS, ...expectedFsBlocks];
+  return { fetch: [...net.violations], fs: fsLog.blocked.filter((b) => !expected.some((re) => re.test(b))), exec };
 }
 /** afterAll: undo every module stand-in, the guards and the env. */
 export function restoreHarness(): void {
   globalThis.fetch = ORIGINAL_FETCH;
   restoreFs();
   restoreCutoverExecModules();
+  if (!active) return;
+  active = false;
   restoreModuleStandIns();
   for (const [k, v] of Object.entries(SAVED_ENV)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
   if (!SAVED_WR) delete process.env["WORKSPACE_ROOT"];

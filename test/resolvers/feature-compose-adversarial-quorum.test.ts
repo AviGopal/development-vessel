@@ -52,7 +52,9 @@ describe("verifyPatchAddressesGap — adversarial-verify quorum (step 6)", () =>
     expect(v.addresses).toBe(true);
   });
 
-  it("keeps the judge PASS when the refuter errors (fail-open — a flaky second lens cannot wedge landing)", async () => {
+  // qa ruling (build 4a): a refuter outage FAILS CLOSED, as an infrastructure refusal (judge_unavailable, a
+  // non-attempt). The pass it could not examine is not a pass. (This row pinned the old fail-open.)
+  it("refuses, as infrastructure, when the refuter errors (fail closed — an unexamined pass is not a pass)", async () => {
     let call = 0;
     const v = await verifyPatchAddressesGap({
       gapSummary: "some gap",
@@ -60,6 +62,6 @@ describe("verifyPatchAddressesGap — adversarial-verify quorum (step 6)", () =>
       reachability: FACTS,
       llm: async () => { call += 1; if (call === 1) return JSON.stringify({ addresses: true, reason: "ok", on_live_path: true }); throw new Error("refuter down"); },
     });
-    expect(v.addresses).toBe(true);
+    expect({ addresses: v.addresses, verified: v.verified, judge_unavailable: v.judge_unavailable }).toEqual({ addresses: false, verified: false, judge_unavailable: true });
   });
 });

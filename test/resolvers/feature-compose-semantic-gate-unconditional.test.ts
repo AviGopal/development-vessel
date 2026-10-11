@@ -46,7 +46,7 @@ let ws: string;
 let logs: string[] = [];
 let planOps: Array<Record<string, unknown>> = [];
 // How the fixture judge answers: a verdict, an outage (HTTP 400, so the LLM call throws), or prose with no JSON.
-let judgeMode: "ok" | "down" | "garbage" | "reject" = "ok";
+let judgeMode: "ok" | "down" | "garbage" | "reject" | "refuter-down" = "ok";
 // The gap row the fixture gap store holds (null: the store has no rows). Every write is merged into it, as the real
 // store carries omitted classification_metadata keys forward, and recorded.
 let storeGap: Record<string, any> | null = null;
@@ -147,6 +147,7 @@ beforeEach(async () => {
       if (prompt.includes("decomposing a feature specification")) {
         return Response.json({ content: JSON.stringify({ summary: "fixture plan", touched_vessels: [`repos/${VESSEL}`], ops: planOps }) });
       }
+      if (prompt.includes("ADVERSARIAL reviewer") && judgeMode === "refuter-down") return new Response("refuter unavailable (test)", { status: 400 });
       if (prompt.includes("ADVERSARIAL reviewer")) return Response.json({ content: JSON.stringify({ refuted: false, confidence: 0.1, reason: "no refutation" }) });
       if (prompt.includes("addresses")) {
         if (judgeMode === "down") return new Response("judge unavailable (test)", { status: 400 });
@@ -423,5 +424,34 @@ describe("a semantic judge outage is an infrastructure refusal: a non-attempt, n
     const meta = (storeGap!.classification_metadata ?? {}) as Record<string, unknown>;
     expect(String(meta.semantic_gate_reason ?? "")).toContain("compute still adds 1");
     expect(fc.priorAttemptFeedbackBlock(meta)).toContain("REJECTED by the semantic gate");
+  });
+});
+
+// ── THE REFUTER FAILS CLOSED TOO ───────────────────────────────────────────────────────────────────────────────
+// When the first judge passes, verifyPatchAddressesGap consults an adversarial refuter. Its catch kept the first
+// judge's pass when the refuter call threw, so a refuter outage passed every patch the first judge liked, unexamined.
+// It now refuses, as infrastructure (judge_unavailable): a non-attempt, like the judge's own outage.
+describe("the adversarial refuter fails closed when it cannot be consulted", () => {
+  const passingJudge = (refuter: (p: string) => Promise<string>) => async (p: string) =>
+    p.includes("ADVERSARIAL reviewer") ? refuter(p) : JSON.stringify({ addresses: true, on_live_path: true, reason: "judged: it adds 2" });
+  it("CONTROL: a refuter that answers 'not refuted' leaves the first judge's pass standing", async () => {
+    const fc = await freshFc("unset");
+    const v = await fc.verifyPatchAddressesGap(judgeArgs(passingJudge(async () => JSON.stringify({ refuted: false, confidence: 0.2, reason: "nothing to refute here" }))));
+    expect({ addresses: v.addresses, verified: v.verified }).toEqual({ addresses: true, verified: true });
+  });
+  it("MUST-FAIL: the refuter THROWS -> addresses:false, unverified, an infrastructure refusal naming the refuter", async () => {
+    const fc = await freshFc("unset");
+    const v = await fc.verifyPatchAddressesGap(judgeArgs(passingJudge(async () => { throw new Error("refuter endpoint down (test)"); })));
+    expect({ addresses: v.addresses, verified: v.verified, judge_unavailable: v.judge_unavailable, hard_fail: v.hard_fail ?? false })
+      .toEqual({ addresses: false, verified: false, judge_unavailable: true, hard_fail: false });
+    expect(String(v.reason)).toMatch(/refuter unavailable[\s\S]*refuter endpoint down \(test\)/);
+  });
+  it("MUST-FAIL (compose): a refuter outage leaves the clean edit NOT FAVORABLE, as a non-attempt", async () => {
+    const fc = await freshFc("unset");
+    judgeMode = "refuter-down";
+    planOps = [editOp("  return base + 1;", "  return base + 2;")];
+    const r = await fc.resolveFeatureCompose(pointer());
+    expect({ verdict: r.body.verdict, failure_kind: r.body.failure_kind, addresses: r.body.semantic_gate?.addresses })
+      .toEqual({ verdict: "UNFAVORABLE", failure_kind: "environment", addresses: false });
   });
 });

@@ -2568,7 +2568,11 @@ export async function verifyPatchAddressesGap(args: {
           console.error(`[feature-compose] refuter SPLIT 1/2 — keeping the first judge's PASS. Dissent: ${first.reason.slice(0, 200)}`);
         }
       }
-    } catch { /* refuter unavailable — keep the first judge's verdict (fail-open) */ }
+    } catch (e) {
+      // FAIL CLOSED, and infrastructure (a non-attempt), like the judge's own outage above: the adversarial lens is part
+      // of the verdict whenever the first judge passed, so a pass it could not examine is not a pass.
+      return { addresses: false, reason: `adversarial refuter unavailable (${(e as Error).message}); the first judge's pass was not examined, so the patch does not pass (fail closed)`, on_live_path: true, llm_consulted: true, verified: false, judge_unavailable: true };
+    }
   }
   return {
     addresses,

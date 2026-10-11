@@ -76,9 +76,13 @@ describe('semantic gate — adversarial refuter quorum', () => {
     expect(iSecond).toBeGreaterThan(iFirstIf);
   });
 
-  it('FAIL-OPEN IS PRESERVED: a refuter outage must not wedge landing', () => {
+  // qa ruling (build 4a): a refuter outage FAILS CLOSED as an infrastructure refusal (judge_unavailable, a
+  // non-attempt, so it does not wedge the gap's attempt count). This row pinned the old fail-open catch.
+  it('FAIL-CLOSED: a refuter outage refuses as infrastructure (judge_unavailable), never keeps the unexamined pass', () => {
     const b = block();
-    expect(b).toMatch(/catch \{ \/\* refuter unavailable/);
+    expect(b).not.toMatch(/catch \{ \/\* refuter unavailable/);
+    expect(b).toMatch(/adversarial refuter unavailable[\s\S]*addresses: false|addresses: false[\s\S]*adversarial refuter unavailable/);
+    expect(b).toMatch(/judge_unavailable: true/);
   });
 
   it('NEGATIVE CONTROL: the single-vote shape would fail these assertions', () => {

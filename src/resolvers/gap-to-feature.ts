@@ -1,8 +1,8 @@
 import { appendFileSync, existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import type { ResolverResult } from "./types.js";
-import { resolveFeatureCompose, priorAttemptFeedbackBlock, readParkedLanding, isDissentChild, dissentChildCheckRefusal } from "./feature-compose.js";
-import { attemptEvidenceBlock, explicitLineHint, testTitleInSource } from "./retry-evidence.js";
+import { resolveFeatureCompose, priorAttemptFeedbackBlock, readParkedLanding } from "./feature-compose.js";
+import { attemptEvidenceBlock, explicitLineHint } from "./retry-evidence.js";
 
 // TYPE AUGMENTATION — allow callers to pass an optional 'directed' flag through the
 // FeatureCompose pointer. feature-compose reads it via a local cast
@@ -16,7 +16,7 @@ declare module "./feature-compose.js" {
   }
 }
 
-import { resolveSubstrateGap, resolveSubstrateGapWrite, DECISION_LOG_GAP_CATEGORIES, takeBirthVerdictWithReport, type MintedBirthVerdict } from "./substrate-gap.js";
+import { resolveSubstrateGap, resolveSubstrateGapWrite, DECISION_LOG_GAP_CATEGORIES } from "./substrate-gap.js";
 import { resolveAuthorProducer } from "./author-producer.js";
 import { resolveDocDriftFix } from "./doc-drift-fix.js";
 import { resolveReachabilityGapRepair } from "./reachability-gap-repair.js";
@@ -30,11 +30,10 @@ import { peekComposeCapacity, hasFreeComposeCapacity } from "../compose-slots.js
 import { readFile } from "node:fs/promises";
 import { evaluatorTreeRoot } from "../lib/evaluator-tree.js";
 import { gapEditSite, composeEligibilitySkipReason, isNonAttemptComposeResult } from "../judge/gap-eligibility.js";
-import { vesselDirExists, identifyVessel, vesselsCloneRoot, ownedVessels, type SpendEnvelopeVerdict, discoverResolveUrls, spendEnvelopeAllows, autonomyScope, autonomyScopeExcludes } from "../judge/gap-policy.js";
-import { verifyGapCondition, type GapCheckVerdict, evaluateGapCheck } from "../judge/gap-check-judge.js";
-import { landabilityScore, readGapFresh, refreshHeldCalibration, readCalibration, gapClassOf, readClassPosteriors, sampleClassTheta, persistGapMetaPatch, predictLand, isHighConfidenceMiss, recordApproachDecision, recordPickIntent, recordAttemptEnd } from "../judge/gap-attempt-credit.js";
-import { solicitedHumanGaps, type Ask, markPendingVerification, kickAutoRevert, sweepIfCloneHeadsMoved, gradeCapabilityCompose, liveProducerProbeClose, gradeTraceStoreDispatch, gradeTraceStoreDispatchError, settleReachabilityRepair, settleAuthorProducerMint, gradeCapabilityRouteResult, gradeSliceSequence, gradeComposeOutcome } from "../judge/gap-landing-verdict.js";
-import { inheritedPredicateHolds, repoPathExists, existingEditTargets, chooseFirstActionable, admitActionableGaps, targetedComposeExclusion, findComposeOwner } from "../judge/gap-admission.js";
+import { vesselDirExists, identifyVessel, vesselsCloneRoot, type SpendEnvelopeVerdict, spendEnvelopeAllows } from "../judge/gap-policy.js";
+import { landabilityScore, readGapFresh, refreshHeldCalibration, gapClassOf, readClassPosteriors, sampleClassTheta, persistGapMetaPatch, predictLand, isHighConfidenceMiss, recordApproachDecision, recordPickIntent, recordAttemptEnd } from "../judge/gap-attempt-credit.js";
+import { type Ask, kickAutoRevert, sweepIfCloneHeadsMoved, gradeCapabilityCompose, liveProducerProbeClose, gradeTraceStoreDispatch, gradeTraceStoreDispatchError, settleReachabilityRepair, settleAuthorProducerMint, gradeCapabilityRouteResult, gradeSliceSequence, gradeComposeOutcome } from "../judge/gap-landing-verdict.js";
+import { inheritedPredicateHolds, repoPathExists, existingEditTargets, admitActionableGaps, targetedComposeExclusion, pickCandidate, decompositionRefusal, parentPredicate, armDecomposition, directedOwnerRoute, settlePickCondition, settlePickConditionAtCapabilityRoute, type DecomposeDeps } from "../judge/gap-admission.js";
 
 // The evaluator's tree is ONE resolver (lib/evaluator-tree.ts), shared with the class-1 classifier in substrate-gap
 // so the label and the measurement read the same file.
@@ -599,15 +598,6 @@ export function vesselTestInventory(vessel: string, terms: string[]): { files: s
   return { files: files.slice(0, 80), matches };
 }
 
-export interface DecomposeDeps {
-  /** The one bounded LLM call. Default: the llm_completion producer discovery names. */
-  llm?: (prompt: string) => Promise<string>;
-  /** The one judge. Default: evaluateGapCheck. */
-  judge?: (gap: Record<string, unknown>) => Promise<GapCheckVerdict>;
-  /** Advertised shape → description. Default: author-composed-capability fetchShapeDescriptions. */
-  shapeDescriptions?: () => Promise<Record<string, string>>;
-}
-
 async function defaultDecomposeLlm(prompt: string): Promise<string> {
   const dr = await fetch(`${DISCOVERY_ENDPOINT}/resolve`, { method: "POST", headers: { "Content-Type": "application/json", Authorization: `ApiKey ${METABOB_API_KEY}` }, body: JSON.stringify({ pointer: { type: "vesselCapability", shape: "llm_completion" } }), signal: AbortSignal.timeout(6000) });
   const dd = (await dr.json()) as { content?: { vessels?: Array<{ endpoint: string; resolve_endpoint?: string }> } };
@@ -620,26 +610,19 @@ async function defaultDecomposeLlm(prompt: string): Promise<string> {
   return String(j.content ?? j.data ?? "");
 }
 
-/** The budget a proposed test_suite check may ask for: the pull-sync failing-test generator's. */
-const PROPOSED_TEST_SUITE_TIMEOUT_MS = 180_000;
-
 export async function decomposeGap(
   parent: Record<string, unknown>,
   opts: { directed?: boolean; parentCheck?: boolean; deps?: DecomposeDeps } = {},
 ): Promise<{ written: string[]; reason: string; parent_check?: string }> {
   const parentId = String(parent.id ?? "");
   const meta = (parent.classification_metadata ?? {}) as Record<string, unknown>;
-  if (!parentId) return { written: [], reason: "no parent id" };
-  // A child minted from a landing's semantic dissent is born with no check and needs one derived here.
-  if ((meta.parent_gap_id && !isDissentChild(meta)) || /-step-\d+$/.test(parentId)) return { written: [], reason: "a decomposed step is not decomposed again" };
-  const judge = opts.deps?.judge ?? ((g: Record<string, unknown>) => evaluateGapCheck(g));
+  { const refused = decompositionRefusal(parent); if (refused) return { written: [], reason: refused }; }
   const site = String(meta.edit_site ?? "").replace(/:\d+.*$/, "");
   const siteMatch = /^repos\/([^/]+)\/(.+)$/.exec(site);
   const siteVessel = siteMatch?.[1] ?? "";
   let excerpt = "";
   if (siteMatch) { try { excerpt = quotedSiteExcerpt(readFileSync(join(vesselsCloneRoot(), siteMatch[1] ?? "", siteMatch[2] ?? ""), "utf-8"), String(parent.summary ?? "")); } catch { excerpt = ""; } }
-  const predicate: Record<string, unknown> = {};
-  for (const k of ["expected_literal", "hardcoded_url", "evidence_resolve", "verify_shape"]) if (meta[k] !== undefined && meta[k] !== null) predicate[k] = meta[k];
+  const predicate = parentPredicate(meta);
   const lessons = Array.isArray(meta.failure_lessons) ? (meta.failure_lessons as Array<Record<string, unknown>>).slice(-3).map((l) => "- " + String(l.class ?? "?") + ": " + String(l.reason ?? "").slice(0, 300)).join("\n") : "";
   // LAW-8 INPUTS: what exists to be named.
   const terms = decomposeSummaryTerms(String(parent.summary ?? ""));
@@ -666,205 +649,7 @@ export async function decomposeGap(
   }
   let parsed: { steps?: Array<Record<string, unknown>>; cannot_falsify?: unknown; parent_check?: unknown } = {};
   try { const a = raw.indexOf("{"), b = raw.lastIndexOf("}"); parsed = JSON.parse(raw.slice(a, b + 1)); } catch { return { written: [], reason: "unparseable decomposition" }; }
-  const scope = await autonomyScope();
-  const written: string[] = [];
-  const refusals: string[] = [];
-
-  // ONE VALIDATION CHAIN for every proposed check: the parent's own (k=0) and each step's. `siblings` are
-  // checks a step may not restate (the parent's pre-existing one, and a parent check proposed in this call).
-  const validateShapeCheck = async (label: string, f: Record<string, unknown>, siblings: Array<Record<string, unknown>>): Promise<{ ok: true; predicate: Record<string, unknown> } | { ok: false; why: string }> => {
-    const shape = typeof f.verify_shape === "string" ? f.verify_shape : (f.evidence_resolve && typeof (f.evidence_resolve as { shape?: unknown }).shape === "string" ? String((f.evidence_resolve as { shape?: unknown }).shape) : "");
-    if (!shape) return { ok: false, why: `${label}: no machine-checkable falsifier` };
-    const producers = await discoverResolveUrls(shape);
-    if (!producers.ok) return { ok: false, why: `${label}: could not check that shape ${shape} is advertised (${producers.why})` };
-    if (producers.urls.length === 0) return { ok: false, why: `${label}: shape ${shape} is not advertised` };
-    // A CHECK THAT WRITES IS NOT A CHECK (09-29): advertisement alone let 12 uiPanel_write/uiQuestion_write
-    // checks through, and verifying them performed live writes. The verifier refuses them too (487a7e9).
-    if (/_write$/.test(shape)) return { ok: false, why: `${label}: shape ${shape} is a write, not a read` };
-    // A step whose predicate is the PARENT's own check cannot be verified alone: one step will not
-    // flip it, so a generic step "satisfied" it in prose while the parent's check stayed failing
-    // (the relevance-sink step landed a size check, 04b3e9c, with divergence still 1).
-    const childEr = f.evidence_resolve as { shape?: unknown; input?: unknown } | undefined;
-    for (const sib of siblings) {
-      const sibEr = sib.evidence_resolve as { shape?: unknown; input?: unknown } | undefined;
-      const same = (typeof f.verify_shape === "string" && f.verify_shape === sib.verify_shape)
-        || (!!sibEr && !!childEr && sibEr.shape === childEr.shape && JSON.stringify(sibEr.input ?? {}) === JSON.stringify(childEr.input ?? {}));
-      if (same) return { ok: false, why: `${label}: its falsifier is the parent's own check, which one step will not flip` };
-    }
-    // A shape check with no measured field reads 'unknown' in the closure sweep forever: the step can
-    // be neither closed nor recorded as falsified. 15 live step/probe predicates were born that way.
-    // The verifier reads inner[field] FLAT, so the field must be a plain identifier: a path such as
-    // entries.length can only ever read unknown (route-edit-ec962628-step-1, 09-29).
-    // A DEFECT_FIELD CHECK IS REFUSED (qa C4 ruling iv): the judge reads it 'present' only when the key is in the
-    // answer, so a key the shape never returns reads 'absent', i.e. fixed, and closes the gap on silence.
-    if (!!childEr && (childEr as Record<string, unknown>)["defect_field"] !== undefined) return { ok: false, why: `${label}: a defect_field check is refused: a missing key reads as fixed` };
-    const measured = !!childEr && ["zero_field", "nonzero_field"].some((fk) => {
-      const fv = (childEr as Record<string, unknown>)[fk];
-      return typeof fv === "string" && /^[A-Za-z_][A-Za-z0-9_]*$/.test(fv);
-    });
-    if (!measured) return { ok: false, why: `${label}: its shape check names no zero_field/nonzero_field, so it could never be judged` };
-    // WHETHER THE SHAPE REPORTS THAT FIELD is not decided here (qa C4 ruling iv): descriptions are prose, and a
-    // lexical match was vacuous (312 of 312 described shapes passed it). The proof is the judge on the real
-    // answer (redNow, below): a zero_field/nonzero_field the shape does not return, or returns non-numeric,
-    // reads 'unknown', so the check is not written.
-    if (shape === "test_suite") {
-      // A NAMED TEST THAT DOES NOT EXIST IS TRIVIALLY RED: requested_not_passing counts a missing test as not
-      // passing, so an invented name reads 'present' forever (the test twin of an absent expected_literal).
-      const er = childEr as Record<string, unknown>;
-      const input = (er.input && typeof er.input === "object" ? er.input : {}) as Record<string, unknown>;
-      const vessel = String(input.vessel ?? "").replace(/^repos\//, "");
-      const testFile = typeof input.test_file === "string" ? input.test_file.trim() : "";
-      const onlyTests = Array.isArray(input.only_tests) ? (input.only_tests as unknown[]).filter((t): t is string => typeof t === "string" && t.trim().length > 0) : [];
-      if (er.zero_field !== "requested_not_passing") return { ok: false, why: `${label}: a test_suite check is judged by zero_field requested_not_passing` };
-      if (!/^[A-Za-z0-9_-]+$/.test(vessel)) return { ok: false, why: `${label}: test_suite check names no vessel` };
-      if (!testFile || !/^[A-Za-z0-9_./-]+$/.test(testFile) || testFile.includes("..")) return { ok: false, why: `${label}: test_suite check names no usable test_file` };
-      if (onlyTests.length === 0) return { ok: false, why: `${label}: test_suite check names no test (only_tests), so it could never be judged` };
-      let testText = "";
-      try { testText = readFileSync(join(vesselsCloneRoot(), vessel, testFile), "utf-8"); } catch { return { ok: false, why: `${label}: test file repos/${vessel}/${testFile} does not exist` }; }
-      // A title built from a template literal (`[${label}] …`) is matched with its placeholders as wildcards.
-      const missing = onlyTests.find((t) => !testTitleInSource(testText, t));
-      if (missing !== undefined) return { ok: false, why: `${label}: test "${missing.slice(0, 120)}" is not in repos/${vessel}/${testFile}` };
-      const tm = typeof input.timeout_ms === "number" && input.timeout_ms > 0 ? Math.min(input.timeout_ms, PROPOSED_TEST_SUITE_TIMEOUT_MS) : PROPOSED_TEST_SUITE_TIMEOUT_MS;
-      return { ok: true, predicate: { evidence_resolve: { shape: "test_suite", input: { vessel: `repos/${vessel}`, test_file: testFile, only_tests: onlyTests, timeout_ms: tm }, zero_field: "requested_not_passing" } } };
-    }
-    return { ok: true, predicate: typeof f.verify_shape === "string" ? { verify_shape: f.verify_shape } : { evidence_resolve: f.evidence_resolve } };
-  };
-  // RED BEFORE WRITE: a class-2 check is kept only if the one judge reads it 'present' on today's tree.
-  // Where the gap store is held ELSEWHERE the judge abstains (it measures only where the store is held), so the
-  // judgement is deferred to the holder: the write is forwarded without a verdict, and the holder's seam stamps
-  // it pending and evaluates it there; anything but 'present' is then predicate_suspect (not admissible).
-  const deferToHolder = !!process.env["GAP_STORE_ENDPOINT"];
-  // The seam's own judge mints the verdict the write may hand over (MINTED BIRTH VERDICTS in substrate-gap); an
-  // injected deps.judge gates only, and the seam then judges the written check itself.
-  const redNow = async (label: string, id: string, pred: Record<string, unknown>): Promise<{ ok: true; stamp?: MintedBirthVerdict } | { ok: false; why: string }> => {
-    if (deferToHolder) return { ok: true };
-    let v: GapCheckVerdict = "unknown";
-    let stamp: MintedBirthVerdict | undefined;
-    try { if (opts.deps?.judge) v = await judge({ id, classification_metadata: { ...pred } }); else ({ verdict: v, stamp } = await takeBirthVerdictWithReport(id, { ...pred })); } catch { v = "unknown"; }
-    return v === "present" ? { ok: true, stamp } : { ok: false, why: `${label}: its check reads ${v} on the current tree, not present` };
-  };
-
-  // k=0: THE PARENT'S OWN CHECK (parent-check mode).
-  let parentCheck: Record<string, unknown> | null = null;
-  let parentCheckNote = "";
-  let parentVerdict: MintedBirthVerdict | null = null;
-  if (opts.parentCheck) {
-    const pc = parsed.parent_check;
-    if (pc && typeof pc === "object") {
-      const f = pc as Record<string, unknown>;
-      const dissentedCheck = dissentChildCheckRefusal(meta, f);
-      if (dissentedCheck) {
-        parentCheckNote = dissentedCheck;
-      } else if (typeof f.expected_literal === "string" || typeof f.hardcoded_url === "string") {
-        parentCheckNote = "parent check: a literal is not a parent check (a word absent now is trivially red)";
-      } else {
-        const v = await validateShapeCheck("parent check", f, [predicate]);
-        if (!v.ok) parentCheckNote = v.why;
-        else {
-          const red = await redNow("parent check", parentId, v.predicate);
-          if (!red.ok) parentCheckNote = red.why;
-          else { parentCheck = v.predicate; parentVerdict = red.stamp ?? null; }
-        }
-      }
-    } else parentCheckNote = "parent check: none proposed";
-    if (parentCheckNote) refusals.push(parentCheckNote);
-  }
-
-  let k = 0;
-  for (const st of (parsed.steps ?? []).slice(0, 3)) {
-    k++;
-    const stepSite = String(st.edit_site ?? "").replace(/:\d+.*$/, "");
-    const sm = /^repos\/([^/]+)\/(.+\.(?:ts|tsx|js|mjs))$/.exec(stepSite);
-    const change = String(st.change ?? "").trim();
-    const f = (st.falsifier ?? {}) as Record<string, unknown>;
-    if (!sm || !change) { refusals.push(`step ${k}: no single source file or no change`); continue; }
-    // Directed decomposition may target the lane core: the scope contains autonomous work, and the
-    // compose floor already never checks directed work, so refusing its steps here only blocked it.
-    if (!opts.directed && autonomyScopeExcludes(scope, stepSite)) { refusals.push(`step ${k}: ${stepSite} is inside the autonomy scope`); continue; }
-    if (/\b(remove|delete|disable|silence|suppress|skip)\b[^.]{0,40}\b(detector|check|gate|falsifier|scan)\b/i.test(change)) { refusals.push(`step ${k}: would silence a detector or check`); continue; }
-    // A helper-only step can never land: the compose semantic gate refuses a new function nothing calls.
-    if (/\b(introduce|add|create|define|extract)\b[^.]{0,60}\b(helper|function|utility|method|wrapper)\b/i.test(change) && !/\b(call|calls|use|uses|using|replace|replaces|route|routes|wire|apply|applies)\b/i.test(change)) { refusals.push(`step ${k}: only adds a helper nothing calls, which the compose gate refuses as hollow`); continue; }
-    // v1.1: an observation-only step is a hollow write (a logging step with a type named as its
-    // "reader" passed v1 and was superseded before any draft).
-    if (/\b(log|logs|logging|console|comment|comments|document|observe|observation)\b/i.test(change) && !/\b(fix|change|replace|route|read|call|return|compute|select|validate|guard|reject|refuse|apply|use)\b/i.test(change)) { refusals.push(`step ${k}: observation-only change`); continue; }
-    let text = "";
-    try { text = readFileSync(join(vesselsCloneRoot(), sm[1] ?? "", sm[2] ?? ""), "utf-8"); } catch { refusals.push(`step ${k}: ${stepSite} does not exist`); continue; }
-    let childPredicate: Record<string, unknown> = {};
-    let childVerdict: MintedBirthVerdict | null = null;
-    const hasShape = typeof f.verify_shape === "string" || (!!f.evidence_resolve && typeof (f.evidence_resolve as { shape?: unknown }).shape === "string");
-    if (hasShape) {
-      const v = await validateShapeCheck(`step ${k}`, f, parentCheck ? [predicate, parentCheck] : [predicate]);
-      if (!v.ok) { refusals.push(v.why); continue; }
-      const red = await redNow(`step ${k}`, `${parentId}-step-${k}`, v.predicate);
-      if (!red.ok) { refusals.push(red.why); continue; }
-      childPredicate = v.predicate;
-      childVerdict = red.stamp ?? null;
-    } else if (typeof f.expected_literal === "string" && f.expected_literal.trim().length >= 4) {
-      const lit = f.expected_literal.trim();
-      const reader = String(f.reader ?? "").trim();
-      if (text.includes(lit)) { refusals.push(`step ${k}: literal ${lit} already present`); continue; }
-      // The verifier reads the RUNNING tree (runtimeRoot), not this clone: a literal present there is
-      // already satisfied, so it could never credit a landing.
-      let runningText = "";
-      try { runningText = readFileSync(join(runtimeRoot(), sm[1] ?? "", sm[2] ?? ""), "utf-8"); } catch { /* not deployed here: the clone check above stands */ }
-      if (runningText.includes(lit)) { refusals.push(`step ${k}: literal ${lit} already present in the running tree`); continue; }
-      if (!reader || !text.includes(reader)) { refusals.push(`step ${k}: reader ${reader || "(none)"} not found in ${stepSite}`); continue; }
-      // v1.1: the reader must be a FUNCTION in the file (defined or called), not a type or interface.
-      const readerRe = reader.replace(/[.*+?^${}()|[\]\\]/g, (ch) => "\\" + ch);
-      const readerIsFunction = new RegExp("(function\\s+" + readerRe + "\\b|\\b" + readerRe + "\\s*(=\\s*(async\\s*)?\\(|\\())").test(text);
-      if (!readerIsFunction) { refusals.push(`step ${k}: reader ${reader} is not a function in ${stepSite}`); continue; }
-      childPredicate.expected_literal = lit;
-      childPredicate.literal_reader = reader;
-    } else { refusals.push(`step ${k}: no machine-checkable falsifier`); continue; }
-    const childId = `${parentId}-step-${k}`;
-    // NEVER OVERWRITE AN OPEN STEP (09-29): child ids are deterministic and three callers re-decompose,
-    // so a re-decomposition silently replaced a step's check while its landing was pending.
-    // Any existing step is protected, closed ones too (rewriting a settled step reopened it); only a
-    // step closed as superseded or rejected may be replaced. An unanswerable check refuses: node 2's
-    // forwarded store read returns 503 during node-1 restarts, exactly the window this guard is for.
-    type StepRow = { status?: unknown; classification_metadata?: { closed_reason?: unknown } };
-    let existingRows: StepRow[] | null = null;
-    try {
-      const existing = await resolveSubstrateGap({ type: "substrateGap", id: childId } as never);
-      const body = existing?.body as { gaps?: unknown } | undefined;
-      existingRows = Array.isArray(body?.gaps) ? (body!.gaps as StepRow[]) : null;
-    } catch { existingRows = null; }
-    if (existingRows === null) { refusals.push(`step ${k}: could not check whether ${childId} exists; not written`); continue; }
-    const replaceable = (r: StepRow): boolean =>
-      String(r.status ?? "") === "superseded" || /supersed|reject/i.test(String(r.classification_metadata?.closed_reason ?? ""));
-    if (existingRows.some((r) => !replaceable(r))) { refusals.push(`step ${k}: ${childId} already exists; not overwritten`); continue; }
-    // Blank the predicate and sentinel fields this child did not choose: the store carries omitted keys
-    // forward, and a leftover removed-line hardcoded_url shadowed a new check and inverted it (09-29).
-    const cleared: Record<string, unknown> = { hardcoded_url: "", predicate_derived_at: "", predicate_commit: "", pending_outcome_verification: "" };
-    if (!("expected_literal" in childPredicate)) { cleared.expected_literal = ""; cleared.literal_reader = ""; }
-    if (!("evidence_resolve" in childPredicate)) cleared.evidence_resolve = null;
-    if (!("verify_shape" in childPredicate)) cleared.verify_shape = "";
-    // A step carries its OWN check (the parent's is refused above: one step will not flip it), but the
-    // operator's hand-off is the parent's: a step of a directed gap is directed too, or it is withheld.
-    const childMeta: Record<string, unknown> = { edit_site: stepSite, parent_gap_id: parentId, predicate_source: "decompose", ...(meta.directed === true || opts.directed === true ? { directed: true } : {}), ...cleared, ...childPredicate };
-    await resolveSubstrateGapWrite(
-      { type: "substrateGap_write", gap: { id: childId, category: "decomposed_step", source: "substrate_detected", summary: `[step ${k} of ${parentId}] ${change}`, detected_at: new Date().toISOString(), status: "open", classification_metadata: childMeta } } as never,
-      childVerdict ? { birthVerdict: childVerdict } : undefined,
-    );
-    written.push(childId);
-  }
-  const stepReason = written.length > 0 ? `wrote ${written.length} step(s)` + (refusals.length ? `; refused: ${refusals.join("; ")}` : "") : (typeof parsed.cannot_falsify === "string" && parsed.cannot_falsify ? "cannot_falsify: " + parsed.cannot_falsify.slice(0, 200) : "no valid step: " + (refusals.join("; ") || "none proposed"));
-  const reason = (parentCheck ? "wrote the parent's own check; " : "") + stepReason;
-  // ONE WRITE OF THE PARENT: the decomposition record, and in parent-check mode its new check. The verdict
-  // the judge just took is handed to the seam in-process so it is not taken twice.
-  try {
-    const parentMeta: Record<string, unknown> = { ...meta, decomposed_at: new Date().toISOString(), decomposition: { children: written, reason: reason.slice(0, 600), ...(opts.parentCheck ? { parent_check: parentCheck ? "written" : parentCheckNote.slice(0, 300) } : {}) } };
-    if (parentCheck) {
-      // verify_shape is blanked, not deleted: the store carries an omitted key forward.
-      Object.assign(parentMeta, { verify_shape: "", ...parentCheck, predicate_source: "gap_falsify:parent_check", falsified_at: new Date().toISOString() });
-    }
-    await resolveSubstrateGapWrite(
-      { type: "substrateGap_write", gap: { ...parent, classification_metadata: parentMeta, status: String(parent.status ?? "open") } } as never,
-      parentCheck && parentVerdict ? { birthVerdict: parentVerdict } : undefined,
-    );
-  } catch { /* the children stand on their own */ }
-  console.log(`[gap-decompose] ${parentId}: ${reason.slice(0, 400)}`);
-  return { written, reason, ...(opts.parentCheck ? { parent_check: parentCheck ? "written" : parentCheckNote } : {}) };
+  return armDecomposition(parent, parsed, opts);
 }
 
 export interface LocalizeResult {
@@ -1301,91 +1086,8 @@ const premiseTokens = Array.from(new Set(String(summary).split(" ").filter((w) =
 // is often excluded (pending, held) while its child is admitted.
 let pickLineageIndex: Map<string, Record<string, unknown>> = new Map();
 function pickMostLandable(gaps: Record<string, unknown>[]): Record<string, unknown> | null {
-  if (!gaps.length) return null;
-  // Learned category-level self-knowledge (expectation-setting step 3, 2026-06-29): strongly
-  // deprioritise gaps in a category the substrate has EMPIRICALLY learned it cannot land
-  // (>=8 attempts, 0 lands) — stop wasting cycles on a class it can't author, while leaving a
-  // re-test path (penalty, not hard exclusion) if nothing better exists.
-  const calib = readCalibration();
-  const hopeless = (g: Record<string, unknown>): boolean => {
-    const r = calib[String(g.category ?? "unknown")];
-    if (!r || r.attempts < 8 || r.lands !== 0) return false;
-    // HUMAN-AUTHORIZED EXEMPTION (2026-08-28). 143212a traded the automatic re-test path
-    // ("leaving a re-test path", d1bb37a) for a HUMAN DECISION, and predicated this
-    // exclusion on the row being "already escalated" — the human IS the designed escape.
-    // Until escalation_disposition_apply existed nothing applied the answer, so the trade
-    // was one-directional and the seal was permanent. A gap whose escalation a human has
-    // ANSWERED carries a bounded exemption; it is per-GAP and decrements, so the category
-    // stays sealed for every other member and the flood 143212a deliberately closed cannot
-    // reopen. Not a threshold change: without an answered escalation this is a no-op.
-    const gm = (g.classification_metadata ?? g.metadata ?? {}) as Record<string, unknown>;
-    if (Number(gm.human_exemption_attempts_remaining ?? 0) > 0) return false;
-    return true;
-  };
-  // Escalate hopeless gaps to a HUMAN and exclude them from selection.
-  // The escalation is the uiQuestion_write and nothing else. This branch used to ALSO call
-  // resolveDispatchGoal({ goalShape: "substrate_gap_decompose", payload: {...} }). That call
-  // could never dispatch: DispatchGoalPointer has no `goalShape` and no `payload` (see
-  // repos/development-vessel/src/resolvers/dispatch-goal.ts @ `export interface DispatchGoalPointer`),
-  // so resolveDispatchGoal read an empty `pointer.goal` and RETURNED a structuredError at
-  // `if (!goal) return { shape: "structuredError"` — a resolved promise, which the attached
-  // .catch() can never observe. The `as never` cast hid the type error and the error value was
-  // discarded, so the failure was invisible. It is not repaired, because repairing it needs a
-  // producer for `substrate_gap_decompose` and none exists: discovery advertises 332 shapes and
-  // zero match /decompos/ (measured 2026-08-06 against http://localhost:18100/registry/shapes).
-  // A dispatch to a shape nothing serves is confabulation with a dispatch id attached.
-  const actionableGaps: Record<string, unknown>[] = [];
-  for (const g of gaps) {
-    if (hopeless(g)) {
-      const gid = String((g as Record<string,unknown>).id ?? (g as Record<string,unknown>).gap_id ?? "");
-      if (gid && !solicitedHumanGaps.has(gid)) {
-        const SOLICITED_GAPS_LOG = '/var/tmp/solicited_gaps.log';
-        let alreadyPersisted = false;
-        try {
-          if (existsSync(SOLICITED_GAPS_LOG)) {
-            const content = readFileSync(SOLICITED_GAPS_LOG, 'utf-8');
-            if (content.includes(`${gid}\n`)) {
-              alreadyPersisted = true;
-              solicitedHumanGaps.add(gid); // Cache in memory to avoid re-reading file in this run
-            }
-          }
-        } catch (e) {
-          console.warn(`[gap-escalation] Failed to read solicitation log, may re-solicit: ${String(e)}`);
-        }
-
-        if (!alreadyPersisted) {
-          // In-process only until delivery is confirmed: persisting BEFORE the send recorded asks that
-          // threw as asked, so they were never retried (node 2: 316 ids, 09-29). Persist on acceptance.
-          solicitedHumanGaps.add(gid);
-
-          resolveUiWritePassthrough({ type: "uiQuestion_write", id: "needs-human-" + gid, title: "Gap needs a human decision", body: "Gap " + gid + " (" + String((g as Record<string,unknown>).category ?? "?") + ") has failed auto-repair 8+ times with 0 lands. It likely needs a human response: redefine the goal, provide missing information, grant access, or drop it. Summary: " + String((g as Record<string,unknown>).summary ?? "").slice(0, 300), kind: "gap_needs_human", importance: "high" } as never)
-            .then((r) => {
-              // An escalation that silently failed is indistinguishable from one that was never
-              // attempted. Log ALL THREE outcomes so the absence of a line means "hopeless() never
-              // fired", not "the escalation was eaten". Baseline before this change: 0 lines in 7d.
-              const shape = (r as { shape?: unknown } | undefined)?.shape;
-              const delivered = shape !== "structuredError" && ((r as { body?: { ok?: unknown } } | undefined)?.body?.ok !== false);
-              if (!delivered) {
-                console.warn(`[gap-escalation] uiQuestion_write REJECTED for hopeless gap ${gid}: ${JSON.stringify((r as { body?: unknown }).body).slice(0, 400)} — no human was asked; not recorded as solicited, retried after restart`);
-              } else {
-                try {
-                  appendFileSync(SOLICITED_GAPS_LOG, `${gid}\n`);
-                } catch (e) {
-                  console.warn(`[gap-escalation] Failed to write to solicitation log: ${String(e)}`);
-                }
-                console.log(`[gap-escalation] uiQuestion_write accepted for hopeless gap ${gid} (shape=${String(shape)})`);
-              }
-            })
-            .catch((e: unknown) => {
-              console.warn(`[gap-escalation] uiQuestion_write THREW for hopeless gap ${gid}: ${String(e)} — no human was asked; not recorded as solicited, retried after restart`);
-            });
-        }
-      }
-      continue;
-    }
-    actionableGaps.push(g);
-  }
-  const scoredGaps = actionableGaps;
+  // The judging steps (hopeless exclusion, floor, pick-skip) are the closed pickCandidate (gap-admission); this
+  // residue supplies the ranker (score, class rerank) and records the pick.
   // IMPACT-RANKED SELECTION (2026-07-09): landability alone drains the easiest gaps
   // first and lets a blocking gap starve behind them. Impact = how many OTHER open
   // gaps cite this gap (by id or by its failing_capability) in their summaries or
@@ -1421,17 +1123,6 @@ function pickMostLandable(gaps: Record<string, unknown>[]): Record<string, unkno
     }
     return (1 + Math.min(1.0, 0.25 * cited)) + verifiabilityCredit;
   };
-  // SIGN FIX + DEAD-FILTER FIX (2026-08-06). `* blockingWeight(g)` multiplied the score by
-  // up to 1.6 for gaps whose metadata points at the picker/composer itself — the exact
-  // OPPOSITE of the intent documented at the `bw > 1` branch of landabilityScore, which
-  // already applies the intended -0.06 penalty. Net effect was +40% for self-targeting
-  // gaps. And the map ran over `gaps`, so `scoredGaps` (hopeless-category rows escalated
-  // and meant to be excluded) was computed and then discarded — the escalated gap was
-  // selected anyway. When EVERY candidate is hopeless, return null so the caller emits its
-  // documented graceful "no matching open gap" instead of selecting a gap the calibration
-  // has already proven unlandable (and instead of ranked[0]! throwing on an empty array).
-  if (!scoredGaps.length) return null;
-  const selectionPool = scoredGaps;
   // A HUMAN'S REPORT OUTRANKS A MACHINE-GENERATED ROUTING RECORD.
   //
   // Nothing in the score distinguished who filed a gap, so a person's complaint about
@@ -1477,203 +1168,113 @@ function pickMostLandable(gaps: Record<string, unknown>[]): Record<string, unkno
   };
   const humanWeight = (g: Record<string, unknown>): number =>
     String(g.source ?? "") === "human_reported" || hasLiveHumanExemption(g) ? HUMAN_REPORT_PRIORITY : (String(g.category) ?? '').startsWith('route-edit') ? 0.5 : 1;
-  const ranked = selectionPool
-    .map((g) => ({ g, s: landabilityScore(g) * impactOf(g) * humanWeight(g) }))
-    .sort((a, b) => b.s - a.s);
-  // LANDABILITY FLOOR (value-per-cost-selection 2.5). The class rerank below orders by a sampled
-  // class theta BEFORE score, so a fresh class's uninformed posterior lifted a score-0 candidate
-  // over a 0.9 one. Candidates below the floor are dropped before any posterior is consulted.
-  const LANDABILITY_FLOOR = 0.15;
-  const aboveFloor = ranked.filter((r) => landabilityScore(r.g) >= LANDABILITY_FLOOR);
-  if (aboveFloor.length < ranked.length) {
-    console.log(`[gap-to-feature] landability_floor excluded ${ranked.length - aboveFloor.length} of ${ranked.length} candidates (floor=${LANDABILITY_FLOOR})`);
-    ranked.splice(0, ranked.length, ...aboveFloor);
-  }
-  if (!ranked.length) return null;
-  // CLASS-THOMPSON RERANK (Option B): sample theta_c ~ Beta(alpha_c, beta_c) once per class in
-  // the pool, then prefer the winning class; WITHIN a class the landability ranking above still
-  // orders gaps, so the pick is the best-scored gap of the sampled class. chooseFirstActionable
-  // below still walks past pending gaps, so a fully-pending winning class falls through to the
-  // next class instead of starving the tick.
-  const classPosteriorsNow = readClassPosteriors();
+  let classPosteriorsNow: ReturnType<typeof readClassPosteriors> = {};
   const classTheta = new Map<string, number>();
-  for (const r of ranked) {
-    const c = gapClassOf(r.g);
-    if (!classTheta.has(c)) classTheta.set(c, sampleClassTheta(c, classPosteriorsNow));
-  }
-  ranked.sort((a, b) => {
-    const ta = classTheta.get(gapClassOf(a.g)) ?? 0.5;
-    const tb = classTheta.get(gapClassOf(b.g)) ?? 0.5;
-    return tb !== ta ? tb - ta : b.s - a.s;
+  return pickCandidate(gaps, {
+    lineageIndex: pickLineageIndex,
+    score: (g) => landabilityScore(g) * impactOf(g) * humanWeight(g),
+    rerank: (ranked) => {
+      // CLASS-THOMPSON RERANK (Option B): sample theta_c ~ Beta(alpha_c, beta_c) once per class in
+      // the pool, then prefer the winning class; WITHIN a class the landability ranking above still
+      // orders gaps, so the pick is the best-scored gap of the sampled class. chooseFirstActionable
+      // below still walks past pending gaps, so a fully-pending winning class falls through to the
+      // next class instead of starving the tick.
+      classPosteriorsNow = readClassPosteriors();
+      for (const r of ranked) {
+        const c = gapClassOf(r.g);
+        if (!classTheta.has(c)) classTheta.set(c, sampleClassTheta(c, classPosteriorsNow));
+      }
+      ranked.sort((a, b) => {
+        const ta = classTheta.get(gapClassOf(a.g)) ?? 0.5;
+        const tb = classTheta.get(gapClassOf(b.g)) ?? 0.5;
+        return tb !== ta ? tb - ta : b.s - a.s;
+      });
+    },
+    onPicked: ({ chosen, skippedPending, ranked, selectionPool }) => {
+      const targetOf = (g: Record<string, unknown>): string =>
+        String(((g.classification_metadata ?? g.metadata ?? {}) as Record<string, unknown>).edit_site ?? "(no-target)");
+      // TRACED SELECTION DECISION (law 12: record the counterfactual AT decision time). Without
+      // this line a 90-way tie at one score over one target file is invisible at every
+      // observation point, which is why the sign error above survived beside its own comment.
+      console.log(`[gap-to-feature] pick ${JSON.stringify({
+        owner: process.env["SUBSTRATE_NAME"] ?? "substrate",
+        gap_id: String(chosen.g.id ?? ""),
+        category: String(chosen.g.category ?? ""),
+        target: targetOf(chosen.g),
+        score: Number(chosen.s.toFixed(4)),
+        landability: Number(landabilityScore(chosen.g).toFixed(4)),
+        human_reported: String(chosen.g.source ?? "") === "human_reported",
+        impact: Number(impactOf(chosen.g).toFixed(4)),
+        pool: selectionPool.length,
+        hopeless_excluded: gaps.length - selectionPool.length,
+        operator_hold_excluded: ranked.filter((r) => {
+          const mm = ((r.g as { classification_metadata?: { operator_hold?: unknown } }).classification_metadata) ?? {};
+          return ((mm.operator_hold as boolean | undefined) === true);
+        }).length,
+        skipped_pending: skippedPending,
+        tied_at_top: ranked.filter((r) => Math.abs(r.s - chosen.s) < 1e-9).length,
+        distinct_targets_top20: new Set(ranked.slice(0, 20).map((r) => targetOf(r.g))).size,
+        runner_up: ranked[1] ? { gap_id: String(ranked[1].g.id ?? ""), target: targetOf(ranked[1].g), score: Number(ranked[1].s.toFixed(4)) } : null,
+      })}`);
+
+      // OPTION A: durable pickDecision record, one JSON line per pick (same pattern as
+      // compose-lessons.jsonl). Fail-open: emission must never block or fail the pick.
+      try {
+        const pickClass = gapClassOf(chosen.g);
+        const pickPost = classPosteriorsNow[pickClass] ?? { alpha: 1, beta: 1 };
+        appendFileSync(PICK_DECISIONS_PATH, JSON.stringify({
+          at: new Date().toISOString(),
+          gap_id: String(chosen.g.id ?? ""),
+          class: pickClass,
+          theta_sampled: Number((classTheta.get(pickClass) ?? 0.5).toFixed(4)),
+          alpha: pickPost.alpha,
+          beta: pickPost.beta,
+          score: Number(chosen.s.toFixed(4)),
+          cooldown_state: { skipped_pending: skippedPending },
+          pool: selectionPool.length,
+          alternatives_top3: ranked.slice(0, 3).map((r) => ({ gap_id: String(r.g.id ?? ""), class: gapClassOf(r.g), score: Number(r.s.toFixed(4)) })),
+        }) + "\n");
+      } catch { /* observability, never control flow */ }
+      // STAMP THE COUNTERFACTUAL AT THE MOMENT OF THE DECISION.
+      //
+      // The log line above already records WHY this gap was chosen (law 12). What it does not
+      // record is the value of the gap's own falsifier BEFORE anything acts on it — and without
+      // that, a later re-measurement can only say "the defect is absent now", which is
+      // indistinguishable from a predicate that was inert all along. That indistinguishability is
+      // how a false close is manufactured, and it looks exactly like success.
+      //
+      // Fire-and-forget on purpose: selection must not block on I/O, and losing a baseline costs a
+      // later verdict of "inconclusive" — honest, and far cheaper than delaying every pick.
+      //
+      // Stamped to its own impulse rather than back onto the gap, because substrateGap_write
+      // REPLACES rather than merges and a partial write erases live fields.
+      void (async () => {
+        try {
+          const meta = (chosen.g.classification_metadata ?? {}) as Record<string, unknown>;
+          const literal = typeof meta["hardcoded_url"] === "string" ? (meta["hardcoded_url"] as string) : "";
+          const editSite = typeof meta["edit_site"] === "string" ? (meta["edit_site"] as string) : "";
+          const { measureClass1, stampBaseline, stampEnvironmentBaseline } = await import("./causal-adjudication.js");
+          const actionIdEnv = `pick-${String(chosen.g.id ?? "")}-${new Date().toISOString().slice(0, 16)}`;
+          // EVERY pick gets an environment before-reading, not just the ~1% carrying a predicate.
+          const envOutcome = await stampEnvironmentBaseline(String(chosen.g.id ?? ""), actionIdEnv);
+          console.log(`[gap-to-feature] env-baseline ${envOutcome} for ${String(chosen.g.id ?? "")}`);
+          const root = process.env["REPO_ROOT"] ?? process.env["WORKSPACE_ROOT"] ?? "/workspace/git/super-repo";
+          if (!literal) return; // predicate baseline needs a Class-1 literal; the env one is already stamped
+          const obs = await measureClass1(root, editSite, literal);
+          const actionId = `pick-${String(chosen.g.id ?? "")}-${new Date().toISOString().slice(0, 13)}`;
+          const outcome = await stampBaseline(String(chosen.g.id ?? ""), actionId, obs, "class1");
+          console.log(
+            `[gap-to-feature] baseline ${outcome} for ${String(chosen.g.id ?? "")} ` +
+              `(present=${obs === null ? "unmeasurable" : obs.present})`,
+          );
+        } catch {
+          /* never let counterfactual bookkeeping break selection */
+        }
+      })();
+
+    },
+    ask: askHuman,
   });
-  // A GAP THAT CANNOT BE COMPOSED MUST NOT CONSUME THE PICK (2026-08-28).
-  //
-  // The eligibility test ran only AFTER selection: the branches at `pickConditionCheck ===
-  // 'pending'` (~2300) and `_pickCond === 'pending'` (~2501) correctly refuse to re-compose a
-  // gap that landed once but is unmeasured — a second landing would manufacture the re-land the
-  // close-oracle scores as a false close. But by then the pick was already spent, so the cycle
-  // ended in a no-op and the next tick re-selected the same gap.
-  //
-  // Self-sustaining, because a skipped pick does no work and therefore records no failed
-  // attempt: the score never decays, so the same gap wins again. Measured over 6h on
-  // recommit-route-edit-9077062c-typecheck_dangling_reference-narrowed: 50 picks, 0 composes,
-  // failed_attempts 0, landability 1.0, open since 2026-08-16 — roughly one wasted cycle every
-  // 7 minutes. Over the same window seven eligible operator-filed gaps were never picked once.
-  //
-  // Filter on the SAME predicate the post-selection branches use. 'pending' here is DERIVED at pick
-  // time by verifyGapCondition from landed-commit provenance, because the livelocked gap did not carry
-  // the stored disposition (it was null on that record while it logged PENDING on every pick).
-  // The stored disposition is filtered too, one layer earlier: admission (admitActionableGaps,
-  // isAwaitingLandVerification) excludes disposition pending_verification, because this skip missed
-  // the gaps it cannot judge at pick time (2026-09-30, compose2: 35 of 75 picks went to gaps whose own
-  // commit had already landed). Admission re-admits one once its landing is known not to have fixed it
-  // (regressed_by, BEHAVIORAL VERIFICATION FAILED, or the sweep's release), so the two layers compose.
-  //
-  // Walked lazily rather than applied pool-wide: verifyGapCondition -> landedCommitVerdict
-  // spawns `git log --grep` per clone plus `git log -1` per matching sha, so evaluating all
-  // ~330 pooled gaps every pick would be hundreds of subprocesses. Walking the ranked list
-  // costs one evaluation per pending gap actually encountered, normally one or two.
-  //
-  // Only 'pending' is skipped. 'absent' must still be selected — the post-selection branch
-  // closes those as already_resolved, which is real work, not a no-op.
-  // Extracted as a pure function with an injected predicate so the skip is unit-testable
-  // without a git checkout — the same reason computeNewlyFailing was extracted in the cutover
-  // resolver. A selection change that only a diff-reader has inspected is the inert-landing
-  // risk fc-coverage warns about: only a test actually runs it.
-  // SKIP A LANDED-BUT-UNVERIFIED GAP WHATEVER ITS VERDICT — not just 'pending'.
-  //
-  // This filter used to test `=== 'pending'` only, which protects a gap for exactly one
-  // landing and then stops. Class-3 provenance returns 'pending' for a SINGLE landing and
-  // 'present' for a RE-LAND, so the moment a gap lands twice it flips to 'present', drops out
-  // of this skip, and is re-composed again — which produces a third landing, which is still
-  // 'present'. The first re-land permanently removes the protection and guarantees the next.
-  //
-  // Measured 2026-08-31: `gap-env-gated-write-allowlist` has SIX substrate-authored commits,
-  // every one editing src/resolvers/fs-write.ts — three of them inside 67 minutes on 08-17,
-  // and one on 08-30 as a recommit-recommit-. At ~4% compose success those are among the most
-  // expensive artifacts the lane produces, all spent re-fixing the same file. bafd83d in that
-  // list is the commit §12.6 names as "the inert-diff hole": the operator fix stopped the
-  // FALSE CLOSE and did nothing about the RE-WORK.
-  //
-  // The distinction that matters: a CLASS-1 'present' is MEASURED — the literal is still in
-  // the file, the fix genuinely did not work, retrying is right. A CLASS-3 'present' only
-  // means "landed >= 2 times"; it is evidence of churn, not of a surviving defect, and
-  // treating it as a retry signal is backwards. So skip on the pending-verification STAMP for
-  // gaps that carry no measurable predicate, and leave measured gaps alone.
-  //
-  // Over-skipping is the safe direction here. These gaps are already landed and already
-  // escalated to a human; another compose cannot close them (only a predicate or a human
-  // can), so skipping frees the scarcest resource in the system. chooseFirstActionable still
-  // fails open when every candidate is skipped, so the lane cannot starve.
-  const { chosen, skippedPending } = chooseFirstActionable(ranked, (g) => {
-
-    const m = (g as { classification_metadata?: Record<string, unknown> }).classification_metadata ?? {};
-    const landedAwaitingVerification = typeof m.pending_outcome_verification === 'string'
-      && (m.pending_outcome_verification as string).length >= 7;
-    const hasMeasurablePredicate = typeof m.hardcoded_url === 'string'
-      || typeof m.evidence_resolve === 'string' || typeof m.verify_shape === 'string' || typeof m.expected_literal === 'string';
-    const operatorHold = ((m as { operator_hold?: unknown }).operator_hold as boolean | undefined) === true;
-    if (operatorHold) return true;
-    // A falsified landing still in HEAD: another compose would build on the regression. Held until
-    // its revert is recorded (regressed_by.revert_sha).
-    const regressedBy = m.regressed_by as { revert_sha?: unknown } | null | undefined;
-    if (regressedBy && typeof regressedBy === 'object' && !regressedBy.revert_sha) return true;
-    if (landedAwaitingVerification && !hasMeasurablePredicate) return true;
-    // A NARROWED CHILD WAITS WHILE ITS PARENT'S LANDING IS UNJUDGED (2026-09-28). The child repeats
-    // its parent's defect at the same site; composing it now edits the parent's fresh lines with no
-    // record that they are the parent's fix (39bef90 -> bc99f91, b20274c -> 9c86aff, each reversed
-    // within 30 min). Skip only; the parent's landing never closes the child (measurement before
-    // provenance). Once the parent's landing is judged, the stamp clears and the child is eligible.
-    const parentId = typeof m.parent_gap_id === 'string' ? m.parent_gap_id : '';
-    if (parentId) {
-      const parent = pickLineageIndex.get(parentId) ?? gaps.find((p) => String(p.id ?? '') === parentId);
-      const pm = (parent?.classification_metadata ?? {}) as Record<string, unknown>;
-      if (typeof pm.pending_outcome_verification === 'string' && (pm.pending_outcome_verification as string).length >= 7) return true;
-    }
-    return verifyGapCondition(g) === 'pending';
-  });
-  const targetOf = (g: Record<string, unknown>): string =>
-    String(((g.classification_metadata ?? g.metadata ?? {}) as Record<string, unknown>).edit_site ?? "(no-target)");
-  // TRACED SELECTION DECISION (law 12: record the counterfactual AT decision time). Without
-  // this line a 90-way tie at one score over one target file is invisible at every
-  // observation point, which is why the sign error above survived beside its own comment.
-  console.log(`[gap-to-feature] pick ${JSON.stringify({
-    owner: process.env["SUBSTRATE_NAME"] ?? "substrate",
-    gap_id: String(chosen.g.id ?? ""),
-    category: String(chosen.g.category ?? ""),
-    target: targetOf(chosen.g),
-    score: Number(chosen.s.toFixed(4)),
-    landability: Number(landabilityScore(chosen.g).toFixed(4)),
-    human_reported: String(chosen.g.source ?? "") === "human_reported",
-    impact: Number(impactOf(chosen.g).toFixed(4)),
-    pool: selectionPool.length,
-    hopeless_excluded: gaps.length - selectionPool.length,
-    operator_hold_excluded: ranked.filter((r) => {
-      const mm = ((r.g as { classification_metadata?: { operator_hold?: unknown } }).classification_metadata) ?? {};
-      return ((mm.operator_hold as boolean | undefined) === true);
-    }).length,
-    skipped_pending: skippedPending,
-    tied_at_top: ranked.filter((r) => Math.abs(r.s - chosen.s) < 1e-9).length,
-    distinct_targets_top20: new Set(ranked.slice(0, 20).map((r) => targetOf(r.g))).size,
-    runner_up: ranked[1] ? { gap_id: String(ranked[1].g.id ?? ""), target: targetOf(ranked[1].g), score: Number(ranked[1].s.toFixed(4)) } : null,
-  })}`);
-
-  // OPTION A: durable pickDecision record, one JSON line per pick (same pattern as
-  // compose-lessons.jsonl). Fail-open: emission must never block or fail the pick.
-  try {
-    const pickClass = gapClassOf(chosen.g);
-    const pickPost = classPosteriorsNow[pickClass] ?? { alpha: 1, beta: 1 };
-    appendFileSync(PICK_DECISIONS_PATH, JSON.stringify({
-      at: new Date().toISOString(),
-      gap_id: String(chosen.g.id ?? ""),
-      class: pickClass,
-      theta_sampled: Number((classTheta.get(pickClass) ?? 0.5).toFixed(4)),
-      alpha: pickPost.alpha,
-      beta: pickPost.beta,
-      score: Number(chosen.s.toFixed(4)),
-      cooldown_state: { skipped_pending: skippedPending },
-      pool: selectionPool.length,
-      alternatives_top3: ranked.slice(0, 3).map((r) => ({ gap_id: String(r.g.id ?? ""), class: gapClassOf(r.g), score: Number(r.s.toFixed(4)) })),
-    }) + "\n");
-  } catch { /* observability, never control flow */ }
-  // STAMP THE COUNTERFACTUAL AT THE MOMENT OF THE DECISION.
-  //
-  // The log line above already records WHY this gap was chosen (law 12). What it does not
-  // record is the value of the gap's own falsifier BEFORE anything acts on it — and without
-  // that, a later re-measurement can only say "the defect is absent now", which is
-  // indistinguishable from a predicate that was inert all along. That indistinguishability is
-  // how a false close is manufactured, and it looks exactly like success.
-  //
-  // Fire-and-forget on purpose: selection must not block on I/O, and losing a baseline costs a
-  // later verdict of "inconclusive" — honest, and far cheaper than delaying every pick.
-  //
-  // Stamped to its own impulse rather than back onto the gap, because substrateGap_write
-  // REPLACES rather than merges and a partial write erases live fields.
-  void (async () => {
-    try {
-      const meta = (chosen.g.classification_metadata ?? {}) as Record<string, unknown>;
-      const literal = typeof meta["hardcoded_url"] === "string" ? (meta["hardcoded_url"] as string) : "";
-      const editSite = typeof meta["edit_site"] === "string" ? (meta["edit_site"] as string) : "";
-      const { measureClass1, stampBaseline, stampEnvironmentBaseline } = await import("./causal-adjudication.js");
-      const actionIdEnv = `pick-${String(chosen.g.id ?? "")}-${new Date().toISOString().slice(0, 16)}`;
-      // EVERY pick gets an environment before-reading, not just the ~1% carrying a predicate.
-      const envOutcome = await stampEnvironmentBaseline(String(chosen.g.id ?? ""), actionIdEnv);
-      console.log(`[gap-to-feature] env-baseline ${envOutcome} for ${String(chosen.g.id ?? "")}`);
-      const root = process.env["REPO_ROOT"] ?? process.env["WORKSPACE_ROOT"] ?? "/workspace/git/super-repo";
-      if (!literal) return; // predicate baseline needs a Class-1 literal; the env one is already stamped
-      const obs = await measureClass1(root, editSite, literal);
-      const actionId = `pick-${String(chosen.g.id ?? "")}-${new Date().toISOString().slice(0, 13)}`;
-      const outcome = await stampBaseline(String(chosen.g.id ?? ""), actionId, obs, "class1");
-      console.log(
-        `[gap-to-feature] baseline ${outcome} for ${String(chosen.g.id ?? "")} ` +
-          `(present=${obs === null ? "unmeasurable" : obs.present})`,
-      );
-    } catch {
-      /* never let counterfactual bookkeeping break selection */
-    }
-  })();
-
-  return chosen.g;
 }
 
 const PICK_DECISIONS_PATH = "/workspace/proposals/pick-decisions.jsonl";
@@ -2068,37 +1669,7 @@ async function routeCapabilityGapToNewResolver(
 
   // Pick-time condition verification: if the gap condition no longer holds,
   // close as already_resolved and skip composing.
-  const pickConditionCheck = verifyGapCondition(gap as Record<string, unknown>);
-  if (pickConditionCheck === 'absent') {
-    console.log(`[gap-to-feature] gap ${String(gap.id ?? '')} condition absent at pick time — closing as already_resolved`);
-    try {
-      const arMeta = { ...((gap.classification_metadata ?? gap.metadata ?? {}) as Record<string, unknown>), resolution: 'already_resolved', closed_reason: 'already_resolved', closed_by: 'gap_to_feature.pick_condition_check', closed_at: new Date().toISOString() };
-      await resolveSubstrateGapWrite({
-        type: "substrateGap_write",
-        gap: {
-          id: String(gap.id ?? ''),
-          category: gap.category,
-          source: gap.source,
-          summary: gap.summary,
-          detected_at: gap.detected_at,
-          classification_metadata: arMeta,
-          status: "closed",
-        },
-      } as never);
-    } catch (writeErr) {
-      console.log(`[gap-to-feature] already_resolved write failed: ${(writeErr as Error).message}`);
-    }
-    return { shape: "gapToFeatureReport", body: { ok: true, gap_id: gap.id, gap_category: gap.category, verdict: "already_resolved", note: "gap condition absent at pick time — closed as already_resolved" } };
-  }
-  if (pickConditionCheck === 'pending') {
-    // A single non-reverted landing already exists for this gap (provenance), but the close-oracle
-    // cannot MEASURE that it resolved the condition. Do NOT re-compose: a second landing would read
-    // as a re-land and manufacture the false-close the oracle is calibrated against (§12.6 step 1).
-    // The pending-verify sweep + human escalation own this gap now; skip composing.
-    console.log(`[gap-to-feature] gap ${String(gap.id ?? '')} PENDING verification at pick time (landed once, unmeasured) — skipping re-compose to avoid a manufactured re-land`);
-    await markPendingVerification(gap, undefined, "pending at pick time: landed once, no measurement predicate — persisted so the candidate filter can exclude it");
-    return { shape: "gapToFeatureReport", body: { ok: true, gap_id: gap.id, gap_category: gap.category, verdict: "pending_verification", note: "landed once but unmeasured — held pending verification; not re-composed" } };
-  }
+  { const settled = await settlePickConditionAtCapabilityRoute(gap); if (settled) return settled; }
 
   const isDirected = (pointer as { directed?: boolean }).directed === true;
   const compose = await resolveFeatureCompose({
@@ -2494,13 +2065,10 @@ async function resolveGapToFeatureOnce(pointer: GapToFeaturePointer, attempt: { 
   // node instead. A forwarded request carries forwarded_from and is never forwarded again; with no
   // single owner found, compose here as before.
   const forwardedFrom = (pointer as { forwarded_from?: string }).forwarded_from;
-  if (pointer.gap_id && !forwardedFrom) {
-    const targetVessel = identifyVessel(gap, (gap.classification_metadata ?? gap.metadata ?? {}) as Record<string, unknown>);
-    const owned = ownedVessels();
-    if (targetVessel && owned.size > 0 && !owned.has(targetVessel)) {
-      const owner = await findComposeOwner(targetVessel);
-      if (owner) {
-        console.log(`[gap-to-feature] directed ${String(gap.id)} routed by ownership → ${owner.vesselId} (${targetVessel} is not owned here)`);
+  {
+    const owner = await directedOwnerRoute(gap, pointer);
+    if (owner) {
+      {
         try {
           const res = await fetch(owner.url, {
             method: "POST",
@@ -2515,7 +2083,6 @@ async function resolveGapToFeatureOnce(pointer: GapToFeaturePointer, attempt: { 
           return { shape: "gapToFeatureReport", body: { ok: false, stage: "route", gap_id: gap.id, routed_to: owner.vesselId, error: `forward to owner failed: ${(e as Error).message}` } };
         }
       }
-      console.log(`[gap-to-feature] directed ${String(gap.id)}: ${targetVessel} is not owned here and no single owner was found; composing here`);
     }
   }
   // Stamp the cooldown at pick-start (covers the whole compose wall time), auto-picks only —
@@ -2586,42 +2153,7 @@ async function resolveGapToFeatureOnce(pointer: GapToFeaturePointer, attempt: { 
 
   // Pick-time condition check: if the surgical gap's cited literal is already
   // absent from the codebase, close it as already_resolved without composing.
-  const _pickCond = verifyGapCondition(gap);
-  if (_pickCond === 'absent') {
-    const closedAt = new Date().toISOString();
-    await resolveSubstrateGapWrite({
-      type: "substrateGap_write",
-      gap: {
-        id: gap.id as string,
-        category: gap.category,
-        source: gap.source,
-        summary: gap.summary,
-        detected_at: gap.detected_at,
-        classification_metadata: { ...((gap.classification_metadata ?? gap.metadata ?? {}) as Record<string, unknown>), resolution: "already_resolved", closed_reason: "already_resolved", closed_by: "gap_to_feature.pick_condition_check", closed_at: closedAt },
-        status: "closed",
-      },
-    } as never);
-    return {
-      shape: "gapToFeatureReport",
-      body: {
-        ok: true,
-        gap_id: gap.id as string,
-        gap_category: gap.category as string,
-        verdict: "already_resolved",
-        note: "gap condition absent at pick time — closed as already_resolved",
-      },
-    };
-  }
-  if (_pickCond === 'pending') {
-    // Landed once but unmeasured — do NOT re-compose (a second landing manufactures a re-land the
-    // close-oracle would score as a false-close). The sweep + human escalation own it. (§12.6 step 1)
-    console.log(`[gap-to-feature] gap ${String(gap.id ?? '')} PENDING verification at pick time — skipping re-compose`);
-    await markPendingVerification(gap, undefined, "pending at pick time (site B): landed once, no measurement predicate — persisted so the candidate filter can exclude it");
-    return {
-      shape: "gapToFeatureReport",
-      body: { ok: true, gap_id: gap.id as string, gap_category: gap.category as string, verdict: "pending_verification", note: "landed once but unmeasured — held pending verification; not re-composed" },
-    };
-  }
+  { const settled = await settlePickCondition(gap); if (settled) return settled; }
 
   // 1a-pre. ALREADY-RESOLVED CHECK for missing_capability gaps: query discovery for a
   // live producer of the candidate shape named in the gap summary. If found, and (when

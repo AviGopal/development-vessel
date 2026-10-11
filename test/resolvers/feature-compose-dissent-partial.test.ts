@@ -344,9 +344,14 @@ describe("a landing over the lane's own semantic dissent is partial, and the dis
     expect(refusal(cm, CHILD_CHECK_META)).toBeNull();
     // Wiring: decomposeGap lets a dissent child through its "a decomposed step is not decomposed again" guard and
     // runs the refusal on the proposed parent_check.
-    const dg = fnNamed(GTF_PATH, "decomposeGap");
+    // decomposeGap's guard and arming moved to the closed gap-admission module (decompositionRefusal, armDecomposition;
+    // gap-to-feature judge split, A2): decomposeGap calls both, so the wiring is read across the three functions.
+    const ADM = new URL("../../src/judge/gap-admission.ts", import.meta.url).pathname;
     const called = new Set<string>();
+    const dg = fnNamed(GTF_PATH, "decomposeGap");
     walk(dg, (n) => { if (ts.isCallExpression(n) && ts.isIdentifier(n.expression)) called.add(n.expression.text); });
+    expect({ decompositionRefusal: called.has("decompositionRefusal"), armDecomposition: called.has("armDecomposition") }).toEqual({ decompositionRefusal: true, armDecomposition: true });
+    for (const fn of ["decompositionRefusal", "armDecomposition"]) walk(fnNamed(ADM, fn), (n) => { if (ts.isCallExpression(n) && ts.isIdentifier(n.expression)) called.add(n.expression.text); });
     expect({ isDissentChild: called.has("isDissentChild"), dissentChildCheckRefusal: called.has("dissentChildCheckRefusal") }).toEqual({ isDissentChild: true, dissentChildCheckRefusal: true });
   });
 

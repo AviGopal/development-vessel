@@ -116,9 +116,11 @@ describe("CONTROL: operator_hold is the boundary", () => {
     expect(spec).toContain(`File facts: ${SITE}`);
   });
 
-  it("the pick skip still returns true for a held gap (pickMostLandable's predicate; no exported seam)", () => {
-    const src = readFileSync(join(import.meta.dir, "..", "..", "src", "resolvers", "gap-to-feature.ts"), "utf8");
-    const pick = src.slice(src.indexOf("function pickMostLandable("));
+  it("the pick skip still returns true for a held gap (the closed pickSkipPending, gap-to-feature judge split A2)", async () => {
+    const { pickSkipPending } = await import("../../src/judge/gap-admission.js");
+    expect(pickSkipPending({ id: "held", classification_metadata: { operator_hold: true } }, [], new Map())).toBe(true);
+    const src = readFileSync(join(import.meta.dir, "..", "..", "src", "judge", "gap-admission.ts"), "utf8");
+    const pick = src.slice(src.indexOf("export function pickSkipPending("));
     const predicate = pick.slice(0, pick.indexOf("return verifyGapCondition(g) === 'pending';"));
     expect(predicate).toContain("const operatorHold = ((m as { operator_hold?: unknown }).operator_hold as boolean | undefined) === true;");
     expect(predicate).toContain("if (operatorHold) return true;");

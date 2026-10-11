@@ -27,7 +27,7 @@ import { resolveDispatchGoal } from "./dispatch-goal.js";
 import { resolveUiWritePassthrough } from "./ui-write-passthrough.js";
 
 const solicitedHumanGaps = new Set<string>();
-import { DISCOVERY_ENDPOINT, METABOB_API_KEY, GOAL_HOST_VESSEL_ENDPOINT, lookupShape, describeLookup, discoveryFailureBackoffMs, __resetDiscoveryForTests } from "../config.js";
+import { DISCOVERY_ENDPOINT, METABOB_API_KEY, METABOB_ENDPOINT, GOAL_HOST_VESSEL_ENDPOINT, lookupShape, describeLookup, discoveryFailureBackoffMs, __resetDiscoveryForTests } from "../config.js";
 import { peekComposeCapacity, hasFreeComposeCapacity } from "../compose-slots.js";
 import { gateLanding, landingsStopped } from "./push-policy.js";
 import { readFile } from "node:fs/promises";
@@ -4498,23 +4498,16 @@ async function recordFalsifiedAutonomousLanding(g: Record<string, unknown>, meta
   const intent = ((await readRecords("attemptIntent", { key: attemptId }))[0]?.record ?? null) as { directed?: unknown; decision_id?: unknown } | null;
   if (!intent || intent.directed !== false) return "not_applicable";
   const committedAt = Number(sweepGitOut(cloneDir, ["log", "-1", "--format=%ct", sha]) ?? "0");
-  let startedAt = 0;
-  try {
-    const p = Bun.spawnSync(["systemctl", "show", vessel, "-p", "ActiveEnterTimestamp", "--value", "--timestamp=unix"], { stdout: "pipe", stderr: "pipe", timeout: 5_000 });
-    const m = new TextDecoder().decode(p.stdout).trim().match(/^@(\d+)$/);
-    startedAt = m ? Number(m[1]) : 0;
-  } catch { /* unit unreadable: cannot tell what is running here */ }
+  // Through the auto-revert seam (systemctl show in production), so a fixture can say when the unit restarted.
+  const startedAt = autoRevertDeps.unitStartedAt(vessel);
   if (!startedAt || !committedAt) return "not_applicable";
   const { selfRestartAlreadyOwed } = await import("./vessel-mitosis-cutover.js");
   if (startedAt <= committedAt || selfRestartAlreadyOwed(vessel)) return "awaiting_restart";
   const at = new Date().toISOString();
-  await resolveSubstrateGapWrite({
-    type: "substrateGap_write",
-    gap: {
-      id: String(g.id), category: g.category, source: g.source, summary: g.summary, detected_at: g.detected_at, status: "open",
-      classification_metadata: { ...meta, regressed_by: { sha, at, verdict: "present", attempt_id: attemptId, vessel, revert_sha: null, by: "gap-sweep:falsified_after_restart" } },
-    },
-  } as never);
+  await autoRevertDeps.writeGap({
+    id: String(g.id), category: g.category, source: g.source, summary: g.summary, detected_at: g.detected_at, status: "open",
+    classification_metadata: { ...meta, regressed_by: { sha, at, verdict: "present", attempt_id: attemptId, vessel, revert_sha: null, by: "gap-sweep:falsified_after_restart" } },
+  });
   // The gap store can drop the stamp above (lost-update race, filed), so the next sweep may land here
   // again for the same landing. The local ledger is durable: its #2 settlement is the once-only marker.
   const alreadySettled = (await readRecords("attemptSettlement", { key: `${attemptId}#2` })).length > 0;
@@ -4559,6 +4552,347 @@ async function recordOperatorRegression(g: Record<string, unknown>): Promise<boo
   } as never);
   console.warn(`[gap-sweep] OPERATOR REGRESSION learned gap=${String(g.id)} sha=${sha.slice(0, 12)} attempt=${attemptId} reverted_by=${String(rb.revert_sha).slice(0, 12)} — settlement regressed, posterior miss, lesson written`);
   return true;
+}
+
+// ── AUTO-REVERT (contained-self-development 8.3 / 8.4 / 8.6) ─────────────────────────────────────────────
+/**
+ * A REGRESSED LANE LANDING IS REVERTED, ONCE, BY THE LANE (REALIGNMENT §7 step 5). A falsified landing was
+ * recorded (regressed_by on the gap, a #2 regressed settlement) and held from re-pick "until reverted", and nothing
+ * reverted it: 0 auto-reverts ever, four falsified shas still ancestors of origin/dev 11-12 days on.
+ *
+ * The trigger is the LOCAL LEDGER's regressed settlement (#1 from the attempt sweep, #2 falsified_after_restart from
+ * the pending-land sweep), never the gap stamp: the store drops writes (8.4b) and the ledger does not. The ledger is
+ * node-local, so a node reverts only landings whose attempt it registered, and two nodes never revert one sha. A
+ * settlement of an attempt the operator already reverted (an operator_revert #2) is not a candidate.
+ *
+ * Guards, in order; each refusal is one `[auto-revert]` line and a counter, never a throw and never a row change:
+ *   1. well-formed: sha hex, attempt id in the ledger's form, the sha a commit in HEAD of a vessel clone, and the gap
+ *      row's regressed_by stamp, when there is one, naming this sha, attempt and an existing clone, written by the
+ *      falsified sweep and not yet reverted. A literal-template row (the leaked `g.id` / "sha" / "attemptId" /
+ *      "vessel") reads skipped=malformed and is left as it is.
+ *   2. owned and autonomous: a local attemptIntent with directed === false exactly (absent or unknown is not
+ *      autonomous) and a route that is not auto_revert. Author identity cannot separate the two: operator
+ *      exact-edits are committed as Substrate Autonomous too.
+ *   3. the commit is a lane landing (substrate-authored:, the same Attempt-Id trailer) and not itself a revert.
+ *   4. fresh: the settlement is younger than AUTO_REVERT_MAX_AGE_MS.
+ *   5. not already reverted: a live clone check (shaWasRevertedInAnyClone), which also completes the gap's
+ *      revert_sha and turns a pending marker done (a self-revert of development-vessel that landed and restarted
+ *      before writing done).
+ *   6. one revert per landing: the ledger's attemptRevert marker, written pending BEFORE the cutover. A pending
+ *      older than the cutover lease TTL with no revert in any clone is escalated once (stuck), never re-attempted.
+ *   7. strike limit (8.6): AUTO_REVERT_STRIKE_LIMIT done reverts on one gap put it under operator_hold, a hold
+ *      record with a lift condition and a review_by (AUTO_REVERT_HOLD_REVIEW_MS), and nothing more is reverted.
+ *   8. scope: no reverted file is inside the autonomy scope's exclusions; one that is is escalated, not reverted.
+ *      (The cutover's own autonomy-scope chokepoint refuses it too: a revert is undirected.)
+ * Thresholds are tuning rows read through activity-api; an absent or unreadable row refuses (skipped=no_tuning_row).
+ * The revert itself is vessel-mitosis-cutover.ts REVERT_OF: the same chokepoint, lease and precutover suite as
+ * any landing. After it lands the gap's regressed_by carries revert_sha, which lifts the picker hold and lets the
+ * pending-land sweep release the gap for another attempt.
+ */
+export type AutoRevertDeps = {
+  /** The revert cutover (vessel-mitosis-cutover.ts REVERT_OF). */
+  cutover: (pointer: Record<string, unknown>) => Promise<unknown>;
+  /** When the vessel's unit last entered active, unix seconds; 0 when unknown. */
+  unitStartedAt: (vessel: string) => number;
+  /** A tuning row's value (activity-api /v2/tuning-params/:name); null when absent or unreadable. */
+  tuning: (name: string) => Promise<number | null>;
+  /** The gap row, null when the store holds none; throws when the store cannot be read. */
+  readGap: (id: string) => Promise<Record<string, unknown> | null>;
+  writeGap: (gap: Record<string, unknown>) => Promise<unknown>;
+  scope: () => Promise<AutonomyScope>;
+  now: () => number;
+};
+function systemdUnitStartedAt(vessel: string): number {
+  try {
+    const p = Bun.spawnSync(["systemctl", "show", vessel, "-p", "ActiveEnterTimestamp", "--value", "--timestamp=unix"], { stdout: "pipe", stderr: "pipe", timeout: 5_000 });
+    const m = new TextDecoder().decode(p.stdout).trim().match(/^@(\d+)$/);
+    return m ? Number(m[1]) : 0;
+  } catch { return 0; } // unit unreadable: cannot tell what is running here
+}
+async function readTuningRow(name: string): Promise<number | null> {
+  try {
+    const res = await fetch(`${METABOB_ENDPOINT}/v2/tuning-params/${encodeURIComponent(name)}`, { method: "GET", headers: { Authorization: `ApiKey ${METABOB_API_KEY}` }, signal: AbortSignal.timeout(10_000) });
+    if (!res.ok) return null;
+    const data = (await res.json()) as { value?: unknown };
+    return typeof data.value === "number" && Number.isFinite(data.value) ? data.value : null;
+  } catch { return null; }
+}
+const realAutoRevertDeps: AutoRevertDeps = {
+  cutover: async (p) => (await import("./vessel-mitosis-cutover.js")).resolveVesselMitosisCutover(p as never),
+  unitStartedAt: systemdUnitStartedAt,
+  tuning: readTuningRow,
+  readGap: async (id) => {
+    const r = (await resolveSubstrateGap({ type: "substrateGap", id, limit: 1 } as never)) as { shape?: string; body?: { gaps?: unknown } };
+    if (r?.shape !== "substrateGap" || !Array.isArray(r.body?.gaps)) throw new Error(`gap store answered ${r?.shape ?? "nothing"}`);
+    return ((r.body!.gaps as Array<Record<string, unknown>>).find((g) => String(g?.["id"]) === id)) ?? null;
+  },
+  writeGap: (gap) => resolveSubstrateGapWrite({ type: "substrateGap_write", gap } as never),
+  scope: () => autonomyScope(),
+  now: () => Date.now(),
+};
+let autoRevertDeps: AutoRevertDeps = realAutoRevertDeps;
+const autoRevertSeen = new Set<string>();
+const autoRevertSettled = new Set<string>();
+const autoRevertCounts: Record<string, number> = {};
+/** Tests only: replace any of the reader's dependencies (null restores the real ones); also clears its log de-dup
+ *  and counters, so each fixture starts from a fresh process's state. */
+export function __setAutoRevertDepsForTests(d: Partial<AutoRevertDeps> | null): void {
+  autoRevertDeps = d ? { ...realAutoRevertDeps, ...d } : realAutoRevertDeps;
+  autoRevertSeen.clear();
+  autoRevertSettled.clear();
+  for (const k of Object.keys(autoRevertCounts)) delete autoRevertCounts[k];
+}
+export function getAutoRevertCounters(): Record<string, number> { return { ...autoRevertCounts }; }
+/** Tests only: the function the pending-land sweep's present branch calls (contained-self-development 8.4a). */
+export const __recordFalsifiedAutonomousLandingForTests = (g: Record<string, unknown>, meta: Record<string, unknown>, sha: string) => recordFalsifiedAutonomousLanding(g, meta, sha);
+
+const AUTO_REVERT_ATTEMPT_RE = /^att-[a-z0-9]+-[a-z0-9]+$/;
+const FALSIFIED_STAMP_BY = "gap-sweep:falsified_after_restart";
+type RevertCandidate = { key: string; attempt_id: string; sha: string; gap_id: string; at: number; source: "falsified_after_restart" | "settle_regressed" };
+type RevertMark = { status: string; at: string; gap_id: string; revert_sha?: string };
+type AutoRevertTuning = { maxAgeMs: number; strikeLimit: number; reviewMs: number } | { missing: string };
+
+async function readAutoRevertTuning(deps: AutoRevertDeps): Promise<AutoRevertTuning> {
+  const maxAgeMs = await deps.tuning("AUTO_REVERT_MAX_AGE_MS");
+  if (maxAgeMs === null || !(maxAgeMs > 0)) return { missing: "AUTO_REVERT_MAX_AGE_MS" };
+  const strikeLimit = await deps.tuning("AUTO_REVERT_STRIKE_LIMIT");
+  if (strikeLimit === null || !(strikeLimit >= 1)) return { missing: "AUTO_REVERT_STRIKE_LIMIT" };
+  const reviewMs = await deps.tuning("AUTO_REVERT_HOLD_REVIEW_MS");
+  if (reviewMs === null || !(reviewMs > 0)) return { missing: "AUTO_REVERT_HOLD_REVIEW_MS" };
+  return { maxAgeMs, strikeLimit: Math.floor(strikeLimit), reviewMs };
+}
+
+/** The vessel clone whose HEAD contains `sha`, and its full sha. */
+function locateLandingClone(sha: string): { vessel: string; cloneDir: string; fullSha: string } | null {
+  let names: string[] = [];
+  try { names = readdirSync(vesselsCloneRoot()).sort(); } catch { return null; }
+  for (const name of names) {
+    const dir = join(vesselsCloneRoot(), name);
+    if (!existsSync(join(dir, ".git"))) continue;
+    const full = sweepGitOut(dir, ["rev-parse", "--verify", "--quiet", `${sha}^{commit}`]);
+    if (!full || sweepGitOut(dir, ["merge-base", "--is-ancestor", full, "HEAD"]) === null) continue;
+    return { vessel: name, cloneDir: dir, fullSha: full };
+  }
+  return null;
+}
+/** The newest commit in `cloneDir` that says it reverts `fullSha`, the same pattern shaWasRevertedInAnyClone reads. */
+function revertShaIn(cloneDir: string, fullSha: string): string | null {
+  const out = sweepGitOut(cloneDir, ["log", "-E", "-i", "--grep", `reverts (\\w+ ){0,4}(commit )?(${fullSha}|${fullSha.slice(0, 12)})`, "--format=%H", "-1", `${fullSha}..HEAD`]);
+  return out && /^[0-9a-f]{40}$/.test(out) ? out : null;
+}
+
+export async function autoRevertRegressedLandings(): Promise<{ decisions: Array<{ settlement: string; gap_id: string; sha: string; result: string }> }> {
+  const deps = autoRevertDeps;
+  const { readRecords, appendRecord: append } = await import("./attempt-ledger.js");
+  const { CUTOVER_LEASE_TTL_MS } = await import("./vessel-mitosis-cutover.js");
+  const decisions: Array<{ settlement: string; gap_id: string; sha: string; result: string }> = [];
+  const now = deps.now();
+
+  // Candidates: one per attempt, its newest regressed settlement. An attempt the operator reverted is not one.
+  const rows = readRecords("attemptSettlement");
+  const operatorReverted = new Set(rows.filter((r) => (r.record as { source?: unknown }).source === "operator_revert").map((r) => String((r.record as { attempt_id?: unknown }).attempt_id ?? "")));
+  const byAttempt = new Map<string, RevertCandidate>();
+  for (const r of rows) {
+    const rec = r.record as { verdict?: unknown; attempt_id?: unknown; shas?: unknown; gap_id?: unknown; at?: unknown; source?: unknown };
+    if (rec.verdict !== "regressed") continue;
+    const att = String(rec.attempt_id ?? "");
+    if (operatorReverted.has(att)) continue;
+    const shas = Array.isArray(rec.shas) ? (rec.shas as unknown[]).map(String) : [];
+    const c: RevertCandidate = {
+      key: r.key, attempt_id: att, sha: shas[shas.length - 1] ?? "", gap_id: typeof rec.gap_id === "string" ? rec.gap_id : "",
+      at: Date.parse(String(rec.at ?? r.at)), source: rec.source === "falsified_after_restart" ? "falsified_after_restart" : "settle_regressed",
+    };
+    const prev = byAttempt.get(att);
+    if (!prev || !(c.at < prev.at)) byAttempt.set(att, c);
+  }
+  // The marker: one record per transition, keyed `<attempt>#revert:<seq>:<status>`, latest by file order.
+  const marks = (att: string): RevertMark[] => readRecords("attemptRevert").filter((r) => (r.record as { reverted_attempt_id?: unknown }).reverted_attempt_id === att).map((r) => r.record as unknown as RevertMark);
+  const mark = (att: string, status: string, rec: Record<string, unknown>): void => {
+    append("attemptRevert", `${att}#revert:${marks(att).length}:${status}`, { reverted_attempt_id: att, status, at: new Date(deps.now()).toISOString(), ...rec });
+  };
+  const latestMarkByAttempt = (): Map<string, RevertMark> => {
+    const m = new Map<string, RevertMark>();
+    for (const r of readRecords("attemptRevert")) m.set(String((r.record as { reverted_attempt_id?: unknown }).reverted_attempt_id ?? ""), r.record as unknown as RevertMark);
+    return m;
+  };
+  let tuning: Promise<AutoRevertTuning> | null = null;
+
+  for (const c of [...byAttempt.values()].sort((a, b) => (a.at || 0) - (b.at || 0))) {
+    if (autoRevertSettled.has(c.key)) continue;
+    let vessel = "";
+    let gapId = c.gap_id;
+    const ageS = Number.isFinite(c.at) ? Math.max(0, Math.round((now - c.at) / 1000)) : -1;
+    const decide = (result: string, counter: string, settled = false): string => {
+      autoRevertCounts[counter] = (autoRevertCounts[counter] ?? 0) + 1;
+      if (settled) autoRevertSettled.add(c.key);
+      const seenKey = `${c.key}|${result}`;
+      if (!autoRevertSeen.has(seenKey)) {
+        autoRevertSeen.add(seenKey);
+        console.warn(`[auto-revert] gap=${gapId || "?"} reverted_sha=${c.sha.slice(0, 12) || "?"} settlement=${c.key} source=${c.source} result=${result} vessel=${vessel || "?"} age_s=${ageS}`);
+      }
+      decisions.push({ settlement: c.key, gap_id: gapId, sha: c.sha, result });
+      return result;
+    };
+    try {
+      // 1. Well-formed (the ledger row).
+      if (!/^[0-9a-f]{7,40}$/.test(c.sha) || !AUTO_REVERT_ATTEMPT_RE.test(c.attempt_id) || !Number.isFinite(c.at)) { decide("skipped=malformed", "malformed_regressed_by", true); continue; }
+      // 2. Owned and autonomous.
+      const intent = (readRecords("attemptIntent", { key: c.attempt_id })[0]?.record ?? null) as { directed?: unknown; route?: unknown; gap_id?: unknown } | null;
+      if (!intent) { decide("skipped=not_owned", "not_owned", true); continue; }
+      if (intent.directed !== false) { decide("skipped=directed", "directed", true); continue; }
+      if (intent.route === "auto_revert") { decide("skipped=is_revert", "is_revert", true); continue; }
+      if (!gapId && typeof intent.gap_id === "string") gapId = intent.gap_id;
+      const loc = locateLandingClone(c.sha);
+      if (!loc || !gapId || gapId.startsWith("unknown")) { decide("skipped=malformed", "malformed_regressed_by", true); continue; }
+      vessel = loc.vessel;
+      // 1, continued. The gap row's stamp, when it carries one, must name this landing (qa F10).
+      let row: Record<string, unknown> | null;
+      try { row = await deps.readGap(gapId); } catch { decide("skipped=gap_store_unavailable", "gap_store_unavailable"); continue; }
+      const meta = ((row?.["classification_metadata"] ?? {}) as Record<string, unknown>);
+      const rb = meta["regressed_by"] as Record<string, unknown> | null | undefined;
+      if (rb !== undefined && rb !== null) {
+        if (typeof rb !== "object" || Array.isArray(rb)) { decide("skipped=malformed", "malformed_regressed_by", true); continue; }
+        if (rb["revert_sha"]) { decide("skipped=already_reverted", "already_reverted"); continue; }
+        const stampSha = typeof rb["sha"] === "string" ? rb["sha"] : "";
+        const stampVessel = typeof rb["vessel"] === "string" ? rb["vessel"] : "";
+        const stampOk = /^[0-9a-f]{7,40}$/.test(stampSha) && loc.fullSha.startsWith(stampSha)
+          && stampVessel === loc.vessel && /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(stampVessel) && existsSync(join(vesselsCloneRoot(), stampVessel, ".git"))
+          && rb["attempt_id"] === c.attempt_id && rb["by"] === FALSIFIED_STAMP_BY;
+        if (!stampOk) { decide("skipped=malformed", "malformed_regressed_by", true); continue; }
+      }
+      // 3. A lane landing, not a revert.
+      const body = sweepGitOut(loc.cloneDir, ["log", "-1", "--format=%B", loc.fullSha]) ?? "";
+      if (/^Auto-Revert:\s*true\s*$/mi.test(body) || /^Revert "/.test(body) || /This reverts commit/i.test(body)) { decide("skipped=is_revert", "is_revert", true); continue; }
+      const trailerAtt = (sweepGitOut(loc.cloneDir, ["log", "-1", "--format=%(trailers:key=Attempt-Id,valueonly)", loc.fullSha]) ?? "").trim();
+      if (!body.startsWith("substrate-authored:") || trailerAtt !== c.attempt_id) { decide("skipped=not_lane_landing", "not_lane_landing", true); continue; }
+      // 4. Fresh, against the tuning rows (fail closed).
+      const t = await (tuning ??= readAutoRevertTuning(deps));
+      if ("missing" in t) { decide(`skipped=no_tuning_row name=${t.missing}`, "no_tuning_row"); continue; }
+      if (!(now - c.at <= t.maxAgeMs)) { decide("skipped=stale", "stale", true); continue; }
+      const gapWrite = async (cm: Record<string, unknown>): Promise<void> => {
+        if (!row) return;
+        try {
+          await deps.writeGap({ id: gapId, category: row["category"], source: row["source"], summary: row["summary"], detected_at: row["detected_at"], status: row["status"] ?? "open", classification_metadata: cm });
+        } catch (err) { console.warn(`[auto-revert] gap=${gapId} write failed (the ledger marker holds): ${String(err).slice(0, 200)}`); }
+      };
+      const completeRevertSha = async (revertSha: string): Promise<void> => {
+        const base = rb && typeof rb === "object" ? rb : { sha: loc.fullSha, at: new Date(c.at).toISOString(), verdict: "regressed", attempt_id: c.attempt_id, vessel: loc.vessel, by: `auto-revert:${c.source}` };
+        await gapWrite({ regressed_by: { ...base, revert_sha: revertSha, revert_status: "done", reverted_by: "auto-revert", reverted_at: new Date(deps.now()).toISOString(), learned_at: (base as { learned_at?: unknown }).learned_at ?? new Date(deps.now()).toISOString() } });
+      };
+      const escalate = async (kind: string, detail: string): Promise<void> => {
+        await gapWrite({ disposition: "needs_information", auto_revert_escalation: { kind, detail: detail.slice(0, 400), settlement: c.key, sha: loc.fullSha, at: new Date(deps.now()).toISOString() } });
+      };
+      // 5. Already reverted (live).
+      if (shaWasRevertedInAnyClone(loc.fullSha)) {
+        const revertSha = revertShaIn(loc.cloneDir, loc.fullSha);
+        if (revertSha) {
+          await completeRevertSha(revertSha);
+          if (marks(c.attempt_id).at(-1)?.status === "pending") mark(c.attempt_id, "done", { gap_id: gapId, sha: loc.fullSha, revert_sha: revertSha, reconciled: true });
+        }
+        decide("skipped=already_reverted", "already_reverted");
+        continue;
+      }
+      // 6. One revert per landing.
+      const latest = marks(c.attempt_id).at(-1);
+      if (latest) {
+        if (latest.status === "pending") {
+          if (now - Date.parse(latest.at) > CUTOVER_LEASE_TTL_MS) {
+            mark(c.attempt_id, "stuck", { gap_id: gapId, sha: loc.fullSha });
+            await escalate("stuck", `a revert of ${loc.fullSha.slice(0, 12)} was started at ${latest.at} and never finished; no revert is in any clone`);
+            decide("stuck", "stuck");
+          } else decide("skipped=in_flight", "in_flight");
+          continue;
+        }
+        if (latest.status !== "deferred") { decide(`skipped=already_attempted status=${latest.status}`, "already_attempted"); continue; }
+      }
+      // 7. Strike limit (8.6): done reverts only; a retry, a conflict or a refusal is not a strike.
+      const latestAll = latestMarkByAttempt();
+      const done = [...latestAll.values()].filter((m) => m.status === "done" && m.gap_id === gapId);
+      if (done.length >= t.strikeLimit) {
+        const atMs = deps.now(); // one clock read: review_by is exactly at + the review interval
+        const at = new Date(atMs).toISOString();
+        const hold = {
+          hold_id: `auto-revert-strike-${gapId}`, scope: `gap:${gapId}`, active: true, by: "auto-revert:strike_limit", at,
+          reason: `${done.length} auto-revert(s) of this gap's landings (limit ${t.strikeLimit}); another regressed landing of it is not reverted automatically`,
+          evidence: done.map((m) => m.revert_sha ?? "").filter(Boolean).length > 0 ? done.map((m) => m.revert_sha ?? "").filter(Boolean) : [c.key],
+          lift: "an operator reviews the reverts and either clears operator_hold (the lane may land and auto-revert again) or re-scopes or closes the gap",
+          review_by: new Date(atMs + t.reviewMs).toISOString(), harm: false,
+        };
+        mark(c.attempt_id, "strike_hold", { gap_id: gapId, sha: loc.fullSha, hold });
+        await gapWrite({ operator_hold: true, operator_hold_reason: hold.reason, disposition: "needs_information", auto_revert_hold: hold });
+        decide("strike_hold", "strike_hold");
+        continue;
+      }
+      // 8. Scope.
+      const files = (sweepGitOut(loc.cloneDir, ["diff-tree", "--no-commit-id", "--name-only", "-r", loc.fullSha]) ?? "").split("\n").map((f) => f.trim()).filter(Boolean);
+      const scope = await deps.scope();
+      if (!scope.readable) { decide("skipped=scope_unreadable", "scope_unreadable"); continue; }
+      const hits = files.map((f) => autonomyScopeExcludes(scope, `repos/${loc.vessel}/${f}`)).filter((h): h is string => !!h);
+      if (files.length === 0 || hits.length > 0) {
+        mark(c.attempt_id, "refused", { gap_id: gapId, sha: loc.fullSha, reason: files.length === 0 ? "no_files" : "out_of_scope", hits });
+        await escalate("out_of_scope", files.length === 0 ? "the landing changed no file" : `the landing touched autonomy-scope excluded path(s) ${[...new Set(hits)].join(", ")}; an autonomous commit there is an anomaly to look at, not to revert automatically`);
+        decide("skipped=out_of_scope", "out_of_scope");
+        continue;
+      }
+      // The marker BEFORE the cutover: a revert of development-vessel restarts this process.
+      mark(c.attempt_id, "pending", { gap_id: gapId, sha: loc.fullSha, vessel: loc.vessel, settlement: c.key });
+      const res = (await deps.cutover({
+        type: "vessel_mitosis_cutover", vessel_name: loc.vessel, base_version_id: "auto-revert", mitosis_version_id: `revert-${c.attempt_id}`,
+        evaluation_evidence: { verdict: "AUTO_REVERT", base_success_rate: 0, mitosis_success_rate: 0, cited_trace_ids: [], cited_check_names: [`settlement:${c.key}`] },
+        gap_id: gapId,
+        revert_of: { sha: loc.fullSha, attempt_id: c.attempt_id, settlement_key: c.key, gap_id: gapId, files, source: c.source },
+      })) as { shape?: string; body?: Record<string, unknown> } | null;
+      const rbody = (res?.body ?? {}) as Record<string, unknown>;
+      const newSha = typeof rbody["new_git_sha"] === "string" ? (rbody["new_git_sha"] as string) : "";
+      if (res?.shape === "cutoverApplied" && rbody["push_status"] === "pushed" && /^[0-9a-f]{7,40}$/.test(newSha)) {
+        mark(c.attempt_id, "done", { gap_id: gapId, sha: loc.fullSha, revert_sha: newSha });
+        await completeRevertSha(newSha);
+        decide(`reverted revert_sha=${newSha.slice(0, 12)}`, "reverted");
+      } else if (rbody["skip_reason"] === "already_reverted") {
+        mark(c.attempt_id, "refused", { gap_id: gapId, sha: loc.fullSha, reason: "already_reverted" });
+        decide("skipped=already_reverted", "already_reverted");
+      } else if (rbody["kind"] === "revert_conflict") {
+        mark(c.attempt_id, "conflict", { gap_id: gapId, sha: loc.fullSha });
+        await escalate("conflict", String(rbody["refusal_reason"] ?? rbody["detail"] ?? "revert conflicts with later edits"));
+        decide("conflict", "conflict");
+      } else if (res?.shape === "cutoverDeferred" || rbody["deferred"] === true || ["env_change_window_held", "proposal_lease_held", "push_kill_switch"].includes(String(rbody["kind"] ?? ""))) {
+        // An environment condition, not a verdict on the revert: retried on a later tick while it is fresh.
+        mark(c.attempt_id, "deferred", { gap_id: gapId, sha: loc.fullSha, reason: String(rbody["kind"] ?? rbody["reason"] ?? res?.shape ?? "deferred") });
+        decide("skipped=deferred", "deferred");
+      } else {
+        const reason = res?.shape === "cutoverApplied" ? `push_${String(rbody["push_status"] ?? "unknown")}` : String(rbody["kind"] ?? rbody["skip_reason"] ?? res?.shape ?? "no_result");
+        mark(c.attempt_id, "refused", { gap_id: gapId, sha: loc.fullSha, reason });
+        await escalate("refused", `the revert cutover refused: ${reason}`);
+        decide(`refused reason=${reason}`, "refused");
+      }
+    } catch (err) {
+      // A throw mid-revert (the process may be dying with it): the pending marker stays, and decides the next run.
+      autoRevertCounts["error"] = (autoRevertCounts["error"] ?? 0) + 1;
+      console.error(`[auto-revert] gap=${gapId || "?"} reverted_sha=${c.sha.slice(0, 12) || "?"} settlement=${c.key} source=${c.source} result=error vessel=${vessel || "?"} age_s=${ageS} — ${String(err).slice(0, 200)}`);
+      decisions.push({ settlement: c.key, gap_id: gapId, sha: c.sha, result: "error" });
+    }
+  }
+  // A strike hold is reviewed by its date: past review_by while still the latest record, it is said again (once).
+  for (const [att, m] of latestMarkByAttempt()) {
+    const review = (m as unknown as { hold?: { review_by?: unknown } }).hold?.review_by;
+    if (m.status !== "strike_hold" || typeof review !== "string" || !(Date.parse(review) < now)) continue;
+    const k = `${att}|hold_review_due`;
+    if (autoRevertSeen.has(k)) continue;
+    autoRevertSeen.add(k);
+    autoRevertCounts["hold_review_due"] = (autoRevertCounts["hold_review_due"] ?? 0) + 1;
+    console.warn(`[auto-revert] hold_review_due gap=${m.gap_id} attempt=${att} review_by=${review} — the strike hold is past its review date`);
+  }
+  return { decisions };
+}
+let autoRevertInFlight = false;
+/** Starts the reader unless one is running (the sweep's inline call and the tick's catch-up share it). Not awaited:
+ *  a revert runs the precutover suite. */
+function kickAutoRevert(from: "inline" | "tick"): void {
+  if (autoRevertInFlight) return;
+  autoRevertInFlight = true;
+  void autoRevertRegressedLandings()
+    .catch((e) => console.error(`[auto-revert] reader failed (${from}): ${(e as Error).message}`))
+    .finally(() => { autoRevertInFlight = false; });
 }
 
 /**
@@ -4836,6 +5170,8 @@ const pending = candidates.unheld
         // A semantic dissent's by-effect check fails only on a 'present' ATTRIBUTABLE to the landing (the
         // landed code is running here); a 'present' read before the restart says nothing about it.
         if (falsified === "recorded") {
+          // 8.4: the settlement is written; revert now (the reader keys off the ledger row, not this stamp).
+          kickAutoRevert("inline");
           await resolveDissentOutcome(gidSweep, { result: "failed" }).catch(dissentOutcomeUnwritten(gidSweep, "failed"));
           tally.falsified += 1;
           continue;
@@ -6837,6 +7173,9 @@ async function resolveGapToFeatureOnce(pointer: GapToFeaturePointer, attempt: { 
     const d = await decomposeGap(found, { directed: (pointer as { directed?: boolean }).directed === true });
     return { shape: "gapToFeatureReport", body: { ok: d.written.length > 0, stage: "decompose", gap_id: decomposeId, children: d.written, reason: d.reason } };
   }
+  // 0-. AUTO-REVERT CATCH-UP, before the clone-heads fingerprint: a #1 regressed settlement from the attempt
+  // sweep moves no HEAD, so behind the fingerprint it would wait for an unrelated landing. Not awaited.
+  kickAutoRevert("tick");
   // 0. Land→close continuity: complete deferred self-cutover closures BEFORE selection,
   // so an already-landed gap cannot be re-picked and re-landed. Cheap, bounded, best-effort.
   try {

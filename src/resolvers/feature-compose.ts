@@ -1875,8 +1875,8 @@ export function detectUnadvertisedShapeLiteral(
  * the vocabulary load, the fail-open rule, the detector, and the SemanticGateVerdict
  * that the downstream `!addresses` branch consumes.
  *
- * Returns null to admit the diff (including every fail-open case), or the refusal
- * verdict. It is routed through the EXISTING semantic-gate plumbing rather than a
+ * Returns null to admit the diff (including the detector's abstentions), or the refusal
+ * verdict; a vocabulary load that throws is a refusal (fail closed). It is routed through the EXISTING semantic-gate plumbing rather than a
  * parallel branch, so a refusal inherits the verdict flip, the rollback, and — the part
  * that closes the class rather than merely blocking it — the `semantic_gate_reason`
  * write-back that `priorAttemptFeedbackBlock` injects into the next draft.
@@ -1890,11 +1890,21 @@ export function shapeVocabularyRefusal(
 ): SemanticGateVerdict | null {
   let vocabulary = opts?.vocabulary;
   if (!vocabulary) {
-    // A throw here must admit the diff, never wedge the lane (invariant 1).
+    // FAIL CLOSED on a load that THROWS. A loader that cannot run at all is not a partial view of the fleet
+    // (that case, a vocabulary too small to judge against, still abstains in detectUnadvertisedShapeLiteral);
+    // it is a broken gate, and a broken gate does not admit. Routed as a hard_fail through the same plumbing
+    // as a refusal, so the verdict flips and the reason reaches the gap.
     try { vocabulary = loadFleetShapeVocabulary(undefined, opts?.vesselRoots); }
     catch (err) {
-      console.log(`[fc-shape-vocab] FAIL-OPEN (admitting diff unjudged): vocabulary load failed: ${String(err)}`);
-      return null;
+      console.log(`[fc-shape-vocab] REFUSED (fail closed): the shape vocabulary could not be loaded: ${String(err)}`);
+      return {
+        addresses: false,
+        reason: `[fc-shape-vocab] the shape vocabulary is unreadable (load failed: ${String(err).slice(0, 200)}), so the diff's resolve-position shape literals cannot be checked against discovery.shapes; an unchecked diff does not pass (fail closed)`,
+        on_live_path: true,
+        hard_fail: true,
+        llm_consulted: false,
+        verified: false,
+      };
     }
   }
   const findings = detectUnadvertisedShapeLiteral(diff, vocabulary);

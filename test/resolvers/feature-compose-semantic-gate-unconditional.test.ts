@@ -317,3 +317,34 @@ describe("verifyPatchAddressesGap fails closed when its judge does not judge", (
     expect({ verdict: r.body.verdict, addresses: g.addresses, verified: g.verified }).toEqual({ verdict: "UNFAVORABLE", addresses: false, verified: false });
   });
 });
+
+// ── FAIL CLOSED: A VOCABULARY THAT CANNOT BE LOADED DOES NOT ADMIT ───────────────────────────────────────────
+// shapeVocabularyRefusal returned null (admit) when loadFleetShapeVocabulary threw. The throw is induced through the
+// call site's own vesselRoots argument (an iterable that throws when the loader walks it); no module is mocked.
+const VOCAB_DIFF = [
+  `### /vessels/${VESSEL}/src/resolvers/w.ts`, `--- a/${VESSEL}/src/resolvers/w.ts`, "@@ -1,1 +1,3 @@",
+  "+  evidence_resolve: {", '+    shape: "failurePatternReport",', "+  },",
+].join("\n");
+const throwingRoots = { [Symbol.iterator]() { throw new Error("vocabulary roots unreadable (test)"); } } as unknown as string[];
+
+describe("shapeVocabularyRefusal fails closed when the vocabulary cannot be loaded", () => {
+  it("CONTROL: with the vocabulary loadable, an unadvertised shape is refused and a clean diff admitted, as before", async () => {
+    const fc = await freshFc("unset");
+    const bad = fc.shapeVocabularyRefusal(VOCAB_DIFF, { vesselRoots: [] });
+    expect({ addresses: bad?.addresses, hard_fail: bad?.hard_fail, verified: bad?.verified }).toEqual({ addresses: false, hard_fail: true, verified: true });
+    expect(fc.shapeVocabularyRefusal(VOCAB_DIFF.replace("failurePatternReport", "trace_failure_pattern_report"), { vesselRoots: [] })).toBeNull();
+  });
+  it("MUST-FAIL: the vocabulary load THROWS -> a hard_fail refusal naming the unreadable vocabulary, not null", async () => {
+    const fc = await freshFc("unset");
+    const v = fc.shapeVocabularyRefusal(VOCAB_DIFF, { vesselRoots: throwingRoots });
+    expect(v).not.toBeNull();
+    expect({ addresses: v?.addresses, hard_fail: v?.hard_fail, llm_consulted: v?.llm_consulted }).toEqual({ addresses: false, hard_fail: true, llm_consulted: false });
+    expect(String(v?.reason)).toMatch(/vocabulary is unreadable[\s\S]*vocabulary roots unreadable \(test\)/);
+  });
+  it("MUST-FAIL: the load throws on a CLEAN diff too: an unchecked diff is not admitted", async () => {
+    const fc = await freshFc("unset");
+    const clean = VOCAB_DIFF.replace("failurePatternReport", "trace_failure_pattern_report");
+    const v = fc.shapeVocabularyRefusal(clean, { vesselRoots: throwingRoots });
+    expect({ addresses: v?.addresses, hard_fail: v?.hard_fail }).toEqual({ addresses: false, hard_fail: true });
+  });
+});

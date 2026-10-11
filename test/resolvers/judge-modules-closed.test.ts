@@ -46,6 +46,8 @@ const EXCLUDED_SRC_MIRROR = [
   // the refusal record's writer check.
   "src/judge/gap-eligibility.ts", "src/judge/gap-policy.ts", "src/judge/gap-check-judge.ts", "src/judge/gap-attempt-credit.ts",
   "src/judge/gap-landing-verdict.ts", "src/judge/gap-admission.ts",
+  // The core's directory entry (qa ruling): mirrored as written; membership here is exact-path, so it adds no file.
+  "src/judge/",
   "src/resolvers/attempt-ledger.ts", "src/lib/operator-hold.ts", "src/test-child-env.ts", "src/resolvers/patch-with-tools.ts",
   "src/lib/operator-direct.ts", "src/resolvers/intervention-evaluate.ts",
 ];

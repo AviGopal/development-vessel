@@ -211,6 +211,9 @@ export const SCOPE_CLASSIFICATION: Readonly<Record<string, ScopeClass>> = {
   "repos/development-vessel/src/judge/gap-attempt-credit.ts": { class: "judge_trust", reason: "evaluator file: attempt credit, landability and the floor inputs (credit)" },
   "repos/development-vessel/src/judge/gap-landing-verdict.ts": { class: "judge_trust", reason: "evaluator file: close, pending-land sweep, settlement and auto-revert (verdict, settlement)" },
   "repos/development-vessel/src/judge/gap-admission.ts": { class: "judge_trust", reason: "evaluator file: admission, pick gates, arming and the owner route (verdict)" },
+  // The core's DIRECTORY (qa ruling on the act): a module added to src/judge/ later is closed by prefix the moment it
+  // exists (autonomyScopeExcludes matches an entry ending "/" by prefix), not only once someone lists it by name.
+  "repos/development-vessel/src/judge/": { class: "judge_trust", reason: "the gap-judge core directory: any module under it decides a gate, verdict, credit or floor input (verdict)" },
   "repos/development-vessel/test/resolvers/judge-modules-closed.test.ts": { class: "judge_trust", reason: "evaluator file: pins that the core is closed and the residue holds no judge (judge tests)" },
   "repos/development-vessel/src/resolvers/attempt-ledger.ts": { class: "judge_trust", reason: "evaluator file: the intent and settlement records the credit and revert read (settlement)" },
   "repos/development-vessel/src/lib/operator-hold.ts": { class: "judge_trust", reason: "evaluator file: the hold predicates the landing verdict gates on (verdict)" },
@@ -219,6 +222,17 @@ export const SCOPE_CLASSIFICATION: Readonly<Record<string, ScopeClass>> = {
   "repos/development-vessel/src/resolvers/intervention-evaluate.ts": { class: "judge_trust", reason: "the refusal record's writer check: only its writer may rewrite it (credential, verdict)" },
   "repos/development-vessel/test/helpers/runtime-root.ts": { class: "judge_trust", reason: "evaluator file: the runtime-root helper the protected tests import (judge tests)" },
   "repos/development-vessel/test/judge-split/": { class: "judge_trust", reason: "the split pins: stored-row behaviour of every non-pure extraction (judge tests)" },
+  // The split pins again, by FILE: the committed seed lists each one beside the directory so pull-sync's protected gate
+  // (which runs only *.test.ts entries alone) runs every pin alone; a seeded pool carries them, so they are classified.
+  "repos/development-vessel/test/judge-split/pin-arm-decomposition.test.ts": { class: "judge_trust", reason: "a split pin, run alone by the protected gate (judge tests)" },
+  "repos/development-vessel/test/judge-split/pin-arm-gate-closed.test.ts": { class: "judge_trust", reason: "a split pin, run alone by the protected gate (judge tests)" },
+  "repos/development-vessel/test/judge-split/pin-bump-close-settles.test.ts": { class: "judge_trust", reason: "a split pin, run alone by the protected gate (judge tests)" },
+  "repos/development-vessel/test/judge-split/pin-compose-graders.test.ts": { class: "judge_trust", reason: "a split pin, run alone by the protected gate (judge tests)" },
+  "repos/development-vessel/test/judge-split/pin-hopeless-floor-pickskip.test.ts": { class: "judge_trust", reason: "a split pin, run alone by the protected gate (judge tests)" },
+  "repos/development-vessel/test/judge-split/pin-live-producer-probe.test.ts": { class: "judge_trust", reason: "a split pin, run alone by the protected gate (judge tests)" },
+  "repos/development-vessel/test/judge-split/pin-owner-route.test.ts": { class: "judge_trust", reason: "a split pin, run alone by the protected gate (judge tests)" },
+  "repos/development-vessel/test/judge-split/pin-pick-skeleton.test.ts": { class: "judge_trust", reason: "a split pin, run alone by the protected gate (judge tests)" },
+  "repos/development-vessel/test/judge-split/pin-sweep-trigger.test.ts": { class: "judge_trust", reason: "a split pin, run alone by the protected gate (judge tests)" },
   "repos/development-vessel/test/resolvers/composer-interruption-sweep-owned-set.test.ts": { class: "judge_trust", reason: "pins the owned set the sweep reads from the policy module (judge tests)" },
   "repos/development-vessel/test/resolvers/gap-attempt-credit-escalate-wiring.test.ts": { class: "judge_trust", reason: "pins the credit escalation wiring (judge tests)" },
   "repos/development-vessel/test/resolvers/gap-landing-verdict-ask-wiring.test.ts": { class: "judge_trust", reason: "pins every residue call into a landing-verdict escalation passes the ask (judge tests)" },

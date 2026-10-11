@@ -129,6 +129,9 @@ const EXCLUDED_SRC = [
   "src/judge/gap-attempt-credit.ts",
   "src/judge/gap-landing-verdict.ts",
   "src/judge/gap-admission.ts",
+  // The core's directory entry (the opening act, qa ruling): inert here (exact-path membership), listed so the mirror
+  // stays equal to the record's dev-vessel src entries.
+  "src/judge/",
   // The opening act (10-11): the helpers the core imports that qa ruled closed (BOUNDARY.md 10.2), the operator:direct
   // grant check and the refusal record's writer check (harm fix).
   "src/resolvers/attempt-ledger.ts",

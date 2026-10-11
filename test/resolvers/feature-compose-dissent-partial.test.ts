@@ -267,8 +267,10 @@ describe("a landing over the lane's own semantic dissent is partial, and the dis
 
   it("MUST-FAIL (b, one builder): chronic-failure narrowing and the dissent child are built by the same exported narrowedChildRecord", async () => {
     const g = await import("../../src/resolvers/gap-to-feature.js");
-    expect(typeof (g as Record<string, unknown>).narrowedChildRecord).toBe("function");
-    const bump = fnNamed(GTF_PATH, "bumpFailedAttempts");
+    const gCredit = await import("../../src/judge/gap-attempt-credit.js");
+    expect(typeof (gCredit as Record<string, unknown>).narrowedChildRecord).toBe("function");
+    // bumpFailedAttempts moved to the closed gap-attempt-credit module (gap-to-feature judge split).
+    const bump = fnNamed(new URL("../../src/judge/gap-attempt-credit.ts", import.meta.url).pathname, "bumpFailedAttempts");
     let calls = 0;
     walk(bump, (n) => { if (ts.isCallExpression(n) && ts.isIdentifier(n.expression) && n.expression.text === "narrowedChildRecord") calls++; });
     expect(calls).toBe(1);

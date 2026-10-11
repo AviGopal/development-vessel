@@ -1,5 +1,5 @@
 import { describe, it, expect } from "bun:test";
-import { shouldNarrowForChronicFailure } from "../../src/resolvers/gap-to-feature.js";
+import { shouldNarrowForChronicFailure } from "../../src/judge/gap-attempt-credit.js";
 
 // Pins the fix for the recommit/narrow alternation loop that drove a CPU/thermal
 // emergency (Tctl 100C, ~1500% container CPU) on 2026-08-29/30.

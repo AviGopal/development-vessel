@@ -17,7 +17,9 @@ import { join } from "node:path";
 import { beginPin, endPin, restoreHarness, seed, stored, metaOf, writesFor, script, calls, tick, faTrail, posteriorWrites, readOverlay, COMPOSE, RUN, SCRATCH, type Row } from "./harness.js";
 
 const g2f = await import("../../src/resolvers/gap-to-feature.js");
-const { resolveGapToFeature, gapClassOf } = g2f;
+const g2fCredit = await import("../../src/judge/gap-attempt-credit.js");
+const { resolveGapToFeature } = g2f;
+const { gapClassOf } = g2fCredit;
 const cooldowns = (): Map<string, number> => (resolveGapToFeature as unknown as { __test__gapComposeLastAttemptAt: () => Map<string, number> }).__test__gapComposeLastAttemptAt();
 
 const VESSEL = `pingrade-${RUN}`;

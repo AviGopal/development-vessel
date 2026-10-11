@@ -14,6 +14,7 @@ const DIR = mkdtempSync(join(tmpdir(), "g2f-ledger-"));
 const saved = process.env["ATTEMPT_LEDGER_DIR"];
 process.env["ATTEMPT_LEDGER_DIR"] = DIR;
 const g2f = (await import("../../src/resolvers/gap-to-feature.js")) as unknown as Record<string, unknown>;
+const g2fCredit = (await import("../../src/judge/gap-attempt-credit.js")) as unknown as Record<string, unknown>;
 const { readRecords } = await import("../../src/resolvers/attempt-ledger.js");
 type Row = Record<string, unknown>;
 type Intent = (attemptId: string, gap: Row) => void;
@@ -29,12 +30,12 @@ const gap = (id: string): Row => ({ id, category: "systematic_failure", classifi
 
 describe("gap-to-feature writes the attempt ledger for every admitted compose", () => {
   it("a compose that fails at stage decompose ('plan had no ops') has an intent and an outcome carrying stage and class", () => {
-    expect(typeof g2f["recordPickIntent"]).toBe("function");
-    expect(typeof g2f["recordAttemptEnd"]).toBe("function");
+    expect(typeof g2fCredit["recordPickIntent"]).toBe("function");
+    expect(typeof g2fCredit["recordAttemptEnd"]).toBe("function");
     const id = `dec-test-${Math.random().toString(36).slice(2, 8)}`;
-    (g2f["recordPickIntent"] as Intent)(id, gap("g-decompose"));
+    (g2fCredit["recordPickIntent"] as Intent)(id, gap("g-decompose"));
     const report = { shape: "gapToFeatureReport", body: { ok: false, gap_id: "g-decompose", verdict: "decompose", landed: false, compose: { ok: false, stage: "decompose", error: "plan had no ops" } } };
-    (g2f["recordAttemptEnd"] as End)(id, gap("g-decompose"), report);
+    (g2fCredit["recordAttemptEnd"] as End)(id, gap("g-decompose"), report);
     const intent = readRecords("attemptIntent", { key: id })[0]?.record as Row | undefined;
     expect(intent?.["gap_id"]).toBe("g-decompose");
     expect(intent?.["attempt_id"]).toBe(id);
@@ -48,14 +49,14 @@ describe("gap-to-feature writes the attempt ledger for every admitted compose", 
   });
 
   it("a landed compose records outcome landed with its commit; a terminal refusal records refused", () => {
-    expect(typeof g2f["recordAttemptEnd"]).toBe("function");
+    expect(typeof g2fCredit["recordAttemptEnd"]).toBe("function");
     const a = `dec-land-${Math.random().toString(36).slice(2, 8)}`;
-    (g2f["recordAttemptEnd"] as End)(a, gap("g-land"), { shape: "gapToFeatureReport", body: { ok: true, landed: true, landed_commit: "abc1234", compose: { ok: true, verdict: "FAVORABLE" } } });
+    (g2fCredit["recordAttemptEnd"] as End)(a, gap("g-land"), { shape: "gapToFeatureReport", body: { ok: true, landed: true, landed_commit: "abc1234", compose: { ok: true, verdict: "FAVORABLE" } } });
     const la = readRecords("attemptOutcome", { key: a })[0]?.record as Row | undefined;
     expect(la?.["outcome"]).toBe("landed");
     expect(la?.["commit"]).toBe("abc1234");
     const b = `dec-ref-${Math.random().toString(36).slice(2, 8)}`;
-    (g2f["recordAttemptEnd"] as End)(b, gap("g-ref"), { shape: "gapToFeatureReport", body: { ok: false, landed: false, compose: { ok: false, verdict: "UNFAVORABLE", failure_kind: "terminal_refusal", terminal_refusal: "the gap is already CLOSED in the store" } } });
+    (g2fCredit["recordAttemptEnd"] as End)(b, gap("g-ref"), { shape: "gapToFeatureReport", body: { ok: false, landed: false, compose: { ok: false, verdict: "UNFAVORABLE", failure_kind: "terminal_refusal", terminal_refusal: "the gap is already CLOSED in the store" } } });
     const rb = readRecords("attemptOutcome", { key: b })[0]?.record as Row | undefined;
     expect(rb?.["outcome"]).toBe("refused");
     expect(rb?.["class"]).toBe("terminal_refusal");

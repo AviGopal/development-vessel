@@ -32,6 +32,7 @@ const { resolveSubstrateGap, resolveSubstrateGapWrite, gapStoreRootForTest, isSc
 const STORE_ROOT = gapStoreRootForTest();
 const RUN = Math.random().toString(36).slice(2, 8);
 const g2f = (await import("../../src/resolvers/gap-to-feature.js")) as Record<string, any>;
+const g2fCredit = (await import("../../src/judge/gap-attempt-credit.js")) as Record<string, any>;
 const g2fPolicy = (await import("../../src/judge/gap-policy.js")) as Record<string, any>;
 const { appendRecord } = await import("../../src/resolvers/attempt-ledger.js");
 type Row = Record<string, any>;
@@ -59,8 +60,8 @@ async function seedGap(id: string): Promise<void> {
 /** Two picks of one gap, each recorded on a FRESH read of the row (as two overlapping ticks would). */
 async function twoPicks(id: string): Promise<{ dA: string; dB: string }> {
   await seedGap(id);
-  const dA = await g2f.recordApproachDecision(await row(id));
-  const dB = await g2f.recordApproachDecision(await row(id));
+  const dA = await g2fCredit.recordApproachDecision(await row(id));
+  const dB = await g2fCredit.recordApproachDecision(await row(id));
   expect(typeof dA).toBe("string");
   expect(typeof dB).toBe("string");
   return { dA, dB };
@@ -73,7 +74,7 @@ async function failThroughSeam(gap: Row, decisionId: string): Promise<void> {
   const deps = {
     resolvePwt: async () => { throw new Error("pwt must not run for a non-apply failure"); },
     updateClassPosterior: () => { /* not under test */ },
-    bumpFailedAttempts: g2f.bumpFailedAttempts,
+    bumpFailedAttempts: g2fCredit.bumpFailedAttempts,
     closeLandedGap: async () => ({ closed: false }),
     persistGapMeta: async () => { /* not under test */ },
     holdStillHeld: () => false,
@@ -100,8 +101,8 @@ function landCommit(vessel: string, attemptId: string): string {
 async function landThroughSweepJoin(id: string, sha: string): Promise<Row> {
   const g = await row(id);
   const meta = g.classification_metadata as Row;
-  const ref = typeof g2f.landingDecisionRef === "function" ? await g2f.landingDecisionRef(sha) : {};
-  g2f.joinDecisionOutcome(meta, { landed: true, verdict: "FAVORABLE", commit: sha }, ref.decision_id ? { decision_id: ref.decision_id } : {});
+  const ref = typeof g2fCredit.landingDecisionRef === "function" ? await g2fCredit.landingDecisionRef(sha) : {};
+  g2fCredit.joinDecisionOutcome(meta, { landed: true, verdict: "FAVORABLE", commit: sha }, ref.decision_id ? { decision_id: ref.decision_id } : {});
   return g;
 }
 
@@ -143,13 +144,13 @@ describe("landing side: a landed commit joins the decision its Attempt-Id names"
   });
 
   it("landingDecisionRef: the trailer's intent wins over the in-scope pick; with no attempt to read, the in-scope pick is used", async () => {
-    expect(typeof g2f.landingDecisionRef).toBe("function");
+    expect(typeof g2fCredit.landingDecisionRef).toBe("function");
     const att = `att-ref-${Math.random().toString(36).slice(2, 9)}`;
     appendRecord("attemptIntent", att, { attempt_id: att, route: "feature_compose", gap_id: "g", decision_id: "dec-from-intent", pre_snapshot_id: "snap-x", registered_at: new Date().toISOString() });
     const S = landCommit("ref-vessel", att);
-    expect(await g2f.landingDecisionRef(S, "dec-in-scope")).toMatchObject({ decision_id: "dec-from-intent", attempt_id: att, source: "attempt_trailer" });
-    expect(await g2f.landingDecisionRef("0123456789abcdef0123456789abcdef01234567", "dec-in-scope")).toMatchObject({ decision_id: "dec-in-scope", source: "in_scope" });
-    expect((await g2f.landingDecisionRef("0123456789abcdef0123456789abcdef01234567")).decision_id).toBeUndefined();
+    expect(await g2fCredit.landingDecisionRef(S, "dec-in-scope")).toMatchObject({ decision_id: "dec-from-intent", attempt_id: att, source: "attempt_trailer" });
+    expect(await g2fCredit.landingDecisionRef("0123456789abcdef0123456789abcdef01234567", "dec-in-scope")).toMatchObject({ decision_id: "dec-in-scope", source: "in_scope" });
+    expect((await g2fCredit.landingDecisionRef("0123456789abcdef0123456789abcdef01234567")).decision_id).toBeUndefined();
   });
 });
 
@@ -188,7 +189,7 @@ describe("source pins: every landing join site carries the decision, and the dec
 });
 
 describe("no decision_id is never a silent positional join", () => {
-  const counters = (): Record<string, number> => (typeof g2f.decisionJoinCounters === "function" ? g2f.decisionJoinCounters() : {}) as Record<string, number>;
+  const counters = (): Record<string, number> => (typeof g2fCredit.decisionJoinCounters === "function" ? g2fCredit.decisionJoinCounters() : {}) as Record<string, number>;
   it("two unjoined entries of this node and no decision_id: neither is guessed; the outcome is appended unattributed and counted", () => {
     const node = process.env["SUBSTRATE_NAME"] ?? "substrate";
     const meta: Row = { approach_decisions: [
@@ -196,7 +197,7 @@ describe("no decision_id is never a silent positional join", () => {
       { decision_id: "dec-new", node, at: "2026-10-09T23:19:00Z", predicted_p: 0.5 },
     ] };
     const before = counters()["unattributed_ambiguous"] ?? 0;
-    g2f.joinDecisionOutcome(meta, { landed: false });
+    g2fCredit.joinDecisionOutcome(meta, { landed: false });
     const decs = meta.approach_decisions as Row[];
     expect(decs[0]!.outcome).toBeUndefined();
     expect(decs[1]!.outcome).toBeUndefined();
@@ -209,7 +210,7 @@ describe("no decision_id is never a silent positional join", () => {
     const node = process.env["SUBSTRATE_NAME"] ?? "substrate";
     const meta: Row = { approach_decisions: [{ decision_id: "dec-only", node, at: "2026-10-09T22:54:00Z" }] };
     const before = counters()["positional_single"] ?? 0;
-    g2f.joinDecisionOutcome(meta, { landed: true, verdict: "FAVORABLE", commit: "abc1234" });
+    g2fCredit.joinDecisionOutcome(meta, { landed: true, verdict: "FAVORABLE", commit: "abc1234" });
     const only = (meta.approach_decisions as Row[])[0]!;
     expect(only.outcome.commit).toBe("abc1234");
     expect(only.outcome.attributed_by).toBe("positional_single");
@@ -224,14 +225,14 @@ describe("the pick-time reader sees the last JUDGED decision, so high_confidence
     const out = last?.outcome as Row | undefined;
     return !!(last && Number(last.predicted_p ?? 0) >= 0.7 && out && out.landed === false);
   };
-  const isMiss = (decs: Row[]): boolean => (typeof g2f.isHighConfidenceMiss === "function" ? g2f.isHighConfidenceMiss(decs) : baseReader(decs));
+  const isMiss = (decs: Row[]): boolean => (typeof g2fCredit.isHighConfidenceMiss === "function" ? g2fCredit.isHighConfidenceMiss(decs) : baseReader(decs));
   it("after a decision with predicted_p 0.8 and outcome landed:false, the next pick (its fresh entry pushed) reads a high-confidence miss", async () => {
     await seedGap(`join-hcm-${RUN}`);
     const g0 = await row(`join-hcm-${RUN}`);
     g0.classification_metadata.approach_decisions = [{ decision_id: "dec-prev", node: "n", at: "2026-10-09T22:54:00Z", predicted_p: 0.8, outcome: { landed: false } }];
     await resolveSubstrateGapWrite({ type: "substrateGap_write", gap: g0 } as never);
     const picked = await row(`join-hcm-${RUN}`);
-    const dNext = await g2f.recordApproachDecision(picked);   // mutates picked's decision list, as the pick does
+    const dNext = await g2fCredit.recordApproachDecision(picked);   // mutates picked's decision list, as the pick does
     const decs = picked.classification_metadata.approach_decisions as Row[];
     expect(decs[decs.length - 1]!.decision_id).toBe(dNext);
     expect(isMiss(decs)).toBe(true);

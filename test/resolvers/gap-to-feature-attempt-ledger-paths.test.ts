@@ -11,6 +11,7 @@ import { join } from "node:path";
 
 process.env["ATTEMPT_LEDGER_DIR"] = mkdtempSync(join(tmpdir(), "g2f-ledger-paths-"));
 const g2f = (await import("../../src/resolvers/gap-to-feature.js")) as unknown as Record<string, unknown>;
+const g2fCredit = (await import("../../src/judge/gap-attempt-credit.js")) as unknown as Record<string, unknown>;
 const { readRecords } = await import("../../src/resolvers/attempt-ledger.js");
 type Row = Record<string, unknown>;
 type End = (attemptId: string, gap: Row, result: { shape: string; body: unknown } | null, err?: unknown) => void;
@@ -18,7 +19,7 @@ const SRC = readFileSync(join(import.meta.dir, "..", "..", "src", "resolvers", "
 const gap = (id: string): Row => ({ id, classification_metadata: {} });
 function outcomeOf(body: Row): Row {
   const id = `dec-path-${Math.random().toString(36).slice(2, 10)}`;
-  (g2f["recordAttemptEnd"] as End)(id, gap(String(body.gap_id ?? "g")), { shape: "gapToFeatureReport", body });
+  (g2fCredit["recordAttemptEnd"] as End)(id, gap(String(body.gap_id ?? "g")), { shape: "gapToFeatureReport", body });
   return (readRecords("attemptOutcome", { key: id })[0]?.record ?? {}) as Row;
 }
 const slices = (ok: boolean, landed: boolean, lastBody: Row): Row => ({ ok, stage: "route_compose", route: "capacity_slice_sequence", gap_id: "g-slice", gap_category: "c", slices: [{ file: "a.ts", verdict: lastBody.verdict }], landed, landed_commit: landed ? "feed123" : null, compose: lastBody });

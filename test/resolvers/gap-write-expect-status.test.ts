@@ -18,6 +18,7 @@ delete process.env["GAP_STORE_ENDPOINT"];
 
 const { resolveSubstrateGap, resolveSubstrateGapWrite } = await import("../../src/resolvers/substrate-gap.js");
 const g2f = (await import("../../src/resolvers/gap-to-feature.js")) as Record<string, any>;
+const g2fCredit = (await import("../../src/judge/gap-attempt-credit.js")) as Record<string, any>;
 
 const base = (id: string, status: "open" | "closed", meta: Record<string, unknown> = {}) => ({
   id, category: "operator_request", source: "human_reported", summary: `race fixture ${id}`, detected_at: "2026-10-02T10:00:00Z",
@@ -94,7 +95,7 @@ describe("recordLineageSpend writes a ledger patch, conditionally", () => {
     await resolveSubstrateGapWrite({ type: "substrateGap_write", gap: base("bump-race", "open", { failed_attempts: 1 }) } as never);
     const picked = await row("bump-race");
     await Promise.all([
-      g2f.bumpFailedAttempts(picked),
+      g2fCredit.bumpFailedAttempts(picked, { escalate: g2f.escalateToDecomposition }),
       resolveSubstrateGapWrite({ type: "substrateGap_write", gap: base("bump-race", "closed", { closed_reason: "landed_verified", landed_sha: "fixture0" }) } as never),
     ]);
     const after = await row("bump-race");
@@ -104,7 +105,9 @@ describe("recordLineageSpend writes a ledger patch, conditionally", () => {
 
   it("both read-modify-write sites send the precondition", () => {
     const src = readFileSync(new URL("../../src/resolvers/gap-to-feature.ts", import.meta.url), "utf8");
-    const bump = src.slice(src.indexOf("export async function bumpFailedAttempts"), src.indexOf("shouldNarrowForChronicFailure(fa, meta0)"));
+    // bumpFailedAttempts moved to the closed gap-attempt-credit module (gap-to-feature judge split).
+    const credit = readFileSync(new URL("../../src/judge/gap-attempt-credit.ts", import.meta.url), "utf8");
+    const bump = credit.slice(credit.indexOf("export async function bumpFailedAttempts"), credit.indexOf("shouldNarrowForChronicFailure(fa, meta0)"));
     expect(bump).toContain('expect_status: "open"');
     const rec = src.slice(src.indexOf("export async function recordLineageSpend"));
     expect(rec.slice(0, rec.indexOf("\n}\n"))).toContain('expect_status: "open"');

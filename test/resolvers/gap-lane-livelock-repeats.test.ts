@@ -37,6 +37,7 @@ for (const [k, v] of Object.entries(SCRATCH_ENV)) { SAVED_ENV[k] = process.env[k
 
 const sg = await import("../../src/resolvers/substrate-gap.js");
 const g2f = await import("../../src/resolvers/gap-to-feature.js") as typeof import("../../src/resolvers/gap-to-feature.js") & Record<string, unknown>;
+const g2fCredit = await import("../../src/judge/gap-attempt-credit.js") as typeof import("../../src/judge/gap-attempt-credit.js") & Record<string, unknown>;
 const g2fPolicy = await import("../../src/judge/gap-policy.js") as typeof import("../../src/judge/gap-policy.js") & Record<string, unknown>;
 const RUN = Math.random().toString(36).slice(2, 8);
 const SITE = "repos/development-vessel/src/resolvers/gap-to-feature.ts";
@@ -102,7 +103,7 @@ describe("(c) an existing narrowed child is not emitted again by the next chroni
   it("POSITIVE CONTROL: a root reaching the threshold with no child emits it once", async () => {
     const P = `livelock-narrow-fresh-${RUN}`;
     await put(P, { failed_attempts: 2, failure_lessons: [LESSON], decomposed_at: "2026-10-01T00:00:00Z", decomposition: { children: ["s-1"] } });
-    const { lines } = await captureLog(() => g2f.bumpFailedAttempts({ id: P, category: "db_performance", source: "substrate_detected", summary: "p", detected_at: "2026-10-01T06:00:00.000Z" }));
+    const { lines } = await captureLog(() => g2fCredit.bumpFailedAttempts({ id: P, category: "db_performance", source: "substrate_detected", summary: "p", detected_at: "2026-10-01T06:00:00.000Z" }, { escalate: g2f.escalateToDecomposition }));
     await settle();
     expect(await read(`${P}-narrowed`)).not.toBeNull();
     expect(lines.filter((l) => l.includes("emitted narrowed child")).length).toBe(1);
@@ -112,7 +113,7 @@ describe("(c) an existing narrowed child is not emitted again by the next chroni
     const P = `livelock-narrow-exists-${RUN}`;
     await put(P, { failed_attempts: 3, failure_lessons: [LESSON], decomposed_at: "2026-10-01T00:00:00Z", decomposition: { children: ["s-1"] } });
     await put(`${P}-narrowed`, { parent_gap_id: P, failed_attempts: 0, narrowed_at: "2026-01-01T00:00:00.000Z" }, { summary: "the original child" });
-    const { lines } = await captureLog(() => g2f.bumpFailedAttempts({ id: P, category: "db_performance", source: "substrate_detected", summary: "p", detected_at: "2026-10-01T06:00:00.000Z" }));
+    const { lines } = await captureLog(() => g2fCredit.bumpFailedAttempts({ id: P, category: "db_performance", source: "substrate_detected", summary: "p", detected_at: "2026-10-01T06:00:00.000Z" }, { escalate: g2f.escalateToDecomposition }));
     await settle();
     const child = await read(`${P}-narrowed`);
     expect(metaOf(child).narrowed_at).toBe("2026-01-01T00:00:00.000Z");

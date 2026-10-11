@@ -22,6 +22,7 @@ process.env["SUBSTRATE_GAP_SKIP_COMPOSE_TRIGGER"] = "1";
 
 const sg = await import("../../src/resolvers/substrate-gap.js");
 const g2f = await import("../../src/resolvers/gap-to-feature.js");
+const g2fCredit = await import("../../src/judge/gap-attempt-credit.js");
 const g2fPolicy = await import("../../src/judge/gap-policy.js");
 const fc = await import("../../src/resolvers/feature-compose.js");
 const RUN = Math.random().toString(36).slice(2, 8);
@@ -85,7 +86,7 @@ async function narrowAndRecommit(parent: Row): Promise<{ narrowed: Row; recommit
   const id = String(parent["id"]);
   // A repeated class mints the recommit; the bump to 3 failed attempts mints the narrowed child.
   await fc.appendComposeLesson("verify_failed", "THE GAP'S OWN CHECK IS STILL RED on this draft again", "activity-api", parent as never);
-  await g2f.bumpFailedAttempts(JSON.parse(JSON.stringify((await storeRow(id))!)) as Row);
+  await g2fCredit.bumpFailedAttempts(JSON.parse(JSON.stringify((await storeRow(id))!)) as Row, { escalate: g2f.escalateToDecomposition });
   await sg.__settleBirthEvaluationsForTests();
   const narrowed = await storeRow(`${id}-narrowed`);
   const recommit = await storeRow(`recommit-${id}-verify_failed`);

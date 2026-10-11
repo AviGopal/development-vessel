@@ -24,6 +24,7 @@ if (!process.env["WORKSPACE_ROOT"]) process.env["WORKSPACE_ROOT"] = ROOT;
 process.env["SUBSTRATE_GAP_SKIP_COMPOSE_TRIGGER"] = "1";
 const sg = await import("../../src/resolvers/substrate-gap.js");
 const g2f = await import("../../src/resolvers/gap-to-feature.js");
+const g2fCredit = await import("../../src/judge/gap-attempt-credit.js");
 const STORE = sg.gapStoreRootForTest();
 const GAPS_PATH = join(STORE, "gaps", "gaps.json");
 const CLONES = join(ROOT, "clones");
@@ -231,13 +232,13 @@ describe("pending-land sweep on a RE-DETECTED gap", () => {
 describe("joinDecisionOutcome is idempotent per (gap, commit) for a FAVORABLE landing", () => {
   it("a second FAVORABLE for the same commit is not appended, and says so", () => {
     const meta: Row = {};
-    const first = g2f.joinDecisionOutcome(meta, { landed: true, verdict: "FAVORABLE", commit: "abc1234" });
-    const second = g2f.joinDecisionOutcome(meta, { landed: true, verdict: "FAVORABLE", commit: "abc1234" });
+    const first = g2fCredit.joinDecisionOutcome(meta, { landed: true, verdict: "FAVORABLE", commit: "abc1234" });
+    const second = g2fCredit.joinDecisionOutcome(meta, { landed: true, verdict: "FAVORABLE", commit: "abc1234" });
     expect(first).toBe(true);
     expect(second).toBe(false);
     expect((meta["approach_decisions"] as Row[]).length).toBe(1);
     // A different landing is a new outcome.
-    expect(g2f.joinDecisionOutcome(meta, { landed: true, verdict: "FAVORABLE", commit: "def5678" })).toBe(true);
+    expect(g2fCredit.joinDecisionOutcome(meta, { landed: true, verdict: "FAVORABLE", commit: "def5678" })).toBe(true);
     expect((meta["approach_decisions"] as Row[]).length).toBe(2);
   });
 });

@@ -14,6 +14,7 @@ if (!process.env["WORKSPACE_ROOT"]) process.env["WORKSPACE_ROOT"] = ROOT;
 process.env["SUBSTRATE_GAP_SKIP_COMPOSE_TRIGGER"] = "1";
 const sg = await import("../../src/resolvers/substrate-gap.js");
 const g2f = await import("../../src/resolvers/gap-to-feature.js");
+const g2fCredit = await import("../../src/judge/gap-attempt-credit.js");
 const RUN = Math.random().toString(36).slice(2, 8);
 
 const ER = { shape: "test_suite", input: { vessel: "activity-api", test_file: "src/a.test.ts", only_tests: ["a > b"] }, zero_field: "requested_not_passing" };
@@ -136,7 +137,7 @@ describe("closeAncestorsOnSamePredicate", () => {
       expect(await g2f.closeAncestorsOnSamePredicate(`${p}-narrowed`, childClose({ parent_gap_id: p }))).toEqual([p]);
     } finally { g2f.__setAncestorCloseRaceHookForTests(null); }
     // A bump that read the row before the close and writes after it is a no-op, not a reopen.
-    await g2f.bumpFailedAttempts(snapshot);
+    await g2fCredit.bumpFailedAttempts(snapshot, { escalate: g2f.escalateToDecomposition });
     const r = await row(p);
     expect(r["status"]).toBe("closed");
     expect(metaOf(r)["closed_reason"]).toBe("closed_via_child");

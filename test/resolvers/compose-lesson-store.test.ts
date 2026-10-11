@@ -25,6 +25,7 @@ process.env["SUBSTRATE_GAP_SKIP_COMPOSE_TRIGGER"] = "1";
 
 const sg = await import("../../src/resolvers/substrate-gap.js");
 const g2f = await import("../../src/resolvers/gap-to-feature.js");
+const g2fCredit = await import("../../src/judge/gap-attempt-credit.js");
 const g2fPolicy = await import("../../src/judge/gap-policy.js");
 const fc = await import("../../src/resolvers/feature-compose.js");
 const RUN = Math.random().toString(36).slice(2, 8);
@@ -166,7 +167,7 @@ describe("bumpFailedAttempts builds on the stored row, so the lesson survives an
     await fc.appendComposeLesson("typecheck_dangling_reference", "error TS2304: Cannot find name 'x'", "development-vessel", snap as never);
     await fc.__lastComposeLessonMirrorForTests();
     expect(lessonsOf(await storeRow(id)).length).toBe(1);
-    await g2f.bumpFailedAttempts(snap);
+    await g2fCredit.bumpFailedAttempts(snap, { escalate: g2f.escalateToDecomposition });
     const row = await storeRow(id);
     expect((row?.["classification_metadata"] as Row)["failed_attempts"]).toBe(3);
     expect(lessonsOf(row).map((l) => l["class"])).toEqual(["typecheck_dangling_reference"]);
@@ -181,7 +182,7 @@ describe("bumpFailedAttempts builds on the stored row, so the lesson survives an
     const id = `ls-keep-${RUN}`;
     const snap = await seedGap(id, { failure_lessons: [{ at: "2026-10-01T03:00:00.000Z", class: "semantic_reject", reason: "earlier" }], failed_attempts: 0 });
     await fc.appendComposeLesson("verify_failed", "1 fail", "development-vessel", snap as never);
-    await g2f.bumpFailedAttempts(snap);
+    await g2fCredit.bumpFailedAttempts(snap, { escalate: g2f.escalateToDecomposition });
     expect(lessonsOf(await storeRow(id)).map((l) => l["class"])).toEqual(["semantic_reject", "verify_failed"]);
   });
 });

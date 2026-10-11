@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { joinDecisionOutcome } from "../../src/resolvers/gap-to-feature";
+import { joinDecisionOutcome } from "../../src/judge/gap-attempt-credit";
 
 /**
  * A LANDING THAT NOBODY RECORDS.

@@ -15,7 +15,7 @@ import { afterAll, afterEach, beforeEach, describe, expect, it } from "bun:test"
 import { beginPin, endPin, restoreHarness, store, calls, stored } from "./harness.js";
 import { candidate, classPosteriors, posteriorsWereRead, autoPick, PICK_LOG } from "./pick-fixture.js";
 
-const { gapClassOf } = await import("../../src/resolvers/gap-to-feature.js");
+const { gapClassOf } = await import("../../src/judge/gap-attempt-credit.js");
 const cls = (id: string) => gapClassOf(stored(id)!);
 const HOPELESS_CAT = "pin_skeleton_hopeless";
 

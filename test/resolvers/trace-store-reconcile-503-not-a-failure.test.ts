@@ -8,19 +8,20 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
 const g2f = (await import("../../src/resolvers/gap-to-feature.js")) as unknown as Record<string, unknown>;
+const g2fCredit = (await import("../../src/judge/gap-attempt-credit.js")) as unknown as Record<string, unknown>;
 type Pred = (status: number, text: string) => boolean;
 const SRC = readFileSync(join(import.meta.dir, "..", "..", "src", "resolvers", "gap-to-feature.ts"), "utf8");
 
 describe("a goal-host 503 that says retryable/draining/quiesced is not a failed attempt", () => {
   it("[MUST-FAIL] 503 {error:'quiesced', retryable:true} and 503 {draining:true} are retryable refusals", () => {
-    const p = g2f["isRetryableDispatchRefusal"] as Pred | undefined;
+    const p = g2fCredit["isRetryableDispatchRefusal"] as Pred | undefined;
     expect(typeof p).toBe("function");
     expect(p!(503, JSON.stringify({ error: "quiesced", retryable: true }))).toBe(true);
     expect(p!(503, JSON.stringify({ draining: true }))).toBe(true);
     expect(p!(503, JSON.stringify({ error: "goal-host is draining" }))).toBe(true);
   });
   it("[CONTROL] a real failure is not: a 500, a 503 that does not say so, a 400 that says retryable, an unparseable body", () => {
-    const p = g2f["isRetryableDispatchRefusal"] as Pred | undefined;
+    const p = g2fCredit["isRetryableDispatchRefusal"] as Pred | undefined;
     expect(typeof p).toBe("function");
     expect(p!(500, JSON.stringify({ error: "boom" }))).toBe(false);
     expect(p!(503, JSON.stringify({ error: "upstream unavailable" }))).toBe(false);
@@ -31,6 +32,6 @@ describe("a goal-host 503 that says retryable/draining/quiesced is not a failed 
     const i = SRC.indexOf("const dispatched = res.ok;");
     expect(i).toBeGreaterThan(0);
     const branch = SRC.slice(i, SRC.indexOf('dispatch_status: res.status', i));
-    expect(branch).toMatch(/\} else if \(isRetryableDispatchRefusal\(res\.status, text\)\) \{[\s\S]*?\} else \{\s*await bumpFailedAttempts\(gap, \{ decisionId: attempt\.id \}\);/);
+    expect(branch).toMatch(/\} else if \(isRetryableDispatchRefusal\(res\.status, text\)\) \{[\s\S]*?\} else \{\s*await bumpFailedAttempts\(gap, \{ decisionId: attempt\.id, escalate: escalateToDecomposition \}\);/);
   });
 });

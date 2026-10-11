@@ -4180,7 +4180,7 @@ async function supersedeStaleDissents(gapId: string, sha: string, deps: GapRowDe
  * derives the child's check, and by resolveDissentOutcome when the child settles the parent's dissent).
  */
 async function mintDissentChild(parent: Record<string, unknown>, d: SemanticDissent, deps: GapRowDeps): Promise<string> {
-  const { narrowedChildRecord } = await import("./gap-to-feature.js");
+  const { narrowedChildRecord } = await import("../judge/gap-attempt-credit.js");
   const parentId = String(parent.id ?? "");
   const id = `${parentId}-dissent-narrowed`;
   const names = d.own_check?.test_names ?? [];

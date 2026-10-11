@@ -186,8 +186,14 @@ function templates(text: string): Array<{ start: number; exprs: string[]; raw: s
   return out;
 }
 /** Is `expr` exactly one shq(...) call? */
+// The ONE non-shq interpolation allowed: the scrubbed-env prefix (src/test-child-env.ts). It is shell SYNTAX built
+// from constants (`env -i PATH="$PATH" ...`), never a value, and quoting it would break it. Exact call text only, no
+// arguments: anything else interpolated bare is still an offender. Its content is pinned by
+// vessel-mitosis-evaluate-child-env.test.ts.
+const SHELL_SYNTAX_FRAGMENTS = new Set(["testChildEnvShellPrefix()"]);
 const isShqWord = (expr: string): boolean => {
   const e = expr.trim();
+  if (SHELL_SYNTAX_FRAGMENTS.has(e)) return true;
   if (!e.startsWith("shq(") || !e.endsWith(")")) return false;
   let depth = 0;
   for (let k = 3; k < e.length; k++) { if (e[k] === "(") depth++; else if (e[k] === ")") { depth--; if (depth === 0 && k !== e.length - 1) return false; } }

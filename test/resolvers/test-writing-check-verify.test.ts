@@ -320,7 +320,8 @@ describe("feature-compose verify: the test_writing check is judged after the sui
     expect(block).toContain("if (testWritingMode && tcOk)");
     expect(block).toContain("runs: csaV.TEST_WRITING_CHECK_RUNS");
     expect(block).toContain('bun test ${shq("./" + rel)} --timeout 20000');
-    expect(block).toContain('env -i PATH="$PATH" HOME="$HOME" NODE_ENV=test TZ=UTC WORKSPACE_ROOT="$(mktemp -d)"');
+    // The own-check's env is the shared scrubbed prefix (src/test-child-env.ts), no longer an inline `env -i` copy.
+    expect(block).toContain("timeout 180 ${testChildEnvShellPrefix()} bun test");
     expect(block).toContain("timeout_sec: 240");
     expect(block).toContain("[fc-test-writing-check]");
     expect(FC).toMatch(/const testWritingMode = \(pointer as \{ compose_mode\?: unknown \}\)\.compose_mode === csaV\.CHECK_SUPPLY_COMPOSE_MODE;/);

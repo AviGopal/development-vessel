@@ -34,6 +34,7 @@ import { readFile } from "node:fs/promises";
 import { selfAuthHeaders } from "../lib/self-auth.js";
 import { evaluatorTreeRoot, evaluatorTreePath } from "../lib/evaluator-tree.js";
 import { readOperatorHold } from "../lib/operator-hold.js";
+import { withTestChildEnv } from "../test-child-env.js";
 
 // Mirror feature-compose's path model: repos/<vessel>/... maps to the writable
 // runtime ${MITOSIS_RUNTIME_DIR}/<vessel>/..., and the drafter writes proposal reports
@@ -2111,7 +2112,7 @@ export function typecheckClassOf(gap: Record<string, unknown>): { vessel: string
 
 export type TypecheckRunner = (vessel: string) => { ran: boolean; clean: boolean };
 /** Default runner: `bun run typecheck` in the vessel's runtime dir. Bounded by a wall timeout. */
-function defaultTypecheckRunner(vessel: string): { ran: boolean; clean: boolean } {
+export function defaultTypecheckRunner(vessel: string): { ran: boolean; clean: boolean } {
   try {
     const cwd = join(runtimeRoot(), vessel);
     if (!existsSync(join(cwd, "package.json"))) return { ran: false, clean: false };
@@ -2121,7 +2122,9 @@ function defaultTypecheckRunner(vessel: string): { ran: boolean; clean: boolean 
     // the commands it runs, and it is why the cost of selection had to be inferred
     // rather than measured. One line per run makes the next estimate a measurement.
     const startedAt = Date.now();
-    const res = Bun.spawnSync(["bun", "run", "typecheck"], { cwd, stdout: "pipe", stderr: "pipe", timeout: 120_000 });
+    // SCRUBBED ENV: `bun run typecheck` runs a lane-authorable package.json script, and this process holds
+    // the fleet secrets file. Only the shared allowlist, with a scratch WORKSPACE_ROOT (test-child-env.ts).
+    const res = withTestChildEnv((env) => Bun.spawnSync(["bun", "run", "typecheck"], { cwd, env, stdout: "pipe", stderr: "pipe", timeout: 120_000 }));
     console.log(`[gap-admission] typecheck vessel=${vessel} exit=${String(res.exitCode)} ms=${Date.now() - startedAt}`);
     return { ran: true, clean: res.exitCode === 0 };
   } catch {

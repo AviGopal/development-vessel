@@ -25,6 +25,7 @@ import { withWriteGrant } from "./write-containment.js";
 import { superRepoCheckoutCall } from "./super-repo-checkout.js";
 import { planPathProblem, vesselRelativePath } from "./vessel-paths.js";
 import { shq } from "./shell-quote.js";
+import { testChildEnvShellPrefix } from "../test-child-env.js";
 import { federatedLlmEgressUrls } from "./federated-llm-egress.js";
 import { acquireComposeWorkspace, type ComposeWorkspace } from "./compose-workspace";
 import type { ResolverResult } from "./types.js";
@@ -324,7 +325,7 @@ export async function resumeParkedLanding(pointer: FeatureComposePointer, park: 
       await parkWriteFile(`${stagingRoot}/${f.path}`, f.content, "utf-8");
     }
     const tc = await callTool(toolsEndpoint, "shell", {
-      command: `cd ${shq(`${RUNTIME_ROOT}/${park.vessel}`)} && timeout 300 bunx tsc --noEmit -p . 2>&1 | tail -20; echo TC_EXIT=\${PIPESTATUS[0]}`,
+      command: `cd ${shq(`${RUNTIME_ROOT}/${park.vessel}`)} && timeout 300 ${testChildEnvShellPrefix()} bunx tsc --noEmit -p . 2>&1 | tail -20; echo TC_EXIT=\${PIPESTATUS[0]}`,
       cwd: REPO_ROOT,
     });
     const tcOut = String((tc.body as { stdout?: unknown })?.stdout ?? "");
@@ -3652,7 +3653,7 @@ export function typecheckVerdict(input: { tcExit: number | null; curTs: Set<stri
  * parse should not pay for 1900 tests, a07c8ce); the verify step's no-summary retry runs it for a relaxed draft.
  */
 export function composeVerifyCommand(vAbs: string, sharedDispatchCheck: string): string {
-  return `cd ${shq(vAbs)} && (echo "== install =="; [ -d node_modules ] || { bun install >/dev/null 2>&1; echo "INSTALL_EXIT=$?"; }; echo "== resolve =="; bun install --dry-run >/tmp/fc-dryrun.$$ 2>&1; echo "DRYRUN_EXIT=$?"; tail -6 /tmp/fc-dryrun.$$; rm -f /tmp/fc-dryrun.$$; echo "== typecheck =="; timeout 300 bun run typecheck 2>&1; TCE=$?; echo "TC_EXIT=$TCE"; echo "== shape-dispatch =="; if [ -f ${shq(sharedDispatchCheck)} ] && [ -f src/config.ts ] && [ -f src/routes/impulses.ts ]; then bun ${shq(sharedDispatchCheck)} ${shq(vAbs)} 2>&1; echo "SD_EXIT=$?"; else echo "SD_EXIT=0"; fi; if [ "$TCE" -ne 0 ]; then echo "== tests =="; echo "SKIPPED_TYPECHECK_FAILED"; else echo "== tests =="; timeout 240 env -i PATH="$PATH" HOME="$HOME" NODE_ENV=test TZ=UTC WORKSPACE_ROOT="$(mktemp -d)" bun test --timeout 20000 2>&1 || true; fi)`;
+  return `cd ${shq(vAbs)} && (echo "== install =="; [ -d node_modules ] || { ${testChildEnvShellPrefix()} bun install >/dev/null 2>&1; echo "INSTALL_EXIT=$?"; }; echo "== resolve =="; ${testChildEnvShellPrefix()} bun install --dry-run >/tmp/fc-dryrun.$$ 2>&1; echo "DRYRUN_EXIT=$?"; tail -6 /tmp/fc-dryrun.$$; rm -f /tmp/fc-dryrun.$$; echo "== typecheck =="; timeout 300 ${testChildEnvShellPrefix()} bun run typecheck 2>&1; TCE=$?; echo "TC_EXIT=$TCE"; echo "== shape-dispatch =="; if [ -f ${shq(sharedDispatchCheck)} ] && [ -f src/config.ts ] && [ -f src/routes/impulses.ts ]; then ${testChildEnvShellPrefix()} bun ${shq(sharedDispatchCheck)} ${shq(vAbs)} 2>&1; echo "SD_EXIT=$?"; else echo "SD_EXIT=0"; fi; if [ "$TCE" -ne 0 ]; then echo "== tests =="; echo "SKIPPED_TYPECHECK_FAILED"; else echo "== tests =="; timeout 240 ${testChildEnvShellPrefix()} bun test --timeout 20000 2>&1 || true; fi)`;
 }
 /** The shape-dispatch exit from verify output, or null when the run printed no SD_EXIT marker. */
 export function shapeDispatchExit(raw: string): number | null {
@@ -6867,11 +6868,11 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
       console.log(`[feature-compose] baseline cache HIT ${cacheKey} (typecheck + suite run skipped)`);
       continue;
     }
-    const b = await callTool(toolsEndpoint, "shell", { command: `cd ${shq(vAbs)} && ([ -d node_modules ] || bun install >/dev/null 2>&1; bun run typecheck 2>&1)`, cwd: REPO_ROOT });
+    const b = await callTool(toolsEndpoint, "shell", { command: `cd ${shq(vAbs)} && ([ -d node_modules ] || ${testChildEnvShellPrefix()} bun install >/dev/null 2>&1; ${testChildEnvShellPrefix()} bun run typecheck 2>&1)`, cwd: REPO_ROOT });
     baselineTsErrors.set(v, tscErrorSet(String((b.body as { stdout?: unknown })?.stdout ?? "")));
     // Bounded so a hanging/absent suite can never stall the compose path; a vessel with
     // no tests just yields an empty baseline and an empty post-set, i.e. no gate.
-    const bt = await callTool(toolsEndpoint, "shell", { command: `cd ${shq(vAbs)} && (timeout 240 env -i PATH="$PATH" HOME="$HOME" NODE_ENV=test TZ=UTC WORKSPACE_ROOT="$(mktemp -d)" bun test --timeout 20000 2>&1 || true)`, cwd: REPO_ROOT });
+    const bt = await callTool(toolsEndpoint, "shell", { command: `cd ${shq(vAbs)} && (timeout 240 ${testChildEnvShellPrefix()} bun test --timeout 20000 2>&1 || true)`, cwd: REPO_ROOT });
     const btRaw = String((bt.body as { stdout?: unknown })?.stdout ?? "");
     baselineTestFails.set(v, testFailureSet(btRaw));
     // Also record how many PASSED, so verify can catch tests that VANISH (see testPassCount).
@@ -7581,7 +7582,7 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
     if (hit !== undefined) return { sha, raw: hit, cached: "hit" };
     const bwO = `/tmp/fc-own-base-${v.replace(/[^a-zA-Z0-9]+/g, "-")}-${Date.now()}`;
     const shB = await callTool(toolsEndpoint, "shell", {
-      command: `git -C ${shq(vAbs)} worktree prune >/dev/null 2>&1; git -C ${shq(vAbs)} worktree add -q --detach ${shq(bwO)} HEAD && ln -s ${shq(vAbs + "/node_modules")} ${shq(bwO + "/node_modules")} && cd ${shq(bwO)} && (timeout 180 env -i PATH="$PATH" HOME="$HOME" NODE_ENV=test TZ=UTC WORKSPACE_ROOT="$(mktemp -d)" bun test ${shq("./" + own.test_file)} --timeout 20000 2>&1 || true); cd / && git -C ${shq(vAbs)} worktree remove --force ${shq(bwO)} >/dev/null 2>&1 || true`,
+      command: `git -C ${shq(vAbs)} worktree prune >/dev/null 2>&1; git -C ${shq(vAbs)} worktree add -q --detach ${shq(bwO)} HEAD && ln -s ${shq(vAbs + "/node_modules")} ${shq(bwO + "/node_modules")} && cd ${shq(bwO)} && (timeout 180 ${testChildEnvShellPrefix()} bun test ${shq("./" + own.test_file)} --timeout 20000 2>&1 || true); cd / && git -C ${shq(vAbs)} worktree remove --force ${shq(bwO)} >/dev/null 2>&1 || true`,
       cwd: REPO_ROOT,
       timeout_sec: 240,
     });
@@ -7733,7 +7734,7 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
     let summaryRetryRc: string | null = null;
     if (baselineTestPass.get(v) !== undefined && testPassCount(raw) === null) {
       const shR = await callTool(toolsEndpoint, "shell", {
-        command: `cd ${shq(vAbs)} && (timeout 240 env -i PATH="$PATH" HOME="$HOME" NODE_ENV=test TZ=UTC WORKSPACE_ROOT="$(mktemp -d)" bun test --timeout 20000 2>&1; echo "SUITE_RC=$?") || true`,
+        command: `cd ${shq(vAbs)} && (timeout 240 ${testChildEnvShellPrefix()} bun test --timeout 20000 2>&1; echo "SUITE_RC=$?") || true`,
         cwd: REPO_ROOT,
       });
       testRaw = String((shR.body as { stdout?: unknown })?.stdout ?? "");
@@ -7772,7 +7773,7 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
     let confirmedNewTest = newTest;
     if (newTest.length > 0 || passRegressed) {
       const sh2 = await callTool(toolsEndpoint, "shell", {
-        command: `cd ${shq(vAbs)} && (timeout 240 env -i PATH="$PATH" HOME="$HOME" NODE_ENV=test TZ=UTC WORKSPACE_ROOT="$(mktemp -d)" bun test --timeout 20000 2>&1 || true)`,
+        command: `cd ${shq(vAbs)} && (timeout 240 ${testChildEnvShellPrefix()} bun test --timeout 20000 2>&1 || true)`,
         cwd: REPO_ROOT,
       });
       const raw2 = String((sh2.body as { stdout?: unknown })?.stdout ?? "");
@@ -7798,7 +7799,7 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
     if (confirmedNewTest.length > 0 || passRegressed) {
       const bw = `/tmp/fc-base-${v.replace(/[^a-zA-Z0-9]+/g, "-")}-${Date.now()}`;
       const sh3 = await callTool(toolsEndpoint, "shell", {
-        command: `git -C ${shq(vAbs)} worktree add -q --detach ${shq(bw)} HEAD && ln -s ${shq(vAbs + "/node_modules")} ${shq(bw + "/node_modules")} && cd ${shq(bw)} && (timeout 240 env -i PATH="$PATH" HOME="$HOME" NODE_ENV=test TZ=UTC WORKSPACE_ROOT="$(mktemp -d)" bun test --timeout 20000 2>&1 || true); git -C ${shq(vAbs)} worktree remove --force ${shq(bw)} >/dev/null 2>&1; true`,
+        command: `git -C ${shq(vAbs)} worktree add -q --detach ${shq(bw)} HEAD && ln -s ${shq(vAbs + "/node_modules")} ${shq(bw + "/node_modules")} && cd ${shq(bw)} && (timeout 240 ${testChildEnvShellPrefix()} bun test --timeout 20000 2>&1 || true); git -C ${shq(vAbs)} worktree remove --force ${shq(bw)} >/dev/null 2>&1; true`,
         cwd: REPO_ROOT,
       });
       const raw3 = String((sh3.body as { stdout?: unknown })?.stdout ?? "");
@@ -7857,7 +7858,7 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
         runs: csaV.TEST_WRITING_CHECK_RUNS,
         run: async (rel) => {
           const shT = await callTool(toolsEndpoint, "shell", {
-            command: `cd ${shq(vAbs)} && (timeout 180 env -i PATH="$PATH" HOME="$HOME" NODE_ENV=test TZ=UTC WORKSPACE_ROOT="$(mktemp -d)" bun test ${shq("./" + rel)} --timeout 20000 2>&1 || true)`,
+            command: `cd ${shq(vAbs)} && (timeout 180 ${testChildEnvShellPrefix()} bun test ${shq("./" + rel)} --timeout 20000 2>&1 || true)`,
             cwd: REPO_ROOT,
             // The shell resolver kills the process group at 30 s without this.
             timeout_sec: 240,
@@ -7923,7 +7924,7 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
       // Skipped when the typecheck already refused this draft: the verdict cannot turn green.
       if (own && tcOk) {
         const shO = await callTool(toolsEndpoint, "shell", {
-          command: `cd ${shq(vAbs)} && (timeout 180 env -i PATH="$PATH" HOME="$HOME" NODE_ENV=test TZ=UTC WORKSPACE_ROOT="$(mktemp -d)" bun test ${shq("./" + own.test_file)} --timeout 20000 2>&1 || true)`,
+          command: `cd ${shq(vAbs)} && (timeout 180 ${testChildEnvShellPrefix()} bun test ${shq("./" + own.test_file)} --timeout 20000 2>&1 || true)`,
           cwd: REPO_ROOT,
           // The shell resolver kills the process group at 30 s without this; a killed run reads as
           // no result or "(not run)" and would refuse a correct draft.

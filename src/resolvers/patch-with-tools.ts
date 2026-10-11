@@ -1562,15 +1562,16 @@ export async function resolvePatchWithTools(pointer: PatchWithToolsPointer): Pro
   // verifyPatchAddressesGap is the SAME function feature_compose runs, imported here the
   // way regionContainmentVerdict already is, so the two lanes cannot drift.
   //
-  // FAILS OPEN BY CONSTRUCTION. The judge itself returns addresses:true when unreachable
-  // or unparseable, this block is skipped when there is no proposal text to judge against
-  // or no LLM endpoint, and any throw is caught and ignored. A flaky judge must never
-  // wedge landing - the deterministic floors above have already passed.
+  // FAILS CLOSED. A judge that could not judge (unreachable, unparseable, refuter down: judge_unavailable) refuses
+  // the patch, and so does a throw anywhere in this block. Both are INFRASTRUCTURE refusals (detail
+  // semantic_judge_unavailable, failure_kind "environment"): a non-attempt that gap-to-feature's isInfraRefusalBody
+  // reads as such, never a semantic_reject. The block is still skipped when there is no proposal text to judge
+  // against or no LLM endpoint.
   {
     const proposalText = String(pointer.proposal_text ?? "").trim();
     if (proposalText && llmEndpoints.length > 0) {
       try {
-        const { verifyPatchAddressesGap } = await import("./feature-compose.js");
+        const { verifyPatchAddressesGap, semanticGateInfraRefusal } = await import("./feature-compose.js");
         const beforeLines2 = baseContent.split("\n");
         const afterLines2 = afterSrc.split("\n");
         const bCount = new Map<string, number>();
@@ -1587,6 +1588,18 @@ export async function resolvePatchWithTools(pointer: PatchWithToolsPointer): Pro
           llm: (p: string) => llmCall(llmEndpoints[0]!, p, model),
           runSemanticJudge: true,
         });
+        if (semanticGateInfraRefusal(semVerdict)) {
+          console.warn(`[pwt-semantic-gate] REFUSED as infrastructure (judge unavailable, a non-attempt) ${pointer.target_file}: ${semVerdict.reason}`);
+          await resetTarget();
+          return structuredError("semantic_judge_unavailable", {
+            target_file: pointer.target_file,
+            why: semVerdict.reason,
+            failure_kind: "environment",
+            non_attempt: true,
+            before_sha: beforeSha,
+            after_sha: afterSha,
+          });
+        }
         if (!semVerdict.addresses) {
           console.warn(`[pwt-semantic-gate] REFUSED ${pointer.target_file}: ${semVerdict.reason}`);
           await resetTarget();
@@ -1597,14 +1610,22 @@ export async function resolvePatchWithTools(pointer: PatchWithToolsPointer): Pro
             after_sha: afterSha,
           });
         }
-        // PRINT THE REASON, NOT JUST THE VERDICT. verifyPatchAddressesGap fails open —
-// addresses:true when the judge is unreachable or unparseable — and records which
-// in `reason`. Without it, "judged and passed" and "judge unavailable, failed open"
-// are the same log line, and the pass count measures nothing. Observed 2026-09-10:
-// the first PASSED had no inference call in the surrounding window.
+        // PRINT THE REASON, NOT JUST THE VERDICT. A pass is now always a judged pass (an unjudged patch is refused
+        // above), and the reason and llm_consulted say what judged it. Observed 2026-09-10, when the judge still
+        // failed open: the first PASSED had no inference call in the surrounding window.
 console.log(`[pwt-semantic-gate] PASSED ${pointer.target_file}: llm_consulted=${semVerdict.llm_consulted === true} reason=${String(semVerdict.reason ?? "(none)").slice(0, 200)}`);
       } catch (e) {
-        console.warn(`[pwt-semantic-gate] skipped (${(e as Error).message}) - failing open`);
+        // FAIL CLOSED: a gate that threw did not judge the patch. Infrastructure, so a non-attempt (see above).
+        console.warn(`[pwt-semantic-gate] REFUSED as infrastructure: the semantic gate threw (${(e as Error).message})`);
+        await resetTarget();
+        return structuredError("semantic_judge_unavailable", {
+          target_file: pointer.target_file,
+          why: `semantic gate error: ${(e as Error).message}`.slice(0, 300),
+          failure_kind: "environment",
+          non_attempt: true,
+          before_sha: beforeSha,
+          after_sha: afterSha,
+        });
       }
     }
   }

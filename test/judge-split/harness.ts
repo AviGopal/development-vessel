@@ -168,6 +168,16 @@ export const fsLog = { writes: [] as Array<{ op: string; path: string; data: str
 /** Files a test makes readable at a fixed (non-tmp) path, e.g. /workspace/proposals/<id>-compose-report.json, served
  *  by readFile/readFileSync/existsSync without touching the disk. Cleared by beginPin. */
 export const readOverlay = new Map<string, string>();
+/** Overlay keys read, in order. A key starting with "*" matches any path ending with the rest (a load-time path the
+ *  test cannot know, e.g. "*\/gap-class-posteriors.json"); a test that relies on one asserts it was hit. */
+export const overlayHits: string[] = [];
+function overlayKey(p: unknown): string | null {
+  const k = toPath(p);
+  if (!k) return null;
+  if (readOverlay.has(k)) return k;
+  for (const key of readOverlay.keys()) if (key.startsWith("*") && k.endsWith(key.slice(1))) return key;
+  return null;
+}
 function installFsGuard(): void {
   fsLog.writes = [];
   fsLog.blocked = [];
@@ -193,9 +203,9 @@ function installFsGuard(): void {
     const sync = `${name}Sync`;
     if (typeof ORIG_S[sync] === "function") S[sync] = (...a: unknown[]) => { for (const t of pick(a)) check(`fs.${sync}`, t, a[1]); return ORIG_S[sync](...a); };
   }
-  P["readFile"] = async (...a: unknown[]) => { const k = toPath(a[0]); if (k && readOverlay.has(k)) return readOverlay.get(k); return ORIG_P["readFile"](...a); };
-  S["readFileSync"] = (...a: unknown[]) => { const k = toPath(a[0]); if (k && readOverlay.has(k)) return readOverlay.get(k); return ORIG_S["readFileSync"](...a); };
-  S["existsSync"] = (...a: unknown[]) => { const k = toPath(a[0]); if (k && readOverlay.has(k)) return true; return ORIG_S["existsSync"](...a); };
+  P["readFile"] = async (...a: unknown[]) => { const k = overlayKey(a[0]); if (k) { overlayHits.push(k); return readOverlay.get(k); } return ORIG_P["readFile"](...a); };
+  S["readFileSync"] = (...a: unknown[]) => { const k = overlayKey(a[0]); if (k) { overlayHits.push(k); return readOverlay.get(k); } return ORIG_S["readFileSync"](...a); };
+  S["existsSync"] = (...a: unknown[]) => { const k = overlayKey(a[0]); if (k) return true; return ORIG_S["existsSync"](...a); };
   P["default"] = P; S["promises"] = P; S["default"] = S;
   mock.module("node:fs/promises", () => P);
   mock.module("node:fs", () => S);
@@ -224,6 +234,7 @@ export function resetScripts(): void {
   for (const k of Object.keys(calls) as Array<keyof typeof calls>) calls[k].length = 0;
   script.compose = [BUSY];
   readOverlay.clear();
+  overlayHits.length = 0;
   script.reachability = { shape: "reachabilityGapRepairReport", body: { verdict: "UNFAVORABLE" } };
   script.author = { shape: "structuredError", body: { error: "pin fixture: mint failed" } };
   script.uiWrite = { shape: "structuredError", body: { ok: false, error: "pin fixture: no surface" } };

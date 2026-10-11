@@ -1,0 +1,867 @@
+[
+  {
+    "name": "<dynamic>@src/config.ts:process.env[key]#1",
+    "class": "bootstrap",
+    "reason": "env() helper plumbing; every name it serves is resolved at its call site and classified individually (read in src/config.ts)"
+  },
+  {
+    "name": "<dynamic>@src/judge/gap-admission.ts:process.env[key]#1",
+    "class": "bootstrap",
+    "reason": "envPath() helper plumbing; every name it serves is resolved at its call site and classified individually (read in src/judge/gap-admission.ts)"
+  },
+  {
+    "name": "<dynamic>@src/test-child-env.ts:source[name]#1",
+    "class": "bootstrap",
+    "reason": "test-only: copies a fixed passthrough list into a scrubbed env for test child processes (read in src/test-child-env.ts)"
+  },
+  {
+    "name": "ACTIVITY_API_ENDPOINT",
+    "class": "bootstrap",
+    "reason": "peer endpoint URL: activity-api (read in src/resolvers/activity-metrics.ts, src/resolvers/coarsenable-chain.ts, src/resolvers/compute-state-signature.ts +18 more)"
+  },
+  {
+    "name": "ACTIVITY_API_TOKEN",
+    "class": "bootstrap",
+    "reason": "credential/secret: bearer token for activity-api (read in src/resolvers/vessel-mitosis-evaluate.ts)"
+  },
+  {
+    "name": "ACTIVITY_API_URL",
+    "class": "bootstrap",
+    "reason": "peer endpoint URL: activity-api (alternate name) (read in src/resolvers/db-contention-observer.ts, src/resolvers/reach-rate-scan.ts, src/resolvers/remedy-effectiveness-observer.ts +4 more)"
+  },
+  {
+    "name": "ANCHOR_REGION_SLACK_LINES",
+    "class": "behaviour",
+    "reason": "feature_compose anchor region slack (read in src/resolvers/feature-compose.ts)"
+  },
+  {
+    "name": "API_KEY",
+    "class": "bootstrap",
+    "reason": "credential/secret: fallback API key (read in src/resolvers/substrate-gap.ts, src/resolvers/test-suite.ts)"
+  },
+  {
+    "name": "ATTEMPT_LEDGER_DIR",
+    "class": "bootstrap",
+    "reason": "filesystem root/path: attempt ledger dir (read in src/resolvers/attempt-ledger.ts)"
+  },
+  {
+    "name": "CLOSE_ORACLE_CALIB_PATH",
+    "class": "bootstrap",
+    "reason": "filesystem root/path: close-oracle calibration file (read in src/judge/gap-landing-verdict.ts)"
+  },
+  {
+    "name": "COMPOSE_CEILING_MS",
+    "class": "behaviour",
+    "reason": "compose time ceiling (read in src/compose-slots.ts)"
+  },
+  {
+    "name": "COMPOSE_DRAIN_MIN_INTERVAL_MS",
+    "class": "behaviour",
+    "reason": "compose drain minimum interval (read in src/services/gap-drain-observer.ts)"
+  },
+  {
+    "name": "COMPOSE_EXECUTION_ID",
+    "class": "bootstrap",
+    "reason": "identity/node name: execution id handed to a compose child (read in src/resolvers/feature-compose.ts)"
+  },
+  {
+    "name": "COMPOSE_MAX_CONCURRENT",
+    "class": "behaviour",
+    "reason": "compose concurrency cap (read in src/compose-slots.ts)"
+  },
+  {
+    "name": "COMPOSE_SLOT_DIR",
+    "class": "bootstrap",
+    "reason": "filesystem root/path: compose slot dir (read in src/compose-slots.ts)"
+  },
+  {
+    "name": "COMPOSE_SLOT_STALE_MS",
+    "class": "behaviour",
+    "reason": "compose slot staleness threshold (read in src/compose-slots.ts)"
+  },
+  {
+    "name": "COMPOSE_WS_DIR",
+    "class": "bootstrap",
+    "reason": "filesystem root/path: compose workspace root (read in src/resolvers/compose-workspace.ts)"
+  },
+  {
+    "name": "CONCEPT_DB_ENDPOINT",
+    "class": "bootstrap",
+    "reason": "peer endpoint URL: concept-db (read in src/config.ts, src/index.ts, src/observers/failure-credit-observer.ts +12 more)"
+  },
+  {
+    "name": "CONCEPT_DB_JWT",
+    "class": "bootstrap",
+    "reason": "credential/secret: concept-db JWT (read in src/resolvers/activity-lifecycle-audit.ts)"
+  },
+  {
+    "name": "CONTAINER_VESSELS_ROOT",
+    "class": "bootstrap",
+    "reason": "filesystem root/path: container vessels root (read in src/resolvers/host-container-source-drift-observer.ts)"
+  },
+  {
+    "name": "CUTOVER_LEASE_WAIT_MS",
+    "class": "behaviour",
+    "reason": "cutover lease wait (read in src/resolvers/vessel-mitosis-cutover.ts)"
+  },
+  {
+    "name": "CUTOVER_PRECHECK_SUITE",
+    "class": "behaviour",
+    "reason": "toggle: cutover precheck suite (read in src/resolvers/vessel-mitosis-cutover.ts)"
+  },
+  {
+    "name": "DETECTOR_CLOSURE_LEDGER_PATH",
+    "class": "bootstrap",
+    "reason": "filesystem root/path: detector closure ledger file (read in src/judge/gap-landing-verdict.ts)"
+  },
+  {
+    "name": "DETECTOR_RETIREMENT_EMIT_CAP",
+    "class": "behaviour",
+    "reason": "detector retirement emission cap (read in src/resolvers/detector-yield-registry.ts)"
+  },
+  {
+    "name": "DETECTOR_RETIREMENT_MIN_GAPS",
+    "class": "behaviour",
+    "reason": "detector retirement evidence floor (read in src/resolvers/detector-yield-registry.ts)"
+  },
+  {
+    "name": "DEV_VESSEL_API_KEY",
+    "class": "bootstrap",
+    "reason": "credential/secret: development-vessel API key fallback (read in src/resolvers/advertised-shape-coverage-scan.ts, src/resolvers/credit-vessel-shapes.ts, src/resolvers/discovery-vessel-registry-observer.ts +14 more)"
+  },
+  {
+    "name": "DEV_VESSEL_CUTOVER_STAGE_MS",
+    "class": "behaviour",
+    "reason": "cutover stage delay (read in src/index.ts)"
+  },
+  {
+    "name": "DEV_VESSEL_DRAIN_FRESH_MS",
+    "class": "behaviour",
+    "reason": "drain freshness window (read in src/index.ts)"
+  },
+  {
+    "name": "DEV_VESSEL_ENDPOINT",
+    "class": "bootstrap",
+    "reason": "peer endpoint URL: development-vessel (read in src/index.ts, src/resolvers/feature-compose.ts, src/resolvers/goal-summary.ts +7 more)"
+  },
+  {
+    "name": "DEV_VESSEL_GC_INTERVAL_MS",
+    "class": "behaviour",
+    "reason": "GC cadence (read in src/index.ts)"
+  },
+  {
+    "name": "DEV_VESSEL_IMPULSES_URL",
+    "class": "bootstrap",
+    "reason": "peer endpoint URL: development-vessel resolve URL (read in src/lib/detector-output-sanity.ts, src/resolvers/assessment-summary.ts, src/resolvers/code-quality-with-substantive-assessment-content.ts +2 more)"
+  },
+  {
+    "name": "DEV_VESSEL_SELF_ENDPOINT",
+    "class": "bootstrap",
+    "reason": "own endpoint/bind address: own base URL for self-calls (read in src/resolvers/gap-check-supply.ts, src/resolvers/obsidian-request-scan.ts, src/resolvers/rhythm-conductor-tick.ts)"
+  },
+  {
+    "name": "DISCOVERY_ENDPOINT",
+    "class": "bootstrap",
+    "reason": "peer endpoint URL: discovery (read in src/config.ts, src/judge/gap-landing-verdict.ts, src/resolvers/concept-write.ts +13 more)"
+  },
+  {
+    "name": "DISCOVERY_VESSEL_ENDPOINT",
+    "class": "bootstrap",
+    "reason": "peer endpoint URL: discovery (read in src/resolvers/advertised-shape-coverage-scan.ts, src/resolvers/concept-write.ts, src/resolvers/discovery-vessel-registry-observer.ts +1 more)"
+  },
+  {
+    "name": "DOC_FIX_AUTOLAND",
+    "class": "behaviour",
+    "reason": "toggle: doc-fix autoland (read in src/resolvers/doc-drift-fix.ts)"
+  },
+  {
+    "name": "DOC_FIX_MODEL",
+    "class": "behaviour",
+    "reason": "doc-fix LLM model selection (read in src/resolvers/doc-drift-fix.ts)"
+  },
+  {
+    "name": "DOC_FIX_POLICY_PATH",
+    "class": "bootstrap",
+    "reason": "filesystem root/path: doc-fix policy file (the policy itself is read from the file) (read in src/resolvers/doc-fix-policy.ts)"
+  },
+  {
+    "name": "DOC_FIX_ROOT",
+    "class": "bootstrap",
+    "reason": "filesystem root/path: doc root (super-repo clone) (read in src/resolvers/doc-drift-fix.ts, src/resolvers/docs-align-tick.ts, src/resolvers/unknown-shape-report.ts)"
+  },
+  {
+    "name": "EXPECTATION_CALIB_PATH",
+    "class": "bootstrap",
+    "reason": "filesystem root/path: expectation calibration file (read in src/judge/gap-attempt-credit.ts, src/resolvers/substrate-gap.ts)"
+  },
+  {
+    "name": "EXPECTATION_SCAN_INTERVAL_MS",
+    "class": "behaviour",
+    "reason": "expectation scan cadence (read in src/index.ts)"
+  },
+  {
+    "name": "EXTRA_WORKSPACE_ROOTS",
+    "class": "behaviour",
+    "reason": "widens the roots tools may read (security-relevant access switch) (read in src/resolvers/fs-read.ts, src/resolvers/workspace-roots.ts)"
+  },
+  {
+    "name": "FEATURE_COMPOSE_ENDPOINT",
+    "class": "bootstrap",
+    "reason": "peer endpoint URL: feature_compose route (read in src/resolvers/feature-compose.ts)"
+  },
+  {
+    "name": "FED_SUBSTRATE_ID",
+    "class": "bootstrap",
+    "reason": "identity/node name: this substrate's federation id (read in src/resolvers/federated-llm-egress.ts)"
+  },
+  {
+    "name": "FED_TRANSPORT_EGRESS",
+    "class": "bootstrap",
+    "reason": "peer endpoint URL: federation transport egress (read in src/resolvers/feature-compose.ts, src/resolvers/llm-api-health-observer.ts, src/resolvers/llm-completion-dispatch.ts +1 more)"
+  },
+  {
+    "name": "FED_VESSEL_ID",
+    "class": "bootstrap",
+    "reason": "identity/node name: federated vessel id (read in src/resolvers/pull-cutover.ts)"
+  },
+  {
+    "name": "FS_READ_EXTRA_ROOTS",
+    "class": "behaviour",
+    "reason": "widens the roots fs_read may read (security-relevant access switch) (read in src/resolvers/fs-read.ts)"
+  },
+  {
+    "name": "GAP_CLASS_OPEN_CAP",
+    "class": "behaviour",
+    "reason": "open gaps per class cap (read in src/resolvers/substrate-gap.ts)"
+  },
+  {
+    "name": "GAP_CLASS_POSTERIOR_PATH",
+    "class": "bootstrap",
+    "reason": "filesystem root/path: gap class posterior file (read in src/judge/gap-attempt-credit.ts)"
+  },
+  {
+    "name": "GAP_COMPOSE_COOLDOWN_MS",
+    "class": "behaviour",
+    "reason": "gap compose cooldown (read in src/resolvers/gap-to-feature.ts)"
+  },
+  {
+    "name": "GAP_DRAIN_OBSERVER",
+    "class": "behaviour",
+    "reason": "toggle: gap drain observer (read in src/index.ts)"
+  },
+  {
+    "name": "GAP_STORE_ENDPOINT",
+    "class": "behaviour",
+    "reason": "remote gap store endpoint whose PRESENCE switches gap writes/closes off on this node (read in src/judge/gap-admission.ts, src/judge/gap-check-judge.ts, src/resolvers/gap-lifecycle-scan.ts +1 more)"
+  },
+  {
+    "name": "GAP_TYPECHECK_CACHE_TTL_MS",
+    "class": "behaviour",
+    "reason": "gap typecheck cache TTL (read in src/judge/gap-admission.ts)"
+  },
+  {
+    "name": "GAP_TYPECHECK_MAX_RUNS_PER_PASS",
+    "class": "behaviour",
+    "reason": "gap typecheck runs per pass cap (read in src/judge/gap-admission.ts)"
+  },
+  {
+    "name": "GENERATIVE_HEADROOM_THRESHOLD",
+    "class": "behaviour",
+    "reason": "generative frontier headroom threshold (read in src/resolvers/generative-frontier-gap-tick.ts)"
+  },
+  {
+    "name": "GH_TOKEN",
+    "class": "bootstrap",
+    "reason": "credential/secret: GitHub token (gh CLI name) (read in src/resolvers/gh-pr-create.ts, src/resolvers/gh-pr-merge.ts, src/resolvers/gh-repo-create.ts)"
+  },
+  {
+    "name": "GITHUB_OWNER",
+    "class": "bootstrap",
+    "reason": "identity/node name: GitHub owner (read in src/resolvers/gh-repo-create.ts)"
+  },
+  {
+    "name": "GITHUB_TOKEN",
+    "class": "bootstrap",
+    "reason": "credential/secret: GitHub token (read in src/resolvers/gh-pr-create.ts, src/resolvers/gh-pr-merge.ts, src/resolvers/gh-repo-create.ts)"
+  },
+  {
+    "name": "GITHUB_USER",
+    "class": "bootstrap",
+    "reason": "identity/node name: GitHub user (read in src/resolvers/gh-repo-create.ts)"
+  },
+  {
+    "name": "GIT_CMD",
+    "class": "bootstrap",
+    "reason": "filesystem root/path: git binary path (read in src/resolvers/vessel-mitosis-cutover.ts)"
+  },
+  {
+    "name": "GOAL_HOST_ENDPOINT",
+    "class": "bootstrap",
+    "reason": "peer endpoint URL: goal-host (read in src/resolvers/obsidian-request-scan.ts, src/resolvers/trace-recurring-pattern-scan.ts, src/resolvers/vessel-arrival-scan.ts +1 more)"
+  },
+  {
+    "name": "GOAL_HOST_VESSEL_ENDPOINT",
+    "class": "bootstrap",
+    "reason": "peer endpoint URL: goal-host (read in src/config.ts, src/index.ts, src/resolvers/compose-topology-tick.ts +7 more)"
+  },
+  {
+    "name": "GOAL_HOST_VESSEL_REPO",
+    "class": "bootstrap",
+    "reason": "filesystem root/path: goal-host repo path (read in src/resolvers/git-head-commit.ts, src/resolvers/git-status.ts)"
+  },
+  {
+    "name": "HOME",
+    "class": "bootstrap",
+    "reason": "filesystem root/path: home dir (read in src/resolvers/boredom-enqueue.ts)"
+  },
+  {
+    "name": "HOST",
+    "class": "bootstrap",
+    "reason": "own endpoint/bind address: bind host (read in src/config.ts)"
+  },
+  {
+    "name": "HOSTNAME",
+    "class": "bootstrap",
+    "reason": "identity/node name: host name for vessel id (read in src/config.ts)"
+  },
+  {
+    "name": "HOST_REPO_ROOT",
+    "class": "bootstrap",
+    "reason": "filesystem root/path: host repo root (read in src/resolvers/host-container-source-drift-observer.ts)"
+  },
+  {
+    "name": "HUMAN_SURFACE_ENDPOINT",
+    "class": "bootstrap",
+    "reason": "peer endpoint URL: human-surface (read in src/resolvers/ui-legibility-scan.ts)"
+  },
+  {
+    "name": "IAS_BUS_DROP_LOG_PATH",
+    "class": "bootstrap",
+    "reason": "filesystem root/path: bus drop log (read in src/resolvers/dispatch-dropped-observer.ts)"
+  },
+  {
+    "name": "IDENTITY_VESSEL_URL",
+    "class": "bootstrap",
+    "reason": "peer endpoint URL: identity-vessel (credential validator) (read in src/lib/caller-credential.ts)"
+  },
+  {
+    "name": "LAST_GOOD_DIR",
+    "class": "bootstrap",
+    "reason": "filesystem root/path: last-good marker dir (read in src/resolvers/scope-earn-in.ts)"
+  },
+  {
+    "name": "LEARNING_MODE_COMPLETENESS_LOW",
+    "class": "behaviour",
+    "reason": "learning-mode completeness threshold (read in src/resolvers/learning-mode.ts)"
+  },
+  {
+    "name": "LEARNING_MODE_EMPHASIS",
+    "class": "behaviour",
+    "reason": "learning-mode emphasis weight (read in src/resolvers/learning-mode.ts)"
+  },
+  {
+    "name": "LEARNING_MODE_FLOOR",
+    "class": "behaviour",
+    "reason": "learning-mode floor weight (read in src/resolvers/learning-mode.ts)"
+  },
+  {
+    "name": "LEARNING_MODE_HYSTERESIS",
+    "class": "behaviour",
+    "reason": "learning-mode hysteresis (read in src/resolvers/learning-mode.ts)"
+  },
+  {
+    "name": "LEARNING_MODE_SHAPE_BOOST",
+    "class": "behaviour",
+    "reason": "learning-mode shape boost (read in src/resolvers/learning-mode.ts)"
+  },
+  {
+    "name": "LEARNING_MODE_TOP_SHAPES",
+    "class": "behaviour",
+    "reason": "learning-mode top shapes count (read in src/resolvers/learning-mode.ts)"
+  },
+  {
+    "name": "LEDGER_CANARY_PATH",
+    "class": "bootstrap",
+    "reason": "filesystem root/path: ledger canary file (read in src/resolvers/attempt-checks.ts)"
+  },
+  {
+    "name": "LIGHT_DISPATCH_ENDPOINT",
+    "class": "bootstrap",
+    "reason": "peer endpoint URL: light-dispatch (read in src/resolvers/dispatch-latest-auto-draft.ts)"
+  },
+  {
+    "name": "LIGHT_DISPATCH_URL",
+    "class": "bootstrap",
+    "reason": "peer endpoint URL: light-dispatch dispatch URL (read in src/resolvers/apply-proposal-as-patch.ts)"
+  },
+  {
+    "name": "LIGHT_DISPATCH_VESSEL_ENDPOINT",
+    "class": "bootstrap",
+    "reason": "peer endpoint URL: light-dispatch-vessel (read in src/resolvers/light-dispatch-vessel-status.ts)"
+  },
+  {
+    "name": "LIVE_EDIT_PULSE_PATH",
+    "class": "bootstrap",
+    "reason": "filesystem root/path: live-edit pulse file (read in src/resolvers/obsidian-request-scan.ts)"
+  },
+  {
+    "name": "LLM_COMPLETION_ENDPOINT",
+    "class": "behaviour",
+    "reason": "LLM completion override whose presence switches the completion route (read in src/resolvers/apply-proposal-as-patch.ts, src/resolvers/llm-completion-dispatch.ts)"
+  },
+  {
+    "name": "LLM_VESSEL_ENDPOINT",
+    "class": "bootstrap",
+    "reason": "peer endpoint URL: llm vessel (read in src/resolvers/llm-api-health-observer.ts, src/resolvers/obsidian-deliver-assist.ts, src/routes/impulses.ts)"
+  },
+  {
+    "name": "LOG_LEVEL",
+    "class": "bootstrap",
+    "reason": "log level (read in src/vacuous-edit.ts)"
+  },
+  {
+    "name": "MAINTENANCE_LEASE_PATH",
+    "class": "bootstrap",
+    "reason": "filesystem root/path: maintenance lease file (read in src/resolvers/maintenance-lease.ts)"
+  },
+  {
+    "name": "MAX_NEW_RESOLVERS_PER_HOUR",
+    "class": "behaviour",
+    "reason": "new resolvers per hour budget (read in src/resolvers/apply-proposal-as-patch.ts)"
+  },
+  {
+    "name": "METABOB_API_KEY",
+    "class": "bootstrap",
+    "reason": "credential/secret: service-to-service API key (read in src/config.ts, src/index.ts, src/lib/caller-credential.ts +102 more)"
+  },
+  {
+    "name": "METABOB_ENDPOINT",
+    "class": "bootstrap",
+    "reason": "peer endpoint URL: activity-api/trace store (read in src/config.ts, src/observers/failure-credit-observer.ts, src/resolvers/activity-template.ts +23 more)"
+  },
+  {
+    "name": "METABOB_JWT",
+    "class": "bootstrap",
+    "reason": "credential/secret: JWT fallback (read in src/resolvers/activity-lifecycle-audit.ts)"
+  },
+  {
+    "name": "MITOSIS_CUTOVER_SKIP_SYSTEMCTL",
+    "class": "behaviour",
+    "reason": "toggle: skip systemctl in cutover (test stub by intent, but switches production behaviour if set) (read in src/resolvers/vessel-mitosis-cutover.ts)"
+  },
+  {
+    "name": "MITOSIS_DIRECT_PUSH",
+    "class": "behaviour",
+    "reason": "toggle: direct push (read in src/judge/gap-admission.ts, src/resolvers/push-policy.ts, src/resolvers/vessel-mitosis-cutover.ts)"
+  },
+  {
+    "name": "MITOSIS_DRAIN_WAIT_MS",
+    "class": "behaviour",
+    "reason": "mitosis drain wait (read in src/resolvers/vessel-mitosis-cutover.ts)"
+  },
+  {
+    "name": "MITOSIS_GOALHOST_RESTART_DELAY_S",
+    "class": "behaviour",
+    "reason": "goal-host restart delay (read in src/resolvers/vessel-mitosis-cutover.ts)"
+  },
+  {
+    "name": "MITOSIS_HOST_REPO_ROOT",
+    "class": "bootstrap",
+    "reason": "filesystem root/path: host repo root (logged) (read in src/resolvers/vessel-mitosis-cutover.ts)"
+  },
+  {
+    "name": "MITOSIS_PENDING_STALE_MS",
+    "class": "behaviour",
+    "reason": "pending mitosis staleness threshold (read in src/resolvers/apply-proposal-as-patch.ts)"
+  },
+  {
+    "name": "MITOSIS_PUSH_CLONE_DIR",
+    "class": "bootstrap",
+    "reason": "filesystem root/path: push clone root (read in src/judge/gap-admission.ts, src/resolvers/compose-workspace.ts, src/resolvers/docs-align-tick.ts +6 more)"
+  },
+  {
+    "name": "MITOSIS_REPO_ROOT",
+    "class": "bootstrap",
+    "reason": "filesystem root/path: repo root (read in src/resolvers/test-suite.ts, src/shape-vocabulary.ts)"
+  },
+  {
+    "name": "MITOSIS_RUNTIME_DIR",
+    "class": "bootstrap",
+    "reason": "filesystem root/path: vessels runtime root (read in src/judge/gap-landing-verdict.ts, src/lib/evaluator-tree.ts, src/resolvers/compose-workspace.ts +11 more)"
+  },
+  {
+    "name": "MITOSIS_SELF_RESTART_DELAY_S",
+    "class": "behaviour",
+    "reason": "self-restart delay (read in src/resolvers/vessel-mitosis-cutover.ts)"
+  },
+  {
+    "name": "MITOSIS_SELF_RESTART_QUIESCE_MAX_S",
+    "class": "behaviour",
+    "reason": "self-restart quiesce bound (read in src/compose-slots.ts)"
+  },
+  {
+    "name": "MITOSIS_SKIP_CLONE_RESET",
+    "class": "behaviour",
+    "reason": "toggle: skip clone reset (escape hatch) (read in src/resolvers/vessel-mitosis-cutover.ts)"
+  },
+  {
+    "name": "MITOSIS_STAGED_MAX_AGE_MS",
+    "class": "behaviour",
+    "reason": "staged freshness max age (read in src/resolvers/vessel-mitosis-cutover.ts)"
+  },
+  {
+    "name": "MITOSIS_SUPER_REPO_DIR",
+    "class": "bootstrap",
+    "reason": "filesystem root/path: super-repo clone (read in src/shape-vocabulary.ts)"
+  },
+  {
+    "name": "MITOSIS_VESSEL_CLONES",
+    "class": "bootstrap",
+    "reason": "filesystem root/path: vessel clones root (read in src/resolvers/scope-earn-in.ts, src/resolvers/test-suite.ts)"
+  },
+  {
+    "name": "NODE_ENV",
+    "class": "bootstrap",
+    "reason": "test-only flag: picks a per-process tmp attempt-ledger dir under test (read in src/resolvers/attempt-ledger.ts)"
+  },
+  {
+    "name": "OBSIDIAN_ASSIST_MODEL",
+    "class": "behaviour",
+    "reason": "obsidian assist LLM model selection (read in src/resolvers/obsidian-deliver-assist.ts)"
+  },
+  {
+    "name": "OBSIDIAN_ENDPOINT",
+    "class": "bootstrap",
+    "reason": "peer endpoint URL: obsidian surface (read in src/resolvers/obsidian-request-scan.ts)"
+  },
+  {
+    "name": "OBSIDIAN_LEARN_ENDPOINT",
+    "class": "bootstrap",
+    "reason": "peer endpoint URL: obsidian learn (read in src/resolvers/implicit-vessel-scan.ts, src/resolvers/interaction-expectation-verify.ts, src/resolvers/interface-deploy-reach-check.ts +8 more)"
+  },
+  {
+    "name": "OBSIDIAN_PLUGIN_ENDPOINT",
+    "class": "bootstrap",
+    "reason": "peer endpoint URL: obsidian plugin (read in src/resolvers/implicit-vessel-scan.ts, src/resolvers/obsidian-assist-feedback-scan.ts, src/resolvers/obsidian-behavior-scan.ts +4 more)"
+  },
+  {
+    "name": "OBSIDIAN_PROBE_ENDPOINT",
+    "class": "bootstrap",
+    "reason": "peer endpoint URL: obsidian probe (read in src/resolvers/obsidian-execute-gated.ts, src/resolvers/obsidian-learn-commands.ts)"
+  },
+  {
+    "name": "OBSIDIAN_RENDER_BOARD",
+    "class": "bootstrap",
+    "reason": "filesystem root/path: vault render board file (read in src/resolvers/obsidian-reflect.ts)"
+  },
+  {
+    "name": "OPSTATE_SNAPSHOT_MAX_AGE_MS",
+    "class": "behaviour",
+    "reason": "opstate snapshot staleness threshold (read in src/resolvers/causal-adjudication.ts)"
+  },
+  {
+    "name": "PARKED_LANDINGS_DIR",
+    "class": "bootstrap",
+    "reason": "filesystem root/path: parked landings dir (read in src/resolvers/feature-compose.ts)"
+  },
+  {
+    "name": "PATH",
+    "class": "bootstrap",
+    "reason": "filesystem root/path: executable search path (read in src/resolvers/falsify-authored-test.ts, src/resolvers/git-log.ts, src/resolvers/vessel-mitosis-cutover.ts)"
+  },
+  {
+    "name": "PORT",
+    "class": "bootstrap",
+    "reason": "own endpoint/bind address: listen port (read in src/config.ts, src/judge/gap-check-judge.ts, src/resolvers/compute-state-signature.ts +1 more)"
+  },
+  {
+    "name": "PREFER_LIBP2P_ROUTE",
+    "class": "behaviour",
+    "reason": "toggle: prefer the libp2p route (read in src/resolvers/feature-compose.ts)"
+  },
+  {
+    "name": "PROFILE",
+    "class": "bootstrap",
+    "reason": "identity/node name: deployment profile (data locality) (read in src/resolvers/self-fact-reconcile.ts)"
+  },
+  {
+    "name": "PROFILE_EFFECTIVE",
+    "class": "bootstrap",
+    "reason": "identity/node name: effective deployment profile (data locality) (read in src/resolvers/self-fact-reconcile.ts)"
+  },
+  {
+    "name": "PROPOSALS_DIR",
+    "class": "bootstrap",
+    "reason": "filesystem root/path: proposals dir (read in src/judge/gap-admission.ts, src/resolvers/apply-proposal-as-patch.ts, src/resolvers/code-locality-mining-tick.ts +3 more)"
+  },
+  {
+    "name": "PUSH_POLICY_PATH",
+    "class": "bootstrap",
+    "reason": "filesystem root/path: push policy file (the policy itself is read from the file) (read in src/resolvers/push-policy.ts)"
+  },
+  {
+    "name": "QUIESCE_DIR",
+    "class": "bootstrap",
+    "reason": "filesystem root/path: quiesce marker dir (read in src/resolvers/vessel-mitosis-cutover.ts)"
+  },
+  {
+    "name": "QUIESCE_MARKER",
+    "class": "bootstrap",
+    "reason": "filesystem root/path: quiesce marker file (read in src/index.ts)"
+  },
+  {
+    "name": "QUIESCE_MAX_MS",
+    "class": "behaviour",
+    "reason": "maximum quiesce wait (read in src/index.ts)"
+  },
+  {
+    "name": "REPO_ROOT",
+    "class": "bootstrap",
+    "reason": "filesystem root/path: repo root (read in src/resolvers/feature-compose.ts, src/resolvers/gap-to-feature.ts)"
+  },
+  {
+    "name": "RESTART_BREADCRUMB_DIR",
+    "class": "bootstrap",
+    "reason": "filesystem root/path: restart breadcrumb dir (read in src/resolvers/vessel-mitosis-cutover.ts, src/restart-attribution.ts)"
+  },
+  {
+    "name": "RESTART_BREADCRUMB_FRESH_MS",
+    "class": "behaviour",
+    "reason": "restart breadcrumb freshness window (read in src/restart-attribution.ts)"
+  },
+  {
+    "name": "REUSE_BEFORE_MINT",
+    "class": "behaviour",
+    "reason": "mode: reuse-before-mint enforcement (read in src/resolvers/activity-create-variant.ts)"
+  },
+  {
+    "name": "ROUTE_FEATURE_PROPOSALS_TO_COMPOSE",
+    "class": "behaviour",
+    "reason": "toggle: route feature proposals to compose (read in src/resolvers/apply-proposal-as-patch.ts)"
+  },
+  {
+    "name": "SELF_ENDPOINT",
+    "class": "bootstrap",
+    "reason": "own endpoint/bind address: own base URL for self-calls (read in src/resolvers/compute-state-signature.ts, src/resolvers/docs-align-scan.ts)"
+  },
+  {
+    "name": "SELF_FACT_RECONCILE_ENDPOINT",
+    "class": "behaviour",
+    "reason": "self-fact reconcile endpoint whose presence switches the reconcile step on (read in src/resolvers/patch-with-tools.ts)"
+  },
+  {
+    "name": "SELF_RESOLVE_ENDPOINT",
+    "class": "bootstrap",
+    "reason": "own endpoint/bind address: own resolve URL for self-calls (read in src/judge/gap-check-judge.ts)"
+  },
+  {
+    "name": "STALE_PROPOSAL_MAX_AGE_DAYS",
+    "class": "behaviour",
+    "reason": "stale proposal max age (read in src/resolvers/apply-proposal-as-patch.ts)"
+  },
+  {
+    "name": "STATEFUL_UI_VESSEL_ENDPOINT",
+    "class": "bootstrap",
+    "reason": "peer endpoint URL: stateful-ui (read in src/resolvers/compute-state-signature.ts, src/resolvers/docs-decision-answer-scan.ts, src/resolvers/docs-decision-deliver.ts +2 more)"
+  },
+  {
+    "name": "SUBSTRATE_ADVERTISE_HOST",
+    "class": "bootstrap",
+    "reason": "own endpoint/bind address: advertised host for discovery registration (read in src/discovery-registration.ts)"
+  },
+  {
+    "name": "SUBSTRATE_ADVERTISE_PORT_OFFSET",
+    "class": "bootstrap",
+    "reason": "own endpoint/bind address: published-port offset for the advertised URL (read in src/discovery-registration.ts)"
+  },
+  {
+    "name": "SUBSTRATE_ALLOWED_BRANCH_PATTERNS",
+    "class": "behaviour",
+    "reason": "policy: allowed branch patterns (read in src/resolvers/git-branch-create.ts)"
+  },
+  {
+    "name": "SUBSTRATE_API_KEY",
+    "class": "bootstrap",
+    "reason": "credential/secret: substrate API key (read in src/resolvers/composition-coverage-report.ts, src/resolvers/substrate-gap.ts)"
+  },
+  {
+    "name": "SUBSTRATE_API_URL",
+    "class": "bootstrap",
+    "reason": "peer endpoint URL: substrate API (read in src/resolvers/composition-coverage-report.ts)"
+  },
+  {
+    "name": "SUBSTRATE_GAP_SKIP_COMPOSE_TRIGGER",
+    "class": "behaviour",
+    "reason": "toggle: skip compose trigger on gap write (set by tests, but switches production behaviour if set) (read in src/resolvers/substrate-gap.ts)"
+  },
+  {
+    "name": "SUBSTRATE_GIT_PAT",
+    "class": "bootstrap",
+    "reason": "credential/secret: git push PAT, read to probe push health (read in src/resolvers/push-health-observer.ts)"
+  },
+  {
+    "name": "SUBSTRATE_HEARTBEAT_PATH",
+    "class": "bootstrap",
+    "reason": "filesystem root/path: heartbeat file (read in src/resolvers/substrate-heartbeat-observer.ts)"
+  },
+  {
+    "name": "SUBSTRATE_MERGE_COMPREHENSIBILITY_FLOOR",
+    "class": "behaviour",
+    "reason": "merge gate threshold (read in src/resolvers/gh-pr-merge.ts)"
+  },
+  {
+    "name": "SUBSTRATE_MERGE_CONVERGENT_VALIDITY_FLOOR",
+    "class": "behaviour",
+    "reason": "merge gate threshold (read in src/resolvers/gh-pr-merge.ts)"
+  },
+  {
+    "name": "SUBSTRATE_MERGE_PHANTOM_DELTA_MAX",
+    "class": "behaviour",
+    "reason": "merge gate threshold (read in src/resolvers/gh-pr-merge.ts)"
+  },
+  {
+    "name": "SUBSTRATE_MERGE_PRECONDITION_DELTA_MAX",
+    "class": "behaviour",
+    "reason": "merge gate threshold (read in src/resolvers/gh-pr-merge.ts)"
+  },
+  {
+    "name": "SUBSTRATE_NAME",
+    "class": "bootstrap",
+    "reason": "identity/node name: substrate (node) name (read in src/judge/gap-attempt-credit.ts, src/resolvers/attempt-checks.ts, src/resolvers/attempt-register.ts +4 more)"
+  },
+  {
+    "name": "SUBSTRATE_PUSH_VESSELS",
+    "class": "behaviour",
+    "reason": "policy: which vessels may push (read in src/judge/gap-policy.ts)"
+  },
+  {
+    "name": "SUBSTRATE_REPO_OWNER",
+    "class": "bootstrap",
+    "reason": "identity/node name: repo owner (read in src/resolvers/push-policy.ts)"
+  },
+  {
+    "name": "SUBSTRATE_RUN_DIR",
+    "class": "bootstrap",
+    "reason": "filesystem root/path: active scripts dir (read in src/resolvers/vessel-mitosis-cutover.ts)"
+  },
+  {
+    "name": "SUPER_REPO_ROOT",
+    "class": "bootstrap",
+    "reason": "filesystem root/path: super-repo clone (read in src/resolvers/self-fact-reconcile.ts)"
+  },
+  {
+    "name": "SURREALDB_DATABASE",
+    "class": "bootstrap",
+    "reason": "database connection coordinate: SurrealDB database (read in src/resolvers/advertised-shape-coverage-scan.ts, src/resolvers/causal-adjudication.ts, src/resolvers/compose-topology-tick.ts +10 more)"
+  },
+  {
+    "name": "SURREALDB_NAMESPACE",
+    "class": "bootstrap",
+    "reason": "database connection coordinate: SurrealDB namespace (read in src/resolvers/advertised-shape-coverage-scan.ts, src/resolvers/causal-adjudication.ts, src/resolvers/compose-topology-tick.ts +10 more)"
+  },
+  {
+    "name": "SURREALDB_PASSWORD",
+    "class": "bootstrap",
+    "reason": "credential/secret: SurrealDB password (read in src/resolvers/advertised-shape-coverage-scan.ts, src/resolvers/causal-adjudication.ts, src/resolvers/compose-topology-tick.ts +10 more)"
+  },
+  {
+    "name": "SURREALDB_URL",
+    "class": "bootstrap",
+    "reason": "database connection coordinate: SurrealDB URL (read in src/lib/surreal-endpoint.ts, src/resolvers/advertised-shape-coverage-scan.ts, src/resolvers/causal-adjudication.ts +8 more)"
+  },
+  {
+    "name": "SURREALDB_USERNAME",
+    "class": "bootstrap",
+    "reason": "credential/secret: SurrealDB user (read in src/resolvers/advertised-shape-coverage-scan.ts, src/resolvers/causal-adjudication.ts, src/resolvers/compose-topology-tick.ts +10 more)"
+  },
+  {
+    "name": "SURREAL_PASS",
+    "class": "bootstrap",
+    "reason": "credential/secret: SurrealDB password (legacy name) (read in src/resolvers/advertised-shape-coverage-scan.ts, src/resolvers/causal-adjudication.ts, src/resolvers/compose-topology-tick.ts +10 more)"
+  },
+  {
+    "name": "SYSTEMCTL_CMD",
+    "class": "bootstrap",
+    "reason": "filesystem root/path: systemctl binary path (read in src/resolvers/vessel-mitosis-cutover.ts)"
+  },
+  {
+    "name": "SYSTEMD_RUN_CMD",
+    "class": "bootstrap",
+    "reason": "filesystem root/path: systemd-run binary path (read in src/resolvers/pull-cutover.ts, src/resolvers/vessel-mitosis-cutover.ts)"
+  },
+  {
+    "name": "SYSTEMD_UNIT_DIRS",
+    "class": "bootstrap",
+    "reason": "filesystem root/path: systemd unit dirs (read in src/judge/gap-policy.ts)"
+  },
+  {
+    "name": "TRANSPORT_VESSEL_ENDPOINT",
+    "class": "bootstrap",
+    "reason": "peer endpoint URL: federation transport (read in src/resolvers/transport-health-observer.ts)"
+  },
+  {
+    "name": "TUNING_PARAM_ENDPOINT",
+    "class": "bootstrap",
+    "reason": "peer endpoint URL: tuning param store (read in src/resolvers/learning-policy-writeback.ts)"
+  },
+  {
+    "name": "VAULT_ROOT",
+    "class": "bootstrap",
+    "reason": "filesystem root/path: vault root (read in src/resolvers/obsidian-request-scan.ts)"
+  },
+  {
+    "name": "VESSELS_CLONE_ROOT",
+    "class": "bootstrap",
+    "reason": "filesystem root/path: vessel clones root (read in src/judge/gap-admission.ts, src/judge/gap-policy.ts, src/resolvers/feature-compose.ts +4 more)"
+  },
+  {
+    "name": "VESSELS_INVENTORY",
+    "class": "bootstrap",
+    "reason": "filesystem root/path: fleet inventory file (read in src/resolvers/pull-cutover.ts, src/resolvers/self-fact-reconcile.ts)"
+  },
+  {
+    "name": "VESSELS_ROOT",
+    "class": "bootstrap",
+    "reason": "filesystem root/path: vessels root (read in src/resolvers/change-series-tick.ts, src/resolvers/goal-file-extract.ts)"
+  },
+  {
+    "name": "VESSEL_ADVERTISE_ENDPOINT",
+    "class": "bootstrap",
+    "reason": "own endpoint/bind address: advertised endpoint override (read in src/discovery-registration.ts)"
+  },
+  {
+    "name": "VESSEL_CLONE_ROOT",
+    "class": "bootstrap",
+    "reason": "filesystem root/path: vessel clone root (read in src/resolvers/feature-compose.ts)"
+  },
+  {
+    "name": "VESSEL_ID",
+    "class": "bootstrap",
+    "reason": "identity/node name: vessel id (read in src/config.ts, src/resolvers/config-file.ts, src/resolvers/pull-cutover.ts +1 more)"
+  },
+  {
+    "name": "VESSEL_IDENTITY_KEY_PATH",
+    "class": "bootstrap",
+    "reason": "credential/secret: identity key file path (read in src/discovery-registration.ts, src/resolvers/self-fact-reconcile.ts)"
+  },
+  {
+    "name": "VESSEL_JWT",
+    "class": "bootstrap",
+    "reason": "credential/secret: vessel JWT fallback bearer (read in src/resolvers/vessel-mitosis-evaluate.ts)"
+  },
+  {
+    "name": "VESSEL_PORT",
+    "class": "bootstrap",
+    "reason": "own endpoint/bind address: own port fallback name (read in src/resolvers/vessel-mitosis-cutover.ts)"
+  },
+  {
+    "name": "WORKSPACE_ROOT",
+    "class": "bootstrap",
+    "reason": "filesystem root/path: workspace root (read in src/compose-slots.ts, src/config.ts, src/judge/gap-landing-verdict.ts +41 more)"
+  },
+  {
+    "name": "WRITE_ALLOWLIST",
+    "class": "behaviour",
+    "reason": "policy: fs_write allowlist (widens what may be written; behaviour, safe direction) (read in src/resolvers/fs-write.ts)"
+  }
+]

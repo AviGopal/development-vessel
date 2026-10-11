@@ -223,7 +223,8 @@ describe("test_suite — per-test timeout", () => {
   it("still bounds the WHOLE run, so a hung test cannot pass silently", async () => {
     // The per-test timeout is raised, not removed. `timeout <budget>` wraps the run.
     const cmd = await captureCommand({});
-    expect(cmd).toMatch(/timeout \d+ bun test/);
+    // (the scrubbed-env prefix, src/test-child-env.ts, sits between `timeout` and `bun`)
+    expect(cmd).toMatch(/timeout \d+ env -i [^;]*? bun test/);
   });
 
   it("accepts an explicit override", async () => {

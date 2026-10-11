@@ -36,7 +36,7 @@ const DEFAULT_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/b
  */
 export function testChildEnv(
   source: Record<string, string | undefined> = process.env,
-  opts: { workspaceRoot?: string } = {},
+  opts: { workspaceRoot?: string; pathAppend?: readonly string[] } = {},
 ): Record<string, string> {
   const env: Record<string, string> = {};
   for (const name of TEST_CHILD_ENV_PASSTHROUGH) {
@@ -44,23 +44,38 @@ export function testChildEnv(
     if (v !== undefined && v !== "") env[name] = v;
   }
   const path = env["PATH"] ?? DEFAULT_PATH;
-  const bunDir = dirname(process.execPath);
-  env["PATH"] = path.split(":").includes(bunDir) ? path : `${path}:${bunDir}`;
+  const dirs = path.split(":");
+  for (const extra of [...(opts.pathAppend ?? []), dirname(process.execPath)]) if (extra && !dirs.includes(extra)) dirs.push(extra);
+  env["PATH"] = dirs.join(":");
   Object.assign(env, TEST_CHILD_ENV_FIXED);
   if (opts.workspaceRoot) env["WORKSPACE_ROOT"] = opts.workspaceRoot;
   return env;
 }
 
 /**
- * Run `fn` with a scrubbed env whose WORKSPACE_ROOT is a fresh scratch directory, removed afterwards.
- * A child that defaults its writes to WORKSPACE_ROOT therefore never writes the live workspace.
+ * Run `fn` with a scrubbed env whose WORKSPACE_ROOT is a fresh scratch directory, removed afterwards
+ * (after the returned promise settles, when `fn` is async). A child that defaults its writes to
+ * WORKSPACE_ROOT therefore never writes the live workspace.
  */
-export function withTestChildEnv<T>(fn: (env: Record<string, string>) => T, source: Record<string, string | undefined> = process.env): T {
+export function withTestChildEnv<T>(
+  fn: (env: Record<string, string>) => T,
+  source: Record<string, string | undefined> = process.env,
+  opts: { pathAppend?: readonly string[] } = {},
+): T {
   const ws = mkdtempSync(`${tmpdir()}/test-child-ws-`);
-  try {
-    return fn(testChildEnv(source, { workspaceRoot: ws }));
-  } finally {
+  const remove = (): void => {
     try { rmSync(ws, { recursive: true, force: true }); } catch { /* best-effort scratch removal */ }
+  };
+  let deferred = false;
+  try {
+    const out = fn(testChildEnv(source, { workspaceRoot: ws, pathAppend: opts.pathAppend }));
+    if (out instanceof Promise) {
+      deferred = true;
+      return out.finally(remove) as T;
+    }
+    return out;
+  } finally {
+    if (!deferred) remove();
   }
 }
 

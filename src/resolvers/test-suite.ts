@@ -2,6 +2,7 @@ import { classifyCheckRun } from "./retry-evidence.js";
 import type { ResolverResult } from "./types.js";
 import fs from "node:fs";
 import { fileURLToPath } from "node:url";
+import { testChildEnvShellPrefix } from "../test-child-env.js";
 
 /**
  * Resolver for the `test_suite` shape — runs a vessel's test suite INSIDE the container
@@ -179,7 +180,7 @@ export function mutationEditProblem(e: unknown): string | null {
 export const MUTANT_APPLIER_PATH = fileURLToPath(new URL("../lib/apply-mutant.ts", import.meta.url));
 export function mutationEditScript(e: MutationEdit): string {
   const data = Buffer.from(JSON.stringify({ file: e.file, start: e.start, end: e.end, original: e.original, replacement: e.replacement }), "utf8").toString("base64");
-  return `if (cd "$BW" && bun run ${shq(MUTANT_APPLIER_PATH)} ${shq(data)}) >/dev/null 2>&1; then echo "MUTATION_APPLIED=1"; else echo "MUTATION_FAILED=1"; fi`;
+  return `if (cd "$BW" && ${testChildEnvShellPrefix()} bun run ${shq(MUTANT_APPLIER_PATH)} ${shq(data)}) >/dev/null 2>&1; then echo "MUTATION_APPLIED=1"; else echo "MUTATION_FAILED=1"; fi`;
 }
 export function mutationRevertScript(sha: string, file: string): string {
   const d = `"$BW.mutation.diff"`;
@@ -311,7 +312,7 @@ export async function resolveTestSuite(pointer: Record<string, unknown>): Promis
   const baseRef = typeof pointer.base_ref === "string" && /^(HEAD|[0-9a-f]{7,40})$/.test(pointer.base_ref.trim())
     ? pointer.base_ref.trim()
     : "";
-  const bunRun = `env -i PATH="$PATH" HOME="$HOME" NODE_ENV=test TZ=UTC WORKSPACE_ROOT="$(mktemp -d)" timeout ${budgetSec} bun test${testFile ? " " + shq("./" + testFile) : ""} --timeout ${perTestTimeoutMs}${testFilter} 2>&1 || true`;
+  const bunRun = `timeout ${budgetSec} ${testChildEnvShellPrefix()} bun test${testFile ? " " + shq("./" + testFile) : ""} --timeout ${perTestTimeoutMs}${testFilter} 2>&1 || true`;
   const command = baseRef
     ? `ROOT=${shq(preferredRoot)}; [ -d "$ROOT" ] || ROOT=${shq(fallbackRoot)}; ` +
       `git -C "$ROOT" worktree prune >/dev/null 2>&1; BW="$(mktemp -d /tmp/test-suite-base-XXXXXX)"; ` +
@@ -323,7 +324,7 @@ export async function resolveTestSuite(pointer: Record<string, unknown>): Promis
       `git -C "$ROOT" worktree remove --force "$BW" >/dev/null 2>&1; rm -rf "$BW"; git -C "$ROOT" worktree prune >/dev/null 2>&1; true`
     : `ROOT=${shq(preferredRoot)}; [ -d "$ROOT" ] || ROOT=${shq(fallbackRoot)}; ` +
       `echo "VERIFIED_ROOT=$ROOT"; echo "VERIFIED_HEAD=$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)"; ` +
-      `cd "$ROOT" && ([ -d node_modules ] || timeout 120 bun install >/dev/null 2>&1; ${bunRun})`;
+      `cd "$ROOT" && ([ -d node_modules ] || timeout 120 ${testChildEnvShellPrefix()} bun install >/dev/null 2>&1; ${bunRun})`;
 
   let raw = "";
   let gateRefused: string | null = null;

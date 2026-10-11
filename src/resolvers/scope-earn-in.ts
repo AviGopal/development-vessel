@@ -111,6 +111,10 @@ export const EVALUATOR_FILES: readonly string[] = [
   // quoting every shell value feature-compose builds goes through (10-08).
   "repos/development-vessel/src/resolvers/vessel-paths.ts",
   "repos/development-vessel/src/resolvers/shell-quote.ts",
+  // The scrubbed child env every suite/typecheck/install child of the judge runs under (test_suite, the mitosis
+  // evaluator, feature-compose's verify), and the test that pins it and classifies every spawn (10-11).
+  "repos/development-vessel/src/test-child-env.ts",
+  "repos/development-vessel/test/resolvers/vessel-mitosis-evaluate-child-env.test.ts",
 ];
 export const EVALUATOR_FILE_REASON = "refused: the path is one of the evaluator's own files (EVALUATOR_FILES)";
 /**
@@ -174,6 +178,8 @@ export const SCOPE_CLASSIFICATION: Readonly<Record<string, ScopeClass>> = {
   "repos/development-vessel/src/resolvers/check-supply-admission.ts": { class: "judge_trust", reason: "evaluator file: the supply test-writing admission ledger check and R3 path rule on feature-compose's verdict path (verdict)" },
   "repos/development-vessel/src/resolvers/vessel-paths.ts": { class: "judge_trust", reason: "evaluator file: the vessel path forms and plan-path rule check-supply-admission and feature-compose read (verdict)" },
   "repos/development-vessel/src/resolvers/shell-quote.ts": { class: "judge_trust", reason: "evaluator file: the shell quoting every value in feature-compose's shell commands goes through (verdict)" },
+  "repos/development-vessel/src/test-child-env.ts": { class: "judge_trust", reason: "evaluator file: the allowlist of what a suite/typecheck/install child may inherit; one added name hands it a credential (credential, verdict)" },
+  "repos/development-vessel/test/resolvers/vessel-mitosis-evaluate-child-env.test.ts": { class: "judge_trust", reason: "evaluator file: pins the child-env allowlist and classifies every child-process spawn (judge tests)" },
   "repos/development-vessel/test/resolvers/scope-earn-in.test.ts": { class: "judge_trust", reason: "evaluator file: the criterion's tests (judge)" },
   "repos/development-vessel/test/resolvers/evaluator-grant-scan.test.ts": { class: "judge_trust", reason: "evaluator file: pins the evaluator grant (judge)" },
   "repos/development-vessel/test/resolvers/scope-change-pin.test.ts": { class: "judge_trust", reason: "evaluator file: pins what the scope judge accepts (judge)" },

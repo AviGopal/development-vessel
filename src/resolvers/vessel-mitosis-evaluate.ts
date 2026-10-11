@@ -14,6 +14,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { groupLeaderArgv, killProcessGroup } from "../process-group";
+import { withTestChildEnv } from "../test-child-env.js";
 import { isSaturated, loadAverage1m, SATURATION_MULTIPLE } from "../system-load";
 // bun resolved via Bun.which at call-time (no external import needed)
 import type { ResolverResult } from "./types.js";
@@ -256,34 +257,39 @@ async function runCheck(
     };
   }
   try {
-    // Spawned as its own process-group leader so a timeout can take the WHOLE tree.
-    const proc = Bun.spawn(groupLeaderArgv(bunCmd, args), {
-      cwd,
-      stdout: "pipe",
-      stderr: "pipe",
-      env: { ...process.env, PATH: `${process.env["PATH"] ?? "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"}:/root/.bun/bin` },
-    });
-    const timer = setTimeout(() => {
-      // V40: record that WE killed it. The resulting exit code (143 / -1) must
-      // not be interpreted as a tsc verdict — it's a kill, not a completion.
-      timedOut = true;
-      // KILL THE GROUP, NOT THE CHILD. `proc.kill()` signals exactly one pid, so killing `bun`
-      // left every worker `bun test` had forked running — reparented to init, no parent, no
-      // timer, forever. Measured on substrate-live 2026-08-30: loadavg 57.5 holding above 45
-      // with 29-47 orphaned `bun test` processes continuously replenished (this runs at ~292
-      // mitosis-ticks/hour with a 420s suite timeout), which is what made vessel /health take
-      // 9.5s and walks die on "fetch failed: The operation was aborted". Same defect, same fix
-      // as `groupBounded` in repos/local-tools-vessel/src/index.ts. Falls back to the old
-      // single-pid kill so a timeout always terminates something.
-      killProcessGroup(proc.pid, () => proc.kill());
-    }, timeoutMs);
-    const [stdoutText, stderrText] = await Promise.all([
-      new Response(proc.stdout).text(),
-      new Response(proc.stderr).text(),
-    ]);
-    exit = await proc.exited;
-    clearTimeout(timer);
-    out = `--- stdout ---\n${stdoutText}\n--- stderr ---\n${stderrText}`;
+    // SCRUBBED ENV: the suite and the lint/typecheck scripts are lane-authorable code, and this process
+    // holds the fleet secrets file. The child gets only the shared allowlist (test-child-env.ts) and a
+    // scratch WORKSPACE_ROOT, removed when the run settles; /root/.bun/bin stays on PATH as before.
+    await withTestChildEnv(async (env) => {
+      // Spawned as its own process-group leader so a timeout can take the WHOLE tree.
+      const proc = Bun.spawn(groupLeaderArgv(bunCmd, args), {
+        cwd,
+        stdout: "pipe",
+        stderr: "pipe",
+        env,
+      });
+      const timer = setTimeout(() => {
+        // V40: record that WE killed it. The resulting exit code (143 / -1) must
+        // not be interpreted as a tsc verdict — it's a kill, not a completion.
+        timedOut = true;
+        // KILL THE GROUP, NOT THE CHILD. `proc.kill()` signals exactly one pid, so killing `bun`
+        // left every worker `bun test` had forked running — reparented to init, no parent, no
+        // timer, forever. Measured on substrate-live 2026-08-30: loadavg 57.5 holding above 45
+        // with 29-47 orphaned `bun test` processes continuously replenished (this runs at ~292
+        // mitosis-ticks/hour with a 420s suite timeout), which is what made vessel /health take
+        // 9.5s and walks die on "fetch failed: The operation was aborted". Same defect, same fix
+        // as `groupBounded` in repos/local-tools-vessel/src/index.ts. Falls back to the old
+        // single-pid kill so a timeout always terminates something.
+        killProcessGroup(proc.pid, () => proc.kill());
+      }, timeoutMs);
+      const [stdoutText, stderrText] = await Promise.all([
+        new Response(proc.stdout).text(),
+        new Response(proc.stderr).text(),
+      ]);
+      exit = await proc.exited;
+      clearTimeout(timer);
+      out = `--- stdout ---\n${stdoutText}\n--- stderr ---\n${stderrText}`;
+    }, process.env, { pathAppend: ["/root/.bun/bin"] });
   } catch (err) {
     out = `spawn_error: ${(err as Error).message}`;
   }

@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, beforeAll, afterAll } from "bun:test";
 import { resolveApplyProposalAsPatch } from "../../src/resolvers/apply-proposal-as-patch.js";
-import { __resetPolicyReadsForTests } from "../../src/resolvers/gap-to-feature.js";
+import { __resetPolicyReadsForTests } from "../../src/judge/gap-policy.js";
 import { writeFileSync, mkdirSync, rmSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";

@@ -32,7 +32,7 @@ import { installCutoverFetchGuard, routeFleetUnreachable, routeShell, BUN_NO_TES
 import { installCutoverFsGuard, restoreCutoverFsModules, type FsGuard } from "./cutover-fs-guard.js";
 
 const { resolveVesselMitosisCutover, __setOwnCheckDepsForTests } = cutoverMod;
-const { __resetPolicyReadsForTests } = await import("../../src/resolvers/gap-to-feature.js");
+const { __resetPolicyReadsForTests } = await import("../../src/judge/gap-policy.js");
 const clearScopeDefault = (): void => (cutoverMod as unknown as { __setAutonomyScopeDefaultForTests?: (r: null) => void }).__setAutonomyScopeDefaultForTests?.(null);
 
 const ENV_KEYS = [

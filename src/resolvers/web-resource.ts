@@ -143,7 +143,7 @@ export type SearchImpulseReader = (dispatchId: string, impulseId: string) => Pro
 
 /** Reads the impulse from this substrate's own goalWalkState producers (a peer cannot vouch). */
 const discoveryReader: SearchImpulseReader = async (dispatchId, impulseId) => {
-  const { discoverOwnResolveUrls } = await import("./gap-to-feature.js");
+  const { discoverOwnResolveUrls } = await import("../judge/gap-policy.js");
   const { METABOB_API_KEY } = await import("../config.js");
   const d = await discoverOwnResolveUrls("goalWalkState");
   if (!d.ok) return { ok: false, why: `goalWalkState unreadable: ${d.why}` };

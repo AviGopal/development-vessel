@@ -41,7 +41,7 @@ import { installCutoverFetchGuard, routeFleetUnreachable, routeShell, BUN_NO_TES
 import { installCutoverFsGuard, restoreCutoverFsModules, type FsGuard } from "./cutover-fs-guard.js";
 
 const { resolveVesselMitosisCutover, __setOwnCheckDepsForTests } = cutoverMod;
-const { __resetPolicyReadsForTests, autonomyScopeExcludes } = await import("../../src/resolvers/gap-to-feature.js");
+const { __resetPolicyReadsForTests, autonomyScopeExcludes } = await import("../../src/judge/gap-policy.js");
 // AUTHENTICATED DIRECTED (lib/operator-direct.ts): a directed intent is stamped only under a grant identity gave the
 // operator's own key ("operator:direct", or "admin" interim). Imported softly so the must-fails below are red at a
 // parent without the module for the behaviour (it stamps every directed:true), not for a missing import.
@@ -458,7 +458,7 @@ describe("cutover: disagreement adjudication mints an excluded edit_site after a
     });
     // The minted site IS excluded by the scope admission read; admission admits it anyway (the mint runs after its scope check).
     __resetPolicyReadsForTests();
-    const { autonomyScope } = await import("../../src/resolvers/gap-to-feature.js");
+    const { autonomyScope } = await import("../../src/judge/gap-policy.js");
     expect(autonomyScopeExcludes(await autonomyScope(), "repos/goal-host-vessel/src/index.ts")).toBe("repos/goal-host-vessel/src/index.ts");
     __resetPolicyReadsForTests();
     const s = await setup({ route: "apply_proposal_as_patch", vessel: "goal-host-vessel", files: ["src/index.ts"], gap });

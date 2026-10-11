@@ -1398,7 +1398,7 @@ export async function resolveApplyProposalAsPatch(pointer: ApplyProposalAsPatchP
   if (!pointer.proposal_id && !pointer.dry_run) {
     let envelope: { allow: boolean; reason: string; paused?: boolean };
     try {
-      envelope = await (await import("./gap-to-feature.js")).spendEnvelopeAllows();
+      envelope = await (await import("../judge/gap-policy.js")).spendEnvelopeAllows();
     } catch (err) {
       envelope = { allow: false, reason: "envelope check failed: " + String(err) };
     }

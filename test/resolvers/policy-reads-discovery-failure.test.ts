@@ -10,12 +10,7 @@ import { afterEach, beforeEach, describe, expect, it, setSystemTime, spyOn } fro
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import {
-  autonomyScope,
-  autonomyScopeFloor,
-  spendEnvelopeAllows,
-  __resetPolicyReadsForTests,
-} from "../../src/resolvers/gap-to-feature.js";
+import { autonomyScope, autonomyScopeFloor, spendEnvelopeAllows, __resetPolicyReadsForTests } from "../../src/judge/gap-policy.js";
 import { composeLessonClass } from "../../src/resolvers/feature-compose.js";
 import { resolveRhythmConductorTick } from "../../src/resolvers/rhythm-conductor-tick.js";
 import * as config from "../../src/config.js";

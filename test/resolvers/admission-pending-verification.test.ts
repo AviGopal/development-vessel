@@ -37,7 +37,7 @@ beforeAll(() => {
     const body = init?.body ? JSON.parse(String(init.body)) : {};
     return explicitOpenPolicy(body) ?? new Response("{}", { status: 200 });
   }) as typeof fetch;
-  (mod as { __resetPolicyReadsForTests: () => void }).__resetPolicyReadsForTests();
+  (modPolicy as { __resetPolicyReadsForTests: () => void }).__resetPolicyReadsForTests();
 });
 afterAll(() => {
   globalThis.fetch = originalFetch;
@@ -46,6 +46,7 @@ afterAll(() => {
 });
 
 const mod = await import("../../src/resolvers/gap-to-feature.js") as Record<string, unknown>;
+const modPolicy = await import("../../src/judge/gap-policy.js") as Record<string, unknown>;
 const elig = await import("../../src/judge/gap-eligibility.js") as Record<string, unknown>;
 const admitActionableGaps = mod.admitActionableGaps as (g: Record<string, unknown>[], o?: unknown) => Promise<{ admitted: Record<string, unknown>[]; excluded: Array<{ id: string; reason: string }> }>;
 const isAwaitingLandVerification = elig.isAwaitingLandVerification as (g: Record<string, unknown>) => boolean;

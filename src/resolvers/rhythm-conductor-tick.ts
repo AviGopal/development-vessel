@@ -523,7 +523,7 @@ export async function resolveRhythmConductorTick(
   let envelope: { allow: boolean; reason: string } = { allow: true, reason: "dry run" };
   if (pointer.dry_run !== true) {
     try {
-      envelope = await (await import("./gap-to-feature.js")).spendEnvelopeAllows();
+      envelope = await (await import("../judge/gap-policy.js")).spendEnvelopeAllows();
     } catch (err) {
       envelope = { allow: false, reason: "envelope check failed: " + String(err) };
     }

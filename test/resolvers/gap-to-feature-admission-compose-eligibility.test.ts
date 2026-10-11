@@ -12,7 +12,8 @@
 // gap carrying source_gap_id inherits its SITE after selection, so only the site is waived and it must still be armed,
 // open and unheld. The last test pins that the fresh-orphan route is untouched.
 import { describe, it, expect, beforeAll, afterAll } from "bun:test";
-import { admitActionableGaps, __resetPolicyReadsForTests } from "../../src/resolvers/gap-to-feature.js";
+import { admitActionableGaps } from "../../src/resolvers/gap-to-feature.js";
+import { __resetPolicyReadsForTests } from "../../src/judge/gap-policy.js";
 import { openPolicyAnswer } from "./explicit-open-policy.fixture.js";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";

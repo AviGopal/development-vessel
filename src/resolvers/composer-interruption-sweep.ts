@@ -23,7 +23,7 @@ type Entry = {
 
 async function getOwnedVesselsSafe(): Promise<Set<string>> {
   try {
-    const mod = await import("./gap-to-feature.js");
+    const mod = await import("../judge/gap-policy.js");
     const fn = (mod as unknown as { ownedVessels?: () => Promise<Iterable<string>> | Iterable<string> }).ownedVessels;
     const owned = typeof fn === "function" ? await fn() : undefined;
     const s = new Set<string>();

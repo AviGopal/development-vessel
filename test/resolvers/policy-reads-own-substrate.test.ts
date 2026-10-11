@@ -20,7 +20,8 @@ mkdirSync(ROOT, { recursive: true });
 if (!process.env["WORKSPACE_ROOT"]) process.env["WORKSPACE_ROOT"] = ROOT;
 
 const g2f = await import("../../src/resolvers/gap-to-feature.js");
-const { autonomyScope, autonomyScopeExcludes, spendEnvelopeAllows, __resetPolicyReadsForTests } = g2f;
+const g2fPolicy = await import("../../src/judge/gap-policy.js");
+const { autonomyScope, autonomyScopeExcludes, spendEnvelopeAllows, __resetPolicyReadsForTests } = g2fPolicy;
 
 const originalFetch = globalThis.fetch;
 
@@ -269,7 +270,7 @@ describe("the node list is ABSENT: peers fail closed, local still reads", () => 
 });
 
 describe("the own-producer predicate", () => {
-  const own = (p: { origin?: string; originUpstream?: string | null }, nodes: string[]) => g2f.isOwnSubstrateProducer(p, nodes);
+  const own = (p: { origin?: string; originUpstream?: string | null }, nodes: string[]) => g2fPolicy.isOwnSubstrateProducer(p, nodes);
   it("local is own; an unstamped or overlay row is not", () => {
     expect(own({ origin: "local" }, [])).toBe(true);
     expect(own({}, [N1_DISCOVERY])).toBe(false);

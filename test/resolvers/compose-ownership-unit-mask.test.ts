@@ -16,9 +16,10 @@ import { mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import * as g2f from "../../src/resolvers/gap-to-feature.js";
-const ownedVessels = g2f.ownedVessels;
+import * as g2fPolicy from "../../src/judge/gap-policy.js";
+const ownedVessels = g2fPolicy.ownedVessels;
 // Namespace read so a missing export fails ITS test, not the whole file.
-const systemdUnitDirs = (): string[] => ((g2f as Record<string, unknown>)["systemdUnitDirs"] as (() => string[]) | undefined)?.() ?? [];
+const systemdUnitDirs = (): string[] => ((g2fPolicy as Record<string, unknown>)["systemdUnitDirs"] as (() => string[]) | undefined)?.() ?? [];
 
 const ROOT = join(tmpdir(), `compose-ownership-mask-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 const CLONES = join(ROOT, "vessels");

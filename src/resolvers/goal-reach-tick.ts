@@ -981,7 +981,7 @@ async function postResolve(url: string, pointer: Record<string, unknown>, timeou
 
 /** Own-substrate producers of `shape` (gap-to-feature.ts discoverOwnResolveUrls): a peer cannot steer R. */
 async function ownUrls(shape: string): Promise<{ ok: true; urls: string[] } | { ok: false; why: string }> {
-  const { discoverOwnResolveUrls } = await import("./gap-to-feature.js");
+  const { discoverOwnResolveUrls } = await import("../judge/gap-policy.js");
   const d = await discoverOwnResolveUrls(shape);
   if (!d.ok) return { ok: false, why: d.why };
   if (d.urls.length === 0) return { ok: false, why: `no own-substrate ${shape} producer discovered` };
@@ -1133,7 +1133,7 @@ export function defaultGoalReachIO(policy: GoalReachPolicy): GoalReachIO {
     },
 
     async scopeExcludes() {
-      const { autonomyScope, autonomyScopeExcludes } = await import("./gap-to-feature.js");
+      const { autonomyScope, autonomyScopeExcludes } = await import("../judge/gap-policy.js");
       const s = await autonomyScope();
       if (!s.readable) return null;
       return (p: string) => autonomyScopeExcludes(s, p);

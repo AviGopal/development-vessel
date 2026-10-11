@@ -2,7 +2,8 @@ import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import { mkdtemp, rm, writeFile, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { resolveGapToFeature, __resetPolicyReadsForTests } from "../../src/resolvers/gap-to-feature.js";
+import { resolveGapToFeature } from "../../src/resolvers/gap-to-feature.js";
+import { __resetPolicyReadsForTests } from "../../src/judge/gap-policy.js";
 import { gapStoreRootForTest } from "../../src/resolvers/substrate-gap.js";
 import { openPolicyAnswer } from "./explicit-open-policy.fixture.js";
 

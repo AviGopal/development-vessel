@@ -14,7 +14,9 @@ const ROOT = join(tmpdir(), `scope-fail-closed-${Date.now()}-${Math.random().toS
 if (!process.env["WORKSPACE_ROOT"]) process.env["WORKSPACE_ROOT"] = ROOT;
 
 const g2f = await import("../../src/resolvers/gap-to-feature.js");
-const { autonomyScope, autonomyScopeExcludes, autonomyScopeFloor, spendEnvelopeAllows, admitActionableGaps, __resetPolicyReadsForTests } = g2f;
+const g2fPolicy = await import("../../src/judge/gap-policy.js");
+const { admitActionableGaps } = g2f;
+const { autonomyScope, autonomyScopeExcludes, autonomyScopeFloor, spendEnvelopeAllows, __resetPolicyReadsForTests } = g2fPolicy;
 
 const originalFetch = globalThis.fetch;
 const POOL = "http://node-a:18090/v2/impulses/resolve";

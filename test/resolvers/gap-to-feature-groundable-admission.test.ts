@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from "bun:test";
-import { admitActionableGaps, __resetPolicyReadsForTests } from "../../src/resolvers/gap-to-feature.js";
+import { admitActionableGaps } from "../../src/resolvers/gap-to-feature.js";
+import { __resetPolicyReadsForTests } from "../../src/judge/gap-policy.js";
 import { openPolicyAnswer } from "./explicit-open-policy.fixture.js";
 
 // The policy reads (autonomyScope, spendEnvelope) fail closed when they cannot be read or hold no record, so this

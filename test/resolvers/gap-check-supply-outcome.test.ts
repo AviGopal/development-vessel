@@ -33,6 +33,7 @@ delete process.env["GAP_STORE_ENDPOINT"];
 
 const sg = await import("../../src/resolvers/substrate-gap.js");
 const g2f = await import("../../src/resolvers/gap-to-feature.js");
+const g2fPolicy = await import("../../src/judge/gap-policy.js");
 const supply = await import("../../src/resolvers/gap-check-supply.js");
 
 type Row = Record<string, unknown>;
@@ -106,7 +107,7 @@ afterAll(async () => {
 beforeEach(() => {
   goals = []; executions = {}; excluded = ["repos/some-other-vessel/"]; rhythms = [dueRhythm()];
   execGuard = installCutoverExecGuard();
-  g2f.__resetPolicyReadsForTests();
+  g2fPolicy.__resetPolicyReadsForTests();
 });
 afterEach(() => { expect(execGuard?.restore() ?? []).toEqual([]); });
 

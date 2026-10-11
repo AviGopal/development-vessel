@@ -23,7 +23,7 @@ const DEFAULT_PSI_BUCKET_THRESHOLDS = (m.DEFAULT_PSI_BUCKET_THRESHOLDS ?? { cpu:
 const __setLoadReadersForTests = (x: any) => { if (typeof m.__setLoadReadersForTests === "function") m.__setLoadReadersForTests(x); };
 const psiFallbackCount = (): number => (typeof m.psiFallbackCount === "function" ? m.psiFallbackCount() : -1);
 const resolveRhythmConductorTick = rct.resolveRhythmConductorTick;
-import { __resetPolicyReadsForTests } from "../../src/resolvers/gap-to-feature.js";
+import { __resetPolicyReadsForTests } from "../../src/judge/gap-policy.js";
 import { openPolicyAnswer } from "./explicit-open-policy.fixture.js";
 
 const PSI = (avg60: number) => `some avg10=${avg60.toFixed(2)} avg60=${avg60.toFixed(2)} avg300=${avg60.toFixed(2)} total=12345\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n`;

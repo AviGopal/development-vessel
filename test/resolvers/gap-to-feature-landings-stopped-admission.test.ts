@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll, afterEach } from "bun:test";
-import { admitActionableGaps, resolveGapToFeature, __resetPolicyReadsForTests } from "../../src/resolvers/gap-to-feature.js";
+import { admitActionableGaps, resolveGapToFeature } from "../../src/resolvers/gap-to-feature.js";
+import { __resetPolicyReadsForTests } from "../../src/judge/gap-policy.js";
 import { openPolicyAnswer } from "./explicit-open-policy.fixture.js";
 
 // MITOSIS_DIRECT_PUSH=0 stops LANDING (the cutover's kill switch, push-policy landingsStopped),

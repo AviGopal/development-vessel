@@ -18,6 +18,7 @@ process.env["SUBSTRATE_GAP_SKIP_COMPOSE_TRIGGER"] = "1";
 
 const sg = await import("../../src/resolvers/substrate-gap.js");
 const g2f = await import("../../src/resolvers/gap-to-feature.js");
+const g2fPolicy = await import("../../src/judge/gap-policy.js");
 const RUN = Math.random().toString(36).slice(2, 8);
 // The policy reads (autonomyScope, spendEnvelope) fail closed when they cannot be read or hold no record, so this
 // fixture answers them as a read that SUCCEEDS and finds the explicit open records (unrestricted, uncapped).
@@ -54,7 +55,7 @@ beforeAll(() => {
     if (url.endsWith("/run-goal")) { runGoals++; return Response.json({ ok: true }); }
     return Response.json({ body: { impulses: [] } });
   }) as unknown as typeof fetch;
-  g2f.__resetPolicyReadsForTests();
+  g2fPolicy.__resetPolicyReadsForTests();
 });
 afterAll(() => {
   globalThis.fetch = originalFetch;

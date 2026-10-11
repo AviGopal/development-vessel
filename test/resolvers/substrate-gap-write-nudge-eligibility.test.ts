@@ -21,7 +21,7 @@ const mod = await import(`../../src/resolvers/substrate-gap.js?${"write-nudge-el
 if (!mod.gapStoreRootForTest().startsWith(tmpdir())) {
   throw new Error(`refusing to run: gap store ${mod.gapStoreRootForTest()} is not under ${tmpdir()}`);
 }
-const { __resetPolicyReadsForTests } = await import("../../src/resolvers/gap-to-feature.js");
+const { __resetPolicyReadsForTests } = await import("../../src/judge/gap-policy.js");
 const observer = (await import("../../src/services/gap-drain-observer.js")) as unknown as {
   __resetComposeNudgeGateForTests: () => void;
   __composeNudgeSkipCountsForTests?: () => Record<string, number>;

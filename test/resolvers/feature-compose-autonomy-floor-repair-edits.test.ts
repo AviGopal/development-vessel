@@ -30,7 +30,7 @@ import { describe, it, expect } from "bun:test";
 import { readFileSync } from "node:fs";
 import ts from "typescript";
 import * as fc from "../../src/resolvers/feature-compose.js";
-import { autonomyScopeFloor } from "../../src/resolvers/gap-to-feature.js";
+import { autonomyScopeFloor } from "../../src/judge/gap-policy.js";
 
 type Applied = { ok: boolean; path: string };
 type Ws = { rel(abs: string): string | undefined };

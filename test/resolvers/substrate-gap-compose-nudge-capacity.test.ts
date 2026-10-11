@@ -25,7 +25,7 @@ const mod = await import(`../../src/resolvers/substrate-gap.js?${"nudge-capacity
 if (!mod.gapStoreRootForTest().startsWith(tmpdir())) {
   throw new Error(`refusing to run: gap store ${mod.gapStoreRootForTest()} is not under ${tmpdir()}`);
 }
-const { __resetPolicyReadsForTests } = await import("../../src/resolvers/gap-to-feature.js");
+const { __resetPolicyReadsForTests } = await import("../../src/judge/gap-policy.js");
 
 type G = { __gapComposeLastTrigger?: number; __composeDrainInflight?: boolean; __composeDrainLastAt?: number };
 const g = globalThis as unknown as G;

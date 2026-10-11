@@ -13,6 +13,7 @@ if (!process.env["WORKSPACE_ROOT"]) process.env["WORKSPACE_ROOT"] = ROOT;
 process.env["SUBSTRATE_GAP_SKIP_COMPOSE_TRIGGER"] = "1";
 const sg = await import("../../src/resolvers/substrate-gap.js");
 const g2f = await import("../../src/resolvers/gap-to-feature.js");
+const g2fPolicy = await import("../../src/judge/gap-policy.js");
 const { inheritedPredicateHolds } = g2f;
 const { class2PredicateKey } = sg;
 
@@ -72,7 +73,7 @@ describe("auto-pick reads the hold before admission (wiring)", () => {
       throw new TypeError("Unable to connect. Is the computer able to access the url?");
     }) as unknown as typeof fetch;
     sg.__setBirthJudgeForTests(async () => "present");
-    g2f.__resetPolicyReadsForTests();
+    g2fPolicy.__resetPolicyReadsForTests();
   });
   afterAll(() => {
     globalThis.fetch = originalFetch;

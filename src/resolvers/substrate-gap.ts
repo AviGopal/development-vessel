@@ -2352,7 +2352,7 @@ async function resolveSubstrateGapWriteInner(
     let nudgeEnvelope: { allow: boolean; reason: string } = { allow: true, reason: "" };
     if (!g.__gapComposeLastTrigger || nowMs - g.__gapComposeLastTrigger > 60_000) {
       try {
-        const { spendEnvelopeAllows } = await import("./gap-to-feature.js");
+        const { spendEnvelopeAllows } = await import("../judge/gap-policy.js");
         nudgeEnvelope = await spendEnvelopeAllows();
       } catch (err) {
         nudgeEnvelope = { allow: false, reason: "envelope check failed: " + String(err) };

@@ -47,7 +47,7 @@ if (SAVED_WR === undefined) delete process.env["WORKSPACE_ROOT"]; else process.e
 void sg;
 
 const { resolveFeatureCompose } = await import("../../src/resolvers/feature-compose.js");
-const { __resetPolicyReadsForTests } = await import("../../src/resolvers/gap-to-feature.js");
+const { __resetPolicyReadsForTests } = await import("../../src/judge/gap-policy.js");
 // The module this slice adds. Absent at base: the must-fails assert it, the controls do not need it.
 const csa = await import("../../src/resolvers/check-supply-admission.js").catch(() => null) as null | {
   __setCheckSupplyLedgerWaitForTests: (w: { attempts?: number; delay_ms?: number; read_timeout_ms?: number } | null) => void;

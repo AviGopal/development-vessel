@@ -37,6 +37,7 @@ for (const [k, v] of Object.entries(SCRATCH_ENV)) { SAVED_ENV[k] = process.env[k
 
 const sg = await import("../../src/resolvers/substrate-gap.js");
 const g2f = await import("../../src/resolvers/gap-to-feature.js") as typeof import("../../src/resolvers/gap-to-feature.js") & Record<string, unknown>;
+const g2fPolicy = await import("../../src/judge/gap-policy.js") as typeof import("../../src/judge/gap-policy.js") & Record<string, unknown>;
 const RUN = Math.random().toString(36).slice(2, 8);
 const SITE = "repos/development-vessel/src/resolvers/gap-to-feature.ts";
 mkdirSync(join(SCRATCH, "runtime", "development-vessel", "src", "resolvers"), { recursive: true });
@@ -65,14 +66,14 @@ beforeAll(() => {
     if (url.endsWith("/run-goal")) { runGoals++; return Response.json({ ok: true }); }
     return Response.json({ body: { impulses: [] } });
   }) as unknown as typeof fetch;
-  g2f.__resetPolicyReadsForTests();
+  g2fPolicy.__resetPolicyReadsForTests();
 });
 afterAll(() => {
   globalThis.fetch = originalFetch;
   if (savedStoreEndpoint !== undefined) process.env["GAP_STORE_ENDPOINT"] = savedStoreEndpoint;
   if (storeFile) { if (storeBefore === null) rmSync(storeFile, { force: true }); else writeFileSync(storeFile, storeBefore); }
   for (const [k, v] of Object.entries(SAVED_ENV)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
-  g2f.__resetPolicyReadsForTests();
+  g2fPolicy.__resetPolicyReadsForTests();
   try { rmSync(SCRATCH, { recursive: true, force: true }); } catch { /* noop */ }
 });
 

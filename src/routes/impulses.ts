@@ -1043,7 +1043,7 @@ async function dispatchInner(pointer: AnyPointer): Promise<ResolverResult> {
       return resolveComposerInterruptionSweep(p as Parameters<typeof resolveComposerInterruptionSweep>[0]);
     }
     case "composeOwnership": {
-      const { ownedVessels } = await import("../resolvers/gap-to-feature.js");
+      const { ownedVessels } = await import("../judge/gap-policy.js");
       return { shape: "composeOwnership", body: { node: process.env["SUBSTRATE_NAME"] ?? "substrate", owned_repos: [...ownedVessels()].sort() } };
     }
     case "vessel_health_report":

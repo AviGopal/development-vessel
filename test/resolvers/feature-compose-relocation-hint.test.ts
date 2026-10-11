@@ -70,6 +70,7 @@ setTreeEnv();
 
 const sg = await import("../../src/resolvers/substrate-gap.js");
 const g2f = await import("../../src/resolvers/gap-to-feature.js");
+const g2fPolicy = await import("../../src/judge/gap-policy.js");
 const elig = await import("../../src/judge/gap-eligibility.js");
 const fc = await import("../../src/resolvers/feature-compose.js");
 const RUN = Math.random().toString(36).slice(2, 8);
@@ -220,14 +221,14 @@ afterAll(() => {
   console.log = origLog;
   console.warn = origWarn;
   for (const [k, v] of Object.entries(savedEnv)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
-  g2f.__resetPolicyReadsForTests();
+  g2fPolicy.__resetPolicyReadsForTests();
   try { rmSync(ROOT, { recursive: true, force: true }); } catch { /* temp */ }
 });
 beforeEach(() => {
   setTreeEnv();
   logs = [];
   scopeRecord = { unrestricted: true, reason: "test fixture: explicitly unrestricted" };
-  g2f.__resetPolicyReadsForTests();
+  g2fPolicy.__resetPolicyReadsForTests();
 });
 
 // ─── helpers ────────────────────────────────────────────────────────────────

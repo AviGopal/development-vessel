@@ -4948,7 +4948,7 @@ export function __lastComposeLessonMirrorForTests(): Promise<void> { return last
  *  client (discoverOwnResolveUrls: a peer substrate's producer never counts). `why` says why there is none. */
 async function ownConceptDbResolveUrl(shape: string): Promise<{ url: string; why?: undefined } | { url: null; why: string }> {
   try {
-    const { discoverOwnResolveUrls } = await import("./gap-to-feature.js");
+    const { discoverOwnResolveUrls } = await import("../judge/gap-policy.js");
     const r = await discoverOwnResolveUrls(shape);
     if (!r.ok) return { url: null, why: `${shape} lookup unreadable: ${r.why}` };
     if (r.urls.length === 0) return { url: null, why: `no own-substrate ${shape} producer${r.foreign > 0 ? `, ${r.foreign} foreign set aside` : ""}` };
@@ -5412,7 +5412,7 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
   // minutes while autonomy was paused (09-27 14:55-15:25, db_performance_slow_queries). No
   // undirected compose lands while the envelope refuses; directed and non-landing composes are unaffected.
   if (!isDirected && (pointer as { land?: boolean }).land !== false) {
-    const { spendEnvelopeAllows } = await import("./gap-to-feature.js");
+    const { spendEnvelopeAllows } = await import("../judge/gap-policy.js");
     const envelope = await spendEnvelopeAllows();
     if (!envelope.allow) {
       console.log(`[feature-compose] undirected compose NOT started: spend envelope ${envelope.reason}`);
@@ -5582,7 +5582,7 @@ async function resolveFeatureComposeUncapped(pointer: FeatureComposePointer): Pr
     const isoTargets = named.length > 0 ? composeTargetFiles((pointer.gap?.classification_metadata ?? {}) as Record<string, unknown>, pointer.spec) : [];
     if (isoTargets.some((f) => { const d = vesselDirOf(f); return !!d && !named.includes(d.slice("repos/".length)); })) {
       const directed = (pointer as { directed?: boolean }).directed === true;
-      const { autonomyScope, autonomyScopeExcludes, ownedVessels } = await import("./gap-to-feature.js");
+      const { autonomyScope, autonomyScopeExcludes, ownedVessels } = await import("../judge/gap-policy.js");
       let excludes: ((path: string) => string | null) | null = null;
       if (!directed) {
         try { const scope = await autonomyScope(); excludes = (path) => autonomyScopeExcludes(scope, path); }
@@ -5855,7 +5855,7 @@ async function resolveFeatureComposeUncapped(pointer: FeatureComposePointer): Pr
       let excludes: ((path: string) => string | null) | null = null;
       if ((pointer as { directed?: boolean }).directed !== true) {
         try {
-          const { autonomyScope, autonomyScopeExcludes } = await import("./gap-to-feature.js");
+          const { autonomyScope, autonomyScopeExcludes } = await import("../judge/gap-policy.js");
           const scope = await autonomyScope();
           excludes = (path) => autonomyScopeExcludes(scope, path);
         } catch (err) {
@@ -8401,7 +8401,7 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
   let scopeWithheld = false;
   if (verdict === "FAVORABLE" && (pointer as { directed?: boolean }).directed !== true) {
     try {
-      const { autonomyScope, autonomyScopeFloor } = await import("./gap-to-feature.js");
+      const { autonomyScope, autonomyScopeFloor } = await import("../judge/gap-policy.js");
       // Every path the cutover will stage, repair edits included (autonomyFloorPaths); one it cannot map fails closed.
       const floorInput = autonomyFloorPaths(applied, edited, created, ws);
       // The gap's row lets a tightening hold pass the repair of its own regression (gapInHoldLineage).

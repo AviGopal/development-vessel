@@ -51,7 +51,7 @@ import { join, posix } from "node:path";
 import type { ResolverResult } from "./types.js";
 import { WORKSPACE_ROOT } from "../config.js";
 import { readFamilyRhythm, rhythmDueScore, writeFamilyRhythm, type RhythmBody } from "./rhythm-conductor-tick.js";
-import { gapCheckKeys } from "./gap-to-feature.js";
+import { gapCheckKeys } from "../judge/gap-policy.js";
 import { resolvePoolImpulse, resolvePoolImpulseWrite, type PoolWriteAuth } from "./pool-impulse.js";
 
 export const SCOPE_EARN_IN_FAMILY = "scope-earn-in";
@@ -235,7 +235,7 @@ const defaultDeps: ScopeEarnInDeps = {
     return (((r.body ?? {}) as { gaps?: Row[] }).gaps ?? []).filter((g) => typeof g["id"] === "string");
   },
   readScope: async () => {
-    const { autonomyScope } = await import("./gap-to-feature.js");
+    const { autonomyScope } = await import("../judge/gap-policy.js");
     return autonomyScope();
   },
   readRhythm: () => readFamilyRhythm(SCOPE_EARN_IN_FAMILY),

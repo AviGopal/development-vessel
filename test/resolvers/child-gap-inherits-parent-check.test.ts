@@ -22,6 +22,7 @@ process.env["SUBSTRATE_GAP_SKIP_COMPOSE_TRIGGER"] = "1";
 
 const sg = await import("../../src/resolvers/substrate-gap.js");
 const g2f = await import("../../src/resolvers/gap-to-feature.js");
+const g2fPolicy = await import("../../src/judge/gap-policy.js");
 const fc = await import("../../src/resolvers/feature-compose.js");
 const RUN = Math.random().toString(36).slice(2, 8);
 
@@ -66,7 +67,7 @@ afterAll(async () => {
   if (savedStoreEndpoint !== undefined) process.env["GAP_STORE_ENDPOINT"] = savedStoreEndpoint;
   try { rmSync(ROOT, { recursive: true, force: true }); } catch { /* temp */ }
 });
-beforeEach(() => { judged = []; verdictFor = () => "present"; g2f.__resetPolicyReadsForTests(); });
+beforeEach(() => { judged = []; verdictFor = () => "present"; g2fPolicy.__resetPolicyReadsForTests(); });
 
 async function storeRow(id: string): Promise<Row | undefined> {
   const r = await sg.resolveSubstrateGap({ type: "substrateGap", id, limit: 1 } as never);

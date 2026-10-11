@@ -413,7 +413,7 @@ const defaultGapBirthDeps: GapBirthDeps = {
     return gaps as Array<Record<string, unknown>>;
   },
   inAutonomyScope: async () => {
-    const { autonomyScope, autonomyScopeExcludes } = await import("./gap-to-feature.js");
+    const { autonomyScope, autonomyScopeExcludes } = await import("../judge/gap-policy.js");
     const scope = await autonomyScope();
     return (site: string) => autonomyScopeExcludes(scope, site) !== null;
   },

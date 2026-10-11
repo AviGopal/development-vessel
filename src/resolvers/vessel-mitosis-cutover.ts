@@ -20,7 +20,7 @@ import {
 import { createHash } from "node:crypto";
 import { registerAttempt, verifyDirectedIntentStamp } from "./attempt-register.js";
 import { readRecords } from "./attempt-ledger.js";
-import type { AutonomyScope } from "./gap-to-feature.js";
+import type { AutonomyScope } from "../judge/gap-policy.js";
 import type { ResolverResult } from "./types.js";
 import { resolveSubstrateGap, resolveSubstrateGapWrite, resolveSubstrateGapLease, landingLeaseOf, isLandingLeaseVerdict, countLandingLeaseRefusal, landingLeaseRefusalCounts, type LandingLeaseVerdict } from "./substrate-gap.js";
 import { resolveTestSuite } from "./test-suite.js";
@@ -2171,7 +2171,7 @@ export function getAutonomyScopeRefusalCounts(): Record<AutonomyScopeRefusal, nu
   return { ...autonomyScopeRefusalCounts };
 }
 type ScopeReader = () => Promise<AutonomyScope>;
-const realScopeReader: ScopeReader = async () => (await import("./gap-to-feature.js")).autonomyScope();
+const realScopeReader: ScopeReader = async () => (await import("../judge/gap-policy.js")).autonomyScope();
 /** Tests only: the DEFAULT layer under the real reader (the shared cutover test setup installs a fixture
  *  scope here so suites about other gates are not refused by this one); null restores the real reader. */
 let scopeReaderDefault: ScopeReader | null = null;
@@ -2220,7 +2220,7 @@ async function autonomyScopeLandingGate(args: GitCutoverArgs): Promise<ResolverR
   }
   const files = stagedFiles.map((f) => `repos/${vessel_name}/${f.replace(/^\.\//, "")}`);
   try {
-    const { autonomyScopeExcludes, autonomyScopeFloor, scopeHoldFor } = await import("./gap-to-feature.js");
+    const { autonomyScopeExcludes, autonomyScopeFloor, scopeHoldFor } = await import("../judge/gap-policy.js");
     const scope = await (scopeReaderDefault ?? realScopeReader)();
     let floor = autonomyScopeFloor(scope, files, null);
     // A tightening hold passes the repair of its own regression: read the gap row only when a hit is a hold.

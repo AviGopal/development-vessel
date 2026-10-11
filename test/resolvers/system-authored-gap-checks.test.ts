@@ -45,6 +45,7 @@ delete process.env["GAP_STORE_ENDPOINT"];
 
 const sg = await import("../../src/resolvers/substrate-gap.js");
 const g2f = await import("../../src/resolvers/gap-to-feature.js");
+const g2fPolicy = await import("../../src/judge/gap-policy.js");
 const elig = await import("../../src/judge/gap-eligibility.js");
 // The organ under test. Absent at the base, so every test below fails on its own assertion, not on a load error.
 const supply = (await import("../../src/resolvers/gap-check-supply.js").catch(() => null)) as null | {
@@ -154,7 +155,7 @@ beforeEach(() => {
   rhythmWrites = []; directCalls = []; registryOverride = null;
   reportFor = (_id, t) => ({ ran: true, total: t.length, fail: t.length, failingTests: t.map((x) => `(fail) ${x}`), red_reason: assertionRedReason(t) });
   execGuard = installCutoverExecGuard();
-  g2f.__resetPolicyReadsForTests();
+  g2fPolicy.__resetPolicyReadsForTests();
 });
 afterEach(() => {
   const blocked = execGuard?.restore() ?? [];

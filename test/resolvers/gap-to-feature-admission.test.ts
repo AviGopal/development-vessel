@@ -59,7 +59,7 @@ beforeAll(() => {
     const body = init?.body ? JSON.parse(String(init.body)) : {};
     return explicitOpenPolicy(body) ?? new Response("{}", { status: 200 });
   }) as typeof fetch;
-  (mod as { __resetPolicyReadsForTests: () => void }).__resetPolicyReadsForTests();
+  (modPolicy as { __resetPolicyReadsForTests: () => void }).__resetPolicyReadsForTests();
 });
 afterAll(() => {
   globalThis.fetch = originalFetch;
@@ -68,6 +68,7 @@ afterAll(() => {
 });
 
 const mod = await import("../../src/resolvers/gap-to-feature.js");
+const modPolicy = await import("../../src/judge/gap-policy.js");
 const { admitActionableGaps, typecheckClassOf, citedExistingFile, hasProposalReport } = mod;
 
 // Typecheck runner: goal-host-vessel is CLEAN (phantom error already fixed); anything else errors.

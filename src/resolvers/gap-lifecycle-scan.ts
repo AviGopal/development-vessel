@@ -837,7 +837,7 @@ export async function resolveGapLifecycleScan(p: GapLifecycleScanPointer): Promi
     // can never be autonomous work (the first run gave 9 of its 10 falsifiers to such gaps).
     let inAutonomyScope: (site: string) => boolean = () => false;
     try {
-      const { autonomyScope, autonomyScopeExcludes } = await import("./gap-to-feature.js");
+      const { autonomyScope, autonomyScopeExcludes } = await import("../judge/gap-policy.js");
       const scope = await autonomyScope();
       inAutonomyScope = (site) => autonomyScopeExcludes(scope, site) !== null;
     } catch { /* scope unreadable: falsify everywhere */ }

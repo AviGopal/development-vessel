@@ -32,6 +32,7 @@ const { resolveSubstrateGap, resolveSubstrateGapWrite, gapStoreRootForTest, isSc
 const STORE_ROOT = gapStoreRootForTest();
 const RUN = Math.random().toString(36).slice(2, 8);
 const g2f = (await import("../../src/resolvers/gap-to-feature.js")) as Record<string, any>;
+const g2fPolicy = (await import("../../src/judge/gap-policy.js")) as Record<string, any>;
 const { appendRecord } = await import("../../src/resolvers/attempt-ledger.js");
 type Row = Record<string, any>;
 
@@ -277,7 +278,7 @@ describe("the auto-pick does not re-pick a gap whose compose is in flight", () =
       if (body?.impulse?.type === "poolImpulse") return openPolicyAnswer(body.impulse.shape);
       throw new TypeError("Unable to connect. Is the computer able to access the url?");
     }) as unknown as typeof fetch;
-    g2f.__resetPolicyReadsForTests?.();
+    g2fPolicy.__resetPolicyReadsForTests?.();
     const id = `inflight-${Math.random().toString(36).slice(2, 8)}`;
     await seedGap(id);
     (g2f.beginComposeInFlight ?? (() => {}))(id);

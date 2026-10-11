@@ -36,6 +36,7 @@ delete process.env["GAP_STORE_ENDPOINT"];
 
 const sg = await import("../../src/resolvers/substrate-gap.js");
 const g2f = await import("../../src/resolvers/gap-to-feature.js");
+const g2fPolicy = await import("../../src/judge/gap-policy.js");
 const supply = await import("../../src/resolvers/gap-check-supply.js") as Record<string, unknown> & typeof import("../../src/resolvers/gap-check-supply.js");
 const csa = await import("../../src/resolvers/check-supply-admission.js") as Record<string, unknown>;
 const { resolveTestSuite } = await import("../../src/resolvers/test-suite.js");
@@ -113,7 +114,7 @@ afterAll(async () => {
   for (const k of ENV_KEYS) { if (savedEnv[k] === undefined) delete process.env[k]; else process.env[k] = savedEnv[k]; }
   try { rmSync(ROOT, { recursive: true, force: true }); } catch { /* temp */ }
 });
-beforeEach(() => { goals = []; suiteRuns = []; stripRedReason = false; execGuard = installCutoverExecGuard(); g2f.__resetPolicyReadsForTests(); });
+beforeEach(() => { goals = []; suiteRuns = []; stripRedReason = false; execGuard = installCutoverExecGuard(); g2fPolicy.__resetPolicyReadsForTests(); });
 afterEach(() => { expect(execGuard?.restore() ?? []).toEqual([]); });
 
 async function storeRow(id: string): Promise<Row | undefined> {

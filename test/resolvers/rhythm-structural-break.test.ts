@@ -13,7 +13,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { resolveRhythmConductorTick } from "../../src/resolvers/rhythm-conductor-tick.js";
-import { __resetPolicyReadsForTests } from "../../src/resolvers/gap-to-feature.js";
+import { __resetPolicyReadsForTests } from "../../src/judge/gap-policy.js";
 import { openPolicyAnswer } from "./explicit-open-policy.fixture.js";
 
 const originalFetch = globalThis.fetch;

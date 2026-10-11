@@ -298,6 +298,17 @@ export function selfRestartAlreadyOwed(vesselName: string): string | null {
  * 81–94 band: a test that already failed at baseline is not held against a new commit.
  */
 const BASELINE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+/** The change-window lease TTL every cutover takes (runGitAwareCutover). Exported so the auto-revert reader
+ *  judges a pending revert stale on the same number, not on a copy of it. */
+export const CUTOVER_LEASE_TTL_MS = 600_000;
+/** Tests only: the precutover gate's last-landed baseline (failing-test names) for a vessel, in place of the
+ *  absolute /workspace/post-land-baseline/<vessel>.json read; null restores the file read. A fixture has no
+ *  such file, and with no baseline the gate passes by construction (computeNewlyFailing(null, ...) is []),
+ *  so a "the suite refuses this tree" fixture cannot go red without it. */
+let precutoverBaselineForTests: ((vessel: string) => Promise<string[] | null>) | null = null;
+export function __setPrecutoverBaselineForTests(f: ((vessel: string) => Promise<string[] | null>) | null): void {
+  precutoverBaselineForTests = f;
+}
 
 export function computeNewlyFailing(prev: string[] | null, now: string[]): string[] {
   // AN EMPTY BASELINE IS UNMEASURED, NOT GREEN.
@@ -517,6 +528,13 @@ export interface VesselMitosisCutoverPointer {
   host_sync_intent_path?: string;
   /** Test hook: override host-sync results file path. */
   host_sync_results_path?: string;
+  /**
+   * AUTO-REVERT (contained-self-development 8.3). When set, this cutover lands `git revert` of a regressed
+   * lane landing instead of a staged tree: same chokepoint, same change-window lease, same precutover
+   * suite, commit, push and restart as any landing. Written only by gap-to-feature
+   * autoRevertRegressedLandings; see REVERT_OF below for what it skips and why.
+   */
+  revert_of?: RevertOf;
 }
 
 export interface GitOpResult {
@@ -1049,6 +1067,9 @@ export async function resolveVesselMitosisCutover(
       { protected_bases: Array.from(PROTECTED_BASES) },
     );
   }
+  // An auto-revert has no staged tree, verdict or freshness base: it goes straight to the git-aware
+  // chokepoint (REVERT_OF below), which still takes the change-window lease and runs the suite.
+  if (pointer.revert_of !== undefined) return await runRevertCutover(pointer);
   if (!evaluation_evidence || typeof evaluation_evidence !== "object") {
     // Missing evaluation_evidence is a misconfiguration (template forgot to
     // pass {{evaluate_pair}}); keep this as a hard error so the bug is loud.
@@ -2033,6 +2054,8 @@ interface GitCutoverArgs {
   stagedBaseSha: string | undefined;
   /** Set by the landing-lease gate when THIS cutover holds the gap's landing lease; released on the outcome. */
   landingLease?: { gapId: string; holder: string; held: boolean };
+  /** Set by a revert_of cutover to the temp tree it materialized from the reverted clone; removed on exit. */
+  revertStaging?: { root: string };
 }
 
 /**
@@ -2065,6 +2088,8 @@ async function cutoverGapIdOf(pointer: VesselMitosisCutoverPointer, mitosis_vers
  * No stored row (route-edit-*, pwt-*, adhoc): no lease to hold, proceed as before.
  */
 async function landingLeaseGate(args: GitCutoverArgs): Promise<ResolverResult | null> {
+  // A revert holds no gap landing lease (it lands no compose for the gap): the one carve-out, REVERT_OF.
+  if (args.pointer.revert_of !== undefined) return null;
   const gapId = await cutoverGapIdOf(args.pointer, args.mitosis_version_id);
   if (!gapId) return null;
   const { thisNode } = await import("./self-fact-reconcile.js");
@@ -2229,7 +2254,7 @@ async function runGitAwareCutover(args: GitCutoverArgs): Promise<ResolverResult>
   const leaseHolder = `cutover:${args.vessel_name}`;
   let leaseToken: string | undefined;
   try {
-    const acq = await resolveMaintenanceLeaseWrite({ type: "maintenanceLease_write", op: "acquire", name: "cutover", holder: leaseHolder, ttl_ms: 600_000 });
+    const acq = await resolveMaintenanceLeaseWrite({ type: "maintenanceLease_write", op: "acquire", name: "cutover", holder: leaseHolder, ttl_ms: CUTOVER_LEASE_TTL_MS });
     const acqBody = acq.body as { acquired?: boolean; token?: string; held_by?: string; expires_at?: string };
     if (acqBody.acquired === false) {
       return softRefuse(
@@ -2278,8 +2303,9 @@ async function runGitAwareCutover(args: GitCutoverArgs): Promise<ResolverResult>
   // unavailable — retry this same tree next tick), and the exit clear below then leaves it.
   let preservePending = false;
   const landingLease = { gapId: "", holder: "", held: false };
+  const revertStaging = { root: "" };
   try {
-    const inner = await runGitAwareCutoverInner({ ...args, landingLease });
+    const inner = await runGitAwareCutoverInner({ ...args, landingLease, revertStaging });
     preservePending = (inner.body as Record<string, unknown> | undefined)?.["preserve_pending"] === true;
     return inner;
   } finally {
@@ -2309,6 +2335,9 @@ async function runGitAwareCutover(args: GitCutoverArgs): Promise<ResolverResult>
     if (!preservePending) {
       try { await clearPendingIfOwned(args.pointer, process.env["WORKSPACE_ROOT"] ?? process.cwd(), args.mitosis_version_id); } catch { }
     }
+    if (revertStaging.root) {
+      try { await fs.rm(revertStaging.root, { recursive: true, force: true }); } catch { }
+    }
   }
 }
 
@@ -2321,8 +2350,135 @@ export function asSemanticDissentStamp(x: unknown): SemanticDissentStamp | null 
   return typeof r === "string" ? (x as SemanticDissentStamp) : null;
 }
 
+/**
+ * REVERT_OF: THE AUTO-REVERT LANDS THROUGH THE SAME CHOKEPOINT AS EVERY LANDING (contained-self-development 8.3).
+ * gap-to-feature autoRevertRegressedLandings asks for it when a lane landing's settlement reads regressed. Kept:
+ * the change-window lease, the kill switch and push scope, the clean-slate to origin/dev, the precutover suite
+ * (a revert that turns a test red is refused), commit, push with rebase-retry (but no host-sync fallback), the
+ * mirror, the restart (the deferred self-restart when the vessel is development-vessel), cutoverApplied and
+ * the post-land suite; pull-sync then converges it like any landing. Replaced: the staged-file copy, by
+ * `git revert --no-commit <sha>` in the clean clone, whose result is materialized as the staged tree so the
+ * copy, re-stage and mirror steps read it unchanged. Skipped, and only these: the gap landing lease
+ * (a revert holds none), the 5c evidence-deletion guard (a revert deletes by definition), the landing gap's
+ * own check (it reads the defect present again by construction) and the pending-outcome stamp (a revert is
+ * not a landing for its gap to verify). A conflict, a target outside HEAD, or a commit that added files (its
+ * revert deletes them, which the mirror cannot express) is refused and left to the caller to escalate; an
+ * empty revert is the change already gone (skip_reason already_reverted). Every exit after the revert began
+ * runs `git revert --abort`, so the clone is left at HEAD with no sequencer state.
+ */
+export type RevertOf = { sha: string; attempt_id: string; settlement_key: string; gap_id: string; files: string[]; source?: string };
+const REVERT_ATTEMPT_ID_RE = /^att-[a-z0-9]+-[a-z0-9]+$/;
+export function asRevertOf(x: unknown): RevertOf | null {
+  if (!x || typeof x !== "object" || Array.isArray(x)) return null;
+  const r = x as Record<string, unknown>;
+  const sha = r["sha"], att = r["attempt_id"], key = r["settlement_key"], gap = r["gap_id"];
+  const files = Array.isArray(r["files"]) ? (r["files"] as unknown[]) : [];
+  if (typeof sha !== "string" || !/^[0-9a-f]{40}$/.test(sha)) return null;
+  if (typeof att !== "string" || !REVERT_ATTEMPT_ID_RE.test(att)) return null;
+  if (typeof key !== "string" || !key.startsWith(`${att}#`)) return null;
+  if (typeof gap !== "string" || !gap.trim() || gap.includes("{{")) return null;
+  if (files.length === 0 || !files.every((f) => typeof f === "string" && f.length > 0 && !isAbsolute(f) && !f.split("/").includes(".."))) return null;
+  return { sha, attempt_id: att, settlement_key: key, gap_id: gap.trim(), files: files as string[], ...(typeof r["source"] === "string" ? { source: r["source"] } : {}) };
+}
+
+async function runRevertCutover(pointer: VesselMitosisCutoverPointer): Promise<ResolverResult> {
+  const revertOf = asRevertOf(pointer.revert_of);
+  const vessel_name = pointer.vessel_name;
+  if (!revertOf) return structuredError("revert_of_malformed: needs sha (40 hex), attempt_id (att-…), settlement_key (<attempt_id>#n), gap_id and files", { kind: "revert_of_malformed", vessel_name });
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(vessel_name) || vessel_name.includes("..")) return structuredError(`revert_of: vessel_name is not a plain vessel name: ${vessel_name}`, { kind: "revert_of_malformed", vessel_name });
+  // Same tree derivation as the staged-tree path below (MITOSIS_DIRECT_PUSH: commit in the push clone, mirror
+  // into the runtime tree).
+  const workspaceRoot = process.env["WORKSPACE_ROOT"] ?? process.cwd();
+  const directPush = process.env["MITOSIS_DIRECT_PUSH"] === "1";
+  const runtimeDir = process.env["MITOSIS_RUNTIME_DIR"];
+  const cloneDir = process.env["MITOSIS_PUSH_CLONE_DIR"];
+  const baseRoot = pointer.base_root ? resolve(pointer.base_root)
+    : directPush && runtimeDir ? join(runtimeDir, vessel_name) : join(workspaceRoot, "git", "super-repo", "repos", vessel_name);
+  const hostRepoRoot = pointer.host_repo_root ?? (directPush && cloneDir ? join(cloneDir, vessel_name) : join(workspaceRoot, "repos", vessel_name));
+  const evidence = pointer.evaluation_evidence && typeof pointer.evaluation_evidence === "object"
+    ? pointer.evaluation_evidence
+    : { verdict: "AUTO_REVERT", base_success_rate: 0, mitosis_success_rate: 0, cited_trace_ids: [], cited_check_names: [] };
+  console.error(`[mitosis-cutover] revert_of sha=${revertOf.sha.slice(0, 12)} attempt=${revertOf.attempt_id} settlement=${revertOf.settlement_key} gap=${revertOf.gap_id} vessel=${vessel_name} files=${revertOf.files.length}`);
+  return await runGitAwareCutover({
+    pointer: { ...pointer, gap_id: revertOf.gap_id, proposal_id: `auto-revert:${revertOf.attempt_id}`, adhoc: false, staged_files: revertOf.files },
+    vessel_name,
+    base_version_id: pointer.base_version_id,
+    mitosis_version_id: pointer.mitosis_version_id,
+    mitosisRoot: "",
+    baseRoot,
+    stagedFiles: revertOf.files,
+    hostRepoRoot,
+    evaluationEvidence: evidence,
+    stagedBaseSha: undefined,
+  });
+}
+
+/** `git revert --no-commit` of the target in the clean clone, materialized as a staged tree (see REVERT_OF). */
+async function applyRevertInClone(
+  gitCmd: string,
+  hostRepoRoot: string,
+  revertOf: RevertOf,
+  vessel_name: string,
+  operations: Array<{ op: string; status: string; detail?: string }>,
+): Promise<{ refused: ResolverResult } | { stagingRoot: string; files: string[]; fullSha: string; subject: string }> {
+  const refuse = (kind: string, why: string, extra: Record<string, unknown> = {}) => ({
+    refused: softRefuse(`${kind}: ${why}`, { kind, refuse_class: kind, vessel_name, revert_of: revertOf, operations, ...extra }),
+  });
+  const abort = async () => {
+    const r = await runGit(gitCmd, ["revert", "--abort"], hostRepoRoot);
+    operations.push({ op: r.op, status: r.exit_code === 0 ? "ok" : "warn", detail: (r.stderr + r.stdout).slice(0, 160) });
+  };
+  const anc = await runGit(gitCmd, ["merge-base", "--is-ancestor", revertOf.sha, "HEAD"], hostRepoRoot);
+  if (anc.exit_code !== 0) return refuse("revert_target_not_in_head", `${revertOf.sha.slice(0, 12)} is not an ancestor of the clean-slated ${vessel_name} HEAD`);
+  const subj = await runGit(gitCmd, ["log", "-1", "--format=%s", revertOf.sha], hostRepoRoot);
+  const added = await runGit(gitCmd, ["diff-tree", "--no-commit-id", "--name-only", "--diff-filter=A", "-r", revertOf.sha], hostRepoRoot);
+  const addedFiles = added.stdout.split("\n").map((f) => f.trim()).filter(Boolean);
+  if (added.exit_code !== 0 || addedFiles.length > 0) {
+    return refuse("revert_deletes_files", added.exit_code !== 0 ? `could not list the files ${revertOf.sha.slice(0, 12)} added` : `${revertOf.sha.slice(0, 12)} added ${addedFiles.join(", ")}; its revert deletes them, which the runtime mirror cannot express`, { added_files: addedFiles });
+  }
+  const rv = await runGit(gitCmd, ["revert", "--no-commit", revertOf.sha], hostRepoRoot);
+  operations.push({ op: rv.op, status: rv.exit_code === 0 ? "ok" : "fail", detail: (rv.stderr + rv.stdout).slice(0, 300) });
+  if (rv.exit_code !== 0) {
+    await abort();
+    return refuse("revert_conflict", `git revert ${revertOf.sha.slice(0, 12)} does not apply to ${vessel_name} HEAD (later edits overlap it); aborted, not retried`);
+  }
+  const cached = await runGit(gitCmd, ["diff", "--cached", "--name-only"], hostRepoRoot);
+  const files = cached.stdout.split("\n").map((f) => f.trim()).filter(Boolean);
+  if (cached.exit_code === 0 && files.length === 0) {
+    await abort();
+    return { refused: { shape: "vesselMitosisCutoverResult", body: { skipped: true, skip_reason: "already_reverted", kind: "already_reverted", cutover_applied: false, vessel_name, revert_of: revertOf, operations } } };
+  }
+  const declared = new Set(revertOf.files);
+  const outside = files.filter((f) => !declared.has(f));
+  if (cached.exit_code !== 0 || outside.length > 0) {
+    await abort();
+    return refuse("revert_scope_mismatch", cached.exit_code !== 0 ? "could not list the reverted files" : `the revert changes ${outside.join(", ")}, outside the declared files`, { outside });
+  }
+  let stagingRoot = "";
+  try {
+    const os = await import("node:os");
+    stagingRoot = await fs.mkdtemp(join(os.tmpdir(), "auto-revert-"));
+    await copyTree(hostRepoRoot, stagingRoot, files);
+  } catch (err) {
+    await abort();
+    if (stagingRoot) { try { await fs.rm(stagingRoot, { recursive: true, force: true }); } catch { } }
+    return refuse("revert_staging_failed", (err as Error).message.slice(0, 200));
+  }
+  operations.push({ op: "git revert --no-commit (auto-revert)", status: "ok", detail: `${files.length} file(s) from ${revertOf.sha.slice(0, 12)}` });
+  return { stagingRoot, files, fullSha: revertOf.sha, subject: subj.exit_code === 0 ? subj.stdout.trim() : "" };
+}
+
+/** The revert commit message. `This reverts commit <full sha>.` is what shaWasRevertedInAnyClone and the
+ *  pending-land sweep read; the cutover commits with -m, so git does not write it. */
+function revertCommitMessage(r: RevertOf, done: { fullSha: string; subject: string }, gapId: string): string {
+  const source = r.source ?? (r.settlement_key.endsWith("#2") ? "falsified_after_restart" : "settle_regressed");
+  return `Revert "${done.subject}"\n\nThis reverts commit ${done.fullSha}.\n\n` +
+    `auto-revert: regressed settlement ${r.settlement_key} (${source}) for gap ${gapId}\n` +
+    `Gap: ${gapId}\nReverts-Attempt: ${r.attempt_id}\nSettlement: ${r.settlement_key}\n\nAuto-Revert: true`;
+}
+
 async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverResult> {
-  const {
+  let {
     pointer,
     vessel_name,
     base_version_id,
@@ -2336,6 +2492,10 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
   } = args;
 
   const operations: Array<{ op: string; status: string; detail?: string }> = [];
+
+  // REVERT_OF: validated here as well as at entry (a direct runGitAwareCutover caller).
+  const revertOf = pointer.revert_of !== undefined ? asRevertOf(pointer.revert_of) : null;
+  if (pointer.revert_of !== undefined && !revertOf) return structuredError("revert_of_malformed", { kind: "revert_of_malformed", vessel_name });
 
   // 0. Atomicity guard (2026-06-29): never commit with no staged files. An empty
   // stagedFiles set means there is nothing to apply — committing here would
@@ -2407,7 +2567,8 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
   }
 
   // 1. Resilience: walk mitosis tree, enforce allowed file set.
-  const allFiles = await walkRelativeFiles(mitosisRoot);
+  // A revert has no staged tree yet: it is materialized from the clone after the clean-slate below.
+  const allFiles = revertOf ? [] : await walkRelativeFiles(mitosisRoot);
   const allowed = new Set(stagedFiles.map((f) => f.replace(/^\.\//, "")));
   const outOfScope = allFiles.filter((f) => !allowed.has(f));
   if (outOfScope.length > 0) {
@@ -2578,6 +2739,17 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
     }
   }
 
+  // 3r. REVERT_OF: the revert, in place of the staged tree; steps 3-5 then copy and add its own result.
+  let revertDone: { fullSha: string; subject: string } | null = null;
+  if (revertOf) {
+    const applied = await applyRevertInClone(gitCmd, hostRepoRoot, revertOf, vessel_name, operations);
+    if ("refused" in applied) return applied.refused;
+    mitosisRoot = applied.stagingRoot;
+    if (args.revertStaging) args.revertStaging.root = applied.stagingRoot;
+    stagedFiles = applied.files;
+    revertDone = { fullSha: applied.fullSha, subject: applied.subject };
+  }
+
   // 3. Copy staged files into the (now clean) host repo clone.
   try {
     await copyTree(mitosisRoot, hostRepoRoot, stagedFiles);
@@ -2651,6 +2823,12 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
   // converging the glue layer, silently (observed: 37 consecutive failed ticks over
   // 11 hours, zero signal, repaired only by hand).
   const unstage = async (why: string) => {
+    if (revertOf) {
+      // An index reset leaves REVERT_HEAD and the reverted work tree behind; abort clears both.
+      const ab = await runGit(gitCmd, ["revert", "--abort"], hostRepoRoot);
+      operations.push({ op: ab.op, status: ab.exit_code === 0 ? "ok" : "warn", detail: `revert aborted after ${why}` });
+      return;
+    }
     const r = await runGit(gitCmd, ["reset", "-q", "HEAD", "--", ...stagedFiles], hostRepoRoot);
     operations.push({ op: r.op, status: r.exit_code === 0 ? "ok" : "warn", detail: `unstaged after ${why}` });
   };
@@ -2673,7 +2851,7 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
   // too); catching that safely needs proposal-level justification, not a pure-diff check, and is
   // tracked separately. This narrow gate has near-zero false-positive risk: it can only fire when
   // the functional code is unchanged. Closes no-gate-reads-what-a-diff-removes (pure case).
-  {
+  if (!revertOf) {
     const full = await runGit(gitCmd, ["diff", "--cached", "-U0"], hostRepoRoot);
     if (full.exit_code === 0) {
       const isComment = (t: string) => t === "" || t.startsWith("//") || t.startsWith("*") || t.startsWith("/*") || t.startsWith("*/");
@@ -2763,7 +2941,8 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
   const semanticDissent = asSemanticDissentStamp((pointer as { semantic_dissent?: unknown }).semantic_dissent) ?? pendingSemanticDissent;
   const dissentFromPendingRecord = semanticDissent !== null && semanticDissent === pendingSemanticDissent;
   if (semanticDissent) landedUnverifiedReason = `semantic_dissent: landed over the semantic gate's non-hard-fail addresses:false (${String(semanticDissent.reason ?? "").slice(0, 200)}); post-land by-effect check required`;
-  {
+  if (revertOf) landedUnverifiedReason = `auto_revert: no own-check run (a revert restores ${revertOf.sha.slice(0, 12)}'s parent, where the gap's defect reads present by construction)`;
+  if (!revertOf) {
     // mitosis-tick passes gap_id as "{{extract_gap_id_content}}", and mitosis_pending_observer does not
     // forward gap_id, so it can arrive unsubstituted. Trust only a real id; else the pending file's.
     const pointerGapId = typeof pointer.gap_id === "string" && pointer.gap_id.trim() && !pointer.gap_id.includes("{{") ? pointer.gap_id.trim() : "";
@@ -2881,6 +3060,7 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
             baseline = JSON.parse(await readFile(baseFile, "utf8")) as string[];
           }
         } catch { baseline = null; }
+        if (precutoverBaselineForTests) baseline = await precutoverBaselineForTests(String(vessel_name));
         let newlyFailing = computeNewlyFailing(baseline, failNow);
         // TRACKED RED IS NOT A REGRESSION (2026-09-30): subtract names an OPEN gap for this vessel
         // deliberately tracks as red (evidence_resolve.only_tests), never the landing gap's own, and
@@ -2977,7 +3157,7 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
   if ((gapId === "unknown-gap" || proposalId === "unknown-proposal") && pointer.adhoc !== true) {
     return structuredError("cutover_refused_missing_provenance", { gap_id: gapId, proposal_id: proposalId });
   }
-  let msg =
+  let msg = revertOf && revertDone ? revertCommitMessage(revertOf, revertDone, gapId) :
     `substrate-authored: apply ${proposalId} via mitosis cutover\n\n` +
     `Applied autonomously by apply_proposal_as_patch + vessel_mitosis_cutover.\n` +
     `Gap: ${gapId}\n` +
@@ -2990,9 +3170,10 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
   try {
     const reg = await Promise.race([
       registerAttempt({
-        route: "vessel_mitosis_cutover",
+        route: revertOf ? "auto_revert" : "vessel_mitosis_cutover",
+        ...(revertOf ? { directed: false } : {}),
         repo: hostRepoRoot,
-        touched_files: pointer.staged_files ?? [],
+        touched_files: revertOf ? stagedFiles : (pointer.staged_files ?? []),
         gap_id: gapId,
         proposal_id: proposalId,
         authoring_execution_id: (pointer as { authoring_execution_id?: string }).authoring_execution_id ?? null,
@@ -3127,7 +3308,14 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
   // cutoverApplied trace reflects "handed to host poller" rather than a
   // misleading dead-end local_only. Best-effort: a failed intent emit leaves
   // pushStatus=local_only (the commit still exists in the clone for re-derive).
-  if (pushStatus === "local_only") {
+  if (pushStatus === "local_only" && revertOf) {
+    // REVERT_OF: no host-sync fallback. The poller re-copies files under its own message, which would drop
+    // "This reverts commit <sha>" (the line every revert reader keys on); and a revert commit left only in
+    // this clone would read as reverted to shaWasRevertedInAnyClone while origin still carries the landing.
+    // Drop it; the caller records the revert as not landed and escalates.
+    const drop = await runGit(gitCmd, ["reset", "-q", "--hard", "origin/dev"], hostRepoRoot);
+    operations.push({ op: drop.op, status: drop.exit_code === 0 ? "ok" : "warn", detail: `revert not pushed (${pushDetail.slice(0, 160)}); local revert commit dropped` });
+  } else if (pushStatus === "local_only") {
     try {
       await emitHostSyncIntent({
         pointer,
@@ -3510,6 +3698,7 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
     // Whether the landing gap's own class-2 check was re-run and passed on this tree (step
     // 5d-own). landed_unverified marks a landing that only typechecked — no gap row, a
     // synthesized id, or a gap with no test_suite check — so tallies can exclude it.
+    ...(revertOf && revertDone ? { revert_of: { ...revertOf, subject: revertDone.subject } } : {}),
     ...(landedUnverifiedReason !== null
       ? { landed_unverified: true, landed_unverified_reason: landedUnverifiedReason }
       : { own_check_verified: true }),
@@ -3651,7 +3840,7 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
       console.warn(`[mitosis-cutover] gap=${gapId}: pending semantic dissent not settled (${(err as Error)?.message ?? String(err)})`);
     }
   }
-  if (gapId !== "unknown-gap" && pushStatus === "pushed" && /^[0-9a-f]{7,40}$/i.test(newSha) && !landingCreditWithheld) {
+  if (gapId !== "unknown-gap" && pushStatus === "pushed" && /^[0-9a-f]{7,40}$/i.test(newSha) && !landingCreditWithheld && !revertOf) {
     await stampPendingLand({ gapId, newSha, appliedAt, vessel_name, hostRepoRoot, gitCmd, landedUnverifiedReason });
   }
   const workspaceRoot = process.env["WORKSPACE_ROOT"] ?? process.cwd();
@@ -3676,7 +3865,8 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
   // Clear the pending slot so the next mitosis can be queued (before FAVORABLE success return).
   const _preClearPendingPath = pointer.pending_pointer_path ?? join(process.env["WORKSPACE_ROOT"] ?? process.cwd(), "mitosis-pending.json");
   try {
-    if (await pathExists(_preClearPendingPath)) {
+    // REVERT_OF: a revert owns no pending slot; the one on disk belongs to another staged landing.
+    if (!revertOf && await pathExists(_preClearPendingPath)) {
       await unlink(_preClearPendingPath);
       operations.push({ op: "pre-return clear mitosis-pending.json", status: "ok" });
     }
@@ -3688,7 +3878,7 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
   const pendingPath =
     pointer.pending_pointer_path ?? join(process.env["WORKSPACE_ROOT"] ?? process.cwd(), "mitosis-pending.json");
   try {
-    if (await pathExists(pendingPath)) {
+    if (!revertOf && await pathExists(pendingPath)) {
       await unlink(pendingPath);
       operations.push({ op: "remove mitosis-pending.json", status: "ok" });
     }

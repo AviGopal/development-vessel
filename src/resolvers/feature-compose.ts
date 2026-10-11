@@ -798,7 +798,10 @@ function touchedVesselProblem(t: unknown): string | null {
 // hard-fail (no LLM) when EVERY changed symbol is dead code, (2) an LLM semantic
 // judge for the rest.
 
-export const SEMANTIC_CUTOVER_GATE = (process.env.SEMANTIC_CUTOVER_GATE ?? "1") !== "0";
+// NO SWITCH. The gate below runs on every FAVORABLE compose. It was guarded by an env-read module constant
+// (SEMANTIC_CUTOVER_GATE, "0" = off) that turned the shape-vocabulary, CJS, endpoint, inert-literal, stub /
+// reachability and dissent checks off together: frozen at process start, invisible to traces (law 1).
+// test/resolvers/feature-compose-semantic-gate-unconditional.test.ts holds it off with the variable set to "0".
 
 export interface ReachabilityFact {
   symbol: string;
@@ -8410,13 +8413,13 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
   // fine yet changes nothing — the hollow landing this gate rejects. Reachability
   // hard-fail (deterministic, no LLM) first; LLM judge second. addresses=false OR
   // on_live_path=false → flip FAVORABLE→UNFAVORABLE (rolls back below, gap stays open
-  // + informed). Skip when the gate is flag-disabled or there were no edits to judge.
+  // + informed). Skipped only when there is no touched vessel to judge; no flag turns it off.
   let semantic_gate: (SemanticGateVerdict & { skipped?: string }) | null = null;
   // A landing over an advisory addresses:false carries this stamp to the cutover (landed_unverified) and the park.
   let semanticDissent: SemanticDissent | null = null;
   // must_be_called constraints this gate run implies (on a rejection), written on the attempt record below.
   let gateConstraints: MustBeCalledConstraint[] = [];
-  if (verdict === "FAVORABLE" && SEMANTIC_CUTOVER_GATE) {
+  if (verdict === "FAVORABLE") {
     const editedTouched = touched && [...touched].length > 0;
     if (!editedTouched) {
       semantic_gate = { addresses: true, reason: "no touched vessel to judge", on_live_path: true, llm_consulted: false, skipped: "no_touched" };

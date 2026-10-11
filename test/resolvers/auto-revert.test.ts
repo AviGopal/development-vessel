@@ -30,7 +30,7 @@ const LOAD_ENV: Record<string, string> = {
 const savedLoadEnv: Record<string, string | undefined> = {};
 for (const [k, v] of Object.entries(LOAD_ENV)) { savedLoadEnv[k] = process.env[k]; process.env[k] = v; }
 
-type Gtf = typeof import("../../src/resolvers/gap-to-feature.js");
+type Gtf = typeof import("../../src/judge/gap-landing-verdict.js");
 type Cut = typeof import("../../src/resolvers/vessel-mitosis-cutover.js");
 type Ledger = typeof import("../../src/resolvers/attempt-ledger.js");
 type FetchMod = typeof import("./cutover-fetch-guard.js");
@@ -160,7 +160,7 @@ beforeAll(async () => {
   fsMod = await import("./cutover-fs-guard.js");
   cut = await import("../../src/resolvers/vessel-mitosis-cutover.js");
   ledger = await import("../../src/resolvers/attempt-ledger.js");
-  gtf = await import("../../src/resolvers/gap-to-feature.js");
+  gtf = await import("../../src/judge/gap-landing-verdict.js");
 });
 afterAll(() => {
   fsMod?.restoreCutoverFsModules();

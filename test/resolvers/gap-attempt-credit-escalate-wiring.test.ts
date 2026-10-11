@@ -36,15 +36,24 @@ describe("bumpFailedAttempts escalates only through the callback, and every resi
     expect(missing).toEqual([]);
   });
 
-  it("MUST-FAIL (2): the default pwt-escalation deps hand bump the same callback", () => {
-    const sf = parse("resolvers/gap-to-feature.ts");
-    let wired = false;
-    walk(sf, (n) => {
+  it("MUST-FAIL (2): the pwt-escalation deps hand bump the same callback", () => {
+    // The default deps live in the closed landing verdict (gap-to-feature judge split, L) and take the callback as
+    // a parameter; every place that builds them hands it escalateToDecomposition (or the grader's own deps.escalate). The
+    // parameter default of escalateApplyFailureToPwt (no callback) serves only callers that pass no deps: tests.
+    const lv = parse("judge/gap-landing-verdict.ts");
+    let forwards = false;
+    walk(lv, (n) => {
       if (ts.isVariableDeclaration(n) && n.name.getText() === "defaultPwtEscalationDeps") {
-        walk(n, (m) => { if (ts.isCallExpression(m) && calleeName(m) === "bumpFailedAttempts" && m.arguments[1] && /\bescalate:\s*escalateToDecomposition\b/.test(m.arguments[1].getText())) wired = true; });
+        walk(n, (m) => { if (ts.isCallExpression(m) && calleeName(m) === "bumpFailedAttempts" && m.arguments[1] && /\bescalate:\s*cb\.escalate\b/.test(m.arguments[1].getText())) forwards = true; });
       }
     });
-    expect(wired).toBe(true);
+    expect(forwards).toBe(true);
+    const builds: string[] = [];
+    for (const rel of ["resolvers/gap-to-feature.ts", "judge/gap-landing-verdict.ts"]) {
+      walk(parse(rel), (n) => { if (ts.isCallExpression(n) && calleeName(n) === "defaultPwtEscalationDeps" && !ts.isParameter(n.parent)) builds.push(n.getText()); });
+    }
+    expect(builds.length).toBeGreaterThan(0);
+    expect(builds.filter((b) => !/escalate:\s*(escalateToDecomposition|deps\.escalate)\b/.test(b))).toEqual([]);
   });
 
   it("MUST-FAIL (3): the closed bump calls opts.escalate in the narrowing try, never a residue function", () => {

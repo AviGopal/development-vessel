@@ -12,6 +12,9 @@
 // Real git, no network (fetch mocked).
 
 import { describe, it, expect, beforeAll, afterAll } from "bun:test";
+import { resolveUiWritePassthrough as __uiw } from "../../src/resolvers/ui-write-passthrough.js";
+// The landing verdict asks humans through a per-call channel (gap-to-feature judge split, qa 10.2): the same one production passes.
+const __askHuman = (p: Record<string, unknown>): Promise<unknown> => __uiw(p as never);
 import { mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -114,8 +117,8 @@ afterAll(() => {
 
 describe("sweepPendingLandVerifications — close on MEASUREMENT, abstain on provenance (§12.6)", () => {
   it("closes only the MEASURED-resolved gap; HOLDS the inert single-landing pending; leaves unlanded + ordinary open", async () => {
-    const { sweepPendingLandVerifications } = await import("../../src/resolvers/gap-to-feature.js");
-    const result = await sweepPendingLandVerifications();
+    const { sweepPendingLandVerifications } = await import("../../src/judge/gap-landing-verdict.js");
+    const result = await sweepPendingLandVerifications({ ask: __askHuman });
     expect(result.checked).toBe(4); // the four gaps carrying a pending marker
     expect(result.closed).toBe(1);  // ONLY the measurable one
 
@@ -152,8 +155,8 @@ describe("sweepPendingLandVerifications — close on MEASUREMENT, abstain on pro
   });
 
   it("is idempotent for the closed gap: a second sweep does not re-close it", async () => {
-    const { sweepPendingLandVerifications } = await import("../../src/resolvers/gap-to-feature.js");
-    const result = await sweepPendingLandVerifications();
+    const { sweepPendingLandVerifications } = await import("../../src/judge/gap-landing-verdict.js");
+    const result = await sweepPendingLandVerifications({ ask: __askHuman });
     // the measured gap is now closed (gone from the open set); the inert gap is still held pending
     // (still checked, still not closed).
     expect(result.closed).toBe(0);

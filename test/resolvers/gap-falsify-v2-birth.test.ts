@@ -6,6 +6,9 @@
 // Driven through the real write seam, the real judge and the real admission, with globalThis.fetch standing in
 // for the vessel's own resolve endpoint (the test_suite answer) and for discovery. No source-text assertions.
 import { afterAll, afterEach, beforeAll, describe, expect, it, spyOn } from "bun:test";
+import { resolveUiWritePassthrough as __uiw } from "../../src/resolvers/ui-write-passthrough.js";
+// The landing verdict asks humans through a per-call channel (gap-to-feature judge split, qa 10.2): the same one production passes.
+const __askHuman = (p: Record<string, unknown>): Promise<unknown> => __uiw(p as never);
 import { snapshotGapStore } from "./gap-store-snapshot.js";
 import { mkdirSync, readFileSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -18,10 +21,12 @@ process.env["SUBSTRATE_GAP_SKIP_COMPOSE_TRIGGER"] = "1";
 
 const sg = await import("../../src/resolvers/substrate-gap.js");
 const g2f = await import("../../src/resolvers/gap-to-feature.js");
+const g2fLanding = await import("../../src/judge/gap-landing-verdict.js");
 const g2fJudge = await import("../../src/judge/gap-check-judge.js");
 const g2fPolicy = await import("../../src/judge/gap-policy.js");
 const { resolveSubstrateGapWrite, resolveSubstrateGap, __settleBirthEvaluationsForTests, predicateSuspect, class2PredicateKey, gapStoreRootForTest } = sg;
-const { admitActionableGaps, sweepPendingLandVerifications, closeLandedGap } = g2f;
+const { admitActionableGaps } = g2f;
+const { sweepPendingLandVerifications, closeLandedGap } = g2fLanding;
 const { evaluateGapCheck } = g2fJudge;
 const { __resetPolicyReadsForTests } = g2fPolicy;
 const { __setBirthJudgeForTests, birthTreeMoved, BIRTH_REEVAL_PER_TICK } = sg;
@@ -290,11 +295,11 @@ describe("closure: a check that never read present at birth closes nothing (8.5)
     __setBirthJudgeForTests(stubTransportJudge);
     // Both landings flip their check at the pinned trees (red at parent, green at the landing): the independent
     // verdict grounds either, so the birth stamp is all that differs.
-    g2f.__setPinnedCheckForTests({
+    g2fLanding.__setPinnedCheckForTests({
       parentOf: (sha) => git(repo, "rev-parse", `${sha}^`),
       runAt: async (gap, ref) => (ref === git(repo, "rev-parse", `${String(((gap.classification_metadata ?? {}) as Record<string, unknown>).pending_outcome_verification)}^`) ? "present" : "absent"),
     });
-    try { await sweepPendingLandVerifications(); await __settleBirthEvaluationsForTests(); } finally { process.env["VESSELS_CLONE_ROOT"] = prevClones; __setBirthJudgeForTests(null); g2f.__setPinnedCheckForTests(null); }
+    try { await sweepPendingLandVerifications({ ask: __askHuman }); await __settleBirthEvaluationsForTests(); } finally { process.env["VESSELS_CLONE_ROOT"] = prevClones; __setBirthJudgeForTests(null); g2fLanding.__setPinnedCheckForTests(null); }
     expect(String((await row(idTrusted)).status)).toBe("closed"); // positive control through the same address
     expect(String((await row(idSuspect)).status)).toBe("open");
   });
@@ -357,8 +362,8 @@ describe("C2: closeLandedGap never closes on an absent from a suspect check", ()
     const meta = (verdict: string) => ({ ...check, falsifier: "class2", edit_site: "repos/fixture-vessel/src/widget.ts", predicate_birth_verdict: verdict, predicate_birth_key: key, predicate_birth_at: now });
     const land = { landed: true, commit_sha: "0123456789abcdef0123456789abcdef01234567", vessel: "fixture-vessel", push_status: "pushed" };
     seedRows([{ ...base, id: idSuspect, classification_metadata: meta("absent") }, { ...base, id: idTrusted, classification_metadata: meta("present") }]);
-    const suspect = await closeLandedGap(await row(idSuspect), land as never);
-    const trusted = await closeLandedGap(await row(idTrusted), land as never);
+    const suspect = await closeLandedGap(await row(idSuspect), land as never, { ask: __askHuman });
+    const trusted = await closeLandedGap(await row(idTrusted), land as never, { ask: __askHuman });
     await __settleBirthEvaluationsForTests();
     // Positive control through the same function, same inputs but the stamp: it passes the suspect guard and reaches
     // the close, which the cutover path never makes verified (independent landing verdict): held pending instead.
@@ -523,7 +528,7 @@ describe("R1: the sweep re-takes unknown and dead-pending birth verdicts, bounde
       expect(metaOf(await row(ids.w)).predicate_birth_at).toBe(before.predicate_birth_at);
       expect(judged).toEqual([]);
 
-      await sweepPendingLandVerifications();
+      await sweepPendingLandVerifications({ ask: __askHuman });
       await __settleBirthEvaluationsForTests();
       expect(judged).toEqual([ids.a, ids.b]); // one at a time on the birth chain, oldest first
       expect(metaOf(await row(ids.a)).predicate_birth_verdict).toBe("present");
@@ -533,7 +538,7 @@ describe("R1: the sweep re-takes unknown and dead-pending birth verdicts, bounde
       expect(metaOf(await row(ids.e)).predicate_birth_verdict).toBe("unknown");
       expect(metaOf(await row(ids.f)).predicate_birth_verdict).toBe("unknown");
 
-      await sweepPendingLandVerifications();
+      await sweepPendingLandVerifications({ ask: __askHuman });
       await __settleBirthEvaluationsForTests();
       expect(judged.slice(2)).toContain(ids.c);
       expect(judged).not.toContain(ids.d);

@@ -131,6 +131,8 @@ async function landUnderDissent(store: ReturnType<typeof memoryStore>, src: Reco
 
 // ── STRUCTURAL PINS READ THE SYNTAX TREE ─────────────────────────────────────────────────────────
 const GTF_PATH = new URL("../../src/resolvers/gap-to-feature.ts", import.meta.url).pathname;
+// The landing closers moved to the closed gap-landing-verdict module (gap-to-feature judge split).
+const GLV_PATH = new URL("../../src/judge/gap-landing-verdict.ts", import.meta.url).pathname;
 function walk(node: ts.Node, visit: (n: ts.Node) => void): void { visit(node); node.forEachChild((c) => walk(c, visit)); }
 function fnNamed(path: string, name: string): ts.Node {
   const sf = ts.createSourceFile(path, readFileSync(path, "utf8"), ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
@@ -206,7 +208,7 @@ describe("a landing over the lane's own semantic dissent is partial, and the dis
   });
 
   it("MUST-FAIL (a, wiring AST): both landing closers — closeLandedGap and the pending-land sweep — take closed_reason from landedCloseReason", () => {
-    const sites = ["closeLandedGap", "sweepPendingLandVerificationsOnce"].map((fn) => [fn, closedReasonInitializers(fnNamed(GTF_PATH, fn))] as const);
+    const sites = ["closeLandedGap", "sweepPendingLandVerificationsOnce"].map((fn) => [fn, closedReasonInitializers(fnNamed(GLV_PATH, fn))] as const);
     for (const [fn, inits] of sites) {
       const landing = inits.filter((t) => /landed_verified|landedCloseReason/.test(t));
       expect({ fn, every_landing_close_uses_the_helper: landing.length > 0 && landing.every((t) => t.startsWith("landedCloseReason(")) }).toEqual({ fn, every_landing_close_uses_the_helper: true });

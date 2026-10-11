@@ -16,7 +16,7 @@
 
 import type { ResolverResult } from "./types.js";
 import { resolveObsidianEndpointViaDiscovery } from "./obsidian-request-scan.js";
-import { recordOperatorEngagement } from "./gap-to-feature.js";
+import { recordOperatorEngagement } from "../judge/gap-landing-verdict.js";
 
 export interface SolicitationOutcomeScanPointer {
   type: "solicitation_outcome_scan";

@@ -21,12 +21,15 @@ import { mkdirSync, writeFileSync, readFileSync, rmSync, symlinkSync } from "nod
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import * as g2f from "../../src/resolvers/gap-to-feature.js";
+import * as g2fLanding from "../../src/judge/gap-landing-verdict.js";
 
 const ROOT = join(tmpdir(), `pending-sweep-non-discriminating-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 const CLONES = join(ROOT, "clones");
 const BIN = join(ROOT, "bin");
 const GAPS_PATH = join(ROOT, "gaps", "gaps.json");
 const GTF = new URL("../../src/resolvers/gap-to-feature.ts", import.meta.url).pathname;
+const UIW = new URL("../../src/resolvers/ui-write-passthrough.ts", import.meta.url).pathname;
+const GLV = new URL("../../src/judge/gap-landing-verdict.ts", import.meta.url).pathname;
 
 function git(repo: string, ...args: string[]): string {
   const p = Bun.spawnSync(["git", "-C", repo, ...args], { stdout: "pipe", stderr: "pipe" });
@@ -85,10 +88,11 @@ function sweepTwiceInIsolation(): { exit: number; first: string; second: string;
     `  if (p.type !== "test_suite") return new Response("{}", { status: 404 });`,
     `  return new Response(JSON.stringify({ body: { ran: true, requested_not_passing: 0 } }), { status: 200 });`,
     `});`,
-    `const { sweepPendingLandVerifications } = await import(${JSON.stringify(GTF)});`,
-    `const r1 = await sweepPendingLandVerifications();`,
+    `const { sweepPendingLandVerifications } = await import(${JSON.stringify(GLV)});`,
+    `const __askHuman = async (p) => (await import(${JSON.stringify(UIW)})).resolveUiWritePassthrough(p);`,
+    `const r1 = await sweepPendingLandVerifications({ ask: __askHuman });`,
     `console.log("SWEEP1_DONE " + JSON.stringify(r1));`,
-    `const r2 = await sweepPendingLandVerifications();`,
+    `const r2 = await sweepPendingLandVerifications({ ask: __askHuman });`,
     `console.log("SWEEP2_DONE " + JSON.stringify(r2));`,
   ].join("\n");
   const env: Record<string, string> = {
@@ -109,11 +113,11 @@ function sweepTwiceInIsolation(): { exit: number; first: string; second: string;
 describe("pending-land sweep: a check green at the landing's parent releases the pending hold", () => {
   it("the predicate: only a non-shadow ungrounded 'parent green, landed green' label", () => {
     const base = { grounded: false, labeler: "sweep-parent-child", sha: "a".repeat(40), parent: "b".repeat(40), tests: [], ran_at: "x" };
-    expect(g2f.nonDiscriminatingLandingLabel({ ...base, reason: "parent green, landed green: the landing did not flip its own check" })).toBe(true);
-    expect(g2f.nonDiscriminatingLandingLabel({ ...base, reason: "parent green, landed green: the landing did not flip its own check", shadow: true })).toBe(false);
-    expect(g2f.nonDiscriminatingLandingLabel({ ...base, reason: "parent red, landed red: the landing did not flip its own check" })).toBe(false);
-    expect(g2f.nonDiscriminatingLandingLabel({ ...base, grounded: true, reason: "parent green, landed green" })).toBe(false);
-    expect(g2f.nonDiscriminatingLandingLabel(null)).toBe(false);
+    expect(g2fLanding.nonDiscriminatingLandingLabel({ ...base, reason: "parent green, landed green: the landing did not flip its own check" })).toBe(true);
+    expect(g2fLanding.nonDiscriminatingLandingLabel({ ...base, reason: "parent green, landed green: the landing did not flip its own check", shadow: true })).toBe(false);
+    expect(g2fLanding.nonDiscriminatingLandingLabel({ ...base, reason: "parent red, landed red: the landing did not flip its own check" })).toBe(false);
+    expect(g2fLanding.nonDiscriminatingLandingLabel({ ...base, grounded: true, reason: "parent green, landed green" })).toBe(false);
+    expect(g2fLanding.nonDiscriminatingLandingLabel(null)).toBe(false);
   });
 
   let run: ReturnType<typeof sweepTwiceInIsolation> | null = null;

@@ -15,6 +15,8 @@ const ROOT = join(tmpdir(), `pending-sweep-held-slots-${Date.now()}-${Math.rando
 const CLONES = join(ROOT, "clones");
 const BIN = join(ROOT, "bin");
 const GTF = new URL("../../src/resolvers/gap-to-feature.ts", import.meta.url).pathname;
+const UIW = new URL("../../src/resolvers/ui-write-passthrough.ts", import.meta.url).pathname;
+const GLV = new URL("../../src/judge/gap-landing-verdict.ts", import.meta.url).pathname;
 const HELD = 20;
 const UNHELD = 10;
 
@@ -48,8 +50,9 @@ afterAll(() => { try { rmSync(ROOT, { recursive: true, force: true }); } catch {
 function sweepInIsolation(): { exit: number; out: string } {
   const code = [
     `globalThis.fetch = (async () => new Response("{}", { status: 404 }));`,
-    `const { sweepPendingLandVerifications } = await import(${JSON.stringify(GTF)});`,
-    `const r = await sweepPendingLandVerifications();`,
+    `const { sweepPendingLandVerifications } = await import(${JSON.stringify(GLV)});`,
+    `const __askHuman = async (p) => (await import(${JSON.stringify(UIW)})).resolveUiWritePassthrough(p);`,
+    `const r = await sweepPendingLandVerifications({ ask: __askHuman });`,
     `console.log("SWEEP_RESULT " + JSON.stringify(r));`,
   ].join("\n");
   const env: Record<string, string> = {

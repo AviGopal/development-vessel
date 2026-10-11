@@ -15,6 +15,9 @@
 // Real git (a temp clone tree), the real gap store at a temp WORKSPACE_ROOT, fetch mocked per shape.
 // Landed commits touch only test/ so the sweep reads them as running on this node without systemctl.
 import { describe, it, expect, beforeAll, afterAll } from "bun:test";
+import { resolveUiWritePassthrough as __uiw } from "../../src/resolvers/ui-write-passthrough.js";
+// The landing verdict asks humans through a per-call channel (gap-to-feature judge split, qa 10.2): the same one production passes.
+const __askHuman = (p: Record<string, unknown>): Promise<unknown> => __uiw(p as never);
 import { mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -24,6 +27,7 @@ if (!process.env["WORKSPACE_ROOT"]) process.env["WORKSPACE_ROOT"] = ROOT;
 process.env["SUBSTRATE_GAP_SKIP_COMPOSE_TRIGGER"] = "1";
 const sg = await import("../../src/resolvers/substrate-gap.js");
 const g2f = await import("../../src/resolvers/gap-to-feature.js");
+const g2fLanding = await import("../../src/judge/gap-landing-verdict.js");
 const g2fCredit = await import("../../src/judge/gap-attempt-credit.js");
 const STORE = sg.gapStoreRootForTest();
 const GAPS_PATH = join(STORE, "gaps", "gaps.json");
@@ -96,7 +100,7 @@ beforeAll(() => {
   process.env["EXPECTATION_CALIB_PATH"] = join(ROOT, "expectation-calibration.json");
   sg.__setBirthJudgeForTests(async () => "present");
   const parentOf = (sha: string): string | null => { try { return git({}, "rev-parse", `${sha}^`); } catch { return null; } };
-  g2f.__setPinnedCheckForTests({
+  g2fLanding.__setPinnedCheckForTests({
     parentOf,
     runAt: async (gap, ref) => (ref === parentOf(String(metaOf(gap as Row)["pending_outcome_verification"] ?? "")) ? "present" : "absent"),
   });
@@ -143,7 +147,7 @@ beforeAll(() => {
 afterAll(() => {
   globalThis.fetch = originalFetch;
   sg.__setBirthJudgeForTests(null);
-  g2f.__setPinnedCheckForTests(null);
+  g2fLanding.__setPinnedCheckForTests(null);
   if (savedStore !== undefined) process.env["GAP_STORE_ENDPOINT"] = savedStore;
   for (const [k, v] of [["VESSELS_CLONE_ROOT", saved.clones], ["CLOSE_ORACLE_CALIB_PATH", saved.calib], ["EXPECTATION_CALIB_PATH", saved.exp]] as const) {
     if (v === undefined) delete process.env[k]; else process.env[k] = v;
@@ -153,7 +157,7 @@ afterAll(() => {
 
 describe("pending-land sweep on a RE-DETECTED gap", () => {
   it("control: a never-reopened gap closes on its (old) landing as today", async () => {
-    await g2f.sweepPendingLandVerifications();
+    await g2fLanding.sweepPendingLandVerifications({ ask: __askHuman });
     const r = rowOf(ids.ctrl);
     expect(r["status"]).toBe("closed");
     expect((metaOf(r)["falsifier_exercise"] as Row)["commit"]).toBe(shaCtrl);
@@ -172,7 +176,7 @@ describe("pending-land sweep on a RE-DETECTED gap", () => {
   it("(a) a commit landed BEFORE the re-detection does not re-close it and appends no FAVORABLE", async () => {
     const before = favorables(rowOf(ids.flap), shaC);
     const calibBefore = measuredCloses();
-    await g2f.sweepPendingLandVerifications();
+    await g2fLanding.sweepPendingLandVerifications({ ask: __askHuman });
     const r = rowOf(ids.flap);
     const m = metaOf(r);
     expect(r["status"]).toBe("open");
@@ -187,7 +191,7 @@ describe("pending-land sweep on a RE-DETECTED gap", () => {
     expect(m["pending_outcome_verification"]).toBe("");
     expect(m["disposition"]).not.toBe("pending_verification");
     // And the next sweep does not take it again.
-    await g2f.sweepPendingLandVerifications();
+    await g2fLanding.sweepPendingLandVerifications({ ask: __askHuman });
     expect(rowOf(ids.flap)["status"]).toBe("open");
     expect(favorables(rowOf(ids.flap), shaC)).toBe(before);
   });
@@ -197,7 +201,7 @@ describe("pending-land sweep on a RE-DETECTED gap", () => {
     // Committer time has whole-second resolution: land C' clearly after the reopen stamp.
     shaC2 = land(`c2-${RUN}`, new Date(Date.parse(String(rowOf(ids.flap)["reopened_at"] ?? new Date().toISOString())) + 2000).toISOString());
     await stampLanding(ids.flap, shaC2);
-    await g2f.sweepPendingLandVerifications();
+    await g2fLanding.sweepPendingLandVerifications({ ask: __askHuman });
     const r = rowOf(ids.flap);
     expect(r["status"]).toBe("closed");
     expect((metaOf(r)["falsifier_exercise"] as Row)["commit"]).toBe(shaC2);
@@ -205,15 +209,15 @@ describe("pending-land sweep on a RE-DETECTED gap", () => {
   });
 
   it("(c) two further sweeps after (b) append nothing more", async () => {
-    await g2f.sweepPendingLandVerifications();
-    await g2f.sweepPendingLandVerifications();
+    await g2fLanding.sweepPendingLandVerifications({ ask: __askHuman });
+    await g2fLanding.sweepPendingLandVerifications({ ask: __askHuman });
     expect(favorables(rowOf(ids.flap), shaC2)).toBe(1);
   });
 
   it("(c') a standing row reopened is not stale, and is not re-credited; its live read check cannot be re-run pinned, so it is not re-closed verified", async () => {
     await redetect(ids.standing);
     const calibBefore = measuredCloses();
-    await g2f.sweepPendingLandVerifications();
+    await g2fLanding.sweepPendingLandVerifications({ ask: __askHuman });
     let r = rowOf(ids.standing);
     // The standing row measures the symptom, so the stale guard does not hold it...
     expect(metaOf(r)["stale_close_evidence"]).toBeUndefined();
@@ -222,7 +226,7 @@ describe("pending-land sweep on a RE-DETECTED gap", () => {
     expect(r["status"]).toBe("open");
     expect(favorables(r, shaStanding)).toBe(1);
     expect(measuredCloses()).toBe(calibBefore);
-    await g2f.sweepPendingLandVerifications();
+    await g2fLanding.sweepPendingLandVerifications({ ask: __askHuman });
     r = rowOf(ids.standing);
     expect(r["status"]).toBe("open");
     expect(favorables(r, shaStanding)).toBe(1);

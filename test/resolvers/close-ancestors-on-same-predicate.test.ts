@@ -14,6 +14,7 @@ if (!process.env["WORKSPACE_ROOT"]) process.env["WORKSPACE_ROOT"] = ROOT;
 process.env["SUBSTRATE_GAP_SKIP_COMPOSE_TRIGGER"] = "1";
 const sg = await import("../../src/resolvers/substrate-gap.js");
 const g2f = await import("../../src/resolvers/gap-to-feature.js");
+const g2fLanding = await import("../../src/judge/gap-landing-verdict.js");
 const g2fCredit = await import("../../src/judge/gap-attempt-credit.js");
 const RUN = Math.random().toString(36).slice(2, 8);
 
@@ -60,7 +61,7 @@ describe("closeAncestorsOnSamePredicate", () => {
   it("a narrowed child's verified close closes its parent on the same predicate, carrying the child's exercise", async () => {
     const p = `ca-p-${RUN}`;
     await write(p, { evidence_resolve: ER, failed_attempts: 7 });
-    const closed = await g2f.closeAncestorsOnSamePredicate(`${p}-narrowed`, childClose({ parent_gap_id: p }));
+    const closed = await g2fLanding.closeAncestorsOnSamePredicate(`${p}-narrowed`, childClose({ parent_gap_id: p }));
     expect(closed).toEqual([p]);
     const r = await row(p);
     expect(r["status"]).toBe("closed");
@@ -76,14 +77,14 @@ describe("closeAncestorsOnSamePredicate", () => {
     const p = `ca-chain-${RUN}`;
     await write(p, { evidence_resolve: ER });
     await write(`${p}-narrowed`, { evidence_resolve: ER, parent_gap_id: p, predicate_source: "gap_falsify:inherit" });
-    const closed = await g2f.closeAncestorsOnSamePredicate(`recommit-${p}-narrowed-x`, childClose({ source_gap_id: `${p}-narrowed` }));
+    const closed = await g2fLanding.closeAncestorsOnSamePredicate(`recommit-${p}-narrowed-x`, childClose({ source_gap_id: `${p}-narrowed` }));
     expect(closed).toEqual([`${p}-narrowed`, p]);
   });
 
   it("never closes an ancestor whose check differs", async () => {
     const p = `ca-diff-${RUN}`;
     await write(p, { evidence_resolve: OTHER });
-    expect(await g2f.closeAncestorsOnSamePredicate(`${p}-narrowed`, childClose({ parent_gap_id: p }))).toEqual([]);
+    expect(await g2fLanding.closeAncestorsOnSamePredicate(`${p}-narrowed`, childClose({ parent_gap_id: p }))).toEqual([]);
     expect((await row(p))["status"]).toBe("open");
   });
 
@@ -91,7 +92,7 @@ describe("closeAncestorsOnSamePredicate", () => {
     const p = `ca-unex-${RUN}`;
     await write(p, { evidence_resolve: ER });
     for (const extra of [{ closed_reason: "landed_literal_only" }, { falsifier_exercise: { ...EXERCISE, passed: false } }, { falsifier_exercise: { ...EXERCISE, verdict: "unknown" } }, { falsifier_exercise: undefined }]) {
-      expect(await g2f.closeAncestorsOnSamePredicate(`${p}-narrowed`, childClose({ parent_gap_id: p }, extra))).toEqual([]);
+      expect(await g2fLanding.closeAncestorsOnSamePredicate(`${p}-narrowed`, childClose({ parent_gap_id: p }, extra))).toEqual([]);
     }
     expect((await row(p))["status"]).toBe("open");
   });
@@ -99,7 +100,7 @@ describe("closeAncestorsOnSamePredicate", () => {
   it("leaves an operator-held ancestor open", async () => {
     const p = `ca-held-${RUN}`;
     await write(p, { evidence_resolve: ER, operator_hold: true });
-    expect(await g2f.closeAncestorsOnSamePredicate(`${p}-narrowed`, childClose({ parent_gap_id: p }))).toEqual([]);
+    expect(await g2fLanding.closeAncestorsOnSamePredicate(`${p}-narrowed`, childClose({ parent_gap_id: p }))).toEqual([]);
     expect((await row(p))["status"]).toBe("open");
   });
 
@@ -107,14 +108,14 @@ describe("closeAncestorsOnSamePredicate", () => {
     const p = `ca-race-close-${RUN}`;
     await write(p, { evidence_resolve: ER });
     await write(`${p}-narrowed`, { evidence_resolve: ER, parent_gap_id: p, predicate_source: "gap_falsify:inherit" });
-    g2f.__setAncestorCloseRaceHookForTests(async (id) => {
+    g2fLanding.__setAncestorCloseRaceHookForTests(async (id) => {
       if (id !== `${p}-narrowed`) return;
       const cur = await row(id);
       await sg.resolveSubstrateGapWrite({ type: "substrateGap_write", gap: { ...cur, status: "closed", classification_metadata: { ...metaOf(cur), closed_reason: "landed_verified", landed_sha: "fff0000" } } } as never);
     });
     try {
-      expect(await g2f.closeAncestorsOnSamePredicate(`recommit-${p}-narrowed-x`, childClose({ source_gap_id: `${p}-narrowed` }))).toEqual([]);
-    } finally { g2f.__setAncestorCloseRaceHookForTests(null); }
+      expect(await g2fLanding.closeAncestorsOnSamePredicate(`recommit-${p}-narrowed-x`, childClose({ source_gap_id: `${p}-narrowed` }))).toEqual([]);
+    } finally { g2fLanding.__setAncestorCloseRaceHookForTests(null); }
     const n = metaOf(await row(`${p}-narrowed`));
     expect(n["closed_reason"]).toBe("landed_verified");
     expect(n["landed_sha"]).toBe("fff0000");
@@ -128,14 +129,14 @@ describe("closeAncestorsOnSamePredicate", () => {
     await write(p, { evidence_resolve: ER, failed_attempts: 5 });
     const snapshot = JSON.parse(JSON.stringify(await row(p))) as Row;
     // A bump that lands between the read and the close leaves the row open: the close still applies.
-    g2f.__setAncestorCloseRaceHookForTests(async (id) => {
+    g2fLanding.__setAncestorCloseRaceHookForTests(async (id) => {
       if (id !== p) return;
       const cur = await row(id);
       await sg.resolveSubstrateGapWrite({ type: "substrateGap_write", expect_status: "open", gap: { ...cur, status: "open", classification_metadata: { ...metaOf(cur), failed_attempts: 6 } } } as never);
     });
     try {
-      expect(await g2f.closeAncestorsOnSamePredicate(`${p}-narrowed`, childClose({ parent_gap_id: p }))).toEqual([p]);
-    } finally { g2f.__setAncestorCloseRaceHookForTests(null); }
+      expect(await g2fLanding.closeAncestorsOnSamePredicate(`${p}-narrowed`, childClose({ parent_gap_id: p }))).toEqual([p]);
+    } finally { g2fLanding.__setAncestorCloseRaceHookForTests(null); }
     // A bump that read the row before the close and writes after it is a no-op, not a reopen.
     await g2fCredit.bumpFailedAttempts(snapshot, { escalate: g2f.escalateToDecomposition });
     const r = await row(p);

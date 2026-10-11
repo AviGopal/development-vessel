@@ -516,7 +516,7 @@ describe("semantic dissent: a green armed class-2 check outranks a non-hard-fail
   });
 
   it("MUST-FAIL (the reader is called, operator half): the pending-land sweep resolves dissents with 'passed' on a verified landing and 'failed' on a reverted or present one", () => {
-    const sweep = fnNamed(GTF_PATH, "sweepPendingLandVerificationsOnce");
+    const sweep = fnNamed(new URL("../../src/judge/gap-landing-verdict.ts", import.meta.url).pathname, "sweepPendingLandVerificationsOnce"); // moved to gap-landing-verdict (judge split)
     const results = callsTo(sweep, "resolveDissentOutcome").map((c) => literalArgProperty(c, 1, "result"));
     expect({ passed: results.includes("passed"), failed: results.includes("failed") }).toEqual({ passed: true, failed: true });
   });

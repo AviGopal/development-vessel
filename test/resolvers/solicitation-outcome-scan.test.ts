@@ -42,7 +42,8 @@ describe("solicitation_outcome_scan — operator-verdict read-back", () => {
     expect(answered?.outcome).toBe("answered");
     // the answered re-land escalation calibrated the oracle against the operator corpus
     const mod = await import("../../src/resolvers/gap-to-feature.js");
-    expect(mod.closeOracleReliability("landed_commit").operator_engaged).toBeGreaterThanOrEqual(1);
+    const modLanding = await import("../../src/judge/gap-landing-verdict.js");
+    expect(modLanding.closeOracleReliability("landed_commit").operator_engaged).toBeGreaterThanOrEqual(1);
   });
 
   it("returns an empty report when no solicitation_ids are supplied", async () => {

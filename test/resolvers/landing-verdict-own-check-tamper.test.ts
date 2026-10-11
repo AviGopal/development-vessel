@@ -13,6 +13,7 @@
 // that ADDS an unrelated test is not tampering.
 import { describe, expect, it } from "bun:test";
 import * as g2f from "../../src/resolvers/gap-to-feature.js";
+import * as g2fLanding from "../../src/judge/gap-landing-verdict.js";
 
 type Verdict = "present" | "absent" | "pending" | "unknown";
 type Label = { grounded: boolean; sha: string; parent: string; reason?: string };
@@ -22,7 +23,7 @@ type Deps = {
   changedFiles?: (sha: string, parent: string) => string[] | null;
   readAt?: (ref: string, path: string) => string | null;
 };
-const verdict = g2f.independentLandingVerdict as unknown as (gap: Record<string, unknown>, sha: string, deps: Deps) => Promise<{ label: Label | null; reason: string }>;
+const verdict = g2fLanding.independentLandingVerdict as unknown as (gap: Record<string, unknown>, sha: string, deps: Deps) => Promise<{ label: Label | null; reason: string }>;
 
 const SHA = "b".repeat(40);
 const PARENT = "a".repeat(40);

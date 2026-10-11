@@ -30,6 +30,7 @@ import { tmpdir } from "node:os";
 import ts from "typescript";
 import * as fc from "../../src/resolvers/feature-compose.js";
 import * as g2f from "../../src/resolvers/gap-to-feature.js";
+import * as g2fLanding from "../../src/judge/gap-landing-verdict.js";
 import { installCutoverFetchGuard, restoreCutoverFetch, type FetchGuard } from "./cutover-fetch-guard.js";
 import { installCutoverExecGuard, restoreCutoverExecModules, type ExecGuard } from "./cutover-exec-guard.js";
 
@@ -44,7 +45,7 @@ function exported<T>(mod: unknown, file: string, name: string): T {
   expect(typeof f, `${file} must export ${name}`).toBe("function");
   return f as T;
 }
-const verdictFn = (): VerdictFn => exported<VerdictFn>(g2f, "src/resolvers/gap-to-feature.ts", "independentLandingVerdict");
+const verdictFn = (): VerdictFn => exported<VerdictFn>(g2fLanding, "src/judge/gap-landing-verdict.ts", "independentLandingVerdict");
 const closeReason: CloseReasonFn = (m, s, l, i) => (fc.landedCloseReason as unknown as CloseReasonFn)(m, s, l, i);
 
 let guard: FetchGuard;
@@ -223,8 +224,8 @@ describe("independent landing verdict: wiring", () => {
     expect(/landingLabelHere\(|goal_verification_label/.test(body)).toBe(true);
   });
   it("the sweep runs the independent verdict BEFORE crediting and before closed_reason; closeLandedGap defers without a label", () => {
-    const sweep = fnText("gap-to-feature.ts", "sweepPendingLandVerificationsOnce");
-    const lander = fnText("gap-to-feature.ts", "closeLandedGap");
+    const sweep = fnText("../judge/gap-landing-verdict.ts", "sweepPendingLandVerificationsOnce"); // moved (judge split)
+    const lander = fnText("../judge/gap-landing-verdict.ts", "closeLandedGap");
     const iv = sweep.indexOf("independentLandingVerdict(");
     expect(iv).toBeGreaterThan(0);
     expect(iv).toBeLessThan(sweep.indexOf("joinDecisionOutcome("));
@@ -238,8 +239,10 @@ describe("independent landing verdict: wiring", () => {
     const deferAt = lander.indexOf('"awaiting_independent_verdict"');
     expect(deferAt).toBeGreaterThan(0);
     expect(deferAt).toBeLessThan(lander.indexOf('status: "closed"'));
-    const src = readFileSync(new URL("../../src/resolvers/gap-to-feature.ts", import.meta.url), "utf8");
-    expect(src.includes('closed_reason: "landed_verified"')).toBe(false);
+    for (const f of ["../../src/resolvers/gap-to-feature.ts", "../../src/judge/gap-landing-verdict.ts"]) {
+      const src = readFileSync(new URL(f, import.meta.url), "utf8");
+      expect(src.includes('closed_reason: "landed_verified"')).toBe(false);
+    }
   });
 });
 
@@ -249,6 +252,8 @@ const CLONES = join(ROOT, "clones");
 const GAPS_PATH = join(ROOT, "gaps", "gaps.json");
 const CALIB = join(ROOT, "expectation-calibration.json");
 const GTF = new URL("../../src/resolvers/gap-to-feature.ts", import.meta.url).pathname;
+const UIW = new URL("../../src/resolvers/ui-write-passthrough.ts", import.meta.url).pathname;
+const GLV = new URL("../../src/judge/gap-landing-verdict.ts", import.meta.url).pathname;
 const BIN = join(ROOT, "bin");
 function git(repo: string, ...args: string[]): string {
   const p = Bun.spawnSync(["git", "-C", repo, ...args], { stdout: "pipe", stderr: "pipe" });
@@ -334,9 +339,10 @@ function sweepInIsolation(): { exit: number; out: string } {
     `  const red = ref !== "" && ((f.includes("control") && ref === T.control.parent) || (f.includes("selfauth") && ref === T.selfauth.parent));`,
     `  return new Response(JSON.stringify({ body: { ran: true, requested_not_passing: red ? 1 : 0 } }), { status: 200 });`,
     `});`,
-    `const { sweepPendingLandVerifications, closeLandedGap } = await import(${JSON.stringify(GTF)});`,
-    `const r = await sweepPendingLandVerifications();`,
-    `const c = await closeLandedGap({ id: "ilv-forgedcut" }, { landed: true, commit_sha: T.forgedcut.sha, vessel: "activity-api", push_status: "pushed" });`,
+    `const { sweepPendingLandVerifications, closeLandedGap } = await import(${JSON.stringify(GLV)});`,
+    `const __askHuman = async (p) => (await import(${JSON.stringify(UIW)})).resolveUiWritePassthrough(p);`,
+    `const r = await sweepPendingLandVerifications({ ask: __askHuman });`,
+    `const c = await closeLandedGap({ id: "ilv-forgedcut" }, { landed: true, commit_sha: T.forgedcut.sha, vessel: "activity-api", push_status: "pushed" }, { ask: __askHuman });`,
     `console.log("CUTOVER_CLOSE " + JSON.stringify(c));`,
     `console.log("SWEEP_RESULT " + JSON.stringify(r));`,
   ].join("\n");

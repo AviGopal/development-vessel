@@ -16,6 +16,7 @@ if (!process.env["WORKSPACE_ROOT"]) process.env["WORKSPACE_ROOT"] = ROOT;
 process.env["SUBSTRATE_GAP_SKIP_COMPOSE_TRIGGER"] = "1";
 const sg = await import("../../src/resolvers/substrate-gap.js");
 const g2f = await import("../../src/resolvers/gap-to-feature.js");
+const g2fLanding = await import("../../src/judge/gap-landing-verdict.js");
 const STORE = sg.gapStoreRootForTest();
 const GAPS_PATH = join(STORE, "gaps", "gaps.json");
 const CLONES = join(ROOT, "clones");
@@ -93,7 +94,7 @@ describe("markTerminalRefusal (fixed_elsewhere) on a REOPENED gap", () => {
   it("does not close it fixed_elsewhere on a commit that landed before the re-detection", async () => {
     const id = `sib-fe-${RUN}`;
     await seedReopened(id, { falsifier: "class2" });
-    await g2f.markTerminalRefusal(rowOf(id), { terminal_refusal: GREEN });
+    await g2fLanding.markTerminalRefusal(rowOf(id), { terminal_refusal: GREEN });
     const r = rowOf(id);
     expect(r["status"]).toBe("open");
     expect(metaOf(r)["closed_reason"]).toBeUndefined();
@@ -104,7 +105,7 @@ describe("closeAncestorsOnSamePredicate on a REOPENED ancestor", () => {
   it("does not close it on a child's commit that landed before the ancestor's re-detection", async () => {
     const p = `sib-anc-${RUN}`;
     await seedReopened(p, {});
-    const closed = await g2f.closeAncestorsOnSamePredicate(`${p}-narrowed`, childClose(oldSha, { parent_gap_id: p }));
+    const closed = await g2fLanding.closeAncestorsOnSamePredicate(`${p}-narrowed`, childClose(oldSha, { parent_gap_id: p }));
     expect(closed).toEqual([]);
     expect(rowOf(p)["status"]).toBe("open");
   });
@@ -112,7 +113,7 @@ describe("closeAncestorsOnSamePredicate on a REOPENED ancestor", () => {
     const p = `sib-anc-new-${RUN}`;
     await seedReopened(p, {});
     const fresh = commitAt("src/a.ts", `export const a = 3; // ${p}\n`, new Date(Date.now() + 2000).toISOString());
-    const closed = await g2f.closeAncestorsOnSamePredicate(`${p}-narrowed`, childClose(fresh, { parent_gap_id: p }));
+    const closed = await g2fLanding.closeAncestorsOnSamePredicate(`${p}-narrowed`, childClose(fresh, { parent_gap_id: p }));
     expect(closed).toEqual([p]);
     expect(rowOf(p)["status"]).toBe("closed");
   });
@@ -123,7 +124,7 @@ describe("closeDescendantsOnSamePredicate on a REOPENED descendant", () => {
     const parent = `sib-desc-${RUN}`;
     const child = `${parent}-narrowed`;
     await seedReopened(child, { parent_gap_id: parent });
-    const closed = await g2f.closeDescendantsOnSamePredicate(parent, childClose(oldSha, {}));
+    const closed = await g2fLanding.closeDescendantsOnSamePredicate(parent, childClose(oldSha, {}));
     expect(closed).toEqual([]);
     expect(rowOf(child)["status"]).toBe("open");
   });

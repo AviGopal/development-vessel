@@ -4,6 +4,9 @@
 // human via a uiQuestion_write to stateful-ui. Real git fixture + captured fetch, no network.
 
 import { describe, it, expect, beforeAll, afterAll } from "bun:test";
+import { resolveUiWritePassthrough as __uiw } from "../../src/resolvers/ui-write-passthrough.js";
+// The landing verdict asks humans through a per-call channel (gap-to-feature judge split, qa 10.2): the same one production passes.
+const __askHuman = (p: Record<string, unknown>): Promise<unknown> => __uiw(p as never);
 import { mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -79,8 +82,8 @@ afterAll(() => {
 
 describe("sweep abstain->escalate on a re-land gap", () => {
   it("leaves the re-land gap OPEN and fires a uiQuestion_write to the human", async () => {
-    const { sweepPendingLandVerifications } = await import("../../src/resolvers/gap-to-feature.js");
-    const result = await sweepPendingLandVerifications();
+    const { sweepPendingLandVerifications } = await import("../../src/judge/gap-landing-verdict.js");
+    const result = await sweepPendingLandVerifications({ ask: __askHuman });
     // escalateRelandToHuman is fire-and-forget (must not block the sweep); let it flush.
     await new Promise((r) => setTimeout(r, 150));
     expect(result.checked).toBe(1);
@@ -93,7 +96,8 @@ describe("sweep abstain->escalate on a re-land gap", () => {
     expect(q!.body).toContain("gap_reland_needs_human");
     // the oracle GRADED itself: the re-land recorded a false-close for the landed-commit class
     const mod = await import("../../src/resolvers/gap-to-feature.js");
-    const rel = mod.closeOracleReliability("landed_commit");
+    const modLanding = await import("../../src/judge/gap-landing-verdict.js");
+    const rel = modLanding.closeOracleReliability("landed_commit");
     expect(rel.false_closes).toBeGreaterThanOrEqual(1);
     expect(rel.reliability).toBeLessThan(1); // a false-close pulls reliability below the 1.0 prior mean
   });

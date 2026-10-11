@@ -19,6 +19,7 @@ const savedClones = process.env["VESSELS_CLONE_ROOT"];
 process.env["VESSELS_CLONE_ROOT"] = CLONES;
 const sg = await import("../../src/resolvers/substrate-gap.js");
 const g2f = await import("../../src/resolvers/gap-to-feature.js");
+const g2fLanding = await import("../../src/judge/gap-landing-verdict.js");
 const RUN = Math.random().toString(36).slice(2, 8);
 const VESSEL = "fe-vessel";
 const REPO = join(CLONES, VESSEL);
@@ -74,7 +75,7 @@ type Mark = (gap: Row, cb: Row) => Promise<void>;
 
 describe("markTerminalRefusal on a gap whose own check is green on the parent", () => {
   it("closes it fixed_elsewhere, naming the commit that touched the check's subject after the gap's birth", async () => {
-    const mark = (g2f as Row)["markTerminalRefusal"] as Mark | undefined;
+    const mark = (g2fLanding as Row)["markTerminalRefusal"] as Mark | undefined;
     expect(typeof mark).toBe("function");
     commitFile("src/a.ts", "export const a = 1; // defect\n", "seed a");
     commitFile("src/a.test.ts", "// a > b\n", "seed test");
@@ -101,7 +102,7 @@ describe("markTerminalRefusal on a gap whose own check is green on the parent", 
   });
 
   it("does NOT close a gap whose check went green with no commit touching its subject files; only the exclusion marker is written", async () => {
-    const mark = (g2f as Row)["markTerminalRefusal"] as Mark | undefined;
+    const mark = (g2fLanding as Row)["markTerminalRefusal"] as Mark | undefined;
     expect(typeof mark).toBe("function");
     commitFile("src/c.ts", "export const c = 1;\n", "seed c");
     commitFile("src/c.test.ts", "// c\n", "seed c test");
@@ -131,7 +132,7 @@ describe("markTerminalRefusal: a commit that touched the gap's own check is not 
     expect(typeof (m["own_check_green_on_parent"] as Row | undefined)?.["at"]).toBe("string");
   };
   const mark = (): Mark => {
-    const f = (g2f as Row)["markTerminalRefusal"] as Mark | undefined;
+    const f = (g2fLanding as Row)["markTerminalRefusal"] as Mark | undefined;
     expect(typeof f).toBe("function");
     return f!;
   };
@@ -237,7 +238,7 @@ describe("markTerminalRefusal: a commit that touched the gap's own check is not 
 describe("selfAuthoredCheckInputs: the check's vessel with or without a repos/ prefix", () => {
   type SelfAuth = (gap: Row, sha: string) => string[];
   const fn = (): SelfAuth => {
-    const f = (g2f as Row)["__selfAuthoredCheckInputsForTests"] as SelfAuth | undefined;
+    const f = (g2fLanding as Row)["__selfAuthoredCheckInputsForTests"] as SelfAuth | undefined;
     expect(typeof f, "gap-to-feature must export __selfAuthoredCheckInputsForTests").toBe("function");
     return f!;
   };

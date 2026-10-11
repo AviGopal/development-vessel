@@ -12,6 +12,7 @@
 import { describe, it, expect } from "bun:test";
 import * as fc from "../../src/resolvers/feature-compose.js";
 import * as g2f from "../../src/resolvers/gap-to-feature.js";
+import * as g2fLanding from "../../src/judge/gap-landing-verdict.js";
 
 type Verdict = "present" | "absent" | "pending" | "unknown";
 type Descriptor = { id: string; version: string; kind: string; source_paths: string[]; lineage?: { authored_sha?: string; registered_by_gap?: string }; must_fail?: { check: Record<string, unknown>; ref: string } };
@@ -23,7 +24,7 @@ type Deps = {
   changedFiles?: (sha: string, parent: string) => string[] | null;
 };
 type Label = { grounded: boolean; labeler: string; sha: string; parent: string; tests: string[]; ran_at: string; reason?: string; verifier?: Record<string, unknown> };
-const verdict = g2f.independentLandingVerdict as unknown as (gap: Record<string, unknown>, sha: string, deps?: Deps) => Promise<{ label: Label | null; reason: string }>;
+const verdict = g2fLanding.independentLandingVerdict as unknown as (gap: Record<string, unknown>, sha: string, deps?: Deps) => Promise<{ label: Label | null; reason: string }>;
 
 const SHA = "b".repeat(40);
 const PARENT = "a".repeat(40);

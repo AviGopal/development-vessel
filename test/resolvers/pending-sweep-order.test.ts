@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { pendingCheckedStamp } from "../../src/resolvers/gap-to-feature";
+import { pendingCheckedStamp } from "../../src/judge/gap-landing-verdict";
 
 // The pending sweep takes the LEAST recently checked gaps first. A new landing has never been examined, so
 // marking it must not stamp it "just checked" (2026-09-30: verified landings waited 60+ min behind 103 gaps).

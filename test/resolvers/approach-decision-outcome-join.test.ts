@@ -32,6 +32,7 @@ const { resolveSubstrateGap, resolveSubstrateGapWrite, gapStoreRootForTest, isSc
 const STORE_ROOT = gapStoreRootForTest();
 const RUN = Math.random().toString(36).slice(2, 8);
 const g2f = (await import("../../src/resolvers/gap-to-feature.js")) as Record<string, any>;
+const g2fLanding = (await import("../../src/judge/gap-landing-verdict.js")) as Record<string, any>;
 const g2fCredit = (await import("../../src/judge/gap-attempt-credit.js")) as Record<string, any>;
 const g2fPolicy = (await import("../../src/judge/gap-policy.js")) as Record<string, any>;
 const { appendRecord } = await import("../../src/resolvers/attempt-ledger.js");
@@ -79,7 +80,7 @@ async function failThroughSeam(gap: Row, decisionId: string): Promise<void> {
     persistGapMeta: async () => { /* not under test */ },
     holdStillHeld: () => false,
   };
-  await g2f.escalateApplyFailureToPwt(gap, { ok: false, verdict: "UNFAVORABLE", stage: "verify" }, "spec", { predicted: false, p: 0.3 }, deps, { decision_id: decisionId });
+  await g2fLanding.escalateApplyFailureToPwt(gap, { ok: false, verdict: "UNFAVORABLE", stage: "verify" }, "spec", { predicted: false, p: 0.3 }, deps, { decision_id: decisionId });
 }
 
 /** A vessel clone whose HEAD commit carries `Attempt-Id: <attemptId>`, as the mitosis cutover writes it. */
@@ -158,6 +159,9 @@ describe("source pins: every landing join site carries the decision, and the dec
   const { readFileSync } = require("node:fs") as typeof import("node:fs");
   const src = (rel: string): string => readFileSync(join(import.meta.dir, "..", "..", rel), "utf8");
   const G2F = src("src/resolvers/gap-to-feature.ts");
+  // The landing closers and the sweep moved to the closed gap-landing-verdict module (gap-to-feature judge split):
+  // the join-site pins read both files.
+  const G2FL = G2F + "\n" + src("src/judge/gap-landing-verdict.ts");
   const FC = src("src/resolvers/feature-compose.ts");
   const REG = src("src/resolvers/attempt-register.ts");
   it("registerAttempt records decision_id on the intent, and feature-compose passes the pointer's decision_id", () => {
@@ -175,16 +179,16 @@ describe("source pins: every landing join site carries the decision, and the dec
     for (const c of calls) expect(c).toMatch(/decision_id: (attempt\.id|decisionId)/);
   });
   it("no joinDecisionOutcome call for a landing is made without a decision ref", () => {
-    const landingJoins = G2F.split("\n").filter((l) => /joinDecisionOutcome\(meta, \{ landed: true/.test(l));
+    const landingJoins = G2FL.split("\n").filter((l) => /joinDecisionOutcome\(meta, \{ landed: true/.test(l));
     expect(landingJoins.length).toBe(4);
     for (const l of landingJoins) expect(l).toMatch(/decision_id/);
-    expect(G2F).toMatch(/const landRef = await landingDecisionRef\(land\.commit_sha \?\? "", ref\.decision_id\);/);
-    expect(G2F).toMatch(/const sweepLandRef = await landingDecisionRef\(sha\);/);
+    expect(G2FL).toMatch(/const landRef = await landingDecisionRef\(land\.commit_sha \?\? "", ref\.decision_id\);/);
+    expect(G2FL).toMatch(/const sweepLandRef = await landingDecisionRef\(sha\);/);
   });
   it("every closeLandedGap call passes the pick's decision", () => {
-    const calls = G2F.split("\n").filter((l) => /closeLandedGap\(gap, /.test(l));
+    const calls = G2FL.split("\n").filter((l) => /closeLandedGap\(gap, /.test(l));
     expect(calls.length).toBe(4);
-    for (const l of calls) expect(l).toMatch(/, (\{ decision_id: (attempt\.id|decisionId) \}|ref)\);$/);
+    for (const l of calls) expect(l).toMatch(/, (\{ decision_id: (attempt\.id|decisionId)(, ask: (askHuman|deps\.ask))? \}|ref)\);$/);
   });
 });
 

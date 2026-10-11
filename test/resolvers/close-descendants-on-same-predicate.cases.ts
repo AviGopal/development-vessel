@@ -14,6 +14,7 @@ if (!process.env["WORKSPACE_ROOT"]) process.env["WORKSPACE_ROOT"] = ROOT;
 process.env["SUBSTRATE_GAP_SKIP_COMPOSE_TRIGGER"] = "1";
 const sg = await import("../../src/resolvers/substrate-gap.js");
 const g2f = await import("../../src/resolvers/gap-to-feature.js");
+const g2fLanding = await import("../../src/judge/gap-landing-verdict.js");
 const RUN = Math.random().toString(36).slice(2, 8);
 
 const ER = { shape: "test_suite", input: { vessel: "activity-api", test_file: "src/a.test.ts", only_tests: ["a > b"] }, zero_field: "requested_not_passing" };
@@ -53,7 +54,7 @@ const parentClose = (extra: Row = {}): Row => ({ edit_site: SITE, evidence_resol
 
 describe("closeDescendantsOnSamePredicate", () => {
   it("a landed_verified close closes its open same-predicate recommit and narrowed children; a different-predicate child stays open", async () => {
-    expect(typeof (g2f as Row)["closeDescendantsOnSamePredicate"]).toBe("function");
+    expect(typeof (g2fLanding as Row)["closeDescendantsOnSamePredicate"]).toBe("function");
     const p = `cd-p-${RUN}`;
     const same = `recommit-${p}-syntax_break`;
     const narrowed = `${p}-narrowed`;
@@ -65,7 +66,7 @@ describe("closeDescendantsOnSamePredicate", () => {
     await write(grand, { evidence_resolve: ER, source_gap_id: narrowed, re_commit: true });
     await write(other, { evidence_resolve: OTHER, source_gap_id: p, re_commit: true });
     await write(otherSite, { evidence_resolve: ER, source_gap_id: p, edit_site: "repos/activity-api/src/b.ts" });
-    const closed = await (g2f as unknown as { closeDescendantsOnSamePredicate: (id: string, m: Row) => Promise<string[]> }).closeDescendantsOnSamePredicate(p, parentClose());
+    const closed = await (g2fLanding as unknown as { closeDescendantsOnSamePredicate: (id: string, m: Row) => Promise<string[]> }).closeDescendantsOnSamePredicate(p, parentClose());
     expect([...closed].sort()).toEqual([grand, narrowed, same].sort());
     for (const id of [same, narrowed, grand]) {
       const r = await row(id);
@@ -81,11 +82,11 @@ describe("closeDescendantsOnSamePredicate", () => {
   });
 
   it("closes nothing unless the parent's own check was exercised and passed on a verified landing", async () => {
-    expect(typeof (g2f as Row)["closeDescendantsOnSamePredicate"]).toBe("function");
+    expect(typeof (g2fLanding as Row)["closeDescendantsOnSamePredicate"]).toBe("function");
     const p = `cd-unex-${RUN}`;
     const c = `recommit-${p}-syntax_break`;
     await write(c, { evidence_resolve: ER, source_gap_id: p });
-    const fn = (g2f as unknown as { closeDescendantsOnSamePredicate: (id: string, m: Row) => Promise<string[]> }).closeDescendantsOnSamePredicate;
+    const fn = (g2fLanding as unknown as { closeDescendantsOnSamePredicate: (id: string, m: Row) => Promise<string[]> }).closeDescendantsOnSamePredicate;
     for (const extra of [{ closed_reason: "landed_literal_only" }, { falsifier_exercise: { ...EXERCISE, passed: false } }, { falsifier_exercise: undefined }]) {
       expect(await fn(p, parentClose(extra))).toEqual([]);
     }
@@ -93,11 +94,11 @@ describe("closeDescendantsOnSamePredicate", () => {
   });
 
   it("leaves an operator-held child open", async () => {
-    expect(typeof (g2f as Row)["closeDescendantsOnSamePredicate"]).toBe("function");
+    expect(typeof (g2fLanding as Row)["closeDescendantsOnSamePredicate"]).toBe("function");
     const p = `cd-held-${RUN}`;
     const c = `recommit-${p}-syntax_break`;
     await write(c, { evidence_resolve: ER, source_gap_id: p, operator_hold: true });
-    const fn = (g2f as unknown as { closeDescendantsOnSamePredicate: (id: string, m: Row) => Promise<string[]> }).closeDescendantsOnSamePredicate;
+    const fn = (g2fLanding as unknown as { closeDescendantsOnSamePredicate: (id: string, m: Row) => Promise<string[]> }).closeDescendantsOnSamePredicate;
     expect(await fn(p, parentClose())).toEqual([]);
     expect((await row(c))["status"]).toBe("open");
   });

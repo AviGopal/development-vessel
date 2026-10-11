@@ -15,7 +15,7 @@ const CALIB = join(tmpdir(), `close-oracle-trust-${Date.now()}-${Math.random().t
 process.env.CLOSE_ORACLE_CALIB_PATH = CALIB;
 
 async function trust(cls: string): Promise<boolean> {
-  const { closeOracleEarnedTrust } = await import("../../src/resolvers/gap-to-feature.js");
+  const { closeOracleEarnedTrust } = await import("../../src/judge/gap-landing-verdict.js");
   return closeOracleEarnedTrust(cls);
 }
 

@@ -18,6 +18,8 @@ const CLONES = join(ROOT, "clones");
 const GAPS_PATH = join(ROOT, "gaps", "gaps.json");
 const CALIB = join(ROOT, "expectation-calibration.json");
 const GTF = new URL("../../src/resolvers/gap-to-feature.ts", import.meta.url).pathname;
+const UIW = new URL("../../src/resolvers/ui-write-passthrough.ts", import.meta.url).pathname;
+const GLV = new URL("../../src/judge/gap-landing-verdict.ts", import.meta.url).pathname;
 
 function git(repo: string, ...args: string[]): string {
   const p = Bun.spawnSync(["git", "-C", repo, ...args], { stdout: "pipe", stderr: "pipe" });
@@ -67,8 +69,9 @@ function sweepInIsolation(): { exit: number; out: string } {
   const code = [
     `const PARENT = ${JSON.stringify(partialSha)};`,
     `globalThis.fetch = (async (_u, init) => { let b = {}; try { b = JSON.parse(String(init?.body ?? "{}")); } catch {} const ref = b?.impulse?.pointer?.base_ref; return new Response(JSON.stringify({ body: { ran: true, requested_not_passing: ref === PARENT ? 1 : 0 } }), { status: 200 }); });`,
-    `const { sweepPendingLandVerifications } = await import(${JSON.stringify(GTF)});`,
-    `const r = await sweepPendingLandVerifications();`,
+    `const { sweepPendingLandVerifications } = await import(${JSON.stringify(GLV)});`,
+    `const __askHuman = async (p) => (await import(${JSON.stringify(UIW)})).resolveUiWritePassthrough(p);`,
+    `const r = await sweepPendingLandVerifications({ ask: __askHuman });`,
     `console.log("SWEEP_RESULT " + JSON.stringify(r));`,
   ].join("\n");
   const env: Record<string, string> = {

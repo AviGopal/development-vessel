@@ -18,6 +18,7 @@ import { join } from "node:path";
 import { resolvePatchWithTools } from "../../src/resolvers/patch-with-tools.js";
 import { resolvePoolImpulseWrite, __setPoolFileForTests, attestationSig } from "../../src/resolvers/pool-impulse.js";
 import * as g2f from "../../src/resolvers/gap-to-feature.js";
+import * as g2fLanding from "../../src/judge/gap-landing-verdict.js";
 import * as elig from "../../src/judge/gap-eligibility.js";
 
 // Loaded leniently so the behavioural tests below fail on BEHAVIOUR (not on a missing module) at a
@@ -262,7 +263,7 @@ describe("t5: a held refusal through the gap-to-feature grading path", () => {
   });
 
   it("changes neither failed_attempts nor the class posterior; stamps pwt_escalation_held and does NOT consume the one-shot; escalates for real once lifted", async () => {
-    const escalate = (g2f as Record<string, unknown>).escalateApplyFailureToPwt as undefined | ((...a: unknown[]) => Promise<Record<string, unknown>>);
+    const escalate = (g2fLanding as Record<string, unknown>).escalateApplyFailureToPwt as undefined | ((...a: unknown[]) => Promise<Record<string, unknown>>);
     expect(typeof escalate).toBe("function");
     const posterior: Array<[string, boolean]> = [];
     const bumps: unknown[] = [];
@@ -330,7 +331,7 @@ describe("t5: a held refusal through the gap-to-feature grading path", () => {
   });
 
   it("control: a genuine (non-held) pwt failure still bumps and still records the class posterior", async () => {
-    const escalate = (g2f as Record<string, unknown>).escalateApplyFailureToPwt as undefined | ((...a: unknown[]) => Promise<Record<string, unknown>>);
+    const escalate = (g2fLanding as Record<string, unknown>).escalateApplyFailureToPwt as undefined | ((...a: unknown[]) => Promise<Record<string, unknown>>);
     expect(typeof escalate).toBe("function");
     const posterior: Array<[string, boolean]> = [];
     const bumps: unknown[] = [];

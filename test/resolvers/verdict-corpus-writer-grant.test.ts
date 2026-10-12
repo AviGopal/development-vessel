@@ -2,8 +2,9 @@
 //
 // goal-host's credit stop reads which credit classes are held from the `verdictCorpusStatus` pool row. A row anyone
 // could write would let anyone clear every hold, so pool-impulse.ts admits that shape only under the runner grant:
-// the request's Authorization credential, validated by identity-vessel, names a key id that an OPEN, operator-attested
-// `verdictCorpusWriter` row lists for goal-host-vessel. The node's own key and any admin key are never the runner;
+// the request's Authorization credential, validated by identity-vessel, carries the dedicated `verdict-corpus:write`
+// scope (issued only to goal-host's key). A default read/write answer, or an answer with no scopes (a legacy key),
+// never satisfies it. The node's own key and any admin key are never the runner, scope or not; no allowlist row and
 // no body field is read for who is calling; every refused write leaves a `verdictCorpusWriteRefusal` row.
 // Reads stay open. identity-vessel is stood in for by globalThis.fetch; the pool store is a real file under a temp root.
 import { afterAll, afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
@@ -24,7 +25,9 @@ const { impulsesRouter } = await import(`../../src/routes/impulses.js?${"vc-writ
 const IDENTITY = "http://127.0.0.1:59107";
 const ADMIN_KEY = "admin-key-fixture";        // keyId k-admin, scopes read/write/admin
 const OPERATOR_KEY = "operator-key-fixture";  // keyId k-op, read/write: an operator's own (cockpit) key
-const RUNNER_KEY = "runner-key-fixture";      // keyId k-runner, read/write: goal-host-vessel's issued key
+const RUNNER_KEY = "runner-key-fixture";      // keyId k-runner, read/write + verdict-corpus:write: goal-host-vessel's key
+const ADMIN_RUNNER_KEY = "admin-runner-fixture"; // keyId k-admin-runner, admin AND verdict-corpus:write
+const LEGACY_KEY = "legacy-key-fixture";      // keyId k-legacy, identity's answer carries no scopes at all
 const NODE_KEY = "node-key-fixture";          // this process's METABOB_API_KEY: node-self, never asks identity
 
 const originalFetch = globalThis.fetch;
@@ -38,7 +41,9 @@ function installIdentity(): void {
       const ok = (keyId: string, scopes: string[]) => Response.json({ success: true, data: { authenticated: true, orgId: "o", userId: "u", keyId, scopes } });
       if (key === ADMIN_KEY) return ok("k-admin", ["read", "write", "admin"]);
       if (key === OPERATOR_KEY) return ok("k-op", ["read", "write"]);
-      if (key === RUNNER_KEY) return ok("k-runner", ["read", "write"]);
+      if (key === RUNNER_KEY) return ok("k-runner", ["read", "write", "verdict-corpus:write"]);
+      if (key === ADMIN_RUNNER_KEY) return ok("k-admin-runner", ["read", "write", "admin", "verdict-corpus:write"]);
+      if (key === LEGACY_KEY) return Response.json({ success: true, data: { authenticated: true, orgId: "o", userId: "u", keyId: "k-legacy" } });
       return Response.json({ success: false, error: "invalid" }, { status: 401 });
     }
     throw new TypeError("unexpected network call in test: " + u);
@@ -66,7 +71,7 @@ afterAll(() => { try { rmSync(ROOT, { recursive: true, force: true }); } catch {
 
 const statusBody = (holds: unknown[] = []) => ({ schema: 1, node: "n", run_at: "2026-10-12T00:00:00.000Z", period_s: 21600, state: "ok", holds });
 const statusWrite = (extra: Record<string, unknown> = {}) => ({ type: "poolImpulse_write", id: "verdictCorpusStatus", shape: "verdictCorpusStatus", source: "verdictCorpusRun", status: "open", body: statusBody(), ...extra });
-/** The operator's allowlist row, written as the operator writes it (an admin-credentialed trust-root write). */
+/** An operator-written verdictCorpusWriter row (the superseded allowlist): the grant must not read it. */
 function seedAllowlist(keyId: string, id = "vcw-goal-host"): void {
   const r = resolvePoolImpulseWrite({ type: "poolImpulse_write", id, shape: "verdictCorpusWriter", status: "open", source: "operator", body: { principal: "goal-host-vessel", key_id: keyId, by: "operator", at: "2026-10-12T00:00:00.000Z", reason: "goal-host's issued key publishes the corpus status" } }, { operator: true, key_id: "k-admin" });
   expect(r.body.ok).toBe(true);
@@ -81,19 +86,17 @@ const statusRow = () => JSON.parse(readFileSync(FILE, "utf8")).find((r: { id: st
 const refusals = () => new Map(rows("verdictCorpusWriteRefusal").map((r) => [String((r.body as Record<string, unknown>)["principal"]), r.body as Record<string, unknown>]));
 
 describe("M11: the hold cannot be forged (through the route every caller uses)", () => {
-  it("MUST-FAIL: an operator's own key (not the allowlisted runner) is refused 403, nothing is stored, and the refusal is recorded", async () => {
-    seedAllowlist("k-runner");
+  it("MUST-FAIL: an operator's own key (no verdict-corpus:write scope) is refused 403, nothing is stored, and the refusal is recorded", async () => {
     const res = await post(`ApiKey ${OPERATOR_KEY}`, statusWrite({ body: statusBody([]) }));
     expect(res.status).toBe(403);
     expect(((await res.json()) as { error: string }).error).toContain("runner_principal_required");
     expect(statusRow()).toBeUndefined();
     const rec = refusals().get("key_id:k-op");
     expect(rec?.["count"]).toBe(1);
-    expect(String(rec?.["last_why"])).toContain("not the allowlisted goal-host-vessel principal");
+    expect(String(rec?.["last_why"])).toContain("lacks the verdict-corpus:write scope");
   });
 
-  it("positive control: the allowlisted runner principal's write is admitted, stamped by 'runner' with its key id, and reads back verified with NO credential", async () => {
-    seedAllowlist("k-runner");
+  it("positive control: the scoped runner key's write is admitted (no allowlist row exists), stamped by 'runner' with its key id, and reads back verified with NO credential", async () => {
     const res = await post(`ApiKey ${RUNNER_KEY}`, statusWrite());
     expect(res.status).toBe(200);
     const stored = statusRow();
@@ -107,18 +110,16 @@ describe("M11: the hold cannot be forged (through the route every caller uses)",
     expect(imp["attested_verified"]).toBe(true);
   });
 
-  it("MUST-FAIL: an admin key is refused even when the allowlist names it; the node's own key even when it names node-self", async () => {
-    seedAllowlist("k-admin", "vcw-admin");
-    seedAllowlist("node-self", "vcw-node");
+  it("MUST-FAIL: an admin key is refused even when it carries the scope; the node's own key is refused", async () => {
+    expect((await post(`ApiKey ${ADMIN_RUNNER_KEY}`, statusWrite())).status).toBe(403);
     expect((await post(`ApiKey ${ADMIN_KEY}`, statusWrite())).status).toBe(403);
     expect((await post(`ApiKey ${NODE_KEY}`, statusWrite())).status).toBe(403);
     expect(statusRow()).toBeUndefined();
-    expect(refusals().get("key_id:k-admin")?.["count"]).toBe(1);
+    expect(String(refusals().get("key_id:k-admin-runner")?.["last_why"])).toContain("admin");
     expect(refusals().get("node-self")?.["count"]).toBe(1);
   });
 
   it("MUST-FAIL: no body field names the caller: a forged principal/key_id/attested in the pointer and body changes nothing", async () => {
-    seedAllowlist("k-runner");
     const forged = statusWrite({ principal: "goal-host-vessel", key_id: "k-runner", keyId: "k-runner", attested: { by: "runner", key_id: "k-runner", at: "x", sig: "f".repeat(64) }, body: { ...statusBody(), attested: { by: "runner" }, key_id: "k-runner" } });
     expect((await post(`ApiKey ${OPERATOR_KEY}`, forged)).status).toBe(403);
     expect(statusRow()).toBeUndefined();
@@ -128,16 +129,18 @@ describe("M11: the hold cannot be forged (through the route every caller uses)",
     expect(statusRow().body.attested).toBeUndefined();
   });
 
-  it("MUST-FAIL: with no allowlist row, or one that is retired, unattested or forged, the runner key is refused too", async () => {
-    expect((await post(`ApiKey ${RUNNER_KEY}`, statusWrite())).status).toBe(403);
-    // unattested / forged allowlist rows planted straight into the file
-    const planted = (id: string, attested?: Record<string, unknown>) => ({ id, shape: "verdictCorpusWriter", body: { principal: "goal-host-vessel", key_id: "k-runner" }, source: "x", status: "open", injected_at: "2026-10-12T00:00:00.000Z", updated_at: "2026-10-12T00:00:00.000Z", ...(attested ? { attested } : {}) });
-    writeFileSync(FILE, JSON.stringify([planted("vcw-bare"), planted("vcw-forged", { by: "operator", key_id: "k-admin", at: "2026-10-12T00:00:00.000Z", sig: "f".repeat(64) })]));
-    expect((await post(`ApiKey ${RUNNER_KEY}`, statusWrite())).status).toBe(403);
-    writeFileSync(FILE, "[]");
-    seedAllowlist("k-runner");
-    expect(resolvePoolImpulseWrite({ type: "poolImpulse_write", id: "vcw-goal-host", status: "retired" }, { operator: true, key_id: "k-admin" }).body.ok).toBe(true);
-    expect((await post(`ApiKey ${RUNNER_KEY}`, statusWrite())).status).toBe(403);
+  it("MUST-FAIL: identity's default scopes never satisfy the check: a read/write key and a legacy key with no scopes are refused", async () => {
+    expect((await post(`ApiKey ${OPERATOR_KEY}`, statusWrite())).status).toBe(403);
+    expect((await post(`ApiKey ${LEGACY_KEY}`, statusWrite())).status).toBe(403);
+    expect(statusRow()).toBeUndefined();
+    expect(String(refusals().get("key_id:k-legacy")?.["last_why"])).toContain("lacks the verdict-corpus:write scope");
+  });
+
+  it("MUST-FAIL: an operator allowlist row naming a key without the scope admits nothing (the row is not read)", async () => {
+    seedAllowlist("k-op");
+    seedAllowlist("k-legacy", "vcw-legacy");
+    expect((await post(`ApiKey ${OPERATOR_KEY}`, statusWrite())).status).toBe(403);
+    expect((await post(`ApiKey ${LEGACY_KEY}`, statusWrite())).status).toBe(403);
     expect(statusRow()).toBeUndefined();
   });
 
@@ -148,7 +151,6 @@ describe("M11: the hold cannot be forged (through the route every caller uses)",
   });
 
   it("identity unreachable fails closed for the runner key", async () => {
-    seedAllowlist("k-runner");
     identityMode = "down";
     expect((await post(`ApiKey ${RUNNER_KEY}`, statusWrite())).status).toBe(403);
     expect(statusRow()).toBeUndefined();
@@ -157,7 +159,6 @@ describe("M11: the hold cannot be forged (through the route every caller uses)",
 
 describe("M11: no other door (by id, reshape, retire, squat, in process)", () => {
   async function seededStatus(): Promise<string> {
-    seedAllowlist("k-runner");
     expect((await post(`ApiKey ${RUNNER_KEY}`, statusWrite({ body: statusBody([{ credit_class: "c", direction: "reach" }]) }))).status).toBe(200);
     return JSON.stringify(statusRow());
   }
@@ -183,7 +184,6 @@ describe("M11: no other door (by id, reshape, retire, squat, in process)", () =>
     expect((await post(`ApiKey ${OPERATOR_KEY}`, { type: "poolImpulse_write", id: "verdictCorpusStatus", shape: "timeShapedRhythm", body: {} })).status).toBe(403);
     expect(statusRow()).toBeUndefined();
     // a squat that predates the grant (planted in the file) is never overwritten into a status, even by the runner
-    seedAllowlist("k-runner");
     const squat = { id: "verdictCorpusStatus", shape: "timeShapedRhythm", body: { x: 1 }, source: "x", status: "open", injected_at: "2026-10-12T00:00:00.000Z", updated_at: "2026-10-12T00:00:00.000Z" };
     writeFileSync(FILE, JSON.stringify([...JSON.parse(readFileSync(FILE, "utf8")), squat]));
     expect((await post(`ApiKey ${RUNNER_KEY}`, statusWrite())).status).toBe(409);
@@ -236,17 +236,18 @@ describe("M11: no other door (by id, reshape, retire, squat, in process)", () =>
 
 describe("the runner decision (pure) and the grant (identity decides)", () => {
   const cred = (keyId: string | undefined, scopes = ["read", "write"]) => ({ authenticated: true, scopes, ...(keyId ? { keyId } : {}) });
-  it("admits only an authenticated, non-admin, allowlisted key id", () => {
-    expect(verdictCorpusWriterDecision(cred("k-runner"), ["k-runner"])).toEqual({ admit: true, key_id: "k-runner" });
-    expect(verdictCorpusWriterDecision(cred("k-op"), ["k-runner"]).admit).toBe(false);
-    expect(verdictCorpusWriterDecision(cred("k-runner", ["read", "write", "admin"]), ["k-runner"]).admit).toBe(false);
-    expect(verdictCorpusWriterDecision(cred(undefined), ["k-runner"]).admit).toBe(false);
-    expect(verdictCorpusWriterDecision(cred("k-runner"), []).admit).toBe(false);
-    expect(verdictCorpusWriterDecision({ authenticated: false, scopes: [] }, ["k-runner"]).admit).toBe(false);
-    expect(verdictCorpusWriterDecision(null, ["k-runner"]).admit).toBe(false);
+  it("admits only an authenticated, non-admin credential carrying verdict-corpus:write explicitly", () => {
+    const W = ["read", "write", "verdict-corpus:write"];
+    expect(verdictCorpusWriterDecision(cred("k-runner", W))).toEqual({ admit: true, key_id: "k-runner" });
+    expect(verdictCorpusWriterDecision(cred(undefined, W))).toEqual({ admit: true, key_id: null });
+    expect(verdictCorpusWriterDecision(cred("k-op")).admit).toBe(false);
+    expect(verdictCorpusWriterDecision(cred("k-legacy", [])).admit).toBe(false);
+    expect(verdictCorpusWriterDecision(cred("k-x", ["verdict-corpus:read", "verdict-corpus", "write"])).admit).toBe(false);
+    expect(verdictCorpusWriterDecision(cred("k-runner", [...W, "admin"])).admit).toBe(false);
+    expect(verdictCorpusWriterDecision({ authenticated: false, scopes: W }).admit).toBe(false);
+    expect(verdictCorpusWriterDecision(null).admit).toBe(false);
   });
   it("the grant names the caller by identity's key id, and an unknown key gets none", async () => {
-    seedAllowlist("k-runner");
     expect(await verdictCorpusWriterGrant(`ApiKey ${RUNNER_KEY}`)).toMatchObject({ principal: "key_id:k-runner", grant: { key_id: "k-runner" } });
     expect(await verdictCorpusWriterGrant("ApiKey nope")).toMatchObject({ grant: null, principal: "unauthenticated" });
     expect(await verdictCorpusWriterGrant(undefined)).toMatchObject({ grant: null });

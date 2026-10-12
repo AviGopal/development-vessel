@@ -142,8 +142,8 @@ export function resolvePoolImpulse(pointer: {
 //   posteriorReplayAuthorization: the operator's go for activity-api's β-leak replay writes, naming the node and
 //   the pinned list / eligibility shas. activity-api reads it from THIS node's route and trusts the
 //   attested_verified verdict the poolImpulse read adds (routes/impulses.ts); it never holds the attestation key.
-//   verdictCorpusWriter: the principals whose verdictCorpusStatus writes the runner grant admits (below). A row is a
-//   grant to clear goal-host's credit holds, so it is operator-only.
+//   verdictCorpusWriter: kept operator-only so no one else can plant one; the runner grant (below) no longer reads it
+//   (the identity scope VERDICT_CORPUS_WRITE_SCOPE is the authority).
 export const TRUST_ROOT_POOL_SHAPES: ReadonlySet<string> = new Set(['substrateNodes', 'autonomyScope', 'spendEnvelope', 'calibrationWindow', 'scriptRunnerAllowlist', 'operatorHold', 'posteriorReplayAuthorization', 'verdictCorpusWriter']);
 /** key_id: the validated credential's key id (identity's identifier, never derived from the secret).
  *  evaluator: set only by in-process code (the HTTP route builds auth from the Authorization header alone, and a
@@ -181,13 +181,14 @@ export async function operatorCredential(authHeader: string | undefined): Promis
 // row of this store. A row anyone could write would let anyone clear every hold, so the shape has exactly one writer:
 // goal-host's OWN principal, publishing a corpus run. Who is calling is derived by the server, never by the body:
 //   - the request's Authorization credential, validated fresh by identity-vessel (identityCredential, cache:false, the
-//     check operatorCredential makes), names a key id;
-//   - that key id must appear in an OPEN `verdictCorpusWriter` row (a trust-root shape: operator-written, signed under
-//     this node's key) whose principal is goal-host-vessel. This vessel never learns goal-host's key id from a
-//     credential, env or file: the operator writes the row (the id is identity's, printed by the identity seeder);
+//     check operatorCredential makes), must carry the dedicated scope VERDICT_CORPUS_WRITE_SCOPE, which identity
+//     issues only to goal-host's own key. Identity answers a key issued without scopes with the default read/write,
+//     and an answer without scopes reads as none here, so no default ever satisfies the check;
 //   - this node's own key (node-self) is never the runner (every vessel on the node holds it), and a credential with
-//     the admin scope is never the runner either: operators are refused, so clearing a hold needs a green run, which
-//     needs the judge to be right. An allowlist row naming an admin key does not change that.
+//     the admin scope is never the runner either, even if it also carries the scope: operators are refused, so
+//     clearing a hold needs a green run, which needs the judge to be right.
+// The scope is the whole authority: no allowlist row is read (a verdictCorpusWriter row, if one exists, stays an
+// operator-only trust-root record and grants nothing).
 // The grant is a frozen object this module mints and remembers in a WeakSet, so it cannot arrive in JSON and an
 // in-process caller that holds no grant (the generic poolImpulse_write case) is refused like any other.
 // `source: 'verdictCorpusRun'` is required on the write. It is a LABEL naming the runner path, not authority: this
@@ -198,6 +199,8 @@ export const VERDICT_CORPUS_STATUS_SHAPE = 'verdictCorpusStatus';
 /** The one status row per store (goal-host reads it by this id). */
 export const VERDICT_CORPUS_STATUS_ID = 'verdictCorpusStatus';
 export const VERDICT_CORPUS_WRITER_SHAPE = 'verdictCorpusWriter';
+/** The identity scope that makes a key the corpus runner (domain:action, as "verdict:human" and "operator:direct"). */
+export const VERDICT_CORPUS_WRITE_SCOPE = 'verdict-corpus:write';
 export const VERDICT_CORPUS_WRITER_PRINCIPAL = 'goal-host-vessel';
 export const VERDICT_CORPUS_RUN_SOURCE = 'verdictCorpusRun';
 export const VERDICT_CORPUS_REFUSAL_SHAPE = 'verdictCorpusWriteRefusal';
@@ -205,9 +208,9 @@ const VERDICT_CORPUS_REFUSAL_ID_PREFIX = 'verdictCorpusWriteRefusal:';
 /** Shapes only the runner grant (status) or this module itself (refusals) writes. */
 export const RUNNER_ONLY_POOL_SHAPES: ReadonlySet<string> = new Set([VERDICT_CORPUS_STATUS_SHAPE, VERDICT_CORPUS_REFUSAL_SHAPE]);
 
-export interface VerdictCorpusWriterGrant { readonly key_id: string; readonly principal: string }
+export interface VerdictCorpusWriterGrant { readonly key_id: string | null; readonly principal: string }
 const runnerGrants = new WeakSet<object>();
-function mintRunnerGrant(key_id: string, principal: string): VerdictCorpusWriterGrant {
+function mintRunnerGrant(key_id: string | null, principal: string): VerdictCorpusWriterGrant {
   const g = Object.freeze({ key_id, principal });
   runnerGrants.add(g);
   return g;
@@ -240,28 +243,15 @@ export function verifyPoolAttestation(row: StandingImpulse, by: 'operator' | 'ru
   return { ok: true };
 }
 
-/** The key ids the operator allowlisted as the runner: open verdictCorpusWriter rows, operator-attested and verified,
- *  naming goal-host-vessel. A row that does not verify grants nothing. */
-export function verdictCorpusWriterKeyIds(): string[] {
-  const ids: string[] = [];
-  for (const row of loadImpulses()) {
-    if (row.shape !== VERDICT_CORPUS_WRITER_SHAPE || row.status !== 'open') continue;
-    if (!verifyPoolAttestation(row, 'operator').ok) continue;
-    const b = (row.body !== null && typeof row.body === 'object' ? row.body : {}) as Record<string, unknown>;
-    if (b['principal'] === VERDICT_CORPUS_WRITER_PRINCIPAL && typeof b['key_id'] === 'string' && b['key_id']) ids.push(b['key_id']);
-  }
-  return ids;
-}
-
-/** The runner decision over a validated credential and the allowlisted key ids (pure). */
-export function verdictCorpusWriterDecision(cred: CallerCredential | null | undefined, allowedKeyIds: readonly string[]): { admit: true; key_id: string } | { admit: false; why: string } {
+/** The runner decision over a validated credential (pure): authenticated, not node-self, not admin, and carrying
+ *  VERDICT_CORPUS_WRITE_SCOPE explicitly. */
+export function verdictCorpusWriterDecision(cred: CallerCredential | null | undefined): { admit: true; key_id: string | null } | { admit: false; why: string } {
   if (!cred || cred.authenticated !== true) return { admit: false, why: cred?.why ? `not authenticated (${cred.why})` : 'not authenticated' };
   if (isNodeSelfCredential(cred)) return { admit: false, why: "this node's own key is never the corpus runner" };
-  if (cred.scopes.includes('admin')) return { admit: false, why: 'an operator (admin) credential is never the corpus runner' };
-  if (!cred.keyId) return { admit: false, why: "identity's answer names no key id" };
-  if (allowedKeyIds.length === 0) return { admit: false, why: `no operator-attested ${VERDICT_CORPUS_WRITER_SHAPE} row is open` };
-  if (!allowedKeyIds.includes(cred.keyId)) return { admit: false, why: `key ${cred.keyId} is not the allowlisted ${VERDICT_CORPUS_WRITER_PRINCIPAL} principal` };
-  return { admit: true, key_id: cred.keyId };
+  const scopes = Array.isArray(cred.scopes) ? cred.scopes : [];
+  if (scopes.includes('admin')) return { admit: false, why: 'an operator (admin) credential is never the corpus runner' };
+  if (!scopes.includes(VERDICT_CORPUS_WRITE_SCOPE)) return { admit: false, why: `credential lacks the ${VERDICT_CORPUS_WRITE_SCOPE} scope` };
+  return { admit: true, key_id: cred.keyId ?? null };
 }
 
 /** The runner grant for the request's Authorization header, or null and why; `principal` names the caller for the
@@ -269,7 +259,7 @@ export function verdictCorpusWriterDecision(cred: CallerCredential | null | unde
 export async function verdictCorpusWriterGrant(authHeader: string | undefined): Promise<{ grant: VerdictCorpusWriterGrant | null; principal: string; why?: string }> {
   const cred = await identityCredential(authHeader, { cache: false });
   const principal = poolCallerLabel(cred);
-  const d = verdictCorpusWriterDecision(cred, verdictCorpusWriterKeyIds());
+  const d = verdictCorpusWriterDecision(cred);
   return d.admit ? { grant: mintRunnerGrant(d.key_id, VERDICT_CORPUS_WRITER_PRINCIPAL), principal } : { grant: null, principal, why: d.why };
 }
 

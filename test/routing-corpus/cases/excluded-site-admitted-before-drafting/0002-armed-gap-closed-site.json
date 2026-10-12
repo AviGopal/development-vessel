@@ -1,0 +1,43 @@
+{
+  "class": "excluded-site-admitted-before-drafting",
+  "control": false,
+  "credit_class": null,
+  "edit_site": "repos/development-vessel/src/judge-rules/routing-admission.ts",
+  "entry": "composeAdmission",
+  "expect": {
+    "admit": false,
+    "refusal": {
+      "excluded_by": "repos/example-vessel/src/index.ts",
+      "stage": "scope_excluded",
+      "verdict": "REFUSED"
+    }
+  },
+  "id": "0002-armed-gap-closed-site",
+  "input": {
+    "edit_site": "repos/example-vessel/src/index.ts",
+    "entry": "composeAdmission",
+    "gap_id": "gap-example-armed",
+    "land": true,
+    "lane": "undirected",
+    "operator_hold": false,
+    "schema": 1,
+    "scope": {
+      "repos/example-vessel/src/index.ts": "repos/example-vessel/src/index.ts"
+    },
+    "scope_reason": null,
+    "stored": "present",
+    "supply_marker": false,
+    "supply_verdict": null,
+    "why": null
+  },
+  "licenses": null,
+  "llm": null,
+  "ports": {},
+  "provenance": {
+    "note": "class features only: an edit-intent compose whose edit site the autonomy scope excludes is admitted and drafts; the scope is checked only at landing",
+    "recorded": "2026-10-12",
+    "source": "class-paraphrase"
+  },
+  "schema": 1,
+  "status_at_append": "known_red"
+}

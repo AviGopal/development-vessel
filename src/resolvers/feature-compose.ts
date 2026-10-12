@@ -36,7 +36,7 @@ import { writeAuthoringMarker, clearAuthoringMarker } from "./patch-with-tools.j
 import { markOnComposeFailure, VERIFY_FAILURE_CLASSES } from "./staged-mitosis-gate.js";
 import { vacuousEditReason, nonTerminatingEditReason, deadStoreEditReason, truncatingRewriteReason } from "../vacuous-edit.js";
 import { acquireComposeSlot } from "../compose-slots.js";
-import { recordComposeAdmission, type AdmissionRefusalStage } from "../judge/routing-capture.js";
+import { recordComposeAdmission, SCOPE_NOT_CONSULTED, type AdmissionRefusalStage } from "../judge/routing-capture.js";
 import { activeMustBeCalled, checkMustBeCalled, constraintRefusalEvidence, introducesDefinition, mustBeCalledFromGate, mustBeCalledReason, mustBeCalledRefusalRecord, constraintParkLine, type ConstraintLift, type MustBeCalledConstraint, attemptEvidenceBlock, baseSpanOfOp, checkOpNoEffect, enforcedLessons, escalateRepeatedRefusal, refusalJournalLine, repeatedRefusalRegion, type RefusalRecord, explicitLineHint, hydrateComposeGap, lineCenteredSlice, noEffectOverlapRefusal, noEffectSpans, parentCheckBlock, parseOwnCheckFailures, sameOwnCheckFailures, spanRecord, testTitleSegmentOffset, typecheckSection, type AttemptRecord, type EditedSpan, type FailStage, type GapRowReader, type OwnCheckFailure } from "./retry-evidence.js";
 
 /**
@@ -5351,30 +5351,12 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
     if (supplyMarker) {
       // FAIL CLOSED, NAMED: whether the supply dispatched this gap cannot be known without its ledger.
       rows = await csa.readWithin(() => readComposeGapRows(_gapIdForSlot), csa.checkSupplyLedgerWait().read_timeout_ms);
-      if (rows === null) {
-        admissionCapture({ decision: "refused", draftingStarted: false, stage: "check_supply_ledger_unreadable", stored: "unreadable", row: null });
-        console.log(`[feature-compose] ${lane} compose NOT started: gap ${_gapIdForSlot} check_supply_ledger_unreadable (gap store unreadable or timed out; failing closed)`);
-        return { shape: "featureComposeReport", body: { ok: false, verdict: "REFUSED", stage: "check_supply_ledger_unreadable", error: `gap ${_gapIdForSlot}: its check_supply ledger could not be read, so the supply's dispatch cannot be verified (${lane} compose not started)` } };
-      }
-      if (!rows.some((r) => String(r.id) === _gapIdForSlot)) {
-        admissionCapture({ decision: "refused", draftingStarted: false, stage: "check_supply_gap_missing", stored: "absent", row: null });
-        console.log(`[feature-compose] ${lane} compose NOT started: gap ${_gapIdForSlot} check_supply_gap_missing (a check_supply compose names a gap the store does not hold)`);
-        return { shape: "featureComposeReport", body: { ok: false, verdict: "REFUSED", stage: "check_supply_gap_missing", error: `gap ${_gapIdForSlot}: a check_supply compose names a gap the store does not hold (${lane} compose not started)` } };
-      }
     } else {
       try { rows = await readComposeGapRows(_gapIdForSlot); } catch { rows = null; }
     }
-    if (rows === null) {
-      admissionCapture({ decision: "refused", draftingStarted: false, stage: "hold_state_unreadable", stored: "unreadable", row: null });
-      console.log(`[feature-compose] ${lane} compose NOT started: gap ${_gapIdForSlot} hold_state_unreadable (gap store unreadable; failing closed)`);
-      return { shape: "featureComposeReport", body: { ok: false, verdict: "BUSY", stage: "hold_state_unreadable", error: `gap ${_gapIdForSlot}: the gap store could not be read, so its operator_hold state is unknown (${lane} compose not started)` } };
-    }
-    const stored = rows.find((r) => String(r.id) === _gapIdForSlot);
-    if ((stored?.classification_metadata as { operator_hold?: unknown } | undefined)?.operator_hold === true) {
-      admissionCapture({ decision: "refused", draftingStarted: false, stage: "operator_hold", stored: "present", row: stored ?? null });
-      console.log(`[feature-compose] ${lane} compose NOT started: gap ${_gapIdForSlot} is under operator_hold`);
-      return { shape: "featureComposeReport", body: { ok: false, verdict: "BUSY", stage: "operator_hold", error: `gap ${_gapIdForSlot} is under operator_hold (${lane} compose not started)` } };
-    }
+    const stored = rows?.find((r) => String(r.id) === _gapIdForSlot);
+    const land = admissionLand;
+    const held = (stored?.classification_metadata as { operator_hold?: unknown } | undefined)?.operator_hold === true;
     // ADMISSION ON EVERY ROUTE (2026-10-07). A compose that would land, naming a gap the
     // store holds, runs THE eligibility predicate the picker, the drain nudge and the gap-write nudge share
     // (composeEligibilitySkipReason: open, armed class1/class2, an edit site, not held incl. pending_verification)
@@ -5385,16 +5367,19 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
     // trend-expectation-check dispatches do, for attribution), so it is not an authority to compose an unarmed
     // gap. A non-landing compose and an id the store does not hold (route-edit-*) are unaffected. A refusal is a
     // non-attempt.
-    if (stored && (pointer as { land?: boolean }).land !== false) {
+    // The evidence is gathered here; the decision is compose-admission-core.ts's (its closed floor is the admission this
+    // block made inline, then the open rules, clamped), and an operator hold is decided before eligibility is asked.
+    let why: import("../judge/gap-eligibility.js").ComposeEligibilitySkipReason | null = null;
+    let supplyVerdict: { admit: boolean; why: string | null } | null = null;
+    // What the admission record carries for an admission-block decision (src/judge/routing-capture.ts).
+    let admissionRow: Record<string, unknown> | null = stored ?? null;
+    let admissionWhy: string | null = null;
+    let supplyException: { admitted: boolean; why: string } | null = null;
+    let admissionStored: "unreadable" | "absent" | "present" = rows === null ? "unreadable" : stored ? "present" : "absent";
+    if (stored && land && !held) {
       const { composeEligibilitySkipReason } = await import("../judge/gap-eligibility.js");
-      let why = composeEligibilitySkipReason(stored);
-      let admissionRow: Record<string, unknown> = stored;
-      let admissionWhy: string | null = why;
-      let supplyException: { admitted: boolean; why: string } | null = null;
-      let supplyVerdictSeen: { admit: boolean; why: string | null } | null = null;
-      let admissionStored: "unreadable" | "absent" | "present" = "present";
-      const captureAdmission = (decision: "admitted" | "refused", draftingStarted: boolean, stage: AdmissionRefusalStage | null = decision === "refused" ? "ineligible" : null): void =>
-        admissionCapture({ decision, draftingStarted, stage, stored: admissionStored, row: admissionRow, why: admissionWhy, supply: supplyException, supplyVerdict: supplyVerdictSeen });
+      why = composeEligibilitySkipReason(stored);
+      admissionWhy = why;
       // TEST-WRITING WORK (slice G): the one exception to "unarmed", for a compose the gap's own check_supply ledger
       // says the supply dispatched with THIS dispatch id. The marker alone admits nothing. The supply writes the
       // ledger after goal-host's 202, so a ledger that does not match yet is re-read, bounded, before refusing.
@@ -5403,14 +5388,14 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
         const wait = csa.checkSupplyLedgerWait();
         let row: Record<string, unknown> = stored;
         let verdict = csa.checkSupplyAdmission(row, supplyMarker, _gapIdForSlot, authoring, why);
-        supplyVerdictSeen = verdict.admit ? { admit: true, why: null } : { admit: false, why: verdict.why };
+        supplyVerdict = verdict.admit ? { admit: true, why: null } : { admit: false, why: verdict.why };
         for (let i = 1; !verdict.admit && verdict.why === "ledger_mismatch" && i < wait.attempts; i++) {
           await new Promise((r) => setTimeout(r, wait.delay_ms));
           const again = await csa.readWithin(() => readComposeGapRows(_gapIdForSlot), wait.read_timeout_ms);
           if (again === null) {
             supplyException = { admitted: false, why: "check_supply_ledger_unreadable" };
             admissionStored = "unreadable";
-            captureAdmission("refused", false, "check_supply_ledger_unreadable");
+            admissionCapture({ decision: "refused", draftingStarted: false, stage: "check_supply_ledger_unreadable", stored: admissionStored, row: admissionRow, why: admissionWhy, supply: supplyException, supplyVerdict });
             console.log(`[feature-compose] ${lane} compose NOT started: gap ${_gapIdForSlot} check_supply_ledger_unreadable (re-read failed; failing closed)`);
             return { shape: "featureComposeReport", body: { ok: false, verdict: "REFUSED", stage: "check_supply_ledger_unreadable", error: `gap ${_gapIdForSlot}: its check_supply ledger could not be re-read, so the supply's dispatch cannot be verified (${lane} compose not started)` } };
           }
@@ -5418,7 +5403,7 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
           if (!next) {
             supplyException = { admitted: false, why: "check_supply_gap_missing" };
             admissionStored = "absent";
-            captureAdmission("refused", false, "check_supply_gap_missing");
+            admissionCapture({ decision: "refused", draftingStarted: false, stage: "check_supply_gap_missing", stored: admissionStored, row: admissionRow, why: admissionWhy, supply: supplyException, supplyVerdict });
             console.log(`[feature-compose] ${lane} compose NOT started: gap ${_gapIdForSlot} check_supply_gap_missing (gone on re-read)`);
             return { shape: "featureComposeReport", body: { ok: false, verdict: "REFUSED", stage: "check_supply_gap_missing", error: `gap ${_gapIdForSlot}: a check_supply compose names a gap the store no longer holds (${lane} compose not started)` } };
           }
@@ -5427,26 +5412,36 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
           admissionRow = row;
           admissionWhy = why;
           verdict = csa.checkSupplyAdmission(row, supplyMarker, _gapIdForSlot, authoring, why);
-          supplyVerdictSeen = verdict.admit ? { admit: true, why: null } : { admit: false, why: verdict.why };
+          supplyVerdict = verdict.admit ? { admit: true, why: null } : { admit: false, why: verdict.why };
         }
         supplyException = verdict.admit ? { admitted: true, why: "ledger_match" } : { admitted: false, why: String(verdict.why) };
-        if (verdict.admit) {
-          (pointer as { compose_mode?: string }).compose_mode = csa.CHECK_SUPPLY_COMPOSE_MODE;
-          console.log(`[feature-compose] ${lane} compose ADMITTED as test-writing work: gap ${_gapIdForSlot} is unarmed, its check_supply ledger names dispatch ${supplyMarker.dispatch_id} (compose_mode=${csa.CHECK_SUPPLY_COMPOSE_MODE})`);
-          why = null;
-        } else {
-          captureAdmission("refused", false);
-          console.log(`[feature-compose] ${lane} compose NOT started: gap ${_gapIdForSlot} is ineligible (${why ?? "check_supply_state_changed"}; check_supply ${verdict.why})`);
-          return { shape: "featureComposeReport", body: { ok: false, verdict: "REFUSED", stage: "ineligible", check_supply_refusal: verdict.why, error: `gap ${_gapIdForSlot} is not compose work: ${why ?? "check_supply_state_changed"} (${lane} compose not started)` } };
-        }
       }
-      if (why) {
-        captureAdmission("refused", false);
-        console.log(`[feature-compose] ${lane} compose NOT started: gap ${_gapIdForSlot} is ineligible (${why})`);
-        return { shape: "featureComposeReport", body: { ok: false, verdict: "REFUSED", stage: "ineligible", error: `gap ${_gapIdForSlot} is not compose work: ${why} (${lane} compose not started)` } };
-      }
+    }
+    const metaSite = (m: unknown): string | null => { const e = (m as { edit_site?: unknown } | undefined)?.edit_site; return typeof e === "string" && e.trim() ? e.trim() : null; };
+    const admissionInput: import("./compose-admission-core.js").ComposeAdmissionInput = {
+      schema: 1, entry: "composeAdmission", gap_id: _gapIdForSlot, lane, land, supply_marker: !!supplyMarker,
+      stored: rows === null ? "unreadable" : stored ? "present" : "absent", operator_hold: held, why, supply_verdict: supplyVerdict,
+      edit_site: metaSite(stored?.classification_metadata) ?? metaSite((pointer.gap as { classification_metadata?: unknown } | undefined)?.classification_metadata),
+      // The scope port is not read at admission yet (the scope is checked at landing); the record says so.
+      scope: null, scope_reason: SCOPE_NOT_CONSULTED,
+    };
+    const { composeAdmission, renderAdmissionRefusal } = await import("./compose-admission-core.js");
+    const admission = composeAdmission(admissionInput);
+    if (!admission.admit && admission.refusal) {
+      const r = renderAdmissionRefusal(admissionInput, admission.refusal);
+      // The record of a refusal the core decided: the evidence this block gathered, as the inline refusals recorded it.
+      const asked = admission.refusal.stage === "ineligible" || admission.refusal.stage === "scope_excluded";
+      admissionCapture({ decision: "refused", draftingStarted: false, stage: admission.refusal.stage, stored: admissionStored, row: admissionRow, ...(asked ? { why: admissionWhy, supply: supplyException, supplyVerdict } : {}) });
+      console.log(r.log);
+      return { shape: "featureComposeReport", body: r.body };
+    }
+    if (supplyVerdict?.admit && supplyMarker) {
+      (pointer as { compose_mode?: string }).compose_mode = csa.CHECK_SUPPLY_COMPOSE_MODE;
+      console.log(`[feature-compose] ${lane} compose ADMITTED as test-writing work: gap ${_gapIdForSlot} is unarmed, its check_supply ledger names dispatch ${supplyMarker.dispatch_id} (compose_mode=${csa.CHECK_SUPPLY_COMPOSE_MODE})`);
+    }
+    if (stored && land) {
       landingLeaseGap = _gapIdForSlot;
-      admittedCapture = (draftingStarted) => captureAdmission("admitted", draftingStarted);
+      admittedCapture = (draftingStarted) => admissionCapture({ decision: "admitted", draftingStarted, stage: null, stored: admissionStored, row: admissionRow, why: admissionWhy, supply: supplyException, supplyVerdict });
     }
   }
   // SPEND ENVELOPE AT THE CHOKEPOINT (contained-self-development). gap-to-feature checks the envelope

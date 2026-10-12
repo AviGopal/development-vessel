@@ -4,11 +4,11 @@
 // writing one is a decision the corpus never sees. A pure-module test cannot notice a call site being dropped; this
 // pin reads resolveFeatureCompose's source and fails when:
 //   - feature-compose.ts stops importing recordComposeAdmission from the closed recorder;
-//   - any return between the stored-row read and the admission block (the first check-supply ledger read, unreadable
-//     or gap missing; hold_state_unreadable; operator_hold) is not preceded by a refused admissionCapture naming its
-//     stage, or the helper stops calling recordComposeAdmission with the lane and no scope port;
-//   - any return inside the admission block (refusals and check-supply ledger failures) is not preceded, since the
-//     previous return, by captureAdmission("refused", false), or the helper stops calling recordComposeAdmission;
+//   - the helper stops calling recordComposeAdmission with the lane and no scope port;
+//   - any return between the stored-row read and the admitted path (the check-supply ledger re-read failures, and the
+//     refusal the admission core decided: store unreadable, gap missing, operator hold, ineligible) is not preceded,
+//     since the previous return, by a refused admissionCapture naming its stage; the core's refusal is recorded with
+//     the core's stage;
 //   - the admitted path stops arming admittedCapture, or any exit between admission and drafting (spend envelope,
 //     landing lease, duplicate slot, capacity) stops calling admittedCapture?.(false);
 //   - the drafting start (resolveFeatureComposeUncapped) is not preceded by admittedCapture?.(true);
@@ -40,8 +40,7 @@ function returnPreludes(segment: string): string[] {
 }
 
 const PRE_START = "const supplyMarker = csa.checkSupplyMarkerOf(pointer);";
-const ADMISSION_START = "if (stored && (pointer as { land?: boolean }).land !== false) {";
-const ADMISSION_END = "landingLeaseGap = _gapIdForSlot;";
+const ADMISSION_END = "admittedCapture = (draftingStarted) => admissionCapture({ decision: \"admitted\", draftingStarted, stage: null,";
 const DRAFT_START = "const outcome = await resolveFeatureComposeUncapped(pointer);";
 
 describe("feature_compose admission writes a composeAdmission record at every decision", () => {
@@ -49,26 +48,20 @@ describe("feature_compose admission writes a composeAdmission record at every de
     expect(SRC).toMatch(/^import \{[^}]*\brecordComposeAdmission\b[^}]*\} from "\.\.\/judge\/routing-capture\.js";$/m);
   });
 
-  it("[MUST-FAIL] every refusal before the admission block is recorded with its stage", () => {
-    const pre = between(SRC, PRE_START, ADMISSION_START);
+  it("[MUST-FAIL] every refusal from the stored-row read to the admitted path is recorded with its stage", () => {
+    const pre = between(SRC, PRE_START, ADMISSION_END);
     expect(pre).toMatch(/const admissionCapture = \([\s\S]*?\)[^=]*=>\s*recordComposeAdmission\(\{ gapId: _gapIdForSlot, lane, [^}]*\bscope: null\b[^}]*\}\);/);
     const preludes = returnPreludes(pre);
-    const stages = ["check_supply_ledger_unreadable", "check_supply_gap_missing", "hold_state_unreadable", "operator_hold"];
-    expect(preludes.length).toBe(stages.length);
-    preludes.forEach((p, i) => expect(p).toContain(`admissionCapture({ decision: "refused", draftingStarted: false, stage: "${stages[i]}"`));
-  });
-
-  it("[MUST-FAIL] every return inside the admission block is preceded by a refused capture", () => {
-    const block = between(SRC, ADMISSION_START, ADMISSION_END);
-    expect(block).toMatch(/const captureAdmission = \([^)]*\)[^=]*=>\s*admissionCapture\(\{[^}]*\}\);/);
-    const preludes = returnPreludes(block);
-    expect(preludes.length).toBe(4); // two ledger re-read failures, the check-supply refusal, the eligibility refusal
-    for (const p of preludes) expect(p).toMatch(/captureAdmission\("refused", false(, "[a-z_]+")?\);/);
+    // two check-supply ledger re-read failures, then the refusal the admission core decided
+    expect(preludes.length).toBe(3);
+    expect(preludes[0]).toContain('admissionCapture({ decision: "refused", draftingStarted: false, stage: "check_supply_ledger_unreadable"');
+    expect(preludes[1]).toContain('admissionCapture({ decision: "refused", draftingStarted: false, stage: "check_supply_gap_missing"');
+    expect(preludes[2]).toContain("const admission = composeAdmission(admissionInput);");
+    expect(preludes[2]).toContain('admissionCapture({ decision: "refused", draftingStarted: false, stage: admission.refusal.stage,');
   });
 
   it("[MUST-FAIL] the admitted path arms the capture, and every exit before drafting records drafting_started false", () => {
     const after = between(SRC, ADMISSION_END, DRAFT_START);
-    expect(after.slice(0, 200)).toContain('admittedCapture = (draftingStarted) => captureAdmission("admitted", draftingStarted);');
     const preludes = returnPreludes(after);
     expect(preludes.length).toBe(4); // spend envelope, landing lease, duplicate slot, capacity
     for (const p of preludes) expect(p).toContain("admittedCapture?.(false);");

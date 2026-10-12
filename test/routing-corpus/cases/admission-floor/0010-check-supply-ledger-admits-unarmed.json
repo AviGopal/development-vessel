@@ -1,0 +1,42 @@
+{
+  "class": "admission-floor",
+  "control": true,
+  "credit_class": null,
+  "edit_site": "repos/development-vessel/src/judge-rules/routing-admission.ts",
+  "entry": "composeAdmission",
+  "expect": {
+    "admit": true,
+    "refusal": null
+  },
+  "id": "0010-check-supply-ledger-admits-unarmed",
+  "input": {
+    "edit_site": "repos/example-vessel/src/index.ts",
+    "entry": "composeAdmission",
+    "gap_id": "gap-example-unarmed",
+    "land": true,
+    "lane": "undirected",
+    "operator_hold": false,
+    "schema": 1,
+    "scope": {
+      "repos/example-vessel/src/index.ts": null
+    },
+    "scope_reason": null,
+    "stored": "present",
+    "supply_marker": true,
+    "supply_verdict": {
+      "admit": true,
+      "why": null
+    },
+    "why": "unarmed"
+  },
+  "licenses": null,
+  "llm": null,
+  "ports": {},
+  "provenance": {
+    "note": "control: class features only",
+    "recorded": "2026-10-12",
+    "source": "class-paraphrase"
+  },
+  "schema": 1,
+  "status_at_append": "green"
+}

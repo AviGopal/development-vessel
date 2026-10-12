@@ -1,0 +1,41 @@
+{
+  "class": "admission-floor",
+  "control": true,
+  "credit_class": null,
+  "edit_site": "repos/development-vessel/src/judge-rules/routing-admission.ts",
+  "entry": "composeAdmission",
+  "expect": {
+    "admit": false,
+    "refusal": {
+      "excluded_by": null,
+      "stage": "ineligible",
+      "verdict": "REFUSED"
+    }
+  },
+  "id": "0009-unarmed-stored-gap-refused",
+  "input": {
+    "edit_site": "repos/example-vessel/src/index.ts",
+    "entry": "composeAdmission",
+    "gap_id": "gap-example-unarmed",
+    "land": true,
+    "lane": "undirected",
+    "operator_hold": false,
+    "schema": 1,
+    "scope": null,
+    "scope_reason": "not_consulted_at_admission: admission holds no scope record and a recorder adds no read",
+    "stored": "present",
+    "supply_marker": false,
+    "supply_verdict": null,
+    "why": "unarmed"
+  },
+  "licenses": null,
+  "llm": null,
+  "ports": {},
+  "provenance": {
+    "note": "control: class features only",
+    "recorded": "2026-10-12",
+    "source": "class-paraphrase"
+  },
+  "schema": 1,
+  "status_at_append": "green"
+}

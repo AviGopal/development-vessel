@@ -125,10 +125,14 @@ export function testWritingPathAllowed(path: string, gapId: unknown): boolean {
   return vesselRelativePath(path) === checkSupplyCheckPath(gapId);
 }
 
+/** An out-of-suite check (vessel-relative): bun's default discovery never collects a .check.ts under test/checks/. */
+const OUT_OF_SUITE_CHECK_RE = /^test\/checks\/[^/]+\.check\.ts$/;
 /**
  * AN ARMING-ONLY LANDING IS NOT A FIX. A landing whose diff touches nothing but the gap's OWN check (the supply's
- * test/checks/<checkSupplyCheckFile(gap id)>, or the test_file its test_suite evidence_resolve names) arms the gap: it
- * adds the red-by-design check the fix is then composed against. Stamped as a fix landing, it held the gap pending
+ * test/checks/<checkSupplyCheckFile(gap id)>, or the out-of-suite test/checks/<name>.check.ts its test_suite
+ * evidence_resolve names) arms the gap: it adds the red-by-design check the fix is then composed against. An in-suite
+ * test_file is not an arming check: a landing that edits only that is a self-authored check edit, held for operator
+ * review by the sweep as before. Stamped as a fix landing, it held the gap pending
  * (the picker and admission skip a landing awaiting its verdict, so the fix was never composed) and the next sweep read
  * the check 'present', which it is by design, and falsified the landing (regressed_by, an UNFAVORABLE settlement, a
  * class-posterior miss). Every changed path (vessel-relative or under a vessel root) must be one of those paths; an
@@ -146,7 +150,7 @@ export function armingOnlyLanding(changedPaths: readonly string[] | null | undef
     const checkVessel = typeof er.input.vessel === "string" ? er.input.vessel.replace(/^repos\//, "").replace(/\/+$/, "") : "";
     const sameVessel = !checkVessel || !landingVessel || checkVessel === landingVessel;
     const rel = vesselRelativePath(er.input.test_file.replace(/^\/+/, ""));
-    if (sameVessel && rel) own.add(rel);
+    if (sameVessel && rel && OUT_OF_SUITE_CHECK_RE.test(rel)) own.add(rel);
   }
   if (own.size === 0) return false;
   return changedPaths.every((p) => {

@@ -112,6 +112,22 @@ describe("arming-only landing: the stamp site and the picker", () => {
     expect(metaOf(after)["pending_outcome_verification"]).toBe(SHA);
   });
 
+  it("MUST-FAIL (a): the out-of-suite check its evidence_resolve names (another test/checks/*.check.ts) is its own check too", async () => {
+    const row = armedRow("fixture-named-check-gap");
+    const meta = row["classification_metadata"] as Row;
+    meta["evidence_resolve"] = { shape: "test_suite", input: { vessel: `repos/${VESSEL}`, test_file: `repos/${VESSEL}/test/checks/fixture-shared.check.ts` }, zero_field: "requested_not_passing" };
+    await stampWith(row, ["test/checks/fixture-shared.check.ts"]);
+    expect(writes.length).toBe(0);
+  });
+
+  it("CONTROL (a): an in-suite test_file is not an arming check: a landing editing only it is stamped as before", async () => {
+    const row = armedRow("fixture-in-suite-gap");
+    const meta = row["classification_metadata"] as Row;
+    meta["evidence_resolve"] = { shape: "test_suite", input: { vessel: `repos/${VESSEL}`, test_file: "test/resolvers/fixture-target.test.ts" }, zero_field: "requested_not_passing" };
+    const after = await stampWith(row, ["test/resolvers/fixture-target.test.ts"]);
+    expect(metaOf(after)["pending_outcome_verification"]).toBe(SHA);
+  });
+
   it("CONTROL (a): a caller that names no changed files is stamped as before", async () => {
     const row = armedRow("fixture-unnamed-gap");
     const after = await stampWith(row, undefined);

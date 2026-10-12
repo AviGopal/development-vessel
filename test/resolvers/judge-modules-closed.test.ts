@@ -21,6 +21,10 @@ const ROOT = join(import.meta.dir, "..", "..");
 const RESIDUE = "src/resolvers/gap-to-feature.ts";
 /** The core, by name. A seventh module must be added here on purpose, and so reach the act's lists. */
 const CORE = ["src/judge/gap-admission.ts", "src/judge/gap-attempt-credit.ts", "src/judge/gap-check-judge.ts", "src/judge/gap-eligibility.ts", "src/judge/gap-landing-verdict.ts", "src/judge/gap-policy.ts"];
+/** Closed RECORDERS under src/judge/ (closed by the directory entry): they write what a decision saw and decide nothing,
+ *  so they are not judges. They are held to the core's import discipline (ii) and to the exact-set pin, not to (iii)
+ *  (an evaluator file and a judge_trust row is the bar for a module whose output a gate reads). */
+const RECORDERS = ["src/judge/routing-capture.ts"];
 /** qa 10.2: CLOSE rulings whose excluded_paths entries rode the opening act. The act landed them in the mirror below
  *  (and in EVALUATOR_FILES / judge_trust), so this list is EMPTY and asserted empty: nothing is closed by promise. */
 const PENDING_CLOSED: string[] = [];
@@ -71,7 +75,7 @@ function evaluatorFiles(): string[] {
   const m = read("src/resolvers/scope-earn-in.ts").match(/export const EVALUATOR_FILES[^=]*=\s*\[([\s\S]*?)\];/);
   return m ? [...m[1]!.matchAll(/"repos\/development-vessel\/([^"]+)"/g)].map((x) => x[1]!) : [];
 }
-const CLOSED = (): Set<string> => new Set([...EXCLUDED_SRC_MIRROR, ...evaluatorFiles(), ...PENDING_CLOSED, ...CORE]);
+const CLOSED = (): Set<string> => new Set([...EXCLUDED_SRC_MIRROR, ...evaluatorFiles(), ...PENDING_CLOSED, ...CORE, ...RECORDERS]);
 
 /** Runtime import specifiers (static, export-from, dynamic), type-only erased. */
 export function importsOf(name: string, text: string): string[] {
@@ -204,8 +208,8 @@ describe("positive controls: each checker flags what it exists to flag", () => {
 });
 
 describe("the gap-judge core is closed and the residue holds no judge", () => {
-  it("MUST-FAIL: src/judge holds exactly the declared core", () => {
-    expect(readdirSync(join(ROOT, "src", "judge")).filter((f) => f.endsWith(".ts")).map((f) => `src/judge/${f}`).sort()).toEqual([...CORE].sort());
+  it("MUST-FAIL: src/judge holds exactly the declared core and its recorders", () => {
+    expect(readdirSync(join(ROOT, "src", "judge")).filter((f) => f.endsWith(".ts")).map((f) => `src/judge/${f}`).sort()).toEqual([...CORE, ...RECORDERS].sort());
   });
 
   it("MUST-FAIL (i): the residue declares, exports and re-exports no core name, and writes no verdict field", async () => {
@@ -223,7 +227,7 @@ describe("the gap-judge core is closed and the residue holds no judge", () => {
   it("MUST-FAIL (ii): a core module imports only node builtins, other core modules and closed files, never the residue", () => {
     const closed = CLOSED();
     const offenders: string[] = [];
-    for (const m of CORE) for (const o of openImports(m, read(m), closed)) offenders.push(`${m}: ${o}`);
+    for (const m of [...CORE, ...RECORDERS]) for (const o of openImports(m, read(m), closed)) offenders.push(`${m}: ${o}`);
     expect(offenders).toEqual([]);
   });
 
@@ -237,7 +241,7 @@ describe("the gap-judge core is closed and the residue holds no judge", () => {
       const syms = residueSymbols(f, text);
       if (n > 0 || syms.length > 0) edges[f] = syms.length > 0 ? syms : ["*"];
     }
-    for (const m of CORE) expect(importsOf(m, read(m)).filter((s) => resolveSpec(m, s) === RESIDUE)).toEqual([]);
+    for (const m of [...CORE, ...RECORDERS]) expect(importsOf(m, read(m)).filter((s) => resolveSpec(m, s) === RESIDUE)).toEqual([]);
     expect(edges).toEqual(KNOWN_RESIDUE_EDGES);
   });
 

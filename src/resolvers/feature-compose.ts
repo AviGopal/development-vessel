@@ -36,6 +36,7 @@ import { writeAuthoringMarker, clearAuthoringMarker } from "./patch-with-tools.j
 import { markOnComposeFailure, VERIFY_FAILURE_CLASSES } from "./staged-mitosis-gate.js";
 import { vacuousEditReason, nonTerminatingEditReason, deadStoreEditReason, truncatingRewriteReason } from "../vacuous-edit.js";
 import { acquireComposeSlot } from "../compose-slots.js";
+import { recordComposeAdmission, type AdmissionRefusalStage } from "../judge/routing-capture.js";
 import { activeMustBeCalled, checkMustBeCalled, constraintRefusalEvidence, introducesDefinition, mustBeCalledFromGate, mustBeCalledReason, mustBeCalledRefusalRecord, constraintParkLine, type ConstraintLift, type MustBeCalledConstraint, attemptEvidenceBlock, baseSpanOfOp, checkOpNoEffect, enforcedLessons, escalateRepeatedRefusal, refusalJournalLine, repeatedRefusalRegion, type RefusalRecord, explicitLineHint, hydrateComposeGap, lineCenteredSlice, noEffectOverlapRefusal, noEffectSpans, parentCheckBlock, parseOwnCheckFailures, sameOwnCheckFailures, spanRecord, testTitleSegmentOffset, typecheckSection, type AttemptRecord, type EditedSpan, type FailStage, type GapRowReader, type OwnCheckFailure } from "./retry-evidence.js";
 
 /**
@@ -5328,6 +5329,10 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
   // is not held. BUSY is a non-attempt, so neither refusal writes anything back to the store.
   // Set when the store holds this gap and the compose would land: such a compose takes the landing lease below.
   let landingLeaseGap: string | null = null;
+  // THE ADMISSION RECORD (src/judge/routing-capture.ts, a recorder): every admission decision below is written once as
+  // a composeAdmission record. A refusal is written where it returns; an admission is written where the compose
+  // starts drafting, or stops before it (spend envelope, landing lease, slot). Never throws; no decision reads it.
+  let admittedCapture: ((draftingStarted: boolean) => void) | null = null;
   // THE COMPOSE MODE IS THIS RESOLVER'S VERDICT, NEVER THE CALLER'S (slice G): a caller-supplied compose_mode is dropped
   // here and set only by the check-supply admission below.
   delete (pointer as { compose_mode?: unknown }).compose_mode;
@@ -5337,15 +5342,22 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
     // supply's dispatch variables, verified against the gap's ledger below. Unmarked composes take the path unchanged.
     const csa = await import("./check-supply-admission.js");
     const supplyMarker = csa.checkSupplyMarkerOf(pointer);
+    // The admission record (src/judge/routing-capture.ts) for every decision from here on: the refusals before the
+    // admission block and every admission-block decision. Builds a record and writes one line; never throws.
+    const admissionLand = (pointer as { land?: boolean }).land !== false;
+    const admissionCapture = (o: { decision: "admitted" | "refused"; draftingStarted: boolean; stage: AdmissionRefusalStage | null; stored: "unreadable" | "absent" | "present"; row: Record<string, unknown> | null; why?: string | null; supply?: { admitted: boolean; why: string } | null; supplyVerdict?: { admit: boolean; why: string | null } | null }): void =>
+      recordComposeAdmission({ gapId: _gapIdForSlot, lane, row: o.row, pointerGap: pointer.gap, why: o.why ?? null, supply: o.supply ?? null, decision: o.decision, draftingStarted: o.draftingStarted, scope: null, stage: o.stage, land: admissionLand, supplyMarker: !!supplyMarker, stored: o.stored, operatorHold: o.stage === "operator_hold", supplyVerdict: o.supplyVerdict ?? null });
     let rows: Array<Record<string, unknown>> | null = null;
     if (supplyMarker) {
       // FAIL CLOSED, NAMED: whether the supply dispatched this gap cannot be known without its ledger.
       rows = await csa.readWithin(() => readComposeGapRows(_gapIdForSlot), csa.checkSupplyLedgerWait().read_timeout_ms);
       if (rows === null) {
+        admissionCapture({ decision: "refused", draftingStarted: false, stage: "check_supply_ledger_unreadable", stored: "unreadable", row: null });
         console.log(`[feature-compose] ${lane} compose NOT started: gap ${_gapIdForSlot} check_supply_ledger_unreadable (gap store unreadable or timed out; failing closed)`);
         return { shape: "featureComposeReport", body: { ok: false, verdict: "REFUSED", stage: "check_supply_ledger_unreadable", error: `gap ${_gapIdForSlot}: its check_supply ledger could not be read, so the supply's dispatch cannot be verified (${lane} compose not started)` } };
       }
       if (!rows.some((r) => String(r.id) === _gapIdForSlot)) {
+        admissionCapture({ decision: "refused", draftingStarted: false, stage: "check_supply_gap_missing", stored: "absent", row: null });
         console.log(`[feature-compose] ${lane} compose NOT started: gap ${_gapIdForSlot} check_supply_gap_missing (a check_supply compose names a gap the store does not hold)`);
         return { shape: "featureComposeReport", body: { ok: false, verdict: "REFUSED", stage: "check_supply_gap_missing", error: `gap ${_gapIdForSlot}: a check_supply compose names a gap the store does not hold (${lane} compose not started)` } };
       }
@@ -5353,11 +5365,13 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
       try { rows = await readComposeGapRows(_gapIdForSlot); } catch { rows = null; }
     }
     if (rows === null) {
+      admissionCapture({ decision: "refused", draftingStarted: false, stage: "hold_state_unreadable", stored: "unreadable", row: null });
       console.log(`[feature-compose] ${lane} compose NOT started: gap ${_gapIdForSlot} hold_state_unreadable (gap store unreadable; failing closed)`);
       return { shape: "featureComposeReport", body: { ok: false, verdict: "BUSY", stage: "hold_state_unreadable", error: `gap ${_gapIdForSlot}: the gap store could not be read, so its operator_hold state is unknown (${lane} compose not started)` } };
     }
     const stored = rows.find((r) => String(r.id) === _gapIdForSlot);
     if ((stored?.classification_metadata as { operator_hold?: unknown } | undefined)?.operator_hold === true) {
+      admissionCapture({ decision: "refused", draftingStarted: false, stage: "operator_hold", stored: "present", row: stored ?? null });
       console.log(`[feature-compose] ${lane} compose NOT started: gap ${_gapIdForSlot} is under operator_hold`);
       return { shape: "featureComposeReport", body: { ok: false, verdict: "BUSY", stage: "operator_hold", error: `gap ${_gapIdForSlot} is under operator_hold (${lane} compose not started)` } };
     }
@@ -5374,6 +5388,13 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
     if (stored && (pointer as { land?: boolean }).land !== false) {
       const { composeEligibilitySkipReason } = await import("../judge/gap-eligibility.js");
       let why = composeEligibilitySkipReason(stored);
+      let admissionRow: Record<string, unknown> = stored;
+      let admissionWhy: string | null = why;
+      let supplyException: { admitted: boolean; why: string } | null = null;
+      let supplyVerdictSeen: { admit: boolean; why: string | null } | null = null;
+      let admissionStored: "unreadable" | "absent" | "present" = "present";
+      const captureAdmission = (decision: "admitted" | "refused", draftingStarted: boolean, stage: AdmissionRefusalStage | null = decision === "refused" ? "ineligible" : null): void =>
+        admissionCapture({ decision, draftingStarted, stage, stored: admissionStored, row: admissionRow, why: admissionWhy, supply: supplyException, supplyVerdict: supplyVerdictSeen });
       // TEST-WRITING WORK (slice G): the one exception to "unarmed", for a compose the gap's own check_supply ledger
       // says the supply dispatched with THIS dispatch id. The marker alone admits nothing. The supply writes the
       // ledger after goal-host's 202, so a ledger that does not match yet is re-read, bounded, before refusing.
@@ -5382,36 +5403,50 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
         const wait = csa.checkSupplyLedgerWait();
         let row: Record<string, unknown> = stored;
         let verdict = csa.checkSupplyAdmission(row, supplyMarker, _gapIdForSlot, authoring, why);
+        supplyVerdictSeen = verdict.admit ? { admit: true, why: null } : { admit: false, why: verdict.why };
         for (let i = 1; !verdict.admit && verdict.why === "ledger_mismatch" && i < wait.attempts; i++) {
           await new Promise((r) => setTimeout(r, wait.delay_ms));
           const again = await csa.readWithin(() => readComposeGapRows(_gapIdForSlot), wait.read_timeout_ms);
           if (again === null) {
+            supplyException = { admitted: false, why: "check_supply_ledger_unreadable" };
+            admissionStored = "unreadable";
+            captureAdmission("refused", false, "check_supply_ledger_unreadable");
             console.log(`[feature-compose] ${lane} compose NOT started: gap ${_gapIdForSlot} check_supply_ledger_unreadable (re-read failed; failing closed)`);
             return { shape: "featureComposeReport", body: { ok: false, verdict: "REFUSED", stage: "check_supply_ledger_unreadable", error: `gap ${_gapIdForSlot}: its check_supply ledger could not be re-read, so the supply's dispatch cannot be verified (${lane} compose not started)` } };
           }
           const next = again.find((r) => String(r.id) === _gapIdForSlot);
           if (!next) {
+            supplyException = { admitted: false, why: "check_supply_gap_missing" };
+            admissionStored = "absent";
+            captureAdmission("refused", false, "check_supply_gap_missing");
             console.log(`[feature-compose] ${lane} compose NOT started: gap ${_gapIdForSlot} check_supply_gap_missing (gone on re-read)`);
             return { shape: "featureComposeReport", body: { ok: false, verdict: "REFUSED", stage: "check_supply_gap_missing", error: `gap ${_gapIdForSlot}: a check_supply compose names a gap the store no longer holds (${lane} compose not started)` } };
           }
           row = next;
           why = composeEligibilitySkipReason(row);
+          admissionRow = row;
+          admissionWhy = why;
           verdict = csa.checkSupplyAdmission(row, supplyMarker, _gapIdForSlot, authoring, why);
+          supplyVerdictSeen = verdict.admit ? { admit: true, why: null } : { admit: false, why: verdict.why };
         }
+        supplyException = verdict.admit ? { admitted: true, why: "ledger_match" } : { admitted: false, why: String(verdict.why) };
         if (verdict.admit) {
           (pointer as { compose_mode?: string }).compose_mode = csa.CHECK_SUPPLY_COMPOSE_MODE;
           console.log(`[feature-compose] ${lane} compose ADMITTED as test-writing work: gap ${_gapIdForSlot} is unarmed, its check_supply ledger names dispatch ${supplyMarker.dispatch_id} (compose_mode=${csa.CHECK_SUPPLY_COMPOSE_MODE})`);
           why = null;
         } else {
+          captureAdmission("refused", false);
           console.log(`[feature-compose] ${lane} compose NOT started: gap ${_gapIdForSlot} is ineligible (${why ?? "check_supply_state_changed"}; check_supply ${verdict.why})`);
           return { shape: "featureComposeReport", body: { ok: false, verdict: "REFUSED", stage: "ineligible", check_supply_refusal: verdict.why, error: `gap ${_gapIdForSlot} is not compose work: ${why ?? "check_supply_state_changed"} (${lane} compose not started)` } };
         }
       }
       if (why) {
+        captureAdmission("refused", false);
         console.log(`[feature-compose] ${lane} compose NOT started: gap ${_gapIdForSlot} is ineligible (${why})`);
         return { shape: "featureComposeReport", body: { ok: false, verdict: "REFUSED", stage: "ineligible", error: `gap ${_gapIdForSlot} is not compose work: ${why} (${lane} compose not started)` } };
       }
       landingLeaseGap = _gapIdForSlot;
+      admittedCapture = (draftingStarted) => captureAdmission("admitted", draftingStarted);
     }
   }
   // SPEND ENVELOPE AT THE CHOKEPOINT (contained-self-development). gap-to-feature checks the envelope
@@ -5422,6 +5457,7 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
     const { spendEnvelopeAllows } = await import("../judge/gap-policy.js");
     const envelope = await spendEnvelopeAllows();
     if (!envelope.allow) {
+      admittedCapture?.(false);
       console.log(`[feature-compose] undirected compose NOT started: spend envelope ${envelope.reason}`);
       return { shape: "featureComposeReport", body: { ok: false, verdict: "BUSY", stage: "budget", error: `spend envelope: ${envelope.reason} (undirected compose not started)` } };
     }
@@ -5445,6 +5481,7 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
       v = { action: "acquire", gap_id: landingLeaseGap, granted: false, unknown: true, reason: `lease op threw: ${(err as Error).message.slice(0, 200)}` };
     }
     if (!v.granted) {
+      admittedCapture?.(false);
       const unknown = v.unknown === true || !v.held_by;
       countLandingLeaseRefusal(unknown ? "compose_unknown" : "compose_held");
       const stage = unknown ? "landing_lease_unknown" : "landing_lease_held";
@@ -5456,10 +5493,12 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
   const slot = await acquireComposeSlot(slotId, { directed: isDirected, gapId: _gapIdForSlot });
   if (!slot.granted) await releaseOrKeepLandingLease(landingLease, null);
   if (!slot.granted && slot.duplicateOf) {
+    admittedCapture?.(false);
     console.error(`[compose-cap] REFUSING compose for ${_gapIdForSlot}: already in flight as ${slot.duplicateOf}`);
     return { shape: "featureComposeReport", body: { ok: false, verdict: "BUSY", stage: "gap_in_flight", error: `gap already in flight as ${slot.duplicateOf} — retry after it completes` } };
   }
   if (!slot.granted) {
+    admittedCapture?.(false);
     // Say WHICH refusal this is. `observed` is read before the atomic claim, so a
     // simultaneous claimant can take the last index in between — and reporting the
     // pre-claim count then produces "REFUSING autonomous compose: 0 in flight",
@@ -5494,6 +5533,7 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
     };
   }
   let leaseOutcome: ResolverResult | null = null;
+  admittedCapture?.(true);
   try {
     const outcome = await resolveFeatureComposeUncapped(pointer);
     try {

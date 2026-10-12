@@ -35,6 +35,8 @@ const ISOLATED = /\bisolateRuntimeRoot\s*\(/;
 const ALLOWED: Record<string, string> = {
   "test/resolvers/compose-admission.test.ts":
     "protected judge test (autonomy-scope excluded): it must not import the lane-editable test/helpers/runtime-root.ts until that helper is an evaluator file (scope-earn-in EVALUATOR_FILES + autonomy-scope), as test/helpers/ungated-rows-source.ts is; it drives only admission refusals (trap run: nothing landed under /vessels, alone or after a /vessels loader)",
+  "test/judge-capture/compose-admission-capture-fail-open.test.ts":
+    "protected capture test, same reason as compose-admission.test.ts (it must not import the lane-editable helper); it drives only admission refusals and an admitted compose stopped at a pre-claimed slot, under the cutover fs and exec guards, which block and record any write outside the OS temp dir and any child process, and afterEach fails on either (no violation recorded, alone or in the whole suite)",
   "test/resolvers/retry-evidence.test.ts":
     "imports only pure feature-compose helpers statically and steers MITOSIS_RUNTIME_DIR per test for gap-to-feature's specFromGap, which reads it at call time; drives no feature_compose write (trap run: nothing landed under /vessels, alone or after a /vessels loader)",
 };

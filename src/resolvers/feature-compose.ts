@@ -5885,8 +5885,14 @@ export type DrafterExpect = {
   prompts: (ctx: DrafterCheckedContext, budget: number) => { decompose: string; refine: string };
 };
 
-/** THE CONTEXT CLAMP. The validated context and its clamped op budget, or why it is refused. */
-export function validateDrafterContext(raw: unknown, ex: DrafterExpect): { ok: true; ctx: DrafterCheckedContext; budget: number; clamped: string | null } | { ok: false; why: string } {
+export const DRAFTER_CONTEXT_NOT_PLAIN = "schema: the context is not plain data";
+
+/** THE CONTEXT CLAMP. The validated context and its clamped op budget, or why it is refused. The module's object is
+ *  read ONCE (a structured copy: each getter runs once, a Proxy throws and is refused); everything below validates and
+ *  delivers that copy, so what is delivered is what was validated. */
+export function validateDrafterContext(rawIn: unknown, ex: DrafterExpect): { ok: true; ctx: DrafterCheckedContext; budget: number; clamped: string | null } | { ok: false; why: string } {
+  let raw: unknown;
+  try { raw = structuredClone(rawIn); } catch { return { ok: false, why: DRAFTER_CONTEXT_NOT_PLAIN }; }
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return { ok: false, why: "schema: the context is not an object" };
   const keys = Object.keys(raw);
   const extra = keys.filter((k) => !(DRAFTER_CONTEXT_KEYS as readonly string[]).includes(k));
@@ -6022,6 +6028,8 @@ export async function draftContextThroughOpenModule(run: DrafterRun): Promise<{ 
   let raw: unknown;
   try { raw = mod.assembleDrafterContext(drafterDeepFreeze(facts)); }
   catch (err) { return floor(`assemble_threw: ${String((err as Error)?.message ?? err).slice(0, 200)}`, null, dropped); }
+  // One read of the module's object: every later read (the clamp, the record's version) is of this plain copy.
+  try { raw = structuredClone(raw); } catch { return floor(`context_refused: ${DRAFTER_CONTEXT_NOT_PLAIN}`, null, dropped); }
   const v = validateDrafterContext(raw, run.expect);
   const version = raw && typeof raw === "object" && typeof (raw as { version?: unknown }).version === "string" ? String((raw as { version: string }).version).slice(0, 64) : null;
   if (!v.ok) return floor(`context_refused: ${v.why}`, version, dropped);

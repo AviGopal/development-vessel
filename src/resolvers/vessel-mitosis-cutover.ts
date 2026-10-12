@@ -29,6 +29,7 @@ import { resolveActivateSubstrateScript } from "./activate-substrate-script.js";
 import { resolveMaintenanceLeaseWrite } from "./maintenance-lease";
 import { gateLanding, KILL_SWITCH_REASON, landingsStopped } from "./push-policy.js";
 import { CUTOVER_QUIESCE_MAX_MS } from "../compose-slots.js";
+import { armingOnlyLanding } from "./check-supply-admission.js";
 import { judgeOwnCheck, loadOwnCheck, ownCheckOutcomeUpdate, OWN_CHECK_UNMEASURABLE_ESCALATE_AT, readUnlandableMarker } from "./staged-mitosis-gate.js";
 
 /**
@@ -134,13 +135,22 @@ function askHumanUnmeasurableLanding(row: Record<string, unknown>, sha: string):
 export async function stampPendingLand(a: {
   gapId: string; newSha: string; appliedAt: string; vessel_name: string; hostRepoRoot: string; gitCmd: string;
   landedUnverifiedReason: string | null;
+  /** The landing's changed files (vessel-relative), when the caller knows them. */
+  stagedFiles?: readonly string[];
 }): Promise<void> {
-  const { gapId, newSha, appliedAt, vessel_name, hostRepoRoot, gitCmd, landedUnverifiedReason } = a;
+  const { gapId, newSha, appliedAt, vessel_name, hostRepoRoot, gitCmd, landedUnverifiedReason, stagedFiles } = a;
   try {
     const stampRead = await ownCheckDeps.readGap({ type: "substrateGap", id: gapId, limit: 1 });
     const stampRow = ((stampRead as { body?: { gaps?: Array<Record<string, unknown>> } }).body?.gaps ?? [])[0];
     if (stampRow && String(stampRow["status"] ?? "") !== "closed") {
       const stampMeta = (stampRow["classification_metadata"] ?? {}) as Record<string, unknown>;
+      // AN ARMING-ONLY LANDING IS NOT A FIX LANDING (armingOnlyLanding): it only added the gap's own red-by-design
+      // check. Stamped pending, it held the gap from the fix it was armed for and was falsified on its own red. The
+      // row is left as it is, open and eligible, so the lane composes the fix against the now-armed check.
+      if (armingOnlyLanding(stagedFiles, stampRow, vessel_name)) {
+        console.log(`[mitosis-cutover] pending-land stamp SKIPPED gap=${gapId} sha=${newSha.slice(0, 12)}: arming-only landing (its diff is only the gap's own check), not a fix to verify`);
+        return;
+      }
       if (stampMeta["pending_outcome_verification"] !== newSha) {
         // STAMP A MEASURABLE PREDICATE, NOT JUST PROVENANCE.
         //
@@ -3841,7 +3851,7 @@ async function runGitAwareCutoverInner(args: GitCutoverArgs): Promise<ResolverRe
     }
   }
   if (gapId !== "unknown-gap" && pushStatus === "pushed" && /^[0-9a-f]{7,40}$/i.test(newSha) && !landingCreditWithheld && !revertOf) {
-    await stampPendingLand({ gapId, newSha, appliedAt, vessel_name, hostRepoRoot, gitCmd, landedUnverifiedReason });
+    await stampPendingLand({ gapId, newSha, appliedAt, vessel_name, hostRepoRoot, gitCmd, landedUnverifiedReason, stagedFiles });
   }
   const workspaceRoot = process.env["WORKSPACE_ROOT"] ?? process.cwd();
   const logPath =

@@ -28,6 +28,7 @@ import { appendRecord } from "../resolvers/attempt-ledger.js";
 import { resolveSubstrateGap, resolveSubstrateGapWrite, DECISION_LOG_GAP_CATEGORIES, predicateSuspect, class2PredicateKey, reevaluateBirthVerdicts, birthCheckRepo } from "../resolvers/substrate-gap.js";
 import { METABOB_API_KEY, METABOB_ENDPOINT, GOAL_HOST_VESSEL_ENDPOINT } from "../config.js";
 import { readOperatorHold } from "../lib/operator-hold.js";
+import { armingOnlyLanding } from "../resolvers/check-supply-admission.js";
 import { gapEditSite, isInfraRefusalBody, isParkingDisposition, liftLandVerificationHold, landVerdictIsMeasured, isNonAttemptComposeResult, isTerminalRefusalResult } from "./gap-eligibility.js";
 import { vesselsCloneRoot, discoverOwnResolveUrls, postEnvelopeRead, autonomyScope, autonomyScopeExcludes, type AutonomyScope } from "./gap-policy.js";
 import { isLiteralOnlyStepClose, verifyGapCondition, type GapCheckVerdict, evaluateGapCheck, shaWasRevertedInAnyClone, landedCommitVerdict, sweepGitOut } from "./gap-check-judge.js";
@@ -785,6 +786,50 @@ function selfAuthoredCheckInputs(gap: Record<string, unknown>, sha: string): str
     console.warn(`[gap-verify] cannot judge self-authorship for ${String(gap.id ?? "?")}: ${(e as Error).message}`);
   }
   return [];
+}
+
+/** The files a landed commit changed (vessel-relative) and the vessel clone holding it, or null when no clone holds it. */
+function landingChangedFiles(sha: string): { vessel: string; files: string[] } | null {
+  if (!/^[0-9a-f]{7,40}$/i.test(sha)) return null;
+  try {
+    for (const name of readdirSync(vesselsCloneRoot()).sort()) {
+      const dir = join(vesselsCloneRoot(), name);
+      if (!existsSync(join(dir, ".git")) || sweepGitOut(dir, ["merge-base", "--is-ancestor", sha, "HEAD"]) === null) continue;
+      const out = sweepGitOut(dir, ["diff-tree", "--no-commit-id", "--name-only", "-r", sha]);
+      return out === null ? null : { vessel: name, files: out.split("\n").map((f) => f.trim()).filter(Boolean) };
+    }
+  } catch { /* no clone tree */ }
+  return null;
+}
+
+export const ARMING_ONLY_LANDING = "arming_only_landing";
+/** The pending-land sweep's backstop for a landing stamped before the stamp site judged arming (armingOnlyLanding):
+ *  an arming-only landing is not a fix, so it is never verified or falsified. Its stamp is cleared ("", the cleared
+ *  convention), a pending_verification hold lifted (a parking disposition is a human's and stays), and
+ *  pending_released names the landing (the lineage re-stamp reads it), so the gap is admitted for the fix composed
+ *  against its now-armed check. Decided on a FRESH read, open rows only; null when there is nothing to write. */
+export function armingLandingReleasedRow(fresh: Record<string, unknown> | null, sha: string, at: string): Record<string, unknown> | null {
+  if (!fresh || String(fresh.status ?? "") !== "open") return null;
+  const m0 = (fresh.classification_metadata ?? {}) as Record<string, unknown>;
+  if (String(m0.pending_outcome_verification ?? "") !== sha) return null;
+  const meta: Record<string, unknown> = {
+    ...(liftLandVerificationHold(m0) ?? m0),
+    pending_outcome_verification: "",
+    pending_released: { reason: ARMING_ONLY_LANDING, landed: sha, at },
+    pending_note: `released: ${ARMING_ONLY_LANDING}: landed ${sha.slice(0, 12)} only added the gap's own check`,
+  };
+  return { ...fresh, classification_metadata: meta };
+}
+async function releaseArmingLanding(gap: Record<string, unknown>, sha: string): Promise<void> {
+  const id = String(gap.id ?? "");
+  try {
+    const row = armingLandingReleasedRow(await readGapFresh(id), sha, new Date().toISOString());
+    if (!row) return;
+    await resolveSubstrateGapWrite({ type: "substrateGap_write", expect_status: "open", gap: row } as never);
+    console.warn(`[gap-sweep] released pending_verification on ${id}: ${ARMING_ONLY_LANDING} (landed ${sha.slice(0, 12)} only added the gap's own check); not verified, not falsified, admitted for the fix`);
+  } catch (e) {
+    console.warn(`[gap-sweep] could not release pending_verification on ${id} (${ARMING_ONLY_LANDING}): ${(e as Error).message}`);
+  }
 }
 
 /**
@@ -1744,7 +1789,7 @@ async function sweepPendingLandVerificationsOnce(deps: { ask: Ask }): Promise<{ 
   // Live at the time of writing: 13 gaps carry pending_outcome_verification, 11 of them
   // have no predicate at all — so the honest answer is "correctly abstaining on an input
   // that cannot be measured", not "broken". A counter per verdict says that out loud.
-  const tally = { absent: 0, present: 0, pending: 0, unknown: 0, not_in_clone: 0, reverted: 0, awaiting_restart: 0, falsified: 0, self_authored: 0, birth_retaken: 0, stale: 0, unlabelled: 0, held: 0, non_discriminating: 0 };
+  const tally = { absent: 0, present: 0, pending: 0, unknown: 0, not_in_clone: 0, reverted: 0, awaiting_restart: 0, falsified: 0, self_authored: 0, birth_retaken: 0, stale: 0, unlabelled: 0, held: 0, non_discriminating: 0, arming_only: 0 };
   try {
     const read = await resolveSubstrateGap({
       type: "substrateGap",
@@ -1856,6 +1901,14 @@ const pending = candidates.unheld
       //                 (it never does on provenance alone -> abstain, retry next tick).
       // Marked on an earlier tick: its check was edited by its own landing, so re-running it proves nothing.
       if (meta.disposition === "awaiting_operator_review" && (meta.self_authored_check as { sha?: unknown } | undefined)?.sha === sha) { tally.self_authored += 1; continue; }
+      // An arming-only landing (its diff is only the gap's own check) is not a fix: its check reads red by design, so
+      // it is never verified or falsified here; the stamp is released and the gap admitted for the fix.
+      const landedFiles = landingChangedFiles(sha);
+      if (landedFiles && armingOnlyLanding(landedFiles.files, g, landedFiles.vessel)) {
+        tally.arming_only += 1;
+        await releaseArmingLanding(g, sha);
+        continue;
+      }
       const verdict = await evaluateGapCheck(g);
       const gidSweep = String(g.id ?? "");
       // 8.5: an 'absent' from a check that never read 'present' at birth closes nothing.

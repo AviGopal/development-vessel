@@ -125,6 +125,36 @@ export function testWritingPathAllowed(path: string, gapId: unknown): boolean {
   return vesselRelativePath(path) === checkSupplyCheckPath(gapId);
 }
 
+/**
+ * AN ARMING-ONLY LANDING IS NOT A FIX. A landing whose diff touches nothing but the gap's OWN check (the supply's
+ * test/checks/<checkSupplyCheckFile(gap id)>, or the test_file its test_suite evidence_resolve names) arms the gap: it
+ * adds the red-by-design check the fix is then composed against. Stamped as a fix landing, it held the gap pending
+ * (the picker and admission skip a landing awaiting its verdict, so the fix was never composed) and the next sweep read
+ * the check 'present', which it is by design, and falsified the landing (regressed_by, an UNFAVORABLE settlement, a
+ * class-posterior miss). Every changed path (vessel-relative or under a vessel root) must be one of those paths; an
+ * empty or unreadable diff is not arming-only (the caller's existing behaviour stands). When both the landing's vessel
+ * and the check's vessel are known and differ, the evidence_resolve path is another vessel's file and does not count.
+ */
+export function armingOnlyLanding(changedPaths: readonly string[] | null | undefined, gap: Record<string, unknown>, landingVessel?: string): boolean {
+  if (!Array.isArray(changedPaths) || changedPaths.length === 0) return false;
+  const own = new Set<string>();
+  const gapId = gap["id"];
+  if (typeof gapId === "string" && gapId.length > 0) own.add(checkSupplyCheckPath(gapId));
+  const meta = (gap["classification_metadata"] ?? gap["metadata"] ?? {}) as Record<string, unknown>;
+  const er = meta["evidence_resolve"] as { shape?: unknown; input?: { vessel?: unknown; test_file?: unknown } } | null | undefined;
+  if (er && typeof er === "object" && er.shape === "test_suite" && typeof er.input?.test_file === "string") {
+    const checkVessel = typeof er.input.vessel === "string" ? er.input.vessel.replace(/^repos\//, "").replace(/\/+$/, "") : "";
+    const sameVessel = !checkVessel || !landingVessel || checkVessel === landingVessel;
+    const rel = vesselRelativePath(er.input.test_file.replace(/^\/+/, ""));
+    if (sameVessel && rel) own.add(rel);
+  }
+  if (own.size === 0) return false;
+  return changedPaths.every((p) => {
+    const rel = typeof p === "string" ? vesselRelativePath(p.replace(/^\/+(?=(?:test|src)\/)/, "")) : null;
+    return rel !== null && own.has(rel);
+  });
+}
+
 /** The paths a compose in `composeMode` may not land: every path but the gap's check when the mode is test_writing, else none. */
 export function testWritingDiffOutsideTests(composeMode: unknown, paths: string[], gapId?: unknown): string[] {
   if (composeMode !== CHECK_SUPPLY_COMPOSE_MODE) return [];

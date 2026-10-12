@@ -28,7 +28,7 @@
  */
 import { createHash } from "node:crypto";
 
-export type FailStage = "install" | "resolve" | "typecheck" | "shape-dispatch" | "tests" | "own_check" | "scope" | "apply" | "constraint" | "decompose";
+export type FailStage = "install" | "resolve" | "typecheck" | "shape-dispatch" | "tests" | "own_check" | "scope" | "apply" | "constraint" | "decompose" | "seed_delivery";
 
 export interface EditedSpan {
   path: string;
@@ -770,7 +770,7 @@ export interface RetryEvidenceMeasure {
   offenders: Array<{ gap: string; at: string; kind: "overlap" | "class_stage" | "stuck_refusal"; detail: string }>;
 }
 
-const SPANS_OWED = new Set(["install", "resolve", "typecheck", "shape-dispatch", "tests", "own_check", "scope", "constraint"]);
+const SPANS_OWED = new Set(["install", "resolve", "typecheck", "shape-dispatch", "tests", "own_check", "scope", "constraint", "seed_delivery"]);
 
 /**
  * Over gap rows: retries whose edits overlap an earlier no-effect span, and lessons whose class contradicts

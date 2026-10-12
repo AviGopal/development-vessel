@@ -35,6 +35,7 @@ import { resolveSubstrateGap, resolveSubstrateGapWrite, inheritableParentCheck, 
 import { writeAuthoringMarker, clearAuthoringMarker } from "./patch-with-tools.js";
 import { markOnComposeFailure, VERIFY_FAILURE_CLASSES } from "./staged-mitosis-gate.js";
 import { vacuousEditReason, nonTerminatingEditReason, deadStoreEditReason, truncatingRewriteReason } from "../vacuous-edit.js";
+import { seedDeliveryReason, seedDeliveryRefusals, touchesSeed } from "../seed-delivery-verify.js";
 import { acquireComposeSlot } from "../compose-slots.js";
 import { recordComposeAdmission, SCOPE_NOT_CONSULTED, type AdmissionRefusalStage } from "../judge/routing-capture.js";
 import { activeMustBeCalled, checkMustBeCalled, constraintRefusalEvidence, introducesDefinition, mustBeCalledFromGate, mustBeCalledReason, mustBeCalledRefusalRecord, constraintParkLine, type ConstraintLift, type MustBeCalledConstraint, attemptEvidenceBlock, baseSpanOfOp, checkOpNoEffect, enforcedLessons, escalateRepeatedRefusal, refusalJournalLine, repeatedRefusalRegion, type RefusalRecord, explicitLineHint, hydrateComposeGap, lineCenteredSlice, noEffectOverlapRefusal, noEffectSpans, parentCheckBlock, parseOwnCheckFailures, sameOwnCheckFailures, spanRecord, testTitleSegmentOffset, typecheckSection, type AttemptRecord, type EditedSpan, type FailStage, type GapRowReader, type OwnCheckFailure } from "./retry-evidence.js";
@@ -5223,6 +5224,24 @@ export function verifyFailureReason(v: VerifyResult | undefined): string {
 }
 
 /**
+ * THE SEED-DELIVERY GATE (src/seed-delivery-verify.ts), per touched vessel, before the suite: a draft that changes an
+ * exported seed template's tasks under src/seed/ without raising its metadata.seed_version cannot reach any running node
+ * (seed delivery re-uploads only on a bump), so it fails verify at stage "seed_delivery" with the reason as its gate
+ * detail (the next attempt's verify_failure_reason). Silent and null when the draft touches no seed file in this vessel.
+ * An unreadable draft file is not judged here (the suite's own stages report it).
+ */
+export function seedDeliveryVerify(v: string, vAbs: string, draft: ReadonlyArray<{ abs: string; pre: string }>, gapId: string): VerifyResult | null {
+  const mine = draft.filter((d) => d.abs.startsWith(vAbs + "/")).map((d) => ({ ...d, rel: d.abs.slice(vAbs.length + 1) }));
+  if (!touchesSeed(mine.map((d) => d.rel))) return null;
+  const edits = mine.flatMap((d) => { try { return [{ path: d.rel, pre: d.pre, post: readFileSync(d.abs, "utf8") }]; } catch { return []; } });
+  const refusals = seedDeliveryRefusals(edits);
+  if (refusals.length === 0) return null;
+  const reason = seedDeliveryReason(refusals);
+  console.warn(`[fc-seed-delivery] gap=${gapId || "none"} vessel=${v}: ${reason.slice(0, 300)}`);
+  return { vessel: v, errors: "seed_delivery", exit_code: 1, ok: false, output: `== seed delivery == | ${reason}`, stage: "seed_delivery", draft: { own_red: [], introduced: [], new_ts: [], gate_detail: reason } };
+}
+
+/**
  * The must_be_called gate at its one compose call site, per touched vessel: the draft's edits in that vessel (pre-image
  * from the rollback snapshot, post-image from disk) and the vessel's src as the draft left it. A refusal is a failed
  * VerifyResult at stage "constraint" whose output carries the refusal sentence (the lesson reason, verify_failure_reason
@@ -8097,6 +8116,8 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
   const draftRel = (abs: string): string => ws?.rel(abs) ?? abs.replace(`${REPO_ROOT}/`, "");
   const runVerify = async (v: string): Promise<VerifyResult> => {
     stampComposeProgress("verify", pointer.gap?.id);
+    const seedRefusal = seedDeliveryVerify(v, vesselRoot(v), [...edited, ...created].map((abs) => ({ abs, pre: preEditContent.get(abs) ?? "" })), String(pointer.gap?.id ?? ""));
+    if (seedRefusal) return seedRefusal;
     if (activeConstraints.length === 0) return runVerifySuite(v);
     const cv = await constraintVerify(v, vesselRoot(v), activeConstraints, [...edited, ...created].map((abs) => ({ abs, rel: draftRel(abs), pre: preEditContent.get(abs) ?? "" })), String(pointer.gap?.id ?? ""));
     for (const l of cv.lifted) if (!constraintLifts.some((x) => x.symbol === l.symbol)) constraintLifts.push(l);

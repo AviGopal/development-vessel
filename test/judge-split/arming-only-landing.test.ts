@@ -201,6 +201,8 @@ beforeAll(() => {
     return { ...r, category: `fixture_cat_${k.replace(/-/g, "_")}`, created_at: now, updated_at: now };
   });
   writeFileSync(GAPS_PATH, JSON.stringify(rows));
+  // An empty posterior store: an absent one is backfilled from the host's compose history.
+  writeFileSync(POSTERIOR, "{}");
   ready = true;
 });
 afterAll(() => { try { rmSync(ROOT, { recursive: true, force: true }); } catch { /* noop */ } });
@@ -258,10 +260,10 @@ describe("arming-only landing: the pending-land sweep never falsifies it (backst
     if (!existsSync(f)) return 0;
     return readFileSync(f, "utf8").split("\n").filter((l) => l.includes(`"${attempt(k)}#2"`)).length;
   };
-  const posteriorMisses = (): number => {
-    if (!existsSync(POSTERIOR)) return 0;
+  const posteriorMisses = (): Record<string, number> => {
+    if (!existsSync(POSTERIOR)) return {};
     const p = JSON.parse(readFileSync(POSTERIOR, "utf8")) as Record<string, { beta: number }>;
-    return Object.values(p).reduce((n, r) => n + (r.beta - 1), 0);
+    return Object.fromEntries(Object.entries(p).filter(([, r]) => r.beta > 1).map(([c, r]) => [c, r.beta - 1]));
   };
 
   it("the real sweep ran", () => {
@@ -295,6 +297,7 @@ describe("arming-only landing: the pending-land sweep never falsifies it (backst
 
   it("MUST-FAIL (c): the only class-posterior miss is the control's", () => {
     const r = runOnce();
-    expect(posteriorMisses(), r.out.slice(-2000)).toBe(1);
+    // gapClassOf: the arming rows share the class "fixture-sweep-arm", the control is "fixture-sweep-fix".
+    expect(posteriorMisses(), r.out.slice(-2000)).toEqual({ "fixture-sweep-fix": 1 });
   });
 });

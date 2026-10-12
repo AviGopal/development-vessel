@@ -27,7 +27,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, relative, isAbsolute } from "node:path";
 
 export type Row = Record<string, any>;
-export type PlanKind = "pass" | "verify_red" | "non_unique" | "off_target" | "create" | "no_ops" | "drafter_edit";
+export type PlanKind = "pass" | "verify_red" | "non_unique" | "off_target" | "create" | "no_ops" | "drafter_edit" | "seed_edit" | "seed_edit_bumped";
 export interface Fixture {
   name: string;
   /** feature_compose pointer (type added). */
@@ -101,6 +101,33 @@ export const CHECK_SRC = [
   "    expect(compute(2)).toBe(compute(2));",
   "  });",
   "});",
+  "",
+].join("\n");
+/** A synthetic seed template (src/seed/) with one task, for the seed-delivery verify rule (seed_edit plans; no corpus
+ *  fixture uses it). */
+export const SEED_T = `repos/${VESSEL}/src/seed/demo-sweep-tick.ts`;
+export const SEED_CONFIG_LINE = '      config: { type: "demo_sweep", staleHours: 48, autoClose: true },';
+export const SEED_TICK_SRC = [
+  'import type { ActivityTemplate } from "@avigopal/ias-executor-ts";',
+  "",
+  "export const DEMO_SWEEP_TICK_TEMPLATE: ActivityTemplate = {",
+  '  id: "demo-vessel:demo-sweep-tick",',
+  '  name: "demo-sweep-tick",',
+  '  description: "Runs demo_sweep over the fixture store.",',
+  "  inputShapes: [],",
+  '  outputShapes: ["demoSweepReport"],',
+  '  tags: ["demo"],',
+  "  variables: [],",
+  "  tasks: [",
+  "    {",
+  '      id: "run_demo_sweep",',
+  '      description: "Run demo_sweep with auto-close enabled.",',
+  '      resolver: "demo_sweep",',
+  SEED_CONFIG_LINE,
+  '      outputShapes: ["demoSweepReport"],',
+  "    },",
+  "  ],",
+  "};",
   "",
 ].join("\n");
 const LESSONS_JSONL = [
@@ -246,6 +273,11 @@ export function createHarness(ROOT: string, RUNTIME: string) {
       case "create": return [{ kind: "create_file", path: `repos/${VESSEL}/src/fresh.ts`, content: "export const FRESH = 1;\n", rationale: "fixture" }];
       case "no_ops": return [];
       case "drafter_edit": return [edit("export const DRAFTER_FIXTURE = 1;", "export const DRAFTER_FIXTURE = 2;", "repos/development-vessel/src/drafter/index.ts")];
+      case "seed_edit": return [edit(SEED_CONFIG_LINE, SEED_CONFIG_LINE.replace("autoClose: true }", "autoClose: true, auditOnly: true }"), SEED_T)];
+      case "seed_edit_bumped": return [
+        edit(SEED_CONFIG_LINE, SEED_CONFIG_LINE.replace("autoClose: true }", "autoClose: true, auditOnly: true }"), SEED_T),
+        edit('  tags: ["demo"],', '  tags: ["demo"],\n  metadata: { seed_version: 1 },', SEED_T),
+      ];
     }
   }
 

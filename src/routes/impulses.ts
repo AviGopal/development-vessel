@@ -46,7 +46,7 @@ import { resolveRhythmConductorTick } from "../resolvers/rhythm-conductor-tick.j
 import { resolveRhythmRealitySync } from "../resolvers/rhythm-reality-sync.js";
 import { resolveMemoryNote, resolveMemoryNoteWrite } from "../resolvers/memory-note.js";
 import { resolveSubstrateGap, resolveSubstrateGapWrite, resolveSubstrateGapLease } from "../resolvers/substrate-gap.js";
-import { resolvePoolImpulse, resolvePoolImpulseWrite, trustRootWriteShape, operatorCredential } from "../resolvers/pool-impulse.js";
+import { resolvePoolImpulse, resolvePoolImpulseWrite, trustRootWriteShape, operatorCredential, runnerOnlyWriteShape, verdictCorpusWriterGrant } from "../resolvers/pool-impulse.js";
 import { operatorDirectGrant, runWithOperatorDirectGrant, OPERATOR_AUTHORIZATION_HEADER, type OperatorDirectGrant } from "../lib/operator-direct.js";
 import { identityCredential, isNodeSelfCredential, isWritePointerType, type CallerCredential } from "../lib/caller-credential.js";
 import { resolveFsList } from "../resolvers/fs-list.js";
@@ -374,10 +374,12 @@ async function dispatchInner(pointer: AnyPointer): Promise<ResolverResult> {
       // holding the key: anyone who can verify the HMAC can also forge it. Added here, not in the store, so
       // in-process readers see rows exactly as stored. Never true for a row whose shape is not a trust root: only a
       // trust-root write is stamped, so a stanza on any other row is not this store's attestation.
-      const { resolvePoolImpulse, TRUST_ROOT_POOL_SHAPES } = await import("../resolvers/pool-impulse.js");
+      // A verdictCorpusStatus row verifies only under the runner's stamp (pool-impulse.ts, the runner grant), which is
+      // what goal-host's credit stop requires before it reads holds from it.
+      const { resolvePoolImpulse, TRUST_ROOT_POOL_SHAPES, VERDICT_CORPUS_STATUS_SHAPE, verifyPoolAttestation } = await import("../resolvers/pool-impulse.js");
       const { verifyOperatorAttestation } = await import("../lib/operator-hold.js");
       const r = resolvePoolImpulse(pointer as Parameters<typeof resolvePoolImpulse>[0]);
-      return { ...r, body: { ...r.body, impulses: r.body.impulses.map((imp) => ({ ...imp, attested_verified: TRUST_ROOT_POOL_SHAPES.has(imp.shape) && verifyOperatorAttestation(imp).ok })) } };
+      return { ...r, body: { ...r.body, impulses: r.body.impulses.map((imp) => ({ ...imp, attested_verified: (TRUST_ROOT_POOL_SHAPES.has(imp.shape) && verifyOperatorAttestation(imp).ok) || (imp.shape === VERDICT_CORPUS_STATUS_SHAPE && verifyPoolAttestation(imp, "runner").ok) })) } };
     }
     case "poolImpulse_write": {
       const { resolvePoolImpulseWrite } = await import("../resolvers/pool-impulse.js");
@@ -1174,6 +1176,19 @@ impulsesRouter.post("/v2/impulses/resolve", async (c) => {
 
   const { refused: writeRefused, cred: writeCred } = await refuseUnauthenticatedWrite(c, pointerType, pointer);
   if (writeRefused) return writeRefused;
+
+  // THE VERDICT CORPUS STATUS (pool-impulse.ts, the runner grant): written only by goal-host's own principal, named by
+  // the Authorization credential identity validates, never by the body. Every other caller, operators included, is a
+  // 403 and a recorded refusal. Checked before the trust-root branch can see the pointer.
+  if (pointerType === "poolImpulse_write" && runnerOnlyWriteShape(pointer as { id?: string; shape?: string })) {
+    const g = await verdictCorpusWriterGrant(c.req.header("Authorization"));
+    const result = resolvePoolImpulseWrite({ ...(pointer as Record<string, unknown>), type: pointerType } as Parameters<typeof resolvePoolImpulseWrite>[0], undefined, g);
+    const err = String(result.body.error ?? "");
+    if (err.startsWith("runner_principal_required")) return c.json({ success: false, shape: result.shape, body: result.body, error: err }, 403);
+    if (err.startsWith("runner_shape_immutable")) return c.json({ success: false, shape: result.shape, body: result.body, error: err }, 409);
+    if (err.startsWith("verdict_corpus_status_invalid")) return c.json({ success: false, shape: result.shape, body: result.body, error: err }, 422);
+    return c.json({ success: true, shape: result.shape, body: result.body });
+  }
 
   // A TRUST-ROOT pool write is the one write that needs WHO is asking (pool-impulse.ts
   // TRUST_ROOT_POOL_SHAPES); only this route sees the Authorization header, so the credential is

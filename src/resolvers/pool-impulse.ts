@@ -1,8 +1,8 @@
 import { join } from 'node:path';
 import { writeFileSync, readFileSync, existsSync, mkdirSync } from 'node:fs';
-import { createHmac, randomUUID } from 'node:crypto';
+import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
 import { WORKSPACE_ROOT } from '../config.js';
-import { identityCredential } from '../lib/caller-credential.js';
+import { identityCredential, isNodeSelfCredential, type CallerCredential } from '../lib/caller-credential.js';
 
 const POOL_DIR = join(WORKSPACE_ROOT, 'pool');
 const POOL_FILE = join(POOL_DIR, 'standing.json');
@@ -13,14 +13,15 @@ export function __setPoolFileForTests(path: string | null): void { poolFileOverr
 const poolFile = (): string => poolFileOverride ?? POOL_FILE;
 
 /** Written ONLY by resolvePoolImpulseWrite, on a trust-root write it accepted with an operator credential (or, for
- *  autonomyScope alone, from the accepted evaluator: EVALUATOR_TRUST_ROOT_WRITERS).
+ *  autonomyScope alone, from the accepted evaluator: EVALUATOR_TRUST_ROOT_WRITERS), or on a verdictCorpusStatus write
+ *  it admitted under the runner grant (by 'runner'; RUNNER_ONLY_POOL_SHAPES).
  *  key_id is identity's id for the validated key (null when identity's answer carried none); at equals the
  *  row's updated_at for that write. Unlike `source` (caller-supplied), a reader can rely on it. */
 export interface PoolAttestation {
   /** 'operator': an admin-scoped credential. 'evaluator': the accepted in-process evaluator named in `evaluator`
    *  (EVALUATOR_TRUST_ROOT_WRITERS), which re-derived the change's evidence itself (no trust root as such: REALIGNMENT
    *  §7 step 9 / §10 item 1, 10-02 rulings). */
-  by: 'operator' | 'evaluator';
+  by: 'operator' | 'evaluator' | 'runner';
   evaluator?: string;
   key_id: string | null;
   at: string;
@@ -37,6 +38,9 @@ export function canonicalJson(v: unknown): string {
   const o = v as Record<string, unknown>;
   return '{' + Object.keys(o).filter((k) => o[k] !== undefined).sort().map((k) => JSON.stringify(k) + ':' + canonicalJson(o[k])).join(',') + '}';
 }
+
+/** This node's key (METABOB_API_KEY), read at use time: the stamp signs and verifies under it. */
+const nodeKey = (): string => process.env['METABOB_API_KEY'] ?? '';
 
 /** SIGNED ATTESTATION. A reader on another vessel takes rows from whatever producer discovery lists as
  *  "local", and discovery stamps ANY authenticated plain registration "local", so a rogue producer could
@@ -138,7 +142,9 @@ export function resolvePoolImpulse(pointer: {
 //   posteriorReplayAuthorization: the operator's go for activity-api's β-leak replay writes, naming the node and
 //   the pinned list / eligibility shas. activity-api reads it from THIS node's route and trusts the
 //   attested_verified verdict the poolImpulse read adds (routes/impulses.ts); it never holds the attestation key.
-export const TRUST_ROOT_POOL_SHAPES: ReadonlySet<string> = new Set(['substrateNodes', 'autonomyScope', 'spendEnvelope', 'calibrationWindow', 'scriptRunnerAllowlist', 'operatorHold', 'posteriorReplayAuthorization']);
+//   verdictCorpusWriter: the principals whose verdictCorpusStatus writes the runner grant admits (below). A row is a
+//   grant to clear goal-host's credit holds, so it is operator-only.
+export const TRUST_ROOT_POOL_SHAPES: ReadonlySet<string> = new Set(['substrateNodes', 'autonomyScope', 'spendEnvelope', 'calibrationWindow', 'scriptRunnerAllowlist', 'operatorHold', 'posteriorReplayAuthorization', 'verdictCorpusWriter']);
 /** key_id: the validated credential's key id (identity's identifier, never derived from the secret).
  *  evaluator: set only by in-process code (the HTTP route builds auth from the Authorization header alone, and a
  *  pointer field of that name is never read), naming the accepted evaluator making the write. */
@@ -168,6 +174,143 @@ export async function operatorCredential(authHeader: string | undefined): Promis
   const cred = await identityCredential(authHeader, { cache: false });
   if (!cred.authenticated) return { operator: false, why: cred.why };
   return cred.scopes.includes('admin') ? { operator: true, key_id: cred.keyId ?? null } : { operator: false, why: 'credential lacks the admin scope' };
+}
+
+// THE VERDICT CORPUS RUNNER GRANT (closed). goal-host's credit stop withholds learning for every
+// credit class a red verdict-corpus case names, and it reads which classes are held from the `verdictCorpusStatus`
+// row of this store. A row anyone could write would let anyone clear every hold, so the shape has exactly one writer:
+// goal-host's OWN principal, publishing a corpus run. Who is calling is derived by the server, never by the body:
+//   - the request's Authorization credential, validated fresh by identity-vessel (identityCredential, cache:false, the
+//     check operatorCredential makes), names a key id;
+//   - that key id must appear in an OPEN `verdictCorpusWriter` row (a trust-root shape: operator-written, signed under
+//     this node's key) whose principal is goal-host-vessel. This vessel never learns goal-host's key id from a
+//     credential, env or file: the operator writes the row (the id is identity's, printed by the identity seeder);
+//   - this node's own key (node-self) is never the runner (every vessel on the node holds it), and a credential with
+//     the admin scope is never the runner either: operators are refused, so clearing a hold needs a green run, which
+//     needs the judge to be right. An allowlist row naming an admin key does not change that.
+// The grant is a frozen object this module mints and remembers in a WeakSet, so it cannot arrive in JSON and an
+// in-process caller that holds no grant (the generic poolImpulse_write case) is refused like any other.
+// `source: 'verdictCorpusRun'` is required on the write. It is a LABEL naming the runner path, not authority: this
+// vessel cannot see inside goal-host, so the grant narrows a forger to whatever holds goal-host's credential.
+// Every refused write is RECORDED: a server-written `verdictCorpusWriteRefusal` row per principal (count, first/last
+// time, last reason), readable like any pool row and never writable from outside. Reads of both shapes stay open.
+export const VERDICT_CORPUS_STATUS_SHAPE = 'verdictCorpusStatus';
+/** The one status row per store (goal-host reads it by this id). */
+export const VERDICT_CORPUS_STATUS_ID = 'verdictCorpusStatus';
+export const VERDICT_CORPUS_WRITER_SHAPE = 'verdictCorpusWriter';
+export const VERDICT_CORPUS_WRITER_PRINCIPAL = 'goal-host-vessel';
+export const VERDICT_CORPUS_RUN_SOURCE = 'verdictCorpusRun';
+export const VERDICT_CORPUS_REFUSAL_SHAPE = 'verdictCorpusWriteRefusal';
+const VERDICT_CORPUS_REFUSAL_ID_PREFIX = 'verdictCorpusWriteRefusal:';
+/** Shapes only the runner grant (status) or this module itself (refusals) writes. */
+export const RUNNER_ONLY_POOL_SHAPES: ReadonlySet<string> = new Set([VERDICT_CORPUS_STATUS_SHAPE, VERDICT_CORPUS_REFUSAL_SHAPE]);
+
+export interface VerdictCorpusWriterGrant { readonly key_id: string; readonly principal: string }
+const runnerGrants = new WeakSet<object>();
+function mintRunnerGrant(key_id: string, principal: string): VerdictCorpusWriterGrant {
+  const g = Object.freeze({ key_id, principal });
+  runnerGrants.add(g);
+  return g;
+}
+/** Tests only: a grant without asking identity. Not reachable from any request. */
+export function __mintVerdictCorpusWriterGrantForTests(key_id: string): VerdictCorpusWriterGrant {
+  return mintRunnerGrant(key_id, VERDICT_CORPUS_WRITER_PRINCIPAL);
+}
+
+/** The caller as a refusal record names it: identity's key id, node-self, or unauthenticated. Nothing derived from a key. */
+export function poolCallerLabel(cred: CallerCredential | null | undefined): string {
+  if (!cred) return 'in-process';
+  if (!cred.authenticated) return 'unauthenticated';
+  if (isNodeSelfCredential(cred)) return 'node-self';
+  return cred.keyId ? `key_id:${cred.keyId}` : `scopes:${[...cred.scopes].sort().join(',') || 'none'}`;
+}
+
+/** Whether `row` carries a stamp by `by` whose signature verifies under THIS node's key (operator-hold's check,
+ *  kept here so the store does not import its readers). */
+export function verifyPoolAttestation(row: StandingImpulse, by: 'operator' | 'runner'): { ok: true } | { ok: false; why: string } {
+  const a = row.attested;
+  if (!a) return { ok: false, why: 'unattested' };
+  if (a.by !== by) return { ok: false, why: `attested by ${String(a.by)}, not by ${by}` };
+  if (typeof a.sig !== 'string' || a.sig.length === 0) return { ok: false, why: 'stamp is unsigned' };
+  const key = nodeKey();
+  if (!key) return { ok: false, why: 'no node key to verify the stamp with' };
+  const want = Buffer.from(attestationSig(key, row, a.key_id ?? null, a.at), 'utf8');
+  const got = Buffer.from(a.sig, 'utf8');
+  if (got.length !== want.length || !timingSafeEqual(got, want)) return { ok: false, why: 'stamp signature does not verify' };
+  return { ok: true };
+}
+
+/** The key ids the operator allowlisted as the runner: open verdictCorpusWriter rows, operator-attested and verified,
+ *  naming goal-host-vessel. A row that does not verify grants nothing. */
+export function verdictCorpusWriterKeyIds(): string[] {
+  const ids: string[] = [];
+  for (const row of loadImpulses()) {
+    if (row.shape !== VERDICT_CORPUS_WRITER_SHAPE || row.status !== 'open') continue;
+    if (!verifyPoolAttestation(row, 'operator').ok) continue;
+    const b = (row.body !== null && typeof row.body === 'object' ? row.body : {}) as Record<string, unknown>;
+    if (b['principal'] === VERDICT_CORPUS_WRITER_PRINCIPAL && typeof b['key_id'] === 'string' && b['key_id']) ids.push(b['key_id']);
+  }
+  return ids;
+}
+
+/** The runner decision over a validated credential and the allowlisted key ids (pure). */
+export function verdictCorpusWriterDecision(cred: CallerCredential | null | undefined, allowedKeyIds: readonly string[]): { admit: true; key_id: string } | { admit: false; why: string } {
+  if (!cred || cred.authenticated !== true) return { admit: false, why: cred?.why ? `not authenticated (${cred.why})` : 'not authenticated' };
+  if (isNodeSelfCredential(cred)) return { admit: false, why: "this node's own key is never the corpus runner" };
+  if (cred.scopes.includes('admin')) return { admit: false, why: 'an operator (admin) credential is never the corpus runner' };
+  if (!cred.keyId) return { admit: false, why: "identity's answer names no key id" };
+  if (allowedKeyIds.length === 0) return { admit: false, why: `no operator-attested ${VERDICT_CORPUS_WRITER_SHAPE} row is open` };
+  if (!allowedKeyIds.includes(cred.keyId)) return { admit: false, why: `key ${cred.keyId} is not the allowlisted ${VERDICT_CORPUS_WRITER_PRINCIPAL} principal` };
+  return { admit: true, key_id: cred.keyId };
+}
+
+/** The runner grant for the request's Authorization header, or null and why; `principal` names the caller for the
+ *  refusal record. Asked fresh every time (a status write is rare and must see a revocation at once). */
+export async function verdictCorpusWriterGrant(authHeader: string | undefined): Promise<{ grant: VerdictCorpusWriterGrant | null; principal: string; why?: string }> {
+  const cred = await identityCredential(authHeader, { cache: false });
+  const principal = poolCallerLabel(cred);
+  const d = verdictCorpusWriterDecision(cred, verdictCorpusWriterKeyIds());
+  return d.admit ? { grant: mintRunnerGrant(d.key_id, VERDICT_CORPUS_WRITER_PRINCIPAL), principal } : { grant: null, principal, why: d.why };
+}
+
+/** The runner-only shape a write would create or modify (its own shape, its reserved id, or the shape of the row its id
+ *  names), or null. */
+export function runnerOnlyWriteShape(pointer: { id?: string; shape?: string }): string | null {
+  if (typeof pointer.shape === 'string' && RUNNER_ONLY_POOL_SHAPES.has(pointer.shape)) return pointer.shape;
+  if (pointer.id === VERDICT_CORPUS_STATUS_ID) return VERDICT_CORPUS_STATUS_SHAPE;
+  if (typeof pointer.id === 'string' && pointer.id.startsWith(VERDICT_CORPUS_REFUSAL_ID_PREFIX)) return VERDICT_CORPUS_REFUSAL_SHAPE;
+  if (typeof pointer.id === 'string') {
+    const existing = loadImpulses().find((imp) => imp.id === pointer.id);
+    if (existing && RUNNER_ONLY_POOL_SHAPES.has(existing.shape)) return existing.shape;
+  }
+  return null;
+}
+
+/** Record a refused runner-only write: one row per caller, upserted (bounded by distinct authenticated principals). */
+function recordRunnerRefusal(principal: string, why: string, attemptedId: string): void {
+  try {
+    const all = loadImpulses();
+    const now = new Date().toISOString();
+    const id = VERDICT_CORPUS_REFUSAL_ID_PREFIX + principal;
+    const idx = all.findIndex((imp) => imp.id === id);
+    const prev = (idx >= 0 && all[idx]!.body !== null && typeof all[idx]!.body === 'object' ? all[idx]!.body : {}) as Record<string, unknown>;
+    const body = { principal, count: (typeof prev['count'] === 'number' ? prev['count'] : 0) + 1, first_at: typeof prev['first_at'] === 'string' ? prev['first_at'] : now, last_at: now, last_why: why, last_attempted_id: attemptedId };
+    const row: StandingImpulse = { id, shape: VERDICT_CORPUS_REFUSAL_SHAPE, body, source: 'pool-impulse', status: 'open', injected_at: idx >= 0 ? all[idx]!.injected_at : now, updated_at: now };
+    if (idx >= 0) all[idx] = row; else all.push(row);
+    saveImpulses(all);
+  } catch (err) {
+    console.error(`[pool] could not record the refused verdictCorpusStatus write by ${principal}: ${String((err as Error)?.message ?? err)}`);
+  }
+}
+
+/** What a verdictCorpusStatus body must carry for the reader to interpret it (credit-hold.ts holdView); [] when valid. */
+export function verdictCorpusStatusProblems(body: unknown): string[] {
+  const b = (body !== null && typeof body === 'object' && !Array.isArray(body) ? body : null) as Record<string, unknown> | null;
+  if (!b) return ['body'];
+  const out: string[] = [];
+  if (!isoString(b['run_at'])) out.push('run_at');
+  if (!Array.isArray(b['holds'])) out.push('holds');
+  return out;
 }
 
 /** The fields every operatorHold body carries (the gap store's operator_hold vocabulary: by/at/reason, plus what
@@ -219,7 +362,35 @@ export function resolvePoolImpulseWrite(pointer: {
   if_updated_at?: string;
   /** Caller-supplied attestation: NEVER stored. The row's `attested` is the server's stamp or absent. */
   attested?: unknown;
-}, auth?: PoolWriteAuth): { shape: string; body: { ok: boolean; id: string; conflict?: boolean; current_updated_at?: string | null; error?: string; hint?: string; missing?: string[] } } {
+}, auth?: PoolWriteAuth, runner?: { grant?: VerdictCorpusWriterGrant | null; principal?: string; why?: string }): { shape: string; body: { ok: boolean; id: string; conflict?: boolean; current_updated_at?: string | null; error?: string; hint?: string; missing?: string[] } } {
+  // RUNNER-ONLY SHAPES (the verdict corpus runner grant above). Checked first: a runner-only write is never also a
+  // trust-root write, and no operator credential admits one.
+  const runnerShape = runnerOnlyWriteShape(pointer);
+  const runnerGrant = runner?.grant && runnerGrants.has(runner.grant) ? runner.grant : null;
+  if (runnerShape) {
+    const principal = runner?.principal ?? (auth ? (auth.key_id ? `key_id:${auth.key_id}` : 'unidentified') : 'in-process');
+    const attempted = String(pointer.id ?? '(new)');
+    const refuse = (code: string, why: string, hint?: string) => {
+      console.warn(`[pool] REFUSED ${runnerShape} write (id=${attempted}) by ${principal}: ${why}`);
+      recordRunnerRefusal(principal, `${code}: ${why}`, attempted);
+      return { shape: 'poolImpulse_write', body: { ok: false, id: String(pointer.id ?? ''), error: `${code}: ${why}`, ...(hint ? { hint } : {}) } };
+    };
+    if (runnerShape === VERDICT_CORPUS_REFUSAL_SHAPE) return refuse('runner_principal_required', `${VERDICT_CORPUS_REFUSAL_SHAPE} rows are written only by this store`);
+    if (!runnerGrant) return refuse('runner_principal_required', `${VERDICT_CORPUS_STATUS_SHAPE} is written only by ${VERDICT_CORPUS_WRITER_PRINCIPAL}'s own principal publishing a corpus run${runner?.why ? `; ${runner.why}` : ''}`);
+    if (pointer.shape !== VERDICT_CORPUS_STATUS_SHAPE || (pointer.id !== undefined && pointer.id !== VERDICT_CORPUS_STATUS_ID)) {
+      return refuse('runner_shape_immutable', `the runner writes shape ${VERDICT_CORPUS_STATUS_SHAPE} under id ${VERDICT_CORPUS_STATUS_ID} only`, 'name both shape and id; no other id may hold this shape and this id holds no other shape');
+    }
+    const existing = loadImpulses().find((imp) => imp.id === VERDICT_CORPUS_STATUS_ID);
+    if (existing && existing.shape !== VERDICT_CORPUS_STATUS_SHAPE) return refuse('runner_shape_immutable', `${VERDICT_CORPUS_STATUS_ID} is held by a ${existing.shape} row`);
+    if (pointer.source !== VERDICT_CORPUS_RUN_SOURCE) return refuse('runner_principal_required', `a status write names source ${VERDICT_CORPUS_RUN_SOURCE} (the runner path)`);
+    if (pointer.status !== undefined && pointer.status !== 'open') return refuse('runner_principal_required', 'the status record is never retired or consumed; a newer run replaces it');
+    const missing = verdictCorpusStatusProblems(stripCallerAttestation(pointer.body));
+    if (missing.length > 0) {
+      console.warn(`[pool] REFUSED ${VERDICT_CORPUS_STATUS_SHAPE} write: invalid ${missing.join(', ')}`);
+      return { shape: 'poolImpulse_write', body: { ok: false, id: VERDICT_CORPUS_STATUS_ID, error: `verdict_corpus_status_invalid: missing or invalid ${missing.join(', ')}`, missing, hint: 'a status body carries run_at (ISO) and holds (array)' } };
+    }
+    pointer = { ...pointer, id: VERDICT_CORPUS_STATUS_ID };
+  }
   const trustRoot = trustRootWriteShape(pointer);
   const evaluatorGrant = !!trustRoot && auth?.operator !== true && typeof auth?.evaluator === 'string' && EVALUATOR_TRUST_ROOT_WRITERS[trustRoot] === auth.evaluator;
   if (trustRoot && auth?.operator !== true && !evaluatorGrant) {
@@ -260,10 +431,12 @@ export function resolvePoolImpulseWrite(pointer: {
       return { shape: 'poolImpulse_write', body: { ok: false, id, conflict: true, current_updated_at: cur ?? null } };
     }
   }
-  // SERVER-SIDE ATTESTATION. Reaching here with trustRoot set means the operator check above passed, so
-  // this write is stamped; every other write carries no attestation (a previous stamp is not carried
+  // SERVER-SIDE ATTESTATION. Reaching here with trustRoot set means the operator check above passed, and with
+  // runnerShape set means the runner grant did (stamped by 'runner' with the grant's key id), so this write is
+  // stamped; every other write carries no attestation (a previous stamp is not carried
   // forward either: it attests the write that made it). pointer.attested is never read.
-  const attestation: PoolAttestation | null = !trustRoot ? null
+  const attestation: PoolAttestation | null = runnerShape && runnerGrant ? { by: 'runner', key_id: runnerGrant.key_id, at: now }
+    : !trustRoot ? null
     : evaluatorGrant ? { by: 'evaluator', evaluator: auth!.evaluator!, key_id: null, at: now }
     : { by: 'operator', key_id: auth?.key_id ?? null, at: now };
   // Signed over the row exactly as stored (below). The key is read here, at write time, never from a
@@ -271,7 +444,7 @@ export function resolvePoolImpulseWrite(pointer: {
   // a reader fails closed on a missing sig anyway).
   const sign = (stored: StandingImpulse): StandingImpulse => {
     if (!stored.attested) return stored;
-    const key = process.env['METABOB_API_KEY'] ?? '';
+    const key = nodeKey();
     if (!key) {
       console.warn(`[pool] ${stored.shape} ${stored.id} stamped unsigned: this node has no METABOB_API_KEY, so readers will refuse it`);
       return stored;

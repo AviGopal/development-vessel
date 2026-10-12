@@ -298,6 +298,8 @@ export const SCOPE_CLASSIFICATION: Readonly<Record<string, ScopeClass>> = {
   "repos/development-vessel/test/resolvers/feature-compose-adversarial-quorum.test.ts": { class: "judge_trust", reason: "pins that a refuter outage refuses the patch (verdict tests)" },
   "repos/development-vessel/test/resolvers/intervention-refused-write-principal.test.ts": { class: "judge_trust", reason: "pins the refusal record's writer check (credential tests)" },
   "repos/development-vessel/test/lib/operator-direct.test.ts": { class: "judge_trust", reason: "pins the operator:direct grant check (credential tests)" },
+  "repos/development-vessel/test/resolvers/verdict-corpus-writer-grant.test.ts": { class: "judge_trust", reason: "pins that only goal-host's own principal writes the verdict corpus status (credential tests)" },
+  "repos/goal-host-vessel/test/verdict-corpus/credit-hold-source.test.ts": { class: "judge_trust", reason: "pins that the credit stop reads its holds only from the runner-verified pool record (credit tests)" },
   "repos/activity-api/src/services/variant-creator.ts": { class: "judge_trust", reason: "holds the variant retirement verdict (verdict)" },
   "repos/activity-api/src/policy/gate-input-rows.ts": { class: "judge_trust", reason: "the gate-input tuning rows a gate reads and who may write them (credential, verdict)" },
   "repos/activity-api/src/policy/gate-input-rows.test.ts": { class: "judge_trust", reason: "pins the gate-input tuning rows (credential tests)" },

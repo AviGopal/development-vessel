@@ -9,7 +9,9 @@
 //   - asks the open rules (src/judge-rules/routing-admission.ts admitCompose) and clamps their answer. The rules may
 //     only ADD a refusal the floor did not make, and only one this module can render from the input (scope_excluded,
 //     naming an entry the recorded scope port returned). Anything else is refused by the clamp and the floor stands;
-//   - renders every refusal's log line and report body from its stage, so an open rule cannot write text.
+//   - renders every refusal's log line and report body from its stage, so an open rule cannot write text;
+//   - never reads state the rules control after the call: the rules get a deep-frozen copy of the input (the clamp and
+//     the renderer read the core's own input), and their answer is taken once as plain data before the clamp reads it.
 // The routing corpus (test/routing-corpus/) replays composeAdmission records through composeAdmission() here, the same
 // function production calls.
 import { admitCompose } from "../judge-rules/routing-admission.js";
@@ -119,6 +121,18 @@ export function clampAdmission(i: ComposeAdmissionInput, out: unknown): Admissio
   return refuse("scope_excluded", "REFUSED", r.excluded_by);
 }
 
+/** A deep-frozen structured copy: the rules can neither mutate what the clamp reads after the call nor keep a handle. */
+function deepFrozenCopy<T>(v: T): T {
+  const copy = structuredClone(v);
+  const freeze = (o: unknown): void => {
+    if (o === null || typeof o !== "object" || Object.isFrozen(o)) return;
+    Object.freeze(o);
+    for (const k of Object.keys(o as object)) freeze((o as Record<string, unknown>)[k]);
+  };
+  freeze(copy);
+  return copy;
+}
+
 /** THE ENTRY (composeAdmission): the floor, then the clamped rules. production and the corpus both call this. */
 export function composeAdmission(raw: ComposeAdmissionInput): AdmissionDecision & { fell_back: boolean; events: AdmissionEvent[] } {
   const i: ComposeAdmissionInput = { ...raw, localization: validLocalizationRecord(raw.localization) ? raw.localization : null };
@@ -126,7 +140,8 @@ export function composeAdmission(raw: ComposeAdmissionInput): AdmissionDecision 
   const floor = floorAdmission(i);
   if (!floor.admit) return { ...floor, fell_back: false, events };
   let out: unknown;
-  try { out = admitCompose(i); } catch { out = undefined; }
+  // The answer is cloned once (getters run once; a Proxy throws): the clamp reads plain data the rules no longer hold.
+  try { out = structuredClone(admitCompose(deepFrozenCopy(i))); } catch { out = undefined; }
   const ok = clampAdmission(i, out);
   if (ok) return { ...ok, fell_back: false, events };
   admissionFellBack.count++;

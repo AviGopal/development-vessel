@@ -2,12 +2,13 @@
 //   bun test/routing-corpus/cli.ts run --json                    every case replayed; the CorpusReport as JSON
 //   bun test/routing-corpus/cli.ts append-check --from <n>       cases n.. must carry the status this tree observes
 //   bun test/routing-corpus/cli.ts append <case.json> [--slug s] operator act: canonicalise, number, observe, append
-//   bun test/routing-corpus/cli.ts heldout --sample <f> --json   replay JSONL records ({record_hash, entry, input, ports,
-//                                                                llm}) and print each record's decision
+//   bun test/routing-corpus/cli.ts heldout --sample <f> --json   replay JSONL held-out lines ({record_hash, family,
+//                                                                entry, delivered, input, ports, llm}); print a JSON
+//                                                                array [{record_hash, decision|null, unreplayable?}]
 // Exit codes: 0 ok, 1 a check failed, 2 usage.
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { appendCheck, canonical, ENTRIES, manifestLine, observedStatus, replayCase, runCorpus, sha256, verifyChain, type RoutingCase } from "./runner";
+import { appendCheck, canonical, heldoutReplay, manifestLine, observedStatus, replayCase, runCorpus, sha256, verifyChain, type HeldoutLine, type RoutingCase } from "./runner";
 
 const DIR = import.meta.dir;
 const [cmd, ...rest] = process.argv.slice(2);
@@ -51,16 +52,13 @@ async function main(): Promise<number> {
     return 0;
   }
   if (cmd === "heldout") {
+    // input: JSONL of {record_hash, family, entry, delivered, input, ports, llm}; output: a JSON array of
+    // {record_hash, decision | null, unreplayable?: [fields]}. A record missing a field the replay needs is
+    // unreplayable, never answered with a default.
     const f = opt("--sample");
     if (!f || !existsSync(f)) return 2;
-    const out: Array<{ record_hash: string; decision: unknown; error: string | null }> = [];
-    for (const line of readFileSync(f, "utf8").split("\n").filter(Boolean)) {
-      const rec = JSON.parse(line) as { record_hash: string; entry: string; input: unknown; ports: RoutingCase["ports"]; llm: RoutingCase["llm"] };
-      if (!ENTRIES[rec.entry]) { out.push({ record_hash: rec.record_hash, decision: null, error: `no entry ${rec.entry}` }); continue; }
-      const r = await replayCase({ schema: 1, id: "heldout", class: "heldout", entry: rec.entry, credit_class: null, edit_site: "", provenance: { source: "live-run", recorded: "", note: "" }, input: rec.input, ports: rec.ports, llm: rec.llm, expect: {}, status_at_append: "green", control: false, licenses: null });
-      out.push({ record_hash: rec.record_hash, decision: r.observed === "green" ? r.got : null, error: r.observed === "green" ? null : r.reason });
-    }
-    console.log(JSON.stringify({ records: out }));
+    const lines = readFileSync(f, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l) as HeldoutLine);
+    console.log(JSON.stringify(await heldoutReplay(lines)));
     return 0;
   }
   console.error("usage: cli.ts run --json | append-check --from <n> | append <case.json> [--slug s] | heldout --sample <f> --json");

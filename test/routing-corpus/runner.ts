@@ -9,7 +9,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { verifyChain, type Chain } from "./chain-lib";
-import { composeAdmission, type ComposeAdmissionInput } from "../../src/resolvers/compose-admission-core.js";
+import { composeAdmission, composeAdmissionReplayOf, type ComposeAdmissionInput } from "../../src/resolvers/compose-admission-core.js";
 
 /** composeAdmission reads no port: its record carries the gathered evidence, the scope port's answers included. */
 export type RoutingPorts = Record<string, never>;
@@ -150,5 +150,37 @@ export async function appendCheck(dir: string, from: number): Promise<{ ok: bool
     .map((r) => `${r.id}: status_at_append ${r.status_at_append}, observed ${r.observed}${r.reason ? ` (${r.reason})` : ""}`);
   return { ok: mismatches.length === 0 && report.problems.length === 0, mismatches: [...report.problems, ...mismatches], report };
 }
+// ── held-out replay (the admission glue's contract) ───────────────────────────────────────────────────────────────
+/** One held-out sample line: a delivered production decision and the captured record it was decided from. */
+export type HeldoutLine = { record_hash: string; family: string; entry: string; delivered: unknown; input: unknown; ports?: unknown; llm?: unknown };
+/** One held-out answer: the candidate's decision for the record, or null with the fields that make it unreplayable. */
+export type HeldoutResult = { record_hash: string; decision: unknown | null; unreplayable?: string[] };
+export type Adapted = { ok: true; input: unknown; ports: unknown; llm: unknown } | { ok: false; unreplayable: string[] };
+
+/** The captured -> replay adapters, by entry. An entry with none is unreplayable, never answered. */
+export const REPLAY_ADAPTERS: Record<string, (line: HeldoutLine) => Adapted> = {
+  composeAdmission: (l) => { const a = composeAdmissionReplayOf(l.input); return a.ok ? { ok: true, input: a.input, ports: {}, llm: null } : a; },
+};
+export const ROUTING_FAMILY = "routing_input";
+
+/** Replay held-out records through the entries. Never defaults: a record the adapter cannot complete is unreplayable. */
+export async function heldoutReplay(lines: readonly HeldoutLine[], adapters: Record<string, (line: HeldoutLine) => Adapted> = REPLAY_ADAPTERS): Promise<HeldoutResult[]> {
+  const out: HeldoutResult[] = [];
+  for (const l of lines) {
+    const hash = typeof l?.record_hash === "string" ? l.record_hash : "";
+    if (!hash) { out.push({ record_hash: "", decision: null, unreplayable: ["record_hash"] }); continue; }
+    if (l.family !== ROUTING_FAMILY) { out.push({ record_hash: hash, decision: null, unreplayable: ["family"] }); continue; }
+    const adapt = adapters[l.entry];
+    if (!adapt || !ENTRIES[l.entry]) { out.push({ record_hash: hash, decision: null, unreplayable: ["entry"] }); continue; }
+    let a: Adapted;
+    try { a = adapt(l); } catch (e) { a = { ok: false, unreplayable: [`adapter_error: ${(e as Error).message}`] }; }
+    if (!a.ok) { out.push({ record_hash: hash, decision: null, unreplayable: a.unreplayable }); continue; }
+    const c = { schema: 1, id: "heldout", class: "heldout", entry: l.entry, credit_class: null, edit_site: "", provenance: { source: "live-run", recorded: "", note: "" }, input: a.input, ports: a.ports, llm: a.llm, expect: {}, status_at_append: "green", control: false, licenses: null } as unknown as RoutingCase;
+    const r = await replayCase(c);
+    out.push(r.observed === "green" ? { record_hash: hash, decision: r.got } : { record_hash: hash, decision: null, unreplayable: [`replay_error: ${r.observed}${r.reason ? ` (${r.reason})` : ""}`] });
+  }
+  return out;
+}
+
 export { canonical, sha256, linkOf, manifestLine, GENESIS } from "./chain-lib";
 export { verifyChain };

@@ -158,3 +158,48 @@ export function renderAdmissionRefusal(i: ComposeAdmissionInput, r: AdmissionRef
       return { log: `${pre} scope_excluded (edit site ${i.edit_site ?? "(none)"} is excluded by ${r.excluded_by})`, body: { ok: false, verdict: "REFUSED", stage: "scope_excluded", excluded_by: r.excluded_by, error: `gap ${g}: its edit site ${i.edit_site ?? "(none)"} is excluded from autonomous work by scope entry ${r.excluded_by} (${lane} compose not started)` } };
   }
 }
+
+// ── the captured -> replay adapter ────────────────────────────────────────────────────────────────────────────────
+/**
+ * A captured composeAdmission record (src/judge/routing-capture.ts) as composeAdmission's input. NEVER A DEFAULT: a
+ * field the replay needs that the record lacks, or carries as null where null is not a value, makes the record
+ * UNREPLAYABLE with every such field named. The replay needs gap_id, lane, land, supply_marker, stored and operator_hold
+ * (never null); edit_site, why, supply_verdict and localization (present; null is a value); scope (a map, or null with
+ * a scope_reason saying why it was not read). A truncated record (fields clipped) is unreplayable.
+ */
+export function composeAdmissionReplayOf(record: unknown): { ok: true; input: ComposeAdmissionInput } | { ok: false; unreplayable: string[] } {
+  const isObj = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
+  if (!isObj(record)) return { ok: false, unreplayable: ["input"] };
+  const r = record;
+  const has = (k: string) => Object.prototype.hasOwnProperty.call(r, k);
+  const missing: string[] = [];
+  if (r.schema !== 1) missing.push("schema");
+  if (r.entry !== "composeAdmission") missing.push("entry");
+  if (typeof r.gap_id !== "string" || !r.gap_id) missing.push("gap_id");
+  if (r.lane !== "directed" && r.lane !== "undirected") missing.push("lane");
+  for (const k of ["land", "supply_marker", "operator_hold"]) if (typeof r[k] !== "boolean") missing.push(k);
+  if (r.stored !== "unreadable" && r.stored !== "absent" && r.stored !== "present") missing.push("stored");
+  if (!has("edit_site") || (r.edit_site !== null && typeof r.edit_site !== "string")) missing.push("edit_site");
+  if (!has("why") || (r.why !== null && typeof r.why !== "string")) missing.push("why");
+  const sv = r.supply_verdict;
+  if (!has("supply_verdict") || (sv !== null && !(isObj(sv) && typeof sv.admit === "boolean"))) missing.push("supply_verdict");
+  if (!has("localization")) missing.push("localization");
+  if (!has("scope") || (r.scope !== null && !isObj(r.scope))) missing.push("scope");
+  else if (r.scope === null && (typeof r.scope_reason !== "string" || !r.scope_reason)) missing.push("scope_reason");
+  if (r.truncated === true) missing.push("truncated");
+  if (missing.length) return { ok: false, unreplayable: missing };
+  return {
+    ok: true,
+    input: {
+      schema: 1, entry: "composeAdmission", gap_id: r.gap_id as string, lane: r.lane as "directed" | "undirected",
+      land: r.land as boolean, supply_marker: r.supply_marker as boolean, stored: r.stored as ComposeAdmissionInput["stored"],
+      operator_hold: r.operator_hold as boolean, why: r.why as string | null,
+      supply_verdict: sv === null ? null : { admit: (sv as { admit: boolean }).admit, why: typeof (sv as { why?: unknown }).why === "string" ? (sv as { why: string }).why : null },
+      edit_site: r.edit_site as string | null, scope: r.scope as Record<string, string | null> | null,
+      scope_reason: (typeof r.scope_reason === "string" ? r.scope_reason : null), localization: r.localization,
+      ...(has("falsifier_class") ? { falsifier_class: r.falsifier_class as string | null } : {}),
+      ...(has("armed") ? { armed: r.armed as boolean } : {}),
+      ...(has("supply_exception") ? { supply_exception: r.supply_exception as { admitted: boolean; why: string } | null } : {}),
+    },
+  };
+}

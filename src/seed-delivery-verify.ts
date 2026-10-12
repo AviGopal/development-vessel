@@ -7,18 +7,24 @@
  * exported ActivityTemplate's tasks (its resolvers, their config) under src/seed/ without raising metadata.seed_version
  * lands, typechecks, and can pass a check that reads the template's literals, while changing nothing any node runs.
  *
- * THE RULE: for each file under src/seed/ that the draft EDITED (it existed before; a new file is not judged here),
- * each exported template present before and after (`export const NAME: ActivityTemplate = { … }`, or the same without
- * the annotation when the object has a `tasks:` member) whose `tasks:` array text changed (comments and whitespace
- * ignored) must carry a metadata.seed_version strictly greater than before (absent = 0). Otherwise verify fails with
- * seedDeliveryReason. Templates whose tasks did not change, and every file outside src/seed/, are not judged.
+ * THE RULE, for each file under src/seed/ the draft edited or created, over its exported templates
+ * (`export const NAME: ActivityTemplate = { … }`, or the same without the annotation when the object has a `tasks:`
+ * member):
+ *   - a template present before and after whose `tasks:` array text changed (comments and whitespace ignored) must carry
+ *     a metadata.seed_version strictly greater than before (absent = 0);
+ *   - a NEW template (absent before: added to an existing seed file, or in a new file) must carry a positive
+ *     metadata.seed_version. A cold-start (empty) catalogue bulk-seeds every template, so the rule is about POPULATED
+ *     catalogues, which every running node has: there delivery treats an absent seed as version 0 and uploads it only
+ *     when its seed_version is >= 1.
+ * Otherwise verify fails with seedDeliveryReason. Templates whose tasks did not change, and every file outside
+ * src/seed/, are not judged.
  *
  * Static and textual on purpose (no draft code is executed). Known limits: a template built by a function call or
  * spread from another object is not recognised (not judged); a seed_version computed from an expression reads as 0.
  */
 
 export type SeedEdit = { path: string; pre: string; post: string };
-export type SeedDeliveryRefusal = { path: string; template: string; before: number; after: number };
+export type SeedDeliveryRefusal = { path: string; template: string; before: number; after: number; added?: true };
 
 const SEED_DIR_RE = /(?:^|\/)src\/seed\//;
 
@@ -97,11 +103,14 @@ export function seedDeliveryRefusals(edits: ReadonlyArray<SeedEdit>): SeedDelive
   const out: SeedDeliveryRefusal[] = [];
   for (const e of edits) {
     const rel = seedRel(e.path);
-    if (!rel || !SEED_DIR_RE.test(rel) || !e.pre) continue;
-    const before = seedTemplates(e.pre), after = seedTemplates(e.post);
-    for (const [name, b] of before) {
-      const a = after.get(name);
-      if (!a || a.tasks === b.tasks) continue;
+    if (!rel || !SEED_DIR_RE.test(rel)) continue;
+    const before = seedTemplates(e.pre ?? ""), after = seedTemplates(e.post);
+    for (const [name, a] of after) {
+      const b = before.get(name);
+      // A NEW template (added to an existing seed file, or in a new one) must carry a positive seed_version: a populated
+      // catalogue's delivery skips a seed whose seed_version is absent or <= 0 (a cold start bulk-seeds it regardless).
+      if (!b) { if (!(a.seed_version > 0)) out.push({ path: rel, template: name, before: 0, after: a.seed_version, added: true }); continue; }
+      if (a.tasks === b.tasks) continue;
       if (!(a.seed_version > b.seed_version)) out.push({ path: rel, template: name, before: b.seed_version, after: a.seed_version });
     }
   }
@@ -114,6 +123,6 @@ export function touchesSeed(paths: ReadonlyArray<string>): boolean {
 }
 
 export function seedDeliveryReason(r: ReadonlyArray<SeedDeliveryRefusal>): string {
-  const list = r.slice(0, 3).map((x) => `${x.template} in ${x.path} (metadata.seed_version ${x.before} -> ${x.after})`).join("; ");
-  return `THE SEED TEMPLATE EDIT ${list}${r.length > 3 ? ` +${r.length - 3}` : ""}: cannot reach the runtime: seed delivery re-uploads only on a seed_version bump (a running node's catalogue keeps the registered template otherwise). Raise metadata.seed_version above its current value in the same edit (add metadata: { seed_version: 1 } to a template that has none).`;
+  const list = r.slice(0, 3).map((x) => x.added ? `new template ${x.template} in ${x.path} (metadata.seed_version ${x.after || "absent"})` : `${x.template} in ${x.path} (metadata.seed_version ${x.before} -> ${x.after})`).join("; ");
+  return `THE SEED TEMPLATE EDIT ${list}${r.length > 3 ? ` +${r.length - 3}` : ""}: cannot reach the runtime: seed delivery re-uploads only on a seed_version bump (on a populated catalogue, every running node's, a changed template is kept as registered and a new one is never uploaded without seed_version >= 1; only a cold-start catalogue bulk-seeds). Raise metadata.seed_version above its current value in the same edit (add metadata: { seed_version: 1 } to a template that has none).`;
 }

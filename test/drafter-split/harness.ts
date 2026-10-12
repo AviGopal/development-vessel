@@ -27,7 +27,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, relative, isAbsolute } from "node:path";
 
 export type Row = Record<string, any>;
-export type PlanKind = "pass" | "verify_red" | "non_unique" | "off_target" | "create" | "no_ops" | "drafter_edit" | "seed_edit" | "seed_edit_bumped";
+export type PlanKind = "pass" | "verify_red" | "non_unique" | "off_target" | "create" | "no_ops" | "drafter_edit" | "seed_edit" | "seed_edit_bumped" | "seed_new" | "seed_new_versioned";
 export interface Fixture {
   name: string;
   /** feature_compose pointer (type added). */
@@ -106,6 +106,8 @@ export const CHECK_SRC = [
 /** A synthetic seed template (src/seed/) with one task, for the seed-delivery verify rule (seed_edit plans; no corpus
  *  fixture uses it). */
 export const SEED_T = `repos/${VESSEL}/src/seed/demo-sweep-tick.ts`;
+/** A new seed file the seed_new plans create. */
+export const SEED_NEW_T = `repos/${VESSEL}/src/seed/demo-audit-tick.ts`;
 export const SEED_CONFIG_LINE = '      config: { type: "demo_sweep", staleHours: 48, autoClose: true },';
 export const SEED_TICK_SRC = [
   'import type { ActivityTemplate } from "@avigopal/ias-executor-ts";',
@@ -274,6 +276,12 @@ export function createHarness(ROOT: string, RUNTIME: string) {
       case "no_ops": return [];
       case "drafter_edit": return [edit("export const DRAFTER_FIXTURE = 1;", "export const DRAFTER_FIXTURE = 2;", "repos/development-vessel/src/drafter/index.ts")];
       case "seed_edit": return [edit(SEED_CONFIG_LINE, SEED_CONFIG_LINE.replace("autoClose: true }", "autoClose: true, auditOnly: true }"), SEED_T)];
+      case "seed_new":
+      case "seed_new_versioned": return [{
+        kind: "create_file", path: SEED_NEW_T, rationale: "fixture",
+        content: SEED_TICK_SRC.replace("DEMO_SWEEP_TICK_TEMPLATE", "DEMO_AUDIT_TICK_TEMPLATE").replace(/demo-sweep-tick/g, "demo-audit-tick")
+          .replace('  tags: ["demo"],', fx.plan === "seed_new_versioned" ? '  tags: ["demo"],\n  metadata: { seed_version: 1 },' : '  tags: ["demo"],'),
+      }];
       case "seed_edit_bumped": return [
         edit(SEED_CONFIG_LINE, SEED_CONFIG_LINE.replace("autoClose: true }", "autoClose: true, auditOnly: true }"), SEED_T),
         edit('  tags: ["demo"],', '  tags: ["demo"],\n  metadata: { seed_version: 1 },', SEED_T),

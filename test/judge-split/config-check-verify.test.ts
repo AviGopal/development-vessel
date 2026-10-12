@@ -11,7 +11,10 @@
 //       the bump verifies and is FAVORABLE (control).
 //   (e) DRAFTER CONTEXT: for a gap whose edit site is under src/seed/, the decompose prompt the drafter is shown carries
 //       the seed_version fact; for a non-seed edit site it does not (control).
-// MUTANTS (seen red): (d) runVerify without the seed-delivery gate; (e) the open lesson renderer returning "".
+//   (d') a NEW seed template (a new seed file, or a template added to one) without a positive seed_version is refused
+//       the same way; with seed_version >= 1 it verifies (control).
+// MUTANTS (seen red): (d) runVerify without the seed-delivery gate; (d') a rule that judges only templates present
+// before; (e) the open lesson renderer returning "".
 import { afterAll, describe, expect, it } from "bun:test";
 import { isolateRuntimeRoot } from "../helpers/runtime-root.js";
 
@@ -68,6 +71,47 @@ describe("(d) verify: a seed template's task edit must bump metadata.seed_versio
     expect(verifyText(body) + rec.console.join("\n")).not.toContain(REASON);
     expect(rec.verdict).toBe("FAVORABLE");
   }, 60_000);
+});
+
+const SEED_NEW_T = (H_MOD as { SEED_NEW_T?: string }).SEED_NEW_T ?? `repos/${VESSEL}/src/seed/demo-audit-tick.ts`;
+function newSeedFixture(name: string, plan: "seed_new" | "seed_new_versioned"): Parameters<typeof H.run>[1] {
+  const id = `seed-${plan}`;
+  const summary = `there is no audit tick: ${SEED_NEW_T} must define one`;
+  return {
+    name,
+    pointer: {
+      spec: `Create ${SEED_NEW_T} exporting a demo audit tick ActivityTemplate.`,
+      verify_vessels: [`repos/${VESSEL}`], land: false, skip_push: true, directed: true,
+      gap: { id, summary },
+    },
+    plan: plan as never,
+    files: { [`${VESSEL}/src/seed/demo-sweep-tick.ts`]: SEED_TICK_SRC },
+    store: [{ id, status: "open", category: "code_quality", summary, classification_metadata: { edit_site: SEED_NEW_T } }],
+  };
+}
+
+describe("(d) verify: a NEW seed template must carry a positive metadata.seed_version (populated catalogues skip it otherwise)", () => {
+  it("REFUSED: a new seed file exporting a template without seed_version fails verify with the delivery reason", async () => {
+    const { rec, body } = await run(newSeedFixture("new seed without seed_version", "seed_new"));
+    expect(rec.applied.some((a) => a.includes("src/seed/demo-audit-tick.ts"))).toBe(true);
+    expect(rec.verdict).not.toBe("FAVORABLE");
+    expect(verifyText(body) + rec.console.join("\n")).toContain(REASON);
+  }, 60_000);
+  it("CONTROL: the same new file with seed_version 1 verifies and is FAVORABLE", async () => {
+    const { rec, body } = await run(newSeedFixture("new seed with seed_version", "seed_new_versioned"));
+    expect(rec.applied.some((a) => a.includes("src/seed/demo-audit-tick.ts"))).toBe(true);
+    expect(verifyText(body) + rec.console.join("\n")).not.toContain(REASON);
+    expect(rec.verdict).toBe("FAVORABLE");
+  }, 60_000);
+  it("RULE: a template ADDED to an existing seed file without seed_version is refused; with seed_version >= 1 it is not", async () => {
+    const m = await import("../../src/seed-delivery-verify.js");
+    const added = SEED_TICK_SRC + SEED_TICK_SRC.split("\n").slice(2).join("\n").replace("DEMO_SWEEP_TICK_TEMPLATE", "DEMO_EXTRA_TICK_TEMPLATE");
+    const r = m.seedDeliveryRefusals([{ path: "src/seed/demo-sweep-tick.ts", pre: SEED_TICK_SRC, post: added }]);
+    expect(r.map((x) => x.template)).toEqual(["DEMO_EXTRA_TICK_TEMPLATE"]);
+    expect(m.seedDeliveryReason(r)).toContain(REASON);
+    const versioned = added.replace(/(DEMO_EXTRA_TICK_TEMPLATE[\s\S]*?  tags: \["demo"\],)/, "$1\n  metadata: { seed_version: 2 },");
+    expect(m.seedDeliveryRefusals([{ path: "src/seed/demo-sweep-tick.ts", pre: SEED_TICK_SRC, post: versioned }])).toEqual([]);
+  });
 });
 
 describe("(e) drafter context: the seed_version fact is shown for a src/seed/ edit site", () => {

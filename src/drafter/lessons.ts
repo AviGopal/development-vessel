@@ -69,7 +69,20 @@ export function renderFileLessons(f: DrafterFacts): string {
   return block;
 }
 
+/** A seed file (src/seed/**): an activity template the runtime reads, delivered by seed version. */
+const SEED_PATH_RE = /(?:^|\/)src\/seed\/[^\s]+\.ts\b/;
+
+/**
+ * SEED DELIVERY, for a compose whose edit site or targets are under src/seed/: the fact the drafter needs at the moment
+ * it edits a seed template (verify refuses the edit without it: src/seed-delivery-verify.ts).
+ */
+export function renderSeedDeliveryLesson(f: DrafterFacts): string {
+  const sites = [String(f.gapMeta["edit_site"] ?? ""), ...f.targets.files];
+  if (!sites.some((s) => SEED_PATH_RE.test(s))) return "";
+  return "\n\nSEED TEMPLATES (src/seed/): a running substrate re-uploads an activity seed template only when its metadata.seed_version rises above the registered one (seed delivery skips a template whose seed_version is absent or unchanged), so an edit to a template's tasks or their config that does not raise metadata.seed_version never reaches the runtime, and verify refuses it. In the same edit, raise metadata.seed_version by one (add metadata: { seed_version: 1 } when the template has none). A template's config is read by its task's resolver: a change is only real if that resolver behaves differently with it, and it must keep doing what it did before.";
+}
+
 /** The lesson text the decompose prompt (after the principles) and the refine prompt read. */
 export function renderLessons(f: DrafterFacts): string {
-  return renderComposeLessons(f) + renderFileLessons(f) + renderSuccessCriterion(f);
+  return renderComposeLessons(f) + renderFileLessons(f) + renderSuccessCriterion(f) + renderSeedDeliveryLesson(f);
 }

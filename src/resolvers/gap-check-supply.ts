@@ -56,7 +56,7 @@ import {
   isParkingDisposition,
 } from "../judge/gap-eligibility.js";
 import { identifyVessel } from "../judge/gap-policy.js";
-import { checkImportsEditSite, checkSupplyCheckPath, vesselRelativeEditSite } from "./check-supply-admission.js";
+import { checkImportsEditSite, checkSupplyCheckPath, configEditSite, configSiteCheckGoal, consumerResolverModules, srcReaderAt, vesselRelativeEditSite, type SrcReader } from "./check-supply-admission.js";
 import { readFamilyRhythm, rhythmDueScore, rhythmSettlementOverlay, type RhythmBody } from "./rhythm-conductor-tick.js";
 // The check-run judge lives with the evaluator (scope-earn-in.ts, an excluded file): item 2 reads it from there.
 import { redForTheRightReason } from "./scope-earn-in.js";
@@ -181,8 +181,15 @@ function importSpecifier(testFile: string, siteRel: string): string {
  * sentence names only the check path (goal-host's edit-intent route targets the file the lead sentence names); the
  * edit site is named by its import specifier.
  */
-export function checkSupplyGoal(vessel: string, testFile: string, summary: string, site: string | null = null): string {
+export function checkSupplyGoal(vessel: string, testFile: string, summary: string, site: string | null = null, reader?: SrcReader): string {
   const siteRel = vesselRelativeEditSite(site);
+  // A CONFIG EDIT SITE (an activity seed or template) gets the consumer-behaviour goal (check-supply-admission.ts
+  // configSiteCheckGoal): the arm step refuses a check that only reads the template's literals.
+  const cfg = reader && siteRel ? configEditSite(siteRel, reader.read(siteRel)) : null;
+  if (cfg && siteRel) {
+    const consumerImports = consumerResolverModules(cfg.resolvers, reader!).map((module) => ({ module, spec: importSpecifier(testFile, module) }));
+    return configSiteCheckGoal({ vessel, testFile, symptom: symptomOf(summary), siteRel, siteImport: importSpecifier(testFile, siteRel), templates: cfg.templates, resolvers: cfg.resolvers, consumerImports });
+  }
   const imp = siteRel && /\.(?:[cm]?[jt]sx?)$/.test(siteRel)
     ? `Import the module the defect lives in as a namespace, import * as mod from "${importSpecifier(testFile, siteRel)}", and assert on it`
     : "Import the src module the defect lives in as a namespace (import * as mod from \"../../src/<file>\") and assert on it";
@@ -321,7 +328,7 @@ export async function resolveGapCheckSupplyTick(pointer: GapCheckSupplyTickPoint
     // W2, THE VERIFY'S RULE (check-supply-admission.ts checkImportsEditSite): the gap's edit site, imported in any
     // form testImportsFile reads; with none, an existing src module the test imports becomes it.
     const vesselDir = ledger.vessel;
-    const site = await checkImportsEditSite(src, ledger.test_file, ledger.edit_site ?? null, (rel) => existsSync(join(clonesRoot(), vesselDir, rel)));
+    const site = await checkImportsEditSite(src, ledger.test_file, ledger.edit_site ?? null, (rel) => existsSync(join(clonesRoot(), vesselDir, rel)), srcReaderAt(join(clonesRoot(), vesselDir)));
     const editSite = site.ok ? `repos/${vesselDir}/${site.edit_site}` : null;
     const why = onlyTestsProblem(titles)?.detail ?? (site.ok ? null : `${site.stage}: ${site.reason}`);
     if (why) {
@@ -427,7 +434,7 @@ export async function resolveGapCheckSupplyTick(pointer: GapCheckSupplyTickPoint
     let baselineTitles: string[] = [];
     try { baselineTitles = declaredTestTitles(readFileSync(join(clonesRoot(), vessel, testFile), "utf-8")); } catch { baselineTitles = []; }
     const summary = String(row["summary"] ?? "");
-    const goal = checkSupplyGoal(vessel, testFile, summary, site);
+    const goal = checkSupplyGoal(vessel, testFile, summary, site, srcReaderAt(join(clonesRoot(), vessel)));
     if (pointer.dry_run) { dispatched.push({ id, goal, dispatch_id: null }); continue; }
     const r = await resolveDispatchGoal({ type: "dispatch_goal", goal, variables: { gap_id: id, check_supply: true }, timeout_ms: 15_000 });
     if (r.shape !== "goalDispatchResult") {

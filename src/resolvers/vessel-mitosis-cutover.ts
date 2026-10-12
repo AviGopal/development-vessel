@@ -103,6 +103,25 @@ export async function pendingLandMeasurable(meta: Record<string, unknown>): Prom
 }
 
 /**
+ * WHAT A PENDING-LAND STAMP SETTLES ON. A gap with a behavioural (class-2) check, evidence_resolve or verify_shape,
+ * settles on that check: the sweep runs it (the one judge), so no line of the landing's diff is derived for it, and the
+ * stamp's journal line names the check ("own_check test_suite <file>", or the shape) as the predicate. Every other gap
+ * is unchanged: a gap with only a literal predicate class (hardcoded_url / expected_literal at an edit site) or with no
+ * predicate still has the removed line derived, which the stamp writes as a durability sentinel only when the row has
+ * no predicate of its own (the write's existing condition).
+ */
+export function pendingLandSettlement(meta: Record<string, unknown>): { kind: "own_check"; label: string } | { kind: "derive_removed_line" } {
+  const er = meta["evidence_resolve"] as { shape?: unknown; input?: { test_file?: unknown } } | null | undefined;
+  if (er && typeof er === "object") {
+    const shape = typeof er.shape === "string" && er.shape ? er.shape : "evidence_resolve";
+    const file = typeof er.input?.test_file === "string" ? ` ${er.input.test_file}` : "";
+    return { kind: "own_check", label: `${shape}${file}` };
+  }
+  if (typeof meta["verify_shape"] === "string" && (meta["verify_shape"] as string).trim()) return { kind: "own_check", label: `verify_shape ${String(meta["verify_shape"])}` };
+  return { kind: "derive_removed_line" };
+}
+
+/**
  * The human ask for a landing with nothing to measure it, on the needs-human-<gap> panel: the id the answer path
  * reads (solicitation_outcome_scan, escalation_disposition_apply gapIdFromPanelId), whose labelled lines
  * (VERIFY_SHAPE:, EDIT_SITE:, EXPECTED_LITERAL:) arm the gap with a check. One line names the gap and where the ask
@@ -173,7 +192,12 @@ export async function stampPendingLand(a: {
         // would pin the gap open forever. Failure to derive leaves the stamp exactly as it
         // was — no predicate is the safe outcome, and the sweep handles it by asking a human.
         let derived: { path: string; line: string } | null = null;
-        try {
+        // A GAP WITH A BEHAVIOURAL CHECK SETTLES ON THAT CHECK, NEVER ON A LINE OF THE DIFF (pendingLandSettlement).
+        // Such a row never received the literal (the write below already excluded it), but the derivation still ran
+        // and the journal named the diff's line as the predicate the sweep would close on, which it never is: the
+        // sweep runs the gap's own check. Now nothing is derived for it and the line names the check.
+        const settlement = pendingLandSettlement(stampMeta);
+        if (settlement.kind === "derive_removed_line") try {
           const cloneRoot = process.env["MITOSIS_PUSH_CLONE_DIR"];
           const repoDir = cloneRoot ? join(cloneRoot, vessel_name) : hostRepoRoot;
           const shown = await runGit(gitCmd, ["show", newSha, "--format="], repoDir);
@@ -226,7 +250,7 @@ export async function stampPendingLand(a: {
           },
         });
         if (unmeasurable) askHumanUnmeasurableLanding(stampRow, newSha);
-        console.log(`[mitosis-cutover] pending-land stamp gap=${gapId} sha=${newSha.slice(0, 12)} predicate=${derived ? JSON.stringify(derived.line.slice(0, 48)) : "none"} (sweep will close as landed_verified)`);
+        console.log(`[mitosis-cutover] pending-land stamp gap=${gapId} sha=${newSha.slice(0, 12)} predicate=${settlement.kind === "own_check" ? `own_check ${settlement.label}` : derived ? JSON.stringify(derived.line.slice(0, 48)) : "none"} (sweep will close as landed_verified)`);
       }
     }
   } catch (err) {

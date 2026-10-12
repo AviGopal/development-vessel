@@ -3408,7 +3408,8 @@ export function groundingFileBlock(repoPath: string, content: string, sliced: { 
   return `----- ${repoPath} -----\n${lead}${renderWindowForDrafter(`${shown}${truncated}`)}`;
 }
 
-async function groundVesselFiles(toolsEndpoint: string, verifyVessels: string[], focusHints: string[] = [], targetFiles: string[] = [], primaryProbe: string | string[] = "", lineHint: { file: string; start: number; end: number } | null = null): Promise<string> {
+// `capture` (the drafter split) records the listing and every file text this read, for the open module's facts.
+async function groundVesselFiles(toolsEndpoint: string, verifyVessels: string[], focusHints: string[] = [], targetFiles: string[] = [], primaryProbe: string | string[] = "", lineHint: { file: string; start: number; end: number } | null = null, capture?: DrafterGroundCapture): Promise<string> {
   const blocks: string[] = [];
   let contentBudget = GROUND_CONTENT_BUDGET;
   for (const v of verifyVessels.slice(0, 6)) {
@@ -3449,6 +3450,7 @@ async function groundVesselFiles(toolsEndpoint: string, verifyVessels: string[],
         if (t.startsWith(pfx) && !files.includes(t.slice(pfx.length)) && (await import("node:fs")).existsSync(`${vAbs}/${t.slice(pfx.length)}`)) files.push(t.slice(pfx.length));
       }
       const tree = files.map((f) => `  repos/${vRel}/${f}`).join("\n");
+      if (capture) capture.listing[`repos/${vRel}`] = [...files];
       // FINER grain: inject current contents while the byte budget holds. The
       // apply step already fs_reads for edits; this lets the PLANNER see existing
       // symbols/fields up front so it doesn't author a duplicate or a wrong call.
@@ -3471,6 +3473,7 @@ async function groundVesselFiles(toolsEndpoint: string, verifyVessels: string[],
             try { content = (await import("node:fs")).readFileSync(`${vAbs}/${f}`, "utf-8"); } catch { content = undefined; }
           }
           if (typeof content === "string") {
+            if (capture) capture.contents[`repos/${vRel}/${f}`] = content;
             const effBudget = target ? Math.max(contentBudget, PER_FILE_SLICE) : contentBudget;
             const sliced = focusedSlice(content, effBudget, focusHints, primaryProbe, lineHint && lineHint.file === `repos/${vRel}/${f}` ? lineHint : null);
             contentBudget -= sliced.slice.length;
@@ -4958,7 +4961,7 @@ async function ownConceptDbResolveUrl(shape: string): Promise<{ url: string; why
   }
 }
 const COMPOSE_FILE_LESSONS_PATH = "/workspace/proposals/compose-file-lessons.jsonl";
-async function fileLessonsBlock(specText?: string): Promise<string> {
+async function fileLessonsBlock(specText?: string, capture?: string[]): Promise<string> {
   // PER-FILE TYPECHECK LESSONS: verbatim tsc diagnostics from prior failed
   // attempts touching files named in this spec. File path is the stable key
   // across reworded re-dispatches (goal_hash is not).
@@ -4967,6 +4970,7 @@ async function fileLessonsBlock(specText?: string): Promise<string> {
     const { existsSync, readFileSync } = await import("node:fs");
     if (!existsSync(COMPOSE_FILE_LESSONS_PATH)) return "";
     const lines = readFileSync(COMPOSE_FILE_LESSONS_PATH, "utf8").split("\n").filter((l) => l.trim().length > 0).slice(-80);
+    if (capture) capture.push(...lines);
     const relevant: Array<{ at: string; files: string[]; tsc: string; kind?: string }> = [];
     for (const ln of lines) {
       try {
@@ -5017,7 +5021,8 @@ export function gapFailureClasses(meta: Record<string, unknown> | undefined): st
   return out;
 }
 
-export async function composeLessonsBlock(specText?: string, failureClasses: string[] = []): Promise<string> {
+// `capture` (the drafter split) records which source the recall used and the rows and lines it read.
+export async function composeLessonsBlock(specText?: string, failureClasses: string[] = [], capture?: DrafterLessonCapture): Promise<string> {
   // FIRST: semantic recall from concept-db — relevance to the current spec, not
   // JSONL recency. Fails open to the JSONL path when concept-db is down or empty.
   if (specText && specText.trim().length > 0) {
@@ -5054,6 +5059,7 @@ export async function composeLessonsBlock(specText?: string, failureClasses: str
         if (found.length > 0) {
           console.warn(`[compose-lessons] source=concept-db n=${found.length} class=${failureClasses[0] ?? "none"}`);
           const rawLessons = await Bun.file(COMPOSE_LESSONS_PATH).text().catch(() => "");
+          if (capture) Object.assign(capture, { source: "concept-db", query: failureClasses[0] ?? "", rows: [...found], tail: rawLessons.split("\n").slice(-400) });
           const latestByClass = new Map<string, string>();
           for (const line of rawLessons.split("\n").slice(-400)) { try { const rec = JSON.parse(line) as { class?: string; reason?: string }; if (rec.class && rec.reason) latestByClass.set(rec.class, rec.reason); } catch { /* skip unparseable line */ } }
           const obs = [...latestByClass.entries()].slice(-8).map(([c, r]) => `- ${c}: ${r.replace(/\s+/g, " ").trim().slice(0, 300)}`).join("\n");
@@ -5070,6 +5076,7 @@ export async function composeLessonsBlock(specText?: string, failureClasses: str
   try {
     const { readFileSync } = await import("node:fs");
     const lines = readFileSync(COMPOSE_LESSONS_PATH, "utf8").split("\n").filter((l) => l.trim().length > 0).slice(-60);
+    if (capture) Object.assign(capture, { source: "jsonl", query: failureClasses[0] ?? "", rows: [], tail: [...lines] });
     const counts = new Map<string, number>();
     for (const l of lines) { try { const r = JSON.parse(l) as { class?: string }; if (r.class) counts.set(r.class, (counts.get(r.class) ?? 0) + 1); } catch { /* skip bad line */ } }
     if (counts.size === 0) return "";
@@ -5675,13 +5682,312 @@ async function resolveFeatureComposeUncapped(pointer: FeatureComposePointer): Pr
   // the caller can charge it to the gap's lineage (gap-to-feature recordLineageSpend, value-per-cost 4.5).
   const usage: ComposeUsage = { input_tokens: 0, output_tokens: 0, calls: 0, cost_usd: 0 };
   try {
-    const r = await composeUsageStore.run(usage, () => resolveFeatureComposeInner(pointer, pointer.gap?.id, ws));
+    const drafter: { record?: DrafterRecord } = {};
+    const r0 = await composeUsageStore.run(usage, () => composeDrafterStore.run(drafter, () => resolveFeatureComposeInner(pointer, pointer.gap?.id, ws)));
+    // The drafter record (which assembly the drafter was shown, and why the floor was used) rides on the report.
+    const r = drafter.record && r0.body && typeof r0.body === "object" && !Array.isArray(r0.body) && (r0.body as Record<string, unknown>)["drafter"] === undefined
+      ? { ...r0, body: { ...(r0.body as Record<string, unknown>), drafter: drafter.record } } : r0;
     const rb = r.body;
     if (rb && typeof rb === "object" && !Array.isArray(rb) && (rb as Record<string, unknown>)["llm_usage"] === undefined) return { ...r, body: { ...(rb as Record<string, unknown>), llm_usage: { ...usage } } };
     return r;
   } finally { for (const v of unisolated) composeInFlight.delete(v); await ws.release(); }
   } finally { composesInFlight--; }
 }
+// ── THE DRAFTER SPLIT: THE CLOSED SIDE (clamps, fact capture, the open-module call, the floor) ─────────────────
+//
+// What the drafter is SHOWN is assembled by an open, pure module (src/drafter/). Everything that gates an edit, a
+// write or a verdict stays here. The module is called once per compose, through one dynamic import inside
+// resolveFeatureComposeInner, after this file's own assembly (THE FLOOR: the grounding, feedback and lessons built
+// above that call, unchanged) has run and every fact has been read:
+//   - the facts it gets are the values the floor computed or read, deep-frozen (targets, region, line hint, the
+//     listing and every file text the grounding read, the own check, the lineage lessons, the lesson recall);
+//   - the extra reads, lesson queries and ancestor depth it asks for are clamped here (READABLE allowlist, counts,
+//     bytes, depth) and fulfilled here; nothing it names is read unless it passes;
+//   - its context is validated here (exact keys, types, prompt bytes, op budget, target visibility, mandatory
+//     lines, net-new set); a refusal, a schema mismatch, a throw, or a compose targeting src/drafter/ drafts with
+//     the floor, recorded as drafter.fell_back on the report and in the journal. A prompt over the byte cap is
+//     REFUSED, never truncated: a cut prompt withholds information without saying so.
+// From the plan call on, the compose reads only closed values; the context only REPLACES the floor's grounding,
+// principles, lessons and feedback strings and the op budget (clamped to [min(4, C), C], C = pointer.max_ops ?? 24).
+// Phase 1 runs the module in-process: a hang is bounded only by the unit watchdog until it runs in a Worker.
+
+/** Bytes of one decompose (or refine) prompt built from an open context. Set from a measurement: the largest
+ *  grounding a decompose carried in the journal window of node 1 and compose2 (80,054 chars, 2026-10-07..11) plus
+ *  the prompt's fixed template, spec, feedback and lessons, with headroom (about 3x). */
+export const MAX_DRAFT_PROMPT_BYTES = 262_144;
+/** Extra reads an open module may ask for, and their total bytes (one grounding budget, four target windows and two
+ *  check windows). The files the floor's own grounding read are facts already and do not count. */
+export const MAX_DRAFT_READS = 64;
+export const MAX_DRAFT_READ_BYTES = 26_000 + 4 * 6000 + 2 * 6000;
+/** Lesson queries an open module may ask for: count, rows per query, query length. */
+export const MAX_DRAFT_LESSON_QUERIES = 4;
+export const MAX_DRAFT_LESSON_LIMIT = 8;
+export const MAX_DRAFT_LESSON_QUERY_CHARS = 120;
+/** How far up the parent/source chain ancestor lessons are read (display only), and each row's lesson bytes. */
+export const DRAFTER_ANCESTOR_DEPTH = 3;
+export const DRAFTER_ANCESTOR_ROW_BYTES = 16_384;
+/** Journal lines from the module: at most this many, each at most this long, each prefixed. */
+export const DRAFTER_JOURNAL_LINES = 20;
+export const DRAFTER_JOURNAL_CHARS = 300;
+export const DRAFTER_JOURNAL_PREFIX = "[drafter] ";
+/** A compose whose targets are under this prefix drafts with the floor: the module never drafts its own repair. */
+export const DRAFTER_SELF_PREFIX = "repos/development-vessel/src/drafter/";
+/** The op budget's lower bound: an open hint can never make a coordinated change unrepresentable. */
+export const DRAFTER_MIN_OPS = 4;
+
+const DRAFTER_CONTEXT_KEYS = ["grounding", "targetWindows", "priorFeedback", "principles", "composeLessons", "netNewTargets", "opBudgetHint", "journal", "version"] as const;
+const DRAFTER_PLAN_KEYS = ["reads", "lessonQueries", "ancestorDepth"] as const;
+
+export type DrafterGroundCapture = { listing: Record<string, string[]>; contents: Record<string, string> };
+export type DrafterLessonCapture = { source: "concept-db" | "jsonl" | "none"; query: string; rows: string[]; tail: string[] };
+export type DrafterCheckedContext = {
+  grounding: string; targetWindows: Record<string, string>; priorFeedback: string; principles: string; composeLessons: string;
+  netNewTargets: string[]; opBudgetHint: number; journal: string[]; version: string;
+};
+export type DrafterRecord = { version: string | null; fell_back: string | null; op_budget: number; clamped?: string; dropped?: string[] };
+
+/** A deep-frozen structured copy: the module can neither mutate what a closed gate reads later nor keep a handle. */
+export function drafterDeepFreeze<T>(v: T): T {
+  const copy = structuredClone(v);
+  const freeze = (o: unknown): void => {
+    if (o === null || typeof o !== "object" || Object.isFrozen(o)) return;
+    Object.freeze(o);
+    for (const k of Object.keys(o as object)) freeze((o as Record<string, unknown>)[k]);
+  };
+  freeze(copy);
+  return copy;
+}
+
+/** B = clamp(hint, min(4, C), C). A finite non-integer is refused; NaN and anything below the floor clamp up. */
+export function clampDrafterOpBudget(hint: unknown, ceiling: number): { ok: true; budget: number; clamped: string | null } | { ok: false; why: string } {
+  const C = Number.isInteger(ceiling) && ceiling > 0 ? ceiling : 24;
+  const lo = Math.min(DRAFTER_MIN_OPS, C);
+  if (typeof hint !== "number") return { ok: false, why: `opBudgetHint is not a number (${typeof hint})` };
+  if (Number.isFinite(hint) && !Number.isInteger(hint)) return { ok: false, why: `opBudgetHint ${hint} is not an integer` };
+  if (Number.isNaN(hint) || hint < lo) return { ok: true, budget: lo, clamped: `opBudgetHint ${String(hint)} raised to ${lo}` };
+  if (hint > C) return { ok: true, budget: C, clamped: `opBudgetHint ${String(hint)} lowered to ${C}` };
+  return { ok: true, budget: hint, clamped: null };
+}
+
+/** The READABLE allowlist: why `path` may not be read for the drafter, or null when it may. Readable: src/ TypeScript
+ *  and the three build configs of a verify vessel, every target file, the own check's test file and its imports. */
+export function drafterReadRefusal(path: unknown, scope: { verifyVessels: readonly string[]; targets: readonly string[]; checkPaths: readonly string[] }): string | null {
+  if (typeof path !== "string" || !path) return "not a path";
+  if (!/^repos\/[\w.-]+\/[\w./-]+\.\w+$/.test(path) || path.split("/").includes("..") || path.split("/").includes(".")) return "outside the repo-path charset";
+  if (scope.targets.includes(path) || scope.checkPaths.includes(path)) return null;
+  const [, vessel, ...rest] = path.split("/");
+  const rel = rest.join("/");
+  if (!scope.verifyVessels.some((v) => v.replace(/^repos\//, "") === vessel)) return "not a verify vessel's file, a target or the own check";
+  if (/^src\/.+\.(ts|tsx)$/.test(rel) && !/(^|\/)(tests?|__tests__)\/|\.test\.[cm]?[jt]sx?$/.test(rel)) return null;
+  if (["tsconfig.json", "package.json", "esbuild.config.mjs"].includes(rel)) return null;
+  return "not src/**/*.ts(x) or a build config of a verify vessel";
+}
+
+/** The clamped read plan; `refused` when the plan's shape is wrong (the compose then drafts with the floor). */
+export function clampDrafterReadPlan(raw: unknown, scope: Parameters<typeof drafterReadRefusal>[1]): { ok: true; reads: Array<{ path: string; maxBytes: number }>; lessonQueries: Array<{ query: string; limit: number }>; ancestorDepth: number; dropped: string[] } | { ok: false; why: string } {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return { ok: false, why: "read plan is not an object" };
+  const extra = Object.keys(raw).filter((k) => !(DRAFTER_PLAN_KEYS as readonly string[]).includes(k));
+  if (extra.length > 0) return { ok: false, why: `read plan has key(s) outside the schema: ${extra.join(", ")}` };
+  const p = raw as { reads?: unknown; lessonQueries?: unknown; ancestorDepth?: unknown };
+  if (!Array.isArray(p.reads) || !Array.isArray(p.lessonQueries) || typeof p.ancestorDepth !== "number") return { ok: false, why: "read plan fields have the wrong types" };
+  const dropped: string[] = [];
+  const reads: Array<{ path: string; maxBytes: number }> = [];
+  let bytes = 0;
+  for (const r of p.reads as unknown[]) {
+    const req = (r ?? {}) as { path?: unknown; maxBytes?: unknown };
+    const label = typeof req.path === "string" ? req.path.slice(0, 160) : "(no path)";
+    if (reads.length >= MAX_DRAFT_READS) { dropped.push(`read ${label}: over ${MAX_DRAFT_READS} reads`); continue; }
+    const why = drafterReadRefusal(req.path, scope);
+    if (why) { dropped.push(`read ${label}: ${why}`); continue; }
+    if (!Number.isInteger(req.maxBytes) || (req.maxBytes as number) <= 0) { dropped.push(`read ${label}: maxBytes is not a positive integer`); continue; }
+    if (bytes + (req.maxBytes as number) > MAX_DRAFT_READ_BYTES) { dropped.push(`read ${label}: over ${MAX_DRAFT_READ_BYTES} read bytes`); continue; }
+    bytes += req.maxBytes as number;
+    reads.push({ path: req.path as string, maxBytes: req.maxBytes as number });
+  }
+  const lessonQueries: Array<{ query: string; limit: number }> = [];
+  for (const q of p.lessonQueries as unknown[]) {
+    const lq = (q ?? {}) as { query?: unknown; limit?: unknown };
+    const label = typeof lq.query === "string" ? lq.query.slice(0, 60) : "(no query)";
+    if (lessonQueries.length >= MAX_DRAFT_LESSON_QUERIES) { dropped.push(`lesson query ${label}: over ${MAX_DRAFT_LESSON_QUERIES} queries`); continue; }
+    if (typeof lq.query !== "string" || !lq.query.trim() || lq.query.length > MAX_DRAFT_LESSON_QUERY_CHARS) { dropped.push(`lesson query ${label}: empty or over ${MAX_DRAFT_LESSON_QUERY_CHARS} chars`); continue; }
+    if (!Number.isInteger(lq.limit) || (lq.limit as number) < 1 || (lq.limit as number) > MAX_DRAFT_LESSON_LIMIT) { dropped.push(`lesson query ${label}: limit outside 1..${MAX_DRAFT_LESSON_LIMIT}`); continue; }
+    lessonQueries.push({ query: lq.query, limit: lq.limit as number });
+  }
+  const d = p.ancestorDepth as number;
+  const ancestorDepth = Number.isInteger(d) ? Math.max(0, Math.min(DRAFTER_ANCESTOR_DEPTH, d)) : 0;
+  if (ancestorDepth !== d) dropped.push(`ancestorDepth ${String(d)} clamped to ${ancestorDepth}`);
+  return { ok: true, reads, lessonQueries, ancestorDepth, dropped };
+}
+
+/** The module's journal lines as they reach the journal: prefixed, one line each, bounded. A prefixed line can never
+ *  match a closed reader's grep (`^[fc-`, `^[compose`, the no-effect and constraint refusal lines). */
+export function drafterJournalLines(lines: readonly string[]): string[] {
+  return lines.slice(0, DRAFTER_JOURNAL_LINES).map((l) => DRAFTER_JOURNAL_PREFIX + String(l).replace(/[\r\n]+/g, " ").slice(0, DRAFTER_JOURNAL_CHARS));
+}
+
+/** The line-numbered body of a target window exactly as the floor renders it (control bytes escaped, no marks). */
+function drafterNumberedWindow(content: string, slice: string): string {
+  const at = content.indexOf(slice);
+  const startLine = at >= 0 ? content.slice(0, at).split("\n").length : 1;
+  return renderControlBytes(slice.split("\n").map((l, i) => `${startLine + i}\t${l}`).join("\n")).text;
+}
+
+export type DrafterExpect = {
+  ceiling: number;
+  netNew: readonly string[];
+  targets: readonly string[];
+  /** path -> text the core read, for every target the window must show. */
+  targetContents: Readonly<Record<string, string>>;
+  /** Strings each of which, if the floor's prompt shows it, the context's prompt must show too. */
+  mandatory: readonly string[];
+  floorPrompt: string;
+  /** Builds the decompose and refine prompts from a context (the closed prompt builders). */
+  prompts: (ctx: DrafterCheckedContext, budget: number) => { decompose: string; refine: string };
+};
+
+/** THE CONTEXT CLAMP. The validated context and its clamped op budget, or why it is refused. */
+export function validateDrafterContext(raw: unknown, ex: DrafterExpect): { ok: true; ctx: DrafterCheckedContext; budget: number; clamped: string | null } | { ok: false; why: string } {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return { ok: false, why: "schema: the context is not an object" };
+  const keys = Object.keys(raw);
+  const extra = keys.filter((k) => !(DRAFTER_CONTEXT_KEYS as readonly string[]).includes(k));
+  if (extra.length > 0) return { ok: false, why: `schema: key(s) outside the context schema: ${extra.join(", ")}` };
+  const missing = DRAFTER_CONTEXT_KEYS.filter((k) => !keys.includes(k));
+  if (missing.length > 0) return { ok: false, why: `schema: missing key(s): ${missing.join(", ")}` };
+  const c = raw as Record<string, unknown>;
+  for (const k of ["grounding", "priorFeedback", "principles", "composeLessons", "version"] as const) if (typeof c[k] !== "string") return { ok: false, why: `schema: ${k} is not a string` };
+  if (!/^[\w.-]{1,64}$/.test(c.version as string)) return { ok: false, why: "schema: version is not a short name" };
+  const isStrArr = (v: unknown): v is string[] => Array.isArray(v) && v.every((x) => typeof x === "string");
+  if (!isStrArr(c.netNewTargets)) return { ok: false, why: "schema: netNewTargets is not a string array" };
+  if (!isStrArr(c.journal)) return { ok: false, why: "schema: journal is not a string array" };
+  const tw = c.targetWindows;
+  if (!tw || typeof tw !== "object" || Array.isArray(tw) || !Object.values(tw).every((v) => typeof v === "string")) return { ok: false, why: "schema: targetWindows is not a path -> text record" };
+  const strayWindow = Object.keys(tw).find((p) => !ex.targets.includes(p));
+  if (strayWindow) return { ok: false, why: `schema: targetWindows names a non-target ${strayWindow.slice(0, 160)}` };
+  const nn = new Set(c.netNewTargets as string[]);
+  if (nn.size !== new Set(ex.netNew).size || ![...ex.netNew].every((t) => nn.has(t))) return { ok: false, why: "netNewTargets differs from the closed net-new set" };
+  const budget = clampDrafterOpBudget(c.opBudgetHint, ex.ceiling);
+  if (!budget.ok) return { ok: false, why: budget.why };
+  const ctx: DrafterCheckedContext = {
+    grounding: c.grounding as string, targetWindows: { ...(tw as Record<string, string>) }, priorFeedback: c.priorFeedback as string,
+    principles: c.principles as string, composeLessons: c.composeLessons as string, netNewTargets: [...(c.netNewTargets as string[])],
+    opBudgetHint: c.opBudgetHint as number, journal: [...(c.journal as string[])], version: c.version as string,
+  };
+  // TARGET VISIBILITY on structured facts: each target the core read has a window that is a verbatim slice of the
+  // text the core read, and the grounding shows that window as the floor renders a target (header + numbered lines).
+  for (const [path, content] of Object.entries(ex.targetContents)) {
+    const w = ctx.targetWindows[path];
+    if (typeof w !== "string" || w.length === 0) return { ok: false, why: `target visibility: no window for ${path}` };
+    if (!content.includes(w)) return { ok: false, why: `target visibility: the window for ${path} is not a verbatim slice of the file the core read` };
+    if (!ctx.grounding.includes(`----- ${path} -----`) || !ctx.grounding.includes(drafterNumberedWindow(content, w))) return { ok: false, why: `target visibility: the grounding does not show the window for ${path}` };
+  }
+  const prompts = ex.prompts(ctx, budget.budget);
+  for (const [name, text] of [["decompose", prompts.decompose], ["refine", prompts.refine]] as const) {
+    const n = Buffer.byteLength(text, "utf8");
+    if (n > MAX_DRAFT_PROMPT_BYTES) return { ok: false, why: `prompt bytes: the ${name} prompt is ${n} bytes, over ${MAX_DRAFT_PROMPT_BYTES} (refused, not truncated)` };
+  }
+  const dropped = ex.mandatory.filter((m) => m && ex.floorPrompt.includes(m) && !prompts.decompose.includes(m));
+  if (dropped.length > 0) return { ok: false, why: `mandatory lines: the context drops ${dropped.slice(0, 3).map((d) => JSON.stringify(d.slice(0, 80))).join(", ")}${dropped.length > 3 ? ` +${dropped.length - 3}` : ""}` };
+  return { ok: true, ctx, budget: budget.budget, clamped: budget.clamped };
+}
+
+/** What the floor states that a context must not drop: each refused region and active must_be_called constraint
+ *  the lock enforces, the success criterion's literal, the own check's path. */
+export function drafterMandatoryLines(enforced: unknown, gapStatus: string, meta: Record<string, unknown>, ownCheck: { vessel: string; test_file: string } | null): string[] {
+  const out = new Set<string>();
+  for (const s of noEffectSpans(enforced)) out.add(`${s.path}:${s.start}-${s.end}`);
+  for (const c of activeMustBeCalled(enforced, gapStatus)) out.add(`must_be_called(${c.symbol})`);
+  const lit = meta["expected_literal"];
+  if (typeof lit === "string" && lit.trim()) out.add(lit);
+  if (ownCheck) out.add(`repos/${ownCheck.vessel}/${ownCheck.test_file}`);
+  return [...out];
+}
+
+/** The compose report carries the drafter record (set inside resolveFeatureComposeInner, read by its wrapper). */
+const composeDrafterStore = new AsyncLocalStorage<{ record?: DrafterRecord }>();
+
+type DrafterModule = { planDrafterReads: (f: unknown) => unknown; assembleDrafterContext: (f: unknown) => unknown };
+export type DrafterRun = {
+  facts: Record<string, unknown>;
+  scope: Parameters<typeof drafterReadRefusal>[1];
+  expect: DrafterExpect;
+  floorBudget: number;
+  /** The closed readers the module's requests are fulfilled through. */
+  readFile: (path: string) => Promise<string | null>;
+  readGapRow: (id: string) => Promise<Record<string, unknown> | null>;
+  lessonRows: (query: string, limit: number) => Promise<string[]>;
+  ancestorStart: string;
+  selfId: string;
+  load: () => Promise<DrafterModule>;
+};
+
+/** Ancestor rows above `start`, to `depth`, cycle-safe; each row's lessons kept newest-first within the byte cap. */
+async function drafterAncestors(start: string, depth: number, selfId: string, read: DrafterRun["readGapRow"]): Promise<Array<{ gap_id: string; depth: number; failure_lessons: Array<Record<string, unknown>>; omitted: number }>> {
+  const out: Array<{ gap_id: string; depth: number; failure_lessons: Array<Record<string, unknown>>; omitted: number }> = [];
+  const seen = new Set<string>([selfId]);
+  let id = start;
+  for (let d = 1; d <= depth && id && !seen.has(id); d++) {
+    seen.add(id);
+    let row: Record<string, unknown> | null = null;
+    try { row = await read(id); } catch { row = null; }
+    if (!row) break;
+    const meta = (row.classification_metadata ?? {}) as Record<string, unknown>;
+    const lessons = Array.isArray(meta.failure_lessons) ? (meta.failure_lessons as Array<Record<string, unknown>>) : [];
+    const kept: Array<Record<string, unknown>> = [];
+    let bytes = 0;
+    for (const l of [...lessons].reverse()) {
+      const n = JSON.stringify(l).length;
+      if (bytes + n > DRAFTER_ANCESTOR_ROW_BYTES) break;
+      bytes += n;
+      kept.unshift(l);
+    }
+    out.push({ gap_id: id, depth: d, failure_lessons: kept, omitted: lessons.length - kept.length });
+    id = typeof meta.parent_gap_id === "string" && meta.parent_gap_id ? meta.parent_gap_id : typeof meta.source_gap_id === "string" ? meta.source_gap_id : "";
+  }
+  return out;
+}
+
+/** ONE CALL OF THE OPEN MODULE, CLAMPED. Returns the validated context (or null: draft with the floor) and the record. */
+export async function draftContextThroughOpenModule(run: DrafterRun): Promise<{ ctx: DrafterCheckedContext | null; budget: number; record: DrafterRecord }> {
+  const floor = (why: string, version: string | null = null, dropped: string[] = []): { ctx: null; budget: number; record: DrafterRecord } =>
+    ({ ctx: null, budget: run.floorBudget, record: { version, fell_back: why, op_budget: run.floorBudget, ...(dropped.length ? { dropped } : {}) } });
+  const targets = run.scope.targets;
+  if (targets.some((t) => t.startsWith(DRAFTER_SELF_PREFIX))) return floor("target_under_src_drafter");
+  let mod: DrafterModule;
+  try {
+    mod = await run.load();
+    if (typeof mod?.planDrafterReads !== "function" || typeof mod?.assembleDrafterContext !== "function") return floor("module_shape: planDrafterReads / assembleDrafterContext missing");
+  } catch (err) { return floor(`import_failed: ${String((err as Error)?.message ?? err).slice(0, 200)}`); }
+  const facts = { ...run.facts } as Record<string, unknown>;
+  let plan: ReturnType<typeof clampDrafterReadPlan>;
+  try { plan = clampDrafterReadPlan(mod.planDrafterReads(drafterDeepFreeze(facts)), run.scope); }
+  catch (err) { return floor(`plan_threw: ${String((err as Error)?.message ?? err).slice(0, 200)}`); }
+  if (!plan.ok) return floor(`plan_refused: ${plan.why}`);
+  const dropped = [...plan.dropped];
+  const contents = { ...(facts.contents as Record<string, string>) };
+  for (const r of plan.reads) {
+    if (typeof contents[r.path] === "string") continue;
+    const text = await run.readFile(r.path).catch(() => null);
+    if (typeof text !== "string") { dropped.push(`read ${r.path}: unreadable`); continue; }
+    if (Buffer.byteLength(text, "utf8") > r.maxBytes) { dropped.push(`read ${r.path}: ${Buffer.byteLength(text, "utf8")} bytes, over its maxBytes ${r.maxBytes} (not read)`); continue; }
+    contents[r.path] = text;
+  }
+  facts.contents = contents;
+  const hits = [...(facts.lessonHits as Array<{ query: string; rows: string[] }>)];
+  for (const q of plan.lessonQueries) {
+    try { hits.push({ query: q.query, rows: (await run.lessonRows(q.query, q.limit)).slice(0, q.limit) }); }
+    catch (err) { dropped.push(`lesson query ${q.query.slice(0, 60)}: ${String((err as Error)?.message ?? err).slice(0, 120)}`); }
+  }
+  facts.lessonHits = hits;
+  if (plan.ancestorDepth > 0 && run.ancestorStart) facts.ancestors = await drafterAncestors(run.ancestorStart, plan.ancestorDepth, run.selfId, run.readGapRow);
+  let raw: unknown;
+  try { raw = mod.assembleDrafterContext(drafterDeepFreeze(facts)); }
+  catch (err) { return floor(`assemble_threw: ${String((err as Error)?.message ?? err).slice(0, 200)}`, null, dropped); }
+  const v = validateDrafterContext(raw, run.expect);
+  const version = raw && typeof raw === "object" && typeof (raw as { version?: unknown }).version === "string" ? String((raw as { version: string }).version).slice(0, 64) : null;
+  if (!v.ok) return floor(`context_refused: ${v.why}`, version, dropped);
+  return { ctx: v.ctx, budget: v.budget, record: { version: v.ctx.version, fell_back: null, op_budget: v.budget, ...(v.clamped ? { clamped: v.clamped } : {}), ...(dropped.length ? { dropped } : {}) } };
+}
+
   // 2026-07-15: Previous edits failed to address the semantic rejection from spec-validation logic at line 1085.
   // The issue is not `gapId` resolution (that was a red herring). The core problem is that `resolveFeatureComposeInner`
   // needs a `name?: string;` property to pass the validation. This change directly implements that. The `gapId` path
@@ -5932,6 +6238,8 @@ async function resolveFeatureComposeUncapped(pointer: FeatureComposePointer): Pr
   }
   let grounding = "";
   let anchorsSuppliedBytes = 0;
+  // The drafter split's facts: what the grounding below lists and reads (the open module renders from these).
+  const drafterGround: DrafterGroundCapture = { listing: {}, contents: {} };
   if (verifyVessels.length > 0) {
     // The explicit region literal first, then identifiers mined from the request. Both
     // legacy sources of a region are inert in practice (0 of 402 gaps set
@@ -5954,7 +6262,7 @@ async function resolveFeatureComposeUncapped(pointer: FeatureComposePointer): Pr
     // runtime and the staging clone — so it is neither a dead dependency nor a missing file.
     //
     // Keep the fail-open behaviour (grounding = "" and carry on); only make the reason visible.
-    try { grounding = await groundVesselFiles(toolsEndpoint, verifyVessels, focusHints, targetFiles, regionProbes, composeLineHint); }
+    try { grounding = await groundVesselFiles(toolsEndpoint, verifyVessels, focusHints, targetFiles, regionProbes, composeLineHint, drafterGround); }
     catch (err) {
       console.error(
         `[fc-grounding] groundVesselFiles THREW — window will be empty and the decompose will be refused: ` +
@@ -6065,8 +6373,11 @@ async function resolveFeatureComposeUncapped(pointer: FeatureComposePointer): Pr
   }
   // THE OWN CHECK, READ-ONLY (ownCheckGrounding). Appended AFTER the blind-window refusals on purpose: the check's
   // import lines name target basenames, and must never satisfy "the window mentions the target file".
+  // The read-only modules are read once: the floor's block below and the drafter's facts both use these texts.
+  const ownCheckReadonlyRead = ownCheckCtx ? ownCheckReadonly.map((r) => ({ ...r, content: readOwnCheckModule(r.path) })) : [];
+  const groundingOwnCheckAt = grounding.length;
   if (ownCheckCtx) {
-    const importsBlock = ownCheckImportsBlock({ added: ownCheckAdded, readonly: ownCheckReadonly.map((r) => ({ ...r, content: readOwnCheckModule(r.path) })), focusHints });
+    const importsBlock = ownCheckImportsBlock({ added: ownCheckAdded, readonly: ownCheckReadonlyRead, focusHints });
     grounding += `\n\n${ownCheckCtx.block}${importsBlock ? `\n\n${importsBlock}` : ""}`;
     console.log(`[fc-own-check-grounding] showed repos/${ownCheckCtx.vessel}/${ownCheckCtx.test_file} read-only (${ownCheckCtx.block.length} bytes, ${ownCheckCtx.only_tests.length} named test(s))`);
   }
@@ -6092,6 +6403,7 @@ async function resolveFeatureComposeUncapped(pointer: FeatureComposePointer): Pr
   // to satisfy "the window mentions the target file". It only ever ADDS declarations
   // for symbols the request already names, and it fails open to "" — a lookup that
   // errors leaves drafting exactly as it is today.
+  const groundingSymbolsAt = grounding.length;
   let symbolBlock = "";
   try {
     const needed = symbolsNeedingDeclaration(String(pointer.spec ?? ""), grounding);
@@ -6246,7 +6558,7 @@ async function resolveFeatureComposeUncapped(pointer: FeatureComposePointer): Pr
   // that as explicit re-draft guidance so the drafter completes the partial fix instead
   // of re-producing it blind. Additive — empty when no prior rejection exists.
   const lineageEvidence = composeGap.lineage_lessons.length > 0 ? attemptEvidenceBlock(composeGap.lineage_lessons) : "";
-  const priorFeedback = priorAttemptFeedbackBlock(pointer.gap?.classification_metadata) + (lineageEvidence ? `\n(the record below is this gap's SOURCE gap's; it is the same defect, and its refused regions are enforced here too)${lineageEvidence}` : "");
+  let priorFeedback = priorAttemptFeedbackBlock(pointer.gap?.classification_metadata) + (lineageEvidence ? `\n(the record below is this gap's SOURCE gap's; it is the same defect, and its refused regions are enforced here too)${lineageEvidence}` : "");
   // SUCCESS CRITERION (contained-self-development, drafting reliability; law 8). A gap with a
   // machine-checkable falsifier is judged by it, but the drafter was never told what it is: the
   // largest failure class was a semantic-gate "addresses:false" on a partial or wrong change.
@@ -6269,13 +6581,16 @@ async function resolveFeatureComposeUncapped(pointer: FeatureComposePointer): Pr
   const parentCheckLine = parentCheckBlock(composeGap.parent_check);
   if (parentCheckLine) criterionLines.push(parentCheckLine);
   const successCriterion = criterionLines.length > 0 ? `\n\nSUCCESS CRITERION (the gap's machine-checkable falsifier; the landing is judged by exactly this):\n${criterionLines.join("\n")}\n` : "";
-  const composeLessons = (await composeLessonsBlock(pointer.spec, gapFailureClasses(pointer.gap?.classification_metadata as Record<string, unknown> | undefined))) + (await fileLessonsBlock(pointer.spec)) + successCriterion;
+  const drafterLessons: DrafterLessonCapture = { source: "none", query: "", rows: [], tail: [] };
+  const drafterFileLessons: string[] = [];
+  let composeLessons = (await composeLessonsBlock(pointer.spec, gapFailureClasses(pointer.gap?.classification_metadata as Record<string, unknown> | undefined), drafterLessons)) + (await fileLessonsBlock(pointer.spec, drafterFileLessons)) + successCriterion;
   let spec = pointer.spec;
   // Ground the spec against the REAL target file UNCONDITIONALLY (law 8 — information
   // at use time). The specs most likely to carry SCHEMATIC anchors are exactly the ones
   // matching REPLACE/WITH/INSERT AFTER/ANCHOR that used to SKIP this grounding, so the
   // drafter obeyed the spec's invented symbol over the file. Always append the authoritative
   // EXISTING SYMBOLS + LIVE VESSEL CONTRACTS; only the LLM spec-refine call stays gated.
+  const groundingContractsAt = grounding.length;
   try {
     const contractBlock = await fetchNamedShapeContracts(spec + " " + grounding);
     const synthesizeVerbatimEditOps = (target: string, edits: Array<{old: string; new: string}>) => {
@@ -6287,10 +6602,102 @@ if (contractBlock) grounding += "\n\nLIVE VESSEL CONTRACTS (authoritative — dr
 const composedChange = composeSurgicalAtoms(contractBlock);
 grounding += `\n\nCOMPOSED CHANGE:\n${composedChange}`;
   } catch { /* advisory */ }
+  const groundingExistingAt = grounding.length;
   try {
     const symbolBlock = await groundFileSymbols(toolsEndpoint, verifyVessels, targetFiles);
     if (symbolBlock) grounding += '\n\nEXISTING SYMBOLS (authoritative — these are the top-level declarations of the TARGET file(s). Do NOT INVENT a new function, const, type, or field name that is absent here. You MAY edit lines, fields, and expressions INSIDE an existing symbol, and inside an inline handler that has no top-level name (e.g. app.post("/x", async (req) => { ... })) — an in-body line/field edit at the change site is expected and does NOT require you to name a changed top-level symbol):\n' + symbolBlock;
   } catch { /* advisory */ }
+  // THE DRAFTER SPLIT (see the section above resolveFeatureComposeInner). Everything above is the floor and the fact
+  // gathering, unchanged; the open module may now replace what the drafter is shown, inside the closed clamps.
+  {
+    const gMeta = (pointer.gap?.classification_metadata ?? {}) as Record<string, unknown>;
+    const segment = (from: number, to: number): string => grounding.slice(from, to);
+    const symbolSegment = segment(groundingSymbolsAt, groundingContractsAt);
+    const anchorsPart = anchorsSuppliedBytes > 0 && anchorsSuppliedBytes <= symbolSegment.length ? symbolSegment.slice(symbolSegment.length - anchorsSuppliedBytes) : "";
+    const ceiling = pointer.max_ops ?? 24;
+    const checkPaths = ownCheckCtx ? [`repos/${ownCheckCtx.vessel}/${ownCheckCtx.test_file}`, ...ownCheckAdded, ...ownCheckReadonly.map((r) => r.path)] : [];
+    const facts: Record<string, unknown> = {
+      spec: String(pointer.spec ?? ""),
+      gapSummary: String(pointer.gap?.summary ?? ""),
+      directed: (pointer as { directed?: boolean }).directed === true,
+      gapMeta: gMeta,
+      regionHint,
+      lineHint: composeLineHint,
+      targets: { files: [...targetFiles], ownCheckAdded: [...ownCheckAdded], ownCheckReadonly: ownCheckReadonly.map((r) => ({ ...r })), netNew: [...netNewTargets] },
+      verifyVessels: [...verifyVessels],
+      listing: drafterGround.listing,
+      contents: drafterGround.contents,
+      ownCheck: ownCheckCtx ? { vessel: ownCheckCtx.vessel, test_file: ownCheckCtx.test_file, only_tests: [...ownCheckCtx.only_tests], source: ownCheckCtx.source, readonlyModules: Object.fromEntries(ownCheckReadonlyRead.map((r) => [r.path, r.content])) } : null,
+      lineageLessons: composeGap.lineage_lessons,
+      ancestors: [],
+      parentCheck: composeGap.parent_check,
+      lessonSource: drafterLessons.source,
+      lessonHits: drafterLessons.source === "concept-db" ? [{ query: drafterLessons.query, rows: drafterLessons.rows }] : [],
+      lessonJsonlTail: drafterLessons.tail,
+      fileLessonsTail: drafterFileLessons,
+      principles,
+      contracts: segment(groundingContractsAt, groundingExistingAt),
+      existingSymbols: segment(groundingExistingAt, grounding.length),
+      symbolDecls: symbolSegment.slice(0, symbolSegment.length - anchorsPart.length),
+      safeAnchors: anchorsPart,
+      opCeiling: ceiling,
+      opCeilingDeclared: pointer.max_ops != null,
+    };
+    const targetContents: Record<string, string> = {};
+    for (const t of targetFiles) if (typeof drafterGround.contents[t] === "string") targetContents[t] = drafterGround.contents[t]!;
+    const promptsOf = (c: DrafterCheckedContext, budget: number) => ({
+      decompose: decomposePrompt(spec, budget, c.grounding, c.principles + c.composeLessons, c.priorFeedback, netNewTargets),
+      refine: refineSpecPrompt(spec, c.grounding, c.composeLessons),
+    });
+    const drafted = await draftContextThroughOpenModule({
+      facts,
+      scope: { verifyVessels: [...verifyVessels], targets: [...targetFiles], checkPaths },
+      expect: {
+        ceiling, netNew: [...netNewTargets], targets: [...targetFiles], targetContents,
+        mandatory: drafterMandatoryLines(enforcedLessons(composeGap), composeGap.status, gMeta, ownCheckCtx),
+        floorPrompt: decomposePrompt(spec, maxOps, grounding, principles + composeLessons, priorFeedback, netNewTargets),
+        prompts: promptsOf,
+      },
+      floorBudget: maxOps,
+      readFile: async (p) => {
+        const rd = await callTool(toolsEndpoint, "fs_read", { path: `${REPO_ROOT}/${p.replace(/^repos\//, "")}` });
+        const c = (rd.body as { content?: unknown })?.content;
+        return rd.ok && typeof c === "string" ? c : null;
+      },
+      readGapRow: async (id) => ((await readComposeGapRows(id)) ?? []).find((r) => String(r.id) === id) ?? null,
+      lessonRows: async (query, limit) => {
+        const target = await ownConceptDbResolveUrl("conceptSearch");
+        if (!target.url) throw new Error(`skipped (${target.why})`);
+        const resp = await fetch(target.url, {
+          method: "POST",
+          headers: { ...(METABOB_API_KEY ? { Authorization: `ApiKey ${METABOB_API_KEY}` } : {}), "Content-Type": "application/json" },
+          body: JSON.stringify({ pointer: { type: "conceptSearch", source_type: "compose_lesson", query, limit } }),
+          signal: AbortSignal.timeout(8_000),
+        });
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const json = (await resp.json()) as { content?: Array<{ content?: string }> };
+        return (json.content ?? []).map((c) => c.content).filter((s): s is string => typeof s === "string" && s.length > 0);
+      },
+      ancestorStart: typeof composeGap.meta.parent_gap_id === "string" && composeGap.meta.parent_gap_id ? composeGap.meta.parent_gap_id : typeof composeGap.meta.source_gap_id === "string" ? composeGap.meta.source_gap_id : "",
+      selfId: String(pointer.gap?.id ?? ""),
+      load: async () => {
+        const { planDrafterReads, assembleDrafterContext } = await import("../drafter/index.js");
+        return { planDrafterReads, assembleDrafterContext } as unknown as { planDrafterReads: (f: unknown) => unknown; assembleDrafterContext: (f: unknown) => unknown };
+      },
+    });
+    const holder = composeDrafterStore.getStore();
+    if (holder) holder.record = drafted.record;
+    if (drafted.ctx) {
+      for (const line of drafterJournalLines(drafted.ctx.journal)) console.log(line);
+      grounding = drafted.ctx.grounding;
+      principles = drafted.ctx.principles;
+      composeLessons = drafted.ctx.composeLessons;
+      priorFeedback = drafted.ctx.priorFeedback;
+      maxOps = drafted.budget;
+      anchorsSuppliedBytes = anchorsPart && grounding.includes(anchorsPart) ? anchorsPart.length : 0;
+    }
+    console.log(`[fc-drafter] ${JSON.stringify({ ...drafted.record, shown: { grounding_bytes: Buffer.byteLength(grounding, "utf8"), windows: drafted.ctx ? Object.keys(drafted.ctx.targetWindows) : null, lineage_lessons: composeGap.lineage_lessons.length, feedback_bytes: priorFeedback.length, lessons_bytes: composeLessons.length } })}`);
+  }
   // value-per-cost-selection 2.7: when the goal's numbered old/new blocks all splice uniquely
   // into the file the apply step edits (opAbs), apply them verbatim: no spec refinement, no LLM
   // plan and no anchor re-draft. Verification below is unchanged.

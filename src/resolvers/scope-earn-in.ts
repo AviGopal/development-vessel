@@ -133,6 +133,8 @@ export const EVALUATOR_FILES: readonly string[] = [
   "repos/development-vessel/src/lib/operator-direct.ts",
   // The runtime-root helper the protected tests import: a lane edit there would change what they assert against.
   "repos/development-vessel/test/helpers/runtime-root.ts",
+  // The drafter split's closure must-fail: the open module stays pure and only feature-compose imports it (10-11).
+  "repos/development-vessel/test/drafter-split/f2-f3-module-boundary.test.ts",
 ];
 export const EVALUATOR_FILE_REASON = "refused: the path is one of the evaluator's own files (EVALUATOR_FILES)";
 /**
@@ -233,6 +235,21 @@ export const SCOPE_CLASSIFICATION: Readonly<Record<string, ScopeClass>> = {
   "repos/development-vessel/test/judge-split/pin-owner-route.test.ts": { class: "judge_trust", reason: "a split pin, run alone by the protected gate (judge tests)" },
   "repos/development-vessel/test/judge-split/pin-pick-skeleton.test.ts": { class: "judge_trust", reason: "a split pin, run alone by the protected gate (judge tests)" },
   "repos/development-vessel/test/judge-split/pin-sweep-trigger.test.ts": { class: "judge_trust", reason: "a split pin, run alone by the protected gate (judge tests)" },
+  // The drafter split (what the drafter is shown opened to src/drafter/, behind closed clamps and a closed floor): its
+  // pins and must-fails, and the four helpers on feature-compose's apply and refusal path whose renderer halves the
+  // open module imports (closed so a lane edit cannot change the binding or refusal halves).
+  "repos/development-vessel/test/drafter-split/": { class: "judge_trust", reason: "the drafter-split pins: clamps, purity and edge must-fails, the floor, the verdict-diff golden (judge tests)" },
+  "repos/development-vessel/test/drafter-split/verdict-diff.golden.test.ts": { class: "judge_trust", reason: "a drafter-split pin, run alone by the protected gate (judge tests)" },
+  "repos/development-vessel/test/drafter-split/f1-adversarial-module.test.ts": { class: "judge_trust", reason: "a drafter-split pin, run alone by the protected gate (judge tests)" },
+  "repos/development-vessel/test/drafter-split/f2-f3-module-boundary.test.ts": { class: "judge_trust", reason: "a drafter-split pin, run alone by the protected gate (judge tests)" },
+  "repos/development-vessel/test/drafter-split/f4-clamps.test.ts": { class: "judge_trust", reason: "a drafter-split pin, run alone by the protected gate (judge tests)" },
+  "repos/development-vessel/test/drafter-split/f6-behaviour-preservation.test.ts": { class: "judge_trust", reason: "a drafter-split pin, run alone by the protected gate (judge tests)" },
+  "repos/development-vessel/test/drafter-split/f7-floor-self-repair.test.ts": { class: "judge_trust", reason: "a drafter-split pin, run alone by the protected gate (judge tests)" },
+  "repos/development-vessel/test/drafter-split/f8-time-bound.test.ts": { class: "judge_trust", reason: "a drafter-split pin, run alone by the protected gate (judge tests)" },
+  "repos/development-vessel/src/control-bytes.ts": { class: "judge_trust", reason: "the drafted-anchor binding feature-compose's apply step writes through (containment)" },
+  "repos/development-vessel/src/cross-file-symbols.ts": { class: "judge_trust", reason: "the safe-anchor and region locators of feature-compose's apply guard (containment)" },
+  "repos/development-vessel/src/edit-provenance.ts": { class: "judge_trust", reason: "the re-derived edit refusal of feature-compose's apply step (containment)" },
+  "repos/development-vessel/src/resolvers/region-probe.ts": { class: "judge_trust", reason: "the region candidates feature-compose's apply guard locates by (containment)" },
   "repos/development-vessel/test/resolvers/composer-interruption-sweep-owned-set.test.ts": { class: "judge_trust", reason: "pins the owned set the sweep reads from the policy module (judge tests)" },
   "repos/development-vessel/test/resolvers/gap-attempt-credit-escalate-wiring.test.ts": { class: "judge_trust", reason: "pins the credit escalation wiring (judge tests)" },
   "repos/development-vessel/test/resolvers/gap-landing-verdict-ask-wiring.test.ts": { class: "judge_trust", reason: "pins every residue call into a landing-verdict escalation passes the ask (judge tests)" },

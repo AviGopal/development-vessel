@@ -1,0 +1,367 @@
+[
+ {
+  "name": "directed / pass / no region / no own check",
+  "prompts": [
+   {
+    "kind": "decompose",
+    "sha256": "c25ed5514f5d2881fa376e39a06f62ed8cdd907a10923001cb5d95a714a26d09",
+    "bytes": 11699
+   },
+   {
+    "kind": "judge",
+    "sha256": "e48804b9f88c8b5ed6df5d626e99cd4c2ad26b3308edbc27f6f0964015ca0948",
+    "bytes": 1824
+   },
+   {
+    "kind": "refuter",
+    "sha256": "e8f5defc8470ee56a088de60da87e75f022f5a4428fc7a913ba93c29d88fa53c",
+    "bytes": 2438
+   }
+  ]
+ },
+ {
+  "name": "directed / verify red",
+  "prompts": [
+   {
+    "kind": "decompose",
+    "sha256": "c25ed5514f5d2881fa376e39a06f62ed8cdd907a10923001cb5d95a714a26d09",
+    "bytes": 11699
+   },
+   {
+    "kind": "other",
+    "sha256": "043d2be3c212676b229325de63be8ff82a4b8065cc59f39869346aa2460f3fc1",
+    "bytes": 1924
+   }
+  ]
+ },
+ {
+  "name": "directed / non-unique anchor",
+  "prompts": [
+   {
+    "kind": "decompose",
+    "sha256": "c25ed5514f5d2881fa376e39a06f62ed8cdd907a10923001cb5d95a714a26d09",
+    "bytes": 11699
+   }
+  ]
+ },
+ {
+  "name": "directed / off-target edit",
+  "prompts": [
+   {
+    "kind": "decompose",
+    "sha256": "c25ed5514f5d2881fa376e39a06f62ed8cdd907a10923001cb5d95a714a26d09",
+    "bytes": 11699
+   }
+  ]
+ },
+ {
+  "name": "directed / no ops",
+  "prompts": [
+   {
+    "kind": "decompose",
+    "sha256": "c25ed5514f5d2881fa376e39a06f62ed8cdd907a10923001cb5d95a714a26d09",
+    "bytes": 11699
+   },
+   {
+    "kind": "decompose",
+    "sha256": "2734bd1f035ac1453da8e00c2e28f0d117ec31e9b131764c1adfdc8a0115840b",
+    "bytes": 11888
+   }
+  ]
+ },
+ {
+  "name": "undirected / pass (scope readable, compute open)",
+  "prompts": [
+   {
+    "kind": "decompose",
+    "sha256": "c25ed5514f5d2881fa376e39a06f62ed8cdd907a10923001cb5d95a714a26d09",
+    "bytes": 11699
+   },
+   {
+    "kind": "judge",
+    "sha256": "e48804b9f88c8b5ed6df5d626e99cd4c2ad26b3308edbc27f6f0964015ca0948",
+    "bytes": 1824
+   },
+   {
+    "kind": "refuter",
+    "sha256": "e8f5defc8470ee56a088de60da87e75f022f5a4428fc7a913ba93c29d88fa53c",
+    "bytes": 2438
+   }
+  ]
+ },
+ {
+  "name": "undirected / pass (scope excludes the target)",
+  "prompts": [
+   {
+    "kind": "decompose",
+    "sha256": "c25ed5514f5d2881fa376e39a06f62ed8cdd907a10923001cb5d95a714a26d09",
+    "bytes": 11699
+   }
+  ]
+ },
+ {
+  "name": "directed / region named, max_ops unset",
+  "prompts": [
+   {
+    "kind": "decompose",
+    "sha256": "38e2c32cb149fbc574f09561d09d2de7b829247767ac4af9474bfc3a328b3c0a",
+    "bytes": 11698
+   },
+   {
+    "kind": "judge",
+    "sha256": "96ac27a6d34ae509f4007aeff5bb0a591da3c2fbe16a00fb20d9ea7ebb3f20de",
+    "bytes": 1855
+   },
+   {
+    "kind": "refuter",
+    "sha256": "e8f5defc8470ee56a088de60da87e75f022f5a4428fc7a913ba93c29d88fa53c",
+    "bytes": 2438
+   }
+  ]
+ },
+ {
+  "name": "directed / region named, max_ops 2",
+  "prompts": [
+   {
+    "kind": "decompose",
+    "sha256": "e99e83eaaffe4d2c888ec71fd5152b4a473508b7d0790812ee099b95cebc3dd9",
+    "bytes": 11698
+   },
+   {
+    "kind": "judge",
+    "sha256": "96ac27a6d34ae509f4007aeff5bb0a591da3c2fbe16a00fb20d9ea7ebb3f20de",
+    "bytes": 1855
+   },
+   {
+    "kind": "refuter",
+    "sha256": "e8f5defc8470ee56a088de60da87e75f022f5a4428fc7a913ba93c29d88fa53c",
+    "bytes": 2438
+   }
+  ]
+ },
+ {
+  "name": "directed / max_ops 1",
+  "prompts": [
+   {
+    "kind": "decompose",
+    "sha256": "5a06e9811839c434dd880d8ce5be2e7227314899fb35165b9469d846b52098c6",
+    "bytes": 11698
+   },
+   {
+    "kind": "judge",
+    "sha256": "e48804b9f88c8b5ed6df5d626e99cd4c2ad26b3308edbc27f6f0964015ca0948",
+    "bytes": 1824
+   },
+   {
+    "kind": "refuter",
+    "sha256": "e8f5defc8470ee56a088de60da87e75f022f5a4428fc7a913ba93c29d88fa53c",
+    "bytes": 2438
+   }
+  ]
+ },
+ {
+  "name": "undirected / own check present, helper excluded (read-only import)",
+  "prompts": [
+   {
+    "kind": "decompose",
+    "sha256": "53d542e6602b4944d093e1a0510b4b6173db8e37102d837acaebc0334d1ab568",
+    "bytes": 13108
+   },
+   {
+    "kind": "judge",
+    "sha256": "a5a727b73ebb17e460dc218328df408cc1bd5b266409b91a22e09b1366a37fe4",
+    "bytes": 2054
+   },
+   {
+    "kind": "refuter",
+    "sha256": "e8f5defc8470ee56a088de60da87e75f022f5a4428fc7a913ba93c29d88fa53c",
+    "bytes": 2438
+   }
+  ]
+ },
+ {
+  "name": "directed / own check present, imports added as targets",
+  "prompts": [
+   {
+    "kind": "decompose",
+    "sha256": "9bc3fd65e5120c984c6232608e681af0a4387453d5314ff3acba5425b9ddd25a",
+    "bytes": 13013
+   },
+   {
+    "kind": "judge",
+    "sha256": "a5a727b73ebb17e460dc218328df408cc1bd5b266409b91a22e09b1366a37fe4",
+    "bytes": 2054
+   },
+   {
+    "kind": "refuter",
+    "sha256": "e8f5defc8470ee56a088de60da87e75f022f5a4428fc7a913ba93c29d88fa53c",
+    "bytes": 2438
+   }
+  ]
+ },
+ {
+  "name": "directed / prior attempt history (own lessons, gate reason, landed sha, literal criterion)",
+  "prompts": [
+   {
+    "kind": "decompose",
+    "sha256": "bd2e3192bb99d2af575f4b633bf381bf0b213eec97634e35838c4124f1f97589",
+    "bytes": 14512
+   },
+   {
+    "kind": "judge",
+    "sha256": "ae7ab45f2384242d321c7f95992afb7ee65c52dfd5cf5be7fa2290a7711f815e",
+    "bytes": 3148
+   },
+   {
+    "kind": "refuter",
+    "sha256": "e8f5defc8470ee56a088de60da87e75f022f5a4428fc7a913ba93c29d88fa53c",
+    "bytes": 2438
+   }
+  ]
+ },
+ {
+  "name": "directed / ancestor lessons (source gap carries refused regions and a must_be_called constraint)",
+  "prompts": [
+   {
+    "kind": "decompose",
+    "sha256": "1fa694384ac6e0be8975ae292d84275618f6bcd50db61beebc38f726ff8cb0d2",
+    "bytes": 13166
+   },
+   {
+    "kind": "judge",
+    "sha256": "50bdd6f9b4334b8a79cc2458687e25ddfd35db86dabc05cad622370f5bbdeb18",
+    "bytes": 1856
+   },
+   {
+    "kind": "refuter",
+    "sha256": "e8f5defc8470ee56a088de60da87e75f022f5a4428fc7a913ba93c29d88fa53c",
+    "bytes": 2438
+   }
+  ]
+ },
+ {
+  "name": "directed / decomposed step with a parent check",
+  "prompts": [
+   {
+    "kind": "decompose",
+    "sha256": "00a77c129ad62c8a5e549749eb1cb63c91c8e604e52651ded75064d3a47a8c1b",
+    "bytes": 12032
+   },
+   {
+    "kind": "judge",
+    "sha256": "807405e1bce88f9a5fab8a939fab10b31feb75d5fbd2ac4c5a52cae6537888da",
+    "bytes": 1887
+   },
+   {
+    "kind": "refuter",
+    "sha256": "e8f5defc8470ee56a088de60da87e75f022f5a4428fc7a913ba93c29d88fa53c",
+    "bytes": 2438
+   }
+  ]
+ },
+ {
+  "name": "directed / large target, explicit line hint",
+  "prompts": [
+   {
+    "kind": "decompose",
+    "sha256": "5d615a4c90be7c2a4cfbb30e2fe6ef338e257d699606001e3715eb060f94aa9f",
+    "bytes": 17820
+   }
+  ]
+ },
+ {
+  "name": "directed / large target, mined probe (no line hint)",
+  "prompts": [
+   {
+    "kind": "decompose",
+    "sha256": "9656a9fd59ae777b276be4ecc569b213b27b0ea612631aac6150c48877b4af2d",
+    "bytes": 18086
+   }
+  ]
+ },
+ {
+  "name": "directed / net-new create target",
+  "prompts": [
+   {
+    "kind": "decompose",
+    "sha256": "2e86fc368af16c0c0f3c70ebbe9facbea3879601d531d1368efa1b339908c307",
+    "bytes": 11802
+   },
+   {
+    "kind": "judge",
+    "sha256": "98ac64a990f4bbafc00be04f21189551b12af44aa58673fd283f975b47e91082",
+    "bytes": 2455
+   },
+   {
+    "kind": "refuter",
+    "sha256": "48af2596c38353d9768d59a912f296778ef51e3f81b411abf6ee713f3ff43b23",
+    "bytes": 2349
+   }
+  ]
+ },
+ {
+  "name": "directed / a named symbol declared in another file (cross-file grounding)",
+  "prompts": [
+   {
+    "kind": "decompose",
+    "sha256": "c9d1caf429c452d08610514499b0504df72d1ef83a2f5b08bacb3ea0c8266b4c",
+    "bytes": 12321
+   },
+   {
+    "kind": "judge",
+    "sha256": "e48804b9f88c8b5ed6df5d626e99cd4c2ad26b3308edbc27f6f0964015ca0948",
+    "bytes": 1824
+   },
+   {
+    "kind": "refuter",
+    "sha256": "e8f5defc8470ee56a088de60da87e75f022f5a4428fc7a913ba93c29d88fa53c",
+    "bytes": 2438
+   }
+  ]
+ },
+ {
+  "name": "directed / two verify vessels, second vessel's files in the window",
+  "prompts": [
+   {
+    "kind": "decompose",
+    "sha256": "b7d5f4486d21348b12b5d7421910b9ec8612c5fc14c740fb4470bb0a6423dbbe",
+    "bytes": 11885
+   },
+   {
+    "kind": "judge",
+    "sha256": "e48804b9f88c8b5ed6df5d626e99cd4c2ad26b3308edbc27f6f0964015ca0948",
+    "bytes": 1824
+   },
+   {
+    "kind": "refuter",
+    "sha256": "e8f5defc8470ee56a088de60da87e75f022f5a4428fc7a913ba93c29d88fa53c",
+    "bytes": 2438
+   }
+  ]
+ },
+ {
+  "name": "directed / spec long enough to be refined",
+  "prompts": [
+   {
+    "kind": "refine",
+    "sha256": "711f19e7739d0b0f00c592b08cedf09aa28ea58cd9169b1a01381aec3afdc60c",
+    "bytes": 6954
+   },
+   {
+    "kind": "decompose",
+    "sha256": "772f2badb622776760f82df5cc4f9b5275e8a3df1d08678daa1a87ee8771f6bf",
+    "bytes": 15900
+   },
+   {
+    "kind": "judge",
+    "sha256": "e48804b9f88c8b5ed6df5d626e99cd4c2ad26b3308edbc27f6f0964015ca0948",
+    "bytes": 1824
+   },
+   {
+    "kind": "refuter",
+    "sha256": "e8f5defc8470ee56a088de60da87e75f022f5a4428fc7a913ba93c29d88fa53c",
+    "bytes": 2438
+   }
+  ]
+ }
+]

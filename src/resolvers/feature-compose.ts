@@ -5345,8 +5345,10 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
     // The admission record (src/judge/routing-capture.ts) for every decision from here on: the refusals before the
     // admission block and every admission-block decision. Builds a record and writes one line; never throws.
     const admissionLand = (pointer as { land?: boolean }).land !== false;
+    // The gap's localizationRecord (gap.localization; the stored row's, else the caller's copy), recorded as read.
+    let admissionLocalization: unknown = (pointer.gap as { localization?: unknown } | undefined)?.localization ?? null;
     const admissionCapture = (o: { decision: "admitted" | "refused"; draftingStarted: boolean; stage: AdmissionRefusalStage | null; stored: "unreadable" | "absent" | "present"; row: Record<string, unknown> | null; why?: string | null; supply?: { admitted: boolean; why: string } | null; supplyVerdict?: { admit: boolean; why: string | null } | null }): void =>
-      recordComposeAdmission({ gapId: _gapIdForSlot, lane, row: o.row, pointerGap: pointer.gap, why: o.why ?? null, supply: o.supply ?? null, decision: o.decision, draftingStarted: o.draftingStarted, scope: null, stage: o.stage, land: admissionLand, supplyMarker: !!supplyMarker, stored: o.stored, operatorHold: o.stage === "operator_hold", supplyVerdict: o.supplyVerdict ?? null });
+      recordComposeAdmission({ gapId: _gapIdForSlot, lane, row: o.row, pointerGap: pointer.gap, why: o.why ?? null, supply: o.supply ?? null, decision: o.decision, draftingStarted: o.draftingStarted, scope: null, stage: o.stage, land: admissionLand, supplyMarker: !!supplyMarker, stored: o.stored, operatorHold: o.stage === "operator_hold", supplyVerdict: o.supplyVerdict ?? null, localization: admissionLocalization });
     let rows: Array<Record<string, unknown>> | null = null;
     if (supplyMarker) {
       // FAIL CLOSED, NAMED: whether the supply dispatched this gap cannot be known without its ledger.
@@ -5357,6 +5359,7 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
     const stored = rows?.find((r) => String(r.id) === _gapIdForSlot);
     const land = admissionLand;
     const held = (stored?.classification_metadata as { operator_hold?: unknown } | undefined)?.operator_hold === true;
+    if (stored && (stored as { localization?: unknown }).localization !== undefined) admissionLocalization = (stored as { localization?: unknown }).localization ?? null;
     // ADMISSION ON EVERY ROUTE (2026-10-07). A compose that would land, naming a gap the
     // store holds, runs THE eligibility predicate the picker, the drain nudge and the gap-write nudge share
     // (composeEligibilitySkipReason: open, armed class1/class2, an edit site, not held incl. pending_verification)
@@ -5424,9 +5427,11 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
       edit_site: metaSite(stored?.classification_metadata) ?? metaSite((pointer.gap as { classification_metadata?: unknown } | undefined)?.classification_metadata),
       // The scope port is not read at admission yet (the scope is checked at landing); the record says so.
       scope: null, scope_reason: SCOPE_NOT_CONSULTED,
+      localization: admissionLocalization,
     };
     const { composeAdmission, renderAdmissionRefusal } = await import("./compose-admission-core.js");
     const admission = composeAdmission(admissionInput);
+    for (const ev of admission.events) console.log(`[fc-admission] ${ev.shape} ${JSON.stringify(ev)}`);
     if (!admission.admit && admission.refusal) {
       const r = renderAdmissionRefusal(admissionInput, admission.refusal);
       // The record of a refusal the core decided: the evidence this block gathered, as the inline refusals recorded it.

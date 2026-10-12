@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { canonical, verifyChain } from "./runner";
 
 /** FROZEN: may only rise (closed file). An operator append act raises it with the cases it appends. */
-const MIN_CASES = 13;
+const MIN_CASES = 14;
 const DIR = import.meta.dir;
 
 describe("routing corpus chain", () => {

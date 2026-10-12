@@ -1,0 +1,49 @@
+{
+  "class": "scope-control",
+  "control": true,
+  "credit_class": null,
+  "edit_site": "repos/development-vessel/src/resolvers/compose-admission-core.ts",
+  "entry": "composeAdmission",
+  "expect": {
+    "admit": true,
+    "events": [
+      {
+        "edit_site": "repos/example-vessel/src/index.ts",
+        "excluded_by": "repos/example-vessel/src/index.ts",
+        "gap_id": "route-edit-example",
+        "lane": "directed",
+        "shape": "excludedSiteCompose"
+      }
+    ],
+    "refusal": null
+  },
+  "id": "0014-directed-compose-on-excluded-site-logged",
+  "input": {
+    "edit_site": "repos/example-vessel/src/index.ts",
+    "entry": "composeAdmission",
+    "gap_id": "route-edit-example",
+    "land": true,
+    "lane": "directed",
+    "localization": null,
+    "operator_hold": false,
+    "schema": 1,
+    "scope": {
+      "repos/example-vessel/src/index.ts": "repos/example-vessel/src/index.ts"
+    },
+    "scope_reason": null,
+    "stored": "absent",
+    "supply_marker": false,
+    "supply_verdict": null,
+    "why": null
+  },
+  "licenses": null,
+  "llm": null,
+  "ports": {},
+  "provenance": {
+    "note": "control: the scope refusal before drafting applies to autonomous composes only; a directed compose on an excluded edit site is admitted and the core emits the shaped excludedSiteCompose event (logged and traced, never silent). Known-red until the scope-refusal fix lands: it needs the closed core's scope read at admission and the event, which go green together with this class's refusal cases",
+    "recorded": "2026-10-12",
+    "source": "operator-ruling"
+  },
+  "schema": 1,
+  "status_at_append": "known_red"
+}

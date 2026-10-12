@@ -7,7 +7,7 @@
 import { describe, expect, test } from "bun:test";
 import { runCorpus } from "./runner";
 
-const MIN_CASES = 13;
+const MIN_CASES = 14;
 
 const report = await runCorpus(import.meta.dir);
 

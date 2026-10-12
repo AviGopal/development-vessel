@@ -50,7 +50,36 @@ export type ComposeAdmissionInput = {
   falsifier_class?: string | null;
   armed?: boolean;
   supply_exception?: { admitted: boolean; why: string } | null;
+  /**
+   * The gap's localizationRecord (gap.localization, shape `localizationRecord`; schema
+   * test/routing-corpus/localization-record.schema.json), as recorded. Additive: a record without the field reads null,
+   * and the core hands the rules a record only when validLocalizationRecord passes.
+   */
+  localization?: unknown;
 };
+
+/**
+ * A shaped admission event the core emits beside its decision. `excludedSiteCompose`: a DIRECTED compose (exempt from
+ * the autonomous scope refusal) admitted on an edit site the scope excludes. Never silent: the core logs it and
+ * traces it. Version 1 emits none (the scope is not read at admission yet).
+ */
+export type AdmissionEvent = { shape: "excludedSiteCompose"; gap_id: string; lane: "directed"; edit_site: string; excluded_by: string };
+
+const str = (v: unknown): v is string => typeof v === "string" && v.trim().length > 0;
+const LOC_KEYS = new Set(["gap_id", "dispatch_id", "file", "evidence", "method", "created_at"]);
+/** The localizationRecord run-time check (the same rule as goal-host's src/routing-core/localization.ts). */
+export function validLocalizationRecord(v: unknown): boolean {
+  if (!v || typeof v !== "object" || Array.isArray(v)) return false;
+  const r = v as Record<string, unknown>;
+  if (Object.keys(r).some((k) => !LOC_KEYS.has(k))) return false;
+  if (!str(r.gap_id) && !str(r.dispatch_id)) return false;
+  if (r.gap_id !== undefined && !str(r.gap_id)) return false;
+  if (r.dispatch_id !== undefined && !str(r.dispatch_id)) return false;
+  if (!str(r.file) || !/^repos\/[\w.-]+\/[\w.\/-]+\.\w+$/.test(r.file)) return false;
+  if (!str(r.method) || !str(r.created_at) || Number.isNaN(Date.parse(r.created_at))) return false;
+  if (!Array.isArray(r.evidence) || r.evidence.length === 0) return false;
+  return r.evidence.every((e) => !!e && typeof e === "object" && !Array.isArray(e) && Object.keys(e).every((k) => k === "read" || k === "why") && str((e as { read?: unknown }).read) && str((e as { why?: unknown }).why));
+}
 
 export type AdmissionRefusal = { stage: AdmissionStage; verdict: "REFUSED" | "BUSY"; excluded_by: string | null };
 export type AdmissionDecision = { admit: boolean; refusal: AdmissionRefusal | null };
@@ -91,16 +120,18 @@ export function clampAdmission(i: ComposeAdmissionInput, out: unknown): Admissio
 }
 
 /** THE ENTRY (composeAdmission): the floor, then the clamped rules. production and the corpus both call this. */
-export function composeAdmission(i: ComposeAdmissionInput): AdmissionDecision & { fell_back: boolean } {
+export function composeAdmission(raw: ComposeAdmissionInput): AdmissionDecision & { fell_back: boolean; events: AdmissionEvent[] } {
+  const i: ComposeAdmissionInput = { ...raw, localization: validLocalizationRecord(raw.localization) ? raw.localization : null };
+  const events: AdmissionEvent[] = [];
   const floor = floorAdmission(i);
-  if (!floor.admit) return { ...floor, fell_back: false };
+  if (!floor.admit) return { ...floor, fell_back: false, events };
   let out: unknown;
   try { out = admitCompose(i); } catch { out = undefined; }
   const ok = clampAdmission(i, out);
-  if (ok) return { ...ok, fell_back: false };
+  if (ok) return { ...ok, fell_back: false, events };
   admissionFellBack.count++;
   console.warn(`[fc-admission] rules answer refused by the clamp — the floor stands (fell_back=${admissionFellBack.count})`);
-  return { ...floor, fell_back: true };
+  return { ...floor, fell_back: true, events };
 }
 
 /** The log line and featureComposeReport body for a refusal: exactly today's text for every floor stage. */

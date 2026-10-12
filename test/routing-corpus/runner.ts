@@ -55,8 +55,8 @@ export type CorpusReport = {
 /** The entries a case may name. A name not here is entry_missing, never an error. */
 export const ENTRIES: Record<string, (c: RoutingCase) => Promise<unknown>> = {
   composeAdmission: async (c) => {
-    const { admit, refusal } = composeAdmission(c.input as ComposeAdmissionInput);
-    return { admit, refusal };
+    const { admit, refusal, events } = composeAdmission(c.input as ComposeAdmissionInput);
+    return { admit, refusal, events };
   },
 };
 

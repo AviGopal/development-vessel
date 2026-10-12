@@ -135,6 +135,12 @@ export const EVALUATOR_FILES: readonly string[] = [
   "repos/development-vessel/test/helpers/runtime-root.ts",
   // The drafter split's closure must-fail: the open module stays pure and only feature-compose imports it (10-11).
   "repos/development-vessel/test/drafter-split/f2-f3-module-boundary.test.ts",
+  // The routing corpora (build 7 part R): the replay and compare logic that pins the open routing rules, and the
+  // compose admission core whose floor and clamp the admission rules are judged against.
+  "repos/goal-host-vessel/test/routing-corpus/",
+  "repos/goal-host-vessel/src/routing-core/corpus-runner.ts",
+  "repos/development-vessel/test/routing-corpus/",
+  "repos/development-vessel/src/resolvers/compose-admission-core.ts",
 ];
 export const EVALUATOR_FILE_REASON = "refused: the path is one of the evaluator's own files (EVALUATOR_FILES)";
 /**
@@ -246,6 +252,29 @@ export const SCOPE_CLASSIFICATION: Readonly<Record<string, ScopeClass>> = {
   "repos/development-vessel/test/drafter-split/f6-behaviour-preservation.test.ts": { class: "judge_trust", reason: "a drafter-split pin, run alone by the protected gate (judge tests)" },
   "repos/development-vessel/test/drafter-split/f7-floor-self-repair.test.ts": { class: "judge_trust", reason: "a drafter-split pin, run alone by the protected gate (judge tests)" },
   "repos/development-vessel/test/drafter-split/f8-time-bound.test.ts": { class: "judge_trust", reason: "a drafter-split pin, run alone by the protected gate (judge tests)" },
+  // The routing split (build 7 part R): the closed routing cores, the pre-closed open rules (until the routing opening
+  // act), and the routing corpora with their protected tests.
+  "repos/goal-host-vessel/src/routing-core/": { class: "judge_trust", reason: "the edit-intent routing core: reads, clamps, the floor and the composed replay entry (containment)" },
+  "repos/goal-host-vessel/src/routing-core/corpus-runner.ts": { class: "judge_trust", reason: "the routing corpus replay and compare logic, the criterion's own checker (judge tests)" },
+  "repos/goal-host-vessel/src/routing-rules/": { class: "judge_trust", reason: "pre-closed until the routing opening act (routing rules)" },
+  "repos/goal-host-vessel/test/routing-corpus/": { class: "judge_trust", reason: "the goal-host routing corpus and its admission checks (judge tests)" },
+  "repos/goal-host-vessel/test/routing-corpus/chain.test.ts": { class: "judge_trust", reason: "a routing-corpus pin, run alone by the protected gate (judge tests)" },
+  "repos/goal-host-vessel/test/routing-corpus/corpus.test.ts": { class: "judge_trust", reason: "a routing-corpus pin, run alone by the protected gate (judge tests)" },
+  "repos/goal-host-vessel/test/routing-corpus/localization-record.test.ts": { class: "judge_trust", reason: "a routing-corpus pin, run alone by the protected gate (judge tests)" },
+  "repos/goal-host-vessel/test/routing-corpus/routing-rules-purity.test.ts": { class: "judge_trust", reason: "a routing-corpus pin, run alone by the protected gate (judge tests)" },
+  "repos/goal-host-vessel/test/routing-corpus/runner-logic.test.ts": { class: "judge_trust", reason: "a routing-corpus pin, run alone by the protected gate (judge tests)" },
+  "repos/goal-host-vessel/test/routing-corpus/wiring-pin.test.ts": { class: "judge_trust", reason: "a routing-corpus pin, run alone by the protected gate (judge tests)" },
+  "repos/development-vessel/src/resolvers/compose-admission-core.ts": { class: "judge_trust", reason: "the compose admission floor, clamp and refusal renderer (containment)" },
+  "repos/development-vessel/src/judge-rules/": { class: "judge_trust", reason: "pre-closed until the routing opening act (admission rules)" },
+  "repos/development-vessel/test/routing-corpus/": { class: "judge_trust", reason: "the development-vessel routing corpus and its admission checks (judge tests)" },
+  "repos/development-vessel/test/routing-corpus/chain.test.ts": { class: "judge_trust", reason: "a routing-corpus pin, run alone by the protected gate (judge tests)" },
+  "repos/development-vessel/test/routing-corpus/corpus.test.ts": { class: "judge_trust", reason: "a routing-corpus pin, run alone by the protected gate (judge tests)" },
+  "repos/development-vessel/test/routing-corpus/localization-record.test.ts": { class: "judge_trust", reason: "a routing-corpus pin, run alone by the protected gate (judge tests)" },
+  "repos/development-vessel/test/routing-corpus/routing-rules-purity.test.ts": { class: "judge_trust", reason: "a routing-corpus pin, run alone by the protected gate (judge tests)" },
+  "repos/development-vessel/test/routing-corpus/runner-logic.test.ts": { class: "judge_trust", reason: "a routing-corpus pin, run alone by the protected gate (judge tests)" },
+  "repos/development-vessel/test/routing-corpus/wiring-pin.test.ts": { class: "judge_trust", reason: "a routing-corpus pin, run alone by the protected gate (judge tests)" },
+  "repos/development-vessel/test/resolvers/compose-admission-check-supply.test.ts": { class: "judge_trust", reason: "pins the check-supply exception to compose admission (containment tests)" },
+  "repos/development-vessel/test/resolvers/operator-hold-contains.test.ts": { class: "judge_trust", reason: "pins that an operator hold contains every compose (containment tests)" },
   "repos/development-vessel/src/control-bytes.ts": { class: "judge_trust", reason: "the drafted-anchor binding feature-compose's apply step writes through (containment)" },
   "repos/development-vessel/src/cross-file-symbols.ts": { class: "judge_trust", reason: "the safe-anchor and region locators of feature-compose's apply guard (containment)" },
   "repos/development-vessel/src/edit-provenance.ts": { class: "judge_trust", reason: "the re-derived edit refusal of feature-compose's apply step (containment)" },

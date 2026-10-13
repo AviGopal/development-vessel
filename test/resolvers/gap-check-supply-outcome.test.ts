@@ -117,7 +117,7 @@ async function storeRow(id: string): Promise<Row | undefined> {
 }
 const ledgerOf = (r: Row | undefined): Row => ((((r?.["classification_metadata"] ?? {}) as Row)["check_supply"] ?? {}) as Row);
 async function seed(id: string, what: string): Promise<void> {
-  const summary = `${what} fixture ${RUN}: local-tools-vessel src/widget.ts widget returns the wrong value`;
+  const summary = `${what} fixture ${RUN}: local-tools-vessel src/widget.ts \`widget\` returns the wrong value`;
   const w = await sg.resolveSubstrateGapWrite({ type: "substrateGap_write", gap: { id, category: "systematic_failure", source: "operator", status: "open", detected_at: new Date().toISOString(), summary, classification_metadata: {} } } as never);
   if (w.shape === "structuredError") throw new Error("seed refused: " + JSON.stringify(w.body));
   await sg.__settleBirthEvaluationsForTests();

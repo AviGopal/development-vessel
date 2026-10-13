@@ -206,7 +206,61 @@ function importSpecifier(testFile: string, siteRel: string): string {
  * sentence names only the check path (goal-host's edit-intent route targets the file the lead sentence names); the
  * edit site is named by its import specifier.
  */
-export function checkSupplyGoal(vessel: string, testFile: string, summary: string, site: string | null = null, reader?: SrcReader): string {
+/**
+ * WHAT A CHECK MAY BE BUILT ON (C-invented-1). An EXISTENCE assertion is never a falsifier by itself: anything can be exported,
+ * so a check that a symbol exists is closed by exporting it. The goal therefore never offers an example symbol, and a symbol
+ * anchors a check only when it ALREADY RESOLVES in the code (used or declared in the edit site's code, or, with no edit site,
+ * declared in the vessel's src), so its existence is already true and the red must come from its BEHAVIOUR.
+ *  - symbol: a backticked, called (`x(`) or camelCase identifier from the evidence that resolves as above. A plain word is
+ *    never one, even when the code exports it (an export is exactly what a hollow fix adds), and neither is a word that only
+ *    the prose names (a shape name, a label) or that resolves only inside strings or comments;
+ *  - text: an OBSERVED output in quotes (an error, a log line, a message, returned or printed text: said so by a nearby
+ *    context word, or written in the falsifier_spec). A quoted goal or question is not an observed output;
+ *  - behaviour: a stated actual-vs-expected pair ("returns 1; it must return 2").
+ */
+export type CheckAnchor = { kind: "symbol" | "text" | "behaviour"; value: string };
+export const NO_ANCHOR_REASON = "evidence names no falsifiable anchor";
+/** Code with comments and string literals blanked, so a name only quoted or commented does not resolve. */
+const codeOnly = (src: string): string => src
+  .replace(/\/\*[\s\S]*?\*\//g, " ")
+  .replace(/(^|[^:])\/\/[^\n]*/g, "$1 ")
+  .replace(/(["'`])(?:\\.|(?!\1)[^\\\n])*\1/g, '""');
+const DECLARATION = /\b(?:function\*?|const|let|var|class|enum)\s+([A-Za-z_$][\w$]*)/g;
+/** The names declared in a source file (code only). */
+export function declaredNames(src: string): Set<string> {
+  return new Set([...codeOnly(src).matchAll(DECLARATION)].map((m) => m[1]!));
+}
+const OUTPUT_CONTEXT = /\b(error|errors|throws?|thrown|logs?|logged|message|prints?|printed|returns?|returned|outputs?|says|reports?|responds?|answers?)\b[^."'`]{0,40}$/i;
+export function falsifiableAnchors(evidence: string, siteSrc: string | null, spec = "", vesselDeclared: ReadonlySet<string> | null = null): CheckAnchor[] {
+  const out: CheckAnchor[] = [];
+  const add = (a: CheckAnchor) => { if (!out.some((x) => x.kind === a.kind && x.value === a.value)) out.push(a); };
+  const ident = /^[A-Za-z_$][\w$]*$/;
+  const siteCode = siteSrc !== null ? codeOnly(siteSrc) : null;
+  const resolves = (name: string): boolean => siteCode !== null
+    ? new RegExp(`(?<![\\w$])${name.replace(/\$/g, "\\$")}(?![\\w$])`).test(siteCode)
+    : !!vesselDeclared?.has(name);
+  const candidates = new Set<string>();
+  const all = `${evidence}\n${spec}`;
+  for (const m of all.matchAll(/`([A-Za-z_$][\w$]*)`/g)) candidates.add(m[1]!);
+  for (const m of all.matchAll(/\b([A-Za-z_$][\w$]{2,})\(/g)) candidates.add(m[1]!);
+  for (const m of all.matchAll(/\b([a-z][a-z0-9]*[A-Z][A-Za-z0-9]*)\b/g)) if (m[1]!.length >= 5) candidates.add(m[1]!);
+  for (const c of candidates) if (resolves(c)) add({ kind: "symbol", value: c });
+  const quoted = (text: string, fromSpec: boolean) => {
+    for (const m of text.matchAll(/`([^`\n]{1,200})`|"([^"\n]{1,200})"|'([^'\n]{1,200})'/g)) {
+      const q = (m[1] ?? m[2] ?? m[3] ?? "").trim();
+      if (ident.test(q) || !/\s/.test(q) || q.length < 8 || /\?$/.test(q)) continue;
+      if (fromSpec || OUTPUT_CONTEXT.test(text.slice(Math.max(0, m.index! - 60), m.index!))) add({ kind: "text", value: q });
+    }
+  };
+  quoted(evidence, false);
+  if (spec) quoted(spec, true);
+  const b = /\b(returns?|yields?|produces?|gives?|is)\s+([^\s,;]+)[^.;]*[;,]?\s*(?:it\s+|but\s+)?(?:must|should)\s+(?:return|yield|produce|give|be)\s+([^\s,;.]+)/i.exec(all);
+  if (b) add({ kind: "behaviour", value: b[0].trim() });
+  return out;
+}
+const anchorText = (anchors: readonly CheckAnchor[]): string => anchors.map((a) => a.kind === "symbol" ? `symbol \`${a.value}\`` : a.kind === "text" ? `text ${JSON.stringify(a.value)}` : `behaviour "${a.value}"`).join("; ");
+
+export function checkSupplyGoal(vessel: string, testFile: string, summary: string, site: string | null = null, reader?: SrcReader, anchors: readonly CheckAnchor[] = []): string {
   const siteRel = vesselRelativeEditSite(site);
   // A CONFIG EDIT SITE (an activity seed or template) gets the consumer-behaviour goal (check-supply-admission.ts
   // configSiteCheckGoal): the arm step refuses a check that only reads the template's literals.
@@ -218,9 +272,11 @@ export function checkSupplyGoal(vessel: string, testFile: string, summary: strin
   const imp = siteRel && /\.(?:[cm]?[jt]sx?)$/.test(siteRel)
     ? `Import the module the defect lives in as a namespace, import * as mod from "${importSpecifier(testFile, siteRel)}", and assert on it`
     : "Import the src module the defect lives in as a namespace (import * as mod from \"../../src/<file>\") and assert on it";
+  const named = anchors.length
+    ? `Build it on what the evidence names (${anchorText(anchors)}): call the code with an input and make the failing assertion on what it returns, throws, logs or prints (its behaviour, never its declaration). `
+    : "";
   return `Write ONE failing test in repos/${vessel}/${testFile} that reproduces: ${symptomOf(summary)}. ` +
-    `Its expect() assertion fails because of the defect, not because the file fails to load: ${imp} ` +
-    `(for a symbol that must exist: expect(typeof (mod as Record<string, unknown>)["name"]).toBe("function")). ` +
+    `Its expect() assertion fails because of the defect, not because the file fails to load: ${imp}. ` + named +
     "No network, no services, no timers. Do not change src/ or any other file.";
 }
 
@@ -564,6 +620,24 @@ export async function resolveGapCheckSupplyTick(pointer: GapCheckSupplyTickPoint
       if (hasFalsifierA !== hasFalsifierB) return hasFalsifierA ? -1 : 1; // stated falsifier FIRST
       return String(a["first_detected_at"] ?? a["detected_at"] ?? "").localeCompare(String(b["first_detected_at"] ?? b["detected_at"] ?? ""));
     });
+  const anchorsOf = new Map<string, CheckAnchor[]>();
+  const declCache = new Map<string, Set<string>>();
+  /** With no edit site, a symbol resolves only if the vessel's own src declares it (cached per tick). */
+  const vesselDeclarations = (vessel: string, reader: SrcReader): Set<string> => {
+    const hit = declCache.get(vessel);
+    if (hit) return hit;
+    const names = new Set<string>();
+    const walk = (dir: string, depth: number) => {
+      if (depth > 6) return;
+      for (const rel of reader.list(dir)) {
+        if (/\.(?:[cm]?[jt]sx?)$/.test(rel) && !/\.(?:test|check)\./.test(rel)) { const src = reader.read(rel); if (src) for (const n of declaredNames(src)) names.add(n); }
+        else if (!/\.[A-Za-z0-9]+$/.test(rel)) walk(rel, depth + 1);
+      }
+    };
+    walk("src", 0);
+    declCache.set(vessel, names);
+    return names;
+  };
   let scopeRead: AutonomyScope | null = null;
   let scopeUnread: string | null = null;
   const scopeOnce = async (): Promise<AutonomyScope> => (scopeRead ??= await readScopeSelf());
@@ -619,7 +693,23 @@ export async function resolveGapCheckSupplyTick(pointer: GapCheckSupplyTickPoint
     let baselineTitles: string[] = [];
     try { baselineTitles = declaredTestTitles(readFileSync(join(clonesRoot(), vessel, testFile), "utf-8")); } catch { baselineTitles = []; }
     const summary = String(row["summary"] ?? "");
-    const goal = checkSupplyGoal(vessel, testFile, summary, site, srcReaderAt(join(clonesRoot(), vessel)));
+    const reader = srcReaderAt(join(clonesRoot(), vessel));
+    const siteRel = vesselRelativeEditSite(site);
+    const siteSrc = siteRel ? reader.read(siteRel) : null;
+    // A CODE site needs a falsifiable anchor from the evidence; never guess one (a config site's goal is built from the
+    // template it names). No anchor: no goal, one loud skip record, re-read every tick in case the evidence grows.
+    if (!configEditSite(siteRel, siteSrc)) {
+      const spec = typeof meta["falsifier_spec"] === "string" ? String(meta["falsifier_spec"]) : "";
+      const anchors = falsifiableAnchors(summary, siteSrc, spec, siteSrc === null ? vesselDeclarations(vessel, reader) : null);
+      if (anchors.length === 0) {
+        skipped.push({ id, reason: NO_ANCHOR_REASON });
+        console.warn(`[gap-check-supply] ${id}: ${NO_ANCHOR_REASON}; no check goal (falsifier stays unknown)`);
+        if (!pointer.dry_run && !(ledger.state === "no_anchor" && ledger.reason === NO_ANCHOR_REASON)) await writeMeta(row, { check_supply: { ...ledger, state: "no_anchor", reason: NO_ANCHOR_REASON } });
+        continue;
+      }
+      anchorsOf.set(id, anchors);
+    }
+    const goal = checkSupplyGoal(vessel, testFile, summary, site, reader, anchorsOf.get(id) ?? []);
     if (pointer.dry_run) { dispatched.push({ id, goal, dispatch_id: null }); continue; }
     const r = await resolveDispatchGoal({ type: "dispatch_goal", goal, variables: { gap_id: id, check_supply: true }, timeout_ms: 15_000 });
     if (r.shape !== "goalDispatchResult") {

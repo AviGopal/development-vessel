@@ -245,7 +245,6 @@ export type GoalReachAction =
 
 // ── classification helpers ────────────────────────────────────────────────────────────────────────
 
-/** The goal_hash of a dispatch, or null when its goal text may be the activeDispatches 200-char cut. */
 /** A goal hash as goal-reach records carry it. */
 const GOAL_HASH_TOKEN = /^[0-9a-f]{8}$/;
 /** A listing row whose goal text is the 200-char cut and not yet completed by a detail read. */
@@ -299,6 +298,7 @@ export function unhashedRuns(dispatches: readonly DispatchObservation[]): { no_g
   return { no_goal_hash, cut_goal };
 }
 
+/** The goal_hash of a dispatch, or null when its goal text may be the activeDispatches 200-char cut. */
 export function dispatchGoalHash(d: DispatchObservation): string | null {
   if (typeof d.goal_hash === "string" && d.goal_hash.length > 0) return d.goal_hash;
   if (typeof d.goal !== "string" || d.goal.trim().length === 0) return null;

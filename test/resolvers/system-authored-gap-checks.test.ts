@@ -381,7 +381,7 @@ describe("system-authored gap checks: (c) a landed test arms the gap only when r
   it("a gap WITH its own edit site: an assertion-red test that imports nothing does NOT arm; the refusal names the import", async () => {
     expect(supply).not.toBeNull();
     const id = T("sgc-noimport");
-    await seed(id, `sgc-noimport fixture ${RUN}: local-tools-vessel site-x misbehaves`, { edit_site: `repos/${VESSEL}/src/site-x.ts` });
+    await seed(id, `sgc-noimport fixture ${RUN}: local-tools-vessel site-x misbehaves: \`site_x_ts\` is 1; it must be 2`, { edit_site: `repos/${VESSEL}/src/site-x.ts` });
     rhythms = [dueRhythm({ max_per_tick: 50, max_attempts: 10 })];
     await tick({ now_ms: Date.now() + 2600 * 3600_000 });
     const testFile = String(ledgerOf(metaOf(await storeRow(id)))["test_file"] ?? "");
@@ -398,7 +398,7 @@ describe("system-authored gap checks: (c) a landed test arms the gap only when r
   it("a gap WITH its own edit site: an assertion-red test importing a DIFFERENT module does NOT arm; the refusal names the import", async () => {
     expect(supply).not.toBeNull();
     const id = T("sgc-otherimport");
-    await seed(id, `sgc-otherimport fixture ${RUN}: local-tools-vessel site-x misbehaves`, { edit_site: `repos/${VESSEL}/src/site-x.ts` });
+    await seed(id, `sgc-otherimport fixture ${RUN}: local-tools-vessel site-x misbehaves: \`site_x_ts\` is 1; it must be 2`, { edit_site: `repos/${VESSEL}/src/site-x.ts` });
     rhythms = [dueRhythm({ max_per_tick: 50, max_attempts: 10 })];
     await tick({ now_ms: Date.now() + 2800 * 3600_000 });
     const testFile = String(ledgerOf(metaOf(await storeRow(id)))["test_file"] ?? "");
@@ -415,7 +415,7 @@ describe("system-authored gap checks: (c) a landed test arms the gap only when r
   it("CONTROL: a gap WITH its own edit site and an assertion-red test importing that module arms", async () => {
     expect(supply).not.toBeNull();
     const id = T("sgc-siteimport");
-    await seed(id, `sgc-siteimport fixture ${RUN}: local-tools-vessel site-x misbehaves`, { edit_site: `repos/${VESSEL}/src/site-x.ts` });
+    await seed(id, `sgc-siteimport fixture ${RUN}: local-tools-vessel site-x misbehaves: \`site_x_ts\` is 1; it must be 2`, { edit_site: `repos/${VESSEL}/src/site-x.ts` });
     rhythms = [dueRhythm({ max_per_tick: 50, max_attempts: 10 })];
     await tick({ now_ms: Date.now() + 3000 * 3600_000 });
     const testFile = String(ledgerOf(metaOf(await storeRow(id)))["test_file"] ?? "");
@@ -558,5 +558,86 @@ describe("system-authored gap checks: (f) a control arm for causal measurement",
     expect(m["check_supply"]).toBeUndefined();
     expect(Number(((body["arms"] ?? {}) as Row)["control"])).toBeGreaterThanOrEqual(1);
     expect(Number(((body["arms"] ?? {}) as Row)["treatment"])).toBeGreaterThanOrEqual(1);
+  });
+});
+
+// (g) C-invented-1: AN EXISTENCE ASSERTION IS NEVER A FALSIFIER. The goal never offers an example symbol (a drafter copied the
+// old `["name"]` example; `export function name()` then "fixed" the gap). A symbol anchors a check only when it ALREADY
+// resolves in the code (used/declared in the edit site's code; with no site, declared in the vessel's src), so the red must
+// come from behaviour; text anchors only when it is an observed output; a code-site gap with no anchor gets NO goal (loud
+// no_anchor, re-read every tick).
+describe("system-authored gap checks: (g) anchors come from the evidence and resolve in the code", () => {
+  const anchorsOf = (evidence: string, site: string | null, spec = "", decl: Set<string> | null = null): Array<[string, string]> =>
+    (supply as unknown as { falsifiableAnchors: (e: string, s: string | null, sp?: string, d?: Set<string> | null) => Array<{ kind: string; value: string }> })
+      .falsifiableAnchors(evidence, site, spec, decl).map((a) => [a.kind, a.value]);
+  const SITE_SRC = [
+    "export async function resolveLedgerDigest(p: unknown) { return parseLedger(String(p)); }",
+    "export function parseLedger(s: string) { return s ? [s] : null; }",
+    "export function computeTotals(rows: number[]) { return rows.reduce((a, b) => a + b, 0); }",
+    "export function name(): string { return \"satisfier:ledger_digest\"; }",
+    "const SHAPE = \"ledgerDigestReport\"; // emits scriptRunResult rows",
+  ].join("\n");
+  const cases: Array<[string, string, string | null, string, Array<[string, string]>]> = [
+    ["symptom-only (capability id, class label, path)", "Capability 'satisfier:ledger_digest' is systematically failing due to an 'execution_error'. I was unable to retrieve the source code for repos/x/src/ledger-digest.ts", SITE_SRC, "", []],
+    ["the ORIGINAL (c) fixture text: symptom-only", "sgc fixture: local-tools-vessel site-x misbehaves", SITE_SRC, "", []],
+    ["MUST-FAIL (a): a camelCase SHAPE the site does not use", "the walk produced no scriptRunResult and no gvlPointer for this goal", SITE_SRC, "", []],
+    ["MUST-FAIL (a): a camelCase name present only in a string or comment of the site", "ledgerDigestReport is never written", SITE_SRC, "", []],
+    ["MUST-FAIL (b): a plain word that happens to be an export (`name`), not code-formatted", "the report has the wrong name for the vessel", SITE_SRC, "", []],
+    ["MUST-FAIL (c): a quoted GOAL question is not an observed output", 'goal "What is happening within this codebase?" was not reached', SITE_SRC, "", []],
+    ["a quoted phrase with no output context is not an anchor", 'the user asked "summarise the open orders please" twice', SITE_SRC, "", []],
+    ["backticked symbol that resolves", "`parseLedger` gives up on an empty file", SITE_SRC, "", [["symbol", "parseLedger"]]],
+    ["called symbol that resolves", "computeTotals( ) double counts refunds", SITE_SRC, "", [["symbol", "computeTotals"]]],
+    ["a code-formatted symbol that does NOT resolve is not an anchor", "`rateLimiter` lets a burst through", SITE_SRC, "", []],
+    ["no edit site: resolves only against the vessel's declarations", "rateLimiter lets a burst of 50 through", null, "", [["symbol", "rateLimiter"]]],
+    ["no edit site, undeclared camelCase: none", "scriptRunResult was empty", null, "", []],
+    ["an observed message in quotes (context word)", 'the importer logs "missing header row in upload" and stops', SITE_SRC, "", [["text", "missing header row in upload"]]],
+    ["a quoted phrase in the falsifier_spec is an observed output", "the importer stops early", SITE_SRC, 'must-fail: "missing header row in upload" is printed', [["text", "missing header row in upload"]]],
+    ["behaviour pair", "the widget returns 1; it must return 2", SITE_SRC, "", [["behaviour", "returns 1; it must return 2"]]],
+    ["the ORIGINAL widget fixture text: a plain word, even one the site declares, is not an anchor", "local-tools-vessel src/widget.ts widget returns the wrong value", "export function widget() { return 1; }", "", []],
+    ["MUST-FAIL (b'): the hollow export `name` with a behaviour verb, as a plain word, does not anchor", "the vessel name lets nothing through", SITE_SRC, "", []],
+  ];
+  for (const [label, evidence, site, spec, want] of cases) it(`${label} → ${want.length ? want.map((w) => w.join(":")).join(", ") : "no anchor"}`, () => {
+    expect(typeof (supply as unknown as Row)["falsifiableAnchors"]).toBe("function");
+    expect(anchorsOf(evidence, site, spec, site === null ? new Set(["rateLimiter", "containShell"]) : null)).toEqual(want);
+  });
+
+  it("MUST-FAIL: a symptom-only code-site gap gets NO goal; it is recorded no_anchor (loud, falsifier unknown) and re-read when its evidence gains an anchor", async () => {
+    expect(supply).not.toBeNull();
+    const id = T("sgc-noanchor");
+    await seed(id, `noanchor fixture ${RUN}: local-tools-vessel site-x misbehaves`, { edit_site: SITE });
+    await tick({ now_ms: Date.now() + 2000 * 3600_000 });
+    expect(goals.filter((g) => g.variables?.["gap_id"] === id)).toEqual([]);
+    const m = metaOf(await storeRow(id));
+    expect(ledgerOf(m)["state"]).toBe("no_anchor");
+    expect(ledgerOf(m)["reason"]).toBe("evidence names no falsifiable anchor");
+    expect(m["falsifier"] ?? "none").toBe("none");
+    await seed(id, `noanchor fixture ${RUN}: \`containShell\` returns true for "git -c core.hooksPath=/tmp/h status"; it must return false`, { edit_site: SITE });
+    await tick({ now_ms: Date.now() + 2001 * 3600_000 });
+    const g = goals.filter((x) => x.variables?.["gap_id"] === id);
+    expect(g.length).toBe(1);
+    expect(g[0]!.goal).toContain("symbol `containShell`");
+  });
+
+  it("CONTROL: a CONFIG edit site (an activity seed) keeps its consumer-behaviour goal; the anchor rule is for code sites", async () => {
+    expect(supply).not.toBeNull();
+    mkdirSync(join(CLONES, VESSEL, "src", "seed"), { recursive: true });
+    writeFileSync(join(CLONES, VESSEL, "src", "seed", "shell-ticks.ts"), "export const SHELL_TICKS = [{ id: \"shell-tick\", resolver: \"shell_report\" }];\n");
+    const id = T("sgc-config");
+    await seed(id, `config fixture ${RUN}: the shell report tick is systematically failing`, { edit_site: `repos/${VESSEL}/src/seed/shell-ticks.ts` });
+    await tick({ now_ms: Date.now() + 2003 * 3600_000 });
+    expect(goals.filter((g) => g.variables?.["gap_id"] === id).length).toBe(1);
+    expect(ledgerOf(metaOf(await storeRow(id)))["state"]).toBe("goal_dispatched");
+  });
+
+  it("MUST-FAIL (d) + G2: a goal built on a resolved symbol asks for behaviour, with no existence/typeof wording and no placeholder anywhere", async () => {
+    expect(supply).not.toBeNull();
+    const id = T("sgc-g2");
+    await seed(id, GIT_DIR_SUMMARY, { edit_site: SITE });
+    await tick({ now_ms: Date.now() + 2002 * 3600_000 });
+    const g = goals.filter((x) => x.variables?.["gap_id"] === id)[0]!;
+    expect(g.goal).toContain("symbol `containShell`");
+    expect(g.goal).toMatch(/what it returns, throws, logs or prints/);
+    expect(g.goal).not.toMatch(/typeof|\bexist|\["name"\]|must exist/i);
+    expect(readFileSync(RESOLVER_FILE, "utf8")).not.toMatch(/\["name"\]|for a symbol that must exist/);
   });
 });

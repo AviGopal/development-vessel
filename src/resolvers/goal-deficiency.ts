@@ -30,6 +30,7 @@
  * open `goalDeficiencyPolicy` pool record over the defaults below (law 1); an invalid record files nothing.
  */
 import { gapClassKey } from "./substrate-gap.js";
+import { verdictTokenOfReason } from "../lib/verdict-token.js";
 
 export const GOAL_DEFICIENCY_POLICY_SHAPE = "goalDeficiencyPolicy";
 export const GOAL_DEFICIENCY_TALLY_SHAPE = "goalDeficiencyTally";
@@ -57,6 +58,10 @@ export interface GoalDeficiencyPolicy {
   abstain_patterns: string[];
   /** Runs whose operator matches one of these (operator-written test goals) are not tallied. */
   ignore_operator_patterns: string[];
+  /** Judge reasons R2 reads itself per call for not-reached runs that have none yet (oldest first). */
+  max_reason_reads: number;
+  /** Judge codes (deterministic:<code>) that are NOT content deficiencies (refusals, rate limits): treated as abstains. */
+  non_deficiency_code_patterns: string[];
   lenient_reach: LenientReachRule[];
 }
 
@@ -69,11 +74,13 @@ export const DEFAULT_GOAL_DEFICIENCY_POLICY: Readonly<GoalDeficiencyPolicy> = Ob
   window_hours: 168,
   max_new_per_run: 2,
   max_entries: 60,
+  max_reason_reads: 30,
+  non_deficiency_code_patterns: ["-refused$"],
   classes: [
     { class: "deliverable_not_produced", patterns: ["\\bnot produced\\b", "did not produce", "did not provide the required", "\\brequired \\S+ was not\\b", "no (output|deliverable) (was )?produced", "missing (the )?required (output|deliverable)"] },
     { class: "did_not_address", patterns: ["did not address", "does not address", "failed to address", "not addressing"] },
     { class: "ungrounded", patterns: ["ungrounded", "not grounded", "unsupported claim"] },
-    { class: "no_substantive_content", patterns: ["no substantive", "only general references", "generic (answer|response)", "\\bhollow\\b"] },
+    { class: "no_substantive_content", patterns: ["no substantive", "only general references", "generic (answer|response)", "(?<![A-Za-z])hollow"] },
     { class: MISSING_PRODUCER_CLASS, patterns: ["no producer or constructible payload for missing shapes"] },
     { class: "execution_error", patterns: ["\\berror\\b", "\\bexception\\b", "unable to connect", "timed out", "failed to execute"] },
   ],
@@ -94,7 +101,7 @@ export function parseDeficiencyPolicy(body: unknown): { ok: true; policy: GoalDe
   if (body === null || body === undefined) return { ok: true, policy: p };
   if (typeof body !== "object" || Array.isArray(body)) return { ok: false, why: "goalDeficiencyPolicy is not an object" };
   const b = body as Record<string, unknown>;
-  const ints: Array<[keyof GoalDeficiencyPolicy, number, number]> = [["file_gaps", 0, 1], ["min_runs", 2, 1000], ["window_hours", 24, 24 * 90], ["max_new_per_run", 0, 50], ["max_entries", 10, 500]];
+  const ints: Array<[keyof GoalDeficiencyPolicy, number, number]> = [["file_gaps", 0, 1], ["min_runs", 2, 1000], ["window_hours", 24, 24 * 90], ["max_new_per_run", 0, 50], ["max_entries", 10, 500], ["max_reason_reads", 0, 200]];
   for (const [k, lo, hi] of ints) {
     if (b[k] === undefined) continue;
     if (!intIn(b[k], lo, hi)) return { ok: false, why: `goalDeficiencyPolicy.${k} must be an integer in ${lo}..${hi}` };
@@ -111,7 +118,7 @@ export function parseDeficiencyPolicy(body: unknown): { ok: true; policy: GoalDe
     }
     p.classes = out;
   }
-  for (const k of ["abstain_patterns", "ignore_operator_patterns"] as const) {
+  for (const k of ["abstain_patterns", "ignore_operator_patterns", "non_deficiency_code_patterns"] as const) {
     if (b[k] === undefined) continue;
     const l = strList(b[k]);
     if (!l || !l.every(compiles)) return { ok: false, why: `goalDeficiencyPolicy.${k} must be a list of patterns that compile` };
@@ -145,8 +152,13 @@ export interface TallyEntry {
   at: number;
   reached: boolean;
   reason: string;
-  /** The reason class; "abstain" and "phantom" are kept but never counted; null = unclassified. */
+  /** The reason class; "abstain", "phantom" and "unread" (no reason read yet) are kept but never counted toward a class;
+   *  null = a reason no rule matched (unclassified). */
   class: string | null;
+  /** The goal-host that ran it (its reason can be read there later). */
+  node?: string | null;
+  /** Where the class came from: the judge's own structured code (the system's taxonomy) or the shaped text map (an operator map). */
+  class_source?: "judge_code" | "operator_map";
   missing_shapes?: string[];
   judge?: ReachJudge;
 }
@@ -172,7 +184,16 @@ export interface RunView {
   completionShapes?: string[] | null;
   poolShapes?: string[];
   selectedTemplateId?: string | null;
+  node?: string | null;
+  /** The run was read and its record carries NO reason (the judge/walk never wrote one): unrecorded, not unread. */
+  reason_unrecorded?: boolean;
 }
+
+/** A not-reached run whose judge reason has not been read yet: counted as a failure, never toward a class, reported as unread. */
+export const UNREAD_CLASS = "unread";
+/** A not-reached run whose record, once read, carries no reason at all: the source never wrote one. Never re-read, never counted. */
+export const UNRECORDED_CLASS = "unrecorded";
+const NEVER_COUNTED: ReadonlySet<string> = new Set(["abstain", "phantom", UNREAD_CLASS, UNRECORDED_CLASS]);
 
 const normReason = (raw: unknown): string => String(raw ?? "")
   .replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi, "<id>")
@@ -183,15 +204,24 @@ const anyMatch = (patterns: readonly string[], text: string): boolean => pattern
  * The class of a not-reached run's reason. `isAdvertised(shape)` answers whether the fleet advertises a shape (null when
  * that cannot be judged: then nothing is called phantom on that ground).
  */
-export function classifyReason(reason: string, inferredTarget: readonly string[], policy: GoalDeficiencyPolicy, isAdvertised: (shape: string) => boolean | null): { class: string | null; missing_shapes?: string[] } {
-  if (anyMatch(policy.abstain_patterns, reason)) return { class: "abstain" };
+export function classifyReason(reason: string, inferredTarget: readonly string[], policy: GoalDeficiencyPolicy, isAdvertised: (shape: string) => boolean | null): { class: string | null; missing_shapes?: string[]; class_source?: "judge_code" | "operator_map" } {
+  if (anyMatch(policy.abstain_patterns, reason)) return { class: "abstain", class_source: "operator_map" };
   const m = MISSING_SHAPES_RE.exec(reason);
   if (m) {
     const shapes = m[1]!.split(",").map((s) => s.trim()).filter(Boolean);
     const real = shapes.filter((s) => inferredTarget.includes(s) || isAdvertised(s) !== false);
     if (shapes.length > 0 && real.length === 0) return { class: "phantom", missing_shapes: shapes };
   }
-  for (const r of policy.classes) if (anyMatch(r.patterns, reason)) return { class: r.class, ...(m ? { missing_shapes: m[1]!.split(",").map((s) => s.trim()).filter(Boolean) } : {}) };
+  // THE SYSTEM'S OWN TAXONOMY FIRST (after the phantom guard, a validity check, not a class): a structured judge code at the head of the reason names the class directly.
+  const code = verdictTokenOfReason(reason);
+  if (code) {
+    if (anyMatch(policy.non_deficiency_code_patterns, code)) return { class: "abstain", class_source: "judge_code" };
+    // A code that is not a class token (too long, leading digit) is never truncated: it falls through to the text map.
+    const cls = code.replace(/-/g, "_");
+    if (CLASS_TOKEN.test(cls)) return { class: cls, class_source: "judge_code" };
+  }
+  // FALLBACK for free-text verdicts: the shaped text map (an operator map; recorded as such for grading).
+  for (const r of policy.classes) if (anyMatch(r.patterns, reason)) return { class: r.class, class_source: "operator_map", ...(m ? { missing_shapes: m[1]!.split(",").map((s) => s.trim()).filter(Boolean) } : {}) };
   return { class: null };
 }
 
@@ -213,10 +243,11 @@ export function tallyUpdate(tallies: Record<string, DeficiencyTally>, runs: read
     const target = r.completionShapes ?? [];
     const e: TallyEntry = r.reached === true
       ? { dispatch_id: r.dispatchId, at: r.endedAt ?? r.startedAt, reached: true, reason, class: null, judge: { reason, shapes: [...(r.completionShapes ?? r.poolShapes ?? [])], template: r.selectedTemplateId ?? null } }
-      : { dispatch_id: r.dispatchId, at: r.endedAt ?? r.startedAt, reached: false, reason, ...(reason ? classifyReason(reason, target, policy, isAdvertised) : { class: null }) };
+      : { dispatch_id: r.dispatchId, at: r.endedAt ?? r.startedAt, reached: false, reason, ...(reason ? classifyReason(reason, target, policy, isAdvertised) : { class: r.reason_unrecorded ? UNRECORDED_CLASS : UNREAD_CLASS }) };
+    if (r.node) e.node = r.node;
     const i = t.entries.findIndex((x) => x.dispatch_id === r.dispatchId);
-    // A later, thinner observation (no reason) never erases a reason already read.
-    if (i >= 0) { if (reason || !t.entries[i]!.reason) t.entries[i] = e; }
+    // A later, thinner observation (no reason) never erases a reason already read, nor the node it was read from.
+    if (i >= 0) { const prev = t.entries[i]!; if (reason || !prev.reason) t.entries[i] = { ...e, ...(e.node || !prev.node ? {} : { node: prev.node }) }; }
     else t.entries.push(e);
     t.entries.sort((a, b) => a.at - b.at);
     if (t.entries.length > policy.max_entries) t.entries = t.entries.slice(-policy.max_entries);
@@ -224,6 +255,26 @@ export function tallyUpdate(tallies: Record<string, DeficiencyTally>, runs: read
     touched.add(r.goal_hash);
   }
   return { tallies: out, touched: [...touched], ignored };
+}
+
+/**
+ * The not-reached runs whose judge reason R2 should read itself this call, oldest first, at most `bound`: runs in the current listing with
+ * no reason, and tallied runs still unread (by the node recorded on them). A run with no node to read from is skipped.
+ */
+export function reasonsToRead(tallies: Record<string, DeficiencyTally>, runs: readonly RunView[], bound: number): Array<{ dispatchId: string; node: string; goal_hash: string; at: number }> {
+  const out = new Map<string, { dispatchId: string; node: string; goal_hash: string; at: number }>();
+  for (const r of runs) {
+    if (r.status === "running" || r.status === "pending" || r.reached === true || !r.goal_hash || !r.node) continue;
+    if (typeof r.goalReachReason === "string" && r.goalReachReason.trim()) continue;
+    const known = tallies[r.goal_hash]?.entries.find((e) => e.dispatch_id === r.dispatchId);
+    if (known && known.reason) continue;
+    out.set(r.dispatchId, { dispatchId: r.dispatchId, node: r.node, goal_hash: r.goal_hash, at: r.endedAt ?? r.startedAt });
+  }
+  for (const t of Object.values(tallies)) for (const e of t.entries) {
+    if (e.reached || e.class !== UNREAD_CLASS || !e.node || out.has(e.dispatch_id)) continue; // unrecorded is never re-read
+    out.set(e.dispatch_id, { dispatchId: e.dispatch_id, node: e.node, goal_hash: t.goal_hash, at: e.at });
+  }
+  return [...out.values()].sort((a, b) => a.at - b.at).slice(0, Math.max(0, bound));
 }
 
 export function isLenientReach(judge: ReachJudge | undefined, policy: Pick<GoalDeficiencyPolicy, "lenient_reach">): boolean {
@@ -262,6 +313,7 @@ export function goalReachVerdict(goalHash: string, tally: DeficiencyTally | null
   if (!HASH_TOKEN.test(goalHash)) return { measured: false, goal_hash: goalHash, why: "goal_hash must be 8 hex chars" };
   if (!tally) return { measured: false, goal_hash: goalHash, why: "no tally for this goal (it has not failed since the tally began)" };
   const since = sinceLastTrustedReach(tally, policy);
+  // An unread or unrecorded failure is still a failure: it counts here (only abstains and phantoms do not).
   const unreached = since.filter((e) => !e.reached && e.class !== "abstain" && e.class !== "phantom").length;
   const reaches = tally.entries.filter((e) => e.reached);
   const trusted = reaches.filter((e) => !isLenientReach(e.judge, policy));
@@ -298,7 +350,11 @@ export interface DeficiencyDecision {
   writes: DeficiencyWrite[];
   skipped: Array<{ goal_hash: string; reason_class?: string; why: string }>;
   unclassified: Array<{ goal_hash: string; count: number; samples: string[] }>;
-  candidates: Array<{ goal_hash: string; reason_class: string; count: number }>;
+  /** Not-reached runs whose reason has not been read yet, per goal (visible, never counted toward a class). */
+  unread: Array<{ goal_hash: string; count: number }>;
+  /** Not-reached runs whose record carries no reason at all (the source never wrote one), per goal. */
+  unrecorded: Array<{ goal_hash: string; count: number }>;
+  candidates: Array<{ goal_hash: string; reason_class: string; count: number; class_source: "judge_code" | "operator_map" | "mixed" }>;
 }
 
 const excerpt = (s: string, n: number): string => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
@@ -318,6 +374,7 @@ export function deficiencyGapRow(t: DeficiencyTally, cls: string, failed: TallyE
       kind: "goal_content_deficiency",
       goal_hash: t.goal_hash,
       reason_class: cls,
+      class_source: sourceOf(failed),
       sample_reasons: samples,
       dispatch_ids: failed.slice(-10).map((e) => e.dispatch_id),
       counted_runs: failed.length,
@@ -332,18 +389,27 @@ export function deficiencyGapRow(t: DeficiencyTally, cls: string, failed: TallyE
  * What to file. `existing` is the store's rows by id (null = the store was not read: nothing is filed). Highest count
  * first; creates + reopens share max_new_per_run; refreshing an open row is free but only when it has new runs.
  */
+const sourceOf = (es: readonly TallyEntry[]): "judge_code" | "operator_map" | "mixed" => {
+  const s = new Set(es.map((e) => e.class_source ?? "operator_map"));
+  return s.size === 1 ? ([...s][0] as "judge_code" | "operator_map") : "mixed";
+};
+
 export function deficiencyDecisions(tallies: Record<string, DeficiencyTally>, existing: Map<string, Record<string, unknown>> | null, now: number, policy: GoalDeficiencyPolicy): DeficiencyDecision {
-  const d: DeficiencyDecision = { writes: [], skipped: [], unclassified: [], candidates: [] };
+  const d: DeficiencyDecision = { writes: [], skipped: [], unclassified: [], unread: [], unrecorded: [], candidates: [] };
   const fromMs = now - policy.window_hours * 3_600_000;
   const nowIso = new Date(now).toISOString();
   const ranked: Array<{ t: DeficiencyTally; cls: string; failed: TallyEntry[] }> = [];
   for (const t of Object.values(tallies)) {
     const recent = sinceLastTrustedReach(t, policy).filter((e) => !e.reached && e.at >= fromMs);
+    const unread = recent.filter((e) => e.class === UNREAD_CLASS).length;
+    if (unread > 0) d.unread.push({ goal_hash: t.goal_hash, count: unread });
+    const unrecorded = recent.filter((e) => e.class === UNRECORDED_CLASS).length;
+    if (unrecorded > 0) d.unrecorded.push({ goal_hash: t.goal_hash, count: unrecorded });
     const un = recent.filter((e) => e.class === null);
     if (un.length > 0) d.unclassified.push({ goal_hash: t.goal_hash, count: un.length, samples: [...new Set(un.map((e) => e.reason).filter(Boolean))].slice(0, 3) });
     const byClass = new Map<string, TallyEntry[]>();
-    for (const e of recent) if (e.class && e.class !== "abstain" && e.class !== "phantom") byClass.set(e.class, [...(byClass.get(e.class) ?? []), e]);
-    for (const [cls, failed] of byClass) if (failed.length >= policy.min_runs) { ranked.push({ t, cls, failed }); d.candidates.push({ goal_hash: t.goal_hash, reason_class: cls, count: failed.length }); }
+    for (const e of recent) if (e.class && !NEVER_COUNTED.has(e.class)) byClass.set(e.class, [...(byClass.get(e.class) ?? []), e]);
+    for (const [cls, failed] of byClass) if (failed.length >= policy.min_runs) { ranked.push({ t, cls, failed }); d.candidates.push({ goal_hash: t.goal_hash, reason_class: cls, count: failed.length, class_source: sourceOf(failed) }); }
   }
   if (policy.file_gaps !== 1) { for (const c of ranked) d.skipped.push({ goal_hash: c.t.goal_hash, reason_class: c.cls, why: "file_gaps is 0 (tally and report only)" }); return d; }
   if (existing === null) { for (const c of ranked) d.skipped.push({ goal_hash: c.t.goal_hash, reason_class: c.cls, why: "store_unread" }); return d; }

@@ -814,7 +814,13 @@ export interface DeficiencyReport {
   refused: Array<{ id: string; why: string }>;
   skipped: Array<{ goal_hash: string; reason_class?: string; why: string }>;
   unclassified: Array<{ goal_hash: string; count: number; samples: string[] }>;
-  candidates: Array<{ goal_hash: string; reason_class: string; count: number }>;
+  unread: Array<{ goal_hash: string; count: number }>;
+  unrecorded: Array<{ goal_hash: string; count: number }>;
+  /** Judge reasons R2 read itself this tick; records read that carry NO reason (unrecorded); reads that failed (stay unread). */
+  reasons_read: number;
+  reasons_unrecorded: number;
+  reason_reads_failed: number;
+  candidates: Array<{ goal_hash: string; reason_class: string; count: number; class_source: string }>;
 }
 
 /** One action (or, in dry-run, would-action) a tick took, with the linked gaps as it saw them. */
@@ -1349,7 +1355,7 @@ export function defaultGoalReachIO(policy: GoalReachPolicy): GoalReachIO {
 
     async recogniseDeficiencies(dispatches, now) {
       const gd = await import("./goal-deficiency.js");
-      const empty: DeficiencyReport = { ok: true, tallied: 0, ignored: 0, filed: [], refused: [], skipped: [], unclassified: [], candidates: [] };
+      const empty: DeficiencyReport = { ok: true, tallied: 0, ignored: 0, filed: [], refused: [], skipped: [], unclassified: [], unread: [], unrecorded: [], reasons_read: 0, reasons_unrecorded: 0, reason_reads_failed: 0, candidates: [] };
       const pol = await gd.readDeficiencyPolicy();
       if (!pol.ok) { console.warn(`[goal-reach] R2 off this tick: ${pol.why}`); return { ...empty, ok: false, why: pol.why }; }
       const { resolvePoolImpulse, resolvePoolImpulseWrite } = await import("./pool-impulse.js");
@@ -1374,7 +1380,23 @@ export function defaultGoalReachIO(policy: GoalReachPolicy): GoalReachIO {
         const cls = typeof c === "string" ? c : String((c as { class?: unknown } | null)?.class ?? "");
         return cls === "class2" ? true : cls === "unresolvable" ? false : null;
       };
-      const runs = dispatches.map((d) => ({ ...d, goal_hash: dispatchGoalHash(d), origin: originOf(d) }));
+      const runs: import("./goal-deficiency.js").RunView[] = dispatches.map((d) => ({ ...d, goal_hash: dispatchGoalHash(d), origin: originOf(d), node: d.node ?? null }));
+      // READ THE MISSING REASONS (C-tally-1): a not-reached run with no judge reason is unread until R2 reads it here, oldest first.
+      let reasonsRead = 0, reasonsUnrecorded = 0, reasonReadsFailed = 0;
+      const byId = new Map(runs.map((r) => [r.dispatchId, r]));
+      for (const n of gd.reasonsToRead(tallies, runs, pol.policy.max_reason_reads)) {
+        const w = await postResolve(n.node, { type: "goalWalkState", dispatchId: n.dispatchId }, 10_000);
+        const b = (w.json?.["body"] ?? null) as Record<string, unknown> | null;
+        if (!w.ok || !b) { reasonReadsFailed++; continue; } // the record could not be read: stays unread, retried later
+        const reason = typeof b["goalReachReason"] === "string" ? (b["goalReachReason"] as string).trim() : "";
+        // Read, and the record has no reason: UNRECORDED (the source never wrote one), never re-read.
+        if (reason) reasonsRead++; else reasonsUnrecorded++;
+        const shapes = asStrArr(b["completionShapes"]);
+        const r = byId.get(n.dispatchId);
+        if (r) { r.goalReachReason = reason || null; r.completionShapes = shapes; r.reason_unrecorded = !reason; continue; }
+        const t = tallies[n.goal_hash]!;
+        runs.push({ dispatchId: n.dispatchId, goal_hash: n.goal_hash, goal: t.goal, status: "failed", reached: false, operator: null, origin: t.origin, startedAt: n.at, endedAt: n.at, goalReachReason: reason || null, completionShapes: shapes, node: n.node, reason_unrecorded: !reason });
+      }
       const up = gd.tallyUpdate(tallies, runs, now, pol.policy, isAdvertised);
       for (const h of up.touched) resolvePoolImpulseWrite({ type: "poolImpulse_write", id: gd.tallyId(h), shape: gd.GOAL_DEFICIENCY_TALLY_SHAPE, body: up.tallies[h], source: "goal_reach_tick", status: "open" });
       let existing: Map<string, Record<string, unknown>> | null = null;
@@ -1384,7 +1406,9 @@ export function defaultGoalReachIO(policy: GoalReachPolicy): GoalReachIO {
         if (r.shape === "substrateGap" && Array.isArray(rows)) existing = new Map(rows.filter((g) => String(g["id"] ?? "").startsWith("goal-deficiency-")).map((g) => [String(g["id"]), g]));
       } catch { existing = null; }
       const dec = gd.deficiencyDecisions(up.tallies, existing, now, pol.policy);
-      const report: DeficiencyReport = { ...empty, tallied: up.touched.length, ignored: up.ignored, skipped: dec.skipped, unclassified: dec.unclassified, candidates: dec.candidates };
+      const report: DeficiencyReport = { ...empty, tallied: up.touched.length, ignored: up.ignored, skipped: dec.skipped, unclassified: dec.unclassified, unread: dec.unread, unrecorded: dec.unrecorded, reasons_read: reasonsRead, reasons_unrecorded: reasonsUnrecorded, reason_reads_failed: reasonReadsFailed, candidates: dec.candidates };
+      const sum = (xs: Array<{ count: number }>) => xs.reduce((s, u) => s + u.count, 0);
+      console.log(`[goal-reach] R2 read ${reasonsRead} reason(s), ${reasonsUnrecorded} record(s) with none, ${reasonReadsFailed} unreadable; still unread ${sum(dec.unread)} run(s), unrecorded ${sum(dec.unrecorded)}; ${dec.candidates.length} candidate(s) (${dec.candidates.map((c) => `${c.reason_class}/${c.class_source}`).join(", ") || "none"})`);
       for (const w of dec.writes) {
         const res = await resolveSubstrateGapWrite({ type: "substrateGap_write", gap: w.gap, demand_goals_append: [w.demand], ...(w.expect_status ? { expect_status: w.expect_status } : {}) } as never);
         const body = (res.body ?? {}) as Record<string, unknown>;

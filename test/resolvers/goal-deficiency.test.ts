@@ -68,7 +68,8 @@ describe("classifyReason (G1: every default class, abstain, phantom, unclassifie
     ["deliverable not produced", "The required weeklyDigest was not produced; only partial shapes were generated.", [], never, "deliverable_not_produced"],
     ["required output not provided", "The output did not provide the required per-team totals, which fails the goal's intent.", [], never, "deliverable_not_produced"],
     ["did not address", "The answer did not address the second question at all.", [], never, "did_not_address"],
-    ["ungrounded", "deterministic:ungrounded-claim — the figures cite nothing.", [], never, "ungrounded"],
+    ["ungrounded (free text)", "The figures are ungrounded: they cite nothing.", [], never, "ungrounded"],
+    ["a judge code names its own class (the system's taxonomy first)", "deterministic:ungrounded-claim — the figures cite nothing.", [], never, "ungrounded_claim"],
     ["no substantive content", "The output has no substantive content, only general references and links.", [], never, "no_substantive_content"],
     ["execution error", "transport: Unable to connect to the peer.", [], never, "execution_error"],
     ["abstain", "abstain:cut-view — the deliverable did not fit the judge's view; not graded.", [], never, "abstain"],
@@ -281,6 +282,33 @@ describe("through the default I/O and the real stores", () => {
     const v2 = await quiet(async () => { await io.recogniseDeficiencies([...ds, obs("ok", 1, true, "reached: backlog produced")], Date.now()); return gd.resolveGoalReachVerdict({ goal_hash: h }); });
     expect(v2.body.unreached_since_last_reach).toBe(0);
   });
+
+  it("C-tally-1: the default I/O reads the reasons it lacks from the run's node — reason → classed, none → unrecorded (never re-read), unreachable → stays unread", async () => {
+    const G2 = `rank the open incidents by customer impact (${RUN})`;
+    const hits: string[] = [];
+    const server = Bun.serve({ port: 0, hostname: "127.0.0.1", async fetch(req) {
+      const id = String(((await req.json()) as Row).impulse.pointer.dispatchId);
+      hits.push(id);
+      if (id.startsWith("x-")) return new Response("down", { status: 503 });
+      return Response.json({ shape: "goalWalkState", body: id.startsWith("e-") ? { status: "failed" } : { goalReachReason: "deterministic:hollow-walklog-capped — capped", completionShapes: [] } });
+    } });
+    try {
+      const node = `http://127.0.0.1:${server.port}/resolve`;
+      const o = (id: string, hoursAgo: number): Row => ({ ...obs(id, hoursAgo, false, ""), goal: G2, node, goalReachReason: null });
+      const ds = [o("c-1", 9), o("c-2", 8), o("e-1", 7), o("x-1", 6)];
+      const io = grt.defaultGoalReachIO({ ...grt.DEFAULT_GOAL_REACH_POLICY });
+      const r1 = await quiet(() => io.recogniseDeficiencies(ds, Date.now()));
+      expect(hits.sort()).toEqual([`c-1-${RUN}`, `c-2-${RUN}`, `e-1-${RUN}`, `x-1-${RUN}`]);
+      expect([r1.reasons_read, r1.reasons_unrecorded, r1.reason_reads_failed]).toEqual([2, 1, 1]);
+      const h2 = grt.goalHashOf(G2);
+      expect(r1.unread).toEqual([{ goal_hash: h2, count: 1 }]);
+      expect(r1.unrecorded).toEqual([{ goal_hash: h2, count: 1 }]);
+      hits.length = 0;
+      const r2 = await quiet(() => io.recogniseDeficiencies([], Date.now()));
+      expect(hits).toEqual([`x-1-${RUN}`]);
+      expect(r2.unrecorded).toEqual([{ goal_hash: h2, count: 1 }]);
+    } finally { server.stop(true); }
+  });
 });
 
 describe("wiring", () => {
@@ -300,5 +328,76 @@ describe("wiring", () => {
     const routes = readFileSync(join(import.meta.dir, "../../src/routes/impulses.ts"), "utf8");
     expect(cfg).toContain('"goal_reach_verdict",');
     expect(routes).toContain('case "goal_reach_verdict":');
+  });
+});
+
+// C-tally-1: R2 READS THE REASONS IT LACKS, and classes by the SYSTEM'S OWN JUDGE CODE before any operator text map.
+//   - a reason headed by a structured judge code (deterministic:<code>) is classed by that code (class_source judge_code);
+//     codes matching the shaped non_deficiency_code_patterns (refusals) are abstains; free text falls back to the shaped
+//     text map (class_source operator_map); the source is carried to candidates and to the filed row;
+//   - an empty reason is UNREAD (never read: re-read later, oldest first, bounded by max_reason_reads) or UNRECORDED
+//     (read, and the record carries none: never re-read); neither is ever counted toward a class; both are reported.
+describe("judge code first; the text map is the fallback (class_source recorded)", () => {
+  const cases: Array<[string, string, string | null, string | undefined]> = [
+    ["a judge code wins over a text-map match in the same reason", "deterministic:hollow-walklog-capped — the required digest was not produced", "hollow_walklog_capped", "judge_code"],
+    ["an underscore code", "deterministic:hollow_walklog_capped", "hollow_walklog_capped", "judge_code"],
+    ["a refusal code is an abstain (shaped non-deficiency list)", "deterministic:spend-rate-refused (cap reached)", "abstain", "judge_code"],
+    ["free text falls back to the text map", "The required digest was not produced.", "deliverable_not_produced", "operator_map"],
+    ["MUST-FAIL (regex): an underscore-joined hollow in free text is no_substantive_content", "walk log hollow_walklog_capped at 40 steps", "no_substantive_content", "operator_map"],
+    ["a code that is not a class token is never truncated: it falls through", `deterministic:${"x".repeat(50)} — the required digest was not produced`, "deliverable_not_produced", "operator_map"],
+    ["a prefix-only reason is free text", "deterministic: nothing here", null, undefined],
+    ["the phantom guard runs before the judge code", "deterministic:missing-producer — no producer or constructible payload for missing shapes [sql_like]", "phantom", undefined],
+  ];
+  for (const [label, reason, cls, src] of cases) it(`${label} → ${cls ?? "unclassified"}${src ? ` (${src})` : ""}`, () => {
+    const c = gd.classifyReason(reason, [], P(), never);
+    expect(c.class).toBe(cls);
+    expect(c.class_source).toBe(src);
+  });
+  it("the non-deficiency list is shaped: emptied, a refusal code is its own class", () => {
+    expect(gd.classifyReason("deterministic:spend-rate-refused", [], { ...P(), non_deficiency_code_patterns: [] }, never)).toEqual({ class: "spend_rate_refused", class_source: "judge_code" });
+  });
+  const bad: Array<[string, unknown]> = [["non-deficiency codes not a list", { non_deficiency_code_patterns: "x" }], ["a non-deficiency pattern that does not compile", { non_deficiency_code_patterns: ["("] }], ["max_reason_reads above 200", { max_reason_reads: 201 }], ["max_reason_reads negative", { max_reason_reads: -1 }]];
+  for (const [label, body] of bad) it(`invalid (${label}) → ok false`, () => { expect(gd.parseDeficiencyPolicy(body).ok).toBe(false); });
+  it("candidates and the filed row carry the class source; refusals never count", () => {
+    const G = "summarise the on-call handover notes";
+    const hh = grt.goalHashOf(G);
+    const judged = [1, 2, 3].map((i) => run(`j${i}`, G, 10 - i, false, "deterministic:hollow-walklog-capped — capped"));
+    const refused = [1, 2, 3].map((i) => run(`s${i}`, G, 5 - i, false, "deterministic:spend-rate-refused"));
+    const d = gd.deficiencyDecisions(tallyFrom([...judged, ...refused]), new Map(), NOW, P());
+    expect(d.candidates).toEqual([{ goal_hash: hh, reason_class: "hollow_walklog_capped", count: 3, class_source: "judge_code" }]);
+    expect(d.writes.map((w: Row) => w.gap.classification_metadata.class_source)).toEqual(["judge_code"]);
+    const mixed = gd.deficiencyDecisions(tallyFrom([run("m1", G, 9, false, "deterministic:ungrounded"), run("m2", G, 8, false, "ungrounded figures"), run("m3", G, 7, false, "not grounded")]), new Map(), NOW, P());
+    expect(mixed.candidates).toEqual([{ goal_hash: hh, reason_class: "ungrounded", count: 3, class_source: "mixed" }]);
+  });
+});
+
+describe("unread vs unrecorded: visible, never counted; reasonsToRead is oldest first and bounded", () => {
+  const G = "list the stale feature flags per service";
+  const hh = grt.goalHashOf(G);
+  it("an empty reason is unread; read-and-empty is unrecorded; neither counts toward a class nor makes a candidate", () => {
+    const runs = [
+      run("u1", G, 9, false, "", { node: "n-a" }), run("u2", G, 8, false, "", { node: "n-a" }), run("u3", G, 7, false, "", { node: "n-a" }),
+      run("r1", G, 6, false, "", { node: "n-a", reason_unrecorded: true }), run("r2", G, 5, false, "", { node: "n-a", reason_unrecorded: true }), run("r3", G, 4, false, "", { node: "n-a", reason_unrecorded: true }),
+    ];
+    const t = tallyFrom(runs);
+    expect(t[hh]!.entries.map((e: Row) => e.class)).toEqual(["unread", "unread", "unread", "unrecorded", "unrecorded", "unrecorded"]);
+    const d = gd.deficiencyDecisions(t, new Map(), NOW, P());
+    expect(d.candidates).toEqual([]);
+    expect(d.writes).toEqual([]);
+    expect(d.unread).toEqual([{ goal_hash: hh, count: 3 }]);
+    expect(d.unrecorded).toEqual([{ goal_hash: hh, count: 3 }]);
+  });
+  it("a later read replaces unread (with its class, keeping the node); a later empty read makes it unrecorded", () => {
+    const first = gd.tallyUpdate({}, [run("u1", G, 9, false, "", { node: "n-a" }), run("u2", G, 8, false, "", { node: "n-a" })], NOW, P(), never).tallies;
+    const read = gd.tallyUpdate(first, [run("u1", G, 9, false, "The required list was not produced."), run("u2", G, 8, false, "", { reason_unrecorded: true })], NOW, P(), never).tallies;
+    expect(read[hh]!.entries.map((e: Row) => [e.class, e.node])).toEqual([["deliverable_not_produced", "n-a"], ["unrecorded", "n-a"]]);
+  });
+  it("reasonsToRead: unread tally entries and reasonless listed runs, oldest first, at most the bound; never unrecorded, reached, running or node-less", () => {
+    expect(has("reasonsToRead")).toBe(true);
+    const tallies = tallyFrom([run("t-old", G, 20, false, "", { node: "n-a" }), run("t-rec", G, 19, false, "", { node: "n-a", reason_unrecorded: true }), run("t-read", G, 18, false, "not produced", { node: "n-a" })]);
+    const listed = [run("l-new", G, 2, false, "", { node: "n-b" }), run("l-mid", G, 10, false, "", { node: "n-b" }), run("l-ok", G, 9, true, "", { node: "n-b" }), run("l-run", G, 8, false, "", { node: "n-b", status: "running" }), run("l-nonode", G, 7, false, ""), run("l-has", G, 6, false, "not produced", { node: "n-b" }), run("t-read", G, 18, false, "", { node: "n-a" })];
+    expect(gd.reasonsToRead(tallies, listed, 30).map((x: Row) => x.dispatchId)).toEqual(["t-old", "l-mid", "l-new"]);
+    expect(gd.reasonsToRead(tallies, listed, 2).map((x: Row) => [x.dispatchId, x.node])).toEqual([["t-old", "n-a"], ["l-mid", "n-b"]]);
+    expect(gd.reasonsToRead(tallies, listed, 0)).toEqual([]);
   });
 });

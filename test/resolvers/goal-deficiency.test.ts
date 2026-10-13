@@ -542,3 +542,96 @@ describe("reclassifyStored: the current policy applies to stored entries", () =>
     expect(t[hh]!.entries.map((e: Row) => e.class)).toEqual(before);
   });
 });
+
+// SETTLEMENT OF A REACH-JUDGED GAP (2026-10-13): a landing's check is not read before the goal runs again. goal_reach_verdict
+// takes `since` (the landing's pending_set_at) and is measured only once a counted run newer than it exists; the ONE judge
+// passes `since` for a pending landing on a since-aware shape. A stale read (only runs from before the landing) is unknown —
+// never present, so never falsified or reverted. The genuine cases stay: a newer run still unreached → present; a newer
+// trusted reach → absent.
+describe("goal_reach_verdict `since` + the judge's landing bound", () => {
+  const G = "summarise the stale feature flags per team";
+  const hh = grt.goalHashOf(G);
+  const T = (h: number) => NOW - h * H;
+  const fails = [5, 4, 3].map((h, i) => run(`f${i}`, G, h, false, "The required summary was not produced."));
+  const tallyOf = (extra: Row[] = []) => tallyFrom([...fails, ...extra])[hh]!;
+  const LANDED = T(2);
+  it("no since → exactly today's verdict (backward compatible)", () => {
+    const t = tallyOf();
+    const a = gd.goalReachVerdict(hh, t, P()), b = gd.goalReachVerdict(hh, t, P(), null);
+    expect(a).toEqual(b);
+    expect(a).toMatchObject({ measured: true, unreached_since_last_reach: 3 });
+  });
+  it("MUST-FAIL: since after every counted run → measured:false (the goal has not run since the landing)", () => {
+    const v = gd.goalReachVerdict(hh, tallyOf(), P(), LANDED);
+    expect(v.measured).toBe(false);
+    expect(v.why).toMatch(/no counted run newer than since/);
+  });
+  it("only abstains after the landing → still measured:false (an abstain is not a run that tests the fix)", () => {
+    const v = gd.goalReachVerdict(hh, tallyOf([run("ab", G, 1, false, "deterministic:spend-rate-refused")]), P(), LANDED);
+    expect(v.measured).toBe(false);
+  });
+  it("G6: a run NEWER than the landing that is still unreached → measured, present (the genuine falsification stays)", () => {
+    const v = gd.goalReachVerdict(hh, tallyOf([run("n1", G, 1, false, "The required summary was not produced.")]), P(), LANDED);
+    expect(v).toMatchObject({ measured: true, unreached_since_last_reach: 4 });
+  });
+  it("G6: a newer TRUSTED reach → measured, 0 (the close stays)", () => {
+    const v = gd.goalReachVerdict(hh, tallyOf([run("r1", G, 1, true, "reached: the summary lists every flag")]), P(), LANDED);
+    expect(v).toMatchObject({ measured: true, unreached_since_last_reach: 0 });
+  });
+  it("an unparseable since is refused by the resolver (measured:false), never ignored", async () => {
+    expect(gd.parseSince("not a time")).toBeNull();
+    expect(gd.parseSince("2030-01-01T00:00:00Z")).toBe(Date.parse("2030-01-01T00:00:00Z"));
+    const v = (await gd.resolveGoalReachVerdict({ goal_hash: hh, since: "not a time" })).body;
+    expect(v.measured).toBe(false);
+    expect(v.why).toMatch(/^since is not a time/);
+  });
+
+  // The ONE judge (evaluateGapCheck: birth, closeLandedGap and the pending-land sweep all call it), with its resolve answered by
+  // the real instrument over an in-memory tally, so the judge→instrument contract is exercised exactly.
+  const judge = async () => (await import("../../src/judge/gap-check-judge.js")) as Record<string, any>;
+  const gapRow = (meta: Row, shape = "goal_reach_verdict"): Row => ({ id: "goal-deficiency-x", classification_metadata: { evidence_resolve: { shape, input: { goal_hash: hh }, zero_field: shape === "goal_reach_verdict" ? "unreached_since_last_reach" : "count" }, ...meta } });
+  const answerWith = (t: Row, seen: Row[]) => (async (_u: unknown, init: { body: string }) => {
+    const ptr = JSON.parse(init.body).impulse.pointer;
+    seen.push(ptr);
+    const body = ptr.type === "goal_reach_verdict" ? gd.goalReachVerdict(ptr.goal_hash, t, P(), gd.parseSince(ptr.since)) : { count: 2 };
+    return new Response(JSON.stringify({ shape: "x", body }), { status: 200 });
+  }) as unknown as typeof fetch;
+  const quietly = async <X>(f: () => Promise<X>): Promise<X> => { const l = console.log; console.log = () => {}; try { return await f(); } finally { console.log = l; } };
+  const landing = { pending_outcome_verification: "c0ffee1234abcd", pending_set_at: new Date(LANDED).toISOString() };
+
+  it("MUST-FAIL: a pending landing + only older runs → unknown (never present, so never falsified/reverted); since was passed", async () => {
+    const { evaluateGapCheck } = await judge();
+    const seen: Row[] = [];
+    expect(await quietly(() => evaluateGapCheck(gapRow(landing), { fetchImpl: answerWith(tallyOf(), seen) }))).toBe("unknown");
+    expect(seen[0]!["since"]).toBe(landing.pending_set_at);
+  });
+  it("G6 through the judge: a newer unreached run → present; a newer trusted reach → absent", async () => {
+    const { evaluateGapCheck } = await judge();
+    expect(await quietly(() => evaluateGapCheck(gapRow(landing), { fetchImpl: answerWith(tallyOf([run("n1", G, 1, false, "The required summary was not produced.")]), []) }))).toBe("present");
+    expect(await quietly(() => evaluateGapCheck(gapRow(landing), { fetchImpl: answerWith(tallyOf([run("r1", G, 1, true, "reached")]), []) }))).toBe("absent");
+  });
+  it("no pending landing → no since, and today's verdict (present on the open tally)", async () => {
+    const { evaluateGapCheck } = await judge();
+    const seen: Row[] = [];
+    expect(await quietly(() => evaluateGapCheck(gapRow({}), { fetchImpl: answerWith(tallyOf(), seen) }))).toBe("present");
+    expect("since" in seen[0]!).toBe(false);
+  });
+  it("a pending landing whose time cannot be read → unknown without a read (cannot be bounded)", async () => {
+    const { evaluateGapCheck } = await judge();
+    const seen: Row[] = [];
+    const lines: string[] = [];
+    const l = console.log; console.log = (x: unknown) => { lines.push(String(x)); };
+    let v: string;
+    try { v = await evaluateGapCheck(gapRow({ pending_outcome_verification: "c0ffee", pending_set_at: "garbage" }), { fetchImpl: answerWith(tallyOf(), seen) }); } finally { console.log = l; }
+    expect(v!).toBe("unknown");
+    expect(seen).toEqual([]);
+    expect(lines.some((x) => /has no readable pending_set_at/.test(x))).toBe(true);
+  });
+  it("a shape that is not since-aware keeps its input unchanged under a pending landing (and today's verdict)", async () => {
+    const { evaluateGapCheck, SINCE_AWARE_CHECK_SHAPES } = await judge();
+    expect([...SINCE_AWARE_CHECK_SHAPES]).toEqual(["goal_reach_verdict"]);
+    const seen: Row[] = [];
+    expect(await quietly(() => evaluateGapCheck(gapRow(landing, "some_count_report"), { fetchImpl: answerWith(tallyOf(), seen) }))).toBe("present");
+    expect(seen[0]).toEqual({ type: "some_count_report", goal_hash: hh });
+  });
+});

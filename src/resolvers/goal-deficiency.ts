@@ -332,11 +332,30 @@ export interface GoalReachVerdict {
   /** The latest reach matched a lenient rule, and no trusted reach followed it. */
   reached_lenient?: boolean;
   lenient_reaches?: number;
+  /** The newest counted run (a reach, or a counted failure): what a landing's `since` is compared with. */
+  newest_run_at?: string | null;
 }
 
-export function goalReachVerdict(goalHash: string, tally: DeficiencyTally | null, policy: GoalDeficiencyPolicy): GoalReachVerdict {
+/** A `since` bound as given (epoch ms or an ISO time), or null when absent or unparseable. */
+export function parseSince(v: unknown): number | null {
+  if (typeof v === "number" && Number.isFinite(v)) return v;
+  if (typeof v === "string" && v.trim()) { const t = /^\d+$/.test(v.trim()) ? Number(v.trim()) : Date.parse(v); return Number.isFinite(t) ? t : null; }
+  return null;
+}
+
+/**
+ * The reach verdict. With `sinceMs` (a landing's time), it is MEASURED only once a counted run newer than it exists: until the
+ * goal has run after the landing, the tally still holds only the runs before it, and reading them as "still unreached" would
+ * falsify (and could revert) a fix nobody has tested yet. measured:false reads unknown, which leaves a landing pending.
+ */
+export function goalReachVerdict(goalHash: string, tally: DeficiencyTally | null, policy: GoalDeficiencyPolicy, sinceMs: number | null = null): GoalReachVerdict {
   if (!HASH_TOKEN.test(goalHash)) return { measured: false, goal_hash: goalHash, why: "goal_hash must be 8 hex chars" };
   if (!tally) return { measured: false, goal_hash: goalHash, why: "no tally for this goal (it has not failed since the tally began)" };
+  const counted = (e: TallyEntry) => e.reached || (e.class !== "abstain" && e.class !== "phantom");
+  const newest = tally.entries.filter(counted).reduce((m, e) => Math.max(m, e.at), -Infinity);
+  if (sinceMs !== null && !(newest > sinceMs)) {
+    return { measured: false, goal_hash: goalHash, why: `no counted run newer than since ${new Date(sinceMs).toISOString()}: the goal has not run since; the verdict waits for one` };
+  }
   const since = sinceLastTrustedReach(tally, policy);
   // An unread or unrecorded failure is still a failure: it counts here (only abstains and phantoms do not).
   const unreached = since.filter((e) => !e.reached && e.class !== "abstain" && e.class !== "phantom").length;
@@ -356,6 +375,7 @@ export function goalReachVerdict(goalHash: string, tally: DeficiencyTally | null
     last_reach_judge: judgeText(latestReach?.judge),
     reached_lenient: latestIsLenient,
     lenient_reaches: reaches.length - trusted.length,
+    newest_run_at: Number.isFinite(newest) ? new Date(newest).toISOString() : null,
   };
 }
 
@@ -493,12 +513,13 @@ export async function readTally(goalHash: string): Promise<DeficiencyTally | nul
 }
 
 /** `{type:"goal_reach_verdict", goal_hash}` → flat fields the gap check reads (zero_field unreached_since_last_reach). */
-export async function resolveGoalReachVerdict(pointer: { goal_hash?: unknown }): Promise<{ shape: string; body: GoalReachVerdict }> {
+export async function resolveGoalReachVerdict(pointer: { goal_hash?: unknown; since?: unknown }): Promise<{ shape: string; body: GoalReachVerdict }> {
   const goalHash = typeof pointer.goal_hash === "string" ? pointer.goal_hash.trim() : "";
   const pol = await readDeficiencyPolicy();
   if (!pol.ok) return { shape: "goalReachVerdict", body: { measured: false, goal_hash: goalHash, why: pol.why } };
   try {
-    return { shape: "goalReachVerdict", body: goalReachVerdict(goalHash, HASH_TOKEN.test(goalHash) ? await readTally(goalHash) : null, pol.policy) };
+    if (pointer.since !== undefined && parseSince(pointer.since) === null) return { shape: "goalReachVerdict", body: { measured: false, goal_hash: goalHash, why: `since is not a time: ${String(pointer.since).slice(0, 60)}` } };
+    return { shape: "goalReachVerdict", body: goalReachVerdict(goalHash, HASH_TOKEN.test(goalHash) ? await readTally(goalHash) : null, pol.policy, parseSince(pointer.since)) };
   } catch (e) {
     return { shape: "goalReachVerdict", body: { measured: false, goal_hash: goalHash, why: `tally unreadable: ${String((e as Error)?.message ?? e).slice(0, 160)}` } };
   }

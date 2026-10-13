@@ -288,6 +288,13 @@ export function gapCheckTimeoutMs(shape: string, input: Record<string, unknown>)
  * (closeLandedGap and the pending-land sweep). All of them call this, so a fix to the judge is a fix
  * everywhere; there is no second evaluator.
  */
+/**
+ * Check shapes whose answer is a tally of RUNS, so it can only change after the goal runs again. A pending landing passes
+ * them `since` (its pending_set_at). Declared HERE, in the judge (a trust root), not read from a lane-editable module: the
+ * set decides when a check may falsify a landing. Shapes not listed get their input unchanged.
+ */
+export const SINCE_AWARE_CHECK_SHAPES: ReadonlySet<string> = new Set(["goal_reach_verdict"]);
+
 export async function evaluateGapCheck(gap: Record<string, unknown>, opts: GapCheckOpts = {}): Promise<GapCheckVerdict> {
   return verifyGapConditionAsync(gap, opts);
 }
@@ -402,6 +409,21 @@ async function verifyGapConditionAsync(gap: Record<string, unknown>, opts: GapCh
       resolveShape = verifyShapeRaw;
     }
     if (!resolveShape) return 'unknown';
+    // A CHECK THAT CAN ONLY CHANGE BY A RE-RUN IS NOT READ BEFORE ONE (2026-10-13, settlement of reach-judged gaps).
+    // For a since-aware shape (its answer is a tally of runs), a pending landing bounds the read: the instrument measures
+    // only once a run newer than the landing exists, and answers measured:false (→ unknown, landing stays pending) until
+    // then. Read without the bound, the runs from before the fix read as "still failing" and the sweep would record the
+    // landing falsified (and the auto-revert could undo it) before the goal ever ran on it. A pending landing whose time
+    // cannot be read cannot be bounded: unknown, never a stale present.
+    const pendingSha = typeof meta['pending_outcome_verification'] === 'string' ? (meta['pending_outcome_verification'] as string) : '';
+    if (pendingSha && SINCE_AWARE_CHECK_SHAPES.has(resolveShape)) {
+      const at = typeof meta['pending_set_at'] === 'string' ? Date.parse(meta['pending_set_at'] as string) : NaN;
+      if (!Number.isFinite(at)) {
+        console.log(`[gap-verify] class2 check for ${String(gap['id'] ?? '')} (${resolveShape}): landing ${pendingSha.slice(0, 12)} has no readable pending_set_at — the read cannot be bounded by it; unknown`);
+        return 'unknown';
+      }
+      resolveInput = { ...resolveInput, since: new Date(at).toISOString() };
+    }
     // POST to the vessel's own in-container resolve endpoint.
     // THE ROUTE REQUIRES AN ENVELOPE (2026-09-01). This POSTed a FLAT body,
     // `{type, ...input}`, and src/routes/impulses.ts:1015-1027 requires
@@ -464,7 +486,8 @@ async function verifyGapConditionAsync(gap: Record<string, unknown>, opts: GapCh
     // otherwise read as 'absent' and close the gap as verified. Any check whose response says
     // observed:false or measured:false is unknown; instruments that do not report it are unaffected.
     if (inner['observed'] === false || inner['measured'] === false) {
-      console.log(`[gap-verify] class2 check for ${String(gap['id'] ?? '')} reported observed/measured false — unknown`);
+      const why = typeof inner['why'] === 'string' ? `: ${String(inner['why']).slice(0, 200)}` : '';
+      console.log(`[gap-verify] class2 check for ${String(gap['id'] ?? '')} reported observed/measured false — unknown${resolveInput['since'] ? ` (landing ${pendingSha.slice(0, 12)} at ${String(resolveInput['since'])}; newest run ${String(inner['newest_run_at'] ?? 'none')})` : ''}${why}`);
       return 'unknown';
     }
     // Defect heuristic 1: explicit defect_field present in response

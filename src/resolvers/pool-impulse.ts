@@ -144,7 +144,11 @@ export function resolvePoolImpulse(pointer: {
 //   attested_verified verdict the poolImpulse read adds (routes/impulses.ts); it never holds the attestation key.
 //   verdictCorpusWriter: kept operator-only so no one else can plant one; the runner grant (below) no longer reads it
 //   (the identity scope VERDICT_CORPUS_WRITE_SCOPE is the authority).
-export const TRUST_ROOT_POOL_SHAPES: ReadonlySet<string> = new Set(['substrateNodes', 'autonomyScope', 'spendEnvelope', 'calibrationWindow', 'scriptRunnerAllowlist', 'operatorHold', 'posteriorReplayAuthorization', 'verdictCorpusWriter']);
+// fedIngressAuthPolicy: the overlay transport's inbound-authentication mode (off/log/enforce) and the peers it may hand
+//   a caller's key to (same_authority_peers). A forged row could switch enforcement off or name an attacker's peer as
+//   same-authority, so only an operator may write it, and the transport honours a row only when this node's read marks
+//   it attested_verified with by 'operator' (scripts/substrate/federation-relay/federation-transport-server.ts).
+export const TRUST_ROOT_POOL_SHAPES: ReadonlySet<string> = new Set(['substrateNodes', 'autonomyScope', 'spendEnvelope', 'calibrationWindow', 'scriptRunnerAllowlist', 'operatorHold', 'posteriorReplayAuthorization', 'verdictCorpusWriter', 'fedIngressAuthPolicy']);
 /** key_id: the validated credential's key id (identity's identifier, never derived from the secret).
  *  evaluator: set only by in-process code (the HTTP route builds auth from the Authorization header alone, and a
  *  pointer field of that name is never read), naming the accepted evaluator making the write. */

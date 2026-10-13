@@ -650,3 +650,53 @@ describe("posteriorReplayAuthorization is a trust-root pool shape, and the pool 
     expect((await read()).get("pra-1")?.["attested_verified"]).toBe(false);
   });
 });
+
+// fedIngressAuthPolicy: the overlay transport's inbound-auth mode. Operator-only, and the transport trusts only the
+// attested_verified verdict this node's read adds (federation-transport-server.ts readIngressPolicy).
+describe("fedIngressAuthPolicy is a trust-root pool shape, and the pool read reports attested_verified", () => {
+  const { createHmac } = require("node:crypto") as typeof import("node:crypto");
+  const { writeFileSync } = require("node:fs") as typeof import("node:fs");
+  const FILE = join(ROOT, "fed-ingress-policy-pool.json");
+  const body = { mode: "enforce", same_authority_peers: ["12D3KooWPlaceholderPeer"], cache: true };
+  const at = "2026-10-13T00:00:00Z";
+  const w = { type: "poolImpulse_write", id: "fiap-1", shape: "fedIngressAuthPolicy", status: "open" as const, body };
+  const canon = (v: unknown): string => {
+    if (v === null || typeof v !== "object") return JSON.stringify(v ?? null);
+    if (Array.isArray(v)) return "[" + v.map(canon).join(",") + "]";
+    const o = v as Record<string, unknown>;
+    return "{" + Object.keys(o).filter((k) => o[k] !== undefined).sort().map((k) => JSON.stringify(k) + ":" + canon(o[k])).join(",") + "}";
+  };
+  const sigUnder = (key: string, id: string) => createHmac("sha256", key).update(["substrate-pool-attestation/v1", id, "fedIngressAuthPolicy", "open", canon(body), "k1", at].join("\n")).digest("hex");
+  const row = (id: string, attested: Record<string, unknown> | undefined) => ({ id, shape: "fedIngressAuthPolicy", body, source: "x", status: "open", injected_at: at, updated_at: at, ...(attested ? { attested } : {}) });
+  beforeEach(() => { pool.__setPoolFileForTests(FILE); writeFileSync(FILE, "[]"); });
+  afterEach(() => pool.__setPoolFileForTests(null));
+
+  it("is a member of TRUST_ROOT_POOL_SHAPES", () => {
+    expect(pool.TRUST_ROOT_POOL_SHAPES.has("fedIngressAuthPolicy")).toBe(true);
+  });
+
+  it("MUST-FAIL: a write without an operator credential (a walk, an evaluator, no auth) is refused and nothing is stored", () => {
+    for (const auth of [undefined, { operator: false }, { operator: false, evaluator: "scope_earn_in_apply" }]) {
+      const r = resolvePoolImpulseWrite(w, auth);
+      expect(r.body.ok).toBe(false);
+      expect(r.body.error).toContain("operator_credential_required");
+    }
+    expect(resolvePoolImpulse({ type: "poolImpulse", shape: "fedIngressAuthPolicy" }).body.count).toBe(0);
+  });
+
+  it("MUST-FAIL: forged, unsigned, peer-signed, evaluator and unattested rows read attested_verified:false; this node's operator stamp reads true", async () => {
+    writeFileSync(FILE, JSON.stringify([
+      row("fiap-forged", { by: "operator", key_id: "k1", at, sig: "f".repeat(64) }),
+      row("fiap-unsigned", { by: "operator", key_id: "k1", at }),
+      row("fiap-peer", { by: "operator", key_id: "k1", at, sig: sigUnder("some-peer-node-key", "fiap-peer") }),
+      row("fiap-evaluator", { by: "evaluator", evaluator: "scope_earn_in_apply", key_id: null, at, sig: sigUnder(NODE_KEY, "fiap-evaluator") }),
+      row("fiap-none", undefined),
+      row("fiap-good", { by: "operator", key_id: "k1", at, sig: sigUnder(NODE_KEY, "fiap-good") }),
+    ]));
+    const res = await impulsesRouter.request("/v2/impulses/resolve", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ impulse: { type: "poolImpulse", shape: "fedIngressAuthPolicy", status: "open" } }) });
+    expect(res.status).toBe(200);
+    const rows = new Map(((await res.json()) as { body: { impulses: Array<Record<string, unknown>> } }).body.impulses.map((r) => [String(r["id"]), r]));
+    for (const id of ["fiap-forged", "fiap-unsigned", "fiap-peer", "fiap-evaluator", "fiap-none"]) expect([id, rows.get(id)?.["attested_verified"]]).toEqual([id, false]);
+    expect(rows.get("fiap-good")?.["attested_verified"]).toBe(true);
+  });
+});

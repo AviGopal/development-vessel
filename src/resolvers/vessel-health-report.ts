@@ -10,6 +10,8 @@ interface Pointer {
   [key: string]: unknown;
 }
 
+export function name(): string { return "satisfier:vessel_health_report"; }
+
 export async function resolveVesselHealthReport(pointer: Pointer): Promise<ResolverResult> {
   // DO NOT INVENT A SUBJECT (2026-08-16).
   //

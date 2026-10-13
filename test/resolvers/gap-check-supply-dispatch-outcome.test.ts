@@ -47,6 +47,16 @@ const BOUNDS = { stale_ms: 24 * H, timeout_ms: 6 * H, title_grace_ms: 2 * H, for
 const NOW = Date.parse("2030-01-01T00:00:00.000Z");
 const sentAgo = (hours: number): string => new Date(NOW - hours * H).toISOString();
 
+describe("checkSupplyScopeTargets: each target is one real repo path (C-doublepath-1)", () => {
+  it("a repos/-prefixed site, a bare vessel-relative site and no site each give repos/<v>/<rel> once, plus the check file", () => {
+    const tf = "test/checks/g.check.ts";
+    expect(supply.checkSupplyScopeTargets("v-vessel", "repos/v-vessel/src/a/b.ts", tf)).toEqual(["repos/v-vessel/src/a/b.ts", "repos/v-vessel/test/checks/g.check.ts"]);
+    expect(supply.checkSupplyScopeTargets("v-vessel", "src/a/b.ts:12", tf)).toEqual(["repos/v-vessel/src/a/b.ts", "repos/v-vessel/test/checks/g.check.ts"]);
+    expect(supply.checkSupplyScopeTargets("v-vessel", null, tf)).toEqual(["repos/v-vessel/", "repos/v-vessel/test/checks/g.check.ts"]);
+    for (const t of supply.checkSupplyScopeTargets("v-vessel", "repos/v-vessel/src/a/b.ts", tf) as string[]) expect(t.split("repos/").length - 1).toBe(1);
+  });
+});
+
 describe("dispatchVerdict: every outcome class (G1), unknown never failed (G3)", () => {
   type Case = [string, Row, unknown, string, string | null];
   // [label, ledger extras, probe (null = not probed), expected kind, expected why (lost/wait) or reason fragment (failed)]
@@ -290,6 +300,18 @@ describe("the tick records, reads and settles dispatch outcomes", () => {
     const b2 = await tick(t1 + 1 * H);
     expect(((b2["outcomes"] as Row)["failed"] as Row[]).some((f) => f["id"] === id2 && String(f["reason"]).includes("no check written"))).toBe(true);
     expect(Number(b2["refused"])).toBeGreaterThanOrEqual(1);
+  });
+
+  it("C-doublepath-1 MUST-FAIL: a scope-excluded edit site is recorded by its one real path, never repos/<v>/repos/<v>/…", async () => {
+    excluded = [`repos/${VESSEL}/src/widget.ts`];
+    const id = T("gcso-scopesite");
+    await seed(id, "scopesite");
+    await tick(Date.now() + 2600 * H);
+    expect(goalsFor(id).length).toBe(0);
+    const l = ledgerOf(await storeRow(id));
+    expect(l["state"]).toBe("scope_excluded");
+    expect(String(l["reason"])).toContain(`target repos/${VESSEL}/src/widget.ts is excluded by the autonomy scope`);
+    expect(String(l["reason"])).not.toContain(`repos/${VESSEL}/repos/`);
   });
 
   it("an absent autonomyScope record skips nothing here and is reported", async () => {

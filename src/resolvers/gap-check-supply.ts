@@ -354,6 +354,15 @@ export function checkSupplySite(row: Row, vessel: string): string | null {
   return null;
 }
 
+/**
+ * The repo paths the lane would write for a gap's check, as the autonomy scope names them: the edit site (vessel-relative,
+ * prefixed ONCE — checkSupplySite already returns repos/<vessel>/<rel>) or the whole vessel, and the gap's check file.
+ */
+export function checkSupplyScopeTargets(vessel: string, site: string | null, testFile: string): string[] {
+  const rel = vesselRelativeEditSite(site);
+  return [rel ? `repos/${vessel}/${rel}` : `repos/${vessel}/`, `repos/${vessel}/${testFile}`];
+}
+
 /** The share measures over armed gaps whose check was born at or after sinceMs. */
 export function checkSupplyMeasures(rows: Row[], sinceMs: number): Record<string, number | null> {
   let armed = 0, sys = 0, sysRed = 0;
@@ -740,7 +749,7 @@ export async function resolveGapCheckSupplyTick(pointer: GapCheckSupplyTickPoint
     // lane's admission is the containment) and is reported once per tick.
     const scope = await scopeOnce();
     if (!scope.readable && !scopeUnread) { scopeUnread = scope.reason; console.warn(`[gap-check-supply] scope not applied this tick: ${scope.reason}`); }
-    const targets = [site ? `repos/${vessel}/${site}` : `repos/${vessel}/`, `repos/${vessel}/${testFile}`];
+    const targets = checkSupplyScopeTargets(vessel, site, testFile);
     const hit = scope.readable ? targets.map((t) => ({ t, e: autonomyScopeExcludes(scope, t) })).find((x) => x.e !== null) : undefined;
     if (hit) {
       const reason = `target ${hit.t} is excluded by the autonomy scope (${hit.e}); the lane could never land it`;

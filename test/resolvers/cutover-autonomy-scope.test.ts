@@ -92,7 +92,8 @@ function routeIdentity(g: FetchGuard): void {
 const FIXTURE_KEY = "f1-fixture-node-key";
 const EXCLUDED_DV = "src/resolvers/feature-compose.ts";
 const SCOPE_BODY = {
-  excluded_paths: ["repos/development-vessel/src/resolvers/feature-compose.ts", "repos/goal-host-vessel/src/index.ts", "scripts/substrate/"],
+  excluded_paths: ["repos/development-vessel/src/resolvers/feature-compose.ts", "repos/goal-host-vessel/src/index.ts", "scripts/substrate/",
+    "repos/development-vessel/src/config.ts", "repos/development-vessel/src/routes/impulses.ts", "repos/development-vessel/src/judge/"],
   reason: "fixture: contained",
 };
 type ScopeMode = "contained" | "unreadable";
@@ -156,6 +157,7 @@ afterEach(async () => {
   const violations = guard.restore();
   const fsViolations = fsGuard.restore();
   __setOwnCheckDepsForTests(null);
+  (cutoverMod as unknown as { __setAdditiveAdvertisedForTests?: (f: null) => void }).__setAdditiveAdvertisedForTests?.(null);
   __resetPolicyReadsForTests();
   for (const k of ENV_KEYS) { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; }
   await rm(ws, { recursive: true, force: true });
@@ -465,5 +467,149 @@ describe("cutover: disagreement adjudication mints an excluded edit_site after a
     ownCheckPasses(s, minted);
     const r = await resolveVesselMitosisCutover(s.pointer as never);
     await expectScopeRefused(s, r, "autonomy_scope_excluded", [{ entry: "repos/goal-host-vessel/src/index.ts", file: "repos/goal-host-vessel/src/index.ts" }]);
+  });
+});
+
+// THE ADDITIVE REGISTRATION RULE (user ruling 10-13, "full package, additive-only"; src/judge/gap-policy.ts additiveRegistration).
+// The registry (src/config.ts) and dispatch table (src/routes/impulses.ts) stay excluded, except for ONE kind of landing:
+// a pure, single, NEW-shape registration of a resolver module created in the SAME landing. Every must-fail below is a
+// landing the rule must refuse; the control lands. Every other excluded path is unchanged (the a-i suites above).
+const ar = (await import("../../src/judge/gap-policy.js").catch(() => ({}))) as Record<string, any>;
+const setAdvertised = (f: ((s: string) => Promise<boolean | null>) | null) => (cutoverMod as unknown as { __setAdditiveAdvertisedForTests?: (f: unknown) => void }).__setAdditiveAdvertisedForTests?.(f);
+const BASE_CONFIG = `export const config = {\n  discovery: {\n    shapes: [\n      "alpha_report",\n      "beta_summary",\n    ],\n  },\n  labels: [\n    "x",\n  ],\n};\n`;
+const BASE_ROUTES = `import { resolveAlpha } from "../resolvers/alpha.js";\nexport async function dispatch(pointer: any): Promise<unknown> {\n  switch (pointer.type) {\n    case "alpha_report": return resolveAlpha(pointer as any);\n    default:\n      throw new Error("Unknown pointer type");\n  }\n}\n`;
+const NEW_MODULE = `export async function resolveGammaDigest(pointer: any): Promise<unknown> {\n  return { shape: "gamma_digest", body: { rows: [] as unknown[], pointer } };\n}\n`;
+const withEntry = (shape: string, after = '      "beta_summary",\n') => BASE_CONFIG.replace(after, `${after}      "${shape}",\n`);
+const withCase = (shape: string, fn: string, mod: string, routes = BASE_ROUTES) => routes
+  .replace(`import { resolveAlpha } from "../resolvers/alpha.js";\n`, `import { resolveAlpha } from "../resolvers/alpha.js";\nimport { ${fn} } from "../resolvers/${mod}.js";\n`)
+  .replace("    default:\n", `    case "${shape}": return ${fn}(pointer as any);\n    default:\n`);
+const withDynCase = (shape: string, fn: string, mod: string) => BASE_ROUTES.replace("    default:\n", `    case "${shape}": {\n      const { ${fn} } = await import("../resolvers/${mod}.js");\n      return ${fn}(pointer as any);\n    }\n    default:\n`);
+type Change = { path: string; before: string | null; after: string | null };
+const registration = (over: Partial<Record<string, Change>> = {}): Change[] => Object.values({
+  "src/config.ts": { path: "src/config.ts", before: BASE_CONFIG, after: withEntry("gamma_digest") },
+  "src/routes/impulses.ts": { path: "src/routes/impulses.ts", before: BASE_ROUTES, after: withCase("gamma_digest", "resolveGammaDigest", "gamma-digest") },
+  "src/resolvers/gamma-digest.ts": { path: "src/resolvers/gamma-digest.ts", before: null, after: NEW_MODULE },
+  ...over,
+}).filter((c): c is Change => !!c);
+const notAdvertised = async () => false as boolean | null;
+
+describe("additive registration rule (the classifier): exactly one new shape, added lines only, a new module", () => {
+  it("CONTROL: a static-import registration and a dynamic-import case block are each admitted", async () => {
+    expect(await ar.additiveRegistration(registration(), notAdvertised)).toEqual({ ok: true, shape: "gamma_digest", module: "src/resolvers/gamma-digest.ts", fn: "resolveGammaDigest" });
+    const dyn = registration({ "src/routes/impulses.ts": { path: "src/routes/impulses.ts", before: BASE_ROUTES, after: withDynCase("gamma_digest", "resolveGammaDigest", "gamma-digest") } });
+    expect((await ar.additiveRegistration(dyn, notAdvertised)).ok).toBe(true);
+  });
+  const mf: Array<[string, Partial<Record<string, Change>>, RegExp]> = [
+    ["a removed line", { "src/routes/impulses.ts": { path: "src/routes/impulses.ts", before: BASE_ROUTES, after: withCase("gamma_digest", "resolveGammaDigest", "gamma-digest").replace('      throw new Error("Unknown pointer type");\n', "") } }, /removed or modified/],
+    ["a modified existing case", { "src/routes/impulses.ts": { path: "src/routes/impulses.ts", before: BASE_ROUTES, after: withCase("gamma_digest", "resolveGammaDigest", "gamma-digest").replace("return resolveAlpha(pointer as any)", "return resolveAlpha({ ...pointer } as any)") } }, /removed or modified/],
+    ["a new case for an EXISTING shape", { "src/config.ts": { path: "src/config.ts", before: BASE_CONFIG, after: withEntry("alpha_report") }, "src/routes/impulses.ts": { path: "src/routes/impulses.ts", before: BASE_ROUTES, after: withCase("alpha_report", "resolveGammaDigest", "gamma-digest") } }, /already/],
+    ["extra non-pattern code alongside", { "src/routes/impulses.ts": { path: "src/routes/impulses.ts", before: BASE_ROUTES, after: withCase("gamma_digest", "resolveGammaDigest", "gamma-digest").replace("    default:\n", "    default:\n      void 0;\n") } }, /not exactly one registration case|not an import|not one contiguous case arm/],
+    ["a case calling an EXISTING module", { "src/routes/impulses.ts": { path: "src/routes/impulses.ts", before: BASE_ROUTES, after: withCase("gamma_digest", "resolveGammaDigest", "alpha") }, "src/resolvers/gamma-digest.ts": undefined, "src/resolvers/alpha.ts": { path: "src/resolvers/alpha.ts", before: "export async function resolveAlpha(p: any) { return p; }\n", after: "export async function resolveAlpha(p: any) { return p; }\nexport async function resolveGammaDigest(p: any) { return p; }\n" } }, /EXISTING module/],
+    ["a case calling a module this landing does not create", { "src/resolvers/gamma-digest.ts": undefined }, /does not create/],
+    ["two shapes in one landing", { "src/config.ts": { path: "src/config.ts", before: BASE_CONFIG, after: BASE_CONFIG.replace('      "beta_summary",\n', '      "beta_summary",\n      "gamma_digest",\n      "delta_view",\n') } }, /exactly one added line/],
+    ["a registry entry outside the shapes array", { "src/config.ts": { path: "src/config.ts", before: BASE_CONFIG, after: BASE_CONFIG.replace('    "x",\n', '    "x",\n    "gamma_digest",\n') } }, /not inside the discovery shapes array/],
+    ["entry and case naming different shapes", { "src/config.ts": { path: "src/config.ts", before: BASE_CONFIG, after: withEntry("epsilon_rows") } }, /different shapes/],
+    ["a module that does not export the called function", { "src/resolvers/gamma-digest.ts": { path: "src/resolvers/gamma-digest.ts", before: null, after: "export async function somethingElse() { return 1; }\n" } }, /does not export/],
+    ["only one of the two registration files", { "src/config.ts": undefined }, /touches both/],
+  ];
+  for (const [label, over, why] of mf) it(`MUST-FAIL: ${label} is refused`, async () => {
+    const v = await ar.additiveRegistration(registration(over), notAdvertised);
+    expect(v.ok).toBe(false);
+    expect(String(v.why)).toMatch(why);
+  });
+  it("MUST-FAIL: a shape the live dispatch table already has a case for (even unregistered) is refused", async () => {
+    const routes = BASE_ROUTES.replace("    default:\n", '    case "orphan_rows": return resolveAlpha(pointer as any);\n    default:\n');
+    const v = await ar.additiveRegistration(registration({
+      "src/config.ts": { path: "src/config.ts", before: BASE_CONFIG, after: withEntry("orphan_rows") },
+      "src/routes/impulses.ts": { path: "src/routes/impulses.ts", before: routes, after: withCase("orphan_rows", "resolveGammaDigest", "gamma-digest", routes) },
+    }), notAdvertised);
+    expect(v).toMatchObject({ ok: false, why: expect.stringMatching(/already has a case/) });
+  });
+  it("MUST-FAIL: a shape discovery already advertises is refused (reuse); an unreadable discovery fails closed", async () => {
+    expect(await ar.additiveRegistration(registration(), async () => true)).toMatchObject({ ok: false, why: expect.stringMatching(/already advertised/) });
+    expect(await ar.additiveRegistration(registration(), async () => null)).toMatchObject({ ok: false, why: expect.stringMatching(/failing closed/) });
+  });
+  it("insertedBlocks: a pure insertion yields its blocks under either alignment; any removed or changed line yields null", () => {
+    expect(ar.insertedBlocks("a\nb\nc", "a\nX\nb\nc")).toEqual([{ at: 1, lines: ["X"] }]);
+    expect(ar.insertedBlocks("a\n}\nb", "a\n}\n}\nb")).toEqual([{ at: 2, lines: ["}"] }]);
+    expect(ar.insertedBlocks("a\n}\nb", "a\n}\n}\nb", true)).toEqual([{ at: 1, lines: ["}"] }]);
+    expect(ar.insertedBlocks("a\nb\nc", "a\nc")).toBeNull();
+    expect(ar.insertedBlocks("a\nb\nc", "a\nB\nc")).toBeNull();
+  });
+});
+
+describe("additive registration rule at the landing chokepoint (the real cutover)", () => {
+  async function setupReg(changes: Change[], gap: string) {
+    const vessel = "development-vessel";
+    const mvid = `mitosis-2026-10-10T10-00-00-000Z-additive`;
+    const baseRoot = join(ws, "git", "super-repo", "repos", vessel);
+    const mitosisRoot = join(ws, "vessels", `${vessel}-${mvid}`);
+    const hostRepoRoot = join(ws, "host-repo");
+    for (const c of changes) {
+      for (const root of [baseRoot, mitosisRoot, hostRepoRoot]) await mkdir(join(root, c.path, ".."), { recursive: true });
+      if (c.before !== null) { await writeFile(join(baseRoot, c.path), c.before); await writeFile(join(hostRepoRoot, c.path), c.before); }
+      if (c.after !== null) await writeFile(join(mitosisRoot, c.path), c.after);
+    }
+    await writeFile(join(hostRepoRoot, "README.md"), "fixture\n");
+    git(hostRepoRoot, "init", "-q", "-b", "dev");
+    git(hostRepoRoot, "config", "user.email", "test@example.com");
+    git(hostRepoRoot, "config", "user.name", "Test");
+    git(hostRepoRoot, "config", "commit.gpgsign", "false");
+    git(hostRepoRoot, "add", ".");
+    git(hostRepoRoot, "commit", "-q", "-m", "baseline");
+    const originRoot = join(ws, "host-origin.git");
+    git(ws, "init", "-q", "--bare", "-b", "dev", originRoot);
+    git(hostRepoRoot, "remote", "add", "origin", originRoot);
+    git(hostRepoRoot, "push", "-q", "-u", "origin", "dev");
+    const originSha = git(originRoot, "rev-parse", "dev");
+    currentHost = hostRepoRoot;
+    const files = changes.map((c) => c.path);
+    const baseSha = sha12(changes[0]!.before ?? "");
+    const pendingPath = join(ws, "mitosis-pending.json");
+    await writeFile(pendingPath, JSON.stringify({ vessel_name: vessel, base_version_id: "v1", mitosis_version_id: mvid, mitosis_root: mitosisRoot, base_sha: baseSha, authored_by: "patch_with_tools", gap_id: gap, proposal: gap, staged_files: files }, null, 2));
+    const pointer = {
+      type: "vessel_mitosis_cutover" as const, vessel_name: vessel, base_version_id: "v1", mitosis_version_id: mvid, mitosis_root: mitosisRoot, base_root: baseRoot, host_repo_root: hostRepoRoot,
+      staged_base_sha: baseSha, staged_files: files, gap_id: gap, pending_pointer_path: pendingPath, applied_log_path: join(ws, "mitosis-applied.jsonl"), skip_push: true, skip_restart: true,
+      proposal_id: gap, evaluation_evidence: { verdict: "FAVORABLE", verdict_reason: "static_checks_pass", base_success_rate: 1, mitosis_success_rate: 1, cited_trace_ids: [], cited_check_names: ["static"] },
+    };
+    return { vessel, hostRepoRoot, originRoot, originSha, pendingPath, pointer };
+  }
+  const logs: string[] = [];
+  const run = async (changes: Change[], gap: string, advertised: (s: string) => Promise<boolean | null> = notAdvertised) => {
+    const s = await setupReg(changes, gap);
+    ownCheckPasses(s as never, gapRow(gap, s.vessel, "repos/development-vessel/src/resolvers/gamma-digest.ts"));
+    setAdvertised(advertised);
+    logs.length = 0;
+    const l = spyOn(console, "log").mockImplementation((...a: unknown[]) => { logs.push(a.map(String).join(" ")); });
+    try { return { s, r: await resolveVesselMitosisCutover(s.pointer as never) }; } finally { l.mockRestore(); }
+  };
+  it("CONTROL: an autonomous landing that is a pure new-shape registration of a module it creates LANDS, and says so", async () => {
+    const changes = registration();
+    const { s, r } = await run(changes, "gap-additive-ok");
+    expect({ shape: r.shape, refusal_reason: String(bodyOf(r)["refusal_reason"] ?? "") }).toEqual({ shape: "cutoverApplied", refusal_reason: "" });
+    for (const c of changes) expect(git(s.hostRepoRoot, "show", `HEAD:${c.path}`) + "\n").toBe(c.after!.endsWith("\n") ? c.after! : c.after! + "\n");
+    expect(logs.some((x) => x.includes("ADDITIVE REGISTRATION admitted") && x.includes("gamma_digest"))).toBe(true);
+  });
+  it("MUST-FAIL: a removed line in the dispatch table is refused at the chokepoint (autonomy_scope_excluded, naming why)", async () => {
+    const changes = registration({ "src/routes/impulses.ts": { path: "src/routes/impulses.ts", before: BASE_ROUTES, after: withCase("gamma_digest", "resolveGammaDigest", "gamma-digest").replace('      throw new Error("Unknown pointer type");\n', "") } });
+    const { s, r } = await run(changes, "gap-additive-removed");
+    await expectScopeRefused(s as never, r, "autonomy_scope_excluded", [{ entry: "repos/development-vessel/src/routes/impulses.ts", file: "repos/development-vessel/src/routes/impulses.ts" }]);
+    expect(String(bodyOf(r)["additive_registration"] ?? "")).toMatch(/removed or modified/);
+  });
+  it("MUST-FAIL: a valid registration PLUS an added line in another protected file is refused (the rule never widens other paths)", async () => {
+    const changes = [...registration(), { path: EXCLUDED_DV, before: "// original\n", after: "// original\n// added\n" }];
+    const { s, r } = await run(changes, "gap-additive-other-protected");
+    await expectScopeRefused(s as never, r, "autonomy_scope_excluded", [{ entry: SCOPE_BODY.excluded_paths[0]!, file: `repos/development-vessel/${EXCLUDED_DV}` }]);
+    expect(logs.some((x) => x.includes("ADDITIVE REGISTRATION admitted"))).toBe(false);
+  });
+  it("MUST-FAIL: a valid registration PLUS an additive change to a judge file is refused", async () => {
+    const changes = [...registration(), { path: "src/judge/gap-policy-extra.ts", before: "export const a = 1;\n", after: "export const a = 1;\nexport const b = 2;\n" }];
+    const { s, r } = await run(changes, "gap-additive-judge");
+    await expectScopeRefused(s as never, r, "autonomy_scope_excluded", [{ entry: "repos/development-vessel/src/judge/", file: "repos/development-vessel/src/judge/gap-policy-extra.ts" }]);
+  });
+  it("MUST-FAIL: a registration of a shape discovery already advertises is refused", async () => {
+    const { s, r } = await run(registration(), "gap-additive-advertised", async () => true);
+    await expectScopeRefused(s as never, r, "autonomy_scope_excluded", [{ entry: "repos/development-vessel/src/config.ts", file: "repos/development-vessel/src/config.ts" }]);
+    expect(String(bodyOf(r)["additive_registration"] ?? "")).toMatch(/already advertised/);
   });
 });

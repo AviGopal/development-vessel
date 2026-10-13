@@ -527,3 +527,140 @@ export function autonomyScopeFloor(scope: AutonomyScope, appliedPaths: string[],
     : null;
   return { hits, unreadable };
 }
+
+// ── THE ADDITIVE REGISTRATION RULE (package C; user ruling 2026-10-13, "full package, additive-only"; a trust-root judge).
+//
+// A vessel's shape registry (src/config.ts) and its dispatch table (src/routes/impulses.ts) are autonomy-scope
+// excluded, so no autonomous landing may touch them. That also refused the one change a missing producer needs: a
+// NEW resolver registered for a NEW shape. This rule admits exactly that, and nothing else. A landing that touches a
+// registration file passes ONLY IF ALL hold:
+//   (1) the registration files change by ADDED lines only: the live file is a subsequence of the staged one (0 removed,
+//       0 modified);
+//   (2) the added lines are exactly the registration patterns: one `"<shape>",` entry inside the discovery shapes array
+//       (config.ts), and one `case "<shape>":` arm delegating to a resolver module (impulses.ts), as a static import
+//       plus a one-line case, or a dynamic-import case block;
+//   (3) <shape> is new: not in the live registry or dispatch table, and not advertised by any producer in discovery
+//       (unknown fails closed);
+//   (4) the module the case calls is a NEW file created in the SAME landing and exports the called function;
+//   (5) one shape per landing.
+// Every other excluded path stays excluded: the cutover applies this rule only when every scope hit is one of the two
+// registration files, so a judge or scope file, or any other protected path, is refused exactly as before.
+
+export const REGISTRATION_FILES = ["src/config.ts", "src/routes/impulses.ts"] as const;
+const REG_CONFIG = REGISTRATION_FILES[0];
+const REG_ROUTES = REGISTRATION_FILES[1];
+
+export interface StagedFile { path: string; before: string | null; after: string | null }
+export type AdditiveVerdict = { ok: true; shape: string; module: string; fn: string } | { ok: false; why: string };
+
+const SHAPE = "[A-Za-z][A-Za-z0-9_]*";
+const IDENT = "[A-Za-z_$][A-Za-z0-9_$]*";
+const MODULE = "[a-z0-9][a-z0-9-]*";
+const ARG = "(?:pointer|p) as (?:any|never)";
+const CONFIG_ENTRY = new RegExp(`^\\s*"(${SHAPE})",\\s*$`);
+const STATIC_IMPORT = new RegExp(`^import \\{ (${IDENT}) \\} from "\\.\\./resolvers/(${MODULE})\\.js";\\s*$`);
+const CASE_CALL = new RegExp(`^\\s*case "(${SHAPE})": return (${IDENT})\\(${ARG}\\);\\s*$`);
+const CASE_OPEN = new RegExp(`^\\s*case "(${SHAPE})": \\{\\s*$`);
+const DYN_IMPORT = new RegExp(`^\\s*const \\{ (${IDENT}) \\} = await import\\("\\.\\./resolvers/(${MODULE})\\.js"\\);\\s*$`);
+const RETURN_CALL = new RegExp(`^\\s*return (${IDENT})\\(${ARG}\\);\\s*$`);
+const CLOSE = /^\s*\}\s*$/;
+const CASE_ONE_LINE_DYN = new RegExp(`^\\s*case "(${SHAPE})": \\{ const \\{ (${IDENT}) \\} = await import\\("\\.\\./resolvers/(${MODULE})\\.js"\\); return (${IDENT})\\(${ARG}\\); \\}\\s*$`);
+
+/**
+ * The lines `after` adds to `before` when `before` is a subsequence of `after`, under one alignment (earliest or latest
+ * matching), as contiguous blocks of [startIndexInAfter, lines]; null when any live line was removed or modified.
+ */
+export function insertedBlocks(before: string, after: string, latest = false): Array<{ at: number; lines: string[] }> | null {
+  const b = before.split("\n"), a = after.split("\n");
+  const added: boolean[] = new Array(a.length).fill(true);
+  if (!latest) {
+    let i = 0;
+    for (let j = 0; j < a.length && i < b.length; j++) if (a[j] === b[i]) { added[j] = false; i++; }
+    if (i < b.length) return null;
+  } else {
+    let i = b.length - 1;
+    for (let j = a.length - 1; j >= 0 && i >= 0; j--) if (a[j] === b[i]) { added[j] = false; i--; }
+    if (i >= 0) return null;
+  }
+  const blocks: Array<{ at: number; lines: string[] }> = [];
+  for (let j = 0; j < a.length; j++) {
+    if (!added[j]) continue;
+    const last = blocks[blocks.length - 1];
+    if (last && last.at + last.lines.length === j) last.lines.push(a[j]!); else blocks.push({ at: j, lines: [a[j]!] });
+  }
+  return blocks;
+}
+
+/** The config.ts addition: exactly one `"<shape>",` line, inside the `shapes: [` array. */
+function configShape(after: string, blocks: Array<{ at: number; lines: string[] }>): { shape: string } | { why: string } {
+  if (blocks.length !== 1 || blocks[0]!.lines.length !== 1) return { why: `${REG_CONFIG}: expected exactly one added line, got ${blocks.reduce((s, x) => s + x.lines.length, 0)}` };
+  const m = CONFIG_ENTRY.exec(blocks[0]!.lines[0]!);
+  if (!m) return { why: `${REG_CONFIG}: the added line is not a shape entry ("<shape>",)` };
+  const a = after.split("\n");
+  for (let j = blocks[0]!.at - 1; j >= 0; j--) {
+    if (/^\s*shapes:\s*\[\s*$/.test(a[j]!)) return { shape: m[1]! };
+    if (/^\s*\]/.test(a[j]!) || /^\s*[A-Za-z_]+:\s*[\[{]/.test(a[j]!)) break;
+  }
+  return { why: `${REG_CONFIG}: the added entry is not inside the discovery shapes array` };
+}
+
+/** The impulses.ts addition: one case arm for one shape, delegating to a resolver module. */
+function routeCase(blocks: Array<{ at: number; lines: string[] }>): { shape: string; module: string; fn: string } | { why: string } {
+  const lines = blocks.flatMap((x) => x.lines);
+  // static import + one-line case (two blocks, or one if adjacent)
+  if (lines.length === 2) {
+    const imp = lines.map((l) => STATIC_IMPORT.exec(l)).find(Boolean), cs = lines.map((l) => CASE_CALL.exec(l)).find(Boolean);
+    if (imp && cs && STATIC_IMPORT.test(lines[0]!) && cs[2] === imp[1]) return { shape: cs[1]!, module: imp[2]!, fn: imp[1]! };
+    return { why: `${REG_ROUTES}: two added lines that are not an import of ../resolvers/<module>.js followed by its one-line case` };
+  }
+  if (blocks.length !== 1) return { why: `${REG_ROUTES}: the added lines are not one contiguous case arm (${blocks.length} blocks)` };
+  if (lines.length === 1) {
+    const m = CASE_ONE_LINE_DYN.exec(lines[0]!);
+    if (m && m[2] === m[4]) return { shape: m[1]!, module: m[3]!, fn: m[2]! };
+    return { why: `${REG_ROUTES}: the added line is not a case arm importing and calling a resolver module` };
+  }
+  if (lines.length === 4) {
+    const o = CASE_OPEN.exec(lines[0]!), d = DYN_IMPORT.exec(lines[1]!), r = RETURN_CALL.exec(lines[2]!);
+    if (o && d && r && CLOSE.test(lines[3]!) && d[1] === r[1]) return { shape: o[1]!, module: d[2]!, fn: d[1]! };
+  }
+  return { why: `${REG_ROUTES}: the ${lines.length} added line(s) are not exactly one registration case arm` };
+}
+
+/**
+ * Whether a landing's changes to the registration files are a pure, single, new-shape registration of a new module.
+ * `advertised(shape)` is the fleet's discovery answer (true = some producer serves it, null = unreadable). Pure but for it.
+ */
+export async function additiveRegistration(staged: readonly StagedFile[], advertised: (shape: string) => Promise<boolean | null>): Promise<AdditiveVerdict> {
+  const by = new Map(staged.map((f) => [f.path.replace(/^\.\//, ""), f]));
+  const cfg = by.get(REG_CONFIG), rt = by.get(REG_ROUTES);
+  if (!cfg || !rt) return { ok: false, why: `a registration touches both ${REG_CONFIG} and ${REG_ROUTES}; this landing touches ${[cfg ? REG_CONFIG : "", rt ? REG_ROUTES : ""].filter(Boolean).join(" and ") || "neither"}` };
+  for (const f of [cfg, rt]) if (f.before === null || f.after === null) return { ok: false, why: `${f.path} is created or deleted, not extended` };
+  // (1) + (2), under either alignment of the insertion
+  let shapeC: { shape: string } | { why: string } = { why: "" }, rc: { shape: string; module: string; fn: string } | { why: string } = { why: "" };
+  for (const latest of [false, true]) {
+    const cb = insertedBlocks(cfg.before!, cfg.after!, latest), rb = insertedBlocks(rt.before!, rt.after!, latest);
+    if (!cb) return { ok: false, why: `${REG_CONFIG}: a live line was removed or modified (only added lines may be registered)` };
+    if (!rb) return { ok: false, why: `${REG_ROUTES}: a live line was removed or modified (only added lines may be registered)` };
+    shapeC = configShape(cfg.after!, cb);
+    rc = routeCase(rb);
+    if ("shape" in shapeC && "shape" in rc) break;
+  }
+  if ("why" in shapeC) return { ok: false, why: shapeC.why };
+  if ("why" in rc) return { ok: false, why: rc.why };
+  // (5) one shape: the entry and the case name the same single shape
+  if (shapeC.shape !== rc.shape) return { ok: false, why: `the registry entry (${shapeC.shape}) and the case (${rc.shape}) name different shapes` };
+  const shape = shapeC.shape;
+  // (3) a new shape
+  if (new RegExp(`"${shape}"`).test(cfg.before!)) return { ok: false, why: `${shape} is already in the live registry` };
+  if (new RegExp(`case "${shape}"`).test(rt.before!)) return { ok: false, why: `${shape} already has a case in the live dispatch table` };
+  const adv = await advertised(shape).catch(() => null);
+  if (adv === null) return { ok: false, why: `discovery could not say whether ${shape} is served: failing closed` };
+  if (adv) return { ok: false, why: `${shape} is already advertised by a producer: reuse it, do not register another` };
+  // (4) the module is new in this landing and exports the called function
+  const modPath = `src/resolvers/${rc.module}.ts`;
+  const mod = by.get(modPath);
+  if (!mod || mod.after === null) return { ok: false, why: `the case calls ../resolvers/${rc.module}.js, which this landing does not create` };
+  if (mod.before !== null) return { ok: false, why: `the case calls an EXISTING module (${modPath}); only a module created in the same landing may be registered` };
+  if (!new RegExp(`export\\s+(?:async\\s+)?(?:function\\s+${rc.fn}\\b|const\\s+${rc.fn}\\b)`).test(mod.after)) return { ok: false, why: `${modPath} does not export ${rc.fn}` };
+  return { ok: true, shape, module: modPath, fn: rc.fn };
+}

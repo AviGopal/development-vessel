@@ -2235,6 +2235,31 @@ async function directedLandingOrigin(pointer: VesselMitosisCutoverPointer, stage
   return { directed: true, why: `stamped directed attemptIntent ${attemptId}` };
 }
 
+/** Tests only: the discovery answer the additive registration rule reads (null restores the real lookup). */
+let additiveAdvertisedForTests: ((shape: string) => Promise<boolean | null>) | null = null;
+export function __setAdditiveAdvertisedForTests(f: ((shape: string) => Promise<boolean | null>) | null): void { additiveAdvertisedForTests = f; }
+/**
+ * Whether the additive registration rule admits this landing: only when every excluded file it touches is one of the
+ * vessel's two registration files, and the rule's five conditions hold over ALL staged files (live = baseRoot, staged =
+ * mitosisRoot). Logged either way when it applies, so its effect is visible.
+ */
+async function additiveRegistrationAdmits(args: GitCutoverArgs, excludedFiles: string[], allHitsMapped: boolean): Promise<{ admitted: boolean; why?: string }> {
+  const { REGISTRATION_FILES, additiveRegistration } = await import("../judge/gap-policy.js");
+  const reg = new Set(REGISTRATION_FILES.map((f) => `repos/${args.vessel_name}/${f}`));
+  if (!allHitsMapped || excludedFiles.length === 0 || !excludedFiles.every((f) => reg.has(f))) return { admitted: false };
+  const read = async (root: string, rel: string): Promise<string | null> => { try { return (await pathExists(join(root, rel))) ? await readFile(join(root, rel), "utf8") : null; } catch { return null; } };
+  const staged = await Promise.all(args.stagedFiles.map(async (f) => { const rel = f.replace(/^\.\//, ""); return { path: rel, before: await read(args.baseRoot, rel), after: await read(args.mitosisRoot, rel) }; }));
+  const advertised = additiveAdvertisedForTests ?? (async (shape: string): Promise<boolean | null> => {
+    const { lookupShape } = await import("../config.js");
+    const r = await lookupShape(shape);
+    return r.ok ? (r.producers as unknown[]).length > 0 : null;
+  });
+  const v = await additiveRegistration(staged, advertised);
+  if (v.ok) { console.log(`[cutover] ADDITIVE REGISTRATION admitted on ${args.vessel_name}: new shape ${v.shape} → ${v.module} (${v.fn}); every other excluded path still applies`); return { admitted: true }; }
+  console.log(`[cutover] additive registration refused on ${args.vessel_name}: ${v.why}`);
+  return { admitted: false, why: v.why };
+}
+
 async function autonomyScopeLandingGate(args: GitCutoverArgs): Promise<ResolverResult | null> {
   const { pointer, vessel_name, stagedFiles } = args;
   const gapId = await cutoverGapIdOf(pointer, args.mitosis_version_id);
@@ -2270,7 +2295,12 @@ async function autonomyScopeLandingGate(args: GitCutoverArgs): Promise<ResolverR
     if (floor.unreadable) return refuse("autonomy_scope_unreadable", `${floor.unreadable}, failing closed`, { scope_reason: scope.reason });
     const excluded = files.map((file) => ({ entry: autonomyScopeExcludes(scope, file), file })).filter((e): e is { entry: string; file: string } => !!e.entry && floor.hits.includes(e.entry));
     const named = excluded.map((e) => `'${e.entry}' (file ${e.file})`).join(", ");
-    return refuse("autonomy_scope_excluded", `autonomous landing touches autonomy-scope excluded path ${named}`, { excluded });
+    // THE ADDITIVE REGISTRATION RULE (src/judge/gap-policy.ts additiveRegistration): when the ONLY excluded files touched are this
+    // vessel's registry and dispatch table, a pure, single, new-shape registration of a module created in the same
+    // landing passes; anything else is refused as before.
+    const additive = await additiveRegistrationAdmits(args, excluded.map((e) => e.file), floor.hits.length === excluded.length);
+    if (additive.admitted) return null;
+    return refuse("autonomy_scope_excluded", `autonomous landing touches autonomy-scope excluded path ${named}${additive.why ? `; not an additive registration: ${additive.why}` : ""}`, { excluded, ...(additive.why ? { additive_registration: additive.why } : {}) });
   } catch (err) {
     return refuse("autonomy_scope_unreadable", `autonomy scope check failed: ${String(err).slice(0, 200)}, failing closed`, {});
   }

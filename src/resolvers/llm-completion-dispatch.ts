@@ -276,6 +276,9 @@ export async function resolveLlmCompletionDispatch(
     detail: "No llm_completion endpoint produced a completion",
     failure_mode: "cascading",
   };
+  let primaryRefusal: { detail: string } | null = null;
+  type FailureEntry = { endpoint: string; status?: number; detail: string; failure_mode: string };
+  const failures: FailureEntry[] = [];
   // Hoisted to function scope: both the local loop and the lazy federated loop
   // below need it, and a failure envelope looks the same wherever it comes from.
   const federatedError = (c: unknown): string | null => {
@@ -329,13 +332,15 @@ export async function resolveLlmCompletionDispatch(
       });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      lastFailure = { detail: msg, failure_mode: "cascading" };
+      failures.push({ endpoint, detail: msg, failure_mode: "cascading" });
+      if (!primaryRefusal) lastFailure = { detail: msg, failure_mode: "cascading" };
       continue;
     }
 
     if (!res.ok) {
       const text = await res.text().catch(() => "");
-      lastFailure = { status: res.status, detail: text.slice(0, 200), failure_mode: "cascading" };
+      failures.push({ endpoint, status: res.status, detail: text.slice(0, 200), failure_mode: "cascading" });
+      if (!primaryRefusal) lastFailure = { status: res.status, detail: text.slice(0, 200), failure_mode: "cascading" };
       continue;
     }
 
@@ -386,6 +391,8 @@ export async function resolveLlmCompletionDispatch(
       return typeof p === "string" ? p : "";
     })();
     if (requestedSubstrate && producedBy && !producedBy.endsWith(`@${requestedSubstrate}`)) {
+      failures.push({ endpoint, detail: `routing integrity: asked for @${requestedSubstrate}, answered by ${producedBy}`, failure_mode: "verifier_negative" });
+      if (!primaryRefusal) primaryRefusal = { detail: `routing integrity: asked for @${requestedSubstrate}, answered by ${producedBy}` };
       lastFailure = {
         detail: `routing integrity: asked for @${requestedSubstrate}, answered by ${producedBy}`,
         failure_mode: "verifier_negative",
@@ -396,10 +403,12 @@ export async function resolveLlmCompletionDispatch(
     if (refusedLocal) return refusedLocal;
     const nested = federatedError(candidate);
     if (!candidate || candidate.error || candidate.resolved === false || candidate.success === false || nested) {
-      lastFailure = {
-        detail: candidate?.error ?? nested ?? "LLM vessel returned error or resolved=false",
-        failure_mode: "verifier_negative",
-      };
+      {
+        const d = candidate?.error ?? nested ?? "LLM vessel returned error or resolved=false";
+        failures.push({ endpoint, detail: d, failure_mode: "verifier_negative" });
+        if (!primaryRefusal) primaryRefusal = { detail: d };
+        lastFailure = { detail: d, failure_mode: "verifier_negative" };
+      }
       continue;
     }
 
@@ -413,7 +422,7 @@ export async function resolveLlmCompletionDispatch(
     const fed = (await federatedLlmEgressUrls(DISCOVERY_ENDPOINT, METABOB_API_KEY, FED_TRANSPORT_EGRESS))
       .filter((u) => !endpoints.includes(u));
     if (fed.length > 0) {
-      console.error(`[llm-completion-dispatch] local arms exhausted — trying ${fed.length} target-pinned federated arm(s)`);
+      console.error(`[llm-completion-dispatch] local arms exhausted — trying ${fed.length} target-pinned federated arm(s); reason: ${String(lastFailure.detail ?? "")}`);
       for (const endpoint of fed) {
         let res: Response;
         try {
@@ -423,12 +432,14 @@ export async function resolveLlmCompletionDispatch(
             body: JSON.stringify(requestBody),
           });
         } catch (err) {
-          lastFailure = { detail: err instanceof Error ? err.message : String(err), failure_mode: "cascading" };
+          failures.push({ endpoint, detail: err instanceof Error ? err.message : String(err), failure_mode: "cascading" });
+          if (!primaryRefusal) lastFailure = { detail: err instanceof Error ? err.message : String(err), failure_mode: "cascading" };
           continue;
         }
         if (!res.ok) {
           const text = await res.text().catch(() => "");
-          lastFailure = { status: res.status, detail: text.slice(0, 200), failure_mode: "cascading" };
+          failures.push({ endpoint, status: res.status, detail: text.slice(0, 200), failure_mode: "cascading" });
+          if (!primaryRefusal) lastFailure = { status: res.status, detail: text.slice(0, 200), failure_mode: "cascading" };
           continue;
         }
         const candidate = await res.json().catch(() => null) as LlmResolverResult | null;
@@ -436,10 +447,12 @@ export async function resolveLlmCompletionDispatch(
         if (refusedFed) return refusedFed;
         const nested = federatedError(candidate);
         if (!candidate || candidate.error || candidate.resolved === false || candidate.success === false || nested) {
-          lastFailure = {
-            detail: candidate?.error ?? nested ?? "federated arm returned error",
-            failure_mode: "verifier_negative",
-          };
+          {
+            const d = candidate?.error ?? nested ?? "federated arm returned error";
+            failures.push({ endpoint, detail: d, failure_mode: "verifier_negative" });
+            if (!primaryRefusal) primaryRefusal = { detail: d };
+            lastFailure = { detail: d, failure_mode: "verifier_negative" };
+          }
           continue;
         }
         result = candidate;
@@ -451,7 +464,7 @@ export async function resolveLlmCompletionDispatch(
   if (!result) {
     return {
       shape: "structuredError",
-      body: { resolver: "llm_completion_dispatch", ...lastFailure },
+      body: { resolver: "llm_completion_dispatch", ...lastFailure, failures },
     };
   }
 

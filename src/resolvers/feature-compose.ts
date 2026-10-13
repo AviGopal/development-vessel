@@ -39,6 +39,7 @@ import { seedDeliveryReason, seedDeliveryRefusals, touchesSeed } from "../seed-d
 import { acquireComposeSlot } from "../compose-slots.js";
 import { recordComposeAdmission, SCOPE_NOT_CONSULTED, type AdmissionRefusalStage } from "../judge/routing-capture.js";
 import { activeMustBeCalled, checkMustBeCalled, constraintRefusalEvidence, introducesDefinition, mustBeCalledFromGate, mustBeCalledReason, mustBeCalledRefusalRecord, constraintParkLine, type ConstraintLift, type MustBeCalledConstraint, attemptEvidenceBlock, baseSpanOfOp, checkOpNoEffect, enforcedLessons, escalateRepeatedRefusal, refusalJournalLine, repeatedRefusalRegion, type RefusalRecord, explicitLineHint, hydrateComposeGap, lineCenteredSlice, noEffectOverlapRefusal, noEffectSpans, parentCheckBlock, parseOwnCheckFailures, sameOwnCheckFailures, spanRecord, testTitleSegmentOffset, typecheckSection, type AttemptRecord, type EditedSpan, type FailStage, type GapRowReader, type OwnCheckFailure } from "./retry-evidence.js";
+import { readComposeGroundingPolicy, effectiveLockLessons, priorTcLessons, tcLessonGroundingBlock, symbolWidenBlock, typecheckLessons, perAssertionDelta, groundingAttributionLine, checkExecuted, COMPOSE_GROUNDING_POLICY_NAME, type ComposeGroundingPolicy, type GroundingEntry, type GroundingAttribution, type LockVoidRules } from "./retry-evidence.js";
 
 /**
  * The blind-edit repair's anchor decision. Pure: the caller's fs_edit is the only effect.
@@ -3325,6 +3326,42 @@ export function focusedSlice(content: string, cap: number, focusHints: string[],
   // 3. Head fallback (unlocalizable — no verbatim probe, no distinctive token).
   return { slice: content.slice(0, window), centered: false, head: true };
 }
+
+/**
+ * ONE TARGET FILE'S GROUNDING (C-window-1). The gap's edit-site file is shown WHOLE when it fits the shaped budget
+ * (composeGroundingPolicy.edit_site_whole_file_max_chars): a single window centred on the gap's line hint hid every other
+ * site the fix needed (measured: a gap's line hint confined two dozen drafts to one window of a file several windows
+ * long, while the fix also needed its imports and sites windows away). Any other target keeps the single window. Returns what was shown and the COMPOSER's record of it (the lock
+ * void rule reads that record; a draft never writes it).
+ */
+export function targetGrounding(repoPath: string, content: string, cap: number, focusHints: string[], primaryProbe: string | string[], lineHint: { start: number; end: number } | null, editSite: { path: string; max_whole_chars: number } | null): { sliced: { slice: string; centered: boolean; head: boolean }; entry: GroundingEntry } {
+  const whole = !!editSite && editSite.path === repoPath && content.length <= editSite.max_whole_chars;
+  const sliced = whole ? { slice: content, centered: false, head: false } : focusedSlice(content, cap, focusHints, primaryProbe, lineHint);
+  const at = content.indexOf(sliced.slice);
+  const start_line = at >= 0 ? content.slice(0, at).split("\n").length : 1;
+  return { sliced, entry: { path: repoPath, mode: sliced.slice.length >= content.length ? "whole" : "slice", start_line, end_line: start_line + sliced.slice.split("\n").length - 1, file_chars: content.length } };
+}
+/** A repo path's text in the tree grounding already reads (REPO_ROOT), or null. A READ: the live-tree write hold, which
+ *  governs writes, is not consulted. */
+function readGroundedText(repoPath: string): string | null {
+  try { return readFileSync(`${REPO_ROOT}/${repoPath.replace(/^repos\//, "")}`, "utf8"); } catch { return null; }
+}
+/** A vessel tree's src/**\/*.ts(x) as vessel-relative {path, content}, bounded (600 files, 400 KB each, 8 MB total). A READ. */
+export function readVesselSourcesAt(vesselAbs: string): Array<{ path: string; content: string }> {
+  const out: Array<{ path: string; content: string }> = [];
+  let total = 0;
+  let names: string[] = [];
+  try { names = (readdirSync(`${vesselAbs}/src`, { recursive: true }) as unknown as string[]).map(String).filter((n) => /\.tsx?$/.test(n)).sort(); } catch { return out; }
+  for (const n of names.slice(0, 600)) {
+    try {
+      const content = readFileSync(`${vesselAbs}/src/${n}`, "utf8");
+      if (content.length > 400_000 || total + content.length > 8_000_000) continue;
+      total += content.length;
+      out.push({ path: `src/${n}`, content });
+    } catch { /* unreadable file: skipped */ }
+  }
+  return out;
+}
 // DETERMINISTIC re-derivation window (minimal-window-swap, 2026-07-22). focusedSlice
 // step-1 only centers when a hint appears verbatim as a backtick fragment or an
 // 80-char prefix; a rationale that NAMES the edit site in prose ("the /executions GET
@@ -3411,7 +3448,7 @@ export function groundingFileBlock(repoPath: string, content: string, sliced: { 
 }
 
 // `capture` (the drafter split) records the listing and every file text this read, for the open module's facts.
-async function groundVesselFiles(toolsEndpoint: string, verifyVessels: string[], focusHints: string[] = [], targetFiles: string[] = [], primaryProbe: string | string[] = "", lineHint: { file: string; start: number; end: number } | null = null, capture?: DrafterGroundCapture): Promise<string> {
+async function groundVesselFiles(toolsEndpoint: string, verifyVessels: string[], focusHints: string[] = [], targetFiles: string[] = [], primaryProbe: string | string[] = "", lineHint: { file: string; start: number; end: number } | null = null, capture?: DrafterGroundCapture, editSite: { path: string; max_whole_chars: number } | null = null, groundingOut?: GroundingEntry[]): Promise<string> {
   const blocks: string[] = [];
   let contentBudget = GROUND_CONTENT_BUDGET;
   for (const v of verifyVessels.slice(0, 6)) {
@@ -3477,7 +3514,12 @@ async function groundVesselFiles(toolsEndpoint: string, verifyVessels: string[],
           if (typeof content === "string") {
             if (capture) capture.contents[`repos/${vRel}/${f}`] = content;
             const effBudget = target ? Math.max(contentBudget, PER_FILE_SLICE) : contentBudget;
-            const sliced = focusedSlice(content, effBudget, focusHints, primaryProbe, lineHint && lineHint.file === `repos/${vRel}/${f}` ? lineHint : null);
+            const fileHint = lineHint && lineHint.file === `repos/${vRel}/${f}` ? lineHint : null;
+            // C-window-1: a target goes through targetGrounding (whole when it is the edit site and fits the shaped budget)
+            // and the composer records what it showed; a non-target keeps the shared-budget window.
+            const tg = target ? targetGrounding(`repos/${vRel}/${f}`, content, effBudget, focusHints, primaryProbe, fileHint, editSite) : null;
+            const sliced = tg ? tg.sliced : focusedSlice(content, effBudget, focusHints, primaryProbe, fileHint);
+            if (tg && groundingOut) groundingOut.push(tg.entry);
             contentBudget -= sliced.slice.length;
             contentParts.push(groundingFileBlock(`repos/${vRel}/${f}`, content, sliced, target));
           }
@@ -5165,6 +5207,7 @@ export function composeAttemptEvidence(
   verify: ReadonlyArray<VerifyResult>,
   scopeWithheld: boolean,
   policyUnreadable: string | null,
+  extra: { grounding?: ReadonlyArray<GroundingEntry>; sources?: (vessel: string) => Array<{ path: string; content: string }> } = {},
 ): { record: AttemptRecord; ownReason: string | undefined } {
   const failedApply = applied.find((a) => !a.ok);
   const failedVerify = verify.find((v) => !v.ok);
@@ -5175,6 +5218,22 @@ export function composeAttemptEvidence(
     edited_spans: [...applied.filter((a) => a.ok && a.base_span).map((a) => a.base_span!), ...repairSpans],
     ...(ownV?.own ? { own_check: { test_file: ownV.own.test_file, failing: ownV.own.failing }, ...(ownV.own.no_effect_vs_parent !== undefined ? { no_effect_vs_parent: ownV.own.no_effect_vs_parent } : {}), ...(ownV.own.base_sha ? { base_sha: ownV.own.base_sha } : {}), ...(ownV.own.parent_cached ? { parent_cached: ownV.own.parent_cached } : {}) } : {}),
   };
+  // C-window-1: what the composer showed and ran, from its own reads and runs (never from the draft). Written only when the
+  // caller passes it (composeGroundingPolicy on), so with the policy off the record is unchanged.
+  if (extra.grounding && extra.grounding.length > 0) record.grounding = extra.grounding.map((g) => ({ ...g }));
+  if (extra.grounding || extra.sources) {
+    if (ownV?.own) record.check_executed = ownV.own.failing.length === 0 || checkExecuted({ own_check: { failing: ownV.own.failing } });
+    else if (verify.length > 0) record.check_executed = false;
+  }
+  if (failedVerify?.stage === "typecheck" && extra.sources) {
+    const v = String(failedVerify.vessel).replace(/^repos\//, "");
+    const tl = typecheckLessons(failedVerify.output, failedVerify.draft?.new_ts ?? [], extra.sources(v), `repos/${v}/`);
+    if (tl.length > 0) record.tc_lessons = tl;
+    else {
+      record.tc_lessons_unparsed = String(failedVerify.output ?? "").replace(/\x1b\[[0-9;]*m/g, "").trim().slice(0, 300);
+      console.warn(`[fc-grounding] typecheck failure for ${v} carried no tsc error line this code parses; recorded as tc_lessons_unparsed`);
+    }
+  }
   const ownReason = failedVerify?.stage === "own_check" && failedVerify.own && failedVerify.own.failing.length > 0
     ? ownFailureLines(failedVerify.own.failing)
     : undefined;
@@ -5891,6 +5950,32 @@ function drafterNumberedWindow(content: string, slice: string): string {
   return renderControlBytes(slice.split("\n").map((l, i) => `${startLine + i}\t${l}`).join("\n")).text;
 }
 
+/**
+ * C-window-1: widen a VALIDATED drafter context to the floor's grounding decisions. Each path in `wholeContents` (a target
+ * the floor grounded whole) replaces the module's numbered window, which the clamp proved is in the grounding verbatim,
+ * with the whole file's; the floor's typecheck-lesson block is appended when the context lacks it. Pure.
+ */
+export function widenDrafterContext(ctx: DrafterCheckedContext, wholeContents: Readonly<Record<string, string>>, tcBlock: string): { ctx: DrafterCheckedContext; widened: string[]; missed: string[] } {
+  let grounding = ctx.grounding;
+  const targetWindows = { ...ctx.targetWindows };
+  const widened: string[] = [];
+  // A path whose window could not be replaced: the caller must not deliver this context (its locks were voided on the
+  // promise that the file is shown whole), so it falls back to the floor.
+  const missed: string[] = [];
+  for (const [path, content] of Object.entries(wholeContents)) {
+    const w = targetWindows[path];
+    if (w === content) continue;
+    if (typeof w !== "string") { missed.push(path); continue; }
+    const shown = drafterNumberedWindow(content, w);
+    if (!grounding.includes(shown)) { missed.push(path); continue; }
+    grounding = grounding.replace(shown, () => drafterNumberedWindow(content, content));
+    targetWindows[path] = content;
+    widened.push(`${path} whole (${content.length} chars)`);
+  }
+  if (tcBlock && !grounding.includes(tcBlock)) { grounding += tcBlock; widened.push("typecheck-lesson windows"); }
+  return { ctx: { ...ctx, grounding, targetWindows }, widened, missed };
+}
+
 export type DrafterExpect = {
   ceiling: number;
   netNew: readonly string[];
@@ -6303,6 +6388,23 @@ export async function draftContextThroughOpenModule(run: DrafterRun): Promise<{ 
     console.log(`[fc-no-gap] REFUSED free-text compose before planning; verify_vessels=[${verifyVessels.join(",")}] spec_head=${JSON.stringify(String(pointer.spec ?? "").slice(0, 80))}`);
     return { shape: "featureComposeReport", body: { ok: false, verdict: "REFUSED", stage: "scope", error: noGapDetail } };
   }
+  // C-window-1: the shaped grounding policy, read at use time. Absent → its defaults (every switch off: unchanged
+  // behaviour); present but unreadable or invalid → nothing is widened and no lock is voided.
+  const groundingPolicyRead = await readComposeGroundingPolicy(SUPER_REPO_ROOT);
+  const groundingPolicy: ComposeGroundingPolicy | null = groundingPolicyRead.ok ? groundingPolicyRead.policy : null;
+  const groundingPolicySource = groundingPolicyRead.ok ? groundingPolicyRead.source : "unreadable";
+  if (groundingPolicyRead.ok && groundingPolicyRead.ignored_keys) console.warn(`[fc-grounding] ${COMPOSE_GROUNDING_POLICY_NAME} has key(s) this code does not read, ignored: ${groundingPolicyRead.ignored_keys.join(", ")}`);
+  if (!groundingPolicyRead.ok) console.warn(`[fc-grounding] ${COMPOSE_GROUNDING_POLICY_NAME} unreadable (${groundingPolicyRead.why}): the edit site keeps the single window, no typecheck-lesson window, no lock voided`);
+  const editSiteForGrounding = groundingPolicy && groundingPolicy.read_widening === 1 && lineHintFile ? { path: lineHintFile, max_whole_chars: groundingPolicy.edit_site_whole_file_max_chars } : null;
+  // On when the record turns any switch on; off (absent record, every switch 0) leaves the floor, its records and its journal unchanged.
+  const groundingOn = !!groundingPolicy && (groundingPolicy.read_widening === 1 || groundingPolicy.void_partial_grounding_locks === 1 || groundingPolicy.void_unexecuted_check_locks === 1);
+  const lockRules: LockVoidRules | null = groundingPolicy ? { void_partial_grounding_locks: groundingPolicy.void_partial_grounding_locks, void_unexecuted_check_locks: groundingPolicy.void_unexecuted_check_locks } : null;
+  const groundingEntries: GroundingEntry[] = [];
+  const wholeGrounded = new Map<string, number>();
+  let tcLessonBlockText = "";
+  let tcLessonConsumed = false;
+  let locksVoided = 0;
+  let unrecognisedGroundingRecords = 0;
   let grounding = "";
   let anchorsSuppliedBytes = 0;
   // The drafter split's facts: what the grounding below lists and reads (the open module renders from these).
@@ -6329,7 +6431,7 @@ export async function draftContextThroughOpenModule(run: DrafterRun): Promise<{ 
     // runtime and the staging clone — so it is neither a dead dependency nor a missing file.
     //
     // Keep the fail-open behaviour (grounding = "" and carry on); only make the reason visible.
-    try { grounding = await groundVesselFiles(toolsEndpoint, verifyVessels, focusHints, targetFiles, regionProbes, composeLineHint, drafterGround); }
+    try { grounding = await groundVesselFiles(toolsEndpoint, verifyVessels, focusHints, targetFiles, regionProbes, composeLineHint, drafterGround, editSiteForGrounding, groundingEntries); }
     catch (err) {
       console.error(
         `[fc-grounding] groundVesselFiles THREW — window will be empty and the decompose will be refused: ` +
@@ -6341,6 +6443,19 @@ export async function draftContextThroughOpenModule(run: DrafterRun): Promise<{ 
         console.error(`[fc-grounding] stack: ${err.stack.split("\n").slice(0, 4).join(" | ")}`);
       }
       grounding = "";
+    }
+    for (const e of groundingEntries) if (e.mode === "whole") wholeGrounded.set(e.path, e.file_chars);
+    if (editSiteForGrounding && wholeGrounded.size > 0) console.log(`[fc-grounding] whole-file grounding: ${[...wholeGrounded].map(([p, n]) => `${p} (${n} chars)`).join(", ")} (${COMPOSE_GROUNDING_POLICY_NAME} source=${groundingPolicySource})`);
+    // THE TYPECHECK LESSON AS A GROUNDING INSTRUCTION: the declarations the previous attempts' typecheck errors named.
+    if (groundingPolicy && groundingPolicy.read_widening === 1) {
+      const tcPrior = priorTcLessons(enforcedLessons({ meta: gapMeta, lineage_lessons: composeGap.lineage_lessons }));
+      const tc = tcLessonGroundingBlock(tcPrior, readGroundedText, groundingPolicy.tc_symbol_window_lines, new Set(wholeGrounded.keys()));
+      if (tc.text) {
+        grounding += tc.text;
+        tcLessonBlockText = tc.text;
+        tcLessonConsumed = tc.consumed > 0;
+        console.log(`[fc-grounding] ${tc.consumed} typecheck lesson(s) delivered as grounding: ${tcPrior.map((t) => `${t.ts_code}${t.symbol ? `(${t.symbol})` : ""}`).join(", ")}`);
+      }
     }
     if (!regionHint && regionProbes.length) {
       const hit = regionProbes.find((p) => grounding.includes(p));
@@ -6624,8 +6739,16 @@ export async function draftContextThroughOpenModule(run: DrafterRun): Promise<{ 
   // gate wrote suspected_real_location + semantic_gate_reason onto its metadata. Inject
   // that as explicit re-draft guidance so the drafter completes the partial fix instead
   // of re-producing it blind. Additive — empty when no prior rejection exists.
-  const lineageEvidence = composeGap.lineage_lessons.length > 0 ? attemptEvidenceBlock(composeGap.lineage_lessons) : "";
-  let priorFeedback = priorAttemptFeedbackBlock(pointer.gap?.classification_metadata) + (lineageEvidence ? `\n(the record below is this gap's SOURCE gap's; it is the same defect, and its refused regions are enforced here too)${lineageEvidence}` : "");
+  // C-window-1: the lessons as THIS attempt enforces them (locks void under the current grounding moved to voided_spans).
+  const ownLocksNow = effectiveLockLessons(gapMeta.failure_lessons, wholeGrounded, lockRules);
+  const lineageLocksNow = effectiveLockLessons(composeGap.lineage_lessons, wholeGrounded, lockRules);
+  locksVoided = ownLocksNow.voided.length + lineageLocksNow.voided.length;
+  unrecognisedGroundingRecords = ownLocksNow.unrecognised.length + lineageLocksNow.unrecognised.length;
+  if (unrecognisedGroundingRecords > 0) console.warn(`[fc-grounding] ${unrecognisedGroundingRecords} lock record(s) name a grounding mode this code does not know; kept as locks: ${[...ownLocksNow.unrecognised, ...lineageLocksNow.unrecognised].map((u) => `${u.path}:${u.start}-${u.end} (mode ${JSON.stringify(u.mode).slice(0, 40)})`).join(", ")}`);
+  if (locksVoided > 0) console.log(`[fc-grounding] voided ${locksVoided} no-effect lock(s) on gap ${pointer.gap?.id ?? "?"}: ${[...ownLocksNow.voided, ...lineageLocksNow.voided].map((v) => `${v.path}:${v.start}-${v.end} (${v.reason})`).join(", ")}`);
+  const metaForPrompt = pointer.gap?.classification_metadata && Array.isArray(gapMeta.failure_lessons) ? { ...gapMeta, failure_lessons: ownLocksNow.lessons } : pointer.gap?.classification_metadata;
+  const lineageEvidence = composeGap.lineage_lessons.length > 0 ? attemptEvidenceBlock(lineageLocksNow.lessons) : "";
+  let priorFeedback = priorAttemptFeedbackBlock(metaForPrompt) + (lineageEvidence ? `\n(the record below is this gap's SOURCE gap's; it is the same defect, and its refused regions are enforced here too)${lineageEvidence}` : "");
   // SUCCESS CRITERION (contained-self-development, drafting reliability; law 8). A gap with a
   // machine-checkable falsifier is judged by it, but the drafter was never told what it is: the
   // largest failure class was a semantic-gate "addresses:false" on a partial or wrong change.
@@ -6687,7 +6810,7 @@ grounding += `\n\nCOMPOSED CHANGE:\n${composedChange}`;
       spec: String(pointer.spec ?? ""),
       gapSummary: String(pointer.gap?.summary ?? ""),
       directed: (pointer as { directed?: boolean }).directed === true,
-      gapMeta: gMeta,
+      gapMeta: Array.isArray(gMeta.failure_lessons) ? { ...gMeta, failure_lessons: ownLocksNow.lessons } : gMeta,
       regionHint,
       lineHint: composeLineHint,
       targets: { files: [...targetFiles], ownCheckAdded: [...ownCheckAdded], ownCheckReadonly: ownCheckReadonly.map((r) => ({ ...r })), netNew: [...netNewTargets] },
@@ -6695,7 +6818,7 @@ grounding += `\n\nCOMPOSED CHANGE:\n${composedChange}`;
       listing: drafterGround.listing,
       contents: drafterGround.contents,
       ownCheck: ownCheckCtx ? { vessel: ownCheckCtx.vessel, test_file: ownCheckCtx.test_file, only_tests: [...ownCheckCtx.only_tests], source: ownCheckCtx.source, readonlyModules: Object.fromEntries(ownCheckReadonlyRead.map((r) => [r.path, r.content])) } : null,
-      lineageLessons: composeGap.lineage_lessons,
+      lineageLessons: lineageLocksNow.lessons,
       ancestors: [],
       parentCheck: composeGap.parent_check,
       lessonSource: drafterLessons.source,
@@ -6721,7 +6844,7 @@ grounding += `\n\nCOMPOSED CHANGE:\n${composedChange}`;
       scope: { verifyVessels: [...verifyVessels], targets: [...targetFiles], checkPaths },
       expect: {
         ceiling, netNew: [...netNewTargets], targets: [...targetFiles], targetContents,
-        mandatory: drafterMandatoryLines(enforcedLessons(composeGap), composeGap.status, gMeta, ownCheckCtx),
+        mandatory: drafterMandatoryLines(effectiveLockLessons(enforcedLessons(composeGap), wholeGrounded, lockRules).lessons, composeGap.status, gMeta, ownCheckCtx),
         floorPrompt: decomposePrompt(spec, maxOps, grounding, principles + composeLessons, priorFeedback, netNewTargets),
         prompts: promptsOf,
       },
@@ -6754,12 +6877,33 @@ grounding += `\n\nCOMPOSED CHANGE:\n${composedChange}`;
     });
     const holder = composeDrafterStore.getStore();
     if (holder) holder.record = drafted.record;
-    if (drafted.ctx) {
-      for (const line of drafterJournalLines(drafted.ctx.journal)) console.log(line);
-      grounding = drafted.ctx.grounding;
-      principles = drafted.ctx.principles;
-      composeLessons = drafted.ctx.composeLessons;
-      priorFeedback = drafted.ctx.priorFeedback;
+    // C-window-1 CLOSED WIDENING: a validated module context shows each whole-grounded target whole and carries the floor's
+    // typecheck-lesson block; if that puts a prompt over the cap, the floor (which already shows both) is used instead.
+    let draftedCtx = drafted.ctx;
+    if (draftedCtx && (wholeGrounded.size > 0 || tcLessonBlockText)) {
+      const wholeContents: Record<string, string> = {};
+      for (const p of wholeGrounded.keys()) if (typeof targetContents[p] === "string") wholeContents[p] = targetContents[p]!;
+      const w = widenDrafterContext(draftedCtx, wholeContents, tcLessonBlockText);
+      const pw = promptsOf(w.ctx, drafted.budget);
+      // VOIDED ⇒ SEEN WHOLE: locks were voided because the edit site is grounded whole, so a context that cannot show it
+      // whole is not delivered; the floor (which does) is used instead.
+      if (w.missed.length > 0) {
+        console.warn(`[fc-grounding] the drafter context could not be widened for ${w.missed.join(", ")}: the floor's grounding is used`);
+        draftedCtx = null;
+      } else if (Buffer.byteLength(pw.decompose, "utf8") > MAX_DRAFT_PROMPT_BYTES || Buffer.byteLength(pw.refine, "utf8") > MAX_DRAFT_PROMPT_BYTES) {
+        console.warn(`[fc-grounding] the widened drafter context is over ${MAX_DRAFT_PROMPT_BYTES} bytes: the floor's grounding is used`);
+        draftedCtx = null;
+      } else {
+        draftedCtx = w.ctx;
+        if (w.widened.length > 0) console.log(`[fc-grounding] drafter context widened: ${w.widened.join(", ")}`);
+      }
+    }
+    if (draftedCtx) {
+      for (const line of drafterJournalLines(draftedCtx.journal)) console.log(line);
+      grounding = draftedCtx.grounding;
+      principles = draftedCtx.principles;
+      composeLessons = draftedCtx.composeLessons;
+      priorFeedback = draftedCtx.priorFeedback;
       maxOps = drafted.budget;
       anchorsSuppliedBytes = anchorsPart && grounding.includes(anchorsPart) ? anchorsPart.length : 0;
     }
@@ -7582,9 +7726,21 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
   // THE NO-EFFECT CONSTRAINT (09-30). A prior attempt on this gap whose own check failed IDENTICALLY with and
   // without its edit proved the region it edited is not on the tested path. An edit overlapping that region is
   // refused before it is written, here and in fc-repair, and the refusal reason is the op's failure detail.
-  const priorLessons = enforcedLessons({ meta: (pointer.gap?.classification_metadata ?? {}) as Record<string, unknown>, lineage_lessons: composeGap.lineage_lessons });
+  const priorLessons = effectiveLockLessons(enforcedLessons({ meta: (pointer.gap?.classification_metadata ?? {}) as Record<string, unknown>, lineage_lessons: composeGap.lineage_lessons }), wholeGrounded, lockRules).lessons;
   // Only skips the extra base read at the op applier's top when there is no lock to check against.
   const hasNoEffectLocks = noEffectSpans(priorLessons).length > 0;
+  // C-window-1 ATTRIBUTION (law 12): how this attempt was grounded, what it voided, whether a typecheck lesson reached it,
+  // and how the own check moved since the gap's last attempt. Read after verify (the closure reads `verify` when called).
+  const groundingAttributionNow = (): GroundingAttribution => {
+    const ownRun = verify.find((v) => v.own);
+    return {
+      grounding_mode: groundingEntries.find((e) => e.path === lineHintFile)?.mode ?? (groundingEntries.length > 0 ? "slice" : "none"),
+      locks_voided: locksVoided,
+      ...(unrecognisedGroundingRecords > 0 ? { unrecognised_grounding: unrecognisedGroundingRecords } : {}),
+      tc_lesson_consumed: tcLessonConsumed,
+      per_assertion_delta: perAssertionDelta(gapMeta.failure_lessons, ownRun?.own?.failing ?? null, !!ownRun?.own),
+    };
+  };
   const repairSpans: EditedSpan[] = [];
   // Every refusal is journaled here and recorded on the gap as a no_effect_region lesson after the compose.
   const noEffectRefusals: RefusalRecord[] = [];
@@ -8720,6 +8876,14 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
             }
           }
         } catch { /* grounding is best-effort */ }
+        // C-window-1 RE-GROUND INSIDE THE ATTEMPT: a missing-symbol or redeclaration error widens this repair's grounding
+        // to the symbol's declarations before the redraft (measured: repair rounds looped on one slice without them).
+        if (groundingPolicy && groundingPolicy.read_widening === 1) {
+          try {
+            const widen = symbolWidenBlock(errText, readVesselSourcesAt(vesselRoot(fv.vessel)), groundingPolicy.tc_symbol_window_lines);
+            if (widen.text) { errorSiteWindow += widen.text; console.log(`[fc-repair] re-grounded on ${widen.symbols.join(", ")} before the repair round`); }
+          } catch (err) { console.warn(`[fc-repair] symbol re-grounding failed: ${String(err).slice(0, 160)}`); }
+        }
         const fix = parseJsonObject(await llmCallWithFailover(
           // LLM egress, NOT concept-db — with failover, like the plan/refine/judge calls.
           llmEndpoints,
@@ -9717,7 +9881,11 @@ const earlyAttempt = await Promise.race([
     // THE STRUCTURED ATTEMPT RECORD (09-30), written on the gap's failure_lessons beside the prose: where it
     // failed, the base regions it edited, the own check's failing Expected/Received, and whether the edit had
     // any effect on that check. The next attempt's prompt shows it and its applier enforces it.
-    const { record: attemptRecord, ownReason } = composeAttemptEvidence(applied, repairSpans, verify, scopeWithheld, policyUnreadable);
+    const { record: attemptRecord, ownReason } = composeAttemptEvidence(applied, repairSpans, verify, scopeWithheld, policyUnreadable, groundingOn ? { grounding: groundingEntries, sources: groundingPolicy!.read_widening === 1 ? (v) => readVesselSourcesAt(`${REPO_ROOT}/${v}`) : undefined } : {});
+    if (groundingOn) {
+      attemptRecord.attribution = groundingAttributionNow();
+      console.log(groundingAttributionLine(String(pointer.gap?.id ?? ""), attemptRecord.attribution));
+    }
     if (refusalEvidence && lessonClass === "no_effect_region") { Object.assign(attemptRecord, refusalEvidence); refusalsRecorded = true; }
     if (scopeDrops) Object.assign(attemptRecord, scopeDrops);
     // must_be_called on the record: imposed by this attempt's gate, re-asserted when refused, lifted when met or moot.

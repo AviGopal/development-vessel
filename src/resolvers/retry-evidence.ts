@@ -27,6 +27,8 @@
  * hint), self_fact_reconcile's retry_evidence instrument (the standing measurement).
  */
 import { createHash } from "node:crypto";
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 
 export type FailStage = "install" | "resolve" | "typecheck" | "shape-dispatch" | "tests" | "own_check" | "scope" | "apply" | "constraint" | "decompose" | "seed_delivery";
 
@@ -72,6 +74,16 @@ export interface AttemptRecord {
   /** Edit ops the file-scope gate dropped as off-target, and why (a drop is recorded, never silent). */
   dropped_paths?: string[];
   dropped_reason?: string;
+  /** What the composer showed the drafter of each target file (see GroundingEntry); never taken from the draft. */
+  grounding?: GroundingEntry[];
+  /** Whether the gap's own check executed in this attempt (named tests reported results), as the composer ran it. */
+  check_executed?: boolean;
+  /** The draft's own typecheck errors, each with the composer's location for the symbol it names. */
+  tc_lessons?: TcLesson[];
+  /** A typecheck-stage failure whose output held no tsc error line this code parses: its head, so the miss is recorded. */
+  tc_lessons_unparsed?: string;
+  /** How this attempt was grounded and what moved (law 12). */
+  attribution?: GroundingAttribution;
 }
 
 /**
@@ -660,6 +672,11 @@ export function attemptEvidenceBlock(lessons: unknown, max = 3): string {
     // The file-scope gate's drops reach the next draft: an edit it planned there was not applied.
     const dropped = Array.isArray(r.dropped_paths) ? (r.dropped_paths as unknown[]).map(String) : [];
     if (dropped.length) lines.push(`    dropped by the file-scope gate (not applied): ${dropped.join(", ")}${r.dropped_reason ? ` — ${String(r.dropped_reason)}` : ""}`);
+    const vs = Array.isArray(r.voided_spans) ? (r.voided_spans as VoidedSpan[]) : [];
+    if (vs.length) lines.push(`    lock VOID now: ${vs.map((x) => `${x.path}:${x.start}-${x.end}`).join(", ")} (${[...new Set(vs.map((x) => x.reason === "partial_grounding" ? "recorded while that draft saw only part of the file; you now see it whole" : "recorded by an attempt whose own check never executed"))].join("; ")}): those lines may be edited`);
+    const tcs = Array.isArray(r.tc_lessons) ? (r.tc_lessons as TcLesson[]) : [];
+    if (typeof r.tc_lessons_unparsed === "string" && r.tc_lessons_unparsed) lines.push(`    typecheck failed with output this code could not parse into errors: ${r.tc_lessons_unparsed.replace(/\s+/g, " ").slice(0, 200)}`);
+    if (tcs.length) lines.push(`    typecheck errors this draft introduced: ${tcs.slice(0, 6).map((t) => `${t.ts_code} ${t.file}:${t.line}${t.symbol ? ` '${t.symbol}'` : ""}${t.symbol_location ? ` (declared at ${t.symbol_location.path}:${t.symbol_location.line})` : t.declared_nowhere ? " (declared nowhere)" : ""} — ${t.message.slice(0, 140)}`).join("; ")}`);
     const oc = r.own_check as { test_file?: string; failing?: OwnCheckFailure[] } | undefined;
     for (const f of (oc?.failing ?? []).slice(0, 4)) {
       lines.push(`    own check ${String(oc?.test_file ?? "")} (fail) ${f.name}`);
@@ -1126,4 +1143,334 @@ export function constraintParkLine(gapId: string, priorLessons: unknown, thisCla
   }
   if (n < 2) return null;
   return `[fc-constraint] PARKED gap=${gapId || "none"}: constraint check could not run on ${n} consecutive attempts (${reason.replace(/\s+/g, " ").slice(0, 200)})`;
+}
+
+// ─── grounding the drafter can learn from (C-window-1) ──────────────────────
+//
+// Measured on the lane's failed composes: an explicit line hint in a gap centred the edit-site window (one slice) on a few
+// hundred lines of a file several windows long, while the fix also needed the file's imports and sites windows away.
+// Every draft edited inside the window, every edit had no effect, and each one LOCKED its region, so the window the
+// drafter could see filled with refusals. Typecheck failures left only prose, so TS2304 / TS2451 / TS2367 recurred blind. Three changes, all decided by the composer:
+//   - the edit-site file is grounded WHOLE when it fits a shaped budget (composeGroundingPolicy), so a draft sees every site;
+//   - a no-effect lock recorded under a PARTIAL grounding of its file (or by an attempt whose own check never executed) is
+//     void while the drafter sees the whole file; a lock recorded under whole grounding with the check executing stays;
+//   - a typecheck failure records {ts_code, symbol, symbol_location}, the location found by the composer in the vessel tree
+//     grounding reads (REPO_ROOT), and
+//     the next attempt's grounding (and the repair round inside an attempt) shows that location.
+// The grounding range and check_executed are recorded by the composer from its own reads and runs, never from a draft: a
+// plan cannot claim a range it was not shown. These are READS of the tree grounding already reads; the pwt-live-tree-writes hold governs
+// live-tree WRITES only and is not consulted here.
+
+export const COMPOSE_GROUNDING_POLICY_NAME = "composeGroundingPolicy";
+export interface ComposeGroundingPolicy {
+  /** 1: read-widening on (whole edit-site file, typecheck-lesson windows); 0: the single window as before. */
+  read_widening: number;
+  /** The edit-site file is shown whole when it has at most this many chars. */
+  edit_site_whole_file_max_chars: number;
+  /** 1: a lock recorded under a partial grounding of its file is void while the drafter sees that file whole. */
+  void_partial_grounding_locks: number;
+  /** 1: a lock recorded by an attempt whose own check did not execute is void. */
+  void_unexecuted_check_locks: number;
+  /** Lines shown either side of a symbol location named by a typecheck lesson. */
+  tc_symbol_window_lines: number;
+}
+/**
+ * ABSENT MEANS OFF: with no record every switch is 0, so the floor, the drafter module's context and every gate are
+ * byte-identical to the tree before this section (the verdict-diff and prompt goldens pin that). A record turns it on.
+ */
+export const DEFAULT_COMPOSE_GROUNDING_POLICY: Readonly<ComposeGroundingPolicy> = Object.freeze({
+  read_widening: 0,
+  edit_site_whole_file_max_chars: 49_152,
+  void_partial_grounding_locks: 0,
+  void_unexecuted_check_locks: 0,
+  tc_symbol_window_lines: 30,
+});
+export const COMPOSE_GROUNDING_POLICY_SPEC: Readonly<Record<keyof ComposeGroundingPolicy, { min: number; max: number }>> = Object.freeze({
+  read_widening: { min: 0, max: 1 },
+  edit_site_whole_file_max_chars: { min: 6_000, max: 400_000 },
+  void_partial_grounding_locks: { min: 0, max: 1 },
+  void_unexecuted_check_locks: { min: 0, max: 1 },
+  tc_symbol_window_lines: { min: 5, max: 200 },
+});
+export type ComposeGroundingPolicyRead =
+  | { ok: true; policy: ComposeGroundingPolicy; source: "policy" | "default"; path: string | null; ignored_keys?: string[] }
+  | { ok: false; why: string; path: string | null };
+/**
+ * `<super-repo clone>/policies/composeGroundingPolicy.json`, read at use time (the same runtime directory as the other
+ * shaped policies; gitignored). Absent (or no clone) → the defaults (off). Present but unreadable, not JSON, or a field
+ * that is not an integer in range → ok:false, and the caller widens nothing and voids nothing. A key not in the spec is
+ * returned in ignored_keys (the caller journals it, never silently); a missing key takes its default. Node builtins only: this closed module reaches nothing the lane can edit.
+ */
+export async function readComposeGroundingPolicy(superRepoRoot: string | null): Promise<ComposeGroundingPolicyRead> {
+  const defaults = (): ComposeGroundingPolicy => ({ ...DEFAULT_COMPOSE_GROUNDING_POLICY });
+  if (!superRepoRoot) return { ok: true, policy: defaults(), source: "default", path: null };
+  const path = join(superRepoRoot, "policies", `${COMPOSE_GROUNDING_POLICY_NAME}.json`);
+  let raw: string;
+  try { raw = await readFile(path, "utf-8"); } catch (err) {
+    const code = (err as NodeJS.ErrnoException)?.code;
+    if (code === "ENOENT" || code === "ENOTDIR") return { ok: true, policy: defaults(), source: "default", path };
+    return { ok: false, why: `${COMPOSE_GROUNDING_POLICY_NAME} unreadable: ${(err as Error).message}`, path };
+  }
+  let value: unknown;
+  try { value = JSON.parse(raw); } catch { return { ok: false, why: `${COMPOSE_GROUNDING_POLICY_NAME} is not valid JSON`, path }; }
+  if (!value || typeof value !== "object" || Array.isArray(value)) return { ok: false, why: `${COMPOSE_GROUNDING_POLICY_NAME} is not an object`, path };
+  const policy = defaults();
+  for (const k of Object.keys(COMPOSE_GROUNDING_POLICY_SPEC) as Array<keyof ComposeGroundingPolicy>) {
+    const v = (value as Record<string, unknown>)[k];
+    if (v === undefined) continue;
+    const r = COMPOSE_GROUNDING_POLICY_SPEC[k];
+    if (typeof v !== "number" || !Number.isInteger(v) || v < r.min || v > r.max) return { ok: false, why: `${COMPOSE_GROUNDING_POLICY_NAME}: ${k} must be an integer in ${r.min}..${r.max}`, path };
+    policy[k] = v;
+  }
+  const ignored = Object.keys(value as Record<string, unknown>).filter((k) => !(k in COMPOSE_GROUNDING_POLICY_SPEC));
+  return { ok: true, policy, source: "policy", path, ...(ignored.length > 0 ? { ignored_keys: ignored } : {}) };
+}
+
+/** What the composer showed the drafter of one target file in one attempt (1-based inclusive lines). */
+export interface GroundingEntry { path: string; mode: "whole" | "slice"; start_line: number; end_line: number; file_chars: number }
+/** The window every lock was recorded under before grounding was recorded: one slice of at most this many chars. */
+export const LEGACY_GROUNDING_SLICE_CHARS = 6000;
+/** Files grounded WHOLE in the current attempt: normalized repo path → current length in chars. */
+export type WholeGrounded = ReadonlyMap<string, number>;
+export type LockVoidRules = Pick<ComposeGroundingPolicy, "void_partial_grounding_locks" | "void_unexecuted_check_locks">;
+
+/** Did the attempt's own check execute (named tests reported a result)? Recorded by the composer; inferred for older records. */
+export function checkExecuted(record: Record<string, unknown>): boolean {
+  if (typeof record.check_executed === "boolean") return record.check_executed;
+  const f = (record.own_check as { failing?: unknown } | undefined)?.failing;
+  return Array.isArray(f) && f.length > 0 && f.every((x) => {
+    const n = (x as { name?: unknown } | null)?.name;
+    return typeof n === "string" && n.trim() !== "" && !/unhandled error|error between tests/i.test(n);
+  });
+}
+
+/** Why a lock on `path` from `record` is void in the current attempt, or null when it holds. */
+export function lockVoidReason(record: Record<string, unknown>, path: string, whole: WholeGrounded, rules: LockVoidRules): "unexecuted_check" | "partial_grounding" | null {
+  if (rules.void_unexecuted_check_locks === 1 && !checkExecuted(record)) return "unexecuted_check";
+  if (rules.void_partial_grounding_locks !== 1) return null;
+  const p = normPath(path);
+  const now = whole.get(p);
+  if (now === undefined) return null;
+  const g = Array.isArray(record.grounding) ? (record.grounding as GroundingEntry[]) : null;
+  // Recorded before grounding was: it saw one slice, so it saw the whole file only if the file fit that slice.
+  if (!g) return now > LEGACY_GROUNDING_SLICE_CHARS ? "partial_grounding" : null;
+  const e = g.find((x) => x && normPath(String(x.path)) === p);
+  return e && e.mode === "whole" ? null : "partial_grounding";
+}
+
+export type VoidedSpan = EditedSpan & { reason: "unexecuted_check" | "partial_grounding" };
+const GROUNDING_MODES: ReadonlySet<string> = new Set(["whole", "slice"]);
+/** A lock's own record names a grounding mode this code does not know: the lock is KEPT and the record is reported. */
+function unrecognisedGrounding(record: Record<string, unknown>, path: string): string | null {
+  if (!Array.isArray(record.grounding)) return null;
+  const e = (record.grounding as Array<Record<string, unknown>>).find((x) => x && normPath(String(x.path ?? "")) === normPath(path));
+  return e && !GROUNDING_MODES.has(String(e.mode)) ? String(e.mode) : null;
+}
+/**
+ * The lessons the no-effect constraint and the prompt read in this attempt: void lock spans moved from edited_spans to
+ * voided_spans. rules null (policy unreadable) → the lessons unchanged: an unreadable policy never loosens the gate.
+ * A lock whose record carries an UNRECOGNISED grounding mode is kept (the conservative reading) and returned in
+ * `unrecognised`, so the caller records it instead of the rule silently deciding.
+ */
+export function effectiveLockLessons(lessons: unknown, whole: WholeGrounded, rules: LockVoidRules | null): { lessons: Array<Record<string, unknown>>; voided: VoidedSpan[]; unrecognised: Array<{ path: string; start: number; end: number; mode: string }> } {
+  const src = Array.isArray(lessons) ? (lessons as Array<Record<string, unknown>>) : [];
+  if (!rules) return { lessons: src, voided: [], unrecognised: [] };
+  const voided: VoidedSpan[] = [];
+  const unrecognised: Array<{ path: string; start: number; end: number; mode: string }> = [];
+  const out = src.map((l) => {
+    if (!l || l.no_effect_vs_parent !== true || !Array.isArray(l.edited_spans)) return l;
+    const keep: EditedSpan[] = [];
+    const gone: VoidedSpan[] = [];
+    for (const s of l.edited_spans as EditedSpan[]) {
+      const odd = s && typeof s.path === "string" ? unrecognisedGrounding(l, s.path) : null;
+      if (odd !== null) { unrecognised.push({ path: s.path, start: s.start, end: s.end, mode: odd }); keep.push(s); continue; }
+      const why = s && typeof s.path === "string" ? lockVoidReason(l, s.path, whole, rules) : null;
+      if (why) gone.push({ ...s, reason: why }); else keep.push(s);
+    }
+    if (gone.length === 0) return l;
+    voided.push(...gone);
+    return { ...l, edited_spans: keep, voided_spans: gone };
+  });
+  return { lessons: out, voided, unrecognised };
+}
+
+// ─── typecheck lessons ──────────────────────────────────────────────────────
+
+/** One typecheck error a draft introduced, and where the composer found the symbol it names. */
+export interface TcLesson { ts_code: string; file: string; line: number; message: string; symbol: string | null; symbol_location: { path: string; line: number } | null; declared_nowhere?: boolean }
+const TSC_LINE_RE = /^[\s|]*([^\s()|][^()|]*?\.tsx?)\((\d+),(\d+)\):\s*error\s+(TS\d+):\s*(.+?)\s*$/;
+/** Codes whose quoted name is a symbol the draft used but the file does not declare (or import). */
+export const TC_MISSING_SYMBOL_CODES: ReadonlySet<string> = new Set(["TS2304", "TS2552", "TS2305", "TS2724", "TS2614"]);
+/** Codes whose quoted name is a symbol declared more than once. */
+export const TC_REDECLARE_CODES: ReadonlySet<string> = new Set(["TS2451", "TS2300", "TS2393", "TS2323"]);
+const IDENT_RE = /^[A-Za-z_$][A-Za-z0-9_$]*$/;
+
+/** tsc error lines in `text` (file(line,col): error TSnnnn: message), first `max`. */
+export function parseTscLines(text: string, max = 8): Array<{ ts_code: string; file: string; line: number; message: string; symbol: string | null }> {
+  const out: Array<{ ts_code: string; file: string; line: number; message: string; symbol: string | null }> = [];
+  for (const raw of stripAnsi(String(text ?? "")).split("\n")) {
+    const m = TSC_LINE_RE.exec(raw);
+    if (!m) continue;
+    const message = m[5]!;
+    // The first quoted IDENTIFIER: a module name ('"./x.js"') or a type ('"a" | "b"') is quoted too and comes first in
+    // TS2305 / TS2724 / TS2614 / TS2367; the name the error is about is the first quote that is an identifier.
+    const q = [...message.matchAll(/'([^']+)'/g)].map((x) => x[1]!).find((x) => IDENT_RE.test(x)) ?? null;
+    out.push({ ts_code: m[4]!, file: m[1]!.trim(), line: Number(m[2]), message: message.slice(0, 240), symbol: q });
+    if (out.length >= max) break;
+  }
+  return out;
+}
+
+const escapeRe = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+/** Every declaration of `symbol` in `files` (function / const / let / var / class / interface / type / enum, exported or not). */
+export function findDeclarations(symbol: string, files: ReadonlyArray<{ path: string; content: string }>): Array<{ path: string; line: number }> {
+  if (!IDENT_RE.test(symbol)) return [];
+  const re = new RegExp(`^\\s*(?:export\\s+)?(?:default\\s+)?(?:declare\\s+)?(?:async\\s+)?(?:function\\*?|const|let|var|class|interface|type|enum)\\s+${escapeRe(symbol)}\\b`);
+  const out: Array<{ path: string; line: number }> = [];
+  for (const f of files) {
+    const lines = f.content.split("\n");
+    for (let i = 0; i < lines.length; i++) if (re.test(lines[i]!)) out.push({ path: f.path, line: i + 1 });
+  }
+  return out;
+}
+
+/**
+ * The structured typecheck lessons for a failed verify: the tsc lines of `output` that are the draft's own (their identity,
+ * coordinates stripped as tscErrorSet does, is in `newTs`; all of them when newTs is empty), each with the composer's
+ * location for its symbol: for a missing name, its declaration elsewhere in the vessel (or declared_nowhere); for a
+ * redeclaration, the first existing declaration in the erroring file. `files` are vessel-relative source texts read by the
+ * composer; `repoPrefix` ("repos/<vessel>/") makes the locations repo paths.
+ */
+export function typecheckLessons(output: string, newTs: readonly string[], files: ReadonlyArray<{ path: string; content: string }>, repoPrefix: string, max = 6): TcLesson[] {
+  const want = new Set(newTs.map((e) => stripAnsi(e).replace(/\(\d+,\d+\)/g, "").trim()));
+  const out: TcLesson[] = [];
+  for (const raw of stripAnsi(String(output ?? "")).split("\n")) {
+    const parsed = parseTscLines(raw, 1)[0];
+    if (!parsed) continue;
+    // newTs holds tscErrorSet's identities of the same output (the line, coordinates stripped, trimmed).
+    if (want.size > 0 && !want.has(raw.replace(/\(\d+,\d+\)/g, "").trim())) continue;
+    let symbol_location: TcLesson["symbol_location"] = null;
+    let declared_nowhere: boolean | undefined;
+    if (parsed.symbol && TC_MISSING_SYMBOL_CODES.has(parsed.ts_code)) {
+      const decl = findDeclarations(parsed.symbol, files)[0];
+      if (decl) symbol_location = { path: `${repoPrefix}${decl.path}`, line: decl.line };
+      else declared_nowhere = true;
+    } else if (parsed.symbol && TC_REDECLARE_CODES.has(parsed.ts_code)) {
+      const decl = findDeclarations(parsed.symbol, files.filter((f) => f.path === parsed.file))[0];
+      if (decl) symbol_location = { path: `${repoPrefix}${decl.path}`, line: decl.line };
+    }
+    if (out.some((o) => o.ts_code === parsed.ts_code && o.file === parsed.file && o.line === parsed.line)) continue;
+    out.push({ ...parsed, symbol_location, ...(declared_nowhere ? { declared_nowhere } : {}) });
+    if (out.length >= max) break;
+  }
+  return out;
+}
+
+/** The typecheck lessons on a gap's records, most recent attempt first. */
+export function priorTcLessons(lessons: unknown, max = 6): TcLesson[] {
+  if (!Array.isArray(lessons)) return [];
+  const out: TcLesson[] = [];
+  for (let i = lessons.length - 1; i >= 0 && out.length < max; i--) {
+    const t = (lessons[i] as { tc_lessons?: unknown } | null)?.tc_lessons;
+    if (Array.isArray(t)) for (const x of t as TcLesson[]) if (x && typeof x.ts_code === "string" && out.length < max) out.push(x);
+  }
+  return out;
+}
+
+const numbered = (lines: readonly string[], from: number, to: number): string => lines.slice(from - 1, to).map((l, i) => `${from + i}\t${l}`).join("\n");
+
+/**
+ * THE TYPECHECK LESSON AS A GROUNDING INSTRUCTION: for each prior lesson with a symbol location, the declaration's window
+ * (±windowLines, numbered); a location inside a file already grounded whole is named, not repeated; a declared-nowhere
+ * symbol is stated. `read` returns a repo path's current text (or null). consumed = lessons this block delivered.
+ */
+export function tcLessonGroundingBlock(prior: readonly TcLesson[], read: (repoPath: string) => string | null, windowLines: number, wholePaths: ReadonlySet<string>): { text: string; consumed: number } {
+  if (prior.length === 0) return { text: "", consumed: 0 };
+  const parts: string[] = [];
+  let consumed = 0;
+  const seen = new Set<string>();
+  for (const t of prior) {
+    const tag = `${t.ts_code} '${t.symbol ?? "?"}' at ${t.file}:${t.line}`;
+    if (t.declared_nowhere && t.symbol) {
+      if (seen.has(`nowhere:${t.symbol}`)) continue;
+      seen.add(`nowhere:${t.symbol}`);
+      parts.push(`- ${tag}: '${t.symbol}' is declared NOWHERE in this vessel. Declare it in this plan, or use a name that exists.`);
+      consumed++;
+      continue;
+    }
+    const loc = t.symbol_location;
+    if (!loc) continue;
+    const key = `${loc.path}:${loc.line}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    if (wholePaths.has(normPath(loc.path))) {
+      parts.push(`- ${tag}: '${t.symbol}' is declared at ${loc.path}:${loc.line} (in the whole file shown above).`);
+      consumed++;
+      continue;
+    }
+    const text = read(loc.path);
+    if (typeof text !== "string") continue;
+    const lines = text.split("\n");
+    const from = Math.max(1, loc.line - windowLines);
+    const to = Math.min(lines.length, loc.line + windowLines);
+    parts.push(`- ${tag}: '${t.symbol}' is declared at ${loc.path}:${loc.line}:\n----- ${loc.path} lines ${from}-${to} -----\n${numbered(lines, from, to)}`);
+    consumed++;
+  }
+  if (parts.length === 0) return { text: "", consumed: 0 };
+  return { text: `\n\nTYPECHECK LESSONS FROM THE PREVIOUS ATTEMPTS (where the names they failed on are declared; read by the composer):\n${parts.join("\n")}`, consumed };
+}
+
+/**
+ * RE-GROUND INSIDE THE ATTEMPT: for the repair round, the declarations behind the missing-symbol / redeclaration errors in
+ * `errText` (vessel-relative paths), each as a numbered window, so the repair is drafted against them rather than the
+ * error line alone. Empty when the errors name no such symbol.
+ */
+export function symbolWidenBlock(errText: string, files: ReadonlyArray<{ path: string; content: string }>, windowLines: number, max = 3): { text: string; symbols: string[] } {
+  const parts: string[] = [];
+  const symbols: string[] = [];
+  for (const e of parseTscLines(errText, 20)) {
+    if (!e.symbol || symbols.includes(e.symbol) || symbols.length >= max) continue;
+    const missing = TC_MISSING_SYMBOL_CODES.has(e.ts_code);
+    const redecl = TC_REDECLARE_CODES.has(e.ts_code);
+    if (!missing && !redecl) continue;
+    symbols.push(e.symbol);
+    const decls = findDeclarations(e.symbol, redecl ? files.filter((f) => f.path === e.file) : files).filter((d) => !(d.path === e.file && d.line === e.line && missing));
+    if (decls.length === 0) { parts.push(`${e.ts_code} '${e.symbol}': declared nowhere in this vessel — declare it, or use a name that exists.`); continue; }
+    for (const d of decls.slice(0, redecl ? 3 : 1)) {
+      const lines = (files.find((f) => f.path === d.path)?.content ?? "").split("\n");
+      const from = Math.max(1, d.line - windowLines);
+      const to = Math.min(lines.length, d.line + windowLines);
+      parts.push(`${e.ts_code} '${e.symbol}': ${redecl ? "already declared" : "declared"} at ${d.path}:${d.line}${missing && d.path !== e.file ? ` (import it into ${e.file})` : ""}\n${lines.slice(from - 1, to).map((l, i) => `${String(from + i).padStart(5, " ")}| ${l}`).join("\n")}`);
+    }
+  }
+  return { text: parts.length ? `\n\nDECLARATIONS BEHIND THESE ERRORS (re-grounded before this repair; the "NNN| " gutter is not part of the file):\n${parts.join("\n\n")}` : "", symbols };
+}
+
+// ─── attribution (law 12) ───────────────────────────────────────────────────
+
+/** Per attempt: how it was grounded, what was voided, whether a typecheck lesson reached it, and how its own check moved. */
+export interface GroundingAttribution {
+  grounding_mode: "whole" | "slice" | "none";
+  locks_voided: number;
+  /** Lock records naming a grounding mode this code does not know (kept as locks, reported). */
+  unrecognised_grounding?: number;
+  tc_lesson_consumed: boolean;
+  per_assertion_delta: { newly_green: string[]; newly_red: string[]; still_red: number } | null;
+}
+/** The own check's movement since the gap's last attempt that ran it (null when either run is missing). */
+export function perAssertionDelta(prior: unknown, current: ReadonlyArray<OwnCheckFailure> | null, currentRan: boolean): GroundingAttribution["per_assertion_delta"] {
+  if (!currentRan || !Array.isArray(prior)) return null;
+  let last: string[] | null = null;
+  for (let i = prior.length - 1; i >= 0; i--) {
+    const f = ((prior[i] as { own_check?: { failing?: unknown } } | null)?.own_check)?.failing;
+    if (Array.isArray(f)) { last = (f as OwnCheckFailure[]).map((x) => String(x?.name ?? "")); break; }
+  }
+  if (!last) return null;
+  const now = (current ?? []).map((x) => String(x.name ?? ""));
+  return { newly_green: last.filter((n) => !now.includes(n)), newly_red: now.filter((n) => !last!.includes(n)), still_red: now.filter((n) => last!.includes(n)).length };
+}
+export const GROUNDING_ATTRIBUTION_GREP = "^\\[fc-grounding-attr\\] gap=";
+export function groundingAttributionLine(gapId: string, a: GroundingAttribution): string {
+  const d = a.per_assertion_delta;
+  return `[fc-grounding-attr] gap=${gapId || "none"} grounding_mode=${a.grounding_mode} locks_voided=${a.locks_voided} tc_lesson_consumed=${a.tc_lesson_consumed} per_assertion_delta=${d ? `green+${d.newly_green.length}/red+${d.newly_red.length}/still_red=${d.still_red}` : "none"}`;
 }

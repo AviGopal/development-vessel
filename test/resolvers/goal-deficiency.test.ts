@@ -401,3 +401,77 @@ describe("unread vs unrecorded: visible, never counted; reasonsToRead is oldest 
     expect(gd.reasonsToRead(tallies, listed, 0)).toEqual([]);
   });
 });
+
+// C-longgoal-1: A GOAL OF 200+ CHARS IS NEVER INVISIBLE TO R2. activeDispatches cuts goals at 200 chars; a cut goal hashes only
+// from a detail read or from the record that already holds the run. Known runs carry their record's hash; the detail budget goes
+// to still-unhashable rows first; a record without a hash falls back to a detail read; and every unhashable run is COUNTED (G3).
+describe("C-longgoal-1: long goals reach R2", () => {
+  const long = (topic: string) => `Compile a careful weekly digest about ${topic}: group the items by owner, note which ones slipped since last week and why, attach the source for every figure, flag anything that needs a decision before Friday, and keep it under one page for the review meeting.`;
+  const LONG_A = long("open procurement requests in the facilities queue"), LONG_B = long("pending vendor security questionnaires and renewals");
+  const cut = (g: string) => g.slice(0, grt.ACTIVE_DISPATCHES_GOAL_CUT);
+  const obs = (id: string, goal: string, over: Row = {}): Row => ({ dispatchId: id, goal, status: "failed", reached: false, operator: "rhythm-conductor-drain", trigger: "operator", startedAt: NOW - H, node: null, ...over });
+  const rec = (goal_hash: string, ids: string[], over: Row = {}): Row => ({ goal_hash, goal: "x", dispatches: ids.map((dispatchId) => ({ dispatchId, status: "failed", startedAt: NOW - 2 * H })), r_issued: [], ...over });
+
+  it("the fixtures really are long: both goals exceed the cut", () => {
+    expect(LONG_A.length).toBeGreaterThan(grt.ACTIVE_DISPATCHES_GOAL_CUT);
+    expect(LONG_B.length).toBeGreaterThan(grt.ACTIVE_DISPATCHES_GOAL_CUT);
+  });
+
+  it("boundary: a 199-char goal hashes straight from the listing; a 200-char one is a cut goal until completed", () => {
+    expect(typeof grt.isCutGoal).toBe("function");
+    const g199 = "a".repeat(199), g200 = "b".repeat(200);
+    expect(grt.dispatchGoalHash(obs("s", g199))).toBe(grt.goalHashOf(g199));
+    expect(grt.isCutGoal(obs("t", g200))).toBe(true);
+    expect(grt.dispatchGoalHash(obs("t", g200))).toBeNull();
+    expect(grt.dispatchGoalHash(obs("t", g200, { goal_full: true }))).toBe(grt.goalHashOf(g200));
+  });
+
+  it("(a) a known terminal run with a cut goal is tallied under the hash of the record that holds it", () => {
+    expect(typeof grt.knownFromRecords).toBe("function");
+    const h = grt.goalHashOf(LONG_A);
+    const k = grt.knownFromRecords({ [h]: rec(h, ["k1"]) });
+    expect([...k.known]).toEqual(["k1"]);
+    const o = grt.applyKnownHash(obs("k1", cut(LONG_A)), k.known_hashes);
+    expect(grt.dispatchGoalHash(o)).toBe(h);
+    expect(grt.detailReadOrder([o], k, 20)).toEqual([]); // no detail read spent on it
+    const t = gd.tallyUpdate({}, [{ ...o, goal_hash: grt.dispatchGoalHash(o), origin: "autonomous", goalReachReason: "The output did not provide the digest." }], NOW, P(), never).tallies;
+    expect(Object.keys(t)).toEqual([h]);
+  });
+
+  it("a record WITHOUT a hash makes none of its runs known: they get a detail read, never a silent skip", () => {
+    const k = grt.knownFromRecords({ legacy: rec(undefined as never, ["old1"]) });
+    expect(k.known.has("old1")).toBe(false);
+    expect(grt.detailReadOrder([obs("old1", cut(LONG_B))], k, 20)).toEqual(["old1"]);
+  });
+
+  it("(b) the detail budget goes to unhashable cut rows first; a cut row past the budget is read on a later tick", () => {
+    const none = { known: new Set<string>(), r_issued: new Set<string>() };
+    const page = [obs("plain", "a short failed goal"), obs("cutA", cut(LONG_A)), obs("cutB", cut(LONG_B))];
+    expect(grt.detailReadOrder(page, none, 1)).toEqual(["cutA"]);
+    // tick 2: cutA was read and recorded under its full hash; cutB is still unknown and now first
+    const hA = grt.goalHashOf(LONG_A);
+    const k2 = grt.knownFromRecords({ [hA]: rec(hA, ["cutA"]) });
+    const page2 = [obs("plain", "a short failed goal"), grt.applyKnownHash(obs("cutA", cut(LONG_A)), k2.known_hashes), obs("cutB", cut(LONG_B))];
+    expect(grt.detailReadOrder(page2, k2, 1)).toEqual(["cutB"]);
+    const afterRead = obs("cutB", LONG_B, { goal_full: true });
+    expect(grt.dispatchGoalHash(afterRead)).toBe(grt.goalHashOf(LONG_B));
+  });
+
+  it("(c) MUST-FAIL: a cut goal left without a hash is COUNTED, never silently dropped", () => {
+    expect(typeof grt.unhashedRuns).toBe("function");
+    const ds = [obs("u1", cut(LONG_A)), obs("u2", "a short goal that hashes"), obs("u3", null as never)];
+    expect(grt.unhashedRuns(ds)).toEqual({ no_goal_hash: 2, cut_goal: 1 });
+    expect(grt.unhashedRuns([obs("u2", "a short goal that hashes")])).toEqual({ no_goal_hash: 0, cut_goal: 0 });
+  });
+
+  it("(c) through the default I/O: R2 reports and logs the skip count every call", async () => {
+    const io = grt.defaultGoalReachIO({ ...grt.DEFAULT_GOAL_REACH_POLICY });
+    const lines: string[] = [];
+    const l = console.log, w = console.warn; console.log = (s: string) => { lines.push(String(s)); }; console.warn = () => {};
+    let r: Row;
+    try { r = await io.recogniseDeficiencies([obs("v1", cut(LONG_A)), obs("v2", cut(LONG_B))], Date.now()); }
+    finally { console.log = l; console.warn = w; }
+    expect([r!.skipped_no_goal_hash, r!.skipped_cut_goal]).toEqual([2, 2]);
+    expect(lines).toContain("[goal-reach] R2 runs skipped: no goal_hash 2 (cut goal 2)");
+  });
+});

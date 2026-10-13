@@ -246,6 +246,59 @@ export type GoalReachAction =
 // ── classification helpers ────────────────────────────────────────────────────────────────────────
 
 /** The goal_hash of a dispatch, or null when its goal text may be the activeDispatches 200-char cut. */
+/** A goal hash as goal-reach records carry it. */
+const GOAL_HASH_TOKEN = /^[0-9a-f]{8}$/;
+/** A listing row whose goal text is the 200-char cut and not yet completed by a detail read. */
+export const isCutGoal = (d: Pick<DispatchObservation, "goal" | "goal_full">): boolean =>
+  typeof d.goal === "string" && !d.goal_full && d.goal.length >= ACTIVE_DISPATCHES_GOAL_CUT;
+
+/**
+ * What the prior records already know (C-longgoal-1): terminal dispatch ids WITH the goal hash of the record that holds them, so
+ * a listing row whose goal is only the 200-char cut still hashes, without a detail read. A record without a usable hash
+ * (written before hashes existed) makes NONE of its dispatches known: they get a detail read, never a silent skip.
+ */
+export function knownFromRecords(prior: Record<string, GoalReachRecord>): { known: Set<string>; known_hashes: Map<string, string>; r_issued: Set<string> } {
+  const known = new Set<string>(), known_hashes = new Map<string, string>(), r_issued = new Set<string>();
+  for (const r of Object.values(prior)) {
+    const h = typeof r.goal_hash === "string" && GOAL_HASH_TOKEN.test(r.goal_hash) ? r.goal_hash : null;
+    for (const e of r.dispatches) if (isTerminal(e.status) && h) { known.add(e.dispatchId); known_hashes.set(e.dispatchId, h); }
+    for (const id of r.r_issued ?? []) r_issued.add(id);
+  }
+  return { known, known_hashes, r_issued };
+}
+
+/**
+ * Which listing rows get a detail read this tick, in order, at most `budget`. Rows still unhashable (a cut goal and no
+ * known hash) come first, so a cut goal is never starved by detail reads that only refine rows already hashed.
+ */
+export function detailReadOrder(
+  obs: readonly DispatchObservation[],
+  ctx: { known: Set<string>; r_issued: Set<string> },
+  budget: number,
+): string[] {
+  const want = obs.filter((o) => {
+    if (ctx.known.has(o.dispatchId)) return false;
+    const failedTerminal = o.status !== "running" && o.reached !== true;
+    return failedTerminal || ctx.r_issued.has(o.dispatchId) || isCutGoal(o);
+  });
+  const unhashable = (o: DispatchObservation) => isCutGoal(o) && !o.goal_hash;
+  return [...want.filter(unhashable), ...want.filter((o) => !unhashable(o))].slice(0, Math.max(0, budget)).map((o) => o.dispatchId);
+}
+
+/** A known run's cut goal hashes under the record that holds it (C-longgoal-1). Returns the same observation. */
+export function applyKnownHash(obs: DispatchObservation, known_hashes: Map<string, string> | undefined): DispatchObservation {
+  const kh = known_hashes?.get(obs.dispatchId);
+  if (kh && isCutGoal(obs) && !obs.goal_hash) obs.goal_hash = kh;
+  return obs;
+}
+
+/** The runs R2 cannot tally this tick because they have no goal hash, and how many of those are a cut goal (G3: always reported). */
+export function unhashedRuns(dispatches: readonly DispatchObservation[]): { no_goal_hash: number; cut_goal: number } {
+  let no_goal_hash = 0, cut_goal = 0;
+  for (const d of dispatches) if (!dispatchGoalHash(d)) { no_goal_hash++; if (isCutGoal(d)) cut_goal++; }
+  return { no_goal_hash, cut_goal };
+}
+
 export function dispatchGoalHash(d: DispatchObservation): string | null {
   if (typeof d.goal_hash === "string" && d.goal_hash.length > 0) return d.goal_hash;
   if (typeof d.goal !== "string" || d.goal.trim().length === 0) return null;
@@ -782,7 +835,7 @@ export interface GoalDispatchRequest {
 }
 export interface GoalReachIO {
   /** Recent goal-host dispatches (this substrate's own goal-hosts). `known` = chain ids already detailed. */
-  listDispatches(ctx: { known: Set<string>; r_issued: Set<string> }): Promise<{ ok: true; dispatches: DispatchObservation[] } | { ok: false; why: string }>;
+  listDispatches(ctx: { known: Set<string>; r_issued: Set<string>; known_hashes?: Map<string, string> }): Promise<{ ok: true; dispatches: DispatchObservation[] } | { ok: false; why: string }>;
   readGaps(goalHashes: string[]): Promise<{ ok: true; gaps: GapView[] } | { ok: false; why: string }>;
   readLandings(fromMs: number, toMs: number): Promise<{ ok: true; landings: LandingView[] } | { ok: false; why: string }>;
   /** The autonomy-scope check, or null when the scope is unreadable (then no blocked_by_scope verdict). */
@@ -820,6 +873,9 @@ export interface DeficiencyReport {
   reasons_read: number;
   reasons_unrecorded: number;
   reason_reads_failed: number;
+  /** Listed runs R2 could not tally for want of a goal hash, and how many of those are a cut goal (C-longgoal-1; 0 in steady state). */
+  skipped_no_goal_hash: number;
+  skipped_cut_goal: number;
   candidates: Array<{ goal_hash: string; reason_class: string; count: number; class_source: string }>;
 }
 
@@ -907,13 +963,8 @@ export async function runGoalReachTick(io: GoalReachIO, policy: GoalReachPolicy,
   };
   const tag = policy.dry_run ? "DRY-RUN would " : "";
   const prior = await io.loadRecords();
-  const known = new Set<string>();
-  const rIssued = new Set<string>();
-  for (const r of Object.values(prior)) {
-    for (const e of r.dispatches) if (isTerminal(e.status)) known.add(e.dispatchId);
-    for (const id of r.r_issued) rIssued.add(id);
-  }
-  const listed = await io.listDispatches({ known, r_issued: rIssued });
+  const { known, known_hashes, r_issued: rIssued } = knownFromRecords(prior);
+  const listed = await io.listDispatches({ known, r_issued: rIssued, known_hashes });
   if (!listed.ok) { result.ledger.errors.push(`dispatches unreadable: ${listed.why}`); return { ...result, ok: false, why: `dispatches unreadable: ${listed.why}`, summary: summarize(Object.values(prior)) }; }
 
   // LINK THE WALKS' OWN FILINGS before the gaps are read, so this tick's linkGaps already sees them.
@@ -1122,7 +1173,7 @@ const repoPrefix = (repo: string): string => {
 
 export function defaultGoalReachIO(policy: GoalReachPolicy): GoalReachIO {
   return {
-    async listDispatches({ known, r_issued }) {
+    async listDispatches({ known, r_issued, known_hashes }) {
       const prod = await ownUrls("activeDispatches");
       if (!prod.ok) return { ok: false, why: prod.why };
       const out: DispatchObservation[] = [];
@@ -1138,6 +1189,7 @@ export function defaultGoalReachIO(policy: GoalReachPolicy): GoalReachIO {
           rows.push(...(body.dispatches as Array<Record<string, unknown>>));
           if (body.hasMore !== true) break;
         }
+        const page: DispatchObservation[] = [];
         for (const row of rows) {
           const id = String(row["dispatchId"] ?? "");
           if (!id) continue;
@@ -1148,10 +1200,13 @@ export function defaultGoalReachIO(policy: GoalReachPolicy): GoalReachIO {
             executionId: typeof row["executionId"] === "string" ? row["executionId"] : null,
             selectedTemplateId: typeof row["selectedTemplateId"] === "string" ? row["selectedTemplateId"] : null,
           };
-          const failedTerminal = obs.status !== "running" && obs.reached !== true;
-          const wantDetail = !known.has(id) && (failedTerminal || r_issued.has(id) || (obs.goal !== null && obs.goal.length >= ACTIVE_DISPATCHES_GOAL_CUT));
-          if (wantDetail && detailBudget > 0) {
-            detailBudget--;
+          page.push(applyKnownHash(obs, known_hashes));
+        }
+        const detail = new Set(detailReadOrder(page, { known, r_issued }, detailBudget));
+        detailBudget -= detail.size;
+        for (const obs of page) {
+          const id = obs.dispatchId;
+          if (detail.has(id)) {
             const w = await postResolve(url, { type: "goalWalkState", dispatchId: id }, 10_000);
             const b = (w.json?.["body"] ?? null) as Record<string, unknown> | null;
             if (w.ok && b) {
@@ -1355,7 +1410,7 @@ export function defaultGoalReachIO(policy: GoalReachPolicy): GoalReachIO {
 
     async recogniseDeficiencies(dispatches, now) {
       const gd = await import("./goal-deficiency.js");
-      const empty: DeficiencyReport = { ok: true, tallied: 0, ignored: 0, filed: [], refused: [], skipped: [], unclassified: [], unread: [], unrecorded: [], reasons_read: 0, reasons_unrecorded: 0, reason_reads_failed: 0, candidates: [] };
+      const empty: DeficiencyReport = { ok: true, tallied: 0, ignored: 0, filed: [], refused: [], skipped: [], unclassified: [], unread: [], unrecorded: [], reasons_read: 0, reasons_unrecorded: 0, reason_reads_failed: 0, skipped_no_goal_hash: 0, skipped_cut_goal: 0, candidates: [] };
       const pol = await gd.readDeficiencyPolicy();
       if (!pol.ok) { console.warn(`[goal-reach] R2 off this tick: ${pol.why}`); return { ...empty, ok: false, why: pol.why }; }
       const { resolvePoolImpulse, resolvePoolImpulseWrite } = await import("./pool-impulse.js");
@@ -1381,6 +1436,9 @@ export function defaultGoalReachIO(policy: GoalReachPolicy): GoalReachIO {
         return cls === "class2" ? true : cls === "unresolvable" ? false : null;
       };
       const runs: import("./goal-deficiency.js").RunView[] = dispatches.map((d) => ({ ...d, goal_hash: dispatchGoalHash(d), origin: originOf(d), node: d.node ?? null }));
+      // G3: a run R2 cannot tally is counted every tick, never folded away; only 0 in steady state means none is invisible.
+      const unhashed = unhashedRuns(dispatches);
+      console.log(`[goal-reach] R2 runs skipped: no goal_hash ${unhashed.no_goal_hash} (cut goal ${unhashed.cut_goal})`);
       // READ THE MISSING REASONS (C-tally-1): a not-reached run with no judge reason is unread until R2 reads it here, oldest first.
       let reasonsRead = 0, reasonsUnrecorded = 0, reasonReadsFailed = 0;
       const byId = new Map(runs.map((r) => [r.dispatchId, r]));
@@ -1406,7 +1464,7 @@ export function defaultGoalReachIO(policy: GoalReachPolicy): GoalReachIO {
         if (r.shape === "substrateGap" && Array.isArray(rows)) existing = new Map(rows.filter((g) => String(g["id"] ?? "").startsWith("goal-deficiency-")).map((g) => [String(g["id"]), g]));
       } catch { existing = null; }
       const dec = gd.deficiencyDecisions(up.tallies, existing, now, pol.policy);
-      const report: DeficiencyReport = { ...empty, tallied: up.touched.length, ignored: up.ignored, skipped: dec.skipped, unclassified: dec.unclassified, unread: dec.unread, unrecorded: dec.unrecorded, reasons_read: reasonsRead, reasons_unrecorded: reasonsUnrecorded, reason_reads_failed: reasonReadsFailed, candidates: dec.candidates };
+      const report: DeficiencyReport = { ...empty, tallied: up.touched.length, ignored: up.ignored, skipped: dec.skipped, unclassified: dec.unclassified, unread: dec.unread, unrecorded: dec.unrecorded, reasons_read: reasonsRead, reasons_unrecorded: reasonsUnrecorded, reason_reads_failed: reasonReadsFailed, skipped_no_goal_hash: unhashed.no_goal_hash, skipped_cut_goal: unhashed.cut_goal, candidates: dec.candidates };
       const sum = (xs: Array<{ count: number }>) => xs.reduce((s, u) => s + u.count, 0);
       console.log(`[goal-reach] R2 read ${reasonsRead} reason(s), ${reasonsUnrecorded} record(s) with none, ${reasonReadsFailed} unreadable; still unread ${sum(dec.unread)} run(s), unrecorded ${sum(dec.unrecorded)}; ${dec.candidates.length} candidate(s) (${dec.candidates.map((c) => `${c.reason_class}/${c.class_source}`).join(", ") || "none"})`);
       for (const w of dec.writes) {

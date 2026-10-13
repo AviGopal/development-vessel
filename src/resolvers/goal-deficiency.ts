@@ -69,6 +69,12 @@ export interface GoalDeficiencyPolicy {
   max_localizations: number;
   /** A run this node attributed trace_unreadable is re-read after this long (ms); another node's is re-read at once by its owner. */
   relocalize_unread_after_ms: number;
+  /** Package A: send goal-linked missing-producer demand to the capability author route. Acts only with file_gaps 1. */
+  producer_dispatch: "off" | "dry_run" | "live";
+  /** Author requests per tick (each a feature_compose). */
+  max_producer_dispatches: number;
+  /** A capability row is not sent again within this long of its last request (ms). */
+  producer_dispatch_cooldown_ms: number;
   /** Judge codes (deterministic:<code>) that are NOT content deficiencies (refusals, rate limits): treated as abstains. */
   non_deficiency_code_patterns: string[];
   lenient_reach: LenientReachRule[];
@@ -88,6 +94,9 @@ export const DEFAULT_GOAL_DEFICIENCY_POLICY: Readonly<GoalDeficiencyPolicy> = Ob
   siting_majority: 0.5,
   max_localizations: 5,
   relocalize_unread_after_ms: 3_600_000,
+  producer_dispatch: "live",
+  max_producer_dispatches: 1,
+  producer_dispatch_cooldown_ms: 6 * 3_600_000,
   non_deficiency_code_patterns: ["-refused$"],
   classes: [
     { class: "deliverable_not_produced", patterns: ["\\bnot produced\\b", "did not produce", "did not provide the required", "\\brequired \\S+ was not\\b", "no (output|deliverable) (was )?produced", "missing (the )?required (output|deliverable)"] },
@@ -139,6 +148,18 @@ export function parseDeficiencyPolicy(body: unknown): { ok: true; policy: GoalDe
   if (b["max_localizations"] !== undefined) {
     if (!intIn(b["max_localizations"], 0, 50)) return { ok: false, why: "goalDeficiencyPolicy.max_localizations must be an integer in 0..50" };
     p.max_localizations = b["max_localizations"] as number;
+  }
+  if (b["producer_dispatch"] !== undefined) {
+    if (b["producer_dispatch"] !== "off" && b["producer_dispatch"] !== "dry_run" && b["producer_dispatch"] !== "live") return { ok: false, why: "goalDeficiencyPolicy.producer_dispatch must be off, dry_run or live" };
+    p.producer_dispatch = b["producer_dispatch"];
+  }
+  if (b["max_producer_dispatches"] !== undefined) {
+    if (!intIn(b["max_producer_dispatches"], 0, 20)) return { ok: false, why: "goalDeficiencyPolicy.max_producer_dispatches must be an integer in 0..20" };
+    p.max_producer_dispatches = b["max_producer_dispatches"] as number;
+  }
+  if (b["producer_dispatch_cooldown_ms"] !== undefined) {
+    if (!intIn(b["producer_dispatch_cooldown_ms"], 60_000, 7 * 24 * 3_600_000)) return { ok: false, why: "goalDeficiencyPolicy.producer_dispatch_cooldown_ms must be an integer in 60000..604800000" };
+    p.producer_dispatch_cooldown_ms = b["producer_dispatch_cooldown_ms"] as number;
   }
   if (b["relocalize_unread_after_ms"] !== undefined) {
     if (!intIn(b["relocalize_unread_after_ms"], 60_000, 7 * 24 * 3_600_000)) return { ok: false, why: "goalDeficiencyPolicy.relocalize_unread_after_ms must be an integer in 60000..604800000" };

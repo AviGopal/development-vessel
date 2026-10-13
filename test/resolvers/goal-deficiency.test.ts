@@ -386,6 +386,54 @@ describe("through the default I/O and the real stores", () => {
     expect(fresh[0].classification_metadata).toMatchObject({ kind: "step_failure", edit_site: `repos/ledger-vessel/src/resolvers/${res2}.ts`, step_dispatch_ids: ["p1", "p2"] });
     expect(linkedGoalHashes(fresh[0].classification_metadata.demand_goals)).toEqual([ph]);
   });
+
+  it("END-TO-END (A+B+B2+C, stubbed lane): a missing-producer deficiency row → armed class2 producer_contract → one author request → its additive registration passes C → the judge reads absent once a contract producer is advertised (hollow stays present)", async () => {
+    const pd = await import("../../src/resolvers/producer-dispatch.js");
+    const judge = await import("../../src/judge/gap-check-judge.js");
+    const ar = await import("../../src/judge/gap-policy.js");
+    const cfg = await import("../../src/config.js");
+    const shape = `parcel_backlog_${RUN}`;
+    const def: Row = { id: `goal-deficiency-cafe0123-write_goal_no_artifact`, status: "open", classification_metadata: { kind: "goal_content_deficiency", goal_hash: "cafe0123", goal: "tabulate the overdue parcels per depot", dispatch_ids: [`e2e-${RUN}`] } };
+    const record = { goal: "tabulate the overdue parcels per depot", walkLog: [`[goal-host-vessel] /run-goal: goal-target inference {"goal_hash":"cafe0123","inferred_target_shapes":["${shape}"],"confidence":0.8}`], completionShapes: [] };
+    const sent: Array<{ id: string; tag: string }> = [];
+    // A: the dispatcher over the REAL store (write) with a stubbed dispatch
+    const rep = await quiet(() => pd.runProducerDispatch([def], Date.now(), { producer_dispatch: "live", max_producer_dispatches: 1, producer_dispatch_cooldown_ms: 6 * H }, () => [], {
+      isWrite: (x) => /_write$/.test(x), advertised: async () => false, readRun: async () => record,
+      write: async (gap, demand) => { const r = await sg.resolveSubstrateGapWrite({ type: "substrateGap_write", gap, demand_goals_append: [demand] } as never); return { ok: r.shape === "substrateGapWriteResult" }; },
+      dispatch: async (id, tag) => { sent.push({ id, tag }); return { ok: true }; },
+    }));
+    const capId = pd.capabilityGapId(shape);
+    expect(sent).toEqual([{ id: capId, tag: `producer_author:cafe0123:${shape}` }]);
+    expect(rep.sent).toHaveLength(1);
+    await sg.__settleBirthEvaluationsForTests();
+    const row = ((await sg.resolveSubstrateGap({ type: "substrateGap", id: capId, limit: 1 } as never)).body as Row).gaps[0] as Row;
+    // B/B2: armed class2 by the producer_contract check (an unadvertised shape), the goal's demand linked
+    expect(row.status).toBe("open");
+    expect(row.classification_metadata).toMatchObject({ kind: "capability_gap", missing_shape: shape, falsifier: "class2", falsifier_mode: "producer_contract", evidence_resolve: { shape, mode: "producer_contract" }, edit_site: pd.plannedResolverFile(shape) });
+    expect(linkedGoalHashes(row.classification_metadata.demand_goals)).toEqual(["cafe0123"]);
+    // C (stubbed lane): the author route's landing — a new module at the armed edit site + the two registrations — is admitted
+    const rel = String(row.classification_metadata.edit_site).replace(/^repos\/development-vessel\//, "");
+    const mod = rel.replace(/^src\/resolvers\//, "").replace(/\.ts$/, "");
+    const fn = "resolveParcelBacklog";
+    const cfgBefore = `export const c = {\n  discovery: {\n    shapes: [\n      "alpha_report",\n    ],\n  },\n};\n`;
+    const rtBefore = `export async function d(pointer: any): Promise<unknown> {\n  switch (pointer.type) {\n    default:\n      throw new Error("x");\n  }\n}\n`;
+    const v = await ar.additiveRegistration([
+      { path: "src/config.ts", before: cfgBefore, after: cfgBefore.replace('      "alpha_report",\n', `      "alpha_report",\n      "${shape}",\n`) },
+      { path: "src/routes/impulses.ts", before: rtBefore, after: rtBefore.replace("    default:\n", `    case "${shape}": {\n      const { ${fn} } = await import("../resolvers/${mod}.js");\n      return ${fn}(pointer as any);\n    }\n    default:\n`) },
+      { path: rel, before: null, after: `export async function ${fn}(pointer: any): Promise<unknown> {\n  return { shape: "${shape}", body: { parcels: [{ depot: "north", overdue: 3 }], total: 3, pointer } };\n}\n` },
+    ], async () => false);
+    expect(v).toMatchObject({ ok: true, shape, module: rel });
+    // B: before any producer → present; a hollow producer → present; a contract-satisfying one → absent
+    const P = "http://author-landed.fixture/v2/impulses/resolve";
+    const withProducer = async (answer: unknown) => {
+      cfg.__setDiscoveryForTests({ lookup: async (sh: string) => ({ ok: true, shape: sh, cached: false, producers: answer === undefined ? [] : [{ id: "landed", resolveEndpoint: P, origin: "local" }] }), describe: () => "fixture", failureBackoffMs: 2_000 } as never);
+      try { return await quiet(() => judge.evaluateGapCheck(row, { fetchImpl: (async () => Response.json(answer)) as unknown as typeof fetch })); }
+      finally { cfg.__resetDiscoveryForTests(); }
+    };
+    expect(await withProducer(undefined)).toBe("present");
+    expect(await withProducer({ shape, body: { parcels: [], total: "TODO" } })).toBe("present");
+    expect(await withProducer({ shape, body: { parcels: [{ depot: "north", overdue: 3 }], total: 3 } })).toBe("absent");
+  });
 });
 
 describe("wiring", () => {
@@ -1066,5 +1114,98 @@ describe("#1e: the serving vessel is read from discovery as the real adapter map
   it("controls: a shape no vessel serves says no local vessel; a local vessel with no repo here says so", async () => {
     expect(await withLiveDiscovery(() => grt.vesselOfResolver("unserved_fixture_shape", { repoExists: () => true }))).toEqual({ why: "no local vessel serves unserved_fixture_shape" });
     expect(await withLiveDiscovery(() => grt.vesselOfResolver("execution_trace", { repoExists: () => false }))).toEqual({ why: "development-vessel-local maps to no repo here (development-vessel)" });
+  });
+});
+
+// PACKAGE A (user ruling 10-13): the producer dispatcher sends goal-linked missing-producer demand into the EXISTING
+// capability author route, arming the capability row from the shape's contract (package B/B2) with its planned CREATE
+// target. Intake: open goal-linked capability_gap rows, and deficiency rows whose inferred target shapes (from the record:
+// tally missing_shapes, else the walkLog inference JSON) no step produced. Reuse first; loud skips; shaped budget/cooldown.
+describe("package A: the producer dispatcher", () => {
+  const pd = async () => (await import("../../src/resolvers/producer-dispatch.js")) as Record<string, any>;
+  const T0 = Date.parse("2030-06-01T00:00:00Z");
+  const INFER = (shapes: string[]) => `[goal-host-vessel] /run-goal: goal-target inference {"goal_hash":"aaaa1111","inferred_target_shapes":${JSON.stringify(shapes)},"confidence":0.8,"alternatives":[]}`;
+  const PRODUCED = (s: string) => `[goal-host-vessel] walk(/run-goal): VESSEL-RESOLVE SATISFIER produced "${s}" directly (connected vessel resolve) — no bridge needed`;
+  const capRow = (shape: string, over: Row = {}): Row => ({ id: `gap-${shape.replace(/_/g, "-")}`, status: "open", classification_metadata: { kind: "capability_gap", missing_shape: shape, goal: "tabulate the overdue parcels per depot", demand_goals: [{ source: "goal_reach", goal_hash: "aaaa1111" }], ...over } });
+  const defRow = (ids: string[], over: Row = {}): Row => ({ id: "goal-deficiency-aaaa1111-write_goal_no_artifact", status: "open", classification_metadata: { kind: "goal_content_deficiency", goal_hash: "aaaa1111", dispatch_ids: ids, ...over } });
+  const deps = (over: Row = {}) => ({ isWrite: (s: string) => /_write$/.test(s) || s === "fs_edit", advertised: async () => false, readRun: async () => ({ goal: "tabulate the overdue parcels per depot", walkLog: [INFER(["parcel_backlog_report"])], completionShapes: [] }), ...over });
+  const none = () => [] as string[];
+  const quiet = async <T>(f: () => Promise<T>): Promise<T> => { const l = console.log, w = console.warn; console.log = () => {}; console.warn = () => {}; try { return await f(); } finally { console.log = l; console.warn = w; } };
+
+  it("reads the inferred targets from the walkLog's JSON payload only, and the produced shapes from the record", async () => {
+    const m = await pd();
+    expect(m.inferredTargets([PRODUCED("x"), INFER(["a_report", "b view"])])).toEqual(["a_report", "b view"]);
+    expect(m.inferredTargets(["no inference here"])).toBeNull();
+    expect([...m.producedShapes([PRODUCED("a_report")], ["c_list"])].sort()).toEqual(["a_report", "c_list"]);
+  });
+  it("MUST-PASS: a deficiency row whose inferred target has NO advertised producer and was not produced → one author request", async () => {
+    const r = await (await pd()).planProducerDemand([defRow(["r1"])], T0, H, none, deps());
+    expect(r.plans).toEqual([{ shape: "parcel_backlog_report", goal: "tabulate the overdue parcels per depot", goal_hash: "aaaa1111", source_gap: "goal-deficiency-aaaa1111-write_goal_no_artifact", via: "deficiency", dispatch_id: "r1" }]);
+  });
+  it("MUST-FAIL (live negative, e643b8f8-shaped): every inferred target WAS produced → loud skip, no request", async () => {
+    const rec = { walkLog: [INFER(["llm_completion_dispatch"]), PRODUCED("llm_completion_dispatch")], completionShapes: ["webSearchResult"] };
+    const r = await (await pd()).planProducerDemand([defRow(["r1"])], T0, H, none, deps({ readRun: async () => rec }));
+    expect(r.plans).toEqual([]);
+    expect(r.skips).toEqual([expect.objectContaining({ why: "target produced; not a missing-producer deficiency" })]);
+  });
+  it("MUST-FAIL: a non-identifier target (04698df0-shaped) is skipped loudly, and the next identifier target is judged", async () => {
+    const rec = { goal: "tabulate the overdue parcels per depot", walkLog: [INFER(["code_quality with substantive assessment content", "parcel_backlog_report"])], completionShapes: [] };
+    const r = await (await pd()).planProducerDemand([defRow(["r1"])], T0, H, none, deps({ readRun: async () => rec }));
+    expect(r.skips[0]).toMatchObject({ why: "target is not a shape identifier" });
+    expect(r.plans.map((p: Row) => p.shape)).toEqual(["parcel_backlog_report"]);
+  });
+  it("MUST-FAIL: an advertised target → reuse (no request); unreadable discovery → no request; a write/action target → never authored", async () => {
+    const m = await pd();
+    expect((await m.planProducerDemand([capRow("parcel_backlog_report")], T0, H, none, deps({ advertised: async () => true }))).skips[0]).toMatchObject({ why: expect.stringMatching(/already advertised: reuse/) });
+    expect((await m.planProducerDemand([capRow("parcel_backlog_report")], T0, H, none, deps({ advertised: async () => null }))).skips[0]).toMatchObject({ why: expect.stringMatching(/discovery unreadable/) });
+    expect((await m.planProducerDemand([capRow("parcel_write")], T0, H, none, deps())).skips[0]).toMatchObject({ why: expect.stringMatching(/write\/action/) });
+  });
+  it("intake: an open goal-linked capability row is a candidate; unlinked, closed, or in cooldown is not; the tally's missing_shapes come before the walkLog", async () => {
+    const m = await pd();
+    expect((await m.planProducerDemand([capRow("parcel_backlog_report")], T0, H, none, deps())).plans).toHaveLength(1);
+    expect((await m.planProducerDemand([capRow("parcel_backlog_report", { demand_goals: ["a text goal"] })], T0, H, none, deps())).plans).toHaveLength(0);
+    expect((await m.planProducerDemand([{ ...capRow("parcel_backlog_report"), status: "closed" }], T0, H, none, deps())).plans).toHaveLength(0);
+    const cooled = capRow("parcel_backlog_report", { producer_dispatch: { at: new Date(T0 - 60_000).toISOString() } });
+    expect((await m.planProducerDemand([cooled], T0, H, none, deps())).skips[0]).toMatchObject({ why: expect.stringMatching(/cooldown/) });
+    let read = 0;
+    const r = await m.planProducerDemand([defRow(["r1"])], T0, H, () => ["depot_load_view"], deps({ readRun: async () => { read++; return null; } }), (h: string) => (h === "aaaa1111" ? "tabulate the overdue parcels per depot" : ""));
+    // the goal text comes from the tally when the row carries none; without it, no request
+    expect((await m.planProducerDemand([defRow(["r1"])], T0, H, () => ["depot_load_view"], deps())).skips[0]).toMatchObject({ why: expect.stringMatching(/no goal text/) });
+    expect(r.plans.map((p: Row) => p.shape)).toEqual(["depot_load_view"]);
+    expect(read).toBe(0);
+  });
+  it("runProducerDispatch: live arms + links + sends at most the budget; dry_run writes and sends nothing; off does nothing", async () => {
+    const m = await pd();
+    const mk = () => { const writes: Row[] = [], sends: string[] = []; return { writes, sends, d: { ...deps(), write: async (gap: Row, demand: Row) => { writes.push({ gap, demand }); return { ok: true }; }, dispatch: async (id: string) => { sends.push(id); return { ok: true }; } } }; };
+    const rows = [capRow("parcel_backlog_report"), capRow("depot_load_view", { demand_goals: [{ source: "goal_reach", goal_hash: "bbbb2222" }] })];
+    const pol = { producer_dispatch: "live", max_producer_dispatches: 1, producer_dispatch_cooldown_ms: 6 * H };
+    const live = mk();
+    const rep = await quiet(() => m.runProducerDispatch(rows, T0, pol, none, live.d));
+    expect(live.sends).toEqual(["gap-parcel-backlog-report"]);
+    expect(rep.sent).toEqual([{ gap_id: "gap-parcel-backlog-report", shape: "parcel_backlog_report", source_gap: "gap-parcel-backlog-report", tag: "producer_author:aaaa1111:parcel_backlog_report" }]);
+    const w = live.writes[0]!;
+    expect(w.gap).toMatchObject({ id: "gap-parcel-backlog-report", status: "open", classification_metadata: { kind: "capability_gap", missing_shape: "parcel_backlog_report", evidence_resolve: { shape: "parcel_backlog_report", mode: "producer_contract" }, edit_site: "repos/development-vessel/src/resolvers/parcel-backlog-report.ts", producer_dispatch: { mode: "live", tag: "producer_author:aaaa1111:parcel_backlog_report" } } });
+    expect(w.demand).toMatchObject({ source: "goal_reach", goal_hash: "aaaa1111" });
+    const dry = mk();
+    await quiet(() => m.runProducerDispatch(rows, T0, { ...pol, producer_dispatch: "dry_run" }, none, dry.d));
+    expect([dry.writes.length, dry.sends.length]).toEqual([0, 0]);
+    const off = mk();
+    expect((await quiet(() => m.runProducerDispatch(rows, T0, { ...pol, producer_dispatch: "off" }, none, off.d))).planned).toEqual([]);
+    const refused = mk(); refused.d.write = async () => ({ ok: false, why: "status_precondition_failed" });
+    const rr = await quiet(() => m.runProducerDispatch(rows, T0, pol, none, refused.d));
+    expect([rr.sent.length, rr.refused[0]?.why, refused.sends.length]).toEqual([0, "write refused: status_precondition_failed", 0]);
+  });
+  it("the armed edit site is the file the author route creates (its shapeToResolverName, kebab-cased)", async () => {
+    const m = await pd();
+    expect(m.plannedResolverFile("llmTextCompletion")).toBe("repos/development-vessel/src/resolvers/llm-text-completion.ts");
+    expect(m.plannedResolverFile("parcel_backlog_report", "ledger-vessel")).toBe("repos/ledger-vessel/src/resolvers/parcel-backlog-report.ts");
+    expect(m.capabilityGapId("llmTextCompletion")).toBe("gap-llmtextcompletion");
+  });
+  it("the policy fields are shaped (defaults live / 1 / 6 h; invalid → ok false) and the tick runs the dispatcher only with file_gaps 1", () => {
+    expect(gd.parseDeficiencyPolicy(null).policy).toMatchObject({ producer_dispatch: "live", max_producer_dispatches: 1, producer_dispatch_cooldown_ms: 6 * 3_600_000 });
+    for (const bad of [{ producer_dispatch: "yes" }, { max_producer_dispatches: 21 }, { producer_dispatch_cooldown_ms: 10 }]) expect(gd.parseDeficiencyPolicy(bad).ok).toBe(false);
+    const src = readFileSync(join(import.meta.dir, "../../src/resolvers/goal-reach-tick.ts"), "utf8");
+    expect(src).toContain('if (pol.policy.file_gaps === 1 && pol.policy.producer_dispatch !== "off") {');
+    expect(src).toContain('type: "gap_to_feature", gap_id: gapId, triggered_by: "goal-reach-producer-dispatch"');
   });
 });

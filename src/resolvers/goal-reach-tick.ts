@@ -876,6 +876,8 @@ export interface GoalReachIO {
 /** What R2 did this tick (goal-deficiency.ts decides; the I/O writes). */
 export interface DeficiencyReport {
   ok: boolean;
+  /** Package A's report for this tick (absent when it did not run). */
+  producer_dispatch?: import("./producer-dispatch.js").ProducerDispatchReport;
   why?: string;
   tallied: number;
   ignored: number;
@@ -1696,6 +1698,41 @@ export function defaultGoalReachIO(policy: GoalReachPolicy): GoalReachIO {
               : `[goal-reach] R2 localization ${g["id"]}: unknown (${loc.kind}) — ${loc.why}${ok ? "" : " — write refused"}`);
           } catch (e) { console.warn(`[goal-reach] R2 localization ${g["id"]} failed: ${errText(e)}`); }
         }
+      }
+      // PACKAGE A: goal-linked missing-producer demand → the capability author route (src/resolvers/producer-dispatch.ts).
+      // Only with file_gaps 1 (the same consent as filing); shaped mode, budget and cooldown in goalDeficiencyPolicy.
+      if (pol.policy.file_gaps === 1 && pol.policy.producer_dispatch !== "off") {
+        try {
+          const pd = await import("./producer-dispatch.js");
+          const all = await readAllGaps(resolveSubstrateGap);
+          const { isWritePointerType } = await import("../lib/caller-credential.js");
+          const { lookupShape } = await import("../config.js");
+          const tallies = up.tallies;
+          report.producer_dispatch = await pd.runProducerDispatch(all, now, pol.policy, (h) => [...new Set((tallies[h]?.entries ?? []).flatMap((e) => ((e.class === gd.MISSING_PRODUCER_CLASS || e.class === "phantom") && Array.isArray(e.missing_shapes) ? e.missing_shapes : [])))], {
+            isWrite: isWritePointerType,
+            advertised: async (shape) => { const r = await lookupShape(shape); return r.ok ? (r.producers as unknown[]).length > 0 : null; },
+            readRun: async (id) => {
+              const base = await ownGoalHostBase();
+              if (!base) return null;
+              const r = await fetch(`${base}/executions/${encodeURIComponent(id)}`, { signal: AbortSignal.timeout(10_000) });
+              return r.ok ? ((await r.json()) as Record<string, unknown>) : null;
+            },
+            write: async (gap, demand) => {
+              const res = await resolveSubstrateGapWrite({ type: "substrateGap_write", gap, demand_goals_append: [demand] } as never);
+              const b = (res.body ?? {}) as Record<string, unknown>;
+              return res.shape === "substrateGapWriteResult" && !b["skip_reason"] ? { ok: true } : { ok: false, why: String(b["skip_reason"] ?? b["detail"] ?? res.shape).slice(0, 200) };
+            },
+            dispatch: async (gapId, tag) => {
+              const { selfAuthHeaders } = await import("../lib/self-auth.js");
+              const url = process.env["SELF_RESOLVE_ENDPOINT"] ?? `http://localhost:${process.env["PORT"] ?? "8090"}/v2/impulses/resolve`;
+              // fire-and-forget: the author compose runs for minutes; its outcome is graded on the gap row by the route itself
+              void fetch(url, { method: "POST", headers: { "Content-Type": "application/json", ...selfAuthHeaders(url, url) }, body: JSON.stringify({ impulse: { pointer: { type: "gap_to_feature", gap_id: gapId, triggered_by: "goal-reach-producer-dispatch", flow: "capability-author", attribution: tag } } }), signal: AbortSignal.timeout(900_000) })
+                .then((r) => console.log(`[producer-dispatch] author route answered HTTP ${r.status} for ${gapId}`))
+                .catch((e) => console.warn(`[producer-dispatch] author route call for ${gapId} failed: ${errText(e)}`));
+              return { ok: true };
+            },
+          }, (h) => String(tallies[h]?.goal ?? ""));
+        } catch (e) { console.warn(`[producer-dispatch] failed: ${errText(e)}`); }
       }
       return report;
     },

@@ -280,6 +280,57 @@ export function checkSupplyGoal(vessel: string, testFile: string, summary: strin
     "No network, no services, no timers. Do not change src/ or any other file.";
 }
 
+/** The source of the call `test("<title>", …)` / `it(…)` from its opening parenthesis to the matching close (strings skipped). */
+function testBody(src: string, title: string): string | null {
+  const esc = title.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const m = new RegExp(`\\b(?:test|it)(?:\\.only|\\.failing)?\\s*\\(\\s*(["'\`])${esc}\\1`).exec(src);
+  if (!m) return null;
+  let i = src.indexOf("(", m.index), depth = 0, q: string | null = null;
+  for (let j = i; j < src.length; j++) {
+    const c = src[j]!;
+    if (q) { if (c === "\\") j++; else if (c === q) q = null; continue; }
+    if (c === "'" || c === '"' || c === "`") q = c;
+    else if (c === "(") depth++;
+    else if (c === ")" && --depth === 0) return src.slice(i, j + 1);
+  }
+  return null;
+}
+/** One expect(...) statement's text: the argument and the matcher chain, to the matcher's call. */
+const EXPECTATIONS = /\bexpect\s*\(([\s\S]*?)\)\s*((?:\.\s*(?:not|resolves|rejects)\s*)*\.\s*[A-Za-z]+\s*\(([^)]*)\))/g;
+/**
+ * AN EXISTENCE ASSERTION IS NEVER A FALSIFIER (C-invented-1 at the arm step). Each expect() in the named tests is
+ * existence-only when it asserts only that a name exists, is defined, or has a type: `typeof x` against a type name,
+ * toBeDefined / not.toBeUndefined / toBeTruthy on a bare or module member, `"x" in mod`, toHaveProperty, Object.keys
+ * containment, toBeInstanceOf(Function). A check whose every assertion is one of those is refused; one behaviour assertion
+ * (a call's result, a throw, an output) keeps it armable, and the red-for-the-right-reason judge decides as before.
+ */
+export function existenceOnlyCheck(src: string, titles: readonly string[]): { existence_only: boolean; assertions: number; existence: number } {
+  let assertions = 0, existence = 0;
+  const memberOrName = /^\s*[A-Za-z_$][\w$]*(?:\s*(?:\.\s*[A-Za-z_$][\w$]*|\[\s*(?:"[^"]*"|'[^']*'|`[^`]*`)\s*\]))*\s*(?:as\s+[^)]*)?$/;
+  // `(mod as any).x` / `(mod as Record<…>)["x"]` read as `mod.x` / `mod["x"]`: a cast does not make an access a behaviour.
+  const unwrap = (a: string) => a.trim().replace(/^\((.*)\)$/s, "$1").replace(/\s+as\s+[\w<>\[\], |"]+$/, "").replace(/\(\s*([A-Za-z_$][\w$]*)\s+as\s+[^()]*(?:\([^()]*\)[^()]*)*\)/g, "$1").trim();
+  for (const t of titles) {
+    const body = testBody(src, t);
+    if (!body) continue;
+    for (const m of body.matchAll(EXPECTATIONS)) {
+      assertions++;
+      const arg = unwrap(m[1] ?? ""), chain = (m[2] ?? "").replace(/\s+/g, ""), val = (m[3] ?? "").trim();
+      // `typeof <name or member>` asks only what a name is; `typeof f(x)` calls the code and is a behaviour.
+      const typeofArg = /^typeof\s/.test(arg) && memberOrName.test(arg.replace(/^typeof\s+/, ""));
+      const typeName = /^["'`](function|object|string|number|boolean|undefined|symbol|bigint)["'`]$/.test(val);
+      const exists =
+        (typeofArg && /\.(not\.)?(toBe|toEqual|toStrictEqual)\(/.test(chain) && typeName) ||
+        (memberOrName.test(arg) && /\.(toBeDefined|toBeTruthy|not\.toBeUndefined|not\.toBeNull|not\.toBeFalsy)\(/.test(chain)) ||
+        (/^["'`][\w$]+["'`]\s+in\s+/.test(arg) && /\.(toBe|toEqual)\(/.test(chain) && /^true$/.test(val)) ||
+        /\.toHaveProperty\(/.test(chain) ||
+        (/^Object\.(keys|getOwnPropertyNames)\(/.test(arg) && /\.(toContain|toContainEqual)\(/.test(chain)) ||
+        (/\.toBeInstanceOf\(/.test(chain) && /^Function$/.test(val));
+      if (exists) existence++;
+    }
+  }
+  return { existence_only: assertions > 0 && existence === assertions, assertions, existence };
+}
+
 /** String-literal test titles declared in a test file (template titles with placeholders are not runnable names). */
 export function declaredTestTitles(src: string): string[] {
   const titles: string[] = [];
@@ -514,6 +565,16 @@ export async function resolveGapCheckSupplyTick(pointer: GapCheckSupplyTickPoint
       refused += 1;
       notArmed.push({ id, reason: why });
       if (!pointer.dry_run) await writeMeta(row, { check_supply: { ...ledger, state: "arm_refused", reason: why } });
+      continue;
+    }
+    // A check that only asserts a name exists (or is defined, or has a type) is closed by adding the name: never armed.
+    const ex = existenceOnlyCheck(src, titles);
+    if (ex.existence_only) {
+      const reason = `existence_only: all ${ex.assertions} assertion(s) of the named test(s) only check that a name exists or has a type; a check must assert behaviour`;
+      refused += 1;
+      notArmed.push({ id, reason });
+      console.warn(`[gap-check-supply] ${id}: ${reason} — not armed`);
+      if (!pointer.dry_run) await writeMeta(row, { check_supply: { ...ledger, state: "existence_only", reason } });
       continue;
     }
     const evidence_resolve = { shape: "test_suite", input: { vessel: `repos/${ledger.vessel}`, test_file: ledger.test_file, only_tests: titles }, zero_field: "requested_not_passing" };

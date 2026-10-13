@@ -641,3 +641,59 @@ describe("system-authored gap checks: (g) anchors come from the evidence and res
     expect(readFileSync(RESOLVER_FILE, "utf8")).not.toMatch(/\["name"\]|for a symbol that must exist/);
   });
 });
+
+// (h) ARM-GUARD: AN EXISTENCE-ONLY CHECK IS NEVER ARMED. The arm step refuses a landed check whose every assertion in its named
+// tests only asserts that a name exists, is defined, or has a type (typeof … "function", toBeDefined, `"x" in mod`,
+// toHaveProperty, Object.keys containment, toBeInstanceOf(Function)): adding the name closes it. It covers every check the old
+// goal builder wrote. One behaviour assertion keeps a check armable; the red-for-the-right-reason judge decides as before.
+describe("system-authored gap checks: (h) an existence-only check is never armed", () => {
+  const ex = (src: string, titles: string[]) => (supply as unknown as { existenceOnlyCheck: (s: string, t: string[]) => { existence_only: boolean; assertions: number; existence: number } }).existenceOnlyCheck(src, titles);
+  const IMP = `import { expect, test } from "bun:test";\nimport * as mod from "../../src/shell-containment.js";\n`;
+  const forms: Array<[string, string]> = [
+    ["typeof … toBe(\"function\")", `expect(typeof (mod as Record<string, unknown>)["name"]).toBe("function");`],
+    ["typeof member .not.toBe(\"undefined\")", `expect(typeof mod.containShellStrict).not.toBe("undefined");`],
+    ["toBeDefined on a module member", `expect((mod as any).getTypesafeJevDecision).toBeDefined();`],
+    ["not.toBeUndefined", `expect(mod["checkThing"]).not.toBeUndefined();`],
+    ["\"x\" in mod", `expect("containShellStrict" in mod).toBe(true);`],
+    ["toHaveProperty", `expect(mod).toHaveProperty("containShellStrict");`],
+    ["Object.keys containment", `expect(Object.keys(mod)).toContain("containShellStrict");`],
+    ["toBeInstanceOf(Function)", `expect(mod.containShell).toBeInstanceOf(Function);`],
+    ["two existence assertions together", `expect(typeof mod.a).toBe("function");\n  expect(mod.b).toBeDefined();`],
+  ];
+  for (const [label, body] of forms) it(`MUST-FAIL: ${label} → existence-only`, () => {
+    expect(typeof (supply as unknown as Row)["existenceOnlyCheck"]).toBe("function");
+    const r = ex(`${IMP}test("t1", () => {\n  ${body}\n});\n`, ["t1"]);
+    expect(r.existence_only).toBe(true);
+  });
+  const behaviours: Array<[string, string]> = [
+    ["a call's result", `expect(mod.containShell("GIT_DIR=.git git config core.hooksPath /tmp/h")).toBe(false);`],
+    ["a throw", `expect(() => mod.containShell("")).toThrow("empty command");`],
+    ["MIXED: existence + a behaviour assertion", `expect(typeof mod.containShell).toBe("function");\n  expect(mod.containShell("rm -rf /")).toBe(false);`],
+    ["typeof of a CALL's result alone (it calls the code: behaviour, not a name)", `expect(typeof mod.containShell("ls")).toBe("boolean");`],
+  ];
+  for (const [label, body] of behaviours) it(`CONTROL: ${label} → armable`, () => {
+    expect(ex(`${IMP}test("t1", () => {\n  ${body}\n});\n`, ["t1"]).existence_only).toBe(false);
+  });
+  it("only the NAMED tests count: an existence-only named test is refused even if another test in the file asserts behaviour", () => {
+    const src = `${IMP}test("named", () => { expect(mod.thing).toBeDefined(); });\ntest("other", () => { expect(mod.containShell("ls")).toBe(true); });\n`;
+    expect(ex(src, ["named"]).existence_only).toBe(true);
+    expect(ex(src, ["named", "other"]).existence_only).toBe(false);
+  });
+  it("MUST-FAIL (tick): a landed existence-only check is NOT armed; state existence_only, loud reason, falsifier unchanged", async () => {
+    expect(supply).not.toBeNull();
+    const { id } = await landTest("sgc-exonly", (t) => `${IMP}test("${t}", () => { expect(typeof (mod as Record<string, unknown>)["name"]).toBe("function"); });\n`, Date.now() + 3000 * 3600_000);
+    await tick({ now_ms: Date.now() + 3100 * 3600_000 });
+    const m = metaOf(await storeRow(id));
+    expect(ledgerOf(m)["state"]).toBe("existence_only");
+    expect(String(ledgerOf(m)["reason"])).toMatch(/^existence_only: all 1 assertion\(s\)/);
+    expect(m["falsifier"] ?? "none").toBe("none");
+    expect(m["evidence_resolve"] ?? null).toBeNull();
+    expect(judged.filter((x) => x === id)).toEqual([]); // refused before the birth verdict runs
+  });
+  it("CONTROL (tick): a landed behaviour check arms as before", async () => {
+    expect(supply).not.toBeNull();
+    const { id } = await landTest("sgc-behaviour", IMPORTING_RED, Date.now() + 3200 * 3600_000);
+    await tick({ now_ms: Date.now() + 3300 * 3600_000 });
+    expect(metaOf(await storeRow(id))["falsifier"]).toBe("class2");
+  });
+});

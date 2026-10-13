@@ -697,3 +697,108 @@ describe("system-authored gap checks: (h) an existence-only check is never armed
     expect(metaOf(await storeRow(id))["falsifier"]).toBe("class2");
   });
 });
+
+// PACKAGE B (user ruling 10-13, "Yes, additive mode"): ONE additive read-only judge mode, evidence_resolve
+// {shape, mode:"producer_contract"}. It is the falsifier a missing-producer gap is armed with, from the shape's contract:
+// present while no advertised producer returns a satisfying body (none advertised, empty, placeholder, error, wrong
+// shape, a declared key missing); absent only on a satisfying body; unknown on unreadable discovery or when no producer
+// answered. A write or action shape is never resolved. A check without the mode is unchanged (G6).
+describe("system-authored gap checks: (i) producer_contract — a missing producer's falsifier from its contract", () => {
+  const pc = async () => (await import("../../src/judge/gap-check-judge.js")) as Record<string, any>;
+  const P1 = "http://producer-one.fixture/v2/impulses/resolve", P2 = "http://producer-two.fixture/v2/impulses/resolve";
+  const answer = (byUrl: Record<string, unknown | Error>) => {
+    const calls: string[] = [];
+    const f = (async (url: string) => {
+      calls.push(String(url));
+      const a = byUrl[String(url)];
+      if (a instanceof Error) throw a;
+      return Response.json(a ?? { success: false, error: "Unknown pointer type" }, { status: a === undefined ? 500 : 200 });
+    }) as unknown as typeof fetch;
+    return { f, calls };
+  };
+  const verdict = async (shape: string, er: Record<string, unknown>, urls: string[] | null, byUrl: Record<string, unknown | Error>) => {
+    const { f, calls } = answer(byUrl);
+    let asked = 0;
+    const v = await (await pc()).producerContractVerdict(shape, { shape, mode: "producer_contract", ...er }, { gapId: "g", fetchImpl: f, producers: async () => { asked++; return urls === null ? { ok: false, why: "discovery down" } : { ok: true, urls }; } });
+    return { v, calls, asked };
+  };
+  const quiet = async <T>(fn: () => Promise<T>): Promise<T> => { const l = console.log; console.log = () => {}; try { return await fn(); } finally { console.log = l; } };
+
+  it("MUST-FAIL: no advertised producer → present", async () => {
+    expect((await quiet(() => verdict("ledger_digest", {}, [], {}))).v).toBe("present");
+  });
+  const hollow: Array<[string, unknown]> = [
+    ["an empty body", { shape: "ledger_digest", body: {} }],
+    ["an empty list", { shape: "ledger_digest", body: { rows: [] } }],
+    ["a placeholder string", { shape: "ledger_digest", body: { summary: "TODO" } }],
+    ["booleans only", { shape: "ledger_digest", body: { ok: true } }],
+    ["an error answer", { success: false, error: "not implemented" }],
+    ["an error answer with a substantive message", { success: false, error: "ledger store refused the connection on port 5432" }],
+    ["an error field on an otherwise full body", { shape: "ledger_digest", error: "partial read", body: { total: 3 } }],
+    ["the wrong shape", { shape: "other_shape", body: { total: 3 } }],
+  ];
+  for (const [label, body] of hollow) it(`MUST-FAIL: a stub/hollow producer (${label}) never satisfies it → present`, async () => {
+    expect((await quiet(() => verdict("ledger_digest", {}, [P1], { [P1]: body }))).v).toBe("present");
+  });
+  it("MUST-FAIL: a declared key missing (or hollow) never satisfies it, even beside substantive keys → present", async () => {
+    expect((await quiet(() => verdict("ledger_digest", { required_keys: ["total"] }, [P1], { [P1]: { shape: "ledger_digest", body: { rows: [{ id: 1 }] } } }))).v).toBe("present");
+    expect((await quiet(() => verdict("ledger_digest", { required_keys: ["total"] }, [P1], { [P1]: { shape: "ledger_digest", body: { total: "n/a", rows: [1] } } }))).v).toBe("present");
+  });
+  it("a substantive body of the shape, with every declared key, → absent (any one advertised producer suffices)", async () => {
+    const good = { shape: "ledger_digest", body: { total: 3, rows: [{ id: 1, amount: 12.5 }] } };
+    expect((await quiet(() => verdict("ledger_digest", { required_keys: ["total"] }, [P1], { [P1]: good }))).v).toBe("absent");
+    expect((await quiet(() => verdict("ledger_digest", {}, [P1, P2], { [P1]: { shape: "ledger_digest", body: {} }, [P2]: good }))).v).toBe("absent");
+  });
+  it("unknown when discovery is unreadable, or when no producer answered (transport/timeouts); one answered hollow → present", async () => {
+    expect((await quiet(() => verdict("ledger_digest", {}, null, {}))).v).toBe("unknown");
+    expect((await quiet(() => verdict("ledger_digest", {}, [P1, P2], { [P1]: new Error("ECONNREFUSED"), [P2]: new Error("TimeoutError") }))).v).toBe("unknown");
+    expect((await quiet(() => verdict("ledger_digest", {}, [P1, P2], { [P1]: new Error("ECONNREFUSED"), [P2]: { shape: "ledger_digest", body: {} } }))).v).toBe("present");
+  });
+  it("MUST-FAIL: a write or action shape is NEVER resolved — no discovery read, no call, unknown", async () => {
+    for (const shape of ["ledger_write", "fs_edit", "git_push"]) {
+      const r = await quiet(() => verdict(shape, {}, [P1], { [P1]: { shape, body: { total: 1 } } }));
+      expect(r).toEqual({ v: "unknown", calls: [], asked: 0 });
+    }
+  });
+  it("each producer is asked with the impulse envelope for the shape and the check's input", async () => {
+    const r = await quiet(() => verdict("ledger_digest", { input: { window: "7d" } }, [P1], { [P1]: { shape: "ledger_digest", body: { total: 1 } } }));
+    expect(r.calls).toEqual([P1]);
+  });
+  it("G6: through evaluateGapCheck, the mode reads producers from DISCOVERY; a check WITHOUT the mode still posts to the vessel's own resolve, unchanged", async () => {
+    const j = await pc();
+    const seen: string[] = [];
+    const f = (async (url: string, init?: RequestInit) => {
+      seen.push(String(url));
+      const body = JSON.parse(String(init?.body ?? "{}"));
+      expect(body).toEqual({ impulse: { pointer: { type: "ledger_digest" } } });
+      return Response.json({ shape: "ledger_digest", body: { total: 4, n: 2 } });
+    }) as unknown as typeof fetch;
+    __setDiscoveryForTests({ lookup: async (shape: string) => ({ ok: true, shape, cached: false, producers: [{ id: "ledger-fixture", resolveEndpoint: P1, origin: "local" }] }), describe: () => "fixture", failureBackoffMs: 2_000 } as never);
+    // This node holds its own store and resolves on itself: another file's env (a forwarded store, a resolve endpoint)
+    // must not decide this pin, since a forwarded store makes the no-mode branch abstain by design.
+    const savedEnv = { GAP_STORE_ENDPOINT: process.env["GAP_STORE_ENDPOINT"], SELF_RESOLVE_ENDPOINT: process.env["SELF_RESOLVE_ENDPOINT"] };
+    delete process.env["GAP_STORE_ENDPOINT"]; delete process.env["SELF_RESOLVE_ENDPOINT"];
+    try {
+      const l = console.log; console.log = () => {};
+      try {
+        const withMode = await j.evaluateGapCheck({ id: "g-mode", classification_metadata: { falsifier: "class2", evidence_resolve: { shape: "ledger_digest", mode: "producer_contract", required_keys: ["total"] } } }, { fetchImpl: f });
+        expect(withMode).toBe("absent");
+        expect(seen).toEqual([P1]);
+        seen.length = 0;
+        const noMode = await j.evaluateGapCheck({ id: "g-plain", classification_metadata: { falsifier: "class2", evidence_resolve: { shape: "ledger_digest", zero_field: "n" } } }, { fetchImpl: f });
+        expect(noMode).toBe("present"); // zero_field n=2 > 0: the defect stands, exactly as before
+        expect(seen.length).toBe(1);
+        expect(seen[0]).not.toBe(P1);
+        expect(seen[0]).toMatch(/\/v2\/impulses\/resolve$/);
+      } finally { console.log = l; }
+    } finally {
+      __resetDiscoveryForTests();
+      for (const [k, v] of Object.entries(savedEnv)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+    }
+  });
+  it("substantive(): strings, numbers and containers that hold one say something; placeholders, empties and booleans do not", async () => {
+    const j = await pc();
+    for (const v of ["x y", 0, 3.5, ["a"], { k: [{ n: 1 }] }]) expect(j.substantive(v)).toBe(true);
+    for (const v of ["", "  ", "TODO", "placeholder", "n/a", "...", true, null, undefined, [], {}, [""], { a: "" }, NaN]) expect(j.substantive(v)).toBe(false);
+  });
+});

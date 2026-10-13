@@ -409,6 +409,11 @@ async function verifyGapConditionAsync(gap: Record<string, unknown>, opts: GapCh
       resolveShape = verifyShapeRaw;
     }
     if (!resolveShape) return 'unknown';
+    // PRODUCER CONTRACT (user ruling 2026-10-13, package B; ONE additive read-only mode). Only when the check says so:
+    // every other evidence_resolve keeps the branches below byte for byte.
+    if (evidenceResolveRaw !== null && typeof evidenceResolveRaw === 'object' && (evidenceResolveRaw as Record<string, unknown>)['mode'] === 'producer_contract') {
+      return producerContractVerdict(resolveShape, evidenceResolveRaw as Record<string, unknown>, { gapId: String(gap['id'] ?? ''), fetchImpl: opts.fetchImpl });
+    }
     // A CHECK THAT CAN ONLY CHANGE BY A RE-RUN IS NOT READ BEFORE ONE (2026-10-13, settlement of reach-judged gaps).
     // For a since-aware shape (its answer is a tally of runs), a pending landing bounds the read: the instrument measures
     // only once a run newer than the landing exists, and answers measured:false (→ unknown, landing stays pending) until
@@ -692,4 +697,80 @@ export function sweepGitOut(cloneDir: string, args: string[]): string | null {
     if (p.exitCode === 0) out = new TextDecoder().decode(p.stdout).trim();
   } catch { /* spawn failed: no output */ }
   return out;
+}
+
+// ── PRODUCER CONTRACT (package B, user ruling 2026-10-13: "Yes, additive mode") ─────────────────────────────────────
+// evidence_resolve {shape, mode:"producer_contract", required_keys?, timeout_ms?} asks one question: does any producer
+// this substrate advertises for `shape` return a body that SATISFIES the shape's contract? It is the falsifier of a
+// missing-producer gap, armed from the shape's own contract (never the gap's prose):
+//   - present  while no advertised producer returns a satisfying body: none advertised, or every answer empty, a
+//              placeholder, an error, the wrong shape, or missing a declared key;
+//   - absent   only on a satisfying body: the declared shape, every required key with a substantive value, and at least
+//              one substantive value overall (a stub or hollow resolver never satisfies it);
+//   - unknown  when discovery is unreadable, or every producer's call failed in transport or timed out.
+// It never resolves a write or action shape (the fleet's own write classification, isWritePointerType): unknown, and
+// nothing is called. Calls go to each producer's own resolve endpoint with a bounded timeout (the check's timeout_ms,
+// default 8 s, clamped to 1..30 s). The residual: a satisfying body is not proof the goal is met; the goal's re-run is.
+const PLACEHOLDER = /^\s*(todo|tbd|placeholder|stub|not implemented|unimplemented|n\/a|none|null|undefined|example|lorem ipsum.*|\.\.\.|-)\s*$/i;
+/** A value that says something: a non-placeholder non-empty string, a finite number, or a container holding one. Booleans alone never do. */
+export function substantive(v: unknown, depth = 0): boolean {
+  if (depth > 6) return false;
+  if (typeof v === 'string') return v.trim().length > 0 && !PLACEHOLDER.test(v);
+  if (typeof v === 'number') return Number.isFinite(v);
+  if (Array.isArray(v)) return v.some((x) => substantive(x, depth + 1));
+  if (v && typeof v === 'object') return Object.values(v as Record<string, unknown>).some((x) => substantive(x, depth + 1));
+  return false;
+}
+/** Whether a producer's response satisfies `shape`'s contract (see above). */
+export function satisfiesShapeContract(shape: string, resp: unknown, requiredKeys: readonly string[]): { ok: boolean; why: string } {
+  if (!resp || typeof resp !== 'object') return { ok: false, why: 'no body' };
+  const r = resp as Record<string, unknown>;
+  if (r['success'] === false || typeof r['error'] === 'string') return { ok: false, why: `error: ${String(r['error'] ?? 'success:false').slice(0, 120)}` };
+  if (typeof r['shape'] === 'string' && r['shape'] !== shape) return { ok: false, why: `answered ${String(r['shape'])}, not ${shape}` };
+  const inner = r['body'] && typeof r['body'] === 'object' ? (r['body'] as Record<string, unknown>) : r;
+  const missing = requiredKeys.filter((k) => !substantive(inner[k]));
+  if (missing.length > 0) return { ok: false, why: `declared key(s) missing or hollow: ${missing.join(', ')}` };
+  const keys = Object.keys(inner).filter((k) => k !== 'shape' && k !== 'success');
+  if (!keys.some((k) => substantive(inner[k]))) return { ok: false, why: 'empty or placeholder body' };
+  return { ok: true, why: 'a substantive body of the shape' };
+}
+export type ProducerContractDeps = {
+  gapId: string;
+  fetchImpl?: typeof fetch;
+  /** The advertised producers' resolve URLs on this substrate (default: discovery via discoverOwnResolveUrls). */
+  producers?: (shape: string) => Promise<{ ok: true; urls: string[] } | { ok: false; why: string }>;
+};
+export async function producerContractVerdict(shape: string, er: Record<string, unknown>, deps: ProducerContractDeps): Promise<'present' | 'absent' | 'unknown'> {
+  const { isWritePointerType } = await import('../lib/caller-credential.js');
+  if (isWritePointerType(shape)) {
+    console.log(`[gap-verify] producer_contract check for ${deps.gapId} names a write/action shape (${shape}) — never resolved; unknown`);
+    return 'unknown';
+  }
+  const required = Array.isArray(er['required_keys']) ? (er['required_keys'] as unknown[]).filter((k): k is string => typeof k === 'string' && k.length > 0) : [];
+  const t = typeof er['timeout_ms'] === 'number' && Number.isFinite(er['timeout_ms']) ? (er['timeout_ms'] as number) : 8_000;
+  const timeoutMs = Math.max(1_000, Math.min(30_000, t));
+  const input = er['input'] && typeof er['input'] === 'object' ? (er['input'] as Record<string, unknown>) : {};
+  let found: { ok: true; urls: string[] } | { ok: false; why: string };
+  try {
+    found = deps.producers ? await deps.producers(shape) : await (async () => { const { discoverOwnResolveUrls } = await import('./gap-policy.js'); const d = await discoverOwnResolveUrls(shape); return d.ok ? { ok: true as const, urls: d.urls } : { ok: false as const, why: d.why }; })();
+  } catch (err) { found = { ok: false, why: String(err).slice(0, 160) }; }
+  if (!found.ok) { console.log(`[gap-verify] producer_contract check for ${deps.gapId} (${shape}): discovery unreadable (${found.why}) — unknown`); return 'unknown'; }
+  if (found.urls.length === 0) { console.log(`[gap-verify] producer_contract check for ${deps.gapId} (${shape}): no advertised producer — present`); return 'present'; }
+  let answered = 0;
+  const whys: string[] = [];
+  for (const url of found.urls) {
+    let body: unknown;
+    try {
+      const resp = await (deps.fetchImpl ?? fetch)(url, { method: 'POST', headers: { 'Content-Type': 'application/json', ...selfAuthHeaders(url, url) }, body: JSON.stringify({ impulse: { pointer: { type: shape, ...input } } }), signal: AbortSignal.timeout(timeoutMs) });
+      try { body = await resp.json(); } catch { body = null; }
+      answered++;
+      if (!resp.ok && (!body || typeof body !== 'object')) { whys.push(`${url}: HTTP ${resp.status}`); continue; }
+    } catch (err) { whys.push(`${url}: transport ${String((err as Error)?.name ?? err)}`); continue; }
+    const v = satisfiesShapeContract(shape, body, required);
+    if (v.ok) { console.log(`[gap-verify] producer_contract check for ${deps.gapId} (${shape}): ${url} satisfies the contract — absent`); return 'absent'; }
+    whys.push(`${url}: ${v.why}`);
+  }
+  if (answered === 0) { console.log(`[gap-verify] producer_contract check for ${deps.gapId} (${shape}): no producer answered (${whys.join('; ').slice(0, 300)}) — unknown`); return 'unknown'; }
+  console.log(`[gap-verify] producer_contract check for ${deps.gapId} (${shape}): no producer satisfies the contract (${whys.join('; ').slice(0, 300)}) — present`);
+  return 'present';
 }

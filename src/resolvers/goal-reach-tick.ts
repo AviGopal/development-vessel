@@ -1265,14 +1265,19 @@ function runNeedsAttributionSync(prior: import("./goal-deficiency.js").RunAttrib
   return !(now - (prior.at ?? 0) < retryMs);
 }
 
-/** The serving vessel of a resolver/shape: exactly one LOCAL (non-federated) producer that is a repo here, else why not. */
-async function vesselOfResolver(resolver: string): Promise<{ vessel: string } | { why: string }> {
+/**
+ * The serving vessel of a resolver/shape: exactly one LOCAL (non-federated) producer that is a repo here, else why not.
+ * A producer is named by `id`: that is the field the ias discovery adapter maps every discovery row's id/vesselId into
+ * (adapters/discovery-adapter.js lookupUncached). Reading `vesselId` here named NO producer, so every step read
+ * "no local vessel serves" live (node1 2026-10-13 11:58Z) while a hand-made fixture with `vesselId` passed.
+ */
+export async function vesselOfResolver(resolver: string, deps: { repoExists?: (rel: string) => boolean } = {}): Promise<{ vessel: string } | { why: string }> {
   const { lookupShape } = await import("../config.js");
   const r = await lookupShape(resolver);
   if (!r.ok) return { why: `discovery unreadable for ${resolver} (${"reason" in r ? r.reason : "?"})` };
-  const local = (r.producers as Array<{ vesselId?: string }>).map((p) => String(p.vesselId ?? "")).filter((v) => v && !v.includes("@"));
+  const local = (r.producers as Array<{ id?: string; vesselId?: string }>).map((p) => String(p.id || p.vesselId || "")).filter((v) => v && !v.includes("@"));
   if (local.length !== 1) return { why: local.length ? `${resolver} is served by ${local.length} local vessels: ${local.join(", ")}` : `no local vessel serves ${resolver}` };
-  const { repoPathExists } = await import("../judge/gap-admission.js");
+  const repoPathExists = deps.repoExists ?? (await import("../judge/gap-admission.js")).repoPathExists;
   const name = local[0]!.replace(/-local$/, "");
   return repoPathExists(`repos/${name}`) ? { vessel: name } : { why: `${local[0]} maps to no repo here (${name})` };
 }

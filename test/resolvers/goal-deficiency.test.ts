@@ -1029,3 +1029,42 @@ describe("#1d: legacy reasonless entries are read, then counted", () => {
     expect(src).toContain("for (const h of failedReadHashes) if (!up.touched.includes(h)) up.touched.push(h);");
   });
 });
+
+// #1e (exception (a), a #1a/#1b regression found live): vesselOfResolver read `vesselId` from discovery producers, but the
+// ias discovery adapter maps every row's id/vesselId into `id`. Every step read "no local vessel serves" on node1
+// (11:58Z, concept_write and execution_trace) while the unit fixtures, hand-made with `vesselId`, passed. The fixture here
+// is the LIVE discovery answer for both shapes (captured 2026-10-13 via the cockpit registry read: the vesselCapability
+// rows), passed through the REAL HttpDiscoveryAdapter, so the test reads exactly what production reads.
+describe("#1e: the serving vessel is read from discovery as the real adapter maps it", () => {
+  const CAPTURED: Record<string, Row[]> = {
+    execution_trace: [
+      { vesselId: "development-vessel-local", endpoint: "http://localhost:18090", resolve_endpoint: "/v2/impulses/resolve" },
+      { vesselId: "development-vessel-local@syzygy-hub", endpoint: "http://127.0.0.1:18401", protocol: "libp2p", resolve_endpoint: "/v2/impulses/resolve" },
+      { vesselId: "development-vessel-local@spoke-cfaaaa8d", endpoint: "http://127.0.0.1:18401", protocol: "libp2p", resolve_endpoint: "/v2/impulses/resolve" },
+    ],
+    concept_write: [
+      { vesselId: "concept-db-local", endpoint: "http://127.0.0.1:18260", protocol: "http", resolve_endpoint: "/v2/impulses/resolve" },
+      { vesselId: "development-vessel-local", endpoint: "http://localhost:18090", resolve_endpoint: "/v2/impulses/resolve" },
+      { vesselId: "concept-db-local@syzygy-hub", endpoint: "http://127.0.0.1:18401", protocol: "libp2p", resolve_endpoint: "/v2/impulses/resolve" },
+      { vesselId: "development-vessel-local@syzygy-hub", endpoint: "http://127.0.0.1:18401", protocol: "libp2p", resolve_endpoint: "/v2/impulses/resolve" },
+      { vesselId: "development-vessel-local@spoke-cfaaaa8d", endpoint: "http://127.0.0.1:18401", protocol: "libp2p", resolve_endpoint: "/v2/impulses/resolve" },
+    ],
+  };
+  const withLiveDiscovery = async <T>(f: () => Promise<T>): Promise<T> => {
+    const { HttpDiscoveryAdapter } = await import("@avigopal/ias-executor-ts/adapters");
+    const cfg = await import("../../src/config.js");
+    const port = { request: async (_u: string, init?: RequestInit) => { const shape = JSON.parse(String(init?.body ?? "{}"))?.pointer?.shape; return Response.json({ content: { shape, vessels: CAPTURED[shape] ?? [], found: !!CAPTURED[shape] } }); } };
+    cfg.__setDiscoveryForTests(new HttpDiscoveryAdapter(port as never, "http://discovery.fixture") as never);
+    try { return await f(); } finally { cfg.__resetDiscoveryForTests(); }
+  };
+  it("MUST-FAIL: execution_trace, served by one local vessel (plus federated rows), is sited in development-vessel", async () => {
+    expect(await withLiveDiscovery(() => grt.vesselOfResolver("execution_trace", { repoExists: (r: string) => r === "repos/development-vessel" }))).toEqual({ vessel: "development-vessel" });
+  });
+  it("MUST-FAIL: concept_write, served by two local vessels, says so by name (never 'no local vessel')", async () => {
+    expect(await withLiveDiscovery(() => grt.vesselOfResolver("concept_write", { repoExists: () => true }))).toEqual({ why: "concept_write is served by 2 local vessels: concept-db-local, development-vessel-local" });
+  });
+  it("controls: a shape no vessel serves says no local vessel; a local vessel with no repo here says so", async () => {
+    expect(await withLiveDiscovery(() => grt.vesselOfResolver("unserved_fixture_shape", { repoExists: () => true }))).toEqual({ why: "no local vessel serves unserved_fixture_shape" });
+    expect(await withLiveDiscovery(() => grt.vesselOfResolver("execution_trace", { repoExists: () => false }))).toEqual({ why: "development-vessel-local maps to no repo here (development-vessel)" });
+  });
+});

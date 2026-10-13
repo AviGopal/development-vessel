@@ -17,6 +17,15 @@
  * goal to it, is not here: a failure with no linked gap is counted (`open_unlinked`) and left alone.
  * A blind retry with nothing fixed is not a cycle.
  *
+ * THE WALK'S OWN FILINGS ARE LINKED (R2's half that needs no diagnosis). A walk that did not reach and
+ * filed gaps on the way (goalWalkState learning.gapsFiled) has named its own prerequisites: each such gap,
+ * if it is still OPEN, gets a `{source:"goal_reach", goal_hash, dispatch_id, origin}` demand entry
+ * (substrateGap_write demand_goals_append under expect_status "open": idempotent, never a reopen). That
+ * is the link the wait (R4) and the re-dispatch (R5) read. A filed gap that is closed, missing, or not a
+ * gap id is NOT linked and is reported (linked_filed.skipped + a journal line), never dropped silently.
+ * Linking is bookkeeping, not an action on a goal, so it runs in dry-run too (like the tick ledger);
+ * goalReachPolicy.link_filed_gaps (default true) is its switch.
+ *
  * R7 IS A MEASUREMENT, not a dispatch: on a reach without hands, R reads the template store for a
  * template whose provenance (`extracted_from` / `metadata.sourceExecutionId`) is the reaching execution,
  * records found/absent/unknown, and on absent appends evidence to the ribosome gap. goal-host's own
@@ -99,6 +108,8 @@ export interface DispatchObservation {
   completionShapes?: string[] | null;
   cost_usd?: number | null;
   edit_sites?: string[];
+  /** Gap ids this walk filed (goalWalkState learning.gapsFiled): the prerequisites it named itself. */
+  gaps_filed?: unknown[];
 }
 
 export interface ChainEntry {
@@ -206,6 +217,8 @@ export interface GoalReachPolicy {
   min_interval_s: number;
   /** Log and grade would-actions only: no re-dispatch, no record/evidence/limit writes. Flipping it is a recorded step. */
   dry_run: boolean;
+  /** Link the gaps a non-reaching walk filed to its goal (bookkeeping: runs in dry-run too). */
+  link_filed_gaps: boolean;
 }
 /** Interim defaults until slice L; overridden by the newest open `goalReachPolicy` pool record (law 1). */
 export const DEFAULT_GOAL_REACH_POLICY: GoalReachPolicy = {
@@ -216,6 +229,7 @@ export const DEFAULT_GOAL_REACH_POLICY: GoalReachPolicy = {
   extraction_window_ms: 30 * 60_000,
   min_interval_s: 300,
   dry_run: true,
+  link_filed_gaps: true,
 };
 
 export type GoalReachAction =
@@ -777,6 +791,11 @@ export interface GoalReachIO {
   /** Append an absent-extraction evidence entry to the ribosome gap (idempotent per goal_hash). */
   attachExtractionEvidence(entry: { goal_hash: string } & Record<string, unknown>): Promise<{ ok: boolean; why?: string }>;
   fileLimitProposal(p: { goal_hash: string; paths: string[]; gap_ids: string[]; reason: string }): Promise<{ ok: boolean; why?: string }>;
+  /**
+   * Attach a goal_reach demand entry to a gap a walk filed, only while the gap is open. linked:false when it
+   * already carried this (goal_hash, dispatch_id). Absent from an I/O ⇒ the tick links nothing and says so.
+   */
+  linkFiledGap?(gapId: string, entry: GoalReachDemandEntry): Promise<{ ok: true; linked: boolean } | { ok: false; reason: "closed" | "not_found" | "write_refused"; why: string }>;
 }
 
 /** One action (or, in dry-run, would-action) a tick took, with the linked gaps as it saw them. */
@@ -797,7 +816,15 @@ export interface TickLedger {
   errors: string[];
 }
 
+/** What the tick did with the gaps the observed walks filed. */
+export interface FiledGapLinks {
+  linked: Array<{ gap_id: string; goal_hash: string; dispatch_id: string }>;
+  already: number;
+  skipped: Array<{ gap_id: string; goal_hash: string | null; dispatch_id: string; why: string }>;
+}
+
 export interface GoalReachTickResult {
+  linked_filed: FiledGapLinks;
   ledger: TickLedger;
   /** The state this tick observed before acting: what grades the previous tick. */
   observed: { records: GoalReachRecord[]; gaps: GapView[] };
@@ -812,10 +839,45 @@ export interface GoalReachTickResult {
 
 const errText = (e: unknown): string => String((e as Error)?.message ?? e).slice(0, 300);
 
+/**
+ * Link each gap a terminal, non-reaching walk filed to that walk's goal. Every filed entry ends in exactly one
+ * of linked / already / skipped (with why): nothing is dropped. Only open gaps are linked (never a reopen).
+ */
+export async function linkFiledGaps(io: GoalReachIO, dispatches: DispatchObservation[], out: FiledGapLinks): Promise<void> {
+  for (const d of dispatches) {
+    if (d.status === "running" || d.reached === true) continue;
+    const filed = Array.isArray(d.gaps_filed) ? d.gaps_filed : [];
+    if (filed.length === 0) continue;
+    const goalHash = dispatchGoalHash(d);
+    const seen = new Set<string>();
+    for (const raw of filed) {
+      const gapId = typeof raw === "string" ? raw.trim() : "";
+      const skip = (why: string) => {
+        out.skipped.push({ gap_id: gapId || JSON.stringify(raw).slice(0, 80), goal_hash: goalHash, dispatch_id: d.dispatchId, why });
+        console.warn(`[goal-reach] filed gap ${gapId || "(not an id)"} of dispatch ${d.dispatchId} NOT linked: ${why}`);
+      };
+      if (!gapId) { skip("not a gap id"); continue; }
+      if (seen.has(gapId)) continue;
+      seen.add(gapId);
+      if (!goalHash) { skip("the goal text is incomplete, so its goal_hash is unknown"); continue; }
+      if (!io.linkFiledGap) { skip("this I/O cannot link gaps"); continue; }
+      const entry: GoalReachDemandEntry = { source: "goal_reach", goal_hash: goalHash, dispatch_id: d.dispatchId, origin: originOf(d) };
+      let r: Awaited<ReturnType<NonNullable<GoalReachIO["linkFiledGap"]>>>;
+      try { r = await io.linkFiledGap(gapId, entry); } catch (e) { r = { ok: false, reason: "write_refused", why: errText(e) }; }
+      if (!r.ok) { skip(`${r.reason}: ${r.why}`); continue; }
+      if (r.linked) {
+        out.linked.push({ gap_id: gapId, goal_hash: goalHash, dispatch_id: d.dispatchId });
+        console.log(`[goal-reach] LINKED filed gap ${gapId} to goal_hash=${goalHash} (dispatch ${d.dispatchId})`);
+      } else out.already++;
+    }
+  }
+}
+
 export async function runGoalReachTick(io: GoalReachIO, policy: GoalReachPolicy, now = Date.now()): Promise<GoalReachTickResult> {
   const result: GoalReachTickResult = {
     ok: true, summary: summarize([]), redispatched: [], stopped: [], asked_human: [], errors: [],
     ledger: { at: now, dry_run: policy.dry_run, actions: [], eligible: [], errors: [] }, observed: { records: [], gaps: [] },
+    linked_filed: { linked: [], already: 0, skipped: [] },
   };
   const tag = policy.dry_run ? "DRY-RUN would " : "";
   const prior = await io.loadRecords();
@@ -827,6 +889,9 @@ export async function runGoalReachTick(io: GoalReachIO, policy: GoalReachPolicy,
   }
   const listed = await io.listDispatches({ known, r_issued: rIssued });
   if (!listed.ok) { result.ledger.errors.push(`dispatches unreadable: ${listed.why}`); return { ...result, ok: false, why: `dispatches unreadable: ${listed.why}`, summary: summarize(Object.values(prior)) }; }
+
+  // LINK THE WALKS' OWN FILINGS before the gaps are read, so this tick's linkGaps already sees them.
+  if (policy.link_filed_gaps !== false) await linkFiledGaps(io, listed.dispatches, result.linked_filed);
 
   const records = observe(prior, listed.dispatches, now, policy);
   const live = Object.values(records);
@@ -952,7 +1017,7 @@ export async function runGoalReachTick(io: GoalReachIO, policy: GoalReachPolicy,
     await io.saveRecord(rec);
   }
   result.summary = summarize(live);
-  console.log(`[goal-reach] tick goals=${result.summary.goals} unlinked=${result.summary.open_unlinked} waiting=${result.summary.waiting} redispatched=${result.redispatched.length} reached_without_hands=${result.summary.reached_without_hands} reached_by_r=${result.summary.reached_by_r} stopped=${result.summary.stopped} errors=${result.errors.length}`);
+  console.log(`[goal-reach] tick linked_filed=${result.linked_filed.linked.length} already=${result.linked_filed.already} not_linked=${result.linked_filed.skipped.length} goals=${result.summary.goals} unlinked=${result.summary.open_unlinked} waiting=${result.summary.waiting} redispatched=${result.redispatched.length} reached_without_hands=${result.summary.reached_without_hands} reached_by_r=${result.summary.reached_by_r} stopped=${result.summary.stopped} errors=${result.errors.length}`);
   return result;
 }
 
@@ -1064,6 +1129,8 @@ export function defaultGoalReachIO(policy: GoalReachPolicy): GoalReachIO {
               obs.poolShapes = asStrArr(b["poolShapes"]);
               obs.completionShapes = asStrArr(b["completionShapes"]);
               if (typeof b["reached"] === "boolean") obs.reached = b["reached"];
+              const learning = b["learning"] as { gapsFiled?: unknown } | null | undefined;
+              if (learning && Array.isArray(learning.gapsFiled)) obs.gaps_filed = learning.gapsFiled;
             }
             if (obs.status !== "running") obs.cost_usd = await traceCost(obs.executionId);
           }
@@ -1230,6 +1297,30 @@ export function defaultGoalReachIO(policy: GoalReachPolicy): GoalReachIO {
       });
       return { ok: w.body.ok, ...(w.body.error ? { why: w.body.error } : {}) };
     },
+
+    async linkFiledGap(gapId, entry) {
+      // Resend the gap's own fields (an open gap must carry its summary) with the entry appended under the store's
+      // lock (demand_goals_append) and expect_status "open": a gap closed in between is not reopened.
+      const { resolveSubstrateGap, resolveSubstrateGapWrite } = await import("./substrate-gap.js");
+      const r = await resolveSubstrateGap({ type: "substrateGap", id: gapId, limit: 5 });
+      const g = ((r.body as { gaps?: Array<Record<string, unknown>> } | null)?.gaps ?? []).find((x) => x["id"] === gapId);
+      if (!g) return { ok: false, reason: "not_found", why: `gap ${gapId} not found` };
+      const status = String(g["status"] ?? "open");
+      if (status !== "open") return { ok: false, reason: "closed", why: `gap ${gapId} is ${status}${typeof (g["classification_metadata"] as Record<string, unknown> | undefined)?.["closed_reason"] === "string" ? ` (${String((g["classification_metadata"] as Record<string, unknown>)["closed_reason"]).slice(0, 80)})` : ""}` };
+      const meta = (g["classification_metadata"] ?? {}) as Record<string, unknown>;
+      const before = Array.isArray(meta["demand_goals"]) ? (meta["demand_goals"] as unknown[]).length : 0;
+      if (mergeDemandGoal(meta["demand_goals"], entry).length === before) return { ok: true, linked: false };
+      const w = await resolveSubstrateGapWrite({
+        type: "substrateGap_write", expect_status: "open", demand_goals_append: [entry],
+        gap: { id: gapId, category: g["category"], source: g["source"], status: "open", summary: g["summary"], detected_at: g["detected_at"], classification_metadata: {} },
+      } as never);
+      const body = (w.body ?? {}) as Record<string, unknown>;
+      if (w.shape !== "substrateGapWriteResult" || body["skip_reason"]) {
+        const why = String(body["skip_reason"] ?? body["detail"] ?? w.shape);
+        return { ok: false, reason: body["skip_reason"] === "status_precondition_failed" ? "closed" : "write_refused", why };
+      }
+      return { ok: true, linked: true };
+    },
   };
 }
 
@@ -1257,6 +1348,7 @@ async function readPolicy(): Promise<GoalReachPolicy> {
     if (asNum(b.extraction_window_ms) !== null) p.extraction_window_ms = b.extraction_window_ms!;
     if (asNum(b.min_interval_s) !== null) p.min_interval_s = b.min_interval_s!;
     if (typeof b.dry_run === "boolean") p.dry_run = b.dry_run;
+    if (typeof b.link_filed_gaps === "boolean") p.link_filed_gaps = b.link_filed_gaps;
     return p;
   } catch { return { ...DEFAULT_GOAL_REACH_POLICY }; }
 }

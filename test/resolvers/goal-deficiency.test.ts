@@ -398,7 +398,7 @@ describe("through the default I/O and the real stores", () => {
     const sent: Array<{ id: string; tag: string }> = [];
     // A: the dispatcher over the REAL store (write) with a stubbed dispatch
     const rep = await quiet(() => pd.runProducerDispatch([def], Date.now(), { producer_dispatch: "live", max_producer_dispatches: 1, producer_dispatch_cooldown_ms: 6 * H }, () => [], {
-      isWrite: (x) => /_write$/.test(x), advertised: async () => false, readRun: async () => record,
+      isWrite: (x) => /_write$/.test(x), advertised: async () => false, readRun: async () => record, declaredBy: async () => [],
       write: async (gap, demand) => { const r = await sg.resolveSubstrateGapWrite({ type: "substrateGap_write", gap, demand_goals_append: [demand] } as never); return { ok: r.shape === "substrateGapWriteResult" }; },
       dispatch: async (id, tag) => { sent.push({ id, tag }); return { ok: true }; },
     }));
@@ -1128,7 +1128,7 @@ describe("package A: the producer dispatcher", () => {
   const PRODUCED = (s: string) => `[goal-host-vessel] walk(/run-goal): VESSEL-RESOLVE SATISFIER produced "${s}" directly (connected vessel resolve) — no bridge needed`;
   const capRow = (shape: string, over: Row = {}): Row => ({ id: `gap-${shape.replace(/_/g, "-")}`, status: "open", classification_metadata: { kind: "capability_gap", missing_shape: shape, goal: "tabulate the overdue parcels per depot", demand_goals: [{ source: "goal_reach", goal_hash: "aaaa1111" }], ...over } });
   const defRow = (ids: string[], over: Row = {}): Row => ({ id: "goal-deficiency-aaaa1111-write_goal_no_artifact", status: "open", classification_metadata: { kind: "goal_content_deficiency", goal_hash: "aaaa1111", dispatch_ids: ids, ...over } });
-  const deps = (over: Row = {}) => ({ isWrite: (s: string) => /_write$/.test(s) || s === "fs_edit", advertised: async () => false, readRun: async () => ({ goal: "tabulate the overdue parcels per depot", walkLog: [INFER(["parcel_backlog_report"])], completionShapes: [] }), ...over });
+  const deps = (over: Row = {}) => ({ isWrite: (s: string) => /_write$/.test(s) || s === "fs_edit", advertised: async () => false, readRun: async () => ({ goal: "tabulate the overdue parcels per depot", walkLog: [INFER(["parcel_backlog_report"])], completionShapes: [] }), declaredBy: async () => [] as string[], ...over });
   const none = () => [] as string[];
   const quiet = async <T>(f: () => Promise<T>): Promise<T> => { const l = console.log, w = console.warn; console.log = () => {}; console.warn = () => {}; try { return await f(); } finally { console.log = l; console.warn = w; } };
 
@@ -1207,5 +1207,80 @@ describe("package A: the producer dispatcher", () => {
     const src = readFileSync(join(import.meta.dir, "../../src/resolvers/goal-reach-tick.ts"), "utf8");
     expect(src).toContain('if (pol.policy.file_gaps === 1 && pol.policy.producer_dispatch !== "off") {');
     expect(src).toContain('type: "gap_to_feature", gap_id: gapId, triggered_by: "goal-reach-producer-dispatch"');
+  });
+});
+
+// CONTAINED IS NOT MISSING (exception (a), 10-13): discovery lists only producers that are UP. A shape that a vessel in the
+// running tree DECLARES but discovery does not advertise (masked, disabled, crashed, contained) is never authored, by the
+// dispatcher or by the author route; an unreadable tree or an unreadable discovery answer refuses too (fail closed).
+describe("contained is not missing: the dispatcher and the author route never author a declared shape", () => {
+  const pd = async () => (await import("../../src/resolvers/producer-dispatch.js")) as Record<string, any>;
+  const T0 = Date.parse("2030-06-01T00:00:00Z");
+  const capRow = (shape: string): Row => ({ id: `gap-${shape.replace(/_/g, "-")}`, status: "open", classification_metadata: { kind: "capability_gap", missing_shape: shape, goal: "list the quarry ledger entries", demand_goals: [{ source: "goal_reach", goal_hash: "bbbb2222" }] } });
+  const deps = (over: Row = {}) => ({ isWrite: (s: string) => /_write$/.test(s), advertised: async () => false, readRun: async () => null, declaredBy: async () => [] as string[], ...over });
+  const none = () => [] as string[];
+  // a fake running tree: vessel dir → declaration file → text
+  const tree = (files: Record<string, string>) => ({
+    list: (d: string) => { if (d !== "/rt") throw Object.assign(new Error("ENOENT"), { code: "ENOENT" }); return [...new Set(Object.keys(files).map((k) => k.split("/")[0]!))]; },
+    read: (f: string) => { const k = f.replace(/^\/rt\//, ""); if (!(k in files)) throw Object.assign(new Error("ENOENT"), { code: "ENOENT" }); if (files[k] === "<EACCES>") throw Object.assign(new Error("EACCES"), { code: "EACCES" }); return files[k]!; },
+  });
+
+  it("MUST-FAIL: a shape declared by a vessel in the tree but not advertised (a masked producer) → skipped, never planned", async () => {
+    const m = await pd();
+    const r = await m.planProducerDemand([capRow("quarry_ledger")], T0, 3_600_000, none, deps({ declaredBy: async () => ["quarry-vessel"] }));
+    expect(r.plans).toEqual([]);
+    expect(r.skips[0]).toMatchObject({ shape: "quarry_ledger", why: expect.stringMatching(/declared by quarry-vessel but not advertised: an offline or contained producer/) });
+  });
+
+  it("MUST-FAIL: unreadable declarations → skipped (unknown is not absent); a throwing reader too", async () => {
+    const m = await pd();
+    for (const declaredBy of [async () => null, async () => { throw new Error("EACCES"); }]) {
+      const r = await m.planProducerDemand([capRow("quarry_ledger")], T0, 3_600_000, none, deps({ declaredBy }));
+      expect(r.plans).toEqual([]);
+      expect(r.skips[0]).toMatchObject({ why: expect.stringMatching(/declarations unreadable/) });
+    }
+  });
+
+  it("MUST-FAIL: a discovery lookup that failed (HTTP 401, timeout, malformed) reads as unreadable, never as 'no producer'", async () => {
+    const m = await pd();
+    expect(m.advertisedFrom({ ok: false, reason: "http", status: 401 })).toBeNull();
+    expect(m.advertisedFrom({ ok: false, reason: "timeout" })).toBeNull();
+    expect(m.advertisedFrom({ ok: true })).toBeNull();
+    expect(m.advertisedFrom({ ok: true, producers: [] })).toBe(false);
+    expect(m.advertisedFrom({ ok: true, producers: [{ id: "x" }] })).toBe(true);
+    const src = readFileSync(join(import.meta.dir, "../../src/resolvers/goal-reach-tick.ts"), "utf8");
+    expect(src).toContain("advertised: async (shape) => pd.advertisedFrom(await lookupShape(shape)),");
+    expect(src).toContain("declaredBy: async (shape) => pd.declaredBy(shape,");
+  });
+
+  it("CONTROL: declared nowhere, readable tree, not advertised → planned (the missing-producer route still works)", async () => {
+    const m = await pd();
+    const r = await m.planProducerDemand([capRow("quarry_ledger")], T0, 3_600_000, none, deps());
+    expect(r.plans.map((p: { shape: string }) => p.shape)).toEqual(["quarry_ledger"]);
+  });
+
+  it("declaredBy reads each vessel's config.ts / index.ts for the quoted shape literal; a missing file declares nothing, an unreadable one (or root) → null", async () => {
+    const m = await pd();
+    const t = tree({ "quarry-vessel/src/index.ts": 'const RESOLVERS = [["quarry_ledger", ledger]];', "other-vessel/src/config.ts": 'shapes: ["quarry_ledger_summary"]', "third-vessel/src/config.ts": "shapes: ['quarry_ledger']" });
+    expect(m.declaredBy("quarry_ledger", "/rt", t)).toEqual(["quarry-vessel", "third-vessel"]);
+    expect(m.declaredBy("slate_index", "/rt", t)).toEqual([]);
+    expect(m.declaredBy("quarry_ledger", "/missing", t)).toBeNull();
+    expect(m.declaredBy("quarry_ledger", "/rt", tree({ "x-vessel/README.md": "quarry_ledger" }))).toEqual([]); // no declaration file: not a vessel
+    expect(m.declaredBy("quarry_ledger", "/rt", tree({ "x-vessel/src/config.ts": "<EACCES>", "y-vessel/src/index.ts": '"slate"' }))).toBeNull(); // unreadable declaration: unknown
+    expect(m.declaredBy("not a shape", "/rt", t)).toEqual([]);
+    expect(m.declaredBy("quarry_ledger", "/rt", tree({}))).toEqual([]); // an empty, listable root declares nothing
+  });
+
+  it("MUST-FAIL (author route): containedRefusal refuses a declared shape and an unreadable tree, and gap-to-feature checks it before composing", async () => {
+    const m = await pd();
+    const t = tree({ "quarry-vessel/src/index.ts": '"quarry_ledger"' });
+    expect(m.containedRefusal("quarry_ledger", "/rt", t)).toMatch(/declared by quarry-vessel but not advertised/);
+    expect(m.containedRefusal("quarry_ledger", "/missing", t)).toMatch(/declarations unreadable/);
+    expect(m.containedRefusal("slate_index", "/rt", t)).toBeNull();
+    const src = readFileSync(join(import.meta.dir, "../../src/resolvers/gap-to-feature.ts"), "utf8");
+    const route = src.slice(src.indexOf("async function routeCapabilityGapToNewResolver("));
+    const guard = route.indexOf("const reason = containedRefusal(missingShape, runtimeRoot());");
+    expect(guard).toBeGreaterThan(0);
+    expect(guard).toBeLessThan(route.indexOf("await resolveFeatureCompose("));
   });
 });

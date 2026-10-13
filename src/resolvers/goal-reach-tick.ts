@@ -1710,7 +1710,8 @@ export function defaultGoalReachIO(policy: GoalReachPolicy): GoalReachIO {
           const tallies = up.tallies;
           report.producer_dispatch = await pd.runProducerDispatch(all, now, pol.policy, (h) => [...new Set((tallies[h]?.entries ?? []).flatMap((e) => ((e.class === gd.MISSING_PRODUCER_CLASS || e.class === "phantom") && Array.isArray(e.missing_shapes) ? e.missing_shapes : [])))], {
             isWrite: isWritePointerType,
-            advertised: async (shape) => { const r = await lookupShape(shape); return r.ok ? (r.producers as unknown[]).length > 0 : null; },
+            advertised: async (shape) => pd.advertisedFrom(await lookupShape(shape)),
+            declaredBy: async (shape) => pd.declaredBy(shape, (await import("../lib/evaluator-tree.js")).evaluatorTreeRoot()),
             readRun: async (id) => {
               const base = await ownGoalHostBase();
               if (!base) return null;

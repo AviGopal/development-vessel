@@ -21,6 +21,7 @@ import { resolveAuthorProducer } from "./author-producer.js";
 import { resolveDocDriftFix } from "./doc-drift-fix.js";
 import { resolveReachabilityGapRepair } from "./reachability-gap-repair.js";
 import { resolveDispatchGoal } from "./dispatch-goal.js";
+import { containedRefusal } from "./producer-dispatch.js";
 import { resolveUiWritePassthrough } from "./ui-write-passthrough.js";
 // The human-question channel the closed landing verdict asks through (qa 10.2: injected per call, never imported).
 const askHuman: Ask = (p) => resolveUiWritePassthrough(p as never);
@@ -1648,6 +1649,15 @@ async function routeCapabilityGapToNewResolver(
       ok: false, route: "capability_gap_skipped", gap_id: gap.id, shape: missingShape,
       reason: "no walk demand (capability_gap carries no goal) — not worth authoring a resolver (reuse-before-mint)",
     } };
+  }
+  // CONTAINED IS NOT MISSING (exception (a), 10-13): a shape a vessel in the running tree declares has a producer that is
+  // down, masked or contained; authoring a twin would route around the containment. Unreadable declarations refuse too.
+  {
+    const reason = containedRefusal(missingShape, runtimeRoot());
+    if (reason) {
+      console.log(`[gap-to-feature] capability gap ${String(gap.id ?? "")} (${missingShape}) not authored: ${reason}`);
+      return { shape: "gapToFeatureReport", body: { ok: false, route: "capability_gap_skipped", gap_id: gap.id, shape: missingShape, reason } };
+    }
   }
 
 

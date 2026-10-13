@@ -19,6 +19,14 @@
 // (evidence_resolve {shape, mode:"producer_contract"}, package B) with its planned CREATE target as edit_site, and sent to
 // gap_to_feature by id. Shaped: mode off|dry_run|live, a per-tick budget, a per-gap cooldown. Every skip is a reason.
 
+// CONTAINED IS NOT MISSING (exception (a), 10-13): discovery answers only for producers that are UP. A vessel masked for
+// harm containment, disabled, crashed or not yet booted advertises nothing, and its shape read as "no producer exists"
+// (the dispatcher sent a contained capability to the author route). A shape some vessel in the running tree DECLARES is
+// never authored: the second, independent reader below; unreadable declarations refuse too (unknown is not absent).
+
+import { readdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+
 export type ProducerDispatchMode = "off" | "dry_run" | "live";
 export interface ProducerPlan { shape: string; goal: string; goal_hash: string; source_gap: string; via: "capability_gap" | "deficiency"; dispatch_id?: string }
 export interface ProducerSkip { source_gap: string; shape?: string; why: string }
@@ -56,6 +64,45 @@ export function producedShapes(walkLog: unknown, completionShapes: unknown): Set
   return out;
 }
 
+/** The files where a vessel declares the shapes it serves (its discovery contract, its resolver map). */
+const DECLARATION_FILES = ["src/config.ts", "src/index.ts"];
+export interface DeclarationIo { list: (dir: string) => string[]; read: (file: string) => string }
+const fsIo: DeclarationIo = { list: (d) => readdirSync(d), read: (f) => readFileSync(f, "utf8") };
+/**
+ * The vessels under `root` whose declaration files name `shape` as a quoted literal: a producer exists in code whether or
+ * not discovery advertises it. A missing file declares nothing; null = the root is unlistable or a declaration file
+ * exists but cannot be read (the tree is unknown, not empty). Over-matching
+ * (a vessel that only names the shape) refuses an author request; it can never send one.
+ */
+export function declaredBy(shape: string, root: string, io: DeclarationIo = fsIo): string[] | null {
+  if (!isShapeIdentifier(shape)) return [];
+  let dirs: string[];
+  try { dirs = io.list(root); } catch { return null; }
+  const lit = new RegExp(`["'\`]${shape}["'\`]`);
+  const out: string[] = [];
+  for (const d of dirs) for (const f of DECLARATION_FILES) {
+    let text: string;
+    try { text = io.read(join(root, d, f)); } catch (e) {
+      const code = (e as { code?: unknown } | null)?.code;
+      if (code === "ENOENT" || code === "ENOTDIR") continue; // not a declaration file of a vessel: nothing declared there
+      return null; // a declaration that exists but cannot be read is unknown, not absent
+    }
+    if (lit.test(text)) { out.push(d); break; }
+  }
+  return out;
+}
+
+/** Why authoring `shape` must be refused because a producer exists in the running tree (or the tree is unreadable), or null. */
+export function containedRefusal(shape: string, root: string, io: DeclarationIo = fsIo): string | null {
+  const declared = declaredBy(shape, root, io);
+  if (declared === null) return "declarations unreadable: not authored (unknown is not absent)";
+  return declared.length > 0 ? `declared by ${declared.join(", ")} but not advertised: an offline or contained producer, never authored` : null;
+}
+/** A discovery lookup as the dispatcher reads it: true = served, false = none, null = unreadable (any failure, e.g. HTTP 401). */
+export function advertisedFrom(r: { ok: boolean; producers?: unknown }): boolean | null {
+  return r.ok === true && Array.isArray(r.producers) ? r.producers.length > 0 : null;
+}
+
 export interface RunRecord { walkLog?: unknown; completionShapes?: unknown }
 export interface Deps {
   isWrite: (shape: string) => boolean;
@@ -63,6 +110,8 @@ export interface Deps {
   advertised: (shape: string) => Promise<boolean | null>;
   /** A run's record on this node's goal-host (walkLog, completionShapes), or null. */
   readRun: (dispatchId: string) => Promise<RunRecord | null>;
+  /** Vessels in the running tree declaring the shape (declaredBy), or null = unreadable. */
+  declaredBy: (shape: string) => Promise<string[] | null>;
 }
 const metaOf = (g: Record<string, unknown>) => (g["classification_metadata"] ?? {}) as Record<string, unknown>;
 const demandHashes = (m: Record<string, unknown>): string[] => (Array.isArray(m["demand_goals"]) ? (m["demand_goals"] as unknown[]) : [])
@@ -92,6 +141,9 @@ export async function planProducerDemand(
     const adv = await deps.advertised(shape).catch(() => null);
     if (adv === null) { skips.push({ source_gap: src, shape, why: "discovery unreadable: not dispatched (unknown is not absent)" }); return false; }
     if (adv) { skips.push({ source_gap: src, shape, why: "already advertised: reuse the producer (producer_now_exists), no author request" }); return false; }
+    const decl = await deps.declaredBy(shape).catch(() => null);
+    if (decl === null) { skips.push({ source_gap: src, shape, why: "declarations unreadable: not dispatched (unknown is not absent)" }); return false; }
+    if (decl.length > 0) { skips.push({ source_gap: src, shape, why: `declared by ${decl.join(", ")} but not advertised: an offline or contained producer, never authored` }); return false; }
     if (!goal.trim()) { skips.push({ source_gap: src, shape, why: "no goal text: the author route needs the demanding goal" }); return false; }
     seenShapes.add(shape);
     plans.push({ shape, goal, goal_hash: goalHash, source_gap: src, via, ...(dispatchId ? { dispatch_id: dispatchId } : {}) });

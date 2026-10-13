@@ -287,6 +287,31 @@ describe("gradeCapabilityCompose (and the route's own outer bump): a capability_
     expect(metaOf(id).pending_outcome_verification).toBe(sha);
   });
 
+  // CONTAINED IS NOT MISSING (exception (a), 10-13): a shape a vessel in the RUNNING tree declares (its producer masked,
+  // disabled, down or contained) is refused by the route itself, before any compose, so no caller can mint a twin of it.
+  it("[PIN] MUST-FAIL: a shape a running-tree vessel declares (not advertised) → capability_gap_skipped, nothing composed", async () => {
+    const shape = `pin_shape_contained_${RUN.replace(/[^a-z0-9]/gi, "")}`;
+    const vessel = `contained-vessel-${RUN}`;
+    mkdirSync(join(SCRATCH, "runtime", vessel, "src"), { recursive: true });
+    writeFileSync(join(SCRATCH, "runtime", vessel, "src", "index.ts"), `const RESOLVERS = [["${shape}", resolve]];\n`);
+    const id = `pin-cap-contained-${RUN}`;
+    seed({ id, category: `pin_capcat_contained_${RUN}`, summary: `walk needs ${shape}`, classification_metadata: { kind: "capability_gap", missing_shape: shape, goal: `a goal needing ${shape}` } });
+    script.compose = [COMPOSE.unfavorable];
+    const { result } = await directed(id);
+    const body = result.body as Row;
+    expect(body.route).toBe("capability_gap_skipped");
+    expect(String(body.reason)).toMatch(new RegExp(`declared by ${vessel} but not advertised: an offline or contained producer`));
+    expect(calls.compose.length).toBe(0);
+  });
+
+  it("[PIN] CONTROL: a shape no running-tree vessel declares still routes to the author compose", async () => {
+    const id = capGap("undeclared");
+    script.compose = [COMPOSE.unfavorable];
+    const { result } = await directed(id);
+    expect((result.body as Row).route).toBe("capability_gap_via_feature_compose");
+    expect(calls.compose.length).toBe(1);
+  });
+
   it("[PIN] no walk demand (no goal): skipped without composing; the caller bumps (+1)", async () => {
     const id = capGap("nogoal", { goal: "" });
     const { result } = await directed(id);

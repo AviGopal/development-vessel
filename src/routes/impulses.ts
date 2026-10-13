@@ -352,6 +352,10 @@ async function dispatchInner(pointer: AnyPointer): Promise<ResolverResult> {
       const { resolveGoalReachTick } = await import("../resolvers/goal-reach-tick.js");
       return resolveGoalReachTick(p as { type?: string; dry_run?: boolean });
     }
+    case "goal_reach_verdict": {
+      const { resolveGoalReachVerdict } = await import("../resolvers/goal-deficiency.js");
+      return resolveGoalReachVerdict(p as { goal_hash?: unknown });
+    }
     case "rhythm_reality_sync": return resolveRhythmRealitySync(pointer as any);
     case "memoryNote":
       return resolveMemoryNote(p as Parameters<typeof resolveMemoryNote>[0]);

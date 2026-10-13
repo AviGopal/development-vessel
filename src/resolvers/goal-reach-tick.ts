@@ -26,6 +26,10 @@
  * Linking is bookkeeping, not an action on a goal, so it runs in dry-run too (like the tick ledger);
  * goalReachPolicy.link_filed_gaps (default true) is its switch.
  *
+ * R2, RECOGNITION BY CONTENT FAILURE (goal-deficiency.ts). A goal whose runs keep being judged not reached for one named
+ * deficiency gets ONE open gap per (goal, reason class), linked to it, with a class-2 falsifier on goal_reach_verdict.
+ * Its tally is bookkeeping (written in dry-run too); goalDeficiencyPolicy.file_gaps is its switch.
+ *
  * R7 IS A MEASUREMENT, not a dispatch: on a reach without hands, R reads the template store for a
  * template whose provenance (`extracted_from` / `metadata.sourceExecutionId`) is the reaching execution,
  * records found/absent/unknown, and on absent appends evidence to the ribosome gap. goal-host's own
@@ -796,6 +800,21 @@ export interface GoalReachIO {
    * already carried this (goal_hash, dispatch_id). Absent from an I/O ⇒ the tick links nothing and says so.
    */
   linkFiledGap?(gapId: string, entry: GoalReachDemandEntry): Promise<{ ok: true; linked: boolean } | { ok: false; reason: "closed" | "not_found" | "write_refused"; why: string }>;
+  /** R2: tally the runs' judge reasons per goal and file one gap per (goal, repeated reason class). Optional. */
+  recogniseDeficiencies?(dispatches: DispatchObservation[], now: number): Promise<DeficiencyReport>;
+}
+
+/** What R2 did this tick (goal-deficiency.ts decides; the I/O writes). */
+export interface DeficiencyReport {
+  ok: boolean;
+  why?: string;
+  tallied: number;
+  ignored: number;
+  filed: Array<{ id: string; kind: string; count: number }>;
+  refused: Array<{ id: string; why: string }>;
+  skipped: Array<{ goal_hash: string; reason_class?: string; why: string }>;
+  unclassified: Array<{ goal_hash: string; count: number; samples: string[] }>;
+  candidates: Array<{ goal_hash: string; reason_class: string; count: number }>;
 }
 
 /** One action (or, in dry-run, would-action) a tick took, with the linked gaps as it saw them. */
@@ -825,6 +844,7 @@ export interface FiledGapLinks {
 
 export interface GoalReachTickResult {
   linked_filed: FiledGapLinks;
+  deficiency?: DeficiencyReport;
   ledger: TickLedger;
   /** The state this tick observed before acting: what grades the previous tick. */
   observed: { records: GoalReachRecord[]; gaps: GapView[] };
@@ -892,6 +912,11 @@ export async function runGoalReachTick(io: GoalReachIO, policy: GoalReachPolicy,
 
   // LINK THE WALKS' OWN FILINGS before the gaps are read, so this tick's linkGaps already sees them.
   if (policy.link_filed_gaps !== false) await linkFiledGaps(io, listed.dispatches, result.linked_filed);
+  // R2: recognise repeated content failures (files before the gaps are read, so this tick's wait sees them).
+  if (io.recogniseDeficiencies) {
+    try { result.deficiency = await io.recogniseDeficiencies(listed.dispatches, now); }
+    catch (e) { result.errors.push(`deficiency recognition failed: ${errText(e)}`); console.warn(`[goal-reach] R2 recognition failed: ${errText(e)}`); }
+  }
 
   const records = observe(prior, listed.dispatches, now, policy);
   const live = Object.values(records);
@@ -1320,6 +1345,60 @@ export function defaultGoalReachIO(policy: GoalReachPolicy): GoalReachIO {
         return { ok: false, reason: body["skip_reason"] === "status_precondition_failed" ? "closed" : "write_refused", why };
       }
       return { ok: true, linked: true };
+    },
+
+    async recogniseDeficiencies(dispatches, now) {
+      const gd = await import("./goal-deficiency.js");
+      const empty: DeficiencyReport = { ok: true, tallied: 0, ignored: 0, filed: [], refused: [], skipped: [], unclassified: [], candidates: [] };
+      const pol = await gd.readDeficiencyPolicy();
+      if (!pol.ok) { console.warn(`[goal-reach] R2 off this tick: ${pol.why}`); return { ...empty, ok: false, why: pol.why }; }
+      const { resolvePoolImpulse, resolvePoolImpulseWrite } = await import("./pool-impulse.js");
+      const tallies: Record<string, import("./goal-deficiency.js").DeficiencyTally> = {};
+      for (const imp of resolvePoolImpulse({ type: "poolImpulse", shape: gd.GOAL_DEFICIENCY_TALLY_SHAPE, status: "open" }).body.impulses) {
+        const t = imp.body as import("./goal-deficiency.js").DeficiencyTally | null;
+        if (t && typeof t.goal_hash === "string" && Array.isArray(t.entries)) tallies[t.goal_hash] = t;
+      }
+      // A reach of a tallied goal is graded by its judge path (leniency), so read its detail when the listing lacks it.
+      let detailBudget = 10;
+      for (const d of dispatches) {
+        const h = dispatchGoalHash(d);
+        if (d.reached !== true || !h || !tallies[h] || d.goalReachReason || !d.node || detailBudget <= 0) continue;
+        detailBudget--;
+        const w = await postResolve(d.node, { type: "goalWalkState", dispatchId: d.dispatchId }, 10_000);
+        const b = (w.json?.["body"] ?? null) as Record<string, unknown> | null;
+        if (w.ok && b) { d.goalReachReason = typeof b["goalReachReason"] === "string" ? b["goalReachReason"] : null; d.completionShapes = asStrArr(b["completionShapes"]); d.poolShapes = asStrArr(b["poolShapes"]); }
+      }
+      const { classifyFalsifier, resolveSubstrateGap, resolveSubstrateGapWrite } = await import("./substrate-gap.js");
+      const isAdvertised = (shape: string): boolean | null => {
+        const c = classifyFalsifier({ evidence_resolve: { shape } } as never) as unknown;
+        const cls = typeof c === "string" ? c : String((c as { class?: unknown } | null)?.class ?? "");
+        return cls === "class2" ? true : cls === "unresolvable" ? false : null;
+      };
+      const runs = dispatches.map((d) => ({ ...d, goal_hash: dispatchGoalHash(d), origin: originOf(d) }));
+      const up = gd.tallyUpdate(tallies, runs, now, pol.policy, isAdvertised);
+      for (const h of up.touched) resolvePoolImpulseWrite({ type: "poolImpulse_write", id: gd.tallyId(h), shape: gd.GOAL_DEFICIENCY_TALLY_SHAPE, body: up.tallies[h], source: "goal_reach_tick", status: "open" });
+      let existing: Map<string, Record<string, unknown>> | null = null;
+      try {
+        const r = await resolveSubstrateGap({ type: "substrateGap", limit: 1_000_000 } as never);
+        const rows = (r.body as { gaps?: Array<Record<string, unknown>> } | null)?.gaps;
+        if (r.shape === "substrateGap" && Array.isArray(rows)) existing = new Map(rows.filter((g) => String(g["id"] ?? "").startsWith("goal-deficiency-")).map((g) => [String(g["id"]), g]));
+      } catch { existing = null; }
+      const dec = gd.deficiencyDecisions(up.tallies, existing, now, pol.policy);
+      const report: DeficiencyReport = { ...empty, tallied: up.touched.length, ignored: up.ignored, skipped: dec.skipped, unclassified: dec.unclassified, candidates: dec.candidates };
+      for (const w of dec.writes) {
+        const res = await resolveSubstrateGapWrite({ type: "substrateGap_write", gap: w.gap, demand_goals_append: [w.demand], ...(w.expect_status ? { expect_status: w.expect_status } : {}) } as never);
+        const body = (res.body ?? {}) as Record<string, unknown>;
+        if (res.shape !== "substrateGapWriteResult" || body["skip_reason"]) {
+          const why = String(body["skip_reason"] ?? body["detail"] ?? res.shape).slice(0, 200);
+          report.refused.push({ id: w.id, why });
+          console.warn(`[goal-reach] R2 ${w.kind} of ${w.id} refused: ${why}`);
+        } else {
+          report.filed.push({ id: w.id, kind: w.kind, count: w.count });
+          console.log(`[goal-reach] R2 ${w.kind.toUpperCase()} ${w.id} (${w.count} not-reached run(s) judged ${w.reason_class})`);
+        }
+      }
+      for (const u of dec.unclassified) console.warn(`[goal-reach] R2 ${u.count} unclassified reason(s) for goal_hash=${u.goal_hash}: ${u.samples.map((x) => JSON.stringify(x.slice(0, 120))).join(" | ")}`);
+      return report;
     },
   };
 }

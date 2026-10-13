@@ -205,6 +205,7 @@ export const config = {
       // Goal-reach seam (slice R): park non-reached goals on their linked prerequisite gaps,
       // re-dispatch when all close, stop on futility/budget/scope. resolvers/goal-reach-tick.ts.
       "goal_reach_tick",
+      "goal_reach_verdict",
       "rhythm_reality_sync",
       // Memory closure (IAL 27.3.j.1): substrate-resident note store.
       // Read: filter by type/title/provenance. Write: upsert by id.

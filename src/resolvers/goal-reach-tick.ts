@@ -892,6 +892,8 @@ export interface DeficiencyReport {
   /** Listed runs R2 could not tally for want of a goal hash, and how many of those are a cut goal (C-longgoal-1; 0 in steady state). */
   skipped_no_goal_hash: number;
   skipped_cut_goal: number;
+  /** #1a: deficiency rows localized this call (sited, or a loud unknown with its kind). */
+  localized: Array<{ id: string; state: string; kind: string; refused?: boolean }>;
   candidates: Array<{ goal_hash: string; reason_class: string; count: number; class_source: string }>;
 }
 
@@ -1189,6 +1191,70 @@ const repoPrefix = (repo: string): string => {
   return b === "super-repo" || b === "substrate" ? "" : `${b}/`;
 };
 
+/** A deficiency row needs (re)localizing when it has none, or its counted runs changed since it was localized. */
+export function needsLocalization(g: Record<string, unknown>): boolean {
+  const meta = (g["classification_metadata"] ?? {}) as Record<string, unknown>;
+  if (meta["kind"] !== "goal_content_deficiency") return false;
+  const ids = Array.isArray(meta["dispatch_ids"]) ? (meta["dispatch_ids"] as unknown[]).map(String) : [];
+  if (ids.length === 0) return false;
+  const loc = meta["localization"] as { runs?: Array<{ dispatch_id?: unknown }> } | undefined;
+  if (!loc || !Array.isArray(loc.runs)) return true;
+  const had = new Set(loc.runs.map((r) => String(r.dispatch_id)));
+  return ids.some((id) => !had.has(id));
+}
+
+/** The serving vessel of a resolver/shape: exactly one LOCAL (non-federated) producer that is a repo here, else why not. */
+async function vesselOfResolver(resolver: string): Promise<{ vessel: string } | { why: string }> {
+  const { lookupShape } = await import("../config.js");
+  const r = await lookupShape(resolver);
+  if (!r.ok) return { why: `discovery unreadable for ${resolver} (${"reason" in r ? r.reason : "?"})` };
+  const local = (r.producers as Array<{ vesselId?: string }>).map((p) => String(p.vesselId ?? "")).filter((v) => v && !v.includes("@"));
+  if (local.length !== 1) return { why: local.length ? `${resolver} is served by ${local.length} local vessels: ${local.join(", ")}` : `no local vessel serves ${resolver}` };
+  const { repoPathExists } = await import("../judge/gap-admission.js");
+  const name = local[0]!.replace(/-local$/, "");
+  return repoPathExists(`repos/${name}`) ? { vessel: name } : { why: `${local[0]} maps to no repo here (${name})` };
+}
+
+/** The file the failing step lives in: the existing localizer's grep over the vessel, with the resolver and the failure evidence as its ONLY terms. */
+async function locateStepFile(vessel: string, resolver: string, excerpt: string | undefined): Promise<{ file: string; method: string } | null> {
+  const { localizeGap } = await import("./gap-to-feature.js");
+  const loc = await localizeGap({ summary: "", classification_metadata: { vessel, live_resolver: resolver, ...(excerpt ? { matched_excerpt: excerpt } : {}) } }, { useLlm: false });
+  return loc ? { file: loc.file, method: loc.method } : null;
+}
+
+/** The execution id of a counted run: the tally's, else goal-host's own dispatch record on the node that ran it. */
+async function executionIdOf(entry: import("./goal-deficiency.js").TallyEntry | undefined, dispatchId: string): Promise<string | null> {
+  if (entry?.execution_id) return entry.execution_id;
+  const node = entry?.node;
+  if (!node) return null;
+  try {
+    const base = node.replace(/\/v2\/impulses\/resolve\/?$/, "").replace(/\/resolve\/?$/, "");
+    const r = await fetch(`${base}/executions/${encodeURIComponent(dispatchId)}`, { signal: AbortSignal.timeout(10_000) });
+    if (!r.ok) return null;
+    const j = (await r.json()) as Record<string, unknown>;
+    return typeof j["executionId"] === "string" ? (j["executionId"] as string) : null;
+  } catch { return null; }
+}
+
+/** #1a for one row: attribute each counted run from its trace, then site (or not) by the policy majority. */
+export async function localizeRow(
+  g: Record<string, unknown>, tallies: Record<string, import("./goal-deficiency.js").DeficiencyTally>, majority: number, now: number,
+  deps: { executionIdOf?: typeof executionIdOf; readTrace?: (id: string | null) => Promise<Record<string, unknown> | null>; vesselOf?: (r: string) => Promise<{ vessel: string } | { why: string }>; locate?: typeof locateStepFile } = {},
+): Promise<import("./goal-deficiency.js").Localization> {
+  const gd = await import("./goal-deficiency.js");
+  const meta = (g["classification_metadata"] ?? {}) as Record<string, unknown>;
+  const ids = (Array.isArray(meta["dispatch_ids"]) ? (meta["dispatch_ids"] as unknown[]) : []).map(String);
+  const t = tallies[String(meta["goal_hash"] ?? "")];
+  const runs: import("./goal-deficiency.js").RunAttribution[] = [];
+  for (const id of ids) {
+    const e = t?.entries.find((x) => x.dispatch_id === id);
+    const exec = await (deps.executionIdOf ?? executionIdOf)(e, id);
+    const tr = exec ? await (deps.readTrace ?? readTrace)(exec) : null;
+    runs.push(gd.attributeRun(id, tr as never, e?.reason ?? ""));
+  }
+  return gd.localizeFromRuns(runs, majority, deps.vesselOf ?? vesselOfResolver, deps.locate ?? locateStepFile, now);
+}
+
 export function defaultGoalReachIO(policy: GoalReachPolicy): GoalReachIO {
   return {
     async listDispatches({ known, r_issued, known_hashes }) {
@@ -1430,7 +1496,7 @@ export function defaultGoalReachIO(policy: GoalReachPolicy): GoalReachIO {
 
     async recogniseDeficiencies(dispatches, now) {
       const gd = await import("./goal-deficiency.js");
-      const empty: DeficiencyReport = { ok: true, tallied: 0, ignored: 0, filed: [], refused: [], skipped: [], unclassified: [], unread: [], unrecorded: [], reasons_read: 0, reasons_unrecorded: 0, reason_reads_failed: 0, skipped_no_goal_hash: 0, skipped_cut_goal: 0, candidates: [] };
+      const empty: DeficiencyReport = { ok: true, tallied: 0, ignored: 0, filed: [], refused: [], skipped: [], unclassified: [], unread: [], unrecorded: [], reasons_read: 0, reasons_unrecorded: 0, reason_reads_failed: 0, skipped_no_goal_hash: 0, skipped_cut_goal: 0, candidates: [], localized: [] };
       const pol = await gd.readDeficiencyPolicy();
       if (!pol.ok) { console.warn(`[goal-reach] R2 off this tick: ${pol.why}`); return { ...empty, ok: false, why: pol.why }; }
       const { resolvePoolImpulse, resolvePoolImpulseWrite } = await import("./pool-impulse.js");
@@ -1488,7 +1554,7 @@ export function defaultGoalReachIO(policy: GoalReachPolicy): GoalReachIO {
         if (r.shape === "substrateGap" && Array.isArray(rows)) existing = new Map(rows.filter((g) => String(g["id"] ?? "").startsWith("goal-deficiency-")).map((g) => [String(g["id"]), g]));
       } catch { existing = null; }
       const dec = gd.deficiencyDecisions(up.tallies, existing, now, pol.policy);
-      const report: DeficiencyReport = { ...empty, tallied: up.touched.length, ignored: up.ignored, skipped: dec.skipped, unclassified: dec.unclassified, unread: dec.unread, unrecorded: dec.unrecorded, reasons_read: reasonsRead, reasons_unrecorded: reasonsUnrecorded, reason_reads_failed: reasonReadsFailed, skipped_no_goal_hash: unhashed.no_goal_hash, skipped_cut_goal: unhashed.cut_goal, candidates: dec.candidates };
+      const report: DeficiencyReport = { ...empty, tallied: up.touched.length, ignored: up.ignored, skipped: dec.skipped, unclassified: dec.unclassified, unread: dec.unread, unrecorded: dec.unrecorded, reasons_read: reasonsRead, reasons_unrecorded: reasonsUnrecorded, reason_reads_failed: reasonReadsFailed, skipped_no_goal_hash: unhashed.no_goal_hash, skipped_cut_goal: unhashed.cut_goal, candidates: dec.candidates, localized: [] };
       const sum = (xs: Array<{ count: number }>) => xs.reduce((s, u) => s + u.count, 0);
       console.log(`[goal-reach] R2 read ${reasonsRead} reason(s), ${reasonsUnrecorded} record(s) with none, ${reasonReadsFailed} unreadable; still unread ${sum(dec.unread)} run(s), unrecorded ${sum(dec.unrecorded)}; ${dec.candidates.length} candidate(s) (${dec.candidates.map((c) => `${c.reason_class}/${c.class_source}`).join(", ") || "none"})`);
       for (const w of dec.writes) {
@@ -1504,6 +1570,26 @@ export function defaultGoalReachIO(policy: GoalReachPolicy): GoalReachIO {
         }
       }
       for (const u of dec.unclassified) console.warn(`[goal-reach] R2 ${u.count} unclassified reason(s) for goal_hash=${u.goal_hash}: ${u.samples.map((x) => JSON.stringify(x.slice(0, 120))).join(" | ")}`);
+      // #1a LOCALIZE: an open deficiency row whose counted runs have not been attributed (or changed since) gets a site from
+      // what its runs' own traces name — or a loud unknown with the per-run breakdown. Never from the goal or judge prose.
+      if (existing !== null && pol.policy.max_localizations > 0) {
+        const rows = new Map(existing);
+        for (const w of dec.writes) rows.set(w.id, { ...(rows.get(w.id) ?? {}), ...w.gap, status: "open" });
+        const due = [...rows.values()].filter((g) => String(g["status"] ?? "") === "open" && needsLocalization(g)).slice(0, pol.policy.max_localizations);
+        for (const g of due) {
+          try {
+            const loc = await localizeRow(g, up.tallies, pol.policy.siting_majority, now);
+            const meta = (g["classification_metadata"] ?? {}) as Record<string, unknown>;
+            const patch: Record<string, unknown> = { ...meta, localization: loc, ...(loc.state === "sited" ? { vessel: loc.vessel, failing_activity: loc.failing_activity, edit_site: loc.edit_site } : {}) };
+            const res = await resolveSubstrateGapWrite({ type: "substrateGap_write", gap: { id: g["id"], category: g["category"], source: g["source"], summary: g["summary"], detected_at: g["detected_at"], status: "open", classification_metadata: patch }, expect_status: "open" } as never);
+            const ok = res.shape === "substrateGapWriteResult" && !((res.body ?? {}) as Record<string, unknown>)["skip_reason"];
+            report.localized.push({ id: String(g["id"]), state: loc.state, kind: loc.kind, ...(ok ? {} : { refused: true }) });
+            console.log(loc.state === "sited"
+              ? `[goal-reach] R2 localization ${g["id"]}: SITED ${loc.vessel} ${loc.edit_site} (failing step ${loc.failing_activity}; ${loc.method})${ok ? "" : " — write refused"}`
+              : `[goal-reach] R2 localization ${g["id"]}: unknown (${loc.kind}) — ${loc.why}${ok ? "" : " — write refused"}`);
+          } catch (e) { console.warn(`[goal-reach] R2 localization ${g["id"]} failed: ${errText(e)}`); }
+        }
+      }
       return report;
     },
   };

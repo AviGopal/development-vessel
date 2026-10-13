@@ -310,6 +310,21 @@ describe("through the default I/O and the real stores", () => {
     } finally { server.stop(true); }
   });
 
+  it("#1a wiring: a filed deficiency row is localized in the same call (loud unknown when no trace is readable) and reported", async () => {
+    const G4 = `reconcile the duplicate vendor invoices (${RUN})`;
+    const io = grt.defaultGoalReachIO({ ...grt.DEFAULT_GOAL_REACH_POLICY });
+    const ds = [9, 8, 7].map((h, i) => ({ ...obs(`lc${i}`, h, false, "The required reconciliation was not produced."), goal: G4 }));
+    const r = await quiet(() => io.recogniseDeficiencies(ds, Date.now()));
+    const h4 = grt.goalHashOf(G4);
+    const id = `goal-deficiency-${h4}-deliverable_not_produced`;
+    expect(r.filed.map((f: Row) => f.id)).toContain(id);
+    expect(r.localized).toContainEqual({ id, state: "unknown", kind: "trace_unreadable" });
+    await sg.__settleBirthEvaluationsForTests();
+    const g = ((await sg.resolveSubstrateGap({ type: "substrateGap", id, limit: 1 } as never)).body as Row).gaps[0];
+    expect(g.classification_metadata.localization).toMatchObject({ state: "unknown", kind: "trace_unreadable" });
+    expect(g.classification_metadata.edit_site ?? null).toBeNull();
+  });
+
   it("a policy edit reclasses the STORED entries on the next call, with no new run (wired in the default I/O)", async () => {
     const G3 = `tabulate the overdue invoices per customer (${RUN})`;
     const prose = "The output did not provide the overdue invoices per customer.";
@@ -634,4 +649,86 @@ describe("goal_reach_verdict `since` + the judge's landing bound", () => {
     expect(await quietly(() => evaluateGapCheck(gapRow(landing, "some_count_report"), { fetchImpl: answerWith(tallyOf(), seen) }))).toBe("present");
     expect(seen[0]).toEqual({ type: "some_count_report", goal_hash: hh });
   });
+});
+
+// #1a: A DEFICIENCY IS SITED ONLY FROM WHAT ITS RUNS' OWN TRACES NAME. Each counted run is attributed from its trace
+// (step_failure / output_error / composition / trace_unreadable); only a FAILING STEP sites, and only when one resolver
+// accounts for siting_majority (a shaped policy field) of the readable runs, with exactly one local serving vessel and one
+// located file. Everything else is a loud unknown carrying the per-run breakdown. Never from the goal or judge prose.
+describe("#1a: attributing a deficiency's runs and siting it", () => {
+  const T = (tasks: Array<[string, boolean]>, reason?: string) => ({ tasks: tasks.map(([r, ok]) => ({ resolver_id: r, status: ok ? "success" : "failure" })), failure_mode: reason ? { type: "execution_error", reason } : null });
+  const A = (id: string, kind: string, resolver?: string, ex?: string): Row => ({ dispatch_id: id, kind, ...(resolver ? { resolver } : {}), ...(ex ? { failure_excerpt: ex } : {}) });
+  const oneVessel = async (r: string) => ({ vessel: `${r.replace(/_/g, "-")}-vessel` });
+  const fileFor = async (v: string, r: string) => ({ file: `repos/${v}/src/resolvers/${r}.ts`, method: "grep_unique" });
+  const NOW2 = Date.parse("2030-04-01T00:00:00Z");
+
+  it("attributeRun: a failed task → step_failure (its resolver + the trace's failure excerpt); unreadable → trace_unreadable", () => {
+    expect(gd.attributeRun("d1", T([["a_step", true], ["ledger_write", false]], "ledger_write POST returned 400: field owner missing"), "x")).toEqual(A("d1", "step_failure", "ledger_write", "ledger_write POST returned 400: field owner missing"));
+    expect(gd.attributeRun("d2", null, "x")).toEqual(A("d2", "trace_unreadable"));
+  });
+  it("attributeRun: all tasks ok + an error-envelope judge code → output_error (last step); all ok otherwise → composition", () => {
+    expect(gd.attributeRun("d3", T([["fetch_page", true]]), "deterministic:error-envelope — output is an error/failure envelope")).toEqual(A("d3", "output_error", "fetch_page"));
+    expect(gd.attributeRun("d4", T([["scan", true], ["summarise", true]]), "The output did not provide the digest.")).toEqual(A("d4", "composition"));
+  });
+  it("single cause: every run fails at ONE resolver → SITED (vessel from discovery, file from the locator); two runs at it → one site", async () => {
+    const runs = [A("d1", "step_failure", "ledger_write", "400"), A("d2", "step_failure", "ledger_write", "400"), A("d3", "step_failure", "ledger_write")];
+    const loc = await gd.localizeFromRuns(runs, 0.5, oneVessel, fileFor, NOW2);
+    expect(loc).toMatchObject({ state: "sited", kind: "step_failure", vessel: "ledger-write-vessel", failing_activity: "ledger_write", edit_site: "repos/ledger-write-vessel/src/resolvers/ledger_write.ts", method: "grep_unique" });
+    expect(loc.counts.step_failure).toBe(3);
+  });
+  it("siting_majority is the policy's: 2 of 4 runs at one resolver sites at 0.5, not at 0.75", async () => {
+    const runs = [A("d1", "step_failure", "x_write"), A("d2", "step_failure", "x_write"), A("d3", "composition"), A("d4", "composition")];
+    expect((await gd.localizeFromRuns(runs, 0.5, oneVessel, fileFor, NOW2)).state).toBe("sited");
+    expect((await gd.localizeFromRuns(runs, 0.75, oneVessel, fileFor, NOW2))).toMatchObject({ state: "unknown", kind: "mixed" });
+  });
+  it("MUST-FAIL: an environment-looking error envelope never sites (output_error stays unknown even with a unique vessel)", async () => {
+    const runs = [A("d1", "output_error", "shell_result"), A("d2", "output_error", "shell_result"), A("d3", "output_error", "shell_result")];
+    const loc = await gd.localizeFromRuns(runs, 0.5, oneVessel, fileFor, NOW2);
+    expect(loc).toMatchObject({ state: "unknown", kind: "output_error" });
+    expect(loc.edit_site).toBeUndefined();
+  });
+  it("MUST-FAIL: prose never sites — composition runs stay unknown whatever the goal/judge text names", async () => {
+    const loc = await gd.localizeFromRuns([A("d1", "composition"), A("d2", "composition")], 0.5, oneVessel, fileFor, NOW2);
+    expect(loc).toMatchObject({ state: "unknown", kind: "composition" });
+    // through attributeRun: a reason naming a file and a vessel does not make a site
+    const viaProse = gd.attributeRun("d5", T([["scan", true]]), "The output did not provide it; fix repos/ledger-vessel/src/resolvers/ledger.ts in the ledger vessel");
+    expect(viaProse.kind).toBe("composition");
+  });
+  it("mixed causes (two failing resolvers, one composition) → unknown 'mixed' with the per-run breakdown", async () => {
+    const runs = [A("d1", "step_failure", "a_write"), A("d2", "step_failure", "b_trace"), A("d3", "composition"), A("d4", "composition")];
+    const loc = await gd.localizeFromRuns(runs, 0.6, oneVessel, fileFor, NOW2);
+    expect(loc).toMatchObject({ state: "unknown", kind: "mixed" });
+    expect(loc.why).toContain("a_write×1");
+    expect(loc.runs.length).toBe(4);
+  });
+  it("a failing step served by several local vessels, or with no located file, stays a loud unknown naming why", async () => {
+    const runs = [A("d1", "step_failure", "c_write"), A("d2", "step_failure", "c_write")];
+    const amb = await gd.localizeFromRuns(runs, 0.5, async () => ({ why: "c_write is served by 2 local vessels: store-a, store-b" }), fileFor, NOW2);
+    expect(amb).toMatchObject({ state: "unknown", kind: "step_failure", failing_activity: "c_write" });
+    expect(amb.why).toContain("2 local vessels");
+    const nofile = await gd.localizeFromRuns(runs, 0.5, oneVessel, async () => null, NOW2);
+    expect(nofile).toMatchObject({ state: "unknown", vessel: "c-write-vessel" });
+  });
+  it("no readable trace → unknown trace_unreadable", async () => {
+    expect(await gd.localizeFromRuns([A("d1", "trace_unreadable")], 0.5, oneVessel, fileFor, NOW2)).toMatchObject({ state: "unknown", kind: "trace_unreadable" });
+  });
+  it("localizeRow: reads each counted run's trace by its execution id; needsLocalization is true until every counted run is attributed", async () => {
+    const G = "tabulate the late shipments per carrier";
+    const hh = grt.goalHashOf(G);
+    const tallies = gd.tallyUpdate({}, [1, 2].map((i) => run(`L${i}`, G, 5 - i, false, "The required table was not produced.", { executionId: `exec_L${i}` })), NOW, P(), never).tallies;
+    const row: Row = { id: `goal-deficiency-${hh}-deliverable_not_produced`, status: "open", classification_metadata: { kind: "goal_content_deficiency", goal_hash: hh, dispatch_ids: ["L1", "L2"] } };
+    expect(grt.needsLocalization(row)).toBe(true);
+    const read: string[] = [];
+    const loc = await grt.localizeRow(row, tallies, 0.5, NOW, { readTrace: async (id: string | null) => { read.push(String(id)); return T([["carrier_report", false]], "carrier_report failed: column eta missing") as Row; }, vesselOf: oneVessel, locate: fileFor });
+    expect(read).toEqual(["exec_L1", "exec_L2"]);
+    expect(loc).toMatchObject({ state: "sited", failing_activity: "carrier_report" });
+    expect(grt.needsLocalization({ ...row, classification_metadata: { ...(row["classification_metadata"] as Row), localization: loc } })).toBe(false);
+    expect(grt.needsLocalization({ ...row, classification_metadata: { ...(row["classification_metadata"] as Row), dispatch_ids: ["L1", "L2", "L3"], localization: loc } })).toBe(true);
+  });
+  it("siting_majority and max_localizations are read from the policy record (defaults 0.5 and 5)", () => {
+    expect(gd.parseDeficiencyPolicy(null).policy).toMatchObject({ siting_majority: 0.5, max_localizations: 5 });
+    expect(gd.parseDeficiencyPolicy({ siting_majority: 0.8, max_localizations: 2 }).policy).toMatchObject({ siting_majority: 0.8, max_localizations: 2 });
+  });
+  const bad: Array<[string, unknown]> = [["siting_majority 0", { siting_majority: 0 }], ["siting_majority above 1", { siting_majority: 1.5 }], ["siting_majority a string", { siting_majority: "half" }], ["max_localizations above 50", { max_localizations: 51 }]];
+  for (const [label, body] of bad) it(`invalid (${label}) → ok false`, () => { expect(gd.parseDeficiencyPolicy(body).ok).toBe(false); });
 });

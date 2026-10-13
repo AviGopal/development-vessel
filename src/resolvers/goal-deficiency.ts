@@ -60,6 +60,10 @@ export interface GoalDeficiencyPolicy {
   ignore_operator_patterns: string[];
   /** Judge reasons R2 reads itself per call for not-reached runs that have none yet (oldest first). */
   max_reason_reads: number;
+  /** Share of a gap's counted runs that must fail at ONE resolver before that resolver sites the gap (#1a). 0 < x <= 1. */
+  siting_majority: number;
+  /** Deficiency rows localized per call (each reads up to its counted runs' traces). */
+  max_localizations: number;
   /** Judge codes (deterministic:<code>) that are NOT content deficiencies (refusals, rate limits): treated as abstains. */
   non_deficiency_code_patterns: string[];
   lenient_reach: LenientReachRule[];
@@ -75,6 +79,8 @@ export const DEFAULT_GOAL_DEFICIENCY_POLICY: Readonly<GoalDeficiencyPolicy> = Ob
   max_new_per_run: 2,
   max_entries: 60,
   max_reason_reads: 30,
+  siting_majority: 0.5,
+  max_localizations: 5,
   non_deficiency_code_patterns: ["-refused$"],
   classes: [
     { class: "deliverable_not_produced", patterns: ["\\bnot produced\\b", "did not produce", "did not provide the required", "\\brequired \\S+ was not\\b", "no (output|deliverable) (was )?produced", "missing (the )?required (output|deliverable)"] },
@@ -118,6 +124,15 @@ export function parseDeficiencyPolicy(body: unknown): { ok: true; policy: GoalDe
     }
     p.classes = out;
   }
+  if (b["siting_majority"] !== undefined) {
+    const v = b["siting_majority"];
+    if (typeof v !== "number" || !Number.isFinite(v) || v <= 0 || v > 1) return { ok: false, why: "goalDeficiencyPolicy.siting_majority must be a number in (0, 1]" };
+    p.siting_majority = v;
+  }
+  if (b["max_localizations"] !== undefined) {
+    if (!intIn(b["max_localizations"], 0, 50)) return { ok: false, why: "goalDeficiencyPolicy.max_localizations must be an integer in 0..50" };
+    p.max_localizations = b["max_localizations"] as number;
+  }
   for (const k of ["abstain_patterns", "ignore_operator_patterns", "non_deficiency_code_patterns"] as const) {
     if (b[k] === undefined) continue;
     const l = strList(b[k]);
@@ -157,6 +172,8 @@ export interface TallyEntry {
   class: string | null;
   /** The goal-host that ran it (its reason can be read there later). */
   node?: string | null;
+  /** The run's execution id (its durable trace), when the listing carried it. */
+  execution_id?: string | null;
   /** Where the class came from: the judge's own structured code (the system's taxonomy) or the shaped text map (an operator map). */
   class_source?: "judge_code" | "operator_map";
   missing_shapes?: string[];
@@ -185,6 +202,7 @@ export interface RunView {
   poolShapes?: string[];
   selectedTemplateId?: string | null;
   node?: string | null;
+  executionId?: string | null;
   /** The run was read and its record carries NO reason (the judge/walk never wrote one): unrecorded, not unread. */
   reason_unrecorded?: boolean;
 }
@@ -245,9 +263,10 @@ export function tallyUpdate(tallies: Record<string, DeficiencyTally>, runs: read
       ? { dispatch_id: r.dispatchId, at: r.endedAt ?? r.startedAt, reached: true, reason, class: null, judge: { reason, shapes: [...(r.completionShapes ?? r.poolShapes ?? [])], template: r.selectedTemplateId ?? null } }
       : { dispatch_id: r.dispatchId, at: r.endedAt ?? r.startedAt, reached: false, reason, ...(reason ? classifyReason(reason, target, policy, isAdvertised) : { class: r.reason_unrecorded ? UNRECORDED_CLASS : UNREAD_CLASS }) };
     if (r.node) e.node = r.node;
+    if (!e.reached && r.executionId) e.execution_id = r.executionId;
     const i = t.entries.findIndex((x) => x.dispatch_id === r.dispatchId);
     // A later, thinner observation (no reason) never erases a reason already read, nor the node it was read from.
-    if (i >= 0) { const prev = t.entries[i]!; if (reason || !prev.reason) t.entries[i] = { ...e, ...(e.node || !prev.node ? {} : { node: prev.node }) }; }
+    if (i >= 0) { const prev = t.entries[i]!; if (reason || !prev.reason) t.entries[i] = { ...e, ...(e.node || !prev.node ? {} : { node: prev.node }), ...(e.execution_id || !prev.execution_id ? {} : { execution_id: prev.execution_id }) }; }
     else t.entries.push(e);
     t.entries.sort((a, b) => a.at - b.at);
     if (t.entries.length > policy.max_entries) t.entries = t.entries.slice(-policy.max_entries);
@@ -523,4 +542,81 @@ export async function resolveGoalReachVerdict(pointer: { goal_hash?: unknown; si
   } catch (e) {
     return { shape: "goalReachVerdict", body: { measured: false, goal_hash: goalHash, why: `tally unreadable: ${String((e as Error)?.message ?? e).slice(0, 160)}` } };
   }
+}
+
+// ── #1a: where a deficiency comes from (attribution) and whether that sites it ───────────────────────
+
+/**
+ * What one counted run's own trace says went wrong. Never the goal or the judge's prose:
+ *  - step_failure: a task the walk ran FAILED; its resolver is the failing step, the trace's failure_mode the evidence;
+ *  - output_error: every task succeeded but the judge classed the output an error envelope (judge code error-envelope):
+ *    the producer is the last step, but environment vs code cannot be told apart from the walk;
+ *  - composition: every task succeeded and the goal was still judged unmet: no step names a site;
+ *  - trace_unreadable: the run's trace could not be read.
+ */
+export type RunKind = "step_failure" | "output_error" | "composition" | "trace_unreadable";
+export interface RunAttribution { dispatch_id: string; kind: RunKind; resolver?: string; failure_excerpt?: string }
+type TraceTask = { resolver_id?: unknown; status?: unknown; success?: unknown };
+export interface TraceView { tasks?: TraceTask[] | null; failure_mode?: { type?: unknown; reason?: unknown } | null }
+
+export function attributeRun(dispatchId: string, trace: TraceView | null, reason: string): RunAttribution {
+  if (!trace || !Array.isArray(trace.tasks)) return { dispatch_id: dispatchId, kind: "trace_unreadable" };
+  const tasks = trace.tasks;
+  const failed = tasks.find((t) => t.status === "failure" || t.success === false);
+  const rid = (t: TraceTask | undefined) => (typeof t?.resolver_id === "string" && t.resolver_id ? t.resolver_id : undefined);
+  if (failed) {
+    const ex = typeof trace.failure_mode?.reason === "string" ? trace.failure_mode.reason.slice(0, 300) : undefined;
+    return { dispatch_id: dispatchId, kind: "step_failure", ...(rid(failed) ? { resolver: rid(failed) } : {}), ...(ex ? { failure_excerpt: ex } : {}) };
+  }
+  if (verdictTokenOfReason(reason) === "error-envelope") {
+    const last = tasks[tasks.length - 1];
+    return { dispatch_id: dispatchId, kind: "output_error", ...(rid(last) ? { resolver: rid(last) } : {}) };
+  }
+  return { dispatch_id: dispatchId, kind: "composition" };
+}
+
+export interface Localization {
+  state: "sited" | "unknown";
+  kind: RunKind | "mixed";
+  why?: string;
+  vessel?: string;
+  failing_activity?: string;
+  edit_site?: string;
+  method?: string;
+  counts: Record<RunKind, number>;
+  runs: RunAttribution[];
+  at: string;
+}
+export type VesselOf = (resolver: string) => Promise<{ vessel: string } | { why: string }>;
+/** The file in `vessel` the failing step's resolver lives in, located from the resolver name and the failure evidence only. */
+export type LocateFile = (vessel: string, resolver: string, excerpt: string | undefined) => Promise<{ file: string; method: string } | null>;
+
+/**
+ * Site a deficiency from its runs' attributions: only a FAILING STEP sites, and only when one resolver accounts for at
+ * least `majority` of the readable counted runs; its vessel comes from `vesselOf` (discovery), its file from `locate`.
+ * Everything else is a loud unknown carrying the per-run breakdown (output errors are never sent to code: an environment
+ * failure would read as a code defect).
+ */
+export async function localizeFromRuns(runs: RunAttribution[], majority: number, vesselOf: VesselOf, locate: LocateFile, now: number): Promise<Localization> {
+  const counts: Record<RunKind, number> = { step_failure: 0, output_error: 0, composition: 0, trace_unreadable: 0 };
+  for (const r of runs) counts[r.kind]++;
+  const base = { counts, runs, at: new Date(now).toISOString() };
+  const readable = runs.length - counts.trace_unreadable;
+  if (readable === 0) return { state: "unknown", kind: "trace_unreadable", why: `no counted run's trace could be read (${runs.length})`, ...base };
+  const byResolver = new Map<string, RunAttribution[]>();
+  for (const r of runs) if (r.kind === "step_failure" && r.resolver) byResolver.set(r.resolver, [...(byResolver.get(r.resolver) ?? []), r]);
+  const top = [...byResolver.entries()].sort((a, b) => b[1].length - a[1].length)[0];
+  if (top && top[1].length / readable >= majority) {
+    const [resolver, rs] = top;
+    const v = await vesselOf(resolver);
+    if ("why" in v) return { state: "unknown", kind: "step_failure", failing_activity: resolver, why: `failing step ${resolver} (${rs.length}/${readable} runs) has no single serving vessel: ${v.why}`, ...base };
+    const f = await locate(v.vessel, resolver, rs.find((r) => r.failure_excerpt)?.failure_excerpt);
+    if (!f) return { state: "unknown", kind: "step_failure", vessel: v.vessel, failing_activity: resolver, why: `failing step ${resolver} (${rs.length}/${readable} runs) in ${v.vessel}, but no single file located for it`, ...base };
+    return { state: "sited", kind: "step_failure", vessel: v.vessel, failing_activity: resolver, edit_site: f.file, method: f.method, ...base };
+  }
+  const dominant = (["output_error", "composition", "step_failure"] as const).find((k) => counts[k] / readable >= majority);
+  if (dominant === "output_error") return { state: "unknown", kind: "output_error", why: `${counts.output_error}/${readable} runs: every step succeeded but the output was an error envelope; environment or code cannot be told apart from the walk`, ...base };
+  if (dominant === "composition") return { state: "unknown", kind: "composition", why: `${counts.composition}/${readable} runs: every step succeeded and the goal was still judged unmet; no step names a site`, ...base };
+  const steps = [...byResolver.entries()].map(([k, v]) => `${k}×${v.length}`).join(", ") || "none";
+  return { state: "unknown", kind: "mixed", why: `no single cause reaches siting_majority ${majority} across ${readable} readable run(s) (failing steps: ${steps}; output errors ${counts.output_error}; composition ${counts.composition})`, ...base };
 }

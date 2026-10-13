@@ -33,6 +33,17 @@
  *      not import the edit site writes no check: the gap stays unarmed (fail closed). No region is written, so
  *      the arm-time region gate has nothing to refuse; the write still passes through it.
  *
+ * OUTCOME (the dispatch is read back; a dispatch alone earns no credit): every dispatch records the node that sent
+ * it (dispatch_node, the substrate's bootstrap identity) and its goal-host. A gap still at goal_dispatched with no new
+ * titles has its goal's outcome read from THAT node's goal-host (GET /executions/:id, the contract dispatch-goal.ts
+ * reads): running waits; terminal and not reached is a FAILED attempt with the reach reason (state dispatch_failed);
+ * terminal and reached with no new title after a grace is failed too. An outcome that cannot be read (not found on the
+ * host, host unreachable, no dispatch id, a status this code does not know, a dispatch owned by another node that never
+ * settles) is never read as failed: it waits, loudly, and only past a shaped staleness bound becomes dispatch_lost with
+ * WHY it was lost. A settled gap (failed or lost) is retried after its backoff ahead of fresh gaps, and a gap whose
+ * goal is in flight is never sent a second one. A gap whose target the live autonomyScope excludes gets no goal and one
+ * skip record (state scope_excluded): the lane could never land it. Bounds are read from the family's rhythm body.
+ *
  * CADENCE IS A RHYTHM (law 5). The family's timeShapedRhythm impulse is read at use time: no rhythm means no
  * work (reason no_rhythm), a rhythm not due by the conductor's own formula (rhythmDueScore) means no work, and
  * the per-tick bound, backoff and attempt cap come from the same impulse's body. The rhythm conductor fires the
@@ -55,7 +66,7 @@ import {
   isAwaitingLandVerification,
   isParkingDisposition,
 } from "../judge/gap-eligibility.js";
-import { identifyVessel } from "../judge/gap-policy.js";
+import { autonomyScopeExcludes, identifyVessel, type AutonomyScope } from "../judge/gap-policy.js";
 import { checkImportsEditSite, checkSupplyCheckPath, configEditSite, configSiteCheckGoal, consumerResolverModules, srcReaderAt, vesselRelativeEditSite, type SrcReader } from "./check-supply-admission.js";
 import { readFamilyRhythm, rhythmDueScore, rhythmSettlementOverlay, type RhythmBody } from "./rhythm-conductor-tick.js";
 // The check-run judge lives with the evaluator (scope-earn-in.ts, an excluded file): item 2 reads it from there.
@@ -64,6 +75,7 @@ import { resolveDispatchGoal } from "./dispatch-goal.js";
 import { armRedReasonRefusal, testTitleInSource } from "./retry-evidence.js";
 import { onlyTestsProblem } from "./test-suite.js";
 import { selfAuthHeaders } from "../lib/self-auth.js";
+import { METABOB_API_KEY } from "../config.js";
 
 export const CHECK_SUPPLY_FAMILY = "gap-check-supply";
 /** The predicate_source a system-authored check carries: the discriminator the measures count. */
@@ -88,6 +100,19 @@ type Ledger = {
   mode?: string;
   baseline_titles?: string[];
   edit_site?: string | null;
+  /** The node that sent the goal (its bootstrap identity) and its goal-host: the only place its outcome can be read. */
+  dispatch_node?: string;
+  dispatch_host?: string;
+  /** The outcome read back for the last dispatch (status, reached, why it was lost, where and when it was read). */
+  outcome?: Row;
+  /** The settled attempts before the current one (state, reason, outcome), newest last, at most five. */
+  history?: Row[];
+};
+const settledHistory = (l: Ledger): Row[] => {
+  const prior = Array.isArray(l.history) ? l.history.slice(-4) : [];
+  return l.state === "dispatch_failed" || l.state === "dispatch_lost"
+    ? [...prior, { attempt: Number(l.attempts ?? 0), state: l.state, reason: l.reason ?? "", outcome: l.outcome ?? {} }]
+    : prior;
 };
 
 export interface GapCheckSupplyTickPointer {
@@ -252,8 +277,96 @@ export function checkSupplyMeasures(rows: Row[], sinceMs: number): Record<string
  * wrong reason); nothing at all when it found nothing to do or is still waiting on a test to land.
  */
 export function checkSupplySettlementLeg(c: { dispatched: number; armed: number; refused: number }): "alpha" | "beta" | null {
-  if (c.dispatched + c.armed > 0) return "alpha";
+  // A dispatch is a promise, not a result: only an armed check is credit. A refusal, a failed or lost goal is a debit.
+  if (c.armed > 0) return "alpha";
   return c.refused > 0 ? "beta" : null;
+}
+
+// ─── the dispatch's outcome, read back ──────────────────────────────────────
+
+const GOAL_HOST_ENDPOINT = process.env["GOAL_HOST_VESSEL_ENDPOINT"] ?? "http://127.0.0.1:8210";
+/** This node's identity in a ledger (bootstrap identity, the same one the lane's pick line names as owner). */
+export const checkSupplyNode = (): string => process.env["SUBSTRATE_NAME"] ?? "substrate";
+const RUNNING_STATUSES: ReadonlySet<string> = new Set(["running", "pending", "accepted", "queued", "dispatched", "in_progress", "started"]);
+const TERMINAL_STATUSES: ReadonlySet<string> = new Set(["completed", "failed", "error", "errored", "cancelled", "canceled", "timeout", "timed_out", "aborted", "refused"]);
+
+/** What a node's goal-host said about one dispatch: an HTTP answer, or unreachable. null = not probed (another node's). */
+export type DispatchProbe = { http: number; status?: unknown; reached?: unknown; reach_reason?: unknown } | { http: "unreachable"; error: string };
+export type LostWhy = "not_found_on_host" | "host_unreachable" | "no_dispatch_id" | "unrecognised_status" | "owning_node_never_settled" | "timed_out";
+export type DispatchVerdict =
+  | { kind: "running" }
+  | { kind: "awaiting_titles" }
+  | { kind: "failed"; reason: string }
+  | { kind: "lost"; why: LostWhy; reason: string }
+  | { kind: "wait"; why: LostWhy; detail: string };
+export interface OutcomeBounds { stale_ms: number; timeout_ms: number; title_grace_ms: number; foreign_stale_ms: number }
+
+/**
+ * The verdict on one in-flight dispatch. Pure. An outcome that cannot be read is never "failed": it waits (and is
+ * reported) until the staleness bound, then is lost with the reason it could not be read.
+ */
+export function dispatchVerdict(ledger: Ledger, probe: DispatchProbe | null, nowMs: number, bounds: OutcomeBounds, localNode: string): DispatchVerdict {
+  const sent = Date.parse(String(ledger.last_dispatch_at ?? ""));
+  const age = Number.isFinite(sent) ? nowMs - sent : Number.POSITIVE_INFINITY;
+  const hours = (ms: number): string => `${Math.round(ms / 3_600_000)} h`;
+  const lostOr = (why: LostWhy, detail: string, bound = bounds.stale_ms): DispatchVerdict =>
+    age > bound ? { kind: "lost", why, reason: `${why}: ${detail}; unsettled ${hours(age)} (bound ${hours(bound)})` } : { kind: "wait", why, detail };
+  if (!nonEmpty(ledger.dispatch_id)) return lostOr("no_dispatch_id", "the dispatch recorded no id, so its outcome cannot be read");
+  const owner = nonEmpty(ledger.dispatch_node) ? String(ledger.dispatch_node) : null;
+  if (owner !== null && owner !== localNode) return lostOr("owning_node_never_settled", `dispatched by ${owner}; only its goal-host can read the outcome`, bounds.foreign_stale_ms);
+  const where = owner === null ? `this node's goal-host (the dispatching node was not recorded)` : `${owner}'s goal-host`;
+  if (probe === null || probe.http === "unreachable") return lostOr("host_unreachable", `${where} did not answer${probe && probe.http === "unreachable" ? ` (${probe.error.slice(0, 120)})` : ""}`);
+  if (probe.http === 404) return lostOr("not_found_on_host", `${where} has no record of dispatch ${ledger.dispatch_id} (pruned, or sent from another node)`);
+  if (probe.http !== 200) return lostOr("host_unreachable", `${where} answered HTTP ${probe.http}`);
+  const status = String(probe.status ?? "").toLowerCase();
+  if (RUNNING_STATUSES.has(status)) return age > bounds.timeout_ms ? { kind: "lost", why: "timed_out", reason: `timed_out: still ${status} ${hours(age)} after dispatch (bound ${hours(bounds.timeout_ms)})` } : { kind: "running" };
+  if (TERMINAL_STATUSES.has(status)) {
+    const why = typeof probe.reach_reason === "string" && probe.reach_reason.trim() ? `: ${probe.reach_reason.replace(/\s+/g, " ").trim().slice(0, 240)}` : "";
+    if (probe.reached === true) {
+      return age > bounds.title_grace_ms
+        ? { kind: "failed", reason: `the goal ended ${status} and reached, but no new test title appeared in ${ledger.test_file ?? "the check file"} within ${hours(bounds.title_grace_ms)}` }
+        : { kind: "awaiting_titles" };
+    }
+    return { kind: "failed", reason: `the goal ended ${status}, not reached${why}` };
+  }
+  return lostOr("unrecognised_status", `${where} reported status ${JSON.stringify(String(probe.status ?? "")).slice(0, 60)}, which this code does not know`);
+}
+
+/**
+ * This node's live autonomyScope record, read from its own pool (the record's authority, as the rhythm is read). The
+ * supply's skip is only a saving (it does not send a goal the lane could never land); the containment itself is the
+ * lane's admission, which fails closed. So an absent or unreadable record here skips nothing and is reported.
+ */
+async function readScopeSelf(): Promise<AutonomyScope> {
+  try {
+    const res = await fetch(SELF_RESOLVE_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...selfAuthHeaders(SELF_RESOLVE_URL, SELF_RESOLVE_URL) },
+      body: JSON.stringify({ impulse: { type: "poolImpulse", shape: "autonomyScope", status: "open" } }),
+      signal: AbortSignal.timeout(5_000),
+    });
+    if (!res.ok) return { excluded: [], readable: false, reason: `autonomyScope read HTTP ${res.status}` };
+    const j = (await res.json()) as { body?: { impulses?: Array<{ body?: Row }> } };
+    const body = j.body?.impulses?.[0]?.body;
+    if (!body) return { excluded: [], readable: false, absent: true, reason: "no autonomyScope record" };
+    const raw = body["excluded_paths"];
+    const excluded = Array.isArray(raw) ? raw.filter((e): e is string => typeof e === "string" && e.trim().length > 0).map((e) => e.trim()) : [];
+    return { excluded, readable: true, reason: `autonomyScope: ${excluded.length} excluded path(s)` };
+  } catch (err) {
+    return { excluded: [], readable: false, reason: `autonomyScope unreadable: ${String((err as Error)?.message ?? err).slice(0, 120)}` };
+  }
+}
+
+/** Read one dispatch from this node's goal-host. */
+async function probeDispatch(dispatchId: string): Promise<DispatchProbe> {
+  try {
+    const r = await fetch(`${GOAL_HOST_ENDPOINT}/executions/${encodeURIComponent(dispatchId)}`, { headers: METABOB_API_KEY ? { Authorization: `ApiKey ${METABOB_API_KEY}` } : {}, signal: AbortSignal.timeout(5_000) });
+    if (r.status !== 200) return { http: r.status };
+    const j = (await r.json().catch(() => ({}))) as Row;
+    return { http: 200, status: j["status"], reached: j["reached"], reach_reason: j["goalReachReason"] };
+  } catch (err) {
+    return { http: "unreachable", error: String((err as Error)?.message ?? err) };
+  }
 }
 
 /** Settle a report-graded family's rhythm (the conductor left it pending: directFamilySettlement). */
@@ -295,6 +408,14 @@ export async function resolveGapCheckSupplyTick(pointer: GapCheckSupplyTickPoint
   const backoffMs = posNum(rhythm.body["backoff_hours"], 24) * 3600_000;
   const maxAttempts = Math.floor(posNum(rhythm.body["max_attempts"], 3));
   const windowMs = posNum(rhythm.body["measure_window_days"], 7) * 86_400_000;
+  const bounds: OutcomeBounds = {
+    stale_ms: posNum(rhythm.body["dispatch_stale_hours"], 24) * 3600_000,
+    timeout_ms: posNum(rhythm.body["dispatch_timeout_hours"], 6) * 3600_000,
+    title_grace_ms: posNum(rhythm.body["title_grace_hours"], 2) * 3600_000,
+    foreign_stale_ms: posNum(rhythm.body["foreign_stale_hours"], 72) * 3600_000,
+  };
+  const maxOutcomeReads = Math.floor(posNum(rhythm.body["max_outcome_reads"], 50));
+  const localNode = checkSupplyNode();
 
   const read = await resolveSubstrateGap({ type: "substrateGap", limit: 1_000_000 } as never);
   const rows = (((read.body ?? {}) as { gaps?: Row[] }).gaps ?? []).filter((r) => typeof r["id"] === "string");
@@ -306,6 +427,7 @@ export async function resolveGapCheckSupplyTick(pointer: GapCheckSupplyTickPoint
   const skipped: Array<{ id: string; reason: string }> = [];
   const exhausted: string[] = [];
   const controlMarked: string[] = [];
+  const outcomes: { failed: Array<{ id: string; reason: string }>; lost: Array<{ id: string; why: LostWhy; reason: string }>; running: number; awaiting_titles: number; waiting: Array<{ id: string; why: LostWhy; detail: string }> } = { failed: [], lost: [], running: 0, awaiting_titles: 0, waiting: [] };
   let refused = 0;
 
   // 2. ARM: a dispatched gap whose test has landed (new titles in its test file).
@@ -315,7 +437,8 @@ export async function resolveGapCheckSupplyTick(pointer: GapCheckSupplyTickPoint
     const id = String(row["id"]);
     const meta = metaOf(row);
     const ledger = ledgerOf(meta);
-    if (ledger.state !== "goal_dispatched" || !ledger.test_file || !ledger.vessel) continue;
+    // A failed or lost goal's test may still land late: its titles arm the gap all the same.
+    if (!(ledger.state === "goal_dispatched" || ledger.state === "dispatch_failed" || ledger.state === "dispatch_lost") || !ledger.test_file || !ledger.vessel) continue;
     const path = join(clonesRoot(), ledger.vessel, ledger.test_file);
     if (!existsSync(path)) continue;
     let src = "";
@@ -370,6 +493,37 @@ export async function resolveGapCheckSupplyTick(pointer: GapCheckSupplyTickPoint
     }
   }
 
+  // 2b. OUTCOME: read back each in-flight goal this tick did not arm from.
+  let outcomeReads = 0;
+  for (const row of open) {
+    const id = String(row["id"]);
+    if (touched.has(id)) continue;
+    const meta = metaOf(row);
+    const ledger = ledgerOf(meta);
+    if (ledger.state !== "goal_dispatched") continue;
+    const owner = nonEmpty(ledger.dispatch_node) ? String(ledger.dispatch_node) : null;
+    const mine = owner === null || owner === localNode;
+    if (mine && nonEmpty(ledger.dispatch_id) && outcomeReads >= maxOutcomeReads) continue;
+    let probe: DispatchProbe | null = null;
+    if (mine && nonEmpty(ledger.dispatch_id)) { outcomeReads += 1; probe = await probeDispatch(String(ledger.dispatch_id)); }
+    const v = dispatchVerdict(ledger, probe, now, bounds, localNode);
+    if (v.kind === "running") { outcomes.running += 1; continue; }
+    if (v.kind === "awaiting_titles") { outcomes.awaiting_titles += 1; continue; }
+    if (v.kind === "wait") {
+      outcomes.waiting.push({ id, why: v.why, detail: v.detail });
+      console.warn(`[gap-check-supply] outcome unread for ${id}: ${v.why}: ${v.detail}`);
+      continue;
+    }
+    const outcome: Row = { read_at: nowIso, read_by: localNode, ...(probe && probe.http !== "unreachable" ? { http: probe.http, status: probe.status ?? null, reached: probe.reached ?? null } : {}), ...(v.kind === "lost" ? { lost_why: v.why } : {}) };
+    const next: Ledger = { ...ledger, state: v.kind === "failed" ? "dispatch_failed" : "dispatch_lost", reason: v.reason, outcome };
+    refused += 1;
+    if (v.kind === "failed") outcomes.failed.push({ id, reason: v.reason }); else outcomes.lost.push({ id, why: v.why, reason: v.reason });
+    console.log(`[gap-check-supply] outcome ${next.state} for ${id}: ${v.reason}`);
+    if (!pointer.dry_run) await writeMeta(row, { check_supply: next });
+    // The same tick's dispatch step sees the settled ledger (a due retry may be sent now).
+    (meta as Row)["check_supply"] = next;
+  }
+
   // A row marked needs_localization that something else has since armed: release the hold.
   for (const row of open) {
     const meta = metaOf(row);
@@ -382,9 +536,20 @@ export async function resolveGapCheckSupplyTick(pointer: GapCheckSupplyTickPoint
   }
 
   // 3. DISPATCH: one test-writing goal per treatment-arm needs-localization gap, fewest attempts and oldest first.
+  // A settled attempt (failed or lost) past its backoff is a DUE RETRY: it goes ahead of fresh gaps, or a steady inflow
+  // of fresh gaps starves it forever (the backoff and max_attempts already bound how often it can come back).
+  const dueRetry = (r: Row): boolean => {
+    const l = ledgerOf(metaOf(r));
+    if (l.state !== "dispatch_failed" && l.state !== "dispatch_lost") return false;
+    const n = Number(l.attempts ?? 0);
+    const last = Date.parse(String(l.last_dispatch_at ?? ""));
+    return n > 0 && n < maxAttempts && (!Number.isFinite(last) || now >= last + backoffMs * 2 ** (n - 1));
+  };
   const candidates = open
     .filter((r) => !touched.has(String(r["id"])) && checkSupplyDisposition(r) !== null)
     .sort((a, b) => {
+      const ra = dueRetry(a); const rb = dueRetry(b);
+      if (ra !== rb) return ra ? -1 : 1;
       // Priority after attempts: writable (existing edit site in clone) > stated falsifier_spec > oldest first
       const ma = metaOf(a); const mb = metaOf(b);
       const la = ledgerOf(ma); const lb = ledgerOf(mb);
@@ -399,6 +564,9 @@ export async function resolveGapCheckSupplyTick(pointer: GapCheckSupplyTickPoint
       if (hasFalsifierA !== hasFalsifierB) return hasFalsifierA ? -1 : 1; // stated falsifier FIRST
       return String(a["first_detected_at"] ?? a["detected_at"] ?? "").localeCompare(String(b["first_detected_at"] ?? b["detected_at"] ?? ""));
     });
+  let scopeRead: AutonomyScope | null = null;
+  let scopeUnread: string | null = null;
+  const scopeOnce = async (): Promise<AutonomyScope> => (scopeRead ??= await readScopeSelf());
   for (const row of candidates) {
     if (dispatched.length >= perTick && controlMarked.length >= perTick) break;
     const id = String(row["id"]);
@@ -414,12 +582,16 @@ export async function resolveGapCheckSupplyTick(pointer: GapCheckSupplyTickPoint
     }
     if (dispatched.length >= perTick) continue;
     if (ledger.state === "armed" || ledger.state === "exhausted") continue;
+    // A goal in flight is settled by the OUTCOME step (read back, or lost past the bound), never by sending another.
+    if (ledger.state === "goal_dispatched") continue;
     const attempts = Number(ledger.attempts ?? 0);
     const last = Date.parse(String(ledger.last_dispatch_at ?? ""));
     if (attempts > 0 && Number.isFinite(last) && now < last + backoffMs * 2 ** (attempts - 1)) continue;
     if (attempts >= maxAttempts) {
       exhausted.push(id);
-      if (!pointer.dry_run) await writeMeta(row, { check_supply: { ...ledger, state: "exhausted", reason: `${attempts} test-writing goals did not yield a red check` } });
+      const hist = settledHistory(ledger);
+      const whys = hist.map((h) => String((h["outcome"] as Row | undefined)?.["lost_why"] ?? h["state"] ?? "?")).join(", ");
+      if (!pointer.dry_run) await writeMeta(row, { check_supply: { ...ledger, history: hist, state: "exhausted", reason: `${attempts} test-writing goals did not yield a red check${whys ? ` (attempts settled as: ${whys})` : ""}` } });
       continue;
     }
     const vessel = checkSupplyVessel(row);
@@ -428,6 +600,19 @@ export async function resolveGapCheckSupplyTick(pointer: GapCheckSupplyTickPoint
     // an intended red in a file bun discovers reads as a regression in every whole-suite run.
     const site = checkSupplySite(row, vessel);
     const testFile = checkSupplyTestFile(id);
+    // SCOPE: a goal whose target (the edit site, or the vessel, and the check file) the live autonomyScope excludes can
+    // never land through the lane. No goal; one skip record. An absent or unreadable record decides nothing here (the
+    // lane's admission is the containment) and is reported once per tick.
+    const scope = await scopeOnce();
+    if (!scope.readable && !scopeUnread) { scopeUnread = scope.reason; console.warn(`[gap-check-supply] scope not applied this tick: ${scope.reason}`); }
+    const targets = [site ? `repos/${vessel}/${site}` : `repos/${vessel}/`, `repos/${vessel}/${testFile}`];
+    const hit = scope.readable ? targets.map((t) => ({ t, e: autonomyScopeExcludes(scope, t) })).find((x) => x.e !== null) : undefined;
+    if (hit) {
+      const reason = `target ${hit.t} is excluded by the autonomy scope (${hit.e}); the lane could never land it`;
+      skipped.push({ id, reason });
+      if (!pointer.dry_run && !(ledger.state === "scope_excluded" && ledger.reason === reason)) await writeMeta(row, { check_supply: { ...ledger, state: "scope_excluded", reason } });
+      continue;
+    }
     const mode = "check_file";
     // The titles the check file already holds (a previous attempt's landed, refused check): only titles added after
     // this dispatch can arm the gap.
@@ -448,7 +633,7 @@ export async function resolveGapCheckSupplyTick(pointer: GapCheckSupplyTickPoint
       ...(holdable ? { disposition: CHECK_SUPPLY_DISPOSITION } : {}),
       gap_check_supply_arm: "treatment",
       check_supply: { ...ledger, state: "goal_dispatched", attempts: attempts + 1, last_dispatch_at: nowIso, test_file: testFile, vessel, mode,
-        baseline_titles: baselineTitles, edit_site: site, dispatch_id: dispatchId, goal },
+        baseline_titles: baselineTitles, edit_site: site, dispatch_id: dispatchId, goal, dispatch_node: localNode, dispatch_host: GOAL_HOST_ENDPOINT, reason: "", outcome: {}, history: settledHistory(ledger) },
     });
   }
 
@@ -477,6 +662,8 @@ export async function resolveGapCheckSupplyTick(pointer: GapCheckSupplyTickPoint
       refused,
       exhausted,
       control_marked: controlMarked,
+      outcomes,
+      ...(scopeUnread ? { scope_unread: scopeUnread } : {}),
       arms,
       skipped: skipped.slice(0, 25),
       measures,

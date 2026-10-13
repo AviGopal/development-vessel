@@ -1456,6 +1456,10 @@ export function defaultGoalReachIO(policy: GoalReachPolicy): GoalReachIO {
         runs.push({ dispatchId: n.dispatchId, goal_hash: n.goal_hash, goal: t.goal, status: "failed", reached: false, operator: null, origin: t.origin, startedAt: n.at, endedAt: n.at, goalReachReason: reason || null, completionShapes: shapes, node: n.node, reason_unrecorded: !reason });
       }
       const up = gd.tallyUpdate(tallies, runs, now, pol.policy, isAdvertised);
+      // The current policy applies to the evidence already held, not only to runs seen from now on.
+      const rc = gd.reclassifyStored(up.tallies, pol.policy, isAdvertised);
+      for (const h of rc.changed) if (!up.touched.includes(h)) up.touched.push(h);
+      if (rc.moved > 0) console.log(`[goal-reach] R2 reclassified ${rc.moved} stored entr${rc.moved === 1 ? "y" : "ies"} across ${rc.changed.length} goal(s) under the current policy`);
       for (const h of up.touched) resolvePoolImpulseWrite({ type: "poolImpulse_write", id: gd.tallyId(h), shape: gd.GOAL_DEFICIENCY_TALLY_SHAPE, body: up.tallies[h], source: "goal_reach_tick", status: "open" });
       let existing: Map<string, Record<string, unknown>> | null = null;
       try {

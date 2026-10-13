@@ -309,6 +309,24 @@ describe("through the default I/O and the real stores", () => {
       expect(r2.unrecorded).toEqual([{ goal_hash: h2, count: 1 }]);
     } finally { server.stop(true); }
   });
+
+  it("a policy edit reclasses the STORED entries on the next call, with no new run (wired in the default I/O)", async () => {
+    const G3 = `tabulate the overdue invoices per customer (${RUN})`;
+    const prose = "The output did not provide the overdue invoices per customer.";
+    const io = grt.defaultGoalReachIO({ ...grt.DEFAULT_GOAL_REACH_POLICY });
+    const ds = [9, 8, 7].map((h, i) => ({ ...obs(`ri${i}`, h, false, prose), goal: G3 }));
+    const r1 = await quiet(() => io.recogniseDeficiencies(ds, Date.now()));
+    const h3 = grt.goalHashOf(G3);
+    expect(r1.candidates.filter((c: Row) => c.goal_hash === h3)).toEqual([]);
+    pool.resolvePoolImpulseWrite({ type: "poolImpulse_write", id: "goalDeficiencyPolicy", shape: "goalDeficiencyPolicy", source: "test", status: "open",
+      body: { file_gaps: 0, classes: [...P().classes, { class: "invoice_fixture_gap", patterns: ["did not provide the overdue"] }] } } as never);
+    try {
+      const r2 = await quiet(() => io.recogniseDeficiencies([], Date.now()));
+      expect(r2.candidates.filter((c: Row) => c.goal_hash === h3)).toEqual([{ goal_hash: h3, reason_class: "invoice_fixture_gap", count: 3, class_source: "operator_map" }]);
+    } finally {
+      pool.resolvePoolImpulseWrite({ type: "poolImpulse_write", id: "goalDeficiencyPolicy", shape: "goalDeficiencyPolicy", source: "test", status: "closed", body: {} } as never);
+    }
+  });
 });
 
 describe("wiring", () => {
@@ -473,5 +491,54 @@ describe("C-longgoal-1: long goals reach R2", () => {
     finally { console.log = l; console.warn = w; }
     expect([r!.skipped_no_goal_hash, r!.skipped_cut_goal]).toEqual([2, 2]);
     expect(lines).toContain("[goal-reach] R2 runs skipped: no goal_hash 2 (cut goal 2)");
+  });
+});
+
+// A POLICY EDIT TAKES EFFECT ON THE EVIDENCE ALREADY HELD (law 1: read at use). Stored not-reached entries with a reason are
+// classed again under the current policy each call; shape-based classes and reasonless entries are left as they are.
+describe("reclassifyStored: the current policy applies to stored entries", () => {
+  const G = "summarise the open purchase orders by supplier";
+  const hh = grt.goalHashOf(G);
+  const prose = "The output did not provide the purchase orders grouped by supplier.";
+  const busy = "RETRYABLE CAPACITY: the compose lane is at capacity (verdict=BUSY), so the required change was not produced.";
+  const withMap = (): Row => ({ ...P(), classes: [...P().classes, { class: "content_gap_fixture", patterns: ["did not provide the purchase orders"] }] });
+  it("a class-map edit reclasses stored entries (unclassified → the new class, with its source); a second call changes nothing", () => {
+    expect(has("reclassifyStored")).toBe(true);
+    const t = tallyFrom([1, 2, 3].map((i) => run(`s${i}`, G, 10 - i, false, prose)));
+    expect(t[hh]!.entries.map((e: Row) => e.class)).toEqual([null, null, null]);
+    const r1 = gd.reclassifyStored(t, withMap(), never);
+    expect(r1).toEqual({ changed: [hh], moved: 3 });
+    expect(t[hh]!.entries.map((e: Row) => [e.class, e.class_source])).toEqual([["content_gap_fixture", "operator_map"], ["content_gap_fixture", "operator_map"], ["content_gap_fixture", "operator_map"]]);
+    expect(gd.deficiencyDecisions(t, new Map(), NOW, withMap()).candidates).toEqual([{ goal_hash: hh, reason_class: "content_gap_fixture", count: 3, class_source: "operator_map" }]);
+    expect(gd.reclassifyStored(t, withMap(), never)).toEqual({ changed: [], moved: 0 });
+  });
+  it("MUST-FAIL: a stored entry whose new class is an abstain is never counted (no candidate, no write)", () => {
+    const t = tallyFrom([1, 2, 3].map((i) => run(`b${i}`, G, 10 - i, false, busy)), withMap());
+    expect(t[hh]!.entries.every((e: Row) => e.class === "deliverable_not_produced")).toBe(true);
+    const pol = { ...withMap(), abstain_patterns: [...P().abstain_patterns, "\\bverdict=BUSY\\b"] };
+    gd.reclassifyStored(t, pol, never);
+    expect(t[hh]!.entries.map((e: Row) => e.class)).toEqual(["abstain", "abstain", "abstain"]);
+    const d = gd.deficiencyDecisions(t, new Map(), NOW, { ...pol, file_gaps: 1 });
+    expect(d.candidates).toEqual([]);
+    expect(d.writes).toEqual([]);
+  });
+  it("an entry tallied before class sources existed gains its source (same class, new source is a change)", () => {
+    const t = tallyFrom([run("o1", G, 9, false, "The required list was not produced.")]);
+    delete t[hh]!.entries[0].class_source;
+    expect(t[hh]!.entries[0].class).toBe("deliverable_not_produced");
+    expect(gd.reclassifyStored(t, P(), never)).toEqual({ changed: [hh], moved: 1 });
+    expect(t[hh]!.entries[0].class_source).toBe("operator_map");
+  });
+
+  it("shape-based classes and reasonless entries are left as judged", () => {
+    const t = tallyFrom([
+      run("m1", G, 9, false, "no producer or constructible payload for missing shapes [poShape]", { completionShapes: ["poShape"] }),
+      run("p1", G, 8, false, "no producer or constructible payload for missing shapes [sql_like]"),
+      run("u1", G, 7, false, "", { node: "n-a" }),
+    ]);
+    const before = t[hh]!.entries.map((e: Row) => e.class);
+    expect(before).toEqual(["missing_producer", "phantom", "unread"]);
+    expect(gd.reclassifyStored(t, { ...withMap(), classes: [{ class: "everything", patterns: ["."] }] }, () => true)).toEqual({ changed: [], moved: 0 });
+    expect(t[hh]!.entries.map((e: Row) => e.class)).toEqual(before);
   });
 });

@@ -258,6 +258,31 @@ export function tallyUpdate(tallies: Record<string, DeficiencyTally>, runs: read
 }
 
 /**
+ * A POLICY EDIT TAKES EFFECT ON THE EVIDENCE ALREADY HELD: every stored not-reached entry that carries a reason is classed again
+ * under the current policy (the class map, abstains, judge-code rules). Shape-based classes (missing_producer, phantom) are left
+ * as judged at observation (they depend on the run's target and the fleet's vocabulary then), and entries without a reason
+ * (unread, unrecorded) have nothing to reclass. Returns the goal hashes whose tally changed and how many entries moved.
+ */
+export function reclassifyStored(tallies: Record<string, DeficiencyTally>, policy: GoalDeficiencyPolicy, isAdvertised: (shape: string) => boolean | null): { changed: string[]; moved: number } {
+  const changed: string[] = [];
+  let moved = 0;
+  for (const t of Object.values(tallies)) {
+    let touched = false;
+    for (const e of t.entries) {
+      if (e.reached || !e.reason || e.class === MISSING_PRODUCER_CLASS || e.class === "phantom") continue;
+      const c = classifyReason(e.reason, [], policy, isAdvertised);
+      if (c.class === MISSING_PRODUCER_CLASS || c.class === "phantom") continue;
+      if (c.class === e.class && (c.class_source ?? undefined) === (e.class_source ?? undefined)) continue;
+      e.class = c.class;
+      if (c.class_source) e.class_source = c.class_source; else delete e.class_source;
+      moved++; touched = true;
+    }
+    if (touched) changed.push(t.goal_hash);
+  }
+  return { changed, moved };
+}
+
+/**
  * The not-reached runs whose judge reason R2 should read itself this call, oldest first, at most `bound`: runs in the current listing with
  * no reason, and tallied runs still unread (by the node recorded on them). A run with no node to read from is skipped.
  */

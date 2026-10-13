@@ -342,6 +342,50 @@ describe("through the default I/O and the real stores", () => {
       pool.resolvePoolImpulseWrite({ type: "poolImpulse_write", id: "goalDeficiencyPolicy", shape: "goalDeficiencyPolicy", source: "test", status: "closed", body: {} } as never);
     }
   });
+
+  it("#1b MUST-FAIL (real store): an existing unsited row for the same (resolver, failure class) is ENRICHED and linked, never duplicated; a new pair files once at the canonical id", async () => {
+    const res = `ledger_post_${RUN}`;
+    const prior = `novel-failure-learned-${res.replace(/_/g, "-")}-${RUN}`;
+    const w0 = await sg.resolveSubstrateGapWrite({ type: "substrateGap_write", gap: { id: prior, category: "systematic_failure", source: "novel-failure-detector", status: "open", detected_at: new Date(Date.now() - 3 * H).toISOString(),
+      summary: `Novel failure cluster on a learned template (${RUN})`, classification_metadata: { cluster_key: `learned-${res.replace(/_/g, "-")}|execution_error` } } } as never);
+    expect(w0.shape).toBe("substrateGapWriteResult");
+    await sg.__settleBirthEvaluationsForTests();
+    const ph = grt.goalHashOf(`post the ledger entries for the quarter (${RUN})`);
+    const parent: Row = { id: `goal-deficiency-${ph}-write_goal_no_artifact`, status: "open", classification_metadata: { goal_hash: ph, dispatch_ids: ["p1", "p2"] } };
+    const step = (id: string, r: string): Row => ({ dispatch_id: id, kind: "step_failure", resolver: r, failure_class: "execution_error", failure_excerpt: `${r} POST returned 400: field owner missing` });
+    const loc = { state: "sited", kind: "step_failure", counts: {}, runs: [step("p1", res), step("p2", res), { dispatch_id: "p3", kind: "output_error", resolver: "shell_result" }] };
+    const rowsOf = async () => (((await sg.resolveSubstrateGap({ type: "substrateGap", limit: 1_000_000 } as never)).body as Row).gaps as Row[]);
+    const deps = { vesselOf: async () => ({ vessel: "ledger-vessel" }), locate: async (v: string, r: string) => ({ file: `repos/${v}/src/resolvers/${r}.ts`, method: "grep_unique" }) };
+    const quietly = <T>(f: () => Promise<T>) => quiet(f);
+    const c1 = await quietly(() => grt.ensureStepChildren(parent, loc, rowsOf, sg.resolveSubstrateGapWrite, deps));
+    expect(c1).toEqual([{ id: prior, resolver: res, failure_class: "execution_error", state: "linked" }]);
+    await sg.__settleBirthEvaluationsForTests();
+    const all = await rowsOf();
+    expect(all.filter((g) => g.classification_metadata?.failing_activity === res).map((g) => g.id)).toEqual([prior]);
+    expect(all.some((g) => g.id === gd.stepGapId(res, "execution_error"))).toBe(false);
+    const m = all.find((g) => g.id === prior)!.classification_metadata;
+    expect(m).toMatchObject({ failing_activity: res, failure_class: "execution_error", vessel: "ledger-vessel", edit_site: `repos/ledger-vessel/src/resolvers/${res}.ts`, cluster_key: `learned-${res.replace(/_/g, "-")}|execution_error`, parent_gap: parent.id });
+    expect(linkedGoalHashes(m.demand_goals)).toEqual([ph]);
+    expect(String(m.falsifier_spec)).toContain(`"${res} POST returned 400: field owner missing"`);
+    // a second goal hitting the same step links the SAME row (demand from both goals), still one row
+    const ph2 = grt.goalHashOf(`reconcile the ledger against the bank feed (${RUN})`);
+    const c2 = await quietly(() => grt.ensureStepChildren({ ...parent, id: `goal-deficiency-${ph2}-x`, classification_metadata: { goal_hash: ph2, dispatch_ids: ["q1"] } }, { ...loc, runs: [step("q1", res)] }, rowsOf, sg.resolveSubstrateGapWrite, deps));
+    expect(c2[0]).toMatchObject({ id: prior, state: "linked" });
+    await sg.__settleBirthEvaluationsForTests();
+    const after = await rowsOf();
+    expect(after.filter((g) => g.classification_metadata?.failing_activity === res).length).toBe(1);
+    expect(linkedGoalHashes(after.find((g) => g.id === prior)!.classification_metadata.demand_goals).sort()).toEqual([ph, ph2].sort());
+    // a pair with no existing row files ONE new row at the canonical id, its summary code-formatting the resolver
+    const res2 = `ledger_close_${RUN}`;
+    const c3 = await quietly(() => grt.ensureStepChildren(parent, { ...loc, runs: [step("p1", res2), step("p2", res2)] }, rowsOf, sg.resolveSubstrateGapWrite, deps));
+    expect(c3).toEqual([{ id: gd.stepGapId(res2, "execution_error"), resolver: res2, failure_class: "execution_error", state: "filed" }]);
+    await sg.__settleBirthEvaluationsForTests();
+    const fresh = (await rowsOf()).filter((g) => g.classification_metadata?.failing_activity === res2);
+    expect(fresh.length).toBe(1);
+    expect(fresh[0].summary).toContain(`\`${res2}\``);
+    expect(fresh[0].classification_metadata).toMatchObject({ kind: "step_failure", edit_site: `repos/ledger-vessel/src/resolvers/${res2}.ts`, step_dispatch_ids: ["p1", "p2"] });
+    expect(linkedGoalHashes(fresh[0].classification_metadata.demand_goals)).toEqual([ph]);
+  });
 });
 
 describe("wiring", () => {
@@ -663,7 +707,7 @@ describe("#1a: attributing a deficiency's runs and siting it", () => {
   const NOW2 = Date.parse("2030-04-01T00:00:00Z");
 
   it("attributeRun: a failed task → step_failure (its resolver + the trace's failure excerpt); unreadable → trace_unreadable", () => {
-    expect(gd.attributeRun("d1", T([["a_step", true], ["ledger_write", false]], "ledger_write POST returned 400: field owner missing"), "x")).toEqual(A("d1", "step_failure", "ledger_write", "ledger_write POST returned 400: field owner missing"));
+    expect(gd.attributeRun("d1", T([["a_step", true], ["ledger_write", false]], "ledger_write POST returned 400: field owner missing"), "x")).toEqual({ ...A("d1", "step_failure", "ledger_write", "ledger_write POST returned 400: field owner missing"), failure_class: "execution_error" });
     expect(gd.attributeRun("d2", null, "x")).toEqual(A("d2", "trace_unreadable"));
   });
   it("attributeRun: all tasks ok + an error-envelope judge code → output_error (last step); all ok otherwise → composition", () => {
@@ -731,4 +775,93 @@ describe("#1a: attributing a deficiency's runs and siting it", () => {
   });
   const bad: Array<[string, unknown]> = [["siting_majority 0", { siting_majority: 0 }], ["siting_majority above 1", { siting_majority: 1.5 }], ["siting_majority a string", { siting_majority: "half" }], ["max_localizations above 50", { max_localizations: 51 }]];
   for (const [label, body] of bad) it(`invalid (${label}) → ok false`, () => { expect(gd.parseDeficiencyPolicy(body).ok).toBe(false); });
+});
+
+// #1b: per distinct failing step of a localized deficiency, a linked step gap (reuse first, by (resolver, failure class)),
+// sited from discovery + the locator and carrying the goal's demand. Output errors and composition runs never make a child.
+describe("#1b: step children of a deficiency", () => {
+  const S = (id: string, r: string, cls = "execution_error", ex?: string): Row => ({ dispatch_id: id, kind: "step_failure", resolver: r, failure_class: cls, ...(ex ? { failure_excerpt: ex } : {}) });
+  const vesselOk = async (r: string) => ({ vessel: `${r.split("_")[0]}-vessel` });
+  const fileOk = async (v: string, r: string) => ({ file: `repos/${v}/src/resolvers/${r}.ts`, method: "grep_unique" });
+  const parent: Row = { id: "goal-deficiency-abc-x", status: "open", classification_metadata: { goal_hash: "abc", dispatch_ids: ["d1", "d2"] } };
+  const LOC = (runs: Row[]) => ({ state: "unknown", kind: "mixed", counts: {}, runs });
+  const recorder = () => { const writes: Row[] = []; return { writes, write: async (p: Row) => { writes.push(p); return { shape: "substrateGapWriteResult", body: { action: "created" } }; } }; };
+  const quiet = async <T>(f: () => Promise<T>): Promise<T> => { const l = console.log, w = console.warn; console.log = () => {}; console.warn = () => {}; try { return await f(); } finally { console.log = l; console.warn = w; } };
+
+  it("stepChildren: two runs at the same (resolver, class) make ONE child with both dispatch ids; a different class at that resolver is another", () => {
+    const plans = gd.stepChildren([S("d1", "ledger_post", "execution_error", "first"), S("d2", "ledger_post", "execution_error", "second"), S("d3", "ledger_post", "timeout"), { dispatch_id: "d4", kind: "composition" }]);
+    expect(plans).toEqual([{ resolver: "ledger_post", failure_class: "execution_error", dispatch_ids: ["d1", "d2"], excerpt: "first" }, { resolver: "ledger_post", failure_class: "timeout", dispatch_ids: ["d3"] }]);
+  });
+  it("attributeRun carries the trace's failure class; no class → unclassified_failure", () => {
+    const t = (fm: Row | null) => ({ tasks: [{ resolver_id: "ledger_post", status: "failure" }], failure_mode: fm });
+    expect(gd.attributeRun("d1", t({ type: "timeout", reason: "deadline exceeded after 30s" }), "x").failure_class).toBe("timeout");
+    expect(gd.attributeRun("d2", t(null), "x").failure_class).toBe("unclassified_failure");
+  });
+  it("MUST-FAIL: an environment error envelope never becomes a child (output_error runs write nothing)", async () => {
+    const r = recorder();
+    const out = await quiet(() => grt.ensureStepChildren(parent, LOC([{ dispatch_id: "d1", kind: "output_error", resolver: "shell_result" }, { dispatch_id: "d2", kind: "output_error", resolver: "shell_result" }]), async () => [], r.write, { vesselOf: vesselOk, locate: fileOk }));
+    expect(out).toEqual([]);
+    expect(r.writes).toEqual([]);
+  });
+  it("MUST-FAIL: prose never sites a child — composition runs (whatever the reason names) write nothing", async () => {
+    const viaProse = gd.attributeRun("d5", { tasks: [{ resolver_id: "scan", status: "success" }], failure_mode: null }, "fix repos/ledger-vessel/src/resolvers/ledger_post.ts");
+    const r = recorder();
+    const out = await quiet(() => grt.ensureStepChildren(parent, LOC([viaProse, { dispatch_id: "d6", kind: "composition" }]), async () => [], r.write, { vesselOf: vesselOk, locate: fileOk }));
+    expect(out).toEqual([]);
+    expect(r.writes).toEqual([]);
+  });
+  it("MUST-FAIL: two runs at the same resolver write ONE child, carrying the goal's demand", async () => {
+    const r = recorder();
+    const out = await quiet(() => grt.ensureStepChildren(parent, LOC([S("d1", "ledger_post", "execution_error", "ledger_post POST returned 400: owner missing"), S("d2", "ledger_post")]), async () => [], r.write, { vesselOf: vesselOk, locate: fileOk }));
+    expect(out).toEqual([{ id: gd.stepGapId("ledger_post", "execution_error"), resolver: "ledger_post", failure_class: "execution_error", state: "filed" }]);
+    expect(r.writes.length).toBe(1);
+    expect(r.writes[0]!.demand_goals_append).toEqual([{ source: "goal_reach", goal_hash: "abc", dispatch_id: "d2", origin: "autonomous" }]);
+    expect(r.writes[0]!.gap.classification_metadata).toMatchObject({ failing_activity: "ledger_post", failure_class: "execution_error", vessel: "ledger-vessel", edit_site: "repos/ledger-vessel/src/resolvers/ledger_post.ts", step_dispatch_ids: ["d1", "d2"] });
+    expect(r.writes[0]!.gap.classification_metadata.falsifier_spec).toContain('"ledger_post POST returned 400: owner missing"');
+  });
+  it("an unsited step (several serving vessels, or no located file) writes nothing and is recorded loudly with why", async () => {
+    const r = recorder();
+    const amb = await quiet(() => grt.ensureStepChildren(parent, LOC([S("d1", "concept_put")]), async () => [], r.write, { vesselOf: async () => ({ why: "concept_put is served by 2 local vessels" }), locate: fileOk }));
+    expect(amb).toEqual([{ resolver: "concept_put", failure_class: "execution_error", state: "unsited", why: "concept_put is served by 2 local vessels" }]);
+    const nofile = await quiet(() => grt.ensureStepChildren(parent, LOC([S("d1", "concept_put")]), async () => [], r.write, { vesselOf: vesselOk, locate: async () => null }));
+    expect(nofile[0]).toMatchObject({ state: "unsited", why: "no single file located in concept-vessel" });
+    expect(r.writes).toEqual([]);
+  });
+  it("reuse keeps an existing row's own falsifier_spec and writes only while it is still open", async () => {
+    const r = recorder();
+    const row: Row = { id: "older-row", status: "open", detected_at: "2030-01-01T00:00:00Z", summary: "s", classification_metadata: { failing_activity: "ledger_post", failure_class: "execution_error", falsifier_spec: "its own check" } };
+    const out = await quiet(() => grt.ensureStepChildren(parent, LOC([S("d1", "ledger_post", "execution_error", "ledger_post POST returned 400: owner missing")]), async () => [row], r.write, { vesselOf: vesselOk, locate: fileOk }));
+    expect(out[0]).toMatchObject({ id: "older-row", state: "linked" });
+    expect(r.writes[0]!.gap.classification_metadata.falsifier_spec).toBe("its own check");
+    expect(r.writes[0]!.expect_status).toBe("open");
+  });
+  it("a refused write is reported as refused, not filed or linked", async () => {
+    const out = await quiet(() => grt.ensureStepChildren(parent, LOC([S("d1", "ledger_post")]), async () => [], async () => ({ shape: "structuredError", body: { skip_reason: "status_precondition_failed" } }), { vesselOf: vesselOk, locate: fileOk }));
+    expect(out[0]).toMatchObject({ state: "refused", why: "status_precondition_failed" });
+  });
+  it("findStepGap: own (failing_activity + class) first, newest; else a cluster key naming the resolver and the SAME class; closed rows and other classes never match", () => {
+    const rows: Row[] = [
+      { id: "closed-own", status: "closed", detected_at: "2030-02-01T00:00:00Z", classification_metadata: { failing_activity: "trace_fetch", failure_class: "execution_error" } },
+      { id: "cluster-old", status: "open", detected_at: "2030-01-01T00:00:00Z", classification_metadata: { cluster_key: "learned-satisfier-trace-fetch|execution_error" } },
+      { id: "cluster-new", status: "open", detected_at: "2030-01-02T00:00:00Z", classification_metadata: { cluster_key: "tpl:trace_fetch|execution_error" } },
+      { id: "cluster-other-class", status: "open", detected_at: "2030-01-03T00:00:00Z", classification_metadata: { cluster_key: "learned-satisfier-trace-fetch|timeout" } },
+      { id: "cluster-prefix-only", status: "open", detected_at: "2030-01-04T00:00:00Z", classification_metadata: { cluster_key: "trace-fetch-extended|execution_error" } },
+    ];
+    expect(gd.findStepGap(rows, "trace_fetch", "execution_error")?.id).toBe("cluster-new");
+    expect(gd.findStepGap([...rows, { id: "own", status: "open", detected_at: "2029-01-01T00:00:00Z", classification_metadata: { failing_activity: "trace_fetch", failure_class: "execution_error" } }], "trace_fetch", "execution_error")?.id).toBe("own");
+    expect(gd.findStepGap(rows, "trace_fetch", "parse_error")).toBeNull();
+    expect(gd.findStepGap(rows.slice(0, 1), "trace_fetch", "execution_error")).toBeNull();
+  });
+  it("observedFailureText: the first line, quotes made safe, bounded; too short or one token → null", () => {
+    expect(gd.observedFailureText('fetch "x" failed with 404\nstack...')).toBe("fetch 'x' failed with 404");
+    expect(gd.observedFailureText("x".repeat(400))).toBeNull();
+    expect(gd.observedFailureText("a ".repeat(200))!.length).toBeLessThanOrEqual(160);
+    expect(gd.observedFailureText("short err")).toBeNull();
+    expect(gd.observedFailureText(undefined)).toBeNull();
+  });
+  it("the tick files step children only when the policy files gaps (file_gaps 1), and records them on the parent's localization", () => {
+    const src = readFileSync(join(import.meta.dir, "../../src/resolvers/goal-reach-tick.ts"), "utf8");
+    expect(src).toMatch(/const children = pol\.policy\.file_gaps === 1\s*\?\s*await ensureStepChildren\(/);
+    expect(src).toContain("localization: { ...loc, children }");
+  });
 });

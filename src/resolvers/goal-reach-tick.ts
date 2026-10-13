@@ -1191,6 +1191,61 @@ const repoPrefix = (repo: string): string => {
   return b === "super-repo" || b === "substrate" ? "" : `${b}/`;
 };
 
+/** Every gap row in the store (for step-gap reuse), or [] when unreadable. */
+async function readAllGaps(read: (p: never) => Promise<{ shape: string; body: unknown }>): Promise<Array<Record<string, unknown>>> {
+  try {
+    const r = await read({ type: "substrateGap", limit: 1_000_000 } as never);
+    const rows = (r.body as { gaps?: Array<Record<string, unknown>> } | null)?.gaps;
+    return Array.isArray(rows) ? rows : [];
+  } catch { return []; }
+}
+
+export type StepChild = { id?: string; resolver: string; failure_class: string; state: "filed" | "linked" | "unsited" | "refused"; why?: string };
+/**
+ * #1b for one localized deficiency row: per distinct failing step (resolver, failure class) of its counted runs, LINK an
+ * existing open gap that is that defect (enriching it with the site) or FILE one at the canonical step id, sited from
+ * discovery + the locator, its falsifier_spec quoting the trace's observed failure text. Every child carries the parent goal's
+ * demand, so linkGaps parks the goal on it and the deadlock fix re-runs the goal when it lands. Output errors and
+ * composition-only runs get no child. A step with no single serving vessel or no located file is recorded unsited, loudly.
+ */
+export async function ensureStepChildren(
+  parent: Record<string, unknown>, loc: import("./goal-deficiency.js").Localization,
+  rowsOf: () => Promise<Array<Record<string, unknown>>>, write: (p: never) => Promise<{ shape: string; body: unknown }>,
+  deps: { vesselOf?: (r: string) => Promise<{ vessel: string } | { why: string }>; locate?: typeof locateStepFile } = {},
+): Promise<StepChild[]> {
+  const gd = await import("./goal-deficiency.js");
+  const pmeta = (parent["classification_metadata"] ?? {}) as Record<string, unknown>;
+  const goalHash = String(pmeta["goal_hash"] ?? "");
+  const ids = Array.isArray(pmeta["dispatch_ids"]) ? (pmeta["dispatch_ids"] as unknown[]).map(String) : [];
+  const out: StepChild[] = [];
+  for (const plan of gd.stepChildren(loc.runs).slice(0, 5)) {
+    const v = await (deps.vesselOf ?? vesselOfResolver)(plan.resolver);
+    if ("why" in v) { out.push({ resolver: plan.resolver, failure_class: plan.failure_class, state: "unsited", why: v.why }); console.warn(`[goal-reach] R2 step child ${plan.resolver}/${plan.failure_class} for ${parent["id"]}: unsited — ${v.why}`); continue; }
+    const f = await (deps.locate ?? locateStepFile)(v.vessel, plan.resolver, plan.excerpt);
+    if (!f) { out.push({ resolver: plan.resolver, failure_class: plan.failure_class, state: "unsited", why: `no single file located in ${v.vessel}` }); console.warn(`[goal-reach] R2 step child ${plan.resolver}/${plan.failure_class} for ${parent["id"]}: unsited — no file located in ${v.vessel}`); continue; }
+    const observed = gd.observedFailureText(plan.excerpt);
+    const demand = { source: "goal_reach" as const, goal_hash: goalHash, dispatch_id: plan.dispatch_ids[plan.dispatch_ids.length - 1] ?? ids[ids.length - 1] ?? "", origin: "autonomous" as const };
+    const sited = { failing_activity: plan.resolver, failure_class: plan.failure_class, vessel: v.vessel, edit_site: f.file, step_dispatch_ids: plan.dispatch_ids, parent_gap: String(parent["id"] ?? ""),
+      ...(observed ? { falsifier_spec: `must-fail: a \`${plan.resolver}\` step given the walk's input no longer fails with "${observed}"; control: the step's other inputs still succeed` } : {}) };
+    const existing = gd.findStepGap(await rowsOf(), plan.resolver, plan.failure_class);
+    const gap = existing
+      ? { id: existing["id"], category: existing["category"], source: existing["source"], summary: existing["summary"], detected_at: existing["detected_at"], status: "open",
+          classification_metadata: { ...((existing["classification_metadata"] ?? {}) as Record<string, unknown>), ...sited, ...(((existing["classification_metadata"] ?? {}) as Record<string, unknown>)["falsifier_spec"] ? { falsifier_spec: ((existing["classification_metadata"] ?? {}) as Record<string, unknown>)["falsifier_spec"] } : {}) } }
+      : { id: gd.stepGapId(plan.resolver, plan.failure_class), category: "systematic_failure", source: "goal_reach_tick", status: "open", detected_at: new Date().toISOString(),
+          summary: `Step \`${plan.resolver}\` fails (${plan.failure_class}) in ${v.vessel} on ${plan.dispatch_ids.length} run(s) of a goal judged deficient: ${String(plan.excerpt ?? "(no failure text)").slice(0, 240)}`,
+          classification_metadata: { kind: "step_failure", ...sited } };
+    const res = await write({ type: "substrateGap_write", gap, demand_goals_append: [demand], ...(existing ? { expect_status: "open" } : {}) } as never);
+    const body = (res.body ?? {}) as Record<string, unknown>;
+    if (res.shape !== "substrateGapWriteResult" || body["skip_reason"]) {
+      out.push({ id: String(gap.id), resolver: plan.resolver, failure_class: plan.failure_class, state: "refused", why: String(body["skip_reason"] ?? body["detail"] ?? res.shape).slice(0, 160) });
+      continue;
+    }
+    out.push({ id: String(gap.id), resolver: plan.resolver, failure_class: plan.failure_class, state: existing ? "linked" : "filed" });
+    console.log(`[goal-reach] R2 step child ${existing ? "LINKED" : "FILED"} ${gap.id} (${plan.resolver}/${plan.failure_class} → ${f.file}) for ${parent["id"]}`);
+  }
+  return out;
+}
+
 /** A deficiency row needs (re)localizing when it has none, or its counted runs changed since it was localized. */
 export function needsLocalization(g: Record<string, unknown>): boolean {
   const meta = (g["classification_metadata"] ?? {}) as Record<string, unknown>;
@@ -1576,11 +1631,17 @@ export function defaultGoalReachIO(policy: GoalReachPolicy): GoalReachIO {
         const rows = new Map(existing);
         for (const w of dec.writes) rows.set(w.id, { ...(rows.get(w.id) ?? {}), ...w.gap, status: "open" });
         const due = [...rows.values()].filter((g) => String(g["status"] ?? "") === "open" && needsLocalization(g)).slice(0, pol.policy.max_localizations);
+        let allRows: Array<Record<string, unknown>> | undefined;
         for (const g of due) {
           try {
             const loc = await localizeRow(g, up.tallies, pol.policy.siting_majority, now);
             const meta = (g["classification_metadata"] ?? {}) as Record<string, unknown>;
-            const patch: Record<string, unknown> = { ...meta, localization: loc, ...(loc.state === "sited" ? { vessel: loc.vessel, failing_activity: loc.failing_activity, edit_site: loc.edit_site } : {}) };
+            // #1b: each distinct failing step becomes a linked, sited step gap (reuse first), carrying this goal's demand,
+            // so the goal waits on it and re-runs when it lands. Filed only when the policy files gaps.
+            const children = pol.policy.file_gaps === 1
+              ? await ensureStepChildren(g, loc, async () => (allRows ??= await readAllGaps(resolveSubstrateGap)), resolveSubstrateGapWrite)
+              : [];
+            const patch: Record<string, unknown> = { ...meta, localization: { ...loc, children }, ...(loc.state === "sited" ? { vessel: loc.vessel, failing_activity: loc.failing_activity, edit_site: loc.edit_site } : {}) };
             const res = await resolveSubstrateGapWrite({ type: "substrateGap_write", gap: { id: g["id"], category: g["category"], source: g["source"], summary: g["summary"], detected_at: g["detected_at"], status: "open", classification_metadata: patch }, expect_status: "open" } as never);
             const ok = res.shape === "substrateGapWriteResult" && !((res.body ?? {}) as Record<string, unknown>)["skip_reason"];
             report.localized.push({ id: String(g["id"]), state: loc.state, kind: loc.kind, ...(ok ? {} : { refused: true }) });

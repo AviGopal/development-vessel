@@ -555,7 +555,7 @@ export async function resolveGoalReachVerdict(pointer: { goal_hash?: unknown; si
  *  - trace_unreadable: the run's trace could not be read.
  */
 export type RunKind = "step_failure" | "output_error" | "composition" | "trace_unreadable";
-export interface RunAttribution { dispatch_id: string; kind: RunKind; resolver?: string; failure_excerpt?: string }
+export interface RunAttribution { dispatch_id: string; kind: RunKind; resolver?: string; failure_excerpt?: string; failure_class?: string }
 type TraceTask = { resolver_id?: unknown; status?: unknown; success?: unknown };
 export interface TraceView { tasks?: TraceTask[] | null; failure_mode?: { type?: unknown; reason?: unknown } | null }
 
@@ -566,7 +566,8 @@ export function attributeRun(dispatchId: string, trace: TraceView | null, reason
   const rid = (t: TraceTask | undefined) => (typeof t?.resolver_id === "string" && t.resolver_id ? t.resolver_id : undefined);
   if (failed) {
     const ex = typeof trace.failure_mode?.reason === "string" ? trace.failure_mode.reason.slice(0, 300) : undefined;
-    return { dispatch_id: dispatchId, kind: "step_failure", ...(rid(failed) ? { resolver: rid(failed) } : {}), ...(ex ? { failure_excerpt: ex } : {}) };
+    const fc = typeof trace.failure_mode?.type === "string" && trace.failure_mode.type ? trace.failure_mode.type : "unclassified_failure";
+    return { dispatch_id: dispatchId, kind: "step_failure", ...(rid(failed) ? { resolver: rid(failed) } : {}), ...(ex ? { failure_excerpt: ex } : {}), failure_class: fc };
   }
   if (verdictTokenOfReason(reason) === "error-envelope") {
     const last = tasks[tasks.length - 1];
@@ -620,3 +621,50 @@ export async function localizeFromRuns(runs: RunAttribution[], majority: number,
   const steps = [...byResolver.entries()].map(([k, v]) => `${k}×${v.length}`).join(", ") || "none";
   return { state: "unknown", kind: "mixed", why: `no single cause reaches siting_majority ${majority} across ${readable} readable run(s) (failing steps: ${steps}; output errors ${counts.output_error}; composition ${counts.composition})`, ...base };
 }
+
+// ── #1b: a deficiency's failing steps become linked, sited step gaps (reuse first) ──────────────────
+
+/** One distinct failing step across a deficiency's counted runs: (resolver, failure class), with the runs that hit it. */
+export interface StepChildPlan { resolver: string; failure_class: string; dispatch_ids: string[]; excerpt?: string }
+export function stepChildren(runs: readonly RunAttribution[]): StepChildPlan[] {
+  const by = new Map<string, StepChildPlan>();
+  for (const r of runs) {
+    if (r.kind !== "step_failure" || !r.resolver) continue;
+    const cls = r.failure_class ?? "unclassified_failure";
+    const k = `${r.resolver}\u0000${cls}`;
+    const p = by.get(k) ?? { resolver: r.resolver, failure_class: cls, dispatch_ids: [] };
+    p.dispatch_ids.push(r.dispatch_id);
+    if (!p.excerpt && r.failure_excerpt) p.excerpt = r.failure_excerpt;
+    by.set(k, p);
+  }
+  return [...by.values()];
+}
+/** The canonical id of a step gap: one per (resolver, failure class), however many goals or runs hit it. */
+export const stepGapId = (resolver: string, failureClass: string): string => gapClassKey(`step-failure-${resolver}-${failureClass}`);
+const kebab = (s: string) => s.replace(/_/g, "-").replace(/([a-z0-9])([A-Z])/g, "$1-$2").toLowerCase();
+/**
+ * An OPEN gap that already is this step defect (law 3: link and enrich, never a duplicate): one this code filed or enriched
+ * (failing_activity + failure_class), else a failure-cluster row whose cluster key names the step's resolver and the same
+ * failure class (e.g. novel-failure "<template ending in the resolver>|<class>"). Newest first. Dedup is by (resolver, class),
+ * never by id string.
+ */
+export function findStepGap(rows: ReadonlyArray<Record<string, unknown>>, resolver: string, failureClass: string): Record<string, unknown> | null {
+  const open = rows.filter((g) => String(g["status"] ?? "open") === "open");
+  const metaOf = (g: Record<string, unknown>) => (g["classification_metadata"] ?? {}) as Record<string, unknown>;
+  const at = (g: Record<string, unknown>) => Date.parse(String(g["detected_at"] ?? "")) || 0;
+  const own = open.filter((g) => metaOf(g)["failing_activity"] === resolver && metaOf(g)["failure_class"] === failureClass);
+  if (own.length) return own.sort((a, b) => at(b) - at(a))[0]!;
+  const names = new Set([resolver, kebab(resolver)]);
+  const cluster = open.filter((g) => {
+    const key = String(metaOf(g)["cluster_key"] ?? "");
+    const [tpl, cls] = key.split("|");
+    if (!tpl || cls !== failureClass) return false;
+    return [...names].some((n) => tpl === n || tpl.endsWith(`-${n}`) || tpl.endsWith(`:${n}`));
+  });
+  return cluster.length ? cluster.sort((a, b) => at(b) - at(a))[0]! : null;
+}
+/** The first line of a failure excerpt, as an observed output a check can assert on (quoted in the child's falsifier_spec). */
+export const observedFailureText = (excerpt: string | undefined): string | null => {
+  const line = (excerpt ?? "").split("\n")[0]!.replace(/["`]/g, "'").trim().slice(0, 160);
+  return line.length >= 12 && /\s/.test(line) ? line : null;
+};

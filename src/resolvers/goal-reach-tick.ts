@@ -1609,10 +1609,18 @@ export function defaultGoalReachIO(policy: GoalReachPolicy): GoalReachIO {
       // READ THE MISSING REASONS (C-tally-1): a not-reached run with no judge reason is unread until R2 reads it here, oldest first.
       let reasonsRead = 0, reasonsUnrecorded = 0, reasonReadsFailed = 0;
       const byId = new Map(runs.map((r) => [r.dispatchId, r]));
-      for (const n of gd.reasonsToRead(tallies, runs, pol.policy.max_reason_reads)) {
+      // Legacy entries (tallied before C-tally-1: no reason, no class, often no node) are read too, through this node's own
+      // goal-host when they name none; a record that stays unreadable for max_reason_read_attempts becomes UNRECORDED.
+      const ownWalk = await ownUrls("goalWalkState").then((u) => (u.ok ? u.urls[0] ?? null : null)).catch(() => null);
+      const failedReadHashes = new Set<string>();
+      for (const n of gd.reasonsToRead(tallies, runs, pol.policy.max_reason_reads, ownWalk)) {
         const w = await postResolve(n.node, { type: "goalWalkState", dispatchId: n.dispatchId }, 10_000);
         const b = (w.json?.["body"] ?? null) as Record<string, unknown> | null;
-        if (!w.ok || !b) { reasonReadsFailed++; continue; } // the record could not be read: stays unread, retried later
+        if (!w.ok || !b) { // the record could not be read: stays unread, retried later, until the attempt bound
+          reasonReadsFailed++;
+          if (gd.recordFailedRead(tallies, n.goal_hash, n.dispatchId, pol.policy.max_reason_read_attempts) !== "absent") failedReadHashes.add(n.goal_hash);
+          continue;
+        }
         const reason = typeof b["goalReachReason"] === "string" ? (b["goalReachReason"] as string).trim() : "";
         // Read, and the record has no reason: UNRECORDED (the source never wrote one), never re-read.
         if (reason) reasonsRead++; else reasonsUnrecorded++;
@@ -1623,6 +1631,7 @@ export function defaultGoalReachIO(policy: GoalReachPolicy): GoalReachIO {
         runs.push({ dispatchId: n.dispatchId, goal_hash: n.goal_hash, goal: t.goal, status: "failed", reached: false, operator: null, origin: t.origin, startedAt: n.at, endedAt: n.at, goalReachReason: reason || null, completionShapes: shapes, node: n.node, reason_unrecorded: !reason });
       }
       const up = gd.tallyUpdate(tallies, runs, now, pol.policy, isAdvertised);
+      for (const h of failedReadHashes) if (!up.touched.includes(h)) up.touched.push(h);
       // The current policy applies to the evidence already held, not only to runs seen from now on.
       const rc = gd.reclassifyStored(up.tallies, pol.policy, isAdvertised);
       for (const h of rc.changed) if (!up.touched.includes(h)) up.touched.push(h);

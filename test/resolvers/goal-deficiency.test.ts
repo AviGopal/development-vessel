@@ -962,3 +962,70 @@ describe("#1c: localization is per-run ownership, merged across nodes", () => {
     expect(src).toContain("if (fresh === 0) continue;");
   });
 });
+
+// #1d (exception (a), a gap in our C-tally-1 follow-up): entries tallied BEFORE unread/unrecorded existed carry no reason and
+// no class (and often no node). reasonsToRead re-read only class "unread" with a node, and reclassifyStored skips a missing
+// reason, so those runs were never read and never counted: a goal could sit below min_runs forever while its goal-host held a
+// reason for every run. Now a legacy entry is unread; with no node it is read through this node's own goal-host; and any
+// unread run whose record stays unreadable for the shaped max_reason_read_attempts becomes UNRECORDED (never re-read), so
+// old or foreign runs cannot hold the oldest-first read budget forever.
+describe("#1d: legacy reasonless entries are read, then counted", () => {
+  const G = "list the overdue library loans by branch";
+  const hh = grt.goalHashOf(G);
+  const OWN = "http://own-goal-host.test/v2/impulses/resolve";
+  const legacy = (id: string, at: number, node?: string): Row => ({ dispatch_id: id, at, reached: false, reason: "", class: null, ...(node ? { node } : {}) });
+  const tallyWith = (entries: Row[]): Record<string, Row> => ({ [hh]: { goal_hash: hh, goal: G, origin: "human", entries, updated_at: NOW } });
+
+  it("MUST-FAIL: a legacy entry (no reason, no class, no node) is read through this node's own goal-host; without a fallback it is not", () => {
+    const t = tallyWith([legacy("lg1", NOW - 3 * H)]);
+    expect(gd.reasonsToRead(t, [], 30, OWN)).toEqual([{ dispatchId: "lg1", node: OWN, goal_hash: hh, at: NOW - 3 * H }]);
+    expect(gd.reasonsToRead(t, [], 30)).toEqual([]);
+  });
+  it("a legacy entry that names its node is read there, not through the fallback; a reached or reasoned entry is never read", () => {
+    const t = tallyWith([legacy("lg2", NOW - 2 * H, "http://ran-here.test/resolve"), { dispatch_id: "ok", at: NOW - H, reached: true, reason: "", class: null }, { dispatch_id: "rs", at: NOW - H, reached: false, reason: "The required table was not produced.", class: "deliverable_not_produced" }]);
+    expect(gd.reasonsToRead(t, [], 30, OWN)).toEqual([{ dispatchId: "lg2", node: "http://ran-here.test/resolve", goal_hash: hh, at: NOW - 2 * H }]);
+  });
+  it("MUST-FAIL: UNRECORDED (read, the record gave none) is never re-read, even with a fallback", () => {
+    const t = tallyWith([{ dispatch_id: "ur", at: NOW - H, reached: false, reason: "", class: gd.UNRECORDED_CLASS }]);
+    expect(gd.reasonsToRead(t, [], 30, OWN)).toEqual([]);
+  });
+  it("MUST-FAIL: a record that stays unreadable becomes UNRECORDED after max_reason_read_attempts and leaves the read queue", () => {
+    const t = tallyWith([legacy("gone", NOW - 9 * H)]);
+    expect(gd.recordFailedRead(t, hh, "gone", 3)).toBe("counted");
+    expect(gd.recordFailedRead(t, hh, "gone", 3)).toBe("counted");
+    expect(gd.reasonsToRead(t, [], 30, OWN).map((x: Row) => x.dispatchId)).toEqual(["gone"]);
+    expect(gd.recordFailedRead(t, hh, "gone", 3)).toBe("unrecorded");
+    expect(t[hh].entries[0].class).toBe(gd.UNRECORDED_CLASS);
+    expect(gd.reasonsToRead(t, [], 30, OWN)).toEqual([]);
+    expect(gd.recordFailedRead(t, hh, "not-tallied", 3)).toBe("absent");
+  });
+  it("MUST-FAIL (qa): a legacy entry, once read and classed, counts toward min_runs on the next decision", () => {
+    const reason = "The required list was not produced.";
+    let tallies: Record<string, Row> = tallyWith([
+      { dispatch_id: "r1", at: NOW - 5 * H, reached: false, reason, class: "deliverable_not_produced", class_source: "operator_map" },
+      legacy("r2", NOW - 4 * H), legacy("r3", NOW - 3 * H),
+    ]);
+    expect(gd.deficiencyDecisions(tallies, new Map(), NOW, P()).candidates.filter((c: Row) => c.goal_hash === hh)).toEqual([]);
+    const queue = gd.reasonsToRead(tallies, [], 30, OWN);
+    expect(queue.map((x: Row) => x.dispatchId)).toEqual(["r2", "r3"]);
+    // the reader's result, as the tick feeds it back: a run with the read reason and the node it was read from
+    const read = queue.map((x: Row) => ({ dispatchId: x.dispatchId, goal_hash: hh, goal: G, status: "failed", reached: false, operator: null, origin: "human", startedAt: x.at, endedAt: x.at, goalReachReason: reason, completionShapes: [], node: x.node, reason_unrecorded: false }));
+    tallies = gd.tallyUpdate(tallies, read, NOW, P(), never).tallies;
+    expect(tallies[hh].entries.every((e: Row) => e.class === "deliverable_not_produced")).toBe(true);
+    expect(tallies[hh].entries.filter((e: Row) => e.dispatch_id !== "r1").every((e: Row) => e.node === OWN)).toBe(true);
+    const c = gd.deficiencyDecisions(tallies, new Map(), NOW, P()).candidates.filter((x: Row) => x.goal_hash === hh);
+    expect(c).toEqual([expect.objectContaining({ goal_hash: hh, reason_class: "deliverable_not_produced", count: 3 })]);
+  });
+  it("max_reason_read_attempts is a shaped policy field (default 3; out of range → ok false)", () => {
+    expect(gd.parseDeficiencyPolicy(null).policy.max_reason_read_attempts).toBe(3);
+    expect(gd.parseDeficiencyPolicy({ max_reason_read_attempts: 5 }).policy.max_reason_read_attempts).toBe(5);
+    expect(gd.parseDeficiencyPolicy({ max_reason_read_attempts: 0 }).ok).toBe(false);
+  });
+  it("wiring: the tick reads legacy entries through its own goal-host, and counts a failed read toward the bound and persists it", () => {
+    const src = readFileSync(join(import.meta.dir, "../../src/resolvers/goal-reach-tick.ts"), "utf8");
+    expect(src).toContain('const ownWalk = await ownUrls("goalWalkState")');
+    expect(src).toContain("gd.reasonsToRead(tallies, runs, pol.policy.max_reason_reads, ownWalk)");
+    expect(src).toContain("gd.recordFailedRead(tallies, n.goal_hash, n.dispatchId, pol.policy.max_reason_read_attempts)");
+    expect(src).toContain("for (const h of failedReadHashes) if (!up.touched.includes(h)) up.touched.push(h);");
+  });
+});

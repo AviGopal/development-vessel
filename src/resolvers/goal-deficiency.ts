@@ -60,6 +60,9 @@ export interface GoalDeficiencyPolicy {
   ignore_operator_patterns: string[];
   /** Judge reasons R2 reads itself per call for not-reached runs that have none yet (oldest first). */
   max_reason_reads: number;
+  /** A run whose record cannot be read after this many reads becomes UNRECORDED (never re-read), so old or foreign runs
+   *  cannot hold the oldest-first read budget forever. */
+  max_reason_read_attempts: number;
   /** Share of a gap's counted runs that must fail at ONE resolver before that resolver sites the gap (#1a). 0 < x <= 1. */
   siting_majority: number;
   /** Deficiency rows localized per call (each reads up to its counted runs' traces). */
@@ -81,6 +84,7 @@ export const DEFAULT_GOAL_DEFICIENCY_POLICY: Readonly<GoalDeficiencyPolicy> = Ob
   max_new_per_run: 2,
   max_entries: 60,
   max_reason_reads: 30,
+  max_reason_read_attempts: 3,
   siting_majority: 0.5,
   max_localizations: 5,
   relocalize_unread_after_ms: 3_600_000,
@@ -110,7 +114,7 @@ export function parseDeficiencyPolicy(body: unknown): { ok: true; policy: GoalDe
   if (body === null || body === undefined) return { ok: true, policy: p };
   if (typeof body !== "object" || Array.isArray(body)) return { ok: false, why: "goalDeficiencyPolicy is not an object" };
   const b = body as Record<string, unknown>;
-  const ints: Array<[keyof GoalDeficiencyPolicy, number, number]> = [["file_gaps", 0, 1], ["min_runs", 2, 1000], ["window_hours", 24, 24 * 90], ["max_new_per_run", 0, 50], ["max_entries", 10, 500], ["max_reason_reads", 0, 200]];
+  const ints: Array<[keyof GoalDeficiencyPolicy, number, number]> = [["file_gaps", 0, 1], ["min_runs", 2, 1000], ["window_hours", 24, 24 * 90], ["max_new_per_run", 0, 50], ["max_entries", 10, 500], ["max_reason_reads", 0, 200], ["max_reason_read_attempts", 1, 50]];
   for (const [k, lo, hi] of ints) {
     if (b[k] === undefined) continue;
     if (!intIn(b[k], lo, hi)) return { ok: false, why: `goalDeficiencyPolicy.${k} must be an integer in ${lo}..${hi}` };
@@ -181,6 +185,8 @@ export interface TallyEntry {
   node?: string | null;
   /** The run's execution id (its durable trace), when the listing carried it. */
   execution_id?: string | null;
+  /** Failed reads of this run's record (unread runs only); at max_reason_read_attempts it becomes UNRECORDED. */
+  read_attempts?: number;
   /** Where the class came from: the judge's own structured code (the system's taxonomy) or the shaped text map (an operator map). */
   class_source?: "judge_code" | "operator_map";
   missing_shapes?: string[];
@@ -312,7 +318,10 @@ export function reclassifyStored(tallies: Record<string, DeficiencyTally>, polic
  * The not-reached runs whose judge reason R2 should read itself this call, oldest first, at most `bound`: runs in the current listing with
  * no reason, and tallied runs still unread (by the node recorded on them). A run with no node to read from is skipped.
  */
-export function reasonsToRead(tallies: Record<string, DeficiencyTally>, runs: readonly RunView[], bound: number): Array<{ dispatchId: string; node: string; goal_hash: string; at: number }> {
+/** A not-reached entry tallied before unread/unrecorded existed (C-tally-1): no reason and no class. It was never read. */
+export const isLegacyUnread = (e: TallyEntry): boolean => !e.reached && !e.reason && (e.class === null || e.class === undefined);
+
+export function reasonsToRead(tallies: Record<string, DeficiencyTally>, runs: readonly RunView[], bound: number, fallbackNode: string | null = null): Array<{ dispatchId: string; node: string; goal_hash: string; at: number }> {
   const out = new Map<string, { dispatchId: string; node: string; goal_hash: string; at: number }>();
   for (const r of runs) {
     if (r.status === "running" || r.status === "pending" || r.reached === true || !r.goal_hash || !r.node) continue;
@@ -322,10 +331,22 @@ export function reasonsToRead(tallies: Record<string, DeficiencyTally>, runs: re
     out.set(r.dispatchId, { dispatchId: r.dispatchId, node: r.node, goal_hash: r.goal_hash, at: r.endedAt ?? r.startedAt });
   }
   for (const t of Object.values(tallies)) for (const e of t.entries) {
-    if (e.reached || e.class !== UNREAD_CLASS || !e.node || out.has(e.dispatch_id)) continue; // unrecorded is never re-read
-    out.set(e.dispatch_id, { dispatchId: e.dispatch_id, node: e.node, goal_hash: t.goal_hash, at: e.at });
+    // unread, or a legacy entry never read; unrecorded is never re-read. No node recorded: this node's own goal-host.
+    if (e.reached || out.has(e.dispatch_id) || !(e.class === UNREAD_CLASS || isLegacyUnread(e))) continue;
+    const node = e.node || fallbackNode;
+    if (!node) continue;
+    out.set(e.dispatch_id, { dispatchId: e.dispatch_id, node, goal_hash: t.goal_hash, at: e.at });
   }
   return [...out.values()].sort((a, b) => a.at - b.at).slice(0, Math.max(0, bound));
+}
+
+/** A read of this run's record failed: count it; at `max` the entry becomes UNRECORDED (never re-read, never counted). Returns whether it changed. */
+export function recordFailedRead(tallies: Record<string, DeficiencyTally>, goalHash: string, dispatchId: string, max: number): "counted" | "unrecorded" | "absent" {
+  const e = tallies[goalHash]?.entries.find((x) => x.dispatch_id === dispatchId);
+  if (!e) return "absent";
+  e.read_attempts = (e.read_attempts ?? 0) + 1;
+  if (e.read_attempts >= max) { e.class = UNRECORDED_CLASS; return "unrecorded"; }
+  return "counted";
 }
 
 export function isLenientReach(judge: ReachJudge | undefined, policy: Pick<GoalDeficiencyPolicy, "lenient_reach">): boolean {

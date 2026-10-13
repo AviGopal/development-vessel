@@ -154,6 +154,8 @@ export interface GoalReachRecord {
   dispatches: ChainEntry[];
   /** Dispatch ids this tick issued (re-dispatches). */
   r_issued: string[];
+  /** The re-dispatches a LANDING on an open linked gap triggered: landing sha → redispatch id, so a reach can show its chain. */
+  redispatch_triggers?: Array<{ dispatch_id: string; landed: Array<{ gap: string; sha: string; at: string }> }>;
   last_redispatch_at: number | null;
   /** Gap ids currently linked / ever linked / currently open among the linked. */
   linked: string[];
@@ -198,6 +200,9 @@ export interface GapView {
   edit_site?: string | null;
   demand_goals?: unknown;
   reopen_count?: number;
+  /** When the lane last LANDED a change for this gap that is not yet verified (pending_set_at with a pending sha), else null. */
+  landed_at?: string | null;
+  landed_sha?: string | null;
 }
 
 /** One landing on the attempt ledger, classified by ROUTE (never by git author strings). */
@@ -239,7 +244,7 @@ export const DEFAULT_GOAL_REACH_POLICY: GoalReachPolicy = {
 export type GoalReachAction =
   | { kind: "none"; reason: string }
   | { kind: "wait"; waiting_on: string[] }
-  | { kind: "redispatch"; goal: string; goal_hash: string }
+  | { kind: "redispatch"; goal: string; goal_hash: string; landed?: Array<{ gap: string; sha: string; at: string }> }
   | { kind: "stop"; reason: string; limit_proposal?: { goal_hash: string; paths: string[]; gap_ids: string[] } }
   | { kind: "ask_human"; reason: string; write_shapes: string[]; addressee: string };
 
@@ -503,6 +508,7 @@ export function askAddressee(rec: Pick<GoalReachRecord, "origin" | "origin_opera
 }
 
 const gapClosedAt = (g: GapView): number => (typeof g.closed_at === "string" ? Date.parse(g.closed_at) : NaN);
+const gapLandedAt = (g: GapView): number => (typeof g.landed_at === "string" && g.landed_sha ? Date.parse(g.landed_at) : NaN);
 
 export function nextAction(
   rec: GoalReachRecord,
@@ -530,17 +536,22 @@ export function nextAction(
       return { kind: "stop", reason: `blocked_by_scope:${paths.join(",")}`, limit_proposal: { goal_hash: rec.goal_hash, paths, gap_ids: blocked.map((g) => g.id) } };
     }
   }
-  if (open.length > 0) return { kind: "wait", waiting_on: open.map((g) => g.id) };
+  const lastAttempt = latest ? latest.startedAt : 0;
+  // AN OPEN GAP WHOSE FIX HAS LANDED IS TESTED BY RUNNING THE GOAL. A gap judged by the goal's own reach (its falsifier is a
+  // later reach) can never close while the goal waits on it: a landing newer than the last attempt re-runs the goal once
+  // (the next attempt is newer than that landing, so the same landing never re-runs it twice). Budgets and scope above.
+  const landedSince = open.filter((g) => gapLandedAt(g) > lastAttempt);
+  if (open.length > 0 && landedSince.length === 0) return { kind: "wait", waiting_on: open.map((g) => g.id) };
   if (linked.length === 0) return { kind: "none", reason: "unlinked" };
 
-  const lastAttempt = latest ? latest.startedAt : 0;
-  if (!linked.some((g) => gapClosedAt(g) > lastAttempt)) return { kind: "none", reason: "no_new_closure" };
+  if (landedSince.length === 0 && !linked.some((g) => gapClosedAt(g) > lastAttempt)) return { kind: "none", reason: "no_new_closure" };
 
   const unkeyed = rec.landed_write_shapes.filter((w) => !IDEMPOTENT_BY_KEY_WRITE_SHAPES.has(w));
   if (rec.origin !== "autonomous" && unkeyed.length > 0) {
     return { kind: "ask_human", reason: `${rec.origin} goal landed writes on an earlier attempt`, write_shapes: unkeyed, addressee: askAddressee(rec) };
   }
-  return { kind: "redispatch", goal: rec.goal, goal_hash: rec.goal_hash };
+  const landed = landedSince.map((g) => ({ gap: g.id, sha: String(g.landed_sha), at: String(g.landed_at) }));
+  return { kind: "redispatch", goal: rec.goal, goal_hash: rec.goal_hash, ...(landed.length ? { landed } : {}) };
 }
 
 // ── attribution ───────────────────────────────────────────────────────────────────────────────────
@@ -605,7 +616,12 @@ export function attributeReach(rec: GoalReachRecord, gaps: GapView[], landings: 
   if (hands.length > 0) return { attribution: "hands", reasons: hands };
   if (possible.length > 0) return { attribution: "possible", reasons: possible };
   const reacher = rec.dispatches.find((e) => e.dispatchId === rec.reached_dispatch_id);
-  if (reacher && isRIssued(rec, reacher)) return { attribution: "r", reasons: [] };
+  if (reacher && isRIssued(rec, reacher)) {
+    // A reach by a re-dispatch a landing triggered carries its chain (landing sha → redispatch id → reach), so grading can tell
+    // a system repair's effect from an external re-run.
+    const t = (rec.redispatch_triggers ?? []).find((x) => x.dispatch_id === reacher.dispatchId);
+    return { attribution: "r", reasons: t ? t.landed.map((l) => `landing:${l.gap}@${l.sha}->redispatch:${reacher.dispatchId}->reach`) : [] };
+  }
   return { attribution: "autonomous_other", reasons: [`reached_by:${reacher?.dispatchId ?? "unknown"}:${reacher?.trigger ?? "unknown"}`] };
 }
 const handsOf = (a: ReachAttribution): HandsVerdict => (a === "hands" ? "true" : a === "possible" ? "possible" : "false");
@@ -1073,7 +1089,7 @@ export async function runGoalReachTick(io: GoalReachIO, policy: GoalReachPolicy,
           goal_hash: action.goal_hash,
           // NEVER `operator`: goal-host maps any operator id to trigger "operator", which would make
           // R's own re-dispatch read as operator hands. The tag yields trigger "goal_reach".
-          tags: ["dispatcher_reason:goal_reach", `goal_reach:${action.goal_hash}`, `goal_reach_cycle:${cycle}`],
+          tags: ["dispatcher_reason:goal_reach", `goal_reach:${action.goal_hash}`, `goal_reach_cycle:${cycle}`, ...(action.landed ?? []).map((l) => `goal_reach_landing:${l.sha}`)],
           variables: { source: "goal_reach", goal_reach_goal_hash: action.goal_hash, goal_reach_cycle: cycle },
         });
         if (!r.ok) { result.errors.push(`redispatch ${rec.goal_hash} failed: ${r.why}`); result.ledger.errors.push(`redispatch ${rec.goal_hash} failed: ${r.why}`); }
@@ -1081,14 +1097,16 @@ export async function runGoalReachTick(io: GoalReachIO, policy: GoalReachPolicy,
           rec.last_action = { kind: "redispatch_coalesced", reason: `goal-host returned the already-running ${r.dispatch_id}`, at: now };
         } else {
           rec.r_issued.push(r.dispatch_id);
+          if (action.landed?.length) (rec.redispatch_triggers ??= []).push({ dispatch_id: r.dispatch_id, landed: action.landed });
           rec.last_redispatch_at = now;
           rec.status = "redispatching";
           rec.cycles = cycle;
           result.redispatched.push({ goal_hash: rec.goal_hash, dispatch_id: r.dispatch_id });
           result.ledger.actions.push({ kind: "redispatch", goal_hash: rec.goal_hash, would: policy.dry_run, linked: linkedSnapshot(rec) });
+          const why = action.landed?.length ? `landing ${action.landed.map((l) => `${l.gap}@${l.sha.slice(0, 12)}`).join(",")} on an open linked gap` : `all ${rec.linked.length} linked gap(s) closed`;
           console.log(policy.dry_run
-            ? `[goal-reach] DRY-RUN would redispatch goal_hash=${rec.goal_hash} cycle=${cycle}/${policy.max_cycles} (all ${rec.linked.length} linked gap(s) closed)`
-            : `[goal-reach] REDISPATCHED goal_hash=${rec.goal_hash} dispatch=${r.dispatch_id} cycle=${cycle}/${policy.max_cycles}`);
+            ? `[goal-reach] DRY-RUN would redispatch goal_hash=${rec.goal_hash} cycle=${cycle}/${policy.max_cycles} (${why})`
+            : `[goal-reach] REDISPATCHED goal_hash=${rec.goal_hash} dispatch=${r.dispatch_id} cycle=${cycle}/${policy.max_cycles} (${why})`);
         }
       } catch (e) {
         result.errors.push(`redispatch ${rec.goal_hash} threw: ${errText(e)}`);
@@ -1243,6 +1261,8 @@ export function defaultGoalReachIO(policy: GoalReachPolicy): GoalReachIO {
             closed_reason: typeof meta["closed_reason"] === "string" ? meta["closed_reason"] : null,
             closed_at: typeof g["closed_at"] === "string" ? g["closed_at"] : null,
             edit_site: typeof meta["edit_site"] === "string" ? meta["edit_site"] : null,
+            landed_at: typeof meta["pending_set_at"] === "string" && typeof meta["pending_outcome_verification"] === "string" && meta["pending_outcome_verification"] ? meta["pending_set_at"] : null,
+            landed_sha: typeof meta["pending_outcome_verification"] === "string" && meta["pending_outcome_verification"] ? meta["pending_outcome_verification"] : null,
             demand_goals: meta["demand_goals"],
           });
         }

@@ -210,3 +210,97 @@ describe("the default I/O links against the real gap store", () => {
     expect((await io.linkFiledGap(`gr-link-absent-${RUN}`, entry("abcd1234", "d-3"))).reason).toBe("not_found");
   });
 });
+
+// THE DEADLOCK (#2): a gap judged by the goal's own reach (its falsifier is a later reach) can never close while the goal waits
+// on it. A LANDING on an open linked gap, newer than the last attempt, re-runs the goal ONCE; nothing else moves. The landing
+// never closes the gap or touches its falsifier; budgets and scope still win; a reach by that re-run records its chain.
+describe("a landing on an open linked gap re-runs its goal once (no deadlock)", () => {
+  const G = `compile the open purchase orders by supplier ${Math.random().toString(36).slice(2, 6)}`;
+  const H = grt.goalHashOf(G);
+  const P = { ...grt.DEFAULT_GOAL_REACH_POLICY, dry_run: false, max_cycles: 3, max_cost_usd: 5 };
+  const link = { source: "goal_reach", goal_hash: H, dispatch_id: "d1", origin: "autonomous" };
+  const gapv = (over: Row = {}): Row => ({ id: "gd-1", status: "open", source: "goal_reach_tick", closed_reason: null, closed_at: null, edit_site: null, demand_goals: [link], ...over });
+  const rec = (dispatches: Row[], gaps: Row[]): Row => { const recs = grt.observe({}, dispatches, T0 + 3_600_000); const r = recs[H]; grt.linkGaps(r, gaps); return r; };
+  const at = (min: number) => new Date(T0 + min * 60_000).toISOString();
+  const d1 = dispatch("d1", G, { startedAt: T0, endedAt: T0 + 60_000 });
+
+  it("MUST-FAIL baseline: an open linked gap with NO landing still waits", () => {
+    expect(grt.nextAction(rec([d1], [gapv()]), [gapv()], P).kind).toBe("wait");
+  });
+  it("a landing newer than the last attempt re-runs the goal, naming the landing", () => {
+    const g = gapv({ landed_at: at(10), landed_sha: "abc123def456" });
+    const a = grt.nextAction(rec([d1], [g]), [g], P);
+    expect(a.kind).toBe("redispatch");
+    expect(a.landed).toEqual([{ gap: "gd-1", sha: "abc123def456", at: at(10) }]);
+  });
+  it("an UNVERIFIED fix landing (the cutover's stamp with landed_unverified, as for a gap with no own check) re-runs the goal once", () => {
+    // the stamp stampPendingLand writes for a pushed fix landing on a gap with no test_suite check (vessel-mitosis-cutover.ts)
+    const meta = { pending_outcome_verification: "9e1f00d2c0ffee", pending_set_at: at(12), landed_unverified: true, landed_unverified_reason: "gap carries no test_suite check", landed_unverified_sha: "9e1f00d2c0ffee" };
+    const g = gapv({ landed_at: meta.pending_set_at, landed_sha: meta.pending_outcome_verification });
+    const a = grt.nextAction(rec([d1], [g]), [g], P);
+    expect(a.kind).toBe("redispatch");
+    expect(a.landed).toEqual([{ gap: "gd-1", sha: "9e1f00d2c0ffee", at: at(12) }]);
+  });
+  it("MUST-FAIL: a landing time with no pending sha (a cleared landing) is no landing: still waits", () => {
+    const g = gapv({ landed_at: at(10), landed_sha: "" });
+    expect(grt.nextAction(rec([d1], [g]), [g], P).kind).toBe("wait");
+  });
+  it("MUST-FAIL: a landing OLDER than the last attempt does not re-run it (that attempt already tested it)", () => {
+    const g = gapv({ landed_at: at(-10), landed_sha: "abc123def456" });
+    expect(grt.nextAction(rec([d1], [g]), [g], P).kind).toBe("wait");
+  });
+  it("MUST-FAIL: one re-run per landing: after the re-run (newer than the landing) the goal waits again", () => {
+    const g = gapv({ landed_at: at(10), landed_sha: "abc123def456" });
+    const d2 = dispatch("r-1", G, { startedAt: T0 + 20 * 60_000, endedAt: T0 + 21 * 60_000 });
+    expect(grt.nextAction(rec([d1, d2], [g]), [g], P).kind).toBe("wait");
+  });
+  it("a landing never overrides scope or budget: blocked_by_scope and budget:cycles still win", () => {
+    const g = gapv({ landed_at: at(10), landed_sha: "abc123def456", edit_site: "repos/x/src/locked.ts" });
+    const a = grt.nextAction(rec([d1], [g]), [g], P, { scopeExcludes: (p: string) => (p.includes("locked") ? "excluded" : null) });
+    expect(a.kind).toBe("stop");
+    expect(String(a.reason)).toMatch(/^blocked_by_scope:/);
+    const r = rec([d1], [g]); r.cycles = 3;
+    expect(grt.nextAction(r, [g], P)).toEqual({ kind: "stop", reason: "budget:cycles" });
+  });
+  it("MUST-FAIL: through a tick the landing re-runs the goal and NOTHING is written to the gap (it closes only on goal_reach_verdict)", async () => {
+    const g = gapv({ landed_at: at(10), landed_sha: "abc123def456" });
+    const records: Record<string, unknown> = {};
+    const gapWrites: unknown[] = [];
+    const dispatched: Row[] = [];
+    const io: Row = {
+      listDispatches: async () => ({ ok: true, dispatches: [d1] }),
+      readGaps: async () => ({ ok: true, gaps: [g] }),
+      readLandings: async () => ({ ok: true, landings: [] }),
+      scopeExcludes: async () => () => null,
+      loadRecords: async () => ({ ...records }),
+      saveRecord: async (r: Row) => { records[String(r["goal_hash"])] = JSON.parse(JSON.stringify(r)); },
+      dispatchGoal: async (req: Row) => { dispatched.push(req); return { ok: true, dispatch_id: "r-1", coalesced: false }; },
+      readTemplatesSince: async () => ({ ok: true, templates: [] }),
+      attachExtractionEvidence: async () => ({ ok: true }),
+      fileLimitProposal: async () => ({ ok: true }),
+      linkFiledGap: async (...a: unknown[]) => { gapWrites.push(a); return { ok: true }; },
+    };
+    const l = console.log, w = console.warn; console.log = () => {}; console.warn = () => {};
+    let res: Row;
+    try { res = await grt.runGoalReachTick(io, { ...P, link_filed_gaps: false }, T0 + 30 * 60_000); } finally { console.log = l; console.warn = w; }
+    expect(dispatched.length).toBe(1);
+    expect((dispatched[0]!["tags"] as string[])).toContain("goal_reach_landing:abc123def456");
+    expect(gapWrites).toEqual([]);
+    expect(g["status"]).toBe("open");
+    expect(Object.keys(g).some((k) => /falsifier|evidence_resolve/.test(k))).toBe(false);
+    const saved = records[H] as Row;
+    expect(saved["redispatch_triggers"]).toEqual([{ dispatch_id: "r-1", landed: [{ gap: "gd-1", sha: "abc123def456", at: at(10) }] }]);
+    expect((res!["redispatched"] as Row[]).map((x) => x["dispatch_id"])).toEqual(["r-1"]);
+  });
+  it("a reach by that re-run records its chain (landing sha -> redispatch id -> reach); another R re-run records none", () => {
+    const g = gapv({ landed_at: at(10), landed_sha: "abc123def456" });
+    const r = rec([d1, dispatch("r-1", G, { startedAt: T0 + 20 * 60_000, status: "completed", reached: true })], [g]);
+    r.r_issued = ["r-1", "r-2"];
+    r.redispatch_triggers = [{ dispatch_id: "r-1", landed: [{ gap: "gd-1", sha: "abc123def456", at: at(10) }] }];
+    r.reached_dispatch_id = "r-1";
+    expect(grt.attributeReach(r, [g], [], T0 + 60 * 60_000)).toEqual({ attribution: "r", reasons: ["landing:gd-1@abc123def456->redispatch:r-1->reach"] });
+    r.reached_dispatch_id = "r-2";
+    r.dispatches.push({ ...r.dispatches[r.dispatches.length - 1], dispatchId: "r-2" });
+    expect(grt.attributeReach(r, [g], [], T0 + 60 * 60_000).reasons).toEqual([]);
+  });
+});

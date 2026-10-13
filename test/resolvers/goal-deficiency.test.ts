@@ -865,3 +865,100 @@ describe("#1b: step children of a deficiency", () => {
     expect(src).toContain("localization: { ...loc, children }");
   });
 });
+
+// #1c (exception (a), a regression of #1a): the gap store is SHARED across nodes, the runs are not. A node attributes only
+// the runs it holds (its tally, or its own goal-host knows the dispatch); another node's runs are skipped, never written as
+// trace_unreadable; every run records the node that attributed it; a node's write MERGES with the other nodes' runs; a
+// trace_unreadable written by another node (or before ownership existed) is re-attributed at once by the owner; a node's
+// own trace_unreadable is retried after the shaped relocalize_unread_after_ms; and "unreadable" says which hop failed.
+describe("#1c: localization is per-run ownership, merged across nodes", () => {
+  const G = "summarise the failed deliveries by region";
+  const hh = grt.goalHashOf(G);
+  const SELF = "node-a", OTHER = "node-b";
+  const tallyOf = (ids: string[], over: Row = {}) => gd.tallyUpdate({}, ids.map((id, i) => run(id, G, 9 - i, false, "The required summary was not produced.", { executionId: `exec_${id}`, ...over })), NOW, P(), never).tallies;
+  const rowOf = (ids: string[], runs?: Row[]): Row => ({ id: `goal-deficiency-${hh}-deliverable_not_produced`, status: "open", classification_metadata: { kind: "goal_content_deficiency", goal_hash: hh, dispatch_ids: ids, ...(runs ? { localization: { state: "unknown", kind: "trace_unreadable", runs } } : {}) } });
+  const stepTrace = (r: string) => ({ tasks: [{ resolver_id: r, status: "failure" }], failure_mode: { type: "execution_error", reason: `${r} POST returned 400: field region missing` } }) as Row;
+  const oneVessel = async (r: string) => ({ vessel: `${r.replace(/_/g, "-")}-vessel` });
+  const fileFor = async (v: string, r: string) => ({ file: `repos/${v}/src/resolvers/${r}.ts`, method: "grep_unique" });
+  const deps = (over: Row = {}) => ({ self: SELF, retryMs: H, vesselOf: oneVessel, locate: fileFor, readTrace: async () => stepTrace("region_report"), ownGoalHost: async () => null, ...over });
+
+  it("MUST-FAIL: a row whose runs this node does not hold is never attributed (nothing fresh to write), whatever its prior state", async () => {
+    const row = rowOf(["x1", "x2"]);
+    const loc = await grt.localizeRow(row, {}, 0.5, NOW, deps({ executionIdOf: async (e: Row | undefined) => (e ? "exec_mine" : null) }));
+    expect(loc.fresh).toBe(0);
+    expect(loc.runs).toEqual([]);
+    const poisoned = rowOf(["x1"], [{ dispatch_id: "x1", kind: "composition", node: OTHER, at: NOW - H }]);
+    const loc2 = await grt.localizeRow(poisoned, {}, 0.5, NOW, deps({ executionIdOf: async () => null }));
+    expect(loc2.fresh).toBe(0);
+    expect(loc2.runs).toEqual([{ dispatch_id: "x1", kind: "composition", node: OTHER, at: NOW - H }]);
+  });
+  it("MUST-FAIL (qa a): a row ALREADY poisoned — another node's trace_unreadable on runs THIS node owns — is re-attributed and the verdict recomputed", async () => {
+    const ids = ["p1", "p2", "p3"];
+    const row = rowOf(ids, ids.map((id) => ({ dispatch_id: id, kind: "trace_unreadable", node: OTHER, at: NOW - 60_000 })));
+    expect(grt.needsLocalization(row, SELF, NOW, H)).toBe(true);
+    const loc = await grt.localizeRow(row, tallyOf(ids), 0.5, NOW, deps());
+    expect(loc.fresh).toBe(3);
+    expect(loc).toMatchObject({ state: "sited", kind: "step_failure", failing_activity: "region_report" });
+    expect(loc.runs.every((r: Row) => r.node === SELF && r.kind === "step_failure")).toBe(true);
+    // the same for rows written before ownership existed (no node recorded on the run)
+    const legacy = rowOf(ids, ids.map((id) => ({ dispatch_id: id, kind: "trace_unreadable" })));
+    expect((await grt.localizeRow(legacy, tallyOf(ids), 0.5, NOW, deps())).fresh).toBe(3);
+  });
+  it("MUST-FAIL (qa b): every fresh run records the attributing node and time; another node's attribution survives the merge", async () => {
+    const row = rowOf(["mine", "theirs"], [{ dispatch_id: "theirs", kind: "composition", node: OTHER, at: NOW - H }]);
+    const loc = await grt.localizeRow(row, tallyOf(["mine"]), 0.5, NOW, deps());
+    expect(loc.fresh).toBe(1);
+    expect(loc.runs).toEqual([
+      { dispatch_id: "mine", kind: "step_failure", resolver: "region_report", failure_excerpt: "region_report POST returned 400: field region missing", failure_class: "execution_error", node: SELF, at: NOW },
+      { dispatch_id: "theirs", kind: "composition", node: OTHER, at: NOW - H },
+    ]);
+  });
+  it("this node's own trace_unreadable is retried only after relocalize_unread_after_ms; its readable verdicts stand", async () => {
+    const recent = rowOf(["r1"], [{ dispatch_id: "r1", kind: "trace_unreadable", unread: "trace_read_failed", node: SELF, at: NOW - 60_000 }]);
+    expect(grt.needsLocalization(recent, SELF, NOW, H)).toBe(false);
+    expect((await grt.localizeRow(recent, tallyOf(["r1"]), 0.5, NOW, deps())).fresh).toBe(0);
+    const old = rowOf(["r1"], [{ dispatch_id: "r1", kind: "trace_unreadable", unread: "trace_read_failed", node: SELF, at: NOW - 2 * H }]);
+    expect(grt.needsLocalization(old, SELF, NOW, H)).toBe(true);
+    expect((await grt.localizeRow(old, tallyOf(["r1"]), 0.5, NOW, deps())).fresh).toBe(1);
+    const settled = rowOf(["r1"], [{ dispatch_id: "r1", kind: "composition", node: SELF, at: NOW - 30 * H }]);
+    expect(grt.needsLocalization(settled, SELF, NOW, H)).toBe(false);
+  });
+  it("MUST-FAIL: a legacy tally entry with no execution id and no node resolves through THIS node's own goal-host; a dispatch it does not know is not this node's run", async () => {
+    const server = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch(req) {
+      const id = decodeURIComponent(new URL(req.url).pathname.split("/").pop() ?? "");
+      return id === "legacy-1" ? Response.json({ dispatchId: id, executionId: "exec_legacy_1" }) : new Response("not found", { status: 404 });
+    } });
+    try {
+      const base = `http://127.0.0.1:${server.port}`;
+      const tallies = tallyOf(["legacy-1"], { executionId: undefined, node: null });
+      const e = tallies[hh]!.entries[0] as Row;
+      expect(e.execution_id ?? null).toBeNull();
+      expect(e.node ?? null).toBeNull();
+      const read: string[] = [];
+      const loc = await grt.localizeRow(rowOf(["legacy-1", "foreign-9"]), tallies, 0.5, NOW, deps({ ownGoalHost: async () => base, readTrace: async (x: string | null) => { read.push(String(x)); return stepTrace("region_report"); } }));
+      expect(read).toEqual(["exec_legacy_1"]);
+      expect(loc.fresh).toBe(1);
+      expect(loc.runs.map((r: Row) => r.dispatch_id)).toEqual(["legacy-1"]);
+    } finally { server.stop(true); }
+  });
+  it("unreadable says which hop failed: execution id unknown vs trace read failed, counted in the why", async () => {
+    const ids = ["u1", "u2"];
+    const loc = await grt.localizeRow(rowOf(ids), tallyOf(ids), 0.5, NOW, deps({ executionIdOf: async (_e: Row | undefined, id: string) => (id === "u1" ? null : "exec_u2"), readTrace: async () => null }));
+    expect(loc.runs).toEqual([
+      { dispatch_id: "u1", kind: "trace_unreadable", unread: "execution_id_unknown", node: SELF, at: NOW },
+      { dispatch_id: "u2", kind: "trace_unreadable", unread: "trace_read_failed", node: SELF, at: NOW },
+    ]);
+    expect(loc.why).toContain("execution id unknown 1, trace read failed 1");
+  });
+  it("relocalize_unread_after_ms is a shaped policy field (default 1 h; out of range → ok false)", () => {
+    expect(gd.parseDeficiencyPolicy(null).policy.relocalize_unread_after_ms).toBe(3_600_000);
+    expect(gd.parseDeficiencyPolicy({ relocalize_unread_after_ms: 7_200_000 }).policy.relocalize_unread_after_ms).toBe(7_200_000);
+    expect(gd.parseDeficiencyPolicy({ relocalize_unread_after_ms: 1000 }).ok).toBe(false);
+  });
+  it("wiring: the tick localizes only rows whose goal has a tally on this node, and never writes when nothing was attributed here", () => {
+    const src = readFileSync(join(import.meta.dir, "../../src/resolvers/goal-reach-tick.ts"), "utf8");
+    expect(src).toMatch(/&& !!up\.tallies\[String\(/);
+    expect(src).toContain("needsLocalization(g, self, now, pol.policy.relocalize_unread_after_ms)");
+    expect(src).toContain("if (fresh === 0) continue;");
+  });
+});

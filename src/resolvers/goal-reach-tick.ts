@@ -1247,15 +1247,22 @@ export async function ensureStepChildren(
 }
 
 /** A deficiency row needs (re)localizing when it has none, or its counted runs changed since it was localized. */
-export function needsLocalization(g: Record<string, unknown>): boolean {
+export function needsLocalization(g: Record<string, unknown>, self = "", now = Date.now(), retryMs = Number.POSITIVE_INFINITY): boolean {
   const meta = (g["classification_metadata"] ?? {}) as Record<string, unknown>;
   if (meta["kind"] !== "goal_content_deficiency") return false;
   const ids = Array.isArray(meta["dispatch_ids"]) ? (meta["dispatch_ids"] as unknown[]).map(String) : [];
   if (ids.length === 0) return false;
-  const loc = meta["localization"] as { runs?: Array<{ dispatch_id?: unknown }> } | undefined;
+  const loc = meta["localization"] as { runs?: import("./goal-deficiency.js").RunAttribution[] } | undefined;
   if (!loc || !Array.isArray(loc.runs)) return true;
-  const had = new Set(loc.runs.map((r) => String(r.dispatch_id)));
-  return ids.some((id) => !had.has(id));
+  const had = new Map(loc.runs.map((r) => [String(r.dispatch_id), r]));
+  // Unattributed runs, another node's trace_unreadable (never its verdict to give), and this node's own after retryMs.
+  return ids.some((id) => runNeedsAttributionSync(had.get(id), self, now, retryMs));
+}
+function runNeedsAttributionSync(prior: import("./goal-deficiency.js").RunAttribution | undefined, self: string, now: number, retryMs: number): boolean {
+  if (!prior) return true;
+  if (prior.kind !== "trace_unreadable") return false;
+  if (prior.node !== self) return true;
+  return !(now - (prior.at ?? 0) < retryMs);
 }
 
 /** The serving vessel of a resolver/shape: exactly one LOCAL (non-federated) producer that is a repo here, else why not. */
@@ -1278,37 +1285,56 @@ async function locateStepFile(vessel: string, resolver: string, excerpt: string 
 }
 
 /** The execution id of a counted run: the tally's, else goal-host's own dispatch record on the node that ran it. */
-async function executionIdOf(entry: import("./goal-deficiency.js").TallyEntry | undefined, dispatchId: string): Promise<string | null> {
+async function executionIdOf(entry: import("./goal-deficiency.js").TallyEntry | undefined, dispatchId: string, ownGoalHost?: () => Promise<string | null>): Promise<string | null> {
   if (entry?.execution_id) return entry.execution_id;
-  const node = entry?.node;
+  // The goal-host that ran it, when the entry names one; else THIS node's own goal-host (entries tallied before
+  // execution ids were recorded carry neither). A dispatch this node's goal-host does not know is not this node's run.
+  const node = entry?.node ? entry.node.replace(/\/v2\/impulses\/resolve\/?$/, "").replace(/\/resolve\/?$/, "") : await (ownGoalHost ?? ownGoalHostBase)();
   if (!node) return null;
   try {
-    const base = node.replace(/\/v2\/impulses\/resolve\/?$/, "").replace(/\/resolve\/?$/, "");
-    const r = await fetch(`${base}/executions/${encodeURIComponent(dispatchId)}`, { signal: AbortSignal.timeout(10_000) });
+    const r = await fetch(`${node}/executions/${encodeURIComponent(dispatchId)}`, { signal: AbortSignal.timeout(10_000) });
     if (!r.ok) return null;
     const j = (await r.json()) as Record<string, unknown>;
     return typeof j["executionId"] === "string" ? (j["executionId"] as string) : null;
   } catch { return null; }
 }
+/** This node's own goal-host base URL (the activeDispatches producer on this substrate), or null. */
+async function ownGoalHostBase(): Promise<string | null> {
+  const u = await ownUrls("activeDispatches");
+  return u.ok && u.urls[0] ? u.urls[0].replace(/\/v2\/impulses\/resolve\/?$/, "").replace(/\/resolve\/?$/, "") : null;
+}
 
 /** #1a for one row: attribute each counted run from its trace, then site (or not) by the policy majority. */
 export async function localizeRow(
   g: Record<string, unknown>, tallies: Record<string, import("./goal-deficiency.js").DeficiencyTally>, majority: number, now: number,
-  deps: { executionIdOf?: typeof executionIdOf; readTrace?: (id: string | null) => Promise<Record<string, unknown> | null>; vesselOf?: (r: string) => Promise<{ vessel: string } | { why: string }>; locate?: typeof locateStepFile } = {},
-): Promise<import("./goal-deficiency.js").Localization> {
+  deps: { executionIdOf?: typeof executionIdOf; readTrace?: (id: string | null) => Promise<Record<string, unknown> | null>; vesselOf?: (r: string) => Promise<{ vessel: string } | { why: string }>; locate?: typeof locateStepFile; self?: string; retryMs?: number; ownGoalHost?: () => Promise<string | null> } = {},
+): Promise<import("./goal-deficiency.js").Localization & { fresh: number }> {
   const gd = await import("./goal-deficiency.js");
   const meta = (g["classification_metadata"] ?? {}) as Record<string, unknown>;
   const ids = (Array.isArray(meta["dispatch_ids"]) ? (meta["dispatch_ids"] as unknown[]) : []).map(String);
   const t = tallies[String(meta["goal_hash"] ?? "")];
-  const runs: import("./goal-deficiency.js").RunAttribution[] = [];
+  const self = deps.self ?? localizingNode();
+  const retryMs = deps.retryMs ?? Number.POSITIVE_INFINITY;
+  const prior = ((meta["localization"] as { runs?: import("./goal-deficiency.js").RunAttribution[] } | undefined)?.runs ?? []).filter((r) => r && typeof r.dispatch_id === "string");
+  const priorBy = new Map(prior.map((r) => [r.dispatch_id, r]));
+  const fresh: import("./goal-deficiency.js").RunAttribution[] = [];
   for (const id of ids) {
+    if (!gd.runNeedsAttribution(priorBy.get(id), self, now, retryMs)) continue;
     const e = t?.entries.find((x) => x.dispatch_id === id);
-    const exec = await (deps.executionIdOf ?? executionIdOf)(e, id);
-    const tr = exec ? await (deps.readTrace ?? readTrace)(exec) : null;
-    runs.push(gd.attributeRun(id, tr as never, e?.reason ?? ""));
+    const exec = await (deps.executionIdOf ?? executionIdOf)(e, id, deps.ownGoalHost);
+    // OWNERSHIP: a run this node neither tallied nor finds on its own goal-host is another node's to attribute.
+    if (!e && !exec) continue;
+    if (!exec) { fresh.push({ dispatch_id: id, kind: "trace_unreadable", unread: "execution_id_unknown", node: self, at: now }); continue; }
+    const tr = await (deps.readTrace ?? readTrace)(exec);
+    const a = tr ? gd.attributeRun(id, tr as never, e?.reason ?? "") : { dispatch_id: id, kind: "trace_unreadable" as const, unread: "trace_read_failed" as const };
+    fresh.push({ ...a, node: self, at: now });
   }
-  return gd.localizeFromRuns(runs, majority, deps.vesselOf ?? vesselOfResolver, deps.locate ?? locateStepFile, now);
+  const runs = gd.mergeRunAttributions(ids, prior, fresh);
+  const loc = await gd.localizeFromRuns(runs, majority, deps.vesselOf ?? vesselOfResolver, deps.locate ?? locateStepFile, now);
+  return { ...loc, fresh: fresh.length };
 }
+/** The name this node attributes runs under (its substrate identity, the same one check supply records as dispatch_node). */
+function localizingNode(): string { return process.env["SUBSTRATE_NAME"] ?? "substrate"; }
 
 export function defaultGoalReachIO(policy: GoalReachPolicy): GoalReachIO {
   return {
@@ -1630,11 +1656,17 @@ export function defaultGoalReachIO(policy: GoalReachPolicy): GoalReachIO {
       if (existing !== null && pol.policy.max_localizations > 0) {
         const rows = new Map(existing);
         for (const w of dec.writes) rows.set(w.id, { ...(rows.get(w.id) ?? {}), ...w.gap, status: "open" });
-        const due = [...rows.values()].filter((g) => String(g["status"] ?? "") === "open" && needsLocalization(g)).slice(0, pol.policy.max_localizations);
+        // Only rows with runs THIS node may attribute: its goal has a tally here (a row filed from another node's runs is
+        // that node's to localize; a shared goal's runs are sorted per run by ownership inside localizeRow).
+        const self = localizingNode();
+        const due = [...rows.values()].filter((g) => String(g["status"] ?? "") === "open"
+          && !!up.tallies[String(((g["classification_metadata"] ?? {}) as Record<string, unknown>)["goal_hash"] ?? "")]
+          && needsLocalization(g, self, now, pol.policy.relocalize_unread_after_ms)).slice(0, pol.policy.max_localizations);
         let allRows: Array<Record<string, unknown>> | undefined;
         for (const g of due) {
           try {
-            const loc = await localizeRow(g, up.tallies, pol.policy.siting_majority, now);
+            const { fresh, ...loc } = await localizeRow(g, up.tallies, pol.policy.siting_majority, now, { self, retryMs: pol.policy.relocalize_unread_after_ms });
+            if (fresh === 0) continue; // nothing of this node's to attribute: never rewrite another node's verdict
             const meta = (g["classification_metadata"] ?? {}) as Record<string, unknown>;
             // #1b: each distinct failing step becomes a linked, sited step gap (reuse first), carrying this goal's demand,
             // so the goal waits on it and re-runs when it lands. Filed only when the policy files gaps.

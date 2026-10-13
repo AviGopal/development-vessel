@@ -64,6 +64,8 @@ export interface GoalDeficiencyPolicy {
   siting_majority: number;
   /** Deficiency rows localized per call (each reads up to its counted runs' traces). */
   max_localizations: number;
+  /** A run this node attributed trace_unreadable is re-read after this long (ms); another node's is re-read at once by its owner. */
+  relocalize_unread_after_ms: number;
   /** Judge codes (deterministic:<code>) that are NOT content deficiencies (refusals, rate limits): treated as abstains. */
   non_deficiency_code_patterns: string[];
   lenient_reach: LenientReachRule[];
@@ -81,6 +83,7 @@ export const DEFAULT_GOAL_DEFICIENCY_POLICY: Readonly<GoalDeficiencyPolicy> = Ob
   max_reason_reads: 30,
   siting_majority: 0.5,
   max_localizations: 5,
+  relocalize_unread_after_ms: 3_600_000,
   non_deficiency_code_patterns: ["-refused$"],
   classes: [
     { class: "deliverable_not_produced", patterns: ["\\bnot produced\\b", "did not produce", "did not provide the required", "\\brequired \\S+ was not\\b", "no (output|deliverable) (was )?produced", "missing (the )?required (output|deliverable)"] },
@@ -132,6 +135,10 @@ export function parseDeficiencyPolicy(body: unknown): { ok: true; policy: GoalDe
   if (b["max_localizations"] !== undefined) {
     if (!intIn(b["max_localizations"], 0, 50)) return { ok: false, why: "goalDeficiencyPolicy.max_localizations must be an integer in 0..50" };
     p.max_localizations = b["max_localizations"] as number;
+  }
+  if (b["relocalize_unread_after_ms"] !== undefined) {
+    if (!intIn(b["relocalize_unread_after_ms"], 60_000, 7 * 24 * 3_600_000)) return { ok: false, why: "goalDeficiencyPolicy.relocalize_unread_after_ms must be an integer in 60000..604800000" };
+    p.relocalize_unread_after_ms = b["relocalize_unread_after_ms"] as number;
   }
   for (const k of ["abstain_patterns", "ignore_operator_patterns", "non_deficiency_code_patterns"] as const) {
     if (b[k] === undefined) continue;
@@ -555,7 +562,35 @@ export async function resolveGoalReachVerdict(pointer: { goal_hash?: unknown; si
  *  - trace_unreadable: the run's trace could not be read.
  */
 export type RunKind = "step_failure" | "output_error" | "composition" | "trace_unreadable";
-export interface RunAttribution { dispatch_id: string; kind: RunKind; resolver?: string; failure_excerpt?: string; failure_class?: string }
+export interface RunAttribution {
+  dispatch_id: string; kind: RunKind; resolver?: string; failure_excerpt?: string; failure_class?: string;
+  /** The node that attributed this run (each node attributes only the runs it holds; the merge is auditable by it). */
+  node?: string;
+  /** When it was attributed (epoch ms). */
+  at?: number;
+  /** For trace_unreadable: the execution id was never learned, or the trace read failed. */
+  unread?: "execution_id_unknown" | "trace_read_failed";
+}
+
+/**
+ * Whether THIS node should (re)attribute a run. Unattributed: yes. trace_unreadable written by ANOTHER node (or with no
+ * node — the rows written before ownership existed): yes, at once — that verdict was never the owner's to give. Its own
+ * trace_unreadable: again after retryMs. Anything else stands.
+ */
+export function runNeedsAttribution(prior: RunAttribution | undefined, self: string, now: number, retryMs: number): boolean {
+  if (!prior) return true;
+  if (prior.kind !== "trace_unreadable") return false;
+  if (prior.node !== self) return true;
+  return !(now - (prior.at ?? 0) < retryMs);
+}
+
+/** The row's runs after this node's fresh attributions: fresh ones replace the same dispatch id; every other node's stand. In `ids` order. */
+export function mergeRunAttributions(ids: readonly string[], prior: readonly RunAttribution[], fresh: readonly RunAttribution[]): RunAttribution[] {
+  const by = new Map<string, RunAttribution>();
+  for (const r of prior) by.set(r.dispatch_id, r);
+  for (const r of fresh) by.set(r.dispatch_id, r);
+  return ids.map((id) => by.get(id)).filter((r): r is RunAttribution => !!r);
+}
 type TraceTask = { resolver_id?: unknown; status?: unknown; success?: unknown };
 export interface TraceView { tasks?: TraceTask[] | null; failure_mode?: { type?: unknown; reason?: unknown } | null }
 
@@ -603,7 +638,10 @@ export async function localizeFromRuns(runs: RunAttribution[], majority: number,
   for (const r of runs) counts[r.kind]++;
   const base = { counts, runs, at: new Date(now).toISOString() };
   const readable = runs.length - counts.trace_unreadable;
-  if (readable === 0) return { state: "unknown", kind: "trace_unreadable", why: `no counted run's trace could be read (${runs.length})`, ...base };
+  if (readable === 0) {
+    const noId = runs.filter((r) => r.unread === "execution_id_unknown").length, failed = runs.filter((r) => r.unread === "trace_read_failed").length;
+    return { state: "unknown", kind: "trace_unreadable", why: `no counted run's trace could be read (${runs.length}: execution id unknown ${noId}, trace read failed ${failed}, unrecorded ${runs.length - noId - failed})`, ...base };
+  }
   const byResolver = new Map<string, RunAttribution[]>();
   for (const r of runs) if (r.kind === "step_failure" && r.resolver) byResolver.set(r.resolver, [...(byResolver.get(r.resolver) ?? []), r]);
   const top = [...byResolver.entries()].sort((a, b) => b[1].length - a[1].length)[0];

@@ -802,3 +802,35 @@ describe("system-authored gap checks: (i) producer_contract — a missing produc
     for (const v of ["", "  ", "TODO", "placeholder", "n/a", "...", true, null, undefined, [], {}, [""], { a: "" }, NaN]) expect(j.substantive(v)).toBe(false);
   });
 });
+
+// The cleared classifyFalsifier branch (user, 10-13: "Yes, one additive branch"): a producer_contract check is DEFINED for an
+// unadvertised shape, so an identifier, non-write shape under the mode is class2 (mode recorded); a write/action shape under
+// it is unresolvable; every other input is classified exactly as before (G6).
+describe("system-authored gap checks: (j) a producer_contract check arms an unadvertised shape", () => {
+  const vocab = () => ({ shapes: new Set(Array.from({ length: 60 }, (_, i) => `known_shape_${i}`)), configs_read: 9 }) as never;
+  const cf = async () => (await import("../../src/resolvers/substrate-gap.js")).classifyFalsifier;
+  it("MUST-FAIL: an unadvertised identifier shape under the mode is class2, with the mode recorded", async () => {
+    expect(await (await cf())({ evidence_resolve: { shape: "ledger_digest", mode: "producer_contract" } }, vocab())).toMatchObject({ falsifier: "class2", predicate_shape: "ledger_digest", predicate_mode: "producer_contract", predicate_position: "evidence_resolve.shape" });
+  });
+  it("MUST-FAIL: a write or action shape under the mode is unresolvable, with a reason; a non-identifier too", async () => {
+    for (const shape of ["ledger_write", "fs_edit", "git_push"]) expect(await (await cf())({ evidence_resolve: { shape, mode: "producer_contract" } }, vocab())).toMatchObject({ falsifier: "unresolvable", unresolvable_reason: expect.stringMatching(/write\/action/) });
+    expect(await (await cf())({ evidence_resolve: { shape: "code_quality with substantive assessment content", mode: "producer_contract" } }, vocab())).toMatchObject({ falsifier: "unresolvable", unresolvable_reason: expect.stringMatching(/not a shape identifier/) });
+  });
+  it("G6: without the mode, an unadvertised shape is still unresolvable and an advertised one still class2 (no mode recorded)", async () => {
+    const c = await cf();
+    expect(c({ evidence_resolve: { shape: "ledger_digest" } }, vocab())).toMatchObject({ falsifier: "unresolvable", unadvertised_shape: "ledger_digest" });
+    const adv = c({ evidence_resolve: { shape: "known_shape_3" } }, vocab()) as Record<string, unknown>;
+    expect(adv).toMatchObject({ falsifier: "class2", predicate_shape: "known_shape_3" });
+    expect(adv["predicate_mode"]).toBeUndefined();
+    expect(c({ evidence_resolve: { shape: "known_shape_3", mode: "something_else" } }, vocab())).toMatchObject({ falsifier: "class2" });
+    expect(c({ evidence_resolve: { shape: "ledger_digest", mode: "something_else" } }, vocab())).toMatchObject({ falsifier: "unresolvable" });
+  });
+  it("through the real store write: the row records falsifier class2 and falsifier_mode producer_contract", async () => {
+    const id = `gap-producer-contract-arm-${RUN}`;
+    const w = await sg.resolveSubstrateGapWrite({ type: "substrateGap_write", gap: { id, category: "missing_capability", source: "test", status: "open", detected_at: new Date().toISOString(), summary: "fixture", classification_metadata: { kind: "capability_gap", missing_shape: "ledger_digest", evidence_resolve: { shape: "ledger_digest", mode: "producer_contract" } } } } as never);
+    expect(w.shape).toBe("substrateGapWriteResult");
+    await sg.__settleBirthEvaluationsForTests();
+    const row = ((await sg.resolveSubstrateGap({ type: "substrateGap", id, limit: 1 } as never)).body as { gaps: Array<Record<string, any>> }).gaps[0]!;
+    expect(row.classification_metadata).toMatchObject({ falsifier: "class2", falsifier_mode: "producer_contract", falsifier_position: "evidence_resolve.shape" });
+  });
+});

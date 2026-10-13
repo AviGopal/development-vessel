@@ -33,6 +33,7 @@
  */
 
 import { WORKSPACE_ROOT as DEFAULT_WORKSPACE_ROOT } from "../config.js";
+import { isWritePointerType } from "../lib/caller-credential.js";
 import type { ResolverResult } from "./types.js";
 import { onlyTestsProblem } from "./test-suite.js";
 import { readFile, writeFile, rename, mkdir } from "node:fs/promises";
@@ -619,6 +620,8 @@ export type FalsifierClass = "class1" | "class2" | "unresolvable" | "none";
 
 export interface FalsifierClassification {
   falsifier: FalsifierClass;
+  /** The check's mode when it is not the default resolve (only "producer_contract" today). */
+  predicate_mode?: string;
   /** The offending literal, present only on "unresolvable" — an escalation needs the NAME. */
   unadvertised_shape?: string;
   /** Which position carried the predicate: "hardcoded_url" | "evidence_resolve.shape" | "verify_shape" | "evidence_resolve.type". */
@@ -835,6 +838,21 @@ if (evidenceResolve && typeof evidenceResolve === "object" && !Array.isArray(evi
 
   if (!shapeName || !position) {
     return { falsifier: "none", classified_at: at };
+  }
+
+  // PRODUCER CONTRACT (user ruling 2026-10-13, "Yes, one additive branch"): this check is DEFINED for a shape no producer
+  // serves yet (present until an advertised producer returns a body satisfying the shape's contract; the judge's
+  // producer_contract mode), so "unadvertised" is its starting state, not a defect. An identifier shape that is not a
+  // write or action is class2 under it; a write or action shape is unresolvable (the judge never resolves one). Every
+  // other input takes the path below unchanged.
+  if (evidenceObj && evidenceObj["mode"] === "producer_contract" && position === "evidence_resolve.shape") {
+    if (!/^[A-Za-z][A-Za-z0-9_]*$/.test(shapeName)) {
+      return { falsifier: "unresolvable", predicate_position: position, unresolvable_reason: `producer_contract: ${shapeName} is not a shape identifier`, classified_at: at };
+    }
+    if (isWritePointerType(shapeName)) {
+      return { falsifier: "unresolvable", predicate_position: position, unresolvable_reason: `producer_contract: ${shapeName} is a write/action shape, never resolved by a check`, classified_at: at };
+    }
+    return { falsifier: "class2", predicate_position: position, predicate_shape: shapeName, predicate_mode: "producer_contract", classified_at: at };
   }
 
   const vocab = vocabulary === undefined ? cachedFleetVocabulary() : vocabulary;
@@ -2243,6 +2261,8 @@ async function resolveSubstrateGapWriteInner(
     merged["falsifier"] = c.falsifier;
     if (c.predicate_position) merged["falsifier_position"] = c.predicate_position;
     else delete merged["falsifier_position"];
+    if (c.predicate_mode) merged["falsifier_mode"] = c.predicate_mode;
+    else delete merged["falsifier_mode"];
     if (c.unadvertised_shape) merged["falsifier_unadvertised_shape"] = c.unadvertised_shape;
     else delete merged["falsifier_unadvertised_shape"];  // clear a stale accusation carried from the old row
     // WHY it is unresolvable travels with the label: the classifier returned it and the row dropped it, so a census

@@ -376,6 +376,42 @@ export class GapDrainObserver {
         const delay = Math.min(DRAIN_BACKOFF_INITIAL_MS * 2 ** (attempts - 1), DRAIN_BACKOFF_MAX_MS);
         gd.__drainBackoff.set(gapId, { until: Date.now() + delay, attempts });
       }
+      // A 200 that was NOT an attempt must not clear backoff. If resp.ok and the body is a non-attempt
+      // (pending_verification or the class of BUSY/environment outcomes gap_to_feature answers 200 with),
+      // reinstate backoff before recording the dispatch.
+      try {
+        if (resp.ok) {
+          let body: Record<string, unknown> | null = null;
+          try {
+            const j = (await resp.clone().json()) as { shape?: string; body?: Record<string, unknown> } | Record<string, unknown>;
+            const maybeBody = (j as { body?: Record<string, unknown> }).body;
+            body = (maybeBody && typeof maybeBody === "object") ? maybeBody : (j as Record<string, unknown>);
+          } catch {
+            body = null;
+          }
+          if (body) {
+            let nonAttempt = false;
+            const verdict = String((body as Record<string, unknown>)["verdict"] ?? "");
+            if (verdict === "pending_verification") {
+              nonAttempt = true;
+            } else {
+              try {
+                const { isNonAttemptComposeResult } = await import("../judge/gap-eligibility.js");
+                nonAttempt = isNonAttemptComposeResult(body);
+              } catch {
+                nonAttempt = false;
+              }
+            }
+            if (nonAttempt) {
+              const attempts = ((boEntry?.attempts ?? 0) + 1);
+              const delay = Math.min(DRAIN_BACKOFF_INITIAL_MS * 2 ** (attempts - 1), DRAIN_BACKOFF_MAX_MS);
+              gd.__drainBackoff.set(gapId, { until: Date.now() + delay, attempts });
+            }
+          }
+        }
+      } catch {
+        /* ignore: recordDrain still happens */
+      }
       this.recordDrain({ action: "dispatched", gap_id: gapId, category, impulse_type: remedy.impulse_type, ok: resp.ok, http_status: resp.status, latency_ms: Date.now() - startedAt });
     } catch (err) {
       const prev = gd.__drainBackoff.get(gapId);

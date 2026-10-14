@@ -185,6 +185,9 @@ describe("deficiencyDecisions (G1 table: count, class split, window, reach, prio
       expect(meta.edit_site).toBeUndefined();
       expect(meta.kind).toBe("goal_content_deficiency");
       expect(meta.evidence_resolve).toEqual({ shape: "goal_reach_verdict", input: { goal_hash: grt.goalHashOf(goals[k]!) }, zero_field: "unreached_since_last_reach" });
+      // PINNED LITERAL (the goalReachCheck extraction must leave R2's row byte-identical)
+      expect(JSON.stringify(meta.evidence_resolve)).toBe(`{"shape":"goal_reach_verdict","input":{"goal_hash":"${grt.goalHashOf(goals[k]!)}"},"zero_field":"unreached_since_last_reach"}`);
+      expect(meta.falsifier_spec).toBe(`goal_reach_verdict(goal_hash=${grt.goalHashOf(goals[k]!)}).unreached_since_last_reach == 0: a later run of this goal is judged reached on a path not listed as lenient`);
       const own = String(w.gap.summary).replace(/"[^"]*"/g, "");
       expect(own).not.toMatch(/\b(compose|composing|mint|use\s+\w+|install|implement|suggest|should|producer|fix)\b/i);
       expect(Object.keys(meta).some((k2) => /suggest|fix|producer|plan/i.test(k2))).toBe(false);
@@ -718,6 +721,21 @@ describe("goal_reach_verdict `since` + the judge's landing bound", () => {
     const { evaluateGapCheck } = await judge();
     expect(await quietly(() => evaluateGapCheck(gapRow(landing), { fetchImpl: answerWith(tallyOf([run("n1", G, 1, false, "The required summary was not produced.")]), []) }))).toBe("present");
     expect(await quietly(() => evaluateGapCheck(gapRow(landing), { fetchImpl: answerWith(tallyOf([run("r1", G, 1, true, "reached")]), []) }))).toBe("absent");
+  });
+  it("MUST-FAIL (capability row armed by the dispatcher): a landing alone never closes it, an unbounded landing is unknown, only a later reached run closes it", async () => {
+    const { evaluateGapCheck } = await judge();
+    const pd = (await import("../../src/resolvers/producer-dispatch.js")) as Record<string, any>;
+    const w = pd.capabilityRowWrite({ shape: "quarry_ledger", goal: G, goal_hash: hh, source_gap: "s", via: "capability_gap" }, null, new Date(LANDED).toISOString(), "live");
+    const capRow = (extra: Row): Row => ({ id: w.gap.id, status: "open", classification_metadata: { ...w.gap.classification_metadata, ...extra } });
+    const seen: Row[] = [];
+    // the landing alone (only runs from before it): unknown, never absent
+    expect(await quietly(() => evaluateGapCheck(capRow(landing), { fetchImpl: answerWith(tallyOf(), seen) }))).toBe("unknown");
+    expect(seen[0]!["since"]).toBe(landing.pending_set_at);
+    // a landing whose time cannot be read: unknown (stale verdicts are never read as current)
+    expect(await quietly(() => evaluateGapCheck(capRow({ pending_outcome_verification: "c0ffee", pending_set_at: "garbage" }), { fetchImpl: answerWith(tallyOf(), []) }))).toBe("unknown");
+    // a later unreached run: present; a later trusted reach: absent (only the goal's own reach closes it)
+    expect(await quietly(() => evaluateGapCheck(capRow(landing), { fetchImpl: answerWith(tallyOf([run("n1", G, 1, false, "The required summary was not produced.")]), []) }))).toBe("present");
+    expect(await quietly(() => evaluateGapCheck(capRow(landing), { fetchImpl: answerWith(tallyOf([run("r1", G, 1, true, "reached")]), []) }))).toBe("absent");
   });
   it("no pending landing → no since, and today's verdict (present on the open tally)", async () => {
     const { evaluateGapCheck } = await judge();
@@ -1298,17 +1316,36 @@ describe("the producer dispatcher arms only a declared contract", () => {
   const io = () => { const writes: Row[] = [], sends: string[] = []; return { writes, sends, d: { isWrite: (x: string) => /_write$/.test(x), advertised: async () => false, readRun: async () => null, declaredBy: async () => [] as string[], write: async (gap: Row, demand: Row) => { writes.push({ gap, demand }); return { ok: true }; }, dispatch: async (id: string) => { sends.push(id); return { ok: true }; } } }; };
   const quiet = async <T>(f: () => Promise<T>): Promise<T> => { const l = console.log, w = console.warn; console.log = () => {}; console.warn = () => {}; try { return await f(); } finally { console.log = l; console.warn = w; } };
 
-  it("MUST-FAIL: a shape with NO declared contract is never armed and never sent; the demand is still recorded, loudly not armed", async () => {
+  it("MUST-FAIL: a shape with NO declared contract is never armed KEYLESS: it is armed on its demanding goal's own reach (the R2 check) and sent once", async () => {
     const m = await pd(); const x = io();
+    const gdm = await import("../../src/resolvers/goal-deficiency.js");
     const rep = await quiet(() => m.runProducerDispatch([cap("quarry_ledger")], T0, pol, () => [], x.d));
-    expect(x.sends).toEqual([]);
-    expect(rep.sent).toEqual([]);
-    expect(rep.refused[0]).toMatchObject({ gap_id: "gap-quarry-ledger", why: expect.stringMatching(/^no declared contract: not armed/) });
-    expect(x.writes).toHaveLength(1);
+    expect(x.sends).toEqual(["gap-quarry-ledger"]);
+    expect(rep.sent).toHaveLength(1);
     const meta = (x.writes[0]!.gap as Row).classification_metadata as Row;
-    expect(meta.evidence_resolve).toBeUndefined();
-    expect(meta.producer_dispatch).toMatchObject({ armed: false, not_armed: expect.stringMatching(/^no declared contract: not armed/) });
+    expect(meta.evidence_resolve).toEqual(gdm.goalReachCheck("cccc3333"));
+    expect(meta.evidence_resolve).toEqual({ shape: "goal_reach_verdict", input: { goal_hash: "cccc3333" }, zero_field: "unreached_since_last_reach" });
+    expect((meta.evidence_resolve as Row).mode).toBeUndefined(); // never a producer_contract without keys
+    expect(meta.falsifier_spec).toBe(gdm.goalReachFalsifierSpec("cccc3333"));
+    expect(meta.producer_dispatch).toMatchObject({ armed: true, arm_basis: "goal_reach" });
     expect((x.writes[0]!.demand as Row).goal_hash).toBe("cccc3333");
+  });
+
+  it("MUST-FAIL: no declared contract and no demanding goal hash → nothing arms it (capabilityRowWrite says so)", async () => {
+    const m = await pd();
+    const w = m.capabilityRowWrite({ shape: "quarry_ledger", goal: "g", goal_hash: "", source_gap: "s", via: "capability_gap" }, null, "2030-06-01T00:00:00.000Z", "live");
+    expect(w.armed).toBe(false);
+    expect(w.gap.classification_metadata.evidence_resolve).toBeUndefined();
+    expect(w.gap.classification_metadata.producer_dispatch).toMatchObject({ armed: false, not_armed: m.NOT_ARMED_NO_GOAL });
+  });
+
+  it("MUST-FAIL: an existing goal-reach check on the row is kept as it is (never rewritten to the demanding goal's) and counts as armed (sent)", async () => {
+    const m = await pd(); const x = io();
+    const gdm = await import("../../src/resolvers/goal-deficiency.js");
+    const own = gdm.goalReachCheck("dddd4444"); // another goal's check than the demanding one: kept verbatim, never rewritten
+    await quiet(() => m.runProducerDispatch([cap("quarry_ledger", { evidence_resolve: own })], T0, pol, () => [], x.d));
+    expect(x.sends).toEqual(["gap-quarry-ledger"]);
+    expect(((x.writes[0]!.gap as Row).classification_metadata as Row).evidence_resolve).toEqual(own);
   });
 
   it("CONTROL: a shape whose contract is declared (required keys on the row) is armed on exactly those keys and sent once", async () => {

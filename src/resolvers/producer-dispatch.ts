@@ -26,6 +26,7 @@
 // never authored: the second, independent reader below; unreadable declarations refuse too (unknown is not absent).
 
 import { readdirSync, readFileSync } from "node:fs";
+import { goalReachCheck, goalReachFalsifierSpec, GOAL_REACH_VERDICT_SHAPE } from "./goal-deficiency.js";
 import { join } from "node:path";
 
 export type ProducerDispatchMode = "off" | "dry_run" | "live";
@@ -194,6 +195,7 @@ export function declaredContractKeys(existing: Record<string, unknown> | null, s
   return [...new Set((er["required_keys"] as unknown[]).filter((k): k is string => typeof k === "string" && k.trim().length > 0))];
 }
 const keysOf = (gap: { classification_metadata: Record<string, unknown> }): string => JSON.stringify(((gap.classification_metadata["evidence_resolve"] ?? {}) as Record<string, unknown>)["required_keys"] ?? []);
+export const NOT_ARMED_NO_GOAL = "no declared contract and no demanding goal to judge it by: not armed";
 export const NOT_ARMED_NO_CONTRACT = "no declared contract: not armed (a producer_contract check without required keys closes on any substantive body, so a hollow producer would close it)";
 
 /** The capability row write that opens/reuses gap-<slug> and links the goal's demand. It ARMS the producer_contract check only
@@ -204,7 +206,16 @@ export function capabilityRowWrite(plan: ProducerPlan, existing: Record<string, 
   const m = existing ? metaOf(existing) : {};
   const tag = `producer_author:${plan.goal_hash}:${plan.shape}`;
   const keys = declaredContractKeys(existing, plan.shape);
-  const armed = keys.length > 0;
+  // WHAT JUDGES THE AUTHORED PRODUCER (exception (a), 10-13): a DECLARED contract first (its required keys); else the DEMANDING
+  // GOAL's own reach (goalReachCheck: the class-2 check R2 arms deficiency rows with, since-aware in the judge), so only a later
+  // reached run of the goal closes it, never a landing alone or a hollow body. An evidence_resolve already on the row is left as it
+  // is: it counts as armed only when it is that goal-reach check. No goal hash and no contract: nothing arms it.
+  const existingEr = m["evidence_resolve"] as Record<string, unknown> | undefined;
+  const goalOk = /^[0-9a-f]{8}$/.test(plan.goal_hash);
+  const basis: "declared_contract" | "goal_reach" | null = keys.length > 0 ? "declared_contract"
+    : existingEr ? (existingEr["shape"] === GOAL_REACH_VERDICT_SHAPE ? "goal_reach" : null)
+    : goalOk ? "goal_reach" : null;
+  const armed = basis !== null;
   const gap = {
     id,
     category: String(existing?.["category"] ?? "missing_capability"),
@@ -215,9 +226,10 @@ export function capabilityRowWrite(plan: ProducerPlan, existing: Record<string, 
     classification_metadata: {
       ...m,
       kind: "capability_gap", missing_shape: plan.shape, allowed_output_shapes: [plan.shape], goal: String(m["goal"] ?? plan.goal) || plan.goal,
-      ...(armed ? { evidence_resolve: { shape: plan.shape, mode: "producer_contract", required_keys: keys } } : {}),
+      ...(basis === "declared_contract" ? { evidence_resolve: { shape: plan.shape, mode: "producer_contract", required_keys: keys } }
+        : basis === "goal_reach" && !existingEr ? { evidence_resolve: goalReachCheck(plan.goal_hash), falsifier_spec: goalReachFalsifierSpec(plan.goal_hash) } : {}),
       edit_site: plannedResolverFile(plan.shape, typeof m["target_vessel"] === "string" && m["target_vessel"] ? String(m["target_vessel"]) : "development-vessel"),
-      producer_dispatch: { at: nowIso, shape: plan.shape, mode, via: plan.via, source_gap: plan.source_gap, tag, armed, ...(armed ? { required_keys: keys } : { not_armed: NOT_ARMED_NO_CONTRACT }) },
+      producer_dispatch: { at: nowIso, shape: plan.shape, mode, via: plan.via, source_gap: plan.source_gap, tag, armed, ...(basis === "declared_contract" ? { arm_basis: basis, required_keys: keys } : basis === "goal_reach" ? { arm_basis: basis } : { not_armed: existingEr ? NOT_ARMED_NO_CONTRACT : NOT_ARMED_NO_GOAL }) },
       ...(plan.via === "deficiency" ? { parent_gap: plan.source_gap } : {}),
     },
   };
@@ -260,16 +272,16 @@ export async function runProducerDispatch(
     const last = Date.parse(String(((((existing?.["classification_metadata"] ?? {}) as Record<string, unknown>)["producer_dispatch"] ?? {}) as Record<string, unknown>)["at"] ?? ""));
     if (Number.isFinite(last) && now - last < policy.producer_dispatch_cooldown_ms) { report.refused.push({ gap_id: id, why: "author request already sent within the cooldown" }); continue; }
     const { gap, demand, tag, armed } = capabilityRowWrite(plan, existing, nowIso, mode);
-    if (mode === "dry_run") { console.log(armed ? `[producer-dispatch] DRY-RUN would arm ${id} (producer_contract ${plan.shape}, declared keys ${keysOf(gap)}) and send it to the author route; goal ${plan.goal_hash} via ${plan.source_gap}` : `[producer-dispatch] DRY-RUN ${id} (${plan.shape}): ${NOT_ARMED_NO_CONTRACT}; would record the demand only`); continue; }
+    if (mode === "dry_run") { console.log(armed ? `[producer-dispatch] DRY-RUN would arm ${id} (${plan.shape}, ${String(((gap.classification_metadata["producer_dispatch"] ?? {}) as Record<string, unknown>)["arm_basis"]) === "declared_contract" ? `declared keys ${keysOf(gap)}` : "on the demanding goal's reach"}) and send it to the author route; goal ${plan.goal_hash} via ${plan.source_gap}` : `[producer-dispatch] DRY-RUN ${id} (${plan.shape}): ${NOT_ARMED_NO_CONTRACT}; would record the demand only`); continue; }
     const w = await deps.write(gap, demand).catch((e: unknown) => ({ ok: false, why: String(e) }));
     if (!w.ok) { report.refused.push({ gap_id: id, why: `write refused: ${w.why ?? "?"}` }); console.warn(`[producer-dispatch] ${id}: write refused: ${w.why ?? "?"}`); continue; }
     // UNARMED IS NOT SENT: the demand is recorded on the row (above), but an author request for a shape with no declared
     // contract would be graded by a check any substantive body satisfies. The author route never sees it.
-    if (!armed) { report.refused.push({ gap_id: id, why: NOT_ARMED_NO_CONTRACT }); console.warn(`[producer-dispatch] ${id} (${plan.shape}): ${NOT_ARMED_NO_CONTRACT}; demand recorded, NOT sent to the author route`); continue; }
+    if (!armed) { const why = String(((gap.classification_metadata["producer_dispatch"] ?? {}) as Record<string, unknown>)["not_armed"] ?? NOT_ARMED_NO_CONTRACT); report.refused.push({ gap_id: id, why }); console.warn(`[producer-dispatch] ${id} (${plan.shape}): ${why}; demand recorded, NOT sent to the author route`); continue; }
     const d = await deps.dispatch(id, tag).catch((e: unknown) => ({ ok: false, why: String(e) }));
     if (!d.ok) { report.refused.push({ gap_id: id, why: `dispatch failed: ${d.why ?? "?"}` }); console.warn(`[producer-dispatch] ${id}: dispatch failed: ${d.why ?? "?"}`); continue; }
     report.sent.push({ gap_id: id, shape: plan.shape, source_gap: plan.source_gap, tag });
-    console.log(`[producer-dispatch] SENT ${id} (missing producer ${plan.shape}) to the author route; armed producer_contract on its declared keys; goal ${plan.goal_hash} via ${plan.source_gap}; tag ${tag}`);
+    console.log(`[producer-dispatch] SENT ${id} (missing producer ${plan.shape}) to the author route; armed (${String(((gap.classification_metadata["producer_dispatch"] ?? {}) as Record<string, unknown>)["arm_basis"] ?? "?")}); goal ${plan.goal_hash} via ${plan.source_gap}; tag ${tag}`);
   }
   return report;
 }

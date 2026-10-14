@@ -473,6 +473,17 @@ export interface DeficiencyDecision {
 const excerpt = (s: string, n: number): string => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
 
 /** The gap row for one (goal, class): the judge's own words and the goal text, nothing else. */
+/** THE goal-reach check (one definition): a class-2 falsifier that reads `goal_hash`'s own reach. It is present while the goal's
+ *  runs since its last trusted reach are unreached, and absent once a later run reaches on a path not listed as lenient. Since-aware
+ *  in the judge (SINCE_AWARE_CHECK_SHAPES), so a pending landing is judged only by runs after it. R2's deficiency rows and the
+ *  producer dispatcher's capability rows both arm with it. */
+export function goalReachCheck(goalHash: string): { shape: string; input: { goal_hash: string }; zero_field: "unreached_since_last_reach" } {
+  return { shape: GOAL_REACH_VERDICT_SHAPE, input: { goal_hash: goalHash }, zero_field: "unreached_since_last_reach" };
+}
+export function goalReachFalsifierSpec(goalHash: string): string {
+  return `${GOAL_REACH_VERDICT_SHAPE}(goal_hash=${goalHash}).unreached_since_last_reach == 0: a later run of this goal is judged reached on a path not listed as lenient`;
+}
+
 export function deficiencyGapRow(t: DeficiencyTally, cls: string, failed: TallyEntry[], windowHours: number, nowIso: string): Record<string, unknown> {
   const latest = failed[failed.length - 1]!;
   const samples = [...new Set(failed.slice().reverse().map((e) => e.reason).filter(Boolean))].slice(0, 3);
@@ -492,8 +503,8 @@ export function deficiencyGapRow(t: DeficiencyTally, cls: string, failed: TallyE
       dispatch_ids: failed.slice(-10).map((e) => e.dispatch_id),
       counted_runs: failed.length,
       window_hours: windowHours,
-      evidence_resolve: { shape: GOAL_REACH_VERDICT_SHAPE, input: { goal_hash: t.goal_hash }, zero_field: "unreached_since_last_reach" },
-      falsifier_spec: `${GOAL_REACH_VERDICT_SHAPE}(goal_hash=${t.goal_hash}).unreached_since_last_reach == 0: a later run of this goal is judged reached on a path not listed as lenient`,
+      evidence_resolve: goalReachCheck(t.goal_hash),
+      falsifier_spec: goalReachFalsifierSpec(t.goal_hash),
     },
   };
 }

@@ -485,6 +485,15 @@ export type LandingLeaseVerdict = {
   reason?: string;
 };
 
+/** THE LAST RELEASE (user ruling 2026-10-14, "Build it before capacity"): who released the gap's lease, and when. Kept
+ *  store-wide on the row so another node's picker can hold the gap for its compose cooldown (gap-to-feature
+ *  crossNodeLeaseSkip): a released lease used to vanish, and the other node re-picked the same gap 1-8 s later. */
+export type LandingRelease = { holder: string; attempt: string; at: string };
+export function landingReleaseOf(meta: unknown): LandingRelease | null {
+  const r = (meta as { landing_last_release?: unknown } | null | undefined)?.landing_last_release as Record<string, unknown> | undefined;
+  if (!r || typeof r !== "object" || typeof r["holder"] !== "string" || typeof r["at"] !== "string") return null;
+  return { holder: r["holder"], attempt: String(r["attempt"] ?? ""), at: r["at"] };
+}
 export function landingLeaseOf(meta: unknown): LandingLease | null {
   const l = (meta as { landing_lease?: unknown } | null | undefined)?.landing_lease as Record<string, unknown> | undefined;
   if (!l || typeof l !== "object" || typeof l["holder"] !== "string" || typeof l["until"] !== "string") return null;
@@ -505,11 +514,18 @@ export function decideLandingLease(current: LandingLease | null, req: SubstrateG
   }
   const ttlRaw = Number(req.ttl_ms ?? LANDING_LEASE_TTL_MS_DEFAULT);
   const ttl = Number.isFinite(ttlRaw) && ttlRaw > 0 ? Math.min(ttlRaw, LANDING_LEASE_TTL_MS_MAX) : LANDING_LEASE_TTL_MS_DEFAULT;
-  const mine = !!current && current.holder === req.holder;
+  // RE-ENTRANT ON HOLDER + ATTEMPT for an acquire: a node may re-take its own lease only for the SAME attempt, so a
+  // restarted process (a new attempt id) cannot silently re-acquire its predecessor's live lease and draft the gap
+  // again; that lease lapses at its TTL like a crashed holder's. Renew and release stay holder-keyed: the cutover
+  // renews under its own attempt id.
+  const sameHolder = !!current && current.holder === req.holder;
+  const mine = req.action === "acquire"
+    ? sameHolder && (!req.attempt || !current!.attempt || current!.attempt === String(req.attempt))
+    : sameHolder;
   const live = !!current && leaseLive(current, now);
   const ok = req.action === "renew" ? mine && live : !current || !live || mine;
   if (!ok) {
-    const reason = req.action === "renew" ? (!current ? "no_lease" : !mine ? (live ? "held_by_other" : "lapsed_held_by_other") : "lapsed") : "held_by_other";
+    const reason = req.action === "renew" ? (!current ? "no_lease" : !mine ? (live ? "held_by_other" : "lapsed_held_by_other") : "lapsed") : sameHolder ? "held_by_prior_attempt" : "held_by_other";
     return { verdict: { ...base, granted: false, ...(current ? { held_by: current.holder, until: current.until } : {}), reason }, next: undefined };
   }
   const until = new Date(now + ttl).toISOString();
@@ -557,7 +573,11 @@ export async function resolveSubstrateGapLease(pointer: SubstrateGapLeasePointer
       const d = decideLandingLease(landingLeaseOf(meta), req, Date.now());
       if (d.next !== undefined) {
         const m = { ...meta };
-        if (d.next === null) delete m["landing_lease"]; else m["landing_lease"] = d.next;
+        const prior = landingLeaseOf(meta);
+        if (d.next === null) {
+          delete m["landing_lease"];
+          if (prior) m["landing_last_release"] = { holder: prior.holder, attempt: prior.attempt, at: new Date().toISOString() } satisfies LandingRelease;
+        } else m["landing_lease"] = d.next;
         g.classification_metadata = m as SubstrateGap["classification_metadata"];
         await saveGaps(gaps);
       }
@@ -2309,6 +2329,12 @@ async function resolveSubstrateGapWriteInner(
     const m = gap.classification_metadata as Record<string, unknown> | undefined;
     if ("landing_lease" in priorMetaForBirth) gap.classification_metadata = { ...(m ?? {}), landing_lease: priorMetaForBirth["landing_lease"] } as SubstrateGap["classification_metadata"];
     else if (m && "landing_lease" in m) { const c = { ...m }; delete c["landing_lease"]; gap.classification_metadata = c as SubstrateGap["classification_metadata"]; }
+  }
+  // The last release is the lease op's too: a write may neither forge nor erase it.
+  {
+    const m = gap.classification_metadata as Record<string, unknown> | undefined;
+    if ("landing_last_release" in priorMetaForBirth) gap.classification_metadata = { ...(m ?? {}), landing_last_release: priorMetaForBirth["landing_last_release"] } as SubstrateGap["classification_metadata"];
+    else if (m && "landing_last_release" in m) { const c = { ...m }; delete c["landing_last_release"]; gap.classification_metadata = c as SubstrateGap["classification_metadata"]; }
   }
 
   await saveGaps(gaps);

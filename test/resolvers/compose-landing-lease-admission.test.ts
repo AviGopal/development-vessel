@@ -140,11 +140,14 @@ describe("feature_compose admission takes the gap's landing lease at the store h
     expect((await leaseAs("acquire", OTHER)).granted).toBe(true);
   });
 
-  it("[CONTROL] this node's own unexpired lease does not refuse its compose (idempotent re-acquire)", async () => {
+  // RE-ENTRANT ON HOLDER + ATTEMPT (user ruling 2026-10-14): this node's live lease from an EARLIER attempt (a restarted
+  // process) no longer lets a new compose through; it lapses at its TTL like a crashed holder's. Same-attempt re-acquire
+  // and holder-keyed renew/release are pinned in cross-node-pick-lease.test.ts.
+  it("[MUST-FAIL] this node's own live lease from an EARLIER attempt refuses a new compose (no silent re-draft after a restart)", async () => {
     store.set(GAP, row({ landing_lease: { holder: thisNode(), attempt: "earlier", acquired_at: AT, until: FUTURE() } }));
     preClaimSlot();
     const b = (await compose()).body as Report;
-    expect(b.stage).toBe("gap_in_flight");
+    expect(b.stage).toBe("landing_lease_held");
   });
 });
 

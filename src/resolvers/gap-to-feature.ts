@@ -16,7 +16,7 @@ declare module "./feature-compose.js" {
   }
 }
 
-import { resolveSubstrateGap, resolveSubstrateGapWrite, DECISION_LOG_GAP_CATEGORIES } from "./substrate-gap.js";
+import { resolveSubstrateGap, resolveSubstrateGapWrite, DECISION_LOG_GAP_CATEGORIES, landingLeaseOf, landingReleaseOf } from "./substrate-gap.js";
 import { resolveAuthorProducer } from "./author-producer.js";
 import { resolveDocDriftFix } from "./doc-drift-fix.js";
 import { resolveReachabilityGapRepair } from "./reachability-gap-repair.js";
@@ -1777,6 +1777,23 @@ async function llmProducerAdvertised(): Promise<boolean | null> {
 }
 
 /**
+ * Why another NODE's landing-lease state keeps this gap out of the auto-pick, or null. The landing lease is the store-wide
+ * per-gap record (substrate-gap.ts LANDING LEASE); the picker's own cooldowns are in-process, so a gap one node had just
+ * finished was re-picked by the other within seconds (measured 2026-10-14: 15 gaps drafted on both nodes in 24 h, every
+ * one sequential). Skipped: a LIVE lease held by another node, and a lease another node RELEASED less than `cooldownMs` ago.
+ * This node's own lease and releases are left to today's same-node rules (the in-process maps, gapBackoffMs). Pure.
+ */
+export function crossNodeLeaseSkip(row: Record<string, unknown>, nowMs: number, node: string, cooldownMs: number): string | null {
+  const meta = (row["classification_metadata"] ?? row["metadata"] ?? {}) as Record<string, unknown>;
+  const lease = landingLeaseOf(meta);
+  if (lease && lease.holder !== node && Date.parse(lease.until) > nowMs) return `landing lease held by ${lease.holder} until ${lease.until}`;
+  const rel = landingReleaseOf(meta);
+  const at = rel ? Date.parse(rel.at) : NaN;
+  if (rel && rel.holder !== node && Number.isFinite(at) && nowMs - at < cooldownMs) return `released by ${rel.holder} at ${rel.at} (cooldown ${Math.round(cooldownMs / 1000)}s)`;
+  return null;
+}
+
+/**
  * The rows an auto-pick may choose from under the compose capacity. `armedOnly` = the only free autonomous slots are reserved
  * for armed gaps: then only rows the one eligibility predicate admits (composeEligibilitySkipReason(row) === null) are
  * offered, and with none the pick is skipped with the reason. Otherwise the admitted rows unchanged (today's pick). Pure.
@@ -2024,10 +2041,14 @@ async function resolveGapToFeatureOnce(pointer: GapToFeaturePointer, attempt: { 
     const predicateHolds = pointer.gap_id ? new Map<string, string>() : inheritedPredicateHolds(gaps);
     const heldLines: string[] = [];
     const inFlightLines: string[] = [];
+    const crossNodeLines: string[] = [];
+    const { thisNode } = await import("./self-fact-reconcile.js");
+    const pickNode = thisNode();
     const eligible = gaps.filter((g) => {
       const holder = predicateHolds.get(String(g.id ?? ""));
       if (holder) { heldLines.push(`${String(g.id)}: predicate held by ${holder}`); return false; }
       if (composeInFlight(String(g.id ?? ""))) { inFlightLines.push(String(g.id)); return false; }
+      { const why = crossNodeLeaseSkip(g, nowMs, pickNode, GAP_COMPOSE_COOLDOWN_MS); if (why) { crossNodeLines.push(`${String(g.id)}: ${why}`); return false; } }
       if (nowMs - (gapComposeLastAttemptAt.get(String(g.id ?? "")) ?? 0) < GAP_COMPOSE_COOLDOWN_MS) return false;
       const siteKey = String(((g.classification_metadata ?? g.metadata ?? {}) as Record<string, unknown>).edit_site ?? "");
       if (siteKey && String(g.source ?? "") !== "human_reported" && nowMs - (siteComposeLastAttemptAt.get(siteKey) ?? 0) < SITE_COMPOSE_COOLDOWN_MS) return false;
@@ -2051,6 +2072,7 @@ async function resolveGapToFeatureOnce(pointer: GapToFeaturePointer, attempt: { 
     // Emit the exclusion COUNT, not just its effect. A brake whose only evidence is
     // "fewer picks happened" is indistinguishable from a lane that has gone quiet for
     // some other reason — which is the confusion this codebase keeps paying for.
+    if (crossNodeLines.length > 0) console.log(`[gap-to-feature] another node's landing lease excluded ${crossNodeLines.length} gap(s) from the auto-pick: ${crossNodeLines.slice(0, 5).join("; ")}`);
     if (inFlightLines.length > 0) console.log(`[gap-to-feature] compose in flight excluded ${inFlightLines.length} gap(s) from the auto-pick: ${inFlightLines.slice(0, 5).join(", ")}`);
     if (heldLines.length > 0) console.log(`[gap-to-feature] predicate hold excluded ${heldLines.length} gap(s): ${heldLines.slice(0, 5).join("; ")}`);
     if (lineageCapped > 0) {

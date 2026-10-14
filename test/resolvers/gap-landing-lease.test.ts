@@ -180,3 +180,32 @@ describe("substrateGapLease_write: one landing lease per gap at the gap-store ho
     expect(stored().updated_at).toBe(AT);
   });
 });
+
+// THE LAST RELEASE (user ruling 2026-10-14): a release keeps a store-wide stamp of who released the lease and when, for the
+// other node's picker cooldown (gap-to-feature crossNodeLeaseSkip). Like the lease, it is the lease op's alone.
+describe("substrateGapLease_write: a release leaves the last-release stamp on the row", () => {
+  it("[MUST-FAIL] A releases its lease -> the row carries landing_last_release {holder A, attempt, at} and no landing_lease", async () => {
+    expect((await lease("acquire", NODE_A)).body.granted).toBe(true);
+    expect((await lease("release", NODE_A)).body.released).toBe(true);
+    const m = stored().classification_metadata;
+    expect(m.landing_lease).toBeUndefined();
+    expect(m.landing_last_release).toMatchObject({ holder: NODE_A, attempt: `${NODE_A}-attempt` });
+    expect(Number.isFinite(Date.parse(m.landing_last_release.at))).toBe(true);
+  });
+  it("[CONTROL] a release by a non-holder writes no stamp", async () => {
+    expect((await lease("acquire", NODE_A)).body.granted).toBe(true);
+    expect((await lease("release", NODE_B)).body.released).toBe(false);
+    expect(stored().classification_metadata.landing_last_release).toBeUndefined();
+  });
+  it("[MUST-FAIL] a substrateGap_write can neither erase nor forge the stamp", async () => {
+    expect((await lease("acquire", NODE_A)).body.granted).toBe(true);
+    expect((await lease("release", NODE_A)).body.released).toBe(true);
+    const before = stored().classification_metadata.landing_last_release;
+    const g = stored();
+    await sg.resolveSubstrateGapWrite({ type: "substrateGap_write", gap: { ...g, classification_metadata: { ...g.classification_metadata, landing_last_release: { holder: "forger", attempt: "x", at: "2000-01-01T00:00:00Z" } } } } as never);
+    expect(stored().classification_metadata.landing_last_release).toEqual(before);
+    const g2 = stored(); const m2 = { ...g2.classification_metadata }; delete m2.landing_last_release;
+    await sg.resolveSubstrateGapWrite({ type: "substrateGap_write", gap: { ...g2, classification_metadata: m2 } } as never);
+    expect(stored().classification_metadata.landing_last_release).toEqual(before);
+  });
+});

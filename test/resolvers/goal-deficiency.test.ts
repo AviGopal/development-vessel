@@ -387,7 +387,7 @@ describe("through the default I/O and the real stores", () => {
     expect(linkedGoalHashes(fresh[0].classification_metadata.demand_goals)).toEqual([ph]);
   });
 
-  it("END-TO-END (A+B+B2+C, stubbed lane): a missing-producer deficiency row → armed class2 producer_contract → one author request → its additive registration passes C → the judge reads absent once a contract producer is advertised (hollow stays present)", async () => {
+  it("END-TO-END (A+B+B2+C, stubbed lane): a missing-producer deficiency row whose shape has a DECLARED contract → armed class2 producer_contract on its keys → one author request → its additive registration passes C → the judge reads absent once a contract producer is advertised (hollow stays present)", async () => {
     const pd = await import("../../src/resolvers/producer-dispatch.js");
     const judge = await import("../../src/judge/gap-check-judge.js");
     const ar = await import("../../src/judge/gap-policy.js");
@@ -397,7 +397,9 @@ describe("through the default I/O and the real stores", () => {
     const record = { goal: "tabulate the overdue parcels per depot", walkLog: [`[goal-host-vessel] /run-goal: goal-target inference {"goal_hash":"cafe0123","inferred_target_shapes":["${shape}"],"confidence":0.8}`], completionShapes: [] };
     const sent: Array<{ id: string; tag: string }> = [];
     // A: the dispatcher over the REAL store (write) with a stubbed dispatch
-    const rep = await quiet(() => pd.runProducerDispatch([def], Date.now(), { producer_dispatch: "live", max_producer_dispatches: 1, producer_dispatch_cooldown_ms: 6 * H }, () => [], {
+    // the shape's contract is DECLARED on its capability row (required keys); without one nothing is armed or sent (see below)
+    const declared: Row = { id: pd.capabilityGapId(shape), status: "open", classification_metadata: { kind: "capability_gap", missing_shape: shape, evidence_resolve: { shape, mode: "producer_contract", required_keys: ["parcels", "total"] } } };
+    const rep = await quiet(() => pd.runProducerDispatch([def, declared], Date.now(), { producer_dispatch: "live", max_producer_dispatches: 1, producer_dispatch_cooldown_ms: 6 * H }, () => [], {
       isWrite: (x) => /_write$/.test(x), advertised: async () => false, readRun: async () => record, declaredBy: async () => [],
       write: async (gap, demand) => { const r = await sg.resolveSubstrateGapWrite({ type: "substrateGap_write", gap, demand_goals_append: [demand] } as never); return { ok: r.shape === "substrateGapWriteResult" }; },
       dispatch: async (id, tag) => { sent.push({ id, tag }); return { ok: true }; },
@@ -409,7 +411,7 @@ describe("through the default I/O and the real stores", () => {
     const row = ((await sg.resolveSubstrateGap({ type: "substrateGap", id: capId, limit: 1 } as never)).body as Row).gaps[0] as Row;
     // B/B2: armed class2 by the producer_contract check (an unadvertised shape), the goal's demand linked
     expect(row.status).toBe("open");
-    expect(row.classification_metadata).toMatchObject({ kind: "capability_gap", missing_shape: shape, falsifier: "class2", falsifier_mode: "producer_contract", evidence_resolve: { shape, mode: "producer_contract" }, edit_site: pd.plannedResolverFile(shape) });
+    expect(row.classification_metadata).toMatchObject({ kind: "capability_gap", missing_shape: shape, falsifier: "class2", falsifier_mode: "producer_contract", evidence_resolve: { shape, mode: "producer_contract", required_keys: ["parcels", "total"] }, edit_site: pd.plannedResolverFile(shape) });
     expect(linkedGoalHashes(row.classification_metadata.demand_goals)).toEqual(["cafe0123"]);
     // C (stubbed lane): the author route's landing — a new module at the armed edit site + the two registrations — is admitted
     const rel = String(row.classification_metadata.edit_site).replace(/^repos\/development-vessel\//, "");
@@ -1177,14 +1179,14 @@ describe("package A: the producer dispatcher", () => {
   it("runProducerDispatch: live arms + links + sends at most the budget; dry_run writes and sends nothing; off does nothing", async () => {
     const m = await pd();
     const mk = () => { const writes: Row[] = [], sends: string[] = []; return { writes, sends, d: { ...deps(), write: async (gap: Row, demand: Row) => { writes.push({ gap, demand }); return { ok: true }; }, dispatch: async (id: string) => { sends.push(id); return { ok: true }; } } }; };
-    const rows = [capRow("parcel_backlog_report"), capRow("depot_load_view", { demand_goals: [{ source: "goal_reach", goal_hash: "bbbb2222" }] })];
+    const rows = [capRow("parcel_backlog_report", { evidence_resolve: { shape: "parcel_backlog_report", mode: "producer_contract", required_keys: ["parcels"] } }), capRow("depot_load_view", { demand_goals: [{ source: "goal_reach", goal_hash: "bbbb2222" }] })];
     const pol = { producer_dispatch: "live", max_producer_dispatches: 1, producer_dispatch_cooldown_ms: 6 * H };
     const live = mk();
     const rep = await quiet(() => m.runProducerDispatch(rows, T0, pol, none, live.d));
     expect(live.sends).toEqual(["gap-parcel-backlog-report"]);
     expect(rep.sent).toEqual([{ gap_id: "gap-parcel-backlog-report", shape: "parcel_backlog_report", source_gap: "gap-parcel-backlog-report", tag: "producer_author:aaaa1111:parcel_backlog_report" }]);
     const w = live.writes[0]!;
-    expect(w.gap).toMatchObject({ id: "gap-parcel-backlog-report", status: "open", classification_metadata: { kind: "capability_gap", missing_shape: "parcel_backlog_report", evidence_resolve: { shape: "parcel_backlog_report", mode: "producer_contract" }, edit_site: "repos/development-vessel/src/resolvers/parcel-backlog-report.ts", producer_dispatch: { mode: "live", tag: "producer_author:aaaa1111:parcel_backlog_report" } } });
+    expect(w.gap).toMatchObject({ id: "gap-parcel-backlog-report", status: "open", classification_metadata: { kind: "capability_gap", missing_shape: "parcel_backlog_report", evidence_resolve: { shape: "parcel_backlog_report", mode: "producer_contract", required_keys: ["parcels"] }, edit_site: "repos/development-vessel/src/resolvers/parcel-backlog-report.ts", producer_dispatch: { mode: "live", tag: "producer_author:aaaa1111:parcel_backlog_report" } } });
     expect(w.demand).toMatchObject({ source: "goal_reach", goal_hash: "aaaa1111" });
     const dry = mk();
     await quiet(() => m.runProducerDispatch(rows, T0, { ...pol, producer_dispatch: "dry_run" }, none, dry.d));
@@ -1282,5 +1284,56 @@ describe("contained is not missing: the dispatcher and the author route never au
     const guard = route.indexOf("const reason = containedRefusal(missingShape, runtimeRoot());");
     expect(guard).toBeGreaterThan(0);
     expect(guard).toBeLessThan(route.indexOf("await resolveFeatureCompose("));
+  });
+});
+
+// NO KEYLESS ARMING (exception (a), 10-13): a producer_contract check with no required keys closes on ANY substantive body, so
+// a hollow producer would close it. The dispatcher arms only from a DECLARED contract (required keys already on the row);
+// otherwise it records the demand and "not armed", and sends nothing to the author route.
+describe("the producer dispatcher arms only a declared contract", () => {
+  const pd = async () => (await import("../../src/resolvers/producer-dispatch.js")) as Record<string, any>;
+  const T0 = Date.parse("2030-06-01T00:00:00Z"), HR = 3_600_000;
+  const pol = { producer_dispatch: "live", max_producer_dispatches: 3, producer_dispatch_cooldown_ms: 6 * HR };
+  const cap = (shape: string, over: Row = {}): Row => ({ id: `gap-${shape.replace(/_/g, "-")}`, status: "open", classification_metadata: { kind: "capability_gap", missing_shape: shape, goal: "list the quarry ledger entries", demand_goals: [{ source: "goal_reach", goal_hash: "cccc3333" }], ...over } });
+  const io = () => { const writes: Row[] = [], sends: string[] = []; return { writes, sends, d: { isWrite: (x: string) => /_write$/.test(x), advertised: async () => false, readRun: async () => null, declaredBy: async () => [] as string[], write: async (gap: Row, demand: Row) => { writes.push({ gap, demand }); return { ok: true }; }, dispatch: async (id: string) => { sends.push(id); return { ok: true }; } } }; };
+  const quiet = async <T>(f: () => Promise<T>): Promise<T> => { const l = console.log, w = console.warn; console.log = () => {}; console.warn = () => {}; try { return await f(); } finally { console.log = l; console.warn = w; } };
+
+  it("MUST-FAIL: a shape with NO declared contract is never armed and never sent; the demand is still recorded, loudly not armed", async () => {
+    const m = await pd(); const x = io();
+    const rep = await quiet(() => m.runProducerDispatch([cap("quarry_ledger")], T0, pol, () => [], x.d));
+    expect(x.sends).toEqual([]);
+    expect(rep.sent).toEqual([]);
+    expect(rep.refused[0]).toMatchObject({ gap_id: "gap-quarry-ledger", why: expect.stringMatching(/^no declared contract: not armed/) });
+    expect(x.writes).toHaveLength(1);
+    const meta = (x.writes[0]!.gap as Row).classification_metadata as Row;
+    expect(meta.evidence_resolve).toBeUndefined();
+    expect(meta.producer_dispatch).toMatchObject({ armed: false, not_armed: expect.stringMatching(/^no declared contract: not armed/) });
+    expect((x.writes[0]!.demand as Row).goal_hash).toBe("cccc3333");
+  });
+
+  it("CONTROL: a shape whose contract is declared (required keys on the row) is armed on exactly those keys and sent once", async () => {
+    const m = await pd(); const x = io();
+    const rep = await quiet(() => m.runProducerDispatch([cap("quarry_ledger", { evidence_resolve: { shape: "quarry_ledger", mode: "producer_contract", required_keys: ["entries", "entries", "count", ""] } })], T0, pol, () => [], x.d));
+    expect(x.sends).toEqual(["gap-quarry-ledger"]);
+    expect(rep.sent).toHaveLength(1);
+    const meta = (x.writes[0]!.gap as Row).classification_metadata as Row;
+    expect(meta.evidence_resolve).toEqual({ shape: "quarry_ledger", mode: "producer_contract", required_keys: ["entries", "count"] });
+    expect(meta.producer_dispatch).toMatchObject({ armed: true, required_keys: ["entries", "count"] });
+  });
+
+  it("MUST-FAIL: a row already armed KEYLESS keeps its check untouched and is not sent again (it is not a declared contract)", async () => {
+    const m = await pd(); const x = io();
+    const keyless = { shape: "quarry_ledger", mode: "producer_contract" };
+    await quiet(() => m.runProducerDispatch([cap("quarry_ledger", { evidence_resolve: keyless })], T0, pol, () => [], x.d));
+    expect(x.sends).toEqual([]);
+    expect(((x.writes[0]!.gap as Row).classification_metadata as Row).evidence_resolve).toEqual(keyless);
+  });
+
+  it("declaredContractKeys reads only a producer_contract check for the same shape; another check or another shape is no contract", async () => {
+    const m = await pd();
+    expect(m.declaredContractKeys(cap("quarry_ledger", { evidence_resolve: { shape: "quarry_ledger", mode: "producer_contract", required_keys: ["a"] } }), "quarry_ledger")).toEqual(["a"]);
+    expect(m.declaredContractKeys(cap("quarry_ledger", { evidence_resolve: { shape: "slate_index", mode: "producer_contract", required_keys: ["a"] } }), "quarry_ledger")).toEqual([]);
+    expect(m.declaredContractKeys(cap("quarry_ledger", { evidence_resolve: { shape: "test_suite", input: {}, zero_field: "x" } }), "quarry_ledger")).toEqual([]);
+    expect(m.declaredContractKeys(null, "quarry_ledger")).toEqual([]);
   });
 });

@@ -15,9 +15,10 @@
 // For each candidate shape: an identifier (else skipped, loudly); never a write/action shape; REUSE FIRST: advertised
 // in discovery → skipped (reuse; the author route's own already-resolved check is the second line); unreadable
 // discovery → skipped (unknown is not absent). Otherwise the capability row gap-<slug> (the id the walk's filer uses,
-// even when it was born closed) is opened or reused, linked to the goal's demand, ARMED from the shape's contract
-// (evidence_resolve {shape, mode:"producer_contract"}, package B) with its planned CREATE target as edit_site, and sent to
-// gap_to_feature by id. Shaped: mode off|dry_run|live, a per-tick budget, a per-gap cooldown. Every skip is a reason.
+// even when it was born closed) is opened or reused, linked to the goal's demand, with its planned CREATE target as edit_site.
+// It is ARMED (evidence_resolve {shape, mode:"producer_contract", required_keys}, package B) and sent to gap_to_feature by id
+// ONLY when the shape has a DECLARED contract (required keys already on the row). A keyless check closes on any substantive
+// body, so without declared keys the row records the demand and "not armed", and nothing is sent (exception (a), 10-13). Shaped: mode off|dry_run|live, a per-tick budget, a per-gap cooldown. Every skip is a reason.
 
 // CONTAINED IS NOT MISSING (exception (a), 10-13): discovery answers only for producers that are UP. A vessel masked for
 // harm containment, disabled, crashed or not yet booted advertises nothing, and its shape read as "no producer exists"
@@ -185,11 +186,25 @@ export async function planProducerDemand(
   return { plans, skips };
 }
 
-/** The capability row write that opens/reuses gap-<slug>, links the goal's demand and arms it from the shape's contract. */
+/** The shape's DECLARED contract keys: the required_keys a producer_contract check already on the row names for this shape
+ *  (put there by whoever declared the contract), else none. Nothing here invents keys from the shape's name or the goal's prose. */
+export function declaredContractKeys(existing: Record<string, unknown> | null, shape: string): string[] {
+  const er = (existing ? metaOf(existing) : {})["evidence_resolve"] as Record<string, unknown> | undefined;
+  if (!er || er["mode"] !== "producer_contract" || er["shape"] !== shape || !Array.isArray(er["required_keys"])) return [];
+  return [...new Set((er["required_keys"] as unknown[]).filter((k): k is string => typeof k === "string" && k.trim().length > 0))];
+}
+const keysOf = (gap: { classification_metadata: Record<string, unknown> }): string => JSON.stringify(((gap.classification_metadata["evidence_resolve"] ?? {}) as Record<string, unknown>)["required_keys"] ?? []);
+export const NOT_ARMED_NO_CONTRACT = "no declared contract: not armed (a producer_contract check without required keys closes on any substantive body, so a hollow producer would close it)";
+
+/** The capability row write that opens/reuses gap-<slug> and links the goal's demand. It ARMS the producer_contract check only
+ *  from a DECLARED contract (declaredContractKeys); with none it arms nothing and says so (armed:false), and an evidence_resolve
+ *  already on the row, of any kind, is left exactly as it is. */
 export function capabilityRowWrite(plan: ProducerPlan, existing: Record<string, unknown> | null, nowIso: string, mode: ProducerDispatchMode) {
   const id = capabilityGapId(plan.shape);
   const m = existing ? metaOf(existing) : {};
   const tag = `producer_author:${plan.goal_hash}:${plan.shape}`;
+  const keys = declaredContractKeys(existing, plan.shape);
+  const armed = keys.length > 0;
   const gap = {
     id,
     category: String(existing?.["category"] ?? "missing_capability"),
@@ -200,14 +215,14 @@ export function capabilityRowWrite(plan: ProducerPlan, existing: Record<string, 
     classification_metadata: {
       ...m,
       kind: "capability_gap", missing_shape: plan.shape, allowed_output_shapes: [plan.shape], goal: String(m["goal"] ?? plan.goal) || plan.goal,
-      evidence_resolve: { shape: plan.shape, mode: "producer_contract" },
+      ...(armed ? { evidence_resolve: { shape: plan.shape, mode: "producer_contract", required_keys: keys } } : {}),
       edit_site: plannedResolverFile(plan.shape, typeof m["target_vessel"] === "string" && m["target_vessel"] ? String(m["target_vessel"]) : "development-vessel"),
-      producer_dispatch: { at: nowIso, shape: plan.shape, mode, via: plan.via, source_gap: plan.source_gap, tag },
+      producer_dispatch: { at: nowIso, shape: plan.shape, mode, via: plan.via, source_gap: plan.source_gap, tag, armed, ...(armed ? { required_keys: keys } : { not_armed: NOT_ARMED_NO_CONTRACT }) },
       ...(plan.via === "deficiency" ? { parent_gap: plan.source_gap } : {}),
     },
   };
   const demand = { source: "goal_reach" as const, goal_hash: plan.goal_hash, dispatch_id: plan.dispatch_id ?? "", origin: "autonomous" as const };
-  return { gap, demand, tag };
+  return { gap, demand, tag, armed };
 }
 
 export interface DispatchDeps extends Deps {
@@ -244,14 +259,17 @@ export async function runProducerDispatch(
     // the capability row's own cooldown, when the plan came from a deficiency row
     const last = Date.parse(String(((((existing?.["classification_metadata"] ?? {}) as Record<string, unknown>)["producer_dispatch"] ?? {}) as Record<string, unknown>)["at"] ?? ""));
     if (Number.isFinite(last) && now - last < policy.producer_dispatch_cooldown_ms) { report.refused.push({ gap_id: id, why: "author request already sent within the cooldown" }); continue; }
-    const { gap, demand, tag } = capabilityRowWrite(plan, existing, nowIso, mode);
-    if (mode === "dry_run") { console.log(`[producer-dispatch] DRY-RUN would arm ${id} (producer_contract ${plan.shape}) and send it to the author route; goal ${plan.goal_hash} via ${plan.source_gap}`); continue; }
+    const { gap, demand, tag, armed } = capabilityRowWrite(plan, existing, nowIso, mode);
+    if (mode === "dry_run") { console.log(armed ? `[producer-dispatch] DRY-RUN would arm ${id} (producer_contract ${plan.shape}, declared keys ${keysOf(gap)}) and send it to the author route; goal ${plan.goal_hash} via ${plan.source_gap}` : `[producer-dispatch] DRY-RUN ${id} (${plan.shape}): ${NOT_ARMED_NO_CONTRACT}; would record the demand only`); continue; }
     const w = await deps.write(gap, demand).catch((e: unknown) => ({ ok: false, why: String(e) }));
     if (!w.ok) { report.refused.push({ gap_id: id, why: `write refused: ${w.why ?? "?"}` }); console.warn(`[producer-dispatch] ${id}: write refused: ${w.why ?? "?"}`); continue; }
+    // UNARMED IS NOT SENT: the demand is recorded on the row (above), but an author request for a shape with no declared
+    // contract would be graded by a check any substantive body satisfies. The author route never sees it.
+    if (!armed) { report.refused.push({ gap_id: id, why: NOT_ARMED_NO_CONTRACT }); console.warn(`[producer-dispatch] ${id} (${plan.shape}): ${NOT_ARMED_NO_CONTRACT}; demand recorded, NOT sent to the author route`); continue; }
     const d = await deps.dispatch(id, tag).catch((e: unknown) => ({ ok: false, why: String(e) }));
     if (!d.ok) { report.refused.push({ gap_id: id, why: `dispatch failed: ${d.why ?? "?"}` }); console.warn(`[producer-dispatch] ${id}: dispatch failed: ${d.why ?? "?"}`); continue; }
     report.sent.push({ gap_id: id, shape: plan.shape, source_gap: plan.source_gap, tag });
-    console.log(`[producer-dispatch] SENT ${id} (missing producer ${plan.shape}) to the author route; armed producer_contract; goal ${plan.goal_hash} via ${plan.source_gap}; tag ${tag}`);
+    console.log(`[producer-dispatch] SENT ${id} (missing producer ${plan.shape}) to the author route; armed producer_contract on its declared keys; goal ${plan.goal_hash} via ${plan.source_gap}; tag ${tag}`);
   }
   return report;
 }

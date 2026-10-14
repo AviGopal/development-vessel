@@ -26,6 +26,9 @@ import { isolateRuntimeRoot } from "../helpers/runtime-root.js";
 const { root: ROOT, runtime: RUNTIME } = await isolateRuntimeRoot("fc-park-untrusted", { who: "feature-compose-park-resume-untrusted.test.ts" });
 
 const realCutover = await import("../../src/resolvers/vessel-mitosis-cutover.js");
+// A BY-VALUE copy for the restore below: the namespace object is a live binding, so once the module is mocked
+// `realCutover.resolveVesselMitosisCutover` reads the FAKE too, and restoring with it restores the mock.
+const REAL_CUTOVER = { ...realCutover };
 let cutoverCalls: Array<Record<string, unknown>> = [];
 mock.module("../../src/resolvers/vessel-mitosis-cutover.js", () => ({
   ...realCutover,
@@ -137,6 +140,10 @@ afterAll(async () => {
   globalThis.fetch = ORIGINAL_FETCH;
   console.log = ORIGINAL_LOG;
   mock.restore();
+  // mock.restore() does not undo mock.module, and the gate runs the whole suite in ONE process: without this, every
+  // later file that imports the cutover got the fake above (cutoverApplied, no gate, no git), which turned all 27
+  // real-cutover tests of cutover-autonomy-scope red wherever this file sorted first (measured on the hub, 2026-10-14).
+  mock.module("../../src/resolvers/vessel-mitosis-cutover.js", () => REAL_CUTOVER);
   await rm(ROOT, { recursive: true, force: true });
 });
 

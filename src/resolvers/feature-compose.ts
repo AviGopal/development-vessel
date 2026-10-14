@@ -5411,6 +5411,9 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
   // a composeAdmission record. A refusal is written where it returns; an admission is written where the compose
   // starts drafting, or stops before it (spend envelope, landing lease, slot). Never throws; no decision reads it.
   let admittedCapture: ((draftingStarted: boolean) => void) | null = null;
+  // ARMED = the stored row passes the one eligibility predicate (open, class1/class2, an edit site, not held) and the
+  // compose is not the check supply's: the shaped composeCapacity record (compose-slots.ts) may reserve slots for it.
+  let composeArmed = false;
   // THE COMPOSE MODE IS THIS RESOLVER'S VERDICT, NEVER THE CALLER'S (slice G): a caller-supplied compose_mode is dropped
   // here and set only by the check-supply admission below.
   delete (pointer as { compose_mode?: unknown }).compose_mode;
@@ -5525,6 +5528,7 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
     if (stored && land) {
       landingLeaseGap = _gapIdForSlot;
       admittedCapture = (draftingStarted) => admissionCapture({ decision: "admitted", draftingStarted, stage: null, stored: admissionStored, row: admissionRow, why: admissionWhy, supply: supplyException, supplyVerdict });
+      if (!supplyMarker && admissionRow) composeArmed = (await import("../judge/gap-eligibility.js")).composeEligibilitySkipReason(admissionRow) === null;
     }
   }
   // SPEND ENVELOPE AT THE CHOKEPOINT (contained-self-development). gap-to-feature checks the envelope
@@ -5568,7 +5572,7 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
     }
     landingLease = { gapId: landingLeaseGap, holder, attempt: slotId };
   }
-  const slot = await acquireComposeSlot(slotId, { directed: isDirected, gapId: _gapIdForSlot });
+  const slot = await acquireComposeSlot(slotId, { directed: isDirected, gapId: _gapIdForSlot, armed: composeArmed });
   if (!slot.granted) await releaseOrKeepLandingLease(landingLease, null);
   if (!slot.granted && slot.duplicateOf) {
     admittedCapture?.(false);

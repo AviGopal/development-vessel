@@ -2470,7 +2470,7 @@ async function resolveSubstrateGapWriteInner(
       // FAIL-CLOSED: if the capacity check fails or returns an unreadable shape, assume no capacity.
       try {
         const { peekComposeCapacity, hasFreeComposeCapacity } = await import("../compose-slots.js");
-        const __cap = await peekComposeCapacity({ directed: false });
+        const __cap = await peekComposeCapacity({ directed: false, armed: true });
         // Null = capacity unobservable: this nudge FAILS CLOSED (no nudge), as before.
         var __autoHasFree = __cap !== null && hasFreeComposeCapacity(__cap);
         if (!__autoHasFree) {

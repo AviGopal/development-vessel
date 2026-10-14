@@ -113,6 +113,63 @@ function capFromEnv(): number {
   return Math.floor(raw);
 }
 
+// ── THE SHAPED COMPOSE CAPACITY (user ruling 2026-10-14, "Build at the binding site"; law 1, law 5).
+//
+// The cap and the armed-gap reservation are a `composeCapacity` poolImpulse record read at claim time
+// through the same own-producer discovery the autonomy scope uses, held for COMPOSE_CAPACITY_TTL_MS:
+//   { max_concurrent: 1..8, reserved_for_armed: 0..max_concurrent-1 }
+// ABSENT, UNREADABLE or INVALID → exactly today's behaviour: COMPOSE_MAX_CONCURRENT (default 2) and the
+// directed reservation, with no armed reservation. The env var is only the bootstrap fallback; when a valid
+// record exists its value binds, whatever the env says. An invalid record is logged and ignored, never
+// half-applied.
+export interface ComposeCapacityPolicy { readonly max_concurrent: number; readonly reserved_for_armed: number }
+const COMPOSE_CAPACITY_TTL_MS = 30_000;
+let capacityCache: { at: number; v: ComposeCapacityPolicy | null } | null = null;
+let capacityReaderForTests: (() => Promise<ComposeCapacityPolicy | null>) | null = null;
+/** Tests only: replace the record read (null restores the real one) and forget the cached answer. */
+export function __setComposeCapacityReaderForTests(f: (() => Promise<ComposeCapacityPolicy | null>) | null): void { capacityReaderForTests = f; capacityCache = null; }
+
+/** The record's fields if they are in bounds, else null (with why). Pure. */
+export function validComposeCapacity(body: unknown): { ok: true; policy: ComposeCapacityPolicy } | { ok: false; why: string } {
+  const b = (body && typeof body === "object" ? body : {}) as Record<string, unknown>;
+  const max = b["max_concurrent"], res = b["reserved_for_armed"] ?? 0;
+  if (typeof max !== "number" || !Number.isInteger(max) || max < 1 || max > 8) return { ok: false, why: `max_concurrent must be an integer 1..8 (got ${JSON.stringify(max)})` };
+  if (typeof res !== "number" || !Number.isInteger(res) || res < 0 || res > max - 1) return { ok: false, why: `reserved_for_armed must be an integer 0..${max - 1} (got ${JSON.stringify(res)})` };
+  return { ok: true, policy: { max_concurrent: max, reserved_for_armed: res } };
+}
+
+async function readComposeCapacityRecord(): Promise<ComposeCapacityPolicy | null> {
+  const { discoverOwnResolveUrls, postEnvelopeRead, policyReadLine } = await import("./judge/gap-policy.js");
+  const pool = await discoverOwnResolveUrls("poolImpulse");
+  if (!pool.ok || pool.producers.length === 0) {
+    console.log(policyReadLine("composeCapacity", { asked: [], verdict: `today's cap (record unreadable: ${pool.ok ? "no own poolImpulse producer" : pool.why})` }));
+    return null;
+  }
+  const res = await Promise.all(pool.producers.map((p) => postEnvelopeRead(p.url, { impulse: { type: "poolImpulse", shape: "composeCapacity", status: "open" } })));
+  let newest: { updated_at?: string; body?: unknown } | null = null;
+  for (const r of res) {
+    const imps = (r?.["body"] as { impulses?: unknown } | undefined)?.impulses;
+    if (!Array.isArray(imps)) continue;
+    for (const imp of imps as Array<{ shape?: string; updated_at?: string; body?: unknown }>) {
+      if (imp.shape === "composeCapacity" && (!newest || String(imp.updated_at ?? "") > String(newest.updated_at ?? ""))) newest = imp;
+    }
+  }
+  if (!newest) { console.log(policyReadLine("composeCapacity", { asked: pool.producers, found: false, verdict: "today's cap (no record)" })); return null; }
+  const v = validComposeCapacity(newest.body);
+  if (!v.ok) { console.warn(`[compose-cap] composeCapacity record IGNORED (${v.why}); today's cap applies`); return null; }
+  console.log(policyReadLine("composeCapacity", { asked: pool.producers, found: true, entries: 2, verdict: `cap ${v.policy.max_concurrent}, reserved_for_armed ${v.policy.reserved_for_armed}` }));
+  return v.policy;
+}
+
+/** The shaped capacity, or null for today's. Never throws: an unreadable record is today's behaviour. */
+export async function composeCapacityPolicy(): Promise<ComposeCapacityPolicy | null> {
+  if (capacityCache && Date.now() - capacityCache.at < COMPOSE_CAPACITY_TTL_MS) return capacityCache.v;
+  let v: ComposeCapacityPolicy | null = null;
+  try { v = await (capacityReaderForTests ?? readComposeCapacityRecord)(); } catch { v = null; }
+  capacityCache = { at: Date.now(), v };
+  return v;
+}
+
 /**
  * The cap that applies to one lane.
  *
@@ -127,10 +184,16 @@ function capFromEnv(): number {
  * slot and 0 directed ones, inverting the lanes. That is pre-existing and documented
  * elsewhere; the peek must MIRROR acquire, not quietly fix it.
  */
-function effectiveCapFor(directed?: boolean): number {
-  const cap = capFromEnv();
-  return directed === true ? cap : Math.max(1, cap - 1);
+function effectiveCapFor(directed?: boolean, armed?: boolean, policy: ComposeCapacityPolicy | null = null): number {
+  const cap = policy ? policy.max_concurrent : capFromEnv();
+  if (directed === true) return cap;
+  const autonomous = Math.max(1, cap - 1);
+  // ARMED PRIORITY: an unarmed or supply compose may not take the slots reserved for armed gaps (class1/class2
+  // with an edit site). With no record, reserved_for_armed is 0 and the lanes are exactly today's.
+  return armed === true || !policy ? autonomous : Math.max(0, autonomous - policy.reserved_for_armed);
 }
+/** Exported for tests: the one cap expression acquire and peek share. */
+export const __effectiveCapForTests = effectiveCapFor;
 
 /**
  * Is the process that took this slot still running?
@@ -251,9 +314,9 @@ export interface ComposeCapacity {
  * see the filesystem must slow the fleet, never halt it.
  */
 export async function peekComposeCapacity(
-  opts: { directed?: boolean } = {},
+  opts: { directed?: boolean; armed?: boolean } = {},
 ): Promise<ComposeCapacity | null> {
-  const cap = effectiveCapFor(opts.directed);
+  const cap = effectiveCapFor(opts.directed, opts.armed, await composeCapacityPolicy());
   try {
     await mkdir(slotDir(), { recursive: true });
     // Reaps dead/stale holders exactly as acquire would, so a peek can never report a
@@ -283,7 +346,7 @@ export function hasFreeComposeCapacity(capacity: ComposeCapacity): boolean {
 
 export async function acquireComposeSlot(
   composeId: string,
-  opts: { directed?: boolean; gapId?: string } = {},
+  opts: { directed?: boolean; gapId?: string; armed?: boolean } = {},
 ): Promise<ComposeSlot> {
   // RESERVE THE LAST SLOT FOR DIRECTED WORK.
   //
@@ -298,7 +361,6 @@ export async function acquireComposeSlot(
   // work is not lost by waiting — its gap stays open and retries. At the default
   // cap of 2 this is one slot each, which is the point: neither lane can starve
   // the other.
-  const effectiveCap = effectiveCapFor(opts.directed);
   let path: string | null = null;
   try {
     await mkdir(slotDir(), { recursive: true });
@@ -330,6 +392,9 @@ export async function acquireComposeSlot(
         } catch { /* unreadable slot: not evidence */ }
       }
     }
+    // The cap is read only once the claim could be granted: a duplicate refusal above
+    // never needs it, so it costs no capacity-record read.
+    const effectiveCap = effectiveCapFor(opts.directed, opts.armed, await composeCapacityPolicy());
     if (live >= effectiveCap) {
       return { granted: false, observed: live, release: async () => {} };
     }

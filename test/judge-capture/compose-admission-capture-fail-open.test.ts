@@ -27,6 +27,9 @@ mkdirSync(ROOT, { recursive: true });
 const { resolveFeatureCompose } = await import("../../src/resolvers/feature-compose.js");
 const rc = await import("../../src/judge/routing-capture.js");
 const { __resetPolicyReadsForTests } = await import("../../src/judge/gap-policy.js");
+// The shaped compose capacity (compose-slots.ts) reads a composeCapacity pool record at slot claim: answer "no record" (today's
+// cap) so the slot claim this file drives makes no network read of its own.
+const { __setComposeCapacityReaderForTests } = await import("../../src/compose-slots.js");
 
 const SLOTS = join(ROOT, "compose-slots");
 const AT = "2026-10-03T10:00:00Z";
@@ -48,6 +51,8 @@ let errSpy: ReturnType<typeof spyOn> | null = null;
 let logs: string[] = [];
 let store: Map<string, Record<string, any>>;
 
+beforeEach(() => { __setComposeCapacityReaderForTests(async () => null); });
+afterAll(() => { __setComposeCapacityReaderForTests(null); });
 beforeEach(() => {
   saved = { GAP_STORE_ENDPOINT: process.env["GAP_STORE_ENDPOINT"], COMPOSE_SLOT_DIR: process.env["COMPOSE_SLOT_DIR"] };
   process.env["COMPOSE_SLOT_DIR"] = SLOTS;

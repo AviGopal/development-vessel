@@ -29,6 +29,9 @@ mkdirSync(ROOT, { recursive: true });
 await isolateRuntimeRoot("compose-landing-lease-admission", { who: "compose-landing-lease-admission.test.ts" });
 const fc = await import("../../src/resolvers/feature-compose.js");
 const sg = await import("../../src/resolvers/substrate-gap.js");
+// The shaped compose capacity (compose-slots.ts) reads a composeCapacity pool record at slot claim: answer "no record" (today's
+// cap) so the claim this file drives makes no network read of its own.
+const { __setComposeCapacityReaderForTests } = await import("../../src/compose-slots.js");
 const { thisNode } = await import("../../src/resolvers/self-fact-reconcile.js");
 const { resolveFeatureCompose } = fc;
 
@@ -54,6 +57,8 @@ let spies: Array<ReturnType<typeof spyOn>> = [];
 let store: Map<string, Record<string, any>>;
 let gapWrites = 0;
 
+beforeEach(() => { __setComposeCapacityReaderForTests(async () => null); });
+afterAll(() => { __setComposeCapacityReaderForTests(null); });
 beforeEach(() => {
   savedEndpoint = process.env["GAP_STORE_ENDPOINT"];
   process.env["GAP_STORE_ENDPOINT"] = FIXTURE_GAP_STORE;

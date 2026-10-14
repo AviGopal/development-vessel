@@ -1776,6 +1776,18 @@ async function llmProducerAdvertised(): Promise<boolean | null> {
   return available;
 }
 
+/**
+ * The rows an auto-pick may choose from under the compose capacity. `armedOnly` = the only free autonomous slots are reserved
+ * for armed gaps: then only rows the one eligibility predicate admits (composeEligibilitySkipReason(row) === null) are
+ * offered, and with none the pick is skipped with the reason. Otherwise the admitted rows unchanged (today's pick). Pure.
+ */
+export function pickPoolForCapacity<T extends Record<string, unknown>>(admitted: readonly T[], armedOnly: boolean): { rows: T[]; skipped?: string } {
+  if (!armedOnly) return { rows: [...admitted] };
+  const armed = admitted.filter((r) => composeEligibilitySkipReason(r) === null);
+  if (armed.length === 0) return { rows: [], skipped: `only armed-reserved compose slots are free and none of ${admitted.length} admitted candidate(s) is armed` };
+  return { rows: armed };
+}
+
 export async function resolveGapToFeature(pointer: GapToFeaturePointer): Promise<ResolverResult> {
   const attempt: { id?: string; gap?: Record<string, unknown>; inFlightGapId?: string } = {};
   let result: ResolverResult;
@@ -1883,8 +1895,13 @@ async function resolveGapToFeatureOnce(pointer: GapToFeaturePointer, attempt: { 
   // matching compose-slots' own contract.
   // The envelope this auto-pick admitted under; its lineage ceiling (4.5) holds lineages below.
   let pickEnvelope: SpendEnvelopeVerdict | null = null;
+  // ARMED-ONLY PICK (the shaped composeCapacity record, compose-slots.ts): when the only free autonomous slots are the
+  // ones reserved for armed gaps, the pick is made among armed rows only, so a reserved slot is never offered to an
+  // unarmed gap (which acquire would refuse BUSY) and never left idle while an armed gap waits.
+  let armedOnlyPick = false;
   if (!pointer.gap_id && !pointer.category) {
-    const capacity = await peekComposeCapacity();
+    // Can ANY autonomous compose start? The armed cap is the widest autonomous cap; acquire enforces the exact one.
+    const capacity = await peekComposeCapacity({ armed: true });
     if (capacity && !hasFreeComposeCapacity(capacity)) {
       // Log the SKIP explicitly. A cost fix whose only evidence is the absence of the
       // old line is unmeasurable, and "nothing happened" is exactly the signal this
@@ -1905,6 +1922,10 @@ async function resolveGapToFeatureOnce(pointer: GapToFeaturePointer, attempt: { 
           skipped_selection: true,
         },
       };
+    }
+    if (capacity) {
+      const unarmed = await peekComposeCapacity({});
+      armedOnlyPick = !!unarmed && !hasFreeComposeCapacity(unarmed);
     }
     if ((await llmProducerAdvertised()) === false) {
       console.log(`[gap-to-feature] selection skipped: llm_unavailable (no llm_completion producer advertised)`);
@@ -2054,7 +2075,12 @@ async function resolveGapToFeatureOnce(pointer: GapToFeaturePointer, attempt: { 
       // which flows to the graceful "no matching open gap" path, not pickMostLandable([])'s throw.
       if (admitted.length) await refreshHeldCalibration();
       pickLineageIndex = gapsById;
-      gap = admitted.length ? pickMostLandable(admitted) : null;
+      const pool = pickPoolForCapacity(admitted, armedOnlyPick);
+      if (pool.skipped) {
+        console.log(`[gap-to-feature] selection skipped: ${pool.skipped}`);
+        return { shape: "gapToFeatureReport", body: { ok: false, stage: "capacity", verdict: "BUSY", error: pool.skipped, skipped_selection: true, armed_only: true } };
+      }
+      gap = pool.rows.length ? pickMostLandable(pool.rows) : null;
     }
   } catch (e) {
     return { shape: "gapToFeatureReport", body: { ok: false, stage: "select", error: (e as Error).message } };

@@ -1184,13 +1184,29 @@ async function landedCommitRunningHere(sha: string): Promise<"running" | "not se
   // forever. Its check (a test_suite run) reads the clone, which the loop above proved contains it.
   const touched = (sweepGitOut(cloneDir, ["diff-tree", "--no-commit-id", "--name-only", "-r", sha]) ?? "").split("\n").filter(Boolean);
   if (touched.length > 0 && touched.every((f) => /^tests?\//.test(f))) return "running";
+  // A LIBRARY HAS NO UNIT OF ITS OWN. ias-executor-ts (and any package consumed through its built dist) reaches the
+  // runtime through its consumers, so asking systemd whether a unit of the clone's name is active read every library
+  // landing as "not served here", on every node, forever (2026-10-14: 0e01b34 and 969f86b, 206 such lines in 72 h).
+  // pull-sync's last-good pin for the library is written only after every consumer is healthy AND its shipped dist is
+  // byte-identical to the shared build, so it is the served code: running iff the landed sha is in it, else awaiting
+  // restart. A unit that exists but is masked or inactive keeps the answer below.
+  // systemd is read here (the reader's two allowlisted unit spawns); tests replace it through the deps seam.
+  let loadState = "";
+  if (autoRevertDeps.unitLoadState) loadState = autoRevertDeps.unitLoadState(vessel);
+  else {
+    try { loadState = new TextDecoder().decode(Bun.spawnSync(["systemctl", "show", vessel, "-p", "LoadState", "--value"], { stdout: "pipe", stderr: "pipe", timeout: 5_000 }).stdout).trim(); } catch { loadState = ""; }
+  }
+  if (loadState === "not-found") {
+    const lastGood = autoRevertDeps.lastGood(vessel);
+    return lastGood && sweepGitOut(cloneDir, ["merge-base", "--is-ancestor", sha, lastGood]) !== null ? "running" : "awaiting restart";
+  }
   let active = "";
   let startedAt = 0;
   try {
-    active = new TextDecoder().decode(Bun.spawnSync(["systemctl", "is-active", vessel], { stdout: "pipe", stderr: "pipe", timeout: 5_000 }).stdout).trim();
-    const p = Bun.spawnSync(["systemctl", "show", vessel, "-p", "ActiveEnterTimestamp", "--value", "--timestamp=unix"], { stdout: "pipe", stderr: "pipe", timeout: 5_000 });
-    const m = new TextDecoder().decode(p.stdout).trim().match(/^@(\d+)$/);
-    startedAt = m ? Number(m[1]) : 0;
+    active = autoRevertDeps.unitActive
+      ? autoRevertDeps.unitActive(vessel)
+      : new TextDecoder().decode(Bun.spawnSync(["systemctl", "is-active", vessel], { stdout: "pipe", stderr: "pipe", timeout: 5_000 }).stdout).trim();
+    startedAt = autoRevertDeps.unitStartedAt(vessel);
   } catch { return "awaiting restart"; }
   if (active !== "active") return "not served here";
   const committedAt = Number(sweepGitOut(cloneDir, ["log", "-1", "--format=%ct", sha]) ?? "0");
@@ -1322,6 +1338,14 @@ export type AutoRevertDeps = {
   cutover: (pointer: Record<string, unknown>) => Promise<unknown>;
   /** When the vessel's unit last entered active, unix seconds; 0 when unknown. */
   unitStartedAt: (vessel: string) => number;
+  /** Tests only: `systemctl is-active <vessel>` ("active", "inactive"). Absent in production, where
+   *  landedCommitRunningHere runs systemctl itself (its allowlisted unit spawns). */
+  unitActive?: (vessel: string) => string;
+  /** Tests only: `systemctl show -p LoadState` ("loaded", "masked", "not-found"). Absent in production, as above. */
+  unitLoadState?: (vessel: string) => string;
+  /** pull-sync's last-good pin for the vessel (<LAST_GOOD_DIR>/<vessel>, the same record scope-earn-in's runtimeSha
+   *  reads); null when none is recorded. */
+  lastGood: (vessel: string) => string | null;
   /** A tuning row's value (activity-api /v2/tuning-params/:name); null when absent or unreadable. */
   tuning: (name: string) => Promise<number | null>;
   /** The gap row, null when the store holds none; throws when the store cannot be read. */
@@ -1348,6 +1372,12 @@ async function readTuningRow(name: string): Promise<number | null> {
 const realAutoRevertDeps: AutoRevertDeps = {
   cutover: async (p) => (await import("../resolvers/vessel-mitosis-cutover.js")).resolveVesselMitosisCutover(p as never),
   unitStartedAt: systemdUnitStartedAt,
+  lastGood: (vessel) => {
+    try {
+      const v = readFileSync(join(process.env["LAST_GOOD_DIR"] ?? "/workspace/.last-good", vessel), "utf8").trim();
+      return /^[0-9a-f]{7,40}$/i.test(v) ? v : null;
+    } catch { return null; }
+  },
   tuning: readTuningRow,
   readGap: async (id) => {
     const r = (await resolveSubstrateGap({ type: "substrateGap", id, limit: 1 } as never)) as { shape?: string; body?: { gaps?: unknown } };
@@ -1371,6 +1401,8 @@ export function __setAutoRevertDepsForTests(d: Partial<AutoRevertDeps> | null): 
   for (const k of Object.keys(autoRevertCounts)) delete autoRevertCounts[k];
 }
 export function getAutoRevertCounters(): Record<string, number> { return { ...autoRevertCounts }; }
+/** Tests only: the served-here judgement the pending-land sweep makes before it closes a landing. */
+export const __landedCommitRunningHereForTests = (sha: string) => landedCommitRunningHere(sha);
 /** Tests only: the function the pending-land sweep's present branch calls (contained-self-development 8.4a). */
 export const __recordFalsifiedAutonomousLandingForTests = (g: Record<string, unknown>, meta: Record<string, unknown>, sha: string) => recordFalsifiedAutonomousLanding(g, meta, sha);
 

@@ -2244,11 +2244,22 @@ export function __setAdditiveAdvertisedForTests(f: ((shape: string) => Promise<b
  * mitosisRoot). Logged either way when it applies, so its effect is visible.
  */
 async function additiveRegistrationAdmits(args: GitCutoverArgs, excludedFiles: string[], allHitsMapped: boolean): Promise<{ admitted: boolean; why?: string }> {
-  const { REGISTRATION_FILES, additiveRegistration } = await import("../judge/gap-policy.js");
+  const { REGISTRATION_FILES, additiveRegistration, STAMP_ROUTE, STAMP_HELPER, additiveStampInsert } = await import("../judge/gap-policy.js");
   const reg = new Set(REGISTRATION_FILES.map((f) => `repos/${args.vessel_name}/${f}`));
-  if (!allHitsMapped || excludedFiles.length === 0 || !excludedFiles.every((f) => reg.has(f))) return { admitted: false };
+  const stamp = new Set([STAMP_ROUTE, STAMP_HELPER].map((f) => `repos/${args.vessel_name}/${f}`));
+  if (!allHitsMapped || excludedFiles.length === 0) return { admitted: false };
+  const isReg = excludedFiles.every((f) => reg.has(f)), isStamp = excludedFiles.every((f) => stamp.has(f));
+  if (!isReg && !isStamp) return { admitted: false };
   const read = async (root: string, rel: string): Promise<string | null> => { try { return (await pathExists(join(root, rel))) ? await readFile(join(root, rel), "utf8") : null; } catch { return null; } };
   const staged = await Promise.all(args.stagedFiles.map(async (f) => { const rel = f.replace(/^\.\//, ""); return { path: rel, before: await read(args.baseRoot, rel), after: await read(args.mitosisRoot, rel) }; }));
+  // THE OPERATOR-ACTS STAMP INSERT (gap-policy.ts additiveStampInsert): inserted lines inside the dispatch table's
+  // substrateGap_write arm, calling a stamp helper this landing creates. Tried when every excluded hit is the route or the helper.
+  if (!isReg || staged.some((f) => f.path === STAMP_HELPER)) {
+    const sv = additiveStampInsert(staged);
+    if (sv.ok) { console.log(`[cutover] ADDITIVE STAMP INSERT admitted on ${args.vessel_name}: ${sv.inserted} line(s) inside the substrateGap_write arm, new helper ${sv.helper}; every other excluded path still applies`); return { admitted: true }; }
+    console.log(`[cutover] additive stamp insert refused on ${args.vessel_name}: ${sv.why}`);
+    if (!isReg) return { admitted: false, why: sv.why };
+  }
   const advertised = additiveAdvertisedForTests ?? (async (shape: string): Promise<boolean | null> => {
     const { lookupShape } = await import("../config.js");
     const r = await lookupShape(shape);

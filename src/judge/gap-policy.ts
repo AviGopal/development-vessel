@@ -664,3 +664,133 @@ export async function additiveRegistration(staged: readonly StagedFile[], advert
   if (!new RegExp(`export\\s+(?:async\\s+)?(?:function\\s+${rc.fn}\\b|const\\s+${rc.fn}\\b)`).test(mod.after)) return { ok: false, why: `${modPath} does not export ${rc.fn}` };
   return { ok: true, shape, module: modPath, fn: rc.fn };
 }
+
+// ── THE OPERATOR-ACTS STAMP INSERT (user ruling 2026-10-14, "Scope earn-in, additive only"; extends the additive rule above).
+//
+// A substrateGap_write by a non-system principal must leave an operator_acts entry on the row, and the write's caller
+// credential exists only at the dispatch table's `case "substrateGap_write":` arm (the route attaches it to the pointer as
+// `_route_caller` before dispatch). That table is excluded. This rule admits exactly that repair, and nothing else:
+//   (1) src/routes/impulses.ts changes by ADDED lines only (0 removed, 0 modified);
+//   (2) every added line sits INSIDE the live `case "substrateGap_write":` arm: after its label, before the live line that
+//       opens the next arm; no added line is itself an arm label; an arm with no live next label cannot be bounded and fails
+//       closed;
+//   (3) the added lines import the stamp helper STAMP_HELPER, and this landing CREATES it (it did not exist before), so the
+//       admission is one-shot: once the helper exists, any further insert is refused like every other excluded change;
+//   (4) the helper is a PURE transform (user ruling 2026-10-14, "Yes, bound it"): its body holds no import or re-export and
+//       names none of process, fetch, Bun, globalThis, require or eval, so it runs inside the route with no reach of its own;
+//       (it also refuses the Function constructor and `constructor`, which build code from strings; the bound matches inside
+//       comments too, which fails closed: a drafter's comment must not name them either);
+//       and it never WRITES (qa review 2026-10-14): no assignment, compound assignment, ++/-- or delete on a member
+//       (a left side containing `.` or `[`); locals it declares may be assigned. It returns the acts;
+//   (5) the ARM's inserted lines only compute and attach the stamp (qa review 2026-10-14): no return, throw, if/else, ternary,
+//       loop, switch or delete; no let/var, ++/--, template literal; every import() targets the helper; every call is import()
+//       or a name the inserts import from the helper (so no second write and no other effect), and every helper call's
+//       one argument is a `structuredClone(...)`, so nothing the helper does can reach the live pointer; every assignment
+//       is a fresh `const`, targets a path ending in `operator_acts`, or is exactly `<path>.classification_metadata ??= {}`
+//       (ensure the object exists, never overwrite it); and none of the names the helper may not use. Whole-line `//`
+//       comments are ignored; everything else is checked as code;
+//   (6) the landing touches no other excluded path: the cutover applies this rule only when every scope hit is the route or
+//       the helper, so a judge, scope or registry file is refused exactly as before.
+export const STAMP_ROUTE = REG_ROUTES;
+export const STAMP_HELPER = "src/judge/operator-acts.ts";
+const STAMP_CASE = /^\s*case "substrateGap_write":/;
+const ARM_LABEL = /^\s*(?:case\s|default\s*:)/;
+const HELPER_IMPORT = /(?:from\s*|import\(\s*)"\.\.\/judge\/operator-acts\.js"/;
+const HELPER_IMPURE: Array<[RegExp, string]> = [
+  [/^\s*import\b/m, "an import statement"], [/\bimport\s*\(/, "a dynamic import"], [/^\s*export\s+(?:\*|\{[^}]*\})\s+from\b/m, "a re-export"],
+  [/\b(?:process|fetch|Bun|globalThis|require|eval|Function|constructor)\b/, "a reference to process, fetch, Bun, globalThis, require, eval, Function or constructor"],
+];
+const ARM_FORBIDDEN: Array<[RegExp, string]> = [
+  [/\b(?:return|throw|if|else|for|while|do|switch|delete|let|var|with|yield)\b/, "control flow, a delete or a mutable declaration"],
+  [/(?<!\?)\?(?![.?])/, "a ternary"], [/\+\+|--/, "an increment or decrement"], [/`/, "a template literal"],
+  [/\b(?:process|fetch|Bun|globalThis|require|eval|Function|constructor)\b/, "a reference to process, fetch, Bun, globalThis, require, eval, Function or constructor"],
+];
+const ARM_ENSURE_META = /^\s*[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*\.classification_metadata\s*\?\?=\s*\{\s*\}\s*$/;
+const ASSIGN_OP = /([^=!<>])((?:\?\?|\|\||&&|\*\*|<<|>>>?|[-+*/%&|^])?)=(?![=>])/g;
+
+/** Why the helper writes to a member (its argument or anything it reaches), or null when it only builds and returns values. */
+function helperMutation(src: string): string | null {
+  if (/\bdelete\b/.test(src)) return `${STAMP_HELPER} contains a delete; the helper returns the acts and never writes`;
+  if (/[\w$\])]\s*(?:\.[\w$]+|\[[^\]]*\])\s*(?:\+\+|--)|(?:\+\+|--)\s*[\w$]+\s*(?:\.[\w$]+|\[)/.test(src)) return `${STAMP_HELPER} increments or decrements a member; the helper never writes`;
+  for (const line of src.split("\n")) {
+    for (const m of line.matchAll(ASSIGN_OP)) {
+      const head = line.slice(0, (m.index ?? 0) + 1);
+      const cut = Math.max(head.lastIndexOf(";"), head.lastIndexOf("{"), head.lastIndexOf("}"), head.lastIndexOf("("), head.lastIndexOf(","));
+      const lhs = head.slice(cut + 1).trim();
+      if (/^(?:export\s+)?(?:const|let|var)\b/.test(lhs)) continue;
+      if (/[.[]/.test(lhs)) return `${STAMP_HELPER} assigns to a member (${lhs.slice(0, 80)}); the helper returns the acts and never writes`;
+    }
+  }
+  return null;
+}
+const ARM_HELPER_IMPORT = /^\s*const\s*\{\s*([A-Za-z_$][\w$]*(?:\s*,\s*[A-Za-z_$][\w$]*)*)\s*\}\s*=\s*await\s+import\(\s*"\.\.\/judge\/operator-acts\.js"\s*\)\s*;?\s*$/;
+
+/** Why the arm's inserted lines do more than compute and attach the stamp, or null when they do not. */
+function stampArmContent(lines: readonly string[]): string | null {
+  const code = lines.filter((l) => !/^\s*\/\//.test(l));
+  const helperNames = new Set<string>();
+  for (const l of code) { const m = ARM_HELPER_IMPORT.exec(l); if (m) for (const n of m[1]!.split(",")) helperNames.add(n.trim()); }
+  for (const l of code) {
+    for (const [re, what] of ARM_FORBIDDEN) if (re.test(l)) return `${STAMP_ROUTE}: an inserted arm line contains ${what}: ${l.trim().slice(0, 120)}`;
+    for (const m of l.matchAll(/\bimport\s*\(\s*([^)]*)\)/g)) if (m[1]!.trim() !== '"../judge/operator-acts.js"') return `${STAMP_ROUTE}: an inserted arm line imports something other than ../judge/operator-acts.js: ${l.trim().slice(0, 120)}`;
+    for (const m of l.matchAll(/([A-Za-z_$][\w$]*)\s*\(/g)) {
+      if (m[1] === "import" || m[1] === "structuredClone") continue;
+      if (!helperNames.has(m[1]!)) return `${STAMP_ROUTE}: an inserted arm line calls ${m[1]}, which is not imported from the helper: ${l.trim().slice(0, 120)}`;
+      if (!/^\s*structuredClone\(/.test(l.slice((m.index ?? 0) + m[0].length))) return `${STAMP_ROUTE}: the helper ${m[1]} must be called with one structuredClone(...) argument, so it cannot reach the live pointer: ${l.trim().slice(0, 120)}`;
+    }
+    for (const st of l.split(";")) {
+      if (ARM_ENSURE_META.test(st)) continue;
+      const a = /^(.*?[^=!<>])=(?![=>])/.exec(st);
+      if (!a) continue;
+      const lhs = a[1]!.trim();
+      if (/^const\b/.test(lhs)) continue;
+      if (!/(?:\.operator_acts|\["operator_acts"\])$/.test(lhs)) return `${STAMP_ROUTE}: an inserted arm line assigns to ${lhs.slice(0, 80)}; only a fresh const or a path ending in operator_acts may be assigned`;
+    }
+  }
+  return null;
+}
+export type StampVerdict = { ok: true; inserted: number; helper: string } | { ok: false; why: string };
+
+/** Why the inserted lines are not all inside the live substrateGap_write arm, or null when they are. */
+function stampOutsideArm(after: string, blocks: Array<{ at: number; lines: string[] }>): string | null {
+  const a = after.split("\n");
+  const added = new Set(blocks.flatMap((b) => b.lines.map((_, i) => b.at + i)));
+  const starts = a.flatMap((l, i) => (!added.has(i) && STAMP_CASE.test(l) ? [i] : []));
+  if (starts.length !== 1) return `${STAMP_ROUTE}: expected exactly one live case "substrateGap_write": arm, found ${starts.length}`;
+  const s = starts[0]!;
+  let e = -1;
+  for (let j = s + 1; j < a.length; j++) if (!added.has(j) && ARM_LABEL.test(a[j]!)) { e = j; break; }
+  if (e < 0) return `${STAMP_ROUTE}: the case "substrateGap_write": arm has no live next arm label, so its end cannot be bounded: failing closed`;
+  for (const j of added) {
+    if (j <= s || j >= e) return `${STAMP_ROUTE}: inserted line ${j + 1} is outside the case "substrateGap_write": arm (lines ${s + 2}-${e})`;
+    if (ARM_LABEL.test(a[j]!)) return `${STAMP_ROUTE}: inserted line ${j + 1} is an arm label; the insert may not add a case`;
+  }
+  return null;
+}
+
+/** Whether a landing's change to the dispatch table is a pure insert into the substrateGap_write arm calling a new stamp helper. Pure. */
+export function additiveStampInsert(staged: readonly StagedFile[]): StampVerdict {
+  const by = new Map(staged.map((f) => [f.path.replace(/^\.\//, ""), f]));
+  const rt = by.get(STAMP_ROUTE), helper = by.get(STAMP_HELPER);
+  if (!rt) return { ok: false, why: `the stamp insert extends ${STAMP_ROUTE}; this landing does not touch it` };
+  if (rt.before === null || rt.after === null) return { ok: false, why: `${STAMP_ROUTE} is created or deleted, not extended` };
+  if (!helper || helper.after === null) return { ok: false, why: `the stamp insert calls ${STAMP_HELPER}, which this landing does not create` };
+  if (helper.before !== null) return { ok: false, why: `${STAMP_HELPER} already exists: the stamp insert is admitted once, with the helper's creation` };
+  for (const [re, what] of HELPER_IMPURE) if (re.test(helper.after)) return { ok: false, why: `${STAMP_HELPER} is not a pure transform: it contains ${what}` };
+  const mutation = helperMutation(helper.after);
+  if (mutation) return { ok: false, why: mutation };
+  let why = "";
+  for (const latest of [false, true]) {
+    const blocks = insertedBlocks(rt.before, rt.after, latest);
+    if (!blocks) return { ok: false, why: `${STAMP_ROUTE}: a live line was removed or modified (only added lines may be inserted)` };
+    if (blocks.length === 0) return { ok: false, why: `${STAMP_ROUTE}: no line was added` };
+    const outside = stampOutsideArm(rt.after, blocks);
+    if (outside) { why = outside; continue; }
+    const lines = blocks.flatMap((b) => b.lines);
+    const content = stampArmContent(lines);
+    if (content) return { ok: false, why: content };
+    if (!lines.some((l) => HELPER_IMPORT.test(l))) { why = `${STAMP_ROUTE}: the inserted lines do not import ../judge/operator-acts.js`; continue; }
+    return { ok: true, inserted: lines.length, helper: STAMP_HELPER };
+  }
+  return { ok: false, why };
+}

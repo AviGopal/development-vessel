@@ -538,6 +538,103 @@ describe("additive registration rule (the classifier): exactly one new shape, ad
   });
 });
 
+// THE OPERATOR-ACTS STAMP INSERT (user ruling 10-14, "Scope earn-in, additive only"; src/judge/gap-policy.ts additiveStampInsert).
+// The dispatch table stays excluded except for inserted lines inside its substrateGap_write arm that import a PURE stamp
+// helper created in the same landing (a one-shot admission). Children inherit stamps at read time, so no judge file is admitted.
+const SG_READ_ARM = `    case "substrateGap":\n      return resolveSubstrateGap(p as any);\n`;
+const STAMP_ROUTES = `import { resolveSubstrateGap, resolveSubstrateGapWrite, resolveSubstrateGapLease } from "../resolvers/substrate-gap.js";\nexport async function dispatchInner(p: any): Promise<unknown> {\n  switch (p.type) {\n${SG_READ_ARM}    case "substrateGap_write":\n      return resolveSubstrateGapWrite(p as any);\n    case "substrateGapLease_write":\n      return resolveSubstrateGapLease(p as any);\n    default:\n      throw new Error("Unknown pointer type");\n  }\n}\n`;
+const STAMP_IMPORT = `      const { operatorActsFor } = await import("../judge/operator-acts.js");\n      // the stamp: who wrote, what changed, when\n      p.gap.classification_metadata ??= {};\n      const acts = operatorActsFor(structuredClone(p));\n      p.gap.classification_metadata.operator_acts = acts;\n`;
+const WRITE_LABEL = `    case "substrateGap_write":\n`;
+const stamped = (insert = STAMP_IMPORT) => STAMP_ROUTES.replace(WRITE_LABEL, WRITE_LABEL + insert);
+const PURE_HELPER = `export function operatorActsFor(p: any): unknown[] {\n  const c = p?._route_caller;\n  const had = p?.gap?.classification_metadata?.operator_acts;\n  const prior = Array.isArray(had) ? had : [];\n  if (!c || c.node_self) return prior;\n  let principal = String(c.key_id ?? c.auth ?? "?");\n  principal = principal.slice(0, 64);\n  return [...prior, { principal, at: new Date().toISOString() }];\n}\n`;
+const stampLanding = (over: Partial<Record<string, Change>> = {}): Change[] => Object.values({
+  "src/routes/impulses.ts": { path: "src/routes/impulses.ts", before: STAMP_ROUTES, after: stamped() },
+  "src/judge/operator-acts.ts": { path: "src/judge/operator-acts.ts", before: null, after: PURE_HELPER },
+  ...over,
+}).filter((c): c is Change => !!c);
+const routeOver = (after: string): Partial<Record<string, Change>> => ({ "src/routes/impulses.ts": { path: "src/routes/impulses.ts", before: STAMP_ROUTES, after } });
+const helperOver = (after: string, before: string | null = null): Partial<Record<string, Change>> => ({ "src/judge/operator-acts.ts": { path: "src/judge/operator-acts.ts", before, after } });
+
+describe("operator-acts stamp insert (the classifier): inserted lines inside the substrateGap_write arm, a new pure helper", () => {
+  it("MUST-FAIL (4) control: inserts inside the arm plus a new pure helper are admitted (a pure transform of its argument)", () => {
+    expect(ar.additiveStampInsert(stampLanding())).toEqual({ ok: true, inserted: 5, helper: "src/judge/operator-acts.ts" });
+    // inserts after the arm's return, still before the next live arm, are inside the arm too
+    expect(ar.additiveStampInsert(stampLanding(routeOver(STAMP_ROUTES.replace(`      return resolveSubstrateGapWrite(p as any);\n`, `      return resolveSubstrateGapWrite(p as any);\n${STAMP_IMPORT}`)))).ok).toBe(true);
+  });
+  const mf: Array<[string, Partial<Record<string, Change>>, RegExp]> = [
+    ["(1) a change to an existing line of the dispatch table", routeOver(stamped().replace("return resolveSubstrateGapWrite(p as any)", "return resolveSubstrateGapWrite({ ...p } as any)")), /removed or modified/],
+    ["(2) a removed line", routeOver(stamped().replace(`      throw new Error("Unknown pointer type");\n`, "")), /removed or modified/],
+    ["(3) an insertion in another arm", routeOver(STAMP_ROUTES.replace(SG_READ_ARM, SG_READ_ARM.replace("    case \"substrateGap\":\n", "    case \"substrateGap\":\n" + STAMP_IMPORT))), /outside the case "substrateGap_write": arm/],
+    ["(3) an insertion after the next arm's label", routeOver(STAMP_ROUTES.replace(`    case "substrateGapLease_write":\n`, `    case "substrateGapLease_write":\n${STAMP_IMPORT}`)), /outside the case "substrateGap_write": arm/],
+    ["(3) an insertion at the top of the file", routeOver(`import { stampOperatorActs } from "../judge/operator-acts.js";\n` + STAMP_ROUTES), /outside the case "substrateGap_write": arm/],
+    ["(3) an inserted arm label inside the arm", routeOver(stamped(`    case "substrateGapAlias_write":\n` + STAMP_IMPORT)), /arm label/],
+    ["inserts that do not import the helper", routeOver(stamped(`      const unused = 1;\n`)), /do not import/],
+    ["a helper that already exists (the admission is one-shot)", helperOver(PURE_HELPER, "export function stampOperatorActs(p: any): any { return p; }\n"), /already exists/],
+    ["a landing that does not create the helper", { "src/judge/operator-acts.ts": undefined }, /does not create/],
+    ["an arm whose end cannot be bounded", { "src/routes/impulses.ts": { path: "src/routes/impulses.ts", before: `switch (p.type) {\n    case "substrateGap_write":\n      return w(p);\n}\n`, after: `switch (p.type) {\n    case "substrateGap_write":\n${STAMP_IMPORT}      return w(p);\n}\n` } }, /cannot be bounded/],
+    ["a helper with an import statement", helperOver(`import { x } from "node:fs";\n` + PURE_HELPER), /not a pure transform: it contains an import statement/],
+    ["a helper with a dynamic import", helperOver(PURE_HELPER.replace("const c = p?._route_caller;", "const c = p?._route_caller; void import(\"node:fs\");")), /dynamic import/],
+    ["a helper with a re-export", helperOver(`export * from "../resolvers/substrate-gap.js";\n` + PURE_HELPER), /re-export/],
+  ];
+  for (const name of ["process", "fetch", "Bun", "globalThis", "require", "eval", "Function", "constructor"]) mf.push([`a helper naming ${name}`, helperOver(PURE_HELPER.replace("const c = p?._route_caller;", `const c = p?._route_caller; void ${name};`)), /not a pure transform/]);
+  // (A) the ARM's inserted lines only compute and attach the stamp (qa review): each escape is refused
+  const armMf: Array<[string, string, RegExp]> = [
+    ["an early return", `      return { shape: "substrateGap", body: { gaps: [] } };\n`, /control flow/],
+    ["a throw", `      throw new Error("no");\n`, /control flow/],
+    ["an if", `      if (p.gap) p.gap.status = "closed";\n`, /control flow/],
+    ["a ternary", `      const s = p.gap ? 1 : 2;\n`, /ternary/],
+    ["a loop", `      for (const k of []) void k;\n`, /control flow/],
+    ["a delete", `      delete p.gap.status;\n`, /control flow/],
+    ["a status assignment", `      p.gap.status = "closed";\n`, /assigns to p\.gap\.status/],
+    ["a reassignment of the pointer", `      p = { ...p };\n`, /assigns to p;/],
+    ["a let", `      let n = 1;\n`, /mutable declaration/],
+    ["an increment", `      const n = [0]; n[0]++;\n`, /increment/],
+    ["a foreign import", `      const { additiveRegistration } = await import("../judge/gap-policy.js");\n`, /imports something other than/],
+    ["a fetch", `      const r = await fetch("http://127.0.0.1:1/");\n`, /fetch/],
+    ["a second write (a call to an in-scope function)", `      const w = await resolveSubstrateGapWrite(p as any);\n`, /calls resolveSubstrateGapWrite/],
+    ["a method call", `      const k = Object.keys(p);\n`, /calls keys/],
+    ["process.env", `      const e = process.env;\n`, /process/],
+    ["the Function constructor", `      const f = Function("ret" + "urn 1");\n`, /Function/],
+    ["constructor access", `      const f = p.constructor;\n`, /constructor/],
+    ["a template literal", "      const t = `x`;\n", /template literal/],
+    ["an ensure that is not empty", `      p.gap.classification_metadata ??= { status: "closed" };\n`, /assigns to p\.gap\.classification_metadata/],
+    ["an overwrite of classification_metadata", `      p.gap.classification_metadata = {};\n`, /assigns to p\.gap\.classification_metadata/],
+    ["a ??= on another field", `      p.gap.status ??= "closed";\n`, /assigns to p\.gap\.status/],
+    ["a helper call on the live pointer", `      const live = operatorActsFor(p);\n`, /structuredClone/],
+  ];
+  it("MUST-FAIL (A) control: the arm's ensure `<path>.classification_metadata ??= {}` is admitted, and `??` / `?.` are not ternaries", () => {
+    expect(ar.additiveStampInsert(stampLanding(routeOver(stamped(STAMP_IMPORT + `      const k = p?.gap ?? null;\n`)))).ok).toBe(true);
+  });
+  it("CONTROL (regression guard): the stamp wrapped best-effort in try { } catch { /* … */ } is admitted (try/catch are not forbidden; the catch body is bounded like any line)", () => {
+    const wrapped = `      try {\n${STAMP_IMPORT}      } catch { /* stamp is best-effort */ }\n`;
+    expect(ar.additiveStampInsert(stampLanding(routeOver(stamped(wrapped)))).ok).toBe(true);
+    const badCatch = `      try {\n${STAMP_IMPORT}      } catch {\n        p.gap.status = "closed";\n      }\n`;
+    expect(ar.additiveStampInsert(stampLanding(routeOver(stamped(badCatch))))).toMatchObject({ ok: false, why: expect.stringMatching(/assigns to p\.gap\.status/) });
+  });
+  const helperMf: Array<[string, string, RegExp]> = [
+    ["assigns a member of its argument", `export function operatorActsFor(p: any): unknown[] {\n  p.gap.status = "closed";\n  return [];\n}\n`, /assigns to a member \(p\.gap\.status\)/],
+    ["??= on a member", `export function operatorActsFor(arg: any): unknown[] {\n  arg.x ??= 1;\n  return [];\n}\n`, /assigns to a member \(arg\.x/],
+    ["a computed member assignment", `export function operatorActsFor(arg: any): unknown[] {\n  const k = "status";\n  arg.gap[k] = "closed";\n  return [];\n}\n`, /assigns to a member/],
+    ["a delete", `export function operatorActsFor(arg: any): unknown[] {\n  delete arg.y;\n  return [];\n}\n`, /delete/],
+    ["a member increment", `export function operatorActsFor(arg: any): unknown[] {\n  arg.n++;\n  return [];\n}\n`, /increments or decrements a member/],
+  ];
+  for (const [label, body, why] of helperMf) it(`MUST-FAIL (helper never writes): a helper that ${label} is refused`, () => {
+    const v = ar.additiveStampInsert(stampLanding(helperOver(body)));
+    expect(v.ok).toBe(false);
+    expect(String(v.why)).toMatch(why);
+  });
+  for (const [label, line, why] of armMf) it(`MUST-FAIL (A): an arm insert with ${label} is refused`, () => {
+    const v = ar.additiveStampInsert(stampLanding(routeOver(stamped(STAMP_IMPORT + line))));
+    expect(v.ok).toBe(false);
+    expect(String(v.why)).toMatch(why);
+  });
+  for (const [label, over, why] of mf) it(`MUST-FAIL: ${label} is refused`, () => {
+    const v = ar.additiveStampInsert(stampLanding(over));
+    expect(v.ok).toBe(false);
+    expect(String(v.why)).toMatch(why);
+  });
+});
+
 describe("additive registration rule at the landing chokepoint (the real cutover)", () => {
   async function setupReg(changes: Change[], gap: string) {
     const vessel = "development-vessel";
@@ -611,5 +708,27 @@ describe("additive registration rule at the landing chokepoint (the real cutover
     const { s, r } = await run(registration(), "gap-additive-advertised", async () => true);
     await expectScopeRefused(s as never, r, "autonomy_scope_excluded", [{ entry: "repos/development-vessel/src/config.ts", file: "repos/development-vessel/src/config.ts" }]);
     expect(String(bodyOf(r)["additive_registration"] ?? "")).toMatch(/already advertised/);
+  });
+
+  // THE OPERATOR-ACTS STAMP INSERT at the chokepoint (gap-policy.ts additiveStampInsert; user ruling 10-14).
+  it("CONTROL: inserted lines inside the substrateGap_write arm plus a new pure stamp helper LAND, and say so", async () => {
+    const { s, r } = await run(stampLanding(), "gap-stamp-ok");
+    expect({ shape: r.shape, refusal_reason: String(bodyOf(r)["refusal_reason"] ?? "") }).toEqual({ shape: "cutoverApplied", refusal_reason: "" });
+    expect(logs.some((x) => x.includes("ADDITIVE STAMP INSERT admitted"))).toBe(true);
+  });
+  it("MUST-FAIL (3): an insertion outside the substrateGap_write arm is refused at the chokepoint, naming why", async () => {
+    const { s, r } = await run(stampLanding({ "src/routes/impulses.ts": { path: "src/routes/impulses.ts", before: STAMP_ROUTES, after: STAMP_ROUTES.replace(SG_READ_ARM, SG_READ_ARM + STAMP_IMPORT) } }), "gap-stamp-outside");
+    await expectScopeRefused(s as never, r, "autonomy_scope_excluded", [{ entry: "repos/development-vessel/src/routes/impulses.ts", file: "repos/development-vessel/src/routes/impulses.ts" }, { entry: "repos/development-vessel/src/judge/", file: "repos/development-vessel/src/judge/operator-acts.ts" }]);
+    expect(String(bodyOf(r)["additive_registration"] ?? "")).toMatch(/outside the case "substrateGap_write": arm/);
+  });
+  it("MUST-FAIL (5): a valid stamp insert PLUS an added line in another protected file is refused (every other path stays excluded)", async () => {
+    const { s, r } = await run([...stampLanding(), { path: EXCLUDED_DV, before: "// original\n", after: "// original\n// added\n" }], "gap-stamp-other-protected");
+    await expectScopeRefused(s as never, r, "autonomy_scope_excluded", [{ entry: SCOPE_BODY.excluded_paths[0]!, file: `repos/development-vessel/${EXCLUDED_DV}` }]);
+    expect(logs.some((x) => x.includes("ADDITIVE STAMP INSERT admitted"))).toBe(false);
+  });
+  it("MUST-FAIL (5): a valid stamp insert PLUS an added line in a judge file (a grader) is refused", async () => {
+    const { s, r } = await run([...stampLanding(), { path: "src/judge/gap-admission.ts", before: "export const a = 1;\n", after: "export const a = 1;\nexport const b = 2;\n" }], "gap-stamp-judge");
+    await expectScopeRefused(s as never, r, "autonomy_scope_excluded", [{ entry: "repos/development-vessel/src/judge/", file: "repos/development-vessel/src/judge/gap-admission.ts" }]);
+    expect(logs.some((x) => x.includes("ADDITIVE STAMP INSERT admitted"))).toBe(false);
   });
 });

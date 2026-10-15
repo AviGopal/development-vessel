@@ -262,6 +262,10 @@ export async function resolveLlmCompletionDispatch(
     // name (llm-model-selection observability seam).
     model?: string;
     fallback_from?: string;
+    // Tools the llm-resolver EXECUTED server-side in its own tool loop
+    // ({iteration, tool_name, tool_input, tool_output | {error}, duration_ms}).
+    // Distinct from content-level tool_calls, which are calls the CALLER must run.
+    tool_calls?: unknown[];
     // Legacy / alternate field names from older vessels
     success?: boolean;
     data?: string;
@@ -515,6 +519,10 @@ export async function resolveLlmCompletionDispatch(
       requested_model: model,
       ...(result.fallback_from ? { fallback_from: result.fallback_from } : {  }),
       usage: result.usage,
+      // Pass the resolver's server-side tool executions through: without them a
+      // caller (the goal-host ReAct floor) sees a grounded, tool-using answer as
+      // a zero-tool completion. Omitted when the resolver sends no tool_calls array.
+      ...(Array.isArray(result.tool_calls) ? { executed_tool_calls: result.tool_calls } : {}),
     },
   };
 

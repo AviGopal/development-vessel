@@ -2039,6 +2039,20 @@ async function resolveGapToFeatureOnce(pointer: GapToFeaturePointer, attempt: { 
     for (const g of gaps) { const id = String(g.id ?? ""); if (id) gapsById.set(id, g); }
     // One live gap per (lineage, check): read over the whole open set, so a holder cooling down still holds.
     const predicateHolds = pointer.gap_id ? new Map<string, string>() : inheritedPredicateHolds(gaps);
+    // A HOLDER THE LINEAGE CAP EXCLUDES HOLDS NOTHING. The hold's own invariant is "a child that cannot work holds
+    // nothing, so the hold can never park a whole lineage", but its holder test does not see the lineage cap below:
+    // the holder it prefers (fewest OWN attempts) is the newest recommit, the one the cap (LINEAGE attempts) excludes
+    // first, so the lineage was parked behind a holder that can never be picked (measured 2026-10-15: four lineages,
+    // one picked 8 times before and 0 after). Released here, at the one site that knows both rules.
+    const capReleased: string[] = [];
+    for (const [held, holder] of predicateHolds) {
+      const h = gapsById.get(holder);
+      if (h && holder.startsWith("recommit-") && lineageBackoffState(h, gapsById).attempts >= RECOMMIT_LINEAGE_ATTEMPT_CAP) {
+        predicateHolds.delete(held);
+        capReleased.push(`${held} (holder ${holder})`);
+      }
+    }
+    if (capReleased.length > 0) console.log(`[gap-to-feature] predicate hold released for ${capReleased.length} gap(s): the holder is past the lineage cap and can never be picked: ${capReleased.slice(0, 5).join("; ")}`);
     const heldLines: string[] = [];
     const inFlightLines: string[] = [];
     const crossNodeLines: string[] = [];

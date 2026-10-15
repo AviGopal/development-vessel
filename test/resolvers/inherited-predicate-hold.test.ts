@@ -104,4 +104,26 @@ describe("auto-pick reads the hold before admission (wiring)", () => {
     expect(hold).toContain(`${pid}: predicate held by ${pid}-narrowed`);
     expect(hold).not.toContain(`${pid}-narrowed: predicate held`);
   });
+  it("[MUST-FAIL] a holder past the recommit lineage cap holds nothing: its lineage is released, not parked", async () => {
+    const run = Math.random().toString(36).slice(2, 8);
+    const pid = `phc-${run}`;
+    const child = `recommit-${pid}-verify_failed`;
+    const write = async (id: string, meta: Record<string, unknown>) => {
+      const w = await sg.resolveSubstrateGapWrite({ type: "substrateGap_write", gap: { id, category: "systematic_failure", source: "operator", status: "open", detected_at: new Date().toISOString(), summary: `hold fixture ${id}`, classification_metadata: { edit_site: SITE, evidence_resolve: ER, ...meta } } } as never);
+      if (w.shape === "structuredError") throw new Error(JSON.stringify(w.body));
+    };
+    await write(pid, {});
+    await write(child, { source_gap_id: pid, predicate_source: "gap_falsify:inherit", failed_attempts: 6 });
+    await sg.__settleBirthEvaluationsForTests();
+    process.env["MITOSIS_DIRECT_PUSH"] = "0";
+    const lines: string[] = [];
+    const orig = console.log;
+    console.log = (...a: unknown[]) => { lines.push(a.map(String).join(" ")); };
+    try { await g2f.resolveGapToFeature({ type: "gapToFeature" } as never); } finally { console.log = orig; }
+    const held = lines.filter((l) => l.includes("predicate hold excluded")).join("\n");
+    expect(held).not.toContain(`${pid}: predicate held by ${child}`);
+    const released = lines.find((l) => l.includes("predicate hold released"));
+    expect(released).toBeDefined();
+    expect(released).toContain(`${pid} (holder ${child})`);
+  });
 });

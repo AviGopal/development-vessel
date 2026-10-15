@@ -408,8 +408,43 @@ export async function stampEnvironmentBaseline(
       `shape: 'environmentBaseline', org_id: 'organizations:substrate', ` +
       `pointer: ${JSON.stringify(pointer)}, created_at: time::now(), budget: 0 };`,
   );
-  if (!res) console.warn(`[causal-adjudication] env-baseline failed for ${gapId}: insert refused (${lastSurrealError || "no response"})`);
-  return res ? "stamped" : "failed";
+  if (res) {
+    return "stamped";
+  }
+
+  // The direct write failed. This is expected on a spoke where the learning store is not
+  // locally writable. Fall back to a routed write via poolImpulse, which this vessel serves.
+  const dbCause = lastSurrealError || "no response";
+  const id = `environmentBaseline:${actionId}`;
+  try {
+    const { resolvePoolImpulse, resolvePoolImpulseWrite } = await import("./pool-impulse.js");
+
+    // The initial duplicate check at the top of the function only checked the local surreal
+    // DB. Before queueing a write, check the in-memory pool to avoid duplicate-stamping
+    // from multiple concurrent calls that all see their direct write fail.
+    if (resolvePoolImpulse({ type: "poolImpulse", id, status: "open" }).body.count > 0) {
+      return "already_stamped";
+    }
+
+    const w = (deps?.routedWrite ?? ((p) => resolvePoolImpulseWrite(p).body))({
+      type: "poolImpulse_write",
+      id,
+      shape: "environmentBaseline",
+      source: "causal-adjudication",
+      status: "open",
+      // Pass along the full pointer; we successfully built it, unlike the read-failure case.
+      body: { ...pointer, routed_via: "poolImpulse" },
+    });
+    if (w.ok) {
+      return "stamped";
+    }
+
+    console.warn(`[causal-adjudication] env-baseline failed for ${gapId}: direct write refused (${dbCause}); routed poolImpulse write failed (${w.error ?? "no reason given"})`);
+  } catch (err) {
+    const importError = err instanceof Error ? err.message : String(err);
+    console.warn(`[causal-adjudication] env-baseline failed for ${gapId}: direct write refused (${dbCause}); routed write failed because of import error: ${importError}`);
+  }
+  return "failed";
 }
 
 /**

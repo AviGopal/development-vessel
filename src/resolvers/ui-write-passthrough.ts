@@ -161,7 +161,9 @@ export async function resolveUiWritePassthrough(
   let lastError = "";
   // A routed target gets a second try 5 s later to ride out a restart's drain window; unrouted
   // delivery keeps one try per target and falls through as before.
-  const attempts = targets.flatMap((url) => (routed ? [url, url] : [url]));
+  const pinnedUrl = `${STATEFUL_UI_ENDPOINT}/resolve`;
+  const ordered = targets.some((t) => t !== pinnedUrl) ? targets.filter((t) => t !== pinnedUrl) : targets;
+  const attempts = ordered.flatMap((url) => (routed ? [url, url] : [url]));
   for (let i = 0; i < attempts.length; i++) {
     const url = attempts[i]!;
     if (routed && i > 0) await new Promise((r) => setTimeout(r, 5_000));

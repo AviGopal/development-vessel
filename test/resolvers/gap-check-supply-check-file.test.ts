@@ -14,6 +14,7 @@
 // resolveTestSuite) whose shell call runs the resolver's real command with the bun on PATH against a temp clone. So
 // "the check is measured" means P0's ./<path> run actually executed the .check.ts.
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
+import { createHash } from "node:crypto";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -205,6 +206,25 @@ describe("B′ P3: the arm step measures the landed .check.ts through P0 and jud
     expect(run!.body).toMatchObject({ ran: true, requested_not_passing: 1 });
     expect(Number(run!.body["requested_not_passing"])).toBeGreaterThanOrEqual(1);
     expect(((run!.body["red_reason"] as Row).failures as Row[])[0]).toMatchObject({ name: title, cls: "assertion" });
+  });
+
+  it("[MUST-FAIL] the control split is the rhythm's control_fraction, default 0: a historical control-arm gap now gets a goal", async () => {
+    let id = "";
+    for (let i = 0; i < 1000 && !id; i++) { const c = `p3-lift-${RUN}-${i}`; if (supply.checkSupplyArm(c) === "control") id = c; }
+    await seed(id);
+    await tick(later());
+    expect(goalFor(id).length).toBe(1);
+    expect(metaOf(await storeRow(id))["gap_check_supply_arm"]).toBe("treatment");
+  });
+
+  it("[CONTROL] control_fraction 0.5 reproduces the historical parity arms exactly, and 0 / 1 put every gap in one arm", () => {
+    for (let i = 0; i < 300; i++) {
+      const id = `arm-${RUN}-${i}`;
+      const parity = (createHash("sha256").update(id).digest()[0]! & 1) === 0 ? "treatment" : "control";
+      expect(supply.checkSupplyArm(id, 0.5)).toBe(parity);
+      expect(supply.checkSupplyArm(id, 0)).toBe("treatment");
+      expect(supply.checkSupplyArm(id, 1)).toBe("control");
+    }
   });
 
   it("[MUST-FAIL] a check GREEN at HEAD is remembered, and the next attempt's goal names it and asks for a different one", async () => {

@@ -549,7 +549,8 @@ describe("system-authored gap checks: (f) a control arm for causal measurement",
     expect(supply!.checkSupplyArm(id)).toBe("control");
     expect(supply!.checkSupplyArm(id)).toBe(supply!.checkSupplyArm(String(id)));
     await seed(id, `control fixture ${RUN}: local-tools-vessel containShell lets env git through`, {});
-    rhythms = [dueRhythm({ max_per_tick: 50 })];
+    // The split is the supply rhythm's shaped control_fraction (default 0, no control arm); this fixture states the half it measures.
+    rhythms = [dueRhythm({ max_per_tick: 50, control_fraction: 0.5 })];
     const body = await tick({ now_ms: Date.now() + 4000 * 3600_000 });
     expect(goals.filter((g) => g.variables?.["gap_id"] === id).length).toBe(0);
     const m = metaOf(await storeRow(id));

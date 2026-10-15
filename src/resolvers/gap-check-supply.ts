@@ -183,10 +183,20 @@ export function checkSupplyTestFile(gapId: string): string {
   return checkSupplyCheckPath(gapId);
 }
 
-/** A gap's experiment arm, stable for its id: hash parity. Control-arm gaps are classified but get no goal, so the
- *  supply's effect on arming and closure can be measured against gaps it did not touch (law 12). */
-export function checkSupplyArm(gapId: string): "treatment" | "control" {
-  return (createHash("sha256").update(gapId).digest()[0]! & 1) === 0 ? "treatment" : "control";
+/** The split the control arm was born with: half of all gaps, by hash parity. */
+export const HISTORICAL_CONTROL_FRACTION = 0.5;
+/** A gap's experiment arm, stable for its id. Control-arm gaps are classified but get no goal, so the supply's effect
+ *  on arming and closure can be measured against gaps it did not touch (law 12).
+ *
+ *  THE SPLIT IS SHAPED. It was a fixed half, an indefinite hold over about 41% of the system's own detections with no
+ *  end date or review (user ruling 2026-10-14: lift it after the capacity window, the fraction moving into the supply
+ *  rhythm's record with a default of 0, so the system can set it). The tick passes the record's control_fraction. The
+ *  id's position is a stable value in [0,1) built so that at exactly 0.5 the arms are the historical parity arms (the
+ *  earlier measurement stays comparable); 0 puts every gap in treatment, 1 every gap in control. */
+export function checkSupplyArm(gapId: string, controlFraction: number = HISTORICAL_CONTROL_FRACTION): "treatment" | "control" {
+  const b = createHash("sha256").update(gapId).digest()[0]!;
+  const position = ((((b & 1) ^ 1) * 128) + (b >> 1)) / 256; // parity 1 (the historical control) falls in [0, 0.5)
+  return position < controlFraction ? "control" : "treatment";
 }
 
 const symptomOf = (summary: string): string => summary
@@ -546,6 +556,9 @@ export async function resolveGapCheckSupplyTick(pointer: GapCheckSupplyTickPoint
   const perTick = Math.floor(posNum(rhythm.body["max_per_tick"], 1));
   const backoffMs = posNum(rhythm.body["backoff_hours"], 24) * 3600_000;
   const maxAttempts = Math.floor(posNum(rhythm.body["max_attempts"], 3));
+  // The control split, read from the same shaped record; absent or unusable means no control arm.
+  const cf = Number(rhythm.body["control_fraction"]);
+  const controlFraction = Number.isFinite(cf) && cf >= 0 && cf <= 1 ? cf : 0;
   const windowMs = posNum(rhythm.body["measure_window_days"], 7) * 86_400_000;
   const bounds: OutcomeBounds = {
     stale_ms: posNum(rhythm.body["dispatch_stale_hours"], 24) * 3600_000,
@@ -742,7 +755,7 @@ export async function resolveGapCheckSupplyTick(pointer: GapCheckSupplyTickPoint
     const meta = metaOf(row);
     const ledger = ledgerOf(meta);
     const holdable = !nonEmpty(meta["disposition"]) || meta["disposition"] === CHECK_SUPPLY_DISPOSITION;
-    if (checkSupplyArm(id) === "control") {
+    if (checkSupplyArm(id, controlFraction) === "control") {
       // CONTROL ARM: classified and recorded, never sent a goal.
       if (meta["gap_check_supply_arm"] === "control" || controlMarked.length >= perTick) continue;
       controlMarked.push(id);

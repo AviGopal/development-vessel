@@ -107,12 +107,19 @@ type Ledger = {
   outcome?: Row;
   /** The settled attempts before the current one (state, reason, outcome), newest last, at most five. */
   history?: Row[];
+  /** The new titles the arm step judged on the last attempt (kept so the next attempt can be told which check did not reproduce). */
+  judged_titles?: string[];
 };
+// A CHECK THAT WAS JUDGED AND NOT ARMED IS A SETTLED ATTEMPT TOO. Only failed and lost dispatches were kept, so a check
+// that landed green at HEAD (or red for the wrong reason) left no trace and the next attempt was sent the same goal text.
+const JUDGED_NOT_ARMED: ReadonlySet<string> = new Set(["green_at_head", "arm_refused", "existence_only"]);
 const settledHistory = (l: Ledger): Row[] => {
   const prior = Array.isArray(l.history) ? l.history.slice(-4) : [];
-  return l.state === "dispatch_failed" || l.state === "dispatch_lost"
-    ? [...prior, { attempt: Number(l.attempts ?? 0), state: l.state, reason: l.reason ?? "", outcome: l.outcome ?? {} }]
-    : prior;
+  if (l.state === "dispatch_failed" || l.state === "dispatch_lost")
+    return [...prior, { attempt: Number(l.attempts ?? 0), state: l.state, reason: l.reason ?? "", outcome: l.outcome ?? {} }];
+  if (JUDGED_NOT_ARMED.has(String(l.state ?? "")))
+    return [...prior, { attempt: Number(l.attempts ?? 0), state: l.state, reason: l.reason ?? "", titles: Array.isArray(l.judged_titles) ? l.judged_titles : [] }];
+  return prior;
 };
 
 export interface GapCheckSupplyTickPointer {
@@ -260,7 +267,7 @@ export function falsifiableAnchors(evidence: string, siteSrc: string | null, spe
 }
 const anchorText = (anchors: readonly CheckAnchor[]): string => anchors.map((a) => a.kind === "symbol" ? `symbol \`${a.value}\`` : a.kind === "text" ? `text ${JSON.stringify(a.value)}` : `behaviour "${a.value}"`).join("; ");
 
-export function checkSupplyGoal(vessel: string, testFile: string, summary: string, site: string | null = null, reader?: SrcReader, anchors: readonly CheckAnchor[] = []): string {
+export function checkSupplyGoal(vessel: string, testFile: string, summary: string, site: string | null = null, reader?: SrcReader, anchors: readonly CheckAnchor[] = [], prior: readonly Row[] = []): string {
   const siteRel = vesselRelativeEditSite(site);
   // A CONFIG EDIT SITE (an activity seed or template) gets the consumer-behaviour goal (check-supply-admission.ts
   // configSiteCheckGoal): the arm step refuses a check that only reads the template's literals.
@@ -277,7 +284,23 @@ export function checkSupplyGoal(vessel: string, testFile: string, summary: strin
     : "";
   return `Write ONE failing test in repos/${vessel}/${testFile} that reproduces: ${symptomOf(summary)}. ` +
     `Its expect() assertion fails because of the defect, not because the file fails to load: ${imp}. ` + named +
+    priorAttemptSentence(prior) +
     "No network, no services, no timers. Do not change src/ or any other file.";
+}
+
+/**
+ * WHAT THE LAST JUDGED ATTEMPT SHOWED, said to the next one. Without it a check that landed green at HEAD was followed
+ * by the same goal text, so the drafter wrote the same check again. The wording follows the dissent child's ("must
+ * differ from … which already passes"): it names the check that did not reproduce and asks for a different one.
+ */
+export function priorAttemptSentence(prior: readonly Row[]): string {
+  const last = [...prior].reverse().find((h) => JUDGED_NOT_ARMED.has(String(h?.["state"] ?? "")));
+  if (!last) return "";
+  const titles = (Array.isArray(last["titles"]) ? (last["titles"] as unknown[]) : []).filter((t): t is string => typeof t === "string" && t.length > 0);
+  const named = titles.length ? titles.map((t) => JSON.stringify(t)).join(", ") : "the previous check";
+  if (last["state"] === "green_at_head")
+    return `An earlier attempt wrote ${named}, which already PASSES at HEAD, so it does not reproduce the defect: write a different test whose assertion fails because of the defect. Tests already in the file do not count. `;
+  return `An earlier attempt wrote ${named}, which was not accepted (${String(last["reason"] ?? "").slice(0, 160)}): write a different test that avoids that. `;
 }
 
 /** The source of the call `test("<title>", …)` / `it(…)` from its opening parenthesis to the matching close (strings skipped). */
@@ -583,7 +606,7 @@ export async function resolveGapCheckSupplyTick(pointer: GapCheckSupplyTickPoint
       refused += 1;
       notArmed.push({ id, reason });
       console.warn(`[gap-check-supply] ${id}: ${reason} — not armed`);
-      if (!pointer.dry_run) await writeMeta(row, { check_supply: { ...ledger, state: "existence_only", reason } });
+      if (!pointer.dry_run) await writeMeta(row, { check_supply: { ...ledger, state: "existence_only", reason, judged_titles: titles } });
       continue;
     }
     const evidence_resolve = { shape: "test_suite", input: { vessel: `repos/${ledger.vessel}`, test_file: ledger.test_file, only_tests: titles }, zero_field: "requested_not_passing" };
@@ -598,7 +621,9 @@ export async function resolveGapCheckSupplyTick(pointer: GapCheckSupplyTickPoint
       const state = verdict === "unknown" ? "goal_dispatched" : verdict === "absent" ? "green_at_head" : "arm_refused";
       if (state !== "goal_dispatched") refused += 1;
       notArmed.push({ id, reason: wrongReason ?? (verdict === "absent" ? "green_at_head" : "verdict_unknown") });
-      if (!pointer.dry_run) await writeMeta(row, { check_supply: { ...ledger, state, last_verdict: verdict, ...(wrongReason ? { reason: wrongReason } : {}) } });
+      if (state === "green_at_head") console.warn(`[gap-check-supply] ${id}: green_at_head — the new check(s) ${JSON.stringify(titles)} pass at HEAD, so they do not reproduce the defect; not armed (the next attempt is told)`);
+      const judged = state === "goal_dispatched" ? {} : { judged_titles: titles, reason: wrongReason ?? "green_at_head: the new check(s) pass at HEAD" };
+      if (!pointer.dry_run) await writeMeta(row, { check_supply: { ...ledger, state, last_verdict: verdict, ...judged } });
       continue;
     }
     if (pointer.dry_run) { armed.push(id); continue; }
@@ -779,7 +804,7 @@ export async function resolveGapCheckSupplyTick(pointer: GapCheckSupplyTickPoint
       }
       anchorsOf.set(id, anchors);
     }
-    const goal = checkSupplyGoal(vessel, testFile, summary, site, reader, anchorsOf.get(id) ?? []);
+    const goal = checkSupplyGoal(vessel, testFile, summary, site, reader, anchorsOf.get(id) ?? [], settledHistory(ledger));
     if (pointer.dry_run) { dispatched.push({ id, goal, dispatch_id: null }); continue; }
     const r = await resolveDispatchGoal({ type: "dispatch_goal", goal, variables: { gap_id: id, check_supply: true }, timeout_ms: 15_000 });
     if (r.shape !== "goalDispatchResult") {

@@ -207,6 +207,36 @@ describe("B′ P3: the arm step measures the landed .check.ts through P0 and jud
     expect(((run!.body["red_reason"] as Row).failures as Row[])[0]).toMatchObject({ name: title, cls: "assertion" });
   });
 
+  it("[MUST-FAIL] a check GREEN at HEAD is remembered, and the next attempt's goal names it and asks for a different one", async () => {
+    const id = T("p3-green-memory");
+    await seed(id);
+    await tick(later());
+    const first = goalFor(id)[0]!.goal;
+    const title = `p3 green memory ${RUN}`;
+    writeFileSync(join(CLONES, VESSEL, checkPathOf(id)), `${H}import * as mod from "../../src/widget";\ntest("${title}", () => { expect(mod.widget).toBe(1); });\n`);
+    await tick(later());
+    const judged = ledgerOf(await storeRow(id));
+    expect(judged["state"]).toBe("green_at_head");
+    expect(judged["judged_titles"]).toEqual([title]);
+    await tick(later());
+    const led = ledgerOf(await storeRow(id));
+    expect(led["state"]).toBe("goal_dispatched");
+    expect((led["history"] as Row[]).at(-1)).toMatchObject({ state: "green_at_head", titles: [title] });
+    const goalsSent = goalFor(id);
+    expect(goalsSent.length).toBe(2);
+    expect(goalsSent[1]!.goal).not.toBe(first);
+    expect(goalsSent[1]!.goal).toContain(JSON.stringify(title));
+    expect(goalsSent[1]!.goal).toContain("already PASSES at HEAD");
+  });
+
+  it("[CONTROL] a first attempt carries no prior-attempt sentence; a wrong-reason attempt is named with its reason", () => {
+    expect(supply.priorAttemptSentence([])).toBe("");
+    expect(supply.priorAttemptSentence([{ state: "dispatch_failed", reason: "busy" }])).toBe("");
+    const s = supply.priorAttemptSentence([{ state: "arm_refused", titles: ["t one"], reason: "network: connection refused" }]);
+    expect(s).toContain('"t one"');
+    expect(s).toContain("network: connection refused");
+  });
+
   it("[MUST-FAIL] a named test that is red because of a refused connection is NOT armed: the shared classifier names the reason", async () => {
     const id = T("p3-net");
     await seed(id);

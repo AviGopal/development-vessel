@@ -166,3 +166,25 @@ describe("rhythm_conductor_tick", () => {
     expect(q.tasks.length).toBe(0);
   });
 });
+
+describe("a member's learning mode reaches goal-host", () => {
+  it("[MUST-FAIL] a member naming learning_mode observe is dispatched with top-level learning_mode observe", async () => {
+    const { rhythmMemberOf, drainRunGoalBody } = await import("../../src/resolvers/rhythm-conductor-tick");
+    const m = rhythmMemberOf({ family: "probe", goal: "Report the five busiest templates", member: "busiest", learning_mode: "observe" });
+    expect(m).toEqual({ goal: "Report the five busiest templates", member: "busiest", learning_mode: "observe" });
+    const body = drainRunGoalBody({ goal: m!.goal, variables: { rhythm_id: "r1", rhythm_member: "busiest", learning_mode: m!.learning_mode } });
+    expect(body["learning_mode"]).toBe("observe");
+    expect(body["operator"]).toBe(drainRunGoalBody({ goal: "x" })["operator"]);
+    expect(body["async"]).toBe(true);
+  });
+  it("[CONTROL] a member without a learning mode dispatches exactly the historical body (no learning_mode key)", async () => {
+    const { rhythmMemberOf, drainRunGoalBody } = await import("../../src/resolvers/rhythm-conductor-tick");
+    expect(rhythmMemberOf({ goal: "g" })).toEqual({ goal: "g" });
+    expect(rhythmMemberOf({ goal: "g", learning_mode: "bogus" })).toEqual({ goal: "g" });
+    expect(rhythmMemberOf({ member: "x" })).toBeNull();
+    const op = drainRunGoalBody({ goal: "x" })["operator"];
+    expect(typeof op).toBe("string");
+    expect(drainRunGoalBody({ goal: "g", variables: { rhythm_id: "r" } })).toEqual({ goal: "g", variables: { rhythm_id: "r" }, operator: op, async: true });
+    expect(drainRunGoalBody({ templateId: "t" })).toEqual({ targetTemplateId: "t", variables: {}, operator: op, async: true });
+  });
+});

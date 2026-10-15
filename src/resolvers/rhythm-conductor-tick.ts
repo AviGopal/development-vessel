@@ -65,12 +65,7 @@ async function drainBoredomQueue(queuePath: string, maxDispatch: number): Promis
           {
             method: "POST",
             headers: { "Content-Type": "application/json", ...(API_KEY ? { Authorization: `ApiKey ${API_KEY}` } : {}) },
-            body: JSON.stringify({
-              ...(t.goal ? { goal: t.goal } : { targetTemplateId: t.templateId }),
-              variables: t.variables ?? {},
-              operator: "rhythm-conductor-drain",
-              async: true,
-            }),
+            body: JSON.stringify(drainRunGoalBody(t)),
           },
           8000,
         );
@@ -93,6 +88,29 @@ async function drainBoredomQueue(queuePath: string, maxDispatch: number): Promis
   } catch {
     return 0;
   }
+}
+
+/** A rhythmFamilyGoal body as a family member: its goal, its member name, and its LEARNING MODE when it names one
+ *  ("observe" | "learn"); null without goal text. */
+export function rhythmMemberOf(body: { goal?: unknown; member?: unknown; learning_mode?: unknown } | null | undefined): { goal: string; member?: string; learning_mode?: "observe" | "learn" } | null {
+  const g = body?.goal;
+  if (typeof g !== "string" || !g) return null;
+  const mem = body?.member;
+  const lm = body?.learning_mode === "observe" || body?.learning_mode === "learn" ? body.learning_mode : undefined;
+  return { goal: g, ...(typeof mem === "string" && mem ? { member: mem } : {}), ...(lm ? { learning_mode: lm } : {}) };
+}
+
+/** The drain's /run-goal body for one queued task. goal-host reads the learning mode from the TOP-LEVEL body only, so a
+ *  member's mode, carried in the task's variables, is lifted there; without one the body is what it always was. */
+export function drainRunGoalBody(t: { goal?: string; templateId?: string; variables?: Record<string, unknown> }): Record<string, unknown> {
+  const lm = t.variables?.["learning_mode"];
+  return {
+    ...(t.goal ? { goal: t.goal } : { targetTemplateId: t.templateId }),
+    variables: t.variables ?? {},
+    operator: "rhythm-conductor-drain",
+    ...(lm === "observe" || lm === "learn" ? { learning_mode: lm } : {}),
+    async: true,
+  };
 }
 
 export interface RhythmConductorTickPointer {
@@ -687,21 +705,22 @@ export async function resolveRhythmConductorTick(
       body: JSON.stringify({ impulse: { type: "poolImpulse", shape: "rhythmFamilyGoal", limit: 50 } }),
     },
     800,
-  )) as { body?: { impulses?: Array<{ body?: { family?: string; goal?: string; member?: string } }> } } | null;
+  )) as { body?: { impulses?: Array<{ body?: { family?: string; goal?: string; member?: string; learning_mode?: string } }> } } | null;
   // A family may carry SEVERAL conditioned goals. Distinct jobs feed one family
   // — gap-closing alone is fed by gap-compose, surgical-gap-scan,
   // efficiency-failure-tick, operator-goal-generator and funnel-drain — and a
   // one-goal-per-family map silently drops all but the last of them, which is
   // what blocks retiring their timers. Accumulate rather than overwrite;
   // `member` names a goal within its family so siblings dedup independently.
-  const poolGoals: Record<string, Array<{ goal: string; member?: string }>> = {};
+  // A member may name its LEARNING MODE ("observe" | "learn"): a measuring family's probes run observe-only, so a replayed
+  // cached command cannot score a free reach and no pathway is minted from a probe. Absent, the dispatch is unchanged.
+  const poolGoals: Record<string, Array<{ goal: string; member?: string; learning_mode?: "observe" | "learn" }>> = {};
   for (const imp of poolGoalResp?.body?.impulses ?? []) {
     const fam = imp?.body?.family;
-    const g = imp?.body?.goal;
-    const mem = imp?.body?.member;
-    if (typeof fam === "string" && fam && typeof g === "string" && g) {
+    const m = rhythmMemberOf(imp?.body);
+    if (typeof fam === "string" && fam && m) {
       const list = poolGoals[fam] ?? [];
-      list.push(typeof mem === "string" && mem ? { goal: g, member: mem } : { goal: g });
+      list.push(m);
       poolGoals[fam] = list;
     }
   }
@@ -712,7 +731,7 @@ export async function resolveRhythmConductorTick(
       continue;
     }
     const bootstrapGoal: string | undefined = FAMILY_GOALS[r.family];
-    const members: Array<{ goal: string; member?: string }> =
+    const members: Array<{ goal: string; member?: string; learning_mode?: "observe" | "learn" }> =
       poolGoals[r.family] ?? (bootstrapGoal ? [{ goal: bootstrapGoal }] : []);
     // A resolver-backed family needs no goal text: it is dispatched directly below.
     if (members.length === 0 && !FAMILY_RESOLVERS[r.family]) {
@@ -776,6 +795,7 @@ export async function resolveRhythmConductorTick(
             rhythm_id: r.id,
             due_score: r.due_score,
             ...(m.member ? { rhythm_member: m.member } : {}),
+            ...(m.learning_mode ? { learning_mode: m.learning_mode } : {}),
             ...(FAMILY_VARIABLES[r.family] ?? {}),
           },
           ...(pointer.queue_path ? { queue_path: pointer.queue_path } : {}),

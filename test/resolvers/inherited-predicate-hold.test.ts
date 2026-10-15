@@ -50,6 +50,15 @@ describe("inheritedPredicateHolds", () => {
     }
   });
 
+  it("canHold: a holder the caller excludes is passed over and the next ranked member is elected", () => {
+    const capped = inherited("recommit-P-x", { source_gap_id: "P" }, { failed_attempts: 0 });
+    const child = inherited("P-c2", { parent_gap_id: "P" }, { failed_attempts: 1 });
+    const all = [parent, capped, child];
+    // Fewest own attempts ranks first: the recommit, unless the caller says it cannot hold.
+    expect(Object.fromEntries(inheritedPredicateHolds(all))).toEqual({ P: "recommit-P-x", "P-c2": "recommit-P-x" });
+    expect(Object.fromEntries(inheritedPredicateHolds(all, (g) => g.id !== "recommit-P-x"))).toEqual({ P: "P-c2", "recommit-P-x": "P-c2" });
+    expect(inheritedPredicateHolds(all, () => false).size).toBe(0);
+  });
   it("a child carrying the check by its own authorship (not inherited) holds nothing", () => {
     expect(inheritedPredicateHolds([parent, gap("P-narrowed", { evidence_resolve: ER, parent_gap_id: "P" })]).size).toBe(0);
   });
@@ -104,26 +113,46 @@ describe("auto-pick reads the hold before admission (wiring)", () => {
     expect(hold).toContain(`${pid}: predicate held by ${pid}-narrowed`);
     expect(hold).not.toContain(`${pid}-narrowed: predicate held`);
   });
-  it("[MUST-FAIL] a holder past the recommit lineage cap holds nothing: its lineage is released, not parked", async () => {
-    const run = Math.random().toString(36).slice(2, 8);
-    const pid = `phc-${run}`;
-    const child = `recommit-${pid}-verify_failed`;
-    const write = async (id: string, meta: Record<string, unknown>) => {
+  // The measured shape (2026-10-15): the parent carries the lineage's attempts, so its newest recommit has the fewest
+  // OWN attempts (elected first) while the lineage sum puts it past the cap (never picked).
+  const pickLines = async (fixture: Array<[string, Record<string, unknown>]>): Promise<string[]> => {
+    for (const [id, meta] of fixture) {
       const w = await sg.resolveSubstrateGapWrite({ type: "substrateGap_write", gap: { id, category: "systematic_failure", source: "operator", status: "open", detected_at: new Date().toISOString(), summary: `hold fixture ${id}`, classification_metadata: { edit_site: SITE, evidence_resolve: ER, ...meta } } } as never);
       if (w.shape === "structuredError") throw new Error(JSON.stringify(w.body));
-    };
-    await write(pid, {});
-    await write(child, { source_gap_id: pid, predicate_source: "gap_falsify:inherit", failed_attempts: 6 });
+    }
     await sg.__settleBirthEvaluationsForTests();
     process.env["MITOSIS_DIRECT_PUSH"] = "0";
     const lines: string[] = [];
     const orig = console.log;
     console.log = (...a: unknown[]) => { lines.push(a.map(String).join(" ")); };
     try { await g2f.resolveGapToFeature({ type: "gapToFeature" } as never); } finally { console.log = orig; }
+    return lines;
+  };
+
+  it("[MUST-FAIL] a holder past the recommit lineage cap is passed over: the next workable member holds, the group stays held", async () => {
+    const pid = `phr-${Math.random().toString(36).slice(2, 8)}`;
+    const capped = `recommit-${pid}-verify_failed`;
+    const child = `${pid}-c2`;
+    const lines = await pickLines([
+      [pid, { failed_attempts: 6 }],
+      [capped, { source_gap_id: pid, predicate_source: "gap_falsify:inherit", failed_attempts: 0 }],
+      [child, { parent_gap_id: pid, predicate_source: "gap_falsify:inherit", failed_attempts: 1 }],
+    ]);
     const held = lines.filter((l) => l.includes("predicate hold excluded")).join("\n");
-    expect(held).not.toContain(`${pid}: predicate held by ${child}`);
-    const released = lines.find((l) => l.includes("predicate hold released"));
-    expect(released).toBeDefined();
-    expect(released).toContain(`${pid} (holder ${child})`);
+    expect(held).toContain(`${pid}: predicate held by ${child}`);
+    expect(held).not.toContain(`predicate held by ${capped}`);
+    expect(lines.some((l) => l.includes("predicate hold released"))).toBe(false);
+  });
+
+  it("[CONTROL] with no workable holder left, the group is not held (nothing can work, so nothing parks the lineage)", async () => {
+    const pid = `phn-${Math.random().toString(36).slice(2, 8)}`;
+    const capped = `recommit-${pid}-verify_failed`;
+    const lines = await pickLines([
+      [pid, { failed_attempts: 6 }],
+      [capped, { source_gap_id: pid, predicate_source: "gap_falsify:inherit", failed_attempts: 0 }],
+    ]);
+    const held = lines.filter((l) => l.includes("predicate hold excluded")).join("\n");
+    expect(held).not.toContain(`${pid}: predicate held by`);
+    expect(lines.some((l) => l.includes("lineage-capped gap(s) passed over as holder"))).toBe(true);
   });
 });

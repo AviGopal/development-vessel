@@ -2038,21 +2038,14 @@ async function resolveGapToFeatureOnce(pointer: GapToFeaturePointer, attempt: { 
     const gapsById = new Map<string, Record<string, unknown>>();
     for (const g of gaps) { const id = String(g.id ?? ""); if (id) gapsById.set(id, g); }
     // One live gap per (lineage, check): read over the whole open set, so a holder cooling down still holds.
-    const predicateHolds = pointer.gap_id ? new Map<string, string>() : inheritedPredicateHolds(gaps);
-    // A HOLDER THE LINEAGE CAP EXCLUDES HOLDS NOTHING. The hold's own invariant is "a child that cannot work holds
-    // nothing, so the hold can never park a whole lineage", but its holder test does not see the lineage cap below:
-    // the holder it prefers (fewest OWN attempts) is the newest recommit, the one the cap (LINEAGE attempts) excludes
-    // first, so the lineage was parked behind a holder that can never be picked (measured 2026-10-15: four lineages,
-    // one picked 8 times before and 0 after). Released here, at the one site that knows both rules.
-    const capReleased: string[] = [];
-    for (const [held, holder] of predicateHolds) {
-      const h = gapsById.get(holder);
-      if (h && holder.startsWith("recommit-") && lineageBackoffState(h, gapsById).attempts >= RECOMMIT_LINEAGE_ATTEMPT_CAP) {
-        predicateHolds.delete(held);
-        capReleased.push(`${held} (holder ${holder})`);
-      }
-    }
-    if (capReleased.length > 0) console.log(`[gap-to-feature] predicate hold released for ${capReleased.length} gap(s): the holder is past the lineage cap and can never be picked: ${capReleased.slice(0, 5).join("; ")}`);
+    // A HOLDER THE LINEAGE CAP EXCLUDES IS NOT ELECTED. The hold's invariant is "a child that cannot work holds nothing,
+    // so the hold can never park a whole lineage"; the cap below makes the newest recommit unpickable, so it must not be
+    // the holder. It is skipped and the next workable member holds, keeping one live gap per (lineage, check). Deleting
+    // the hold instead (the previous fix) made every sibling of the check pickable at once.
+    const isLineageCapped = (g: Record<string, unknown>): boolean => String(g.id ?? "").startsWith("recommit-") && lineageBackoffState(g, gapsById).attempts >= RECOMMIT_LINEAGE_ATTEMPT_CAP;
+    let cappedHolderCandidates = 0;
+    const predicateHolds = pointer.gap_id ? new Map<string, string>() : inheritedPredicateHolds(gaps, (g) => { const c = isLineageCapped(g); if (c) cappedHolderCandidates++; return !c; });
+    if (cappedHolderCandidates > 0) console.log(`[gap-to-feature] predicate hold: ${cappedHolderCandidates} lineage-capped gap(s) passed over as holder; the next workable member holds`);
     const heldLines: string[] = [];
     const inFlightLines: string[] = [];
     const crossNodeLines: string[] = [];

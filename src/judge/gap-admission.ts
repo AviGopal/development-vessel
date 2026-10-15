@@ -62,7 +62,7 @@ const proposalsDir = (): string => envPath("PROPOSALS_DIR", "/workspace/proposal
  * loss. Among several, the narrowed child (it carries the failure lessons) is preferred, then the one
  * with fewer failed attempts, then the id, so the choice is stable across passes.
  */
-export function inheritedPredicateHolds(gaps: Record<string, unknown>[]): Map<string, string> {
+export function inheritedPredicateHolds(gaps: Record<string, unknown>[], canHold: (g: Record<string, unknown>) => boolean = () => true): Map<string, string> {
   const byId = new Map<string, Record<string, unknown>>();
   for (const g of gaps) { const id = String(g.id ?? ""); if (id) byId.set(id, g); }
   const metaOf = (g: Record<string, unknown>): Record<string, unknown> => (g.classification_metadata ?? g.metadata ?? {}) as Record<string, unknown>;
@@ -96,7 +96,9 @@ export function inheritedPredicateHolds(gaps: Record<string, unknown>[]): Map<st
     const grp = groups.get(gk) ?? { members: [], holders: [] };
     grp.members.push(id);
     const isInheritedChild = m.predicate_source === "gap_falsify:inherit" && !!(m.parent_gap_id ?? m.source_gap_id);
-    if (isInheritedChild && predicateSuspect(m) === null && m.operator_hold !== true && !isParkingDisposition(m.disposition) && !identicalRepeatedFailure(m.failure_lessons)) grp.holders.push(g);
+    // canHold: the caller's own exclusions (e.g. the recommit lineage cap, applied later in the pick). A gap the caller
+    // will never pick cannot hold; the next workable member is elected instead, so the group stays one-live.
+    if (isInheritedChild && predicateSuspect(m) === null && m.operator_hold !== true && !isParkingDisposition(m.disposition) && !identicalRepeatedFailure(m.failure_lessons) && canHold(g)) grp.holders.push(g);
     groups.set(gk, grp);
   }
   const held = new Map<string, string>();

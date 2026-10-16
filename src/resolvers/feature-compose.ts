@@ -5268,6 +5268,14 @@ export const REPAIR_OUTPUT_SLICE = 4000;
  * each only when the slice does not already show it. When the slice already shows everything (a typecheck error at
  * the head of the log), the prompt is today's, byte for byte.
  */
+/** The repair prompt, journalling the rounds R1 CHANGED (form=evidence: the gate's structured evidence led the prompt), so
+ *  they can be read by effect. A round whose prompt is today's (nothing hidden) adds no line: its console stays as it was,
+ *  so the floor-path golden is unchanged, and such a round is a repair round without this line. */
+export function repairPromptLogged(fv: VerifyResult, errorSiteWindow: string, editSite: string | null, gapId: string | null): string {
+  const p = buildRepairPrompt(fv, errorSiteWindow, editSite);
+  if (p.includes("\nFAILING STAGE: ")) console.log(`[fc-repair] prompt ${JSON.stringify({ gap: gapId, vessel: fv.vessel, stage: fv.stage ?? null, form: "evidence", own_failing: (fv.own?.failing ?? []).length, edit_site: editSite })}`);
+  return p;
+}
 export function buildRepairPrompt(fv: VerifyResult, errorSiteWindow: string, editSite: string | null): string {
   const errText = (fv.output || "").trim();
   const slice = errText.slice(0, REPAIR_OUTPUT_SLICE);
@@ -9012,7 +9020,7 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
         const fix = parseJsonObject(await llmCallWithFailover(
           // LLM egress, NOT concept-db — with failover, like the plan/refine/judge calls.
           llmEndpoints,
-          buildRepairPrompt(fv, errorSiteWindow, gapEditSiteOf(pointer)),
+          repairPromptLogged(fv, errorSiteWindow, gapEditSiteOf(pointer), pointer.gap?.id ?? null),
           model,
         ));
         const ef = typeof fix?.file === "string" ? String(fix.file)

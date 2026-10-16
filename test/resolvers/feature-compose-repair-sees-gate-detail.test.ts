@@ -58,8 +58,23 @@ describe("the repair round is shown the gate's own reason", () => {
 
   it("[MUST-FAIL] wiring: the repair LLM call is built by buildRepairPrompt, and a missed old_string is logged", () => {
     const src = readFileSync(new URL("../../src/resolvers/feature-compose.ts", import.meta.url), "utf8");
-    expect(src).toContain("buildRepairPrompt(fv, errorSiteWindow, gapEditSiteOf(pointer)),");
+    expect(src).toMatch(/(buildRepairPrompt|repairPromptLogged)\(fv, errorSiteWindow, gapEditSiteOf\(pointer\)/);
     expect(src).not.toContain("Lint output:\\n\\n${errText.slice(0, 4000)}${errorSiteWindow}");
     expect(src).toContain("old_string not found in the file's current content");
+  });
+
+  it("[R1b] a repair round whose prompt R1 changed journals it; an unchanged round adds no line", () => {
+    const logs: string[] = [];
+    const orig = console.log;
+    console.log = (m?: unknown) => { logs.push(String(m)); };
+    try {
+      const fv = { vessel: "repos/activity-api", errors: "verify", exit_code: 0, ok: false, output: "x".repeat(5000) + " | OWN CHECK IS STILL RED: 5.2.4", stage: "own_check", own: { test_file: "t.test.ts", failing: [{ name: "5.2.4: z" }] }, draft: { own_red: [], introduced: [], new_ts: [], gate_detail: "OWN CHECK IS STILL RED: 5.2.4" } };
+      fc["repairPromptLogged"](fv, "", "repos/activity-api/src/a.ts", "gap-1");
+      fc["repairPromptLogged"]({ ...fv, output: "src/x.ts(1,1): error TS2304: x", stage: "typecheck", own: undefined, draft: { own_red: [], introduced: [], new_ts: [], gate_detail: "" } }, "", null, "gap-2");
+    } finally { console.log = orig; }
+    const lines = logs.filter((l) => l.startsWith("[fc-repair] prompt "));
+    // the changed (evidence) round is journalled; today's (lint) round adds no line, so its console is as before
+    expect(lines.length).toBe(1);
+    expect(JSON.parse(lines[0]!.slice("[fc-repair] prompt ".length))).toMatchObject({ gap: "gap-1", stage: "own_check", form: "evidence", own_failing: 1 });
   });
 });

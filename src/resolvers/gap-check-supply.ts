@@ -58,7 +58,7 @@ import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { join, normalize } from "node:path";
 import type { ResolverResult } from "./types.js";
-import { resolveSubstrateGap, resolveSubstrateGapWrite, takeBirthVerdictWithReport, unrenderedBindingToken } from "./substrate-gap.js";
+import { predicateSuspect, resolveSubstrateGap, resolveSubstrateGapWrite, takeBirthVerdictWithReport, unrenderedBindingToken } from "./substrate-gap.js";
 import {
   CHECK_SUPPLY_DISPOSITION,
   composeEligibilitySkipReason,
@@ -634,6 +634,31 @@ async function writeMeta(row: Row, meta: Row, opts?: Parameters<typeof resolveSu
   } as never, opts);
 }
 
+/**
+ * I1, LOCALIZE BEFORE ADMISSION. An armed class2 gap whose ONLY compose skip is no_edit_site needs a site, not a test:
+ * admission excludes it before any localizer runs, and a test-writing goal would replace a check it already has. The
+ * site comes from the gap's own evidence (checkSupplySite: a src file its summary names that exists in the vessel
+ * clone), else localizeGap without the LLM, the localizer the lane already runs after a pick. A class1 or literal row
+ * is never sited here (a guessed site would make a literal measurable at the guess; checkSupplyDisposition already
+ * drops expected_literal and hardcoded_url rows), and a row with any site field is never re-aimed.
+ * Persisted as edit_site (what eligibility reads) plus the shaped localizationRecord (gap.localization, the record
+ * compose admission reads), with localized_by and localization_method beside it, outside the record's closed key set.
+ * History: af21e4fe wrote edit_site from localizeGap with a flat pointer the store refused; f77676f6 fixed the wrapper
+ * and dropped the payload, so the site was never persisted.
+ */
+export function localizableBySupply(row: Row): boolean {
+  const meta = metaOf(row);
+  return composeEligibilitySkipReason(row) === "no_edit_site" && falsifierClassOf(meta) === "class2" && predicateSuspect(meta) === null
+    && !nonEmpty(meta["expected_literal"]) && !nonEmpty(meta["hardcoded_url"]);
+}
+async function localizeForSupply(row: Row, vessel: string, site: string | null): Promise<{ file: string; method: string; evidence: Array<{ read: string; why: string }> } | null> {
+  if (site) return { file: site, method: "check_supply_site", evidence: [{ read: "summary", why: `the gap's summary names ${site}, which exists in the ${vessel} clone` }] };
+  const { localizeGap } = await import("./gap-to-feature.js");
+  const loc = await localizeGap(row, { useLlm: false });
+  if (!loc || !loc.file.startsWith(`repos/${vessel}/`) || !existsSync(join(clonesRoot(), loc.file.replace(/^repos\//, "")))) return null;
+  return { file: loc.file, method: loc.method, evidence: [{ read: loc.method, why: loc.description }] };
+}
+
 export async function resolveGapCheckSupplyTick(pointer: GapCheckSupplyTickPointer): Promise<ResolverResult> {
   const now = typeof pointer.now_ms === "number" ? pointer.now_ms : Date.now();
   const nowIso = new Date(now).toISOString();
@@ -684,6 +709,7 @@ export async function resolveGapCheckSupplyTick(pointer: GapCheckSupplyTickPoint
   const skipped: Array<{ id: string; reason: string }> = [];
   const exhausted: string[] = [];
   const controlMarked: string[] = [];
+  const localized: Array<{ id: string; edit_site: string; method: string }> = [];
   const outcomes: { not_attempts: Array<{ id: string; kind: string; reason: string; not_before: string }>; failed: Array<{ id: string; reason: string }>; lost: Array<{ id: string; why: LostWhy; reason: string }>; running: number; awaiting_titles: number; waiting: Array<{ id: string; why: LostWhy; detail: string }> } = { not_attempts: [], failed: [], lost: [], running: 0, awaiting_titles: 0, waiting: [] };
   let refused = 0;
 
@@ -914,6 +940,28 @@ export async function resolveGapCheckSupplyTick(pointer: GapCheckSupplyTickPoint
       if (!pointer.dry_run && !(ledger.state === "scope_excluded" && ledger.reason === reason)) await writeMeta(row, { check_supply: { ...ledger, state: "scope_excluded", reason } });
       continue;
     }
+    // I1: a gap that has its check and lacks only a site is LOCALIZED, never sent a test-writing goal.
+    if (localizableBySupply(row)) {
+      if (localized.length >= perTick) continue; // the same shaped per-tick bound as a dispatch (max_per_tick)
+      const loc = await localizeForSupply(row, vessel, site);
+      const locExcl = loc && scope.readable ? autonomyScopeExcludes(scope, loc.file) : null;
+      if (!loc || locExcl) {
+        const reason = !loc ? "no_site: no src file named by the gap's evidence exists, and the localizer found no confident one" : `localized site ${loc.file} is excluded by the autonomy scope (${locExcl})`;
+        skipped.push({ id, reason });
+        continue;
+      }
+      if (pointer.dry_run) { localized.push({ id, edit_site: loc.file, method: loc.method }); continue; }
+      const record = { gap_id: id, file: loc.file, evidence: loc.evidence, method: loc.method, created_at: nowIso };
+      const lw = await resolveSubstrateGapWrite({
+        type: "substrateGap_write",
+        gap: { id: row["id"], category: row["category"], source: row["source"], summary: row["summary"], detected_at: row["detected_at"], status: row["status"] ?? "open",
+          classification_metadata: { edit_site: loc.file, localized_by: "gap-check-supply", localization_method: loc.method }, localization: record },
+      } as never);
+      if (lw.shape === "structuredError") { skipped.push({ id, reason: `localization write refused: ${JSON.stringify(lw.body).slice(0, 160)}` }); continue; }
+      touched.add(id);
+      localized.push({ id, edit_site: loc.file, method: loc.method });
+      continue;
+    }
     const mode = "check_file";
     // The titles the check file already holds (a previous attempt's landed, refused check): only titles added after
     // this dispatch can arm the gap.
@@ -981,7 +1029,8 @@ export async function resolveGapCheckSupplyTick(pointer: GapCheckSupplyTickPoint
     if (w.shape === "structuredError") await writeMeta(row, { ...arm, check_supply: { ...intent, dispatch_id: dispatchId } });
   }
 
-  const leg = checkSupplySettlementLeg({ dispatched: dispatched.length, armed: armed.length, refused });
+  // A localized gap is work done this tick (I1), graded as a dispatch is.
+  const leg = checkSupplySettlementLeg({ dispatched: dispatched.length + localized.length, armed: armed.length, refused });
   if (leg && !pointer.dry_run) await settleFamily(rhythm, leg, due);
 
   const after = await resolveSubstrateGap({ type: "substrateGap", limit: 1_000_000 } as never);
@@ -995,7 +1044,7 @@ export async function resolveGapCheckSupplyTick(pointer: GapCheckSupplyTickPoint
   return {
     shape: "gapCheckSupplyReport",
     body: {
-      fired: dispatched.length + armed.length > 0,
+      fired: dispatched.length + armed.length + localized.length > 0,
       reason: leg === "alpha" ? "due" : leg === "beta" ? "refused" : "nothing_to_do",
       settlement: leg ?? "none",
       due_score: due.due_score,
@@ -1006,6 +1055,7 @@ export async function resolveGapCheckSupplyTick(pointer: GapCheckSupplyTickPoint
       refused,
       exhausted,
       control_marked: controlMarked,
+      localized,
       outcomes,
       ...(scopeUnread ? { scope_unread: scopeUnread } : {}),
       arms,

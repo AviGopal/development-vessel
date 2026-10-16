@@ -107,6 +107,11 @@ type Ledger = {
   outcome?: Row;
   /** The settled attempts before the current one (state, reason, outcome), newest last, at most five. */
   history?: Row[];
+  /** A NON-ATTEMPT (state non_attempt / send_refused) is not sent again before this instant (CHANGE-30). */
+  not_before?: string;
+  /** CONSECUTIVE non-attempts/refusals since the last SETTLED outcome (failed, lost, armed): each one doubles the
+   *  wait up to the shaped cap, so a receiver that never takes the gap cannot be sent it without bound. */
+  non_attempt_streak?: number;
   /** The new titles the arm step judged on the last attempt (kept so the next attempt can be told which check did not reproduce). */
   judged_titles?: string[];
 };
@@ -440,15 +445,80 @@ const RUNNING_STATUSES: ReadonlySet<string> = new Set(["running", "pending", "ac
 const TERMINAL_STATUSES: ReadonlySet<string> = new Set(["completed", "failed", "error", "errored", "cancelled", "canceled", "timeout", "timed_out", "aborted", "refused"]);
 
 /** What a node's goal-host said about one dispatch: an HTTP answer, or unreachable. null = not probed (another node's). */
-export type DispatchProbe = { http: number; status?: unknown; reached?: unknown; reach_reason?: unknown } | { http: "unreachable"; error: string };
+export type DispatchProbe = { http: number; status?: unknown; reached?: unknown; reach_reason?: unknown; outcome?: unknown } | { http: "unreachable"; error: string };
 export type LostWhy = "not_found_on_host" | "host_unreachable" | "no_dispatch_id" | "unrecognised_status" | "owning_node_never_settled" | "timed_out";
 export type DispatchVerdict =
   | { kind: "running" }
   | { kind: "awaiting_titles" }
   | { kind: "failed"; reason: string }
+  | { kind: "non_attempt"; reason: string; retry_after_s?: number }
+  | { kind: "refused"; reason: string; retry_after_s?: number }
   | { kind: "lost"; why: LostWhy; reason: string }
   | { kind: "wait"; why: LostWhy; detail: string };
 export interface OutcomeBounds { stale_ms: number; timeout_ms: number; title_grace_ms: number; foreign_stale_ms: number }
+
+/**
+ * THE ONE CLASSIFICATION OF A NON-SUCCESS THAT IS NOT A FAILED ATTEMPT (CHANGE-30), read from the receiver's
+ * STRUCTURED `outcome` (goal-host: GET /executions/:id and the /run-goal 429 body), never from goalReachReason prose:
+ *   non_attempt: the receiver will take it later (compose capacity, a landing that deferred with its park kept);
+ *   refused:     the receiver declined it (the spend-rate breaker), with its own retry_after_s when it said one.
+ * Neither is charged as an attempt; each waits its own shaped delay. Anything else is null (today's semantics).
+ */
+export function outcomeKindOf(o: unknown): { kind: "non_attempt" | "refused"; retry_after_s?: number; refuse_class?: string; failure_kind?: string } | null {
+  if (!o || typeof o !== "object") return null;
+  const r = o as Row;
+  const kind = r["kind"];
+  if (kind !== "non_attempt" && kind !== "refused") return null;
+  const ra = r["retry_after_s"];
+  return {
+    kind,
+    ...(typeof ra === "number" && Number.isFinite(ra) && ra > 0 ? { retry_after_s: ra } : {}),
+    ...(typeof r["refuse_class"] === "string" ? { refuse_class: r["refuse_class"] as string } : {}),
+    ...(typeof r["failure_kind"] === "string" ? { failure_kind: r["failure_kind"] as string } : {}),
+  };
+}
+
+/**
+ * A SEND that did not dispatch, classified by the same rule: the receiver's structured outcome when its body carried
+ * one, else its transport: 429 with refused:true is a refusal, 503 (draining) and no answer at all are non-attempts,
+ * any other status is a failed send.
+ */
+export function classifySendFailure(r: ResolverResult): { kind: "non_attempt" | "refused" | "failed"; reason: string; retry_after_s?: number; http_status: number | null } {
+  const body = ((r.body ?? {}) as Row);
+  const http = typeof body["http_status"] === "number" ? (body["http_status"] as number) : null;
+  const resp = (body["response"] && typeof body["response"] === "object" ? body["response"] : {}) as Row;
+  const detail = String(body["detail"] ?? "").slice(0, 160);
+  const why = typeof resp["goalReachReason"] === "string" ? `: ${String(resp["goalReachReason"]).slice(0, 160)}` : "";
+  const named = outcomeKindOf(resp["outcome"]);
+  if (named) return { kind: named.kind, reason: `${detail}${why}`, http_status: http, ...(named.retry_after_s ? { retry_after_s: named.retry_after_s } : {}) };
+  if (http === 429 && resp["refused"] === true) return { kind: "refused", reason: `${detail}${why}`, http_status: http };
+  if (http === 503 || http === null) return { kind: "non_attempt", reason: detail || "the goal-host did not answer", http_status: http };
+  return { kind: "failed", reason: `${detail}${why}`, http_status: http };
+}
+
+/**
+ * The wait before re-sending after the n-th CONSECUTIVE non-attempt (CHANGE-30): the kind's base delay (a refusal's
+ * own retry_after_s when the receiver gave one) doubled per consecutive one, capped by the shaped maximum, and never
+ * shorter than what the receiver asked for. Bounded by construction: the sends a never-taking receiver gets in any
+ * window fall as the streak grows (with the defaults, 30 min doubling to a 6 h cap: at most 7 sends in 24 h).
+ */
+export function nonAttemptDelayMs(baseMs: number, streak: number, maxMs: number, receiverMinMs = 0): number {
+  const n = Math.max(1, Math.floor(streak));
+  const grown = Math.min(baseMs * 2 ** Math.min(n - 1, 30), Math.max(maxMs, baseMs));
+  return Math.max(grown, receiverMinMs);
+}
+/** The ledger a non-attempt settles to: not charged (the send's attempt is given back), not sent before not_before. */
+export function nonAttemptLedger(ledger: Ledger, kind: "non_attempt" | "refused", reason: string, delayMs: number, nowMs: number, outcome?: Row, streak?: number): Ledger {
+  return {
+    ...ledger,
+    state: kind === "refused" ? "send_refused" : "non_attempt",
+    attempts: Math.max(0, Number(ledger.attempts ?? 0) - 1),
+    not_before: new Date(nowMs + delayMs).toISOString(),
+    non_attempt_streak: streak ?? Number(ledger.non_attempt_streak ?? 0) + 1,
+    reason,
+    ...(outcome ? { outcome } : {}),
+  };
+}
 
 /**
  * The verdict on one in-flight dispatch. Pure. An outcome that cannot be read is never "failed": it waits (and is
@@ -476,6 +546,8 @@ export function dispatchVerdict(ledger: Ledger, probe: DispatchProbe | null, now
         ? { kind: "failed", reason: `the goal ended ${status} and reached, but no new test title appeared in ${ledger.test_file ?? "the check file"} within ${hours(bounds.title_grace_ms)}` }
         : { kind: "awaiting_titles" };
     }
+    const named = outcomeKindOf((probe as { outcome?: unknown }).outcome);
+    if (named) return { kind: named.kind, reason: `the goal ended ${status}, not reached, as a ${named.kind === "refused" ? "refusal" : "non-attempt"}${named.refuse_class ? ` (${named.refuse_class})` : ""}${why}`, ...(named.retry_after_s ? { retry_after_s: named.retry_after_s } : {}) };
     return { kind: "failed", reason: `the goal ended ${status}, not reached${why}` };
   }
   return lostOr("unrecognised_status", `${where} reported status ${JSON.stringify(String(probe.status ?? "")).slice(0, 60)}, which this code does not know`);
@@ -512,7 +584,7 @@ async function probeDispatch(dispatchId: string): Promise<DispatchProbe> {
     const r = await fetch(`${GOAL_HOST_ENDPOINT}/executions/${encodeURIComponent(dispatchId)}`, { headers: METABOB_API_KEY ? { Authorization: `ApiKey ${METABOB_API_KEY}` } : {}, signal: AbortSignal.timeout(5_000) });
     if (r.status !== 200) return { http: r.status };
     const j = (await r.json().catch(() => ({}))) as Row;
-    return { http: 200, status: j["status"], reached: j["reached"], reach_reason: j["goalReachReason"] };
+    return { http: 200, status: j["status"], reached: j["reached"], reach_reason: j["goalReachReason"], outcome: j["outcome"] };
   } catch (err) {
     return { http: "unreachable", error: String((err as Error)?.message ?? err) };
   }
@@ -556,6 +628,17 @@ export async function resolveGapCheckSupplyTick(pointer: GapCheckSupplyTickPoint
   const perTick = Math.floor(posNum(rhythm.body["max_per_tick"], 1));
   const backoffMs = posNum(rhythm.body["backoff_hours"], 24) * 3600_000;
   const maxAttempts = Math.floor(posNum(rhythm.body["max_attempts"], 3));
+  // A NON-ATTEMPT's wait and a REFUSAL's wait (CHANGE-30), read from the same shaped record; a refusal prefers the
+  // receiver's own retry_after_s. The non-attempt default sits well inside the 24 h park TTL a deferred landing keeps.
+  const nonAttemptDelayMsBase = posNum(rhythm.body["non_attempt_delay_s"], 1800) * 1000;
+  const refusalDelayMs = posNum(rhythm.body["refusal_delay_s"], 3600) * 1000;
+  const maxNonAttemptDelayMs = posNum(rhythm.body["max_non_attempt_delay_s"], 6 * 3600) * 1000;
+  // The wait for the NEXT consecutive non-attempt of a gap: its kind's base, doubled per consecutive one, capped.
+  const delayFor = (kind: "non_attempt" | "refused", ledger: Ledger, retryAfterS?: number): { ms: number; streak: number } => {
+    const streak = Number(ledger.non_attempt_streak ?? 0) + 1;
+    const receiverMs = kind === "refused" && retryAfterS ? retryAfterS * 1000 : 0;
+    return { ms: nonAttemptDelayMs(kind === "refused" ? (receiverMs || refusalDelayMs) : nonAttemptDelayMsBase, streak, maxNonAttemptDelayMs, receiverMs), streak };
+  };
   // The control split, read from the same shaped record; absent or unusable means no control arm.
   const cf = Number(rhythm.body["control_fraction"]);
   const controlFraction = Number.isFinite(cf) && cf >= 0 && cf <= 1 ? cf : 0;
@@ -579,7 +662,7 @@ export async function resolveGapCheckSupplyTick(pointer: GapCheckSupplyTickPoint
   const skipped: Array<{ id: string; reason: string }> = [];
   const exhausted: string[] = [];
   const controlMarked: string[] = [];
-  const outcomes: { failed: Array<{ id: string; reason: string }>; lost: Array<{ id: string; why: LostWhy; reason: string }>; running: number; awaiting_titles: number; waiting: Array<{ id: string; why: LostWhy; detail: string }> } = { failed: [], lost: [], running: 0, awaiting_titles: 0, waiting: [] };
+  const outcomes: { not_attempts: Array<{ id: string; kind: string; reason: string; not_before: string }>; failed: Array<{ id: string; reason: string }>; lost: Array<{ id: string; why: LostWhy; reason: string }>; running: number; awaiting_titles: number; waiting: Array<{ id: string; why: LostWhy; detail: string }> } = { not_attempts: [], failed: [], lost: [], running: 0, awaiting_titles: 0, waiting: [] };
   let refused = 0;
 
   // 2. ARM: a dispatched gap whose test has landed (new titles in its test file).
@@ -590,7 +673,7 @@ export async function resolveGapCheckSupplyTick(pointer: GapCheckSupplyTickPoint
     const meta = metaOf(row);
     const ledger = ledgerOf(meta);
     // A failed or lost goal's test may still land late: its titles arm the gap all the same.
-    if (!(ledger.state === "goal_dispatched" || ledger.state === "dispatch_failed" || ledger.state === "dispatch_lost") || !ledger.test_file || !ledger.vessel) continue;
+    if (!(ledger.state === "goal_dispatched" || ledger.state === "dispatch_failed" || ledger.state === "dispatch_lost" || ledger.state === "non_attempt" || ledger.state === "send_refused") || !ledger.test_file || !ledger.vessel) continue;
     const path = join(clonesRoot(), ledger.vessel, ledger.test_file);
     if (!existsSync(path)) continue;
     let src = "";
@@ -645,7 +728,7 @@ export async function resolveGapCheckSupplyTick(pointer: GapCheckSupplyTickPoint
       edit_site: editSite,
       predicate_source: CHECK_SUPPLY_SOURCE,
       disposition: meta["disposition"] === CHECK_SUPPLY_DISPOSITION ? "" : meta["disposition"] ?? "",
-      check_supply: { ...ledger, state: "armed", armed_at: nowIso, red_at_head: true, last_verdict: verdict },
+      check_supply: { ...ledger, state: "armed", armed_at: nowIso, red_at_head: true, last_verdict: verdict, non_attempt_streak: 0 },
     }, { birthVerdict: stamp }); // the verdict minted by the run above: the seam honours nothing else
     if (w.shape === "structuredError") {
       const reason = `arm write refused: ${JSON.stringify(w.body).slice(0, 200)}`;
@@ -678,8 +761,18 @@ export async function resolveGapCheckSupplyTick(pointer: GapCheckSupplyTickPoint
       console.warn(`[gap-check-supply] outcome unread for ${id}: ${v.why}: ${v.detail}`);
       continue;
     }
-    const outcome: Row = { read_at: nowIso, read_by: localNode, ...(probe && probe.http !== "unreachable" ? { http: probe.http, status: probe.status ?? null, reached: probe.reached ?? null } : {}), ...(v.kind === "lost" ? { lost_why: v.why } : {}) };
-    const next: Ledger = { ...ledger, state: v.kind === "failed" ? "dispatch_failed" : "dispatch_lost", reason: v.reason, outcome };
+    const outcome: Row = { read_at: nowIso, read_by: localNode, ...(probe && probe.http !== "unreachable" ? { http: probe.http, status: probe.status ?? null, reached: probe.reached ?? null, ...(probe.outcome !== undefined ? { outcome: probe.outcome } : {}) } : {}), ...(v.kind === "lost" ? { lost_why: v.why } : {}) };
+    if (v.kind === "non_attempt" || v.kind === "refused") {
+      // NOT A FAILED ATTEMPT (CHANGE-30): no dispatch_failed, the attempt given back, the shaped wait recorded.
+      const d = delayFor(v.kind, ledger, v.retry_after_s);
+      const held = nonAttemptLedger(ledger, v.kind, v.reason, d.ms, now, outcome, d.streak);
+      outcomes.not_attempts.push({ id, kind: v.kind, reason: v.reason, not_before: String(held.not_before) });
+      console.log(`[gap-check-supply] outcome ${held.state} for ${id} (not charged; next not before ${held.not_before}): ${v.reason}`);
+      if (!pointer.dry_run) await writeMeta(row, { check_supply: held });
+      (meta as Row)["check_supply"] = held;
+      continue;
+    }
+    const next: Ledger = { ...ledger, state: v.kind === "failed" ? "dispatch_failed" : "dispatch_lost", reason: v.reason, outcome, non_attempt_streak: 0 };
     refused += 1;
     if (v.kind === "failed") outcomes.failed.push({ id, reason: v.reason }); else outcomes.lost.push({ id, why: v.why, reason: v.reason });
     console.log(`[gap-check-supply] outcome ${next.state} for ${id}: ${v.reason}`);
@@ -704,6 +797,7 @@ export async function resolveGapCheckSupplyTick(pointer: GapCheckSupplyTickPoint
   // of fresh gaps starves it forever (the backoff and max_attempts already bound how often it can come back).
   const dueRetry = (r: Row): boolean => {
     const l = ledgerOf(metaOf(r));
+    if (l.state === "non_attempt" || l.state === "send_refused") { const nb = Date.parse(String(l.not_before ?? "")); return !Number.isFinite(nb) || now >= nb; }
     if (l.state !== "dispatch_failed" && l.state !== "dispatch_lost") return false;
     const n = Number(l.attempts ?? 0);
     const last = Date.parse(String(l.last_dispatch_at ?? ""));
@@ -768,7 +862,10 @@ export async function resolveGapCheckSupplyTick(pointer: GapCheckSupplyTickPoint
     if (ledger.state === "goal_dispatched") continue;
     const attempts = Number(ledger.attempts ?? 0);
     const last = Date.parse(String(ledger.last_dispatch_at ?? ""));
-    if (attempts > 0 && Number.isFinite(last) && now < last + backoffMs * 2 ** (attempts - 1)) continue;
+    if (ledger.state === "non_attempt" || ledger.state === "send_refused") {
+      const nb = Date.parse(String(ledger.not_before ?? ""));
+      if (Number.isFinite(nb) && now < nb) continue; // its own shaped wait (CHANGE-30), not the attempt backoff
+    } else if (attempts > 0 && Number.isFinite(last) && now < last + backoffMs * 2 ** (attempts - 1)) continue;
     if (attempts >= maxAttempts) {
       exhausted.push(id);
       const hist = settledHistory(ledger);
@@ -819,20 +916,47 @@ export async function resolveGapCheckSupplyTick(pointer: GapCheckSupplyTickPoint
     }
     const goal = checkSupplyGoal(vessel, testFile, summary, site, reader, anchorsOf.get(id) ?? [], settledHistory(ledger));
     if (pointer.dry_run) { dispatched.push({ id, goal, dispatch_id: null }); continue; }
+    // RECORD BEFORE SEND (CHANGE-30): the in-flight record is written FIRST, without the goal text, so no send is ever
+    // unrecorded. If even that write is refused, nothing is sent: a send this tick cannot record is a send the next
+    // tick would repeat (the 455-a-day loop). A crash between this write and the send settles through the existing
+    // no_dispatch_id path (lost past the staleness bound), so the record is safe to leave.
+    const { goal: _priorGoal, not_before: _priorNotBefore, ...ledgerRest } = ledger;
+    void _priorGoal; void _priorNotBefore;
+    const intent: Ledger = { ...ledgerRest, state: "goal_dispatched", attempts: attempts + 1, last_dispatch_at: nowIso, test_file: testFile, vessel, mode,
+      baseline_titles: baselineTitles, edit_site: site, dispatch_id: null, dispatch_node: localNode, dispatch_host: GOAL_HOST_ENDPOINT, reason: "", outcome: {}, history: settledHistory(ledger) };
+    const arm = { ...(holdable ? { disposition: CHECK_SUPPLY_DISPOSITION } : {}), gap_check_supply_arm: "treatment" };
+    const iw = await writeMeta(row, { ...arm, check_supply: intent });
+    if (iw.shape === "structuredError") {
+      const reason = `not sent: the in-flight record could not be written (${String((iw.body as Row)?.["detail"] ?? (iw.body as Row)?.["failure_mode"] ?? "").slice(0, 120)})`;
+      skipped.push({ id, reason });
+      console.warn(`[gap-check-supply] ${id}: ${reason}`);
+      continue;
+    }
     const r = await resolveDispatchGoal({ type: "dispatch_goal", goal, variables: { gap_id: id, check_supply: true }, timeout_ms: 15_000 });
     if (r.shape !== "goalDispatchResult") {
-      refused += 1;
-      skipped.push({ id, reason: `dispatch failed: ${String((r.body as Row)?.["detail"] ?? "").slice(0, 120)}` });
+      // ONE classification of the send (CHANGE-30): a refusal or a non-attempt is recorded as what it is, with its wait;
+      // only a genuine failed send is an attempt.
+      const c = classifySendFailure(r);
+      if (c.kind === "failed") {
+        refused += 1;
+        skipped.push({ id, reason: `dispatch failed: ${c.reason.slice(0, 120)}` });
+        await writeMeta(row, { ...arm, check_supply: { ...intent, state: "dispatch_failed", reason: `dispatch failed: ${c.reason}`, outcome: { send_failed: true, http: c.http_status }, non_attempt_streak: 0 } });
+      } else {
+        const d = delayFor(c.kind, intent, c.retry_after_s);
+        const held = nonAttemptLedger(intent, c.kind, `${c.kind === "refused" ? "send refused by the receiver" : "send not taken (non-attempt)"}: ${c.reason}`, d.ms, now, { send_failed: true, http: c.http_status, kind: c.kind }, d.streak);
+        outcomes.not_attempts.push({ id, kind: c.kind, reason: String(held.reason), not_before: String(held.not_before) });
+        skipped.push({ id, reason: String(held.reason).slice(0, 160) });
+        console.warn(`[gap-check-supply] ${id}: ${held.state} (not charged; next not before ${held.not_before}): ${c.reason.slice(0, 160)}`);
+        await writeMeta(row, { ...arm, check_supply: held });
+      }
       continue;
     }
     const dispatchId = ((r.body ?? {}) as { dispatch_id?: string | null }).dispatch_id ?? null;
     dispatched.push({ id, goal, dispatch_id: dispatchId });
-    await writeMeta(row, {
-      ...(holdable ? { disposition: CHECK_SUPPLY_DISPOSITION } : {}),
-      gap_check_supply_arm: "treatment",
-      check_supply: { ...ledger, state: "goal_dispatched", attempts: attempts + 1, last_dispatch_at: nowIso, test_file: testFile, vessel, mode,
-        baseline_titles: baselineTitles, edit_site: site, dispatch_id: dispatchId, goal, dispatch_node: localNode, dispatch_host: GOAL_HOST_ENDPOINT, reason: "", outcome: {}, history: settledHistory(ledger) },
-    });
+    const sent: Ledger = { ...intent, dispatch_id: dispatchId, goal };
+    const w = await writeMeta(row, { ...arm, check_supply: sent });
+    // The full record (with the goal text) refused: keep the dispatch id at least, so its outcome stays readable.
+    if (w.shape === "structuredError") await writeMeta(row, { ...arm, check_supply: { ...intent, dispatch_id: dispatchId } });
   }
 
   const leg = checkSupplySettlementLeg({ dispatched: dispatched.length, armed: armed.length, refused });

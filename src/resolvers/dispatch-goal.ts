@@ -106,7 +106,13 @@ export async function resolveDispatchGoal(pointer: DispatchGoalPointer): Promise
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(pointer.timeout_ms ?? 30_000),
     });
-    if (!res.ok) return { shape: "structuredError", body: { resolver: "dispatch_goal", detail: `run-goal HTTP ${res.status}`, goal } };
+    if (!res.ok) {
+      // ADDITIVE (CHANGE-30): the receiver's own status and body, so a caller can tell a refusal (the spend-rate
+      // breaker's 429 names {refused, outcome, retry_after_s}) from a failure without parsing `detail`.
+      let response: unknown = null;
+      try { response = await res.json(); } catch { response = null; }
+      return { shape: "structuredError", body: { resolver: "dispatch_goal", detail: `run-goal HTTP ${res.status}`, goal, http_status: res.status, ...(response && typeof response === "object" ? { response } : {}) } };
+    }
     const j = (await res.json()) as { dispatchId?: string; executionId?: string; status?: string; selectedTemplateId?: string };
     const dispatchId = j.dispatchId ?? j.executionId ?? null;
 

@@ -36,7 +36,7 @@ import { WORKSPACE_ROOT as DEFAULT_WORKSPACE_ROOT } from "../config.js";
 import { isWritePointerType } from "../lib/caller-credential.js";
 import type { ResolverResult } from "./types.js";
 import { onlyTestsProblem } from "./test-suite.js";
-import { readFile, writeFile, rename, mkdir } from "node:fs/promises";
+import { readFile, writeFile, rename, mkdir, stat } from "node:fs/promises";
 import { readFileSync, existsSync, writeFileSync } from "node:fs";
 import { join, resolve as resolvePath, sep } from "node:path";
 import { tmpdir } from "node:os";
@@ -408,6 +408,68 @@ async function loadGaps(): Promise<SubstrateGap[]> {
   }
 }
 
+// THE READ-PATH SNAPSHOT (2026-10-16). Every lock-free read used to readFile + JSON.parse the WHOLE store per call
+// (measured on the holder: 21.6 MB / 8,718 rows = ~140 ms each, a ~100 MB transient tree each, at >= 0.4 reads/s from
+// the drain observer alone plus every forwarded spoke read). The holder's event loop stalled 15-18 s at a time and the
+// spokes' 15 s forwarded reads timed out, failing their gates closed. Reads now share ONE parse per version of the file.
+//
+// The key is the file's IDENTITY (path + ino + size + mtimeMs + ctimeMs + this process's write generation), re-stat'd on every read: saveGaps (and any other
+// process's writer) replaces the file by rename, which changes the inode, so a written store is always re-parsed on
+// the next read. No TTL: an unchanged file is the same store. A file that changes WHILE it is being read (the stat
+// before and after disagree) is returned but not kept. Writers are unchanged: withGapLock -> loadGaps -> modify ->
+// saveGaps still reads the file fresh, so no write is ever computed over a cached copy.
+// Readers get COPIES of the rows they are handed (structuredClone of the selected page only), so no caller can
+// mutate the shared snapshot.
+type GapReadSnapshot = { key: string; rows: SubstrateGap[]; byId: Map<string, SubstrateGap[]>; coverage: ReturnType<typeof falsifierCoverage> | null };
+let __gapReadSnapshot: GapReadSnapshot | null = null;
+let __gapReadParses = 0;
+let __gapWriteGeneration = 0; // bumped by every saveGaps in this process: in-process writes change the key whatever the fs timestamp granularity
+async function gapFileIdentity(path: string): Promise<string | null> {
+  try {
+    const st = await stat(path);
+    return `${path}|${st.ino}|${st.size}|${st.mtimeMs}|${st.ctimeMs}|gen${__gapWriteGeneration}`;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException)?.code === "ENOENT") return null;
+    throw err;
+  }
+}
+// Concurrent misses on the SAME version share ONE parse: a write invalidates the snapshot, and the reads it triggers
+// (the drain observer's nudges for that write, forwarded spoke reads) arrive together; without this each ran its own
+// 140 ms / 100 MB parse at once. Cleared when the parse settles; a rejected parse is never kept.
+const __gapReadInflight = new Map<string, Promise<GapReadSnapshot>>();
+async function loadGapsForRead(): Promise<GapReadSnapshot> {
+  const path = GAPS_PATH();
+  const before = await gapFileIdentity(path);
+  if (before === null) { __gapReadSnapshot = null; return { key: "", rows: [], byId: new Map(), coverage: null }; }
+  if (__gapReadSnapshot && __gapReadSnapshot.key === before) return __gapReadSnapshot;
+  const pending = __gapReadInflight.get(before);
+  if (pending) return pending;
+  const parse = parseGapsForRead(path, before);
+  __gapReadInflight.set(before, parse);
+  try {
+    return await parse;
+  } finally {
+    if (__gapReadInflight.get(before) === parse) __gapReadInflight.delete(before);
+  }
+}
+async function parseGapsForRead(path: string, before: string): Promise<GapReadSnapshot> {
+  const rows = await loadGaps();
+  __gapReadParses++;
+  const byId = new Map<string, SubstrateGap[]>();
+  for (const g of rows) {
+    if (!g || typeof g.id !== "string") continue;
+    const list = byId.get(g.id);
+    if (list) list.push(g); else byId.set(g.id, [g]);
+  }
+  const snap: GapReadSnapshot = { key: before, rows, byId, coverage: null };
+  const after = await gapFileIdentity(path);
+  if (after === before) __gapReadSnapshot = snap;
+  return snap;
+}
+/** Tests only: how many times the read path parsed the store, and a reset. */
+export function __gapReadParsesForTests(): number { return __gapReadParses; }
+export function __resetGapReadSnapshotForTests(): void { __gapReadSnapshot = null; __gapReadParses = 0; __gapReadInflight.clear(); }
+
 // In-process serialization of the gap store's read-modify-write. Concurrent
 // writers previously (a) shared a single gaps.json.tmp — one writer's rename
 // unlinked the tmp out from under another, surfacing as ENOENT — and (b)
@@ -438,6 +500,8 @@ async function saveGaps(gaps: SubstrateGap[]): Promise<void> {
   const tmp = GAPS_PATH() + `.${process.pid}.${__gapTmpCounter++}.tmp`;
   await writeFile(tmp, JSON.stringify(gaps, null, 2), "utf-8");
   await rename(tmp, GAPS_PATH());
+  __gapWriteGeneration++;
+  __gapReadSnapshot = null; // the rename already changes the inode; the generation covers same-second, same-size in-process writes
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1335,13 +1399,14 @@ export async function resolveSubstrateGap(
   pointer: SubstrateGapReadPointer,
 ): Promise<ResolverResult> {
   { const fwd = await forwardToGapStore(pointer as unknown as Record<string, unknown>); if (fwd) return fwd; }
-  const gaps = await loadGaps();
+  const snap = await loadGapsForRead();
+  const gaps = snap.rows;
   const limit = pointer.limit ?? 50;
 
   let results = gaps;
 
   if (pointer.id) {
-    results = results.filter((g) => g.id === pointer.id);
+    results = snap.byId.get(pointer.id) ?? [];
   }
   if (pointer.category) {
     results = results.filter((g) => g.category === pointer.category);
@@ -1360,20 +1425,22 @@ export async function resolveSubstrateGap(
     results = results.filter((g) => !excluded.has(String(g.category)));
   }
 
-  results = results
+  // A copy: with no filter, `results` IS the shared snapshot's array, and sort() works in place.
+  results = [...results]
     .sort((a, b) => (b.updated_at || b.created_at || b.detected_at || "").localeCompare(a.updated_at || a.created_at || a.detected_at || ""))
     .slice(0, limit);
 
+  if (snap.coverage === null) snap.coverage = falsifierCoverage(gaps);
   return {
     shape: "substrateGap",
     body: {
-      gaps: results,
+      gaps: structuredClone(results),
       total: results.length,
       // ADDITIVE. Existing consumers read `gaps`/`total` only. This is the census
       // over the WHOLE open store (not the filtered/limited page) so that
       // "how many open gaps can never close?" is answerable from any read instead
       // of by hand-grepping the store file.
-      falsifier_coverage: falsifierCoverage(gaps),
+      falsifier_coverage: structuredClone(snap.coverage),
       ...(pointer.include_calibration ? { expectation_calibration: readExpectationCalibration() } : {}),
     },
   };

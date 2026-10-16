@@ -5248,6 +5248,47 @@ export function composeFailureKind(input: { verdict: string; terminal_refusal: s
   // that refused it was an outage, so the refusal is infrastructure: a non-attempt, like an env_* class.
   return input.verdict === "FAVORABLE" ? null : input.terminal_refusal ? "terminal_refusal" : ownCheckStayedRed ? "fix" : input.semantic_judge_unavailable ? "environment" : input.cutover_env_class || input.verify.some((vr) => !vr.ok && (vr.stage !== "constraint" || !!vr.constraint_unrunnable) && (vr.exit_code === null || !vr.output || /timed out after \d+\s*ms/i.test(vr.output))) ? "environment" : "fix";
 }
+/** The gap's own edit site, as the compose was handed it (classification_metadata.edit_site), or null. */
+export function gapEditSiteOf(pointer: { gap?: unknown } | null | undefined): string | null {
+  const m = ((pointer?.gap ?? {}) as { classification_metadata?: unknown }).classification_metadata as { edit_site?: unknown } | undefined;
+  return typeof m?.edit_site === "string" && m.edit_site.trim() ? m.edit_site.trim() : null;
+}
+/** How much of a failed verify's raw output the repair prompt quotes (unchanged; the evidence goes AHEAD of it, not in a bigger slice). */
+export const REPAIR_OUTPUT_SLICE = 4000;
+/**
+ * THE REPAIR PROMPT (CHANGE-33/R1). The repair round used to quote only the first 4000 chars of `fv.output`, which is
+ * raw + detail: the whole pipeline log (install, a passing typecheck, thousands of "(pass)" lines) with the gate's own
+ * reason ("OWN CHECK IS STILL RED…", "TEST-WRITING CHECK IS REFUSED…", "NEW test failures…") APPENDED at the end. So for
+ * any failure past the typecheck the model never saw why the draft failed, was told it "fails bun run lint", and fixed
+ * whatever failing test the slice happened to show (measured: 25 of 33 "wrote nothing" rounds; the 10-16 05:52Z lane
+ * attempt edited an unrelated test while its own check stayed red).
+ *
+ * ONE rule, no per-stage branches: the verify result's STRUCTURED evidence (the stage, the gate's own detail, the own
+ * check's failing tests with Expected/Received, the gap's edit site) goes AHEAD of the raw slice as fields of their own,
+ * each only when the slice does not already show it. When the slice already shows everything (a typecheck error at
+ * the head of the log), the prompt is today's, byte for byte.
+ */
+export function buildRepairPrompt(fv: VerifyResult, errorSiteWindow: string, editSite: string | null): string {
+  const errText = (fv.output || "").trim();
+  const slice = errText.slice(0, REPAIR_OUTPUT_SLICE);
+  const hidden = (t: string | null | undefined): t is string => typeof t === "string" && t.trim().length > 0 && !slice.includes(t.trim().slice(0, 160));
+  const failing = (fv.own?.failing ?? []).filter((f) => hidden(f.name));
+  const gateDetail = fv.draft?.gate_detail;
+  const fields: string[] = [];
+  if (hidden(gateDetail)) fields.push(`GATE DETAIL (the pre-land gate's own reason): ${gateDetail!.trim().slice(0, 1500)}`);
+  if (failing.length > 0) {
+    fields.push(`OWN CHECK STILL RED (${fv.own!.test_file}), the tests this draft must turn green:\n` + failing.slice(0, 8).map((f) => `  - ${f.name}${f.expected !== undefined || f.received !== undefined ? ` (expected ${String(f.expected ?? "?").slice(0, 160)}, received ${String(f.received ?? "?").slice(0, 160)})` : f.error ? ` (${f.error.slice(0, 200)})` : ""}`).join("\n"));
+  }
+  const lead = `A change to vessel ${fv.vessel} fails \`bun run lint\` (strict tsc + shape-dispatch agreement: every advertised shape in src/config.ts MUST have a matching case in src/routes/impulses.ts and vice-versa). Lint output:\n\n`;
+  const ask = `\n\nPick the SINGLE most-blocking error and emit ONE JSON object {"file":"repos/${fv.vessel.replace(/^repos\//, "")}/<subpath>","old_string":"<a SHORT verbatim UNIQUE substring of that file's CURRENT content>","new_string":"<corrected replacement>"} that fixes it, changing as little else as possible. For a missing dispatch case, copy the shape into the switch next to a sibling case. old_string MUST appear verbatim. No prose, no fences. Escape newlines as \\n.`;
+  if (fields.length === 0) return `${lead}${slice}${errorSiteWindow}${ask}`;
+  const head = [
+    `FAILING STAGE: ${fv.stage ?? "unknown"}`,
+    ...fields,
+    ...(editSite ? [`EDIT SITE (where this gap's fix belongs; fix the code there, do not edit another test to make it pass): ${editSite}`] : []),
+  ].join("\n");
+  return `A change to vessel ${fv.vessel} fails its pre-land gate. What failed, from the gate itself:\n${head}\n\nThe gate's output (its first ${REPAIR_OUTPUT_SLICE} chars; the reason above may lie past them):\n\n${slice}${errorSiteWindow}${ask}`;
+}
 /** What the pre-land gate blamed on THIS draft (set on a failed runVerify): each list is already net of the parent tree. */
 export type DraftFailures = { own_red: string[]; introduced: string[]; new_ts: string[]; gate_detail: string };
 /** Parent-tree runs of a gap's own check, keyed (gap, vessel, base sha, check). */
@@ -8971,7 +9012,7 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
         const fix = parseJsonObject(await llmCallWithFailover(
           // LLM egress, NOT concept-db — with failover, like the plan/refine/judge calls.
           llmEndpoints,
-          `A change to vessel ${fv.vessel} fails \`bun run lint\` (strict tsc + shape-dispatch agreement: every advertised shape in src/config.ts MUST have a matching case in src/routes/impulses.ts and vice-versa). Lint output:\n\n${errText.slice(0, 4000)}${errorSiteWindow}\n\nPick the SINGLE most-blocking error and emit ONE JSON object {"file":"repos/${fv.vessel.replace(/^repos\//, "")}/<subpath>","old_string":"<a SHORT verbatim UNIQUE substring of that file's CURRENT content>","new_string":"<corrected replacement>"} that fixes it, changing as little else as possible. For a missing dispatch case, copy the shape into the switch next to a sibling case. old_string MUST appear verbatim. No prose, no fences. Escape newlines as \\n.`,
+          buildRepairPrompt(fv, errorSiteWindow, gapEditSiteOf(pointer)),
           model,
         ));
         const ef = typeof fix?.file === "string" ? String(fix.file)
@@ -9051,6 +9092,9 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
           const osRefusal = osBase ? checkOpNoEffect({ path: efNorm, kind: "edit", old_string: String(fix.old_string) }, osBase, priorLessons) : null;
           if (osRefusal) {
             noteNoEffectRefusal("fc-repair edit", osRefusal);
+          } else if (cur.ok && typeof curContent === "string" && !curContent.includes(String(fix.old_string))) {
+            // Was silent: a repair whose anchor is not in the file wrote nothing and logged nothing (CHANGE-33/R1).
+            console.warn(`[fc-repair] edit REFUSED ${ef}: old_string not found in the file's current content (${JSON.stringify(String(fix.old_string).slice(0, 80))})`);
           } else if (cur.ok && typeof curContent === "string" && curContent.includes(String(fix.old_string))) {
             if (!preEditContent.has(efAbs) && !created.includes(efAbs)) preEditContent.set(efAbs, curContent);
             const w = await callTool(toolsEndpoint, "fs_edit", { path: efAbs, old_string: String(fix.old_string), new_string: String(fix.new_string ?? "") });

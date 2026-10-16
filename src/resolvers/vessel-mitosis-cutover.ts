@@ -30,7 +30,7 @@ import { resolveMaintenanceLeaseWrite } from "./maintenance-lease";
 import { gateLanding, KILL_SWITCH_REASON, landingsStopped } from "./push-policy.js";
 import { CUTOVER_QUIESCE_MAX_MS } from "../compose-slots.js";
 import { armingOnlyLanding } from "./check-supply-admission.js";
-import { judgeOwnCheck, loadOwnCheck, ownCheckOutcomeUpdate, OWN_CHECK_UNMEASURABLE_ESCALATE_AT, readUnlandableMarker } from "./staged-mitosis-gate.js";
+import { judgeOwnCheck, loadOwnCheck, ownCheckOutcomeUpdate, OWN_CHECK_UNMEASURABLE_ESCALATE_AT, readUnlandableMarker, gapStoreAnsweredWhy } from "./staged-mitosis-gate.js";
 
 /**
  * The landing gap's own-check dependencies: the gap-store read and the test_suite run. Module-level
@@ -2147,8 +2147,8 @@ async function landingLeaseGate(args: GitCutoverArgs): Promise<ResolverResult | 
   };
   let res: unknown;
   try { res = await ownCheckDeps.readGap({ type: "substrateGap", id: gapId, limit: 1 }); } catch (err) { return unreadable(`gap store read threw: ${(err as Error).message.slice(0, 200)}`); }
-  const r = res as { shape?: string; body?: { gaps?: unknown } } | null;
-  if (!r || r.shape !== "substrateGap" || !Array.isArray(r.body?.gaps)) return unreadable(`gap store answered ${r?.shape ?? "nothing"}`);
+  const r = res as { shape?: string; body?: { gaps?: unknown; detail?: unknown } } | null;
+  if (!r || r.shape !== "substrateGap" || !Array.isArray(r.body?.gaps)) return unreadable(gapStoreAnsweredWhy(r));
   const row = (r.body!.gaps as Array<Record<string, unknown>>).find((g) => String(g?.["id"]) === gapId);
   if (!row) return null;
   const current = landingLeaseOf(row["classification_metadata"]);

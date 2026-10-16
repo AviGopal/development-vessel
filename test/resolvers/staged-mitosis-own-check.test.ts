@@ -397,6 +397,9 @@ describe("own-check gate: store outage, counters, unverified landings", () => {
     const r = await resolveVesselMitosisCutover(deferredPointer(s) as never);
     expect((r.body as Record<string, unknown>)["refuse_class"]).toBe("gap_store_unavailable");
     expect(await headSubject(s.hostRepoRoot)).toBe("baseline");
+    // [MUST-FAIL] (CHANGE-30b) the refusal carries the holder's own detail, so a timeout, a 401 and a dropped
+    // socket are told apart in the log instead of all reading "gap store answered structuredError".
+    expect(String((r.body as Record<string, unknown>)["refusal_reason"])).toContain("GAP_STORE_ENDPOINT unreachable");
   });
 
   it("own_check_failed and own_check_unmeasurable are counted separately", async () => {

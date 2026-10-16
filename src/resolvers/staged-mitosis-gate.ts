@@ -163,6 +163,17 @@ export type OwnCheckLoad =
   | { status: "unreadable"; why: string };
 
 /** Read the landing gap's row by id and extract its own test_suite check. */
+/**
+ * Why a gap-store read was not a substrateGap answer, WITH the holder's own detail (CHANGE-30b). A forwarded read
+ * that failed comes back as a structuredError whose body.detail says which way it failed (substrate-gap.ts
+ * forwardToGapStore: "answered HTTP <status>" vs "unreachable: <timeout|socket closed|...>"); logging only the shape
+ * made a 401, a timeout and a dropped socket read identically. One definition, used by every gap-store read here.
+ */
+export function gapStoreAnsweredWhy(r: { shape?: string; body?: { detail?: unknown } } | null | undefined): string {
+  const detail = r?.body?.detail;
+  return `gap store answered ${r?.shape ?? "nothing"}${typeof detail === "string" && detail.trim() ? `: ${detail.trim().slice(0, 200)}` : ""}`;
+}
+
 export async function loadOwnCheck(
   vessel: string,
   gapId: string,
@@ -175,9 +186,9 @@ export async function loadOwnCheck(
   } catch (err) {
     return { status: "unreadable", why: `gap store read threw: ${(err as Error).message}` };
   }
-  const r = res as { shape?: string; body?: { gaps?: unknown } } | null;
+  const r = res as { shape?: string; body?: { gaps?: unknown; detail?: unknown } } | null;
   if (!r || r.shape !== "substrateGap" || !Array.isArray(r.body?.gaps)) {
-    return { status: "unreadable", why: `gap store answered ${r?.shape ?? "nothing"}` };
+    return { status: "unreadable", why: gapStoreAnsweredWhy(r) };
   }
   const row = (r.body!.gaps as Array<Record<string, unknown>>).find((g) => String(g?.["id"]) === gapId);
   if (!row) return { status: "none", why: `no gap row ${gapId}` };

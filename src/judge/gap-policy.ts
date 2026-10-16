@@ -14,7 +14,7 @@
 import { existsSync, readdirSync, readlinkSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { gapLineageRoot } from "../resolvers/staged-mitosis-gate.js";
-import { METABOB_API_KEY, lookupShape, describeLookup, discoveryFailureBackoffMs, __resetDiscoveryForTests } from "../config.js";
+import { METABOB_API_KEY, METABOB_ENDPOINT, lookupShape, describeLookup, discoveryFailureBackoffMs, __resetDiscoveryForTests } from "../config.js";
 import { evaluatorTreeRoot } from "../lib/evaluator-tree.js";
 
 // The evaluator's tree (lib/evaluator-tree.ts), the same alias gap-to-feature uses.
@@ -219,9 +219,9 @@ export async function substrateNodeEndpoints(): Promise<SubstrateNodes> {
 }
 /** discoverResolveUrls restricted to this substrate's own producers. A failed lookup, or an unreadable
  *  node list, is `{ok:false}`; `foreign` counts the producers set aside. */
-export async function discoverOwnResolveUrls(shape: string): Promise<{ ok: true; urls: string[]; producers: PolicyProducer[]; foreign: number } | { ok: false; why: string; lookup_failed: boolean }> {
+export async function discoverOwnResolveUrls(shape: string): Promise<{ ok: true; urls: string[]; producers: PolicyProducer[]; foreign: number } | { ok: false; why: string; lookup_failed: boolean; adapter_outdated?: true }> {
   const r = await lookupShape(shape);
-  if (!r.ok) return { ok: false, why: describeLookup(r), lookup_failed: true };
+  if (!r.ok) return { ok: false, why: describeLookup(r), lookup_failed: true, ...(r.reason === "adapter_outdated" ? { adapter_outdated: true as const } : {}) };
   // The node list matters only for a peer row that could be own (a listed node's local row). With
   // none, it is not read: a standalone node's reads never depend on it.
   const mayBeOwnPeer = r.producers.some((p) => { const v = p as OwnProducerView; return typeof v.origin === "string" && v.origin.startsWith("peer:") && v.originUpstream === "local"; });
@@ -276,6 +276,8 @@ const foreignNote = (n: number): string => (n > 0 ? ` (${n} non-own producer(s) 
 export function __resetPolicyReadsForTests(): void {
   spendEnvelopeCache = null;
   autonomyScopeCache = null;
+  autonomyScopeLastGood = null;
+  autonomyScopeStaleReuses = 0;
   substrateNodesCache = null;
   __resetDiscoveryForTests();
 }
@@ -391,7 +393,12 @@ export async function spendEnvelopeAllows(): Promise<SpendEnvelopeVerdict> {
 // lists paths, is a misconfiguration and closed too. An unreadable scope excludes everything
 // autonomous (fail closed), including on a fresh process that has not read one yet.
 // Directed work never consults it. Cached 30 s.
-export type AutonomyScope = { excluded: string[]; readable: boolean; reason: string; absent?: boolean; lookup_failed?: boolean; requireFalsifierClasses?: string[]; holds?: ScopeHold[] };
+export type AutonomyScope = { excluded: string[]; readable: boolean; reason: string; absent?: boolean; lookup_failed?: boolean; requireFalsifierClasses?: string[]; holds?: ScopeHold[];
+  /** The live read FAILED in transport (no discovery answer, no producer, a silent producer, a throw): a read that could not
+   *  happen, as against an explicit answer (absent, misconfigured), which is never stood in for. */
+  transport?: boolean;
+  /** This is the LAST GOOD scope reused inside its bounded staleness because the live read failed (CHANGE-31). */
+  stale?: { age_ms: number; bound_ms: number; live_reason: string; reuse: number } };
 
 /**
  * A TIGHTENING HOLD MUST NOT BLOCK THE REPAIR OF ITS OWN REGRESSION (scope earn-in, qa ruling 10-05). The evaluator
@@ -451,17 +458,80 @@ export function gapInHoldLineage(gap: Record<string, unknown>, hold: ScopeHold, 
   return gapCheckKeys(gap).some((k) => checks.has(k));
 }
 let autonomyScopeCache: { at: number; v: AutonomyScope } | null = null;
+/**
+ * ONE TUNING READER: a tuning row's numeric value (activity-api GET /v2/tuning-params/:name), null when absent or
+ * unreadable. gap-landing-verdict's auto-revert reads its rows through this too.
+ */
+export async function readTuningNumber(name: string): Promise<number | null> {
+  try {
+    const res = await fetch(`${METABOB_ENDPOINT}/v2/tuning-params/${encodeURIComponent(name)}`, { method: "GET", headers: { Authorization: `ApiKey ${METABOB_API_KEY}` }, signal: AbortSignal.timeout(5_000) });
+    if (!res.ok) return null;
+    const data = (await res.json()) as { value?: unknown };
+    return typeof data.value === "number" && Number.isFinite(data.value) ? data.value : null;
+  } catch { return null; }
+}
+/** The shaped bound on reusing a last-good autonomyScope (CHANGE-31); seeded create-only at 600 s (activity-api migration 222). */
+export const AUTONOMY_SCOPE_STALE_REUSE_ROW = "autonomy_scope.stale_reuse_s";
+/**
+ * BOUNDED STALE REUSE (CHANGE-31; user ruling ~2026-10-16T05:57Z, "Full bounded reuse": a stale scope may admit and refuse
+ * for a bounded time). Pure. A LIVE read always wins: a readable live scope is returned as is. When the live read FAILED
+ * IN TRANSPORT and a last-good scope is younger than the bound, the last-good scope is used for every decision
+ * (selection, the compose floor, landing), marked stale with its age. Past the bound, with no last-good, with a bound of
+ * 0 (the row absent or unreadable), or for an explicit answer (absent, misconfigured): the live result, fail-closed as
+ * before.
+ */
+export function applyStaleReuse(live: AutonomyScope, lastGood: { at: number; v: AutonomyScope } | null, nowMs: number, boundMs: number, reuse = 1): AutonomyScope {
+  if (live.readable || !live.transport || !lastGood || !(boundMs > 0)) return live;
+  const age = nowMs - lastGood.at;
+  if (!(age >= 0 && age < boundMs)) return live;
+  return { ...lastGood.v, reason: `${lastGood.v.reason} (STALE: last good ${Math.round(age / 1000)} s ago, bound ${Math.round(boundMs / 1000)} s; live read failed: ${live.reason})`, stale: { age_ms: age, bound_ms: boundMs, live_reason: live.reason, reuse } };
+}
+type AutonomyScopeDeps = { live: () => Promise<AutonomyScope>; boundS: () => Promise<number | null>; now: () => number };
+let autonomyScopeDeps: AutonomyScopeDeps | null = null;
+let autonomyScopeLastGood: { at: number; v: AutonomyScope } | null = null;
+let autonomyScopeStaleReuses = 0;
+/** Tests only: replace the live read / the bound read / the clock (null restores them), and reset the in-memory last-good. */
+export function __setAutonomyScopeDepsForTests(d: Partial<AutonomyScopeDeps> | null): void {
+  autonomyScopeDeps = d ? { live: d.live ?? readAutonomyScopeLive, boundS: d.boundS ?? (() => readTuningNumber(AUTONOMY_SCOPE_STALE_REUSE_ROW)), now: d.now ?? Date.now } : null;
+  autonomyScopeCache = null; autonomyScopeLastGood = null; autonomyScopeStaleReuses = 0;
+}
 export async function autonomyScope(): Promise<AutonomyScope> {
-  // ABSENT is held for the normal TTL like a readable scope (a successful read; see spendEnvelopeAllows).
-  if (autonomyScopeCache && Date.now() - autonomyScopeCache.at < (autonomyScopeCache.v.readable || autonomyScopeCache.v.absent ? 30_000 : policyUnreadableRetryMs())) return autonomyScopeCache.v;
+  const deps: AutonomyScopeDeps = autonomyScopeDeps ?? { live: readAutonomyScopeLive, boundS: () => readTuningNumber(AUTONOMY_SCOPE_STALE_REUSE_ROW), now: Date.now };
+  const now = deps.now();
+  // ABSENT is held for the normal TTL like a readable scope (a successful read; see spendEnvelopeAllows). A STALE reuse is
+  // held only for the unreadable retry interval, so the live read is tried again (and wins) within seconds.
+  if (autonomyScopeCache && now - autonomyScopeCache.at < ((autonomyScopeCache.v.readable && !autonomyScopeCache.v.stale) || autonomyScopeCache.v.absent ? 30_000 : policyUnreadableRetryMs())) return autonomyScopeCache.v;
+  const live = await deps.live();
+  let v = live;
+  if (live.readable) {
+    autonomyScopeLastGood = { at: now, v: live }; // in memory only: a restart has no last-good and fails closed until a good read
+  } else if (live.transport && autonomyScopeLastGood) {
+    const boundS = await deps.boundS();
+    const boundMs = typeof boundS === "number" && Number.isFinite(boundS) && boundS > 0 ? boundS * 1000 : 0; // an unreadable bound is 0: fail closed
+    const reused = applyStaleReuse(live, autonomyScopeLastGood, now, boundMs, autonomyScopeStaleReuses + 1);
+    if (reused.stale) {
+      autonomyScopeStaleReuses += 1;
+      v = reused;
+      console.log(`[policy-read] autonomyScope: STALE REUSE #${autonomyScopeStaleReuses} of the last good scope (age ${Math.round(reused.stale.age_ms / 1000)} s, bound ${Math.round(boundMs / 1000)} s, ${reused.excluded.length} excluded path(s)); live read failed: ${live.reason}`);
+    } else {
+      console.log(`[policy-read] autonomyScope: no stale reuse (last good ${Math.round((now - autonomyScopeLastGood.at) / 1000)} s old, bound ${Math.round(boundMs / 1000)} s): closed`);
+    }
+  }
+  autonomyScopeCache = { at: now, v };
+  return v;
+}
+/** The LIVE autonomyScope read (unchanged by CHANGE-31 apart from naming a transport failure as such). */
+async function readAutonomyScopeLive(): Promise<AutonomyScope> {
   let v: AutonomyScope;
   try {
     const pool = await discoverOwnResolveUrls("poolImpulse");
     if (!pool.ok) {
-      v = { excluded: [], readable: false, ...(pool.lookup_failed ? { lookup_failed: true } : {}), reason: pool.why };
+      // An OUTDATED ias adapter is a standing condition of this process, not a blip: it fails closed with no further
+      // read (policy-reads-discovery-failure.test.ts), so it is never stood in for.
+      v = { excluded: [], readable: false, ...(pool.adapter_outdated ? {} : { transport: true }), ...(pool.lookup_failed ? { lookup_failed: true } : {}), reason: pool.why };
       console.log(policyReadLine("autonomyScope", { asked: [], verdict: `closed (unreadable: ${v.reason})` }));
     } else if (pool.producers.length === 0) {
-      v = { excluded: [], readable: false, reason: "no " + (pool.foreign > 0 ? "own-substrate " : "") + "poolImpulse producer discovered" + foreignNote(pool.foreign) };
+      v = { excluded: [], readable: false, transport: true, reason: "no " + (pool.foreign > 0 ? "own-substrate " : "") + "poolImpulse producer discovered" + foreignNote(pool.foreign) };
       console.log(policyReadLine("autonomyScope", { asked: [], verdict: `closed (unreadable: ${v.reason})` }));
     } else {
       const read = await readNewestPoolRecord("autonomyScope", pool.producers);
@@ -470,7 +540,7 @@ export async function autonomyScope(): Promise<AutonomyScope> {
       const raw = body.excluded_paths;
       const excluded = Array.isArray(raw) ? raw.filter((e): e is string => typeof e === "string" && e.trim().length > 0).map((e) => e.trim()) : [];
       if (read.silent.length > 0) {
-        v = { excluded: [], readable: false, reason: "no answer from " + read.silent[0]!.url };
+        v = { excluded: [], readable: false, transport: true, reason: "no answer from " + read.silent[0]!.url };
         line(`closed (unreadable: ${v.reason})`);
       } else if (!read.newest) {
         v = { excluded: [], readable: false, absent: true, reason: `autonomyScope absent: no record among ${read.answered.length} answering own producer(s) (no scope must be explicit: {unrestricted: true})` };
@@ -493,10 +563,9 @@ export async function autonomyScope(): Promise<AutonomyScope> {
       }
     }
   } catch (err) {
-    v = { excluded: [], readable: false, reason: "autonomyScope unreadable: " + String(err) };
+    v = { excluded: [], readable: false, transport: true, reason: "autonomyScope unreadable: " + String(err) };
     console.log(policyReadLine("autonomyScope", { asked: [], verdict: `closed (${v.reason})` }));
   }
-  autonomyScopeCache = { at: Date.now(), v };
   return v;
 }
 /** The scope entry that excludes `path` from autonomous work, or null. An unreadable scope excludes

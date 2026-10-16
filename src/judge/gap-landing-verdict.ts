@@ -30,7 +30,7 @@ import { METABOB_API_KEY, METABOB_ENDPOINT, GOAL_HOST_VESSEL_ENDPOINT } from "..
 import { readOperatorHold } from "../lib/operator-hold.js";
 import { armingOnlyLanding } from "../resolvers/check-supply-admission.js";
 import { gapEditSite, isInfraRefusalBody, isParkingDisposition, liftLandVerificationHold, landVerdictIsMeasured, isNonAttemptComposeResult, isTerminalRefusalResult } from "./gap-eligibility.js";
-import { vesselsCloneRoot, discoverOwnResolveUrls, postEnvelopeRead, autonomyScope, autonomyScopeExcludes, type AutonomyScope } from "./gap-policy.js";
+import { vesselsCloneRoot, discoverOwnResolveUrls, postEnvelopeRead, autonomyScope, autonomyScopeExcludes, readTuningNumber, type AutonomyScope } from "./gap-policy.js";
 import { isLiteralOnlyStepClose, verifyGapCondition, type GapCheckVerdict, evaluateGapCheck, shaWasRevertedInAnyClone, landedCommitVerdict, sweepGitOut } from "./gap-check-judge.js";
 /** The human-question channel (ui-write-passthrough), handed in per call: an effect the lane keeps open (qa 10.2). */
 export type Ask = (pointer: Record<string, unknown>) => Promise<unknown>;
@@ -1364,14 +1364,8 @@ function systemdUnitStartedAt(vessel: string): number {
     return m ? Number(m[1]) : 0;
   } catch { return 0; } // unit unreadable: cannot tell what is running here
 }
-async function readTuningRow(name: string): Promise<number | null> {
-  try {
-    const res = await fetch(`${METABOB_ENDPOINT}/v2/tuning-params/${encodeURIComponent(name)}`, { method: "GET", headers: { Authorization: `ApiKey ${METABOB_API_KEY}` }, signal: AbortSignal.timeout(10_000) });
-    if (!res.ok) return null;
-    const data = (await res.json()) as { value?: unknown };
-    return typeof data.value === "number" && Number.isFinite(data.value) ? data.value : null;
-  } catch { return null; }
-}
+/** One tuning reader (gap-policy.ts readTuningNumber). */
+const readTuningRow = (name: string): Promise<number | null> => readTuningNumber(name);
 const realAutoRevertDeps: AutoRevertDeps = {
   cutover: async (p) => (await import("../resolvers/vessel-mitosis-cutover.js")).resolveVesselMitosisCutover(p as never),
   unitStartedAt: systemdUnitStartedAt,

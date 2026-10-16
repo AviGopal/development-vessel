@@ -3,6 +3,7 @@ import type { ResolverResult } from "./types.js";
 import { readdir, readFile, writeFile, rename, mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { fetchWithRetry } from "./http-retry.js";
+import { isMetaTemplate } from "../lib/meta-templates.js";
 
 export interface SubstrateHealthTickPointer {
   type: "substrate_health_tick";
@@ -228,9 +229,12 @@ export async function resolveSubstrateHealthTick(
 
   const activeNormIds = new Set(activeTemplates.map(t => normalizeId(t.id)));
 
-  // Each active template with traces gets a pair from its execution counts.
+  // Each active template with traces gets a pair from its execution counts. META templates (lib/meta-templates.ts, the
+  // shared definition: routing activities that run no task of their own) are structural, not learned arms, and are
+  // left out (CHANGE DB1): their normal runs are COUNTED rather than traced when lifecycle.subscriber_trace_mode = 1,
+  // so only their failures would reach this window and their pair would read as failing.
   for (const [id, counts] of traceCounts) {
-    if (activeNormIds.has(normalizeId(id))) {
+    if (activeNormIds.has(normalizeId(id)) && !isMetaTemplate(id)) {
       variantPairs.push({ alpha: counts.success + 1, beta: counts.fail + 1 });
     }
   }

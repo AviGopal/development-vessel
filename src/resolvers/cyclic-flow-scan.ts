@@ -175,6 +175,10 @@ export async function resolveCyclicFlowScan(pointer: CyclicFlowScanPointer): Pro
       // one to trend for "stabilizing while growing"; lower is more stable.
       cyclic_flow_fraction_nonmeta: Number(nonMetaFraction.toFixed(4)),
       nonmeta_dispatches: nonMetaTotal,
+      // CHANGE DB1: with lifecycle.subscriber_trace_mode = 1, NORMAL runs of the meta lifecycle subscribers
+      // (validator-dispatch, slot-binding) are counted, not traced, so they are not in dispatches_examined or
+      // cyclic_flow_fraction. The non-meta scalar is unaffected.
+      aggregate_excludes: "normal (counted) runs of the meta lifecycle subscribers when lifecycle.subscriber_trace_mode = 1",
       zero_work_dispatches: aggZero,
       wasted_cycle_templates: wasted.length,
       gaps_emitted,

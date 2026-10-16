@@ -3065,6 +3065,59 @@ export function autonomyFloorPaths(
   return { paths: [...new Set(paths)], unmapped };
 }
 
+// ADDITIVE REGISTRATION AT THE FLOOR (gap-policy.ts additiveRegistration, 7939b362). The cutover admits a landing whose
+// only excluded files are a vessel's two registration files when the change is a pure, single, new-shape registration
+// of a new module; but an autonomous compose that writes those files is withheld HERE first, so the rule never ran
+// (0 "ADDITIVE REGISTRATION" lines on either compose node, 7 d) and every missing-producer compose died before landing.
+// The same rule now runs at the floor, over the same evidence the cutover reads: every file the compose wrote in that
+// vessel, before = the worktree's HEAD, after = the worktree file. Anything else (another excluded hit, more than one
+// vessel, an unreadable file, a rule violation) still withholds; the cutover re-applies the rule at landing.
+export async function additiveRegistrationAtFloor(
+  hits: readonly string[],
+  paths: readonly string[],
+  io: {
+    before: (vessel: string, rel: string) => Promise<string | null>;
+    after: (vessel: string, rel: string) => Promise<string | null>;
+    advertised: (shape: string) => Promise<boolean | null>;
+  },
+): Promise<{ admitted: boolean; why: string; considered: boolean }> {
+  const { REGISTRATION_FILES, additiveRegistration } = await import("../judge/gap-policy.js");
+  const vessels = new Set(hits.map((h) => /^repos\/([^/]+)\//.exec(h)?.[1] ?? ""));
+  // considered = the rule actually ran (every hit was one vessel's registration file); only then is its reason news.
+  if (hits.length === 0 || vessels.size !== 1 || vessels.has("")) return { admitted: false, why: "the excluded hits do not name exactly one vessel", considered: false };
+  const v = [...vessels][0]!;
+  const reg = new Set<string>(REGISTRATION_FILES.map((f) => `repos/${v}/${f}`));
+  const other = hits.filter((h) => !reg.has(h));
+  if (other.length > 0) return { admitted: false, why: `excluded path(s) other than the registration files: ${other.join(", ")}`, considered: false };
+  const prefix = `repos/${v}/`;
+  const rels = [...new Set(paths.filter((p) => p.startsWith(prefix)).map((p) => p.slice(prefix.length)))];
+  const staged = await Promise.all(rels.map(async (rel) => ({ path: rel, before: await io.before(v, rel), after: await io.after(v, rel) })));
+  const verdict = await additiveRegistration(staged, io.advertised);
+  return verdict.ok ? { admitted: true, why: `new shape ${verdict.shape} -> ${verdict.module} (${verdict.fn})`, considered: true } : { admitted: false, why: verdict.why, considered: true };
+}
+
+/** The floor's readers over a compose workspace: HEAD blob and worktree file of a vessel; null when absent or unisolated. */
+function floorRegistrationIo(ws: ComposeWorkspace | undefined) {
+  return {
+    before: async (vessel: string, rel: string): Promise<string | null> => {
+      const root = ws?.rootFor(vessel);
+      if (!root) return null;
+      const r = await runGit("git", ["-C", root, "show", `HEAD:${rel}`], root, { timeoutMs: 15_000 });
+      return r.exit_code === 0 ? r.stdout : null;
+    },
+    after: async (vessel: string, rel: string): Promise<string | null> => {
+      const root = ws?.rootFor(vessel);
+      if (!root) return null;
+      try { return await parkReadFile(floorPosix.join(root, rel), "utf8"); } catch { return null; }
+    },
+    advertised: async (shape: string): Promise<boolean | null> => {
+      const { lookupShape } = await import("../config.js");
+      const r = await lookupShape(shape);
+      return r.ok ? (r.producers as unknown[]).length > 0 : null;
+    },
+  };
+}
+
 // Apply parsed exact edits in order; null unless every old text occurs exactly once at its
 // turn, so an earlier new text can neither consume nor duplicate a later anchor.
 function spliceExactEdits(content: string, edits: Array<{ old: string; new: string }>): string | null {
@@ -9056,13 +9109,18 @@ const verbatimOps = (pointer as { directed?: boolean }).directed === true ? synt
         scopeWithheld = true;
         console.log(`[feature-compose] autonomy-scope floor: WITHHELD FAVORABLE - unmappable written path(s), failing closed: ${floorInput.unmapped.map((u) => `${u.path} (${u.reason})`).join(", ")}${scopeHits.length > 0 ? `; excluded path(s) also hit: ${scopeHits.join(", ")}` : ""}`);
       } else if (scopeHits.length > 0) {
-        verdict = "UNFAVORABLE";
-        if (floor.unreadable) {
-          policyUnreadable = floor.unreadable;
-          console.log(`[feature-compose] autonomy-scope floor: WITHHELD FAVORABLE - ${policyUnreadable}; failing closed, not a draft defect`);
+        const additive = floor.unreadable ? null : await additiveRegistrationAtFloor(scopeHits, floorInput.paths, floorRegistrationIo(ws));
+        if (additive?.admitted) {
+          console.log(`[feature-compose] autonomy-scope floor: ADDITIVE REGISTRATION admitted on ${scopeHits.join(", ")}: ${additive.why}; the cutover re-applies the rule`);
         } else {
-          scopeWithheld = true;
-          console.log(`[feature-compose] autonomy-scope floor: WITHHELD FAVORABLE - autonomous compose touched excluded path(s): ${scopeHits.join(", ")}`);
+          verdict = "UNFAVORABLE";
+          if (floor.unreadable) {
+            policyUnreadable = floor.unreadable;
+            console.log(`[feature-compose] autonomy-scope floor: WITHHELD FAVORABLE - ${policyUnreadable}; failing closed, not a draft defect`);
+          } else {
+            scopeWithheld = true;
+            console.log(`[feature-compose] autonomy-scope floor: WITHHELD FAVORABLE - autonomous compose touched excluded path(s): ${scopeHits.join(", ")}${additive?.considered ? ` (additive registration refused: ${additive.why})` : ""}`);
+          }
         }
       }
     } catch (err) {

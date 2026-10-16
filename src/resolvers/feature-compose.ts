@@ -4660,7 +4660,7 @@ export function fileScopeGate<O extends { kind: string; path: string; content?: 
   for (const op of ops) {
     if (!onTargetPath(op)) continue;
     const src = op.kind === "create_file" ? (op.content ?? "") : (op.new_string ?? "");
-    for (const m of src.matchAll(/export\s+(?:const|function|class|type|interface)\s+([A-Za-z_$][\w$]*)/g)) if (m[1] && m[1].length > 2) newSymbols.add(m[1]);
+    for (const m of src.matchAll(/export\s+(?:async\s+)?(?:const|function|class|type|interface)\s+([A-Za-z_$][\w$]*)/g)) if (m[1] && m[1].length > 2) newSymbols.add(m[1]);
   }
   const wiresNewSymbol = (op: O): boolean => { const ns = op.new_string ?? ""; for (const sym of newSymbols) if (ns.includes(sym)) return true; return false; };
   const isOff = (op: O): boolean => (op.kind === "edit" || op.kind === "replace_lines") && !targetFiles.includes(norm(op.path)) && !wiresNewSymbol(op);

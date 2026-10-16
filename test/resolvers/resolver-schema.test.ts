@@ -14,7 +14,8 @@
 // resolver, rather than asserting the declaration against itself.
 import { afterAll, describe, expect, it } from "bun:test";
 import { stubGapEventPublish } from "./stub-gap-event-publish.js";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 // Gap writes here must not reach the live event bus (test/resolvers/stub-gap-event-publish.ts).
@@ -187,5 +188,20 @@ describe("a poisoned row heals on the next write", () => {
     const gap = (body(read).gaps as Array<Record<string, unknown>>)[0]!;
     expect(String(gap.created_at)).not.toContain("{{");
     expect(Number.isNaN(Date.parse(String(gap.created_at)))).toBe(false);
+  });
+});
+
+// CHANGE-37e: a contract field may declare `constant: true` (the same value on every call), the one flag author-producer
+// reads to allow a concrete value in a reusable template (37d″). Every other field is a per-call input.
+describe("CHANGE-37e: a contract field can declare itself constant", () => {
+  it("[MUST-FAIL] the contract field type declares an optional boolean `constant`", () => {
+    const src = readFileSync(join(import.meta.dir, "..", "..", "src", "resolvers", "resolver-schema.ts"), "utf8");
+    expect(src).toMatch(/export interface ContractField \{[^}]*\bconstant\?: boolean;/);
+  });
+  it("[CONTROL] every served field's `constant` is a boolean or absent, so a reader can trust `constant === true`", () => {
+    for (const shape of CONTRACT_SHAPES) {
+      const body = resolveResolverSchema({ shape }).body as { fields?: Array<Record<string, unknown>> };
+      for (const f of body.fields ?? []) expect(f["constant"] === undefined || typeof f["constant"] === "boolean").toBe(true);
+    }
   });
 });

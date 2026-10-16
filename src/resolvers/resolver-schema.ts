@@ -38,15 +38,23 @@ export interface ResolverSchemaResult {
   known: boolean;
   /** Key the args nest under, e.g. "gap". Absent/empty ⇒ the resolver takes a FLAT pointer. */
   envelope?: string;
-  fields?: Array<{ name: string; required: boolean; type: string; }>;
+  fields?: Array<ContractField>;
   required?: string[];
   invocation?: string;
 }
 
+/**
+ * One pointer field of a contract. `constant: true` declares that the field takes the SAME value on every call (a mode,
+ * a format), so a template that invokes this shape may hold a concrete value for it. Any other field is a per-call
+ * input: a reusable template must bind it from a slot, never freeze one call's value (author-producer reads this flag;
+ * CHANGE-37e). Omitted means not constant.
+ */
+export interface ContractField { name: string; required: boolean; type: string; constant?: boolean; }
+
 interface Contract {
   /** Omit for shapes whose resolver reads a flat pointer. */
   envelope?: string;
-  fields: Array<{ name: string; required: boolean; type: string; }>;
+  fields: Array<ContractField>;
   /** Notes the synthesizer benefits from that a field list cannot express. */
   notes?: string;
 }

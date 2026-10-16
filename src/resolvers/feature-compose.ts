@@ -364,9 +364,13 @@ export async function resumeParkedLanding(pointer: FeatureComposePointer, park: 
       await restoreLive();
       console.log(`[feature-compose] cutover did not land - verified patch parked for ${gapId}`);
     }
+    // The same definition of "deferred" as a fresh compose's landing (CHANGE-30a): a resumed cutover that deferred
+    // again is a non-attempt with its park kept, never UNFAVORABLE.
+    const resumedVerdict = landingVerdictFromCutovers("FAVORABLE", [cut.body]);
+    const resumedDeferred = resumedVerdict === "BUSY";
     return {
       shape: "featureComposeReport",
-      body: { ok: pushed, verdict: pushed ? "FAVORABLE" : "UNFAVORABLE", resumed_from: park.compose_id, parked: !pushed, cutovers: [{ vessel: park.vessel, result: cut.body }] },
+      body: { ok: pushed, verdict: resumedVerdict, resumed_from: park.compose_id, parked: !pushed, ...(resumedDeferred ? { failure_kind: "environment", refuse_class: String(r["refuse_class"] ?? "deferred") } : {}), cutovers: [{ vessel: park.vessel, result: cut.body }] },
     };
   } catch (err) {
     await restoreLive();
@@ -5730,10 +5734,33 @@ export async function resolveFeatureCompose(pointer: FeatureComposePointer): Pro
 export function cutoverPendingIn(outcome: ResolverResult | null): boolean {
   const cutovers = ((outcome?.body ?? {}) as { cutovers?: unknown }).cutovers;
   if (!Array.isArray(cutovers)) return false;
-  return cutovers.some((c) => {
-    const r = ((c ?? {}) as { result?: unknown }).result as Record<string, unknown> | undefined;
-    return !!r && typeof r === "object" && (r["preserve_pending"] === true || r["deferred"] === true);
-  });
+  return cutovers.some((c) => cutoverResultPending(((c ?? {}) as { result?: unknown }).result));
+}
+
+/**
+ * THE ONE DEFINITION OF A DEFERRED CUTOVER (CHANGE-30a). A cutover result is PENDING when it deferred, keeping its
+ * staged tree and pending lock (preserve_pending), or returned cutoverDeferred (deferred: the change window was
+ * held, the gap store was unreadable). Every site that asks "did this landing defer?" uses this.
+ */
+export function cutoverResultPending(r: unknown): boolean {
+  return !!r && typeof r === "object" && ((r as Record<string, unknown>)["preserve_pending"] === true || (r as Record<string, unknown>)["deferred"] === true);
+}
+/** Did a cutover result PUSH (a sha on the remote)? */
+export function cutoverResultPushed(r: unknown): boolean {
+  const o = (r ?? {}) as Record<string, unknown>;
+  return o["push_status"] === "pushed" && typeof o["new_git_sha"] === "string" && String(o["new_git_sha"]).trim() !== "";
+}
+/**
+ * The landing verdict a compose takes from its cutovers when it asked to land (CHANGE-30a). Any push → keep the
+ * draft's verdict. Nothing pushed and a cutover DEFERRED → "BUSY": a NON-ATTEMPT (isNonAttemptComposeResult), the
+ * verified patch stays parked and the next compose for the gap resumes it; never UNFAVORABLE (that charged the
+ * drafter, wrote a compose lesson on the gap and started check-supply's 24 h backoff for an environment condition)
+ * and never FAVORABLE (goal-host penalises FAVORABLE-but-not-landed as hollow). Nothing pushed and nothing
+ * deferred → "UNFAVORABLE", as before.
+ */
+export function landingVerdictFromCutovers(draftVerdict: string, results: ReadonlyArray<unknown>): string {
+  if (results.length === 0 || results.some(cutoverResultPushed)) return draftVerdict;
+  return results.some(cutoverResultPending) ? "BUSY" : "UNFAVORABLE";
 }
 
 /**
@@ -9860,7 +9887,7 @@ const earlyAttempt = await Promise.race([
     // "change window held" with spaces and so never matched it — a lease deferral
     // was classified as a `fix` failure and charged to the drafter, for an
     // environment condition the drafter did not cause and cannot fix.
-    if (/env_change_window_held|change[_ ]window( lease)? held|"deferred"\s*:\s*true/i.test(t)) return "env_change_window_held";
+    if (/env_change_window_held|change[_ ]window( lease)? held/i.test(t) || (cuts ?? []).some((c) => cutoverResultPending(((c ?? {}) as { result?: unknown }).result))) return "env_change_window_held";
     if (/restarted \(cutover\)|cutover race/i.test(t)) return "env_cutover_race";
     if (/restarted \(verify\)|verify race/i.test(t)) return "env_verify_race";
     return null;
@@ -9875,17 +9902,11 @@ const earlyAttempt = await Promise.race([
   // FAVORABLE, the whole `if (verdict !== "FAVORABLE")` block that follows was
   // skipped, so no compose lesson and no gap write-back was produced for a
   // failed landing. Test the same evidence the live check uses.
-  if (
-    pointer.land &&
-    cutovers.length > 0 &&
-    cutovers.every((c: unknown) => {
-      const r = (((c as Record<string, unknown>)?.result) ?? {}) as Record<string, unknown>;
-      const pushed = r["push_status"] === "pushed" && typeof r["new_git_sha"] === "string" && String(r["new_git_sha"]).trim() !== "";
-      return !pushed;
-    })
-  ) {
-    verdict = "UNFAVORABLE";
-  }
+  // ONE DEFINITION OF "DEFERRED" (CHANGE-30a): a landing whose cutover deferred is a non-attempt (BUSY), not a
+  // refusal; its park is kept and its gap gets no compose lesson for an environment condition.
+  const cutoverResults = cutovers.map((c: unknown) => ((c as Record<string, unknown>)?.result));
+  const landingDeferred = !!pointer.land && cutovers.length > 0 && landingVerdictFromCutovers(verdict, cutoverResults) === "BUSY";
+  if (pointer.land && cutovers.length > 0) verdict = landingVerdictFromCutovers(verdict, cutoverResults) as typeof verdict;
   // NO-EFFECT REFUSALS ARE RECORDED, AND A REPEAT ESCALATES (09-30). Every refusal goes on the gap as a
   // no_effect_region lesson (with the locked region's text sha); a region refused again on the same gap is
   // handed to the existing decompose/investigate escalation and journaled, never retried silently.
@@ -9898,7 +9919,7 @@ const earlyAttempt = await Promise.race([
     refusalEvidence = { refusals: noEffectRefusals, ...(escalation ? { escalation } : {}) };
   }
   let refusalsRecorded = false;
-  if (verdict !== "FAVORABLE") {
+  if (verdict !== "FAVORABLE" && !landingDeferred) {
     const envClass = classifyEnvironmentFailure(cutovers);
     // What the next drafter reads as "Verify failure from prior attempt" (priorAttemptFeedbackBlock): this draft's
     // failure, never the log's first error or its tail, both of which can be red on the parent (verifyFailureReason).
@@ -10179,8 +10200,9 @@ for (const _c of cutovers as Array<Record<string, unknown>>) { const _ops = (((_
     if (anyCutoverPushed) await deleteParkedLanding(String(pointer.gap.id));
     else console.log(`[feature-compose] cutover did not land — verified patch parked for ${pointer.gap.id}`);
   }
-  const allCutoversRefused = pointer.land && verdict === "FAVORABLE" && cutovers.length > 0 && !anyCutoverPushed;
-  const effectiveVerdict = allCutoversRefused ? "UNFAVORABLE" : verdict;
+  // The same definition as the flip above (CHANGE-30a); with that flip in place this changes nothing, but a later
+  // reassignment of `verdict` cannot reintroduce a deferral read as a refusal.
+  const effectiveVerdict = pointer.land && cutovers.length > 0 ? landingVerdictFromCutovers(verdict, cutovers.map((c: unknown) => ((c as Record<string, unknown>)?.result))) : verdict;
   return {
     shape: "featureComposeReport",
     body: {
@@ -10188,6 +10210,9 @@ for (const _c of cutovers as Array<Record<string, unknown>>) { const _ops = (((_
       execution_id: emittedExecutionId,
       parked: parkedAny && !anyCutoverPushed,
       verdict: effectiveVerdict,
+      // A deferred landing names why (CHANGE-30a): the deferring cutover's own refuse_class, for the consumer that
+      // classifies this as a non-attempt (goal-host's retryable return, check-supply's ledger).
+      ...(landingDeferred ? { refuse_class: String(((cutovers.map((c: unknown) => ((c as Record<string, unknown>)?.result)).find(cutoverResultPending) ?? {}) as Record<string, unknown>)["refuse_class"] ?? "deferred") } : {}),
       // terminal_refusal: the gap is closed or its own check is already green on the parent; gap-to-feature
       // counts it as a NON-ATTEMPT (no failed_attempts bump, no -narrowed/decompose redispatch).
       terminal_refusal: terminalRefusal,

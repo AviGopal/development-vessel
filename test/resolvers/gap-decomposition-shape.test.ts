@@ -29,6 +29,16 @@ describe("gapDecomposition: the existing writer, advertised", () => {
     expect(dg).toContain('if (Array.isArray(pointer.expected_output_shapes) && pointer.expected_output_shapes.length > 0) body["expected_output_shapes"] = pointer.expected_output_shapes;');
   });
 
+  it("[WIRING] CHANGE-37c: `created` subtracts the parent's recorded children, and that record ACCUMULATES", () => {
+    // created = written minus the parent's decomposition.children read before the call. That is only "new" if the record
+    // keeps every prior child: gap-admission writes the union (prior children still held, then written), never `written`
+    // alone, so a step re-written after an earlier call is not reported as created (CHANGE-35's oracle counts created).
+    const ga = readFileSync(new URL("../../src/judge/gap-admission.ts", import.meta.url), "utf8");
+    expect(ga).toContain("decomposition: { children, reason: reason.slice(0, 600)");
+    expect(ga).not.toContain("decomposition: { children: written,");
+    expect(ga).toContain("for (const c of written) if (!children.includes(c)) children.push(c);");
+  });
+
   it("[CONTROL] no gap id: a shaped missing_input error", () => {
     expect(read("routes/impulses.ts")).toContain('failure_mode: "missing_input", detail: "gapDecomposition requires decompose_gap_id (the gap to decompose)"');
   });

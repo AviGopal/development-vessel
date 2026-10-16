@@ -1312,12 +1312,37 @@ export async function armDecomposition(
     );
     written.push(childId);
   }
-  const stepReason = written.length > 0 ? `wrote ${written.length} step(s)` + (refusals.length ? `; refused: ${refusals.join("; ")}` : "") : (typeof parsed.cannot_falsify === "string" && parsed.cannot_falsify ? "cannot_falsify: " + parsed.cannot_falsify.slice(0, 200) : "no valid step: " + (refusals.join("; ") || "none proposed"));
+  // CHANGE-37c: the step refusals are NEVER hidden. A cannot_falsify string used to replace them whenever nothing was
+  // written, so an LLM's "false" or "none" masked why every step was refused. The rule is structural, never a judgement
+  // of its wording: when there are refusals they are the reason and the decomposer's cannot_falsify rides alongside,
+  // verbatim; with no refusals (no step proposed) it is the reason alone, exactly as before.
+  const cf = typeof parsed.cannot_falsify === "string" && parsed.cannot_falsify.trim() ? parsed.cannot_falsify.trim().slice(0, 200) : null;
+  const stepReason = written.length > 0
+    ? `wrote ${written.length} step(s)` + (refusals.length ? `; refused: ${refusals.join("; ")}` : "")
+    : refusals.length > 0 ? `no valid step: ${refusals.join("; ")}` + (cf ? `; cannot_falsify: ${cf}` : "")
+    : cf ? `cannot_falsify: ${cf}` : "no valid step: none proposed";
+  // CHANGE-37c: a decomposition's children ACCUMULATE. Each call wrote `children: written` fresh, so any re-decomposition
+  // (an all-refused one included) replaced the prior list, the next call's prior_children under-counted, and a step
+  // re-written after the wipe was reported as newly created. Prior children the store still holds are kept, prior
+  // order first; one whose read fails is kept (absence is not proven), and only a confirmed-absent one drops.
+  const priorChildren = Array.isArray((meta.decomposition as { children?: unknown } | undefined)?.children)
+    ? ((meta.decomposition as { children: unknown[] }).children).filter((c): c is string => typeof c === "string" && c.length > 0) : [];
+  const children: string[] = [];
+  for (const c of priorChildren) {
+    if (children.includes(c)) continue;
+    if (written.includes(c)) { children.push(c); continue; }
+    try {
+      const r = await resolveSubstrateGap({ type: "substrateGap", id: c } as never);
+      const rows = (r?.body as { gaps?: unknown } | undefined)?.gaps;
+      if (!Array.isArray(rows) || rows.length > 0) children.push(c);
+    } catch { children.push(c); }
+  }
+  for (const c of written) if (!children.includes(c)) children.push(c);
   const reason = (parentCheck ? "wrote the parent's own check; " : "") + stepReason;
   // ONE WRITE OF THE PARENT: the decomposition record, and in parent-check mode its new check. The verdict
   // the judge just took is handed to the seam in-process so it is not taken twice.
   try {
-    const parentMeta: Record<string, unknown> = { ...meta, decomposed_at: new Date().toISOString(), decomposition: { children: written, reason: reason.slice(0, 600), ...(opts.parentCheck ? { parent_check: parentCheck ? "written" : parentCheckNote.slice(0, 300) } : {}) } };
+    const parentMeta: Record<string, unknown> = { ...meta, decomposed_at: new Date().toISOString(), decomposition: { children, reason: reason.slice(0, 600), ...(opts.parentCheck ? { parent_check: parentCheck ? "written" : parentCheckNote.slice(0, 300) } : {}) } };
     if (parentCheck) {
       // verify_shape is blanked, not deleted: the store carries an omitted key forward.
       Object.assign(parentMeta, { verify_shape: "", ...parentCheck, predicate_source: "gap_falsify:parent_check", falsified_at: new Date().toISOString() });

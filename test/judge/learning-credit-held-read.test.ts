@@ -101,6 +101,20 @@ describe("the learning credit tables are read from the holder", () => {
     expect(fn).toContain("await replayLearningJournal();");
   });
 
+  it("[HELD-OUT] a node with NO GAP_STORE_ENDPOINT is its own holder: it reads its local table, forwards nothing, and says it is a separate authority", async () => {
+    delete process.env["GAP_STORE_ENDPOINT"];
+    const calls: string[] = [];
+    globalThis.fetch = (async (u: unknown) => { calls.push(String(u)); throw new TypeError("no network in this case"); }) as unknown as typeof fetch;
+    const logs: string[] = [];
+    const logSpy = spyOn(console, "log").mockImplementation(((m: unknown) => { logs.push(String(m)); }) as never);
+    try {
+      await credit.refreshHeldCalibration();
+      expect(calls.filter((u) => u.startsWith("http://holder.test"))).toEqual([]);
+      expect(credit.readClassPosteriors()["X"]).toEqual({ alpha: 1, beta: 9 });
+      expect(logs.some((l) => l.includes("separate authority"))).toBe(true);
+    } finally { logSpy.mockRestore(); }
+  });
+
   it("[PARAPHRASE] the same class reached by a reworded id stem reads the same held posterior", async () => {
     await credit.refreshHeldCalibration();
     served = { ...HELD, class_posteriors: { [credit.gapClassOf({ id: "lane-repicks-fixed-gaps-1a2b3c4d", source: "" })]: { alpha: 5, beta: 2 } } };

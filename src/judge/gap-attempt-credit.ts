@@ -188,10 +188,18 @@ let heldCalibration: CalibRec | null = null;
 export type LearningCreditTable = "class_posteriors" | "close_oracle" | "detector_credit" | "priority_weights";
 let heldLearningCredit: Partial<Record<LearningCreditTable, Record<string, unknown>>> | null = null;
 let heldFallbackLogged = new Set<LearningCreditTable>();
+let separateAuthorityLogged = false;
 export async function refreshHeldCalibration(): Promise<void> {
   heldFallbackLogged = new Set();
   // I4a's journal: any credit an outage left pending is re-sent before the tables are read (no silent loss).
   try { await replayLearningJournal(); } catch (err) { console.warn(`[learning-credit] replay failed: ${String(err).slice(0, 160)}`); }
+  // I4's SCOPE (qa, 2026-10-16): the held tables agree across the nodes that SHARE a gap-store holder. A node with no
+  // GAP_STORE_ENDPOINT is its own holder (a root, its own authority): its tables are its own, read locally, and that is a
+  // SEPARATE AUTHORITY, not a failure. Learning shared across authorities is replication's job, not this read's.
+  if (!process.env["GAP_STORE_ENDPOINT"] && !separateAuthorityLogged) {
+    separateAuthorityLogged = true;
+    console.log("[learning-credit] this node holds its own gap store: its learning tables are a separate authority's (read locally; cross-authority sharing is replication's)");
+  }
   try {
     const r = await resolveSubstrateGap({ type: "substrateGap", limit: 1, include_calibration: true } as never);
     const b = r.body as { expectation_calibration?: unknown; learning_credit?: unknown } | undefined;
